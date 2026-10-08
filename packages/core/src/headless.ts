@@ -117,6 +117,13 @@ import {
 } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
 import {
+	captureJob,
+	captureUsageTo,
+	type JobCapture,
+	type ReleaseClass,
+	releaseClassRefusal,
+} from "./shared/job.js";
+import {
 	capturePrincipal,
 	type Principal,
 	type PrincipalLedgerTags,
@@ -132,6 +139,8 @@ import { TrustConfigSchema } from "./shared/types.js";
 // package entry point in its own right, and a plugin should not have to reach into
 // the root export for the argument type of a method it can already see here.
 export type { EnvelopeDescriptor, EnvelopeStatus } from "./budget/context.js";
+// The wire's ISO-8601 UTC rule for `usageFrom`/`usageTo`, shared for the reason above.
+export { RELEASE_CLASSES, type ReleaseClass, usageTimeRefusal } from "./shared/job.js";
 // Same reason for the principal: an integration that passes `principal` to
 // `authorize()` gets its type, its field rule and its ledger tags from the entry
 // point it already imports — the tags are what a `query_transfers` roll-up filters on.
@@ -204,6 +213,12 @@ export interface Authorization {
 	 */
 	costCenter?: string | undefined;
 	/**
+	 * The job this hold is labelled with, for REPORTING: frozen with the handle and never
+	 * read back by the governor, whose records come from the authorize capture. Absent
+	 * for an unlabelled call.
+	 */
+	job?: string | undefined;
+	/**
 	 * The ledger's pending timeout this call's hold was reserved with, in ms
 	 * (`LEDGER_HOLD_TIMEOUT_MS`): TigerBeetle expires the hold on its own that long
 	 * after creating it. Absent when no ledger hold was made (dry run). A DURATION,
@@ -229,6 +244,12 @@ interface AuthorizationCapture {
 	readonly actor: string;
 	/** The frozen principal captured at authorize, or `undefined` when none was given. */
 	readonly principal: Principal | undefined;
+	/**
+	 * The frozen job labels captured at authorize (`job`, `jobState`, `usageFrom`);
+	 * `{}` for an unlabelled call. Every record this hold produces spreads it, so
+	 * release and TTL expiry carry the hold's job and usage start too.
+	 */
+	readonly jobAudit: JobCapture;
 	/** The scope's cost center, or `undefined` for an unattributed call. */
 	readonly costCenter: string | undefined;
 	/**
@@ -317,6 +338,16 @@ export interface AuthorizeParams {
 	 */
 	principal?: Principal | undefined;
 	/**
+	 * Which job the work is for (see `shared/job.ts`). A label, never a payer: it
+	 * selects no account, enters no policy context and prices nothing. Validated by
+	 * the principal's field rule and captured once, before any I/O.
+	 */
+	job?: string | undefined;
+	/** `"invalid"` when the caller's job state could not be trusted; exclusive with `job`. */
+	jobState?: "invalid" | undefined;
+	/** When the usage this hold covers began (ISO-8601 UTC); inherited by release and expiry records. */
+	usageFrom?: string | undefined;
+	/**
 	 * Per-call endpoint scope override — wins over the governor-wide default
 	 * (A3). The effective scope is captured on the Authorization and governs
 	 * settle()/abort() and the receipt's endpoint/meter fields.
@@ -373,6 +404,12 @@ export interface SettleParams {
 	 * or negative values are dropped (A6: the field is then omitted entirely).
 	 */
 	computeMs?: number | undefined;
+	/**
+	 * When the usage this settle covers ended (ISO-8601 UTC), recorded verbatim on the
+	 * settle's records. Not a pricing input. The job and the usage START are NOT settle
+	 * fields: both are the authorize capture's.
+	 */
+	usageTo?: string | undefined;
 }
 
 /** Headless governance engine for non-SDK integrations. */
@@ -434,7 +471,11 @@ export interface Governor {
 	 *
 	 * `reason` is caller text, recorded through {@link sanitizeReleaseReason}.
 	 */
-	release(auth: Authorization, reason?: string): Promise<ReleaseOutcome>;
+	release(
+		auth: Authorization,
+		reason?: string,
+		opts?: { releaseClass?: ReleaseClass | undefined },
+	): Promise<ReleaseOutcome>;
 
 	/** Graceful shutdown — voids all pending holds, flushes audit. */
 	destroy(): Promise<void>;
@@ -1094,7 +1135,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// before destroy()'s `flush()` and `release()`. One still here at destroy()'s
 	// deadline is taken out and recorded by destroy() itself (the capture is kept for
 	// its actor), and that terminal, finding itself gone, writes no second record.
-	const inFlight = new Map<string, AuthorizationCapture>();
+	// A terminal in flight, with the release class it was given (if any): destroy() records the
+	// hold it takes from here, and that record must carry what the release stated.
+	const inFlight = new Map<string, AuthorizationCapture & { releaseClass?: ReleaseClass }>();
 
 	// Finding-2 (RECON #4): serialized, monotonic spend-ledger persistence.
 	// budgetSpent only ever increases (settle adds actualCost >= 0; authorize and
@@ -1156,6 +1199,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const principal = capturePrincipal(params.principal);
 			const principalAudit: { principal?: Principal } =
 				principal === undefined ? {} : { principal };
+			// The job labels, read ONCE and frozen like the principal: a TypeError here is
+			// before any I/O, and every record below spreads this one capture.
+			const jobAudit = captureJob({
+				job: params.job,
+				jobState: params.jobState,
+				usageFrom: params.usageFrom,
+			});
 			// Per-tier estimates, read ONCE and validated before any I/O, like the
 			// principal: a hold sized from a NaN or a negative count would either reach
 			// the ledger as garbage or silently reserve less than the call can cost.
@@ -1215,6 +1265,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							promptParts: messages,
 							...costCenterAudit,
 							...principalAudit,
+							...jobAudit,
 						},
 					});
 					throw unknownModelDenial;
@@ -1500,6 +1551,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							promptParts: messages,
 							...costCenterAudit,
 							...principalAudit,
+							...jobAudit,
 						},
 					});
 				}
@@ -1537,6 +1589,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// attributed handle is still `JSON.stringify`-able for a caller that logs
 				// or transports it.
 				...(captured !== undefined ? { costCenter: captured.attribution.costCenter } : {}),
+				...(jobAudit.job !== undefined ? { job: jobAudit.job } : {}),
 			};
 			// destroy() may have begun while this call awaited (the budget lock, the policy,
 			// the reserve). It claims every hold registered before it, and a hold registered
@@ -1574,6 +1627,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					proxyTransferId,
 					actor,
 					principal,
+					jobAudit,
 					costCenter: captured?.attribution.costCenter,
 					envelope: captured,
 					sessionAccounted: !envelopeDebited,
@@ -1606,15 +1660,28 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				usageSource: params?.usageSource,
 				chunksDelivered: params?.chunksDelivered,
 				computeMs: params?.computeMs,
+				usageTo: params?.usageTo,
 			};
 			// One `get` where there used to be `has` + a read off the caller's object:
 			// the presence check and the attribution now come from the same internal
 			// record, so liveness and provenance cannot disagree. Semantics are
 			// unchanged — the first terminal claims the entry, every later one is
 			// refused.
+			// Validated BEFORE the claim, like the reads above: a bad `usageTo` changes nothing.
+			const usageToAudit = captureUsageTo(input.usageTo);
 			const capture = activeAuths.get(transferId);
 			if (capture === undefined) {
 				throw new Error(`Authorization ${transferId} is not active (already settled or aborted)`);
+			}
+			// A window that ends before it began is refused BEFORE the claim (the hold stays
+			// settleable), for a direct caller as for the HTTP server: only the capture knows the
+			// usage start, so only here can every caller be held to it.
+			if (
+				usageToAudit.usageTo !== undefined &&
+				capture.jobAudit.usageFrom !== undefined &&
+				Date.parse(capture.jobAudit.usageFrom) > Date.parse(usageToAudit.usageTo)
+			) {
+				throw new TypeError("usageTo must not be before the hold's usageFrom");
 			}
 			activeAuths.delete(transferId);
 			// Claimed. Still PENDING. Pre-POST throw leaves the id here so
@@ -1649,6 +1716,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// no key, so an untagged call's records keep their shape.
 				const principalAudit: { principal?: Principal } =
 					capture.principal === undefined ? {} : { principal: capture.principal };
+				// And for WHICH JOB: the authorize capture's labels (and its usage start), plus
+				// this settle's `usageTo`. Never a job from `SettleParams`.
+				const jobAudit = { ...capture.jobAudit, ...usageToAudit };
 
 				// A3: settlement meters with the endpoint scope CAPTURED AT AUTHORIZE —
 				// SettleParams carries no endpoint field by design.
@@ -1763,6 +1833,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 											: String(postErr).slice(0, 200),
 									...costCenterAudit,
 									...principalAudit,
+									...jobAudit,
 								},
 							})
 							.catch(() => {
@@ -1799,6 +1870,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 											: String(postErr).slice(0, 200),
 									...costCenterAudit,
 									...principalAudit,
+									...jobAudit,
 								},
 							})
 							.catch(() => {
@@ -1860,6 +1932,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							source: "headless",
 							...costCenterAudit,
 							...principalAudit,
+							...jobAudit,
 						},
 					});
 					auditHash = auditEvent.hash;
@@ -1884,6 +1957,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 								transferId,
 								...costCenterAudit,
 								...principalAudit,
+								...jobAudit,
 							},
 						})
 						.catch(() => {
@@ -1906,6 +1980,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 								transferId,
 								...costCenterAudit,
 								...principalAudit,
+								...jobAudit,
 							},
 						},
 						config.audit.indexLimit,
@@ -2092,6 +2167,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							...(voidError === undefined ? {} : { voidError }),
 							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
 							...(capture.principal === undefined ? {} : { principal: capture.principal }),
+							...capture.jobAudit,
 						},
 					})
 					.catch(() => {});
@@ -2101,9 +2177,17 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			}
 		},
 
-		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
+		async release(
+			auth: Authorization,
+			reason?: string,
+			opts?: { releaseClass?: ReleaseClass | undefined },
+		): Promise<ReleaseOutcome> {
 			// The handle's id, read ONCE and FIRST (see settle()).
 			const transferId = auth.transferId;
+			// So is the release class (a closed set): an invalid one is refused before any claim.
+			const releaseClass = opts?.releaseClass;
+			const classRefusal = releaseClassRefusal(releaseClass);
+			if (classRefusal !== undefined) throw new TypeError(classRefusal);
 			// Refused once destroy() has taken the remaining holds, before any claim, as abort() is.
 			if (sweeping) {
 				return { released: false };
@@ -2126,7 +2210,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				unpostedHolds.delete(transferId);
 			}
 			// Claimed, and in flight until its record starts (see abort()).
-			inFlight.set(transferId, capture);
+			inFlight.set(transferId, releaseClass === undefined ? capture : { ...capture, releaseClass });
 			try {
 				// Exactly what abort() gives back, the same way: only the session wallet's own
 				// in-flight exposure. An attributed hold never added to it.
@@ -2178,9 +2262,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							transferId,
 							reason: sanitizeReleaseReason(reason),
 							source: "headless",
+							...(releaseClass === undefined ? {} : { releaseClass }),
 							...(voidError === undefined ? {} : { voidError }),
 							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
 							...(capture.principal === undefined ? {} : { principal: capture.principal }),
+							...capture.jobAudit,
 						},
 					})
 					.catch(() => {});
@@ -2237,8 +2323,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							transferId: txId,
 							reason: "governor destroyed (terminal still in flight: its void had not completed)",
 							source: "headless",
+							...(capture.releaseClass === undefined ? {} : { releaseClass: capture.releaseClass }),
 							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
 							...(capture.principal === undefined ? {} : { principal: capture.principal }),
+							...capture.jobAudit,
 						},
 					})
 					.catch(() => {});
@@ -2273,6 +2361,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							...(voidError === undefined ? {} : { voidError }),
 							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
 							...(capture.principal === undefined ? {} : { principal: capture.principal }),
+							...capture.jobAudit,
 						},
 					})
 					.catch(() => {});

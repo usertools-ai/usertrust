@@ -256,6 +256,7 @@ jobs:
           packages/core/tests/integration/release.tb.test.ts
           packages/core/tests/integration/destroy.tb.test.ts
           packages/core/tests/integration/reconciliation-cache-day.tb.test.ts
+          packages/core/tests/integration/job.tb.test.ts
           packages/openshell/tests/engine.tb.test.ts
           packages/openclaw/tests/envelope-integration.test.ts
 
