@@ -1563,12 +1563,12 @@ this.
 
 There is no root `build` script; each package builds itself (`npm run build -w usertrust`, etc.).
 
-**CI** (`.github/workflows/ci.yml`) runs six jobs on Node 22, on every push to `master` and every
-**non-draft** PR: `lint`, `typecheck`, `test` (coverage, with the thresholds above),
-`openclaw-contract` (the host contract, described below), `tb-integration` (a real single-node
-TigerBeetle cluster, sha256-pinned binary), and `site-build` (the site's own install, tests and
-production build). There is **no path filter** — every non-draft PR runs all six regardless of what
-changed. Draft PRs run none of them.
+**CI** (`.github/workflows/ci.yml`) runs seven jobs on Node 22, on every push to `master` and every
+**non-draft** PR: `agent-config` (the agent-config check, described below), `lint`, `typecheck`,
+`test` (coverage, with the thresholds above), `openclaw-contract` (the host contract, described
+below), `tb-integration` (a real single-node TigerBeetle cluster, sha256-pinned binary), and
+`site-build` (the site's own install, tests and production build). There is **no path filter** —
+every non-draft PR runs all seven regardless of what changed. A draft PR runs `agent-config` alone.
 
 The TigerBeetle server version in CI is pinned to match `tigerbeetle-node` in `packages/core` and
 must be bumped in lockstep — **never `latest`**. The client must never be newer than the server. The
