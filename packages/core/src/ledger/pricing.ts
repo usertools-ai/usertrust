@@ -654,71 +654,75 @@ export function holdCacheWriteRate(rates: ModelRates, operatorOwned = false): nu
 }
 
 /**
+ * A request serialized ONCE: `body` is the plain-data parse of the exact JSON text that was
+ * scanned, and `declares1h` is the verdict on that same text. The caller sends `body`, so
+ * the bytes checked and the bytes sent are one object: a stateful getter or `toJSON` that
+ * answers 5-minute to a scan and 1-hour to the SDK has nothing left to flip, because the
+ * SDK never sees the original.
+ */
+export interface SerializedRequest {
+	readonly body: Record<string, unknown>;
+	readonly declares1h: boolean;
+}
+
+/**
+ * Serialize a request once, the way the provider SDKs do (`JSON.stringify`), and scan the
+ * result. Returns `null` when the request cannot be serialized to a JSON object (a cycle, a
+ * BigInt, a throwing getter or `toJSON`, a text too long to build): the caller must then
+ * fail dearest. This replaced a property walk that had to enumerate every way
+ * `JSON.stringify` reads a value (accessors, `toJSON` on objects, arrays and built-ins,
+ * inherited array entries, ...) and found a new one each review round.
+ */
+export function serializeRequest(request: unknown): SerializedRequest | null {
+	let body: unknown;
+	try {
+		const text = JSON.stringify(request);
+		if (typeof text !== "string") return null;
+		body = JSON.parse(text);
+	} catch {
+		return null;
+	}
+	if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+	return { body: body as Record<string, unknown>, declares1h: dataDeclares1h(body) };
+}
+
+/** A `cache_control` object with `ttl: "1h"` anywhere in plain JSON data. Iterative and bounded. */
+function dataDeclares1h(root: unknown): boolean {
+	const MAX_NODES = 200_000;
+	const stack: unknown[] = [root];
+	let nodes = 0;
+	while (stack.length > 0) {
+		const value = stack.pop();
+		if (value === null || typeof value !== "object") continue;
+		if (++nodes > MAX_NODES) return true;
+		if (Array.isArray(value)) {
+			for (const item of value) stack.push(item);
+			continue;
+		}
+		const record = value as Record<string, unknown>;
+		const control = record.cache_control;
+		if (control !== null && typeof control === "object") {
+			if ((control as Record<string, unknown>).ttl === "1h") return true;
+		}
+		for (const key of Object.keys(record)) stack.push(record[key]);
+	}
+	return false;
+}
+
+/**
  * True when an Anthropic-shaped REQUEST can produce 1-hour cache writes: some object
  * in it carries `cache_control` with `ttl: "1h"` (a content block, a system block,
  * a tool, or the top-level automatic-caching field). A request with no such marker
  * can only write 5-minute cache, so its hold needs no 1-hour reserve. The hold
  * covers the worst case THIS request can produce, not the worst case any request can.
  *
- * Fails dearest: a request too large or too deep to scan within the bound answers
- * `true`, never `false`; a getter that throws does too. An unreadable request is not
- * evidence that it asks for nothing.
+ * Decided on the request's JSON serialization (`serializeRequest`). Fails dearest: a
+ * request that cannot be serialized answers `true`, never `false`. A caller that SENDS the
+ * request must send `serializeRequest(...).body`, not the original, or this verdict
+ * describes bytes other than the ones that leave.
  */
 export function requestDeclares1hCache(request: unknown): boolean {
-	const MAX_NODES = 50_000;
-	const MAX_DEPTH = 64;
-	let nodes = 0;
-	const seen = new Set<object>();
-	const walk = (value: unknown, depth: number): boolean => {
-		if (value === null || typeof value !== "object") return false;
-		if (depth > MAX_DEPTH || ++nodes > MAX_NODES) return true;
-		if (seen.has(value)) return false;
-		seen.add(value);
-		// A callable `toJSON` (own, non-enumerable or inherited), on an array as on an object, lets
-		// the SDK's serialization emit something the scan never saw, a `cache_control` block with
-		// `ttl: "1h"` included, so the scan cannot vouch for the request: fail dearest. A Date or a
-		// binary view carries a toJSON that can only produce a string or bytes, never a cache block.
-		// Found by DESCRIPTOR down the prototype chain, never by reading `.toJSON`: a getter
-		// would be evaluated by the read and could answer differently at serialization.
-		if (!(value instanceof Date) && !ArrayBuffer.isView(value)) {
-			for (let o: object | null = value; o !== null; o = Object.getPrototypeOf(o)) {
-				const d = Object.getOwnPropertyDescriptor(o, "toJSON");
-				if (d === undefined) continue;
-				if (d.get !== undefined || d.set !== undefined || typeof d.value === "function")
-					return true;
-			}
-		}
-		if (Array.isArray(value)) {
-			// An indexed accessor is an accessor like any other: fail dearest.
-			for (let i = 0; i < value.length; i++) {
-				const d = Object.getOwnPropertyDescriptor(value, i);
-				if (d !== undefined && (d.get !== undefined || d.set !== undefined)) return true;
-				if (walk(d?.value, depth + 1)) return true;
-			}
-			return false;
-		}
-		const record = value as Record<string, unknown>;
-		// An accessor can answer differently when the request is later serialized than it
-		// did for this scan, so the scan cannot vouch for what the provider will receive:
-		// fail dearest, like every other unreadable request. (A plain data property that
-		// the caller mutates AFTER the scan is the same trust boundary as the PII and
-		// injection scans, which also read the live request: declared in AGENTS.md.)
-		for (const key of Object.keys(record)) {
-			const d = Object.getOwnPropertyDescriptor(record, key);
-			if (d !== undefined && (d.get !== undefined || d.set !== undefined)) return true;
-		}
-		const control = record.cache_control;
-		if (control !== null && typeof control === "object") {
-			if ((control as Record<string, unknown>).ttl === "1h") return true;
-		}
-		for (const key of Object.keys(record)) if (walk(record[key], depth + 1)) return true;
-		return false;
-	};
-	try {
-		return walk(request, 0);
-	} catch {
-		return true;
-	}
+	return serializeRequest(request)?.declares1h ?? true;
 }
 
 /**

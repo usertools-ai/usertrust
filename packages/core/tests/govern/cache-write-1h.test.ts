@@ -154,6 +154,97 @@ describe("1-hour cache writes: governed paths", () => {
 		expect(await holdFor({ messages: [{ role: "user", content: block }] })).toBe(46);
 	});
 
+	// The bytes scanned are the bytes sent: the SDK is handed the plain-data parse of the one
+	// serialization, never the original object, so nothing can answer 5m to the scan and 1h later.
+	it("a stateful getter cannot evade: the provider receives the scanned data, not the original", async () => {
+		const engine = makeCappingEngine();
+		const client = anthropic({ input_tokens: 10, output_tokens: 1 });
+		const governed = await trust(client, {
+			budget: 1_000_000,
+			vaultBase: tmpVault,
+			_engine: asEngine(engine),
+		});
+		let reads = 0;
+		const original = {
+			model: MODEL,
+			max_tokens: 1,
+			messages: [{ role: "user", content: "x".repeat(2000) }],
+			system: [
+				{
+					type: "text",
+					text: "s",
+					get cache_control() {
+						reads += 1;
+						return { type: "ephemeral", ttl: reads === 1 ? "5m" : "1h" };
+					},
+				},
+			],
+		};
+		await governed.messages.create(original);
+		await governed.destroy();
+		// Counted before any assertion: an assertion's own diffing reads the original too.
+		const readsDuringCall = reads;
+		// Held at the 5-minute rate because the ONE read said 5m...
+		expect(heldAmount(engine)).toBe(29);
+		const sent = client.messages.create.mock.calls[0]?.[0] as typeof original;
+		// ...and that same answer is what the SDK got: plain data, not the flipping original.
+		expect(sent).not.toBe(original);
+		const block = Object.getOwnPropertyDescriptor(sent.system[0], "cache_control");
+		expect(block?.get).toBeUndefined();
+		expect(block?.value).toEqual({ type: "ephemeral", ttl: "5m" });
+		expect(readsDuringCall).toBe(1);
+	});
+
+	it("a toJSON that flips cannot evade either: the hook runs once and its output is what is sent", async () => {
+		const engine = makeCappingEngine();
+		const client = anthropic({ input_tokens: 10, output_tokens: 1 });
+		const governed = await trust(client, {
+			budget: 1_000_000,
+			vaultBase: tmpVault,
+			_engine: asEngine(engine),
+		});
+		let calls = 0;
+		const hook = {
+			toJSON() {
+				calls += 1;
+				return { type: "text", text: "s", cache_control: { ttl: calls === 1 ? "5m" : "1h" } };
+			},
+		};
+		await governed.messages.create({
+			model: MODEL,
+			max_tokens: 1,
+			messages: [{ role: "user", content: "x".repeat(2000) }],
+			system: [hook],
+		});
+		await governed.destroy();
+		expect(heldAmount(engine)).toBe(29);
+		const sent = client.messages.create.mock.calls[0]?.[0] as { system: unknown[] };
+		expect(JSON.stringify(sent.system)).toBe(
+			'[{"type":"text","text":"s","cache_control":{"ttl":"5m"}}]',
+		);
+		expect(calls).toBe(1);
+	});
+
+	it("a request that cannot be serialized is held DEAREST (and forwarded as given)", async () => {
+		const engine = makeCappingEngine();
+		const client = anthropic({ input_tokens: 10, output_tokens: 1 });
+		const governed = await trust(client, {
+			budget: 1_000_000,
+			vaultBase: tmpVault,
+			_engine: asEngine(engine),
+		});
+		const cyclic: Record<string, unknown> = {
+			model: MODEL,
+			max_tokens: 1,
+			messages: [{ role: "user", content: "x".repeat(2000) }],
+		};
+		cyclic.self = cyclic;
+		await governed.messages.create(cyclic);
+		await governed.destroy();
+		expect(heldAmount(engine)).toBe(46);
+		expect(client.messages.create.mock.calls[0]?.[0]).toBe(cyclic);
+	});
+
 	it("positive control: a call that settles WITH 1h writes never exceeds its hold", async () => {
 		const marker = { type: "ephemeral", ttl: "1h" };
 		const engine = makeCappingEngine();

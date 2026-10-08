@@ -55,9 +55,9 @@ import {
 	holdInputRate,
 	PRICING_TABLE_VERSION,
 	type RateResolution,
-	requestDeclares1hCache,
 	resolveAppliedRates,
 	resolveRates,
+	serializeRequest,
 	supported1hTokens,
 	warnCacheRateMigration,
 	warnUnknownModel,
@@ -1308,7 +1308,20 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				await persistSpendLedger(vaultBase, budgetSpent);
 			};
 
-			const params = (args[0] ?? {}) as Record<string, unknown>;
+			// The request is serialized ONCE, and the parse of that text is what every later step
+			// reads (the 1-hour hold verdict, PII and injection scans, redaction) and what is
+			// forwarded, so the bytes scanned are the bytes sent: a stateful getter or `toJSON`
+			// has nothing left to flip between the scan and the SDK's own serialization.
+			// Google is the exception, named: its SDK reads non-JSON members off the request
+			// (callable tools), so the original object is forwarded; Google has no 1-hour tier
+			// and its extractor never reports a 1-hour share, so a flip cannot under-hold there.
+			// A request that cannot be serialized forwards as given and holds dearest.
+			const originalParams = (args[0] ?? {}) as Record<string, unknown>;
+			const serialized = serializeRequest(originalParams);
+			const params = (
+				kind !== "google" && serialized !== null ? serialized.body : originalParams
+			) as Record<string, unknown>;
+			const declares1h = serialized?.declares1h ?? true;
 			const model = (params.model as string) ?? "unknown";
 			// P3-PROVIDER-BLINDSPOT: normalize the prompt-bearing payload across
 			// providers (Anthropic/OpenAI `messages` + `system`, Google `contents`) so
@@ -1332,7 +1345,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// P3-PII-REDACT-EGRESS: `forwardArgs` is what we actually send to the
 			// provider. In redact mode it becomes a redacted deep clone so PII never
 			// egresses; block mode throws before any egress. Default: forward verbatim.
-			let forwardArgs = args;
+			let forwardArgs: unknown[] = params === originalParams ? args : [params, ...args.slice(1)];
 
 			// a. Circuit breaker check
 			const cb = breaker.get(kind);
@@ -1399,7 +1412,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// marker, so this needs no provider test.)
 			const holdRate = holdInputRate(
 				rateResolution.rates,
-				requestDeclares1hCache(params),
+				declares1h,
 				rateResolution.rateSource !== "table",
 			);
 			const estimatedCost = costFromRates(

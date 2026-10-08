@@ -591,11 +591,19 @@ both, so a field there makes every v2 validator reject every receipt. An older s
 lists `cache-write-1h`.
 *Prevents:* 1-hour writes billed at 1.25x while the provider bills 2x (#203), and a recorded cost
 no auditor can reproduce from the record.
-*The request scan reads the LIVE request, like the PII and injection scans do:* an accessor property
-anywhere in it fails dearest (the scan cannot vouch for what a getter returns at serialization), but a
-plain data property the caller mutates AFTER the scan and before the provider call is the same trust
-boundary those scans already have: `trust()` is not a sandbox against its own caller, and a hold
-capped below a mutated request's settle is audited as `settlement_shortfall`, not silent.
+*The request is serialized ONCE, and what is scanned is what is sent.* `serializeRequest` runs
+`JSON.stringify` on the request a single time, parses that text back to plain data, and scans the
+data for a `cache_control` with `ttl: "1h"`. `trust()` then reads that body everywhere (hold
+verdict, PII and injection scans, redaction) and forwards it, so a getter or `toJSON` that answers
+5-minute to a scan and 1-hour to the SDK has nothing left to flip: the SDK never sees the original.
+A request that cannot be serialized to a JSON object (a cycle, a BigInt, a throwing hook) holds
+dearest and is forwarded as given; the dearest hold covers whatever it then writes. Google is the
+named exception to forwarding the body: its SDK reads callable members off the request, so the
+original goes through; Google has no 1-hour tier and its extractor never reports a 1-hour share, so
+a flip cannot under-hold there. *Prevents:* the property-walk scan this replaced, which had to
+enumerate every way `JSON.stringify` reads a value (accessors, `toJSON` on objects, arrays and
+built-ins, inherited array entries) and was found incomplete in seven consecutive review rounds.
+Do not reintroduce a walk over the live request.
 *DECLARED RESIDUE (a decision, not an omission):* a PARTIAL `cache_creation` breakdown (one TTL
 field) prices its unattributed remainder (flat total minus the named count) at the dearer 1-hour
 rate, and the stream accumulators only rise, so a stream whose early event is partial and whose
@@ -626,7 +634,7 @@ and the headless authorize estimate — reserve the input leg at
 `max(inputPer1k, effectiveCacheWriteRate(rates))` instead of `inputPer1k` alone.
 *The 1-hour write (2x input, `cacheWrite1hPer1k`) joins that max for the worst case THIS REQUEST
 can produce:* `trust()` reads the request (`requestDeclares1hCache`: a `cache_control` block with
-`ttl: "1h"` anywhere in it, failing dearest when the request cannot be scanned) and adds the 1-hour
+`ttl: "1h"` anywhere in its serialization, failing dearest when it cannot be serialized) and adds the 1-hour
 rate only then; headless `authorize()` cannot see the TTLs, so it holds the dearest write rate for
 the input leg and any stated write estimate (`holdInputRate` / `holdCacheWriteRate`, the one site).
 Only a row that EXPLICITLY publishes a 1-hour rate holds it, so a TABLE model with no 1-hour tier

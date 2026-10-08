@@ -6,6 +6,7 @@ import {
 	type ModelRates,
 	PRICING_TABLE,
 	requestDeclares1hCache,
+	serializeRequest,
 	supportsCacheWrite1h,
 } from "../../src/ledger/pricing.js";
 import {
@@ -173,35 +174,187 @@ describe("requestDeclares1hCache", () => {
 		expect(
 			requestDeclares1hCache({ messages: [{ role: "user", content: 'cache_control ttl "1h"' }] }),
 		).toBe(false);
-		for (const v of [null, undefined, 3, "x", []]) expect(requestDeclares1hCache(v)).toBe(false);
+		expect(requestDeclares1hCache({ a: { b: 1 } })).toBe(false);
 	});
 
-	it("fails DEAREST: too deep, too large, or unreadable answers true, never false", () => {
-		let deep: Record<string, unknown> = {};
-		const root = deep;
-		for (let i = 0; i < 100; i++) {
-			const next: Record<string, unknown> = {};
-			deep.child = next;
-			deep = next;
-		}
-		expect(requestDeclares1hCache(root)).toBe(true);
-		expect(requestDeclares1hCache({ items: Array.from({ length: 60_000 }, () => ({})) })).toBe(
+	it("fails DEAREST: a request that cannot be serialized to a JSON object answers true", () => {
+		const cycle: Record<string, unknown> = {};
+		cycle.self = cycle;
+		expect(requestDeclares1hCache(cycle)).toBe(true);
+		expect(requestDeclares1hCache({ n: 10n })).toBe(true);
+		expect(
+			requestDeclares1hCache({
+				get messages(): unknown {
+					throw new Error("boom");
+				},
+			}),
+		).toBe(true);
+		expect(
+			requestDeclares1hCache({
+				toJSON() {
+					throw new Error("boom");
+				},
+			}),
+		).toBe(true);
+		// Too large to vouch for within the node bound.
+		expect(requestDeclares1hCache({ items: Array.from({ length: 250_000 }, () => ({})) })).toBe(
 			true,
 		);
-		const hostile = {
-			get messages(): unknown {
-				throw new Error("boom");
-			},
+		// Not a request object at all.
+		for (const v of [null, undefined, 3, "x", []]) expect(requestDeclares1hCache(v)).toBe(true);
+	});
+
+	// Every shape the property walk needed its own branch for now goes through ONE path: the
+	// serialization the SDK itself would produce. Each declares a 1-hour TTL only through a
+	// hook or accessor, and each must be seen.
+	describe("every serialization shape is decided on the serialized text", () => {
+		// [text, <hole>, text]: index 1 is absent, so a read falls through to the prototype.
+		const withHole = (): unknown[] => {
+			const a: unknown[] = [{ type: "text" }];
+			a.length = 3;
+			a[2] = { type: "text" };
+			return a;
 		};
-		expect(requestDeclares1hCache(hostile)).toBe(true);
-		// An accessor can answer differently at serialization time than during the scan, so
-		// the scan cannot vouch for the request: fail dearest.
+		const oneHour = { type: "ephemeral", ttl: "1h" };
+		const cases: Array<[string, () => unknown]> = [
+			[
+				"accessor property",
+				() => ({
+					system: [
+						{
+							get cache_control() {
+								return oneHour;
+							},
+						},
+					],
+				}),
+			],
+			[
+				"indexed array accessor",
+				() => {
+					const content: unknown[] = [{ type: "text" }];
+					Object.defineProperty(content, 1, {
+						enumerable: true,
+						get: () => ({ cache_control: oneHour }),
+					});
+					return { messages: [{ content }] };
+				},
+			],
+			[
+				"callable toJSON on a class instance",
+				() => ({
+					messages: [
+						{
+							content: [
+								new (class {
+									toJSON() {
+										return { cache_control: oneHour };
+									}
+								})(),
+							],
+						},
+					],
+				}),
+			],
+			[
+				"toJSON on an array",
+				() => {
+					const arr: unknown[] = [{ type: "text" }];
+					Object.defineProperty(arr, "toJSON", { value: () => [{ cache_control: oneHour }] });
+					return { messages: [{ content: arr }] };
+				},
+			],
+			[
+				"accessor-backed toJSON",
+				() => ({
+					messages: [
+						{
+							content: [
+								Object.create({
+									get toJSON() {
+										return () => ({ cache_control: oneHour });
+									},
+								}),
+							],
+						},
+					],
+				}),
+			],
+			[
+				"non-enumerable toJSON",
+				() => {
+					const block = { type: "text" };
+					Object.defineProperty(block, "toJSON", {
+						value: () => ({ cache_control: oneHour }),
+						enumerable: false,
+					});
+					return { messages: [{ content: [block] }] };
+				},
+			],
+			[
+				"overridden toJSON on a Date",
+				() => {
+					const when = new Date(0);
+					Object.defineProperty(when, "toJSON", { value: () => ({ cache_control: oneHour }) });
+					return { messages: [{ content: [when] }] };
+				},
+			],
+			[
+				"overridden toJSON on a binary view",
+				() => {
+					const bytes = new Uint8Array(2);
+					Object.defineProperty(bytes, "toJSON", { value: () => ({ cache_control: oneHour }) });
+					return { messages: [{ content: [bytes] }] };
+				},
+			],
+			[
+				"sparse array inheriting an entry from its prototype",
+				() => {
+					const proto = Object.create(Array.prototype);
+					proto[1] = { cache_control: oneHour };
+					const content = Object.setPrototypeOf(withHole(), proto);
+					return { messages: [{ content }] };
+				},
+			],
+			[
+				"sparse array inheriting a getter from its prototype",
+				() => {
+					const proto = Object.create(Array.prototype);
+					Object.defineProperty(proto, 1, { get: () => ({ cache_control: oneHour }) });
+					const content = Object.setPrototypeOf(withHole(), proto);
+					return { messages: [{ content }] };
+				},
+			],
+		];
+		for (const [name, build] of cases) {
+			it(`${name}: what JSON.stringify emits is what is scanned`, () => {
+				const emitted = JSON.stringify(build());
+				const scanned = serializeRequest(build());
+				// Positive control: the serialization really does carry the marker (a case that
+				// stopped emitting it would pass vacuously), and the scan agrees with it.
+				expect(emitted).toContain('"ttl":"1h"');
+				expect(scanned?.declares1h).toBe(true);
+				expect(JSON.stringify(scanned?.body)).toBe(emitted);
+			});
+		}
+
+		it("a Date and a binary view with their own serializers stay unmarked", () => {
+			expect(
+				requestDeclares1hCache({
+					when: new Date(0),
+					bytes: new Uint8Array(4),
+					buf: Buffer.from("x"),
+				}),
+			).toBe(false);
+		});
+	});
+
+	it("a getter or toJSON that flips between reads cannot evade: the scanned body IS the sent body", () => {
 		let reads = 0;
-		const shifty = {
+		const flipping = {
 			system: [
 				{
 					type: "text",
-					text: "x",
 					get cache_control() {
 						reads += 1;
 						return { type: "ephemeral", ttl: reads === 1 ? "5m" : "1h" };
@@ -209,64 +362,28 @@ describe("requestDeclares1hCache", () => {
 				},
 			],
 		};
-		expect(requestDeclares1hCache(shifty)).toBe(true);
-		expect(
-			requestDeclares1hCache({
-				a: {
-					get b() {
-						return 1;
-					},
-				},
-			}),
-		).toBe(true);
-		expect(requestDeclares1hCache({ a: { b: 1 } })).toBe(false); // plain data stays false
-		// ...and an INDEXED accessor in an array (a content array) is one too.
-		const indexed: unknown[] = [{ type: "text" }];
-		Object.defineProperty(indexed, 1, {
-			enumerable: true,
-			get: () => ({ type: "text", cache_control: { type: "ephemeral", ttl: "5m" } }),
-		});
-		expect(requestDeclares1hCache({ messages: [{ role: "user", content: indexed }] })).toBe(true);
-		expect(
-			requestDeclares1hCache({
-				messages: [{ role: "user", content: [{ type: "text" }, { type: "text" }] }],
-			}),
-		).toBe(false);
-		// A callable toJSON (own, non-enumerable, or inherited) can serialize to a 1h block the
-		// scan never saw: fail dearest. A Date or a binary view cannot, and stays false.
-		class Sneaky {
-			toJSON() {
-				return { cache_control: { type: "ephemeral", ttl: "1h" } };
-			}
-		}
-		expect(requestDeclares1hCache({ messages: [{ role: "user", content: [new Sneaky()] }] })).toBe(
-			true,
+		const scanned = serializeRequest(flipping);
+		// The one read the serialization made decided both the verdict and the body; whatever the
+		// original answers afterwards cannot reach the SDK, which is handed `body`.
+		expect(scanned?.declares1h).toBe(false);
+		expect(JSON.stringify(scanned?.body)).toContain('"ttl":"5m"');
+		expect(reads).toBe(1);
+		// The body is plain data: nothing is left to answer differently.
+		const desc = Object.getOwnPropertyDescriptor(
+			(scanned?.body.system as Array<Record<string, unknown>> | undefined)?.[0] ?? {},
+			"cache_control",
 		);
-		// An accessor-backed toJSON (own non-enumerable, or inherited) is never evaluated: a getter
-		// that answers undefined now could return a serializer later.
-		const lazy = Object.create({
-			get toJSON() {
-				return undefined;
+		expect(desc?.get).toBeUndefined();
+		let flips = 0;
+		const hook = {
+			toJSON() {
+				flips += 1;
+				return { cache_control: { ttl: flips === 1 ? "5m" : "1h" } };
 			},
-		});
-		expect(requestDeclares1hCache({ messages: [{ content: [lazy] }] })).toBe(true);
-		const arr: unknown[] = [{ type: "text" }];
-		Object.defineProperty(arr, "toJSON", { value: () => [{ cache_control: { ttl: "1h" } }] });
-		expect(requestDeclares1hCache({ messages: [{ content: arr }] })).toBe(true);
-		const hidden = { type: "text" };
-		Object.defineProperty(hidden, "toJSON", { value: () => ({}), enumerable: false });
-		expect(requestDeclares1hCache({ messages: [{ content: [hidden] }] })).toBe(true);
-		expect(
-			requestDeclares1hCache({
-				when: new Date(0),
-				bytes: new Uint8Array(4),
-				buf: Buffer.from("x"),
-			}),
-		).toBe(false);
-		// A cycle terminates (and is not itself evidence of a marker).
-		const a: Record<string, unknown> = {};
-		a.self = a;
-		expect(requestDeclares1hCache(a)).toBe(false);
+		};
+		const viaHook = serializeRequest({ messages: [hook] });
+		expect(viaHook?.declares1h).toBe(false);
+		expect(JSON.stringify(viaHook?.body)).toBe('{"messages":[{"cache_control":{"ttl":"5m"}}]}');
 	});
 });
 
