@@ -123,7 +123,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { resolveJob } from "./job-log.mjs";
+import { labelsFor, resolveJob } from "./job-log.mjs";
 import {
 	budgetShare,
 	cleanup,
@@ -1586,7 +1586,8 @@ export async function prepareWindow({
 		// only messages that happened under that job may ride it: a message from before a
 		// switch stays unassigned and is posted by a remainder under ITS job. The hold is
 		// never settled with a job it was not authorized with.
-		const eligible = jobs === null ? fresh : fresh.filter((m) => jobs.keyAt(m.ts) === holdKey);
+		const eligible =
+			jobs === null ? fresh : fresh.filter((m) => labelsFor(jobs, m.ts).key === holdKey);
 		if (eligible.length > 0) {
 			const model = eligible[0].model;
 			const messages = eligible.filter((m) => m.model === model);
@@ -2066,14 +2067,21 @@ export async function postRemainder({
 		// is the one open at the message's OWN time, so a remainder spanning a switch
 		// settles once per job.
 		const jobs = (await jobCapable(capabilities)) ? await resolveJob(sessionId) : null;
-		const groups = groupByModel(fresh, jobs === null ? undefined : (m) => jobs.keyAt(m.ts));
+		const groups = groupByModel(
+			fresh,
+			jobs === null ? undefined : (m) => labelsFor(jobs, m.ts).key,
+		);
 		for (const messages of groups.values()) {
 			const model = messages[0].model;
 			const span = jobs === null ? {} : usageSpan(messages);
 			const labels =
 				jobs === null
 					? {}
-					: { ...jobs.at(messages.find((m) => Number.isFinite(m.ts))?.ts ?? Number.NaN), ...span };
+					: {
+							...labelsFor(jobs, messages.find((m) => Number.isFinite(m.ts))?.ts ?? Number.NaN)
+								.labels,
+							...span,
+						};
 			const timeoutMs = callBudget();
 			if (timeoutMs < minCall()) {
 				summary.notes.push(`${model}: deferred to the next settle point (out of time)`);

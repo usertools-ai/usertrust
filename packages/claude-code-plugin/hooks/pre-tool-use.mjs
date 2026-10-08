@@ -42,7 +42,7 @@
 // `already_settled`) means an earlier settle of exactly this window landed: it
 // is accounted, and the tool is held alone.
 import { rename, unlink } from "node:fs/promises";
-import { resolveJob } from "./job-log.mjs";
+import { labelsFor, resolveJob } from "./job-log.mjs";
 import {
 	claimForRelease,
 	claimForSettle,
@@ -406,9 +406,7 @@ async function reserve(input) {
 	const callMs = hookStartedAt();
 	const jobs = (await jobCapable(await serverCapabilities())) ? await resolveJob(sessionId) : null;
 	// A log stamped by a clock far AHEAD of this one (since corrected) makes this call's job unknown.
-	const suspect = jobs !== null && jobs.suspectAt();
-	const holdLabels = jobs === null ? {} : suspect ? { jobState: "invalid" } : jobs.at(callMs);
-	const holdKey = jobs === null ? "none" : suspect ? "invalid" : jobs.keyAt(callMs);
+	const { labels: holdLabels, key: holdKey } = labelsFor(jobs, callMs);
 	const prepared = await prepareWindow({
 		sessionId,
 		agentId,

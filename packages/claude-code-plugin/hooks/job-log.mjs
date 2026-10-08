@@ -35,7 +35,7 @@
 import { constants } from "node:fs";
 import { appendFile, mkdir, open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { sanitize, stateRoot } from "./lib.mjs";
+import { guardMode, recordWatchEvent, sanitize, stateRoot, writeFileAtomic } from "./lib.mjs";
 
 /** 1-128 of `[A-Za-z0-9._:-]`: usertrust core's `PRINCIPAL_FIELD_PATTERN`, pinned by a test. */
 export const JOB_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -171,6 +171,45 @@ export function labelsAt(parsed, tMs) {
 }
 
 /** Read this session's log NOW (never cached) and return its resolver. */
+/**
+ * THE ONE ANSWER PATH for "which job does a call or a message belong to": `{ labels, key }` for
+ * epoch-ms `tMs`, where `key` says which calls and messages may share a hold or a settle.
+ * Every labeller (PreToolUse, the window's eligibility filter, a Stop remainder) calls THIS and
+ * nothing else reads `at`/`keyAt` for labelling (a test greps for it), because a guard applied
+ * at one labeller and not another writes two answers for one log:
+ *  - no resolver (the server does not honour `job`): no labels;
+ *  - a log whose latest stamp is more than a clock step AHEAD of the clock that read it (a fast
+ *    clock wrote it and has since been corrected, so nothing was clamped): the job open then
+ *    cannot be trusted, so it is UNKNOWN, `jobState: "invalid"`, one key, no per-job split;
+ *  - otherwise the job open at `tMs` and its interval.
+ */
+export function labelsFor(jobs, tMs) {
+	if (jobs === null) return { labels: {}, key: "none" };
+	if (jobs.suspectAt()) return { labels: { jobState: "invalid" }, key: "invalid" };
+	return { labels: jobs.at(tMs), key: jobs.keyAt(tMs) };
+}
+
+async function noteSuspect(sessionId, maxRawMs) {
+	const marker = join(jobsDir(), `${sanitize(sessionId)}.suspect`);
+	try {
+		const prior = await readFile(marker, "utf-8").catch(() => null);
+		if (prior === String(maxRawMs)) return;
+		await recordWatchEvent({
+			kind: "gap",
+			mode: guardMode(),
+			session: sessionId,
+			agent: "(job log)",
+			tool: "(job log)",
+			reason: "the job log is stamped ahead of this clock",
+			started: null,
+		});
+		await mkdir(jobsDir(), { recursive: true, mode: 0o700 });
+		await writeFileAtomic(marker, String(maxRawMs));
+	} catch {
+		// the record is best-effort evidence; a failure here must never fail a hook
+	}
+}
+
 export async function resolveJob(sessionId) {
 	const read = async () => {
 		try {
@@ -195,15 +234,21 @@ export async function resolveJob(sessionId) {
 		parsed = await read();
 		readAtMs = Date.now();
 	}
+	const suspect = parsed.state === "ok" && parsed.maxRawMs - readAtMs > CLOCK_STEP_MS;
+	// Detection is TRANSIENT (the stamp passes, and a later Stop reads a log that looks normal), so a
+	// suspect read leaves a DURABLE trace: one time-less gap record per (session, latest stamp),
+	// which counts against every job. Without it, usage posted after the fast stamp has passed
+	// would come back clean for a job the skew touched.
+	if (suspect) await noteSuspect(sessionId, parsed.maxRawMs);
 	return {
 		parsed,
-		/** Labels for a call or message at epoch-ms `tMs`. */
+		/** Raw labels at `tMs`. LABELLING goes through `labelsFor`, never this: it owns the guard. */
 		at: (tMs) => labelsAt(parsed, tMs),
 		/**
 		 * Whether the log's latest stamp is more than a clock step AHEAD of the clock that read it: a fast clock wrote it and has since been corrected, so nothing was clamped and the
 		 * job open "now" cannot be trusted. That call's job is unknown (a gap), never a guess.
 		 */
-		suspectAt: () => parsed.state === "ok" && parsed.maxRawMs - readAtMs > CLOCK_STEP_MS,
+		suspectAt: () => suspect,
 		/**
 		 * The ts (epoch ms) of the first `start` or `stop` at or after `tMs`, or null: where a job's
 		 * call ends. AT, not just after: a line applies strictly after its own ts, so one written in

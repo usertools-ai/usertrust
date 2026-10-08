@@ -565,7 +565,7 @@ async function settlingRecords(sessionId, agentId) {
 				...jobHoldFields(body),
 				...(typeof body.startedAt === "string" ? { startedAt: body.startedAt } : {}),
 				// Why the hold was claimed: `release` when its call was deferred and the claim only
-				// serves to end the hold (see `markReleaseIntent`), otherwise a settle attempt.
+				// serves to end the hold (the hold was claimed into `.releasing`), otherwise a settle attempt.
 				...(releasing ? { intent: "release" } : {}),
 				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
 				transcript: body.usage === "transcript",

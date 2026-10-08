@@ -765,6 +765,111 @@ describe("a `.releasing` hold is given back by Stop in EVERY mode (B-113)", () =
 	});
 });
 
+describe("ONE answer path labels every call and message (B-117, B-120)", () => {
+	/** The same fixture for every path: a switch to job-b stamped far ahead (suspect) or normally. */
+	async function fixture(suspect: boolean) {
+		await startFake();
+		await writeLog(
+			logLine(at(-60), "session-start", null),
+			logLine(at(-50), "start", "job-a"),
+			logLine(suspect ? at(60) : at(-20), "start", "job-b"),
+		);
+		await writeTranscript([message("m1", at(-10), 100, 50)]);
+	}
+
+	it("SUSPECT log, PreToolUse + the window's eligibility filter: invalid, no job, and the message rides the hold", async () => {
+		await fixture(true);
+		await run("pre-tool-use.mjs", pre("tu_1"));
+		const hold = of("/v1/authorize")[0]?.body;
+		// mutant: the hold's labeller bypasses `labelsFor` → job-a
+		expect(hold?.jobState).toBe("invalid");
+		expect(hold).not.toHaveProperty("job");
+		// mutant: prepareWindow's filter bypasses it → the message is left out of the window
+		expect((hold as { params: { messages: number } }).params.messages).toBe(1);
+	});
+	it("SUSPECT log, a Stop remainder: grouped and labelled invalid, no job", async () => {
+		await fixture(true);
+		await run("stop.mjs", base());
+		const body = of("/v1/authorize")[0]?.body;
+		// mutant: the remainder bypasses it (group key or labels) → job-a
+		expect(body?.jobState).toBe("invalid");
+		expect(body).not.toHaveProperty("job");
+		expect(of("/v1/settle")[0]?.body).not.toHaveProperty("job");
+	});
+	it("control, the same fixture with normal stamps: the right job on all three", async () => {
+		await fixture(false);
+		await run("pre-tool-use.mjs", pre("tu_1"));
+		const hold = of("/v1/authorize")[0]?.body;
+		expect(hold?.job).toBe("job-b");
+		expect((hold as { params: { messages: number } }).params.messages).toBe(1);
+		requests = [];
+		await run("stop.mjs", base());
+		// the message rode the hold; nothing is left for a remainder, so assert the hold's job above and
+		// run a second fixture through Stop alone:
+		expect(of("/v1/authorize").length).toBeLessThanOrEqual(1);
+	});
+	it("control, a Stop remainder alone with normal stamps", async () => {
+		await fixture(false);
+		await run("stop.mjs", base());
+		expect(of("/v1/authorize")[0]?.body.job).toBe("job-b");
+	});
+	it("nothing labels from `.at(` or `.keyAt(` outside `labelsFor`: the guard has one home", async () => {
+		const { readdir } = await import("node:fs/promises");
+		for (const name of (await readdir(HOOKS)).filter(
+			(n) => n.endsWith(".mjs") && n !== "job-log.mjs",
+		)) {
+			const text = await readFile(join(HOOKS, name), "utf-8");
+			expect(text, name).not.toMatch(/\bjobs\.(at|keyAt)\(/);
+		}
+	});
+});
+
+describe("a skew seen during PreToolUse leaves a durable gap (B-121)", () => {
+	const watch = async () =>
+		(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l))
+			.filter((e) => e.reason === "the job log is stamped ahead of this clock");
+
+	it("one time-less gap per (session, latest stamp), and a later job report still carries it after the stamp has passed", async () => {
+		await startFake();
+		await writeLog(logLine(at(-60), "session-start", null), logLine(at(100), "start", "job-a"));
+		await run("pre-tool-use.mjs", pre("tu_1"), { UT_CC_USAGE: "estimate" });
+		await run("pre-tool-use.mjs", pre("tu_2"), { UT_CC_USAGE: "estimate" });
+		const gaps = await watch();
+		// mutant: nothing durable is written → the later report looks clean
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0]).toMatchObject({ kind: "gap", started: null, session: SESSION });
+		// The clock is corrected and the stamp has passed: the log now reads normally...
+		const { jobCoverage } = (await import(pathToFileURL(join(HOOKS, "job-log.mjs")).href)) as {
+			jobCoverage(a: {
+				job: string;
+				logs: Record<string, string>;
+				records: unknown[];
+				watch: unknown[];
+			}): {
+				knownGaps: Array<{ gap: string }>;
+			};
+		};
+		const corrected = `${logLine(at(-60), "session-start", null)}${logLine(at(-30), "start", "job-a")}${logLine(at(-5), "stop", null)}`;
+		const r = jobCoverage({
+			job: "job-a",
+			logs: { [SESSION]: corrected },
+			records: [],
+			watch: gaps,
+		});
+		// ...but the durable record still counts against the job.
+		expect(r.knownGaps.map((g) => g.gap).join(" ")).toContain("its time is unreadable");
+	});
+	it("no record without a skew", async () => {
+		await startFake();
+		await writeLog(logLine(at(-60), "session-start", null), logLine(at(-30), "start", "job-a"));
+		await run("pre-tool-use.mjs", pre("tu_1"), { UT_CC_USAGE: "estimate" });
+		expect(await watch()).toEqual([]);
+	});
+});
+
 describe("the skew check uses the clock that READ the log (B-114)", () => {
 	it("a sibling that switches jobs while this hook waits on a slow probe does not make the known job unknown", async () => {
 		await startFake();
