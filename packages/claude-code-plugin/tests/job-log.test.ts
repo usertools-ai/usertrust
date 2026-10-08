@@ -1687,6 +1687,67 @@ describe("usertrust-job start/stop — a write failure is reported through the s
 	);
 });
 
+describe("a sessionless give-back without proof is a gap (B-110)", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const call = {
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost: 7,
+			job: J,
+			principal: { origin: `claude-code:${SID}` },
+			usageFrom: iso(T0 + 2000),
+			usageTo: iso(T0 + 3000),
+		},
+	};
+	const given = (data: Record<string, unknown>) => ({
+		kind: "hold_released",
+		actor: "local",
+		data: { transferId: "tx_9", usageFrom: iso(T0 + 2500), ...data },
+	});
+	it("with no releaseClass it cannot be placed by any log", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({ job: J, logs: { [SID]: logText }, records: [call, given({})] });
+		// mutant: only sessionless calls and denials are looked at
+		expect(gapText(r)).toContain("a hold_released record names no session");
+	});
+	it("with releaseClass unused it stays clean", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [call, given({ releaseClass: "unused" })],
+		});
+		expect(r.knownGaps).toEqual([]);
+	});
+});
+
+describe("recordWatchEvent has no default start (B-108)", () => {
+	it("an event that does not state its start is written with started null, never this hook's time", async () => {
+		const { recordWatchEvent } = (await import(pathToFileURL(join(HOOKS, "lib.mjs")).href)) as {
+			recordWatchEvent(e: Record<string, unknown>): Promise<boolean>;
+		};
+		expect(await recordWatchEvent({ kind: "gap", session: SID })).toBe(true);
+		const [rec] = (await readFile(join(state, "watch.jsonl"), "utf-8"))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l));
+		// mutant: the helper defaults it to the hook's start
+		expect(rec.started).toBeNull();
+		expect(
+			await recordWatchEvent({ kind: "gap", session: SID, started: "2026-01-01T00:00:00.000Z" }),
+		).toBe(true);
+		const lines = (await readFile(join(state, "watch.jsonl"), "utf-8"))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l));
+		expect(lines[1].started).toBe("2026-01-01T00:00:00.000Z");
+	});
+});
+
 describe("capability.json is replaced atomically (B-100)", () => {
 	it("during a replace the reader sees the OLD content whole, never an empty or half-written file", async () => {
 		const target = join(state, "capability.json");

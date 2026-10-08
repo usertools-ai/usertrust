@@ -210,12 +210,16 @@ export function modeAnnouncement() {
  * written, so no note claims a record that is not there.
  */
 export async function recordWatchEvent(event) {
-	// `started` is when the CALL was received (this hook's start), `at` when the record was
-	// written: a job switch that lands in between must not move the call to the new job.
+	// `started` is when the EVENT'S OWN CALL began; `at` is when this record was written. EVERY
+	// caller must say its own `started` (an ISO time), or `null` when it is not known. There is
+	// no default: this hook's start is the call's start only for a PreToolUse event, and a
+	// default of it stamped other writers' records with the Stop's time, which could land the
+	// event in a later job while the job it belonged to read clean. An omitted `started` is
+	// UNKNOWN (null), which counts against every job.
 	const line = JSON.stringify({
 		at: new Date().toISOString(),
-		started: new Date(HOOK_STARTED_AT).toISOString(),
 		...event,
+		started: event.started === undefined ? null : event.started,
 	});
 	try {
 		await mkdir(stateRoot(), { recursive: true });
@@ -495,14 +499,23 @@ function settlingPath(livePath) {
  * `.settling` path, or null when another hook took it first.
  */
 /**
- * Record, in a hold already claimed (`.settling`), that the claim is only to END it: a resumed
- * call's earlier hold, whose call was DEFERRED and never ran. Without it Stop reads every
- * `.settling` as "its settle went unanswered", and gives the hold back as `call-ran` with a gap
- * for a call that did not run. Best-effort: a claim with no intent is read conservatively.
+ * Claim a hold ONLY to end it: a resumed call's earlier hold, whose call was DEFERRED and never
+ * ran. It is renamed straight into `.releasing`, a name that carries the intent, so Stop gives
+ * it back as `unused` with no gap, and no state between the claim and the intent exists to be
+ * caught by a Stop or a kill. (Marking the `.json` first would let a PostToolUse claim inherit
+ * the mark.) Returns the claimed path, or null when another hook claimed the hold first.
  */
-export async function markReleaseIntent(claimedPath) {
-	const body = JSON.parse(await readFile(claimedPath, "utf-8"));
-	await writeFileAtomic(claimedPath, JSON.stringify({ ...body, intent: "release" }));
+export async function claimForRelease(live) {
+	const now = new Date();
+	await utimes(live, now, now).catch(() => {});
+	const target = `${live.slice(0, -".json".length)}.releasing`;
+	try {
+		await rename(live, target);
+	} catch (err) {
+		if (err?.code === "ENOENT") return null;
+		throw err;
+	}
+	return target;
 }
 
 export async function claimForSettle(live) {
@@ -533,7 +546,11 @@ async function settlingRecords(sessionId, agentId) {
 	}
 	const held = [];
 	for (const name of names) {
-		if (!name.startsWith(prefix) || !name.endsWith(".settling")) continue;
+		// `.settling`: its one settle was attempted. `.releasing`: the claim only ENDS a deferred
+		// call's hold. The intent is in the NAME the hold was claimed into, so it is atomic with
+		// the claim: a Stop or a kill between the two can never read it as a settle attempt.
+		const releasing = name.endsWith(".releasing");
+		if (!name.startsWith(prefix) || !(releasing || name.endsWith(".settling"))) continue;
 		const path = join(stateDir(), name);
 		try {
 			const body = JSON.parse(await readFile(path, "utf-8"));
@@ -549,7 +566,7 @@ async function settlingRecords(sessionId, agentId) {
 				...(typeof body.startedAt === "string" ? { startedAt: body.startedAt } : {}),
 				// Why the hold was claimed: `release` when its call was deferred and the claim only
 				// serves to end the hold (see `markReleaseIntent`), otherwise a settle attempt.
-				...(body.intent === "release" ? { intent: "release" } : {}),
+				...(releasing ? { intent: "release" } : {}),
 				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
 				transcript: body.usage === "transcript",
 				// Which server and tenant made the hold (`tenantBinding`), as written.

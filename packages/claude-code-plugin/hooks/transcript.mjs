@@ -136,6 +136,7 @@ import {
 	LINKLESS,
 	listPending,
 	publishExclusive,
+	recordUnconfirmedCall,
 	recordWatchEvent,
 	releaseHold,
 	sanitize,
@@ -865,7 +866,18 @@ async function holdJournal(sessionId, agentId) {
 			const ids = isStringArray(body.assignedIds) ? body.assignedIds : [];
 			if (ids.length === 0 && kind === "live") continue;
 			const { mtimeMs } = await stat(path);
-			records.push({ kind, path, ids, outcome: body.outcome, keyed: holdVehicle(body), mtimeMs });
+			records.push({
+				kind,
+				path,
+				ids,
+				outcome: body.outcome,
+				keyed: holdVehicle(body),
+				mtimeMs,
+				estimate: body.usage !== "transcript",
+				agentId: sanitize(body.agentId ?? "main"),
+				...jobHoldFields(body),
+				...(typeof body.startedAt === "string" ? { startedAt: body.startedAt } : {}),
+			});
 		} catch {
 			// Corrupt or concurrently removed — skip.
 		}
@@ -894,6 +906,11 @@ async function reconcile(cursor, sessionId, agentId) {
 			// stale, its hold is past the ledger's pending timeout (STALE_SETTLING_MS), so
 			// clearing the file is all there is left to do.
 			holdUnresolved(cursor, record);
+			// An ESTIMATE hold left `.settling` this long is a call that RAN whose charge was never
+			// confirmed. Clearing the file would also clear the only trace of it: write the gap first.
+			if (record.estimate && record.ids.length === 0) {
+				await recordUnconfirmedCall(sessionId, record, "call-ran");
+			}
 			finished.push(record.path);
 		} else {
 			for (const id of record.ids) live.add(id);
@@ -2141,7 +2158,9 @@ async function reportDenied(agentType, agentId, reason, ids, model, counts, extr
 			tool: "(remainder)",
 			// The refused usage's own start, not the Stop that ran when it was refused: a
 			// remainder refused while another job is open belongs to ITS job's interval.
-			...(extra.labels.usageFrom === undefined ? {} : { started: extra.labels.usageFrom }),
+			// When the refused usage began, or null when it is not known (a timestamp-less message):
+			// never the time of the Stop that ran the refusal.
+			started: extra.labels.usageFrom ?? null,
 			status: extra.status,
 			error: extra.error,
 			reason: sanitizeReason(reason),

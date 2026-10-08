@@ -4,10 +4,11 @@
 //
 // Job ids are opaque (`job-a`, `job-b`). Each test names the mutant it kills.
 
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, utimes, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { costFromRates, getModelRates, readLedgerEvents } from "usertrust";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashKey } from "../../server/src/config.js";
@@ -616,6 +617,10 @@ describe("a resumed call's earlier hold is only ENDED, so an unconfirmed release
 		// The deferred call fires PreToolUse again: its earlier hold is claimed, its release fails.
 		const resumed = await run("pre-tool-use.mjs", pre("tu_1"), env);
 		expect(resumed.code).not.toBe(0);
+		// The intent is in the NAME the hold was claimed into: no `.settling` ever existed for it.
+		const left = await readdir(stateDir);
+		expect(left.some((n) => n.endsWith(".releasing"))).toBe(true);
+		expect(left.some((n) => n.endsWith(".settling"))).toBe(false);
 		await run("stop.mjs", base(), env);
 		const sent = of("/v1/release").map((r) => r.body);
 		expect(sent.map((b) => b.releaseClass)).toEqual(["unused", "unused"]); // mutant: call-ran
@@ -671,6 +676,105 @@ describe("a give-back's gap is placed by when the call STARTED, even with no job
 		await run("stop.mjs", base(), env);
 		const [gap] = await gapsOf();
 		expect(gap?.started).toBeNull(); // mutant: stamped with the Stop's time
+	});
+});
+
+describe("a watch record never defaults its start to the hook that wrote it (B-108)", () => {
+	const watch = async () =>
+		(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l));
+
+	it("a refused, timestamp-less remainder at Stop after a job switch: would_block with started null, a gap for BOTH jobs", async () => {
+		await startFake();
+		override = (path) =>
+			path === "/v1/authorize"
+				? { status: 402, json: { error: "budget_exceeded", reason: "need 9" } }
+				: undefined;
+		await writeLog(
+			logLine(at(-60), "session-start", null),
+			logLine(at(-50), "start", "job-a"),
+			logLine(at(-5), "start", "job-b"),
+		);
+		// A message with NO timestamp: its time, and so its job, cannot be known.
+		const noTime = JSON.parse(message("m1", at(-40), 100, 50));
+		delete noTime.timestamp;
+		await writeTranscript([JSON.stringify(noTime)]);
+		await run("stop.mjs", base());
+		const wb = (await watch()).find((e) => e.kind === "would_block");
+		// mutant: `started` omitted → the helper defaults it to the Stop's time, inside job-b
+		expect(wb?.started).toBeNull();
+		const { jobCoverage } = (await import(pathToFileURL(join(HOOKS, "job-log.mjs")).href)) as {
+			jobCoverage(a: {
+				job: string;
+				logs: Record<string, string>;
+				records: unknown[];
+				watch: unknown[];
+			}): {
+				knownGaps: Array<{ gap: string }>;
+			};
+		};
+		const log = await readFile(join(stateDir, "jobs", `${SESSION}.jsonl`), "utf-8");
+		for (const job of ["job-a", "job-b"]) {
+			const r = jobCoverage({ job, logs: { [SESSION]: log }, records: [], watch: await watch() });
+			expect(r.knownGaps.map((g) => g.gap).join(" "), job).toContain("its time is unreadable");
+		}
+	});
+	it("every PreToolUse watch record states the call's own start", async () => {
+		await startFake();
+		override = (path) =>
+			path === "/v1/authorize" ? { status: 503, json: { error: "down" } } : undefined;
+		await run("pre-tool-use.mjs", pre("tu_1"), { UT_CC_USAGE: "estimate" });
+		const gap = (await watch()).find((e) => e.kind === "gap");
+		expect(typeof gap?.started).toBe("string");
+	});
+});
+
+describe("estimate holds left behind are never lost silently (B-111, B-112)", () => {
+	it("an estimate `.settling` stale enough for the journal's sweep still leaves its call-ran gap (B-111)", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await mkdir(stateDir, { recursive: true });
+		const file = join(stateDir, `${SESSION}__main__tu_9.tx_9.settling`);
+		await writeFile(
+			file,
+			JSON.stringify({
+				gate: 1,
+				toolUseId: "tu_9",
+				transferId: "tx_9",
+				agentId: "main",
+				usageFrom: iso(at(-30)),
+			}),
+		);
+		const old = new Date(Date.now() - 20 * 60_000);
+		await utimes(file, old, old);
+		await writeTranscript([]);
+		await run("stop.mjs", base());
+		const gaps = (await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l))
+			.filter((e) => e.kind === "gap");
+		// mutant: the sweep deletes the file and writes no gap
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0]).toMatchObject({ releaseClass: "call-ran", started: iso(at(-30)) });
+		expect(await readdir(stateDir)).not.toContain(`${SESSION}__main__tu_9.tx_9.settling`);
+	});
+	it("a log stamped by a clock far AHEAD of this one makes the call's job unknown (B-112)", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(60), "start", "job-a"));
+		await run("pre-tool-use.mjs", pre("tu_1"), { UT_CC_USAGE: "estimate" });
+		const body = of("/v1/authorize")[0]?.body;
+		// mutant: no check → the log is read as if its clock were right
+		expect(body?.jobState).toBe("invalid");
+		expect(body).not.toHaveProperty("job");
+	});
+	it("a stamp less than a clock step ahead is not suspect", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await run("pre-tool-use.mjs", pre("tu_1"), { UT_CC_USAGE: "estimate" });
+		expect(of("/v1/authorize")[0]?.body.job).toBe("job-a");
 	});
 });
 

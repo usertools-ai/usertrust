@@ -3,7 +3,8 @@
 // file finds that another hook has just made the same rename: the file is renamed
 // away a moment before, as that hook's claim leaves it, so this hook's own rename
 // finds no file (ENOENT). Its claim is lost; the file stays claimed by the "other"
-// hook. A claim is a rename of `<hold>.json` to `<hold>.settling` (a settle's), or of
+// hook. A claim is a rename of `<hold>.json` to `<hold>.settling` (a settle's) or `<hold>.releasing`
+// (a release-only claim), or of
 // a `<hold>.settling` to `<hold>.settling.abandoned.*` (an abandon's).
 import { createRequire, syncBuiltinESMExports } from "node:module";
 
@@ -15,7 +16,7 @@ function isClaim(from, to) {
 	const source = String(from);
 	const target = String(to);
 	return (
-		(source.endsWith(".json") && target.endsWith(".settling")) ||
+		(source.endsWith(".json") && (target.endsWith(".settling") || target.endsWith(".releasing"))) ||
 		(source.endsWith(".settling") && target.includes(".settling.abandoned."))
 	);
 }

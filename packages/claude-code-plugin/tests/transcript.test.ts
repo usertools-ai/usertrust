@@ -368,7 +368,9 @@ function holdFile(call: string, transferId: string, kind = "json", agentId = "ma
 
 /** Every hold-state file left: pending (`.json`) and settle-attempted (`.settling`). */
 async function holdStateFiles() {
-	return (await readdir(stateDir)).filter((n) => n.endsWith(".json") || n.endsWith(".settling"));
+	return (await readdir(stateDir)).filter(
+		(n) => n.endsWith(".json") || n.endsWith(".settling") || n.endsWith(".releasing"),
+	);
 }
 
 /** JSON.stringify({command:"ls"}) is 16 chars → 4 estimated tokens; the output hold is 4096. */
@@ -3435,6 +3437,8 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 	/** The first hold's files: each hold of the call has its own (by transfer). */
 	const RECORD = holdFile("tu_1", "tx_1");
 	const SETTLING = holdFile("tu_1", "tx_1", "settling");
+	/** An estimate hold claimed only to be ENDED (a resumed call's earlier hold) is `.releasing`. */
+	const RELEASING = holdFile("tu_1", "tx_1", "releasing");
 	/** The call's one pending record as written, whichever hold it is. */
 	async function record(): Promise<Record<string, unknown>> {
 		const pending = (await holdStateFiles()).filter((name) => name.endsWith(".json"));
@@ -3896,7 +3900,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				}
 				expect(authorizes()).toHaveLength(1);
 				// The record is the other hook's claim; nothing was written beside it.
-				expect(await holdStateFiles()).toEqual([SETTLING]);
+				expect(await holdStateFiles()).toEqual([transcript ? SETTLING : RELEASING]);
 			},
 		);
 
@@ -3911,7 +3915,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
 				await run("pre-tool-use.mjs", preInput("tu_1"), usage);
 				// A directory where the claim renames the record to: it cannot be claimed.
-				await mkdir(join(stateDir, SETTLING));
+				await mkdir(join(stateDir, usage.UT_CC_USAGE === "estimate" ? RELEASING : SETTLING));
 				const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
 					...usage,
 					UT_CC_MODE: "enforce",
@@ -4622,7 +4626,8 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				}
 				expect(again.stderr).not.toContain("is ended");
 				expect(authorizes()).toHaveLength(1);
-				expect(await holdStateFiles()).toEqual([SETTLING]);
+				// An estimate hold claimed only to be ended: `.releasing`, which Stop gives back unused.
+				expect(await holdStateFiles()).toEqual([RELEASING]);
 				// Stop gives it back.
 				refusing = false;
 				await run("stop.mjs", stopInput(), env);

@@ -44,6 +44,7 @@
 import { rename, unlink } from "node:fs/promises";
 import { resolveJob } from "./job-log.mjs";
 import {
+	claimForRelease,
 	claimForSettle,
 	defaultModel,
 	estimateTokens,
@@ -59,7 +60,6 @@ import {
 	jobCapable,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
-	markReleaseIntent,
 	readStdin,
 	recordPending,
 	recordWatchEvent,
@@ -178,6 +178,7 @@ try {
 	} else if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
 		// The call proceeds unmetered: say so durably, so the gap is never silent.
 		const recorded = await recordWatchEvent({
+			started: new Date(hookStartedAt()).toISOString(),
 			kind: "gap",
 			mode,
 			session: sessionId,
@@ -291,6 +292,7 @@ async function unsettled(
 		return;
 	}
 	const recorded = await recordWatchEvent({
+		started: new Date(hookStartedAt()).toISOString(),
 		kind: "gap",
 		mode,
 		session: sessionId,
@@ -348,10 +350,9 @@ async function retire(entry) {
 		}
 		return true;
 	}
-	const claimed = await claimForSettle(entry.path);
+	// This claim only ENDS a deferred call's hold, and says so in the name it claims into.
+	const claimed = await claimForRelease(entry.path);
 	if (claimed === null) return false;
-	// This claim only ENDS a deferred call's hold: say so, so Stop gives it back as `unused`.
-	await markReleaseIntent(claimed).catch(() => {});
 	const capabilities = await serverCapabilities();
 	if (capabilities?.has("release")) {
 		const unconfirmed = await releaseUnconfirmed(entry.transferId);
@@ -404,8 +405,10 @@ async function reserve(input) {
 	// keys, and an unlabelled hold must stay byte-identical to today's).
 	const callMs = hookStartedAt();
 	const jobs = (await jobCapable(await serverCapabilities())) ? await resolveJob(sessionId) : null;
-	const holdLabels = jobs === null ? {} : jobs.at(callMs);
-	const holdKey = jobs === null ? "none" : jobs.keyAt(callMs);
+	// A log stamped by a clock far AHEAD of this one (since corrected) makes this call's job unknown.
+	const suspect = jobs !== null && jobs.suspectAt(callMs);
+	const holdLabels = jobs === null ? {} : suspect ? { jobState: "invalid" } : jobs.at(callMs);
+	const holdKey = jobs === null ? "none" : suspect ? "invalid" : jobs.keyAt(callMs);
 	const prepared = await prepareWindow({
 		sessionId,
 		agentId,
@@ -566,6 +569,7 @@ async function reserve(input) {
 				deny(`usertrust ${error}: ${reason}`);
 			} else {
 				await recordWatchEvent({
+					started: new Date(hookStartedAt()).toISOString(),
 					kind: "would_block",
 					session: sessionId,
 					agent: agentId,

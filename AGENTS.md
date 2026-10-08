@@ -695,6 +695,12 @@ hold still `.json` at Stop never reached PostToolUse (a failed or interrupted ca
 `call-unconfirmed` (a tool the user DENIES at the permission prompt leaves such a hold too, and cannot be told
 apart from a crash, so it reads the same, correctly), and one left `.settling` is `call-ran`; both are also written to `watch.jsonl` as a gap
 record, because a give-back of a hold whose call ran is metering the ledger cannot vouch for.
+A hold claimed only to END a deferred call's earlier hold is renamed straight into `.releasing`, a name that
+carries the intent (never `.settling` and then a mark), so Stop gives it back as `unused` with no gap. Every
+`watch.jsonl` record states its own `started` (the call's start, or `null` when unknown, which counts against every
+job); the shared writer has no default of its own, because the hook that writes a record is not always the hook
+that began the call. A stale `.settling` estimate hold swept by the journal writes its gap first. A job log whose
+latest stamp is more than a clock step AHEAD of the hook's clock makes that call's job unknown.
 
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
 `LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless

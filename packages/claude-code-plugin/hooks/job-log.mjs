@@ -84,6 +84,8 @@ export function parseJobLog(text, sessionId) {
 	// Lines whose stamp ran BACKWARDS by more than a benign inversion between concurrent
 	// appenders: the clock stepped, and attribution around them is uncertain.
 	const clockSteps = [];
+	// The latest raw stamp in the log: one far AHEAD of the clock that reads it is a fast clock.
+	let maxRawMs = Number.NEGATIVE_INFINITY;
 	for (const [i, line] of lines.entries()) {
 		let rec;
 		try {
@@ -127,6 +129,7 @@ export function parseJobLog(text, sessionId) {
 			return { state: "invalid", reason: `line ${i + 1} has a bad job id` };
 		}
 		effectiveMs = tsMs;
+		maxRawMs = Math.max(maxRawMs, rawMs);
 		events.push({
 			index: i,
 			tsMs,
@@ -135,7 +138,7 @@ export function parseJobLog(text, sessionId) {
 			job: rec.op === "start" ? rec.job : null,
 		});
 	}
-	return { state: "ok", events, last: events[events.length - 1], clockSteps };
+	return { state: "ok", events, last: events[events.length - 1], clockSteps, maxRawMs };
 }
 
 /** The job open at `tMs`: every line applies strictly AFTER its own ts. */
@@ -191,6 +194,12 @@ export async function resolveJob(sessionId) {
 		parsed,
 		/** Labels for a call or message at epoch-ms `tMs`. */
 		at: (tMs) => labelsAt(parsed, tMs),
+		/**
+		 * Whether the log's latest stamp is more than a clock step AHEAD of `callMs`, the hook's own
+		 * clock: a fast clock wrote it and has since been corrected, so nothing was clamped and the
+		 * job open "now" cannot be trusted. That call's job is unknown (a gap), never a guess.
+		 */
+		suspectAt: (callMs) => parsed.state === "ok" && parsed.maxRawMs - callMs > CLOCK_STEP_MS,
 		/**
 		 * The ts (epoch ms) of the first `start` or `stop` at or after `tMs`, or null: where a job's
 		 * call ends. AT, not just after: a line applies strictly after its own ts, so one written in
@@ -603,7 +612,11 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 	// fall in an interval of the job (or is unreadable), they may be the job's.
 	for (const r of records) {
 		if (r?.data?.job === job || sessionOfRecord(r) !== null) continue;
-		if (r?.kind !== "llm_call" && !SPEND_LIKE.has(r?.kind)) continue;
+		// A give-back that names no session cannot be placed by any log either: unless it states
+		// the proof of no usage, it is as unplaceable as a sessionless call.
+		const unproven =
+			r?.kind === "hold_released" && r.data?.releaseClass !== "unused" && r.data?.job === undefined;
+		if (r?.kind !== "llm_call" && !SPEND_LIKE.has(r?.kind) && !unproven) continue;
 		const w = r.kind === "llm_call" ? window(r.data) : null;
 		const point = ms(r?.data?.usageFrom);
 		const span = r.kind === "llm_call" ? w : Number.isFinite(point) ? [point, point] : null;
