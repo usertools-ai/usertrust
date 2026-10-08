@@ -773,3 +773,32 @@ describe("destroy() records a terminal still in flight with the hold's job", () 
 		await ending;
 	});
 });
+
+describe("destroy() records a release still in flight with the class the release stated", () => {
+	it("release(auth, reason, { releaseClass: 'unused' }) whose void never opens: the one record carries the class", async () => {
+		const voids = gate();
+		const { engine } = ledgerEngine({ void: voids.wait });
+		const gov = await governor(engine, BOUND_MS);
+		const auth = await gov.authorize({ ...AUTHORIZE, actor: "plugin", principal: PRINCIPAL });
+		const ending = gov.release(auth, "given back", { releaseClass: "unused" });
+		await gov.destroy();
+		const records = recordsOf(auth.transferId);
+		expect(records).toHaveLength(1);
+		// mutant: the in-flight state drops the class → recorded unclassified, read as unproven
+		expect(records[0]?.data).toMatchObject({ releaseClass: "unused", reason: STILL_IN_FLIGHT });
+		voids.open();
+		await ending;
+		expect(recordsOf(auth.transferId)).toHaveLength(1);
+	});
+	it("an abort in flight, and a release that stated no class, record none", async () => {
+		const voids = gate();
+		const { engine } = ledgerEngine({ void: voids.wait });
+		const gov = await governor(engine, BOUND_MS);
+		const auth = await gov.authorize({ ...AUTHORIZE, actor: "plugin", principal: PRINCIPAL });
+		const ending = gov.release(auth, "given back");
+		await gov.destroy();
+		expect(recordsOf(auth.transferId)[0]?.data).not.toHaveProperty("releaseClass");
+		voids.open();
+		await ending;
+	});
+});

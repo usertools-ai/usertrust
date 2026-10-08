@@ -656,13 +656,15 @@ answers 200. A client therefore sends them only to a server that lists `"job"` i
 
 *The Claude Code plugin's side* (`hooks/job-log.mjs`) is where the job comes from: a per-session,
 append-only log (`<state>/jobs/<session_id>.jsonl`) written by the `usertrust-job` CLI and the
-SessionStart hook under a lock held only for read-validate-append. The lock stays (a single O_APPEND write is
-atomic, but it neither orders the timestamps nor truncates an orphaned tail); it keeps ONE property, at most one
-writer at a time: it is taken atomically WITH its content (a private file `link()`ed into place, so it never
-exists empty), broken only when its holder is provably dead (`kill(pid, 0)`, never by age: a slow writer on a
-loaded host is alive), breakers are serialized by a sentinel, and a writer releases only a lock that still
-carries its own token. Declared residual: a dead holder's pid reused by an unrelated live process keeps the lock
-until that process exits. A record's job is the one
+SessionStart hook with NO lock: every write is ONE complete line appended with ONE O_APPEND write, which POSIX
+places at the end of the file atomically on a local filesystem (declared residual: a non-local filesystem such
+as NFS). The ORDER of a log is the POSITION of its lines, not their stamps: a line's effective time is the
+running maximum of the stamps so far, so a late-stamped line can never be placed before a line that precedes it.
+The reader is the authority and only reads: a partial line followed by more lines, a torn last line, a repeated
+`session-start` or an unknown op make the log INVALID (`jobState: "invalid"` on the records, a named known gap
+in coverage), and nothing ever truncates, repairs or reorders it. A hook that sees a torn last line looks once
+more after a short pause (an append may be in flight) and otherwise treats THAT call's job as unknown; the next
+call reads afresh. `capability.json` is replaced atomically (a temp file, then `rename(2)`). A record's job is the one
 open at the time its USAGE happened (a hold: its PreToolUse; a transcript message: its own
 timestamp), never the one open at settle time, so a remainder spanning a switch settles once per job.
 `jobCoverage()` in that module is a DIAGNOSTIC, not a certification: it reports the job's tagged cost and a

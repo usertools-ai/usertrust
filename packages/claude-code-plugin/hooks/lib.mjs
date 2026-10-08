@@ -26,7 +26,7 @@
 // (<safeSession>__<safeAgent>__<safeCall>.json). Each hold is then claimed,
 // settled, journalled and cleared through the path its listing found, so a 1.4.0
 // record is ended through its own name, once.
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
 	appendFile,
 	link,
@@ -727,6 +727,23 @@ export function jobHoldFields(entry) {
 
 // Under jobs/, beside the logs: the state dir's top level lists holds, and a server that
 // never offered `job` must leave it exactly as it was.
+/**
+ * Replace `path` with `text` ATOMICALLY: a temp file in the same directory, then rename(2) over
+ * the name. A reader sees the old content or the new, never an empty or half-written file
+ * (writeFile truncates in place first). `beforeCommit` is a test seam between the two steps.
+ */
+export async function writeFileAtomic(path, text, { mode = 0o600, beforeCommit } = {}) {
+	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	try {
+		await writeFile(tmp, text, { mode });
+		await beforeCommit?.();
+		await rename(tmp, path);
+	} catch (err) {
+		await unlink(tmp).catch(() => {});
+		throw err;
+	}
+}
+
 const JOB_CAPABILITY_FILE = join("jobs", "capability.json");
 let jobCapableRead;
 
@@ -757,7 +774,7 @@ export function jobCapable(capabilities) {
 		if (known[url] !== honoured && (honoured || known[url] !== undefined)) {
 			try {
 				await mkdir(join(stateDir(), "jobs"), { recursive: true, mode: 0o700 });
-				await writeFile(file, JSON.stringify({ ...known, [url]: honoured }), { mode: 0o600 });
+				await writeFileAtomic(file, JSON.stringify({ ...known, [url]: honoured }));
 			} catch {
 				// the bit is a convenience: a failed write loses only the memory
 			}

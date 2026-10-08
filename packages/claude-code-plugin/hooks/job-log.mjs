@@ -18,41 +18,33 @@
 //    bills job-a, because its hook ran before the CLI wrote the line.
 // An equal `ts` resolves to the EARLIER job (a line applies strictly AFTER its ts).
 //
-// VALID means: every complete line's `sid` is the session's; the first complete line
-// is `session-start`; `ts` is non-decreasing; every `op` is known. An unterminated
-// FINAL line is a write in progress and is ignored; INTERIOR corruption is invalid,
-// and an invalid log is `jobState: "invalid"` on the records, never a guess.
+// ORDER IS POSITION, not the clock: lines are applied in file order, and a line's effective
+// time is the running maximum of the stamps so far, so a stamp that runs backwards (concurrent
+// appenders can differ by a few ms) can never place a `start` before a line that precedes it.
 //
-// THE LOCK: <log>.lock, taken atomically WITH its content { pid, ts, token } (a private file
-// link()ed into place, so it never exists empty). EVERY writer (the CLI and the SessionStart
-// hook) holds it only for read-last-validate-append, milliseconds, and NEVER while waiting or
-// polling. At most one writer at a time: a lock is broken ONLY when its holder is provably
-// dead (never by age alone: a slow writer on a loaded host is alive), breakers are serialized
-// by a sentinel, and a writer releases only a lock that still carries its own token.
+// VALID means: every line's `sid` is the session's; the first line is `session-start` and
+// no other is; every `op` is known; `start` names a valid job id. A line that is not JSON, or
+// a last line with no newline (a torn line), makes the log INVALID: `jobState: "invalid"` on
+// the records and a named gap in coverage, never a guess. NOTHING here repairs, truncates or
+// reorders a log: the reader is the authority and it only reads.
+//
+// NO LOCK: every writer appends ONE complete line with ONE write to a file opened O_APPEND
+// (see "Writing" below).
 //
 // Zero dependencies; reads and writes only the state dir.
-import { randomBytes } from "node:crypto";
-import { closeSync, constants, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
-import {
-	link,
-	mkdir,
-	open,
-	readdir,
-	readFile,
-	stat,
-	truncate,
-	unlink,
-	writeFile,
-} from "node:fs/promises";
+import { constants } from "node:fs";
+import { appendFile, mkdir, open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { LINKLESS, sanitize, stateRoot } from "./lib.mjs";
+import { sanitize, stateRoot } from "./lib.mjs";
 
 /** 1-128 of `[A-Za-z0-9._:-]`: usertrust core's `PRINCIPAL_FIELD_PATTERN`, pinned by a test. */
 export const JOB_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
+/** The reason of a log whose last line was cut short. */
+export const TORN_REASON = "the last line is torn (it has no newline)";
+/** How long a hook waits before it reads a torn log once more. */
+export const TORN_RECHECK_MS = 40;
 const OPS = new Set(["session-start", "start", "stop"]);
-/** A lock older than this is broken even if its holder's pid is alive. */
-export const LOCK_STALE_MS = 10_000;
 /** How long the CLI waits for the SessionStart line to land. */
 export const DEFAULT_WAIT_MS = 10_000;
 const POLL_MS = 250;
@@ -74,12 +66,19 @@ export function jobLogPath(sessionId) {
  * each event is { tsMs, ts, op, job }.
  */
 export function parseJobLog(text, sessionId) {
-	// The final fragment after the last newline is a write in progress: not corruption.
-	const complete = text.endsWith("\n") ? text : text.slice(0, text.lastIndexOf("\n") + 1);
-	const lines = complete.split("\n").slice(0, -1);
-	if (lines.length === 0) return { state: "none" };
+	if (text === "") return { state: "none" };
+	// Every writer appends ONE complete line in one write, so a final fragment with no newline
+	// is not a write in progress: it is a line that was cut short (a crash, a full disk). The
+	// reader never repairs a log, and never ignores such a line: the log is INVALID.
+	if (!text.endsWith("\n")) {
+		return { state: "invalid", reason: TORN_REASON };
+	}
+	const lines = text.split("\n").slice(0, -1);
 	const events = [];
-	let lastMs = Number.NEGATIVE_INFINITY;
+	// Order is POSITION. A line's effective time is the running maximum of the stamps so far,
+	// so a stamp that runs backwards (a clock step, a late writer) cannot place a `start` before
+	// a line that precedes it in the file.
+	let effectiveMs = Number.NEGATIVE_INFINITY;
 	for (const [i, line] of lines.entries()) {
 		let rec;
 		try {
@@ -109,12 +108,11 @@ export function parseJobLog(text, sessionId) {
 		) {
 			return { state: "invalid", reason: `line ${i + 1} has a bad ts` };
 		}
-		const tsMs = Date.parse(rec.ts);
-		if (tsMs < lastMs) return { state: "invalid", reason: `line ${i + 1} is out of order` };
+		const tsMs = Math.max(Date.parse(rec.ts), effectiveMs);
 		if (rec.op === "start" && !(typeof rec.job === "string" && JOB_ID.test(rec.job))) {
 			return { state: "invalid", reason: `line ${i + 1} has a bad job id` };
 		}
-		lastMs = tsMs;
+		effectiveMs = tsMs;
 		events.push({ tsMs, ts: rec.ts, op: rec.op, job: rec.op === "start" ? rec.job : null });
 	}
 	return { state: "ok", events, last: events[events.length - 1] };
@@ -151,12 +149,23 @@ export function labelsAt(parsed, tMs) {
 
 /** Read this session's log NOW (never cached) and return its resolver. */
 export async function resolveJob(sessionId) {
-	let parsed;
-	try {
-		parsed = parseJobLog(await readFile(jobLogPath(sessionId), "utf-8"), sessionId);
-	} catch (err) {
-		parsed =
-			err?.code === "ENOENT" ? { state: "none" } : { state: "invalid", reason: "unreadable" };
+	const read = async () => {
+		try {
+			return parseJobLog(await readFile(jobLogPath(sessionId), "utf-8"), sessionId);
+		} catch (err) {
+			return err?.code === "ENOENT"
+				? { state: "none" }
+				: { state: "invalid", reason: "unreadable" };
+		}
+	};
+	let parsed = await read();
+	// A torn last line may be an append in flight on a filesystem that does not make a write
+	// atomic for readers: look once more after a short pause. If it is still torn, THIS call's
+	// job is unknown (`jobState: "invalid"`, a gap downstream). The file is never touched, and
+	// the next call reads it afresh, so a transient tear cannot poison the session.
+	if (parsed.state === "invalid" && parsed.reason === TORN_REASON) {
+		await sleep(TORN_RECHECK_MS);
+		parsed = await read();
 	}
 	return {
 		parsed,
@@ -192,154 +201,14 @@ export async function resolveJob(sessionId) {
 	};
 }
 
-// ── The lock ──
-
-function pidAlive(pid) {
-	if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (err) {
-		return err?.code === "EPERM";
-	}
-}
-
-/**
- * How long a lock whose content cannot be read may exist before it is broken. A lock is
- * created WITH its content (below), so an unreadable one is not a writer mid-way: it is
- * corruption, or a lock from a filesystem without hard links.
- */
-export const UNFINISHED_LOCK_MS = 2_000;
-
-/**
- * Break a lock, but ONLY when its holder is provably DEAD (`kill(pid, 0)` says no such
- * process), never by age: a slow writer on a loaded host is alive, and breaking its lock
- * would put two writers inside read-validate-append. (Declared residual: a dead holder's pid
- * reused by an unrelated live process keeps the lock until that process exits.)
- *
- * Breaking is SERIALIZED by an O_EXCL sentinel around the re-read and the unlink, and a lock
- * is only ever unlinked if it is still the very one judged (every lock carries a unique
- * token). `hooks.beforeUnlink` is a test seam between the re-read and the unlink.
- */
-export async function breakIfStale(lock, hooks = {}) {
-	let text;
-	let mtimeMs;
-	try {
-		text = await readFile(lock, "utf-8");
-		mtimeMs = (await stat(lock)).mtimeMs;
-	} catch {
-		return; // gone already: the next attempt takes it
-	}
-	let holder = null;
-	try {
-		holder = JSON.parse(text);
-	} catch {
-		// unreadable: judged by age below
-	}
-	const complete =
-		holder !== null && Number.isFinite(holder.pid) && typeof holder.token === "string";
-	const stale = complete ? !pidAlive(holder.pid) : Date.now() - mtimeMs > UNFINISHED_LOCK_MS;
-	if (!stale) return;
-	const breaking = `${lock}.breaking`;
-	let sentinel;
-	try {
-		sentinel = await open(
-			breaking,
-			constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
-			0o600,
-		);
-	} catch (err) {
-		if (err?.code === "EEXIST") {
-			// Another breaker is at it. One that died holding the sentinel is cleared by age.
-			try {
-				if (Date.now() - (await stat(breaking)).mtimeMs > LOCK_STALE_MS) await unlink(breaking);
-			} catch {
-				// gone already
-			}
-		}
-		return;
-	}
-	try {
-		// Re-read under the sentinel: break only the lock we judged, never one taken since.
-		const again = await readFile(lock, "utf-8");
-		await hooks.beforeUnlink?.();
-		if (again === text) await unlink(lock);
-	} catch {
-		// raced: fine
-	} finally {
-		await sentinel.close().catch(() => {});
-		await unlink(breaking).catch(() => {});
-	}
-}
-
-/** The lock's content: written to a private file first, then linked into place whole. */
-async function takeLock(lock, token) {
-	const tmp = `${lock}.${process.pid}.${token}.tmp`;
-	await writeFile(tmp, JSON.stringify({ pid: process.pid, ts: Date.now(), token }), {
-		mode: 0o600,
-		flag: "wx",
-	});
-	try {
-		// link(2) never replaces a name and carries the content: the lock never exists empty.
-		await link(tmp, lock);
-		return true;
-	} catch (err) {
-		if (err?.code === "EEXIST") return false;
-		if (LINKLESS.has(err?.code)) {
-			// A filesystem without hard links: an exclusive create (content follows).
-			try {
-				const handle = await open(
-					lock,
-					constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
-					0o600,
-				);
-				await handle.writeFile(readFileSync(tmp, "utf-8"));
-				await handle.close();
-				return true;
-			} catch (e) {
-				if (e?.code === "EEXIST") return false;
-				throw e;
-			}
-		}
-		throw err;
-	} finally {
-		await unlink(tmp).catch(() => {});
-	}
-}
-
-/**
- * Run `fn` holding `<log>.lock`, for read-validate-append: the validation and the monotonic
- * `ts` need ONE writer at a time (a single O_APPEND write is atomic by itself, but it does not
- * order timestamps or truncate an orphaned tail). At most one holder: the lock is taken
- * atomically with its content, broken only when its holder is dead, and released only if it is
- * still THIS holder's (the token).
- */
-export async function withLock(log, fn, { maxWaitMs = 5_000 } = {}) {
-	const lock = `${log}.lock`;
-	const token = randomBytes(8).toString("hex");
-	const deadline = Date.now() + maxWaitMs;
-	for (;;) {
-		if (await takeLock(lock, token)) break;
-		await breakIfStale(lock);
-		if (Date.now() > deadline) {
-			// The message names the lock, an operator's path: it is the CLI's job to keep that out of
-			// a terminal (it prints only the code).
-			throw Object.assign(new Error(`the job log's lock is held: ${lock}`), { code: "ELOCKED" });
-		}
-		await sleep(10 + Math.floor(Math.random() * 15));
-	}
-	try {
-		return await fn();
-	} finally {
-		// Release only a lock that is still ours. Nobody breaks a live holder's lock, so this
-		// is belt and braces: it can never remove a successor's.
-		try {
-			if (JSON.parse(await readFile(lock, "utf-8"))?.token === token) await unlink(lock);
-		} catch {
-			// gone or unreadable: nothing of ours to release
-		}
-	}
-}
+// ── Writing: ONE append of ONE complete line, no lock ──
+//
+// Every writer appends a single small line with one `write` to a file opened O_APPEND: POSIX
+// places each such write at the end of the file atomically on a local filesystem, so two
+// concurrent writers interleave WHOLE lines and never bytes. There is no lock, no sentinel and
+// no age rule to get wrong. Order is the line's POSITION in the file (see `parseJobLog`), not
+// its clock. The reader is the authority on validity, and nothing here repairs a log.
+// (Declared residual: a non-local filesystem, e.g. NFS, where O_APPEND is not atomic.)
 
 async function readParsed(log, sessionId) {
 	try {
@@ -351,57 +220,71 @@ async function readParsed(log, sessionId) {
 	}
 }
 
-function appendLine(log, rec) {
-	// O_APPEND, 0600, fsync'd: a reader never sees a half-line as a whole one.
-	const fd = openSync(log, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600);
-	try {
-		writeSync(fd, `${JSON.stringify(rec)}\n`);
-		fsyncSync(fd);
-	} finally {
-		closeSync(fd);
-	}
+/** Append `rec` as one complete line, one write, fsync'd. */
+async function appendLine(log, rec) {
+	await appendFile(log, `${JSON.stringify(rec)}\n`, { flag: "a", mode: 0o600 });
 }
 
 /**
- * SessionStart's write. `startup`, `clear` and `fork` mint a NEW session id, so the
- * log is absent and gets its `session-start`. `resume` and `compact` keep an
- * existing id: they write NOTHING, so neither ever ends or invalidates an open job.
- * Returns what it did.
+ * SessionStart's write. `startup`, `clear` and `fork` mint a NEW session id, so the log is
+ * absent and gets its `session-start`: created O_EXCL, so exactly one creator wins, and the
+ * line is written by that creator in one write. `resume` and `compact` keep an existing id:
+ * they write NOTHING, so neither ever ends or invalidates an open job. Returns what it did.
  */
 export async function writeSessionStart(sessionId, source) {
 	if (!["startup", "clear", "fork"].includes(source)) return "skipped";
 	if (typeof sessionId !== "string" || sessionId === "") return "skipped";
 	const log = jobLogPath(sessionId);
 	await mkdir(jobsDir(), { recursive: true, mode: 0o700 });
-	return withLock(log, async () => {
-		const parsed = await readParsed(log, sessionId);
+	let handle;
+	try {
+		handle = await open(
+			log,
+			constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_APPEND,
+			0o600,
+		);
+	} catch (err) {
 		// A new id has no log. One that does (impossible for a new id) is left alone.
-		if (!parsed.absent) return "present";
-		appendLine(log, {
-			sid: sessionId,
-			ts: new Date(Date.now()).toISOString(),
-			op: "session-start",
-			job: null,
-		});
-		return "written";
-	});
+		if (err?.code === "EEXIST") return "present";
+		throw err;
+	}
+	try {
+		await handle.write(
+			`${JSON.stringify({
+				sid: sessionId,
+				ts: new Date(Date.now()).toISOString(),
+				op: "session-start",
+				job: null,
+			})}\n`,
+		);
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	return "written";
 }
 
 /**
- * The CLI's write. The log must ALREADY exist with the plugin's `session-start` for
- * this session id: the CLI never mints one, because a log minted for an id the plugin
- * never started is exactly the resume-without-id file this refuses.
- *
- * It POLLS WITHOUT THE LOCK (the SessionStart writer takes the same lock, so holding
- * it while waiting would block the very writer it waits for), then takes the lock only
- * for the final re-verify and append. Returns { ok: true, ts } or { ok: false, reason }.
+ * The CLI's write. The log must ALREADY exist with the plugin's `session-start` for this
+ * session id: the CLI never mints one, because a log minted for an id the plugin never
+ * started is exactly the resume-without-id file this refuses. It polls for that line (a
+ * friendly refusal; nothing correct depends on it), then appends ONE line. Returns
+ * { ok: true, ts } or { ok: false, reason }.
  */
 export async function appendJobOp(sessionId, op, job, { waitMs = DEFAULT_WAIT_MS } = {}) {
 	const log = jobLogPath(sessionId);
 	const deadline = Date.now() + waitMs;
+	let seen;
+	let rechecked = false;
 	for (;;) {
-		const seen = await readParsed(log, sessionId).catch(() => ({ state: "none" }));
+		seen = await readParsed(log, sessionId).catch(() => ({ state: "none" }));
 		if (seen.state === "ok") break;
+		if (seen.state === "invalid" && seen.reason === TORN_REASON && !rechecked) {
+			// Possibly another writer's append in flight: look once more before refusing.
+			rechecked = true;
+			await sleep(TORN_RECHECK_MS);
+			continue;
+		}
 		if (seen.state === "invalid")
 			return { ok: false, reason: `the job log is invalid (${seen.reason})` };
 		if (Date.now() >= deadline) {
@@ -413,25 +296,11 @@ export async function appendJobOp(sessionId, op, job, { waitMs = DEFAULT_WAIT_MS
 		}
 		await sleep(Math.min(POLL_MS, Math.max(1, deadline - Date.now())));
 	}
-	return withLock(log, async () => {
-		const parsed = await readParsed(log, sessionId);
-		if (parsed.state !== "ok") {
-			return { ok: false, reason: "the job log changed while it was being written" };
-		}
-		// An unterminated tail is a fragment a crashed writer left: nothing acknowledged it,
-		// and (holding the lock) no live writer is producing it. Cut it off, or this line
-		// would be glued onto it into a malformed COMPLETE line that invalidates the session.
-		if (!parsed.text.endsWith("\n")) {
-			const keep = Buffer.byteLength(parsed.text.slice(0, parsed.text.lastIndexOf("\n") + 1));
-			await truncate(log, keep);
-		}
-		const open = jobAtEvents(parsed.events, Number.POSITIVE_INFINITY);
-		if (op === "stop" && open === null) return { ok: true, noop: true, ts: parsed.last.ts };
-		const tsMs = Math.max(Date.now(), parsed.last.tsMs);
-		const ts = new Date(tsMs).toISOString();
-		appendLine(log, { sid: sessionId, ts, op, job: op === "start" ? job : null });
-		return { ok: true, ts, replaced: op === "start" && open !== null ? open : null };
-	});
+	const open = jobAtEvents(seen.events, Number.POSITIVE_INFINITY);
+	if (op === "stop" && open === null) return { ok: true, noop: true, ts: seen.last.ts };
+	const ts = new Date(Date.now()).toISOString();
+	await appendLine(log, { sid: sessionId, ts, op, job: op === "start" ? job : null });
+	return { ok: true, ts, replaced: op === "start" && open !== null ? open : null };
 }
 
 // ── Coverage: what the evidence does NOT cover ──

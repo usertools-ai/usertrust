@@ -161,8 +161,12 @@ describe("test 3 — stale, foreign or corrupt state is invalid, never a guess",
 		["no session-start first", op(SID, T0, "start", "job-a")],
 		["interior corruption", `${start(SID, T0)}not json\n${op(SID, T0 + 5, "start", "job-a")}`],
 		[
-			"out-of-order lines",
-			start(SID, T0) + op(SID, T0 + 9, "start", "job-a") + op(SID, T0 + 1, "stop", null),
+			"a PARTIAL line followed by more lines",
+			`${start(SID, T0)}{"sid":"sess-1","ts":\n${op(SID, T0 + 5, "start", "job-a")}`,
+		],
+		[
+			"a torn last line (no newline)",
+			`${start(SID, T0)}${op(SID, T0 + 1, "start", "job-a")}{"sid":"sess-1","ts":"2026`,
 		],
 		["an unknown op", start(SID, T0) + op(SID, T0 + 1, "pause", null)],
 		["a bad job id", start(SID, T0) + op(SID, T0 + 1, "start", "bad id")],
@@ -188,65 +192,101 @@ describe("test 3 — stale, foreign or corrupt state is invalid, never a guess",
 	});
 });
 
-describe("test 4 — a torn tail is not corruption", () => {
-	it("an unterminated final line is ignored", async () => {
+describe("test 4 — a torn tail is INVALID, never ignored and never repaired", () => {
+	it("an unterminated final line makes the log invalid: the job is unknown, not the previous one", async () => {
 		await writeLog(
 			`${start(SID, T0)}${op(SID, T0 + 1, "start", "job-a")}{"sid":"sess-1","ts":"2026`,
 		);
 		const { resolveJob } = await lib();
-		expect((await resolveJob(SID)).at(T0 + 100)).toEqual({ job: "job-a" });
+		// mutant: the torn line is silently dropped → job-a
+		expect((await resolveJob(SID)).at(T0 + 100)).toEqual({ jobState: "invalid" });
 	});
-	it("only a torn first line is 'not yet written'", async () => {
+	it("a torn first line is invalid too", async () => {
 		await writeLog('{"sid":"sess-1","ts":');
 		const { resolveJob } = await lib();
-		expect((await resolveJob(SID)).at(T0)).toEqual({});
+		expect((await resolveJob(SID)).at(T0)).toEqual({ jobState: "invalid" });
+	});
+	it("an append IN FLIGHT: the hook looks again, and a line completed meanwhile is read", async () => {
+		const whole = op(SID, T0 + 1, "start", "job-a");
+		await writeLog(start(SID, T0) + whole.slice(0, 20));
+		const { resolveJob } = await lib();
+		const finishing = new Promise<void>((resolve) => {
+			setTimeout(() => {
+				void (async () => {
+					await (await import("node:fs/promises")).appendFile(logFile(), whole.slice(20));
+					resolve();
+				})();
+			}, 10);
+		});
+		const resolved = await resolveJob(SID);
+		await finishing;
+		// mutant: no second look → the call's job is unknown
+		expect(resolved.at(T0 + 100)).toEqual({ job: "job-a" });
+		// and a tear that persists leaves THIS call unknown, never the file changed
+		await writeLog(start(SID, T0) + whole.slice(0, 20));
+		const before = await readFile(logFile(), "utf-8");
+		expect((await (await lib()).resolveJob(SID)).at(T0 + 100)).toEqual({ jobState: "invalid" });
+		expect(await readFile(logFile(), "utf-8")).toBe(before);
 	});
 });
 
-describe("test 5 — the lock", () => {
-	it("a writer WAITS for a live holder and appends after it lets go", async () => {
-		await writeLog(start(SID, T0));
-		await writeFile(
-			`${logFile()}.lock`,
-			JSON.stringify({ pid: process.pid, ts: Date.now(), token: "held" }),
-		);
-		const { appendJobOp } = await lib();
-		let done = false;
-		const pending = appendJobOp(SID, "start", "job-a", { waitMs: 1000 }).then((r) => {
-			done = true;
-			return r;
-		});
-		await new Promise((r) => setTimeout(r, 400));
-		expect(done).toBe(false);
-		expect((await readFile(logFile(), "utf-8")).split("\n").filter(Boolean)).toHaveLength(1);
-		await (await import("node:fs/promises")).unlink(`${logFile()}.lock`);
-		expect((await pending).ok).toBe(true);
-		expect((await readFile(logFile(), "utf-8")).split("\n").filter(Boolean)).toHaveLength(2);
+describe("ORDER IS POSITION (B-99)", () => {
+	it("a line stamped EARLIER than the line before it does not backdate: its effective time is clamped", async () => {
+		// start@T0+500 sits AFTER session-start@T0+1000 in the file: it takes effect at +1000.
+		await writeLog(start(SID, T0 + 1000) + op(SID, T0 + 500, "start", "job-a"));
+		const { resolveJob, parseJobLog } = await lib();
+		expect(parseJobLog(await readFile(logFile(), "utf-8"), SID).state).toBe("ok");
+		const r = await resolveJob(SID);
+		// mutant: ordered by ts → job-a is open from +500
+		expect(r.at(T0 + 700)).toEqual({});
+		expect(r.at(T0 + 1001)).toEqual({ job: "job-a" });
 	});
-	it("a lock whose holder is dead is broken", async () => {
-		await writeLog(start(SID, T0));
-		await writeFile(
-			`${logFile()}.lock`,
-			JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now(), token: "dead" }),
+	it("a later line with an earlier ts never reorders a stop before the start that precedes it", async () => {
+		await writeLog(
+			start(SID, T0) + op(SID, T0 + 10, "start", "job-a") + op(SID, T0 + 5, "stop", null),
 		);
-		const { appendJobOp } = await lib();
-		expect((await appendJobOp(SID, "start", "job-a", { waitMs: 1000 })).ok).toBe(true);
+		const { resolveJob } = await lib();
+		const r = await resolveJob(SID);
+		// The stop is effectively at +10, AFTER the start it follows: nothing is open after.
+		// mutant: ordered by ts, the stop (+5) runs before the start (+10) → job-a is left open
+		expect(r.at(T0 + 11)).toEqual({});
 	});
-	it("a lock is NEVER broken by age while its holder is alive (a slow writer on a loaded host is alive)", async () => {
-		await writeLog(start(SID, T0));
-		const lock = `${logFile()}.lock`;
-		await writeFile(
-			lock,
-			JSON.stringify({ pid: process.pid, ts: Date.now() - 3_600_000, token: "slow" }),
-		);
-		const { breakIfStale } = (await lib()) as unknown as {
-			breakIfStale(lock: string): Promise<void>;
+	it("a stop stamped before the start it follows makes an empty interval, not a backwards one", async () => {
+		const text =
+			start(SID, T0) + op(SID, T0 + 1000, "start", "job-a") + op(SID, T0 + 500, "stop", null);
+		const { parseJobLog, intervalsOf } = (await lib()) as unknown as {
+			parseJobLog(t: string, s: string): { state: string };
+			intervalsOf(p: unknown, job: string): Array<[number, number]>;
 		};
-		await breakIfStale(lock);
-		// mutant: a lock older than 10 s is broken even for a live pid
-		expect(await readFile(lock, "utf-8")).toContain("slow");
+		// mutant: no clamp → [T0+1000, T0+500], an interval that ends before it begins
+		expect(intervalsOf(parseJobLog(text, SID), "job-a")).toEqual([[T0 + 1000, T0 + 1000]]);
 	});
-	it("simultaneous CLI starts leave a monotonic, valid log", async () => {
+	it("reading never modifies a log: resolve and coverage leave the bytes alone", async () => {
+		const torn = `${start(SID, T0)}${op(SID, T0 + 1, "start", "job-a")}{"torn`;
+		await writeLog(torn);
+		const { resolveJob, jobCoverage } = await lib();
+		await resolveJob(SID);
+		jobCoverage({ job: "job-a", logs: { [SID]: torn }, records: [] });
+		// mutant: the reader truncates the torn tail
+		expect(await readFile(logFile(), "utf-8")).toBe(torn);
+	});
+});
+
+describe("test 5 — concurrent appenders: the verdict is valid or flagged, never silently wrong", () => {
+	it("20 in-process appenders leave every line whole, in a valid log", async () => {
+		await writeLog(start(SID, Date.now()));
+		const { appendJobOp, parseJobLog } = await lib();
+		const results = await Promise.all(
+			Array.from({ length: 20 }, (_, i) => appendJobOp(SID, "start", `job-${i}`, { waitMs: 3000 })),
+		);
+		expect(results.every((r) => r.ok)).toBe(true);
+		const text = await readFile(logFile(), "utf-8");
+		for (const l of text.split("\n").filter(Boolean)) expect(() => JSON.parse(l)).not.toThrow();
+		const parsed = parseJobLog(text, SID);
+		expect(parsed.state).toBe("ok");
+		if (parsed.state === "ok") expect(parsed.events).toHaveLength(21);
+	});
+	it("8 simultaneous CLI starts: every line whole, a valid log", async () => {
 		await writeLog(start(SID, Date.now()));
 		const ids = Array.from({ length: 8 }, (_, i) => `job-${i}`);
 		const results = await Promise.all(
@@ -259,6 +299,16 @@ describe("test 5 — the lock", () => {
 		const parsed = parseJobLog(await readFile(logFile(), "utf-8"), SID);
 		expect(parsed.state).toBe("ok");
 		if (parsed.state === "ok") expect(parsed.events).toHaveLength(1 + ids.length);
+	});
+	it("a log that DID get damaged is a named gap in coverage, not a quiet figure", async () => {
+		const { jobCoverage } = await lib();
+		const damaged = `${start(SID, T0)}${op(SID, T0 + 1000, "start", "bug-1")}{"sid":"sess-1","ts":\n${op(SID, T0 + 5000, "stop", null)}`;
+		const r = jobCoverage({ job: "bug-1", logs: { [SID]: damaged }, records: [] });
+		expect(gapText(r)).toContain("the job log is invalid");
+		const torn = `${start(SID, T0)}${op(SID, T0 + 1000, "start", "bug-1")}{"torn`;
+		expect(gapText(jobCoverage({ job: "bug-1", logs: { [SID]: torn }, records: [] }))).toContain(
+			"the job log is invalid (the last line is torn",
+		);
 	});
 });
 
@@ -1443,161 +1493,95 @@ describe("hot paths cannot be broken by a long backlog (B-86)", () => {
 	});
 });
 
-describe("stale-lock breaking is serialized (B-92)", () => {
-	it("a breaker that finds another breaker's sentinel leaves the lock alone", async () => {
-		await writeLog(start(SID, T0));
-		await writeFile(
-			`${logFile()}.lock`,
-			JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now(), token: "dead" }),
-		);
-		await writeFile(`${logFile()}.lock.breaking`, "");
-		const { breakIfStale } = (await lib()) as unknown as {
-			breakIfStale(lock: string): Promise<void>;
-		};
-		await breakIfStale(`${logFile()}.lock`);
-		// mutant: no sentinel → the stale lock is unlinked while another breaker is mid-way
-		expect(await readFile(`${logFile()}.lock`, "utf-8")).toContain("pid");
-	});
-	it("a sentinel left by a breaker that died is cleared by age, then the lock can be broken", async () => {
-		await writeLog(start(SID, T0));
-		await writeFile(
-			`${logFile()}.lock`,
-			JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now(), token: "dead" }),
-		);
-		await writeFile(`${logFile()}.lock.breaking`, "");
-		const old = new Date(Date.now() - 60_000);
-		await utimes(`${logFile()}.lock.breaking`, old, old);
-		const { breakIfStale } = (await lib()) as unknown as {
-			breakIfStale(lock: string): Promise<void>;
-		};
-		await breakIfStale(`${logFile()}.lock`); // clears the dead sentinel
-		await breakIfStale(`${logFile()}.lock`); // now breaks the lock
-		await expect(readFile(`${logFile()}.lock`, "utf-8")).rejects.toThrow();
-		await expect(readFile(`${logFile()}.lock.breaking`, "utf-8")).rejects.toThrow();
-	});
-	it("two breakers of one dead lock: the second is turned away mid-break, and a fresh lock taken after survives a late breaker", async () => {
-		await writeLog(start(SID, T0));
-		const lock = `${logFile()}.lock`;
-		await writeFile(lock, JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now(), token: "dead" }));
-		const { breakIfStale } = (await lib()) as unknown as {
-			breakIfStale(lock: string, hooks?: { beforeUnlink?: () => Promise<void> }): Promise<void>;
-		};
-		let release = () => {};
-		const paused = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		let entered = () => {};
-		const inside = new Promise<void>((resolve) => {
-			entered = resolve;
-		});
-		// B1 has judged the lock dead and re-read it, and stands between the re-read and the unlink.
-		const b1 = breakIfStale(lock, {
-			beforeUnlink: async () => {
-				entered();
-				await paused;
-			},
-		});
-		await inside;
-		await breakIfStale(lock); // B2 arrives now
-		// mutant: no sentinel → B2 passes the re-read too and unlinks the lock right here
-		expect(await readFile(lock, "utf-8")).toContain("dead");
-		release();
-		await b1;
-		await expect(readFile(lock, "utf-8")).rejects.toThrow(); // broken once
-		// A takes a fresh lock; a breaker that judged the old one earlier must not touch it.
-		await writeFile(lock, JSON.stringify({ pid: process.pid, ts: Date.now(), token: "fresh" }));
-		await breakIfStale(lock);
-		expect(await readFile(lock, "utf-8")).toContain("fresh");
-	});
-	it("a writer releases only a lock that still carries ITS token, never its successor's", async () => {
-		await writeLog(start(SID, T0));
-		const lock = `${logFile()}.lock`;
-		const { withLock } = (await lib()) as unknown as {
-			withLock(log: string, fn: () => Promise<void>): Promise<void>;
-		};
-		await withLock(logFile(), async () => {
-			// While this writer holds it, the lock is replaced (as if broken and re-taken).
-			await writeFile(
-				lock,
-				JSON.stringify({ pid: process.pid, ts: Date.now(), token: "successor" }),
-			);
-		});
-		// mutant: an unconditional unlink removes the successor's lock
-		expect(await readFile(lock, "utf-8")).toContain("successor");
-	});
-	it("a lock exists with its content from the first instant, and no temp file is left", async () => {
-		await writeLog(start(SID, T0));
-		const { withLock } = (await lib()) as unknown as {
-			withLock(log: string, fn: () => Promise<void>): Promise<void>;
-		};
-		await withLock(logFile(), async () => {
-			const held = JSON.parse(await readFile(`${logFile()}.lock`, "utf-8"));
-			expect(held).toMatchObject({ pid: process.pid });
-			expect(typeof held.token).toBe("string");
-		});
-		expect((await readdir(join(state, "jobs"))).filter((n) => n.endsWith(".tmp"))).toEqual([]);
-		await expect(readFile(`${logFile()}.lock`, "utf-8")).rejects.toThrow();
-	});
-	it("many writers racing over one dead lock all append exactly once, into a valid log (a smoke test: the deterministic ones above carry the claim)", async () => {
-		await writeLog(start(SID, Date.now()));
-		await writeFile(
-			`${logFile()}.lock`,
-			JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now(), token: "dead" }),
-		);
-		const { appendJobOp, parseJobLog } = await lib();
-		const results = await Promise.all(
-			Array.from({ length: 8 }, (_, i) => appendJobOp(SID, "start", `job-${i}`, { waitMs: 3000 })),
-		);
-		expect(results.every((r) => r.ok)).toBe(true);
-		const parsed = parseJobLog(await readFile(logFile(), "utf-8"), SID);
-		expect(parsed.state).toBe("ok");
-		if (parsed.state === "ok") expect(parsed.events).toHaveLength(9);
-	});
+describe("usertrust-job start/stop — a write failure is reported through the scrubber (B-93)", () => {
+	// A read-only log does not stop root: SKIPPED there, never vacuously passed.
+	it.skipIf(process.getuid?.() === 0)(
+		"an unwritable log under a state dir holding ESC and C1: exit 1, no stack, no raw control bytes",
+		async () => {
+			const hostile = join(state, "st\u001b[31mRED\u009b");
+			const jobs = join(hostile, "jobs");
+			await mkdir(jobs, { recursive: true });
+			await writeFile(join(jobs, "s1.jsonl"), start("s1", Date.now() - 5000));
+			await chmod(join(jobs, "s1.jsonl"), 0o444);
+			const r = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+				const inherited = Object.fromEntries(
+					Object.entries(process.env).filter(
+						([k]) => !k.startsWith("UT_") && k !== "CLAUDE_CODE_SESSION_ID",
+					),
+				);
+				const child = spawn(process.execPath, [CLI, "start", "job-a"], {
+					env: {
+						...inherited,
+						UT_CC_STATE_DIR: hostile,
+						CLAUDE_CODE_SESSION_ID: "s1",
+						UT_CC_JOB_WAIT_MS: "0",
+					},
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+				let stdout = "";
+				let stderr = "";
+				child.stdout.on("data", (c) => {
+					stdout += c;
+				});
+				child.stderr.on("data", (c) => {
+					stderr += c;
+				});
+				child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+			});
+			// Unconditional: a regression that swallows the failure and exits 0 must fail here.
+			expect(r.code).toBe(1);
+			expect(r.stderr).toContain("usertrust-job: failed (EACCES)");
+			expect(r.stderr).not.toContain("node:internal");
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting none reach the terminal is the point
+			expect(r.stderr).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+			expect(await readFile(join(jobs, "s1.jsonl"), "utf-8")).not.toContain("job-a");
+		},
+		30_000,
+	);
 });
 
-describe("usertrust-job start/stop — a write failure is reported through the scrubber (B-93)", () => {
-	it("a lock that cannot be taken, under a state dir holding ESC and C1: exit 1, no stack, no raw control bytes", async () => {
-		const hostile = join(state, "st\u001b[31mRED\u009b");
-		const jobs = join(hostile, "jobs");
-		await mkdir(jobs, { recursive: true });
-		await writeFile(join(jobs, "s1.jsonl"), start("s1", Date.now() - 5000));
-		// A DIRECTORY where the lock file goes: the O_EXCL open fails EEXIST and nothing can
-		// break it, for ANY uid (a read-only dir would not stop root).
-		await mkdir(join(jobs, "s1.jsonl.lock"));
-		const r = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
-			const inherited = Object.fromEntries(
-				Object.entries(process.env).filter(
-					([k]) => !k.startsWith("UT_") && k !== "CLAUDE_CODE_SESSION_ID",
-				),
-			);
-			const child = spawn(process.execPath, [CLI, "start", "job-a"], {
-				env: {
-					...inherited,
-					UT_CC_STATE_DIR: hostile,
-					CLAUDE_CODE_SESSION_ID: "s1",
-					UT_CC_JOB_WAIT_MS: "0",
-				},
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-			let stdout = "";
-			let stderr = "";
-			child.stdout.on("data", (c) => {
-				stdout += c;
-			});
-			child.stderr.on("data", (c) => {
-				stderr += c;
-			});
-			child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+describe("capability.json is replaced atomically (B-100)", () => {
+	it("during a replace the reader sees the OLD content whole, never an empty or half-written file", async () => {
+		const target = join(state, "capability.json");
+		await writeFile(target, '{"a":true}');
+		const { writeFileAtomic } = (await import(pathToFileURL(join(HOOKS, "lib.mjs")).href)) as {
+			writeFileAtomic(
+				path: string,
+				text: string,
+				opts?: { beforeCommit?: () => Promise<void> },
+			): Promise<void>;
+		};
+		let during = "";
+		await writeFileAtomic(target, '{"a":false,"b":true}', {
+			beforeCommit: async () => {
+				during = await readFile(target, "utf-8");
+			},
 		});
-		// Unconditional: a regression that swallows the failure and exits 0 must fail here.
-		expect(r.code).toBe(1);
-		expect(r.stderr).toContain("usertrust-job: failed (ELOCKED)");
-		expect(r.stderr).not.toContain("node:internal");
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting none reach the terminal is the point
-		expect(r.stderr).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
-		// and nothing was recorded
-		expect(await readFile(join(jobs, "s1.jsonl"), "utf-8")).not.toContain("job-a");
-	}, 30_000);
+		// mutant: written in place → the file is already the new (or a truncated) content here
+		expect(during).toBe('{"a":true}');
+		expect(await readFile(target, "utf-8")).toBe('{"a":false,"b":true}');
+		expect((await readdir(state)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+	});
+	it("a failed replace leaves the old file and no temp file", async () => {
+		const target = join(state, "capability.json");
+		await writeFile(target, '{"a":true}');
+		const { writeFileAtomic } = (await import(pathToFileURL(join(HOOKS, "lib.mjs")).href)) as {
+			writeFileAtomic(
+				path: string,
+				text: string,
+				opts?: { beforeCommit?: () => Promise<void> },
+			): Promise<void>;
+		};
+		await expect(
+			writeFileAtomic(target, "{}", {
+				beforeCommit: async () => {
+					throw new Error("stop");
+				},
+			}),
+		).rejects.toThrow("stop");
+		expect(await readFile(target, "utf-8")).toBe('{"a":true}');
+		expect((await readdir(state)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+	});
 });
 
 describe("B-96 and B-88's remaining arms", () => {
@@ -1674,38 +1658,5 @@ describe("B-96 and B-88's remaining arms", () => {
 		});
 		// mutant: the missing-usageFrom arm is skipped (`capable` → false)
 		expect(gapText(r)).toContain("a released hold of no known job, usage unconfirmed");
-	});
-});
-
-describe("the lock and the log tail — review hardening", () => {
-	it("a lock whose metadata was never written is broken once it is old enough", async () => {
-		await writeLog(start(SID, T0));
-		await writeFile(`${logFile()}.lock`, "");
-		const old = new Date(Date.now() - 60_000);
-		await utimes(`${logFile()}.lock`, old, old);
-		const { appendJobOp } = await lib();
-		expect((await appendJobOp(SID, "start", "job-a", { waitMs: 1000 })).ok).toBe(true);
-	});
-	it("...but not while it is still being written (a fresh empty lock waits)", async () => {
-		await writeLog(start(SID, T0));
-		await writeFile(`${logFile()}.lock`, "");
-		const { appendJobOp } = await lib();
-		let done = false;
-		const pending = appendJobOp(SID, "start", "job-a", { waitMs: 1000 }).then((r) => {
-			done = true;
-			return r;
-		});
-		await new Promise((r) => setTimeout(r, 300));
-		expect(done).toBe(false);
-		expect((await pending).ok).toBe(true); // after the 2 s grace it is broken
-	}, 10_000);
-	it("an orphaned partial line is cut off before the append, so the log stays valid", async () => {
-		await writeLog(`${start(SID, T0)}{"sid":"sess-1","ts":"2026-01-01T00:0`);
-		const { appendJobOp, parseJobLog } = await lib();
-		expect((await appendJobOp(SID, "start", "job-a", { waitMs: 1000 })).ok).toBe(true);
-		const parsed = parseJobLog(await readFile(logFile(), "utf-8"), SID);
-		expect(parsed.state).toBe("ok");
-		if (parsed.state === "ok")
-			expect(parsed.events.map((e) => e.op)).toEqual(["session-start", "start"]);
 	});
 });

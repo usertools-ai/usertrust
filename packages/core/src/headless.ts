@@ -1135,7 +1135,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// before destroy()'s `flush()` and `release()`. One still here at destroy()'s
 	// deadline is taken out and recorded by destroy() itself (the capture is kept for
 	// its actor), and that terminal, finding itself gone, writes no second record.
-	const inFlight = new Map<string, AuthorizationCapture>();
+	// A terminal in flight, with the release class it was given (if any): destroy() records the
+	// hold it takes from here, and that record must carry what the release stated.
+	const inFlight = new Map<string, AuthorizationCapture & { releaseClass?: ReleaseClass }>();
 
 	// Finding-2 (RECON #4): serialized, monotonic spend-ledger persistence.
 	// budgetSpent only ever increases (settle adds actualCost >= 0; authorize and
@@ -2208,7 +2210,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				unpostedHolds.delete(transferId);
 			}
 			// Claimed, and in flight until its record starts (see abort()).
-			inFlight.set(transferId, capture);
+			inFlight.set(transferId, releaseClass === undefined ? capture : { ...capture, releaseClass });
 			try {
 				// Exactly what abort() gives back, the same way: only the session wallet's own
 				// in-flight exposure. An attributed hold never added to it.
@@ -2321,6 +2323,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							transferId: txId,
 							reason: "governor destroyed (terminal still in flight: its void had not completed)",
 							source: "headless",
+							...(capture.releaseClass === undefined ? {} : { releaseClass: capture.releaseClass }),
 							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
 							...(capture.principal === undefined ? {} : { principal: capture.principal }),
 							...capture.jobAudit,
