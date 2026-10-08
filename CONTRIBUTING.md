@@ -33,6 +33,10 @@ All contributions are made under the [Apache License 2.0](./LICENSE). By submitt
 5. Ensure lint passes: `npm run lint`
 6. Open a pull request against `master`
 
+Don't commit agent config. A pull request that adds, edits or removes Claude Code's `.claude/`,
+an `.mcp.json`, or `.grok/` or `.codex/`, at any depth, fails the `agent-config` check: it would
+run on the machine of anyone who opens the checkout in a coding agent.
+
 ## Code of conduct
 
 This project follows the [Contributor Covenant v2.1](./CODE_OF_CONDUCT.md). By participating, you agree to uphold these standards.

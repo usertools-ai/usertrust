@@ -1,2 +1,7 @@
 # All changes require review
 * @c-1k
+
+# CI, and the agent-config check's launcher and allowlist (ci.yml's `agent-config` job): a
+# change to any of them changes what every pull request is checked against.
+/.github/ @c-1k
+/.github/agent-config-allowlist.json @c-1k

@@ -1605,6 +1605,19 @@ avoid `git add -A` / `git add .`.
 
 All changes require review (`.github/CODEOWNERS`).
 
+**Agent config is refused (the `agent-config` check).** Agent config is what a coding agent
+runs, or obeys, when it opens a checkout: Claude Code's `.claude/`, an `.mcp.json`, and the Grok
+and Codex CLIs' `.grok/` and `.codex/`, at any depth, matched as a case-insensitive filesystem
+opens them.
+- No change may add, edit or remove agent config that `.github/agent-config-allowlist.json` does
+  not name. Here the allowlist is empty. An exact entry may pin its file's `sha256`.
+- A committed Claude Code settings file may hold only `$schema`, and `permissions.deny` /
+  `permissions.ask`. Any other key fails, including one this guard has never heard of.
+- The guard (`scripts/agent-config-guard.mjs`) and the allowlist are read from the BASE
+  (`.github/agent-config.sh`), so a change cannot allowlist itself. A widening merges on its own,
+  before the change that needs it.
+- Its tests: `node --test scripts/agent-config-guard.test.mjs`.
+
 ---
 
 ## What NOT to flag in code review
