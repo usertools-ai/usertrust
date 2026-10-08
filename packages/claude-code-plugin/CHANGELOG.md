@@ -7,6 +7,8 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-08
+
 ### Added
 
 - **Say which job a session is working on: `usertrust-job start <job-id>` / `stop`.** The job is recorded on every ledger record the session produces (`job`, plus `usageFrom` / `usageTo`, the window of USAGE the record covers), so one session that fixes five bugs can say what each cost. It needs a usertrust-server that lists `"job"` in `/v1/health` `capabilities`; against an older one nothing is sent and every body is what it was.
@@ -114,6 +116,38 @@ npm, and its version is its own: the `usertrust` packages and their
   `failOpen`, went ungoverned). Requests now go to the url's origin and path, for
   `UT_SERVER_URL` and a config file's `url` alike. A hold still records the url as
   written, so one recorded under any spelling is ended as before.
+
+- **A 1-hour cache write is priced at the 1-hour rate.** Anthropic bills a 1-hour
+  cache write at twice the base input rate and a 5-minute one at 1.25 times it. The
+  plugin sent only the write total, so the server priced every write at the 5-minute
+  rate, and a 1-hour write was under-priced by 37.5%.
+  - The transcript parser reads the 1-hour share
+    (`cache_creation.ephemeral_1h_input_tokens`), and a transcript settle carries
+    it as `cacheWrite1hTokens`, a subset of `cacheWriteTokens`, beside the total.
+    When a message's breakdown names only one TTL, the write it leaves unattributed
+    counts as 1-hour, the dearer rate.
+  - The share goes only to a server that lists `cache-write-1h` in `/v1/health`
+    `capabilities`. An older server would strip the key and bill the share at the
+    5-minute rate, so it gets the total alone, as before.
+  - While the server's capabilities are unknown (its health probe failed, and
+    failed again when retried), a settle that carries a 1-hour share waits for a
+    later settle point, rather than bill the share at the 5-minute rate for good. A
+    pending hold stays as it is, and a remainder stays unposted.
+
+### Known issues
+
+- **Configured sessions do not run on Windows yet** (see *Security*). A session
+  configured through the environment is unaffected.
+- **What an older version left behind carries no server or key:** a hold record
+  written before 1.4.1, and a settle that 1.4.1 or earlier left unresolved.
+  Outside a resumed call, such a record or settle is still settled or retried
+  through the current server and key, as before. Everything 1.5.0 writes carries
+  its binding, and is ended only through it (see *Security*). Tracked in
+  [#246](https://github.com/usertools-ai/usertrust/issues/246).
+- **If a settle fails and its release also fails, the old hold may stay live until
+  the server's sweep.** A later re-fire of the same call reserves a replacement,
+  double-counting the budget until then: an early refusal, never an overspend.
+  Tracked in [#248](https://github.com/usertools-ai/usertrust/issues/248).
 
 ## [1.4.1] - 2026-10-07
 
