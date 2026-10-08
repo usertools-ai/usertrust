@@ -85,6 +85,8 @@ let requests: Recorded[];
 let delayMs: number;
 /** What the fake server's /v1/health publishes: none, an older server, unless a test says. Null: health fails. */
 let capabilities: string[] | null;
+/** The next N /v1/health probes fail (503) before it answers `capabilities`: a TRANSIENT failure. */
+let healthFailures = 0;
 
 type Responder = (path: string, body: Record<string, unknown>) => { status: number; json: unknown };
 
@@ -163,6 +165,10 @@ async function health(
 	responder: Responder | { forwardTo: string; key: string },
 ): Promise<{ status: number; json: unknown }> {
 	if (typeof responder === "function") {
+		if (healthFailures > 0) {
+			healthFailures -= 1;
+			return { status: 503, json: { error: "unavailable" } };
+		}
 		return capabilities === null
 			? { status: 503, json: { error: "unavailable" } }
 			: { status: 200, json: { status: "ok", capabilities } };
@@ -325,6 +331,7 @@ beforeEach(async () => {
 	nextTransfer = 0;
 	delayMs = 0;
 	capabilities = [];
+	healthFailures = 0;
 });
 afterEach(async () => {
 	// The invariant a settle's 404 rests on (post-tool-use.mjs `settleEstimateHold`):
@@ -515,22 +522,54 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 			});
 		});
 
-		it.each([
-			["an older server (no `cache-write-1h`)", []],
-			["a server whose capabilities are unknown", null],
-		] as const)(
-			"%s never gets the share: it would strip the key and bill 1-hour writes at the 5-minute rate",
-			async (_server, published) => {
-				capabilities = published === null ? null : [...published];
-				await startServer(okResponder);
-				await writeMain(responseEntries("msg_a", SONNET, oneHour()));
-				await run("stop.mjs", stopInput());
-				expect(settles()).toHaveLength(1);
-				const body = settles()[0]?.body as Record<string, unknown>;
-				expect(body.cacheWriteTokens).toBe(400); // the total is still sent
-				expect(body).not.toHaveProperty("cacheWrite1hTokens");
-			},
-		);
+		it("an older server (no `cache-write-1h`) never gets the share: it would strip the key and bill 1-hour writes at the 5-minute rate", async () => {
+			capabilities = [];
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, oneHour()));
+			await run("stop.mjs", stopInput());
+			expect(settles()).toHaveLength(1);
+			const body = settles()[0]?.body as Record<string, unknown>;
+			expect(body.cacheWriteTokens).toBe(400); // the total is still sent
+			expect(body).not.toHaveProperty("cacheWrite1hTokens");
+		});
+
+		it("a server whose capabilities stay UNKNOWN is not an older server: a settle with a 1-hour share is deferred, not billed at the 5-minute rate", async () => {
+			capabilities = null;
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, oneHour()));
+			await run("stop.mjs", stopInput());
+			// Nothing was authorized or settled: the messages stay unposted for a later settle point.
+			expect(authorizes()).toHaveLength(0);
+			expect(settles()).toHaveLength(0);
+			// A group with NO 1-hour share (another model: groups are per model) does not need
+			// the capability and still settles.
+			await appendMain(responseEntries("msg_b", HAIKU, u(5, 6, 700, 80)));
+			await run("stop.mjs", stopInput());
+			expect(settles()).toHaveLength(1);
+			expect(settles()[0]?.body).toMatchObject({ cacheWriteTokens: 80 });
+			expect(settles()[0]?.body).not.toHaveProperty("cacheWrite1hTokens");
+		});
+
+		it("a WINDOWED hold whose settle finds the capabilities unknown is left unsettled, never billed at the 5-minute rate", async () => {
+			capabilities = null;
+			await startServer(okResponder);
+			// The hold carries msg_a, whose 1-hour share is already known when the hold is placed.
+			await writeMain(responseEntries("msg_a", SONNET, oneHour()));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			// Sending only the flat total would price those 1-hour tokens at the 5-minute rate for good.
+			expect(settles().filter((s) => s.body.inputTokens !== 0)).toHaveLength(0);
+		});
+
+		it("a TRANSIENT health failure is retried once, and the share then goes to a server that prices it", async () => {
+			capabilities = ["cache-write-1h"];
+			healthFailures = 1; // the first probe fails; the retry answers
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, oneHour()));
+			await run("stop.mjs", stopInput());
+			expect(settles()).toHaveLength(1);
+			expect(settles()[0]?.body).toMatchObject({ cacheWriteTokens: 400, cacheWrite1hTokens: 150 });
+		});
 
 		it("a PARTIAL breakdown (one TTL named) counts the unattributed remainder as 1-hour, as core does", async () => {
 			capabilities = ["cache-write-1h"];

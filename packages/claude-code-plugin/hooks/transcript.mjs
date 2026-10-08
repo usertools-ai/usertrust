@@ -137,6 +137,7 @@ import {
 	LINKLESS,
 	listPending,
 	publishExclusive,
+	refreshUnknownServerCapabilities,
 	releaseHold,
 	sanitize,
 	say,
@@ -1617,6 +1618,20 @@ async function hygieneRelease(transferId, why) {
  * hold after a failed settle), except one a `settled: false` receipt says is spent.
  */
 /**
+ * Whether the server prices the 1-hour share, for a settle that carries `share` of them:
+ * true or false when the capabilities are known; null when they are UNKNOWN (the health
+ * probe failed, even once more) and there IS a share. An older server answers false (it is
+ * known not to price it: the total is sent, the share is not); an unknown one is not
+ * an older one, and is retried once (a transient failure) before it defers the settle.
+ */
+async function oneHourSupport(share) {
+	if (!(share > 0)) return true;
+	const capabilities = await refreshUnknownServerCapabilities();
+	if (capabilities === null) return null;
+	return capabilities.has(CACHE_WRITE_1H);
+}
+
+/**
  * The body of a transcript settle. The 1-hour share goes only to a server that prices it
  * (`cache-write-1h`): an older server strips the unknown key, and those tokens would
  * silently bill at the cheaper 5-minute rate. The write TOTAL is always sent, so the
@@ -1624,7 +1639,11 @@ async function hygieneRelease(transferId, why) {
  */
 async function settleBody(transferId, counts) {
 	const { cacheWrite1hTokens, ...rest } = counts;
-	const sendShare = cacheWrite1hTokens > 0 && (await serverCapabilities())?.has(CACHE_WRITE_1H);
+	const support = await oneHourSupport(cacheWrite1hTokens);
+	// Support UNKNOWN with a share to carry: sending only the flat total would bill the
+	// 1-hour tokens at the 5-minute rate for good, so no body is built; the caller defers.
+	if (support === null) return null;
+	const sendShare = cacheWrite1hTokens > 0 && support;
 	return {
 		transferId,
 		...rest,
@@ -1636,9 +1655,15 @@ async function settleBody(transferId, counts) {
 async function settleAt(transferId, counts, { keyed }) {
 	let settle;
 	try {
-		settle = await serverRequest("/v1/settle", await settleBody(transferId, counts), {
-			timeoutMs: callTimeout(),
-		});
+		const body = await settleBody(transferId, counts);
+		if (body === null) {
+			return {
+				outcome: "deferred",
+				reason:
+					"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet; the hold is untouched",
+			};
+		}
+		settle = await serverRequest("/v1/settle", body, { timeoutMs: callTimeout() });
 	} catch (err) {
 		const holdEnded = await hygieneRelease(transferId, "transcript settle unanswered");
 		return {
@@ -2082,6 +2107,14 @@ async function postGroup({
 		reason,
 		...extra,
 	});
+	// A 1-hour share the server may or may not price: decide BEFORE placing a hold, so an
+	// unknown server leaves the messages unposted for a later settle point rather than
+	// stranding a hold or billing the share at the 5-minute rate.
+	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) {
+		return unsettled(
+			"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet",
+		);
+	}
 	let auth;
 	try {
 		auth = await serverRequest(
@@ -2124,9 +2157,15 @@ async function postGroup({
 	}
 	let settle;
 	try {
-		settle = await serverRequest("/v1/settle", await settleBody(transferId, counts), {
-			timeoutMs,
-		});
+		const body = await settleBody(transferId, counts);
+		if (body === null) {
+			// The capabilities went unknown after the gate above: give the hold back.
+			await hygieneRelease(transferId, "1-hour share cannot be priced yet");
+			return unsettled(
+				"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet",
+			);
+		}
+		settle = await serverRequest("/v1/settle", body, { timeoutMs });
 	} catch (err) {
 		await hygieneRelease(transferId, "transcript settle unanswered");
 		return {

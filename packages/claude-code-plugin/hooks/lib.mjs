@@ -677,6 +677,19 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 let capabilitiesRead;
 
 /**
+ * Read the capabilities AGAIN, discarding a cached UNKNOWN. serverCapabilities() caches
+ * its answer for the hook process, which is right for a settled answer but wrong for a
+ * transient failure: a health probe that failed once would otherwise stay "unknown" for
+ * every later call of the hook. Only an unknown answer is retried; a known one is kept.
+ */
+export async function refreshUnknownServerCapabilities() {
+	const current = await serverCapabilities();
+	if (current !== null) return current;
+	capabilitiesRead = undefined;
+	return serverCapabilities();
+}
+
+/**
  * What the server honours (`/v1/health` `capabilities`), read once per hook
  * process. Never cached on disk: a cache could still claim keys after the server
  * was downgraded to one that strips them. Resolves to a Set — empty for an older

@@ -232,6 +232,26 @@ describe("requestDeclares1hCache", () => {
 				messages: [{ role: "user", content: [{ type: "text" }, { type: "text" }] }],
 			}),
 		).toBe(false);
+		// A callable toJSON (own, non-enumerable, or inherited) can serialize to a 1h block the
+		// scan never saw: fail dearest. A Date or a binary view cannot, and stays false.
+		class Sneaky {
+			toJSON() {
+				return { cache_control: { type: "ephemeral", ttl: "1h" } };
+			}
+		}
+		expect(requestDeclares1hCache({ messages: [{ role: "user", content: [new Sneaky()] }] })).toBe(
+			true,
+		);
+		const hidden = { type: "text" };
+		Object.defineProperty(hidden, "toJSON", { value: () => ({}), enumerable: false });
+		expect(requestDeclares1hCache({ messages: [{ content: [hidden] }] })).toBe(true);
+		expect(
+			requestDeclares1hCache({
+				when: new Date(0),
+				bytes: new Uint8Array(4),
+				buf: Buffer.from("x"),
+			}),
+		).toBe(false);
 		// A cycle terminates (and is not itself evidence of a marker).
 		const a: Record<string, unknown> = {};
 		a.self = a;
