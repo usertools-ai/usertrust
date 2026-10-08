@@ -123,6 +123,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { labelsKey, resolveJob } from "./job-log.mjs";
 import {
 	budgetShare,
 	cleanup,
@@ -130,11 +131,15 @@ import {
 	isAlreadySettled,
 	isUnknownRoute,
 	isUnknownTransfer,
+	jobCapable,
+	jobHoldFields,
 	LINKLESS,
 	listPending,
 	publishExclusive,
+	recordWatchEvent,
 	releaseHold,
 	sanitize,
+	sanitizeReason,
 	say,
 	serverCapabilities,
 	serverRequest,
@@ -276,14 +281,54 @@ function sumCounts(messages) {
  * after a long outage can be tens of thousands of messages, every one of them
  * waiting on this before any settle.
  */
-export function groupByModel(messages) {
+export function groupByModel(messages, labelsOf) {
 	const groups = new Map();
 	for (const m of messages) {
-		const group = groups.get(m.model);
-		if (group === undefined) groups.set(m.model, [m]);
+		// One settle never spans a job switch: a group is a model AND a job, so a
+		// record never carries two jobs and never the job open at settle time.
+		const key = labelsOf === undefined ? m.model : `${m.model}\u0000${labelsKey(labelsOf(m))}`;
+		const group = groups.get(key);
+		if (group === undefined) groups.set(key, [m]);
 		else group.push(m);
 	}
 	return groups;
+}
+
+/** The ISO time of an epoch-ms value, or undefined when it is not a usable time. */
+export function isoOf(ms) {
+	return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+
+/**
+ * The job labels an AUTHORIZE carries: the job (or why there is none) and when the
+ * usage began. The authorize capture is the only source of both on the record.
+ */
+export function authorizeLabels(labels) {
+	return {
+		...(labels.job === undefined ? {} : { job: labels.job }),
+		...(labels.jobState === undefined ? {} : { jobState: labels.jobState }),
+		...(labels.usageFrom === undefined ? {} : { usageFrom: labels.usageFrom }),
+	};
+}
+
+/**
+ * The labels a SETTLE carries: the hold's job again (the server refuses a settle
+ * that names another, which only a bug could send) and when the usage ended. NEVER
+ * `usageFrom`: the server refuses a settle that states it.
+ */
+export function settleLabels(labels) {
+	return {
+		...(labels.job === undefined ? {} : { job: labels.job }),
+		...(labels.jobState === undefined ? {} : { jobState: labels.jobState }),
+		...(labels.usageTo === undefined ? {} : { usageTo: labels.usageTo }),
+	};
+}
+
+/** The earliest and latest finite `ts` of a message list, as ISO strings. */
+export function usageSpan(messages) {
+	const times = messages.map((m) => m.ts).filter((t) => Number.isFinite(t));
+	if (times.length === 0) return {};
+	return { usageFrom: isoOf(Math.min(...times)), usageTo: isoOf(Math.max(...times)) };
 }
 
 function describeCounts(c) {
@@ -525,6 +570,9 @@ function parseCursor(raw) {
 			synthetic: m.synthetic === true,
 			complete: m.complete === true,
 			claimed: m.claimed === true,
+			// When the message happened (epoch ms), or null when no entry said: the job
+			// it belongs to is the one open at THAT time, never at settle time.
+			ts: Number.isFinite(m.ts) ? m.ts : null,
 			inputTokens: count(m.inputTokens),
 			outputTokens: count(m.outputTokens),
 			cacheReadTokens: count(m.cacheReadTokens),
@@ -570,6 +618,10 @@ function parseVehicle(key, v) {
 		agentType: typeof v.agentType === "string" ? v.agentType : "subagent",
 	};
 	for (const k of COUNT_KEYS) vehicle[k] = count(v[k]);
+	// The job labels the vehicle was first sent with: a retry is the SAME charge, so it
+	// carries the same job, never the one open when the retry happens.
+	const labels = jobHoldFields(v.labels);
+	if (Object.keys(labels).length > 0) vehicle.labels = labels;
 	return vehicle;
 }
 
@@ -588,6 +640,7 @@ function holdVehicle(body) {
 		outputTokens: body.outputTokens,
 		cacheReadTokens: body.cacheReadTokens,
 		cacheWriteTokens: body.cacheWriteTokens,
+		labels: body,
 	});
 	return vehicle === null ? null : { key, vehicle };
 }
@@ -965,6 +1018,7 @@ function foldLine(cursor, bytes, since) {
 			synthetic: model === SYNTHETIC_MODEL,
 			complete: false,
 			claimed: false,
+			ts: null,
 			inputTokens: 0,
 			outputTokens: 0,
 			cacheReadTokens: 0,
@@ -978,6 +1032,10 @@ function foldLine(cursor, bytes, since) {
 		m.model = model;
 		m.synthetic = false;
 	}
+	// The EARLIEST entry's time: one API response is written as several entries, and
+	// min is idempotent however many are re-read.
+	const at = Date.parse(entry?.timestamp);
+	if (Number.isFinite(at) && (m.ts === null || at < m.ts)) m.ts = at;
 	m.inputTokens = Math.max(m.inputTokens, count(usage.input_tokens));
 	m.outputTokens = Math.max(m.outputTokens, count(usage.output_tokens));
 	m.cacheReadTokens = Math.max(m.cacheReadTokens, count(usage.cache_read_input_tokens));
@@ -1461,7 +1519,14 @@ export async function reconcileAgent(sessionId, agentId) {
  * `agentType` is safe for an actor string, `agentTypeRaw` is what a principal is
  * built from, and `principal` is what the server may record.
  */
-export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }) {
+export async function prepareWindow({
+	sessionId,
+	agentId,
+	agentTypeHint,
+	input,
+	jobs = null,
+	holdLabels = {},
+}) {
 	const opened = await openAgent({ sessionId, agentId, input, mayEstimate: true });
 	if (opened.kind === "estimate" || opened.kind === "unavailable") {
 		return { mode: opened.kind, reason: opened.reason, becameSticky: opened.becameSticky === true };
@@ -1491,11 +1556,23 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 	let window = null;
 	try {
 		const fresh = await selectOwn(opened);
-		if (fresh.length > 0) {
-			const model = fresh[0].model;
-			const messages = fresh.filter((m) => m.model === model);
+		// With the `job` capability the hold has ONE job (the one open at this call), and
+		// only messages that happened under that job may ride it: a message from before a
+		// switch stays unassigned and is posted by a remainder under ITS job. The hold is
+		// never settled with a job it was not authorized with.
+		const holdKey = labelsKey(holdLabels);
+		const eligible =
+			jobs === null ? fresh : fresh.filter((m) => labelsKey(jobs.at(m.ts)) === holdKey);
+		if (eligible.length > 0) {
+			const model = eligible[0].model;
+			const messages = eligible.filter((m) => m.model === model);
 			for (const m of messages) cursor.assigned.set(m.id, AUTHORIZING);
-			window = { model, ids: messages.map((m) => m.id), counts: sumCounts(messages) };
+			window = {
+				model,
+				ids: messages.map((m) => m.id),
+				counts: sumCounts(messages),
+				...usageSpan(messages),
+			};
 		}
 		await opened.save();
 	} catch (err) {
@@ -1576,12 +1653,12 @@ async function hygieneRelease(transferId, why) {
  * Every hold that is not settled is given back for hygiene (the server re-queues a
  * hold after a failed settle), except one a `settled: false` receipt says is spent.
  */
-async function settleAt(transferId, counts, { keyed }) {
+async function settleAt(transferId, counts, { keyed, labels = {} }) {
 	let settle;
 	try {
 		settle = await serverRequest(
 			"/v1/settle",
-			{ transferId, ...counts, usageSource: "provider" },
+			{ transferId, ...counts, usageSource: "provider", ...settleLabels(labels) },
 			{ timeoutMs: callTimeout() },
 		);
 	} catch (err) {
@@ -1685,7 +1762,7 @@ export async function settleTranscriptHold(sessionId, entry) {
 		return { outcome: "deferred", reason: `hold could not be claimed (${err?.code ?? "error"})` };
 	}
 	const keyed = typeof entry.idempotencyKey === "string";
-	const result = await settleAt(entry.transferId, counts, { keyed });
+	const result = await settleAt(entry.transferId, counts, { keyed, labels: jobHoldFields(entry) });
 	try {
 		// Exclusive: an outcome never lands over another hold's. Only a 1.4.0 per-call
 		// name can already be taken (two holds of one call shared it then). That leaves
@@ -1922,6 +1999,7 @@ export async function postRemainder({
 				key,
 				principal: principalOf(vehicle.agentType),
 				capabilities,
+				labels: vehicle.labels ?? {},
 				retry: true,
 			});
 			if (result.outcome !== "unresolved") cursor.unresolved.delete(key);
@@ -1930,7 +2008,20 @@ export async function postRemainder({
 				summary.posted += vehicle.ids.length;
 			} else if (result.outcome === "denied") {
 				denyIds(cursor, vehicle.ids);
-				reportDenied(agentType.name, agentId, result.reason, vehicle.ids, vehicle.model, counts);
+				await reportDenied(
+					agentType.name,
+					agentId,
+					result.reason,
+					vehicle.ids,
+					vehicle.model,
+					counts,
+					{
+						sessionId,
+						labels: vehicle.labels,
+						status: result.status,
+						error: result.error,
+					},
+				);
 			} else summary.notes.push(`unresolved ${vehicle.model} settle: ${result.reason}`);
 			await opened.save();
 			if (result.serverDown) {
@@ -1939,7 +2030,18 @@ export async function postRemainder({
 			}
 		}
 
-		for (const [model, messages] of groupByModel(fresh)) {
+		// What this session's job log says NOW, read once per remainder: a message's job
+		// is the one open at the message's OWN time, so a remainder spanning a switch
+		// settles once per job.
+		const jobs = (await jobCapable(capabilities)) ? await resolveJob(sessionId) : null;
+		const groups = groupByModel(fresh, jobs === null ? undefined : (m) => jobs.at(m.ts));
+		for (const messages of groups.values()) {
+			const model = messages[0].model;
+			const span = jobs === null ? {} : usageSpan(messages);
+			const labels =
+				jobs === null
+					? {}
+					: { ...jobs.at(messages.find((m) => Number.isFinite(m.ts))?.ts ?? Number.NaN), ...span };
 			const timeoutMs = callBudget();
 			if (timeoutMs < minCall()) {
 				summary.notes.push(`${model}: deferred to the next settle point (out of time)`);
@@ -1952,7 +2054,15 @@ export async function postRemainder({
 			// parked as an unresolved vehicle, so a hook killed mid-call leaves it to be
 			// retried as itself; without one, a crash can only lose it, never repeat it.
 			if (key === undefined) for (const id of ids) cursor.assigned.set(id, REMAINDER);
-			else cursor.unresolved.set(key, { ids, model, agentType: agentType.raw, ...counts });
+			else {
+				cursor.unresolved.set(key, {
+					ids,
+					model,
+					agentType: agentType.raw,
+					...counts,
+					...(Object.keys(labels).length === 0 ? {} : { labels }),
+				});
+			}
 			await opened.save();
 			const result = await postGroup({
 				sessionId,
@@ -1966,6 +2076,7 @@ export async function postRemainder({
 				key,
 				principal: principalOf(agentType.raw),
 				capabilities,
+				labels,
 				retry: false,
 			});
 			// An unresolved vehicle stays parked; any other outcome is final for it.
@@ -1976,7 +2087,12 @@ export async function postRemainder({
 			await opened.save();
 			if (result.outcome === "settled") summary.posted += ids.length;
 			else if (result.outcome === "denied") {
-				reportDenied(agentType.name, agentId, result.reason, ids, model, counts);
+				await reportDenied(agentType.name, agentId, result.reason, ids, model, counts, {
+					sessionId,
+					labels,
+					status: result.status,
+					error: result.error,
+				});
 			} else summary.notes.push(`${model}: ${result.outcome} — ${result.reason}`);
 			if (result.serverDown) {
 				summary.serverDown = true;
@@ -1995,7 +2111,28 @@ function vehicleCounts(vehicle) {
 	return counts;
 }
 
-function reportDenied(agentType, agentId, reason, ids, model, counts) {
+async function reportDenied(agentType, agentId, reason, ids, model, counts, extra = {}) {
+	// A refused segment is never dropped silently: with a job it is also written down as a
+	// `would_block` record naming the job and the tokens, so a job's refused spend stays
+	// countable (the posted records alone would understate it).
+	if (
+		extra.labels !== undefined &&
+		(extra.labels.job !== undefined || extra.labels.jobState !== undefined)
+	) {
+		await recordWatchEvent({
+			kind: "would_block",
+			session: extra.sessionId,
+			agent: agentId,
+			tool: "(remainder)",
+			status: extra.status,
+			error: extra.error,
+			reason: sanitizeReason(reason),
+			...(extra.labels.job === undefined ? {} : { job: extra.labels.job }),
+			...(extra.labels.jobState === undefined ? {} : { jobState: extra.labels.jobState }),
+			model,
+			tokens: { ...counts },
+		});
+	}
 	say(
 		`usertrust: ${agentType}:${agentId} usage NOT recorded — ${reason}; ${ids.length} ${model} message(s) (${describeCounts(counts)} tokens) are marked denied and never retried`,
 	);
@@ -2020,6 +2157,7 @@ async function postGroup({
 	key,
 	principal,
 	capabilities,
+	labels = {},
 	retry,
 }) {
 	const unsettled = (reason, extra = {}) => ({
@@ -2044,6 +2182,7 @@ async function postGroup({
 				actor: `claude-code:${sessionId}:${agentType}:${agentId}`,
 				...(key === undefined ? {} : { idempotencyKey: key }),
 				...(principal === undefined ? {} : { principal }),
+				...authorizeLabels(labels),
 			},
 			{ timeoutMs },
 		);
@@ -2056,6 +2195,8 @@ async function postGroup({
 	if (auth.status === 402 || auth.status === 403 || auth.status === 429) {
 		return {
 			outcome: "denied",
+			status: auth.status,
+			error: safeName(auth.json?.error, "denied"),
 			reason: `authorize ${auth.status} (${safeName(auth.json?.error, "denied")})`,
 		};
 	}
@@ -2071,7 +2212,7 @@ async function postGroup({
 	try {
 		settle = await serverRequest(
 			"/v1/settle",
-			{ transferId, ...counts, usageSource: "provider" },
+			{ transferId, ...counts, usageSource: "provider", ...settleLabels(labels) },
 			{ timeoutMs },
 		);
 	} catch (err) {

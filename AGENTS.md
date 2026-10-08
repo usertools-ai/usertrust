@@ -624,6 +624,45 @@ surface and still records `actor: "local"`. `ledger/engine.ts` — which has no 
 (see Known drift) — predates this scheme with its own `deriveUserId64`/`fnv1a32` tags; if it is ever
 wired in, it must adopt `principalLedgerTags`, or one ledger will carry two incompatible schemes.
 
+**A job is a label, never a payer.** `AuthorizeParams.job` (`shared/job.ts`) says WHICH JOB a
+spend was for, so per-job cost is a query over the chain. It never selects the account a hold
+debits, never enters the policy gate and is never a pricing input. It is validated by
+`principalFieldRefusal` (one rule for the governor and the wire), and it takes no `user_data` tag:
+all three slots belong to the principal. `jobState: "invalid"` says the caller's job state could not
+be trusted, so a record with no `job` and that state reads "unknown", not "no job"; it is exclusive
+with `job`. `usageFrom` / `usageTo` are the window of USAGE a record covers (ISO-8601 UTC), never the
+time the record was appended.
+
+*Captured once, read from the capture.* `authorize` captures `job`, `jobState` and `usageFrom`
+exactly once (`captureJob`: read once, validated, frozen, a `TypeError` before any I/O) into
+`capture.jobAudit`, and every record the hold produces spreads it: `llm_call`, `llm_call_failed`,
+`hold_released` (a release, a TTL expiry, `destroy()`), `settlement_ambiguous`,
+`settlement_shortfall`, `policy_denied`, `ledger_rejected`, and the rotated receipt. Release and
+expiry take no input of their own and inherit the hold's labels from the capture. A settle adds only
+`usageTo` (`captureUsageTo`, validated BEFORE the claim, so a bad value changes nothing);
+`Authorization.job` is reporting only and the governor never reads it back.
+*Prevents:* a caller relabelling a spend between the two phases through its own object or handle,
+and a release or expiry record losing the job its hold was reserved for.
+
+*usertrust-server's rules (capability `job`).* `/v1/authorize` accepts `job`, `jobState` and
+`usageFrom`; `/v1/settle` accepts `usageTo`, and `job` / `jobState` only to CHECK them. The server
+keeps its own copy of the authorize labels and refuses (400, nothing written, the hold still
+settleable) a settle that names a different job, or a `usageTo` before the hold's `usageFrom`; a settle
+that states `usageFrom` is refused outright. The usage START has exactly one source, the authorize
+capture, so no record can carry two different "from" values and a coverage check never has to choose.
+*Prevents:* the silent strip: zod drops unknown keys, so an older server records none of these and
+answers 200. A client therefore sends them only to a server that lists `"job"` in `/v1/health`
+`capabilities`, and a coverage check treats an untagged record as untagged, never as covered.
+
+*The Claude Code plugin's side* (`hooks/job-log.mjs`) is where the job comes from: a per-session,
+append-only log (`<state>/jobs/<session_id>.jsonl`) written by the `usertrust-job` CLI and the
+SessionStart hook under an O_EXCL lock held only for read-validate-append. A record's job is the one
+open at the time its USAGE happened (a hold: its PreToolUse; a transcript message: its own
+timestamp), never the one open at settle time, so a remainder spanning a switch settles once per job.
+`jobCoverage()` in that module is the ONE answer path for "is this job's cost exact": an empty
+interval, an untagged overlapping record, a missing usage time, an invalid state or a missing log each
+refuse it. It is not exported from a package entry (nothing outside the lab calls it).
+
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
 `LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless
 `Authorization` publishes the same value as `holdTimeoutMs` (absent in dry run).

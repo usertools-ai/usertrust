@@ -267,6 +267,38 @@ for them is a separate piece, not part of this plugin.
 usertrust governs cooperative agents on a machine you control; it is not a
 sandbox against a process that wants to rewrite its own transcript.
 
+## Job tagging: what did each job cost
+
+One session that fixes five bugs is one session to the ledger. Say which job you are on, and every
+record from then on carries it (`data.job`, with `data.usageFrom` / `data.usageTo`, the window of
+usage the record covers), so per-job cost is a query.
+
+```bash
+node "$CLAUDE_PLUGIN_ROOT/bin/usertrust-job.mjs" start bug-1   # from the NEXT tool call on
+node "$CLAUDE_PLUGIN_ROOT/bin/usertrust-job.mjs" stop
+```
+
+Run it as an ordinary Bash call (the session id is `$CLAUDE_CODE_SESSION_ID`). Job ids are opaque:
+1-128 characters of `[A-Za-z0-9._:-]`.
+
+- **A switch applies from the next call.** The call that runs `start bug-2` still bills `bug-1`. Usage
+  that was already in the transcript is billed to the job open when it happened, so a turn that spans
+  a switch is settled once per job.
+- **No default.** With no job open the field is absent; an unreadable log is recorded as
+  `jobState: "invalid"`, never guessed.
+- **It refuses rather than guesses.** The CLI writes only to a log the plugin started
+  (`<state>/jobs/<session_id>.jsonl`, created by SessionStart for a new session id). A session resumed
+  without an explicit id may carry the startup id in its environment: resume with `--resume <id>`. It
+  waits up to 10 s for a session that has only just started.
+- **Scope.** Per session, not per agent: a subagent shares its parent's job.
+- **Server.** Sent only to a usertrust-server that lists `"job"` in `/v1/health` `capabilities`
+  (remembered per server URL, so one failed health probe does not drop it); an older server leaves every
+  record as it was.
+- **Is the cost exact?**
+  `node bin/usertrust-job.mjs coverage bug-1 --vault <project>/.usertrust` prints whether the job's
+  recorded cost is exact. An empty interval, a record with no usage time, an untagged record
+  overlapping the job, an invalid state or a missing log each say no.
+
 ## Modes: watch-only by default
 
 `UT_CC_MODE` decides what PreToolUse — the one hook that can block — does with the

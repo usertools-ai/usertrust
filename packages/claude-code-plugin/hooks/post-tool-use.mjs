@@ -49,9 +49,11 @@ import {
 	usageMode,
 } from "./lib.mjs";
 import {
+	authorizeLabels,
 	estimatePrincipalFor,
 	estimateReasonFor,
 	OUTCOME_NOTES,
+	settleLabels,
 	settleTranscriptHold,
 } from "./transcript.mjs";
 
@@ -150,6 +152,9 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 			},
 			actor: `claude-code:${sessionId}`,
 			...(principal === undefined ? {} : { principal }),
+			// The replacement is the SAME call's charge: it carries the expired hold's job
+			// and usage start, not whatever job is open now.
+			...authorizeLabels(entry),
 		},
 		withinBudget(),
 	);
@@ -260,6 +265,11 @@ try {
 				JSON.stringify(input.tool_response ?? "").slice(0, MAX_CONTENT_CHARS),
 			),
 			usageSource: "estimated",
+			// A hold authorized under the `job` capability names its job again, and says when
+			// its usage ended (now). The usage START is the authorize capture's alone.
+			...(typeof entry.usageFrom === "string"
+				? settleLabels({ ...entry, usageTo: new Date().toISOString() })
+				: {}),
 		};
 		await settleEstimateHold({ sessionId, agentId, entry, usage, input });
 	}

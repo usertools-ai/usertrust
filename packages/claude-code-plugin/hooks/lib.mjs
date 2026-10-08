@@ -348,6 +348,9 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				// was authorized at, the transcript message ids assigned to it, and their
 				// summed counts.
 				...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
+				// The job labels this hold was authorized with: what its settle names and what
+				// a replacement hold must carry (the labels belong to the HOLD, not the clock).
+				...jobHoldFields(entry),
 			}),
 		);
 	} catch (err) {
@@ -571,6 +574,7 @@ export async function listPending(sessionId, agentId) {
 				...(typeof parsed.serverUrl === "string" ? { serverUrl: parsed.serverUrl } : {}),
 				...(typeof parsed.keyHash === "string" ? { keyHash: parsed.keyHash } : {}),
 				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
+				...jobHoldFields(parsed),
 				mtimeMs,
 			});
 		} catch {
@@ -669,6 +673,61 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 // ── What the server honours ──
 
 let capabilitiesRead;
+
+/**
+ * Which job labels a record carries, off a hold's entry or its file: strings only,
+ * so a corrupt file can never put a non-string into a request. Absent keys stay
+ * absent (a hold authorized without the `job` capability records none).
+ */
+export function jobHoldFields(entry) {
+	const out = {};
+	for (const key of ["job", "jobState", "usageFrom", "usageTo"]) {
+		if (typeof entry?.[key] === "string" && entry[key] !== "") out[key] = entry[key];
+	}
+	return out;
+}
+
+// Under jobs/, beside the logs: the state dir's top level lists holds, and a server that
+// never offered `job` must leave it exactly as it was.
+const JOB_CAPABILITY_FILE = join("jobs", "capability.json");
+let jobCapableRead;
+
+/**
+ * Whether the server honours the `job` capability (job, jobState, usageFrom, usageTo).
+ * An older server's schemas STRIP those keys in silence, so they are sent only to a
+ * server known to honour them. Unlike an idempotency key, sending them to a server
+ * that does not is HARMLESS (the record is simply untagged, and the coverage check
+ * refuses "exact" for an untagged record), so this one bit may be remembered per
+ * server URL for the case where the health probe fails: losing attribution to a
+ * probe timeout is the silent loss this exists to avoid. The idempotency-key and
+ * release capabilities are NEVER cached: a stale "honoured" there double-posts.
+ * A probe that ANSWERS always overwrites the remembered bit.
+ */
+export function jobCapable(capabilities) {
+	jobCapableRead ??= (async () => {
+		const file = join(stateDir(), JOB_CAPABILITY_FILE);
+		const url = serverBase();
+		let known = {};
+		try {
+			const parsed = JSON.parse(await readFile(file, "utf-8"));
+			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) known = parsed;
+		} catch {
+			// unreadable or absent: nothing remembered
+		}
+		if (capabilities === null) return known[url] === true;
+		const honoured = capabilities.has("job");
+		if (known[url] !== honoured && (honoured || known[url] !== undefined)) {
+			try {
+				await mkdir(join(stateDir(), "jobs"), { recursive: true, mode: 0o700 });
+				await writeFile(file, JSON.stringify({ ...known, [url]: honoured }), { mode: 0o600 });
+			} catch {
+				// the bit is a convenience: a failed write loses only the memory
+			}
+		}
+		return honoured;
+	})();
+	return jobCapableRead;
+}
 
 /**
  * What the server honours (`/v1/health` `capabilities`), read once per hook

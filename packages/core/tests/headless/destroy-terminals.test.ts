@@ -747,3 +747,29 @@ describe("with the real audit writer: nothing appends after destroy() releases i
 		expect(chainOf(auth.transferId)).toEqual([{ kind: "hold_released", reason: "given back" }]);
 	});
 });
+
+describe("destroy() records a terminal still in flight with the hold's job", () => {
+	it("release() whose void never opens: the record destroy() writes names the job and usage start", async () => {
+		const voids = gate();
+		const { engine } = ledgerEngine({ void: voids.wait });
+		const gov = await governor(engine, BOUND_MS);
+		const auth = await gov.authorize({
+			...AUTHORIZE,
+			actor: "plugin",
+			principal: PRINCIPAL,
+			job: "job-a",
+			usageFrom: "2026-01-01T00:00:00.000Z",
+		});
+		const ending = end(gov, auth, "release");
+		await gov.destroy();
+		expect(recordsOf(auth.transferId).map((e) => e.data)).toEqual([
+			{
+				...destroyRecord(auth, "session", STILL_IN_FLIGHT).data,
+				job: "job-a",
+				usageFrom: "2026-01-01T00:00:00.000Z",
+			},
+		]);
+		voids.open();
+		await ending;
+	});
+});

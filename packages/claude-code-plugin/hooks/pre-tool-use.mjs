@@ -42,6 +42,7 @@
 // `already_settled`) means an earlier settle of exactly this window landed: it
 // is accounted, and the tool is held alone.
 import { rename, unlink } from "node:fs/promises";
+import { resolveJob } from "./job-log.mjs";
 import {
 	claimForSettle,
 	defaultModel,
@@ -54,6 +55,7 @@ import {
 	isAlreadySettled,
 	isTransferId,
 	isUnknownTransfer,
+	jobCapable,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
@@ -68,8 +70,10 @@ import {
 	timeLeft,
 } from "./lib.mjs";
 import {
+	authorizeLabels,
 	estimatePrincipalFor,
 	holdEstimate,
+	isoOf,
 	OUTCOME_NOTES,
 	prepareWindow,
 	reconcileAgent,
@@ -388,11 +392,20 @@ async function reserve(input) {
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
 	const content = process.env.UT_CC_SEND_CONTENT === "0" ? '{"redacted":true}' : toolInput;
 	const estimatedInputTokens = estimateTokens(toolInput);
+	// The job open at THIS call, from this session's own log read now (never cached):
+	// a switch applies from the next call, so the call that runs `start job-b` still
+	// bills job-a. Read only for a server that honours `job` (older servers strip the
+	// keys, and an unlabelled hold must stay byte-identical to today's).
+	const jobs = (await jobCapable(await serverCapabilities())) ? await resolveJob(sessionId) : null;
+	const callMs = Date.now();
+	const holdLabels = jobs === null ? {} : jobs.at(callMs);
 	const prepared = await prepareWindow({
 		sessionId,
 		agentId,
 		agentTypeHint: input.agent_type,
 		input,
+		jobs,
+		holdLabels,
 	});
 	if (prepared.becameSticky) {
 		say(
@@ -421,6 +434,23 @@ async function reserve(input) {
 				? prepared.principal
 				: estimatePrincipalFor(sessionId, agentId, input.agent_type);
 		let window = transcriptMode ? prepared.window : null;
+		// What the hold is authorized with: its job, and when its usage began (the earlier
+		// of this call and its first assigned message, so a window never starts after it
+		// ends). Fixed here, from the capture the server will keep. Recomputed if the
+		// window is dropped below.
+		const labelsFor = () =>
+			jobs === null
+				? {}
+				: {
+						...holdLabels,
+						usageFrom: isoOf(
+							Math.min(
+								callMs,
+								window?.usageFrom === undefined ? callMs : Date.parse(window.usageFrom),
+							),
+						),
+						...(window?.usageTo === undefined ? {} : { usageTo: window.usageTo }),
+					};
 		const fallbackModel = prepared.lastModel ?? defaultModel();
 		// Never past the hook's own budget: a hook killed mid-call leaves the tool
 		// ungoverned and this agent's lock held.
@@ -455,6 +485,7 @@ async function reserve(input) {
 					messages: [{ role: "user", content }],
 					...(window && keyed ? { idempotencyKey: prepared.key } : {}),
 					...(principal === undefined ? {} : { principal }),
+					...authorizeLabels(labelsFor()),
 				},
 				{ timeoutMs: callTimeout() },
 			);
@@ -498,6 +529,7 @@ async function reserve(input) {
 									? { idempotencyKey: prepared.key, agentType: prepared.agentTypeRaw }
 									: {}),
 							}),
+					...labelsFor(),
 				});
 			} catch (err) {
 				// Unrecorded, the hold could never be settled: give it back now. `giveBack`
@@ -531,6 +563,9 @@ async function reserve(input) {
 					status: response.status,
 					error: error.slice(0, MAX_REASON_CHARS),
 					reason: reason.slice(0, MAX_REASON_CHARS),
+					// With the `job` capability, a refused call names its job (or why it has none).
+					...(labelsFor().job === undefined ? {} : { job: labelsFor().job }),
+					...(labelsFor().jobState === undefined ? {} : { jobState: labelsFor().jobState }),
 				});
 				proceed(`usertrust watch-only: would have blocked (${error}: ${reason}) — not enforced`);
 			}
