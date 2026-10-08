@@ -29,7 +29,7 @@
 //
 // A pin deleted mid-session is made again, from the settings then current, by the
 // next hook. A pin idle for 30 days is swept (`sweep`, at SessionStart); a session
-// resumed after that is pinned again.
+// resumed at or after the sweep is pinned again, from the settings then current.
 import { randomBytes } from "node:crypto";
 import {
 	closeSync,

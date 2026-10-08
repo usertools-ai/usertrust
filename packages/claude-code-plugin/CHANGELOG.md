@@ -75,8 +75,8 @@ npm, and its version is its own: the `usertrust` packages and their
   - An environment session's pin holds the key's hash, never the key. A key changed
     mid-session is refused for that hook: it sends nothing, and records a gap.
   - A pin unused for 30 days is removed when a session starts; that session, if
-    resumed, is pinned again. A pin that cannot be used runs the hook watch-only and
-    key-less, with a gap.
+    resumed at or after the removal, is pinned again from the settings then current.
+    A pin that cannot be used runs the hook watch-only and key-less, with a gap.
   - Every hook now starts through `hooks/launch.mjs`.
 
 ### Fixed

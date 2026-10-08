@@ -175,8 +175,8 @@ under your home as the passwd database gives it.
   `UT_SERVER_KEY` afresh, and a key changed mid-session is refused, as
   `pin: key changed`: that hook sends nothing, and its call is recorded as a gap.
 - A pin unused for 30 days is removed when a session starts. A session resumed
-  after that, or whose pin you delete, is pinned again from the settings then
-  current.
+  at or after that removal, or whose pin you delete, is pinned again from the
+  settings then current.
 - A config file that is refused is not pinned: the next hook reads it again.
 
 **A pin that cannot be used runs the hook watch-only and key-less, with a gap.**
