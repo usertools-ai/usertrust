@@ -15,6 +15,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
+import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -40,8 +41,10 @@ const MODEL = "claude-sonnet-4-6";
 const sse = (events: Array<[string, unknown]>): string =>
 	events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("");
 
+const PAYLOAD = '{"city":"Paris","days":3}';
+
 function fakeFetch(): typeof fetch {
-	const body = sse([
+	const stream = sse([
 		[
 			"message_start",
 			{
@@ -63,11 +66,7 @@ function fakeFetch(): typeof fetch {
 		],
 		[
 			"content_block_delta",
-			{
-				type: "content_block_delta",
-				index: 0,
-				delta: { type: "text_delta", text: '{"city":"Paris","days":3}' },
-			},
+			{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: PAYLOAD } },
 		],
 		["content_block_stop", { type: "content_block_stop", index: 0 }],
 		[
@@ -80,11 +79,25 @@ function fakeFetch(): typeof fetch {
 		],
 		["message_stop", { type: "message_stop" }],
 	]);
-	return (async () =>
-		new Response(body, {
-			status: 200,
-			headers: { "content-type": "text/event-stream" },
-		})) as unknown as typeof fetch;
+	const message = {
+		id: "msg_1",
+		type: "message",
+		role: "assistant",
+		model: MODEL,
+		content: [{ type: "text", text: PAYLOAD }],
+		stop_reason: "end_turn",
+		stop_sequence: null,
+		usage: { input_tokens: 10, output_tokens: 9 },
+	};
+	return (async (_url: unknown, init?: { body?: unknown }) => {
+		const wantsStream = String(init?.body ?? "").includes('"stream":true');
+		return wantsStream
+			? new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } })
+			: new Response(JSON.stringify(message), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+	}) as unknown as typeof fetch;
 }
 
 function engine(): TrustEngine {
@@ -99,7 +112,24 @@ function engine(): TrustEngine {
 	} as unknown as TrustEngine;
 }
 
-describe("stream helper keeps the SDK's structured-output parse hook", () => {
+type StreamCall = (p: unknown) => Promise<{ finalMessage: () => Promise<unknown> }>;
+type ParseCall = (p: unknown) => Promise<unknown>;
+
+const EXPECTED = { city: "Paris", days: 3 };
+const schema = z.object({ city: z.string(), days: z.number() });
+const base = {
+	model: MODEL,
+	max_tokens: 100,
+	messages: [{ role: "user" as const, content: "plan" }],
+};
+
+/** The structured output the SDK parsed onto a message (block-level, or message-level). */
+function parsedOutput(message: unknown): unknown {
+	const m = message as { parsed_output?: unknown; content?: Array<{ parsed_output?: unknown }> };
+	return m.content?.find((b) => b.parsed_output != null)?.parsed_output ?? m.parsed_output;
+}
+
+describe("a governed call keeps the structured-output parse hook the SDK reads client-side", () => {
 	let vault: string;
 	beforeEach(() => {
 		vault = join(tmpdir(), `sph-${randomUUID()}`);
@@ -109,26 +139,64 @@ describe("stream helper keeps the SDK's structured-output parse hook", () => {
 		rmSync(vault, { recursive: true, force: true });
 	});
 
-	it("parsed_output is the parsed object, not null", async () => {
+	async function governedClient() {
 		const client = new Anthropic({ apiKey: "k", fetch: fakeFetch(), maxRetries: 0 });
-		const governed = await trust(client, {
-			budget: 1_000_000,
-			vaultBase: vault,
-			_engine: engine(),
+		return trust(client, { budget: 1_000_000, vaultBase: vault, _engine: engine() });
+	}
+
+	// Governed surfaces that hand the SDK a function off the params: the stream helper (stable
+	// and beta) reads `output_config.format.parse` while building the message, and is the one
+	// path that receives the request snapshot. The parse helpers run the SDK transform on the
+	// caller's ORIGINAL params, and create reads no parse hook, so neither can lose one.
+	const cases: Array<
+		[string, (g: Awaited<ReturnType<typeof governedClient>>) => Promise<unknown>]
+	> = [
+		[
+			"messages.stream",
+			async (g) =>
+				(
+					await (g as unknown as { messages: { stream: StreamCall } }).messages.stream({
+						...base,
+						output_config: { format: zodOutputFormat(schema) },
+					})
+				).finalMessage(),
+		],
+		[
+			"beta.messages.stream",
+			async (g) =>
+				(
+					await (
+						g as unknown as { beta: { messages: { stream: StreamCall } } }
+					).beta.messages.stream({
+						...base,
+						output_config: { format: betaZodOutputFormat(schema) },
+					})
+				).finalMessage(),
+		],
+		[
+			"messages.parse",
+			async (g) =>
+				(g as unknown as { messages: { parse: ParseCall } }).messages.parse({
+					...base,
+					output_config: { format: zodOutputFormat(schema) },
+				}),
+		],
+		[
+			"beta.messages.parse",
+			async (g) =>
+				(g as unknown as { beta: { messages: { parse: ParseCall } } }).beta.messages.parse({
+					...base,
+					output_config: { format: betaZodOutputFormat(schema) },
+				}),
+		],
+	];
+	for (const [name, call] of cases) {
+		it(`${name}: parsed_output is the parsed object, not null`, async () => {
+			const governed = await governedClient();
+			const message = await call(governed);
+			await governed.destroy();
+			// The SDK parses this same payload when ungoverned; null here is the lost hook.
+			expect(parsedOutput(message)).toEqual(EXPECTED);
 		});
-		const schema = z.object({ city: z.string(), days: z.number() });
-		const stream = governed.messages.stream({
-			model: MODEL,
-			max_tokens: 100,
-			messages: [{ role: "user", content: "plan" }],
-			output_config: { format: zodOutputFormat(schema) },
-		});
-		const final = await (await stream).finalMessage();
-		await governed.destroy();
-		const text = final.content.find((b) => b.type === "text") as
-			| { parsed_output?: unknown }
-			| undefined;
-		// Positive control for the assertion: the unwrapped SDK parses this same payload.
-		expect(text?.parsed_output).toEqual({ city: "Paris", days: 3 });
-	});
+	}
 });
