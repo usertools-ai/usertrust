@@ -1473,46 +1473,48 @@ describe("stale-lock breaking is serialized (B-92)", () => {
 });
 
 describe("usertrust-job start/stop — a write failure is reported through the scrubber (B-93)", () => {
-	it("a read-only jobs dir under a state dir holding ESC: exit 1, no stack, no raw control bytes", async () => {
+	it("a lock that cannot be taken, under a state dir holding ESC and C1: exit 1, no stack, no raw control bytes", async () => {
 		const hostile = join(state, "st\u001b[31mRED\u009b");
 		const jobs = join(hostile, "jobs");
 		await mkdir(jobs, { recursive: true });
 		await writeFile(join(jobs, "s1.jsonl"), start("s1", Date.now() - 5000));
-		await chmod(jobs, 0o555);
-		try {
-			const r = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
-				const inherited = Object.fromEntries(
-					Object.entries(process.env).filter(
-						([k]) => !k.startsWith("UT_") && k !== "CLAUDE_CODE_SESSION_ID",
-					),
-				);
-				const child = spawn(process.execPath, [CLI, "start", "job-a"], {
-					env: {
-						...inherited,
-						UT_CC_STATE_DIR: hostile,
-						CLAUDE_CODE_SESSION_ID: "s1",
-						UT_CC_JOB_WAIT_MS: "0",
-					},
-					stdio: ["ignore", "pipe", "pipe"],
-				});
-				let stdout = "";
-				let stderr = "";
-				child.stdout.on("data", (c) => (stdout += c));
-				child.stderr.on("data", (c) => (stderr += c));
-				child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+		// A DIRECTORY where the lock file goes: the O_EXCL open fails EEXIST and nothing can
+		// break it, for ANY uid (a read-only dir would not stop root).
+		await mkdir(join(jobs, "s1.jsonl.lock"));
+		const r = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+			const inherited = Object.fromEntries(
+				Object.entries(process.env).filter(
+					([k]) => !k.startsWith("UT_") && k !== "CLAUDE_CODE_SESSION_ID",
+				),
+			);
+			const child = spawn(process.execPath, [CLI, "start", "job-a"], {
+				env: {
+					...inherited,
+					UT_CC_STATE_DIR: hostile,
+					CLAUDE_CODE_SESSION_ID: "s1",
+					UT_CC_JOB_WAIT_MS: "0",
+				},
+				stdio: ["ignore", "pipe", "pipe"],
 			});
-			// (Running as root can write into a read-only dir: then there is nothing to report.)
-			if (r.code !== 0) {
-				expect(r.code).toBe(1);
-				expect(r.stderr).toContain("usertrust-job: failed");
-				expect(r.stderr).not.toContain("node:internal");
-				// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting none reach the terminal is the point
-				expect(r.stderr).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
-			}
-		} finally {
-			await chmod(jobs, 0o755);
-		}
-	});
+			let stdout = "";
+			let stderr = "";
+			child.stdout.on("data", (c) => {
+				stdout += c;
+			});
+			child.stderr.on("data", (c) => {
+				stderr += c;
+			});
+			child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+		});
+		// Unconditional: a regression that swallows the failure and exits 0 must fail here.
+		expect(r.code).toBe(1);
+		expect(r.stderr).toContain("usertrust-job: failed");
+		expect(r.stderr).not.toContain("node:internal");
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting none reach the terminal is the point
+		expect(r.stderr).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+		// and nothing was recorded
+		expect(await readFile(join(jobs, "s1.jsonl"), "utf-8")).not.toContain("job-a");
+	}, 30_000);
 });
 
 describe("the lock and the log tail — review hardening", () => {
