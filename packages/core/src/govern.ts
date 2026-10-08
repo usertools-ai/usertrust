@@ -1322,6 +1322,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				kind !== "google" && serialized !== null ? serialized.body : originalParams
 			) as Record<string, unknown>;
 			const declares1h = serialized?.declares1h ?? true;
+			// The stream helper's MessageStream reads the SDK-only `parse` hook off the params
+			// (`zodOutputFormat` structured output). JSON drops a function, so the snapshot is
+			// given that one callable back; it is not wire data, so the bytes sent are unchanged.
+			if (surfaceKind === "stream-helper" && params !== originalParams) {
+				graftParseHooks(originalParams, params);
+			}
 			const model = (params.model as string) ?? "unknown";
 			// P3-PROVIDER-BLINDSPOT: normalize the prompt-bearing payload across
 			// providers (Anthropic/OpenAI `messages` + `system`, Google `contents`) so
@@ -3544,6 +3550,39 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
  * Without this, a Google `generateContent({ model, contents })` call has an empty
  * `messages` array, so every PII/injection scan sees nothing and PII egresses.
  */
+/**
+ * Give a request SNAPSHOT back the SDK-only `parse` function on its structured-output format.
+ * The Anthropic stream helper reads `output_config.format.parse` (beta: `output_format.parse`)
+ * from the params to build `parsed_output`; a JSON snapshot has dropped it, and the stream would
+ * then return `parsed_output: null`. A function is not wire data, so grafting it (non-enumerable,
+ * read once) leaves the serialization, and so the bytes sent, exactly as scanned.
+ */
+function graftParseHooks(
+	original: Record<string, unknown>,
+	snapshot: Record<string, unknown>,
+): void {
+	const graft = (from: unknown, to: unknown): void => {
+		if (from === null || typeof from !== "object" || to === null || typeof to !== "object") return;
+		try {
+			const parse = (from as { parse?: unknown }).parse;
+			if (typeof parse === "function") {
+				Object.defineProperty(to, "parse", { value: parse, enumerable: false, configurable: true });
+			}
+		} catch {
+			// A getter that throws on `parse` leaves the snapshot without it: the stream then
+			// returns the raw message, which is what a request without the hook gets.
+		}
+	};
+	try {
+		const oc = original.output_config as { format?: unknown } | null | undefined;
+		const sc = snapshot.output_config as { format?: unknown } | null | undefined;
+		graft(oc?.format, sc?.format);
+		graft(original.output_format, snapshot.output_format);
+	} catch {
+		// Unreadable original: nothing to graft.
+	}
+}
+
 /**
  * Normalize the prompt-bearing payload across providers into a flat parts array
  * that PII/injection scanning, token estimation, redaction, and pattern hashing
