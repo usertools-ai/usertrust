@@ -620,7 +620,9 @@ holds as before; the exception is OPERATOR-OWNED rates (a customRates row, a loc
 fallback, i.e. `rateSource !== "table"`) with no explicit 1-hour rate, which hold the derived 2x input
 because settlement meters their 1-hour tokens at that derived rate
 (`holdInputRate(rates, include1h, operatorOwned)`). ONE predicate, `supportsCacheWrite1h`, decides
-both halves: a built-in table row with no explicit 1-hour rate is a model with NO such tier, so its
+both halves (`tests/harden/one-hour-tier-single-decider.test.ts` fails if any file outside a short
+allowlist reads the per-model 1-hour rate, or prices a 1-hour count without routing it through the
+predicate, and plants a violation as its own positive control): a built-in table row with no explicit 1-hour rate is a model with NO such tier, so its
 hold reserves none AND settlement IGNORES a reported 1-hour share (`withSupported1hTier`: the write
 total prices at the single write rate and no `cacheWrite1h` is recorded), so the two cannot disagree. *Prevents:* a 1-hour write settling above its hold and being capped, which under-debits.
 *Documented consequence:* holds on headless Anthropic calls run ~60% fatter on the input leg, so a

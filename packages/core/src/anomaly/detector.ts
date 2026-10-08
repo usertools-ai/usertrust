@@ -83,13 +83,15 @@ function defaultCostCalculator(
 		// exactly 0 and spend-velocity stays flat — token_rate is the primary local
 		// signal. govern.ts injects a config-aware calculator that prices via
 		// resolveRates (operator-set local rates enable velocity showback).
+		const localRates = { inputPer1k: 0, outputPer1k: 0 };
 		return costFromRatesUnfloored(
-			{ inputPer1k: 0, outputPer1k: 0 },
+			localRates,
 			inputTokens,
 			outputTokens,
 			cacheReadTokens,
 			cacheWriteTokens,
-			cacheWrite1hTokens,
+			// Local rates are operator-owned: the same predicate as everywhere else.
+			supported1hTokens(localRates, true, cacheWrite1hTokens),
 		);
 	}
 	// Unfloored four-tier usertokens; convert to dollars (cloud usd-proxy scope).
