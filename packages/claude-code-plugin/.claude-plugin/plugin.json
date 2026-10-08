@@ -1,7 +1,7 @@
 {
 	"name": "usertrust-claude-code",
 	"description": "Ledger-backed governance for Claude Code: PreToolUse authorization, watch-only by default (UT_CC_MODE=enforce blocks over-budget calls), real per-model and per-subagent usage settled from Claude Code transcripts, a remainder scan at Stop, SubagentStop and SessionEnd",
-	"version": "1.4.1",
+	"version": "2.0.0",
 	"author": { "name": "usertrust" },
 	"repository": "https://github.com/usertools-ai/usertrust",
 	"license": "Apache-2.0"
