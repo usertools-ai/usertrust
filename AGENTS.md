@@ -604,6 +604,21 @@ a flip cannot under-hold there. *Prevents:* the property-walk scan this replaced
 enumerate every way `JSON.stringify` reads a value (accessors, `toJSON` on objects, arrays and
 built-ins, inherited array entries) and was found incomplete in seven consecutive review rounds.
 Do not reintroduce a walk over the live request.
+*The stream helper's parse hook is grafted back onto the snapshot, and that graft has a declared
+fidelity contract.* The forwarded request is plain JSON data, which drops the SDK-only `parse` function
+on a structured-output format (`zodOutputFormat`) that `messages.stream()` / `beta.messages.stream()`
+read to build `parsed_output`. `graftParseHooks` gives that one function back, non-enumerable and bound
+to the ORIGINAL format, once, onto the object finally forwarded (after redaction). A function is not
+wire data, so the bytes sent are still the bytes scanned. The contract is that the SDK's parsers read
+exactly three things off a format: `'parse' in format` (a `has` check a non-enumerable property
+satisfies), `format.type` (wire data the snapshot carries) and `format.parse(content)` (a method call,
+hence the bound receiver); the format sits at `params.output_config.format`, or beta
+`params.output_format ?? params.output_config.format`. `tests/govern/parse-hook-contract.test.ts` drives
+the real SDK parsers against a Proxy that records every trap and fails if that set changes (verified
+against `@anthropic-ai/sdk` 0.116.0), so an SDK that starts reading anything else gets this graft
+re-reviewed instead of silently returning `parsed_output: null`. Forwarding the original `format`
+by reference instead was rejected: it would take that subtree out of PII redaction and out of the
+scanned bytes.
 *DECLARED RESIDUE (a decision, not an omission):* a PARTIAL `cache_creation` breakdown (one TTL
 field) prices its unattributed remainder (flat total minus the named count) at the dearer 1-hour
 rate, and the stream accumulators only rise, so a stream whose early event is partial and whose
