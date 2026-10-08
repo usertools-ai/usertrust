@@ -157,6 +157,10 @@ describe("captureJob", () => {
 			expect(usageTimeRefusal(bad), bad).toMatch(/ISO-8601 UTC/);
 		}
 		expect(usageTimeRefusal("2028-02-29T23:59:59.999Z")).toBeUndefined();
+		// years 0000-0099 are real years (Date.UTC would read them as 1900-1999)
+		expect(usageTimeRefusal("0050-01-01T00:00:00.000Z")).toBeUndefined();
+		expect(usageTimeRefusal("0000-01-01T00:00:00.000Z")).toBeUndefined();
+		expect(usageTimeRefusal("0050-02-30T00:00:00.000Z")).toMatch(/ISO-8601 UTC/);
 	});
 	it("allows at most millisecond precision (finer digits would compare equal)", () => {
 		expect(usageTimeRefusal("2026-01-01T00:00:00.000000009Z")).toMatch(/ISO-8601 UTC/);

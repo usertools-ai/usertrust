@@ -70,7 +70,10 @@ export function usageTimeRefusal(value: unknown): string | undefined {
 		number,
 		number,
 	];
-	const at = new Date(Date.UTC(y, mo - 1, d, h, mi, s));
+	// Not Date.UTC: it reads years 0-99 as 1900-1999.
+	const at = new Date(0);
+	at.setUTCFullYear(y, mo - 1, d);
+	at.setUTCHours(h, mi, s, 0);
 	if (
 		!Number.isFinite(at.getTime()) ||
 		at.getUTCFullYear() !== y ||

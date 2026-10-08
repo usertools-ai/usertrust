@@ -1506,7 +1506,7 @@ describe("jobCoverage — shapes a record can take", () => {
 		const beside = meta({ transferId: "tx_1", usageFrom: iso(T0 + 2500), usageTo: iso(T0 + 2600) });
 		expect((await run([ok, beside])).knownGaps).toEqual([]);
 	});
-	it("a would_block that NAMES another job is that job's, not this one's, whatever time it was written", async () => {
+	it("a would_block that NAMES another job is still PLACED by its own session's log", async () => {
 		const two =
 			start(SID, T0) +
 			op(SID, T0 + 1000, "start", "job-a") +
@@ -1526,7 +1526,8 @@ describe("jobCoverage — shapes a record can take", () => {
 		const records = [rec("job-a", 1500, 2500), rec("job-b", 3500, 4500)];
 		const wb = { kind: "would_block", job: "job-a", session: SID, started: iso(T0 + 4000) };
 		const forB = jobCoverage({ job: "job-b", logs: { [SID]: two }, records, watch: [wb] });
-		expect(forB.knownGaps.filter((g) => g.gap.includes("would_block"))).toEqual([]); // mutant: placed by time → a false gap of job-b
+		// a foreign tag is a claim: it starts inside job-b's interval, so it is a gap for job-b too
+		expect(gapText(forB)).toContain("a would_block fell inside an interval of job-b");
 		const forA = jobCoverage({ job: "job-a", logs: { [SID]: two }, records, watch: [wb] });
 		expect(gapText(forA)).toContain("would_block");
 	});
@@ -1610,7 +1611,7 @@ describe("generators with their own test", () => {
 			"an llm_call in the interval has an invalid job state",
 		);
 	});
-	it("a released hold with no class, no job and a start inside the interval is a gap; unused or another job's is not", async () => {
+	it("a released hold with no class inside the interval is a gap whatever job it names; unused is not", async () => {
 		const given = (extra: Record<string, unknown>) => ({
 			kind: "hold_released",
 			actor: base.actor,
@@ -1623,9 +1624,8 @@ describe("generators with their own test", () => {
 			"usage unconfirmed",
 		);
 		expect((await run([base, given({ releaseClass: "unused" })])).knownGaps).toEqual([]);
-		expect(
-			(await run([base, given({ job: "bug-9" })])).knownGaps.map((g) => g.gap).join(" "),
-		).not.toContain("no known job");
+		// a foreign tag is a claim, not a placement: still a gap inside this job's interval
+		expect(gapText(await run([base, given({ job: "bug-9" })]))).toContain("usage unconfirmed");
 		// outside every interval it is not this job's
 		expect((await run([base, given({ usageFrom: iso(T0 + 9000) })])).knownGaps).toEqual([]);
 	});
@@ -1734,6 +1734,130 @@ describe("a sessionless give-back without proof is a gap", () => {
 			records: [call, given({ releaseClass: "unused" })],
 		});
 		expect(r.knownGaps).toEqual([]);
+	});
+});
+
+describe("ONE placement for every kind of evidence", () => {
+	const J = "bug-1";
+	const logA = start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const principal = { origin: `claude-code:${SID}` };
+	const call = {
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost: 7,
+			job: J,
+			principal,
+			usageFrom: iso(T0 + 2000),
+			usageTo: iso(T0 + 3000),
+		},
+	};
+	const given = (extra: Record<string, unknown>) => ({
+		kind: "hold_released",
+		actor: call.actor,
+		data: {
+			transferId: "tx_9",
+			principal,
+			releaseClass: "call-ran",
+			usageFrom: iso(T0 + 2500),
+			...extra,
+		},
+	});
+	const zPrincipal = { origin: "claude-code:sess-z" };
+	const foreignCall = (extra: Record<string, unknown> = {}) => ({
+		...call,
+		data: {
+			...call.data,
+			transferId: "tx_2",
+			job: "bug-2",
+			usageFrom: iso(T0 + 2500),
+			usageTo: iso(T0 + 2600),
+			...extra,
+		},
+	});
+	const wb = (extra: Record<string, unknown>) => ({
+		kind: "would_block",
+		job: "bug-2",
+		session: SID,
+		started: iso(T0 + 2500),
+		...extra,
+	});
+	const run = async (records: unknown[], watch: unknown[]) =>
+		(await lib()).jobCoverage({ job: J, logs: { [SID]: logA }, records, watch });
+
+	type Case = { records: unknown[]; watch: unknown[] };
+	const kinds: Array<[string, Case, Case]> = [
+		[
+			"llm_call",
+			{ records: [call, foreignCall()], watch: [] },
+			{
+				records: [
+					call,
+					{
+						...foreignCall(),
+						actor: "claude-code:sess-z:main:main",
+						data: { ...foreignCall().data, principal: zPrincipal },
+					},
+				],
+				watch: [],
+			},
+		],
+		[
+			"hold_released",
+			{ records: [call, given({ job: "bug-2" })], watch: [] },
+			{ records: [call, given({ job: "bug-2", principal: zPrincipal })], watch: [] },
+		],
+		[
+			"would_block",
+			{ records: [call], watch: [wb({})] },
+			{ records: [call], watch: [wb({ session: "sess-z" })] },
+		],
+		[
+			"gap",
+			{ records: [call], watch: [{ kind: "gap", session: SID, started: iso(T0 + 2500) }] },
+			{ records: [call], watch: [{ kind: "gap", session: "sess-z", started: iso(T0 + 2500) }] },
+		],
+	];
+	it.each(kinds)(
+		"%s: a foreign tag inside this job's interval is a gap, and so is a log-less session",
+		async (_kind, inside, logless) => {
+			// mutant: trust the foreign tag
+			expect((await run(inside.records, inside.watch)).knownGaps.length).toBeGreaterThan(0);
+			// mutant: skip a log-less session
+			expect((await run(logless.records, logless.watch)).knownGaps.length).toBeGreaterThan(0);
+		},
+	);
+	it.each(["llm_call", "hold_released", "would_block", "gap"])(
+		"%s: the correctly placed control is clean",
+		async (kind) => {
+			const clean: Record<string, Case> = {
+				llm_call: { records: [call], watch: [] },
+				hold_released: { records: [call, given({ releaseClass: "unused" })], watch: [] },
+				would_block: { records: [call], watch: [wb({ started: iso(T0 + 9000) })] },
+				gap: { records: [call], watch: [{ kind: "gap", session: SID, started: iso(T0 + 9000) }] },
+			};
+			const c = clean[kind] ?? { records: [], watch: [] };
+			expect((await run(c.records, c.watch)).knownGaps).toEqual([]);
+		},
+	);
+	it("no hook, CLI or reader places evidence outside jobCoverage's one function", async () => {
+		const { readdir } = await import("node:fs/promises");
+		for (const name of (await readdir(HOOKS)).filter(
+			(n) => n.endsWith(".mjs") && n !== "job-log.mjs",
+		)) {
+			expect(await readFile(join(HOOKS, name), "utf-8"), name).not.toMatch(
+				/overlapsAny|insideAny|jobAtEvents\(/,
+			);
+		}
+		expect(await readFile(CLI, "utf-8")).not.toMatch(
+			/overlapsAny|insideAny|jobAtEvents\(|intervalsOf/,
+		);
+		const source = await readFile(join(HOOKS, "job-log.mjs"), "utf-8");
+		const body = source.slice(source.indexOf("export function jobCoverage"));
+		const place = body.slice(body.indexOf("const place = "), body.indexOf("const placeAll"));
+		// inside jobCoverage, only `place` decides where evidence falls
+		expect(body.replace(place, "")).not.toMatch(/overlapsAny\(|insideAny\(/);
 	});
 });
 

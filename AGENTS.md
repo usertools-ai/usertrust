@@ -681,7 +681,10 @@ transfer known only through `settlement_*` metadata or with more than one `llm_c
 without `releaseClass: "unused"`; an interval with no stop yet (the job is still running); an evidence line
 that could not be parsed (never a silent drop); and a contributing session without a usable log. An interval
 is (start, stop], matching how the hooks resolve a time (a line applies strictly after its own ts), and
-cost counts each transfer once, from its `llm_call`.
+cost counts each transfer once, from its `llm_call`. Every kind of evidence (an `llm_call`, a give-back, a denial, a `would_block`, a gap,
+anything else) goes through ONE placement function: its own session's valid log places it, a tag it carries is a claim
+and never a placement (a foreign tag inside this job's interval is a gap for this job), and one whose session has no
+usable log is a gap for every job. A test fails if anything else decides where evidence falls.
 
 *A release states WHY, as a closed set.* `/v1/release` and `Governor.release()` take an optional
 `releaseClass`: `unused` (no call ran under the hold, so no usage hides behind it), `call-unconfirmed`
@@ -707,7 +710,8 @@ than a second when a job op is written, then corrected, is detected only while t
 reading clock. Every labeller goes through ONE function (`labelsFor`), which then labels the call unknown, and a suspect
 read leaves a durable time-less gap record (once per session and latest stamp) that counts against every job. A skew that
 NO hook observed while it lasted (no PreToolUse or Stop ran before the stamp passed) can still write a wrong job label; a
-real fix needs writer-side information (a monotonic stamp). (3) Two server URLs updating `capability.json`
+real fix needs writer-side information (a monotonic stamp). (3) SessionStart creates the log O_EXCL and then writes its one line: a kill between the two leaves an empty
+log, which reads as none (job tagging is off for that session; it fails honest, never wrong). (4) Two server URLs updating `capability.json`
 at once can lose one bit, which yields untagged calls and so gaps, never a false clean.
 
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass

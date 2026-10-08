@@ -578,64 +578,6 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 		}
 	}
 
-	// ── Clause 1: EVERY record tagged with the job lies inside an interval of the job in a
-	// valid log of its own session. A session with no interval of the job puts all of its
-	// tagged records outside; so does a session with no usable log. ──
-	for (const rec of records) {
-		if (rec?.data?.job !== job) continue;
-		if (["policy_denied", "ledger_rejected"].includes(rec.kind)) {
-			// A REFUSED request leaves no spend record: the usage it asked to post is NOT in
-			// the total, and the denial carries the job, which is all that is known.
-			why(`a request of ${job} was denied: its usage may be unrecorded`, {
-				kind: rec.kind,
-				transferId: rec.data.transferId,
-			});
-			continue;
-		}
-		if (rec.kind !== "llm_call" && !BENIGN_KINDS.has(rec.kind) && !SPEND_METADATA.has(rec.kind)) {
-			// A kind this check cannot read as spend or as a give-back, naming the job: it may be
-			// usage that is not in the total.
-			why(`an unrecognised ${rec.kind} record names ${job}`, {
-				kind: rec.kind,
-				transferId: rec.data.transferId,
-			});
-			continue;
-		}
-		const sid = sessionOfRecord(rec);
-		if (sid === null) {
-			why(`a record of ${job} names no session`);
-			continue;
-		}
-		if (!usable(sid)) {
-			why(`session ${sid}: a record of ${job} has no usable job log to be placed by`, {
-				session: sid,
-				kind: rec.kind,
-				transferId: rec.data.transferId,
-			});
-			continue;
-		}
-		const intervals = intervalsBySession.get(sid) ?? [];
-		if (intervals.length === 0) {
-			why(
-				`session ${sid}: a ${rec.kind} of ${job} lies outside its intervals (the session has none)`,
-				{ session: sid, kind: rec.kind, transferId: rec.data.transferId },
-			);
-			continue;
-		}
-		const w = rec.kind === "llm_call" ? window(rec.data) : null;
-		const point = ms(rec.data.usageFrom);
-		const placed =
-			rec.kind === "llm_call"
-				? w !== null && insideAny(w, intervals)
-				: Number.isFinite(point) && insideAny([point, point], intervals);
-		if (!placed)
-			why(`session ${sid}: a ${rec.kind} of ${job} lies outside its intervals`, {
-				session: sid,
-				kind: rec.kind,
-				transferId: rec.data.transferId,
-			});
-	}
-
 	// Every interval needs POSITIVE evidence: a tagged record with a complete window in it.
 	let intervalsSeen = 0;
 	for (const [sid, intervals] of intervalsBySession) {
@@ -655,156 +597,166 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 	}
 	if (intervalsSeen === 0) why(`no session log has an interval of ${job}`);
 
-	// Transfers that have an llm_call anywhere in the evidence: settlement metadata beside one
-	// is bookkeeping; without one it is spend the total does not hold.
+	// ── PLACEMENT: ONE function decides, for EVERY kind of evidence, whether it is a gap for this
+	// job. Records (llm_call, a give-back, a denial, anything else) and the plugin's watch
+	// records (a gap, a refusal) are normalised into one shape and go through `place`; nothing
+	// else decides which job a piece of evidence counts toward, and a test greps for it. Three
+	// kinds once had three rules, two of which trusted a foreign tag without checking it against
+	// the event's own session log. A tag is a CLAIM; the event's own session log places it. ──
+	const capableSessions = new Set(
+		[...bySession]
+			.filter(([, mine]) => mine.some((r) => typeof r?.data?.usageFrom === "string"))
+			.map(([sid]) => sid),
+	);
 	const callTransfers = new Set(
 		records.filter((r) => r?.kind === "llm_call").map((r) => r?.data?.transferId),
 	);
-	// Spend-like records that name NO session cannot be placed by any log, so they may be the
-	// job's AT ANY TIME: another session's intervals say nothing about when they happened. They
-	// are a gap for every job, as a log-less session's usage is.
-	for (const r of records) {
-		if (r?.data?.job === job || sessionOfRecord(r) !== null) continue;
-		// A give-back that names no session cannot be placed by any log either: unless it states
-		// the proof of no usage, it is as unplaceable as a sessionless call.
-		const unproven =
-			r?.kind === "hold_released" && r.data?.releaseClass !== "unused" && r.data?.job === undefined;
-		if (r?.kind !== "llm_call" && !SPEND_LIKE.has(r?.kind) && !unproven) continue;
-		why(`a ${r.kind} record names no session: it may belong to ${job}`, {
-			kind: r.kind,
-			transferId: r?.data?.transferId,
-		});
-	}
+	const REFUSALS = new Set(["policy_denied", "ledger_rejected", "would_block"]);
+	const recognised = (kind) =>
+		kind === "llm_call" || BENIGN_KINDS.has(kind) || SPEND_METADATA.has(kind);
 
-	// ── Clause 2: every event whose time could fall in the job's intervals is POSITIVELY
-	// attributed elsewhere, through a valid log of its own session. One that cannot be
-	// resolved could belong to the job, so it is a known gap. ──
-	for (const [sid, mine] of bySession) {
-		const capable = mine.some((r) => typeof r?.data?.usageFrom === "string");
-		const intervals = intervalsBySession.get(sid) ?? [];
-		for (const r of mine) {
-			if (r?.data?.job === job) continue; // clause 1 judged it
-			// A give-back that states no proof of no usage and is not attributed to ANOTHER job could
-			// be this job's: with no usable log, or starting inside an interval, it is a gap.
-			if (
-				r?.kind === "hold_released" &&
-				r.data?.releaseClass !== "unused" &&
-				r.data?.job === undefined
-			) {
-				const at = ms(r.data?.usageFrom);
-				if (!usable(sid) || (Number.isFinite(at) ? insideAny([at, at], intervals) : capable)) {
-					why(
-						`session ${sid}: a released hold of no known job, usage unconfirmed, may belong to ${job}`,
-						{
-							session: sid,
-							transferId: r.data?.transferId,
-						},
-					);
-				}
-				continue;
-			}
-			if (
-				BENIGN_KINDS.has(r?.kind) &&
-				!(SPEND_METADATA.has(r?.kind) && !callTransfers.has(r?.data?.transferId))
-			) {
-				continue;
-			}
-			const isCall = r?.kind === "llm_call";
-			const w = isCall ? window(r.data) : null;
-			const point = ms(r?.data?.usageFrom);
-			if (!usable(sid)) {
-				why(
-					`session ${sid}: a ${r?.kind} cannot be placed (no usable job log): it may belong to ${job}`,
-					{ session: sid, kind: r?.kind, transferId: r?.data?.transferId },
-				);
-				continue;
-			}
-			if (!isCall) {
-				// DENY BY DEFAULT: a record of a kind this check cannot read as spend or as a
-				// harmless give-back (a denial, a failure, anything new) inside an interval may
-				// stand for usage that is not in the total, whatever labels it carries or lacks.
-				if (!Number.isFinite(point) ? capable : insideAny([point, point], intervals)) {
-					why(`session ${sid}: a ${r?.kind} record lies in an interval of ${job}`, {
-						session: sid,
-						kind: r?.kind,
-					});
-				}
-				continue;
-			}
-			if (w === null) {
-				if (capable)
-					why(`session ${sid}: an llm_call has no complete usage window`, {
-						session: sid,
-						transferId: r?.data?.transferId,
-					});
-				continue;
-			}
-			if (!overlapsAny(w, intervals)) continue; // positively attributed elsewhere
-			if (r.data?.jobState === "invalid") {
-				why(`session ${sid}: an llm_call in the interval has an invalid job state`, {
-					session: sid,
-					transferId: r?.data?.transferId,
-				});
-			} else if (r.data?.job === undefined) {
-				why(`session ${sid}: an llm_call in the interval carries no job`, {
-					session: sid,
-					transferId: r?.data?.transferId,
-				});
-			} else {
-				why(`session ${sid}: an llm_call in the interval carries another job`, {
-					session: sid,
-					transferId: r?.data?.transferId,
-					job: r?.data?.job,
-				});
-			}
+	const fromRecord = (rec) => {
+		const data = rec?.data ?? {};
+		const point = ms(data.usageFrom);
+		return {
+			origin: "record",
+			kind: rec?.kind,
+			sid: sessionOfRecord(rec),
+			tag: typeof data.job === "string" ? data.job : null,
+			jobState: data.jobState,
+			span:
+				rec?.kind === "llm_call" ? window(data) : Number.isFinite(point) ? [point, point] : null,
+			transferId: data.transferId,
+			proof: rec?.kind === "hold_released" && data.releaseClass === "unused",
+		};
+	};
+	const fromWatch = (w) => {
+		// An explicit null start is a start nobody knows: unresolved, never the time it was written.
+		const t = w.started === null ? Number.NaN : ms(w.started ?? w.at);
+		return {
+			origin: "watch",
+			kind: w.kind,
+			sid: typeof w.session === "string" ? w.session : null,
+			tag:
+				w.kind === "would_block" && typeof w.job === "string" && JOB_ID.test(w.job) ? w.job : null,
+			span: Number.isFinite(t) ? [t, t] : null,
+			started: w.started ?? w.at,
+			proof: false,
+		};
+	};
+
+	/** The gap this event is for `job`, as `[text, evidence]`, or null when it is not one. */
+	const place = (ev) => {
+		const here = { kind: ev.kind, session: ev.sid ?? undefined, transferId: ev.transferId };
+		if (ev.proof) return null; // a structured proof that no usage happened
+		// Settlement bookkeeping beside the llm_call it belongs to holds no usage of its own.
+		if (
+			SPEND_METADATA.has(ev.kind) &&
+			BENIGN_KINDS.has(ev.kind) &&
+			callTransfers.has(ev.transferId)
+		) {
+			return null;
 		}
-	}
+		if (ev.tag === job) {
+			if (REFUSALS.has(ev.kind)) {
+				return ev.origin === "watch"
+					? [`a request of ${job} was refused (would_block): its usage is unrecorded`, here]
+					: [`a request of ${job} was denied: its usage may be unrecorded`, here];
+			}
+			if (!recognised(ev.kind)) return [`an unrecognised ${ev.kind} record names ${job}`, here];
+			if (ev.sid === null) return [`a record of ${job} names no session`, here];
+			if (!usable(ev.sid)) {
+				return [
+					`session ${ev.sid}: a record of ${job} has no usable job log to be placed by`,
+					here,
+				];
+			}
+			const intervals = intervalsBySession.get(ev.sid) ?? [];
+			if (intervals.length === 0) {
+				return [
+					`session ${ev.sid}: a ${ev.kind} of ${job} lies outside its intervals (the session has none)`,
+					here,
+				];
+			}
+			return ev.span !== null && insideAny(ev.span, intervals)
+				? null
+				: [`session ${ev.sid}: a ${ev.kind} of ${job} lies outside its intervals`, here];
+		}
+		// Not tagged with this job (another job, none, or an invalid state): its own session's log
+		// places it, whatever it claims.
+		const unproven = ev.kind === "hold_released";
+		const spendLike =
+			ev.origin === "watch" || ev.kind === "llm_call" || SPEND_LIKE.has(ev.kind) || unproven;
+		if (ev.sid === null) {
+			return spendLike
+				? [
+						ev.origin === "watch"
+							? `a ${ev.kind} cannot be attributed to a job (it names no session): it may belong to ${job}`
+							: `a ${ev.kind} record names no session: it may belong to ${job}`,
+						here,
+					]
+				: null;
+		}
+		const releasedHold = `session ${ev.sid}: a released hold of no known job, usage unconfirmed, may belong to ${job}`;
+		if (!usable(ev.sid)) {
+			if (unproven) return [releasedHold, here];
+			return [
+				ev.origin === "watch"
+					? `a ${ev.kind} cannot be attributed to a job (session ${ev.sid} has ${Object.hasOwn(logs ?? {}, ev.sid) ? "no usable" : "no"} job log): it may belong to ${job}`
+					: `session ${ev.sid}: a ${ev.kind} cannot be placed (no usable job log): it may belong to ${job}`,
+				here,
+			];
+		}
+		const intervals = intervalsBySession.get(ev.sid) ?? [];
+		if (ev.span === null) {
+			if (ev.origin === "watch") {
+				return [
+					`a ${ev.kind} cannot be attributed to a job (its time is unreadable): it may belong to ${job}`,
+					here,
+				];
+			}
+			if (!capableSessions.has(ev.sid)) return null;
+			if (unproven) return [releasedHold, here];
+			return ev.kind === "llm_call"
+				? [`session ${ev.sid}: an llm_call has no complete usage window`, here]
+				: [`session ${ev.sid}: a ${ev.kind} record lies in an interval of ${job}`, here];
+		}
+		const inside =
+			ev.kind === "llm_call" ? overlapsAny(ev.span, intervals) : insideAny(ev.span, intervals);
+		if (!inside) return null; // positively placed elsewhere
+		if (ev.origin === "watch") {
+			return [
+				`session ${ev.sid}: a ${ev.kind} fell inside an interval of ${job}`,
+				{ ...here, started: ev.started },
+			];
+		}
+		if (ev.kind === "llm_call") {
+			const how =
+				ev.jobState === "invalid"
+					? "has an invalid job state"
+					: ev.tag === null
+						? "carries no job"
+						: "carries another job";
+			return [
+				`session ${ev.sid}: an llm_call in the interval ${how}`,
+				{ ...here, job: ev.tag ?? undefined },
+			];
+		}
+		if (unproven) return [releasedHold, here];
+		return [`session ${ev.sid}: a ${ev.kind} record lies in an interval of ${job}`, here];
+	};
 
-	// The plugin's own watch records (`watch.jsonl`), when supplied: a `would_block` is usage
-	// that was refused and a `gap` is a call that ran UNMETERED, so neither is in the total.
-	// Such an event stops being a problem for the job ONLY when positively attributed to
-	// something else through a valid log of its own session (the job open when its call
-	// STARTED is not this one, or none is). One that cannot be resolved (no session, an
-	// unreadable time, no usable log) could belong to ANY job, so it is a known gap for every job;
-	// its own label proves nothing, and neither does its lack of one.
+	const placeAll = [
+		...records.map(fromRecord),
+		...watch.filter((w) => w?.kind === "gap" || w?.kind === "would_block").map(fromWatch),
+	];
+	for (const ev of placeAll) {
+		const gap = place(ev);
+		if (gap !== null) why(gap[0], gap[1]);
+	}
 	for (const w of watch) {
 		if (w?.kind === "unreadable") {
 			why("the watch records are unreadable: gaps and refusals cannot be ruled out");
-			continue;
-		}
-		if (w?.kind !== "gap" && w?.kind !== "would_block") continue;
-		if (w.kind === "would_block" && w.job === job) {
-			why(`a request of ${job} was refused (would_block): its usage is unrecorded`, {
-				kind: w.kind,
-				session: w.session,
-			});
-			continue;
-		}
-		// A refusal that NAMES another job is positively attributed to it: its hook time (a Stop
-		// that ran during this job) is not its usage time.
-		if (w.kind === "would_block" && typeof w.job === "string" && JOB_ID.test(w.job)) continue;
-		const sid = typeof w.session === "string" ? w.session : null;
-		// An explicit null is a start nobody knows: unresolved, never the time it was written.
-		const t = w.started === null ? Number.NaN : ms(w.started ?? w.at);
-		let unresolved = null;
-		if (sid === null) unresolved = "it names no session";
-		else if (!Number.isFinite(t)) unresolved = "its time is unreadable";
-		else if (!Object.hasOwn(logs ?? {}, sid)) unresolved = `session ${sid} has no job log`;
-		else if (!usable(sid)) unresolved = `session ${sid} has no usable job log`;
-		else if (jobAtEvents(parsedLogs.get(sid).events, t) === job) {
-			why(`session ${sid}: a ${w.kind} fell inside an interval of ${job}`, {
-				kind: w.kind,
-				session: sid,
-				started: w.started ?? w.at,
-			});
-		}
-		if (unresolved !== null) {
-			why(`a ${w.kind} cannot be attributed to a job (${unresolved}): it may belong to ${job}`, {
-				kind: w.kind,
-				session: w.session,
-				started: w.started ?? w.at,
-				why: unresolved,
-			});
 		}
 	}
 
