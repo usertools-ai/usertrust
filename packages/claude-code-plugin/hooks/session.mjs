@@ -22,10 +22,20 @@
 // A refused config file is not pinned, and the next hook resolves again. A refused
 // hook sends nothing, so nothing it saw can be posted twice.
 //
-// Anything wrong with the pin itself runs the hook refused: key-less and watch-only,
-// with a gap. That means a session id that is not safe as a file name, a directory
-// or file that fails its checks, a corrupt pin, or no hard links. The hook never
-// resolves without the pin, which could move the state dir.
+// The pin has ONE place. Before one is made, its name there is read (`readPin`): a pin;
+// none, which only ENOENT means; or a failure to read it, which refuses the hook, so a
+// pin that cannot be read is never taken for none. A session whose passwd home cannot
+// hold its pin has nowhere else: a pin made anywhere else could be the session's second,
+// and charge usage twice.
+//
+// Anything wrong with the pin itself runs the hook refused: key-less, it sends nothing,
+// and records a gap. That means a session id that is not safe as a file name, a passwd
+// home that cannot hold the pin (none, or a directory that fails its checks), a pin
+// that cannot be read, a corrupt pin, or no hard links. The hook never sends with
+// settings resolved in the pin's place, which could move the state dir. Its mode is still
+// the session's: an enforce session blocks (PreToolUse fails closed, unless failOpen),
+// and never silently stops enforcing. Only a refused config file, whose mode is unknown,
+// runs watch-only.
 //
 // A pin deleted mid-session is made again, from the settings then current, by the
 // next hook. A pin idle for 30 days is swept (`sweep`, at SessionStart); a session
@@ -236,7 +246,8 @@ function pinOf(resolved, kind, now) {
 /**
  * A pin's settings, as config.mjs `settings()` gives them. An environment pin takes
  * its key from `env` (config.mjs `environmentKey`), and is refused when that key is
- * not the one the session was pinned with.
+ * not the one the session was pinned with: it sends nothing, in its pinned mode, so
+ * an enforce session blocks rather than stop enforcing.
  */
 export function pinnedSettings(pin, env, passwdHome) {
 	const { key, keyHash: pinned, ...rest } = pin.settings;
@@ -247,6 +258,8 @@ export function pinnedSettings(pin, env, passwdHome) {
 		return refusedSettings("pin: key changed", passwdHome, {
 			configured: false,
 			stateDir: rest.stateDir,
+			mode: rest.mode,
+			failOpen: rest.failOpen,
 		});
 	}
 	return { ...base, ...rest, configured: false, key: current };
@@ -291,7 +304,18 @@ function publish(path, content, { fs }) {
  * This hook's session: its settings from the session's pin, made now when the
  * session has none; the pin's `kind` ("configured" or "environment", null when there
  * is no usable pin); and the pin's path. `payload` is the hook's input, which names
- * the session. Anything wrong with the pin gives refused settings.
+ * the session.
+ * - The pin is made only under the passwd home, and only once `readPin` says there is
+ *   none: ENOENT, nothing else. A passwd home that cannot hold it (none: a failed
+ *   passwd lookup included; or a directory that fails its checks) refuses the hook.
+ * - Anything wrong with the pin gives refused settings: the hook sends nothing. Their
+ *   mode and failOpen are what the session means to be, so an enforce session still
+ *   blocks (PreToolUse fails closed, as on any outage) and never silently stops
+ *   enforcing. Once this hook has resolved the settings itself, they are that
+ *   resolution's; a config file read again could be caught mid-replacement, and name
+ *   no mode. Before then, they are the settings as resolved now (`intended`), or the
+ *   pin's own for `pin: key changed`. A refused config file names no mode, and stays
+ *   watch-only.
  */
 export function sessionSettings({
 	env = environment(),
@@ -301,40 +325,46 @@ export function sessionSettings({
 	now = Date.now(),
 	fs = REAL_FS,
 }) {
-	const refuse = (reason) => ({
-		settings: refusedSettings(reason, passwdHome, { configured: namesConfig(env) }),
+	/** The mode and failOpen the session means to have, as resolved now: none for a refused file. */
+	const intended = () => {
+		const current = resolveSettings({ env, passwdHome, uid, fs });
+		return current.refused === null ? { mode: current.mode, failOpen: current.failOpen } : {};
+	};
+	/** Refused settings, in `known`'s mode and failOpen when this hook resolved them, else as now. */
+	const refuse = (reason, known = intended()) => ({
+		settings: refusedSettings(reason, passwdHome, { configured: namesConfig(env), ...known }),
 		kind: null,
 		path: null,
 	});
+	/** The session of the pin `read` at `path`, refused as `known` says when it is not usable. */
+	const use = (read, path, known) => {
+		if (read.refused !== undefined) return refuse(read.refused, known);
+		if (read.missing) return refuse("pin: unreadable", known);
+		return { settings: pinnedSettings(read.pin, env, passwdHome), kind: read.pin.kind, path };
+	};
 	const id = isObject(payload) ? payload.session_id : undefined;
 	if (typeof id !== "string" || !SESSION_ID.test(id)) return refuse("pin: session id refused");
 	if (passwdHome === null) return refuse("pin: dir refused (home)");
 	const where = pinDir(passwdHome, { uid, fs });
 	if (where.refused !== undefined) return refuse(where.refused);
 	const path = join(where.dir, `${id}.json`);
-	let read = readPin(path, { uid, fs });
-	if (read.missing) {
-		const resolved = resolveSettings({ env, passwdHome, uid, fs });
-		// A refused config file is not pinned: the next hook resolves again.
-		if (resolved.refused !== null) return { settings: resolved, kind: null, path: null };
-		const kind = resolved.configured ? "configured" : "environment";
-		let outcome;
-		try {
-			outcome = publish(path, JSON.stringify(pinOf(resolved, kind, now)), { fs });
-		} catch {
-			return refuse("pin: unwritable");
-		}
-		if (outcome === "nolink") return refuse("pin: no hard links");
-		// Won or lost, the pin is the one now there.
-		read = readPin(path, { uid, fs });
+	const read = readPin(path, { uid, fs });
+	// A pin, or one that cannot be read: never taken for none, so no pin is made for it.
+	if (!read.missing) return use(read, path);
+	const resolved = resolveSettings({ env, passwdHome, uid, fs });
+	// A refused config file is not pinned: the next hook resolves again.
+	if (resolved.refused !== null) return { settings: resolved, kind: null, path: null };
+	const known = { mode: resolved.mode, failOpen: resolved.failOpen };
+	const kind = resolved.configured ? "configured" : "environment";
+	let outcome;
+	try {
+		outcome = publish(path, JSON.stringify(pinOf(resolved, kind, now)), { fs });
+	} catch {
+		return refuse("pin: unwritable", known);
 	}
-	if (read.refused !== undefined) return refuse(read.refused);
-	if (read.missing) return refuse("pin: unreadable");
-	return {
-		settings: pinnedSettings(read.pin, env, passwdHome),
-		kind: read.pin.kind,
-		path,
-	};
+	if (outcome === "nolink") return refuse("pin: no hard links", known);
+	// Won or lost, the pin is the one now there.
+	return use(readPin(path, { uid, fs }), path, known);
 }
 
 /** Mark a pin used now, so `sweep` keeps it while its session lives. Best effort. */

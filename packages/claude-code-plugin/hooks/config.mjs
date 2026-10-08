@@ -107,21 +107,29 @@ function fromEnvironment(env) {
 
 /**
  * A session that sends nothing: a configured one whose file was refused, or one whose
- * pin or launch was (session.mjs, launch.mjs). Watch-only and key-less, with no
- * server to send to (`url: null`: lib.mjs `serverRequest` refuses before any
- * request). Its gap records go to `stateDir` when the session's own is known (from
- * its pin), else to the default state dir under the passwd home, so they still land
- * somewhere the user owns. Without a passwd home, under `homedir()`.
+ * pin or launch was (session.mjs, launch.mjs). Key-less, with no server to send to
+ * (`url: null`: lib.mjs `serverRequest` refuses before any request).
+ * - Watch-only when its mode is unknown, as a refused file's is. When the session's
+ *   mode is known (`mode`, `failOpen`: its pin, its environment, a readable file), that
+ *   mode still decides the outcome: an enforce PreToolUse fails closed, as on any
+ *   outage, unless failOpen.
+ * - Its gap records go to `stateDir` when the session's own is known (from its pin),
+ *   else to the default state dir under the passwd home, so they still land somewhere
+ *   the user owns. Without a passwd home, under `homedir()`.
  */
-export function refusedSettings(reason, passwdHome, { configured = true, stateDir } = {}) {
+export function refusedSettings(
+	reason,
+	passwdHome,
+	{ configured = true, stateDir, mode = "watch", failOpen = false } = {},
+) {
 	return {
 		configured,
 		refused: reason,
 		url: null,
 		key: "",
-		mode: "watch",
+		mode,
 		unrecognizedMode: undefined,
-		failOpen: false,
+		failOpen,
 		stateDir: stateDir ?? defaultStateDir(passwdHome ?? homedir()),
 		usage: "transcript",
 		model: DEFAULT_MODEL,

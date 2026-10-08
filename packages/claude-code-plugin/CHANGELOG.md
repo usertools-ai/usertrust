@@ -7,6 +7,32 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Breaking
+
+- **A session that cannot keep its pin under the passwd home is refused; 1.4.1 ran
+  it as usual.** Each session's settings are now pinned once, under the home the
+  passwd database gives (see *Changed*), so that a setting changed mid-session can
+  never charge the same usage twice. There is no other place to keep the pin that
+  is safe from that, so a session that cannot keep it there sends nothing.
+  - **Who this affects:** sessions configured through the environment (no
+    `UT_CC_CONFIG`) where:
+    - the user has no passwd entry (a container running as a uid with none, say), or
+      the passwd lookup fails;
+    - the passwd home does not exist;
+    - `.local/state/usertrust` or its `sessions` directory under that home is a
+      symlink, is not a directory, is owned by another user, or is writable by its
+      group or others;
+    - or the pin cannot be written there: a read-only home, or a filesystem without
+      hard links.
+  - **What they get now:** each hook sends nothing, in the session's own mode, and
+    SessionStart says why. In enforce mode every tool call is blocked (with
+    `failOpen`, each proceeds ungoverned, as a gap); in watch mode each is recorded
+    as a gap. A lookup that fails for a moment refuses only the hooks that run
+    meanwhile.
+  - **To keep such a setup working:** run as a user with a passwd entry whose home
+    exists, and let the plugin make its directories there (0700), or make them the
+    user's own, real directories, writable by no one else.
+
 ### Added
 
 - **Say which job a session is working on: `usertrust-job start <job-id>` / `stop`.** The job is recorded on every ledger record the session produces (`job`, plus `usageFrom` / `usageTo`, the window of USAGE the record covers), so one session that fixes five bugs can say what each cost. It needs a usertrust-server that lists `"job"` in `/v1/health` `capabilities`; against an older one nothing is sent and every body is what it was.
@@ -83,12 +109,20 @@ npm, and its version is its own: the `usertrust` packages and their
   environment alike, and an edit applies to new sessions, a key rotation included.
   - They are kept in a pin under the passwd home:
     `.local/state/usertrust/sessions/<session id>.json`, 0600, in directories
-    checked as the config anchor is.
+    checked as the config anchor is. There is no other place: a session whose passwd
+    home cannot hold its pin is refused (see *Breaking*). A pin is made only once a
+    read of its name finds nothing there; one that is there but cannot be read
+    refuses the hook.
   - An environment session's pin holds the key's hash, never the key. A key changed
     mid-session is refused for that hook: it sends nothing, and records a gap.
   - A pin unused for 30 days is removed when a session starts; that session, if
     resumed at or after the removal, is pinned again from the settings then current.
-    A pin that cannot be used runs the hook watch-only and key-less, with a gap.
+  - A pin that cannot be used runs the hook key-less: it sends nothing, in the
+    session's own mode. An enforce session blocks every call (with `failOpen`, lets
+    each through as a gap), and never silently stops enforcing. When the failure
+    follows the hook's own read of the settings (a pin that could not be written),
+    the mode is that read's: a config file read again could be caught mid-save, and
+    name none. Only a refused config file, whose mode is unknown, runs watch-only.
   - Every hook now starts through `hooks/launch.mjs`.
   - `usertrust-job` reads a session's settings from the same pin, so `start` and
     `stop` write to the job log the session's hooks read, whatever the state dir

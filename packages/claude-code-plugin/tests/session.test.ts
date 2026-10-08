@@ -30,6 +30,7 @@ const SPAWN_FAILS = join(import.meta.dirname, "helpers", "spawn-fails.mjs");
 const WIN32 = join(import.meta.dirname, "helpers", "win32.mjs");
 const ANNOUNCE = join(import.meta.dirname, "helpers", "announce-preload.mjs");
 const PAUSE_AT_PIN = join(import.meta.dirname, "helpers", "pause-at-pin.mjs");
+const TORN_AT_PIN = join(import.meta.dirname, "helpers", "torn-at-pin.mjs");
 const UID = process.getuid?.() ?? null;
 const SESSION = "sess-pin";
 const MODEL = "claude-sonnet-4-6";
@@ -616,6 +617,367 @@ describe("a pin that cannot be used runs the hook refused: key-less, a gap, noth
 				await symlink(real, pinOf(home));
 			}),
 		).toBe("pin: unreadable");
+	});
+});
+
+describe("a session that cannot pin keeps its mode: enforce never silently stops enforcing", () => {
+	const call = (tool_use_id = "tu_1") => ({
+		session_id: SESSION,
+		tool_name: "Bash",
+		tool_use_id,
+		tool_input: {},
+	});
+	/** An environment session in enforce mode, unless `more` says otherwise. */
+	const enforce = (url: string, stateDir: string, more: Record<string, string> = {}) => ({
+		UT_CC_STATE_DIR: stateDir,
+		UT_SERVER_URL: url,
+		UT_SERVER_KEY: "k",
+		UT_CC_USAGE: "estimate",
+		UT_CC_MODE: "enforce",
+		...more,
+	});
+	/** A HOME of the test's own: with no passwd home, a refused session's gaps go under it. */
+	const scratchHome = () => mkdtemp(join(tmpdir(), "utcc-pin-HOME-"));
+
+	for (const [what, place, reason] of [
+		[
+			"no passwd home (no passwd entry, or a lookup that fails)",
+			async () => ({ TEST_PASSWD_HOME: "", HOME: await scratchHome() }),
+			"pin: dir refused (home)",
+		],
+		[
+			"a passwd home whose sessions dir its group can write",
+			async () => {
+				const home = await makeHome();
+				await mkdir(pinsOf(home), { recursive: true });
+				await chmod(pinsOf(home), 0o770);
+				return { TEST_PASSWD_HOME: home, HOME: await scratchHome() };
+			},
+			"pin: dir refused (mode)",
+		],
+	] as const) {
+		it(`an environment session with ${what} has nowhere to pin: refused in its mode, enforce fails closed, failOpen proceeds as a gap, SessionStart says why, and no pin is made anywhere`, async () => {
+			const server = await recordingServer();
+			const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-nowhere-"));
+			const at = await place();
+			const env = enforce(server.url, stateDir, at);
+			const strict = await runHook(hook("pre-tool-use"), call(), env);
+			// mutant: a pin made somewhere else instead (the state dir, $HOME), and the call sent
+			expect(server.requests).toEqual([]);
+			expect(strict.code).toBe(2);
+			expect(strict.stderr).toContain(`failed closed: ${reason}`);
+			const open = await runHook(hook("pre-tool-use"), call("tu_2"), {
+				...env,
+				UT_FAIL_OPEN: "1",
+			});
+			expect(open.code).toBe(0);
+			expect(server.requests).toEqual([]);
+			const start = await runHook(
+				hook("session-start"),
+				{ session_id: SESSION, source: "startup" },
+				env,
+			);
+			const message = (JSON.parse(start.stdout) as { systemMessage: string }).systemMessage;
+			expect(message).toContain("usertrust: ENFORCING, but nothing can be sent");
+			expect(message).toContain(reason);
+			expect(message).toContain("every tool call is blocked");
+			// No pin anywhere: neither the state dir nor $HOME holds one.
+			expect(await readdir(stateDir)).toEqual([]);
+			expect(nodeFs.existsSync(join(at.HOME, ".local"))).toBe(false);
+		});
+	}
+
+	it("a configured session whose passwd home cannot hold its pin is refused in the file's mode: enforce fails closed", async () => {
+		const home = await makeHome();
+		const server = await recordingServer();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-cfg-nowhere-"));
+		const config = await writeConfig(home, {
+			url: server.url,
+			key: "k",
+			mode: "enforce",
+			stateDir,
+			usage: "estimate",
+		});
+		await mkdir(pinsOf(home), { recursive: true });
+		await chmod(pinsOf(home), 0o770);
+		const pre = await runHook(hook("pre-tool-use"), call(), {
+			TEST_PASSWD_HOME: home,
+			UT_CC_CONFIG: config,
+		});
+		// mutant: a session that cannot pin runs watch-only: exit 0
+		expect(server.requests).toEqual([]);
+		expect(pre.code).toBe(2);
+		expect(pre.stderr).toContain("failed closed: pin: dir refused (mode)");
+	});
+
+	for (const [at, failure, reason] of [
+		["open", "its temp file cannot be made", "pin: unwritable"],
+		["link", "the filesystem has no hard links", "pin: no hard links"],
+		["read", "it cannot be read back", "pin: unreadable"],
+	] as const) {
+		it(`a pin that fails as ${failure}, after the hook read an enforce config file whole, is refused in THAT reading's mode: exit 2, though the file is half-written by then`, async () => {
+			const home = await makeHome();
+			const server = await recordingServer();
+			const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-torn-"));
+			const config = await writeConfig(home, {
+				url: server.url,
+				key: "k",
+				mode: "enforce",
+				stateDir,
+				usage: "estimate",
+			});
+			const pre = await runHook(
+				hook("pre-tool-use"),
+				call(),
+				{ TEST_PASSWD_HOME: home, UT_CC_CONFIG: config, TEST_TEAR_AT: at },
+				["--import", TORN_AT_PIN],
+			);
+			// mutant: the refusal reads the file again: half-written, it names no mode, and the
+			// call runs
+			expect(server.requests).toEqual([]);
+			expect(pre.code).toBe(2);
+			expect(pre.stderr).toContain(`failed closed: ${reason}`);
+			// Control: the file is half-written now, so a second read finds no mode.
+			const text = await readFile(config, "utf-8");
+			expect(() => JSON.parse(text)).toThrow();
+		});
+	}
+
+	it("a corrupt pin under enforce: PreToolUse fails closed, and sends nothing", async () => {
+		const server = await recordingServer();
+		const home = await makeHome();
+		await mkdir(pinsOf(home), { recursive: true, mode: 0o700 });
+		await writeFile(pinOf(home), "{not a pin", { mode: 0o600 });
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-corrupt-"));
+		const pre = await runHook(
+			hook("pre-tool-use"),
+			call(),
+			enforce(server.url, stateDir, { TEST_PASSWD_HOME: home }),
+		);
+		// mutant: a corrupt pin runs watch-only: exit 0
+		expect(pre.code).toBe(2);
+		expect(pre.stderr).toContain("failed closed: pin: corrupt");
+		expect(server.requests).toEqual([]);
+	});
+
+	it("a key changed mid-session under enforce is blocked, in the PINNED mode", async () => {
+		const server = await recordingServer();
+		const home = await makeHome();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-key-enforce-"));
+		const env = enforce(server.url, stateDir, { TEST_PASSWD_HOME: home });
+		expect((await runHook(hook("pre-tool-use"), call(), env)).stderr).toContain("reserved tx_1");
+		const before = server.requests.length;
+		// The environment says watch now as well: the session's pin still says enforce.
+		const changed = await runHook(hook("pre-tool-use"), call("tu_2"), {
+			...env,
+			UT_SERVER_KEY: "another-key",
+			UT_CC_MODE: "watch",
+		});
+		// mutant: a changed key runs watch-only: exit 0
+		expect(changed.code).toBe(2);
+		expect(changed.stderr).toContain("failed closed: pin: key changed");
+		expect(server.requests).toHaveLength(before);
+	});
+
+	it("SessionStart says why: ENFORCING with nothing sent, every call blocked, or with failOpen let through as gaps", async () => {
+		const server = await recordingServer();
+		const home = await makeHome();
+		await mkdir(pinsOf(home), { recursive: true, mode: 0o700 });
+		await writeFile(pinOf(home), "{not a pin", { mode: 0o600 });
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-announce-"));
+		const start = async (more: Record<string, string> = {}) =>
+			(
+				JSON.parse(
+					(
+						await runHook(
+							hook("session-start"),
+							{ session_id: SESSION, source: "startup" },
+							enforce(server.url, stateDir, { TEST_PASSWD_HOME: home, ...more }),
+						)
+					).stdout,
+				) as { systemMessage: string }
+			).systemMessage;
+		const strict = await start();
+		// mutant: a refused session announces itself watch-only
+		expect(strict).toContain("usertrust: ENFORCING, but nothing can be sent");
+		expect(strict).toContain("pin: corrupt");
+		expect(strict).toContain("every tool call is blocked");
+		expect(await start({ UT_FAIL_OPEN: "1" })).toContain("every tool call proceeds ungoverned");
+	});
+
+	it("a refused config file names no mode: watch-only, whatever the environment says", async () => {
+		const server = await recordingServer();
+		const home = await makeHome();
+		const pre = await runHook(hook("pre-tool-use"), call(), {
+			TEST_PASSWD_HOME: home,
+			UT_CC_CONFIG: "",
+			UT_CC_MODE: "enforce",
+			UT_SERVER_URL: server.url,
+		});
+		expect(pre.code).toBe(0);
+		expect(server.requests).toEqual([]);
+		expect(await watchRecords(join(home, ".claude", "usertrust-cc"))).toMatchObject([
+			{ kind: "gap", reason: "config: empty" },
+		]);
+	});
+});
+
+describe("a session is pinned once: a passwd home that cannot be used, or a lookup that fails, is never taken for one without a pin", () => {
+	/** An environment session's Stops, in watch mode, at a state dir and a place the test moves. */
+	async function stops(at: Record<string, string>) {
+		const server = await recordingServer();
+		const [own, used] = [await mkdtemp(join(tmpdir(), "utcc-pin-once-own-")), await usedStateDir()];
+		const transcript = await transcriptFile();
+		let stateDir = own;
+		let place = at;
+		const env = () => ({
+			UT_CC_STATE_DIR: stateDir,
+			UT_SERVER_URL: server.url,
+			UT_SERVER_KEY: "k",
+			...place,
+		});
+		return {
+			server,
+			used,
+			transcript,
+			stop: () =>
+				runHook(hook("stop"), { session_id: SESSION, transcript_path: transcript }, env()),
+			preToolUse: () =>
+				runHook(
+					hook("pre-tool-use"),
+					{ session_id: SESSION, tool_name: "Bash", tool_use_id: "tu_1", tool_input: {} },
+					env(),
+				),
+			moveTo: (dir: string) => {
+				stateDir = dir;
+			},
+			moveHome: (to: Record<string, string>) => {
+				place = to;
+			},
+		};
+	}
+
+	it("a passwd home whose sessions dir turns group-writable mid-session, as the state dir moves: refused, no second pin, and once repaired each message is charged once", async () => {
+		const home = await makeHome();
+		const HOME = await mkdtemp(join(tmpdir(), "utcc-pin-once-HOME-"));
+		const session = await stops({ TEST_PASSWD_HOME: home, HOME });
+		expect((await session.stop()).code).toBe(0);
+		await append(session.transcript, responseEntries("msg_a", 100, 20));
+		await session.stop();
+		expect(session.server.charged()).toBe(120);
+		expect(await readdir(pinsOf(home))).toEqual([`${SESSION}.json`]);
+		// Mid-session the sessions dir turns group-writable, and the state dir moves to one
+		// that already exists: under it, msg_a would be posted again.
+		await chmod(pinsOf(home), 0o770);
+		session.moveTo(session.used);
+		const before = session.server.requests.length;
+		const refused = await session.stop();
+		// mutant: the session pinned again elsewhere (its state dir), and msg_a charged again
+		expect(refused.code).toBe(0);
+		expect(session.server.requests).toHaveLength(before);
+		expect(await readdir(session.used)).toEqual(["transcripts"]);
+		expect(await readdir(join(session.used, "transcripts"))).toEqual(["since"]);
+		expect((await session.preToolUse()).code).toBe(0);
+		expect(session.server.requests).toHaveLength(before);
+		expect(await watchRecords(join(home, ".claude", "usertrust-cc"))).toMatchObject([
+			{ kind: "gap", tool: "Bash", reason: "pin: dir refused (mode)" },
+		]);
+		// Repaired, the pin under the passwd home is the session's again: msg_b once.
+		await chmod(pinsOf(home), 0o700);
+		await append(session.transcript, responseEntries("msg_b", 200, 40));
+		await session.stop();
+		expect(session.server.charged()).toBe(360);
+		expect(session.server.posts("/v1/settle")).toHaveLength(2);
+		expect(await readdir(pinsOf(home))).toEqual([`${SESSION}.json`]);
+		expect(await readdir(session.used)).toEqual(["transcripts"]);
+		expect(nodeFs.existsSync(join(HOME, ".local"))).toBe(false);
+	});
+
+	it("a passwd lookup that fails mid-session, as the state dir moves, refuses those hooks only: no pin anywhere else, and once it answers again each message is charged once", async () => {
+		const home = await makeHome();
+		const HOME = await mkdtemp(join(tmpdir(), "utcc-pin-once-HOME-"));
+		const session = await stops({ TEST_PASSWD_HOME: home, HOME });
+		await session.stop();
+		await append(session.transcript, responseEntries("msg_a", 100, 20));
+		await session.stop();
+		expect(session.server.charged()).toBe(120);
+		// The passwd lookup fails (a directory service that does not answer, say), and the
+		// state dir moves to one under which msg_a would be posted again.
+		session.moveHome({ TEST_PASSWD_HOME: "", HOME });
+		session.moveTo(session.used);
+		const before = session.server.requests.length;
+		const refused = await session.stop();
+		// mutant: a failed lookup read as no passwd home, and the session pinned again
+		// elsewhere ($HOME, or its state dir): msg_a charged again
+		expect(refused.code).toBe(0);
+		expect(session.server.requests).toHaveLength(before);
+		expect(nodeFs.existsSync(join(HOME, ".local"))).toBe(false);
+		expect(await readdir(session.used)).toEqual(["transcripts"]);
+		expect(await readdir(join(session.used, "transcripts"))).toEqual(["since"]);
+		expect((await session.preToolUse()).code).toBe(0);
+		expect(session.server.requests).toHaveLength(before);
+		expect(await watchRecords(join(HOME, ".claude", "usertrust-cc"))).toMatchObject([
+			{ kind: "gap", tool: "Bash", reason: "pin: dir refused (home)" },
+		]);
+		// The lookup answers again: the session's own pin decides, and msg_b is charged once.
+		session.moveHome({ TEST_PASSWD_HOME: home, HOME });
+		await append(session.transcript, responseEntries("msg_b", 200, 40));
+		await session.stop();
+		expect(session.server.charged()).toBe(360);
+		expect(session.server.posts("/v1/settle")).toHaveLength(2);
+		expect(await readdir(pinsOf(home))).toEqual([`${SESSION}.json`]);
+		expect(await readdir(session.used)).toEqual(["transcripts"]);
+	});
+
+	it("a pin that cannot be read is never taken for none: refused, and no pin is made for it", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		await mkdir(pinsOf(home), { recursive: true, mode: 0o700 });
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-once-unread-"));
+		const env = {
+			UT_CC_STATE_DIR: stateDir,
+			UT_SERVER_URL: "http://127.0.0.1:9",
+			UT_SERVER_KEY: "k",
+		};
+		const denied = () => Object.assign(new Error("EACCES"), { code: "EACCES" });
+		// Its pin cannot be opened (EACCES); a create, were one tried, is counted and fails.
+		const creates: string[] = [];
+		const fs = {
+			...nodeFs,
+			openSync: (path: string, flags: number, mode?: number) => {
+				if (path === pinOf(home)) throw denied();
+				if (typeof flags === "number" && (flags & nodeFs.constants.O_CREAT) !== 0) {
+					creates.push(path);
+					throw denied();
+				}
+				return nodeFs.openSync(path, flags, mode);
+			},
+			linkSync: (from: string, to: string) => {
+				creates.push(to);
+				nodeFs.linkSync(from, to);
+			},
+		};
+		const { settings, path } = sessionSettings({
+			env,
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			fs,
+		});
+		// mutant: a pin that cannot be read taken for none: the hook resolves afresh and
+		// tries to make one
+		expect(settings.refused).toBe("pin: unreadable");
+		expect(path).toBeNull();
+		expect(creates).toEqual([]);
+		// Control: ENOENT, and nothing else, is none, and the pin is made.
+		const fresh = await makeHome();
+		const made = sessionSettings({
+			env,
+			payload: { session_id: SESSION },
+			passwdHome: fresh,
+			uid: UID,
+		});
+		expect(made.path).toBe(pinOf(fresh));
 	});
 });
 
