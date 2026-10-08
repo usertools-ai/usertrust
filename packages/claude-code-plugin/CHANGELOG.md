@@ -27,10 +27,16 @@ npm, and its version is its own: the `usertrust` packages and their
     field names. A url with a user or password in it is refused: a request to it
     fails with an error that quotes the whole url.
   - Node can reroute or expose a request without any code, so a configured
-    session is also refused in an environment that does: `NODE_USE_ENV_PROXY` or
-    `--use-env-proxy` (every request through `HTTP_PROXY`, the key included),
-    `NODE_TLS_REJECT_UNAUTHORIZED=0`, `NODE_EXTRA_CA_CERTS`, or `SSL_CERT_FILE` /
-    `SSL_CERT_DIR` under `--use-openssl-ca`.
+    session is also refused in an environment that does:
+    - `NODE_USE_ENV_PROXY` sends every request through `HTTP_PROXY`, the key included;
+    - `NODE_TLS_REJECT_UNAUTHORIZED=0`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
+      `SSL_CERT_DIR` (no flag needed on a build whose default store is OpenSSL's),
+      `NODE_USE_SYSTEM_CA` and `OPENSSL_CONF` / `_MODULES` / `_ENGINES` change what
+      TLS trusts or what OpenSSL loads.
+  - `NODE_OPTIONS` may hold only a short list of options that neither route a
+    request nor change TLS trust; any other token refuses. Node reads options quoted,
+    escaped, with `_` for `-` and with `=` values, so the list is of what to ALLOW:
+    a list of options to refuse missed those spellings.
   - This does not stop code from a project's settings: a hook, or a variable that
     loads code (`NODE_OPTIONS`, `PATH`), runs in the hook's own process and can
     read the file too. Without `UT_CC_CONFIG`, nothing changes.

@@ -21,11 +21,13 @@
 // That code runs in the hook's own process and can read this file too. Only not
 // starting a session in a checkout you have not reviewed stops it.
 //
-// Nor may the environment reroute the requests or loosen their TLS: Node's own
+// Nor may the environment reroute the requests or change what TLS trusts: Node's own
 // proxy support (NODE_USE_ENV_PROXY, --use-env-proxy) sends every fetch through
-// HTTP_PROXY, and NODE_TLS_REJECT_UNAUTHORIZED=0, NODE_EXTRA_CA_CERTS or OpenSSL's
-// certificate variables let someone else read an https one. A configured session
-// whose environment sets any of these is refused like a bad file (`environmentRefusal`).
+// HTTP_PROXY, and NODE_TLS_REJECT_UNAUTHORIZED=0, NODE_EXTRA_CA_CERTS, OpenSSL's
+// certificate and config variables, or a CA-store option let someone else read an
+// https one. NODE_OPTIONS may hold only a short list of options that do neither. A
+// configured session whose environment breaks any of this is refused like a bad file
+// (`environmentRefusal`).
 //
 // Nothing read from the file is ever written where it could be seen: a refusal is
 // one of the fixed reasons below, naming only our own field names. (A JSON parse
@@ -149,36 +151,76 @@ function isHttpUrl(value) {
 	}
 }
 
-/** A node option given in NODE_OPTIONS or on the hook's own command line. */
-function nodeOption(env, execArgv, flag) {
-	const tokens = [...(env.NODE_OPTIONS ?? "").split(/\s+/), ...execArgv];
-	return tokens.some((t) => t === flag || t.startsWith(`${flag}=`));
-}
+/**
+ * The NODE_OPTIONS a configured session may carry: each token must be one of these,
+ * EXACTLY. Node also accepts its options quoted, with backslash escapes inside the
+ * quotes, with `_` for `-` and with a value after `=`, so a list of what to refuse
+ * misses spellings (it did, twice). Anything not on this list refuses. A token holding
+ * a quote or a backslash matches none of these, so splitting on spaces is enough: Node
+ * splits an unquoted string exactly the same way.
+ */
+const NODE_OPTIONS_ALLOWED = [
+	/^--max-old-space-size=\d+$/,
+	/^--max-semi-space-size=\d+$/,
+	/^--enable-source-maps$/,
+	/^--no-warnings$/,
+	/^--no-deprecation$/,
+	/^--trace-warnings$/,
+	/^--trace-deprecation$/,
+	/^--unhandled-rejections=(strict|warn|none|throw|warn-with-error-code)$/,
+	/^--dns-result-order=(ipv4first|ipv6first|verbatim)$/,
+];
+
+/**
+ * The node options that route a request or choose what TLS trusts, as they appear in
+ * the hook's own command line: matched after lower-casing, dropping quotes and
+ * backslashes, and reading `_` as `-`, so no spelling Node accepts slips by. The
+ * command line comes from the plugin's own hooks.json, not the environment; this is the
+ * same rule kept for it.
+ */
+const ROUTE_OR_TRUST_OPTIONS = [
+	"--use-env-proxy",
+	"--use-openssl-ca",
+	"--use-system-ca",
+	"--openssl-config",
+];
+
+/** Variables that change what TLS trusts, or load OpenSSL config or modules: refused when set. */
+const TRUST_VARIABLES = [
+	"NODE_EXTRA_CA_CERTS",
+	"SSL_CERT_FILE",
+	"SSL_CERT_DIR",
+	"NODE_USE_SYSTEM_CA",
+	"OPENSSL_CONF",
+	"OPENSSL_MODULES",
+	"OPENSSL_ENGINES",
+];
 
 /**
  * Why this environment may not carry a configured session's requests, or null. Node
- * reroutes or exposes a fetch without any code: NODE_USE_ENV_PROXY (or
- * --use-env-proxy) sends it through HTTP_PROXY / HTTPS_PROXY, key and all;
- * NODE_TLS_REJECT_UNAUTHORIZED=0 trusts any certificate; NODE_EXTRA_CA_CERTS adds
- * certificates to trust; and under --use-openssl-ca, SSL_CERT_FILE / SSL_CERT_DIR
- * replace them. Each is refused by name, never by value.
+ * reroutes or exposes a fetch without any code:
+ * - NODE_USE_ENV_PROXY (or --use-env-proxy) sends it through HTTP_PROXY /
+ *   HTTPS_PROXY, key and all;
+ * - NODE_TLS_REJECT_UNAUTHORIZED=0 trusts any certificate;
+ * - NODE_EXTRA_CA_CERTS adds certificates to trust; SSL_CERT_FILE / SSL_CERT_DIR
+ *   replace them, with no flag, on a build whose default store is OpenSSL's (as
+ *   Homebrew's); NODE_USE_SYSTEM_CA and the CA-store options change the store; and
+ *   OPENSSL_CONF / _MODULES / _ENGINES load OpenSSL config or code.
+ * NODE_OPTIONS may hold only `NODE_OPTIONS_ALLOWED`. Each refusal names a variable or
+ * an option, never a value.
  */
 export function environmentRefusal(env, execArgv = []) {
 	const set = (name) => (env[name] ?? "") !== "";
-	if (set("NODE_USE_ENV_PROXY")) return "config: environment refused (NODE_USE_ENV_PROXY)";
-	if (nodeOption(env, execArgv, "--use-env-proxy")) {
-		return "config: environment refused (--use-env-proxy)";
+	const refused = (what) => `config: environment refused (${what})`;
+	if (set("NODE_USE_ENV_PROXY")) return refused("NODE_USE_ENV_PROXY");
+	const options = (env.NODE_OPTIONS ?? "").split(/\s+/).filter((t) => t !== "");
+	if (options.some((t) => !NODE_OPTIONS_ALLOWED.some((re) => re.test(t)))) {
+		return refused("NODE_OPTIONS");
 	}
-	if (env.NODE_TLS_REJECT_UNAUTHORIZED === "0") {
-		return "config: environment refused (NODE_TLS_REJECT_UNAUTHORIZED)";
-	}
-	if (set("NODE_EXTRA_CA_CERTS")) return "config: environment refused (NODE_EXTRA_CA_CERTS)";
-	if (
-		nodeOption(env, execArgv, "--use-openssl-ca") &&
-		(set("SSL_CERT_FILE") || set("SSL_CERT_DIR"))
-	) {
-		return "config: environment refused (--use-openssl-ca)";
-	}
+	const argv = execArgv.join(" ").toLowerCase().replace(/["\\]/g, "").replaceAll("_", "-");
+	for (const flag of ROUTE_OR_TRUST_OPTIONS) if (argv.includes(flag.slice(2))) return refused(flag);
+	if (env.NODE_TLS_REJECT_UNAUTHORIZED === "0") return refused("NODE_TLS_REJECT_UNAUTHORIZED");
+	for (const name of TRUST_VARIABLES) if (set(name)) return refused(name);
 	return null;
 }
 

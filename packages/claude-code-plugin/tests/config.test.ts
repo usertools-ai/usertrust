@@ -39,6 +39,10 @@ const NO_REROUTE = {
 	NODE_OPTIONS: "",
 	SSL_CERT_FILE: "",
 	SSL_CERT_DIR: "",
+	NODE_USE_SYSTEM_CA: "",
+	OPENSSL_CONF: "",
+	OPENSSL_MODULES: "",
+	OPENSSL_ENGINES: "",
 	HTTP_PROXY: "",
 	HTTPS_PROXY: "",
 };
@@ -122,7 +126,7 @@ const VALID = {
 
 /** Every refusal is one of these fixed forms: our own field names, never a value. */
 const REASON =
-	/^config: (empty|unreadable|not valid JSON|outside the anchor|anchor refused \((home|missing|symlink|type|owner|mode)\)|file refused \((symlink|type|owner|mode|size)\)|field "[A-Za-z]+" (missing|invalid)|environment refused \((NODE_USE_ENV_PROXY|--use-env-proxy|NODE_TLS_REJECT_UNAUTHORIZED|NODE_EXTRA_CA_CERTS|--use-openssl-ca)\))$/;
+	/^config: (empty|unreadable|not valid JSON|outside the anchor|anchor refused \((home|missing|symlink|type|owner|mode)\)|file refused \((symlink|type|owner|mode|size)\)|field "[A-Za-z]+" (missing|invalid)|environment refused \((NODE_USE_ENV_PROXY|NODE_OPTIONS|--use-env-proxy|--use-openssl-ca|--use-system-ca|--openssl-config|NODE_TLS_REJECT_UNAUTHORIZED|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|NODE_USE_SYSTEM_CA|OPENSSL_CONF|OPENSSL_MODULES|OPENSSL_ENGINES)\))$/;
 
 describe("resolveSettings: which file a configured session accepts", () => {
 	const resolve = async (
@@ -402,26 +406,57 @@ describe("resolveSettings: which file a configured session accepts", () => {
 		expect(refusal({})).toBeNull();
 		const refused: Array<[string, Record<string, string>, string[]]> = [
 			["NODE_USE_ENV_PROXY", { NODE_USE_ENV_PROXY: "1", HTTP_PROXY: "http://127.0.0.1:9" }, []],
-			["--use-env-proxy", { NODE_OPTIONS: "--max-old-space-size=64 --use-env-proxy" }, []],
-			["--use-env-proxy", {}, ["--use-env-proxy"]],
 			["NODE_TLS_REJECT_UNAUTHORIZED", { NODE_TLS_REJECT_UNAUTHORIZED: "0" }, []],
+			// Each variable that changes what TLS trusts, alone: SSL_CERT_* need no flag on a
+			// build whose default store is OpenSSL's (B-67).
 			["NODE_EXTRA_CA_CERTS", { NODE_EXTRA_CA_CERTS: "/tmp/ca.pem" }, []],
-			["--use-openssl-ca", { NODE_OPTIONS: "--use-openssl-ca", SSL_CERT_FILE: "/tmp/ca.pem" }, []],
-			["--use-openssl-ca", { SSL_CERT_DIR: "/tmp/certs" }, ["--use-openssl-ca"]],
+			["SSL_CERT_FILE", { SSL_CERT_FILE: "/tmp/ca.pem" }, []],
+			["SSL_CERT_DIR", { SSL_CERT_DIR: "/tmp/certs" }, []],
+			["NODE_USE_SYSTEM_CA", { NODE_USE_SYSTEM_CA: "1" }, []],
+			["OPENSSL_CONF", { OPENSSL_CONF: "/tmp/openssl.cnf" }, []],
+			["OPENSSL_MODULES", { OPENSSL_MODULES: "/tmp/modules" }, []],
+			["OPENSSL_ENGINES", { OPENSSL_ENGINES: "/tmp/engines" }, []],
+			// The hook's own command line, in every spelling Node accepts (B-66).
+			["--use-env-proxy", {}, ["--use-env-proxy"]],
+			["--use-env-proxy", {}, ["--use_env_proxy"]],
+			["--use-openssl-ca", {}, ["--use_openssl_ca"]],
+			["--use-system-ca", {}, ["--use-system-ca"]],
+			["--openssl-config", {}, ['"--openssl-config=/tmp/x.cnf"']],
 		];
 		for (const [name, env, execArgv] of refused) {
 			expect(refusal(env, execArgv), name).toBe(`config: environment refused (${name})`);
 		}
-		// What changes neither the route nor the trust: accepted.
-		for (const env of [
-			{ NODE_USE_ENV_PROXY: "" },
-			{ HTTP_PROXY: "http://127.0.0.1:9", HTTPS_PROXY: "http://127.0.0.1:9" },
-			{ NODE_TLS_REJECT_UNAUTHORIZED: "1" },
-			{ NODE_OPTIONS: "--max-old-space-size=64 --no-use-env-proxy" },
-			{ NODE_OPTIONS: "--use-openssl-ca" },
-			{ SSL_CERT_FILE: "/tmp/ca.pem" },
+		// NODE_OPTIONS holds only allowlisted tokens (B-66): every spelling Node accepts for a
+		// flag that is not on the list is refused, quoted, escaped, `_` for `-`, with `=`, or
+		// a `--no-` form (the safe direction).
+		for (const options of [
+			'"--use-env-proxy"',
+			'"--use-env\\-proxy"',
+			"--use_env_proxy",
+			"--use-env-proxy=1",
+			"--max-old-space-size=64 --use-env-proxy",
+			'"--use-openssl-ca"',
+			"--use_openssl_ca",
+			"--use-openssl-ca=true",
+			"--no-use-env-proxy",
+			"--use-system-ca",
+			"--require /tmp/preload.cjs",
+			'--max-old-space-size=64"--use-env-proxy"',
 		]) {
-			expect(refusal(env), JSON.stringify(env)).toBeNull();
+			expect(refusal({ NODE_OPTIONS: options }), options).toBe(
+				"config: environment refused (NODE_OPTIONS)",
+			);
+		}
+		// What neither routes a request nor changes the trust: accepted.
+		for (const [env, execArgv] of [
+			[{ NODE_USE_ENV_PROXY: "" }, []],
+			[{ HTTP_PROXY: "http://127.0.0.1:9", HTTPS_PROXY: "http://127.0.0.1:9" }, []],
+			[{ NODE_TLS_REJECT_UNAUTHORIZED: "1" }, []],
+			[{ NODE_OPTIONS: "  --max-old-space-size=64   --enable-source-maps --no-warnings " }, []],
+			[{ NODE_OPTIONS: "--unhandled-rejections=strict --dns-result-order=ipv4first" }, []],
+			[{}, ["--import", "/tmp/a-test-preload.mjs"]],
+		] as Array<[Record<string, string>, string[]]>) {
+			expect(refusal(env, execArgv), JSON.stringify([env, execArgv])).toBeNull();
 		}
 	});
 });
@@ -793,6 +828,52 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 		expect(await watchRecords(join(session.home.home, ".claude", "usertrust-cc"))).toMatchObject([
 			{ kind: "gap", reason: "config: environment refused (NODE_USE_ENV_PROXY)" },
 		]);
+	});
+
+	// B-66: NODE_OPTIONS='"--use-env-proxy"' — Node strips the quotes and enables the option.
+	const QUOTED_PROXY = '"--use-env-proxy"';
+
+	it("control: on this node, a QUOTED --use-env-proxy in NODE_OPTIONS carries an UNCONFIGURED session's key through HTTP_PROXY", async (ctx) => {
+		const target = await fakeServer();
+		const proxy = await recordingProxy();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-env-state-"));
+		await runHook(PRE, PAYLOAD, {
+			...NO_REROUTE,
+			UT_CC_STATE_DIR: stateDir,
+			UT_SERVER_URL: target.url,
+			UT_SERVER_KEY: "env-key",
+			UT_CC_USAGE: "estimate",
+			NODE_OPTIONS: QUOTED_PROXY,
+			HTTP_PROXY: proxy.url,
+		});
+		if (proxy.reached.length === 0) {
+			// This node does not accept --use-env-proxy (it refuses to start, or ignores it).
+			// CI must run a node that does, or this case proves nothing there.
+			expect(process.env.CI, `node ${process.version} has no --use-env-proxy support`).toBeFalsy();
+			ctx.skip();
+		}
+		expect(proxy.reached[0]).toBe(`CONNECT ${new URL(target.url).host}`);
+		expect(proxy.bytes()).toContain("Bearer env-key");
+	});
+
+	it("a configured session whose NODE_OPTIONS quotes --use-env-proxy sends nothing to the proxy or the server", async () => {
+		const target = await fakeServer();
+		const proxy = await recordingProxy();
+		const session = await configured({ url: target.url });
+		const pre = await runConfigured(PRE, session, {
+			NODE_OPTIONS: QUOTED_PROXY,
+			HTTP_PROXY: proxy.url,
+			HTTPS_PROXY: proxy.url,
+		});
+		expect(proxy.reached).toEqual([]);
+		expect(target.seen).toEqual([]);
+		// Where node accepts the option, the hook runs and refuses the environment by name.
+		// Where it does not, node itself refuses to start, and nothing runs at all.
+		if (pre.code === 0) {
+			expect(await watchRecords(join(session.home.home, ".claude", "usertrust-cc"))).toMatchObject([
+				{ kind: "gap", reason: "config: environment refused (NODE_OPTIONS)" },
+			]);
+		}
 	});
 
 	it("never echoes the file: the marker reaches no stderr, session-start line, record or request", async () => {

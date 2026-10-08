@@ -111,13 +111,26 @@ are ignored. The file is accepted only if all of these hold:
 - the file is not a link but a regular file, yours, with no group or other
   permission bits (`chmod 600`), and at most 64 KiB;
 - it is a JSON object with every required field, and every field it has is valid;
-- the environment neither reroutes its requests nor loosens their TLS. Node itself
-  can do both without any code: `NODE_USE_ENV_PROXY` (or `--use-env-proxy` in
-  `NODE_OPTIONS`) sends every request through `HTTP_PROXY` / `HTTPS_PROXY`, key and
-  all; `NODE_TLS_REJECT_UNAUTHORIZED=0` trusts any certificate;
-  `NODE_EXTRA_CA_CERTS` adds certificates to trust; and under `--use-openssl-ca`,
-  `SSL_CERT_FILE` / `SSL_CERT_DIR` replace them. Each is refused by name, as in
-  `config: environment refused (NODE_USE_ENV_PROXY)`.
+- the environment neither reroutes its requests nor changes what their TLS trusts.
+  Node itself can do both without any code:
+  - `NODE_USE_ENV_PROXY` sends every request through `HTTP_PROXY` / `HTTPS_PROXY`,
+    key and all;
+  - `NODE_TLS_REJECT_UNAUTHORIZED=0` trusts any certificate;
+  - `NODE_EXTRA_CA_CERTS` adds certificates to trust, and `SSL_CERT_FILE` /
+    `SSL_CERT_DIR` replace them, with no flag at all on a build whose default store
+    is OpenSSL's (as Homebrew's);
+  - `NODE_USE_SYSTEM_CA` changes the store, and `OPENSSL_CONF`, `OPENSSL_MODULES`
+    and `OPENSSL_ENGINES` load OpenSSL config or modules.
+
+  Each set variable is refused by name, as in
+  `config: environment refused (NODE_USE_ENV_PROXY)`. And `NODE_OPTIONS` may hold
+  only these options, each exactly as written: `--max-old-space-size=<n>`,
+  `--max-semi-space-size=<n>`, `--enable-source-maps`, `--no-warnings`,
+  `--no-deprecation`, `--trace-warnings`, `--trace-deprecation`,
+  `--unhandled-rejections=<mode>` and `--dns-result-order=<order>`. Anything else
+  is refused as `config: environment refused (NODE_OPTIONS)`. Node also reads an
+  option quoted, escaped, with `_` for `-` or with a value after `=`, so a list of
+  options to refuse would miss spellings; a list of what to allow cannot.
 
 **Anything else, an empty `UT_CC_CONFIG` included, runs the plugin watch-only and
 key-less.** No request is sent to any server. Each tool call is recorded as a
