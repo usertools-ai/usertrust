@@ -63,7 +63,8 @@ remainder at the 5-minute rate; see [1-hour cache writes](#1-hour-cache-writes).
 explicitly (the page's "1h cache writes" column). `cacheWriteTokens` is the TOTAL cache-write
 count, and the 1-hour tokens are a **subset** of it (never added to it): the 5-minute term is
 `cacheWriteTokens - cacheWrite1hTokens`. A 1-hour count above the total is clamped to it, and a
-1-hour count with no write total bills nothing. A custom row that omits `cacheWrite1hPer1k`
+1-hour count with no write total prices nothing at the 1-hour rate; sent alone to a headless
+`settle()` it is not reported usage, so the settle meters at the pre-call estimate. A custom row that omits `cacheWrite1hPer1k`
 resolves, in one place (`effectiveCacheWrite1hRate`), to the dearer of its 5-minute write rate and
 2x `inputPer1k`: a silent row is never billed below 2x input.
 
@@ -331,9 +332,9 @@ produce:
   at `max(inputPer1k, effectiveCacheWriteRate(rates))` exactly as before;
 - the headless `authorize()` path runs before the call and cannot see the TTLs, so it reserves the
   dearest write rate (the 1-hour one) for the input leg and for any stated `estimatedCacheWriteTokens`. Only a row that publishes a 1-hour
-  rate reserves it, so a model with no 1-hour tier holds as before; an operator's `customRates` row that
-  has a write tier but no `cacheWrite1hPer1k` reserves the derived 2x input, as its 1-hour tokens are
-  metered at that rate.
+  rate reserves it, so a model with no 1-hour tier holds as before; operator-owned rates
+  (`customRates`, local rates, the fallback) with no `cacheWrite1hPer1k` reserve the derived 2x input,
+  as their 1-hour tokens are metered at that rate.
 
 **Consequence:** holds on cache-writing workloads run roughly 25% fatter than an input-only hold
 would size them, and **headless holds on Anthropic models run about 60% fatter on the input leg**

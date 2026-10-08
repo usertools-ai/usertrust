@@ -1377,10 +1377,12 @@ describe("holds for an operator's custom row (legacy rows with no 1-hour rate)",
 		expect(holdInputRate(legacy, true, true)).toBe(60);
 		expect(holdCacheWriteRate(legacy, true)).toBe(60);
 	});
-	it("the same row from the TABLE (no 1-hour tier) holds as before; so does a custom row with no write tier", () => {
+	it("the same row from the TABLE (no 1-hour tier) holds as before, and operator-owned rates with no write tier still derive", () => {
 		expect(holdInputRate(legacy, true, false)).toBe(37.5);
 		expect(holdCacheWriteRate(legacy, false)).toBe(37.5);
-		expect(holdInputRate({ inputPer1k: 5, outputPer1k: 5 }, true, true)).toBe(5);
+		// ...but operator-owned rates with no write tier at all still derive: settlement
+		// meters their 1-hour tokens at 2x input.
+		expect(holdInputRate({ inputPer1k: 5, outputPer1k: 5 }, true, true)).toBe(10);
 	});
 	it("an explicit rate wins on a custom row too", () => {
 		expect(holdInputRate({ ...legacy, cacheWrite1hPer1k: 45 }, true, true)).toBe(45);

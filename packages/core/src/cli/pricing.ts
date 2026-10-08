@@ -10,6 +10,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import pc from "picocolors";
 import {
+	effectiveCacheWrite1hRate,
 	modelsForProvider,
 	PRICING_TABLE,
 	PRICING_TABLE_VERSION,
@@ -53,6 +54,7 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 				outputPerM: number;
 				cacheReadPerM: number;
 				cacheWritePerM: number;
+				cacheWrite1hPerM: number;
 				source: string;
 			}
 		> = {};
@@ -71,6 +73,9 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 					outputPerM: applied.outputPer1k / 10,
 					cacheReadPerM: applied.cacheReadPer1k / 10,
 					cacheWritePerM: applied.cacheWritePer1k / 10,
+					// The rate a 1-hour cache write settles at (explicit, or the derived
+					// dearer-of-5m-and-2x-input when the row publishes none).
+					cacheWrite1hPerM: effectiveCacheWrite1hRate(r) / 10,
 					source,
 				};
 			}
@@ -92,10 +97,11 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 		const outputPerM = (applied.outputPer1k / 10).toFixed(2);
 		const cacheReadPerM = (applied.cacheReadPer1k / 10).toFixed(2);
 		const cacheWritePerM = (applied.cacheWritePer1k / 10).toFixed(2);
+		const cacheWrite1hPerM = (effectiveCacheWrite1hRate(r) / 10).toFixed(2);
 		const tag = custom ? pc.yellow(" (custom)") : "";
 		console.log(
 			`  ${pc.cyan(model.padEnd(24))} in $${inputPerM} out $${outputPerM} ` +
-				`cache-read $${cacheReadPerM} cache-write $${cacheWritePerM} per 1M${tag}`,
+				`cache-read $${cacheReadPerM} cache-write $${cacheWritePerM} (1h $${cacheWrite1hPerM}) per 1M${tag}`,
 		);
 	}
 

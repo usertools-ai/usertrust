@@ -616,9 +616,10 @@ can produce:* `trust()` reads the request (`requestDeclares1hCache`: a `cache_co
 rate only then; headless `authorize()` cannot see the TTLs, so it holds the dearest write rate for
 the input leg and any stated write estimate (`holdInputRate` / `holdCacheWriteRate`, the one site).
 Only a row that EXPLICITLY publishes a 1-hour rate holds it, so a TABLE model with no 1-hour tier
-holds as before; the one exception is an operator's CUSTOM row that publishes a cache-write tier but
-no 1-hour rate (a legacy Anthropic-shaped row), which holds the derived 2x input because settlement
-meters its 1-hour tokens at that derived rate (`holdInputRate(rates, include1h, custom)`). *Prevents:* a 1-hour write settling above its hold and being capped, which under-debits.
+holds as before; the exception is OPERATOR-OWNED rates (a customRates row, a local rate, the
+fallback, i.e. `rateSource !== "table"`) with no explicit 1-hour rate, which hold the derived 2x input
+because settlement meters their 1-hour tokens at that derived rate
+(`holdInputRate(rates, include1h, operatorOwned)`). *Prevents:* a 1-hour write settling above its hold and being capped, which under-debits.
 *Documented consequence:* holds on headless Anthropic calls run ~60% fatter on the input leg, so a
 402 near the budget comes sooner; the same trade as below.
 *Documented consequence:* holds on cache-writing workloads run ~25% fatter than before; warm

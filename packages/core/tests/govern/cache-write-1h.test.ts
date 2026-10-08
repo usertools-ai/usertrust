@@ -296,6 +296,13 @@ describe("1-hour cache writes: governed paths", () => {
 		expect(over.cacheWrite1h).toEqual({ tokens: 1_000, ratePer1k: 60 });
 		const alone = await settle({ inputTokens: 5, outputTokens: 5, cacheWrite1hTokens: 9_999 });
 		expect(alone.cacheWrite1h).toBeUndefined();
+		// A 1h share with NO other count is not usage: the settle meters at the pre-call
+		// estimate, exactly as a settle that carries nothing does.
+		const bare = await settle({ cacheWrite1hTokens: 9_999 });
+		const nothing = await settle({});
+		expect(bare.cost).toBe(nothing.cost);
+		expect(bare.usage).toBeUndefined();
+		expect(bare.cacheWrite1h).toBeUndefined();
 		await gov.destroy();
 	});
 
@@ -378,6 +385,37 @@ describe("1-hour cache writes: governed paths", () => {
 			usageSource: "provider",
 		});
 		expect(receipt.cost).toBe(5_002);
+		expect(receipt.postedCost).toBeUndefined();
+		await gov.destroy();
+	});
+
+	it("a custom row with only input/output rates: the hold covers a 1-hour settle", async () => {
+		const dir = join(tmpVault, ".usertrust");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "usertrust.config.json"),
+			JSON.stringify({
+				budget: 10_000_000,
+				pricing: "custom",
+				customRates: { "my-claude": { inputPer1k: 30, outputPer1k: 150 } },
+			}),
+		);
+		const engine = makeCappingEngine();
+		const gov = await createGovernor({ vaultBase: tmpVault, _engine: asEngine(engine) });
+		const auth = await gov.authorize({
+			model: "my-claude",
+			estimatedInputTokens: 10_000,
+			maxOutputTokens: 1,
+		});
+		expect(heldAmount(engine)).toBe(601); // 10,000 x 60 / 1000 + 0.15: the derived 2x input
+		const receipt = await gov.settle(auth, {
+			inputTokens: 0,
+			outputTokens: 1,
+			cacheWriteTokens: 10_000,
+			cacheWrite1hTokens: 10_000,
+			usageSource: "provider",
+		});
+		expect(receipt.cost).toBe(601);
 		expect(receipt.postedCost).toBeUndefined();
 		await gov.destroy();
 	});

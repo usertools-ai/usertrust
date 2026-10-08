@@ -581,18 +581,17 @@ export function effectiveCacheWrite1hRate(rates: ModelRates): number {
 
 /**
  * The 1-hour write rate a HOLD may reserve. A row that publishes one reserves it. A row
- * that does not reserves nothing, EXCEPT an operator's custom row that publishes a
- * cache-write tier but no 1-hour rate (`custom`): that is a legacy Anthropic-shaped row
- * written before the field existed, and settlement meters its 1-hour tokens at the
- * derived `effectiveCacheWrite1hRate`, so the hold must reserve the same or the settle
- * is capped below what it charged. Silence in a TABLE row is a model with no 1-hour
- * tier (Mistral, Gemini, OpenAI) and derives nothing, so those hold exactly as before.
+ * that does not reserves nothing if it is a built-in TABLE row, and the DERIVED rate if
+ * it is operator-owned (`operatorOwned`: a customRates row, a local rate, the fallback):
+ * settlement meters 1-hour tokens on such a row at `effectiveCacheWrite1hRate`, so a
+ * hold that reserved less would be capped below what the settle charged. Silence in a
+ * TABLE row is a model with no 1-hour tier (Mistral, Gemini, OpenAI) and derives nothing,
+ * so those hold exactly as before.
  */
-function hold1hWriteRate(rates: ModelRates, custom: boolean): number {
+function hold1hWriteRate(rates: ModelRates, operatorOwned: boolean): number {
 	const r = rates.cacheWrite1hPer1k;
 	if (r !== undefined && Number.isFinite(r) && r >= 0) return r;
-	if (custom && rates.cacheWritePer1k !== undefined) return effectiveCacheWrite1hRate(rates);
-	return 0;
+	return operatorOwned ? effectiveCacheWrite1hRate(rates) : 0;
 }
 
 /**
@@ -602,14 +601,18 @@ function hold1hWriteRate(rates: ModelRates, custom: boolean): number {
  * 1-hour write (spec D3, extended to the 1-hour tier; see `hold1hWriteRate` for which
  * rows have one). Reserving less lets the capped settle post `min(actual, held)` and
  * silently under-debit a call that wrote a 1-hour cache. Both hold-sizing sites call
- * this; do not re-derive the max anywhere else. `custom` is true when the rates came from
- * the operator's `customRates` rather than the built-in table.
+ * this; do not re-derive the max anywhere else. `operatorOwned` is true when the rates are
+ * not a built-in table row (`rateSource !== "table"`).
  */
-export function holdInputRate(rates: ModelRates, include1hWrite = true, custom = false): number {
+export function holdInputRate(
+	rates: ModelRates,
+	include1hWrite = true,
+	operatorOwned = false,
+): number {
 	return Math.max(
 		rates.inputPer1k,
 		effectiveCacheWriteRate(rates),
-		include1hWrite ? hold1hWriteRate(rates, custom) : 0,
+		include1hWrite ? hold1hWriteRate(rates, operatorOwned) : 0,
 	);
 }
 
@@ -620,8 +623,8 @@ export function holdInputRate(rates: ModelRates, include1hWrite = true, custom =
  * call) must be held at the worst case or a 1-hour write settles above its hold and is
  * capped.
  */
-export function holdCacheWriteRate(rates: ModelRates, custom = false): number {
-	return Math.max(effectiveCacheWriteRate(rates), hold1hWriteRate(rates, custom));
+export function holdCacheWriteRate(rates: ModelRates, operatorOwned = false): number {
+	return Math.max(effectiveCacheWriteRate(rates), hold1hWriteRate(rates, operatorOwned));
 }
 
 /**

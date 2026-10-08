@@ -719,8 +719,11 @@ export function evaluateRequest(
 		costFromRates(rates, 0, maxOutputTokens, 0, inputTokenBound),
 		costFromRates(rates, 0, maxOutputTokens, inputTokenBound, 0),
 		// A request that declares a 1-hour cache TTL can write its prompt at the 1-hour
-		// rate (2x input), above the 5-minute write: hold that too, only for such a request.
-		...(requestDeclares1hCache(body)
+		// rate (2x input), above the 5-minute write: hold that too, only for such a request
+		// on the ANTHROPIC route. The 1-hour tier is Anthropic's: an OpenAI request must
+		// hold as before however its body scans (a `cache_control` example inside a tool
+		// schema, or a body too large to scan, both answer true).
+		...(match.route === "anthropic.messages" && requestDeclares1hCache(body)
 			? [costFromRates(rates, 0, maxOutputTokens, 0, inputTokenBound, inputTokenBound)]
 			: []),
 	);

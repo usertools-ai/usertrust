@@ -1408,7 +1408,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const holdRate = holdInputRate(
 				rateResolution.rates,
 				kind === "anthropic" && requestDeclares1hCache(params),
-				rateResolution.rateSource === "custom",
+				rateResolution.rateSource !== "table",
 			);
 			const estimatedCost = costFromRates(
 				{ ...rateResolution.rates, inputPer1k: holdRate },

@@ -866,3 +866,42 @@ describe("#203: a request that declares a 1-hour cache TTL is held at the 1-hour
 		expect(s.overage).toBe(0);
 	});
 });
+
+describe("#203: the 1-hour hold premium is Anthropic-only", () => {
+	it("an OpenAI request whose body scans as declaring 1h (a cache_control example in a tool schema) holds as before", () => {
+		const plain = gate(OPENAI, "/v1/chat/completions", {
+			model: "gpt-4o",
+			max_tokens: 1,
+			messages: [{ role: "user", content: "x".repeat(4000) }],
+		});
+		const marked = gate(OPENAI, "/v1/chat/completions", {
+			model: "gpt-4o",
+			max_tokens: 1,
+			messages: [{ role: "user", content: "x".repeat(4000) }],
+			tools: [
+				{
+					type: "function",
+					function: {
+						name: "t",
+						parameters: {
+							type: "object",
+							properties: { example: { cache_control: { type: "ephemeral", ttl: "1h" } } },
+						},
+					},
+				},
+			],
+		});
+		if (plain.decision !== "allow" || marked.decision !== "allow")
+			throw new Error("expected allow");
+		const rates = getModelRates("gpt-4o");
+		// Each hold is the dearest of the three plain scenarios on ITS OWN bound: no 2x input.
+		const holdOf = (r: typeof marked) =>
+			Math.max(
+				costFromRates(rates, r.hold.inputTokenBound, r.hold.maxOutputTokens),
+				costFromRates(rates, 0, r.hold.maxOutputTokens, 0, r.hold.inputTokenBound),
+				costFromRates(rates, 0, r.hold.maxOutputTokens, r.hold.inputTokenBound, 0),
+			);
+		expect(marked.hold.amount).toBe(holdOf(marked));
+		expect(plain.hold.amount).toBe(holdOf(plain));
+	});
+});

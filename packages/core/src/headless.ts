@@ -360,7 +360,8 @@ export interface SettleParams {
 	 * of the write total, never added to it: `cacheWriteTokens` stays the TOTAL written
 	 * and this says how much of it was the 1-hour kind, priced at the resolved
 	 * `cacheWrite1hPer1k` (the 5-minute remainder at `cacheWritePer1k`). Clamped to the
-	 * write total; alone, with no write total, it bills nothing. Omitted → 0, so an old
+	 * write total. Sent ALONE (no write total, no other count) it is not usage: the settle
+	 * meters at the pre-call estimate like any settle with no counts. Omitted → 0, so an old
 	 * client's settle is metered exactly as before.
 	 */
 	cacheWrite1hTokens?: number | undefined;
@@ -1252,7 +1253,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// rate only when the request declares a 1-hour TTL.) Consequence, declared in
 			// the CHANGELOG: holds on headless Anthropic calls run about 60% fatter on the
 			// input leg than a 5-minute-only reserve.
-			const holdRate = holdInputRate(rateInfo.rates, true, rateInfo.rateSource === "custom");
+			const holdRate = holdInputRate(rateInfo.rates, true, rateInfo.rateSource !== "table");
 			// Per-tier hold: each cache tier at ITS OWN rate, resolved from the
 			// UN-inflated rates exactly as settle resolves them (`resolveAppliedRates`).
 			// Only the FRESH-input estimate keeps the D3 write premium — it is the half
@@ -1266,7 +1267,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				{
 					...rateInfo.rates,
 					cacheReadPer1k: appliedForHold.cacheReadPer1k,
-					cacheWritePer1k: holdCacheWriteRate(rateInfo.rates, rateInfo.rateSource === "custom"),
+					cacheWritePer1k: holdCacheWriteRate(rateInfo.rates, rateInfo.rateSource !== "table"),
 					inputPer1k: holdRate,
 				},
 				estInputTokens,
