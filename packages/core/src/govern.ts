@@ -1408,6 +1408,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const holdRate = holdInputRate(
 				rateResolution.rates,
 				kind === "anthropic" && requestDeclares1hCache(params),
+				rateResolution.rateSource === "custom",
 			);
 			const estimatedCost = costFromRates(
 				{ ...rateResolution.rates, inputPer1k: holdRate },
@@ -3631,13 +3632,17 @@ function readFinalMessageUsage(msg: unknown): {
 				(isUsableCount(breakdown.ephemeral_5m_input_tokens) ||
 					isUsableCount(breakdown.ephemeral_1h_input_tokens));
 			const writeUsable = isUsableCount(u.cache_creation_input_tokens) || breakdownUsable;
+			const oneHourUsable = breakdown != null && isUsableCount(breakdown.ephemeral_1h_input_tokens);
 			if (inTok !== undefined || outTok !== undefined) {
 				return {
 					inputTokens: inTok,
 					outputTokens: outTok,
 					cacheReadTokens: readUsable ? cacheTiers.cacheReadTokens : undefined,
 					cacheWriteTokens: writeUsable ? cacheTiers.cacheWriteTokens : undefined,
-					cacheWrite1hTokens: writeUsable ? (cacheTiers.cacheWrite1hTokens ?? 0) : undefined,
+					// The 1-hour share is reported only when the breakdown's own 1-hour field is usable. A
+					// finalMessage that carries just the flat write total says nothing about the
+					// split, and answering 0 would overwrite the share the streamEvent tap accumulated.
+					cacheWrite1hTokens: oneHourUsable ? (cacheTiers.cacheWrite1hTokens ?? 0) : undefined,
 					reported: true,
 				};
 			}

@@ -1252,7 +1252,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// rate only when the request declares a 1-hour TTL.) Consequence, declared in
 			// the CHANGELOG: holds on headless Anthropic calls run about 60% fatter on the
 			// input leg than a 5-minute-only reserve.
-			const holdRate = holdInputRate(rateInfo.rates);
+			const holdRate = holdInputRate(rateInfo.rates, true, rateInfo.rateSource === "custom");
 			// Per-tier hold: each cache tier at ITS OWN rate, resolved from the
 			// UN-inflated rates exactly as settle resolves them (`resolveAppliedRates`).
 			// Only the FRESH-input estimate keeps the D3 write premium — it is the half
@@ -1266,7 +1266,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				{
 					...rateInfo.rates,
 					cacheReadPer1k: appliedForHold.cacheReadPer1k,
-					cacheWritePer1k: holdCacheWriteRate(rateInfo.rates),
+					cacheWritePer1k: holdCacheWriteRate(rateInfo.rates, rateInfo.rateSource === "custom"),
 					inputPer1k: holdRate,
 				},
 				estInputTokens,

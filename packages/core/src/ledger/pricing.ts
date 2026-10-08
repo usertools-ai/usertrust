@@ -575,43 +575,48 @@ export function effectiveCacheWrite1hRate(rates: ModelRates): number {
 }
 
 /**
- * The 1-hour write rate a HOLD may reserve: the row's EXPLICIT `cacheWrite1hPer1k`, or 0
- * when it publishes none. Deliberately not `effectiveCacheWrite1hRate`: that derives 2x
- * input for a row that is silent (right for METERING reported 1-hour tokens, which can
- * only come from a provider that has the tier), but a hold derives nothing from silence.
- * A model with no 1-hour tier (Mistral, Gemini, OpenAI) must hold exactly as before, not
- * 2x on its input leg.
+ * The 1-hour write rate a HOLD may reserve. A row that publishes one reserves it. A row
+ * that does not reserves nothing, EXCEPT an operator's custom row that publishes a
+ * cache-write tier but no 1-hour rate (`custom`): that is a legacy Anthropic-shaped row
+ * written before the field existed, and settlement meters its 1-hour tokens at the
+ * derived `effectiveCacheWrite1hRate`, so the hold must reserve the same or the settle
+ * is capped below what it charged. Silence in a TABLE row is a model with no 1-hour
+ * tier (Mistral, Gemini, OpenAI) and derives nothing, so those hold exactly as before.
  */
-function explicit1hWriteRate(rates: ModelRates): number {
+function hold1hWriteRate(rates: ModelRates, custom: boolean): number {
 	const r = rates.cacheWrite1hPer1k;
-	return r !== undefined && Number.isFinite(r) && r >= 0 ? r : 0;
+	if (r !== undefined && Number.isFinite(r) && r >= 0) return r;
+	if (custom && rates.cacheWritePer1k !== undefined) return effectiveCacheWrite1hRate(rates);
+	return 0;
 }
 
 /**
  * The per-1k rate a HOLD reserves the input leg at. A hold cannot know which of its
  * input tokens will be written to cache, nor for how long, so the input leg is held
- * at the dearest of: fresh input, the 5-minute write, and (for a row that publishes
- * one, when `include1hWrite`) the 1-hour write (spec D3, extended to the 1-hour tier).
- * Reserving less lets the capped settle post `min(actual, held)` and silently
- * under-debit a call that wrote a 1-hour cache. Both hold-sizing sites call this; do not
- * re-derive the max anywhere else.
+ * at the dearest of: fresh input, the 5-minute write, and (when `include1hWrite`) the
+ * 1-hour write (spec D3, extended to the 1-hour tier; see `hold1hWriteRate` for which
+ * rows have one). Reserving less lets the capped settle post `min(actual, held)` and
+ * silently under-debit a call that wrote a 1-hour cache. Both hold-sizing sites call
+ * this; do not re-derive the max anywhere else. `custom` is true when the rates came from
+ * the operator's `customRates` rather than the built-in table.
  */
-export function holdInputRate(rates: ModelRates, include1hWrite = true): number {
+export function holdInputRate(rates: ModelRates, include1hWrite = true, custom = false): number {
 	return Math.max(
 		rates.inputPer1k,
 		effectiveCacheWriteRate(rates),
-		include1hWrite ? explicit1hWriteRate(rates) : 0,
+		include1hWrite ? hold1hWriteRate(rates, custom) : 0,
 	);
 }
 
 /**
  * The cache-WRITE rate a hold with a STATED write estimate reserves those tokens at:
- * the dearer of the 5-minute and the row's explicit 1-hour rate, because a caller that
- * cannot say which TTL its writes will use (a headless authorize, before the call) must
- * be held at the worst case or a 1-hour write settles above its hold and is capped.
+ * the dearer of the 5-minute and the 1-hour rate `hold1hWriteRate` allows, because a
+ * caller that cannot say which TTL its writes will use (a headless authorize, before the
+ * call) must be held at the worst case or a 1-hour write settles above its hold and is
+ * capped.
  */
-export function holdCacheWriteRate(rates: ModelRates): number {
-	return Math.max(effectiveCacheWriteRate(rates), explicit1hWriteRate(rates));
+export function holdCacheWriteRate(rates: ModelRates, custom = false): number {
+	return Math.max(effectiveCacheWriteRate(rates), hold1hWriteRate(rates, custom));
 }
 
 /**
@@ -774,12 +779,17 @@ function tieredCostRaw(
 	// The 1-hour tokens are a SUBSET of cacheWriteTok (clamped to it), so the 5-minute
 	// term is the remainder and nothing is counted twice.
 	const write1hTok = clampWrite1h(cacheWrite1hTokens, cacheWriteTok);
-	const cacheWriteCost =
-		((cacheWriteTok - write1hTok) * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k) +
-			write1hTok * effectiveCacheWrite1hRate(rates)) /
+	// Each term multiplies THEN divides on its own, and the terms sum in the documented
+	// order (input, output, read, 5-minute write, 1-hour write): `ceil(sum(counts x rates /
+	// 1000))` is what an auditor recomputes, and summing two numerators before dividing
+	// rounds differently at the boundary (e.g. 607 / 1062 / 2800 / 2367 / 2059 on Sonnet
+	// lands a whole usertoken away from the per-term sum).
+	const cacheWrite5mCost =
+		((cacheWriteTok - write1hTok) * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k)) /
 		1000;
+	const cacheWrite1hCost = (write1hTok * effectiveCacheWrite1hRate(rates)) / 1000;
 
-	return inputCost + outputCost + cacheReadCost + cacheWriteCost;
+	return inputCost + outputCost + cacheReadCost + cacheWrite5mCost + cacheWrite1hCost;
 }
 
 /**

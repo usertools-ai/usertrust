@@ -452,7 +452,13 @@ describe("the request gate: every unmetered shape is DENIED before any hold", ()
 				{ ...DEFAULT_GATE_CONFIG, customRates: { [model]: rates as never } },
 			);
 		const bad = [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, "1", null];
-		for (const field of ["inputPer1k", "outputPer1k", "cacheReadPer1k", "cacheWritePer1k"]) {
+		for (const field of [
+			"inputPer1k",
+			"outputPer1k",
+			"cacheReadPer1k",
+			"cacheWritePer1k",
+			"cacheWrite1hPer1k",
+		]) {
 			for (const v of bad) {
 				const rates = { inputPer1k: 1, outputPer1k: 2, [field]: v };
 				expect(denied(call("op-model", rates)), `${field}=${String(v)}`).toBe("model_unpriced");

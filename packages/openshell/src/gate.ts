@@ -630,7 +630,7 @@ function operatorRatesValid(model: string, customRates: GateConfig["customRates"
 	if (typeof r !== "object" || r === null) return false;
 	const rates = r as Record<string, unknown>;
 	if (!isRate(rates.inputPer1k) || !isRate(rates.outputPer1k)) return false;
-	for (const k of ["cacheReadPer1k", "cacheWritePer1k"]) {
+	for (const k of ["cacheReadPer1k", "cacheWritePer1k", "cacheWrite1hPer1k"]) {
 		if (rates[k] !== undefined && !isRate(rates[k])) return false;
 	}
 	return true;

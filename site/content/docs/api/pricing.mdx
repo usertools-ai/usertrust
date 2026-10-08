@@ -329,7 +329,10 @@ produce:
   declares a 1-hour TTL (a `cache_control` block with `ttl: "1h"` anywhere in it), and otherwise holds
   at `max(inputPer1k, effectiveCacheWriteRate(rates))` exactly as before;
 - the headless `authorize()` path runs before the call and cannot see the TTLs, so it reserves the
-  dearest write rate (the 1-hour one) for the input leg and for any stated `estimatedCacheWriteTokens`.
+  dearest write rate (the 1-hour one) for the input leg and for any stated `estimatedCacheWriteTokens`. Only a row that publishes a 1-hour
+  rate reserves it, so a model with no 1-hour tier holds as before; an operator's `customRates` row that
+  has a write tier but no `cacheWrite1hPer1k` reserves the derived 2x input, as its 1-hour tokens are
+  metered at that rate.
 
 **Consequence:** holds on cache-writing workloads run roughly 25% fatter than an input-only hold
 would size them, and **headless holds on Anthropic models run about 60% fatter on the input leg**

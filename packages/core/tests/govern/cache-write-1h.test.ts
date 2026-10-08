@@ -20,7 +20,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -320,6 +320,39 @@ describe("1-hour cache writes: governed paths", () => {
 		const receipt = await gov.settle(auth, params);
 		expect(reads).toBe(1);
 		expect(receipt.cost).toBe(173);
+		await gov.destroy();
+	});
+
+	it("a legacy custom row (write tier, no 1h rate): the hold covers the 1-hour settle, no shortfall", async () => {
+		const dir = join(tmpVault, ".usertrust");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "usertrust.config.json"),
+			JSON.stringify({
+				budget: 10_000_000,
+				pricing: "custom",
+				customRates: { "my-claude": { inputPer1k: 30, outputPer1k: 150, cacheWritePer1k: 37.5 } },
+			}),
+		);
+		const engine = makeCappingEngine();
+		const gov = await createGovernor({ vaultBase: tmpVault, _engine: asEngine(engine) });
+		const auth = await gov.authorize({
+			model: "my-claude",
+			estimatedInputTokens: 10_000,
+			maxOutputTokens: 1,
+		});
+		// 10,000 x 60 / 1000 + 1 x 150 / 1000 = 600.15 -> 601: the derived 1h rate (2x input),
+		// not the 5-minute 376 a hold on explicit-only silence would reserve.
+		expect(heldAmount(engine)).toBe(601);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 0,
+			outputTokens: 1,
+			cacheWriteTokens: 10_000,
+			cacheWrite1hTokens: 10_000,
+			usageSource: "provider",
+		});
+		expect(receipt.cost).toBe(601);
+		expect(receipt.postedCost).toBeUndefined();
 		await gov.destroy();
 	});
 

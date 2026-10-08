@@ -1394,6 +1394,35 @@ describe("cache tiers survive the MessageStream accumulator", () => {
 		expect(receipt.usage?.cacheWriteTokens).toBe(1_000);
 	});
 
+	it("a finalMessage with only the flat write total keeps the 1-hour share the tap accumulated", async () => {
+		// The final payload says nothing about the TTL split, so it must not answer "0 hour"
+		// and overwrite the 400 the streamEvent tap read: 107, not 98.
+		const receipt = await settleStream(ONE_HOUR_EVENTS, {
+			id: "msg_h3",
+			usage: {
+				input_tokens: 100,
+				output_tokens: 200,
+				cache_read_input_tokens: 9_000,
+				cache_creation_input_tokens: 1_000,
+			},
+		});
+		expect(receipt.cost).toBe(107);
+		expect(receipt.cacheWrite1h).toEqual({ tokens: 400, ratePer1k: 60 });
+	});
+
+	it("a final breakdown that carries only the 5-minute field also leaves the tap's share alone", async () => {
+		const receipt = await settleStream(ONE_HOUR_EVENTS, {
+			id: "msg_h4",
+			usage: {
+				input_tokens: 100,
+				output_tokens: 200,
+				cache_creation_input_tokens: 1_000,
+				cache_creation: { ephemeral_5m_input_tokens: 600 },
+			},
+		});
+		expect(receipt.cacheWrite1h).toEqual({ tokens: 400, ratePer1k: 60 });
+	});
+
 	it("prefers the finalMessage's 1-hour share over the accumulated one", async () => {
 		// finalMessage is the authoritative total: 200 x 37.5 / 1000 (7.5) + 800 x 60 / 1000 (48);
 		// 3 + 30 + 27 + 7.5 + 48 = 115.5 -> 116.

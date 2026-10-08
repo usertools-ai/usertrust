@@ -1307,3 +1307,75 @@ describe("1-hour cache-write tier", () => {
 		expect(resolveCacheWrite1h(SONNET, 9999, 4000)?.tokens).toBe(4000);
 	});
 });
+
+describe("1-hour write arithmetic matches the auditor's recompute exactly", () => {
+	// The documented recompute is ceil(sum(counts x rates / 1000)): each term multiplies THEN
+	// divides on its own, and the terms sum in the order input, output, read, 5-minute write,
+	// 1-hour write. Settlement must group identically, or an honest receipt fails to reproduce.
+	const audit = (
+		r: { in: number; out: number; read: number; w5: number; w1: number },
+		n: { in: number; out: number; read: number; w: number; h: number },
+	) =>
+		Math.max(
+			1,
+			Math.ceil(
+				(n.in * r.in) / 1000 +
+					(n.out * r.out) / 1000 +
+					(n.read * r.read) / 1000 +
+					((n.w - n.h) * r.w5) / 1000 +
+					(n.h * r.w1) / 1000,
+			),
+		);
+	const SONNET_RATES = { in: 30, out: 150, read: 3, w5: 37.5, w1: 60 };
+
+	it("the counts that exposed a numerator-grouping drift (321 vs 322) reproduce", () => {
+		const n = { in: 607, out: 1062, read: 2800, w: 2367, h: 2059 };
+		const cost = costFromRates(
+			PRICING_TABLE["claude-sonnet-4-6"] as ModelRates,
+			n.in,
+			n.out,
+			n.read,
+			n.w,
+			n.h,
+		);
+		expect(cost).toBe(audit(SONNET_RATES, n));
+	});
+
+	it("2,000 seeded random call shapes: cost equals the per-term recompute on every one", () => {
+		let seed = 0x9e3779b9;
+		const next = () => {
+			seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+			return seed / 2 ** 32;
+		};
+		const rates = PRICING_TABLE["claude-sonnet-4-6"] as ModelRates;
+		for (let i = 0; i < 2_000; i++) {
+			const w = Math.floor(next() * 5_000);
+			const n = {
+				in: Math.floor(next() * 3_000),
+				out: Math.floor(next() * 3_000),
+				read: Math.floor(next() * 6_000),
+				w,
+				h: Math.floor(next() * (w + 1)),
+			};
+			expect(costFromRates(rates, n.in, n.out, n.read, n.w, n.h), JSON.stringify(n)).toBe(
+				audit(SONNET_RATES, n),
+			);
+		}
+	});
+});
+
+describe("holds for an operator's custom row (legacy rows with no 1-hour rate)", () => {
+	const legacy: ModelRates = { inputPer1k: 30, outputPer1k: 150, cacheWritePer1k: 37.5 };
+	it("a custom row that publishes a write tier but no 1h rate holds the derived 2x input", () => {
+		expect(holdInputRate(legacy, true, true)).toBe(60);
+		expect(holdCacheWriteRate(legacy, true)).toBe(60);
+	});
+	it("the same row from the TABLE (no 1-hour tier) holds as before; so does a custom row with no write tier", () => {
+		expect(holdInputRate(legacy, true, false)).toBe(37.5);
+		expect(holdCacheWriteRate(legacy, false)).toBe(37.5);
+		expect(holdInputRate({ inputPer1k: 5, outputPer1k: 5 }, true, true)).toBe(5);
+	});
+	it("an explicit rate wins on a custom row too", () => {
+		expect(holdInputRate({ ...legacy, cacheWrite1hPer1k: 45 }, true, true)).toBe(45);
+	});
+});
