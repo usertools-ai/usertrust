@@ -90,7 +90,10 @@ export function parseJobLog(text, sessionId) {
 		if (
 			typeof rec.ts !== "string" ||
 			!ISO_UTC.test(rec.ts) ||
-			!Number.isFinite(Date.parse(rec.ts))
+			!Number.isFinite(Date.parse(rec.ts)) ||
+			// Canonical: Date.parse normalizes an impossible date (Feb 31 is Mar 3), so the
+			// instant must print back as the very string the CLI wrote.
+			new Date(Date.parse(rec.ts)).toISOString() !== rec.ts
 		) {
 			return { state: "invalid", reason: `line ${i + 1} has a bad ts` };
 		}
@@ -451,7 +454,7 @@ export function jobCoverage({ job, logs, records }) {
 			intervalsSeen += 1;
 			const tagged = mine.some((r) => {
 				const window = complete(r?.data);
-				return r?.data?.job === job && window !== null && window[0] >= from && window[1] <= to;
+				return r?.data?.job === job && window !== null && window[0] > from && window[1] <= to;
 			});
 			if (!tagged) reasons.push(`session ${sid}: no record of ${job} inside [${from}, ${to}]`);
 			for (const r of mine) {
@@ -461,12 +464,28 @@ export function jobCoverage({ job, logs, records }) {
 					if (capable) reasons.push(`session ${sid}: an llm_call has no complete usage window`);
 					continue;
 				}
-				if (!(window[0] <= to && window[1] >= from)) continue;
+				// An interval is (start, stop]: a line applies strictly AFTER its own ts, so usage
+				// at exactly the start belongs to the earlier job and usage at exactly the stop
+				// to this one.
+				if (!(window[0] <= to && window[1] > from)) continue;
 				if (r.data?.jobState === "invalid") {
 					reasons.push(`session ${sid}: an llm_call in the interval has an invalid job state`);
 				} else if (r.data?.job === undefined) {
 					reasons.push(`session ${sid}: an llm_call in the interval carries no job`);
+				} else if (r.data.job !== job) {
+					// Spend that overlaps this job's interval but is booked to another job is a
+					// conflict, not a coincidence: it is missing from this job's total.
+					reasons.push(`session ${sid}: an llm_call in the interval carries another job`);
 				}
+			}
+		}
+		// Spend booked to this job must lie inside one of ITS intervals in this log: a
+		// record tagged after the stop is in the total but proves nothing about the interval.
+		for (const r of mine) {
+			if (r?.kind !== "llm_call" || r.data?.job !== job) continue;
+			const window = complete(r.data);
+			if (window === null || !intervals.some(([from, to]) => window[0] > from && window[1] <= to)) {
+				reasons.push(`session ${sid}: an llm_call of ${job} lies outside its intervals`);
 			}
 		}
 	}

@@ -27,12 +27,36 @@ export interface JobCapture {
 /** The audit-record spread for a captured job: absent keys for an unlabelled call. */
 export type JobAudit = JobCapture & { readonly usageTo?: string };
 
-const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+const ISO_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
 
 /** Why `value` is not an ISO-8601 UTC instant, or `undefined` when it is. */
 export function usageTimeRefusal(value: unknown): string | undefined {
-	if (typeof value !== "string" || !ISO_UTC.test(value) || !Number.isFinite(Date.parse(value))) {
-		return "must be an ISO-8601 UTC instant (…Z)";
+	const refusal = "must be an ISO-8601 UTC instant (…Z)";
+	if (typeof value !== "string") return refusal;
+	const m = ISO_UTC.exec(value);
+	if (m === null) return refusal;
+	// Date.parse NORMALIZES an impossible date (Feb 31 becomes Mar 3) instead of refusing
+	// it, which would persist a string that names no real instant and then order it as
+	// another one. The calendar fields must round-trip.
+	const [y, mo, d, h, mi, s] = m.slice(1).map(Number) as [
+		number,
+		number,
+		number,
+		number,
+		number,
+		number,
+	];
+	const at = new Date(Date.UTC(y, mo - 1, d, h, mi, s));
+	if (
+		!Number.isFinite(at.getTime()) ||
+		at.getUTCFullYear() !== y ||
+		at.getUTCMonth() !== mo - 1 ||
+		at.getUTCDate() !== d ||
+		at.getUTCHours() !== h ||
+		at.getUTCMinutes() !== mi ||
+		at.getUTCSeconds() !== s
+	) {
+		return refusal;
 	}
 	return undefined;
 }

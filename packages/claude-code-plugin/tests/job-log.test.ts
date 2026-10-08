@@ -138,6 +138,10 @@ describe("test 3 — stale, foreign or corrupt state is invalid, never a guess",
 		["an unknown op", start(SID, T0) + op(SID, T0 + 1, "pause", null)],
 		["a bad job id", start(SID, T0) + op(SID, T0 + 1, "start", "bad id")],
 		["a repeated session-start", start(SID, T0) + start(SID, T0 + 1)],
+		[
+			"a ts that is no real instant (Feb 31)",
+			`${start(SID, T0)}${line({ sid: SID, ts: "2026-02-31T00:00:00.000Z", op: "start", job: "job-a" })}`,
+		],
 	];
 	it.each(cases)("%s → no job and jobState invalid", async (_name, text) => {
 		await writeLog(text);
@@ -468,6 +472,59 @@ describe("jobCoverage — review hardening", () => {
 		});
 		expect(r.exact).toBe(false);
 		expect(r.reasons.join(" ")).toContain("no record of bug-1");
+	});
+});
+
+describe("jobCoverage — connector review", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const inside = { usageFrom: iso(T0 + 2000), usageTo: iso(T0 + 3000) };
+	const rec = (extra: Record<string, unknown>, id = "tx_1") => ({
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: { transferId: id, cost: 5, principal: { origin: `claude-code:${SID}` }, ...extra },
+	});
+
+	it("a call inside the interval booked to ANOTHER job is not exact (it is missing from the total)", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [
+				rec({ job: J, ...inside }),
+				rec({ job: "bug-2", usageFrom: iso(T0 + 3500), usageTo: iso(T0 + 4000) }, "tx_2"),
+			],
+		});
+		expect(r.exact).toBe(false);
+		expect(r.reasons.join(" ")).toContain("carries another job");
+	});
+
+	it("a call tagged to the job but AFTER its stop is not exact (it is in the total, outside the interval)", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [
+				rec({ job: J, ...inside }),
+				rec({ job: J, usageFrom: iso(T0 + 6000), usageTo: iso(T0 + 7000) }, "tx_2"),
+			],
+		});
+		expect(r.exact).toBe(false);
+		expect(r.reasons.join(" ")).toContain("lies outside its intervals");
+	});
+
+	it("an interval is (start, stop]: a call ending exactly at the start belongs to the earlier job", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [
+				rec({ job: J, ...inside }),
+				rec({ job: "bug-0", usageFrom: iso(T0 + 500), usageTo: iso(T0 + 1000) }, "tx_2"),
+			],
+		});
+		expect(r.exact).toBe(true);
 	});
 });
 

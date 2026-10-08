@@ -146,6 +146,18 @@ describe("captureJob", () => {
 		expect(usageTimeRefusal(FROM)).toBeUndefined();
 		expect(usageTimeRefusal("2026-13-45T00:00:00.000Z")).toMatch(/ISO-8601 UTC/);
 	});
+	it("refuses a calendar date Date.parse would silently normalize", () => {
+		for (const bad of [
+			"2026-02-31T00:00:00.000Z",
+			"2026-02-29T00:00:00.000Z",
+			"2026-04-31T00:00:00Z",
+			"2026-01-01T24:00:00.000Z",
+			"2026-01-01T00:60:00.000Z",
+		]) {
+			expect(usageTimeRefusal(bad), bad).toMatch(/ISO-8601 UTC/);
+		}
+		expect(usageTimeRefusal("2028-02-29T23:59:59.999Z")).toBeUndefined();
+	});
 });
 
 describe("headless records carry the authorize capture's job", () => {
