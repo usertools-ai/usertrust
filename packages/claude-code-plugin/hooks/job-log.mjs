@@ -262,7 +262,11 @@ export async function withLock(log, fn, { maxWaitMs = 5_000 } = {}) {
 		} catch (err) {
 			if (err?.code !== "EEXIST") throw err;
 			await breakIfStale(lock);
-			if (Date.now() > deadline) throw new Error("the job log's lock is held");
+			if (Date.now() > deadline) {
+				// The message names the lock, an operator's path: it is the CLI's job to keep that out of
+				// a terminal (it prints only the code).
+				throw Object.assign(new Error(`the job log's lock is held: ${lock}`), { code: "ELOCKED" });
+			}
 			await sleep(10 + Math.floor(Math.random() * 15));
 			continue;
 		}

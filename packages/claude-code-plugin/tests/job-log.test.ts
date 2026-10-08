@@ -1508,7 +1508,7 @@ describe("usertrust-job start/stop — a write failure is reported through the s
 		});
 		// Unconditional: a regression that swallows the failure and exits 0 must fail here.
 		expect(r.code).toBe(1);
-		expect(r.stderr).toContain("usertrust-job: failed");
+		expect(r.stderr).toContain("usertrust-job: failed (ELOCKED)");
 		expect(r.stderr).not.toContain("node:internal");
 		// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting none reach the terminal is the point
 		expect(r.stderr).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
