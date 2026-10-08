@@ -26,6 +26,8 @@ import { runHook } from "./helpers/run-hook.js";
 const HOOKS = join(import.meta.dirname, "..", "hooks");
 const hook = (name: string) => join(HOOKS, `${name}.mjs`);
 const LOSE_PIN = join(import.meta.dirname, "helpers", "lose-pin.mjs");
+const SPAWN_FAILS = join(import.meta.dirname, "helpers", "spawn-fails.mjs");
+const WIN32 = join(import.meta.dirname, "helpers", "win32.mjs");
 const ANNOUNCE = join(import.meta.dirname, "helpers", "announce-preload.mjs");
 const PAUSE_AT_PIN = join(import.meta.dirname, "helpers", "pause-at-pin.mjs");
 const UID = process.getuid?.() ?? null;
@@ -910,6 +912,94 @@ describe("launch.mjs: a child that fails is the hook's outage, and nothing else"
 			},
 		]);
 	});
+
+	/** A configured session's PreToolUse whose parent runs with `preload`, and what it left. */
+	async function preToolUseWith(mode: string, preload: string, env: Record<string, string> = {}) {
+		const home = await makeHome();
+		const server = await recordingServer();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-launch-"));
+		const config = await writeConfig(home, {
+			url: server.url,
+			key: "k",
+			mode,
+			stateDir,
+			usage: "estimate",
+		});
+		const call = { session_id: SESSION, tool_name: "Bash", tool_use_id: "tu_1", tool_input: {} };
+		const pre = await runHook(
+			hook("pre-tool-use"),
+			call,
+			{ TEST_PASSWD_HOME: home, UT_CC_CONFIG: config, ...env },
+			["--import", preload],
+		);
+		return { pre, sent: server.requests, gaps: await watchRecords(stateDir) };
+	}
+
+	// Exit 1 from a hook is a non-blocking error to Claude Code: the call RUNS, in enforce
+	// mode ungoverned, and nothing records it. However the launcher fails, it ends as a
+	// failed child does (`childOutcome`).
+	for (const [failure, what] of [
+		// A spawn short of descriptors: no stdin, and EMFILE only on a later tick.
+		["emfile", "no process: EMFILE"],
+		// A throw in the parent that nothing foresaw.
+		["throw", "an unexpected TypeError"],
+		// A throw in a callback, which no `catch` reaches.
+		["uncaught", "an unexpected Error"],
+	] as const) {
+		for (const [mode, expected] of [
+			["watch", { code: 0, gap: true }],
+			["enforce", { code: 2, gap: false }],
+		] as const) {
+			it(`a launcher that fails (${failure}): PreToolUse in ${mode} ${expected.code === 2 ? "fails closed" : "records a gap"}, never exit 1, and nothing is sent`, async () => {
+				const { pre, sent, gaps } = await preToolUseWith(mode, SPAWN_FAILS, {
+					TEST_SPAWN_FAIL: failure,
+				});
+				const reason = `launch: the hook's process failed (${what})`;
+				// mutant: no top-level catch: exit 1. mutant: stdin written at once: a TypeError, not EMFILE
+				expect(pre.code).toBe(expected.code);
+				expect(sent).toEqual([]);
+				if (expected.gap) {
+					expect(gaps).toMatchObject([
+						{ kind: "gap", phase: "pre-tool-use", tool: "Bash", reason },
+					]);
+				} else {
+					expect(gaps).toEqual([]);
+					expect(pre.stderr).toContain(reason);
+				}
+			});
+		}
+	}
+
+	it("Windows: configured sessions do not run there yet, and the refusal says so", async () => {
+		// @ts-expect-error TS7016: config.mjs ships as plain .mjs, with no type declarations.
+		const config = (await import("../hooks/config.mjs")) as {
+			childUnsupported(platform?: string): string | null;
+		};
+		expect(config.childUnsupported("win32")).toBe("configured sessions do not run on Windows yet");
+		for (const platform of ["darwin", "linux", "freebsd"]) {
+			expect(config.childUnsupported(platform), platform).toBeNull();
+		}
+	});
+
+	for (const [mode, expected] of [
+		["watch", { code: 0, gap: true }],
+		["enforce", { code: 2, gap: false }],
+	] as const) {
+		it(`Windows: a configured session's PreToolUse in ${mode} starts no child, sends nothing, and says why`, async () => {
+			const { pre, sent, gaps } = await preToolUseWith(mode, WIN32);
+			const reason =
+				"launch: the hook's process failed (configured sessions do not run on Windows yet)";
+			// mutant: the child is started there all the same, and sends
+			expect(sent).toEqual([]);
+			expect(pre.code).toBe(expected.code);
+			if (expected.gap) {
+				expect(gaps).toMatchObject([{ kind: "gap", phase: "pre-tool-use", reason }]);
+			} else {
+				expect(gaps).toEqual([]);
+				expect(pre.stderr).toContain(reason);
+			}
+		});
+	}
 });
 
 /** Wait until `ready` holds, for 15 s at most. */

@@ -127,6 +127,16 @@ directory `/`, and with nothing of the environment but Claude Code's own
   does not see `NODE_EXTRA_CA_CERTS`.
 - The child also checks its own environment: holding anything else, it refuses to
   run and sends nothing.
+- **Configured sessions do not run on Windows yet.** Windows adds `SYSTEMROOT`,
+  `SYSTEMDRIVE` and `TEMP` to a child's environment, with the parent's values, and
+  `SYSTEMROOT` decides where system libraries are found. So on Windows a configured
+  session's hooks start no child, and say why: each tool call is a gap in watch
+  mode, and blocked in enforce mode (with `failOpen`, let through as a gap). A
+  session configured through the environment is unaffected.
+- A hook whose child cannot start, or that fails in any other way, ends as an
+  outage: in enforce mode PreToolUse blocks the call (with `failOpen`, lets it
+  through as a gap), and every other case is a gap. It never exits 1, which Claude
+  Code reads as a non-blocking error, letting the call run with no record.
 
 **Anything else, an empty `UT_CC_CONFIG` included, runs the plugin watch-only and
 key-less.** No request is sent to any server. Each tool call is recorded as a

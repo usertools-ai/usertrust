@@ -378,6 +378,17 @@ export const CHILD_ENV = HOST_VARIABLES;
 export const PLATFORM_ENV = process.platform === "darwin" ? ["__CF_USER_TEXT_ENCODING"] : [];
 
 /**
+ * Why a configured session's child cannot run on this platform, or null. On Windows,
+ * libuv adds SYSTEMROOT, SYSTEMDRIVE and TEMP to a child's environment when they are
+ * missing, with the PARENT's values, and SYSTEMROOT decides where system libraries are
+ * found. A child would then run with values the environment set, the one thing it
+ * exists to refuse, so a configured session's sending hooks do not run there yet.
+ */
+export function childUnsupported(platform = process.platform) {
+	return platform === "win32" ? "configured sessions do not run on Windows yet" : null;
+}
+
+/**
  * A child's environment: `CHILD_ENV`'s variables that `env` has, and nothing else.
  * Node's spawn copies the parent's NODE_V8_COVERAGE into any environment it is given
  * that lacks one, so this one is set, empty: no coverage, and nothing copied.

@@ -47,6 +47,15 @@ npm, and its version is its own: the `usertrust` packages and their
       is refused.
     - A child that finds anything else in its environment refuses to run. A server
       behind a private CA is not supported.
+    - Configured sessions do not run on Windows yet: Windows adds `SYSTEMROOT`,
+      `SYSTEMDRIVE` and `TEMP` to a child's environment, with the parent's values.
+      There a configured session's hooks start no child, and say so: each call is
+      a gap in watch mode, or blocked in enforce mode. A session configured through
+      the environment is unaffected.
+    - A hook whose child cannot start, or that fails in any other way, ends as an
+      outage: PreToolUse in enforce mode blocks the call (unless `failOpen`), and
+      every other case is a gap. It never exits 1, which Claude Code reads as a
+      non-blocking error, letting the call run with no record.
   - This does not stop code from a project's settings: a hook, or a variable that
     loads code (`NODE_OPTIONS`, `PATH`), runs in the hook's own process and can
     read the file too. Without `UT_CC_CONFIG`, requests are sent as before.

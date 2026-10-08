@@ -24,13 +24,26 @@
 // - Anything else is the hook failing: no child, a signal, a refusal or another exit
 //   code. PreToolUse treats it as an outage (a gap, or a block in enforce mode); the
 //   other hooks record a gap (`childOutcome`).
+// - So is anything the parent throws that nothing caught (`launcherFailed`). It never
+//   exits 1, which Claude Code reads as a non-blocking error: the call would run, and
+//   in enforce mode ungoverned, with no gap.
+// - On Windows the child does not run at all (config.mjs `childUnsupported`).
 //
 // What this does not stop is CODE in the parent. A variable that loads code
 // (NODE_OPTIONS, PATH) runs before any of this, and can read the config file too.
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { childEnv, howToSet, isChildEnv, passwdHome, useSession } from "./config.mjs";
+import {
+	childEnv,
+	childUnsupported,
+	howToSet,
+	isChildEnv,
+	passwdHome,
+	refusedSettings,
+	settings as resolvedSettings,
+	useSession,
+} from "./config.mjs";
 import { launch, readStdin, recordWatchEvent, say } from "./lib.mjs";
 import { pinnedSettings, readPin, sessionSettings, sweep, touchPin } from "./session.mjs";
 
@@ -156,8 +169,12 @@ function runInChild(hook, text, input, session) {
 		for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
 			process.on(signal, () => child.kill(signal));
 		}
-		child.stdin.on("error", () => {});
-		child.stdin.end(text);
+		// A spawn that fails for want of descriptors (EMFILE, ENFILE) returns a child with
+		// no stdin, and says so only by a later `error`: the input goes in once it exists.
+		child.once("spawn", () => {
+			child.stdin?.on("error", () => {});
+			child.stdin?.end(text);
+		});
 		child.on("close", (code, signal) => {
 			if (signal !== null) void finish(`signal ${signal}`);
 			else if (code === 0 || code === 2) void finish(null, code);
@@ -167,23 +184,62 @@ function runInChild(hook, text, input, session) {
 	});
 }
 
+/** What the parent knows so far, for `launcherFailed`: the hook's input and its session's settings. */
+const known = { input: null, settings: null };
+
 /** The parent: resolve the session, then run the hook here or as a child. */
 async function parent(hook) {
 	const text = await readStdin();
 	const input = parsePayload(text);
+	known.input = input;
 	const home = passwdHome();
 	const uid = currentUid();
 	const session = sessionSettings({ payload: input, passwdHome: home, uid });
 	useSession(session.settings);
+	known.settings = session.settings;
 	if (session.path !== null) touchPin(session.path);
 	if (hook === "session-start") sweep({ passwdHome: home, uid });
 	const sends = hook !== "session-start";
 	if (session.kind === "configured" && session.settings.refused === null && sends) {
-		await runInChild(hook, text, input, session);
+		const unsupported = childUnsupported();
+		if (unsupported !== null) await childFailed(hook, session.settings, input, unsupported);
+		else await runInChild(hook, text, input, session);
 		return;
 	}
 	launch({ payload: text, startedAt: STARTED });
 	await import(`./${hook}.mjs`);
+}
+
+let failure;
+
+/**
+ * Anything the parent throws that nothing caught, here or in the hook it runs, ends as a
+ * failed child does (`childFailed`, by `childOutcome`): exit 2 for an enforce PreToolUse
+ * without failOpen, else exit 0 and a gap. Never exit 1: Claude Code reads it as a
+ * non-blocking error, and lets the call run with no gap. Before the session is known, its
+ * settings are resolved as they were before pins, and refused if even that fails. One
+ * outcome per process: a second throw waits for the first's.
+ */
+function launcherFailed(hook, err) {
+	failure ??= (async () => {
+		let current = known.settings;
+		if (current === null) {
+			try {
+				current = resolvedSettings();
+			} catch {
+				current = refusedSettings("launch: no settings", passwdHome());
+			}
+		}
+		const what = `an unexpected ${err?.code ?? err?.name ?? "error"}`;
+		try {
+			await childFailed(hook, current, known.input, what);
+		} catch {
+			// The gap or the note could not be written: the exit still follows the table.
+			const { mode, failOpen } = current;
+			process.exitCode = childOutcome({ hook, mode, failOpen, what }).exitCode;
+		}
+	})();
+	return failure;
 }
 
 /** The child: run the hook with the pinned settings, or refuse. */
@@ -219,6 +275,14 @@ if (isScript()) {
 	} else if (process.argv.includes(CHILD)) {
 		await child(hook);
 	} else {
-		await parent(hook);
+		// A throw in a callback, or a rejection nothing awaits, never reaches the catch.
+		const failed = (err) => launcherFailed(hook, err).finally(() => process.exit());
+		process.on("uncaughtException", failed);
+		process.on("unhandledRejection", failed);
+		try {
+			await parent(hook);
+		} catch (err) {
+			await launcherFailed(hook, err);
+		}
 	}
 }
