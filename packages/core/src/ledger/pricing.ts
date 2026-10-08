@@ -403,6 +403,10 @@ export const FALLBACK_RATE: ModelRates = {
 	inputPer1k: 250,
 	outputPer1k: 1250,
 	cacheWritePer1k: 312.5,
+	// Explicit, so a HOLD on an unknown id reserves it: settlement meters 1-hour tokens
+	// at the derived rate, and a hold that derives nothing from silence (table rows with no
+	// 1-hour tier) would be capped below what the settle charged.
+	cacheWrite1hPer1k: 500,
 };
 
 /** Maps provider names to their model key prefixes in PRICING_TABLE. */

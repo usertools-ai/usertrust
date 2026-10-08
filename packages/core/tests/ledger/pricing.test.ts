@@ -50,6 +50,9 @@ describe("FALLBACK_RATE", () => {
 		expect(FALLBACK_RATE.inputPer1k).toBe(maxIn);
 		expect(FALLBACK_RATE.outputPer1k).toBe(maxOut);
 		expect(FALLBACK_RATE.cacheWritePer1k).toBe(maxWrite);
+		// The 1-hour tier too: the dearest effective 1-hour write rate in the table.
+		const max1h = Math.max(...rows.map((r) => effectiveCacheWrite1hRate(r)));
+		expect(FALLBACK_RATE.cacheWrite1hPer1k).toBe(max1h);
 	});
 
 	it("pins the literal fallback (250 / 1250 / write 312.5)", () => {
@@ -57,6 +60,7 @@ describe("FALLBACK_RATE", () => {
 			inputPer1k: 250,
 			outputPer1k: 1250,
 			cacheWritePer1k: 312.5,
+			cacheWrite1hPer1k: 500,
 		});
 	});
 });

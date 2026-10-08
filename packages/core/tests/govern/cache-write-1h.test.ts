@@ -356,6 +356,32 @@ describe("1-hour cache writes: governed paths", () => {
 		await gov.destroy();
 	});
 
+	it("an UNKNOWN model (fallback rate): the hold covers a 1-hour settle, no shortfall", async () => {
+		const engine = makeCappingEngine();
+		const gov = await createGovernor({
+			budget: 10_000_000,
+			vaultBase: tmpVault,
+			_engine: asEngine(engine),
+		});
+		const auth = await gov.authorize({
+			model: "claude-made-up-9",
+			estimatedInputTokens: 10_000,
+			maxOutputTokens: 1,
+		});
+		// Fallback 250 / 1250, 1h write 500: 10,000 x 500 / 1000 + 1 x 1250 / 1000 = 5,001.25 -> 5,002.
+		expect(heldAmount(engine)).toBe(5_002);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 0,
+			outputTokens: 1,
+			cacheWriteTokens: 10_000,
+			cacheWrite1hTokens: 10_000,
+			usageSource: "provider",
+		});
+		expect(receipt.cost).toBe(5_002);
+		expect(receipt.postedCost).toBeUndefined();
+		await gov.destroy();
+	});
+
 	it("headless authorize() holds the worst case: input leg and stated writes at the 1h rate", async () => {
 		const engine = makeCappingEngine();
 		const gov = await createGovernor({
