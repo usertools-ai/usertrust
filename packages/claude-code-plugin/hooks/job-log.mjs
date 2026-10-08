@@ -194,7 +194,9 @@ async function noteSuspect(sessionId, maxRawMs) {
 	try {
 		const prior = await readFile(marker, "utf-8").catch(() => null);
 		if (prior === String(maxRawMs)) return;
-		await recordWatchEvent({
+		// Mark it written ONLY if it was: a transient failure of the watch log must not leave a
+		// marker that stops the gap from ever being written once the log recovers.
+		const written = await recordWatchEvent({
 			kind: "gap",
 			mode: guardMode(),
 			session: sessionId,
@@ -203,6 +205,7 @@ async function noteSuspect(sessionId, maxRawMs) {
 			reason: "the job log is stamped ahead of this clock",
 			started: null,
 		});
+		if (!written) return;
 		await mkdir(jobsDir(), { recursive: true, mode: 0o700 });
 		await writeFileAtomic(marker, String(maxRawMs));
 	} catch {

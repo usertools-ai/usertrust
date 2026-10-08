@@ -446,7 +446,7 @@ async function reserve(input) {
 		// of this call and its first assigned message, so a window never starts after it
 		// ends). Fixed here, from the capture the server will keep. Recomputed if the
 		// window is dropped below.
-		const labelsFor = () =>
+		const holdAuthorizeLabels = () =>
 			jobs === null
 				? {}
 				: {
@@ -493,7 +493,7 @@ async function reserve(input) {
 					messages: [{ role: "user", content }],
 					...(window && keyed ? { idempotencyKey: prepared.key } : {}),
 					...(principal === undefined ? {} : { principal }),
-					...authorizeLabels(labelsFor()),
+					...authorizeLabels(holdAuthorizeLabels()),
 				},
 				{ timeoutMs: callTimeout() },
 			);
@@ -538,7 +538,7 @@ async function reserve(input) {
 									? { idempotencyKey: prepared.key, agentType: prepared.agentTypeRaw }
 									: {}),
 							}),
-					...labelsFor(),
+					...holdAuthorizeLabels(),
 				});
 			} catch (err) {
 				// Unrecorded, the hold could never be settled: give it back now. `giveBack`
@@ -576,8 +576,10 @@ async function reserve(input) {
 					error: error.slice(0, MAX_REASON_CHARS),
 					reason: reason.slice(0, MAX_REASON_CHARS),
 					// With the `job` capability, a refused call names its job (or why it has none).
-					...(labelsFor().job === undefined ? {} : { job: labelsFor().job }),
-					...(labelsFor().jobState === undefined ? {} : { jobState: labelsFor().jobState }),
+					...(holdAuthorizeLabels().job === undefined ? {} : { job: holdAuthorizeLabels().job }),
+					...(holdAuthorizeLabels().jobState === undefined
+						? {}
+						: { jobState: holdAuthorizeLabels().jobState }),
 				});
 				proceed(`usertrust watch-only: would have blocked (${error}: ${reason}) — not enforced`);
 			}

@@ -870,6 +870,25 @@ describe("a skew seen during PreToolUse leaves a durable gap", () => {
 	});
 });
 
+describe("a failed gap write leaves no marker, so the gap is written once the watch log recovers", () => {
+	it("the watch path is a directory for the first suspect read, then a file", async () => {
+		await startFake();
+		await writeLog(logLine(at(-60), "session-start", null), logLine(at(100), "start", "job-a"));
+		await mkdir(join(stateDir, "watch.jsonl"), { recursive: true }); // the write fails
+		await run("pre-tool-use.mjs", pre("tu_1"), { UT_CC_USAGE: "estimate" });
+		// mutant: the result is ignored and the marker written anyway
+		expect((await readdir(join(stateDir, "jobs"))).some((n) => n.endsWith(".suspect"))).toBe(false);
+		await (await import("node:fs/promises")).rm(join(stateDir, "watch.jsonl"), { recursive: true });
+		await run("pre-tool-use.mjs", pre("tu_2"), { UT_CC_USAGE: "estimate" });
+		const gaps = (await readFile(join(stateDir, "watch.jsonl"), "utf-8"))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l))
+			.filter((e) => e.reason === "the job log is stamped ahead of this clock");
+		expect(gaps).toHaveLength(1);
+	});
+});
+
 describe("the skew check uses the clock that READ the log", () => {
 	it("a sibling that switches jobs while this hook waits on a slow probe does not make the known job unknown", async () => {
 		await startFake();
