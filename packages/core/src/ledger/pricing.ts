@@ -678,12 +678,15 @@ export function requestDeclares1hCache(request: unknown): boolean {
 		// the SDK's serialization emit something the scan never saw, a `cache_control` block with
 		// `ttl: "1h"` included, so the scan cannot vouch for the request: fail dearest. A Date or a
 		// binary view carries a toJSON that can only produce a string or bytes, never a cache block.
-		if (
-			typeof (value as { toJSON?: unknown }).toJSON === "function" &&
-			!(value instanceof Date) &&
-			!ArrayBuffer.isView(value)
-		) {
-			return true;
+		// Found by DESCRIPTOR down the prototype chain, never by reading `.toJSON`: a getter
+		// would be evaluated by the read and could answer differently at serialization.
+		if (!(value instanceof Date) && !ArrayBuffer.isView(value)) {
+			for (let o: object | null = value; o !== null; o = Object.getPrototypeOf(o)) {
+				const d = Object.getOwnPropertyDescriptor(o, "toJSON");
+				if (d === undefined) continue;
+				if (d.get !== undefined || d.set !== undefined || typeof d.value === "function")
+					return true;
+			}
 		}
 		if (Array.isArray(value)) {
 			// An indexed accessor is an accessor like any other: fail dearest.

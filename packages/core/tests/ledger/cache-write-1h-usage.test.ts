@@ -242,6 +242,14 @@ describe("requestDeclares1hCache", () => {
 		expect(requestDeclares1hCache({ messages: [{ role: "user", content: [new Sneaky()] }] })).toBe(
 			true,
 		);
+		// An accessor-backed toJSON (own non-enumerable, or inherited) is never evaluated: a getter
+		// that answers undefined now could return a serializer later.
+		const lazy = Object.create({
+			get toJSON() {
+				return undefined;
+			},
+		});
+		expect(requestDeclares1hCache({ messages: [{ content: [lazy] }] })).toBe(true);
 		const arr: unknown[] = [{ type: "text" }];
 		Object.defineProperty(arr, "toJSON", { value: () => [{ cache_control: { ttl: "1h" } }] });
 		expect(requestDeclares1hCache({ messages: [{ content: arr }] })).toBe(true);
