@@ -19,10 +19,11 @@ import {
 	openSync,
 	readFileSync,
 	realpathSync,
+	statSync,
 	unlinkSync,
 	writeSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
 import { canonicalize } from "./canonical.js";
@@ -196,16 +197,32 @@ function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
  * directory (a relative path, a symlink, macOS's /tmp → /private/tmp) must be the same key, or a
  * second writer in this process misses the first writer's entry, meets EEXIST, and "reclaims"
  * the LIVE same-PID lock as stale — two live writers, a silently forked chain (AUD-471's class).
- * `resolve` only when the directory does not exist yet (nothing can hold a lock in it).
+ *
+ * ALWAYS the native realpath — no fallback (#182.1), and the filesystem's own case (#195 r1). A directory that does not exist cannot hold the lock
+ * file (its open fails ENOENT anyway), so a `resolve()` fallback could only ever key a lock in
+ * the window where ANOTHER process creates the directory between this call and the open — under
+ * a spelling that misses a live writer's realpath key and "reclaims" its lock. An ENOENT here is
+ * thrown, exactly as the open would have thrown it.
  */
 function canonicalDir(dir: string): string {
+	// `.native` (realpath(3)): it also returns the filesystem's own CASE. The JS realpath
+	// resolves symlinks but keeps the caller's case, so on a case-insensitive volume (APFS's
+	// default) `Vault` and `vault` were two keys for one directory (#195 r1).
 	try {
-		return realpathSync(dir);
-	} catch (err: unknown) {
-		if (err instanceof Error && "code" in err && (err as { code?: string }).code === "ENOENT") {
-			return resolve(dir);
+		return realpathSync.native(dir);
+	} catch {
+		// A directory that really is absent throws HERE (ENOENT), exactly as the lock's open
+		// would — never a resolve() spelling (#182.1).
+		statSync(dir);
+		// It exists. Either it was created since (#182.1's window: native now answers), or
+		// native cannot answer at all — musl without /proc (Alpine, procfs-less sandboxes) fails
+		// realpath(3) on every call (#195 r2). Only then the JS realpath: it resolves symlinks,
+		// and the platforms where native is unavailable are case-sensitive, so its key is unique.
+		try {
+			return realpathSync.native(dir);
+		} catch {
+			return realpathSync(dir);
 		}
-		throw err;
 	}
 }
 
