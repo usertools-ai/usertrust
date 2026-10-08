@@ -1421,6 +1421,10 @@ describe("cache tiers survive the MessageStream accumulator", () => {
 			},
 		});
 		expect(receipt.cacheWrite1h).toEqual({ tokens: 400, ratePer1k: 60 });
+		// ...and the flat total (1,000) survives the partial breakdown (600): the cost is the
+		// same 107 as the tap-only case, not the 98 a dropped 400 would give.
+		expect(receipt.usage?.cacheWriteTokens).toBe(1_000);
+		expect(receipt.cost).toBe(107);
 	});
 
 	it("prefers the finalMessage's 1-hour share over the accumulated one", async () => {

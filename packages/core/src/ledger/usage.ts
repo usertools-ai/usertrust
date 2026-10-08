@@ -251,10 +251,12 @@ export function publishableUsageFields(
  *
  * `cache_creation` carries the per-TTL breakdown
  * (`ephemeral_5m_input_tokens` + `ephemeral_1h_input_tokens`). When it reports
- * at least one usable count its sum wins; otherwise the flat
- * `cache_creation_input_tokens` is used. (The two agree in practice — the flat
- * field is the sum — so this is about surviving whichever one a given SDK
- * version, proxy or fixture omits.) The 1-hour share rides along as
+ * both TTL counts it is the write total and wins over the flat
+ * `cache_creation_input_tokens`; when it reports only one of them (a partial
+ * breakdown) the total is the dearer of that partial sum and the flat field, so the
+ * unaccounted remainder is not dropped. (The two agree in practice — the flat field is
+ * the sum — so this is about surviving whichever one a given SDK version, proxy or
+ * fixture omits, or reports only part of.) The 1-hour share rides along as
  * `cacheWrite1hTokens` and is priced at `cacheWrite1hPer1k`.
  */
 export function fromAnthropicUsage(usage: unknown): NormalizedUsage {
@@ -273,7 +275,14 @@ export function fromAnthropicUsage(usage: unknown): NormalizedUsage {
 		inputTokens: input ?? 0,
 		outputTokens: output ?? 0,
 		cacheReadTokens: readCount(u.cache_read_input_tokens) ?? 0,
-		cacheWriteTokens: nestedWrite ?? readCount(u.cache_creation_input_tokens) ?? 0,
+		// A COMPLETE breakdown (both TTL fields usable) is authoritative and wins over the
+		// flat total. A PARTIAL one (a single TTL field) sums to less than the whole, and
+		// taking it alone would drop the unaccounted remainder, so the total is the dearer
+		// of the partial sum and the flat total; the remainder prices at the 5-minute rate.
+		cacheWriteTokens:
+			ephemeral5m != null && ephemeral1h != null
+				? (nestedWrite ?? 0)
+				: Math.max(nestedWrite ?? 0, readCount(u.cache_creation_input_tokens) ?? 0),
 		// Only the per-TTL breakdown can say how much was 1-hour. A payload that carries
 		// just the flat total is priced entirely at the 5-minute rate, which cannot be
 		// told apart from a genuine 5-minute write; the API reports the breakdown.

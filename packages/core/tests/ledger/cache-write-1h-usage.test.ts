@@ -31,6 +31,32 @@ describe("1h share in usage extraction", () => {
 		expect(u.cacheWrite1hTokens).toBe(700);
 	});
 
+	it("a PARTIAL breakdown never drops the flat total: the write total is the dearer of the two", () => {
+		const partial = fromAnthropicUsage({
+			input_tokens: 1,
+			output_tokens: 1,
+			cache_creation_input_tokens: 1_000,
+			cache_creation: { ephemeral_5m_input_tokens: 600 },
+		});
+		expect(partial.cacheWriteTokens).toBe(1_000);
+		expect("cacheWrite1hTokens" in partial).toBe(false);
+		// A COMPLETE breakdown still wins over the flat field, in either direction.
+		const bigger = fromAnthropicUsage({
+			input_tokens: 1,
+			output_tokens: 1,
+			cache_creation_input_tokens: 100,
+			cache_creation: { ephemeral_5m_input_tokens: 600, ephemeral_1h_input_tokens: 400 },
+		});
+		expect(bigger.cacheWriteTokens).toBe(1_000);
+		expect(bigger.cacheWrite1hTokens).toBe(400);
+		// Flat only, and nothing at all, are as before.
+		expect(
+			fromAnthropicUsage({ input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 40 })
+				.cacheWriteTokens,
+		).toBe(40);
+		expect(fromAnthropicUsage({ input_tokens: 1, output_tokens: 1 }).cacheWriteTokens).toBe(0);
+	});
+
 	it("the key is ABSENT when there is no 1h share (the snapshot keeps its old shape)", () => {
 		const flat = fromAnthropicUsage({
 			input_tokens: 1,

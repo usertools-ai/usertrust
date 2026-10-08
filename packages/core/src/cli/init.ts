@@ -343,7 +343,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			// The 1-hour cache-write rate. A blank answer OMITS it (never 0): an omitted
 			// 1-hour rate settles at the dearer of the 5-minute write and 2x input.
 			const cacheWrite1hResult = await clack.text({
-				message: `${model} cache-write 1-hour rate ($/1M tokens, blank = 2x the input rate):`,
+				message: `${model} cache-write 1-hour rate ($/1M tokens, blank = the dearer of the 5-minute write rate and 2x the input rate):`,
 			});
 
 			if (clack.isCancel(cacheWrite1hResult)) {
