@@ -3672,7 +3672,10 @@ function readFinalMessageUsage(msg: unknown): {
 					// The 1-hour share is reported only when the breakdown's own 1-hour field is usable. A
 					// finalMessage that carries just the flat write total says nothing about the
 					// split, and answering 0 would overwrite the share the streamEvent tap accumulated.
-					cacheWrite1hTokens: oneHourUsable ? (cacheTiers.cacheWrite1hTokens ?? 0) : undefined,
+					cacheWrite1hTokens:
+						oneHourUsable || (cacheTiers.cacheWrite1hTokens ?? 0) > 0
+							? (cacheTiers.cacheWrite1hTokens ?? 0)
+							: undefined,
 					reported: true,
 				};
 			}

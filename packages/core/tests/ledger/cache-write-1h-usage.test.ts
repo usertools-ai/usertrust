@@ -39,7 +39,17 @@ describe("1h share in usage extraction", () => {
 			cache_creation: { ephemeral_5m_input_tokens: 600 },
 		});
 		expect(partial.cacheWriteTokens).toBe(1_000);
-		expect("cacheWrite1hTokens" in partial).toBe(false);
+		// The 400 the payload did not attribute are a real write: priced at the dearer 1-hour rate.
+		expect(partial.cacheWrite1hTokens).toBe(400);
+		// A partial breakdown naming only the 1-hour field keeps the rest of the flat total too.
+		const only1h = fromAnthropicUsage({
+			input_tokens: 1,
+			output_tokens: 1,
+			cache_creation_input_tokens: 1_000,
+			cache_creation: { ephemeral_1h_input_tokens: 300 },
+		});
+		expect(only1h.cacheWriteTokens).toBe(1_000);
+		expect(only1h.cacheWrite1hTokens).toBe(1_000);
 		// A COMPLETE breakdown still wins over the flat field, in either direction.
 		const bigger = fromAnthropicUsage({
 			input_tokens: 1,

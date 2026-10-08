@@ -270,23 +270,25 @@ export function fromAnthropicUsage(usage: unknown): NormalizedUsage {
 	const ephemeral1h = breakdown ? readCount(breakdown.ephemeral_1h_input_tokens) : null;
 	const nestedWrite =
 		ephemeral5m == null && ephemeral1h == null ? null : (ephemeral5m ?? 0) + (ephemeral1h ?? 0);
+	const flatWrite = readCount(u.cache_creation_input_tokens);
+	// A COMPLETE breakdown (both TTL fields usable) is authoritative and wins over the flat
+	// total. A PARTIAL one (a single TTL field) sums to less than the whole: the flat total
+	// is the sum of the two TTLs, so what the partial sum leaves out is a real write whose
+	// TTL the payload did not attribute. It is kept (never dropped) and, being unattributed,
+	// priced at the DEARER 1-hour rate: understating a write is the dangerous direction.
+	const complete = ephemeral5m != null && ephemeral1h != null;
+	const unattributed =
+		complete || nestedWrite == null ? 0 : Math.max(0, (flatWrite ?? 0) - nestedWrite);
 
 	return sanitizeUsage({
 		inputTokens: input ?? 0,
 		outputTokens: output ?? 0,
 		cacheReadTokens: readCount(u.cache_read_input_tokens) ?? 0,
-		// A COMPLETE breakdown (both TTL fields usable) is authoritative and wins over the
-		// flat total. A PARTIAL one (a single TTL field) sums to less than the whole, and
-		// taking it alone would drop the unaccounted remainder, so the total is the dearer
-		// of the partial sum and the flat total; the remainder prices at the 5-minute rate.
-		cacheWriteTokens:
-			ephemeral5m != null && ephemeral1h != null
-				? (nestedWrite ?? 0)
-				: Math.max(nestedWrite ?? 0, readCount(u.cache_creation_input_tokens) ?? 0),
+		cacheWriteTokens: complete ? (nestedWrite ?? 0) : Math.max(nestedWrite ?? 0, flatWrite ?? 0),
 		// Only the per-TTL breakdown can say how much was 1-hour. A payload that carries
-		// just the flat total is priced entirely at the 5-minute rate, which cannot be
-		// told apart from a genuine 5-minute write; the API reports the breakdown.
-		cacheWrite1hTokens: ephemeral1h ?? 0,
+		// just the flat total (no breakdown at all) cannot be told apart from a genuine
+		// 5-minute write and is priced at the 5-minute rate; the API reports the breakdown.
+		cacheWrite1hTokens: (ephemeral1h ?? 0) + unattributed,
 		source: input != null && output != null ? "provider" : "estimated",
 	});
 }
