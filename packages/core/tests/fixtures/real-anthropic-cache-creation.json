@@ -1,0 +1,174 @@
+{
+	"stats": {
+		"distinctBlocks": 73292,
+		"mixed": 0,
+		"only1h": 23999,
+		"only5m": 49135,
+		"zero": 158,
+		"violations": 0
+	},
+	"sample": [
+		{
+			"model": "claude-fable-5",
+			"cache_creation_input_tokens": 3660,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 3660
+			}
+		},
+		{
+			"model": "claude-opus-5-5",
+			"cache_creation_input_tokens": 1651,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 1651
+			}
+		},
+		{
+			"model": "claude-opus-5-5",
+			"cache_creation_input_tokens": 1298,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 1298
+			}
+		},
+		{
+			"model": "claude-opus-5-5",
+			"cache_creation_input_tokens": 584,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 584
+			}
+		},
+		{
+			"model": "claude-fable-5-1",
+			"cache_creation_input_tokens": 4343,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 4343
+			}
+		},
+		{
+			"model": "claude-fable-5-1",
+			"cache_creation_input_tokens": 650284,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 650284
+			}
+		},
+		{
+			"model": "claude-fable-5-1",
+			"cache_creation_input_tokens": 1495,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 1495
+			}
+		},
+		{
+			"model": "claude-opus-5-5",
+			"cache_creation_input_tokens": 946,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 946
+			}
+		},
+		{
+			"model": "claude-opus-5-5",
+			"cache_creation_input_tokens": 1408,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 1408,
+				"ephemeral_1h_input_tokens": 0
+			}
+		},
+		{
+			"model": "claude-sonnet-5",
+			"cache_creation_input_tokens": 1399,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 1399,
+				"ephemeral_1h_input_tokens": 0
+			}
+		},
+		{
+			"model": "claude-opus-5",
+			"cache_creation_input_tokens": 1323,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 1323,
+				"ephemeral_1h_input_tokens": 0
+			}
+		},
+		{
+			"model": "claude-opus-5-5",
+			"cache_creation_input_tokens": 2513,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 2513,
+				"ephemeral_1h_input_tokens": 0
+			}
+		},
+		{
+			"model": "claude-opus-5-5",
+			"cache_creation_input_tokens": 10963,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 10963,
+				"ephemeral_1h_input_tokens": 0
+			}
+		},
+		{
+			"model": "claude-sonnet-5",
+			"cache_creation_input_tokens": 36086,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 36086,
+				"ephemeral_1h_input_tokens": 0
+			}
+		},
+		{
+			"model": "claude-opus-5-5",
+			"cache_creation_input_tokens": 863,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 863,
+				"ephemeral_1h_input_tokens": 0
+			}
+		},
+		{
+			"model": "claude-sonnet-5-5",
+			"cache_creation_input_tokens": 993,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 993,
+				"ephemeral_1h_input_tokens": 0
+			}
+		},
+		{
+			"model": "<synthetic>",
+			"cache_creation_input_tokens": 0,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 0
+			}
+		},
+		{
+			"model": "claude-fable-5-1",
+			"cache_creation_input_tokens": 0,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 0
+			}
+		},
+		{
+			"model": "claude-sonnet-5",
+			"cache_creation_input_tokens": 0,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 0
+			}
+		},
+		{
+			"model": "<synthetic>",
+			"cache_creation_input_tokens": 0,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 0,
+				"ephemeral_1h_input_tokens": 0
+			}
+		}
+	],
+	"source": "Claude Code session transcripts on the build machine (message.usage.cache_creation as the Anthropic API returned it), scanned 2026-10-08T04:48Z. Distinct (message id, breakdown, flat total) blocks, excluding two hand-written fixture lines in a test-fixtures directory. Only token counts and the model id are kept.",
+	"apiReference": "https://platform.claude.com/docs/en/api/messages, read raw 2026-10-08T04:49Z: CacheCreation object { ephemeral_1h_input_tokens: number (default 0, minimum 0), ephemeral_5m_input_tokens: number (default 0, minimum 0) }."
+}

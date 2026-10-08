@@ -47,6 +47,18 @@ export interface AppliedRates {
 }
 
 /**
+ * The 1-hour cache-write record on a receipt: a ROOT field (never inside `usage` or
+ * `pricing.appliedRates`, which the v2 schema closes), present only when the call
+ * wrote 1-hour cache. `tokens` is the 1-hour SUBSET of `usage.cacheWriteTokens`;
+ * `ratePer1k` is the usertoken rate those tokens were priced at. The 5-minute term
+ * of a recompute is `usage.cacheWriteTokens - tokens` at `appliedRates.cacheWritePer1k`.
+ */
+export interface CacheWrite1h {
+	tokens: number;
+	ratePer1k: number;
+}
+
+/**
  * The four-tier DISJOINT token split a settle was metered from (spec D5).
  *
  * Sanitized by construction — every count is a finite integer >= 0 — because
@@ -105,6 +117,17 @@ export interface TrustReceipt {
 	 * `ceil(sum(counts x rates / 1000))` floored at 1 equals `cost`.
 	 */
 	usage?: ReceiptUsage;
+	/**
+	 * The 1-hour cache-write share of `usage.cacheWriteTokens`, with the rate it was
+	 * priced at. PRESENT only when the call wrote 1-hour cache; absent otherwise, so
+	 * every other receipt is byte-identical to what it was. A ROOT field on purpose:
+	 * the v2 schema closes `usage` and `pricing.appliedRates`, and a field added inside
+	 * either would make every v2 validator reject every receipt. The recompute becomes
+	 * `ceil(sum(counts x rates / 1000))` with the write term split:
+	 * `(usage.cacheWriteTokens - cacheWrite1h.tokens) x appliedRates.cacheWritePer1k
+	 * + cacheWrite1h.tokens x cacheWrite1h.ratePer1k`.
+	 */
+	cacheWrite1h?: CacheWrite1h;
 	/** Number of chunks delivered to the consumer (streaming calls only). */
 	chunksDelivered?: number;
 	/** Action kind for governed non-LLM actions. Absent for LLM calls (backward compat). */
@@ -206,6 +229,9 @@ const RateSchema = z.object({
 	outputPer1k: z.number().finite().nonnegative(),
 	cacheReadPer1k: z.number().finite().nonnegative().optional(),
 	cacheWritePer1k: z.number().finite().nonnegative().optional(),
+	// The 1-hour cache-write rate. Optional and undeclared-means-stripped, like the other
+	// cache tiers: absent resolves to the dearer of the 5-minute write and 2x input.
+	cacheWrite1hPer1k: z.number().finite().nonnegative().optional(),
 });
 
 export const TrustConfigSchema = z.object({

@@ -172,6 +172,7 @@ describe("usertrust init (interactive)", () => {
 			.mockResolvedValueOnce("170") // output rate $/1M
 			.mockResolvedValueOnce("4") // cache-read rate $/1M
 			.mockResolvedValueOnce("45") // cache-write rate $/1M
+			.mockResolvedValueOnce("72") // cache-write 1-hour rate $/1M
 			.mockResolvedValueOnce(""); // done editing models
 		vi.mocked(clack.confirm)
 			.mockResolvedValueOnce(false) // useRecommended? -> no, custom
@@ -188,6 +189,7 @@ describe("usertrust init (interactive)", () => {
 			outputPer1k: 1700,
 			cacheReadPer1k: 40,
 			cacheWritePer1k: 450,
+			cacheWrite1hPer1k: 720,
 		});
 	});
 
@@ -201,6 +203,7 @@ describe("usertrust init (interactive)", () => {
 			.mockResolvedValueOnce("170") // output rate $/1M
 			.mockResolvedValueOnce("") // cache-read rate: blank
 			.mockResolvedValueOnce("") // cache-write rate: blank
+			.mockResolvedValueOnce("") // cache-write 1-hour rate: blank
 			.mockResolvedValueOnce("");
 		vi.mocked(clack.confirm).mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
@@ -213,6 +216,7 @@ describe("usertrust init (interactive)", () => {
 		expect(rate).toEqual({ inputPer1k: 350, outputPer1k: 1700 });
 		expect(rate).not.toHaveProperty("cacheReadPer1k");
 		expect(rate).not.toHaveProperty("cacheWritePer1k");
+		expect(rate).not.toHaveProperty("cacheWrite1hPer1k");
 	});
 
 	it("--json flag produces non-interactive output with defaults", async () => {

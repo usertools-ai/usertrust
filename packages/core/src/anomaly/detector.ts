@@ -21,7 +21,7 @@
  * when off, observe/check are no-ops.
  */
 
-import { costFromRatesUnfloored, getModelRates } from "../ledger/pricing.js";
+import { costFromRatesUnfloored, getModelRates, supported1hTokens } from "../ledger/pricing.js";
 import {
 	createInjectionCascadeSignal,
 	type InjectionCascadeSignal,
@@ -76,30 +76,38 @@ function defaultCostCalculator(
 	// rate instead of vanishing behind fresh-only input/output.
 	const cacheReadTokens = event?.cumulativeCacheReadTokens ?? 0;
 	const cacheWriteTokens = event?.cumulativeCacheWriteTokens ?? 0;
+	const cacheWrite1hTokens = event?.cumulativeCacheWrite1hTokens ?? 0;
 	if (event?.endpointClass === "local") {
 		// Local scope without an injected calculator: price in nominal usertokens at
 		// the shipped default local rate {0,0}. Unfloored, so the cumulative cost is
 		// exactly 0 and spend-velocity stays flat — token_rate is the primary local
 		// signal. govern.ts injects a config-aware calculator that prices via
 		// resolveRates (operator-set local rates enable velocity showback).
+		const localRates = { inputPer1k: 0, outputPer1k: 0 };
 		return costFromRatesUnfloored(
-			{ inputPer1k: 0, outputPer1k: 0 },
+			localRates,
 			inputTokens,
 			outputTokens,
 			cacheReadTokens,
 			cacheWriteTokens,
+			// Local rates are operator-owned: the same predicate as everywhere else.
+			supported1hTokens(localRates, true, cacheWrite1hTokens),
 		);
 	}
 	// Unfloored four-tier usertokens; convert to dollars (cloud usd-proxy scope).
 	// No-floor per D7: settlement floors per call, but spend-velocity measures a
 	// continuous flow — a per-call floor would clamp every early sample to the
 	// same plateau, hiding exactly the flood this fix makes visible.
+	const rates = getModelRates(model);
 	const usertokens = costFromRatesUnfloored(
-		getModelRates(model),
+		rates,
 		inputTokens,
 		outputTokens,
 		cacheReadTokens,
 		cacheWriteTokens,
+		// A built-in row with no 1-hour tier does not price a reported share (the ledger
+		// will not charge it), so the velocity signal must not either.
+		supported1hTokens(rates, false, cacheWrite1hTokens),
 	);
 	return usertokens / USERTOKENS_PER_DOLLAR;
 }

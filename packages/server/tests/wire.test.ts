@@ -61,6 +61,26 @@ describe("request schemas", () => {
 		});
 	});
 
+	it("round-trips cacheWrite1hTokens (the 1-hour share of the write total; zod would STRIP an unknown key)", () => {
+		const parsed = SettleRequestSchema.parse({
+			transferId: "tx_1",
+			cacheWriteTokens: 1_200,
+			cacheWrite1hTokens: 500,
+		});
+		expect(parsed.cacheWrite1hTokens).toBe(500);
+		expect(parsed).toEqual({
+			transferId: "tx_1",
+			cacheWriteTokens: 1_200,
+			cacheWrite1hTokens: 500,
+		});
+		expect(SettleRequestSchema.parse({ transferId: "tx_1" }).cacheWrite1hTokens).toBeUndefined();
+		for (const bad of [-1, 1.5, "7"]) {
+			expect(() =>
+				SettleRequestSchema.parse({ transferId: "tx_1", cacheWrite1hTokens: bad }),
+			).toThrow();
+		}
+	});
+
 	it("cache fields stay optional and reject non-integer/negative values like the existing token fields", () => {
 		expect(SettleRequestSchema.parse({ transferId: "tx_1" }).cacheReadTokens).toBeUndefined();
 		expect(() => SettleRequestSchema.parse({ transferId: "tx_1", cacheReadTokens: -1 })).toThrow();

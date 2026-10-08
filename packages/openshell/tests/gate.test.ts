@@ -452,7 +452,13 @@ describe("the request gate: every unmetered shape is DENIED before any hold", ()
 				{ ...DEFAULT_GATE_CONFIG, customRates: { [model]: rates as never } },
 			);
 		const bad = [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, "1", null];
-		for (const field of ["inputPer1k", "outputPer1k", "cacheReadPer1k", "cacheWritePer1k"]) {
+		for (const field of [
+			"inputPer1k",
+			"outputPer1k",
+			"cacheReadPer1k",
+			"cacheWritePer1k",
+			"cacheWrite1hPer1k",
+		]) {
 			for (const v of bad) {
 				const rates = { inputPer1k: 1, outputPer1k: 2, [field]: v };
 				expect(denied(call("op-model", rates)), `${field}=${String(v)}`).toBe("model_unpriced");
@@ -806,5 +812,165 @@ describe("#171: the image and tool token config is validated — a bad value ref
 		const zero = { ...DEFAULT_GATE_CONFIG, toolOverheadTokens: { anthropic: 0, openai: 0 } };
 		expect(run(zero, tools, ANTHROPIC).decision).toBe("allow");
 		expect(run(DEFAULT_GATE_CONFIG, withImage).decision).toBe("allow");
+	});
+});
+
+describe("#203: a request that declares a 1-hour cache TTL is held at the 1-hour write rate", () => {
+	const body = (cacheControl?: Record<string, unknown>) => ({
+		model: "claude-sonnet-4-6",
+		max_tokens: 1,
+		messages: [
+			{
+				role: "user",
+				content: [
+					{
+						type: "text",
+						text: "x".repeat(4000),
+						...(cacheControl === undefined ? {} : { cache_control: cacheControl }),
+					},
+				],
+			},
+		],
+	});
+
+	it("no marker, or a 5-minute marker: held exactly as before", () => {
+		const plain = gate(ANTHROPIC, "/v1/messages", body());
+		const fiveMin = gate(ANTHROPIC, "/v1/messages", body({ type: "ephemeral", ttl: "5m" }));
+		if (plain.decision !== "allow" || fiveMin.decision !== "allow")
+			throw new Error("expected allow");
+		const rates = getModelRates("claude-sonnet-4-6");
+		const bound = plain.hold.inputTokenBound;
+		const out = plain.hold.maxOutputTokens;
+		expect(plain.hold.amount).toBe(costFromRates(rates, 0, out, 0, bound));
+		// (The marker adds bytes to the bound, so compare each hold to ITS OWN bound.)
+		expect(fiveMin.hold.amount).toBe(costFromRates(rates, 0, out, 0, fiveMin.hold.inputTokenBound));
+	});
+
+	it("a 1h marker: the hold is the 1-hour write on the whole input bound", () => {
+		const r = gate(ANTHROPIC, "/v1/messages", body({ type: "ephemeral", ttl: "1h" }));
+		if (r.decision !== "allow") throw new Error("expected allow");
+		const rates = getModelRates("claude-sonnet-4-6");
+		const bound = r.hold.inputTokenBound;
+		const out = r.hold.maxOutputTokens;
+		expect(r.hold.amount).toBe(costFromRates(rates, 0, out, 0, bound, bound));
+		expect(r.hold.amount).toBeGreaterThan(costFromRates(rates, 0, out, 0, bound));
+		// Positive control: a call that wrote its whole prompt as 1h cache settles within the hold.
+		const s = settleHold(r.hold, {
+			inputTokens: 0,
+			outputTokens: 1,
+			cacheReadTokens: 0,
+			cacheWriteTokens: bound,
+			cacheWrite1hTokens: bound,
+			source: "provider",
+		});
+		expect(s.overage).toBe(0);
+	});
+});
+
+describe("#203: the 1-hour hold premium is Anthropic-only", () => {
+	it("an OpenAI request whose body scans as declaring 1h (a cache_control example in a tool schema) holds as before", () => {
+		const plain = gate(OPENAI, "/v1/chat/completions", {
+			model: "gpt-4o",
+			max_tokens: 1,
+			messages: [{ role: "user", content: "x".repeat(4000) }],
+		});
+		const marked = gate(OPENAI, "/v1/chat/completions", {
+			model: "gpt-4o",
+			max_tokens: 1,
+			messages: [{ role: "user", content: "x".repeat(4000) }],
+			tools: [
+				{
+					type: "function",
+					function: {
+						name: "t",
+						parameters: {
+							type: "object",
+							properties: { example: { cache_control: { type: "ephemeral", ttl: "1h" } } },
+						},
+					},
+				},
+			],
+		});
+		if (plain.decision !== "allow" || marked.decision !== "allow")
+			throw new Error("expected allow");
+		const rates = getModelRates("gpt-4o");
+		// Each hold is the dearest of the three plain scenarios on ITS OWN bound: no 2x input.
+		const holdOf = (r: typeof marked) =>
+			Math.max(
+				costFromRates(rates, r.hold.inputTokenBound, r.hold.maxOutputTokens),
+				costFromRates(rates, 0, r.hold.maxOutputTokens, 0, r.hold.inputTokenBound),
+				costFromRates(rates, 0, r.hold.maxOutputTokens, r.hold.inputTokenBound, 0),
+			);
+		expect(marked.hold.amount).toBe(holdOf(marked));
+		expect(plain.hold.amount).toBe(holdOf(plain));
+	});
+});
+
+describe("#203: the gate and settlement apply the SAME 1-hour tier predicate", () => {
+	const marked = (model: string) => ({
+		model,
+		max_tokens: 1,
+		messages: [
+			{
+				role: "user",
+				content: [
+					{
+						type: "text",
+						text: "x".repeat(4000),
+						cache_control: { type: "ephemeral", ttl: "1h" },
+					},
+				],
+			},
+		],
+	});
+
+	it("a built-in model with no 1-hour tier behind an Anthropic-compatible host is held as before, and its 1h share is ignored at settlement", () => {
+		const r = gate(ANTHROPIC, "/v1/messages", marked("gpt-4o"));
+		if (r.decision !== "allow") throw new Error("expected allow");
+		const rates = getModelRates("gpt-4o");
+		const bound = r.hold.inputTokenBound;
+		const out = r.hold.maxOutputTokens;
+		expect(r.hold.operatorOwned).toBe(false);
+		// No 2x-input scenario: the dearest of the three plain ones.
+		expect(r.hold.amount).toBe(
+			Math.max(
+				costFromRates(rates, bound, out),
+				costFromRates(rates, 0, out, 0, bound),
+				costFromRates(rates, 0, out, bound, 0),
+			),
+		);
+		const s = settleHold(r.hold, {
+			inputTokens: 0,
+			outputTokens: out,
+			cacheReadTokens: 0,
+			cacheWriteTokens: bound,
+			cacheWrite1hTokens: bound,
+			source: "provider",
+		});
+		expect(s.actual).toBe(costFromRates(rates, 0, out, 0, bound)); // single write rate, no 1h share
+		expect(s.overage).toBe(0);
+	});
+
+	it("an operator's custom row for the same model HAS a derived tier: held and settled at it", () => {
+		const config = {
+			...DEFAULT_GATE_CONFIG,
+			customRates: { "op-claude": { inputPer1k: 30, outputPer1k: 150, cacheWritePer1k: 37.5 } },
+		};
+		const r = gate(ANTHROPIC, "/v1/messages", marked("op-claude"), config);
+		if (r.decision !== "allow") throw new Error("expected allow");
+		expect(r.hold.operatorOwned).toBe(true);
+		const bound = r.hold.inputTokenBound;
+		const out = r.hold.maxOutputTokens;
+		expect(r.hold.amount).toBe(costFromRates(r.hold.rates, 0, out, 0, bound, bound));
+		const s = settleHold(r.hold, {
+			inputTokens: 0,
+			outputTokens: out,
+			cacheReadTokens: 0,
+			cacheWriteTokens: bound,
+			cacheWrite1hTokens: bound,
+			source: "provider",
+		});
+		expect(s.actual).toBe(costFromRates(r.hold.rates, 0, out, 0, bound, bound));
+		expect(s.overage).toBe(0);
 	});
 });

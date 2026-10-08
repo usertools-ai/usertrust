@@ -576,6 +576,59 @@ with. It returns a FROZEN snapshot and each record surface gets its own copy: on
 reaches the caller's receipt, the chain event and (for streams) the pre-settle handle, so a shared
 mutable object would let a caller rewrite the rates the chain records without touching the cost.
 
+**The 1-hour cache-write tier is a SUBSET of the write total, and its receipt field is at the ROOT.**
+`cacheWriteTokens` stays the TOTAL written; `cacheWrite1hTokens` is how much of it was the 1-hour
+kind (`NormalizedUsage`, `SettleParams`, `POST /v1/settle` with capability `cache-write-1h`). Cost
+is `(total - 1h) x cacheWritePer1k + 1h x cacheWrite1hPer1k` through the one `tieredCostRaw`, the
+1-hour count clamped to the total in `sanitizeUsage` and again in the cost, so it can never be
+summed into a larger bill than the provider reported. `cacheWrite1hPer1k` is explicit on every
+Anthropic row; an absent one resolves in `effectiveCacheWrite1hRate` (the one site) to the dearer of
+the 5-minute write and 2x input. The receipt carries `cacheWrite1h: { tokens, ratePer1k }` at the
+root, present only when 1h tokens > 0, built by `resolveCacheWrite1h` (frozen) and spread beside
+`usage` by `publishableUsageFields`. Not inside `usage` or `pricing.appliedRates`: the v2 schema closes
+both, so a field there makes every v2 validator reject every receipt. An older server strips the
+`cacheWrite1hTokens` key, so a client (the Claude Code plugin) sends it only when `/v1/health`
+lists `cache-write-1h`.
+*Prevents:* 1-hour writes billed at 1.25x while the provider bills 2x (#203), and a recorded cost
+no auditor can reproduce from the record.
+*The request is serialized ONCE, and what is scanned is what is sent.* `serializeRequest` runs
+`JSON.stringify` on the request a single time, parses that text back to plain data, and scans the
+data for a `cache_control` with `ttl: "1h"`. `trust()` then reads that body everywhere (hold
+verdict, PII and injection scans, redaction) and forwards it, so a getter or `toJSON` that answers
+5-minute to a scan and 1-hour to the SDK has nothing left to flip: the SDK never sees the original.
+A request that cannot be serialized to a JSON object (a cycle, a BigInt, a throwing hook) holds
+dearest and is forwarded as given; the dearest hold covers whatever it then writes. Google is the
+named exception to forwarding the body: its SDK reads callable members off the request, so the
+original goes through; Google has no 1-hour tier and its extractor never reports a 1-hour share, so
+a flip cannot under-hold there. *Prevents:* the property-walk scan this replaced, which had to
+enumerate every way `JSON.stringify` reads a value (accessors, `toJSON` on objects, arrays and
+built-ins, inherited array entries) and was found incomplete in seven consecutive review rounds.
+Do not reintroduce a walk over the live request.
+*The stream helper's parse hook is grafted back onto the snapshot, and that graft has a declared
+fidelity contract.* The forwarded request is plain JSON data, which drops the SDK-only `parse` function
+on a structured-output format (`zodOutputFormat`) that `messages.stream()` / `beta.messages.stream()`
+read to build `parsed_output`. `graftParseHooks` gives that one function back, non-enumerable and bound
+to the ORIGINAL format, once, onto the object finally forwarded (after redaction). A function is not
+wire data, so the bytes sent are still the bytes scanned. The contract is that the SDK's parsers read
+exactly three things off a format: `'parse' in format` (a `has` check a non-enumerable property
+satisfies), `format.type` (wire data the snapshot carries) and `format.parse(content)` (a method call,
+hence the bound receiver); the format sits at `params.output_config.format`, or beta
+`params.output_format ?? params.output_config.format`. `tests/govern/parse-hook-contract.test.ts` drives
+the real SDK parsers against a Proxy that records every trap and fails if that set changes (verified
+against `@anthropic-ai/sdk` 0.116.0), so an SDK that starts reading anything else gets this graft
+re-reviewed instead of silently returning `parsed_output: null`. Forwarding the original `format`
+by reference instead was rejected: it would take that subtree out of PII redaction and out of the
+scanned bytes.
+*DECLARED RESIDUE (a decision, not an omission):* a PARTIAL `cache_creation` breakdown (one TTL
+field) prices its unattributed remainder (flat total minus the named count) at the dearer 1-hour
+rate, and the stream accumulators only rise, so a stream whose early event is partial and whose
+later event is complete keeps that inferred share. It OVERSTATES, and overstatement is still
+inaccuracy; it is accepted because the real API emits BOTH TTL fields with a sum equal to the flat
+total (`tests/ledger/real-cache-creation-shapes.test.ts`: 73,292 captured blocks, 0 violations, and
+the API reference). The structural fix, tracking reported 5m/1h separately from the flat total and
+deriving the remainder at settlement, is a follow-up; if that test ever sees a partial block, the
+premise is false and the rework is no longer optional.
+
 **New receipt fields go at the ROOT, never inside `meter`.** `receipt.v1.schema.json` is frozen
 and declares `meter` with `additionalProperties: false` while leaving the receipt root open. A
 field added inside `meter` therefore makes every v1 validator reject every receipt usertrust
@@ -594,6 +647,23 @@ machinery (above) would then post `min(actual, held)`, silently under-debiting t
 leaving scarcity numbers falsely high. Both hold-sizing sites — the govern-path authorize estimate
 and the headless authorize estimate — reserve the input leg at
 `max(inputPer1k, effectiveCacheWriteRate(rates))` instead of `inputPer1k` alone.
+*The 1-hour write (2x input, `cacheWrite1hPer1k`) joins that max for the worst case THIS REQUEST
+can produce:* `trust()` reads the request (`requestDeclares1hCache`: a `cache_control` block with
+`ttl: "1h"` anywhere in its serialization, failing dearest when it cannot be serialized) and adds the 1-hour
+rate only then; headless `authorize()` cannot see the TTLs, so it holds the dearest write rate for
+the input leg and any stated write estimate (`holdInputRate` / `holdCacheWriteRate`, the one site).
+Only a row that EXPLICITLY publishes a 1-hour rate holds it, so a TABLE model with no 1-hour tier
+holds as before; the exception is OPERATOR-OWNED rates (a customRates row, a local rate, the
+fallback, i.e. `rateSource !== "table"`) with no explicit 1-hour rate, which hold the derived 2x input
+because settlement meters their 1-hour tokens at that derived rate
+(`holdInputRate(rates, include1h, operatorOwned)`). ONE predicate, `supportsCacheWrite1h`, decides
+both halves (`tests/harden/one-hour-tier-single-decider.test.ts` fails if any file outside a short
+allowlist reads the per-model 1-hour rate, or prices a 1-hour count without routing it through the
+predicate, and plants a violation as its own positive control): a built-in table row with no explicit 1-hour rate is a model with NO such tier, so its
+hold reserves none AND settlement IGNORES a reported 1-hour share (`withSupported1hTier`: the write
+total prices at the single write rate and no `cacheWrite1h` is recorded), so the two cannot disagree. *Prevents:* a 1-hour write settling above its hold and being capped, which under-debits.
+*Documented consequence:* holds on headless Anthropic calls run ~60% fatter on the input leg, so a
+402 near the budget comes sooner; the same trade as below.
 *Documented consequence:* holds on cache-writing workloads run ~25% fatter than before; warm
 (cache-hit-heavy) workloads settle far below the hold and release the difference back, so this is
 conservative, not a leak. A warm-but-cold-held call can see `budget_remaining_after` over-deny —
@@ -613,8 +683,8 @@ rate. On Sonnet, 84,150 prompt tokens held at 37.5/1k is 3,156 usertokens agains
 that costs ~327, which is a false 402 near a budget.
 
 **Documented pricing approximations — verbatim, also published at `/docs/api/pricing`:**
-Per-TTL write premium collapsed (1h = 2× billed as 1.25×; `customRates` override for 1h-heavy
-workloads); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
+1-hour cache writes are priced at the 1-hour rate only when the provider reports the 5m/1h split
+(a flat write total, or a host with no TTL split, bills at the 5-minute rate); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
 hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
 per-model rates by design (`claude-haiku-5-5` is priced at its over-100,000-token tier, which
 overstates every shorter prompt 5×); fast mode is not priced (Opus 5.5 fast is $8 / $40, Opus 5 and

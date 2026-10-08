@@ -630,7 +630,13 @@ async function settlingEstimates(sessionId, agentId) {
 	);
 }
 
-const COUNT_FIELDS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
+const COUNT_FIELDS = [
+	"inputTokens",
+	"outputTokens",
+	"cacheReadTokens",
+	"cacheWriteTokens",
+	"cacheWrite1hTokens",
+];
 
 function countOf(value) {
 	return Number.isSafeInteger(value) && value >= 0 ? value : 0;
@@ -874,6 +880,19 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 // ── What the server honours ──
 
 let capabilitiesRead;
+
+/**
+ * Read the capabilities AGAIN, discarding a cached UNKNOWN. serverCapabilities() caches
+ * its answer for the hook process, which is right for a settled answer but wrong for a
+ * transient failure: a health probe that failed once would otherwise stay "unknown" for
+ * every later call of the hook. Only an unknown answer is retried; a known one is kept.
+ */
+export async function refreshUnknownServerCapabilities() {
+	const current = await serverCapabilities();
+	if (current !== null) return current;
+	capabilitiesRead = undefined;
+	return serverCapabilities();
+}
 
 /**
  * Which job labels a record carries, off a hold's entry or its file: strings only,

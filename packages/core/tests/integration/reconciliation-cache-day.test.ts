@@ -117,14 +117,17 @@ const PER_CALL: ReceiptUsage = {
 };
 
 /**
- * The per-TTL split of one call's cache-WRITE tier. Both TTLs bill at the single
- * `cacheWritePer1k` (the D6 approximation), so the split changes no money — it
- * exists so drive A exercises the nested `cache_creation` summing branch rather
- * than the flat `cache_creation_input_tokens` field. Written as literals, not as
- * fractions of the tier, so no float rounding can reach a token count.
+ * The per-TTL split of one call's cache-WRITE tier. The whole day is 5-MINUTE
+ * writes, so it prices at the single `cacheWritePer1k` and the published
+ * 5,640,000 / 7.83x figures stand; the split exists so drive A exercises the nested
+ * `cache_creation` summing branch rather than the flat `cache_creation_input_tokens`
+ * field. A day with 1-HOUR writes (priced at 2x input) is reconciled in
+ * `reconciliation-cache-write-1h.test.ts`, where the receipt's root `cacheWrite1h`
+ * record carries the extra term. Written as literals, not as fractions of the tier,
+ * so no float rounding can reach a token count.
  */
-const EPHEMERAL_5M = 4_000_000;
-const EPHEMERAL_1H = 1_000_000;
+const EPHEMERAL_5M = 5_000_000;
+const EPHEMERAL_1H = 0;
 
 /**
  * The prompt a call like this genuinely sends: cached tokens are PROMPT tokens

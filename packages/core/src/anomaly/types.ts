@@ -100,6 +100,8 @@ export interface AnomalyChunkEvent {
 	cumulativeCacheReadTokens?: number | undefined;
 	/** Cumulative cache-WRITE tokens reported so far (spec D7). Same default-0 semantics. */
 	cumulativeCacheWriteTokens?: number | undefined;
+	/** The 1-hour SUBSET of `cumulativeCacheWriteTokens` (default 0); priced at the 1-hour rate. */
+	cumulativeCacheWrite1hTokens?: number | undefined;
 	/** Wall-clock timestamp. Defaults to Date.now() if omitted. */
 	at?: number;
 	/** Model of the call this chunk belongs to. Overrides options.model when present (M2). */

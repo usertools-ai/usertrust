@@ -134,8 +134,10 @@ export {
 	getModelRates,
 	isModelPriced,
 	PRICING_TABLE_VERSION,
+	requestDeclares1hCache,
 	resolveAppliedRates,
 	resolveRates,
+	supportsCacheWrite1h,
 } from "./ledger/pricing.js";
 // Usage normalization (spec D2/D5): the one place provider usage becomes the
 // four-tier disjoint snapshot that both cost and record emission derive from.
@@ -148,6 +150,7 @@ export {
 	fromProviderResponse,
 	publishableUsage,
 	sanitizeUsage,
+	withSupported1hTier,
 } from "./ledger/usage.js";
 // Pattern memory
 export { getPatternStats, hashPrompt, recordPattern, suggestModel } from "./memory/patterns.js";
@@ -194,6 +197,7 @@ export type {
 	AppliedRates,
 	AuditEvent,
 	BoardDecision,
+	CacheWrite1h,
 	CanaryToken,
 	CostBasis,
 	CredentialAccessResult,

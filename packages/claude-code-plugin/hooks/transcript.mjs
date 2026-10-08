@@ -23,6 +23,10 @@
 //    cache EXCLUDED), `cache_read_input_tokens`, `cache_creation_input_tokens`,
 //    `output_tokens`. These four are already disjoint, which is exactly the
 //    usertrust settle contract (cache tiers are never folded into inputTokens).
+//    `cache_creation.ephemeral_1h_input_tokens` is the 1-HOUR share of the write
+//    tier (a subset of `cache_creation_input_tokens`, never added to it); it is
+//    carried as `cacheWrite1hTokens` and sent only to a server that advertises
+//    `cache-write-1h` (an older server strips the key and bills it at the 5m rate).
 //
 // THE MECHANISM: the PreToolUse hold IS the settlement vehicle. PreToolUse
 // assigns the agent's new complete messages (one model's worth: the "window")
@@ -142,6 +146,7 @@ import {
 	publishExclusive,
 	recordUnconfirmedCall,
 	recordWatchEvent,
+	refreshUnknownServerCapabilities,
 	releaseHold,
 	sanitize,
 	sanitizeReason,
@@ -171,6 +176,8 @@ const MODEL_ID = /^[^\p{C}\p{Z}]{1,256}$/u;
  * `estimatedCacheReadTokens` / `estimatedCacheWriteTokens` (see `holdEstimate`).
  */
 const CACHE_TIERS = "authorize-cache-tiers";
+/** The capability of a server that prices `cacheWrite1hTokens` at the 1-hour write rate. */
+const CACHE_WRITE_1H = "cache-write-1h";
 
 const CURSOR_VERSION = 2;
 /** v1 cursors (no `unresolved`) are read as v2 with nothing unresolved. */
@@ -226,7 +233,14 @@ export const sessionEndLockWait = () => budgetShare(0.2);
 const AUTHORIZING = "authorizing";
 const REMAINDER = "remainder";
 const AGENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
-const COUNT_KEYS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
+const COUNT_KEYS = [
+	"inputTokens",
+	"outputTokens",
+	"cacheReadTokens",
+	"cacheWriteTokens",
+	// A SUBSET of cacheWriteTokens (the 1-hour share), carried beside it, never summed into it.
+	"cacheWrite1hTokens",
+];
 /**
  * One field of a usertrust `principal`: the server refuses anything else. It must
  * equal core's PRINCIPAL_FIELD_PATTERN — a tightening there would turn every
@@ -276,7 +290,13 @@ function callTimeout(reserveMs = 0) {
 }
 
 function sumCounts(messages) {
-	const sum = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+	const sum = {
+		inputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		cacheWrite1hTokens: 0,
+	};
 	for (const m of messages) for (const key of COUNT_KEYS) sum[key] += m[key];
 	return sum;
 }
@@ -593,6 +613,7 @@ function parseCursor(raw) {
 			outputTokens: count(m.outputTokens),
 			cacheReadTokens: count(m.cacheReadTokens),
 			cacheWriteTokens: count(m.cacheWriteTokens),
+			cacheWrite1hTokens: count(m.cacheWrite1hTokens),
 		});
 	}
 	for (const [id, value] of Object.entries(raw.assigned)) {
@@ -663,6 +684,7 @@ function holdVehicle(body) {
 		outputTokens: body.outputTokens,
 		cacheReadTokens: body.cacheReadTokens,
 		cacheWriteTokens: body.cacheWriteTokens,
+		cacheWrite1hTokens: body.cacheWrite1hTokens,
 		labels: body,
 	});
 	return vehicle === null ? null : { key, vehicle };
@@ -1062,6 +1084,7 @@ function foldLine(cursor, bytes, since) {
 			outputTokens: 0,
 			cacheReadTokens: 0,
 			cacheWriteTokens: 0,
+			cacheWrite1hTokens: 0,
 		};
 		cursor.nextSeq += 1;
 		cursor.partial.set(id, m);
@@ -1079,6 +1102,24 @@ function foldLine(cursor, bytes, since) {
 	m.outputTokens = Math.max(m.outputTokens, count(usage.output_tokens));
 	m.cacheReadTokens = Math.max(m.cacheReadTokens, count(usage.cache_read_input_tokens));
 	m.cacheWriteTokens = Math.max(m.cacheWriteTokens, count(usage.cache_creation_input_tokens));
+	// The 1-hour share, from the per-TTL breakdown when the transcript carries one. When
+	// the breakdown names only ONE TTL, what it leaves out of the flat total is a real
+	// write whose TTL it did not attribute; it is counted as 1-hour (the dearer rate), the
+	// same rule core's fromAnthropicUsage applies. Like every counter here it only rises,
+	// and it is clamped to the write total so a subset can never exceed its whole.
+	const breakdown = usage.cache_creation;
+	const names5m = typeof breakdown?.ephemeral_5m_input_tokens === "number";
+	const names1h = typeof breakdown?.ephemeral_1h_input_tokens === "number";
+	const named5m = count(breakdown?.ephemeral_5m_input_tokens);
+	const named1h = count(breakdown?.ephemeral_1h_input_tokens);
+	const unattributed =
+		names5m !== names1h
+			? Math.max(0, count(usage.cache_creation_input_tokens) - named5m - named1h)
+			: 0;
+	m.cacheWrite1hTokens = Math.min(
+		Math.max(m.cacheWrite1hTokens, named1h + unattributed),
+		m.cacheWriteTokens,
+	);
 	if (message.stop_reason != null) m.complete = true;
 	if (named) cursor.lastModel = model;
 	return true;
@@ -1693,14 +1734,54 @@ async function hygieneRelease(transferId, why) {
  * Every hold that is not settled is given back for hygiene (the server re-queues a
  * hold after a failed settle), except one a `settled: false` receipt says is spent.
  */
+/**
+ * Whether the server prices the 1-hour share, for a settle that carries `share` of them:
+ * true or false when the capabilities are known; null when they are UNKNOWN (the health
+ * probe failed, even once more) and there IS a share. An older server answers false (it is
+ * known not to price it: the total is sent, the share is not); an unknown one is not
+ * an older one, and is retried once (a transient failure) before it defers the settle.
+ */
+async function oneHourSupport(share) {
+	if (!(share > 0)) return true;
+	const capabilities = await refreshUnknownServerCapabilities();
+	if (capabilities === null) return null;
+	return capabilities.has(CACHE_WRITE_1H);
+}
+
+/**
+ * The body of a transcript settle. The 1-hour share goes only to a server that prices it
+ * (`cache-write-1h`): an older server strips the unknown key, and those tokens would
+ * silently bill at the cheaper 5-minute rate. The write TOTAL is always sent, so the
+ * worst case against an old server is the 5-minute price, never a dropped count.
+ */
+async function settleBody(transferId, counts, labels) {
+	const { cacheWrite1hTokens, ...rest } = counts;
+	const support = await oneHourSupport(cacheWrite1hTokens);
+	// Support UNKNOWN with a share to carry: sending only the flat total would bill the
+	// 1-hour tokens at the 5-minute rate for good, so no body is built; the caller defers.
+	if (support === null) return null;
+	const sendShare = cacheWrite1hTokens > 0 && support;
+	return {
+		transferId,
+		...rest,
+		...(sendShare ? { cacheWrite1hTokens } : {}),
+		usageSource: "provider",
+		...settleLabels(labels),
+	};
+}
+
 async function settleAt(transferId, counts, { keyed, labels = {} }) {
 	let settle;
 	try {
-		settle = await serverRequest(
-			"/v1/settle",
-			{ transferId, ...counts, usageSource: "provider", ...settleLabels(labels) },
-			{ timeoutMs: callTimeout() },
-		);
+		const body = await settleBody(transferId, counts, labels);
+		if (body === null) {
+			return {
+				outcome: "deferred",
+				reason:
+					"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet; the hold is untouched",
+			};
+		}
+		settle = await serverRequest("/v1/settle", body, { timeoutMs: callTimeout() });
 	} catch (err) {
 		const holdEnded = await hygieneRelease(transferId, "transcript settle unanswered");
 		return {
@@ -1789,6 +1870,16 @@ export async function settleTranscriptHold(sessionId, entry) {
 	}
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(entry[key]);
+	// A 1-hour share the server may or may not price: decide BEFORE claiming the hold's file,
+	// so an unknown server leaves the pending record in place for a later settle point instead
+	// of journalling a `.done` for a settle that never went out.
+	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) {
+		return {
+			outcome: "deferred",
+			reason:
+				"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet; the hold is untouched",
+		};
+	}
 	// The hold's own file, as its listing found it: never whatever file the call's
 	// name holds now, which may be a later hold's.
 	const livePath = entry.path;
@@ -2261,6 +2352,14 @@ async function postGroup({
 		reason,
 		...extra,
 	});
+	// A 1-hour share the server may or may not price: decide BEFORE placing a hold, so an
+	// unknown server leaves the messages unposted for a later settle point rather than
+	// stranding a hold or billing the share at the 5-minute rate.
+	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) {
+		return unsettled(
+			"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet",
+		);
+	}
 	let auth;
 	try {
 		auth = await serverRequest(
@@ -2306,11 +2405,15 @@ async function postGroup({
 	}
 	let settle;
 	try {
-		settle = await serverRequest(
-			"/v1/settle",
-			{ transferId, ...counts, usageSource: "provider", ...settleLabels(labels) },
-			{ timeoutMs },
-		);
+		const body = await settleBody(transferId, counts, labels);
+		if (body === null) {
+			// The capabilities went unknown after the gate above: give the hold back.
+			await hygieneRelease(transferId, "1-hour share cannot be priced yet");
+			return unsettled(
+				"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet",
+			);
+		}
+		settle = await serverRequest("/v1/settle", body, { timeoutMs });
 	} catch (err) {
 		await hygieneRelease(transferId, "transcript settle unanswered");
 		return {
