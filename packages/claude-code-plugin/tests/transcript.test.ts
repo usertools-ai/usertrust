@@ -313,7 +313,9 @@ async function readCursor(agentId = "main"): Promise<Cursor> {
 }
 /** Pending-hold files (live), excluding the transcripts dir. */
 async function holdFiles() {
-	return (await readdir(stateDir)).filter((n) => n !== "transcripts").sort();
+	// `watch.jsonl` is the plugin's watch log (a give-back of a hold whose call ran writes a gap
+	// record there), not a hold.
+	return (await readdir(stateDir)).filter((n) => n !== "transcripts" && n !== "watch.jsonl").sort();
 }
 
 beforeEach(async () => {
@@ -373,7 +375,9 @@ function holdFile(call: string, transferId: string, kind = "json", agentId = "ma
 
 /** Every hold-state file left: pending (`.json`) and settle-attempted (`.settling`). */
 async function holdStateFiles() {
-	return (await readdir(stateDir)).filter((n) => n.endsWith(".json") || n.endsWith(".settling"));
+	return (await readdir(stateDir)).filter(
+		(n) => n.endsWith(".json") || n.endsWith(".settling") || n.endsWith(".releasing"),
+	);
 }
 
 /** JSON.stringify({command:"ls"}) is 16 chars → 4 estimated tokens; the output hold is 4096. */
@@ -2120,7 +2124,10 @@ describe("estimate holds", () => {
 					"/v1/settle",
 				]);
 				// Nothing is left but the squatter: no hold, no claim, no partial write.
-				expect((await readdir(stateDir)).filter((n) => n !== "transcripts")).toEqual([squat]);
+				// (The watch log holds the gap this unrecorded call leaves: it is not a hold.)
+				expect(
+					(await readdir(stateDir)).filter((n) => n !== "transcripts" && n !== "watch.jsonl"),
+				).toEqual([squat]);
 			});
 		}
 
@@ -2235,6 +2242,8 @@ describe("estimate holds", () => {
 			transferId: "tx_1",
 			agentId: "main",
 			estimatedInputTokens: 4,
+			// When the call was received: kept on every hold, whatever the server honours.
+			startedAt: expect.any(String),
 			serverUrl: `http://127.0.0.1:${port}`,
 			keyHash: createHash("sha256").update("k").digest("hex").slice(0, 16),
 		});
@@ -3438,6 +3447,8 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 	/** The first hold's files: each hold of the call has its own (by transfer). */
 	const RECORD = holdFile("tu_1", "tx_1");
 	const SETTLING = holdFile("tu_1", "tx_1", "settling");
+	/** An estimate hold claimed only to be ENDED (a resumed call's earlier hold) is `.releasing`. */
+	const RELEASING = holdFile("tu_1", "tx_1", "releasing");
 	/** The call's one pending record as written, whichever hold it is. */
 	async function record(): Promise<Record<string, unknown>> {
 		const pending = (await holdStateFiles()).filter((name) => name.endsWith(".json"));
@@ -3908,16 +3919,18 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				}
 				expect(authorizes()).toHaveLength(1);
 				// The record is the other hook's claim; nothing was written beside it.
-				expect(await holdStateFiles()).toEqual([SETTLING]);
+				expect(await holdStateFiles()).toEqual([transcript ? SETTLING : RELEASING]);
 			},
 		);
 
-		it.each<[string, Record<string, string>]>([
-			["estimate", { UT_CC_USAGE: "estimate" }],
-			["transcript", {}],
+		it.each<[string, Record<string, string>, string | null]>([
+			["estimate", { UT_CC_USAGE: "estimate" }, null],
+			// The settle's claim fails (`deferred`): refused as a hold that could not be
+			// ended, before any settle of it is attempted.
+			["transcript", {}, "could not be ended"],
 		])(
 			"%s mode: a first hold that cannot be ended stops the fresh reserve, and enforce fails closed",
-			async (_, usage) => {
+			async (_, usage, reason) => {
 				const server = holdingServer();
 				await startServer(server.responder);
 				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
@@ -3925,10 +3938,11 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				const enforce = { ...usage, UT_CC_MODE: "enforce" };
 				await run("pre-tool-use.mjs", preInput("tu_1"), enforce);
 				// A directory where the claim renames the record to: it cannot be claimed.
-				await mkdir(join(stateDir, SETTLING));
+				await mkdir(join(stateDir, usage.UT_CC_USAGE === "estimate" ? RELEASING : SETTLING));
 				const again = await run("pre-tool-use.mjs", preInput("tu_1"), enforce);
 				expect(again.code).toBe(2);
 				expect(again.stderr).toContain("authorization failed closed");
+				if (reason !== null) expect(again.stderr).toContain(reason);
 				expect(authorizes()).toHaveLength(1);
 				expect(server.charges).toEqual([]);
 				// tx_1's record is kept, never overwritten by a fresh hold's.
@@ -4634,7 +4648,8 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				}
 				expect(again.stderr).not.toContain("is ended");
 				expect(authorizes()).toHaveLength(1);
-				expect(await holdStateFiles()).toEqual([SETTLING]);
+				// An estimate hold claimed only to be ended: `.releasing`, which Stop gives back unused.
+				expect(await holdStateFiles()).toEqual([RELEASING]);
 				// Stop gives it back.
 				refusing = false;
 				await run("stop.mjs", stopInput(), env);

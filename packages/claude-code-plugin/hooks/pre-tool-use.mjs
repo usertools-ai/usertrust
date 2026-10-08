@@ -45,8 +45,10 @@
 // is accounted, and the tool is held alone.
 import { rename, unlink } from "node:fs/promises";
 import { howToSet, settings } from "./config.mjs";
+import { labelsFor, resolveJob } from "./job-log.mjs";
 import {
 	abandonHold,
+	claimForRelease,
 	claimForSettle,
 	defaultModel,
 	estimateTokens,
@@ -55,9 +57,11 @@ import {
 	guardMode,
 	HoldNameTaken,
 	holdOfCall,
+	hookStartedAt,
 	isAlreadySettled,
 	isTransferId,
 	isUnknownTransfer,
+	jobCapable,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
@@ -73,8 +77,10 @@ import {
 	timeLeft,
 } from "./lib.mjs";
 import {
+	authorizeLabels,
 	estimatePrincipalFor,
 	holdEstimate,
+	isoOf,
 	OUTCOME_NOTES,
 	prepareWindow,
 	reconcileAgent,
@@ -179,6 +185,7 @@ try {
 	} else if (mode === "watch" || settings().failOpen) {
 		// The call proceeds unmetered: say so durably, so the gap is never silent.
 		const recorded = await recordWatchEvent({
+			started: new Date(hookStartedAt()).toISOString(),
 			kind: "gap",
 			mode,
 			session: sessionId,
@@ -271,6 +278,7 @@ async function unsettled(
 		return;
 	}
 	const recorded = await recordWatchEvent({
+		started: new Date(hookStartedAt()).toISOString(),
 		kind: "gap",
 		mode,
 		session: sessionId,
@@ -328,7 +336,8 @@ async function retire(entry) {
 		}
 		return true;
 	}
-	const claimed = await claimForSettle(entry.path);
+	// This claim only ENDS a deferred call's hold, and says so in the name it claims into.
+	const claimed = await claimForRelease(entry.path);
 	if (claimed === null) return false;
 	const capabilities = await serverCapabilities();
 	if (capabilities?.has("release")) {
@@ -357,6 +366,8 @@ async function releaseUnconfirmed(transferId) {
 	try {
 		response = await releaseHold(transferId, "a resumed tool call's earlier hold", {
 			timeoutMs: Math.min(5000, timeLeft()),
+			// The earlier hold belonged to a call that was deferred, not run.
+			releaseClass: "unused",
 		});
 	} catch (err) {
 		return `release ${transferId} failed (${err instanceof Error ? err.message : String(err)})`;
@@ -374,11 +385,21 @@ async function reserve(input) {
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
 	const content = settings().sendContent ? toolInput : '{"redacted":true}';
 	const estimatedInputTokens = estimateTokens(toolInput);
+	// The job open at THIS call, from this session's own log read now (never cached):
+	// a switch applies from the next call, so the call that runs `start job-b` still
+	// bills job-a. Read only for a server that honours `job` (older servers strip the
+	// keys, and an unlabelled hold must stay byte-identical to today's).
+	const callMs = hookStartedAt();
+	const jobs = (await jobCapable(await serverCapabilities())) ? await resolveJob(sessionId) : null;
+	// A log stamped by a clock far AHEAD of this one (since corrected) makes this call's job unknown.
+	const { labels: holdLabels, key: holdKey } = labelsFor(jobs, callMs);
 	const prepared = await prepareWindow({
 		sessionId,
 		agentId,
 		agentTypeHint: input.agent_type,
 		input,
+		jobs,
+		holdKey,
 	});
 	if (prepared.becameSticky) {
 		say(
@@ -407,6 +428,23 @@ async function reserve(input) {
 				? prepared.principal
 				: estimatePrincipalFor(sessionId, agentId, input.agent_type);
 		let window = transcriptMode ? prepared.window : null;
+		// What the hold is authorized with: its job, and when its usage began (the earlier
+		// of this call and its first assigned message, so a window never starts after it
+		// ends). Fixed here, from the capture the server will keep. Recomputed if the
+		// window is dropped below.
+		const holdAuthorizeLabels = () =>
+			jobs === null
+				? {}
+				: {
+						...holdLabels,
+						usageFrom: isoOf(
+							Math.min(
+								callMs,
+								window?.usageFrom === undefined ? callMs : Date.parse(window.usageFrom),
+							),
+						),
+						...(window?.usageTo === undefined ? {} : { usageTo: window.usageTo }),
+					};
 		const fallbackModel = prepared.lastModel ?? defaultModel();
 		// Never past the hook's own budget: a hook killed mid-call leaves the tool
 		// ungoverned and this agent's lock held.
@@ -441,6 +479,7 @@ async function reserve(input) {
 					messages: [{ role: "user", content }],
 					...(window && keyed ? { idempotencyKey: prepared.key } : {}),
 					...(principal === undefined ? {} : { principal }),
+					...authorizeLabels(holdAuthorizeLabels()),
 				},
 				{ timeoutMs: callTimeout() },
 			);
@@ -472,6 +511,7 @@ async function reserve(input) {
 				await recordPending(sessionId, agentId, {
 					toolUseId: input.tool_use_id ?? null,
 					transferId: json.transferId,
+					startedAt: new Date(callMs).toISOString(),
 					estimatedInputTokens,
 					...(settlesAtEstimate
 						? {}
@@ -484,6 +524,7 @@ async function reserve(input) {
 									? { idempotencyKey: prepared.key, agentType: prepared.agentTypeRaw }
 									: {}),
 							}),
+					...holdAuthorizeLabels(),
 				});
 			} catch (err) {
 				// Unrecorded, the hold could never be settled: give it back now. `giveBack`
@@ -492,6 +533,8 @@ async function reserve(input) {
 					json.transferId,
 					"pending hold could not be recorded",
 					Math.max(250, callTimeout()),
+					// No call has run under a hold that was never recorded.
+					"unused",
 				);
 				throw err;
 			}
@@ -510,6 +553,7 @@ async function reserve(input) {
 				deny(`usertrust ${error}: ${reason}`);
 			} else {
 				await recordWatchEvent({
+					started: new Date(hookStartedAt()).toISOString(),
 					kind: "would_block",
 					session: sessionId,
 					agent: agentId,
@@ -517,6 +561,11 @@ async function reserve(input) {
 					status: response.status,
 					error: error.slice(0, MAX_REASON_CHARS),
 					reason: reason.slice(0, MAX_REASON_CHARS),
+					// With the `job` capability, a refused call names its job (or why it has none).
+					...(holdAuthorizeLabels().job === undefined ? {} : { job: holdAuthorizeLabels().job }),
+					...(holdAuthorizeLabels().jobState === undefined
+						? {}
+						: { jobState: holdAuthorizeLabels().jobState }),
 				});
 				proceed(`usertrust watch-only: would have blocked (${error}: ${reason}) — not enforced`);
 			}

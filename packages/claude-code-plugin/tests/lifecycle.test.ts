@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -118,7 +118,7 @@ describe("post-tool-use hook", () => {
 		expect(body.inputTokens).toBe(4);
 		expect(body.outputTokens).toBe(3);
 		expect(body.usageSource).toBe("estimated");
-		expect(await readdir(stateDir)).toEqual([]);
+		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl")).toEqual([]);
 	});
 
 	it("re-estimates inputTokens from tool_input when the pending file has no estimate", async () => {
@@ -285,7 +285,17 @@ describe("stop.mjs aborts every hold across all agents", () => {
 			"tx_b",
 			"tx_main",
 		]);
-		expect(await readdir(stateDir)).toEqual([]);
+		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl")).toEqual([]);
+		// Each give-back of an estimate hold whose call never reported back is a GAP.
+		const gaps = (await readFile(join(stateDir, "watch.jsonl"), "utf-8"))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l));
+		expect(gaps.map((g) => [g.kind, g.releaseClass])).toEqual([
+			["gap", "call-unconfirmed"],
+			["gap", "call-unconfirmed"],
+			["gap", "call-unconfirmed"],
+		]);
 		const again = await run("stop.mjs", { session_id: "s2" });
 		expect(again.code).toBe(0);
 		expect(requests.filter((r) => r.path === "/v1/abort")).toHaveLength(3);
@@ -303,7 +313,7 @@ describe("stop.mjs aborts every hold across all agents", () => {
 		expect(result.code).toBe(0);
 		expect(result.stderr).toContain("abort");
 		expect(result.stderr).toContain("500");
-		expect(await readdir(stateDir)).toEqual([]);
+		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl")).toEqual([]);
 	});
 
 	it("capabilities UNKNOWN (health fails): a hold is released, never aborted — an abort counts as a breaker failure", async () => {
@@ -353,7 +363,10 @@ describe("subagent-stop.mjs scopes cleanup to the stopping subagent", () => {
 			"tx_a2",
 		]);
 		// The parent's and sibling subagent's in-flight holds survive.
-		expect((await readdir(stateDir)).sort()).toEqual(["s2__agent-B__d.json", "s2__main__a.json"]);
+		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl").sort()).toEqual([
+			"s2__agent-B__d.json",
+			"s2__main__a.json",
+		]);
 	});
 
 	it("without agent_id aborts nothing and leaves every hold for later reconciliation", async () => {
@@ -364,6 +377,9 @@ describe("subagent-stop.mjs scopes cleanup to the stopping subagent", () => {
 		expect(result.code).toBe(0);
 		expect(requests.filter((r) => r.path === "/v1/abort")).toHaveLength(0);
 		expect(result.stderr).toContain("without agent_id");
-		expect((await readdir(stateDir)).sort()).toEqual(["s2__agent-A__b.json", "s2__main__a.json"]);
+		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl").sort()).toEqual([
+			"s2__agent-A__b.json",
+			"s2__main__a.json",
+		]);
 	});
 });

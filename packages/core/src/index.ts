@@ -108,7 +108,10 @@ export {
 	type PrincipalLedgerTags,
 	principalFieldRefusal,
 	principalLedgerTags,
+	RELEASE_CLASSES,
+	type ReleaseClass,
 	sanitizeReleaseReason,
+	usageTimeRefusal,
 } from "./headless.js";
 // The ledger client is the required first argument of every budget entry point
 // above. Without it at the root those functions can be imported but never

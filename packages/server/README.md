@@ -56,6 +56,17 @@ An older server strips them, so a client checks the list before relying on a sma
 the call's audit records, and the principal's `id`/`unit`/`role` become TigerBeetle `user_data` tags
 on its ledger transfers for roll-ups. A principal never changes which wallet pays.
 
+`/v1/authorize` also accepts `job` (1–128 characters of `[A-Za-z0-9._:-]`), `jobState` (only
+`"invalid"`, exclusive with `job`: the caller's job state could not be trusted) and `usageFrom` (an
+ISO-8601 UTC instant: when the usage the hold covers began); `/v1/settle` accepts `usageTo` (same
+form, never before the hold's `usageFrom`). They are recorded verbatim on every audit record the hold
+produces (a release or an expiry inherits them from the hold), so per-job cost is a query. A job is a
+label: it never selects the wallet that pays, enters the policy gate or prices anything. A settle may
+repeat `job` / `jobState` only to be checked: one that differs from the hold's is a `400`, nothing is
+written and the hold stays settleable. A settle that states `usageFrom` is a `400`: the authorize is the
+one source of a usage start. A server that honours these lists `"job"` in `capabilities`; an older one
+strips them in silence, so a client checks the list first.
+
 A `200` from `/v1/authorize` carries `expiresInMs`: the longest the hold can still be pending, in whole
 milliseconds. That is the shorter of `pendingTtlMs` and the ledger's pending timeout (5 min; in dryRun,
 `pendingTtlMs` alone), counted from when the request arrived. No expiry ends the hold sooner; a settle,
@@ -97,6 +108,11 @@ least a minute. To give back a hold you no longer need, call `/v1/release` with
 `capabilities`). It voids the hold and records a neutral `hold_released`, and it touches the breaker not
 at all: not a failure, and not a success that could close a breaker real failures opened. The reason is
 stored with control characters stripped and clipped to 200 characters, never refused.
+
+`/v1/release` also takes `releaseClass` (optional): `unused`, `call-unconfirmed` or `call-ran`, why the
+hold is given back, derived by the client from its own hold state and recorded verbatim on the
+`hold_released` record (capability `job`). The free-text `reason` is never read as the class: a release that
+states none (a TTL expiry, a shutdown) proves nothing about whether usage hides behind the hold.
 
 It answers `200 { "released": true, "transferId": "…" }` only when that request ended the hold, plus
 `voidError` (a fixed code) when the ledger refused the void: the hold is still ended, and the ledger's

@@ -7,14 +7,24 @@
 // any platform, return `systemMessage` in JSON output", and SessionStart
 // decision control: "Claude Code adds stdout it treats as plain text to
 // Claude's context"). No network call: the hook must be fast and cannot fail.
-import { announce, modeAnnouncement, readStdin, requireLaunch } from "./lib.mjs";
+import { writeSessionStart } from "./job-log.mjs";
+import { announce, modeAnnouncement, readStdin, requireLaunch, say } from "./lib.mjs";
 
 requireLaunch();
 
+let payload = {};
 try {
-	// The payload is not needed; reading it lets Claude Code finish writing stdin.
-	await readStdin();
+	// Claude Code writes the session id and the start `source` to stdin.
+	payload = JSON.parse((await readStdin()) || "{}");
 } catch {
 	// Nothing to read is fine.
+}
+// The job log: a NEW session id (startup, clear, fork) gets its `session-start` line;
+// resume and compact write nothing, so neither ever ends or invalidates an open job.
+// Failing to write it must never fail a session: `usertrust-job` then refuses loudly.
+try {
+	await writeSessionStart(payload?.session_id, payload?.source);
+} catch (err) {
+	say(`usertrust: job log not started: ${err instanceof Error ? err.message : String(err)}`);
 }
 announce(modeAnnouncement());

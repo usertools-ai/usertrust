@@ -7,6 +7,16 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Added
+
+- **Say which job a session is working on: `usertrust-job start <job-id>` / `stop`.** The job is recorded on every ledger record the session produces (`job`, plus `usageFrom` / `usageTo`, the window of USAGE the record covers), so one session that fixes five bugs can say what each cost. It needs a usertrust-server that lists `"job"` in `/v1/health` `capabilities`; against an older one nothing is sent and every body is what it was.
+  - The job log is `<state>/jobs/<session_id>.jsonl`, written by the SessionStart hook (`session-start`, for a new session id only: `startup`, `clear`, `fork`; a `resume` or `compact` writes nothing, so neither ends an open job) and by the CLI. There is no lock: every write is ONE complete line appended with ONE O_APPEND write (atomic on a local filesystem), and the order of a log is the position of its lines, not their clock. The reader is the authority: a partial line followed by more lines, or a torn last line, makes the log invalid (a known gap), and nothing ever repairs or truncates it. The CLI refuses, writing nothing, unless the log already exists with that `session-start`: it waits up to 10 s for the background SessionStart to land.
+  - A call's job is the one open when it was made, and a transcript message's job is the one open at the message's own time, so the call that runs `start job-b` still bills the previous job, and a remainder that spans a switch settles once per job. A per-call hold takes only messages that happened under its own job; the rest go to a remainder under theirs.
+  - An unreadable or inconsistent log is recorded as `jobState: "invalid"`, never guessed. The job is per session: a subagent shares its parent's job.
+  - `usertrust-job coverage <job-id> --vault <.usertrust dir>` prints the job's tagged cost and its `knownGaps`: named reasons the figure may be incomplete, each with its evidence. It is a diagnostic, not a certification; an empty list does not mean the figure is complete (still-running job, a record outside the job's intervals, a call that cannot be placed, a denied request, a `would_block` or unmetered `gap`, a transfer known only through settlement metadata, a released hold whose usage is unconfirmed, an unparseable evidence line, a session without a usable log).
+  - A hold given back after its call ran (an unanswered settle left `.settling`, or a call that never reached PostToolUse) is written to `watch.jsonl` as a `gap` ("ran, charge unconfirmed") and released with a structured `releaseClass`, so a hold given back with no usage ahead of it (`unused`) is told apart from one that was not.
+  - A refused remainder of a job is also written to `watch.jsonl` as a `would_block` record naming the job and its tokens.
+
 ### Security
 
 - **Settings from one file, which no environment variable can redirect.** Set

@@ -34,6 +34,7 @@
 // is never ended through this server: its record is dropped, its usage goes
 // unrecorded, and the hold is left to its own server's sweep.
 import { unlink } from "node:fs/promises";
+import { resolveJob } from "./job-log.mjs";
 import {
 	abandonHold,
 	boundElsewhere,
@@ -44,10 +45,12 @@ import {
 	giveBackInvalid,
 	isGated,
 	isTransferId,
+	jobHoldFields,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	recordUnconfirmedCall,
 	requireLaunch,
 	say,
 	serverCapabilities,
@@ -57,13 +60,33 @@ import {
 	usageMode,
 } from "./lib.mjs";
 import {
+	authorizeLabels,
 	estimatePrincipalFor,
 	estimateReasonFor,
 	OUTCOME_NOTES,
+	settleLabels,
 	settleTranscriptHold,
 } from "./transcript.mjs";
 
 requireLaunch();
+
+/**
+ * When an estimate hold's usage ended: now, but never past the next job switch. The call that
+ * runs `usertrust-job start job-b` bills job-a, and its PostToolUse comes AFTER the switch, so
+ * "now" would put job-a's record across the boundary into job-b's interval. Never before the
+ * hold's own usageFrom.
+ */
+async function estimateUsageTo(sessionId, entry) {
+	const from = Date.parse(entry.usageFrom);
+	let end = Date.now();
+	try {
+		const boundary = (await resolveJob(sessionId)).boundaryAfter(from);
+		if (boundary !== null && boundary < end) end = boundary;
+	} catch {
+		// no log to read: now
+	}
+	return new Date(Math.max(end, from)).toISOString();
+}
 
 /** One request of the expired-hold chain: 5 s at most, and never past the hook's budget. */
 function withinBudget() {
@@ -160,6 +183,9 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 			},
 			actor: `claude-code:${sessionId}`,
 			...(principal === undefined ? {} : { principal }),
+			// The replacement is the SAME call's charge: it carries the expired hold's job
+			// and usage start, not whatever job is open now.
+			...authorizeLabels(entry),
 		},
 		withinBudget(),
 	);
@@ -171,6 +197,8 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		transferId === ""
 	) {
 		await unlink(claimed).catch(() => {});
+		// The call RAN and nothing will charge it: its usage is unrecorded, which is a gap.
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
 		say(
 			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold was not granted (${auth.status}); this call's estimate is not recorded`,
 		);
@@ -179,7 +207,9 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	if (!isTransferId(transferId)) {
 		// It would name the fresh hold's file, as it is (lib.mjs `isTransferId`): the
 		// hold is given back, through `release` only, and never recorded.
-		await giveBackInvalid(transferId, Math.max(250, Math.min(5000, timeLeft())));
+		// The call RAN and this hold was to charge it: a gap, and the give-back says `call-ran`.
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		await giveBackInvalid(transferId, Math.max(250, Math.min(5000, timeLeft())), "call-ran");
 		await unlink(claimed).catch(() => {});
 		say(
 			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold's transferId is not a valid id, so it is not kept; this call's estimate is not recorded`,
@@ -197,9 +227,13 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 			{
 				toolUseId: entry.toolUseId,
 				transferId,
+				...(typeof entry.startedAt === "string" ? { startedAt: entry.startedAt } : {}),
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),
+				// The replacement is the SAME call's charge: it keeps the expired hold's job and usage
+				// start, so a Stop that finds it unanswered places its gap by when the call began.
+				...jobHoldFields(entry),
 			},
 			{ settling: true },
 		);
@@ -209,10 +243,14 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		// leave its reservation held until the server's TTL sweep. This call's
 		// estimate goes unrecorded: an under-count, never a second charge. The expired
 		// hold's claim goes too, since its 404 said the server has no such hold.
+		// The call RAN and this hold was to charge it: its estimate goes unrecorded, which is a
+		// gap, and the give-back says so (`call-ran`).
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
 		const givenBack = await giveBack(
 			transferId,
 			"replacement hold could not be recorded",
 			Math.max(250, Math.min(5000, timeLeft())),
+			"call-ran",
 		);
 		await unlink(claimed).catch(() => {});
 		say(
@@ -272,6 +310,11 @@ try {
 				JSON.stringify(input.tool_response ?? "").slice(0, MAX_CONTENT_CHARS),
 			),
 			usageSource: "estimated",
+			// A hold authorized under the `job` capability names its job again, and says when
+			// its usage ended (now). The usage START is the authorize capture's alone.
+			...(typeof entry.usageFrom === "string"
+				? settleLabels({ ...entry, usageTo: await estimateUsageTo(sessionId, entry) })
+				: {}),
 		};
 		await settleEstimateHold({ sessionId, agentId, entry, usage, input });
 	}
