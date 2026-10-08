@@ -14,6 +14,7 @@ import { validateManifest } from "../supply-chain/manifest.js";
 import { enforceSkillLoad } from "../supply-chain/permissions.js";
 import { verifySignature } from "../supply-chain/sign.js";
 import { parseFlags } from "./flags.js";
+import { scrubForTerminal, toSafeJson } from "./target.js";
 
 export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise<void> {
 	const { json, positional } = parseFlags();
@@ -29,15 +30,15 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 			? `Unknown subcommand: ${action}`
 			: "Usage: usertrust skill verify <manifest.json>";
 		if (jsonOut)
-			console.log(JSON.stringify({ command: "skill", success: false, data: { error: msg } }));
-		else console.log(msg);
+			console.log(toSafeJson({ command: "skill", success: false, data: { error: msg } }));
+		else console.log(scrubForTerminal(msg));
 		return;
 	}
 
 	if (!manifestPath) {
 		if (jsonOut)
 			console.log(
-				JSON.stringify({
+				toSafeJson({
 					command: "skill verify",
 					success: false,
 					data: { error: "Path required" },
@@ -53,10 +54,8 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 	} catch {
 		const err = `File not found: ${manifestPath}`;
 		if (jsonOut)
-			console.log(
-				JSON.stringify({ command: "skill verify", success: false, data: { error: err } }),
-			);
-		else console.log(pc.red(err));
+			console.log(toSafeJson({ command: "skill verify", success: false, data: { error: err } }));
+		else console.log(pc.red(scrubForTerminal(err)));
 		return;
 	}
 
@@ -66,10 +65,8 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 	} catch {
 		const err = `Invalid JSON in ${manifestPath}`;
 		if (jsonOut)
-			console.log(
-				JSON.stringify({ command: "skill verify", success: false, data: { error: err } }),
-			);
-		else console.log(pc.red(err));
+			console.log(toSafeJson({ command: "skill verify", success: false, data: { error: err } }));
+		else console.log(pc.red(scrubForTerminal(err)));
 		return;
 	}
 
@@ -79,10 +76,8 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 	} catch (e) {
 		const err = `Schema error: ${e instanceof Error ? e.message : String(e)}`;
 		if (jsonOut)
-			console.log(
-				JSON.stringify({ command: "skill verify", success: false, data: { error: err } }),
-			);
-		else console.log(pc.red(err));
+			console.log(toSafeJson({ command: "skill verify", success: false, data: { error: err } }));
+		else console.log(pc.red(scrubForTerminal(err)));
 		return;
 	}
 
@@ -99,10 +94,8 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 		} catch {
 			const err = `Entry file not found: ${entryPath}`;
 			if (jsonOut)
-				console.log(
-					JSON.stringify({ command: "skill verify", success: false, data: { error: err } }),
-				);
-			else console.log(pc.red(err));
+				console.log(toSafeJson({ command: "skill verify", success: false, data: { error: err } }));
+			else console.log(pc.red(scrubForTerminal(err)));
 			return;
 		}
 	}
@@ -127,18 +120,18 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 	if (jsonOut) {
 		const success = result.valid;
 		console.log(
-			JSON.stringify({
+			toSafeJson({
 				command: "skill verify",
 				success,
 				data: success ? output : { ...output, error: result.error ?? "Verification failed" },
 			}),
 		);
 	} else {
-		console.log(`${pc.bold("Skill:")} ${manifest.id}`);
-		console.log(`${pc.bold("Publisher:")} ${manifest.publisher}`);
+		console.log(`${pc.bold("Skill:")} ${scrubForTerminal(manifest.id)}`);
+		console.log(`${pc.bold("Publisher:")} ${scrubForTerminal(manifest.publisher)}`);
 		console.log(`${pc.bold("Signature:")} ${sigValid ? pc.green("valid") : pc.red("INVALID")}`);
 		console.log(
-			`${pc.bold("Permissions:")} ${result.permissionsAllowed ? pc.green("allowed") : pc.red(`denied: ${result.deniedPermissions.join(", ")}`)}`,
+			`${pc.bold("Permissions:")} ${result.permissionsAllowed ? pc.green("allowed") : pc.red(`denied: ${scrubForTerminal(result.deniedPermissions.join(", "))}`)}`,
 		);
 		const integrityColor =
 			integrityStatus === "verified"
@@ -147,6 +140,6 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 					? pc.red(integrityStatus)
 					: pc.dim(integrityStatus);
 		console.log(`${pc.bold("Integrity:")} ${integrityColor}`);
-		console.log(`${pc.bold("Manifest hash:")} ${result.manifestHash}`);
+		console.log(`${pc.bold("Manifest hash:")} ${scrubForTerminal(result.manifestHash)}`);
 	}
 }

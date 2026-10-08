@@ -14,6 +14,7 @@
  */
 
 import pc from "picocolors";
+import { GLOBAL_FLAGS, JSON_FLAG } from "./flags.js";
 
 /**
  * Untrusted text (argv, a resolved path) echoed at a terminal. Replaces C0, DEL and C1 with `?`.
@@ -37,9 +38,6 @@ export function toSafeJson(value: unknown): string {
 	);
 }
 
-/** Flags `main.ts` accepts for every command. */
-const GLOBAL_FLAGS = ["--json", "--skip-verify", "--reconfigure"];
-
 /**
  * Refuse an argument a path-less command has no use for. Returns true if it refused (the caller
  * must then do nothing else); the exit code is set here.
@@ -58,7 +56,7 @@ export function refuseStrayPositional(
 	let message: string | undefined;
 	// `--json` is global and main.ts removes it before dispatch, so it must not be taken as the
 	// value of a preceding value flag (`export --markdown --json out`) here either.
-	const rest = args.filter((a) => a !== "--json");
+	const rest = args.filter((a) => a !== JSON_FLAG);
 	for (let i = 0; i < rest.length && message === undefined; i++) {
 		const a = rest[i] as string;
 		if (valueFlags.includes(a)) {

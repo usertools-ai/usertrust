@@ -113,6 +113,36 @@ describe("verify <path> verifies that path", () => {
 		);
 	}, 60_000);
 
+	it("T1d: the vault reported is the PHYSICAL directory the OS opens (`..` after a symlink)", async () => {
+		// proj/.usertrust -> <tmp>/work/link/../vault/.usertrust, with work/link -> other/subdir.
+		// The OS follows `link` BEFORE applying `..`, so it opens other/vault. JS realpath collapsed
+		// the `..` lexically first and named work/vault: a PASS for a different chain.
+		const phys = join(tmp, "phys");
+		mkdirSync(join(phys, "work"), { recursive: true });
+		mkdirSync(join(phys, "other", "subdir"), { recursive: true });
+		mkdirSync(join(phys, "proj"));
+		symlinkSync(join(phys, "other", "subdir"), join(phys, "work", "link"));
+		await makeVault(join(phys, "work", "vault"), 3);
+		await makeVault(join(phys, "other", "vault"), 1);
+		// Built by concatenation: path.join would normalise the `..` away.
+		symlinkSync(`${phys}/work/link/../vault/.usertrust`, join(phys, "proj", ".usertrust"));
+
+		const viaLink = cli(empty, "verify", join(phys, "proj"));
+		expect(viaLink.code).toBe(0);
+		expect(viaLink.stdout).toContain("1 events");
+		expect(viaLink.stdout).toContain(`Vault: ${join(phys, "other", "vault", ".usertrust")}`);
+		expect(viaLink.stdout).not.toContain("3 events");
+
+		// The explicit argument has the same lexical collapse: link/../vault is other/vault.
+		const viaArg = cli(empty, "verify", `${phys}/work/link/../vault`);
+		expect(viaArg.code).toBe(0);
+		expect(viaArg.stdout).toContain("1 events");
+		expect(viaArg.stdout).toContain(`Vault: ${join(phys, "other", "vault", ".usertrust")}`);
+		expect(json(cli(empty, "verify", `${phys}/work/link/../vault`, "--json")).data.vaultPath).toBe(
+			join(phys, "other", "vault", ".usertrust"),
+		);
+	}, 60_000);
+
 	it("T2: from an empty directory, `verify vault-a` verifies vault-a", () => {
 		const out = cli(empty, "verify", vaultA);
 		expect(out.code).toBe(0);

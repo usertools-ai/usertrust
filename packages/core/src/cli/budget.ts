@@ -43,7 +43,9 @@ import { type BudgetStatus, getBudgetStatus } from "../budget/allocation.js";
 import { loadConfig } from "../config.js";
 import { TrustTBClient } from "../ledger/client.js";
 import { VAULT_DIR } from "../shared/constants.js";
+import { GLOBAL_FLAGS } from "./flags.js";
 import type { CliOptions } from "./init.js";
+import { toSafeJson } from "./target.js";
 
 const USAGE =
 	"Usage: usertrust budget --cost-center <name> --allocated <int> [--parent <id>] [--period-start <iso>] [--period-end <iso>] [--json]";
@@ -57,9 +59,7 @@ const PARENT_ENV_VAR = "USERTRUST_USER_ID";
 const KNOWN_BUDGET_FLAGS = new Set([
 	// Global flags main.ts passes to every subcommand — rejecting them here would
 	// break `usertrust budget ... --json`, which main.ts forwards verbatim.
-	"--json",
-	"--skip-verify",
-	"--reconfigure",
+	...GLOBAL_FLAGS,
 	// Budget flags.
 	"--cost-center",
 	"--parent",
@@ -379,7 +379,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 	// Use process.exitCode (not process.exit) so buffered stdout flushes.
 	const fail = (message: string, humanMessage?: string): void => {
 		if (json) {
-			console.log(JSON.stringify({ command: "budget", success: false, data: { message } }));
+			console.log(toSafeJson({ command: "budget", success: false, data: { message } }));
 		} else {
 			console.log(humanMessage ?? pc.red(message));
 		}
@@ -439,7 +439,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 
 	if (json) {
 		console.log(
-			JSON.stringify({
+			toSafeJson({
 				command: "budget",
 				success: true,
 				data: {

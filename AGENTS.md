@@ -1145,6 +1145,16 @@ positional — or any dash token that is not a global flag or the command's own 
 new such command needs the same line. Exit codes: a path that cannot be used is 1 (as "No trust vault
 found" always was), an argument of the wrong shape is 2. `tests/cli/verify-target.test.ts` drives the
 real entry point from a cwd that is itself a valid vault.
+The vault named is the PHYSICAL directory the OS opens: the argument and the `.usertrust` entry
+are resolved once, with `realpathSync.native`, after the existence checks, and nothing normalises a
+path that can still hold a link — `path.join`/`resolve` and JS `realpathSync` collapse `..`
+lexically, but the OS applies `..` after following the link before it, so `work/link/../vault`
+(`link -> other/subdir`) is `other/vault`, not `work/vault`. A relative argument is concatenated onto
+the cwd, not resolved against it. The global flags (`--json`, `--skip-verify`, `--reconfigure`) have
+one definition, `GLOBAL_FLAGS` in `cli/flags.ts`; `tests/cli/global-flags.test.ts` fails on a second
+spelling. No untrusted argument reaches the terminal as a control byte or a raw C1 in `--json`:
+`tests/cli/terminal-echo.test.ts` drives every command with an ESC/C1/BEL/DEL argument in every
+position and fails on any raw byte out, so a new echo site is caught by running it, not by a grep.
 *Prevents:* `verify <vault-a>` run inside vault-b printing vault-b's chain as the verdict —
 `run(undefined, …)` dropped the argument and `rootDir ?? process.cwd()` answered for the wrong vault,
 exit 0. A verifier that certifies the wrong subject is the worst failure it can have.

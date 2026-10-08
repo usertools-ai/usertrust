@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { GLOBAL_FLAGS, JSON_FLAG, RECONFIGURE_FLAG, SKIP_VERIFY_FLAG } from "./flags.js";
+import { scrubForTerminal } from "./target.js";
+
 const COMMANDS = [
 	"init",
 	"inspect",
@@ -21,12 +24,10 @@ const COMMANDS = [
 ] as const;
 
 const argv = process.argv.slice(2);
-const jsonFlag = argv.includes("--json");
-const skipVerify = argv.includes("--skip-verify");
-const reconfigure = argv.includes("--reconfigure");
-const positional = argv.filter(
-	(a) => a !== "--json" && a !== "--skip-verify" && a !== "--reconfigure",
-);
+const jsonFlag = argv.includes(JSON_FLAG);
+const skipVerify = argv.includes(SKIP_VERIFY_FLAG);
+const reconfigure = argv.includes(RECONFIGURE_FLAG);
+const positional = argv.filter((a) => !GLOBAL_FLAGS.includes(a));
 const command = positional[0];
 
 /** Simple Levenshtein distance — two-row DP, no dependency needed. */
@@ -96,7 +97,7 @@ switch (command) {
 		await import("./health.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
 	case "policy": {
-		const rest = argv.slice(argv.indexOf("policy") + 1).filter((a) => a !== "--json");
+		const rest = argv.slice(argv.indexOf("policy") + 1).filter((a) => a !== JSON_FLAG);
 		await import("./policy.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
 	}
@@ -109,7 +110,7 @@ switch (command) {
 		break;
 	case "export": {
 		if (await refusedStray("export", ["--markdown"])) break;
-		const rest = argv.slice(argv.indexOf("export") + 1).filter((a) => a !== "--json");
+		const rest = argv.slice(argv.indexOf("export") + 1).filter((a) => a !== JSON_FLAG);
 		await import("./export.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
 	}
@@ -142,7 +143,7 @@ switch (command) {
 		await import("./skill.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
 	case "ui": {
-		const rest = argv.slice(argv.indexOf("ui") + 1).filter((a) => a !== "--json");
+		const rest = argv.slice(argv.indexOf("ui") + 1).filter((a) => a !== JSON_FLAG);
 		await import("./ui.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
 	}
@@ -150,7 +151,7 @@ switch (command) {
 		if (command && !command.startsWith("-")) {
 			const suggestion = suggestCommand(command);
 			if (suggestion) {
-				console.log(`Unknown command: "${command}"`);
+				console.log(`Unknown command: "${scrubForTerminal(command)}"`);
 				console.log(`Did you mean "${suggestion}"?`);
 				break;
 			}
