@@ -29,6 +29,7 @@
 // `isGated`). One an earlier release recorded is never re-authorized: Stop only
 // gives it back.
 import { unlink } from "node:fs/promises";
+import { resolveJob } from "./job-log.mjs";
 import {
 	claimForSettle,
 	defaultModel,
@@ -56,6 +57,24 @@ import {
 	settleLabels,
 	settleTranscriptHold,
 } from "./transcript.mjs";
+
+/**
+ * When an estimate hold's usage ended: now, but never past the next job switch. The call that
+ * runs `usertrust-job start job-b` bills job-a, and its PostToolUse comes AFTER the switch, so
+ * "now" would put job-a's record across the boundary into job-b's interval. Never before the
+ * hold's own usageFrom.
+ */
+async function estimateUsageTo(sessionId, entry) {
+	const from = Date.parse(entry.usageFrom);
+	let end = Date.now();
+	try {
+		const boundary = (await resolveJob(sessionId)).boundaryAfter(from);
+		if (boundary !== null && boundary < end) end = boundary;
+	} catch {
+		// no log to read: now
+	}
+	return new Date(Math.max(end, from)).toISOString();
+}
 
 /** One request of the expired-hold chain: 5 s at most, and never past the hook's budget. */
 function withinBudget() {
@@ -268,7 +287,7 @@ try {
 			// A hold authorized under the `job` capability names its job again, and says when
 			// its usage ended (now). The usage START is the authorize capture's alone.
 			...(typeof entry.usageFrom === "string"
-				? settleLabels({ ...entry, usageTo: new Date().toISOString() })
+				? settleLabels({ ...entry, usageTo: await estimateUsageTo(sessionId, entry) })
 				: {}),
 		};
 		await settleEstimateHold({ sessionId, agentId, entry, usage, input });

@@ -55,20 +55,26 @@ async function readRecords(vault) {
 	return out;
 }
 
-/** The plugin's watch records (one JSON object per line); none is fine, an unreadable line is skipped. */
+/** The plugin's watch records (one JSON object per line); a missing file is none, an unreadable one is no verdict. */
 async function readWatch(path) {
 	const out = [];
 	let text;
 	try {
 		text = await readFile(path, "utf-8");
-	} catch {
-		return out;
+	} catch (err) {
+		// Only a file that is not there means "no watch records". One that exists and cannot
+		// be read may hold the very gap or refusal that makes the answer "no": no verdict.
+		if (err?.code === "ENOENT") return out;
+		say(`usertrust-job: the watch records cannot be read (${err?.code ?? "error"}): no verdict`);
+		process.exit(1);
 	}
 	for (const line of text.split("\n")) {
+		if (line === "") continue;
 		try {
-			if (line !== "") out.push(JSON.parse(line));
+			out.push(JSON.parse(line));
 		} catch {
-			// a torn line says nothing
+			// A line that cannot be read may be a gap or a refusal: coverage refuses "exact".
+			out.push({ kind: "unreadable" });
 		}
 	}
 	return out;

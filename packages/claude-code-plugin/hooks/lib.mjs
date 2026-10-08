@@ -210,7 +210,13 @@ export function modeAnnouncement() {
  * written, so no note claims a record that is not there.
  */
 export async function recordWatchEvent(event) {
-	const line = JSON.stringify({ at: new Date().toISOString(), ...event });
+	// `started` is when the CALL was received (this hook's start), `at` when the record was
+	// written: a job switch that lands in between must not move the call to the new job.
+	const line = JSON.stringify({
+		at: new Date().toISOString(),
+		started: new Date(HOOK_STARTED_AT).toISOString(),
+		...event,
+	});
 	try {
 		await mkdir(stateRoot(), { recursive: true });
 		await appendFile(watchLogPath(), `${line}\n`, { mode: 0o600 });

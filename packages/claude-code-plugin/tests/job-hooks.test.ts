@@ -397,6 +397,53 @@ describe("an unresolved keyed settle is retried under the job it was authorized 
 	});
 });
 
+describe("the switching call's window stays inside the job it bills", () => {
+	it("an estimate hold's usageTo is clamped to the switch, and never before its usageFrom", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		const env = { UT_CC_USAGE: "estimate" };
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		const switchedAt = Date.now() + 5;
+		await appendLog(logLine(switchedAt, "start", "job-b"));
+		await new Promise((r) => setTimeout(r, 200));
+		await run("post-tool-use.mjs", post("tu_1"), env);
+		const from = Date.parse(of("/v1/authorize")[0]?.body.usageFrom as string);
+		const to = Date.parse(of("/v1/settle")[0]?.body.usageTo as string);
+		// mutant: usageTo = now → after the switch, across the boundary into job-b
+		expect(to).toBeLessThanOrEqual(switchedAt);
+		expect(to).toBeGreaterThanOrEqual(from);
+	});
+	it("with no switch it is simply now", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		const env = { UT_CC_USAGE: "estimate" };
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		await run("post-tool-use.mjs", post("tu_1"), env);
+		const to = Date.parse(of("/v1/settle")[0]?.body.usageTo as string);
+		expect(Date.now() - to).toBeLessThan(15_000);
+		expect(to).toBeGreaterThan(Date.parse(of("/v1/authorize")[0]?.body.usageFrom as string) - 1);
+	});
+});
+
+describe("a gap records when the call STARTED", () => {
+	it("started is the hook's start, at is later", async () => {
+		await startFake();
+		healthDelayMs = 400;
+		// The server is unreachable for the authorize itself: watch mode records a gap.
+		override = (path) =>
+			path === "/v1/authorize" ? { status: 503, json: { error: "down" } } : undefined;
+		await run("pre-tool-use.mjs", pre("tu_1"), { UT_CC_USAGE: "estimate" });
+		const events = (await readFile(join(stateDir, "watch.jsonl"), "utf-8"))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l));
+		const gap = events.find((e) => e.kind === "gap");
+		expect(gap).toBeDefined();
+		expect(Date.parse(gap.started)).toBeLessThanOrEqual(Date.parse(gap.at));
+		expect(Date.parse(gap.at) - Date.parse(gap.started)).toBeGreaterThanOrEqual(300);
+	});
+});
+
 describe("a job stopped and started again (a, b, a) keeps its intervals apart", () => {
 	it("a remainder settles three times, each window inside its own interval", async () => {
 		await startFake();

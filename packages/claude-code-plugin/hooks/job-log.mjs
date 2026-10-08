@@ -150,6 +150,12 @@ export async function resolveJob(sessionId) {
 		parsed,
 		/** Labels for a call or message at epoch-ms `tMs`. */
 		at: (tMs) => labelsAt(parsed, tMs),
+		/** The ts (epoch ms) of the first `start` or `stop` after `tMs`, or null: where a job's call ends. */
+		boundaryAfter: (tMs) => {
+			if (parsed.state !== "ok") return null;
+			const next = parsed.events.find((e) => e.op !== "session-start" && e.tsMs > tMs);
+			return next === undefined ? null : next.tsMs;
+		},
 		/**
 		 * What may share one settle or one per-call hold: the labels AND the interval. A job
 		 * that is stopped and started again (a, b, a) has two intervals, and a window that
@@ -424,6 +430,9 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 	// The plugin's own watch records (`watch.jsonl`), when supplied: a `would_block` of this
 	// job is usage that was refused, and a `gap` is a call that ran UNMETERED.
 	for (const w of watch) {
+		if (w?.kind === "unreadable") {
+			reasons.push("the watch records are unreadable: gaps and refusals cannot be ruled out");
+		}
 		if (w?.kind === "would_block" && w.job === job) {
 			reasons.push(`a request of ${job} was refused (would_block): its usage is unrecorded`);
 		}
@@ -470,7 +479,8 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 		const mine = bySession.get(sid) ?? [];
 		for (const w of watch) {
 			if (w?.kind !== "gap" || w.session !== sid) continue;
-			const at = ms(w.at);
+			// The call's own start, never the later time its record was written.
+			const at = ms(w.started ?? w.at);
 			if (intervals.some(([from, to]) => !Number.isFinite(at) || (at > from && at <= to))) {
 				reasons.push(`session ${sid}: a call ran unmetered (gap) during an interval of ${job}`);
 			}

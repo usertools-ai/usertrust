@@ -3,7 +3,7 @@
 // Job ids here are opaque (`job-a`, `bug-1`). Each test names the mutant it kills.
 
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -91,6 +91,29 @@ function cli(args: string[], env: Record<string, string>) {
 			stderr += c;
 		});
 		child.on("close", (code) => resolve({ code: code ?? 1, stderr }));
+	});
+}
+
+function cliOut(args: string[]) {
+	return new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+		const inherited = Object.fromEntries(
+			Object.entries(process.env).filter(
+				([k]) => !k.startsWith("UT_") && k !== "CLAUDE_CODE_SESSION_ID",
+			),
+		);
+		const child = spawn(process.execPath, [CLI, ...args], {
+			env: { ...inherited, UT_CC_STATE_DIR: state },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (c) => {
+			stdout += c;
+		});
+		child.stderr.on("data", (c) => {
+			stderr += c;
+		});
+		child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
 	});
 }
 
@@ -664,6 +687,98 @@ describe("jobCoverage — deny by default", () => {
 			records: [ok, other("policy_denied", { usageFrom: iso(T0 + 9000) })],
 		});
 		expect(r.exact).toBe(true);
+	});
+});
+
+describe("jobCoverage — watch evidence", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const ok = {
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost: 5,
+			job: J,
+			principal: { origin: `claude-code:${SID}` },
+			usageFrom: iso(T0 + 2000),
+			usageTo: iso(T0 + 3000),
+		},
+	};
+	it("a gap is placed by when its call STARTED, not when its record was written", async () => {
+		const { jobCoverage } = await lib();
+		const gap = { kind: "gap", session: SID, started: iso(T0 + 3000), at: iso(T0 + 9000) };
+		const r = jobCoverage({ job: J, logs: { [SID]: logText }, records: [ok], watch: [gap] });
+		expect(r.exact).toBe(false); // mutant: reads `at` → after the stop → exact
+		expect(r.reasons.join(" ")).toContain("unmetered");
+	});
+	it("an unreadable watch line refuses exact", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [ok],
+			watch: [{ kind: "unreadable" }],
+		});
+		expect(r.exact).toBe(false);
+	});
+});
+
+describe("usertrust-job coverage — the CLI", () => {
+	const J = "bug-1";
+	async function fixture(watch?: string | null) {
+		const vault = join(state, "vault");
+		await mkdir(join(vault, "audit"), { recursive: true });
+		await writeFile(
+			join(vault, "audit", "events.jsonl"),
+			`${JSON.stringify({
+				kind: "llm_call",
+				actor: `claude-code:${SID}:main:main`,
+				data: {
+					transferId: "tx_1",
+					cost: 5,
+					job: J,
+					principal: { origin: `claude-code:${SID}` },
+					usageFrom: iso(T0 + 2000),
+					usageTo: iso(T0 + 3000),
+				},
+			})}\n`,
+		);
+		await writeLog(
+			start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null),
+		);
+		const args = ["coverage", J, "--vault", vault];
+		if (watch !== undefined && watch !== null) {
+			const file = join(state, "watch-test.jsonl");
+			await writeFile(file, watch);
+			args.push("--watch", file);
+			return { args, file };
+		}
+		args.push("--watch", join(state, "no-such-watch.jsonl"));
+		return { args, file: null };
+	}
+	const out = (r: { stdout: string }) => JSON.parse(r.stdout) as { exact: boolean };
+
+	it("no watch file is no watch records: exact", async () => {
+		const { args } = await fixture();
+		const r = await cliOut(args);
+		expect(r.code).toBe(0);
+		expect(out(r).exact).toBe(true);
+	});
+	it("a watch line it cannot read refuses exact", async () => {
+		const { args } = await fixture('{"kind":"gap","sess');
+		const r = await cliOut(args);
+		expect(out(r).exact).toBe(false); // mutant: the torn line is skipped → exact
+	});
+	it("a watch file that exists but cannot be read is NO verdict (exit 1), never exact", async () => {
+		const { args, file } = await fixture("{}\n");
+		await chmod(file as string, 0o000);
+		const r = await cliOut(args);
+		await chmod(file as string, 0o600);
+		// mutant: every read error is treated as 'no file' → exact
+		expect(r.code).toBe(1);
+		expect(r.stdout).toBe("");
 	});
 });
 
