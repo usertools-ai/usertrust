@@ -1,0 +1,188 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+import { describe, expect, it } from "vitest";
+import {
+	type ModelRates,
+	PRICING_TABLE,
+	requestDeclares1hCache,
+} from "../../src/ledger/pricing.js";
+import {
+	fromAnthropicUsage,
+	fromOpenAICompletionsUsage,
+	publishableUsageFields,
+	sanitizeUsage,
+} from "../../src/ledger/usage.js";
+import { TrustConfigSchema } from "../../src/shared/types.js";
+
+const SONNET = PRICING_TABLE["claude-sonnet-4-6"] as ModelRates;
+
+describe("1h share in usage extraction", () => {
+	it("fromAnthropicUsage reads ephemeral_1h as a SUBSET of the write total", () => {
+		const u = fromAnthropicUsage({
+			input_tokens: 10,
+			output_tokens: 5,
+			cache_creation_input_tokens: 999, // ignored: the breakdown wins when usable
+			cache_creation: { ephemeral_5m_input_tokens: 300, ephemeral_1h_input_tokens: 700 },
+		});
+		expect(u.cacheWriteTokens).toBe(1_000);
+		expect(u.cacheWrite1hTokens).toBe(700);
+	});
+
+	it("the key is ABSENT when there is no 1h share (the snapshot keeps its old shape)", () => {
+		const flat = fromAnthropicUsage({
+			input_tokens: 1,
+			output_tokens: 1,
+			cache_creation_input_tokens: 40,
+		});
+		expect(flat.cacheWriteTokens).toBe(40);
+		expect("cacheWrite1hTokens" in flat).toBe(false);
+		const zero = fromAnthropicUsage({
+			input_tokens: 1,
+			output_tokens: 1,
+			cache_creation: { ephemeral_5m_input_tokens: 40, ephemeral_1h_input_tokens: 0 },
+		});
+		expect("cacheWrite1hTokens" in zero).toBe(false);
+		expect(
+			"cacheWrite1hTokens" in
+				fromOpenAICompletionsUsage({ prompt_tokens: 5, completion_tokens: 1 }),
+		).toBe(false);
+	});
+
+	it("sanitizeUsage clamps a 1h count to the write total and drops garbage", () => {
+		const over = sanitizeUsage({
+			inputTokens: 1,
+			outputTokens: 1,
+			cacheWriteTokens: 100,
+			cacheWrite1hTokens: 500,
+		});
+		expect(over.cacheWrite1hTokens).toBe(100);
+		for (const bad of [Number.NaN, -3, Number.POSITIVE_INFINITY, "7", null, undefined]) {
+			const s = sanitizeUsage({
+				inputTokens: 1,
+				outputTokens: 1,
+				cacheWriteTokens: 100,
+				cacheWrite1hTokens: bad,
+			});
+			expect("cacheWrite1hTokens" in s, String(bad)).toBe(false);
+		}
+		// With no write total there is nothing for the 1h share to be a subset of.
+		expect(
+			"cacheWrite1hTokens" in
+				sanitizeUsage({ inputTokens: 1, outputTokens: 1, cacheWrite1hTokens: 9 }),
+		).toBe(false);
+	});
+
+	it("publishableUsageFields: usage always, cacheWrite1h only when 1h tokens were written", () => {
+		const with1h = sanitizeUsage({
+			inputTokens: 1,
+			outputTokens: 1,
+			cacheWriteTokens: 100,
+			cacheWrite1hTokens: 40,
+			source: "provider",
+		});
+		const f = publishableUsageFields(with1h, SONNET);
+		expect(f.usage).toEqual({
+			inputTokens: 1,
+			outputTokens: 1,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 100,
+		});
+		expect(f.cacheWrite1h).toEqual({ tokens: 40, ratePer1k: 60 });
+		const without = publishableUsageFields(
+			sanitizeUsage({ inputTokens: 1, outputTokens: 1, cacheWriteTokens: 100, source: "provider" }),
+			SONNET,
+		);
+		expect(without.usage).toBeDefined();
+		expect("cacheWrite1h" in without).toBe(false);
+		// An ESTIMATED snapshot publishes nothing, 1h share or not.
+		const est = publishableUsageFields(
+			sanitizeUsage({ inputTokens: 1, cacheWriteTokens: 100, cacheWrite1hTokens: 40 }),
+			SONNET,
+		);
+		expect(est).toEqual({});
+	});
+});
+
+describe("requestDeclares1hCache", () => {
+	const m = { type: "ephemeral", ttl: "1h" };
+
+	it("finds a 1h marker on a content block, a system block, a tool, or the top level", () => {
+		expect(
+			requestDeclares1hCache({
+				messages: [{ role: "user", content: [{ type: "text", text: "x", cache_control: m }] }],
+			}),
+		).toBe(true);
+		expect(
+			requestDeclares1hCache({ system: [{ type: "text", text: "x", cache_control: m }] }),
+		).toBe(true);
+		expect(requestDeclares1hCache({ tools: [{ name: "t", cache_control: m }] })).toBe(true);
+		expect(requestDeclares1hCache({ cache_control: m })).toBe(true);
+	});
+
+	it("a request with no marker, a 5m marker, or a non-string ttl declares nothing", () => {
+		expect(
+			requestDeclares1hCache({ model: "x", messages: [{ role: "user", content: "hi" }] }),
+		).toBe(false);
+		expect(
+			requestDeclares1hCache({
+				system: [{ type: "text", text: "x", cache_control: { type: "ephemeral" } }],
+			}),
+		).toBe(false);
+		expect(requestDeclares1hCache({ cache_control: { type: "ephemeral", ttl: "5m" } })).toBe(false);
+		expect(requestDeclares1hCache({ cache_control: { ttl: 3600 } })).toBe(false);
+		// The marker is the KEY `cache_control`, not text that mentions it.
+		expect(
+			requestDeclares1hCache({ messages: [{ role: "user", content: 'cache_control ttl "1h"' }] }),
+		).toBe(false);
+		for (const v of [null, undefined, 3, "x", []]) expect(requestDeclares1hCache(v)).toBe(false);
+	});
+
+	it("fails DEAREST: too deep, too large, or unreadable answers true, never false", () => {
+		let deep: Record<string, unknown> = {};
+		const root = deep;
+		for (let i = 0; i < 100; i++) {
+			const next: Record<string, unknown> = {};
+			deep.child = next;
+			deep = next;
+		}
+		expect(requestDeclares1hCache(root)).toBe(true);
+		expect(requestDeclares1hCache({ items: Array.from({ length: 60_000 }, () => ({})) })).toBe(
+			true,
+		);
+		const hostile = {
+			get messages(): unknown {
+				throw new Error("boom");
+			},
+		};
+		expect(requestDeclares1hCache(hostile)).toBe(true);
+		// A cycle terminates (and is not itself evidence of a marker).
+		const a: Record<string, unknown> = {};
+		a.self = a;
+		expect(requestDeclares1hCache(a)).toBe(false);
+	});
+});
+
+describe("customRates keeps an operator's 1h write rate", () => {
+	it("cacheWrite1hPer1k survives config parsing (a closed schema would strip it silently)", () => {
+		const config = TrustConfigSchema.parse({
+			budget: 1000,
+			pricing: "custom",
+			customRates: {
+				"my-claude": {
+					inputPer1k: 10,
+					outputPer1k: 50,
+					cacheWritePer1k: 12.5,
+					cacheWrite1hPer1k: 17,
+				},
+			},
+		});
+		expect(config.customRates?.["my-claude"]?.cacheWrite1hPer1k).toBe(17);
+		expect(() =>
+			TrustConfigSchema.parse({
+				budget: 1000,
+				customRates: { m: { inputPer1k: 1, outputPer1k: 1, cacheWrite1hPer1k: -1 } },
+			}),
+		).toThrow();
+	});
+});

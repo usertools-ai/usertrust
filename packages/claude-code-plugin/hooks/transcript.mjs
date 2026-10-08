@@ -23,6 +23,10 @@
 //    cache EXCLUDED), `cache_read_input_tokens`, `cache_creation_input_tokens`,
 //    `output_tokens`. These four are already disjoint, which is exactly the
 //    usertrust settle contract (cache tiers are never folded into inputTokens).
+//    `cache_creation.ephemeral_1h_input_tokens` is the 1-HOUR share of the write
+//    tier (a subset of `cache_creation_input_tokens`, never added to it); it is
+//    carried as `cacheWrite1hTokens` and sent only to a server that advertises
+//    `cache-write-1h` (an older server strips the key and bills it at the 5m rate).
 //
 // THE MECHANISM: the PreToolUse hold IS the settlement vehicle. PreToolUse
 // assigns the agent's new complete messages (one model's worth: the "window")
@@ -160,6 +164,8 @@ const MODEL_ID = /^[^\p{C}\p{Z}]{1,256}$/u;
  * `estimatedCacheReadTokens` / `estimatedCacheWriteTokens` (see `holdEstimate`).
  */
 const CACHE_TIERS = "authorize-cache-tiers";
+/** The capability of a server that prices `cacheWrite1hTokens` at the 1-hour write rate. */
+const CACHE_WRITE_1H = "cache-write-1h";
 
 const CURSOR_VERSION = 2;
 /** v1 cursors (no `unresolved`) are read as v2 with nothing unresolved. */
@@ -215,7 +221,14 @@ export const sessionEndLockWait = () => budgetShare(0.2);
 const AUTHORIZING = "authorizing";
 const REMAINDER = "remainder";
 const AGENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
-const COUNT_KEYS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
+const COUNT_KEYS = [
+	"inputTokens",
+	"outputTokens",
+	"cacheReadTokens",
+	"cacheWriteTokens",
+	// A SUBSET of cacheWriteTokens (the 1-hour share), carried beside it, never summed into it.
+	"cacheWrite1hTokens",
+];
 /**
  * One field of a usertrust `principal`: the server refuses anything else. It must
  * equal core's PRINCIPAL_FIELD_PATTERN — a tightening there would turn every
@@ -265,7 +278,13 @@ function callTimeout(reserveMs = 0) {
 }
 
 function sumCounts(messages) {
-	const sum = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+	const sum = {
+		inputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		cacheWrite1hTokens: 0,
+	};
 	for (const m of messages) for (const key of COUNT_KEYS) sum[key] += m[key];
 	return sum;
 }
@@ -529,6 +548,7 @@ function parseCursor(raw) {
 			outputTokens: count(m.outputTokens),
 			cacheReadTokens: count(m.cacheReadTokens),
 			cacheWriteTokens: count(m.cacheWriteTokens),
+			cacheWrite1hTokens: count(m.cacheWrite1hTokens),
 		});
 	}
 	for (const [id, value] of Object.entries(raw.assigned)) {
@@ -588,6 +608,7 @@ function holdVehicle(body) {
 		outputTokens: body.outputTokens,
 		cacheReadTokens: body.cacheReadTokens,
 		cacheWriteTokens: body.cacheWriteTokens,
+		cacheWrite1hTokens: body.cacheWrite1hTokens,
 	});
 	return vehicle === null ? null : { key, vehicle };
 }
@@ -969,6 +990,7 @@ function foldLine(cursor, bytes, since) {
 			outputTokens: 0,
 			cacheReadTokens: 0,
 			cacheWriteTokens: 0,
+			cacheWrite1hTokens: 0,
 		};
 		cursor.nextSeq += 1;
 		cursor.partial.set(id, m);
@@ -982,6 +1004,13 @@ function foldLine(cursor, bytes, since) {
 	m.outputTokens = Math.max(m.outputTokens, count(usage.output_tokens));
 	m.cacheReadTokens = Math.max(m.cacheReadTokens, count(usage.cache_read_input_tokens));
 	m.cacheWriteTokens = Math.max(m.cacheWriteTokens, count(usage.cache_creation_input_tokens));
+	// The 1-hour share, from the per-TTL breakdown when the transcript carries one.
+	// Like every counter here it only rises, and it is clamped to the write total so a
+	// subset can never exceed its whole.
+	m.cacheWrite1hTokens = Math.min(
+		Math.max(m.cacheWrite1hTokens, count(usage.cache_creation?.ephemeral_1h_input_tokens)),
+		m.cacheWriteTokens,
+	);
 	if (message.stop_reason != null) m.complete = true;
 	if (named) cursor.lastModel = model;
 	return true;
@@ -1576,14 +1605,29 @@ async function hygieneRelease(transferId, why) {
  * Every hold that is not settled is given back for hygiene (the server re-queues a
  * hold after a failed settle), except one a `settled: false` receipt says is spent.
  */
+/**
+ * The body of a transcript settle. The 1-hour share goes only to a server that prices it
+ * (`cache-write-1h`): an older server strips the unknown key, and those tokens would
+ * silently bill at the cheaper 5-minute rate. The write TOTAL is always sent, so the
+ * worst case against an old server is the 5-minute price, never a dropped count.
+ */
+async function settleBody(transferId, counts) {
+	const { cacheWrite1hTokens, ...rest } = counts;
+	const sendShare = cacheWrite1hTokens > 0 && (await serverCapabilities())?.has(CACHE_WRITE_1H);
+	return {
+		transferId,
+		...rest,
+		...(sendShare ? { cacheWrite1hTokens } : {}),
+		usageSource: "provider",
+	};
+}
+
 async function settleAt(transferId, counts, { keyed }) {
 	let settle;
 	try {
-		settle = await serverRequest(
-			"/v1/settle",
-			{ transferId, ...counts, usageSource: "provider" },
-			{ timeoutMs: callTimeout() },
-		);
+		settle = await serverRequest("/v1/settle", await settleBody(transferId, counts), {
+			timeoutMs: callTimeout(),
+		});
 	} catch (err) {
 		const holdEnded = await hygieneRelease(transferId, "transcript settle unanswered");
 		return {
@@ -2069,11 +2113,9 @@ async function postGroup({
 	}
 	let settle;
 	try {
-		settle = await serverRequest(
-			"/v1/settle",
-			{ transferId, ...counts, usageSource: "provider" },
-			{ timeoutMs },
-		);
+		settle = await serverRequest("/v1/settle", await settleBody(transferId, counts), {
+			timeoutMs,
+		});
 	} catch (err) {
 		await hygieneRelease(transferId, "transcript settle unanswered");
 		return {

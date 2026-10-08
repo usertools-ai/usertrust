@@ -49,7 +49,10 @@ interface Usage {
 	input: number;
 	output: number;
 	cacheRead: number;
+	/** The write TOTAL (5-minute + 1-hour). */
 	cacheWrite: number;
+	/** The 1-HOUR share of `cacheWrite`, a subset of it; omitted = 0. */
+	cacheWrite1h?: number;
 }
 
 interface Recorded {
@@ -191,7 +194,10 @@ function responseEntries(
 		cache_creation_input_tokens: u.cacheWrite,
 		cache_read_input_tokens: u.cacheRead,
 		output_tokens: output,
-		cache_creation: { ephemeral_5m_input_tokens: u.cacheWrite, ephemeral_1h_input_tokens: 0 },
+		cache_creation: {
+			ephemeral_5m_input_tokens: u.cacheWrite - (u.cacheWrite1h ?? 0),
+			ephemeral_1h_input_tokens: u.cacheWrite1h ?? 0,
+		},
 		service_tier: "standard",
 	});
 	for (let i = 0; i < partials; i += 1) {
@@ -490,6 +496,47 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 		// (Doubling the cache writes, as before, held 3 381.)
 		expect(windowHold(plain)).toBe(3_306);
 		expect(windowHold(plain)).toBeGreaterThanOrEqual(realCost);
+	});
+
+	describe("the 1-hour share of the cache-write tier (#203)", () => {
+		const oneHour = (): Usage => ({ ...u(10, 20, 3_000, 400), cacheWrite1h: 150 });
+
+		it("a server that advertises `cache-write-1h` gets the share, as a SUBSET of the write total", async () => {
+			capabilities = ["cache-write-1h"];
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, oneHour()));
+			await run("stop.mjs", stopInput());
+			expect(settles()).toHaveLength(1);
+			expect(settles()[0]?.body).toMatchObject({
+				cacheWriteTokens: 400,
+				cacheWrite1hTokens: 150,
+			});
+		});
+
+		it.each([
+			["an older server (no `cache-write-1h`)", []],
+			["a server whose capabilities are unknown", null],
+		] as const)(
+			"%s never gets the share: it would strip the key and bill 1-hour writes at the 5-minute rate",
+			async (_server, published) => {
+				capabilities = published === null ? null : [...published];
+				await startServer(okResponder);
+				await writeMain(responseEntries("msg_a", SONNET, oneHour()));
+				await run("stop.mjs", stopInput());
+				expect(settles()).toHaveLength(1);
+				const body = settles()[0]?.body as Record<string, unknown>;
+				expect(body.cacheWriteTokens).toBe(400); // the total is still sent
+				expect(body).not.toHaveProperty("cacheWrite1hTokens");
+			},
+		);
+
+		it("a message with no 1-hour writes sends no share, even to a server that prices it", async () => {
+			capabilities = ["cache-write-1h"];
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 3_000, 400)));
+			await run("stop.mjs", stopInput());
+			expect(settles()[0]?.body).not.toHaveProperty("cacheWrite1hTokens");
+		});
 	});
 
 	it.each([
@@ -3315,9 +3362,13 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 			maxOutputTokens: 1000 + TOOL_OUTPUT_HOLD,
 		});
 		const rates = getModelRates(SONNET);
+		// The server cannot see the transcript's cache TTLs before the call, so it holds the
+		// window's input leg AND its stated cache writes at the dearest write rate: the
+		// 1-hour 60/1k (2x input), written out by hand, not the 37.5 5-minute rate.
 		const holdRates = {
 			...rates,
-			inputPer1k: Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates)),
+			inputPer1k: Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates), 60),
+			cacheWritePer1k: 60,
 		};
 		const hold = costFromRates(
 			holdRates,
@@ -3328,9 +3379,9 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 		);
 		const windowAuth = authorizes()[0]?.response as { estimatedCost?: number } | undefined;
 		expect(windowAuth?.estimatedCost).toBe(hold);
-		// The window's own part of it, less the tool call's estimate: 477, against a
-		// real cost of 476 (it held 3 381 with the cache writes doubled).
-		expect(costFromRates(holdRates, 150, 1000, 82_000, 2_000)).toBe(477);
+		// The window's own part of it, less the tool call's estimate: 525 (150 x 60 + 82,000 x 3
+		// + 2,000 x 60 + 1,000 x 150, per 1k), against a real cost of 476 (the 5-minute rate).
+		expect(costFromRates(holdRates, 150, 1000, 82_000, 2_000)).toBe(525);
 		expect(receipts[0]?.cost).toBe(476);
 		const expected = [
 			{ inputTokens: 150, outputTokens: 1000, cacheReadTokens: 82_000, cacheWriteTokens: 2_000 },

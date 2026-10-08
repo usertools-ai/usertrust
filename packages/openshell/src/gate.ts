@@ -13,7 +13,13 @@
  * here is denied, including types that do not exist yet.
  */
 
-import { costFromRates, getModelRates, isModelPriced, type ModelRates } from "usertrust";
+import {
+	costFromRates,
+	getModelRates,
+	isModelPriced,
+	type ModelRates,
+	requestDeclares1hCache,
+} from "usertrust";
 import { DenyReason } from "./reasons.js";
 import {
 	DEFAULT_ROUTE_CONFIG,
@@ -712,6 +718,11 @@ export function evaluateRequest(
 		costFromRates(rates, inputTokenBound, maxOutputTokens),
 		costFromRates(rates, 0, maxOutputTokens, 0, inputTokenBound),
 		costFromRates(rates, 0, maxOutputTokens, inputTokenBound, 0),
+		// A request that declares a 1-hour cache TTL can write its prompt at the 1-hour
+		// rate (2x input), above the 5-minute write: hold that too, only for such a request.
+		...(requestDeclares1hCache(body)
+			? [costFromRates(rates, 0, maxOutputTokens, 0, inputTokenBound, inputTokenBound)]
+			: []),
 	);
 
 	const mutations: RequestMutations = {

@@ -248,3 +248,82 @@ test("the receipt Exhibit A renders is a scalar-cost receipt, four-tier and reco
 		assert.equal(recomputed, receipt.cost, "four-tier recompute must reproduce the receipt cost");
 	}
 });
+
+test("a receipt WITH 1-hour cache writes validates under v1 and v2, and its split recompute reproduces cost", () => {
+	// `cacheWrite1h` is a ROOT field: `usage` and `pricing.appliedRates` are closed, so a
+	// field added inside either would make every existing v2 validator reject the receipt.
+	// 100 in, 200 out, 10,000 read, 20,000 written of which 8,000 are 1-HOUR (Sonnet 4.6).
+	const receipt: Record<string, Json> = {
+		transferId: "tx_1h",
+		cost: 993,
+		budgetRemaining: 1,
+		auditHash: "a".repeat(64),
+		chainPath: ".usertrust/audit",
+		receiptUrl: null,
+		settled: true,
+		model: "claude-sonnet-4-6",
+		provider: "anthropic",
+		timestamp: "2026-10-08T00:00:00.000Z",
+		usageSource: "provider",
+		usage: {
+			inputTokens: 100,
+			outputTokens: 200,
+			cacheReadTokens: 10_000,
+			cacheWriteTokens: 20_000,
+		},
+		pricing: {
+			appliedRates: { inputPer1k: 30, outputPer1k: 150, cacheReadPer1k: 3, cacheWritePer1k: 37.5 },
+			tableVersion: "2026-10-07",
+		},
+		cacheWrite1h: { tokens: 8_000, ratePer1k: 60 },
+	};
+	for (const [name, schema] of VERSIONS) {
+		assert.deepEqual(validate(receipt, schema, `${name}:1h`), [], name);
+	}
+	// 100x30 + 200x150 + 10,000x3 + (20,000-8,000)x37.5 + 8,000x60, per 1,000, ceil.
+	const u = receipt.usage as Record<string, number>;
+	const r = (receipt.pricing as { appliedRates: Record<string, number> }).appliedRates;
+	const h = receipt.cacheWrite1h as { tokens: number; ratePer1k: number };
+	const recomputed = Math.max(
+		1,
+		Math.ceil(
+			(u.inputTokens * r.inputPer1k +
+				u.outputTokens * r.outputPer1k +
+				u.cacheReadTokens * r.cacheReadPer1k +
+				(u.cacheWriteTokens - h.tokens) * r.cacheWritePer1k +
+				h.tokens * h.ratePer1k) /
+				1000,
+		),
+	);
+	assert.equal(recomputed, receipt.cost);
+});
+
+test("a malformed cacheWrite1h is rejected by v2 (negative control: the field is actually checked)", () => {
+	const base: Record<string, Json> = {
+		transferId: "tx",
+		cost: 1,
+		budgetRemaining: 1,
+		auditHash: "a".repeat(64),
+		chainPath: ".usertrust/audit",
+		receiptUrl: null,
+		settled: true,
+		model: "m",
+		provider: "anthropic",
+		timestamp: "2026-10-08T00:00:00.000Z",
+	};
+	const v2schema = VERSIONS.find(([n]) => n.includes("v2"))?.[1];
+	assert.ok(v2schema, "v2 schema present");
+	for (const bad of [
+		{ tokens: 0, ratePer1k: 60 },
+		{ tokens: 1.5, ratePer1k: 60 },
+		{ tokens: 5 },
+		{ tokens: 5, ratePer1k: 60, extra: 1 },
+		"8000",
+	] as Json[]) {
+		assert.notDeepEqual(
+			validate({ ...base, cacheWrite1h: bad }, v2schema, "bad"),
+			[],
+			JSON.stringify(bad),
+		);
+	}
+});

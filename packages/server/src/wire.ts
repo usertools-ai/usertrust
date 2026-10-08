@@ -58,6 +58,10 @@ export const SettleRequestSchema = z.object({
 	// counts round-tripped as if they were never sent.
 	cacheReadTokens: z.number().int().nonnegative().optional(),
 	cacheWriteTokens: z.number().int().nonnegative().optional(),
+	// The 1-HOUR share of cacheWriteTokens (a subset of it, not an addition). An older
+	// server strips this key, so the write silently bills at the 5-minute rate: a client
+	// sends it only to a server that lists `cache-write-1h` in /v1/health capabilities.
+	cacheWrite1hTokens: z.number().int().nonnegative().optional(),
 	chunksDelivered: z.number().int().nonnegative().optional(),
 	usageSource: z.enum(["provider", "estimated"]).optional(),
 	// Same silent-strip as the D4 cache tiers: computeMs is already a

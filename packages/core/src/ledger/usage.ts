@@ -34,7 +34,8 @@
  * Every function here is pure — no I/O, no clock, no config.
  */
 
-import type { ReceiptUsage } from "../shared/types.js";
+import type { CacheWrite1h, ReceiptUsage } from "../shared/types.js";
+import { type ModelRates, resolveCacheWrite1h } from "./pricing.js";
 
 /**
  * A sanitized, four-tier, disjoint usage snapshot.
@@ -52,6 +53,13 @@ export interface NormalizedUsage {
 	cacheReadTokens: number;
 	/** Cache-creation prompt tokens (written into a cache entry). */
 	cacheWriteTokens: number;
+	/**
+	 * The 1-HOUR share of `cacheWriteTokens` (Anthropic's `ephemeral_1h` TTL), a SUBSET
+	 * of it, never added to it: `0 <= cacheWrite1hTokens <= cacheWriteTokens`, held by
+	 * `sanitizeUsage`. Absent means 0. Only the Anthropic extractor reports it; every
+	 * other provider's cache writes are priced at the single write rate.
+	 */
+	cacheWrite1hTokens?: number | undefined;
 	/**
 	 * Provenance (D5). `"provider"` means the provider reported BOTH input and
 	 * output; absent cache fields then legitimately mean zero. `"estimated"`
@@ -73,6 +81,7 @@ export interface RawUsageCandidate {
 	outputTokens?: unknown;
 	cacheReadTokens?: unknown;
 	cacheWriteTokens?: unknown;
+	cacheWrite1hTokens?: unknown;
 	source?: "provider" | "estimated";
 }
 
@@ -149,11 +158,18 @@ export function sanitizeUsage(raw: RawUsageCandidate | null | undefined): Normal
 	const input = readCount(r.inputTokens);
 	const output = readCount(r.outputTokens);
 	const reported = input != null && output != null;
+	const cacheWrite = readCount(r.cacheWriteTokens) ?? 0;
+	const cacheWrite1h = Math.min(readCount(r.cacheWrite1hTokens) ?? 0, cacheWrite);
 	return {
 		inputTokens: input ?? 0,
 		outputTokens: output ?? 0,
 		cacheReadTokens: readCount(r.cacheReadTokens) ?? 0,
-		cacheWriteTokens: readCount(r.cacheWriteTokens) ?? 0,
+		cacheWriteTokens: cacheWrite,
+		// A SUBSET of the write total: a 1-hour count above it is garbage and clamps, so
+		// the two can never be summed into a larger bill than the provider reported. The
+		// key is ABSENT when 0, so a snapshot with no 1-hour writes is the shape it
+		// always was.
+		...(cacheWrite1h > 0 ? { cacheWrite1hTokens: cacheWrite1h } : {}),
 		source: r.source === "provider" && reported ? "provider" : "estimated",
 	};
 }
@@ -189,6 +205,26 @@ export function publishableUsage(snapshot: NormalizedUsage): ReceiptUsage | unde
 }
 
 /**
+ * The record fields a PUBLISHABLE snapshot adds to a chain event or receipt: the
+ * four-tier `usage` block and, only when the call wrote 1-hour cache, the root
+ * `cacheWrite1h` record. ONE function so the four emission sites cannot disagree
+ * about either; both are absent for an estimated snapshot.
+ */
+export function publishableUsageFields(
+	snapshot: NormalizedUsage,
+	rates: ModelRates,
+): { usage?: ReceiptUsage; cacheWrite1h?: CacheWrite1h } {
+	const usage = publishableUsage(snapshot);
+	if (usage === undefined) return {};
+	const cacheWrite1h = resolveCacheWrite1h(
+		rates,
+		snapshot.cacheWrite1hTokens ?? 0,
+		snapshot.cacheWriteTokens,
+	);
+	return cacheWrite1h === undefined ? { usage } : { usage, cacheWrite1h };
+}
+
+/**
  * D2 row — **Anthropic SDK, core direct: pass through.**
  *
  * `input_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens`
@@ -199,8 +235,8 @@ export function publishableUsage(snapshot: NormalizedUsage): ReceiptUsage | unde
  * at least one usable count its sum wins; otherwise the flat
  * `cache_creation_input_tokens` is used. (The two agree in practice — the flat
  * field is the sum — so this is about surviving whichever one a given SDK
- * version, proxy or fixture omits. Per-TTL write pricing is out of scope: both
- * TTLs bill at the single `cacheWritePer1k`, a documented D6 approximation.)
+ * version, proxy or fixture omits.) The 1-hour share rides along as
+ * `cacheWrite1hTokens` and is priced at `cacheWrite1hPer1k`.
  */
 export function fromAnthropicUsage(usage: unknown): NormalizedUsage {
 	const u = asRecord(usage);
@@ -219,6 +255,10 @@ export function fromAnthropicUsage(usage: unknown): NormalizedUsage {
 		outputTokens: output ?? 0,
 		cacheReadTokens: readCount(u.cache_read_input_tokens) ?? 0,
 		cacheWriteTokens: nestedWrite ?? readCount(u.cache_creation_input_tokens) ?? 0,
+		// Only the per-TTL breakdown can say how much was 1-hour. A payload that carries
+		// just the flat total is priced entirely at the 5-minute rate, which cannot be
+		// told apart from a genuine 5-minute write; the API reports the breakdown.
+		cacheWrite1hTokens: ephemeral1h ?? 0,
 		source: input != null && output != null ? "provider" : "estimated",
 	});
 }

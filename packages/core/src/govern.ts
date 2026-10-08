@@ -51,10 +51,11 @@ import {
 	copyAppliedRates,
 	costFromRates,
 	costFromRatesUnfloored,
-	effectiveCacheWriteRate,
 	estimateInputTokens,
+	holdInputRate,
 	PRICING_TABLE_VERSION,
 	type RateResolution,
+	requestDeclares1hCache,
 	resolveAppliedRates,
 	resolveRates,
 	warnCacheRateMigration,
@@ -63,7 +64,7 @@ import {
 import {
 	fromAnthropicUsage,
 	fromProviderResponse,
-	publishableUsage,
+	publishableUsageFields,
 	sanitizeUsage,
 	type UsageWireShape,
 } from "./ledger/usage.js";
@@ -1240,6 +1241,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				outputTokens,
 				cacheReadTokens,
 				cacheWriteTokens,
+				event?.cumulativeCacheWrite1hTokens ?? 0,
 			);
 			return scope === "local" ? usertokens : usertokens / USERTOKENS_PER_DOLLAR;
 		},
@@ -1397,12 +1399,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// ESTIMATED-input half of the hold at the fatter of the two rates; this
 			// is a HOLD-sizing adjustment only — the settle-time actual cost still
 			// resolves each tier independently via `costFromRates`, never discounted.
-			const holdInputRate = Math.max(
-				rateResolution.rates.inputPer1k,
-				effectiveCacheWriteRate(rateResolution.rates),
+			//
+			// The 1-HOUR write rate joins the max only when THIS REQUEST can produce
+			// 1-hour writes (a `cache_control` block with `ttl: "1h"`): the hold covers
+			// the worst case the request can produce, not the worst case any request can,
+			// so an ordinary call is held exactly as before and a 1-hour caller is never
+			// capped below what it settles at.
+			const holdRate = holdInputRate(
+				rateResolution.rates,
+				kind === "anthropic" && requestDeclares1hCache(params),
 			);
 			const estimatedCost = costFromRates(
-				{ ...rateResolution.rates, inputPer1k: holdInputRate },
+				{ ...rateResolution.rates, inputPer1k: holdRate },
 				estimatedInputTokens,
 				maxOutputTokens,
 			);
@@ -1845,12 +1853,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					outputTokens: completion.usage.outputTokens,
 					cacheReadTokens: completion.usage.cacheReadTokens,
 					cacheWriteTokens: completion.usage.cacheWriteTokens,
+					cacheWrite1hTokens: completion.usage.cacheWrite1hTokens,
 					source: completion.usageReported ? "provider" : "estimated",
 				});
 				// D5: the record half of the SAME snapshot the cost comes from —
 				// present iff provider-sourced, omitted (never zero-filled) otherwise.
-				const usageRecord = publishableUsage(usageSnapshot);
-				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
+				const usageAudit = publishableUsageFields(usageSnapshot, rateResolution.rates);
 				let streamCost: number;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
 				if (usageSnapshot.source === "provider") {
@@ -1860,6 +1868,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						usageSnapshot.outputTokens,
 						usageSnapshot.cacheReadTokens,
 						usageSnapshot.cacheWriteTokens,
+						usageSnapshot.cacheWrite1hTokens ?? 0,
 					);
 				} else {
 					// FIX: the un-inflated metering estimate, never the fattened hold
@@ -2217,6 +2226,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// them.
 				let accCacheRead = 0;
 				let accCacheWrite = 0;
+				let accCacheWrite1h = 0;
 				let accUsageReported = false;
 				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
 				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
@@ -2228,6 +2238,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						outputTokens: accOutput,
 						cacheReadTokens: accCacheRead,
 						cacheWriteTokens: accCacheWrite,
+						cacheWrite1hTokens: accCacheWrite1h,
 					},
 					chunksDelivered,
 					usageReported: accUsageReported,
@@ -2257,6 +2268,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						deltaTokens += tokens.cacheWriteTokens - accCacheWrite;
 						accCacheWrite = tokens.cacheWriteTokens;
 					}
+					// A subset of the write total: it only rises with it.
+					if (tokens.cacheWrite1hTokens > accCacheWrite1h) {
+						accCacheWrite1h = tokens.cacheWrite1hTokens;
+					}
 					if (!config.anomaly.enabled) return;
 					anomalyDetector.observe({
 						kind: "chunk",
@@ -2265,6 +2280,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						cumulativeOutputTokens: accOutput,
 						cumulativeCacheReadTokens: accCacheRead,
 						cumulativeCacheWriteTokens: accCacheWrite,
+						cumulativeCacheWrite1hTokens: accCacheWrite1h,
 						// M2: stamp the per-call scope so the SHARED detector prices this
 						// event with the same scoped rates as settlement.
 						model,
@@ -2315,6 +2331,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									outputTokens: finalUsage.outputTokens ?? accOutput,
 									cacheReadTokens: finalUsage.cacheReadTokens ?? accCacheRead,
 									cacheWriteTokens: finalUsage.cacheWriteTokens ?? accCacheWrite,
+									cacheWrite1hTokens: finalUsage.cacheWrite1hTokens ?? accCacheWrite1h,
 								},
 								chunksDelivered,
 								usageReported: true,
@@ -2489,6 +2506,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								cumulativeOutputTokens: obs.cumulativeOutputTokens,
 								cumulativeCacheReadTokens: obs.cumulativeCacheReadTokens,
 								cumulativeCacheWriteTokens: obs.cumulativeCacheWriteTokens,
+								cumulativeCacheWrite1hTokens: obs.cumulativeCacheWrite1hTokens,
 								// M2: stamp the per-call scope so the SHARED detector prices
 								// this event with the same scoped rates as settlement.
 								model,
@@ -2563,8 +2581,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
 				// D5: the record half of the SAME snapshot the cost comes from. Nothing
 				// below re-reads `response.usage` — one read, one object, two uses.
-				const usageRecord = publishableUsage(usageSnapshot);
-				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
+				const usageAudit = publishableUsageFields(usageSnapshot, rateResolution.rates);
 				if (usageSnapshot.source === "provider") {
 					actualCost = costFromRates(
 						rateResolution.rates,
@@ -2572,6 +2589,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						usageSnapshot.outputTokens,
 						usageSnapshot.cacheReadTokens,
 						usageSnapshot.cacheWriteTokens,
+						usageSnapshot.cacheWrite1hTokens ?? 0,
 					);
 				}
 
@@ -3577,6 +3595,8 @@ function readFinalMessageUsage(msg: unknown): {
 	outputTokens: number | undefined;
 	cacheReadTokens: number | undefined;
 	cacheWriteTokens: number | undefined;
+	/** The 1-hour share of the write tier; undefined whenever the write tier is. */
+	cacheWrite1hTokens: number | undefined;
 	reported: boolean;
 } {
 	if (msg != null && typeof msg === "object") {
@@ -3617,6 +3637,7 @@ function readFinalMessageUsage(msg: unknown): {
 					outputTokens: outTok,
 					cacheReadTokens: readUsable ? cacheTiers.cacheReadTokens : undefined,
 					cacheWriteTokens: writeUsable ? cacheTiers.cacheWriteTokens : undefined,
+					cacheWrite1hTokens: writeUsable ? (cacheTiers.cacheWrite1hTokens ?? 0) : undefined,
 					reported: true,
 				};
 			}
@@ -3627,6 +3648,7 @@ function readFinalMessageUsage(msg: unknown): {
 		outputTokens: undefined,
 		cacheReadTokens: undefined,
 		cacheWriteTokens: undefined,
+		cacheWrite1hTokens: undefined,
 		reported: false,
 	};
 }
@@ -3642,8 +3664,15 @@ function extractAnthropicStreamUsage(event: unknown): {
 	outputTokens: number;
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
+	cacheWrite1hTokens: number;
 } {
-	const none = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+	const none = {
+		inputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		cacheWrite1hTokens: 0,
+	};
 	if (event == null || typeof event !== "object") return none;
 	const c = event as Record<string, unknown>;
 	if (c.type === "message_start" && c.message != null && typeof c.message === "object") {
@@ -3659,6 +3688,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 				outputTokens: 0,
 				cacheReadTokens: tiers.cacheReadTokens,
 				cacheWriteTokens: tiers.cacheWriteTokens,
+				cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 			};
 		}
 	}
@@ -3671,6 +3701,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 			outputTokens: outTok > 0 ? outTok : 0,
 			cacheReadTokens: tiers.cacheReadTokens,
 			cacheWriteTokens: tiers.cacheWriteTokens,
+			cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 		};
 	}
 	return none;

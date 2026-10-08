@@ -20,29 +20,29 @@ output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation pr
 
 ### Anthropic
 
-| Model | Input | Output | Cache Read | Cache Write |
-|-------|------:|-------:|-----------:|------------:|
-| `claude-fable-5-1` | 100 | 500 | 2.5 | 125 |
-| `claude-fable-5` | 100 | 500 | 10 | 125 |
-| `claude-mythos-5-1` (limited availability) | 100 | 500 | 2.5 | 125 |
-| `claude-mythos-5` (limited availability) | 100 | 500 | 10 | 125 |
-| `claude-opus-5-5` | 40 | 200 | 2 | 50 |
-| `claude-opus-5` | 50 | 250 | 5 | 62.5 |
-| `claude-opus-4-8` | 50 | 250 | 5 | 62.5 |
-| `claude-opus-4-7` | 50 | 250 | 5 | 62.5 |
-| `claude-opus-4-6` | 50 | 250 | 5 | 62.5 |
-| `claude-opus-4-5` | 50 | 250 | 5 | 62.5 |
-| `claude-mythos-preview` (deprecated; Project Glasswing) | 250 | 1250 | 25 | 312.5 |
-| `claude-opus-4-1` (retired) | 150 | 750 | 15 | 187.5 |
-| `claude-opus-4` (retired) | 150 | 750 | 15 | 187.5 |
-| `claude-sonnet-5-5` | 20 | 100 | 1 | 25 |
-| `claude-sonnet-5` | 20 | 100 | 2 | 25 |
-| `claude-sonnet-4-6` | 30 | 150 | 3 | 37.5 |
-| `claude-sonnet-4-5` | 30 | 150 | 3 | 37.5 |
-| `claude-sonnet-4` (retired) | 30 | 150 | 3 | 37.5 |
-| `claude-haiku-5-5` (over-100k tier) | 5 | 25 | 0.5 | 6.25 |
-| `claude-haiku-4-5` | 10 | 50 | 1 | 12.5 |
-| `claude-3-5-haiku` (retired) | 8 | 40 | 0.8 | 10 |
+| Model | Input | Output | Cache Read | Cache Write (5m) | Cache Write (1h) |
+|-------|------:|-------:|-----------:|------------:|------------:|
+| `claude-fable-5-1` | 100 | 500 | 2.5 | 125 | 200 |
+| `claude-fable-5` | 100 | 500 | 10 | 125 | 200 |
+| `claude-mythos-5-1` (limited availability) | 100 | 500 | 2.5 | 125 | 200 |
+| `claude-mythos-5` (limited availability) | 100 | 500 | 10 | 125 | 200 |
+| `claude-opus-5-5` | 40 | 200 | 2 | 50 | 80 |
+| `claude-opus-5` | 50 | 250 | 5 | 62.5 | 100 |
+| `claude-opus-4-8` | 50 | 250 | 5 | 62.5 | 100 |
+| `claude-opus-4-7` | 50 | 250 | 5 | 62.5 | 100 |
+| `claude-opus-4-6` | 50 | 250 | 5 | 62.5 | 100 |
+| `claude-opus-4-5` | 50 | 250 | 5 | 62.5 | 100 |
+| `claude-mythos-preview` (deprecated; Project Glasswing) | 250 | 1250 | 25 | 312.5 | 500 |
+| `claude-opus-4-1` (retired) | 150 | 750 | 15 | 187.5 | 300 |
+| `claude-opus-4` (retired) | 150 | 750 | 15 | 187.5 | 300 |
+| `claude-sonnet-5-5` | 20 | 100 | 1 | 25 | 40 |
+| `claude-sonnet-5` | 20 | 100 | 2 | 25 | 40 |
+| `claude-sonnet-4-6` | 30 | 150 | 3 | 37.5 | 60 |
+| `claude-sonnet-4-5` | 30 | 150 | 3 | 37.5 | 60 |
+| `claude-sonnet-4` (retired) | 30 | 150 | 3 | 37.5 | 60 |
+| `claude-haiku-5-5` (over-100k tier) | 5 | 25 | 0.5 | 6.25 | 10 |
+| `claude-haiku-4-5` | 10 | 50 | 1 | 12.5 | 20 |
+| `claude-3-5-haiku` (retired) | 8 | 40 | 0.8 | 10 | 16 |
 
 Rates re-verified against Anthropic's published pricing page
 (`platform.claude.com/docs/en/about-claude/pricing`) on 2026-10-07.
@@ -51,9 +51,33 @@ Anthropic publishes cache-read at 0.1x base input and 5-minute cache-write at 1.
 published exceptions on cache reads: **0.05x** on `claude-opus-5-5` and `claude-sonnet-5-5`, and
 **0.025x** on `claude-fable-5-1` and `claude-mythos-5-1`. `claude-sonnet-5` is $2 / $10 per MTok:
 the introductory price became the standard price and the announced increase to $3 / $15 did not
-happen. The 1-hour write premium (2x) collapses to the 5-minute rate — see [Documented
-approximations](#documented-approximations) — operators with 1h-heavy workloads should override via
-`customRates`.
+happen. The **1-hour** cache write (2x base input, the last column) is its own tier:
+`cacheWriteTokens` stays the TOTAL written and a call that reports a 1-hour share
+(`cache_creation.ephemeral_1h_input_tokens`) prices that share at `cacheWrite1hPer1k` and the
+remainder at the 5-minute rate; see [1-hour cache writes](#1-hour-cache-writes).
+
+### 1-hour cache writes
+
+`ModelRates.cacheWrite1hPer1k` is the 1-hour write rate. Every Anthropic row carries it
+explicitly (the page's "1h cache writes" column). `cacheWriteTokens` is the TOTAL cache-write
+count, and the 1-hour tokens are a **subset** of it (never added to it): the 5-minute term is
+`cacheWriteTokens - cacheWrite1hTokens`. A 1-hour count above the total is clamped to it, and a
+1-hour count with no write total bills nothing. A custom row that omits `cacheWrite1hPer1k`
+resolves, in one place (`effectiveCacheWrite1hRate`), to the dearer of its 5-minute write rate and
+2x `inputPer1k`: a silent row is never billed below 2x input.
+
+Where the split comes from: the Anthropic `usage.cache_creation` breakdown, on both stream
+surfaces and the non-stream path; headless `settle()` takes `cacheWrite1hTokens`; `usertrust-server`
+accepts it on `POST /v1/settle` and lists `cache-write-1h` in `/v1/health` `capabilities` (an older
+server strips the key, so a client sends it only when the capability is listed). A payload that
+carries only the flat `cache_creation_input_tokens` total, and a host with no TTL split (the
+OpenClaw plugin's usage), prices at the 5-minute rate.
+
+**On the receipt**, when the call wrote 1-hour cache: a ROOT field
+`cacheWrite1h: { tokens, ratePer1k }`, never inside `usage` or `pricing.appliedRates` (the v2 schema
+closes both). It is absent otherwise, so every other receipt is unchanged. An auditor's recompute
+splits the write term: `(usage.cacheWriteTokens - cacheWrite1h.tokens) x appliedRates.cacheWritePer1k +
+cacheWrite1h.tokens x cacheWrite1h.ratePer1k`.
 
 ### OpenAI
 
@@ -129,6 +153,7 @@ interface ModelRates {
   outputPer1k: number;
   cacheReadPer1k?: number;  // absent ⇒ prices at inputPer1k, never 0
   cacheWritePer1k?: number; // absent ⇒ prices at inputPer1k, never 0
+  cacheWrite1hPer1k?: number; // 1-hour writes; absent ⇒ the dearer of cacheWritePer1k and 2 × inputPer1k
 }
 ```
 
@@ -207,7 +232,8 @@ function costFromRates(
   inputTokens: number,
   outputTokens: number,
   cacheReadTokens?: number,  // default 0
-  cacheWriteTokens?: number, // default 0
+  cacheWriteTokens?: number, // default 0; the TOTAL written (5m + 1h)
+  cacheWrite1hTokens?: number, // default 0; the 1-hour SUBSET of cacheWriteTokens
 ): number
 ```
 
@@ -276,6 +302,7 @@ interface ModelRates {
   outputPer1k: number;       // usertokens per 1,000 output tokens
   cacheReadPer1k?: number;   // usertokens per 1,000 cache-hit tokens; absent ⇒ inputPer1k
   cacheWritePer1k?: number;  // usertokens per 1,000 cache-creation tokens; absent ⇒ inputPer1k
+  cacheWrite1hPer1k?: number; // 1-hour cache writes; absent ⇒ max(cacheWritePer1k, 2 × inputPer1k)
 }
 ```
 
@@ -292,14 +319,22 @@ version that priced it, independent of the SDK version currently installed.
 
 ## Hold sizing and the cache-write premium
 
-The PENDING hold reserves the input leg at `max(inputPer1k, effectiveCacheWriteRate(rates))`, not
+The PENDING hold reserves the input leg at the dearest write rate the call can produce, not
 `inputPer1k` alone. A cache write can price *above* plain input — Anthropic's 5-minute write is
 1.25x, the 1-hour write 2x — so sizing the hold off `inputPer1k` alone understates the reserve for
-any call that turns out to write to cache. This applies at both hold-sizing sites (the governed
-`authorize()` path and the headless `authorize()` path).
+any call that turns out to write to cache. The hold covers the worst case **this request** can
+produce:
+
+- the governed `trust()` path reads the request: it reserves the 1-hour rate only when the request
+  declares a 1-hour TTL (a `cache_control` block with `ttl: "1h"` anywhere in it), and otherwise holds
+  at `max(inputPer1k, effectiveCacheWriteRate(rates))` exactly as before;
+- the headless `authorize()` path runs before the call and cannot see the TTLs, so it reserves the
+  dearest write rate (the 1-hour one) for the input leg and for any stated `estimatedCacheWriteTokens`.
 
 **Consequence:** holds on cache-writing workloads run roughly 25% fatter than an input-only hold
-would size them. Warm (cache-hit-heavy) calls settle well below the hold and release the
+would size them, and **headless holds on Anthropic models run about 60% fatter on the input leg**
+(2x input against 1.25x), so a 402 near the budget comes sooner. The trust() path pays the extra only
+for a request that declares a 1-hour TTL. Warm (cache-hit-heavy) calls settle well below the hold and release the
 difference — this is conservative, not wasted budget. A caller supplying an exact
 `estimatedInputTokens` for a call that turns out cache-cold can still see the settle capped at the
 hold (`settlement_shortfall`, see `AGENTS.md`'s Money invariants) if the actual write premium
@@ -311,8 +346,8 @@ Reconciliation against a provider's own invoice is **approximate**, not exact �
 exactly reproduces usertrust's own configured metered cost (counts × `appliedRates`, per-call
 `ceil`, 1-UT floor), but not necessarily the provider's bill line-for-line, because:
 
-Per-TTL write premium collapsed (1h = 2× billed as 1.25×; `customRates` override for 1h-heavy
-workloads); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
+1-hour cache writes are priced at the 1-hour rate only when the provider reports the 5m/1h split
+(a flat write total, or a host with no TTL split, bills at the 5-minute rate); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
 hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
 per-model rates by design (`claude-haiku-5-5` is priced at its over-100,000-token tier, which
 overstates every shorter prompt 5×); fast mode is not priced (Opus 5.5 fast is $8 / $40, Opus 5 and

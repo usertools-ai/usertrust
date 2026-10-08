@@ -35,7 +35,7 @@ describe("documented pricing approximations: AGENTS.md and /docs/api/pricing sta
 
 	it("both paragraphs were found and carry the clauses that matter", () => {
 		for (const p of [fromAgents, fromDocs]) {
-			expect(p).toContain("Per-TTL write premium collapsed");
+			expect(p).toContain("1-hour cache writes are priced at the 1-hour rate only when");
 			expect(p).toContain("claude-haiku-5-5");
 			expect(p).toContain("fast mode is not priced");
 			expect(p).toContain("Estimates never model cache state.");

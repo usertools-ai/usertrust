@@ -506,7 +506,13 @@ async function settlingEstimates(sessionId, agentId) {
 	return (await settlingRecords(sessionId, agentId)).filter((record) => !record.transcript);
 }
 
-const COUNT_FIELDS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
+const COUNT_FIELDS = [
+	"inputTokens",
+	"outputTokens",
+	"cacheReadTokens",
+	"cacheWriteTokens",
+	"cacheWrite1hTokens",
+];
 
 function countOf(value) {
 	return Number.isSafeInteger(value) && value >= 0 ? value : 0;

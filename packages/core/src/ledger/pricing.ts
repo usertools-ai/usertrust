@@ -11,6 +11,7 @@
 
 import type {
 	AppliedRates,
+	CacheWrite1h,
 	CostBasis,
 	EndpointClass,
 	RateSource,
@@ -43,6 +44,14 @@ export interface ModelRates {
 	 * and `costFromRates` prices those tokens at `inputPer1k`.
 	 */
 	cacheWritePer1k?: number | undefined;
+	/**
+	 * Rate for 1-HOUR cache-write tokens (Anthropic's `ephemeral_1h` TTL, 2x base
+	 * input), a SUBSET of the cache-write tokens priced by `cacheWritePer1k`, which
+	 * stays the 5-minute rate. Every Anthropic row carries it explicitly. Absent
+	 * means unpublished, not free and not the 5-minute rate: `effectiveCacheWrite1hRate`
+	 * resolves it to the dearer of the 5-minute rate and 2x `inputPer1k`.
+	 */
+	cacheWrite1hPer1k?: number | undefined;
 }
 
 /**
@@ -78,12 +87,14 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 150,
 		cacheReadPer1k: 3,
 		cacheWritePer1k: 37.5,
+		cacheWrite1hPer1k: 60,
 	},
 	"claude-sonnet-4-5": {
 		inputPer1k: 30,
 		outputPer1k: 150,
 		cacheReadPer1k: 3,
 		cacheWritePer1k: 37.5,
+		cacheWrite1hPer1k: 60,
 	},
 	// Retired on the first-party API (still served on Bedrock and Google Cloud).
 	"claude-sonnet-4": {
@@ -91,10 +102,23 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 150,
 		cacheReadPer1k: 3,
 		cacheWritePer1k: 37.5,
+		cacheWrite1hPer1k: 60,
 	},
-	"claude-haiku-4-5": { inputPer1k: 10, outputPer1k: 50, cacheReadPer1k: 1, cacheWritePer1k: 12.5 },
+	"claude-haiku-4-5": {
+		inputPer1k: 10,
+		outputPer1k: 50,
+		cacheReadPer1k: 1,
+		cacheWritePer1k: 12.5,
+		cacheWrite1hPer1k: 20,
+	},
 	// Retired on the first-party API. Published id is `claude-3-5-haiku-<date>`.
-	"claude-3-5-haiku": { inputPer1k: 8, outputPer1k: 40, cacheReadPer1k: 0.8, cacheWritePer1k: 10 },
+	"claude-3-5-haiku": {
+		inputPer1k: 8,
+		outputPer1k: 40,
+		cacheReadPer1k: 0.8,
+		cacheWritePer1k: 10,
+		cacheWrite1hPer1k: 16,
+	},
 	// Haiku 5.5 is priced BY PROMPT LENGTH: $0.10 in / $0.50 out up to 100,000
 	// prompt tokens, $0.50 in / $2.50 out above. A per-model table cannot carry a
 	// per-call tier, so this row holds the OVER-100k tier (5 / 25, cache read 0.5,
@@ -105,22 +129,43 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 25,
 		cacheReadPer1k: 0.5,
 		cacheWritePer1k: 6.25,
+		cacheWrite1hPer1k: 10,
 	},
-	"claude-opus-4-6": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
-	"claude-opus-4-7": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
-	"claude-opus-4-5": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
+	"claude-opus-4-6": {
+		inputPer1k: 50,
+		outputPer1k: 250,
+		cacheReadPer1k: 5,
+		cacheWritePer1k: 62.5,
+		cacheWrite1hPer1k: 100,
+	},
+	"claude-opus-4-7": {
+		inputPer1k: 50,
+		outputPer1k: 250,
+		cacheReadPer1k: 5,
+		cacheWritePer1k: 62.5,
+		cacheWrite1hPer1k: 100,
+	},
+	"claude-opus-4-5": {
+		inputPer1k: 50,
+		outputPer1k: 250,
+		cacheReadPer1k: 5,
+		cacheWritePer1k: 62.5,
+		cacheWrite1hPer1k: 100,
+	},
 	// Retired on the first-party API: $15 in / $75 out / $1.50 hit / $18.75 write.
 	"claude-opus-4-1": {
 		inputPer1k: 150,
 		outputPer1k: 750,
 		cacheReadPer1k: 15,
 		cacheWritePer1k: 187.5,
+		cacheWrite1hPer1k: 300,
 	},
 	"claude-opus-4": {
 		inputPer1k: 150,
 		outputPer1k: 750,
 		cacheReadPer1k: 15,
 		cacheWritePer1k: 187.5,
+		cacheWrite1hPer1k: 300,
 	},
 	// $10 in / $50 out / $1 hit / $12.50 5m write.
 	"claude-fable-5": {
@@ -128,6 +173,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 500,
 		cacheReadPer1k: 10,
 		cacheWritePer1k: 125,
+		cacheWrite1hPer1k: 200,
 	},
 	// $10 / $50 / $0.25 hit (0.025x) / $12.50 5m write.
 	"claude-fable-5-1": {
@@ -135,6 +181,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 500,
 		cacheReadPer1k: 2.5,
 		cacheWritePer1k: 125,
+		cacheWrite1hPer1k: 200,
 	},
 	// Deprecated 2026-06-09 (retirement date "to be announced") but still callable by
 	// Project Glasswing participants, so it needs its own row or it falls to the
@@ -150,6 +197,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 1250,
 		cacheReadPer1k: 25,
 		cacheWritePer1k: 312.5,
+		cacheWrite1hPer1k: 500,
 	},
 	// Limited availability; same rates as Fable 5 / Fable 5.1.
 	"claude-mythos-5": {
@@ -157,12 +205,14 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 500,
 		cacheReadPer1k: 10,
 		cacheWritePer1k: 125,
+		cacheWrite1hPer1k: 200,
 	},
 	"claude-mythos-5-1": {
 		inputPer1k: 100,
 		outputPer1k: 500,
 		cacheReadPer1k: 2.5,
 		cacheWritePer1k: 125,
+		cacheWrite1hPer1k: 200,
 	},
 	// $5 in / $25 out / $0.50 hit / $6.25 5m write. These are the STANDARD-speed
 	// rates; fast mode ($10 in / $50 out) is a request `speed` tier this per-model
@@ -172,6 +222,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 250,
 		cacheReadPer1k: 5,
 		cacheWritePer1k: 62.5,
+		cacheWrite1hPer1k: 100,
 	},
 	// $4 in / $20 out / $0.20 hit (0.05x) / $5 5m write. Standard speed; fast mode
 	// ($8 / $40) is not priced here.
@@ -180,6 +231,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 200,
 		cacheReadPer1k: 2,
 		cacheWritePer1k: 50,
+		cacheWrite1hPer1k: 80,
 	},
 	// $2 in / $10 out / $0.20 hit / $2.50 5m write. Page footnote 3: the $2/$10
 	// introductory price is now the STANDARD price and the scheduled 2026-09-01
@@ -190,6 +242,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 100,
 		cacheReadPer1k: 2,
 		cacheWritePer1k: 25,
+		cacheWrite1hPer1k: 40,
 	},
 	// $2 in / $10 out / $0.10 hit (0.05x, NOT 0.1x) / $2.50 5m write.
 	"claude-sonnet-5-5": {
@@ -197,12 +250,14 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 100,
 		cacheReadPer1k: 1,
 		cacheWritePer1k: 25,
+		cacheWrite1hPer1k: 40,
 	},
 	"claude-opus-4-8": {
 		inputPer1k: 50,
 		outputPer1k: 250,
 		cacheReadPer1k: 5,
 		cacheWritePer1k: 62.5,
+		cacheWrite1hPer1k: 100,
 	},
 
 	// ── OpenAI ──
@@ -507,6 +562,125 @@ export function effectiveCacheWriteRate(rates: ModelRates): number {
 }
 
 /**
+ * Resolve the effective 1-HOUR cache-write rate, the one site that decides it.
+ * An explicit finite rate >= 0 is honoured; an absent (or garbage) one resolves to
+ * the DEARER of the 5-minute write rate and 2x `inputPer1k` (Anthropic's published
+ * 1-hour multiple). Never the 5-minute rate alone: a custom row written before this
+ * field existed would otherwise bill 1-hour writes at 1.25x and understate them.
+ */
+export function effectiveCacheWrite1hRate(rates: ModelRates): number {
+	const r = rates.cacheWrite1hPer1k;
+	if (r !== undefined && Number.isFinite(r) && r >= 0) return r;
+	return Math.max(effectiveCacheWriteRate(rates), 2 * rates.inputPer1k);
+}
+
+/**
+ * The 1-hour write rate a HOLD may reserve: the row's EXPLICIT `cacheWrite1hPer1k`, or 0
+ * when it publishes none. Deliberately not `effectiveCacheWrite1hRate`: that derives 2x
+ * input for a row that is silent (right for METERING reported 1-hour tokens, which can
+ * only come from a provider that has the tier), but a hold derives nothing from silence.
+ * A model with no 1-hour tier (Mistral, Gemini, OpenAI) must hold exactly as before, not
+ * 2x on its input leg.
+ */
+function explicit1hWriteRate(rates: ModelRates): number {
+	const r = rates.cacheWrite1hPer1k;
+	return r !== undefined && Number.isFinite(r) && r >= 0 ? r : 0;
+}
+
+/**
+ * The per-1k rate a HOLD reserves the input leg at. A hold cannot know which of its
+ * input tokens will be written to cache, nor for how long, so the input leg is held
+ * at the dearest of: fresh input, the 5-minute write, and (for a row that publishes
+ * one, when `include1hWrite`) the 1-hour write (spec D3, extended to the 1-hour tier).
+ * Reserving less lets the capped settle post `min(actual, held)` and silently
+ * under-debit a call that wrote a 1-hour cache. Both hold-sizing sites call this; do not
+ * re-derive the max anywhere else.
+ */
+export function holdInputRate(rates: ModelRates, include1hWrite = true): number {
+	return Math.max(
+		rates.inputPer1k,
+		effectiveCacheWriteRate(rates),
+		include1hWrite ? explicit1hWriteRate(rates) : 0,
+	);
+}
+
+/**
+ * The cache-WRITE rate a hold with a STATED write estimate reserves those tokens at:
+ * the dearer of the 5-minute and the row's explicit 1-hour rate, because a caller that
+ * cannot say which TTL its writes will use (a headless authorize, before the call) must
+ * be held at the worst case or a 1-hour write settles above its hold and is capped.
+ */
+export function holdCacheWriteRate(rates: ModelRates): number {
+	return Math.max(effectiveCacheWriteRate(rates), explicit1hWriteRate(rates));
+}
+
+/**
+ * True when an Anthropic-shaped REQUEST can produce 1-hour cache writes: some object
+ * in it carries `cache_control` with `ttl: "1h"` (a content block, a system block,
+ * a tool, or the top-level automatic-caching field). A request with no such marker
+ * can only write 5-minute cache, so its hold needs no 1-hour reserve. The hold
+ * covers the worst case THIS request can produce, not the worst case any request can.
+ *
+ * Fails dearest: a request too large or too deep to scan within the bound answers
+ * `true`, never `false`; a getter that throws does too. An unreadable request is not
+ * evidence that it asks for nothing.
+ */
+export function requestDeclares1hCache(request: unknown): boolean {
+	const MAX_NODES = 50_000;
+	const MAX_DEPTH = 64;
+	let nodes = 0;
+	const seen = new Set<object>();
+	const walk = (value: unknown, depth: number): boolean => {
+		if (value === null || typeof value !== "object") return false;
+		if (depth > MAX_DEPTH || ++nodes > MAX_NODES) return true;
+		if (seen.has(value)) return false;
+		seen.add(value);
+		if (Array.isArray(value)) {
+			for (const item of value) if (walk(item, depth + 1)) return true;
+			return false;
+		}
+		const record = value as Record<string, unknown>;
+		const control = record.cache_control;
+		if (control !== null && typeof control === "object") {
+			if ((control as Record<string, unknown>).ttl === "1h") return true;
+		}
+		for (const key of Object.keys(record)) if (walk(record[key], depth + 1)) return true;
+		return false;
+	};
+	try {
+		return walk(request, 0);
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * The 1-hour cache-write record for a RECEIPT, or undefined when the call wrote none.
+ * A ROOT field (`receipt.cacheWrite1h`), never inside `usage` or `pricing.appliedRates`:
+ * the v2 schema closes both, so a field added there would make every v2 validator
+ * reject every receipt we emit. `tokens` is the 1-hour SUBSET of `usage.cacheWriteTokens`
+ * (clamped to it); an auditor prices `cacheWriteTokens - tokens` at the 5-minute rate
+ * and `tokens` at `ratePer1k`. FROZEN, like `resolveAppliedRates`: one snapshot reaches
+ * several record surfaces.
+ */
+export function resolveCacheWrite1h(
+	rates: ModelRates,
+	cacheWrite1hTokens: number,
+	cacheWriteTokens: number,
+): CacheWrite1h | undefined {
+	const tokens = clampWrite1h(cacheWrite1hTokens, cacheWriteTokens);
+	if (tokens === 0) return undefined;
+	return Object.freeze({ tokens, ratePer1k: effectiveCacheWrite1hRate(rates) });
+}
+
+/** The 1-hour subset of a write count: finite, integer-safe, within [0, total]. */
+function clampWrite1h(write1h: number, write: number): number {
+	const w = Number.isFinite(write) && write > 0 ? write : 0;
+	const h = Number.isFinite(write1h) && write1h > 0 ? write1h : 0;
+	return Math.min(h, w);
+}
+
+/**
  * The four RESOLVED per-1k rates a settle is metered with — the record-surface
  * half of the D1 invariant, and what `receipt.pricing.appliedRates` publishes.
  *
@@ -574,6 +748,7 @@ function tieredCostRaw(
 	outputTokens: number,
 	cacheReadTokens: number,
 	cacheWriteTokens: number,
+	cacheWrite1hTokens: number,
 ): number {
 	const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
 	const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
@@ -596,8 +771,13 @@ function tieredCostRaw(
 	const outputCost = (outTok * rates.outputPer1k) / 1000;
 	const cacheReadCost =
 		(cacheReadTok * effectiveCacheRate(rates.cacheReadPer1k, rates.inputPer1k)) / 1000;
+	// The 1-hour tokens are a SUBSET of cacheWriteTok (clamped to it), so the 5-minute
+	// term is the remainder and nothing is counted twice.
+	const write1hTok = clampWrite1h(cacheWrite1hTokens, cacheWriteTok);
 	const cacheWriteCost =
-		(cacheWriteTok * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k)) / 1000;
+		((cacheWriteTok - write1hTok) * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k) +
+			write1hTok * effectiveCacheWrite1hRate(rates)) /
+		1000;
 
 	return inputCost + outputCost + cacheReadCost + cacheWriteCost;
 }
@@ -624,10 +804,20 @@ export function costFromRates(
 	outputTokens: number,
 	cacheReadTokens = 0,
 	cacheWriteTokens = 0,
+	cacheWrite1hTokens = 0,
 ): number {
 	return Math.max(
 		1,
-		Math.ceil(tieredCostRaw(rates, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens)),
+		Math.ceil(
+			tieredCostRaw(
+				rates,
+				inputTokens,
+				outputTokens,
+				cacheReadTokens,
+				cacheWriteTokens,
+				cacheWrite1hTokens,
+			),
+		),
 	);
 }
 
@@ -649,8 +839,16 @@ export function costFromRatesUnfloored(
 	outputTokens: number,
 	cacheReadTokens = 0,
 	cacheWriteTokens = 0,
+	cacheWrite1hTokens = 0,
 ): number {
-	return tieredCostRaw(rates, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
+	return tieredCostRaw(
+		rates,
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+		cacheWrite1hTokens,
+	);
 }
 
 /**

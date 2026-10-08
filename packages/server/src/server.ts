@@ -36,12 +36,17 @@ const SERVER_VERSION = (createRequire(import.meta.url)("../package.json") as { v
  * `hold-expiry`: an authorize answer carries `expiresInMs`, the hold's remaining life.
  * `release`: `POST /v1/release` gives a hold back without a failure: no circuit-breaker
  * failure, and a `hold_released` record rather than `llm_call_failed`.
+ * `cache-write-1h`: `POST /v1/settle` accepts `cacheWrite1hTokens`, the 1-hour share of
+ * `cacheWriteTokens`, and prices it at the model's 1-hour write rate. Without it a client
+ * must not send the field: an older server strips it and bills those tokens at the
+ * cheaper 5-minute rate.
  */
 const SERVER_CAPABILITIES = Object.freeze([
 	"principal",
 	"authorize-cache-tiers",
 	"hold-expiry",
 	"release",
+	"cache-write-1h",
 ]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records

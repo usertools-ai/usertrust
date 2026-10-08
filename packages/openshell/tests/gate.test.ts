@@ -808,3 +808,55 @@ describe("#171: the image and tool token config is validated — a bad value ref
 		expect(run(DEFAULT_GATE_CONFIG, withImage).decision).toBe("allow");
 	});
 });
+
+describe("#203: a request that declares a 1-hour cache TTL is held at the 1-hour write rate", () => {
+	const body = (cacheControl?: Record<string, unknown>) => ({
+		model: "claude-sonnet-4-6",
+		max_tokens: 1,
+		messages: [
+			{
+				role: "user",
+				content: [
+					{
+						type: "text",
+						text: "x".repeat(4000),
+						...(cacheControl === undefined ? {} : { cache_control: cacheControl }),
+					},
+				],
+			},
+		],
+	});
+
+	it("no marker, or a 5-minute marker: held exactly as before", () => {
+		const plain = gate(ANTHROPIC, "/v1/messages", body());
+		const fiveMin = gate(ANTHROPIC, "/v1/messages", body({ type: "ephemeral", ttl: "5m" }));
+		if (plain.decision !== "allow" || fiveMin.decision !== "allow")
+			throw new Error("expected allow");
+		const rates = getModelRates("claude-sonnet-4-6");
+		const bound = plain.hold.inputTokenBound;
+		const out = plain.hold.maxOutputTokens;
+		expect(plain.hold.amount).toBe(costFromRates(rates, 0, out, 0, bound));
+		// (The marker adds bytes to the bound, so compare each hold to ITS OWN bound.)
+		expect(fiveMin.hold.amount).toBe(costFromRates(rates, 0, out, 0, fiveMin.hold.inputTokenBound));
+	});
+
+	it("a 1h marker: the hold is the 1-hour write on the whole input bound", () => {
+		const r = gate(ANTHROPIC, "/v1/messages", body({ type: "ephemeral", ttl: "1h" }));
+		if (r.decision !== "allow") throw new Error("expected allow");
+		const rates = getModelRates("claude-sonnet-4-6");
+		const bound = r.hold.inputTokenBound;
+		const out = r.hold.maxOutputTokens;
+		expect(r.hold.amount).toBe(costFromRates(rates, 0, out, 0, bound, bound));
+		expect(r.hold.amount).toBeGreaterThan(costFromRates(rates, 0, out, 0, bound));
+		// Positive control: a call that wrote its whole prompt as 1h cache settles within the hold.
+		const s = settleHold(r.hold, {
+			inputTokens: 0,
+			outputTokens: 1,
+			cacheReadTokens: 0,
+			cacheWriteTokens: bound,
+			cacheWrite1hTokens: bound,
+			source: "provider",
+		});
+		expect(s.overage).toBe(0);
+	});
+});

@@ -131,6 +131,7 @@ export {
 	getModelRates,
 	isModelPriced,
 	PRICING_TABLE_VERSION,
+	requestDeclares1hCache,
 	resolveAppliedRates,
 	resolveRates,
 } from "./ledger/pricing.js";
@@ -191,6 +192,7 @@ export type {
 	AppliedRates,
 	AuditEvent,
 	BoardDecision,
+	CacheWrite1h,
 	CanaryToken,
 	CostBasis,
 	CredentialAccessResult,

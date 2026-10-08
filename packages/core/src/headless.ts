@@ -85,16 +85,17 @@ import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	copyAppliedRates,
 	costFromRates,
-	effectiveCacheWriteRate,
 	estimateCost,
 	estimateInputTokens,
+	holdCacheWriteRate,
+	holdInputRate,
 	PRICING_TABLE_VERSION,
 	resolveAppliedRates,
 	resolveRates,
 	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
-import { publishableUsage, sanitizeUsage } from "./ledger/usage.js";
+import { publishableUsageFields, sanitizeUsage } from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import {
@@ -354,6 +355,15 @@ export interface SettleParams {
 	cacheReadTokens?: number | undefined;
 	/** Cache-creation prompt tokens (D5). Priced at the resolved `cacheWritePer1k`. */
 	cacheWriteTokens?: number | undefined;
+	/**
+	 * The 1-HOUR share of `cacheWriteTokens` (Anthropic's `ephemeral_1h` TTL). A SUBSET
+	 * of the write total, never added to it: `cacheWriteTokens` stays the TOTAL written
+	 * and this says how much of it was the 1-hour kind, priced at the resolved
+	 * `cacheWrite1hPer1k` (the 5-minute remainder at `cacheWritePer1k`). Clamped to the
+	 * write total; alone, with no write total, it bills nothing. Omitted → 0, so an old
+	 * client's settle is metered exactly as before.
+	 */
+	cacheWrite1hTokens?: number | undefined;
 	/** Number of streaming chunks delivered (for streaming calls). */
 	chunksDelivered?: number | undefined;
 	/**
@@ -1235,10 +1245,14 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// max(inputPer1k, effective cacheWritePer1k) — see the identical
 			// govern.ts hold-sizing comment for the full rationale. Settle-time
 			// actual cost is unaffected; this only widens the PENDING reservation.
-			const holdInputRate = Math.max(
-				rateInfo.rates.inputPer1k,
-				effectiveCacheWriteRate(rateInfo.rates),
-			);
+			// A headless authorize runs BEFORE the call and cannot see the request's cache
+			// TTLs, so it reserves the worst case: the input leg at the dearest of input,
+			// 5-minute write and 1-hour write, and any stated write estimate at the dearer
+			// of the two write rates. (trust() reads the request and reserves the 1-hour
+			// rate only when the request declares a 1-hour TTL.) Consequence, declared in
+			// the CHANGELOG: holds on headless Anthropic calls run about 60% fatter on the
+			// input leg than a 5-minute-only reserve.
+			const holdRate = holdInputRate(rateInfo.rates);
 			// Per-tier hold: each cache tier at ITS OWN rate, resolved from the
 			// UN-inflated rates exactly as settle resolves them (`resolveAppliedRates`).
 			// Only the FRESH-input estimate keeps the D3 write premium — it is the half
@@ -1252,8 +1266,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				{
 					...rateInfo.rates,
 					cacheReadPer1k: appliedForHold.cacheReadPer1k,
-					cacheWritePer1k: appliedForHold.cacheWritePer1k,
-					inputPer1k: holdInputRate,
+					cacheWritePer1k: holdCacheWriteRate(rateInfo.rates),
+					inputPer1k: holdRate,
 				},
 				estInputTokens,
 				maxOutputTokens,
@@ -1603,6 +1617,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				outputTokens: params?.outputTokens,
 				cacheReadTokens: params?.cacheReadTokens,
 				cacheWriteTokens: params?.cacheWriteTokens,
+				cacheWrite1hTokens: params?.cacheWrite1hTokens,
 				usageSource: params?.usageSource,
 				chunksDelivered: params?.chunksDelivered,
 				computeMs: params?.computeMs,
@@ -1665,6 +1680,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					outputTokens: input.outputTokens,
 					cacheReadTokens: input.cacheReadTokens,
 					cacheWriteTokens: input.cacheWriteTokens,
+					cacheWrite1hTokens: input.cacheWrite1hTokens,
 				};
 				// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
 				// read only input/output, so a settle carrying nothing but cache counts
@@ -1692,11 +1708,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					outputTokens: reportedCounts.outputTokens ?? 0,
 					cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
 					cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
+					cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
 					source: usageReported ? (input.usageSource ?? "provider") : "estimated",
 				});
 				// Present IFF provider-sourced (D5) — the single rule, in one place.
-				const usageRecord = publishableUsage(usageSnapshot);
-				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
+				const usageAudit = publishableUsageFields(usageSnapshot, rateInfo.rates);
 
 				// Determine actual cost
 				let actualCost: number;
@@ -1708,6 +1724,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						usageSnapshot.outputTokens,
 						usageSnapshot.cacheReadTokens,
 						usageSnapshot.cacheWriteTokens,
+						usageSnapshot.cacheWrite1hTokens ?? 0,
 					);
 				} else {
 					// FIX: the un-inflated metering estimate, never the fattened hold

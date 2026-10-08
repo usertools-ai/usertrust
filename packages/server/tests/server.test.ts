@@ -104,6 +104,7 @@ describe("HTTP control plane", () => {
 				"authorize-cache-tiers",
 				"hold-expiry",
 				"release",
+				"cache-write-1h",
 			]);
 			await server?.close();
 			server = undefined;

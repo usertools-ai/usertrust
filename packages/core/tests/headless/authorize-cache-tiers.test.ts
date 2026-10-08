@@ -128,10 +128,13 @@ describe("authorize: per-tier hold sizing", () => {
 
 	it("the real-server window holds ~327 on the input side WITH the tiers, ~3,156 without them", async () => {
 		// Hand-computed from the published Sonnet rates — never from the code under test.
-		// With tiers: fresh 150 x 37.5 (D3) + read 82,000 x 3 + write 2,000 x 37.5 = 326.625;
-		// output 1,000 x 150 = 150; total ceil(476.625) = 477.
-		// Without (an old client sends all 84,150 prompt tokens as input): 84,150 x 37.5
-		// = 3,155.625 on the input side; total ceil(3,305.625) = 3,306.
+		// A headless authorize cannot see the request's cache TTLs, so it holds the worst
+		// case: fresh input and any stated write at the 1-hour write rate (60/1k on Sonnet,
+		// 2x input), not the 37.5 5-minute rate it held at before the 1-hour tier existed.
+		// With tiers: fresh 150 x 60 + read 82,000 x 3 + write 2,000 x 60 = 9 + 246 + 120 = 375;
+		// output 1,000 x 150 = 150; total 525.
+		// Without (an old client sends all 84,150 prompt tokens as input): 84,150 x 60
+		// = 5,049 on the input side; total 5,199.
 		const tiered = makeEngine();
 		const govTiered = await governor(tiered);
 		const auth = await govTiered.authorize({
@@ -141,8 +144,8 @@ describe("authorize: per-tier hold sizing", () => {
 			estimatedCacheWriteTokens: WINDOW.cacheWrite,
 			maxOutputTokens: WINDOW.output,
 		});
-		expect(heldAmount(tiered)).toBe(477);
-		expect(auth.estimatedCost).toBe(477);
+		expect(heldAmount(tiered)).toBe(525);
+		expect(auth.estimatedCost).toBe(525);
 		await govTiered.destroy();
 
 		const old = makeEngine();
@@ -152,23 +155,24 @@ describe("authorize: per-tier hold sizing", () => {
 			estimatedInputTokens: WINDOW.input + WINDOW.cacheRead + WINDOW.cacheWrite,
 			maxOutputTokens: WINDOW.output,
 		});
-		expect(heldAmount(old)).toBe(3306);
+		expect(heldAmount(old)).toBe(5199);
 		await govOld.destroy();
 	});
 
-	it("an OLD client (no tier fields) is held exactly as before: max(input, write) on all estimated input", async () => {
+	it("an OLD client (no tier fields) is held at the dearest write rate on all estimated input", async () => {
 		const engine = makeEngine();
 		const gov = await governor(engine);
 		await gov.authorize({ model: SONNET, estimatedInputTokens: 12_345, maxOutputTokens: 678 });
 		const rates = getModelRates(SONNET);
-		// The pre-change formula, written out: fresh input at the D3 hold rate.
+		// The hold formula, written out: fresh input at the dearest write rate, which is now
+		// the 1-hour rate (60/1k), not the 5-minute 37.5 it was before that tier existed.
 		expect(heldAmount(engine)).toBe(
-			costFromRates({ ...rates, inputPer1k: Math.max(rates.inputPer1k, 37.5) }, 12_345, 678),
+			costFromRates({ ...rates, inputPer1k: Math.max(rates.inputPer1k, 37.5, 60) }, 12_345, 678),
 		);
 		await gov.destroy();
 	});
 
-	it("each tier is held at ITS OWN rate: reads at 3/1k and writes at 37.5/1k, never one rate for both", async () => {
+	it("each tier is held at ITS OWN rate: reads at 3/1k and writes at the dearer write rate (60/1k), never one rate for both", async () => {
 		const reads = makeEngine();
 		const govReads = await governor(reads);
 		await govReads.authorize({
@@ -189,8 +193,9 @@ describe("authorize: per-tier hold sizing", () => {
 			estimatedCacheWriteTokens: 100_000,
 			maxOutputTokens: 1,
 		});
-		// 100,000 x 37.5 / 1000 = 3,750; + 0.15 → 3,751.
-		expect(heldAmount(writes)).toBe(3751);
+		// A stated write estimate is held at the dearer of the 5-minute (37.5) and 1-hour (60)
+		// rates, because the TTL is unknown before the call: 100,000 x 60 / 1000 = 6,000; + 0.15 → 6,001.
+		expect(heldAmount(writes)).toBe(6001);
 		await govWrites.destroy();
 	});
 

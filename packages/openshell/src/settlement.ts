@@ -32,6 +32,7 @@ export function settlementAmounts(
 		usage.outputTokens,
 		usage.cacheReadTokens,
 		usage.cacheWriteTokens,
+		usage.cacheWrite1hTokens ?? 0,
 	);
 	return { actual, post: Math.min(actual, hold), overage: Math.max(0, actual - hold) };
 }

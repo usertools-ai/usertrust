@@ -76,6 +76,7 @@ function defaultCostCalculator(
 	// rate instead of vanishing behind fresh-only input/output.
 	const cacheReadTokens = event?.cumulativeCacheReadTokens ?? 0;
 	const cacheWriteTokens = event?.cumulativeCacheWriteTokens ?? 0;
+	const cacheWrite1hTokens = event?.cumulativeCacheWrite1hTokens ?? 0;
 	if (event?.endpointClass === "local") {
 		// Local scope without an injected calculator: price in nominal usertokens at
 		// the shipped default local rate {0,0}. Unfloored, so the cumulative cost is
@@ -88,6 +89,7 @@ function defaultCostCalculator(
 			outputTokens,
 			cacheReadTokens,
 			cacheWriteTokens,
+			cacheWrite1hTokens,
 		);
 	}
 	// Unfloored four-tier usertokens; convert to dollars (cloud usd-proxy scope).
@@ -100,6 +102,7 @@ function defaultCostCalculator(
 		outputTokens,
 		cacheReadTokens,
 		cacheWriteTokens,
+		cacheWrite1hTokens,
 	);
 	return usertokens / USERTOKENS_PER_DOLLAR;
 }
