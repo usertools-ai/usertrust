@@ -21,17 +21,17 @@
 // That code runs in the hook's own process and can read this file too. Only not
 // starting a session in a checkout you have not reviewed stops it.
 //
-// Nor may the environment reroute the requests or change what TLS trusts: Node's own
-// proxy support (NODE_USE_ENV_PROXY, --use-env-proxy) sends every fetch through
-// HTTP_PROXY, and NODE_TLS_REJECT_UNAUTHORIZED=0, NODE_EXTRA_CA_CERTS, OpenSSL's
-// certificate and config variables, or a CA-store option let someone else read an
-// https one. NODE_OPTIONS may hold only a short list of options that do neither. A
-// configured session whose environment breaks any of this is refused like a bad file
-// (`environmentRefusal`).
+// Nor does the environment reach the process that sends a configured session's
+// requests: launch.mjs sends them from a CHILD it starts with no node options and an
+// environment of one Claude Code timeout variable, so a proxy, CA, OpenSSL or resolver
+// variable, or one nobody has named yet, never applies to them. And a session's
+// settings are resolved ONCE, at its first hook, and pinned for its life
+// (session.mjs): an edit to the file or the environment applies to new sessions.
 //
 // Nothing read from the file is ever written where it could be seen: a refusal is
 // one of the fixed reasons below, naming only our own field names. (A JSON parse
 // error quotes the input, and an OS error can carry a path, so neither is passed on.)
+import { createHash } from "node:crypto";
 import {
 	closeSync,
 	constants,
@@ -106,21 +106,23 @@ function fromEnvironment(env) {
 }
 
 /**
- * A configured session whose file was refused: watch-only and key-less, with no
+ * A session that sends nothing: a configured one whose file was refused, or one whose
+ * pin or launch was (session.mjs, launch.mjs). Watch-only and key-less, with no
  * server to send to (`url: null`: lib.mjs `serverRequest` refuses before any
- * request), and the default state dir under the passwd home, so the gap records
- * still land somewhere the user owns. Without a passwd home, under `homedir()`.
+ * request). Its gap records go to `stateDir` when the session's own is known (from
+ * its pin), else to the default state dir under the passwd home, so they still land
+ * somewhere the user owns. Without a passwd home, under `homedir()`.
  */
-function refusedSettings(reason, passwdHome) {
+export function refusedSettings(reason, passwdHome, { configured = true, stateDir } = {}) {
 	return {
-		configured: true,
+		configured,
 		refused: reason,
 		url: null,
 		key: "",
 		mode: "watch",
 		unrecognizedMode: undefined,
 		failOpen: false,
-		stateDir: defaultStateDir(passwdHome ?? homedir()),
+		stateDir: stateDir ?? defaultStateDir(passwdHome ?? homedir()),
 		usage: "transcript",
 		model: DEFAULT_MODEL,
 		sendContent: false,
@@ -149,79 +151,6 @@ function isHttpUrl(value) {
 	} catch {
 		return false;
 	}
-}
-
-/**
- * The NODE_OPTIONS a configured session may carry: each token must be one of these,
- * EXACTLY. Node also accepts its options quoted, with backslash escapes inside the
- * quotes, with `_` for `-` and with a value after `=`, so a list of what to refuse
- * misses spellings (it did, twice). Anything not on this list refuses. A token holding
- * a quote or a backslash matches none of these, so splitting on spaces is enough: Node
- * splits an unquoted string exactly the same way.
- */
-const NODE_OPTIONS_ALLOWED = [
-	/^--max-old-space-size=\d+$/,
-	/^--max-semi-space-size=\d+$/,
-	/^--enable-source-maps$/,
-	/^--no-warnings$/,
-	/^--no-deprecation$/,
-	/^--trace-warnings$/,
-	/^--trace-deprecation$/,
-	/^--unhandled-rejections=(strict|warn|none|throw|warn-with-error-code)$/,
-	/^--dns-result-order=(ipv4first|ipv6first|verbatim)$/,
-];
-
-/**
- * The node options that route a request or choose what TLS trusts, as they appear in
- * the hook's own command line: matched with `_` read as `-`, the one other spelling
- * Node's command line accepts. It takes no option quoted (that is a script's path),
- * escaped or in another case (a `bad option`). The command line comes from the
- * plugin's own hooks.json, not the environment; this is the same rule kept for it.
- */
-const ROUTE_OR_TRUST_OPTIONS = [
-	"--use-env-proxy",
-	"--use-openssl-ca",
-	"--use-system-ca",
-	"--openssl-config",
-];
-
-/** Variables that change what TLS trusts, or load OpenSSL config or modules: refused when set. */
-const TRUST_VARIABLES = [
-	"NODE_EXTRA_CA_CERTS",
-	"SSL_CERT_FILE",
-	"SSL_CERT_DIR",
-	"NODE_USE_SYSTEM_CA",
-	"OPENSSL_CONF",
-	"OPENSSL_MODULES",
-	"OPENSSL_ENGINES",
-];
-
-/**
- * Why this environment may not carry a configured session's requests, or null. Node
- * reroutes or exposes a fetch without any code:
- * - NODE_USE_ENV_PROXY (or --use-env-proxy) sends it through HTTP_PROXY /
- *   HTTPS_PROXY, key and all;
- * - NODE_TLS_REJECT_UNAUTHORIZED=0 trusts any certificate;
- * - NODE_EXTRA_CA_CERTS adds certificates to trust; SSL_CERT_FILE / SSL_CERT_DIR
- *   replace them, with no flag, on a build whose default store is OpenSSL's (as
- *   Homebrew's); NODE_USE_SYSTEM_CA and the CA-store options change the store; and
- *   OPENSSL_CONF / _MODULES / _ENGINES load OpenSSL config or code.
- * NODE_OPTIONS may hold only `NODE_OPTIONS_ALLOWED`. Each refusal names a variable or
- * an option, never a value.
- */
-export function environmentRefusal(env, execArgv = []) {
-	const set = (name) => (env[name] ?? "") !== "";
-	const refused = (what) => `config: environment refused (${what})`;
-	if (set("NODE_USE_ENV_PROXY")) return refused("NODE_USE_ENV_PROXY");
-	const options = (env.NODE_OPTIONS ?? "").split(/\s+/).filter((t) => t !== "");
-	if (options.some((t) => !NODE_OPTIONS_ALLOWED.some((re) => re.test(t)))) {
-		return refused("NODE_OPTIONS");
-	}
-	const argv = execArgv.join(" ").replaceAll("_", "-");
-	for (const flag of ROUTE_OR_TRUST_OPTIONS) if (argv.includes(flag.slice(2))) return refused(flag);
-	if (env.NODE_TLS_REJECT_UNAUTHORIZED === "0") return refused("NODE_TLS_REJECT_UNAUTHORIZED");
-	for (const name of TRUST_VARIABLES) if (set(name)) return refused(name);
-	return null;
 }
 
 /**
@@ -355,22 +284,20 @@ const REAL_FS = { closeSync, fstatSync, lstatSync, openSync, readFileSync, realp
 /**
  * The settings for an environment: from the environment when it has no
  * UT_CC_CONFIG, else from the file it names (`readConfig`), or watch-only and
- * key-less when that file, or the environment that would carry its requests
- * (`environmentRefusal`), is refused. `passwdHome` is the passwd database's home
- * (null when there is none), `uid` the user's (null without POSIX ownership),
- * `execArgv` the hook's own node options, and `fs` the file functions it reads
- * with (tests swap in their own `fstatSync` and `lstatSync` to stand in for
- * another owner).
+ * key-less when that file is refused. `passwdHome` is the passwd database's home
+ * (null when there is none), `uid` the user's (null without POSIX ownership), and
+ * `fs` the file functions it reads with (tests swap in their own `fstatSync` and
+ * `lstatSync` to stand in for another owner). A session resolves once, at its first
+ * hook, and keeps the result in its pin (session.mjs).
  */
-export function resolveSettings({ env, passwdHome, uid, execArgv = [], fs = REAL_FS }) {
+export function resolveSettings({ env, passwdHome, uid, fs = REAL_FS }) {
 	if (!Object.hasOwn(env, CONFIG_VARIABLE)) return fromEnvironment(env);
-	const read =
-		environmentRefusal(env, execArgv) ?? readConfig(env[CONFIG_VARIABLE], { passwdHome, uid, fs });
+	const read = readConfig(env[CONFIG_VARIABLE], { passwdHome, uid, fs });
 	return typeof read === "string" ? refusedSettings(read, passwdHome) : read;
 }
 
 /** The passwd database's home for this user, or null when it has none. */
-function passwdHome() {
+export function passwdHome() {
 	try {
 		const { homedir: home } = userInfo();
 		return typeof home === "string" && home !== "" ? home : null;
@@ -379,15 +306,29 @@ function passwdHome() {
 	}
 }
 
+/** This hook process's session settings, once launch.mjs has set them (`useSession`). */
+let session;
+
+/**
+ * Set this hook process's settings: launch.mjs does, from the session's pin
+ * (session.mjs), before any hook code runs.
+ */
+export function useSession(value) {
+	session = value;
+}
+
 /** A configured session's settings, read once per process (per config path). */
 let fromFile;
 
 /**
- * This hook's settings (`resolveSettings`). A configured session reads its file
- * once per process. An unconfigured one reads the environment at each call, as the
- * hooks always have.
+ * This hook's settings: its session's, from the pin (`useSession`). A module used
+ * outside a hook process, as a unit test uses lib.mjs, has no session and resolves
+ * as the hooks did before pins: a configured session reads its file once per
+ * process, an unconfigured one the environment at each call. No hook runs that way:
+ * a hook module refuses to run unless launch.mjs started it (lib.mjs `requireLaunch`).
  */
 export function settings() {
+	if (session !== undefined) return session;
 	if (!Object.hasOwn(process.env, CONFIG_VARIABLE)) return fromEnvironment(process.env);
 	const path = process.env[CONFIG_VARIABLE];
 	if (fromFile?.path !== path) {
@@ -397,11 +338,67 @@ export function settings() {
 				env: process.env,
 				passwdHome: passwdHome(),
 				uid: typeof process.getuid === "function" ? process.getuid() : null,
-				execArgv: process.execArgv,
 			}),
 		};
 	}
 	return fromFile.value;
+}
+
+/** A key's fingerprint: the first 16 hex digits of its SHA-256, never the key itself. */
+export function keyHash(key) {
+	return createHash("sha256").update(key).digest("hex").slice(0, 16);
+}
+
+/** This process's environment: what a session resolves from, at its first hook (session.mjs). */
+export function environment() {
+	return process.env;
+}
+
+/** Whether an environment makes a session configured: UT_CC_CONFIG is in it, even empty. */
+export function namesConfig(env) {
+	return Object.hasOwn(env, CONFIG_VARIABLE);
+}
+
+/** The tenant key an environment holds (UT_SERVER_KEY), for an environment session's pin check. */
+export function environmentKey(env) {
+	return env.UT_SERVER_KEY ?? "";
+}
+
+/**
+ * All a configured session's child is given of the environment (launch.mjs): the
+ * variables Claude Code itself defines that a hook reads (`HOST_VARIABLES`).
+ */
+export const CHILD_ENV = HOST_VARIABLES;
+
+/**
+ * What the platform itself adds to a process started with an empty environment.
+ * macOS adds CoreFoundation's text encoding, with the system's value whatever the
+ * parent's environment held. Measured by a test on the platform it runs on.
+ */
+export const PLATFORM_ENV = process.platform === "darwin" ? ["__CF_USER_TEXT_ENCODING"] : [];
+
+/**
+ * A child's environment: `CHILD_ENV`'s variables that `env` has, and nothing else.
+ * Node's spawn copies the parent's NODE_V8_COVERAGE into any environment it is given
+ * that lacks one, so this one is set, empty: no coverage, and nothing copied.
+ */
+export function childEnv(env = process.env) {
+	return {
+		...Object.fromEntries(
+			CHILD_ENV.filter((name) => env[name] !== undefined).map((name) => [name, env[name]]),
+		),
+		NODE_V8_COVERAGE: "",
+	};
+}
+
+/** Whether a child's environment holds only what `childEnv` gives and the platform adds. */
+export function isChildEnv(env = process.env) {
+	return Object.entries(env).every(
+		([name, value]) =>
+			CHILD_ENV.includes(name) ||
+			PLATFORM_ENV.includes(name) ||
+			(name === "NODE_V8_COVERAGE" && value === ""),
+	);
 }
 
 /**
@@ -433,7 +430,11 @@ export function settingName(name) {
 	return settings().configured ? `the config file's "${name}"` : VARIABLES[name];
 }
 
-/** Why a configured session runs key-less: the variable that named the file, and the fixed reason. */
+/**
+ * Why a session runs key-less, for its session-start line: the fixed reason, and
+ * what it is about: the config file, or the session's pin or launch.
+ */
 export function refusalNote(reason) {
+	if (!reason.startsWith("config:")) return `this session's settings could not be used (${reason})`;
 	return `the config file ${CONFIG_VARIABLE} names was refused (${reason})`;
 }

@@ -48,6 +48,7 @@ import {
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	requireLaunch,
 	say,
 	serverCapabilities,
 	serverRequest,
@@ -61,6 +62,8 @@ import {
 	OUTCOME_NOTES,
 	settleTranscriptHold,
 } from "./transcript.mjs";
+
+requireLaunch();
 
 /** One request of the expired-hold chain: 5 s at most, and never past the hook's budget. */
 function withinBudget() {

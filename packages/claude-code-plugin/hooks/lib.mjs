@@ -26,7 +26,6 @@
 // (<safeSession>__<safeAgent>__<safeCall>.json). Each hold is then claimed,
 // settled, journalled and cleared through the path its listing found, so a 1.4.0
 // record is ended through its own name, once.
-import { createHash } from "node:crypto";
 import {
 	appendFile,
 	link,
@@ -40,7 +39,28 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { hostEnv, howToSet, refusalNote, settingName, settings } from "./config.mjs";
+import { hostEnv, howToSet, keyHash, refusalNote, settingName, settings } from "./config.mjs";
+
+/** Set by launch.mjs, which runs every hook: the hook's payload and its start. */
+let launched = null;
+
+/**
+ * launch.mjs starts each hook: it resolves the session's settings (config.mjs
+ * `useSession`), then hands over what it read from stdin (null when the hook should
+ * read stdin itself, as a child does) and when the hook started.
+ */
+export function launch({ payload, startedAt }) {
+	launched = { payload, startedAt };
+	hookStartedAt = startedAt;
+}
+
+/**
+ * Every hook module's first step: a hook runs only as launch.mjs starts it, never
+ * from its own file, so no hook can run without its session's pinned settings.
+ */
+export function requireLaunch() {
+	if (launched === null) throw new Error("usertrust: a hook runs only through launch.mjs");
+}
 
 export class TransportError extends Error {
 	constructor(message) {
@@ -50,6 +70,8 @@ export class TransportError extends Error {
 }
 
 export function readStdin() {
+	// launch.mjs read it already when it runs the hook in its own process.
+	if (typeof launched?.payload === "string") return Promise.resolve(launched.payload);
 	return new Promise((resolve, reject) => {
 		let data = "";
 		process.stdin.setEncoding("utf-8");
@@ -224,15 +246,19 @@ export async function recordWatchEvent(event) {
 }
 
 // Every hook gets a wall-clock budget inside the time Claude Code gives it, so a
-// slow server makes a hook give up cleanly instead of being killed mid-write.
-// Module evaluation is the hook's start: each hook is its own node process.
-const HOOK_STARTED_AT = Date.now();
+// slow server makes a hook give up cleanly instead of being killed mid-write. The
+// hook's start is launch.mjs's (`launch`): for a configured session's child, its
+// parent's start, so the budget counts the time it took to start the child.
+let hookStartedAt = Date.now();
 /** Every hook's budget but SessionEnd's: well inside hooks.json's 15 s timeout. */
 export const HOOK_BUDGET_MS = 10_000;
 let hookBudgetMs = HOOK_BUDGET_MS;
 
 const SESSION_END_DEFAULT_MS = 1_500;
-/** What node takes to start the hook before its budget starts, and to exit. */
+/**
+ * What node takes to start the hook before its budget starts, and to exit. A
+ * configured session's child starts within the budget: it counts from its parent's start.
+ */
 const SESSION_END_MARGIN_MS = 300;
 
 /**
@@ -261,7 +287,7 @@ export function budgetShare(fraction) {
 
 /** Milliseconds left in this hook's budget (negative once it is spent). */
 export function timeLeft() {
-	return HOOK_STARTED_AT + hookBudgetMs - Date.now();
+	return hookStartedAt + hookBudgetMs - Date.now();
 }
 
 export function sanitize(part) {
@@ -649,7 +675,7 @@ function routeUrl(route) {
 export function tenantBinding() {
 	return {
 		serverUrl: serverBase(),
-		keyHash: createHash("sha256").update(settings().key).digest("hex").slice(0, 16),
+		keyHash: keyHash(settings().key),
 	};
 }
 

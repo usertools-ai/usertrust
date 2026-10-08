@@ -14,7 +14,7 @@
 // back last. Like Stop, it first waits — boundedly — for the subagent's final
 // response (its input's `last_assistant_message`) to reach its transcript, and
 // says so when it gives up.
-import { cleanup, readStdin, say, usageMode } from "./lib.mjs";
+import { cleanup, readStdin, requireLaunch, say, usageMode } from "./lib.mjs";
 import {
 	awaitFinalResponse,
 	cleanupReserve,
@@ -22,6 +22,8 @@ import {
 	settleAssignedHolds,
 	transcriptPathFor,
 } from "./transcript.mjs";
+
+requireLaunch();
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");

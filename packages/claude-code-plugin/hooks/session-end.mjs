@@ -12,9 +12,10 @@
 // v2.1.268 a hook without its own timeout kept 1.5 s even then). Every step is
 // sized to the budget, a Stop still finishing included: its lock is waited for
 // only a fifth of it. SessionEnd cannot block, and never fails a session.
-import { readStdin, say, sessionEndBudgetMs, useHookBudget } from "./lib.mjs";
+import { readStdin, requireLaunch, say, sessionEndBudgetMs, useHookBudget } from "./lib.mjs";
 import { sessionEndLockWait, settleSession } from "./transcript.mjs";
 
+requireLaunch();
 useHookBudget(sessionEndBudgetMs());
 
 try {

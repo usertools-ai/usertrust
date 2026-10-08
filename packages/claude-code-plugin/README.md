@@ -45,6 +45,8 @@ export UT_SERVER_KEY="<the key from step 1>"
 
 These are read only when `UT_CC_CONFIG` is not set. With it set, the plugin reads
 every setting from one file instead: see [Configuration file](#configuration-file).
+Either way, a session reads its settings once, at its first hook: see
+[One session, one set of settings](#one-session-one-set-of-settings).
 
 | Variable             | Default                  | Meaning                                          |
 | -------------------- | ------------------------ | ------------------------------------------------ |
@@ -110,27 +112,21 @@ are ignored. The file is accepted only if all of these hold:
   yours, writable by no one else;
 - the file is not a link but a regular file, yours, with no group or other
   permission bits (`chmod 600`), and at most 64 KiB;
-- it is a JSON object with every required field, and every field it has is valid;
-- the environment neither reroutes its requests nor changes what their TLS trusts.
-  Node itself can do both without any code:
-  - `NODE_USE_ENV_PROXY` sends every request through `HTTP_PROXY` / `HTTPS_PROXY`,
-    key and all;
-  - `NODE_TLS_REJECT_UNAUTHORIZED=0` trusts any certificate;
-  - `NODE_EXTRA_CA_CERTS` adds certificates to trust, and `SSL_CERT_FILE` /
-    `SSL_CERT_DIR` replace them, with no flag at all on a build whose default store
-    is OpenSSL's (as Homebrew's);
-  - `NODE_USE_SYSTEM_CA` changes the store, and `OPENSSL_CONF`, `OPENSSL_MODULES`
-    and `OPENSSL_ENGINES` load OpenSSL config or modules.
+- it is a JSON object with every required field, and every field it has is valid.
 
-  Each set variable is refused by name, as in
-  `config: environment refused (NODE_USE_ENV_PROXY)`. And `NODE_OPTIONS` may hold
-  only these options, each exactly as written: `--max-old-space-size=<n>`,
-  `--max-semi-space-size=<n>`, `--enable-source-maps`, `--no-warnings`,
-  `--no-deprecation`, `--trace-warnings`, `--trace-deprecation`,
-  `--unhandled-rejections=<mode>` and `--dns-result-order=<order>`. Anything else
-  is refused as `config: environment refused (NODE_OPTIONS)`. Node also reads an
-  option quoted, escaped, with `_` for `-` or with a value after `=`, so a list of
-  options to refuse would miss spellings; a list of what to allow cannot.
+**The environment never reaches a configured session's requests.** Its hooks send
+from a child process that the plugin starts with no node options, in the working
+directory `/`, and with nothing of the environment but Claude Code's own
+`CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`.
+- Node and the C library can reroute or expose a request without any code: a proxy
+  (`NODE_USE_ENV_PROXY`, `HTTP_PROXY`), a CA store (`NODE_TLS_REJECT_UNAUTHORIZED`,
+  `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, …), OpenSSL's config, the resolver
+  (`HOSTALIASES`, `LOCALDOMAIN`, `RES_OPTIONS`), or a variable no one has named
+  yet. None of them applies to that child, so none of them is refused either.
+- One consequence: a server behind a private CA is not supported, because the child
+  does not see `NODE_EXTRA_CA_CERTS`.
+- The child also checks its own environment: holding anything else, it refuses to
+  run and sends nothing.
 
 **Anything else, an empty `UT_CC_CONFIG` included, runs the plugin watch-only and
 key-less.** No request is sent to any server. Each tool call is recorded as a
@@ -157,6 +153,38 @@ starting a session in a checkout you have not reviewed stops it. And an
 environment can still point `UT_CC_CONFIG` at another valid file in the same
 directory: keep only configs there you would accept for any session. A host
 that should never block a tool call holds only `watch` configs.
+
+### One session, one set of settings
+
+**A session reads its settings once, at its first hook, and keeps them for its
+life, a resumed session included.** This applies whether they come from the config
+file or the environment. An edit applies to sessions started after it: a new url,
+key, mode or state dir, or a key rotation. Claude Code can apply an environment
+change to a running session, and the state dir holds the session's holds and the
+record of what was already posted. A session moved to another state dir mid-way
+lost holds it had made, and could post again, from a state dir that already
+existed, usage it had already posted.
+
+The settings are kept in a pin: `.local/state/usertrust/sessions/<session id>.json`
+under your home as the passwd database gives it.
+- It is a regular file of yours with no group or other permission bits, in
+  directories that are yours and writable by no one else.
+- A configured session's pin holds the file's settings, key included: the key is in
+  the config file already.
+- An environment session's pin holds the key's hash, never the key. Each hook reads
+  `UT_SERVER_KEY` afresh, and a key changed mid-session is refused, as
+  `pin: key changed`: that hook sends nothing, and its call is recorded as a gap.
+- A pin unused for 30 days is removed when a session starts. A session resumed
+  after that, or whose pin you delete, is pinned again from the settings then
+  current.
+- A config file that is refused is not pinned: the next hook reads it again.
+
+**A pin that cannot be used runs the hook watch-only and key-less, with a gap.**
+That covers a session id that is not a safe file name, a directory or file that
+fails these checks, a corrupt pin, and a filesystem without hard links. The reason
+is one of `pin: session id refused`, `pin: dir refused (<what>)`,
+`pin: unreadable`, `pin: corrupt`, `pin: unwritable` and `pin: no hard links`. The
+hook never reads the settings afresh in its place, which could move the state dir.
 
 ## Real usage: what is settled, and how
 

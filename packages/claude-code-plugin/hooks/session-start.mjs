@@ -7,7 +7,9 @@
 // any platform, return `systemMessage` in JSON output", and SessionStart
 // decision control: "Claude Code adds stdout it treats as plain text to
 // Claude's context"). No network call: the hook must be fast and cannot fail.
-import { announce, modeAnnouncement, readStdin } from "./lib.mjs";
+import { announce, modeAnnouncement, readStdin, requireLaunch } from "./lib.mjs";
+
+requireLaunch();
 
 try {
 	// The payload is not needed; reading it lets Claude Code finish writing stdin.

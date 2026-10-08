@@ -64,6 +64,7 @@ import {
 	recordPending,
 	recordWatchEvent,
 	releaseHold,
+	requireLaunch,
 	sameTenant,
 	sanitizeReason,
 	say,
@@ -81,6 +82,8 @@ import {
 	safeName,
 	settleTranscriptHold,
 } from "./transcript.mjs";
+
+requireLaunch();
 
 const MAX_REASON_CHARS = 500;
 

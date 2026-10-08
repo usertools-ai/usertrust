@@ -1,4 +1,5 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
@@ -6,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as ts from "typescript";
 import { afterEach, describe, expect, it } from "vitest";
-import { runHook } from "./helpers/run-hook.js";
+import { LAUNCH, runHook } from "./helpers/run-hook.js";
 
 // The config file (config.mjs): a configured session reads every setting from one
 // file inside <passwd home>/.config/usertrust/, and no UT_* variable. The hooks are
@@ -29,25 +30,6 @@ const LEAK = "BEGIN TEST";
 /** Every form a leak could take: as written, and percent-encoded, as a url prints it. */
 const LEAKS = [LEAK, "BEGIN%20TEST"];
 const leaks = (text: string) => LEAKS.filter((leak) => text.includes(leak));
-/**
- * Every variable that reroutes or exposes a configured session's requests, blank: a
- * shell that sets one (NODE_EXTRA_CA_CERTS is common) must not refuse these tests.
- */
-const NO_REROUTE = {
-	NODE_USE_ENV_PROXY: "",
-	NODE_TLS_REJECT_UNAUTHORIZED: "",
-	NODE_EXTRA_CA_CERTS: "",
-	NODE_OPTIONS: "",
-	SSL_CERT_FILE: "",
-	SSL_CERT_DIR: "",
-	NODE_USE_SYSTEM_CA: "",
-	OPENSSL_CONF: "",
-	OPENSSL_MODULES: "",
-	OPENSSL_ENGINES: "",
-	HTTP_PROXY: "",
-	HTTPS_PROXY: "",
-};
-
 interface Settings {
 	configured: boolean;
 	refused: string | null;
@@ -67,12 +49,15 @@ interface ResolveInput {
 	env: Record<string, string>;
 	passwdHome: string | null;
 	uid: number | null;
-	execArgv?: string[];
 	fs?: Record<string, unknown>;
 }
 
 interface ConfigModule {
 	resolveSettings(input: ResolveInput): Settings;
+	childEnv(env: Record<string, string>): Record<string, string>;
+	isChildEnv(env: Record<string, string | undefined>): boolean;
+	CHILD_ENV: string[];
+	PLATFORM_ENV: string[];
 }
 
 const REAL_FS = {
@@ -127,7 +112,7 @@ const VALID = {
 
 /** Every refusal is one of these fixed forms: our own field names, never a value. */
 const REASON =
-	/^config: (empty|unreadable|not valid JSON|outside the anchor|anchor refused \((home|missing|symlink|type|owner|mode)\)|file refused \((symlink|type|owner|mode|size)\)|field "[A-Za-z]+" (missing|invalid)|environment refused \((NODE_USE_ENV_PROXY|NODE_OPTIONS|--use-env-proxy|--use-openssl-ca|--use-system-ca|--openssl-config|NODE_TLS_REJECT_UNAUTHORIZED|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|NODE_USE_SYSTEM_CA|OPENSSL_CONF|OPENSSL_MODULES|OPENSSL_ENGINES)\))$/;
+	/^config: (empty|unreadable|not valid JSON|outside the anchor|anchor refused \((home|missing|symlink|type|owner|mode)\)|file refused \((symlink|type|owner|mode|size)\)|field "[A-Za-z]+" (missing|invalid))$/;
 
 describe("resolveSettings: which file a configured session accepts", () => {
 	const resolve = async (
@@ -307,9 +292,9 @@ describe("resolveSettings: which file a configured session accepts", () => {
 		const inherited = Object.fromEntries(
 			Object.entries(process.env).filter(([name]) => !name.startsWith("UT_")),
 		);
-		const start = spawnSync(process.execPath, [...PRELOAD, SESSION_START], {
-			input: "{}",
-			env: { ...inherited, ...NO_REROUTE, TEST_PASSWD_HOME: home.home, UT_CC_CONFIG: fifo },
+		const start = spawnSync(process.execPath, [...PRELOAD, LAUNCH, "session-start"], {
+			input: JSON.stringify({ session_id: "fifo-session" }),
+			env: { ...inherited, TEST_PASSWD_HOME: home.home, UT_CC_CONFIG: fifo },
 			encoding: "utf-8",
 			timeout: 10_000,
 		});
@@ -392,88 +377,74 @@ describe("resolveSettings: which file a configured session accepts", () => {
 		expect(leaks(JSON.stringify(valid))).toEqual([]);
 	});
 
-	it("refuses an environment that reroutes the requests or loosens their TLS, each by name", async () => {
-		const home = await makeHome();
-		const path = await writeConfig(join(home.anchor, "session.json"), VALID);
-		const { resolveSettings } = await configModule();
-		const refusal = (env: Record<string, string>, execArgv: string[] = []) =>
-			resolveSettings({
-				env: { UT_CC_CONFIG: path, ...env },
-				passwdHome: home.home,
-				uid: UID,
-				execArgv,
-			}).refused;
-		// Control: the same file, in a plain environment, is accepted.
-		expect(refusal({})).toBeNull();
-		const refused: Array<[string, Record<string, string>, string[]]> = [
-			["NODE_USE_ENV_PROXY", { NODE_USE_ENV_PROXY: "1", HTTP_PROXY: "http://127.0.0.1:9" }, []],
-			["NODE_TLS_REJECT_UNAUTHORIZED", { NODE_TLS_REJECT_UNAUTHORIZED: "0" }, []],
-			// Each variable that changes what TLS trusts, alone: SSL_CERT_* need no flag on a
-			// build whose default store is OpenSSL's.
-			["NODE_EXTRA_CA_CERTS", { NODE_EXTRA_CA_CERTS: "/tmp/ca.pem" }, []],
-			["SSL_CERT_FILE", { SSL_CERT_FILE: "/tmp/ca.pem" }, []],
-			["SSL_CERT_DIR", { SSL_CERT_DIR: "/tmp/certs" }, []],
-			["NODE_USE_SYSTEM_CA", { NODE_USE_SYSTEM_CA: "1" }, []],
-			["OPENSSL_CONF", { OPENSSL_CONF: "/tmp/openssl.cnf" }, []],
-			["OPENSSL_MODULES", { OPENSSL_MODULES: "/tmp/modules" }, []],
-			["OPENSSL_ENGINES", { OPENSSL_ENGINES: "/tmp/engines" }, []],
-			// The hook's own command line, in every spelling Node accepts.
-			["--use-env-proxy", {}, ["--use-env-proxy"]],
-			["--use-env-proxy", {}, ["--use_env_proxy"]],
-			["--use-openssl-ca", {}, ["--use_openssl_ca"]],
-			["--use-system-ca", {}, ["--use-system-ca"]],
-			["--openssl-config", {}, ["--openssl-config=/tmp/x.cnf"]],
-		];
-		for (const [name, env, execArgv] of refused) {
-			expect(refusal(env, execArgv), name).toBe(`config: environment refused (${name})`);
-		}
-		// NODE_OPTIONS holds only allowlisted tokens: every spelling Node accepts for a
-		// flag that is not on the list is refused, quoted, escaped, `_` for `-`, with `=`, or
-		// a `--no-` form (the safe direction).
-		for (const options of [
-			'"--use-env-proxy"',
-			'"--use-env\\-proxy"',
-			"--use_env_proxy",
-			"--use-env-proxy=1",
-			"--max-old-space-size=64 --use-env-proxy",
-			'"--use-openssl-ca"',
-			"--use_openssl_ca",
-			"--use-openssl-ca=true",
-			"--no-use-env-proxy",
-			"--use-system-ca",
-			"--require /tmp/preload.cjs",
-			'--max-old-space-size=64"--use-env-proxy"',
-		]) {
-			expect(refusal({ NODE_OPTIONS: options }), options).toBe(
-				"config: environment refused (NODE_OPTIONS)",
-			);
-		}
-		// What neither routes a request nor changes the trust: accepted.
-		for (const [env, execArgv] of [
-			[{ NODE_USE_ENV_PROXY: "" }, []],
-			[{ HTTP_PROXY: "http://127.0.0.1:9", HTTPS_PROXY: "http://127.0.0.1:9" }, []],
-			[{ NODE_TLS_REJECT_UNAUTHORIZED: "1" }, []],
-			[{ NODE_OPTIONS: "  --max-old-space-size=64   --enable-source-maps --no-warnings " }, []],
-			[{ NODE_OPTIONS: "--unhandled-rejections=strict --dns-result-order=ipv4first" }, []],
-			[{}, ["--import", "/tmp/a-test-preload.mjs"]],
-		] as Array<[Record<string, string>, string[]]>) {
-			expect(refusal(env, execArgv), JSON.stringify([env, execArgv])).toBeNull();
+	/**
+	 * Every variable that ever rerouted or exposed a request (node's proxy, the TLS and
+	 * OpenSSL stores, glibc's resolver), one nobody has named, and the ones a child
+	 * might seem to need: none of them reaches a configured session's child.
+	 */
+	const HOSTILE_ENV: Record<string, string> = {
+		NODE_USE_ENV_PROXY: "1",
+		HTTP_PROXY: "http://127.0.0.1:9",
+		HTTPS_PROXY: "http://127.0.0.1:9",
+		NODE_OPTIONS: '"--use-env-proxy"',
+		NODE_TLS_REJECT_UNAUTHORIZED: "0",
+		NODE_EXTRA_CA_CERTS: "/tmp/ca.pem",
+		SSL_CERT_FILE: "/tmp/ca.pem",
+		SSL_CERT_DIR: "/tmp/certs",
+		NODE_USE_SYSTEM_CA: "1",
+		OPENSSL_CONF: "/tmp/openssl.cnf",
+		OPENSSL_MODULES: "/tmp/modules",
+		OPENSSL_ENGINES: "/tmp/engines",
+		HOSTALIASES: "/tmp/hosts",
+		LOCALDOMAIN: "attacker.example",
+		RES_OPTIONS: "ndots:9",
+		NODE_V8_COVERAGE: "/tmp/coverage",
+		A_VARIABLE_NO_ONE_HAS_NAMED: "1",
+		UT_CC_CONFIG: "/tmp/session.json",
+		HOME: "/tmp",
+		PATH: "/tmp",
+	};
+
+	it("a configured session's child gets nothing of the environment but the host variables a hook reads", async () => {
+		const { CHILD_ENV, childEnv, isChildEnv } = await configModule();
+		expect(CHILD_ENV).toEqual(["CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"]);
+		const given = childEnv({ ...HOSTILE_ENV, CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "3000" });
+		// NODE_V8_COVERAGE is set, empty: node's spawn copies the parent's into any
+		// environment it is given that lacks one.
+		expect(given).toEqual({
+			CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "3000",
+			NODE_V8_COVERAGE: "",
+		});
+		expect(isChildEnv(given)).toBe(true);
+		// A child holding any one of them refuses to run.
+		for (const [name, value] of Object.entries(HOSTILE_ENV)) {
+			expect(isChildEnv({ [name]: value }), name).toBe(false);
 		}
 	});
 
-	it("node's own command line takes `_` for `-`, and no option quoted, escaped or in another case", () => {
-		// Why the hook's own command line is matched with `_` read as `-` and nothing else:
-		// process.execArgv holds only options node accepted, and this is all it accepts. A
-		// quoted option is read as a script's path; the others are a `bad option`. If a node
-		// ever takes one of them, this fails, and the check must read that spelling too.
-		const cwd = nodeFs.mkdtempSync(join(tmpdir(), "utcc-argv-"));
-		const status = (option: string) =>
-			spawnSync(process.execPath, [option, "-e", "0"], { cwd, stdio: "ignore" }).status;
-		expect(status("--no-warnings"), "control: the option as written").toBe(0);
-		expect(status("--no_warnings"), "`_` for `-`").toBe(0);
-		for (const option of ['"--no-warnings"', "--no-warn\\ings", "--NO-WARNINGS"]) {
-			expect(status(option), option).not.toBe(0);
-		}
+	it("measured on this platform: a child started as launch.mjs starts one holds only its environment and the platform's own, in the working directory /", async () => {
+		const { PLATFORM_ENV, isChildEnv } = await configModule();
+		// A parent whose environment holds every variable above starts a child with
+		// launch.mjs's own options; the child prints what it was given, and where it runs.
+		const parent = `
+			const { childOptions } = await import(${JSON.stringify(LAUNCH)});
+			const { spawnSync } = await import("node:child_process");
+			const seen = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify({ env: process.env, cwd: process.cwd() }))"], { ...childOptions(), stdio: "pipe", encoding: "utf-8" });
+			process.stdout.write(seen.stdout);
+		`;
+		const run = spawnSync(process.execPath, ["--input-type=module", "-e", parent], {
+			env: { ...process.env, ...HOSTILE_ENV, CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "3000" },
+			encoding: "utf-8",
+		});
+		expect(run.status, run.stderr).toBe(0);
+		const child = JSON.parse(run.stdout) as { env: Record<string, string>; cwd: string };
+		expect(child.cwd).toBe("/");
+		expect(Object.keys(child.env).sort()).toEqual(
+			["CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS", "NODE_V8_COVERAGE", ...PLATFORM_ENV].sort(),
+		);
+		expect(child.env.NODE_V8_COVERAGE).toBe("");
+		// The child's own check accepts exactly this, and nothing more.
+		expect(isChildEnv(child.env)).toBe(true);
 	});
 });
 
@@ -642,7 +613,7 @@ const runConfigured = (
 	runHook(
 		hook,
 		payload,
-		{ ...NO_REROUTE, TEST_PASSWD_HOME: l.home.home, UT_CC_CONFIG: l.config, ...env },
+		{ TEST_PASSWD_HOME: l.home.home, UT_CC_CONFIG: l.config, ...env },
 		PRELOAD,
 	);
 
@@ -805,7 +776,7 @@ describe("a server url with a trailing `/`, a query or a fragment reaches the se
 					runHook(
 						hook,
 						payload,
-						{ ...NO_REROUTE, TEST_PASSWD_HOME: session.home.home, UT_CC_CONFIG: session.config },
+						{ TEST_PASSWD_HOME: session.home.home, UT_CC_CONFIG: session.config },
 						PRELOAD,
 					),
 			};
@@ -819,7 +790,6 @@ describe("a server url with a trailing `/`, a query or a fragment reaches the se
 				stateDir,
 				run: (hook, payload) =>
 					runHook(hook, payload, {
-						...NO_REROUTE,
 						UT_SERVER_URL: url,
 						UT_SERVER_KEY: "env-key",
 						UT_CC_STATE_DIR: stateDir,
@@ -827,6 +797,45 @@ describe("a server url with a trailing `/`, a query or a fragment reaches the se
 					}),
 			};
 		});
+	});
+
+	it("a hold 1.4.1 recorded under a url ending in `/` is settled by this version, at /v1/settle, never dropped", async () => {
+		const fake = await fakeServer();
+		const url = `${fake.url}/`;
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-url-state-"));
+		// The record exactly as 1.4.1 writes it (lib.mjs `recordPending`): its binding is
+		// the url as written, and the key's hash.
+		await writeFile(
+			join(stateDir, "sess1__main__tu_1.tx_1.json"),
+			JSON.stringify({
+				gate: 1,
+				toolUseId: "tu_1",
+				transferId: "tx_1",
+				agentId: "main",
+				estimatedInputTokens: 4,
+				serverUrl: url,
+				keyHash: createHash("sha256").update("k-141").digest("hex").slice(0, 16),
+			}),
+			{ mode: 0o600 },
+		);
+		const post = await runHook(
+			POST,
+			{ ...PAYLOAD, tool_response: "ok" },
+			{
+				UT_SERVER_URL: url,
+				UT_SERVER_KEY: "k-141",
+				UT_CC_STATE_DIR: stateDir,
+				UT_CC_USAGE: "estimate",
+			},
+		);
+		expect(post.code).toBe(0);
+		expect(fake.seen.map((s) => s.url)).toEqual(["/v1/settle"]);
+		expect((JSON.parse(fake.seen[0]?.body ?? "{}") as { transferId: string }).transferId).toBe(
+			"tx_1",
+		);
+		// Settled, not abandoned as another server's: no gap, and no file of it left.
+		expect(await watchRecords(stateDir)).toEqual([]);
+		expect((await files(stateDir)).filter((f) => f.includes("tx_1"))).toEqual([]);
 	});
 });
 
@@ -839,7 +848,6 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 				hook,
 				PAYLOAD,
 				{
-					...NO_REROUTE,
 					TEST_PASSWD_HOME: home.home,
 					UT_CC_CONFIG: "",
 					UT_SERVER_URL: env.url,
@@ -873,7 +881,7 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 		const pre = await runHook(
 			PRE,
 			PAYLOAD,
-			{ ...NO_REROUTE, TEST_PASSWD_HOME: home.home, UT_CC_CONFIG: outside, UT_SERVER_URL: env.url },
+			{ TEST_PASSWD_HOME: home.home, UT_CC_CONFIG: outside, UT_SERVER_URL: env.url },
 			PRELOAD,
 		);
 		expect(pre.code).toBe(0);
@@ -888,7 +896,6 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 		const proxy = await recordingProxy();
 		const stateDir = await mkdtemp(join(tmpdir(), "utcc-env-state-"));
 		await runHook(PRE, PAYLOAD, {
-			...NO_REROUTE,
 			UT_CC_STATE_DIR: stateDir,
 			UT_SERVER_URL: target.url,
 			UT_SERVER_KEY: "env-key",
@@ -909,7 +916,7 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 		expect(proxy.bytes()).toContain("Bearer env-key");
 	});
 
-	it("a configured session in an environment with NODE_USE_ENV_PROXY is refused: nothing reaches the proxy or the server", async () => {
+	it("a configured session in an environment with NODE_USE_ENV_PROXY sends straight to its server: nothing reaches the proxy", async () => {
 		const target = await fakeServer();
 		const proxy = await recordingProxy();
 		const session = await configured({ url: target.url });
@@ -919,11 +926,9 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 			HTTPS_PROXY: proxy.url,
 		});
 		expect(pre.code).toBe(0);
+		// The child that sends never sees these: the file's key goes to the file's server only.
 		expect(proxy.reached).toEqual([]);
-		expect(target.seen).toEqual([]);
-		expect(await watchRecords(join(session.home.home, ".claude", "usertrust-cc"))).toMatchObject([
-			{ kind: "gap", reason: "config: environment refused (NODE_USE_ENV_PROXY)" },
-		]);
+		expect(authorizes(target).map((s) => s.headers.authorization)).toEqual(["Bearer file-key"]);
 	});
 
 	// NODE_OPTIONS='"--use-env-proxy"' — Node strips the quotes and enables the option.
@@ -934,7 +939,6 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 		const proxy = await recordingProxy();
 		const stateDir = await mkdtemp(join(tmpdir(), "utcc-env-state-"));
 		await runHook(PRE, PAYLOAD, {
-			...NO_REROUTE,
 			UT_CC_STATE_DIR: stateDir,
 			UT_SERVER_URL: target.url,
 			UT_SERVER_KEY: "env-key",
@@ -952,7 +956,7 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 		expect(proxy.bytes()).toContain("Bearer env-key");
 	});
 
-	it("a configured session whose NODE_OPTIONS quotes --use-env-proxy sends nothing to the proxy or the server", async () => {
+	it("a configured session whose NODE_OPTIONS quotes --use-env-proxy: nothing reaches the proxy", async () => {
 		const target = await fakeServer();
 		const proxy = await recordingProxy();
 		const session = await configured({ url: target.url });
@@ -962,14 +966,79 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 			HTTPS_PROXY: proxy.url,
 		});
 		expect(proxy.reached).toEqual([]);
-		expect(target.seen).toEqual([]);
-		// Where node accepts the option, the hook runs and refuses the environment by name.
-		// Where it does not, node itself refuses to start, and nothing runs at all.
+		// Where node accepts the option, the parent starts and its child, which gets no
+		// node options, sends straight to the server. Where it does not, node refuses to
+		// start the hook, and nothing runs at all.
 		if (pre.code === 0) {
-			expect(await watchRecords(join(session.home.home, ".claude", "usertrust-cc"))).toMatchObject([
-				{ kind: "gap", reason: "config: environment refused (NODE_OPTIONS)" },
-			]);
+			expect(authorizes(target).map((s) => s.headers.authorization)).toEqual(["Bearer file-key"]);
+		} else {
+			expect(target.seen).toEqual([]);
 		}
+	});
+
+	it("a variable no one has named never reaches the child: NODE_DEBUG=timer prints from an unconfigured hook, and from no configured one", async () => {
+		const target = await fakeServer();
+		const timerLines = (stderr: string) =>
+			[...stderr.matchAll(/^TIMER (\d+):/gm)].map((m) => Number(m[1]));
+		// Control: an UNCONFIGURED hook runs in the process it is given, and prints node's
+		// timer debug lines there.
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-env-state-"));
+		const unconfigured = await runHook(PRE, PAYLOAD, {
+			UT_CC_STATE_DIR: stateDir,
+			UT_SERVER_URL: target.url,
+			UT_SERVER_KEY: "env-key",
+			UT_CC_USAGE: "estimate",
+			NODE_DEBUG: "timer",
+		});
+		expect(timerLines(unconfigured.stderr).length).toBeGreaterThan(0);
+		expect(new Set(timerLines(unconfigured.stderr))).toEqual(new Set([unconfigured.pid]));
+		// A configured hook's child sends, setting timers of its own, and prints none: the
+		// variable never reached it, and the parent sets no timer. Variables naming a
+		// child marker change nothing: the parent is never taken for the child.
+		const session = await configured({ url: target.url, usage: "estimate" });
+		const pre = await runConfigured(PRE, session, {
+			NODE_DEBUG: "timer",
+			UT_CC_CHILD: "1",
+			UT_CHILD: "1",
+		});
+		expect(pre.code).toBe(0);
+		expect(authorizes(target).map((s) => s.headers.authorization)).toEqual([
+			"Bearer env-key",
+			"Bearer file-key",
+		]);
+		expect(timerLines(pre.stderr)).toEqual([]);
+	});
+
+	it("a child started with anything more in its environment refuses to run, and sends nothing", async () => {
+		const target = await fakeServer();
+		const session = await configured({ url: target.url, usage: "estimate" });
+		// The session's pin, as its first hook makes it.
+		expect((await runConfigured(SESSION_START, session)).code).toBe(0);
+		const pin = join(session.home.home, ".local", "state", "usertrust", "sessions", "sess1.json");
+		// Started asynchronously: the fake server answers from this very process.
+		const asChild = (env: Record<string, string>) =>
+			new Promise<{ status: number | null; stderr: string }>((resolve) => {
+				const child = spawn(
+					process.execPath,
+					[LAUNCH, "pre-tool-use", "--ut-child", `--ut-pin=${pin}`],
+					{ env: { NODE_V8_COVERAGE: "", ...env }, stdio: ["pipe", "ignore", "pipe"] },
+				);
+				let stderr = "";
+				child.stderr.setEncoding("utf-8");
+				child.stderr.on("data", (chunk: string) => {
+					stderr += chunk;
+				});
+				child.on("close", (status) => resolve({ status, stderr }));
+				child.stdin.end(JSON.stringify(PAYLOAD));
+			});
+		const forged = await asChild({ HTTP_PROXY: "http://127.0.0.1:9" });
+		expect(forged.status).toBe(3);
+		expect(forged.stderr).toContain("the hook's child refused to run");
+		expect(authorizes(target)).toEqual([]);
+		// Control: the same child, given only what a child is given, runs and sends.
+		const child = await asChild({});
+		expect(child.status, child.stderr).toBe(0);
+		expect(authorizes(target).map((s) => s.headers.authorization)).toEqual(["Bearer file-key"]);
 	});
 
 	it("never echoes the file: the marker reaches no stderr, session-start line, record or request", async () => {
@@ -990,7 +1059,6 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 				typeof content === "string" ? content : { ...VALID, url: server.url, stateDir, ...content },
 			);
 			const env = {
-				...NO_REROUTE,
 				TEST_PASSWD_HOME: home.home,
 				UT_CC_CONFIG: config,
 				UT_SERVER_URL: server.url,
@@ -1021,8 +1089,23 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 
 // ── Q2: the hooks read the environment ONLY through config.mjs ──
 
-/** `process` members a hook may use; anything else (env above all) is config.mjs's alone. */
-const PROCESS_MEMBERS = new Set(["stdin", "stdout", "stderr", "pid", "exit", "getuid"]);
+/**
+ * `process` members a hook may use; anything else (env above all) is config.mjs's
+ * alone. launch.mjs starts the child (`argv`, `execPath`), passes on its exit
+ * (`exitCode`) and its signals (`on`): none of them is the environment.
+ */
+const PROCESS_MEMBERS = new Set([
+	"stdin",
+	"stdout",
+	"stderr",
+	"pid",
+	"exit",
+	"getuid",
+	"argv",
+	"execPath",
+	"exitCode",
+	"on",
+]);
 
 interface EnvUse {
 	line: number;
