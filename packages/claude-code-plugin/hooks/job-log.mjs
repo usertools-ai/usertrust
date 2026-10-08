@@ -23,17 +23,29 @@
 // FINAL line is a write in progress and is ignored; INTERIOR corruption is invalid,
 // and an invalid log is `jobState: "invalid"` on the records, never a guess.
 //
-// THE LOCK: <log>.lock, created O_CREAT|O_EXCL, holding { pid, ts }. EVERY writer
-// (the CLI and the SessionStart hook) holds it only for read-last-validate-append,
-// milliseconds, and NEVER while waiting or polling. A lock whose holder is dead, or
-// that is older than 10 s, is broken: 10 s is far longer than any legitimate hold, so
-// only a dead or wedged holder can be broken.
+// THE LOCK: <log>.lock, taken atomically WITH its content { pid, ts, token } (a private file
+// link()ed into place, so it never exists empty). EVERY writer (the CLI and the SessionStart
+// hook) holds it only for read-last-validate-append, milliseconds, and NEVER while waiting or
+// polling. At most one writer at a time: a lock is broken ONLY when its holder is provably
+// dead (never by age alone: a slow writer on a loaded host is alive), breakers are serialized
+// by a sentinel, and a writer releases only a lock that still carries its own token.
 //
 // Zero dependencies; reads and writes only the state dir.
-import { closeSync, constants, fsyncSync, openSync, writeSync } from "node:fs";
-import { mkdir, open, readdir, readFile, stat, truncate, unlink } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { closeSync, constants, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
+import {
+	link,
+	mkdir,
+	open,
+	readdir,
+	readFile,
+	stat,
+	truncate,
+	unlink,
+	writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
-import { sanitize, stateRoot } from "./lib.mjs";
+import { LINKLESS, sanitize, stateRoot } from "./lib.mjs";
 
 /** 1-128 of `[A-Za-z0-9._:-]`: usertrust core's `PRINCIPAL_FIELD_PATTERN`, pinned by a test. */
 export const JOB_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -192,10 +204,24 @@ function pidAlive(pid) {
 	}
 }
 
-/** How long a lock whose metadata was never completed may exist before it is broken. */
+/**
+ * How long a lock whose content cannot be read may exist before it is broken. A lock is
+ * created WITH its content (below), so an unreadable one is not a writer mid-way: it is
+ * corruption, or a lock from a filesystem without hard links.
+ */
 export const UNFINISHED_LOCK_MS = 2_000;
 
-export async function breakIfStale(lock) {
+/**
+ * Break a lock, but ONLY when its holder is provably DEAD (`kill(pid, 0)` says no such
+ * process), never by age: a slow writer on a loaded host is alive, and breaking its lock
+ * would put two writers inside read-validate-append. (Declared residual: a dead holder's pid
+ * reused by an unrelated live process keeps the lock until that process exits.)
+ *
+ * Breaking is SERIALIZED by an O_EXCL sentinel around the re-read and the unlink, and a lock
+ * is only ever unlinked if it is still the very one judged (every lock carries a unique
+ * token). `hooks.beforeUnlink` is a test seam between the re-read and the unlink.
+ */
+export async function breakIfStale(lock, hooks = {}) {
 	let text;
 	let mtimeMs;
 	try {
@@ -208,19 +234,12 @@ export async function breakIfStale(lock) {
 	try {
 		holder = JSON.parse(text);
 	} catch {
-		// A writer that died between creating the lock and writing its metadata leaves an
-		// empty or partial file. It has no pid or ts to judge, so its AGE decides, after a
-		// short grace for a writer that is only now writing it.
+		// unreadable: judged by age below
 	}
-	const complete = holder !== null && Number.isFinite(holder.ts) && Number.isFinite(holder.pid);
-	const stale = complete
-		? !pidAlive(holder.pid) || Date.now() - holder.ts > LOCK_STALE_MS
-		: Date.now() - mtimeMs > UNFINISHED_LOCK_MS;
+	const complete =
+		holder !== null && Number.isFinite(holder.pid) && typeof holder.token === "string";
+	const stale = complete ? !pidAlive(holder.pid) : Date.now() - mtimeMs > UNFINISHED_LOCK_MS;
 	if (!stale) return;
-	// Breaking is SERIALIZED by an O_EXCL sentinel held around the re-read and the unlink.
-	// "Re-read, then unlink if unchanged" alone is not atomic: two breakers of the same dead
-	// lock can both pass the re-read, and the slower one's unlink would then remove the
-	// FRESH lock the faster one just took, leaving two writers inside read-validate-append.
 	const breaking = `${lock}.breaking`;
 	let sentinel;
 	try {
@@ -242,7 +261,9 @@ export async function breakIfStale(lock) {
 	}
 	try {
 		// Re-read under the sentinel: break only the lock we judged, never one taken since.
-		if ((await readFile(lock, "utf-8")) === text) await unlink(lock);
+		const again = await readFile(lock, "utf-8");
+		await hooks.beforeUnlink?.();
+		if (again === text) await unlink(lock);
 	} catch {
 		// raced: fine
 	} finally {
@@ -251,34 +272,71 @@ export async function breakIfStale(lock) {
 	}
 }
 
-/** Run `fn` holding `<log>.lock`; the lock is for read-validate-append ONLY. */
+/** The lock's content: written to a private file first, then linked into place whole. */
+async function takeLock(lock, token) {
+	const tmp = `${lock}.${process.pid}.${token}.tmp`;
+	await writeFile(tmp, JSON.stringify({ pid: process.pid, ts: Date.now(), token }), {
+		mode: 0o600,
+		flag: "wx",
+	});
+	try {
+		// link(2) never replaces a name and carries the content: the lock never exists empty.
+		await link(tmp, lock);
+		return true;
+	} catch (err) {
+		if (err?.code === "EEXIST") return false;
+		if (LINKLESS.has(err?.code)) {
+			// A filesystem without hard links: an exclusive create (content follows).
+			try {
+				const handle = await open(
+					lock,
+					constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+					0o600,
+				);
+				await handle.writeFile(readFileSync(tmp, "utf-8"));
+				await handle.close();
+				return true;
+			} catch (e) {
+				if (e?.code === "EEXIST") return false;
+				throw e;
+			}
+		}
+		throw err;
+	} finally {
+		await unlink(tmp).catch(() => {});
+	}
+}
+
+/**
+ * Run `fn` holding `<log>.lock`, for read-validate-append: the validation and the monotonic
+ * `ts` need ONE writer at a time (a single O_APPEND write is atomic by itself, but it does not
+ * order timestamps or truncate an orphaned tail). At most one holder: the lock is taken
+ * atomically with its content, broken only when its holder is dead, and released only if it is
+ * still THIS holder's (the token).
+ */
 export async function withLock(log, fn, { maxWaitMs = 5_000 } = {}) {
 	const lock = `${log}.lock`;
+	const token = randomBytes(8).toString("hex");
 	const deadline = Date.now() + maxWaitMs;
 	for (;;) {
-		let handle;
-		try {
-			handle = await open(lock, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-		} catch (err) {
-			if (err?.code !== "EEXIST") throw err;
-			await breakIfStale(lock);
-			if (Date.now() > deadline) {
-				// The message names the lock, an operator's path: it is the CLI's job to keep that out of
-				// a terminal (it prints only the code).
-				throw Object.assign(new Error(`the job log's lock is held: ${lock}`), { code: "ELOCKED" });
-			}
-			await sleep(10 + Math.floor(Math.random() * 15));
-			continue;
+		if (await takeLock(lock, token)) break;
+		await breakIfStale(lock);
+		if (Date.now() > deadline) {
+			// The message names the lock, an operator's path: it is the CLI's job to keep that out of
+			// a terminal (it prints only the code).
+			throw Object.assign(new Error(`the job log's lock is held: ${lock}`), { code: "ELOCKED" });
 		}
+		await sleep(10 + Math.floor(Math.random() * 15));
+	}
+	try {
+		return await fn();
+	} finally {
+		// Release only a lock that is still ours. Nobody breaks a live holder's lock, so this
+		// is belt and braces: it can never remove a successor's.
 		try {
-			await handle.writeFile(JSON.stringify({ pid: process.pid, ts: Date.now() }));
-		} finally {
-			await handle.close();
-		}
-		try {
-			return await fn();
-		} finally {
-			await unlink(lock).catch(() => {});
+			if (JSON.parse(await readFile(lock, "utf-8"))?.token === token) await unlink(lock);
+		} catch {
+			// gone or unreadable: nothing of ours to release
 		}
 	}
 }
@@ -547,6 +605,26 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 	// exactly the start belongs to the earlier job and usage at exactly the stop to this one.
 	const insideAny = (w, intervals) => intervals.some(([from, to]) => w[0] > from && w[1] <= to);
 	const overlapsAny = (w, intervals) => intervals.some(([from, to]) => w[0] <= to && w[1] > from);
+
+	// A transfer is ONE charge. If llm_calls name it under two jobs (or twice), it sits in each
+	// job's total: a gap for every job that names it, found across ALL records before any
+	// filtering by job.
+	const callsByTransfer = new Map();
+	for (const r of records) {
+		if (r?.kind !== "llm_call" || typeof r?.data?.transferId !== "string") continue;
+		const entry = callsByTransfer.get(r.data.transferId) ?? { n: 0, jobs: new Set() };
+		entry.n += 1;
+		entry.jobs.add(r.data.job ?? null);
+		callsByTransfer.set(r.data.transferId, entry);
+	}
+	for (const [id, entry] of callsByTransfer) {
+		if (entry.jobs.size > 1 && entry.jobs.has(job)) {
+			why(`transfer ${id} is attributed to multiple jobs: its cost sits in more than one total`, {
+				transferId: id,
+				jobs: [...entry.jobs].map((j) => j ?? null),
+			});
+		}
+	}
 
 	// ── Clause 1: EVERY record tagged with the job lies inside an interval of the job in a
 	// valid log of its own session. A session with no interval of the job puts all of its

@@ -206,7 +206,10 @@ describe("test 4 — a torn tail is not corruption", () => {
 describe("test 5 — the lock", () => {
 	it("a writer WAITS for a live holder and appends after it lets go", async () => {
 		await writeLog(start(SID, T0));
-		await writeFile(`${logFile()}.lock`, JSON.stringify({ pid: process.pid, ts: Date.now() }));
+		await writeFile(
+			`${logFile()}.lock`,
+			JSON.stringify({ pid: process.pid, ts: Date.now(), token: "held" }),
+		);
 		const { appendJobOp } = await lib();
 		let done = false;
 		const pending = appendJobOp(SID, "start", "job-a", { waitMs: 1000 }).then((r) => {
@@ -222,18 +225,26 @@ describe("test 5 — the lock", () => {
 	});
 	it("a lock whose holder is dead is broken", async () => {
 		await writeLog(start(SID, T0));
-		await writeFile(`${logFile()}.lock`, JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now() }));
-		const { appendJobOp } = await lib();
-		expect((await appendJobOp(SID, "start", "job-a", { waitMs: 1000 })).ok).toBe(true);
-	});
-	it("a lock older than 10 s is broken even for a live pid", async () => {
-		await writeLog(start(SID, T0));
 		await writeFile(
 			`${logFile()}.lock`,
-			JSON.stringify({ pid: process.pid, ts: Date.now() - 11_000 }),
+			JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now(), token: "dead" }),
 		);
 		const { appendJobOp } = await lib();
 		expect((await appendJobOp(SID, "start", "job-a", { waitMs: 1000 })).ok).toBe(true);
+	});
+	it("a lock is NEVER broken by age while its holder is alive (a slow writer on a loaded host is alive)", async () => {
+		await writeLog(start(SID, T0));
+		const lock = `${logFile()}.lock`;
+		await writeFile(
+			lock,
+			JSON.stringify({ pid: process.pid, ts: Date.now() - 3_600_000, token: "slow" }),
+		);
+		const { breakIfStale } = (await lib()) as unknown as {
+			breakIfStale(lock: string): Promise<void>;
+		};
+		await breakIfStale(lock);
+		// mutant: a lock older than 10 s is broken even for a live pid
+		expect(await readFile(lock, "utf-8")).toContain("slow");
 	});
 	it("simultaneous CLI starts leave a monotonic, valid log", async () => {
 		await writeLog(start(SID, Date.now()));
@@ -1435,7 +1446,10 @@ describe("hot paths cannot be broken by a long backlog (B-86)", () => {
 describe("stale-lock breaking is serialized (B-92)", () => {
 	it("a breaker that finds another breaker's sentinel leaves the lock alone", async () => {
 		await writeLog(start(SID, T0));
-		await writeFile(`${logFile()}.lock`, JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now() }));
+		await writeFile(
+			`${logFile()}.lock`,
+			JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now(), token: "dead" }),
+		);
 		await writeFile(`${logFile()}.lock.breaking`, "");
 		const { breakIfStale } = (await lib()) as unknown as {
 			breakIfStale(lock: string): Promise<void>;
@@ -1446,7 +1460,10 @@ describe("stale-lock breaking is serialized (B-92)", () => {
 	});
 	it("a sentinel left by a breaker that died is cleared by age, then the lock can be broken", async () => {
 		await writeLog(start(SID, T0));
-		await writeFile(`${logFile()}.lock`, JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now() }));
+		await writeFile(
+			`${logFile()}.lock`,
+			JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now(), token: "dead" }),
+		);
 		await writeFile(`${logFile()}.lock.breaking`, "");
 		const old = new Date(Date.now() - 60_000);
 		await utimes(`${logFile()}.lock.breaking`, old, old);
@@ -1458,9 +1475,75 @@ describe("stale-lock breaking is serialized (B-92)", () => {
 		await expect(readFile(`${logFile()}.lock`, "utf-8")).rejects.toThrow();
 		await expect(readFile(`${logFile()}.lock.breaking`, "utf-8")).rejects.toThrow();
 	});
-	it("many writers racing over one dead lock all append exactly once, into a valid log", async () => {
+	it("two breakers of one dead lock: the second is turned away mid-break, and a fresh lock taken after survives a late breaker", async () => {
+		await writeLog(start(SID, T0));
+		const lock = `${logFile()}.lock`;
+		await writeFile(lock, JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now(), token: "dead" }));
+		const { breakIfStale } = (await lib()) as unknown as {
+			breakIfStale(lock: string, hooks?: { beforeUnlink?: () => Promise<void> }): Promise<void>;
+		};
+		let release = () => {};
+		const paused = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let entered = () => {};
+		const inside = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		// B1 has judged the lock dead and re-read it, and stands between the re-read and the unlink.
+		const b1 = breakIfStale(lock, {
+			beforeUnlink: async () => {
+				entered();
+				await paused;
+			},
+		});
+		await inside;
+		await breakIfStale(lock); // B2 arrives now
+		// mutant: no sentinel → B2 passes the re-read too and unlinks the lock right here
+		expect(await readFile(lock, "utf-8")).toContain("dead");
+		release();
+		await b1;
+		await expect(readFile(lock, "utf-8")).rejects.toThrow(); // broken once
+		// A takes a fresh lock; a breaker that judged the old one earlier must not touch it.
+		await writeFile(lock, JSON.stringify({ pid: process.pid, ts: Date.now(), token: "fresh" }));
+		await breakIfStale(lock);
+		expect(await readFile(lock, "utf-8")).toContain("fresh");
+	});
+	it("a writer releases only a lock that still carries ITS token, never its successor's", async () => {
+		await writeLog(start(SID, T0));
+		const lock = `${logFile()}.lock`;
+		const { withLock } = (await lib()) as unknown as {
+			withLock(log: string, fn: () => Promise<void>): Promise<void>;
+		};
+		await withLock(logFile(), async () => {
+			// While this writer holds it, the lock is replaced (as if broken and re-taken).
+			await writeFile(
+				lock,
+				JSON.stringify({ pid: process.pid, ts: Date.now(), token: "successor" }),
+			);
+		});
+		// mutant: an unconditional unlink removes the successor's lock
+		expect(await readFile(lock, "utf-8")).toContain("successor");
+	});
+	it("a lock exists with its content from the first instant, and no temp file is left", async () => {
+		await writeLog(start(SID, T0));
+		const { withLock } = (await lib()) as unknown as {
+			withLock(log: string, fn: () => Promise<void>): Promise<void>;
+		};
+		await withLock(logFile(), async () => {
+			const held = JSON.parse(await readFile(`${logFile()}.lock`, "utf-8"));
+			expect(held).toMatchObject({ pid: process.pid });
+			expect(typeof held.token).toBe("string");
+		});
+		expect((await readdir(join(state, "jobs"))).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+		await expect(readFile(`${logFile()}.lock`, "utf-8")).rejects.toThrow();
+	});
+	it("many writers racing over one dead lock all append exactly once, into a valid log (a smoke test: the deterministic ones above carry the claim)", async () => {
 		await writeLog(start(SID, Date.now()));
-		await writeFile(`${logFile()}.lock`, JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now() }));
+		await writeFile(
+			`${logFile()}.lock`,
+			JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now(), token: "dead" }),
+		);
 		const { appendJobOp, parseJobLog } = await lib();
 		const results = await Promise.all(
 			Array.from({ length: 8 }, (_, i) => appendJobOp(SID, "start", `job-${i}`, { waitMs: 3000 })),
@@ -1515,6 +1598,83 @@ describe("usertrust-job start/stop — a write failure is reported through the s
 		// and nothing was recorded
 		expect(await readFile(join(jobs, "s1.jsonl"), "utf-8")).not.toContain("job-a");
 	}, 30_000);
+});
+
+describe("B-96 and B-88's remaining arms", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) +
+		op(SID, T0 + 1000, "start", J) +
+		op(SID, T0 + 3000, "start", "bug-2") +
+		op(SID, T0 + 6000, "stop", null);
+	const principal = { origin: `claude-code:${SID}` };
+	const call = (job: string, from: number, to: number, cost: number) => ({
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost,
+			job,
+			principal,
+			usageFrom: iso(T0 + from),
+			usageTo: iso(T0 + to),
+		},
+	});
+	it("one transfer whose llm_calls name TWO jobs is a gap in each job's report", async () => {
+		const { jobCoverage } = await lib();
+		const records = [call(J, 1500, 2500, 57), call("bug-2", 3500, 4500, 50)];
+		for (const job of [J, "bug-2"]) {
+			const r = jobCoverage({ job, logs: { [SID]: logText }, records });
+			expect(gapText(r), job).toContain("attributed to multiple jobs"); // mutant: counted per job after filtering
+		}
+		// control: two different transfers, one per job
+		const ok = [
+			call(J, 1500, 2500, 57),
+			{
+				...call("bug-2", 3500, 4500, 50),
+				data: { ...call("bug-2", 3500, 4500, 50).data, transferId: "tx_2" },
+			},
+		];
+		expect(gapText(jobCoverage({ job: J, logs: { [SID]: logText }, records: ok }))).not.toContain(
+			"multiple jobs",
+		);
+	});
+	it("a give-back of no known job from a session with NO usable log is a gap", async () => {
+		const { jobCoverage } = await lib();
+		const given = {
+			kind: "hold_released",
+			actor: "claude-code:sess-9:main:main",
+			data: {
+				transferId: "tx_9",
+				principal: { origin: "claude-code:sess-9" },
+				usageFrom: iso(T0 + 9000),
+			},
+		};
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [call(J, 1500, 2500, 5), given],
+		});
+		// mutant: the log-less arm is skipped
+		expect(gapText(r)).toContain(
+			"session sess-9: a released hold of no known job, usage unconfirmed",
+		);
+	});
+	it("a give-back of no known job and NO usageFrom, in a session that records usage times, is a gap", async () => {
+		const { jobCoverage } = await lib();
+		const given = {
+			kind: "hold_released",
+			actor: `claude-code:${SID}:main:main`,
+			data: { transferId: "tx_9", principal },
+		};
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [call(J, 1500, 2500, 5), given],
+		});
+		// mutant: the missing-usageFrom arm is skipped (`capable` → false)
+		expect(gapText(r)).toContain("a released hold of no known job, usage unconfirmed");
+	});
 });
 
 describe("the lock and the log tail — review hardening", () => {
