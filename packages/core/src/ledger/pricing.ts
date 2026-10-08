@@ -70,7 +70,8 @@ export interface ModelRates {
  */
 export const PRICING_TABLE: Record<string, ModelRates> = {
 	// ── Anthropic ──
-	// Every row below was re-derived on 2026-10-07 from Anthropic's published
+	// Every row below was re-derived on 2026-10-07 (and the 1-hour write column re-read
+	// raw on 2026-10-08, all 20 models, which is why the table version is 2026-10-08) from Anthropic's published
 	// model-pricing table (platform.claude.com/docs/en/about-claude/pricing),
 	// $/MTok x 10 = usertokens per 1k. Published multipliers: 5-minute cache write
 	// 1.25x base input; cache read 0.1x base input EXCEPT 0.05x on Opus 5.5 and
@@ -349,7 +350,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
  * Bump on every entry change; recorded on receipts so a metered cost can be
  * reproduced against the exact table that priced it.
  */
-export const PRICING_TABLE_VERSION = "2026-10-07";
+export const PRICING_TABLE_VERSION = "2026-10-08";
 
 /**
  * Reduce a model id to its base table key. Strips EXACTLY ONE trailing date

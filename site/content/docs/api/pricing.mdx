@@ -12,7 +12,7 @@ A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.0
 ## Pricing Table
 
 The SDK includes a 42-model pricing table in `ledger/pricing.ts`, current as of
-`PRICING_TABLE_VERSION = "2026-10-07"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
+`PRICING_TABLE_VERSION = "2026-10-08"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
 Rates are in usertokens per 1,000 LLM tokens, across **four tiers**: input (fresh prompt tokens),
 output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation prompt tokens). A
 `—` means the provider publishes no rate for that tier — it is **not** free; see
@@ -45,7 +45,8 @@ output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation pr
 | `claude-3-5-haiku` (retired) | 8 | 40 | 0.8 | 10 | 16 |
 
 Rates re-verified against Anthropic's published pricing page
-(`platform.claude.com/docs/en/about-claude/pricing`) on 2026-10-07.
+(`platform.claude.com/docs/en/about-claude/pricing`) on 2026-10-07; the 1-hour write column was re-read
+raw on 2026-10-08.
 
 Anthropic publishes cache-read at 0.1x base input and 5-minute cache-write at 1.25x, with three
 published exceptions on cache reads: **0.05x** on `claude-opus-5-5` and `claude-sonnet-5-5`, and

@@ -393,7 +393,10 @@ describe("PRICING_TABLE_VERSION", () => {
 		// opus-4-8).
 		// 2026-10-07: Sonnet 5 corrected to $2/$10; exact rows for the 5.5 / 5.1
 		// generation, Mythos, Haiku 5.5 and the older Opus/Sonnet/Haiku ids.
-		expect(PRICING_TABLE_VERSION).toBe("2026-10-07");
+		// 2026-10-08: the 1-hour cache-write column (cacheWrite1hPer1k) was added to the
+		// Anthropic rows after v4.0.0 shipped with 2026-10-07; one version string must not
+		// label two different tables.
+		expect(PRICING_TABLE_VERSION).toBe("2026-10-08");
 	});
 });
 
