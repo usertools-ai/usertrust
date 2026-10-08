@@ -3571,7 +3571,13 @@ function graftParseHooks(
 		try {
 			const parse = (from as { parse?: unknown }).parse;
 			if (typeof parse === "function") {
-				Object.defineProperty(to, "parse", { value: parse, enumerable: false, configurable: true });
+				// Bound to the ORIGINAL format: the SDK calls `format.parse(...)`, and a parser that
+				// keeps private or non-enumerable state would otherwise run against this snapshot.
+				Object.defineProperty(to, "parse", {
+					value: (parse as (...a: unknown[]) => unknown).bind(from),
+					enumerable: false,
+					configurable: true,
+				});
 			}
 		} catch {
 			// A getter that throws on `parse` leaves the snapshot without it: the stream then

@@ -253,4 +253,28 @@ describe("a governed call keeps the structured-output parse hook the SDK reads c
 			expect(parsedOutput(message)).toEqual(EXPECTED);
 		});
 	}
+
+	// A custom format whose `parse` keeps private state must run against ITS OWN receiver, not
+	// the plain-data snapshot the hook was grafted onto.
+	it("messages.stream with a receiver-dependent parser: parse runs on the original format", async () => {
+		class StatefulFormat {
+			readonly type = "json_schema";
+			readonly schema = { type: "object", properties: {} };
+			#seen = 0;
+			parse(content: string): unknown {
+				this.#seen += 1; // throws a TypeError if `this` is not a StatefulFormat
+				return { ...(JSON.parse(content) as object), seen: this.#seen };
+			}
+		}
+		const governed = await governedClient();
+		const stream = await (
+			governed as unknown as { messages: { stream: StreamCall } }
+		).messages.stream({
+			...base,
+			output_config: { format: new StatefulFormat() },
+		});
+		const message = await stream.finalMessage();
+		await governed.destroy();
+		expect(parsedOutput(message)).toEqual({ ...EXPECTED, seen: 1 });
+	});
 });
