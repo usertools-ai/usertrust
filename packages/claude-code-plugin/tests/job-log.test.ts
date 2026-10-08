@@ -230,7 +230,7 @@ describe("test 4 — a torn tail is INVALID, never ignored and never repaired", 
 	});
 });
 
-describe("ORDER IS POSITION (B-99)", () => {
+describe("ORDER IS POSITION", () => {
 	it("a line stamped EARLIER than the line before it does not backdate: its effective time is clamped", async () => {
 		// start@T0+500 sits AFTER session-start@T0+1000 in the file: it takes effect at +1000.
 		await writeLog(start(SID, T0 + 1000) + op(SID, T0 + 500, "start", "job-a"));
@@ -1133,7 +1133,7 @@ describe("jobCoverage — transfers, and the evidence being there at all", () =>
 	});
 });
 
-describe("interval keys are POSITIONS, not stamps (B-102)", () => {
+describe("interval keys are POSITIONS, not stamps", () => {
 	it("after a backward clock step two intervals of one job still get different keys", async () => {
 		// start A@+100, start B@+200, stop@+300, start A@+100 again: the last is clamped to +300.
 		await writeLog(
@@ -1168,7 +1168,7 @@ describe("interval keys are POSITIONS, not stamps (B-102)", () => {
 	});
 });
 
-describe("a clock that stepped backwards is a known gap (B-105)", () => {
+describe("a clock that stepped backwards is a known gap", () => {
 	const J = "job-a";
 	const principal = { origin: `claude-code:${SID}` };
 	const rec = (from: number, to: number) => ({
@@ -1230,7 +1230,7 @@ describe("a clock that stepped backwards is a known gap (B-105)", () => {
 	});
 });
 
-describe("the writers, through their real entry points (B-106)", () => {
+describe("the writers, through their real entry points", () => {
 	it("SessionStart creates the log O_EXCL: 20 racing writers leave exactly one session-start", async () => {
 		const { writeSessionStart } = (await lib()) as unknown as {
 			writeSessionStart(sid: string, source: string): Promise<string>;
@@ -1553,7 +1553,7 @@ describe("usertrust-job coverage — C1 bytes are escaped in its output", () => 
 	});
 });
 
-describe("generators with their own test (B-90)", () => {
+describe("generators with their own test", () => {
 	const J = "bug-1";
 	const logText =
 		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
@@ -1610,7 +1610,7 @@ describe("generators with their own test (B-90)", () => {
 			"an llm_call in the interval has an invalid job state",
 		);
 	});
-	it("a released hold with no class, no job and a start inside the interval is a gap; unused or another job's is not (B-88)", async () => {
+	it("a released hold with no class, no job and a start inside the interval is a gap; unused or another job's is not", async () => {
 		const given = (extra: Record<string, unknown>) => ({
 			kind: "hold_released",
 			actor: base.actor,
@@ -1631,7 +1631,7 @@ describe("generators with their own test (B-90)", () => {
 	});
 });
 
-describe("hot paths cannot be broken by a long backlog (B-86)", () => {
+describe("hot paths cannot be broken by a long backlog", () => {
 	it("usageSpan over 200,000 messages does not throw", async () => {
 		const { usageSpan } = (await import(pathToFileURL(join(HOOKS, "transcript.mjs")).href)) as {
 			usageSpan(m: Array<{ ts: number | null }>): { usageFrom?: string; usageTo?: string };
@@ -1643,7 +1643,7 @@ describe("hot paths cannot be broken by a long backlog (B-86)", () => {
 	});
 });
 
-describe("usertrust-job start/stop — a write failure is reported through the scrubber (B-93)", () => {
+describe("usertrust-job start/stop — a write failure is reported through the scrubber", () => {
 	// A read-only log does not stop root: SKIPPED there, never vacuously passed.
 	it.skipIf(process.getuid?.() === 0)(
 		"an unwritable log under a state dir holding ESC and C1: exit 1, no stack, no raw control bytes",
@@ -1690,7 +1690,7 @@ describe("usertrust-job start/stop — a write failure is reported through the s
 	);
 });
 
-describe("a sessionless give-back without proof is a gap (B-110)", () => {
+describe("a sessionless give-back without proof is a gap", () => {
 	const J = "bug-1";
 	const logText =
 		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
@@ -1737,7 +1737,7 @@ describe("a sessionless give-back without proof is a gap (B-110)", () => {
 	});
 });
 
-describe("recordWatchEvent has no default start (B-108)", () => {
+describe("recordWatchEvent has no default start", () => {
 	it("an event that does not state its start is written with started null, never this hook's time", async () => {
 		const { recordWatchEvent } = (await import(pathToFileURL(join(HOOKS, "lib.mjs")).href)) as {
 			recordWatchEvent(e: Record<string, unknown>): Promise<boolean>;
@@ -1760,7 +1760,7 @@ describe("recordWatchEvent has no default start (B-108)", () => {
 	});
 });
 
-describe("capability.json is replaced atomically (B-100)", () => {
+describe("capability.json is replaced atomically", () => {
 	it("during a replace the reader sees the OLD content whole, never an empty or half-written file", async () => {
 		const target = join(state, "capability.json");
 		await writeFile(target, '{"a":true}');
@@ -1804,7 +1804,7 @@ describe("capability.json is replaced atomically (B-100)", () => {
 	});
 });
 
-describe("B-96 and B-88's remaining arms", () => {
+describe("a transfer under two jobs, and the give-back arms", () => {
 	const J = "bug-1";
 	const logText =
 		start(SID, T0) +

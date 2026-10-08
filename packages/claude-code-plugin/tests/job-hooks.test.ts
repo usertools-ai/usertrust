@@ -537,7 +537,7 @@ describe("an expired estimate hold's replacement: the call RAN, so every way it 
 		await run("post-tool-use.mjs", post("tu_1"), env);
 	}
 
-	it("the replacement authorize is refused: a call-ran gap (B-91)", async () => {
+	it("the replacement authorize is refused: a call-ran gap", async () => {
 		await expired((path) =>
 			path === "/v1/authorize" ? { status: 503, json: { error: "down" } } : undefined,
 		);
@@ -556,7 +556,7 @@ describe("an expired estimate hold's replacement: the call RAN, so every way it 
 			(await watch()).filter((e) => e.kind === "gap" && e.releaseClass === "call-ran"),
 		).toHaveLength(1);
 	});
-	it("the replacement's id is malformed: released as call-ran (not unused), and a gap (B-87)", async () => {
+	it("the replacement's id is malformed: released as call-ran (not unused), and a gap", async () => {
 		await expired((path) =>
 			path === "/v1/authorize"
 				? { status: 200, json: { transferId: "bad id!", estimatedCost: 1 } }
@@ -587,7 +587,7 @@ describe("an expired estimate hold's replacement: the call RAN, so every way it 
 			(await watch()).filter((e) => e.kind === "gap" && e.releaseClass === "call-ran"),
 		).toHaveLength(1); // mutant: no gap
 	});
-	it("a replacement whose settle goes unanswered carries the call's job and start, so Stop's gap is placed by them (B-89)", async () => {
+	it("a replacement whose settle goes unanswered carries the call's job and start, so Stop's gap is placed by them", async () => {
 		await expired((path) =>
 			path === "/v1/settle" ? { status: 503, json: { error: "down" } } : undefined,
 		);
@@ -602,7 +602,7 @@ describe("an expired estimate hold's replacement: the call RAN, so every way it 
 	});
 });
 
-describe("a resumed call's earlier hold is only ENDED, so an unconfirmed release reads unused (B-103)", () => {
+describe("a resumed call's earlier hold is only ENDED, so an unconfirmed release reads unused", () => {
 	it("the earlier hold's release gets a 500: at Stop it is given back as unused, with no call-ran gap", async () => {
 		await startFake();
 		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
@@ -645,7 +645,7 @@ describe("a resumed call's earlier hold is only ENDED, so an unconfirmed release
 	});
 });
 
-describe("a give-back's gap is placed by when the call STARTED, even with no job capability (B-104)", () => {
+describe("a give-back's gap is placed by when the call STARTED, even with no job capability", () => {
 	const env = { UT_CC_USAGE: "estimate" };
 	const gapsOf = async () =>
 		(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
@@ -679,7 +679,7 @@ describe("a give-back's gap is placed by when the call STARTED, even with no job
 	});
 });
 
-describe("a watch record never defaults its start to the hook that wrote it (B-108)", () => {
+describe("a watch record never defaults its start to the hook that wrote it", () => {
 	const watch = async () =>
 		(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
 			.split("\n")
@@ -731,7 +731,7 @@ describe("a watch record never defaults its start to the hook that wrote it (B-1
 	});
 });
 
-describe("a `.releasing` hold is given back by Stop in EVERY mode (B-113)", () => {
+describe("a `.releasing` hold is given back by Stop in EVERY mode", () => {
 	it("an EMPTY transcript hold whose resume-time release fails: Stop gives it back unused, the file is gone, and the call is no longer refused", async () => {
 		await startFake();
 		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
@@ -765,7 +765,7 @@ describe("a `.releasing` hold is given back by Stop in EVERY mode (B-113)", () =
 	});
 });
 
-describe("ONE answer path labels every call and message (B-117, B-120)", () => {
+describe("ONE answer path labels every call and message", () => {
 	/** The same fixture for every path: a switch to job-b stamped far ahead (suspect) or normally. */
 	async function fixture(suspect: boolean) {
 		await startFake();
@@ -824,7 +824,7 @@ describe("ONE answer path labels every call and message (B-117, B-120)", () => {
 	});
 });
 
-describe("a skew seen during PreToolUse leaves a durable gap (B-121)", () => {
+describe("a skew seen during PreToolUse leaves a durable gap", () => {
 	const watch = async () =>
 		(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
 			.split("\n")
@@ -870,7 +870,7 @@ describe("a skew seen during PreToolUse leaves a durable gap (B-121)", () => {
 	});
 });
 
-describe("the skew check uses the clock that READ the log (B-114)", () => {
+describe("the skew check uses the clock that READ the log", () => {
 	it("a sibling that switches jobs while this hook waits on a slow probe does not make the known job unknown", async () => {
 		await startFake();
 		healthDelayMs = 1600;
@@ -886,8 +886,8 @@ describe("the skew check uses the clock that READ the log (B-114)", () => {
 	}, 30_000);
 });
 
-describe("estimate holds left behind are never lost silently (B-111, B-112)", () => {
-	it("an estimate `.settling` stale enough for the journal's sweep still leaves its call-ran gap (B-111)", async () => {
+describe("estimate holds left behind are never lost silently", () => {
+	it("an estimate `.settling` stale enough for the journal's sweep still leaves its call-ran gap", async () => {
 		await startFake();
 		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
 		await mkdir(stateDir, { recursive: true });
@@ -916,7 +916,7 @@ describe("estimate holds left behind are never lost silently (B-111, B-112)", ()
 		expect(gaps[0]).toMatchObject({ releaseClass: "call-ran", started: iso(at(-30)) });
 		expect(await readdir(stateDir)).not.toContain(`${SESSION}__main__tu_9.tx_9.settling`);
 	});
-	it("a log stamped by a clock far AHEAD of this one makes the call's job unknown (B-112)", async () => {
+	it("a log stamped by a clock far AHEAD of this one makes the call's job unknown", async () => {
 		await startFake();
 		await writeLog(logLine(at(-50), "session-start", null), logLine(at(60), "start", "job-a"));
 		await run("pre-tool-use.mjs", pre("tu_1"), { UT_CC_USAGE: "estimate" });
