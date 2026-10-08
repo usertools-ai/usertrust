@@ -306,7 +306,9 @@ async function readCursor(agentId = "main"): Promise<Cursor> {
 }
 /** Pending-hold files (live), excluding the transcripts dir. */
 async function holdFiles() {
-	return (await readdir(stateDir)).filter((n) => n !== "transcripts").sort();
+	// `watch.jsonl` is the plugin's watch log (a give-back of a hold whose call ran writes a gap
+	// record there), not a hold.
+	return (await readdir(stateDir)).filter((n) => n !== "transcripts" && n !== "watch.jsonl").sort();
 }
 
 beforeEach(async () => {
@@ -2112,7 +2114,10 @@ describe("estimate holds", () => {
 					"/v1/settle",
 				]);
 				// Nothing is left but the squatter: no hold, no claim, no partial write.
-				expect((await readdir(stateDir)).filter((n) => n !== "transcripts")).toEqual([squat]);
+				// (The watch log holds the gap this unrecorded call leaves: it is not a hold.)
+				expect(
+					(await readdir(stateDir)).filter((n) => n !== "transcripts" && n !== "watch.jsonl"),
+				).toEqual([squat]);
 			});
 		}
 
