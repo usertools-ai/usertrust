@@ -198,7 +198,11 @@ async function parent(hook) {
 	useSession(session.settings);
 	known.settings = session.settings;
 	if (session.path !== null) touchPin(session.path);
-	if (hook === "session-start") sweep({ passwdHome: home, uid });
+	if (hook === "session-start") {
+		// An environment session may keep its pins under its state dir (session.mjs).
+		const stateDir = session.kind === "environment" ? session.settings.stateDir : null;
+		sweep({ passwdHome: home, uid, stateDir });
+	}
 	const sends = hook !== "session-start";
 	if (session.kind === "configured" && session.settings.refused === null && sends) {
 		const unsupported = childUnsupported();

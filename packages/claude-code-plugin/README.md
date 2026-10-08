@@ -179,6 +179,11 @@ The settings are kept in a pin: `.local/state/usertrust/sessions/<session id>.js
 under your home as the passwd database gives it.
 - It is a regular file of yours with no group or other permission bits, in
   directories that are yours and writable by no one else.
+- A session configured through the environment whose passwd home cannot hold its
+  pin (a container user with no passwd entry, say, or a home that fails these
+  checks) keeps it under its state dir instead: `<state dir>/sessions/`, checked the
+  same way. That is the one place it already needed. A configured session's pin
+  stays under the passwd home, where no environment can move it.
 - A configured session's pin holds the file's settings, key included: the key is in
   the config file already.
 - An environment session's pin holds the key's hash, never the key. Each hook reads
@@ -189,12 +194,19 @@ under your home as the passwd database gives it.
   settings then current.
 - A config file that is refused is not pinned: the next hook reads it again.
 
-**A pin that cannot be used runs the hook watch-only and key-less, with a gap.**
-That covers a session id that is not a safe file name, a directory or file that
-fails these checks, a corrupt pin, and a filesystem without hard links. The reason
-is one of `pin: session id refused`, `pin: dir refused (<what>)`,
-`pin: unreadable`, `pin: corrupt`, `pin: unwritable` and `pin: no hard links`. The
-hook never reads the settings afresh in its place, which could move the state dir.
+**A pin that cannot be used runs the hook key-less: it sends nothing, and records a
+gap.** That covers a session id that is not a safe file name, a directory or file
+that fails these checks, a corrupt pin, and a filesystem without hard links. The
+reason is one of `pin: session id refused`, `pin: dir refused (<what>)`,
+`pin: state dir refused (<what>)`, `pin: unreadable`, `pin: corrupt`,
+`pin: unwritable` and `pin: no hard links`; for an environment session whose passwd
+home and state dir both failed, both, separated by `; `. The hook never reads the
+settings afresh in its place, which could move the state dir.
+- **Its mode is still the session's,** as its environment or config file says now,
+  or as its pin says for `pin: key changed`. An enforce session blocks every tool
+  call (with `failOpen`, lets each through as a gap) and says so at session start: it
+  never silently stops enforcing.
+- **A refused config file names no mode,** so its session runs watch-only.
 
 ## Real usage: what is settled, and how
 

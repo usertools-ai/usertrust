@@ -66,6 +66,7 @@ interface SessionModule {
 	sweep(input: {
 		passwdHome: string | null;
 		uid: number | null;
+		stateDir?: string | null;
 		now?: number;
 		idleMs?: number;
 		limit?: number;
@@ -148,9 +149,10 @@ afterEach(() => {
  * A usertrust server that records every request: each authorize a fresh hold
  * (`tx_<n>`), each settle and release a success. With `keyed`, it advertises and
  * honours idempotency keys: a key it has charged answers 409 `already_settled`.
- * Otherwise it advertises the bundled server's own list, which has no keys.
+ * Otherwise it advertises the bundled server's own list, which has no keys. With
+ * `deny`, every authorize is refused for budget (402).
  */
-async function recordingServer({ keyed = false } = {}) {
+async function recordingServer({ keyed = false, deny = false } = {}) {
 	const requests: Request[] = [];
 	const charged = new Set<string>();
 	let next = 0;
@@ -171,7 +173,10 @@ async function recordingServer({ keyed = false } = {}) {
 			if (path === "/v1/health") json = { status: "ok", capabilities };
 			else if (path === "/v1/authorize") {
 				const key = typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined;
-				if (keyed && key !== undefined && charged.has(key)) {
+				if (deny) {
+					status = 402;
+					json = { error: "budget_exceeded", reason: "over budget" };
+				} else if (keyed && key !== undefined && charged.has(key)) {
 					status = 409;
 					json = { error: "already_settled", reason: "this key's charge already stands" };
 				} else {
@@ -554,11 +559,14 @@ describe("a pin that cannot be used runs the hook refused: key-less, a gap, noth
 		tool_input: {},
 	});
 
-	async function refusedRun(prepare: (home: string) => Promise<void>, session = SESSION) {
+	async function refusedRun(
+		prepare: (home: string, stateDir: string) => Promise<void>,
+		session = SESSION,
+	) {
 		const home = await makeHome();
 		const server = await recordingServer();
 		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-refuse-"));
-		await prepare(home);
+		await prepare(home, stateDir);
 		const result = await runHook(hook("pre-tool-use"), call(session), {
 			UT_CC_STATE_DIR: stateDir,
 			UT_SERVER_URL: server.url,
@@ -579,20 +587,25 @@ describe("a pin that cannot be used runs the hook refused: key-less, a gap, noth
 		}
 	});
 
-	it("a sessions dir that is a symlink, or writable by its group", async () => {
+	it("a sessions dir that is a symlink, or writable by its group, and a state dir that cannot take the pin either", async () => {
+		// An environment session pins under its state dir when the passwd home cannot
+		// (below): it is refused only when that fails too, and the reason names both.
+		const groupWritable = async (dir: string) => chmod(dir, 0o770);
 		expect(
-			await refusedRun(async (home) => {
+			await refusedRun(async (home, stateDir) => {
 				const elsewhere = await mkdtemp(join(tmpdir(), "utcc-pin-elsewhere-"));
 				await mkdir(join(home, ".local", "state", "usertrust"), { recursive: true });
 				await symlink(elsewhere, pinsOf(home));
+				await groupWritable(stateDir);
 			}),
-		).toBe("pin: dir refused (symlink)");
+		).toBe("pin: dir refused (symlink); pin: state dir refused (mode)");
 		expect(
-			await refusedRun(async (home) => {
+			await refusedRun(async (home, stateDir) => {
 				await mkdir(pinsOf(home), { recursive: true });
-				await chmod(pinsOf(home), 0o770);
+				await groupWritable(pinsOf(home));
+				await groupWritable(stateDir);
 			}),
-		).toBe("pin: dir refused (mode)");
+		).toBe("pin: dir refused (mode); pin: state dir refused (mode)");
 	});
 
 	it("a corrupt pin, one others can read, and one that is a link", async () => {
@@ -619,6 +632,234 @@ describe("a pin that cannot be used runs the hook refused: key-less, a gap, noth
 	});
 });
 
+describe("a session that cannot pin keeps its mode: enforce never silently stops enforcing", () => {
+	const call = (tool_use_id = "tu_1") => ({
+		session_id: SESSION,
+		tool_name: "Bash",
+		tool_use_id,
+		tool_input: {},
+	});
+	/** An environment session in enforce mode, unless `more` says otherwise. */
+	const enforce = (url: string, stateDir: string, more: Record<string, string> = {}) => ({
+		UT_CC_STATE_DIR: stateDir,
+		UT_SERVER_URL: url,
+		UT_SERVER_KEY: "k",
+		UT_CC_USAGE: "estimate",
+		UT_CC_MODE: "enforce",
+		...more,
+	});
+	/** The call's permission decision, or "(none)" when the hook printed none. */
+	const decision = (stdout: string) =>
+		stdout === ""
+			? "(none)"
+			: (JSON.parse(stdout) as { hookSpecificOutput: { permissionDecision: string } })
+					.hookSpecificOutput.permissionDecision;
+	/** A HOME of the test's own: with no passwd home, a refused session's gaps go under it. */
+	const scratchHome = () => mkdtemp(join(tmpdir(), "utcc-pin-HOME-"));
+	const statePins = (stateDir: string) => join(nodeFs.realpathSync(stateDir), "sessions");
+
+	for (const [what, place] of [
+		["no passwd home at all", async () => ({ TEST_PASSWD_HOME: "", HOME: await scratchHome() })],
+		[
+			"a passwd home whose sessions dir its group can write",
+			async () => {
+				const home = await makeHome();
+				await mkdir(pinsOf(home), { recursive: true });
+				await chmod(pinsOf(home), 0o770);
+				return { TEST_PASSWD_HOME: home };
+			},
+		],
+	] as const) {
+		it(`an environment session with ${what} pins under its state dir, and is enforced: a deny still blocks`, async () => {
+			const server = await recordingServer({ deny: true });
+			const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-fallback-"));
+			const pre = await runHook(
+				hook("pre-tool-use"),
+				call(),
+				enforce(server.url, stateDir, await place()),
+			);
+			// mutant: no state-dir pin, so refused: nothing sent, exit 2
+			expect(server.posts("/v1/authorize")).toHaveLength(1);
+			expect(pre.code).toBe(0);
+			expect(decision(pre.stdout)).toBe("deny");
+			const pin = join(statePins(stateDir), `${SESSION}.json`);
+			expect(JSON.parse(await readFile(pin, "utf-8"))).toMatchObject({
+				kind: "environment",
+				settings: { mode: "enforce" },
+			});
+			expect((await stat(pin)).mode & 0o777).toBe(0o600);
+		});
+	}
+
+	it("both places unusable: an enforce PreToolUse fails closed and sends nothing; with failOpen it proceeds, as a gap", async () => {
+		const server = await recordingServer();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-nowhere-"));
+		await chmod(stateDir, 0o770);
+		const HOME = await scratchHome();
+		const reason = "pin: dir refused (home); pin: state dir refused (mode)";
+		const nowhere = { TEST_PASSWD_HOME: "", HOME };
+		const strict = await runHook(
+			hook("pre-tool-use"),
+			call(),
+			enforce(server.url, stateDir, nowhere),
+		);
+		// mutant: a session that cannot pin runs watch-only: exit 0, the call let through
+		expect(strict.code).toBe(2);
+		expect(strict.stderr).toContain(`failed closed: ${reason}`);
+		const open = await runHook(
+			hook("pre-tool-use"),
+			call("tu_2"),
+			enforce(server.url, stateDir, { ...nowhere, UT_FAIL_OPEN: "1" }),
+		);
+		expect(open.code).toBe(0);
+		expect(server.requests).toEqual([]);
+		expect(await watchRecords(join(HOME, ".claude", "usertrust-cc"))).toMatchObject([
+			{ kind: "gap", tool: "Bash", reason },
+		]);
+	});
+
+	it("a corrupt pin under enforce: PreToolUse fails closed, and sends nothing", async () => {
+		const server = await recordingServer();
+		const home = await makeHome();
+		await mkdir(pinsOf(home), { recursive: true, mode: 0o700 });
+		await writeFile(pinOf(home), "{not a pin", { mode: 0o600 });
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-corrupt-"));
+		const pre = await runHook(
+			hook("pre-tool-use"),
+			call(),
+			enforce(server.url, stateDir, { TEST_PASSWD_HOME: home }),
+		);
+		// mutant: a corrupt pin runs watch-only: exit 0
+		expect(pre.code).toBe(2);
+		expect(pre.stderr).toContain("failed closed: pin: corrupt");
+		expect(server.requests).toEqual([]);
+	});
+
+	it("a key changed mid-session under enforce is blocked, in the PINNED mode", async () => {
+		const server = await recordingServer();
+		const home = await makeHome();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-key-enforce-"));
+		const env = enforce(server.url, stateDir, { TEST_PASSWD_HOME: home });
+		expect((await runHook(hook("pre-tool-use"), call(), env)).stderr).toContain("reserved tx_1");
+		const before = server.requests.length;
+		// The environment says watch now as well: the session's pin still says enforce.
+		const changed = await runHook(hook("pre-tool-use"), call("tu_2"), {
+			...env,
+			UT_SERVER_KEY: "another-key",
+			UT_CC_MODE: "watch",
+		});
+		// mutant: a changed key runs watch-only: exit 0
+		expect(changed.code).toBe(2);
+		expect(changed.stderr).toContain("failed closed: pin: key changed");
+		expect(server.requests).toHaveLength(before);
+	});
+
+	it("SessionStart says why: ENFORCING with nothing sent, every call blocked, or with failOpen let through as gaps", async () => {
+		const server = await recordingServer();
+		const home = await makeHome();
+		await mkdir(pinsOf(home), { recursive: true, mode: 0o700 });
+		await writeFile(pinOf(home), "{not a pin", { mode: 0o600 });
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-announce-"));
+		const start = async (more: Record<string, string> = {}) =>
+			(
+				JSON.parse(
+					(
+						await runHook(
+							hook("session-start"),
+							{ session_id: SESSION, source: "startup" },
+							enforce(server.url, stateDir, { TEST_PASSWD_HOME: home, ...more }),
+						)
+					).stdout,
+				) as { systemMessage: string }
+			).systemMessage;
+		const strict = await start();
+		// mutant: a refused session announces itself watch-only
+		expect(strict).toContain("usertrust: ENFORCING, but nothing can be sent");
+		expect(strict).toContain("pin: corrupt");
+		expect(strict).toContain("every tool call is blocked");
+		expect(await start({ UT_FAIL_OPEN: "1" })).toContain("every tool call proceeds ungoverned");
+	});
+
+	it("a configured session never pins under its state dir: refused, it keeps the file's mode", async () => {
+		const home = await makeHome();
+		const server = await recordingServer();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-cfg-home-only-"));
+		const config = await writeConfig(home, {
+			url: server.url,
+			key: "k",
+			mode: "enforce",
+			stateDir,
+			usage: "estimate",
+		});
+		await mkdir(pinsOf(home), { recursive: true });
+		await chmod(pinsOf(home), 0o770);
+		const pre = await runHook(hook("pre-tool-use"), call(), {
+			TEST_PASSWD_HOME: home,
+			UT_CC_CONFIG: config,
+		});
+		// mutant: a configured session pins under its state dir as well, and sends
+		expect(server.requests).toEqual([]);
+		expect(pre.code).toBe(2);
+		expect(pre.stderr).toContain("failed closed: pin: dir refused (mode)");
+		expect(nodeFs.existsSync(join(stateDir, "sessions"))).toBe(false);
+	});
+
+	it("a refused config file names no mode: watch-only, whatever the environment says", async () => {
+		const server = await recordingServer();
+		const home = await makeHome();
+		const pre = await runHook(hook("pre-tool-use"), call(), {
+			TEST_PASSWD_HOME: home,
+			UT_CC_CONFIG: "",
+			UT_CC_MODE: "enforce",
+			UT_SERVER_URL: server.url,
+		});
+		expect(pre.code).toBe(0);
+		expect(server.requests).toEqual([]);
+		expect(await watchRecords(join(home, ".claude", "usertrust-cc"))).toMatchObject([
+			{ kind: "gap", reason: "config: empty" },
+		]);
+	});
+
+	it("a pin already under the state dir is the session's, even once the passwd home could take one", async () => {
+		const server = await recordingServer({ deny: true });
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-stays-"));
+		const HOME = await scratchHome();
+		await runHook(
+			hook("pre-tool-use"),
+			call(),
+			enforce(server.url, stateDir, { TEST_PASSWD_HOME: "", HOME }),
+		);
+		expect(nodeFs.readdirSync(statePins(stateDir))).toEqual([`${SESSION}.json`]);
+		// A passwd home appears, and the environment says watch now: the pin still decides.
+		const home = await makeHome();
+		const later = await runHook(
+			hook("pre-tool-use"),
+			call("tu_2"),
+			enforce(server.url, stateDir, { TEST_PASSWD_HOME: home, UT_CC_MODE: "watch" }),
+		);
+		// mutant: the passwd home pins it again, from the settings now: watch, so no deny
+		expect(decision(later.stdout)).toBe("deny");
+		expect(nodeFs.existsSync(pinOf(home))).toBe(false);
+	});
+
+	it("SessionStart sweeps an environment session's state-dir pins too", async () => {
+		const server = await recordingServer();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-sweep-start-"));
+		const pins = join(nodeFs.realpathSync(stateDir), "sessions");
+		await mkdir(pins, { mode: 0o700 });
+		await writeFile(join(pins, "idle.json"), "{}", { mode: 0o600 });
+		const old = new Date(Date.now() - 31 * 24 * 3600_000);
+		await utimes(join(pins, "idle.json"), old, old);
+		await runHook(
+			hook("session-start"),
+			{ session_id: SESSION, source: "startup" },
+			enforce(server.url, stateDir, { TEST_PASSWD_HOME: "", HOME: await scratchHome() }),
+		);
+		// mutant: SessionStart sweeps the passwd home's pins only
+		expect((await readdir(pins)).sort()).toEqual([`${SESSION}.json`]);
+	});
+});
+
 describe("session.mjs, unit by unit", () => {
 	const envSession = (stateDir: string, key = "k") => ({
 		UT_CC_STATE_DIR: stateDir,
@@ -626,9 +867,10 @@ describe("session.mjs, unit by unit", () => {
 		UT_SERVER_KEY: key,
 	});
 
-	it("a foreign-owned sessions dir is refused (an owner the user is not)", async () => {
+	it("a foreign-owned sessions dir is refused (an owner the user is not), the state dir's too", async () => {
 		const { sessionSettings } = await sessionModule();
 		const home = await makeHome();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-owner-"));
 		const fs = {
 			...nodeFs,
 			lstatSync: (path: string) => {
@@ -643,19 +885,20 @@ describe("session.mjs, unit by unit", () => {
 			},
 		};
 		const { settings, kind } = sessionSettings({
-			env: envSession("/tmp/x"),
+			env: envSession(stateDir),
 			payload: { session_id: SESSION },
 			passwdHome: home,
 			uid: UID,
 			fs,
 		});
 		expect(kind).toBeNull();
-		expect(settings.refused).toBe("pin: dir refused (owner)");
+		expect(settings.refused).toBe("pin: dir refused (owner); pin: state dir refused (owner)");
 	});
 
-	it("no hard links: refused, never a pin written in two steps", async () => {
+	it("no hard links: refused, never a pin written in two steps, in either place", async () => {
 		const { sessionSettings } = await sessionModule();
 		const home = await makeHome();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-nolink-"));
 		const fs = {
 			...nodeFs,
 			linkSync: () => {
@@ -663,14 +906,15 @@ describe("session.mjs, unit by unit", () => {
 			},
 		};
 		const { settings } = sessionSettings({
-			env: envSession("/tmp/x"),
+			env: envSession(stateDir),
 			payload: { session_id: SESSION },
 			passwdHome: home,
 			uid: UID,
 			fs,
 		});
-		expect(settings.refused).toBe("pin: no hard links");
+		expect(settings.refused).toBe("pin: no hard links; pin: state dir has no hard links");
 		expect(nodeFs.readdirSync(pinsOf(home))).toEqual([]);
+		expect(nodeFs.readdirSync(join(nodeFs.realpathSync(stateDir), "sessions"))).toEqual([]);
 	});
 
 	it("a home the system reaches through a symlink is followed: the pin lives under its real path", async () => {
@@ -730,6 +974,24 @@ describe("session.mjs, unit by unit", () => {
 				uid: UID,
 			}).settings.stateDir,
 		).toBe("/tmp/second");
+	});
+
+	it("the sweep takes an environment session's state-dir pins too, only when given that dir", async () => {
+		const { sweep } = await sessionModule();
+		const home = await makeHome();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-pin-sweep-state-"));
+		const pins = join(nodeFs.realpathSync(stateDir), "sessions");
+		await mkdir(pins, { mode: 0o700 });
+		for (const name of ["idle.json", "fresh.json"]) {
+			await writeFile(join(pins, name), "{}", { mode: 0o600 });
+		}
+		const now = Date.now();
+		const old = new Date(now - 31 * 24 * 3600_000);
+		await utimes(join(pins, "idle.json"), old, old);
+		expect(sweep({ passwdHome: home, uid: UID, now })).toBe(0);
+		// mutant: the state dir is never swept
+		expect(sweep({ passwdHome: home, uid: UID, stateDir, now })).toBe(1);
+		expect((await readdir(pins)).sort()).toEqual(["fresh.json"]);
 	});
 
 	it("the sweep removes pins idle past 30 days and a crashed publish's temp files, at most `limit`, and keeps the rest", async () => {

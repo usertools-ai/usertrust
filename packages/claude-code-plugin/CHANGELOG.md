@@ -83,12 +83,17 @@ npm, and its version is its own: the `usertrust` packages and their
   environment alike, and an edit applies to new sessions, a key rotation included.
   - They are kept in a pin under the passwd home:
     `.local/state/usertrust/sessions/<session id>.json`, 0600, in directories
-    checked as the config anchor is.
+    checked as the config anchor is. A session configured through the environment
+    whose passwd home cannot hold its pin keeps it under its state dir instead,
+    checked the same way, so it needs nothing 1.4.1 did not.
   - An environment session's pin holds the key's hash, never the key. A key changed
     mid-session is refused for that hook: it sends nothing, and records a gap.
   - A pin unused for 30 days is removed when a session starts; that session, if
     resumed at or after the removal, is pinned again from the settings then current.
-    A pin that cannot be used runs the hook watch-only and key-less, with a gap.
+  - A pin that cannot be used runs the hook key-less: it sends nothing, in the
+    session's own mode. An enforce session blocks every call (with `failOpen`, lets
+    each through as a gap), and never silently stops enforcing. Only a refused config
+    file, whose mode is unknown, runs watch-only.
   - Every hook now starts through `hooks/launch.mjs`.
   - `usertrust-job` reads a session's settings from the same pin, so `start` and
     `stop` write to the job log the session's hooks read, whatever the state dir
