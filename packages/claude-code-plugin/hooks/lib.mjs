@@ -588,7 +588,12 @@ async function settlingRecords(sessionId, agentId) {
  * transcript hold's `.settling` belongs to the transcript journal instead.
  */
 async function settlingEstimates(sessionId, agentId) {
-	return (await settlingRecords(sessionId, agentId)).filter((record) => !record.transcript);
+	// A `.releasing` hold (claimed only to END a deferred call's earlier hold) is Stop's to give
+	// back whatever mode made it: it has no usage by construction, so the transcript/estimate split
+	// does not apply, and nothing else (the journal, the sweep) ever reads it.
+	return (await settlingRecords(sessionId, agentId)).filter(
+		(record) => !record.transcript || record.intent === "release",
+	);
 }
 
 const COUNT_FIELDS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];

@@ -406,7 +406,7 @@ async function reserve(input) {
 	const callMs = hookStartedAt();
 	const jobs = (await jobCapable(await serverCapabilities())) ? await resolveJob(sessionId) : null;
 	// A log stamped by a clock far AHEAD of this one (since corrected) makes this call's job unknown.
-	const suspect = jobs !== null && jobs.suspectAt(callMs);
+	const suspect = jobs !== null && jobs.suspectAt();
 	const holdLabels = jobs === null ? {} : suspect ? { jobState: "invalid" } : jobs.at(callMs);
 	const holdKey = jobs === null ? "none" : suspect ? "invalid" : jobs.keyAt(callMs);
 	const prepared = await prepareWindow({

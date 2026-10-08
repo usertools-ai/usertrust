@@ -182,6 +182,10 @@ export async function resolveJob(sessionId) {
 		}
 	};
 	let parsed = await read();
+	// The clock that READS the log, taken when it is read: the bound for "stamped by a clock
+	// ahead of this one". Not the hook's start: a sibling that switched jobs while this hook
+	// waited on a slow probe is legitimately later than the start.
+	let readAtMs = Date.now();
 	// A torn last line may be an append in flight on a filesystem that does not make a write
 	// atomic for readers: look once more after a short pause. If it is still torn, THIS call's
 	// job is unknown (`jobState: "invalid"`, a gap downstream). The file is never touched, and
@@ -189,17 +193,17 @@ export async function resolveJob(sessionId) {
 	if (parsed.state === "invalid" && parsed.reason === TORN_REASON) {
 		await sleep(TORN_RECHECK_MS);
 		parsed = await read();
+		readAtMs = Date.now();
 	}
 	return {
 		parsed,
 		/** Labels for a call or message at epoch-ms `tMs`. */
 		at: (tMs) => labelsAt(parsed, tMs),
 		/**
-		 * Whether the log's latest stamp is more than a clock step AHEAD of `callMs`, the hook's own
-		 * clock: a fast clock wrote it and has since been corrected, so nothing was clamped and the
+		 * Whether the log's latest stamp is more than a clock step AHEAD of the clock that read it: a fast clock wrote it and has since been corrected, so nothing was clamped and the
 		 * job open "now" cannot be trusted. That call's job is unknown (a gap), never a guess.
 		 */
-		suspectAt: (callMs) => parsed.state === "ok" && parsed.maxRawMs - callMs > CLOCK_STEP_MS,
+		suspectAt: () => parsed.state === "ok" && parsed.maxRawMs - readAtMs > CLOCK_STEP_MS,
 		/**
 		 * The ts (epoch ms) of the first `start` or `stop` at or after `tMs`, or null: where a job's
 		 * call ends. AT, not just after: a line applies strictly after its own ts, so one written in

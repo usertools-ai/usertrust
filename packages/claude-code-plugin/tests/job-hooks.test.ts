@@ -731,6 +731,56 @@ describe("a watch record never defaults its start to the hook that wrote it (B-1
 	});
 });
 
+describe("a `.releasing` hold is given back by Stop in EVERY mode (B-113)", () => {
+	it("an EMPTY transcript hold whose resume-time release fails: Stop gives it back unused, the file is gone, and the call is no longer refused", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await writeTranscript([]);
+		const env = { UT_CC_MODE: "enforce" };
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		let releases = 0;
+		override = (path) => {
+			if (path !== "/v1/release") return undefined;
+			releases += 1;
+			return releases === 1 ? { status: 500, json: { error: "ledger unavailable" } } : undefined;
+		};
+		const isRefused = (r: { code: number; stdout: string }) =>
+			r.code !== 0 || r.stdout.includes('"permissionDecision":"deny"');
+		const refused = await run("pre-tool-use.mjs", pre("tu_1"), env);
+		expect(isRefused(refused)).toBe(true);
+		expect((await readdir(stateDir)).some((n) => n.endsWith(".releasing"))).toBe(true);
+		// still refused until Stop resolves it
+		expect(isRefused(await run("pre-tool-use.mjs", pre("tu_1"), env))).toBe(true);
+		await run("stop.mjs", base(), env);
+		// mutant: the transcript filter drops it → never given back, never removed
+		expect(
+			of("/v1/release")
+				.map((r) => r.body.releaseClass)
+				.at(-1),
+		).toBe("unused");
+		expect((await readdir(stateDir)).some((n) => n.endsWith(".releasing"))).toBe(false);
+		const again = await run("pre-tool-use.mjs", pre("tu_1"), env);
+		expect(isRefused(again)).toBe(false);
+		expect(again.stdout).toBe("");
+	});
+});
+
+describe("the skew check uses the clock that READ the log (B-114)", () => {
+	it("a sibling that switches jobs while this hook waits on a slow probe does not make the known job unknown", async () => {
+		await startFake();
+		healthDelayMs = 1600;
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		const running = run("pre-tool-use.mjs", pre("tu_1"), { UT_CC_USAGE: "estimate" });
+		await new Promise((r) => setTimeout(r, 1200));
+		await appendLog(logLine(Date.now(), "start", "job-b")); // a real stamp, after this hook began
+		await running;
+		// mutant: compared with the hook's START → 1.2 s "ahead" → jobState invalid
+		const body = of("/v1/authorize")[0]?.body;
+		expect(body?.job).toBe("job-a");
+		expect(body).not.toHaveProperty("jobState");
+	}, 30_000);
+});
+
 describe("estimate holds left behind are never lost silently (B-111, B-112)", () => {
 	it("an estimate `.settling` stale enough for the journal's sweep still leaves its call-ran gap (B-111)", async () => {
 		await startFake();
