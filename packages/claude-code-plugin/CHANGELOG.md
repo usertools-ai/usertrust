@@ -24,7 +24,13 @@ npm, and its version is its own: the `usertrust` packages and their
     key-less: no request is sent, and each tool call is recorded as a `gap` with a
     fixed reason. It never falls back to the environment, and never enforces.
   - Nothing read from the file is echoed: a reason names only the plugin's own
-    field names.
+    field names. A url with a user or password in it is refused: a request to it
+    fails with an error that quotes the whole url.
+  - Node can reroute or expose a request without any code, so a configured
+    session is also refused in an environment that does: `NODE_USE_ENV_PROXY` or
+    `--use-env-proxy` (every request through `HTTP_PROXY`, the key included),
+    `NODE_TLS_REJECT_UNAUTHORIZED=0`, `NODE_EXTRA_CA_CERTS`, or `SSL_CERT_FILE` /
+    `SSL_CERT_DIR` under `--use-openssl-ca`.
   - This does not stop code from a project's settings: a hook, or a variable that
     loads code (`NODE_OPTIONS`, `PATH`), runs in the hook's own process and can
     read the file too. Without `UT_CC_CONFIG`, nothing changes.

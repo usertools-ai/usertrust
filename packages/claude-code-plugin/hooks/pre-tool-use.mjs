@@ -203,7 +203,7 @@ try {
  * `sameTenant`): this call reserves afresh beside it, and its tenant is unknown.
  */
 function abandon(entry) {
-	return abandonHold(entry, "this tool call's earlier hold");
+	return abandonHold(entry, "this tool call's earlier hold", sessionId);
 }
 
 /**

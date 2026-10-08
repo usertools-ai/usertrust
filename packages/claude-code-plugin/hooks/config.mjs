@@ -21,6 +21,12 @@
 // That code runs in the hook's own process and can read this file too. Only not
 // starting a session in a checkout you have not reviewed stops it.
 //
+// Nor may the environment reroute the requests or loosen their TLS: Node's own
+// proxy support (NODE_USE_ENV_PROXY, --use-env-proxy) sends every fetch through
+// HTTP_PROXY, and NODE_TLS_REJECT_UNAUTHORIZED=0, NODE_EXTRA_CA_CERTS or OpenSSL's
+// certificate variables let someone else read an https one. A configured session
+// whose environment sets any of these is refused like a bad file (`environmentRefusal`).
+//
 // Nothing read from the file is ever written where it could be seen: a refusal is
 // one of the fixed reasons below, naming only our own field names. (A JSON parse
 // error quotes the input, and an OS error can carry a path, so neither is passed on.)
@@ -124,14 +130,56 @@ function refusedSettings(reason, passwdHome) {
 const missing = (field) => `config: field "${field}" missing`;
 const invalid = (field) => `config: field "${field}" invalid`;
 
+/**
+ * An http or https url with no credentials in it: a fetch refuses a url that holds
+ * a user or password, with an error that quotes the whole url, and that error
+ * would reach stderr and the gap records.
+ */
 function isHttpUrl(value) {
 	if (typeof value !== "string") return false;
 	try {
 		const url = new URL(value);
-		return url.protocol === "http:" || url.protocol === "https:";
+		return (
+			(url.protocol === "http:" || url.protocol === "https:") &&
+			url.username === "" &&
+			url.password === ""
+		);
 	} catch {
 		return false;
 	}
+}
+
+/** A node option given in NODE_OPTIONS or on the hook's own command line. */
+function nodeOption(env, execArgv, flag) {
+	const tokens = [...(env.NODE_OPTIONS ?? "").split(/\s+/), ...execArgv];
+	return tokens.some((t) => t === flag || t.startsWith(`${flag}=`));
+}
+
+/**
+ * Why this environment may not carry a configured session's requests, or null. Node
+ * reroutes or exposes a fetch without any code: NODE_USE_ENV_PROXY (or
+ * --use-env-proxy) sends it through HTTP_PROXY / HTTPS_PROXY, key and all;
+ * NODE_TLS_REJECT_UNAUTHORIZED=0 trusts any certificate; NODE_EXTRA_CA_CERTS adds
+ * certificates to trust; and under --use-openssl-ca, SSL_CERT_FILE / SSL_CERT_DIR
+ * replace them. Each is refused by name, never by value.
+ */
+export function environmentRefusal(env, execArgv = []) {
+	const set = (name) => (env[name] ?? "") !== "";
+	if (set("NODE_USE_ENV_PROXY")) return "config: environment refused (NODE_USE_ENV_PROXY)";
+	if (nodeOption(env, execArgv, "--use-env-proxy")) {
+		return "config: environment refused (--use-env-proxy)";
+	}
+	if (env.NODE_TLS_REJECT_UNAUTHORIZED === "0") {
+		return "config: environment refused (NODE_TLS_REJECT_UNAUTHORIZED)";
+	}
+	if (set("NODE_EXTRA_CA_CERTS")) return "config: environment refused (NODE_EXTRA_CA_CERTS)";
+	if (
+		nodeOption(env, execArgv, "--use-openssl-ca") &&
+		(set("SSL_CERT_FILE") || set("SSL_CERT_DIR"))
+	) {
+		return "config: environment refused (--use-openssl-ca)";
+	}
+	return null;
 }
 
 /**
@@ -265,14 +313,17 @@ const REAL_FS = { closeSync, fstatSync, lstatSync, openSync, readFileSync, realp
 /**
  * The settings for an environment: from the environment when it has no
  * UT_CC_CONFIG, else from the file it names (`readConfig`), or watch-only and
- * key-less when that file is refused. `passwdHome` is the passwd database's home
- * (null when there is none), `uid` the user's (null without POSIX ownership), and
- * `fs` the file functions it reads with (tests swap in their own `fstatSync` and
- * `lstatSync` to stand in for another owner).
+ * key-less when that file, or the environment that would carry its requests
+ * (`environmentRefusal`), is refused. `passwdHome` is the passwd database's home
+ * (null when there is none), `uid` the user's (null without POSIX ownership),
+ * `execArgv` the hook's own node options, and `fs` the file functions it reads
+ * with (tests swap in their own `fstatSync` and `lstatSync` to stand in for
+ * another owner).
  */
-export function resolveSettings({ env, passwdHome, uid, fs = REAL_FS }) {
+export function resolveSettings({ env, passwdHome, uid, execArgv = [], fs = REAL_FS }) {
 	if (!Object.hasOwn(env, CONFIG_VARIABLE)) return fromEnvironment(env);
-	const read = readConfig(env[CONFIG_VARIABLE], { passwdHome, uid, fs });
+	const read =
+		environmentRefusal(env, execArgv) ?? readConfig(env[CONFIG_VARIABLE], { passwdHome, uid, fs });
 	return typeof read === "string" ? refusedSettings(read, passwdHome) : read;
 }
 
@@ -304,6 +355,7 @@ export function settings() {
 				env: process.env,
 				passwdHome: passwdHome(),
 				uid: typeof process.getuid === "function" ? process.getuid() : null,
+				execArgv: process.execArgv,
 			}),
 		};
 	}

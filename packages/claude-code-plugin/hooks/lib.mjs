@@ -660,21 +660,34 @@ export function boundElsewhere(entry) {
 	);
 }
 
+/** The watch record of a hold dropped unended (`boundElsewhere`): its usage goes unrecorded. */
+const ABANDONED = "the hold was made under another server or key";
+
 /**
  * Drop the record of a hold made under ANOTHER server or key, sending this hook's
  * server nothing about it (`boundElsewhere`). The record is claimed first, so only
- * one hook drops it.
+ * one hook drops it, and the drop is recorded as a gap (`session`, the session's
+ * id): any usage it carried goes unrecorded.
  * - A window it carried is then accounted by the journal as unrecorded (assigned
  *   ids whose hold is gone), never posted to this tenant: an under-count of the
  *   other one.
  * - The hold itself is left to its own server's sweep, or the ledger's timeout.
  * Returns false when another hook claimed the record first.
  */
-export async function abandonHold(entry, what) {
+export async function abandonHold(entry, what, session) {
 	const claimed = await claimForSettle(entry.path);
 	if (claimed !== null) {
+		const recorded = await recordWatchEvent({
+			kind: "gap",
+			mode: guardMode(),
+			phase: "abandon",
+			session,
+			agent: entry.agentId,
+			transferId: entry.transferId,
+			reason: ABANDONED,
+		});
 		say(
-			`usertrust: ${what} ${entry.transferId} was made under another server or key; nothing about it is sent here, and any usage it carried goes unrecorded`,
+			`usertrust: ${what} ${entry.transferId} was made under another server or key; nothing about it is sent here, and any usage it carried goes unrecorded${recorded ? " (recorded as a gap)" : ""}`,
 		);
 		await unlink(claimed).catch(() => {});
 	}
@@ -882,7 +895,7 @@ export async function cleanup(sessionId, agentId) {
 	for (const entry of await listPending(sessionId, agentId)) {
 		if ((entry.assignedIds?.length ?? 0) > 0) continue;
 		if (boundElsewhere(entry)) {
-			await abandonHold(entry, "leftover hold");
+			await abandonHold(entry, "leftover hold", sessionId);
 			continue;
 		}
 		const timeoutMs = Math.min(5000, timeLeft());
@@ -909,6 +922,8 @@ export async function cleanup(sessionId, agentId) {
 		// it is NEVER settled again — only given back (a 404 here means it posted or
 		// expired), then forgotten. Another server's or key's is only forgotten.
 		if (boundElsewhere(held)) {
+			// Its one settle went out unanswered under that server: whatever it charged
+			// stands there. Nothing more is owed here, so nothing is recorded.
 			say(
 				`usertrust: leftover hold ${held.transferId} was made under another server or key; nothing about it is sent here`,
 			);

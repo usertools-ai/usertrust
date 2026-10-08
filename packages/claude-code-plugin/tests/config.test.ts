@@ -25,6 +25,23 @@ const MARKER = "-----BEGIN TEST KEY-----";
  * not after MARKER's leading dashes, so the marker is also planted letter-first.
  */
 const LEAK = "BEGIN TEST";
+/** Every form a leak could take: as written, and percent-encoded, as a url prints it. */
+const LEAKS = [LEAK, "BEGIN%20TEST"];
+const leaks = (text: string) => LEAKS.filter((leak) => text.includes(leak));
+/**
+ * Every variable that reroutes or exposes a configured session's requests, blank: a
+ * shell that sets one (NODE_EXTRA_CA_CERTS is common) must not refuse these tests.
+ */
+const NO_REROUTE = {
+	NODE_USE_ENV_PROXY: "",
+	NODE_TLS_REJECT_UNAUTHORIZED: "",
+	NODE_EXTRA_CA_CERTS: "",
+	NODE_OPTIONS: "",
+	SSL_CERT_FILE: "",
+	SSL_CERT_DIR: "",
+	HTTP_PROXY: "",
+	HTTPS_PROXY: "",
+};
 
 interface Settings {
 	configured: boolean;
@@ -45,6 +62,7 @@ interface ResolveInput {
 	env: Record<string, string>;
 	passwdHome: string | null;
 	uid: number | null;
+	execArgv?: string[];
 	fs?: Record<string, unknown>;
 }
 
@@ -104,7 +122,7 @@ const VALID = {
 
 /** Every refusal is one of these fixed forms: our own field names, never a value. */
 const REASON =
-	/^config: (empty|unreadable|not valid JSON|outside the anchor|anchor refused \((home|missing|symlink|type|owner|mode)\)|file refused \((symlink|type|owner|mode|size)\)|field "[A-Za-z]+" (missing|invalid))$/;
+	/^config: (empty|unreadable|not valid JSON|outside the anchor|anchor refused \((home|missing|symlink|type|owner|mode)\)|file refused \((symlink|type|owner|mode|size)\)|field "[A-Za-z]+" (missing|invalid)|environment refused \((NODE_USE_ENV_PROXY|--use-env-proxy|NODE_TLS_REJECT_UNAUTHORIZED|NODE_EXTRA_CA_CERTS|--use-openssl-ca)\))$/;
 
 describe("resolveSettings: which file a configured session accepts", () => {
 	const resolve = async (
@@ -286,7 +304,7 @@ describe("resolveSettings: which file a configured session accepts", () => {
 		);
 		const start = spawnSync(process.execPath, [...PRELOAD, SESSION_START], {
 			input: "{}",
-			env: { ...inherited, TEST_PASSWD_HOME: home.home, UT_CC_CONFIG: fifo },
+			env: { ...inherited, ...NO_REROUTE, TEST_PASSWD_HOME: home.home, UT_CC_CONFIG: fifo },
 			encoding: "utf-8",
 			timeout: 10_000,
 		});
@@ -349,20 +367,62 @@ describe("resolveSettings: which file a configured session accepts", () => {
 			{ ...VALID, mode: MARKER },
 			{ ...VALID, url: MARKER },
 			{ ...VALID, url: `ftp://${MARKER}` },
+			// A url with credentials: a fetch refuses it with an error that quotes it.
+			{ ...VALID, url: "http://operator:BEGIN TEST KEY@127.0.0.1:9" },
+			{ ...VALID, url: "https://BEGIN%20TEST@127.0.0.1:9" },
 			{ ...VALID, key: `${MARKER}` },
 			{ ...VALID, stateDir: MARKER },
 		];
 		for (const content of placements) {
 			await writeConfig(path, content);
 			const settings = await resolve(home, path);
-			expect(settings.refused).toMatch(REASON);
-			expect(JSON.stringify(settings)).not.toContain(LEAK);
+			// stringMatching, not toMatch: an accepted file (refused null) fails as an assertion.
+			expect(settings.refused, JSON.stringify(content)).toEqual(expect.stringMatching(REASON));
+			expect(leaks(JSON.stringify(settings))).toEqual([]);
 		}
 		// In an unknown field of a valid file it is ignored, and so never anywhere.
 		await writeConfig(path, { ...VALID, note: MARKER });
 		const valid = await resolve(home, path);
 		expect(valid.refused).toBeNull();
-		expect(JSON.stringify(valid)).not.toContain(LEAK);
+		expect(leaks(JSON.stringify(valid))).toEqual([]);
+	});
+
+	it("refuses an environment that reroutes the requests or loosens their TLS, each by name", async () => {
+		const home = await makeHome();
+		const path = await writeConfig(join(home.anchor, "session.json"), VALID);
+		const { resolveSettings } = await configModule();
+		const refusal = (env: Record<string, string>, execArgv: string[] = []) =>
+			resolveSettings({
+				env: { UT_CC_CONFIG: path, ...env },
+				passwdHome: home.home,
+				uid: UID,
+				execArgv,
+			}).refused;
+		// Control: the same file, in a plain environment, is accepted.
+		expect(refusal({})).toBeNull();
+		const refused: Array<[string, Record<string, string>, string[]]> = [
+			["NODE_USE_ENV_PROXY", { NODE_USE_ENV_PROXY: "1", HTTP_PROXY: "http://127.0.0.1:9" }, []],
+			["--use-env-proxy", { NODE_OPTIONS: "--max-old-space-size=64 --use-env-proxy" }, []],
+			["--use-env-proxy", {}, ["--use-env-proxy"]],
+			["NODE_TLS_REJECT_UNAUTHORIZED", { NODE_TLS_REJECT_UNAUTHORIZED: "0" }, []],
+			["NODE_EXTRA_CA_CERTS", { NODE_EXTRA_CA_CERTS: "/tmp/ca.pem" }, []],
+			["--use-openssl-ca", { NODE_OPTIONS: "--use-openssl-ca", SSL_CERT_FILE: "/tmp/ca.pem" }, []],
+			["--use-openssl-ca", { SSL_CERT_DIR: "/tmp/certs" }, ["--use-openssl-ca"]],
+		];
+		for (const [name, env, execArgv] of refused) {
+			expect(refusal(env, execArgv), name).toBe(`config: environment refused (${name})`);
+		}
+		// What changes neither the route nor the trust: accepted.
+		for (const env of [
+			{ NODE_USE_ENV_PROXY: "" },
+			{ HTTP_PROXY: "http://127.0.0.1:9", HTTPS_PROXY: "http://127.0.0.1:9" },
+			{ NODE_TLS_REJECT_UNAUTHORIZED: "1" },
+			{ NODE_OPTIONS: "--max-old-space-size=64 --no-use-env-proxy" },
+			{ NODE_OPTIONS: "--use-openssl-ca" },
+			{ SSL_CERT_FILE: "/tmp/ca.pem" },
+		]) {
+			expect(refusal(env), JSON.stringify(env)).toBeNull();
+		}
 	});
 });
 
@@ -418,6 +478,47 @@ function fakeServer(status = 200): Promise<Fake> {
 			const address = server.address();
 			const port = typeof address === "object" && address !== null ? address.port : 0;
 			resolve({ url: `http://127.0.0.1:${port}`, seen });
+		});
+	});
+}
+
+interface Proxy {
+	url: string;
+	/** Each request that reached the proxy: a CONNECT's target, or an absolute-form request line. */
+	reached: string[];
+	/** Every byte tunnelled or sent to it. */
+	bytes: () => string;
+}
+
+/**
+ * A recording HTTP proxy: it accepts a CONNECT tunnel (how Node's own proxy support
+ * carries a request) or an absolute-form request, keeps what it is sent, and answers 503.
+ */
+function recordingProxy(): Promise<Proxy> {
+	const reached: string[] = [];
+	let bytes = "";
+	return new Promise((resolve) => {
+		const server = createServer((req, res) => {
+			reached.push(`${req.method} ${req.url}`);
+			bytes += JSON.stringify(req.headers);
+			res.writeHead(503);
+			res.end();
+		});
+		server.on("connect", (req, socket) => {
+			reached.push(`CONNECT ${req.url}`);
+			socket.on("error", () => {});
+			socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+			socket.on("data", (chunk) => {
+				bytes += chunk;
+				if (bytes.includes("\r\n\r\n"))
+					socket.end("HTTP/1.1 503 Unavailable\r\ncontent-length: 0\r\n\r\n");
+			});
+		});
+		servers.push(server);
+		server.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			const port = typeof address === "object" && address !== null ? address.port : 0;
+			resolve({ url: `http://127.0.0.1:${port}`, reached, bytes: () => bytes });
 		});
 	});
 }
@@ -490,7 +591,7 @@ const runConfigured = (
 	runHook(
 		hook,
 		payload,
-		{ TEST_PASSWD_HOME: l.home.home, UT_CC_CONFIG: l.config, ...env },
+		{ ...NO_REROUTE, TEST_PASSWD_HOME: l.home.home, UT_CC_CONFIG: l.config, ...env },
 		PRELOAD,
 	);
 
@@ -607,6 +708,7 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 				hook,
 				PAYLOAD,
 				{
+					...NO_REROUTE,
 					TEST_PASSWD_HOME: home.home,
 					UT_CC_CONFIG: "",
 					UT_SERVER_URL: env.url,
@@ -640,7 +742,7 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 		const pre = await runHook(
 			PRE,
 			PAYLOAD,
-			{ TEST_PASSWD_HOME: home.home, UT_CC_CONFIG: outside, UT_SERVER_URL: env.url },
+			{ ...NO_REROUTE, TEST_PASSWD_HOME: home.home, UT_CC_CONFIG: outside, UT_SERVER_URL: env.url },
 			PRELOAD,
 		);
 		expect(pre.code).toBe(0);
@@ -650,12 +752,56 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 		]);
 	});
 
+	it("control: on this node, NODE_USE_ENV_PROXY carries an UNCONFIGURED session's key through HTTP_PROXY", async (ctx) => {
+		const target = await fakeServer();
+		const proxy = await recordingProxy();
+		const stateDir = await mkdtemp(join(tmpdir(), "utcc-env-state-"));
+		await runHook(PRE, PAYLOAD, {
+			...NO_REROUTE,
+			UT_CC_STATE_DIR: stateDir,
+			UT_SERVER_URL: target.url,
+			UT_SERVER_KEY: "env-key",
+			UT_CC_USAGE: "estimate",
+			NODE_USE_ENV_PROXY: "1",
+			HTTP_PROXY: proxy.url,
+		});
+		if (proxy.reached.length === 0) {
+			// This node has no env-proxy support: the request went straight to the server.
+			// CI must run a node that has it, or this case proves nothing there.
+			expect(
+				process.env.CI,
+				`node ${process.version} has no NODE_USE_ENV_PROXY support`,
+			).toBeFalsy();
+			ctx.skip();
+		}
+		expect(proxy.reached[0]).toBe(`CONNECT ${new URL(target.url).host}`);
+		expect(proxy.bytes()).toContain("Bearer env-key");
+	});
+
+	it("a configured session in an environment with NODE_USE_ENV_PROXY is refused: nothing reaches the proxy or the server", async () => {
+		const target = await fakeServer();
+		const proxy = await recordingProxy();
+		const session = await configured({ url: target.url });
+		const pre = await runConfigured(PRE, session, {
+			NODE_USE_ENV_PROXY: "1",
+			HTTP_PROXY: proxy.url,
+			HTTPS_PROXY: proxy.url,
+		});
+		expect(pre.code).toBe(0);
+		expect(proxy.reached).toEqual([]);
+		expect(target.seen).toEqual([]);
+		expect(await watchRecords(join(session.home.home, ".claude", "usertrust-cc"))).toMatchObject([
+			{ kind: "gap", reason: "config: environment refused (NODE_USE_ENV_PROXY)" },
+		]);
+	});
+
 	it("never echoes the file: the marker reaches no stderr, session-start line, record or request", async () => {
 		const placements: Array<[string, string | Record<string, unknown>]> = [
 			["the first bytes of a file that is not JSON", `${MARKER}\n{"url": 1}`],
 			["a file that is not JSON, whose parse error quotes it", "BEGIN TEST KEY-----\n"],
 			["the mode", { mode: MARKER }],
 			["an invalid url", { url: `${MARKER}` }],
+			["a url with credentials", { url: "http://operator:BEGIN TEST KEY@127.0.0.1:9" }],
 			["an unknown field of a valid file", { note: MARKER }],
 		];
 		for (const [where, content] of placements) {
@@ -667,6 +813,7 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 				typeof content === "string" ? content : { ...VALID, url: server.url, stateDir, ...content },
 			);
 			const env = {
+				...NO_REROUTE,
 				TEST_PASSWD_HOME: home.home,
 				UT_CC_CONFIG: config,
 				UT_SERVER_URL: server.url,
@@ -681,7 +828,13 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 			];
 			const requests = server.seen.map((s) => `${s.url} ${JSON.stringify(s.headers)} ${s.body}`);
 			for (const text of [...outputs, JSON.stringify(records), ...requests]) {
-				expect(text, where).not.toContain(LEAK);
+				expect(leaks(text), where).toEqual([]);
+			}
+			// A refusal's gap carries a fixed reason, whatever the parser's wording.
+			for (const record of records) {
+				if (typeof record.reason === "string" && record.reason.startsWith("config:")) {
+					expect(record.reason, where).toMatch(REASON);
+				}
 			}
 			// Control: the run did produce what was searched.
 			expect(outputs.join("").length, where).toBeGreaterThan(0);

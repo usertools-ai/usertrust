@@ -237,7 +237,7 @@ try {
 	const agentId = input.agent_id ?? "main";
 	const entry = await takePendingEntry(sessionId, agentId, input.tool_use_id ?? null);
 	if (entry !== null && boundElsewhere(entry)) {
-		await abandonHold(entry, "this tool call's hold");
+		await abandonHold(entry, "this tool call's hold", sessionId);
 	} else if (entry?.usage === "transcript") {
 		const result = await settleTranscriptHold(sessionId, entry);
 		if (result.outcome !== "settled" && result.outcome !== "returned") {

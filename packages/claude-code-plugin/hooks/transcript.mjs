@@ -1755,7 +1755,7 @@ export async function settleAssignedHolds(sessionId, agentId) {
 		if ((entry.assignedIds?.length ?? 0) === 0) continue;
 		if (boundElsewhere(entry)) {
 			// Its window is accounted unrecorded by the agent's next reconcile.
-			await abandonHold(entry, "leftover hold");
+			await abandonHold(entry, "leftover hold", sessionId);
 			continue;
 		}
 		const result = await settleTranscriptHold(sessionId, entry);

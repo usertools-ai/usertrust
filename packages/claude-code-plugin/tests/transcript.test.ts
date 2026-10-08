@@ -4831,6 +4831,21 @@ describe("a hook after the server or key changed never ends a hold through the n
 	const aboutTx1 = () => requests.filter((r) => r.body.transferId === "tx_1");
 	const notedOther = (stderr: string, what: string) =>
 		expect(stderr).toContain(`${what} tx_1 was made under another server or key`);
+	/** The watch records written so far. */
+	const watched = async () =>
+		(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+			.split("\n")
+			.filter((line) => line !== "")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+	/** The one gap a dropped hold leaves: its usage goes unrecorded. */
+	const ABANDONED = [
+		{
+			kind: "gap",
+			phase: "abandon",
+			transferId: "tx_1",
+			reason: "the hold was made under another server or key",
+		},
+	];
 
 	it("PostToolUse, estimate: the hold is dropped, and nothing about it is sent", async () => {
 		await startServer(okResponder);
@@ -4840,6 +4855,7 @@ describe("a hook after the server or key changed never ends a hold through the n
 		expect(settles()).toEqual([]);
 		expect(authorizes()).toHaveLength(1);
 		expect(await holdStateFiles()).toEqual([]);
+		expect(await watched()).toMatchObject(ABANDONED);
 	});
 
 	it("control: PostToolUse under the same key settles the hold", async () => {
@@ -4872,6 +4888,7 @@ describe("a hook after the server or key changed never ends a hold through the n
 		expect(settles()).toEqual([]);
 		expect((await readCursor()).accounted).toEqual(["msg_a"]);
 		expect(await holdStateFiles()).toEqual([]);
+		expect(await watched()).toMatchObject(ABANDONED);
 	});
 
 	it("Stop: an empty leftover hold is forgotten without a release, which the same key gets (control)", async () => {
@@ -4882,6 +4899,7 @@ describe("a hook after the server or key changed never ends a hold through the n
 		notedOther(stop.stderr, "leftover hold");
 		expect(aboutTx1()).toEqual([]);
 		expect(await holdStateFiles()).toEqual([]);
+		expect(await watched()).toMatchObject(ABANDONED);
 		await run("pre-tool-use.mjs", preInput("tu_2"), estimate);
 		await run("stop.mjs", stopInput(), estimate);
 		expect(requests.filter((r) => r.path === "/v1/release").map((r) => r.body.transferId)).toEqual([

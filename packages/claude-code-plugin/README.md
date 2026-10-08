@@ -87,7 +87,7 @@ export UT_CC_CONFIG="$HOME/.config/usertrust/claude-code.json"
 
 | Field         | Required | Default             | Meaning (the variable it replaces)                        |
 | ------------- | -------- | ------------------- | --------------------------------------------------------- |
-| `url`         | yes      |                     | `http` or `https` base URL of your usertrust-server (`UT_SERVER_URL`) |
+| `url`         | yes      |                     | `http` or `https` base URL of your usertrust-server, with no user or password in it (`UT_SERVER_URL`) |
 | `key`         | yes      |                     | Tenant bearer key, visible ASCII (`UT_SERVER_KEY`)        |
 | `mode`        | yes      |                     | `watch` or `enforce`, exactly (`UT_CC_MODE`)              |
 | `stateDir`    | yes      |                     | Absolute path of the state dir (`UT_CC_STATE_DIR`)        |
@@ -110,7 +110,14 @@ are ignored. The file is accepted only if all of these hold:
   yours, writable by no one else;
 - the file is not a link but a regular file, yours, with no group or other
   permission bits (`chmod 600`), and at most 64 KiB;
-- it is a JSON object with every required field, and every field it has is valid.
+- it is a JSON object with every required field, and every field it has is valid;
+- the environment neither reroutes its requests nor loosens their TLS. Node itself
+  can do both without any code: `NODE_USE_ENV_PROXY` (or `--use-env-proxy` in
+  `NODE_OPTIONS`) sends every request through `HTTP_PROXY` / `HTTPS_PROXY`, key and
+  all; `NODE_TLS_REJECT_UNAUTHORIZED=0` trusts any certificate;
+  `NODE_EXTRA_CA_CERTS` adds certificates to trust; and under `--use-openssl-ca`,
+  `SSL_CERT_FILE` / `SSL_CERT_DIR` replace them. Each is refused by name, as in
+  `config: environment refused (NODE_USE_ENV_PROXY)`.
 
 **Anything else, an empty `UT_CC_CONFIG` included, runs the plugin watch-only and
 key-less.** No request is sent to any server. Each tool call is recorded as a
