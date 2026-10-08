@@ -18,6 +18,7 @@ import {
 import { VAULT_DIR } from "../shared/constants.js";
 import type { TrustConfig } from "../shared/types.js";
 import { TrustConfigSchema } from "../shared/types.js";
+import { toSafeJson } from "./target.js";
 
 export interface PricingOpts {
 	json: boolean;
@@ -74,9 +75,7 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 				};
 			}
 		}
-		console.log(
-			JSON.stringify({ command: "pricing", pricing, version: PRICING_TABLE_VERSION, rates }),
-		);
+		console.log(toSafeJson({ command: "pricing", pricing, version: PRICING_TABLE_VERSION, rates }));
 		return;
 	}
 

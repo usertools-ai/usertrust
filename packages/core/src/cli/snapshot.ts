@@ -16,6 +16,7 @@ import pc from "picocolors";
 import { VAULT_DIR } from "../shared/constants.js";
 import { createSnapshot, listSnapshots, restoreSnapshot } from "../snapshot/checkpoint.js";
 import type { CliOptions } from "./init.js";
+import { scrubForTerminal, toSafeJson } from "./target.js";
 
 /** Untrusted text is clipped AFTER sanitizing, per the AGENTS.md ordering rule. */
 const MAX_ECHOED_LENGTH = 120;
@@ -54,7 +55,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	if (!existsSync(vaultPath)) {
 		if (json) {
 			console.log(
-				JSON.stringify({
+				toSafeJson({
 					command: "snapshot",
 					success: false,
 					data: { message: "No trust vault found. Run `usertrust init` first." },
@@ -76,7 +77,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			if (!name) {
 				if (json) {
 					console.log(
-						JSON.stringify({
+						toSafeJson({
 							command: "snapshot",
 							success: false,
 							data: { message: "Missing snapshot name" },
@@ -103,21 +104,21 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				const message = forDisplay(err instanceof Error ? err.message : String(err));
 				if (json) {
 					console.log(
-						JSON.stringify({
+						toSafeJson({
 							command: "snapshot",
 							success: false,
 							data: { action: "create", message },
 						}),
 					);
 				} else {
-					console.log(pc.red(`Snapshot failed: ${message}`));
+					console.log(pc.red(`Snapshot failed: ${scrubForTerminal(message)}`));
 				}
 				process.exitCode = 1;
 				return;
 			}
 			if (json) {
 				console.log(
-					JSON.stringify({
+					toSafeJson({
 						command: "snapshot",
 						success: true,
 						data: {
@@ -130,7 +131,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 					}),
 				);
 			} else {
-				console.log(pc.green(`Snapshot created: ${meta.name}`));
+				console.log(pc.green(`Snapshot created: ${scrubForTerminal(meta.name)}`));
 				console.log(pc.dim(`  Files: ${meta.files.length}`));
 				console.log(pc.dim(`  Size: ${meta.size} bytes`));
 				console.log(pc.dim(`  Timestamp: ${meta.timestamp}`));
@@ -142,7 +143,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			if (!name) {
 				if (json) {
 					console.log(
-						JSON.stringify({
+						toSafeJson({
 							command: "snapshot",
 							success: false,
 							data: { message: "Missing snapshot name" },
@@ -159,27 +160,27 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				const msg = e instanceof Error ? e.message : String(e);
 				if (json) {
 					console.log(
-						JSON.stringify({
+						toSafeJson({
 							command: "snapshot",
 							success: false,
 							data: { action: "restore", name, error: msg },
 						}),
 					);
 				} else {
-					console.log(`${pc.red("Restore refused:")} ${msg}`);
+					console.log(`${pc.red("Restore refused:")} ${scrubForTerminal(msg)}`);
 				}
 				return;
 			}
 			if (json) {
 				console.log(
-					JSON.stringify({
+					toSafeJson({
 						command: "snapshot",
 						success: true,
 						data: { action: "restore", name },
 					}),
 				);
 			} else {
-				console.log(pc.green(`Snapshot restored: ${name}`));
+				console.log(pc.green(`Snapshot restored: ${scrubForTerminal(name)}`));
 			}
 			break;
 		}
@@ -188,7 +189,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			const snapshots = await listSnapshots(vaultPath);
 			if (json) {
 				console.log(
-					JSON.stringify({
+					toSafeJson({
 						command: "snapshot",
 						success: true,
 						data: {
@@ -208,7 +209,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				console.log("Snapshots:");
 				for (const s of snapshots) {
 					console.log(
-						`  ${pc.bold(s.name)}  ${pc.dim(`(${s.files.length} files, ${s.size} bytes, ${s.timestamp})`)}`,
+						`  ${pc.bold(scrubForTerminal(s.name))}  ${pc.dim(`(${s.files.length} files, ${s.size} bytes, ${scrubForTerminal(s.timestamp)})`)}`,
 					);
 				}
 			}
@@ -218,7 +219,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		default:
 			if (json) {
 				console.log(
-					JSON.stringify({
+					toSafeJson({
 						command: "snapshot",
 						success: false,
 						data: { message: "Unknown subcommand. Use: create, restore, list" },

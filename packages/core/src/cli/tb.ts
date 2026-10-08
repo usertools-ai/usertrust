@@ -10,6 +10,7 @@
 
 import pc from "picocolors";
 import type { CliOptions } from "./init.js";
+import { toSafeJson } from "./target.js";
 
 export async function run(opts?: CliOptions): Promise<void> {
 	const subcommand = process.argv[3];
@@ -19,7 +20,7 @@ export async function run(opts?: CliOptions): Promise<void> {
 		case "start":
 			if (json) {
 				console.log(
-					JSON.stringify({
+					toSafeJson({
 						command: "tb",
 						success: false,
 						data: { action: "start", message: "Not yet implemented" },
@@ -37,7 +38,7 @@ export async function run(opts?: CliOptions): Promise<void> {
 		case "stop":
 			if (json) {
 				console.log(
-					JSON.stringify({
+					toSafeJson({
 						command: "tb",
 						success: false,
 						data: { action: "stop", message: "Not yet implemented" },
@@ -62,7 +63,7 @@ export async function run(opts?: CliOptions): Promise<void> {
 
 			if (json) {
 				console.log(
-					JSON.stringify({
+					toSafeJson({
 						command: "tb",
 						success: true,
 						data: { action: "status", running: isRunning },
@@ -79,7 +80,7 @@ export async function run(opts?: CliOptions): Promise<void> {
 		default:
 			if (json) {
 				console.log(
-					JSON.stringify({
+					toSafeJson({
 						command: "tb",
 						success: false,
 						data: { message: "Unknown subcommand. Use: start, stop, status" },
