@@ -1661,6 +1661,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			if (capture === undefined) {
 				throw new Error(`Authorization ${transferId} is not active (already settled or aborted)`);
 			}
+			// A window that ends before it began is refused BEFORE the claim (the hold stays
+			// settleable), for a direct caller as for the HTTP server: only the capture knows the
+			// usage start, so only here can every caller be held to it.
+			if (
+				usageToAudit.usageTo !== undefined &&
+				capture.jobAudit.usageFrom !== undefined &&
+				Date.parse(capture.jobAudit.usageFrom) > Date.parse(usageToAudit.usageTo)
+			) {
+				throw new TypeError("usageTo must not be before the hold's usageFrom");
+			}
 			activeAuths.delete(transferId);
 			// Claimed. Still PENDING. Pre-POST throw leaves the id here so
 			// abort()/destroy() can void a hold that never reached POST. The id

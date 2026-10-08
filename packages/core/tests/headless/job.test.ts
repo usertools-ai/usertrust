@@ -341,6 +341,19 @@ describe("headless records carry the authorize capture's job", () => {
 		await b.destroy();
 	});
 
+	it("a usageTo before the hold's usageFrom is refused before the claim, and the hold stays settleable", async () => {
+		const audit = makeAudit();
+		const gov = await governor(makeEngine(), audit);
+		const auth = await gov.authorize({ ...AUTHORIZE, ...LABELS });
+		await expect(
+			gov.settle(auth, { inputTokens: 1, outputTokens: 1, usageTo: "2025-12-31T23:59:59.999Z" }),
+		).rejects.toThrow(/usageTo must not be before/);
+		expect(audit.events.filter((e) => e.kind === "llm_call")).toEqual([]);
+		await gov.settle(auth, { inputTokens: 1, outputTokens: 1, usageTo: TO });
+		expect(record(audit, "llm_call").data).toMatchObject({ usageFrom: FROM, usageTo: TO });
+		await gov.destroy();
+	});
+
 	it("a bad usageTo is refused before the claim: the hold stays settleable", async () => {
 		const audit = makeAudit();
 		const gov = await governor(makeEngine(), audit);
