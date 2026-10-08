@@ -270,7 +270,10 @@ describe("headless records carry the authorize capture's job", () => {
 
 	it("a ledger rejection names the job", async () => {
 		const audit = makeAudit();
-		const gov = await governor(makeEngine({ spend: new InsufficientBalanceError("trust:hold", 999, 0) }), audit);
+		const gov = await governor(
+			makeEngine({ spend: new InsufficientBalanceError("trust:hold", 999, 0) }),
+			audit,
+		);
 		await expect(gov.authorize({ ...AUTHORIZE, ...LABELS })).rejects.toBeInstanceOf(
 			InsufficientBalanceError,
 		);
