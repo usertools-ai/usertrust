@@ -11,9 +11,15 @@
 // `coverage` is read-only. It prints the job's tagged cost and the KNOWN GAPS in the evidence
 // behind it: a diagnostic, never a certification.
 //
+// In a session, every path comes from the session's pin, as every hook's settings do: a
+// state dir changed since the session began is not where its hooks keep its log. A
+// session with no pin yet is pinned now (hooks/session.mjs), as its next hook would be:
+// the one write outside the state dir, and `coverage`'s only one.
+//
 // Exit codes: 0 done, 1 refused (no usable log), 2 bad usage.
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { passwdHome, useSession } from "../hooks/config.mjs";
 import {
 	appendJobOp,
 	DEFAULT_WAIT_MS,
@@ -23,8 +29,22 @@ import {
 	readLogs,
 } from "../hooks/job-log.mjs";
 import { say, watchLogPath } from "../hooks/lib.mjs";
+import { sessionSettings } from "../hooks/session.mjs";
 
 const [command, ...rest] = process.argv.slice(2);
+
+/** This session's settings, from its pin, before any path is computed. Outside a session, none. */
+function usePinnedSession() {
+	const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
+	if (typeof sessionId !== "string" || sessionId === "") return;
+	const uid = typeof process.getuid === "function" ? process.getuid() : null;
+	const session = sessionSettings({
+		payload: { session_id: sessionId },
+		passwdHome: passwdHome(),
+		uid,
+	});
+	useSession(session.settings);
+}
 
 function usage(why) {
 	say(`usertrust-job: ${why}`);
@@ -85,6 +105,7 @@ async function readWatch(path) {
 }
 
 try {
+	usePinnedSession();
 	if (command === "start" || command === "stop") {
 		const wantsId = command === "start";
 		if (rest.length !== (wantsId ? 1 : 0)) {

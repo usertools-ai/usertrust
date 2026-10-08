@@ -114,6 +114,9 @@ async function childFailed(hook, settings, input, what) {
 		agent: input?.agent_id ?? "main",
 		...(hook === "pre-tool-use" ? { tool: input?.tool_name ?? "unknown" } : {}),
 		reason: outcome.reason,
+		// PreToolUse's call began when this hook did. What any other hook was to settle began
+		// earlier, at a time this process never reads: unknown.
+		started: hook === "pre-tool-use" ? new Date(STARTED).toISOString() : null,
 	});
 	const record = recorded ? "recorded as a gap" : "and its gap record could not be written";
 	if (hook !== "pre-tool-use") {

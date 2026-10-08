@@ -852,6 +852,7 @@ describe("launch.mjs: a child that fails is the hook's outage, and nothing else"
 				usage: "estimate",
 			});
 			const call = { session_id: SESSION, tool_name: "Bash", tool_use_id: "tu_1", tool_input: {} };
+			const began = Date.now();
 			const pre = await runHook(
 				hook("pre-tool-use"),
 				call,
@@ -870,6 +871,12 @@ describe("launch.mjs: a child that fails is the hook's outage, and nothing else"
 						reason: "launch: the hook's process failed (its child refused to run)",
 					},
 				]);
+				// The call began when the hook did (its parent's start): known, so never null,
+				// which would count the gap against every job.
+				const { started, at } = gaps[0] as { started: unknown; at: string };
+				expect(typeof started).toBe("string");
+				expect(Date.parse(started as string)).toBeGreaterThanOrEqual(began);
+				expect(Date.parse(started as string)).toBeLessThanOrEqual(Date.parse(at));
 			} else {
 				expect(gaps).toEqual([]);
 				expect(pre.stderr).toContain("authorization failed closed");
@@ -898,6 +905,8 @@ describe("launch.mjs: a child that fails is the hook's outage, and nothing else"
 				kind: "gap",
 				phase: "stop",
 				reason: "launch: the hook's process failed (its child refused to run)",
+				// What Stop settles began before it, at a time its parent never reads.
+				started: null,
 			},
 		]);
 	});

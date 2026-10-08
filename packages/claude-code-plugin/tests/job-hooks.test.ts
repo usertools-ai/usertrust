@@ -13,13 +13,14 @@ import { costFromRates, getModelRates, readLedgerEvents } from "usertrust";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashKey } from "../../server/src/config.js";
 import { createUsertrustServer, type UsertrustServer } from "../../server/src/server.js";
-import { runHook } from "./helpers/run-hook.js";
+import { forgetPins, runHook } from "./helpers/run-hook.js";
 
 // Every test here spawns hook processes (some several): a loaded machine needs more than
 // the 5 s default, and a timeout is not what these tests are about.
 vi.setConfig({ testTimeout: 30_000 });
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
+const CRASH_AT = join(import.meta.dirname, "helpers", "crash-at.mjs");
 const SESSION = "11111111-2222-4333-8444-555555555555";
 const MODEL = "claude-sonnet-4-6";
 
@@ -949,6 +950,158 @@ describe("estimate holds left behind are never lost silently", () => {
 		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
 		await run("pre-tool-use.mjs", pre("tu_1"), { UT_CC_USAGE: "estimate" });
 		expect(of("/v1/authorize")[0]?.body.job).toBe("job-a");
+	});
+});
+
+describe("a hold dropped as another server's or key's still leaves its gap, written first", () => {
+	// A hold is ended only through the server and key that made it (lib.mjs `boundElsewhere`):
+	// under another, its record is dropped and nothing about it is sent. A hook that sends
+	// nothing at all (refused: here, its key changed mid-session) reads every bound record so.
+	// The call ran all the same, so the drop writes the gap its give-back would have, before
+	// the record goes, stating when the call began. A claim that only ends a deferred call's
+	// hold (`.releasing`) never ran, and has none.
+	const env = { UT_CC_USAGE: "estimate" };
+	const k2 = { ...env, UT_SERVER_KEY: "k2" };
+	const gaps = async () =>
+		(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l))
+			.filter((e) => e.kind === "gap");
+	const claims = async () =>
+		(await readdir(stateDir)).filter((n) => n.endsWith(".settling") || n.endsWith(".releasing"));
+	const holdFile = (ext: string) => join(stateDir, `${SESSION}__main__tu_1.tx_1.${ext}`);
+	/** The session pinned again, as a sweep or a hand that deletes the pin leaves it. */
+	const repin = () => forgetPins({ UT_CC_STATE_DIR: stateDir });
+
+	/** tu_1's one settle goes unanswered, so its record is left `.settling`. Returns its call's start. */
+	async function unansweredSettle(more: Record<string, string> = {}): Promise<string> {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await run("pre-tool-use.mjs", pre("tu_1"), { ...env, ...more });
+		override = (path) =>
+			path === "/v1/settle" ? { status: 503, json: { error: "down" } } : undefined;
+		await run("post-tool-use.mjs", post("tu_1"), { ...env, ...more });
+		override = undefined;
+		expect(await claims()).toEqual([`${SESSION}__main__tu_1.tx_1.settling`]);
+		expect(await gaps()).toEqual([]);
+		const usageFrom = of("/v1/authorize")[0]?.body.usageFrom;
+		expect(typeof usageFrom).toBe("string");
+		return usageFrom as string;
+	}
+
+	it("Stop under another key (the session pinned again): nothing about it is sent, and one call-ran gap", async () => {
+		const enforce = { UT_CC_MODE: "enforce" };
+		const started = await unansweredSettle(enforce);
+		repin();
+		const stop = await run("stop.mjs", base(), { ...k2, ...enforce });
+		expect(stop.stderr).toContain("leftover hold tx_1 was made under another server or key");
+		expect(stop.stderr).toContain("its unconfirmed charge is recorded as a gap");
+		expect(of("/v1/release")).toEqual([]);
+		// mutant: the record is dropped with no gap. The gap's mode is the new pin's
+		// `enforce`: this Stop was not refused, only under another key.
+		expect(await gaps()).toMatchObject([
+			{ releaseClass: "call-ran", session: SESSION, mode: "enforce", started },
+		]);
+		expect(await claims()).toEqual([]);
+	});
+
+	it("a REFUSED Stop (its key changed, the pin kept): nothing is sent at all, and one call-ran gap", async () => {
+		const enforce = { UT_CC_MODE: "enforce" };
+		const started = await unansweredSettle(enforce);
+		const sent = requests.length;
+		const stop = await run("stop.mjs", base(), { ...k2, ...enforce });
+		expect(stop.code).toBe(0);
+		expect(requests).toHaveLength(sent);
+		// mutant: the record is dropped with no gap. The gap's mode is `watch` in a session
+		// pinned `enforce`: the Stop ran refused, as a refused hook is watch-only.
+		expect(await gaps()).toMatchObject([
+			{ releaseClass: "call-ran", session: SESSION, mode: "watch", started },
+		]);
+		expect(await claims()).toEqual([]);
+	});
+
+	it("the gap is written BEFORE the record goes: a Stop killed between the two has written it", async () => {
+		const started = await unansweredSettle();
+		repin();
+		const stop = await runHook(
+			join(HOOKS, "stop.mjs"),
+			base(),
+			{
+				UT_CC_STATE_DIR: stateDir,
+				UT_SERVER_URL: `http://127.0.0.1:${port}`,
+				...k2,
+				UT_CC_CRASH: "unlink .settling|1|before",
+			},
+			["--import", CRASH_AT],
+		);
+		expect(stop.code).not.toBe(0);
+		// Killed before the unlink: the record is still there, and its gap already written.
+		expect(await claims()).toEqual([`${SESSION}__main__tu_1.tx_1.settling`]);
+		// mutant: the record goes first, so the kill leaves no gap
+		expect(await gaps()).toMatchObject([{ releaseClass: "call-ran", started }]);
+	});
+
+	it("a claim that only ENDS a deferred call's hold (`.releasing`), under another key: dropped, with no gap", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		const enforce = { ...env, UT_CC_MODE: "enforce" };
+		await run("pre-tool-use.mjs", pre("tu_1"), enforce);
+		override = (path) =>
+			path === "/v1/release" ? { status: 500, json: { error: "ledger unavailable" } } : undefined;
+		// The deferred call fires PreToolUse again: its earlier hold is claimed only to be
+		// ended, and that release fails.
+		await run("pre-tool-use.mjs", pre("tu_1"), enforce);
+		override = undefined;
+		expect(await claims()).toEqual([`${SESSION}__main__tu_1.tx_1.releasing`]);
+		repin();
+		const released = of("/v1/release").length;
+		await run("stop.mjs", base(), { ...enforce, UT_SERVER_KEY: "k2" });
+		expect(of("/v1/release")).toHaveLength(released);
+		// mutant: a gap for a call that never ran
+		expect(await gaps()).toEqual([]);
+		expect(await claims()).toEqual([]);
+	});
+
+	it("PostToolUse under another key drops the hold, and its gap states when the call began", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		const started = of("/v1/authorize")[0]?.body.usageFrom;
+		expect(typeof started).toBe("string");
+		repin();
+		await run("post-tool-use.mjs", post("tu_1"), k2);
+		// mutant: the drop's gap states no start: null, a gap against every job
+		expect(await gaps()).toMatchObject([{ phase: "abandon", transferId: "tx_1", started }]);
+	});
+
+	it("with no job capability, the drop's gap states the time the call was received", async () => {
+		capabilities = ["principal", "release"];
+		await startFake();
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		const hold = JSON.parse(await readFile(holdFile("json"), "utf-8"));
+		expect(hold).not.toHaveProperty("usageFrom");
+		expect(typeof hold.startedAt).toBe("string");
+		repin();
+		await run("post-tool-use.mjs", post("tu_1"), k2);
+		// mutant: only `usageFrom` is read, so null
+		expect(await gaps()).toMatchObject([{ phase: "abandon", started: hold.startedAt }]);
+	});
+
+	it("a transcript hold whose window began before its call: the drop's gap states the window's start, where coverage places the hold's own records", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await writeTranscript([message("m1", at(-20), 100, 50)]);
+		await run("pre-tool-use.mjs", pre("tu_1"));
+		const hold = JSON.parse(await readFile(holdFile("json"), "utf-8"));
+		expect(hold.assignedIds).toEqual(["m1"]);
+		expect(Date.parse(hold.usageFrom)).toBeLessThan(Date.parse(hold.startedAt));
+		repin();
+		await run("stop.mjs", base(), { UT_SERVER_KEY: "k2" });
+		// mutant: the receipt time first, a later point than where the hold's records are placed
+		expect((await gaps()).filter((g) => g.phase === "abandon")).toMatchObject([
+			{ transferId: "tx_1", started: hold.usageFrom },
+		]);
 	});
 });
 

@@ -413,12 +413,25 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 }
 
 /**
+ * When a hold's call began, as a gap record about the hold states it (`started`): the
+ * hold's usage start, else the time the call was received. That is where coverage places
+ * the hold's own records too (job-log.mjs `fromRecord`), so its gap lands in the same job.
+ * With NEITHER (an older hold) the time is UNKNOWN: null, which counts against every job.
+ * It is never the time of the hook writing the gap, which could put it in a later job.
+ */
+export function callStart(held) {
+	if (typeof held.usageFrom === "string") return held.usageFrom;
+	return typeof held.startedAt === "string" ? held.startedAt : null;
+}
+
+/**
  * A give-back of a hold whose call RAN (or may have) without a confirmed charge is a GAP:
- * metered usage the ledger cannot vouch for. `started` is when the call began (the hold's
- * own `usageFrom`), so a job switch that lands later cannot move it to another job.
+ * metered usage the ledger cannot vouch for. `started` is when the call began
+ * (`callStart`), so a job switch that lands later cannot move it to another job. Returns
+ * whether the gap was written.
  */
 export async function recordUnconfirmedCall(sessionId, held, releaseClass) {
-	await recordWatchEvent({
+	return recordWatchEvent({
 		kind: "gap",
 		mode: guardMode(),
 		session: sessionId,
@@ -429,15 +442,7 @@ export async function recordUnconfirmedCall(sessionId, held, releaseClass) {
 				? "the call ran and its charge is unconfirmed (its settle went unanswered)"
 				: "the call may have run and was never charged (no PostToolUse settle)",
 		releaseClass,
-		// The call's own start: the hold's usage start, else the time it was received. With NEITHER
-		// (an older hold) the time is UNKNOWN, and a gap with no time counts against every job; it
-		// is never stamped with this Stop's time, which could put it in a later job.
-		started:
-			typeof held.usageFrom === "string"
-				? held.usageFrom
-				: typeof held.startedAt === "string"
-					? held.startedAt
-					: null,
+		started: callStart(held),
 	});
 }
 
@@ -823,6 +828,7 @@ export async function abandonHold(entry, what, session) {
 			agent: entry.agentId,
 			transferId: entry.transferId,
 			reason: ABANDONED,
+			started: callStart(entry),
 		});
 		say(
 			`usertrust: ${what} ${entry.transferId} was made under another server or key; nothing about it is sent here, and any usage it carried goes unrecorded${recorded ? " (recorded as a gap)" : ""}`,
@@ -1112,7 +1118,8 @@ export async function giveBack(transferId, reason, timeoutMs, releaseClass) {
  * left for the next Stop and the TTL sweep. An estimate hold left settle-attempted
  * (`.settling`: its one settle went unanswered) is given back the same way and
  * then forgotten — never settled again. A hold made under another server or key
- * is forgotten without a word to this one (`boundElsewhere`).
+ * is forgotten without a word to this one (`boundElsewhere`), its gap written first:
+ * every such hold has one but a claim that only ends a deferred call's hold.
  */
 export async function cleanup(sessionId, agentId) {
 	for (const entry of await listPending(sessionId, agentId)) {
@@ -1153,10 +1160,14 @@ export async function cleanup(sessionId, agentId) {
 		// it is NEVER settled again — only given back (a 404 here means it posted or
 		// expired), then forgotten. Another server's or key's is only forgotten.
 		if (boundElsewhere(held)) {
-			// Its one settle went out unanswered under that server: whatever it charged
-			// stands there. Nothing more is owed here, so nothing is recorded.
+			// Its one settle went out unanswered under that server, and nothing about it is
+			// sent here. Its call RAN all the same (unless the claim only ends a deferred call's
+			// hold), and its charge is unconfirmed: the gap is written first, as for this
+			// server's own below, so dropping the record never erases it.
+			const recorded =
+				held.intent !== "release" && (await recordUnconfirmedCall(sessionId, held, "call-ran"));
 			say(
-				`usertrust: leftover hold ${held.transferId} was made under another server or key; nothing about it is sent here`,
+				`usertrust: leftover hold ${held.transferId} was made under another server or key; nothing about it is sent here${recorded ? ", and its unconfirmed charge is recorded as a gap" : ""}`,
 			);
 			await unlink(held.path).catch(() => {});
 			continue;

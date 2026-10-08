@@ -3827,7 +3827,8 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			await startServer(server.responder);
 			await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
 			await run("pre-tool-use.mjs", preInput("tu_1"));
-			expect(await record()).toHaveProperty("idempotencyKey");
+			const before = await record();
+			expect(before).toHaveProperty("idempotencyKey");
 			await cutOff({ stale: true });
 			other = await otherServer([...ALL_CAPABILITIES]);
 			repin();
@@ -3836,6 +3837,12 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			expect(again.stderr).toContain("reserved tx_other");
 			expect(other.aboutTx1()).toEqual([]);
 			expect(other.posts()).toEqual(["/v1/authorize Bearer k2"]);
+			// mutant: abandoned with no gap. Its settle went out unanswered: the call ran, and
+			// its charge is unconfirmed, so the gap is written before the record goes.
+			expect(again.stderr).toContain("goes unrecorded (recorded as a gap)");
+			expect(await gaps()).toMatchObject([
+				{ kind: "gap", releaseClass: "call-ran", started: before.usageFrom ?? before.startedAt },
+			]);
 			// Abandoned through its own name; the fresh hold carries no window of the old one.
 			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_other")]);
 			expect((await record()).assignedIds).toEqual([]);
@@ -3851,6 +3858,26 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				"/v1/authorize Bearer k2",
 			]);
 			expect(server.charges).toEqual([]);
+		});
+
+		it("a STALE `.releasing` claim made under another server or key is abandoned with no gap: its call never ran", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			// Claimed only to be ENDED, as a deferred call's earlier hold is, and left stale.
+			await rename(join(stateDir, RECORD), join(stateDir, RELEASING));
+			const then = new Date(Date.now() - 11 * 60_000);
+			await utimes(join(stateDir, RELEASING), then, then);
+			other = await otherServer([]);
+			repin();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { ...env, ...other.env });
+			expect(again.stderr).toContain("hold tx_1 was made under another server or key");
+			expect(again.stderr).toContain("reserved tx_other");
+			expect(other.aboutTx1()).toEqual([]);
+			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_other")]);
+			// mutant: a call-ran gap for a call that never ran
+			const watch = await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => "");
+			expect(watch).toBe("");
 		});
 
 		it("a FRESH `.settling` made under another server or key is refused: its settle may be in flight, and nothing about it is sent", async () => {
@@ -5010,6 +5037,15 @@ describe("a hook after the server or key changed never ends a hold through the n
 		expect(stop.stderr).toContain("made under another server or key is not retried here");
 		expect(authorizes().filter((r) => r.body.idempotencyKey === key)).toHaveLength(1);
 		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		// mutant: the vehicle is dropped with no gap. With no job labels, its start is unknown.
+		expect((await watched()).filter((w) => w.phase === "abandon")).toMatchObject([
+			{
+				kind: "gap",
+				reason: "an unresolved settle was made under another server or key",
+				started: null,
+			},
+		]);
+		expect(stop.stderr).toContain("its usage goes unrecorded (recorded as a gap)");
 	});
 
 	it("a REMAINDER group parked under the old key is never retried under the new one", async () => {
@@ -5036,6 +5072,10 @@ describe("a hook after the server or key changed never ends a hold through the n
 		expect(stop.stderr).toContain("made under another server or key is not retried here");
 		expect(authorizes().filter((r) => r.body.idempotencyKey === key)).toHaveLength(1);
 		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		// mutant: the vehicle is dropped with no gap
+		expect((await watched()).filter((w) => w.phase === "abandon")).toMatchObject([
+			{ kind: "gap", reason: "an unresolved settle was made under another server or key" },
+		]);
 	});
 
 	it("control: the same key retries the unresolved settle at Stop", async () => {

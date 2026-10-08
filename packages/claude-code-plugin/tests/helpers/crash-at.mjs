@@ -3,7 +3,9 @@
 // so a test can stop a hook at every step boundary that can change what is
 // posted — a claim published (link), a cursor or hold file renamed into place
 // (rename), an exclusive create (a lock owner, an estimate marker, a claim on a
-// link-less filesystem), and every server call (fetch, by path).
+// link-less filesystem), and every server call (fetch, by path). A record's removal
+// (`unlink <its extension>`, ".settling" say) only when UT_CC_CRASH names one, so
+// no other failpoint's log changes.
 //
 //   UT_CC_CRASH         "<op>|<k>|<before|after>", e.g. "fetch /v1/settle|1|after"
 //   UT_CC_CRASH_LOG     a file: each call is appended as "<op>", the crash as "CRASH ..."
@@ -14,7 +16,7 @@
 // handler — exactly as when the hook's process is killed there.
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import { dirname } from "node:path";
+import { dirname, extname } from "node:path";
 
 const fsp = createRequire(import.meta.url)("node:fs/promises");
 const [target = "", nth = "0", when = "before"] = (process.env.UT_CC_CRASH ?? "").split("|");
@@ -54,13 +56,16 @@ async function step(op, call) {
 	}
 }
 
-const { link, rename, writeFile } = fsp;
+const { link, rename, unlink, writeFile } = fsp;
 fsp.link = (...args) => step("link", () => link(...args));
 fsp.rename = (...args) => step("rename", () => rename(...args));
 fsp.writeFile = (path, data, options) =>
 	options?.flag === "wx"
 		? step("create", () => writeFile(path, data, options))
 		: writeFile(path, data, options);
+if (target.startsWith("unlink ")) {
+	fsp.unlink = (path) => step(`unlink ${extname(String(path))}`, () => unlink(path));
+}
 syncBuiltinESMExports();
 
 const realFetch = globalThis.fetch;

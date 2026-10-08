@@ -131,6 +131,7 @@ import {
 	budgetShare,
 	cleanup,
 	clearPending,
+	guardMode,
 	isAlreadySettled,
 	isUnknownRoute,
 	isUnknownTransfer,
@@ -2043,12 +2044,23 @@ export async function postRemainder({
 			if (boundElsewhere(vehicle)) {
 				// Its settle may have posted at that server. Retried here, under a key this
 				// server never saw, it would be charged to this tenant as well: it goes
-				// unrecorded instead.
+				// unrecorded instead. That is a gap, written before the vehicle goes, so
+				// dropping it never erases the one record of an unconfirmed charge.
+				const recorded = await recordWatchEvent({
+					kind: "gap",
+					mode: guardMode(),
+					phase: "abandon",
+					session: sessionId,
+					agent: agentId,
+					reason: "an unresolved settle was made under another server or key",
+					// When its usage began, from the labels it was sent with, else unknown.
+					started: vehicle.labels?.usageFrom ?? null,
+				});
 				cursor.unresolved.delete(key);
 				accountIds(cursor, vehicle.ids);
 				await opened.save();
 				summary.notes.push(
-					`an unresolved ${vehicle.model} settle made under another server or key is not retried here: its usage goes unrecorded`,
+					`an unresolved ${vehicle.model} settle made under another server or key is not retried here: its usage goes unrecorded${recorded ? " (recorded as a gap)" : ""}`,
 				);
 				continue;
 			}

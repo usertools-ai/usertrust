@@ -412,7 +412,9 @@ Run it as an ordinary Bash call (the session id is `$CLAUDE_CODE_SESSION_ID`). J
 - **No default.** With no job open the field is absent; an unreadable log is recorded as
   `jobState: "invalid"`, never guessed.
 - **It refuses rather than guesses.** The CLI writes only to a log the plugin started
-  (`<state>/jobs/<session_id>.jsonl`, created by SessionStart for a new session id). A session resumed
+  (`<state>/jobs/<session_id>.jsonl`, created by SessionStart for a new session id). `<state>` is the
+  session's own, from its pin, as its hooks read it: a state dir changed since the session began
+  is not where its log is (see [One session, one set of settings](#one-session-one-set-of-settings)). A session resumed
   without an explicit id may carry the startup id in its environment: resume with `--resume <id>`. It
   waits up to 10 s for a session that has only just started.
 - **Scope.** Per session, not per agent: a subagent shares its parent's job.
@@ -575,7 +577,9 @@ again, and the plugin finds the hold the call already has.
     record made under another server or key never reaches the journal through the
     resumed call either. While fresh, the call is refused. Once stale, the record
     is abandoned through its own name: its usage goes unrecorded, and is never
-    parked for a retry through the new server. Any other hook that reconciles is
+    parked for a retry through the new server. Each drop is first written to
+    `watch.jsonl` as a gap, except a claim that only ends a deferred call's hold,
+    whose call never ran. Any other hook that reconciles is
     still blind to the tenant, as in 1.4.0, and so is Stop's (or SubagentStop's)
     settle of a hold still pending then: it settles that hold through the current
     server and key ([#246](https://github.com/usertools-ai/usertrust/issues/246)).

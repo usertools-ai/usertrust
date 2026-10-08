@@ -66,6 +66,7 @@ import {
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	recordUnconfirmedCall,
 	recordWatchEvent,
 	releaseHold,
 	requireLaunch,
@@ -224,8 +225,10 @@ function abandon(entry) {
  * exclusive rename, then deleted. Nothing about it is sent to this hook's server,
  * and nothing is parked for a retry. Any window it carried is accounted by the
  * journal as unrecorded (assigned ids whose hold is gone): an under-count of the
- * other tenant, never charged to this one. Returns false when the record is fresh,
- * or another hook took it first.
+ * other tenant, never charged to this one. Its call RAN (unless the claim only ends
+ * a deferred call's hold), and its charge is unconfirmed: that gap is written before
+ * the record goes, as Stop writes it (lib.mjs `cleanup`). Returns false when the
+ * record is fresh, or another hook took it first.
  */
 async function abandonSettling(entry) {
 	if (!(Date.now() - entry.mtimeMs > STALE_SETTLING_MS)) return false;
@@ -235,8 +238,10 @@ async function abandonSettling(entry) {
 	} catch {
 		return false;
 	}
+	const recorded =
+		entry.intent !== "release" && (await recordUnconfirmedCall(sessionId, entry, "call-ran"));
 	say(
-		`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key, and its settle never resolved; nothing about it is sent here, and any usage it carried goes unrecorded`,
+		`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key, and its settle never resolved; nothing about it is sent here, and any usage it carried goes unrecorded${recorded ? " (recorded as a gap)" : ""}`,
 	);
 	await unlink(taken).catch(() => {});
 	return true;

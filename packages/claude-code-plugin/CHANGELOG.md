@@ -59,7 +59,10 @@ npm, and its version is its own: the `usertrust` packages and their
   Ended through the new server, it answered 404 there, and the estimate path then
   charged the call to the new tenant on a fresh hold. An unresolved settle parked
   under one server and key is likewise never retried under another: there, under
-  a key that server never saw, it could charge again what the first already did. A
+  a key that server never saw, it could charge again what the first already did.
+  Every such drop first writes a gap to `watch.jsonl`, stating when its call began,
+  except a claim that only ends a deferred call's hold, whose call never ran. A
+  stale `.settling` record that 1.4.1's resumed PreToolUse abandoned left no gap. A
   record without a binding (from before 1.4.1) is ended as it always was.
 - **Hold files are created `0600`**, as every other file in the state dir already
   was. They were `0644`, readable by other users when the state dir allows it.
@@ -78,6 +81,9 @@ npm, and its version is its own: the `usertrust` packages and their
     resumed at or after the removal, is pinned again from the settings then current.
     A pin that cannot be used runs the hook watch-only and key-less, with a gap.
   - Every hook now starts through `hooks/launch.mjs`.
+  - `usertrust-job` reads a session's settings from the same pin, so `start` and
+    `stop` write to the job log the session's hooks read, whatever the state dir
+    says now.
 
 ### Fixed
 
