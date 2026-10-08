@@ -59,6 +59,7 @@ import {
 	jobCapable,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
+	markReleaseIntent,
 	readStdin,
 	recordPending,
 	recordWatchEvent,
@@ -349,6 +350,8 @@ async function retire(entry) {
 	}
 	const claimed = await claimForSettle(entry.path);
 	if (claimed === null) return false;
+	// This claim only ENDS a deferred call's hold: say so, so Stop gives it back as `unused`.
+	await markReleaseIntent(claimed).catch(() => {});
 	const capabilities = await serverCapabilities();
 	if (capabilities?.has("release")) {
 		const unconfirmed = await releaseUnconfirmed(entry.transferId);

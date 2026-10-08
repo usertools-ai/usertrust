@@ -482,6 +482,17 @@ function settlingPath(livePath) {
  * claim names one hold, never whatever file a call's name holds now. Returns the
  * `.settling` path, or null when another hook took it first.
  */
+/**
+ * Record, in a hold already claimed (`.settling`), that the claim is only to END it: a resumed
+ * call's earlier hold, whose call was DEFERRED and never ran. Without it Stop reads every
+ * `.settling` as "its settle went unanswered", and gives the hold back as `call-ran` with a gap
+ * for a call that did not run. Best-effort: a claim with no intent is read conservatively.
+ */
+export async function markReleaseIntent(claimedPath) {
+	const body = JSON.parse(await readFile(claimedPath, "utf-8"));
+	await writeFileAtomic(claimedPath, JSON.stringify({ ...body, intent: "release" }));
+}
+
 export async function claimForSettle(live) {
 	const now = new Date();
 	await utimes(live, now, now).catch(() => {});
@@ -523,6 +534,9 @@ async function settlingRecords(sessionId, agentId) {
 				toolUseId: body.toolUseId ?? null,
 				agentId: sanitize(body.agentId ?? "main"),
 				...jobHoldFields(body),
+				// Why the hold was claimed: `release` when its call was deferred and the claim only
+				// serves to end the hold (see `markReleaseIntent`), otherwise a settle attempt.
+				...(body.intent === "release" ? { intent: "release" } : {}),
 				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
 				transcript: body.usage === "transcript",
 				// Which server and tenant made the hold (`tenantBinding`), as written.
@@ -994,16 +1008,19 @@ export async function cleanup(sessionId, agentId) {
 			say(`usertrust: out of time; hold ${held.transferId} left for Stop/TTL`);
 			return;
 		}
-		// The call RAN and its one settle went unanswered: the charge is unconfirmed, and a
+		// A claim made only to END a deferred call's hold (`intent: "release"`) is given back as
+		// `unused`: that call never ran, so there is nothing to confirm and no gap.
+		const releasing = held.intent === "release";
+		// Otherwise the call RAN and its one settle went unanswered: the charge is unconfirmed, and a
 		// give-back of the hold proves nothing about what was charged. Written down as a gap.
-		await recordUnconfirmedCall(sessionId, held, "call-ran");
+		if (!releasing) await recordUnconfirmedCall(sessionId, held, "call-ran");
 		try {
 			const response = await releaseHold(
 				held.transferId,
 				"session ended after an unanswered settle",
 				{
 					timeoutMs,
-					releaseClass: "call-ran",
+					releaseClass: releasing ? "unused" : "call-ran",
 				},
 			);
 			if (response.status !== 200 && response.status !== 404) {

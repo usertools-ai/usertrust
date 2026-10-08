@@ -1133,6 +1133,41 @@ describe("jobCoverage — transfers, and the evidence being there at all", () =>
 	});
 });
 
+describe("interval keys are POSITIONS, not stamps (B-102)", () => {
+	it("after a backward clock step two intervals of one job still get different keys", async () => {
+		// start A@+100, start B@+200, stop@+300, start A@+100 again: the last is clamped to +300.
+		await writeLog(
+			start(SID, T0) +
+				op(SID, T0 + 100, "start", "job-a") +
+				op(SID, T0 + 200, "start", "job-b") +
+				op(SID, T0 + 300, "stop", null) +
+				op(SID, T0 + 100, "start", "job-a"),
+		);
+		const { resolveJob } = await lib();
+		const jobs = (await resolveJob(SID)) as unknown as { keyAt(t: number): string };
+		const first = jobs.keyAt(T0 + 150);
+		const second = jobs.keyAt(T0 + 400);
+		expect(first).toContain("job:job-a");
+		expect(second).toContain("job:job-a");
+		// mutant: keyed by the raw stamp → both read `job:job-a@<same>`
+		expect(first).not.toBe(second);
+		expect(jobs.keyAt(T0 + 250)).not.toBe(first);
+	});
+	it("two unlabelled stretches begun by lines with the same raw stamp are two stretches", async () => {
+		await writeLog(
+			start(SID, T0) +
+				op(SID, T0 + 100, "start", "job-a") +
+				op(SID, T0 + 200, "stop", null) +
+				op(SID, T0 + 300, "start", "job-b") +
+				op(SID, T0 + 200, "stop", null),
+		);
+		const { resolveJob } = await lib();
+		const jobs = (await resolveJob(SID)) as unknown as { keyAt(t: number): string };
+		// mutant: `none@<raw stamp>` is the same for both stretches after a stop stamped +200
+		expect(jobs.keyAt(T0 + 250)).not.toBe(jobs.keyAt(T0 + 400));
+	});
+});
+
 describe("keyAt — unlabelled stretches are distinct", () => {
 	it("the time before `start a` and the time after `stop` are two stretches", async () => {
 		await writeLog(

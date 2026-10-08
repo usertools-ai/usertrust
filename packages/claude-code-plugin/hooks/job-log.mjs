@@ -113,7 +113,13 @@ export function parseJobLog(text, sessionId) {
 			return { state: "invalid", reason: `line ${i + 1} has a bad job id` };
 		}
 		effectiveMs = tsMs;
-		events.push({ tsMs, ts: rec.ts, op: rec.op, job: rec.op === "start" ? rec.job : null });
+		events.push({
+			index: i,
+			tsMs,
+			ts: rec.ts,
+			op: rec.op,
+			job: rec.op === "start" ? rec.job : null,
+		});
 	}
 	return { state: "ok", events, last: events[events.length - 1] };
 }
@@ -128,7 +134,7 @@ export function openAtEvents(events, tMs) {
 	let open = null;
 	for (const e of events) {
 		if (!(e.tsMs < tMs)) break;
-		if (e.op === "start") open = { job: e.job, since: e.ts };
+		if (e.op === "start") open = { job: e.job, since: e.index };
 		else if (e.op === "stop") open = null;
 	}
 	return open;
@@ -191,12 +197,14 @@ export async function resolveJob(sessionId) {
 			if (parsed.state === "none") return "none";
 			if (parsed.state === "invalid" || !Number.isFinite(tMs)) return "invalid";
 			const open = openAtEvents(parsed.events, tMs);
-			if (open !== null) return `job:${open.job}@${open.since}`;
+			// Keyed by POSITION (the opening line's index), not its stamp: after a clock step two
+			// intervals of one job can carry the same raw stamp.
+			if (open !== null) return `job:${open.job}#${open.since}`;
 			// Unlabelled time is keyed by the line that began it: the stretch before `start a`
 			// and the one after `stop` are two stretches, and a window spanning both would span
 			// job a.
 			const began = parsed.events.filter((e) => e.tsMs < tMs).at(-1);
-			return `none@${began?.ts ?? ""}`;
+			return `none#${began?.index ?? ""}`;
 		},
 	};
 }

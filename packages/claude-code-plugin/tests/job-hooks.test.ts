@@ -601,6 +601,45 @@ describe("an expired estimate hold's replacement: the call RAN, so every way it 
 	});
 });
 
+describe("a resumed call's earlier hold is only ENDED, so an unconfirmed release reads unused (B-103)", () => {
+	it("the earlier hold's release gets a 500: at Stop it is given back as unused, with no call-ran gap", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		const env = { UT_CC_USAGE: "estimate", UT_CC_MODE: "enforce" };
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		let releases = 0;
+		override = (path) => {
+			if (path !== "/v1/release") return undefined;
+			releases += 1;
+			return releases === 1 ? { status: 500, json: { error: "ledger unavailable" } } : undefined;
+		};
+		// The deferred call fires PreToolUse again: its earlier hold is claimed, its release fails.
+		const resumed = await run("pre-tool-use.mjs", pre("tu_1"), env);
+		expect(resumed.code).not.toBe(0);
+		await run("stop.mjs", base(), env);
+		const sent = of("/v1/release").map((r) => r.body);
+		expect(sent.map((b) => b.releaseClass)).toEqual(["unused", "unused"]); // mutant: call-ran
+		const gaps = (await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l))
+			.filter((e) => e.kind === "gap");
+		expect(gaps).toEqual([]);
+	});
+	it("a settle attempt left unanswered is still call-ran (the claim carries no release intent)", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		const env = { UT_CC_USAGE: "estimate" };
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		override = (path) =>
+			path === "/v1/settle" ? { status: 503, json: { error: "down" } } : undefined;
+		await run("post-tool-use.mjs", post("tu_1"), env);
+		override = undefined;
+		await run("stop.mjs", base(), env);
+		expect(of("/v1/release").map((r) => r.body.releaseClass)).toEqual(["call-ran"]);
+	});
+});
+
 describe("a job stopped and started again (a, b, a) keeps its intervals apart", () => {
 	it("a remainder settles three times, each window inside its own interval", async () => {
 		await startFake();
