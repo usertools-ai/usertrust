@@ -399,13 +399,14 @@ async function reserve(input) {
 	const jobs = (await jobCapable(await serverCapabilities())) ? await resolveJob(sessionId) : null;
 	const callMs = Date.now();
 	const holdLabels = jobs === null ? {} : jobs.at(callMs);
+	const holdKey = jobs === null ? "none" : jobs.keyAt(callMs);
 	const prepared = await prepareWindow({
 		sessionId,
 		agentId,
 		agentTypeHint: input.agent_type,
 		input,
 		jobs,
-		holdLabels,
+		holdKey,
 	});
 	if (prepared.becameSticky) {
 		say(

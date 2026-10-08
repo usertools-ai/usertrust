@@ -350,6 +350,33 @@ describe("test 2 — a remainder spanning a switch settles once per job", () => 
 	});
 });
 
+describe("a job stopped and started again (a, b, a) keeps its intervals apart", () => {
+	it("a remainder settles three times, each window inside its own interval", async () => {
+		await startFake();
+		await writeLog(
+			logLine(at(-60), "session-start", null),
+			logLine(at(-50), "start", "job-a"),
+			logLine(at(-30), "start", "job-b"),
+			logLine(at(-10), "start", "job-a"),
+		);
+		await writeTranscript([
+			message("m1", at(-40), 100, 50),
+			message("m2", at(-20), 200, 80),
+			message("m3", at(-5), 300, 120),
+		]);
+		await run("stop.mjs", base());
+		const auths = of("/v1/authorize").map((r) => r.body);
+		const settles = of("/v1/settle").map((r) => r.body);
+		// mutant: group by job id only → job-a's two intervals merge into one window across job-b
+		expect(auths.map((b) => [b.job, b.usageFrom])).toEqual([
+			["job-a", iso(at(-40))],
+			["job-b", iso(at(-20))],
+			["job-a", iso(at(-5))],
+		]);
+		expect(settles.map((b) => b.usageTo)).toEqual([iso(at(-40)), iso(at(-20)), iso(at(-5))]);
+	});
+});
+
 describe("test 8 (plugin → vault) and the G2(c) guard, against a REAL usertrust-server", () => {
 	const KEY = "ut_jobhooks_key";
 	async function realServer() {

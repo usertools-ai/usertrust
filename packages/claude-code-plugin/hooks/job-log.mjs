@@ -31,7 +31,7 @@
 //
 // Zero dependencies; reads and writes only the state dir.
 import { closeSync, constants, fsyncSync, openSync, writeSync } from "node:fs";
-import { mkdir, open, readdir, readFile, unlink } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, stat, truncate, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { sanitize, stateRoot } from "./lib.mjs";
 
@@ -107,10 +107,15 @@ export function parseJobLog(text, sessionId) {
 
 /** The job open at `tMs`: every line applies strictly AFTER its own ts. */
 export function jobAtEvents(events, tMs) {
+	return openAtEvents(events, tMs)?.job ?? null;
+}
+
+/** The open job at `tMs` and the ts of the `start` that opened THIS interval of it, or null. */
+export function openAtEvents(events, tMs) {
 	let open = null;
 	for (const e of events) {
 		if (!(e.tsMs < tMs)) break;
-		if (e.op === "start") open = e.job;
+		if (e.op === "start") open = { job: e.job, since: e.ts };
 		else if (e.op === "stop") open = null;
 	}
 	return open;
@@ -142,13 +147,18 @@ export async function resolveJob(sessionId) {
 		parsed,
 		/** Labels for a call or message at epoch-ms `tMs`. */
 		at: (tMs) => labelsAt(parsed, tMs),
+		/**
+		 * What may share one settle or one per-call hold: the labels AND the interval. A job
+		 * that is stopped and started again (a, b, a) has two intervals, and a window that
+		 * spanned both would span the other job's, which no coverage check could place.
+		 */
+		keyAt: (tMs) => {
+			if (parsed.state === "none") return "none";
+			if (parsed.state === "invalid" || !Number.isFinite(tMs)) return "invalid";
+			const open = openAtEvents(parsed.events, tMs);
+			return open === null ? "none" : `job:${open.job}@${open.since}`;
+		},
 	};
-}
-
-/** A stable key for a labels object: messages with equal keys may share one settle. */
-export function labelsKey(labels) {
-	if (labels.job !== undefined) return `job:${labels.job}`;
-	return labels.jobState === "invalid" ? "invalid" : "none";
 }
 
 // ── The lock ──
@@ -163,10 +173,15 @@ function pidAlive(pid) {
 	}
 }
 
+/** How long a lock whose metadata was never completed may exist before it is broken. */
+export const UNFINISHED_LOCK_MS = 2_000;
+
 async function breakIfStale(lock) {
 	let text;
+	let mtimeMs;
 	try {
 		text = await readFile(lock, "utf-8");
+		mtimeMs = (await stat(lock)).mtimeMs;
 	} catch {
 		return; // gone already: the next attempt takes it
 	}
@@ -174,11 +189,15 @@ async function breakIfStale(lock) {
 	try {
 		holder = JSON.parse(text);
 	} catch {
-		// A lock still being written is NOT stale: only age makes an unreadable one so.
+		// A writer that died between creating the lock and writing its metadata leaves an
+		// empty or partial file. It has no pid or ts to judge, so its AGE decides, after a
+		// short grace for a writer that is only now writing it.
 	}
-	const age = holder && Number.isFinite(holder.ts) ? Date.now() - holder.ts : 0;
-	if (holder && pidAlive(holder.pid) && age <= LOCK_STALE_MS) return;
-	if (!holder && age <= LOCK_STALE_MS) return;
+	const complete = holder !== null && Number.isFinite(holder.ts) && Number.isFinite(holder.pid);
+	const stale = complete
+		? !pidAlive(holder.pid) || Date.now() - holder.ts > LOCK_STALE_MS
+		: Date.now() - mtimeMs > UNFINISHED_LOCK_MS;
+	if (!stale) return;
 	// Re-read: break only the lock we judged, never one taken since.
 	try {
 		if ((await readFile(lock, "utf-8")) === text) await unlink(lock);
@@ -217,7 +236,8 @@ export async function withLock(log, fn, { maxWaitMs = 5_000 } = {}) {
 
 async function readParsed(log, sessionId) {
 	try {
-		return parseJobLog(await readFile(log, "utf-8"), sessionId);
+		const text = await readFile(log, "utf-8");
+		return { ...parseJobLog(text, sessionId), text };
 	} catch (err) {
 		if (err?.code === "ENOENT") return { state: "none", absent: true };
 		throw err;
@@ -291,6 +311,13 @@ export async function appendJobOp(sessionId, op, job, { waitMs = DEFAULT_WAIT_MS
 		if (parsed.state !== "ok") {
 			return { ok: false, reason: "the job log changed while it was being written" };
 		}
+		// An unterminated tail is a fragment a crashed writer left: nothing acknowledged it,
+		// and (holding the lock) no live writer is producing it. Cut it off, or this line
+		// would be glued onto it into a malformed COMPLETE line that invalidates the session.
+		if (!parsed.text.endsWith("\n")) {
+			const keep = Buffer.byteLength(parsed.text.slice(0, parsed.text.lastIndexOf("\n") + 1));
+			await truncate(log, keep);
+		}
 		const open = jobAtEvents(parsed.events, Number.POSITIVE_INFINITY);
 		if (op === "stop" && open === null) return { ok: true, noop: true, ts: parsed.last.ts };
 		const tsMs = Math.max(Date.now(), parsed.last.tsMs);
@@ -346,26 +373,39 @@ const ms = (value) => (typeof value === "string" ? Date.parse(value) : Number.Na
  * EXACT iff, for EVERY (session, open interval) of the job — taken from THAT
  * session's own validated log, from its `start` to its `stop`, its implicit stop (the
  * next `start`) or the session's end:
- *  - at least ONE record of the session carries `job` with its [usageFrom, usageTo]
- *    inside the interval (an empty interval proves nothing);
+ *  - at least ONE record of the session carries `job` with its COMPLETE
+ *    [usageFrom, usageTo] inside the interval (an empty interval proves nothing, and a
+ *    window with an end missing proves nothing about where it ended);
  *  - EVERY `llm_call` record of the session whose [usageFrom, usageTo] overlaps the
- *    interval carries `job`; none carries `jobState: "invalid"`; and none, in a
- *    session that records usage times at all, lacks `usageFrom` (that record is
- *    untagged, whatever it was appended after).
- * A record's APPEND time is never read. A log that is missing or invalid, or no log
- * for the job at all, is not exact.
+ *    interval carries `job`; none carries `jobState: "invalid"`; and none lacks a
+ *    complete usage window (an unknown end could reach into the interval), in a
+ *    session that records usage times at all.
+ * And every session with a record of the job has a usable log of its own: a session
+ * whose log is missing, unreadable or invalid is not exact. A record's APPEND time is
+ * never read.
+ *
+ * The cost counts each TRANSFER once, from its `llm_call`: the job rides every record a
+ * hold produces, and a failed ledger POST leaves a `settlement_ambiguous` beside the
+ * `llm_call` for the same transfer and cost.
  */
 export function jobCoverage({ job, logs, records }) {
 	const reasons = [];
-	const transferIds = [];
-	let costUt = 0n;
+	const transferCost = new Map();
 	for (const rec of records) {
 		if (rec?.data?.job !== job) continue;
-		if (typeof rec.data.transferId === "string") transferIds.push(rec.data.transferId);
+		const id = rec.data.transferId;
+		if (typeof id !== "string") {
+			reasons.push(`a record of ${job} names no transfer`);
+			continue;
+		}
+		if (!transferCost.has(id)) transferCost.set(id, null);
+		if (rec.kind !== "llm_call") continue;
 		const cost = rec.data.cost;
-		if (Number.isSafeInteger(cost) && cost >= 0) costUt += BigInt(cost);
-		else if (cost !== undefined) reasons.push(`a record of ${job} has no integer cost`);
+		if (Number.isSafeInteger(cost) && cost >= 0) transferCost.set(id, BigInt(cost));
+		else reasons.push(`the llm_call of a record of ${job} has no integer cost`);
 	}
+	let costUt = 0n;
+	for (const cost of transferCost.values()) costUt += cost ?? 0n;
 	const bySession = new Map();
 	for (const rec of records) {
 		const sid = sessionOfRecord(rec);
@@ -373,12 +413,33 @@ export function jobCoverage({ job, logs, records }) {
 		if (!bySession.has(sid)) bySession.set(sid, []);
 		bySession.get(sid).push(rec);
 	}
+	const complete = (data) => {
+		const f = ms(data?.usageFrom);
+		const t = ms(data?.usageTo);
+		return Number.isFinite(f) && Number.isFinite(t) && f <= t ? [f, t] : null;
+	};
+	// A session with a record of the job must have a log to judge it by.
+	for (const [sid, mine] of bySession) {
+		if (!mine.some((r) => r?.data?.job === job)) continue;
+		if (!Object.hasOwn(logs ?? {}, sid)) {
+			reasons.push(`session ${sid}: no job log was supplied`);
+		} else if (parseJobLog(logs[sid], sid).state !== "ok") {
+			reasons.push(`session ${sid}: its job log is missing, empty or invalid`);
+		}
+	}
+	for (const rec of records) {
+		if (rec?.data?.job === job && sessionOfRecord(rec) === null) {
+			reasons.push(`a record of ${job} names no session`);
+			break;
+		}
+	}
 	let intervalsSeen = 0;
 	for (const [sid, text] of Object.entries(logs ?? {})) {
 		const parsed = parseJobLog(text, sid);
 		if (parsed.state === "invalid") {
-			if (text.includes(`"${job}"`))
+			if (text.includes(`"${job}"`)) {
 				reasons.push(`session ${sid}: the job log is invalid (${parsed.reason})`);
+			}
 			continue;
 		}
 		if (parsed.state !== "ok") continue;
@@ -389,20 +450,18 @@ export function jobCoverage({ job, logs, records }) {
 		for (const [from, to] of intervals) {
 			intervalsSeen += 1;
 			const tagged = mine.some((r) => {
-				const f = ms(r?.data?.usageFrom);
-				const t = ms(r?.data?.usageTo ?? r?.data?.usageFrom);
-				return r?.data?.job === job && f >= from && t <= to;
+				const window = complete(r?.data);
+				return r?.data?.job === job && window !== null && window[0] >= from && window[1] <= to;
 			});
 			if (!tagged) reasons.push(`session ${sid}: no record of ${job} inside [${from}, ${to}]`);
 			for (const r of mine) {
 				if (r?.kind !== "llm_call") continue;
-				const f = ms(r.data?.usageFrom);
-				const t = ms(r.data?.usageTo ?? r.data?.usageFrom);
-				if (!Number.isFinite(f)) {
-					if (capable) reasons.push(`session ${sid}: an llm_call has no usageFrom`);
+				const window = complete(r.data);
+				if (window === null) {
+					if (capable) reasons.push(`session ${sid}: an llm_call has no complete usage window`);
 					continue;
 				}
-				if (!(f <= to && t >= from)) continue;
+				if (!(window[0] <= to && window[1] >= from)) continue;
 				if (r.data?.jobState === "invalid") {
 					reasons.push(`session ${sid}: an llm_call in the interval has an invalid job state`);
 				} else if (r.data?.job === undefined) {
@@ -415,7 +474,7 @@ export function jobCoverage({ job, logs, records }) {
 	return {
 		exact: reasons.length === 0,
 		reasons: [...new Set(reasons)],
-		transferIds,
+		transferIds: [...transferCost.keys()],
 		costUt: String(costUt),
 	};
 }

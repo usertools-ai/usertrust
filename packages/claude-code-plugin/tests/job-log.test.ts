@@ -352,7 +352,7 @@ describe("jobCoverage — the one answer path for 'exact'", () => {
 			records: [rec({ job: J, ...inside }), rec({})],
 		});
 		expect(r.exact).toBe(false);
-		expect(r.reasons.join(" ")).toContain("no usageFrom");
+		expect(r.reasons.join(" ")).toContain("no complete usage window");
 	});
 	it("an invalid job state anywhere in the interval is NOT exact", async () => {
 		const { jobCoverage } = await lib();
@@ -395,5 +395,111 @@ describe("jobCoverage — the one answer path for 'exact'", () => {
 		const r = jobCoverage({ job: J, logs, records: [rec({ job: J, ...inside })] });
 		expect(r.exact).toBe(false); // sess-2's interval has no record
 		expect(r.reasons.join(" ")).toContain("sess-2");
+	});
+});
+
+describe("jobCoverage — review hardening", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const inside = { usageFrom: iso(T0 + 2000), usageTo: iso(T0 + 3000) };
+	const rec = (extra: Record<string, unknown>, kind = "llm_call", sid = SID) => ({
+		kind,
+		actor: `claude-code:${sid}:main:main`,
+		data: { transferId: "tx_1", cost: 17, principal: { origin: `claude-code:${sid}` }, ...extra },
+	});
+
+	it("counts a transfer ONCE: settlement_ambiguous beside its llm_call is not a second spend", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [rec({ job: J, ...inside }), rec({ job: J, ...inside }, "settlement_ambiguous")],
+		});
+		expect(r.costUt).toBe("17");
+		expect(r.transferIds).toEqual(["tx_1"]);
+	});
+
+	it("a contributing session with NO supplied log is not exact", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [
+				rec({ job: J, ...inside }),
+				rec({ job: J, transferId: "tx_2", ...inside }, "llm_call", "sess-b"),
+			],
+		});
+		expect(r.exact).toBe(false);
+		expect(r.reasons.join(" ")).toContain("session sess-b: no job log was supplied");
+	});
+
+	it("a contributing session whose log is empty (unreadable) is not exact", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText, "sess-b": "" },
+			records: [
+				rec({ job: J, ...inside }),
+				rec({ job: J, transferId: "tx_2", ...inside }, "llm_call", "sess-b"),
+			],
+		});
+		expect(r.exact).toBe(false);
+		expect(r.reasons.join(" ")).toContain("sess-b");
+	});
+
+	it("an llm_call with usageFrom but no usageTo is NOT exact (its end could reach the interval)", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [rec({ job: J, ...inside }), rec({ transferId: "tx_2", usageFrom: iso(T0 + 500) })],
+		});
+		expect(r.exact).toBe(false);
+		expect(r.reasons.join(" ")).toContain("no complete usage window");
+	});
+
+	it("a record with only a usageFrom (a release) cannot be the positive evidence", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [rec({ job: J, usageFrom: iso(T0 + 2000) }, "hold_released")],
+		});
+		expect(r.exact).toBe(false);
+		expect(r.reasons.join(" ")).toContain("no record of bug-1");
+	});
+});
+
+describe("the lock and the log tail — review hardening", () => {
+	it("a lock whose metadata was never written is broken once it is old enough", async () => {
+		await writeLog(start(SID, T0));
+		await writeFile(`${logFile()}.lock`, "");
+		const old = new Date(Date.now() - 60_000);
+		await utimes(`${logFile()}.lock`, old, old);
+		const { appendJobOp } = await lib();
+		expect((await appendJobOp(SID, "start", "job-a", { waitMs: 1000 })).ok).toBe(true);
+	});
+	it("...but not while it is still being written (a fresh empty lock waits)", async () => {
+		await writeLog(start(SID, T0));
+		await writeFile(`${logFile()}.lock`, "");
+		const { appendJobOp } = await lib();
+		let done = false;
+		const pending = appendJobOp(SID, "start", "job-a", { waitMs: 1000 }).then((r) => {
+			done = true;
+			return r;
+		});
+		await new Promise((r) => setTimeout(r, 300));
+		expect(done).toBe(false);
+		expect((await pending).ok).toBe(true); // after the 2 s grace it is broken
+	}, 10_000);
+	it("an orphaned partial line is cut off before the append, so the log stays valid", async () => {
+		await writeLog(`${start(SID, T0)}{"sid":"sess-1","ts":"2026-01-01T00:0`);
+		const { appendJobOp, parseJobLog } = await lib();
+		expect((await appendJobOp(SID, "start", "job-a", { waitMs: 1000 })).ok).toBe(true);
+		const parsed = parseJobLog(await readFile(logFile(), "utf-8"), SID);
+		expect(parsed.state).toBe("ok");
+		if (parsed.state === "ok")
+			expect(parsed.events.map((e) => e.op)).toEqual(["session-start", "start"]);
 	});
 });

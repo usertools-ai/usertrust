@@ -123,7 +123,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { labelsKey, resolveJob } from "./job-log.mjs";
+import { resolveJob } from "./job-log.mjs";
 import {
 	budgetShare,
 	cleanup,
@@ -281,12 +281,12 @@ function sumCounts(messages) {
  * after a long outage can be tens of thousands of messages, every one of them
  * waiting on this before any settle.
  */
-export function groupByModel(messages, labelsOf) {
+export function groupByModel(messages, keyOf) {
 	const groups = new Map();
 	for (const m of messages) {
 		// One settle never spans a job switch: a group is a model AND a job, so a
 		// record never carries two jobs and never the job open at settle time.
-		const key = labelsOf === undefined ? m.model : `${m.model}\u0000${labelsKey(labelsOf(m))}`;
+		const key = keyOf === undefined ? m.model : `${m.model}\u0000${keyOf(m)}`;
 		const group = groups.get(key);
 		if (group === undefined) groups.set(key, [m]);
 		else group.push(m);
@@ -1525,7 +1525,7 @@ export async function prepareWindow({
 	agentTypeHint,
 	input,
 	jobs = null,
-	holdLabels = {},
+	holdKey = "none",
 }) {
 	const opened = await openAgent({ sessionId, agentId, input, mayEstimate: true });
 	if (opened.kind === "estimate" || opened.kind === "unavailable") {
@@ -1560,9 +1560,7 @@ export async function prepareWindow({
 		// only messages that happened under that job may ride it: a message from before a
 		// switch stays unassigned and is posted by a remainder under ITS job. The hold is
 		// never settled with a job it was not authorized with.
-		const holdKey = labelsKey(holdLabels);
-		const eligible =
-			jobs === null ? fresh : fresh.filter((m) => labelsKey(jobs.at(m.ts)) === holdKey);
+		const eligible = jobs === null ? fresh : fresh.filter((m) => jobs.keyAt(m.ts) === holdKey);
 		if (eligible.length > 0) {
 			const model = eligible[0].model;
 			const messages = eligible.filter((m) => m.model === model);
@@ -2034,7 +2032,7 @@ export async function postRemainder({
 		// is the one open at the message's OWN time, so a remainder spanning a switch
 		// settles once per job.
 		const jobs = (await jobCapable(capabilities)) ? await resolveJob(sessionId) : null;
-		const groups = groupByModel(fresh, jobs === null ? undefined : (m) => jobs.at(m.ts));
+		const groups = groupByModel(fresh, jobs === null ? undefined : (m) => jobs.keyAt(m.ts));
 		for (const messages of groups.values()) {
 			const model = messages[0].model;
 			const span = jobs === null ? {} : usageSpan(messages);
