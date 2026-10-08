@@ -663,7 +663,16 @@ timestamp), never the one open at settle time, so a remainder spanning a switch 
 interval, an untagged or differently tagged overlapping record, a record of the job outside its
 intervals, an incomplete usage window, an invalid state, a denied request of the job, a `would_block`
 or an unmetered `gap` in the plugin's watch records, or a contributing session without a usable log each
-refuse it. It is DENY BY DEFAULT for records it does not recognise: any record of a session that is
+refuse it. It reconciles THREE sides, and anything unaccounted for is inexact with a named reason: (1) every
+record TAGGED with the job lies inside an interval of the job in a valid log of its own session (a session
+with no interval of it puts all of its tagged records outside); (2) every gap, `would_block`, untagged call
+or unrecognised record whose time could fall in an interval is POSITIVELY attributed elsewhere through a valid
+log of its own session, and one that cannot be resolved (no usable log, no session, no readable time) makes
+the job inexact (a log-less gap or refusal makes EVERY job inexact, as the set it could belong to is
+unbounded); an untagged call in a session with a valid log, outside every interval, stays exact; (3) every
+transfer is joined to exactly one `llm_call` with an integer cost, so a transfer known only through
+`settlement_shortfall`, `settlement_ambiguous` or `llm_call_failed` is never costed as zero. It is DENY BY
+DEFAULT for records it does not recognise: any record of a session that is
 neither spend (`llm_call`) nor a give-back or spend's own bookkeeping (`hold_released`,
 `settlement_ambiguous`, `settlement_shortfall`) and lies in an interval makes it inexact, whatever
 labels it carries or lacks (naming the bad kinds one at a time kept leaking new ones). An interval is (start, stop], matching how the hooks resolve a time (a line applies strictly

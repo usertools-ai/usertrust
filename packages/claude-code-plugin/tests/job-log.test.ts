@@ -463,7 +463,9 @@ describe("jobCoverage — review hardening", () => {
 			],
 		});
 		expect(r.exact).toBe(false);
-		expect(r.reasons.join(" ")).toContain("session sess-b: no job log was supplied");
+		expect(r.reasons.join(" ")).toContain(
+			"session sess-b: a record of bug-1 has no usable job log to be placed by",
+		);
 	});
 
 	it("a contributing session whose log is empty (unreadable) is not exact", async () => {
@@ -611,17 +613,95 @@ describe("jobCoverage — refused and unmetered work", () => {
 			watch: [{ kind: "gap", session: SID, at: iso(T0 + 3500) }],
 		});
 		expect(inGap.exact).toBe(false);
-		expect(inGap.reasons.join(" ")).toContain("unmetered");
+		expect(inGap.reasons.join(" ")).toContain("a gap fell inside an interval");
 		const outGap = jobCoverage({
 			...base,
 			watch: [{ kind: "gap", session: SID, at: iso(T0 + 9000) }],
 		});
 		expect(outGap.exact).toBe(true);
-		const otherSession = jobCoverage({
+		// A gap from a session with a VALID log that had a different job (or none) open is
+		// positively attributed elsewhere.
+		const zLog = start("sess-z", T0) + op("sess-z", T0 + 1000, "start", "bug-9");
+		const elsewhere = jobCoverage({
 			...base,
+			logs: { [SID]: logText, "sess-z": zLog },
 			watch: [{ kind: "gap", session: "sess-z", at: iso(T0 + 3500) }],
 		});
-		expect(otherSession.exact).toBe(true);
+		expect(elsewhere.exact).toBe(true);
+	});
+});
+
+describe("jobCoverage — watch events whose job cannot be resolved", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const ok = {
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost: 5,
+			job: J,
+			principal: { origin: `claude-code:${SID}` },
+			usageFrom: iso(T0 + 2000),
+			usageTo: iso(T0 + 3000),
+		},
+	};
+	const inside = iso(T0 + 3500);
+	const run = async (watch: unknown[], logs: Record<string, string> = { [SID]: logText }) =>
+		(await lib()).jobCoverage({ job: J, logs, records: [ok], watch });
+
+	it("probe 1: a gap from a session whose log is MISSING may belong to the job", async () => {
+		expect((await run([{ kind: "gap", session: "sess-z", started: inside }])).exact).toBe(false);
+		const r = await run([{ kind: "gap", session: "sess-z", started: inside }]);
+		expect(r.reasons.join(" ")).toContain(
+			"cannot be attributed to a job (session sess-z has no job log)",
+		);
+		// positive control: the same event in S1, whose log has the job open then, flips it
+		expect((await run([{ kind: "gap", session: SID, started: inside }])).exact).toBe(false);
+		// ...and from a session with a valid log that had ANOTHER job open, it does not
+		const other = start("sess-z", T0) + op("sess-z", T0 + 1000, "start", "bug-9");
+		expect(
+			(
+				await run([{ kind: "gap", session: "sess-z", started: inside }], {
+					[SID]: logText,
+					"sess-z": other,
+				})
+			).exact,
+		).toBe(true);
+	});
+	it("probe 1b: ...or whose log is INVALID or empty", async () => {
+		for (const bad of ["", "garbage\n"]) {
+			const r = await run([{ kind: "gap", session: "sess-z", started: inside }], {
+				[SID]: logText,
+				"sess-z": bad,
+			});
+			expect(r.exact, JSON.stringify(bad)).toBe(false);
+			expect(r.reasons.join(" ")).toContain("has no usable job log");
+		}
+	});
+	it("probe 2: a would_block labelled jobState invalid is resolved through its session's log", async () => {
+		const w = { kind: "would_block", jobState: "invalid", session: SID, started: inside };
+		const r = await run([w]);
+		expect(r.exact).toBe(false); // mutant: ignored because it carries no job
+		expect(r.reasons.join(" ")).toContain("a would_block fell inside an interval");
+		// no usable log for its session: unresolved, so inexact for every job
+		expect((await run([{ ...w, session: "sess-z" }])).exact).toBe(false);
+		// positive control: attributed to another job through a valid log
+		const other = start("sess-z", T0) + op("sess-z", T0 + 1000, "start", "bug-9");
+		expect(
+			(await run([{ ...w, session: "sess-z" }], { [SID]: logText, "sess-z": other })).exact,
+		).toBe(true);
+	});
+	it("probe 3: a would_block with NO job label inside the interval is not ignored", async () => {
+		const w = { kind: "would_block", session: SID, started: inside };
+		expect((await run([w])).exact).toBe(false); // mutant: only labelled would_blocks count
+		// outside the interval it is positively attributed to no job
+		expect((await run([{ ...w, started: iso(T0 + 9000) }])).exact).toBe(true);
+	});
+	it("an event that names no session or has no readable time is unresolved", async () => {
+		expect((await run([{ kind: "gap", started: inside }])).exact).toBe(false);
+		expect((await run([{ kind: "gap", session: SID, started: "never" }])).exact).toBe(false);
 	});
 });
 
@@ -711,7 +791,7 @@ describe("jobCoverage — watch evidence", () => {
 		const gap = { kind: "gap", session: SID, started: iso(T0 + 3000), at: iso(T0 + 9000) };
 		const r = jobCoverage({ job: J, logs: { [SID]: logText }, records: [ok], watch: [gap] });
 		expect(r.exact).toBe(false); // mutant: reads `at` → after the stop → exact
-		expect(r.reasons.join(" ")).toContain("unmetered");
+		expect(r.reasons.join(" ")).toContain("a gap fell inside an interval");
 	});
 	it("an unreadable watch line refuses exact", async () => {
 		const { jobCoverage } = await lib();
@@ -824,6 +904,162 @@ describe("jobCoverage — sessions that could not attribute their usage", () => 
 		const jobs = (await resolveJob(SID)) as unknown as { boundaryAfter(t: number): number | null };
 		expect(jobs.boundaryAfter(T0 + 500)).toBe(T0 + 500); // mutant: strictly after → null
 		expect(jobs.boundaryAfter(T0 + 501)).toBeNull();
+	});
+});
+
+describe("jobCoverage — reconciliation, both ways", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const call = (sid: string, data: Record<string, unknown>) => ({
+		kind: "llm_call",
+		actor: `claude-code:${sid}:main:main`,
+		data: {
+			transferId: `tx_${sid}_${String(data.usageFrom)}`,
+			cost: 5,
+			principal: { origin: `claude-code:${sid}` },
+			usageFrom: iso(T0 + 2000),
+			usageTo: iso(T0 + 3000),
+			...data,
+		},
+	});
+	const s1 = call(SID, { job: J });
+	const other = start("sess-2", T0) + op("sess-2", T0 + 1000, "start", "bug-9");
+	const run = async (records: unknown[], logs: Record<string, string>, watch: unknown[] = []) =>
+		(await lib()).jobCoverage({ job: J, logs, records, watch });
+
+	it("clause 1: a call TAGGED with the job in a session whose valid log has no interval of it is outside", async () => {
+		const r = await run([s1, call("sess-2", { job: J })], { [SID]: logText, "sess-2": other });
+		expect(r.exact).toBe(false); // mutant: sessions with no interval of the job are skipped
+		expect(r.reasons.join(" ")).toContain("lies outside its intervals (the session has none)");
+		// positive control: a clean session stays exact
+		expect((await run([s1], { [SID]: logText })).exact).toBe(true);
+	});
+	it("clause 1: ...or whose log is missing", async () => {
+		const r = await run([s1, call("sess-2", { job: J })], { [SID]: logText });
+		expect(r.exact).toBe(false);
+	});
+	it("clause 2: an UNTAGGED call from a session with no log, reaching the job's intervals, is unresolved", async () => {
+		const r = await run([s1, call("sess-2", {})], { [SID]: logText });
+		expect(r.exact).toBe(false); // mutant: records of log-less sessions are not examined
+		expect(r.reasons.join(" ")).toContain("cannot be placed (no usable job log)");
+	});
+	it("clause 2: an untagged call in a session WITH a valid log, outside every interval, stays exact", async () => {
+		const before = call(SID, { usageFrom: iso(T0 + 100), usageTo: iso(T0 + 900) });
+		expect((await run([s1, before], { [SID]: logText })).exact).toBe(true);
+	});
+	it("unbounded: a log-less gap BETWEEN two jobs' intervals makes both non-exact", async () => {
+		const both =
+			start(SID, T0) +
+			op(SID, T0 + 1000, "start", "bug-1") +
+			op(SID, T0 + 3000, "start", "bug-2") +
+			op(SID, T0 + 6000, "stop", null);
+		const { jobCoverage } = await lib();
+		const gap = { kind: "gap", session: "sess-z", started: iso(T0 + 3000) };
+		for (const [id, w] of [
+			["bug-1", [T0 + 1500, T0 + 2500]],
+			["bug-2", [T0 + 3500, T0 + 5500]],
+		] as const) {
+			const record = call(SID, { job: id, usageFrom: iso(w[0]), usageTo: iso(w[1]) });
+			expect(
+				jobCoverage({ job: id, logs: { [SID]: both }, records: [record] }).exact,
+				`${id} clean`,
+			).toBe(true);
+			const r = jobCoverage({ job: id, logs: { [SID]: both }, records: [record], watch: [gap] });
+			expect(r.exact, `${id} with a log-less gap`).toBe(false);
+		}
+	});
+});
+
+describe("jobCoverage — transfers, and the evidence being there at all", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const principal = { origin: `claude-code:${SID}` };
+	const call = {
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost: 7,
+			job: J,
+			principal,
+			usageFrom: iso(T0 + 2000),
+			usageTo: iso(T0 + 3000),
+		},
+	};
+	const meta = (kind: string, transferId: string) => ({
+		kind,
+		actor: call.actor,
+		data: { ...call.data, transferId, cost: 20 },
+	});
+	const run = async (records: unknown[], watch: unknown[] = [], logs = { [SID]: logText }) =>
+		(await lib()).jobCoverage({ job: J, logs, records, watch });
+
+	it.each(["settlement_shortfall", "settlement_ambiguous", "llm_call_failed"])(
+		"clause 3: a transfer known only through %s metadata is NOT exact (never costed as 0)",
+		async (kind) => {
+			const r = await run([call, meta(kind, "tx_2")]);
+			expect(r.exact).toBe(false); // mutant: a transfer without an llm_call counts as 0
+			expect(r.reasons.join(" ")).toContain("known only through its settlement metadata");
+			// positive control: the same metadata BESIDE its llm_call is one charge
+			expect((await run([call, meta(kind, "tx_1")])).exact).toBe(true);
+		},
+	);
+	it("clause 3: two llm_calls for one transfer are not one charge", async () => {
+		const r = await run([call, { ...call }]);
+		expect(r.exact).toBe(false);
+		expect(r.reasons.join(" ")).toContain("has 2 llm_calls");
+	});
+	it("clause 3: a transfer that was only given back spent nothing and needs no llm_call", async () => {
+		const given = {
+			kind: "hold_released",
+			actor: call.actor,
+			data: { ...call.data, transferId: "tx_9", usageTo: undefined },
+		};
+		expect((await run([call, given])).exact).toBe(true);
+	});
+	it("a labelled would_block of the job is never exact, wherever it happened", async () => {
+		const w = { kind: "would_block", job: J, session: SID, started: iso(T0 + 9000) };
+		expect((await run([call], [w])).exact).toBe(false);
+	});
+	it("no records and no logs is not exact (nothing proves anything)", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({ job: J, logs: {}, records: [] });
+		expect(r.exact).toBe(false);
+		expect(r.reasons.join(" ")).toContain("no session log has an interval");
+	});
+	it("an invalid log that names the job is reported by name", async () => {
+		const r = await run([call], [], { [SID]: `${logText}garbage\n` });
+		expect(r.reasons.join(" ")).toContain("the job log is invalid");
+	});
+});
+
+describe("keyAt — unlabelled stretches are distinct", () => {
+	it("the time before `start a` and the time after `stop` are two stretches", async () => {
+		await writeLog(
+			start(SID, T0) + op(SID, T0 + 1000, "start", "job-a") + op(SID, T0 + 5000, "stop", null),
+		);
+		const { resolveJob } = await lib();
+		const jobs = (await resolveJob(SID)) as unknown as { keyAt(t: number): string };
+		const before = jobs.keyAt(T0 + 500);
+		const during = jobs.keyAt(T0 + 2000);
+		const after = jobs.keyAt(T0 + 6000);
+		expect(new Set([before, during, after]).size).toBe(3); // mutant: both unlabelled are "none"
+		expect(jobs.keyAt(T0 + 7000)).toBe(after);
+		expect(jobs.keyAt(T0 + 600)).toBe(before);
+	});
+});
+
+describe("usertrust-job coverage — an unreadable vault is no verdict, said through the scrubber", () => {
+	it("a missing --vault holding escape bytes is reported without them, exit 1", async () => {
+		const hostile = `${state}/gone\u001b[2J\u001b]0;pwned\u0007\u009b`;
+		const r = await cliOut(["coverage", "bug-1", "--vault", hostile]);
+		expect(r.code).toBe(1); // mutant: the rejection escapes and Node prints the path raw
+		expect(r.stdout).toBe("");
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting none reach the terminal is the point
+		expect(r.stderr).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+		expect(r.stderr).toContain("no verdict");
 	});
 });
 

@@ -114,12 +114,22 @@ if (command === "start" || command === "stop") {
 		flags.set(rest[i], rest[i + 1]);
 	}
 	if (!flags.has("--vault")) usage("coverage needs --vault <the .usertrust directory>");
-	const report = jobCoverage({
-		job,
-		logs: await readLogs(flags.get("--jobs") ?? jobsDir()),
-		records: await readRecords(flags.get("--vault")),
-		watch: await readWatch(flags.get("--watch") ?? watchLogPath()),
-	});
+	let report;
+	try {
+		report = jobCoverage({
+			job,
+			logs: await readLogs(flags.get("--jobs") ?? jobsDir()),
+			records: await readRecords(flags.get("--vault")),
+			watch: await readWatch(flags.get("--watch") ?? watchLogPath()),
+		});
+	} catch (err) {
+		// The evidence cannot be read: no verdict. The path is argv, so it goes out through
+		// `say` (control characters scrubbed), never as an unhandled rejection Node prints raw.
+		say(
+			`usertrust-job: cannot read the evidence under ${flags.get("--vault")} (${err?.code ?? "error"}): no verdict`,
+		);
+		process.exit(1);
+	}
 	process.stdout.write(`${JSON.stringify(report)}\n`);
 } else {
 	usage("unknown command");
