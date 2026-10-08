@@ -7,9 +7,13 @@ import { mkdir, mkdtemp, readdir, readFile, utimes, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PRINCIPAL_FIELD_PATTERN } from "../../core/src/shared/principal.js";
 import { runHook } from "./helpers/run-hook.js";
+
+// Every test here spawns hook processes (some several): a loaded machine needs more than
+// the 5 s default, and a timeout is not what these tests are about.
+vi.setConfig({ testTimeout: 30_000 });
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
 const CLI = join(import.meta.dirname, "..", "bin", "usertrust-job.mjs");

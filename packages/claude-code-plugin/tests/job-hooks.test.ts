@@ -9,10 +9,14 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { costFromRates, getModelRates, readLedgerEvents } from "usertrust";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashKey } from "../../server/src/config.js";
 import { createUsertrustServer, type UsertrustServer } from "../../server/src/server.js";
 import { runHook } from "./helpers/run-hook.js";
+
+// Every test here spawns hook processes (some several): a loaded machine needs more than
+// the 5 s default, and a timeout is not what these tests are about.
+vi.setConfig({ testTimeout: 30_000 });
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
 const SESSION = "11111111-2222-4333-8444-555555555555";
