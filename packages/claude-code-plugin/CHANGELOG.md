@@ -84,8 +84,11 @@ npm, and its version is its own: the `usertrust` packages and their
   - They are kept in a pin under the passwd home:
     `.local/state/usertrust/sessions/<session id>.json`, 0600, in directories
     checked as the config anchor is. A session configured through the environment
-    whose passwd home cannot hold its pin keeps it under its state dir instead,
-    checked the same way, so it needs nothing 1.4.1 did not.
+    whose passwd home cannot hold its pin keeps it in a per-user fallback,
+    `/tmp/usertrust-<uid>/sessions/`, checked the same way, so it needs nothing 1.4.1
+    did not. The fallback is derived from the uid alone, and every hook looks there
+    after the passwd home, whatever its settings now say. A system cleanup of `/tmp`
+    that removes a fallback pin re-pins the session, as the sweep does.
   - An environment session's pin holds the key's hash, never the key. A key changed
     mid-session is refused for that hook: it sends nothing, and records a gap.
   - A pin unused for 30 days is removed when a session starts; that session, if

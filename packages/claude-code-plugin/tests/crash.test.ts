@@ -27,7 +27,13 @@ import { createServer, type Server } from "node:http";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { LAUNCH, PASSWD_HOME_PRELOAD, passwdHomeFor } from "./helpers/run-hook.js";
+import {
+	LAUNCH,
+	PASSWD_HOME_PRELOAD,
+	passwdHomeFor,
+	TMP_ROOT_PRELOAD,
+	tmpRootFor,
+} from "./helpers/run-hook.js";
 
 const CRASH_AT = join(import.meta.dirname, "helpers", "crash-at.mjs");
 const SESSION = "22222222-3333-4444-8555-666666666666";
@@ -197,6 +203,8 @@ function hook(
 				...(crash ? ["--import", CRASH_AT] : []),
 				"--import",
 				PASSWD_HOME_PRELOAD,
+				"--import",
+				TMP_ROOT_PRELOAD,
 				LAUNCH,
 				name.replace(/\.mjs$/, ""),
 			],
@@ -204,6 +212,7 @@ function hook(
 				env: {
 					...process.env,
 					TEST_PASSWD_HOME: passwdHomeFor({ UT_CC_STATE_DIR: world.stateDir }),
+					TEST_TMP_ROOT: tmpRootFor({ UT_CC_STATE_DIR: world.stateDir }),
 					UT_CC_STATE_DIR: world.stateDir,
 					UT_SERVER_URL: `http://127.0.0.1:${world.port}`,
 					UT_SERVER_KEY: "k",

@@ -17,6 +17,8 @@ const HOOKS = join(import.meta.dirname, "..", "..", "hooks");
 export const LAUNCH = join(HOOKS, "launch.mjs");
 /** The test-only preload that moves the passwd home (passwd-home.mjs). */
 export const PASSWD_HOME_PRELOAD = join(import.meta.dirname, "passwd-home.mjs");
+/** The test-only preload that moves `/tmp`, where fallback pins live (tmp-root.mjs). */
+export const TMP_ROOT_PRELOAD = join(import.meta.dirname, "tmp-root.mjs");
 
 /**
  * The passwd home a run's hooks pin their sessions under, never the real one. It is
@@ -36,6 +38,30 @@ export function passwdHomeFor(env: Record<string, string>): string {
 	);
 	mkdirSync(home, { recursive: true });
 	return realpathSync(home);
+}
+
+/**
+ * What a run's hooks take for `/tmp` (tmp-root.mjs), never the real one: the test's
+ * own (TEST_TMP_ROOT), else one named by the hash of UT_CC_STATE_DIR, as
+ * `passwdHomeFor` names a home. A test that moves a session's state dir and needs its
+ * fallback pin found again passes its own. By its real path.
+ */
+export function tmpRootFor(env: Record<string, string>): string {
+	if (env.TEST_TMP_ROOT !== undefined) return env.TEST_TMP_ROOT;
+	const state = env.UT_CC_STATE_DIR;
+	if (state === undefined) return realpathSync(mkdtempSync(join(tmpdir(), "utcc-tmproot-")));
+	const root = join(
+		tmpdir(),
+		"utcc-tmproots",
+		createHash("sha256").update(state).digest("hex").slice(0, 24),
+	);
+	mkdirSync(root, { recursive: true });
+	return realpathSync(root);
+}
+
+/** The fallback's pins under a run's `/tmp` (session.mjs `fallbackDir`), for `uid`. */
+export function fallbackPinsDir(env: Record<string, string>, uid: number | null): string {
+	return join(tmpRootFor(env), `usertrust-${uid}`, "sessions");
 }
 
 /** The directory a run's sessions are pinned in (session.mjs), under its passwd home. */
@@ -60,8 +86,9 @@ export function forgetPins(env: Record<string, string>): void {
  * - The plugin's own `UT_*` variables are never inherited from the shell running the
  *   tests: a developer with `UT_CC_MODE=enforce` exported would otherwise flip every
  *   mode-dependent test. Each test passes the ones it means.
- * - Every run gets the passwd-home preload (`passwdHomeFor`). `nodeArgs` go before
- *   launch.mjs's path (another test-only `--import` preload, say).
+ * - Every run gets the passwd-home preload (`passwdHomeFor`) and the tmp-root one
+ *   (`tmpRootFor`). `nodeArgs` go before launch.mjs's path (another test-only
+ *   `--import` preload, say).
  */
 export function runHook(
 	hookPath: string,
@@ -76,10 +103,19 @@ export function runHook(
 		dirname(hookPath) === HOOKS && basename(hookPath) !== "launch.mjs"
 			? [LAUNCH, basename(hookPath, ".mjs")]
 			: [hookPath];
-	const preload = nodeArgs.includes(PASSWD_HOME_PRELOAD) ? [] : ["--import", PASSWD_HOME_PRELOAD];
+	const preload = [
+		...(nodeArgs.includes(PASSWD_HOME_PRELOAD) ? [] : ["--import", PASSWD_HOME_PRELOAD]),
+		"--import",
+		TMP_ROOT_PRELOAD,
+	];
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [...preload, ...nodeArgs, ...script], {
-			env: { ...inherited, ...env, TEST_PASSWD_HOME: passwdHomeFor(env) },
+			env: {
+				...inherited,
+				...env,
+				TEST_PASSWD_HOME: passwdHomeFor(env),
+				TEST_TMP_ROOT: tmpRootFor(env),
+			},
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		let stdout = "";

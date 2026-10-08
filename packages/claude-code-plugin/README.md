@@ -181,9 +181,16 @@ under your home as the passwd database gives it.
   directories that are yours and writable by no one else.
 - A session configured through the environment whose passwd home cannot hold its
   pin (a container user with no passwd entry, say, or a home that fails these
-  checks) keeps it under its state dir instead: `<state dir>/sessions/`, checked the
-  same way. That is the one place it already needed. A configured session's pin
-  stays under the passwd home, where no environment can move it.
+  checks) keeps it in a per-user fallback instead: `/tmp/usertrust-<uid>/sessions/`
+  (`/tmp` by its real path, never `TMPDIR`), checked the same way. It is derived
+  from your uid alone, so no setting can move it, and every hook looks there after
+  the passwd home, whatever its settings now say. A configured session never makes
+  a pin there: its pin stays under the passwd home, where no environment can move it.
+  - A fallback pin removed by the system's own cleanup of `/tmp` (after days unused
+    on macOS, at boot on many Linux systems) is made again, from the settings then
+    current, as after the sweep.
+  - A `/tmp/usertrust-<uid>` that another user made first, or that is a link, is
+    refused: the session runs as a pin that cannot be used does, below.
 - A configured session's pin holds the file's settings, key included: the key is in
   the config file already.
 - An environment session's pin holds the key's hash, never the key. Each hook reads
@@ -198,9 +205,9 @@ under your home as the passwd database gives it.
 gap.** That covers a session id that is not a safe file name, a directory or file
 that fails these checks, a corrupt pin, and a filesystem without hard links. The
 reason is one of `pin: session id refused`, `pin: dir refused (<what>)`,
-`pin: state dir refused (<what>)`, `pin: unreadable`, `pin: corrupt`,
+`pin: fallback dir refused (<what>)`, `pin: unreadable`, `pin: corrupt`,
 `pin: unwritable` and `pin: no hard links`; for an environment session whose passwd
-home and state dir both failed, both, separated by `; `. The hook never reads the
+home and fallback both failed, both, separated by `; `. The hook never reads the
 settings afresh in its place, which could move the state dir.
 - **Its mode is still the session's,** as its environment or config file says now,
   or as its pin says for `pin: key changed`. An enforce session blocks every tool

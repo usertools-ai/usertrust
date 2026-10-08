@@ -9,7 +9,13 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PRINCIPAL_FIELD_PATTERN } from "../../core/src/shared/principal.js";
-import { PASSWD_HOME_PRELOAD, passwdHomeFor, runHook } from "./helpers/run-hook.js";
+import {
+	PASSWD_HOME_PRELOAD,
+	passwdHomeFor,
+	runHook,
+	TMP_ROOT_PRELOAD,
+	tmpRootFor,
+} from "./helpers/run-hook.js";
 
 // Every test here spawns hook processes (some several): a loaded machine needs more than
 // the 5 s default, and a timeout is not what these tests are about.
@@ -89,10 +95,19 @@ function spawnCli(args: string[], env: Record<string, string>) {
 		),
 	);
 	const given = { UT_CC_STATE_DIR: state, ...env };
-	return spawn(process.execPath, ["--import", PASSWD_HOME_PRELOAD, CLI, ...args], {
-		env: { ...inherited, ...given, TEST_PASSWD_HOME: passwdHomeFor(given) },
-		stdio: ["ignore", "pipe", "pipe"],
-	});
+	return spawn(
+		process.execPath,
+		["--import", PASSWD_HOME_PRELOAD, "--import", TMP_ROOT_PRELOAD, CLI, ...args],
+		{
+			env: {
+				...inherited,
+				...given,
+				TEST_PASSWD_HOME: passwdHomeFor(given),
+				TEST_TMP_ROOT: tmpRootFor(given),
+			},
+			stdio: ["ignore", "pipe", "pipe"],
+		},
+	);
 }
 
 function cli(args: string[], env: Record<string, string>) {

@@ -292,9 +292,15 @@ describe("resolveSettings: which file a configured session accepts", () => {
 		const inherited = Object.fromEntries(
 			Object.entries(process.env).filter(([name]) => !name.startsWith("UT_")),
 		);
-		const start = spawnSync(process.execPath, [...PRELOAD, LAUNCH, "session-start"], {
+		const tmpRoot = ["--import", join(import.meta.dirname, "helpers", "tmp-root.mjs")];
+		const start = spawnSync(process.execPath, [...PRELOAD, ...tmpRoot, LAUNCH, "session-start"], {
 			input: JSON.stringify({ session_id: "fifo-session" }),
-			env: { ...inherited, TEST_PASSWD_HOME: home.home, UT_CC_CONFIG: fifo },
+			env: {
+				...inherited,
+				TEST_PASSWD_HOME: home.home,
+				TEST_TMP_ROOT: nodeFs.realpathSync(nodeFs.mkdtempSync(join(tmpdir(), "utcc-tmproot-"))),
+				UT_CC_CONFIG: fifo,
+			},
 			encoding: "utf-8",
 			timeout: 10_000,
 		});

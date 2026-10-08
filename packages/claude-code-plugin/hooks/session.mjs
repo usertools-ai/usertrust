@@ -10,7 +10,7 @@
 // a resumed one included, uses the pin, and an edit applies to new sessions.
 //
 // THE PIN: <passwd home>/.local/state/usertrust/sessions/<session id>.json (below, for
-// an environment session, the other place it may be), 0600, in
+// an environment session, the one other place it may be), 0600, in
 // directories made 0700 and checked as the config anchor is (`privateDir`). It is
 // published once (`publish`): written whole to a temp file, then link()ed to its
 // name. A second hook that races to pin finds EEXIST, and reads the first one's
@@ -23,10 +23,12 @@
 // A refused config file is not pinned, and the next hook resolves again. A refused
 // hook sends nothing, so nothing it saw can be posted twice.
 //
-// An ENVIRONMENT session whose passwd home cannot hold its pin pins under its own
-// state dir instead, `<state dir>/sessions/`, checked the same way (`stateDirPins`).
-// A configured session's pin stays under the passwd home, where no environment can
-// move it.
+// An ENVIRONMENT session whose passwd home cannot hold its pin pins in a per-user
+// FALLBACK instead, `<real /tmp>/usertrust-<uid>/sessions/`, checked the same way
+// (`fallbackDir`). It is derived from the uid alone, so no setting can move it, and
+// every hook looks there after the passwd home and before it pins, whatever its
+// settings now say: the pin it finds, and that pin's `kind`, decide the session. Only
+// an environment session makes a pin there.
 //
 // Anything else wrong with the pin runs the hook refused: it sends nothing, and
 // records a gap. That means a session id that is not safe as a file name, a directory
@@ -146,24 +148,37 @@ function pinDir(home, { uid, fs }) {
 }
 
 /**
- * Where an ENVIRONMENT session pins when the passwd home cannot hold its pin: under
- * its own state dir, `<state dir>/sessions/`, both levels checked as the passwd home's
- * are, the state dir taken by its real path. The passwd home is required so that no
- * environment can move a CONFIGURED session's pin. An environment session takes every
- * setting from its environment by design, and its state dir is the one place 1.4.1
- * already needed, so this adds it no requirement. `{ dir }` or `{ refused }`.
+ * The system's temporary directory, BY NAME: never `os.tmpdir()`, which TMPDIR moves.
+ * `sessionSettings` and `sweep` take another only as a test's seam, never a setting.
  */
-function stateDirPins(stateDir, { uid, fs }) {
-	let base;
+const TMP_ROOT = "/tmp";
+
+/** The fallback's own directory, `<real tmp root>/usertrust-<uid>`, or null. Creates nothing. */
+function fallbackBase({ uid, fs, tmpRoot }) {
+	if (uid === null) return null;
 	try {
-		fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-		base = fs.realpathSync(stateDir);
+		return join(fs.realpathSync(tmpRoot), `usertrust-${uid}`);
 	} catch {
-		return { refused: "pin: state dir refused (missing)" };
+		return null;
 	}
+}
+
+/**
+ * Where an ENVIRONMENT session pins when the passwd home cannot hold its pin:
+ * `<real /tmp>/usertrust-<uid>/sessions/`, both levels checked as the passwd home's
+ * are, so a directory another user made first, or a link, is refused. It is derived
+ * from the uid alone, never from a setting or a variable: no change to the state dir,
+ * TMPDIR or the rest mid-session can move it. The passwd home is required so that no
+ * environment can move a CONFIGURED session's pin; an environment session gets this
+ * place too, which asks nothing 1.4.1 did not. Without a uid (Windows) there is none.
+ * `{ dir }` or `{ refused }`.
+ */
+function fallbackDir({ uid, fs, tmpRoot }) {
+	const base = fallbackBase({ uid, fs, tmpRoot });
+	if (base === null) return { refused: "pin: fallback dir refused (missing)" };
 	const dir = join(base, SESSIONS);
 	const refused = privateDir(base, { uid, fs }) ?? privateDir(dir, { uid, fs });
-	return refused === null ? { dir } : { refused: `pin: state dir refused (${refused})` };
+	return refused === null ? { dir } : { refused: `pin: fallback dir refused (${refused})` };
 }
 
 /** Whether anything is at `path` (not following a final link). Creates nothing. */
@@ -335,16 +350,19 @@ function publish(path, content, { fs }) {
  * session has none; the pin's `kind` ("configured" or "environment", null when there
  * is no usable pin); and the pin's path. `payload` is the hook's input, which names
  * the session.
- * - The pin lives under the passwd home. An environment session whose passwd home
+ * - Every hook looks, whatever its settings now say: first under the passwd home,
+ *   then in the fallback (`fallbackDir`), and only then pins. The pin it finds, and
+ *   its `kind`, decide the session, so a setting re-applied mid-session (another
+ *   state dir, a config file named) can never pin the session a second time.
+ * - A new pin goes under the passwd home. An environment session whose passwd home
  *   cannot hold it (none, a directory that fails its checks, a pin that cannot be
- *   written there) pins under its state dir instead (`stateDirPins`). A pin already
- *   there is the session's, whatever the passwd home has become, so a session is
- *   never pinned in both places.
+ *   written there) pins in the fallback instead. A configured session never does.
  * - A session that still has no usable pin gets refused settings: it sends nothing.
  *   Their mode and failOpen are what the session means to be, as resolved now
  *   (`intended`), so an enforce session still blocks (PreToolUse fails closed, as on
  *   any outage) and never silently stops enforcing. A refused config file names no
  *   mode, and stays watch-only.
+ * - `tmpRoot` is a test's seam, never a setting (`TMP_ROOT`).
  */
 export function sessionSettings({
 	env = environment(),
@@ -353,14 +371,14 @@ export function sessionSettings({
 	uid,
 	now = Date.now(),
 	fs = REAL_FS,
+	tmpRoot = TMP_ROOT,
 }) {
-	const configured = namesConfig(env);
 	const intended = () => {
 		const current = resolveSettings({ env, passwdHome, uid, fs });
 		return current.refused === null ? { mode: current.mode, failOpen: current.failOpen } : {};
 	};
 	const refuse = (reason) => ({
-		settings: refusedSettings(reason, passwdHome, { configured, ...intended() }),
+		settings: refusedSettings(reason, passwdHome, { configured: namesConfig(env), ...intended() }),
 		kind: null,
 		path: null,
 	});
@@ -372,6 +390,7 @@ export function sessionSettings({
 	const id = isObject(payload) ? payload.session_id : undefined;
 	if (typeof id !== "string" || !SESSION_ID.test(id)) return refuse("pin: session id refused");
 	const name = `${id}.json`;
+	// 1. Under the passwd home.
 	const home =
 		passwdHome === null ? { refused: "pin: dir refused (home)" } : pinDir(passwdHome, { uid, fs });
 	if (home.refused === undefined) {
@@ -379,15 +398,16 @@ export function sessionSettings({
 		const read = readPin(path, { uid, fs });
 		if (!read.missing) return use(read, path);
 	}
-	const resolved = resolveSettings({ env, passwdHome, uid, fs });
-	// An environment session's state dir, by its settings now: an earlier hook of this
-	// session may have pinned there.
-	if (!configured && present(join(resolved.stateDir, SESSIONS, name), fs)) {
-		const there = stateDirPins(resolved.stateDir, { uid, fs });
+	// 2. In the fallback, made by an earlier hook of this session, whatever kind it is.
+	const base = fallbackBase({ uid, fs, tmpRoot });
+	if (base !== null && present(join(base, SESSIONS, name), fs)) {
+		const there = fallbackDir({ uid, fs, tmpRoot });
 		if (there.refused !== undefined) return refuse(there.refused);
 		const path = join(there.dir, name);
 		return use(readPin(path, { uid, fs }), path);
 	}
+	// 3. None yet: the settings now, pinned.
+	const resolved = resolveSettings({ env, passwdHome, uid, fs });
 	// A refused config file is not pinned: the next hook resolves again.
 	if (resolved.refused !== null) return { settings: resolved, kind: null, path: null };
 	const content = JSON.stringify(
@@ -409,13 +429,14 @@ export function sessionSettings({
 	};
 	const atHome = pinIn(home, { unwritable: "pin: unwritable", nolink: "pin: no hard links" });
 	if (atHome.session !== undefined) return atHome.session;
-	if (configured) return refuse(atHome.refused);
-	const atState = pinIn(stateDirPins(resolved.stateDir, { uid, fs }), {
-		unwritable: "pin: state dir unwritable",
-		nolink: "pin: state dir has no hard links",
+	// Only an environment session makes a pin in the fallback.
+	if (resolved.configured) return refuse(atHome.refused);
+	const atFallback = pinIn(fallbackDir({ uid, fs, tmpRoot }), {
+		unwritable: "pin: fallback dir unwritable",
+		nolink: "pin: fallback dir has no hard links",
 	});
-	if (atState.session !== undefined) return atState.session;
-	return refuse(`${atHome.refused}; ${atState.refused}`);
+	if (atFallback.session !== undefined) return atFallback.session;
+	return refuse(`${atHome.refused}; ${atFallback.refused}`);
 }
 
 /** Mark a pin used now, so `sweep` keeps it while its session lives. Best effort. */
@@ -430,27 +451,27 @@ export function touchPin(path, { now = Date.now(), fs = REAL_FS } = {}) {
 /**
  * Remove pins unused for `idleMs` (30 days), and the temp files a publish that
  * crashed left behind (after an hour), at most `limit` in one call, and only in the
- * pins' own directories: the passwd home's and, for an environment session
- * (`stateDir`, its state dir), its state dir's when it has one (`stateDirPins`).
- * SessionStart runs it, never SessionEnd: a session can be resumed. Returns how many
- * it removed.
+ * pins' own directories: the passwd home's, and the fallback (`fallbackDir`) when
+ * there is one. SessionStart runs it, never SessionEnd: a session can be resumed.
+ * Returns how many it removed. `tmpRoot` is a test's seam, never a setting.
  */
 export function sweep({
 	passwdHome,
 	uid,
-	stateDir = null,
 	now = Date.now(),
 	idleMs = PIN_IDLE_MS,
 	limit = 100,
 	fs = REAL_FS,
+	tmpRoot = TMP_ROOT,
 }) {
 	const dirs = [];
 	if (passwdHome !== null) {
 		const where = pinDir(passwdHome, { uid, fs });
 		if (where.refused === undefined) dirs.push(where.dir);
 	}
-	if (stateDir !== null && present(join(stateDir, SESSIONS), fs)) {
-		const where = stateDirPins(stateDir, { uid, fs });
+	const base = fallbackBase({ uid, fs, tmpRoot });
+	if (base !== null && present(join(base, SESSIONS), fs)) {
+		const where = fallbackDir({ uid, fs, tmpRoot });
 		if (where.refused === undefined) dirs.push(where.dir);
 	}
 	let removed = 0;
