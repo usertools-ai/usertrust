@@ -49,7 +49,7 @@ every setting from one file instead: see [Configuration file](#configuration-fil
 | Variable             | Default                  | Meaning                                          |
 | -------------------- | ------------------------ | ------------------------------------------------ |
 | `UT_CC_CONFIG`       | unset                    | Path of a [configuration file](#configuration-file); when set, even empty, none of the variables below is read |
-| `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server                |
+| `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server; requests go to its origin and path, without a trailing `/`, query or fragment |
 | `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
 | `UT_CC_MODE`         | `watch`                  | `enforce` (matched case-insensitively) blocks over-budget calls; any other value is watch-only (see [Modes](#modes-watch-only-by-default)) |
 | `UT_CC_UNIT`         | unset                    | The principal's `unit`, e.g. `platform` (see *Attribution*) |
@@ -87,7 +87,7 @@ export UT_CC_CONFIG="$HOME/.config/usertrust/claude-code.json"
 
 | Field         | Required | Default             | Meaning (the variable it replaces)                        |
 | ------------- | -------- | ------------------- | --------------------------------------------------------- |
-| `url`         | yes      |                     | `http` or `https` base URL of your usertrust-server, with no user or password in it (`UT_SERVER_URL`) |
+| `url`         | yes      |                     | `http` or `https` base URL of your usertrust-server, with no user or password in it; requests go to its origin and path, without a trailing `/`, query or fragment (`UT_SERVER_URL`) |
 | `key`         | yes      |                     | Tenant bearer key, visible ASCII (`UT_SERVER_KEY`)        |
 | `mode`        | yes      |                     | `watch` or `enforce`, exactly (`UT_CC_MODE`)              |
 | `stateDir`    | yes      |                     | Absolute path of the state dir (`UT_CC_STATE_DIR`)        |

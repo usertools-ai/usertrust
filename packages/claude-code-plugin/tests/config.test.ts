@@ -15,6 +15,7 @@ import { runHook } from "./helpers/run-hook.js";
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
 const PRE = join(HOOKS, "pre-tool-use.mjs");
+const POST = join(HOOKS, "post-tool-use.mjs");
 const SESSION_START = join(HOOKS, "session-start.mjs");
 const PRELOAD = ["--import", join(import.meta.dirname, "helpers", "passwd-home.mjs")];
 /** Planted wherever the config file could leak a value; it must never come out. */
@@ -408,7 +409,7 @@ describe("resolveSettings: which file a configured session accepts", () => {
 			["NODE_USE_ENV_PROXY", { NODE_USE_ENV_PROXY: "1", HTTP_PROXY: "http://127.0.0.1:9" }, []],
 			["NODE_TLS_REJECT_UNAUTHORIZED", { NODE_TLS_REJECT_UNAUTHORIZED: "0" }, []],
 			// Each variable that changes what TLS trusts, alone: SSL_CERT_* need no flag on a
-			// build whose default store is OpenSSL's (B-67).
+			// build whose default store is OpenSSL's.
 			["NODE_EXTRA_CA_CERTS", { NODE_EXTRA_CA_CERTS: "/tmp/ca.pem" }, []],
 			["SSL_CERT_FILE", { SSL_CERT_FILE: "/tmp/ca.pem" }, []],
 			["SSL_CERT_DIR", { SSL_CERT_DIR: "/tmp/certs" }, []],
@@ -416,17 +417,17 @@ describe("resolveSettings: which file a configured session accepts", () => {
 			["OPENSSL_CONF", { OPENSSL_CONF: "/tmp/openssl.cnf" }, []],
 			["OPENSSL_MODULES", { OPENSSL_MODULES: "/tmp/modules" }, []],
 			["OPENSSL_ENGINES", { OPENSSL_ENGINES: "/tmp/engines" }, []],
-			// The hook's own command line, in every spelling Node accepts (B-66).
+			// The hook's own command line, in every spelling Node accepts.
 			["--use-env-proxy", {}, ["--use-env-proxy"]],
 			["--use-env-proxy", {}, ["--use_env_proxy"]],
 			["--use-openssl-ca", {}, ["--use_openssl_ca"]],
 			["--use-system-ca", {}, ["--use-system-ca"]],
-			["--openssl-config", {}, ['"--openssl-config=/tmp/x.cnf"']],
+			["--openssl-config", {}, ["--openssl-config=/tmp/x.cnf"]],
 		];
 		for (const [name, env, execArgv] of refused) {
 			expect(refusal(env, execArgv), name).toBe(`config: environment refused (${name})`);
 		}
-		// NODE_OPTIONS holds only allowlisted tokens (B-66): every spelling Node accepts for a
+		// NODE_OPTIONS holds only allowlisted tokens: every spelling Node accepts for a
 		// flag that is not on the list is refused, quoted, escaped, `_` for `-`, with `=`, or
 		// a `--no-` form (the safe direction).
 		for (const options of [
@@ -457,6 +458,21 @@ describe("resolveSettings: which file a configured session accepts", () => {
 			[{}, ["--import", "/tmp/a-test-preload.mjs"]],
 		] as Array<[Record<string, string>, string[]]>) {
 			expect(refusal(env, execArgv), JSON.stringify([env, execArgv])).toBeNull();
+		}
+	});
+
+	it("node's own command line takes `_` for `-`, and no option quoted, escaped or in another case", () => {
+		// Why the hook's own command line is matched with `_` read as `-` and nothing else:
+		// process.execArgv holds only options node accepted, and this is all it accepts. A
+		// quoted option is read as a script's path; the others are a `bad option`. If a node
+		// ever takes one of them, this fails, and the check must read that spelling too.
+		const cwd = nodeFs.mkdtempSync(join(tmpdir(), "utcc-argv-"));
+		const status = (option: string) =>
+			spawnSync(process.execPath, [option, "-e", "0"], { cwd, stdio: "ignore" }).status;
+		expect(status("--no-warnings"), "control: the option as written").toBe(0);
+		expect(status("--no_warnings"), "`_` for `-`").toBe(0);
+		for (const option of ['"--no-warnings"', "--no-warn\\ings", "--NO-WARNINGS"]) {
+			expect(status(option), option).not.toBe(0);
 		}
 	});
 });
@@ -734,6 +750,86 @@ describe("a configured session reads every setting from its file, and none from 
 	});
 });
 
+describe("a server url with a trailing `/`, a query or a fragment reaches the server's own routes", () => {
+	// The server matches each route exactly, so a url's TEXT is no base: `http://host/`
+	// then `/v1/authorize` is `//v1/authorize`, a 404 there. On both paths, each spelling
+	// must reach exactly the routes the url as served does. And its hold must still bind
+	// to the url AS WRITTEN, as 1.4.1 records it: a hold recorded under a spelling is
+	// ended under it, here by PostToolUse's settle.
+	const SPELLINGS: Array<[suffix: string, path: string]> = [
+		["", ""], // control: the url as the server gives it
+		["/", ""],
+		["//", ""],
+		["/?team=a", ""],
+		["#frag", ""],
+		["/base/", "/base"],
+	];
+
+	type Session = {
+		stateDir: string;
+		run: (hook: string, payload: unknown) => ReturnType<typeof runHook>;
+	};
+
+	async function eachSpelling(start: (url: string) => Promise<Session>) {
+		for (const [suffix, path] of SPELLINGS) {
+			const fake = await fakeServer();
+			const url = `${fake.url}${suffix}`;
+			const { stateDir, run } = await start(url);
+			const pre = await run(PRE, PAYLOAD);
+			expect(pre.stderr, url).toContain("usertrust: reserved tx_1");
+			const hold = JSON.parse(
+				await readFile(join(stateDir, "sess1__main__tu_1.tx_1.json"), "utf-8"),
+			) as { serverUrl: string };
+			expect(hold.serverUrl, url).toBe(url);
+			const post = await run(POST, { ...PAYLOAD, tool_response: "ok" });
+			expect([pre.code, post.code], url).toEqual([0, 0]);
+			expect(
+				fake.seen.map((s) => s.url),
+				url,
+			).toEqual([`${path}/v1/health`, `${path}/v1/authorize`, `${path}/v1/settle`]);
+			// Settled: no file of the hold is left, under its own name or a claimed one.
+			expect(
+				(await files(stateDir)).filter((f) => f.includes("tx_1")),
+				url,
+			).toEqual([]);
+			expect(await watchRecords(stateDir), url).toEqual([]);
+		}
+	}
+
+	it("a config file's url: each request on the server's own route, and the hold bound to the url as written", async () => {
+		await eachSpelling(async (url) => {
+			const session = await configured({ url, usage: "estimate" });
+			return {
+				stateDir: session.stateDir,
+				run: (hook, payload) =>
+					runHook(
+						hook,
+						payload,
+						{ ...NO_REROUTE, TEST_PASSWD_HOME: session.home.home, UT_CC_CONFIG: session.config },
+						PRELOAD,
+					),
+			};
+		});
+	});
+
+	it("UT_SERVER_URL with a trailing `/`, a query or a fragment: the same", async () => {
+		await eachSpelling(async (url) => {
+			const stateDir = await mkdtemp(join(tmpdir(), "utcc-url-state-"));
+			return {
+				stateDir,
+				run: (hook, payload) =>
+					runHook(hook, payload, {
+						...NO_REROUTE,
+						UT_SERVER_URL: url,
+						UT_SERVER_KEY: "env-key",
+						UT_CC_STATE_DIR: stateDir,
+						UT_CC_USAGE: "estimate",
+					}),
+			};
+		});
+	});
+});
+
 describe("a refused config: watch-only and key-less, and nothing sent", () => {
 	it("an EMPTY UT_CC_CONFIG with a key, a url and enforce in the environment: no request, a gap, no block", async () => {
 		const env = await fakeServer();
@@ -830,7 +926,7 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 		]);
 	});
 
-	// B-66: NODE_OPTIONS='"--use-env-proxy"' — Node strips the quotes and enables the option.
+	// NODE_OPTIONS='"--use-env-proxy"' — Node strips the quotes and enables the option.
 	const QUOTED_PROXY = '"--use-env-proxy"';
 
 	it("control: on this node, a QUOTED --use-env-proxy in NODE_OPTIONS carries an UNCONFIGURED session's key through HTTP_PROXY", async (ctx) => {

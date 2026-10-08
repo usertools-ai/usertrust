@@ -54,6 +54,17 @@ npm, and its version is its own: the `usertrust` packages and their
 - **Hold files are created `0600`**, as every other file in the state dir already
   was. They were `0644`, readable by other users when the state dir allows it.
 
+### Fixed
+
+- **A server url with a trailing `/`, a query or a fragment reaches the server.**
+  Requests were built from the url's text, so `http://host:4519/` sent
+  `//v1/authorize`, and a query put the route inside the query. The server matches
+  each route exactly and answered 404: in watch mode every call went unmetered, each
+  recorded as a gap, and in enforce mode every call was blocked (or, with
+  `failOpen`, went ungoverned). Requests now go to the url's origin and path, for
+  `UT_SERVER_URL` and a config file's `url` alike. A hold still records the url as
+  written, so one recorded under any spelling is ended as before.
+
 ## [1.4.1] - 2026-10-07
 
 ### Fixed

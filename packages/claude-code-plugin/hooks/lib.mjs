@@ -623,10 +623,28 @@ function serverBase() {
 }
 
 /**
+ * The url of one of the server's routes (`route`, as `/v1/authorize`): the base's
+ * origin and path as the URL parser reads them, then the route. The server matches
+ * each route exactly, so the base's text will not do: with a trailing `/` it gave
+ * `//v1/authorize`, and with a query it put the route inside the query. Both answer
+ * 404, so every call went unmetered, or was blocked in enforce mode. A fragment is
+ * never sent. Throws on a base that does not parse, as a fetch of it would.
+ */
+function routeUrl(route) {
+	const url = new URL(serverBase());
+	url.pathname = `${url.pathname.replace(/\/+$/, "")}${route}`;
+	url.search = "";
+	return url.href;
+}
+
+/**
  * Which server and tenant this hook talks to, without the key itself: the server's
  * URL, and the first 16 hex digits of the key's SHA-256 (`UT_SERVER_KEY`). Every
  * pending record carries it, so a tool call resumed under another server or key
  * never takes the earlier hold for one of its own (pre-tool-use.mjs `sameTenant`).
+ * The URL is the base AS WRITTEN, not as requested (`routeUrl`): a hold recorded
+ * under any spelling, by this version or an earlier one, is ended under that same
+ * spelling exactly as before.
  */
 export function tenantBinding() {
 	return {
@@ -702,12 +720,11 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 	const { refused, key } = settings();
 	// A refused config file: no request at all, and its fixed reason is the gap's.
 	if (refused !== null) throw new TransportError(refused);
-	const base = serverBase();
 	if (!(timeoutMs > 0)) throw new TransportError("hook time budget spent");
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		const response = await fetch(`${base}${path}`, {
+		const response = await fetch(routeUrl(path), {
 			method: "POST",
 			headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
 			body: JSON.stringify(body),
@@ -747,7 +764,6 @@ let capabilitiesRead;
  */
 export function serverCapabilities() {
 	capabilitiesRead ??= (async () => {
-		const base = serverBase();
 		const timeoutMs = Math.min(2_000, budgetShare(0.2), timeLeft());
 		const unknown = (why) => {
 			say(
@@ -761,7 +777,7 @@ export function serverCapabilities() {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
-			const response = await fetch(`${base}/v1/health`, { signal: controller.signal });
+			const response = await fetch(routeUrl("/v1/health"), { signal: controller.signal });
 			if (!response.ok) return unknown(`health returned ${response.status}`);
 			const json = await response.json();
 			const list = Array.isArray(json?.capabilities) ? json.capabilities : [];

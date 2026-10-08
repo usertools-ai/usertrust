@@ -173,10 +173,10 @@ const NODE_OPTIONS_ALLOWED = [
 
 /**
  * The node options that route a request or choose what TLS trusts, as they appear in
- * the hook's own command line: matched after lower-casing, dropping quotes and
- * backslashes, and reading `_` as `-`, so no spelling Node accepts slips by. The
- * command line comes from the plugin's own hooks.json, not the environment; this is the
- * same rule kept for it.
+ * the hook's own command line: matched with `_` read as `-`, the one other spelling
+ * Node's command line accepts. It takes no option quoted (that is a script's path),
+ * escaped or in another case (a `bad option`). The command line comes from the
+ * plugin's own hooks.json, not the environment; this is the same rule kept for it.
  */
 const ROUTE_OR_TRUST_OPTIONS = [
 	"--use-env-proxy",
@@ -217,7 +217,7 @@ export function environmentRefusal(env, execArgv = []) {
 	if (options.some((t) => !NODE_OPTIONS_ALLOWED.some((re) => re.test(t)))) {
 		return refused("NODE_OPTIONS");
 	}
-	const argv = execArgv.join(" ").toLowerCase().replace(/["\\]/g, "").replaceAll("_", "-");
+	const argv = execArgv.join(" ").replaceAll("_", "-");
 	for (const flag of ROUTE_OR_TRUST_OPTIONS) if (argv.includes(flag.slice(2))) return refused(flag);
 	if (env.NODE_TLS_REJECT_UNAUTHORIZED === "0") return refused("NODE_TLS_REJECT_UNAUTHORIZED");
 	for (const name of TRUST_VARIABLES) if (set(name)) return refused(name);
