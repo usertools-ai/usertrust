@@ -296,8 +296,11 @@ Run it as an ordinary Bash call (the session id is `$CLAUDE_CODE_SESSION_ID`). J
   record as it was.
 - **Is the cost exact?**
   `node bin/usertrust-job.mjs coverage bug-1 --vault <project>/.usertrust` prints whether the job's
-  recorded cost is exact. An empty interval, a record with no usage time, an untagged record
-  overlapping the job, an invalid state or a missing log each say no.
+  recorded cost is exact. An empty interval, a record with no complete usage window, an untagged or
+  differently tagged record overlapping the job, a record of the job outside its intervals, a denied
+  request of the job, a `would_block` or an unmetered `gap` (read from `watch.jsonl`, or `--watch FILE`),
+  an invalid state, or a contributing session without a usable log each say no. An interval is
+  (start, stop]: usage at exactly the start belongs to the earlier job.
 
 ## Modes: watch-only by default
 

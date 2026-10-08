@@ -27,7 +27,10 @@ export interface JobCapture {
 /** The audit-record spread for a captured job: absent keys for an unlabelled call. */
 export type JobAudit = JobCapture & { readonly usageTo?: string };
 
-const ISO_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
+// At most MILLISECOND precision: every comparison downstream goes through Date.parse,
+// which truncates finer digits, so ".000000009Z" and ".000000001Z" would compare equal and
+// a settle whose end precedes its start would pass the ordering check.
+const ISO_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?Z$/;
 
 /** Why `value` is not an ISO-8601 UTC instant, or `undefined` when it is. */
 export function usageTimeRefusal(value: unknown): string | undefined {

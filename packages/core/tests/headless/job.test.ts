@@ -158,6 +158,12 @@ describe("captureJob", () => {
 		}
 		expect(usageTimeRefusal("2028-02-29T23:59:59.999Z")).toBeUndefined();
 	});
+	it("allows at most millisecond precision (finer digits would compare equal)", () => {
+		expect(usageTimeRefusal("2026-01-01T00:00:00.000000009Z")).toMatch(/ISO-8601 UTC/);
+		expect(usageTimeRefusal("2026-01-01T00:00:00.1234Z")).toMatch(/ISO-8601 UTC/);
+		expect(usageTimeRefusal("2026-01-01T00:00:00.123Z")).toBeUndefined();
+		expect(usageTimeRefusal("2026-01-01T00:00:00Z")).toBeUndefined();
+	});
 });
 
 describe("headless records carry the authorize capture's job", () => {

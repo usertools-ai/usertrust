@@ -194,6 +194,8 @@ describe("validation", () => {
 		["an empty job", { job: "" }],
 		["a non-UTC usageFrom", { usageFrom: "2026-01-01T00:00:00+02:00" }],
 		["a date-only usageFrom", { usageFrom: "2026-01-01" }],
+		["a usageFrom finer than a millisecond", { usageFrom: "2026-01-01T00:00:00.000000009Z" }],
+		["an impossible date", { usageFrom: "2026-02-31T00:00:00.000Z" }],
 		["a jobState other than invalid", { jobState: "valid" }],
 		["a job together with jobState", { job: "job-a", jobState: "invalid" }],
 	])("authorize refuses %s", async (_name, extra) => {

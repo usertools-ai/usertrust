@@ -660,8 +660,11 @@ SessionStart hook under an O_EXCL lock held only for read-validate-append. A rec
 open at the time its USAGE happened (a hold: its PreToolUse; a transcript message: its own
 timestamp), never the one open at settle time, so a remainder spanning a switch settles once per job.
 `jobCoverage()` in that module is the ONE answer path for "is this job's cost exact": an empty
-interval, an untagged overlapping record, a missing usage time, an invalid state or a missing log each
-refuse it. It is not exported from a package entry (nothing outside the lab calls it).
+interval, an untagged or differently tagged overlapping record, a record of the job outside its
+intervals, an incomplete usage window, an invalid state, a denied request of the job, a `would_block`
+or an unmetered `gap` in the plugin's watch records, or a contributing session without a usable log each
+refuse it. An interval is (start, stop], matching how the hooks resolve a time (a line applies strictly
+after its own ts), and cost counts each transfer once, from its `llm_call`. It is not exported from a package entry (nothing outside the lab calls it).
 
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
 `LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless

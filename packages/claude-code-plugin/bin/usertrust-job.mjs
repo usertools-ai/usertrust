@@ -3,7 +3,7 @@
 //
 //   node usertrust-job.mjs start <job-id>   the job from the NEXT tool call on
 //   node usertrust-job.mjs stop             no job from the next tool call on
-//   node usertrust-job.mjs coverage <job-id> [--vault <.usertrust dir>] [--jobs <dir>]
+//   node usertrust-job.mjs coverage <job-id> --vault <.usertrust dir> [--jobs <dir>] [--watch <file>]
 //
 // Run it as an ordinary Bash call; the session id is $CLAUDE_CODE_SESSION_ID. It
 // writes only to the session's job log (hooks/job-log.mjs), and REFUSES, writing
@@ -21,7 +21,7 @@ import {
 	jobsDir,
 	readLogs,
 } from "../hooks/job-log.mjs";
-import { say } from "../hooks/lib.mjs";
+import { say, watchLogPath } from "../hooks/lib.mjs";
 
 const [command, ...rest] = process.argv.slice(2);
 
@@ -55,6 +55,25 @@ async function readRecords(vault) {
 	return out;
 }
 
+/** The plugin's watch records (one JSON object per line); none is fine, an unreadable line is skipped. */
+async function readWatch(path) {
+	const out = [];
+	let text;
+	try {
+		text = await readFile(path, "utf-8");
+	} catch {
+		return out;
+	}
+	for (const line of text.split("\n")) {
+		try {
+			if (line !== "") out.push(JSON.parse(line));
+		} catch {
+			// a torn line says nothing
+		}
+	}
+	return out;
+}
+
 if (command === "start" || command === "stop") {
 	const wantsId = command === "start";
 	if (rest.length !== (wantsId ? 1 : 0)) {
@@ -83,8 +102,8 @@ if (command === "start" || command === "stop") {
 	if (job === undefined || !JOB_ID.test(job)) usage("coverage takes a valid job id");
 	const flags = new Map();
 	for (let i = 1; i < rest.length; i += 2) {
-		if (!["--vault", "--jobs"].includes(rest[i]) || rest[i + 1] === undefined) {
-			usage("coverage takes --vault DIR and --jobs DIR");
+		if (!["--vault", "--jobs", "--watch"].includes(rest[i]) || rest[i + 1] === undefined) {
+			usage("coverage takes --vault DIR, --jobs DIR and --watch FILE");
 		}
 		flags.set(rest[i], rest[i + 1]);
 	}
@@ -93,6 +112,7 @@ if (command === "start" || command === "stop") {
 		job,
 		logs: await readLogs(flags.get("--jobs") ?? jobsDir()),
 		records: await readRecords(flags.get("--vault")),
+		watch: await readWatch(flags.get("--watch") ?? watchLogPath()),
 	});
 	process.stdout.write(`${JSON.stringify(report)}\n`);
 } else {

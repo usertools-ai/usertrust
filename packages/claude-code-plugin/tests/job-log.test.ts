@@ -528,6 +528,75 @@ describe("jobCoverage — connector review", () => {
 	});
 });
 
+describe("jobCoverage — refused and unmetered work", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const inside = { usageFrom: iso(T0 + 2000), usageTo: iso(T0 + 3000) };
+	const ok = {
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost: 5,
+			job: J,
+			principal: { origin: `claude-code:${SID}` },
+			...inside,
+		},
+	};
+
+	it("a policy_denied or ledger_rejected record of the job is NOT exact (its usage is unrecorded)", async () => {
+		const { jobCoverage } = await lib();
+		for (const kind of ["policy_denied", "ledger_rejected"]) {
+			const r = jobCoverage({
+				job: J,
+				logs: { [SID]: logText },
+				records: [
+					ok,
+					{
+						kind,
+						actor: ok.actor,
+						data: { job: J, usageFrom: iso(T0 + 3500), principal: ok.data.principal },
+					},
+				],
+			});
+			expect(r.exact, kind).toBe(false);
+			expect(r.reasons.join(" ")).toContain("was denied");
+		}
+	});
+	it("a watch would_block naming the job is NOT exact", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [ok],
+			watch: [{ kind: "would_block", job: J, session: SID, at: iso(T0 + 3500) }],
+		});
+		expect(r.exact).toBe(false);
+		expect(r.reasons.join(" ")).toContain("would_block");
+	});
+	it("a gap (an unmetered call) INSIDE the interval is NOT exact; outside it is irrelevant", async () => {
+		const { jobCoverage } = await lib();
+		const base = { job: J, logs: { [SID]: logText }, records: [ok] };
+		const inGap = jobCoverage({
+			...base,
+			watch: [{ kind: "gap", session: SID, at: iso(T0 + 3500) }],
+		});
+		expect(inGap.exact).toBe(false);
+		expect(inGap.reasons.join(" ")).toContain("unmetered");
+		const outGap = jobCoverage({
+			...base,
+			watch: [{ kind: "gap", session: SID, at: iso(T0 + 9000) }],
+		});
+		expect(outGap.exact).toBe(true);
+		const otherSession = jobCoverage({
+			...base,
+			watch: [{ kind: "gap", session: "sess-z", at: iso(T0 + 3500) }],
+		});
+		expect(otherSession.exact).toBe(true);
+	});
+});
+
 describe("the lock and the log tail — review hardening", () => {
 	it("a lock whose metadata was never written is broken once it is old enough", async () => {
 		await writeLog(start(SID, T0));

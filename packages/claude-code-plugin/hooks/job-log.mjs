@@ -391,7 +391,7 @@ const ms = (value) => (typeof value === "string" ? Date.parse(value) : Number.Na
  * hold produces, and a failed ledger POST leaves a `settlement_ambiguous` beside the
  * `llm_call` for the same transfer and cost.
  */
-export function jobCoverage({ job, logs, records }) {
+export function jobCoverage({ job, logs, records, watch = [] }) {
 	const reasons = [];
 	const transferCost = new Map();
 	for (const rec of records) {
@@ -409,6 +409,22 @@ export function jobCoverage({ job, logs, records }) {
 	}
 	let costUt = 0n;
 	for (const cost of transferCost.values()) costUt += cost ?? 0n;
+	// A REFUSED request leaves no spend record: the usage it asked to post (a remainder
+	// already consumed) is NOT in the total. The denial record carries the job, and that
+	// is all that is known, so a denial of this job is never exact.
+	for (const rec of records) {
+		if (rec?.data?.job === job && ["policy_denied", "ledger_rejected"].includes(rec.kind)) {
+			reasons.push(`a request of ${job} was denied: its usage may be unrecorded`);
+			break;
+		}
+	}
+	// The plugin's own watch records (`watch.jsonl`), when supplied: a `would_block` of this
+	// job is usage that was refused, and a `gap` is a call that ran UNMETERED.
+	for (const w of watch) {
+		if (w?.kind === "would_block" && w.job === job) {
+			reasons.push(`a request of ${job} was refused (would_block): its usage is unrecorded`);
+		}
+	}
 	const bySession = new Map();
 	for (const rec of records) {
 		const sid = sessionOfRecord(rec);
@@ -449,6 +465,13 @@ export function jobCoverage({ job, logs, records }) {
 		const intervals = intervalsOf(parsed, job);
 		if (intervals.length === 0) continue;
 		const mine = bySession.get(sid) ?? [];
+		for (const w of watch) {
+			if (w?.kind !== "gap" || w.session !== sid) continue;
+			const at = ms(w.at);
+			if (intervals.some(([from, to]) => !Number.isFinite(at) || (at > from && at <= to))) {
+				reasons.push(`session ${sid}: a call ran unmetered (gap) during an interval of ${job}`);
+			}
+		}
 		const capable = mine.some((r) => typeof r?.data?.usageFrom === "string");
 		for (const [from, to] of intervals) {
 			intervalsSeen += 1;
