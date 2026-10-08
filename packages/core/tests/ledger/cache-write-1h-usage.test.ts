@@ -194,6 +194,32 @@ describe("requestDeclares1hCache", () => {
 			},
 		};
 		expect(requestDeclares1hCache(hostile)).toBe(true);
+		// An accessor can answer differently at serialization time than during the scan, so
+		// the scan cannot vouch for the request: fail dearest.
+		let reads = 0;
+		const shifty = {
+			system: [
+				{
+					type: "text",
+					text: "x",
+					get cache_control() {
+						reads += 1;
+						return { type: "ephemeral", ttl: reads === 1 ? "5m" : "1h" };
+					},
+				},
+			],
+		};
+		expect(requestDeclares1hCache(shifty)).toBe(true);
+		expect(
+			requestDeclares1hCache({
+				a: {
+					get b() {
+						return 1;
+					},
+				},
+			}),
+		).toBe(true);
+		expect(requestDeclares1hCache({ a: { b: 1 } })).toBe(false); // plain data stays false
 		// A cycle terminates (and is not itself evidence of a marker).
 		const a: Record<string, unknown> = {};
 		a.self = a;

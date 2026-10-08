@@ -591,6 +591,11 @@ both, so a field there makes every v2 validator reject every receipt. An older s
 lists `cache-write-1h`.
 *Prevents:* 1-hour writes billed at 1.25x while the provider bills 2x (#203), and a recorded cost
 no auditor can reproduce from the record.
+*The request scan reads the LIVE request, like the PII and injection scans do:* an accessor property
+anywhere in it fails dearest (the scan cannot vouch for what a getter returns at serialization), but a
+plain data property the caller mutates AFTER the scan and before the provider call is the same trust
+boundary those scans already have: `trust()` is not a sandbox against its own caller, and a hold
+capped below a mutated request's settle is audited as `settlement_shortfall`, not silent.
 *DECLARED RESIDUE (a decision, not an omission):* a PARTIAL `cache_creation` breakdown (one TTL
 field) prices its unattributed remainder (flat total minus the named count) at the dearer 1-hour
 rate, and the stream accumulators only rise, so a stream whose early event is partial and whose

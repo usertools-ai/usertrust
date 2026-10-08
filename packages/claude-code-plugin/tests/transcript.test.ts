@@ -53,6 +53,8 @@ interface Usage {
 	cacheWrite: number;
 	/** The 1-HOUR share of `cacheWrite`, a subset of it; omitted = 0. */
 	cacheWrite1h?: number;
+	/** Replace the `cache_creation` breakdown wholesale (a PARTIAL breakdown, for the tests that need one). */
+	cacheCreation?: Record<string, number>;
 }
 
 interface Recorded {
@@ -194,7 +196,7 @@ function responseEntries(
 		cache_creation_input_tokens: u.cacheWrite,
 		cache_read_input_tokens: u.cacheRead,
 		output_tokens: output,
-		cache_creation: {
+		cache_creation: u.cacheCreation ?? {
 			ephemeral_5m_input_tokens: u.cacheWrite - (u.cacheWrite1h ?? 0),
 			ephemeral_1h_input_tokens: u.cacheWrite1h ?? 0,
 		},
@@ -529,6 +531,22 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 				expect(body).not.toHaveProperty("cacheWrite1hTokens");
 			},
 		);
+
+		it("a PARTIAL breakdown (one TTL named) counts the unattributed remainder as 1-hour, as core does", async () => {
+			capabilities = ["cache-write-1h"];
+			await startServer(okResponder);
+			await writeMain(
+				responseEntries("msg_a", SONNET, {
+					...u(10, 20, 3_000, 1_000),
+					cacheCreation: { ephemeral_5m_input_tokens: 600 },
+				}),
+			);
+			await run("stop.mjs", stopInput());
+			expect(settles()[0]?.body).toMatchObject({
+				cacheWriteTokens: 1_000,
+				cacheWrite1hTokens: 400,
+			});
+		});
 
 		it("a message with no 1-hour writes sends no share, even to a server that prices it", async () => {
 			capabilities = ["cache-write-1h"];

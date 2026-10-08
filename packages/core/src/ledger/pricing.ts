@@ -679,6 +679,15 @@ export function requestDeclares1hCache(request: unknown): boolean {
 			return false;
 		}
 		const record = value as Record<string, unknown>;
+		// An accessor can answer differently when the request is later serialized than it
+		// did for this scan, so the scan cannot vouch for what the provider will receive:
+		// fail dearest, like every other unreadable request. (A plain data property that
+		// the caller mutates AFTER the scan is the same trust boundary as the PII and
+		// injection scans, which also read the live request: declared in AGENTS.md.)
+		for (const key of Object.keys(record)) {
+			const d = Object.getOwnPropertyDescriptor(record, key);
+			if (d !== undefined && (d.get !== undefined || d.set !== undefined)) return true;
+		}
 		const control = record.cache_control;
 		if (control !== null && typeof control === "object") {
 			if ((control as Record<string, unknown>).ttl === "1h") return true;

@@ -1004,11 +1004,22 @@ function foldLine(cursor, bytes, since) {
 	m.outputTokens = Math.max(m.outputTokens, count(usage.output_tokens));
 	m.cacheReadTokens = Math.max(m.cacheReadTokens, count(usage.cache_read_input_tokens));
 	m.cacheWriteTokens = Math.max(m.cacheWriteTokens, count(usage.cache_creation_input_tokens));
-	// The 1-hour share, from the per-TTL breakdown when the transcript carries one.
-	// Like every counter here it only rises, and it is clamped to the write total so a
-	// subset can never exceed its whole.
+	// The 1-hour share, from the per-TTL breakdown when the transcript carries one. When
+	// the breakdown names only ONE TTL, what it leaves out of the flat total is a real
+	// write whose TTL it did not attribute; it is counted as 1-hour (the dearer rate), the
+	// same rule core's fromAnthropicUsage applies. Like every counter here it only rises,
+	// and it is clamped to the write total so a subset can never exceed its whole.
+	const breakdown = usage.cache_creation;
+	const names5m = typeof breakdown?.ephemeral_5m_input_tokens === "number";
+	const names1h = typeof breakdown?.ephemeral_1h_input_tokens === "number";
+	const named5m = count(breakdown?.ephemeral_5m_input_tokens);
+	const named1h = count(breakdown?.ephemeral_1h_input_tokens);
+	const unattributed =
+		names5m !== names1h
+			? Math.max(0, count(usage.cache_creation_input_tokens) - named5m - named1h)
+			: 0;
 	m.cacheWrite1hTokens = Math.min(
-		Math.max(m.cacheWrite1hTokens, count(usage.cache_creation?.ephemeral_1h_input_tokens)),
+		Math.max(m.cacheWrite1hTokens, named1h + unattributed),
 		m.cacheWriteTokens,
 	);
 	if (message.stop_reason != null) m.complete = true;
