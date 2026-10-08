@@ -208,7 +208,14 @@ export function modeAnnouncement() {
 	// from its config file, and no such value is ever echoed: that line names no path.
 	const current = settings();
 	if (current.refused !== null) {
-		return `usertrust: watch-only and key-less — ${refusalNote(current.refused)}, so nothing is sent to any server: every tool call is recorded as a gap in ${watchLogPath()}.`;
+		const why = refusalNote(current.refused);
+		// A session whose mode is known still enforces, with nothing to send with.
+		if (current.mode === "enforce") {
+			return current.failOpen
+				? `usertrust: ENFORCING, but nothing can be sent — ${why}: every tool call proceeds ungoverned (${howToSet("failOpen", true)}), each recorded as a gap in ${watchLogPath()}.`
+				: `usertrust: ENFORCING, but nothing can be sent — ${why}: every tool call is blocked.`;
+		}
+		return `usertrust: watch-only and key-less — ${why}, so nothing is sent to any server: every tool call is recorded as a gap in ${watchLogPath()}.`;
 	}
 	const records = current.configured
 		? "watch.jsonl in the config file's state dir"

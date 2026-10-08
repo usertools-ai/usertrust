@@ -1007,14 +1007,15 @@ describe("a hold dropped as another server's or key's still leaves its gap, writ
 	});
 
 	it("a REFUSED Stop (its key changed, the pin kept): nothing is sent at all, and one call-ran gap", async () => {
-		const enforce = { UT_CC_MODE: "enforce" };
-		const started = await unansweredSettle(enforce);
+		// Pinned in watch mode; the environment says enforce by the time of the Stop.
+		const started = await unansweredSettle();
 		const sent = requests.length;
-		const stop = await run("stop.mjs", base(), { ...k2, ...enforce });
+		const stop = await run("stop.mjs", base(), { ...k2, UT_CC_MODE: "enforce" });
 		expect(stop.code).toBe(0);
 		expect(requests).toHaveLength(sent);
-		// mutant: the record is dropped with no gap. The gap's mode is `watch` in a session
-		// pinned `enforce`: the Stop ran refused, as a refused hook is watch-only.
+		// mutant: the record is dropped with no gap. The gap's mode is the PINNED `watch`,
+		// not the environment's `enforce`: the Stop ran refused (its key changed), in the
+		// session's own mode.
 		expect(await gaps()).toMatchObject([
 			{ releaseClass: "call-ran", session: SESSION, mode: "watch", started },
 		]);
