@@ -11,12 +11,14 @@
 // something unusable) is written down as a `gap` record. With UT_CC_MODE=enforce
 // it blocks: a denial is enforced (`deny`), and a failed authorization fails closed
 // (exit 2) unless UT_FAIL_OPEN=1, which lets the call through and records the
-// gap. Output contract adapted from the AGT Claude Code plugin's stdin-JSON
+// gap. A config file's `mode` and `failOpen` decide the same (config.mjs). Output
+// contract adapted from the AGT Claude Code plugin's stdin-JSON
 // permissionDecision convention (MIT — see repository NOTICE).
 //
 // Content minimization: tool_input is truncated at 16 KiB before it is sent
-// (both message content and token estimation); UT_CC_SEND_CONTENT=0 replaces
-// the content with {"redacted":true} while keeping the size-based estimate.
+// (both message content and token estimation); UT_CC_SEND_CONTENT=0 (a config
+// file's `"sendContent": false`) replaces the content with {"redacted":true} while
+// keeping the size-based estimate.
 // The output hold uses that same 16 KiB bound so a large tool_response cannot
 // price above the reservation (AUD-004).
 //
@@ -42,6 +44,7 @@
 // `already_settled`) means an earlier settle of exactly this window landed: it
 // is accounted, and the tool is held alone.
 import { rename, unlink } from "node:fs/promises";
+import { howToSet, settings } from "./config.mjs";
 import {
 	claimForSettle,
 	defaultModel,
@@ -169,7 +172,7 @@ try {
 			null,
 			`${why}: the fresh hold is not kept, and the call is refused rather than write over that file`,
 		);
-	} else if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
+	} else if (mode === "watch" || settings().failOpen) {
 		// The call proceeds unmetered: say so durably, so the gap is never silent.
 		const recorded = await recordWatchEvent({
 			kind: "gap",
@@ -182,7 +185,7 @@ try {
 		proceed(
 			mode === "watch"
 				? `usertrust watch-only: this call is not metered (${why}) — ${recorded ? "recorded as a gap" : "and its gap record could not be written (see above)"}`
-				: `usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${why}`,
+				: `usertrust unavailable — proceeding ungoverned (${howToSet("failOpen", true)}): ${why}`,
 		);
 	} else {
 		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
@@ -386,7 +389,7 @@ async function releaseUnconfirmed(transferId) {
  */
 async function reserve(input) {
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
-	const content = process.env.UT_CC_SEND_CONTENT === "0" ? '{"redacted":true}' : toolInput;
+	const content = settings().sendContent ? toolInput : '{"redacted":true}';
 	const estimatedInputTokens = estimateTokens(toolInput);
 	const prepared = await prepareWindow({
 		sessionId,

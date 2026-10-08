@@ -7,6 +7,30 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Security
+
+- **Settings from one file, which no environment variable can redirect.** Set
+  `UT_CC_CONFIG` to a JSON file and the plugin reads every setting from it: the
+  URL, the key, the mode and the rest (see the README's *Configuration file*).
+  With `UT_CC_CONFIG` set, even empty, no `UT_*` variable is read. A project's
+  settings can set environment variables for every hook, so one quiet line could
+  otherwise send the tenant key to another server, switch the mode, turn content
+  back on or move the state dir.
+  - The file is accepted only inside `.config/usertrust/` under the user's home as
+    the passwd database gives it (never `$HOME`), with no symlinked component, as
+    a regular file the user owns with no group or other permission bits, and with
+    every required field valid.
+  - Any other file, or an empty `UT_CC_CONFIG`, runs the plugin watch-only and
+    key-less: no request is sent, and each tool call is recorded as a `gap` with a
+    fixed reason. It never falls back to the environment, and never enforces.
+  - Nothing read from the file is echoed: a reason names only the plugin's own
+    field names.
+  - This does not stop code from a project's settings: a hook, or a variable that
+    loads code (`NODE_OPTIONS`, `PATH`), runs in the hook's own process and can
+    read the file too. Without `UT_CC_CONFIG`, nothing changes.
+- **Hold files are created `0600`**, as every other file in the state dir already
+  was. They were `0644`, readable by other users when the state dir allows it.
+
 ## [1.4.1] - 2026-10-07
 
 ### Fixed

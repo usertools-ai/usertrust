@@ -12,18 +12,20 @@ export interface HookRunResult {
  * execFile has no `input` option, hence spawn. The plugin's own `UT_*`
  * variables are never inherited from the shell running the tests (a developer
  * with `UT_CC_MODE=enforce` exported would otherwise flip every mode-dependent
- * test): each test passes the ones it means.
+ * test): each test passes the ones it means. `nodeArgs` go before the hook's path
+ * (a test-only `--import` preload, say).
  */
 export function runHook(
 	hookPath: string,
 	input: unknown,
 	env: Record<string, string>,
+	nodeArgs: string[] = [],
 ): Promise<HookRunResult> {
 	const inherited = Object.fromEntries(
 		Object.entries(process.env).filter(([name]) => !name.startsWith("UT_")),
 	);
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, [hookPath], {
+		const child = spawn(process.execPath, [...nodeArgs, hookPath], {
 			env: { ...inherited, ...env },
 			stdio: ["pipe", "pipe", "pipe"],
 		});

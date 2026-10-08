@@ -39,8 +39,8 @@ import {
 	utimes,
 	writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { hostEnv, howToSet, refusalNote, settingName, settings } from "./config.mjs";
 
 export class TransportError extends Error {
 	constructor(message) {
@@ -79,12 +79,10 @@ export const MAX_OUTPUT_TOKENS = estimateTokens("x".repeat(MAX_CONTENT_CHARS));
  * Claude Code's own data (its transcripts live in the same config dir): state lost
  * while its transcripts survive would be read as "nothing posted yet". A temp dir
  * is not durable — macOS purges files untouched for three days.
+ * `UT_CC_STATE_DIR`, or a config file's `stateDir` (config.mjs).
  */
 export function stateRoot() {
-	return (
-		process.env.UT_CC_STATE_DIR ??
-		join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "usertrust-cc")
-	);
+	return settings().stateDir;
 }
 
 const stateDir = stateRoot;
@@ -99,7 +97,7 @@ const stateDir = stateRoot;
  * posts nothing it settled at the estimate.
  */
 export function usageMode() {
-	return process.env.UT_CC_USAGE === "estimate" ? "estimate" : "transcript";
+	return settings().usage;
 }
 
 /**
@@ -151,7 +149,7 @@ export function announce(text, max = MAX_NOTE_CHARS) {
  * and a transcript hold before its first model is known.
  */
 export function defaultModel() {
-	return process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
+	return settings().model;
 }
 
 /**
@@ -163,16 +161,11 @@ export function defaultModel() {
  * missed metering is visible, never silent. `UT_CC_MODE=enforce` opts in to
  * blocking: denials are enforced, and a failed authorization blocks the call
  * unless `UT_FAIL_OPEN=1`. Any other value runs watch-only, and the
- * session-start announcement names the value it ignored.
+ * session-start announcement names the value it ignored. A config file's `mode`
+ * and `failOpen` decide the same (config.mjs), and a refused one runs watch-only.
  */
 export function guardMode() {
-	return (process.env.UT_CC_MODE ?? "").trim().toLowerCase() === "enforce" ? "enforce" : "watch";
-}
-
-/** The `UT_CC_MODE` value that was set but is not a mode, if any. */
-function unrecognizedMode() {
-	const raw = (process.env.UT_CC_MODE ?? "").trim();
-	return raw === "" || ["watch", "enforce"].includes(raw.toLowerCase()) ? undefined : raw;
+	return settings().mode;
 }
 
 /** Where watch records go: one JSON object per line, beside the plugin's other state. */
@@ -188,18 +181,25 @@ export function modeAnnouncement() {
 	// The path (the operator's UT_CC_STATE_DIR / CLAUDE_CONFIG_DIR) is raw on
 	// purpose: it reaches the user only through `announce`, which sanitizes all of
 	// the message, then clips it. An unrecognised UT_CC_MODE value is clipped HERE,
-	// so it is sanitized here first.
-	const records = watchLogPath();
-	if (guardMode() === "enforce") {
-		return process.env.UT_FAIL_OPEN === "1"
-			? `usertrust: ENFORCING — over-budget tool calls are blocked. While the server is unreachable, calls proceed unmetered (UT_FAIL_OPEN=1), each recorded as a gap in ${records}.`
-			: "usertrust: ENFORCING — over-budget tool calls are blocked, and so is every tool call while the usertrust server is unreachable (UT_FAIL_OPEN=1 lets those through).";
+	// so it is sanitized here first. A configured session's state dir is a value
+	// from its config file, and no such value is ever echoed: that line names no path.
+	const current = settings();
+	if (current.refused !== null) {
+		return `usertrust: watch-only and key-less — ${refusalNote(current.refused)}, so nothing is sent to any server: every tool call is recorded as a gap in ${watchLogPath()}.`;
 	}
-	const ignored = unrecognizedMode();
+	const records = current.configured
+		? "watch.jsonl in the config file's state dir"
+		: watchLogPath();
+	if (current.mode === "enforce") {
+		return current.failOpen
+			? `usertrust: ENFORCING — over-budget tool calls are blocked. While the server is unreachable, calls proceed unmetered (${howToSet("failOpen", true)}), each recorded as a gap in ${records}.`
+			: `usertrust: ENFORCING — over-budget tool calls are blocked, and so is every tool call while the usertrust server is unreachable (${howToSet("failOpen", true)} lets those through).`;
+	}
+	const ignored = current.unrecognizedMode;
 	const note =
 		ignored === undefined
-			? "Set UT_CC_MODE=enforce to block over-budget calls."
-			: `UT_CC_MODE=${JSON.stringify(sanitizeThenClip(ignored, 40))} is not a mode: use UT_CC_MODE=enforce to block over-budget calls.`;
+			? `Set ${howToSet("mode", "enforce")} to block over-budget calls.`
+			: `${settingName("mode")}=${JSON.stringify(sanitizeThenClip(ignored, 40))} is not a mode: use ${howToSet("mode", "enforce")} to block over-budget calls.`;
 	return `usertrust: watch-only — nothing is blocked. Calls that would have been blocked, and calls that could not be metered, are recorded in ${records}. ${note}`;
 }
 
@@ -243,7 +243,7 @@ const SESSION_END_MARGIN_MS = 300;
  * (https://code.claude.com/docs/en/hooks#sessionend). Less the start-up margin,
  * and never more than any other hook's budget.
  */
-export function sessionEndBudgetMs(env = process.env) {
+export function sessionEndBudgetMs(env = hostEnv()) {
 	const raw = env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS ?? "";
 	const configured = /^[0-9]{1,9}$/.test(raw) ? Number(raw) : SESSION_END_DEFAULT_MS;
 	return Math.max(0, Math.min(configured, HOOK_BUDGET_MS) - SESSION_END_MARGIN_MS);
@@ -322,7 +322,7 @@ export class HoldNameTaken extends Error {
  * already taken throws `HoldNameTaken`, and that file is left untouched. The agent id is stored in the
  * file body so a whole-session sweep can recover which agent owns the hold.
  * Every hold is marked `gate: 1` (`isGated`) in this same atomic write, never
- * later.
+ * later. The file is the user's alone (0600), as every file in the state dir is.
  */
 export async function recordPending(sessionId, agentId, entry, { settling = false } = {}) {
 	const live = holdFilePath(sessionId, agentId, entry);
@@ -349,6 +349,7 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				// summed counts.
 				...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
 			}),
+			{ mode: 0o600 },
 		);
 	} catch (err) {
 		if (err?.code === "EEXIST") throw new HoldNameTaken(path);
@@ -613,9 +614,12 @@ export async function clearPending(path) {
 	}
 }
 
-/** The governance server this hook talks to (`UT_SERVER_URL`). */
+/**
+ * The governance server this hook talks to (`UT_SERVER_URL`, or a config file's
+ * `url`): null when a configured session's file was refused, which sends nothing.
+ */
 function serverBase() {
-	return process.env.UT_SERVER_URL ?? "http://127.0.0.1:4519";
+	return settings().url;
 }
 
 /**
@@ -627,10 +631,7 @@ function serverBase() {
 export function tenantBinding() {
 	return {
 		serverUrl: serverBase(),
-		keyHash: createHash("sha256")
-			.update(process.env.UT_SERVER_KEY ?? "")
-			.digest("hex")
-			.slice(0, 16),
+		keyHash: createHash("sha256").update(settings().key).digest("hex").slice(0, 16),
 	};
 }
 
@@ -639,8 +640,10 @@ export function tenantBinding() {
  * unless the caller passes less); a spent budget throws without a request.
  */
 export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
+	const { refused, key } = settings();
+	// A refused config file: no request at all, and its fixed reason is the gap's.
+	if (refused !== null) throw new TransportError(refused);
 	const base = serverBase();
-	const key = process.env.UT_SERVER_KEY ?? "";
 	if (!(timeoutMs > 0)) throw new TransportError("hook time budget spent");
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -693,6 +696,8 @@ export function serverCapabilities() {
 			);
 			return null;
 		};
+		const { refused } = settings();
+		if (refused !== null) return unknown(refused);
 		if (!(timeoutMs > 0)) return unknown("hook time budget spent");
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);

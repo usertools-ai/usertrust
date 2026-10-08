@@ -123,6 +123,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { howToSet, settingName, settings } from "./config.mjs";
 import {
 	budgetShare,
 	cleanup,
@@ -312,12 +313,13 @@ function principalField(value, fallback) {
 	return PRINCIPAL_FIELD.test(text) ? text : fallback;
 }
 
-/** The attribution variables a note was already written for, in this hook. */
+/** The attribution fields a note was already written for, in this hook. */
 const attributionNoted = new Set();
 
 /**
  * The optional `unit` and `role` a principal carries, from UT_CC_UNIT /
- * UT_CC_ROLE. Each is sent only as it is, and only if it is a valid principal
+ * UT_CC_ROLE (a config file's `unit` and `role`: config.mjs). Each is sent only as
+ * it is, and only if it is a valid principal
  * field: a strict server refuses a principal with anything else — a 400, which is
  * a gap in watch mode and a BLOCK in enforce mode — so a value that is empty or
  * invalid is never sent, nor forced into shape (it would attribute the spend to a
@@ -325,16 +327,16 @@ const attributionNoted = new Set();
  */
 function principalAttribution() {
 	const fields = {};
-	for (const [key, variable] of [
-		["unit", "UT_CC_UNIT"],
-		["role", "UT_CC_ROLE"],
+	const { unit, role } = settings();
+	for (const [key, value] of [
+		["unit", unit],
+		["role", role],
 	]) {
-		const value = process.env[variable];
 		if (value === undefined) continue;
 		if (PRINCIPAL_FIELD.test(value)) {
 			fields[key] = value;
-		} else if (!attributionNoted.has(variable)) {
-			attributionNoted.add(variable);
+		} else if (!attributionNoted.has(key)) {
+			attributionNoted.add(key);
 			const why =
 				value === ""
 					? "it is empty"
@@ -342,7 +344,7 @@ function principalAttribution() {
 						? `it is ${value.length} characters long`
 						: "it has a character outside that set";
 			say(
-				`usertrust: ${variable} is not sent — a principal ${key} must be 1-128 characters of [A-Za-z0-9._:-], and ${why}`,
+				`usertrust: ${settingName(key)} is not sent — a principal ${key} must be 1-128 characters of [A-Za-z0-9._:-], and ${why}`,
 			);
 		}
 	}
@@ -1127,7 +1129,9 @@ async function claimHolder(claimsDir, id, owner) {
  */
 async function locate({ sessionId, agentId, input, mayEstimate }) {
 	const configured = usageMode() === "estimate";
-	if (configured && !mayEstimate) return { ok: false, reason: "UT_CC_USAGE=estimate" };
+	// The user's own setting, as this session spells it: UT_CC_USAGE=estimate, or the config file's.
+	const bySetting = howToSet("usage", "estimate");
+	if (configured && !mayEstimate) return { ok: false, reason: bySetting };
 	if (!isAgentId(agentId)) return { ok: false, reason: "agent id is not safe in a path" };
 	const transcriptPath = configured ? undefined : transcriptPathFor(input, agentId);
 	if (transcriptPath === undefined && !mayEstimate) {
@@ -1138,7 +1142,7 @@ async function locate({ sessionId, agentId, input, mayEstimate }) {
 	return {
 		...where,
 		transcriptPath,
-		unread: configured ? "UT_CC_USAGE=estimate" : "no transcript path",
+		unread: configured ? bySetting : "no transcript path",
 	};
 }
 
@@ -1285,7 +1289,7 @@ async function stickToEstimate(where, reason, announce) {
 
 /** Why an agent's hold settles at the estimate, for PostToolUse's note; null when unknown. */
 export async function estimateReasonFor({ sessionId, agentId, input }) {
-	if (usageMode() === "estimate") return "UT_CC_USAGE=estimate";
+	if (usageMode() === "estimate") return howToSet("usage", "estimate");
 	if (!isAgentId(agentId)) return "agent id is not safe in a path";
 	const marker = join(
 		stateRoot(),
@@ -1342,8 +1346,8 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			return { kind: "unavailable", reason: `${reason}, and another hook holds the agent's lock` };
 		}
 		try {
-			// UT_CC_USAGE=estimate is the user's own setting: nothing to announce.
-			return await stickToEstimate(where, reason, reason !== "UT_CC_USAGE=estimate");
+			// UT_CC_USAGE=estimate (or the config file's) is the user's own setting: nothing to announce.
+			return await stickToEstimate(where, reason, reason !== howToSet("usage", "estimate"));
 		} finally {
 			await held();
 		}

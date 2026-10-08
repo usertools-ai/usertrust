@@ -43,8 +43,12 @@ export UT_SERVER_KEY="<the key from step 1>"
 
 ## Environment variables
 
+These are read only when `UT_CC_CONFIG` is not set. With it set, the plugin reads
+every setting from one file instead: see [Configuration file](#configuration-file).
+
 | Variable             | Default                  | Meaning                                          |
 | -------------------- | ------------------------ | ------------------------------------------------ |
+| `UT_CC_CONFIG`       | unset                    | Path of a [configuration file](#configuration-file); when set, even empty, none of the variables below is read |
 | `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server                |
 | `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
 | `UT_CC_MODE`         | `watch`                  | `enforce` (matched case-insensitively) blocks over-budget calls; any other value is watch-only (see [Modes](#modes-watch-only-by-default)) |
@@ -59,7 +63,80 @@ export UT_SERVER_KEY="<the key from step 1>"
 > **Caution:** `UT_SERVER_URL` and `UT_SERVER_KEY` are read from the environment,
 > and every PreToolUse authorization sends the tenant key (and tool input as
 > message content) to that URL — point them only at a `usertrust-server` you host
-> and control, never a third-party or untrusted endpoint.
+> and control, never a third-party or untrusted endpoint. A project's settings can
+> set environment variables for every hook, so prefer a
+> [configuration file](#configuration-file), which no variable can redirect.
+
+## Configuration file
+
+Set `UT_CC_CONFIG` to the path of one JSON file, and the plugin reads every
+setting from it:
+
+```sh
+export UT_CC_CONFIG="$HOME/.config/usertrust/claude-code.json"
+```
+
+```json
+{
+  "url": "http://127.0.0.1:4519",
+  "key": "<the key from step 1>",
+  "mode": "watch",
+  "stateDir": "/Users/you/.claude/usertrust-cc"
+}
+```
+
+| Field         | Required | Default             | Meaning (the variable it replaces)                        |
+| ------------- | -------- | ------------------- | --------------------------------------------------------- |
+| `url`         | yes      |                     | `http` or `https` base URL of your usertrust-server (`UT_SERVER_URL`) |
+| `key`         | yes      |                     | Tenant bearer key, visible ASCII (`UT_SERVER_KEY`)        |
+| `mode`        | yes      |                     | `watch` or `enforce`, exactly (`UT_CC_MODE`)              |
+| `stateDir`    | yes      |                     | Absolute path of the state dir (`UT_CC_STATE_DIR`)        |
+| `failOpen`    | no       | `false`             | `true`: in enforce mode, calls proceed while governance is down (`UT_FAIL_OPEN`) |
+| `sendContent` | no       | `true`              | `false` sends `{"redacted":true}` instead of content (`UT_CC_SEND_CONTENT`) |
+| `usage`       | no       | `transcript`        | `estimate` settles per-call estimates only (`UT_CC_USAGE`) |
+| `model`       | no       | `claude-sonnet-4-6` | Model for an estimate hold (`UT_CC_MODEL`)                |
+| `unit`        | no       | unset               | The principal's `unit` (`UT_CC_UNIT`)                     |
+| `role`        | no       | unset               | The principal's `role` (`UT_CC_ROLE`)                     |
+
+**With `UT_CC_CONFIG` set, even to an empty string, the session is configured:**
+every setting comes from the file, and no `UT_*` variable is read, nor
+`CLAUDE_CONFIG_DIR` or `HOME` for the state dir. Fields the plugin does not know
+are ignored. The file is accepted only if all of these hold:
+
+- its path is absolute, and its real path is inside `.config/usertrust/` under
+  your home **as the passwd database gives it**: `$HOME` and `XDG_CONFIG_HOME`
+  are environment, so neither can move it;
+- that directory's real path is its path (no symlinked component), and it is
+  yours, writable by no one else;
+- the file is not a link but a regular file, yours, with no group or other
+  permission bits (`chmod 600`), and at most 64 KiB;
+- it is a JSON object with every required field, and every field it has is valid.
+
+**Anything else, an empty `UT_CC_CONFIG` included, runs the plugin watch-only and
+key-less.** No request is sent to any server. Each tool call is recorded as a
+`gap` with a fixed reason, such as `config: outside the anchor` or
+`config: field "mode" invalid`, in `watch.jsonl` under that passwd home's
+`.claude/usertrust-cc`, and the session's first line says why. It never falls
+back to the environment, and never enforces. A reason names only the plugin's
+own field names, never a value from the file (a JSON error quotes its input, and
+an OS error can carry a path, so neither is passed on), and the session's first
+line names no value from the file either. A note about a state file the plugin
+cannot write still names that file's path, under the configured `stateDir`.
+
+On Windows, where a file has no POSIX owner or mode bits, the owner and mode
+checks are skipped; the location checks still apply.
+
+**What this protects, and what it does not.** A project's settings can set
+environment variables for every hook. One quiet line (`UT_SERVER_URL`,
+`UT_CC_MODE`, `UT_CC_STATE_DIR`, …) could otherwise send your tenant key to
+another server, switch the mode, turn content back on or move the state dir; a
+configured session ignores all of them. It does not stop CODE from a project's
+settings: a hook, or a variable that loads code (`NODE_OPTIONS`, `PATH`). That
+code runs inside the hook's own process, and can read this file too. Only not
+starting a session in a checkout you have not reviewed stops it. And an
+environment can still point `UT_CC_CONFIG` at another valid file in the same
+directory: keep only configs there you would accept for any session. A host
+that should never block a tool call holds only `watch` configs.
 
 ## Real usage: what is settled, and how
 
