@@ -701,6 +701,12 @@ carries the intent (never `.settling` and then a mark), so Stop gives it back as
 job); the shared writer has no default of its own, because the hook that writes a record is not always the hook
 that began the call. A stale `.settling` estimate hold swept by the journal writes its gap first. A job log whose
 latest stamp is more than a clock step AHEAD of the hook's clock makes that call's job unknown.
+Declared residuals: (1) usage that names no session (a vault shared with non-plugin clients) is a known gap for EVERY job,
+at any time, because no log can place it; the trade-off is the same as for a log-less session. (2) A clock fast by more
+than a second when a job op is written, corrected before later messages, and those messages settled by a Stop remainder
+(not through PreToolUse) can write a wrong job label: the read-time skew check cannot see a stamp that is already in the
+past, and a real fix needs writer-side information (a monotonic stamp). (3) Two server URLs updating `capability.json`
+at once can lose one bit, which yields untagged calls and so gaps, never a false clean.
 
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
 `LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless

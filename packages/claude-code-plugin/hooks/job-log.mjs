@@ -612,8 +612,9 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 	const callTransfers = new Set(
 		records.filter((r) => r?.kind === "llm_call").map((r) => r?.data?.transferId),
 	);
-	// Spend-like records that name NO session cannot be placed by any log: if their time could
-	// fall in an interval of the job (or is unreadable), they may be the job's.
+	// Spend-like records that name NO session cannot be placed by any log, so they may be the
+	// job's AT ANY TIME: another session's intervals say nothing about when they happened. They
+	// are a gap for every job, as a log-less session's usage is.
 	for (const r of records) {
 		if (r?.data?.job === job || sessionOfRecord(r) !== null) continue;
 		// A give-back that names no session cannot be placed by any log either: unless it states
@@ -621,15 +622,10 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 		const unproven =
 			r?.kind === "hold_released" && r.data?.releaseClass !== "unused" && r.data?.job === undefined;
 		if (r?.kind !== "llm_call" && !SPEND_LIKE.has(r?.kind) && !unproven) continue;
-		const w = r.kind === "llm_call" ? window(r.data) : null;
-		const point = ms(r?.data?.usageFrom);
-		const span = r.kind === "llm_call" ? w : Number.isFinite(point) ? [point, point] : null;
-		if (span === null || overlapsAny(span, allIntervals)) {
-			why(`a ${r.kind} record names no session: it may belong to ${job}`, {
-				kind: r.kind,
-				transferId: r?.data?.transferId,
-			});
-		}
+		why(`a ${r.kind} record names no session: it may belong to ${job}`, {
+			kind: r.kind,
+			transferId: r?.data?.transferId,
+		});
 	}
 
 	// ── Clause 2: every event whose time could fall in the job's intervals is POSITIVELY

@@ -1477,14 +1477,17 @@ describe("jobCoverage — shapes a record can take", () => {
 		);
 		expect((await run([ok])).knownGaps).toEqual([]);
 	});
-	it("an untagged call with NO session overlapping the job is a gap; outside it is not", async () => {
+	it("an untagged call with NO session is a gap for the job, inside its interval or not", async () => {
 		const sessionless = (from: number, to: number) => ({
 			kind: "llm_call",
 			actor: "local",
 			data: { transferId: "tx_s", cost: 9, usageFrom: iso(T0 + from), usageTo: iso(T0 + to) },
 		});
 		expect(gapText(await run([ok, sessionless(2500, 2600)]))).toContain("names no session");
-		expect(gapText(await run([ok, sessionless(9000, 9100)]))).not.toContain("names no session");
+		// and at ANY time: no log places it, and another session's intervals say nothing about it
+		// mutant: filtered by the intervals of unrelated sessions
+		expect(gapText(await run([ok, sessionless(9000, 9100)]))).toContain("names no session");
+		expect(gapText(await run([ok, sessionless(100, 200)]))).toContain("names no session");
 	});
 	it("untagged settlement metadata with no llm_call, in the interval, is a gap", async () => {
 		const meta = (data: Record<string, unknown>) => ({
@@ -1712,6 +1715,15 @@ describe("a sessionless give-back without proof is a gap (B-110)", () => {
 		const { jobCoverage } = await lib();
 		const r = jobCoverage({ job: J, logs: { [SID]: logText }, records: [call, given({})] });
 		// mutant: only sessionless calls and denials are looked at
+		expect(gapText(r)).toContain("a hold_released record names no session");
+	});
+	it("...at any time, not only inside an interval", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [call, given({ usageFrom: iso(T0 + 40_000) })],
+		});
 		expect(gapText(r)).toContain("a hold_released record names no session");
 	});
 	it("with releaseClass unused it stays clean", async () => {
