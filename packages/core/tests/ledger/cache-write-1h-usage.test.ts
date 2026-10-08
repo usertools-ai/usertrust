@@ -242,6 +242,9 @@ describe("requestDeclares1hCache", () => {
 		expect(requestDeclares1hCache({ messages: [{ role: "user", content: [new Sneaky()] }] })).toBe(
 			true,
 		);
+		const arr: unknown[] = [{ type: "text" }];
+		Object.defineProperty(arr, "toJSON", { value: () => [{ cache_control: { ttl: "1h" } }] });
+		expect(requestDeclares1hCache({ messages: [{ content: arr }] })).toBe(true);
 		const hidden = { type: "text" };
 		Object.defineProperty(hidden, "toJSON", { value: () => ({}), enumerable: false });
 		expect(requestDeclares1hCache({ messages: [{ content: [hidden] }] })).toBe(true);

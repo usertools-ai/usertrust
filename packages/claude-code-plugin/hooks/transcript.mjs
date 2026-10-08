@@ -1747,6 +1747,16 @@ export async function settleTranscriptHold(sessionId, entry) {
 	}
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(entry[key]);
+	// A 1-hour share the server may or may not price: decide BEFORE claiming the hold's file,
+	// so an unknown server leaves the pending record in place for a later settle point instead
+	// of journalling a `.done` for a settle that never went out.
+	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) {
+		return {
+			outcome: "deferred",
+			reason:
+				"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet; the hold is untouched",
+		};
+	}
 	// The hold's own file, as its listing found it: never whatever file the call's
 	// name holds now, which may be a later hold's.
 	const livePath = entry.path;

@@ -559,6 +559,11 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 			await run("post-tool-use.mjs", postInput("tu_1"));
 			// Sending only the flat total would price those 1-hour tokens at the 5-minute rate for good.
 			expect(settles().filter((s) => s.body.inputTokens !== 0)).toHaveLength(0);
+			// The hold's pending record was not claimed or journalled: once the server answers, a
+			// later settle point still carries the usage, with its 1-hour share.
+			capabilities = ["cache-write-1h"];
+			await run("stop.mjs", stopInput());
+			expect(settles().filter((s) => s.body.cacheWrite1hTokens === 150)).toHaveLength(1);
 		});
 
 		it("a TRANSIENT health failure is retried once, and the share then goes to a server that prices it", async () => {

@@ -674,6 +674,17 @@ export function requestDeclares1hCache(request: unknown): boolean {
 		if (depth > MAX_DEPTH || ++nodes > MAX_NODES) return true;
 		if (seen.has(value)) return false;
 		seen.add(value);
+		// A callable `toJSON` (own, non-enumerable or inherited), on an array as on an object, lets
+		// the SDK's serialization emit something the scan never saw, a `cache_control` block with
+		// `ttl: "1h"` included, so the scan cannot vouch for the request: fail dearest. A Date or a
+		// binary view carries a toJSON that can only produce a string or bytes, never a cache block.
+		if (
+			typeof (value as { toJSON?: unknown }).toJSON === "function" &&
+			!(value instanceof Date) &&
+			!ArrayBuffer.isView(value)
+		) {
+			return true;
+		}
 		if (Array.isArray(value)) {
 			// An indexed accessor is an accessor like any other: fail dearest.
 			for (let i = 0; i < value.length; i++) {
@@ -684,17 +695,6 @@ export function requestDeclares1hCache(request: unknown): boolean {
 			return false;
 		}
 		const record = value as Record<string, unknown>;
-		// A callable `toJSON` (own, non-enumerable or inherited) lets the SDK's serialization emit
-		// something the scan never saw, a `cache_control` block with `ttl: "1h"` included, so
-		// the scan cannot vouch for the request: fail dearest. A Date or a binary view carries
-		// a toJSON that can only produce a string or bytes, never a cache block.
-		if (
-			typeof (record as { toJSON?: unknown }).toJSON === "function" &&
-			!(value instanceof Date) &&
-			!ArrayBuffer.isView(value)
-		) {
-			return true;
-		}
 		// An accessor can answer differently when the request is later serialized than it
 		// did for this scan, so the scan cannot vouch for what the provider will receive:
 		// fail dearest, like every other unreadable request. (A plain data property that
