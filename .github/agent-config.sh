@@ -9,18 +9,22 @@
 #   guard nor this file.
 # - Once a base has this file, a base without the guard fails. It never falls back to the
 #   change's copy.
+# A pull request is checked from where it branched; a push, tip to tip (the guard's
+# `--event`).
 # This file and ci.yml run from the change itself, as every workflow does: CODEOWNERS
-# names their owner, whose review a change to either needs.
+# names their owner, whose review a change to either needs. As this file passes its own
+# arguments to the BASE's guard, a new argument lands in the guard first, on its own.
 #
-# Usage: agent-config.sh <base> <head>
+# Usage: agent-config.sh <pull_request|push> <base> <head>
 set -euo pipefail
 
-if [ $# -ne 2 ]; then
-	echo "usage: agent-config.sh <base> <head>" >&2
+if [ $# -ne 3 ] || { [ "$1" != pull_request ] && [ "$1" != push ]; }; then
+	echo "usage: agent-config.sh <pull_request|push> <base> <head>" >&2
 	exit 2
 fi
-base=$1
-head=$2
+event=$1
+base=$2
+head=$3
 guard=scripts/agent-config-guard.mjs
 
 for commit in "$base" "$head"; do
@@ -43,4 +47,4 @@ fi
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 git cat-file blob "$rules:$guard" >"$dir/agent-config-guard.mjs"
-node "$dir/agent-config-guard.mjs" --rules "$rules" --base "$base" --head "$head"
+node "$dir/agent-config-guard.mjs" --event "$event" --rules "$rules" --base "$base" --head "$head"

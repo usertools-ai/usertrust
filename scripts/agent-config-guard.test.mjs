@@ -96,18 +96,18 @@ const guardFiles = (entries = []) => ({
 });
 
 /** The guard run directly, its rules (the allowlist) read from `rules`. */
-function guard(repo, { rules, base, head }) {
+function guard(repo, { rules, base, head, event = "pull_request" }) {
 	const run = spawnSync(
 		process.execPath,
-		[GUARD, "--rules", rules, "--base", base, "--head", head],
+		[GUARD, "--event", event, "--rules", rules, "--base", base, "--head", head],
 		{ cwd: repo.root, env: ENV, encoding: "utf-8" },
 	);
 	return { status: run.status, out: run.stdout + run.stderr };
 }
 
-/** The launcher, as ci.yml runs it. */
-function launch(repo, base, head) {
-	const run = spawnSync("bash", [LAUNCHER, base, head], {
+/** The launcher, as ci.yml runs it, for a pull request unless `event` says otherwise. */
+function launch(repo, base, head, event = "pull_request") {
+	const run = spawnSync("bash", [LAUNCHER, event, base, head], {
 		cwd: repo.root,
 		env: ENV,
 		encoding: "utf-8",
@@ -485,11 +485,28 @@ describe("the launcher runs the guard and its allowlist as the BASE has them", (
 		);
 	});
 
-	test("a push is checked as before...after, the same way", () => {
+	test("a push is checked from before to after", () => {
 		const repo = fixture();
 		const before = repo.commit({ "README.md": "x", ...guardFiles() });
 		const after = repo.commit({ ".codex/config.toml": "x" }, before);
-		fails(launch(repo, before, after), ".codex/config.toml", UNNAMED);
+		fails(launch(repo, before, after, "push"), ".codex/config.toml", UNNAMED);
+	});
+
+	test("a push that rewrites the branch is checked tip to tip: agent config the old tip had, and the new one drops, counts", () => {
+		const repo = fixture();
+		const fork = repo.commit({
+			"README.md": "x",
+			...guardFiles([{ path: ".grok/sandbox.toml", why: "test", sha256: sha256("v1") }]),
+		});
+		const before = repo.commit({ ".grok/sandbox.toml": "v1" }, fork);
+		const after = repo.commit({ "README.md": "rewritten" }, fork);
+		fails(
+			launch(repo, before, after, "push"),
+			".grok/sandbox.toml",
+			"is pinned by the allowlist, and the change removes it",
+		);
+		// Control: a pull request with the same commits is its own changes only, from where it branched.
+		passes(launch(repo, before, after));
 	});
 
 	test("a base or head that is not a commit cannot be checked", () => {
@@ -503,5 +520,8 @@ describe("the launcher runs the guard and its allowlist as the BASE has them", (
 			assert.equal(status, 2, out);
 			assert.match(out, /CANNOT CHECK: \w+ is not a commit here/);
 		}
+		const { status, out } = launch(repo, base, base, "merge_group");
+		assert.equal(status, 2, out);
+		assert.match(out, /usage: agent-config\.sh <pull_request\|push> <base> <head>/);
 	});
 });

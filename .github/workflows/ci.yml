@@ -42,9 +42,10 @@ jobs:
         run: node --test scripts/agent-config-guard.test.mjs
       - name: The guard, as the base has it
         env:
+          EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-        run: bash .github/agent-config.sh "$BASE_SHA" "$HEAD_SHA"
+        run: bash .github/agent-config.sh "$EVENT" "$BASE_SHA" "$HEAD_SHA"
 
   lint:
     name: lint

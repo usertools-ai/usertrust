@@ -20,11 +20,17 @@
 // Agent-config paths are recognized as a case-insensitive filesystem, or Windows, opens
 // them (`.Claude/`, `.MCP.JSON`, `.claude./`); allowlist entries match exactly.
 //
+// The change is what `--event` says it is:
+// - for a pull request, `base...head`: its own changes, from where it branched;
+// - for a push, `base..head`, tip to tip. A push that rewrites the branch removes what
+//   the old tip had, and that counts too.
+//
 // The allowlist is read from `--rules`, which the launcher sets to the BASE, as it runs
 // the base's copy of this script: a change is never graded by its own rules. Node
 // built-ins and git only, so it runs before any dependency is installed.
 //
-// Usage: node agent-config-guard.mjs --rules <commit> --base <commit> --head <commit>
+// Usage: node agent-config-guard.mjs --event <pull_request|push> --rules <commit>
+//                                    --base <commit> --head <commit>
 // Exit 0 when the change passes; 1 when it fails, each failure named; 2 when it cannot be
 // checked (a usage or git error, or an allowlist that is not valid).
 import { execFileSync } from "node:child_process";
@@ -200,8 +206,11 @@ function tree(commit) {
 
 const blob = (oid) => git(["cat-file", "blob", oid], "buffer");
 
-/** The failures of the change `base...head` under the allowlist at `rules`. */
-function check({ rules, base, head }) {
+/** How each event's change is read: a pull request from where it branched, a push tip to tip. */
+const RANGE = { pull_request: "...", push: ".." };
+
+/** The failures of the change from `base` to `head` under the allowlist at `rules`. */
+function check({ event, rules, base, head }) {
 	const allow = readAllowlist(rules);
 	const changed = git([
 		"diff",
@@ -210,7 +219,7 @@ function check({ rules, base, head }) {
 		"--no-ext-diff",
 		"--ignore-submodules=none",
 		"-z",
-		`${base}...${head}`,
+		`${base}${RANGE[event]}${head}`,
 	])
 		.split("\0")
 		.filter((path) => path !== "");
@@ -251,17 +260,20 @@ function check({ rules, base, head }) {
 	return { failures, changed: changed.length, agentPaths, settingsFiles };
 }
 
-/** `--name value` pairs; Unusable when one is missing or names no commit. */
+/** `--name value` pairs; Unusable when one is missing, or names no event or commit. */
 function options(argv) {
 	const named = {};
 	for (let i = 0; i < argv.length; i += 2) {
 		const name = argv[i]?.replace(/^--/u, "");
-		if (!["rules", "base", "head"].includes(name) || argv[i + 1] === undefined) {
+		if (!["event", "rules", "base", "head"].includes(name) || argv[i + 1] === undefined) {
 			throw new Unusable(
-				"usage: agent-config-guard.mjs --rules <commit> --base <commit> --head <commit>",
+				"usage: agent-config-guard.mjs --event <pull_request|push> --rules <commit> --base <commit> --head <commit>",
 			);
 		}
 		named[name] = argv[i + 1];
+	}
+	if (!Object.hasOwn(RANGE, named.event ?? "")) {
+		throw new Unusable("--event is pull_request or push");
 	}
 	for (const name of ["rules", "base", "head"]) {
 		if (named[name] === undefined) throw new Unusable(`--${name} is missing`);
