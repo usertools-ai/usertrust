@@ -7,7 +7,7 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-10-08
+## [2.0.0] - 2026-10-08
 
 ### Breaking
 
@@ -34,6 +34,19 @@ npm, and its version is its own: the `usertrust` packages and their
   - **To keep such a setup working:** run as a user with a passwd entry whose home
     exists, and let the plugin make its directories there (0700), or make them the
     user's own, real directories, writable by no one else.
+- **A setting changed mid-session reaches new sessions only, and a key changed
+  mid-session is refused.** 1.4.1 read the environment afresh at every hook, so a
+  change Claude Code applied to a running session took effect at its next hook. Now
+  a session keeps the settings of its first hook for its life, a resumed session
+  included (see *Changed*): that is what stops a moved state dir from posting the
+  same usage twice.
+  - A new url, mode, state dir or any other setting applies from the next session.
+  - An environment session's pin holds no key, so each hook still reads
+    `UT_SERVER_KEY`, and one that changed mid-session is refused as
+    `pin: key changed`. The hook sends nothing, in the session's pinned mode: in
+    enforce mode every call is blocked (with `failOpen`, each proceeds as a gap), and
+    in watch mode each is a gap. That lasts until the old key is back, or the session
+    ends and a new one starts, so rotate a key between sessions.
 
 ### Added
 
@@ -175,7 +188,7 @@ npm, and its version is its own: the `usertrust` packages and their
 - **What an older version left behind carries no server or key:** a hold record
   written before 1.4.1, and a settle that 1.4.1 or earlier left unresolved.
   Outside a resumed call, such a record or settle is still settled or retried
-  through the current server and key, as before. Everything 1.5.0 writes carries
+  through the current server and key, as before. Everything 2.0.0 writes carries
   its binding, and is ended only through it (see *Security*). Tracked in
   [#246](https://github.com/usertools-ai/usertrust/issues/246).
 - **If a settle fails and its release also fails, the old hold may stay live until
