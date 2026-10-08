@@ -591,6 +591,15 @@ both, so a field there makes every v2 validator reject every receipt. An older s
 lists `cache-write-1h`.
 *Prevents:* 1-hour writes billed at 1.25x while the provider bills 2x (#203), and a recorded cost
 no auditor can reproduce from the record.
+*DECLARED RESIDUE (a decision, not an omission):* a PARTIAL `cache_creation` breakdown (one TTL
+field) prices its unattributed remainder (flat total minus the named count) at the dearer 1-hour
+rate, and the stream accumulators only rise, so a stream whose early event is partial and whose
+later event is complete keeps that inferred share. It OVERSTATES, and overstatement is still
+inaccuracy; it is accepted because the real API emits BOTH TTL fields with a sum equal to the flat
+total (`tests/ledger/real-cache-creation-shapes.test.ts`: 73,292 captured blocks, 0 violations, and
+the API reference). The structural fix, tracking reported 5m/1h separately from the flat total and
+deriving the remainder at settlement, is a follow-up; if that test ever sees a partial block, the
+premise is false and the rework is no longer optional.
 
 **New receipt fields go at the ROOT, never inside `meter`.** `receipt.v1.schema.json` is frozen
 and declares `meter` with `additionalProperties: false` while leaving the receipt root open. A
