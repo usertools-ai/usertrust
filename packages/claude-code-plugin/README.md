@@ -579,10 +579,15 @@ again, and the plugin finds the hold the call already has.
     is abandoned through its own name: its usage goes unrecorded, and is never
     parked for a retry through the new server. Each drop is first written to
     `watch.jsonl` as a gap, except a claim that only ends a deferred call's hold,
-    whose call never ran. Any other hook that reconciles is
-    still blind to the tenant, as in 1.4.0, and so is Stop's (or SubagentStop's)
-    settle of a hold still pending then: it settles that hold through the current
-    server and key ([#246](https://github.com/usertools-ai/usertrust/issues/246)).
+    whose call never ran. Stop, SubagentStop and SessionEnd end a hold still
+    pending then the same way: only through the server and key that made it, and
+    one made under another is dropped, as above. Any other hook that reconciles
+    still decides a stale record whatever made it, as in 1.4.0: its keyed window
+    is parked for a retry, or its ids are accounted. The parked window keeps the
+    record's server and key, so it is retried only through them; under another,
+    it is dropped, as above. Outside the resumed call, a record with no binding
+    (from before 1.4.1) is still settled or retried through the current server
+    and key ([#246](https://github.com/usertools-ai/usertrust/issues/246)).
 - **Two resumes of one call at once** (two `claude -p --resume` of one session,
   say) can leave the call two holds: one resume can reserve while the other is
   between ending the earlier hold and recording its fresh one. Each hold has its
