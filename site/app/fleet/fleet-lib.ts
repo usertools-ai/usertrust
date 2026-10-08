@@ -72,6 +72,8 @@ export interface FleetChainEvent {
 			cacheWriteTokens: number;
 		};
 		appliedRates?: Record<string, number>;
+		/** The 1-hour share of usage.cacheWriteTokens and its rate; present only for a call that wrote 1h cache. */
+		cacheWrite1h?: { tokens: number; ratePer1k: number };
 		rateSource?: string;
 		pricingTableVersion?: string;
 		usageSource?: string;
@@ -201,6 +203,11 @@ export function receiptJson(event: FleetChainEvent): JsonObject {
 	}
 	if (d.cost !== undefined) json.cost = d.cost;
 	if (d.appliedRates !== undefined) json.appliedRates = { ...d.appliedRates };
+	// The 1-hour split the recompute needs: without it the displayed counts and rates
+	// reproduce a LOWER cost than the one shown. Copied key by key like everything else.
+	if (d.cacheWrite1h !== undefined) {
+		json.cacheWrite1h = { tokens: d.cacheWrite1h.tokens, ratePer1k: d.cacheWrite1h.ratePer1k };
+	}
 	if (d.rateSource !== undefined) json.rateSource = d.rateSource;
 	if (d.pricingTableVersion !== undefined) json.pricingTableVersion = d.pricingTableVersion;
 	json.auditHash = event.hash;
