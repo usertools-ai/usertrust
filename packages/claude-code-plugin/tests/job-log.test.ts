@@ -58,7 +58,12 @@ interface Lib {
 		job: string | null,
 		opts?: { waitMs?: number },
 	): Promise<{ ok: boolean }>;
-	jobCoverage(args: { job: string; logs: Record<string, string>; records: unknown[] }): {
+	jobCoverage(args: {
+		job: string;
+		logs: Record<string, string>;
+		records: unknown[];
+		watch?: unknown[];
+	}): {
 		exact: boolean;
 		reasons: string[];
 		transferIds: string[];
