@@ -375,6 +375,27 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 	return path;
 }
 
+/**
+ * A give-back of a hold whose call RAN (or may have) without a confirmed charge is a GAP:
+ * metered usage the ledger cannot vouch for. `started` is when the call began (the hold's
+ * own `usageFrom`), so a job switch that lands later cannot move it to another job.
+ */
+export async function recordUnconfirmedCall(sessionId, held, releaseClass) {
+	await recordWatchEvent({
+		kind: "gap",
+		mode: guardMode(),
+		session: sessionId,
+		agent: held.agentId ?? "main",
+		tool: "(unconfirmed)",
+		reason:
+			releaseClass === "call-ran"
+				? "the call ran and its charge is unconfirmed (its settle went unanswered)"
+				: "the call may have run and was never charged (no PostToolUse settle)",
+		releaseClass,
+		...(typeof held.usageFrom === "string" ? { started: held.usageFrom } : {}),
+	});
+}
+
 /** Errors that mean the state dir's filesystem cannot make hard links. */
 export const LINKLESS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"]);
 
@@ -500,6 +521,8 @@ async function settlingRecords(sessionId, agentId) {
 				path,
 				transferId: body.transferId,
 				toolUseId: body.toolUseId ?? null,
+				agentId: sanitize(body.agentId ?? "main"),
+				...jobHoldFields(body),
 				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
 				transcript: body.usage === "transcript",
 				// Which server and tenant made the hold (`tenantBinding`), as written.
@@ -712,7 +735,7 @@ let jobCapableRead;
  * An older server's schemas STRIP those keys in silence, so they are sent only to a
  * server known to honour them. Unlike an idempotency key, sending them to a server
  * that does not is HARMLESS (the record is simply untagged, and the coverage check
- * refuses "exact" for an untagged record), so this one bit may be remembered per
+ * reports the untagged record as a known gap), so this one bit may be remembered per
  * server URL for the case where the health probe fails: losing attribution to a
  * probe timeout is the silent loss this exists to avoid. The idempotency-key and
  * release capabilities are NEVER cached: a stale "honoured" there double-posts.
@@ -815,10 +838,19 @@ export function isAlreadySettled(response) {
  * the capabilities unknown, release is tried first: only a server that answers it
  * has no such route gets the abort.
  */
-export async function releaseHold(transferId, reason, { timeoutMs = 5000 } = {}) {
+export async function releaseHold(transferId, reason, { timeoutMs = 5000, releaseClass } = {}) {
 	const capabilities = await serverCapabilities();
 	if (capabilities === null || capabilities.has("release")) {
-		const released = await serverRequest("/v1/release", { transferId, reason }, { timeoutMs });
+		// WHY the hold is given back, as the closed set the server records
+		// (`releaseClass`, capability `job`): the only thing that can prove a released hold
+		// spent nothing. Sent only to a server that honours it; a release that states none
+		// proves nothing.
+		const cls = releaseClass !== undefined && (await jobCapable(capabilities));
+		const released = await serverRequest(
+			"/v1/release",
+			{ transferId, reason, ...(cls ? { releaseClass } : {}) },
+			{ timeoutMs },
+		);
 		if (capabilities !== null || !isUnknownRoute(released))
 			return { route: "release", ...released };
 	}
@@ -835,6 +867,7 @@ export async function releaseHold(transferId, reason, { timeoutMs = 5000 } = {})
  * pending-hold sweep. Never throws; never echoes the id, which may be anything.
  */
 export async function giveBackInvalid(transferId, timeoutMs) {
+	// No call ever ran under a hold whose id could not even be recorded: `unused`.
 	if (typeof transferId !== "string" || transferId === "") return;
 	const capabilities = await serverCapabilities();
 	if (!capabilities?.has("release")) {
@@ -846,7 +879,11 @@ export async function giveBackInvalid(transferId, timeoutMs) {
 	try {
 		const response = await serverRequest(
 			"/v1/release",
-			{ transferId, reason: "its transferId is not a valid id" },
+			{
+				transferId,
+				reason: "its transferId is not a valid id",
+				...((await jobCapable(capabilities)) ? { releaseClass: "unused" } : {}),
+			},
 			{ timeoutMs },
 		);
 		if (response.status !== 200) {
@@ -870,9 +907,9 @@ export async function giveBackInvalid(transferId, timeoutMs) {
  * server's pending-TTL sweep. Never throws. Returns whether the give-back was
  * confirmed.
  */
-export async function giveBack(transferId, reason, timeoutMs) {
+export async function giveBack(transferId, reason, timeoutMs, releaseClass) {
 	try {
-		const response = await releaseHold(transferId, reason, { timeoutMs });
+		const response = await releaseHold(transferId, reason, { timeoutMs, releaseClass });
 		if (response.status === 200) return true;
 		const why = response.json?.reason ?? response.json?.error;
 		say(
@@ -908,9 +945,17 @@ export async function cleanup(sessionId, agentId) {
 			say(`usertrust: out of time; hold ${entry.transferId} left for Stop/TTL`);
 			return;
 		}
+		// What the client KNOWS about this hold decides its class, never the reason text. A
+		// transcript-mode hold with no assigned usage reserved a window of messages that is
+		// posted by message, so nothing hides behind it: `unused`. An estimate-mode hold still
+		// `.json` at Stop never reached PostToolUse: a failed or interrupted call (#264 A) that
+		// MAY have run and was never charged. That is unconfirmed, and it is a gap.
+		const ranUnconfirmed = entry.usage !== "transcript";
+		if (ranUnconfirmed) await recordUnconfirmedCall(sessionId, entry, "call-unconfirmed");
 		try {
 			const response = await releaseHold(entry.transferId, "session ended with unsettled hold", {
 				timeoutMs,
+				releaseClass: ranUnconfirmed ? "call-unconfirmed" : "unused",
 			});
 			if (response.status !== 200) {
 				say(`usertrust: ${response.route} ${entry.transferId} returned ${response.status}`);
@@ -931,12 +976,16 @@ export async function cleanup(sessionId, agentId) {
 			say(`usertrust: out of time; hold ${held.transferId} left for Stop/TTL`);
 			return;
 		}
+		// The call RAN and its one settle went unanswered: the charge is unconfirmed, and a
+		// give-back of the hold proves nothing about what was charged. Written down as a gap.
+		await recordUnconfirmedCall(sessionId, held, "call-ran");
 		try {
 			const response = await releaseHold(
 				held.transferId,
 				"session ended after an unanswered settle",
 				{
 					timeoutMs,
+					releaseClass: "call-ran",
 				},
 			);
 			if (response.status !== 200 && response.status !== 404) {

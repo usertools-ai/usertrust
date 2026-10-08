@@ -1704,7 +1704,12 @@ async function returnEmptyHold(transferId) {
 		try {
 			const response = await serverRequest(
 				"/v1/release",
-				{ transferId, reason: "no transcript usage was assigned to this hold" },
+				{
+					transferId,
+					reason: "no transcript usage was assigned to this hold",
+					// Its call's usage is posted by message, never by this hold: nothing hides behind it.
+					...((await jobCapable(capabilities)) ? { releaseClass: "unused" } : {}),
+				},
 				{ timeoutMs: callTimeout() },
 			);
 			if (response.status === 200) return { outcome: "returned" };
@@ -2125,6 +2130,9 @@ async function reportDenied(agentType, agentId, reason, ids, model, counts, extr
 			session: extra.sessionId,
 			agent: agentId,
 			tool: "(remainder)",
+			// The refused usage's own start, not the Stop that ran when it was refused: a
+			// remainder refused while another job is open belongs to ITS job's interval.
+			...(extra.labels.usageFrom === undefined ? {} : { started: extra.labels.usageFrom }),
 			status: extra.status,
 			error: extra.error,
 			reason: sanitizeReason(reason),

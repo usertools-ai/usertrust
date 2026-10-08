@@ -116,7 +116,13 @@ import {
 	SpendLedgerUnreadableError,
 } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
-import { captureJob, captureUsageTo, type JobCapture } from "./shared/job.js";
+import {
+	captureJob,
+	captureUsageTo,
+	type JobCapture,
+	type ReleaseClass,
+	releaseClassRefusal,
+} from "./shared/job.js";
 import {
 	capturePrincipal,
 	type Principal,
@@ -134,7 +140,7 @@ import { TrustConfigSchema } from "./shared/types.js";
 // the root export for the argument type of a method it can already see here.
 export type { EnvelopeDescriptor, EnvelopeStatus } from "./budget/context.js";
 // The wire's ISO-8601 UTC rule for `usageFrom`/`usageTo`, shared for the reason above.
-export { usageTimeRefusal } from "./shared/job.js";
+export { RELEASE_CLASSES, type ReleaseClass, usageTimeRefusal } from "./shared/job.js";
 // Same reason for the principal: an integration that passes `principal` to
 // `authorize()` gets its type, its field rule and its ledger tags from the entry
 // point it already imports — the tags are what a `query_transfers` roll-up filters on.
@@ -465,7 +471,11 @@ export interface Governor {
 	 *
 	 * `reason` is caller text, recorded through {@link sanitizeReleaseReason}.
 	 */
-	release(auth: Authorization, reason?: string): Promise<ReleaseOutcome>;
+	release(
+		auth: Authorization,
+		reason?: string,
+		opts?: { releaseClass?: ReleaseClass | undefined },
+	): Promise<ReleaseOutcome>;
 
 	/** Graceful shutdown — voids all pending holds, flushes audit. */
 	destroy(): Promise<void>;
@@ -2165,9 +2175,17 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			}
 		},
 
-		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
+		async release(
+			auth: Authorization,
+			reason?: string,
+			opts?: { releaseClass?: ReleaseClass | undefined },
+		): Promise<ReleaseOutcome> {
 			// The handle's id, read ONCE and FIRST (see settle()).
 			const transferId = auth.transferId;
+			// So is the release class (a closed set): an invalid one is refused before any claim.
+			const releaseClass = opts?.releaseClass;
+			const classRefusal = releaseClassRefusal(releaseClass);
+			if (classRefusal !== undefined) throw new TypeError(classRefusal);
 			// Refused once destroy() has taken the remaining holds, before any claim, as abort() is.
 			if (sweeping) {
 				return { released: false };
@@ -2242,6 +2260,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							transferId,
 							reason: sanitizeReleaseReason(reason),
 							source: "headless",
+							...(releaseClass === undefined ? {} : { releaseClass }),
 							...(voidError === undefined ? {} : { voidError }),
 							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
 							...(capture.principal === undefined ? {} : { principal: capture.principal }),

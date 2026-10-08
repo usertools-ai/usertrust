@@ -376,6 +376,8 @@ async function releaseUnconfirmed(transferId) {
 	try {
 		response = await releaseHold(transferId, "a resumed tool call's earlier hold", {
 			timeoutMs: Math.min(5000, timeLeft()),
+			// The earlier hold belonged to a call that was deferred, not run.
+			releaseClass: "unused",
 		});
 	} catch (err) {
 		return `release ${transferId} failed (${err instanceof Error ? err.message : String(err)})`;
@@ -540,6 +542,8 @@ async function reserve(input) {
 					json.transferId,
 					"pending hold could not be recorded",
 					Math.max(250, callTimeout()),
+					// No call has run under a hold that was never recorded.
+					"unused",
 				);
 				throw err;
 			}

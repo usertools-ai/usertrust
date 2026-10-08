@@ -8,7 +8,8 @@
 // Run it as an ordinary Bash call; the session id is $CLAUDE_CODE_SESSION_ID. It
 // writes only to the session's job log (hooks/job-log.mjs), and REFUSES, writing
 // nothing, when the log does not already exist with the plugin's `session-start`.
-// `coverage` is read-only: the one answer path for "is this job's cost exact".
+// `coverage` is read-only. It prints the job's tagged cost and the KNOWN GAPS in the evidence
+// behind it: a diagnostic, never a certification.
 //
 // Exit codes: 0 done, 1 refused (no usable log), 2 bad usage.
 import { readdir, readFile } from "node:fs/promises";
@@ -40,19 +41,22 @@ function waitMs() {
 /** Every `*.jsonl` under <vault>/audit, parsed line by line (read-only). */
 async function readRecords(vault) {
 	const dir = join(vault, "audit");
-	const out = [];
+	const records = [];
+	let unparsed = 0;
 	for (const name of (await readdir(dir)).sort()) {
 		if (!name.endsWith(".jsonl")) continue;
 		for (const line of (await readFile(join(dir, name), "utf-8")).split("\n")) {
 			if (line === "") continue;
 			try {
-				out.push(JSON.parse(line));
+				records.push(JSON.parse(line));
 			} catch {
-				// A torn or corrupt line is the verifier's finding, not this command's.
+				// Never a silent drop: a line that cannot be read may be spend, so it is counted
+				// and reported as incomplete evidence (verifying the chain is the verifier's job).
+				unparsed += 1;
 			}
 		}
 	}
-	return out;
+	return { records, unparsed };
 }
 
 /** The plugin's watch records (one JSON object per line); a missing file is none, an unreadable one is no verdict. */
@@ -73,7 +77,7 @@ async function readWatch(path) {
 		try {
 			out.push(JSON.parse(line));
 		} catch {
-			// A line that cannot be read may be a gap or a refusal: coverage refuses "exact".
+			// A line that cannot be read may be a gap or a refusal: coverage reports it as evidence incomplete.
 			out.push({ kind: "unreadable" });
 		}
 	}
@@ -116,11 +120,13 @@ if (command === "start" || command === "stop") {
 	if (!flags.has("--vault")) usage("coverage needs --vault <the .usertrust directory>");
 	let report;
 	try {
+		const audit = await readRecords(flags.get("--vault"));
 		report = jobCoverage({
 			job,
 			logs: await readLogs(flags.get("--jobs") ?? jobsDir()),
-			records: await readRecords(flags.get("--vault")),
+			records: audit.records,
 			watch: await readWatch(flags.get("--watch") ?? watchLogPath()),
+			unreadable: { audit: audit.unparsed },
 		});
 	} catch (err) {
 		// The evidence cannot be read: no verdict. The path is argv, so it goes out through
@@ -130,7 +136,15 @@ if (command === "start" || command === "stop") {
 		);
 		process.exit(1);
 	}
-	process.stdout.write(`${JSON.stringify(report)}\n`);
+	// JSON.stringify escapes C0 but leaves DEL and C1 (U+007F-U+009F) raw, and some of those
+	// are 8-bit terminal introducers: escape them too, so no argv- or vault-derived byte reaches
+	// a terminal as itself.
+	const safe = JSON.stringify(report).replace(
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: escaping them is the intent
+		/[\u007f-\u009f]/g,
+		(c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+	);
+	process.stdout.write(`${safe}\n`);
 } else {
 	usage("unknown command");
 }

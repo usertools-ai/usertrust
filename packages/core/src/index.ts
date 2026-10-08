@@ -108,6 +108,8 @@ export {
 	type PrincipalLedgerTags,
 	principalFieldRefusal,
 	principalLedgerTags,
+	RELEASE_CLASSES,
+	type ReleaseClass,
 	sanitizeReleaseReason,
 	usageTimeRefusal,
 } from "./headless.js";

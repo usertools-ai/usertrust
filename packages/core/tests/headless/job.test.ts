@@ -242,6 +242,34 @@ describe("headless records carry the authorize capture's job", () => {
 		await gov.destroy();
 	});
 
+	it("release records a structured releaseClass, and only a valid one", async () => {
+		const audit = makeAudit();
+		const gov = await governor(makeEngine(), audit);
+		const auth = await gov.authorize({ ...AUTHORIZE, ...LABELS });
+		await expect(
+			gov.release(auth, "x", { releaseClass: "because" as unknown as "unused" }),
+		).rejects.toThrow(/releaseClass must be one of/);
+		// refused BEFORE the claim: the hold is still releasable
+		await gov.release(auth, "given back", { releaseClass: "unused" });
+		expect(record(audit, "hold_released").data).toMatchObject({
+			reason: "given back",
+			releaseClass: "unused",
+		});
+		await gov.destroy();
+	});
+
+	it("a release that states no class records none, and so does destroy(): neither proves anything", async () => {
+		const audit = makeAudit();
+		const gov = await governor(makeEngine(), audit);
+		const a = await gov.authorize({ ...AUTHORIZE, ...LABELS });
+		await gov.release(a, "session ended with unsettled hold");
+		await gov.authorize({ ...AUTHORIZE, ...LABELS });
+		await gov.destroy();
+		const released = audit.events.filter((e) => e.kind === "hold_released");
+		expect(released).toHaveLength(2);
+		for (const e of released) expect(e.data).not.toHaveProperty("releaseClass");
+	});
+
 	it("destroy() releasing a hold still held records its job too", async () => {
 		const audit = makeAudit();
 		const gov = await governor(makeEngine(), audit);

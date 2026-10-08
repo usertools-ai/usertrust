@@ -109,6 +109,11 @@ least a minute. To give back a hold you no longer need, call `/v1/release` with
 at all: not a failure, and not a success that could close a breaker real failures opened. The reason is
 stored with control characters stripped and clipped to 200 characters, never refused.
 
+`/v1/release` also takes `releaseClass` (optional): `unused`, `call-unconfirmed` or `call-ran`, why the
+hold is given back, derived by the client from its own hold state and recorded verbatim on the
+`hold_released` record (capability `job`). The free-text `reason` is never read as the class: a release that
+states none (a TTL expiry, a shutdown) proves nothing about whether usage hides behind the hold.
+
 It answers `200 { "released": true, "transferId": "…" }` only when that request ended the hold, plus
 `voidError` (a fixed code) when the ledger refused the void: the hold is still ended, and the ledger's
 pending timeout returns its funds. An unknown id, another tenant's id, or a hold that was already settled,

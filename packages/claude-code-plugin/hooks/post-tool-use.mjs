@@ -42,6 +42,7 @@ import {
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	recordUnconfirmedCall,
 	say,
 	serverCapabilities,
 	serverRequest,
@@ -223,10 +224,14 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		// leave its reservation held until the server's TTL sweep. This call's
 		// estimate goes unrecorded: an under-count, never a second charge. The expired
 		// hold's claim goes too, since its 404 said the server has no such hold.
+		// The call RAN and this hold was to charge it: its estimate goes unrecorded, which is a
+		// gap, and the give-back says so (`call-ran`).
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
 		const givenBack = await giveBack(
 			transferId,
 			"replacement hold could not be recorded",
 			Math.max(250, Math.min(5000, timeLeft())),
+			"call-ran",
 		);
 		await unlink(claimed).catch(() => {});
 		say(

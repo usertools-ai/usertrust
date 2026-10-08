@@ -659,24 +659,33 @@ append-only log (`<state>/jobs/<session_id>.jsonl`) written by the `usertrust-jo
 SessionStart hook under an O_EXCL lock held only for read-validate-append. A record's job is the one
 open at the time its USAGE happened (a hold: its PreToolUse; a transcript message: its own
 timestamp), never the one open at settle time, so a remainder spanning a switch settles once per job.
-`jobCoverage()` in that module is the ONE answer path for "is this job's cost exact": an empty
-interval, an untagged or differently tagged overlapping record, a record of the job outside its
-intervals, an incomplete usage window, an invalid state, a denied request of the job, a `would_block`
-or an unmetered `gap` in the plugin's watch records, or a contributing session without a usable log each
-refuse it. It reconciles THREE sides, and anything unaccounted for is inexact with a named reason: (1) every
-record TAGGED with the job lies inside an interval of the job in a valid log of its own session (a session
-with no interval of it puts all of its tagged records outside); (2) every gap, `would_block`, untagged call
-or unrecognised record whose time could fall in an interval is POSITIVELY attributed elsewhere through a valid
-log of its own session, and one that cannot be resolved (no usable log, no session, no readable time) makes
-the job inexact (a log-less gap or refusal makes EVERY job inexact, as the set it could belong to is
-unbounded); an untagged call in a session with a valid log, outside every interval, stays exact; (3) every
-transfer is joined to exactly one `llm_call` with an integer cost, so a transfer known only through
-`settlement_shortfall`, `settlement_ambiguous` or `llm_call_failed` is never costed as zero. It is DENY BY
-DEFAULT for records it does not recognise: any record of a session that is
-neither spend (`llm_call`) nor a give-back or spend's own bookkeeping (`hold_released`,
-`settlement_ambiguous`, `settlement_shortfall`) and lies in an interval makes it inexact, whatever
-labels it carries or lacks (naming the bad kinds one at a time kept leaking new ones). An interval is (start, stop], matching how the hooks resolve a time (a line applies strictly
-after its own ts), and cost counts each transfer once, from its `llm_call`. It is not exported from a package entry (nothing outside the lab calls it).
+`jobCoverage()` in that module is a DIAGNOSTIC, not a certification: it reports the job's tagged cost and a
+list of KNOWN GAPS, named reasons the figure may be incomplete, each with its evidence. An empty list means
+only that none of its checks found anything. Nothing in this repository, `usertrust-job coverage` and anything
+that reads its output included, may label a job's cost exact, complete or certified; a sound certification
+needs a scope decision (which sessions could hold the job?) that has not been made, and the check was a
+deny-list over evidence shapes that kept leaking new shapes. Its generators: a record tagged with the job
+that lies outside an interval of the job in a valid log of its own session (a session with none, or no
+usable log, puts all of them outside); a gap, `would_block`, untagged call or unrecognised record that cannot
+be placed elsewhere through a valid log of its own session (a log-less session's usage is a gap for every
+job, wherever it falls); an incomplete usage window; an invalid job state; a denied request of the job; a
+transfer known only through `settlement_*` metadata or with more than one `llm_call`; a released hold
+without `releaseClass: "unused"`; an interval with no stop yet (the job is still running); an evidence line
+that could not be parsed (never a silent drop); and a contributing session without a usable log. An interval
+is (start, stop], matching how the hooks resolve a time (a line applies strictly after its own ts), and
+cost counts each transfer once, from its `llm_call`.
+
+*A release states WHY, as a closed set.* `/v1/release` and `Governor.release()` take an optional
+`releaseClass`: `unused` (no call ran under the hold, so no usage hides behind it), `call-unconfirmed`
+(its call may have run and never reported back) or `call-ran` (it ran and its one settle went unanswered).
+The client derives it from its own hold state, never from the reason text; the governor records it
+verbatim on `hold_released`. A release that states none (a TTL expiry, a shutdown, an older client) proves
+nothing, and the coverage diagnostic reports it as a released hold whose usage is unconfirmed. The plugin
+sends `unused` only where it KNOWS no call ran: a superseded or never-recorded hold, a transcript-mode hold
+with no assigned usage (its call's usage is posted by message), a resumed call's earlier hold. An estimate
+hold still `.json` at Stop never reached PostToolUse (a failed or interrupted call): it is
+`call-unconfirmed`, and one left `.settling` is `call-ran`; both are also written to `watch.jsonl` as a gap
+record, because a give-back of a hold whose call ran is metering the ledger cannot vouch for.
 
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
 `LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless

@@ -387,7 +387,7 @@ export function createUsertrustServer(opts: {
 			sendJson(res, 400, { error: "bad_request", reason: "invalid release request" });
 			return;
 		}
-		const { transferId, reason } = parsed.data;
+		const { transferId, reason, releaseClass } = parsed.data;
 		const entry = pending.get(transferId);
 		if (!entry || entry.tenantId !== tenant.id) {
 			// "unknown transferId", never "unknown route": a client that could not read this
@@ -401,7 +401,7 @@ export function createUsertrustServer(opts: {
 		let outcome: ReleaseOutcome;
 		try {
 			const governor = await pool.get(tenant);
-			outcome = await governor.release(entry.auth, reason);
+			outcome = await governor.release(entry.auth, reason, { releaseClass });
 		} catch (err) {
 			pending.set(transferId, entry);
 			const mapped = toHttpError(err);

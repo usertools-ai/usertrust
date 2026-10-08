@@ -188,6 +188,32 @@ describe("the authorize capture is the only source", () => {
 	});
 });
 
+describe("release carries a structured class, never inferred from the reason", () => {
+	it("is recorded verbatim on hold_released; an unknown class is a 400", async () => {
+		const { base, stateDir } = await start();
+		const auth = await post(base, "/v1/authorize", { ...AUTHORIZE, job: "job-a", usageFrom: FROM });
+		const transferId = auth.json.transferId as string;
+		const bad = await post(base, "/v1/release", { transferId, releaseClass: "because" });
+		expect(bad.status).toBe(400);
+		const ok = await post(base, "/v1/release", {
+			transferId,
+			reason: "session ended with unsettled hold",
+			releaseClass: "call-unconfirmed",
+		});
+		expect(ok.status).toBe(200);
+		const rec = (await chain(stateDir)).find((e) => e.data.transferId === transferId);
+		expect(rec?.data).toMatchObject({ releaseClass: "call-unconfirmed", job: "job-a" });
+	});
+	it("a release stating none records none (an expiry or an older client proves nothing)", async () => {
+		const { base, stateDir } = await start();
+		const auth = await post(base, "/v1/authorize", { ...AUTHORIZE, job: "job-a", usageFrom: FROM });
+		const transferId = auth.json.transferId as string;
+		await post(base, "/v1/release", { transferId, reason: "unused" });
+		const rec = (await chain(stateDir)).find((e) => e.data.transferId === transferId);
+		expect(rec?.data).not.toHaveProperty("releaseClass");
+	});
+});
+
 describe("validation", () => {
 	it.each([
 		["a job with a space", { job: "job a" }],

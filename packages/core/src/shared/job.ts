@@ -24,6 +24,27 @@ export interface JobCapture {
 	readonly usageFrom?: string;
 }
 
+/**
+ * WHY a hold was given back, as a closed set the CLIENT derives from its own hold state and
+ * the governor records verbatim. It is the only thing that can prove a released hold spent
+ * nothing: the free-text `reason` never can.
+ * - `unused`           — no call ran under the hold (superseded, never recorded, or its usage
+ *                        is posted elsewhere): POSITIVE proof that no usage hides behind it.
+ * - `call-unconfirmed` — the hold's call may have run and never reported back.
+ * - `call-ran`         — the call ran and its one settle went unanswered: the charge is unconfirmed.
+ * A release that states none of these (an expiry, a shutdown, any older client) proves nothing.
+ */
+export const RELEASE_CLASSES = ["unused", "call-unconfirmed", "call-ran"] as const;
+export type ReleaseClass = (typeof RELEASE_CLASSES)[number];
+
+/** Why `value` is not a release class, or `undefined` when it is (or is absent). */
+export function releaseClassRefusal(value: unknown): string | undefined {
+	if (value === undefined) return undefined;
+	return (RELEASE_CLASSES as readonly unknown[]).includes(value)
+		? undefined
+		: `releaseClass must be one of ${RELEASE_CLASSES.join(", ")}`;
+}
+
 /** The audit-record spread for a captured job: absent keys for an unlabelled call. */
 export type JobAudit = JobCapture & { readonly usageTo?: string };
 

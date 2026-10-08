@@ -6,6 +6,7 @@ import {
 	InsufficientBalanceError,
 	PolicyDeniedError,
 	principalFieldRefusal,
+	RELEASE_CLASSES,
 	usageTimeRefusal,
 } from "usertrust";
 import { z } from "zod";
@@ -110,6 +111,10 @@ export const AbortRequestSchema = z.object({
 export const ReleaseRequestSchema = z.object({
 	transferId: z.string().min(1),
 	reason: z.string().optional(),
+	// Capability `job`. WHY the hold was given back, as a closed set the client derives from
+	// its own hold state, recorded verbatim on the `hold_released` record. The free-text
+	// `reason` can never prove a released hold spent nothing; only `unused` can.
+	releaseClass: z.enum(RELEASE_CLASSES).optional(),
 });
 
 export type AuthorizeRequest = z.infer<typeof AuthorizeRequestSchema>;

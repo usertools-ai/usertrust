@@ -294,13 +294,17 @@ Run it as an ordinary Bash call (the session id is `$CLAUDE_CODE_SESSION_ID`). J
 - **Server.** Sent only to a usertrust-server that lists `"job"` in `/v1/health` `capabilities`
   (remembered per server URL, so one failed health probe does not drop it); an older server leaves every
   record as it was.
-- **Is the cost exact?**
-  `node bin/usertrust-job.mjs coverage bug-1 --vault <project>/.usertrust` prints whether the job's
-  recorded cost is exact. An empty interval, a record with no complete usage window, an untagged or
-  differently tagged record overlapping the job, a record of the job outside its intervals, a denied
-  request of the job, a `would_block` or an unmetered `gap` (read from `watch.jsonl`, or `--watch FILE`; placed by when its call STARTED; a watch file that exists but cannot be read gives no verdict, and an unreadable line refuses exact),
-  an invalid state, a record of any kind other than spend or a give-back inside an interval, or a contributing session without a usable log each say no. An interval is
-  (start, stop]: usage at exactly the start belongs to the earlier job.
+- **What does the evidence not cover?**
+  `node bin/usertrust-job.mjs coverage bug-1 --vault <project>/.usertrust` prints the job's tagged cost
+  and a list of `knownGaps`, each a named reason the figure may be incomplete, with its evidence. **It is a
+  diagnostic, not a certification: an empty list does not mean the figure is complete.** Gaps include: the
+  job is still running; a record of the job outside its intervals or without a complete usage window; a call
+  of another or no job overlapping it; a call, gap or refusal that cannot be placed because its session has
+  no usable log; a denied request of the job; a `would_block` or an unmetered `gap` (read from
+  `watch.jsonl`, or `--watch FILE`, placed by when its call STARTED); a transfer known only through its
+  settlement metadata; a released hold whose usage is unconfirmed; an evidence line that could not be
+  parsed. A watch file that exists but cannot be read gives no verdict. An interval is (start, stop]:
+  usage at exactly the start belongs to the earlier job.
 
 ## Modes: watch-only by default
 

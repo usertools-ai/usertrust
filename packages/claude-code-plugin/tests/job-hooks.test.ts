@@ -444,6 +444,67 @@ describe("a gap records when the call STARTED", () => {
 	});
 });
 
+describe("a give-back of a hold is classified by what the client KNOWS, and a ran call is a gap", () => {
+	const env = { UT_CC_USAGE: "estimate" };
+	const watch = async () =>
+		(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l));
+	const releases = () => of("/v1/release").map((r) => r.body);
+
+	it("an unanswered settle left `.settling` at Stop: released as call-ran, and written down as a gap", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		override = (path) =>
+			path === "/v1/settle" ? { status: 503, json: { error: "down" } } : undefined;
+		await run("post-tool-use.mjs", post("tu_1"), env);
+		override = undefined;
+		await run("stop.mjs", base(), env);
+		expect(releases().map((b) => b.releaseClass)).toEqual(["call-ran"]);
+		// mutant: the give-back writes no gap
+		const gap = (await watch()).find((e) => e.kind === "gap");
+		expect(gap).toMatchObject({ releaseClass: "call-ran", session: SESSION });
+		expect(gap.started).toBe(of("/v1/authorize")[0]?.body.usageFrom);
+	});
+	it("a hold still `.json` at Stop in estimate mode (PostToolUse never ran): call-unconfirmed, and a gap", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		await run("stop.mjs", base(), env);
+		expect(releases().map((b) => b.releaseClass)).toEqual(["call-unconfirmed"]);
+		expect((await watch()).filter((e) => e.kind === "gap")).toHaveLength(1);
+	});
+	it("a transcript hold with no assigned usage: `unused`, and NO gap (nothing hides behind it)", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await writeTranscript([]);
+		await run("pre-tool-use.mjs", pre("tu_1"));
+		await run("post-tool-use.mjs", post("tu_1"));
+		expect(releases().map((b) => b.releaseClass)).toEqual(["unused"]);
+		expect((await watch()).filter((e) => e.kind === "gap")).toEqual([]);
+	});
+	it("the free-text reason is not the class: it is unchanged, and the class is its own field", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		await run("stop.mjs", base(), env);
+		expect(releases()[0]).toMatchObject({
+			reason: "session ended with unsettled hold",
+			releaseClass: "call-unconfirmed",
+		});
+	});
+	it("capability off: no releaseClass is sent (an older server would strip it)", async () => {
+		capabilities = ["principal", "release"];
+		await startFake();
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		await run("stop.mjs", base(), env);
+		expect(releases()).toHaveLength(1);
+		expect(releases()[0]).not.toHaveProperty("releaseClass");
+	});
+});
+
 describe("a job stopped and started again (a, b, a) keeps its intervals apart", () => {
 	it("a remainder settles three times, each window inside its own interval", async () => {
 		await startFake();
@@ -553,6 +614,8 @@ describe("test 10 — a refused remainder names its job and tokens", () => {
 			.filter(Boolean)
 			.map((l) => JSON.parse(l));
 		const wb = events.find((e) => e.kind === "would_block");
+		// mutant: stamped with the Stop's time → a refusal during another job lands in ITS interval
+		expect(wb.started).toBe(iso(at(-40)));
 		expect(wb).toMatchObject({
 			job: "job-a",
 			status: 402,

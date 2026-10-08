@@ -346,10 +346,13 @@ export async function appendJobOp(sessionId, op, job, { waitMs = DEFAULT_WAIT_MS
 	});
 }
 
-// ── Coverage: is a job's cost EXACT? ──
+// ── Coverage: what the evidence does NOT cover ──
 //
-// ONE answer path for "exact": the lab's aggregator calls this, it does not
-// re-implement it. Absence of evidence is never exact.
+// A DIAGNOSTIC, not a certification. It reports the job's tagged cost and a list of KNOWN GAPS:
+// named reasons the figure may be incomplete, each with the evidence behind it. An empty list
+// means only that none of the checks below found anything; it does not mean the figure is
+// complete, and nothing here may be read, printed or relabelled as such. A certified per-job
+// cost needs a scope decision (which sessions could hold the job?) that is not made here.
 
 /** A record's session: from its principal's origin (`claude-code:<sid>`) or its actor. */
 export function sessionOfRecord(rec) {
@@ -385,37 +388,47 @@ export function intervalsOf(parsed, job) {
 /** Records that say a charge happened or was attempted, and so need their llm_call. */
 const SPEND_METADATA = new Set(["settlement_ambiguous", "settlement_shortfall", "llm_call_failed"]);
 
+/** Records that stand for spend or a refusal of it, so they matter even with no session. */
+const SPEND_LIKE = new Set([
+	"settlement_ambiguous",
+	"settlement_shortfall",
+	"llm_call_failed",
+	"policy_denied",
+	"ledger_rejected",
+]);
+
 const BENIGN_KINDS = new Set(["hold_released", "settlement_ambiguous", "settlement_shortfall"]);
 
 const ms = (value) => (typeof value === "string" ? Date.parse(value) : Number.NaN);
 
 /**
- * Whether `job`'s recorded cost is EXACT, and why not.
+ * The job's tagged cost, and the KNOWN GAPS in the evidence behind it.
  *
- *   jobCoverage({ job, logs: { <sid>: <log text> }, records: [<audit event>, ...] })
- *     → { exact, reasons: [...], transferIds: [...], costUt: <integer string> }
+ *   jobCoverage({ job, logs: { <sid>: <log text> }, records: [<audit event>, ...],
+ *                 watch: [<watch record>, ...], unreadable: { audit, watch } })
+ *     → { job, diagnostic: true, note, taggedCostUt: <integer string>, transferIds: [...],
+ *         knownGaps: [{ gap, evidence }] }
  *
- * EXACT iff, for EVERY (session, open interval) of the job — taken from THAT
- * session's own validated log, from its `start` to its `stop`, its implicit stop (the
- * next `start`) or the session's end:
- *  - at least ONE record of the session carries `job` with its COMPLETE
- *    [usageFrom, usageTo] inside the interval (an empty interval proves nothing, and a
- *    window with an end missing proves nothing about where it ended);
- *  - EVERY `llm_call` record of the session whose [usageFrom, usageTo] overlaps the
- *    interval carries `job`; none carries `jobState: "invalid"`; and none lacks a
- *    complete usage window (an unknown end could reach into the interval), in a
- *    session that records usage times at all.
- * And every session with a record of the job has a usable log of its own: a session
- * whose log is missing, unreadable or invalid is not exact. A record's APPEND time is
- * never read.
- *
- * The cost counts each TRANSFER once, from its `llm_call`: the job rides every record a
- * hold produces, and a failed ledger POST leaves a `settlement_ambiguous` beside the
- * `llm_call` for the same transfer and cost.
+ * This is NOT a certification. Every check below is a known-gap GENERATOR, a way the figure
+ * can be seen to be incomplete; finding none proves nothing about what no check was written
+ * for. The generators fall into three groups, reconciled against the job's intervals (from
+ * the `start` to the `stop`, an implicit stop, or none yet) in each session's own validated
+ * log; an interval is (start, stop]:
+ *  1. every record TAGGED with the job lies inside an interval of the job in a valid log of
+ *     its own session, with a complete usage window (a session with no interval of the job,
+ *     or no usable log, puts all its tagged records outside);
+ *  2. every gap, `would_block`, untagged call or unrecognised record whose time could fall in
+ *     an interval is positively placed elsewhere through a valid log of its own session
+ *     (an unresolvable event is a gap for every job: the set it could belong to is unbounded);
+ *  3. every transfer is joined to exactly one `llm_call`, and a hold given back without a
+ *     structured `releaseClass: "unused"` is a released hold whose usage is unconfirmed.
+ * Plus: an interval with no stop yet (the job is still running), an evidence line that could
+ * not be parsed, a missing or invalid log, a denied request of the job.
+ * A record's APPEND time is never read.
  */
-export function jobCoverage({ job, logs, records, watch = [] }) {
-	const reasons = [];
-	const why = (text) => reasons.push(text);
+export function jobCoverage({ job, logs, records, watch = [], unreadable = {} }) {
+	const knownGaps = [];
+	const why = (text, evidence = {}) => knownGaps.push({ gap: text, evidence });
 
 	// ── Evidence: the logs, the intervals, the cost ──
 	// A session's log is USABLE when it was supplied and parses as valid. Everything that
@@ -427,7 +440,7 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 	const allIntervals = [];
 	for (const [sid, parsed] of parsedLogs) {
 		if (parsed.state === "invalid" && logs[sid].includes(`"${job}"`)) {
-			why(`session ${sid}: the job log is invalid (${parsed.reason})`);
+			why(`session ${sid}: the job log is invalid (${parsed.reason})`, { session: sid });
 		}
 		if (parsed.state !== "ok") continue;
 		const intervals = intervalsOf(parsed, job);
@@ -445,9 +458,10 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 			continue;
 		}
 		if (!transferCost.has(id)) transferCost.set(id, null);
-		const seen = byTransfer.get(id) ?? { calls: 0, spendish: 0 };
+		const seen = byTransfer.get(id) ?? { calls: 0, spendish: 0, released: [] };
 		byTransfer.set(id, seen);
 		if (SPEND_METADATA.has(rec.kind)) seen.spendish += 1;
+		if (rec.kind === "hold_released") seen.released.push(rec.data.releaseClass);
 		if (rec.kind !== "llm_call") continue;
 		seen.calls += 1;
 		const cost = rec.data.cost;
@@ -457,14 +471,31 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 	// Clause 3: every transfer seen through spend METADATA (a shortfall, an ambiguous
 	// settlement, a failed call) is joined to EXACTLY ONE llm_call. Costing a transfer that has
 	// none as zero would let a posted-but-unrecorded spend certify at 0. A transfer that was
-	// only given back (hold_released) spent nothing and needs no llm_call.
+	// only given back (hold_released) needs no llm_call ONLY with POSITIVE proof that no usage
+	// happened: a structured `releaseClass: "unused"` the client derived from its own hold
+	// state. The free-text reason never proves it, and neither does a release that states no
+	// class (a TTL expiry, a shutdown, an older client): the call may have run and gone
+	// uncharged.
 	for (const [id, seen] of byTransfer) {
 		if (seen.calls > 1)
-			why(`transfer ${id} of ${job} has ${seen.calls} llm_calls: one charge, one record`);
+			why(`transfer ${id} of ${job} has ${seen.calls} llm_calls: one charge, one record`, {
+				transferId: id,
+				llmCalls: seen.calls,
+			});
 		else if (seen.calls === 0 && seen.spendish > 0) {
 			why(
 				`transfer ${id} of ${job} is known only through its settlement metadata: its cost is unrecorded`,
+				{ transferId: id },
 			);
+		} else if (seen.calls === 0) {
+			for (const cls of seen.released) {
+				if (cls !== "unused") {
+					why(
+						`transfer ${id} of ${job} was released without proof that no usage happened (releaseClass ${cls ?? "none"})`,
+						{ transferId: id, releaseClass: cls ?? null },
+					);
+				}
+			}
 		}
 	}
 	let costUt = 0n;
@@ -495,7 +526,19 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 		if (["policy_denied", "ledger_rejected"].includes(rec.kind)) {
 			// A REFUSED request leaves no spend record: the usage it asked to post is NOT in
 			// the total, and the denial carries the job, which is all that is known.
-			why(`a request of ${job} was denied: its usage may be unrecorded`);
+			why(`a request of ${job} was denied: its usage may be unrecorded`, {
+				kind: rec.kind,
+				transferId: rec.data.transferId,
+			});
+			continue;
+		}
+		if (rec.kind !== "llm_call" && !BENIGN_KINDS.has(rec.kind) && !SPEND_METADATA.has(rec.kind)) {
+			// A kind this check cannot read as spend or as a give-back, naming the job: it may be
+			// usage that is not in the total.
+			why(`an unrecognised ${rec.kind} record names ${job}`, {
+				kind: rec.kind,
+				transferId: rec.data.transferId,
+			});
 			continue;
 		}
 		const sid = sessionOfRecord(rec);
@@ -504,13 +547,18 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 			continue;
 		}
 		if (!usable(sid)) {
-			why(`session ${sid}: a record of ${job} has no usable job log to be placed by`);
+			why(`session ${sid}: a record of ${job} has no usable job log to be placed by`, {
+				session: sid,
+				kind: rec.kind,
+				transferId: rec.data.transferId,
+			});
 			continue;
 		}
 		const intervals = intervalsBySession.get(sid) ?? [];
 		if (intervals.length === 0) {
 			why(
 				`session ${sid}: a ${rec.kind} of ${job} lies outside its intervals (the session has none)`,
+				{ session: sid, kind: rec.kind, transferId: rec.data.transferId },
 			);
 			continue;
 		}
@@ -520,7 +568,12 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 			rec.kind === "llm_call"
 				? w !== null && insideAny(w, intervals)
 				: Number.isFinite(point) && insideAny([point, point], intervals);
-		if (!placed) why(`session ${sid}: a ${rec.kind} of ${job} lies outside its intervals`);
+		if (!placed)
+			why(`session ${sid}: a ${rec.kind} of ${job} lies outside its intervals`, {
+				session: sid,
+				kind: rec.kind,
+				transferId: rec.data.transferId,
+			});
 	}
 
 	// Every interval needs POSITIVE evidence: a tagged record with a complete window in it.
@@ -533,32 +586,58 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 				const w = window(r?.data);
 				return r?.data?.job === job && w !== null && w[0] > from && w[1] <= to;
 			});
-			if (!tagged) why(`session ${sid}: no record of ${job} inside [${from}, ${to}]`);
+			if (!tagged)
+				why(`session ${sid}: no record of ${job} inside [${from}, ${to}]`, {
+					session: sid,
+					interval: [from, to],
+				});
 		}
 	}
 	if (intervalsSeen === 0) why(`no session log has an interval of ${job}`);
 
+	// Transfers that have an llm_call anywhere in the evidence: settlement metadata beside one
+	// is bookkeeping; without one it is spend the total does not hold.
+	const callTransfers = new Set(
+		records.filter((r) => r?.kind === "llm_call").map((r) => r?.data?.transferId),
+	);
+	// Spend-like records that name NO session cannot be placed by any log: if their time could
+	// fall in an interval of the job (or is unreadable), they may be the job's.
+	for (const r of records) {
+		if (r?.data?.job === job || sessionOfRecord(r) !== null) continue;
+		if (r?.kind !== "llm_call" && !SPEND_LIKE.has(r?.kind)) continue;
+		const w = r.kind === "llm_call" ? window(r.data) : null;
+		const point = ms(r?.data?.usageFrom);
+		const span = r.kind === "llm_call" ? w : Number.isFinite(point) ? [point, point] : null;
+		if (span === null || overlapsAny(span, allIntervals)) {
+			why(`a ${r.kind} record names no session: it may belong to ${job}`, {
+				kind: r.kind,
+				transferId: r?.data?.transferId,
+			});
+		}
+	}
+
 	// ── Clause 2: every event whose time could fall in the job's intervals is POSITIVELY
 	// attributed elsewhere, through a valid log of its own session. One that cannot be
-	// resolved could belong to the job, so it makes the job inexact. ──
+	// resolved could belong to the job, so it is a known gap. ──
 	for (const [sid, mine] of bySession) {
 		const capable = mine.some((r) => typeof r?.data?.usageFrom === "string");
 		const intervals = intervalsBySession.get(sid) ?? [];
 		for (const r of mine) {
 			if (r?.data?.job === job) continue; // clause 1 judged it
-			if (BENIGN_KINDS.has(r?.kind)) continue;
+			if (
+				BENIGN_KINDS.has(r?.kind) &&
+				!(SPEND_METADATA.has(r?.kind) && !callTransfers.has(r?.data?.transferId))
+			) {
+				continue;
+			}
 			const isCall = r?.kind === "llm_call";
 			const w = isCall ? window(r.data) : null;
 			const point = ms(r?.data?.usageFrom);
 			if (!usable(sid)) {
-				// Nothing can place it: only its own claim, which proves nothing. Whatever it is,
-				// if its time could reach the job's intervals, or is unknown, it may be the job's.
-				const span = isCall ? w : Number.isFinite(point) ? [point, point] : null;
-				if (span === null || overlapsAny(span, allIntervals)) {
-					why(
-						`session ${sid}: a ${r?.kind} cannot be placed (no usable job log): it may belong to ${job}`,
-					);
-				}
+				why(
+					`session ${sid}: a ${r?.kind} cannot be placed (no usable job log): it may belong to ${job}`,
+					{ session: sid, kind: r?.kind, transferId: r?.data?.transferId },
+				);
 				continue;
 			}
 			if (!isCall) {
@@ -566,21 +645,38 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 				// harmless give-back (a denial, a failure, anything new) inside an interval may
 				// stand for usage that is not in the total, whatever labels it carries or lacks.
 				if (!Number.isFinite(point) ? capable : insideAny([point, point], intervals)) {
-					why(`session ${sid}: a ${r?.kind} record lies in an interval of ${job}`);
+					why(`session ${sid}: a ${r?.kind} record lies in an interval of ${job}`, {
+						session: sid,
+						kind: r?.kind,
+					});
 				}
 				continue;
 			}
 			if (w === null) {
-				if (capable) why(`session ${sid}: an llm_call has no complete usage window`);
+				if (capable)
+					why(`session ${sid}: an llm_call has no complete usage window`, {
+						session: sid,
+						transferId: r?.data?.transferId,
+					});
 				continue;
 			}
 			if (!overlapsAny(w, intervals)) continue; // positively attributed elsewhere
 			if (r.data?.jobState === "invalid") {
-				why(`session ${sid}: an llm_call in the interval has an invalid job state`);
+				why(`session ${sid}: an llm_call in the interval has an invalid job state`, {
+					session: sid,
+					transferId: r?.data?.transferId,
+				});
 			} else if (r.data?.job === undefined) {
-				why(`session ${sid}: an llm_call in the interval carries no job`);
+				why(`session ${sid}: an llm_call in the interval carries no job`, {
+					session: sid,
+					transferId: r?.data?.transferId,
+				});
 			} else {
-				why(`session ${sid}: an llm_call in the interval carries another job`);
+				why(`session ${sid}: an llm_call in the interval carries another job`, {
+					session: sid,
+					transferId: r?.data?.transferId,
+					job: r?.data?.job,
+				});
 			}
 		}
 	}
@@ -590,8 +686,8 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 	// Such an event stops being a problem for the job ONLY when positively attributed to
 	// something else through a valid log of its own session (the job open when its call
 	// STARTED is not this one, or none is). One that cannot be resolved (no session, an
-	// unreadable time, no usable log) could belong to ANY job, so it makes every job
-	// inexact; its own label proves nothing, and neither does its lack of one.
+	// unreadable time, no usable log) could belong to ANY job, so it is a known gap for every job;
+	// its own label proves nothing, and neither does its lack of one.
 	for (const w of watch) {
 		if (w?.kind === "unreadable") {
 			why("the watch records are unreadable: gaps and refusals cannot be ruled out");
@@ -599,9 +695,15 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 		}
 		if (w?.kind !== "gap" && w?.kind !== "would_block") continue;
 		if (w.kind === "would_block" && w.job === job) {
-			why(`a request of ${job} was refused (would_block): its usage is unrecorded`);
+			why(`a request of ${job} was refused (would_block): its usage is unrecorded`, {
+				kind: w.kind,
+				session: w.session,
+			});
 			continue;
 		}
+		// A refusal that NAMES another job is positively attributed to it: its hook time (a Stop
+		// that ran during this job) is not its usage time.
+		if (w.kind === "would_block" && typeof w.job === "string" && JOB_ID.test(w.job)) continue;
 		const sid = typeof w.session === "string" ? w.session : null;
 		const t = ms(w.started ?? w.at);
 		let unresolved = null;
@@ -610,18 +712,48 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 		else if (!Object.hasOwn(logs ?? {}, sid)) unresolved = `session ${sid} has no job log`;
 		else if (!usable(sid)) unresolved = `session ${sid} has no usable job log`;
 		else if (jobAtEvents(parsedLogs.get(sid).events, t) === job) {
-			why(`session ${sid}: a ${w.kind} fell inside an interval of ${job}`);
+			why(`session ${sid}: a ${w.kind} fell inside an interval of ${job}`, {
+				kind: w.kind,
+				session: sid,
+				started: w.started ?? w.at,
+			});
 		}
 		if (unresolved !== null) {
-			why(`a ${w.kind} cannot be attributed to a job (${unresolved}): it may belong to ${job}`);
+			why(`a ${w.kind} cannot be attributed to a job (${unresolved}): it may belong to ${job}`, {
+				kind: w.kind,
+				session: w.session,
+				started: w.started ?? w.at,
+				why: unresolved,
+			});
 		}
 	}
 
+	// Evidence that could not be read is evidence that is missing, never a silent drop.
+	for (const [what, n] of Object.entries(unreadable ?? {})) {
+		if (n > 0)
+			why(`evidence incomplete: ${n} ${what} line(s) could not be parsed`, { what, lines: n });
+	}
+	// An interval with no stop yet: the job is still running, so holds in flight are not yet
+	// settled and the tagged cost is still moving.
+	for (const [sid, intervals] of intervalsBySession) {
+		if (intervals.some(([, to]) => to === Number.POSITIVE_INFINITY)) {
+			why("job still running: in-flight holds are not yet settled", { session: sid });
+		}
+	}
+
+	const seen = new Set();
 	return {
-		exact: reasons.length === 0,
-		reasons: [...new Set(reasons)],
+		job,
+		diagnostic: true,
+		note: "A diagnostic only: knownGaps lists the ways this figure is known to be incomplete. An empty list does not mean it is complete.",
+		taggedCostUt: String(costUt),
 		transferIds: [...transferCost.keys()],
-		costUt: String(costUt),
+		knownGaps: knownGaps.filter((g) => {
+			const key = `${g.gap}\u0000${JSON.stringify(g.evidence)}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		}),
 	};
 }
 
