@@ -84,67 +84,75 @@ async function readWatch(path) {
 	return out;
 }
 
-if (command === "start" || command === "stop") {
-	const wantsId = command === "start";
-	if (rest.length !== (wantsId ? 1 : 0)) {
-		usage(wantsId ? "start takes exactly one job id" : "stop takes no argument");
-	}
-	if (wantsId && !JOB_ID.test(rest[0])) {
-		usage("a job id is 1-128 characters of [A-Za-z0-9._:-]");
-	}
-	const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
-	if (typeof sessionId !== "string" || sessionId === "") {
-		say("usertrust-job: CLAUDE_CODE_SESSION_ID is not set, so there is no session to label");
-		process.exit(2);
-	}
-	const result = await appendJobOp(sessionId, command, wantsId ? rest[0] : null, {
-		waitMs: waitMs(),
-	});
-	if (!result.ok) {
-		say(`usertrust-job: ${result.reason}`);
-		process.exit(1);
-	}
-	if (result.noop) say("usertrust-job: no job is open");
-	else if (wantsId) say(`usertrust-job: job ${rest[0]} from the next tool call`);
-	else say("usertrust-job: no job from the next tool call");
-} else if (command === "coverage") {
-	const job = rest[0];
-	if (job === undefined || !JOB_ID.test(job)) usage("coverage takes a valid job id");
-	const flags = new Map();
-	for (let i = 1; i < rest.length; i += 2) {
-		if (!["--vault", "--jobs", "--watch"].includes(rest[i]) || rest[i + 1] === undefined) {
-			usage("coverage takes --vault DIR, --jobs DIR and --watch FILE");
+try {
+	if (command === "start" || command === "stop") {
+		const wantsId = command === "start";
+		if (rest.length !== (wantsId ? 1 : 0)) {
+			usage(wantsId ? "start takes exactly one job id" : "stop takes no argument");
 		}
-		flags.set(rest[i], rest[i + 1]);
-	}
-	if (!flags.has("--vault")) usage("coverage needs --vault <the .usertrust directory>");
-	let report;
-	try {
-		const audit = await readRecords(flags.get("--vault"));
-		report = jobCoverage({
-			job,
-			logs: await readLogs(flags.get("--jobs") ?? jobsDir()),
-			records: audit.records,
-			watch: await readWatch(flags.get("--watch") ?? watchLogPath()),
-			unreadable: { audit: audit.unparsed },
+		if (wantsId && !JOB_ID.test(rest[0])) {
+			usage("a job id is 1-128 characters of [A-Za-z0-9._:-]");
+		}
+		const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
+		if (typeof sessionId !== "string" || sessionId === "") {
+			say("usertrust-job: CLAUDE_CODE_SESSION_ID is not set, so there is no session to label");
+			process.exit(2);
+		}
+		const result = await appendJobOp(sessionId, command, wantsId ? rest[0] : null, {
+			waitMs: waitMs(),
 		});
-	} catch (err) {
-		// The evidence cannot be read: no verdict. The path is argv, so it goes out through
-		// `say` (control characters scrubbed), never as an unhandled rejection Node prints raw.
-		say(
-			`usertrust-job: cannot read the evidence under ${flags.get("--vault")} (${err?.code ?? "error"}): no verdict`,
+		if (!result.ok) {
+			say(`usertrust-job: ${result.reason}`);
+			process.exit(1);
+		}
+		if (result.noop) say("usertrust-job: no job is open");
+		else if (wantsId) say(`usertrust-job: job ${rest[0]} from the next tool call`);
+		else say("usertrust-job: no job from the next tool call");
+	} else if (command === "coverage") {
+		const job = rest[0];
+		if (job === undefined || !JOB_ID.test(job)) usage("coverage takes a valid job id");
+		const flags = new Map();
+		for (let i = 1; i < rest.length; i += 2) {
+			if (!["--vault", "--jobs", "--watch"].includes(rest[i]) || rest[i + 1] === undefined) {
+				usage("coverage takes --vault DIR, --jobs DIR and --watch FILE");
+			}
+			flags.set(rest[i], rest[i + 1]);
+		}
+		if (!flags.has("--vault")) usage("coverage needs --vault <the .usertrust directory>");
+		let report;
+		try {
+			const audit = await readRecords(flags.get("--vault"));
+			report = jobCoverage({
+				job,
+				logs: await readLogs(flags.get("--jobs") ?? jobsDir()),
+				records: audit.records,
+				watch: await readWatch(flags.get("--watch") ?? watchLogPath()),
+				unreadable: { audit: audit.unparsed },
+			});
+		} catch (err) {
+			// The evidence cannot be read: no verdict. The path is argv, so it goes out through
+			// `say` (control characters scrubbed), never as an unhandled rejection Node prints raw.
+			say(
+				`usertrust-job: cannot read the evidence under ${flags.get("--vault")} (${err?.code ?? "error"}): no verdict`,
+			);
+			process.exit(1);
+		}
+		// JSON.stringify escapes C0 but leaves DEL and C1 (U+007F-U+009F) raw, and some of those
+		// are 8-bit terminal introducers: escape them too, so no argv- or vault-derived byte reaches
+		// a terminal as itself.
+		const safe = JSON.stringify(report).replace(
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: escaping them is the intent
+			/[\u007f-\u009f]/g,
+			(c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
 		);
-		process.exit(1);
+		process.stdout.write(`${safe}\n`);
+	} else {
+		usage("unknown command");
 	}
-	// JSON.stringify escapes C0 but leaves DEL and C1 (U+007F-U+009F) raw, and some of those
-	// are 8-bit terminal introducers: escape them too, so no argv- or vault-derived byte reaches
-	// a terminal as itself.
-	const safe = JSON.stringify(report).replace(
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: escaping them is the intent
-		/[\u007f-\u009f]/g,
-		(c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
-	);
-	process.stdout.write(`${safe}\n`);
-} else {
-	usage("unknown command");
+} catch (err) {
+	// Any failure the command did not foresee (a write to a read-only state dir, a vanished file)
+	// is reported through the scrubber with no stack and no raw path: Node's uncaught-error
+	// renderer would print both, and the path is argv or environment.
+	say(`usertrust-job: failed (${err?.code ?? "error"}); nothing was recorded`);
+	process.exit(1);
 }

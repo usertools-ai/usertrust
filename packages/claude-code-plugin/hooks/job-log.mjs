@@ -195,7 +195,7 @@ function pidAlive(pid) {
 /** How long a lock whose metadata was never completed may exist before it is broken. */
 export const UNFINISHED_LOCK_MS = 2_000;
 
-async function breakIfStale(lock) {
+export async function breakIfStale(lock) {
 	let text;
 	let mtimeMs;
 	try {
@@ -217,11 +217,37 @@ async function breakIfStale(lock) {
 		? !pidAlive(holder.pid) || Date.now() - holder.ts > LOCK_STALE_MS
 		: Date.now() - mtimeMs > UNFINISHED_LOCK_MS;
 	if (!stale) return;
-	// Re-read: break only the lock we judged, never one taken since.
+	// Breaking is SERIALIZED by an O_EXCL sentinel held around the re-read and the unlink.
+	// "Re-read, then unlink if unchanged" alone is not atomic: two breakers of the same dead
+	// lock can both pass the re-read, and the slower one's unlink would then remove the
+	// FRESH lock the faster one just took, leaving two writers inside read-validate-append.
+	const breaking = `${lock}.breaking`;
+	let sentinel;
 	try {
+		sentinel = await open(
+			breaking,
+			constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+			0o600,
+		);
+	} catch (err) {
+		if (err?.code === "EEXIST") {
+			// Another breaker is at it. One that died holding the sentinel is cleared by age.
+			try {
+				if (Date.now() - (await stat(breaking)).mtimeMs > LOCK_STALE_MS) await unlink(breaking);
+			} catch {
+				// gone already
+			}
+		}
+		return;
+	}
+	try {
+		// Re-read under the sentinel: break only the lock we judged, never one taken since.
 		if ((await readFile(lock, "utf-8")) === text) await unlink(lock);
 	} catch {
 		// raced: fine
+	} finally {
+		await sentinel.close().catch(() => {});
+		await unlink(breaking).catch(() => {});
 	}
 }
 
@@ -624,6 +650,25 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 		const intervals = intervalsBySession.get(sid) ?? [];
 		for (const r of mine) {
 			if (r?.data?.job === job) continue; // clause 1 judged it
+			// A give-back that states no proof of no usage and is not attributed to ANOTHER job could
+			// be this job's: with no usable log, or starting inside an interval, it is a gap.
+			if (
+				r?.kind === "hold_released" &&
+				r.data?.releaseClass !== "unused" &&
+				r.data?.job === undefined
+			) {
+				const at = ms(r.data?.usageFrom);
+				if (!usable(sid) || (Number.isFinite(at) ? insideAny([at, at], intervals) : capable)) {
+					why(
+						`session ${sid}: a released hold of no known job, usage unconfirmed, may belong to ${job}`,
+						{
+							session: sid,
+							transferId: r.data?.transferId,
+						},
+					);
+				}
+				continue;
+			}
 			if (
 				BENIGN_KINDS.has(r?.kind) &&
 				!(SPEND_METADATA.has(r?.kind) && !callTransfers.has(r?.data?.transferId))

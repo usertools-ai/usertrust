@@ -326,9 +326,18 @@ export function settleLabels(labels) {
 
 /** The earliest and latest finite `ts` of a message list, as ISO strings. */
 export function usageSpan(messages) {
-	const times = messages.map((m) => m.ts).filter((t) => Number.isFinite(t));
-	if (times.length === 0) return {};
-	return { usageFrom: isoOf(Math.min(...times)), usageTo: isoOf(Math.max(...times)) };
+	// A loop, never `Math.min(...times)`: a spread of ~125k arguments throws a RangeError, and
+	// this runs in EVERY hook over whatever backlog a long outage left.
+	let min = Number.POSITIVE_INFINITY;
+	let max = Number.NEGATIVE_INFINITY;
+	for (const m of messages) {
+		const t = m.ts;
+		if (!Number.isFinite(t)) continue;
+		if (t < min) min = t;
+		if (t > max) max = t;
+	}
+	if (min === Number.POSITIVE_INFINITY) return {};
+	return { usageFrom: isoOf(min), usageTo: isoOf(max) };
 }
 
 function describeCounts(c) {

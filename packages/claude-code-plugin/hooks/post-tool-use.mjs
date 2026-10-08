@@ -38,6 +38,7 @@ import {
 	giveBackInvalid,
 	isGated,
 	isTransferId,
+	jobHoldFields,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
@@ -186,6 +187,8 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		transferId === ""
 	) {
 		await unlink(claimed).catch(() => {});
+		// The call RAN and nothing will charge it: its usage is unrecorded, which is a gap.
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
 		say(
 			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold was not granted (${auth.status}); this call's estimate is not recorded`,
 		);
@@ -194,7 +197,9 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	if (!isTransferId(transferId)) {
 		// It would name the fresh hold's file, as it is (lib.mjs `isTransferId`): the
 		// hold is given back, through `release` only, and never recorded.
-		await giveBackInvalid(transferId, Math.max(250, Math.min(5000, timeLeft())));
+		// The call RAN and this hold was to charge it: a gap, and the give-back says `call-ran`.
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		await giveBackInvalid(transferId, Math.max(250, Math.min(5000, timeLeft())), "call-ran");
 		await unlink(claimed).catch(() => {});
 		say(
 			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold's transferId is not a valid id, so it is not kept; this call's estimate is not recorded`,
@@ -215,6 +220,9 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),
+				// The replacement is the SAME call's charge: it keeps the expired hold's job and usage
+				// start, so a Stop that finds it unanswered places its gap by when the call began.
+				...jobHoldFields(entry),
 			},
 			{ settling: true },
 		);

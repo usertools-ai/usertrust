@@ -684,7 +684,8 @@ nothing, and the coverage diagnostic reports it as a released hold whose usage i
 sends `unused` only where it KNOWS no call ran: a superseded or never-recorded hold, a transcript-mode hold
 with no assigned usage (its call's usage is posted by message), a resumed call's earlier hold. An estimate
 hold still `.json` at Stop never reached PostToolUse (a failed or interrupted call): it is
-`call-unconfirmed`, and one left `.settling` is `call-ran`; both are also written to `watch.jsonl` as a gap
+`call-unconfirmed` (a tool the user DENIES at the permission prompt leaves such a hold too, and cannot be told
+apart from a crash, so it reads the same, correctly), and one left `.settling` is `call-ran`; both are also written to `watch.jsonl` as a gap
 record, because a give-back of a hold whose call ran is metering the ledger cannot vouch for.
 
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass

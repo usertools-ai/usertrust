@@ -505,6 +505,102 @@ describe("a give-back of a hold is classified by what the client KNOWS, and a ra
 	});
 });
 
+describe("an expired estimate hold's replacement: the call RAN, so every way it fails is a gap", () => {
+	const env = { UT_CC_USAGE: "estimate" };
+	const gone = { status: 404, json: { error: "not_found", reason: "unknown transferId" } };
+	const watch = async () =>
+		(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l));
+	const releases = () => of("/v1/release").map((r) => r.body);
+
+	/** pre → the settle of tx_1 answers 404 (the hold expired) → the replacement path runs. */
+	async function expired(
+		replacement: (
+			path: string,
+			body: Record<string, unknown>,
+		) => { status: number; json: unknown } | undefined,
+	) {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		let settles = 0;
+		override = (path, body) => {
+			if (path === "/v1/settle") {
+				settles += 1;
+				if (settles === 1) return gone;
+			}
+			return replacement(path, body);
+		};
+		await run("post-tool-use.mjs", post("tu_1"), env);
+	}
+
+	it("the replacement authorize is refused: a call-ran gap (B-91)", async () => {
+		await expired((path) =>
+			path === "/v1/authorize" ? { status: 503, json: { error: "down" } } : undefined,
+		);
+		// mutant: no gap is written
+		expect(
+			(await watch()).filter((e) => e.kind === "gap" && e.releaseClass === "call-ran"),
+		).toHaveLength(1);
+	});
+	it("the replacement authorize is a shadow: a call-ran gap", async () => {
+		await expired((path) =>
+			path === "/v1/authorize"
+				? { status: 200, json: { shadow: true, shadowId: "shadow_1" } }
+				: undefined,
+		);
+		expect(
+			(await watch()).filter((e) => e.kind === "gap" && e.releaseClass === "call-ran"),
+		).toHaveLength(1);
+	});
+	it("the replacement's id is malformed: released as call-ran (not unused), and a gap (B-87)", async () => {
+		await expired((path) =>
+			path === "/v1/authorize"
+				? { status: 200, json: { transferId: "bad id!", estimatedCost: 1 } }
+				: undefined,
+		);
+		expect(releases().map((b) => b.releaseClass)).toEqual(["call-ran"]); // mutant: unused
+		expect(
+			(await watch()).filter((e) => e.kind === "gap" && e.releaseClass === "call-ran"),
+		).toHaveLength(1);
+	});
+	it("the replacement's record cannot be written: released as call-ran, and a gap", async () => {
+		await startFake();
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		// A directory squats on the fresh hold's file name, so its record cannot be written.
+		await mkdir(join(stateDir, `${SESSION}__main__tu_1.tx_2.settling`, "x"), { recursive: true });
+		let settles = 0;
+		override = (path) => {
+			if (path === "/v1/settle") {
+				settles += 1;
+				if (settles === 1) return gone;
+			}
+			return undefined;
+		};
+		await run("post-tool-use.mjs", post("tu_1"), env);
+		expect(releases().map((b) => b.releaseClass)).toEqual(["call-ran"]);
+		expect(
+			(await watch()).filter((e) => e.kind === "gap" && e.releaseClass === "call-ran"),
+		).toHaveLength(1); // mutant: no gap
+	});
+	it("a replacement whose settle goes unanswered carries the call's job and start, so Stop's gap is placed by them (B-89)", async () => {
+		await expired((path) =>
+			path === "/v1/settle" ? { status: 503, json: { error: "down" } } : undefined,
+		);
+		const startedAt = of("/v1/authorize")[0]?.body.usageFrom;
+		override = undefined;
+		await appendLog(logLine(Date.now() + 5, "start", "job-b"));
+		await new Promise((r) => setTimeout(r, 30));
+		await run("stop.mjs", base(), env);
+		const gap = (await watch()).find((e) => e.kind === "gap" && e.releaseClass === "call-ran");
+		// mutant: the replacement is recorded without the labels → placed by the Stop's time, in job-b
+		expect(gap?.started).toBe(startedAt);
+	});
+});
+
 describe("a job stopped and started again (a, b, a) keeps its intervals apart", () => {
 	it("a remainder settles three times, each window inside its own interval", async () => {
 		await startFake();

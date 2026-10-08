@@ -866,8 +866,9 @@ export async function releaseHold(transferId, reason, { timeoutMs = 5000, releas
  * as a breaker failure. Without `release`, the hold is left to the server's
  * pending-hold sweep. Never throws; never echoes the id, which may be anything.
  */
-export async function giveBackInvalid(transferId, timeoutMs) {
-	// No call ever ran under a hold whose id could not even be recorded: `unused`.
+export async function giveBackInvalid(transferId, timeoutMs, releaseClass = "unused") {
+	// The default: no call ever ran under a hold whose id came back malformed at PreToolUse.
+	// A caller whose call DID run (PostToolUse's replacement hold) says so, `call-ran`.
 	if (typeof transferId !== "string" || transferId === "") return;
 	const capabilities = await serverCapabilities();
 	if (!capabilities?.has("release")) {
@@ -882,7 +883,7 @@ export async function giveBackInvalid(transferId, timeoutMs) {
 			{
 				transferId,
 				reason: "its transferId is not a valid id",
-				...((await jobCapable(capabilities)) ? { releaseClass: "unused" } : {}),
+				...((await jobCapable(capabilities)) ? { releaseClass } : {}),
 			},
 			{ timeoutMs },
 		);

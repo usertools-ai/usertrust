@@ -1342,6 +1342,179 @@ describe("usertrust-job coverage — C1 bytes are escaped in its output", () => 
 	});
 });
 
+describe("generators with their own test (B-90)", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const principal = { origin: `claude-code:${SID}` };
+	const base = {
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost: 7,
+			job: J,
+			principal,
+			usageFrom: iso(T0 + 2000),
+			usageTo: iso(T0 + 3000),
+		},
+	};
+	const run = async (records: unknown[]) =>
+		(await lib()).jobCoverage({ job: J, logs: { [SID]: logText }, records });
+
+	it("a record of the job that names no transfer is a gap", async () => {
+		const { transferId: _t, ...data } = base.data;
+		expect(gapText(await run([base, { ...base, data }]))).toContain("names no transfer");
+	});
+	it("an llm_call of the job with no integer cost is a gap", async () => {
+		for (const cost of ["7", 1.5, -1, undefined]) {
+			const r = await run([{ ...base, data: { ...base.data, cost } }]);
+			expect(gapText(r), String(cost)).toContain("has no integer cost");
+		}
+	});
+	it("a record of the job that names no session is a gap", async () => {
+		const { principal: _p, ...data } = base.data;
+		expect(
+			gapText(
+				await run([
+					base,
+					{ kind: "llm_call", actor: "local", data: { ...data, transferId: "tx_2" } },
+				]),
+			),
+		).toContain("names no session");
+	});
+	it("an llm_call in the interval whose job state is invalid, and that names no job, is a gap", async () => {
+		const bad = {
+			...base,
+			data: {
+				transferId: "tx_3",
+				cost: 2,
+				principal,
+				jobState: "invalid",
+				usageFrom: iso(T0 + 2500),
+				usageTo: iso(T0 + 2600),
+			},
+		};
+		expect(gapText(await run([base, bad]))).toContain(
+			"an llm_call in the interval has an invalid job state",
+		);
+	});
+	it("a released hold with no class, no job and a start inside the interval is a gap; unused or another job's is not (B-88)", async () => {
+		const given = (extra: Record<string, unknown>) => ({
+			kind: "hold_released",
+			actor: base.actor,
+			data: { transferId: "tx_9", principal, usageFrom: iso(T0 + 2500), ...extra },
+		});
+		expect(gapText(await run([base, given({})]))).toContain(
+			"a released hold of no known job, usage unconfirmed",
+		);
+		expect(gapText(await run([base, given({ jobState: "invalid" })]))).toContain(
+			"usage unconfirmed",
+		);
+		expect((await run([base, given({ releaseClass: "unused" })])).knownGaps).toEqual([]);
+		expect(
+			(await run([base, given({ job: "bug-9" })])).knownGaps.map((g) => g.gap).join(" "),
+		).not.toContain("no known job");
+		// outside every interval it is not this job's
+		expect((await run([base, given({ usageFrom: iso(T0 + 9000) })])).knownGaps).toEqual([]);
+	});
+});
+
+describe("hot paths cannot be broken by a long backlog (B-86)", () => {
+	it("usageSpan over 200,000 messages does not throw", async () => {
+		const { usageSpan } = (await import(pathToFileURL(join(HOOKS, "transcript.mjs")).href)) as {
+			usageSpan(m: Array<{ ts: number | null }>): { usageFrom?: string; usageTo?: string };
+		};
+		const messages = Array.from({ length: 200_000 }, (_, i) => ({ ts: T0 + i }));
+		// mutant: Math.min(...times) → RangeError: Maximum call stack size exceeded
+		expect(usageSpan(messages)).toEqual({ usageFrom: iso(T0), usageTo: iso(T0 + 199_999) });
+		expect(usageSpan([{ ts: null }])).toEqual({});
+	});
+});
+
+describe("stale-lock breaking is serialized (B-92)", () => {
+	it("a breaker that finds another breaker's sentinel leaves the lock alone", async () => {
+		await writeLog(start(SID, T0));
+		await writeFile(`${logFile()}.lock`, JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now() }));
+		await writeFile(`${logFile()}.lock.breaking`, "");
+		const { breakIfStale } = (await lib()) as unknown as {
+			breakIfStale(lock: string): Promise<void>;
+		};
+		await breakIfStale(`${logFile()}.lock`);
+		// mutant: no sentinel → the stale lock is unlinked while another breaker is mid-way
+		expect(await readFile(`${logFile()}.lock`, "utf-8")).toContain("pid");
+	});
+	it("a sentinel left by a breaker that died is cleared by age, then the lock can be broken", async () => {
+		await writeLog(start(SID, T0));
+		await writeFile(`${logFile()}.lock`, JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now() }));
+		await writeFile(`${logFile()}.lock.breaking`, "");
+		const old = new Date(Date.now() - 60_000);
+		await utimes(`${logFile()}.lock.breaking`, old, old);
+		const { breakIfStale } = (await lib()) as unknown as {
+			breakIfStale(lock: string): Promise<void>;
+		};
+		await breakIfStale(`${logFile()}.lock`); // clears the dead sentinel
+		await breakIfStale(`${logFile()}.lock`); // now breaks the lock
+		await expect(readFile(`${logFile()}.lock`, "utf-8")).rejects.toThrow();
+		await expect(readFile(`${logFile()}.lock.breaking`, "utf-8")).rejects.toThrow();
+	});
+	it("many writers racing over one dead lock all append exactly once, into a valid log", async () => {
+		await writeLog(start(SID, Date.now()));
+		await writeFile(`${logFile()}.lock`, JSON.stringify({ pid: 2 ** 31 - 2, ts: Date.now() }));
+		const { appendJobOp, parseJobLog } = await lib();
+		const results = await Promise.all(
+			Array.from({ length: 8 }, (_, i) => appendJobOp(SID, "start", `job-${i}`, { waitMs: 3000 })),
+		);
+		expect(results.every((r) => r.ok)).toBe(true);
+		const parsed = parseJobLog(await readFile(logFile(), "utf-8"), SID);
+		expect(parsed.state).toBe("ok");
+		if (parsed.state === "ok") expect(parsed.events).toHaveLength(9);
+	});
+});
+
+describe("usertrust-job start/stop — a write failure is reported through the scrubber (B-93)", () => {
+	it("a read-only jobs dir under a state dir holding ESC: exit 1, no stack, no raw control bytes", async () => {
+		const hostile = join(state, "st\u001b[31mRED\u009b");
+		const jobs = join(hostile, "jobs");
+		await mkdir(jobs, { recursive: true });
+		await writeFile(join(jobs, "s1.jsonl"), start("s1", Date.now() - 5000));
+		await chmod(jobs, 0o555);
+		try {
+			const r = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+				const inherited = Object.fromEntries(
+					Object.entries(process.env).filter(
+						([k]) => !k.startsWith("UT_") && k !== "CLAUDE_CODE_SESSION_ID",
+					),
+				);
+				const child = spawn(process.execPath, [CLI, "start", "job-a"], {
+					env: {
+						...inherited,
+						UT_CC_STATE_DIR: hostile,
+						CLAUDE_CODE_SESSION_ID: "s1",
+						UT_CC_JOB_WAIT_MS: "0",
+					},
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+				let stdout = "";
+				let stderr = "";
+				child.stdout.on("data", (c) => (stdout += c));
+				child.stderr.on("data", (c) => (stderr += c));
+				child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+			});
+			// (Running as root can write into a read-only dir: then there is nothing to report.)
+			if (r.code !== 0) {
+				expect(r.code).toBe(1);
+				expect(r.stderr).toContain("usertrust-job: failed");
+				expect(r.stderr).not.toContain("node:internal");
+				// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting none reach the terminal is the point
+				expect(r.stderr).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+			}
+		} finally {
+			await chmod(jobs, 0o755);
+		}
+	});
+});
+
 describe("the lock and the log tail — review hardening", () => {
 	it("a lock whose metadata was never written is broken once it is old enough", async () => {
 		await writeLog(start(SID, T0));
