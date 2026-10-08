@@ -663,7 +663,10 @@ timestamp), never the one open at settle time, so a remainder spanning a switch 
 interval, an untagged or differently tagged overlapping record, a record of the job outside its
 intervals, an incomplete usage window, an invalid state, a denied request of the job, a `would_block`
 or an unmetered `gap` in the plugin's watch records, or a contributing session without a usable log each
-refuse it. An interval is (start, stop], matching how the hooks resolve a time (a line applies strictly
+refuse it. It is DENY BY DEFAULT for records it does not recognise: any record of a session that is
+neither spend (`llm_call`) nor a give-back or spend's own bookkeeping (`hold_released`,
+`settlement_ambiguous`, `settlement_shortfall`) and lies in an interval makes it inexact, whatever
+labels it carries or lacks (naming the bad kinds one at a time kept leaking new ones). An interval is (start, stop], matching how the hooks resolve a time (a line applies strictly
 after its own ts), and cost counts each transfer once, from its `llm_call`. It is not exported from a package entry (nothing outside the lab calls it).
 
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass

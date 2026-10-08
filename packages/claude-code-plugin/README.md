@@ -299,7 +299,7 @@ Run it as an ordinary Bash call (the session id is `$CLAUDE_CODE_SESSION_ID`). J
   recorded cost is exact. An empty interval, a record with no complete usage window, an untagged or
   differently tagged record overlapping the job, a record of the job outside its intervals, a denied
   request of the job, a `would_block` or an unmetered `gap` (read from `watch.jsonl`, or `--watch FILE`),
-  an invalid state, or a contributing session without a usable log each say no. An interval is
+  an invalid state, a record of any kind other than spend or a give-back inside an interval, or a contributing session without a usable log each say no. An interval is
   (start, stop]: usage at exactly the start belongs to the earlier job.
 
 ## Modes: watch-only by default

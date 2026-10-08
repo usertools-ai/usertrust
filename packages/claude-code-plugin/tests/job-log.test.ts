@@ -602,6 +602,71 @@ describe("jobCoverage — refused and unmetered work", () => {
 	});
 });
 
+describe("jobCoverage — deny by default", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const principal = { origin: `claude-code:${SID}` };
+	const ok = {
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost: 5,
+			job: J,
+			principal,
+			usageFrom: iso(T0 + 2000),
+			usageTo: iso(T0 + 3000),
+		},
+	};
+	const other = (kind: string, data: Record<string, unknown>) => ({
+		kind,
+		actor: ok.actor,
+		data: { principal, ...data },
+	});
+
+	it("a denial carrying jobState invalid and no job, inside the interval, is NOT exact", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [ok, other("policy_denied", { jobState: "invalid", usageFrom: iso(T0 + 3500) })],
+		});
+		expect(r.exact).toBe(false);
+		expect(r.reasons.join(" ")).toContain("a policy_denied record lies in an interval");
+	});
+	it("a record of a kind it does not know, inside the interval, is NOT exact", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [ok, other("some_future_kind", { usageFrom: iso(T0 + 3500) })],
+		});
+		expect(r.exact).toBe(false);
+	});
+	it("a give-back (hold_released) inside the interval is harmless", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [
+				ok,
+				other("hold_released", { job: J, transferId: "tx_9", usageFrom: iso(T0 + 3500) }),
+			],
+		});
+		expect(r.exact).toBe(true);
+	});
+	it("a record outside every interval is not this job's business", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: logText },
+			records: [ok, other("policy_denied", { usageFrom: iso(T0 + 9000) })],
+		});
+		expect(r.exact).toBe(true);
+	});
+});
+
 describe("the lock and the log tail — review hardening", () => {
 	it("a lock whose metadata was never written is broken once it is old enough", async () => {
 		await writeLog(start(SID, T0));

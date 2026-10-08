@@ -1780,6 +1780,9 @@ export async function settleTranscriptHold(sessionId, entry) {
 							holdModel: entry.holdModel,
 							agentType: entry.agentType,
 							...counts,
+							// The labels it was authorized with: a retry is the SAME charge, so it
+							// must carry the job that was open when the usage happened.
+							...jobHoldFields(entry),
 						}
 					: {}),
 			}),

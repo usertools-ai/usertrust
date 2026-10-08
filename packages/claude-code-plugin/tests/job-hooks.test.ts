@@ -31,6 +31,8 @@ let port: number;
 let capabilities: string[];
 let requests: Array<{ path: string; body: Record<string, unknown>; status: number }>;
 let nextTransfer = 0;
+/** How long the fake holds its /v1/health answer: a hook awaiting it is awaiting a probe. */
+let healthDelayMs = 0;
 /** Replace the fake's answer to one path (default: the ok responder). */
 let override:
 	| ((path: string, body: Record<string, unknown>) => { status: number; json: unknown } | undefined)
@@ -41,6 +43,7 @@ function startFake(forwardTo?: { url: string; key: string }, listenOn = 0): Prom
 		fake = createServer((req, res) => {
 			if (req.method === "GET" && req.url === "/v1/health") {
 				void (async () => {
+					if (healthDelayMs > 0) await new Promise((r) => setTimeout(r, healthDelayMs));
 					const json =
 						forwardTo === undefined
 							? { status: "ok", capabilities }
@@ -95,6 +98,7 @@ beforeEach(async () => {
 	nextTransfer = 0;
 	capabilities = ["job", "principal", "release"];
 	override = undefined;
+	healthDelayMs = 0;
 	// Entries older than the state's first run are never posted: back-date it so the
 	// synthetic transcript's timeline (all in the past) is eligible.
 	await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
@@ -347,6 +351,49 @@ describe("test 2 — a remainder spanning a switch settles once per job", () => 
 		const sum = (k: string) => settles.reduce((n, b) => n + (b[k] as number), 0);
 		expect([sum("inputTokens"), sum("outputTokens")]).toEqual([600, 250]);
 		expect(settles.every((b) => !("usageFrom" in b))).toBe(true);
+	});
+});
+
+describe("a call belongs to the job open when the hook RECEIVED it", () => {
+	it("a switch that lands while the hook awaits its health probe does not move the call", async () => {
+		await startFake();
+		healthDelayMs = 700;
+		await writeLog(logLine(at(-50), "session-start", null), logLine(at(-40), "start", "job-a"));
+		const running = run("pre-tool-use.mjs", pre("tu_1"), { UT_CC_USAGE: "estimate" });
+		// The CLI lands during the probe: after the call began, before the hook resolves.
+		await new Promise((r) => setTimeout(r, 300));
+		await appendLog(logLine(Date.now(), "start", "job-b"));
+		await running;
+		// mutant: the time is read after the awaits → job-b
+		expect(of("/v1/authorize")[0]?.body.job).toBe("job-a");
+	});
+});
+
+describe("an unresolved keyed settle is retried under the job it was authorized with", () => {
+	it("the .done journal keeps the labels, and the retry's authorize carries them", async () => {
+		capabilities = ["job", "principal", "release", "idempotency-key"];
+		await startFake();
+		await writeLog(logLine(at(-60), "session-start", null), logLine(at(-50), "start", "job-a"));
+		await writeTranscript([message("m1", at(-40), 100, 50)]);
+		await run("pre-tool-use.mjs", pre("tu_1"));
+		// The settle comes back 503: the charge's fate is unknown, so it stays unresolved.
+		override = (path) =>
+			path === "/v1/settle" ? { status: 503, json: { error: "down" } } : undefined;
+		await run("post-tool-use.mjs", post("tu_1"));
+		// The job moves on before the retry.
+		await appendLog(logLine(Date.now() + 5, "start", "job-b"));
+		await new Promise((r) => setTimeout(r, 30));
+		override = undefined;
+		await run("stop.mjs", base());
+		const retried = of("/v1/authorize")
+			.slice(1)
+			.map((r) => r.body);
+		// mutant: the journal drops the labels → the retry carries no job (or the new one)
+		expect(retried.length).toBeGreaterThan(0);
+		for (const body of retried) {
+			expect(body.job).toBe("job-a");
+			expect(body.usageFrom).toBe(iso(at(-40)));
+		}
 	});
 });
 

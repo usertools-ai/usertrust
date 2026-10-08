@@ -365,6 +365,9 @@ export function intervalsOf(parsed, job) {
 	return out;
 }
 
+/** Records that are spend's own bookkeeping or a give-back: no usage hides behind them. */
+const BENIGN_KINDS = new Set(["hold_released", "settlement_ambiguous", "settlement_shortfall"]);
+
 const ms = (value) => (typeof value === "string" ? Date.parse(value) : Number.NaN);
 
 /**
@@ -481,6 +484,17 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 			});
 			if (!tagged) reasons.push(`session ${sid}: no record of ${job} inside [${from}, ${to}]`);
 			for (const r of mine) {
+				if (r?.kind !== "llm_call" && !BENIGN_KINDS.has(r?.kind)) {
+					// DENY BY DEFAULT: a record of a kind this check cannot read as spend or as a
+					// harmless give-back (a denial, a failure, anything new) inside the interval may
+					// stand for usage that is not in the total, whatever labels it carries or lacks.
+					// Naming the bad kinds one by one is the shape that kept leaking.
+					const at = ms(r?.data?.usageFrom);
+					if (!Number.isFinite(at) ? capable : at > from && at <= to) {
+						reasons.push(`session ${sid}: a ${r?.kind} record lies in an interval of ${job}`);
+					}
+					continue;
+				}
 				if (r?.kind !== "llm_call") continue;
 				const window = complete(r.data);
 				if (window === null) {

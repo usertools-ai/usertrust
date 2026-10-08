@@ -259,6 +259,15 @@ export function budgetShare(fraction) {
 	return Math.floor(hookBudgetMs * fraction);
 }
 
+/**
+ * When this hook process started (epoch ms): the moment it RECEIVED the call. A job is
+ * resolved at this time and no later, so a `usertrust-job` switch that lands while the hook
+ * awaits a health probe or a log read cannot move the call to the new job.
+ */
+export function hookStartedAt() {
+	return HOOK_STARTED_AT;
+}
+
 /** Milliseconds left in this hook's budget (negative once it is spent). */
 export function timeLeft() {
 	return HOOK_STARTED_AT + hookBudgetMs - Date.now();

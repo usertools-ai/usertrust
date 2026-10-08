@@ -52,6 +52,7 @@ import {
 	guardMode,
 	HoldNameTaken,
 	holdOfCall,
+	hookStartedAt,
 	isAlreadySettled,
 	isTransferId,
 	isUnknownTransfer,
@@ -396,8 +397,8 @@ async function reserve(input) {
 	// a switch applies from the next call, so the call that runs `start job-b` still
 	// bills job-a. Read only for a server that honours `job` (older servers strip the
 	// keys, and an unlabelled hold must stay byte-identical to today's).
+	const callMs = hookStartedAt();
 	const jobs = (await jobCapable(await serverCapabilities())) ? await resolveJob(sessionId) : null;
-	const callMs = Date.now();
 	const holdLabels = jobs === null ? {} : jobs.at(callMs);
 	const holdKey = jobs === null ? "none" : jobs.keyAt(callMs);
 	const prepared = await prepareWindow({
