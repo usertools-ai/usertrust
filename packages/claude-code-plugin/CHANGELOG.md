@@ -28,6 +28,17 @@ npm, and its version is its own: the `usertrust` packages and their
   - This does not stop code from a project's settings: a hook, or a variable that
     loads code (`NODE_OPTIONS`, `PATH`), runs in the hook's own process and can
     read the file too. Without `UT_CC_CONFIG`, nothing changes.
+- **A hold is ended only through the server and key that made it.** Every hook is
+  its own process and reads its settings afresh, so the server or key can change
+  between the hook that made a hold and the one that ends it (an edited config
+  file, or environment). PostToolUse, Stop, SubagentStop and SessionEnd now treat
+  such a hold as 1.4.1's resumed PreToolUse does: its record is dropped, nothing
+  about it is sent to the new server, and any usage it carried goes unrecorded.
+  Ended through the new server, it answered 404 there, and the estimate path then
+  charged the call to the new tenant on a fresh hold. An unresolved settle parked
+  under one server and key is likewise never retried under another: there, under
+  a key that server never saw, it could charge again what the first already did. A
+  record without a binding (from before 1.4.1) is ended as it always was.
 - **Hold files are created `0600`**, as every other file in the state dir already
   was. They were `0644`, readable by other users when the state dir allows it.
 

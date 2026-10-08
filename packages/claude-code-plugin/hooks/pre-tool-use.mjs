@@ -46,6 +46,7 @@
 import { rename, unlink } from "node:fs/promises";
 import { howToSet, settings } from "./config.mjs";
 import {
+	abandonHold,
 	claimForSettle,
 	defaultModel,
 	estimateTokens,
@@ -63,11 +64,11 @@ import {
 	recordPending,
 	recordWatchEvent,
 	releaseHold,
+	sameTenant,
 	sanitizeReason,
 	say,
 	serverCapabilities,
 	serverRequest,
-	tenantBinding,
 	timeLeft,
 } from "./lib.mjs";
 import {
@@ -194,36 +195,15 @@ try {
 }
 
 /**
- * Whether a pending record was made under the server and key this hook talks to
- * (lib.mjs `tenantBinding`). A record without a binding (written before the plugin
- * kept one) is not: its tenant is unknown.
- */
-function sameTenant(entry) {
-	const here = tenantBinding();
-	return entry.serverUrl === here.serverUrl && entry.keyHash === here.keyHash;
-}
-
-/**
  * End an earlier hold made under ANOTHER server or key, or an unknown one, without
- * sending this hook's server anything about it. That server does not know the hold:
- * a settle there answers 404, and the unkeyed path would hand the old window to the
- * fresh hold, so this tenant would pay for the other's usage. The record is claimed
- * and dropped instead.
- * - A window it carried is then accounted by the journal as unrecorded (assigned ids
- *   whose hold is gone), never carried into the fresh hold: an under-count of the
- *   other tenant.
- * - The hold itself is left to its own server's sweep, or the ledger's timeout.
- * Returns false when another hook claimed the record first.
+ * sending this hook's server anything about it (lib.mjs `abandonHold`). That server
+ * does not know the hold: a settle there answers 404, and the unkeyed path would
+ * hand the old window to the fresh hold, so this tenant would pay for the other's
+ * usage. A record without a binding counts as another tenant's here (lib.mjs
+ * `sameTenant`): this call reserves afresh beside it, and its tenant is unknown.
  */
-async function abandon(entry) {
-	const claimed = await claimForSettle(entry.path);
-	if (claimed !== null) {
-		say(
-			`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key; nothing about it is sent here, and any usage it carried goes unrecorded`,
-		);
-		await unlink(claimed).catch(() => {});
-	}
-	return claimed !== null;
+function abandon(entry) {
+	return abandonHold(entry, "this tool call's earlier hold");
 }
 
 /**

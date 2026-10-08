@@ -125,6 +125,8 @@ import {
 import { basename, dirname, join } from "node:path";
 import { howToSet, settingName, settings } from "./config.mjs";
 import {
+	abandonHold,
+	boundElsewhere,
 	budgetShare,
 	cleanup,
 	clearPending,
@@ -140,6 +142,7 @@ import {
 	serverCapabilities,
 	serverRequest,
 	stateRoot,
+	tenantBinding,
 	timeLeft,
 	usageMode,
 } from "./lib.mjs";
@@ -570,6 +573,11 @@ function parseVehicle(key, v) {
 		ids: v.ids,
 		model: modelId(v.model) ?? UNKNOWN_MODEL,
 		agentType: typeof v.agentType === "string" ? v.agentType : "subagent",
+		// The server and key it was authorized under (lib.mjs `tenantBinding`), when
+		// known: it is retried only through that server and key (`boundElsewhere`).
+		...(typeof v.serverUrl === "string" && typeof v.keyHash === "string"
+			? { serverUrl: v.serverUrl, keyHash: v.keyHash }
+			: {}),
 	};
 	for (const k of COUNT_KEYS) vehicle[k] = count(v[k]);
 	return vehicle;
@@ -586,6 +594,8 @@ function holdVehicle(body) {
 		ids: body.assignedIds,
 		model: body.holdModel,
 		agentType: body.agentType,
+		serverUrl: body.serverUrl,
+		keyHash: body.keyHash,
 		inputTokens: body.inputTokens,
 		outputTokens: body.outputTokens,
 		cacheReadTokens: body.cacheReadTokens,
@@ -1709,6 +1719,9 @@ export async function settleTranscriptHold(sessionId, entry) {
 							holdModel: entry.holdModel,
 							agentType: entry.agentType,
 							...counts,
+							...(typeof entry.serverUrl === "string" && typeof entry.keyHash === "string"
+								? { serverUrl: entry.serverUrl, keyHash: entry.keyHash }
+								: {}),
 						}
 					: {}),
 			}),
@@ -1732,10 +1745,19 @@ export const OUTCOME_NOTES = new Map([
 	["claimed", "; its usage may be unrecorded, and is never retried (no key)"],
 ]);
 
-/** Stop/SubagentStop: SETTLE every leftover hold that carries assigned usage. */
+/**
+ * Stop/SubagentStop: SETTLE every leftover hold that carries assigned usage. One made
+ * under another server or key is dropped instead, nothing sent (lib.mjs
+ * `boundElsewhere`): its usage goes unrecorded, never charged to this tenant.
+ */
 export async function settleAssignedHolds(sessionId, agentId) {
 	for (const entry of await listPending(sessionId, agentId)) {
 		if ((entry.assignedIds?.length ?? 0) === 0) continue;
+		if (boundElsewhere(entry)) {
+			// Its window is accounted unrecorded by the agent's next reconcile.
+			await abandonHold(entry, "leftover hold");
+			continue;
+		}
 		const result = await settleTranscriptHold(sessionId, entry);
 		if (result.outcome !== "settled") {
 			say(
@@ -1908,6 +1930,18 @@ export async function postRemainder({
 			);
 		}
 		for (const [key, vehicle] of keyed ? [...cursor.unresolved] : []) {
+			if (boundElsewhere(vehicle)) {
+				// Its settle may have posted at that server. Retried here, under a key this
+				// server never saw, it would be charged to this tenant as well: it goes
+				// unrecorded instead.
+				cursor.unresolved.delete(key);
+				accountIds(cursor, vehicle.ids);
+				await opened.save();
+				summary.notes.push(
+					`an unresolved ${vehicle.model} settle made under another server or key is not retried here: its usage goes unrecorded`,
+				);
+				continue;
+			}
 			const timeoutMs = callBudget();
 			if (timeoutMs < minCall()) {
 				summary.notes.push("unresolved settles: deferred to the next settle point (out of time)");
@@ -1956,7 +1990,15 @@ export async function postRemainder({
 			// parked as an unresolved vehicle, so a hook killed mid-call leaves it to be
 			// retried as itself; without one, a crash can only lose it, never repeat it.
 			if (key === undefined) for (const id of ids) cursor.assigned.set(id, REMAINDER);
-			else cursor.unresolved.set(key, { ids, model, agentType: agentType.raw, ...counts });
+			else {
+				cursor.unresolved.set(key, {
+					ids,
+					model,
+					agentType: agentType.raw,
+					...counts,
+					...tenantBinding(),
+				});
+			}
 			await opened.save();
 			const result = await postGroup({
 				sessionId,

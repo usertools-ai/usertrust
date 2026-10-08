@@ -636,6 +636,52 @@ export function tenantBinding() {
 }
 
 /**
+ * Whether a hold record was made under the server and key this hook talks to
+ * (`tenantBinding`). A record without a binding (written before the plugin kept
+ * one) is not: its tenant is unknown.
+ */
+export function sameTenant(entry) {
+	const here = tenantBinding();
+	return entry.serverUrl === here.serverUrl && entry.keyHash === here.keyHash;
+}
+
+/**
+ * Whether a hold record NAMES another server or key than this hook's. Every hook
+ * is its own process and reads its settings afresh, so the server or key can
+ * change between the hook that made a hold and the one that ends it (an edited
+ * config file, or environment). Such a hold is never settled, released or given
+ * back through this server: it answers 404 for a hold it never made, and the
+ * estimate path would then charge the call to this tenant on a fresh hold. A
+ * record without a binding names none, and is ended as it always was.
+ */
+export function boundElsewhere(entry) {
+	return (
+		typeof entry.serverUrl === "string" && typeof entry.keyHash === "string" && !sameTenant(entry)
+	);
+}
+
+/**
+ * Drop the record of a hold made under ANOTHER server or key, sending this hook's
+ * server nothing about it (`boundElsewhere`). The record is claimed first, so only
+ * one hook drops it.
+ * - A window it carried is then accounted by the journal as unrecorded (assigned
+ *   ids whose hold is gone), never posted to this tenant: an under-count of the
+ *   other one.
+ * - The hold itself is left to its own server's sweep, or the ledger's timeout.
+ * Returns false when another hook claimed the record first.
+ */
+export async function abandonHold(entry, what) {
+	const claimed = await claimForSettle(entry.path);
+	if (claimed !== null) {
+		say(
+			`usertrust: ${what} ${entry.transferId} was made under another server or key; nothing about it is sent here, and any usage it carried goes unrecorded`,
+		);
+		await unlink(claimed).catch(() => {});
+	}
+	return claimed !== null;
+}
+
+/**
  * POST to the governance server. `timeoutMs` bounds the whole exchange (5 s
  * unless the caller passes less); a spent budget throws without a request.
  */
@@ -829,11 +875,16 @@ export async function giveBack(transferId, reason, timeoutMs) {
  * would only leak state-dir entries. A hold the hook budget no longer covers is
  * left for the next Stop and the TTL sweep. An estimate hold left settle-attempted
  * (`.settling`: its one settle went unanswered) is given back the same way and
- * then forgotten — never settled again.
+ * then forgotten — never settled again. A hold made under another server or key
+ * is forgotten without a word to this one (`boundElsewhere`).
  */
 export async function cleanup(sessionId, agentId) {
 	for (const entry of await listPending(sessionId, agentId)) {
 		if ((entry.assignedIds?.length ?? 0) > 0) continue;
+		if (boundElsewhere(entry)) {
+			await abandonHold(entry, "leftover hold");
+			continue;
+		}
 		const timeoutMs = Math.min(5000, timeLeft());
 		if (timeoutMs < 100) {
 			say(`usertrust: out of time; hold ${entry.transferId} left for Stop/TTL`);
@@ -856,7 +907,14 @@ export async function cleanup(sessionId, agentId) {
 	for (const held of await settlingEstimates(sessionId, agentId)) {
 		// An estimate hold whose one settle went unanswered: it may have posted, so
 		// it is NEVER settled again — only given back (a 404 here means it posted or
-		// expired), then forgotten.
+		// expired), then forgotten. Another server's or key's is only forgotten.
+		if (boundElsewhere(held)) {
+			say(
+				`usertrust: leftover hold ${held.transferId} was made under another server or key; nothing about it is sent here`,
+			);
+			await unlink(held.path).catch(() => {});
+			continue;
+		}
 		const timeoutMs = Math.min(5000, timeLeft());
 		if (timeoutMs < 100) {
 			say(`usertrust: out of time; hold ${held.transferId} left for Stop/TTL`);

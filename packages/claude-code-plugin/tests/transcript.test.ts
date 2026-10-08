@@ -4816,3 +4816,182 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 		);
 	});
 });
+
+describe("a hook after the server or key changed never ends a hold through the new one", () => {
+	// Each hook is its own process and reads its settings afresh, so the server or key
+	// can change between the hook that made a hold and the one that ends it: an edited
+	// config file, or environment. Settled, released or retried through the new one, a
+	// hold it never made answers 404, the estimate path then charges the call to it on
+	// a fresh hold, and an unresolved settle retried under its key there could charge
+	// what the old server already did. So such a hold is dropped, nothing about it is
+	// sent, and its usage goes unrecorded: an under-count of the old tenant. A record
+	// with no binding (from before the plugin kept one) is ended as it always was.
+	const estimate = { UT_CC_USAGE: "estimate" };
+	const otherKey = { UT_SERVER_KEY: "k2" };
+	const aboutTx1 = () => requests.filter((r) => r.body.transferId === "tx_1");
+	const notedOther = (stderr: string, what: string) =>
+		expect(stderr).toContain(`${what} tx_1 was made under another server or key`);
+
+	it("PostToolUse, estimate: the hold is dropped, and nothing about it is sent", async () => {
+		await startServer(okResponder);
+		await run("pre-tool-use.mjs", preInput("tu_1"), estimate);
+		const post = await run("post-tool-use.mjs", postInput("tu_1"), { ...estimate, ...otherKey });
+		notedOther(post.stderr, "this tool call's hold");
+		expect(settles()).toEqual([]);
+		expect(authorizes()).toHaveLength(1);
+		expect(await holdStateFiles()).toEqual([]);
+	});
+
+	it("control: PostToolUse under the same key settles the hold", async () => {
+		await startServer(okResponder);
+		await run("pre-tool-use.mjs", preInput("tu_1"), estimate);
+		await run("post-tool-use.mjs", postInput("tu_1"), estimate);
+		expect(settles().map((r) => r.body.transferId)).toEqual(["tx_1"]);
+	});
+
+	it("PostToolUse, transcript: the window is never settled through the new key, and goes unrecorded", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		const post = await run("post-tool-use.mjs", postInput("tu_1"), otherKey);
+		notedOther(post.stderr, "this tool call's hold");
+		await run("stop.mjs", stopInput(), otherKey);
+		expect(aboutTx1()).toEqual([]);
+		expect(settles()).toEqual([]);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		expect(await holdStateFiles()).toEqual([]);
+	});
+
+	it("Stop: a leftover hold with a window is dropped, nothing sent, its usage unrecorded", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		const stop = await run("stop.mjs", stopInput(), otherKey);
+		notedOther(stop.stderr, "leftover hold");
+		expect(aboutTx1()).toEqual([]);
+		expect(settles()).toEqual([]);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		expect(await holdStateFiles()).toEqual([]);
+	});
+
+	it("Stop: an empty leftover hold is forgotten without a release, which the same key gets (control)", async () => {
+		capabilities = ["release"];
+		await startServer(okResponder);
+		await run("pre-tool-use.mjs", preInput("tu_1"), estimate);
+		const stop = await run("stop.mjs", stopInput(), { ...estimate, ...otherKey });
+		notedOther(stop.stderr, "leftover hold");
+		expect(aboutTx1()).toEqual([]);
+		expect(await holdStateFiles()).toEqual([]);
+		await run("pre-tool-use.mjs", preInput("tu_2"), estimate);
+		await run("stop.mjs", stopInput(), estimate);
+		expect(requests.filter((r) => r.path === "/v1/release").map((r) => r.body.transferId)).toEqual([
+			"tx_2",
+		]);
+	});
+
+	it("Stop: an estimate hold left `.settling` (its settle unanswered) is forgotten without a release", async () => {
+		capabilities = ["release"];
+		const lostSettle: Responder = (path, body) =>
+			path === "/v1/settle" && body.transferId === "tx_1"
+				? { status: 0, json: null }
+				: okResponder(path, body);
+		await startServer(lostSettle);
+		await run("pre-tool-use.mjs", preInput("tu_1"), estimate);
+		await run("post-tool-use.mjs", postInput("tu_1"), estimate);
+		expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_1", "settling")]);
+		const stop = await run("stop.mjs", stopInput(), { ...estimate, ...otherKey });
+		notedOther(stop.stderr, "leftover hold");
+		expect(requests.filter((r) => r.path !== "/v1/settle" && r.body.transferId === "tx_1")).toEqual(
+			[],
+		);
+		expect(await holdStateFiles()).toEqual([]);
+	});
+
+	it("a record without a binding (from before the plugin kept one) is still given back at Stop, as before", async () => {
+		capabilities = ["release"];
+		await startServer(okResponder);
+		await run("pre-tool-use.mjs", preInput("tu_1"), estimate);
+		const path = join(stateDir, holdFile("tu_1", "tx_1"));
+		const {
+			serverUrl: _url,
+			keyHash: _hash,
+			...legacy
+		} = JSON.parse(await readFile(path, "utf-8")) as Record<string, unknown>;
+		await writeFile(path, JSON.stringify(legacy));
+		const stop = await run("stop.mjs", stopInput(), { ...estimate, ...otherKey });
+		expect(stop.stderr).not.toContain("another server or key");
+		expect(requests.filter((r) => r.path === "/v1/release").map((r) => r.body.transferId)).toEqual([
+			"tx_1",
+		]);
+	});
+
+	it("an UNRESOLVED settle parked under the old key is never retried under the new one", async () => {
+		capabilities = ["idempotency-key", "release"];
+		const failingSettle: Responder = (path, body) =>
+			path === "/v1/settle"
+				? { status: 503, json: { error: "unavailable" } }
+				: okResponder(path, body);
+		await startServer(failingSettle);
+		await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		const key = authorizes()[0]?.body.idempotencyKey;
+		expect(typeof key).toBe("string");
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		// Parked as an unresolved vehicle, with the server and key it was authorized under.
+		const parked = JSON.parse(await readFile(cursorPath(), "utf-8")) as {
+			unresolved: Record<string, { keyHash?: string }>;
+		};
+		expect(parked.unresolved[key as string]?.keyHash).toBe(
+			createHash("sha256").update("k").digest("hex").slice(0, 16),
+		);
+		const stop = await run("stop.mjs", stopInput(), otherKey);
+		expect(stop.stderr).toContain("made under another server or key is not retried here");
+		expect(authorizes().filter((r) => r.body.idempotencyKey === key)).toHaveLength(1);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+	});
+
+	it("a REMAINDER group parked under the old key is never retried under the new one", async () => {
+		capabilities = ["idempotency-key", "release"];
+		const failingSettle: Responder = (path, body) =>
+			path === "/v1/settle"
+				? { status: 503, json: { error: "unavailable" } }
+				: okResponder(path, body);
+		await startServer(failingSettle);
+		await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+		// No hold carried msg_a: Stop posts it as a remainder group, parked under its key
+		// before the authorize, and its settle fails, so it stays parked.
+		await run("stop.mjs", stopInput());
+		const key = authorizes()[0]?.body.idempotencyKey;
+		expect(typeof key).toBe("string");
+		const parked = JSON.parse(await readFile(cursorPath(), "utf-8")) as {
+			unresolved: Record<string, { keyHash?: string }>;
+		};
+		expect(parked.unresolved[key as string]?.keyHash).toBe(
+			createHash("sha256").update("k").digest("hex").slice(0, 16),
+		);
+		const stop = await run("stop.mjs", stopInput(), otherKey);
+		expect(stop.stderr).toContain("made under another server or key is not retried here");
+		expect(authorizes().filter((r) => r.body.idempotencyKey === key)).toHaveLength(1);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+	});
+
+	it("control: the same key retries the unresolved settle at Stop", async () => {
+		capabilities = ["idempotency-key", "release"];
+		let failSettle = true;
+		const recovering: Responder = (path, body) => {
+			if (path === "/v1/settle" && failSettle) {
+				failSettle = false;
+				return { status: 503, json: { error: "unavailable" } };
+			}
+			return okResponder(path, body);
+		};
+		await startServer(recovering);
+		await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		const key = authorizes()[0]?.body.idempotencyKey;
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await run("stop.mjs", stopInput());
+		expect(authorizes().filter((r) => r.body.idempotencyKey === key)).toHaveLength(2);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+	});
+});
