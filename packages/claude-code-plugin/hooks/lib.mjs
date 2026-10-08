@@ -351,6 +351,10 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				toolUseId: entry.toolUseId ?? null,
 				transferId: entry.transferId,
 				agentId: String(agentId ?? "main"),
+				// When the CALL was received, kept on EVERY hold whether or not the server honours
+				// `job`: a give-back at Stop that has to write a gap places it by this time, never
+				// by the Stop's own.
+				...(typeof entry.startedAt === "string" ? { startedAt: entry.startedAt } : {}),
 				// Persist the authorize-time input estimate so settle can price both
 				// legs. Without it, post-tool-use sent only outputTokens and a large
 				// result priced above the 1-token hold (AUD-004).
@@ -392,7 +396,15 @@ export async function recordUnconfirmedCall(sessionId, held, releaseClass) {
 				? "the call ran and its charge is unconfirmed (its settle went unanswered)"
 				: "the call may have run and was never charged (no PostToolUse settle)",
 		releaseClass,
-		...(typeof held.usageFrom === "string" ? { started: held.usageFrom } : {}),
+		// The call's own start: the hold's usage start, else the time it was received. With NEITHER
+		// (an older hold) the time is UNKNOWN, and a gap with no time counts against every job; it
+		// is never stamped with this Stop's time, which could put it in a later job.
+		started:
+			typeof held.usageFrom === "string"
+				? held.usageFrom
+				: typeof held.startedAt === "string"
+					? held.startedAt
+					: null,
 	});
 }
 
@@ -534,6 +546,7 @@ async function settlingRecords(sessionId, agentId) {
 				toolUseId: body.toolUseId ?? null,
 				agentId: sanitize(body.agentId ?? "main"),
 				...jobHoldFields(body),
+				...(typeof body.startedAt === "string" ? { startedAt: body.startedAt } : {}),
 				// Why the hold was claimed: `release` when its call was deferred and the claim only
 				// serves to end the hold (see `markReleaseIntent`), otherwise a settle attempt.
 				...(body.intent === "release" ? { intent: "release" } : {}),
@@ -627,6 +640,7 @@ export async function listPending(sessionId, agentId) {
 				...(typeof parsed.keyHash === "string" ? { keyHash: parsed.keyHash } : {}),
 				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
 				...jobHoldFields(parsed),
+				...(typeof parsed.startedAt === "string" ? { startedAt: parsed.startedAt } : {}),
 				mtimeMs,
 			});
 		} catch {

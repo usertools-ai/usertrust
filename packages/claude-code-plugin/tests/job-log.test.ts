@@ -1168,6 +1168,118 @@ describe("interval keys are POSITIONS, not stamps (B-102)", () => {
 	});
 });
 
+describe("a clock that stepped backwards is a known gap (B-105)", () => {
+	const J = "job-a";
+	const principal = { origin: `claude-code:${SID}` };
+	const rec = (from: number, to: number) => ({
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost: 10,
+			job: J,
+			principal,
+			usageFrom: iso(T0 + from),
+			usageTo: iso(T0 + to),
+		},
+	});
+	it("a stop stamped by a fast clock, then a start stamped earlier: job-a reports the step", async () => {
+		const text =
+			start(SID, T0) +
+			op(SID, T0 + 1000, "start", J) +
+			op(SID, T0 + 100_000, "stop", null) + // a fast clock
+			op(SID, T0 + 20_000, "start", "job-b"); // real time: clamped to +100 000
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({ job: J, logs: { [SID]: text }, records: [rec(2000, 3000)] });
+		// mutant: the clamp is applied silently → no gap
+		expect(gapText(r)).toContain("the clock moved backwards in the job log");
+		expect(r.knownGaps.find((g) => g.gap.includes("clock"))?.evidence).toMatchObject({
+			session: SID,
+			line: 4,
+		});
+	});
+	it("a benign inversion between concurrent appenders (a few ms) is not a clock step", async () => {
+		const text = start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 900, "stop", null);
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({ job: J, logs: { [SID]: text }, records: [rec(1100, 1200)] });
+		expect(gapText(r)).not.toContain("clock moved backwards");
+	});
+	it("a job whose intervals do not touch the stepped stretch is not blamed", async () => {
+		const text =
+			start(SID, T0) +
+			op(SID, T0 + 1000, "start", "job-z") +
+			op(SID, T0 + 2000, "stop", null) +
+			op(SID, T0 + 3000, "start", J) +
+			op(SID, T0 + 4000, "stop", null) +
+			op(SID, T0 + 500_000, "start", "job-y") + // fast clock
+			op(SID, T0 + 100_000, "stop", null); // stepped back
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({ job: J, logs: { [SID]: text }, records: [rec(3500, 3600)] });
+		expect(gapText(r)).not.toContain("clock moved backwards");
+	});
+	it("a gap with an UNKNOWN start counts against every job", async () => {
+		const text = start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({
+			job: J,
+			logs: { [SID]: text },
+			records: [rec(2000, 3000)],
+			watch: [{ kind: "gap", session: SID, started: null, at: iso(T0 + 9000) }],
+		});
+		expect(gapText(r)).toContain("its time is unreadable");
+	});
+});
+
+describe("the writers, through their real entry points (B-106)", () => {
+	it("SessionStart creates the log O_EXCL: 20 racing writers leave exactly one session-start", async () => {
+		const { writeSessionStart } = (await lib()) as unknown as {
+			writeSessionStart(sid: string, source: string): Promise<string>;
+		};
+		const outcomes = await Promise.all(
+			Array.from({ length: 20 }, () => writeSessionStart(SID, "startup")),
+		);
+		// mutant: no O_EXCL → every writer appends its own session-start
+		expect(outcomes.filter((o) => o === "written")).toHaveLength(1);
+		expect((await readFile(logFile(), "utf-8")).split("\n").filter(Boolean)).toHaveLength(1);
+	});
+	it("the CLI's own look at a torn tail: an append completed meanwhile is accepted, not refused", async () => {
+		const whole = op(SID, T0 + 1, "start", "job-a");
+		await writeLog(start(SID, Date.now() - 5000) + whole.slice(0, 20));
+		const { appendJobOp } = await lib();
+		const done = new Promise<void>((resolve) => {
+			setTimeout(() => {
+				void (async () => {
+					await (await import("node:fs/promises")).appendFile(logFile(), whole.slice(20));
+					resolve();
+				})();
+			}, 10);
+		});
+		const result = await appendJobOp(SID, "start", "job-b", { waitMs: 0 });
+		await done;
+		// mutant: no second look → "the job log is invalid (the last line is torn …)"
+		expect(result.ok).toBe(true);
+	});
+	it.skipIf(process.getuid?.() === 0)(
+		"capability.json is replaced via rename: it works even when the file itself is read-only",
+		async () => {
+			const jobs = join(state, "jobs");
+			await mkdir(jobs, { recursive: true });
+			const cap = join(jobs, "capability.json");
+			const url = "http://127.0.0.1:1";
+			await writeFile(cap, JSON.stringify({ [url]: false }));
+			await chmod(cap, 0o444); // an in-place write cannot truncate it; a rename replaces it
+			const { jobCapable } = (await import(pathToFileURL(join(HOOKS, "lib.mjs")).href)) as {
+				jobCapable(capabilities: Set<string> | null): Promise<boolean>;
+			};
+			process.env.UT_SERVER_URL = url;
+			const honoured = await jobCapable(new Set(["job"]));
+			// mutant: writeFile in place → EACCES, swallowed → the bit stays false on disk
+			expect(honoured).toBe(true);
+			expect(JSON.parse(await readFile(cap, "utf-8"))[url]).toBe(true);
+		},
+	);
+});
+
 describe("keyAt — unlabelled stretches are distinct", () => {
 	it("the time before `start a` and the time after `stop` are two stretches", async () => {
 		await writeLog(

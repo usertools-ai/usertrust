@@ -640,6 +640,40 @@ describe("a resumed call's earlier hold is only ENDED, so an unconfirmed release
 	});
 });
 
+describe("a give-back's gap is placed by when the call STARTED, even with no job capability (B-104)", () => {
+	const env = { UT_CC_USAGE: "estimate" };
+	const gapsOf = async () =>
+		(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l))
+			.filter((e) => e.kind === "gap");
+
+	it("a server without `job`: the hold still records when the call began, and Stop's gap uses it", async () => {
+		capabilities = ["principal", "release"];
+		await startFake();
+		await run("pre-tool-use.mjs", pre("tu_1"), env);
+		await new Promise((r) => setTimeout(r, 700));
+		await run("stop.mjs", base(), env);
+		const [gap] = await gapsOf();
+		// mutant: no start stored → null, or the Stop's own time (700 ms later)
+		expect(typeof gap?.started).toBe("string");
+		expect(Date.parse(gap.at) - Date.parse(gap.started)).toBeGreaterThanOrEqual(600);
+	});
+	it("a hold that carries no time at all (an older hold) writes a gap with NO time, not the Stop's", async () => {
+		capabilities = ["principal", "release"];
+		await startFake();
+		await mkdir(stateDir, { recursive: true });
+		await writeFile(
+			join(stateDir, `${SESSION}__main__tu_9.tx_9.json`),
+			JSON.stringify({ gate: 1, toolUseId: "tu_9", transferId: "tx_9", agentId: "main" }),
+		);
+		await run("stop.mjs", base(), env);
+		const [gap] = await gapsOf();
+		expect(gap?.started).toBeNull(); // mutant: stamped with the Stop's time
+	});
+});
+
 describe("a job stopped and started again (a, b, a) keeps its intervals apart", () => {
 	it("a remainder settles three times, each window inside its own interval", async () => {
 		await startFake();

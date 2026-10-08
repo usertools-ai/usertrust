@@ -217,6 +217,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 			{
 				toolUseId: entry.toolUseId,
 				transferId,
+				...(typeof entry.startedAt === "string" ? { startedAt: entry.startedAt } : {}),
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),

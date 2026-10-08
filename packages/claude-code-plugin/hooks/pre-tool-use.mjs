@@ -524,6 +524,7 @@ async function reserve(input) {
 				await recordPending(sessionId, agentId, {
 					toolUseId: input.tool_use_id ?? null,
 					transferId: json.transferId,
+					startedAt: new Date(callMs).toISOString(),
 					estimatedInputTokens,
 					...(settlesAtEstimate
 						? {}

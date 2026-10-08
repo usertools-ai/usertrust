@@ -40,6 +40,8 @@ import { sanitize, stateRoot } from "./lib.mjs";
 /** 1-128 of `[A-Za-z0-9._:-]`: usertrust core's `PRINCIPAL_FIELD_PATTERN`, pinned by a test. */
 export const JOB_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
+/** A stamp this far behind the line before it is a clock step, not two appenders racing. */
+export const CLOCK_STEP_MS = 1_000;
 /** The reason of a log whose last line was cut short. */
 export const TORN_REASON = "the last line is torn (it has no newline)";
 /** How long a hook waits before it reads a torn log once more. */
@@ -79,6 +81,9 @@ export function parseJobLog(text, sessionId) {
 	// so a stamp that runs backwards (a clock step, a late writer) cannot place a `start` before
 	// a line that precedes it in the file.
 	let effectiveMs = Number.NEGATIVE_INFINITY;
+	// Lines whose stamp ran BACKWARDS by more than a benign inversion between concurrent
+	// appenders: the clock stepped, and attribution around them is uncertain.
+	const clockSteps = [];
 	for (const [i, line] of lines.entries()) {
 		let rec;
 		try {
@@ -108,7 +113,16 @@ export function parseJobLog(text, sessionId) {
 		) {
 			return { state: "invalid", reason: `line ${i + 1} has a bad ts` };
 		}
-		const tsMs = Math.max(Date.parse(rec.ts), effectiveMs);
+		const rawMs = Date.parse(rec.ts);
+		if (effectiveMs - rawMs > CLOCK_STEP_MS) {
+			clockSteps.push({
+				line: i + 1,
+				rawMs,
+				effectiveMs,
+				bySeconds: Math.round((effectiveMs - rawMs) / 1000),
+			});
+		}
+		const tsMs = Math.max(rawMs, effectiveMs);
 		if (rec.op === "start" && !(typeof rec.job === "string" && JOB_ID.test(rec.job))) {
 			return { state: "invalid", reason: `line ${i + 1} has a bad job id` };
 		}
@@ -121,7 +135,7 @@ export function parseJobLog(text, sessionId) {
 			job: rec.op === "start" ? rec.job : null,
 		});
 	}
-	return { state: "ok", events, last: events[events.length - 1] };
+	return { state: "ok", events, last: events[events.length - 1], clockSteps };
 }
 
 /** The job open at `tMs`: every line applies strictly AFTER its own ts. */
@@ -228,7 +242,7 @@ async function readParsed(log, sessionId) {
 	}
 }
 
-/** Append `rec` as one complete line, one write, fsync'd. */
+/** Append `rec` as one complete line, in one write (no fsync: only SessionStart's line is synced). */
 async function appendLine(log, rec) {
 	await appendFile(log, `${JSON.stringify(rec)}\n`, { flag: "a", mode: 0o600 });
 }
@@ -709,7 +723,8 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 		// that ran during this job) is not its usage time.
 		if (w.kind === "would_block" && typeof w.job === "string" && JOB_ID.test(w.job)) continue;
 		const sid = typeof w.session === "string" ? w.session : null;
-		const t = ms(w.started ?? w.at);
+		// An explicit null is a start nobody knows: unresolved, never the time it was written.
+		const t = w.started === null ? Number.NaN : ms(w.started ?? w.at);
 		let unresolved = null;
 		if (sid === null) unresolved = "it names no session";
 		else if (!Number.isFinite(t)) unresolved = "its time is unreadable";
@@ -729,6 +744,22 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 				started: w.started ?? w.at,
 				why: unresolved,
 			});
+		}
+	}
+
+	// A clock that stepped backwards inside a log: attribution around the stepped lines is
+	// uncertain for any job whose interval touches the stretch they were clamped across.
+	for (const [sid, parsed] of parsedLogs) {
+		if (parsed.state !== "ok") continue;
+		const intervals = intervalsBySession.get(sid) ?? [];
+		for (const step of parsed.clockSteps ?? []) {
+			const touches = intervals.some(([from, to]) => from <= step.effectiveMs && to >= step.rawMs);
+			if (touches) {
+				why(
+					`session ${sid}: the clock moved backwards in the job log (line ${step.line}, by ${step.bySeconds} s): attribution around it is uncertain`,
+					{ session: sid, line: step.line, bySeconds: step.bySeconds },
+				);
+			}
 		}
 	}
 
