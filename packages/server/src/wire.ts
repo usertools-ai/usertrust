@@ -6,6 +6,8 @@ import {
 	InsufficientBalanceError,
 	PolicyDeniedError,
 	principalFieldRefusal,
+	RELEASE_CLASSES,
+	usageTimeRefusal,
 } from "usertrust";
 import { z } from "zod";
 
@@ -34,20 +36,40 @@ export const PrincipalSchema = z
 	})
 	.strict();
 
-export const AuthorizeRequestSchema = z.object({
-	model: z.string().min(1),
-	estimatedInputTokens: z.number().int().nonnegative().optional(),
-	maxOutputTokens: z.number().int().positive().optional(),
-	// Per-tier estimates (spec D4 tiers, at authorize): without them a window that is
-	// mostly cache READS is reserved at the cache-WRITE rate. Same integer rule as the
-	// settle-side tiers; omitted → 0, the pre-existing hold.
-	estimatedCacheReadTokens: z.number().int().nonnegative().optional(),
-	estimatedCacheWriteTokens: z.number().int().nonnegative().optional(),
-	messages: z.array(z.unknown()).optional(),
-	params: z.record(z.string(), z.unknown()).optional(),
-	actor: z.string().optional(),
-	principal: PrincipalSchema.optional(),
+/**
+ * An ISO-8601 UTC instant, under core's own rule (`usageTimeRefusal`): the wire never
+ * restates the pattern, for the reason `PrincipalField` doesn't.
+ */
+const UsageTime = z.string().superRefine((value, ctx) => {
+	const refusal = usageTimeRefusal(value);
+	if (refusal !== undefined) ctx.addIssue({ code: "custom", message: refusal });
 });
+
+export const AuthorizeRequestSchema = z
+	.object({
+		model: z.string().min(1),
+		estimatedInputTokens: z.number().int().nonnegative().optional(),
+		maxOutputTokens: z.number().int().positive().optional(),
+		// Per-tier estimates (spec D4 tiers, at authorize): without them a window that is
+		// mostly cache READS is reserved at the cache-WRITE rate. Same integer rule as the
+		// settle-side tiers; omitted → 0, the pre-existing hold.
+		estimatedCacheReadTokens: z.number().int().nonnegative().optional(),
+		estimatedCacheWriteTokens: z.number().int().nonnegative().optional(),
+		messages: z.array(z.unknown()).optional(),
+		params: z.record(z.string(), z.unknown()).optional(),
+		actor: z.string().optional(),
+		principal: PrincipalSchema.optional(),
+		// Capability `job`: which job the work is for (a LABEL, never a payer), the
+		// job state when the caller's log could not be trusted, and when the usage this
+		// hold covers began. Zod strips unknown keys, so an older server drops all three
+		// in silence: a client sends them only to a server that lists `job`.
+		job: PrincipalField.optional(),
+		jobState: z.literal("invalid").optional(),
+		usageFrom: UsageTime.optional(),
+	})
+	.refine((r) => r.job === undefined || r.jobState === undefined, {
+		message: "jobState cannot accompany a job",
+	});
 
 export const SettleRequestSchema = z.object({
 	transferId: z.string().min(1),
@@ -69,6 +91,14 @@ export const SettleRequestSchema = z.object({
 	// HTTP settle carrying Ollama eval_duration returns 200 with the field
 	// gone. Not .int() — core accepts any finite non-negative number.
 	computeMs: z.number().finite().nonnegative().optional(),
+	// Capability `job`. The job and the usage START belong to the AUTHORIZE capture and
+	// nothing else: `job`/`jobState` are accepted here only to be checked against it
+	// (a mismatch is a 400), and `usageFrom` is accepted only to be REFUSED, so no record
+	// can carry two different values. `usageTo` is the one genuine settle-side fact.
+	job: PrincipalField.optional(),
+	jobState: z.literal("invalid").optional(),
+	usageFrom: z.never().optional(),
+	usageTo: UsageTime.optional(),
 });
 
 export const AbortRequestSchema = z.object({
@@ -85,6 +115,10 @@ export const AbortRequestSchema = z.object({
 export const ReleaseRequestSchema = z.object({
 	transferId: z.string().min(1),
 	reason: z.string().optional(),
+	// Capability `job`. WHY the hold was given back, as a closed set the client derives from
+	// its own hold state, recorded verbatim on the `hold_released` record. The free-text
+	// `reason` can never prove a released hold spent nothing; only `unused` can.
+	releaseClass: z.enum(RELEASE_CLASSES).optional(),
 });
 
 export type AuthorizeRequest = z.infer<typeof AuthorizeRequestSchema>;

@@ -47,6 +47,10 @@ const SERVER_CAPABILITIES = Object.freeze([
 	"hold-expiry",
 	"release",
 	"cache-write-1h",
+	// `job`: authorize accepts `job`/`jobState`/`usageFrom` and settle accepts
+	// `usageTo` (and a `job`/`jobState` it must agree with). All recorded verbatim on
+	// the audit records, none a pricing input, none selecting a wallet.
+	"job",
 ]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
@@ -76,6 +80,12 @@ interface PendingEntry {
 	 * would otherwise state more life than the hold has.
 	 */
 	startedMono: number;
+	/**
+	 * The job labels this hold was AUTHORIZED with, kept by the server from its own
+	 * parse of the authorize body: what a settle's `job` is checked against, and the
+	 * floor of its `usageTo`. Never read from the handle, which is the caller's.
+	 */
+	labels: { job?: string; jobState?: "invalid"; usageFrom?: string };
 }
 
 /**
@@ -215,7 +225,17 @@ export function createUsertrustServer(opts: {
 		const governor = await pool.get(tenant);
 		try {
 			const auth = await governor.authorize(parsed.data);
-			const entry: PendingEntry = { auth, tenantId: tenant.id, createdAt, startedMono };
+			const entry: PendingEntry = {
+				auth,
+				tenantId: tenant.id,
+				createdAt,
+				startedMono,
+				labels: {
+					...(parsed.data.job === undefined ? {} : { job: parsed.data.job }),
+					...(parsed.data.jobState === undefined ? {} : { jobState: parsed.data.jobState }),
+					...(parsed.data.usageFrom === undefined ? {} : { usageFrom: parsed.data.usageFrom }),
+				},
+			};
 			pending.set(auth.transferId, entry);
 			bus.publish(tenant.id, {
 				type: "authorized",
@@ -266,10 +286,32 @@ export function createUsertrustServer(opts: {
 			sendJson(res, 400, { error: "bad_request", reason: "invalid settle request" });
 			return;
 		}
-		const { transferId, ...usage } = parsed.data;
+		const { transferId, job, jobState, ...usage } = parsed.data;
 		const entry = pending.get(transferId);
 		if (!entry || entry.tenantId !== tenant.id) {
 			sendJson(res, 404, { error: "not_found", reason: "unknown transferId" });
+			return;
+		}
+		// The record carries the AUTHORIZE capture's labels. A settle that names a
+		// different job (or job state) is refused BEFORE the claim, so nothing is written
+		// and the hold stays settleable. A legitimate client never trips this: it settles
+		// a hold under the job the hold was authorized with.
+		if (
+			(job !== undefined && job !== entry.labels.job) ||
+			(jobState !== undefined && jobState !== entry.labels.jobState)
+		) {
+			sendJson(res, 400, {
+				error: "bad_request",
+				reason: "settle job differs from the hold's job",
+			});
+			return;
+		}
+		if (
+			usage.usageTo !== undefined &&
+			entry.labels.usageFrom !== undefined &&
+			Date.parse(entry.labels.usageFrom) > Date.parse(usage.usageTo)
+		) {
+			sendJson(res, 400, { error: "bad_request", reason: "usageTo precedes the hold's usageFrom" });
 			return;
 		}
 		// Atomic claim: first concurrent caller wins; a governor failure re-inserts
@@ -350,7 +392,7 @@ export function createUsertrustServer(opts: {
 			sendJson(res, 400, { error: "bad_request", reason: "invalid release request" });
 			return;
 		}
-		const { transferId, reason } = parsed.data;
+		const { transferId, reason, releaseClass } = parsed.data;
 		const entry = pending.get(transferId);
 		if (!entry || entry.tenantId !== tenant.id) {
 			// "unknown transferId", never "unknown route": a client that could not read this
@@ -364,7 +406,7 @@ export function createUsertrustServer(opts: {
 		let outcome: ReleaseOutcome;
 		try {
 			const governor = await pool.get(tenant);
-			outcome = await governor.release(entry.auth, reason);
+			outcome = await governor.release(entry.auth, reason, { releaseClass });
 		} catch (err) {
 			pending.set(transferId, entry);
 			const mapped = toHttpError(err);

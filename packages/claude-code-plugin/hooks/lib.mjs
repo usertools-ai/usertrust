@@ -26,7 +26,7 @@
 // (<safeSession>__<safeAgent>__<safeCall>.json). Each hold is then claimed,
 // settled, journalled and cleared through the path its listing found, so a 1.4.0
 // record is ended through its own name, once.
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
 	appendFile,
 	link,
@@ -210,7 +210,17 @@ export function modeAnnouncement() {
  * written, so no note claims a record that is not there.
  */
 export async function recordWatchEvent(event) {
-	const line = JSON.stringify({ at: new Date().toISOString(), ...event });
+	// `started` is when the EVENT'S OWN CALL began; `at` is when this record was written. EVERY
+	// caller must say its own `started` (an ISO time), or `null` when it is not known. There is
+	// no default: this hook's start is the call's start only for a PreToolUse event, and a
+	// default of it stamped other writers' records with the Stop's time, which could land the
+	// event in a later job while the job it belonged to read clean. An omitted `started` is
+	// UNKNOWN (null), which counts against every job.
+	const line = JSON.stringify({
+		at: new Date().toISOString(),
+		...event,
+		started: event.started === undefined ? null : event.started,
+	});
 	try {
 		await mkdir(stateRoot(), { recursive: true });
 		await appendFile(watchLogPath(), `${line}\n`, { mode: 0o600 });
@@ -257,6 +267,15 @@ export function useHookBudget(ms) {
 /** A share of this hook's budget: the time limits of its steps scale with it. */
 export function budgetShare(fraction) {
 	return Math.floor(hookBudgetMs * fraction);
+}
+
+/**
+ * When this hook process started (epoch ms): the moment it RECEIVED the call. A job is
+ * resolved at this time and no later, so a `usertrust-job` switch that lands while the hook
+ * awaits a health probe or a log read cannot move the call to the new job.
+ */
+export function hookStartedAt() {
+	return HOOK_STARTED_AT;
 }
 
 /** Milliseconds left in this hook's budget (negative once it is spent). */
@@ -336,6 +355,10 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				toolUseId: entry.toolUseId ?? null,
 				transferId: entry.transferId,
 				agentId: String(agentId ?? "main"),
+				// When the CALL was received, kept on EVERY hold whether or not the server honours
+				// `job`: a give-back at Stop that has to write a gap places it by this time, never
+				// by the Stop's own.
+				...(typeof entry.startedAt === "string" ? { startedAt: entry.startedAt } : {}),
 				// Persist the authorize-time input estimate so settle can price both
 				// legs. Without it, post-tool-use sent only outputTokens and a large
 				// result priced above the 1-token hold (AUD-004).
@@ -348,6 +371,9 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				// was authorized at, the transcript message ids assigned to it, and their
 				// summed counts.
 				...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
+				// The job labels this hold was authorized with: what its settle names and what
+				// a replacement hold must carry (the labels belong to the HOLD, not the clock).
+				...jobHoldFields(entry),
 			}),
 		);
 	} catch (err) {
@@ -355,6 +381,35 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 		throw err;
 	}
 	return path;
+}
+
+/**
+ * A give-back of a hold whose call RAN (or may have) without a confirmed charge is a GAP:
+ * metered usage the ledger cannot vouch for. `started` is when the call began (the hold's
+ * own `usageFrom`), so a job switch that lands later cannot move it to another job.
+ */
+export async function recordUnconfirmedCall(sessionId, held, releaseClass) {
+	await recordWatchEvent({
+		kind: "gap",
+		mode: guardMode(),
+		session: sessionId,
+		agent: held.agentId ?? "main",
+		tool: "(unconfirmed)",
+		reason:
+			releaseClass === "call-ran"
+				? "the call ran and its charge is unconfirmed (its settle went unanswered)"
+				: "the call may have run and was never charged (no PostToolUse settle)",
+		releaseClass,
+		// The call's own start: the hold's usage start, else the time it was received. With NEITHER
+		// (an older hold) the time is UNKNOWN, and a gap with no time counts against every job; it
+		// is never stamped with this Stop's time, which could put it in a later job.
+		started:
+			typeof held.usageFrom === "string"
+				? held.usageFrom
+				: typeof held.startedAt === "string"
+					? held.startedAt
+					: null,
+	});
 }
 
 /** Errors that mean the state dir's filesystem cannot make hard links. */
@@ -443,6 +498,26 @@ function settlingPath(livePath) {
  * claim names one hold, never whatever file a call's name holds now. Returns the
  * `.settling` path, or null when another hook took it first.
  */
+/**
+ * Claim a hold ONLY to end it: a resumed call's earlier hold, whose call was DEFERRED and never
+ * ran. It is renamed straight into `.releasing`, a name that carries the intent, so Stop gives
+ * it back as `unused` with no gap, and no state between the claim and the intent exists to be
+ * caught by a Stop or a kill. (Marking the `.json` first would let a PostToolUse claim inherit
+ * the mark.) Returns the claimed path, or null when another hook claimed the hold first.
+ */
+export async function claimForRelease(live) {
+	const now = new Date();
+	await utimes(live, now, now).catch(() => {});
+	const target = `${live.slice(0, -".json".length)}.releasing`;
+	try {
+		await rename(live, target);
+	} catch (err) {
+		if (err?.code === "ENOENT") return null;
+		throw err;
+	}
+	return target;
+}
+
 export async function claimForSettle(live) {
 	const now = new Date();
 	await utimes(live, now, now).catch(() => {});
@@ -471,7 +546,11 @@ async function settlingRecords(sessionId, agentId) {
 	}
 	const held = [];
 	for (const name of names) {
-		if (!name.startsWith(prefix) || !name.endsWith(".settling")) continue;
+		// `.settling`: its one settle was attempted. `.releasing`: the claim only ENDS a deferred
+		// call's hold. The intent is in the NAME the hold was claimed into, so it is atomic with
+		// the claim: a Stop or a kill between the two can never read it as a settle attempt.
+		const releasing = name.endsWith(".releasing");
+		if (!name.startsWith(prefix) || !(releasing || name.endsWith(".settling"))) continue;
 		const path = join(stateDir(), name);
 		try {
 			const body = JSON.parse(await readFile(path, "utf-8"));
@@ -482,6 +561,12 @@ async function settlingRecords(sessionId, agentId) {
 				path,
 				transferId: body.transferId,
 				toolUseId: body.toolUseId ?? null,
+				agentId: sanitize(body.agentId ?? "main"),
+				...jobHoldFields(body),
+				...(typeof body.startedAt === "string" ? { startedAt: body.startedAt } : {}),
+				// Why the hold was claimed: `release` when its call was deferred and the claim only
+				// serves to end the hold (the hold was claimed into `.releasing`), otherwise a settle attempt.
+				...(releasing ? { intent: "release" } : {}),
 				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
 				transcript: body.usage === "transcript",
 				// Which server and tenant made the hold (`tenantBinding`), as written.
@@ -503,7 +588,12 @@ async function settlingRecords(sessionId, agentId) {
  * transcript hold's `.settling` belongs to the transcript journal instead.
  */
 async function settlingEstimates(sessionId, agentId) {
-	return (await settlingRecords(sessionId, agentId)).filter((record) => !record.transcript);
+	// A `.releasing` hold (claimed only to END a deferred call's earlier hold) is Stop's to give
+	// back whatever mode made it: it has no usage by construction, so the transcript/estimate split
+	// does not apply, and nothing else (the journal, the sweep) ever reads it.
+	return (await settlingRecords(sessionId, agentId)).filter(
+		(record) => !record.transcript || record.intent === "release",
+	);
 }
 
 const COUNT_FIELDS = [
@@ -577,6 +667,8 @@ export async function listPending(sessionId, agentId) {
 				...(typeof parsed.serverUrl === "string" ? { serverUrl: parsed.serverUrl } : {}),
 				...(typeof parsed.keyHash === "string" ? { keyHash: parsed.keyHash } : {}),
 				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
+				...jobHoldFields(parsed),
+				...(typeof parsed.startedAt === "string" ? { startedAt: parsed.startedAt } : {}),
 				mtimeMs,
 			});
 		} catch {
@@ -690,6 +782,78 @@ export async function refreshUnknownServerCapabilities() {
 }
 
 /**
+ * Which job labels a record carries, off a hold's entry or its file: strings only,
+ * so a corrupt file can never put a non-string into a request. Absent keys stay
+ * absent (a hold authorized without the `job` capability records none).
+ */
+export function jobHoldFields(entry) {
+	const out = {};
+	for (const key of ["job", "jobState", "usageFrom", "usageTo"]) {
+		if (typeof entry?.[key] === "string" && entry[key] !== "") out[key] = entry[key];
+	}
+	return out;
+}
+
+// Under jobs/, beside the logs: the state dir's top level lists holds, and a server that
+// never offered `job` must leave it exactly as it was.
+/**
+ * Replace `path` with `text` ATOMICALLY: a temp file in the same directory, then rename(2) over
+ * the name. A reader sees the old content or the new, never an empty or half-written file
+ * (writeFile truncates in place first). `beforeCommit` is a test seam between the two steps.
+ */
+export async function writeFileAtomic(path, text, { mode = 0o600, beforeCommit } = {}) {
+	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	try {
+		await writeFile(tmp, text, { mode });
+		await beforeCommit?.();
+		await rename(tmp, path);
+	} catch (err) {
+		await unlink(tmp).catch(() => {});
+		throw err;
+	}
+}
+
+const JOB_CAPABILITY_FILE = join("jobs", "capability.json");
+let jobCapableRead;
+
+/**
+ * Whether the server honours the `job` capability (job, jobState, usageFrom, usageTo).
+ * An older server's schemas STRIP those keys in silence, so they are sent only to a
+ * server known to honour them. Unlike an idempotency key, sending them to a server
+ * that does not is HARMLESS (the record is simply untagged, and the coverage check
+ * reports the untagged record as a known gap), so this one bit may be remembered per
+ * server URL for the case where the health probe fails: losing attribution to a
+ * probe timeout is the silent loss this exists to avoid. The idempotency-key and
+ * release capabilities are NEVER cached: a stale "honoured" there double-posts.
+ * A probe that ANSWERS always overwrites the remembered bit.
+ */
+export function jobCapable(capabilities) {
+	jobCapableRead ??= (async () => {
+		const file = join(stateDir(), JOB_CAPABILITY_FILE);
+		const url = serverBase();
+		let known = {};
+		try {
+			const parsed = JSON.parse(await readFile(file, "utf-8"));
+			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) known = parsed;
+		} catch {
+			// unreadable or absent: nothing remembered
+		}
+		if (capabilities === null) return known[url] === true;
+		const honoured = capabilities.has("job");
+		if (known[url] !== honoured && (honoured || known[url] !== undefined)) {
+			try {
+				await mkdir(join(stateDir(), "jobs"), { recursive: true, mode: 0o700 });
+				await writeFileAtomic(file, JSON.stringify({ ...known, [url]: honoured }));
+			} catch {
+				// the bit is a convenience: a failed write loses only the memory
+			}
+		}
+		return honoured;
+	})();
+	return jobCapableRead;
+}
+
+/**
  * What the server honours (`/v1/health` `capabilities`), read once per hook
  * process. Never cached on disk: a cache could still claim keys after the server
  * was downgraded to one that strips them. Resolves to a Set — empty for an older
@@ -760,10 +924,19 @@ export function isAlreadySettled(response) {
  * the capabilities unknown, release is tried first: only a server that answers it
  * has no such route gets the abort.
  */
-export async function releaseHold(transferId, reason, { timeoutMs = 5000 } = {}) {
+export async function releaseHold(transferId, reason, { timeoutMs = 5000, releaseClass } = {}) {
 	const capabilities = await serverCapabilities();
 	if (capabilities === null || capabilities.has("release")) {
-		const released = await serverRequest("/v1/release", { transferId, reason }, { timeoutMs });
+		// WHY the hold is given back, as the closed set the server records
+		// (`releaseClass`, capability `job`): the only thing that can prove a released hold
+		// spent nothing. Sent only to a server that honours it; a release that states none
+		// proves nothing.
+		const cls = releaseClass !== undefined && (await jobCapable(capabilities));
+		const released = await serverRequest(
+			"/v1/release",
+			{ transferId, reason, ...(cls ? { releaseClass } : {}) },
+			{ timeoutMs },
+		);
 		if (capabilities !== null || !isUnknownRoute(released))
 			return { route: "release", ...released };
 	}
@@ -779,7 +952,9 @@ export async function releaseHold(transferId, reason, { timeoutMs = 5000 } = {})
  * as a breaker failure. Without `release`, the hold is left to the server's
  * pending-hold sweep. Never throws; never echoes the id, which may be anything.
  */
-export async function giveBackInvalid(transferId, timeoutMs) {
+export async function giveBackInvalid(transferId, timeoutMs, releaseClass = "unused") {
+	// The default: no call ever ran under a hold whose id came back malformed at PreToolUse.
+	// A caller whose call DID run (PostToolUse's replacement hold) says so, `call-ran`.
 	if (typeof transferId !== "string" || transferId === "") return;
 	const capabilities = await serverCapabilities();
 	if (!capabilities?.has("release")) {
@@ -791,7 +966,11 @@ export async function giveBackInvalid(transferId, timeoutMs) {
 	try {
 		const response = await serverRequest(
 			"/v1/release",
-			{ transferId, reason: "its transferId is not a valid id" },
+			{
+				transferId,
+				reason: "its transferId is not a valid id",
+				...((await jobCapable(capabilities)) ? { releaseClass } : {}),
+			},
 			{ timeoutMs },
 		);
 		if (response.status !== 200) {
@@ -815,9 +994,9 @@ export async function giveBackInvalid(transferId, timeoutMs) {
  * server's pending-TTL sweep. Never throws. Returns whether the give-back was
  * confirmed.
  */
-export async function giveBack(transferId, reason, timeoutMs) {
+export async function giveBack(transferId, reason, timeoutMs, releaseClass) {
 	try {
-		const response = await releaseHold(transferId, reason, { timeoutMs });
+		const response = await releaseHold(transferId, reason, { timeoutMs, releaseClass });
 		if (response.status === 200) return true;
 		const why = response.json?.reason ?? response.json?.error;
 		say(
@@ -853,9 +1032,17 @@ export async function cleanup(sessionId, agentId) {
 			say(`usertrust: out of time; hold ${entry.transferId} left for Stop/TTL`);
 			return;
 		}
+		// What the client KNOWS about this hold decides its class, never the reason text. A
+		// transcript-mode hold with no assigned usage reserved a window of messages that is
+		// posted by message, so nothing hides behind it: `unused`. An estimate-mode hold still
+		// `.json` at Stop never reached PostToolUse: a failed or interrupted call (#264 A) that
+		// MAY have run and was never charged. That is unconfirmed, and it is a gap.
+		const ranUnconfirmed = entry.usage !== "transcript";
+		if (ranUnconfirmed) await recordUnconfirmedCall(sessionId, entry, "call-unconfirmed");
 		try {
 			const response = await releaseHold(entry.transferId, "session ended with unsettled hold", {
 				timeoutMs,
+				releaseClass: ranUnconfirmed ? "call-unconfirmed" : "unused",
 			});
 			if (response.status !== 200) {
 				say(`usertrust: ${response.route} ${entry.transferId} returned ${response.status}`);
@@ -876,12 +1063,19 @@ export async function cleanup(sessionId, agentId) {
 			say(`usertrust: out of time; hold ${held.transferId} left for Stop/TTL`);
 			return;
 		}
+		// A claim made only to END a deferred call's hold (`intent: "release"`) is given back as
+		// `unused`: that call never ran, so there is nothing to confirm and no gap.
+		const releasing = held.intent === "release";
+		// Otherwise the call RAN and its one settle went unanswered: the charge is unconfirmed, and a
+		// give-back of the hold proves nothing about what was charged. Written down as a gap.
+		if (!releasing) await recordUnconfirmedCall(sessionId, held, "call-ran");
 		try {
 			const response = await releaseHold(
 				held.transferId,
 				"session ended after an unanswered settle",
 				{
 					timeoutMs,
+					releaseClass: releasing ? "unused" : "call-ran",
 				},
 			);
 			if (response.status !== 200 && response.status !== 404) {

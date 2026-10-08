@@ -100,6 +100,13 @@ export interface DenialEventFields {
 	 * input read at the boundary. Absent (no key) when the call named no principal.
 	 */
 	principal?: Principal | undefined;
+	/**
+	 * Which job the refused call was for (`shared/job.ts`) — the governor's frozen
+	 * capture. A label, never a payer; absent (no key) for an unlabelled call.
+	 */
+	job?: string | undefined;
+	jobState?: "invalid" | undefined;
+	usageFrom?: string | undefined;
 }
 
 export interface AppendDenialEventArgs {
@@ -218,6 +225,9 @@ function buildPolicyDeniedData(
 		...(promptHash !== undefined ? { promptHash, promptHashAlg: PROMPT_HASH_ALG } : {}),
 		...(fields.costCenter !== undefined ? { costCenter: fields.costCenter } : {}),
 		...(fields.principal !== undefined ? { principal: fields.principal } : {}),
+		...(fields.job !== undefined ? { job: fields.job } : {}),
+		...(fields.jobState !== undefined ? { jobState: fields.jobState } : {}),
+		...(fields.usageFrom !== undefined ? { usageFrom: fields.usageFrom } : {}),
 		...(fields.endpointClass !== undefined ? { endpointClass: fields.endpointClass } : {}),
 		error: safeErrorText(error.message),
 		...(fields.transferId !== undefined ? { transferId: fields.transferId } : {}),
@@ -244,6 +254,9 @@ function buildLedgerRejectedData(
 		...(fields.estimatedCost !== undefined ? { estimatedCost: fields.estimatedCost } : {}),
 		...(fields.costCenter !== undefined ? { costCenter: fields.costCenter } : {}),
 		...(fields.principal !== undefined ? { principal: fields.principal } : {}),
+		...(fields.job !== undefined ? { job: fields.job } : {}),
+		...(fields.jobState !== undefined ? { jobState: fields.jobState } : {}),
+		...(fields.usageFrom !== undefined ? { usageFrom: fields.usageFrom } : {}),
 		...(fields.endpointClass !== undefined ? { endpointClass: fields.endpointClass } : {}),
 		error: safeErrorText(error.message),
 	};

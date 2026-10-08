@@ -717,6 +717,96 @@ surface and still records `actor: "local"`. `ledger/engine.ts` — which has no 
 (see Known drift) — predates this scheme with its own `deriveUserId64`/`fnv1a32` tags; if it is ever
 wired in, it must adopt `principalLedgerTags`, or one ledger will carry two incompatible schemes.
 
+**A job is a label, never a payer.** `AuthorizeParams.job` (`shared/job.ts`) says WHICH JOB a
+spend was for, so per-job cost is a query over the chain. It never selects the account a hold
+debits, never enters the policy gate and is never a pricing input. It is validated by
+`principalFieldRefusal` (one rule for the governor and the wire), and it takes no `user_data` tag:
+all three slots belong to the principal. `jobState: "invalid"` says the caller's job state could not
+be trusted, so a record with no `job` and that state reads "unknown", not "no job"; it is exclusive
+with `job`. `usageFrom` / `usageTo` are the window of USAGE a record covers (ISO-8601 UTC), never the
+time the record was appended.
+
+*Captured once, read from the capture.* `authorize` captures `job`, `jobState` and `usageFrom`
+exactly once (`captureJob`: read once, validated, frozen, a `TypeError` before any I/O) into
+`capture.jobAudit`, and every record the hold produces spreads it: `llm_call`, `llm_call_failed`,
+`hold_released` (a release, a TTL expiry, `destroy()`), `settlement_ambiguous`,
+`settlement_shortfall`, `policy_denied`, `ledger_rejected`, and the rotated receipt. Release and
+expiry take no input of their own and inherit the hold's labels from the capture. A settle adds only
+`usageTo` (`captureUsageTo`, validated BEFORE the claim, so a bad value changes nothing);
+`Authorization.job` is reporting only and the governor never reads it back.
+*Prevents:* a caller relabelling a spend between the two phases through its own object or handle,
+and a release or expiry record losing the job its hold was reserved for.
+
+*usertrust-server's rules (capability `job`).* `/v1/authorize` accepts `job`, `jobState` and
+`usageFrom`; `/v1/settle` accepts `usageTo`, and `job` / `jobState` only to CHECK them. The server
+keeps its own copy of the authorize labels and refuses (400, nothing written, the hold still
+settleable) a settle that names a different job, or a `usageTo` before the hold's `usageFrom`; a settle
+that states `usageFrom` is refused outright. The usage START has exactly one source, the authorize
+capture, so no record can carry two different "from" values and a coverage check never has to choose.
+*Prevents:* the silent strip: zod drops unknown keys, so an older server records none of these and
+answers 200. A client therefore sends them only to a server that lists `"job"` in `/v1/health`
+`capabilities`, and a coverage check treats an untagged record as untagged, never as covered.
+
+*The Claude Code plugin's side* (`hooks/job-log.mjs`) is where the job comes from: a per-session,
+append-only log (`<state>/jobs/<session_id>.jsonl`) written by the `usertrust-job` CLI and the
+SessionStart hook with NO lock: every write is ONE complete line appended with ONE O_APPEND write, which POSIX
+places at the end of the file atomically on a local filesystem (declared residual: a non-local filesystem such
+as NFS). The ORDER of a log is the POSITION of its lines, not their stamps: a line's effective time is the
+running maximum of the stamps so far, so a late-stamped line can never be placed before a line that precedes it.
+The reader is the authority and only reads: a partial line followed by more lines, a torn last line, a repeated
+`session-start` or an unknown op make the log INVALID (`jobState: "invalid"` on the records, a named known gap
+in coverage), and nothing ever truncates, repairs or reorders it. A hook that sees a torn last line looks once
+more after a short pause (an append may be in flight) and otherwise treats THAT call's job as unknown; the next
+call reads afresh. `capability.json` is replaced atomically (a temp file, then `rename(2)`). A record's job is the one
+open at the time its USAGE happened (a hold: its PreToolUse; a transcript message: its own
+timestamp), never the one open at settle time, so a remainder spanning a switch settles once per job.
+`jobCoverage()` in that module is a DIAGNOSTIC, not a certification: it reports the job's tagged cost and a
+list of KNOWN GAPS, named reasons the figure may be incomplete, each with its evidence. An empty list means
+only that none of its checks found anything. Nothing in this repository, `usertrust-job coverage` and anything
+that reads its output included, may label a job's cost exact, complete or certified; a sound certification
+needs a scope decision (which sessions could hold the job?) that has not been made, and the check was a
+deny-list over evidence shapes that kept leaking new shapes. Its generators: a record tagged with the job
+that lies outside an interval of the job in a valid log of its own session (a session with none, or no
+usable log, puts all of them outside); a gap, `would_block`, untagged call or unrecognised record that cannot
+be placed elsewhere through a valid log of its own session (a log-less session's usage is a gap for every
+job, wherever it falls); an incomplete usage window; an invalid job state; a denied request of the job; a
+transfer known only through `settlement_*` metadata or with more than one `llm_call`; a released hold
+without `releaseClass: "unused"`; an interval with no stop yet (the job is still running); an evidence line
+that could not be parsed (never a silent drop); and a contributing session without a usable log. An interval
+is (start, stop], matching how the hooks resolve a time (a line applies strictly after its own ts), and
+cost counts each transfer once, from its `llm_call`. Every kind of evidence (an `llm_call`, a give-back, a denial, a `would_block`, a gap,
+anything else) goes through ONE placement function: its own session's valid log places it, a tag it carries is a claim
+and never a placement (a foreign tag inside this job's interval is a gap for this job), and one whose session has no
+usable log is a gap for every job. A test fails if anything else decides where evidence falls.
+
+*A release states WHY, as a closed set.* `/v1/release` and `Governor.release()` take an optional
+`releaseClass`: `unused` (no call ran under the hold, so no usage hides behind it), `call-unconfirmed`
+(its call may have run and never reported back) or `call-ran` (it ran and its one settle went unanswered).
+The client derives it from its own hold state, never from the reason text; the governor records it
+verbatim on `hold_released`. A release that states none (a TTL expiry, a shutdown, an older client) proves
+nothing, and the coverage diagnostic reports it as a released hold whose usage is unconfirmed. The plugin
+sends `unused` only where it KNOWS no call ran: a superseded or never-recorded hold, a transcript-mode hold
+with no assigned usage (its call's usage is posted by message), a resumed call's earlier hold. An estimate
+hold still `.json` at Stop never reached PostToolUse (a failed or interrupted call): it is
+`call-unconfirmed` (a tool the user DENIES at the permission prompt leaves such a hold too, and cannot be told
+apart from a crash, so it reads the same, correctly), and one left `.settling` is `call-ran`; both are also written to `watch.jsonl` as a gap
+record, because a give-back of a hold whose call ran is metering the ledger cannot vouch for.
+A hold claimed only to END a deferred call's earlier hold is renamed straight into `.releasing`, a name that
+carries the intent (never `.settling` and then a mark), so Stop gives it back as `unused` with no gap. Every
+`watch.jsonl` record states its own `started` (the call's start, or `null` when unknown, which counts against every
+job); the shared writer has no default of its own, because the hook that writes a record is not always the hook
+that began the call. A stale `.settling` estimate hold swept by the journal writes its gap first. A job log whose
+latest stamp is more than a clock step AHEAD of the hook's clock makes that call's job unknown.
+Declared residuals: (1) usage that names no session (a vault shared with non-plugin clients) is a known gap for EVERY job,
+at any time, because no log can place it; the trade-off is the same as for a log-less session. (2) A clock fast by more
+than a second when a job op is written, then corrected, is detected only while the fast stamp is still ahead of the
+reading clock. Every labeller goes through ONE function (`labelsFor`), which then labels the call unknown, and a suspect
+read leaves a durable time-less gap record (once per session and latest stamp) that counts against every job. A skew that
+NO hook observed while it lasted (no PreToolUse or Stop ran before the stamp passed) can still write a wrong job label; a
+real fix needs writer-side information (a monotonic stamp). (3) SessionStart creates the log O_EXCL and then writes its one line: a kill between the two leaves an empty
+log, which reads as none (job tagging is off for that session; it fails honest, never wrong). (4) Two server URLs updating `capability.json`
+at once can lose one bit, which yields untagged calls and so gaps, never a false clean.
+
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
 `LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless
 `Authorization` publishes the same value as `holdTimeoutMs` (absent in dry run).

@@ -114,6 +114,8 @@ describe("pre-tool-use hook", () => {
 			transferId: "tx_1",
 			agentId: "main",
 			estimatedInputTokens: 4,
+			// When the call was received: kept on every hold, whatever the server honours.
+			startedAt: expect.any(String),
 			serverUrl: `http://127.0.0.1:${port}`,
 			keyHash: createHash("sha256").update("k").digest("hex").slice(0, 16),
 		});
