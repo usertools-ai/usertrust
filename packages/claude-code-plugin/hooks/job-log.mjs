@@ -150,10 +150,15 @@ export async function resolveJob(sessionId) {
 		parsed,
 		/** Labels for a call or message at epoch-ms `tMs`. */
 		at: (tMs) => labelsAt(parsed, tMs),
-		/** The ts (epoch ms) of the first `start` or `stop` after `tMs`, or null: where a job's call ends. */
+		/**
+		 * The ts (epoch ms) of the first `start` or `stop` at or after `tMs`, or null: where a job's
+		 * call ends. AT, not just after: a line applies strictly after its own ts, so one written in
+		 * the very millisecond a call began still leaves that call with the earlier job, and its
+		 * window must end there.
+		 */
 		boundaryAfter: (tMs) => {
 			if (parsed.state !== "ok") return null;
-			const next = parsed.events.find((e) => e.op !== "session-start" && e.tsMs > tMs);
+			const next = parsed.events.find((e) => e.op !== "session-start" && e.tsMs >= tMs);
 			return next === undefined ? null : next.tsMs;
 		},
 		/**
@@ -449,9 +454,11 @@ export function jobCoverage({ job, logs, records, watch = [] }) {
 		const t = ms(data?.usageTo);
 		return Number.isFinite(f) && Number.isFinite(t) && f <= t ? [f, t] : null;
 	};
-	// A session with a record of the job must have a log to judge it by.
+	// A session with a record of the job must have a log to judge it by. So must one whose
+	// records say their job could not be attributed (`jobState: "invalid"`): its usage may
+	// belong to this job, and with no usable log of its own nothing can say it does not.
 	for (const [sid, mine] of bySession) {
-		if (!mine.some((r) => r?.data?.job === job)) continue;
+		if (!mine.some((r) => r?.data?.job === job || r?.data?.jobState === "invalid")) continue;
 		if (!Object.hasOwn(logs ?? {}, sid)) {
 			reasons.push(`session ${sid}: no job log was supplied`);
 		} else if (parseJobLog(logs[sid], sid).state !== "ok") {

@@ -782,6 +782,51 @@ describe("usertrust-job coverage — the CLI", () => {
 	});
 });
 
+describe("jobCoverage — sessions that could not attribute their usage", () => {
+	const J = "bug-1";
+	const logText =
+		start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null);
+	const ok = {
+		kind: "llm_call",
+		actor: `claude-code:${SID}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost: 5,
+			job: J,
+			principal: { origin: `claude-code:${SID}` },
+			usageFrom: iso(T0 + 2000),
+			usageTo: iso(T0 + 3000),
+		},
+	};
+	const unattributed = {
+		kind: "llm_call",
+		actor: "claude-code:sess-b:main:main",
+		data: {
+			transferId: "tx_2",
+			cost: 9,
+			jobState: "invalid",
+			principal: { origin: "claude-code:sess-b" },
+			usageFrom: iso(T0 + 2000),
+			usageTo: iso(T0 + 3000),
+		},
+	};
+	it("another session whose records are jobState invalid and whose log is missing is NOT exact", async () => {
+		const { jobCoverage } = await lib();
+		const r = jobCoverage({ job: J, logs: { [SID]: logText }, records: [ok, unattributed] });
+		expect(r.exact).toBe(false); // mutant: only sessions with a record of the job are checked
+		expect(r.reasons.join(" ")).toContain("sess-b");
+	});
+	it("a boundary written in the very millisecond a call began still clamps its window", async () => {
+		await writeLog(
+			start(SID, T0) + op(SID, T0 + 100, "start", "job-a") + op(SID, T0 + 500, "start", "job-b"),
+		);
+		const { resolveJob } = await lib();
+		const jobs = (await resolveJob(SID)) as unknown as { boundaryAfter(t: number): number | null };
+		expect(jobs.boundaryAfter(T0 + 500)).toBe(T0 + 500); // mutant: strictly after → null
+		expect(jobs.boundaryAfter(T0 + 501)).toBeNull();
+	});
+});
+
 describe("the lock and the log tail — review hardening", () => {
 	it("a lock whose metadata was never written is broken once it is old enough", async () => {
 		await writeLog(start(SID, T0));
