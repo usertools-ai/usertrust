@@ -1,5 +1,6 @@
 import { ImageResponse } from "next/og";
 import ShareCard, { SHARE_CARD_SIZE } from "../components/share-card";
+import { getKitFonts } from "../lib/kit-fonts";
 import { resolvePageState } from "../lib/resolve";
 
 /**
@@ -9,9 +10,10 @@ import { resolvePageState } from "../lib/resolve";
  * card is broadcast into every link unfurl, and it must not tie a receipt back
  * to whoever it charged (decided 2026-10-05).
  *
- * It renders in the image renderer's default font and fetches nothing, so it
- * renders the same whether or not the brand kit is reachable: see the card's
- * own header for why the brand fonts are not used here.
+ * The brand fonts come from the kit, each checked against its sha384 pin and
+ * decoded (`lib/kit-fonts.ts`). If any fails, the card renders in the
+ * renderer's default font with no mark: it never fails to render, and no
+ * unpinned font ever draws the verdict or the amount.
  *
  * Per-request, not `force-static`: the word depends on live resolver state, and
  * the route's `Cache-Control: no-store` mirrors the page's own rule (D1/R35) —
@@ -33,10 +35,11 @@ interface RouteContext {
 
 export default async function Image({ params }: RouteContext) {
 	const { receiptId } = await params;
-	const state = await resolvePageState(receiptId);
-	return new ImageResponse(<ShareCard state={state} />, {
+	const [state, fonts] = await Promise.all([resolvePageState(receiptId), getKitFonts()]);
+	return new ImageResponse(<ShareCard state={state} brand={fonts !== undefined} />, {
 		width: size.width,
 		height: size.height,
+		...(fonts === undefined ? {} : { fonts }),
 		headers: { "Cache-Control": "no-store" },
 	});
 }
