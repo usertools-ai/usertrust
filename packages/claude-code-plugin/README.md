@@ -43,9 +43,15 @@ export UT_SERVER_KEY="<the key from step 1>"
 
 ## Environment variables
 
+These are read only when `UT_CC_CONFIG` is not set. With it set, the plugin reads
+every setting from one file instead: see [Configuration file](#configuration-file).
+Either way, a session reads its settings once, at its first hook: see
+[One session, one set of settings](#one-session-one-set-of-settings).
+
 | Variable             | Default                  | Meaning                                          |
 | -------------------- | ------------------------ | ------------------------------------------------ |
-| `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server                |
+| `UT_CC_CONFIG`       | unset                    | Path of a [configuration file](#configuration-file); when set, even empty, none of the variables below is read |
+| `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server; requests go to its origin and path, without a trailing `/`, query or fragment |
 | `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
 | `UT_CC_MODE`         | `watch`                  | `enforce` (matched case-insensitively) blocks over-budget calls; any other value is watch-only (see [Modes](#modes-watch-only-by-default)) |
 | `UT_CC_UNIT`         | unset                    | The principal's `unit`, e.g. `platform` (see *Attribution*) |
@@ -59,7 +65,136 @@ export UT_SERVER_KEY="<the key from step 1>"
 > **Caution:** `UT_SERVER_URL` and `UT_SERVER_KEY` are read from the environment,
 > and every PreToolUse authorization sends the tenant key (and tool input as
 > message content) to that URL — point them only at a `usertrust-server` you host
-> and control, never a third-party or untrusted endpoint.
+> and control, never a third-party or untrusted endpoint. A project's settings can
+> set environment variables for every hook, so prefer a
+> [configuration file](#configuration-file), which no variable can redirect.
+
+## Configuration file
+
+Set `UT_CC_CONFIG` to the path of one JSON file, and the plugin reads every
+setting from it:
+
+```sh
+export UT_CC_CONFIG="$HOME/.config/usertrust/claude-code.json"
+```
+
+```json
+{
+  "url": "http://127.0.0.1:4519",
+  "key": "<the key from step 1>",
+  "mode": "watch",
+  "stateDir": "/Users/you/.claude/usertrust-cc"
+}
+```
+
+| Field         | Required | Default             | Meaning (the variable it replaces)                        |
+| ------------- | -------- | ------------------- | --------------------------------------------------------- |
+| `url`         | yes      |                     | `http` or `https` base URL of your usertrust-server, with no user or password in it; requests go to its origin and path, without a trailing `/`, query or fragment (`UT_SERVER_URL`) |
+| `key`         | yes      |                     | Tenant bearer key, visible ASCII (`UT_SERVER_KEY`)        |
+| `mode`        | yes      |                     | `watch` or `enforce`, exactly (`UT_CC_MODE`)              |
+| `stateDir`    | yes      |                     | Absolute path of the state dir (`UT_CC_STATE_DIR`)        |
+| `failOpen`    | no       | `false`             | `true`: in enforce mode, calls proceed while governance is down (`UT_FAIL_OPEN`) |
+| `sendContent` | no       | `true`              | `false` sends `{"redacted":true}` instead of content (`UT_CC_SEND_CONTENT`) |
+| `usage`       | no       | `transcript`        | `estimate` settles per-call estimates only (`UT_CC_USAGE`) |
+| `model`       | no       | `claude-sonnet-4-6` | Model for an estimate hold (`UT_CC_MODEL`)                |
+| `unit`        | no       | unset               | The principal's `unit` (`UT_CC_UNIT`)                     |
+| `role`        | no       | unset               | The principal's `role` (`UT_CC_ROLE`)                     |
+
+**With `UT_CC_CONFIG` set, even to an empty string, the session is configured:**
+every setting comes from the file, and no `UT_*` variable is read, nor
+`CLAUDE_CONFIG_DIR` or `HOME` for the state dir. Fields the plugin does not know
+are ignored. The file is accepted only if all of these hold:
+
+- its path is absolute, and its real path is inside `.config/usertrust/` under
+  your home **as the passwd database gives it**: `$HOME` and `XDG_CONFIG_HOME`
+  are environment, so neither can move it;
+- that directory's real path is its path (no symlinked component), and it is
+  yours, writable by no one else;
+- the file is not a link but a regular file, yours, with no group or other
+  permission bits (`chmod 600`), and at most 64 KiB;
+- it is a JSON object with every required field, and every field it has is valid.
+
+**The environment never reaches a configured session's requests.** Its hooks send
+from a child process that the plugin starts with no node options, in the working
+directory `/`, and with nothing of the environment but Claude Code's own
+`CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`.
+- Node and the C library can reroute or expose a request without any code: a proxy
+  (`NODE_USE_ENV_PROXY`, `HTTP_PROXY`), a CA store (`NODE_TLS_REJECT_UNAUTHORIZED`,
+  `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, …), OpenSSL's config, the resolver
+  (`HOSTALIASES`, `LOCALDOMAIN`, `RES_OPTIONS`), or a variable no one has named
+  yet. None of them applies to that child, so none of them is refused either.
+- One consequence: a server behind a private CA is not supported, because the child
+  does not see `NODE_EXTRA_CA_CERTS`.
+- The child also checks its own environment: holding anything else, it refuses to
+  run and sends nothing.
+- **Configured sessions do not run on Windows yet.** Windows adds `SYSTEMROOT`,
+  `SYSTEMDRIVE` and `TEMP` to a child's environment, with the parent's values, and
+  `SYSTEMROOT` decides where system libraries are found. So on Windows a configured
+  session's hooks start no child, and say why: each tool call is a gap in watch
+  mode, and blocked in enforce mode (with `failOpen`, let through as a gap). A
+  session configured through the environment is unaffected.
+- A hook whose child cannot start, or that fails in any other way, ends as an
+  outage: in enforce mode PreToolUse blocks the call (with `failOpen`, lets it
+  through as a gap), and every other case is a gap. It never exits 1, which Claude
+  Code reads as a non-blocking error, letting the call run with no record.
+
+**Anything else, an empty `UT_CC_CONFIG` included, runs the plugin watch-only and
+key-less.** No request is sent to any server. Each tool call is recorded as a
+`gap` with a fixed reason, such as `config: outside the anchor` or
+`config: field "mode" invalid`, in `watch.jsonl` under that passwd home's
+`.claude/usertrust-cc`, and the session's first line says why. It never falls
+back to the environment, and never enforces. A reason names only the plugin's
+own field names, never a value from the file (a JSON error quotes its input, and
+an OS error can carry a path, so neither is passed on), and the session's first
+line names no value from the file either. A note about a state file the plugin
+cannot write still names that file's path, under the configured `stateDir`.
+
+On Windows, where a file has no POSIX owner or mode bits, the owner and mode
+checks are skipped; the location checks still apply.
+
+**What this protects, and what it does not.** A project's settings can set
+environment variables for every hook. One quiet line (`UT_SERVER_URL`,
+`UT_CC_MODE`, `UT_CC_STATE_DIR`, …) could otherwise send your tenant key to
+another server, switch the mode, turn content back on or move the state dir; a
+configured session ignores all of them. It does not stop CODE from a project's
+settings: a hook, or a variable that loads code (`NODE_OPTIONS`, `PATH`). That
+code runs inside the hook's own process, and can read this file too. Only not
+starting a session in a checkout you have not reviewed stops it. And an
+environment can still point `UT_CC_CONFIG` at another valid file in the same
+directory: keep only configs there you would accept for any session. A host
+that should never block a tool call holds only `watch` configs.
+
+### One session, one set of settings
+
+**A session reads its settings once, at its first hook, and keeps them for its
+life, a resumed session included.** This applies whether they come from the config
+file or the environment. An edit applies to sessions started after it: a new url,
+key, mode or state dir, or a key rotation. Claude Code can apply an environment
+change to a running session, and the state dir holds the session's holds and the
+record of what was already posted. A session moved to another state dir mid-way
+lost holds it had made, and could post again, from a state dir that already
+existed, usage it had already posted.
+
+The settings are kept in a pin: `.local/state/usertrust/sessions/<session id>.json`
+under your home as the passwd database gives it.
+- It is a regular file of yours with no group or other permission bits, in
+  directories that are yours and writable by no one else.
+- A configured session's pin holds the file's settings, key included: the key is in
+  the config file already.
+- An environment session's pin holds the key's hash, never the key. Each hook reads
+  `UT_SERVER_KEY` afresh, and a key changed mid-session is refused, as
+  `pin: key changed`: that hook sends nothing, and its call is recorded as a gap.
+- A pin unused for 30 days is removed when a session starts. A session resumed
+  at or after that removal, or whose pin you delete, is pinned again from the
+  settings then current.
+- A config file that is refused is not pinned: the next hook reads it again.
+
+**A pin that cannot be used runs the hook watch-only and key-less, with a gap.**
+That covers a session id that is not a safe file name, a directory or file that
+fails these checks, a corrupt pin, and a filesystem without hard links. The reason
+is one of `pin: session id refused`, `pin: dir refused (<what>)`,
+`pin: unreadable`, `pin: corrupt`, `pin: unwritable` and `pin: no hard links`. The
+hook never reads the settings afresh in its place, which could move the state dir.
 
 ## Real usage: what is settled, and how
 
@@ -287,7 +422,9 @@ Run it as an ordinary Bash call (the session id is `$CLAUDE_CODE_SESSION_ID`). J
 - **No default.** With no job open the field is absent; an unreadable log is recorded as
   `jobState: "invalid"`, never guessed.
 - **It refuses rather than guesses.** The CLI writes only to a log the plugin started
-  (`<state>/jobs/<session_id>.jsonl`, created by SessionStart for a new session id). A session resumed
+  (`<state>/jobs/<session_id>.jsonl`, created by SessionStart for a new session id). `<state>` is the
+  session's own, from its pin, as its hooks read it: a state dir changed since the session began
+  is not where its log is (see [One session, one set of settings](#one-session-one-set-of-settings)). A session resumed
   without an explicit id may carry the startup id in its environment: resume with `--resume <id>`. It
   waits up to 10 s for a session that has only just started.
 - **Scope.** Per session, not per agent: a subagent shares its parent's job.
@@ -450,10 +587,17 @@ again, and the plugin finds the hold the call already has.
     record made under another server or key never reaches the journal through the
     resumed call either. While fresh, the call is refused. Once stale, the record
     is abandoned through its own name: its usage goes unrecorded, and is never
-    parked for a retry through the new server. Any other hook that reconciles is
-    still blind to the tenant, as in 1.4.0, and so is Stop's (or SubagentStop's)
-    settle of a hold still pending then: it settles that hold through the current
-    server and key ([#246](https://github.com/usertools-ai/usertrust/issues/246)).
+    parked for a retry through the new server. Each drop is first written to
+    `watch.jsonl` as a gap, except a claim that only ends a deferred call's hold,
+    whose call never ran. Stop, SubagentStop and SessionEnd end a hold still
+    pending then the same way: only through the server and key that made it, and
+    one made under another is dropped, as above. Any other hook that reconciles
+    still decides a stale record whatever made it, as in 1.4.0: its keyed window
+    is parked for a retry, or its ids are accounted. The parked window keeps the
+    record's server and key, so it is retried only through them; under another,
+    it is dropped, as above. Outside the resumed call, a record with no binding
+    (from before 1.4.1) is still settled or retried through the current server
+    and key ([#246](https://github.com/usertools-ai/usertrust/issues/246)).
 - **Two resumes of one call at once** (two `claude -p --resume` of one session,
   say) can leave the call two holds: one resume can reserve while the other is
   between ending the earlier hold and recording its fresh one. Each hold has its

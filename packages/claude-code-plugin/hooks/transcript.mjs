@@ -127,11 +127,15 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { howToSet, settingName, settings } from "./config.mjs";
 import { labelsFor, resolveJob } from "./job-log.mjs";
 import {
+	abandonHold,
+	boundElsewhere,
 	budgetShare,
 	cleanup,
 	clearPending,
+	guardMode,
 	isAlreadySettled,
 	isUnknownRoute,
 	isUnknownTransfer,
@@ -150,6 +154,7 @@ import {
 	serverCapabilities,
 	serverRequest,
 	stateRoot,
+	tenantBinding,
 	timeLeft,
 	usageMode,
 } from "./lib.mjs";
@@ -387,12 +392,13 @@ function principalField(value, fallback) {
 	return PRINCIPAL_FIELD.test(text) ? text : fallback;
 }
 
-/** The attribution variables a note was already written for, in this hook. */
+/** The attribution fields a note was already written for, in this hook. */
 const attributionNoted = new Set();
 
 /**
  * The optional `unit` and `role` a principal carries, from UT_CC_UNIT /
- * UT_CC_ROLE. Each is sent only as it is, and only if it is a valid principal
+ * UT_CC_ROLE (a config file's `unit` and `role`: config.mjs). Each is sent only as
+ * it is, and only if it is a valid principal
  * field: a strict server refuses a principal with anything else — a 400, which is
  * a gap in watch mode and a BLOCK in enforce mode — so a value that is empty or
  * invalid is never sent, nor forced into shape (it would attribute the spend to a
@@ -400,16 +406,16 @@ const attributionNoted = new Set();
  */
 function principalAttribution() {
 	const fields = {};
-	for (const [key, variable] of [
-		["unit", "UT_CC_UNIT"],
-		["role", "UT_CC_ROLE"],
+	const { unit, role } = settings();
+	for (const [key, value] of [
+		["unit", unit],
+		["role", role],
 	]) {
-		const value = process.env[variable];
 		if (value === undefined) continue;
 		if (PRINCIPAL_FIELD.test(value)) {
 			fields[key] = value;
-		} else if (!attributionNoted.has(variable)) {
-			attributionNoted.add(variable);
+		} else if (!attributionNoted.has(key)) {
+			attributionNoted.add(key);
 			const why =
 				value === ""
 					? "it is empty"
@@ -417,7 +423,7 @@ function principalAttribution() {
 						? `it is ${value.length} characters long`
 						: "it has a character outside that set";
 			say(
-				`usertrust: ${variable} is not sent — a principal ${key} must be 1-128 characters of [A-Za-z0-9._:-], and ${why}`,
+				`usertrust: ${settingName(key)} is not sent — a principal ${key} must be 1-128 characters of [A-Za-z0-9._:-], and ${why}`,
 			);
 		}
 	}
@@ -647,6 +653,11 @@ function parseVehicle(key, v) {
 		ids: v.ids,
 		model: modelId(v.model) ?? UNKNOWN_MODEL,
 		agentType: typeof v.agentType === "string" ? v.agentType : "subagent",
+		// The server and key it was authorized under (lib.mjs `tenantBinding`), when
+		// known: it is retried only through that server and key (`boundElsewhere`).
+		...(typeof v.serverUrl === "string" && typeof v.keyHash === "string"
+			? { serverUrl: v.serverUrl, keyHash: v.keyHash }
+			: {}),
 	};
 	for (const k of COUNT_KEYS) vehicle[k] = count(v[k]);
 	// The job labels the vehicle was first sent with: a retry is the SAME charge, so it
@@ -667,6 +678,8 @@ function holdVehicle(body) {
 		ids: body.assignedIds,
 		model: body.holdModel,
 		agentType: body.agentType,
+		serverUrl: body.serverUrl,
+		keyHash: body.keyHash,
 		inputTokens: body.inputTokens,
 		outputTokens: body.outputTokens,
 		cacheReadTokens: body.cacheReadTokens,
@@ -1252,7 +1265,9 @@ async function claimHolder(claimsDir, id, owner) {
  */
 async function locate({ sessionId, agentId, input, mayEstimate }) {
 	const configured = usageMode() === "estimate";
-	if (configured && !mayEstimate) return { ok: false, reason: "UT_CC_USAGE=estimate" };
+	// The user's own setting, as this session spells it: UT_CC_USAGE=estimate, or the config file's.
+	const bySetting = howToSet("usage", "estimate");
+	if (configured && !mayEstimate) return { ok: false, reason: bySetting };
 	if (!isAgentId(agentId)) return { ok: false, reason: "agent id is not safe in a path" };
 	const transcriptPath = configured ? undefined : transcriptPathFor(input, agentId);
 	if (transcriptPath === undefined && !mayEstimate) {
@@ -1263,7 +1278,7 @@ async function locate({ sessionId, agentId, input, mayEstimate }) {
 	return {
 		...where,
 		transcriptPath,
-		unread: configured ? "UT_CC_USAGE=estimate" : "no transcript path",
+		unread: configured ? bySetting : "no transcript path",
 	};
 }
 
@@ -1410,7 +1425,7 @@ async function stickToEstimate(where, reason, announce) {
 
 /** Why an agent's hold settles at the estimate, for PostToolUse's note; null when unknown. */
 export async function estimateReasonFor({ sessionId, agentId, input }) {
-	if (usageMode() === "estimate") return "UT_CC_USAGE=estimate";
+	if (usageMode() === "estimate") return howToSet("usage", "estimate");
 	if (!isAgentId(agentId)) return "agent id is not safe in a path";
 	const marker = join(
 		stateRoot(),
@@ -1467,8 +1482,8 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			return { kind: "unavailable", reason: `${reason}, and another hook holds the agent's lock` };
 		}
 		try {
-			// UT_CC_USAGE=estimate is the user's own setting: nothing to announce.
-			return await stickToEstimate(where, reason, reason !== "UT_CC_USAGE=estimate");
+			// UT_CC_USAGE=estimate (or the config file's) is the user's own setting: nothing to announce.
+			return await stickToEstimate(where, reason, reason !== howToSet("usage", "estimate"));
 		} finally {
 			await held();
 		}
@@ -1903,6 +1918,9 @@ export async function settleTranscriptHold(sessionId, entry) {
 							holdModel: entry.holdModel,
 							agentType: entry.agentType,
 							...counts,
+							...(typeof entry.serverUrl === "string" && typeof entry.keyHash === "string"
+								? { serverUrl: entry.serverUrl, keyHash: entry.keyHash }
+								: {}),
 							// The labels it was authorized with: a retry is the SAME charge, so it
 							// must carry the job that was open when the usage happened.
 							...jobHoldFields(entry),
@@ -1929,10 +1947,19 @@ export const OUTCOME_NOTES = new Map([
 	["claimed", "; its usage may be unrecorded, and is never retried (no key)"],
 ]);
 
-/** Stop/SubagentStop: SETTLE every leftover hold that carries assigned usage. */
+/**
+ * Stop/SubagentStop: SETTLE every leftover hold that carries assigned usage. One made
+ * under another server or key is dropped instead, nothing sent (lib.mjs
+ * `boundElsewhere`): its usage goes unrecorded, never charged to this tenant.
+ */
 export async function settleAssignedHolds(sessionId, agentId) {
 	for (const entry of await listPending(sessionId, agentId)) {
 		if ((entry.assignedIds?.length ?? 0) === 0) continue;
+		if (boundElsewhere(entry)) {
+			// Its window is accounted unrecorded by the agent's next reconcile.
+			await abandonHold(entry, "leftover hold", sessionId);
+			continue;
+		}
 		const result = await settleTranscriptHold(sessionId, entry);
 		if (result.outcome !== "settled") {
 			say(
@@ -2105,6 +2132,29 @@ export async function postRemainder({
 			);
 		}
 		for (const [key, vehicle] of keyed ? [...cursor.unresolved] : []) {
+			if (boundElsewhere(vehicle)) {
+				// Its settle may have posted at that server. Retried here, under a key this
+				// server never saw, it would be charged to this tenant as well: it goes
+				// unrecorded instead. That is a gap, written before the vehicle goes, so
+				// dropping it never erases the one record of an unconfirmed charge.
+				const recorded = await recordWatchEvent({
+					kind: "gap",
+					mode: guardMode(),
+					phase: "abandon",
+					session: sessionId,
+					agent: agentId,
+					reason: "an unresolved settle was made under another server or key",
+					// When its usage began, from the labels it was sent with, else unknown.
+					started: vehicle.labels?.usageFrom ?? null,
+				});
+				cursor.unresolved.delete(key);
+				accountIds(cursor, vehicle.ids);
+				await opened.save();
+				summary.notes.push(
+					`an unresolved ${vehicle.model} settle made under another server or key is not retried here: its usage goes unrecorded${recorded ? " (recorded as a gap)" : ""}`,
+				);
+				continue;
+			}
 			const timeoutMs = callBudget();
 			if (timeoutMs < minCall()) {
 				summary.notes.push("unresolved settles: deferred to the next settle point (out of time)");
@@ -2191,6 +2241,7 @@ export async function postRemainder({
 					model,
 					agentType: agentType.raw,
 					...counts,
+					...tenantBinding(),
 					...(Object.keys(labels).length === 0 ? {} : { labels }),
 				});
 			}

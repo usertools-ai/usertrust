@@ -53,6 +53,13 @@ const PAYLOAD = {
 	tool_input: { command: "ls" },
 };
 
+/**
+ * A new session's id. A session's settings are pinned at its first hook, so a run
+ * with other settings is another session, as it would be under Claude Code.
+ */
+let sessions = 0;
+const newSession = () => `sess-${++sessions}`;
+
 interface HookOutput {
 	hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string };
 }
@@ -100,7 +107,7 @@ describe("the mode: watch-only unless UT_CC_MODE=enforce", () => {
 	const modeOf = async (value: string | undefined) => {
 		const env = { ...baseEnv };
 		if (value !== undefined) env.UT_CC_MODE = value;
-		const result = await runHook(SESSION_START, {}, env);
+		const result = await runHook(SESSION_START, { session_id: newSession() }, env);
 		const message = (JSON.parse(result.stdout) as { systemMessage: string }).systemMessage;
 		return message.startsWith("usertrust: ENFORCING")
 			? "enforce"
@@ -169,13 +176,14 @@ describe("watch (the default) never blocks a tool call, and never approves one",
 
 	it("a watch record that cannot be written is reported without control characters: path, error and line", async () => {
 		// The state root is a FILE, so no record can be written. Its name, and the
-		// session id inside the record line (where JSON leaves DEL and C1 raw), carry
-		// ESC, DEL and C1.
+		// tool name inside the record line (where JSON leaves DEL and C1 raw), carry
+		// ESC, DEL and C1. (A session id carrying them is refused before any record:
+		// it names the session's pin.)
 		const blocked = join(stateDir, `state${HOSTILE}`);
 		await writeFile(blocked, "not a directory");
 		const result = await runHook(
 			PRE,
-			{ ...PAYLOAD, session_id: `sess${HOSTILE}` },
+			{ ...PAYLOAD, tool_name: `Bash${HOSTILE}` },
 			{ ...baseEnv, UT_CC_STATE_DIR: blocked, UT_SERVER_URL: UNREACHABLE },
 		);
 		expectNoDecision(result);
@@ -272,12 +280,16 @@ describe("UT_CC_MODE=enforce still blocks", () => {
 	it("a 429 anomaly cutoff is denied like a 402/403 — even with UT_FAIL_OPEN=1, which is for outages", async () => {
 		for (const failOpen of ["", "1"]) {
 			const port = await startFake(429, { error: "anomaly", reason: "spend velocity" });
-			const result = await runHook(PRE, PAYLOAD, {
-				...baseEnv,
-				UT_CC_MODE: "enforce",
-				...(failOpen === "" ? {} : { UT_FAIL_OPEN: failOpen }),
-				UT_SERVER_URL: `http://127.0.0.1:${port}`,
-			});
+			const result = await runHook(
+				PRE,
+				{ ...PAYLOAD, session_id: newSession() },
+				{
+					...baseEnv,
+					UT_CC_MODE: "enforce",
+					...(failOpen === "" ? {} : { UT_FAIL_OPEN: failOpen }),
+					UT_SERVER_URL: `http://127.0.0.1:${port}`,
+				},
+			);
 			expect(decision(result.stdout).permissionDecision, failOpen).toBe("deny");
 			expect(decision(result.stdout).permissionDecisionReason).toContain("anomaly");
 			server?.close();
@@ -342,7 +354,7 @@ describe("the mode is announced to the user at session start", () => {
 	const announce = async (env: Record<string, string>) => {
 		const result = await runHook(
 			SESSION_START,
-			{ hook_event_name: "SessionStart", source: "startup" },
+			{ hook_event_name: "SessionStart", source: "startup", session_id: newSession() },
 			{
 				...baseEnv,
 				...env,
@@ -352,7 +364,7 @@ describe("the mode is announced to the user at session start", () => {
 		return (JSON.parse(result.stdout) as { systemMessage: string }).systemMessage;
 	};
 
-	it("hooks.json runs session-start.mjs on SessionStart", async () => {
+	it("hooks.json runs session-start through launch.mjs on SessionStart", async () => {
 		const manifest = JSON.parse(await readFile(join(HOOKS, "hooks.json"), "utf-8")) as {
 			hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
 		};
@@ -360,7 +372,7 @@ describe("the mode is announced to the user at session start", () => {
 			entry.hooks.map((hook) => hook.command),
 		);
 		// biome-ignore lint/suspicious/noTemplateCurlyInString: Claude Code expands ${CLAUDE_PLUGIN_ROOT} itself
-		expect(commands).toEqual(['node "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.mjs"']);
+		expect(commands).toEqual(['node "${CLAUDE_PLUGIN_ROOT}/hooks/launch.mjs" session-start']);
 	});
 
 	it("watch (default): 'nothing is blocked', where the records go, and how to enforce", async () => {

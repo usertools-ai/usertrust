@@ -7,8 +7,10 @@
 // be in it yet: with the input's `last_assistant_message`, Stop first waits —
 // boundedly — for it to arrive (`awaitFinalResponse`), and says so when it gives
 // up. A response that arrives later still is left for SessionEnd, or the next Stop.
-import { readStdin, say, usageMode } from "./lib.mjs";
+import { readStdin, requireLaunch, say, usageMode } from "./lib.mjs";
 import { awaitFinalResponse, settleSession } from "./transcript.mjs";
+
+requireLaunch();
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");

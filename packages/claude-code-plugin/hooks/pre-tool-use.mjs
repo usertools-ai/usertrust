@@ -11,12 +11,14 @@
 // something unusable) is written down as a `gap` record. With UT_CC_MODE=enforce
 // it blocks: a denial is enforced (`deny`), and a failed authorization fails closed
 // (exit 2) unless UT_FAIL_OPEN=1, which lets the call through and records the
-// gap. Output contract adapted from the AGT Claude Code plugin's stdin-JSON
+// gap. A config file's `mode` and `failOpen` decide the same (config.mjs). Output
+// contract adapted from the AGT Claude Code plugin's stdin-JSON
 // permissionDecision convention (MIT — see repository NOTICE).
 //
 // Content minimization: tool_input is truncated at 16 KiB before it is sent
-// (both message content and token estimation); UT_CC_SEND_CONTENT=0 replaces
-// the content with {"redacted":true} while keeping the size-based estimate.
+// (both message content and token estimation); UT_CC_SEND_CONTENT=0 (a config
+// file's `"sendContent": false`) replaces the content with {"redacted":true} while
+// keeping the size-based estimate.
 // The output hold uses that same 16 KiB bound so a large tool_response cannot
 // price above the reservation (AUD-004).
 //
@@ -42,8 +44,10 @@
 // `already_settled`) means an earlier settle of exactly this window landed: it
 // is accounted, and the tool is held alone.
 import { rename, unlink } from "node:fs/promises";
+import { howToSet, settings } from "./config.mjs";
 import { labelsFor, resolveJob } from "./job-log.mjs";
 import {
+	abandonHold,
 	claimForRelease,
 	claimForSettle,
 	defaultModel,
@@ -62,13 +66,15 @@ import {
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	recordUnconfirmedCall,
 	recordWatchEvent,
 	releaseHold,
+	requireLaunch,
+	sameTenant,
 	sanitizeReason,
 	say,
 	serverCapabilities,
 	serverRequest,
-	tenantBinding,
 	timeLeft,
 } from "./lib.mjs";
 import {
@@ -83,6 +89,8 @@ import {
 	safeName,
 	settleTranscriptHold,
 } from "./transcript.mjs";
+
+requireLaunch();
 
 const MAX_REASON_CHARS = 500;
 
@@ -175,7 +183,7 @@ try {
 			null,
 			`${why}: the fresh hold is not kept, and the call is refused rather than write over that file`,
 		);
-	} else if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
+	} else if (mode === "watch" || settings().failOpen) {
 		// The call proceeds unmetered: say so durably, so the gap is never silent.
 		const recorded = await recordWatchEvent({
 			started: new Date(hookStartedAt()).toISOString(),
@@ -189,7 +197,7 @@ try {
 		proceed(
 			mode === "watch"
 				? `usertrust watch-only: this call is not metered (${why}) — ${recorded ? "recorded as a gap" : "and its gap record could not be written (see above)"}`
-				: `usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${why}`,
+				: `usertrust unavailable — proceeding ungoverned (${howToSet("failOpen", true)}): ${why}`,
 		);
 	} else {
 		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
@@ -198,36 +206,15 @@ try {
 }
 
 /**
- * Whether a pending record was made under the server and key this hook talks to
- * (lib.mjs `tenantBinding`). A record without a binding (written before the plugin
- * kept one) is not: its tenant is unknown.
- */
-function sameTenant(entry) {
-	const here = tenantBinding();
-	return entry.serverUrl === here.serverUrl && entry.keyHash === here.keyHash;
-}
-
-/**
  * End an earlier hold made under ANOTHER server or key, or an unknown one, without
- * sending this hook's server anything about it. That server does not know the hold:
- * a settle there answers 404, and the unkeyed path would hand the old window to the
- * fresh hold, so this tenant would pay for the other's usage. The record is claimed
- * and dropped instead.
- * - A window it carried is then accounted by the journal as unrecorded (assigned ids
- *   whose hold is gone), never carried into the fresh hold: an under-count of the
- *   other tenant.
- * - The hold itself is left to its own server's sweep, or the ledger's timeout.
- * Returns false when another hook claimed the record first.
+ * sending this hook's server anything about it (lib.mjs `abandonHold`). That server
+ * does not know the hold: a settle there answers 404, and the unkeyed path would
+ * hand the old window to the fresh hold, so this tenant would pay for the other's
+ * usage. A record without a binding counts as another tenant's here (lib.mjs
+ * `sameTenant`): this call reserves afresh beside it, and its tenant is unknown.
  */
-async function abandon(entry) {
-	const claimed = await claimForSettle(entry.path);
-	if (claimed !== null) {
-		say(
-			`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key; nothing about it is sent here, and any usage it carried goes unrecorded`,
-		);
-		await unlink(claimed).catch(() => {});
-	}
-	return claimed !== null;
+function abandon(entry) {
+	return abandonHold(entry, "this tool call's earlier hold", sessionId);
 }
 
 /**
@@ -238,8 +225,10 @@ async function abandon(entry) {
  * exclusive rename, then deleted. Nothing about it is sent to this hook's server,
  * and nothing is parked for a retry. Any window it carried is accounted by the
  * journal as unrecorded (assigned ids whose hold is gone): an under-count of the
- * other tenant, never charged to this one. Returns false when the record is fresh,
- * or another hook took it first.
+ * other tenant, never charged to this one. Its call RAN (unless the claim only ends
+ * a deferred call's hold), and its charge is unconfirmed: that gap is written before
+ * the record goes, as Stop writes it (lib.mjs `cleanup`). Returns false when the
+ * record is fresh, or another hook took it first.
  */
 async function abandonSettling(entry) {
 	if (!(Date.now() - entry.mtimeMs > STALE_SETTLING_MS)) return false;
@@ -249,8 +238,10 @@ async function abandonSettling(entry) {
 	} catch {
 		return false;
 	}
+	const recorded =
+		entry.intent !== "release" && (await recordUnconfirmedCall(sessionId, entry, "call-ran"));
 	say(
-		`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key, and its settle never resolved; nothing about it is sent here, and any usage it carried goes unrecorded`,
+		`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key, and its settle never resolved; nothing about it is sent here, and any usage it carried goes unrecorded${recorded ? " (recorded as a gap)" : ""}`,
 	);
 	await unlink(taken).catch(() => {});
 	return true;
@@ -397,7 +388,7 @@ async function releaseUnconfirmed(transferId) {
  */
 async function reserve(input) {
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
-	const content = process.env.UT_CC_SEND_CONTENT === "0" ? '{"redacted":true}' : toolInput;
+	const content = settings().sendContent ? toolInput : '{"redacted":true}';
 	const estimatedInputTokens = estimateTokens(toolInput);
 	// The job open at THIS call, from this session's own log read now (never cached):
 	// a switch applies from the next call, so the call that runs `start job-b` still

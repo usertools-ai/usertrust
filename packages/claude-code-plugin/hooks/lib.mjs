@@ -26,7 +26,7 @@
 // (<safeSession>__<safeAgent>__<safeCall>.json). Each hold is then claimed,
 // settled, journalled and cleared through the path its listing found, so a 1.4.0
 // record is ended through its own name, once.
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
 	appendFile,
 	link,
@@ -39,8 +39,29 @@ import {
 	utimes,
 	writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { hostEnv, howToSet, keyHash, refusalNote, settingName, settings } from "./config.mjs";
+
+/** Set by launch.mjs, which runs every hook: the hook's payload and its start. */
+let launched = null;
+
+/**
+ * launch.mjs starts each hook: it resolves the session's settings (config.mjs
+ * `useSession`), then hands over what it read from stdin (null when the hook should
+ * read stdin itself, as a child does) and when the hook started.
+ */
+export function launch({ payload, startedAt }) {
+	launched = { payload, startedAt };
+	hookStart = startedAt;
+}
+
+/**
+ * Every hook module's first step: a hook runs only as launch.mjs starts it, never
+ * from its own file, so no hook can run without its session's pinned settings.
+ */
+export function requireLaunch() {
+	if (launched === null) throw new Error("usertrust: a hook runs only through launch.mjs");
+}
 
 export class TransportError extends Error {
 	constructor(message) {
@@ -50,6 +71,8 @@ export class TransportError extends Error {
 }
 
 export function readStdin() {
+	// launch.mjs read it already when it runs the hook in its own process.
+	if (typeof launched?.payload === "string") return Promise.resolve(launched.payload);
 	return new Promise((resolve, reject) => {
 		let data = "";
 		process.stdin.setEncoding("utf-8");
@@ -79,12 +102,10 @@ export const MAX_OUTPUT_TOKENS = estimateTokens("x".repeat(MAX_CONTENT_CHARS));
  * Claude Code's own data (its transcripts live in the same config dir): state lost
  * while its transcripts survive would be read as "nothing posted yet". A temp dir
  * is not durable — macOS purges files untouched for three days.
+ * `UT_CC_STATE_DIR`, or a config file's `stateDir` (config.mjs).
  */
 export function stateRoot() {
-	return (
-		process.env.UT_CC_STATE_DIR ??
-		join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "usertrust-cc")
-	);
+	return settings().stateDir;
 }
 
 const stateDir = stateRoot;
@@ -99,7 +120,7 @@ const stateDir = stateRoot;
  * posts nothing it settled at the estimate.
  */
 export function usageMode() {
-	return process.env.UT_CC_USAGE === "estimate" ? "estimate" : "transcript";
+	return settings().usage;
 }
 
 /**
@@ -151,7 +172,7 @@ export function announce(text, max = MAX_NOTE_CHARS) {
  * and a transcript hold before its first model is known.
  */
 export function defaultModel() {
-	return process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
+	return settings().model;
 }
 
 /**
@@ -163,16 +184,11 @@ export function defaultModel() {
  * missed metering is visible, never silent. `UT_CC_MODE=enforce` opts in to
  * blocking: denials are enforced, and a failed authorization blocks the call
  * unless `UT_FAIL_OPEN=1`. Any other value runs watch-only, and the
- * session-start announcement names the value it ignored.
+ * session-start announcement names the value it ignored. A config file's `mode`
+ * and `failOpen` decide the same (config.mjs), and a refused one runs watch-only.
  */
 export function guardMode() {
-	return (process.env.UT_CC_MODE ?? "").trim().toLowerCase() === "enforce" ? "enforce" : "watch";
-}
-
-/** The `UT_CC_MODE` value that was set but is not a mode, if any. */
-function unrecognizedMode() {
-	const raw = (process.env.UT_CC_MODE ?? "").trim();
-	return raw === "" || ["watch", "enforce"].includes(raw.toLowerCase()) ? undefined : raw;
+	return settings().mode;
 }
 
 /** Where watch records go: one JSON object per line, beside the plugin's other state. */
@@ -188,18 +204,25 @@ export function modeAnnouncement() {
 	// The path (the operator's UT_CC_STATE_DIR / CLAUDE_CONFIG_DIR) is raw on
 	// purpose: it reaches the user only through `announce`, which sanitizes all of
 	// the message, then clips it. An unrecognised UT_CC_MODE value is clipped HERE,
-	// so it is sanitized here first.
-	const records = watchLogPath();
-	if (guardMode() === "enforce") {
-		return process.env.UT_FAIL_OPEN === "1"
-			? `usertrust: ENFORCING — over-budget tool calls are blocked. While the server is unreachable, calls proceed unmetered (UT_FAIL_OPEN=1), each recorded as a gap in ${records}.`
-			: "usertrust: ENFORCING — over-budget tool calls are blocked, and so is every tool call while the usertrust server is unreachable (UT_FAIL_OPEN=1 lets those through).";
+	// so it is sanitized here first. A configured session's state dir is a value
+	// from its config file, and no such value is ever echoed: that line names no path.
+	const current = settings();
+	if (current.refused !== null) {
+		return `usertrust: watch-only and key-less — ${refusalNote(current.refused)}, so nothing is sent to any server: every tool call is recorded as a gap in ${watchLogPath()}.`;
 	}
-	const ignored = unrecognizedMode();
+	const records = current.configured
+		? "watch.jsonl in the config file's state dir"
+		: watchLogPath();
+	if (current.mode === "enforce") {
+		return current.failOpen
+			? `usertrust: ENFORCING — over-budget tool calls are blocked. While the server is unreachable, calls proceed unmetered (${howToSet("failOpen", true)}), each recorded as a gap in ${records}.`
+			: `usertrust: ENFORCING — over-budget tool calls are blocked, and so is every tool call while the usertrust server is unreachable (${howToSet("failOpen", true)} lets those through).`;
+	}
+	const ignored = current.unrecognizedMode;
 	const note =
 		ignored === undefined
-			? "Set UT_CC_MODE=enforce to block over-budget calls."
-			: `UT_CC_MODE=${JSON.stringify(sanitizeThenClip(ignored, 40))} is not a mode: use UT_CC_MODE=enforce to block over-budget calls.`;
+			? `Set ${howToSet("mode", "enforce")} to block over-budget calls.`
+			: `${settingName("mode")}=${JSON.stringify(sanitizeThenClip(ignored, 40))} is not a mode: use ${howToSet("mode", "enforce")} to block over-budget calls.`;
 	return `usertrust: watch-only — nothing is blocked. Calls that would have been blocked, and calls that could not be metered, are recorded in ${records}. ${note}`;
 }
 
@@ -234,15 +257,19 @@ export async function recordWatchEvent(event) {
 }
 
 // Every hook gets a wall-clock budget inside the time Claude Code gives it, so a
-// slow server makes a hook give up cleanly instead of being killed mid-write.
-// Module evaluation is the hook's start: each hook is its own node process.
-const HOOK_STARTED_AT = Date.now();
+// slow server makes a hook give up cleanly instead of being killed mid-write. The
+// hook's start is launch.mjs's (`launch`): for a configured session's child, its
+// parent's start, so the budget counts the time it took to start the child.
+let hookStart = Date.now();
 /** Every hook's budget but SessionEnd's: well inside hooks.json's 15 s timeout. */
 export const HOOK_BUDGET_MS = 10_000;
 let hookBudgetMs = HOOK_BUDGET_MS;
 
 const SESSION_END_DEFAULT_MS = 1_500;
-/** What node takes to start the hook before its budget starts, and to exit. */
+/**
+ * What node takes to start the hook before its budget starts, and to exit. A
+ * configured session's child starts within the budget: it counts from its parent's start.
+ */
 const SESSION_END_MARGIN_MS = 300;
 
 /**
@@ -253,7 +280,7 @@ const SESSION_END_MARGIN_MS = 300;
  * (https://code.claude.com/docs/en/hooks#sessionend). Less the start-up margin,
  * and never more than any other hook's budget.
  */
-export function sessionEndBudgetMs(env = process.env) {
+export function sessionEndBudgetMs(env = hostEnv()) {
 	const raw = env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS ?? "";
 	const configured = /^[0-9]{1,9}$/.test(raw) ? Number(raw) : SESSION_END_DEFAULT_MS;
 	return Math.max(0, Math.min(configured, HOOK_BUDGET_MS) - SESSION_END_MARGIN_MS);
@@ -270,17 +297,18 @@ export function budgetShare(fraction) {
 }
 
 /**
- * When this hook process started (epoch ms): the moment it RECEIVED the call. A job is
- * resolved at this time and no later, so a `usertrust-job` switch that lands while the hook
- * awaits a health probe or a log read cannot move the call to the new job.
+ * When this hook started (epoch ms): the moment it RECEIVED the call. For a configured
+ * session's child, that is its parent's start (`launch`). A job is resolved at this time
+ * and no later, so a `usertrust-job` switch that lands while the hook awaits a health
+ * probe or a log read cannot move the call to the new job.
  */
 export function hookStartedAt() {
-	return HOOK_STARTED_AT;
+	return hookStart;
 }
 
 /** Milliseconds left in this hook's budget (negative once it is spent). */
 export function timeLeft() {
-	return HOOK_STARTED_AT + hookBudgetMs - Date.now();
+	return hookStart + hookBudgetMs - Date.now();
 }
 
 export function sanitize(part) {
@@ -341,7 +369,7 @@ export class HoldNameTaken extends Error {
  * already taken throws `HoldNameTaken`, and that file is left untouched. The agent id is stored in the
  * file body so a whole-session sweep can recover which agent owns the hold.
  * Every hold is marked `gate: 1` (`isGated`) in this same atomic write, never
- * later.
+ * later. The file is the user's alone (0600), as every file in the state dir is.
  */
 export async function recordPending(sessionId, agentId, entry, { settling = false } = {}) {
 	const live = holdFilePath(sessionId, agentId, entry);
@@ -375,6 +403,7 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				// a replacement hold must carry (the labels belong to the HOLD, not the clock).
 				...jobHoldFields(entry),
 			}),
+			{ mode: 0o600 },
 		);
 	} catch (err) {
 		if (err?.code === "EEXIST") throw new HoldNameTaken(path);
@@ -384,12 +413,25 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 }
 
 /**
+ * When a hold's call began, as a gap record about the hold states it (`started`): the
+ * hold's usage start, else the time the call was received. That is where coverage places
+ * the hold's own records too (job-log.mjs `fromRecord`), so its gap lands in the same job.
+ * With NEITHER (an older hold) the time is UNKNOWN: null, which counts against every job.
+ * It is never the time of the hook writing the gap, which could put it in a later job.
+ */
+export function callStart(held) {
+	if (typeof held.usageFrom === "string") return held.usageFrom;
+	return typeof held.startedAt === "string" ? held.startedAt : null;
+}
+
+/**
  * A give-back of a hold whose call RAN (or may have) without a confirmed charge is a GAP:
- * metered usage the ledger cannot vouch for. `started` is when the call began (the hold's
- * own `usageFrom`), so a job switch that lands later cannot move it to another job.
+ * metered usage the ledger cannot vouch for. `started` is when the call began
+ * (`callStart`), so a job switch that lands later cannot move it to another job. Returns
+ * whether the gap was written.
  */
 export async function recordUnconfirmedCall(sessionId, held, releaseClass) {
-	await recordWatchEvent({
+	return recordWatchEvent({
 		kind: "gap",
 		mode: guardMode(),
 		session: sessionId,
@@ -400,15 +442,7 @@ export async function recordUnconfirmedCall(sessionId, held, releaseClass) {
 				? "the call ran and its charge is unconfirmed (its settle went unanswered)"
 				: "the call may have run and was never charged (no PostToolUse settle)",
 		releaseClass,
-		// The call's own start: the hold's usage start, else the time it was received. With NEITHER
-		// (an older hold) the time is UNKNOWN, and a gap with no time counts against every job; it
-		// is never stamped with this Stop's time, which could put it in a later job.
-		started:
-			typeof held.usageFrom === "string"
-				? held.usageFrom
-				: typeof held.startedAt === "string"
-					? held.startedAt
-					: null,
+		started: callStart(held),
 	});
 }
 
@@ -711,9 +745,27 @@ export async function clearPending(path) {
 	}
 }
 
-/** The governance server this hook talks to (`UT_SERVER_URL`). */
+/**
+ * The governance server this hook talks to (`UT_SERVER_URL`, or a config file's
+ * `url`): null when a configured session's file was refused, which sends nothing.
+ */
 function serverBase() {
-	return process.env.UT_SERVER_URL ?? "http://127.0.0.1:4519";
+	return settings().url;
+}
+
+/**
+ * The url of one of the server's routes (`route`, as `/v1/authorize`): the base's
+ * origin and path as the URL parser reads them, then the route. The server matches
+ * each route exactly, so the base's text will not do: with a trailing `/` it gave
+ * `//v1/authorize`, and with a query it put the route inside the query. Both answer
+ * 404, so every call went unmetered, or was blocked in enforce mode. A fragment is
+ * never sent. Throws on a base that does not parse, as a fetch of it would.
+ */
+function routeUrl(route) {
+	const url = new URL(serverBase());
+	url.pathname = `${url.pathname.replace(/\/+$/, "")}${route}`;
+	url.search = "";
+	return url.href;
 }
 
 /**
@@ -721,15 +773,75 @@ function serverBase() {
  * URL, and the first 16 hex digits of the key's SHA-256 (`UT_SERVER_KEY`). Every
  * pending record carries it, so a tool call resumed under another server or key
  * never takes the earlier hold for one of its own (pre-tool-use.mjs `sameTenant`).
+ * The URL is the base AS WRITTEN, not as requested (`routeUrl`): a hold recorded
+ * under any spelling, by this version or an earlier one, is ended under that same
+ * spelling exactly as before.
  */
 export function tenantBinding() {
 	return {
 		serverUrl: serverBase(),
-		keyHash: createHash("sha256")
-			.update(process.env.UT_SERVER_KEY ?? "")
-			.digest("hex")
-			.slice(0, 16),
+		keyHash: keyHash(settings().key),
 	};
+}
+
+/**
+ * Whether a hold record was made under the server and key this hook talks to
+ * (`tenantBinding`). A record without a binding (written before the plugin kept
+ * one) is not: its tenant is unknown.
+ */
+export function sameTenant(entry) {
+	const here = tenantBinding();
+	return entry.serverUrl === here.serverUrl && entry.keyHash === here.keyHash;
+}
+
+/**
+ * Whether a hold record NAMES another server or key than this hook's. Every hook
+ * is its own process and reads its settings afresh, so the server or key can
+ * change between the hook that made a hold and the one that ends it (an edited
+ * config file, or environment). Such a hold is never settled, released or given
+ * back through this server: it answers 404 for a hold it never made, and the
+ * estimate path would then charge the call to this tenant on a fresh hold. A
+ * record without a binding names none, and is ended as it always was.
+ */
+export function boundElsewhere(entry) {
+	return (
+		typeof entry.serverUrl === "string" && typeof entry.keyHash === "string" && !sameTenant(entry)
+	);
+}
+
+/** The watch record of a hold dropped unended (`boundElsewhere`): its usage goes unrecorded. */
+const ABANDONED = "the hold was made under another server or key";
+
+/**
+ * Drop the record of a hold made under ANOTHER server or key, sending this hook's
+ * server nothing about it (`boundElsewhere`). The record is claimed first, so only
+ * one hook drops it, and the drop is recorded as a gap (`session`, the session's
+ * id): any usage it carried goes unrecorded.
+ * - A window it carried is then accounted by the journal as unrecorded (assigned
+ *   ids whose hold is gone), never posted to this tenant: an under-count of the
+ *   other one.
+ * - The hold itself is left to its own server's sweep, or the ledger's timeout.
+ * Returns false when another hook claimed the record first.
+ */
+export async function abandonHold(entry, what, session) {
+	const claimed = await claimForSettle(entry.path);
+	if (claimed !== null) {
+		const recorded = await recordWatchEvent({
+			kind: "gap",
+			mode: guardMode(),
+			phase: "abandon",
+			session,
+			agent: entry.agentId,
+			transferId: entry.transferId,
+			reason: ABANDONED,
+			started: callStart(entry),
+		});
+		say(
+			`usertrust: ${what} ${entry.transferId} was made under another server or key; nothing about it is sent here, and any usage it carried goes unrecorded${recorded ? " (recorded as a gap)" : ""}`,
+		);
+		await unlink(claimed).catch(() => {});
+	}
+	return claimed !== null;
 }
 
 /**
@@ -737,13 +849,14 @@ export function tenantBinding() {
  * unless the caller passes less); a spent budget throws without a request.
  */
 export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
-	const base = serverBase();
-	const key = process.env.UT_SERVER_KEY ?? "";
+	const { refused, key } = settings();
+	// A refused config file: no request at all, and its fixed reason is the gap's.
+	if (refused !== null) throw new TransportError(refused);
 	if (!(timeoutMs > 0)) throw new TransportError("hook time budget spent");
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		const response = await fetch(`${base}${path}`, {
+		const response = await fetch(routeUrl(path), {
 			method: "POST",
 			headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
 			body: JSON.stringify(body),
@@ -868,7 +981,6 @@ export function jobCapable(capabilities) {
  */
 export function serverCapabilities() {
 	capabilitiesRead ??= (async () => {
-		const base = serverBase();
 		const timeoutMs = Math.min(2_000, budgetShare(0.2), timeLeft());
 		const unknown = (why) => {
 			say(
@@ -876,11 +988,13 @@ export function serverCapabilities() {
 			);
 			return null;
 		};
+		const { refused } = settings();
+		if (refused !== null) return unknown(refused);
 		if (!(timeoutMs > 0)) return unknown("hook time budget spent");
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
-			const response = await fetch(`${base}/v1/health`, { signal: controller.signal });
+			const response = await fetch(routeUrl("/v1/health"), { signal: controller.signal });
 			if (!response.ok) return unknown(`health returned ${response.status}`);
 			const json = await response.json();
 			const list = Array.isArray(json?.capabilities) ? json.capabilities : [];
@@ -1022,11 +1136,17 @@ export async function giveBack(transferId, reason, timeoutMs, releaseClass) {
  * would only leak state-dir entries. A hold the hook budget no longer covers is
  * left for the next Stop and the TTL sweep. An estimate hold left settle-attempted
  * (`.settling`: its one settle went unanswered) is given back the same way and
- * then forgotten — never settled again.
+ * then forgotten — never settled again. A hold made under another server or key
+ * is forgotten without a word to this one (`boundElsewhere`), its gap written first:
+ * every such hold has one but a claim that only ends a deferred call's hold.
  */
 export async function cleanup(sessionId, agentId) {
 	for (const entry of await listPending(sessionId, agentId)) {
 		if ((entry.assignedIds?.length ?? 0) > 0) continue;
+		if (boundElsewhere(entry)) {
+			await abandonHold(entry, "leftover hold", sessionId);
+			continue;
+		}
 		const timeoutMs = Math.min(5000, timeLeft());
 		if (timeoutMs < 100) {
 			say(`usertrust: out of time; hold ${entry.transferId} left for Stop/TTL`);
@@ -1057,7 +1177,20 @@ export async function cleanup(sessionId, agentId) {
 	for (const held of await settlingEstimates(sessionId, agentId)) {
 		// An estimate hold whose one settle went unanswered: it may have posted, so
 		// it is NEVER settled again — only given back (a 404 here means it posted or
-		// expired), then forgotten.
+		// expired), then forgotten. Another server's or key's is only forgotten.
+		if (boundElsewhere(held)) {
+			// Its one settle went out unanswered under that server, and nothing about it is
+			// sent here. Its call RAN all the same (unless the claim only ends a deferred call's
+			// hold), and its charge is unconfirmed: the gap is written first, as for this
+			// server's own below, so dropping the record never erases it.
+			const recorded =
+				held.intent !== "release" && (await recordUnconfirmedCall(sessionId, held, "call-ran"));
+			say(
+				`usertrust: leftover hold ${held.transferId} was made under another server or key; nothing about it is sent here${recorded ? ", and its unconfirmed charge is recorded as a gap" : ""}`,
+			);
+			await unlink(held.path).catch(() => {});
+			continue;
+		}
 		const timeoutMs = Math.min(5000, timeLeft());
 		if (timeoutMs < 100) {
 			say(`usertrust: out of time; hold ${held.transferId} left for Stop/TTL`);

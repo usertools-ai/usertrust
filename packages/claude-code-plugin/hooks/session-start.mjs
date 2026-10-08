@@ -8,7 +8,9 @@
 // decision control: "Claude Code adds stdout it treats as plain text to
 // Claude's context"). No network call: the hook must be fast and cannot fail.
 import { writeSessionStart } from "./job-log.mjs";
-import { announce, modeAnnouncement, readStdin, say } from "./lib.mjs";
+import { announce, modeAnnouncement, readStdin, requireLaunch, say } from "./lib.mjs";
+
+requireLaunch();
 
 let payload = {};
 try {

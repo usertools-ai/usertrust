@@ -28,9 +28,16 @@
 // holds only for a hold recorded under the settle-attempt gate (lib.mjs
 // `isGated`). One an earlier release recorded is never re-authorized: Stop only
 // gives it back.
+//
+// A hold made under another server or key than this hook's (lib.mjs
+// `boundElsewhere`: the config file or the environment changed after PreToolUse)
+// is never ended through this server: its record is dropped, its usage goes
+// unrecorded, and the hold is left to its own server's sweep.
 import { unlink } from "node:fs/promises";
 import { resolveJob } from "./job-log.mjs";
 import {
+	abandonHold,
+	boundElsewhere,
 	claimForSettle,
 	defaultModel,
 	estimateTokens,
@@ -44,6 +51,7 @@ import {
 	readStdin,
 	recordPending,
 	recordUnconfirmedCall,
+	requireLaunch,
 	say,
 	serverCapabilities,
 	serverRequest,
@@ -59,6 +67,8 @@ import {
 	settleLabels,
 	settleTranscriptHold,
 } from "./transcript.mjs";
+
+requireLaunch();
 
 /**
  * When an estimate hold's usage ended: now, but never past the next job switch. The call that
@@ -267,7 +277,9 @@ try {
 	// Settle only this agent's holds; the session bucket is shared with siblings.
 	const agentId = input.agent_id ?? "main";
 	const entry = await takePendingEntry(sessionId, agentId, input.tool_use_id ?? null);
-	if (entry?.usage === "transcript") {
+	if (entry !== null && boundElsewhere(entry)) {
+		await abandonHold(entry, "this tool call's hold", sessionId);
+	} else if (entry?.usage === "transcript") {
 		const result = await settleTranscriptHold(sessionId, entry);
 		if (result.outcome !== "settled" && result.outcome !== "returned") {
 			say(

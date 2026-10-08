@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PRINCIPAL_FIELD_PATTERN } from "../../core/src/shared/principal.js";
-import { runHook } from "./helpers/run-hook.js";
+import { PASSWD_HOME_PRELOAD, passwdHomeFor, runHook } from "./helpers/run-hook.js";
 
 // Every test here spawns hook processes (some several): a loaded machine needs more than
 // the 5 s default, and a timeout is not what these tests are about.
@@ -76,17 +76,28 @@ async function lib(): Promise<Lib> {
 	return (await import(pathToFileURL(join(HOOKS, "job-log.mjs")).href)) as Lib;
 }
 
+/**
+ * Start the CLI as a Bash call in a session would, with no `UT_*` variable or session id
+ * from the shell running the tests. It reads its session's pin, so it gets the passwd-home
+ * preload and a test's own passwd home (run-hook.ts `passwdHomeFor`): the one its state
+ * dir's hooks pin under, and never the real one.
+ */
+function spawnCli(args: string[], env: Record<string, string>) {
+	const inherited = Object.fromEntries(
+		Object.entries(process.env).filter(
+			([k]) => !k.startsWith("UT_") && k !== "CLAUDE_CODE_SESSION_ID",
+		),
+	);
+	const given = { UT_CC_STATE_DIR: state, ...env };
+	return spawn(process.execPath, ["--import", PASSWD_HOME_PRELOAD, CLI, ...args], {
+		env: { ...inherited, ...given, TEST_PASSWD_HOME: passwdHomeFor(given) },
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+}
+
 function cli(args: string[], env: Record<string, string>) {
 	return new Promise<{ code: number; stderr: string }>((resolve) => {
-		const inherited = Object.fromEntries(
-			Object.entries(process.env).filter(
-				([k]) => !k.startsWith("UT_") && k !== "CLAUDE_CODE_SESSION_ID",
-			),
-		);
-		const child = spawn(process.execPath, [CLI, ...args], {
-			env: { ...inherited, UT_CC_STATE_DIR: state, ...env },
-			stdio: ["ignore", "pipe", "pipe"],
-		});
+		const child = spawnCli(args, env);
 		let stderr = "";
 		child.stderr.on("data", (c) => {
 			stderr += c;
@@ -95,17 +106,9 @@ function cli(args: string[], env: Record<string, string>) {
 	});
 }
 
-function cliOut(args: string[]) {
+function cliOut(args: string[], env: Record<string, string> = {}) {
 	return new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
-		const inherited = Object.fromEntries(
-			Object.entries(process.env).filter(
-				([k]) => !k.startsWith("UT_") && k !== "CLAUDE_CODE_SESSION_ID",
-			),
-		);
-		const child = spawn(process.execPath, [CLI, ...args], {
-			env: { ...inherited, UT_CC_STATE_DIR: state },
-			stdio: ["ignore", "pipe", "pipe"],
-		});
+		const child = spawnCli(args, env);
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (c) => {
@@ -387,6 +390,58 @@ describe("test 14 (R2-D) — SessionStart sources and the race", () => {
 		if (parsed.state === "ok")
 			expect(parsed.events.map((e) => e.op)).toEqual(["session-start", "start"]);
 	}, 20_000);
+});
+
+describe("usertrust-job in a session: its paths come from the session's pin, as its hooks' do", () => {
+	// A session's hooks keep its state dir for its life (session.mjs). The state dir can
+	// change under a running session (an edited config, an applied `env`); were the CLI
+	// to read the current one, it would write the session's job ops where its hooks no
+	// longer read them: silently, when that dir already holds a log for this session.
+	const pinnedHome = () => passwdHomeFor({ UT_CC_STATE_DIR: state });
+
+	it("after a state-dir switch, start and stop write to the log the session's hooks read", async () => {
+		await sessionStart("startup");
+		const other = await mkdtemp(join(tmpdir(), "utcc-job-other-"));
+		await mkdir(join(other, "jobs"), { recursive: true });
+		const otherLog = start(SID, Date.now() - 5000);
+		await writeFile(join(other, "jobs", `${SID}.jsonl`), otherLog);
+		const switched = {
+			UT_CC_STATE_DIR: other,
+			TEST_PASSWD_HOME: pinnedHome(),
+			CLAUDE_CODE_SESSION_ID: SID,
+			UT_CC_JOB_WAIT_MS: "0",
+		};
+		expect((await cli(["start", "job-a"], switched)).code).toBe(0);
+		expect((await cli(["stop"], switched)).code).toBe(0);
+		// mutant: the CLI reads the current settings, so both ops land in `other`
+		const { parseJobLog } = await lib();
+		const pinned = parseJobLog(await readFile(logFile(), "utf-8"), SID);
+		expect(pinned.state === "ok" ? pinned.events.map((e) => [e.op, e.job]) : pinned).toEqual([
+			["session-start", null],
+			["start", "job-a"],
+			["stop", null],
+		]);
+		expect(await readFile(join(other, "jobs", `${SID}.jsonl`), "utf-8")).toBe(otherLog);
+	});
+
+	it("coverage in a session reads the job logs where the session's hooks keep them", async () => {
+		await sessionStart("startup");
+		expect(
+			(await cli(["start", "bug-1"], { CLAUDE_CODE_SESSION_ID: SID, UT_CC_JOB_WAIT_MS: "0" })).code,
+		).toBe(0);
+		const other = await mkdtemp(join(tmpdir(), "utcc-job-other-"));
+		const vault = await mkdtemp(join(tmpdir(), "utcc-job-vault-"));
+		await mkdir(join(vault, "audit"));
+		const r = await cliOut(["coverage", "bug-1", "--vault", vault], {
+			UT_CC_STATE_DIR: other,
+			TEST_PASSWD_HOME: pinnedHome(),
+			CLAUDE_CODE_SESSION_ID: SID,
+		});
+		expect(r.code).toBe(0);
+		// The job is open in the pinned log only. mutant: the current state dir's logs are
+		// read, which hold no interval of it, and no such gap
+		expect(r.stdout).toContain("job still running");
+	});
 });
 
 describe("jobCoverage — a diagnostic, not a certification", () => {
@@ -1654,19 +1709,10 @@ describe("usertrust-job start/stop — a write failure is reported through the s
 			await writeFile(join(jobs, "s1.jsonl"), start("s1", Date.now() - 5000));
 			await chmod(join(jobs, "s1.jsonl"), 0o444);
 			const r = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
-				const inherited = Object.fromEntries(
-					Object.entries(process.env).filter(
-						([k]) => !k.startsWith("UT_") && k !== "CLAUDE_CODE_SESSION_ID",
-					),
-				);
-				const child = spawn(process.execPath, [CLI, "start", "job-a"], {
-					env: {
-						...inherited,
-						UT_CC_STATE_DIR: hostile,
-						CLAUDE_CODE_SESSION_ID: "s1",
-						UT_CC_JOB_WAIT_MS: "0",
-					},
-					stdio: ["ignore", "pipe", "pipe"],
+				const child = spawnCli(["start", "job-a"], {
+					UT_CC_STATE_DIR: hostile,
+					CLAUDE_CODE_SESSION_ID: "s1",
+					UT_CC_JOB_WAIT_MS: "0",
 				});
 				let stdout = "";
 				let stderr = "";

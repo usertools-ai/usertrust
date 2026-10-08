@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,6 +34,8 @@ describe("pending state store (one file per hold)", () => {
 		const path = await recordPending(sessionId, "main", { toolUseId: "tu_1", transferId: "tx_1" });
 		// One file per hold: named by its call AND its transfer.
 		expect(path).toBe(join(stateDir, "sess_______evil__main__tu_1.tx_1.json"));
+		// The user's alone, as every file in the state dir is: no group or other bits.
+		expect((await stat(path)).mode & 0o777).toBe(0o600);
 		await recordPending("other-session", "main", { toolUseId: "tu_x", transferId: "tx_x" });
 		const entries = await listPending(sessionId, "main");
 		expect(entries).toHaveLength(1);

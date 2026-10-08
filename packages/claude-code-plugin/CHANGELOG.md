@@ -17,6 +17,104 @@ npm, and its version is its own: the `usertrust` packages and their
   - A hold given back after its call ran (an unanswered settle left `.settling`, or a call that never reached PostToolUse) is written to `watch.jsonl` as a `gap` ("ran, charge unconfirmed") and released with a structured `releaseClass`, so a hold given back with no usage ahead of it (`unused`) is told apart from one that was not.
   - A refused remainder of a job is also written to `watch.jsonl` as a `would_block` record naming the job and its tokens.
 
+### Security
+
+- **Settings from one file, which no environment variable can redirect.** Set
+  `UT_CC_CONFIG` to a JSON file and the plugin reads every setting from it: the
+  URL, the key, the mode and the rest (see the README's *Configuration file*).
+  With `UT_CC_CONFIG` set, even empty, no `UT_*` variable is read. A project's
+  settings can set environment variables for every hook, so one quiet line could
+  otherwise send the tenant key to another server, switch the mode, turn content
+  back on or move the state dir.
+  - The file is accepted only inside `.config/usertrust/` under the user's home as
+    the passwd database gives it (never `$HOME`), with no symlinked component, as
+    a regular file the user owns with no group or other permission bits, and with
+    every required field valid.
+  - Any other file, or an empty `UT_CC_CONFIG`, runs the plugin watch-only and
+    key-less: no request is sent, and each tool call is recorded as a `gap` with a
+    fixed reason. It never falls back to the environment, and never enforces.
+  - Nothing read from the file is echoed: a reason names only the plugin's own
+    field names. A url with a user or password in it is refused: a request to it
+    fails with an error that quotes the whole url.
+  - Node and the C library can reroute or expose a request without any code: a
+    proxy (`NODE_USE_ENV_PROXY`), a CA store (`NODE_EXTRA_CA_CERTS`,
+    `SSL_CERT_FILE`, …), OpenSSL's config, or the resolver (`HOSTALIASES`,
+    `LOCALDOMAIN`, `RES_OPTIONS`).
+    - So a configured session's requests are sent by a child process the plugin
+      starts with no node options, the working directory `/`, and nothing of the
+      environment but Claude Code's `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`.
+    - None of those variables, nor one no one has named yet, applies to it, so none
+      is refused.
+    - A child that finds anything else in its environment refuses to run. A server
+      behind a private CA is not supported.
+    - Configured sessions do not run on Windows yet: Windows adds `SYSTEMROOT`,
+      `SYSTEMDRIVE` and `TEMP` to a child's environment, with the parent's values.
+      There a configured session's hooks start no child, and say so: each call is
+      a gap in watch mode, or blocked in enforce mode. A session configured through
+      the environment is unaffected.
+    - A hook whose child cannot start, or that fails in any other way, ends as an
+      outage: PreToolUse in enforce mode blocks the call (unless `failOpen`), and
+      every other case is a gap. It never exits 1, which Claude Code reads as a
+      non-blocking error, letting the call run with no record.
+  - This does not stop code from a project's settings: a hook, or a variable that
+    loads code (`NODE_OPTIONS`, `PATH`), runs in the hook's own process and can
+    read the file too. Without `UT_CC_CONFIG`, requests are sent as before.
+- **A hold is ended only through the server and key that made it.** A session's
+  settings are pinned (see *Changed*), but a pin deleted mid-session is made again
+  from the settings then current, so the server or key can still change between
+  the hook that made a hold and the one that ends it. PostToolUse, Stop, SubagentStop and SessionEnd now treat
+  such a hold as 1.4.1's resumed PreToolUse does: its record is dropped, nothing
+  about it is sent to the new server, and any usage it carried goes unrecorded.
+  Ended through the new server, it answered 404 there, and the estimate path then
+  charged the call to the new tenant on a fresh hold. An unresolved settle parked
+  under one server and key is likewise never retried under another: there, under
+  a key that server never saw, it could charge again what the first already did.
+  Every such drop first writes a gap to `watch.jsonl`, stating when its call began,
+  except a claim that only ends a deferred call's hold, whose call never ran. A
+  stale `.settling` record that 1.4.1's resumed PreToolUse abandoned left no gap. A
+  record without a binding (from before 1.4.1) is ended as it always was.
+- **Hold files are created `0600`**, as every other file in the state dir already
+  was. They were `0644`, readable by other users when the state dir allows it.
+
+### Changed
+
+- **A session reads its settings once, at its first hook, and keeps them for its
+  life, a resumed session included.** This applies to the config file and the
+  environment alike, and an edit applies to new sessions, a key rotation included.
+  - They are kept in a pin under the passwd home:
+    `.local/state/usertrust/sessions/<session id>.json`, 0600, in directories
+    checked as the config anchor is.
+  - An environment session's pin holds the key's hash, never the key. A key changed
+    mid-session is refused for that hook: it sends nothing, and records a gap.
+  - A pin unused for 30 days is removed when a session starts; that session, if
+    resumed at or after the removal, is pinned again from the settings then current.
+    A pin that cannot be used runs the hook watch-only and key-less, with a gap.
+  - Every hook now starts through `hooks/launch.mjs`.
+  - `usertrust-job` reads a session's settings from the same pin, so `start` and
+    `stop` write to the job log the session's hooks read, whatever the state dir
+    says now.
+
+### Fixed
+
+- **A session whose state dir changed mid-session no longer charges usage twice,
+  nor loses its holds.**
+  - The record of what was already posted lives in the state dir.
+  - Moved to a state dir that already existed (another session's, or its own
+    earlier one), a session posted at its next Stop transcript usage it had already
+    settled, and no key or ledger id caught it.
+  - Its holds stayed in the old dir, never settled, and with no gap.
+  - Claude Code applies a settings `env` change to a running session, so this
+    happened with `UT_CC_STATE_DIR` as well as with a config file.
+
+- **A server url with a trailing `/`, a query or a fragment reaches the server.**
+  Requests were built from the url's text, so `http://host:4519/` sent
+  `//v1/authorize`, and a query put the route inside the query. The server matches
+  each route exactly and answered 404: in watch mode every call went unmetered, each
+  recorded as a gap, and in enforce mode every call was blocked (or, with
+  `failOpen`, went ungoverned). Requests now go to the url's origin and path, for
+  `UT_SERVER_URL` and a config file's `url` alike. A hold still records the url as
+  written, so one recorded under any spelling is ended as before.
+
 ## [1.4.1] - 2026-10-07
 
 ### Fixed
