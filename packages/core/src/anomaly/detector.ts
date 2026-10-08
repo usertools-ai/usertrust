@@ -21,7 +21,7 @@
  * when off, observe/check are no-ops.
  */
 
-import { costFromRatesUnfloored, getModelRates } from "../ledger/pricing.js";
+import { costFromRatesUnfloored, getModelRates, supported1hTokens } from "../ledger/pricing.js";
 import {
 	createInjectionCascadeSignal,
 	type InjectionCascadeSignal,
@@ -96,13 +96,16 @@ function defaultCostCalculator(
 	// No-floor per D7: settlement floors per call, but spend-velocity measures a
 	// continuous flow — a per-call floor would clamp every early sample to the
 	// same plateau, hiding exactly the flood this fix makes visible.
+	const rates = getModelRates(model);
 	const usertokens = costFromRatesUnfloored(
-		getModelRates(model),
+		rates,
 		inputTokens,
 		outputTokens,
 		cacheReadTokens,
 		cacheWriteTokens,
-		cacheWrite1hTokens,
+		// A built-in row with no 1-hour tier does not price a reported share (the ledger
+		// will not charge it), so the velocity signal must not either.
+		supported1hTokens(rates, false, cacheWrite1hTokens),
 	);
 	return usertokens / USERTOKENS_PER_DOLLAR;
 }

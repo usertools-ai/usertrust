@@ -24,9 +24,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type TrustEngine, trust } from "../../src/govern.js";
+import { scopedAnomalyCostCalculator, type TrustEngine, trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
-import type { TrustReceipt } from "../../src/shared/types.js";
+import { TrustConfigSchema, type TrustReceipt } from "../../src/shared/types.js";
 
 vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(() => ({
@@ -447,6 +447,60 @@ describe("1-hour cache writes: governed paths", () => {
 		expect(receipt.cacheWrite1h).toBeUndefined();
 		expect(receipt.usage?.cacheWriteTokens).toBe(10_000);
 		await gov.destroy();
+	});
+
+	it("the anomaly cost calculator prices a 1h share only for rates that have the tier", () => {
+		const calc = scopedAnomalyCostCalculator(TrustConfigSchema.parse({ budget: 1000 }));
+		const ev = (model: string, h: number) => ({
+			kind: "chunk" as const,
+			deltaTokens: 0,
+			cumulativeInputTokens: 0,
+			cumulativeOutputTokens: 0,
+			cumulativeCacheWriteTokens: 10_000,
+			cumulativeCacheWrite1hTokens: h,
+			model,
+			chunk: null,
+		});
+		// Sonnet 4.6 has the tier: 10,000 written, all 1h: 10,000 x 60 / 1000 = 600 UT = $0.06.
+		expect(calc("claude-sonnet-4-6", 0, 0, ev("claude-sonnet-4-6", 10_000))).toBeCloseTo(0.06, 10);
+		// gpt-4o has none: the share is ignored, all 10,000 price at its single write rate (25/1k = 250 UT).
+		expect(calc("gpt-4o", 0, 0, ev("gpt-4o", 10_000))).toBeCloseTo(0.025, 10);
+		expect(calc("gpt-4o", 0, 0, ev("gpt-4o", 10_000))).toBe(calc("gpt-4o", 0, 0, ev("gpt-4o", 0)));
+	});
+
+	it("an OpenAI-shaped client serving a Claude model: a 1h marker still raises the hold", async () => {
+		const mk = async (content: unknown) => {
+			const engine = makeCappingEngine();
+			const client = {
+				chat: {
+					completions: {
+						create: vi.fn(async (_params?: unknown) => ({
+							id: "c1",
+							choices: [{ message: { role: "assistant", content: "ok" } }],
+							usage: { prompt_tokens: 10, completion_tokens: 1 },
+						})),
+					},
+				},
+			};
+			const governed = await trust(client, {
+				budget: 1_000_000,
+				vaultBase: tmpVault,
+				_engine: asEngine(engine),
+			});
+			await governed.chat.completions.create({
+				model: MODEL,
+				max_tokens: 1,
+				messages: [{ role: "user", content }],
+			});
+			await governed.destroy();
+			return heldAmount(engine);
+		};
+		const plain = await mk("x".repeat(2000));
+		const marked = await mk([
+			{ type: "text", text: "x".repeat(2000), cache_control: { type: "ephemeral", ttl: "1h" } },
+		]);
+		expect(plain).toBe(29);
+		expect(marked).toBe(46); // 756 x 60 / 1000 + 0.15, the 1h rate, not the 5m 37.5
 	});
 
 	it("headless authorize() holds the worst case: input leg and stated writes at the 1h rate", async () => {

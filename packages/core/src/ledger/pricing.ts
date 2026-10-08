@@ -580,6 +580,19 @@ export function effectiveCacheWrite1hRate(rates: ModelRates): number {
 }
 
 /**
+ * A reported 1-hour share, or 0 when these rates have no 1-hour tier
+ * (`supportsCacheWrite1h`). For the callers that price a running total outside a
+ * settle (the anomaly detector's spend velocity) and so cannot use a snapshot.
+ */
+export function supported1hTokens(
+	rates: ModelRates,
+	operatorOwned: boolean,
+	cacheWrite1hTokens: number,
+): number {
+	return supportsCacheWrite1h(rates, operatorOwned) ? cacheWrite1hTokens : 0;
+}
+
+/**
  * The 1-hour write rate a HOLD may reserve. A row that publishes one reserves it. A row
  * that does not reserves nothing if it is a built-in TABLE row, and the DERIVED rate if
  * it is operator-owned (`operatorOwned`: a customRates row, a local rate, the fallback):

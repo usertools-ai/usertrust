@@ -58,6 +58,7 @@ import {
 	requestDeclares1hCache,
 	resolveAppliedRates,
 	resolveRates,
+	supported1hTokens,
 	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
@@ -88,6 +89,7 @@ import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/cons
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
 
 import { createAnomalyDetector } from "./anomaly/detector.js";
+import type { AnomalyChunkEvent } from "./anomaly/types.js";
 import {
 	AnomalyError,
 	AuditDegradedError,
@@ -1231,21 +1233,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// behind near-zero fresh input/output.
 	const anomalyDetector = createAnomalyDetector(config.anomaly, {
 		provider: kind,
-		costCalculator: (calcModel, inputTokens, outputTokens, event) => {
-			const scope = event?.endpointClass ?? "cloud";
-			const resolution = resolveRates(event?.model ?? calcModel, scope, config);
-			const cacheReadTokens = event?.cumulativeCacheReadTokens ?? 0;
-			const cacheWriteTokens = event?.cumulativeCacheWriteTokens ?? 0;
-			const usertokens = costFromRatesUnfloored(
-				resolution.rates,
-				inputTokens,
-				outputTokens,
-				cacheReadTokens,
-				cacheWriteTokens,
-				event?.cumulativeCacheWrite1hTokens ?? 0,
-			);
-			return scope === "local" ? usertokens : usertokens / USERTOKENS_PER_DOLLAR;
-		},
+		costCalculator: scopedAnomalyCostCalculator(config),
 	});
 
 	// 7. Two-phase intercept
@@ -1406,9 +1394,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// the worst case the request can produce, not the worst case any request can,
 			// so an ordinary call is held exactly as before and a 1-hour caller is never
 			// capped below what it settles at.
+			// (Whatever client shape carried the request: an OpenAI-shaped compatibility client
+			// can serve a Claude model. A row with no 1-hour tier reserves nothing for the
+			// marker, so this needs no provider test.)
 			const holdRate = holdInputRate(
 				rateResolution.rates,
-				kind === "anthropic" && requestDeclares1hCache(params),
+				requestDeclares1hCache(params),
 				rateResolution.rateSource !== "table",
 			);
 			const estimatedCost = costFromRates(
@@ -3588,6 +3579,36 @@ export function extractPromptParts(
 		parts.push({ role: "system", content: params.system });
 	}
 	return parts;
+}
+
+/**
+ * The anomaly detector's cost calculator for one governor: prices a running token total
+ * with the SAME scoped rate resolution settlement uses, all tiers, unfloored (spec D7).
+ * A reported 1-hour share counts only for rates that have a 1-hour tier
+ * (`supported1hTokens`), exactly as `withSupported1hTier` decides it at settlement, so
+ * the velocity signal cannot price a share the ledger will not charge. Exported so that
+ * is testable without driving a stream.
+ */
+export function scopedAnomalyCostCalculator(
+	config: TrustConfig,
+): (model: string, inputTokens: number, outputTokens: number, event?: AnomalyChunkEvent) => number {
+	return (calcModel, inputTokens, outputTokens, event) => {
+		const scope = event?.endpointClass ?? "cloud";
+		const resolution = resolveRates(event?.model ?? calcModel, scope, config);
+		const usertokens = costFromRatesUnfloored(
+			resolution.rates,
+			inputTokens,
+			outputTokens,
+			event?.cumulativeCacheReadTokens ?? 0,
+			event?.cumulativeCacheWriteTokens ?? 0,
+			supported1hTokens(
+				resolution.rates,
+				resolution.rateSource !== "table",
+				event?.cumulativeCacheWrite1hTokens ?? 0,
+			),
+		);
+		return scope === "local" ? usertokens : usertokens / USERTOKENS_PER_DOLLAR;
+	};
 }
 
 // ── Anthropic MessageStream helpers (Task 2, A1/A3) ──

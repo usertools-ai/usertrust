@@ -94,6 +94,39 @@ describe("usertrust pricing", () => {
 		expect(sonnet.cacheWrite1hPerM).toBe(6);
 	});
 
+	it("publishes NO 1-hour rate for a built-in model without that tier (null), human and --json", async () => {
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(vaultPath, { recursive: true });
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({
+				budget: 50_000,
+				pricing: "recommended",
+				providers: [{ name: "openai", models: ["gpt-4o"] }],
+			}),
+			"utf-8",
+		);
+		await run(tempDir, { json: true });
+		const jsonCall = vi.mocked(console.log).mock.calls.find((c) => {
+			try {
+				JSON.parse(c[0] as string);
+				return true;
+			} catch {
+				return false;
+			}
+		});
+		const parsed = JSON.parse(jsonCall?.[0] as string);
+		expect(parsed.rates["gpt-4o"].cacheWrite1hPerM).toBeNull();
+		vi.mocked(console.log).mockClear();
+		await run(tempDir);
+		const line = vi
+			.mocked(console.log)
+			.mock.calls.map((c) => String(c[0]))
+			.find((l) => l.includes("gpt-4o"));
+		expect(line).toBeDefined();
+		expect(line).not.toContain("(1h");
+	});
+
 	it("shows an operator's explicit 1-hour rate, and the derived one when a custom row omits it", async () => {
 		const vaultPath = join(tempDir, ".usertrust");
 		mkdirSync(vaultPath, { recursive: true });

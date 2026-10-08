@@ -15,6 +15,7 @@ import {
 	PRICING_TABLE,
 	PRICING_TABLE_VERSION,
 	resolveAppliedRates,
+	supportsCacheWrite1h,
 } from "../ledger/pricing.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { TrustConfig } from "../shared/types.js";
@@ -54,7 +55,7 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 				outputPerM: number;
 				cacheReadPerM: number;
 				cacheWritePerM: number;
-				cacheWrite1hPerM: number;
+				cacheWrite1hPerM: number | null;
 				source: string;
 			}
 		> = {};
@@ -75,7 +76,11 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 					cacheWritePerM: applied.cacheWritePer1k / 10,
 					// The rate a 1-hour cache write settles at (explicit, or the derived
 					// dearer-of-5m-and-2x-input when the row publishes none).
-					cacheWrite1hPerM: effectiveCacheWrite1hRate(r) / 10,
+					// null = the model has no 1-hour tier (a built-in row with no explicit rate);
+					// operator-owned rates derive one, as settlement does.
+					cacheWrite1hPerM: supportsCacheWrite1h(r, custom !== undefined)
+						? effectiveCacheWrite1hRate(r) / 10
+						: null,
 					source,
 				};
 			}
@@ -97,11 +102,13 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 		const outputPerM = (applied.outputPer1k / 10).toFixed(2);
 		const cacheReadPerM = (applied.cacheReadPer1k / 10).toFixed(2);
 		const cacheWritePerM = (applied.cacheWritePer1k / 10).toFixed(2);
-		const cacheWrite1hPerM = (effectiveCacheWrite1hRate(r) / 10).toFixed(2);
+		const oneHour = supportsCacheWrite1h(r, custom !== undefined)
+			? ` (1h $${(effectiveCacheWrite1hRate(r) / 10).toFixed(2)})`
+			: "";
 		const tag = custom ? pc.yellow(" (custom)") : "";
 		console.log(
 			`  ${pc.cyan(model.padEnd(24))} in $${inputPerM} out $${outputPerM} ` +
-				`cache-read $${cacheReadPerM} cache-write $${cacheWritePerM} (1h $${cacheWrite1hPerM}) per 1M${tag}`,
+				`cache-read $${cacheReadPerM} cache-write $${cacheWritePerM}${oneHour} per 1M${tag}`,
 		);
 	}
 
