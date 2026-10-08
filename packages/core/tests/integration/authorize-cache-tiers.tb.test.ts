@@ -48,9 +48,11 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — per-tier authorize hold", () 
 			principal: { unit },
 		});
 		// Hand-computed from the published Sonnet rates (30 / 150 / 3 / 37.5 per 1k):
-		// fresh 150 x 37.5 (D3) + read 82,000 x 3 + write 2,000 x 37.5 + out 1,000 x 150
-		// = 476.625 → 477. The old all-input sizing of the same window would hold 3,306.
-		expect(auth.estimatedCost).toBe(477);
+		// A headless authorize cannot see the cache TTLs, so fresh input and the stated write
+		// are held at the 1-hour write rate (60 = 2x input): fresh 150 x 60 + read 82,000 x 3
+		// + write 2,000 x 60 + out 1,000 x 150 = 9 + 246 + 120 + 150 = 525. The old all-input
+		// sizing of the same window would hold 5,199.
+		expect(auth.estimatedCost).toBe(525);
 
 		const tbNode = await import("tigerbeetle-node");
 		const raw = tbNode.createClient({ cluster_id: 0n, replica_addresses: [TB_ADDRESS as string] });
@@ -72,7 +74,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — per-tier authorize hold", () 
 		const held = await byUnit();
 		expect(held).toHaveLength(1);
 		expect((held[0]?.flags ?? 0) & pending).not.toBe(0);
-		expect(held[0]?.amount).toBe(477n);
+		expect(held[0]?.amount).toBe(525n);
 
 		await gov.abort(auth, new Error("provider 500"));
 		const after = await byUnit();

@@ -2,15 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	canonicalModelId,
 	costFromRates,
+	costFromRatesUnfloored,
+	effectiveCacheWrite1hRate,
 	estimateCost,
 	estimateInputTokens,
 	FALLBACK_RATE,
 	getModelRates,
+	holdCacheWriteRate,
+	holdInputRate,
 	isModelPriced,
 	type ModelRates,
 	modelsForProvider,
 	PRICING_TABLE,
 	PRICING_TABLE_VERSION,
+	resolveCacheWrite1h,
 	resolveRates,
 	warnCacheRateMigration,
 } from "../../src/ledger/pricing.js";
@@ -45,6 +50,9 @@ describe("FALLBACK_RATE", () => {
 		expect(FALLBACK_RATE.inputPer1k).toBe(maxIn);
 		expect(FALLBACK_RATE.outputPer1k).toBe(maxOut);
 		expect(FALLBACK_RATE.cacheWritePer1k).toBe(maxWrite);
+		// The 1-hour tier too: the dearest effective 1-hour write rate in the table.
+		const max1h = Math.max(...rows.map((r) => effectiveCacheWrite1hRate(r)));
+		expect(FALLBACK_RATE.cacheWrite1hPer1k).toBe(max1h);
 	});
 
 	it("pins the literal fallback (250 / 1250 / write 312.5)", () => {
@@ -52,6 +60,7 @@ describe("FALLBACK_RATE", () => {
 			inputPer1k: 250,
 			outputPer1k: 1250,
 			cacheWritePer1k: 312.5,
+			cacheWrite1hPer1k: 500,
 		});
 	});
 });
@@ -388,7 +397,10 @@ describe("PRICING_TABLE_VERSION", () => {
 		// opus-4-8).
 		// 2026-10-07: Sonnet 5 corrected to $2/$10; exact rows for the 5.5 / 5.1
 		// generation, Mythos, Haiku 5.5 and the older Opus/Sonnet/Haiku ids.
-		expect(PRICING_TABLE_VERSION).toBe("2026-10-07");
+		// 2026-10-08: the 1-hour cache-write column (cacheWrite1hPer1k) was added to the
+		// Anthropic rows after v4.0.0 shipped with 2026-10-07; one version string must not
+		// label two different tables.
+		expect(PRICING_TABLE_VERSION).toBe("2026-10-08");
 	});
 });
 
@@ -661,7 +673,12 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 		it(`pins all four tiers for ${model}`, () => {
 			// toStrictEqual so an accidentally-present `cacheWritePer1k: undefined`
 			// fails too — presence/absence of a cache field is load-bearing under D1.
-			expect(PRICING_TABLE[model]).toStrictEqual(expected);
+			// Anthropic rows also carry the explicit 1-hour write rate, pinned against the
+			// page in "1-hour cache-write tier" below.
+			const oneHour = PAGE_1H_WRITE_PER_1K[model];
+			expect(PRICING_TABLE[model]).toStrictEqual(
+				oneHour === undefined ? expected : { ...expected, cacheWrite1hPer1k: oneHour },
+			);
 		});
 	}
 
@@ -1175,5 +1192,199 @@ describe("claude-mythos-preview (deprecated, still callable)", () => {
 		const preview = PRICING_TABLE["claude-mythos-preview"];
 		expect(FALLBACK_RATE.inputPer1k).toBe(preview?.inputPer1k);
 		expect(FALLBACK_RATE.outputPer1k).toBe(preview?.outputPer1k);
+	});
+});
+
+// ── 1-hour cache writes (#203) ──────────────────────────────────────────────
+
+// The "1h cache writes" column of Anthropic's model-pricing table, $/MTok x 10 =
+// usertokens per 1k (https://platform.claude.com/docs/en/about-claude/pricing,
+// retrieved 2026-10-07). Read from the page, not derived from 2x input here, so a
+// row that drifts off its published rate fails against the source and not against
+// itself. claude-mythos-preview is not on the page: its entry is 2x its $25 input
+// (the page's published 1-hour multiple for a model without an exception).
+const PAGE_1H_WRITE_PER_1K: Record<string, number> = {
+	"claude-fable-5-1": 200,
+	"claude-fable-5": 200,
+	"claude-mythos-5-1": 200,
+	"claude-mythos-5": 200,
+	"claude-mythos-preview": 500,
+	"claude-opus-5-5": 80,
+	"claude-opus-5": 100,
+	"claude-opus-4-8": 100,
+	"claude-opus-4-7": 100,
+	"claude-opus-4-6": 100,
+	"claude-opus-4-5": 100,
+	"claude-opus-4-1": 300,
+	"claude-opus-4": 300,
+	"claude-sonnet-5-5": 40,
+	"claude-sonnet-5": 40,
+	"claude-sonnet-4-6": 60,
+	"claude-sonnet-4-5": 60,
+	"claude-sonnet-4": 60,
+	"claude-haiku-5-5": 10,
+	"claude-haiku-4-5": 20,
+	"claude-3-5-haiku": 16,
+};
+
+describe("1-hour cache-write tier", () => {
+	for (const [model, per1k] of Object.entries(PAGE_1H_WRITE_PER_1K)) {
+		it(`${model} publishes an explicit 1h write rate of ${per1k}`, () => {
+			expect(PRICING_TABLE[model]?.cacheWrite1hPer1k).toBe(per1k);
+		});
+	}
+
+	it("every Anthropic row carries an explicit 1h rate, and the pin list covers exactly them", () => {
+		const anthropic = Object.keys(PRICING_TABLE).filter((m) => m.startsWith("claude-"));
+		expect(anthropic.sort()).toEqual(Object.keys(PAGE_1H_WRITE_PER_1K).sort());
+		for (const m of anthropic) {
+			const r = PRICING_TABLE[m];
+			expect(r?.cacheWrite1hPer1k, m).toBeDefined();
+			expect(r?.cacheWrite1hPer1k, `${m} 1h >= 5m write`).toBeGreaterThanOrEqual(
+				r?.cacheWritePer1k ?? 0,
+			);
+		}
+	});
+
+	it("an absent 1h rate resolves to the dearer of the 5m write and 2x input (one site)", () => {
+		expect(effectiveCacheWrite1hRate({ inputPer1k: 30, outputPer1k: 150 })).toBe(60);
+		expect(
+			effectiveCacheWrite1hRate({ inputPer1k: 30, outputPer1k: 150, cacheWritePer1k: 90 }),
+		).toBe(90);
+		expect(
+			effectiveCacheWrite1hRate({ inputPer1k: 30, outputPer1k: 150, cacheWrite1hPer1k: 45 }),
+		).toBe(45);
+		// A garbage explicit value is an absence, not a discount.
+		for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+			expect(
+				effectiveCacheWrite1hRate({ inputPer1k: 30, outputPer1k: 150, cacheWrite1hPer1k: bad }),
+			).toBe(60);
+		}
+		// An operator's explicit 0 is honoured, like every other cache tier.
+		expect(
+			effectiveCacheWrite1hRate({ inputPer1k: 30, outputPer1k: 150, cacheWrite1hPer1k: 0 }),
+		).toBe(0);
+	});
+
+	const SONNET = PRICING_TABLE["claude-sonnet-4-6"] as ModelRates; // 30 / 150 / 3 / 37.5 / 1h 60
+
+	it("prices the 1h SUBSET at the 1h rate and the remainder at the 5m rate", () => {
+		// 4000 written, 1000 of them 1h: 3000 x 37.5/1k + 1000 x 60/1k = 112.5 + 60 = 172.5 -> 173
+		expect(costFromRates(SONNET, 0, 0, 0, 4000, 1000)).toBe(173);
+		// All 1h: 4000 x 60/1k = 240. All 5m: 4000 x 37.5/1k = 150.
+		expect(costFromRates(SONNET, 0, 0, 0, 4000, 4000)).toBe(240);
+		expect(costFromRates(SONNET, 0, 0, 0, 4000, 0)).toBe(150);
+		expect(costFromRatesUnfloored(SONNET, 0, 0, 0, 4000, 1000)).toBe(172.5);
+	});
+
+	it("the 1h count is clamped to the write total and sanitized", () => {
+		// 1h larger than the total can never price more than the total at the 1h rate.
+		expect(costFromRates(SONNET, 0, 0, 0, 1000, 9999)).toBe(60);
+		for (const bad of [Number.NaN, -5, Number.POSITIVE_INFINITY]) {
+			expect(costFromRates(SONNET, 0, 0, 0, 1000, bad)).toBe(
+				costFromRates(SONNET, 0, 0, 0, 1000, 0),
+			);
+		}
+		// 1h tokens with NO write total are not billed on their own.
+		expect(costFromRates(SONNET, 0, 0, 0, 0, 500)).toBe(1);
+	});
+
+	it("omitting the 1h argument leaves every existing cost unchanged", () => {
+		expect(costFromRates(SONNET, 1000, 500, 2000, 700)).toBe(
+			costFromRates(SONNET, 1000, 500, 2000, 700, 0),
+		);
+	});
+
+	it("holdInputRate reserves the dearest of input, 5m write and 1h write", () => {
+		expect(holdInputRate(SONNET)).toBe(60); // 1h write, not the 37.5 5m write
+		expect(holdInputRate(SONNET, false)).toBe(37.5); // a request with no 1h marker
+		// A row that publishes no 1h tier derives nothing from silence: held as before.
+		expect(holdInputRate({ inputPer1k: 25, outputPer1k: 100, cacheReadPer1k: 12.5 })).toBe(25);
+		expect(holdInputRate({ inputPer1k: 5, outputPer1k: 5, cacheWritePer1k: 9 })).toBe(9);
+		expect(holdCacheWriteRate(SONNET)).toBe(60);
+		expect(holdCacheWriteRate({ inputPer1k: 5, outputPer1k: 5, cacheWritePer1k: 9 })).toBe(9);
+	});
+
+	it("resolveCacheWrite1h: absent when no 1h tokens, frozen record when some", () => {
+		expect(resolveCacheWrite1h(SONNET, 0, 4000)).toBeUndefined();
+		expect(resolveCacheWrite1h(SONNET, 500, 0)).toBeUndefined();
+		const rec = resolveCacheWrite1h(SONNET, 1000, 4000);
+		expect(rec).toEqual({ tokens: 1000, ratePer1k: 60 });
+		expect(Object.isFrozen(rec)).toBe(true);
+		expect(resolveCacheWrite1h(SONNET, 9999, 4000)?.tokens).toBe(4000);
+	});
+});
+
+describe("1-hour write arithmetic matches the auditor's recompute exactly", () => {
+	// The documented recompute is ceil(sum(counts x rates / 1000)): each term multiplies THEN
+	// divides on its own, and the terms sum in the order input, output, read, 5-minute write,
+	// 1-hour write. Settlement must group identically, or an honest receipt fails to reproduce.
+	const audit = (
+		r: { in: number; out: number; read: number; w5: number; w1: number },
+		n: { in: number; out: number; read: number; w: number; h: number },
+	) =>
+		Math.max(
+			1,
+			Math.ceil(
+				(n.in * r.in) / 1000 +
+					(n.out * r.out) / 1000 +
+					(n.read * r.read) / 1000 +
+					((n.w - n.h) * r.w5) / 1000 +
+					(n.h * r.w1) / 1000,
+			),
+		);
+	const SONNET_RATES = { in: 30, out: 150, read: 3, w5: 37.5, w1: 60 };
+
+	it("the counts that exposed a numerator-grouping drift (321 vs 322) reproduce", () => {
+		const n = { in: 607, out: 1062, read: 2800, w: 2367, h: 2059 };
+		const cost = costFromRates(
+			PRICING_TABLE["claude-sonnet-4-6"] as ModelRates,
+			n.in,
+			n.out,
+			n.read,
+			n.w,
+			n.h,
+		);
+		expect(cost).toBe(audit(SONNET_RATES, n));
+	});
+
+	it("2,000 seeded random call shapes: cost equals the per-term recompute on every one", () => {
+		let seed = 0x9e3779b9;
+		const next = () => {
+			seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+			return seed / 2 ** 32;
+		};
+		const rates = PRICING_TABLE["claude-sonnet-4-6"] as ModelRates;
+		for (let i = 0; i < 2_000; i++) {
+			const w = Math.floor(next() * 5_000);
+			const n = {
+				in: Math.floor(next() * 3_000),
+				out: Math.floor(next() * 3_000),
+				read: Math.floor(next() * 6_000),
+				w,
+				h: Math.floor(next() * (w + 1)),
+			};
+			expect(costFromRates(rates, n.in, n.out, n.read, n.w, n.h), JSON.stringify(n)).toBe(
+				audit(SONNET_RATES, n),
+			);
+		}
+	});
+});
+
+describe("holds for an operator's custom row (legacy rows with no 1-hour rate)", () => {
+	const legacy: ModelRates = { inputPer1k: 30, outputPer1k: 150, cacheWritePer1k: 37.5 };
+	it("a custom row that publishes a write tier but no 1h rate holds the derived 2x input", () => {
+		expect(holdInputRate(legacy, true, true)).toBe(60);
+		expect(holdCacheWriteRate(legacy, true)).toBe(60);
+	});
+	it("the same row from the TABLE (no 1-hour tier) holds as before, and operator-owned rates with no write tier still derive", () => {
+		expect(holdInputRate(legacy, true, false)).toBe(37.5);
+		expect(holdCacheWriteRate(legacy, false)).toBe(37.5);
+		// ...but operator-owned rates with no write tier at all still derive: settlement
+		// meters their 1-hour tokens at 2x input.
+		expect(holdInputRate({ inputPer1k: 5, outputPer1k: 5 }, true, true)).toBe(10);
+	});
+	it("an explicit rate wins on a custom row too", () => {
+		expect(holdInputRate({ ...legacy, cacheWrite1hPer1k: 45 }, true, true)).toBe(45);
 	});
 });
