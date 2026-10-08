@@ -627,9 +627,12 @@ describe("#166 P2-2: a request with tools carries the provider's tool system pro
 	});
 });
 
+// gpt-4o-2024-05-13 is no longer the example: it has its OWN exact row now (priced above
+// its alias), so the gate rightly prices it. -08-06 has none, meters at gpt-4o's row
+// in the governor, and stays unpriced here because isModelPriced is exact by design.
 describe("#166 P1-1: a model priced only by PREFIX is unpriced at the gate", () => {
 	it("o3-pro, a dated gpt-4o snapshot, a -pro tier and a -fast variant are denied model_unpriced", () => {
-		for (const model of ["o3-pro", "gpt-4o-2024-05-13", "gpt-5.4-pro", "claude-opus-4-6-fast"]) {
+		for (const model of ["o3-pro", "gpt-4o-2024-08-06", "gpt-5.4-pro", "claude-opus-4-6-fast"]) {
 			const r = model.startsWith("claude")
 				? gate(ANTHROPIC, "/v1/messages", { model, max_tokens: 5, messages: [] })
 				: gate(OPENAI, "/v1/chat/completions", { model, max_tokens: 5, messages: [] });

@@ -24,9 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`isModelPriced(model, customRates?)`** — true only when a model has rates of
   its OWN: an operator custom rate or an EXACT pricing-table entry. It is for a
   caller that must refuse what it cannot price exactly rather than bill it at a
-  guess. It is deliberately stricter than `getModelRates`, whose prefix match
-  prices a variant (`o3-pro`, a dated snapshot, a `-pro` or `-fast` tier) at its
-  base model's row; `getModelRates` is unchanged.
+  guess. It is deliberately stricter than `getModelRates`, which meters a dated
+  snapshot (`-YYYYMMDD` or `-YYYY-MM-DD`) at its base model's row when the
+  snapshot has no row of its own, and prices any other unknown id (`o3-pro`, a
+  `-pro` or `-fast` tier) at the dearest-known fallback.
 
 - **Core exports `TBTransferError` and `XFER_SPEND`** from the package entry. `TBTransferError` is the base of the replay errors already exported, so a caller can read a failed transfer's `code` without an internal import.
 
@@ -221,6 +222,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `inspect` kind column are also follow-ups.
 
 ### Fixed
+
+- **Model pricing is exact, current and fails dearest** (closes #209; the prefix-match hole of #143). Re-verified against Anthropic's pricing page on 2026-10-07 (`PRICING_TABLE_VERSION` `2026-10-07`). `claude-sonnet-5` is $2 / $10, not $3 / $15: the announced increase did not happen, and the old row overstated every Sonnet 5 call by 50%. New exact rows: `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`, `claude-mythos-5`, `claude-mythos-5-1`, `claude-mythos-preview`, `claude-haiku-5-5` (priced at its over-100,000-token tier, an overstatement for shorter prompts), the older Opus / Sonnet / Haiku ids the page still lists, `gpt-4o-2024-05-13` (priced above `gpt-4o`) and `mistral-large-latest`. Cache reads are 0.05x on Opus 5.5 and Sonnet 5.5 and 0.025x on Fable 5.1 and Mythos 5.1, not 0.1x. **`getModelRates` and `resolveRates` no longer prefix match**: a longer id used to be billed at a shorter key's row with `rateSource: "table"` (`claude-sonnet-5-5` at `claude-sonnet-5`). Lookup is now an exact row, then the id with one trailing `-YYYYMMDD` or `-YYYY-MM-DD` stripped, then `FALLBACK_RATE`. **`FALLBACK_RATE` is now the highest rate in the table** (250 / 1250, cache write 312.5), no longer sonnet-class 30 / 150, so an unknown id over-counts visibly (`rateSource: "fallback"`, `unknown: true`) instead of under-counting silently. A consequence to expect: an unknown model's hold at the default `max_tokens` is far larger, so a small budget refuses it before the provider is reached, and the spend-velocity anomaly trips sooner for it. Fast mode (a `speed` usage field) is still not priced: #256. The fleet rollup's list-price table follows the same lookup rule and carries the per-model cache-read multipliers.
 
 - **usertrust-server's `/v1/abort` answered 200 for a hold it had not aborted** (addresses #240). It answered `200 { aborted: true }` whatever the governor did, and published an `aborted` event, so an abort of a hold the governor no longer held (its settle in flight, or already ended) said it had aborted it. It now keeps `/v1/release`'s rule: `200 { aborted: true, transferId }` (with `voidError` when the ledger refused the void) only when the governor ended the hold, else `404 { error: "not_found", reason: "unknown transferId" }` with no event, and the entry stays out. A governor that throws still puts the entry back, so a failed abort stays retryable. The answer's type is exported as `AbortResponse`.
 

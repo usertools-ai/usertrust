@@ -256,7 +256,7 @@ describe("local OpenAI-compat endpoint — e2e over HTTP (M2)", () => {
 	it("(d) BEFORE-behavior guard: autoDetectLoopback:false meters the same call at FALLBACK_RATE", async () => {
 		// This is the pre-M2 bug as a contrast case: with loopback autodetect off,
 		// the endpoint classifies as cloud, "llama3.3:70b" misses the pricing
-		// table, and free inference is billed at sonnet-class FALLBACK_RATE.
+		// table, and free inference is billed at the dearest-known FALLBACK_RATE.
 		// Budget is 5000 (not 200) because the fallback-rate PENDING hold alone
 		// (~617 ut for a $0 call) would overshoot a 200-ut budget — that
 		// over-reservation is itself part of the documented old bug.
@@ -267,13 +267,18 @@ describe("local OpenAI-compat endpoint — e2e over HTTP (M2)", () => {
 
 		const result = await call(governed, {
 			model: "llama3.3:70b",
+			// A small max_tokens keeps the fallback-priced (250/1250) hold inside the 5000-ut
+			// budget: at the default 4096 the hold alone is ~5,120 ut and the call is refused
+			// pre-spend. That consequence is pinned in govern/local-endpoint.test.ts; this
+			// test is about how the call is METERED.
+			max_tokens: 100,
 			messages: [{ role: "user", content: "Explain governance briefly" }],
 		});
 
 		expect(result.receipt.endpoint).toEqual({ class: "cloud", runtime: "unknown" });
 		expect(result.receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
-		// FALLBACK_RATE {30, 150}: (100/1000)*30 + (50/1000)*150 = 3 + 7.5 → ceil = 11.
-		expect(result.receipt.cost).toBe(11);
+		// FALLBACK_RATE {250, 1250}: (100/1000)*250 + (50/1000)*1250 = 25 + 62.5 → ceil = 88.
+		expect(result.receipt.cost).toBe(88);
 		// Default unknownModelPolicy "warn" surfaces the fallback footgun.
 		expect(
 			warnSpy.mock.calls.filter((c) => String(c[0]).includes("llama3.3:70b")).length,

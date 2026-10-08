@@ -1,20 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	canonicalModelId,
 	costFromRates,
 	estimateCost,
 	estimateInputTokens,
 	FALLBACK_RATE,
 	getModelRates,
+	isModelPriced,
 	type ModelRates,
 	modelsForProvider,
 	PRICING_TABLE,
 	PRICING_TABLE_VERSION,
+	resolveRates,
 	warnCacheRateMigration,
 } from "../../src/ledger/pricing.js";
+import { type TrustConfig, TrustConfigSchema } from "../../src/shared/types.js";
+
+function makeCloudConfig(): TrustConfig {
+	return TrustConfigSchema.parse({ budget: 1000 });
+}
 
 describe("PRICING_TABLE", () => {
-	it("contains 26 models", () => {
-		expect(Object.keys(PRICING_TABLE)).toHaveLength(26);
+	it("contains 42 models", () => {
+		expect(Object.keys(PRICING_TABLE)).toHaveLength(42);
 	});
 
 	it("all rates are positive", () => {
@@ -26,9 +34,25 @@ describe("PRICING_TABLE", () => {
 });
 
 describe("FALLBACK_RATE", () => {
-	it("is sonnet-class pricing", () => {
-		expect(FALLBACK_RATE.inputPer1k).toBe(30);
-		expect(FALLBACK_RATE.outputPer1k).toBe(150);
+	// Fail dearest: an unknown id over-counts visibly instead of under-counting
+	// silently. The maxima are COMPUTED from the table, so a dearer row added later
+	// fails here until the fallback is raised with it.
+	it("FALLBACK_RATE equals the table maximum on every tier it carries", () => {
+		const rows = Object.values(PRICING_TABLE);
+		const maxIn = Math.max(...rows.map((r) => r.inputPer1k));
+		const maxOut = Math.max(...rows.map((r) => r.outputPer1k));
+		const maxWrite = Math.max(...rows.map((r) => r.cacheWritePer1k ?? r.inputPer1k));
+		expect(FALLBACK_RATE.inputPer1k).toBe(maxIn);
+		expect(FALLBACK_RATE.outputPer1k).toBe(maxOut);
+		expect(FALLBACK_RATE.cacheWritePer1k).toBe(maxWrite);
+	});
+
+	it("pins the literal fallback (250 / 1250 / write 312.5)", () => {
+		expect(FALLBACK_RATE).toStrictEqual({
+			inputPer1k: 250,
+			outputPer1k: 1250,
+			cacheWritePer1k: 312.5,
+		});
 	});
 });
 
@@ -39,11 +63,9 @@ describe("getModelRates", () => {
 		expect(rates.outputPer1k).toBe(150);
 	});
 
-	it("returns prefix match for versioned model strings", () => {
-		// "claude-haiku-4-5-20251001" should match "claude-haiku-4-5"
+	it("resolves a dated snapshot (-YYYYMMDD) to its base row", () => {
 		const rates = getModelRates("claude-haiku-4-5-20251001");
-		expect(rates.inputPer1k).toBe(10);
-		expect(rates.outputPer1k).toBe(50);
+		expect(rates).toBe(PRICING_TABLE["claude-haiku-4-5"]);
 	});
 
 	it("returns FALLBACK_RATE for unknown model", () => {
@@ -58,18 +80,13 @@ describe("getModelRates", () => {
 		}
 	});
 
-	it("prefix matches longest key first to avoid partial collisions", () => {
-		// "gpt-4o-mini" is a separate key from "gpt-4o"
-		// "gpt-4o-mini-2025" should match "gpt-4o-mini", not "gpt-4o"
-		const rates = getModelRates("gpt-4o-mini-2025");
-		expect(rates.inputPer1k).toBe(1.5); // gpt-4o-mini rate
-		expect(rates.outputPer1k).toBe(6);
-	});
-
-	it("prefix matches gpt-4o versioned string to gpt-4o (not gpt-4o-mini)", () => {
-		const rates = getModelRates("gpt-4o-2025-01-01");
-		expect(rates.inputPer1k).toBe(25); // gpt-4o rate
-		expect(rates.outputPer1k).toBe(100);
+	it("does NOT prefix match: a longer id is a different model (#143)", () => {
+		// Not a date suffix, and prefix matching is gone, so these fall to the
+		// dearest-known fallback instead of a base row.
+		expect(getModelRates("gpt-4o-mini-2025")).toBe(FALLBACK_RATE);
+		expect(getModelRates("gpt-4o-2025-01")).toBe(FALLBACK_RATE);
+		expect(getModelRates("o3-pro")).toBe(FALLBACK_RATE);
+		expect(getModelRates("gemini-2.5-pro-preview-06-05")).toBe(FALLBACK_RATE);
 	});
 
 	it("handles empty string gracefully (falls back)", () => {
@@ -103,10 +120,10 @@ describe("estimateCost", () => {
 	});
 
 	it("uses fallback rate for unknown model", () => {
-		// fallback: 30 input, 150 output
-		// 1000 input * 30/1k + 1000 output * 150/1k = 30 + 150 = 180
+		// fallback (dearest known): 250 input, 1250 output
+		// 1000 input * 250/1k + 1000 output * 1250/1k = 250 + 1250 = 1500
 		const cost = estimateCost("unknown-model", 1000, 1000);
-		expect(cost).toBe(180);
+		expect(cost).toBe(1500);
 	});
 
 	it("returns integer (ceiling)", () => {
@@ -369,7 +386,9 @@ describe("PRICING_TABLE_VERSION", () => {
 		// 2026-08-09: the three frontier entries (fable-5 / gpt-5.6-sol / kimi-k3).
 		// 2026-08-10: the three fleet-ledger Anthropic entries (opus-5 / sonnet-5 /
 		// opus-4-8).
-		expect(PRICING_TABLE_VERSION).toBe("2026-08-10");
+		// 2026-10-07: Sonnet 5 corrected to $2/$10; exact rows for the 5.5 / 5.1
+		// generation, Mythos, Haiku 5.5 and the older Opus/Sonnet/Haiku ids.
+		expect(PRICING_TABLE_VERSION).toBe("2026-10-07");
 	});
 });
 
@@ -454,8 +473,10 @@ describe("estimateCost with customRates", () => {
 // The three fleet-ledger Anthropic entries (claude-opus-5, claude-sonnet-5,
 // claude-opus-4-8) were added on 2026-08-10, re-derived that day from Anthropic's
 // published model-pricing table (platform.claude.com/docs/en/about-claude/pricing).
-// sonnet-5 pins the STANDARD $3/$15 rate, not the $2/$10 introductory pricing
-// running through 2026-08-31 (D1 prefers overstatement during the promo window).
+// On 2026-10-07 every Anthropic row was re-verified against the same page
+// (retrieved that day). sonnet-5 is $2/$10: page footnote 3 says the introductory
+// price is now the standard price and the 2026-09-01 increase to $3/$15 will not
+// occur. The 5.5 / 5.1 generation publishes cache reads at 0.05x / 0.025x.
 //
 // An entry OMITS a cache field when the provider publishes no rate for that tier.
 // Omission is not zero: costFromRates resolves it to inputPer1k (the D1 money
@@ -486,15 +507,72 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 		cacheReadPer1k: 5,
 		cacheWritePer1k: 62.5,
 	},
-	// $3 in / $15 out / $0.30 cache hit / $3.75 5m cache write per MTok — the
-	// STANDARD rate effective 2026-09-01, deliberately not the $2/$10 intro
-	// pricing in effect through 2026-08-31. Retrieved 2026-08-10.
-	"claude-sonnet-5": {
+	// Retrieved 2026-10-07. $2 in / $10 out / $0.20 hit / $2.50 5m write per MTok.
+	"claude-sonnet-5": { inputPer1k: 20, outputPer1k: 100, cacheReadPer1k: 2, cacheWritePer1k: 25 },
+	// $2 / $10 / $0.10 hit (0.05x, footnote 2) / $2.50 5m write.
+	"claude-sonnet-5-5": { inputPer1k: 20, outputPer1k: 100, cacheReadPer1k: 1, cacheWritePer1k: 25 },
+	// $4 / $20 / $0.20 hit (0.05x) / $5 5m write.
+	"claude-opus-5-5": { inputPer1k: 40, outputPer1k: 200, cacheReadPer1k: 2, cacheWritePer1k: 50 },
+	// $10 / $50 / $0.25 hit (0.025x, footnote 1) / $12.50 5m write.
+	"claude-fable-5-1": {
+		inputPer1k: 100,
+		outputPer1k: 500,
+		cacheReadPer1k: 2.5,
+		cacheWritePer1k: 125,
+	},
+	// Limited availability. Mythos 5: $10 / $50 / $1 hit / $12.50; Mythos 5.1: hit $0.25.
+	"claude-mythos-5": {
+		inputPer1k: 100,
+		outputPer1k: 500,
+		cacheReadPer1k: 10,
+		cacheWritePer1k: 125,
+	},
+	"claude-mythos-5-1": {
+		inputPer1k: 100,
+		outputPer1k: 500,
+		cacheReadPer1k: 2.5,
+		cacheWritePer1k: 125,
+	},
+	// OVER-100k-prompt tier of a length-tiered model: $0.50 / $2.50 / $0.05 hit /
+	// $0.625 write. The up-to-100k tier ($0.10 / $0.50) is overstated 5x.
+	"claude-haiku-5-5": {
+		inputPer1k: 5,
+		outputPer1k: 25,
+		cacheReadPer1k: 0.5,
+		cacheWritePer1k: 6.25,
+	},
+	// Deprecated but callable. $25 / $125 per MTok for Project Glasswing participants
+	// (anthropic.com/project/glasswing; status per the model-deprecations page; both
+	// retrieved 2026-10-07). Cache tiers: the pricing page's multipliers for models
+	// without an exception (read 0.1x, 5m write 1.25x).
+	"claude-mythos-preview": {
+		inputPer1k: 250,
+		outputPer1k: 1250,
+		cacheReadPer1k: 25,
+		cacheWritePer1k: 312.5,
+	},
+	"claude-3-5-haiku": { inputPer1k: 8, outputPer1k: 40, cacheReadPer1k: 0.8, cacheWritePer1k: 10 },
+	"claude-opus-4-7": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
+	"claude-opus-4-5": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
+	"claude-opus-4-1": {
+		inputPer1k: 150,
+		outputPer1k: 750,
+		cacheReadPer1k: 15,
+		cacheWritePer1k: 187.5,
+	},
+	"claude-opus-4": {
+		inputPer1k: 150,
+		outputPer1k: 750,
+		cacheReadPer1k: 15,
+		cacheWritePer1k: 187.5,
+	},
+	"claude-sonnet-4-5": {
 		inputPer1k: 30,
 		outputPer1k: 150,
 		cacheReadPer1k: 3,
 		cacheWritePer1k: 37.5,
 	},
+	"claude-sonnet-4": { inputPer1k: 30, outputPer1k: 150, cacheReadPer1k: 3, cacheWritePer1k: 37.5 },
 	// $5 in / $25 out / $0.50 cache hit / $6.25 5m cache write per MTok —
 	// identical to the opus-4-6 row, as published. Retrieved 2026-08-10.
 	"claude-opus-4-8": {
@@ -508,6 +586,9 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 	// cache-WRITE rate (writes bill at standard input), so cacheWritePer1k is omitted
 	// and the D1 fallback reproduces the published behaviour exactly.
 	"gpt-4o": { inputPer1k: 25, outputPer1k: 100, cacheReadPer1k: 12.5 },
+	// Dated snapshot priced differently from its alias: $5 / $15 per MTok, no cached
+	// input. developers.openai.com/api/docs/pricing, retrieved 2026-10-07.
+	"gpt-4o-2024-05-13": { inputPer1k: 50, outputPer1k: 150 },
 	"gpt-4o-mini": { inputPer1k: 1.5, outputPer1k: 6, cacheReadPer1k: 0.75 },
 	"gpt-5.4": { inputPer1k: 25, outputPer1k: 150, cacheReadPer1k: 2.5 },
 	o3: { inputPer1k: 20, outputPer1k: 80, cacheReadPer1k: 5 },
@@ -531,6 +612,7 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 
 	// No published cache pricing for these models — both cache fields omitted.
 	"mistral-large": { inputPer1k: 5, outputPer1k: 15 },
+	"mistral-large-latest": { inputPer1k: 5, outputPer1k: 15 },
 	"deepseek-chat": { inputPer1k: 2.8, outputPer1k: 4.2 },
 	"deepseek-reasoner": { inputPer1k: 2.8, outputPer1k: 4.2 },
 	"grok-3": { inputPer1k: 30, outputPer1k: 150 },
@@ -559,6 +641,13 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 		"kimi-k3",
 		"claude-opus-5",
 		"claude-sonnet-5",
+		"claude-sonnet-5-5",
+		"claude-opus-5-5",
+		"claude-fable-5-1",
+		"claude-mythos-5",
+		"claude-mythos-5-1",
+		"claude-haiku-5-5",
+		"claude-mythos-preview",
 		"claude-opus-4-8",
 	]) {
 		it(`resolves ${model} to a table entry, not the fallback`, () => {
@@ -587,20 +676,32 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 		}
 	});
 
-	// promo-window-understatement. The golden above already pins sonnet-5 at
-	// 30/150, but it fails as "pins all four tiers for claude-sonnet-5" — a name
-	// that gives no reason, so the natural response is to update the golden and
-	// move on. That is the failure this test exists to prevent: it names the
-	// consequence, so lowering the row fails with the reason attached.
-	it("promo-window-understatement: sonnet-5 holds the POST-promo rate, never the $2/$10 promo", () => {
-		const rates = PRICING_TABLE["claude-sonnet-5"];
-		// $3/$15 per MTok — the standard rate effective 2026-09-01. The $2/$10
-		// introductory pricing running through 2026-08-31 is deliberately NOT
-		// entered: it would understate, and because these rates size the hold and
-		// the settle debit, an understating row lets a capped agent spend past
-		// its cap. Overstating during the promo is the safe direction (D1).
-		expect(rates?.inputPer1k).toBe(30);
-		expect(rates?.outputPer1k).toBe(150);
+	// sonnet-5-is-not-3-15. The row held $3/$15 from 2026-08-10 until 2026-10-07 on
+	// the strength of a scheduled increase that Anthropic then cancelled (page
+	// footnote 3), overstating every Sonnet 5 call by 50%. Named for the consequence
+	// so reverting the row fails with the reason attached.
+	it("sonnet-5-is-not-3-15: sonnet-5 and sonnet-5-5 price at the published $2/$10", () => {
+		for (const id of ["claude-sonnet-5", "claude-sonnet-5-5"]) {
+			expect(PRICING_TABLE[id]?.inputPer1k, id).toBe(20);
+			expect(PRICING_TABLE[id]?.outputPer1k, id).toBe(100);
+		}
+	});
+
+	// The 5.5 / 5.1 generation reads cache at 0.05x / 0.025x, NOT the 0.1x every
+	// older row uses. A 0.1x row overstates reads 2x-4x on exactly the traffic
+	// (cache-read-dominated sessions) that dominates a Claude Code bill.
+	it("cache-read-multiplier: 0.05x on opus-5-5 / sonnet-5-5, 0.025x on fable-5-1 / mythos-5-1, 0.1x elsewhere", () => {
+		const mult: Record<string, number> = {
+			"claude-opus-5-5": 0.05,
+			"claude-sonnet-5-5": 0.05,
+			"claude-fable-5-1": 0.025,
+			"claude-mythos-5-1": 0.025,
+		};
+		for (const [id, rates] of Object.entries(PRICING_TABLE)) {
+			if (!id.startsWith("claude-")) continue;
+			const expected = mult[id] ?? 0.1;
+			expect((rates.cacheReadPer1k ?? NaN) / rates.inputPer1k, id).toBeCloseTo(expected, 10);
+		}
 	});
 
 	it("prices cache reads at or below base input, and cache writes at or above", () => {
@@ -643,12 +744,13 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 		expect(PRICING_TABLE["mistral-large"]).toStrictEqual({ inputPer1k: 5, outputPer1k: 15 });
 	});
 
-	it("keeps FALLBACK_RATE two-tier so unknown models price cache at input rate", () => {
+	it("keeps FALLBACK_RATE cache-READ absent so unknown models read at the input rate", () => {
 		// An unknown model is not known to be Anthropic-shaped; attaching a cache
-		// discount here would silently under-bill every unrecognised model. Leaving
-		// both cache fields absent routes them through the D1 fallback instead.
+		// discount here would silently under-bill every unrecognised model. The read
+		// tier stays absent (D1 prices it at inputPer1k, dearer than any published
+		// read rate); the write tier carries the dearest published write rate.
 		expect(FALLBACK_RATE.cacheReadPer1k).toBeUndefined();
-		expect(FALLBACK_RATE.cacheWritePer1k).toBeUndefined();
+		expect(FALLBACK_RATE.cacheWritePer1k).toBe(312.5);
 	});
 });
 
@@ -950,7 +1052,7 @@ describe("isModelPriced (a caller that must refuse what it cannot price exactly)
 		).toBe(true);
 	});
 
-	it("over the whole table: priced iff an exact key; every variant unpriced; getModelRates unchanged", async () => {
+	it("over the whole table: priced iff an exact key; every variant unpriced and metered at the fallback", async () => {
 		const { FALLBACK_RATE, PRICING_TABLE, getModelRates, isModelPriced } = await import(
 			"../../src/ledger/pricing.js"
 		);
@@ -960,11 +1062,118 @@ describe("isModelPriced (a caller that must refuse what it cannot price exactly)
 			const v = `${k}-variant`;
 			if (keys.includes(v)) continue;
 			expect(isModelPriced(v), v).toBe(false);
-			// The public lookup keeps its prefix behaviour (additive-only core).
-			expect(getModelRates(v), v).not.toBe(FALLBACK_RATE);
+			// And the public lookup does not prefix match either: the variant is
+			// metered at the dearest-known fallback, never at its base row.
+			expect(getModelRates(v), v).toBe(FALLBACK_RATE);
 		}
 		for (const m of ["", "x", "gpt", "claude", "toString", "hasOwnProperty", "unknown-model"]) {
 			expect(isModelPriced(m), m).toBe(false);
 		}
+	});
+});
+
+describe("dated-snapshot canonicalization (F2)", () => {
+	it("strips exactly one trailing -YYYY-MM-DD and nothing else", () => {
+		expect(canonicalModelId("gpt-4o-2024-08-06")).toBe("gpt-4o");
+		expect(canonicalModelId("o3-2025-04-16")).toBe("o3");
+		expect(canonicalModelId("gpt-4o-2024-08-06-2024-08-06")).toBe("gpt-4o-2024-08-06");
+		expect(canonicalModelId("gpt-4o-2024-8-06")).toBe("gpt-4o-2024-8-06");
+		expect(canonicalModelId("gemini-2.5-pro-preview-06-05")).toBe("gemini-2.5-pro-preview-06-05");
+	});
+
+	it("a hyphenated-date snapshot resolves to its alias row", () => {
+		expect(getModelRates("gpt-4o-2024-08-06")).toBe(PRICING_TABLE["gpt-4o"]);
+		expect(getModelRates("gpt-4o-mini-2024-07-18")).toBe(PRICING_TABLE["gpt-4o-mini"]);
+		expect(getModelRates("o3-2025-04-16")).toBe(PRICING_TABLE.o3);
+		expect(getModelRates("o4-mini-2025-04-16")).toBe(PRICING_TABLE["o4-mini"]);
+		const r = resolveRates("gpt-4o-2024-08-06", "cloud", makeCloudConfig());
+		expect(r.rateSource).toBe("table");
+		expect(r.unknown).toBe(false);
+	});
+
+	// EXACT FIRST. gpt-4o-2024-05-13 is $5/$15 against gpt-4o's $2.50/$10, so reducing
+	// it to its alias would under-price every call 2x, silently, as a table hit.
+	it("exact-first: a snapshot with its own row is NOT reduced to its cheaper alias", () => {
+		const snap = getModelRates("gpt-4o-2024-05-13");
+		expect(snap).toBe(PRICING_TABLE["gpt-4o-2024-05-13"]);
+		expect(snap).not.toBe(PRICING_TABLE["gpt-4o"]);
+		expect(snap.inputPer1k).toBe(50);
+		expect(snap.outputPer1k).toBe(150);
+		expect(resolveRates("gpt-4o-2024-05-13", "cloud", makeCloudConfig()).rates).toBe(snap);
+	});
+
+	it("strips exactly one trailing -YYYYMMDD and nothing else", () => {
+		expect(canonicalModelId("claude-haiku-4-5-20251001")).toBe("claude-haiku-4-5");
+		expect(canonicalModelId("claude-sonnet-5-5")).toBe("claude-sonnet-5-5");
+		expect(canonicalModelId("claude-opus-5-20260101-20260102")).toBe("claude-opus-5-20260101");
+		expect(canonicalModelId("claude-opus-5-2026010")).toBe("claude-opus-5-2026010");
+		expect(canonicalModelId("claude-opus-5-fast")).toBe("claude-opus-5-fast");
+	});
+
+	it("a dated id resolves to its base row, table-sourced and not unknown", () => {
+		const r = resolveRates("claude-haiku-4-5-20251001", "cloud", makeCloudConfig());
+		expect(r.rates).toBe(PRICING_TABLE["claude-haiku-4-5"]);
+		expect(r.rateSource).toBe("table");
+		expect(r.unknown).toBe(false);
+	});
+
+	it("claude-sonnet-5-5 is NOT claude-sonnet-5 (no prefix match; #143)", () => {
+		expect(getModelRates("claude-sonnet-5-5")).toBe(PRICING_TABLE["claude-sonnet-5-5"]);
+		expect(getModelRates("claude-sonnet-5-5")).not.toBe(PRICING_TABLE["claude-sonnet-5"]);
+		expect(getModelRates("claude-opus-5-5")).not.toBe(PRICING_TABLE["claude-opus-5"]);
+		expect(getModelRates("claude-fable-5-1")).not.toBe(PRICING_TABLE["claude-fable-5"]);
+	});
+
+	it("a 7-digit, non-numeric or -fast suffix falls to the flagged fallback", () => {
+		for (const id of [
+			"claude-opus-5-2026010",
+			"claude-opus-5-2026010x",
+			"claude-opus-5-fast",
+			"claude-opus-4-6-fast",
+			"anthropic.claude-opus-5-v1:0",
+			"claude-opus-5@20260101",
+		]) {
+			const r = resolveRates(id, "cloud", makeCloudConfig());
+			expect(r.rates, id).toBe(FALLBACK_RATE);
+			expect(r.rateSource, id).toBe("fallback");
+			expect(r.unknown, id).toBe(true);
+		}
+	});
+
+	// The CHECK fails closed for enforcement; the PRICE canonicalizes for metering.
+	// Pinned together on ONE id so neither half can drift alone.
+	it("divergence: isModelPriced refuses a dated id that getModelRates meters at its base row", () => {
+		const id = "claude-sonnet-4-6-20991231";
+		expect(isModelPriced(id)).toBe(false);
+		expect(getModelRates(id)).toBe(PRICING_TABLE["claude-sonnet-4-6"]);
+		const r = resolveRates(id, "cloud", makeCloudConfig());
+		expect(r.rateSource).toBe("table");
+		expect(r.unknown).toBe(false);
+	});
+});
+
+describe("claude-mythos-preview (deprecated, still callable)", () => {
+	// Project Glasswing participants still call it; without its own row it fell to the
+	// fallback and, before the fallback tracked the table maximum, to a rate 40% BELOW
+	// its published $25/$125.
+	it("has its own exact row at the published $25 / $125", () => {
+		const r = resolveRates("claude-mythos-preview", "cloud", makeCloudConfig());
+		expect(r.rates).toBe(PRICING_TABLE["claude-mythos-preview"]);
+		expect(r.rateSource).toBe("table");
+		expect(r.unknown).toBe(false);
+		expect(r.rates.inputPer1k).toBe(250);
+		expect(r.rates.outputPer1k).toBe(1250);
+	});
+
+	it("carries the page's standard cache multipliers: read 0.1x, 5m write 1.25x", () => {
+		const preview = PRICING_TABLE["claude-mythos-preview"];
+		expect(preview?.cacheReadPer1k).toBe(25);
+		expect(preview?.cacheWritePer1k).toBe(312.5);
+	});
+
+	it("is the dearest row, so it sets the fallback", () => {
+		const preview = PRICING_TABLE["claude-mythos-preview"];
+		expect(FALLBACK_RATE.inputPer1k).toBe(preview?.inputPer1k);
+		expect(FALLBACK_RATE.outputPer1k).toBe(preview?.outputPer1k);
 	});
 });
