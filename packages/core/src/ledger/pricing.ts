@@ -675,7 +675,12 @@ export function requestDeclares1hCache(request: unknown): boolean {
 		if (seen.has(value)) return false;
 		seen.add(value);
 		if (Array.isArray(value)) {
-			for (const item of value) if (walk(item, depth + 1)) return true;
+			// An indexed accessor is an accessor like any other: fail dearest.
+			for (let i = 0; i < value.length; i++) {
+				const d = Object.getOwnPropertyDescriptor(value, i);
+				if (d !== undefined && (d.get !== undefined || d.set !== undefined)) return true;
+				if (walk(d?.value, depth + 1)) return true;
+			}
 			return false;
 		}
 		const record = value as Record<string, unknown>;

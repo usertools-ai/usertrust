@@ -220,6 +220,18 @@ describe("requestDeclares1hCache", () => {
 			}),
 		).toBe(true);
 		expect(requestDeclares1hCache({ a: { b: 1 } })).toBe(false); // plain data stays false
+		// ...and an INDEXED accessor in an array (a content array) is one too.
+		const indexed: unknown[] = [{ type: "text" }];
+		Object.defineProperty(indexed, 1, {
+			enumerable: true,
+			get: () => ({ type: "text", cache_control: { type: "ephemeral", ttl: "5m" } }),
+		});
+		expect(requestDeclares1hCache({ messages: [{ role: "user", content: indexed }] })).toBe(true);
+		expect(
+			requestDeclares1hCache({
+				messages: [{ role: "user", content: [{ type: "text" }, { type: "text" }] }],
+			}),
+		).toBe(false);
 		// A cycle terminates (and is not itself evidence of a marker).
 		const a: Record<string, unknown> = {};
 		a.self = a;
