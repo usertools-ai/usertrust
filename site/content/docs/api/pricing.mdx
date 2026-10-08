@@ -11,8 +11,8 @@ A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.0
 
 ## Pricing Table
 
-The SDK includes a 23-model pricing table in `ledger/pricing.ts`, current as of
-`PRICING_TABLE_VERSION = "2026-08-09"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
+The SDK includes a 42-model pricing table in `ledger/pricing.ts`, current as of
+`PRICING_TABLE_VERSION = "2026-10-07"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
 Rates are in usertokens per 1,000 LLM tokens, across **four tiers**: input (fresh prompt tokens),
 output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation prompt tokens). A
 `—` means the provider publishes no rate for that tier — it is **not** free; see
@@ -22,13 +22,36 @@ output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation pr
 
 | Model | Input | Output | Cache Read | Cache Write |
 |-------|------:|-------:|-----------:|------------:|
-| `claude-sonnet-4-6` | 30 | 150 | 3 | 37.5 |
-| `claude-haiku-4-5` | 10 | 50 | 1 | 12.5 |
-| `claude-opus-4-6` | 50 | 250 | 5 | 62.5 |
+| `claude-fable-5-1` | 100 | 500 | 2.5 | 125 |
 | `claude-fable-5` | 100 | 500 | 10 | 125 |
+| `claude-mythos-5-1` (limited availability) | 100 | 500 | 2.5 | 125 |
+| `claude-mythos-5` (limited availability) | 100 | 500 | 10 | 125 |
+| `claude-opus-5-5` | 40 | 200 | 2 | 50 |
+| `claude-opus-5` | 50 | 250 | 5 | 62.5 |
+| `claude-opus-4-8` | 50 | 250 | 5 | 62.5 |
+| `claude-opus-4-7` | 50 | 250 | 5 | 62.5 |
+| `claude-opus-4-6` | 50 | 250 | 5 | 62.5 |
+| `claude-opus-4-5` | 50 | 250 | 5 | 62.5 |
+| `claude-mythos-preview` (deprecated; Project Glasswing) | 250 | 1250 | 25 | 312.5 |
+| `claude-opus-4-1` (retired) | 150 | 750 | 15 | 187.5 |
+| `claude-opus-4` (retired) | 150 | 750 | 15 | 187.5 |
+| `claude-sonnet-5-5` | 20 | 100 | 1 | 25 |
+| `claude-sonnet-5` | 20 | 100 | 2 | 25 |
+| `claude-sonnet-4-6` | 30 | 150 | 3 | 37.5 |
+| `claude-sonnet-4-5` | 30 | 150 | 3 | 37.5 |
+| `claude-sonnet-4` (retired) | 30 | 150 | 3 | 37.5 |
+| `claude-haiku-5-5` (over-100k tier) | 5 | 25 | 0.5 | 6.25 |
+| `claude-haiku-4-5` | 10 | 50 | 1 | 12.5 |
+| `claude-3-5-haiku` (retired) | 8 | 40 | 0.8 | 10 |
 
-Anthropic publishes cache-read at 0.1x base input and 5-minute cache-write at 1.25x. The 1-hour
-write premium (2x) collapses to the 5-minute rate — see [Documented
+Rates re-verified against Anthropic's published pricing page
+(`platform.claude.com/docs/en/about-claude/pricing`) on 2026-10-07.
+
+Anthropic publishes cache-read at 0.1x base input and 5-minute cache-write at 1.25x, with three
+published exceptions on cache reads: **0.05x** on `claude-opus-5-5` and `claude-sonnet-5-5`, and
+**0.025x** on `claude-fable-5-1` and `claude-mythos-5-1`. `claude-sonnet-5` is $2 / $10 per MTok:
+the introductory price became the standard price and the announced increase to $3 / $15 did not
+happen. The 1-hour write premium (2x) collapses to the 5-minute rate — see [Documented
 approximations](#documented-approximations) — operators with 1h-heavy workloads should override via
 `customRates`.
 
@@ -37,6 +60,7 @@ approximations](#documented-approximations) — operators with 1h-heavy workload
 | Model | Input | Output | Cache Read | Cache Write |
 |-------|------:|-------:|-----------:|------------:|
 | `gpt-4o` | 25 | 100 | 12.5 | — |
+| `gpt-4o-2024-05-13` (snapshot priced above its alias) | 50 | 150 | — | — |
 | `gpt-4o-mini` | 1.5 | 6 | 0.75 | — |
 | `gpt-5.4` | 25 | 150 | 2.5 | — |
 | `o3` | 20 | 80 | 5 | — |
@@ -81,6 +105,7 @@ the input rate.
 | Model | Provider | Input | Output |
 |-------|----------|------:|-------:|
 | `mistral-large` | Mistral | 5 | 15 |
+| `mistral-large-latest` (alias) | Mistral | 5 | 15 |
 | `deepseek-chat` | DeepSeek | 2.8 | 4.2 |
 | `deepseek-reasoner` | DeepSeek | 2.8 | 4.2 |
 | `grok-3` | xAI | 30 | 150 |
@@ -118,26 +143,50 @@ price, never to zero. Never treat an absent field as a discount.
 
 ## Fallback Rate
 
-Models not in the pricing table use **sonnet-class pricing** as a conservative fallback:
+Models not in the pricing table are priced at the **highest rate the table publishes** ("fail
+dearest"). An unknown id over-counts visibly instead of under-counting silently:
 
 | Direction | Rate (per 1K tokens) |
 |-----------|---------------------|
-| Input | 30 UT |
-| Output | 150 UT |
+| Input | 250 UT |
+| Output | 1250 UT |
+| Cache write | 312.5 UT |
+| Cache read | 250 UT (the input rate; no cache discount is assumed) |
 
-This ensures unknown models are never free. The fallback is intentionally high to avoid
-under-billing, and is deliberately two-tier: an unrecognized model isn't known to be
-Anthropic-shaped, so attaching a cache discount here would silently under-bill it. Its cache
-tokens route through the same fallback invariant above and price at 30 UT/1k.
+These are the maxima over the table (today `claude-mythos-preview`, $25 / $125); a test recomputes them,
+so a dearer row cannot be added without raising the fallback. A fallback-priced record carries
+`rateSource: "fallback"` and `unknown: true`. An unrecognized model isn't known to be
+Anthropic-shaped, so no cache-read discount is attached. Set `unknownModelPolicy: "deny"` to refuse
+an unknown model instead of metering it. The fallback is the dearest rate the table KNOWS; it cannot bound a model the table does not list that costs more than every row in it (`claude-mythos-preview` was exactly that case before it got its own row). For a hard budget, `unknownModelPolicy: "deny"` is the guarantee.
 
 ## Model Matching
 
-`getModelRates()` first attempts an exact match against the pricing table. If no exact match is found, it tries prefix matching (longest key first) to handle versioned model names. If neither matches, the fallback rate is used.
+`getModelRates()` resolves a model id in this order:
+
+1. an **exact** row;
+2. the id with exactly one trailing date suffix stripped — `-YYYYMMDD` (`claude-haiku-4-5-20251001`)
+   or `-YYYY-MM-DD` (`gpt-4o-2024-08-06`) — then exact;
+3. the fallback rate, flagged `rateSource: "fallback"`, `unknown: true`.
+
+There is no prefix matching: `claude-sonnet-5-5` is a different, separately priced model from
+`claude-sonnet-5`, and a longer id that merely begins with a table key used to be billed at that
+key's row while the receipt claimed an exact table match. The exact row is tried first because a
+dated snapshot can cost **more** than its alias: `gpt-4o-2024-05-13` is $5 / $15 per MTok against
+`gpt-4o`'s $2.50 / $10, so it has its own row and is never reduced to the alias. A dated snapshot
+with no row of its own is metered at its base row, which assumes it is priced like its alias.
+
+**Residue (priced at the fallback, flagged):** Gemini `…-preview-MM-DD` ids, a seven-digit or
+non-numeric suffix, `-fast`, and Bedrock `anthropic.…:0` / Vertex `…@…` ids. `isModelPriced()` is
+stricter on purpose: it checks for an exact key (or custom rate) only, so a dated snapshot meters
+at its base row but is not "priced" for a caller that must refuse what it cannot price exactly.
 
 ```typescript
 getModelRates("claude-fable-5")           // exact match → { 100, 500 }
-getModelRates("claude-fable-5-20260301")  // prefix match → { 100, 500 }
-getModelRates("unknown-model")              // fallback → { 30, 150 }
+getModelRates("claude-fable-5-20260301")  // dated snapshot → claude-fable-5 → { 100, 500 }
+getModelRates("gpt-4o-2024-08-06")        // dated snapshot → gpt-4o → { 25, 100 }
+getModelRates("gpt-4o-2024-05-13")        // exact row, priced above its alias → { 50, 150 }
+getModelRates("claude-fable-5-1")         // its own row → { 100, 500, cache read 2.5 }
+getModelRates("claude-opus-5-fast")       // unknown → fallback → { 250, 1250 }
 ```
 
 ## Functions
@@ -148,7 +197,7 @@ getModelRates("unknown-model")              // fallback → { 30, 150 }
 function getModelRates(model: string): ModelRates
 ```
 
-Look up the four-tier rates for a model. Falls back to prefix matching, then to the fallback rate.
+Look up the four-tier rates for a model. Resolves an exact row, then the id with one date suffix stripped, then the fallback rate (never a prefix match).
 
 ### costFromRates()
 
@@ -265,8 +314,10 @@ exactly reproduces usertrust's own configured metered cost (counts × `appliedRa
 Per-TTL write premium collapsed (1h = 2× billed as 1.25×; `customRates` override for 1h-heavy
 workloads); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
 hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
-per-model rates by design; per-call `ceil` + 1-UT floor differs from provider-side aggregation.
-Estimates never model cache state.
+per-model rates by design (`claude-haiku-5-5` is priced at its over-100,000-token tier, which
+overstates every shorter prompt 5×); fast mode is not priced (Opus 5.5 fast is $8 / $40, Opus 5 and
+Opus 4.8 fast $10 / $50; `speed` is a usage field, not a model id); per-call `ceil` + 1-UT floor
+differs from provider-side aggregation. Estimates never model cache state.
 
 ## Cost Estimation Flow
 

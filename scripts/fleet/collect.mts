@@ -23,8 +23,8 @@
  * PRE-FLIGHT (r2/C1; capture-evidence.mts J1 precedent): before ANY vault
  * write, abort listing offenders if a new record's model resolves to the
  * fallback sentinel — the reference-equality probe
- * `getModelRates(model) === FALLBACK_RATE`, which unlike a key lookup also
- * honors the table's prefix matching — or its `speed` is not "standard"
+ * `getModelRates(model) === FALLBACK_RATE`, which, unlike a key lookup, also
+ * honors the dated-snapshot reduction (one trailing date suffix) — or its `speed` is not "standard"
  * (fast-mode rates are not in the table). This guarantees no fallback-priced
  * or wrong-modifier receipt can ever exist in a fleet vault.
  *

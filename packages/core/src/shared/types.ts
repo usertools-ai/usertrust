@@ -353,8 +353,9 @@ export const TrustConfigSchema = z.object({
 		})
 		.prefault({}),
 	/**
-	 * Cloud-scope policy when a model misses customRates, PRICING_TABLE, and prefix match.
-	 * "fallback" = silent sonnet-class rate (legacy) · "warn" = same rate + one-time warn +
+	 * Cloud-scope policy when a model misses customRates and PRICING_TABLE (an exact key, or
+	 * a dated `-YYYYMMDD` / `-YYYY-MM-DD` snapshot of one; there is no prefix match).
+	 * "fallback" = silent dearest-known rate (the table maximum) · "warn" = same rate + one-time warn +
 	 * receipt.meter.rateSource "fallback" · "deny" = PolicyDeniedError before the PENDING hold.
 	 */
 	unknownModelPolicy: z.enum(["fallback", "warn", "deny"]).default("warn"),

@@ -157,7 +157,7 @@ describe("resolveRates — cloud scope", () => {
 		expect(r.unknown).toBe(false);
 	});
 
-	it('prefix hit resolves rateSource "table"', () => {
+	it('a dated-snapshot hit resolves rateSource "table"', () => {
 		const r = resolveRates("claude-haiku-4-5-20251001", "cloud", makeConfig());
 		expect(r.rates).toBe(PRICING_TABLE["claude-haiku-4-5"]);
 		expect(r.rateSource).toBe("table");
