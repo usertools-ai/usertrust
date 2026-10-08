@@ -905,3 +905,72 @@ describe("#203: the 1-hour hold premium is Anthropic-only", () => {
 		expect(plain.hold.amount).toBe(holdOf(plain));
 	});
 });
+
+describe("#203: the gate and settlement apply the SAME 1-hour tier predicate", () => {
+	const marked = (model: string) => ({
+		model,
+		max_tokens: 1,
+		messages: [
+			{
+				role: "user",
+				content: [
+					{
+						type: "text",
+						text: "x".repeat(4000),
+						cache_control: { type: "ephemeral", ttl: "1h" },
+					},
+				],
+			},
+		],
+	});
+
+	it("a built-in model with no 1-hour tier behind an Anthropic-compatible host is held as before, and its 1h share is ignored at settlement", () => {
+		const r = gate(ANTHROPIC, "/v1/messages", marked("gpt-4o"));
+		if (r.decision !== "allow") throw new Error("expected allow");
+		const rates = getModelRates("gpt-4o");
+		const bound = r.hold.inputTokenBound;
+		const out = r.hold.maxOutputTokens;
+		expect(r.hold.operatorOwned).toBe(false);
+		// No 2x-input scenario: the dearest of the three plain ones.
+		expect(r.hold.amount).toBe(
+			Math.max(
+				costFromRates(rates, bound, out),
+				costFromRates(rates, 0, out, 0, bound),
+				costFromRates(rates, 0, out, bound, 0),
+			),
+		);
+		const s = settleHold(r.hold, {
+			inputTokens: 0,
+			outputTokens: out,
+			cacheReadTokens: 0,
+			cacheWriteTokens: bound,
+			cacheWrite1hTokens: bound,
+			source: "provider",
+		});
+		expect(s.actual).toBe(costFromRates(rates, 0, out, 0, bound)); // single write rate, no 1h share
+		expect(s.overage).toBe(0);
+	});
+
+	it("an operator's custom row for the same model HAS a derived tier: held and settled at it", () => {
+		const config = {
+			...DEFAULT_GATE_CONFIG,
+			customRates: { "op-claude": { inputPer1k: 30, outputPer1k: 150, cacheWritePer1k: 37.5 } },
+		};
+		const r = gate(ANTHROPIC, "/v1/messages", marked("op-claude"), config);
+		if (r.decision !== "allow") throw new Error("expected allow");
+		expect(r.hold.operatorOwned).toBe(true);
+		const bound = r.hold.inputTokenBound;
+		const out = r.hold.maxOutputTokens;
+		expect(r.hold.amount).toBe(costFromRates(r.hold.rates, 0, out, 0, bound, bound));
+		const s = settleHold(r.hold, {
+			inputTokens: 0,
+			outputTokens: out,
+			cacheReadTokens: 0,
+			cacheWriteTokens: bound,
+			cacheWrite1hTokens: bound,
+			source: "provider",
+		});
+		expect(s.actual).toBe(costFromRates(r.hold.rates, 0, out, 0, bound, bound));
+		expect(s.overage).toBe(0);
+	});
+});

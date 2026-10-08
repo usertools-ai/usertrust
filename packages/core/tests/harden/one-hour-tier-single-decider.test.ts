@@ -53,14 +53,11 @@ const DECIDER_ALLOWLIST: Record<string, readonly string[]> = {
 };
 
 /**
- * RULE 2 exemptions. OpenShell's settlement prices usage against the rates its HOLD
- * snapshotted, which carry no table-vs-operator provenance; its usage comes from
- * core's extractors, which only report a 1-hour share on the Anthropic route, whose
- * built-in rows all publish one, and the gate reserves the matching premium.
+ * RULE 2 exemptions: only the file that DEFINES the cost functions. Every consumer,
+ * OpenShell's settlement included, routes a 1-hour count through the predicate.
  */
 const COST_CALL_ALLOWLIST = new Set([
 	"packages/core/src/ledger/pricing.ts", // defines the cost functions
-	"packages/openshell/src/settlement.ts",
 ]);
 
 /** Strip // and block comments (a scan for identifiers must not trip on prose). */
@@ -107,11 +104,18 @@ export function scanOneHourTier(files: Record<string, string>): string[] {
 			const snapshotsFiltered = [...code.matchAll(/const usageSnapshot =\s*([\w.]+)\(/g)].every(
 				(m) => m[1] === "withSupported1hTier",
 			);
+			// Names bound to a snapshot that withSupported1hTier built (`const metered = ...`).
+			const filteredNames = new Set(
+				[...code.matchAll(/const (\w+) =\s*withSupported1hTier\(/g)].map((m) => m[1] as string),
+			);
 			for (const call of costCalls(code)) {
 				const counts = call.match(/[\w.]*1hTokens\b/g) ?? [];
 				if (counts.length === 0) continue;
 				const wrapped = /\bsupported1hTokens\s*\(/.test(call);
-				const fromSnapshot = counts.every((c) => c === "usageSnapshot.cacheWrite1hTokens");
+				const fromSnapshot = counts.every((c) => {
+					const [owner, field] = c.split(".");
+					return field === "cacheWrite1hTokens" && filteredNames.has(owner ?? "");
+				});
 				if (!(wrapped || (fromSnapshot && snapshotsFiltered))) {
 					violations.push(
 						`RULE 2: ${path} prices a 1-hour count without routing it through supportsCacheWrite1h`,
