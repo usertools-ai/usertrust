@@ -27,10 +27,10 @@ jobs:
     # - The guard runs FIRST: no code of the change runs in this job before it has finished
     #   (its tests, which are the change's, run after it). scripts/agent-config-guard.test.mjs
     #   pins this order.
-    # - The name is STABLE, `agent-config`, for a pull request or a push: branch protection
-    #   requires this check by it. Any other event (a dispatched run, say) is not a change:
-    #   nothing is checked, and the job takes another name, so it can never stand in for
-    #   the required check, nor fail.
+    # - The name is STABLE, `agent-config`, for a pull request or a push, so that branch
+    #   protection can require this check by it (an owner's setting, applied after this
+    #   merges). Any other event (a dispatched run, say) is not a change: nothing is checked,
+    #   and the job takes another name, so it can never stand in for that check, nor fail.
     # It needs no dependency and no secret, so it runs on a fork's pull request as it is,
     # drafts included.
     name: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'agent-config' || 'agent-config (no change to check)' }}

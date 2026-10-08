@@ -12,7 +12,7 @@
 # A pull request is checked from where it branched; a push, tip to tip (the guard's
 # `--event`).
 # This file and the workflow that runs it come from the change itself, as every workflow
-# does: CODEOWNERS names their owner, whose review a change to either needs. As this file
+# does: CODEOWNERS names their owner, for the review of a change to either. As this file
 # passes its own arguments to the BASE's guard, a new argument lands in the guard first, on
 # its own.
 #
