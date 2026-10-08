@@ -89,6 +89,9 @@ npm, and its version is its own: the `usertrust` packages and their
     did not. The fallback is derived from the uid alone, and every hook looks there
     after the passwd home, whatever its settings now say. A system cleanup of `/tmp`
     that removes a fallback pin re-pins the session, as the sweep does.
+  - A session has one pin. One is made only once both places are known to hold none.
+    A place whose directories fail their checks is looked in all the same; a pin
+    there, a place that cannot be looked in, or a pin in both places refuses the hook.
   - An environment session's pin holds the key's hash, never the key. A key changed
     mid-session is refused for that hook: it sends nothing, and records a gap.
   - A pin unused for 30 days is removed when a session starts; that session, if

@@ -186,11 +186,18 @@ under your home as the passwd database gives it.
   from your uid alone, so no setting can move it, and every hook looks there after
   the passwd home, whatever its settings now say. A configured session never makes
   a pin there: its pin stays under the passwd home, where no environment can move it.
+  - A session has one pin, in one of the two places. A pin is made only once both
+    are known to hold none: a look at the pin's name there finds nothing. A place
+    whose directories fail these checks is looked in all the same, and a pin found
+    there is never used, nor made again elsewhere: the hook is refused. So is a hook
+    that cannot look in a place (a permission error, say), or that finds a pin in both.
   - A fallback pin removed by the system's own cleanup of `/tmp` (after days unused
     on macOS, at boot on many Linux systems) is made again, from the settings then
     current, as after the sweep.
-  - A `/tmp/usertrust-<uid>` that another user made first, or that is a link, is
-    refused: the session runs as a pin that cannot be used does, below.
+  - A `/tmp/usertrust-<uid>` that another user made first holds none of your pins,
+    and is never looked into: a session whose passwd home can hold its pin is
+    unaffected, and one that needs the fallback is refused. One that is a link is
+    refused. A refused session runs as a pin that cannot be used does, below.
 - A configured session's pin holds the file's settings, key included: the key is in
   the config file already.
 - An environment session's pin holds the key's hash, never the key. Each hook reads
@@ -203,12 +210,15 @@ under your home as the passwd database gives it.
 
 **A pin that cannot be used runs the hook key-less: it sends nothing, and records a
 gap.** That covers a session id that is not a safe file name, a directory or file
-that fails these checks, a corrupt pin, and a filesystem without hard links. The
-reason is one of `pin: session id refused`, `pin: dir refused (<what>)`,
-`pin: fallback dir refused (<what>)`, `pin: unreadable`, `pin: corrupt`,
-`pin: unwritable` and `pin: no hard links`; for an environment session whose passwd
-home and fallback both failed, both, separated by `; `. The hook never reads the
-settings afresh in its place, which could move the state dir.
+that fails these checks, a corrupt pin, a place that cannot be looked in, a pin in
+both places, and a filesystem without hard links. The reason is one of
+`pin: session id refused`, `pin: dir refused (<what>)`,
+`pin: fallback dir refused (<what>)`, `pin: dir unreadable`,
+`pin: fallback dir unreadable`, `pin: in both places`, `pin: unreadable`,
+`pin: corrupt`, `pin: unwritable`, `pin: fallback dir unwritable`,
+`pin: no hard links` and `pin: fallback dir has no hard links`; for an environment
+session whose passwd home and fallback both failed, both, separated by `; `. The
+hook never reads the settings afresh in its place, which could move the state dir.
 - **Its mode is still the session's,** as its environment or config file says now,
   or as its pin says for `pin: key changed`. An enforce session blocks every tool
   call (with `failOpen`, lets each through as a gap) and says so at session start: it
