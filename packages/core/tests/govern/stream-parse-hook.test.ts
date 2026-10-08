@@ -11,7 +11,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
@@ -20,6 +20,7 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { type TrustEngine, trust } from "../../src/govern.js";
+import { VAULT_DIR } from "../../src/shared/constants.js";
 
 vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(() => ({
@@ -42,6 +43,9 @@ const sse = (events: Array<[string, unknown]>): string =>
 	events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("");
 
 const PAYLOAD = '{"city":"Paris","days":3}';
+
+/** Request bodies the fake provider received, in order. */
+const sentBodies: string[] = [];
 
 function fakeFetch(): typeof fetch {
 	const stream = sse([
@@ -90,6 +94,7 @@ function fakeFetch(): typeof fetch {
 		usage: { input_tokens: 10, output_tokens: 9 },
 	};
 	return (async (_url: unknown, init?: { body?: unknown }) => {
+		sentBodies.push(String(init?.body ?? ""));
 		const wantsStream = String(init?.body ?? "").includes('"stream":true');
 		return wantsStream
 			? new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } })
@@ -139,7 +144,14 @@ describe("a governed call keeps the structured-output parse hook the SDK reads c
 		rmSync(vault, { recursive: true, force: true });
 	});
 
-	async function governedClient() {
+	async function governedClient(config: Record<string, unknown> = {}) {
+		// Policy knobs such as `pii` are read from the vault's config file, not from trust()'s opts.
+		const dir = join(vault, VAULT_DIR);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "usertrust.config.json"),
+			JSON.stringify({ budget: 1_000_000, ...config }),
+		);
 		const client = new Anthropic({ apiKey: "k", fetch: fakeFetch(), maxRetries: 0 });
 		return trust(client, { budget: 1_000_000, vaultBase: vault, _engine: engine() });
 	}
@@ -196,6 +208,48 @@ describe("a governed call keeps the structured-output parse hook the SDK reads c
 			const message = await call(governed);
 			await governed.destroy();
 			// The SDK parses this same payload when ungoverned; null here is the lost hook.
+			expect(parsedOutput(message)).toEqual(EXPECTED);
+		});
+	}
+
+	// pii: "redact" forwards a redacted DEEP CLONE, which copies enumerable properties only.
+	const redactCases: Array<[string, (g: unknown, format: unknown) => Promise<unknown>]> = [
+		[
+			"messages.stream",
+			async (g, format) =>
+				(
+					await (g as { messages: { stream: StreamCall } }).messages.stream({
+						...base,
+						messages: [{ role: "user", content: "mail me at jane.doe@example.com" }],
+						output_config: { format },
+					})
+				).finalMessage(),
+		],
+		[
+			"beta.messages.stream",
+			async (g, format) =>
+				(
+					await (g as { beta: { messages: { stream: StreamCall } } }).beta.messages.stream({
+						...base,
+						messages: [{ role: "user", content: "mail me at jane.doe@example.com" }],
+						output_config: { format },
+					})
+				).finalMessage(),
+		],
+	];
+	for (const [name, call] of redactCases) {
+		it(`${name} with PII redaction on: the redacted body is sent AND the parse hook survives`, async () => {
+			sentBodies.length = 0;
+			const governed = await governedClient({ pii: "redact" });
+			const format = name.startsWith("beta")
+				? betaZodOutputFormat(schema)
+				: zodOutputFormat(schema);
+			const message = await call(governed, format);
+			await governed.destroy();
+			// Positive control: redaction really ran on what left the process...
+			expect(sentBodies.join("")).toContain("[REDACTED:email]");
+			expect(sentBodies.join("")).not.toContain("jane.doe@example.com");
+			// ...and the structured output still parsed.
 			expect(parsedOutput(message)).toEqual(EXPECTED);
 		});
 	}

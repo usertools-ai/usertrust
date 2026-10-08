@@ -1322,12 +1322,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				kind !== "google" && serialized !== null ? serialized.body : originalParams
 			) as Record<string, unknown>;
 			const declares1h = serialized?.declares1h ?? true;
-			// The stream helper's MessageStream reads the SDK-only `parse` hook off the params
-			// (`zodOutputFormat` structured output). JSON drops a function, so the snapshot is
-			// given that one callable back; it is not wire data, so the bytes sent are unchanged.
-			if (surfaceKind === "stream-helper" && params !== originalParams) {
-				graftParseHooks(originalParams, params);
-			}
 			const model = (params.model as string) ?? "unknown";
 			// P3-PROVIDER-BLINDSPOT: normalize the prompt-bearing payload across
 			// providers (Anthropic/OpenAI `messages` + `system`, Google `contents`) so
@@ -1766,6 +1760,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					preInjectionArgs = forwardArgs;
 					forwardArgs = injected;
 				}
+			}
+
+			// The stream helper's MessageStream reads the SDK-only `parse` hook off its params
+			// (`zodOutputFormat` structured output). The snapshot and the redacted clone are both
+			// rebuilt from enumerable data, so neither carries a function: it is given back to
+			// whatever object is finally forwarded, ONCE, after every clone is made. A function is
+			// not wire data, so the bytes sent stay exactly the bytes scanned.
+			if (surfaceKind === "stream-helper") {
+				graftParseHooks(originalParams, forwardArgs[0] as Record<string, unknown>);
 			}
 
 			// e. Forward to original SDK. P3-PII-REDACT-EGRESS: forwardArgs is the
@@ -3563,6 +3566,8 @@ function graftParseHooks(
 ): void {
 	const graft = (from: unknown, to: unknown): void => {
 		if (from === null || typeof from !== "object" || to === null || typeof to !== "object") return;
+		// The forwarded object IS the caller's (nothing was cloned): never touch it.
+		if (from === to) return;
 		try {
 			const parse = (from as { parse?: unknown }).parse;
 			if (typeof parse === "function") {
