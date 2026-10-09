@@ -15,7 +15,9 @@
 //    read, and an attribute under which checkout rewrites a file (`working-tree-encoding`,
 //    `filter`, `ident`) would hand an agent other bytes than the ones checked here. The
 //    attributes are read as git reads them on either kind of filesystem, case-sensitive or
-//    not; and so that every attributes file is read, one must be spelled `.gitattributes`.
+//    not; and so that every attributes file is read, one must be spelled `.gitattributes`,
+//    and be a regular file: git before 2.32 reads a symlinked one through its link, from the
+//    file it names, where this check reads the link itself.
 //    No attributes file may give one of them the literal value `unset` or `unspecified`, a
 //    macro's included: `check-attr` prints that as no value, where git looks for a filter
 //    or an encoding of that name. And every attributes file, at any depth, is checked out as
@@ -475,6 +477,13 @@ function check({ event, rules, base, head }) {
 				1,
 				path,
 				'is ".gitattributes" to a case-insensitive filesystem, and git reads it there, but not here: spell it ".gitattributes"',
+			);
+		}
+		if (leaf === ".gitattributes" && !REGULAR.has(mode)) {
+			fail(
+				1,
+				path,
+				`is an attributes file that is not a regular file (mode ${mode}): git before 2.32 reads a symlinked one through its link, where this check reads the link`,
 			);
 		}
 		if (leaf === ".gitattributes" && mode !== "160000") {
