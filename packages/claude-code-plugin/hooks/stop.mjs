@@ -9,16 +9,18 @@
 // up. A response that arrives later still is left for SessionEnd, or the next Stop.
 //
 // While the server's breaker is open (lib.mjs `breakerOpen`, watch mode only), nothing is
-// sent and nothing is touched: the holds and the remainder wait for the first hook after it
-// closes, and one `deferred` record names the holds (`skipSettlePoint`).
+// sent and nothing is touched but the state's first-run time (transcript.mjs
+// `stampFirstRun`): the holds and the remainder wait for the first hook after it closes, and
+// one `deferred` record names the holds (`skipSettlePoint`).
 import { breakerOpen, readStdin, requireLaunch, say, skipSettlePoint, usageMode } from "./lib.mjs";
-import { awaitFinalResponse, settleSession } from "./transcript.mjs";
+import { awaitFinalResponse, settleSession, stampFirstRun } from "./transcript.mjs";
 
 requireLaunch();
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
 	if (await breakerOpen()) {
+		if (usageMode() === "transcript") await stampFirstRun();
 		await skipSettlePoint({
 			kind: "deferred",
 			phase: "stop",

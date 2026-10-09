@@ -48,7 +48,7 @@ async function breakerModule(): Promise<BreakerModule> {
 	return (await import("../hooks/breaker.mjs")) as BreakerModule;
 }
 
-type Reply = { status: number; json?: unknown } | "hang";
+type Reply = { status: number; json?: unknown } | "hang" | "stall";
 
 interface Seen {
 	method: string;
@@ -74,7 +74,10 @@ function usual(path: string): Reply {
 	return { status: 404, json: { reason: "unknown route" } };
 }
 
-/** A fake server: every request is recorded, then answered; a "hang" reply never answers. */
+/**
+ * A fake server: every request is recorded, then answered. A "hang" reply never answers; a
+ * "stall" reply sends its headers, then never its body.
+ */
 function startServer(): Promise<string> {
 	return new Promise((resolve) => {
 		const server = createServer((req, res) => {
@@ -93,6 +96,11 @@ function startServer(): Promise<string> {
 				seen.push({ method: req.method ?? "", path, body });
 				const reply = override?.(path, body) ?? usual(path);
 				if (reply === "hang") return;
+				if (reply === "stall") {
+					res.writeHead(200, { "content-type": "application/json" });
+					res.flushHeaders();
+					return;
+				}
 				res.writeHead(reply.status, { "content-type": "application/json" });
 				res.end(JSON.stringify(reply.json ?? {}));
 			});
@@ -195,18 +203,22 @@ async function records(dir = stateDir): Promise<Array<Record<string, unknown>>> 
 		.map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-const holdName = (call: string, transferId: string, agent = "main") =>
-	`${SESSION}__${agent}__${call}.${transferId}.json`;
+const holdName = (call: string, transferId: string, agent = "main", kind = "json") =>
+	`${SESSION}__${agent}__${call}.${transferId}.${kind}`;
 
-/** A pending hold's file, as PreToolUse records one. */
+/**
+ * A pending hold's file, as PreToolUse records one; `kind` "settling" or "releasing" for one
+ * a hook has claimed, its settle or give-back attempted.
+ */
 async function seedHold(
 	call: string,
 	transferId: string,
 	fields: Record<string, unknown>,
 	agent = "main",
+	kind = "json",
 ): Promise<void> {
 	await writeFile(
-		join(stateDir, holdName(call, transferId, agent)),
+		join(stateDir, holdName(call, transferId, agent, kind)),
 		JSON.stringify({
 			gate: 1,
 			toolUseId: call,
@@ -251,17 +263,21 @@ async function snapshot(dir: string, skip: string[] = []): Promise<Record<string
 /**
  * A session's main transcript: one user line, then one complete response, `id` (5 in, 6 out).
  * Message claims are shared by every session of a state dir, so two sessions need two ids.
+ * `at` timestamps both lines, as Claude Code does; without it they carry none.
  */
-async function writeTranscript(session = SESSION, id = "msg_a"): Promise<void> {
+async function writeTranscript(session = SESSION, id = "msg_a", at?: string): Promise<void> {
+	const stamp = at === undefined ? {} : { timestamp: at };
 	const user = JSON.stringify({
 		type: "user",
 		sessionId: SESSION,
+		...stamp,
 		message: { role: "user", content: "synthetic" },
 	});
 	const response = JSON.stringify({
 		type: "assistant",
 		sessionId: SESSION,
 		uuid: `${id}-final`,
+		...stamp,
 		message: {
 			id,
 			model: SONNET,
@@ -398,6 +414,30 @@ describe("the breaker's file (breaker.mjs)", () => {
 		expect(nodeFs.existsSync(marker)).toBe(false);
 	});
 
+	it("a probe marker dated past PROBE_STALE_MS ahead (the clock was set back) reads stale; one a second ahead still has its prober", async () => {
+		await dueBreaker();
+		let probes = 0;
+		const counted = async () => {
+			probes += 1;
+			return true;
+		};
+		const marker = breakerFile().replace(/\.json$/u, ".probe");
+		await writeFile(marker, "");
+		const ahead = new Date(Date.now() + 3_600_000);
+		await utimes(marker, ahead, ahead);
+		expect((await breaker.consultBreaker(url, counted)).state).toBe("closed");
+		expect(probes).toBe(0);
+		expect(nodeFs.existsSync(marker)).toBe(false);
+		// A fresh marker's mtime, finer than Date.now(), can lead it by under a millisecond: a
+		// marker a second ahead still has its prober at work.
+		await writeFile(marker, "");
+		const soon = new Date(Date.now() + 1_000);
+		await utimes(marker, soon, soon);
+		expect((await breaker.consultBreaker(url, counted)).state).toBe("open");
+		expect(probes).toBe(0);
+		expect(nodeFs.existsSync(marker)).toBe(true);
+	});
+
 	it("a probe that gets no answer opens it for another minute", async () => {
 		await dueBreaker();
 		const before = Date.now();
@@ -449,8 +489,10 @@ describe("under an open breaker, every hook sends nothing and touches nothing", 
 				session: SESSION,
 			},
 		]);
-		// The agent's transcript state is untouched: no cursor, no window, no marker.
-		expect(await readdir(stateDir)).toEqual(["watch.jsonl"]);
+		// The agent's transcript state is untouched: no cursor, no window, no marker. Only the
+		// state's first-run time is stamped (transcript.mjs `stampFirstRun`).
+		expect(await readdir(stateDir)).toEqual(["transcripts", "watch.jsonl"]);
+		expect(await readdir(join(stateDir, "transcripts"))).toEqual(["since"]);
 		// Another session: a session's settings, its usage included, are pinned at its first hook.
 		await run("pre-tool-use", preInput("tu_2", "estimate-session"), { UT_CC_USAGE: "estimate" });
 		expect(seen).toEqual([]);
@@ -461,14 +503,14 @@ describe("under an open breaker, every hook sends nothing and touches nothing", 
 		});
 	});
 
-	it("PostToolUse leaves the state dir byte-identical but for its record, and the first Stop after the close settles that hold ONCE", async () => {
+	it("PostToolUse leaves the state dir byte-identical but for its record and the first-run time, and the first Stop after the close settles that hold ONCE", async () => {
 		await seedHold("tu_1", "tx_1", WINDOW);
 		await openBreaker();
 		const before = await snapshot(stateDir);
 		const post = await run("post-tool-use", postInput("tu_1"));
 		expect(post.code).toBe(0);
 		expect(seen).toEqual([]);
-		expect(await snapshot(stateDir, ["watch.jsonl"])).toEqual(before);
+		expect(await snapshot(stateDir, ["watch.jsonl", join("transcripts", "since")])).toEqual(before);
 		expect(await records()).toMatchObject([
 			{
 				kind: "deferred",
@@ -503,6 +545,38 @@ describe("under an open breaker, every hook sends nothing and touches nothing", 
 		expect(settles()).toHaveLength(1);
 	});
 
+	it.each<[string, () => Record<string, unknown>]>([
+		["pre-tool-use", () => preInput("tu_1")],
+		["post-tool-use", () => postInput("tu_1")],
+		["stop", bare],
+		["subagent-stop", () => ({ session_id: SESSION, agent_id: "agent1" })],
+		["session-end", bare],
+	])(
+		"on a fresh state dir, the %s skip stamps the state's first-run time: the outage's usage is posted after the close",
+		async (hook, input) => {
+			await openBreaker();
+			await run(hook, input());
+			expect(seen).toEqual([]);
+			// A response of the outage, timestamped as Claude Code writes one, after the skip.
+			await writeTranscript(SESSION, "msg_a", new Date().toISOString());
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			await dueBreaker();
+			await run("stop", { session_id: SESSION, transcript_path: transcriptPath() });
+			expect(settles()).toHaveLength(1);
+			expect(settles()[0]?.body).toMatchObject({ inputTokens: 5, outputTokens: 6 });
+		},
+	);
+
+	it("control: with no hook before the close, the same response predates the state, and is never posted", async () => {
+		await openBreaker();
+		await writeTranscript(SESSION, "msg_a", new Date().toISOString());
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		await dueBreaker();
+		await run("stop", { session_id: SESSION, transcript_path: transcriptPath() });
+		expect(await breakerState()).toBeNull();
+		expect(settles()).toEqual([]);
+	});
+
 	it("an estimate hold PostToolUse leaves is a gap: no later hook charges it, one only gives it back", async () => {
 		await seedHold("tu_1", "tx_1", ESTIMATE);
 		await openBreaker();
@@ -511,41 +585,52 @@ describe("under an open breaker, every hook sends nothing and touches nothing", 
 		expect(await records()).toMatchObject([
 			{ kind: "gap", phase: "post-tool-use", transferIds: ["tx_1"], reason: "breaker-open" },
 		]);
+		// An estimate-mode skip stamps no first-run time: it has no transcript state.
+		expect(nodeFs.existsSync(join(stateDir, "transcripts"))).toBe(false);
 	});
 
-	it("Stop and SubagentStop each record a deferral naming the holds they leave", async () => {
+	it("Stop and SubagentStop each record a deferral naming the holds they leave, those whose settle or give-back was attempted included, once each", async () => {
 		await seedHold("tu_1", "tx_1", WINDOW);
 		await seedHold("tu_2", "tx_2", WINDOW, "agent1");
+		await seedHold("tu_3", "tx_3", WINDOW, "main", "settling");
+		await seedHold("tu_4", "tx_4", { ...WINDOW, assignedIds: [] }, "agent1", "releasing");
+		// Met twice, as when a hook claims it between the two listings: named once.
+		await seedHold("tu_5", "tx_5", WINDOW);
+		await seedHold("tu_5", "tx_5", WINDOW, "main", "settling");
 		await openBreaker();
 		await run("subagent-stop", { session_id: SESSION, agent_id: "agent1" });
 		await run("stop", bare());
 		expect(seen).toEqual([]);
 		const [subagent, stop] = await records();
-		expect(subagent).toMatchObject({
-			kind: "deferred",
-			phase: "subagent-stop",
-			transferIds: ["tx_2"],
-		});
+		expect(subagent).toMatchObject({ kind: "deferred", phase: "subagent-stop" });
+		expect([...((subagent?.transferIds as string[] | undefined) ?? [])].sort()).toEqual([
+			"tx_2",
+			"tx_4",
+		]);
 		expect(stop).toMatchObject({ kind: "deferred", phase: "stop" });
 		expect([...((stop?.transferIds as string[] | undefined) ?? [])].sort()).toEqual([
 			"tx_1",
 			"tx_2",
+			"tx_3",
+			"tx_4",
+			"tx_5",
 		]);
 	});
 
 	it("SessionEnd records a GAP, not a deferral, naming the holds it leaves: no later hook of the session settles them", async () => {
 		await seedHold("tu_1", "tx_1", WINDOW);
+		// An estimate hold whose settle went unanswered: settle-attempted.
+		await seedHold("tu_2", "tx_2", ESTIMATE, "main", "settling");
 		await openBreaker();
 		await run("session-end", bare());
 		expect(seen).toEqual([]);
-		expect(await records()).toMatchObject([
-			{
-				kind: "gap",
-				phase: "session-end",
-				outcome: "deferred",
-				transferIds: ["tx_1"],
-				reason: "breaker-open",
-			},
+		const written = await records();
+		expect(written).toMatchObject([
+			{ kind: "gap", phase: "session-end", outcome: "deferred", reason: "breaker-open" },
+		]);
+		expect([...((written[0]?.transferIds as string[] | undefined) ?? [])].sort()).toEqual([
+			"tx_1",
+			"tx_2",
 		]);
 	});
 
@@ -593,6 +678,8 @@ describe("under an open breaker, every hook sends nothing and touches nothing", 
 		});
 		expect(seen).toEqual([]);
 		expect(await records(lane)).toMatchObject([{ kind: "gap", reason: "breaker-open" }]);
+		// An estimate-mode skip stamps no first-run time: it has no transcript state.
+		expect(await readdir(lane)).toEqual(["watch.jsonl"]);
 		const other = await startServer();
 		await runHook(join(HOOKS, "pre-tool-use.mjs"), preInput("tu_2", "lane-c"), {
 			...envFor({ UT_CC_USAGE: "estimate" }),
@@ -663,6 +750,45 @@ describe("what opens the breaker, and what never does", () => {
 		});
 	}, 60_000);
 
+	it("a server that sends its headers and then stalls is a hung one: three timeouts trip it", async () => {
+		override = () => "stall";
+		const env = { UT_CC_USAGE: "estimate" };
+		await run("pre-tool-use", preInput("tu_1"), env);
+		expect(paths()).toEqual(["/v1/health", "/v1/authorize"]);
+		expect((await breakerState())?.timeouts).toHaveLength(2);
+		await run("pre-tool-use", preInput("tu_2"), env);
+		expect(typeof (await breakerState())?.openUntil).toBe("number");
+		await run("pre-tool-use", preInput("tu_3"), env);
+		expect(seen).toHaveLength(4);
+		expect((await records()).at(-1)).toMatchObject({
+			kind: "gap",
+			phase: "pre-tool-use",
+			reason: "breaker-open",
+		});
+	}, 60_000);
+
+	it("a whole answer, its body read, still clears the count", async () => {
+		override = () => "stall";
+		const env = { UT_CC_USAGE: "estimate" };
+		await run("pre-tool-use", preInput("tu_1"), env);
+		expect((await breakerState())?.timeouts).toHaveLength(2);
+		override = undefined;
+		await run("pre-tool-use", preInput("tu_2"), env);
+		expect(await breakerState()).toEqual({ timeouts: [] });
+	}, 60_000);
+
+	it("a half-open probe whose answer stalls after its headers opens it for another minute", async () => {
+		await dueBreaker();
+		override = (path) => (path === "/v1/health" ? "stall" : undefined);
+		const before = Date.now();
+		const pre = await run("pre-tool-use", preInput("tu_1"), { UT_CC_USAGE: "estimate" });
+		expect(pre.code).toBe(0);
+		expect(paths()).toEqual(["/v1/health"]);
+		expect(pre.stderr).toContain("its breaker stays open for another minute");
+		expect(Number((await breakerState())?.openedAt)).toBeGreaterThanOrEqual(before);
+		expect((await records()).at(-1)).toMatchObject({ reason: "breaker-open" });
+	}, 30_000);
+
 	it("a server that answers between its timeouts never opens it: the count is of timeouts in a row", async () => {
 		override = (path) => (path === "/v1/health" ? "hang" : undefined);
 		for (const call of ["tu_1", "tu_2", "tu_3"]) {
@@ -696,6 +822,22 @@ describe("a settle or give-back that does not end cleanly is written down, under
 			{ phase: "settle", outcome: "claimed", transferId: "tx_1", session: SESSION },
 			{ phase: "settle", outcome: "released", transferId: "tx_2" },
 			{ phase: "settle", outcome: "unresolved", transferId: "tx_3" },
+		]);
+	});
+
+	it("PreToolUse: a repeated call's earlier hold whose settle ends claimed (a 500, the hold then given back) is written down before the call holds afresh", async () => {
+		capabilities = ["release"];
+		await writeTranscript();
+		await run("pre-tool-use", preInput("tu_1"));
+		override = (path) =>
+			path === "/v1/settle" ? { status: 500, json: { error: "down" } } : undefined;
+		const again = await run("pre-tool-use", preInput("tu_1"));
+		// The give-back confirmed the hold gone, so the call reserves afresh.
+		expect(paths().filter((path) => path === "/v1/release")).toHaveLength(1);
+		expect(again.stderr).toContain("this tool call's earlier hold tx_s1 is ended");
+		expect(paths().filter((path) => path === "/v1/authorize")).toHaveLength(2);
+		expect(await gaps()).toMatchObject([
+			{ phase: "settle", outcome: "claimed", transferId: "tx_s1", session: SESSION },
 		]);
 	});
 

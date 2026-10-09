@@ -13,7 +13,8 @@
 //   deadline; one under MIN_COUNTED_MS is the hook's budget running out, not the server's
 //   silence, and does not count). `timeouts[]` holds the consecutive ones of the last
 //   WINDOW_MS, and the TRIP_TIMEOUTS-th opens the breaker for OPEN_MS. ANY answer, a refusal
-//   included, clears it. A refused or reset connection neither counts nor clears: it fails
+//   included, clears it: a whole answer, its body read, so headers and then a stall end in
+//   the timeout they are. A refused or reset connection neither counts nor clears: it fails
 //   fast, and stalls nothing.
 // - Every update is a read, then a whole write (a temp file renamed over the name). Two
 //   hooks counting at once can lose an update, which only delays opening.
@@ -23,11 +24,11 @@
 //   clock set back, a hand edit) reads CLOSED: no value can hold it open. (Capped at now +
 //   OPEN_MS instead, a far-future `openUntil` would read open at every read, for good.)
 // - HALF-OPEN: past `openUntil`, the hook that wins `<name>.probe` by an exclusive create
-//   probes the server once (lib.mjs: `/v1/health`, ≤ 1 s). An answer deletes the file
-//   (closed), and the hook runs as usual; no answer re-opens it for OPEN_MS, and the hook
-//   skips. Either way the prober removes its marker. Every other hook skips while the marker
-//   is younger than PROBE_STALE_MS; an older one (its prober died) reads CLOSED, and is
-//   removed.
+//   probes the server once (lib.mjs: `/v1/health`, ≤ 1 s). An answer, its body read, deletes
+//   the file (closed), and the hook runs as usual; no answer re-opens it for OPEN_MS, and the
+//   hook skips. Either way the prober removes its marker. Every other hook skips while the
+//   marker is within PROBE_STALE_MS of now; one older (its prober died), or dated further
+//   ahead (the clock was set back), reads CLOSED, and is removed.
 // Only watch mode reads or writes it (lib.mjs `breakerOpen`): enforce keeps failing closed.
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -219,7 +220,12 @@ export async function consultBreaker(url, probe, { clock = Date.now, fs = REAL_F
 	} catch (err) {
 		if (err?.code !== "EEXIST") return { state: "closed" };
 		try {
-			if (clock() - fs.lstatSync(at.probe).mtimeMs < PROBE_STALE_MS) return { state: "open" };
+			// A marker within PROBE_STALE_MS of this clock, either way, has a prober at work: a fresh
+			// one's mtime, finer than Date.now(), can lead it by under a millisecond. One further off,
+			// too old or dated in the future (the clock was set back), has none this clock can vouch
+			// for: stale.
+			const age = clock() - fs.lstatSync(at.probe).mtimeMs;
+			if (Math.abs(age) < PROBE_STALE_MS) return { state: "open" };
 			fs.unlinkSync(at.probe);
 		} catch {
 			// Gone meanwhile: its prober finished.

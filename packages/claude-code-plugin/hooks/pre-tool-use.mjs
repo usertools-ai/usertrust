@@ -84,6 +84,7 @@ import {
 	serverCapabilities,
 	serverRequest,
 	timeLeft,
+	usageMode,
 } from "./lib.mjs";
 import {
 	authorizeLabels,
@@ -93,10 +94,12 @@ import {
 	OUTCOME_NOTES,
 	prepareWindow,
 	reconcileAgent,
+	recordHoldOutcome,
 	STALE_SETTLING_MS,
 	safeName,
 	settlesAtEstimate,
 	settleTranscriptHold,
+	stampFirstRun,
 } from "./transcript.mjs";
 
 requireLaunch();
@@ -230,6 +233,9 @@ async function governCall(input) {
  * settled at the estimate (transcript.mjs `settlesAtEstimate`) has no later carrier: a GAP.
  */
 async function skipWhileOpen(input) {
+	// The state's first-run time, so the outage's transcript entries count as this state's
+	// (transcript.mjs `stampFirstRun`).
+	if (usageMode() === "transcript") await stampFirstRun();
 	const estimate = await settlesAtEstimate({ sessionId, agentId, input });
 	const kind = estimate ? "gap" : "deferred";
 	const recorded = await recordBreakerSkip({
@@ -365,6 +371,9 @@ async function unsettled(
 async function retire(entry) {
 	if ((entry.assignedIds?.length ?? 0) > 0) {
 		const result = await settleTranscriptHold(sessionId, entry);
+		// Written down as at every settle (transcript.mjs `recordHoldOutcome`): a hold ended
+		// badly here is a gap even when the call then reserves afresh.
+		await recordHoldOutcome(sessionId, entry, result);
 		if (result.outcome === "deferred") {
 			throw new Error(`hold ${entry.transferId} could not be ended (${result.reason})`);
 		}

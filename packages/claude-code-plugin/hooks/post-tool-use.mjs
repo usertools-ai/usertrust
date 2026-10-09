@@ -79,6 +79,7 @@ import {
 	recordHoldOutcome,
 	settleLabels,
 	settleTranscriptHold,
+	stampFirstRun,
 } from "./transcript.mjs";
 
 requireLaunch();
@@ -345,6 +346,7 @@ try {
 		// Stop, a SubagentStop, SessionEnd): a deferral. An ESTIMATE hold is charged by this hook
 		// alone, and a later one only gives it back: its charge is lost, a gap.
 		const estimate = entry !== null && entry.usage !== "transcript";
+		if (usageMode() === "transcript") await stampFirstRun();
 		const recorded = await recordBreakerSkip({
 			kind: estimate ? "gap" : "deferred",
 			phase: "post-tool-use",

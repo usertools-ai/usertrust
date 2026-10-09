@@ -14,9 +14,10 @@
 // only a fifth of it. SessionEnd cannot block, and never fails a session.
 //
 // While the server's breaker is open (lib.mjs `breakerOpen`, watch mode only), nothing is
-// sent and nothing is touched, and this is the session's last hook: no later one settles what
-// it leaves, unless the session is resumed. So its record is a GAP, not a deferral, naming the
-// holds it leaves (`skipSettlePoint`).
+// sent and nothing is touched but the state's first-run time (transcript.mjs
+// `stampFirstRun`), and this is the session's last hook: no later one settles what it leaves,
+// unless the session is resumed. So its record is a GAP, not a deferral, naming the holds it
+// leaves (`skipSettlePoint`).
 import {
 	breakerOpen,
 	readStdin,
@@ -24,9 +25,10 @@ import {
 	say,
 	sessionEndBudgetMs,
 	skipSettlePoint,
+	usageMode,
 	useHookBudget,
 } from "./lib.mjs";
-import { sessionEndLockWait, settleSession } from "./transcript.mjs";
+import { sessionEndLockWait, settleSession, stampFirstRun } from "./transcript.mjs";
 
 requireLaunch();
 useHookBudget(sessionEndBudgetMs());
@@ -34,6 +36,7 @@ useHookBudget(sessionEndBudgetMs());
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
 	if (await breakerOpen()) {
+		if (usageMode() === "transcript") await stampFirstRun();
 		await skipSettlePoint({
 			kind: "gap",
 			phase: "session-end",

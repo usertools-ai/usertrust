@@ -545,7 +545,15 @@ export async function recordBreakerSkip({
  * resumed. `agent` scopes it to one subagent's holds; null, the whole session's.
  */
 export async function skipSettlePoint({ kind, phase, session, agent }) {
-	const held = await listPending(session, agent);
+	// The pending holds, and those whose settle was attempted (`.settling`, `.releasing`): every
+	// hold this skip leaves, once each.
+	const held = [
+		...new Map(
+			[...(await listPending(session, agent)), ...(await settlingRecords(session, agent))].map(
+				(entry) => [entry.transferId, entry],
+			),
+		).values(),
+	];
 	const recorded = await recordBreakerSkip({
 		kind,
 		phase,
@@ -987,8 +995,9 @@ function timedOut(deadlineMs) {
 
 /**
  * The half-open probe: whether the server answers `/v1/health` at all, any status, within a
- * second (and what is left of this hook's budget). Not counted as a timeout: it is the
- * breaker's own question.
+ * second (and what is left of this hook's budget). An answer is the whole of it, its body
+ * read: a server that sends its headers and then stalls has not answered. Not counted as a
+ * timeout: it is the breaker's own question.
  */
 async function healthAnswers() {
 	const timeoutMs = Math.min(1_000, timeLeft());
@@ -997,7 +1006,7 @@ async function healthAnswers() {
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	try {
 		const response = await fetch(routeUrl("/v1/health"), { signal: controller.signal });
-		await response.arrayBuffer().catch(() => {});
+		await response.arrayBuffer();
 		return true;
 	} catch {
 		return false;
@@ -1032,7 +1041,8 @@ export async function breakerOpen() {
 /**
  * POST to the governance server. `timeoutMs` bounds the whole exchange (5 s
  * unless the caller passes less); a spent budget throws without a request. An
- * answer and a timeout are counted by the breaker (watch mode, `breakerOpen`).
+ * answer and a timeout are counted by the breaker (watch mode, `breakerOpen`): an answer once
+ * its body is read, so headers and then a stall count as the timeout they end in.
  */
 export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 	const { refused, key } = settings();
@@ -1048,8 +1058,8 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 			body: JSON.stringify(body),
 			signal: controller.signal,
 		});
-		answered();
 		const text = await response.text();
+		answered();
 		let json = null;
 		try {
 			json = text === "" ? null : JSON.parse(text);
@@ -1191,9 +1201,11 @@ export function serverCapabilities() {
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
 			const response = await fetch(routeUrl("/v1/health"), { signal: controller.signal });
+			// Answered once its body is read: headers and then a stall end in the timeout.
+			const text = await response.text();
 			answered();
 			if (!response.ok) return unknown(`health returned ${response.status}`);
-			const json = await response.json();
+			const json = JSON.parse(text);
 			const list = Array.isArray(json?.capabilities) ? json.capabilities : [];
 			const capabilities = new Set(list.filter((c) => typeof c === "string"));
 			principalCachedAt = null;

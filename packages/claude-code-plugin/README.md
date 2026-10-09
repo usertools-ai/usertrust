@@ -691,28 +691,33 @@ session its full timeouts: a 2 s capability probe and a 5 s request, about 7 s p
 PreToolUse, and up to a hook's 10 s budget. So in
 watch mode, three timeouts in a row within a minute open a breaker for a minute. Any
 answer, a refusal included, resets the count, and a refused connection counts for
-nothing: both fail fast. The breaker is the host's, one per server URL, shared by every
+nothing: both fail fast. An answer is the whole response, its body read: a server that
+sends its headers and then stalls is timing out. The breaker is the host's, one per server URL, shared by every
 session of your user, under the home the passwd database gives you
 (`~/.local/state/usertrust/breaker/`, 0700). While it is open, a hook sends nothing and
 changes nothing, and writes one record with `"reason":"breaker-open"` and
-`"outcome":"deferred"`:
+`"outcome":"deferred"`. The one exception is in transcript mode, on a state dir that has
+no first-run time yet: the hook stamps it, so the outage's usage counts as this state's and
+is posted later. Each record is one of:
 - **`"kind":"deferred"`**: a transcript-mode PreToolUse, a PostToolUse whose hold carries
   transcript usage, Stop and SubagentStop. The first settle point after the breaker
   closes posts that usage, once. `usertrust-job coverage` still lists a deferral inside a
   job's interval as a known gap: the record cannot say whether that settle point came.
 - **`"kind":"gap"`**: an estimate-mode PreToolUse, a PostToolUse whose hold settles at the
   estimate, and SessionEnd. Nothing later settles those: a session that ends during an
-  outage settles what it left only if it is resumed.
+  outage settles what it left only if it is resumed. If it never is, its hold files stay
+  in the state dir, and nothing removes them.
 
-A record about holds names them in `transferIds`. After its minute, the next hook asks
-`/v1/health` once, for at most a second: an answer closes the breaker, and no answer
-opens it for another minute. A hook reads the breaker once, as it starts: one that
+A record about holds names them in `transferIds`, including those whose settle was
+already under way. After its minute, the next hook asks `/v1/health` once, for at most a
+second: an answer closes the breaker, and no answer opens it for another minute. A hook reads the breaker once, as it starts: one that
 started before the breaker opened sends everything it would have, so a settle it began
 is never left half-done. Enforce mode never reads or writes it.
 
 **A settle or a give-back that does not end cleanly is written down too.** PostToolUse,
 Stop, SubagentStop and SessionEnd add a `gap` record whenever settling a hold, giving
-one back or posting a remainder ends other than settled or given back. Its `"phase"` is
+one back or posting a remainder ends other than settled or given back. So does
+PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"phase"` is
 `settle`, `release` or `remainder`, and its `"outcome"` one of:
 - `claimed`: the settle may have posted, and is never retried (no key);
 - `unresolved`: retried under its key at the next Stop;

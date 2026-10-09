@@ -16,9 +16,10 @@
 // says so when it gives up.
 //
 // While the server's breaker is open (lib.mjs `breakerOpen`, watch mode only), nothing is
-// sent and nothing is touched: the subagent's holds and remainder wait for the first hook
-// after it closes (Stop's sweep settles every subagent's), and one `deferred` record names
-// the holds (`skipSettlePoint`).
+// sent and nothing is touched but the state's first-run time (transcript.mjs
+// `stampFirstRun`): the subagent's holds and remainder wait for the first hook after it
+// closes (Stop's sweep settles every subagent's), and one `deferred` record names the holds
+// (`skipSettlePoint`).
 import {
 	breakerOpen,
 	cleanup,
@@ -33,6 +34,7 @@ import {
 	cleanupReserve,
 	postRemainder,
 	settleAssignedHolds,
+	stampFirstRun,
 	transcriptPathFor,
 } from "./transcript.mjs";
 
@@ -43,6 +45,7 @@ try {
 	const sessionId = input.session_id ?? "unknown";
 	const agentId = input.agent_id;
 	if (typeof agentId === "string" && agentId !== "" && (await breakerOpen())) {
+		if (usageMode() === "transcript") await stampFirstRun();
 		await skipSettlePoint({
 			kind: "deferred",
 			phase: "subagent-stop",

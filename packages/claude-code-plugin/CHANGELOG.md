@@ -11,15 +11,18 @@ npm, and its version is its own: the `usertrust` packages and their
 
 - **Watch mode stops asking a server that has stopped answering: a breaker.** Three
   timeouts in a row within a minute open it for a minute, host-wide, one per server URL
-  (`~/.local/state/usertrust/breaker/` under the passwd home). While it is open, every
-  hook sends nothing and touches no hold, window or cursor, and writes one
-  `breaker-open` record: `deferred` where a later settle point posts the usage, `gap`
-  where nothing will (an estimate-mode call, SessionEnd). One hook probes after the
-  minute and closes it or re-opens it. Enforce mode never reads or writes it.
+  (`~/.local/state/usertrust/breaker/` under the passwd home). An answer counts only once
+  its body is read, so a server that sends headers and then stalls trips it too. While it
+  is open, every hook sends nothing and touches no hold, window or cursor, and writes one
+  `breaker-open` record naming the holds it leaves: `deferred` where a later settle point
+  posts the usage, `gap` where nothing will (an estimate-mode call, SessionEnd). One hook
+  probes after the minute and closes it or re-opens it. Enforce mode never reads or
+  writes it.
 - **Every settle, give-back and remainder that does not end cleanly writes a `gap`
   record**, with its `phase`, its `outcome` (`claimed`, `unresolved`, `released`,
-  `deferred`, `failed` or `unknown`) and its hold's `transferId`. Until now only
-  PreToolUse wrote records; the rest went to stderr alone.
+  `deferred`, `failed` or `unknown`) and its hold's `transferId`, including PreToolUse's
+  settle of a repeated or resumed call's earlier hold. Until now only PreToolUse wrote
+  records, for its own calls; the rest went to stderr alone.
 - **A failed health probe still sends the principal**, from a remembered answer under a
   day old, per server and key. Nothing else is ever taken from it: no idempotency key.
 
