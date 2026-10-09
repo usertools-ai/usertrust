@@ -213,9 +213,24 @@ describe("rule 1: agent config the allowlist does not name fails, in every statu
 		}
 	});
 
-	test("a compatibility spelling counts as the name it folds to (NFKC): a fullwidth ｊ", () => {
-		fails(change({ "pkg/.mcp.ｊson": "{}" }).run(), "pkg/.mcp.ｊson", UNNAMED);
+	test("a compatibility spelling counts as the name it folds to (NFKC): a fullwidth \uFF4A", () => {
+		fails(change({ "pkg/.mcp.\uFF4Ason": "{}" }).run(), "pkg/.mcp.\uFF4Ason", UNNAMED);
 	});
+
+	// HFS+ ignores these code points in a name, as git's own list has them: each range's first
+	// and last, inside `.mcp.json`, still names an MCP server list.
+	for (const [range, first, last] of [
+		["U+200C to U+200F", "\u200C", "\u200F"],
+		["U+202A to U+202E", "\u202A", "\u202E"],
+		["U+206A to U+206F", "\u206A", "\u206F"],
+		["U+FEFF", "\uFEFF", "\uFEFF"],
+	]) {
+		test(`a code point HFS+ ignores (${range}) counts as the name without it`, () => {
+			const paths = [`pkg/.mcp.j${first}son`, `.mc${last}p.json`];
+			const result = change(Object.fromEntries(paths.map((path) => [path, "{}"]))).run();
+			for (const path of paths) fails(result, path, UNNAMED);
+		});
+	}
 
 	test("an edit to agent config that was already there fails", () => {
 		const { run } = change(
@@ -738,16 +753,42 @@ describe("the workflow runs the guard before any code of the change, and only fo
 		return all.map((step) => step.join("\n"));
 	}
 
-	test("only the checkout and the node setup run before the guard, and the guard's tests after it", () => {
+	/** The guard's step: the one that runs the launcher. */
+	const guardStep = (all) => all.findIndex((step) => step.includes(".github/agent-config.sh"));
+
+	test("only the checkout runs before the guard; the node setup and the guard's tests after it", () => {
 		const all = steps(job());
-		const guard = all.findIndex((step) => step.includes("bash .github/agent-config.sh"));
+		const guard = guardStep(all);
 		assert.ok(guard > 0, `no guard step:\n${all.join("\n")}`);
 		for (const step of all.slice(0, guard)) {
-			assert.match(step, /^ {6}(- | {2})uses: actions\/(checkout|setup-node)@v\d+$/mu, step);
+			assert.match(step, /^ {6}(- | {2})uses: actions\/checkout@v\d+$/mu, step);
 			assert.doesNotMatch(step, /^ {8}run:/mu, step);
 		}
+		const setup = all.findIndex((step) => step.includes("actions/setup-node@"));
+		assert.ok(setup > guard, `a node setup runs before the guard:\n${all.join("\n")}`);
 		const tests = all.findIndex((step) => step.includes("node --test"));
 		assert.ok(tests > guard, `the tests run before the guard:\n${all.join("\n")}`);
+	});
+
+	test("the launcher runs from the graded commit's object, never from the working tree", () => {
+		const all = steps(job());
+		const guard = all[guardStep(all)];
+		assert.match(
+			guard,
+			/^ {10}git cat-file blob "\$SHA:\.github\/agent-config\.sh" > "\$launcher"$/mu,
+			guard,
+		);
+		assert.match(guard, /^ {12}bash "\$launcher" pull_request "\$SHA"$/mu, guard);
+		assert.match(guard, /^ {12}bash "\$launcher" push "\$BEFORE" "\$SHA"$/mu, guard);
+		assert.doesNotMatch(guard, /bash \.github\/agent-config\.sh/u, guard);
+	});
+
+	test("no package-manager cache: every node setup in the job turns it off", () => {
+		const setups = steps(job()).filter((step) => step.includes("actions/setup-node@"));
+		assert.ok(setups.length > 0, "no node setup: the control cannot reach anything");
+		for (const step of setups) {
+			assert.match(step, /^ {10}package-manager-cache: false$/mu, step);
+		}
 	});
 
 	test("an event that is not a change checks nothing, under a name branch protection does not require", () => {
@@ -759,14 +800,14 @@ describe("the workflow runs the guard before any code of the change, and only fo
 			),
 			lines.join("\n"),
 		);
-		const guard = steps(lines).find((step) => step.includes("bash .github/agent-config.sh"));
+		const guard = steps(lines).find((step) => step.includes(".github/agent-config.sh"));
 		assert.match(guard, new RegExp(`^        if: ${literal(change)}$`, "mu"), guard);
 	});
 
 	test("a pull request is checked as the merge commit GitHub tests (github.sha), never the branch's head", () => {
-		const guard = steps(job()).find((step) => step.includes("bash .github/agent-config.sh"));
+		const guard = steps(job()).find((step) => step.includes(".github/agent-config.sh"));
 		assert.match(guard, /^ {10}SHA: \$\{\{ github\.sha \}\}$/mu, guard);
-		assert.match(guard, /^ {12}bash \.github\/agent-config\.sh pull_request "\$SHA"$/mu, guard);
+		assert.match(guard, /^ {12}bash "\$launcher" pull_request "\$SHA"$/mu, guard);
 		assert.doesNotMatch(guard, /pull_request\.(head|base)\.sha/u, guard);
 	});
 

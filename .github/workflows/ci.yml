@@ -24,9 +24,17 @@ jobs:
     # a committed Claude Code settings file may hold only permitted keys
     # (scripts/agent-config-guard.mjs). The guard and its allowlist are read from the BASE
     # (.github/agent-config.sh), so a change is never graded by its own rules.
-    # - The guard runs FIRST: no code of the change runs in this job before it has finished
-    #   (its tests, which are the change's, run after it). scripts/agent-config-guard.test.mjs
-    #   pins this order.
+    # - The guard runs FIRST, and nothing the change controls reaches it but this workflow and
+    #   its launcher, as with every workflow (`.github/`, which CODEOWNERS names an owner for):
+    #   no other code, no file, no configuration, no cache. Only the checkout runs before it.
+    #   - No setup step: one that reads the checkout can restore files into it from an
+    #     earlier run of the same change (a package manager's cache, whose path the change's
+    #     .npmrc sets). The guard runs on the runner's own node.
+    #   - The launcher's bytes come from the graded commit's object (git cat-file), never from
+    #     the working tree, and the launcher reads the guard and its allowlist the same way.
+    #   - The guard's tests, which are the change's, run after it, on node 22, with no
+    #     package-manager cache.
+    #   scripts/agent-config-guard.test.mjs pins all of this.
     # - What it checks is what will land: a pull request as the merge commit GitHub tests
     #   (`github.sha`), never the branch's head alone; a push, tip to tip.
     # - The name is STABLE, `agent-config`, for a pull request or a push, so that branch
@@ -43,9 +51,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
       - name: The guard, as the base has it, before any code of the change runs
         if: github.event_name == 'pull_request' || github.event_name == 'push'
         env:
@@ -53,11 +58,17 @@ jobs:
           SHA: ${{ github.sha }}
           BEFORE: ${{ github.event.before }}
         run: |
+          launcher=$(mktemp)
+          git cat-file blob "$SHA:.github/agent-config.sh" > "$launcher"
           if [ "$EVENT" = pull_request ]; then
-            bash .github/agent-config.sh pull_request "$SHA"
+            bash "$launcher" pull_request "$SHA"
           else
-            bash .github/agent-config.sh push "$BEFORE" "$SHA"
+            bash "$launcher" push "$BEFORE" "$SHA"
           fi
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
       - name: The guard's own tests, after it
         run: node --test scripts/agent-config-guard.test.mjs
 

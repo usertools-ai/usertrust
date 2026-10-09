@@ -473,6 +473,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     case-insensitive filesystem opens as that file, and a change may not add such a spelling
     beside another file or a pinned one.
   - A pull request is checked as the merge commit GitHub tests: what lands, not the branch's head.
+  - Nothing the change controls runs before the guard: only the checkout, with no setup step or
+    cache, and the launcher is read from the graded commit's object.
   - A committed Claude Code settings file may hold only `$schema`, and `permissions` that
     tighten (`deny`, `ask`).
   - The guard and its allowlist are read from the base, so a change cannot allowlist itself.

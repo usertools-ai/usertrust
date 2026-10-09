@@ -18,8 +18,9 @@
 //    key fails, a key this guard has never heard of included: a list of the keys that
 //    run something goes stale each time Claude Code ships a setting.
 // Agent-config paths are recognized as a case-insensitive filesystem, or Windows, opens
-// them (`.Claude/`, `.MCP.JSON`, `.claude./`, `.mcp.jſon`), by the same folding (`fold`)
-// everywhere a spelling could stand for another file:
+// them (`.Claude/`, `.MCP.JSON`, `.claude./`, `.mcp.jſon`, and `.mcp.json` with a code
+// point HFS+ ignores inside it), by the same folding (`fold`) everywhere a spelling could
+// stand for another file:
 // - an allowlist entry names a path as it is written;
 // - a pin holds for every spelling that folds to its path;
 // - and a change may not add a spelling that folds to another path in its tree, or to a
@@ -71,12 +72,21 @@ function git(args, encoding = "utf-8") {
 }
 
 /**
- * A path segment as a case-insensitive filesystem, or Windows, resolves it: compatibility
- * forms folded (NFKC: `ﬁ` is `fi`, a fullwidth `ｊ` is `j`), then case (`ſ` is `s`; lower,
- * upper and lower again, so `ẞ` and `ß` are both `ss`), and trailing dots and spaces dropped.
+ * The code points HFS+ ignores in a name, git's own list (utf8.c `next_hfs_char`): the zero
+ * width non-joiner, joiner and direction marks, the directional formatting characters, the
+ * deprecated format characters, and U+FEFF. A name holding one opens as the name without it.
+ */
+const HFS_IGNORED = /[\u200C-\u200F\u202A-\u202E\u206A-\u206F\uFEFF]/gu;
+
+/**
+ * A path segment as a case-insensitive filesystem, or Windows, resolves it: the code points
+ * HFS+ ignores removed (`HFS_IGNORED`), compatibility forms folded (NFKC: `ﬁ` is `fi`, a
+ * fullwidth `ｊ` is `j`), then case (`ſ` is `s`; lower, upper and lower again, so `ẞ` and `ß`
+ * are both `ss`), and trailing dots and spaces dropped.
  */
 const fold = (segment) =>
 	segment
+		.replace(HFS_IGNORED, "")
 		.normalize("NFKC")
 		.toLowerCase()
 		.toUpperCase()
