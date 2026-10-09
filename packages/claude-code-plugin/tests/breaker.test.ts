@@ -847,6 +847,54 @@ describe("what opens the breaker, and what never does", () => {
 		expect(paths().filter((path) => path === "/v1/authorize")).toHaveLength(3);
 		expect(await breakerState()).toEqual({ timeouts: [] });
 	}, 60_000);
+
+	it("a server that answers /v1/health while its routes hang (a stuck ledger): three route timeouts open it, and the fourth hook sends nothing", async () => {
+		override = (path) => (path === "/v1/authorize" ? "hang" : undefined);
+		const env = { UT_CC_USAGE: "estimate" };
+		for (const [call, count] of [
+			["tu_1", 1],
+			["tu_2", 2],
+		] as const) {
+			await run("pre-tool-use", preInput(call), env);
+			// Each hook's probe was answered and cleared nothing: the count grows by its route timeout.
+			expect((await breakerState())?.timeouts).toHaveLength(count);
+		}
+		await run("pre-tool-use", preInput("tu_3"), env);
+		expect(typeof (await breakerState())?.openUntil).toBe("number");
+		const sent = seen.length;
+		await run("pre-tool-use", preInput("tu_4"), env);
+		expect(seen).toHaveLength(sent);
+		expect((await records()).at(-1)).toMatchObject({
+			kind: "gap",
+			phase: "pre-tool-use",
+			reason: "breaker-open",
+		});
+	}, 60_000);
+
+	it("with /v1/health answering, a route's answer still clears the count", async () => {
+		override = (path) => (path === "/v1/authorize" ? "hang" : undefined);
+		const env = { UT_CC_USAGE: "estimate" };
+		await run("pre-tool-use", preInput("tu_1"), env);
+		expect((await breakerState())?.timeouts).toHaveLength(1);
+		override = undefined;
+		await run("pre-tool-use", preInput("tu_2"), env);
+		expect(await breakerState()).toEqual({ timeouts: [] });
+	}, 60_000);
+
+	it("the declared cycle, /v1/health answering and the routes hung: the half-open probe's answer closes it, and the third route timeout opens it again", async () => {
+		await dueBreaker();
+		override = (path) => (path === "/v1/authorize" ? "hang" : undefined);
+		const env = { UT_CC_USAGE: "estimate" };
+		await run("pre-tool-use", preInput("tu_1"), env);
+		// Closed by the probe (the file deleted), then this hook's authorize timed out: one.
+		expect(await breakerState()).toMatchObject({ timeouts: [expect.any(Number)] });
+		expect((await breakerState())?.openUntil).toBeUndefined();
+		await run("pre-tool-use", preInput("tu_2"), env);
+		const before = Date.now();
+		await run("pre-tool-use", preInput("tu_3"), env);
+		expect(Number((await breakerState())?.openedAt)).toBeGreaterThanOrEqual(before);
+		expect(paths().filter((path) => path === "/v1/authorize")).toHaveLength(3);
+	}, 60_000);
 });
 
 describe("a settle or give-back that does not end cleanly is written down, under its transferId", () => {

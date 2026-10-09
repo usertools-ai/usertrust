@@ -11,8 +11,10 @@ npm, and its version is its own: the `usertrust` packages and their
 
 - **Watch mode stops asking a server that has stopped answering: a breaker.** Three
   timeouts in a row within a minute open it for a minute, host-wide, one per server URL
-  (`~/.local/state/usertrust/breaker/` under the passwd home). An answer counts only once
-  its body is read, so a server that sends headers and then stalls trips it too. While it
+  (`~/.local/state/usertrust/breaker/` under the passwd home). Only a governance route's
+  answer resets the count, never a `/v1/health` answer, so a server whose health answers while
+  its routes hang (a stuck ledger) trips it. An answer counts only once its body is read, so a
+  server that sends headers and then stalls trips it too. While it
   is open, every hook sends nothing and touches no window or cursor, and writes one
   `breaker-open` record naming the holds it leaves. The one hold it touches is an estimate
   hold PostToolUse skips: renamed `.settling`, as its call ran, so Stop gives it back as
@@ -43,17 +45,17 @@ npm, and its version is its own: the `usertrust` packages and their
   most a fifth of its budget.
 - **A remainder's gap is one record per job** of the session's job log, at Stop as at
   SessionEnd, each started at its own first message, whether or not the server records jobs.
-- **A redirect is followed only to the same origin, once, by hand.** A 307 or 308 to the URL's
-  own origin is re-sent with the same method, body and key, as before, and from its first
-  answer on the request counts as sent: no later ending reads as never sent. Any other 3xx is
-  the server's answer, read by its status: a settle answered with one is never `released`, as
-  the server may have acted on it. A redirect to another origin is never followed, so the key
-  is never sent there. Node's fetch already dropped the key on one (measured on Node 22.22.1,
-  22.23.3, 23.6.0 and 24.21.0); on older Node releases, which kept it, a server URL that
-  redirects to another origin worked before and must now be the URL the server answers at. So
-  must one behind a chain of redirects. A health route behind a 301, 302 or 303 now reads the
-  capabilities as unknown; through one of those, fetch had turned every other route's POST into
-  a GET with no body, which the server refuses.
+- **A redirect is followed only to the same origin, by hand, up to 20.** Each 307 or 308 to
+  the URL's own origin is re-sent with the same method, body and key, as before, and from the
+  first answer on the request counts as sent: no later ending reads as never sent. Any other
+  3xx is the server's answer, read by its status: a settle answered with one is never
+  `released`, as the server may have acted on it. A redirect to another origin is never
+  followed, so the key is never sent there. Node's fetch already dropped the key on one
+  (measured on Node 22.22.1, 22.23.3, 23.6.0 and 24.21.0); on older Node releases, which kept
+  it, a server URL that redirects to another origin worked before and must now be the URL the
+  server answers at. A health route behind a 301, 302 or 303 now reads the capabilities as
+  unknown; through one of those, fetch had turned every other route's POST into a GET with no
+  body, which the server refuses.
 - **`usertrust-job coverage` lists a breaker's deferral inside a job's interval as a known
   gap**, as it does a gap: the record cannot say whether the usage was posted later.
 

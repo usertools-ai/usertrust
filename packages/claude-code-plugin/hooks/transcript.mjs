@@ -2305,13 +2305,15 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
  */
 export async function postRemainder(args) {
 	// What this call selected and has neither posted nor written down, and why: the sweep's input.
-	const left = { messages: new Map(), agent: null, exit: null };
+	const left = { messages: new Map(), agent: null, exit: null, read: false };
 	try {
 		return await remainderOf(args, left);
 	} catch (err) {
 		const why = `an error ended it (${errText(err)})`;
 		left.exit ??= why;
-		if (left.messages.size === 0) left.agent ??= `${why}, before this agent's usage was read`;
+		// Before selection, the agent's usage was never read: the agent is written down whole. After
+		// it, what is left in `left` is all there is to write, which may be nothing.
+		if (!left.read) left.agent ??= `${why}, before this agent's usage was read`;
 		throw err;
 	} finally {
 		// SessionEnd's one exit sweep: every exit above passes through here.
@@ -2321,10 +2323,10 @@ export async function postRemainder(args) {
 
 /**
  * `postRemainder`'s body. It writes no deferral: each exit says only why (`left.exit`, or
- * `left.agent` when the agent's usage was never read), and the sweep writes what is left. A
- * message leaves `left` once it is posted, refused, or its group's own gap is written: until
- * then an exit, a throw included, leaves it to the sweep. An unresolved vehicle is not in
- * `left`: it was written down as `unresolved` when it became one.
+ * `left.agent` when the agent's usage was never read; `left.read` once it is selected), and the
+ * sweep writes what is left. A message leaves `left` once it is posted, refused, or its group's
+ * own gap is written: until then an exit, a throw included, leaves it to the sweep. An
+ * unresolved vehicle is not in `left`: it was written down as `unresolved` when it became one.
  */
 async function remainderOf(
 	{ sessionId, agentId, agentTypeHint, input, hook, reserveMs, lockWaitMs = 0, serverDown = false },
@@ -2352,6 +2354,7 @@ async function remainderOf(
 	const callBudget = () => Math.min(callTimeoutCap(), Math.floor((timeLeft() - reserveMs) / 3));
 	try {
 		const fresh = await selectOwn(opened, { left });
+		left.read = true;
 		await opened.save();
 		if (fresh.length === 0 && cursor.unresolved.size === 0) return summary;
 		// What the server honours decides what these calls may carry (see lib.mjs).
@@ -2522,7 +2525,6 @@ async function remainderOf(
 			if (result.outcome === "settled" || result.outcome === "claimed") accountIds(cursor, ids);
 			else if (result.outcome === "denied") denyIds(cursor, ids);
 			else if (result.outcome !== "unresolved") releaseIds(cursor, ids);
-			await opened.save();
 			if (result.outcome === "settled") summary.posted += ids.length;
 			else if (result.outcome === "denied") {
 				await reportDenied(agentType.name, agentId, result.reason, ids, model, counts, {
@@ -2543,8 +2545,10 @@ async function remainderOf(
 					messages,
 				});
 			}
-			// Posted, refused, or written down: no longer the sweep's.
+			// Posted, refused, or written down: no longer the sweep's. Before the cursor's save, so a
+			// save that fails cannot make a group the server settled read as deferred.
 			for (const id of ids) left.messages.delete(id);
+			await opened.save();
 			if (result.serverDown) {
 				summary.serverDown = true;
 				left.exit = "the server stopped answering";

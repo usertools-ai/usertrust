@@ -12,11 +12,13 @@
 // - WHAT COUNTS: a request this hook's own timer aborted is a timeout (lib.mjs passes its
 //   deadline; one under MIN_COUNTED_MS is the hook's budget running out, not the server's
 //   silence, and does not count). `timeouts[]` holds the consecutive ones of the last
-//   WINDOW_MS, and the TRIP_TIMEOUTS-th opens the breaker for OPEN_MS. ANY answer, a refusal
-//   included, clears the count: a whole answer, its body read, so headers and then a stall end
-//   in the timeout they are. It does not close a breaker already open: only the half-open probe
-//   does (below). A refused or reset connection neither counts nor clears: it fails fast, and
-//   stalls nothing.
+//   WINDOW_MS, and the TRIP_TIMEOUTS-th opens the breaker for OPEN_MS. ANY answer of a
+//   governance ROUTE, a refusal included, clears the count: a whole answer, its body read, so
+//   headers and then a stall end in the timeout they are. A `/v1/health` answer (each hook's
+//   capability probe) clears nothing: a server can answer it while its routes hang (a stuck
+//   ledger), and it would reset the count before every route timeout. An answer does not close
+//   a breaker already open: only the half-open probe does (below). A refused or reset
+//   connection neither counts nor clears: it fails fast, and stalls nothing.
 // - Every update is a read, then a whole write (a temp file renamed over the name). Two
 //   hooks counting at once can lose an update: a lost timeout delays opening, and a lost
 //   answer can let timeouts that were not in a row open it. Either way the breaker is wrong
@@ -183,7 +185,10 @@ export function noteTimeout(url, deadlineMs, { now = Date.now(), fs = REAL_FS } 
 	}
 }
 
-/** `url` answered one of this hook's requests: the timeouts so far are not consecutive. Never throws. */
+/**
+ * A governance route of `url` answered one of this hook's requests: the timeouts so far are not
+ * consecutive. Never throws. (A health answer is no call of this: lib.mjs `answered`.)
+ */
 export function noteAnswer(url, { now = Date.now(), fs = REAL_FS } = {}) {
 	try {
 		const at = locate(url, { create: false, fs });

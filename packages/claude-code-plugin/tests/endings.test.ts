@@ -1002,6 +1002,47 @@ describe("the half-open probe of a breaker past its minute", () => {
 	);
 });
 
+describe("the breaker's count while /v1/health answers (PreToolUse's authorize)", () => {
+	/** A breaker two timeouts into its count: one more opens it. */
+	async function twoTimeouts(): Promise<string> {
+		const file = join(
+			breakerDir(),
+			`${createHash("sha256").update(url).digest("hex").slice(0, 16)}.json`,
+		);
+		await mkdir(breakerDir(), { recursive: true, mode: 0o700 });
+		await writeFile(file, JSON.stringify({ timeouts: [Date.now() - 2_000, Date.now() - 1_000] }), {
+			mode: 0o600,
+		});
+		return file;
+	}
+	// Each hook's capability probe is answered first: that answer clears nothing. Only the route's
+	// ending decides: any answer clears the count, a timeout counts, and a request that got no
+	// answer without a timeout (refused, dropped) leaves it as it was.
+	it.each<[Ending, "cleared" | "opens" | "kept"]>([
+		["ok", "cleared"],
+		["other4xx", "cleared"],
+		["refusal402", "cleared"],
+		["error5xx", "cleared"],
+		["redirect", "cleared"],
+		["timeout", "opens"],
+		["refused", "kept"],
+		["dropped", "kept"],
+	])(
+		"%s: the count is %s",
+		async (ending, effect) => {
+			const file = await twoTimeouts();
+			aim("/v1/authorize", 1, ending, ["/v1/health", 1]);
+			await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+			expect(requests("/v1/health")).toHaveLength(1);
+			const state = await breakerState(file);
+			if (effect === "cleared") expect(state).toEqual({ timeouts: [] });
+			else if (effect === "kept") expect(state?.timeouts).toHaveLength(2);
+			else expect(typeof state?.openUntil).toBe("number");
+		},
+		LONG,
+	);
+});
+
 describe("SessionEnd, the last settle point: what it cannot finish is written down", () => {
 	/** SessionEnd's whole budget, by Claude Code's variable less the start-up margin. */
 	const budget = (ms: number) => ({ CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: String(ms + 300) });
@@ -1227,9 +1268,20 @@ const carried = (pick: (authorize: Seen) => boolean) =>
 
 describe("SessionEnd's one exit sweep: whatever the exit, what it selected and did not post is written down, once", () => {
 	const main = transcriptPath;
+	// Two jobs, one message in each: every record says by its start which message it is.
+	const now = Date.now();
+	const at = (offsetS: number) => new Date(now + offsetS * 1000).toISOString();
+	const T = { A: at(-40), B: at(-10), V: at(-45) };
+	const jobLine = (ts: string, op: string, job: string | null) =>
+		JSON.stringify({ sid: SESSION, ts, op, job });
+	const JOB_LOG = `${[
+		jobLine(at(-60), "session-start", null),
+		jobLine(at(-50), "start", "job-a"),
+		jobLine(at(-30), "stop", null),
+		jobLine(at(-20), "start", "job-b"),
+		jobLine(at(-5), "stop", null),
+	].join("\n")}\n`;
 	type Scenario = {
-		/** The exit, as the code names it. */
-		exit: string;
 		lines: () => string[];
 		prepare?: () => Promise<void>;
 		budgetMs?: number;
@@ -1238,193 +1290,239 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 		selected: number;
 		posted: number;
 		refused?: number;
-		recorded?: number;
-		deferred: number;
+		/** The messages each kind of record names, by its start: one record per job, so per message. */
+		recorded?: Array<keyof typeof T>;
+		deferred: Array<keyof typeof T>;
 		/** Agents written down whole, their usage never read. */
 		agents?: string[];
 		why?: string;
 		said?: string;
 	};
-	const TWO = () => [response("msg_a", SONNET), response("msg_b", HAIKU)];
-	const ONE = () => [response("msg_a", SONNET)];
+	const A = () => response("msg_a", SONNET, T.A);
+	const B = () => response("msg_b", HAIKU, T.B);
+	const V = () => response("msg_v", HAIKU, T.V);
+	const TWO = () => [A(), B()];
 	/** A Stop leaves an unresolved vehicle (haiku, under a key) for SessionEnd to retry first. */
 	const vehicleFirst = async () => {
 		capabilities = ["idempotency-key"];
-		await writeLines(main(), [response("msg_v", HAIKU)]);
+		await writeLines(main(), [V()]);
 		fixed.set("/v1/settle#1", { status: 503, json: { error: "unavailable" } });
 		await run("stop", stopInput());
 		nodeFs.rmSync(join(stateDir, "watch.jsonl"), { force: true });
 		seen = [];
 		counts = new Map();
 		fixed = new Map();
-		await writeLines(main(), [response("msg_v", HAIKU), response("msg_a", SONNET)]);
+		await writeLines(main(), [V(), A()]);
 	};
-	const scenarios: Scenario[] = [
-		{ exit: "every group posted (the control)", lines: TWO, selected: 2, posted: 2, deferred: 0 },
-		{
-			exit: "a group refused (402)",
-			lines: TWO,
-			prepare: async () => {
-				fixed.set("/v1/authorize#1", ANSWER.refusal402 as Reply);
+	const scenarios: Array<[string, Scenario]> = [
+		["every group posted (the control)", { lines: TWO, selected: 2, posted: 2, deferred: [] }],
+		[
+			"a group refused (402)",
+			{
+				lines: TWO,
+				prepare: async () => {
+					fixed.set("/v1/authorize#1", ANSWER.refusal402 as Reply);
+				},
+				selected: 2,
+				posted: 1,
+				refused: 1,
+				deferred: [],
 			},
-			selected: 2,
-			posted: 1,
-			refused: 1,
-			deferred: 0,
-		},
-		{ exit: "nothing new to post", lines: () => [], selected: 0, posted: 0, deferred: 0 },
-		{
-			exit: "selection: out of time to claim",
-			lines: TWO,
-			budgetMs: 0,
-			selected: 2,
-			posted: 0,
-			deferred: 2,
-			why: "not claimed (out of time)",
-		},
-		{
-			exit: "selection: a claim that fails",
-			lines: TWO,
-			prepare: async () => {
-				await mkdir(join(stateDir, "transcripts", "claims"), { recursive: true, mode: 0o700 });
-				await chmod(join(stateDir, "transcripts", "claims"), 0o500);
+		],
+		["nothing new to post", { lines: () => [], selected: 0, posted: 0, deferred: [] }],
+		[
+			"selection: out of time to claim",
+			{
+				lines: TWO,
+				budgetMs: 0,
+				selected: 2,
+				posted: 0,
+				deferred: ["A", "B"],
+				why: "not claimed (out of time)",
 			},
-			selected: 2,
-			posted: 0,
-			deferred: 2,
-			why: "could not be claimed (EACCES)",
-		},
-		{
-			exit: "selection: a message an earlier settle point claimed and did not post",
-			lines: TWO,
-			prepare: async () => {
-				// Stop claims both, and the server stops answering at the first group's authorize: the
-				// first group is released, the second never tried, and SessionEnd finds both claimed.
-				aim("/v1/authorize", 1, "timeout", null);
-				await run("stop", stopInput());
-				nodeFs.rmSync(join(stateDir, "watch.jsonl"), { force: true });
-				seen = [];
-				counts = new Map();
-				aimed = null;
+		],
+		[
+			"selection: a claim that fails",
+			{
+				lines: TWO,
+				prepare: async () => {
+					await mkdir(join(stateDir, "transcripts", "claims"), { recursive: true, mode: 0o700 });
+					await chmod(join(stateDir, "transcripts", "claims"), 0o500);
+				},
+				selected: 2,
+				posted: 0,
+				deferred: ["A", "B"],
+				why: "could not be claimed (EACCES)",
 			},
-			budgetMs: 0,
-			selected: 2,
-			posted: 0,
-			deferred: 2,
-			// A released group keeps its claims: both are this agent's own, and neither is posted.
-			why: "not posted (out of time)",
-		},
-		{
-			exit: "the retry loop: out of time",
-			lines: () => [response("msg_v", HAIKU), response("msg_a", SONNET)],
-			prepare: vehicleFirst,
-			fault: "__main.json|1|sleep 800",
-			selected: 1,
-			posted: 0,
-			deferred: 1,
-			why: "not posted (out of time)",
-			said: "unresolved settles: deferred to the next settle point (out of time)",
-		},
-		{
-			exit: "the retry loop: the server stops answering",
-			lines: () => [response("msg_v", HAIKU), response("msg_a", SONNET)],
-			prepare: async () => {
-				await vehicleFirst();
-				capabilities = ["idempotency-key"];
-				aim("/v1/authorize", 1, "timeout", null);
+		],
+		[
+			"selection: a message an earlier settle point claimed and did not post",
+			{
+				lines: TWO,
+				prepare: async () => {
+					// Stop claims both, and the server stops answering at the first group's authorize: the
+					// first group is released, the second never tried, and SessionEnd finds both claimed.
+					aim("/v1/authorize", 1, "timeout", null);
+					await run("stop", stopInput());
+					nodeFs.rmSync(join(stateDir, "watch.jsonl"), { force: true });
+					seen = [];
+					counts = new Map();
+					aimed = null;
+				},
+				budgetMs: 0,
+				selected: 2,
+				posted: 0,
+				// A released group keeps its claims: both are this agent's own, and neither is posted.
+				deferred: ["A", "B"],
+				why: "not posted (out of time)",
 			},
-			selected: 1,
-			posted: 0,
-			deferred: 1,
-			why: "not posted (the server stopped answering)",
-		},
-		{
-			exit: "the group loop: out of time",
-			lines: TWO,
-			fault: "__main.json|3|sleep 900",
-			selected: 2,
-			posted: 1,
-			deferred: 1,
-			why: "not posted (out of time)",
-			said: `${HAIKU}: deferred to the next settle point (out of time)`,
-		},
-		{
-			exit: "the group loop: the server stops answering",
-			lines: TWO,
-			prepare: async () => aim("/v1/authorize", 1, "timeout", null),
-			selected: 2,
-			posted: 0,
-			recorded: 1,
-			deferred: 1,
-			why: "not posted (the server stopped answering)",
-		},
-		{
-			exit: "an error after selection (the cursor's save fails)",
-			lines: TWO,
-			fault: "__main.json|1|throw",
-			selected: 2,
-			posted: 0,
-			deferred: 2,
-			why: "not posted (an error ended it (injected rename failure))",
-		},
-		{
-			exit: "the agent's lock is busy",
-			lines: TWO,
-			prepare: async () => {
-				const lock = join(stateDir, "transcripts", `${SESSION}__main.json.lock`);
-				await mkdir(lock, { recursive: true });
-				await writeFile(join(lock, "owner"), "another hook");
+		],
+		[
+			"the retry loop: out of time",
+			{
+				lines: () => [V(), A()],
+				prepare: vehicleFirst,
+				fault: "__main.json|1|sleep 800",
+				selected: 1,
+				posted: 0,
+				deferred: ["A"],
+				why: "not posted (out of time)",
+				said: "unresolved settles: deferred to the next settle point (out of time)",
 			},
-			selected: 0,
-			posted: 0,
-			deferred: 0,
-			agents: ["main"],
-			why: "another hook holds this agent's lock",
-		},
-		{
-			exit: "the agent's state is unavailable",
-			lines: TWO,
-			prepare: async () => {
-				await writeFile(join(stateDir, "transcripts", `${SESSION}__main.json`), "{ not a cursor");
+		],
+		[
+			"the retry loop: the server stops answering",
+			{
+				lines: () => [V(), A()],
+				prepare: async () => {
+					await vehicleFirst();
+					capabilities = ["idempotency-key"];
+					aim("/v1/authorize", 1, "timeout", null);
+				},
+				selected: 1,
+				posted: 0,
+				deferred: ["A"],
+				why: "not posted (the server stopped answering)",
 			},
-			selected: 0,
-			posted: 0,
-			deferred: 0,
-			agents: ["main"],
-			why: "transcript state unavailable",
-		},
-		{
-			exit: "the agent settles at the estimate (nothing to post)",
-			lines: TWO,
-			prepare: async () => {
-				await mkdir(join(stateDir, "transcripts", "estimate"), { recursive: true, mode: 0o700 });
-				await writeFile(join(stateDir, "transcripts", "estimate", `${SESSION}__main`), "");
+		],
+		[
+			"the group loop: out of time",
+			{
+				lines: TWO,
+				fault: "__main.json|3|sleep 900",
+				selected: 2,
+				posted: 1,
+				deferred: ["B"],
+				why: "not posted (out of time)",
+				said: `${HAIKU}: deferred to the next settle point (out of time)`,
 			},
-			selected: 0,
-			posted: 0,
-			deferred: 0,
-		},
-		{
-			exit: "an agent after the server stopped answering",
-			lines: ONE,
-			prepare: async () => {
-				const subagents = join(projectDir, SESSION, "subagents");
-				await mkdir(subagents, { recursive: true });
-				await writeLines(join(subagents, "agent-a1.jsonl"), [response("msg_s", HAIKU)]);
-				aim("/v1/authorize", 1, "timeout", null);
+		],
+		[
+			"the group loop: the server stops answering",
+			{
+				lines: TWO,
+				prepare: async () => aim("/v1/authorize", 1, "timeout", null),
+				selected: 2,
+				posted: 0,
+				recorded: ["A"],
+				deferred: ["B"],
+				why: "not posted (the server stopped answering)",
 			},
-			selected: 1,
-			posted: 0,
-			recorded: 1,
-			deferred: 0,
-			agents: ["a1"],
-			why: "the server stopped answering, so this agent's usage was not posted",
-		},
+		],
+		[
+			"an error after selection (the cursor's save fails)",
+			{
+				lines: TWO,
+				fault: "__main.json|1|throw",
+				selected: 2,
+				posted: 0,
+				deferred: ["A", "B"],
+				why: "not posted (an error ended it (injected rename failure))",
+			},
+		],
+		[
+			"an error after a group settled (its cursor save fails)",
+			{
+				lines: TWO,
+				fault: "__main.json|3|throw",
+				selected: 2,
+				posted: 1,
+				deferred: ["B"],
+				why: "not posted (an error ended it (injected rename failure))",
+			},
+		],
+		[
+			"an error after every group posted (the last cursor save fails)",
+			{ lines: TWO, fault: "__main.json|5|throw", selected: 2, posted: 2, deferred: [] },
+		],
+		[
+			"the agent's lock is busy",
+			{
+				lines: TWO,
+				prepare: async () => {
+					const lock = join(stateDir, "transcripts", `${SESSION}__main.json.lock`);
+					await mkdir(lock, { recursive: true });
+					await writeFile(join(lock, "owner"), "another hook");
+				},
+				selected: 0,
+				posted: 0,
+				deferred: [],
+				agents: ["main"],
+				why: "another hook holds this agent's lock",
+			},
+		],
+		[
+			"the agent's state is unavailable",
+			{
+				lines: TWO,
+				prepare: async () => {
+					await writeFile(join(stateDir, "transcripts", `${SESSION}__main.json`), "{ not a cursor");
+				},
+				selected: 0,
+				posted: 0,
+				deferred: [],
+				agents: ["main"],
+				why: "transcript state unavailable",
+			},
+		],
+		[
+			"the agent settles at the estimate (nothing to post)",
+			{
+				lines: TWO,
+				prepare: async () => {
+					await mkdir(join(stateDir, "transcripts", "estimate"), { recursive: true, mode: 0o700 });
+					await writeFile(join(stateDir, "transcripts", "estimate", `${SESSION}__main`), "");
+				},
+				selected: 0,
+				posted: 0,
+				deferred: [],
+			},
+		],
+		[
+			"an agent after the server stopped answering",
+			{
+				lines: () => [A()],
+				prepare: async () => {
+					const subagents = join(projectDir, SESSION, "subagents");
+					await mkdir(subagents, { recursive: true });
+					await writeLines(join(subagents, "agent-a1.jsonl"), [response("msg_s", HAIKU, T.B)]);
+					aim("/v1/authorize", 1, "timeout", null);
+				},
+				selected: 1,
+				posted: 0,
+				recorded: ["A"],
+				deferred: [],
+				agents: ["a1"],
+				why: "the server stopped answering, so this agent's usage was not posted",
+			},
+		],
 	];
-	it.each(scenarios.map((scenario) => [scenario.exit, scenario] as const))(
+	it.each(scenarios)(
 		"%s",
 		async (_, scenario) => {
-			await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+			await backdate();
+			await mkdir(join(stateDir, "jobs"), { recursive: true });
+			await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), JOB_LOG);
 			await writeLines(main(), scenario.lines());
 			await scenario.prepare?.();
 			const end = await runHook(
@@ -1437,15 +1535,17 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 				scenario.fault === undefined ? [] : ["--import", FAULT_AT],
 			);
 			await chmod(join(stateDir, "transcripts", "claims"), 0o700).catch(() => {});
+			// A retried vehicle's own record (haiku, its start unknown) is not the fresh messages'.
+			const vehicle = scenario.lines().some((line) => line.includes("msg_v"));
 			const remainder = (await phased("remainder")).filter(
-				(record) =>
-					record.model !== HAIKU || !scenario.lines().some((line) => line.includes("msg_v")),
+				(record) => !vehicle || record.model !== HAIKU,
 			);
 			const deferred = remainder.filter((r) => r.outcome === "deferred");
 			const ofMessages = deferred.filter((r) => r.messages !== undefined && r.agent === "main");
 			const whole = deferred.filter((r) => r.messages === undefined).map((r) => r.agent);
 			const recorded = remainder.filter((r) => r.outcome !== "deferred");
 			const sum = (rs: WatchRecord[]) => rs.reduce((n, r) => n + Number(r.messages ?? 0), 0);
+			const startedOf = (rs: WatchRecord[]) => rs.map((r) => String(r.started)).sort();
 			const settled = new Set(
 				requests("/v1/settle")
 					.filter((r) => answered(r, 200) && replyJson(r)?.settled !== false)
@@ -1454,12 +1554,18 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			const posted = carried((r) => answered(r, 200) && settled.has(replyJson(r)?.transferId));
 			const refused = carried((r) => answered(r, 402));
 			// The sweep's defining property: every message selected is posted, refused, written down
-			// by its group, or deferred by the sweep, and exactly one of these.
-			expect({ posted, refused, recorded: sum(recorded), deferred: sum(ofMessages) }).toEqual({
+			// by its group, or deferred by the sweep, exactly one of these; and each record names, by
+			// its start, the very message it is about.
+			expect({
+				posted,
+				refused,
+				recorded: startedOf(recorded),
+				deferred: startedOf(ofMessages),
+			}).toEqual({
 				posted: scenario.posted,
 				refused: scenario.refused ?? 0,
-				recorded: scenario.recorded ?? 0,
-				deferred: scenario.deferred,
+				recorded: (scenario.recorded ?? []).map((m) => T[m]).sort(),
+				deferred: scenario.deferred.map((m) => T[m]).sort(),
 			});
 			expect(posted + refused + sum(recorded) + sum(ofMessages)).toBe(scenario.selected);
 			expect(whole.sort()).toEqual(scenario.agents ?? []);
@@ -1584,7 +1690,7 @@ describe("one writer for a remainder's records: each job's record starts at that
 	);
 });
 
-describe("a redirect the plugin follows by hand: one, to the same origin, a 307 or a 308", () => {
+describe("a redirect the plugin follows by hand: to the same origin, a 307 or a 308, up to twenty", () => {
 	/** A transcript hold's settle, unkeyed: `claimed` when it may have posted, `released` when not. */
 	const settleTranscriptHold = async () => {
 		capabilities = ["release"];
@@ -1619,10 +1725,38 @@ describe("a redirect the plugin follows by hand: one, to the same origin, a 307 
 			expect(await holdFiles()).toEqual([]);
 		},
 	);
-	it("a same-origin 307 answered by a second 307: the second is not followed, and is the answer: claimed", async () => {
+	it("a chain of two same-origin redirects: both followed, each with the same request; settled", async () => {
 		fixed.set("/v1/settle#1", to("/v1/settle"));
-		fixed.set("/v1/settle#2", to("/v1/settle"));
+		fixed.set("/v1/settle#2", to(`${url}/v1/settle`, 308));
 		await settleTranscriptHold();
+		const settles = requests("/v1/settle");
+		expect(settles).toHaveLength(3);
+		for (const hop of settles) {
+			expect(hop).toMatchObject({ method: "POST", body: settles[0]?.body, auth: "Bearer k" });
+		}
+		expect(await records()).toEqual([]);
+	});
+	it("twenty-one same-origin redirects: twenty are followed, and the twenty-first is the answer: claimed", async () => {
+		for (let n = 1; n <= 21; n += 1) fixed.set(`/v1/settle#${n}`, to("/v1/settle"));
+		await settleTranscriptHold();
+		expect(requests("/v1/settle")).toHaveLength(21);
+		expect(await phased("settle")).toMatchObject([{ outcome: "claimed", transferId: "tx_1" }]);
+	});
+	it("a same-origin redirect, then one to another origin: followed to the other origin's, and no further: claimed", async () => {
+		let reached = 0;
+		const other = createServer((req, res) => {
+			reached += 1;
+			req.resume();
+			res.writeHead(200, { "content-type": "application/json", connection: "close" });
+			res.end(JSON.stringify({ settled: true }));
+		});
+		servers.push(other);
+		await new Promise<void>((resolve) => other.listen(0, "127.0.0.1", () => resolve()));
+		const port = (other.address() as { port: number }).port;
+		fixed.set("/v1/settle#1", to("/v1/settle"));
+		fixed.set("/v1/settle#2", to(`http://127.0.0.1:${port}/v1/settle`));
+		await settleTranscriptHold();
+		expect(reached).toBe(0);
 		expect(requests("/v1/settle")).toHaveLength(2);
 		expect(await phased("settle")).toMatchObject([{ outcome: "claimed", transferId: "tx_1" }]);
 	});

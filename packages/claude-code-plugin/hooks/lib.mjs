@@ -99,32 +99,41 @@ const NO_REDIRECT = { redirect: "manual" };
 /** The redirects `fetchServer` follows: the two that keep the method and the body. */
 const FOLLOWED = new Set([307, 308]);
 
+/** How many redirects `fetchServer` follows at most: fetch's own limit, which 2.0.0 had. */
+const MAX_FOLLOWED = 20;
+
 /**
  * A request to the server, as `serverRequest` and the capability probe make it. It follows by
- * hand ONE 307 or 308 whose `Location` has the origin (scheme, host and port) of the URL asked,
- * re-sending the same method, body and headers, `Authorization` included: the fetch of 2.0.0
- * followed such a redirect, so a server whose routes redirect within their origin kept working.
- * Anything else is returned as the answer it is: a 301, 302 or 303, a redirect to another
- * origin, a second redirect, a `Location` that does not parse.
+ * hand up to MAX_FOLLOWED 307s or 308s, each whose `Location` has the origin (scheme, host and
+ * port) of the URL the plugin asked, re-sending the same method, body and headers,
+ * `Authorization` included: the fetch of 2.0.0 followed such redirects, so a server whose routes
+ * redirect within their origin keeps working. Anything else is returned as the answer it is: a
+ * 301, 302 or 303, a redirect to another origin, the redirect past the limit, a `Location` that
+ * does not parse.
  *
  * `onSent` runs once the first response is in hand. From then on the request WAS sent, whatever
- * ends the follow: a timeout or a refused connection on the second hop may follow a request the
+ * ends the follow: a timeout or a refused connection on a later hop may follow a request the
  * server already acted on, so it can never read as never sent.
  */
 async function fetchServer(url, init, onSent = () => {}) {
-	const first = await fetch(url, { ...init, ...NO_REDIRECT });
+	const origin = new URL(url).origin;
+	let at = url;
+	let response = await fetch(at, { ...init, ...NO_REDIRECT });
 	onSent();
-	if (!FOLLOWED.has(first.status)) return first;
-	const location = first.headers.get("location");
-	let next = null;
-	try {
-		next = location === null ? null : new URL(location, url);
-	} catch {
-		next = null;
+	for (let followed = 0; followed < MAX_FOLLOWED && FOLLOWED.has(response.status); followed += 1) {
+		const location = response.headers.get("location");
+		let next = null;
+		try {
+			next = location === null ? null : new URL(location, at);
+		} catch {
+			next = null;
+		}
+		if (next === null || next.origin !== origin) return response;
+		await response.arrayBuffer();
+		at = next.href;
+		response = await fetch(at, { ...init, ...NO_REDIRECT });
 	}
-	if (next === null || next.origin !== new URL(url).origin) return first;
-	await first.arrayBuffer();
-	return fetch(next.href, { ...init, ...NO_REDIRECT });
+	return response;
 }
 
 /**
@@ -1044,7 +1053,14 @@ function breakerUrl() {
 	return mode === "watch" && refused === null && typeof url === "string" ? url : null;
 }
 
-/** The server answered a request: a timeout before it was not one of a row. */
+/**
+ * A governance route answered a request (`serverRequest`): a timeout before it was not one of a
+ * row. Only a route's answer clears the count. A health answer neither counts nor clears it: a
+ * server can answer `/v1/health` while its routes hang (a stuck ledger), and a health answer
+ * from each hook's capability probe would reset the count before every route timeout, so the
+ * breaker would never open in the very outage it is for. The half-open probe's answer closes an
+ * open breaker (`consultBreaker`), a different question: whether the server answers at all.
+ */
 function answered() {
 	const url = breakerUrl();
 	if (url !== null) noteAnswer(url);
@@ -1291,9 +1307,9 @@ export function serverCapabilities() {
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
 			const response = await fetchServer(routeUrl("/v1/health"), { signal: controller.signal });
-			// Answered once its body is read: headers and then a stall end in the timeout.
+			// Read whole: headers and then a stall end in the timeout, which counts. Its answer clears
+			// nothing (`answered`): only a route's answer does.
 			const text = await response.text();
-			answered();
 			if (!response.ok) return unknown(`health returned ${response.status}`);
 			const json = JSON.parse(text);
 			const list = Array.isArray(json?.capabilities) ? json.capabilities : [];

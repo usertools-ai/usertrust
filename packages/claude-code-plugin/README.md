@@ -689,9 +689,12 @@ the file back, so deleting it is safe — unlike the rest of the state dir.
 that hangs, its connection open and no answer coming, would cost every hook of every
 session its full timeouts: a 2 s capability probe and a 5 s request, about 7 s per
 PreToolUse, and up to a hook's 10 s budget. So in
-watch mode, three timeouts in a row within a minute open a breaker for a minute. Any
-answer, a refusal included, resets the count, and a refused connection counts for
-nothing: both fail fast. An answer is the whole response, its body read: a server that
+watch mode, three timeouts in a row within a minute open a breaker for a minute. A
+governance route's answer, a refusal included, resets the count, and a refused connection
+counts for nothing: both fail fast. A `/v1/health` answer resets nothing: a server can answer
+it while its routes hang (a stuck ledger), and the capability probe every hook makes first
+would otherwise reset the count before every route timeout, so the breaker would never open.
+A health probe that times out does count. An answer is the whole response, its body read: a server that
 sends its headers and then stalls is timing out. An answer does not close a breaker that is
 already open: only the probe after its minute does (below). Two sessions counting at once
 can lose an update, so the breaker can open a little early or late, by one minute at most,
@@ -742,13 +745,13 @@ PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"pha
   settle that ends this way is `claimed`, or `unresolved` under a key, which also say whether
   it is retried.
 
-**Redirects.** The plugin follows one redirect, by hand: a 307 or a 308 whose `Location` has
-the origin (scheme, host and port) of the URL it asked, re-sent with the same method, body and
-key. Once the first answer is in, the request was sent: whatever ends the second hop, a timeout
-or a refused connection, the request is never read as unsent, so a settle is never `released`.
-Any other redirect is the server's answer, read as any other that is not a 200, since the server
-may have acted on the request before redirecting it: a 301, 302 or 303, a second redirect, or a
-redirect to another origin. A settle answered with one is never `released`: a transcript hold's
+**Redirects.** The plugin follows redirects by hand, up to 20 (fetch's own limit, which earlier
+releases had): each a 307 or a 308 whose `Location` has the origin (scheme, host and port) of
+the URL the plugin asked, re-sent with the same method, body and key. Once the first answer is
+in, the request was sent: whatever ends a later hop, a timeout or a refused connection, the
+request is never read as unsent, so a settle is never `released`. Any other redirect is the
+server's answer, read as any other that is not a 200, since the server may have acted on the
+request before redirecting it: a 301, 302 or 303, a redirect to another origin, or a 21st. A settle answered with one is never `released`: a transcript hold's
 or a remainder's is `claimed` (or `unresolved` under a key), and an estimate hold's is `failed`,
 as a 5xx is, its hold kept settle-attempted and never settled again.
 
@@ -757,9 +760,9 @@ fetch, which followed redirects for earlier releases of the plugin, drops the `A
 header when it follows one to another origin: measured on Node 22.22.1, 22.23.3, 23.6.0 and
 24.21.0, where the server refused such a call. Older Node releases kept the header, so on those
 a server URL that redirects to another origin worked before and does not now: set the server
-URL to the one the server answers at. So too for a chain of redirects, and for a health route
-behind a 301, 302 or 303, whose capabilities now read as unknown. (fetch turned the POST of any
-other route into a GET with no body through one of those, which the server refuses.)
+URL to the one the server answers at. So too for a health route behind a 301, 302 or 303,
+whose capabilities now read as unknown. (fetch turned the POST of any other route into a GET
+with no body through one of those, which the server refuses.)
 
 Each names its hold's `transferId`, so a deferral and how it ended can be joined. A hold
 that carried no usage, given back to a server that no longer holds it (a 404 `unknown
