@@ -35,7 +35,10 @@ All contributions are made under the [Apache License 2.0](./LICENSE). By submitt
 
 Don't commit agent config. A pull request that adds, edits or removes Claude Code's `.claude/`,
 an `.mcp.json`, or `.grok/` or `.codex/`, at any depth, fails the `agent-config` check: it would
-run on the machine of anyone who opens the checkout in a coding agent.
+run on the machine of anyone who opens the checkout in a coding agent. The same check holds the
+name of every file you add to letters, digits, `.`, `_`, `-`, `[` and `]`, and refuses one that
+differs from another file or directory only in case: a case-insensitive filesystem opens both as
+one.
 
 ## Code of conduct
 

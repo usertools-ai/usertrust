@@ -469,9 +469,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case-insensitive filesystem opens them.
   - A pull request or push that adds, edits or removes agent config the repository has not
     allowlisted fails. The allowlist, `.github/agent-config-allowlist.json`, is empty here.
-  - An exact entry may pin its file's `sha256`. The pin holds for every spelling a
-    case-insensitive filesystem opens as that file, and a change may not add such a spelling
-    beside another file or a pinned one.
+  - An exact entry may pin its file's `sha256`, for that path as it is written; a file in the
+    tree under another spelling of a pinned path fails.
+  - Every path a change adds, anywhere in the repository, must be one name to every filesystem:
+    each segment only `A-Z a-z 0-9 . _ - [ ]`, unless the allowlist's `nonportable` list names
+    it by its exact bytes, and no name it makes, a file's or a directory's, may fold to another
+    name in the change's tree.
+  - Agent config must be checked out as it is stored: no `working-tree-encoding`, `filter` or
+    `ident` attribute may apply to it.
   - A pull request is checked as the merge commit GitHub tests: what lands, not the branch's head.
   - Nothing the change controls runs before the guard: only the checkout, with no setup step or
     cache, and the launcher is read from the graded commit's object.

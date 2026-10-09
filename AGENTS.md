@@ -1610,10 +1610,17 @@ runs, or obeys, when it opens a checkout: Claude Code's `.claude/`, an `.mcp.jso
 and Codex CLIs' `.grok/` and `.codex/`, at any depth, matched as a case-insensitive filesystem
 opens them.
 - No change may add, edit or remove agent config that `.github/agent-config-allowlist.json` does
-  not name. Here the allowlist is empty. An exact entry may pin its file's `sha256`. The pin holds
-  for every spelling a case-insensitive filesystem opens as that file (macOS opens `.mcp.jſon` as
-  `.mcp.json`, and HFS+ ignores a zero-width joiner inside it), and a change may not add such a
-  spelling beside another path in its tree, or a pinned one.
+  not name. Here the allowlist is empty. An exact entry may pin its file's `sha256`, for that path
+  as it is written; a file in the tree under another spelling of a pinned path fails.
+- Every path a change adds, anywhere in the repository, must be one name to every filesystem. Each
+  segment holds only `A-Z a-z 0-9 . _ - [ ]`, unless the allowlist's `nonportable` list names the
+  path by its exact bytes. And no name it makes, a file's or a directory's, may fold to another
+  name in the change's tree (macOS opens `Readme.md` as `README.md`, and `.mcp.jſon` as
+  `.mcp.json`). The set is closed because the aliases are not: every Unicode way to spell one name
+  twice, and Windows' streams (`:`) and short names (`~`), need a character outside it.
+- Agent config is checked out as it is stored: no `working-tree-encoding`, `filter` or `ident`
+  attribute may apply to it, as git matches its patterns with case or without, and an attributes
+  file is spelled `.gitattributes`.
 - A committed Claude Code settings file may hold only `$schema`, and `permissions.deny` /
   `permissions.ask`. Any other key fails, including one this guard has never heard of.
 - The guard (`scripts/agent-config-guard.mjs`) and the allowlist are read from the BASE

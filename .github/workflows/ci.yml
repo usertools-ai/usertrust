@@ -20,10 +20,11 @@ jobs:
   agent-config:
     # Committed agent config (`.claude/`, `.mcp.json`, `.grok/`, `.codex/`, at any depth)
     # runs on every machine that opens a checkout of this repo in an agent. No change may
-    # add, edit or remove any that `.github/agent-config-allowlist.json` does not name, and
-    # a committed Claude Code settings file may hold only permitted keys
-    # (scripts/agent-config-guard.mjs). The guard and its allowlist are read from the BASE
-    # (.github/agent-config.sh), so a change is never graded by its own rules.
+    # add, edit or remove any that `.github/agent-config-allowlist.json` does not name, a
+    # committed Claude Code settings file may hold only permitted keys, and every path a
+    # change adds must be one name to every filesystem (scripts/agent-config-guard.mjs). The
+    # guard and its allowlist are read from the BASE (.github/agent-config.sh), so a change is
+    # never graded by its own rules.
     # - The guard runs FIRST, and nothing the change controls reaches it but this workflow and
     #   its launcher, as with every workflow (`.github/`, which CODEOWNERS names an owner for):
     #   no other code, no file, no configuration, no cache. Only the checkout runs before it.

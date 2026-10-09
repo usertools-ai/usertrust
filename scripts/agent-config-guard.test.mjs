@@ -41,10 +41,16 @@ const sha256 = (text) => createHash("sha256").update(text).digest("hex");
  */
 function fixture() {
 	const root = mkdtempSync(join(scratch, "repo-"));
-	const git = (args, input) =>
-		execFileSync("git", args, { cwd: root, env: ENV, input, encoding: "utf-8" }).trim();
+	const git = (args, input, env = ENV) =>
+		execFileSync("git", args, { cwd: root, env, input, encoding: "utf-8" }).trim();
 	git(["init", "-q", "-b", "master"]);
 	const snapshots = new Map();
+	const blobs = new Map();
+	/** The blob holding `content`, written once. */
+	const object = (content) => {
+		if (!blobs.has(content)) blobs.set(content, git(["hash-object", "-w", "--stdin"], content));
+		return blobs.get(content);
+	};
 	let n = 0;
 	return {
 		root,
@@ -54,29 +60,17 @@ function fixture() {
 				if (value === null) files.delete(path);
 				else files.set(path, value);
 			}
-			const index = join(root, ".git", `fixture-index-${n++}`);
-			const withIndex = (args, input) =>
-				execFileSync("git", args, {
-					cwd: root,
-					env: { ...ENV, GIT_INDEX_FILE: index },
-					input,
-					encoding: "utf-8",
-				}).trim();
+			let entries = "";
 			for (const [path, value] of files) {
-				let mode = "100644";
-				let oid;
-				if (typeof value === "string") {
-					oid = withIndex(["hash-object", "-w", "--stdin"], value);
-				} else if (value.link !== undefined) {
-					mode = "120000";
-					oid = withIndex(["hash-object", "-w", "--stdin"], value.link);
-				} else {
-					mode = "160000";
-					oid = value.submodule;
-				}
-				withIndex(["update-index", "--add", "--cacheinfo", `${mode},${oid},${path}`]);
+				let entry;
+				if (typeof value === "string") entry = `100644 ${object(value)}`;
+				else if (value.link !== undefined) entry = `120000 ${object(value.link)}`;
+				else entry = `160000 ${value.submodule}`;
+				entries += `${entry}\t${path}\0`;
 			}
-			const tree = withIndex(["write-tree"]);
+			const env = { ...ENV, GIT_INDEX_FILE: join(root, ".git", `fixture-index-${n++}`) };
+			git(["update-index", "-z", "--add", "--index-info"], entries, env);
+			const tree = git(["write-tree"], undefined, env);
 			const sha = git(
 				["commit-tree", tree, ...(parent === null ? [] : ["-p", parent]), "-m", `fixture ${n}`],
 				"",
@@ -100,8 +94,9 @@ function fixture() {
 	};
 }
 
-/** An allowlist file's text: `entries` are `{ path, why, sha256? }`. */
-const allowlist = (entries = []) => JSON.stringify({ allow: entries });
+/** An allowlist file's text: `entries` are `{ path, why, sha256? }`, `nonportable` `{ path, why }`. */
+const allowlist = (entries = [], nonportable = undefined) =>
+	JSON.stringify(nonportable === undefined ? { allow: entries } : { allow: entries, nonportable });
 
 /** The guard, its launcher and an allowlist, as this repository has them. */
 const guardFiles = (entries = []) => ({
@@ -140,13 +135,26 @@ function launch(repo, base, head, event = "pull_request") {
 		: launcher(repo, event, base, head);
 }
 
-/** A repository whose base holds `allow` and `files`, and a head with `changes` on top. */
-function change(changes, { allow = [], files = {} } = {}) {
+/** A repository whose base holds `allow`, `nonportable` and `files`, and a head with `changes`. */
+function change(changes, { allow = [], nonportable = undefined, files = {} } = {}) {
 	const repo = fixture();
-	const base = repo.commit({ "README.md": "hello\n", [ALLOWLIST]: allowlist(allow), ...files });
+	const base = repo.commit({
+		"README.md": "hello\n",
+		[ALLOWLIST]: allowlist(allow, nonportable),
+		...files,
+	});
 	const head = repo.commit(changes, base);
 	return { repo, base, head, run: () => guard(repo, { rules: base, base, head }) };
 }
+
+/** Text as the guard's log shows it: JSON, with each code point outside printable ASCII escaped. */
+const shown = (text) =>
+	JSON.stringify(text).replace(/[^ -~]/gu, (c) =>
+		c
+			.split("")
+			.map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`)
+			.join(""),
+	);
 
 /** Assert a run failed (exit 1), with a failure line naming `path` and holding `reason`. */
 function fails({ status, out }, path, reason) {
@@ -155,12 +163,11 @@ function fails({ status, out }, path, reason) {
 		.split("\n")
 		.filter(
 			(line) =>
-				line.startsWith("agent-config: FAILED (rule ") &&
-				line.includes(`: ${JSON.stringify(path)} `),
+				line.startsWith("agent-config: FAILED (rule ") && line.includes(`: ${shown(path)} `),
 		);
 	assert.ok(
 		lines.some((line) => line.includes(` ${reason}`)),
-		`expected ${JSON.stringify(path)} ${reason}, in:\n${out}`,
+		`expected ${shown(path)} ${reason}, in:\n${out}`,
 	);
 }
 
@@ -171,6 +178,14 @@ function passes({ status, out }) {
 }
 
 const UNNAMED = "is agent config, and the allowlist does not name it";
+/** Rule 3's reason for an added name holding `codePoints` outside the portable set. */
+const outside = (...codePoints) =>
+	`holds ${codePoints.join(", ")}, outside the portable set (A-Z a-z 0-9 . _ - [ ]), and the allowlist's "nonportable" list does not name it`;
+/** Rule 3's reason for an added name that folds to `other`. */
+const another = (other) => `folds to ${shown(other)}, another name in the tree`;
+/** Rule 3's reason for an added path whose directory `name` folds to `other`. */
+const within = (name, other) =>
+	`holds ${shown(name)}, which folds to ${shown(other)}, another name in the tree`;
 
 describe("rule 1: agent config the allowlist does not name fails, in every status", () => {
 	test("an added .claude/ file fails", () => {
@@ -368,70 +383,274 @@ describe("an allowlist entry may pin an exact file's sha256", () => {
 	});
 });
 
-describe("a spelling a case-insensitive filesystem opens as another file is held to that file's rules", () => {
+describe("a pin holds for its path as written, and no file may stand for it under another spelling", () => {
 	// U+017F, LATIN SMALL LETTER LONG S, folds to `s`: macOS's filesystem opens `.mcp.jſon`
 	// as `.mcp.json`, so writing one writes the other.
-	const ALIAS = ".grok/plugins/x/.mcp.jſon";
+	const ALIAS = ".grok/plugins/x/.mcp.j\u017Fon";
 	const PINNED = ".grok/plugins/x/.mcp.json";
 	/** A glob that names both spellings, and a pin on one of them. */
 	const rules = (content) => [
 		{ path: ".grok/plugins/**", why: "test" },
 		{ path: PINNED, why: "test", sha256: sha256(content) },
 	];
+	const standsFor = (pin) =>
+		`folds to the pinned path ${shown(pin)}: a case-insensitive filesystem opens both as one file`;
 
-	test("an added spelling of a pinned file is held to its pin, and refused beside it", () => {
+	test("a spelling of a pinned file added beside it fails, by its name and as the pinned file", () => {
 		const { run } = change(
 			{ [ALIAS]: "replaced" },
 			{ allow: rules("pinned"), files: { [PINNED]: "pinned" } },
 		);
 		const result = run();
-		fails(result, ALIAS, "is pinned by the allowlist, and the change leaves other content");
-		fails(result, ALIAS, `folds to ${JSON.stringify(PINNED)}, another path in the tree`);
-		fails(result, ALIAS, `folds to the pinned path ${JSON.stringify(PINNED)}`);
+		fails(result, ALIAS, outside("U+017F"));
+		fails(result, ALIAS, another(PINNED));
+		fails(result, ALIAS, standsFor(PINNED));
 	});
 
-	test("a spelling of a pinned file already in the tree is held to that pin when the change edits it", () => {
-		// Only the other spelling is in the tree, so the change adds nothing: the pin alone refuses it.
+	test("a spelling of an absent pinned file fails, with the pinned content, named by its exact bytes", () => {
+		const result = change(
+			{ [ALIAS]: "pinned" },
+			{ allow: rules("pinned"), nonportable: [{ path: ALIAS, why: "test" }] },
+		).run();
+		fails(result, ALIAS, standsFor(PINNED));
+		assert.doesNotMatch(
+			result.out,
+			/outside the portable set|another name in the tree/u,
+			result.out,
+		);
+	});
+
+	test("a spelling of a pinned file already in the tree fails, whatever the change touches", () => {
+		// It came in before the pin did: it fails every change until one removes it.
 		const { run } = change(
-			{ [ALIAS]: "replaced" },
+			{ "README.md": "edited" },
 			{ allow: rules("pinned"), files: { [ALIAS]: "pinned" } },
 		);
-		fails(run(), ALIAS, "is pinned by the allowlist, and the change leaves other content");
+		fails(run(), ALIAS, standsFor(PINNED));
 	});
 
-	test("a change may not add a spelling that folds to another path in its tree, or to a pinned path", () => {
-		// Unpinned, under a glob: only the collision refuses it.
-		const hooks = change(
-			{ ".claude/hooks/Run.sh": "two" },
+	test("an ASCII spelling of an absent pinned file fails too", () => {
+		const { run } = change(
+			{ ".Grok/plugins/x/.mcp.json": "replaced" },
+			{ allow: [{ path: "**", why: "test" }, ...rules("pinned")] },
+		);
+		fails(run(), ".Grok/plugins/x/.mcp.json", standsFor(PINNED));
+	});
+
+	test("control: the pinned file at its pinned content passes, and so does removing its other spelling", () => {
+		passes(change({ [PINNED]: "pinned" }, { allow: rules("pinned") }).run());
+		passes(
+			change({ [ALIAS]: null }, { allow: rules("pinned"), files: { [ALIAS]: "pinned" } }).run(),
+		);
+	});
+});
+
+describe("rule 3: every path a change adds is one name to every filesystem, anywhere in the repository", () => {
+	test("an added file that folds to another file by ASCII case fails, agent config or not", () => {
+		const { run } = change(
+			{ "docs/guide.md": "two", ".claude/hooks/Run.sh": "two" },
 			{
 				allow: [{ path: ".claude/hooks/**", why: "test" }],
-				files: { ".claude/hooks/run.sh": "one" },
+				files: { "docs/Guide.md": "one", ".claude/hooks/run.sh": "one" },
 			},
 		);
-		fails(
-			hooks.run(),
-			".claude/hooks/Run.sh",
-			'folds to ".claude/hooks/run.sh", another path in the tree',
-		);
-		// The pinned content exactly, the pinned spelling absent: the pin holds, and the spelling
-		// is refused all the same.
-		const result = change({ [ALIAS]: "pinned" }, { allow: rules("pinned") }).run();
-		fails(result, ALIAS, `folds to the pinned path ${JSON.stringify(PINNED)}`);
-		assert.doesNotMatch(result.out, /leaves other content/u, result.out);
+		const result = run();
+		fails(result, "docs/guide.md", another("docs/Guide.md"));
+		fails(result, ".claude/hooks/Run.sh", another(".claude/hooks/run.sh"));
 	});
 
-	test("control: a case-only rename passes, and so do spellings that fold apart", () => {
+	test("an added file that folds to a directory fails, and so does a directory that folds to a file or a directory", () => {
+		// A case-insensitive checkout holds one of the two: when the file wins, the directory's
+		// files are absent, a pinned MCP server list among them, and its pin cannot object.
+		const MCP = "apps/session-bus/plugin/.mcp.json";
+		const overDir = change(
+			{ "apps/Session-Bus": "x" },
+			{ allow: [{ path: MCP, why: "test", sha256: sha256("{}") }], files: { [MCP]: "{}" } },
+		);
+		fails(overDir.run(), "apps/Session-Bus", another("apps/session-bus"));
+		const overFile = change({ "notes/todo/x.md": "x" }, { files: { "notes/Todo": "x" } });
+		fails(overFile.run(), "notes/todo/x.md", within("notes/todo", "notes/Todo"));
+		const dirOverDir = change({ "src/lib/b.ts": "x" }, { files: { "src/Lib/a.ts": "x" } });
+		fails(dirOverDir.run(), "src/lib/b.ts", within("src/lib", "src/Lib"));
+	});
+
+	test("an added name outside the portable set fails, unless the allowlist names it by its exact bytes: a long s over a directory, a fullwidth letter", () => {
+		const { run } = change(
+			{ ".grok/plugins/session-bu\u017F": "x", "docs/\uFF52eadme.md": "x" },
+			{
+				allow: [{ path: ".grok/plugins/**", why: "test" }],
+				files: { ".grok/plugins/session-bus/.mcp.json": "{}" },
+			},
+		);
+		const result = run();
+		fails(result, ".grok/plugins/session-bu\u017F", outside("U+017F"));
+		fails(result, "docs/\uFF52eadme.md", outside("U+FF52"));
+	});
+
+	test("a name the allowlist names by its exact bytes fails all the same when it folds to another: by case, by NFKC, or by a code point HFS+ ignores", () => {
+		const added = [".grok/plugins/session-bu\u017F", "docs/\uFF52eadme.md", "docs/gu\u200Cide.md"];
+		const { run } = change(Object.fromEntries(added.map((path) => [path, "x"])), {
+			allow: [{ path: ".grok/plugins/**", why: "test" }],
+			nonportable: added.map((path) => ({ path, why: "test" })),
+			files: {
+				".grok/plugins/session-bus/.mcp.json": "{}",
+				"docs/readme.md": "x",
+				"docs/guide.md": "x",
+			},
+		});
+		const result = run();
+		fails(result, added[0], another(".grok/plugins/session-bus"));
+		fails(result, added[1], another("docs/readme.md"));
+		fails(result, added[2], another("docs/guide.md"));
+		assert.doesNotMatch(result.out, /outside the portable set/u, result.out);
+	});
+
+	test("a name the allowlist names by its exact bytes, folding to no other, passes; the same name in other bytes does not", () => {
+		const nonportable = [{ path: "docs/caf\u00E9.md", why: "test" }];
+		passes(change({ "docs/caf\u00E9.md": "x" }, { nonportable }).run());
+		// Decomposed (NFD), it is the same name in other bytes, which the entry does not name.
+		fails(
+			change({ "docs/cafe\u0301.md": "x" }, { nonportable }).run(),
+			"docs/cafe\u0301.md",
+			outside("U+0301"),
+		);
+	});
+
+	test("control: an added portable name that folds to no other passes, and so does a case-only rename, of a file or a directory", () => {
+		passes(change({ "site/app/r/[id]/page-2_v1.0.tsx": "x" }).run());
 		passes(
 			change(
 				{
 					".claude/hooks/Run.sh": null,
 					".claude/hooks/run.sh": "one",
-					".claude/hooks/walk.sh": "w",
+					"src/Lib/a.ts": null,
+					"src/lib/a.ts": "a",
 				},
 				{
 					allow: [{ path: ".claude/hooks/**", why: "test" }],
-					files: { ".claude/hooks/Run.sh": "one" },
+					files: { ".claude/hooks/Run.sh": "one", "src/Lib/a.ts": "a" },
 				},
+			).run(),
+		);
+	});
+
+	test("a Windows short name fails: ~ is outside the portable set, so CLAUDE~1/settings.json cannot stand for .claude/settings.json", () => {
+		const { run } = change({ "CLAUDE~1/settings.json": "{}" });
+		fails(run(), "CLAUDE~1/settings.json", outside("U+007E"));
+	});
+
+	test("two added names that fold alike fail, each against the other: what is checked is the change's own tree", () => {
+		const result = change({
+			"docs/A.md": "1",
+			"docs/a.md": "2",
+			"x/One/a": "1",
+			"x/one/b": "2",
+		}).run();
+		fails(result, "docs/A.md", another("docs/a.md"));
+		fails(result, "docs/a.md", another("docs/A.md"));
+		fails(result, "x/One/a", within("x/One", "x/one"));
+		fails(result, "x/one/b", within("x/one", "x/One"));
+	});
+
+	test("an alternate data stream, a backslash, a space or a control character in a name fails", () => {
+		const result = change(
+			{
+				".claude/settings.json:x": "{}",
+				"docs\\x.md": "x",
+				"docs/a b.md": "x",
+				"docs/a\tb.md": "x",
+			},
+			{ allow: [{ path: ".claude/**", why: "test" }] },
+		).run();
+		fails(result, ".claude/settings.json:x", outside("U+003A"));
+		fails(result, "docs\\x.md", outside("U+005C"));
+		fails(result, "docs/a b.md", outside("U+0020"));
+		fails(result, "docs/a\tb.md", outside("U+0009"));
+	});
+
+	test("control: every path this repository holds passes when a change adds it", () => {
+		const paths = execFileSync(
+			"git",
+			["ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD"],
+			{
+				cwd: import.meta.dirname,
+				env: ENV,
+				encoding: "utf-8",
+			},
+		)
+			.split("\0")
+			.filter((path) => path !== "");
+		assert.ok(paths.length > 100, `${paths.length} paths: not this repository's tree`);
+		const repo = fixture();
+		const base = repo.commit({ [ALLOWLIST]: allowlist([{ path: "**", why: "test" }]) });
+		const head = repo.commit(Object.fromEntries(paths.map((path) => [path, "{}"])), base);
+		const result = guard(repo, { rules: base, base, head });
+		passes(result);
+		assert.match(result.out, new RegExp(`OK \\(${paths.length} paths changed`, "u"), result.out);
+	});
+});
+
+describe("agent config is checked out as it is stored: no attribute may rewrite it", () => {
+	const ALLOW = [{ path: "**", why: "test" }];
+	const FILES = { ".claude/settings.json": "{}", ".mcp.json": "{}", ".claude/hooks/run.sh": "x" };
+	const rewrites = (attribute, value) =>
+		`is agent config that checkout rewrites (${attribute} ${shown(value)})`;
+
+	test("working-tree-encoding, a filter, or ident, set by a .gitattributes the change adds, fails", () => {
+		const { run } = change(
+			{
+				".gitattributes":
+					".claude/settings.json working-tree-encoding=UTF-16\n.mcp.json filter=lfs\n.claude/hooks/* ident\n",
+			},
+			{ allow: ALLOW, files: FILES },
+		);
+		const result = run();
+		fails(result, ".claude/settings.json", rewrites("working-tree-encoding", "UTF-16"));
+		fails(result, ".mcp.json", rewrites("filter", "lfs"));
+		fails(result, ".claude/hooks/run.sh", rewrites("ident", "set"));
+	});
+
+	test("a pattern that matches only with case, or only without it, counts: an agent may open either kind of checkout", () => {
+		const { run } = change(
+			{
+				".gitattributes":
+					"* filter=x\n.CLAUDE/** -filter\n.CLAUDE/settings.json working-tree-encoding=UTF-16\n",
+			},
+			{ allow: ALLOW, files: FILES },
+		);
+		const result = run();
+		// With case, `.CLAUDE/**` misses, so `* filter=x` holds; without it, the encoding does.
+		fails(result, ".claude/settings.json", rewrites("filter", "x"));
+		fails(result, ".claude/settings.json", rewrites("working-tree-encoding", "UTF-16"));
+	});
+
+	test("a .gitattributes in a directory counts, and so does a macro", () => {
+		const { run } = change(
+			{
+				".gitattributes": "[attr]evil filter=x\n",
+				".claude/hooks/.gitattributes": "run.sh evil\n",
+			},
+			{ allow: ALLOW, files: FILES },
+		);
+		fails(run(), ".claude/hooks/run.sh", rewrites("filter", "x"));
+	});
+
+	test("an attributes file spelled otherwise fails: a case-insensitive filesystem opens it as .gitattributes", () => {
+		const { run } = change(
+			{ "pkg/.GitAttributes": "* filter=x\n" },
+			{ allow: ALLOW, files: FILES },
+		);
+		fails(run(), "pkg/.GitAttributes", 'is ".gitattributes" to a case-insensitive filesystem');
+	});
+
+	test("control: attributes that leave the bytes alone pass, and so do transforms of paths that are not agent config", () => {
+		passes(
+			change(
+				{
+					".gitattributes":
+						"* text=auto eol=lf\n*.json -filter\n.claude/hooks/* -ident\ndocs/** filter=lfs working-tree-encoding=UTF-16 ident\n",
+				},
+				{ allow: ALLOW, files: FILES },
 			).run(),
 		);
 	});
@@ -513,7 +732,7 @@ describe("rule 2: a committed Claude Code settings file holds only permitted key
 });
 
 describe("an allowlist that is not valid cannot check anything: exit 2", () => {
-	test("bad JSON, an unknown field, a pin on a glob, a bad pin, or no allowlist at all", () => {
+	test("bad JSON, an unknown field, a pin on a glob, a bad pin, a nonportable entry that is not one, or no allowlist at all", () => {
 		for (const text of [
 			"{",
 			JSON.stringify({ allow: [], extra: 1 }),
@@ -521,6 +740,16 @@ describe("an allowlist that is not valid cannot check anything: exit 2", () => {
 			JSON.stringify({ allow: [{ path: ".claude/**", why: "t", sha256: sha256("x") }] }),
 			JSON.stringify({ allow: [{ path: ".mcp.json", why: "t", sha256: "beef" }] }),
 			JSON.stringify({ allow: [{ path: ".mcp.json", why: "" }] }),
+			JSON.stringify({ nonportable: [] }),
+			JSON.stringify({ allow: [], nonportable: {} }),
+			JSON.stringify({ allow: [], nonportable: null }),
+			JSON.stringify({ allow: [], nonportable: [{ path: "docs/x.md", why: "t" }] }),
+			JSON.stringify({ allow: [], nonportable: [{ path: "docs/caf\u00E9.md", why: "" }] }),
+			JSON.stringify({
+				allow: [],
+				nonportable: [{ path: "docs/caf\u00E9.md", why: "t", sha256: sha256("x") }],
+			}),
+			JSON.stringify({ allow: [], nonportable: [{ path: "docs/\uFFFD.md", why: "t" }] }),
 			null,
 		]) {
 			const repo = fixture();

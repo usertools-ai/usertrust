@@ -10,22 +10,34 @@
 //    deleted, and both sides of a rename. An entry is a path or a glob (`*` within one
 //    segment, `**` across them), with its `why`. An exact path may pin its `sha256`: a
 //    change that leaves it any other content, or none, fails.
-//    In the change's tree, every agent-config path must be a regular file: a link or a
-//    submodule there could carry config these rules never read.
+//    In the change's tree, every agent-config path must be a regular file, and checked out
+//    as it is stored: a link or a submodule there could carry config these rules never
+//    read, and an attribute under which checkout rewrites a file (`working-tree-encoding`,
+//    `filter`, `ident`) would hand an agent other bytes than the ones checked here. The
+//    attributes are read as git reads them on either kind of filesystem, case-sensitive or
+//    not; and so that every attributes file is read, one must be spelled `.gitattributes`.
 // 2. Every Claude Code settings file in the change's tree (`.claude/settings*.json`, at
 //    any depth), allowlisted or not, must be a JSON object holding only the permitted
 //    keys: `$schema`, and `permissions` that only tighten (`deny`, `ask`). Any other
 //    key fails, a key this guard has never heard of included: a list of the keys that
 //    run something goes stale each time Claude Code ships a setting.
-// Agent-config paths are recognized as a case-insensitive filesystem, or Windows, opens
-// them (`.Claude/`, `.MCP.JSON`, `.claude./`, `.mcp.jſon`, and `.mcp.json` with a code
-// point HFS+ ignores inside it), by the same folding (`fold`) everywhere a spelling could
-// stand for another file:
-// - an allowlist entry names a path as it is written;
-// - a pin holds for every spelling that folds to its path;
-// - and a change may not add a spelling that folds to another path in its tree, or to a
-//   pinned path: on such a filesystem both are one file, and either could be what an
-//   agent reads.
+// 3. Every path the change adds, anywhere in the repository, must be one name to every
+//    filesystem that checks it out:
+//    - Its name is portable: each segment holds only `A-Z a-z 0-9 . _ - [ ]`. Each way
+//      Unicode spells one name twice (a long s, a fullwidth letter, a code point HFS+
+//      ignores, a combining mark) needs a code point outside that set, and so does each
+//      pure-ASCII alias Windows makes: a stream (`settings.json:x`), a short name
+//      (`CLAUDE~1`), a backslash, a trailing space. A path that must be spelled otherwise
+//      is named by its exact bytes in the allowlist's own list, `nonportable`.
+//    - No name it makes, itself or a directory above it, folds (`fold`) to another name in
+//      the change's tree, a file's or a directory's, the change's other additions
+//      included: a case-insensitive filesystem, or Windows, opens both as one.
+// Rule 3 keeps each name in the tree its file's only spelling, so rule 1 compares paths as
+// they are written: an entry names a spelling, and a pin holds for it. And a file the tree
+// holds under another spelling of a pinned path fails, so that no pin is left naming an
+// absent file that a case-insensitive filesystem would open as another. Agent config is
+// still recognized as such a filesystem opens it (`.Claude/`, `.MCP.JSON`, `.claude./`), so
+// every spelling of it is held to rules 1 and 2.
 //
 // The change is what `--event` says it is:
 // - for a pull request, `base...head`, which the launcher makes what will land: `head` is
@@ -54,17 +66,37 @@ const AGENT_FILES = new Set([".mcp.json"]);
 const PERMISSION_KEYS = new Set(["deny", "ask"]);
 /** A regular file's modes: anything else (a link, 120000; a submodule, 160000) is not one. */
 const REGULAR = new Set(["100644", "100755"]);
+/**
+ * The portable set, and the `/` between segments: what a path may hold with no allowlist
+ * entry. POSIX's portable filename characters, and the brackets of a route's directory
+ * (`[id]`).
+ */
+const PORTABLE = /[A-Za-z0-9._\-[\]/]/u;
+/**
+ * The attributes under which checkout writes a file other than its blob. Line-end conversion
+ * (`text`, `eol`, and a machine's own `core.autocrlf`) is not one: it rewrites only the line
+ * ends, as a Windows checkout does to any text file, and JSON reads both alike.
+ */
+const TRANSFORMS = ["working-tree-encoding", "filter", "ident"];
 
 /** A run that cannot be checked: exit 2, never a pass. */
 class Unusable extends Error {}
 
 /** `git` in the repository's top level, its config held to what the checks need. */
-function git(args, encoding = "utf-8") {
+function git(args, { encoding = "utf-8", config = [], input } = {}) {
 	try {
 		return execFileSync(
 			"git",
-			["-c", "diff.relative=false", "-c", "core.quotePath=true", ...args],
-			{ encoding, maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] },
+			[
+				...["diff.relative=false", "core.quotePath=true", ...config].flatMap((c) => ["-c", c]),
+				...args,
+			],
+			{
+				encoding,
+				input,
+				maxBuffer: 1 << 30,
+				stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+			},
 		);
 	} catch (err) {
 		throw new Unusable(`git ${args[0]} failed: ${String(err?.stderr ?? err).trim()}`);
@@ -96,6 +128,31 @@ const fold = (segment) =>
 
 /** A whole path, folded segment by segment (`fold`): two paths that fold alike are one file. */
 const folded = (path) => path.split("/").map(fold).join("/");
+
+/** The names a path makes: each directory above it, outermost first, then the path itself. */
+function names(path) {
+	const segments = path.split("/");
+	return segments.map((_, i) => segments.slice(0, i + 1).join("/"));
+}
+
+/** The code points of `path` outside the portable set (`PORTABLE`), each once, as U+XXXX. */
+function unportable(path) {
+	const outside = new Set();
+	for (const c of path) {
+		if (PORTABLE.test(c)) continue;
+		outside.add(`U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`);
+	}
+	return [...outside];
+}
+
+/** Text as the log shows it: JSON, with each code point outside printable ASCII escaped. */
+const shown = (text) =>
+	JSON.stringify(text).replace(/[^ -~]/gu, (c) =>
+		c
+			.split("")
+			.map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`)
+			.join(""),
+	);
 
 /** Whether `path` is agent config: under an agent directory, or an MCP server list. */
 function isAgentConfig(path) {
@@ -135,7 +192,28 @@ function globMatcher(glob) {
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 
-/** The allowlist at `commit`, each entry with its matcher; Unusable when it is not one. */
+/** One allowlist entry, held to its list's `fields`, a relative `path` and a `why`. */
+function entry(value, where, fields) {
+	if (!isObject(value)) throw new Unusable(`${where} is not an object`);
+	for (const key of Object.keys(value)) {
+		if (!fields.includes(key)) {
+			throw new Unusable(`${where} has an unknown field ${JSON.stringify(key)}`);
+		}
+	}
+	const { path, why } = value;
+	if (typeof path !== "string" || path === "" || path.startsWith("/")) {
+		throw new Unusable(`${where} needs a "path" relative to the repository's root`);
+	}
+	if (typeof why !== "string" || why.trim() === "") {
+		throw new Unusable(`${where} needs a "why"`);
+	}
+	return value;
+}
+
+/**
+ * The allowlist at `commit`: its `allow` entries, each with its matcher, and the paths its
+ * `nonportable` list names. Unusable when it is not one.
+ */
 function readAllowlist(commit) {
 	let text;
 	try {
@@ -152,23 +230,21 @@ function readAllowlist(commit) {
 	} catch {
 		throw new Unusable(`${ALLOWLIST} is not valid JSON`);
 	}
-	if (!isObject(value) || Object.keys(value).join() !== "allow" || !Array.isArray(value.allow)) {
-		throw new Unusable(`${ALLOWLIST} must be exactly { "allow": [ ... ] }`);
+	if (
+		!isObject(value) ||
+		!Array.isArray(value.allow) ||
+		!Object.keys(value).every((key) => key === "allow" || key === "nonportable") ||
+		(Object.hasOwn(value, "nonportable") && !Array.isArray(value.nonportable))
+	) {
+		throw new Unusable(
+			`${ALLOWLIST} must be { "allow": [ ... ] }, with "nonportable": [ ... ] if any`,
+		);
 	}
-	return value.allow.map((entry, i) => {
+	const allow = value.allow.map((item, i) => {
 		const where = `${ALLOWLIST} entry ${i}`;
-		if (!isObject(entry)) throw new Unusable(`${where} is not an object`);
-		for (const key of Object.keys(entry)) {
-			if (!["path", "why", "sha256"].includes(key)) {
-				throw new Unusable(`${where} has an unknown field ${JSON.stringify(key)}`);
-			}
-		}
-		const { path, why, sha256 } = entry;
-		if (typeof path !== "string" || path === "" || path.startsWith("/") || path.includes("\\")) {
+		const { path, sha256 } = entry(item, where, ["path", "why", "sha256"]);
+		if (path.includes("\\")) {
 			throw new Unusable(`${where} needs a "path" relative to the repository's root`);
-		}
-		if (typeof why !== "string" || why.trim() === "") {
-			throw new Unusable(`${where} needs a "why"`);
 		}
 		const glob = path.includes("*");
 		if (
@@ -179,6 +255,22 @@ function readAllowlist(commit) {
 		}
 		return { path, sha256, matches: glob ? globMatcher(path) : (p) => p === path };
 	});
+	const nonportable = new Set(
+		(value.nonportable ?? []).map((item, i) => {
+			const where = `${ALLOWLIST} "nonportable" entry ${i}`;
+			const { path } = entry(item, where, ["path", "why"]);
+			if (unportable(path).length === 0) {
+				throw new Unusable(`${where} names a portable path, which needs no entry`);
+			}
+			// Git's output is read as UTF-8, where bytes that are not UTF-8 become U+FFFD: an entry
+			// holding one names no path exactly.
+			if (path.includes("\uFFFD")) {
+				throw new Unusable(`${where} holds U+FFFD, which stands for bytes that are not UTF-8`);
+			}
+			return path;
+		}),
+	);
+	return { allow, nonportable };
 }
 
 /** The problems with one settings file's text: none when it holds only permitted keys. */
@@ -227,7 +319,7 @@ function tree(commit) {
 	return entries;
 }
 
-const blob = (oid) => git(["cat-file", "blob", oid], "buffer");
+const blob = (oid) => git(["cat-file", "blob", oid], { encoding: "buffer" });
 
 /** How each event's change is read: a pull request from where it branched, a push tip to tip. */
 const RANGE = { pull_request: "...", push: ".." };
@@ -250,53 +342,76 @@ function changes(event, base, head) {
 	return touched;
 }
 
+/**
+ * Each attribute in `TRANSFORMS` that `commit`'s own `.gitattributes` files give one of
+ * `paths`, as git matches their patterns with case (a case-sensitive filesystem) and without
+ * (`core.ignorecase`, a case-insensitive one): a pattern can match a path on one and not the
+ * other, and an agent may open a checkout of either.
+ */
+function transforms(commit, paths) {
+	if (paths.length === 0) return [];
+	const found = new Map();
+	for (const ignoreCase of [false, true]) {
+		const fields = git(["check-attr", `--source=${commit}`, "-z", "--stdin", ...TRANSFORMS], {
+			config: [`core.ignorecase=${ignoreCase}`],
+			input: `${paths.join("\0")}\0`,
+		}).split("\0");
+		for (let i = 0; i + 2 < fields.length; i += 3) {
+			const [path, attribute, value] = fields.slice(i, i + 3);
+			if (value === "unspecified" || value === "unset") continue;
+			found.set(`${path}\0${attribute}\0${value}`, { path, attribute, value });
+		}
+	}
+	return [...found.values()];
+}
+
 /** The failures of the change from `base` to `head` under the allowlist at `rules`. */
 function check({ event, rules, base, head }) {
-	const allow = readAllowlist(rules);
+	const { allow, nonportable } = readAllowlist(rules);
 	const changed = changes(event, base, head);
 	const headTree = tree(head);
 	const failures = [];
 	const fail = (rule, path, reason) => failures.push({ rule, path, reason });
-	const pinned = allow.filter((e) => e.sha256 !== undefined);
-	// Every agent-config path in the change's tree, by its folded spelling.
+	// Every name in the change's tree, a file's or a directory's, by what it folds to.
 	const spellings = new Map();
 	for (const path of headTree.keys()) {
-		if (!isAgentConfig(path)) continue;
-		const key = folded(path);
-		spellings.set(key, [...(spellings.get(key) ?? []), path]);
+		for (const name of names(path)) {
+			const key = folded(name);
+			spellings.set(key, (spellings.get(key) ?? new Set()).add(name));
+		}
 	}
 	let agentPaths = 0;
 	for (const { status, path } of changed) {
-		if (!isAgentConfig(path)) continue;
-		agentPaths += 1;
-		const key = folded(path);
-		// A spelling the change adds may not stand for another file: one already in the tree
-		// (or added beside it), or one the allowlist pins.
 		if (status === "A") {
-			for (const other of spellings.get(key) ?? []) {
-				if (other === path) continue;
+			const outside = unportable(path);
+			if (outside.length > 0 && !nonportable.has(path)) {
 				fail(
-					1,
+					3,
 					path,
-					`folds to ${JSON.stringify(other)}, another path in the tree: a case-insensitive filesystem opens both as one file`,
+					`holds ${outside.join(", ")}, outside the portable set (A-Z a-z 0-9 . _ - [ ]), and the allowlist's "nonportable" list does not name it`,
 				);
 			}
-			for (const { path: pin } of pinned) {
-				if (pin === path || folded(pin) !== key) continue;
-				fail(
-					1,
-					path,
-					`folds to the pinned path ${JSON.stringify(pin)}: a case-insensitive filesystem opens both as one file`,
-				);
+			// The outermost name that folds to another stands for the names inside it.
+			for (const name of names(path)) {
+				const others = [...spellings.get(folded(name))].filter((other) => other !== name);
+				for (const other of others) {
+					fail(
+						3,
+						path,
+						`${name === path ? "" : `holds ${shown(name)}, which `}folds to ${shown(other)}, another name in the tree: a case-insensitive filesystem opens both as one`,
+					);
+				}
+				if (others.length > 0) break;
 			}
 		}
+		if (!isAgentConfig(path)) continue;
+		agentPaths += 1;
 		if (!allow.some((e) => e.matches(path))) {
 			fail(1, path, "is agent config, and the allowlist does not name it");
 			continue;
 		}
-		// Every pin whose path folds to this one holds, whatever else names it too: a spelling
-		// that folds alike is the same file to an agent on a case-insensitive filesystem.
-		const pins = pinned.filter((e) => folded(e.path) === key).map((e) => e.sha256);
+		// Every pin on this path holds, whatever else names it too.
+		const pins = allow.filter((e) => e.sha256 !== undefined && e.path === path);
 		if (pins.length === 0) continue;
 		const now = headTree.get(path);
 		if (now === undefined) {
@@ -304,18 +419,51 @@ function check({ event, rules, base, head }) {
 			continue;
 		}
 		const hash = createHash("sha256").update(blob(now.oid)).digest("hex");
-		if (pins.some((pin) => pin !== hash)) {
+		if (pins.some((e) => e.sha256 !== hash)) {
 			fail(1, path, "is pinned by the allowlist, and the change leaves other content");
 		}
 	}
+	// Every pinned path, by what it folds to.
+	const pinned = new Map();
+	for (const { path, sha256 } of allow) {
+		if (sha256 === undefined) continue;
+		const key = folded(path);
+		pinned.set(key, (pinned.get(key) ?? new Set()).add(path));
+	}
+	const agentTree = [];
 	let settingsFiles = 0;
 	for (const [path, { mode, oid }] of headTree) {
-		if (isAgentConfig(path) && !REGULAR.has(mode)) {
+		for (const pin of pinned.get(folded(path)) ?? []) {
+			if (pin === path) continue;
+			fail(
+				1,
+				path,
+				`folds to the pinned path ${shown(pin)}: a case-insensitive filesystem opens both as one file`,
+			);
+		}
+		const leaf = path.split("/").at(-1);
+		if (leaf !== ".gitattributes" && fold(leaf) === ".gitattributes") {
+			fail(
+				1,
+				path,
+				'is ".gitattributes" to a case-insensitive filesystem, and git reads it there, but not here: spell it ".gitattributes"',
+			);
+		}
+		if (!isAgentConfig(path)) continue;
+		agentTree.push(path);
+		if (!REGULAR.has(mode)) {
 			fail(1, path, `is agent config that is not a regular file (mode ${mode})`);
 		}
 		if (!isSettings(path)) continue;
 		settingsFiles += 1;
 		for (const problem of settingsProblems(blob(oid).toString("utf-8"))) fail(2, path, problem);
+	}
+	for (const { path, attribute, value } of transforms(head, agentTree)) {
+		fail(
+			1,
+			path,
+			`is agent config that checkout rewrites (${attribute} ${shown(value)}): an agent would read other bytes than the ones checked here`,
+		);
 	}
 	return { failures, changed: changed.length, agentPaths, settingsFiles };
 }
@@ -345,7 +493,7 @@ function options(argv) {
 try {
 	const result = check(options(process.argv.slice(2)));
 	for (const { rule, path, reason } of result.failures) {
-		console.log(`agent-config: FAILED (rule ${rule}): ${JSON.stringify(path)} ${reason}`);
+		console.log(`agent-config: FAILED (rule ${rule}): ${shown(path)} ${reason}`);
 	}
 	const summary = `${result.changed} paths changed, ${result.agentPaths} of them agent config; ${result.settingsFiles} settings files in the tree`;
 	if (result.failures.length > 0) {
