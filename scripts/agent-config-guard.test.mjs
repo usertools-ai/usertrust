@@ -607,6 +607,8 @@ describe("agent config is checked out as it is stored: no attribute may rewrite 
 	const FILES = { ".claude/settings.json": "{}", ".mcp.json": "{}", ".claude/hooks/run.sh": "x" };
 	const rewrites = (attribute, value) =>
 		`is agent config that checkout rewrites (${attribute} ${shown(value)})`;
+	const rewritten = (attribute, value) =>
+		`is an attributes file that checkout rewrites (${attribute} ${shown(value)})`;
 
 	test("working-tree-encoding, a filter, or ident, set by a .gitattributes the change adds, fails", () => {
 		const { run } = change(
@@ -696,6 +698,57 @@ describe("agent config is checked out as it is stored: no attribute may rewrite 
 		// Exactly those four: not the comments', and not `text`, which rewrites no bytes here.
 		const lines = result.out.split("\n").filter((line) => line.includes("check-attr prints that"));
 		assert.equal(lines.length, 4, result.out);
+	});
+
+	test("an attributes file that checkout rewrites fails, nested or not, with no agent config in the change", () => {
+		const { run } = change({
+			".gitattributes": "pkg/.gitattributes working-tree-encoding=UTF-16LE\n",
+			"pkg/.gitattributes": "*.txt text\n",
+		});
+		fails(run(), "pkg/.gitattributes", rewritten("working-tree-encoding", "UTF-16LE"));
+	});
+
+	test("an attributes file that gives itself a transform fails, by its own name or by a pattern", () => {
+		const { run } = change({
+			".gitattributes": "* ident\n",
+			"pkg/.gitattributes": ".gitattributes filter=x\n",
+		});
+		const result = run();
+		fails(result, ".gitattributes", rewritten("ident", "set"));
+		fails(result, "pkg/.gitattributes", rewritten("filter", "x"));
+		fails(result, "pkg/.gitattributes", rewritten("ident", "set"));
+	});
+
+	test("rules that checkout would rewrite cannot shield a pinned file: an encoded attributes file that unsets the encoding for the .mcp.json beside it fails", () => {
+		// At checkout git writes plugin/.gitattributes as UTF-16LE, stops reading it at its first
+		// NUL, and loses the override: a later restore of the pinned .mcp.json writes it UTF-16LE,
+		// though its blob, and so its pin, never change. Read from the tree, the override holds, so
+		// the .mcp.json alone passes; the attributes file is what fails.
+		const mcp = '{"mcpServers":{}}\n';
+		const { run } = change(
+			{
+				".gitattributes":
+					"plugin/.gitattributes working-tree-encoding=UTF-16LE\nplugin/.mcp.json working-tree-encoding=UTF-16LE\n",
+				"plugin/.gitattributes": ".mcp.json -working-tree-encoding\n",
+			},
+			{
+				allow: [{ path: "plugin/.mcp.json", why: "test", sha256: sha256(mcp) }],
+				files: { "plugin/.mcp.json": mcp },
+			},
+		);
+		const result = run();
+		fails(result, "plugin/.gitattributes", rewritten("working-tree-encoding", "UTF-16LE"));
+		assert.ok(!result.out.includes(`${shown("plugin/.mcp.json")} is agent config`), result.out);
+	});
+
+	test("control: attributes files no transform applies to pass, at the root and nested, beside transforms of other paths", () => {
+		passes(
+			change({
+				".gitattributes": "* text=auto eol=lf\ndocs/** filter=lfs ident\n",
+				"pkg/.gitattributes": "*.bin -text\n",
+				"docs/notes.md": "notes\n",
+			}).run(),
+		);
 	});
 
 	test("control: attributes that leave the bytes alone pass, and so do transforms of paths that are not agent config", () => {
