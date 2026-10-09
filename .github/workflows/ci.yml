@@ -17,6 +17,62 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  agent-config:
+    # Committed agent config (`.claude/`, `.mcp.json`, `.grok/`, `.codex/`, at any depth)
+    # runs on every machine that opens a checkout of this repo in an agent. No change may
+    # add, edit or remove any that `.github/agent-config-allowlist.json` does not name, a
+    # committed Claude Code settings file may hold only permitted keys, and every path a
+    # change adds must be one name to every filesystem (scripts/agent-config-guard.mjs). The
+    # guard and its allowlist are read from the BASE (.github/agent-config.sh), so a change is
+    # never graded by its own rules.
+    # - The guard runs FIRST, and nothing the change controls reaches it but this workflow and
+    #   its launcher, as with every workflow (`.github/`, which CODEOWNERS names an owner for):
+    #   no other code, no file, no configuration, no cache. Only the checkout runs before it.
+    #   - No setup step: one that reads the checkout can restore files into it from an
+    #     earlier run of the same change (a package manager's cache, whose path the change's
+    #     .npmrc sets). The guard runs on the runner's own node.
+    #   - The launcher's bytes come from the graded commit's object (git cat-file), never from
+    #     the working tree, and the launcher reads the guard and its allowlist the same way.
+    #   - The guard's tests, which are the change's, run after it, on node 22, with no
+    #     package-manager cache.
+    #   scripts/agent-config-guard.test.mjs pins all of this.
+    # - What it checks is what will land: a pull request as the merge commit GitHub tests
+    #   (`github.sha`), never the branch's head alone; a push, tip to tip.
+    # - The name is STABLE, `agent-config`, for a pull request or a push, so that branch
+    #   protection can require this check by it (an owner's setting, applied after this
+    #   merges). Any other event (a dispatched run, say) is not a change: nothing is checked,
+    #   and the job takes another name, so it can never stand in for that check, nor fail.
+    # It needs no dependency and no secret, so it runs on a fork's pull request as it is,
+    # drafts included.
+    name: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'agent-config' || 'agent-config (no change to check)' }}
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: The guard, as the base has it, before any code of the change runs
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        env:
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          launcher=$(mktemp)
+          git cat-file blob "$SHA:.github/agent-config.sh" > "$launcher"
+          if [ "$EVENT" = pull_request ]; then
+            bash "$launcher" pull_request "$SHA"
+          else
+            bash "$launcher" push "$BEFORE" "$SHA"
+          fi
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: The guard's own tests, after it
+        run: node --test scripts/agent-config-guard.test.mjs
+
   lint:
     name: lint
     # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a

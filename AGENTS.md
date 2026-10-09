@@ -1563,12 +1563,12 @@ this.
 
 There is no root `build` script; each package builds itself (`npm run build -w usertrust`, etc.).
 
-**CI** (`.github/workflows/ci.yml`) runs six jobs on Node 22, on every push to `master` and every
-**non-draft** PR: `lint`, `typecheck`, `test` (coverage, with the thresholds above),
-`openclaw-contract` (the host contract, described below), `tb-integration` (a real single-node
-TigerBeetle cluster, sha256-pinned binary), and `site-build` (the site's own install, tests and
-production build). There is **no path filter** — every non-draft PR runs all six regardless of what
-changed. Draft PRs run none of them.
+**CI** (`.github/workflows/ci.yml`) runs seven jobs on Node 22, on every push to `master` and every
+**non-draft** PR: `agent-config` (the agent-config check, described below), `lint`, `typecheck`,
+`test` (coverage, with the thresholds above), `openclaw-contract` (the host contract, described
+below), `tb-integration` (a real single-node TigerBeetle cluster, sha256-pinned binary), and
+`site-build` (the site's own install, tests and production build). There is **no path filter** —
+every non-draft PR runs all seven regardless of what changed. A draft PR runs `agent-config` alone.
 
 The TigerBeetle server version in CI is pinned to match `tigerbeetle-node` in `packages/core` and
 must be bumped in lockstep — **never `latest`**. The client must never be newer than the server. The
@@ -1604,6 +1604,42 @@ this document's content came from.
 avoid `git add -A` / `git add .`.
 
 All changes require review (`.github/CODEOWNERS`).
+
+**Agent config is refused (the `agent-config` check).** Agent config is what a coding agent
+runs, or obeys, when it opens a checkout: Claude Code's `.claude/`, an `.mcp.json`, and the Grok
+and Codex CLIs' `.grok/` and `.codex/`, at any depth, matched as a case-insensitive filesystem
+opens them.
+- No change may add, edit or remove agent config that `.github/agent-config-allowlist.json` does
+  not name. Here the allowlist is empty. An exact entry may pin its file's `sha256`, for that path
+  as it is written; a file in the tree under another spelling of a pinned path fails.
+  A pin is checked when a change touches its path. A pin that does not hold on the base is noticed at the next edit of that path, which it refuses; it never admits anything.
+  Validating every pin on every run is a follow-up: usertrust#275.
+- Every path a change adds, anywhere in the repository, must be one name to every filesystem. Each
+  segment holds only `A-Z a-z 0-9 . _ - [ ]`, unless the allowlist's `nonportable` list names the
+  path by its exact bytes. And no name it makes, a file's or a directory's, may fold to another
+  name in the change's tree (macOS opens `Readme.md` as `README.md`, and `.mcp.jſon` as
+  `.mcp.json`). The set is closed because the aliases are not: every Unicode way to spell one name
+  twice, and Windows' streams (`:`) and short names (`~`), need a character outside it.
+- Agent config is checked out as it is stored: no `working-tree-encoding`, `filter` or `ident`
+  attribute may apply to it, as git matches its patterns with case or without, and an attributes
+  file is spelled `.gitattributes`. No attributes file may give one of them the literal value
+  `unset` or `unspecified`, which `check-attr` prints as no value, or hold a NUL byte, where git
+  stops reading it.
+- A submodule is another repository, and its own tree can hold agent config: one a change adds,
+  or moves to another commit, must be named by the allowlist, wherever it is.
+- A committed Claude Code settings file may hold only `$schema`, and `permissions.deny` /
+  `permissions.ask`. Any other key fails, including one this guard has never heard of.
+- The guard (`scripts/agent-config-guard.mjs`) and the allowlist are read from the BASE
+  (`.github/agent-config.sh`), so a change cannot allowlist itself. A widening merges on its own,
+  before the change that needs it.
+- What is checked is what lands: a pull request as the merge commit GitHub tests (`github.sha`),
+  against its first parent; a push, tip to tip.
+- The launcher counts the guard's exit 0 only beside its own `agent-config: OK (...)` line, its
+  last word: a guard that exits 0 without checking fails.
+- Only the checkout runs before the guard: no setup step (a package manager's cache, whose path
+  a change's `.npmrc` sets, could restore files into the checkout), the runner's own node, and
+  the launcher read from the graded commit's object, never from the working tree.
+- Its tests: `node --test scripts/agent-config-guard.test.mjs`.
 
 ---
 

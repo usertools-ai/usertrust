@@ -1,2 +1,11 @@
 # All changes require review
 * @c-1k
+
+# CI, and the agent-config check (ci.yml's `agent-config` job): its launcher and allowlist,
+# and the guard and its tests. A change to any of them changes what every pull request is
+# checked against; the base-read stops a change from grading itself, not a weakening that
+# merges.
+/.github/ @c-1k
+/.github/agent-config-allowlist.json @c-1k
+/scripts/agent-config-guard.mjs @c-1k
+/scripts/agent-config-guard.test.mjs @c-1k

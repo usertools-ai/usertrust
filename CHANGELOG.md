@@ -463,6 +463,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **CI refuses committed agent config: the `agent-config` check.** Agent config runs on the
+  machine of anyone who opens a checkout in a coding agent: Claude Code's `.claude/`, an
+  `.mcp.json`, and the Grok and Codex CLIs' `.grok/` and `.codex/`, at any depth, matched as a
+  case-insensitive filesystem opens them.
+  - A pull request or push that adds, edits or removes agent config the repository has not
+    allowlisted fails. The allowlist, `.github/agent-config-allowlist.json`, is empty here.
+  - An exact entry may pin its file's `sha256`, for that path as it is written; a file in the
+    tree under another spelling of a pinned path fails.
+  - Every path a change adds, anywhere in the repository, must be one name to every filesystem:
+    each segment only `A-Z a-z 0-9 . _ - [ ]`, unless the allowlist's `nonportable` list names
+    it by its exact bytes, and no name it makes, a file's or a directory's, may fold to another
+    name in the change's tree.
+  - Agent config must be checked out as it is stored: no `working-tree-encoding`, `filter` or
+    `ident` attribute may apply to it, and no attributes file may give one of them the literal
+    value `unset` or `unspecified`, or hold a NUL byte, where git stops reading it.
+  - A submodule a change adds, or moves to another commit, must be on the allowlist: its own
+    tree can hold agent config.
+  - A pull request is checked as the merge commit GitHub tests: what lands, not the branch's head.
+  - The launcher counts the guard's exit 0 only beside its own `agent-config: OK` line, so a guard
+    that exits 0 without checking fails.
+  - Nothing the change controls runs before the guard: only the checkout, with no setup step or
+    cache, and the launcher is read from the graded commit's object.
+  - A committed Claude Code settings file may hold only `$schema`, and `permissions` that
+    tighten (`deny`, `ask`).
+  - The guard and its allowlist are read from the base, so a change cannot allowlist itself.
+  - `.github/CODEOWNERS` names an owner for the check's launcher and allowlist (`.github/`),
+    and for the guard and its tests (`scripts/agent-config-guard.mjs`, `.test.mjs`).
+
 - **usertrust-claude-code no longer auto-approves tool calls; permission prompts return to Claude Code's normal flow.** Its PreToolUse hook answered `allow` on every call it let through (a reservation, a shadow answer, and a call let through by `UT_FAIL_OPEN=1`), and a hook's `allow` skips the permission prompt Claude Code would otherwise show (deny and ask rules still apply), so installing a budget plugin silently approved every call no permission rule covered. The plugin now never grants permission. The only decision it makes is `deny`; every call it does not block gets no decision and goes through the user's own permission settings. Users who installed v1.3.0 (or earlier) will see the permission prompts it had been silently skipping.
 
 - **Merkle inclusion proofs now validate PATH TOPOLOGY against
