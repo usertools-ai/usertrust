@@ -742,14 +742,24 @@ PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"pha
   settle that ends this way is `claimed`, or `unresolved` under a key, which also say whether
   it is retried.
 
-The plugin never follows a redirect. A 3xx is the server's answer, read as any other that is
-not a 200, since the server may have acted on the request before redirecting it: a settle
-answered with one is never `released`. A transcript hold's or a remainder's is `claimed` (or
-`unresolved` under a key); an estimate hold's is `failed`, as a 5xx is, its hold kept
-settle-attempted and never settled again. So set the server URL to the one the server answers
-at: a server that redirects its routes, even within its own origin, refuses every call. (A
-redirect to another origin never carried the key: fetch drops the `Authorization` header when
-it follows one.)
+**Redirects.** The plugin follows one redirect, by hand: a 307 or a 308 whose `Location` has
+the origin (scheme, host and port) of the URL it asked, re-sent with the same method, body and
+key. Once the first answer is in, the request was sent: whatever ends the second hop, a timeout
+or a refused connection, the request is never read as unsent, so a settle is never `released`.
+Any other redirect is the server's answer, read as any other that is not a 200, since the server
+may have acted on the request before redirecting it: a 301, 302 or 303, a second redirect, or a
+redirect to another origin. A settle answered with one is never `released`: a transcript hold's
+or a remainder's is `claimed` (or `unresolved` under a key), and an estimate hold's is `failed`,
+as a 5xx is, its hold kept settle-attempted and never settled again.
+
+A redirect to another origin is never followed, so as never to send the key there. Node's own
+fetch, which followed redirects for earlier releases of the plugin, drops the `Authorization`
+header when it follows one to another origin: measured on Node 22.22.1, 22.23.3, 23.6.0 and
+24.21.0, where the server refused such a call. Older Node releases kept the header, so on those
+a server URL that redirects to another origin worked before and does not now: set the server
+URL to the one the server answers at. So too for a chain of redirects, and for a health route
+behind a 301, 302 or 303, whose capabilities now read as unknown. (fetch turned the POST of any
+other route into a GET with no body through one of those, which the server refuses.)
 
 Each names its hold's `transferId`, so a deferral and how it ended can be joined. A hold
 that carried no usage, given back to a server that no longer holds it (a 404 `unknown
@@ -760,13 +770,17 @@ given back by a settle at zero, and that settle's failure is written as the give
 stands for: `release`, `failed` or `unknown`.
 
 **SessionEnd, the last settle point, writes down what it cannot finish.** What it leaves "for
-a later settle point" has none unless the session is resumed, so each such deferral is a
-record of its own: a `remainder` gap, `deferred`, for usage it has no time to claim or post
-or whose claim fails (a full or unwritable state dir), for an agent whose usage it could not
-reach once the server stopped answering, and for an agent whose transcript state is unusable;
-and its call's gap for a hold it has no time to give back. Usage that spans jobs is one record
-per job, each started at its own first message, so `usertrust-job coverage` lists it as a
-known gap of every job it touches.
+a later settle point" has none unless the session is resumed, so whatever it selected and did
+not post is a `remainder` gap, `deferred`, whatever stopped it: no time to claim or post, a
+claim that fails (a full or unwritable state dir), the server no longer answering, an error. An
+agent whose usage it never read is one too: one it could not reach once the server stopped
+answering, one whose transcript state is unusable, and one whose lock another hook holds. And a
+hold it has no time to give back is its call's gap.
+
+**Each job's usage is its own record.** A remainder's gap, at Stop as at SessionEnd, is one
+record per job interval of the session's job log, each started at its own first message,
+whether or not the server records jobs. So `usertrust-job coverage` lists it as a known gap of
+every job it touches.
 
 **A failed health probe still sends the principal.** After a probe that answers, the
 plugin remembers the server's capabilities, per server and key, in the state dir

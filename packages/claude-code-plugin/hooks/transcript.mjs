@@ -354,32 +354,52 @@ export function settleLabels(labels) {
 	};
 }
 
+/** The session's LOCAL job log, read once per hook process (`resolveJob`): the records' split. */
+const localJobsRead = new Map();
+function localJobs(sessionId) {
+	if (!localJobsRead.has(sessionId)) localJobsRead.set(sessionId, resolveJob(sessionId));
+	return localJobsRead.get(sessionId);
+}
+
 /**
- * SessionEnd is the last settle point: usage it leaves "for a later settle point" has none,
- * unless the session is resumed. So whatever it defers is written down as a gap, `deferred`,
- * never left to stderr alone. `messages`, when known, give each record its count and its start.
+ * The ONE writer of a remainder's gap records, at Stop, SubagentStop and SessionEnd: a group or a
+ * retried vehicle that did not settle, and everything SessionEnd leaves (`sweepRemainder`).
  *
- * A job's coverage places a record by its start alone, so one record for messages of two jobs
- * would be a gap for the first job only. The messages are written down one record per job
- * interval of the session's job log (`labelsFor`, as a remainder groups them), each started at
- * its own earliest message. Messages of no known time share one record, started at null: a gap
- * that may belong to any job. With no usable job log, they are one record, which coverage
- * cannot place in any job either, and so counts against every job; so is a log stamped ahead of
- * the clock, beside the time-less gap that `labelsFor`'s guard writes for every job.
+ * A job's coverage places a record by its start alone, so `messages` are written down one record
+ * per job interval of the session's LOCAL job log (`labelsFor`), each started at its own earliest
+ * message, whether or not the server honours `job`. The wire's grouping (one settle per job only
+ * when it does) is the server's business; the record's split is never the wire's. Messages of no
+ * known time share one record started at null, a gap that may belong to any job. With no usable
+ * job log they are one record, which coverage cannot place in any job and so counts against
+ * every job; so is a log stamped ahead of the clock, beside the time-less gap that `labelsFor`'s
+ * guard writes for every job. With no `messages` (a vehicle, whose ids carry no time, or an agent
+ * never read), one record started at `started`, with `count` messages when it is known.
  */
-async function finalDeferral({ sessionId, agentId, reason, messages }) {
-	const record = (part, share = "") =>
+async function recordRemainderGap({
+	sessionId,
+	agentId,
+	outcome,
+	reason,
+	transferId,
+	model,
+	messages,
+	started = null,
+	count,
+}) {
+	const record = (fields) =>
 		recordSettleGap({
 			phase: "remainder",
-			outcome: "deferred",
+			outcome,
 			session: sessionId,
 			agent: agentId,
-			reason: `at SessionEnd: ${reason}${share}`,
-			started: part === undefined ? null : (usageSpan(part).usageFrom ?? null),
-			...(part === undefined ? {} : { messages: part.length }),
+			transferId,
+			...fields,
+			...(model === undefined ? {} : { model }),
 		});
-	if (messages === undefined) return record(undefined);
-	const jobs = await resolveJob(sessionId);
+	if (messages === undefined) {
+		return record({ reason, started, ...(count === undefined ? {} : { messages: count }) });
+	}
+	const jobs = await localJobs(sessionId);
 	const parts = new Map();
 	for (const m of messages) {
 		const key = labelsFor(jobs, m.ts).key;
@@ -388,10 +408,42 @@ async function finalDeferral({ sessionId, agentId, reason, messages }) {
 		else part.push(m);
 	}
 	for (const part of parts.values()) {
-		await record(
-			part,
-			parts.size > 1 ? `; this record: the ${part.length} of one job interval` : "",
-		);
+		await record({
+			reason:
+				parts.size > 1 ? `${reason}; this record: the ${part.length} of one job interval` : reason,
+			started: usageSpan(part).usageFrom ?? null,
+			messages: part.length,
+		});
+	}
+}
+
+/**
+ * SessionEnd is the last settle point: what it leaves "for a later settle point" has none, unless
+ * the session is resumed. So whatever `postRemainder` leaves there is written down as a gap,
+ * `deferred`, never left to stderr alone, and by this sweep ALONE, whatever the exit: it runs in
+ * `postRemainder`'s `finally`, over `left`, the messages it selected and has neither posted nor
+ * written down (`left.messages`, each with why, or the exit's `left.exit`), or why the agent's
+ * usage was never read at all (`left.agent`).
+ */
+async function sweepRemainder(sessionId, agentId, left) {
+	const deferred = (reason, messages) =>
+		recordRemainderGap({
+			sessionId,
+			agentId,
+			outcome: "deferred",
+			reason: `at SessionEnd: ${reason}`,
+			messages,
+		});
+	if (left.agent !== null) await deferred(left.agent);
+	const byWhy = new Map();
+	for (const { m, why } of left.messages.values()) {
+		const key = why ?? `not posted (${left.exit ?? "the remainder ended first"})`;
+		const same = byWhy.get(key);
+		if (same === undefined) byWhy.set(key, [m]);
+		else same.push(m);
+	}
+	for (const [why, messages] of byWhy) {
+		await deferred(`${messages.length} transcript message(s) ${why}`, messages);
 	}
 }
 
@@ -1208,9 +1260,10 @@ function selectNew(cursor, live) {
  * Nothing about such a claim can say whether it was posted, so it never is again:
  * the worst a lost record does is under-count. An id whose claim cannot be made or
  * read, or that the hook's time no longer covers, is left for a later settle
- * point, never posted unverified.
+ * point, never posted unverified. With `left` (`postRemainder`), every message selected goes
+ * into it as it is selected: an own one with no why yet, an unclaimed one with its own.
  */
-async function selectOwn(opened, { final = null } = {}) {
+async function selectOwn(opened, { left = null } = {}) {
 	const { cursor } = opened;
 	const fresh = selectNew(cursor, opened.live);
 	const own = [];
@@ -1221,11 +1274,13 @@ async function selectOwn(opened, { final = null } = {}) {
 	for (const m of fresh) {
 		if (m.claimed) {
 			own.push(m);
+			left?.messages.set(m.id, { m, why: null });
 			continue;
 		}
 		// Each claim is file I/O: never let them eat the time the calls need.
 		if (timeLeft() < claimFloor()) {
 			deferred.push(m);
+			left?.messages.set(m.id, { m, why: "not claimed (out of time)" });
 			continue;
 		}
 		const claim = await claimHolder(opened.claimsDir, m.id, opened.owner);
@@ -1233,6 +1288,7 @@ async function selectOwn(opened, { final = null } = {}) {
 			const state = cursor.partial.get(m.id);
 			if (state !== undefined) state.claimed = true;
 			own.push(m);
+			left?.messages.set(m.id, { m, why: null });
 		} else if (claim.holder === opened.owner) {
 			accountIds(cursor, [m.id]);
 			writtenOff += 1;
@@ -1241,6 +1297,7 @@ async function selectOwn(opened, { final = null } = {}) {
 		} else {
 			failed.set(claim.code, (failed.get(claim.code) ?? 0) + 1);
 			unclaimed.push(m);
+			left?.messages.set(m.id, { m, why: `could not be claimed (${claim.code})` });
 		}
 	}
 	if (failed.size > 0) {
@@ -1248,26 +1305,11 @@ async function selectOwn(opened, { final = null } = {}) {
 		say(
 			`usertrust: ${unclaimed.length} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point`,
 		);
-		// At SessionEnd there is no next settle point: written down, as an out-of-time claim is.
-		if (final !== null) {
-			await finalDeferral({
-				...final,
-				reason: `${unclaimed.length} transcript message(s) could not be claimed (${codes})`,
-				messages: unclaimed,
-			});
-		}
 	}
 	if (deferred.length > 0) {
 		say(
 			`usertrust: ${deferred.length} transcript message(s) not claimed this time (out of time) — posted at a later settle point`,
 		);
-		if (final !== null) {
-			await finalDeferral({
-				...final,
-				reason: `${deferred.length} transcript message(s) not claimed (out of time)`,
-				messages: deferred,
-			});
-		}
 	}
 	if (writtenOff > 0) {
 		say(
@@ -2203,12 +2245,16 @@ async function lastCompleteText(path) {
  */
 export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 	const sessionId = input.session_id ?? "unknown";
-	// SessionEnd is the last settle point: what it leaves is written down (`finalDeferral`).
+	// SessionEnd is the last settle point: what it leaves is written down (`sweepRemainder`).
 	const final = hook === "SessionEnd";
 	await settleAssignedHolds(sessionId, null);
 	if (usageMode() === "transcript") {
 		const agents = ["main", ...(await subagentIds(input))];
+		let serverDown = false;
 		for (const [index, agentId] of agents.entries()) {
+			// Once the server stops answering, a later agent is not tried. At SessionEnd it still
+			// goes through postRemainder, which sends nothing and whose sweep writes it down.
+			if (serverDown && !final) break;
 			try {
 				const result = await postRemainder({
 					sessionId,
@@ -2218,7 +2264,9 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 					reserveMs: cleanupReserve(),
 					lockWaitMs,
 					final,
+					serverDown,
 				});
+				if (serverDown) continue;
 				if (result.skipped !== undefined) {
 					say(`usertrust: no transcript usage for ${agentId} — ${result.skipped}`);
 				}
@@ -2226,22 +2274,13 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 					say(`usertrust: transcript usage for ${agentId}: ${note}`);
 				}
 				if (result.serverDown) {
+					serverDown = true;
 					const rest = agents.slice(index + 1);
 					if (rest.length > 0) {
 						say(
 							`usertrust: server unreachable — transcript usage of ${rest.join(", ")} left for the next settle point`,
 						);
 					}
-					if (final) {
-						for (const other of rest) {
-							await finalDeferral({
-								sessionId,
-								agentId: other,
-								reason: "the server stopped answering, so this agent's usage was not posted",
-							});
-						}
-					}
-					break;
 				}
 			} catch (err) {
 				say(`usertrust: transcript usage failed for ${agentId}: ${errText(err)}`);
@@ -2256,36 +2295,63 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
  * retried exactly as it was; then the unassigned complete messages, one
  * authorize→settle per model. A call starts only if the budget (less
  * `reserveMs`) still covers authorize + settle + release. Returns `{ skipped }` or
- * `{ posted, notes, serverDown }`.
+ * `{ posted, notes, serverDown }`. With `serverDown` (an earlier agent's server stopped
+ * answering), it sends nothing and reads nothing.
+ *
+ * At SessionEnd (`final`), whatever it selected and did not post or write down is written down
+ * by ONE exit sweep (`sweepRemainder`), in a `finally`, whatever the exit: out of time, the
+ * server down, a busy lock, an unusable state, an error. No exit writes a deferral of its own,
+ * so none can be missed.
  */
-export async function postRemainder({
-	sessionId,
-	agentId,
-	agentTypeHint,
-	input,
-	hook,
-	reserveMs,
-	lockWaitMs = 0,
-	final = false,
-}) {
+export async function postRemainder(args) {
+	// What this call selected and has neither posted nor written down, and why: the sweep's input.
+	const left = { messages: new Map(), agent: null, exit: null };
+	try {
+		return await remainderOf(args, left);
+	} catch (err) {
+		const why = `an error ended it (${errText(err)})`;
+		left.exit ??= why;
+		if (left.messages.size === 0) left.agent ??= `${why}, before this agent's usage was read`;
+		throw err;
+	} finally {
+		// SessionEnd's one exit sweep: every exit above passes through here.
+		if (args.final === true) await sweepRemainder(args.sessionId, args.agentId, left);
+	}
+}
+
+/**
+ * `postRemainder`'s body. It writes no deferral: each exit says only why (`left.exit`, or
+ * `left.agent` when the agent's usage was never read), and the sweep writes what is left. A
+ * message leaves `left` once it is posted, refused, or its group's own gap is written: until
+ * then an exit, a throw included, leaves it to the sweep. An unresolved vehicle is not in
+ * `left`: it was written down as `unresolved` when it became one.
+ */
+async function remainderOf(
+	{ sessionId, agentId, agentTypeHint, input, hook, reserveMs, lockWaitMs = 0, serverDown = false },
+	left,
+) {
+	if (serverDown) {
+		left.agent = "the server stopped answering, so this agent's usage was not posted";
+		return { skipped: "the server stopped answering" };
+	}
 	const opened = await openAgent({ sessionId, agentId, input, waitMs: lockWaitMs });
 	if (opened.kind === "estimate") return { skipped: opened.reason };
 	if (opened.kind === "unavailable") {
-		if (final) {
-			await finalDeferral({
-				sessionId,
-				agentId,
-				reason: `transcript state unavailable (${opened.reason}), so this agent's usage was not posted`,
-			});
-		}
+		left.agent = `transcript state unavailable (${opened.reason}), so this agent's usage was not posted`;
 		return { skipped: opened.reason };
 	}
-	if (opened.kind === "busy") return { skipped: "a concurrent hook holds this agent's lock" };
+	if (opened.kind === "busy") {
+		// A concurrent Stop holding the lock posts the usage; a hook that died holding it, within
+		// the lock's stale window, leaves it unposted. Which one cannot be told from here.
+		left.agent =
+			"another hook holds this agent's lock, so its usage was not posted here (a concurrent settle point may post it)";
+		return { skipped: "a concurrent hook holds this agent's lock" };
+	}
 	const { cursor } = opened;
 	const summary = { posted: 0, notes: [], serverDown: false };
 	const callBudget = () => Math.min(callTimeoutCap(), Math.floor((timeLeft() - reserveMs) / 3));
 	try {
-		const fresh = await selectOwn(opened, { final: final ? { sessionId, agentId } : null });
+		const fresh = await selectOwn(opened, { left });
 		await opened.save();
 		if (fresh.length === 0 && cursor.unresolved.size === 0) return summary;
 		// What the server honours decides what these calls may carry (see lib.mjs).
@@ -2332,6 +2398,7 @@ export async function postRemainder({
 			const timeoutMs = callBudget();
 			if (timeoutMs < minCall()) {
 				summary.notes.push("unresolved settles: deferred to the next settle point (out of time)");
+				left.exit = "out of time";
 				return summary;
 			}
 			const counts = vehicleCounts(vehicle);
@@ -2373,20 +2440,21 @@ export async function postRemainder({
 			} else summary.notes.push(`unresolved ${vehicle.model} settle: ${result.reason}`);
 			await opened.save();
 			if (result.outcome !== "settled" && result.outcome !== "denied") {
-				await recordSettleGap({
-					phase: "remainder",
+				// Its ids carry no time: the record starts when its labels say, else unknown.
+				await recordRemainderGap({
+					sessionId,
+					agentId,
 					outcome: result.outcome,
-					session: sessionId,
-					agent: agentId,
 					transferId: result.transferId,
 					reason: result.reason,
 					started: vehicle.labels?.usageFrom ?? null,
 					model: vehicle.model,
-					messages: vehicle.ids.length,
+					count: vehicle.ids.length,
 				});
 			}
 			if (result.serverDown) {
 				summary.serverDown = true;
+				left.exit = "the server stopped answering";
 				return summary;
 			}
 		}
@@ -2399,20 +2467,7 @@ export async function postRemainder({
 			fresh,
 			jobs === null ? undefined : (m) => labelsFor(jobs, m.ts).key,
 		);
-		const pending = [...groups.values()];
-		// At SessionEnd, the groups a break leaves (out of time, or the server down) are written down.
-		const leave = async (from, why) => {
-			if (!final) return;
-			for (const left of pending.slice(from)) {
-				await finalDeferral({
-					sessionId,
-					agentId,
-					reason: `${left[0].model}: not posted (${why})`,
-					messages: left,
-				});
-			}
-		};
-		for (const [index, messages] of pending.entries()) {
+		for (const messages of groups.values()) {
 			const model = messages[0].model;
 			const span = jobs === null ? {} : usageSpan(messages);
 			const labels =
@@ -2426,7 +2481,7 @@ export async function postRemainder({
 			const timeoutMs = callBudget();
 			if (timeoutMs < minCall()) {
 				summary.notes.push(`${model}: deferred to the next settle point (out of time)`);
-				await leave(index, "out of time");
+				left.exit = "out of time";
 				break;
 			}
 			const ids = messages.map((m) => m.id);
@@ -2478,21 +2533,21 @@ export async function postRemainder({
 				});
 			} else summary.notes.push(`${model}: ${result.outcome} — ${result.reason}`);
 			if (result.outcome !== "settled" && result.outcome !== "denied") {
-				await recordSettleGap({
-					phase: "remainder",
+				await recordRemainderGap({
+					sessionId,
+					agentId,
 					outcome: result.outcome,
-					session: sessionId,
-					agent: agentId,
 					transferId: result.transferId,
 					reason: result.reason,
-					started: usageSpan(messages).usageFrom ?? null,
 					model,
-					messages: ids.length,
+					messages,
 				});
 			}
+			// Posted, refused, or written down: no longer the sweep's.
+			for (const id of ids) left.messages.delete(id);
 			if (result.serverDown) {
 				summary.serverDown = true;
-				await leave(index + 1, "the server stopped answering");
+				left.exit = "the server stopped answering";
 				break;
 			}
 		}

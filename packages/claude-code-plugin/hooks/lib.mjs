@@ -89,12 +89,43 @@ const NEVER_SENT_CODES = new Set([
 ]);
 
 /**
- * Every request to the server is answered by the server itself: a redirect is never followed.
- * fetch follows one by default, and a failure on the hop after it would be read as the
- * server's own: a refused connection there would say a settle the server had already acted on
- * was never sent (`neverSent`). With `manual`, a 3xx is returned as it came.
+ * fetch never follows a redirect on its own: by default it would, and a failure on the hop after
+ * it would be read as the server's own. A refused connection there would say a settle the server
+ * had already acted on was never sent (`neverSent`). With `manual`, a 3xx is returned as it came,
+ * and `fetchServer` decides what to follow.
  */
 const NO_REDIRECT = { redirect: "manual" };
+
+/** The redirects `fetchServer` follows: the two that keep the method and the body. */
+const FOLLOWED = new Set([307, 308]);
+
+/**
+ * A request to the server, as `serverRequest` and the capability probe make it. It follows by
+ * hand ONE 307 or 308 whose `Location` has the origin (scheme, host and port) of the URL asked,
+ * re-sending the same method, body and headers, `Authorization` included: the fetch of 2.0.0
+ * followed such a redirect, so a server whose routes redirect within their origin kept working.
+ * Anything else is returned as the answer it is: a 301, 302 or 303, a redirect to another
+ * origin, a second redirect, a `Location` that does not parse.
+ *
+ * `onSent` runs once the first response is in hand. From then on the request WAS sent, whatever
+ * ends the follow: a timeout or a refused connection on the second hop may follow a request the
+ * server already acted on, so it can never read as never sent.
+ */
+async function fetchServer(url, init, onSent = () => {}) {
+	const first = await fetch(url, { ...init, ...NO_REDIRECT });
+	onSent();
+	if (!FOLLOWED.has(first.status)) return first;
+	const location = first.headers.get("location");
+	let next = null;
+	try {
+		next = location === null ? null : new URL(location, url);
+	} catch {
+		next = null;
+	}
+	if (next === null || next.origin !== new URL(url).origin) return first;
+	await first.arrayBuffer();
+	return fetch(next.href, { ...init, ...NO_REDIRECT });
+}
 
 /**
  * Whether a fetch failure proves its request never left: the connection was never made, or
@@ -1034,7 +1065,8 @@ function timedOut(deadlineMs) {
  * second and a fifth of this hook's budget (`budgetShare(0.2)`, as the capability probe), so it
  * never takes the time a settle point needs: SessionEnd's whole budget is 1.2 s. An answer is the
  * whole of it, its body read: a server that sends its headers and then stalls has not answered.
- * Null when there is no time to ask at all: the probe did not run, and decides nothing
+ * A redirect is such an answer, as it came, never followed: the probe asks only whether the server
+ * answers. Null when there is no time to ask at all: the probe did not run, and decides nothing
  * (breaker.mjs `consultBreaker`). Not counted as a timeout: it is the breaker's own question.
  */
 async function healthAnswers() {
@@ -1090,10 +1122,9 @@ export async function breakerOpen() {
  * answer and a timeout are counted by the breaker (watch mode, `breakerOpen`): an answer once
  * its body is read, so headers and then a stall count as the timeout they end in.
  *
- * A redirect is never followed (`NO_REDIRECT`): a 3xx is the server's answer, read by its status
- * as any other that is not a 200. The server may have acted on the request before it redirected
- * it, so the ending of a hop after it, a refused connection above all, cannot say the request
- * was never sent.
+ * One same-origin 307 or 308 is followed (`fetchServer`); any other 3xx is the server's answer,
+ * read by its status as any other that is not a 200. Once the first response is in, the request
+ * was sent: no ending after it can say it was not, as the server may have acted on it.
  */
 export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 	const { refused, key } = settings();
@@ -1102,14 +1133,20 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 	if (!(timeoutMs > 0)) throw new TransportError("hook time budget spent", { unsent: true });
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
+	let sent = false;
 	try {
-		const response = await fetch(routeUrl(path), {
-			method: "POST",
-			headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-			body: JSON.stringify(body),
-			signal: controller.signal,
-			...NO_REDIRECT,
-		});
+		const response = await fetchServer(
+			routeUrl(path),
+			{
+				method: "POST",
+				headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+				body: JSON.stringify(body),
+				signal: controller.signal,
+			},
+			() => {
+				sent = true;
+			},
+		);
 		const text = await response.text();
 		answered();
 		let json = null;
@@ -1124,7 +1161,7 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 		if (aborted) timedOut(timeoutMs);
 		throw new TransportError(err instanceof Error ? err.message : String(err), {
 			timedOut: aborted,
-			unsent: !aborted && neverSent(err),
+			unsent: !aborted && !sent && neverSent(err),
 		});
 	} finally {
 		clearTimeout(timeout);
@@ -1253,10 +1290,7 @@ export function serverCapabilities() {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
-			const response = await fetch(routeUrl("/v1/health"), {
-				signal: controller.signal,
-				...NO_REDIRECT,
-			});
+			const response = await fetchServer(routeUrl("/v1/health"), { signal: controller.signal });
 			// Answered once its body is read: headers and then a stall end in the timeout.
 			const text = await response.text();
 			answered();

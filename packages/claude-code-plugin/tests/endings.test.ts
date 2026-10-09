@@ -67,6 +67,8 @@ interface Seen {
 	method: string;
 	path: string;
 	body: Record<string, unknown>;
+	auth: string | undefined;
+	reply: Reply;
 }
 
 let servers: Server[] = [];
@@ -121,8 +123,8 @@ function startServer(): Promise<string> {
 				}
 				const nth = (counts.get(path) ?? 0) + 1;
 				counts.set(path, nth);
-				seen.push({ method: req.method ?? "", path, body });
 				const reply = replyFor(path, nth);
+				seen.push({ method: req.method ?? "", path, body, auth: req.headers.authorization, reply });
 				if (reply === "hang") return;
 				if (reply === "drop") {
 					req.socket.destroy();
@@ -1173,5 +1175,505 @@ describe("SessionEnd, the last settle point: what it cannot finish is written do
 		expect(written).toMatchObject([{ outcome: "deferred", agent: "main", messages: 1 }]);
 		expect(String(written[0]?.reason)).toContain("could not be claimed (EACCES)");
 		await chmod(join(stateDir, "transcripts", "claims"), 0o700);
+	});
+});
+
+// ── The fixes of the sixth review round: the mechanisms that replace exit-by-exit patching ──
+
+const FAULT_AT = join(import.meta.dirname, "helpers", "fault-at.mjs");
+const seBudget = (ms: number) => ({ CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: String(ms + 300) });
+const seInput = () => ({ ...stopInput(), hook_event_name: "SessionEnd", reason: "other" });
+
+/** One complete response, as Claude Code writes it, at `ts` (ISO) when given. */
+const response = (id: string, model: string, ts?: string) =>
+	JSON.stringify({
+		type: "assistant",
+		sessionId: SESSION,
+		uuid: `${id}-final`,
+		...(ts === undefined ? {} : { timestamp: ts }),
+		message: {
+			id,
+			model,
+			role: "assistant",
+			type: "message",
+			stop_reason: "end_turn",
+			content: [{ type: "text", text: "x" }],
+			usage: {
+				input_tokens: 5,
+				output_tokens: 6,
+				cache_read_input_tokens: 0,
+				cache_creation_input_tokens: 0,
+			},
+		},
+	});
+const writeLines = (path: string, lines: string[]) =>
+	writeFile(path, lines.length === 0 ? "" : `${lines.join("\n")}\n`);
+/** The state is older than any message a test writes, so every message is the session's to post. */
+async function backdate(): Promise<void> {
+	await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+	await writeFile(join(stateDir, "transcripts", "since"), "2000-01-01T00:00:00.000Z");
+}
+const answered = (request: Seen, status: number) =>
+	typeof request.reply === "object" && request.reply.status === status;
+const replyJson = (request: Seen) =>
+	(typeof request.reply === "object" ? request.reply.json : undefined) as
+		| Record<string, unknown>
+		| undefined;
+/** Messages a remainder authorize carried, for the authorizes `pick` selects. */
+const carried = (pick: (authorize: Seen) => boolean) =>
+	requests("/v1/authorize")
+		.filter(pick)
+		.reduce((n, r) => n + Number((r.body.params as Record<string, unknown>)?.messages ?? 0), 0);
+
+describe("SessionEnd's one exit sweep: whatever the exit, what it selected and did not post is written down, once", () => {
+	const main = transcriptPath;
+	type Scenario = {
+		/** The exit, as the code names it. */
+		exit: string;
+		lines: () => string[];
+		prepare?: () => Promise<void>;
+		budgetMs?: number;
+		fault?: string;
+		/** Messages the remainder selected: the transcript's, unless it never read them. */
+		selected: number;
+		posted: number;
+		refused?: number;
+		recorded?: number;
+		deferred: number;
+		/** Agents written down whole, their usage never read. */
+		agents?: string[];
+		why?: string;
+		said?: string;
+	};
+	const TWO = () => [response("msg_a", SONNET), response("msg_b", HAIKU)];
+	const ONE = () => [response("msg_a", SONNET)];
+	/** A Stop leaves an unresolved vehicle (haiku, under a key) for SessionEnd to retry first. */
+	const vehicleFirst = async () => {
+		capabilities = ["idempotency-key"];
+		await writeLines(main(), [response("msg_v", HAIKU)]);
+		fixed.set("/v1/settle#1", { status: 503, json: { error: "unavailable" } });
+		await run("stop", stopInput());
+		nodeFs.rmSync(join(stateDir, "watch.jsonl"), { force: true });
+		seen = [];
+		counts = new Map();
+		fixed = new Map();
+		await writeLines(main(), [response("msg_v", HAIKU), response("msg_a", SONNET)]);
+	};
+	const scenarios: Scenario[] = [
+		{ exit: "every group posted (the control)", lines: TWO, selected: 2, posted: 2, deferred: 0 },
+		{
+			exit: "a group refused (402)",
+			lines: TWO,
+			prepare: async () => {
+				fixed.set("/v1/authorize#1", ANSWER.refusal402 as Reply);
+			},
+			selected: 2,
+			posted: 1,
+			refused: 1,
+			deferred: 0,
+		},
+		{ exit: "nothing new to post", lines: () => [], selected: 0, posted: 0, deferred: 0 },
+		{
+			exit: "selection: out of time to claim",
+			lines: TWO,
+			budgetMs: 0,
+			selected: 2,
+			posted: 0,
+			deferred: 2,
+			why: "not claimed (out of time)",
+		},
+		{
+			exit: "selection: a claim that fails",
+			lines: TWO,
+			prepare: async () => {
+				await mkdir(join(stateDir, "transcripts", "claims"), { recursive: true, mode: 0o700 });
+				await chmod(join(stateDir, "transcripts", "claims"), 0o500);
+			},
+			selected: 2,
+			posted: 0,
+			deferred: 2,
+			why: "could not be claimed (EACCES)",
+		},
+		{
+			exit: "selection: a message an earlier settle point claimed and did not post",
+			lines: TWO,
+			prepare: async () => {
+				// Stop claims both, and the server stops answering at the first group's authorize: the
+				// first group is released, the second never tried, and SessionEnd finds both claimed.
+				aim("/v1/authorize", 1, "timeout", null);
+				await run("stop", stopInput());
+				nodeFs.rmSync(join(stateDir, "watch.jsonl"), { force: true });
+				seen = [];
+				counts = new Map();
+				aimed = null;
+			},
+			budgetMs: 0,
+			selected: 2,
+			posted: 0,
+			deferred: 2,
+			// A released group keeps its claims: both are this agent's own, and neither is posted.
+			why: "not posted (out of time)",
+		},
+		{
+			exit: "the retry loop: out of time",
+			lines: () => [response("msg_v", HAIKU), response("msg_a", SONNET)],
+			prepare: vehicleFirst,
+			fault: "__main.json|1|sleep 800",
+			selected: 1,
+			posted: 0,
+			deferred: 1,
+			why: "not posted (out of time)",
+			said: "unresolved settles: deferred to the next settle point (out of time)",
+		},
+		{
+			exit: "the retry loop: the server stops answering",
+			lines: () => [response("msg_v", HAIKU), response("msg_a", SONNET)],
+			prepare: async () => {
+				await vehicleFirst();
+				capabilities = ["idempotency-key"];
+				aim("/v1/authorize", 1, "timeout", null);
+			},
+			selected: 1,
+			posted: 0,
+			deferred: 1,
+			why: "not posted (the server stopped answering)",
+		},
+		{
+			exit: "the group loop: out of time",
+			lines: TWO,
+			fault: "__main.json|3|sleep 900",
+			selected: 2,
+			posted: 1,
+			deferred: 1,
+			why: "not posted (out of time)",
+			said: `${HAIKU}: deferred to the next settle point (out of time)`,
+		},
+		{
+			exit: "the group loop: the server stops answering",
+			lines: TWO,
+			prepare: async () => aim("/v1/authorize", 1, "timeout", null),
+			selected: 2,
+			posted: 0,
+			recorded: 1,
+			deferred: 1,
+			why: "not posted (the server stopped answering)",
+		},
+		{
+			exit: "an error after selection (the cursor's save fails)",
+			lines: TWO,
+			fault: "__main.json|1|throw",
+			selected: 2,
+			posted: 0,
+			deferred: 2,
+			why: "not posted (an error ended it (injected rename failure))",
+		},
+		{
+			exit: "the agent's lock is busy",
+			lines: TWO,
+			prepare: async () => {
+				const lock = join(stateDir, "transcripts", `${SESSION}__main.json.lock`);
+				await mkdir(lock, { recursive: true });
+				await writeFile(join(lock, "owner"), "another hook");
+			},
+			selected: 0,
+			posted: 0,
+			deferred: 0,
+			agents: ["main"],
+			why: "another hook holds this agent's lock",
+		},
+		{
+			exit: "the agent's state is unavailable",
+			lines: TWO,
+			prepare: async () => {
+				await writeFile(join(stateDir, "transcripts", `${SESSION}__main.json`), "{ not a cursor");
+			},
+			selected: 0,
+			posted: 0,
+			deferred: 0,
+			agents: ["main"],
+			why: "transcript state unavailable",
+		},
+		{
+			exit: "the agent settles at the estimate (nothing to post)",
+			lines: TWO,
+			prepare: async () => {
+				await mkdir(join(stateDir, "transcripts", "estimate"), { recursive: true, mode: 0o700 });
+				await writeFile(join(stateDir, "transcripts", "estimate", `${SESSION}__main`), "");
+			},
+			selected: 0,
+			posted: 0,
+			deferred: 0,
+		},
+		{
+			exit: "an agent after the server stopped answering",
+			lines: ONE,
+			prepare: async () => {
+				const subagents = join(projectDir, SESSION, "subagents");
+				await mkdir(subagents, { recursive: true });
+				await writeLines(join(subagents, "agent-a1.jsonl"), [response("msg_s", HAIKU)]);
+				aim("/v1/authorize", 1, "timeout", null);
+			},
+			selected: 1,
+			posted: 0,
+			recorded: 1,
+			deferred: 0,
+			agents: ["a1"],
+			why: "the server stopped answering, so this agent's usage was not posted",
+		},
+	];
+	it.each(scenarios.map((scenario) => [scenario.exit, scenario] as const))(
+		"%s",
+		async (_, scenario) => {
+			await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+			await writeLines(main(), scenario.lines());
+			await scenario.prepare?.();
+			const end = await runHook(
+				join(HOOKS, "session-end.mjs"),
+				seInput(),
+				envFor({
+					...seBudget(scenario.budgetMs ?? 1_200),
+					...(scenario.fault === undefined ? {} : { UT_CC_FAULT: scenario.fault }),
+				}),
+				scenario.fault === undefined ? [] : ["--import", FAULT_AT],
+			);
+			await chmod(join(stateDir, "transcripts", "claims"), 0o700).catch(() => {});
+			const remainder = (await phased("remainder")).filter(
+				(record) =>
+					record.model !== HAIKU || !scenario.lines().some((line) => line.includes("msg_v")),
+			);
+			const deferred = remainder.filter((r) => r.outcome === "deferred");
+			const ofMessages = deferred.filter((r) => r.messages !== undefined && r.agent === "main");
+			const whole = deferred.filter((r) => r.messages === undefined).map((r) => r.agent);
+			const recorded = remainder.filter((r) => r.outcome !== "deferred");
+			const sum = (rs: WatchRecord[]) => rs.reduce((n, r) => n + Number(r.messages ?? 0), 0);
+			const settled = new Set(
+				requests("/v1/settle")
+					.filter((r) => answered(r, 200) && replyJson(r)?.settled !== false)
+					.map((r) => r.body.transferId),
+			);
+			const posted = carried((r) => answered(r, 200) && settled.has(replyJson(r)?.transferId));
+			const refused = carried((r) => answered(r, 402));
+			// The sweep's defining property: every message selected is posted, refused, written down
+			// by its group, or deferred by the sweep, and exactly one of these.
+			expect({ posted, refused, recorded: sum(recorded), deferred: sum(ofMessages) }).toEqual({
+				posted: scenario.posted,
+				refused: scenario.refused ?? 0,
+				recorded: scenario.recorded ?? 0,
+				deferred: scenario.deferred,
+			});
+			expect(posted + refused + sum(recorded) + sum(ofMessages)).toBe(scenario.selected);
+			expect(whole.sort()).toEqual(scenario.agents ?? []);
+			if (scenario.why !== undefined) {
+				for (const record of deferred) expect(String(record.reason)).toContain(scenario.why);
+			}
+			if (scenario.said !== undefined) expect(end.stderr).toContain(scenario.said);
+		},
+		LONG,
+	);
+});
+
+describe("one writer for a remainder's records: each job's record starts at that job's own first message, whatever the server says of `job`", () => {
+	const now = Date.now();
+	const at = (offsetS: number) => new Date(now + offsetS * 1000).toISOString();
+	const line = (ts: string, op: string, job: string | null) =>
+		JSON.stringify({ sid: SESSION, ts, op, job });
+	const log = `${[
+		line(at(-60), "session-start", null),
+		line(at(-50), "start", "job-a"),
+		line(at(-30), "stop", null),
+		line(at(-20), "start", "job-b"),
+		line(at(-5), "stop", null),
+	].join("\n")}\n`;
+	const states: Array<[string, () => void]> = [
+		[
+			"`job` honoured",
+			() => {
+				capabilities = ["job"];
+			},
+		],
+		[
+			"`job` absent",
+			() => {
+				capabilities = [];
+			},
+		],
+		[
+			"capabilities unknown",
+			() => {
+				for (let n = 1; n <= 4; n += 1) fixed.set(`/v1/health#${n}`, ANSWER.error5xx as Reply);
+			},
+		],
+	];
+	const endings: Array<[string, string, () => void, "stop" | "session-end"]> = [
+		[
+			"Stop, an authorize refused (400)",
+			"released",
+			() => {
+				for (let n = 1; n <= 2; n += 1) fixed.set(`/v1/authorize#${n}`, ANSWER.other4xx as Reply);
+			},
+			"stop",
+		],
+		[
+			"Stop, a settle answered 503",
+			"claimed",
+			() => {
+				for (let n = 1; n <= 2; n += 1) fixed.set(`/v1/settle#${n}`, ANSWER.error5xx as Reply);
+			},
+			"stop",
+		],
+		[
+			"Stop, a settle answered settled:false",
+			"claimed",
+			() => {
+				for (let n = 1; n <= 2; n += 1) fixed.set(`/v1/settle#${n}`, ANSWER.unsettled as Reply);
+			},
+			"stop",
+		],
+		["SessionEnd, out of time", "deferred", () => {}, "session-end"],
+	];
+	const cases = states.flatMap(([state, setState]) =>
+		endings.map(
+			([ending, outcome, setEnding, hook]) =>
+				[state, ending, outcome, setState, setEnding, hook] as const,
+		),
+	);
+	it.each(cases)(
+		"%s × %s: one %s record per job, each at its own first message",
+		async (_, __, outcome, setState, setEnding, hook) => {
+			await backdate();
+			await mkdir(join(stateDir, "jobs"), { recursive: true });
+			await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), log);
+			await writeLines(transcriptPath(), [
+				response("msg_a", SONNET, at(-40)),
+				response("msg_b", SONNET, at(-10)),
+			]);
+			setState();
+			setEnding();
+			if (hook === "stop") await run("stop", stopInput());
+			else await run("session-end", seInput(), seBudget(0));
+			const written = await phased("remainder");
+			expect(
+				written
+					.map((r) => ({ outcome: r.outcome, started: r.started, messages: r.messages }))
+					.sort((x, y) => String(x.started).localeCompare(String(y.started))),
+			).toEqual([
+				{ outcome, started: at(-40), messages: 1 },
+				{ outcome, started: at(-10), messages: 1 },
+			]);
+			const { jobCoverage } = (await import(pathToFileURL(join(HOOKS, "job-log.mjs")).href)) as {
+				jobCoverage(args: {
+					job: string;
+					logs: Record<string, string>;
+					records: unknown[];
+					watch: unknown[];
+				}): { knownGaps: Array<{ gap: string }> };
+			};
+			for (const job of ["job-a", "job-b"]) {
+				const coverage = jobCoverage({
+					job,
+					logs: { [SESSION]: log },
+					records: [],
+					watch: written,
+				});
+				expect(coverage.knownGaps.map((gap) => gap.gap)).toContain(
+					`session ${SESSION}: a gap fell inside an interval of ${job}`,
+				);
+			}
+		},
+		LONG,
+	);
+});
+
+describe("a redirect the plugin follows by hand: one, to the same origin, a 307 or a 308", () => {
+	/** A transcript hold's settle, unkeyed: `claimed` when it may have posted, `released` when not. */
+	const settleTranscriptHold = async () => {
+		capabilities = ["release"];
+		await seedHold("tu_1", "tx_1", WINDOW);
+		return run("post-tool-use", postInput("tu_1"));
+	};
+	const to = (location: string, status = 307): Reply => ({
+		status,
+		json: { moved: true },
+		headers: { location },
+	});
+	it.each<[number, string]>([
+		[307, "absolute"],
+		[308, "relative"],
+	])(
+		"a same-origin %i (%s Location): followed once, with the same method, body and key; settled",
+		async (status, form) => {
+			fixed.set(
+				"/v1/settle#1",
+				to(form === "absolute" ? `${url}/v1/settle` : "/v1/settle", status),
+			);
+			await settleTranscriptHold();
+			const settles = requests("/v1/settle");
+			expect(settles).toHaveLength(2);
+			expect(settles[0]?.auth).toBe("Bearer k");
+			expect(settles[1]).toMatchObject({
+				method: "POST",
+				body: settles[0]?.body,
+				auth: "Bearer k",
+			});
+			expect(await records()).toEqual([]);
+			expect(await holdFiles()).toEqual([]);
+		},
+	);
+	it("a same-origin 307 answered by a second 307: the second is not followed, and is the answer: claimed", async () => {
+		fixed.set("/v1/settle#1", to("/v1/settle"));
+		fixed.set("/v1/settle#2", to("/v1/settle"));
+		await settleTranscriptHold();
+		expect(requests("/v1/settle")).toHaveLength(2);
+		expect(await phased("settle")).toMatchObject([{ outcome: "claimed", transferId: "tx_1" }]);
+	});
+	it("a 307 to another origin (another port): not followed, and is the answer: claimed", async () => {
+		let reached = 0;
+		const other = createServer((req, res) => {
+			reached += 1;
+			req.resume();
+			res.writeHead(200, { "content-type": "application/json", connection: "close" });
+			res.end(JSON.stringify({ settled: true }));
+		});
+		servers.push(other);
+		await new Promise<void>((resolve) => other.listen(0, "127.0.0.1", () => resolve()));
+		const port = (other.address() as { port: number }).port;
+		fixed.set("/v1/settle#1", to(`http://127.0.0.1:${port}/v1/settle`));
+		await settleTranscriptHold();
+		expect(reached).toBe(0);
+		expect(requests("/v1/settle")).toHaveLength(1);
+		expect(await phased("settle")).toMatchObject([{ outcome: "claimed", transferId: "tx_1" }]);
+	});
+	it.each([301, 302, 303])(
+		"a same-origin %i: not followed, and is the answer: claimed",
+		async (status) => {
+			fixed.set("/v1/settle#1", to("/v1/settle", status));
+			await settleTranscriptHold();
+			expect(requests("/v1/settle")).toHaveLength(1);
+			expect(await phased("settle")).toMatchObject([{ outcome: "claimed", transferId: "tx_1" }]);
+		},
+	);
+	it("a followed request whose next hop is refused was sent all the same: claimed, never released", async () => {
+		fixed.set("/v1/settle#1", to(`${url}/v1/settle`));
+		closeAfter = { path: "/v1/settle", nth: 1 };
+		await settleTranscriptHold();
+		expect(requests("/v1/settle")).toHaveLength(1);
+		expect(await phased("settle")).toMatchObject([{ outcome: "claimed", transferId: "tx_1" }]);
+	});
+	it(
+		"a followed request whose next hop times out: claimed, never released",
+		async () => {
+			fixed.set("/v1/settle#1", to("/v1/settle"));
+			fixed.set("/v1/settle#2", "hang");
+			await settleTranscriptHold();
+			expect(requests("/v1/settle")).toHaveLength(2);
+			expect(await phased("settle")).toMatchObject([{ outcome: "claimed", transferId: "tx_1" }]);
+		},
+		LONG,
+	);
+	it("the capability probe follows a same-origin 308: the capabilities are known", async () => {
+		fixed.set("/v1/health#1", to("/v1/health", 308));
+		const pre = await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+		expect(requests("/v1/health")).toHaveLength(2);
+		expect(pre.stderr).not.toContain("capabilities are unknown");
 	});
 });

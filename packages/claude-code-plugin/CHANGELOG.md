@@ -37,15 +37,23 @@ npm, and its version is its own: the `usertrust` packages and their
 - **An estimate settle answered `settled: false` is a `claimed` gap**, as a transcript hold's
   is: its charge may be missing.
 - **SessionEnd, the last settle point, writes down what it cannot finish**: a `deferred`
-  remainder gap for usage it leaves unposted (out of time, or a claim that fails), one per job
-  the usage spans, and its call's gap for a hold it has no time to give back. Its breaker probe
-  takes at most a fifth of its budget.
-- **No request follows a redirect.** A 3xx is the server's answer, read by its status: a
-  settle answered with one is never `released`, as the server may have acted on it, and no
-  hop after it can make the request read as never sent. A server URL whose routes redirect
-  within the same origin, which worked before, now fails every call: set the URL the server
-  answers at. One that redirects to another origin never worked, as fetch drops the key when
-  it follows such a redirect.
+  remainder gap for whatever it selected and did not post, whatever stopped it, and for an
+  agent whose usage it never read (the server down, an unusable state, a lock another hook
+  holds); and its call's gap for a hold it has no time to give back. Its breaker probe takes at
+  most a fifth of its budget.
+- **A remainder's gap is one record per job** of the session's job log, at Stop as at
+  SessionEnd, each started at its own first message, whether or not the server records jobs.
+- **A redirect is followed only to the same origin, once, by hand.** A 307 or 308 to the URL's
+  own origin is re-sent with the same method, body and key, as before, and from its first
+  answer on the request counts as sent: no later ending reads as never sent. Any other 3xx is
+  the server's answer, read by its status: a settle answered with one is never `released`, as
+  the server may have acted on it. A redirect to another origin is never followed, so the key
+  is never sent there. Node's fetch already dropped the key on one (measured on Node 22.22.1,
+  22.23.3, 23.6.0 and 24.21.0); on older Node releases, which kept it, a server URL that
+  redirects to another origin worked before and must now be the URL the server answers at. So
+  must one behind a chain of redirects. A health route behind a 301, 302 or 303 now reads the
+  capabilities as unknown; through one of those, fetch had turned every other route's POST into
+  a GET with no body, which the server refuses.
 - **`usertrust-job coverage` lists a breaker's deferral inside a job's interval as a known
   gap**, as it does a gap: the record cannot say whether the usage was posted later.
 
