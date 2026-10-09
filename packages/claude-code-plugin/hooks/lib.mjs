@@ -26,7 +26,7 @@
 // (<safeSession>__<safeAgent>__<safeCall>.json). Each hold is then claimed,
 // settled, journalled and cleared through the path its listing found, so a 1.4.0
 // record is ended through its own name, once.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
 	appendFile,
 	link,
@@ -40,6 +40,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { consultBreaker, noteAnswer, noteTimeout } from "./breaker.mjs";
 import { hostEnv, howToSet, keyHash, refusalNote, settingName, settings } from "./config.mjs";
 
 /** Set by launch.mjs, which runs every hook: the hook's payload and its start. */
@@ -63,10 +64,16 @@ export function requireLaunch() {
 	if (launched === null) throw new Error("usertrust: a hook runs only through launch.mjs");
 }
 
+/**
+ * A request that got no answer. `timedOut` when this hook's own timer aborted it: the server
+ * may yet act on it, so its outcome is UNKNOWN, never "failed". Read from the abort itself,
+ * never parsed from a message.
+ */
 export class TransportError extends Error {
-	constructor(message) {
+	constructor(message, { timedOut = false } = {}) {
 		super(message);
 		this.name = "TransportError";
+		this.timedOut = timedOut;
 	}
 }
 
@@ -234,7 +241,7 @@ export function modeAnnouncement() {
 }
 
 /**
- * Append one watch record (`would_block` or `gap`) as a JSON line, with the time,
+ * Append one watch record (`would_block`, `gap` or `deferred`) as a JSON line, with the time,
  * session, agent and tool. Never throws: a record that cannot be written is said
  * on stderr, and the tool call proceeds either way. Returns whether the record was
  * written, so no note claims a record that is not there.
@@ -443,6 +450,9 @@ export async function recordUnconfirmedCall(sessionId, held, releaseClass) {
 		mode: guardMode(),
 		session: sessionId,
 		agent: held.agentId ?? "main",
+		// The hold it is about, so a record of the same hold elsewhere (its settle's, a deferral's)
+		// joins it.
+		...(typeof held.transferId === "string" ? { transferId: held.transferId } : {}),
 		tool: "(unconfirmed)",
 		reason:
 			releaseClass === "call-ran"
@@ -451,6 +461,106 @@ export async function recordUnconfirmedCall(sessionId, held, releaseClass) {
 		releaseClass,
 		started: callStart(held),
 	});
+}
+
+/**
+ * A settle or give-back of a hold, or a remainder's post, that ended other than `settled` or
+ * `returned`, written down as a gap (`kind: "gap"`), so watch.jsonl alone carries every one.
+ * - `phase`: settle, release, remainder or abandon.
+ * - `outcome`: `unknown` (this hook's own timer aborted the request, which may yet land),
+ *   `failed`, `claimed`, `unresolved`, `released` or `deferred`.
+ * - `transferId`, when the hold is known: a deferral of the same hold names it too
+ *   (`recordBreakerSkip`), and its settle's outcome decides it.
+ * A `skipped` ending (another hook is settling the hold, and writes its own) and a `denied` one
+ * (a budget refusal, recorded as such) are not written. Never throws; returns whether the
+ * record was written.
+ */
+export async function recordSettleGap({
+	phase,
+	outcome,
+	session,
+	agent,
+	transferId,
+	reason,
+	started,
+	...extra
+}) {
+	return recordWatchEvent({
+		kind: "gap",
+		mode: guardMode(),
+		phase,
+		outcome,
+		session,
+		agent: agent ?? "main",
+		...(typeof transferId === "string" ? { transferId } : {}),
+		reason: sanitizeReason(reason, outcome).slice(0, MAX_NOTE_CHARS),
+		started,
+		...extra,
+	});
+}
+
+/** A request's failure as an outcome: `unknown` when this hook's own timer aborted it, else `failed`. */
+export function failureOutcome(err) {
+	return err?.timedOut === true ? "unknown" : "failed";
+}
+
+/** The reason every record of a hook that skipped the network under an open breaker gives. */
+export const BREAKER_OPEN = "breaker-open";
+
+/**
+ * The one record of a hook that skipped the network because the breaker is open
+ * (`breakerOpen`): its `phase` is the hook, its `outcome` `deferred`, and `transferIds` the
+ * holds it left untouched (none for PreToolUse, whose call made none). `kind` says what that
+ * deferral is worth: `deferred` when a later hook of the session settles it all, `gap` when
+ * none will (an estimate-mode call, or SessionEnd). Returns whether it was written.
+ */
+export async function recordBreakerSkip({
+	kind,
+	phase,
+	session,
+	agent,
+	tool,
+	transferIds,
+	started,
+}) {
+	return recordWatchEvent({
+		kind,
+		mode: guardMode(),
+		phase,
+		outcome: "deferred",
+		session,
+		agent: agent ?? "main",
+		...(tool === undefined ? {} : { tool }),
+		...(transferIds === undefined ? {} : { transferIds }),
+		reason: BREAKER_OPEN,
+		started,
+	});
+}
+
+/**
+ * A settle point (Stop, SubagentStop, SessionEnd) under an open breaker: nothing is sent, and
+ * nothing is touched, no hold claimed, no window, no cursor. Its one record names the holds it
+ * leaves (a listing reads them, and changes nothing): `kind` deferred when a later hook of the
+ * session settles them, or gap at SessionEnd, after which none will unless the session is
+ * resumed. `agent` scopes it to one subagent's holds; null, the whole session's.
+ */
+export async function skipSettlePoint({ kind, phase, session, agent }) {
+	const held = await listPending(session, agent);
+	const recorded = await recordBreakerSkip({
+		kind,
+		phase,
+		session,
+		agent: agent ?? "main",
+		transferIds: held.map((entry) => entry.transferId),
+		started: null,
+	});
+	const after =
+		kind === "gap"
+			? "and the session is ending: unless it is resumed, no later hook settles them"
+			: "for the first hook after it closes";
+	say(
+		`usertrust: the server is not answering (its breaker is open): ${held.length} hold(s), and the transcript usage no hold carries, are left untouched, ${after}${recorded ? ` (recorded as ${kind === "gap" ? "a gap" : "deferred"})` : ""}`,
+	);
 }
 
 /** Errors that mean the state dir's filesystem cannot make hard links. */
@@ -851,9 +961,78 @@ export async function abandonHold(entry, what, session) {
 	return claimed !== null;
 }
 
+// ── The breaker (breaker.mjs) ──
+
+/** The server whose breaker this hook keeps: watch mode, with a server to send to; else none. */
+function breakerUrl() {
+	const { mode, refused, url } = settings();
+	return mode === "watch" && refused === null && typeof url === "string" ? url : null;
+}
+
+/** The server answered a request: a timeout before it was not one of a row. */
+function answered() {
+	const url = breakerUrl();
+	if (url !== null) noteAnswer(url);
+}
+
+/** This hook's own timer aborted a request after `deadlineMs`: one more timeout. */
+function timedOut(deadlineMs) {
+	const url = breakerUrl();
+	if (url !== null && noteTimeout(url, deadlineMs)) {
+		say(
+			"usertrust: the server stopped answering (3 timeouts within a minute): its breaker is open for a minute, and until then watch-mode hooks send nothing to it",
+		);
+	}
+}
+
+/**
+ * The half-open probe: whether the server answers `/v1/health` at all, any status, within a
+ * second (and what is left of this hook's budget). Not counted as a timeout: it is the
+ * breaker's own question.
+ */
+async function healthAnswers() {
+	const timeoutMs = Math.min(1_000, timeLeft());
+	if (!(timeoutMs > 0)) return false;
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), timeoutMs);
+	try {
+		const response = await fetch(routeUrl("/v1/health"), { signal: controller.signal });
+		await response.arrayBuffer().catch(() => {});
+		return true;
+	} catch {
+		return false;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+/**
+ * Whether this hook must leave the network alone: the host's breaker for its server is open
+ * (breaker.mjs). Watch mode only, and consulted ONCE, at the hook's start: a hook that starts
+ * closed sends everything it would have sent, timeouts and all, even when they open the
+ * breaker for the hooks after it. Stopping mid-hook would leave a hold claimed and never sent,
+ * and an unkeyed claim is never retried: usage that happened would read as usage that did not.
+ * Enforce never reads it.
+ */
+export async function breakerOpen() {
+	const url = breakerUrl();
+	if (url === null) return false;
+	const verdict = await consultBreaker(url, healthAnswers);
+	if (verdict.note !== undefined) {
+		say(
+			`usertrust: the breaker's directory is refused (${verdict.note}): it reads closed, and this hook sends as usual`,
+		);
+	}
+	if (verdict.reopened === true) {
+		say("usertrust: the server still does not answer: its breaker stays open for another minute");
+	}
+	return verdict.state === "open";
+}
+
 /**
  * POST to the governance server. `timeoutMs` bounds the whole exchange (5 s
- * unless the caller passes less); a spent budget throws without a request.
+ * unless the caller passes less); a spent budget throws without a request. An
+ * answer and a timeout are counted by the breaker (watch mode, `breakerOpen`).
  */
 export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 	const { refused, key } = settings();
@@ -869,6 +1048,7 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 			body: JSON.stringify(body),
 			signal: controller.signal,
 		});
+		answered();
 		const text = await response.text();
 		let json = null;
 		try {
@@ -878,7 +1058,11 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 		}
 		return { status: response.status, json };
 	} catch (err) {
-		throw new TransportError(err instanceof Error ? err.message : String(err));
+		const aborted = controller.signal.aborted;
+		if (aborted) timedOut(timeoutMs);
+		throw new TransportError(err instanceof Error ? err.message : String(err), {
+			timedOut: aborted,
+		});
 	} finally {
 		clearTimeout(timeout);
 	}
@@ -975,12 +1159,14 @@ export function jobCapable(capabilities) {
 
 /**
  * What the server honours (`/v1/health` `capabilities`), read once per hook
- * process. Never cached on disk: a cache could still claim keys after the server
- * was downgraded to one that strips them. Resolves to a Set — empty for an older
- * server, which publishes none — or to null when it is UNKNOWN: the probe failed
- * or ran out of time (noted on stderr, once). Unknown is not absent: a caller must
- * not send a key it cannot know is honoured, and must not treat a server that can
- * release as one that cannot (its abort would count as a breaker failure).
+ * process. The answer is never READ from disk: a cache could still claim keys after
+ * the server was downgraded to one that strips them. (One that answered is
+ * remembered for the principal alone: `principalCapable`.) Resolves to a Set —
+ * empty for an older server, which publishes none — or to null when it is UNKNOWN:
+ * the probe failed or ran out of time (noted on stderr, once). Unknown is not
+ * absent: a caller must not send a key it cannot know is honoured, and must not
+ * treat a server that can release as one that cannot (its abort would count as a
+ * breaker failure).
  *
  * WHY THIS GATES ANYTHING: an older usertrust-server's schemas STRIP request keys
  * they do not know. It would accept an `idempotencyKey` and drop it in silence —
@@ -989,30 +1175,126 @@ export function jobCapable(capabilities) {
 export function serverCapabilities() {
 	capabilitiesRead ??= (async () => {
 		const timeoutMs = Math.min(2_000, budgetShare(0.2), timeLeft());
-		const unknown = (why) => {
+		const unknown = async (why, { cache = true } = {}) => {
+			principalCachedAt = cache ? await cachedPrincipal() : null;
 			say(
-				`usertrust: the server's capabilities are unknown (${why}) — this hook sends no idempotency key or principal`,
+				principalCachedAt === null
+					? `usertrust: the server's capabilities are unknown (${why}) — this hook sends no idempotency key or principal`
+					: `usertrust: capabilities unknown (${why}) — a cached answer from ${principalCachedAt} says it records a principal: this hook sends it, and no idempotency key`,
 			);
 			return null;
 		};
 		const { refused } = settings();
-		if (refused !== null) return unknown(refused);
+		if (refused !== null) return unknown(refused, { cache: false });
 		if (!(timeoutMs > 0)) return unknown("hook time budget spent");
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
 			const response = await fetch(routeUrl("/v1/health"), { signal: controller.signal });
+			answered();
 			if (!response.ok) return unknown(`health returned ${response.status}`);
 			const json = await response.json();
 			const list = Array.isArray(json?.capabilities) ? json.capabilities : [];
-			return new Set(list.filter((c) => typeof c === "string"));
+			const capabilities = new Set(list.filter((c) => typeof c === "string"));
+			principalCachedAt = null;
+			await rememberCapabilities(capabilities);
+			return capabilities;
 		} catch (err) {
+			if (controller.signal.aborted) timedOut(timeoutMs);
 			return unknown(err instanceof Error ? err.message : String(err));
 		} finally {
 			clearTimeout(timeout);
 		}
 	})();
 	return capabilitiesRead;
+}
+
+// ── The cached `principal` capability ──
+//
+// A health probe fails exactly when the server is slow, and a call then went out with no
+// principal: the server recorded it unattributed. Capabilities do not change while a server
+// runs, so a probe that ANSWERED is remembered, per server and key, and a probe that fails
+// falls back to it for ONE question: may this hook send a principal? Never for keys: an older
+// server strips a key it does not know, so a remembered "keys honoured" would let a settle
+// retried under its key post twice after a downgrade. A principal sent to a server that
+// strips it costs nothing (the record is unattributed, as it would be anyway).
+
+const CAPABILITIES_DIR = "capabilities";
+/** How long a remembered answer is believed, by its file's mtime. */
+export const CAPABILITY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** When the remembered answer this hook's failed probe falls back to was last confirmed; null when none. */
+let principalCachedAt = null;
+
+/** The remembered answer of this server and key: <stateDir>/capabilities/<sha256(url)[0:16]>-<keyHash>.json. */
+function capabilitiesCachePath() {
+	const { url, key } = settings();
+	const server = createHash("sha256").update(String(url)).digest("hex").slice(0, 16);
+	return join(stateDir(), CAPABILITIES_DIR, `${server}-${keyHash(key)}.json`);
+}
+
+/**
+ * Remember a probe that answered: `{ capabilities, at }`, written whole (a temp file renamed
+ * over the name), 0600, and only when the answer changed. An unchanged one only renews the
+ * file's mtime, which the TTL reads. Never started for a server that records no principal,
+ * the one thing it is ever read for; but an answer that drops it replaces one that had it.
+ */
+async function rememberCapabilities(capabilities) {
+	try {
+		const path = capabilitiesCachePath();
+		const list = [...capabilities].sort();
+		let previous;
+		try {
+			previous = JSON.parse(await readFile(path, "utf-8"));
+		} catch {
+			previous = undefined;
+		}
+		if (
+			Array.isArray(previous?.capabilities) &&
+			JSON.stringify(previous.capabilities) === JSON.stringify(list)
+		) {
+			const now = new Date();
+			await utimes(path, now, now);
+			return;
+		}
+		if (previous === undefined && !capabilities.has("principal")) return;
+		await mkdir(join(stateDir(), CAPABILITIES_DIR), { recursive: true, mode: 0o700 });
+		await writeFileAtomic(
+			path,
+			JSON.stringify({ capabilities: list, at: new Date().toISOString() }),
+		);
+	} catch {
+		// A convenience: losing it loses only a principal on a failed probe.
+	}
+}
+
+/**
+ * When the remembered answer that lets a failed probe send a principal was last confirmed (an
+ * ISO time), or null: none, unreadable, corrupt, older than a day, its mtime in the FUTURE (a
+ * clock set back), or no `principal` in it.
+ */
+async function cachedPrincipal() {
+	try {
+		const path = capabilitiesCachePath();
+		const { mtimeMs } = await stat(path);
+		const age = Date.now() - mtimeMs;
+		if (!(age >= 0 && age <= CAPABILITY_CACHE_TTL_MS)) return null;
+		const value = JSON.parse(await readFile(path, "utf-8"));
+		return Array.isArray(value?.capabilities) && value.capabilities.includes("principal")
+			? new Date(mtimeMs).toISOString()
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether this hook may send a principal, given `capabilities` as `serverCapabilities` resolved
+ * them: the live answer when the probe answered; when it failed (null), the remembered answer
+ * (`cachedPrincipal`). Nothing else ever reads the remembered answer.
+ */
+export function principalCapable(capabilities) {
+	return capabilities !== null ? capabilities.has("principal") : principalCachedAt !== null;
 }
 
 /** A server's answer that it has no such route at all: an older server, not a refusal. */
@@ -1137,7 +1419,9 @@ export async function giveBack(transferId, reason, timeoutMs, releaseClass) {
  * when it is null, every agent's holds are (Stop — the session really is ending).
  * A hold that carries assigned transcript usage is NOT released here: it is a
  * settlement, and transcript.mjs settles it. Non-200 responses and transport
- * failures are reported to stderr but never thrown. Files are cleared
+ * failures are reported to stderr, and written down as gaps (`recordSettleGap`:
+ * `failed`, or `unknown` when this hook's timer cut the request off), but never
+ * thrown. Files are cleared
  * regardless: the session (or subagent) is over, so a hold that could not be
  * released is voided server-side by the pending-TTL sweep, and keeping the file
  * would only leak state-dir entries. A hold the hook budget no longer covers is
@@ -1166,18 +1450,32 @@ export async function cleanup(sessionId, agentId) {
 		// MAY have run and was never charged. That is unconfirmed, and it is a gap.
 		const ranUnconfirmed = entry.usage !== "transcript";
 		if (ranUnconfirmed) await recordUnconfirmedCall(sessionId, entry, "call-unconfirmed");
+		const releaseClass = ranUnconfirmed ? "call-unconfirmed" : "unused";
+		// A give-back the server did not confirm is written down too (F2a): the hold may be live.
+		const unconfirmed = (outcome, reason) =>
+			recordSettleGap({
+				phase: "release",
+				outcome,
+				session: sessionId,
+				agent: entry.agentId,
+				transferId: entry.transferId,
+				reason,
+				started: callStart(entry),
+				releaseClass,
+			});
 		try {
 			const response = await releaseHold(entry.transferId, "session ended with unsettled hold", {
 				timeoutMs,
-				releaseClass: ranUnconfirmed ? "call-unconfirmed" : "unused",
+				releaseClass,
 			});
 			if (response.status !== 200) {
 				say(`usertrust: ${response.route} ${entry.transferId} returned ${response.status}`);
+				await unconfirmed("failed", `${response.route} returned ${response.status}`);
 			}
 		} catch (err) {
-			say(
-				`usertrust: failed to give back ${entry.transferId}: ${err instanceof Error ? err.message : String(err)}`,
-			);
+			const why = err instanceof Error ? err.message : String(err);
+			say(`usertrust: failed to give back ${entry.transferId}: ${why}`);
+			await unconfirmed(failureOutcome(err), `give-back unanswered: ${why}`);
 		}
 		await clearPending(entry.path);
 	}
@@ -1209,22 +1507,32 @@ export async function cleanup(sessionId, agentId) {
 		// Otherwise the call RAN and its one settle went unanswered: the charge is unconfirmed, and a
 		// give-back of the hold proves nothing about what was charged. Written down as a gap.
 		if (!releasing) await recordUnconfirmedCall(sessionId, held, "call-ran");
+		const releaseClass = releasing ? "unused" : "call-ran";
+		const unconfirmed = (outcome, reason) =>
+			recordSettleGap({
+				phase: "release",
+				outcome,
+				session: sessionId,
+				agent: held.agentId,
+				transferId: held.transferId,
+				reason,
+				started: callStart(held),
+				releaseClass,
+			});
 		try {
 			const response = await releaseHold(
 				held.transferId,
 				"session ended after an unanswered settle",
-				{
-					timeoutMs,
-					releaseClass: releasing ? "unused" : "call-ran",
-				},
+				{ timeoutMs, releaseClass },
 			);
 			if (response.status !== 200 && response.status !== 404) {
 				say(`usertrust: ${response.route} ${held.transferId} returned ${response.status}`);
+				await unconfirmed("failed", `${response.route} returned ${response.status}`);
 			}
 		} catch (err) {
-			say(
-				`usertrust: failed to give back ${held.transferId}: ${err instanceof Error ? err.message : String(err)}`,
-			);
+			const why = err instanceof Error ? err.message : String(err);
+			say(`usertrust: failed to give back ${held.transferId}: ${why}`);
+			await unconfirmed(failureOutcome(err), `give-back unanswered: ${why}`);
 		}
 		await unlink(held.path).catch(() => {});
 	}

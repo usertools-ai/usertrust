@@ -12,7 +12,20 @@
 // v2.1.268 a hook without its own timeout kept 1.5 s even then). Every step is
 // sized to the budget, a Stop still finishing included: its lock is waited for
 // only a fifth of it. SessionEnd cannot block, and never fails a session.
-import { readStdin, requireLaunch, say, sessionEndBudgetMs, useHookBudget } from "./lib.mjs";
+//
+// While the server's breaker is open (lib.mjs `breakerOpen`, watch mode only), nothing is
+// sent and nothing is touched, and this is the session's last hook: no later one settles what
+// it leaves, unless the session is resumed. So its record is a GAP, not a deferral, naming the
+// holds it leaves (`skipSettlePoint`).
+import {
+	breakerOpen,
+	readStdin,
+	requireLaunch,
+	say,
+	sessionEndBudgetMs,
+	skipSettlePoint,
+	useHookBudget,
+} from "./lib.mjs";
 import { sessionEndLockWait, settleSession } from "./transcript.mjs";
 
 requireLaunch();
@@ -20,7 +33,16 @@ useHookBudget(sessionEndBudgetMs());
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
-	await settleSession({ input, hook: "SessionEnd", lockWaitMs: sessionEndLockWait() });
+	if (await breakerOpen()) {
+		await skipSettlePoint({
+			kind: "gap",
+			phase: "session-end",
+			session: input.session_id ?? "unknown",
+			agent: null,
+		});
+	} else {
+		await settleSession({ input, hook: "SessionEnd", lockWaitMs: sessionEndLockWait() });
+	}
 } catch (err) {
 	say(`usertrust: session-end settle failed: ${err instanceof Error ? err.message : String(err)}`);
 }

@@ -329,7 +329,10 @@ async function readCursor(agentId = "main"): Promise<Cursor> {
 async function holdFiles() {
 	// `watch.jsonl` is the plugin's watch log (a give-back of a hold whose call ran writes a gap
 	// record there), not a hold.
-	return (await readdir(stateDir)).filter((n) => n !== "transcripts" && n !== "watch.jsonl").sort();
+	// `capabilities` holds the server's remembered answer (lib.mjs `rememberCapabilities`), not a hold.
+	return (await readdir(stateDir))
+		.filter((n) => n !== "transcripts" && n !== "watch.jsonl" && n !== "capabilities")
+		.sort();
 }
 
 beforeEach(async () => {

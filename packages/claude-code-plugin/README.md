@@ -454,8 +454,8 @@ Run it as an ordinary Bash call (the session id is `$CLAUDE_CODE_SESSION_ID`). J
   diagnostic, not a certification: an empty list does not mean the figure is complete.** Gaps include: the
   job is still running; a record of the job outside its intervals or without a complete usage window; a call
   of another or no job overlapping it; a call, gap or refusal that cannot be placed because its session has
-  no usable log; a denied request of the job; a `would_block` or an unmetered `gap` (read from
-  `watch.jsonl`, or `--watch FILE`, placed by when its call STARTED); a transfer known only through its
+  no usable log; a denied request of the job; a `would_block`, an unmetered `gap` or a breaker's `deferred`
+  record (read from `watch.jsonl`, or `--watch FILE`, placed by when its call STARTED); a transfer known only through its
   settlement metadata; a released hold whose usage is unconfirmed; an evidence line that could not be
   parsed. A watch file that exists but cannot be read gives no verdict. An interval is (start, stop]:
   usage at exactly the start belongs to the earlier job.
@@ -684,6 +684,52 @@ transcript to be posted at a later settle point. In estimate mode
 (`UT_CC_USAGE=estimate`) the call's estimate is not recorded. A record that cannot
 be written goes to stderr instead, and the call proceeds either way. Nothing reads
 the file back, so deleting it is safe — unlike the rest of the state dir.
+
+**When the server stops answering, watch mode stops asking it: the breaker.** A server
+that hangs, its connection open and no answer coming, would cost every hook of every
+session its full timeouts: a 2 s capability probe and a 5 s request, about 7 s per
+PreToolUse, and up to a hook's 10 s budget. So in
+watch mode, three timeouts in a row within a minute open a breaker for a minute. Any
+answer, a refusal included, resets the count, and a refused connection counts for
+nothing: both fail fast. The breaker is the host's, one per server URL, shared by every
+session of your user, under the home the passwd database gives you
+(`~/.local/state/usertrust/breaker/`, 0700). While it is open, a hook sends nothing and
+changes nothing, and writes one record with `"reason":"breaker-open"` and
+`"outcome":"deferred"`:
+- **`"kind":"deferred"`**: a transcript-mode PreToolUse, a PostToolUse whose hold carries
+  transcript usage, Stop and SubagentStop. The first settle point after the breaker
+  closes posts that usage, once. `usertrust-job coverage` still lists a deferral inside a
+  job's interval as a known gap: the record cannot say whether that settle point came.
+- **`"kind":"gap"`**: an estimate-mode PreToolUse, a PostToolUse whose hold settles at the
+  estimate, and SessionEnd. Nothing later settles those: a session that ends during an
+  outage settles what it left only if it is resumed.
+
+A record about holds names them in `transferIds`. After its minute, the next hook asks
+`/v1/health` once, for at most a second: an answer closes the breaker, and no answer
+opens it for another minute. A hook reads the breaker once, as it starts: one that
+started before the breaker opened sends everything it would have, so a settle it began
+is never left half-done. Enforce mode never reads or writes it.
+
+**A settle or a give-back that does not end cleanly is written down too.** PostToolUse,
+Stop, SubagentStop and SessionEnd add a `gap` record whenever settling a hold, giving
+one back or posting a remainder ends other than settled or given back. Its `"phase"` is
+`settle`, `release` or `remainder`, and its `"outcome"` one of:
+- `claimed`: the settle may have posted, and is never retried (no key);
+- `unresolved`: retried under its key at the next Stop;
+- `released`: nothing was posted, and the usage waits for a later settle point;
+- `deferred`: not attempted yet (out of time, say);
+- `failed`: the server answered it with an error;
+- `unknown`: this hook's own timeout cut it off, and the server may still act on it.
+
+Each names its hold's `transferId`, so a deferral and how it ended can be joined.
+
+**A failed health probe still sends the principal.** After a probe that answers, the
+plugin remembers the server's capabilities, per server and key, in the state dir
+(`capabilities/`, 0600), and renews the entry each time the same answer comes back.
+When a later probe fails, an entry under a day old that lists `principal` lets the
+hook send its principal anyway, and stderr says so. It is never used for anything
+else: an idempotency key is sent only to a server whose live probe says it honours
+one, as a server that strips the key would let a retried settle post twice.
 
 ## From watching to enforcing
 

@@ -782,14 +782,15 @@ that reads its output included, may label a job's cost exact, complete or certif
 needs a scope decision (which sessions could hold the job?) that has not been made, and the check was a
 deny-list over evidence shapes that kept leaking new shapes. Its generators: a record tagged with the job
 that lies outside an interval of the job in a valid log of its own session (a session with none, or no
-usable log, puts all of them outside); a gap, `would_block`, untagged call or unrecognised record that cannot
+usable log, puts all of them outside); a gap, a deferral (a `deferred` watch record: the breaker was open, and
+its usage is posted at a later settle point or never), `would_block`, untagged call or unrecognised record that cannot
 be placed elsewhere through a valid log of its own session (a log-less session's usage is a gap for every
 job, wherever it falls); an incomplete usage window; an invalid job state; a denied request of the job; a
 transfer known only through `settlement_*` metadata or with more than one `llm_call`; a released hold
 without `releaseClass: "unused"`; an interval with no stop yet (the job is still running); an evidence line
 that could not be parsed (never a silent drop); and a contributing session without a usable log. An interval
 is (start, stop], matching how the hooks resolve a time (a line applies strictly after its own ts), and
-cost counts each transfer once, from its `llm_call`. Every kind of evidence (an `llm_call`, a give-back, a denial, a `would_block`, a gap,
+cost counts each transfer once, from its `llm_call`. Every kind of evidence (an `llm_call`, a give-back, a denial, a `would_block`, a gap, a deferral,
 anything else) goes through ONE placement function: its own session's valid log places it, a tag it carries is a claim
 and never a placement (a foreign tag inside this job's interval is a gap for this job), and one whose session has no
 usable log is a gap for every job. A test fails if anything else decides where evidence falls.

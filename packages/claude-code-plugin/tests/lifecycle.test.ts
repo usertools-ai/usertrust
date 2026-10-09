@@ -69,6 +69,15 @@ async function seedState(
 	}
 }
 
+/** Every watch record written so far, parsed; [] when there is no log. */
+async function watchRecords(): Promise<Array<Record<string, unknown>>> {
+	const text = await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => "");
+	return text
+		.split("\n")
+		.filter((line) => line !== "")
+		.map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 function run(name: string, input: unknown, portOverride?: number) {
 	return runHook(join(HOOKS, name), input, {
 		UT_CC_STATE_DIR: stateDir,
@@ -167,7 +176,12 @@ describe("post-tool-use hook", () => {
 		expect(result.code).toBe(0);
 		expect(result.stderr).toContain("settle");
 		// The hold survives for Stop/SubagentStop cleanup (A10), marked settle-attempted.
-		expect(await readdir(stateDir)).toEqual(["s1__main__tu_1.settling"]);
+		expect((await readdir(stateDir)).sort()).toEqual(["s1__main__tu_1.settling", "watch.jsonl"]);
+		// And the unanswered settle is written down, under the hold's transferId (F2a): refused
+		// at once, it is `failed`, not `unknown`.
+		expect(await watchRecords()).toMatchObject([
+			{ kind: "gap", phase: "settle", outcome: "failed", transferId: "tx_1", session: "s1" },
+		]);
 	});
 
 	it("keeps the pending file on a non-200 settle response", async () => {
@@ -183,7 +197,16 @@ describe("post-tool-use hook", () => {
 		expect(result.stderr).toContain("500");
 		// Kept for Stop cleanup, marked settle-attempted: it may have posted, so no
 		// later hook settles it again (Stop only gives it back).
-		expect(await readdir(stateDir)).toEqual(["s1__main__tu_1.settling"]);
+		expect((await readdir(stateDir)).sort()).toEqual(["s1__main__tu_1.settling", "watch.jsonl"]);
+		expect(await watchRecords()).toMatchObject([
+			{
+				kind: "gap",
+				phase: "settle",
+				outcome: "failed",
+				transferId: "tx_1",
+				reason: "settle returned 500",
+			},
+		]);
 	});
 
 	it("post-tool-use from agent A settles A's hold and never a sibling's (pre→post scoping)", async () => {

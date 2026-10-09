@@ -43,11 +43,17 @@
 // while transcript state is unavailable. A key whose charge already stands (409
 // `already_settled`) means an earlier settle of exactly this window landed: it
 // is accounted, and the tool is held alone.
+//
+// While the server's breaker is open (lib.mjs `breakerOpen`, watch mode only), the call
+// is not authorized and nothing of the agent's state is touched (`skipWhileOpen`): a
+// transcript-mode call is recorded as deferred, its usage left for the first hold after
+// the breaker closes; an estimate-mode call, which nothing later carries, as a gap.
 import { rename, unlink } from "node:fs/promises";
 import { howToSet, settings } from "./config.mjs";
 import { labelsFor, resolveJob } from "./job-log.mjs";
 import {
 	abandonHold,
+	breakerOpen,
 	claimForRelease,
 	claimForSettle,
 	defaultModel,
@@ -64,7 +70,9 @@ import {
 	jobCapable,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
+	principalCapable,
 	readStdin,
+	recordBreakerSkip,
 	recordPending,
 	recordUnconfirmedCall,
 	recordWatchEvent,
@@ -87,6 +95,7 @@ import {
 	reconcileAgent,
 	STALE_SETTLING_MS,
 	safeName,
+	settlesAtEstimate,
 	settleTranscriptHold,
 } from "./transcript.mjs";
 
@@ -133,44 +142,10 @@ try {
 	// on older Claude Code) is what scopes a hold to the agent that made it.
 	agentId = input.agent_id ?? "main";
 	toolName = input.tool_name ?? "unknown";
-	// A deferred call's resume fires PreToolUse again for the SAME tool call (hooks
-	// reference, "Defer a tool call for later"), and so might any repeat. That call
-	// already has its hold. A second authorize alone would leave the first hold live
-	// beside it: counting against the budget and, in transcript mode, its window
-	// unsettled, until a Stop. A hold is never REUSED either: whether it is still
-	// live, and still the current server's and tenant's, cannot be known from here,
-	// and a reused hold skips the budget check. So the earlier hold is ended first
-	// (`retire`), and the call then reserves afresh, its budget checked again. A hold
-	// whose settle is under way or unanswered (`.settling`), or that another hook ends
-	// first, gets no fresh hold beside it: the call is refused until that resolves
-	// (`unsettled`).
-	const held = await holdOfCall(sessionId, agentId, input.tool_use_id);
-	if (held === null) {
-		await reserve(input);
-	} else if (held.state === "settling") {
-		// One made under another server or key never reaches this tenant's journal,
-		// which would retry a keyed window through this server: this tenant charged
-		// for the other's usage.
-		if (!sameTenant(held.entry)) {
-			if (await abandonSettling(held.entry)) await reserve(input);
-			else await unsettled(held.entry);
-		} else if (await journalDecides(held.entry, input.tool_use_id)) await reserve(input);
-		else await unsettled(held.entry);
-	} else {
-		// A hold made under another server or key is never touched through this one.
-		const ended = sameTenant(held.entry) ? await retire(held.entry) : await abandon(held.entry);
-		if (ended) {
-			say(
-				`usertrust: this tool call's earlier hold ${held.entry.transferId} is ended: a resumed call never reuses a hold, so it reserves afresh`,
-			);
-			await reserve(input);
-		} else {
-			await unsettled(
-				held.entry,
-				`another hook is ending this tool call's earlier hold ${held.entry.transferId}; it is refused until that hold is resolved`,
-			);
-		}
-	}
+	// The server stopped answering (lib.mjs `breakerOpen`, watch mode only): the call is not
+	// authorized, and nothing of the agent's state is touched.
+	if (await breakerOpen()) await skipWhileOpen(input);
+	else await governCall(input);
 } catch (err) {
 	const why = sanitizeReason(err instanceof Error ? err.message : String(err)).slice(
 		0,
@@ -203,6 +178,74 @@ try {
 		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
 		process.exit(2);
 	}
+}
+
+/**
+ * Govern this call. A deferred call's resume fires PreToolUse again for the SAME tool call (hooks
+ * reference, "Defer a tool call for later"), and so might any repeat. That call
+ * already has its hold. A second authorize alone would leave the first hold live
+ * beside it: counting against the budget and, in transcript mode, its window
+ * unsettled, until a Stop. A hold is never REUSED either: whether it is still
+ * live, and still the current server's and tenant's, cannot be known from here,
+ * and a reused hold skips the budget check. So the earlier hold is ended first
+ * (`retire`), and the call then reserves afresh, its budget checked again. A hold
+ * whose settle is under way or unanswered (`.settling`), or that another hook ends
+ * first, gets no fresh hold beside it: the call is refused until that resolves
+ * (`unsettled`).
+ */
+async function governCall(input) {
+	const held = await holdOfCall(sessionId, agentId, input.tool_use_id);
+	if (held === null) {
+		await reserve(input);
+	} else if (held.state === "settling") {
+		// One made under another server or key never reaches this tenant's journal,
+		// which would retry a keyed window through this server: this tenant charged
+		// for the other's usage.
+		if (!sameTenant(held.entry)) {
+			if (await abandonSettling(held.entry)) await reserve(input);
+			else await unsettled(held.entry);
+		} else if (await journalDecides(held.entry, input.tool_use_id)) await reserve(input);
+		else await unsettled(held.entry);
+	} else {
+		// A hold made under another server or key is never touched through this one.
+		const ended = sameTenant(held.entry) ? await retire(held.entry) : await abandon(held.entry);
+		if (ended) {
+			say(
+				`usertrust: this tool call's earlier hold ${held.entry.transferId} is ended: a resumed call never reuses a hold, so it reserves afresh`,
+			);
+			await reserve(input);
+		} else {
+			await unsettled(
+				held.entry,
+				`another hook is ending this tool call's earlier hold ${held.entry.transferId}; it is refused until that hold is resolved`,
+			);
+		}
+	}
+}
+
+/**
+ * The breaker is open (lib.mjs `breakerOpen`): nothing is sent, and nothing of the agent's
+ * state is touched, its window, its cursor or its holds. A transcript-mode call's messages stay
+ * unassigned, and the first hold after the breaker closes carries them: a DEFERRAL. A call
+ * settled at the estimate (transcript.mjs `settlesAtEstimate`) has no later carrier: a GAP.
+ */
+async function skipWhileOpen(input) {
+	const estimate = await settlesAtEstimate({ sessionId, agentId, input });
+	const kind = estimate ? "gap" : "deferred";
+	const recorded = await recordBreakerSkip({
+		kind,
+		phase: "pre-tool-use",
+		session: sessionId,
+		agent: agentId,
+		tool: toolName,
+		started: new Date(hookStartedAt()).toISOString(),
+	});
+	const what = estimate
+		? "its estimate has no later carrier"
+		: "its usage stays in the transcript for the first hold after the breaker closes";
+	proceed(
+		`usertrust watch-only: the server is not answering (its breaker is open), so this call is not metered now: ${what}${recorded ? ` (recorded as ${kind === "gap" ? "a gap" : "deferred"})` : ", and its record could not be written (see above)"}`,
+	);
 }
 
 /**
@@ -424,10 +467,11 @@ async function reserve(input) {
 		// What the server honours decides what this hold may carry (see lib.mjs).
 		// Unknown (a failed probe) reads as absent here: a key is sent only to a server
 		// known to honour it, and a principal — on either path, in one shape — only to
-		// a server that records one.
+		// a server that records one, or that a remembered answer says does (lib.mjs
+		// `principalCapable`).
 		const capabilities = await serverCapabilities();
 		const keyed = capabilities?.has("idempotency-key") ?? false;
-		const principal = !capabilities?.has("principal")
+		const principal = !principalCapable(capabilities)
 			? undefined
 			: transcriptMode
 				? prepared.principal

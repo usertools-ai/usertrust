@@ -10,7 +10,7 @@
 // a resumed one included, uses the pin, and an edit applies to new sessions.
 //
 // THE PIN: <passwd home>/.local/state/usertrust/sessions/<session id>.json, 0600, in
-// directories made 0700 and checked as the config anchor is (`privateDir`). It is
+// directories made 0700 and checked as the config anchor is (private-dir.mjs). It is
 // published once (`publish`): written whole to a temp file, then link()ed to its
 // name. A second hook that races to pin finds EEXIST, and reads the first one's
 // file, complete.
@@ -67,9 +67,9 @@ import {
 	resolveSettings,
 } from "./config.mjs";
 import { LINKLESS } from "./lib.mjs";
+import { stateSubdir } from "./private-dir.mjs";
 
-/** The plugin's private state under the passwd home; `sessions/` holds the pins. */
-const STATE = [".local", "state", "usertrust"];
+/** Under the plugin's private state (private-dir.mjs): the pins. */
 const SESSIONS = "sessions";
 
 /** A session id as a pin's name: never sanitized, so two ids never share a pin. */
@@ -106,44 +106,12 @@ const REAL_FS = {
 };
 
 /**
- * A directory the plugin keeps private state in, made 0700 when missing and accepted
- * only as the config anchor is (config.mjs `readConfig`). Its realpath must be its
- * path (no symlinked component), it must be a directory, the user must own it, and
- * no group or other may write it. Null when it is accepted, else the fixed reason it
- * is refused. Without POSIX ownership (`uid` null: Windows) the owner and mode
- * checks are skipped.
- */
-export function privateDir(path, { uid, fs = REAL_FS }) {
-	try {
-		fs.mkdirSync(path, { recursive: true, mode: 0o700 });
-		if (fs.realpathSync(path) !== path) return "symlink";
-		const info = fs.lstatSync(path);
-		if (!info.isDirectory()) return "type";
-		if (uid !== null && info.uid !== uid) return "owner";
-		if (uid !== null && (info.mode & 0o022) !== 0) return "mode";
-		return null;
-	} catch {
-		return "missing";
-	}
-}
-
-/**
- * The pins' directory under `home`, both its levels checked: `{ dir }` or
- * `{ refused }`. The home itself is taken by its real path, so a home the system
- * reaches through a symlink (as Fedora Atomic's /home → /var/home) is followed. Below
- * it, no component may be a symlink.
+ * The pins' directory under `home`, both its levels made and checked (private-dir.mjs
+ * `stateSubdir`): `{ dir }` or `{ refused }`.
  */
 function pinDir(home, { uid, fs }) {
-	let base;
-	try {
-		base = fs.realpathSync(home);
-	} catch {
-		return { refused: "pin: dir refused (home)" };
-	}
-	const state = join(base, ...STATE);
-	const dir = join(state, SESSIONS);
-	const refused = privateDir(state, { uid, fs }) ?? privateDir(dir, { uid, fs });
-	return refused === null ? { dir } : { refused: `pin: dir refused (${refused})` };
+	const where = stateSubdir(home, SESSIONS, { uid, fs });
+	return where.refused === undefined ? where : { refused: `pin: dir refused (${where.refused})` };
 }
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);

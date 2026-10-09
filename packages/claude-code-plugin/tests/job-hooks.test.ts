@@ -466,9 +466,14 @@ describe("a give-back of a hold is classified by what the client KNOWS, and a ra
 		await run("stop.mjs", base(), env);
 		expect(releases().map((b) => b.releaseClass)).toEqual(["call-ran"]);
 		// mutant: the give-back writes no gap
-		const gap = (await watch()).find((e) => e.kind === "gap");
-		expect(gap).toMatchObject({ releaseClass: "call-ran", session: SESSION });
+		const gap = (await watch()).find((e) => e.kind === "gap" && e.releaseClass === "call-ran");
+		expect(gap).toMatchObject({ releaseClass: "call-ran", session: SESSION, transferId: "tx_1" });
 		expect(gap.started).toBe(of("/v1/authorize")[0]?.body.usageFrom);
+		// The settle that failed wrote its own gap first, under the same transferId (F2a), so the
+		// two join as one hold's.
+		expect((await watch()).filter((e) => e.kind === "gap" && e.phase === "settle")).toMatchObject([
+			{ outcome: "failed", transferId: "tx_1", started: gap.started },
+		]);
 	});
 	it("a hold still `.json` at Stop in estimate mode (PostToolUse never ran): call-unconfirmed, and a gap", async () => {
 		await startFake();
@@ -968,6 +973,8 @@ describe("a hold dropped as another server's or key's still leaves its gap, writ
 			.filter(Boolean)
 			.map((l) => JSON.parse(l))
 			.filter((e) => e.kind === "gap");
+	/** The gaps a give-back (or its drop) writes: the settle's own (F2a) aside. */
+	const callRan = async () => (await gaps()).filter((e) => e.releaseClass === "call-ran");
 	const claims = async () =>
 		(await readdir(stateDir)).filter((n) => n.endsWith(".settling") || n.endsWith(".releasing"));
 	const holdFile = (ext: string) => join(stateDir, `${SESSION}__main__tu_1.tx_1.${ext}`);
@@ -984,7 +991,10 @@ describe("a hold dropped as another server's or key's still leaves its gap, writ
 		await run("post-tool-use.mjs", post("tu_1"), { ...env, ...more });
 		override = undefined;
 		expect(await claims()).toEqual([`${SESSION}__main__tu_1.tx_1.settling`]);
-		expect(await gaps()).toEqual([]);
+		// The unanswered settle's own record (F2a), under the hold's transferId; nothing else yet.
+		expect(await gaps()).toMatchObject([
+			{ phase: "settle", outcome: "failed", transferId: "tx_1", reason: "settle returned 503" },
+		]);
 		const usageFrom = of("/v1/authorize")[0]?.body.usageFrom;
 		expect(typeof usageFrom).toBe("string");
 		return usageFrom as string;
@@ -1000,7 +1010,7 @@ describe("a hold dropped as another server's or key's still leaves its gap, writ
 		expect(of("/v1/release")).toEqual([]);
 		// mutant: the record is dropped with no gap. The gap's mode is the new pin's
 		// `enforce`: this Stop was not refused, only under another key.
-		expect(await gaps()).toMatchObject([
+		expect(await callRan()).toMatchObject([
 			{ releaseClass: "call-ran", session: SESSION, mode: "enforce", started },
 		]);
 		expect(await claims()).toEqual([]);
@@ -1016,7 +1026,7 @@ describe("a hold dropped as another server's or key's still leaves its gap, writ
 		// mutant: the record is dropped with no gap. The gap's mode is the PINNED `watch`,
 		// not the environment's `enforce`: the Stop ran refused (its key changed), in the
 		// session's own mode.
-		expect(await gaps()).toMatchObject([
+		expect(await callRan()).toMatchObject([
 			{ releaseClass: "call-ran", session: SESSION, mode: "watch", started },
 		]);
 		expect(await claims()).toEqual([]);
@@ -1040,7 +1050,7 @@ describe("a hold dropped as another server's or key's still leaves its gap, writ
 		// Killed before the unlink: the record is still there, and its gap already written.
 		expect(await claims()).toEqual([`${SESSION}__main__tu_1.tx_1.settling`]);
 		// mutant: the record goes first, so the kill leaves no gap
-		expect(await gaps()).toMatchObject([{ releaseClass: "call-ran", started }]);
+		expect(await callRan()).toMatchObject([{ releaseClass: "call-ran", started }]);
 	});
 
 	it("a claim that only ENDS a deferred call's hold (`.releasing`), under another key: dropped, with no gap", async () => {

@@ -746,6 +746,21 @@ describe("jobCoverage — refused and unmetered work", () => {
 		});
 		expect(elsewhere.knownGaps.length).toBe(0);
 	});
+	it("a deferral (the breaker was open) INSIDE the interval has a known gap, as its usage may never be posted; outside it is irrelevant", async () => {
+		const { jobCoverage } = await lib();
+		const base = { job: J, logs: { [SID]: logText }, records: [ok] };
+		const deferral = (at: number) => ({
+			kind: "deferred",
+			reason: "breaker-open",
+			outcome: "deferred",
+			session: SID,
+			at: iso(at),
+		});
+		const inside = jobCoverage({ ...base, watch: [deferral(T0 + 3500)] });
+		expect(gapText(inside)).toContain("a deferred fell inside an interval");
+		const outside = jobCoverage({ ...base, watch: [deferral(T0 + 9000)] });
+		expect(outside.knownGaps.length).toBe(0);
+	});
 });
 
 describe("jobCoverage — watch events whose job cannot be resolved", () => {

@@ -133,6 +133,7 @@ import {
 	abandonHold,
 	boundElsewhere,
 	budgetShare,
+	callStart,
 	cleanup,
 	clearPending,
 	guardMode,
@@ -143,7 +144,9 @@ import {
 	jobHoldFields,
 	LINKLESS,
 	listPending,
+	principalCapable,
 	publishExclusive,
+	recordSettleGap,
 	recordUnconfirmedCall,
 	recordWatchEvent,
 	refreshUnknownServerCapabilities,
@@ -1439,6 +1442,29 @@ export async function estimateReasonFor({ sessionId, agentId, input }) {
 }
 
 /**
+ * Whether this agent's usage is settled at the ESTIMATE, read without the agent's lock and
+ * without writing anything (the breaker's skip, pre-tool-use.mjs, must touch no state):
+ * UT_CC_USAGE=estimate (or the config file's), an agent id unsafe in a path, no transcript
+ * path, or a recorded estimate mode, the agent's own or, for a subagent, another agent's of
+ * its session (`inheritedEstimate`). A marker directory that cannot be read answers yes: an
+ * answer this cannot give is never "no".
+ */
+export async function settlesAtEstimate({ sessionId, agentId, input }) {
+	if (usageMode() === "estimate" || !isAgentId(agentId)) return true;
+	if (transcriptPathFor(input, agentId) === undefined) return true;
+	const own = `${sanitize(sessionId)}__${agentId}`;
+	let names;
+	try {
+		names = await readdir(join(stateRoot(), "transcripts", ESTIMATE_DIR));
+	} catch (err) {
+		return err?.code !== "ENOENT";
+	}
+	if (names.includes(own)) return true;
+	const prefix = `${sanitize(sessionId)}__`;
+	return agentId !== "main" && names.some((name) => name !== own && name.startsWith(prefix));
+}
+
+/**
  * Open an agent's transcript state: lock, cursor, journal reconcile, then an
  * incremental read. Returns one of:
  *  - `{ kind: "estimate", reason }`: the agent's usage is settled at the
@@ -1788,6 +1814,7 @@ async function settleAt(transferId, counts, { keyed, labels = {} }) {
 			outcome: keyed ? "unresolved" : "claimed",
 			reason: `settle unreachable: ${errText(err)}`,
 			holdEnded,
+			timedOut: err?.timedOut === true,
 		};
 	}
 	return settleOutcome(transferId, settle, keyed);
@@ -1842,7 +1869,11 @@ async function returnEmptyHold(transferId) {
 			}
 		} catch (err) {
 			// The server's pending-TTL sweep releases it.
-			return { outcome: "unreturned", reason: `release unreachable: ${errText(err)}` };
+			return {
+				outcome: "unreturned",
+				reason: `release unreachable: ${errText(err)}`,
+				timedOut: err?.timedOut === true,
+			};
 		}
 	}
 	const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -1948,6 +1979,28 @@ export const OUTCOME_NOTES = new Map([
 ]);
 
 /**
+ * Write down a transcript hold's settle that ended other than `settled` or `returned` (lib.mjs
+ * `recordSettleGap`), under the hold's transferId. `skipped` is not: another hook is settling
+ * the hold, and writes its own. An empty hold's give-back that failed (`unreturned`) is a
+ * `release`, `failed`, or `unknown` when this hook's timer cut it off; every other ending keeps
+ * its name. Returns whether a record was written.
+ */
+export async function recordHoldOutcome(sessionId, entry, result) {
+	const { outcome } = result;
+	if (outcome === "settled" || outcome === "returned" || outcome === "skipped") return false;
+	const release = outcome === "unreturned";
+	return recordSettleGap({
+		phase: release ? "release" : "settle",
+		outcome: release ? (result.timedOut === true ? "unknown" : "failed") : outcome,
+		session: sessionId,
+		agent: entry.agentId,
+		transferId: entry.transferId,
+		reason: result.reason ?? outcome,
+		started: callStart(entry),
+	});
+}
+
+/**
  * Stop/SubagentStop: SETTLE every leftover hold that carries assigned usage. One made
  * under another server or key is dropped instead, nothing sent (lib.mjs
  * `boundElsewhere`): its usage goes unrecorded, never charged to this tenant.
@@ -1966,6 +2019,7 @@ export async function settleAssignedHolds(sessionId, agentId) {
 				`usertrust: leftover hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}`,
 			);
 		}
+		await recordHoldOutcome(sessionId, entry, result);
 	}
 }
 
@@ -2119,7 +2173,7 @@ export async function postRemainder({
 		const capabilities = await serverCapabilities();
 		const keyed = capabilities?.has("idempotency-key") ?? false;
 		const principalOf = (rawType) =>
-			capabilities?.has("principal") ? principalFor(sessionId, agentId, rawType) : undefined;
+			principalCapable(capabilities) ? principalFor(sessionId, agentId, rawType) : undefined;
 		const agentType = await agentTypeFor(opened.transcriptPath, agentId, agentTypeHint);
 
 		// A retry under a key the server would strip could post twice: unresolved
@@ -2198,6 +2252,19 @@ export async function postRemainder({
 				);
 			} else summary.notes.push(`unresolved ${vehicle.model} settle: ${result.reason}`);
 			await opened.save();
+			if (result.outcome !== "settled" && result.outcome !== "denied") {
+				await recordSettleGap({
+					phase: "remainder",
+					outcome: result.outcome,
+					session: sessionId,
+					agent: agentId,
+					transferId: result.transferId,
+					reason: result.reason,
+					started: vehicle.labels?.usageFrom ?? null,
+					model: vehicle.model,
+					messages: vehicle.ids.length,
+				});
+			}
 			if (result.serverDown) {
 				summary.serverDown = true;
 				return summary;
@@ -2276,6 +2343,19 @@ export async function postRemainder({
 					error: result.error,
 				});
 			} else summary.notes.push(`${model}: ${result.outcome} — ${result.reason}`);
+			if (result.outcome !== "settled" && result.outcome !== "denied") {
+				await recordSettleGap({
+					phase: "remainder",
+					outcome: result.outcome,
+					session: sessionId,
+					agent: agentId,
+					transferId: result.transferId,
+					reason: result.reason,
+					started: usageSpan(messages).usageFrom ?? null,
+					model,
+					messages: ids.length,
+				});
+			}
 			if (result.serverDown) {
 				summary.serverDown = true;
 				break;
@@ -2419,8 +2499,10 @@ async function postGroup({
 		return {
 			outcome: key === undefined ? "claimed" : "unresolved",
 			reason: `settle unreachable: ${errText(err)}`,
+			transferId,
+			timedOut: err?.timedOut === true,
 		};
 	}
-	const result = await settleOutcome(transferId, settle, key !== undefined);
+	const result = { ...(await settleOutcome(transferId, settle, key !== undefined)), transferId };
 	return retry && result.outcome === "released" ? { ...result, outcome: "unresolved" } : result;
 }
