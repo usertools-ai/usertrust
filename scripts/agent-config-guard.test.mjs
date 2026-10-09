@@ -741,6 +741,20 @@ describe("agent config is checked out as it is stored: no attribute may rewrite 
 		assert.ok(!result.out.includes(`${shown("plugin/.mcp.json")} is agent config`), result.out);
 	});
 
+	test("an attributes file that is not a regular file fails, at the root and nested: git before 2.32 reads a symlinked one through its link", () => {
+		const { run } = change({
+			".gitattributes": { link: "docs/rules.txt" },
+			"docs/rules.txt": "*.json -filter\n",
+			"pkg/.gitattributes": { link: "../docs/rules.txt" },
+			"lib/.gitattributes": { submodule: "0123456789abcdef0123456789abcdef01234567" },
+		});
+		const result = run();
+		const notRegular = (mode) => `is an attributes file that is not a regular file (mode ${mode})`;
+		fails(result, ".gitattributes", notRegular("120000"));
+		fails(result, "pkg/.gitattributes", notRegular("120000"));
+		fails(result, "lib/.gitattributes", notRegular("160000"));
+	});
+
 	test("control: attributes files no transform applies to pass, at the root and nested, beside transforms of other paths", () => {
 		passes(
 			change({
