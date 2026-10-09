@@ -16,6 +16,11 @@
 //    `filter`, `ident`) would hand an agent other bytes than the ones checked here. The
 //    attributes are read as git reads them on either kind of filesystem, case-sensitive or
 //    not; and so that every attributes file is read, one must be spelled `.gitattributes`.
+//    No attributes file may give one of them the literal value `unset` or `unspecified`, a
+//    macro's included: `check-attr` prints that as no value, where git looks for a filter
+//    or an encoding of that name.
+//    A submodule is another repository, and its own tree can hold agent config: one the
+//    change adds, or moves to another commit, must be named by the allowlist, wherever it is.
 // 2. Every Claude Code settings file in the change's tree (`.claude/settings*.json`, at
 //    any depth), allowlisted or not, must be a JSON object holding only the permitted
 //    keys: `$schema`, and `permissions` that only tighten (`deny`, `ask`). Any other
@@ -53,6 +58,9 @@
 //                                    --base <commit> --head <commit>
 // Exit 0 when the change passes; 1 when it fails, each failure named; 2 when it cannot be
 // checked (a usage or git error, or an allowlist that is not valid).
+// Imported with `?library` on its URL, it checks nothing and exports its fold, so another
+// test can recognize a path exactly as this does. No command line can add that query: run
+// as a script, it always checks.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
@@ -78,6 +86,11 @@ const PORTABLE = /[A-Za-z0-9._\-[\]/]/u;
  * ends, as a Windows checkout does to any text file, and JSON reads both alike.
  */
 const TRANSFORMS = ["working-tree-encoding", "filter", "ident"];
+/**
+ * An attributes-file assignment `check-attr` cannot tell from none: one of `TRANSFORMS` given
+ * the literal value `unset` or `unspecified`, which it prints as that state.
+ */
+const AMBIGUOUS = new RegExp(`^(?:${TRANSFORMS.join("|")})=(?:unset|unspecified)$`, "u");
 
 /** A run that cannot be checked: exit 2, never a pass. */
 class Unusable extends Error {}
@@ -404,6 +417,18 @@ function check({ event, rules, base, head }) {
 				if (others.length > 0) break;
 			}
 		}
+		// A submodule's own tree is another repository's, and can hold agent config.
+		if (
+			status !== "D" &&
+			headTree.get(path)?.mode === "160000" &&
+			!allow.some((e) => e.matches(path))
+		) {
+			fail(
+				1,
+				path,
+				"is a submodule, whose own tree can hold agent config, and the allowlist does not name it",
+			);
+		}
 		if (!isAgentConfig(path)) continue;
 		agentPaths += 1;
 		if (!allow.some((e) => e.matches(path))) {
@@ -449,6 +474,21 @@ function check({ event, rules, base, head }) {
 				'is ".gitattributes" to a case-insensitive filesystem, and git reads it there, but not here: spell it ".gitattributes"',
 			);
 		}
+		if (leaf === ".gitattributes" && mode !== "160000") {
+			const ambiguous = new Set();
+			for (const line of blob(oid).toString("utf-8").split(/\r?\n/u)) {
+				// A comment as git reads one: `#` after nothing but its blanks (space, tab, CR, LF).
+				if (/^[ \t\r\n]*#/u.test(line)) continue;
+				for (const token of line.split(/\s+/u)) if (AMBIGUOUS.test(token)) ambiguous.add(token);
+			}
+			for (const token of ambiguous) {
+				fail(
+					1,
+					path,
+					`holds ${shown(token)}: check-attr prints that as no value, so this check could not see it`,
+				);
+			}
+		}
 		if (!isAgentConfig(path)) continue;
 		agentTree.push(path);
 		if (!REGULAR.has(mode)) {
@@ -490,20 +530,27 @@ function options(argv) {
 	return named;
 }
 
-try {
-	const result = check(options(process.argv.slice(2)));
-	for (const { rule, path, reason } of result.failures) {
-		console.log(`agent-config: FAILED (rule ${rule}): ${shown(path)} ${reason}`);
+/** The command line: check the change it names, and say how it went. */
+function main() {
+	try {
+		const result = check(options(process.argv.slice(2)));
+		for (const { rule, path, reason } of result.failures) {
+			console.log(`agent-config: FAILED (rule ${rule}): ${shown(path)} ${reason}`);
+		}
+		const summary = `${result.changed} paths changed, ${result.agentPaths} of them agent config; ${result.settingsFiles} settings files in the tree`;
+		if (result.failures.length > 0) {
+			console.log(`agent-config: ${result.failures.length} failures (${summary})`);
+			process.exitCode = 1;
+		} else {
+			console.log(`agent-config: OK (${summary})`);
+		}
+	} catch (err) {
+		if (!(err instanceof Unusable)) throw err;
+		console.log(`agent-config: CANNOT CHECK: ${err.message}`);
+		process.exitCode = 2;
 	}
-	const summary = `${result.changed} paths changed, ${result.agentPaths} of them agent config; ${result.settingsFiles} settings files in the tree`;
-	if (result.failures.length > 0) {
-		console.log(`agent-config: ${result.failures.length} failures (${summary})`);
-		process.exitCode = 1;
-	} else {
-		console.log(`agent-config: OK (${summary})`);
-	}
-} catch (err) {
-	if (!(err instanceof Unusable)) throw err;
-	console.log(`agent-config: CANNOT CHECK: ${err.message}`);
-	process.exitCode = 2;
 }
+
+if (!new URL(import.meta.url).searchParams.has("library")) main();
+
+export { fold, folded };

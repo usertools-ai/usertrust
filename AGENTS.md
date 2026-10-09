@@ -1620,7 +1620,10 @@ opens them.
   twice, and Windows' streams (`:`) and short names (`~`), need a character outside it.
 - Agent config is checked out as it is stored: no `working-tree-encoding`, `filter` or `ident`
   attribute may apply to it, as git matches its patterns with case or without, and an attributes
-  file is spelled `.gitattributes`.
+  file is spelled `.gitattributes`. No attributes file may give one of them the literal value
+  `unset` or `unspecified`, which `check-attr` prints as no value.
+- A submodule is another repository, and its own tree can hold agent config: one a change adds,
+  or moves to another commit, must be named by the allowlist, wherever it is.
 - A committed Claude Code settings file may hold only `$schema`, and `permissions.deny` /
   `permissions.ask`. Any other key fails, including one this guard has never heard of.
 - The guard (`scripts/agent-config-guard.mjs`) and the allowlist are read from the BASE

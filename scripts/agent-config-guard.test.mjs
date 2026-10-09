@@ -10,6 +10,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 const GUARD = join(import.meta.dirname, "agent-config-guard.mjs");
 const LAUNCHER = join(import.meta.dirname, "..", ".github", "agent-config.sh");
@@ -568,25 +569,36 @@ describe("rule 3: every path a change adds is one name to every filesystem, anyw
 		fails(result, "docs/a\tb.md", outside("U+0009"));
 	});
 
+	/**
+	 * Every path of `paths` added in one change, under the allowlist `rules` (its text) with
+	 * every path allowlisted and the rest of it kept, its `nonportable` list included.
+	 */
+	function reAdd(paths, rules) {
+		const repo = fixture();
+		const everything = { ...JSON.parse(rules), allow: [{ path: "**", why: "test" }] };
+		const base = repo.commit({ [ALLOWLIST]: JSON.stringify(everything) });
+		const head = repo.commit(Object.fromEntries(paths.map((path) => [path, "{}"])), base);
+		return guard(repo, { rules: base, base, head });
+	}
+
 	test("control: every path this repository holds passes when a change adds it", () => {
-		const paths = execFileSync(
-			"git",
-			["ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD"],
-			{
-				cwd: import.meta.dirname,
-				env: ENV,
-				encoding: "utf-8",
-			},
-		)
+		const here = (args) =>
+			execFileSync("git", args, { cwd: import.meta.dirname, env: ENV, encoding: "utf-8" });
+		const paths = here(["ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD"])
 			.split("\0")
 			.filter((path) => path !== "");
 		assert.ok(paths.length > 100, `${paths.length} paths: not this repository's tree`);
-		const repo = fixture();
-		const base = repo.commit({ [ALLOWLIST]: allowlist([{ path: "**", why: "test" }]) });
-		const head = repo.commit(Object.fromEntries(paths.map((path) => [path, "{}"])), base);
-		const result = guard(repo, { rules: base, base, head });
+		const result = reAdd(paths, here(["cat-file", "blob", `HEAD:${ALLOWLIST}`]));
 		passes(result);
 		assert.match(result.out, new RegExp(`OK \\(${paths.length} paths changed`, "u"), result.out);
+	});
+
+	test("the re-add keeps the allowlist's own nonportable list: a tree with a name it lists passes", () => {
+		const name = "docs/caf\u00E9.md";
+		const listed = JSON.stringify({ allow: [], nonportable: [{ path: name, why: "test" }] });
+		passes(reAdd(["README.md", name], listed));
+		// Control: the same tree, the name unlisted, fails on it.
+		fails(reAdd(["README.md", name], JSON.stringify({ allow: [] })), name, outside("U+00E9"));
 	});
 });
 
@@ -643,6 +655,39 @@ describe("agent config is checked out as it is stored: no attribute may rewrite 
 		fails(run(), "pkg/.GitAttributes", 'is ".gitattributes" to a case-insensitive filesystem');
 	});
 
+	test("an attributes file that gives one of them the literal value unset or unspecified fails, a macro's included: check-attr prints that as no value", () => {
+		const { run } = change(
+			{
+				".gitattributes": [
+					".claude/settings.json filter=unset",
+					".mcp.json working-tree-encoding=unspecified",
+					"[attr]quiet ident=unset",
+					".claude/hooks/* quiet",
+					"# ident=unspecified is a comment, not an assignment",
+					"  # working-tree-encoding=unset after blanks is a comment too",
+					// A vertical tab is no blank to git: this line's pattern is "\v#x", and it assigns.
+					"\v#x filter=unspecified",
+					"* text=unset",
+					"",
+				].join("\n"),
+			},
+			{ allow: ALLOW, files: FILES },
+		);
+		const result = run();
+		const literal = (token) => `holds ${shown(token)}: check-attr prints that as no value`;
+		for (const token of [
+			"filter=unset",
+			"working-tree-encoding=unspecified",
+			"ident=unset",
+			"filter=unspecified",
+		]) {
+			fails(result, ".gitattributes", literal(token));
+		}
+		// Exactly those four: not the comments', and not `text`, which rewrites no bytes here.
+		const lines = result.out.split("\n").filter((line) => line.includes("check-attr prints that"));
+		assert.equal(lines.length, 4, result.out);
+	});
+
 	test("control: attributes that leave the bytes alone pass, and so do transforms of paths that are not agent config", () => {
 		passes(
 			change(
@@ -653,6 +698,67 @@ describe("agent config is checked out as it is stored: no attribute may rewrite 
 				{ allow: ALLOW, files: FILES },
 			).run(),
 		);
+	});
+});
+
+describe("a submodule is another repository: one a change adds or moves must be on the allowlist", () => {
+	const SUBMODULE =
+		"is a submodule, whose own tree can hold agent config, and the allowlist does not name it";
+
+	test("a submodule the change adds fails unless the allowlist names it; a regular file at its path passes", () => {
+		const repo = fixture();
+		const inside = repo.commit({ ".claude/settings.json": JSON.stringify({ hooks: {} }) });
+		const base = repo.commit({ "README.md": "x", [ALLOWLIST]: allowlist() });
+		const added = repo.commit({ "vendor/tool": { submodule: inside } }, base);
+		fails(guard(repo, { rules: base, base, head: added }), "vendor/tool", SUBMODULE);
+		const named = repo.commit(
+			{ [ALLOWLIST]: allowlist([{ path: "vendor/tool", why: "test" }]) },
+			base,
+		);
+		passes(guard(repo, { rules: named, base, head: added }));
+		// Control: a regular file at that path is no submodule.
+		const file = repo.commit({ "vendor/tool": "x" }, base);
+		passes(guard(repo, { rules: base, base, head: file }));
+	});
+
+	test("a submodule moved to another commit fails unless the allowlist names it; one removed passes", () => {
+		const repo = fixture();
+		const one = repo.commit({ "a.md": "1" });
+		const two = repo.commit({ ".claude/settings.json": "{}" }, one);
+		const base = repo.commit({
+			"README.md": "x",
+			[ALLOWLIST]: allowlist(),
+			"vendor/tool": { submodule: one },
+		});
+		const moved = repo.commit({ "vendor/tool": { submodule: two } }, base);
+		fails(guard(repo, { rules: base, base, head: moved }), "vendor/tool", SUBMODULE);
+		const named = repo.commit(
+			{ [ALLOWLIST]: allowlist([{ path: "vendor/**", why: "test" }]) },
+			base,
+		);
+		passes(guard(repo, { rules: named, base, head: moved }));
+		const removed = repo.commit({ "vendor/tool": null }, base);
+		passes(guard(repo, { rules: base, base, head: removed }));
+	});
+});
+
+describe("the guard as a module: imported with ?library it checks nothing, run as a script it checks", () => {
+	test("imported with ?library, it exports its fold and checks nothing; run as a script, it checks", () => {
+		const url = `${pathToFileURL(GUARD).href}?library`;
+		const source = `const m = await import(${JSON.stringify(url)}); console.log(JSON.stringify([m.fold(".MCP.JSON"), m.folded("pkg/.Claude./settings.json")]));`;
+		const imported = spawnSync(process.execPath, ["--input-type=module", "-e", source], {
+			env: ENV,
+			encoding: "utf-8",
+		});
+		assert.equal(imported.status, 0, imported.stdout + imported.stderr);
+		assert.equal(
+			imported.stdout,
+			`${JSON.stringify([".mcp.json", "pkg/.claude/settings.json"])}\n`,
+		);
+		// Control: the same file run as a script checks, and with no arguments cannot.
+		const script = spawnSync(process.execPath, [GUARD], { env: ENV, encoding: "utf-8" });
+		assert.equal(script.status, 2, script.stdout + script.stderr);
+		assert.match(script.stdout, /^agent-config: CANNOT CHECK: /u);
 	});
 });
 
