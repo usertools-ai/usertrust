@@ -777,13 +777,23 @@ a later settle point" has none unless the session is resumed, so whatever it sel
 not post is a `remainder` gap, `deferred`, whatever stopped it: no time to claim or post, a
 claim that fails (a full or unwritable state dir), the server no longer answering, an error. An
 agent whose usage it never read is one too: one it could not reach once the server stopped
-answering, one whose transcript state is unusable, and one whose lock another hook holds. And a
-hold it has no time to give back is its call's gap.
+answering, one whose transcript state is unusable, and one whose lock another hook holds. A
+hold it has no time to give back is its call's gap. And a transcript hold whose settle a hook
+sent and never saw end (it was killed first) is a `settle` gap, `unknown`, under its
+`transferId`: whether it posted cannot be known.
+
+**A settle that was sent and never seen to end is written down.** A transcript hold left
+settle-attempted by a hook that died is decided by the next hook that reads its agent once it is
+ten minutes old: a `settle` gap under its `transferId`, `claimed` (its usage may have posted,
+and is never posted again) or `unresolved` under an idempotency key (retried as itself).
+Before that, at SessionEnd, it is the `unknown` gap above.
 
 **Each job's usage is its own record.** A remainder's gap, at Stop as at SessionEnd, is one
 record per job interval of the session's job log, each started at its own first message,
 whether or not the server records jobs. So `usertrust-job coverage` lists it as a known gap of
-every job it touches.
+every job it touches. When the job log cannot be read whole (torn, unreadable, or stamped ahead
+of the clock), the record has no start, so it is a gap of every job, even once the log reads
+cleanly again.
 
 **A failed health probe still sends the principal.** After a probe that answers, the
 plugin remembers the server's capabilities, per server and key, in the state dir

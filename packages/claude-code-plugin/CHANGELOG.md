@@ -41,10 +41,15 @@ npm, and its version is its own: the `usertrust` packages and their
 - **SessionEnd, the last settle point, writes down what it cannot finish**: a `deferred`
   remainder gap for whatever it selected and did not post, whatever stopped it, and for an
   agent whose usage it never read (the server down, an unusable state, a lock another hook
-  holds); and its call's gap for a hold it has no time to give back. Its breaker probe takes at
+  holds); its call's gap for a hold it has no time to give back; and an `unknown` settle gap
+  for a transcript hold whose settle was sent and never seen to end. Its breaker probe takes at
   most a fifth of its budget.
+- **A settle a dead hook left in flight is written down** when the next hook decides it (ten
+  minutes on): a `settle` gap under its `transferId`, `claimed`, or `unresolved` under a key.
+  The journal's gap for a stale estimate hold names its `transferId` too.
 - **A remainder's gap is one record per job** of the session's job log, at Stop as at
-  SessionEnd, each started at its own first message, whether or not the server records jobs.
+  SessionEnd, each started at its own first message, whether or not the server records jobs. A
+  job log that cannot be read whole gives the record no start: a gap of every job.
 - **A redirect is followed only to the same origin, by hand, up to 20.** Each 307 or 308 to
   the URL's own origin is re-sent with the same method, body and key, as before, and from the
   first answer on the request counts as sent: no later ending reads as never sent. Any other

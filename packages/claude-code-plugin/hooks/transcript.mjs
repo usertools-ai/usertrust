@@ -368,12 +368,14 @@ function localJobs(sessionId) {
  * A job's coverage places a record by its start alone, so `messages` are written down one record
  * per job interval of the session's LOCAL job log (`labelsFor`), each started at its own earliest
  * message, whether or not the server honours `job`. The wire's grouping (one settle per job only
- * when it does) is the server's business; the record's split is never the wire's. Messages of no
- * known time share one record started at null, a gap that may belong to any job. With no usable
- * job log they are one record, which coverage cannot place in any job and so counts against
- * every job; so is a log stamped ahead of the clock, beside the time-less gap that `labelsFor`'s
- * guard writes for every job. With no `messages` (a vehicle, whose ids carry no time, or an agent
- * never read), one record started at `started`, with `count` messages when it is known.
+ * when it does) is the server's business; the record's split is never the wire's. A part whose
+ * key is no job interval is started at null, a gap that may belong to any job: messages of no
+ * known time, and every message when there is no usable job log (none, torn, unreadable, or
+ * stamped ahead of the clock, beside the time-less gap `labelsFor`'s guard writes). The log may
+ * read cleanly by the time coverage runs, and a start then would place the record in one job and
+ * leave every later job clean. Unlabelled time in a valid log keeps its start. With no
+ * `messages` (a vehicle, whose ids carry no time, or an agent never read), one record started at
+ * `started`, with `count` messages when it is known.
  */
 async function recordRemainderGap({
 	sessionId,
@@ -407,11 +409,16 @@ async function recordRemainderGap({
 		if (part === undefined) parts.set(key, [m]);
 		else part.push(m);
 	}
-	for (const part of parts.values()) {
+	for (const [key, part] of parts) {
 		await record({
 			reason:
 				parts.size > 1 ? `${reason}; this record: the ${part.length} of one job interval` : reason,
-			started: usageSpan(part).usageFrom ?? null,
+			// No usable job log (`none`), or one that cannot be read or trusted (`invalid`, a time-less
+			// message too): no start can be vouched for, so none is written. A start at the earliest
+			// message would place the record in one job, and once the log reads cleanly every later
+			// job would read clean. Unlabelled time in a valid log (`none#…`) keeps its start: coverage
+			// places it outside every job, which is where it is.
+			started: key === "invalid" || key === "none" ? null : (usageSpan(part).usageFrom ?? null),
 			messages: part.length,
 		});
 	}
@@ -423,9 +430,19 @@ async function recordRemainderGap({
  * `deferred`, never left to stderr alone, and by this sweep ALONE, whatever the exit: it runs in
  * `postRemainder`'s `finally`, over `left`, the messages it selected and has neither posted nor
  * written down (`left.messages`, each with why, or the exit's `left.exit`), or why the agent's
- * usage was never read at all (`left.agent`).
+ * usage was never read at all (`left.agent`); and every transcript hold whose settle is in flight
+ * (`left.holds`), its outcome never seen: a transfer-scoped settle gap, `unknown`. Those come from
+ * the agent's own reconcile when it was read; else from its journal, the fresh ones (a stale one
+ * is reconcile's, at the first hook that reads the agent, which writes it down then).
  */
 async function sweepRemainder(sessionId, agentId, left) {
+	for (const record of left.holds ?? (await inFlightSettles(sessionId, agentId))) {
+		await recordInFlightSettle(sessionId, record, {
+			outcome: "unknown",
+			reason:
+				"at SessionEnd: its settle was sent and never seen to end, by a hook that did not finish: whether it posted is unknown",
+		});
+	}
 	const deferred = (reason, messages) =>
 		recordRemainderGap({
 			sessionId,
@@ -445,6 +462,18 @@ async function sweepRemainder(sessionId, agentId, left) {
 	for (const [why, messages] of byWhy) {
 		await deferred(`${messages.length} transcript message(s) ${why}`, messages);
 	}
+}
+
+/** An agent's transcript holds whose settle is in flight and not yet stale, from its journal. */
+async function inFlightSettles(sessionId, agentId) {
+	const now = Date.now();
+	return (await holdJournal(sessionId, agentId)).filter(
+		(record) =>
+			record.kind === "settling" &&
+			!record.estimate &&
+			record.ids.length > 0 &&
+			now - record.mtimeMs <= STALE_SETTLING_MS,
+	);
 }
 
 /** The earliest and latest finite `ts` of a message list, as ISO strings. */
@@ -1002,6 +1031,8 @@ async function holdJournal(sessionId, agentId) {
 				kind,
 				path,
 				ids,
+				// The hold it is about: a gap written from this record joins the hold's other records.
+				...(typeof body.transferId === "string" ? { transferId: body.transferId } : {}),
 				outcome: body.outcome,
 				keyed: holdVehicle(body),
 				mtimeMs,
@@ -1025,6 +1056,7 @@ async function holdJournal(sessionId, agentId) {
 async function reconcile(cursor, sessionId, agentId) {
 	const live = new Set();
 	const finished = [];
+	const inFlight = [];
 	const now = Date.now();
 	for (const record of await holdJournal(sessionId, agentId)) {
 		if (record.kind === "done") {
@@ -1043,9 +1075,17 @@ async function reconcile(cursor, sessionId, agentId) {
 			if (record.estimate && record.ids.length === 0) {
 				await recordUnconfirmedCall(sessionId, record, "call-ran");
 			}
+			// A TRANSCRIPT hold's settle went out and its hook died before writing how it ended: it may
+			// have posted. Its window is now accounted (no key) or parked unresolved (a key), and this is
+			// the one place that knows why: written down, as its settle's own gap would have been.
+			if (!record.estimate && record.ids.length > 0) await recordInFlightSettle(sessionId, record);
 			finished.push(record.path);
 		} else {
 			for (const id of record.ids) live.add(id);
+			// A transcript hold whose settle is in flight: SessionEnd's sweep writes it down.
+			if (record.kind === "settling" && !record.estimate && record.ids.length > 0) {
+				inFlight.push(record);
+			}
 		}
 	}
 	for (const [id] of cursor.assigned) {
@@ -1055,7 +1095,31 @@ async function reconcile(cursor, sessionId, agentId) {
 		// ids are never posted again.
 		if (!live.has(id)) accountIds(cursor, [id]);
 	}
-	return { live, finished };
+	return { live, finished, inFlight };
+}
+
+/**
+ * A transcript hold's settle that went out and was never seen to end: its hook died after
+ * claiming it (`.settling`). Stale, `reconcile` writes it as the settle's own gap would have
+ * been: `claimed` without a key (its window accounted, never retried) or `unresolved` under one
+ * (retried as a vehicle). Fresh at SessionEnd, the last settle point, the sweep writes it
+ * `unknown` (`sweepRemainder`). Its start is the window's, from its job labels when a server
+ * that honours `job` labelled it (one job interval, then); else null, a gap that may belong to
+ * any job, as the window's messages carry no time here.
+ */
+function recordInFlightSettle(sessionId, record, { outcome, reason } = {}) {
+	return recordSettleGap({
+		phase: "settle",
+		outcome: outcome ?? (record.keyed === null ? "claimed" : "unresolved"),
+		session: sessionId,
+		agent: record.agentId,
+		transferId: record.transferId,
+		reason:
+			reason ??
+			"its hook died after sending the settle and before writing how it ended: it may have posted",
+		started: typeof record.usageFrom === "string" ? record.usageFrom : null,
+		messages: record.ids.length,
+	});
 }
 
 /**
@@ -1665,7 +1729,7 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			await release();
 			return stickToEstimate(where, cursor.estimateReason ?? "transcript unreadable", false);
 		}
-		const { live, finished } = await reconcile(cursor, sessionId, agentId);
+		const { live, finished, inFlight } = await reconcile(cursor, sessionId, agentId);
 		const ingested = await ingest(cursor, transcriptPath, where.since);
 		if (!ingested.ok) {
 			const sticky = await stickToEstimate(where, ingested.reason, true);
@@ -1690,6 +1754,7 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			kind: "ready",
 			cursor,
 			live,
+			inFlight,
 			transcriptPath,
 			claimsDir: where.claimsDir,
 			owner: `${sanitize(sessionId)}/${agentId}`,
@@ -2305,7 +2370,7 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
  */
 export async function postRemainder(args) {
 	// What this call selected and has neither posted nor written down, and why: the sweep's input.
-	const left = { messages: new Map(), agent: null, exit: null, read: false };
+	const left = { messages: new Map(), agent: null, exit: null, read: false, holds: null };
 	try {
 		return await remainderOf(args, left);
 	} catch (err) {
@@ -2349,6 +2414,8 @@ async function remainderOf(
 			"another hook holds this agent's lock, so its usage was not posted here (a concurrent settle point may post it)";
 		return { skipped: "a concurrent hook holds this agent's lock" };
 	}
+	// The transcript holds whose settle is in flight, as this agent's reconcile found them.
+	left.holds = opened.inFlight;
 	const { cursor } = opened;
 	const summary = { posted: 0, notes: [], serverDown: false };
 	const callBudget = () => Math.min(callTimeoutCap(), Math.floor((timeLeft() - reserveMs) / 3));

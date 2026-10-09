@@ -11,7 +11,7 @@
 // port fetch refuses outright: an answer, never followed, as the request may have been acted on.
 import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, utimes, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1685,6 +1685,212 @@ describe("one writer for a remainder's records: each job's record starts at that
 					`session ${SESSION}: a gap fell inside an interval of ${job}`,
 				);
 			}
+		},
+		LONG,
+	);
+
+	// A job log no hook can read whole: no start can be vouched for, so the record has none. Read
+	// whole later (repaired, or its torn line completed), it must still be a gap of every job.
+	const unusable: Array<[string, () => Promise<void>]> = [
+		[
+			"a torn job log (its last line unfinished)",
+			async () => {
+				await mkdir(join(stateDir, "jobs"), { recursive: true });
+				await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), log.slice(0, -1));
+			},
+		],
+		[
+			"an unreadable job log (a directory in its place)",
+			async () => {
+				await mkdir(join(stateDir, "jobs", `${SESSION}.jsonl`), { recursive: true });
+			},
+		],
+	];
+	const where: Array<[string, string, () => void, "stop" | "session-end"]> = [
+		[
+			"Stop, an authorize refused (400)",
+			"released",
+			() => {
+				fixed.set("/v1/authorize#1", ANSWER.other4xx as Reply);
+			},
+			"stop",
+		],
+		["SessionEnd, out of time", "deferred", () => {}, "session-end"],
+	];
+	it.each(
+		unusable.flatMap(([what, spoil]) =>
+			where.map(
+				([ending, outcome, setEnding, hook]) =>
+					[what, ending, outcome, spoil, setEnding, hook] as const,
+			),
+		),
+	)(
+		"%s × %s: one %s record, started at null, and a gap of every job once the log reads whole",
+		async (_, __, outcome, spoil, setEnding, hook) => {
+			await backdate();
+			await spoil();
+			await writeLines(transcriptPath(), [
+				response("msg_a", SONNET, at(-40)),
+				response("msg_b", SONNET, at(-10)),
+			]);
+			setEnding();
+			if (hook === "stop") await run("stop", stopInput());
+			else await run("session-end", seInput(), seBudget(0));
+			const written = await phased("remainder");
+			expect(
+				written.map((r) => ({ outcome: r.outcome, started: r.started, messages: r.messages })),
+			).toEqual([{ outcome, started: null, messages: 2 }]);
+			const { jobCoverage } = (await import(pathToFileURL(join(HOOKS, "job-log.mjs")).href)) as {
+				jobCoverage(args: {
+					job: string;
+					logs: Record<string, string>;
+					records: unknown[];
+					watch: unknown[];
+				}): { knownGaps: Array<{ gap: string }> };
+			};
+			for (const job of ["job-a", "job-b"]) {
+				const coverage = jobCoverage({
+					job,
+					logs: { [SESSION]: log },
+					records: [],
+					watch: written,
+				});
+				expect(coverage.knownGaps.map((gap) => gap.gap)).toContain(
+					`a gap cannot be attributed to a job (its time is unreadable): it may belong to ${job}`,
+				);
+			}
+		},
+		LONG,
+	);
+});
+
+describe("every hold state SessionEnd can meet, and what it writes down", () => {
+	const STALE = (Date.now() - 11 * 60_000) / 1000;
+	const makeStale = async (call: string, transferId: string, kind: string) =>
+		utimes(join(stateDir, holdName(call, transferId, "main", kind)), STALE, STALE);
+	const busyLock = async () => {
+		const lock = join(stateDir, "transcripts", `${SESSION}__main.json.lock`);
+		await mkdir(lock, { recursive: true });
+		await writeFile(join(lock, "owner"), "another hook");
+	};
+	type Row = {
+		/** The hold, as SessionEnd finds it. */
+		seed: () => Promise<void>;
+		mode?: Record<string, string>;
+		budgetMs?: number;
+		/** Every gap SessionEnd writes, in order. */
+		gaps: Array<Record<string, unknown>>;
+	};
+	const tx = { transferId: "tx_1" };
+	const rows: Array<[string, Row]> = [
+		[
+			"an estimate hold, pending (.json): its call may have run uncharged",
+			{
+				seed: () => seedHold("tu_1", "tx_1", ESTIMATE),
+				mode: ESTIMATE_MODE,
+				gaps: [{ ...tx, tool: "(unconfirmed)", releaseClass: "call-unconfirmed" }],
+			},
+		],
+		[
+			"an estimate hold, settle-attempted (.settling), fresh: its call ran",
+			{
+				seed: () => seedHold("tu_1", "tx_1", ESTIMATE, "settling"),
+				mode: ESTIMATE_MODE,
+				gaps: [{ ...tx, tool: "(unconfirmed)", releaseClass: "call-ran" }],
+			},
+		],
+		[
+			"an estimate hold, settle-attempted (.settling), stale: the journal writes its call down, under its transferId",
+			{
+				seed: async () => {
+					await seedHold("tu_1", "tx_1", ESTIMATE, "settling");
+					await makeStale("tu_1", "tx_1", "settling");
+				},
+				gaps: [{ ...tx, tool: "(unconfirmed)", releaseClass: "call-ran" }],
+			},
+		],
+		[
+			"a hold claimed only to end a deferred call's (.releasing): given back, nothing written",
+			{
+				seed: () => seedHold("tu_1", "tx_1", ESTIMATE, "releasing"),
+				mode: ESTIMATE_MODE,
+				gaps: [],
+			},
+		],
+		[
+			"a transcript hold with its window, pending (.json): settled, nothing written",
+			{ seed: () => seedHold("tu_1", "tx_1", WINDOW), gaps: [] },
+		],
+		[
+			"a transcript hold with its window, pending (.json), out of time: its settle deferred",
+			{
+				seed: () => seedHold("tu_1", "tx_1", WINDOW),
+				budgetMs: 0,
+				gaps: [{ ...tx, phase: "settle", outcome: "deferred" }],
+			},
+		],
+		[
+			"a transcript hold with no usage, pending (.json): given back, nothing written",
+			{ seed: () => seedHold("tu_1", "tx_1", EMPTY), gaps: [] },
+		],
+		[
+			"a transcript hold whose settle is in flight (.settling), fresh: unknown",
+			{
+				seed: () => seedHold("tu_1", "tx_1", WINDOW, "settling"),
+				gaps: [{ ...tx, phase: "settle", outcome: "unknown", messages: 1 }],
+			},
+		],
+		[
+			"a transcript hold whose settle is in flight (.settling), fresh, its agent's lock busy: unknown, beside the agent's own",
+			{
+				seed: async () => {
+					await seedHold("tu_1", "tx_1", WINDOW, "settling");
+					await busyLock();
+				},
+				gaps: [
+					{ ...tx, phase: "settle", outcome: "unknown", messages: 1 },
+					{ phase: "remainder", outcome: "deferred", agent: "main" },
+				],
+			},
+		],
+		[
+			"a transcript hold whose settle is in flight (.settling), stale: claimed, its window accounted",
+			{
+				seed: async () => {
+					await seedHold("tu_1", "tx_1", WINDOW, "settling");
+					await makeStale("tu_1", "tx_1", "settling");
+				},
+				gaps: [{ ...tx, phase: "settle", outcome: "claimed", messages: 1 }],
+			},
+		],
+		[
+			"a transcript hold whose settle is in flight (.settling) under a key, stale: unresolved, retried as itself",
+			{
+				seed: async () => {
+					await seedHold("tu_1", "tx_1", KEYED, "settling");
+					await makeStale("tu_1", "tx_1", "settling");
+				},
+				gaps: [{ ...tx, phase: "settle", outcome: "unresolved", messages: 1 }],
+			},
+		],
+		[
+			"a finished hold (.done): its outcome applied, nothing written",
+			{ seed: () => seedHold("tu_1", "tx_1", { ...WINDOW, outcome: "settled" }, "done"), gaps: [] },
+		],
+	];
+	it.each(rows)(
+		"%s",
+		async (_, row) => {
+			capabilities = ["release"];
+			await writeTranscript();
+			await row.seed();
+			await run("session-end", seInput(), {
+				...(row.mode ?? {}),
+				...seBudget(row.budgetMs ?? 1_200),
+			});
+			const written = await gaps();
+			expect(written).toMatchObject(row.gaps);
+			expect(written).toHaveLength(row.gaps.length);
 		},
 		LONG,
 	);
