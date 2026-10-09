@@ -426,13 +426,18 @@ record from then on carries it (`data.job`, with `data.usageFrom` / `data.usageT
 usage the record covers), so per-job cost is a query.
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/bin/usertrust-job.mjs" start bug-1   # from the NEXT tool call on
-node "$CLAUDE_PLUGIN_ROOT/bin/usertrust-job.mjs" stop
+usertrust-job.mjs start bug-1   # from the NEXT tool call on
+usertrust-job.mjs stop
 ```
 
-Run it as an ordinary Bash call (the session id is `$CLAUDE_CODE_SESSION_ID`). Job ids are opaque:
-1-128 characters of `[A-Za-z0-9._:-]`.
+Run it as an ordinary Bash call in the session (the session id is `$CLAUDE_CODE_SESSION_ID`). Job ids
+are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
 
+- **A bare command.** While the plugin is enabled, Claude Code puts its `bin/` on the Bash tool's
+  `PATH`, so `usertrust-job.mjs` runs by name
+  ([plugins reference](https://code.claude.com/docs/en/plugins/manifest-reference#standard-layout)).
+  `$CLAUDE_PLUGIN_ROOT` is set for a plugin's hooks, not in the Bash tool, so a command written with
+  it fails there. A permission rule can allow the command: `Bash(usertrust-job.mjs:*)`.
 - **A switch applies from the next call.** The call that runs `start bug-2` still bills `bug-1`. Usage
   that was already in the transcript is billed to the job open when it happened, so a turn that spans
   a switch is settled once per job.
@@ -449,7 +454,7 @@ Run it as an ordinary Bash call (the session id is `$CLAUDE_CODE_SESSION_ID`). J
   (remembered per server URL, so one failed health probe does not drop it); an older server leaves every
   record as it was.
 - **What does the evidence not cover?**
-  `node bin/usertrust-job.mjs coverage bug-1 --vault <project>/.usertrust` prints the job's tagged cost
+  `usertrust-job.mjs coverage bug-1 --vault <project>/.usertrust` prints the job's tagged cost
   and a list of `knownGaps`, each a named reason the figure may be incomplete, with its evidence. **It is a
   diagnostic, not a certification: an empty list does not mean the figure is complete.** Gaps include: the
   job is still running; a record of the job outside its intervals or without a complete usage window; a call
