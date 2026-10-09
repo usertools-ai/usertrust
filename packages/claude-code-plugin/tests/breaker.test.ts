@@ -30,6 +30,7 @@ interface Verdict {
 	note?: string;
 	closed?: boolean;
 	reopened?: boolean;
+	unprobed?: boolean;
 }
 
 interface BreakerModule {
@@ -38,7 +39,7 @@ interface BreakerModule {
 	noteAnswer(url: string, options?: { now?: number }): void;
 	consultBreaker(
 		url: string,
-		probe: () => Promise<boolean>,
+		probe: () => Promise<boolean | null>,
 		options?: { clock?: () => number },
 	): Promise<Verdict>;
 }
@@ -436,6 +437,17 @@ describe("the breaker's file (breaker.mjs)", () => {
 		expect((await breaker.consultBreaker(url, counted)).state).toBe("open");
 		expect(probes).toBe(0);
 		expect(nodeFs.existsSync(marker)).toBe(true);
+	});
+
+	it("a probe that could not run decides nothing: the breaker stays past its minute, and its marker is removed", async () => {
+		await dueBreaker();
+		const was = await breakerState();
+		expect(await breaker.consultBreaker(url, async () => null)).toEqual({
+			state: "open",
+			unprobed: true,
+		});
+		expect(await breakerState()).toEqual(was);
+		expect(nodeFs.existsSync(breakerFile().replace(/\.json$/u, ".probe"))).toBe(false);
 	});
 
 	it("a probe that gets no answer opens it for another minute", async () => {

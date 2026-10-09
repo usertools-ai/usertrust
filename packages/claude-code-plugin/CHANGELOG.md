@@ -30,8 +30,15 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ### Changed
 
-- **A request this hook's own timer cut off is `unknown`, never `failed`**: it may still
-  land. The gap records say which.
+- **A request that got no answer is `unknown`, unless it was never sent**: this hook's own
+  timeout, or a connection dropped after sending, may still land. Only a refused connection
+  or a spent budget is `failed`, as an error answer is, and a transcript settle refused before
+  it was sent is `released`: it cannot have posted. The gap records say which.
+- **An estimate settle answered `settled: false` is a `claimed` gap**, as a transcript hold's
+  is: its charge may be missing.
+- **SessionEnd, the last settle point, writes down what it cannot finish**: a `deferred`
+  remainder gap for usage it leaves unposted, and its call's gap for a hold it has no time to
+  give back. Its breaker probe takes at most a fifth of its budget.
 - **`usertrust-job coverage` lists a breaker's deferral inside a job's interval as a known
   gap**, as it does a gap: the record cannot say whether the usage was posted later.
 

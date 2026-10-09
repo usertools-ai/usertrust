@@ -136,6 +136,7 @@ import {
 	callStart,
 	cleanup,
 	clearPending,
+	failureOutcome,
 	guardMode,
 	isAlreadySettled,
 	isUnknownRoute,
@@ -354,6 +355,23 @@ export function settleLabels(labels) {
 }
 
 /** The earliest and latest finite `ts` of a message list, as ISO strings. */
+/**
+ * SessionEnd is the last settle point: usage it leaves "for a later settle point" has none,
+ * unless the session is resumed. So whatever it defers is written down as a gap, `deferred`,
+ * never left to stderr alone. `messages`, when known, give the record its count and its start.
+ */
+function finalDeferral({ sessionId, agentId, reason, messages }) {
+	return recordSettleGap({
+		phase: "remainder",
+		outcome: "deferred",
+		session: sessionId,
+		agent: agentId,
+		reason: `at SessionEnd: ${reason}`,
+		started: messages === undefined ? null : (usageSpan(messages).usageFrom ?? null),
+		...(messages === undefined ? {} : { messages: messages.length }),
+	});
+}
+
 export function usageSpan(messages) {
 	// A loop, never `Math.min(...times)`: a spread of ~125k arguments throws a RangeError, and
 	// this runs in EVERY hook over whatever backlog a long outage left.
@@ -1168,12 +1186,12 @@ function selectNew(cursor, live) {
  * read, or that the hook's time no longer covers, is left for a later settle
  * point, never posted unverified.
  */
-async function selectOwn(opened) {
+async function selectOwn(opened, { final = null } = {}) {
 	const { cursor } = opened;
 	const fresh = selectNew(cursor, opened.live);
 	const own = [];
 	const failed = new Map();
-	let deferred = 0;
+	const deferred = [];
 	let writtenOff = 0;
 	for (const m of fresh) {
 		if (m.claimed) {
@@ -1182,7 +1200,7 @@ async function selectOwn(opened) {
 		}
 		// Each claim is file I/O: never let them eat the time the calls need.
 		if (timeLeft() < claimFloor()) {
-			deferred += 1;
+			deferred.push(m);
 			continue;
 		}
 		const claim = await claimHolder(opened.claimsDir, m.id, opened.owner);
@@ -1206,10 +1224,17 @@ async function selectOwn(opened) {
 			`usertrust: ${total} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point`,
 		);
 	}
-	if (deferred > 0) {
+	if (deferred.length > 0) {
 		say(
-			`usertrust: ${deferred} transcript message(s) not claimed this time (out of time) — posted at a later settle point`,
+			`usertrust: ${deferred.length} transcript message(s) not claimed this time (out of time) — posted at a later settle point`,
 		);
+		if (final !== null) {
+			await finalDeferral({
+				...final,
+				reason: `${deferred.length} transcript message(s) not claimed (out of time)`,
+				messages: deferred,
+			});
+		}
 	}
 	if (writtenOff > 0) {
 		say(
@@ -1827,10 +1852,14 @@ async function settleAt(transferId, counts, { keyed, labels = {} }) {
 	} catch (err) {
 		const holdEnded = await hygieneRelease(transferId, "transcript settle unanswered");
 		return {
-			outcome: keyed ? "unresolved" : "claimed",
+			// A settle that never left (lib.mjs `TransportError.unsent`) posted nothing: its window is
+			// released to a later settle point. Any other may have posted: claimed, or unresolved
+			// under a key.
+			outcome: keyed ? "unresolved" : err?.unsent === true ? "released" : "claimed",
 			reason: `settle unreachable: ${errText(err)}`,
 			holdEnded,
 			timedOut: err?.timedOut === true,
+			failure: failureOutcome(err),
 		};
 	}
 	return settleOutcome(transferId, settle, keyed);
@@ -1898,12 +1927,22 @@ async function returnEmptyHold(transferId) {
 				outcome: "unreturned",
 				reason: `release unreachable: ${errText(err)}`,
 				timedOut: err?.timedOut === true,
+				failure: failureOutcome(err),
 			};
 		}
 	}
 	const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 	const result = await settleAt(transferId, zero, { keyed: false });
-	return result.unknownTransfer === true ? { outcome: "returned" } : result;
+	if (result.outcome === "settled" || result.unknownTransfer === true)
+		return { outcome: "returned" };
+	// The settle at zero stands in for a release, so it ends as one: a give-back that did not end
+	// cleanly, written down as such (`recordHoldOutcome`), whatever the settle's own words.
+	return {
+		outcome: "unreturned",
+		reason: result.reason ?? result.outcome,
+		timedOut: result.timedOut === true,
+		...(result.failure === undefined ? {} : { failure: result.failure }),
+	};
 }
 
 /**
@@ -2007,9 +2046,10 @@ export const OUTCOME_NOTES = new Map([
 /**
  * Write down a transcript hold's settle that ended other than `settled` or `returned` (lib.mjs
  * `recordSettleGap`), under the hold's transferId. `skipped` is not: another hook is settling
- * the hold, and writes its own. An empty hold's give-back that failed (`unreturned`) is a
- * `release`, `failed`, or `unknown` when this hook's timer cut it off; every other ending keeps
- * its name. Returns whether a record was written.
+ * the hold, and writes its own. An empty hold's give-back that failed (`unreturned`), by a
+ * release or by the settle at zero that stands in for one, is a `release`: `failed` when the
+ * server answered with an error or the request never left, else `unknown` (lib.mjs
+ * `failureOutcome`). Every other ending keeps its name. Returns whether a record was written.
  */
 export async function recordHoldOutcome(sessionId, entry, result) {
 	const { outcome } = result;
@@ -2017,7 +2057,7 @@ export async function recordHoldOutcome(sessionId, entry, result) {
 	const release = outcome === "unreturned";
 	return recordSettleGap({
 		phase: release ? "release" : "settle",
-		outcome: release ? (result.timedOut === true ? "unknown" : "failed") : outcome,
+		outcome: release ? (result.failure ?? "failed") : outcome,
 		session: sessionId,
 		agent: entry.agentId,
 		transferId: entry.transferId,
@@ -2130,6 +2170,8 @@ async function lastCompleteText(path) {
  */
 export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 	const sessionId = input.session_id ?? "unknown";
+	// SessionEnd is the last settle point: what it leaves is written down (`finalDeferral`).
+	const final = hook === "SessionEnd";
 	await settleAssignedHolds(sessionId, null);
 	if (usageMode() === "transcript") {
 		const agents = ["main", ...(await subagentIds(input))];
@@ -2142,6 +2184,7 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 					hook,
 					reserveMs: cleanupReserve(),
 					lockWaitMs,
+					final,
 				});
 				if (result.skipped !== undefined) {
 					say(`usertrust: no transcript usage for ${agentId} — ${result.skipped}`);
@@ -2156,6 +2199,15 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 							`usertrust: server unreachable — transcript usage of ${rest.join(", ")} left for the next settle point`,
 						);
 					}
+					if (final) {
+						for (const other of rest) {
+							await finalDeferral({
+								sessionId,
+								agentId: other,
+								reason: "the server stopped answering, so this agent's usage was not posted",
+							});
+						}
+					}
 					break;
 				}
 			} catch (err) {
@@ -2163,7 +2215,7 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 			}
 		}
 	}
-	await cleanup(sessionId, null);
+	await cleanup(sessionId, null, { final });
 }
 
 /**
@@ -2181,9 +2233,18 @@ export async function postRemainder({
 	hook,
 	reserveMs,
 	lockWaitMs = 0,
+	final = false,
 }) {
 	const opened = await openAgent({ sessionId, agentId, input, waitMs: lockWaitMs });
-	if (opened.kind === "estimate" || opened.kind === "unavailable") {
+	if (opened.kind === "estimate") return { skipped: opened.reason };
+	if (opened.kind === "unavailable") {
+		if (final) {
+			await finalDeferral({
+				sessionId,
+				agentId,
+				reason: `transcript state unavailable (${opened.reason}), so this agent's usage was not posted`,
+			});
+		}
 		return { skipped: opened.reason };
 	}
 	if (opened.kind === "busy") return { skipped: "a concurrent hook holds this agent's lock" };
@@ -2191,7 +2252,7 @@ export async function postRemainder({
 	const summary = { posted: 0, notes: [], serverDown: false };
 	const callBudget = () => Math.min(callTimeoutCap(), Math.floor((timeLeft() - reserveMs) / 3));
 	try {
-		const fresh = await selectOwn(opened);
+		const fresh = await selectOwn(opened, { final: final ? { sessionId, agentId } : null });
 		await opened.save();
 		if (fresh.length === 0 && cursor.unresolved.size === 0) return summary;
 		// What the server honours decides what these calls may carry (see lib.mjs).
@@ -2305,7 +2366,20 @@ export async function postRemainder({
 			fresh,
 			jobs === null ? undefined : (m) => labelsFor(jobs, m.ts).key,
 		);
-		for (const messages of groups.values()) {
+		const pending = [...groups.values()];
+		// At SessionEnd, the groups a break leaves (out of time, or the server down) are written down.
+		const leave = async (from, why) => {
+			if (!final) return;
+			for (const left of pending.slice(from)) {
+				await finalDeferral({
+					sessionId,
+					agentId,
+					reason: `${left[0].model}: not posted (${why})`,
+					messages: left,
+				});
+			}
+		};
+		for (const [index, messages] of pending.entries()) {
 			const model = messages[0].model;
 			const span = jobs === null ? {} : usageSpan(messages);
 			const labels =
@@ -2319,6 +2393,7 @@ export async function postRemainder({
 			const timeoutMs = callBudget();
 			if (timeoutMs < minCall()) {
 				summary.notes.push(`${model}: deferred to the next settle point (out of time)`);
+				await leave(index, "out of time");
 				break;
 			}
 			const ids = messages.map((m) => m.id);
@@ -2384,6 +2459,7 @@ export async function postRemainder({
 			}
 			if (result.serverDown) {
 				summary.serverDown = true;
+				await leave(index + 1, "the server stopped answering");
 				break;
 			}
 		}
@@ -2523,7 +2599,8 @@ async function postGroup({
 	} catch (err) {
 		await hygieneRelease(transferId, "transcript settle unanswered");
 		return {
-			outcome: key === undefined ? "claimed" : "unresolved",
+			// A settle that never left posted nothing (`settleAt`): its group is released.
+			outcome: key !== undefined ? "unresolved" : err?.unsent === true ? "released" : "claimed",
 			reason: `settle unreachable: ${errText(err)}`,
 			transferId,
 			timedOut: err?.timedOut === true,

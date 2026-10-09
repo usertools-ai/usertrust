@@ -65,16 +65,40 @@ export function requireLaunch() {
 }
 
 /**
- * A request that got no answer. `timedOut` when this hook's own timer aborted it: the server
- * may yet act on it, so its outcome is UNKNOWN, never "failed". Read from the abort itself,
- * never parsed from a message.
+ * A request that got no answer. `timedOut` when this hook's own timer aborted it. `unsent`
+ * when the request provably never reached the server: a refused config, a spent budget, or a
+ * connection never made (`neverSent`). Only then can nothing have landed; any other failure
+ * (a timeout, a connection dropped after the request went out) may yet be acted on.
  */
 export class TransportError extends Error {
-	constructor(message, { timedOut = false } = {}) {
+	constructor(message, { timedOut = false, unsent = false } = {}) {
 		super(message);
 		this.name = "TransportError";
 		this.timedOut = timedOut;
+		this.unsent = unsent;
 	}
+}
+
+/** A connection that was never made: refused, unresolved, unreachable. */
+const NEVER_SENT_CODES = new Set([
+	"ECONNREFUSED",
+	"ENOTFOUND",
+	"EAI_AGAIN",
+	"EHOSTUNREACH",
+	"ENETUNREACH",
+]);
+
+/**
+ * Whether a fetch failure proves its request never left: the connection was never made, or
+ * fetch refused the port outright (`bad port`). Read from the error's cause, as undici reports it.
+ */
+function neverSent(err) {
+	const cause = err?.cause;
+	return (
+		NEVER_SENT_CODES.has(cause?.code) ||
+		NEVER_SENT_CODES.has(err?.code) ||
+		cause?.message === "bad port"
+	);
 }
 
 export function readStdin() {
@@ -499,9 +523,13 @@ export async function recordSettleGap({
 	});
 }
 
-/** A request's failure as an outcome: `unknown` when this hook's own timer aborted it, else `failed`. */
+/**
+ * A request's failure as an outcome: `failed` only when it provably never reached the server
+ * (`TransportError.unsent`), so nothing can have landed; else `unknown`, as the server may yet
+ * act on it (this hook's own timeout, or a connection dropped after the request went out).
+ */
 export function failureOutcome(err) {
-	return err?.timedOut === true ? "unknown" : "failed";
+	return err?.unsent === true && err?.timedOut !== true ? "failed" : "unknown";
 }
 
 /** The reason every record of a hook that skipped the network under an open breaker gives. */
@@ -995,13 +1023,15 @@ function timedOut(deadlineMs) {
 
 /**
  * The half-open probe: whether the server answers `/v1/health` at all, any status, within a
- * second (and what is left of this hook's budget). An answer is the whole of it, its body
- * read: a server that sends its headers and then stalls has not answered. Not counted as a
- * timeout: it is the breaker's own question.
+ * second and a fifth of this hook's budget (`budgetShare(0.2)`, as the capability probe), so it
+ * never takes the time a settle point needs: SessionEnd's whole budget is 1.2 s. An answer is the
+ * whole of it, its body read: a server that sends its headers and then stalls has not answered.
+ * Null when there is no time to ask at all: the probe did not run, and decides nothing
+ * (breaker.mjs `consultBreaker`). Not counted as a timeout: it is the breaker's own question.
  */
 async function healthAnswers() {
-	const timeoutMs = Math.min(1_000, timeLeft());
-	if (!(timeoutMs > 0)) return false;
+	const timeoutMs = Math.min(1_000, budgetShare(0.2), timeLeft());
+	if (!(timeoutMs > 0)) return null;
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	try {
@@ -1035,6 +1065,11 @@ export async function breakerOpen() {
 	if (verdict.reopened === true) {
 		say("usertrust: the server still does not answer: its breaker stays open for another minute");
 	}
+	if (verdict.unprobed === true) {
+		say(
+			"usertrust: the server's breaker is past its minute, but this hook has no time left to probe it: it sends nothing, and the next hook probes",
+		);
+	}
 	return verdict.state === "open";
 }
 
@@ -1047,8 +1082,8 @@ export async function breakerOpen() {
 export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 	const { refused, key } = settings();
 	// A refused config file: no request at all, and its fixed reason is the gap's.
-	if (refused !== null) throw new TransportError(refused);
-	if (!(timeoutMs > 0)) throw new TransportError("hook time budget spent");
+	if (refused !== null) throw new TransportError(refused, { unsent: true });
+	if (!(timeoutMs > 0)) throw new TransportError("hook time budget spent", { unsent: true });
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	try {
@@ -1072,6 +1107,7 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 		if (aborted) timedOut(timeoutMs);
 		throw new TransportError(err instanceof Error ? err.message : String(err), {
 			timedOut: aborted,
+			unsent: !aborted && neverSent(err),
 		});
 	} finally {
 		clearTimeout(timeout);
@@ -1362,6 +1398,24 @@ export async function releaseHold(transferId, reason, { timeoutMs = 5000, releas
 }
 
 /**
+ * SessionEnd is the last settle point: a hold it has no time left to give back is written down
+ * as its call's gap, as the give-back would have written it (`recordUnconfirmedCall`), and left
+ * to the server's sweep. A hold with no call behind it (a transcript window's, or one claimed
+ * only to end a deferred call's) has no gap to write, and one with assigned usage was settled
+ * first (transcript.mjs `settleAssignedHolds`).
+ */
+async function leftAtSessionEnd(sessionId, pending, settling) {
+	for (const entry of pending) {
+		if ((entry.assignedIds?.length ?? 0) > 0 || entry.usage === "transcript") continue;
+		await recordUnconfirmedCall(sessionId, entry, "call-unconfirmed");
+	}
+	for (const held of settling) {
+		if (held.intent === "release" || held.transcript) continue;
+		await recordUnconfirmedCall(sessionId, held, "call-ran");
+	}
+}
+
+/**
  * Give back a hold whose transferId cannot name a file (`isTransferId`), through a
  * `release` the server advertises and nothing else: never an abort, which counts
  * as a breaker failure. Without `release`, the hold is left to the server's
@@ -1388,7 +1442,7 @@ export async function giveBackInvalid(transferId, timeoutMs, releaseClass = "unu
 			},
 			{ timeoutMs },
 		);
-		if (response.status !== 200) {
+		if (response.status !== 200 && !isUnknownTransfer(response)) {
 			say(
 				`usertrust: the release of a hold whose transferId is not a valid id returned ${response.status}; the server's sweep releases it`,
 			);
@@ -1412,7 +1466,8 @@ export async function giveBackInvalid(transferId, timeoutMs, releaseClass = "unu
 export async function giveBack(transferId, reason, timeoutMs, releaseClass) {
 	try {
 		const response = await releaseHold(transferId, reason, { timeoutMs, releaseClass });
-		if (response.status === 200) return true;
+		// A 404 `unknown transferId` confirms it too: the server holds it no more.
+		if (response.status === 200 || isUnknownTransfer(response)) return true;
 		const why = response.json?.reason ?? response.json?.error;
 		say(
 			`usertrust: ${response.route} ${transferId} was refused (${response.status}${typeof why === "string" ? `: ${why}` : ""}); the server's TTL sweep releases the hold`,
@@ -1443,8 +1498,9 @@ export async function giveBack(transferId, reason, timeoutMs, releaseClass) {
  * is forgotten without a word to this one (`boundElsewhere`), its gap written first:
  * every such hold has one but a claim that only ends a deferred call's hold.
  */
-export async function cleanup(sessionId, agentId) {
-	for (const entry of await listPending(sessionId, agentId)) {
+export async function cleanup(sessionId, agentId, { final = false } = {}) {
+	const pending = await listPending(sessionId, agentId);
+	for (const [index, entry] of pending.entries()) {
 		if ((entry.assignedIds?.length ?? 0) > 0) continue;
 		if (boundElsewhere(entry)) {
 			await abandonHold(entry, "leftover hold", sessionId);
@@ -1453,6 +1509,13 @@ export async function cleanup(sessionId, agentId) {
 		const timeoutMs = Math.min(5000, timeLeft());
 		if (timeoutMs < 100) {
 			say(`usertrust: out of time; hold ${entry.transferId} left for Stop/TTL`);
+			if (final) {
+				await leftAtSessionEnd(
+					sessionId,
+					pending.slice(index),
+					await settlingEstimates(sessionId, agentId),
+				);
+			}
 			return;
 		}
 		// What the client KNOWS about this hold decides its class, never the reason text. A
@@ -1493,7 +1556,8 @@ export async function cleanup(sessionId, agentId) {
 		}
 		await clearPending(entry.path);
 	}
-	for (const held of await settlingEstimates(sessionId, agentId)) {
+	const settling = await settlingEstimates(sessionId, agentId);
+	for (const [index, held] of settling.entries()) {
 		// An estimate hold whose one settle went unanswered: it may have posted, so
 		// it is NEVER settled again — only given back (a 404 here means it posted or
 		// expired), then forgotten. Another server's or key's is only forgotten.
@@ -1513,6 +1577,7 @@ export async function cleanup(sessionId, agentId) {
 		const timeoutMs = Math.min(5000, timeLeft());
 		if (timeoutMs < 100) {
 			say(`usertrust: out of time; hold ${held.transferId} left for Stop/TTL`);
+			if (final) await leftAtSessionEnd(sessionId, [], settling.slice(index));
 			return;
 		}
 		// A claim made only to END a deferred call's hold (`intent: "release"`) is given back as
@@ -1539,7 +1604,8 @@ export async function cleanup(sessionId, agentId) {
 				"session ended after an unanswered settle",
 				{ timeoutMs, releaseClass },
 			);
-			if (response.status !== 200 && response.status !== 404) {
+			// A 404 `unknown transferId` says the hold is gone already: no give-back failed.
+			if (response.status !== 200 && !isUnknownTransfer(response)) {
 				say(`usertrust: ${response.route} ${held.transferId} returned ${response.status}`);
 				await unconfirmed("failed", `${response.route} returned ${response.status}`);
 			}

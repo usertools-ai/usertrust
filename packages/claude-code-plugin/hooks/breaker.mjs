@@ -28,11 +28,13 @@
 //   clock set back, a hand edit) reads CLOSED: no value can hold it open. (Capped at now +
 //   OPEN_MS instead, a far-future `openUntil` would read open at every read, for good.)
 // - HALF-OPEN: past `openUntil`, the hook that wins `<name>.probe` by an exclusive create
-//   probes the server once (lib.mjs: `/v1/health`, ≤ 1 s). An answer, its body read, deletes
-//   the file (closed), and the hook runs as usual; no answer re-opens it for OPEN_MS, and the
-//   hook skips. Either way the prober removes its marker. Every other hook skips while the
-//   marker is within PROBE_STALE_MS of now; one older (its prober died), or dated further
-//   ahead (the clock was set back), reads CLOSED, and is removed.
+//   probes the server once (lib.mjs: `/v1/health`, ≤ 1 s and a fifth of the hook's budget).
+//   An answer, its body read, deletes the file (closed), and the hook runs as usual; no answer
+//   re-opens it for OPEN_MS, and the hook skips. A probe that could not run (no time left)
+//   decides nothing: the file is left past its minute for the next hook, and this one skips.
+//   Either way the prober removes its marker. Every other hook skips while the marker is
+//   within PROBE_STALE_MS of now; one older (its prober died), or dated further ahead (the
+//   clock was set back), reads CLOSED, and is removed.
 // Only watch mode reads or writes it (lib.mjs `breakerOpen`): enforce keeps failing closed.
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -196,8 +198,9 @@ export function noteAnswer(url, { now = Date.now(), fs = REAL_FS } = {}) {
 /**
  * Whether the breaker of `url` keeps this hook off the network: `{ state: "open" }` or
  * `{ state: "closed" }`, with `note` when its directory is refused (it reads closed), and
- * `reopened` or `closed` when this hook's probe decided it. `probe` resolves to whether the
- * server answered. Never throws.
+ * `reopened` or `closed` when this hook's probe decided it, or `unprobed` when the probe could
+ * not run. `probe` resolves to whether the server answered, or null when it did not ask. Never
+ * throws.
  */
 export async function consultBreaker(url, probe, { clock = Date.now, fs = REAL_FS } = {}) {
 	let at;
@@ -237,7 +240,11 @@ export async function consultBreaker(url, probe, { clock = Date.now, fs = REAL_F
 		return { state: "closed" };
 	}
 	try {
-		if (await probe()) {
+		const answered = await probe();
+		// The probe did not run (no time left to ask): nothing was learned, so nothing changes. The
+		// breaker stays past its minute for the next hook to probe, and this one sends nothing.
+		if (answered === null) return { state: "open", unprobed: true };
+		if (answered) {
 			try {
 				fs.unlinkSync(at.path);
 			} catch {

@@ -145,13 +145,22 @@ async function settleOnce(at, body) {
 	}
 }
 
-function noteIfAmbiguous(response, transferId) {
-	if (response.json?.settled === false) {
-		// The server's ledger post was ambiguous: the hold is spent either way.
-		say(
-			`usertrust: settle ${transferId} — the ledger post is ambiguous (settled: false); the usage may be unrecorded`,
-		);
-	}
+/**
+ * A 200 whose receipt says `settled: false`: the server's ledger post was ambiguous, and the hold
+ * is spent either way. Its charge may be missing, so it is written down as a gap, `claimed`, as a
+ * transcript hold's would be (transcript.mjs `settleOutcome`), and said.
+ */
+async function noteIfAmbiguous(at, response, transferId) {
+	if (response.json?.settled !== false) return;
+	say(
+		`usertrust: settle ${transferId} — the ledger post is ambiguous (settled: false); the usage may be unrecorded`,
+	);
+	await settleGap({
+		...at,
+		transferId,
+		outcome: "claimed",
+		reason: "the ledger post is ambiguous (settled: false): the usage may be unrecorded",
+	});
 }
 
 /**
@@ -194,7 +203,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const at = { sessionId, agentId, entry };
 	const response = await settleOnce(at, { transferId: entry.transferId, ...usage });
 	if (response.status === 200) {
-		noteIfAmbiguous(response, entry.transferId);
+		await noteIfAmbiguous(at, response, entry.transferId);
 		await unlink(claimed).catch(() => {});
 		return;
 	}
@@ -226,25 +235,39 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const principal = principalCapable(capabilities)
 		? estimatePrincipalFor(sessionId, agentId, input.agent_type)
 		: undefined;
-	const auth = await serverRequest(
-		"/v1/authorize",
-		{
-			model: defaultModel(),
-			...(typeof usage.inputTokens === "number" ? { estimatedInputTokens: usage.inputTokens } : {}),
-			maxOutputTokens: MAX_OUTPUT_TOKENS,
-			params: {
-				hook: "PostToolUse",
-				tool_name: input.tool_name ?? "unknown",
-				replaces: entry.transferId,
+	let auth;
+	try {
+		auth = await serverRequest(
+			"/v1/authorize",
+			{
+				model: defaultModel(),
+				...(typeof usage.inputTokens === "number"
+					? { estimatedInputTokens: usage.inputTokens }
+					: {}),
+				maxOutputTokens: MAX_OUTPUT_TOKENS,
+				params: {
+					hook: "PostToolUse",
+					tool_name: input.tool_name ?? "unknown",
+					replaces: entry.transferId,
+				},
+				actor: `claude-code:${sessionId}`,
+				...(principal === undefined ? {} : { principal }),
+				// The replacement is the SAME call's charge: it carries the expired hold's job
+				// and usage start, not whatever job is open now.
+				...authorizeLabels(entry),
 			},
-			actor: `claude-code:${sessionId}`,
-			...(principal === undefined ? {} : { principal }),
-			// The replacement is the SAME call's charge: it carries the expired hold's job
-			// and usage start, not whatever job is open now.
-			...authorizeLabels(entry),
-		},
-		withinBudget(),
-	);
+			withinBudget(),
+		);
+	} catch (err) {
+		// No answer. The call RAN and nothing will charge it, as when the fresh hold is refused (below):
+		// its gap is written now. A hold the authorize may have made is left to the server's sweep.
+		await unlink(claimed).catch(() => {});
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		say(
+			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold was not granted (no answer: ${err instanceof Error ? err.message : String(err)}); this call's estimate is not recorded`,
+		);
+		return;
+	}
 	const transferId = auth.json?.transferId;
 	if (
 		auth.status !== 200 ||
@@ -320,7 +343,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	);
 	const settle = await settleOnce(at, { transferId, ...usage });
 	if (settle.status === 200) {
-		noteIfAmbiguous(settle, transferId);
+		await noteIfAmbiguous(at, settle, transferId);
 		await unlink(fresh).catch(() => {});
 	} else {
 		say(`usertrust: settle ${transferId} returned ${settle.status}; hold kept for Stop cleanup`);

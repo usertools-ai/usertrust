@@ -715,7 +715,9 @@ one of:
 
 A record about holds names them in `transferIds`, including those whose settle was
 already under way. After its minute, the next hook asks `/v1/health` once, for at most a
-second: an answer closes the breaker, and no answer opens it for another minute. A hook reads the breaker once, as it starts: one that
+second, and never more than a fifth of its own budget (SessionEnd's is about a second): an
+answer closes the breaker, and no answer opens it for another minute. A hook with no time
+left to ask decides nothing: it sends nothing, and the next hook asks. A hook reads the breaker once, as it starts: one that
 started before the breaker opened sends everything it would have, so a settle it began
 is never left half-done. Enforce mode never reads or writes it.
 
@@ -724,18 +726,34 @@ Stop, SubagentStop and SessionEnd add a `gap` record whenever settling a hold, g
 one back or posting a remainder ends other than settled or given back. So does
 PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"phase"` is
 `settle`, `release` or `remainder`, and its `"outcome"` one of:
-- `claimed`: the settle may have posted, and is never retried (no key);
+- `claimed`: the settle may have posted, and is never retried (no key). An answer of
+  `settled: false`, the ledger's post ambiguous, is `claimed` too, for an estimate hold as
+  for a transcript one;
 - `unresolved`: retried under its key at the next Stop;
-- `released`: nothing was posted, and the usage waits for a later settle point;
+- `released`: nothing was posted, and the usage waits for a later settle point. A settle
+  whose connection was refused before anything was sent is `released`: it cannot have posted;
 - `deferred`: not attempted yet (out of time, say);
-- `failed`: the server answered it with an error;
-- `unknown`: this hook's own timeout cut it off, and the server may still act on it.
+- `failed`: the server answered it with an error, or it was never sent (a refused
+  connection, a spent budget), so nothing can have landed;
+- `unknown`: no answer once it may have gone out: this hook's own timeout cut it off, or the
+  connection dropped after sending, and the server may still act on it. A transcript hold's
+  settle that ends this way is `claimed`, or `unresolved` under a key, which also say whether
+  it is retried.
 
 Each names its hold's `transferId`, so a deferral and how it ended can be joined. A hold
 that carried no usage, given back to a server that no longer holds it (a 404 `unknown
 transferId`: it expired, or another hook ended it), writes nothing: it is gone. At Stop, such
 a 404 writes no `release` gap for any hold, as none is left to give back; a call that may
-have run uncharged still has its own gap.
+have run uncharged still has its own gap. On a server that cannot release, an empty hold is
+given back by a settle at zero, and that settle's failure is written as the give-back it
+stands for: `release`, `failed` or `unknown`.
+
+**SessionEnd, the last settle point, writes down what it cannot finish.** What it leaves "for
+a later settle point" has none unless the session is resumed, so each such deferral is a
+record of its own: a `remainder` gap, `deferred`, for usage it has no time to claim or post,
+for an agent whose usage it could not reach once the server stopped answering, and for an
+agent whose transcript state is unusable; and its call's gap for a hold it has no time to
+give back.
 
 **A failed health probe still sends the principal.** After a probe that answers, the
 plugin remembers the server's capabilities, per server and key, in the state dir

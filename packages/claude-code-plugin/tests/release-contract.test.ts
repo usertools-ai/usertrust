@@ -290,7 +290,7 @@ describe("returnEmptyHold: PostToolUse's empty transcript hold", () => {
 		});
 	});
 
-	it("the capability read failing, a hold the server no longer knows: unreturned, no settle, no abort", async () => {
+	it("the capability read failing, a hold the server no longer knows is gone: returned, no settle, no abort", async () => {
 		await startReal(50);
 		health = "fail";
 		await writeMain([]);
