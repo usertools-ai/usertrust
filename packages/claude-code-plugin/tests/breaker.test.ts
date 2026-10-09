@@ -585,8 +585,45 @@ describe("under an open breaker, every hook sends nothing and touches nothing", 
 		expect(await records()).toMatchObject([
 			{ kind: "gap", phase: "post-tool-use", transferIds: ["tx_1"], reason: "breaker-open" },
 		]);
+		// Its call ran: the hold is claimed as settle-attempted, by a local rename.
+		expect((await readdir(stateDir)).filter((name) => name.includes("tx_1"))).toEqual([
+			holdName("tu_1", "tx_1", "main", "settling"),
+		]);
 		// An estimate-mode skip stamps no first-run time: it has no transcript state.
 		expect(nodeFs.existsSync(join(stateDir, "transcripts"))).toBe(false);
+	});
+
+	it("with no tool_use_id, a skipped estimate hold is never the next call's: that call settles its own hold, and Stop gives the skipped one back as call-ran", async () => {
+		capabilities = ["release"];
+		const env = { UT_CC_USAGE: "estimate" };
+		// A host that sends no tool_use_id: PostToolUse takes the oldest hold it can pair.
+		const pre = (n: number) => ({
+			session_id: SESSION,
+			tool_name: "Bash",
+			tool_input: { command: `echo ${n}` },
+		});
+		const post = (n: number) => ({
+			session_id: SESSION,
+			tool_name: "Bash",
+			tool_response: `out ${n}`,
+		});
+		await run("pre-tool-use", pre(1), env);
+		await openBreaker();
+		await run("post-tool-use", post(1), env);
+		expect(settles()).toEqual([]);
+		// The minute over, the next call holds afresh, and its PostToolUse settles ITS hold.
+		await dueBreaker();
+		await run("pre-tool-use", pre(2), env);
+		await run("post-tool-use", post(2), env);
+		expect(settles().map((request) => request.body.transferId)).toEqual(["tx_s2"]);
+		await run("stop", bare(), env);
+		// The skipped call's hold is given back as a call that ran, its charge unconfirmed.
+		expect(seen.filter((request) => request.path === "/v1/release")).toMatchObject([
+			{ body: { transferId: "tx_s1" } },
+		]);
+		expect((await records()).filter((record) => record.tool === "(unconfirmed)")).toMatchObject([
+			{ transferId: "tx_s1", releaseClass: "call-ran" },
+		]);
 	});
 
 	it("Stop and SubagentStop each record a deferral naming the holds they leave, those whose settle or give-back was attempted included, once each", async () => {

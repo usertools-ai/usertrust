@@ -695,10 +695,12 @@ nothing: both fail fast. An answer is the whole response, its body read: a serve
 sends its headers and then stalls is timing out. The breaker is the host's, one per server URL, shared by every
 session of your user, under the home the passwd database gives you
 (`~/.local/state/usertrust/breaker/`, 0700). While it is open, a hook sends nothing and
-changes nothing, and writes one record with `"reason":"breaker-open"` and
-`"outcome":"deferred"`. The one exception is in transcript mode, on a state dir that has
-no first-run time yet: the hook stamps it, so the outage's usage counts as this state's and
-is posted later. Each record is one of:
+writes one record with `"reason":"breaker-open"` and `"outcome":"deferred"`. It changes
+nothing else, with two exceptions. In transcript mode, on a state dir that has no first-run
+time yet, the hook stamps it, so the outage's usage counts as this state's and is posted
+later. And PostToolUse renames an estimate hold to `.settling`, as one whose call ran: Stop
+then gives it back as `call-ran`, and no later call can take it for its own. Each record is
+one of:
 - **`"kind":"deferred"`**: a transcript-mode PreToolUse, a PostToolUse whose hold carries
   transcript usage, Stop and SubagentStop. The first settle point after the breaker
   closes posts that usage, once. `usertrust-job coverage` still lists a deferral inside a

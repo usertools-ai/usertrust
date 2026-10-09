@@ -797,7 +797,8 @@ usable log is a gap for every job. A test fails if anything else decides where e
 
 *A release states WHY, as a closed set.* `/v1/release` and `Governor.release()` take an optional
 `releaseClass`: `unused` (no call ran under the hold, so no usage hides behind it), `call-unconfirmed`
-(its call may have run and never reported back) or `call-ran` (it ran and its one settle went unanswered).
+(its call may have run and never reported back) or `call-ran` (it ran, and its one settle went unanswered, or was
+never sent because PostToolUse found the breaker open).
 The client derives it from its own hold state, never from the reason text; the governor records it
 verbatim on `hold_released`. A release that states none (a TTL expiry, a shutdown, an older client) proves
 nothing, and the coverage diagnostic reports it as a released hold whose usage is unconfirmed. The plugin

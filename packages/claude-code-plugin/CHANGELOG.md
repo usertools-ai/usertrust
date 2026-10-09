@@ -13,11 +13,12 @@ npm, and its version is its own: the `usertrust` packages and their
   timeouts in a row within a minute open it for a minute, host-wide, one per server URL
   (`~/.local/state/usertrust/breaker/` under the passwd home). An answer counts only once
   its body is read, so a server that sends headers and then stalls trips it too. While it
-  is open, every hook sends nothing and touches no hold, window or cursor, and writes one
-  `breaker-open` record naming the holds it leaves: `deferred` where a later settle point
-  posts the usage, `gap` where nothing will (an estimate-mode call, SessionEnd). One hook
-  probes after the minute and closes it or re-opens it. Enforce mode never reads or
-  writes it.
+  is open, every hook sends nothing and touches no window or cursor, and writes one
+  `breaker-open` record naming the holds it leaves. The one hold it touches is an estimate
+  hold PostToolUse skips: renamed `.settling`, as its call ran, so Stop gives it back as
+  `call-ran`. Each record is `deferred` where a later settle point posts the usage, `gap`
+  where nothing will (an estimate-mode call, SessionEnd). One hook probes after the minute
+  and closes it or re-opens it. Enforce mode never reads or writes it.
 - **Every settle, give-back and remainder that does not end cleanly writes a `gap`
   record**, with its `phase`, its `outcome` (`claimed`, `unresolved`, `released`,
   `deferred`, `failed` or `unknown`) and its hold's `transferId`, including PreToolUse's

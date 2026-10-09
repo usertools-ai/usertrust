@@ -36,9 +36,10 @@
 //
 // Every settle that ends other than settled or given back is written down as a gap,
 // under its hold's transferId (lib.mjs `recordSettleGap`). While the server's breaker is
-// open (lib.mjs `breakerOpen`, watch mode only), nothing is sent and the hold is left as
-// it is: a transcript hold waits for the first settle point after the breaker closes (a
-// deferral); an estimate hold, which only this hook charges, is a gap.
+// open (lib.mjs `breakerOpen`, watch mode only), nothing is sent: a transcript hold is left
+// as it is, and waits for the first settle point after the breaker closes (a deferral); an
+// estimate hold, which only this hook charges, is a gap, claimed as settle-attempted
+// (`.settling`) because its call ran, so Stop gives it back as `call-ran`.
 import { unlink } from "node:fs/promises";
 import { resolveJob } from "./job-log.mjs";
 import {
@@ -341,12 +342,24 @@ try {
 	const open = await breakerOpen();
 	const entry = await takePendingEntry(sessionId, agentId, input.tool_use_id ?? null);
 	if (open) {
-		// The server stopped answering: nothing is sent, and the hold is left exactly as it is. A
-		// transcript hold's window waits for the first settle point after the breaker closes (a
-		// Stop, a SubagentStop, SessionEnd): a deferral. An ESTIMATE hold is charged by this hook
-		// alone, and a later one only gives it back: its charge is lost, a gap.
+		// The server stopped answering: nothing is sent. A transcript hold is left exactly as it
+		// is: its window waits for the first settle point after the breaker closes (a Stop, a
+		// SubagentStop, SessionEnd), a deferral. An ESTIMATE hold is charged by this hook alone, and
+		// a later one only gives it back: its charge is lost, a gap.
 		const estimate = entry !== null && entry.usage !== "transcript";
 		if (usageMode() === "transcript") await stampFirstRun();
+		// The estimate hold's call RAN, so the hold is claimed as settle-attempted
+		// (`claimForSettle`: a local rename, nothing sent), the state that says so. Left `.json`, it
+		// would read as a call that never reached this hook: Stop would give it back as
+		// `call-unconfirmed`, and on a host that sends no tool_use_id the next call would take it
+		// as its own (lib.mjs `takePendingEntry`), and settle it at that call's usage.
+		if (estimate) {
+			await claimForSettle(entry.path).catch((err) => {
+				say(
+					`usertrust: hold ${entry.transferId} could not be marked settle-attempted (${err?.code ?? "error"}); Stop gives it back as a call that may not have run`,
+				);
+			});
+		}
 		const recorded = await recordBreakerSkip({
 			kind: estimate ? "gap" : "deferred",
 			phase: "post-tool-use",
