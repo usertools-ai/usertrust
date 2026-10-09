@@ -1623,7 +1623,8 @@ opens them.
 - Agent config is checked out as it is stored: no `working-tree-encoding`, `filter` or `ident`
   attribute may apply to it, as git matches its patterns with case or without, and an attributes
   file is spelled `.gitattributes`, and is a regular file (git before 2.32 reads a symlinked one
-  through its link). No attributes file may give one of them the literal value
+  through its link, and git reads no rules from a submodule). No attributes file may give one of
+  them the literal value
   `unset` or `unspecified`, which `check-attr` prints as no value, or hold a NUL byte, where git
   stops reading it. And no such attribute may apply to an attributes file, at any depth: checkout
   writes each as it is stored, so git reads at checkout the rules the check read.

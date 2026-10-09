@@ -480,7 +480,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     value `unset` or `unspecified`, or hold a NUL byte, where git stops reading it. Nor may one
     apply to an attributes file, at any depth, so git reads at checkout the rules the check read.
     And an attributes file must be a regular file: git before 2.32 reads a symlinked one through
-    its link.
+    its link, and git reads no rules from a submodule. Each refusal names the reason for its
+    mode.
   - A submodule a change adds, or moves to another commit, must be on the allowlist: its own
     tree can hold agent config.
   - A pull request is checked as the merge commit GitHub tests: what lands, not the branch's head.

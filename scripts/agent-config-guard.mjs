@@ -17,7 +17,8 @@
 //    attributes are read as git reads them on either kind of filesystem, case-sensitive or
 //    not; and so that every attributes file is read, one must be spelled `.gitattributes`,
 //    and be a regular file: git before 2.32 reads a symlinked one through its link, from the
-//    file it names, where this check reads the link itself.
+//    file it names, where this check reads the link itself; and git reads no rules from a
+//    submodule, so any rules a reader expects there would silently not apply.
 //    No attributes file may give one of them the literal value `unset` or `unspecified`, a
 //    macro's included: `check-attr` prints that as no value, where git looks for a filter
 //    or an encoding of that name. And every attributes file, at any depth, is checked out as
@@ -78,6 +79,21 @@ const AGENT_FILES = new Set([".mcp.json"]);
 const PERMISSION_KEYS = new Set(["deny", "ask"]);
 /** A regular file's modes: anything else (a link, 120000; a submodule, 160000) is not one. */
 const REGULAR = new Set(["100644", "100755"]);
+/**
+ * Why an attributes file in each mode that is not `REGULAR` is refused. `ls-tree` prints a
+ * tree entry's mode canonical (any other blob mode as one of `REGULAR`, an unknown one as a
+ * gitlink) and `-r` walks into a directory, so a link and a submodule are all it can show.
+ */
+const NOT_REGULAR = new Map([
+	[
+		"120000",
+		"git before 2.32 reads a symlinked one through its link, where this check reads the link",
+	],
+	[
+		"160000",
+		"git reads no rules from a submodule, so any rules a reader expects there would silently not apply",
+	],
+]);
 /**
  * The portable set, and the `/` between segments: what a path may hold with no allowlist
  * entry. POSIX's portable filename characters, and the brackets of a route's directory
@@ -480,10 +496,11 @@ function check({ event, rules, base, head }) {
 			);
 		}
 		if (leaf === ".gitattributes" && !REGULAR.has(mode)) {
+			const why = NOT_REGULAR.get(mode);
 			fail(
 				1,
 				path,
-				`is an attributes file that is not a regular file (mode ${mode}): git before 2.32 reads a symlinked one through its link, where this check reads the link`,
+				`is an attributes file that is not a regular file (mode ${mode})${why === undefined ? "" : `: ${why}`}`,
 			);
 		}
 		if (leaf === ".gitattributes" && mode !== "160000") {
