@@ -22,8 +22,9 @@ npm, and its version is its own: the `usertrust` packages and their
 - **Every settle, give-back and remainder that does not end cleanly writes a `gap`
   record**, with its `phase`, its `outcome` (`claimed`, `unresolved`, `released`,
   `deferred`, `failed` or `unknown`) and its hold's `transferId`, including PreToolUse's
-  settle of a repeated or resumed call's earlier hold. Until now only PreToolUse wrote
-  records, for its own calls; the rest went to stderr alone.
+  settle of a repeated or resumed call's earlier hold. A give-back the server answers with a
+  404 `unknown transferId` writes no `release` gap: the hold is gone. Until now only
+  PreToolUse wrote records, for its own calls; the rest went to stderr alone.
 - **A failed health probe still sends the principal**, from a remembered answer under a
   day old, per server and key. Nothing else is ever taken from it: no idempotency key.
 

@@ -1856,13 +1856,22 @@ async function settleOutcome(transferId, settle, keyed) {
 	const reason = `settle returned ${settle.status}`;
 	if (settle.status === 400) return { outcome: "released", reason, holdEnded };
 	if (keyed) return { outcome: "unresolved", reason, holdEnded };
-	return { outcome: settle.status === 404 ? "released" : "claimed", reason, holdEnded };
+	return {
+		outcome: settle.status === 404 ? "released" : "claimed",
+		reason,
+		holdEnded,
+		// The server holds no such transfer: the caller of an empty hold's settle at zero reads
+		// this as the hold gone (`returnEmptyHold`).
+		...(isUnknownTransfer(settle) ? { unknownTransfer: true } : {}),
+	};
 }
 
 /**
  * A hold no usage was assigned to (a parallel tool call, or nothing new yet)
  * carries no spend: it is released — no charge, no failure. A server that cannot
- * release gets the old settle at zero, which costs its 1-unit floor.
+ * release gets the old settle at zero, which costs its 1-unit floor. A hold the
+ * server no longer has (a 404 `unknown transferId`: it expired, or another hook
+ * ended it) is gone already, and carried nothing: returned, either way.
  */
 async function returnEmptyHold(transferId) {
 	const capabilities = await serverCapabilities();
@@ -1878,7 +1887,7 @@ async function returnEmptyHold(transferId) {
 				},
 				{ timeoutMs: callTimeout() },
 			);
-			if (response.status === 200) return { outcome: "returned" };
+			if (response.status === 200 || isUnknownTransfer(response)) return { outcome: "returned" };
 			// Capabilities unknown, and the server has no release route: an older one.
 			if (capabilities !== null || !isUnknownRoute(response)) {
 				return { outcome: "unreturned", reason: `release returned ${response.status}` };
@@ -1893,7 +1902,8 @@ async function returnEmptyHold(transferId) {
 		}
 	}
 	const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-	return settleAt(transferId, zero, { keyed: false });
+	const result = await settleAt(transferId, zero, { keyed: false });
+	return result.unknownTransfer === true ? { outcome: "returned" } : result;
 }
 
 /**

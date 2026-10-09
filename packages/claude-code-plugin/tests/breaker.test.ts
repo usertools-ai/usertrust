@@ -982,6 +982,42 @@ describe("a settle or give-back that does not end cleanly is written down, under
 		]);
 	});
 
+	it("an empty hold the server no longer holds writes no gap: a release's, or a settle at zero's, 404 unknown transferId", async () => {
+		const gone = { status: 404, json: { error: "not_found", reason: "unknown transferId" } };
+		const empty = { usage: "transcript", holdModel: SONNET, assignedIds: [] };
+		// A server that can release: the give-back is a release.
+		capabilities = ["release"];
+		await seedHold("tu_1", "tx_1", empty);
+		override = (path) => (path === "/v1/release" || path === "/v1/settle" ? gone : undefined);
+		await run("post-tool-use", postInput("tu_1"));
+		expect(seen.filter((request) => request.path === "/v1/release")).toMatchObject([
+			{ body: { transferId: "tx_1" } },
+		]);
+		// A server that cannot: the give-back is a settle at zero.
+		capabilities = [];
+		await seedHold("tu_2", "tx_2", empty);
+		await run("post-tool-use", postInput("tu_2"));
+		expect(settles()).toMatchObject([{ body: { transferId: "tx_2", inputTokens: 0 } }]);
+		expect(await gaps()).toEqual([]);
+	});
+
+	it("Stop: a give-back the server answers 404 unknown transferId writes no release gap, and an estimate hold's call keeps its own gap", async () => {
+		capabilities = ["release"];
+		await seedHold("tu_1", "tx_1", { usage: "transcript", holdModel: SONNET, assignedIds: [] });
+		await seedHold("tu_2", "tx_2", ESTIMATE);
+		override = (path) =>
+			path === "/v1/release"
+				? { status: 404, json: { error: "not_found", reason: "unknown transferId" } }
+				: undefined;
+		await run("stop", bare());
+		expect(seen.filter((request) => request.path === "/v1/release")).toHaveLength(2);
+		const written = await gaps();
+		expect(written.filter((record) => record.phase === "release")).toEqual([]);
+		expect(written).toMatchObject([
+			{ tool: "(unconfirmed)", transferId: "tx_2", releaseClass: "call-unconfirmed" },
+		]);
+	});
+
 	it("control: settles and give-backs that end cleanly write nothing", async () => {
 		capabilities = ["release"];
 		await seedHold("tu_1", "tx_1", WINDOW);

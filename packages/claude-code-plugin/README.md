@@ -692,7 +692,10 @@ PreToolUse, and up to a hook's 10 s budget. So in
 watch mode, three timeouts in a row within a minute open a breaker for a minute. Any
 answer, a refusal included, resets the count, and a refused connection counts for
 nothing: both fail fast. An answer is the whole response, its body read: a server that
-sends its headers and then stalls is timing out. The breaker is the host's, one per server URL, shared by every
+sends its headers and then stalls is timing out. An answer does not close a breaker that is
+already open: only the probe after its minute does (below). Two sessions counting at once
+can lose an update, so the breaker can open a little early or late, by one minute at most,
+and every hook it skips writes its record. The breaker is the host's, one per server URL, shared by every
 session of your user, under the home the passwd database gives you
 (`~/.local/state/usertrust/breaker/`, 0700). While it is open, a hook sends nothing and
 writes one record with `"reason":"breaker-open"` and `"outcome":"deferred"`. It changes
@@ -728,7 +731,11 @@ PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"pha
 - `failed`: the server answered it with an error;
 - `unknown`: this hook's own timeout cut it off, and the server may still act on it.
 
-Each names its hold's `transferId`, so a deferral and how it ended can be joined.
+Each names its hold's `transferId`, so a deferral and how it ended can be joined. A hold
+that carried no usage, given back to a server that no longer holds it (a 404 `unknown
+transferId`: it expired, or another hook ended it), writes nothing: it is gone. At Stop, such
+a 404 writes no `release` gap for any hold, as none is left to give back; a call that may
+have run uncharged still has its own gap.
 
 **A failed health probe still sends the principal.** After a probe that answers, the
 plugin remembers the server's capabilities, per server and key, in the state dir

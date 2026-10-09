@@ -1480,7 +1480,9 @@ export async function cleanup(sessionId, agentId) {
 				timeoutMs,
 				releaseClass,
 			});
-			if (response.status !== 200) {
+			// A 404 `unknown transferId` says the hold is gone already (it expired, or another hook
+			// ended it): nothing is left to give back, and no give-back failed.
+			if (response.status !== 200 && !isUnknownTransfer(response)) {
 				say(`usertrust: ${response.route} ${entry.transferId} returned ${response.status}`);
 				await unconfirmed("failed", `${response.route} returned ${response.status}`);
 			}
