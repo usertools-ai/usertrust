@@ -707,7 +707,8 @@ time yet, the hook stamps it, so the outage's usage counts as this state's and i
 later. And PostToolUse renames an estimate hold to `.settling`, as one whose call ran: Stop
 then gives it back as `call-ran`, and no later call can take it for its own. If that rename
 fails, the hold is still kept from any later call (its pairing mark dropped, or its record
-removed), and Stop gives it back as `call-ran`: its call ran. Each record is
+removed), and it is given back as `call-ran` wherever it ends (Stop, SessionEnd, or the
+PreToolUse of the same call resumed): its call ran. Each record is
 one of:
 - **`"kind":"deferred"`**: a transcript-mode PreToolUse, a PostToolUse whose hold carries
   transcript usage, Stop and SubagentStop. The first settle point after the breaker

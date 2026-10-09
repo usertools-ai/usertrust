@@ -70,6 +70,7 @@ import {
 	jobCapable,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
+	noCallRan,
 	principalCapable,
 	readStdin,
 	recordBreakerSkip,
@@ -287,8 +288,7 @@ async function abandonSettling(entry) {
 	} catch {
 		return false;
 	}
-	const recorded =
-		entry.intent !== "release" && (await recordUnconfirmedCall(sessionId, entry, "call-ran"));
+	const recorded = !noCallRan(entry) && (await recordUnconfirmedCall(sessionId, entry, "call-ran"));
 	say(
 		`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key, and its settle never resolved; nothing about it is sent here, and any usage it carried goes unrecorded${recorded ? " (recorded as a gap)" : ""}`,
 	);
@@ -357,7 +357,8 @@ async function unsettled(
  *   hold is gone (`holdEnded`: its release unconfirmed, too) leaves it possibly
  *   live.
  * - Any other hold (an estimate, or an empty window) carries no usage: the call
- *   has not run. Its record is dropped. It is given back only through a `release`
+ *   has not run, unless the hold is marked `ran` (`quarantineHold`): then its gap is
+ *   written, and it is given back as `call-ran`. Its record is dropped. It is given back only through a `release`
  *   the server advertises; otherwise a hold the server still has is left to the
  *   server's TTL sweep. A release that answers neither 200 nor that the hold is gone
  *   leaves it possibly live: its record is kept settle-attempted, for Stop to give
@@ -396,9 +397,14 @@ async function retire(entry) {
 	// This claim only ENDS a deferred call's hold, and says so in the name it claims into.
 	const claimed = await claimForRelease(entry.path);
 	if (claimed === null) return false;
+	// Unless its call RAN (`ran`: PostToolUse found the breaker open, and could not mark it
+	// settle-attempted, `quarantineHold`): its gap is written first, and it is given back as
+	// `call-ran`, never as a call that did not run.
+	const ran = entry.ran === true;
+	if (ran) await recordUnconfirmedCall(sessionId, entry, "call-ran");
 	const capabilities = await serverCapabilities();
 	if (capabilities?.has("release")) {
-		const unconfirmed = await releaseUnconfirmed(entry.transferId);
+		const unconfirmed = await releaseUnconfirmed(entry.transferId, ran);
 		if (unconfirmed !== null) {
 			// The hold may still be live: no fresh hold is made beside it. Its record
 			// stays settle-attempted (`.settling`), so Stop gives it back, and the call
@@ -418,13 +424,13 @@ async function retire(entry) {
  * server (a 404 `unknown transferId`: it expired, or another hook ended it). Any
  * other answer, or none, leaves it possibly live.
  */
-async function releaseUnconfirmed(transferId) {
+async function releaseUnconfirmed(transferId, ran) {
 	let response;
 	try {
 		response = await releaseHold(transferId, "a resumed tool call's earlier hold", {
 			timeoutMs: Math.min(5000, timeLeft()),
-			// The earlier hold belonged to a call that was deferred, not run.
-			releaseClass: "unused",
+			// The earlier hold belonged to a call that was deferred, not run; unless its call ran.
+			releaseClass: ran ? "call-ran" : "unused",
 		});
 	} catch (err) {
 		return `release ${transferId} failed (${err instanceof Error ? err.message : String(err)})`;

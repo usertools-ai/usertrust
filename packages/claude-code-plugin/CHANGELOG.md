@@ -19,7 +19,7 @@ npm, and its version is its own: the `usertrust` packages and their
   `breaker-open` record naming the holds it leaves. The one hold it touches is an estimate
   hold PostToolUse skips: renamed `.settling`, as its call ran, so Stop gives it back as
   `call-ran`; if the rename fails, it is still kept from any later call, and still given back
-  as `call-ran`. Each record is `deferred` where a later settle point posts the usage, `gap`
+  as `call-ran`, wherever it ends. Each record is `deferred` where a later settle point posts the usage, `gap`
   where nothing will (an estimate-mode call, SessionEnd). One hook probes after the minute
   and closes it or re-opens it. Enforce mode never reads or writes it.
 - **Every settle, give-back and remainder that does not end cleanly writes a `gap`

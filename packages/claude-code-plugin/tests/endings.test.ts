@@ -570,6 +570,85 @@ describe("a ran estimate hold the breaker skip cannot mark settle-attempted", ()
 	);
 });
 
+describe("a hold whose call ran (marked `ran`) is given back as call-ran, wherever it ends", () => {
+	/** The hold a quarantine leaves (`ran`, no gate), as a pending `.json` or claimed `.releasing`. */
+	async function ranHold(kind: "json" | "releasing", marked = true): Promise<void> {
+		await writeFile(
+			join(stateDir, holdName("tu_1", "tx_1", "main", kind)),
+			JSON.stringify({
+				toolUseId: "tu_1",
+				transferId: "tx_1",
+				agentId: "main",
+				startedAt: new Date().toISOString(),
+				...ESTIMATE,
+				...(marked ? { ran: true } : {}),
+			}),
+			{ mode: 0o600 },
+		);
+	}
+	const released = () => requests("/v1/release").map((r) => r.body.releaseClass);
+	it(
+		"quarantined under an open breaker, then retired by a resumed PreToolUse of the same tool_use_id: call-ran",
+		async () => {
+			// The hold as PreToolUse makes it (gated, bound to this server and key), before the outage.
+			capabilities = ["release", "job"];
+			await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+			expect(await holdFiles()).toEqual([holdName("tu_1", "tx_s1")]);
+			const file = join(
+				breakerDir(),
+				`${createHash("sha256").update(url).digest("hex").slice(0, 16)}.json`,
+			);
+			await mkdir(breakerDir(), { recursive: true, mode: 0o700 });
+			await writeFile(
+				file,
+				JSON.stringify({ openUntil: Date.now() + 60_000, openedAt: Date.now(), timeouts: [] }),
+				{ mode: 0o600 },
+			);
+			await runHook(
+				join(HOOKS, "post-tool-use.mjs"),
+				postInput("tu_1"),
+				envFor({ ...ESTIMATE_MODE, UT_CC_FAULT: ".settling|1|throw" }),
+				["--import", FAULT_AT],
+			);
+			nodeFs.rmSync(file, { force: true });
+			await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+			expect(released()).toEqual(["call-ran"]);
+			expect(await unconfirmed()).toMatchObject([
+				{ transferId: "tx_s1", releaseClass: "call-ran" },
+			]);
+		},
+		LONG,
+	);
+	it.each<[string, "json" | "releasing", number, string[]]>([
+		["a pending hold, SessionEnd out of time", "json", 0, []],
+		[
+			"a retired hold kept .releasing (its release unconfirmed), at Stop",
+			"releasing",
+			-1,
+			["call-ran"],
+		],
+		["a retired hold kept .releasing, SessionEnd out of time", "releasing", 0, []],
+	])(
+		"%s: its call's gap, call-ran",
+		async (_, kind, budgetMs, wire) => {
+			capabilities = ["release", "job"];
+			await ranHold(kind);
+			if (budgetMs < 0) await run("stop", stopInput(), ESTIMATE_MODE);
+			else await run("session-end", seInput(), { ...ESTIMATE_MODE, ...seBudget(budgetMs) });
+			expect(await unconfirmed()).toMatchObject([{ transferId: "tx_1", releaseClass: "call-ran" }]);
+			expect(released()).toEqual(wire);
+		},
+		LONG,
+	);
+	it("control: a .releasing hold with no mark is a deferred call's, which never ran: unused, and no gap", async () => {
+		capabilities = ["release", "job"];
+		await ranHold("releasing", false);
+		await run("stop", stopInput(), ESTIMATE_MODE);
+		expect(released()).toEqual(["unused"]);
+		expect(await unconfirmed()).toEqual([]);
+	});
+});
+
 describe("PostToolUse's settle of that fresh hold", () => {
 	const go = async (ending: Ending) => {
 		await seedHold("tu_1", "tx_1", ESTIMATE);

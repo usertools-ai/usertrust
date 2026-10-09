@@ -718,6 +718,17 @@ export function isGated(entry) {
 }
 
 /**
+ * Whether the plugin KNOWS no call ran behind a hold, the one case it gives a hold back as
+ * `unused` and writes no call gap: a claim made only to END a deferred call's hold
+ * (`.releasing`, `intent: "release"`), unless the hold is marked as one whose call ran (`ran`,
+ * `quarantineHold`): a hold PostToolUse found the breaker open for, retired by a resumed call,
+ * keeps that mark in its `.releasing` body, and its call ran.
+ */
+export function noCallRan(held) {
+	return held?.intent === "release" && held.ran !== true;
+}
+
+/**
  * The hold a tool call already has. Claude Code fires PreToolUse again for the SAME
  * tool call when a deferred call resumes (hooks reference, "Defer a tool call for
  * later"), and PreToolUse then ends that hold before it reserves afresh. Returns
@@ -853,6 +864,8 @@ async function settlingRecords(sessionId, agentId) {
 				// Why the hold was claimed: `release` when its call was deferred and the claim only
 				// serves to end the hold (the hold was claimed into `.releasing`), otherwise a settle attempt.
 				...(releasing ? { intent: "release" } : {}),
+				// A hold whose call ran though its claim says only release (`noCallRan`).
+				...(body.ran === true ? { ran: true } : {}),
 				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
 				transcript: body.usage === "transcript",
 				// Which server and tenant made the hold (`tenantBinding`), as written.
@@ -1537,7 +1550,7 @@ async function leftAtSessionEnd(sessionId, pending, settling) {
 		);
 	}
 	for (const held of settling) {
-		if (held.intent === "release" || held.transcript) continue;
+		if (noCallRan(held) || held.transcript) continue;
 		await recordUnconfirmedCall(sessionId, held, "call-ran");
 	}
 }
@@ -1696,7 +1709,7 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 			// hold), and its charge is unconfirmed: the gap is written first, as for this
 			// server's own below, so dropping the record never erases it.
 			const recorded =
-				held.intent !== "release" && (await recordUnconfirmedCall(sessionId, held, "call-ran"));
+				!noCallRan(held) && (await recordUnconfirmedCall(sessionId, held, "call-ran"));
 			say(
 				`usertrust: leftover hold ${held.transferId} was made under another server or key; nothing about it is sent here${recorded ? ", and its unconfirmed charge is recorded as a gap" : ""}`,
 			);
@@ -1710,8 +1723,9 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 			return;
 		}
 		// A claim made only to END a deferred call's hold (`intent: "release"`) is given back as
-		// `unused`: that call never ran, so there is nothing to confirm and no gap.
-		const releasing = held.intent === "release";
+		// `unused`: that call never ran, so there is nothing to confirm and no gap. Unless it is
+		// marked `ran`: then its call ran, as any settle-attempted hold's did (`noCallRan`).
+		const releasing = noCallRan(held);
 		// Otherwise the call RAN and its one settle went unanswered: the charge is unconfirmed, and a
 		// give-back of the hold proves nothing about what was charged. Written down as a gap.
 		if (!releasing) await recordUnconfirmedCall(sessionId, held, "call-ran");
