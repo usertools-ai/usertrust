@@ -388,7 +388,7 @@ try {
 				say(
 					`usertrust: hold ${entry.transferId} could not be marked settle-attempted (${err?.code ?? "error"}); ${
 						quarantined === "ungated"
-							? "it is kept out of any other call's reach, and Stop gives it back as a call that may not have run"
+							? "it is kept out of any other call's reach, and Stop gives it back as a call that ran"
 							: quarantined === "removed"
 								? "its record is removed, so no other call can take it, and its hold is left to the server's sweep"
 								: "it could not be kept out of another call's reach either"

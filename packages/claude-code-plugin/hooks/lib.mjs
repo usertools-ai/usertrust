@@ -791,7 +791,8 @@ export async function claimForRelease(live) {
 export async function quarantineHold(path) {
 	try {
 		const { gate: _gate, ...body } = JSON.parse(await readFile(path, "utf-8"));
-		await writeFile(path, JSON.stringify(body), { mode: 0o600 });
+		// Its call RAN (PostToolUse found the breaker open): Stop gives it back as `call-ran`.
+		await writeFile(path, JSON.stringify({ ...body, ran: true }), { mode: 0o600 });
 		return "ungated";
 	} catch {
 		try {
@@ -949,6 +950,8 @@ export async function listPending(sessionId, agentId) {
 					: {}),
 				// The mark as written, whatever its value: `isGated` judges it.
 				...(Object.hasOwn(parsed, "gate") ? { gate: parsed.gate } : {}),
+				// A quarantined hold whose call ran (`quarantineHold`).
+				...(parsed.ran === true ? { ran: true } : {}),
 				...(typeof parsed.serverUrl === "string" ? { serverUrl: parsed.serverUrl } : {}),
 				...(typeof parsed.keyHash === "string" ? { keyHash: parsed.keyHash } : {}),
 				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
@@ -1527,7 +1530,11 @@ export async function releaseHold(transferId, reason, { timeoutMs = 5000, releas
 async function leftAtSessionEnd(sessionId, pending, settling) {
 	for (const entry of pending) {
 		if ((entry.assignedIds?.length ?? 0) > 0 || entry.usage === "transcript") continue;
-		await recordUnconfirmedCall(sessionId, entry, "call-unconfirmed");
+		await recordUnconfirmedCall(
+			sessionId,
+			entry,
+			entry.ran === true ? "call-ran" : "call-unconfirmed",
+		);
 	}
 	for (const held of settling) {
 		if (held.intent === "release" || held.transcript) continue;
@@ -1642,10 +1649,12 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 		// transcript-mode hold with no assigned usage reserved a window of messages that is
 		// posted by message, so nothing hides behind it: `unused`. An estimate-mode hold still
 		// `.json` at Stop never reached PostToolUse: a failed or interrupted call (#264 A) that
-		// MAY have run and was never charged. That is unconfirmed, and it is a gap.
+		// MAY have run and was never charged. That is unconfirmed, and it is a gap. One that did
+		// reach it, under an open breaker, and was quarantined (`ran`), RAN: `call-ran`.
 		const ranUnconfirmed = entry.usage !== "transcript";
-		if (ranUnconfirmed) await recordUnconfirmedCall(sessionId, entry, "call-unconfirmed");
-		const releaseClass = ranUnconfirmed ? "call-unconfirmed" : "unused";
+		const callClass = entry.ran === true ? "call-ran" : "call-unconfirmed";
+		if (ranUnconfirmed) await recordUnconfirmedCall(sessionId, entry, callClass);
+		const releaseClass = ranUnconfirmed ? callClass : "unused";
 		// A give-back the server did not confirm is written down too (F2a): the hold may be live.
 		const unconfirmed = (outcome, reason) =>
 			recordSettleGap({

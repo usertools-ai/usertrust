@@ -356,11 +356,14 @@ export function settleLabels(labels) {
 	};
 }
 
-/** The session's LOCAL job log, read once per hook process (`resolveJob`): the records' split. */
-const localJobsRead = new Map();
+/**
+ * The session's LOCAL job log, the records' split (`resolveJob`), read afresh for every record,
+ * never cached: a background subagent of the session can switch jobs (`usertrust-job`) while a
+ * Stop sweeps its agents, and a record split by the log as it was would date usage in the job
+ * before the switch.
+ */
 function localJobs(sessionId) {
-	if (!localJobsRead.has(sessionId)) localJobsRead.set(sessionId, resolveJob(sessionId));
-	return localJobsRead.get(sessionId);
+	return resolveJob(sessionId);
 }
 
 /**

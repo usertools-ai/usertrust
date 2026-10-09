@@ -558,8 +558,13 @@ describe("a ran estimate hold the breaker skip cannot mark settle-attempted", ()
 			const { tool_use_id: _call, ...noCallId } = postInput("tu_2");
 			await run("post-tool-use", noCallId, ESTIMATE_MODE);
 			expect(requests("/v1/settle").filter((r) => r.body.transferId === "tx_1")).toEqual([]);
-			// The hold itself stays, for Stop to give back.
+			// The hold itself stays, for Stop to give back, as a call that RAN: PostToolUse found the
+			// breaker open, which is `call-ran` by its definition.
 			expect(await holdFiles()).toEqual([holdName("tu_1", "tx_1")]);
+			capabilities = ["release"];
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await unconfirmed()).toMatchObject([{ transferId: "tx_1", releaseClass: "call-ran" }]);
+			expect(await holdFiles()).toEqual([]);
 		},
 		LONG,
 	);
@@ -1745,6 +1750,65 @@ describe("one writer for a remainder's records: each job's record starts at that
 					`session ${SESSION}: a gap fell inside an interval of ${job}`,
 				);
 			}
+		},
+		LONG,
+	);
+
+	it(
+		"a job switch between two agents' remainders, by a background subagent during the Stop: the later agent's record is split by the log as it is then",
+		async () => {
+			await backdate();
+			// Job A is open; the switch to job B (A stopped at -30, B started at -20) lands mid-Stop.
+			const before = `${[line(at(-60), "session-start", null), line(at(-50), "start", "job-a")].join("\n")}\n`;
+			const switched = `${[line(at(-30), "stop", null), line(at(-20), "start", "job-b"), line(at(-5), "stop", null)].join("\n")}\n`;
+			const logPath = join(stateDir, "jobs", `${SESSION}.jsonl`);
+			await mkdir(join(stateDir, "jobs"), { recursive: true });
+			await writeFile(logPath, before);
+			await writeLines(transcriptPath(), [response("msg_m", SONNET, at(-45))]);
+			const subagents = join(projectDir, SESSION, "subagents");
+			await mkdir(subagents, { recursive: true });
+			await writeLines(join(subagents, "agent-a1.jsonl"), [
+				response("msg_s1", SONNET, at(-40)),
+				response("msg_s2", SONNET, at(-10)),
+			]);
+			// Both agents' remainders fail, so each is written down; main's first, with the log as it was.
+			fixed.set("/v1/authorize#1", ANSWER.other4xx as Reply);
+			fixed.set("/v1/authorize#2", ANSWER.other4xx as Reply);
+			await runHook(
+				join(HOOKS, "stop.mjs"),
+				stopInput(),
+				envFor({
+					UT_CC_FAULT: "__a1.json|1|append",
+					UT_CC_FAULT_FILE: logPath,
+					UT_CC_FAULT_TEXT: switched,
+				}),
+				["--import", FAULT_AT],
+			);
+			const written = await phased("remainder");
+			expect(written.filter((r) => r.agent === "main").map((r) => r.started)).toEqual([at(-45)]);
+			expect(
+				written
+					.filter((r) => r.agent === "a1")
+					.map((r) => r.started)
+					.sort(),
+			).toEqual([at(-40), at(-10)]);
+			const { jobCoverage } = (await import(pathToFileURL(join(HOOKS, "job-log.mjs")).href)) as {
+				jobCoverage(args: {
+					job: string;
+					logs: Record<string, string>;
+					records: unknown[];
+					watch: unknown[];
+				}): { knownGaps: Array<{ gap: string }> };
+			};
+			const coverage = jobCoverage({
+				job: "job-b",
+				logs: { [SESSION]: before + switched },
+				records: [],
+				watch: written,
+			});
+			expect(coverage.knownGaps.map((gap) => gap.gap)).toContain(
+				`session ${SESSION}: a gap fell inside an interval of job-b`,
+			);
 		},
 		LONG,
 	);
