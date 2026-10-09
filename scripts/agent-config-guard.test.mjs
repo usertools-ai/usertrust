@@ -647,6 +647,16 @@ describe("agent config is checked out as it is stored: no attribute may rewrite 
 		fails(run(), ".claude/hooks/run.sh", rewrites("filter", "x"));
 	});
 
+	test("an attributes file holding a NUL byte fails: git stops reading it there, so this check could not read it as git does", () => {
+		// Git reads this line as `.claude/settings.json filter=unset`, which check-attr prints as no
+		// filter, and the literal scan reads one token running on past the NUL.
+		const { run } = change(
+			{ ".gitattributes": ".claude/settings.json filter=unset\0x\n" },
+			{ allow: ALLOW, files: FILES },
+		);
+		fails(run(), ".gitattributes", "holds a NUL byte, where git stops reading it");
+	});
+
 	test("an attributes file spelled otherwise fails: a case-insensitive filesystem opens it as .gitattributes", () => {
 		const { run } = change(
 			{ "pkg/.GitAttributes": "* filter=x\n" },
@@ -827,6 +837,19 @@ describe("rule 2: a committed Claude Code settings file holds only permitted key
 		fails(run(), ".claude/settings.json", 'holds the key "env"');
 	});
 
+	test("a key or a permission holding a C1 control is named escaped, never raw", () => {
+		const key = "x\u009B2J";
+		const named = settings({ [key]: {} });
+		fails(named, ".claude/settings.json", `holds the key ${shown(key)}, which is not permitted`);
+		const rule = settings({ permissions: { [key]: [] } });
+		fails(
+			rule,
+			".claude/settings.json",
+			`holds "permissions.${shown(key).slice(1, -1)}", which is not permitted`,
+		);
+		for (const { out } of [named, rule]) assert.ok(!out.includes("\u009B"), out);
+	});
+
 	test("control: $schema, and permissions that only tighten (deny, ask), pass", () => {
 		passes(
 			settings({
@@ -981,6 +1004,32 @@ describe("the launcher runs the guard and its allowlist as the BASE has them", (
 			".grok/sandbox.toml",
 			"is pinned by the allowlist, and the change leaves other content",
 		);
+	});
+
+	test("a guard that exits 0 without its OK line as its last word fails the launcher: it did not say it checked", () => {
+		const OK_LINE =
+			"agent-config: OK (1 paths changed, 0 of them agent config; 0 settings files in the tree)";
+		const run = (stub) => {
+			const repo = fixture();
+			const base = repo.commit({
+				"README.md": "x",
+				...guardFiles(),
+				"scripts/agent-config-guard.mjs": stub,
+			});
+			return launch(repo, base, repo.commit({ "README.md": "y" }, base));
+		};
+		for (const stub of [
+			"process.exit(0);\n",
+			"console.log('agent-config: OK');\n",
+			`console.log(${JSON.stringify(OK_LINE)}); console.log("and then something else");\n`,
+		]) {
+			const { status, out } = run(stub);
+			assert.equal(status, 1, `${stub}: ${out}`);
+			assert.match(out, /agent-config: FAILED: the guard exited 0 without its OK line/u, out);
+		}
+		// Control: the OK line as its last word is what counts, whatever printed it.
+		const { status, out } = run(`console.log(${JSON.stringify(OK_LINE)});\n`);
+		assert.equal(status, 0, out);
 	});
 
 	test("a pull request that is not a merge commit, or a commit that is not here, cannot be checked", () => {

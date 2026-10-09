@@ -58,9 +58,9 @@
 //                                    --base <commit> --head <commit>
 // Exit 0 when the change passes; 1 when it fails, each failure named; 2 when it cannot be
 // checked (a usage or git error, or an allowlist that is not valid).
-// Imported with `?library` on its URL, it checks nothing and exports its fold, so another
-// test can recognize a path exactly as this does. No command line can add that query: run
-// as a script, it always checks.
+// Imported with `?library` on its URL, it checks nothing and exports its fold and its settings
+// recognizer, so another test can recognize a path exactly as this does. No command line can
+// add that query: run as a script, it always checks.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
@@ -210,7 +210,7 @@ function entry(value, where, fields) {
 	if (!isObject(value)) throw new Unusable(`${where} is not an object`);
 	for (const key of Object.keys(value)) {
 		if (!fields.includes(key)) {
-			throw new Unusable(`${where} has an unknown field ${JSON.stringify(key)}`);
+			throw new Unusable(`${where} has an unknown field ${shown(key)}`);
 		}
 	}
 	const { path, why } = value;
@@ -306,15 +306,13 @@ function settingsProblems(text) {
 			}
 			for (const [rule, list] of Object.entries(inner)) {
 				if (!PERMISSION_KEYS.has(rule)) {
-					problems.push(
-						`holds "permissions.${JSON.stringify(rule).slice(1, -1)}", which is not permitted`,
-					);
+					problems.push(`holds "permissions.${shown(rule).slice(1, -1)}", which is not permitted`);
 				} else if (!Array.isArray(list) || !list.every((item) => typeof item === "string")) {
 					problems.push(`holds "permissions.${rule}" that is not a list of rules`);
 				}
 			}
 		} else {
-			problems.push(`holds the key ${JSON.stringify(key)}, which is not permitted`);
+			problems.push(`holds the key ${shown(key)}, which is not permitted`);
 		}
 	}
 	return problems;
@@ -475,8 +473,18 @@ function check({ event, rules, base, head }) {
 			);
 		}
 		if (leaf === ".gitattributes" && mode !== "160000") {
+			const text = blob(oid).toString("utf-8");
+			// Git stops reading an attributes file at its first NUL; what follows is not the file
+			// git reads, and a token cut short there is not the token git reads either.
+			if (text.includes("\0")) {
+				fail(
+					1,
+					path,
+					"holds a NUL byte, where git stops reading it: this check could not read it as git does",
+				);
+			}
 			const ambiguous = new Set();
-			for (const line of blob(oid).toString("utf-8").split(/\r?\n/u)) {
+			for (const line of text.split(/\r?\n/u)) {
 				// A comment as git reads one: `#` after nothing but its blanks (space, tab, CR, LF).
 				if (/^[ \t\r\n]*#/u.test(line)) continue;
 				for (const token of line.split(/\s+/u)) if (AMBIGUOUS.test(token)) ambiguous.add(token);
@@ -553,4 +561,4 @@ function main() {
 
 if (!new URL(import.meta.url).searchParams.has("library")) main();
 
-export { fold, folded };
+export { fold, folded, isSettings };

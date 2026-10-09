@@ -20,6 +20,11 @@
 # passes its own arguments to the BASE's guard, a new argument lands in the guard first, on
 # its own.
 #
+# The guard's verdict is its exit code AND its own last word. An exit 0 counts only when the
+# guard's last line is its `agent-config: OK (...)` summary, so a guard that exits 0 without
+# running (a stub, a module that returns early) fails; any other exit passes through. As with
+# its arguments, a change to that line's form lands here first, on its own.
+#
 # Usage: agent-config.sh pull_request <merge-commit>
 #        agent-config.sh push <before> <after>
 set -euo pipefail
@@ -82,4 +87,14 @@ fi
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 git cat-file blob "$rules:$guard" >"$dir/agent-config-guard.mjs"
-node "$dir/agent-config-guard.mjs" --event "$event" --rules "$rules" --base "$base" --head "$head"
+status=0
+out=$(node "$dir/agent-config-guard.mjs" --event "$event" --rules "$rules" --base "$base" --head "$head") || status=$?
+printf '%s\n' "$out"
+if [ "$status" -ne 0 ]; then
+	exit "$status"
+fi
+ok='^agent-config: OK \([0-9]+ paths changed, [0-9]+ of them agent config; [0-9]+ settings files in the tree\)$'
+if [[ ! ${out##*$'\n'} =~ $ok ]]; then
+	echo "agent-config: FAILED: the guard exited 0 without its OK line, so it did not say it checked" >&2
+	exit 1
+fi

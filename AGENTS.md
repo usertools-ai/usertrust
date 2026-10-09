@@ -1612,6 +1612,8 @@ opens them.
 - No change may add, edit or remove agent config that `.github/agent-config-allowlist.json` does
   not name. Here the allowlist is empty. An exact entry may pin its file's `sha256`, for that path
   as it is written; a file in the tree under another spelling of a pinned path fails.
+  A pin is checked when a change touches its path. A pin that does not hold on the base is noticed at the next edit of that path, which it refuses; it never admits anything.
+  Validating every pin on every run is a follow-up: usertrust#275.
 - Every path a change adds, anywhere in the repository, must be one name to every filesystem. Each
   segment holds only `A-Z a-z 0-9 . _ - [ ]`, unless the allowlist's `nonportable` list names the
   path by its exact bytes. And no name it makes, a file's or a directory's, may fold to another
@@ -1621,7 +1623,8 @@ opens them.
 - Agent config is checked out as it is stored: no `working-tree-encoding`, `filter` or `ident`
   attribute may apply to it, as git matches its patterns with case or without, and an attributes
   file is spelled `.gitattributes`. No attributes file may give one of them the literal value
-  `unset` or `unspecified`, which `check-attr` prints as no value.
+  `unset` or `unspecified`, which `check-attr` prints as no value, or hold a NUL byte, where git
+  stops reading it.
 - A submodule is another repository, and its own tree can hold agent config: one a change adds,
   or moves to another commit, must be named by the allowlist, wherever it is.
 - A committed Claude Code settings file may hold only `$schema`, and `permissions.deny` /
@@ -1631,6 +1634,8 @@ opens them.
   before the change that needs it.
 - What is checked is what lands: a pull request as the merge commit GitHub tests (`github.sha`),
   against its first parent; a push, tip to tip.
+- The launcher counts the guard's exit 0 only beside its own `agent-config: OK (...)` line, its
+  last word: a guard that exits 0 without checking fails.
 - Only the checkout runs before the guard: no setup step (a package manager's cache, whose path
   a change's `.npmrc` sets, could restore files into the checkout), the runner's own node, and
   the launcher read from the graded commit's object, never from the working tree.
