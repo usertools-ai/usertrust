@@ -7,6 +7,8 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-09
+
 ### Added
 
 - **Watch mode stops asking a server that has stopped answering: a breaker.** Three
