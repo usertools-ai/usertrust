@@ -89,6 +89,14 @@ const NEVER_SENT_CODES = new Set([
 ]);
 
 /**
+ * Every request to the server is answered by the server itself: a redirect is never followed.
+ * fetch follows one by default, and a failure on the hop after it would be read as the
+ * server's own: a refused connection there would say a settle the server had already acted on
+ * was never sent (`neverSent`). With `manual`, a 3xx is returned as it came.
+ */
+const NO_REDIRECT = { redirect: "manual" };
+
+/**
  * Whether a fetch failure proves its request never left: the connection was never made, or
  * fetch refused the port outright (`bad port`). Read from the error's cause, as undici reports it.
  */
@@ -1035,7 +1043,10 @@ async function healthAnswers() {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		const response = await fetch(routeUrl("/v1/health"), { signal: controller.signal });
+		const response = await fetch(routeUrl("/v1/health"), {
+			signal: controller.signal,
+			...NO_REDIRECT,
+		});
 		await response.arrayBuffer();
 		return true;
 	} catch {
@@ -1078,6 +1089,11 @@ export async function breakerOpen() {
  * unless the caller passes less); a spent budget throws without a request. An
  * answer and a timeout are counted by the breaker (watch mode, `breakerOpen`): an answer once
  * its body is read, so headers and then a stall count as the timeout they end in.
+ *
+ * A redirect is never followed (`NO_REDIRECT`): a 3xx is the server's answer, read by its status
+ * as any other that is not a 200. The server may have acted on the request before it redirected
+ * it, so the ending of a hop after it, a refused connection above all, cannot say the request
+ * was never sent.
  */
 export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 	const { refused, key } = settings();
@@ -1092,6 +1108,7 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 			headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
 			body: JSON.stringify(body),
 			signal: controller.signal,
+			...NO_REDIRECT,
 		});
 		const text = await response.text();
 		answered();
@@ -1236,7 +1253,10 @@ export function serverCapabilities() {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
-			const response = await fetch(routeUrl("/v1/health"), { signal: controller.signal });
+			const response = await fetch(routeUrl("/v1/health"), {
+				signal: controller.signal,
+				...NO_REDIRECT,
+			});
 			// Answered once its body is read: headers and then a stall end in the timeout.
 			const text = await response.text();
 			answered();

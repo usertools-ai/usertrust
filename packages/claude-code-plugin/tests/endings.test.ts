@@ -7,13 +7,15 @@
 // The endings: an answer (200), a 200 whose ledger post was ambiguous (`settled: false`), a 404
 // `unknown transferId` (the server holds no such hold), another 4xx, a 5xx, no answer before this
 // hook's own timer (`hang`), a connection refused before anything was sent (the server stops
-// listening first), and a connection dropped once the request went out.
+// listening first), a connection dropped once the request went out, and a 307 redirect to a
+// port fetch refuses outright: an answer, never followed, as the request may have been acted on.
 import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runHook } from "./helpers/run-hook.js";
 
@@ -22,7 +24,12 @@ const SESSION = "55555555-2222-4333-8444-666666666666";
 const SONNET = "claude-sonnet-4-6";
 const HAIKU = "claude-haiku-4-5";
 
-type Answer = { status: number; json?: unknown; delayMs?: number };
+type Answer = {
+	status: number;
+	json?: unknown;
+	delayMs?: number;
+	headers?: Record<string, string>;
+};
 type Reply = Answer | "hang" | "drop";
 type Ending =
 	| "ok"
@@ -34,7 +41,8 @@ type Ending =
 	| "error5xx"
 	| "timeout"
 	| "refused"
-	| "dropped";
+	| "dropped"
+	| "redirect";
 
 /** How the fake server answers the request a test aims at, for each ending it can answer. */
 const ANSWER: Record<Exclude<Ending, "ok" | "refused">, Reply> = {
@@ -46,6 +54,13 @@ const ANSWER: Record<Exclude<Ending, "ok" | "refused">, Reply> = {
 	error5xx: { status: 503, json: { error: "unavailable" } },
 	timeout: "hang",
 	dropped: "drop",
+	// Followed, it would end on a port fetch refuses before connecting (`bad port`), which reads
+	// as never sent: the ending a redirect to an unreachable host gives, with no race for a port.
+	redirect: {
+		status: 307,
+		json: { moved: true },
+		headers: { location: "http://127.0.0.1:1/v1/elsewhere" },
+	},
 };
 
 interface Seen {
@@ -117,7 +132,11 @@ function startServer(): Promise<string> {
 					if (closeAfter !== null && closeAfter.path === path && closeAfter.nth === nth) {
 						res.on("finish", () => server.close());
 					}
-					res.writeHead(reply.status, { "content-type": "application/json", connection: "close" });
+					res.writeHead(reply.status, {
+						"content-type": "application/json",
+						connection: "close",
+						...reply.headers,
+					});
 					res.end(JSON.stringify(reply.json ?? {}));
 				};
 				if (reply.delayMs === undefined) send();
@@ -335,6 +354,7 @@ describe("PreToolUse's authorize", () => {
 		["timeout", ""],
 		["refused", "fetch failed"],
 		["dropped", "fetch failed"],
+		["redirect", "unexpected governance response 307"],
 	])(
 		"%s: no hold, and the call is recorded as a gap",
 		async (ending, reason) => {
@@ -373,6 +393,7 @@ describe("PreToolUse's give-back of a repeated call's earlier hold", () => {
 		["timeout", "release tx_s1 failed"],
 		["refused", "release tx_s1 failed"],
 		["dropped", "release tx_s1 failed"],
+		["redirect", "release tx_s1 returned 307"],
 	])(
 		"%s: the hold may be live, so none is made beside it: a gap, and the hold kept for Stop",
 		async (ending, reason) => {
@@ -432,6 +453,7 @@ describe("PostToolUse's settle of an estimate hold", () => {
 		["timeout", "unknown"],
 		["refused", "failed"],
 		["dropped", "unknown"],
+		["redirect", "failed"],
 	])(
 		"%s: a settle gap, %s, and the hold kept for Stop",
 		async (ending, outcome) => {
@@ -460,7 +482,15 @@ describe("PostToolUse's fresh hold for an estimate hold that expired", () => {
 		]);
 		expect(await records()).toEqual([]);
 	});
-	it.each<Ending>(["other4xx", "refusal402", "error5xx", "timeout", "refused", "dropped"])(
+	it.each<Ending>([
+		"other4xx",
+		"refusal402",
+		"error5xx",
+		"timeout",
+		"refused",
+		"dropped",
+		"redirect",
+	])(
 		"%s: the call ran and nothing charges it: a call-ran gap now, and no hold left",
 		async (ending) => {
 			await go(ending);
@@ -492,6 +522,7 @@ describe("PostToolUse's settle of that fresh hold", () => {
 		["timeout", "unknown"],
 		["refused", "failed"],
 		["dropped", "unknown"],
+		["redirect", "failed"],
 	])(
 		"%s: a settle gap under the fresh hold, %s",
 		async (ending, outcome) => {
@@ -522,6 +553,7 @@ describe("the give-back of a hold whose transferId is not a valid id", () => {
 		["timeout", "could not be released"],
 		["refused", "could not be released"],
 		["dropped", "could not be released"],
+		["redirect", "returned 307; the server's sweep releases it"],
 	])(
 		"%s: released or left to the sweep, said on stderr; the call's own gap is the record",
 		async (ending, said) => {
@@ -554,6 +586,7 @@ describe("the give-back of a hold whose record cannot be written", () => {
 		["timeout", "could not be given back"],
 		["refused", "could not be given back"],
 		["dropped", "could not be given back"],
+		["redirect", "was refused (307"],
 	])(
 		"%s: given back or left to the sweep, said on stderr; the call's own gap is the record",
 		async (ending, said) => {
@@ -593,6 +626,7 @@ describe("the settle of a transcript hold (PostToolUse)", () => {
 		["timeout", "claimed"],
 		["refused", "released"],
 		["dropped", "claimed"],
+		["redirect", "claimed"],
 	])(
 		"%s, with no key: a settle gap, %s",
 		async (ending, outcome) => {
@@ -611,6 +645,7 @@ describe("the settle of a transcript hold (PostToolUse)", () => {
 		["timeout", "unresolved"],
 		["refused", "unresolved"],
 		["dropped", "unresolved"],
+		["redirect", "unresolved"],
 	])(
 		"%s, under a key: a settle gap, %s",
 		async (ending, outcome) => {
@@ -640,7 +675,7 @@ describe("the give-back after a transcript hold's failed settle, as a repeated c
 			expect(await phased("settle")).toMatchObject([{ outcome: "claimed", transferId: "tx_s1" }]);
 		},
 	);
-	it.each<Ending>(["other4xx", "error5xx", "timeout", "refused", "dropped"])(
+	it.each<Ending>(["other4xx", "error5xx", "timeout", "refused", "dropped", "redirect"])(
 		"%s: the hold may be live, so none is made beside it, and the call's gap says so",
 		async (ending) => {
 			await go(ending);
@@ -670,6 +705,7 @@ describe("the release of a transcript hold that carries no usage (PostToolUse)",
 		["timeout", "unknown"],
 		["refused", "failed"],
 		["dropped", "unknown"],
+		["redirect", "failed"],
 	])(
 		"%s: a release gap, %s",
 		async (ending, outcome) => {
@@ -703,6 +739,7 @@ describe("the settle at zero that stands in for that release on a server that ca
 		["timeout", "unknown"],
 		["refused", "failed"],
 		["dropped", "unknown"],
+		["redirect", "failed"],
 	])(
 		"%s: written down as the give-back it stands for: a release gap, %s",
 		async (ending, outcome) => {
@@ -726,7 +763,7 @@ describe("Stop's remainder: the authorize", () => {
 		expect(requests("/v1/settle")).toHaveLength(1);
 		expect(await records()).toEqual([]);
 	});
-	it.each<Ending>(["other4xx", "error5xx", "timeout", "refused", "dropped"])(
+	it.each<Ending>(["other4xx", "error5xx", "timeout", "refused", "dropped", "redirect"])(
 		"%s: nothing posted, so the messages are released: a remainder gap",
 		async (ending) => {
 			await go(ending);
@@ -766,6 +803,7 @@ describe("Stop's remainder: the settle", () => {
 		["timeout", "claimed"],
 		["refused", "released"],
 		["dropped", "claimed"],
+		["redirect", "claimed"],
 	])(
 		"%s: a remainder gap, %s",
 		async (ending, outcome) => {
@@ -783,6 +821,7 @@ describe("Stop's remainder: the settle", () => {
 		["timeout", "unresolved"],
 		["refused", "unresolved"],
 		["dropped", "unresolved"],
+		["redirect", "unresolved"],
 	])(
 		"%s, under a key: a remainder gap, %s",
 		async (ending, outcome) => {
@@ -823,18 +862,81 @@ describe("Stop's give-back of a leftover estimate hold", () => {
 		["json", "timeout", "unknown"],
 		["json", "refused", "failed"],
 		["json", "dropped", "unknown"],
+		["json", "redirect", "failed"],
 		["settling", "other4xx", "failed"],
 		["settling", "other404", "failed"],
 		["settling", "error5xx", "failed"],
 		["settling", "timeout", "unknown"],
 		["settling", "refused", "failed"],
 		["settling", "dropped", "unknown"],
+		["settling", "redirect", "failed"],
 	])(
 		"a .%s hold, %s: its call's gap, and a release gap, %s",
 		async (kind, ending, outcome) => {
 			await go(ending, kind);
 			expect(await unconfirmed()).toHaveLength(1);
 			expect(await phased("release")).toMatchObject([{ outcome, transferId: "tx_1" }]);
+		},
+		LONG,
+	);
+
+	// The same loops give back two holds behind which no call's charge can hide: a transcript hold
+	// with no usage (its window is posted by message) and a `.releasing` hold (claimed only to END
+	// a deferred call's earlier hold). Each is given back as `unused`: no call gap, whatever the
+	// ending; a give-back that did not end cleanly is its release gap alone.
+	const unused: Array<[string, Record<string, unknown>, string, Record<string, string>]> = [
+		["a transcript hold that carries no usage (.json)", EMPTY, "json", {}],
+		["a .releasing hold", ESTIMATE, "releasing", ESTIMATE_MODE],
+	];
+	const giveBackUnused = async (
+		ending: Ending,
+		fields: Record<string, unknown>,
+		kind: string,
+		mode: Record<string, string>,
+	) => {
+		// `job`: the server records why a hold is given back, so the release names its class.
+		capabilities = ["release", "job"];
+		await seedHold("tu_1", "tx_1", fields, kind);
+		aim("/v1/release", 1, ending, ["/v1/health", 1]);
+		return run("stop", stopInput(), mode);
+	};
+	it.each(unused)(
+		"%s, 200 and 404 unknown transferId: given back, and nothing recorded",
+		async (_, fields, kind, mode) => {
+			for (const ending of ["ok", "gone"] as const) {
+				await giveBackUnused(ending, fields, kind, mode);
+				expect(requests("/v1/release")).toMatchObject([
+					{ body: { transferId: "tx_1", releaseClass: "unused" } },
+				]);
+				expect(await records()).toEqual([]);
+				expect(await holdFiles()).toEqual([]);
+				seen = [];
+				counts = new Map();
+			}
+		},
+	);
+	it.each(
+		unused.flatMap(([what, fields, kind, mode]) =>
+			(
+				[
+					["other4xx", "failed"],
+					["other404", "failed"],
+					["error5xx", "failed"],
+					["timeout", "unknown"],
+					["refused", "failed"],
+					["dropped", "unknown"],
+					["redirect", "failed"],
+				] as Array<[Ending, string]>
+			).map(([ending, outcome]) => [what, ending, outcome, fields, kind, mode] as const),
+		),
+	)(
+		"%s, %s: no call gap; a release gap, %s, as unused",
+		async (_, ending, outcome, fields, kind, mode) => {
+			await giveBackUnused(ending, fields, kind, mode);
+			expect(await unconfirmed()).toEqual([]);
+			expect(await records()).toMatchObject([
+				{ kind: "gap", phase: "release", outcome, transferId: "tx_1", releaseClass: "unused" },
+			]);
 		},
 		LONG,
 	);
@@ -855,6 +957,7 @@ describe("the capability probe", () => {
 		["timeout", "capabilities are unknown"],
 		["refused", "capabilities are unknown"],
 		["dropped", "capabilities are unknown"],
+		["redirect", "health returned 307"],
 	])(
 		"%s: unknown, said on stderr, and the call sends no key or principal",
 		async (ending, said) => {
@@ -876,7 +979,7 @@ describe("the half-open probe of a breaker past its minute", () => {
 		await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
 		return file;
 	};
-	it.each<Ending>(["ok", "other4xx", "error5xx"])(
+	it.each<Ending>(["ok", "other4xx", "error5xx", "redirect"])(
 		"%s: an answer: the breaker closes, and the call is governed",
 		async (ending) => {
 			const file = await go(ending);
@@ -984,5 +1087,91 @@ describe("SessionEnd, the last settle point: what it cannot finish is written do
 			["tx_1", "call-unconfirmed"],
 			["tx_2", "call-ran"],
 		]);
+	});
+
+	it("a backlog spanning two jobs: one deferred gap per job, each a known gap of its own job's coverage", async () => {
+		const now = Date.now();
+		const at = (offsetS: number) => new Date(now + offsetS * 1000).toISOString();
+		// The state is older than the backlog, so both messages are the session's to post.
+		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+		await writeFile(join(stateDir, "transcripts", "since"), "2000-01-01T00:00:00.000Z");
+		const line = (ts: string, op: string, job: string | null) =>
+			JSON.stringify({ sid: SESSION, ts, op, job });
+		const log = [
+			line(at(-60), "session-start", null),
+			line(at(-50), "start", "job-a"),
+			line(at(-30), "stop", null),
+			line(at(-20), "start", "job-b"),
+			line(at(-5), "stop", null),
+		].join("\n");
+		await mkdir(join(stateDir, "jobs"), { recursive: true });
+		await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), `${log}\n`);
+		const message = (id: string, ts: string) =>
+			JSON.stringify({
+				type: "assistant",
+				sessionId: SESSION,
+				uuid: `${id}-final`,
+				timestamp: ts,
+				message: {
+					id,
+					model: SONNET,
+					role: "assistant",
+					type: "message",
+					stop_reason: "end_turn",
+					content: [{ type: "text", text: "x" }],
+					usage: {
+						input_tokens: 5,
+						output_tokens: 6,
+						cache_read_input_tokens: 0,
+						cache_creation_input_tokens: 0,
+					},
+				},
+			});
+		await writeFile(
+			transcriptPath(),
+			`${[message("msg_a", at(-40)), message("msg_b", at(-10))].join("\n")}\n`,
+		);
+		await run("session-end", endInput(), budget(0));
+		expect(seen).toEqual([]);
+		const written = await phased("remainder");
+		expect(written).toMatchObject([
+			{ outcome: "deferred", messages: 1, started: at(-40) },
+			{ outcome: "deferred", messages: 1, started: at(-10) },
+		]);
+		const { jobCoverage } = (await import(pathToFileURL(join(HOOKS, "job-log.mjs")).href)) as {
+			jobCoverage(args: {
+				job: string;
+				logs: Record<string, string>;
+				records: unknown[];
+				watch: unknown[];
+			}): { knownGaps: Array<{ gap: string }> };
+		};
+		for (const job of ["job-a", "job-b"]) {
+			const coverage = jobCoverage({
+				job,
+				logs: { [SESSION]: `${log}\n` },
+				records: [],
+				watch: written,
+			});
+			expect(coverage.knownGaps.map((gap) => gap.gap)).toContain(
+				`session ${SESSION}: a gap fell inside an interval of ${job}`,
+			);
+		}
+	});
+
+	it("a message whose claim fails: Stop leaves it to stderr, as a later settle point retries it; SessionEnd, the last, writes it down", async () => {
+		await writeTranscript();
+		// A claims directory this user cannot write: every claim fails (EACCES).
+		await mkdir(join(stateDir, "transcripts", "claims"), { recursive: true, mode: 0o700 });
+		await chmod(join(stateDir, "transcripts", "claims"), 0o500);
+		const stop = await run("stop", stopInput());
+		expect(stop.stderr).toContain("could not be claimed (EACCES)");
+		expect(await records()).toEqual([]);
+		await run("session-end", endInput(), budget(1_200));
+		expect(requests("/v1/settle")).toEqual([]);
+		const written = await phased("remainder");
+		expect(written).toMatchObject([{ outcome: "deferred", agent: "main", messages: 1 }]);
+		expect(String(written[0]?.reason)).toContain("could not be claimed (EACCES)");
+		await chmod(join(stateDir, "transcripts", "claims"), 0o700);
 	});
 });

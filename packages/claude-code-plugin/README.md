@@ -733,12 +733,23 @@ PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"pha
 - `released`: nothing was posted, and the usage waits for a later settle point. A settle
   whose connection was refused before anything was sent is `released`: it cannot have posted;
 - `deferred`: not attempted yet (out of time, say);
-- `failed`: the server answered it with an error, or it was never sent (a refused
-  connection, a spent budget), so nothing can have landed;
+- `failed`: the server answered it with an error or a redirect, or it was never sent (a
+  refused connection, a spent budget). Never sent, nothing can have landed; answered, the
+  server did not confirm it, and a hold it leaves is never settled again: an estimate hold's
+  call keeps its own `call-ran` gap;
 - `unknown`: no answer once it may have gone out: this hook's own timeout cut it off, or the
   connection dropped after sending, and the server may still act on it. A transcript hold's
   settle that ends this way is `claimed`, or `unresolved` under a key, which also say whether
   it is retried.
+
+The plugin never follows a redirect. A 3xx is the server's answer, read as any other that is
+not a 200, since the server may have acted on the request before redirecting it: a settle
+answered with one is never `released`. A transcript hold's or a remainder's is `claimed` (or
+`unresolved` under a key); an estimate hold's is `failed`, as a 5xx is, its hold kept
+settle-attempted and never settled again. So set the server URL to the one the server answers
+at: a server that redirects its routes, even within its own origin, refuses every call. (A
+redirect to another origin never carried the key: fetch drops the `Authorization` header when
+it follows one.)
 
 Each names its hold's `transferId`, so a deferral and how it ended can be joined. A hold
 that carried no usage, given back to a server that no longer holds it (a 404 `unknown
@@ -750,10 +761,12 @@ stands for: `release`, `failed` or `unknown`.
 
 **SessionEnd, the last settle point, writes down what it cannot finish.** What it leaves "for
 a later settle point" has none unless the session is resumed, so each such deferral is a
-record of its own: a `remainder` gap, `deferred`, for usage it has no time to claim or post,
-for an agent whose usage it could not reach once the server stopped answering, and for an
-agent whose transcript state is unusable; and its call's gap for a hold it has no time to
-give back.
+record of its own: a `remainder` gap, `deferred`, for usage it has no time to claim or post
+or whose claim fails (a full or unwritable state dir), for an agent whose usage it could not
+reach once the server stopped answering, and for an agent whose transcript state is unusable;
+and its call's gap for a hold it has no time to give back. Usage that spans jobs is one record
+per job, each started at its own first message, so `usertrust-job coverage` lists it as a
+known gap of every job it touches.
 
 **A failed health probe still sends the principal.** After a probe that answers, the
 plugin remembers the server's capabilities, per server and key, in the state dir

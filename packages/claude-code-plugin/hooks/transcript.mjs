@@ -354,24 +354,48 @@ export function settleLabels(labels) {
 	};
 }
 
-/** The earliest and latest finite `ts` of a message list, as ISO strings. */
 /**
  * SessionEnd is the last settle point: usage it leaves "for a later settle point" has none,
  * unless the session is resumed. So whatever it defers is written down as a gap, `deferred`,
- * never left to stderr alone. `messages`, when known, give the record its count and its start.
+ * never left to stderr alone. `messages`, when known, give each record its count and its start.
+ *
+ * A job's coverage places a record by its start alone, so one record for messages of two jobs
+ * would be a gap for the first job only. The messages are written down one record per job
+ * interval of the session's job log (`labelsFor`, as a remainder groups them), each started at
+ * its own earliest message. Messages of no known time share one record, started at null: a gap
+ * that may belong to any job. With no usable job log, they are one record, which coverage
+ * cannot place in any job either, and so counts against every job; so is a log stamped ahead of
+ * the clock, beside the time-less gap that `labelsFor`'s guard writes for every job.
  */
-function finalDeferral({ sessionId, agentId, reason, messages }) {
-	return recordSettleGap({
-		phase: "remainder",
-		outcome: "deferred",
-		session: sessionId,
-		agent: agentId,
-		reason: `at SessionEnd: ${reason}`,
-		started: messages === undefined ? null : (usageSpan(messages).usageFrom ?? null),
-		...(messages === undefined ? {} : { messages: messages.length }),
-	});
+async function finalDeferral({ sessionId, agentId, reason, messages }) {
+	const record = (part, share = "") =>
+		recordSettleGap({
+			phase: "remainder",
+			outcome: "deferred",
+			session: sessionId,
+			agent: agentId,
+			reason: `at SessionEnd: ${reason}${share}`,
+			started: part === undefined ? null : (usageSpan(part).usageFrom ?? null),
+			...(part === undefined ? {} : { messages: part.length }),
+		});
+	if (messages === undefined) return record(undefined);
+	const jobs = await resolveJob(sessionId);
+	const parts = new Map();
+	for (const m of messages) {
+		const key = labelsFor(jobs, m.ts).key;
+		const part = parts.get(key);
+		if (part === undefined) parts.set(key, [m]);
+		else part.push(m);
+	}
+	for (const part of parts.values()) {
+		await record(
+			part,
+			parts.size > 1 ? `; this record: the ${part.length} of one job interval` : "",
+		);
+	}
 }
 
+/** The earliest and latest finite `ts` of a message list, as ISO strings. */
 export function usageSpan(messages) {
 	// A loop, never `Math.min(...times)`: a spread of ~125k arguments throws a RangeError, and
 	// this runs in EVERY hook over whatever backlog a long outage left.
@@ -1191,6 +1215,7 @@ async function selectOwn(opened, { final = null } = {}) {
 	const fresh = selectNew(cursor, opened.live);
 	const own = [];
 	const failed = new Map();
+	const unclaimed = [];
 	const deferred = [];
 	let writtenOff = 0;
 	for (const m of fresh) {
@@ -1215,14 +1240,22 @@ async function selectOwn(opened, { final = null } = {}) {
 			accountIds(cursor, [m.id]);
 		} else {
 			failed.set(claim.code, (failed.get(claim.code) ?? 0) + 1);
+			unclaimed.push(m);
 		}
 	}
 	if (failed.size > 0) {
-		const total = [...failed.values()].reduce((sum, n) => sum + n, 0);
 		const codes = [...failed.keys()].join(", ");
 		say(
-			`usertrust: ${total} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point`,
+			`usertrust: ${unclaimed.length} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point`,
 		);
+		// At SessionEnd there is no next settle point: written down, as an out-of-time claim is.
+		if (final !== null) {
+			await finalDeferral({
+				...final,
+				reason: `${unclaimed.length} transcript message(s) could not be claimed (${codes})`,
+				messages: unclaimed,
+			});
+		}
 	}
 	if (deferred.length > 0) {
 		say(

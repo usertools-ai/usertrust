@@ -37,8 +37,15 @@ npm, and its version is its own: the `usertrust` packages and their
 - **An estimate settle answered `settled: false` is a `claimed` gap**, as a transcript hold's
   is: its charge may be missing.
 - **SessionEnd, the last settle point, writes down what it cannot finish**: a `deferred`
-  remainder gap for usage it leaves unposted, and its call's gap for a hold it has no time to
-  give back. Its breaker probe takes at most a fifth of its budget.
+  remainder gap for usage it leaves unposted (out of time, or a claim that fails), one per job
+  the usage spans, and its call's gap for a hold it has no time to give back. Its breaker probe
+  takes at most a fifth of its budget.
+- **No request follows a redirect.** A 3xx is the server's answer, read by its status: a
+  settle answered with one is never `released`, as the server may have acted on it, and no
+  hop after it can make the request read as never sent. A server URL whose routes redirect
+  within the same origin, which worked before, now fails every call: set the URL the server
+  answers at. One that redirects to another origin never worked, as fetch drops the key when
+  it follows such a redirect.
 - **`usertrust-job coverage` lists a breaker's deferral inside a job's interval as a known
   gap**, as it does a gap: the record cannot say whether the usage was posted later.
 
