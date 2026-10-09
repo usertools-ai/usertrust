@@ -1610,12 +1610,17 @@ runs, or obeys, when it opens a checkout: Claude Code's `.claude/`, an `.mcp.jso
 and Codex CLIs' `.grok/` and `.codex/`, at any depth, matched as a case-insensitive filesystem
 opens them.
 - No change may add, edit or remove agent config that `.github/agent-config-allowlist.json` does
-  not name. Here the allowlist is empty. An exact entry may pin its file's `sha256`.
+  not name. Here the allowlist is empty. An exact entry may pin its file's `sha256`. The pin holds
+  for every spelling a case-insensitive filesystem opens as that file (macOS opens `.mcp.jſon` as
+  `.mcp.json`), and a change may not add such a spelling beside another path in its tree, or a
+  pinned one.
 - A committed Claude Code settings file may hold only `$schema`, and `permissions.deny` /
   `permissions.ask`. Any other key fails, including one this guard has never heard of.
 - The guard (`scripts/agent-config-guard.mjs`) and the allowlist are read from the BASE
   (`.github/agent-config.sh`), so a change cannot allowlist itself. A widening merges on its own,
   before the change that needs it.
+- What is checked is what lands: a pull request as the merge commit GitHub tests (`github.sha`),
+  against its first parent; a push, tip to tip.
 - Its tests: `node --test scripts/agent-config-guard.test.mjs`.
 
 ---

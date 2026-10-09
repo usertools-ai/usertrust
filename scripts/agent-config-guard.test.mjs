@@ -37,6 +37,7 @@ const sha256 = (text) => createHash("sha256").update(text).digest("hex");
  * A fixture repository. `commit(changes, parent)` makes a commit holding the parent's
  * files with `changes` applied: a path maps to its content, `{ link }` for a symlink,
  * `{ submodule }` for a gitlink, or null to delete it. Returns the commit's sha.
+ * `merge(base, head)` makes the merge commit a pull request is tested as.
  */
 function fixture() {
 	const root = mkdtempSync(join(scratch, "repo-"));
@@ -83,6 +84,19 @@ function fixture() {
 			snapshots.set(sha, files);
 			return sha;
 		},
+		/** The merge commit GitHub tests for a pull request of `head` into `base`: base first. */
+		merge(base, head) {
+			const tree = git(["merge-tree", "--write-tree", base, head]).split("\n")[0];
+			return git(["commit-tree", tree, "-p", base, "-p", head, "-m", `merge ${n++}`], "");
+		},
+		/** A file's content at a commit (`<commit>:<path>`), as it is. */
+		blob(spec) {
+			return execFileSync("git", ["cat-file", "blob", spec], {
+				cwd: root,
+				env: ENV,
+				encoding: "utf-8",
+			});
+		},
 	};
 }
 
@@ -106,14 +120,24 @@ function guard(repo, { rules, base, head, event = "pull_request" }) {
 	return { status: run.status, out: run.stdout + run.stderr };
 }
 
-/** The launcher, as ci.yml runs it, for a pull request unless `event` says otherwise. */
-function launch(repo, base, head, event = "pull_request") {
-	const run = spawnSync("bash", [LAUNCHER, event, base, head], {
+/** The launcher, run with `args`. */
+function launcher(repo, ...args) {
+	const run = spawnSync("bash", [LAUNCHER, ...args], {
 		cwd: repo.root,
 		env: ENV,
 		encoding: "utf-8",
 	});
 	return { status: run.status, out: run.stdout + run.stderr };
+}
+
+/**
+ * The launcher, as ci.yml runs it: for a pull request (unless `event` says otherwise), the
+ * merge commit GitHub tests, `head` merged into `base`; for a push, `base` to `head`.
+ */
+function launch(repo, base, head, event = "pull_request") {
+	return event === "pull_request"
+		? launcher(repo, event, repo.merge(base, head))
+		: launcher(repo, event, base, head);
 }
 
 /** A repository whose base holds `allow` and `files`, and a head with `changes` on top. */
@@ -187,6 +211,10 @@ describe("rule 1: agent config the allowlist does not name fails, in every statu
 		]) {
 			fails(result, path, UNNAMED);
 		}
+	});
+
+	test("a compatibility spelling counts as the name it folds to (NFKC): a fullwidth ｊ", () => {
+		fails(change({ "pkg/.mcp.ｊson": "{}" }).run(), "pkg/.mcp.ｊson", UNNAMED);
 	});
 
 	test("an edit to agent config that was already there fails", () => {
@@ -322,6 +350,75 @@ describe("an allowlist entry may pin an exact file's sha256", () => {
 		const base = repo.commit({ ".mcp.json": "v2", [ALLOWLIST]: pin("v2") }, fork);
 		const head = repo.commit({ "README.md": "x" }, fork);
 		passes(guard(repo, { rules: base, base, head }));
+	});
+});
+
+describe("a spelling a case-insensitive filesystem opens as another file is held to that file's rules", () => {
+	// U+017F, LATIN SMALL LETTER LONG S, folds to `s`: macOS's filesystem opens `.mcp.jſon`
+	// as `.mcp.json`, so writing one writes the other.
+	const ALIAS = ".grok/plugins/x/.mcp.jſon";
+	const PINNED = ".grok/plugins/x/.mcp.json";
+	/** A glob that names both spellings, and a pin on one of them. */
+	const rules = (content) => [
+		{ path: ".grok/plugins/**", why: "test" },
+		{ path: PINNED, why: "test", sha256: sha256(content) },
+	];
+
+	test("an added spelling of a pinned file is held to its pin, and refused beside it", () => {
+		const { run } = change(
+			{ [ALIAS]: "replaced" },
+			{ allow: rules("pinned"), files: { [PINNED]: "pinned" } },
+		);
+		const result = run();
+		fails(result, ALIAS, "is pinned by the allowlist, and the change leaves other content");
+		fails(result, ALIAS, `folds to ${JSON.stringify(PINNED)}, another path in the tree`);
+		fails(result, ALIAS, `folds to the pinned path ${JSON.stringify(PINNED)}`);
+	});
+
+	test("a spelling of a pinned file already in the tree is held to that pin when the change edits it", () => {
+		// Only the other spelling is in the tree, so the change adds nothing: the pin alone refuses it.
+		const { run } = change(
+			{ [ALIAS]: "replaced" },
+			{ allow: rules("pinned"), files: { [ALIAS]: "pinned" } },
+		);
+		fails(run(), ALIAS, "is pinned by the allowlist, and the change leaves other content");
+	});
+
+	test("a change may not add a spelling that folds to another path in its tree, or to a pinned path", () => {
+		// Unpinned, under a glob: only the collision refuses it.
+		const hooks = change(
+			{ ".claude/hooks/Run.sh": "two" },
+			{
+				allow: [{ path: ".claude/hooks/**", why: "test" }],
+				files: { ".claude/hooks/run.sh": "one" },
+			},
+		);
+		fails(
+			hooks.run(),
+			".claude/hooks/Run.sh",
+			'folds to ".claude/hooks/run.sh", another path in the tree',
+		);
+		// The pinned content exactly, the pinned spelling absent: the pin holds, and the spelling
+		// is refused all the same.
+		const result = change({ [ALIAS]: "pinned" }, { allow: rules("pinned") }).run();
+		fails(result, ALIAS, `folds to the pinned path ${JSON.stringify(PINNED)}`);
+		assert.doesNotMatch(result.out, /leaves other content/u, result.out);
+	});
+
+	test("control: a case-only rename passes, and so do spellings that fold apart", () => {
+		passes(
+			change(
+				{
+					".claude/hooks/Run.sh": null,
+					".claude/hooks/run.sh": "one",
+					".claude/hooks/walk.sh": "w",
+				},
+				{
+					allow: [{ path: ".claude/hooks/**", why: "test" }],
+					files: { ".claude/hooks/Run.sh": "one" },
+				},
+			).run(),
+		);
 	});
 });
 
@@ -510,20 +607,62 @@ describe("the launcher runs the guard and its allowlist as the BASE has them", (
 		passes(launch(repo, before, after));
 	});
 
-	test("a base or head that is not a commit cannot be checked", () => {
+	test("a pull request is checked as the merge commit GitHub tests: a pinned file both sides edited lands as content no pin names", () => {
+		const repo = fixture();
+		const entry = (text) => [{ path: ".grok/sandbox.toml", why: "test", sha256: sha256(text) }];
+		const fork = repo.commit({
+			"README.md": "x",
+			".grok/sandbox.toml": "a\nb\nc\nd\ne\n",
+			...guardFiles(entry("a\nb\nc\nd\ne\n")),
+		});
+		// After the fork, the base edits the file's first line in the two pull requests a pinned
+		// file takes, then re-pins it to the content the branch's last line edit gives.
+		const repinned = repo.commit({ [ALLOWLIST]: allowlist(entry("A\nb\nc\nd\ne\n")) }, fork);
+		const edited = repo.commit({ ".grok/sandbox.toml": "A\nb\nc\nd\ne\n" }, repinned);
+		const base = repo.commit({ [ALLOWLIST]: allowlist(entry("a\nb\nc\nd\nE\n")) }, edited);
+		const head = repo.commit({ ".grok/sandbox.toml": "a\nb\nc\nd\nE\n" }, fork);
+		// Control: graded on the branch's head alone, the change passes, as the base pins its file.
+		passes(guard(repo, { rules: base, base, head }));
+		// What lands is the merge of both edits, content no pin names.
+		const merge = repo.merge(base, head);
+		assert.equal(repo.blob(`${merge}:.grok/sandbox.toml`), "A\nb\nc\nd\nE\n");
+		fails(
+			launcher(repo, "pull_request", merge),
+			".grok/sandbox.toml",
+			"is pinned by the allowlist, and the change leaves other content",
+		);
+	});
+
+	test("a pull request that is not a merge commit, or a commit that is not here, cannot be checked", () => {
 		const repo = fixture();
 		const base = repo.commit({ "README.md": "x", ...guardFiles() });
-		for (const [b, h] of [
-			["0000000000000000000000000000000000000000", base],
-			[base, "0000000000000000000000000000000000000000"],
+		const head = repo.commit({ "README.md": "y" }, base);
+		const missing = "0".repeat(40);
+		for (const args of [
+			["pull_request", missing],
+			["push", missing, head],
+			["push", base, missing],
 		]) {
-			const { status, out } = launch(repo, b, h);
+			const { status, out } = launcher(repo, ...args);
 			assert.equal(status, 2, out);
-			assert.match(out, /CANNOT CHECK: \w+ is not a commit here/);
+			assert.match(out, new RegExp(`CANNOT CHECK: ${missing} is not a commit here`));
 		}
-		const { status, out } = launch(repo, base, base, "merge_group");
-		assert.equal(status, 2, out);
-		assert.match(out, /usage: agent-config\.sh <pull_request\|push> <base> <head>/);
+		// The branch's head alone is never what is checked.
+		const branch = launcher(repo, "pull_request", head);
+		assert.equal(branch.status, 2, branch.out);
+		assert.match(branch.out, /CANNOT CHECK: \w+ is not a merge commit/);
+		for (const args of [
+			["merge_group", base, head],
+			["pull_request", base, head],
+			["push", head],
+		]) {
+			const { status, out } = launcher(repo, ...args);
+			assert.equal(status, 2, out);
+			assert.match(
+				out,
+				/usage: agent-config\.sh pull_request <merge-commit> \| push <before> <after>/,
+			);
+		}
 	});
 
 	/** `origin` holding a pinned file the old tip had, the branch rewritten, and a clone of its refs. */
@@ -622,6 +761,13 @@ describe("the workflow runs the guard before any code of the change, and only fo
 		);
 		const guard = steps(lines).find((step) => step.includes("bash .github/agent-config.sh"));
 		assert.match(guard, new RegExp(`^        if: ${literal(change)}$`, "mu"), guard);
+	});
+
+	test("a pull request is checked as the merge commit GitHub tests (github.sha), never the branch's head", () => {
+		const guard = steps(job()).find((step) => step.includes("bash .github/agent-config.sh"));
+		assert.match(guard, /^ {10}SHA: \$\{\{ github\.sha \}\}$/mu, guard);
+		assert.match(guard, /^ {12}bash \.github\/agent-config\.sh pull_request "\$SHA"$/mu, guard);
+		assert.doesNotMatch(guard, /pull_request\.(head|base)\.sha/u, guard);
 	});
 
 	test("CODEOWNERS names an owner for the launcher, the allowlist, the guard and its tests", () => {

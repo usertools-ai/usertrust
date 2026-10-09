@@ -18,10 +18,17 @@
 //    key fails, a key this guard has never heard of included: a list of the keys that
 //    run something goes stale each time Claude Code ships a setting.
 // Agent-config paths are recognized as a case-insensitive filesystem, or Windows, opens
-// them (`.Claude/`, `.MCP.JSON`, `.claude./`); allowlist entries match exactly.
+// them (`.Claude/`, `.MCP.JSON`, `.claude./`, `.mcp.jſon`), by the same folding (`fold`)
+// everywhere a spelling could stand for another file:
+// - an allowlist entry names a path as it is written;
+// - a pin holds for every spelling that folds to its path;
+// - and a change may not add a spelling that folds to another path in its tree, or to a
+//   pinned path: on such a filesystem both are one file, and either could be what an
+//   agent reads.
 //
 // The change is what `--event` says it is:
-// - for a pull request, `base...head`: its own changes, from where it branched;
+// - for a pull request, `base...head`, which the launcher makes what will land: `head` is
+//   the merge commit GitHub tests, and `base` its first parent;
 // - for a push, `base..head`, tip to tip. A push that rewrites the branch removes what
 //   the old tip had, and that counts too.
 //
@@ -64,15 +71,21 @@ function git(args, encoding = "utf-8") {
 }
 
 /**
- * A path segment as a case-insensitive filesystem, or Windows, resolves it: case folded
- * (`ſ` is `s`), and trailing dots and spaces dropped.
+ * A path segment as a case-insensitive filesystem, or Windows, resolves it: compatibility
+ * forms folded (NFKC: `ﬁ` is `fi`, a fullwidth `ｊ` is `j`), then case (`ſ` is `s`; lower,
+ * upper and lower again, so `ẞ` and `ß` are both `ss`), and trailing dots and spaces dropped.
  */
 const fold = (segment) =>
 	segment
-		.normalize("NFC")
+		.normalize("NFKC")
+		.toLowerCase()
 		.toUpperCase()
 		.toLowerCase()
+		.normalize("NFKC")
 		.replace(/[. ]+$/u, "");
+
+/** A whole path, folded segment by segment (`fold`): two paths that fold alike are one file. */
+const folded = (path) => path.split("/").map(fold).join("/");
 
 /** Whether `path` is agent config: under an agent directory, or an MCP server list. */
 function isAgentConfig(path) {
@@ -209,34 +222,71 @@ const blob = (oid) => git(["cat-file", "blob", oid], "buffer");
 /** How each event's change is read: a pull request from where it branched, a push tip to tip. */
 const RANGE = { pull_request: "...", push: ".." };
 
-/** The failures of the change from `base` to `head` under the allowlist at `rules`. */
-function check({ event, rules, base, head }) {
-	const allow = readAllowlist(rules);
-	const changed = git([
+/** The paths the change from `base` to `head` touches, each with its status (`A`, `M`, `D`, ...). */
+function changes(event, base, head) {
+	const fields = git([
 		"diff",
-		"--name-only",
+		"--name-status",
 		"--no-renames",
 		"--no-ext-diff",
 		"--ignore-submodules=none",
 		"-z",
 		`${base}${RANGE[event]}${head}`,
-	])
-		.split("\0")
-		.filter((path) => path !== "");
+	]).split("\0");
+	const touched = [];
+	for (let i = 0; i + 1 < fields.length; i += 2) {
+		touched.push({ status: fields[i], path: fields[i + 1] });
+	}
+	return touched;
+}
+
+/** The failures of the change from `base` to `head` under the allowlist at `rules`. */
+function check({ event, rules, base, head }) {
+	const allow = readAllowlist(rules);
+	const changed = changes(event, base, head);
 	const headTree = tree(head);
 	const failures = [];
 	const fail = (rule, path, reason) => failures.push({ rule, path, reason });
+	const pinned = allow.filter((e) => e.sha256 !== undefined);
+	// Every agent-config path in the change's tree, by its folded spelling.
+	const spellings = new Map();
+	for (const path of headTree.keys()) {
+		if (!isAgentConfig(path)) continue;
+		const key = folded(path);
+		spellings.set(key, [...(spellings.get(key) ?? []), path]);
+	}
 	let agentPaths = 0;
-	for (const path of changed) {
+	for (const { status, path } of changed) {
 		if (!isAgentConfig(path)) continue;
 		agentPaths += 1;
-		const entries = allow.filter((e) => e.matches(path));
-		if (entries.length === 0) {
+		const key = folded(path);
+		// A spelling the change adds may not stand for another file: one already in the tree
+		// (or added beside it), or one the allowlist pins.
+		if (status === "A") {
+			for (const other of spellings.get(key) ?? []) {
+				if (other === path) continue;
+				fail(
+					1,
+					path,
+					`folds to ${JSON.stringify(other)}, another path in the tree: a case-insensitive filesystem opens both as one file`,
+				);
+			}
+			for (const { path: pin } of pinned) {
+				if (pin === path || folded(pin) !== key) continue;
+				fail(
+					1,
+					path,
+					`folds to the pinned path ${JSON.stringify(pin)}: a case-insensitive filesystem opens both as one file`,
+				);
+			}
+		}
+		if (!allow.some((e) => e.matches(path))) {
 			fail(1, path, "is agent config, and the allowlist does not name it");
 			continue;
 		}
-		// Every pin that names the path holds, whatever else names it too.
-		const pins = entries.filter((e) => e.sha256 !== undefined).map((e) => e.sha256);
+		// Every pin whose path folds to this one holds, whatever else names it too: a spelling
+		// that folds alike is the same file to an agent on a case-insensitive filesystem.
+		const pins = pinned.filter((e) => folded(e.path) === key).map((e) => e.sha256);
 		if (pins.length === 0) continue;
 		const now = headTree.get(path);
 		if (now === undefined) {

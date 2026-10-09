@@ -469,6 +469,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case-insensitive filesystem opens them.
   - A pull request or push that adds, edits or removes agent config the repository has not
     allowlisted fails. The allowlist, `.github/agent-config-allowlist.json`, is empty here.
+  - An exact entry may pin its file's `sha256`. The pin holds for every spelling a
+    case-insensitive filesystem opens as that file, and a change may not add such a spelling
+    beside another file or a pinned one.
+  - A pull request is checked as the merge commit GitHub tests: what lands, not the branch's head.
   - A committed Claude Code settings file may hold only `$schema`, and `permissions` that
     tighten (`deny`, `ask`).
   - The guard and its allowlist are read from the base, so a change cannot allowlist itself.
