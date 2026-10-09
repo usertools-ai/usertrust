@@ -477,7 +477,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     name in the change's tree.
   - Agent config must be checked out as it is stored: no `working-tree-encoding`, `filter` or
     `ident` attribute may apply to it, and no attributes file may give one of them the literal
-    value `unset` or `unspecified`, or hold a NUL byte, where git stops reading it.
+    value `unset` or `unspecified`, or hold a NUL byte, where git stops reading it. Nor may one
+    apply to an attributes file, at any depth, so git reads at checkout the rules the check read.
   - A submodule a change adds, or moves to another commit, must be on the allowlist: its own
     tree can hold agent config.
   - A pull request is checked as the merge commit GitHub tests: what lands, not the branch's head.

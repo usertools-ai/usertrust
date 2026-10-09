@@ -18,7 +18,9 @@
 //    not; and so that every attributes file is read, one must be spelled `.gitattributes`.
 //    No attributes file may give one of them the literal value `unset` or `unspecified`, a
 //    macro's included: `check-attr` prints that as no value, where git looks for a filter
-//    or an encoding of that name.
+//    or an encoding of that name. And every attributes file, at any depth, is checked out as
+//    it is stored too: one that checkout rewrote would give git other rules at checkout than
+//    the ones read here (an encoding that adds NUL bytes ends git's read of the file there).
 //    A submodule is another repository, and its own tree can hold agent config: one the
 //    change adds, or moves to another commit, must be named by the allowlist, wherever it is.
 // 2. Every Claude Code settings file in the change's tree (`.claude/settings*.json`, at
@@ -454,6 +456,9 @@ function check({ event, rules, base, head }) {
 		pinned.set(key, (pinned.get(key) ?? new Set()).add(path));
 	}
 	const agentTree = [];
+	// The attributes files that are not agent config (those are in `agentTree`): each must be
+	// checked out as stored, so that git reads at checkout the rules `transforms` reads here.
+	const attributesTree = [];
 	let settingsFiles = 0;
 	for (const [path, { mode, oid }] of headTree) {
 		for (const pin of pinned.get(folded(path)) ?? []) {
@@ -496,6 +501,7 @@ function check({ event, rules, base, head }) {
 					`holds ${shown(token)}: check-attr prints that as no value, so this check could not see it`,
 				);
 			}
+			if (!isAgentConfig(path)) attributesTree.push(path);
 		}
 		if (!isAgentConfig(path)) continue;
 		agentTree.push(path);
@@ -511,6 +517,13 @@ function check({ event, rules, base, head }) {
 			1,
 			path,
 			`is agent config that checkout rewrites (${attribute} ${shown(value)}): an agent would read other bytes than the ones checked here`,
+		);
+	}
+	for (const { path, attribute, value } of transforms(head, attributesTree)) {
+		fail(
+			1,
+			path,
+			`is an attributes file that checkout rewrites (${attribute} ${shown(value)}): git would read other rules from it at checkout than the ones checked here`,
 		);
 	}
 	return { failures, changed: changed.length, agentPaths, settingsFiles };

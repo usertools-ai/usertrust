@@ -1624,7 +1624,8 @@ opens them.
   attribute may apply to it, as git matches its patterns with case or without, and an attributes
   file is spelled `.gitattributes`. No attributes file may give one of them the literal value
   `unset` or `unspecified`, which `check-attr` prints as no value, or hold a NUL byte, where git
-  stops reading it.
+  stops reading it. And no such attribute may apply to an attributes file, at any depth: checkout
+  writes each as it is stored, so git reads at checkout the rules the check read.
 - A submodule is another repository, and its own tree can hold agent config: one a change adds,
   or moves to another commit, must be named by the allowlist, wherever it is.
 - A committed Claude Code settings file may hold only `$schema`, and `permissions.deny` /
