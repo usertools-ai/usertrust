@@ -60,6 +60,7 @@ import {
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	principalCapable,
+	quarantineHold,
 	readStdin,
 	recordBreakerSkip,
 	recordPending,
@@ -261,9 +262,10 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		);
 	} catch (err) {
 		// No answer. The call RAN and nothing will charge it, as when the fresh hold is refused (below):
-		// its gap is written now. A hold the authorize may have made is left to the server's sweep.
-		await unlink(claimed).catch(() => {});
+		// its gap is written now, before its settle-attempted marker goes (evidence first). A hold
+		// the authorize may have made is left to the server's sweep.
 		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		await unlink(claimed).catch(() => {});
 		say(
 			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold was not granted (no answer: ${err instanceof Error ? err.message : String(err)}); this call's estimate is not recorded`,
 		);
@@ -276,9 +278,10 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		typeof transferId !== "string" ||
 		transferId === ""
 	) {
-		await unlink(claimed).catch(() => {});
-		// The call RAN and nothing will charge it: its usage is unrecorded, which is a gap.
+		// The call RAN and nothing will charge it: its usage is unrecorded, which is a gap, written
+		// before its settle-attempted marker goes (evidence first).
 		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		await unlink(claimed).catch(() => {});
 		say(
 			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold was not granted (${auth.status}); this call's estimate is not recorded`,
 		);
@@ -378,9 +381,18 @@ try {
 		// `call-unconfirmed`, and on a host that sends no tool_use_id the next call would take it
 		// as its own (lib.mjs `takePendingEntry`), and settle it at that call's usage.
 		if (estimate) {
-			await claimForSettle(entry.path).catch((err) => {
+			await claimForSettle(entry.path).catch(async (err) => {
+				// Left a gated `.json`, it would be the next call's on a host with no tool_use_id, and
+				// settled at that call's usage: it is quarantined, out of that call's reach.
+				const quarantined = await quarantineHold(entry.path);
 				say(
-					`usertrust: hold ${entry.transferId} could not be marked settle-attempted (${err?.code ?? "error"}); Stop gives it back as a call that may not have run`,
+					`usertrust: hold ${entry.transferId} could not be marked settle-attempted (${err?.code ?? "error"}); ${
+						quarantined === "ungated"
+							? "it is kept out of any other call's reach, and Stop gives it back as a call that may not have run"
+							: quarantined === "removed"
+								? "its record is removed, so no other call can take it, and its hold is left to the server's sweep"
+								: "it could not be kept out of another call's reach either"
+					}`,
 				);
 			});
 		}

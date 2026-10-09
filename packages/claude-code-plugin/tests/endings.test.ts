@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { forgetPins, runHook } from "./helpers/run-hook.js";
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
+const CRASH_AT = join(import.meta.dirname, "helpers", "crash-at.mjs");
 const SESSION = "55555555-2222-4333-8444-666666666666";
 const SONNET = "claude-sonnet-4-6";
 const HAIKU = "claude-haiku-4-5";
@@ -500,6 +501,65 @@ describe("PostToolUse's fresh hold for an estimate hold that expired", () => {
 				{ kind: "gap", tool: "(unconfirmed)", transferId: "tx_1", releaseClass: "call-ran" },
 			]);
 			expect(await holdFiles()).toEqual([]);
+		},
+		LONG,
+	);
+});
+
+describe("PostToolUse's fresh hold for an estimate hold that expired: evidence before the marker goes", () => {
+	// Killed right before its settle-attempted marker is removed, the hook has already written the
+	// call's gap: never neither.
+	it.each<Ending>(["other4xx", "dropped"])(
+		"%s: the call-ran gap is written before the marker's unlink",
+		async (ending) => {
+			await seedHold("tu_1", "tx_1", ESTIMATE);
+			fixed.set("/v1/settle#1", ANSWER.gone);
+			aim("/v1/authorize", 1, ending, ["/v1/health", 1]);
+			await runHook(
+				join(HOOKS, "post-tool-use.mjs"),
+				postInput("tu_1"),
+				envFor({ ...ESTIMATE_MODE, UT_CC_CRASH: "unlink .settling|1|before" }),
+				["--import", CRASH_AT],
+			);
+			expect(await records()).toMatchObject([
+				{ kind: "gap", tool: "(unconfirmed)", transferId: "tx_1", releaseClass: "call-ran" },
+			]);
+			expect(await holdFiles()).toEqual([holdName("tu_1", "tx_1", "main", "settling")]);
+		},
+		LONG,
+	);
+});
+
+describe("a ran estimate hold the breaker skip cannot mark settle-attempted", () => {
+	it(
+		"a claim that fails (not ENOENT) quarantines the hold: no later call without a tool_use_id can take it",
+		async () => {
+			const file = join(
+				breakerDir(),
+				`${createHash("sha256").update(url).digest("hex").slice(0, 16)}.json`,
+			);
+			await mkdir(breakerDir(), { recursive: true, mode: 0o700 });
+			await writeFile(
+				file,
+				JSON.stringify({ openUntil: Date.now() + 60_000, openedAt: Date.now(), timeouts: [] }),
+				{ mode: 0o600 },
+			);
+			await seedHold("tu_1", "tx_1", ESTIMATE);
+			const skipped = await runHook(
+				join(HOOKS, "post-tool-use.mjs"),
+				postInput("tu_1"),
+				envFor({ ...ESTIMATE_MODE, UT_CC_FAULT: ".settling|1|throw" }),
+				["--import", FAULT_AT],
+			);
+			expect(skipped.stderr).toContain("could not be marked settle-attempted (EIO)");
+			expect(skipped.stderr).toContain("kept out of any other call's reach");
+			// The breaker closes, and the next call comes from a host that sends no tool_use_id.
+			nodeFs.rmSync(file, { force: true });
+			const { tool_use_id: _call, ...noCallId } = postInput("tu_2");
+			await run("post-tool-use", noCallId, ESTIMATE_MODE);
+			expect(requests("/v1/settle").filter((r) => r.body.transferId === "tx_1")).toEqual([]);
+			// The hold itself stays, for Stop to give back.
+			expect(await holdFiles()).toEqual([holdName("tu_1", "tx_1")]);
 		},
 		LONG,
 	);
@@ -2008,6 +2068,22 @@ describe("every gap that carries transcript usage is dated by one rule: its job-
 				await run("stop", stopInput());
 			},
 			(r) => r.kind === "gap" && r.phase === "settle",
+		],
+		[
+			"PreToolUse's drop of a repeated call's stale settle made under another server (call-ran)",
+			async (labels) => {
+				await writeTranscript();
+				await seedHold(
+					"tu_1",
+					"tx_1",
+					{ ...windowHold(labels), serverUrl: "http://elsewhere.invalid", keyHash: "x" },
+					"settling",
+				);
+				const stale = (Date.now() - 11 * 60_000) / 1000;
+				await utimes(join(stateDir, holdName("tu_1", "tx_1", "main", "settling")), stale, stale);
+				await run("pre-tool-use", preInput("tu_1"));
+			},
+			(r) => r.kind === "gap" && r.tool === "(unconfirmed)" && r.releaseClass === "call-ran",
 		],
 		[
 			"PostToolUse under an open breaker (its transcript hold deferred)",

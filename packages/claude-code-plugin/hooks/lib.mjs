@@ -532,16 +532,17 @@ export function windowStart(labels) {
  * the call itself, and an empty hold carries none.
  */
 export function holdUsageStart(held) {
-	return held.usage === "transcript" && (held.assignedIds?.length ?? 0) > 0
-		? windowStart(held)
-		: callStart(held);
+	// A pending hold's listing says `usage: "transcript"`; a settle-attempted one's, `transcript`.
+	const transcript = held.usage === "transcript" || held.transcript === true;
+	return transcript && (held.assignedIds?.length ?? 0) > 0 ? windowStart(held) : callStart(held);
 }
 
 /**
  * A give-back of a hold whose call RAN (or may have) without a confirmed charge is a GAP:
- * metered usage the ledger cannot vouch for. `started` is when the call began
- * (`callStart`), so a job switch that lands later cannot move it to another job. Returns
- * whether the gap was written.
+ * metered usage the ledger cannot vouch for. `started` is when its usage began
+ * (`holdUsageStart`): an estimate hold's call, so a job switch that lands later cannot move it
+ * to another job; a transcript hold's window, by the one rule. Returns whether the gap was
+ * written.
  */
 export async function recordUnconfirmedCall(sessionId, held, releaseClass) {
 	return recordWatchEvent({
@@ -558,7 +559,7 @@ export async function recordUnconfirmedCall(sessionId, held, releaseClass) {
 				? "the call ran and its charge is unconfirmed (its settle went unanswered)"
 				: "the call may have run and was never charged (no PostToolUse settle)",
 		releaseClass,
-		started: callStart(held),
+		started: holdUsageStart(held),
 	});
 }
 
@@ -778,6 +779,28 @@ export async function claimForRelease(live) {
 		throw err;
 	}
 	return target;
+}
+
+/**
+ * Take a pending hold out of the reach of a call with no `tool_use_id` (`takePendingEntry` pairs
+ * only a gated hold, `isGated`): its gate mark dropped, written in place (no rename, which is
+ * what failed when a hook needs this). A hold that cannot be rewritten is removed: its hold is
+ * then left to the server's sweep, never paired with another call's usage. Returns "ungated",
+ * "removed" or "failed". Never throws.
+ */
+export async function quarantineHold(path) {
+	try {
+		const { gate: _gate, ...body } = JSON.parse(await readFile(path, "utf-8"));
+		await writeFile(path, JSON.stringify(body), { mode: 0o600 });
+		return "ungated";
+	} catch {
+		try {
+			await unlink(path);
+			return "removed";
+		} catch {
+			return "failed";
+		}
+	}
 }
 
 export async function claimForSettle(live) {

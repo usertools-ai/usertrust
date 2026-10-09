@@ -3972,8 +3972,11 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			// mutant: abandoned with no gap. Its settle went out unanswered: the call ran, and
 			// its charge is unconfirmed, so the gap is written before the record goes.
 			expect(again.stderr).toContain("goes unrecorded (recorded as a gap)");
+			// It stands for its window, dated by the one rule (lib.mjs `windowStart`): no job label
+			// (no job log here), so no start, a gap of every job, never its call's time.
+			expect(before.job).toBeUndefined();
 			expect(await gaps()).toMatchObject([
-				{ kind: "gap", releaseClass: "call-ran", started: before.usageFrom ?? before.startedAt },
+				{ kind: "gap", releaseClass: "call-ran", started: null },
 			]);
 			// Abandoned through its own name; the fresh hold carries no window of the old one.
 			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_other")]);

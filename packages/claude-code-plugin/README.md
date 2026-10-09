@@ -705,7 +705,9 @@ writes one record with `"reason":"breaker-open"` and `"outcome":"deferred"`. It 
 nothing else, with two exceptions. In transcript mode, on a state dir that has no first-run
 time yet, the hook stamps it, so the outage's usage counts as this state's and is posted
 later. And PostToolUse renames an estimate hold to `.settling`, as one whose call ran: Stop
-then gives it back as `call-ran`, and no later call can take it for its own. Each record is
+then gives it back as `call-ran`, and no later call can take it for its own. If that rename
+fails, the hold is still kept from any later call (its pairing mark dropped, or its record
+removed), and Stop gives it back as a call that may have run. Each record is
 one of:
 - **`"kind":"deferred"`**: a transcript-mode PreToolUse, a PostToolUse whose hold carries
   transcript usage, Stop and SubagentStop. The first settle point after the breaker
