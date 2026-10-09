@@ -439,6 +439,13 @@ const SPEND_LIKE = new Set([
 
 const BENIGN_KINDS = new Set(["hold_released", "settlement_ambiguous", "settlement_shortfall"]);
 
+/**
+ * The watch records that are evidence of usage the vault may lack: an unmetered call (`gap`),
+ * a refused one (`would_block`), and a deferral (`deferred`: the breaker was open, and its
+ * usage is posted at a later settle point, or never if none comes).
+ */
+const WATCH_EVIDENCE = new Set(["gap", "would_block", "deferred"]);
+
 const ms = (value) => (typeof value === "string" ? Date.parse(value) : Number.NaN);
 
 /**
@@ -457,8 +464,8 @@ const ms = (value) => (typeof value === "string" ? Date.parse(value) : Number.Na
  *  1. every record TAGGED with the job lies inside an interval of the job in a valid log of
  *     its own session, with a complete usage window (a session with no interval of the job,
  *     or no usable log, puts all its tagged records outside);
- *  2. every gap, `would_block`, untagged call or unrecognised record whose time could fall in
- *     an interval is positively placed elsewhere through a valid log of its own session
+ *  2. every gap, deferral, `would_block`, untagged call or unrecognised record whose time could
+ *     fall in an interval is positively placed elsewhere through a valid log of its own session
  *     (an unresolvable event is a gap for every job: the set it could belong to is unbounded);
  *  3. every transfer is joined to exactly one `llm_call`, and a hold given back without a
  *     structured `releaseClass: "unused"` is a released hold whose usage is unconfirmed.
@@ -748,7 +755,7 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 
 	const placeAll = [
 		...records.map(fromRecord),
-		...watch.filter((w) => w?.kind === "gap" || w?.kind === "would_block").map(fromWatch),
+		...watch.filter((w) => WATCH_EVIDENCE.has(w?.kind)).map(fromWatch),
 	];
 	for (const ev of placeAll) {
 		const gap = place(ev);

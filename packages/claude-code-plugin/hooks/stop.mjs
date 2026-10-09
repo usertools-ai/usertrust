@@ -7,13 +7,35 @@
 // be in it yet: with the input's `last_assistant_message`, Stop first waits —
 // boundedly — for it to arrive (`awaitFinalResponse`), and says so when it gives
 // up. A response that arrives later still is left for SessionEnd, or the next Stop.
-import { readStdin, requireLaunch, say, usageMode } from "./lib.mjs";
-import { awaitFinalResponse, settleSession } from "./transcript.mjs";
+//
+// While the server's breaker is open (lib.mjs `breakerOpen`, watch mode only), nothing is
+// sent and nothing is touched but the state's first-run time (transcript.mjs
+// `stampFirstRun`): the holds and the remainder wait for the first hook after it closes, and
+// one `deferred` record names the holds (`skipSettlePoint`).
+import { breakerOpen, readStdin, requireLaunch, say, skipSettlePoint, usageMode } from "./lib.mjs";
+import { awaitFinalResponse, settleSession, stampFirstRun } from "./transcript.mjs";
 
 requireLaunch();
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
+	if (await breakerOpen()) {
+		if (usageMode() === "transcript") await stampFirstRun();
+		await skipSettlePoint({
+			kind: "deferred",
+			phase: "stop",
+			session: input.session_id ?? "unknown",
+			agent: null,
+		});
+	} else {
+		await settle(input);
+	}
+} catch (err) {
+	say(`usertrust: stop cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+}
+
+/** The turn's end: wait for its final response, then settle the session (`settleSession`). */
+async function settle(input) {
 	if (usageMode() === "transcript") {
 		const waited = await awaitFinalResponse(input.transcript_path, input.last_assistant_message);
 		if (waited === "not flushed") {
@@ -23,6 +45,4 @@ try {
 		}
 	}
 	await settleSession({ input, hook: "Stop" });
-} catch (err) {
-	say(`usertrust: stop cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
 }

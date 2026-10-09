@@ -17,7 +17,9 @@
 // The child is known by its argv (`--ut-child`): an environment cannot add a script
 // argument, and the hook's argv comes from the plugin's own hooks.json.
 // - It reads the pin the parent names (`--ut-pin`), and counts its time budget from
-//   the parent's start (`--ut-started`).
+//   the parent's start (`--ut-started`). Its passwd home, under which the host's breaker
+//   lives (breaker.mjs), is the one the parent read (`--ut-home`): the child's environment
+//   holds nothing to find it by.
 // - It refuses to run, exit `CHILD_REFUSED`, when its environment holds anything
 //   else (config.mjs `isChildEnv`) or its pin is unusable.
 // - Its stdout and stderr are the parent's, and exit codes 0 and 2 pass through.
@@ -33,7 +35,9 @@
 // (NODE_OPTIONS, PATH) runs before any of this, and can read the config file too.
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
+import { useBreakerHome } from "./breaker.mjs";
 import {
 	childEnv,
 	childUnsupported,
@@ -144,7 +148,7 @@ async function childFailed(hook, settings, input, what) {
 }
 
 /** Run the hook as a child that sends, with nothing from this environment. */
-function runInChild(hook, text, input, session) {
+function runInChild(hook, text, input, session, home) {
 	return new Promise((resolve) => {
 		let done = false;
 		const finish = async (what, code) => {
@@ -158,7 +162,14 @@ function runInChild(hook, text, input, session) {
 		try {
 			child = spawn(
 				process.execPath,
-				[LAUNCH, hook, CHILD, `--ut-started=${STARTED}`, `--ut-pin=${session.path}`],
+				[
+					LAUNCH,
+					hook,
+					CHILD,
+					`--ut-started=${STARTED}`,
+					`--ut-pin=${session.path}`,
+					...(home === null ? [] : [`--ut-home=${home}`]),
+				],
 				childOptions(),
 			);
 		} catch (err) {
@@ -203,7 +214,7 @@ async function parent(hook) {
 	if (session.kind === "configured" && session.settings.refused === null && sends) {
 		const unsupported = childUnsupported();
 		if (unsupported !== null) await childFailed(hook, session.settings, input, unsupported);
-		else await runInChild(hook, text, input, session);
+		else await runInChild(hook, text, input, session, home);
 		return;
 	}
 	launch({ payload: text, startedAt: STARTED });
@@ -254,6 +265,8 @@ async function child(hook) {
 		return;
 	}
 	useSession(pinnedSettings(read.pin, {}, null));
+	const home = flag("home");
+	useBreakerHome(typeof home === "string" && isAbsolute(home) ? home : null);
 	launch({ payload: null, startedAt: startedAt(flag("started")) });
 	await import(`./${hook}.mjs`);
 }

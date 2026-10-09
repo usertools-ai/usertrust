@@ -38,7 +38,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { effectiveCacheWriteRate } from "../../core/src/ledger/pricing.js";
 import { hashKey } from "../../server/src/config.js";
 import { createUsertrustServer, type UsertrustServer } from "../../server/src/server.js";
-import { forgetPins, runHook } from "./helpers/run-hook.js";
+import { forgetPins, passwdHomeFor, runHook } from "./helpers/run-hook.js";
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
 const SESSION = "11111111-2222-4333-8444-555555555555";
@@ -329,7 +329,10 @@ async function readCursor(agentId = "main"): Promise<Cursor> {
 async function holdFiles() {
 	// `watch.jsonl` is the plugin's watch log (a give-back of a hold whose call ran writes a gap
 	// record there), not a hold.
-	return (await readdir(stateDir)).filter((n) => n !== "transcripts" && n !== "watch.jsonl").sort();
+	// `capabilities` holds the server's remembered answer (lib.mjs `rememberCapabilities`), not a hold.
+	return (await readdir(stateDir))
+		.filter((n) => n !== "transcripts" && n !== "watch.jsonl" && n !== "capabilities")
+		.sort();
 }
 
 beforeEach(async () => {
@@ -1222,7 +1225,7 @@ describe("idempotency and concurrency", () => {
 });
 
 describe("hardening", () => {
-	it("a server slower than the per-call timeout: every hook exits 0 in < 12 s and no id is lost", async () => {
+	it("a server slower than the per-call timeout: every hook exits 0 in < 12 s, the breaker opens, and no id is lost", async () => {
 		delayMs = 5_500;
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(1, 1)));
@@ -1257,7 +1260,23 @@ describe("hardening", () => {
 			expect(cursor.accounted, agent).toEqual([]);
 			expect(cursor.assigned, agent).toEqual({});
 		}
-		// Once the server answers again, both messages post.
+		// Its routes timed out while /v1/health answered, which clears nothing: the breaker opened,
+		// and the hooks after it left the server alone. The messages wait, deferred, not lost.
+		const breaker = join(
+			passwdHomeFor({ UT_CC_STATE_DIR: stateDir }),
+			".local",
+			"state",
+			"usertrust",
+			"breaker",
+			`${createHash("sha256").update(`http://127.0.0.1:${port}`).digest("hex").slice(0, 16)}.json`,
+		);
+		expect(typeof JSON.parse(await readFile(breaker, "utf-8")).openUntil).toBe("number");
+		// Once the server answers again and the breaker's minute is over, both messages post.
+		await writeFile(
+			breaker,
+			JSON.stringify({ openUntil: Date.now() - 1, openedAt: Date.now() - 61_000, timeouts: [] }),
+			{ mode: 0o600 },
+		);
 		delayMs = 0;
 		await run("stop.mjs", stopInput());
 		expect(
@@ -3953,8 +3972,11 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			// mutant: abandoned with no gap. Its settle went out unanswered: the call ran, and
 			// its charge is unconfirmed, so the gap is written before the record goes.
 			expect(again.stderr).toContain("goes unrecorded (recorded as a gap)");
+			// It stands for its window, dated by the one rule (lib.mjs `windowStart`): no job label
+			// (no job log here), so no start, a gap of every job, never its call's time.
+			expect(before.job).toBeUndefined();
 			expect(await gaps()).toMatchObject([
-				{ kind: "gap", releaseClass: "call-ran", started: before.usageFrom ?? before.startedAt },
+				{ kind: "gap", releaseClass: "call-ran", started: null },
 			]);
 			// Abandoned through its own name; the fresh hold carries no window of the old one.
 			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_other")]);

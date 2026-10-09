@@ -7,6 +7,69 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Added
+
+- **Watch mode stops asking a server that has stopped answering: a breaker.** Three
+  timeouts in a row within a minute open it for a minute, host-wide, one per server URL
+  (`~/.local/state/usertrust/breaker/` under the passwd home). Only a governance route's
+  answer resets the count, never a `/v1/health` answer, so a server whose health answers while
+  its routes hang (a stuck ledger) trips it. An answer counts only once its body is read, so a
+  server that sends headers and then stalls trips it too. While it
+  is open, every hook sends nothing and touches no window or cursor, and writes one
+  `breaker-open` record naming the holds it leaves. The one hold it touches is an estimate
+  hold PostToolUse skips: renamed `.settling`, as its call ran, so Stop gives it back as
+  `call-ran`; if the rename fails, it is still kept from any later call, and still given back
+  as `call-ran`, wherever it ends. Each record is `deferred` where a later settle point posts the usage, `gap`
+  where nothing will (an estimate-mode call, SessionEnd). One hook probes after the minute
+  and closes it or re-opens it. Enforce mode never reads or writes it.
+- **Every settle, give-back and remainder that does not end cleanly writes a `gap`
+  record**, with its `phase`, its `outcome` (`claimed`, `unresolved`, `released`,
+  `deferred`, `failed` or `unknown`) and its hold's `transferId`, including PreToolUse's
+  settle of a repeated or resumed call's earlier hold. A give-back the server answers with a
+  404 `unknown transferId` writes no `release` gap: the hold is gone. Until now only
+  PreToolUse wrote records, for its own calls; the rest went to stderr alone.
+- **A failed health probe still sends the principal**, from a remembered answer under a
+  day old, per server and key. Nothing else is ever taken from it: no idempotency key.
+
+### Changed
+
+- **A request that got no answer is `unknown`, unless it was never sent**: this hook's own
+  timeout, or a connection dropped after sending, may still land. Only a refused connection
+  or a spent budget is `failed`, as an error answer is, and a transcript settle refused before
+  it was sent is `released`: it cannot have posted. The gap records say which.
+- **An estimate settle answered `settled: false` is a `claimed` gap**, as a transcript hold's
+  is: its charge may be missing.
+- **SessionEnd, the last settle point, writes down what it cannot finish**: a `deferred`
+  remainder gap for whatever it selected and did not post, whatever stopped it, and for an
+  agent whose usage it never read (the server down, an unusable state, a lock another hook
+  holds); its call's gap for a hold it has no time to give back; and an `unknown` settle gap
+  for a transcript hold whose settle was sent and never seen to end. Its breaker probe takes at
+  most a fifth of its budget.
+- **A settle a dead hook left in flight is written down** when the next hook decides it (ten
+  minutes on): a `settle` gap under its `transferId`, `claimed`, or `unresolved` under a key.
+  The journal's gap for a stale estimate hold names its `transferId` too.
+- **A remainder's gap is one record per job** of the session's job log, at Stop as at
+  SessionEnd, each started at its own first message, whether or not the server records jobs. A
+  job log that cannot be read whole gives the record no start: a gap of every job.
+- **Every gap that carries transcript usage is dated by one rule:** its job-labelled start,
+  else none (a gap of every job). A transcript hold's settle gap was dated at its tool call, so
+  against a server without `job` a window holding an earlier job's messages left that job
+  clean; so were a dropped hold's and a breaker deferral's, and a refused remainder or a retried
+  settle took a start from an untrusted job log.
+- **A redirect is followed only to the same origin, by hand, up to 20.** Each 307 or 308 to
+  the URL's own origin is re-sent with the same method, body and key, as before, and from the
+  first answer on the request counts as sent: no later ending reads as never sent. Any other
+  3xx is the server's answer, read by its status: a settle answered with one is never
+  `released`, as the server may have acted on it. A redirect to another origin is never
+  followed, so the key is never sent there. Node's fetch already dropped the key on one
+  (measured on Node 22.22.1, 22.23.3, 23.6.0 and 24.21.0); on older Node releases, which kept
+  it, a server URL that redirects to another origin worked before and must now be the URL the
+  server answers at. A health route behind a 301, 302 or 303 now reads the capabilities as
+  unknown; through one of those, fetch had turned every other route's POST into a GET with no
+  body, which the server refuses.
+- **`usertrust-job coverage` lists a breaker's deferral inside a job's interval as a known
+  gap**, as it does a gap: the record cannot say whether the usage was posted later.
+
 ## [2.0.0] - 2026-10-08
 
 ### Breaking

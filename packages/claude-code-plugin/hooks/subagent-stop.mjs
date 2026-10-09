@@ -14,12 +14,27 @@
 // back last. Like Stop, it first waits — boundedly — for the subagent's final
 // response (its input's `last_assistant_message`) to reach its transcript, and
 // says so when it gives up.
-import { cleanup, readStdin, requireLaunch, say, usageMode } from "./lib.mjs";
+//
+// While the server's breaker is open (lib.mjs `breakerOpen`, watch mode only), nothing is
+// sent and nothing is touched but the state's first-run time (transcript.mjs
+// `stampFirstRun`): the subagent's holds and remainder wait for the first hook after it
+// closes (Stop's sweep settles every subagent's), and one `deferred` record names the holds
+// (`skipSettlePoint`).
+import {
+	breakerOpen,
+	cleanup,
+	readStdin,
+	requireLaunch,
+	say,
+	skipSettlePoint,
+	usageMode,
+} from "./lib.mjs";
 import {
 	awaitFinalResponse,
 	cleanupReserve,
 	postRemainder,
 	settleAssignedHolds,
+	stampFirstRun,
 	transcriptPathFor,
 } from "./transcript.mjs";
 
@@ -29,7 +44,15 @@ try {
 	const input = JSON.parse((await readStdin()) || "{}");
 	const sessionId = input.session_id ?? "unknown";
 	const agentId = input.agent_id;
-	if (typeof agentId === "string" && agentId !== "") {
+	if (typeof agentId === "string" && agentId !== "" && (await breakerOpen())) {
+		if (usageMode() === "transcript") await stampFirstRun();
+		await skipSettlePoint({
+			kind: "deferred",
+			phase: "subagent-stop",
+			session: sessionId,
+			agent: agentId,
+		});
+	} else if (typeof agentId === "string" && agentId !== "") {
 		await settleAssignedHolds(sessionId, agentId);
 		if (usageMode() === "transcript") {
 			const waited = await awaitFinalResponse(

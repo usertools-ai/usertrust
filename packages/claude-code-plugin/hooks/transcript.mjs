@@ -133,9 +133,12 @@ import {
 	abandonHold,
 	boundElsewhere,
 	budgetShare,
+	callStart,
 	cleanup,
 	clearPending,
+	failureOutcome,
 	guardMode,
+	holdUsageStart,
 	isAlreadySettled,
 	isUnknownRoute,
 	isUnknownTransfer,
@@ -143,7 +146,9 @@ import {
 	jobHoldFields,
 	LINKLESS,
 	listPending,
+	principalCapable,
 	publishExclusive,
+	recordSettleGap,
 	recordUnconfirmedCall,
 	recordWatchEvent,
 	refreshUnknownServerCapabilities,
@@ -157,6 +162,7 @@ import {
 	tenantBinding,
 	timeLeft,
 	usageMode,
+	windowStart,
 } from "./lib.mjs";
 
 /** Never priced when its usage is all zero: Claude Code's local placeholder. */
@@ -348,6 +354,131 @@ export function settleLabels(labels) {
 		...(labels.jobState === undefined ? {} : { jobState: labels.jobState }),
 		...(labels.usageTo === undefined ? {} : { usageTo: labels.usageTo }),
 	};
+}
+
+/**
+ * The session's LOCAL job log, the records' split (`resolveJob`), read afresh for every record,
+ * never cached: a background subagent of the session can switch jobs (`usertrust-job`) while a
+ * Stop sweeps its agents, and a record split by the log as it was would date usage in the job
+ * before the switch.
+ */
+function localJobs(sessionId) {
+	return resolveJob(sessionId);
+}
+
+/**
+ * The ONE writer of a remainder's gap records, at Stop, SubagentStop and SessionEnd: a group or a
+ * retried vehicle that did not settle, and everything SessionEnd leaves (`sweepRemainder`).
+ *
+ * A job's coverage places a record by its start alone, so `messages` are written down one record
+ * per job interval of the session's LOCAL job log (`labelsFor`), each started at its own earliest
+ * message, whether or not the server honours `job`. The wire's grouping (one settle per job only
+ * when it does) is the server's business; the record's split is never the wire's. A part whose
+ * key is no job interval is started at null, a gap that may belong to any job: messages of no
+ * known time, and every message when there is no usable job log (none, torn, unreadable, or
+ * stamped ahead of the clock, beside the time-less gap `labelsFor`'s guard writes). The log may
+ * read cleanly by the time coverage runs, and a start then would place the record in one job and
+ * leave every later job clean. Unlabelled time in a valid log keeps its start. With no
+ * `messages` (a vehicle, whose ids carry no time, or an agent never read), one record started at
+ * `started`, with `count` messages when it is known.
+ */
+async function recordRemainderGap({
+	sessionId,
+	agentId,
+	outcome,
+	reason,
+	transferId,
+	model,
+	messages,
+	started = null,
+	count,
+}) {
+	const record = (fields) =>
+		recordSettleGap({
+			phase: "remainder",
+			outcome,
+			session: sessionId,
+			agent: agentId,
+			transferId,
+			...fields,
+			...(model === undefined ? {} : { model }),
+		});
+	if (messages === undefined) {
+		return record({ reason, started, ...(count === undefined ? {} : { messages: count }) });
+	}
+	const jobs = await localJobs(sessionId);
+	const parts = new Map();
+	for (const m of messages) {
+		const key = labelsFor(jobs, m.ts).key;
+		const part = parts.get(key);
+		if (part === undefined) parts.set(key, [m]);
+		else part.push(m);
+	}
+	for (const [key, part] of parts) {
+		await record({
+			reason:
+				parts.size > 1 ? `${reason}; this record: the ${part.length} of one job interval` : reason,
+			// No usable job log (`none`), or one that cannot be read or trusted (`invalid`, a time-less
+			// message too): no start can be vouched for, so none is written. A start at the earliest
+			// message would place the record in one job, and once the log reads cleanly every later
+			// job would read clean. Unlabelled time in a valid log (`none#…`) keeps its start: coverage
+			// places it outside every job, which is where it is.
+			started: key === "invalid" || key === "none" ? null : (usageSpan(part).usageFrom ?? null),
+			messages: part.length,
+		});
+	}
+}
+
+/**
+ * SessionEnd is the last settle point: what it leaves "for a later settle point" has none, unless
+ * the session is resumed. So whatever `postRemainder` leaves there is written down as a gap,
+ * `deferred`, never left to stderr alone, and by this sweep ALONE, whatever the exit: it runs in
+ * `postRemainder`'s `finally`, over `left`, the messages it selected and has neither posted nor
+ * written down (`left.messages`, each with why, or the exit's `left.exit`), or why the agent's
+ * usage was never read at all (`left.agent`); and every transcript hold whose settle is in flight
+ * (`left.holds`), its outcome never seen: a transfer-scoped settle gap, `unknown`. Those come from
+ * the agent's own reconcile when it was read; else from its journal, the fresh ones (a stale one
+ * is reconcile's, at the first hook that reads the agent, which writes it down then).
+ */
+async function sweepRemainder(sessionId, agentId, left) {
+	for (const record of left.holds ?? (await inFlightSettles(sessionId, agentId))) {
+		await recordInFlightSettle(sessionId, record, {
+			outcome: "unknown",
+			reason:
+				"at SessionEnd: its settle was sent and never seen to end, by a hook that did not finish: whether it posted is unknown",
+		});
+	}
+	const deferred = (reason, messages) =>
+		recordRemainderGap({
+			sessionId,
+			agentId,
+			outcome: "deferred",
+			reason: `at SessionEnd: ${reason}`,
+			messages,
+		});
+	if (left.agent !== null) await deferred(left.agent);
+	const byWhy = new Map();
+	for (const { m, why } of left.messages.values()) {
+		const key = why ?? `not posted (${left.exit ?? "the remainder ended first"})`;
+		const same = byWhy.get(key);
+		if (same === undefined) byWhy.set(key, [m]);
+		else same.push(m);
+	}
+	for (const [why, messages] of byWhy) {
+		await deferred(`${messages.length} transcript message(s) ${why}`, messages);
+	}
+}
+
+/** An agent's transcript holds whose settle is in flight and not yet stale, from its journal. */
+async function inFlightSettles(sessionId, agentId) {
+	const now = Date.now();
+	return (await holdJournal(sessionId, agentId)).filter(
+		(record) =>
+			record.kind === "settling" &&
+			!record.estimate &&
+			record.ids.length > 0 &&
+			now - record.mtimeMs <= STALE_SETTLING_MS,
+	);
 }
 
 /** The earliest and latest finite `ts` of a message list, as ISO strings. */
@@ -905,6 +1036,8 @@ async function holdJournal(sessionId, agentId) {
 				kind,
 				path,
 				ids,
+				// The hold it is about: a gap written from this record joins the hold's other records.
+				...(typeof body.transferId === "string" ? { transferId: body.transferId } : {}),
 				outcome: body.outcome,
 				keyed: holdVehicle(body),
 				mtimeMs,
@@ -928,6 +1061,7 @@ async function holdJournal(sessionId, agentId) {
 async function reconcile(cursor, sessionId, agentId) {
 	const live = new Set();
 	const finished = [];
+	const inFlight = [];
 	const now = Date.now();
 	for (const record of await holdJournal(sessionId, agentId)) {
 		if (record.kind === "done") {
@@ -946,9 +1080,17 @@ async function reconcile(cursor, sessionId, agentId) {
 			if (record.estimate && record.ids.length === 0) {
 				await recordUnconfirmedCall(sessionId, record, "call-ran");
 			}
+			// A TRANSCRIPT hold's settle went out and its hook died before writing how it ended: it may
+			// have posted. Its window is now accounted (no key) or parked unresolved (a key), and this is
+			// the one place that knows why: written down, as its settle's own gap would have been.
+			if (!record.estimate && record.ids.length > 0) await recordInFlightSettle(sessionId, record);
 			finished.push(record.path);
 		} else {
 			for (const id of record.ids) live.add(id);
+			// A transcript hold whose settle is in flight: SessionEnd's sweep writes it down.
+			if (record.kind === "settling" && !record.estimate && record.ids.length > 0) {
+				inFlight.push(record);
+			}
 		}
 	}
 	for (const [id] of cursor.assigned) {
@@ -958,7 +1100,31 @@ async function reconcile(cursor, sessionId, agentId) {
 		// ids are never posted again.
 		if (!live.has(id)) accountIds(cursor, [id]);
 	}
-	return { live, finished };
+	return { live, finished, inFlight };
+}
+
+/**
+ * A transcript hold's settle that went out and was never seen to end: its hook died after
+ * claiming it (`.settling`). Stale, `reconcile` writes it as the settle's own gap would have
+ * been: `claimed` without a key (its window accounted, never retried) or `unresolved` under one
+ * (retried as a vehicle). Fresh at SessionEnd, the last settle point, the sweep writes it
+ * `unknown` (`sweepRemainder`). Its start is the window's, from its job labels when a server
+ * that honours `job` labelled it (one job interval, then); else null, a gap that may belong to
+ * any job, as the window's messages carry no time here.
+ */
+function recordInFlightSettle(sessionId, record, { outcome, reason } = {}) {
+	return recordSettleGap({
+		phase: "settle",
+		outcome: outcome ?? (record.keyed === null ? "claimed" : "unresolved"),
+		session: sessionId,
+		agent: record.agentId,
+		transferId: record.transferId,
+		reason:
+			reason ??
+			"its hook died after sending the settle and before writing how it ended: it may have posted",
+		started: windowStart(record),
+		messages: record.ids.length,
+	});
 }
 
 /**
@@ -1163,23 +1329,27 @@ function selectNew(cursor, live) {
  * Nothing about such a claim can say whether it was posted, so it never is again:
  * the worst a lost record does is under-count. An id whose claim cannot be made or
  * read, or that the hook's time no longer covers, is left for a later settle
- * point, never posted unverified.
+ * point, never posted unverified. With `left` (`postRemainder`), every message selected goes
+ * into it as it is selected: an own one with no why yet, an unclaimed one with its own.
  */
-async function selectOwn(opened) {
+async function selectOwn(opened, { left = null } = {}) {
 	const { cursor } = opened;
 	const fresh = selectNew(cursor, opened.live);
 	const own = [];
 	const failed = new Map();
-	let deferred = 0;
+	const unclaimed = [];
+	const deferred = [];
 	let writtenOff = 0;
 	for (const m of fresh) {
 		if (m.claimed) {
 			own.push(m);
+			left?.messages.set(m.id, { m, why: null });
 			continue;
 		}
 		// Each claim is file I/O: never let them eat the time the calls need.
 		if (timeLeft() < claimFloor()) {
-			deferred += 1;
+			deferred.push(m);
+			left?.messages.set(m.id, { m, why: "not claimed (out of time)" });
 			continue;
 		}
 		const claim = await claimHolder(opened.claimsDir, m.id, opened.owner);
@@ -1187,6 +1357,7 @@ async function selectOwn(opened) {
 			const state = cursor.partial.get(m.id);
 			if (state !== undefined) state.claimed = true;
 			own.push(m);
+			left?.messages.set(m.id, { m, why: null });
 		} else if (claim.holder === opened.owner) {
 			accountIds(cursor, [m.id]);
 			writtenOff += 1;
@@ -1194,18 +1365,19 @@ async function selectOwn(opened) {
 			accountIds(cursor, [m.id]);
 		} else {
 			failed.set(claim.code, (failed.get(claim.code) ?? 0) + 1);
+			unclaimed.push(m);
+			left?.messages.set(m.id, { m, why: `could not be claimed (${claim.code})` });
 		}
 	}
 	if (failed.size > 0) {
-		const total = [...failed.values()].reduce((sum, n) => sum + n, 0);
 		const codes = [...failed.keys()].join(", ");
 		say(
-			`usertrust: ${total} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point`,
+			`usertrust: ${unclaimed.length} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point`,
 		);
 	}
-	if (deferred > 0) {
+	if (deferred.length > 0) {
 		say(
-			`usertrust: ${deferred} transcript message(s) not claimed this time (out of time) — posted at a later settle point`,
+			`usertrust: ${deferred.length} transcript message(s) not claimed this time (out of time) — posted at a later settle point`,
 		);
 	}
 	if (writtenOff > 0) {
@@ -1361,6 +1533,22 @@ async function firstRun(dir) {
 }
 
 /**
+ * Stamp this state's first-run time now, if it has none (`firstRun`), and touch nothing else.
+ * A transcript-mode hook that skips the server (its breaker is open) stamps it all the same:
+ * otherwise the first hook after the breaker closes would, and every transcript entry of the
+ * outage would read as from before this state existed, never posted. Never throws: the next
+ * hook that needs the time reads it, and says what failed.
+ */
+export async function stampFirstRun() {
+	try {
+		const dir = await privateStateDir();
+		if (dir.ok) await firstRun(dir.dir);
+	} catch {
+		// The first hook that needs it reports it.
+	}
+}
+
+/**
  * Publish `content` at `path` unless something is there already: by link(2), which
  * never replaces a name, so it is whole the moment it exists — on a filesystem
  * without hard links, by an exclusive create.
@@ -1436,6 +1624,29 @@ export async function estimateReasonFor({ sessionId, agentId, input }) {
 	const recorded = await estimateMarker(marker).catch(() => null);
 	if (recorded !== null) return recorded;
 	return transcriptPathFor(input, agentId) === undefined ? "no transcript path" : null;
+}
+
+/**
+ * Whether this agent's usage is settled at the ESTIMATE, read without the agent's lock and
+ * without writing anything (the breaker's skip, pre-tool-use.mjs, must touch no state):
+ * UT_CC_USAGE=estimate (or the config file's), an agent id unsafe in a path, no transcript
+ * path, or a recorded estimate mode, the agent's own or, for a subagent, another agent's of
+ * its session (`inheritedEstimate`). A marker directory that cannot be read answers yes: an
+ * answer this cannot give is never "no".
+ */
+export async function settlesAtEstimate({ sessionId, agentId, input }) {
+	if (usageMode() === "estimate" || !isAgentId(agentId)) return true;
+	if (transcriptPathFor(input, agentId) === undefined) return true;
+	const own = `${sanitize(sessionId)}__${agentId}`;
+	let names;
+	try {
+		names = await readdir(join(stateRoot(), "transcripts", ESTIMATE_DIR));
+	} catch (err) {
+		return err?.code !== "ENOENT";
+	}
+	if (names.includes(own)) return true;
+	const prefix = `${sanitize(sessionId)}__`;
+	return agentId !== "main" && names.some((name) => name !== own && name.startsWith(prefix));
 }
 
 /**
@@ -1523,7 +1734,7 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			await release();
 			return stickToEstimate(where, cursor.estimateReason ?? "transcript unreadable", false);
 		}
-		const { live, finished } = await reconcile(cursor, sessionId, agentId);
+		const { live, finished, inFlight } = await reconcile(cursor, sessionId, agentId);
 		const ingested = await ingest(cursor, transcriptPath, where.since);
 		if (!ingested.ok) {
 			const sticky = await stickToEstimate(where, ingested.reason, true);
@@ -1548,6 +1759,7 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			kind: "ready",
 			cursor,
 			live,
+			inFlight,
 			transcriptPath,
 			claimsDir: where.claimsDir,
 			owner: `${sanitize(sessionId)}/${agentId}`,
@@ -1785,9 +1997,14 @@ async function settleAt(transferId, counts, { keyed, labels = {} }) {
 	} catch (err) {
 		const holdEnded = await hygieneRelease(transferId, "transcript settle unanswered");
 		return {
-			outcome: keyed ? "unresolved" : "claimed",
+			// A settle that never left (lib.mjs `TransportError.unsent`) posted nothing: its window is
+			// released to a later settle point. Any other may have posted: claimed, or unresolved
+			// under a key.
+			outcome: keyed ? "unresolved" : err?.unsent === true ? "released" : "claimed",
 			reason: `settle unreachable: ${errText(err)}`,
 			holdEnded,
+			timedOut: err?.timedOut === true,
+			failure: failureOutcome(err),
 		};
 	}
 	return settleOutcome(transferId, settle, keyed);
@@ -1813,13 +2030,22 @@ async function settleOutcome(transferId, settle, keyed) {
 	const reason = `settle returned ${settle.status}`;
 	if (settle.status === 400) return { outcome: "released", reason, holdEnded };
 	if (keyed) return { outcome: "unresolved", reason, holdEnded };
-	return { outcome: settle.status === 404 ? "released" : "claimed", reason, holdEnded };
+	return {
+		outcome: settle.status === 404 ? "released" : "claimed",
+		reason,
+		holdEnded,
+		// The server holds no such transfer: the caller of an empty hold's settle at zero reads
+		// this as the hold gone (`returnEmptyHold`).
+		...(isUnknownTransfer(settle) ? { unknownTransfer: true } : {}),
+	};
 }
 
 /**
  * A hold no usage was assigned to (a parallel tool call, or nothing new yet)
  * carries no spend: it is released — no charge, no failure. A server that cannot
- * release gets the old settle at zero, which costs its 1-unit floor.
+ * release gets the old settle at zero, which costs its 1-unit floor. A hold the
+ * server no longer has (a 404 `unknown transferId`: it expired, or another hook
+ * ended it) is gone already, and carried nothing: returned, either way.
  */
 async function returnEmptyHold(transferId) {
 	const capabilities = await serverCapabilities();
@@ -1835,18 +2061,33 @@ async function returnEmptyHold(transferId) {
 				},
 				{ timeoutMs: callTimeout() },
 			);
-			if (response.status === 200) return { outcome: "returned" };
+			if (response.status === 200 || isUnknownTransfer(response)) return { outcome: "returned" };
 			// Capabilities unknown, and the server has no release route: an older one.
 			if (capabilities !== null || !isUnknownRoute(response)) {
 				return { outcome: "unreturned", reason: `release returned ${response.status}` };
 			}
 		} catch (err) {
 			// The server's pending-TTL sweep releases it.
-			return { outcome: "unreturned", reason: `release unreachable: ${errText(err)}` };
+			return {
+				outcome: "unreturned",
+				reason: `release unreachable: ${errText(err)}`,
+				timedOut: err?.timedOut === true,
+				failure: failureOutcome(err),
+			};
 		}
 	}
 	const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-	return settleAt(transferId, zero, { keyed: false });
+	const result = await settleAt(transferId, zero, { keyed: false });
+	if (result.outcome === "settled" || result.unknownTransfer === true)
+		return { outcome: "returned" };
+	// The settle at zero stands in for a release, so it ends as one: a give-back that did not end
+	// cleanly, written down as such (`recordHoldOutcome`), whatever the settle's own words.
+	return {
+		outcome: "unreturned",
+		reason: result.reason ?? result.outcome,
+		timedOut: result.timedOut === true,
+		...(result.failure === undefined ? {} : { failure: result.failure }),
+	};
 }
 
 /**
@@ -1948,6 +2189,31 @@ export const OUTCOME_NOTES = new Map([
 ]);
 
 /**
+ * Write down a transcript hold's settle that ended other than `settled` or `returned` (lib.mjs
+ * `recordSettleGap`), under the hold's transferId. `skipped` is not: another hook is settling
+ * the hold, and writes its own. An empty hold's give-back that failed (`unreturned`), by a
+ * release or by the settle at zero that stands in for one, is a `release`: `failed` when the
+ * server answered with an error or the request never left, else `unknown` (lib.mjs
+ * `failureOutcome`). Every other ending keeps its name. Returns whether a record was written.
+ */
+export async function recordHoldOutcome(sessionId, entry, result) {
+	const { outcome } = result;
+	if (outcome === "settled" || outcome === "returned" || outcome === "skipped") return false;
+	const release = outcome === "unreturned";
+	return recordSettleGap({
+		phase: release ? "release" : "settle",
+		outcome: release ? (result.failure ?? "failed") : outcome,
+		session: sessionId,
+		agent: entry.agentId,
+		transferId: entry.transferId,
+		reason: result.reason ?? outcome,
+		// A settle stands for its window's usage, dated by the one rule (`holdUsageStart`). A
+		// give-back stands for no usage: it keeps its call's time.
+		started: release ? callStart(entry) : holdUsageStart(entry),
+	});
+}
+
+/**
  * Stop/SubagentStop: SETTLE every leftover hold that carries assigned usage. One made
  * under another server or key is dropped instead, nothing sent (lib.mjs
  * `boundElsewhere`): its usage goes unrecorded, never charged to this tenant.
@@ -1966,6 +2232,7 @@ export async function settleAssignedHolds(sessionId, agentId) {
 				`usertrust: leftover hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}`,
 			);
 		}
+		await recordHoldOutcome(sessionId, entry, result);
 	}
 }
 
@@ -2050,10 +2317,16 @@ async function lastCompleteText(path) {
  */
 export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 	const sessionId = input.session_id ?? "unknown";
+	// SessionEnd is the last settle point: what it leaves is written down (`sweepRemainder`).
+	const final = hook === "SessionEnd";
 	await settleAssignedHolds(sessionId, null);
 	if (usageMode() === "transcript") {
 		const agents = ["main", ...(await subagentIds(input))];
+		let serverDown = false;
 		for (const [index, agentId] of agents.entries()) {
+			// Once the server stops answering, a later agent is not tried. At SessionEnd it still
+			// goes through postRemainder, which sends nothing and whose sweep writes it down.
+			if (serverDown && !final) break;
 			try {
 				const result = await postRemainder({
 					sessionId,
@@ -2062,7 +2335,10 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 					hook,
 					reserveMs: cleanupReserve(),
 					lockWaitMs,
+					final,
+					serverDown,
 				});
+				if (serverDown) continue;
 				if (result.skipped !== undefined) {
 					say(`usertrust: no transcript usage for ${agentId} — ${result.skipped}`);
 				}
@@ -2070,20 +2346,20 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 					say(`usertrust: transcript usage for ${agentId}: ${note}`);
 				}
 				if (result.serverDown) {
+					serverDown = true;
 					const rest = agents.slice(index + 1);
 					if (rest.length > 0) {
 						say(
 							`usertrust: server unreachable — transcript usage of ${rest.join(", ")} left for the next settle point`,
 						);
 					}
-					break;
 				}
 			} catch (err) {
 				say(`usertrust: transcript usage failed for ${agentId}: ${errText(err)}`);
 			}
 		}
 	}
-	await cleanup(sessionId, null);
+	await cleanup(sessionId, null, { final });
 }
 
 /**
@@ -2091,27 +2367,68 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
  * retried exactly as it was; then the unassigned complete messages, one
  * authorize→settle per model. A call starts only if the budget (less
  * `reserveMs`) still covers authorize + settle + release. Returns `{ skipped }` or
- * `{ posted, notes, serverDown }`.
+ * `{ posted, notes, serverDown }`. With `serverDown` (an earlier agent's server stopped
+ * answering), it sends nothing and reads nothing.
+ *
+ * At SessionEnd (`final`), whatever it selected and did not post or write down is written down
+ * by ONE exit sweep (`sweepRemainder`), in a `finally`, whatever the exit: out of time, the
+ * server down, a busy lock, an unusable state, an error. No exit writes a deferral of its own,
+ * so none can be missed.
  */
-export async function postRemainder({
-	sessionId,
-	agentId,
-	agentTypeHint,
-	input,
-	hook,
-	reserveMs,
-	lockWaitMs = 0,
-}) {
+export async function postRemainder(args) {
+	// What this call selected and has neither posted nor written down, and why: the sweep's input.
+	const left = { messages: new Map(), agent: null, exit: null, read: false, holds: null };
+	try {
+		return await remainderOf(args, left);
+	} catch (err) {
+		const why = `an error ended it (${errText(err)})`;
+		left.exit ??= why;
+		// Before selection, the agent's usage was never read: the agent is written down whole. After
+		// it, what is left in `left` is all there is to write, which may be nothing.
+		if (!left.read) left.agent ??= `${why}, before this agent's usage was read`;
+		throw err;
+	} finally {
+		// SessionEnd's one exit sweep: every exit above passes through here.
+		if (args.final === true) await sweepRemainder(args.sessionId, args.agentId, left);
+	}
+}
+
+/**
+ * `postRemainder`'s body. It writes no deferral: each exit says only why (`left.exit`, or
+ * `left.agent` when the agent's usage was never read; `left.read` once it is selected), and the
+ * sweep writes what is left. A message leaves `left` once it is posted, refused, or its group's
+ * own gap is written: until then an exit, a throw included, leaves it to the sweep. An
+ * unresolved vehicle is not in `left`: it was written down as `unresolved` when it became one.
+ */
+async function remainderOf(
+	{ sessionId, agentId, agentTypeHint, input, hook, reserveMs, lockWaitMs = 0, serverDown = false },
+	left,
+) {
+	if (serverDown) {
+		left.agent = "the server stopped answering, so this agent's usage was not posted";
+		return { skipped: "the server stopped answering" };
+	}
 	const opened = await openAgent({ sessionId, agentId, input, waitMs: lockWaitMs });
-	if (opened.kind === "estimate" || opened.kind === "unavailable") {
+	if (opened.kind === "estimate") return { skipped: opened.reason };
+	if (opened.kind === "unavailable") {
+		left.agent = `transcript state unavailable (${opened.reason}), so this agent's usage was not posted`;
 		return { skipped: opened.reason };
 	}
-	if (opened.kind === "busy") return { skipped: "a concurrent hook holds this agent's lock" };
+	if (opened.kind === "busy") {
+		// A concurrent Stop holding the lock posts the usage; a hook that died holding it, within
+		// the lock's stale window, leaves it unposted. Which one cannot be told from here.
+		left.agent =
+			"another hook holds this agent's lock, so its usage was not posted here (a concurrent settle point may post it)";
+		return { skipped: "a concurrent hook holds this agent's lock" };
+	}
+	// The transcript holds whose settle is in flight, as this agent's reconcile found them.
+	left.holds = opened.inFlight;
 	const { cursor } = opened;
 	const summary = { posted: 0, notes: [], serverDown: false };
 	const callBudget = () => Math.min(callTimeoutCap(), Math.floor((timeLeft() - reserveMs) / 3));
 	try {
-		const fresh = await selectOwn(opened);
+		const fresh = await selectOwn(opened, { left });
+		left.read = true;
 		await opened.save();
 		if (fresh.length === 0 && cursor.unresolved.size === 0) return summary;
 		// What the server honours decides what these calls may carry (see lib.mjs).
@@ -2119,7 +2436,7 @@ export async function postRemainder({
 		const capabilities = await serverCapabilities();
 		const keyed = capabilities?.has("idempotency-key") ?? false;
 		const principalOf = (rawType) =>
-			capabilities?.has("principal") ? principalFor(sessionId, agentId, rawType) : undefined;
+			principalCapable(capabilities) ? principalFor(sessionId, agentId, rawType) : undefined;
 		const agentType = await agentTypeFor(opened.transcriptPath, agentId, agentTypeHint);
 
 		// A retry under a key the server would strip could post twice: unresolved
@@ -2144,8 +2461,8 @@ export async function postRemainder({
 					session: sessionId,
 					agent: agentId,
 					reason: "an unresolved settle was made under another server or key",
-					// When its usage began, from the labels it was sent with, else unknown.
-					started: vehicle.labels?.usageFrom ?? null,
+					// When its usage began, from the job labels it was sent with, else unknown.
+					started: windowStart(vehicle.labels),
 				});
 				cursor.unresolved.delete(key);
 				accountIds(cursor, vehicle.ids);
@@ -2158,6 +2475,7 @@ export async function postRemainder({
 			const timeoutMs = callBudget();
 			if (timeoutMs < minCall()) {
 				summary.notes.push("unresolved settles: deferred to the next settle point (out of time)");
+				left.exit = "out of time";
 				return summary;
 			}
 			const counts = vehicleCounts(vehicle);
@@ -2198,8 +2516,22 @@ export async function postRemainder({
 				);
 			} else summary.notes.push(`unresolved ${vehicle.model} settle: ${result.reason}`);
 			await opened.save();
+			if (result.outcome !== "settled" && result.outcome !== "denied") {
+				// Its ids carry no time: the record starts when its labels say, else unknown.
+				await recordRemainderGap({
+					sessionId,
+					agentId,
+					outcome: result.outcome,
+					transferId: result.transferId,
+					reason: result.reason,
+					started: windowStart(vehicle.labels),
+					model: vehicle.model,
+					count: vehicle.ids.length,
+				});
+			}
 			if (result.serverDown) {
 				summary.serverDown = true;
+				left.exit = "the server stopped answering";
 				return summary;
 			}
 		}
@@ -2226,6 +2558,7 @@ export async function postRemainder({
 			const timeoutMs = callBudget();
 			if (timeoutMs < minCall()) {
 				summary.notes.push(`${model}: deferred to the next settle point (out of time)`);
+				left.exit = "out of time";
 				break;
 			}
 			const ids = messages.map((m) => m.id);
@@ -2266,7 +2599,6 @@ export async function postRemainder({
 			if (result.outcome === "settled" || result.outcome === "claimed") accountIds(cursor, ids);
 			else if (result.outcome === "denied") denyIds(cursor, ids);
 			else if (result.outcome !== "unresolved") releaseIds(cursor, ids);
-			await opened.save();
 			if (result.outcome === "settled") summary.posted += ids.length;
 			else if (result.outcome === "denied") {
 				await reportDenied(agentType.name, agentId, result.reason, ids, model, counts, {
@@ -2276,8 +2608,24 @@ export async function postRemainder({
 					error: result.error,
 				});
 			} else summary.notes.push(`${model}: ${result.outcome} — ${result.reason}`);
+			if (result.outcome !== "settled" && result.outcome !== "denied") {
+				await recordRemainderGap({
+					sessionId,
+					agentId,
+					outcome: result.outcome,
+					transferId: result.transferId,
+					reason: result.reason,
+					model,
+					messages,
+				});
+			}
+			// Posted, refused, or written down: no longer the sweep's. Before the cursor's save, so a
+			// save that fails cannot make a group the server settled read as deferred.
+			for (const id of ids) left.messages.delete(id);
+			await opened.save();
 			if (result.serverDown) {
 				summary.serverDown = true;
+				left.exit = "the server stopped answering";
 				break;
 			}
 		}
@@ -2310,7 +2658,7 @@ async function reportDenied(agentType, agentId, reason, ids, model, counts, extr
 			// remainder refused while another job is open belongs to ITS job's interval.
 			// When the refused usage began, or null when it is not known (a timestamp-less message):
 			// never the time of the Stop that ran the refusal.
-			started: extra.labels.usageFrom ?? null,
+			started: windowStart(extra.labels),
 			status: extra.status,
 			error: extra.error,
 			reason: sanitizeReason(reason),
@@ -2417,10 +2765,13 @@ async function postGroup({
 	} catch (err) {
 		await hygieneRelease(transferId, "transcript settle unanswered");
 		return {
-			outcome: key === undefined ? "claimed" : "unresolved",
+			// A settle that never left posted nothing (`settleAt`): its group is released.
+			outcome: key !== undefined ? "unresolved" : err?.unsent === true ? "released" : "claimed",
 			reason: `settle unreachable: ${errText(err)}`,
+			transferId,
+			timedOut: err?.timedOut === true,
 		};
 	}
-	const result = await settleOutcome(transferId, settle, key !== undefined);
+	const result = { ...(await settleOutcome(transferId, settle, key !== undefined)), transferId };
 	return retry && result.outcome === "released" ? { ...result, outcome: "unresolved" } : result;
 }

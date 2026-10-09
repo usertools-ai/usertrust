@@ -33,23 +33,38 @@
 // `boundElsewhere`: the config file or the environment changed after PreToolUse)
 // is never ended through this server: its record is dropped, its usage goes
 // unrecorded, and the hold is left to its own server's sweep.
+//
+// Every settle that ends other than settled or given back is written down as a gap,
+// under its hold's transferId (lib.mjs `recordSettleGap`). While the server's breaker is
+// open (lib.mjs `breakerOpen`, watch mode only), nothing is sent: a transcript hold is left
+// as it is, and waits for the first settle point after the breaker closes (a deferral); an
+// estimate hold, which only this hook charges, is a gap, claimed as settle-attempted
+// (`.settling`) because its call ran, so Stop gives it back as `call-ran`.
 import { unlink } from "node:fs/promises";
 import { resolveJob } from "./job-log.mjs";
 import {
 	abandonHold,
 	boundElsewhere,
+	breakerOpen,
+	callStart,
 	claimForSettle,
 	defaultModel,
 	estimateTokens,
+	failureOutcome,
 	giveBack,
 	giveBackInvalid,
+	holdUsageStart,
 	isGated,
 	isTransferId,
 	jobHoldFields,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
+	principalCapable,
+	quarantineHold,
 	readStdin,
+	recordBreakerSkip,
 	recordPending,
+	recordSettleGap,
 	recordUnconfirmedCall,
 	requireLaunch,
 	say,
@@ -64,8 +79,10 @@ import {
 	estimatePrincipalFor,
 	estimateReasonFor,
 	OUTCOME_NOTES,
+	recordHoldOutcome,
 	settleLabels,
 	settleTranscriptHold,
+	stampFirstRun,
 } from "./transcript.mjs";
 
 requireLaunch();
@@ -98,13 +115,54 @@ function holdIsGone(response) {
 	return response.status === 404 && response.json?.reason === "unknown transferId";
 }
 
-function noteIfAmbiguous(response, transferId) {
-	if (response.json?.settled === false) {
-		// The server's ledger post was ambiguous: the hold is spent either way.
-		say(
-			`usertrust: settle ${transferId} — the ledger post is ambiguous (settled: false); the usage may be unrecorded`,
-		);
+/**
+ * An estimate hold's settle that ended other than a 200, written down as a gap (lib.mjs
+ * `recordSettleGap`) under the transferId it was sent for: `failed`, or `unknown` when this
+ * hook's timer cut it off. The hold is kept `.settling`, and Stop gives it back.
+ */
+function settleGap({ sessionId, agentId, entry, transferId, outcome, reason }) {
+	return recordSettleGap({
+		phase: "settle",
+		outcome,
+		session: sessionId,
+		agent: agentId,
+		transferId,
+		reason,
+		started: callStart(entry),
+	});
+}
+
+/** A settle that may be unanswered: on no answer, its gap is written, then the error goes on. */
+async function settleOnce(at, body) {
+	try {
+		return await serverRequest("/v1/settle", body, withinBudget());
+	} catch (err) {
+		await settleGap({
+			...at,
+			transferId: body.transferId,
+			outcome: failureOutcome(err),
+			reason: `settle unanswered: ${err instanceof Error ? err.message : String(err)}`,
+		});
+		throw err;
 	}
+}
+
+/**
+ * A 200 whose receipt says `settled: false`: the server's ledger post was ambiguous, and the hold
+ * is spent either way. Its charge may be missing, so it is written down as a gap, `claimed`, as a
+ * transcript hold's would be (transcript.mjs `settleOutcome`), and said.
+ */
+async function noteIfAmbiguous(at, response, transferId) {
+	if (response.json?.settled !== false) return;
+	say(
+		`usertrust: settle ${transferId} — the ledger post is ambiguous (settled: false); the usage may be unrecorded`,
+	);
+	await settleGap({
+		...at,
+		transferId,
+		outcome: "claimed",
+		reason: "the ledger post is ambiguous (settled: false): the usage may be unrecorded",
+	});
 }
 
 /**
@@ -144,13 +202,10 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		say(`usertrust: hold ${entry.transferId} is being settled by another hook`);
 		return;
 	}
-	const response = await serverRequest(
-		"/v1/settle",
-		{ transferId: entry.transferId, ...usage },
-		withinBudget(),
-	);
+	const at = { sessionId, agentId, entry };
+	const response = await settleOnce(at, { transferId: entry.transferId, ...usage });
 	if (response.status === 200) {
-		noteIfAmbiguous(response, entry.transferId);
+		await noteIfAmbiguous(at, response, entry.transferId);
 		await unlink(claimed).catch(() => {});
 		return;
 	}
@@ -158,37 +213,64 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		say(
 			`usertrust: settle ${entry.transferId} returned ${response.status}; hold kept for Stop cleanup`,
 		);
+		await settleGap({
+			...at,
+			transferId: entry.transferId,
+			outcome: "failed",
+			reason: `settle returned ${response.status}`,
+		});
 		return;
 	}
 	if (!isGated(entry)) {
 		say(
 			`usertrust: settle ${entry.transferId} returned 404, but the hold was not recorded under the settle-attempt gate, so it may have been charged already; hold kept for Stop cleanup`,
 		);
+		await settleGap({
+			...at,
+			transferId: entry.transferId,
+			outcome: "failed",
+			reason: "settle returned 404 for a hold recorded without the settle-attempt gate",
+		});
 		return;
 	}
 	const capabilities = await serverCapabilities();
-	const principal = capabilities?.has("principal")
+	const principal = principalCapable(capabilities)
 		? estimatePrincipalFor(sessionId, agentId, input.agent_type)
 		: undefined;
-	const auth = await serverRequest(
-		"/v1/authorize",
-		{
-			model: defaultModel(),
-			...(typeof usage.inputTokens === "number" ? { estimatedInputTokens: usage.inputTokens } : {}),
-			maxOutputTokens: MAX_OUTPUT_TOKENS,
-			params: {
-				hook: "PostToolUse",
-				tool_name: input.tool_name ?? "unknown",
-				replaces: entry.transferId,
+	let auth;
+	try {
+		auth = await serverRequest(
+			"/v1/authorize",
+			{
+				model: defaultModel(),
+				...(typeof usage.inputTokens === "number"
+					? { estimatedInputTokens: usage.inputTokens }
+					: {}),
+				maxOutputTokens: MAX_OUTPUT_TOKENS,
+				params: {
+					hook: "PostToolUse",
+					tool_name: input.tool_name ?? "unknown",
+					replaces: entry.transferId,
+				},
+				actor: `claude-code:${sessionId}`,
+				...(principal === undefined ? {} : { principal }),
+				// The replacement is the SAME call's charge: it carries the expired hold's job
+				// and usage start, not whatever job is open now.
+				...authorizeLabels(entry),
 			},
-			actor: `claude-code:${sessionId}`,
-			...(principal === undefined ? {} : { principal }),
-			// The replacement is the SAME call's charge: it carries the expired hold's job
-			// and usage start, not whatever job is open now.
-			...authorizeLabels(entry),
-		},
-		withinBudget(),
-	);
+			withinBudget(),
+		);
+	} catch (err) {
+		// No answer. The call RAN and nothing will charge it, as when the fresh hold is refused (below):
+		// its gap is written now, before its settle-attempted marker goes (evidence first). A hold
+		// the authorize may have made is left to the server's sweep.
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		await unlink(claimed).catch(() => {});
+		say(
+			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold was not granted (no answer: ${err instanceof Error ? err.message : String(err)}); this call's estimate is not recorded`,
+		);
+		return;
+	}
 	const transferId = auth.json?.transferId;
 	if (
 		auth.status !== 200 ||
@@ -196,9 +278,10 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		typeof transferId !== "string" ||
 		transferId === ""
 	) {
-		await unlink(claimed).catch(() => {});
-		// The call RAN and nothing will charge it: its usage is unrecorded, which is a gap.
+		// The call RAN and nothing will charge it: its usage is unrecorded, which is a gap, written
+		// before its settle-attempted marker goes (evidence first).
 		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		await unlink(claimed).catch(() => {});
 		say(
 			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold was not granted (${auth.status}); this call's estimate is not recorded`,
 		);
@@ -262,12 +345,18 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	say(
 		`usertrust: hold ${entry.transferId} expired before its settle (a long permission prompt?); charging this call once on ${transferId}`,
 	);
-	const settle = await serverRequest("/v1/settle", { transferId, ...usage }, withinBudget());
+	const settle = await settleOnce(at, { transferId, ...usage });
 	if (settle.status === 200) {
-		noteIfAmbiguous(settle, transferId);
+		await noteIfAmbiguous(at, settle, transferId);
 		await unlink(fresh).catch(() => {});
 	} else {
 		say(`usertrust: settle ${transferId} returned ${settle.status}; hold kept for Stop cleanup`);
+		await settleGap({
+			...at,
+			transferId,
+			outcome: "failed",
+			reason: `settle returned ${settle.status}`,
+		});
 	}
 }
 
@@ -276,8 +365,56 @@ try {
 	const sessionId = input.session_id ?? "unknown";
 	// Settle only this agent's holds; the session bucket is shared with siblings.
 	const agentId = input.agent_id ?? "main";
+	// The breaker is consulted first, once (lib.mjs `breakerOpen`, watch mode only).
+	const open = await breakerOpen();
 	const entry = await takePendingEntry(sessionId, agentId, input.tool_use_id ?? null);
-	if (entry !== null && boundElsewhere(entry)) {
+	if (open) {
+		// The server stopped answering: nothing is sent. A transcript hold is left exactly as it
+		// is: its window waits for the first settle point after the breaker closes (a Stop, a
+		// SubagentStop, SessionEnd), a deferral. An ESTIMATE hold is charged by this hook alone, and
+		// a later one only gives it back: its charge is lost, a gap.
+		const estimate = entry !== null && entry.usage !== "transcript";
+		if (usageMode() === "transcript") await stampFirstRun();
+		// The estimate hold's call RAN, so the hold is claimed as settle-attempted
+		// (`claimForSettle`: a local rename, nothing sent), the state that says so. Left `.json`, it
+		// would read as a call that never reached this hook: Stop would give it back as
+		// `call-unconfirmed`, and on a host that sends no tool_use_id the next call would take it
+		// as its own (lib.mjs `takePendingEntry`), and settle it at that call's usage.
+		if (estimate) {
+			await claimForSettle(entry.path).catch(async (err) => {
+				// Left a gated `.json`, it would be the next call's on a host with no tool_use_id, and
+				// settled at that call's usage: it is quarantined, out of that call's reach.
+				const quarantined = await quarantineHold(entry.path);
+				say(
+					`usertrust: hold ${entry.transferId} could not be marked settle-attempted (${err?.code ?? "error"}); ${
+						quarantined === "ungated"
+							? "it is kept out of any other call's reach, and Stop gives it back as a call that ran"
+							: quarantined === "removed"
+								? "its record is removed, so no other call can take it, and its hold is left to the server's sweep"
+								: "it could not be kept out of another call's reach either"
+					}`,
+				);
+			});
+		}
+		const recorded = await recordBreakerSkip({
+			kind: estimate ? "gap" : "deferred",
+			phase: "post-tool-use",
+			session: sessionId,
+			agent: agentId,
+			tool: input.tool_name ?? "unknown",
+			transferIds: entry === null ? [] : [entry.transferId],
+			started: entry === null ? null : holdUsageStart(entry),
+		});
+		const what =
+			entry === null
+				? "this call has no hold"
+				: estimate
+					? `hold ${entry.transferId} is not settled, and only a later hook's give-back can end it`
+					: `hold ${entry.transferId} is left for a later hook`;
+		say(
+			`usertrust: the server is not answering (its breaker is open); ${what}${recorded ? ` (recorded as ${estimate ? "a gap" : "deferred"})` : ""}`,
+		);
+	} else if (entry !== null && boundElsewhere(entry)) {
 		await abandonHold(entry, "this tool call's hold", sessionId);
 	} else if (entry?.usage === "transcript") {
 		const result = await settleTranscriptHold(sessionId, entry);
@@ -286,6 +423,7 @@ try {
 				`usertrust: transcript hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}`,
 			);
 		}
+		await recordHoldOutcome(sessionId, entry, result);
 	} else if (entry) {
 		if (usageMode() === "transcript") {
 			const reason = await estimateReasonFor({ sessionId, agentId, input });

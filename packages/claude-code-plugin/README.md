@@ -459,8 +459,8 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
   diagnostic, not a certification: an empty list does not mean the figure is complete.** Gaps include: the
   job is still running; a record of the job outside its intervals or without a complete usage window; a call
   of another or no job overlapping it; a call, gap or refusal that cannot be placed because its session has
-  no usable log; a denied request of the job; a `would_block` or an unmetered `gap` (read from
-  `watch.jsonl`, or `--watch FILE`, placed by when its call STARTED); a transfer known only through its
+  no usable log; a denied request of the job; a `would_block`, an unmetered `gap` or a breaker's `deferred`
+  record (read from `watch.jsonl`, or `--watch FILE`, placed by when its call STARTED); a transfer known only through its
   settlement metadata; a released hold whose usage is unconfirmed; an evidence line that could not be
   parsed. A watch file that exists but cannot be read gives no verdict. An interval is (start, stop]:
   usage at exactly the start belongs to the earlier job.
@@ -689,6 +689,135 @@ transcript to be posted at a later settle point. In estimate mode
 (`UT_CC_USAGE=estimate`) the call's estimate is not recorded. A record that cannot
 be written goes to stderr instead, and the call proceeds either way. Nothing reads
 the file back, so deleting it is safe — unlike the rest of the state dir.
+
+**When the server stops answering, watch mode stops asking it: the breaker.** A server
+that hangs, its connection open and no answer coming, would cost every hook of every
+session its full timeouts: a 2 s capability probe and a 5 s request, about 7 s per
+PreToolUse, and up to a hook's 10 s budget. So in
+watch mode, three timeouts in a row within a minute open a breaker for a minute. A
+governance route's answer, a refusal included, resets the count, and a refused connection
+counts for nothing: both fail fast. A `/v1/health` answer resets nothing: a server can answer
+it while its routes hang (a stuck ledger), and the capability probe every hook makes first
+would otherwise reset the count before every route timeout, so the breaker would never open.
+A health probe that times out does count. An answer is the whole response, its body read: a server that
+sends its headers and then stalls is timing out. An answer does not close a breaker that is
+already open: only the probe after its minute does (below). Two sessions counting at once
+can lose an update, so the breaker can open a little early or late, by one minute at most,
+and every hook it skips writes its record. The breaker is the host's, one per server URL, shared by every
+session of your user, under the home the passwd database gives you
+(`~/.local/state/usertrust/breaker/`, 0700). While it is open, a hook sends nothing and
+writes one record with `"reason":"breaker-open"` and `"outcome":"deferred"`. It changes
+nothing else, with two exceptions. In transcript mode, on a state dir that has no first-run
+time yet, the hook stamps it, so the outage's usage counts as this state's and is posted
+later. And PostToolUse renames an estimate hold to `.settling`, as one whose call ran: Stop
+then gives it back as `call-ran`, and no later call can take it for its own. If that rename
+fails, the hold is still kept from any later call (its pairing mark dropped, or its record
+removed), and it is given back as `call-ran` wherever it ends (Stop, SessionEnd, or the
+PreToolUse of the same call resumed): its call ran. Each record is
+one of:
+- **`"kind":"deferred"`**: a transcript-mode PreToolUse, a PostToolUse whose hold carries
+  transcript usage, Stop and SubagentStop. The first settle point after the breaker
+  closes posts that usage, once. `usertrust-job coverage` still lists a deferral inside a
+  job's interval as a known gap: the record cannot say whether that settle point came.
+- **`"kind":"gap"`**: an estimate-mode PreToolUse, a PostToolUse whose hold settles at the
+  estimate, and SessionEnd. Nothing later settles those: a session that ends during an
+  outage settles what it left only if it is resumed. If it never is, its hold files stay
+  in the state dir, and nothing removes them.
+
+A record about holds names them in `transferIds`, including those whose settle was
+already under way. After its minute, the next hook asks `/v1/health` once, for at most a
+second, and never more than a fifth of its own budget (SessionEnd's is about a second): an
+answer closes the breaker, and no answer opens it for another minute. A hook with no time
+left to ask decides nothing: it sends nothing, and the next hook asks. A hook reads the breaker once, as it starts: one that
+started before the breaker opened sends everything it would have, so a settle it began
+is never left half-done. Enforce mode never reads or writes it.
+
+**A settle or a give-back that does not end cleanly is written down too.** PostToolUse,
+Stop, SubagentStop and SessionEnd add a `gap` record whenever settling a hold, giving
+one back or posting a remainder ends other than settled or given back. So does
+PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"phase"` is
+`settle`, `release` or `remainder`, and its `"outcome"` one of:
+- `claimed`: the settle may have posted, and is never retried (no key). An answer of
+  `settled: false`, the ledger's post ambiguous, is `claimed` too, for an estimate hold as
+  for a transcript one;
+- `unresolved`: retried under its key at the next Stop;
+- `released`: nothing was posted, and the usage waits for a later settle point. A settle
+  whose connection was refused before anything was sent is `released`: it cannot have posted;
+- `deferred`: not attempted yet (out of time, say);
+- `failed`: the server answered it with an error or a redirect, or it was never sent (a
+  refused connection, a spent budget). Never sent, nothing can have landed; answered, the
+  server did not confirm it, and a hold it leaves is never settled again: an estimate hold's
+  call keeps its own `call-ran` gap;
+- `unknown`: no answer once it may have gone out: this hook's own timeout cut it off, or the
+  connection dropped after sending, and the server may still act on it. A transcript hold's
+  settle that ends this way is `claimed`, or `unresolved` under a key, which also say whether
+  it is retried.
+
+**Redirects.** The plugin follows redirects by hand, up to 20 (fetch's own limit, which earlier
+releases had): each a 307 or a 308 whose `Location` has the origin (scheme, host and port) of
+the URL the plugin asked, re-sent with the same method, body and key. Once the first answer is
+in, the request was sent: whatever ends a later hop, a timeout or a refused connection, the
+request is never read as unsent, so a settle is never `released`. Any other redirect is the
+server's answer, read as any other that is not a 200, since the server may have acted on the
+request before redirecting it: a 301, 302 or 303, a redirect to another origin, or a 21st. A settle answered with one is never `released`: a transcript hold's
+or a remainder's is `claimed` (or `unresolved` under a key), and an estimate hold's is `failed`,
+as a 5xx is, its hold kept settle-attempted and never settled again.
+
+A redirect to another origin is never followed, so as never to send the key there. Node's own
+fetch, which followed redirects for earlier releases of the plugin, drops the `Authorization`
+header when it follows one to another origin: measured on Node 22.22.1, 22.23.3, 23.6.0 and
+24.21.0, where the server refused such a call. Older Node releases kept the header, so on those
+a server URL that redirects to another origin worked before and does not now: set the server
+URL to the one the server answers at. So too for a health route behind a 301, 302 or 303,
+whose capabilities now read as unknown. (fetch turned the POST of any other route into a GET
+with no body through one of those, which the server refuses.)
+
+Each names its hold's `transferId`, so a deferral and how it ended can be joined. A hold
+that carried no usage, given back to a server that no longer holds it (a 404 `unknown
+transferId`: it expired, or another hook ended it), writes nothing: it is gone. At Stop, such
+a 404 writes no `release` gap for any hold, as none is left to give back; a call that may
+have run uncharged still has its own gap. On a server that cannot release, an empty hold is
+given back by a settle at zero, and that settle's failure is written as the give-back it
+stands for: `release`, `failed` or `unknown`.
+
+**SessionEnd, the last settle point, writes down what it cannot finish.** What it leaves "for
+a later settle point" has none unless the session is resumed, so whatever it selected and did
+not post is a `remainder` gap, `deferred`, whatever stopped it: no time to claim or post, a
+claim that fails (a full or unwritable state dir), the server no longer answering, an error. An
+agent whose usage it never read is one too: one it could not reach once the server stopped
+answering, one whose transcript state is unusable, and one whose lock another hook holds. A
+hold it has no time to give back is its call's gap. And a transcript hold whose settle a hook
+sent and never saw end (it was killed first) is a `settle` gap, `unknown`, under its
+`transferId`: whether it posted cannot be known.
+
+**A settle that was sent and never seen to end is written down.** A transcript hold left
+settle-attempted by a hook that died is decided by the next hook that reads its agent once it is
+ten minutes old: a `settle` gap under its `transferId`, `claimed` (its usage may have posted,
+and is never posted again) or `unresolved` under an idempotency key (retried as itself).
+Before that, at SessionEnd, it is the `unknown` gap above.
+
+**Each job's usage is its own record.** A remainder's gap, at Stop as at SessionEnd, is one
+record per job interval of the session's job log, each started at its own first message,
+whether or not the server records jobs. So `usertrust-job coverage` lists it as a known gap of
+every job it touches. When the job log cannot be read whole (torn, unreadable, or stamped ahead
+of the clock), the record has no start, so it is a gap of every job, even once the log reads
+cleanly again.
+
+**Every gap that carries transcript usage is dated by one rule.** A hold's settle, a settle in
+flight, a hold or a retried settle dropped as another server's, a refused remainder, a deferral
+under an open breaker: each starts where its job labels say, only when a server that honours
+`job` labelled it with a job (its messages were then one job interval). Otherwise it has no
+start, and is a gap of every job: a window that a server without `job` never split can hold an
+earlier job's messages, and a start at its tool call would leave that job clean. A gap for an
+estimate-mode call, or for a give-back, carries no transcript usage: it is dated at its call.
+
+**A failed health probe still sends the principal.** After a probe that answers, the
+plugin remembers the server's capabilities, per server and key, in the state dir
+(`capabilities/`, 0600), and renews the entry each time the same answer comes back.
+When a later probe fails, an entry under a day old that lists `principal` lets the
+hook send its principal anyway, and stderr says so. It is never used for anything
+else: an idempotency key is sent only to a server whose live probe says it honours
+one, as a server that strips the key would let a retried settle post twice.
 
 ## From watching to enforcing
 
