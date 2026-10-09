@@ -795,6 +795,14 @@ every job it touches. When the job log cannot be read whole (torn, unreadable, o
 of the clock), the record has no start, so it is a gap of every job, even once the log reads
 cleanly again.
 
+**Every gap that carries transcript usage is dated by one rule.** A hold's settle, a settle in
+flight, a hold or a retried settle dropped as another server's, a refused remainder, a deferral
+under an open breaker: each starts where its job labels say, only when a server that honours
+`job` labelled it with a job (its messages were then one job interval). Otherwise it has no
+start, and is a gap of every job: a window that a server without `job` never split can hold an
+earlier job's messages, and a start at its tool call would leave that job clean. A gap for an
+estimate-mode call, or for a give-back, carries no transcript usage: it is dated at its call.
+
 **A failed health probe still sends the principal.** After a probe that answers, the
 plugin remembers the server's capabilities, per server and key, in the state dir
 (`capabilities/`, 0600), and renews the entry each time the same answer comes back.

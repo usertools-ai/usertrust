@@ -50,6 +50,11 @@ npm, and its version is its own: the `usertrust` packages and their
 - **A remainder's gap is one record per job** of the session's job log, at Stop as at
   SessionEnd, each started at its own first message, whether or not the server records jobs. A
   job log that cannot be read whole gives the record no start: a gap of every job.
+- **Every gap that carries transcript usage is dated by one rule:** its job-labelled start,
+  else none (a gap of every job). A transcript hold's settle gap was dated at its tool call, so
+  against a server without `job` a window holding an earlier job's messages left that job
+  clean; so were a dropped hold's and a breaker deferral's, and a refused remainder or a retried
+  settle took a start from an untrusted job log.
 - **A redirect is followed only to the same origin, by hand, up to 20.** Each 307 or 308 to
   the URL's own origin is re-sent with the same method, body and key, as before, and from the
   first answer on the request counts as sent: no later ending reads as never sent. Any other

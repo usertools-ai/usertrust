@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { runHook } from "./helpers/run-hook.js";
+import { forgetPins, runHook } from "./helpers/run-hook.js";
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
 const SESSION = "55555555-2222-4333-8444-666666666666";
@@ -1891,6 +1891,211 @@ describe("every hold state SessionEnd can meet, and what it writes down", () => 
 			const written = await gaps();
 			expect(written).toMatchObject(row.gaps);
 			expect(written).toHaveLength(row.gaps.length);
+		},
+		LONG,
+	);
+});
+
+describe("every gap that carries transcript usage is dated by one rule: its job-labelled start, else null", () => {
+	const now = Date.now();
+	const at = (offsetS: number) => new Date(now + offsetS * 1000).toISOString();
+	const jobLine = (ts: string, op: string, job: string | null) =>
+		JSON.stringify({ sid: SESSION, ts, op, job });
+	// Job A, then job B. The window's message is A's; the tool call that holds it is B's.
+	const LOG = `${[
+		jobLine(at(-60), "session-start", null),
+		jobLine(at(-50), "start", "job-a"),
+		jobLine(at(-30), "stop", null),
+		jobLine(at(-20), "start", "job-b"),
+		jobLine(at(-5), "stop", null),
+	].join("\n")}\n`;
+	const CALL = at(-10);
+	const coverageOf = async (job: string, watch: WatchRecord[]) => {
+		const { jobCoverage } = (await import(pathToFileURL(join(HOOKS, "job-log.mjs")).href)) as {
+			jobCoverage(args: {
+				job: string;
+				logs: Record<string, string>;
+				records: unknown[];
+				watch: unknown[];
+			}): { knownGaps: Array<{ gap: string }> };
+		};
+		return jobCoverage({ job, logs: { [SESSION]: LOG }, records: [], watch }).knownGaps.map(
+			(gap) => gap.gap,
+		);
+	};
+	/** What job A's coverage must say of a gap dated `started`: a gap of job A either way. */
+	const gapOfJobA = (started: string | null) =>
+		started === null
+			? "cannot be attributed to a job (its time is unreadable): it may belong to job-a"
+			: "fell inside an interval of job-a";
+	const labelStates: Array<[string, Record<string, unknown>, string | null]> = [
+		["no job label (a server without `job`): a job switch inside the hold", {}, null],
+		[
+			"an untrusted job log (`jobState: invalid`)",
+			{ jobState: "invalid", usageFrom: at(-40) },
+			null,
+		],
+		["a job label", { job: "job-a", usageFrom: at(-40) }, at(-40)],
+	];
+	const windowHold = (labels: Record<string, unknown>) => ({
+		...WINDOW,
+		startedAt: CALL,
+		...labels,
+	});
+	const openBreakerNow = async () => {
+		const file = join(
+			breakerDir(),
+			`${createHash("sha256").update(url).digest("hex").slice(0, 16)}.json`,
+		);
+		await mkdir(breakerDir(), { recursive: true, mode: 0o700 });
+		await writeFile(
+			file,
+			JSON.stringify({ openUntil: Date.now() + 60_000, openedAt: Date.now(), timeouts: [] }),
+			{ mode: 0o600 },
+		);
+	};
+	const holdWriters: Array<
+		[string, (labels: Record<string, unknown>) => Promise<void>, (r: WatchRecord) => boolean]
+	> = [
+		[
+			"PostToolUse's settle of a transcript hold (503: claimed)",
+			async (labels) => {
+				capabilities = ["release"];
+				await seedHold("tu_1", "tx_1", windowHold(labels));
+				fixed.set("/v1/settle#1", ANSWER.error5xx as Reply);
+				await run("post-tool-use", postInput("tu_1"));
+			},
+			(r) => r.kind === "gap" && r.phase === "settle",
+		],
+		[
+			"Stop's settle of a leftover transcript hold (503: claimed)",
+			async (labels) => {
+				capabilities = ["release"];
+				await seedHold("tu_1", "tx_1", windowHold(labels));
+				fixed.set("/v1/settle#1", ANSWER.error5xx as Reply);
+				await run("stop", stopInput());
+			},
+			(r) => r.kind === "gap" && r.phase === "settle",
+		],
+		[
+			"Stop's drop of a hold made under another server (abandon)",
+			async (labels) => {
+				await seedHold("tu_1", "tx_1", {
+					...windowHold(labels),
+					serverUrl: "http://elsewhere.invalid",
+					keyHash: "x",
+				});
+				await run("stop", stopInput());
+			},
+			(r) => r.kind === "gap" && r.phase === "abandon",
+		],
+		[
+			"SessionEnd's sweep of a settle in flight (unknown)",
+			async (labels) => {
+				await writeTranscript();
+				await seedHold("tu_1", "tx_1", windowHold(labels), "settling");
+				await run("session-end", seInput(), seBudget(1_200));
+			},
+			(r) => r.kind === "gap" && r.phase === "settle",
+		],
+		[
+			"a reconcile's decision on a stale settle in flight (claimed)",
+			async (labels) => {
+				await writeTranscript();
+				await seedHold("tu_1", "tx_1", windowHold(labels), "settling");
+				const stale = (Date.now() - 11 * 60_000) / 1000;
+				await utimes(join(stateDir, holdName("tu_1", "tx_1", "main", "settling")), stale, stale);
+				await run("stop", stopInput());
+			},
+			(r) => r.kind === "gap" && r.phase === "settle",
+		],
+		[
+			"PostToolUse under an open breaker (its transcript hold deferred)",
+			async (labels) => {
+				await openBreakerNow();
+				await seedHold("tu_1", "tx_1", windowHold(labels));
+				await run("post-tool-use", postInput("tu_1"));
+			},
+			(r) => r.kind === "deferred",
+		],
+	];
+	it.each(
+		holdWriters.flatMap(([writer, play, pick]) =>
+			labelStates.map(
+				([state, labels, started]) => [writer, state, labels, started, play, pick] as const,
+			),
+		),
+	)(
+		"%s, %s: started at its window's job-labelled start, else null; a gap of the earlier job",
+		async (_, __, labels, started, play, pick) => {
+			await play(labels);
+			const written = (await records()).filter(pick);
+			expect(written.map((r) => r.started)).toEqual([started]);
+			const gapsOfA = await coverageOf("job-a", written);
+			expect(
+				gapsOfA.some((gap) => gap.includes(gapOfJobA(started))),
+				gapsOfA.join(" | "),
+			).toBe(true);
+		},
+		LONG,
+	);
+	it("a give-back carries no usage, and keeps its call's time", async () => {
+		capabilities = ["release"];
+		await seedHold("tu_1", "tx_1", { ...EMPTY, startedAt: CALL });
+		fixed.set("/v1/release#1", ANSWER.other4xx as Reply);
+		await run("post-tool-use", postInput("tu_1"));
+		expect((await phased("release")).map((r) => r.started)).toEqual([CALL]);
+	});
+
+	// The group-level writers with labels: a job log torn (untrusted) or whole.
+	const logs: Array<[string, string, string | null]> = [
+		["a torn job log", LOG.slice(0, -1), null],
+		["a whole job log", LOG, at(-40)],
+	];
+	const sendLabelled = async (text: string) => {
+		await backdate();
+		await mkdir(join(stateDir, "jobs"), { recursive: true });
+		await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), text);
+		await writeLines(transcriptPath(), [response("msg_a", SONNET, at(-40))]);
+	};
+	it.each(logs)(
+		"a refused remainder (would_block) under %s: started at its job's start, else null",
+		async (_, text, started) => {
+			capabilities = ["job"];
+			await sendLabelled(text);
+			fixed.set("/v1/authorize#1", ANSWER.refusal402 as Reply);
+			await run("stop", stopInput());
+			const refused = (await records()).filter((r) => r.kind === "would_block");
+			expect(refused.map((r) => r.started)).toEqual([started]);
+		},
+		LONG,
+	);
+	/** A Stop parks an unresolved vehicle, under a key, with the labels its job log gave. */
+	const parkVehicle = async (text: string) => {
+		capabilities = ["job", "idempotency-key"];
+		await sendLabelled(text);
+		fixed.set("/v1/settle#1", ANSWER.error5xx as Reply);
+		await run("stop", stopInput());
+		nodeFs.rmSync(join(stateDir, "watch.jsonl"), { force: true });
+	};
+	it.each(logs)(
+		"a retried vehicle's gap under %s: started at its job's start, else null",
+		async (_, text, started) => {
+			await parkVehicle(text);
+			fixed.set("/v1/settle#2", ANSWER.error5xx as Reply);
+			await run("stop", stopInput());
+			expect((await phased("remainder")).map((r) => r.started)).toEqual([started]);
+		},
+		LONG,
+	);
+	it.each(logs)(
+		"a vehicle made under another server, dropped (abandon), under %s: started at its job's start, else null",
+		async (_, text, started) => {
+			await parkVehicle(text);
+			forgetPins(envFor());
+			url = await startServer();
+			await run("stop", stopInput());
+			expect((await phased("abandon")).map((r) => r.started)).toEqual([started]);
 		},
 		LONG,
 	);

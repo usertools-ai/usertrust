@@ -138,6 +138,7 @@ import {
 	clearPending,
 	failureOutcome,
 	guardMode,
+	holdUsageStart,
 	isAlreadySettled,
 	isUnknownRoute,
 	isUnknownTransfer,
@@ -161,6 +162,7 @@ import {
 	tenantBinding,
 	timeLeft,
 	usageMode,
+	windowStart,
 } from "./lib.mjs";
 
 /** Never priced when its usage is all zero: Claude Code's local placeholder. */
@@ -1117,7 +1119,7 @@ function recordInFlightSettle(sessionId, record, { outcome, reason } = {}) {
 		reason:
 			reason ??
 			"its hook died after sending the settle and before writing how it ended: it may have posted",
-		started: typeof record.usageFrom === "string" ? record.usageFrom : null,
+		started: windowStart(record),
 		messages: record.ids.length,
 	});
 }
@@ -2202,7 +2204,9 @@ export async function recordHoldOutcome(sessionId, entry, result) {
 		agent: entry.agentId,
 		transferId: entry.transferId,
 		reason: result.reason ?? outcome,
-		started: callStart(entry),
+		// A settle stands for its window's usage, dated by the one rule (`holdUsageStart`). A
+		// give-back stands for no usage: it keeps its call's time.
+		started: release ? callStart(entry) : holdUsageStart(entry),
 	});
 }
 
@@ -2454,8 +2458,8 @@ async function remainderOf(
 					session: sessionId,
 					agent: agentId,
 					reason: "an unresolved settle was made under another server or key",
-					// When its usage began, from the labels it was sent with, else unknown.
-					started: vehicle.labels?.usageFrom ?? null,
+					// When its usage began, from the job labels it was sent with, else unknown.
+					started: windowStart(vehicle.labels),
 				});
 				cursor.unresolved.delete(key);
 				accountIds(cursor, vehicle.ids);
@@ -2517,7 +2521,7 @@ async function remainderOf(
 					outcome: result.outcome,
 					transferId: result.transferId,
 					reason: result.reason,
-					started: vehicle.labels?.usageFrom ?? null,
+					started: windowStart(vehicle.labels),
 					model: vehicle.model,
 					count: vehicle.ids.length,
 				});
@@ -2651,7 +2655,7 @@ async function reportDenied(agentType, agentId, reason, ids, model, counts, extr
 			// remainder refused while another job is open belongs to ITS job's interval.
 			// When the refused usage began, or null when it is not known (a timestamp-less message):
 			// never the time of the Stop that ran the refusal.
-			started: extra.labels.usageFrom ?? null,
+			started: windowStart(extra.labels),
 			status: extra.status,
 			error: extra.error,
 			reason: sanitizeReason(reason),

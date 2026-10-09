@@ -511,6 +511,33 @@ export function callStart(held) {
 }
 
 /**
+ * When transcript usage a gap stands for began, by the one rule every such gap is dated by: the
+ * start its labels give only when they name a JOB (a server that honours `job` labelled it, and
+ * its messages were then one job interval); else null, a gap that may belong to any job. With no
+ * job label, a window or a group was never split by job (the server does not honour `job`, or the
+ * job log cannot be trusted, `jobState: "invalid"`), so any start would place the gap in one job
+ * and leave an earlier one clean. `labels` is a hold record, a vehicle's labels or a group's.
+ */
+export function windowStart(labels) {
+	return typeof labels?.job === "string" &&
+		labels.job !== "" &&
+		typeof labels.usageFrom === "string"
+		? labels.usageFrom
+		: null;
+}
+
+/**
+ * The start of the usage a hold's gap stands for: a transcript hold that carries a window, its
+ * window's (`windowStart`); any other hold, its call's (`callStart`): an estimate hold's usage is
+ * the call itself, and an empty hold carries none.
+ */
+export function holdUsageStart(held) {
+	return held.usage === "transcript" && (held.assignedIds?.length ?? 0) > 0
+		? windowStart(held)
+		: callStart(held);
+}
+
+/**
  * A give-back of a hold whose call RAN (or may have) without a confirmed charge is a GAP:
  * metered usage the ledger cannot vouch for. `started` is when the call began
  * (`callStart`), so a job switch that lands later cannot move it to another job. Returns
@@ -1035,7 +1062,7 @@ export async function abandonHold(entry, what, session) {
 			agent: entry.agentId,
 			transferId: entry.transferId,
 			reason: ABANDONED,
-			started: callStart(entry),
+			started: holdUsageStart(entry),
 		});
 		say(
 			`usertrust: ${what} ${entry.transferId} was made under another server or key; nothing about it is sent here, and any usage it carried goes unrecorded${recorded ? " (recorded as a gap)" : ""}`,

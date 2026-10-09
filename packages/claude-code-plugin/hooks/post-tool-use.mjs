@@ -53,6 +53,7 @@ import {
 	failureOutcome,
 	giveBack,
 	giveBackInvalid,
+	holdUsageStart,
 	isGated,
 	isTransferId,
 	jobHoldFields,
@@ -390,7 +391,7 @@ try {
 			agent: agentId,
 			tool: input.tool_name ?? "unknown",
 			transferIds: entry === null ? [] : [entry.transferId],
-			started: entry === null ? null : callStart(entry),
+			started: entry === null ? null : holdUsageStart(entry),
 		});
 		const what =
 			entry === null
