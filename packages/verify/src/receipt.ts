@@ -28,6 +28,11 @@ export interface TransactionEvent {
 		/** The fixed code of a ledger void that failed (`hold_released`, `llm_call_failed`). */
 		readonly voidError?: string;
 		readonly transferId?: string | undefined;
+		/**
+		 * `settlement_unrecoverable` stores the SHA-256 of its transferId, never the id: the id of an
+		 * unknown hold is caller text. `--tx` hashes the queried id and matches this.
+		 */
+		readonly transferIdHash?: string | undefined;
 	};
 	readonly sequence?: number | undefined;
 	readonly hash: string;
@@ -279,6 +284,12 @@ const DETECTION_KINDS = new Set(["anomaly_detected"]);
  */
 export const RELEASE_KINDS = new Set(["hold_released"]);
 
+/**
+ * A settle for a hold the server no longer held: usage that was NOT charged. It carries no `settled`
+ * field and no transferId (only its hash), so without this arm it read PENDING for a spend that is lost.
+ */
+export const UNRECOVERABLE_KINDS = new Set(["settlement_unrecoverable"]);
+
 function resolveStatus(event: TransactionEvent): string {
 	if (DENIAL_KINDS.has(event.kind)) return "DENIED";
 	// `stream_partial_delivery` is a FAILURE TERMINAL (AGENTS.md): the hold was
@@ -295,6 +306,7 @@ function resolveStatus(event: TransactionEvent): string {
 	if (event.kind === "stream_partial_delivery") return "FAILED";
 	if (event.kind === "llm_call_failed") return "FAILED";
 	if (RELEASE_KINDS.has(event.kind)) return "RELEASED";
+	if (UNRECOVERABLE_KINDS.has(event.kind)) return "UNRECOVERABLE";
 	if (event.data.settled === true) return "SETTLED";
 	return "PENDING";
 }
@@ -337,9 +349,14 @@ export function renderReceipt(data: ReceiptData): string {
 	// message and read as anomaly-caused. Correlation is not causation, and a
 	// receipt that names the wrong cause is worse than one that names none.
 	const isReleased = RELEASE_KINDS.has(event.kind);
+	const isUnrecoverable = UNRECOVERABLE_KINDS.has(event.kind);
 	const reason =
 		event.data.error ??
-		(isDetection ? event.data.message : isReleased ? event.data.reason : undefined);
+		(isDetection
+			? event.data.message
+			: isReleased || isUnrecoverable
+				? event.data.reason
+				: undefined);
 	const allVerified = chainVerified && merkleVerified;
 
 	const lines: string[] = [];
@@ -354,7 +371,13 @@ export function renderReceipt(data: ReceiptData): string {
 	// ── Transaction details ──
 	lines.push(row(pad("  TRANSACTION RECEIPT")));
 	lines.push(divider());
-	lines.push(row(`${dotted("  TX", forDisplay(event.data.transferId ?? "(none)"), WIDTH - 1)} `));
+	if (event.data.transferId === undefined && event.data.transferIdHash !== undefined) {
+		// Only the hash was recorded: show its start, labelled, never a made-up id.
+		const h = forDisplay(event.data.transferIdHash);
+		lines.push(row(`${dotted("  TX (sha256)", `${h.slice(0, 20)}...`, WIDTH - 1)} `));
+	} else {
+		lines.push(row(`${dotted("  TX", forDisplay(event.data.transferId ?? "(none)"), WIDTH - 1)} `));
+	}
 	lines.push(row(`${dotted("  Date", forDisplay(formatDate(event.timestamp)), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Model", forDisplay(model), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Provider", provider, WIDTH - 1)} `));
@@ -368,10 +391,13 @@ export function renderReceipt(data: ReceiptData): string {
 
 	const voidError =
 		isReleased || event.kind === "llm_call_failed" ? event.data.voidError : undefined;
-	if ((isFailed || isDenied || isDetection || isReleased) && (reason || voidError)) {
+	if (
+		(isFailed || isDenied || isDetection || isReleased || isUnrecoverable) &&
+		(reason || voidError)
+	) {
 		lines.push(blank());
 	}
-	if ((isFailed || isDenied || isDetection || isReleased) && reason) {
+	if ((isFailed || isDenied || isDetection || isReleased || isUnrecoverable) && reason) {
 		// The label describes THIS EVENT, and nothing else. `isDetection` alone —
 		// deliberately not `|| detectionReason !== undefined`, which labelled a
 		// TERMINAL's error "Anomaly:" whenever a detection happened to correlate,
@@ -379,7 +405,11 @@ export function renderReceipt(data: ReceiptData): string {
 		// as the detector's observation while the real detector message printed
 		// separately below. The correlated detection has its own line; it does not
 		// get to rename someone else's error.
-		const errPrefix = isDetection ? "  Anomaly: " : isReleased ? "  Reason: " : "  Error: ";
+		const errPrefix = isDetection
+			? "  Anomaly: "
+			: isReleased || isUnrecoverable
+				? "  Reason: "
+				: "  Error: ";
 		const indent = " ".repeat(errPrefix.length);
 		const maxW = WIDTH - indent.length - 2;
 		const wrapped = wordWrap(forDisplay(reason), maxW);

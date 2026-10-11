@@ -177,6 +177,15 @@ caller's reported usage, no cost) and **only** that: it never reserves, posts, v
 touches no budget counter and prices nothing. `POST /v1/settle` answers it as `410`, with `409
 already_settled` for a retry of a settle that went through in this process (bounded memory of 10 000,
 FIFO; past it a retry is recorded again, a duplicate record and never a lost one).
+*In usertrust-server, ONE function (`claim`) is the only way an entry leaves `pending`:* settle, abort,
+release, the TTL sweep and shutdown all go through it, and it registers the terminal in `claimed` in the
+same synchronous step, so a settle that finds the entry gone waits on whatever terminal holds it (bounded)
+instead of polling. A route that took an entry out on its own left a settle racing a slow client
+release or abort nothing to wait on: it answered a 409 the plugin reads as "claimed", and the usage was
+neither charged nor recorded (the same class as the sweep race, patched by handler once). Pinned by
+`tests/claim.test.ts` (exactly one delete call on `pending`, no clear call) and by red-first rows for a
+settle racing a slow release and a slow abort. `usertrust-verify --tx <id>` matches a
+`settlement_unrecoverable` record by the SHA-256 of the queried id, since the record stores no id.
 *Prevents:* a TTL-swept or restarted hold turning a client's real provider spend into a bare `404` that
 nothing records, and the opposite mistake of "recovering" it by moving money from a record. The record
 is deliberately UNATTRIBUTED (`actor: "local"`, no `costCenter`): its hold is gone, so there is no
