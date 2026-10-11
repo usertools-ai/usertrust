@@ -45,6 +45,7 @@ import { CreateTransferStatus } from "tigerbeetle-node";
 import {
 	type AuditWriter,
 	createAuditWriter,
+	readDurableEventHash,
 	releaseAuditWriterForTeardown,
 } from "./audit/chain.js";
 import {
@@ -122,6 +123,7 @@ import {
 	PendingEntryNotFoundError,
 	PolicyDeniedError,
 	SpendLedgerUnreadableError,
+	UnheldSettlementRateLimitedError,
 } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
 import {
@@ -130,6 +132,7 @@ import {
 	type JobCapture,
 	type ReleaseClass,
 	releaseClassRefusal,
+	usageTimeRefusal,
 } from "./shared/job.js";
 import {
 	capturePrincipal,
@@ -501,6 +504,26 @@ export interface Governor {
 		opts?: { releaseClass?: ReleaseClass | undefined },
 	): Promise<ReleaseOutcome>;
 
+	/**
+	 * A settle arrived for a hold this governor no longer has (a TTL sweep released it, the
+	 * process restarted, or it was already settled): real provider spend the ledger will
+	 * never charge. This makes it a RECORD instead of silence, and nothing else.
+	 *
+	 * It is a record ONLY. It never reserves, posts, voids or re-opens anything, touches no
+	 * budget counter and no hold map, and prices nothing (it has no model or rates to price
+	 * with, so the record carries the caller's reported usage, not a cost). The charge, if
+	 * the caller wants one, is a fresh `authorize()` and `settle()`.
+	 *
+	 * `{ outcome: "held" }` when this governor still has the hold: nothing is recorded, settle
+	 * that hold. Otherwise it appends `settlement_unrecoverable` and answers
+	 * `{ outcome: "unrecoverable", recorded: true }`. An EXACT retry (same id, same usage) of
+	 * one of the last {@link UNHELD_RECORD_MEMORY} records answers `recorded: false` with no
+	 * second record; past that memory it is recorded again, a duplicate record and never a lost
+	 * one. A failed append is thrown, never swallowed: no money is at stake here, so the caller
+	 * must learn the spend is not on the chain and retry.
+	 */
+	recordUnheldSettlement(params: UnheldSettlementParams): Promise<UnheldSettlementOutcome>;
+
 	/** Graceful shutdown — voids all pending holds, flushes audit. */
 	destroy(): Promise<void>;
 
@@ -554,6 +577,38 @@ export type AbortOutcome =
 export type ReleaseOutcome =
 	| { readonly released: true; readonly voidError?: string }
 	| { readonly released: false };
+
+/** What a settle for a hold this governor no longer has is: see `Governor.recordUnheldSettlement()`. */
+export interface UnheldSettlementParams {
+	/** The hold's id, as the caller knew it. Recorded only as its SHA-256. */
+	transferId: string;
+	inputTokens?: number | undefined;
+	outputTokens?: number | undefined;
+	cacheReadTokens?: number | undefined;
+	cacheWriteTokens?: number | undefined;
+	cacheWrite1hTokens?: number | undefined;
+	chunksDelivered?: number | undefined;
+	usageSource?: "provider" | "estimated" | undefined;
+	computeMs?: number | undefined;
+	usageTo?: string | undefined;
+	principal?: Principal | undefined;
+}
+
+/**
+ * What `Governor.recordUnheldSettlement()` did. `held`: this governor still has the hold, so
+ * nothing was recorded and the caller should settle it. `unrecoverable`: no hold here; the
+ * settle is on the chain (`recorded: true`) or an exact retry of one already there
+ * (`recorded: false`).
+ */
+export type UnheldSettlementOutcome =
+	| { readonly outcome: "held"; readonly transferId: string }
+	| { readonly outcome: "unrecoverable"; readonly recorded: boolean };
+
+/** Remembered `settlement_unrecoverable` records, so an exact retry is not recorded twice. */
+export const UNHELD_RECORD_MEMORY = 10_000;
+/** At most this many NEW records per window per governor; past it `recordUnheldSettlement` throws. */
+export const UNHELD_RECORD_BURST = 1_000;
+export const UNHELD_RECORD_WINDOW_MS = 60_000;
 
 /** The longest `hold_released` reason the chain records, in characters (code points). */
 const RELEASE_REASON_MAX = 200;
@@ -1117,7 +1172,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// remaining budget so TigerBeetle atomically REJECTS an over-budget hold.
 			engine = await createTBEngine(config, Math.max(0, config.budget - budgetSpent));
 		} catch (err) {
-			throw new LedgerUnavailableError(err instanceof Error ? err.message : String(err));
+			throw new LedgerUnavailableError(
+				err instanceof Error ? err.message : String(err),
+				config.tigerbeetle.addresses.join(","),
+			);
 		}
 	} else {
 		engine = null;
@@ -1150,6 +1208,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// destroy() waits for this set to drain before voidAllPending(), matching
 	// trust()'s 5s in-flight wait — never void a hold a settle is still working on.
 	const settling = new Set<string>();
+	// `recordUnheldSettlement`: the keys of the last UNHELD_RECORD_MEMORY records (FIFO), and the
+	// appends still in flight, so an identical retry never lands twice.
+	const unheldRecorded = new Set<string>();
+	const unheldInFlight = new Map<string, Promise<unknown>>();
+	const unheldWindow: number[] = []; // performance.now() of each record in the current window
 	// Holds an abort() or release() has CLAIMED and not yet recorded: parked on the
 	// budget lock or on its ledger void, and in neither map. destroy() waits for these
 	// as it does for `settling`, so a parked terminal lands its own void before the sweep.
@@ -2332,6 +2395,115 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			}
 		},
 
+		async recordUnheldSettlement(params: UnheldSettlementParams): Promise<UnheldSettlementOutcome> {
+			// Caller input, read ONCE and FIRST, into plain locals (a getter runs here and nowhere else).
+			const transferId = params.transferId;
+			if (typeof transferId !== "string" || transferId.length === 0 || transferId.length > 256) {
+				throw new TypeError(
+					"recordUnheldSettlement: transferId must be a non-empty string (max 256)",
+				);
+			}
+			const count = (v: unknown): number | undefined =>
+				typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : undefined;
+			const counts = {
+				inputTokens: count(params.inputTokens),
+				outputTokens: count(params.outputTokens),
+				cacheReadTokens: count(params.cacheReadTokens),
+				cacheWriteTokens: count(params.cacheWriteTokens),
+				cacheWrite1hTokens: count(params.cacheWrite1hTokens),
+				chunksDelivered: count(params.chunksDelivered),
+			};
+			// Every remaining field is read ONCE into a local and validated from that local: a getter
+			// that answers differently on a second read cannot get unchecked text onto the chain.
+			const rawComputeMs: unknown = params.computeMs;
+			const computeMs =
+				typeof rawComputeMs === "number" && Number.isFinite(rawComputeMs) && rawComputeMs >= 0
+					? rawComputeMs
+					: undefined;
+			const rawUsageSource: unknown = params.usageSource;
+			const usageSource =
+				rawUsageSource === "provider" || rawUsageSource === "estimated"
+					? rawUsageSource
+					: undefined;
+			// The settle path's own rule: an ISO-8601 UTC instant or nothing (an unusable one is dropped).
+			const rawUsageTo: unknown = params.usageTo;
+			const usageTo =
+				typeof rawUsageTo === "string" && usageTimeRefusal(rawUsageTo) === undefined
+					? rawUsageTo
+					: undefined;
+			const principal = capturePrincipal(params.principal);
+			if (destroyed || sweeping) throw new Error("Governor has been destroyed");
+			// A hold this governor still has is NOT unrecoverable: settle it. Includes one a settle,
+			// abort or release is working on right now.
+			if (
+				activeAuths.has(transferId) ||
+				unpostedHolds.has(transferId) ||
+				settling.has(transferId) ||
+				inFlight.has(transferId)
+			) {
+				return { outcome: "held", transferId };
+			}
+			const usage = Object.fromEntries(Object.entries(counts).filter(([, v]) => v !== undefined));
+			const data = {
+				transferIdHash: createHash("sha256").update(transferId).digest("hex"),
+				reason: "no hold for this transferId: swept, restarted or already settled",
+				source: "headless",
+				...(Object.keys(usage).length === 0 ? {} : { usage }),
+				...(usageSource === undefined ? {} : { usageSource }),
+				...(computeMs === undefined ? {} : { computeMs }),
+				...(usageTo === undefined ? {} : { usageTo }),
+				...(principal === undefined ? {} : { principal }),
+			};
+			const key = createHash("sha256").update(JSON.stringify(data)).digest("hex");
+			const first = unheldInFlight.get(key);
+			if (first !== undefined) {
+				// An identical retry while the first is still being appended shares its outcome (a
+				// failure included): it never answers `recorded: false` for a record not yet on the chain.
+				await first;
+				return { outcome: "unrecoverable", recorded: false };
+			}
+			if (unheldRecorded.has(key)) return { outcome: "unrecoverable", recorded: false };
+			// Each record is an fsync'd append: bound them per window so a client minting unknown ids
+			// cannot grow the chain without limit. Refused, never dropped: the caller sees it.
+			const now = performance.now();
+			while (
+				unheldWindow.length > 0 &&
+				now - (unheldWindow[0] as number) >= UNHELD_RECORD_WINDOW_MS
+			) {
+				unheldWindow.shift();
+			}
+			if (unheldWindow.length >= UNHELD_RECORD_BURST) {
+				throw new UnheldSettlementRateLimitedError(
+					UNHELD_RECORD_WINDOW_MS - (now - (unheldWindow[0] as number)),
+				);
+			}
+			unheldWindow.push(now);
+			// A rejected append has not necessarily written nothing: the writer fsyncs the event, THEN its
+			// sidecar, and records the event's hash on a rejection that came after the event was durable.
+			// Then the record IS on the chain: it counts as recorded, and the retry must not write it a
+			// second time. (Sharers of an in-flight append see the same outcome.)
+			const append = audit
+				.appendEvent({ kind: "settlement_unrecoverable", actor: "local", data })
+				.then(
+					() => undefined,
+					(err: unknown) => {
+						if (readDurableEventHash(err) === undefined) throw err;
+					},
+				);
+			unheldInFlight.set(key, append);
+			try {
+				await append;
+			} finally {
+				unheldInFlight.delete(key);
+			}
+			unheldRecorded.add(key);
+			if (unheldRecorded.size > UNHELD_RECORD_MEMORY) {
+				const oldest = unheldRecorded.values().next().value;
+				if (oldest !== undefined) unheldRecorded.delete(oldest);
+			}
+			return { outcome: "unrecoverable", recorded: true };
+		},
+
 		async destroy(): Promise<void> {
 			if (destroyed) return;
 			destroyed = true;
@@ -2342,7 +2514,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// drains (a settle, an abort, a release) runs as before and is waited for too; they
 			// refuse only from the claim below (`sweeping`).
 			const deadline = Date.now() + destroyDrainMs;
-			while ((settling.size > 0 || inFlight.size > 0) && Date.now() < deadline) {
+			while (
+				(settling.size > 0 || inFlight.size > 0 || unheldInFlight.size > 0) &&
+				Date.now() < deadline
+			) {
 				await new Promise<void>((r) => setTimeout(r, 50));
 			}
 

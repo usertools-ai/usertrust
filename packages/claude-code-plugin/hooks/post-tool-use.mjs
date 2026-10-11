@@ -55,6 +55,7 @@ import {
 	giveBackInvalid,
 	holdUsageStart,
 	isGated,
+	isSettleGone,
 	isTransferId,
 	jobHoldFields,
 	MAX_CONTENT_CHARS,
@@ -112,7 +113,7 @@ function withinBudget() {
 
 /** A settle's answer that its hold does not exist on the server (not an unknown route). */
 function holdIsGone(response) {
-	return response.status === 404 && response.json?.reason === "unknown transferId";
+	return isSettleGone(response);
 }
 
 /**

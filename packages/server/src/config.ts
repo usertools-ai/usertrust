@@ -23,6 +23,11 @@ const ServerConfigSchema = z.object({
 	enforcement: z.enum(["enforce", "evaluate_only"]).default("enforce"),
 	pendingTtlMs: z.number().int().positive().default(300_000),
 	dryRun: z.boolean().default(false),
+	/**
+	 * How long the start-up ledger probe waits for TigerBeetle to answer (ledger-probe.ts).
+	 * Unset means DEFAULT_LEDGER_PROBE_TIMEOUT_MS. Not read in dryRun, which needs no ledger.
+	 */
+	ledgerProbeTimeoutMs: z.number().int().min(1_000).optional(),
 	tenants: z.array(TenantSchema).min(1),
 });
 

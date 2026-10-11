@@ -201,7 +201,7 @@ All errors include fix suggestions and documentation links:
 ```
 Ledger unavailable: connection refused
 
-  Hint: Start TigerBeetle with "npx usertrust tb start" or use { dryRun: true } to skip the ledger.
+  Hint: Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=127.0.0.1:3001) or use { dryRun: true } to skip the ledger.
   Docs: https://usertrust.ai/docs/errors/ledger-unavailable
 ```
 

@@ -386,7 +386,8 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		return (
 			data?.settled !== undefined ||
 			e.kind === "settlement_ambiguous" ||
-			e.kind === "settlement_shortfall"
+			e.kind === "settlement_shortfall" ||
+			e.kind === "settlement_unrecoverable"
 		);
 	});
 	const spent = loadPersistedSpend(vaultPath, anyAttempt);

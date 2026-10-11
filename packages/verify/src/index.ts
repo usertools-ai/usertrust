@@ -30,6 +30,7 @@ import {
 	renderNotFound,
 	renderReceipt,
 	type TransactionEvent,
+	UNRECOVERABLE_KINDS,
 } from "./receipt.js";
 import { parseRekorReceipt, type RekorVerification, verifyRekorReceipt } from "./rekor-verify.js";
 import {
@@ -711,6 +712,7 @@ function normalizeEvent(raw: unknown): TransactionEvent {
 			// found/valid with exit 0 for a transaction that does not exist. A
 			// false OK, manufactured by the normalizer meant to prevent them.
 			...(str(d.transferId) !== undefined ? { transferId: str(d.transferId) } : {}),
+			...(str(d.transferIdHash) !== undefined ? { transferIdHash: str(d.transferIdHash) } : {}),
 		} as TransactionEvent["data"],
 		// PRESERVED, not defaulted. A legacy segment may legitimately carry no
 		// `sequence` (the v1 event schema allows it), and inventing 0 killed the
@@ -812,7 +814,15 @@ export function verifyTransaction(
 
 	// No per-use shape guard needed: `normalizeEvent` already guarantees `kind`
 	// is a string, `data` is an object, and `transferId` is a string.
-	const matching = events.filter((e) => e.data.transferId === txId);
+	// `settlement_unrecoverable` stores only the SHA-256 of its transferId (the id of a hold the server
+	// did not hold is caller text), so that kind matches on the hash of the queried id, as the producer
+	// computes it. Any other kind carrying a coincidental `transferIdHash` field is not matched.
+	const txHash = createHash("sha256").update(txId).digest("hex");
+	const matching = events.filter(
+		(e) =>
+			e.data.transferId === txId ||
+			(UNRECOVERABLE_KINDS.has(e.kind) && e.data.transferIdHash === txHash),
+	);
 	const isFailureTerminal = (e: TransactionEvent): boolean =>
 		e.kind === "stream_partial_delivery" ||
 		e.kind === "llm_call_failed" ||
@@ -839,6 +849,7 @@ export function verifyTransaction(
 		isFailureTerminal(e) ||
 		isDenialTerminal(e) ||
 		isReleaseTerminal(e) ||
+		UNRECOVERABLE_KINDS.has(e.kind) ||
 		e.kind === "settlement_ambiguous";
 
 	// FIRST TERMINAL IN CHAIN ORDER WINS. Not the best-TYPED terminal anywhere in

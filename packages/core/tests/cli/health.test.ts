@@ -163,6 +163,42 @@ describe("usertrust health", () => {
 		expect(logOutput.join("\n")).toContain("0.0%");
 	});
 
+	it("a settlement_unrecoverable with no spend ledger is UNKNOWN spend, not a reassuring zero", async () => {
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(join(vaultPath, "audit"), { recursive: true });
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({ budget: 50000 }),
+			"utf-8",
+		);
+		const writer = createAuditWriter(tempDir);
+		await writer.appendEvent({
+			kind: "settlement_unrecoverable",
+			actor: "local",
+			data: { transferIdHash: "a".repeat(64), usage: { inputTokens: 5 } },
+		});
+		writer.release();
+		await run(tempDir);
+		const combined = logOutput.join("\n");
+		expect(combined).toContain("[unknown]");
+		expect(combined).not.toContain("0.0% ");
+	});
+
+	it("pre-fix control: the same vault with an unrelated record still reads 0.0%", async () => {
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(join(vaultPath, "audit"), { recursive: true });
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({ budget: 50000 }),
+			"utf-8",
+		);
+		const writer = createAuditWriter(tempDir);
+		await writer.appendEvent({ kind: "not_a_settlement", actor: "local", data: { x: 1 } });
+		writer.release();
+		await run(tempDir);
+		expect(logOutput.join("\n")).toContain("0.0%");
+	});
+
 	it("reports an UNREADABLE ledger as unknown, not as zero", async () => {
 		// Rendering "0.0% [ok]" for a corrupt ledger gives the most reassuring
 		// possible answer to a question the tool cannot answer.
