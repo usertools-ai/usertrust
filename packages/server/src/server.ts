@@ -399,6 +399,53 @@ export function createUsertrustServer(opts: {
 	}
 
 	/**
+	 * Answers (and returns true) when the id is NOT an unknown hold after all: a settle for it is in flight,
+	 * it was settled in this process, or its entry is back in `pending` (a release or abort that claimed it
+	 * threw and put it back). Checked before EVERY record and once more after the last one: a release or abort
+	 * takes the entry out of `pending` WITHOUT marking `settling`, so a settle that arrived meanwhile must not
+	 * write settlement_unrecoverable and answer 410 ("authorize again") for a charge that stands.
+	 */
+	function answerIfKnown(tenant: TenantConfig, transferId: string, res: ServerResponse): boolean {
+		const key = `${tenant.id}\0${transferId}`;
+		if (settling.has(key)) {
+			sendJson(res, 409, {
+				error: "settle_in_progress",
+				reason: "a settle for this transferId is in progress: retry shortly",
+				transferId,
+			});
+			return true;
+		}
+		const earlier = recentlySettled.get(tenant.id)?.get(transferId);
+		if (earlier === "ambiguous") {
+			sendJson(res, 409, {
+				error: "settlement_ambiguous",
+				reason:
+					"the first settle's ledger post was ambiguous: it may have charged. Do not authorize again to settle it; check the ledger",
+				transferId,
+			});
+			return true;
+		}
+		if (earlier === "settled") {
+			sendJson(res, 409, {
+				error: "already_settled",
+				reason: "this transferId was already settled: the charge stands",
+				transferId,
+			});
+			return true;
+		}
+		const live = pending.get(transferId);
+		if (live !== undefined && live.tenantId === tenant.id) {
+			sendJson(res, 409, {
+				error: "hold_active",
+				reason: "the hold is live again (a release or abort did not complete): retry the settle",
+				transferId,
+			});
+			return true;
+		}
+		return false;
+	}
+
+	/**
 	 * A settle for a transferId this server holds no hold for. It used to be a bare 404, which dropped
 	 * real provider spend the ledger would never charge. Now: a settle in flight or a retry of one that
 	 * went through is a 409 (nothing recorded); anything else is RECORDED on the chain as
@@ -412,32 +459,7 @@ export function createUsertrustServer(opts: {
 		res: ServerResponse,
 	): Promise<void> {
 		const key = `${tenant.id}\0${transferId}`;
-		if (settling.has(key)) {
-			sendJson(res, 409, {
-				error: "settle_in_progress",
-				reason: "a settle for this transferId is in progress: retry shortly",
-				transferId,
-			});
-			return;
-		}
-		const earlier = recentlySettled.get(tenant.id)?.get(transferId);
-		if (earlier === "ambiguous") {
-			sendJson(res, 409, {
-				error: "settlement_ambiguous",
-				reason:
-					"the first settle's ledger post was ambiguous: it may have charged. Do not authorize again to settle it; check the ledger",
-				transferId,
-			});
-			return;
-		}
-		if (earlier === "settled") {
-			sendJson(res, 409, {
-				error: "already_settled",
-				reason: "this transferId was already settled: the charge stands",
-				transferId,
-			});
-			return;
-		}
+		if (answerIfKnown(tenant, transferId, res)) return;
 		// Only the RECORD of an unknown hold bounds the id (it is hashed into an audit event). The checks
 		// above come first on purpose: a retry of an already-settled settle with a long id (a custom factory
 		// may issue them for live holds) must still be told 409 already_settled / settlement_ambiguous, never
@@ -481,6 +503,7 @@ export function createUsertrustServer(opts: {
 					new Promise<void>((resolve) => setTimeout(resolve, RELEASE_WAIT_MAX_MS).unref()),
 				]);
 			}
+			if (answerIfKnown(tenant, transferId, res)) return;
 			let outcome = await record();
 			for (
 				let waited = 0;
@@ -488,6 +511,9 @@ export function createUsertrustServer(opts: {
 				waited += HELD_POLL_MS
 			) {
 				await new Promise<void>((resolve) => setTimeout(resolve, HELD_POLL_MS));
+				// The state can change while we wait (a failed release puts the entry back, a settle may
+				// then charge it): recheck before each record.
+				if (answerIfKnown(tenant, transferId, res)) return;
 				outcome = await record();
 			}
 			if (outcome.outcome === "held") {
@@ -498,6 +524,9 @@ export function createUsertrustServer(opts: {
 				});
 				return;
 			}
+			// ... and once more after the last record: if the id turned out to be known meanwhile, the charge
+			// stands, so the answer is that, never "not charged, authorize again".
+			if (answerIfKnown(tenant, transferId, res)) return;
 			if (outcome.recorded) {
 				settlementsUnrecoverable.set(tenant.id, (settlementsUnrecoverable.get(tenant.id) ?? 0) + 1);
 			}

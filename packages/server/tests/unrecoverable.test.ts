@@ -379,6 +379,22 @@ describe("adjudicated review threads", () => {
 		}
 	}, 30_000);
 
+	it("a settle polling on a hold that a FAILED release puts back is a 409 hold_active, never a recorded 410 for a charge that may stand", async () => {
+		// release takes 300 ms, THEN throws: the server puts the entry back in `pending`
+		const { base, fake } = await start({ releaseDelayMs: 300, release: { throws: true } });
+		const id = await authorize(base);
+		const releasing = post(base, "/v1/release", { transferId: id });
+		await new Promise((r) => setTimeout(r, 60)); // the release has claimed the entry
+		const settle = await post(base, "/v1/settle", { transferId: id });
+		expect(settle.status).toBe(409);
+		expect(await settle.json()).toMatchObject({ error: "hold_active" });
+		await releasing;
+		expect(await counted(base)).toBe(0);
+		expect(fake.calls.settled).toEqual([]);
+		// the entry is live again, so a settle now charges it normally
+		expect((await post(base, "/v1/settle", { transferId: id })).status).toBe(200);
+	}, 20_000);
+
 	it("a RETRY of an already-settled settle with a long id is 409 already_settled, not 'names no hold here'", async () => {
 		const { base } = await start({ idLength: 300 });
 		const id = await authorize(base);
