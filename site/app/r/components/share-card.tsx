@@ -3,15 +3,15 @@ import type { PageState } from "../lib/wire";
 
 /**
  * The `/r/<receiptId>` share card, in the page's brand: the ut mark and the
- * usertrust wordmark, the page's black ground and silver glow with a still
- * frame of the dot lattice, the verdict word in its register's colour and, on
+ * usertrust wordmark, the page's black ground and silver glow with the kit's
+ * frame behind them, the verdict word in its register's colour and, on
  * a verified receipt, the amount, then the tagline. The card's text is the
  * verdict and the amount only: no receipt ID, no account handle, no linked
  * receipt (decided 2026-10-05).
  *
- * `brand` says whether the brand fonts are in hand: the route fetches them
- * from the kit, checks each against its sha384 pin and decodes it
- * (`lib/kit-fonts.ts`). With them, the card sets everything in Usertools Sans
+ * `brand` says whether the brand assets are in hand: the route fetches the
+ * fonts (`lib/kit-fonts.ts`) and the frame (`lib/kit-frame.ts`) from the kit and
+ * checks each against its sha384 pin, so a card is fully branded or not at all. With them, the card sets everything in Usertools Sans
  * and draws the mark by the page's own CSS recipe (brand.css `.brand .mark`:
  * a gold pill, "ut" in Usertools Sans 700 with a same-colour stroke) — the
  * real font, so the mark is cloned, not rebuilt. Without them (the kit is
@@ -45,45 +45,19 @@ const REGISTER_INK: Record<ReturnType<typeof ogCardRegister>, string> = {
 export const SHARE_CARD_TAGLINE = "keep the receipts.";
 export const SHARE_CARD_SITE = "usertrust.ai";
 
-interface Dot {
-	x: number;
-	y: number;
-	r: number;
-	lit: boolean;
-	opacity: number;
-}
-
-/**
- * A still frame of the page's lattice: rows of dots receding toward a horizon,
- * displaced by one slow wave, a rare point lit gold. Deterministic, so the
- * same card renders the same pixels every time.
- */
-export function latticeFrame(): Dot[] {
-	const dots: Dot[] = [];
-	const rows = 14;
-	const horizon = 470;
-	const front = SHARE_CARD_SIZE.height + 30;
-	for (let row = 0; row < rows; row++) {
-		const depth = row / (rows - 1); // 0 at the horizon, 1 at the front
-		const y = horizon + (front - horizon) * depth * depth;
-		const spacing = 9 + 21 * depth;
-		const r = 0.8 + 1.6 * depth;
-		const amplitude = 6 + 22 * depth;
-		const count = Math.ceil(SHARE_CARD_SIZE.width / spacing) + 2;
-		for (let i = 0; i < count; i++) {
-			const x = i * spacing - spacing + ((row % 2) * spacing) / 2;
-			const wave = Math.sin(x / 170 + row * 0.42) * amplitude - Math.cos(x / 420) * amplitude * 0.6;
-			const lit = (i * 7 + row * 5) % 37 === 0;
-			dots.push({ x, y: y + wave, r, lit, opacity: lit ? 0.95 : 0.16 + 0.5 * depth });
-		}
-	}
-	return dots;
-}
-
 /** The page's mark recipe (brand.css: 26px box, 7px radius, 18.5px glyph, .7px stroke), scaled. */
 const MARK_SCALE = 60 / 26;
 
-export default function ShareCard({ state, brand }: { state: PageState; brand: boolean }) {
+export default function ShareCard({
+	state,
+	brand,
+	frame,
+}: {
+	state: PageState;
+	brand: boolean;
+	/** The kit's verified frame, as a data URI; drawn only on a branded card. */
+	frame?: string | undefined;
+}) {
 	const word = ogCardWord(state).toUpperCase();
 	const amount = ogCardAmount(state);
 	const ink = REGISTER_INK[ogCardRegister(state)];
@@ -104,33 +78,17 @@ export default function ShareCard({ state, brand }: { state: PageState; brand: b
 				...(brand ? { fontFamily: "Usertools Sans" } : {}),
 			}}
 		>
-			{/* the lattice, a still frame behind everything */}
-			<div
-				style={{
-					position: "absolute",
-					left: 0,
-					top: 0,
-					width: "100%",
-					height: "100%",
-					display: "flex",
-				}}
-			>
-				{latticeFrame().map((dot) => (
-					<div
-						key={`${dot.x.toFixed(1)}:${dot.y.toFixed(1)}`}
-						style={{
-							position: "absolute",
-							left: dot.x - dot.r,
-							top: dot.y - dot.r,
-							width: dot.r * 2,
-							height: dot.r * 2,
-							borderRadius: dot.r,
-							backgroundColor: dot.lit ? TOKENS.brand : TOKENS.silver,
-							opacity: dot.opacity,
-						}}
-					/>
-				))}
-			</div>
+			{/* the kit's frame, behind everything: loaded from the kit and pinned, never drawn here */}
+			{brand && frame !== undefined ? (
+				// biome-ignore lint/performance/noImgElement: the image renderer's own <img>, not next/image
+				<img
+					src={frame}
+					alt=""
+					width={SHARE_CARD_SIZE.width}
+					height={SHARE_CARD_SIZE.height}
+					style={{ position: "absolute", left: 0, top: 0 }}
+				/>
+			) : null}
 
 			{/* the nav: the mark and the wordmark, only in the brand's own font */}
 			{brand ? (
