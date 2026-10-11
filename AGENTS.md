@@ -1021,10 +1021,13 @@ a sibling window, because the window is the model, not a bug. Change the mechani
 **Nothing is appended onto a torn tail, and the quarantine is the ONE repair.** A log whose last byte
 is not `\n` ends in a torn line, and `appendEvent` refuses it (`AuditTornTailError`) with nothing
 written. `audit/quarantine.ts` (`usertrust audit quarantine-tail`) repairs exactly one state:
-unparseable bytes after the last newline, on a single `events.jsonl` that verifies from genesis with
-a `.meta` anchor at the head or one behind. It moves the bytes to `audit/quarantine/<sha256>.torn`,
-cuts the log, and records a chained `audit.quarantine.torn_tail`, all under the vault's writer lock
-(`lockAtCreate`). Anything else is refused with nothing changed.
+unparseable bytes after the last newline, on a single, singly-linked `events.jsonl` that verifies from
+genesis with a `.meta` anchor at the head or one behind (absent only for a chain of at most one
+event). Under the vault's writer lock (`lockAtCreate`) it fsyncs the log and advances an anchor one
+behind BEFORE anything is appended, moves the bytes to `audit/quarantine/<sha256>-<offset>.torn`,
+cuts the log, and records a chained `audit.quarantine.torn_tail` naming that file. Anything else is
+refused with nothing changed. A cut's identity is its digest AND offset, in the file name and the
+record alike: a digest alone let an earlier record of identical bytes suppress a later cut's.
 *Prevents:* a new line concatenated onto torn bytes, burying them mid-file as an unparseable line
 inside the chain; and a "repair" that chooses which evidence is true. `quarantine/` is a
 subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evidence as a segment.

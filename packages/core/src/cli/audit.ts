@@ -51,8 +51,8 @@ export async function run(
 		const recVerb = dryRun ? "Would record" : "Recorded";
 		// Vault-derived text is untrusted: scrubbed before it reaches the terminal (AGENTS.md
 		// "Untrusted text echoed to a terminal").
-		for (const sha of r.recorded)
-			console.log(`${recVerb} on the chain: quarantine/${scrubForTerminal(sha)}.torn`);
+		for (const file of r.recorded)
+			console.log(`${recVerb} on the chain: ${scrubForTerminal(file)}`);
 		if (r.anchorAdvanced === true) {
 			console.log(
 				dryRun

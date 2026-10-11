@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
 	appendFileSync,
 	existsSync,
+	linkSync,
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
@@ -39,6 +40,9 @@ const logOf = (v: string) => join(auditDirOf(v), "events.jsonl");
 const lines = (v: string) => readFileSync(logOf(v), "utf-8").trim().split("\n");
 const sha256 = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
 const TORN = '{"id":"half-writ';
+/** The evidence file a cut of the log's CURRENT torn tail gets: its digest and its offset. */
+const tornFile = (v: string) =>
+	`quarantine/${sha256(TORN)}-${readFileSync(logOf(v)).lastIndexOf(0x0a) + 1}.torn`;
 
 /** A vault with `n` events and then, unless `torn` is null, a torn tail. */
 async function vault(n: number, torn: string | null = '{"id":"half-writ'): Promise<string> {
@@ -70,7 +74,7 @@ describe("#194.2: quarantine-tail — the ONE repair, recorded on the chain", ()
 		const before = readFileSync(logOf(v));
 		const r = await quarantineTornTail(v, { dryRun: true });
 		expect(r.torn).toMatchObject({ length: 16 });
-		expect(r.recorded).toEqual([r.torn?.sha256]);
+		expect(r.recorded).toEqual([r.torn?.file]);
 		expect(readFileSync(logOf(v)).equals(before)).toBe(true);
 		expect(existsSync(join(auditDirOf(v), "quarantine"))).toBe(false);
 	});
@@ -101,12 +105,14 @@ describe("#194.2: quarantine-tail — the ONE repair, recorded on the chain", ()
 	it("a run that died AFTER truncating but BEFORE its record is finished by the next run, once", async () => {
 		const v = await vault(2, null);
 		const sha = sha256("torn-bytes");
+		const at = readFileSync(logOf(v)).length; // the dead run cut the log back to here
+		const file = `quarantine/${sha}-${at}.torn`;
 		mkdirSync(join(auditDirOf(v), "quarantine"));
-		writeFileSync(join(auditDirOf(v), "quarantine", `${sha}.torn`), "torn-bytes");
-		expect((await quarantineTornTail(v)).recorded).toEqual([sha]);
+		writeFileSync(join(auditDirOf(v), file), "torn-bytes");
+		expect((await quarantineTornTail(v)).recorded).toEqual([file]);
 		expect(JSON.parse(lines(v).at(-1) as string)).toMatchObject({
 			kind: QUARANTINE_EVENT_KIND,
-			data: { sha256: sha, length: 10 },
+			data: { sha256: sha, length: 10, offset: at, file },
 		});
 		expect(await quarantineTornTail(v)).toEqual({ dryRun: false, torn: null, recorded: [] });
 		expect(lines(v)).toHaveLength(3);
@@ -210,7 +216,7 @@ describe("#196 r1: quarantine evidence is never written through a link, and neve
 		dirs.push(join(victim, ".."));
 		writeFileSync(victim, "original");
 		mkdirSync(join(auditDirOf(v), "quarantine"), { mode: 0o700 });
-		symlinkSync(victim, join(auditDirOf(v), "quarantine", `${sha256(TORN)}.torn`));
+		symlinkSync(victim, join(auditDirOf(v), tornFile(v)));
 		const before = readFileSync(logOf(v));
 		await expect(quarantineTornTail(v)).rejects.toBeInstanceOf(AuditQuarantineRefusedError);
 		expect(readFileSync(victim, "utf-8")).toBe("original");
@@ -220,16 +226,17 @@ describe("#196 r1: quarantine evidence is never written through a link, and neve
 	it("an EXISTING regular evidence file whose bytes hash to its name is accepted (idempotent re-run)", async () => {
 		const v = await vault(2);
 		mkdirSync(join(auditDirOf(v), "quarantine"), { mode: 0o700 });
-		writeFileSync(join(auditDirOf(v), "quarantine", `${sha256(TORN)}.torn`), TORN);
+		const file = tornFile(v);
+		writeFileSync(join(auditDirOf(v), file), TORN);
 		const r = await quarantineTornTail(v);
-		expect(r.recorded).toEqual([sha256(TORN)]);
+		expect(r.recorded).toEqual([file]);
 		expect(verifyVault(join(v, VAULT_DIR)).valid).toBe(true);
 	});
 
 	it("an EXISTING evidence file with OTHER bytes under the torn tail's name is refused", async () => {
 		const v = await vault(2);
 		mkdirSync(join(auditDirOf(v), "quarantine"), { mode: 0o700 });
-		writeFileSync(join(auditDirOf(v), "quarantine", `${sha256(TORN)}.torn`), "planted");
+		writeFileSync(join(auditDirOf(v), tornFile(v)), "planted");
 		const before = readFileSync(logOf(v));
 		await expect(quarantineTornTail(v)).rejects.toBeInstanceOf(AuditQuarantineRefusedError);
 		expect(readFileSync(logOf(v)).equals(before)).toBe(true);
@@ -238,12 +245,20 @@ describe("#196 r1: quarantine evidence is never written through a link, and neve
 	it("P2: an orphan whose bytes do NOT hash to its name is refused, never recorded", async () => {
 		const v = await vault(2, null);
 		mkdirSync(join(auditDirOf(v), "quarantine"));
-		writeFileSync(join(auditDirOf(v), "quarantine", `${"a".repeat(64)}.torn`), "torn-bytes");
+		writeFileSync(join(auditDirOf(v), "quarantine", `${"a".repeat(64)}-0.torn`), "torn-bytes");
 		await expect(quarantineTornTail(v)).rejects.toBeInstanceOf(AuditQuarantineRefusedError);
 		expect(lines(v)).toHaveLength(2);
 	});
 
-	it("P2: a *.torn file not named <sha256>.torn is refused", async () => {
+	it("an unrecorded cut whose offset is not a line boundary of the log is refused, never recorded", async () => {
+		const v = await vault(2, null);
+		mkdirSync(join(auditDirOf(v), "quarantine"));
+		writeFileSync(join(auditDirOf(v), "quarantine", `${sha256("x")}-3.torn`), "x");
+		await expect(quarantineTornTail(v)).rejects.toBeInstanceOf(AuditQuarantineRefusedError);
+		expect(lines(v)).toHaveLength(2);
+	});
+
+	it("P2: a *.torn file not named <sha256>-<offset>.torn is refused", async () => {
 		const v = await vault(2, null);
 		mkdirSync(join(auditDirOf(v), "quarantine"));
 		writeFileSync(join(auditDirOf(v), "quarantine", "../../x.torn".replace(/\//g, "_")), "x");
@@ -367,5 +382,49 @@ describe("#196 r2: the LOG is never followed through a link, and a one-behind an
 		expect(r).toMatchObject({ torn: null, recorded: [], anchorAdvanced: true });
 		expect(verifyVault(join(v, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 3 });
 		expect(await quarantineTornTail(v)).toEqual({ dryRun: false, torn: null, recorded: [] });
+	});
+});
+
+describe("quarantine refuses what it cannot cut or verify safely", () => {
+	it("a HARD-LINKED log (another name for the same file) is refused: cutting it would cut every name — both untouched", async () => {
+		const v = await vault(2);
+		const other = join(v, "events-hardlink-elsewhere");
+		linkSync(logOf(v), other);
+		const before = readFileSync(logOf(v));
+		await expect(quarantineTornTail(v, { dryRun: true })).rejects.toBeInstanceOf(
+			AuditQuarantineRefusedError,
+		);
+		await expect(quarantineTornTail(v)).rejects.toBeInstanceOf(AuditQuarantineRefusedError);
+		expect(readFileSync(logOf(v)).equals(before)).toBe(true);
+		expect(readFileSync(other).equals(before)).toBe(true);
+		expect(existsSync(join(auditDirOf(v), "quarantine"))).toBe(false);
+	});
+
+	it("an ANCHORLESS chain of 2+ events is refused (the writer anchors every append): nothing changed", async () => {
+		const v = await vault(2);
+		rmSync(`${logOf(v)}.meta`);
+		const before = readFileSync(logOf(v));
+		await expect(quarantineTornTail(v)).rejects.toBeInstanceOf(AuditQuarantineRefusedError);
+		expect(readFileSync(logOf(v)).equals(before)).toBe(true);
+		expect(existsSync(join(auditDirOf(v), "quarantine"))).toBe(false);
+	});
+
+	it("control: an anchorless chain of ONE event (its first anchor update failed) is repaired", async () => {
+		const v = await vault(1);
+		rmSync(`${logOf(v)}.meta`);
+		const r = await quarantineTornTail(v);
+		expect(r.torn).toMatchObject({ length: 16 });
+		expect(verifyVault(join(v, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 2 });
+	});
+
+	it("an unterminated last line that PARSES is refused WITH the operator's remedy", async () => {
+		const v = await vault(2, null);
+		appendFileSync(logOf(v), '{"complete":true}');
+		const err = await quarantineTornTail(v).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(AuditQuarantineRefusedError);
+		const message = (err as Error).message;
+		expect(message).toMatch(/not a torn write/);
+		expect(message).toMatch(/newline/);
+		expect(message).toMatch(/backup/);
 	});
 });

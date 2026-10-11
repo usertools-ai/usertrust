@@ -79,7 +79,9 @@ describe("TRIPWIRE: core writes ONE audit log file (no segment rotation)", () =>
 		} finally {
 			rmSync(v, { recursive: true, force: true });
 		}
-	});
+		// 200 fsync'd appends (log, anchor temp file, rename, directory) are disk-bound: seconds on a
+		// loaded or nearly full disk. The default 5 s budget measured the disk, not the writer.
+	}, 60_000);
 
 	it("source: every `*.jsonl` name in core is a known one, where it is known; nothing renames the log", () => {
 		const root = join(__dirname, "..", "..", "src");
