@@ -70,7 +70,14 @@ In the table this is `ModelRates.longPrompt`: the row's own rates are the lower 
 `longPrompt` is `{ thresholdTokens: 100_000, rates }`. `costFromRates` selects the tier from the
 counts it prices, so every estimate, settle and stream applies the same rule, and a receipt's
 `pricing.appliedRates` are the rates of the tier the call was **settled** at: the recompute below
-still reproduces its `cost`. Only built-in table rows carry a tier; `customRates` are flat.
+still reproduces its `cost`. Only built-in table rows carry a tier; `customRates` are flat, and a
+`longPrompt` on a custom row (for example one built by spreading a table row) is ignored.
+
+**One settle is one request.** A settle prices the counts it is given as a single request. A
+caller that settles several requests' usage together, such as the Claude Code plugin's
+transcript windows, is priced at the tier of their combined prompt. That is never below what the
+requests cost one by one, and never above the higher tier for all of them. To be priced exactly,
+settle each request on its own.
 
 **Holds.** `trust()` and `createGovernor().authorize()` size a hold from an *estimated* prompt,
 which cannot tell which side of the threshold the request will land on. They hold the **higher**

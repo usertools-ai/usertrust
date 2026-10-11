@@ -30,9 +30,11 @@ import {
 	promptTokenCount,
 	resolveAppliedRates,
 	resolveCacheWrite1h,
+	resolveRates,
 	snapshotRates,
 } from "../../src/ledger/pricing.js";
 import { publishableUsageFields } from "../../src/ledger/usage.js";
+import { type TrustConfig, TrustConfigSchema } from "../../src/shared/types.js";
 
 const HAIKU = "claude-haiku-5-5";
 const THRESHOLD = 100_000;
@@ -306,5 +308,75 @@ describe("snapshotRates is deep-frozen", () => {
 		expect(Object.isFrozen(snap)).toBe(true);
 		expect(snap).not.toBe(sonnet);
 		expect(snap).toStrictEqual(sonnet);
+	});
+});
+
+describe("every built-in tier is dearer than its row, so a hold at the tier covers either", () => {
+	const RATE_KEYS = [
+		"inputPer1k",
+		"outputPer1k",
+		"cacheReadPer1k",
+		"cacheWritePer1k",
+		"cacheWrite1hPer1k",
+	] as const;
+	const tiered = Object.entries(PRICING_TABLE).filter(([, r]) => r?.longPrompt !== undefined);
+
+	it("the table has at least one tiered row (the check below is not vacuous)", () => {
+		expect(tiered.map(([m]) => m)).toContain(HAIKU);
+	});
+
+	for (const [model, row] of tiered) {
+		it(`${model}: a finite threshold, and every tier rate finite and at least the row's`, () => {
+			const tier = row?.longPrompt;
+			if (row === undefined || tier === undefined) throw new Error("not tiered");
+			expect(Number.isFinite(tier.thresholdTokens) && tier.thresholdTokens >= 0).toBe(true);
+			for (const k of RATE_KEYS) {
+				const base = row[k];
+				const high = tier.rates[k];
+				// A category the row prices, the tier prices too, never below it.
+				if (base === undefined) continue;
+				expect(Number.isFinite(high)).toBe(true);
+				expect(high).toBeGreaterThanOrEqual(base);
+			}
+		});
+	}
+});
+
+describe("an operator's row is priced FLAT, even one spread from a tiered table row", () => {
+	// The shape an operator writes to override a tiered model: spread the table row and change
+	// the base rates. The spread carries the table's `longPrompt`, which nothing validates and
+	// which is now CHEAPER than the operator's own rates.
+	const spread = (): ModelRates => ({ ...haiku(), inputPer1k: 100, outputPer1k: 100 });
+
+	it("getModelRates drops the tier from a custom row", () => {
+		const rates = getModelRates(HAIKU, { [HAIKU]: spread() });
+		expect(rates.longPrompt).toBeUndefined();
+		expect(rates.inputPer1k).toBe(100);
+		// A 150,000-token prompt is priced at the operator's rates, not the table's tier.
+		expect(costFromRates(rates, 150_000, 100)).toBe(Math.ceil(150_000 * 0.1 + 100 * 0.1));
+	});
+
+	it("an untiered custom row is returned as the operator's own object", () => {
+		const own: ModelRates = { inputPer1k: 3, outputPer1k: 7 };
+		expect(getModelRates("my-model", { "my-model": own })).toBe(own);
+	});
+
+	it("resolveRates drops the tier from a custom row and from local-model rates", () => {
+		const parsed = TrustConfigSchema.parse({ budget: 1000, pricing: "custom" });
+		// Built by hand: the schema would strip the field, and the point is a row that has it.
+		const config = {
+			...parsed,
+			customRates: { [HAIKU]: spread() },
+			local: { ...parsed.local, models: { "llama-*": spread() }, defaultRate: spread() },
+		} as TrustConfig;
+		const cloud = resolveRates(HAIKU, "cloud", config);
+		expect(cloud.rateSource).toBe("custom");
+		expect(cloud.rates.longPrompt).toBeUndefined();
+		const local = resolveRates("llama-3", "local", config);
+		expect(local.rateSource).toBe("local-model");
+		expect(local.rates.longPrompt).toBeUndefined();
+		const fallback = resolveRates("unmatched", "local", config);
+		expect(fallback.rateSource).toBe("local-default");
+		expect(fallback.rates.longPrompt).toBeUndefined();
 	});
 });

@@ -60,7 +60,8 @@ export interface ModelRates {
 	 * writes (the 1-hour writes are a subset of the cache writes, counted once). Output
 	 * never counts toward it. The tier is decided per request, by `promptTierRates`, inside
 	 * the one cost function, so every estimate, hold, settle and stream prices it the same
-	 * way. Table rows only: operator `customRates` are flat.
+	 * way. Table rows only: operator `customRates` (and local-model rates) are priced flat,
+	 * and a `longPrompt` on one is dropped at lookup (`flatRow`).
 	 */
 	longPrompt?: LongPromptTier | undefined;
 }
@@ -487,7 +488,7 @@ export function getModelRates(model: string, customRates?: Record<string, ModelR
 	// ledger). The table lookup below is own-key-only as well.
 	if (customRates && Object.hasOwn(customRates, model)) {
 		const custom = customRates[model];
-		if (custom) return custom;
+		if (custom) return flatRow(custom);
 	}
 
 	return lookupTableRates(model) ?? FALLBACK_RATE;
@@ -902,6 +903,18 @@ function withoutTier(rates: ModelRates): ModelRates {
 }
 
 /**
+ * An operator's row (`customRates`, a local model's rate) as it is priced: FLAT. Only the
+ * built-in table carries per-request prompt tiers. A custom row built by spreading a tiered
+ * table row (`{ ...getModelRates("claude-haiku-5-5"), inputPer1k: 100 }`) would otherwise
+ * keep the table's `longPrompt`, which nothing validates and which need not be dearer than
+ * the operator's own rates: a hold sized at that tier could then be BELOW the settle.
+ * Returned as-is when it has no tier, so an untiered row keeps its identity.
+ */
+function flatRow(rates: ModelRates): ModelRates {
+	return rates.longPrompt === undefined ? rates : withoutTier(rates);
+}
+
+/**
  * A DEEP-frozen copy of a rate row, for a snapshot that must not change after it is taken
  * (a hold that settles later). A tiered row's `longPrompt` is an object of its own, so a
  * shallow copy would still share it with the table.
@@ -1128,10 +1141,16 @@ export function resolveRates(
 			config.local.rateClass === "amortized-usd" ? "usd-proxy" : "nominal";
 		const match = matchModelPattern(model, config.local.models);
 		if (match !== undefined) {
-			return { rates: match.value, scope, costBasis, rateSource: "local-model", unknown: false };
+			return {
+				rates: flatRow(match.value),
+				scope,
+				costBasis,
+				rateSource: "local-model",
+				unknown: false,
+			};
 		}
 		return {
-			rates: config.local.defaultRate,
+			rates: flatRow(config.local.defaultRate),
 			scope,
 			costBasis,
 			rateSource: "local-default",
@@ -1147,7 +1166,13 @@ export function resolveRates(
 	if (customRates && Object.hasOwn(customRates, model)) {
 		const custom = customRates[model];
 		if (custom) {
-			return { rates: custom, scope, costBasis: "usd-proxy", rateSource: "custom", unknown: false };
+			return {
+				rates: flatRow(custom),
+				scope,
+				costBasis: "usd-proxy",
+				rateSource: "custom",
+				unknown: false,
+			};
 		}
 	}
 

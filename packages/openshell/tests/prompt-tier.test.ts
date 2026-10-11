@@ -88,6 +88,37 @@ describe("the gate holds Haiku 5.5 at the tier its prompt BOUND selects", () => 
 		expect(large.overage).toBe(0);
 	});
 
+	it("an operator row spread from the tiered table row is priced FLAT: its hold covers the settle", () => {
+		// The override an operator writes by spreading the table row: base rates raised to 100,
+		// the table's (now cheaper) `longPrompt` carried along. Priced by that tier, a bound over
+		// 100,000 would hold a few hundred units for a call that settles at over 10,000.
+		const customRates = {
+			[MODEL]: { ...getModelRates(MODEL), inputPer1k: 100, outputPer1k: 100 },
+		};
+		const r = evaluateRequest(
+			{
+				method: "POST",
+				host: "api.anthropic.com",
+				path: "/v1/messages",
+				body: enc(bodyOfAbout(110_000)),
+			},
+			{ ...DEFAULT_GATE_CONFIG, customRates },
+		);
+		if (r.decision !== "allow") throw new Error("not allowed");
+		expect(bound(r)).toBeGreaterThan(100_000);
+		expect(r.hold.rates.longPrompt).toBeUndefined();
+		const settled = settleHold(r.hold, {
+			inputTokens: 100_000,
+			outputTokens: 100,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			source: "provider",
+		});
+		expect(settled.actual).toBe(Math.ceil((100_000 * 100) / 1000 + (100 * 100) / 1000));
+		expect(r.hold.amount).toBeGreaterThanOrEqual(settled.actual);
+		expect(settled.overage).toBe(0);
+	});
+
 	it("the hold's rate snapshot is deep-frozen (its tier cannot be edited after authorize)", () => {
 		const r = gate(bodyOfAbout(1000));
 		if (r.decision !== "allow") throw new Error("not allowed");
