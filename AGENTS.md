@@ -54,7 +54,7 @@ are not.
 |---|---|
 | Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `config.ts`, `proxy.ts` |
 | Ledger | `ledger/{client,engine,pricing}.ts` |
-| Audit | `audit/{chain,canonical,merkle,verify,read,rotation,entropy}.ts` |
+| Audit | `audit/{chain,canonical,merkle,verify,read,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
 | Policy | `policy/{gate,default-rules,pii,injection,canary,decay}.ts` |
 | Board | `board/{board,director,concerns}.ts` |
@@ -996,8 +996,10 @@ in the clear, with no hash chain over it. `0600` is the only thing protecting it
 
 **Single-writer audit semantics.** In-process `AsyncMutex` + an `O_WRONLY|O_CREAT|O_EXCL` advisory
 lock file + an owner registry that distinguishes a crashed same-PID writer (reclaimable) from a live
-sibling (refused). Every append is `writeSync` + `fsyncSync` + `closeSync`, and the `.meta` sidecar
-is fsync'd too. Reclaiming a *live* sibling's lock forks the chain, because each writer caches its
+sibling (refused). Every append writes EVERY byte (`writeFully`: a short `writeSync` is looped, and
+one that makes no progress throws, so nothing is claimed durable and the cached tail is dropped),
+then `fsyncSync` + `closeSync`. The `.meta` sidecar is replaced atomically: a temp file, fsync,
+rename, then a directory fsync (only an UNSUPPORTED directory fsync is best effort). Reclaiming a *live* sibling's lock forks the chain, because each writer caches its
 own tail. There is **no** cross-process protection beyond this advisory lock.
 
 **The lock's threat model: accidental concurrent writers, not an adversary.** The lock stops two
@@ -1015,6 +1017,36 @@ open for the writer's lifetime was rejected earlier, because the lock's semantic
 file's existence at its path; an open fd adds no exclusion except together with such a kernel lock.
 *Prevents:* a review round "fixing" another pathname race inside this model. Every such fix leaves
 a sibling window, because the window is the model, not a bug. Change the mechanism (#288) instead.
+
+**Nothing is appended onto a torn tail, and the quarantine is the ONE repair.** A log whose last byte
+is not `\n` ends in a torn line, and `appendEvent` refuses it (`AuditTornTailError`) with nothing
+written. `audit/quarantine.ts` (`usertrust audit quarantine-tail`) repairs exactly one state:
+unparseable bytes after the last newline, on a single, singly-linked `events.jsonl` that verifies from
+genesis with a `.meta` anchor at the head or one behind (absent only for a chain of at most one
+event). Under the vault's writer lock (`lockAtCreate`) it fsyncs the log and brings an anchor one
+behind, or absent, to the verified head BEFORE anything is appended, moves the bytes to `audit/quarantine/<sha256>-<offset>.torn`,
+cuts the log, and records a chained `audit.quarantine.torn_tail` naming that file. Anything else is
+refused with nothing changed. A cut's identity is its digest AND offset, in the file name and the
+record alike: a digest alone let an earlier record of identical bytes suppress a later cut's.
+Every refusal (`AuditQuarantineRefusedError`, "Nothing was changed") comes before the first write:
+from the read-only analysis, or from the link check on the log's own descriptor immediately before
+the first repair write. So a refusal changes nothing.
+*The one exception, and how it is reported:* a hard link made to the log AFTER that check, before
+the cut — another actor working on the vault mid-repair, the same class as the directory
+replacement in the lock's threat model, and not closable without an atomic check-and-truncate. The
+cut-time check then throws `AuditQuarantineInterruptedError`, never a refusal: it does not cut, its
+message and `done` name what was already done (the anchor brought to the head, the evidence saved),
+and never claim that nothing changed. That state is one the next run finishes from once the extra
+name is removed. A link made between the cut-time check and the truncate itself cannot be seen at
+all, and the truncate then cuts both names.
+`tests/audit/quarantine-crash-sweep.test.ts` holds these properties: it crashes the repair at each
+durable step, from each start state, and requires the next run to converge (verifies, anchor at the
+head, one record per cut); every refusal must leave the log, `.meta` and `quarantine/` byte-identical;
+and a hard link planted before each fs call of the repair must give a refusal before the first
+write, an interrupted repair from it up to the cut, and convergence once the link is removed.
+*Prevents:* a new line concatenated onto torn bytes, burying them mid-file as an unparseable line
+inside the chain; and a "repair" that chooses which evidence is true. `quarantine/` is a
+subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evidence as a segment.
 
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
 `packages/core/src/audit/read.ts`, and `packages/core/src/audit/verify.ts` contain zero filesystem
