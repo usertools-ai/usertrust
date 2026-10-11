@@ -24,6 +24,7 @@ import {
 	readFileSync,
 	readlinkSync,
 	realpathSync,
+	renameSync,
 	unlinkSync,
 	writeSync,
 } from "node:fs";
@@ -48,6 +49,67 @@ function writeFully(fd: number, data: string): void {
 			throw new Error(`audit write made no progress (${off} of ${buf.length} bytes written)`);
 		}
 		off += n;
+	}
+}
+
+/**
+ * Replace the `.meta` head anchor ATOMICALLY: written and fsync'd to a private temp file, then
+ * renamed over the anchor, then the directory is fsync'd. Rewriting it in place (open "w" truncates
+ * first) left an EMPTY or half-written anchor after a crash mid-write — one that reads as corrupt
+ * and refuses every append and verification. Now the anchor is always the old one or the new one.
+ */
+export function writeAnchorAtomically(metaPath: string, content: string): void {
+	const tmp = `${metaPath}.${randomUUID()}.tmp`;
+	const fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+	try {
+		try {
+			writeFully(fd, content);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		renameSync(tmp, metaPath);
+	} catch (err) {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			/* renamed, or never created */
+		}
+		throw err;
+	}
+	// The parent-directory fsync makes the RENAME durable. Only an UNSUPPORTED directory fsync
+	// (EINVAL/ENOTSUP/EOPNOTSUPP/EISDIR) is best effort; a genuine failure (EIO, …) propagates into
+	// appendEvent's degraded-append / durable-hash contract instead of reporting a durable anchor a
+	// crash could roll back.
+	let dfd: number | undefined;
+	try {
+		dfd = openSync(dirname(metaPath), "r");
+		fsyncSync(dfd);
+	} catch (err) {
+		if (!isUnsupportedDirSync(err)) throw err;
+	} finally {
+		if (dfd !== undefined) closeSync(dfd);
+	}
+}
+
+/** A directory fsync the platform does not support — the only directory-sync error that is best effort. */
+export function isUnsupportedDirSync(err: unknown): boolean {
+	const code = errorCode(err);
+	return code === "EINVAL" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "EISDIR";
+}
+
+/**
+ * The log ends in a TORN line — bytes after its last newline, from an append that never
+ * completed. Nothing is appended after it: the new line would be concatenated onto the torn
+ * bytes, burying them mid-file. `usertrust audit quarantine-tail` moves a torn tail aside,
+ * recorded on the chain.
+ */
+export class AuditTornTailError extends Error {
+	constructor(logPath: string, bytes: number) {
+		super(
+			`Audit log ${logPath} ends in a torn line (${bytes} byte(s) after its last newline). Refusing to append. Run \`usertrust audit quarantine-tail\` to move it aside, recorded on the chain.`,
+		);
+		this.name = "AuditTornTailError";
 	}
 }
 
@@ -958,7 +1020,13 @@ function getLastEvent(logPath: string, cache: Map<string, CachedTail>): CachedTa
 
 	if (!existsSync(logPath)) return null;
 
-	const content = readFileSync(logPath, "utf-8").trim();
+	const raw = readFileSync(logPath, "utf-8");
+	// A log whose last byte is not a newline ends in a TORN line (#194). Appending would
+	// concatenate onto it; refuse, and let the operator quarantine it (recorded on the chain).
+	if (raw.length > 0 && !raw.endsWith("\n")) {
+		throw new AuditTornTailError(logPath, Buffer.byteLength(raw.slice(raw.lastIndexOf("\n") + 1)));
+	}
+	const content = raw.trim();
 	if (!content) {
 		const metaPath = `${logPath}.meta`;
 		if (existsSync(metaPath)) {
@@ -1129,9 +1197,18 @@ export function createAuditWriter(
 			const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
 			fullEvent.hash = hash;
 
-			const fd = openSync(logPath, "a");
+			// O_NOFOLLOW: an append never writes THROUGH a symlinked log into a file outside the
+			// vault. Mode as `openSync(path, "a")` created it (0o666 & ~umask).
+			const fd = openSync(
+				logPath,
+				fsConstants.O_WRONLY |
+					fsConstants.O_APPEND |
+					fsConstants.O_CREAT |
+					(fsConstants.O_NOFOLLOW ?? 0),
+				0o666,
+			);
 			try {
-				writeSync(fd, `${persisted}\n`);
+				writeFully(fd, `${persisted}\n`);
 				fsyncSync(fd);
 			} finally {
 				closeSync(fd);
@@ -1144,19 +1221,15 @@ export function createAuditWriter(
 			durableHash = hash;
 
 			// Persist last hash to sidecar for cross-segment chain continuity
-			const metaPath = `${logPath}.meta`;
-			const metaFd = openSync(metaPath, "w");
-			try {
-				writeSync(metaFd, JSON.stringify({ lastHash: hash, sequence }));
-				fsyncSync(metaFd);
-			} finally {
-				closeSync(metaFd);
-			}
+			writeAnchorAtomically(`${logPath}.meta`, JSON.stringify({ lastHash: hash, sequence }));
 
 			return fullEvent;
 		} catch (err) {
 			degraded = true;
 			writeFailures++;
+			// The cached tail may no longer be the log's tail (a partial write): the next append
+			// re-reads the log, and refuses a torn one.
+			lastEventCache.delete(logPath);
 			if (durableHash !== undefined && err !== null && typeof err === "object") {
 				Object.defineProperty(err, DURABLE_EVENT_HASH, {
 					value: durableHash,
