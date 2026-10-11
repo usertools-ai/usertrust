@@ -63,6 +63,15 @@ describe("loadServerConfig", () => {
 		const path = await writeConfig({ tenants: [{ id: "../etc", keyHash: hashKey("k") }] });
 		await expect(loadServerConfig(path)).rejects.toThrow();
 	});
+
+	it("ledgerProbeTimeoutMs is optional, and below 1000 ms is refused", async () => {
+		expect((await loadServerConfig(await writeConfig())).ledgerProbeTimeoutMs).toBeUndefined();
+		const set = await loadServerConfig(await writeConfig({ ledgerProbeTimeoutMs: 2_500 }));
+		expect(set.ledgerProbeTimeoutMs).toBe(2_500);
+		await expect(
+			loadServerConfig(await writeConfig({ ledgerProbeTimeoutMs: 999 })),
+		).rejects.toThrow();
+	});
 });
 
 describe("resolveTenant", () => {

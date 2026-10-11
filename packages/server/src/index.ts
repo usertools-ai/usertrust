@@ -5,6 +5,13 @@ export type { ServerConfig, TenantConfig } from "./config.js";
 export { hashKey, loadServerConfig, resolveTenant } from "./config.js";
 export type { ServerEvent } from "./events.js";
 export { EventBus } from "./events.js";
+export type { LedgerProbeOutcome, LedgerProbeResult, LedgerTarget } from "./ledger-probe.js";
+export {
+	classifyLedgerProbe,
+	DEFAULT_LEDGER_PROBE_TIMEOUT_MS,
+	probeLedger,
+	resolveLedgerTargets,
+} from "./ledger-probe.js";
 export type { GovernorFactory } from "./pool.js";
 export { GovernorPool } from "./pool.js";
 export type { UsertrustServer } from "./server.js";
