@@ -97,7 +97,7 @@ describe("pending state store (one file per hold)", () => {
 		await recordPending("s", "main", { toolUseId: "a", transferId: "tx_a" });
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		await recordPending("s", "main", { toolUseId: "b", transferId: "tx_b" });
-		// A stale or concurrent-tool id must not settle someone else's reservation (AUD-005).
+		// A stale or concurrent-tool id must not settle someone else's reservation.
 		expect(await takePendingEntry("s", "main", "zzz")).toBeNull();
 	});
 

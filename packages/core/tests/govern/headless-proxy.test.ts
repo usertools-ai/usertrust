@@ -1,7 +1,7 @@
 /**
  * headless-proxy.test.ts
  *
- * AUD-456: Proxy mode has been removed from the public API.
+ * Proxy mode has been removed from the public API.
  * These tests verify that attempting to use proxy mode throws
  * a clear error, and that the headless governor works without proxy.
  */

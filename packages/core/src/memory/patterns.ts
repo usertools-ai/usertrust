@@ -28,7 +28,7 @@ const PATTERNS_DIR = "patterns";
 const MEMORY_FILE = "memory.json";
 const MAX_ENTRIES = 10_000;
 
-// ── AsyncMutex (AUD-464) ──
+// ── AsyncMutex ──
 
 /**
  * In-process async mutex for serializing pattern memory writes.
@@ -138,7 +138,7 @@ export function hashPrompt(text: string): string {
  * Evicts oldest entries when exceeding 10,000.
  *
  * Uses an async mutex to serialize concurrent read-modify-write cycles
- * and prevent entry loss under concurrent calls (AUD-464).
+ * and prevent entry loss under concurrent calls.
  */
 export async function recordPattern(
 	entry: Omit<PatternEntry, "timestamp">,

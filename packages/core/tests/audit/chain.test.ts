@@ -605,7 +605,8 @@ describe("Audit Chain Writer — lockAtCreate (the lock taken in the factory)", 
 		}
 		expect(caught).toBeInstanceOf(AuditWriterLockHeldError);
 		expect(caught).toBeInstanceOf(Error);
-		// The message names the lock by its REAL path (the one every lock key uses).
+		// The message names the lock file at its PHYSICAL path (#195 r4: the stored lock path is the
+		// directory's realpath; the registry KEY is the directory's identity, never a path).
 		expect(String((caught as Error).message)).toBe(
 			`Audit writer lock held by PID ${process.ppid}. Only one process may write to the audit log. Lock file: ${join(realpathSync(join(tempDir, ".usertrust", "audit")), ".audit-writer.lock")}`,
 		);
@@ -642,7 +643,7 @@ describe("Audit Chain Writer — lockAtCreate (the lock taken in the factory)", 
 	});
 });
 
-describe("Audit Chain Writer — one vault, many spellings (the lock is keyed on the REAL path)", () => {
+describe("Audit Chain Writer — one vault, many spellings (one lock file, whatever the spelling)", () => {
 	let tempDir: string;
 	const writers: Array<ReturnType<typeof createAuditWriter>> = [];
 	const lockPath = () => join(tempDir, ".usertrust", "audit", ".audit-writer.lock");

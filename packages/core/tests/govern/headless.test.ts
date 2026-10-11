@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AuditWriter } from "../../src/audit/chain.js";
+import { AuditLockReleaseError, type AuditWriter } from "../../src/audit/chain.js";
 import type { TrustEngine } from "../../src/govern.js";
 import type { Governor } from "../../src/headless.js";
 import { createGovernor } from "../../src/headless.js";
@@ -351,7 +351,7 @@ describe("headless governor", () => {
 		expect(engine.voidedIds).toHaveLength(2);
 	});
 
-	// ── AUD-456: Proxy mode removed ──
+	// ── Proxy mode removed ──
 
 	it("createGovernor throws when proxy is set (AUD-456)", async () => {
 		await expect(
@@ -382,6 +382,52 @@ describe("headless governor", () => {
 				proxy: "https://proxy.example.com",
 			}),
 		).rejects.toThrow("dryRun");
+	});
+
+	it("a lock left behind: destroy() RESOLVES, still destroys the engine, and reports it as a USERTRUST_AUDIT_LOCK_LEFT warning — none when release succeeds", async () => {
+		const LEFT = "/vaults/a/.usertrust/audit/.audit-writer.lock";
+		const emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			for (const fails of [true, false]) {
+				emitWarning.mockClear();
+				const mockAudit: AuditWriter = {
+					appendEvent: vi.fn(),
+					getWriteFailures: () => 0,
+					isDegraded: () => false,
+					flush: async () => {},
+					release: () => {
+						if (fails) {
+							throw new AuditLockReleaseError([
+								{ path: LEFT, error: Object.assign(new Error("EIO: i/o error"), { code: "EIO" }) },
+							]);
+						}
+					},
+				};
+				const engine = mockEngine();
+				const engineDestroy = vi.spyOn(engine, "destroy");
+				const gov = await createGovernor({
+					budget: 100_000,
+					vaultBase,
+					_engine: engine,
+					_audit: mockAudit,
+				});
+
+				await expect(gov.destroy()).resolves.toBeUndefined();
+				expect(engineDestroy).toHaveBeenCalledOnce();
+				if (fails) {
+					expect(emitWarning).toHaveBeenCalledWith(
+						expect.stringContaining(LEFT),
+						expect.objectContaining({ code: "USERTRUST_AUDIT_LOCK_LEFT" }),
+					);
+				} else {
+					expect(emitWarning, "control: no warning").not.toHaveBeenCalled();
+				}
+			}
+		} finally {
+			emitWarning.mockRestore();
+			warn.mockRestore();
+		}
 	});
 
 	// ── Engine POST failure in settle() ──
@@ -832,7 +878,7 @@ describe("headless governor", () => {
 		await gov.destroy();
 	});
 
-	// ── AUD-456: Proxy settle failure branch removed ──
+	// ── Proxy settle failure branch removed ──
 
 	it("createGovernor rejects proxy option (AUD-456)", async () => {
 		await expect(
@@ -991,5 +1037,195 @@ describe("headless governor", () => {
 		await expect(gov.authorize({ model: "claude-sonnet-4-6" })).rejects.toThrow("string error");
 
 		await gov.destroy();
+	});
+
+	// ── Teardown: every step is attempted, whatever an earlier one does ──
+
+	function teardownAudit(release: () => void): AuditWriter {
+		return {
+			appendEvent: vi.fn(async (input) => ({
+				id: randomUUID(),
+				timestamp: new Date().toISOString(),
+				previousHash: "0".repeat(64),
+				hash: "a".repeat(64),
+				kind: input.kind,
+				actor: input.actor,
+				data: input.data,
+			})),
+			getWriteFailures: () => 0,
+			isDegraded: () => false,
+			flush: async () => {},
+			release: vi.fn(release),
+		};
+	}
+
+	it("destroy: a throwing engine destroy still rejects with the engine's own error", async () => {
+		const engineErr = new Error("engine destroy failed");
+		const engine = mockEngine();
+		const engineDestroy = vi.fn(() => {
+			throw engineErr;
+		});
+		engine.destroy = engineDestroy;
+		const audit = teardownAudit(() => {});
+
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: engine,
+			_audit: audit,
+		});
+
+		await expect(gov.destroy()).rejects.toBe(engineErr);
+		expect(audit.release).toHaveBeenCalledOnce();
+		expect(engineDestroy).toHaveBeenCalledOnce();
+	});
+
+	it("destroy control: no step throws, it resolves and each step runs exactly once", async () => {
+		const engine = mockEngine();
+		const engineDestroy = vi.fn();
+		engine.destroy = engineDestroy;
+		const audit = teardownAudit(() => {});
+
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: engine,
+			_audit: audit,
+		});
+
+		await expect(gov.destroy()).resolves.toBeUndefined();
+		expect(audit.release).toHaveBeenCalledOnce();
+		expect(engineDestroy).toHaveBeenCalledOnce();
+	});
+
+	// The drain, the engine sweep and the flush are teardown steps too: a throw from any of
+	// them must not leave the TigerBeetle client open (the process would hang on it) or the
+	// audit lock held. One hold is left active so the drain has a hold to void and record.
+	async function governorForTeardown(
+		fail: { drain?: unknown; voidAll?: unknown; flush?: unknown; release?: unknown } = {},
+	) {
+		const calls: string[] = [];
+		const engine = mockEngine();
+		const voidPendingSpend = engine.voidPendingSpend.bind(engine);
+		engine.voidPendingSpend = async (transferId) => {
+			calls.push("voidPendingSpend");
+			await voidPendingSpend(transferId);
+		};
+		engine.voidAllPending = async () => {
+			calls.push("voidAllPending");
+			if (fail.voidAll !== undefined) throw fail.voidAll;
+		};
+		const engineDestroy = vi.fn(() => {
+			calls.push("engine.destroy");
+		});
+		engine.destroy = engineDestroy;
+		const audit = teardownAudit(() => {
+			calls.push("release");
+			if (fail.release !== undefined) throw fail.release;
+		});
+		const append = audit.appendEvent;
+		// Synchronous on purpose: a throw here is one the drain's own `.catch` cannot see.
+		audit.appendEvent = (input) => {
+			if (input.kind === "hold_released") {
+				calls.push("hold_released");
+				if (fail.drain !== undefined) throw fail.drain;
+			}
+			return append(input);
+		};
+		audit.flush = vi.fn(async () => {
+			calls.push("flush");
+			if (fail.flush !== undefined) throw fail.flush;
+		});
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: engine,
+			_audit: audit,
+		});
+		await gov.authorize({ model: "claude-sonnet-4-6" });
+		return { gov, engineDestroy, audit, calls };
+	}
+
+	it("destroy: a throwing voidAllPending is still swallowed (unchanged), and every later step runs", async () => {
+		const { gov, engineDestroy, audit } = await governorForTeardown({
+			voidAll: new Error("voidAllPending failed"),
+		});
+
+		await expect(gov.destroy()).resolves.toBeUndefined();
+		expect(audit.flush).toHaveBeenCalledOnce();
+		expect(audit.release).toHaveBeenCalledOnce();
+		expect(engineDestroy).toHaveBeenCalledOnce();
+	});
+
+	it("destroy: a throwing flush still releases the lock and destroys the engine, then rejects with its error", async () => {
+		const flushErr = new Error("flush failed");
+		const { gov, engineDestroy, audit } = await governorForTeardown({ flush: flushErr });
+
+		await expect(gov.destroy()).rejects.toBe(flushErr);
+		expect(audit.release).toHaveBeenCalledOnce();
+		expect(engineDestroy).toHaveBeenCalledOnce();
+	});
+
+	it("destroy: a throw from the drain still sweeps, flushes, releases and destroys the engine, then rejects with it", async () => {
+		const drainErr = new Error("drain failed");
+		const { gov, engineDestroy, audit, calls } = await governorForTeardown({ drain: drainErr });
+
+		await expect(gov.destroy()).rejects.toBe(drainErr);
+		expect(calls).toContain("voidAllPending");
+		expect(audit.flush).toHaveBeenCalledOnce();
+		expect(audit.release).toHaveBeenCalledOnce();
+		expect(engineDestroy).toHaveBeenCalledOnce();
+	});
+
+	it("destroy: a throwing drain and flush reject with ONE AggregateError, in step order", async () => {
+		const drainErr = new Error("drain failed");
+		const flushErr = new Error("flush failed");
+		const { gov, engineDestroy } = await governorForTeardown({ drain: drainErr, flush: flushErr });
+
+		const err = await gov.destroy().then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(AggregateError);
+		expect((err as AggregateError).errors).toEqual([drainErr, flushErr]);
+		expect((err as AggregateError).errors[0]).toBe(drainErr);
+		expect((err as AggregateError).errors[1]).toBe(flushErr);
+		expect(engineDestroy).toHaveBeenCalledOnce();
+	});
+
+	it("destroy: a lock left behind adds no rejection: a throwing flush rejects with its error alone", async () => {
+		const emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const flushErr = new Error("flush failed");
+			const { gov, engineDestroy } = await governorForTeardown({
+				flush: flushErr,
+				release: new Error("lock left behind"),
+			});
+
+			await expect(gov.destroy()).rejects.toBe(flushErr);
+			expect(engineDestroy).toHaveBeenCalledOnce();
+			expect(emitWarning).toHaveBeenCalledWith(
+				expect.any(String),
+				expect.objectContaining({ code: "USERTRUST_AUDIT_LOCK_LEFT" }),
+			);
+		} finally {
+			emitWarning.mockRestore();
+			warn.mockRestore();
+		}
+	});
+
+	it("destroy control: nothing throws, it resolves and runs every step once, in order", async () => {
+		const { gov, calls } = await governorForTeardown();
+
+		await expect(gov.destroy()).resolves.toBeUndefined();
+		expect(calls).toEqual([
+			"voidPendingSpend",
+			"hold_released",
+			"voidAllPending",
+			"flush",
+			"release",
+			"engine.destroy",
+		]);
 	});
 });

@@ -4,7 +4,7 @@
 /**
  * Proxy Mode — Remote Governance Connection
  *
- * AUD-456: Proxy mode is removed from the public API.
+ * Proxy mode is removed from the public API.
  *
  * The previous stub implementation returned hardcoded success for all
  * financial operations (spend/settle/void), making the entire two-phase
@@ -41,7 +41,7 @@ export interface ProxyConnection {
 /**
  * Connect to a remote governance proxy.
  *
- * AUD-456: Proxy mode is not yet implemented. The previous stub returned
+ * Proxy mode is not yet implemented. The previous stub returned
  * hardcoded success, bypassing all financial governance. This function
  * now throws to prevent silent governance bypass.
  *

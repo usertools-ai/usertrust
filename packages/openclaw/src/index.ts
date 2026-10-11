@@ -476,7 +476,7 @@ export interface GovernedStreamFnOptions {
 	 * headless tests use.
 	 *
 	 * NOT a governance bypass: core accepts an injected engine only under
-	 * `USERTRUST_TEST=1` / `NODE_ENV=test` (AUD-470) and ignores it in production,
+	 * `USERTRUST_TEST=1` / `NODE_ENV=test` and ignores it in production,
 	 * so passing one from shipped code buys nothing.
 	 *
 	 * It deliberately does NOT participate in the governor fingerprint — the
