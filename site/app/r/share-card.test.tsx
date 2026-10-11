@@ -7,11 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import ShareCard, {
-	latticeFrame,
-	SHARE_CARD_SITE,
-	SHARE_CARD_TAGLINE,
-} from "./components/share-card";
+import ShareCard, { SHARE_CARD_SITE, SHARE_CARD_TAGLINE } from "./components/share-card";
 import { fixtureState, loadFixture } from "./fixture-harness";
 
 /** The card's text, in order, by its data-share slots. */
@@ -95,21 +91,37 @@ test("the verdict is green only when verified, in brand.css's register inks", ()
 test("the card draws; the route fetches only through the pinned font loader", () => {
 	const strip = (path: string) =>
 		readFileSync(new URL(path, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-	assert.doesNotMatch(strip("./components/share-card.tsx"), /fetch\(|https?:\/\/|<img|readFile/);
+	assert.doesNotMatch(strip("./components/share-card.tsx"), /fetch\(|https?:\/\/|readFile/);
 	const route = strip("./[receiptId]/opengraph-image.tsx");
 	assert.doesNotMatch(route, /fetch\(|https?:\/\/|readFile/, "no direct fetch, URL or file read");
 	assert.match(route, /getKitFonts\(\)/, "fonts come from the pinned loader");
+	assert.match(route, /getKitFrame\(\)/, "the frame comes from the pinned loader");
+	assert.match(
+		route,
+		/const brand = fonts !== undefined && frame !== undefined;/,
+		"fully branded or not at all: the fonts AND the frame",
+	);
 	const markup = renderToStaticMarkup(
 		<ShareCard state={fixtureState(loadFixture("cluster/first.json"))} brand={true} />,
 	);
-	assert.doesNotMatch(markup, /<img|url\(/);
+	assert.doesNotMatch(markup, /<img|url\(/, "no frame given, none drawn");
 });
 
-test("the lattice is a deterministic still frame", () => {
-	assert.deepEqual(latticeFrame(), latticeFrame());
-	assert.ok(latticeFrame().length > 300, "a sheet, not a scatter");
-	assert.ok(
-		latticeFrame().some((dot) => dot.lit),
-		"a rare point lit gold",
-	);
+const FRAME = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=";
+
+test("the kit's frame is drawn behind a branded card only, as the one image, from a data URI", () => {
+	const state = fixtureState(loadFixture("cluster/first.json"));
+	const branded = renderToStaticMarkup(<ShareCard state={state} brand={true} frame={FRAME} />);
+	assert.equal((branded.match(/<img /g) ?? []).length, 1);
+	assert.ok(branded.includes(`src="${FRAME}"`));
+	assert.ok(branded.indexOf("<img ") < branded.indexOf('data-share="mark"'), "behind the content");
+	const fallback = renderToStaticMarkup(<ShareCard state={state} brand={false} frame={FRAME} />);
+	assert.doesNotMatch(fallback, /<img/, "an unbranded card draws no frame");
+	const noFrame = renderToStaticMarkup(<ShareCard state={state} brand={true} />);
+	assert.doesNotMatch(noFrame, /<img/);
+});
+
+test("no lattice arithmetic lives in the public repo: the card carries no dot generator", () => {
+	const text = readFileSync(new URL("./components/share-card.tsx", import.meta.url), "utf8");
+	assert.doesNotMatch(text, /latticeFrame|Math\.(sin|cos)|horizon|amplitude/);
 });
