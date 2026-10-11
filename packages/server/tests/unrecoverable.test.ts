@@ -15,7 +15,7 @@
  * `/v1/abort` and `/v1/release` keep their 404.
  */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ServerConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
 import {
@@ -342,6 +342,42 @@ describe("adjudicated review threads", () => {
 		expect(fake.calls.unheld.length).toBeGreaterThan(0);
 		await sweeping;
 	}, 20_000);
+
+	it("a release that NEVER settles is waited for only the bounded time, then 409 hold_active with nothing recorded", async () => {
+		const { base, fake } = await start({ releaseDelayMs: 10 ** 9 });
+		const id = await authorize(base);
+		const real = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			void server?.sweepExpired(Date.now() + 10 * 60_000); // the release starts and never lands
+			await vi.advanceTimersByTimeAsync(10);
+			let status: number | undefined;
+			const answered = post(base, "/v1/settle", { transferId: id }).then((r) => {
+				status = r.status;
+			});
+			for (let i = 0; i < 20; i++) await real(); // the request reaches the handler
+			// well inside the bound: still waiting on the release, no answer yet
+			await vi.advanceTimersByTimeAsync(20_000);
+			for (let i = 0; i < 5; i++) await real();
+			expect(status).toBeUndefined();
+			// past the bound (30 s) and the 2 s poll backstop: it answers instead of hanging
+			for (let waited = 0; waited < 14_000 && status === undefined; waited += 500) {
+				await vi.advanceTimersByTimeAsync(500);
+				await real();
+			}
+			await answered;
+			expect(status).toBe(409);
+			expect(fake.calls.settled).toEqual([]);
+			expect(
+				await (async () => {
+					vi.useRealTimers();
+					return counted(base);
+				})(),
+			).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	}, 30_000);
 
 	it("a RETRY of an already-settled settle with a long id is 409 already_settled, not 'names no hold here'", async () => {
 		const { base } = await start({ idLength: 300 });
