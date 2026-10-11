@@ -152,6 +152,15 @@ describe("an unknown transferId on /v1/settle is recorded, not dropped", () => {
 		expect(await counted(base)).toBe(0);
 	});
 
+	it("a settle racing the TTL sweep (the hold is mid-release) waits and then answers the recorded 410, not a 409", async () => {
+		const { base, fake } = await start({ unheld: { heldFor: 2 } });
+		const res = await post(base, "/v1/settle", { transferId: "tx_mid_release" });
+		expect(res.status).toBe(410);
+		expect(await res.json()).toMatchObject({ error: "settlement_unrecoverable", recorded: true });
+		expect(fake.calls.unheld.length).toBe(3);
+		expect(await counted(base)).toBe(1);
+	});
+
 	it("a governor that still holds the id answers 409 hold_active, nothing counted", async () => {
 		const { base } = await start({ unheld: { held: true } });
 		const res = await post(base, "/v1/settle", { transferId: "tx_live_elsewhere" });

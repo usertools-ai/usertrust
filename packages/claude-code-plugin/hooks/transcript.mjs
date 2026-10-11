@@ -2023,7 +2023,8 @@ async function settleOutcome(transferId, settle, keyed) {
 		}
 		return { outcome: "settled", holdEnded: true };
 	}
-	if (keyed && isAlreadySettled(settle)) return { outcome: "settled", holdEnded: true };
+	// The server charged it already (a re-send after another settle landed): the charge stands.
+	if (isAlreadySettled(settle)) return { outcome: "settled", holdEnded: true };
 	// The hold is known gone only when the server says so: this settle's 404
 	// `unknown transferId`, or a confirmed hygiene release.
 	const released = await hygieneRelease(transferId, "transcript settle failed");

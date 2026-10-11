@@ -76,6 +76,9 @@ const SWEEP_INTERVAL_MS = 30_000;
  * one. That is the declared residue of having no idempotency key.
  */
 export const RECENTLY_SETTLED_MEMORY = 10_000;
+/** How long a settle that finds its hold mid-release waits for the release before answering 409. */
+const HELD_WAIT_MS = 2_000;
+const HELD_POLL_MS = 50;
 /** Max concurrent SSE streams a single tenant may hold open at once. */
 const MAX_SSE_PER_TENANT = 8;
 /** Drop an SSE subscriber whose kernel send buffer backs up past this. */
@@ -429,18 +432,33 @@ export function createUsertrustServer(opts: {
 		}
 		try {
 			const governor = await pool.get(tenant);
-			const outcome = await governor.recordUnheldSettlement({
-				transferId,
-				inputTokens: usage.inputTokens,
-				outputTokens: usage.outputTokens,
-				cacheReadTokens: usage.cacheReadTokens,
-				cacheWriteTokens: usage.cacheWriteTokens,
-				cacheWrite1hTokens: usage.cacheWrite1hTokens,
-				chunksDelivered: usage.chunksDelivered,
-				usageSource: usage.usageSource,
-				computeMs: usage.computeMs,
-				usageTo: usage.usageTo,
-			});
+			const record = () =>
+				governor.recordUnheldSettlement({
+					transferId,
+					inputTokens: usage.inputTokens,
+					outputTokens: usage.outputTokens,
+					cacheReadTokens: usage.cacheReadTokens,
+					cacheWriteTokens: usage.cacheWriteTokens,
+					cacheWrite1hTokens: usage.cacheWrite1hTokens,
+					chunksDelivered: usage.chunksDelivered,
+					usageSource: usage.usageSource,
+					computeMs: usage.computeMs,
+					usageTo: usage.usageTo,
+				});
+			// A settle racing the TTL sweep: the sweep has taken the hold out of `pending` and is
+			// releasing it, and the governor still holds it until the release lands. Wait for it (bounded:
+			// the release is one ledger void) and answer what the settle then IS (a recorded 410), so the
+			// race ends as it did when the answer was a 404. Only a hold that is still held after the
+			// wait is a 409 hold_active.
+			let outcome = await record();
+			for (
+				let waited = 0;
+				outcome.outcome === "held" && waited < HELD_WAIT_MS;
+				waited += HELD_POLL_MS
+			) {
+				await new Promise<void>((resolve) => setTimeout(resolve, HELD_POLL_MS));
+				outcome = await record();
+			}
 			if (outcome.outcome === "held") {
 				sendJson(res, 409, {
 					error: "hold_active",

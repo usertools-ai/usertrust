@@ -47,7 +47,14 @@ export function createFakeGovernor(
 		/** How `abort` answers, by the same three options as `release`. */
 		abort?: { notHeld?: boolean; voidError?: string; throws?: boolean };
 		/** How `recordUnheldSettlement` answers: as one that fails to append, or one that already recorded it. */
-		unheld?: { throws?: boolean; recorded?: boolean; held?: boolean; rateLimited?: boolean };
+		unheld?: {
+			throws?: boolean;
+			recorded?: boolean;
+			held?: boolean;
+			/** Answer `held` for this many calls, then unrecoverable: a hold mid-release. */
+			heldFor?: number;
+			rateLimited?: boolean;
+		};
 	} = {},
 ): FakeGovernorHandle {
 	let budget = opts.budget ?? 10_000;
@@ -131,6 +138,9 @@ export function createFakeGovernor(
 			// A real pool gives each tenant its own governor, so another tenant's hold is never "held"
 			// here; a test that wants the answer asks for it.
 			if (opts.unheld?.held === true) return { outcome: "held", transferId: params.transferId };
+			if (opts.unheld?.heldFor !== undefined && calls.unheld.length <= opts.unheld.heldFor) {
+				return { outcome: "held", transferId: params.transferId };
+			}
 			return { outcome: "unrecoverable", recorded: opts.unheld?.recorded ?? true };
 		},
 		async destroy(): Promise<void> {

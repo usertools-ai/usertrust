@@ -837,6 +837,56 @@ describe("failure handling — at most once", () => {
 		expect(ok.map((s) => [s.body.inputTokens, s.body.outputTokens])).toEqual([[3, 4]]);
 	});
 
+	describe("a PostToolUse settle answered 409: one settle is ever sent for a hold, and nothing is charged twice", () => {
+		/** The hold's settle answers `answer`; every other call succeeds. */
+		const withAnswer = async (answer: { status: number; json: unknown }) => {
+			await startServer((path, body) => {
+				if (path === "/v1/settle" && body.transferId === "tx_1") return answer;
+				return okResponder(path, body);
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(8, 8)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			const post = await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			return post;
+		};
+		it.each([
+			[
+				"hold_active",
+				"a hold the server still holds (a sweep's release the server could not wait out)",
+			],
+			["settle_in_progress", "another settle for the id still running"],
+		])(
+			"409 %s (%s): claimed, ONE settle sent, never re-sent (the plugin's at-most-once rule)",
+			async (error) => {
+				const post = await withAnswer({ status: 409, json: { error, transferId: "tx_1" } });
+				expect(settles().filter((s) => s.body.transferId === "tx_1")).toHaveLength(1);
+				expect(post.stderr).toContain("claimed");
+				expect(settles().filter((s) => s.status === 200)).toHaveLength(0);
+			},
+		);
+		it("409 already_settled: the charge stands, so it is settled, not claimed and not re-charged", async () => {
+			const post = await withAnswer({
+				status: 409,
+				json: { error: "already_settled", transferId: "tx_1" },
+			});
+			expect(settles().filter((s) => s.body.transferId === "tx_1")).toHaveLength(1);
+			expect(post.stderr).not.toContain("claimed");
+			expect(settles().filter((s) => s.status === 200)).toHaveLength(0);
+		});
+		it("410 settlement_unrecoverable: the hold is gone, so the window is settled once on a fresh hold at Stop", async () => {
+			await withAnswer({
+				status: 410,
+				json: { error: "settlement_unrecoverable", recorded: true },
+			});
+			expect(
+				settles()
+					.filter((s) => s.status === 200)
+					.map((s) => s.body.inputTokens),
+			).toEqual([8]);
+		});
+	});
+
 	it("a PostToolUse settle 404 releases the window to the remainder; a 500 keeps it claimed", async () => {
 		let settleStatus = 404;
 		await startServer((path, body) => {
@@ -1784,7 +1834,15 @@ describe("estimate holds", () => {
 		const notFound = { status: 404, json: { error: "not_found", reason: "unknown transferId" } };
 		/** A ledger: an authorize mints tx_N; `fault` answers the FIRST settle of tx_1, posted or not. */
 		function ledger(
-			fault: "expired" | "posted-then-lost" | "posted-then-500" | "unposted-500" | "settled-false",
+			fault:
+				| "expired"
+				| "posted-then-lost"
+				| "posted-then-500"
+				| "unposted-500"
+				| "settled-false"
+				| "409-in-progress"
+				| "409-hold-active"
+				| "429-rate-limited",
 		) {
 			const charged: string[] = [];
 			const responder: Responder = (path, body) => {
@@ -1797,6 +1855,13 @@ describe("estimate holds", () => {
 					if (id === "tx_1" && fault === "expired") return notFound;
 					if (id === "tx_1" && fault === "unposted-500")
 						return { status: 500, json: { error: "internal" } };
+					// A newer server's transient settle answers: nothing settled, nothing recorded.
+					if (id === "tx_1" && fault === "409-in-progress")
+						return { status: 409, json: { error: "settle_in_progress", transferId: id } };
+					if (id === "tx_1" && fault === "409-hold-active")
+						return { status: 409, json: { error: "hold_active", transferId: id } };
+					if (id === "tx_1" && fault === "429-rate-limited")
+						return { status: 429, json: { error: "rate_limited" } };
 					charged.push(id);
 					if (id === "tx_1" && fault === "posted-then-lost") return { status: 0, json: null };
 					if (id === "tx_1" && fault === "posted-then-500")
@@ -1850,6 +1915,9 @@ describe("estimate holds", () => {
 			["posted-then-500", "posted, then answered 500"],
 			["unposted-500", "not posted, answered 500"],
 			["settled-false", "answered settled: false"],
+			["409-in-progress", "answered 409 settle_in_progress (another settle owns the id)"],
+			["409-hold-active", "answered 409 hold_active (the hold is still held)"],
+			["429-rate-limited", "answered 429 rate_limited (nothing recorded)"],
 		] as const) {
 			it(`a settle ${what} is never re-authorized and never settled again — charged at most once`, async () => {
 				const { responder, charged } = ledger(fault);
