@@ -71,11 +71,13 @@ The `receipt` returned from every governed call:
 ## Install
 
 ```bash
-npm install usertrust
+npm install usertrust @anthropic-ai/sdk
 npx usertrust init
 ```
 
 `npx usertrust init` does not install the package into your project, so the `npm install` line is required. `import { trust } from "usertrust"` fails until it runs.
+
+usertrust wraps your provider's own client and does not install it: the provider SDKs are optional peer dependencies. Install the one you use: `@anthropic-ai/sdk` for the example above, or `openai`.
 
 `init` is interactive in a terminal. It asks for your provider API key (Anthropic `sk-ant-`, OpenAI `sk-` and Google `AIza` keys are detected from their prefix; any other provider you name yourself), checks the key against that provider's models endpoint (unless you pass `--skip-verify`), and writes it to `.usertrust/.env` with owner-only permissions.
 

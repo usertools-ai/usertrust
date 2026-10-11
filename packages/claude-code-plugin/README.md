@@ -12,8 +12,9 @@ through usertrust: it only reads what Claude Code already recorded.
 **Watch-only by default.** Installed, the plugin never blocks a tool call. A call
 the server refuses (over budget, denied by policy, or cut off as an anomaly) is
 written down as one that would have been blocked, and a call that could not be
-metered (the server is unreachable, say) as a gap. Set `UT_CC_MODE=enforce` to
-block — see [Modes](#modes-watch-only-by-default). **In no mode does it approve a
+metered (the server is unreachable, say) as a gap. Set `"mode": "enforce"` in the
+[configuration file](#configuration-file) (or `UT_CC_MODE=enforce` when you run without
+one) to block — see [Modes](#modes-watch-only-by-default). **In no mode does it approve a
 call:** it can only deny, so Claude Code's own permission settings decide every
 call it lets through, exactly as they would without it.
 
@@ -35,18 +36,19 @@ call it lets through, exactly as they would without it.
 mkdir -p ~/.config/usertrust && chmod 700 ~/.config/usertrust
 ```
 
-`~/.config/usertrust/claude-code.json`:
+Write `~/.config/usertrust/claude-code.json`. `stateDir` must be an absolute path, and
+JSON expands nothing, so let the shell put your home directory in. The subshell's
+`umask 077` creates the file owner-only, so the key is never readable by others:
 
-```json
+```sh
+(umask 077 && cat > ~/.config/usertrust/claude-code.json) <<EOF
 {
   "url": "http://127.0.0.1:4519",
   "key": "<the key from step 1>",
   "mode": "watch",
-  "stateDir": "/Users/you/.claude/usertrust-cc"
+  "stateDir": "$HOME/.claude/usertrust-cc"
 }
-```
-
-```sh
+EOF
 chmod 600 ~/.config/usertrust/claude-code.json
 export UT_CC_CONFIG="$HOME/.config/usertrust/claude-code.json"
 ```
@@ -484,8 +486,10 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
 
 ## Modes: watch-only by default
 
-`UT_CC_MODE` decides what PreToolUse — the one hook that can block — does with the
-server's answer. Reservations, settlement and everything above work the same in
+The mode — `"mode"` in the configuration file, or `UT_CC_MODE` in a session without
+one — decides what PreToolUse, the one hook that can block, does with the
+server's answer. **With `UT_CC_CONFIG` set, every `UT_*` variable is ignored, `UT_CC_MODE`
+and `UT_FAIL_OPEN` included:** set the mode and `failOpen` in the file. Reservations, settlement and everything above work the same in
 both modes.
 
 | The server's answer at PreToolUse | watch (the default) | enforce (`UT_CC_MODE=enforce`) |
@@ -842,8 +846,8 @@ Enforcement is opt-in. Turn it on in three steps, so the first thing a
 misconfigured setup does is write a record, not stop your session.
 
 1. **Install and watch.** Install the plugin, point it at your server (see the
-   [Quickstart](#quickstart-against-usertrust-server)), and leave `UT_CC_MODE`
-   unset. The plugin authorizes tool calls against your server and settles their
+   [Quickstart](#quickstart-against-usertrust-server)), and keep `"mode": "watch"` in
+   the configuration file (or, without one, leave `UT_CC_MODE` unset). The plugin authorizes tool calls against your server and settles their
    usage, but blocks nothing, and each session opens with `usertrust: watch-only —
    nothing is blocked. …`. Keep the server's `enforcement` at its default, `enforce`: its
    refusals are what show you which calls would be blocked. A server in
@@ -856,23 +860,31 @@ misconfigured setup does is write a record, not stop your session.
      calls you mean to stop. If they are not, fix the budget or the policy first.
    - A `gap` record is a call the plugin could not meter: the server was
      unreachable, timed out or answered something unusable. **In enforce mode
-     each of these blocks the call**, unless `UT_FAIL_OPEN=1`. Make the gaps go
+     each of these blocks the call**, unless fail-open is on (`"failOpen": true`, or
+     `UT_FAIL_OPEN=1` without a configuration file). Make the gaps go
      away, or understand them, before you enforce.
 
    For example: `grep '"kind":"gap"' ~/.claude/usertrust-cc/watch.jsonl`.
-3. **Enforce.** `export UT_CC_MODE=enforce` before launching Claude Code. The
-   session-start message now begins `usertrust: ENFORCING`. Over-budget, policy
-   and anomaly refusals are blocked. Then decide what an outage does:
-   - `UT_FAIL_OPEN` unset: while the server cannot answer, every tool call is
-     blocked. Use this where the budget must hold.
-   - `UT_FAIL_OPEN=1`: while the server cannot answer, calls proceed unmetered,
-     and each is recorded as a `gap`. Use this where availability matters more.
+3. **Enforce.** Set `"mode": "enforce"` in the configuration file, then start a NEW
+   Claude Code session (a session keeps the settings it read at its first hook).
+   Without a configuration file, `export UT_CC_MODE=enforce` before launching
+   instead; with one, that variable is ignored. The session-start message now
+   begins `usertrust: ENFORCING`, and if it does not, the session is not enforcing.
+   Over-budget, policy and anomaly refusals are blocked. Then decide what an
+   outage does:
+   - fail-open off (`"failOpen": false`, the default; or `UT_FAIL_OPEN` unset):
+     while the server cannot answer, every tool call is blocked. Use this where
+     the budget must hold.
+   - fail-open on (`"failOpen": true`; or `UT_FAIL_OPEN=1`): while the server
+     cannot answer, calls proceed unmetered, and each is recorded as a `gap`. Use
+     this where availability matters more.
 
    Before enforcing near a tight budget, read the known limitations and the
    known issue in [Modes](#modes-watch-only-by-default).
 
-To go back to watching, unset `UT_CC_MODE` (`enforce` is matched
-case-insensitively; any other value runs watch-only) and relaunch Claude Code.
+To go back to watching, set `"mode": "watch"` in the configuration file (or, without
+one, unset `UT_CC_MODE`; `enforce` is matched case-insensitively there and any other
+value runs watch-only) and start a new Claude Code session.
 
 ## Content flow and audit
 
