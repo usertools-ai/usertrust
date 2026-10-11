@@ -12,7 +12,7 @@ import test from "node:test";
 import compress from "wawoff2/compress";
 // @ts-expect-error -- wawoff2 ships no type declarations
 import decompress from "wawoff2/decompress";
-import { KIT_FONTS, loadPinnedFonts, OG_FONTS, type PinnedFont } from "./kit-fonts";
+import { decodeToTtf, KIT_FONTS, loadPinnedFonts, OG_FONTS, type PinnedFont } from "./kit-fonts";
 
 const require = createRequire(import.meta.url);
 const NOTO_TTF = readFileSync(
@@ -177,4 +177,101 @@ test("a font that fails to decode does not wedge the next load", async () => {
 	const { bytes, spec } = await woff2Fixture();
 	const fonts = await loadPinnedFonts([spec], served(bytes));
 	assert.ok(fonts, "the next load still works");
+});
+
+const NEVER = () => new Promise<Uint8Array>(() => {});
+
+/**
+ * A stand-in for wawoff2's SHARED heap: two decodes in flight at once corrupt each other's output (both
+ * come back as 0xFF garbage). A decode that is abandoned but still running counts as in flight.
+ */
+function sharedHeapDecoder(delays: Record<number, number>) {
+	let active = 0;
+	let collided = false;
+	return async (woff2: Uint8Array): Promise<Uint8Array> => {
+		active += 1;
+		if (active > 1) collided = true;
+		const mine = new Uint8Array(woff2);
+		await new Promise((resolve) => setTimeout(resolve, delays[woff2[0] as number] ?? 5));
+		const overlapped = collided;
+		active -= 1;
+		if (active === 0) collided = false;
+		return overlapped ? new Uint8Array(mine.length).fill(0xff) : mine;
+	};
+}
+
+test("a SLOW first decode that times out never lets the next decode run beside it: the next font is its own bytes, not another's", {
+	timeout: 8000,
+}, async () => {
+	const decoder = sharedHeapDecoder({ 1: 120, 2: 5 });
+	const first = decodeToTtf(new Uint8Array([1, 1, 1, 1]), 20, decoder);
+	await assert.rejects(first, /timed out/);
+	// started while the abandoned decode is still running: it must wait for it, then decode cleanly
+	const second = await decodeToTtf(new Uint8Array([2, 2, 2, 2]), 2000, decoder);
+	assert.deepEqual(Array.from(new Uint8Array(second)), [2, 2, 2, 2]);
+});
+
+test("a decode that never settles: its caller times out, and every later decode times out (unbranded), never a wrong font", {
+	timeout: 8000,
+}, async () => {
+	// A fresh module state is not available, so this runs LAST in the file's decode tests: it wedges the chain
+	// on purpose. Later decodes in this process then time out rather than return anything.
+	await assert.rejects(decodeToTtf(new Uint8Array([1]), 40, NEVER), /timed out/);
+	await assert.rejects(
+		decodeToTtf(new Uint8Array([2]), 40, async () => new Uint8Array([2])),
+		/timed out/,
+	);
+});
+
+test("while a decode is stalled, N later cards each answer UNBRANDED at once: zero fetches, zero queued decodes (bounded memory)", {
+	timeout: 8000,
+}, async () => {
+	// Runs after the test above, which left a decode stalled on purpose.
+	const { bytes, spec } = await woff2Fixture();
+	let fetches = 0;
+	let decodes = 0;
+	const countingFetch = (async () => {
+		fetches += 1;
+		return new Response(bytes.slice().buffer, { status: 200 });
+	}) as unknown as typeof fetch;
+	const countingDecode = async () => {
+		decodes += 1;
+		return new ArrayBuffer(1);
+	};
+	const answers = await Promise.all(
+		Array.from({ length: 25 }, () => loadPinnedFonts([spec], countingFetch, 3000, countingDecode)),
+	);
+	assert.deepEqual(answers, Array(25).fill(undefined));
+	assert.equal(fetches, 0, "no fetch while a decode is stalled");
+	assert.equal(decodes, 0, "nothing is enqueued behind the stalled decode");
+});
+
+test("RECOVERY: when the stalled decode finally settles, the stall clears and the next card is branded again", {
+	timeout: 8000,
+}, async () => {
+	// A fresh module instance (its own stall counter): the earlier tests left the shared one stalled.
+	const fresh = (await import(
+		`./kit-fonts.ts?recovery=${Date.now()}`
+	)) as typeof import("./kit-fonts");
+	const { bytes, spec } = await woff2Fixture();
+	let release: (() => void) | undefined;
+	const slow = (woff2: Uint8Array) =>
+		new Promise<Uint8Array>((resolve) => {
+			release = () => resolve(woff2);
+		});
+	await assert.rejects(fresh.decodeToTtf(new Uint8Array([1, 2, 3]), 20, slow), /timed out/);
+	// stalled: a new card answers unbranded with no fetch
+	let fetches = 0;
+	const countingFetch = (async () => {
+		fetches += 1;
+		return new Response(bytes.slice().buffer, { status: 200 });
+	}) as unknown as typeof fetch;
+	assert.equal(await fresh.loadPinnedFonts([spec], countingFetch), undefined);
+	assert.equal(fetches, 0);
+	// the late decode really finishes: the stall clears, and the next card loads normally
+	release?.();
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	const fonts = await fresh.loadPinnedFonts([spec], countingFetch);
+	assert.ok(fonts, "branded again once the stalled decode has settled");
+	assert.equal(fetches, 1);
 });

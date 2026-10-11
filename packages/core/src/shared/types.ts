@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { z } from "zod";
+import { DEFAULT_TIGERBEETLE_ADDRESS } from "./constants.js";
 import { parentUserIdRefusal } from "./ids.js";
 
 // ── Endpoint classification (M2 local-model governance) ──
@@ -324,7 +325,7 @@ export const TrustConfigSchema = z.object({
 		.prefault({}),
 	tigerbeetle: z
 		.object({
-			addresses: z.array(z.string()).default(["127.0.0.1:3001"]),
+			addresses: z.array(z.string()).default([DEFAULT_TIGERBEETLE_ADDRESS]),
 			clusterId: z.number().int().nonnegative().default(0),
 		})
 		.prefault({}),

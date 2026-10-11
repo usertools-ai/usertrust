@@ -72,12 +72,13 @@ Carried forward from the plan's Global Constraints, unchanged by this task:
   in-page re-verify). The share card's amount was decided on 2026-10-05: the
   card (`components/share-card.tsx`) carries the verdict word and, on a
   verified receipt, the amount, never an ID or a handle. It is drawn in the
-  page's brand: the mark and the wordmark, the black ground and a still
-  lattice, set in Usertools Sans. The fonts come from the brand kit at render
-  time, each checked against its sha384 pin before it is decoded from woff2
-  (`lib/kit-fonts.ts`); if any fails, the card renders in the renderer's
-  default font with no mark at all. `share-card.test.tsx` pins its text and
-  `lib/kit-fonts.test.ts` the loader.
+  page's brand: the mark and the wordmark, the black ground and the kit's
+  frame, set in Usertools Sans. The fonts and the frame come from the brand
+  kit at render time, each checked against its sha384 pin (the fonts are then
+  decoded from woff2; `lib/kit-fonts.ts`, `lib/kit-frame.ts`); if any fails,
+  the card renders in the renderer's default font with no mark and no frame.
+  `share-card.test.tsx` pins its text and `lib/kit-fonts.test.ts` and
+  `lib/kit-frame.test.ts` the loaders.
 
 A further set of review-found minors (base58 codec edge cases, a few
 under-asserted copy strings, non-numeric-literal nits) is itemized in this

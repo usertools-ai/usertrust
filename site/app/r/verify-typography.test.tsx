@@ -151,6 +151,7 @@ function routeSources(): Array<[string, string]> {
 
 test("every external URL the route names is classified: pinned script, chrome font, link, or server read", () => {
 	const KIT_FONT = /^https:\/\/usertrust\.ai\/kit\/fonts\/[A-Za-z-]+\.woff2$/;
+	const KIT_FRAME_URL = /^https:\/\/usertrust\.ai\/kit\/card-frame\.[0-9a-f]{12}\.svg$/;
 	const LINKS = new Set([
 		"https://usertrust.ai/",
 		"https://usertrust.ai/#first-receipt",
@@ -173,6 +174,11 @@ test("every external URL the route names is classified: pinned script, chrome fo
 				const after = text.slice(match.index, match.index + 160);
 				assert.match(after, /integrity: "sha384-[A-Za-z0-9+/]{64}"/, `${url} is pinned`);
 				assert.doesNotMatch(text, /^["']use client["']/m, "kit-fonts.ts is server code");
+			} else if (KIT_FRAME_URL.test(url)) {
+				// The card's frame: a server-side fetch beside its sha384 pin, like the fonts.
+				assert.equal(file, "lib/kit-frame.ts", `${url} in ${file}`);
+				assert.match(text, /integrity: "sha384-[A-Za-z0-9+/]{64}"/, `${url} is pinned`);
+				assert.doesNotMatch(text, /^["']use client["']/m, "kit-frame.ts is server code");
 			} else if (KIT_FONT.test(url)) {
 				// A font on the page: only ever an @font-face source, whose family reaches the chrome only (above).
 				assert.equal(file, "brand.css", `${url} in ${file}`);

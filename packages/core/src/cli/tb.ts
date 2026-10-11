@@ -9,8 +9,18 @@
  */
 
 import pc from "picocolors";
+import { DEFAULT_TIGERBEETLE_ADDRESS } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
 import { toSafeJson } from "./target.js";
+
+/**
+ * Running TigerBeetle by hand: format its data file once, then start it where a
+ * governor with no `tigerbeetle.addresses` looks for it.
+ */
+const MANUAL_START = [
+	"tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle",
+	`tigerbeetle start --addresses=${DEFAULT_TIGERBEETLE_ADDRESS} --development 0_0.tigerbeetle`,
+];
 
 export async function run(opts?: CliOptions): Promise<void> {
 	const subcommand = process.argv[3];
@@ -23,15 +33,14 @@ export async function run(opts?: CliOptions): Promise<void> {
 					toSafeJson({
 						command: "tb",
 						success: false,
-						data: { action: "start", message: "Not yet implemented" },
+						data: { action: "start", message: "Not yet implemented", commands: MANUAL_START },
 					}),
 				);
 			} else {
 				console.log(pc.yellow("TigerBeetle start — not yet implemented."));
-				console.log("To run TigerBeetle manually:");
-				console.log(
-					pc.dim("  tigerbeetle start --addresses=3000 --cache-grid=256MiB ./data/0_0.tigerbeetle"),
-				);
+				console.log("usertrust tb start does not manage TigerBeetle in this version.");
+				console.log("To run TigerBeetle 0.17.x yourself (format once, then start):");
+				for (const command of MANUAL_START) console.log(pc.dim(`  ${command}`));
 			}
 			break;
 
