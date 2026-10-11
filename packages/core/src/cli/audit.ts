@@ -14,6 +14,7 @@ import {
 	AuditQuarantineRefusedError,
 	quarantineTornTail,
 } from "../audit/quarantine.js";
+import { GLOBAL_FLAGS } from "./flags.js";
 import type { CliOptions } from "./init.js";
 import { scrubForTerminal, toSafeJson } from "./target.js";
 
@@ -26,13 +27,17 @@ export async function run(
 ): Promise<void> {
 	const json = opts.json === true;
 	const root = rootDir ?? process.cwd();
-	const [sub, ...rest] = args;
+	// The global flags (`cli/flags.ts`, the one list) are accepted wherever main.ts forwards them;
+	// anything else that is not this command's own is a malformed invocation: exit 2, as every CLI
+	// command answers an argument of the wrong shape (AGENTS.md). Exit 1 is kept for operational
+	// failures — a refusal, an interrupted repair.
+	const [sub, ...rest] = args.filter((a) => !GLOBAL_FLAGS.includes(a));
 	const unknown = rest.filter((a) => a !== "--dry-run");
 	if (sub !== "quarantine-tail" || unknown.length > 0) {
 		if (json)
 			console.log(toSafeJson({ command: "audit", success: false, data: { message: USAGE } }));
 		else console.log(USAGE);
-		process.exitCode = 1;
+		process.exitCode = 2;
 		return;
 	}
 	const dryRun = rest.includes("--dry-run");
