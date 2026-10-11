@@ -94,6 +94,18 @@ If you need multiple concurrent workers, give each its own vault. Merging or
 centralizing chains is a control-plane concern, not something the core SDK
 pretends to solve today.
 
+**A torn tail halts appends until an operator repairs it.** An append that never
+completed (a crash, a full disk) can leave bytes after the log's last newline. The
+writer then refuses every append (`AuditTornTailError`) rather than bury those bytes
+mid-file — so with `audit.failClosed`, governed calls stop too. The repair is
+`usertrust audit quarantine-tail`, and it repairs exactly ONE state: unparseable bytes
+after the last newline, on a single `events.jsonl` that otherwise verifies from
+genesis, with an agreeing `.meta` anchor. Every other unverifiable state, including an
+unterminated last line that parses, is refused: repairing it would mean choosing which
+evidence is true, which is an operator's decision. A run that died between cutting the
+log and recording the cut is finished by the next run; that record carries the
+quarantined bytes' digest and length but not their offset, which died with the run.
+
 ## 6. Anomaly governance ships conservative defaults and expects calibration
 
 Anomaly detection is opt-in (`anomaly.enabled: true`) and tuned to catch
