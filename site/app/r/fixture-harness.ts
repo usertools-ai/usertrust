@@ -15,7 +15,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { conformingFixtures } from "./fixtures/index";
-import { type PageState, parseResolverResponse, type VerifiedState } from "./lib/wire";
+import {
+	type PageState,
+	parseResolverResponse,
+	type VerifiedClusterState,
+	type VerifiedState,
+} from "./lib/wire";
 
 export const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -40,20 +45,35 @@ export function fixtureState(fixture: WireFixture): PageState {
 }
 
 /**
- * The same, narrowed to a verified receipt. Throws rather than skipping: a
- * §8.1 fixture that no longer parses green is a regression in the fixture or
- * the parser, and a rendering test must not quietly pass over it.
+ * The same, narrowed to a verified SESSION receipt. Throws rather than
+ * skipping: a §8.1 fixture that no longer parses green is a regression in the
+ * fixture or the parser, and a rendering test must not quietly pass over it.
+ * A verified CLUSTER receipt throws too — handed to a session renderer it
+ * would print session claims the receipt never made.
  */
 export function verifiedFixtureState(relPath: string): VerifiedState {
 	const state = fixtureState(loadFixture(relPath));
-	if (state.kind !== "verified") {
-		throw new Error(
-			`${relPath} did not resolve to a verified receipt (got "${state.kind}"${
-				"detail" in state ? `: ${state.detail}` : ""
-			})`,
-		);
+	if (state.kind !== "verified" || state.scope !== "session") {
+		throw new Error(notVerifiedAs(relPath, state, "session"));
 	}
 	return state;
+}
+
+/** The cluster counterpart (receipt-spec v0.10 §15): throws unless the fixture verifies as a cluster receipt. */
+export function verifiedClusterFixtureState(relPath: string): VerifiedClusterState {
+	const state = fixtureState(loadFixture(relPath));
+	if (state.kind !== "verified" || state.scope !== "cluster") {
+		throw new Error(notVerifiedAs(relPath, state, "cluster"));
+	}
+	return state;
+}
+
+function notVerifiedAs(relPath: string, state: PageState, scope: "session" | "cluster"): string {
+	const got =
+		state.kind === "verified"
+			? `a verified ${state.scope} receipt`
+			: `"${state.kind}"${"detail" in state ? `: ${state.detail}` : ""}`;
+	return `${relPath} did not resolve to a verified ${scope} receipt (got ${got})`;
 }
 
 /** Every §8.1 row whose single file resolves to a 200 ladder status. */

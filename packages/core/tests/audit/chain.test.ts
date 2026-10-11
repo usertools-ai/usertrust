@@ -350,7 +350,7 @@ describe("Audit Chain Writer — flush and release", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("flush resolves after pending appends", async () => {
+	it("flush resolves after pending appends: an append queues when it is CALLED", async () => {
 		const pending = writer.appendEvent({
 			kind: "test.flush",
 			actor: "sys",
@@ -358,11 +358,13 @@ describe("Audit Chain Writer — flush and release", () => {
 		});
 
 		await writer.flush();
-		await pending;
-
+		// Read BEFORE awaiting the append: flush() queued behind it, so the record is
+		// already on disk. A headless governor's destroy() relies on this: a terminal
+		// record started before destroy()'s flush() lands before the writer is released.
 		const logPath = join(tempDir, ".usertrust", "audit", "events.jsonl");
 		const content = readFileSync(logPath, "utf-8").trim();
 		expect(content.split("\n")).toHaveLength(1);
+		await pending;
 	});
 
 	it("flush resolves immediately when nothing is pending", async () => {

@@ -158,6 +158,39 @@ test("receiptJson: allowlisted chained fields only, keyed for display", () => {
 	assert.equal(json.costCenter, "fleet.aaaaaaaaaaaa.msg_7");
 });
 
+test("receiptJson: a 1-hour cache write keeps its split, so the shown counts and rates recompute to the shown cost", () => {
+	const [e] = parseChainJsonl(
+		`${event(9, "llm_call", {
+			cost: 60,
+			usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 1000 },
+			appliedRates: { inputPer1k: 30, outputPer1k: 150, cacheReadPer1k: 3, cacheWritePer1k: 37.5 },
+			cacheWrite1h: { tokens: 1000, ratePer1k: 60, secret: "must-not-render" },
+		})}\n`,
+	);
+	const json = receiptJson(e as FleetChainEvent);
+	assert.deepEqual(json.cacheWrite1h, { tokens: 1000, ratePer1k: 60 });
+	const u = json.usage as Record<string, number>;
+	const r = json.appliedRates as Record<string, number>;
+	const h = json.cacheWrite1h as { tokens: number; ratePer1k: number };
+	const recomputed = Math.ceil(
+		((u.cacheWriteTokens - h.tokens) * r.cacheWritePer1k) / 1000 + (h.tokens * h.ratePer1k) / 1000,
+	);
+	assert.equal(recomputed, json.cost);
+	// Without the split the same counts and rates reproduce 38, not 60: the drop this pins.
+	assert.equal(Math.ceil((u.cacheWriteTokens * r.cacheWritePer1k) / 1000), 38);
+	assert.deepEqual(Object.keys(json), [
+		"costCenter",
+		"model",
+		"usage",
+		"cost",
+		"appliedRates",
+		"cacheWrite1h",
+		"rateSource",
+		"pricingTableVersion",
+		"auditHash",
+	]);
+});
+
 test("receiptJson: budgetRemaining/receiptUrl NEVER render, even when present", () => {
 	const [e] = parseChainJsonl(
 		event(9, "llm_call", { budgetRemaining: 9999999, receiptUrl: "https://usertrust.ai/r/x" }),

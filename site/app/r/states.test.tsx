@@ -2,10 +2,11 @@
  * §7's non-receipt state matrix (Task 5): every kind except `verified`
  * (Task 4's `rendering.test.tsx`/`components.test.tsx` own that one),
  * driven through the REAL parser via `fixture-harness.ts`, asserting the
- * pinned §7 copy actually reaches the DOM, the mandated loudness (404/409
- * full danger, 503 warning, `billedUnfinalized` danger-without-409's-panel,
- * everything else neutral), the 410 `billedUnfinalized` four-way-checked
- * link, and the check-ledger's keyboard/aria additions this task adds.
+ * pinned §7 copy actually reaches the DOM, the mandated loudness (409 full
+ * danger, 503 warning, `billedUnfinalized` danger-without-409's-panel,
+ * everything else neutral — the 404 included, per receipt-spec v0.10
+ * §15.13), the 410 `billedUnfinalized` four-way-checked link, and the
+ * check-ledger's keyboard/aria additions this task adds.
  */
 
 import assert from "node:assert/strict";
@@ -33,6 +34,7 @@ import {
 	PROTOCOL_ERROR_HEADLINE,
 	RATE_LIMITED_HEADLINE,
 	UNKNOWN_HEADLINE,
+	UNKNOWN_NOT_YET_NOTE,
 	UNVERIFIABLE_HEADLINE,
 	VERIFICATION_UNAVAILABLE_HEADLINE,
 } from "./lib/shell-copy";
@@ -234,20 +236,50 @@ test("X1: every broken-equality mutant renders as integrityFailure with NO bille
 });
 
 // ===========================================================================
-// Loud failures — unknown (404), unverifiable (409, resolver-sourced)
+// No receipt under this ID yet — unknown (404), receipt-spec v0.10 §15.13
 // ===========================================================================
 
-test("unknown.json: full danger register, the pinned headline, and the red-flag note", () => {
+test("unknown.json (404): neutral, 'No receipt yet', §15.13's sentences in Details, and no forgery wording", () => {
 	const state = fixtureState(loadFixture("unknown.json"));
 	assert.equal(state.kind, "unknownReceipt");
 	if (state.kind !== "unknownReceipt") return;
 	const markup = html(<UnknownReceiptStateView state={state} />);
 	const text = textOf(markup);
-	assert.equal(UNKNOWN_HEADLINE, "This receipt ID was never allocated.");
-	assert.match(text, /This receipt ID was never allocated\./);
-	assert.match(text, /an unknown receipt on a commit is an integrity red flag/);
-	assert.match(markup, /data-register="danger"/);
+	const at = markup.indexOf("<details");
+	assert.notEqual(at, -1, "the 404 carries its Details");
+	const glance = textOf(markup.slice(0, at));
+	const details = textOf(markup.slice(at));
+
+	// Neutral, and never forgery: no danger register, no red ink anywhere.
+	assert.match(markup, /data-register="neutral"/);
+	assert.doesNotMatch(markup, /data-register="danger"/);
+	assert.doesNotMatch(markup, /text-danger/, "a 404 is never rendered in the danger ink");
+	// Never green: the masthead's word is not in the verdict's green. (The copy
+	// chip's `$` sigil is the site-wide copy affordance, so it is not scanned.)
+	const masthead = markup.match(/<header[\s\S]*?<\/header>/)?.[0] ?? "";
+	assert.ok(masthead.includes("No receipt yet"), "the masthead is the plain word");
+	assert.doesNotMatch(masthead, /text-ut\b/, "a 404 is never green");
+
+	// The plain word and line lead; the spec's headline and note are in Details.
+	assert.ok(glance.includes("No receipt yet"));
+	assert.ok(
+		glance.includes(
+			"There's no receipt under this ID yet. Receipts are minted after the agent key goes idle — 10 minutes by default — and its audit segment seals.",
+		),
+	);
+	assert.equal(UNKNOWN_HEADLINE, "no receipt under this ID yet");
+	assert.ok(details.includes(UNKNOWN_HEADLINE), "§15.13's headline is in Details");
+	assert.ok(details.includes(UNKNOWN_NOT_YET_NOTE), "and so is the not-yet note");
+
+	// The retired loud rendering is gone from the page, in every wording it had.
+	for (const retired of [/never allocated/i, /never issued/i, /red flag/i]) {
+		assert.doesNotMatch(text, retired);
+	}
 });
+
+// ===========================================================================
+// Loud failures — unverifiable (409, resolver-sourced)
+// ===========================================================================
 
 test("unverifiable.json (409, resolver-sourced): full danger, the failed check named, and the ledger with a keyboard-reachable jump link", () => {
 	const state = fixtureState(loadFixture("unverifiable.json"));

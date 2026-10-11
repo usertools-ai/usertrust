@@ -12,10 +12,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export default function CopyChip({
 	text,
 	label,
+	display,
 	tone = "dark",
 }: {
 	text: string;
 	label?: string;
+	/**
+	 * The visible text, when it should be the value itself rather than its
+	 * label (the receipt header's ID). It ellipsizes INSIDE the chip and the
+	 * chip may shrink, so a narrow row clips the value instead of wrapping it
+	 * away from its copy affordance. The accessible name still uses `label`.
+	 */
+	display?: string;
 	/**
 	 * "dark" (default) is the original dark-ground styling (white/near-white
 	 * on a translucent white fill) — every pre-existing call site (hero,
@@ -59,6 +67,10 @@ export default function CopyChip({
 	}, [text, label]);
 
 	const isPaper = tone === "paper";
+	// A value chip is tighter and shrinkable, and its fixed glyphs never shrink,
+	// so only the value itself gives way on a narrow row.
+	const fits = display === undefined ? "gap-3 px-4" : "min-w-0 max-w-full gap-2 px-3";
+	const fixed = display === undefined ? "" : " shrink-0";
 	return (
 		<button
 			type="button"
@@ -67,21 +79,27 @@ export default function CopyChip({
 			data-cursor-hover
 			className={
 				isPaper
-					? "focus-ring group relative inline-flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border border-ink/15 bg-ink/[0.04] px-4 py-2.5 font-mono text-sm text-ink transition-colors hover:border-ink/30"
-					: "focus-ring group relative inline-flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border border-white/10 bg-white/[0.06] px-4 py-2.5 font-mono text-sm text-white/85 transition-colors hover:border-ut/30"
+					? `focus-ring group relative inline-flex min-h-[44px] cursor-pointer items-center ${fits} rounded-lg border border-ink/15 bg-ink/[0.04] py-2.5 font-mono text-sm text-ink transition-colors hover:border-ink/30`
+					: `focus-ring group relative inline-flex min-h-[44px] cursor-pointer items-center ${fits} rounded-lg border border-white/10 bg-white/[0.06] py-2.5 font-mono text-sm text-white/85 transition-colors hover:border-ut/30`
 			}
 		>
-			<span aria-hidden="true" className={isPaper ? "text-ink/64" : "text-ut/80"}>
+			<span aria-hidden="true" className={`${isPaper ? "text-ink/64" : "text-ut/80"}${fixed}`}>
 				$
 			</span>
-			<span>{label ?? text}</span>
+			{display === undefined ? (
+				<span>{label ?? text}</span>
+			) : (
+				<span className="min-w-0 truncate" data-copy-display="">
+					{display}
+				</span>
+			)}
 			<span
 				aria-hidden="true"
-				className={
+				className={`${
 					isPaper
 						? "text-xs text-ink/64 transition-colors group-hover:text-ink"
 						: "text-xs text-white/70 transition-colors group-hover:text-ut"
-				}
+				}${fixed}`}
 			>
 				copy
 			</span>

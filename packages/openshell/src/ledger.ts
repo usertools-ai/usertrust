@@ -106,6 +106,7 @@ const PENDING_TRANSFER_NOT_FOUND = 25;
 const PENDING_TRANSFER_ALREADY_POSTED = 33;
 const PENDING_TRANSFER_ALREADY_VOIDED = 34;
 const PENDING_TRANSFER_EXPIRED = 35;
+const DEBIT_ACCOUNT_ALREADY_CLOSED = 65;
 const ID_ALREADY_FAILED = 68;
 
 export interface TigerBeetleLedgerOptions {
@@ -286,7 +287,11 @@ export class TigerBeetleLedger implements LedgerPort {
 		role: "overage" | "late";
 		amount: number;
 	}): Promise<ChargeOutcome> {
-		const debtAccount = await this.tb.ensureEscrowAccount(debtAccountLabel(p.budgetId));
+		// The reservation ENSURED this account before placement (every account a settlement might
+		// touch is ensured then), so the charge debits its derived id directly. A re-ensure here
+		// would fail on a CLOSED account before the transfer could answer 65 (#190), leaving the
+		// row in flight forever; the transfer's own answer drives the terminal path below.
+		const debtAccount = TrustTBClient.deriveAccountId(debtAccountLabel(p.budgetId));
 		const charge = (role: TransferRole) =>
 			this.tb.immediateTransfer({
 				debitAccountId: debtAccount,
@@ -295,8 +300,12 @@ export class TigerBeetleLedger implements LedgerPort {
 				code: XFER_SPEND,
 				transferId: transferIdFor(p.holdKey, role),
 			});
+		// The id can never land, MEASURED on 0.17.9: id_already_failed (68), and a debit from a
+		// closed account (65), which fails AND retires the id (#189). Only measured codes: an
+		// answer not proven to retire the id is rethrown and retried by the next attempt.
 		const retired = (err: unknown) =>
-			err instanceof TBTransferError && err.code === ID_ALREADY_FAILED;
+			err instanceof TBTransferError &&
+			(err.code === ID_ALREADY_FAILED || err.code === DEBIT_ACCOUNT_ALREADY_CLOSED);
 		try {
 			await charge(p.role);
 			return "done";

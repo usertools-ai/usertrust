@@ -44,7 +44,7 @@ function StatusBadge(props: { row: LedgerRow }): React.JSX.Element {
 	// Settling is normal, not a celebration — neutral text. Green is earned
 	// by verification only (integrity column).
 	const color =
-		status === "settled"
+		status === "settled" || status === "released"
 			? "text-[var(--text)]"
 			: status === "failed" || status === "denied"
 				? "text-[var(--danger)]"

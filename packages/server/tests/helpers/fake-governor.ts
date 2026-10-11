@@ -1,8 +1,10 @@
 import type {
+	AbortOutcome,
 	Authorization,
 	AuthorizeParams,
 	EnvelopeStatus,
 	Governor,
+	ReleaseOutcome,
 	SettleParams,
 	TrustReceipt,
 } from "usertrust";
@@ -14,12 +16,30 @@ export interface FakeGovernorHandle {
 		authorized: string[];
 		settled: string[];
 		aborted: string[];
+		released: string[];
+		releaseReasons: Array<string | undefined>;
 		settleParams: Array<SettleParams | undefined>;
+		authorizeParams: AuthorizeParams[];
 	};
 }
 
 export function createFakeGovernor(
-	opts: { budget?: number; denyReason?: string } = {},
+	opts: {
+		budget?: number;
+		denyReason?: string;
+		/** Stamped on every handle, as a ledger-backed governor does (`LEDGER_HOLD_TIMEOUT_MS`). */
+		holdTimeoutMs?: number;
+		/** Runs inside `authorize`, after the server's request has arrived: a clock step, say. */
+		duringAuthorize?: () => void;
+		/**
+		 * How `release` answers. By default it ends the hold. `notHeld` answers as a governor
+		 * that no longer holds it; `voidError` as one whose ledger void failed; `throws` as
+		 * one that failed outright.
+		 */
+		release?: { notHeld?: boolean; voidError?: string; throws?: boolean };
+		/** How `abort` answers, by the same three options as `release`. */
+		abort?: { notHeld?: boolean; voidError?: string; throws?: boolean };
+	} = {},
 ): FakeGovernorHandle {
 	let budget = opts.budget ?? 10_000;
 	let seq = 0;
@@ -28,11 +48,16 @@ export function createFakeGovernor(
 		authorized: [] as string[],
 		settled: [] as string[],
 		aborted: [] as string[],
+		released: [] as string[],
+		releaseReasons: [] as Array<string | undefined>,
 		settleParams: [] as Array<SettleParams | undefined>,
+		authorizeParams: [] as AuthorizeParams[],
 	};
 
 	const governor: Governor = {
 		async authorize(params: AuthorizeParams): Promise<Authorization> {
+			calls.authorizeParams.push(params);
+			opts.duringAuthorize?.();
 			if (opts.denyReason) throw new PolicyDeniedError(opts.denyReason);
 			const estimatedCost = (params.estimatedInputTokens ?? 100) + (params.maxOutputTokens ?? 4096);
 			if (estimatedCost > budget) {
@@ -44,6 +69,7 @@ export function createFakeGovernor(
 				estimatedCost,
 				model: params.model,
 				createdAt: Date.now(),
+				...(opts.holdTimeoutMs !== undefined ? { holdTimeoutMs: opts.holdTimeoutMs } : {}),
 			};
 			budget -= estimatedCost;
 			pending.set(auth.transferId, auth);
@@ -69,10 +95,24 @@ export function createFakeGovernor(
 				timestamp: new Date().toISOString(),
 			};
 		},
-		async abort(auth: Authorization): Promise<void> {
+		async abort(auth: Authorization): Promise<AbortOutcome> {
+			if (opts.abort?.throws === true) throw new Error("fake abort failed");
+			if (opts.abort?.notHeld === true) return { aborted: false };
 			pending.delete(auth.transferId);
 			budget += auth.estimatedCost;
 			calls.aborted.push(auth.transferId);
+			const voidError = opts.abort?.voidError;
+			return voidError === undefined ? { aborted: true } : { aborted: true, voidError };
+		},
+		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
+			calls.releaseReasons.push(reason);
+			if (opts.release?.throws === true) throw new Error("fake release failed");
+			if (opts.release?.notHeld === true) return { released: false };
+			pending.delete(auth.transferId);
+			budget += auth.estimatedCost;
+			calls.released.push(auth.transferId);
+			const voidError = opts.release?.voidError;
+			return voidError === undefined ? { released: true } : { released: true, voidError };
 		},
 		async destroy(): Promise<void> {
 			pending.clear();

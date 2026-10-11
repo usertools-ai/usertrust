@@ -3,7 +3,8 @@
  * Every `assert.equal` against a string literal here is a VERBATIM
  * transcription of `docs/specs/2026-08-11-verify-page-design.md` §7 — a
  * redesign that silently rewords one of these fails this file, not a
- * reviewer's memory of the spec.
+ * reviewer's memory of the spec. The exception is the 404, whose headline is
+ * receipt-spec v0.10 §15.13's, which supersedes §7's `unknown` row.
  *
  * `transport.test.ts` already pins the three Task-3 constants
  * (`INVALID_ID_HEADLINE`/`PROTOCOL_ERROR_HEADLINE`/
@@ -12,6 +13,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { plainState } from "./plain-copy";
 import {
 	BILLED_UNFINALIZED_HEADLINE,
 	BILLED_UNFINALIZED_REGISTER_NOTE,
@@ -34,7 +36,7 @@ import {
 	shellHeadline,
 	stepOrCheckLabel,
 	UNKNOWN_HEADLINE,
-	UNKNOWN_RED_FLAG_NOTE,
+	UNKNOWN_NOT_YET_NOTE,
 	UNVERIFIABLE_HEADLINE,
 } from "./shell-copy";
 import type { IntegrityCause, PageState } from "./wire";
@@ -65,9 +67,15 @@ test("§7 terminal-without-a-receipt headlines and asymmetry notes, verbatim", (
 	assert.equal(BILLED_UNFINALIZED_REGISTER_NOTE, "this is a failed promise, not a forgery signal.");
 });
 
-test("§7 loud failures: unknown/unverifiable headlines, verbatim", () => {
-	assert.equal(UNKNOWN_HEADLINE, "This receipt ID was never allocated.");
-	assert.equal(UNKNOWN_RED_FLAG_NOTE, "an unknown receipt on a commit is an integrity red flag.");
+test("receipt-spec v0.10 §15.13: every 404 reads 'no receipt under this ID yet', with the not-yet note", () => {
+	assert.equal(UNKNOWN_HEADLINE, "no receipt under this ID yet");
+	assert.equal(
+		UNKNOWN_NOT_YET_NOTE,
+		"a receipt is minted once its agent key has been idle for the key's idle threshold — 10 minutes by default, on the ledger's clock — and its audit segment has sealed, so an ID can be cited before its receipt exists. A 404 is not evidence of forgery, and it is not a verification.",
+	);
+});
+
+test("§7 loud failures: the unverifiable headline, verbatim", () => {
 	assert.equal(
 		UNVERIFIABLE_HEADLINE,
 		"proof recomputation failed against the chain — this should be impossible",
@@ -190,18 +198,18 @@ test("shellHeadline dispatches every non-verified kind to its pinned constant", 
 // same source as the page's own headline — never a dollar amount.
 // ===========================================================================
 
-test("ogCardWord IS shellHeadline — one source, never a second re-spelling", () => {
+test("ogCardWord is the page's own plain word — the card says what the page leads with", () => {
 	const state: PageState = { kind: "unknownReceipt", routeParamId: "x", receiptId: "x" };
-	assert.equal(ogCardWord(state), shellHeadline(state));
+	assert.equal(ogCardWord(state), "No receipt yet");
+	assert.equal(ogCardWord(state), plainState(state).word);
 });
 
-test("ogCardWord for a verified receipt is the artifact type, not a rung word", () => {
+test("ogCardWord for a verified receipt is the plain verdict, not a rung word", () => {
 	const state = {
 		kind: "verified",
 		rung: "verified_anchored",
 	} as unknown as PageState;
-	assert.equal(ogCardWord(state), "Receipt");
-	assert.equal(ogCardWord(state), shellHeadline(state));
+	assert.equal(ogCardWord(state), "Verified");
 });
 
 test("ogCardWord never contains a dollar figure — no fixture-derived amount ever reaches it", () => {
@@ -224,9 +232,10 @@ test("ogCardRegister: green ONLY for verified; every other kind is neutral/warni
 		{ kind: "terminalNoReceipt", expect: "neutral" },
 		{ kind: "invalidId", expect: "neutral" },
 		{ kind: "rateLimited", expect: "neutral" },
+		// receipt-spec v0.10 §15.13: a 404 is never forgery, so never danger.
+		{ kind: "unknownReceipt", expect: "neutral" },
 		{ kind: "verificationUnavailable", expect: "warning" },
 		{ kind: "billedUnfinalized", expect: "danger" },
-		{ kind: "unknownReceipt", expect: "danger" },
 		{ kind: "integrityFailure", expect: "danger" },
 		{ kind: "protocolError", expect: "danger" },
 	];
@@ -234,5 +243,39 @@ test("ogCardRegister: green ONLY for verified; every other kind is neutral/warni
 		const register = ogCardRegister({ kind } as unknown as PageState);
 		assert.notEqual(register, "green", kind);
 		assert.equal(register, expect, kind);
+	}
+});
+
+test("the share card's register never disagrees with the page's own plain register", () => {
+	// `ogCardRegister` and `plainState().register` are two spellings of one
+	// decision; a state whose card and page disagreed would broadcast a
+	// different alarm level than the page it links to.
+	const states: PageState[] = [
+		{ kind: "pending", routeParamId: "x", receiptId: "x", status: "reserved" },
+		{ kind: "pending", routeParamId: "x", receiptId: "x", status: "reconciling" },
+		{ kind: "terminalNoReceipt", routeParamId: "x", receiptId: "x", status: "notMinted" },
+		{ kind: "terminalNoReceipt", routeParamId: "x", receiptId: "x", status: "cancelled" },
+		{ kind: "unknownReceipt", routeParamId: "x", receiptId: "x" },
+		{ kind: "invalidId", routeParamId: "x", reason: "x" },
+		{ kind: "verificationUnavailable", routeParamId: "x" },
+		{ kind: "rateLimited", routeParamId: "x" },
+		{
+			kind: "integrityFailure",
+			routeParamId: "x",
+			cause: { source: "page", obligation: "R1", detail: "x" },
+		},
+		{ kind: "protocolError", routeParamId: "x", reason: "schemaInvalid", detail: "x" },
+		{
+			kind: "billedUnfinalized",
+			routeParamId: "x",
+			receiptId: "x",
+			linkedReceiptId: "x",
+			transferSetRoot: "x",
+			linkage: "unchecked",
+		} as unknown as PageState,
+	];
+	for (const state of states) {
+		if (state.kind === "verified") continue;
+		assert.equal(ogCardRegister(state), plainState(state).register, state.kind);
 	}
 });

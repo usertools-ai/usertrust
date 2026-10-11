@@ -24,7 +24,9 @@ export default function TerminalPaperStub({
 	stamp?: { word: "VOID" | "UNPROVEN"; colorClassName: string };
 }) {
 	return (
-		<div className="relative">
+		// `ut-paper-ink`: the stamp sits on the paper but outside `.paper-surface`,
+		// so the wrapper carries the paper inks for both (brand.css).
+		<div className="ut-paper-ink relative">
 			{stamp ? (
 				<Stamp
 					word={stamp.word}

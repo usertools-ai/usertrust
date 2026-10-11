@@ -1,16 +1,39 @@
-# Receipt Resolver API — v0.2 (normative companion; adopted authority: receipt-spec v0.9.5)
+# Receipt Resolver API — v0.3 (normative companion; adopted authority: receipt-spec v0.10)
 
-Status: **v0.2 — the SIXTEEN §10 companion updates applied, and the verify
+Status: **v0.3 (2026-10-05) — CLUSTER receipts.** The receipt spec's v0.10
+makes cluster receipts (§15) the only kind issued. The session kind is
+RESERVED: defined, never issued. This revision applies its companion items
+§10.17–§10.22:
+
+- clusters are served on the unchanged envelope and ladder;
+- a cluster ID has no 202 and no 410 — it answers 404 until its receipt is
+  minted;
+- 404 caching is unchanged, but its rendering changes;
+- identity binding gains the derived-ID recompute, and `predecessorLinkage`
+  gains the account's receipt chain — both checked on every read;
+- no failure code is added;
+- the cluster rendering sentences are added.
+
+The new section **"Cluster receipts — states and identity"** carries it.
+Everything below that was written for reservations is retained as the
+definition of the reserved session kind. No session receipt has ever been
+issued, and a conformant resolver serves only cluster receipts. The
+content-pinned Mint-lifecycle section is untouched (see the banner below).
+
+Earlier status — **v0.2: the SIXTEEN §10 companion updates applied, and the verify
 page's §4 concrete response schema adopted.** All sixteen §10 items now land
 in full: the in-pin corrections that once held §10.13 to a part-landing and
 §10.16 to none have been applied to the pinned section, and the pin
-recomputed against this file. Interface owner: stealth (`apps/api`).
+recomputed against this file. Interface owner: the operator (its proxy service).
 Consumer: the public verify page at `usertrust.ai/r/<id>` (usertrust instance)
 and any third-party verifier.
 
 **Normative inputs, in authority order:**
 
-1. **`receipt-spec.md` — v0.9.5, the ADOPTED revision** (usertrust). This
+1. **`receipt-spec.md` — v0.10, the ADOPTED revision** (usertrust; v0.3
+   moved it off v0.9.5, because this document now transcribes v0.10's cluster
+   states; everything said below about why v0.6 was too old stays true of
+   v0.9.5's content, which v0.10 contains). This
    document treats the receipt ID as opaque and defers its format, the
    canonical projection, the canonicalization algorithm, and the signature
    scheme to that spec. **Conflicts resolve in its favor, always** — the
@@ -36,7 +59,7 @@ and any third-party verifier.
    §4 EXTENDS §10 rather than contradicting it: `receiptBytes`,
    `verification`, and `advisories` are envelope growth that §5 explicitly
    permits, so §10.1's six-member enumeration is a floor, not a closed set.
-3. This document — the wire contract itself, owned by stealth.
+3. This document — the wire contract itself, owned by the operator.
 
 Where §4 and §10 genuinely disagree, this revision **flags rather than
 reconciles**; the three instances found are recorded under **§4 vs §10:
@@ -68,9 +91,23 @@ records them, and nothing remains deferred. Editing that section is a coordinati
 the usertrust instance (it forces a version bump and a re-pin on their side),
 never a companion edit.
 
+**v0.3: the pinned section is unchanged, byte for byte, and now describes the
+reserved session kind only.**
+
+- **The reserved kind's lifecycle.** The reserve → work → finalize lifecycle it
+  specifies belongs to the session kind, which is defined and never issued.
+  Every receipt issued follows the receipt spec's §15.10. The section stays
+  pinned as that kind's definition.
+- **The pin still moves.** v0.3 edits only OUTSIDE the pinned section. But the
+  pin covers this whole file, so the receipt spec's v0.10 re-pins it and records
+  the byte-identity check of the section (§6a there).
+
+The same rule continues to hold: an edit INSIDE the section is a coordination
+event, never a companion edit.
+
 ## Purpose
 
-A receipt trailer on a commit/PR/issue replaces `Co-Authored-By` (Cam's
+A receipt trailer on a commit/PR/issue replaces `Co-Authored-By` (a
 universal rule, 2026-08-08). The trailer is only as good as what the ID
 resolves to. This API is the resolution: public, unauthenticated, cacheable
 proof that the proxy executed and billed the work — model, timestamps, **$
@@ -115,7 +152,7 @@ GET https://api.usertools.ai/v1/receipts/{receiptId}
   side), which calls this API. The trailer cites the pretty URL, never this
   endpoint.
 - **Rate limiting — dedicated reader-IP header with service-key
-  authentication (Cam's ruling, 2026-08-10; option (b) ratified, superseding
+  authentication (ruled 2026-08-10; option (b) ratified, superseding
   the forwarded-`X-Forwarded-For` form).** Limits are per READER and generous
   — it's a public verifier, but it sits in front of the ledger. The problem
   the ruling solves is that the verify page fetches SERVER-SIDE with
@@ -194,8 +231,8 @@ GET https://api.usertools.ai/v1/receipts/{receiptId}
 
   **Key provisioning and custody are specified elsewhere, deliberately.**
   The resolver service key lands with the MINT-KEY work under the EC2 custody
-  pattern (receipt-spec §9-A H1: key material lives on the EC2 proxy host,
-  never mini2, env-file custody consistent with the existing SurrealDB/Clerk
+  pattern (receipt-spec §9-A H1: key material lives on the EC2 proxy host
+  and no other host, env-file custody consistent with the proxy's existing
   secrets, or KMS if a rotation ceremony is wanted). Page-side key handling —
   storage, rotation, and the egress allow-list the page presents — is the
   same verify-page ship-gate addendum. Both are cited here, not specified
@@ -225,6 +262,12 @@ GET https://api.usertools.ai/v1/receipts/{receiptId}
   (the terminal event nests as `terminalEvent.event` in the §4.2 bundle),
   under the same first-write-wins discipline, so that bundle is checkable by
   the same mechanism as a green receipt instead of being self-asserted.
+  **v0.3, cluster receipts:** a cluster ID is not opaque. It is DERIVED from
+  the receipt's own `{vaultId: proof.chain, account, windowStart}`
+  (receipt-spec §15.9), and the resolver recomputes it on every read that
+  serves one, in addition to route = body = registry. A stored cluster receipt
+  whose ID does not recompute is never served: it answers the 409 receipt-spec
+  §15.13 states once.
 - **Caching (Codex F3, tightened by round-2 F1):** 200 → `Cache-Control:
   public, no-cache` plus a strong `ETag`; clients revalidate every render.
   **Verification precedes conditional-request evaluation**: the resolver
@@ -235,7 +278,10 @@ GET https://api.usertools.ai/v1/receipts/{receiptId}
   On verification failure the conditional request is answered 409 `no-store`
   like any other. 409 → `Cache-Control: no-store`. 404 → `public,
   no-cache` (round-16 — a cached negative could mask this ID's later
-  allocation). A CDN layer, if ever added, fronts only the
+  allocation). (v0.3: for a derived cluster ID the "later" event is the
+  receipt's MINTING, not an allocation. The same rule covers it unchanged, and
+  it is now the ordinary case: an ID cited before its receipt exists answers
+  404 until it is minted.) A CDN layer, if ever added, fronts only the
   post-verification 304 path.
   **The ETag covers the whole envelope, extension material included**, so a
   status that rises from `verified_checkpoint` to
@@ -350,9 +396,14 @@ shape). Four tiers, and a consumer must not blur them:
                                          // inside the projection; the v0.5 minter-asserted
                                          // carve-out is gone
       "kind": "commit",                  // commit | pr | issue | session
+                                         // (receipt-spec v0.9.6: a v1 verifier REFUSES the
+                                         // artifact variants commit, pr and issue; v0.10
+                                         // issues only cluster receipts, whose work is
+                                         // {kind: "cluster"}. This example shows what is
+                                         // recognized in order to be refused)
       "repoId": "github.com:R_kgDOK1x2Yw",  // NORMATIVE scope: immutable provider-scoped ID
                                          // (keyed r1_… form for private repos) — round-12
-      "repo": "github.com/usertools-ai/usertools-stealth",  // OPTIONAL display-at-mint
+      "repo": "github.com/example-org/example-repo",  // OPTIONAL display-at-mint
                                          // metadata, and ABSENT unless disclosure is
                                          // authorized (spec §2: provider-verified PUBLIC
                                          // visibility, or a recorded operator authorization);
@@ -570,8 +621,8 @@ shape). Four tiers, and a consumer must not blur them:
         },
         "delegationPosture": "selfDebitsOnly",  // REQUIRED (receipt-spec §2a, v0.9) — WHAT THE
                                          // AMOUNT COVERS with respect to DELEGATED work. a2a
-                                         // delegation holds are always-released (stealth
-                                         // #829), so delegated cost debits the DELEGATE and a
+                                         // delegation holds are always-released, so
+                                         // delegated cost debits the DELEGATE and a
                                          // parent session's amount EXCLUDES work it caused —
                                          // technically correct and universally misread, which
                                          // is why the posture is chain-committed rather than
@@ -626,7 +677,7 @@ shape). Four tiers, and a consumer must not blur them:
                                          // unchanged from the draft; the spec renamed ITS
                                          // field to match (§10.12)
       },
-      "sequence": 8123421,
+      "sequence": 8123420,
       "hash": "…"                        // = sha256(canonicalize(event − hash)), key-absent
                                          // exclusion. The verifier RECOMPUTES it from the
                                          // embedded envelope
@@ -649,8 +700,12 @@ shape). Four tiers, and a consumer must not blur them:
                                          // interior = sha256(0x01 ‖ left ‖ right) over
                                          // DECODED bytes, odd nodes promoting
         "leafIndex": 21,                 // = event.sequence − checkpoint.segmentFirstSequence
-                                         // = 8123421 − 8123400 (equality 4), and
-                                         // 0 ≤ leafIndex < treeSize
+                                         //   + offset = 8123420 − 8123400 + 1 (equality 4,
+                                         // v0.9.6), and offset ≤ leafIndex < treeSize. The
+                                         // offset is 1 because this segment is not genesis:
+                                         // its leaf 0 is the CHAIN-LINK leaf (the sealed
+                                         // predecessor's root), so its first event is leaf 1
+                                         // and treeSize counts the link
         "treeSize": 32,
         "root": "…",
         "siblings": [                    // Example kept internally VALID (round-4 F6, now
@@ -687,6 +742,11 @@ shape). Four tiers, and a consumer must not blur them:
                                          // retirement-boundary input for §8's key states
         "previousSegmentRoot": "…",      // the SIGNED lineage edge. Genesis: both fields are
         "previousSegmentId": "seg-000411",   // the fixed string "genesis" for the first segment
+        "segmentStartPreviousHash": "…", // SIGNED (v0.9.6, the twelfth member): the
+                                         // previousHash this segment's first event carries,
+                                         // i.e. the predecessor's final event hash; for the
+                                         // genesis segment, 64 "0" characters. Equality 4
+                                         // binds it when the receipt's event is leaf `offset`
         "keyId": "usertools-audit-root-2026a",
         "publishedAt": "2026-08-09T02:11:04.000Z",   // a signed input, and NOT a trusted clock
         "sig": "base64…"                 // Ed25519 over canonicalize(unsigned payload)
@@ -726,13 +786,16 @@ shape). Four tiers, and a consumer must not blur them:
       "schema":      { "result": "passed" },   // 1 — SCHEMA_INVALID (the wire name for
                                          //     step 1 is owned by §4; §7 names 2–9)
       "event":       { "result": "passed" },   // 2 — EVENT_MISMATCH
-      "registry":    { "result": "passed" },   // 3 — ID_MISMATCH (both halves)
+      "registry":    { "result": "passed" },   // 3 — ID_MISMATCH (both halves; v0.3, cluster:
+                                         //     also (d), the derived-ID recompute)
       "signature":   { "result": "passed" },   // 4 — SIG_INVALID
       "inclusion":   { "result": "passed" },   // 5 — PROOF_INVALID
       "checkpoint":  { "result": "passed" },   // 6 — CHECKPOINT_INVALID
       "semantics":   { "result": "passed" },   // 7 — SEMANTIC_INVALID
       "derivations": { "result": "passed" },   // 8 — DERIVATION_MISMATCH;
                                          //     notApplicable when transferSet is absent
+                                         //     (v0.3, cluster: and no skipped list of
+                                         //     ≤ 16 windows is present)
       "extensions":  { "result": "passed" }    // 9 — summary; per-check detail below
     },
     "checks": {                          // the FOUR named ONLINE checks, same
@@ -740,7 +803,10 @@ shape). Four tiers, and a consumer must not blur them:
       "registryBinding":    { "result": "passed" },        // 3(b) — mandatory
                                          // server-side on every read serving a receipt
       "predecessorLinkage": { "result": "notApplicable" }, // generation 1 has no
-                                         // predecessor to check
+                                         // predecessor to check (v0.3, cluster: an
+                                         // account's FIRST receipt; every later one
+                                         // is "passed", and a 200 never carries
+                                         // "unavailable" here)
       "checkpointHistory":  { "result": "notApplicable" }, // failure: HISTORY_INVALID
       "anchorEvidence":     { "result": "unavailable"   }  // failure: ANCHOR_INVALID
     }
@@ -981,7 +1047,11 @@ question.
    because "the registry IS the resolver's backing store, so `unavailable`
    would assert 'I read the registry for the bytes but not for the binding'".
    Two actors, two rules, one check name. `predecessorLinkage` is `passed`,
-   `notApplicable` (generation 1), or `unavailable`.
+   `notApplicable` (generation 1), or `unavailable`. (v0.3, cluster receipts:
+   `passed`, or `notApplicable` for an account's first receipt — never
+   `unavailable`, for `registryBinding`'s reason: the registry the chain is
+   checked against is this API's own store. See "Cluster receipts — states and
+   identity".)
    **`registryBinding: failed` or `predecessorLinkage: failed`
    on a 200 is INVALID** — those two fail only on a POSITIVE CONTRADICTION (a
    binding to a different event; a predecessor hash that is not
@@ -1165,7 +1235,9 @@ Three consequences the draft got wrong and v0.2 fixes:
 `"reserved"` is the only 202 this ladder recognizes — a state of the ID
 BEFORE it has a receipt, never a state of a minted proof. (`"reconciling"`
 sits on the same pre-mint side of that line: it is mint-side machinery this
-document owns, and it survives.)
+document owns, and it survives.) (v0.3: both 202s are SESSION-reservation
+states. A cluster ID never answers 202. See "Cluster receipts — states and
+identity".)
 
 ## Display states (never a `status`, never a verdict)
 
@@ -1210,9 +1282,11 @@ Design intents behind the shape:
   prefixes, RFC 6962 §2.1), odd-leaf promotion (CVE-2012-2459), one tree per
   JSONL segment, and Ed25519-signed roots. What is NET-NEW is the checkpoint
   STATEMENT: `SegmentCheckpoint` v2 (§4a), a versioned extension whose signed
-  payload covers `{ v, vaultId, profile, root, treeSize, segmentId,
-  segmentFirstSequence, previousSegmentRoot, previousSegmentId, keyId,
-  publishedAt }`. The receipt attests exactly ONE leaf — the `receipt_settled`
+  payload covers exactly twelve members, `{ v, vaultId, profile, root,
+  treeSize, segmentId, segmentFirstSequence, previousSegmentRoot,
+  previousSegmentId, segmentStartPreviousHash, keyId, publishedAt }` (v0.3:
+  receipt-spec v0.9.6 added `segmentStartPreviousHash`; with `sig` the
+  embedded checkpoint has thirteen keys). The receipt attests exactly ONE leaf — the `receipt_settled`
   mint event — so the proof is a standard `MerkleInclusionProof` against that
   checkpoint.
   **Segments are SEALED by their checkpoint — exactly ONE checkpoint per
@@ -1243,7 +1317,15 @@ Design intents behind the shape:
      byte-identically to the projection the receipt claims; they are the same
      object, not duplicate copies), equality 4
      (`inclusion.leafIndex === event.sequence −
-     checkpoint.segmentFirstSequence`), equality 8 (`checkpoint.vaultId ===
+     checkpoint.segmentFirstSequence + offset`, with `offset ≤ leafIndex <
+     checkpoint.treeSize`, where `offset` is §4a's chain-link offset: `0` iff
+     `checkpoint.previousSegmentRoot === "genesis"`, else `1`; and when
+     `leafIndex === offset`, `event.previousHash ===
+     checkpoint.segmentStartPreviousHash` — v0.3, per receipt-spec v0.9.6,
+     which also binds every proof node the receipt can recompute and
+     requires `treeSize > offset`; this transcription does not restate
+     those),
+     equality 8 (`checkpoint.vaultId ===
      proof.chain` and `checkpoint.profile === proof.profile`, read out of the
      CHECKPOINT's own signed payload, THEN cross-checked against the registered
      `chains[]` entry), and equality 9
@@ -1266,7 +1348,17 @@ Design intents behind the shape:
      server-side on EVERY read that serves a receipt; offline verifiers report
      it `notApplicable`. A binding to a DIFFERENT event, or a missing binding
      for an ID served as final, is `failed` — never a fallback to (a);
-     (c) equality 3 above, which ties the projection to the event.
+     (c) equality 3 above, which ties the projection to the event;
+     (d) v0.3, `scope: "cluster"` ONLY — ALWAYS, offline. A cluster ID is
+     DERIVED, not reservation-issued, so the reservation wording above
+     describes the reserved session kind and (d) applies on top of (a)–(c).
+     The document's `receiptId` must recompute from its own `{vaultId:
+     proof.chain, account, windowStart}` (receipt-spec §15.9, its step 3(c)).
+     The result is reported under `steps.registry`, like (a) and (b), and a
+     mismatch is `failed` with `ID_MISMATCH`. The resolver runs it on every
+     read that serves a cluster receipt, as the Endpoint section requires.
+     Route, body and registry agreeing on an ID that does not derive is
+     still the 409 of receipt-spec §15.13.
      Together these bind request → document → event without a payload-embedded
      ID. → `ID_MISMATCH`
   4. **Mint signature**, with key role `mint`, the `minterKind` binding, and a
@@ -1291,8 +1383,8 @@ Design intents behind the shape:
      promotions included — and reject any proof whose supplied siblings
      disagree. Folding the siblings as given is non-conformant, and without
      this equality 4 is forgeable by altering `leafIndex`. (`packages/core`
-     already implements this; the STEALTH half is an open code fix —
-     `merkle-proofs.ts:84` — and it gates this API.) → `PROOF_INVALID`
+     already implements this; the operator's half is an open code fix, in
+     its proxy's Merkle-proof module, and it gates this API.) → `PROOF_INVALID`
   6. **Checkpoint.** `checkpoint.v === 2` (a v1 `PublishedMerkleRoot` in a
      receipt is FAIL), then its signature under a key with role `checkpoint`,
      in a permitting state, and in the rotation lineage pinned by this chain's
@@ -1460,8 +1552,8 @@ Design intents behind the shape:
   row plus persisted exact adapter posture), `"conservative"` when any leg
   used an allowlisted fallback mapping that can only round UP.
 
-  Proxy reality today: Anthropic traffic (the dominant path — Claude Code /
-  minidev) is priced EXACTLY, all four token tiers extracted and rated.
+  Proxy reality today: Anthropic traffic (the dominant path, coding agents)
+  is priced EXACTLY, all four token tiers extracted and rated.
   OpenAI/Gemini adapters zero the cache counts and bill the full prompt at the
   input rate — cached tokens priced at full freight, i.e. conservatively HIGH,
   the same posture as the SDK's D1 invariant by a different route. The
@@ -1864,11 +1956,133 @@ finalize A for the commit). Therefore:
   terminal-intent commitment instead. `transferSetRoot` commits the server-derived set, and
   `spend` is computed from it and nothing else.
 
+## Cluster receipts — states and identity (v0.3 — receipt-spec §15)
+
+**What a cluster receipt is.** The receipt spec's v0.10 defines it (§15). It
+covers every charge to ONE funded ledger account — one agent key — over a
+SYSTEM-DEFINED window: from the account's first hold until it has been idle
+for its idle threshold (10 minutes by default, set per agent within 60 s to
+24 h), judged on the ledger's own timestamps.
+
+- Nobody reserves, and nobody chooses a boundary.
+- Its ID is DERIVED from `{vaultId: proof.chain, account, windowStart}`
+  (§15.9), so it can be computed — and cited — once the window's first hold
+  commits. `account` is a keyed public handle, never a ledger ID (§15.7).
+- Each receipt names the account's previous minted receipt
+  (`previousReceiptId`), and discloses the windows refused since it
+  (`skippedSincePrevious`) (§15.6, §15.10).
+- **This section is a transcription; the receipt spec is the authority.** It
+  restates the states the resolver serves for such an ID. Where it and the
+  receipt spec differ, the receipt spec wins, as always.
+
+**The states.**
+
+| Code | Body `status` | When |
+|---|---|---|
+| 200 | `verified_checkpoint` / `verified_checkpoint_history` / `verified_anchored` | A MINTED cluster receipt: the same envelope, the same ladder, the same `apiVersion` as any receipt (§10.17). The signed receipt's shape is governed by `scope`, under the receipt spec's strict schema. `checks.registryBinding` is `passed`. `checks.predecessorLinkage` is `passed`, or `notApplicable` for an account's first receipt — never `unavailable`. |
+| 404 | `"unknown"` | **Any ID with no minted receipt.** For a derived cluster ID that includes a window that is still open, closed but not reconciled, with its mint event appended but not yet sealed, or refused (it never gets a receipt). Caching is unchanged: `public, no-cache, max-age=0, must-revalidate`. The round-21 reasoning — a fresh cached 404 can never observe the answer that follows — is now the ORDINARY case rather than an edge. |
+| 409 | `"unverifiable"` | As in the Errors table, plus the two cluster cases receipt-spec §15.13 states once, with their codes: an ID that does not recompute, and a predecessor link that fails. |
+| 503, 304, 429 | as in the Errors table | Unchanged. |
+
+**The receipt chain, checked on every read (§15.10).** The resolver checks
+`predecessorLinkage` against its own registry:
+
+- **`previousReceiptId` absent:** the account has no receipt before this
+  window → `notApplicable`.
+- **`previousReceiptId` present:** exactly one registry row binds that ID,
+  for the same vault and the same `account`, and then:
+  - the row is not trusted for its own window: its ID re-derives from its own
+    `(vault, account, windowStart)`, and `prev.windowStart ≤ prev.windowEnd <
+    windowStart`;
+  - `prev.windowEnd + prev.idleThresholdNs ≤ windowStart`;
+  - the first skipped window, if any, starts at or after `prev.windowEnd +
+    prev.idleThresholdNs`, because a hold inside the predecessor's idle gap
+    would have joined the predecessor's window;
+  - no receipt of the account lies strictly between the two windows.
+
+  All of these hold → `passed`.
+- **Anything else** → `failed` with `PREDECESSOR_MISMATCH`, answered with
+  the 409 of receipt-spec §15.13.
+- **Never `unavailable` on a 200.** The registry is this API's own store, so
+  the reasoning that makes `registryBinding` mandatory (see "The verdict
+  algebra") applies unchanged. A registry the resolver cannot reach is a 503.
+
+**There is no pre-mint state for a cluster ID.**
+
+- **No 202 `reserved`:** nothing is reserved.
+- **No 202 `reconciling`, and no `"sealing"`.** The ruling is "unminted → 404".
+  Two further reasons support it:
+  1. A pre-mint answer for a DERIVABLE ID is an unauthenticated oracle: anyone
+     holding an account's handle could confirm "this account had activity
+     starting at time T".
+  2. With no allocation event, a 202 would have nothing to mean that a 404 does
+     not.
+- **No 410 of any kind.** Nothing is cancelled or expired. A refused window
+  simply never has a receipt, so its ID answers 404 forever. A window refused
+  after its `receipt_settled` event was appended leaves that event in the
+  chain without a registry row, so it is never served, and its ID answers 404
+  like any other unminted ID.
+
+The 202 and 410 rows in the Errors table remain defined for the reserved
+session kind only, and are never emitted.
+
+**What a 404 means, and how it renders — this changes for every ID.** Under
+reservation a 404 meant "never allocated", and the page rendered it LOUDLY as
+an integrity red flag. A 404 now ALSO covers a legitimately cited cluster ID
+whose receipt does not exist yet, and nothing in the ID says which kind it is.
+So a consumer:
+
+- MUST render a 404 as **"no receipt under this ID yet"**, saying that a
+  cluster receipt is minted once its agent key has been idle for the key's
+  idle threshold — 10 minutes by default — on the ledger's clock, and its
+  audit segment has sealed;
+- MUST NOT render a 404 as forgery or invalidity;
+- MUST NOT render a 404 green.
+
+This is a verify-page change, tracked as a companion item on that document.
+
+**What the resolver does NOT do for clusters.** It does not audit the ledger
+on the public's behalf. Completeness against the ledger is the receipt spec's
+completeness AUDIT (§15.11), run by a party with ledger access, and it is not
+a named check. So the four named checks are unchanged, and a resolver response
+carries no `ledgerCompleteness` member.
+
+**Failure vocabulary: unchanged.** No code is added (§10.21). A cluster
+contradiction uses the existing codes: `ID_MISMATCH` for the derived ID,
+`PREDECESSOR_MISMATCH` for the chain, and `DERIVATION_MISMATCH` when a listed
+skipped-window set does not recompute to its root. Two results live OUTSIDE
+the vocabulary and never appear in a resolver `verification` block:
+
+- `COMPLETENESS_MISMATCH` is the completeness audit's result;
+- `WINDOW_CONFLICT` is the result of a consumer rule over two receipts of one
+  account (§15.12).
+
+**Rendering (§10.22).** For `scope: "cluster"`, the claim line is "charged to
+this agent key between `<windowStart>` and `<windowEnd>` — $X". The R40 scope
+line under `selfDebitsOnly` is "Charged to this agent key · delegated work
+bills to the delegate". The scoped never-understates sentence is "never
+understates the ledger-POSTed charges to this agent key in this window". Times
+render the ledger nanoseconds as RFC 3339 UTC, by integer division to
+milliseconds. A page that shows `skippedSincePrevious` renders each listed
+window with its reason, and never as a receipt or an amount.
+
 ## Errors
 
 Every lifecycle phase has a defined response (round-7 F4) — consumers get
 deterministic rendering/retry behavior, and no cacheable state can mask a
-transition:
+transition.
+
+**v0.3 scope note.**
+
+- **Session-only rows.** The 202 rows and the 410 rows below are states of
+  the RESERVED session kind (the receipt spec's §15.1): defined, never
+  emitted. A cluster ID never answers any of them.
+- **The 404 row** gains the cluster meaning: any unminted ID, including a
+  derived cluster ID cited before its receipt exists. Its rendering changes as
+  "Cluster receipts — states and identity" states. The row's LOUD "integrity
+  red flag" rendering is retired for EVERY ID: the two kinds share one ID
+  format, so a consumer cannot tell which kind a 404 answers.
+- **409 / 503 / 429** are unchanged for both kinds.
 
 | Code | Body `status` | Meaning |
 |---|---|---|
@@ -1877,7 +2091,7 @@ transition:
 | 410 | `"cancelled"` / `"expired"` | Terminal: the reservation was cancelled by its owner or expired server-side — reachable ONLY for reservations with zero admitted intents (round-11 F1); an expiration tombstone persists, so an allocated ID answers 410 forever (round-12). Cacheable ≤1h. Renders as "reservation ended without a receipt" — loud on a commit, expected on abandoned work. Cancellation authorizes against the reservation owner / billing principal (or a delegated orchestrator capability) in the same transaction as the state CAS — reservation IDs are public by design (trailers), and an unauthorized caller receives the 404 shape (review-gate R7). |
 | 410 | `"billedUnfinalized"` | Terminal, NON-GREEN: the reservation billed (≥1 POST) but never finalized; a spend-only session receipt exists under a SEPARATE linked ID referenced in the body (round-14 F2). Loud on a commit — the trailer's claim was never proven. Cacheable ≤1h. **The bundle's ut1 re-expression (§10.15) IS applied** — its concrete amended shape is transcribed from §4.2 under "Non-receipt response bodies", which supersedes the older description still carried in the content-pinned section. |
 | 410 | `"notMinted"` | Terminal: at least one intent was admitted, ALL intents are terminal, and ZERO TigerBeetle transfers POSTed — actual transfers VOIDed; pre-ledger intents may be REJECTED or ABORTED_NOT_SUBMITTED (round-12 definition). Nothing billable settled, nothing to prove, and this can never change (round-8 F4). Cacheable ≤1h. The page renders "no billable work settled under this receipt ID" — distinct from both an error and a green check. |
-| 404 | `"unknown"` | ID never allocated (round-12: allocated IDs that expire answer 410 via the tombstone — the two have opposite integrity semantics). `Cache-Control: public, no-cache, max-age=0, must-revalidate` — storage is acceptable ONLY when every reuse revalidates at the origin; NO freshness allowance (round-21: a fresh cached 404 is served without contacting the origin, so it can never observe the 202 that follows allocation). The spec's §3 makes this meaningful: the ID is CLAIMED atomically at reserve time by an insert-if-absent into the mint-side registry, in the same durable write that creates the reservation, so it exists — unresolvable-but-allocated — before it can be written into any trailer. The page renders this LOUDLY — an unknown receipt on a commit is an integrity red flag, per the fail-closed convention. |
+| 404 | `"unknown"` | **v0.3: also every DERIVED cluster ID with no minted receipt yet — open, closed-unreconciled, appended-unsealed, or refused (receipt-spec §15.13); the caching below is unchanged; the rendering is "no receipt under this ID yet", never forgery, never green.** Session-format meaning, unchanged: ID never allocated (round-12: allocated IDs that expire answer 410 via the tombstone — the two have opposite integrity semantics). `Cache-Control: public, no-cache, max-age=0, must-revalidate` — storage is acceptable ONLY when every reuse revalidates at the origin; NO freshness allowance (round-21: a fresh cached 404 is served without contacting the origin, so it can never observe the 202 that follows allocation). The spec's §3 makes this meaningful: the ID is CLAIMED atomically at reserve time by an insert-if-absent into the mint-side registry, in the same durable write that creates the reservation, so it exists — unresolvable-but-allocated — before it can be written into any trailer. The page renders this LOUDLY — an unknown receipt on a commit is an integrity red flag, per the fail-closed convention. (v0.3: that rendering is RETIRED — the page renders every 404 as "no receipt under this ID yet", never forgery and never green, because a cluster ID cited before minting is indistinguishable from an unallocated one.) |
 | 409 | `"unverifiable"` | ID known, but recomputation of the STORED mint-time artifact failed — the event/proof/checkpoint the resolver serves does not verify against itself (§10.4). Never cached. Alerts internally — this should be impossible. A failed EXTENSION check is never a 409: it preserves the base verdict and is reported beside it. |
 | 503 | `"verificationUnavailable"` | A transient dependency prevented the BASE verification — and the list is exactly two: **the key registry or the receipt store being unreachable** (§10.4). An OPERATIONAL condition, not a cryptographic mismatch (round-32: rendering it 409 fakes an integrity incident; rendering a recompute failure as 503 hides one; an unspecified 500 breaks deterministic retry). `Cache-Control: no-store` + `Retry-After`; never a 304, never a fallback to any cached green response. **An anchor or history endpoint is NOT on that list:** anchor and checkpoint-history material are optional EXTENSION inputs, so failing to reach them is a clean 200 at `verified_checkpoint` with the extension reported `unavailable` — never a 503, never a downgrade. |
 | 429 | — | Rate limited. **The one body-less state**, and exempt from the `apiVersion` discipline: consumers derive it from the status code + `Retry-After` alone and never parse the body (§4.2, below). |
@@ -1886,7 +2100,9 @@ transition:
 
 Transcribed from the verify page's §4.2. `receiptBytes`, `receipt`,
 `verification`, and `advisories` exist ONLY where shown: a 202/410/404 has no
-receipt and no verification to report.
+receipt and no verification to report. (v0.3: the 202 and 410 bodies are
+SESSION-reservation bodies. A cluster ID's only non-receipt bodies are the
+404, 409 and 503 below, with their shapes unchanged.)
 
 ```jsonc
 // 202 — Cache-Control: no-store
@@ -1986,7 +2202,10 @@ non-200 states, but the contract is the full set, so it is enumerated here
 once and in full — **`200`, `304`, `202`, `410`, `404`, `409`, `503`, `429`,
 and nothing else.** Two of these carry no body: `304` (a successful
 revalidation, emitted only after a current verification succeeded — see
-Caching) and `429`.
+Caching) and `429`. (v0.3: `202` and `410` are states of the reserved session
+kind, defined and never emitted. A conformant resolver's set is therefore
+`200`, `304`, `404`, `409`, `429` and `503`, and a consumer treats a `202` or
+a `410` as a protocol error — receipt-spec §15.13.)
 
 Two obligations land on this API rather than on the page: (1) **on
 BODY-BEARING responses, the HTTP code and the body `status` must agree** — a
@@ -2006,7 +2225,11 @@ consumer could not obtain a trustworthy answer at all.
 
 - No list/search endpoints (enumeration of receipts is a different product
   decision — amounts are public per-receipt, not necessarily as a browsable
-  firehose).
+  firehose). v0.3: none is needed for clusters either. Each cluster receipt
+  names its predecessor (`previousReceiptId`) and discloses the windows
+  refused since it (`skippedSincePrevious`), so a holder can walk an
+  account's chain back one ID at a time (receipt-spec §15.10), without an
+  index the public could browse.
 - No per-transfer SPEND breakdown endpoint. `spend` is session-aggregate. (The
   transfer ID PAIRS are a different thing and are disclosed by rule, not by
   endpoint: the projection enumerates them at `transferCount ≤ 32` and omits
@@ -2028,7 +2251,7 @@ consumer could not obtain a trustworthy answer at all.
    canonical URL is display-at-mint metadata only; the git object ID is
    always the FULL oid + algorithm. The spec tightened the display half into a
    presence rule: `repo` is ABSENT unless disclosure is authorized, so this is
-   no longer Cam's per-commit call but a mint-side authorization check.
+   no longer a per-commit judgement call but a mint-side authorization check.
 2. ~~Proof size bound~~ **RESOLVED (Codex F1 remediation, revised by
    §10.10):** the receipt attests exactly ONE leaf — the `receipt_settled`
    mint event, embedded as the chain's real envelope. The proof structures are
@@ -2078,7 +2301,7 @@ consumer could not obtain a trustworthy answer at all.
    key-custody design a distributed npm package cannot satisfy (it must never
    embed the trust domain's mint key) and is deferred to `ut2`.
 
-## Sequencing / gating (from Cam's plan)
+## Sequencing / gating (from the delivery plan)
 
 **Prerequisite migration (round-13 F3):** per-transfer pricing metadata —
 `pricingTableVersion`, the applied tier rates, and the sanitized usage
@@ -2122,7 +2345,7 @@ spec's `postedUsertokens === assessedUsertokens` rule true by construction:
 every POST carries `amount === actualAmount` under a bound, so a conformant
 ut1 receipt cannot exhibit a settlement shortfall.
 
-**Stealth net-new work that gates the mint endpoint (spec §9-B — ALL SIX are
+**Operator-side net-new work that gates the mint endpoint (spec §9-B — ALL SIX are
 mint blockers, not just the checkpoint pipeline).** Without them no conformant
 receipt can be produced at all:
 
@@ -2134,7 +2357,7 @@ receipt can be produced at all:
    checkpoint history + outbox with crash recovery, a stable public-safe
    `vaultId`, a sealing/checkpoint cadence that cannot indefinitely stall
    low-volume minting, and either a stated single-host writer constraint or a
-   distributed lock. **The genesis decision is stealth's to make and must be
+   distributed lock. **The genesis decision is the operator's to make and must be
    DECLARED in the trust document**, not just in prose: either (a) verified
    backfill — re-issue v2 statements over all prior segments, whose lineage
    edges must be reconstructed from the existing unsigned `MerkleTreeState` —
@@ -2158,13 +2381,13 @@ receipt can be produced at all:
    audit subsystem (plaintext `MERKLE_SIGNING_KEY`, undocumented in both
    `.env.example` files, ephemeral outside production). The spec REJECTS
    shared material: a distinct mint key must be provisioned, custody on the
-   **EC2 proxy host** (never mini2), and both env keys documented.
+   **EC2 proxy host** and no other host, and both env keys documented.
 6. **`sessionId` nonce migration** — today's `sessionId` is a content hash and
    collides across concurrent runs; the spec requires a nonce/ULID minted at
    session open.
 
 Plus one required code fix this API depends on directly:
-**inclusion-path topology validation in stealth's `merkle-proofs.ts:84`** —
+**inclusion-path topology validation in the operator proxy's Merkle-proof module** —
 without it, equality 4 is forgeable by altering `leafIndex`, and every
 verification step above inherits the hole. (`packages/core` already
 implements it.)
@@ -2172,8 +2395,8 @@ implements it.)
 Order: pricing-snapshot ledger migration → §9-B (1–6) → mint endpoint → this
 resolver API → verify page → the swap.
 
-spec+IDs (usertrust) → **mint endpoint (stealth)** → **this API (stealth)** →
-verify page (usertrust) → the swap (stealth). The swap is additionally gated
+spec+IDs (usertrust) → **mint endpoint (the operator)** → **this API (the
+operator)** → verify page (usertrust) → the swap (the operator). The swap is additionally gated
 on this API being live in prod: a trailer that 404s is worse than
 `Co-Authored-By`. Publication is two-stage (round-9 F1 — "no receipt, no
 push" deadlocks against observed membership, since a webhook cannot see an
@@ -2210,6 +2433,23 @@ receipt is compared by IMMUTABLE `providerArtifactId` (numbers and URLs are
 both reusable) — a mismatch there is a transplant and fails, while a newer
 revision of the SAME artifact is the `revisionSuperseded` display state, not
 a failure.
+
+## Changelog — v0.3 (cluster receipts: receipt-spec v0.10, §10.17–§10.22)
+
+Applied against receipt-spec **v0.10**. Each row cites its §10 item; every
+change is OUTSIDE the content-pinned Mint-lifecycle section, which is
+byte-identical to v0.2's (the receipt spec's §6a records the check and its
+command).
+
+| §10 | Applied |
+|---|---|
+| 17 | Minted cluster receipts are served at 200 on the unchanged envelope and ladder; `apiVersion` unchanged (header status; "Cluster receipts — states and identity"). |
+| 18 | 202 `reserved`/`reconciling` and the 410 terminals are states of the reserved session kind, never emitted. A cluster ID has no 202, no 410, and no pre-mint state ("Cluster receipts"; the Errors scope note; Status ladder; Non-receipt bodies). |
+| 19 | 404 covers every unminted ID, including derived cluster IDs. Caching is unchanged; the 404 rendering changes to "no receipt under this ID yet" (Caching; the Errors 404 row; "Cluster receipts"). |
+| 20 | The derived-ID recompute joins identity binding on every read serving a cluster receipt, and `predecessorLinkage` checks the account's receipt chain against the registry. Either failure is the 409 receipt-spec §15.13 states once; on a 200 the chain check is `passed` or `notApplicable`, never `unavailable` (Endpoint, identity binding; the verification steps' step 3 (d); the 200 example; "The verdict algebra"; "Cluster receipts"). |
+| 21 | No failure code is added. `COMPLETENESS_MISMATCH` and `WINDOW_CONFLICT` are results of the receipt spec's completeness audit and of a two-receipt consumer rule, never emitted by a resolver; the four named checks are unchanged, so there is no `ledgerCompleteness` member ("Cluster receipts"). |
+| 22 | Cluster rendering sentences: claim line, R40 scope line, scoped never-understates ("Cluster receipts"). |
+| v0.9.6 | The proof-block transcriptions caught up with receipt-spec v0.9.6, which overrode them and left this correction to the companion's own round. The 200 example's checkpoint carries the twelfth signed member, `segmentStartPreviousHash`. Equality 4 carries the chain-link offset, in the example and in the verification steps. The example's event sequence moves to 8123420 so that its `leafIndex` 21, and with it the sibling sides, stays valid for a non-genesis segment. The example's `commit` work variant is marked as refused (v0.9.6), and the equality-4 transcription points to v0.9.6's recomputable proof-node bindings and `treeSize > offset`, which it does not restate. |
 
 ## Changelog — v0.2 (sixteen §10 companion updates + the §4 schema adoption)
 
@@ -2249,14 +2489,14 @@ concrete shape for something §10 described abstractly.
 | §4.2 | **The 429 exemption** — body never parsed, state from status code + `Retry-After` alone, never the protocol-error shell. |
 | §3/R37 | Version discipline: unknown MEMBERS under `apiVersion: "1"` tolerated, unknown VERSIONS and statuses fail closed; plus two obligations on this API — the HTTP code and body `status` must agree on body-bearing responses, and no status code outside the enumerated allowed set (completed by F6 below). |
 
-**Adopted AFTER the v0.2 transcription — a Cam ruling, not a §10 item:**
+**Adopted AFTER the v0.2 transcription — a ruling, not a §10 item:**
 
 | Source | Adopted |
 |---|---|
-| **Cam's ruling, 2026-08-10 (option (b) ratified)** | **Rate limiting: dedicated reader-IP header with service-key authentication.** The verify-page service authenticates with a service key; a valid key from the KNOWN EGRESS unlocks trust in **`Usertrust-Reader-IP`**, and the per-reader limit applies to the address it carries. That header is the ONLY attribution header: inbound `X-Forwarded-For` is now IGNORED ENTIRELY, on every request. An absent header on an authenticated request falls back to a keyed page-service allowance as the floor, and a MALFORMED value (non-single-value or non-IP-literal) degrades to the same floor — **never a rejection; the request is still served.** The page CONSTRUCTS the value from the platform-attested client IP (on Vercel, the platform's own trusted source), never derived from or merged with inbound `X-Forwarded-For`. **Ratification history:** the first form of this ruling forwarded a single-valued `X-Forwarded-For`; option (b) superseded it on the deciding fact that **the page's hosting platform rewrites `X-Forwarded-For` in transit**, putting that header's semantics under infrastructure neither side controls. Header NAME fixed at `Usertrust-Reader-IP` — no `X-` prefix (RFC 6648 deprecates it; matches the `Usertrust-Receipt` convention); the working name `X-Usertrust-Reader-IP` in cross-instance coordination syncs to this. This REPLACES the open coordination item v0.2 raised from verify-page §11/D1 — that item is now closed. Cited, not specified: the service key lands with the mint-key work under the EC2 custody pattern (§9-A H1), and both page-side key handling and header construction are the usertrust verify-page ship-gate addendum. The service key is rate-limit attribution only, never access — the endpoint stays public and the "no auth'd variants" non-goal is intact. |
+| **Ruling, 2026-08-10 (option (b) ratified)** | **Rate limiting: dedicated reader-IP header with service-key authentication.** The verify-page service authenticates with a service key; a valid key from the KNOWN EGRESS unlocks trust in **`Usertrust-Reader-IP`**, and the per-reader limit applies to the address it carries. That header is the ONLY attribution header: inbound `X-Forwarded-For` is now IGNORED ENTIRELY, on every request. An absent header on an authenticated request falls back to a keyed page-service allowance as the floor, and a MALFORMED value (non-single-value or non-IP-literal) degrades to the same floor — **never a rejection; the request is still served.** The page CONSTRUCTS the value from the platform-attested client IP (on Vercel, the platform's own trusted source), never derived from or merged with inbound `X-Forwarded-For`. **Ratification history:** the first form of this ruling forwarded a single-valued `X-Forwarded-For`; option (b) superseded it on the deciding fact that **the page's hosting platform rewrites `X-Forwarded-For` in transit**, putting that header's semantics under infrastructure neither side controls. Header NAME fixed at `Usertrust-Reader-IP` — no `X-` prefix (RFC 6648 deprecates it; matches the `Usertrust-Receipt` convention); the working name `X-Usertrust-Reader-IP` in cross-instance coordination syncs to this. This REPLACES the open coordination item v0.2 raised from verify-page §11/D1 — that item is now closed. Cited, not specified: the service key lands with the mint-key work under the EC2 custody pattern (§9-A H1), and both page-side key handling and header construction are the usertrust verify-page ship-gate addendum. The service key is rate-limit attribution only, never access — the endpoint stays public and the "no auth'd variants" non-goal is intact. |
 
-**Gate round-1 remediation (PR #823) — review findings, distinct from both the
-§10 items and the Cam ruling:**
+**Gate round-1 remediation — review findings, distinct from both the
+§10 items and that ruling:**
 
 | Finding | Applied |
 |---|---|
@@ -2267,8 +2507,7 @@ concrete shape for something §10 described abstractly.
 | F5 (Medium) | **Advisory kind naming fixed.** The advisory is camelCase `receiptSuperseded` (verify-page §4.1); the underlying chain event is snake_case `receipt_superseded` (receipt-spec §8). Both names now appear with the distinction stated and each cited to the document that defines it, plus the failure mode: the snake_case form on the wire is silently lossy, falling through to the unknown-kind path. |
 | F6 (Medium) | **Allowed response-code set completed** — `200`, `304`, `202`, `410`, `404`, `409`, `503`, `429`, enumerated in full and closed. The code/body-`status` agreement rule is now scoped to BODY-BEARING responses, since `304` and `429` carry no body. |
 
-**Gate round-3 remediation + re-pin bundle (PR #823, the cap round) —
-reviewed at 23fcd3be:**
+**Gate round-3 remediation + re-pin bundle (the cap round):**
 
 | Item | Applied |
 |---|---|
@@ -2280,8 +2519,7 @@ reviewed at 23fcd3be:**
 | R3-F6 (Medium) | **CORS preflight contract added** — OPTIONS with `Allow-Headers: If-None-Match` (+ Methods/Origin/Expose); the closed response-code set scoped to GET. |
 | Re-pin bundle | The Mint-lifecycle section was replaced with the byte-identical section text of the usertrust instance's re-pinned copy (§6a pin `6260043a…`, superseding `4c293c35…`): anchor-clock paragraph retired (§10.13), separate-billing-identities sentence retired (§10.16), both in-pin `claimsHash` residues removed (§10.2). The boundary banner reflects the current pin; the "Deferred: pinned-section collisions" section is DELETED — nothing remains deferred. |
 
-**Gate round-2 remediation (PR #823) — reviewed at c7b95721; findings against
-the round-1 tip:**
+**Gate round-2 remediation — findings against the round-1 tip:**
 
 | Finding | Applied |
 |---|---|
@@ -2295,7 +2533,7 @@ the round-1 tip:**
 
 Also carried through, as consequences rather than separate items: the
 `SegmentCheckpoint` sealed-segment rule (§4a), normative inclusion-path
-topology validation and its open stealth code fix, the four-valued check
+topology validation and its open operator-side code fix, the four-valued check
 results with the one online-check rule, the equivocation non-goal, the spec's
 operationalized public-safety rules, the §9-B mint blockers in Sequencing, and
 the `receiptSuperseded` advisory display state.
@@ -2316,7 +2554,7 @@ gate round-1 escalation, and items 1-3 by the receipt spec's **ERRATA of
 corrected to `terminalEvent.event.hash`; §10.14's anchored trigger phrased as
 jointly cumulative; §10.1's binding-qualifier list completed with the
 `billedUnfinalized` exception" — surfaced by this document's transcription
-gate, stealth PR #823). Each item keeps its original finding and adds its
+gate). Each item keeps its original finding and adds its
 resolution; nothing is deleted, because the record of WHY the two documents
 diverged is what stops the divergence recurring.
 

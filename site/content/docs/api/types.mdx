@@ -66,6 +66,8 @@ interface TrustReceipt {
   usageSource?: "provider" | "estimated";
   /** Four-tier disjoint token split. Present iff usageSource === "provider". */
   usage?: ReceiptUsage;
+  /** The 1-hour share of usage.cacheWriteTokens and its rate. Present only when the call wrote 1h cache. */
+  cacheWrite1h?: { tokens: number; ratePer1k: number };
   chunksDelivered?: number;
   actionKind?: ActionKind;
   endpoint?: { class: EndpointClass; runtime: LocalRuntime };
@@ -84,6 +86,11 @@ interface TrustReceipt {
   budget?: { costCenter: string; remaining: number; fraction?: number };
 }
 ```
+
+`cacheWrite1h` is a root-level field for the same reason (and because `usage` and
+`pricing.appliedRates` are closed in the v2 schema): when a call wrote 1-hour cache, the write term of
+the recompute splits into `(usage.cacheWriteTokens - cacheWrite1h.tokens) x appliedRates.cacheWritePer1k +
+cacheWrite1h.tokens x cacheWrite1h.ratePer1k`. It is absent otherwise, so other receipts are unchanged.
 
 `pricing` is a **root-level sibling** of `meter`, not a member of it. That placement is deliberate:
 [`receipt.v1.schema.json`](https://usertrust.ai/schemas/receipt.v1.schema.json) declares `meter`
@@ -338,5 +345,6 @@ interface StreamUsage {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  cacheWrite1hTokens?: number; // the 1-hour SUBSET of cacheWriteTokens (Anthropic); absent = 0
 }
 ```

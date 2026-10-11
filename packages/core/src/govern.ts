@@ -55,21 +55,26 @@ import {
 	copyAppliedRates,
 	costFromRates,
 	costFromRatesUnfloored,
-	effectiveCacheWriteRate,
 	estimateInputTokens,
+	holdInputRate,
+	holdTierRates,
 	PRICING_TABLE_VERSION,
+	promptTokenCount,
 	type RateResolution,
 	resolveAppliedRates,
 	resolveRates,
+	serializeRequest,
+	supported1hTokens,
 	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
 import {
 	fromAnthropicUsage,
 	fromProviderResponse,
-	publishableUsage,
+	publishableUsageFields,
 	sanitizeUsage,
 	type UsageWireShape,
+	withSupported1hTier,
 } from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
@@ -84,21 +89,24 @@ import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
-import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
+import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
 
 import { createAnomalyDetector } from "./anomaly/detector.js";
+import type { AnomalyChunkEvent } from "./anomaly/types.js";
 import {
 	AnomalyError,
 	AuditDegradedError,
 	InsufficientBalanceError,
 	LedgerUnavailableError,
+	PendingEntryNotFoundError,
 	PolicyDeniedError,
 	SpendLedgerUnreadableError,
 } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
+import type { PrincipalLedgerTags } from "./shared/principal.js";
 import type {
 	ActionDescriptor,
 	EndpointInfo,
@@ -198,6 +206,13 @@ export interface TrustEngine {
 		transferId: string;
 		amount: number;
 		debitAccountId?: bigint | undefined;
+		/**
+		 * The principal's `user_data` tags (`principalLedgerTags`), written on the
+		 * PENDING hold. TigerBeetle copies a zero `user_data` on post/void from the
+		 * pending transfer, so the settlement inherits them natively. Reporting only:
+		 * they never select an account. Omitted → all zero, exactly as before.
+		 */
+		userData?: PrincipalLedgerTags | undefined;
 	}): Promise<{ transferId: string }>;
 	/**
 	 * Settle a PENDING hold. `actualAmount` is CAPPED at the reserved amount —
@@ -1224,20 +1239,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// behind near-zero fresh input/output.
 	const anomalyDetector = createAnomalyDetector(config.anomaly, {
 		provider: kind,
-		costCalculator: (calcModel, inputTokens, outputTokens, event) => {
-			const scope = event?.endpointClass ?? "cloud";
-			const resolution = resolveRates(event?.model ?? calcModel, scope, config);
-			const cacheReadTokens = event?.cumulativeCacheReadTokens ?? 0;
-			const cacheWriteTokens = event?.cumulativeCacheWriteTokens ?? 0;
-			const usertokens = costFromRatesUnfloored(
-				resolution.rates,
-				inputTokens,
-				outputTokens,
-				cacheReadTokens,
-				cacheWriteTokens,
-			);
-			return scope === "local" ? usertokens : usertokens / USERTOKENS_PER_DOLLAR;
-		},
+		costCalculator: scopedAnomalyCostCalculator(config),
 	});
 
 	// 7. Two-phase intercept
@@ -1312,7 +1314,20 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				await persistSpendLedger(vaultBase, budgetSpent);
 			};
 
-			const params = (args[0] ?? {}) as Record<string, unknown>;
+			// The request is serialized ONCE, and the parse of that text is what every later step
+			// reads (the 1-hour hold verdict, PII and injection scans, redaction) and what is
+			// forwarded, so the bytes scanned are the bytes sent: a stateful getter or `toJSON`
+			// has nothing left to flip between the scan and the SDK's own serialization.
+			// Google is the exception, named: its SDK reads non-JSON members off the request
+			// (callable tools), so the original object is forwarded; Google has no 1-hour tier
+			// and its extractor never reports a 1-hour share, so a flip cannot under-hold there.
+			// A request that cannot be serialized forwards as given and holds dearest.
+			const originalParams = (args[0] ?? {}) as Record<string, unknown>;
+			const serialized = serializeRequest(originalParams);
+			const params = (
+				kind !== "google" && serialized !== null ? serialized.body : originalParams
+			) as Record<string, unknown>;
+			const declares1h = serialized?.declares1h ?? true;
 			const model = (params.model as string) ?? "unknown";
 			// P3-PROVIDER-BLINDSPOT: normalize the prompt-bearing payload across
 			// providers (Anthropic/OpenAI `messages` + `system`, Google `contents`) so
@@ -1336,7 +1351,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// P3-PII-REDACT-EGRESS: `forwardArgs` is what we actually send to the
 			// provider. In redact mode it becomes a redacted deep clone so PII never
 			// egresses; block mode throws before any egress. Default: forward verbatim.
-			let forwardArgs = args;
+			let forwardArgs: unknown[] = params === originalParams ? args : [params, ...args.slice(1)];
 
 			// a. Circuit breaker check
 			const cb = breaker.get(kind);
@@ -1392,12 +1407,23 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// ESTIMATED-input half of the hold at the fatter of the two rates; this
 			// is a HOLD-sizing adjustment only — the settle-time actual cost still
 			// resolves each tier independently via `costFromRates`, never discounted.
-			const holdInputRate = Math.max(
-				rateResolution.rates.inputPer1k,
-				effectiveCacheWriteRate(rateResolution.rates),
-			);
+			//
+			// The 1-HOUR write rate joins the max only when THIS REQUEST can produce
+			// 1-hour writes (a `cache_control` block with `ttl: "1h"`): the hold covers
+			// the worst case the request can produce, not the worst case any request can,
+			// so an ordinary call is held exactly as before and a 1-hour caller is never
+			// capped below what it settles at.
+			// (Whatever client shape carried the request: an OpenAI-shaped compatibility client
+			// can serve a Claude model. A row with no 1-hour tier reserves nothing for the
+			// marker, so this needs no provider test.)
+			// A per-request prompt tier (`longPrompt`) is held at its DEARER tier: the
+			// estimate is a heuristic and can land on the wrong side of the threshold, and a
+			// hold below the settle is capped. The two-phase post releases the difference.
+			// `holdTierRates` drops the tier, so the spread below cannot re-select it.
+			const holdRates = holdTierRates(rateResolution.rates);
+			const holdRate = holdInputRate(holdRates, declares1h, rateResolution.rateSource !== "table");
 			const estimatedCost = costFromRates(
-				{ ...rateResolution.rates, inputPer1k: holdInputRate },
+				{ ...holdRates, inputPer1k: holdRate },
 				estimatedInputTokens,
 				maxOutputTokens,
 			);
@@ -1426,7 +1452,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// used cannot become two different things. This is the D1 resolution, so
 			// an absent cache tier appears as `inputPer1k` (what it actually charges),
 			// never as a hole an auditor would read as free.
-			const appliedRates = resolveAppliedRates(rateResolution.rates);
+			// A tiered row (`longPrompt`) publishes, on the estimate-priced handle, the tier
+			// the ESTIMATE selects (the tier `meteredEstimateCost` was priced at). The
+			// settle and the stream terminal re-resolve from the reported usage
+			// (`settledAppliedRates`), because the tier is decided per request by its real
+			// prompt length. An untiered row resolves to exactly the same object either way.
+			const appliedRates = resolveAppliedRates(rateResolution.rates, estimatedInputTokens);
 
 			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
 			// This prevents concurrent calls from both passing the budget check and
@@ -1743,6 +1774,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 			}
 
+			// The stream helper's MessageStream reads the SDK-only `parse` hook off its params
+			// (`zodOutputFormat` structured output). The snapshot and the redacted clone are both
+			// rebuilt from enumerable data, so neither carries a function: it is given back to
+			// whatever object is finally forwarded, ONCE, after every clone is made. A function is
+			// not wire data, so the bytes sent stay exactly the bytes scanned.
+			if (surfaceKind === "stream-helper") {
+				graftParseHooks(originalParams, forwardArgs[0] as Record<string, unknown>);
+			}
+
 			// e. Forward to original SDK. P3-PII-REDACT-EGRESS: forwardArgs is the
 			// redacted clone in redact mode, or the original args otherwise.
 			let settled = true;
@@ -1835,17 +1875,36 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// a "provider" label survives only when input AND output are usable
 				// counts, so a stream that reported neither cannot be published as
 				// provider-sourced.
-				const usageSnapshot = sanitizeUsage({
-					inputTokens: completion.usage.inputTokens,
-					outputTokens: completion.usage.outputTokens,
-					cacheReadTokens: completion.usage.cacheReadTokens,
-					cacheWriteTokens: completion.usage.cacheWriteTokens,
-					source: completion.usageReported ? "provider" : "estimated",
-				});
+				const usageSnapshot = withSupported1hTier(
+					sanitizeUsage({
+						inputTokens: completion.usage.inputTokens,
+						outputTokens: completion.usage.outputTokens,
+						cacheReadTokens: completion.usage.cacheReadTokens,
+						cacheWriteTokens: completion.usage.cacheWriteTokens,
+						cacheWrite1hTokens: completion.usage.cacheWrite1hTokens,
+						source: completion.usageReported ? "provider" : "estimated",
+					}),
+					rateResolution.rates,
+					rateResolution.rateSource !== "table",
+				);
 				// D5: the record half of the SAME snapshot the cost comes from —
 				// present iff provider-sourced, omitted (never zero-filled) otherwise.
-				const usageRecord = publishableUsage(usageSnapshot);
-				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
+				const usageAudit = publishableUsageFields(usageSnapshot, rateResolution.rates);
+				// The rates this call SETTLES at: a tiered row (`longPrompt`) re-resolves its
+				// tier from the REPORTED prompt length, the same counts `costFromRates` prices
+				// below, so the record reproduces the cost. Without provider usage the cost is
+				// the estimate, and so are the rates.
+				const settledAppliedRates =
+					usageSnapshot.source === "provider"
+						? resolveAppliedRates(
+								rateResolution.rates,
+								promptTokenCount(
+									usageSnapshot.inputTokens,
+									usageSnapshot.cacheReadTokens,
+									usageSnapshot.cacheWriteTokens,
+								),
+							)
+						: appliedRates;
 				let streamCost: number;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
 				if (usageSnapshot.source === "provider") {
@@ -1855,6 +1914,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						usageSnapshot.outputTokens,
 						usageSnapshot.cacheReadTokens,
 						usageSnapshot.cacheWriteTokens,
+						usageSnapshot.cacheWrite1hTokens ?? 0,
 					);
 				} else {
 					// FIX: the un-inflated metering estimate, never the fattened hold
@@ -1962,7 +2022,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// receipt's meter as costBasis/rateSource/endpointClass). The
 						// relocation was forced by v1's closed `meter` object, which
 						// has no counterpart here. P1-2: its own frozen copy.
-						appliedRates: copyAppliedRates(appliedRates),
+						appliedRates: copyAppliedRates(settledAppliedRates),
 						pricingTableVersion: PRICING_TABLE_VERSION,
 						chunksDelivered: completion.chunksDelivered,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
@@ -2060,7 +2120,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// D5: what the rates WERE, beside where they came from — a sibling
 					// of `meter`, not a member of it (P1-1). P1-2: its own frozen copy.
 					pricing: {
-						appliedRates: copyAppliedRates(appliedRates),
+						appliedRates: copyAppliedRates(settledAppliedRates),
 						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
@@ -2212,6 +2272,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// them.
 				let accCacheRead = 0;
 				let accCacheWrite = 0;
+				let accCacheWrite1h = 0;
 				let accUsageReported = false;
 				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
 				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
@@ -2223,6 +2284,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						outputTokens: accOutput,
 						cacheReadTokens: accCacheRead,
 						cacheWriteTokens: accCacheWrite,
+						cacheWrite1hTokens: accCacheWrite1h,
 					},
 					chunksDelivered,
 					usageReported: accUsageReported,
@@ -2252,6 +2314,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						deltaTokens += tokens.cacheWriteTokens - accCacheWrite;
 						accCacheWrite = tokens.cacheWriteTokens;
 					}
+					// A subset of the write total: it only rises with it.
+					if (tokens.cacheWrite1hTokens > accCacheWrite1h) {
+						accCacheWrite1h = tokens.cacheWrite1hTokens;
+					}
 					if (!config.anomaly.enabled) return;
 					anomalyDetector.observe({
 						kind: "chunk",
@@ -2260,6 +2326,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						cumulativeOutputTokens: accOutput,
 						cumulativeCacheReadTokens: accCacheRead,
 						cumulativeCacheWriteTokens: accCacheWrite,
+						cumulativeCacheWrite1hTokens: accCacheWrite1h,
 						// M2: stamp the per-call scope so the SHARED detector prices this
 						// event with the same scoped rates as settlement.
 						model,
@@ -2310,6 +2377,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									outputTokens: finalUsage.outputTokens ?? accOutput,
 									cacheReadTokens: finalUsage.cacheReadTokens ?? accCacheRead,
 									cacheWriteTokens: finalUsage.cacheWriteTokens ?? accCacheWrite,
+									cacheWrite1hTokens: finalUsage.cacheWrite1hTokens ?? accCacheWrite1h,
 								},
 								chunksDelivered,
 								usageReported: true,
@@ -2484,6 +2552,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								cumulativeOutputTokens: obs.cumulativeOutputTokens,
 								cumulativeCacheReadTokens: obs.cumulativeCacheReadTokens,
 								cumulativeCacheWriteTokens: obs.cumulativeCacheWriteTokens,
+								cumulativeCacheWrite1hTokens: obs.cumulativeCacheWrite1hTokens,
 								// M2: stamp the per-call scope so the SHARED detector prices
 								// this event with the same scoped rates as settlement.
 								model,
@@ -2551,15 +2620,33 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							: surfaceKind === "openai-responses"
 								? "openai-responses"
 								: "openai-completions";
-				const usageSnapshot = fromProviderResponse(response, usageShape);
+				const usageSnapshot = withSupported1hTier(
+					fromProviderResponse(response, usageShape),
+					rateResolution.rates,
+					rateResolution.rateSource !== "table",
+				);
 				// FIX: the un-inflated metering estimate, never the fattened hold
 				// (see the `meteredEstimateCost` comment at the hold-sizing site).
 				let actualCost = meteredEstimateCost;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
 				// D5: the record half of the SAME snapshot the cost comes from. Nothing
 				// below re-reads `response.usage` — one read, one object, two uses.
-				const usageRecord = publishableUsage(usageSnapshot);
-				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
+				const usageAudit = publishableUsageFields(usageSnapshot, rateResolution.rates);
+				// The rates this call SETTLES at: a tiered row (`longPrompt`) re-resolves its
+				// tier from the REPORTED prompt length, the same counts `costFromRates` prices
+				// below, so the record reproduces the cost. Without provider usage the cost is
+				// the estimate, and so are the rates.
+				const settledAppliedRates =
+					usageSnapshot.source === "provider"
+						? resolveAppliedRates(
+								rateResolution.rates,
+								promptTokenCount(
+									usageSnapshot.inputTokens,
+									usageSnapshot.cacheReadTokens,
+									usageSnapshot.cacheWriteTokens,
+								),
+							)
+						: appliedRates;
 				if (usageSnapshot.source === "provider") {
 					actualCost = costFromRates(
 						rateResolution.rates,
@@ -2567,6 +2654,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						usageSnapshot.outputTokens,
 						usageSnapshot.cacheReadTokens,
 						usageSnapshot.cacheWriteTokens,
+						usageSnapshot.cacheWrite1hTokens ?? 0,
 					);
 				}
 
@@ -2591,7 +2679,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						...usageAudit,
 						// P1-1: flat here by design (see the stream terminal above).
 						// P1-2: its own frozen copy.
-						appliedRates: copyAppliedRates(appliedRates),
+						appliedRates: copyAppliedRates(settledAppliedRates),
 						pricingTableVersion: PRICING_TABLE_VERSION,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
 						endpointClass: endpoint.class,
@@ -2797,7 +2885,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// D5: what the rates WERE, beside where they came from — a sibling
 					// of `meter`, not a member of it (P1-1). P1-2: its own frozen copy.
 					pricing: {
-						appliedRates: copyAppliedRates(appliedRates),
+						appliedRates: copyAppliedRates(settledAppliedRates),
 						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
@@ -3514,6 +3602,47 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
  * `messages` array, so every PII/injection scan sees nothing and PII egresses.
  */
 /**
+ * Give a request SNAPSHOT back the SDK-only `parse` function on its structured-output format.
+ * The Anthropic stream helper reads `output_config.format.parse` (beta: `output_format.parse`)
+ * from the params to build `parsed_output`; a JSON snapshot has dropped it, and the stream would
+ * then return `parsed_output: null`. A function is not wire data, so grafting it (non-enumerable,
+ * read once) leaves the serialization, and so the bytes sent, exactly as scanned.
+ */
+function graftParseHooks(
+	original: Record<string, unknown>,
+	snapshot: Record<string, unknown>,
+): void {
+	const graft = (from: unknown, to: unknown): void => {
+		if (from === null || typeof from !== "object" || to === null || typeof to !== "object") return;
+		// The forwarded object IS the caller's (nothing was cloned): never touch it.
+		if (from === to) return;
+		try {
+			const parse = (from as { parse?: unknown }).parse;
+			if (typeof parse === "function") {
+				// Bound to the ORIGINAL format: the SDK calls `format.parse(...)`, and a parser that
+				// keeps private or non-enumerable state would otherwise run against this snapshot.
+				Object.defineProperty(to, "parse", {
+					value: (parse as (...a: unknown[]) => unknown).bind(from),
+					enumerable: false,
+					configurable: true,
+				});
+			}
+		} catch {
+			// A getter that throws on `parse` leaves the snapshot without it: the stream then
+			// returns the raw message, which is what a request without the hook gets.
+		}
+	};
+	try {
+		const oc = original.output_config as { format?: unknown } | null | undefined;
+		const sc = snapshot.output_config as { format?: unknown } | null | undefined;
+		graft(oc?.format, sc?.format);
+		graft(original.output_format, snapshot.output_format);
+	} catch {
+		// Unreadable original: nothing to graft.
+	}
+}
+
+/**
  * Normalize the prompt-bearing payload across providers into a flat parts array
  * that PII/injection scanning, token estimation, redaction, and pattern hashing
  * all consume. Exported for the A8 byte-exact regression test (kept internal to
@@ -3563,6 +3692,36 @@ export function extractPromptParts(
 	return parts;
 }
 
+/**
+ * The anomaly detector's cost calculator for one governor: prices a running token total
+ * with the SAME scoped rate resolution settlement uses, all tiers, unfloored (spec D7).
+ * A reported 1-hour share counts only for rates that have a 1-hour tier
+ * (`supported1hTokens`), exactly as `withSupported1hTier` decides it at settlement, so
+ * the velocity signal cannot price a share the ledger will not charge. Exported so that
+ * is testable without driving a stream.
+ */
+export function scopedAnomalyCostCalculator(
+	config: TrustConfig,
+): (model: string, inputTokens: number, outputTokens: number, event?: AnomalyChunkEvent) => number {
+	return (calcModel, inputTokens, outputTokens, event) => {
+		const scope = event?.endpointClass ?? "cloud";
+		const resolution = resolveRates(event?.model ?? calcModel, scope, config);
+		const usertokens = costFromRatesUnfloored(
+			resolution.rates,
+			inputTokens,
+			outputTokens,
+			event?.cumulativeCacheReadTokens ?? 0,
+			event?.cumulativeCacheWriteTokens ?? 0,
+			supported1hTokens(
+				resolution.rates,
+				resolution.rateSource !== "table",
+				event?.cumulativeCacheWrite1hTokens ?? 0,
+			),
+		);
+		return scope === "local" ? usertokens : usertokens / USERTOKENS_PER_DOLLAR;
+	};
+}
+
 // ── Anthropic MessageStream helpers (Task 2, A1/A3) ──
 
 /**
@@ -3578,6 +3737,8 @@ function readFinalMessageUsage(msg: unknown): {
 	outputTokens: number | undefined;
 	cacheReadTokens: number | undefined;
 	cacheWriteTokens: number | undefined;
+	/** The 1-hour share of the write tier; undefined whenever the write tier is. */
+	cacheWrite1hTokens: number | undefined;
 	reported: boolean;
 } {
 	if (msg != null && typeof msg === "object") {
@@ -3612,12 +3773,20 @@ function readFinalMessageUsage(msg: unknown): {
 				(isUsableCount(breakdown.ephemeral_5m_input_tokens) ||
 					isUsableCount(breakdown.ephemeral_1h_input_tokens));
 			const writeUsable = isUsableCount(u.cache_creation_input_tokens) || breakdownUsable;
+			const oneHourUsable = breakdown != null && isUsableCount(breakdown.ephemeral_1h_input_tokens);
 			if (inTok !== undefined || outTok !== undefined) {
 				return {
 					inputTokens: inTok,
 					outputTokens: outTok,
 					cacheReadTokens: readUsable ? cacheTiers.cacheReadTokens : undefined,
 					cacheWriteTokens: writeUsable ? cacheTiers.cacheWriteTokens : undefined,
+					// The 1-hour share is reported only when the breakdown's own 1-hour field is usable. A
+					// finalMessage that carries just the flat write total says nothing about the
+					// split, and answering 0 would overwrite the share the streamEvent tap accumulated.
+					cacheWrite1hTokens:
+						oneHourUsable || (cacheTiers.cacheWrite1hTokens ?? 0) > 0
+							? (cacheTiers.cacheWrite1hTokens ?? 0)
+							: undefined,
 					reported: true,
 				};
 			}
@@ -3628,6 +3797,7 @@ function readFinalMessageUsage(msg: unknown): {
 		outputTokens: undefined,
 		cacheReadTokens: undefined,
 		cacheWriteTokens: undefined,
+		cacheWrite1hTokens: undefined,
 		reported: false,
 	};
 }
@@ -3643,8 +3813,15 @@ function extractAnthropicStreamUsage(event: unknown): {
 	outputTokens: number;
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
+	cacheWrite1hTokens: number;
 } {
-	const none = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+	const none = {
+		inputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		cacheWrite1hTokens: 0,
+	};
 	if (event == null || typeof event !== "object") return none;
 	const c = event as Record<string, unknown>;
 	if (c.type === "message_start" && c.message != null && typeof c.message === "object") {
@@ -3660,6 +3837,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 				outputTokens: 0,
 				cacheReadTokens: tiers.cacheReadTokens,
 				cacheWriteTokens: tiers.cacheWriteTokens,
+				cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 			};
 		}
 	}
@@ -3672,6 +3850,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 			outputTokens: outTok > 0 ? outTok : 0,
 			cacheReadTokens: tiers.cacheReadTokens,
 			cacheWriteTokens: tiers.cacheWriteTokens,
+			cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 		};
 	}
 	return none;
@@ -3754,6 +3933,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			transferId: string;
 			amount: number;
 			debitAccountId?: bigint | undefined;
+			userData?: PrincipalLedgerTags | undefined;
 		}): Promise<{ transferId: string }> {
 			// An ATTRIBUTED hold names its own debit account — the cost-center
 			// envelope the governor derived at authorize. Unattributed holds keep
@@ -3765,6 +3945,17 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					creditAccountId: treasury,
 					amount: params.amount,
 					code: XFER_SPEND,
+					// Named, not the client's default: the ledger expires the hold at this
+					// timeout, and a headless handle publishes it (`holdTimeoutMs`).
+					timeoutSeconds: LEDGER_HOLD_TIMEOUT_MS / 1000,
+					// The principal's roll-up tags ride the hold; post/void inherit them.
+					...(params.userData !== undefined
+						? {
+								userData128: params.userData.userData128,
+								userData64: params.userData.userData64,
+								userData32: params.userData.userData32,
+							}
+						: {}),
 				});
 				pendingMap.set(params.transferId, { tbId: tbTransferId, heldAmount: params.amount });
 				return { transferId: params.transferId };
@@ -3857,9 +4048,19 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		async voidPendingSpend(transferId: string): Promise<void> {
 			const entry = pendingMap.get(transferId);
 			if (entry === undefined) {
-				throw new Error(`No pending transfer found for ${transferId}`);
+				throw new PendingEntryNotFoundError(transferId);
 			}
-			await tbClient.voidTransfer(entry.tbId);
+			try {
+				await tbClient.voidTransfer(entry.tbId);
+			} catch (err) {
+				// The ledger already ended this hold at its pending timeout and returned its
+				// funds, which is what the void was for: like `exists`, that outcome stands.
+				// Thrown, it left this entry behind, one per expired hold, until destroy().
+				const expired =
+					err instanceof TBTransferError &&
+					err.code === CreateTransferStatus.pending_transfer_expired;
+				if (!expired) throw err;
+			}
 			pendingMap.delete(transferId);
 		},
 

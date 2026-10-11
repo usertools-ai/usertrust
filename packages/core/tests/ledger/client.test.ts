@@ -1958,11 +1958,12 @@ describe("TrustTBClient", () => {
 			client.destroy();
 
 			const onAlert = vi.fn();
+			// Destroyed at the end, not here: a destroyed client no longer reconnects (#249).
+			// The fake timers keep its health check from firing in this test.
 			const alertClient = new TrustTBClient({
 				addresses: ["3000"],
 				onAlert,
 			});
-			alertClient.destroy(); // Stop health check interval
 
 			mockCreateClient.mockImplementation(() => {
 				throw new Error("cannot connect");
@@ -1983,6 +1984,7 @@ describe("TrustTBClient", () => {
 				expect.any(Object),
 			);
 
+			alertClient.destroy();
 			resetCreateClient();
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
@@ -1994,8 +1996,8 @@ describe("TrustTBClient", () => {
 			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 			client.destroy();
 
+			// Destroyed at the end: a destroyed client no longer reconnects (#249).
 			const noAlertClient = new TrustTBClient({ addresses: ["3000"] });
-			noAlertClient.destroy();
 
 			mockCreateClient.mockImplementation(() => {
 				throw new Error("cannot connect");
@@ -2009,6 +2011,7 @@ describe("TrustTBClient", () => {
 
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[usertrust]"));
 
+			noAlertClient.destroy();
 			resetCreateClient();
 			warnSpy.mockRestore();
 			logSpy.mockRestore();
@@ -2017,8 +2020,8 @@ describe("TrustTBClient", () => {
 
 		it("reconnect deduplicates concurrent calls", async () => {
 			client.destroy();
+			// Destroyed at the end: a destroyed client no longer reconnects (#249).
 			const testClient = new TrustTBClient({ addresses: ["3000"] });
-			testClient.destroy();
 
 			// reconnect() deduplicates via reconnectPromise
 			const p1 = testClient.reconnect();
@@ -2029,6 +2032,7 @@ describe("TrustTBClient", () => {
 
 			// createClient called: constructor + 1 reconnect (deduplicated)
 			expect(mockCreateClient).toHaveBeenCalledTimes(3); // main client + testClient + reconnect
+			testClient.destroy();
 		});
 	});
 

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -69,6 +69,15 @@ async function seedState(
 	}
 }
 
+/** Every watch record written so far, parsed; [] when there is no log. */
+async function watchRecords(): Promise<Array<Record<string, unknown>>> {
+	const text = await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => "");
+	return text
+		.split("\n")
+		.filter((line) => line !== "")
+		.map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 function run(name: string, input: unknown, portOverride?: number) {
 	return runHook(join(HOOKS, name), input, {
 		UT_CC_STATE_DIR: stateDir,
@@ -82,6 +91,14 @@ beforeEach(async () => {
 	requests = [];
 });
 afterEach(() => {
+	// The invariant a settle's 404 rests on: no transferId is ever settled twice.
+	const settled = requests
+		.filter((r) => r.path === "/v1/settle")
+		.map((r) => String((r.body as { transferId?: unknown }).transferId));
+	expect(
+		settled.filter((id, i) => settled.indexOf(id) !== i),
+		"a transferId was settled twice",
+	).toEqual([]);
 	server?.close();
 	server = undefined;
 });
@@ -110,7 +127,7 @@ describe("post-tool-use hook", () => {
 		expect(body.inputTokens).toBe(4);
 		expect(body.outputTokens).toBe(3);
 		expect(body.usageSource).toBe("estimated");
-		expect(await readdir(stateDir)).toEqual([]);
+		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl")).toEqual([]);
 	});
 
 	it("re-estimates inputTokens from tool_input when the pending file has no estimate", async () => {
@@ -158,8 +175,13 @@ describe("post-tool-use hook", () => {
 		);
 		expect(result.code).toBe(0);
 		expect(result.stderr).toContain("settle");
-		// The hold survives for Stop/SubagentStop cleanup (A10).
-		expect(await readdir(stateDir)).toEqual(["s1__main__tu_1.json"]);
+		// The hold survives for Stop/SubagentStop cleanup (A10), marked settle-attempted.
+		expect((await readdir(stateDir)).sort()).toEqual(["s1__main__tu_1.settling", "watch.jsonl"]);
+		// And the unanswered settle is written down, under the hold's transferId (F2a): refused
+		// at once, it is `failed`, not `unknown`.
+		expect(await watchRecords()).toMatchObject([
+			{ kind: "gap", phase: "settle", outcome: "failed", transferId: "tx_1", session: "s1" },
+		]);
 	});
 
 	it("keeps the pending file on a non-200 settle response", async () => {
@@ -173,7 +195,18 @@ describe("post-tool-use hook", () => {
 		expect(result.code).toBe(0);
 		expect(result.stderr).toContain("settle");
 		expect(result.stderr).toContain("500");
-		expect(await readdir(stateDir)).toEqual(["s1__main__tu_1.json"]);
+		// Kept for Stop cleanup, marked settle-attempted: it may have posted, so no
+		// later hook settles it again (Stop only gives it back).
+		expect((await readdir(stateDir)).sort()).toEqual(["s1__main__tu_1.settling", "watch.jsonl"]);
+		expect(await watchRecords()).toMatchObject([
+			{
+				kind: "gap",
+				phase: "settle",
+				outcome: "failed",
+				transferId: "tx_1",
+				reason: "settle returned 500",
+			},
+		]);
 	});
 
 	it("post-tool-use from agent A settles A's hold and never a sibling's (pre→post scoping)", async () => {
@@ -212,8 +245,12 @@ describe("post-tool-use hook", () => {
 		expect(settleBody.inputTokens).toBe(4);
 		expect(settleBody.outputTokens).toBe(1);
 		expect(settleBody.usageSource).toBe("estimated");
-		// main's hold is still present; only agent-A's was settled and cleared.
-		expect(await readdir(stateDir)).toEqual(["sess__main__tu_main.json"]);
+		// main's hold is still present; only agent-A's was settled and cleared. (Beside
+		// the holds, transcripts/ records that agent-A, which named no transcript,
+		// settles at the estimate for good.)
+		expect((await readdir(stateDir)).filter((n) => n !== "transcripts")).toEqual([
+			"sess__main__tu_main.json",
+		]);
 	});
 
 	it("a content-cap settle does not exceed the reserved hold on either leg", async () => {
@@ -271,20 +308,64 @@ describe("stop.mjs aborts every hold across all agents", () => {
 			"tx_b",
 			"tx_main",
 		]);
-		expect(await readdir(stateDir)).toEqual([]);
+		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl")).toEqual([]);
+		// Each give-back of an estimate hold whose call never reported back is a GAP.
+		const gaps = (await readFile(join(stateDir, "watch.jsonl"), "utf-8"))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l));
+		expect(gaps.map((g) => [g.kind, g.releaseClass])).toEqual([
+			["gap", "call-unconfirmed"],
+			["gap", "call-unconfirmed"],
+			["gap", "call-unconfirmed"],
+		]);
 		const again = await run("stop.mjs", { session_id: "s2" });
 		expect(again.code).toBe(0);
 		expect(requests.filter((r) => r.path === "/v1/abort")).toHaveLength(3);
 	});
 
 	it("logs non-200 abort responses to stderr but still exits 0 and clears state", async () => {
-		await startFake(() => ({ status: 500, json: { error: "internal" } }));
+		// An older server: health answers without capabilities, everything else fails.
+		await startFake((path) =>
+			path === "/v1/health"
+				? { status: 200, json: { ok: true } }
+				: { status: 500, json: { error: "internal" } },
+		);
 		await seedState("s3", "main", [{ toolUseId: "a", transferId: "tx_a" }]);
 		const result = await run("stop.mjs", { session_id: "s3" });
 		expect(result.code).toBe(0);
 		expect(result.stderr).toContain("abort");
 		expect(result.stderr).toContain("500");
-		expect(await readdir(stateDir)).toEqual([]);
+		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl")).toEqual([]);
+	});
+
+	it("capabilities UNKNOWN (health fails): a hold is released, never aborted — an abort counts as a breaker failure", async () => {
+		await startFake((path) =>
+			path === "/v1/health"
+				? { status: 503, json: { error: "unavailable" } }
+				: { status: 200, json: { released: true } },
+		);
+		await seedState("s4", "main", [{ toolUseId: "a", transferId: "tx_a" }]);
+		const result = await run("stop.mjs", { session_id: "s4" });
+		expect(result.code).toBe(0);
+		expect(result.stderr).toContain("capabilities are unknown");
+		const paths = requests.map((r) => r.path).filter((p) => p !== "/v1/health");
+		expect(paths).toEqual(["/v1/release"]);
+	});
+
+	it("capabilities UNKNOWN and no release route — an older server: falls back to abort", async () => {
+		await startFake((path) =>
+			path === "/v1/health"
+				? { status: 503, json: { error: "unavailable" } }
+				: path === "/v1/release"
+					? { status: 404, json: { error: "not_found", reason: "unknown route" } }
+					: { status: 200, json: { aborted: true } },
+		);
+		await seedState("s5", "main", [{ toolUseId: "a", transferId: "tx_a" }]);
+		const result = await run("stop.mjs", { session_id: "s5" });
+		expect(result.code).toBe(0);
+		const paths = requests.map((r) => r.path).filter((p) => p !== "/v1/health");
+		expect(paths).toEqual(["/v1/release", "/v1/abort"]);
 	});
 });
 
@@ -305,7 +386,10 @@ describe("subagent-stop.mjs scopes cleanup to the stopping subagent", () => {
 			"tx_a2",
 		]);
 		// The parent's and sibling subagent's in-flight holds survive.
-		expect((await readdir(stateDir)).sort()).toEqual(["s2__agent-B__d.json", "s2__main__a.json"]);
+		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl").sort()).toEqual([
+			"s2__agent-B__d.json",
+			"s2__main__a.json",
+		]);
 	});
 
 	it("without agent_id aborts nothing and leaves every hold for later reconciliation", async () => {
@@ -316,6 +400,9 @@ describe("subagent-stop.mjs scopes cleanup to the stopping subagent", () => {
 		expect(result.code).toBe(0);
 		expect(requests.filter((r) => r.path === "/v1/abort")).toHaveLength(0);
 		expect(result.stderr).toContain("without agent_id");
-		expect((await readdir(stateDir)).sort()).toEqual(["s2__agent-A__b.json", "s2__main__a.json"]);
+		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl").sort()).toEqual([
+			"s2__agent-A__b.json",
+			"s2__main__a.json",
+		]);
 	});
 });

@@ -17,9 +17,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  agent-config:
+    # Committed agent config (`.claude/`, `.mcp.json`, `.grok/`, `.codex/`, at any depth)
+    # runs on every machine that opens a checkout of this repo in an agent. No change may
+    # add, edit or remove any that `.github/agent-config-allowlist.json` does not name, a
+    # committed Claude Code settings file may hold only permitted keys, and every path a
+    # change adds must be one name to every filesystem (scripts/agent-config-guard.mjs). The
+    # guard and its allowlist are read from the BASE (.github/agent-config.sh), so a change is
+    # never graded by its own rules.
+    # - The guard runs FIRST, and nothing the change controls reaches it but this workflow and
+    #   its launcher, as with every workflow (`.github/`, which CODEOWNERS names an owner for):
+    #   no other code, no file, no configuration, no cache. Only the checkout runs before it.
+    #   - No setup step: one that reads the checkout can restore files into it from an
+    #     earlier run of the same change (a package manager's cache, whose path the change's
+    #     .npmrc sets). The guard runs on the runner's own node.
+    #   - The launcher's bytes come from the graded commit's object (git cat-file), never from
+    #     the working tree, and the launcher reads the guard and its allowlist the same way.
+    #   - The guard's tests, which are the change's, run after it, on node 22, with no
+    #     package-manager cache.
+    #   scripts/agent-config-guard.test.mjs pins all of this.
+    # - What it checks is what will land: a pull request as the merge commit GitHub tests
+    #   (`github.sha`), never the branch's head alone; a push, tip to tip.
+    # - The name is STABLE, `agent-config`, for a pull request or a push, so that branch
+    #   protection can require this check by it (an owner's setting, applied after this
+    #   merges). Any other event (a dispatched run, say) is not a change: nothing is checked,
+    #   and the job takes another name, so it can never stand in for that check, nor fail.
+    # It needs no dependency and no secret, so it runs on a fork's pull request as it is,
+    # drafts included.
+    name: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'agent-config' || 'agent-config (no change to check)' }}
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: The guard, as the base has it, before any code of the change runs
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        env:
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          launcher=$(mktemp)
+          git cat-file blob "$SHA:.github/agent-config.sh" > "$launcher"
+          if [ "$EVENT" = pull_request ]; then
+            bash "$launcher" pull_request "$SHA"
+          else
+            bash "$launcher" push "$BEFORE" "$SHA"
+          fi
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: The guard's own tests, after it
+        run: node --test scripts/agent-config-guard.test.mjs
+
   lint:
     name: lint
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v7
@@ -32,7 +90,9 @@ jobs:
 
   typecheck:
     name: typecheck
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v7
@@ -41,18 +101,27 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # `npm run typecheck` = `tsc -b` + the two type-test projects
-      # (packages/core, packages/openclaw), because a bare `tsc -b` never compiles
-      # a .test-d.ts. That is what makes the F5 TrustedClient type-surface guard
-      # (trusted-client-types.test-d.ts) and the pi-ai half of the openclaw host
-      # contract (packages/openclaw/tests/contract.test-d.ts) gate every push. The
-      # openclaw half of that contract needs a package `npm ci` does not install;
-      # it is proven in the `openclaw-contract` job instead.
+      # `npm run typecheck` = `tsc -b` + the three type-test projects
+      # (packages/core, packages/openclaw, packages/openshell), because a bare
+      # `tsc -b` never compiles a .test-d.ts. That is what makes the F5
+      # TrustedClient type-surface guard (trusted-client-types.test-d.ts) and the
+      # pi-ai half of the openclaw host contract (packages/openclaw/tests/
+      # contract.test-d.ts) gate every push. The openclaw half of that contract
+      # needs a package `npm ci` does not install; it is proven in the
+      # `openclaw-contract` job instead.
+      # It then typechecks every package's TESTS (#193: tsconfig.tests.json) under
+      # a ratchet: errors are frozen per file and code in
+      # tsconfig.tests.baseline.json, and a new or grown one fails, as does a
+      # fixed one until the baseline is tightened.
       - run: npm run typecheck
+      # The ratchet's own comparison logic (scripts/typecheck-tests.test.mts).
+      - run: npm run typecheck-tests:test
 
   test:
     name: test
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v7
@@ -80,7 +149,9 @@ jobs:
 
   openclaw-contract:
     name: openclaw-contract
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     # The proving ground for the openclaw half of the host contract.
     #
@@ -158,7 +229,9 @@ jobs:
 
   tb-integration:
     name: tb-integration
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     # Additive job: runs in parallel with lint/typecheck/test and gates none of them
     # (nothing `needs:` it). It stands up a real single-node TigerBeetle cluster and
@@ -226,17 +299,28 @@ jobs:
         # `budget-envelope.tb.test.ts`. Each one self-skips when USERTRUST_TB_ADDRESS
         # is unset, which is why the ordinary `test` job never runs them — this job
         # is the only place a hard-budget or envelope-accounting failure can surface.
+        # `packages/core/tests/harden/tb-ci-list.test.ts` fails the `test` job if a
+        # real-ledger suite on disk is missing from this list, so extend it here.
         run: >-
           npx vitest run
           packages/core/tests/integration/tigerbeetle.tb.test.ts
           packages/core/tests/integration/budget-envelope.tb.test.ts
           packages/core/tests/integration/replay.tb.test.ts
+          packages/core/tests/integration/principal-tags.tb.test.ts
+          packages/core/tests/integration/authorize-cache-tiers.tb.test.ts
+          packages/core/tests/integration/hold-timeout.tb.test.ts
+          packages/core/tests/integration/release.tb.test.ts
+          packages/core/tests/integration/destroy.tb.test.ts
+          packages/core/tests/integration/reconciliation-cache-day.tb.test.ts
+          packages/core/tests/integration/job.tb.test.ts
           packages/openshell/tests/engine.tb.test.ts
           packages/openclaw/tests/envelope-integration.test.ts
 
   site-build:
     name: site-build
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     # The site is a standalone npm project outside the workspaces (own lockfile).
     # Evidence fixtures are committed, so this build needs no TigerBeetle and no

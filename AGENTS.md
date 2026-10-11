@@ -115,8 +115,16 @@ unconditional `throw` because the throw is right there and needs no catch to int
 Grepping `catch (denialErr)` therefore finds four, not five. Payloads and rationale live in
 `audit/denial-events.ts`.
 
-`destroy()` waits up to 5s for in-flight work, voids all remaining pending transfers, flushes and
-releases the audit writer. **Callers must call it** or the process hangs on the TigerBeetle client.
+`destroy()` waits up to 5s, one deadline for all of them, for the terminals still working (a
+settle's POST, an abort or release parked on its void). At the deadline it takes every remaining
+hold in ONE synchronous step, before its first await: it records each abort or release still in
+flight, and voids and records (`hold_released`, `governor destroyed`) each hold still held. Then it
+voids the engine's remaining pending transfers, and flushes and releases the audit writer. An
+`authorize()` refuses from destroy()'s start, and one still reserving registers no hold: it gives
+back its accounting and fails, and sends no void (the engine sweep, or the ledger's pending timeout
+within 300 s of its reserve, releases the reservation). While destroy() drains, a `settle()`, `abort()` or `release()` runs as
+before and is waited for (a settle carries a charge); from the claim at its deadline (`sweeping`)
+they refuse at entry. **Callers must call it** or the process hangs on the TigerBeetle client.
 A `process.on("beforeExit")` handler calls it too, but that is a net, not a substitute: `beforeExit`
 fires only once the event loop drains, and an open TigerBeetle client is precisely what keeps it
 from draining. The net catches a governor whose client is already closed; it cannot catch the case
@@ -154,6 +162,30 @@ settle-then-void leaving the ledger holding a debit its accounting does not.
   circuit-breaker failure.
 - A governance anomaly cutoff voids.
 - A post-commit `failClosed` throw must **not** void an already-posted transfer.
+
+**A give-back is not a failure, and not a success either.** Headless has three terminals: `settle`
+(a circuit-breaker success), `abort` (a failed call: a breaker failure and `llm_call_failed`), and
+`release` (a hold given back: neither, and a `hold_released` record). usertrust-server's TTL sweep
+and shutdown release; `POST /v1/release` (capability `release`) exposes it, and answers 200 only
+when the governor says it ended the hold (`{ released: true }`), else 404 `unknown transferId`.
+`abort()` answers the same way (`{ aborted: true }` or `{ aborted: false }`, a refused void named in
+`voidError`), and `POST /v1/abort` keeps the same 200/404 rule. An abort or release is in flight
+from its synchronous claim until its record starts (`inFlight`): `destroy()` waits for it, and
+records one still in flight at its deadline, taking the record from it so it writes no second. A
+void that TigerBeetle answers `pending_transfer_expired` is a success in both `createTBEngine`
+factories: the ledger has already returned the funds. `settle()` reads every `SettleParams`
+field ONCE, FIRST, before it claims the hold, so a getter that ends the hold is the first terminal
+(settle is then refused) and one that throws changes nothing. It OWNS the hold from its synchronous
+claim to its end (`settling`, under `try`/`finally`), so what it still reads afterwards (the
+handle's own fields) cannot end the hold under it, and a settle that throws before its POST hands
+the hold back, voidable again. A re-check after the budget lock is not a substitute: an attributed
+hold takes no lock, and a fast POST can drop `settling` before the lock is acquired.
+*Prevents:* routine give-backs and expiries opening a tenant's breaker (#238) and reading as failed
+calls on the chain (#204); a release counted as a success closing a breaker that real failures
+opened; an expired hold's engine entry staying behind until `destroy()`; a POST and a VOID for one
+hold when a `SettleParams` getter released or aborted it mid-settle; `/v1/abort` answering 200 for a
+hold it did not abort (#240); `destroy()` voiding a hold under a terminal parked on it, or ending a
+hold with no record (#243).
 
 **Settle never exceeds the hold — and never silently fails because of it.** The hold's input side
 is a chars/4 × 1.5 heuristic (`pricing.ts`), so real usage CAN price above the reserve. Both
@@ -214,6 +246,44 @@ wallet.
 *Corollary:* never wrap `createUserWallet` in a blanket `try/catch` "to handle already exists" — a
 broad catch swallows `exists_with_different_flags`, i.e. an account missing its
 `debits_must_not_exceed_credits` enforcement. No catch is strictly better than a broad one.
+
+**A destroyed ledger client stays destroyed.** `TrustTBClient.destroy()` sets `closed` first, and
+from then on nothing reconnects and no request reaches a native client. An operation in flight at
+`destroy()` fails with its own error. Two checks do the rest, and they have different jobs:
+- **At an operation's entry**, `assertOpen()` is every public ledger operation's first statement. It
+  runs before the operation's own input checks and before any shortcut that answers without the
+  ledger (a cached wallet id), so an operation started after `destroy()` fails with
+  `LedgerClientClosedError` whatever its arguments. A caller can tell shutdown from a refused input.
+- **At each request**, `native()` checks `closed` at the moment the request is made, because an
+  await lets `destroy()` land between an operation's steps, or between a reconnect and its retry.
+  Only `withReconnect()` calls `native()`, for the request and for its retry. It hands the client
+  to a closure that makes its one request at once. A native destroy that throws leaves its client
+  open, and this check is what keeps requests off it.
+
+The rest of the closed state:
+- `ping()` reports unhealthy.
+- `reconnect()` is refused, even while a finished reconnect is still cached.
+- `_doReconnect()` checks before every attempt, so a reconnect waiting out its backoff builds nothing.
+- Once the native destroy returns, `destroy()` replaces the native client with `CLOSED_CLIENT`,
+  which refuses every request. If the native destroy throws, the client stays in place, for a second
+  `destroy()` to retry.
+- The synchronous accessors (`setTreasuryId`, `setAccountMapping`, `getAccountId`, `getTreasuryId`)
+  touch only this object's memory and are not refused.
+
+The tests hold this. Two parse `client.ts` and fail in any of these cases:
+- a public async method other than `ping()` does not open with `this.assertOpen()`;
+- anything but the constructor, `native()`, `_doReconnect()` and `destroy()` reads the native client;
+- anything but `withReconnect()` calls `native()`;
+- a request closure is anything but `(native) => native.<request>(…)`.
+
+Another set runs every operation with `destroy()` landing at each of its await boundaries.
+
+The native client cannot make this call: its `ERR_CLIENT_CLOSED` also comes from our own reconnect,
+which closes the old client, and an operation in flight on THAT one must still retry.
+*Prevents:* a reconnect after shutdown building a native client nothing destroys, which keeps the
+process alive (#249). A POST that committed but lost its reply at `destroy()` is therefore no longer
+retried into an `exists` success: it fails, and a settle records `settlement_ambiguous`. Its charge
+stands on the ledger.
 
 **Ordinary wallet ids and escrow labels share one namespace, and collide only safely.**
 `deriveAccountId(userId)` is `SHA-256("wallet:" + userId)`, read as a u128 from the digest's first 16
@@ -401,8 +471,8 @@ accounting, matching the numbers its policy gate saw.
 *Every audit record an attributed call emits carries `costCenter`, from that same capture* — not
 from params, and on the failure terminals as well as the settle ones (`llm_call`, `<action.kind>`,
 `llm_call_failed`, `<action.kind>_failed`, `stream_partial_delivery`, `settlement_ambiguous`,
-`settlement_shortfall`, `injection_detected`, `anomaly_detected`, `policy_denied`,
-`ledger_rejected`). An attributed hold must leave an attributed forensic trail whichever way it
+`settlement_shortfall`, `hold_released`, `injection_detected`, `anomaly_detected`,
+`policy_denied`, `ledger_rejected`). An attributed hold must leave an attributed forensic trail whichever way it
 ends — including the way where it never became a hold at all. Unattributed calls spread an empty
 object, so their records stay byte-identical to what they were before envelopes existed.
 
@@ -510,6 +580,59 @@ with. It returns a FROZEN snapshot and each record surface gets its own copy: on
 reaches the caller's receipt, the chain event and (for streams) the pre-settle handle, so a shared
 mutable object would let a caller rewrite the rates the chain records without touching the cost.
 
+**The 1-hour cache-write tier is a SUBSET of the write total, and its receipt field is at the ROOT.**
+`cacheWriteTokens` stays the TOTAL written; `cacheWrite1hTokens` is how much of it was the 1-hour
+kind (`NormalizedUsage`, `SettleParams`, `POST /v1/settle` with capability `cache-write-1h`). Cost
+is `(total - 1h) x cacheWritePer1k + 1h x cacheWrite1hPer1k` through the one `tieredCostRaw`, the
+1-hour count clamped to the total in `sanitizeUsage` and again in the cost, so it can never be
+summed into a larger bill than the provider reported. `cacheWrite1hPer1k` is explicit on every
+Anthropic row; an absent one resolves in `effectiveCacheWrite1hRate` (the one site) to the dearer of
+the 5-minute write and 2x input. The receipt carries `cacheWrite1h: { tokens, ratePer1k }` at the
+root, present only when 1h tokens > 0, built by `resolveCacheWrite1h` (frozen) and spread beside
+`usage` by `publishableUsageFields`. Not inside `usage` or `pricing.appliedRates`: the v2 schema closes
+both, so a field there makes every v2 validator reject every receipt. An older server strips the
+`cacheWrite1hTokens` key, so a client (the Claude Code plugin) sends it only when `/v1/health`
+lists `cache-write-1h`.
+*Prevents:* 1-hour writes billed at 1.25x while the provider bills 2x (#203), and a recorded cost
+no auditor can reproduce from the record.
+*The request is serialized ONCE, and what is scanned is what is sent.* `serializeRequest` runs
+`JSON.stringify` on the request a single time, parses that text back to plain data, and scans the
+data for a `cache_control` with `ttl: "1h"`. `trust()` then reads that body everywhere (hold
+verdict, PII and injection scans, redaction) and forwards it, so a getter or `toJSON` that answers
+5-minute to a scan and 1-hour to the SDK has nothing left to flip: the SDK never sees the original.
+A request that cannot be serialized to a JSON object (a cycle, a BigInt, a throwing hook) holds
+dearest and is forwarded as given; the dearest hold covers whatever it then writes. Google is the
+named exception to forwarding the body: its SDK reads callable members off the request, so the
+original goes through; Google has no 1-hour tier and its extractor never reports a 1-hour share, so
+a flip cannot under-hold there. *Prevents:* the property-walk scan this replaced, which had to
+enumerate every way `JSON.stringify` reads a value (accessors, `toJSON` on objects, arrays and
+built-ins, inherited array entries) and was found incomplete in seven consecutive review rounds.
+Do not reintroduce a walk over the live request.
+*The stream helper's parse hook is grafted back onto the snapshot, and that graft has a declared
+fidelity contract.* The forwarded request is plain JSON data, which drops the SDK-only `parse` function
+on a structured-output format (`zodOutputFormat`) that `messages.stream()` / `beta.messages.stream()`
+read to build `parsed_output`. `graftParseHooks` gives that one function back, non-enumerable and bound
+to the ORIGINAL format, once, onto the object finally forwarded (after redaction). A function is not
+wire data, so the bytes sent are still the bytes scanned. The contract is that the SDK's parsers read
+exactly three things off a format: `'parse' in format` (a `has` check a non-enumerable property
+satisfies), `format.type` (wire data the snapshot carries) and `format.parse(content)` (a method call,
+hence the bound receiver); the format sits at `params.output_config.format`, or beta
+`params.output_format ?? params.output_config.format`. `tests/govern/parse-hook-contract.test.ts` drives
+the real SDK parsers against a Proxy that records every trap and fails if that set changes (verified
+against `@anthropic-ai/sdk` 0.116.0), so an SDK that starts reading anything else gets this graft
+re-reviewed instead of silently returning `parsed_output: null`. Forwarding the original `format`
+by reference instead was rejected: it would take that subtree out of PII redaction and out of the
+scanned bytes.
+*DECLARED RESIDUE (a decision, not an omission):* a PARTIAL `cache_creation` breakdown (one TTL
+field) prices its unattributed remainder (flat total minus the named count) at the dearer 1-hour
+rate, and the stream accumulators only rise, so a stream whose early event is partial and whose
+later event is complete keeps that inferred share. It OVERSTATES, and overstatement is still
+inaccuracy; it is accepted because the real API emits BOTH TTL fields with a sum equal to the flat
+total (`tests/ledger/real-cache-creation-shapes.test.ts`: 73,292 captured blocks, 0 violations, and
+the API reference). The structural fix, tracking reported 5m/1h separately from the flat total and
+deriving the remainder at settlement, is a follow-up; if that test ever sees a partial block, the
+premise is false and the rework is no longer optional.
+
 **New receipt fields go at the ROOT, never inside `meter`.** `receipt.v1.schema.json` is frozen
 and declares `meter` with `additionalProperties: false` while leaving the receipt root open. A
 field added inside `meter` therefore makes every v1 validator reject every receipt usertrust
@@ -528,17 +651,211 @@ machinery (above) would then post `min(actual, held)`, silently under-debiting t
 leaving scarcity numbers falsely high. Both hold-sizing sites — the govern-path authorize estimate
 and the headless authorize estimate — reserve the input leg at
 `max(inputPer1k, effectiveCacheWriteRate(rates))` instead of `inputPer1k` alone.
+*The 1-hour write (2x input, `cacheWrite1hPer1k`) joins that max for the worst case THIS REQUEST
+can produce:* `trust()` reads the request (`requestDeclares1hCache`: a `cache_control` block with
+`ttl: "1h"` anywhere in its serialization, failing dearest when it cannot be serialized) and adds the 1-hour
+rate only then; headless `authorize()` cannot see the TTLs, so it holds the dearest write rate for
+the input leg and any stated write estimate (`holdInputRate` / `holdCacheWriteRate`, the one site).
+Only a row that EXPLICITLY publishes a 1-hour rate holds it, so a TABLE model with no 1-hour tier
+holds as before; the exception is OPERATOR-OWNED rates (a customRates row, a local rate, the
+fallback, i.e. `rateSource !== "table"`) with no explicit 1-hour rate, which hold the derived 2x input
+because settlement meters their 1-hour tokens at that derived rate
+(`holdInputRate(rates, include1h, operatorOwned)`). ONE predicate, `supportsCacheWrite1h`, decides
+both halves (`tests/harden/one-hour-tier-single-decider.test.ts` fails if any file outside a short
+allowlist reads the per-model 1-hour rate, or prices a 1-hour count without routing it through the
+predicate, and plants a violation as its own positive control): a built-in table row with no explicit 1-hour rate is a model with NO such tier, so its
+hold reserves none AND settlement IGNORES a reported 1-hour share (`withSupported1hTier`: the write
+total prices at the single write rate and no `cacheWrite1h` is recorded), so the two cannot disagree. *Prevents:* a 1-hour write settling above its hold and being capped, which under-debits.
+*Documented consequence:* holds on headless Anthropic calls run ~60% fatter on the input leg, so a
+402 near the budget comes sooner; the same trade as below.
 *Documented consequence:* holds on cache-writing workloads run ~25% fatter than before; warm
 (cache-hit-heavy) workloads settle far below the hold and release the difference back, so this is
 conservative, not a leak. A warm-but-cold-held call can see `budget_remaining_after` over-deny —
 the fail-safe trade the invariant above already accepts.
+*A headless caller that KNOWS its cache split says so.* `AuthorizeParams.estimatedCacheReadTokens`
+/ `estimatedCacheWriteTokens` (and the same keys on `/v1/authorize`, advertised as the
+`authorize-cache-tiers` capability) size each cache tier at its OWN rate. Only the fresh-input
+estimate keeps the write premium above, because it is the one half of the estimate that cannot know
+which of its tokens will be written to cache. The cache tiers resolve from the UN-inflated rates via
+`resolveAppliedRates`, the same resolution settle meters with: a model with no published cache-read
+rate holds its reads at the real `inputPer1k` (D1), never at the inflated hold rate. The un-inflated
+`meteredEstimate` uses the same four tiers. Omitted tiers are 0, so an old client's hold is
+unchanged. The hold is still ONE pending transfer of the computed amount
+(`tests/integration/authorize-cache-tiers.tb.test.ts`).
+*Prevents:* a mostly-cache-READ window (a Claude Code session) being reserved at the cache-WRITE
+rate. On Sonnet, 84,150 prompt tokens held at 37.5/1k is 3,156 usertokens against an input side
+that costs ~327, which is a false 402 near a budget.
 
 **Documented pricing approximations — verbatim, also published at `/docs/api/pricing`:**
-Per-TTL write premium collapsed (1h = 2× billed as 1.25×; `customRates` override for 1h-heavy
-workloads); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
+1-hour cache writes are priced at the 1-hour rate only when the provider reports the 5m/1h split
+(a flat write total, or a host with no TTL split, bills at the 5-minute rate); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
 hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
-per-model rates by design; per-call `ceil` + 1-UT floor differs from provider-side aggregation.
-Estimates never model cache state.
+per-model rates by design, except `claude-haiku-5-5`, which is priced per request by prompt length
+(see "Per-request prompt tiers" at `/docs/api/pricing`); fast mode is not priced (Opus 5.5 fast is $8 / $40, Opus 5 and
+Opus 4.8 fast $10 / $50; `speed` is a usage field, not a model id); per-call `ceil` + 1-UT floor
+differs from provider-side aggregation. Estimates never model cache state.
+
+**A principal is a label, never a payer.** `AuthorizeParams.principal`
+(`{ id?, type?, origin?, unit?, role? }`, `shared/principal.ts`) says WHO the work was for: the agent
+instance and kind, where it came from (a client and its session), the business unit, and the role. It never selects the account a hold debits and never enters the policy gate — that is
+`withCostCenter`'s job, and the two stay separate fields on purpose. A `unit` that should also be a
+budget is a deliberate `withCostCenter` scope beside it, never an implicit one.
+*Prevents:* a reporting label moving money — routing a hold to an envelope nobody funded, or
+gating a call against a balance that was never allocated to it.
+
+*Captured once, read from the capture.* `authorize` reads `actor` and `principal` exactly once —
+the principal through `capturePrincipal`, which validates each field (1–128 characters of
+`[A-Za-z0-9._:-]`, `principalFieldRefusal`), rebuilds and freezes the object, and throws a
+`TypeError` before any I/O — and stores both on the governor's own `activeAuths` capture. Every
+headless record then names `capture.actor` and spreads `principal` (key ABSENT when there is none):
+`policy_denied`, `ledger_rejected`, `llm_call`, `llm_call_failed`, `hold_released`,
+`settlement_ambiguous`, `settlement_shortfall`, and the rotated receipt. `packages/server` validates the wire field with the
+same `principalFieldRefusal` and refuses an unknown key rather than stripping it, and publishes
+`"principal"` in `/v1/health` `capabilities`: an older server strips the key, so a client sends a
+principal only to a server that lists it.
+*Prevents:* the settle-side records hard-coding `actor: "local"` — which threw away who did the
+work exactly where the money was recorded — and a caller relabelling a spend between the two phases
+through its own object or the handle.
+
+*The principal's ledger tags are an INDEX, not an identity.* The PENDING hold carries
+`principalLedgerTags(principal)`: `id` → `user_data_128`, `unit` → `user_data_64`, `role` →
+`user_data_32` (the slot widths follow the dimensions' cardinality; `type` and `origin` stay in the
+chain only).
+Each tag is the leading bytes of `SHA-256("usertrust/ledger-tag/v1\n" ‖ dimension ‖ "\n" ‖ value)`,
+with zero mapped to 1. The post and void deliberately write ZERO `user_data`: TigerBeetle then
+copies the pending transfer's values onto them, so the settlement inherits the tags natively and the
+post path is unchanged (`tests/integration/principal-tags.tb.test.ts` pins this against a real
+cluster). `query_transfers` filters on the tags (intersection), so work can be rolled up by agent,
+unit and role from the ledger alone. A tag query returns the PENDING hold AND its post or void, so a
+SPEND roll-up sums only the posted transfers (`post_pending_transfer`) — summing every match counts
+each settled call twice and a voided reserve as spend. And a tag is a hash: the label is in the audit chain, and a
+ledger roll-up is a candidate set to confirm there (the 32-bit role slot is the most exposed to
+collisions). An untagged call passes no `userData`, so its hold is created exactly as before.
+*Scope:* the headless governor (and so `packages/server`). `trust()` has no `AuthorizeParams`
+surface and still records `actor: "local"`. `ledger/engine.ts` — which has no production importer
+(see Known drift) — predates this scheme with its own `deriveUserId64`/`fnv1a32` tags; if it is ever
+wired in, it must adopt `principalLedgerTags`, or one ledger will carry two incompatible schemes.
+
+**A job is a label, never a payer.** `AuthorizeParams.job` (`shared/job.ts`) says WHICH JOB a
+spend was for, so per-job cost is a query over the chain. It never selects the account a hold
+debits, never enters the policy gate and is never a pricing input. It is validated by
+`principalFieldRefusal` (one rule for the governor and the wire), and it takes no `user_data` tag:
+all three slots belong to the principal. `jobState: "invalid"` says the caller's job state could not
+be trusted, so a record with no `job` and that state reads "unknown", not "no job"; it is exclusive
+with `job`. `usageFrom` / `usageTo` are the window of USAGE a record covers (ISO-8601 UTC), never the
+time the record was appended.
+
+*Captured once, read from the capture.* `authorize` captures `job`, `jobState` and `usageFrom`
+exactly once (`captureJob`: read once, validated, frozen, a `TypeError` before any I/O) into
+`capture.jobAudit`, and every record the hold produces spreads it: `llm_call`, `llm_call_failed`,
+`hold_released` (a release, a TTL expiry, `destroy()`), `settlement_ambiguous`,
+`settlement_shortfall`, `policy_denied`, `ledger_rejected`, and the rotated receipt. Release and
+expiry take no input of their own and inherit the hold's labels from the capture. A settle adds only
+`usageTo` (`captureUsageTo`, validated BEFORE the claim, so a bad value changes nothing);
+`Authorization.job` is reporting only and the governor never reads it back.
+*Prevents:* a caller relabelling a spend between the two phases through its own object or handle,
+and a release or expiry record losing the job its hold was reserved for.
+
+*usertrust-server's rules (capability `job`).* `/v1/authorize` accepts `job`, `jobState` and
+`usageFrom`; `/v1/settle` accepts `usageTo`, and `job` / `jobState` only to CHECK them. The server
+keeps its own copy of the authorize labels and refuses (400, nothing written, the hold still
+settleable) a settle that names a different job, or a `usageTo` before the hold's `usageFrom`; a settle
+that states `usageFrom` is refused outright. The usage START has exactly one source, the authorize
+capture, so no record can carry two different "from" values and a coverage check never has to choose.
+*Prevents:* the silent strip: zod drops unknown keys, so an older server records none of these and
+answers 200. A client therefore sends them only to a server that lists `"job"` in `/v1/health`
+`capabilities`, and a coverage check treats an untagged record as untagged, never as covered.
+
+*The Claude Code plugin's side* (`hooks/job-log.mjs`) is where the job comes from: a per-session,
+append-only log (`<state>/jobs/<session_id>.jsonl`) written by the `usertrust-job` CLI and the
+SessionStart hook with NO lock: every write is ONE complete line appended with ONE O_APPEND write, which POSIX
+places at the end of the file atomically on a local filesystem (declared residual: a non-local filesystem such
+as NFS). The ORDER of a log is the POSITION of its lines, not their stamps: a line's effective time is the
+running maximum of the stamps so far, so a late-stamped line can never be placed before a line that precedes it.
+The reader is the authority and only reads: a partial line followed by more lines, a torn last line, a repeated
+`session-start` or an unknown op make the log INVALID (`jobState: "invalid"` on the records, a named known gap
+in coverage), and nothing ever truncates, repairs or reorders it. A hook that sees a torn last line looks once
+more after a short pause (an append may be in flight) and otherwise treats THAT call's job as unknown; the next
+call reads afresh. `capability.json` is replaced atomically (a temp file, then `rename(2)`). A record's job is the one
+open at the time its USAGE happened (a hold: its PreToolUse; a transcript message: its own
+timestamp), never the one open at settle time, so a remainder spanning a switch settles once per job.
+`jobCoverage()` in that module is a DIAGNOSTIC, not a certification: it reports the job's tagged cost and a
+list of KNOWN GAPS, named reasons the figure may be incomplete, each with its evidence. An empty list means
+only that none of its checks found anything. Nothing in this repository, `usertrust-job coverage` and anything
+that reads its output included, may label a job's cost exact, complete or certified; a sound certification
+needs a scope decision (which sessions could hold the job?) that has not been made, and the check was a
+deny-list over evidence shapes that kept leaking new shapes. Its generators: a record tagged with the job
+that lies outside an interval of the job in a valid log of its own session (a session with none, or no
+usable log, puts all of them outside); a gap, a deferral (a `deferred` watch record: the breaker was open, and
+its usage is posted at a later settle point or never), `would_block`, untagged call or unrecognised record that cannot
+be placed elsewhere through a valid log of its own session (a log-less session's usage is a gap for every
+job, wherever it falls); an incomplete usage window; an invalid job state; a denied request of the job; a
+transfer known only through `settlement_*` metadata or with more than one `llm_call`; a released hold
+without `releaseClass: "unused"`; an interval with no stop yet (the job is still running); an evidence line
+that could not be parsed (never a silent drop); and a contributing session without a usable log. An interval
+is (start, stop], matching how the hooks resolve a time (a line applies strictly after its own ts), and
+cost counts each transfer once, from its `llm_call`. Every kind of evidence (an `llm_call`, a give-back, a denial, a `would_block`, a gap, a deferral,
+anything else) goes through ONE placement function: its own session's valid log places it, a tag it carries is a claim
+and never a placement (a foreign tag inside this job's interval is a gap for this job), and one whose session has no
+usable log is a gap for every job. A test fails if anything else decides where evidence falls.
+
+*A release states WHY, as a closed set.* `/v1/release` and `Governor.release()` take an optional
+`releaseClass`: `unused` (no call ran under the hold, so no usage hides behind it), `call-unconfirmed`
+(its call may have run and never reported back) or `call-ran` (it ran, and its one settle went unanswered, or was
+never sent because PostToolUse found the breaker open).
+The client derives it from its own hold state, never from the reason text; the governor records it
+verbatim on `hold_released`. A release that states none (a TTL expiry, a shutdown, an older client) proves
+nothing, and the coverage diagnostic reports it as a released hold whose usage is unconfirmed. The plugin
+sends `unused` only where it KNOWS no call ran: a superseded or never-recorded hold, a transcript-mode hold
+with no assigned usage (its call's usage is posted by message), a resumed call's earlier hold. An estimate
+hold still `.json` at Stop never reached PostToolUse (a failed or interrupted call): it is
+`call-unconfirmed` (a tool the user DENIES at the permission prompt leaves such a hold too, and cannot be told
+apart from a crash, so it reads the same, correctly), and one left `.settling` is `call-ran`; both are also written to `watch.jsonl` as a gap
+record, because a give-back of a hold whose call ran is metering the ledger cannot vouch for.
+A hold claimed only to END a deferred call's earlier hold is renamed straight into `.releasing`, a name that
+carries the intent (never `.settling` and then a mark), so Stop gives it back as `unused` with no gap. Every
+`watch.jsonl` record states its own `started` (the call's start, or `null` when unknown, which counts against every
+job); the shared writer has no default of its own, because the hook that writes a record is not always the hook
+that began the call. A stale `.settling` estimate hold swept by the journal writes its gap first. A job log whose
+latest stamp is more than a clock step AHEAD of the hook's clock makes that call's job unknown.
+Declared residuals: (1) usage that names no session (a vault shared with non-plugin clients) is a known gap for EVERY job,
+at any time, because no log can place it; the trade-off is the same as for a log-less session. (2) A clock fast by more
+than a second when a job op is written, then corrected, is detected only while the fast stamp is still ahead of the
+reading clock. Every labeller goes through ONE function (`labelsFor`), which then labels the call unknown, and a suspect
+read leaves a durable time-less gap record (once per session and latest stamp) that counts against every job. A skew that
+NO hook observed while it lasted (no PreToolUse or Stop ran before the stamp passed) can still write a wrong job label; a
+real fix needs writer-side information (a monotonic stamp). (3) SessionStart creates the log O_EXCL and then writes its one line: a kill between the two leaves an empty
+log, which reads as none (job tagging is off for that session; it fails honest, never wrong). (4) Two server URLs updating `capability.json`
+at once can lose one bit, which yields untagged calls and so gaps, never a false clean.
+
+**A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
+`LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless
+`Authorization` publishes the same value as `holdTimeoutMs` (absent in dry run).
+`usertrust-server` answers every authorize with `expiresInMs` (capability `hold-expiry`): the longest
+the hold can still be pending, the shorter of its `pendingTtlMs` sweep and that timeout, minus the
+hold's age (`remainingLifeMs`). A settle, a void or a restart can end the hold sooner; no expiry can.
+- The sweep ends a hold when that life reaches 0, so the sweep and the answer are one rule.
+- A ledger hold whose handle does not state its timeout gets NO `expiresInMs` (an absence is never read
+  as "no limit"), and the sweep falls back to `pendingTtlMs` for it.
+- The answer and the sweep read a hold's age on the MONOTONIC clock: `startedMono`, read as the request
+  arrives and so before the reserve. No wall-clock step moves either, so the sweep never voids a hold
+  before its advertised life. That is the unsafe direction: a hold still in use would get a 404, and in
+  enforce mode its re-authorize could be refused after the work ran.
+- Declared: the monotonic clock does not count a host's sleep, and the ledger's timeout does. A hold
+  of life L, aged a when a sleep of length D begins, keeps counting past its real end for min(D, L − a)
+  after wake: at most one hold life (L ≤ T, 300 s by default), plus up to one sweep interval (30 s).
+  Meanwhile it counts against the budget, which in enforce mode can mean false denials: the safe
+  direction, since nothing is charged and the ledger releases the funds on time. Two clocks cannot tell
+  a sleep from a forward step. A TigerBeetle-state probe for this case is a follow-up (#241).
+- Only durations leave the process (`expiresInMs`, `holdTimeoutMs`). The answer's `createdAt` is a
+  wall-clock time for display.
+- A client adds `expiresInMs` to its own clock reading taken before it sent the request. That is never
+  later than the real expiry, whatever the offset between the clocks.
+- `tests/integration/hold-timeout.tb.test.ts` reads the stored `timeout` back from a real cluster.
+
+*Prevents:* a client guessing a hold's life from the defaults (under a short `pendingTtlMs` it would
+reuse a swept hold, and an enforce-mode call would run unchecked). It also prevents a wall-clock step
+on the server from lengthening an advertised life or delaying the sweep.
 
 ### Audit
 
@@ -896,7 +1213,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **fourteen** sanitizers, in two variants: **eight** neutralise C1 and **six** do not. Do
+There are **sixteen** sanitizers, in two variants: **ten** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -972,13 +1289,28 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   the terminal scrubber inside the loader corrupted the JSON diagnostic in exactly that way before
   it was moved.
 - The stronger variant in a SHIPPED HOOK rather than a `src/` tree: `sanitizeReason` in
-  `claude-code-plugin/hooks/pre-tool-use.mjs`, which strips C0/DEL/C1 from server-provided text
-  before it becomes a permission-decision reason, and clips afterwards. This one was invisible to
-  the count guard for its entire existence, because the traversal walked `packages/*/src` and that
+  `claude-code-plugin/hooks/lib.mjs`. It is the one sanitizer behind that package's ONE writer:
+  `say` for every stderr line and `announce` for the session-start `systemMessage`, both
+  sanitize-then-clip, plus the permission-decision reason. `tests/terminal-sinks.test.ts` walks
+  every shipped `hooks/*.mjs` and fails on any other write to stderr, stdout or a `systemMessage`,
+  with an injected raw write as its positive control. The writer replaced per-site sanitizing
+  after review found the same class six times across two rounds. `sanitizeReason` was invisible
+  to the count guard for its entire existence, because the traversal walked `packages/*/src` and that
   package has no `src/` — it ships `hooks/*.mjs`. It is listed last because it is the newest entry
   to the *inventory*, not the newest code: it predates the guard that failed to see it. **Scope a
   source-wide assertion by what SHIPS, not by the directory layout the other packages happen to
   use** — that is the same lesson as the worktree note above, one level out.
+- The stronger variant again: `scrubForTerminal` in `core/src/cli/target.ts`. `usertrust verify <path>`
+  prints the absolute path of the vault it verified, and every command that takes no path echoes
+  the stray argument it refused — both are argv or a resolved path reaching an operator's terminal.
+  It substitutes `?` and does **not** clip: a clipped path is not the path that was verified, and
+  naming the subject of a verdict is the point. The `--json` side escapes C1 as `\uXXXX` after
+  serialization (`toSafeJson`, same file) instead, so `data.vaultPath` parses back to the real path.
+- The stronger variant for a STORED record: `sanitizeReleaseReason` in `core/src/headless.ts`.
+  A `hold_released` record's `reason` is caller text (a `/v1/release` body), and the `--tx`
+  receipt later prints it at an auditor. It STRIPS C0, DEL and C1 rather than substituting `?`,
+  because a stored reason is data, not a render, and then clips at 200 code points. It is
+  exported so usertrust-server's `released` event carries exactly the text the chain recorded.
 
 **THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
 `packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus
@@ -1010,6 +1342,28 @@ picocolors adds SGR codes without sanitizing anything it wraps.
 *Prevents:* `--parent -x` silently reporting on the cost center `-x::research`; `--period-start 0`
 passing `Date.parse` as Jan 2000 and turning a one-hour window into 26 years; and a rejected flag
 value turning its own error message into a terminal-repaint on the operator who typed it.
+
+**A CLI command uses an argument or refuses it — it never ignores one.** `usertrust verify <path>`
+verifies THAT path (the project root, as the cwd is), names the real directory it read
+(`Vault: <abs>`, `data.vaultPath`, the REAL path of the `.usertrust` read, symlinks resolved), and refuses a path it cannot use instead of falling back to the
+cwd. A single-dash token is an error (exit 2), never "probably a flag": there are no short flags, and `verify -vault` once ignored it and verified the cwd. Commands that take no path (`inspect`, `health`, `pricing`, `init`, `export`) refuse a stray
+positional — or any dash token that is not a global flag or the command's own flag — through `refuseStrayPositional` (`cli/target.ts`), called per command in `main.ts`; a
+new such command needs the same line. Exit codes: a path that cannot be used is 1 (as "No trust vault
+found" always was), an argument of the wrong shape is 2. `tests/cli/verify-target.test.ts` drives the
+real entry point from a cwd that is itself a valid vault.
+The vault named is the PHYSICAL directory the OS opens: the argument and the `.usertrust` entry
+are resolved once, with `realpathSync.native`, after the existence checks, and nothing normalises a
+path that can still hold a link — `path.join`/`resolve` and JS `realpathSync` collapse `..`
+lexically, but the OS applies `..` after following the link before it, so `work/link/../vault`
+(`link -> other/subdir`) is `other/vault`, not `work/vault`. A relative argument is concatenated onto
+the cwd, not resolved against it. The global flags (`--json`, `--skip-verify`, `--reconfigure`) have
+one definition, `GLOBAL_FLAGS` in `cli/flags.ts`; `tests/cli/global-flags.test.ts` fails on a second
+spelling. No untrusted argument reaches the terminal as a control byte or a raw C1 in `--json`:
+`tests/cli/terminal-echo.test.ts` drives every command with an ESC/C1/BEL/DEL argument in every
+position and fails on any raw byte out, so a new echo site is caught by running it, not by a grep.
+*Prevents:* `verify <vault-a>` run inside vault-b printing vault-b's chain as the verdict —
+`run(undefined, …)` dropped the argument and `rootDir ?? process.cwd()` answered for the wrong vault,
+exit 0. A verifier that certifies the wrong subject is the worst failure it can have.
 
 ### Client detection
 
@@ -1077,8 +1431,8 @@ Drop every line whose raw text contains `from "`, then require exact string equa
   lines **are** compared, so both packages must import the same names in the same order and may
   differ only in the module path.
 
-Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 9900 (a
-vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900 on this line as
+Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 10200 (a
+vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900→10000→10100→10200 on this line as
 `packages/verify` grew legitimate node-builtins-only surface, with master separately raising
 4200→4300→4320 for its own receipt-hardening work over the same period — both lineages are folded
 in here and both are recorded in `packages/core/tests/harden/anchoring/anchor-additive.test.ts`
@@ -1215,12 +1569,12 @@ this.
 
 There is no root `build` script; each package builds itself (`npm run build -w usertrust`, etc.).
 
-**CI** (`.github/workflows/ci.yml`) runs six jobs on Node 22, on every push to `master` and every
-**non-draft** PR: `lint`, `typecheck`, `test` (coverage, with the thresholds above),
-`openclaw-contract` (the host contract, described below), `tb-integration` (a real single-node
-TigerBeetle cluster, sha256-pinned binary), and `site-build` (the site's own install, tests and
-production build). There is **no path filter** — every non-draft PR runs all six regardless of what
-changed. Draft PRs run none of them.
+**CI** (`.github/workflows/ci.yml`) runs seven jobs on Node 22, on every push to `master` and every
+**non-draft** PR: `agent-config` (the agent-config check, described below), `lint`, `typecheck`,
+`test` (coverage, with the thresholds above), `openclaw-contract` (the host contract, described
+below), `tb-integration` (a real single-node TigerBeetle cluster, sha256-pinned binary), and
+`site-build` (the site's own install, tests and production build). There is **no path filter** —
+every non-draft PR runs all seven regardless of what changed. A draft PR runs `agent-config` alone.
 
 The TigerBeetle server version in CI is pinned to match `tigerbeetle-node` in `packages/core` and
 must be bumped in lockstep — **never `latest`**. The client must never be newer than the server. The
@@ -1256,6 +1610,45 @@ this document's content came from.
 avoid `git add -A` / `git add .`.
 
 All changes require review (`.github/CODEOWNERS`).
+
+**Agent config is refused (the `agent-config` check).** Agent config is what a coding agent
+runs, or obeys, when it opens a checkout: Claude Code's `.claude/`, an `.mcp.json`, and the Grok
+and Codex CLIs' `.grok/` and `.codex/`, at any depth, matched as a case-insensitive filesystem
+opens them.
+- No change may add, edit or remove agent config that `.github/agent-config-allowlist.json` does
+  not name. Here the allowlist is empty. An exact entry may pin its file's `sha256`, for that path
+  as it is written; a file in the tree under another spelling of a pinned path fails.
+  A pin is checked when a change touches its path. A pin that does not hold on the base is noticed at the next edit of that path, which it refuses; it never admits anything.
+  Validating every pin on every run is a follow-up: usertrust#275.
+- Every path a change adds, anywhere in the repository, must be one name to every filesystem. Each
+  segment holds only `A-Z a-z 0-9 . _ - [ ]`, unless the allowlist's `nonportable` list names the
+  path by its exact bytes. And no name it makes, a file's or a directory's, may fold to another
+  name in the change's tree (macOS opens `Readme.md` as `README.md`, and `.mcp.jſon` as
+  `.mcp.json`). The set is closed because the aliases are not: every Unicode way to spell one name
+  twice, and Windows' streams (`:`) and short names (`~`), need a character outside it.
+- Agent config is checked out as it is stored: no `working-tree-encoding`, `filter` or `ident`
+  attribute may apply to it, as git matches its patterns with case or without, and an attributes
+  file is spelled `.gitattributes`, and is a regular file (git before 2.32 reads a symlinked one
+  through its link, and git reads no rules from a submodule). No attributes file may give one of
+  them the literal value `unset` or `unspecified`, which `check-attr` prints as no value, or hold
+  a NUL byte, where git stops reading it. And no such attribute may apply to an attributes file,
+  at any depth: checkout writes each as it is stored, so git reads at checkout the rules the
+  check read.
+- A submodule is another repository, and its own tree can hold agent config: one a change adds,
+  or moves to another commit, must be named by the allowlist, wherever it is.
+- A committed Claude Code settings file may hold only `$schema`, and `permissions.deny` /
+  `permissions.ask`. Any other key fails, including one this guard has never heard of.
+- The guard (`scripts/agent-config-guard.mjs`) and the allowlist are read from the BASE
+  (`.github/agent-config.sh`), so a change cannot allowlist itself. A widening merges on its own,
+  before the change that needs it.
+- What is checked is what lands: a pull request as the merge commit GitHub tests (`github.sha`),
+  against its first parent; a push, tip to tip.
+- The launcher counts the guard's exit 0 only beside its own `agent-config: OK (...)` line, its
+  last word: a guard that exits 0 without checking fails.
+- Only the checkout runs before the guard: no setup step (a package manager's cache, whose path
+  a change's `.npmrc` sets, could restore files into the checkout), the runner's own node, and
+  the launcher read from the graded commit's object, never from the working tree.
+- Its tests: `node --test scripts/agent-config-guard.test.mjs`.
 
 ---
 

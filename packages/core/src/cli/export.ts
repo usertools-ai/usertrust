@@ -11,6 +11,7 @@ import pc from "picocolors";
 import { exportMarkdown } from "../export/markdown.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
+import { scrubForTerminal, toSafeJson } from "./target.js";
 
 export async function run(rootDir?: string, opts?: CliOptions, args?: string[]): Promise<void> {
 	const root = rootDir ?? process.cwd();
@@ -23,9 +24,9 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 
 	const fail = (message: string): void => {
 		if (json) {
-			console.log(JSON.stringify({ command: "export", success: false, data: { message } }));
+			console.log(toSafeJson({ command: "export", success: false, data: { message } }));
 		} else {
-			console.log(`${pc.red("export failed:")} ${message}`);
+			console.log(`${pc.red("export failed:")} ${scrubForTerminal(message)}`);
 		}
 		process.exitCode = 1;
 	};
@@ -42,9 +43,11 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 	try {
 		const result = exportMarkdown(vaultPath, resolve(root, outArg));
 		if (json) {
-			console.log(JSON.stringify({ command: "export", success: true, data: result }));
+			console.log(toSafeJson({ command: "export", success: true, data: result }));
 		} else {
-			console.log(`Exported ${result.written} receipt note(s) to ${result.outDir}`);
+			console.log(
+				`Exported ${result.written} receipt note(s) to ${scrubForTerminal(result.outDir)}`,
+			);
 			if (result.chainValid && result.vaultValid) {
 				console.log("Chain integrity: verified");
 			} else {

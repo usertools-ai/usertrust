@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,10 +17,25 @@ afterEach(() => {
 
 describe("pending state store (one file per hold)", () => {
 	it("records one file per hold, scoped per session+agent, with sanitized path components", async () => {
-		const { listPending, recordPending, stateFilePath } = await import("../hooks/lib.mjs");
+		const { holdFilePath, listPending, recordPending } = await import("../hooks/lib.mjs");
 		const sessionId = "sess/../../evil";
-		expect(stateFilePath(sessionId, "ag/../1", "tu/../1")).not.toContain("..");
-		await recordPending(sessionId, "main", { toolUseId: "tu_1", transferId: "tx_1" });
+		const hostile = holdFilePath(sessionId, "ag/../1", {
+			toolUseId: "tu/../1",
+			transferId: "tx_1",
+		});
+		expect(hostile).not.toContain("..");
+		expect(hostile.slice(stateDir.length + 1)).not.toContain("/");
+		// The transferId is never sanitized: one that is not a valid id names no file.
+		for (const transferId of ["tx/../1", "a.b", "", "x".repeat(129)]) {
+			expect(() => holdFilePath(sessionId, "main", { toolUseId: "tu_1", transferId })).toThrow(
+				"not a valid id",
+			);
+		}
+		const path = await recordPending(sessionId, "main", { toolUseId: "tu_1", transferId: "tx_1" });
+		// One file per hold: named by its call AND its transfer.
+		expect(path).toBe(join(stateDir, "sess_______evil__main__tu_1.tx_1.json"));
+		// The user's alone, as every file in the state dir is: no group or other bits.
+		expect((await stat(path)).mode & 0o777).toBe(0o600);
 		await recordPending("other-session", "main", { toolUseId: "tu_x", transferId: "tx_x" });
 		const entries = await listPending(sessionId, "main");
 		expect(entries).toHaveLength(1);
@@ -28,6 +43,7 @@ describe("pending state store (one file per hold)", () => {
 		expect(entries[0]?.transferId).toBe("tx_1");
 		expect(entries[0]?.entryKey).toBe("tu_1");
 		expect(entries[0]?.agentId).toBe("main");
+		expect(entries[0]?.path).toBe(path);
 	});
 
 	it("scopes holds per agent: a specific agent sees only its own; null sees all", async () => {
@@ -117,7 +133,7 @@ describe("pending state store (one file per hold)", () => {
 		expect(await takePendingEntry("s", "agent-C", "shared")).toBeNull();
 	});
 
-	it("clearPending removes exactly the named hold for that agent and is idempotent", async () => {
+	it("clearPending removes exactly the hold its listing found, and is idempotent", async () => {
 		const { clearPending, listPending, recordPending, takePendingEntry } = await import(
 			"../hooks/lib.mjs"
 		);
@@ -125,11 +141,11 @@ describe("pending state store (one file per hold)", () => {
 		await recordPending("s", "main", { toolUseId: "b", transferId: "tx_b" });
 		const entry = await takePendingEntry("s", "main", "a");
 		expect(entry?.entryKey).toBe("a");
-		await clearPending("s", "main", entry?.entryKey ?? "");
+		await clearPending(entry?.path ?? "");
 		const rest = await listPending("s", "main");
 		expect(rest).toHaveLength(1);
 		expect(rest[0]?.transferId).toBe("tx_b");
-		await expect(clearPending("s", "main", "a")).resolves.toBeUndefined();
+		await expect(clearPending(entry?.path ?? "")).resolves.toBeUndefined();
 	});
 
 	it("keys entries without a toolUseId by transferId and skips corrupt files", async () => {
@@ -141,6 +157,24 @@ describe("pending state store (one file per hold)", () => {
 		expect(entries).toHaveLength(1);
 		expect(entries[0]?.entryKey).toBe("tx_solo");
 		expect(entries[0]?.toolUseId).toBeNull();
+	});
+});
+
+describe("SessionEnd's budget (Claude Code's, not hooks.json's)", () => {
+	it("is 1.5 s by default, CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS when set, never over 10 s — less node's start-up", async () => {
+		// @ts-expect-error TS7016: lib.mjs has no type declarations, as for every import here (baselined).
+		const { HOOK_BUDGET_MS, sessionEndBudgetMs } = await import("../hooks/lib.mjs");
+		const budget = (value?: string) =>
+			sessionEndBudgetMs(
+				value === undefined ? {} : { CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: value },
+			);
+		expect(budget()).toBe(1_200);
+		expect(budget("5000")).toBe(4_700);
+		// No more than any other hook's budget, whatever the variable says.
+		expect(budget("60000")).toBe(HOOK_BUDGET_MS - 300);
+		// Not a whole number of milliseconds: the default.
+		for (const odd of ["", "abc", "-5", "1.5", "2e3", " 5000"]) expect(budget(odd)).toBe(1_200);
+		expect(budget("0")).toBe(0);
 	});
 });
 

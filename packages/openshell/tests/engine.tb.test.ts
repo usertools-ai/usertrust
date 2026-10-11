@@ -19,7 +19,7 @@ import {
 	XFER_SPEND,
 } from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
-import { HoldEngine } from "../src/engine.js";
+import { DebtChargeFailedError, HoldEngine } from "../src/engine.js";
 import { HoldJournal } from "../src/journal.js";
 import {
 	BudgetIdError,
@@ -225,8 +225,16 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 	}, 15_000);
 
 	/** An `open` row whose placement never reached the ledger (the placeHold "succeeded" locally). */
-	const unplacedRow = (journal: HoldJournal, k: string, budgetId: string) =>
-		journal.reserve({
+	// A row whose placement never reached the ledger. As the engine's reserve, the debt account
+	// is ensured first: chargeDebt relies on it (#190).
+	const unplacedRow = async (
+		journal: HoldJournal,
+		k: string,
+		budgetId: string,
+		ledger: TigerBeetleLedger,
+	) => {
+		await ledger.ensureDebtAccount(budgetId);
+		return journal.reserve({
 			holdId: k,
 			budgetId,
 			amount: 100,
@@ -235,11 +243,12 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 			availableCredit: () => 1_000,
 			placeHold: () => {},
 		});
+	};
 
 	it("#174 r1 P1: a post that found no hold RETIRES its id — the retry is read back (not_found → incident), never a throw loop", async () => {
-		const { engine, budgetId, journal, key } = await setup(1_000);
+		const { engine, ledger, budgetId, journal, key } = await setup(1_000);
 		const k = key();
-		await unplacedRow(journal, k, budgetId);
+		await unplacedRow(journal, k, budgetId, ledger);
 		expect(await engine.settle(k, { post: 60, overage: 0 })).toEqual({
 			outcome: "incident",
 			state: "settling",
@@ -254,7 +263,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 	it("#174 r1 P1: the late placement LANDS after a retired post id — in flight while the hold lives, then late settlement once its own timeout passes (never `settling` forever)", async () => {
 		const { engine, ledger, budgetId, journal, key } = await setup(1_000, 1, { expirySkewMs: 0 });
 		const k = key();
-		await unplacedRow(journal, k, budgetId);
+		await unplacedRow(journal, k, budgetId, ledger);
 		expect(await engine.settle(k, { post: 60, overage: 0 })).toMatchObject({ outcome: "incident" });
 		await ledger.placeHold({ budgetId, holdKey: k, amount: 100, timeoutSeconds: 1 }); // it landed
 		expect(await engine.settle(k, { post: 60, overage: 0 }), "live hold, retired post id").toEqual({
@@ -398,6 +407,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 	it("#177 x #180: a chargeDebt REPLAY (a crash after the charge landed) builds the identical transfer — core's now-verified `exists` accepts it, and the debt account is charged once; a replay with another amount is refused as a mismatch", async () => {
 		const { tb, ledger, budgetId, key } = await setup(1_000);
 		const k = key();
+		await ledger.ensureDebtAccount(budgetId); // as the reservation does (#190)
 		const charge = (amount: number) =>
 			ledger.chargeDebt({ budgetId, holdKey: k, role: "overage", amount });
 		expect(await charge(40)).toBe("done");
@@ -524,7 +534,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		]);
 	});
 
-	it("#179 (the ENGINE path): with the debt account closed after a successful reservation, the overage charge fails EARLIER — at chargeDebt's ensureEscrowAccount — and LOUDLY on every attempt: never quiet, never a false success; the hold posts once and the debt account is never charged", async () => {
+	it("#190 (the ENGINE path): with the debt account closed after a successful reservation, the overage charge ends in ONE terminal `debt_charge_failed` incident on the first settle — the hold posted once, the debt account never charged, and a later settle makes no ledger call", async () => {
 		const { tb, treasury, engine, budgetId, journal, walletAcct, key } = await setup(1_000);
 		const tbNode = await import("tigerbeetle-node");
 		const k = key();
@@ -532,15 +542,41 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		const debtAcct = await tb.ensureEscrowAccount(debtAccountLabel(budgetId));
 		await closeForDebits(tbNode, debtAcct, treasury);
 		const intent = { post: 100, overage: 30 };
-		for (let attempt = 1; attempt <= 3; attempt++) {
-			await expect(engine.settle(k, intent), `attempt ${attempt}`).rejects.toThrow(
-				/Failed to create escrow account/,
-			);
-		}
-		expect(journal.get(k)).toMatchObject({ state: "settling", incident: null });
+		await expect(engine.settle(k, intent)).rejects.toBeInstanceOf(DebtChargeFailedError);
+		const ids = [transferIdFor(k, "overage"), transferIdFor(k, "overage-retry")].map(String);
+		expect(journal.get(k)?.incident).toEqual({
+			kind: "debt_charge_failed",
+			failed: true,
+			role: "overage",
+			transferIds: ids,
+			amount: 30,
+		});
+		expect(
+			journal.inFlight().map((r) => r.holdId),
+			"no longer in flight",
+		).not.toContain(k);
 		expect((await walletAcct())?.debits_posted, "the hold posted once").toBe(100n);
 		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted, "never charged").toBe(0n);
 		expect(journal.debtOf(budgetId), "the debt stays recorded: admission stays bounded").toBe(30);
+		// A later settle answers from the row: no ledger call at all.
+		const calls: string[] = [];
+		for (const m of [
+			"immediateTransfer",
+			"lookupTransfer",
+			"ensureEscrowAccount",
+			"postPendingTransfer",
+			"voidPendingTransfer",
+		] as const) {
+			const t = tb as unknown as Record<string, (...a: unknown[]) => unknown>;
+			const orig = t[m];
+			if (typeof orig !== "function") continue;
+			t[m] = (...a: unknown[]) => {
+				calls.push(m);
+				return orig.apply(tb, a);
+			};
+		}
+		expect(await engine.settle(k, intent)).toMatchObject({ outcome: "incident" });
+		expect(calls).toEqual([]);
 	});
 
 	it("control: every role's id is distinct and stable for a hold", () => {

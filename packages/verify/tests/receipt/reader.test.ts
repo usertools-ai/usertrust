@@ -511,8 +511,18 @@ describe("unknown-field rejection in the signed receipt (§5, §2)", () => {
 			],
 			["work.extra", (r) => ((r.work as Record<string, unknown>).extra = 1)],
 			[
+				// The default mint is a session receipt, which carries no membership.
 				"work.repositoryMembership.extra",
-				(r) => (((r.work as JsonObject).repositoryMembership as Record<string, unknown>).extra = 1),
+				(r) => {
+					r.work = {
+						kind: "commit",
+						repoId: "github.com:R_kgDOK1x2Yw",
+						oid: "37df16d3a4c1b8e05f92d7a6c31e4b8079fa2d51",
+						oidAlg: "sha1",
+						objectSha256: "b".repeat(64),
+						repositoryMembership: { status: "providerVerified", proofId: "pv_1", extra: 1 },
+					};
+				},
 			],
 			[
 				"event.data.extra",

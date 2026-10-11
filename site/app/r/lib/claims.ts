@@ -100,8 +100,15 @@ export const RUNG_EARNED_BY: Record<LadderStatus, string> = {
 };
 
 /**
- * R6, VERBATIM IN FORCE (receipt-spec §7, `VERIFIED_CHECKPOINT`). Rendered as
- * the rung's fine print, "not hidden behind interaction" (§7).
+ * The glance card's verdict word. The three rungs stay DISTINCT (R5) in the
+ * level strip beside it; the full ladder, with what would earn each rung, sits
+ * in the card's Details.
+ */
+export const PLAIN_VERDICT_VERIFIED = "Verified";
+
+/**
+ * R6, VERBATIM IN FORCE (receipt-spec §7, `VERIFIED_CHECKPOINT`). Rendered in
+ * full in the card's Details (amended 2026-10-05: not above the fold).
  */
 export const FORK_DISCLAIMER =
 	"this level does NOT prove whole-chain linear consistency, anchor-sequence continuity, or external immutability — a checkpoint signer could sign a fork.";
@@ -553,6 +560,24 @@ export const DELEGATION_POSTURE_SCOPE: Record<DelegationPosture, string> = {
 };
 
 /**
+ * The glance card's ONE-LINE meaning for each posture: the scope chip's
+ * `title`, the only place a posture sentence sits outside Details (amended
+ * 2026-10-05). A SHORT FORM, never a substitute: each keeps its value's
+ * load-bearing clause, and the full R39 sentence above renders in Details,
+ * so the brief card removes nothing from the page — it folds it.
+ */
+export const DELEGATION_POSTURE_SHORT: Record<DelegationPosture, string> = {
+	selfDebitsOnly:
+		"this amount is DIRECT, self-account spend, built ONLY from debits charged to the receipt subject; delegated spend is OUT OF SCOPE.",
+	includesSomeDelegated:
+		"this amount is an INCOMPLETE ATTRIBUTED SUBTOTAL: some delegated debits are included, coverage is NOT established, and it must not be read as the cost of the work this subject caused.",
+	indeterminate:
+		"END-TO-END COVERAGE CANNOT BE VERIFIED for this amount, which supports no bound in either direction.",
+	includesAllDelegated:
+		"this receipt claims its amount is the TOTAL COST OF WORK CAUSED BY THE SUBJECT, but no signed evidence exists to check it — UNEVIDENCED, and not presented as a total.",
+};
+
+/**
  * R38/R39 — the posture rendered as the attested claim it is, beside the amount
  * it scopes. Same shape as the other three postures so it inherits their
  * treatment rather than inventing a second one.
@@ -669,8 +694,12 @@ export interface TransferSetRendering {
  * R25 — the two cases render DIFFERENTLY. The pair list present makes the root
  * a recomputable digest; the pair list absent (> 32 pairs) makes the same field
  * a commitment, and the reader has to be told which one they are looking at.
+ * Both receipt kinds carry the pair (§15.6 adopts §2's rule unchanged), so it
+ * takes only the two members the rule reads.
  */
-export function transferSetRendering(projection: Projection): TransferSetRendering {
+export function transferSetRendering(
+	projection: Pick<Projection, "transferSet" | "transferSetRoot">,
+): TransferSetRendering {
 	const pairs = projection.transferSet;
 	const rootIsCommitment = pairs === undefined;
 	return {
@@ -942,6 +971,13 @@ export interface AdvisoryBand {
  */
 export const ADVISORY_FIELD_NOT_SERVED = "(not served)";
 
+/**
+ * What a band says in place of another receipt's ID, or a revision, on a page
+ * that withholds them: a cluster receipt's public page ties the receipt to no
+ * other receipt and no repository, advisories included.
+ */
+export const OTHER_RECEIPT_WITHHELD = "This public page names no other receipt or revision.";
+
 function advisoryText(advisory: Advisory, key: string): string {
 	return str(advisory as Bag, key) ?? ADVISORY_FIELD_NOT_SERVED;
 }
@@ -956,7 +992,11 @@ function advisoryLink(advisory: Advisory, key: string): string | undefined {
  * an unknown kind "renders as a generic advisory notice naming the kind (never
  * silently dropped, never verdict-affecting)".
  */
-export function advisoryBand(advisory: Advisory): AdvisoryBand {
+export function advisoryBand(
+	advisory: Advisory,
+	options: { withholdIdentifiers?: boolean } = {},
+): AdvisoryBand {
+	if (options.withholdIdentifiers) return withheldAdvisoryBand(advisory);
 	switch (advisory.kind) {
 		case "revisionSuperseded":
 			return {
@@ -986,6 +1026,41 @@ export function advisoryBand(advisory: Advisory): AdvisoryBand {
 				title: "ADVISORY",
 				body: `this resolver reported an advisory of kind "${advisory.kind}", which this page does not know how to expand. ${ADVISORY_NEVER_ALTERS_VERDICT}`,
 			};
+	}
+}
+
+/**
+ * The same notices with every advisory-supplied identifier withheld: no other
+ * receipt's ID (as text or as a link) and no revision. The notice itself, its
+ * kind and the chain event's hash stay, so the advisory is never dropped.
+ */
+function withheldAdvisoryBand(advisory: Advisory): AdvisoryBand {
+	switch (advisory.kind) {
+		case "revisionSuperseded":
+			return {
+				kind: advisory.kind,
+				title: "REVISION SUPERSEDED",
+				body: `the artifact this receipt attests has since changed. ${OTHER_RECEIPT_WITHHELD} A display state, never a status: not a failure, not a downgrade, and never silently a plain green check.`,
+			};
+		case "receiptSuperseded":
+			return {
+				kind: advisory.kind,
+				title: "RECEIPT SUPERSEDED",
+				body: `a later receipt_superseded chain event supersedes this receipt (event hash ${advisoryText(advisory, "eventHash")}). ${OTHER_RECEIPT_WITHHELD} ${ADVISORY_NEVER_ALTERS_VERDICT}`,
+			};
+		case "generationAddendum": {
+			const generation = num(advisory as Bag, "generation");
+			return {
+				kind: advisory.kind,
+				title: "GENERATION ADDENDUM",
+				body: `generation ${generation ?? ADVISORY_FIELD_NOT_SERVED} was minted as a separate receipt. ${OTHER_RECEIPT_WITHHELD} ${ADVISORY_NEVER_ALTERS_VERDICT}`,
+			};
+		}
+		default: {
+			// An unknown kind's band names only its kind; it never carries a link.
+			const { kind, title, body } = advisoryBand(advisory);
+			return { kind, title, body };
+		}
 	}
 }
 

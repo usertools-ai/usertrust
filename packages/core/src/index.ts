@@ -93,13 +93,31 @@ export { exportMarkdown } from "./export/markdown.js";
 export type { TrustedClient, TrustOpts } from "./govern.js";
 // Core
 export { trust } from "./govern.js";
-export type { Authorization, AuthorizeParams, Governor, SettleParams } from "./headless.js";
+export type {
+	AbortOutcome,
+	Authorization,
+	AuthorizeParams,
+	Governor,
+	ReleaseOutcome,
+	SettleParams,
+} from "./headless.js";
 // Headless governance (non-SDK integrations)
-export { createGovernor } from "./headless.js";
+export {
+	createGovernor,
+	type Principal,
+	type PrincipalLedgerTags,
+	principalFieldRefusal,
+	principalLedgerTags,
+	RELEASE_CLASSES,
+	type ReleaseClass,
+	sanitizeReleaseReason,
+	usageTimeRefusal,
+} from "./headless.js";
 // The ledger client is the required first argument of every budget entry point
 // above. Without it at the root those functions can be imported but never
 // called: the argument is unnameable and unconstructible outside this package.
 export {
+	LedgerClientClosedError,
 	PendingReplayError,
 	TBTransferError,
 	TransferIdRetiredError,
@@ -107,17 +125,23 @@ export {
 	TrustTBClient,
 	XFER_SPEND,
 } from "./ledger/client.js";
-export type { ModelRates, RateResolution } from "./ledger/pricing.js";
+export type { LongPromptTier, ModelRates, RateResolution } from "./ledger/pricing.js";
 // Pricing
 export {
 	costFromRates,
 	estimateCost,
 	estimateInputTokens,
 	getModelRates,
+	holdTierRates,
 	isModelPriced,
 	PRICING_TABLE_VERSION,
+	promptTierRates,
+	promptTokenCount,
+	requestDeclares1hCache,
 	resolveAppliedRates,
 	resolveRates,
+	snapshotRates,
+	supportsCacheWrite1h,
 } from "./ledger/pricing.js";
 // Usage normalization (spec D2/D5): the one place provider usage becomes the
 // four-tier disjoint snapshot that both cost and record emission derive from.
@@ -130,6 +154,7 @@ export {
 	fromProviderResponse,
 	publishableUsage,
 	sanitizeUsage,
+	withSupported1hTier,
 } from "./ledger/usage.js";
 // Pattern memory
 export { getPatternStats, hashPrompt, recordPattern, suggestModel } from "./memory/patterns.js";
@@ -176,6 +201,7 @@ export type {
 	AppliedRates,
 	AuditEvent,
 	BoardDecision,
+	CacheWrite1h,
 	CanaryToken,
 	CostBasis,
 	CredentialAccessResult,

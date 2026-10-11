@@ -76,6 +76,15 @@ describe("settlement amounts", () => {
 			overage: 0,
 		});
 	});
+	it("prices the 1-hour share of the write tier at the 1-hour rate", () => {
+		// 300 written, 200 of them 1h: 100 x 37.5 + 200 x 60 = 3,750 + 12,000 = 15,750 / 1000.
+		const withHour = { ...usage, cacheWrite1hTokens: 200 };
+		const withHourActual = costFromRates(rates, 1000, 500, 2000, 300, 200);
+		expect(withHourActual).toBeGreaterThan(actual);
+		expect(settlementAmounts(rates, withHour, withHourActual + 5).actual).toBe(withHourActual);
+		// Dropping the field falls back to the all-5-minute price: that is the bug this pins.
+		expect(settlementAmounts(rates, usage, withHourActual + 5).actual).toBe(actual);
+	});
 	it("over the hold it posts the hold and the excess is overage", () => {
 		expect(settlementAmounts(rates, usage, actual - 7)).toEqual({
 			actual,

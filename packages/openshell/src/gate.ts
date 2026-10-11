@@ -13,7 +13,15 @@
  * here is denied, including types that do not exist yet.
  */
 
-import { costFromRates, getModelRates, isModelPriced, type ModelRates } from "usertrust";
+import {
+	costFromRates,
+	getModelRates,
+	isModelPriced,
+	type ModelRates,
+	requestDeclares1hCache,
+	snapshotRates,
+	supportsCacheWrite1h,
+} from "usertrust";
 import { DenyReason } from "./reasons.js";
 import {
 	DEFAULT_ROUTE_CONFIG,
@@ -107,6 +115,12 @@ export interface Hold {
 	 * changed (become cheaper) between the reservation and the settlement.
 	 */
 	readonly rates: Readonly<ModelRates>;
+	/**
+	 * True when `rates` came from the operator's `customRates` rather than the built-in
+	 * table. It decides whether the rates have a 1-hour cache-write tier
+	 * (`supportsCacheWrite1h`), for the hold AND for settlement. Absent means false.
+	 */
+	readonly operatorOwned?: boolean | undefined;
 }
 
 export type GateResult =
@@ -624,7 +638,7 @@ function operatorRatesValid(model: string, customRates: GateConfig["customRates"
 	if (typeof r !== "object" || r === null) return false;
 	const rates = r as Record<string, unknown>;
 	if (!isRate(rates.inputPer1k) || !isRate(rates.outputPer1k)) return false;
-	for (const k of ["cacheReadPer1k", "cacheWritePer1k"]) {
+	for (const k of ["cacheReadPer1k", "cacheWritePer1k", "cacheWrite1hPer1k"]) {
 		if (rates[k] !== undefined && !isRate(rates[k])) return false;
 	}
 	return true;
@@ -703,15 +717,35 @@ export function evaluateRequest(
 		w.images * perImage +
 		(hasTools(body) ? config.toolOverheadTokens[match.provider] : 0);
 	// A FROZEN COPY: getModelRates returns the operator's own object, and an in-place edit after
-	// authorize must not change what this hold settles at. ModelRates is flat numbers.
-	const rates: ModelRates = Object.freeze({ ...getModelRates(model, config.customRates) });
+	// authorize must not change what this hold settles at. DEEP-frozen (`snapshotRates`): a
+	// tiered row (`longPrompt`) carries a nested object a shallow copy would still share with
+	// the table.
+	const rates: ModelRates = snapshotRates(getModelRates(model, config.customRates));
+	const operatorOwned =
+		config.customRates !== undefined && Object.hasOwn(config.customRates, model);
 	// Priced at the DEAREST input tier: plain input, cache write (a prompt the provider writes
 	// to its cache bills above plain input) and cache read (#169: an operator's rate may price
 	// a cache read above both). Each tier is linear, so no split of the bound costs more.
+	// A per-request prompt tier (`longPrompt`) needs nothing extra here: every term below
+	// prices a prompt of exactly `inputTokenBound`, an UPPER bound on the real prompt, and
+	// `costFromRates` selects the tier from it. A bound at or under the threshold proves the
+	// request cannot cross it, so the lower tier is exact, and a bound over it holds the higher.
 	const amount = Math.max(
 		costFromRates(rates, inputTokenBound, maxOutputTokens),
 		costFromRates(rates, 0, maxOutputTokens, 0, inputTokenBound),
 		costFromRates(rates, 0, maxOutputTokens, inputTokenBound, 0),
+		// A request that declares a 1-hour cache TTL can write its prompt at the 1-hour
+		// rate (2x input), above the 5-minute write: hold that too, only for such a request
+		// on the ANTHROPIC route. The 1-hour tier is Anthropic's: an OpenAI request must
+		// hold as before however its body scans (a `cache_control` example inside a tool
+		// schema, or a body too large to scan, both answer true). And only for rates that
+		// HAVE a 1-hour tier (`supportsCacheWrite1h`, the one predicate): a built-in row with
+		// none (gpt-4o behind an Anthropic-compatible host) must not be held at an invented 2x.
+		...(match.route === "anthropic.messages" &&
+		supportsCacheWrite1h(rates, operatorOwned) &&
+		requestDeclares1hCache(body)
+			? [costFromRates(rates, 0, maxOutputTokens, 0, inputTokenBound, inputTokenBound)]
+			: []),
 	);
 
 	const mutations: RequestMutations = {
@@ -730,6 +764,7 @@ export function evaluateRequest(
 			amount,
 			streaming,
 			rates,
+			operatorOwned,
 		}),
 		mutations,
 	};

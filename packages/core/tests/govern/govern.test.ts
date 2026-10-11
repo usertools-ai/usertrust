@@ -336,7 +336,9 @@ describe("trust()", () => {
 		});
 
 		it("sums the nested Anthropic cache_creation TTL breakdown into the write tier", async () => {
-			// 1500 + 500 = 2000 write tokens: 3 + 30 + 0 + 75 = 108.
+			// 1500 + 500 = 2000 write tokens, of which 500 are the 1-HOUR kind (60/1k, 2x
+			// input) and 1500 the 5-minute kind (37.5/1k):
+			// input 3 + output 30 + 5m 56.25 + 1h 30 = 119.25 -> 120.
 			const mockClient = makeAnthropicMock({
 				id: "msg_nested",
 				model: "claude-sonnet-4-6",
@@ -362,7 +364,12 @@ describe("trust()", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			});
 
-			expect(result.receipt.cost).toBe(108);
+			expect(result.receipt.cost).toBe(120);
+			// The write TOTAL stays 2000 (the 1h share is a subset), and the receipt names
+			// the 1-hour share and the rate it was priced at, so an auditor can reproduce
+			// the cost: (2000 - 500) x 37.5 + 500 x 60.
+			expect(result.receipt.usage?.cacheWriteTokens).toBe(2_000);
+			expect(result.receipt.cacheWrite1h).toEqual({ tokens: 500, ratePer1k: 60 });
 
 			await governed.destroy();
 		});
@@ -968,9 +975,9 @@ describe("trust()", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			});
 
-			// Fallback rate: input 30/1k, output 150/1k
-			// (100/1000)*30 + (50/1000)*150 = 3 + 7.5 = ceil(10.5) = 11
-			expect(result.receipt.cost).toBe(11);
+			// Fallback rate (dearest known): input 250/1k, output 1250/1k
+			// (100/1000)*250 + (50/1000)*1250 = 25 + 62.5 = ceil(87.5) = 88
+			expect(result.receipt.cost).toBe(88);
 
 			await governed.destroy();
 		});

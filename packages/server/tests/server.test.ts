@@ -92,6 +92,107 @@ describe("HTTP control plane", () => {
 		expect(fake.calls.settled).toHaveLength(1);
 	});
 
+	it("/v1/health advertises its capabilities — in dryRun AND with a ledger", async () => {
+		// A client sends `principal` only to a server that lists it (an older server
+		// strips the key and records the call as nobody's), so a missing entry here
+		// silently loses all attribution.
+		for (const dryRun of [true, false]) {
+			const { base } = await start({ dryRun });
+			const body = (await (await fetch(`${base}/v1/health`)).json()) as { capabilities?: unknown };
+			expect(body.capabilities).toEqual([
+				"principal",
+				"authorize-cache-tiers",
+				"hold-expiry",
+				"release",
+				"cache-write-1h",
+				"job",
+			]);
+			await server?.close();
+			server = undefined;
+		}
+	});
+
+	it("a plugin-shaped principal ({ id, type, origin }) is accepted and forwarded, alone or with unit and role", async () => {
+		const { base, fake } = await start();
+		const plugin = { id: "a7f3", type: "Explore", origin: "claude-code:0b9e-4c11" };
+		for (const principal of [plugin, { ...plugin, unit: "receipts", role: "reviewer" }]) {
+			const res = await post(base, "/v1/authorize", {
+				model: "m",
+				estimatedInputTokens: 1,
+				maxOutputTokens: 1,
+				principal,
+			});
+			expect(res.status).toBe(200);
+		}
+		expect(fake.calls.authorizeParams.map((p) => p.principal)).toEqual([
+			plugin,
+			{ ...plugin, unit: "receipts", role: "reviewer" },
+		]);
+	});
+
+	it("forwards the per-tier estimates to governor.authorize(), and refuses invalid counts with a 400", async () => {
+		// Without the two fields on the wire schema, zod strips them and a mostly-cache-read
+		// window is held at the cache-WRITE rate — a false 402 near a budget.
+		const { base, fake } = await start();
+		const res = await post(base, "/v1/authorize", {
+			model: "m",
+			estimatedInputTokens: 150,
+			estimatedCacheReadTokens: 82_000,
+			estimatedCacheWriteTokens: 2_000,
+			maxOutputTokens: 1_000,
+		});
+		expect(res.status).toBe(200);
+		expect(fake.calls.authorizeParams[0]).toMatchObject({
+			estimatedInputTokens: 150,
+			estimatedCacheReadTokens: 82_000,
+			estimatedCacheWriteTokens: 2_000,
+			maxOutputTokens: 1_000,
+		});
+		for (const bad of [-1, 1.5, "82000"]) {
+			for (const field of ["estimatedCacheReadTokens", "estimatedCacheWriteTokens"]) {
+				const r = await post(base, "/v1/authorize", { model: "m", [field]: bad });
+				expect(r.status).toBe(400);
+			}
+		}
+		expect(fake.calls.authorizeParams).toHaveLength(1);
+	});
+
+	it("forwards the actor and the principal to governor.authorize()", async () => {
+		// Without `principal` on the wire schema, zod strips it and the request still
+		// returns 200: the D4 silent-strip failure, for WHO did the work.
+		const { base, fake } = await start();
+		const principal = { id: "a7f3", type: "Explore", unit: "receipts", role: "reviewer" };
+		const res = await post(base, "/v1/authorize", {
+			model: "m",
+			estimatedInputTokens: 1,
+			maxOutputTokens: 1,
+			actor: "claude-code:s-1:Explore:a7f3",
+			principal,
+		});
+		expect(res.status).toBe(200);
+		expect(fake.calls.authorizeParams[0]).toMatchObject({
+			actor: "claude-code:s-1:Explore:a7f3",
+			principal,
+		});
+	});
+
+	it("a principal the governor would refuse is a 400 BEFORE the governor is asked", async () => {
+		const { base, fake } = await start();
+		for (const principal of [
+			{ unit: "has space" },
+			{ role: "" },
+			{ id: "x".repeat(129) },
+			{ unit: "receipts", extra: "never silently stripped" },
+			{ id: "a7f3", type: "Explore", origin: "claude-code:s-1", session: "unknown key" },
+			{ origin: "has space" },
+			"receipts",
+		]) {
+			const res = await post(base, "/v1/authorize", { model: "m", principal });
+			expect(res.status).toBe(400);
+		}
+		expect(fake.calls.authorizeParams).toHaveLength(0);
+	});
+
 	it("forwards computeMs from the settle body to governor.settle()", async () => {
 		const { base, fake } = await start();
 		const auth = (await (
@@ -176,14 +277,16 @@ describe("HTTP control plane", () => {
 		expect(server.pendingCount()).toBe(0);
 	});
 
-	it("close() aborts remaining pending holds", async () => {
+	it("close() RELEASES remaining pending holds: a shutdown is no failure", async () => {
 		const { base, fake } = await start();
 		const auth = (await (
 			await post(base, "/v1/authorize", { model: "m", estimatedInputTokens: 1, maxOutputTokens: 1 })
 		).json()) as { transferId: string };
 		expect(server?.pendingCount()).toBe(1);
 		await server?.close();
-		expect(fake.calls.aborted).toEqual([auth.transferId]);
+		expect(fake.calls.released).toEqual([auth.transferId]);
+		expect(fake.calls.releaseReasons).toEqual(["server shutdown"]);
+		expect(fake.calls.aborted).toEqual([]);
 		expect(server?.pendingCount()).toBe(0);
 		server = undefined;
 	});

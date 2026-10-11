@@ -86,6 +86,16 @@ describe("statusOf", () => {
 		expect(statusOf(pending as never)).toBe("pending");
 	});
 
+	it("labels a released hold as released: never pending, never failed", () => {
+		// A release carries a `reason` and no `settled`: without its own arm it read
+		// "pending", a hold that can never settle shown as one that might.
+		const [released] = toLedgerRows(
+			[evt({ kind: "hold_released", data: { transferId: "tx_1", reason: "pending TTL expired" } })],
+			{ valid: true, breakIndex: null },
+		);
+		expect(statusOf(released as never)).toBe("released");
+	});
+
 	it("labels a denial as denied, not as a zero-cost failed transaction", () => {
 		// A denial carries an `error` string, which the generic mapping would
 		// otherwise read as a failed CALL — putting refusals in the same column

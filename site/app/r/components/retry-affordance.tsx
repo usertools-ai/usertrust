@@ -24,10 +24,7 @@ export default function RetryAffordance({
 	return (
 		<p className="text-[13px] leading-relaxed text-white/70" data-testid="retry-affordance">
 			{line ? <span>{line} </span> : null}
-			<a
-				className="focus-ring underline decoration-white/40 underline-offset-2 hover:text-white"
-				href={`/r/${routeParamId}`}
-			>
+			<a className="ut-link focus-ring" href={`/r/${routeParamId}`}>
 				retry
 			</a>
 		</p>

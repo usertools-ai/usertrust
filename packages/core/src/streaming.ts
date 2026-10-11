@@ -63,6 +63,8 @@ export interface StreamUsage {
 	outputTokens: number;
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
+	/** The 1-hour SUBSET of `cacheWriteTokens` (Anthropic only). Absent means 0. */
+	cacheWrite1hTokens?: number | undefined;
 }
 
 /** The zero snapshot — a stream that reported nothing. */
@@ -111,6 +113,7 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage {
 				outputTokens: 0,
 				cacheReadTokens: normalized.cacheReadTokens,
 				cacheWriteTokens: normalized.cacheWriteTokens,
+				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
 			};
 		}
 	}
@@ -123,6 +126,7 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage {
 				outputTokens: sanitizeCount(usage.output_tokens),
 				cacheReadTokens: normalized.cacheReadTokens,
 				cacheWriteTokens: normalized.cacheWriteTokens,
+				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
 			};
 		}
 	}
@@ -249,6 +253,8 @@ export interface ChunkObservation {
 	cumulativeOutputTokens: number;
 	cumulativeCacheReadTokens: number;
 	cumulativeCacheWriteTokens: number;
+	/** The 1-hour subset of the write total; present only once some was reported. */
+	cumulativeCacheWrite1hTokens?: number | undefined;
 }
 
 export type ChunkHook = (obs: ChunkObservation) => void;
@@ -281,6 +287,7 @@ async function* wrapStreamImpl<T>(
 	let outputTokens = 0;
 	let cacheReadTokens = 0;
 	let cacheWriteTokens = 0;
+	let cacheWrite1hTokens = 0;
 	let chunksDelivered = 0;
 	let usageReported = false;
 	const snapshot = (): StreamUsage => ({
@@ -288,6 +295,8 @@ async function* wrapStreamImpl<T>(
 		outputTokens,
 		cacheReadTokens,
 		cacheWriteTokens,
+		// Absent when 0, so a stream with no 1-hour writes snapshots as it always did.
+		...(cacheWrite1hTokens > 0 ? { cacheWrite1hTokens } : {}),
 	});
 
 	// P4-STREAM-LEAK: settlement runs in `finally` so that a consumer who breaks
@@ -352,6 +361,11 @@ async function* wrapStreamImpl<T>(
 					deltaCacheWrite = tokens.cacheWriteTokens - cacheWriteTokens;
 					cacheWriteTokens = tokens.cacheWriteTokens;
 				}
+				// The 1-hour share is a subset of the write total, so it only ever rises
+				// with it (same keep-the-latest-larger rule as every other cache counter).
+				if ((tokens.cacheWrite1hTokens ?? 0) > cacheWrite1hTokens) {
+					cacheWrite1hTokens = tokens.cacheWrite1hTokens ?? 0;
+				}
 			}
 
 			// Run hook BEFORE yielding so a throw aborts before the consumer sees it.
@@ -363,6 +377,7 @@ async function* wrapStreamImpl<T>(
 					cumulativeOutputTokens: outputTokens,
 					cumulativeCacheReadTokens: cacheReadTokens,
 					cumulativeCacheWriteTokens: cacheWriteTokens,
+					...(cacheWrite1hTokens > 0 ? { cumulativeCacheWrite1hTokens: cacheWrite1hTokens } : {}),
 				});
 			}
 

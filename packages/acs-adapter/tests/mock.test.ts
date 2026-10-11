@@ -12,7 +12,10 @@ describe("createMockGovernor", () => {
 			maxOutputTokens: 10,
 		});
 		expect(governor.budgetRemaining()).toBe(80);
-		await governor.abort(auth);
+		expect(await governor.abort(auth)).toEqual({ aborted: true });
+		expect(governor.budgetRemaining()).toBe(100);
+		// It says whether it ended the hold, as the real governor does: a second abort did not.
+		expect(await governor.abort(auth)).toEqual({ aborted: false });
 		expect(governor.budgetRemaining()).toBe(100);
 		const auth2 = await governor.authorize({
 			model: "m",
