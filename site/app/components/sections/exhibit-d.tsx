@@ -124,7 +124,7 @@ export default function ExhibitD() {
 				<StageTag stage="ANCHOR" />
 			</div>
 			<h2 className="font-display mt-3 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
-				tamper with one byte. break the whole chain.
+				tamper with one byte. the chain breaks there.
 			</h2>
 
 			{/* The tree ended at ~860px while the content column ran to ~1310px, and
