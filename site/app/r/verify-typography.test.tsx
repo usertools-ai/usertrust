@@ -168,8 +168,13 @@ test("every external URL the route names is classified: pinned script, chrome fo
 			const url = match[0];
 			seen.add(url);
 			const before = text.slice(Math.max(0, match.index - 40), match.index);
-			if (KIT_FONT.test(url)) {
-				// A font: only ever an @font-face source, whose family reaches the chrome only (above).
+			if (KIT_FONT.test(url) && file === "lib/kit-fonts.ts") {
+				// The share card's server-side fetch: each URL sits beside its sha384 pin.
+				const after = text.slice(match.index, match.index + 160);
+				assert.match(after, /integrity: "sha384-[A-Za-z0-9+/]{64}"/, `${url} is pinned`);
+				assert.doesNotMatch(text, /^["']use client["']/m, "kit-fonts.ts is server code");
+			} else if (KIT_FONT.test(url)) {
+				// A font on the page: only ever an @font-face source, whose family reaches the chrome only (above).
 				assert.equal(file, "brand.css", `${url} in ${file}`);
 				assert.match(before, /src:url\(['"]?$/, `${url} is an @font-face source`);
 			} else if (url === LATTICE_SRC) {

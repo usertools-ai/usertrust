@@ -22,75 +22,69 @@ function cardText(markup: string): Array<[string, string]> {
 	]);
 }
 
+const BRAND_HEAD: Array<[string, string]> = [
+	["mark", "ut"],
+	["wordmark", "usertrust"],
+	["where", "RECEIPT"],
+];
+const TAIL: Array<[string, string]> = [
+	["tagline", SHARE_CARD_TAGLINE],
+	["site", SHARE_CARD_SITE],
+];
+
 const CASES: Array<[string, Array<[string, string]>]> = [
 	[
 		"cluster/first.json",
 		[
-			["mark", "ut"],
-			["wordmark", "usertrust"],
-			["where", "RECEIPT"],
 			["verdict", "VERIFIED"],
 			["amount", "$4.8224"],
-			["tagline", SHARE_CARD_TAGLINE],
-			["site", SHARE_CARD_SITE],
 		],
 	],
 	[
 		"cluster/skipped-overflow.json",
 		[
-			["mark", "ut"],
-			["wordmark", "usertrust"],
-			["where", "RECEIPT"],
 			["verdict", "VERIFIED"],
 			["amount", "$245.0000"],
-			["tagline", SHARE_CARD_TAGLINE],
-			["site", SHARE_CARD_SITE],
 		],
 	],
-	[
-		"unknown.json",
-		[
-			["mark", "ut"],
-			["wordmark", "usertrust"],
-			["where", "RECEIPT"],
-			["verdict", "NO RECEIPT YET"],
-			["tagline", SHARE_CARD_TAGLINE],
-			["site", SHARE_CARD_SITE],
-		],
-	],
-	[
-		"expired.json",
-		[
-			["mark", "ut"],
-			["wordmark", "usertrust"],
-			["where", "RECEIPT"],
-			["verdict", "NO RECEIPT"],
-			["tagline", SHARE_CARD_TAGLINE],
-			["site", SHARE_CARD_SITE],
-		],
-	],
+	["unknown.json", [["verdict", "NO RECEIPT YET"]]],
+	["expired.json", [["verdict", "NO RECEIPT"]]],
 ];
 
-for (const [file, expected] of CASES) {
-	test(`share card for ${file}: the brand, the verdict word, the amount only when verified — nothing else`, () => {
-		const markup = renderToStaticMarkup(<ShareCard state={fixtureState(loadFixture(file))} />);
-		assert.deepEqual(cardText(markup), expected);
-		// No ID of any kind, no handle, no repository: the card ties the receipt to no one.
-		assert.doesNotMatch(markup, /ut1_|a1_|r1_/);
-		const { routeParamId } = loadFixture(file);
-		assert.ok(
-			!markup.includes(routeParamId.slice(4, 12)),
-			"not even a fragment of the receipt's ID",
-		);
-	});
+for (const [file, claim] of CASES) {
+	for (const brand of [true, false]) {
+		test(`share card for ${file} (${brand ? "brand fonts" : "fallback"}): the verdict word, the amount only when verified — nothing else`, () => {
+			const markup = renderToStaticMarkup(
+				<ShareCard state={fixtureState(loadFixture(file))} brand={brand} />,
+			);
+			assert.deepEqual(cardText(markup), [...(brand ? BRAND_HEAD : []), ...claim, ...TAIL]);
+			// No ID of any kind, no handle, no repository: the card ties the receipt to no one.
+			assert.doesNotMatch(markup, /ut1_|a1_|r1_/);
+			const { routeParamId } = loadFixture(file);
+			assert.ok(
+				!markup.includes(routeParamId.slice(4, 12)),
+				"not even a fragment of the receipt's ID",
+			);
+		});
+	}
 }
+
+test("with the brand fonts the card is set in Usertools Sans; without them, no font is named and no mark is drawn", () => {
+	const state = fixtureState(loadFixture("cluster/first.json"));
+	const branded = renderToStaticMarkup(<ShareCard state={state} brand={true} />);
+	assert.match(branded, /^<div style="[^"]*font-family:Usertools Sans/);
+	assert.match(branded, /data-share="mark"/);
+	const fallback = renderToStaticMarkup(<ShareCard state={state} brand={false} />);
+	assert.doesNotMatch(fallback, /font-family/, "the renderer's default font");
+	assert.doesNotMatch(fallback, /data-share="(mark|wordmark)"/, "never a mark in another font");
+});
 
 test("the verdict is green only when verified, in brand.css's register inks", () => {
 	const verified = renderToStaticMarkup(
-		<ShareCard state={fixtureState(loadFixture("cluster/first.json"))} />,
+		<ShareCard state={fixtureState(loadFixture("cluster/first.json"))} brand={true} />,
 	);
 	const unknown = renderToStaticMarkup(
-		<ShareCard state={fixtureState(loadFixture("unknown.json"))} />,
+		<ShareCard state={fixtureState(loadFixture("unknown.json"))} brand={true} />,
 	);
 	const inkOf = (markup: string) =>
 		/data-share="verdict" style="[^"]*?color:(#[0-9A-Fa-f]{6})/.exec(markup)?.[1];
@@ -98,23 +92,15 @@ test("the verdict is green only when verified, in brand.css's register inks", ()
 	assert.equal(inkOf(unknown), "#FFFFFF");
 });
 
-test("the card fetches nothing: no URL, no image, no font, in its source or its markup", () => {
-	const source = readFileSync(
-		new URL("./components/share-card.tsx", import.meta.url),
-		"utf8",
-	).replace(/\/\*[\s\S]*?\*\//g, "");
-	assert.doesNotMatch(source, /fetch\(|https?:\/\/|<img|readFile|fonts:/);
-	const route = readFileSync(
-		new URL("./[receiptId]/opengraph-image.tsx", import.meta.url),
-		"utf8",
-	).replace(/\/\*[\s\S]*?\*\//g, "");
-	assert.doesNotMatch(
-		route,
-		/fetch\(|https?:\/\/|readFile|fonts:/,
-		"the route passes no font: the renderer's default",
-	);
+test("the card draws; the route fetches only through the pinned font loader", () => {
+	const strip = (path: string) =>
+		readFileSync(new URL(path, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+	assert.doesNotMatch(strip("./components/share-card.tsx"), /fetch\(|https?:\/\/|<img|readFile/);
+	const route = strip("./[receiptId]/opengraph-image.tsx");
+	assert.doesNotMatch(route, /fetch\(|https?:\/\/|readFile/, "no direct fetch, URL or file read");
+	assert.match(route, /getKitFonts\(\)/, "fonts come from the pinned loader");
 	const markup = renderToStaticMarkup(
-		<ShareCard state={fixtureState(loadFixture("cluster/first.json"))} />,
+		<ShareCard state={fixtureState(loadFixture("cluster/first.json"))} brand={true} />,
 	);
 	assert.doesNotMatch(markup, /<img|url\(/);
 });
