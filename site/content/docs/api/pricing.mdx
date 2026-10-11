@@ -75,9 +75,11 @@ still reproduces its `cost`. Only built-in table rows carry a tier; `customRates
 
 **One settle is one request.** A settle prices the counts it is given as a single request. A
 caller that settles several requests' usage together, such as the Claude Code plugin's
-transcript windows, is priced at the tier of their combined prompt. That is never below what the
-requests cost one by one, and never above the higher tier for all of them. To be priced exactly,
-settle each request on its own.
+transcript windows, is priced at the tier of their combined prompt. Before rounding, that is
+never below what the requests cost one by one, and never above the higher tier for all of them.
+The charge itself can be lower, because a settle is rounded up to a whole UT once, with a 1 UT
+floor: two requests that each cost 0.4 UT are charged 1 UT together and 2 UT apart. To be priced
+exactly, settle each request on its own.
 
 **Holds.** `trust()` and `createGovernor().authorize()` size a hold from an *estimated* prompt,
 which cannot tell which side of the threshold the request will land on. They hold the **higher**
