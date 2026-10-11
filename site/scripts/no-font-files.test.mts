@@ -36,6 +36,27 @@ function trackedFiles(): string[] {
 	return r.stdout.split("\0").filter(Boolean);
 }
 
+/**
+ * Every font URL `text` names (quoted, or in CSS `url(...)`) that is not the
+ * kit's. The scan below runs it over each site source; the rows test plants
+ * URLs through it directly, so no font URL is ever committed to site source.
+ *
+ * A URL is judged by its PATH: the query and the fragment are stripped first,
+ * so `X.woff2?v=1` and `X.eot#iefix` are fonts, and the extension rule is
+ * `FONT_FILE`, the same one the tracked-file guard applies. A kit URL with a
+ * query still passes: a query or a fragment changes neither the host nor the
+ * path, so the bytes still come from the kit and nothing is committed here.
+ */
+export function nonKitFontUrls(text: string): string[] {
+	const offenders: string[] = [];
+	for (const m of text.matchAll(/['"(`]([^'"()`\s]+)['")`]/g)) {
+		const url = m[1] ?? "";
+		const path = url.replace(/[?#].*$/, "");
+		if (FONT_FILE.test(path) && !path.startsWith(KIT_FONTS)) offenders.push(url);
+	}
+	return offenders;
+}
+
 /** The font files among `paths` that are not explicitly allowlisted. */
 export function fontFiles(paths: readonly string[]): string[] {
 	return paths.filter((path) => FONT_FILE.test(path) && !Object.hasOwn(ALLOWED_FONT_FILES, path));
@@ -92,9 +113,24 @@ test("no site source points at a local font file; every font URL is the kit's", 
 	const offenders: string[] = [];
 	for (const file of sources) {
 		const text = readFileSync(join(REPO_ROOT, file), "utf8");
-		for (const m of text.matchAll(/['"(`]([^'"()`\s]*\.(?:woff2?|ttf|otf|eot))['")`]/gi)) {
-			if (!m[1]?.startsWith(KIT_FONTS)) offenders.push(`${file}: ${m[1]}`);
-		}
+		for (const url of nonKitFontUrls(text)) offenders.push(`${file}: ${url}`);
 	}
 	assert.deepEqual(offenders, []);
+});
+
+test("a font URL is judged by its path: a query or a fragment does not hide it", () => {
+	const local = (url: string) => nonKitFontUrls(`src: url("${url}") format("woff2");`);
+	// The control: a plain local font URL is caught.
+	assert.deepEqual(local("/fonts/X.woff2"), ["/fonts/X.woff2"]);
+	// A query or a fragment after the extension is still a local font.
+	assert.deepEqual(local("/fonts/X.woff2?v=1"), ["/fonts/X.woff2?v=1"]);
+	assert.deepEqual(local("../public/fonts/X.eot#iefix"), ["../public/fonts/X.eot#iefix"]);
+	assert.deepEqual(local("/fonts/X.eot?#iefix"), ["/fonts/X.eot?#iefix"]);
+	assert.deepEqual(nonKitFontUrls("const f = '/fonts/X.ttf?v=2';"), ["/fonts/X.ttf?v=2"]);
+	// The kit, with or without a query, is the one host allowed.
+	assert.deepEqual(local("https://usertrust.ai/kit/fonts/X.woff2"), []);
+	assert.deepEqual(local("https://usertrust.ai/kit/fonts/X.woff2?v=1"), []);
+	// A name that only CONTAINS a font extension is not a font.
+	assert.deepEqual(local("/fonts/X.woff2.md"), []);
+	assert.deepEqual(local("/fonts/X.woff2x?v=1"), []);
 });

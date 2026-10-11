@@ -49,7 +49,9 @@ export const KIT_FONTS: readonly PinnedFont[] = [
 /**
  * The site's own share card (`app/og/route.tsx`): the hero's display voice,
  * Khand, from the kit, pinned the same way. Its own list, loaded separately:
- * a Khand miss must never cost the receipt card its Usertools Sans.
+ * a Khand fetch or pin miss must never cost the receipt card its Usertools
+ * Sans. The decodes are NOT separate: both lists share one decode queue and
+ * one stall counter (`stalledDecodes`), because they share one WASM heap.
  */
 export const OG_FONTS: readonly PinnedFont[] = [
 	{
@@ -126,6 +128,11 @@ export function decodeToTtf(
  * fetch fonts or enqueue another decode behind it (each would keep its buffers after its caller timed out:
  * unbounded memory on a public endpoint): it answers UNBRANDED at once. Single-flight until the stalled
  * decode actually settles, which also keeps the WASM heap serialised.
+ *
+ * ONE counter for every pinned set: the receipt card's `KIT_FONTS` and the site card's `OG_FONTS` (Khand)
+ * decode in the same WASM heap, through the same `decodeChain`, so a stalled Khand decode also sends the
+ * receipt card unbranded until it settles, and the reverse. Separate lists keep each set's FETCH
+ * all-or-nothing apart; they never separate the decode queue or this counter.
  */
 let stalledDecodes = 0;
 
