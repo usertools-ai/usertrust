@@ -5,7 +5,6 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
-	realpathSync,
 	rmSync,
 	symlinkSync,
 	unlinkSync,
@@ -603,9 +602,10 @@ describe("Audit Chain Writer — lockAtCreate (the lock taken in the factory)", 
 		}
 		expect(caught).toBeInstanceOf(AuditWriterLockHeldError);
 		expect(caught).toBeInstanceOf(Error);
-		// The message names the lock by its REAL path (the one every lock key uses).
+		// The message names the lock file at the path it was opened by: the vault's own spelling.
+		// (#195 r3: the lock is keyed by the directory's identity, so no realpath is taken at all.)
 		expect(String((caught as Error).message)).toBe(
-			`Audit writer lock held by PID ${process.ppid}. Only one process may write to the audit log. Lock file: ${join(realpathSync(join(tempDir, ".usertrust", "audit")), ".audit-writer.lock")}`,
+			`Audit writer lock held by PID ${process.ppid}. Only one process may write to the audit log. Lock file: ${lockPath()}`,
 		);
 	});
 
