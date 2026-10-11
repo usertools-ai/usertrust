@@ -20,7 +20,16 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import {
+	appendFile,
+	chmod,
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +39,8 @@ import { createUsertrustServer, type UsertrustServer } from "../../server/src/se
 import { runHook } from "./helpers/run-hook.js";
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
+/** A failpoint preload: the first state write under key-rejected/ is torn (helpers/torn-write.mjs). */
+const TORN_WRITE = join(import.meta.dirname, "helpers", "torn-write.mjs");
 const PRE = join(HOOKS, "pre-tool-use.mjs");
 const SESSION_START = join(HOOKS, "session-start.mjs");
 
@@ -217,6 +228,27 @@ describe("watch mode: a rejected key is a configuration failure the user is SHOW
 		expect(records.map((r) => r.detail !== undefined)).toEqual([true, true]);
 	}, 30_000);
 
+	it("the notice state never appears half-written: a write torn mid-way leaves no state file and no temp", async () => {
+		const url = await startStub();
+		const env = { ...baseEnv, UT_SERVER_URL: url, UT_CC_TORN_WRITE: "/key-rejected/" };
+		const session = newSession();
+		const torn = await runHook(PRE, call(session, 1), env, ["--import", TORN_WRITE]);
+		// The state could not be written: the call is still recorded and still shown.
+		expectProceeded(torn);
+		expect(String(hookJson(torn.stdout)?.systemMessage)).toContain("(401)");
+		// Nothing half-written under the state's name, and no temp left behind.
+		expect(await readdir(join(stateDir, "key-rejected"))).toEqual([]);
+		// The next call writes it whole.
+		const next = await runHook(PRE, call(session, 2), { ...baseEnv, UT_SERVER_URL: url });
+		expectProceeded(next);
+		const state = JSON.parse(await readFile(noticeState(session), "utf-8")) as Record<
+			string,
+			unknown
+		>;
+		expect(Date.parse(String(state.noticeAt))).not.toBeNaN();
+		expect(await readdir(join(stateDir, "key-rejected"))).toEqual([`${session}.json`]);
+	}, 30_000);
+
 	it("a 403 that says `unauthorized` takes the same path: a configuration failure, not a policy refusal", async () => {
 		const url = await startStub(403, { error: "unauthorized", reason: "key revoked" });
 		const result = await runHook(PRE, call(newSession(), 1), { ...baseEnv, UT_SERVER_URL: url });
@@ -289,12 +321,53 @@ describe("enforce mode still blocks on a rejected key", () => {
 			UT_CC_MODE: "enforce",
 			UT_SERVER_URL: url,
 		});
-		const json = hookJson(result.stdout) as {
-			hookSpecificOutput?: { permissionDecision?: string };
-		} | null;
-		const blocked = result.code === 2 || json?.hookSpecificOutput?.permissionDecision === "deny";
-		expect(blocked).toBe(true);
+		// Blocked as a failed authorization (exit 2), no longer denied as a policy refusal.
+		expect(result.code).toBe(2);
+		expect(result.stdout).toBe("");
+		expect(result.stderr).toContain("rejected this key (403)");
+		expect(await watchRecords()).toEqual([]);
 	}, 30_000);
+
+	it("the approved change: enforce + UT_FAIL_OPEN=1 + a 403 `unauthorized` PROCEEDS (exit 0) with the message, as a 401 does", async () => {
+		const url = await startStub(403, { error: "unauthorized", reason: "key revoked" });
+		const result = await runHook(PRE, call(newSession(), 1), {
+			...baseEnv,
+			UT_CC_MODE: "enforce",
+			UT_FAIL_OPEN: "1",
+			UT_SERVER_URL: url,
+		});
+		expect(result.code).toBe(0);
+		expect(hookJson(result.stdout)).toEqual({
+			systemMessage: expect.stringContaining("the server rejected this session's key (403)"),
+		});
+		expect(await watchRecords()).toMatchObject([
+			{ kind: "gap", mode: "enforce", cause: "key-rejected", status: 403 },
+		]);
+	}, 30_000);
+
+	for (const json of [
+		{ error: "policy_denied", reason: "rule pii" },
+		{ error: "forbidden", reason: "some other refusal" },
+		{ error: "Unauthorized", reason: "case differs" },
+	]) {
+		it(`enforce + UT_FAIL_OPEN=1 + a 403 ${json.error}: still a policy deny, no message, no key-rejected record`, async () => {
+			const url = await startStub(403, json);
+			const result = await runHook(PRE, call(newSession(), 1), {
+				...baseEnv,
+				UT_CC_MODE: "enforce",
+				UT_FAIL_OPEN: "1",
+				UT_SERVER_URL: url,
+			});
+			expect(result.code).toBe(0);
+			const out = hookJson(result.stdout) as {
+				systemMessage?: string;
+				hookSpecificOutput?: { permissionDecision?: string };
+			};
+			expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
+			expect(out.systemMessage).toBeUndefined();
+			expect(JSON.stringify(await watchRecords())).not.toContain("key-rejected");
+		}, 30_000);
+	}
 
 	it("with UT_FAIL_OPEN=1 the call proceeds unmetered, so the user is shown it", async () => {
 		const url = await startStub();
@@ -397,12 +470,17 @@ const otherGapLine = (at: string) =>
 		started: at,
 	});
 
+/** SessionStart's budget in hooks.json is 5 s: a start that takes longer is killed (exit 1). */
+const START_BUDGET_MS = 5_000;
+
 async function banner(env: Record<string, string> = {}) {
 	const startedAt = Date.now();
 	const result = await runHook(
 		SESSION_START,
 		{ hook_event_name: "SessionStart", source: "startup", session_id: newSession() },
 		{ ...baseEnv, ...env },
+		[],
+		{ timeoutMs: START_BUDGET_MS },
 	);
 	const tookMs = Date.now() - startedAt;
 	expect(result.code).toBe(0);
@@ -538,4 +616,108 @@ describe("SessionStart warns, locally, of calls the server rejected since the la
 		expect(shown).toBeLessThan(count);
 		expect(shown).toBeGreaterThan(Math.floor(SINCE_READ_BYTES / one.length) - 2);
 	}, 30_000);
+});
+
+/**
+ * A REAL pre-upgrade record: what master's pre-tool-use.mjs (before this change) wrote for a 401,
+ * captured by running that hook against a 401 stub, verbatim. No `cause`, no `phase`.
+ */
+const LEGACY_401 =
+	'{"at":"2026-10-11T22:15:26.982Z","started":"2026-10-11T22:15:26.582Z","kind":"gap","mode":"watch","session":"11111111-2222-4333-8444-555555555555","agent":"main","tool":"Bash","reason":"unexpected governance response 401"}';
+
+describe("an upgraded install warns of the rejections it already had", () => {
+	it("a mark-less state dir with pre-upgrade 401 gaps: the first start warns of them, and only then", async () => {
+		const legacyAt = (iso: string) =>
+			LEGACY_401.replace("2026-10-11T22:15:26.982Z", iso).replace("2026-10-11T22:15:26.582Z", iso);
+		await writeFile(
+			WATCH(),
+			`${[
+				legacyAt("2026-10-08T09:00:00.000Z"),
+				legacyAt("2026-10-09T09:00:00.000Z"),
+				legacyAt("2026-10-10T09:00:00.000Z"),
+				// Not a rejected key: a 503, another hook's 401 (it carries a phase), and a base-era
+				// 403 `unauthorized` refusal (a would_block, by that version's contract a policy answer).
+				otherGapLine("2026-10-07T09:00:00.000Z").replace(
+					"fetch failed",
+					"unexpected governance response 503",
+				),
+				JSON.stringify({
+					...JSON.parse(LEGACY_401),
+					phase: "stop",
+					at: "2026-10-01T00:00:00.000Z",
+				}),
+				JSON.stringify({
+					kind: "would_block",
+					status: 403,
+					error: "unauthorized",
+					reason: "x",
+					at: "2026-10-01T00:00:00.000Z",
+				}),
+			].join("\n")}\n`,
+		);
+		const first = await banner();
+		expect(
+			first.message.startsWith(
+				"usertrust: WARNING: 3 tool calls since 2026-10-08 were NOT metered",
+			),
+		).toBe(true);
+		// The mark moved past them only once they were reported.
+		const second = await banner();
+		expect(second.message.startsWith("usertrust: watch-only — nothing is blocked")).toBe(true);
+	}, 30_000);
+});
+
+describe("SessionStart's mark is read like watch.jsonl: non-blocking, a regular file, bounded", () => {
+	const markOf = () => join(stateDir, "key-rejected", "session-start.mark");
+	const quiet = async () => {
+		await writeFile(WATCH(), `${otherGapLine("2026-10-10T08:00:00.000Z")}\n`);
+		await mkdir(join(stateDir, "key-rejected"), { recursive: true });
+	};
+
+	it("a FIFO in the mark's place: the normal banner, never a hang", async () => {
+		if (process.platform === "win32") return;
+		await quiet();
+		expect(spawnSync("mkfifo", [markOf()]).status).toBe(0);
+		const { message, tookMs } = await banner();
+		expect(message.startsWith("usertrust: watch-only — nothing is blocked")).toBe(true);
+		expect(tookMs).toBeLessThan(START_BUDGET_MS);
+	}, 30_000);
+
+	it("a directory in the mark's place: the normal banner", async () => {
+		await quiet();
+		await mkdir(markOf());
+		const { message } = await banner();
+		expect(message.startsWith("usertrust: watch-only — nothing is blocked")).toBe(true);
+	}, 30_000);
+
+	it("an oversized mark is no mark: it is never parsed, so watch.jsonl is read from its start", async () => {
+		// A VALID mark, padded past any real mark's size, pointing past a rejected call: honoured,
+		// it would hide that call.
+		const line = `${rejectedLine("2026-10-09T08:00:00.000Z", 0)}\n`;
+		await writeFile(WATCH(), line);
+		await mkdir(join(stateDir, "key-rejected"), { recursive: true });
+		const info = await stat(WATCH());
+		await writeFile(
+			markOf(),
+			JSON.stringify({
+				v: 1,
+				dev: String(info.dev),
+				ino: String(info.ino),
+				offset: info.size,
+				pad: "x".repeat(64 * 1024),
+			}),
+		);
+		const { message } = await banner();
+		expect(
+			message.startsWith("usertrust: WARNING: 1 tool call since 2026-10-09 was NOT metered"),
+		).toBe(true);
+	}, 30_000);
+
+	it("a huge mark: the normal banner, fast", async () => {
+		await quiet();
+		await writeFile(markOf(), "x".repeat(64 * 1024 * 1024));
+		const { message, tookMs } = await banner();
+		expect(message.startsWith("usertrust: watch-only — nothing is blocked")).toBe(true);
+		expect(tookMs).toBeLessThan(3_000);
+	}, 60_000);
 });

@@ -727,7 +727,11 @@ is a configuration problem, not an outage, and every call it touches goes unmete
   the last session start stopped reading (`key-rejected/session-start.mark` in the state dir);
   a file that is not the one it read last (deleted and written again) is read from its start.
   With more than the bound since then, the count reads `at least`. A file it cannot read is the
-  normal banner.
+  normal banner, and so is a mark that is not a small regular file (it is then ignored, and
+  `watch.jsonl` read from its start). It also counts the gaps earlier releases wrote for a 401,
+  `"reason":"unexpected governance response 401"` with no `cause`, so the first session start
+  after upgrading warns of rejections the install already had. A 401 only: those releases
+  recorded a 403 as a policy refusal (`would_block`), which stays one.
 
 **To fix it**, give the plugin the key the server holds: `export UT_SERVER_KEY=...` (or fix
 the config file's `key`) and start a new session, as a session keeps the key it started with;

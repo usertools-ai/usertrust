@@ -23,6 +23,8 @@ npm, and its version is its own: the `usertrust` packages and their
   - SessionStart warns, before the mode line, of the rejected calls recorded since the last
     session start, read locally from the last 1 MiB of `watch.jsonl` (`WARNING: 1,946 tool
     calls since 2026-10-09 were NOT metered …`). A file it cannot read is the normal banner.
+    It counts the `unexpected governance response 401` gaps earlier releases wrote too, so the
+    first start after upgrading warns of the losses an install already had.
   - Unchanged: enforce mode blocks a rejected key (exit 2) unless `UT_FAIL_OPEN=1`; a 402, a
     403 `policy_denied` (and any 403 not `unauthorized`) are `would_block`; timeouts go through
     the breaker as before. A 403 `unauthorized` in enforce mode is now blocked as a failed

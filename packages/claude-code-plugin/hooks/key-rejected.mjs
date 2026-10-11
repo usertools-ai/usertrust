@@ -29,11 +29,12 @@
 // Deliberately NOT done: skipping the network after a rejection. A key fixed on the SERVER (its
 // hash added back) cannot be seen without asking, so any skip strands a fixed key for its whole
 // window, and asking costs one fast round trip: a rejection is an answer, never a timeout.
-import { closeSync, constants, fstatSync, openSync, readFileSync, readSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { settingName, settings } from "./config.mjs";
 import {
+	publishExclusive,
 	sanitize,
 	sanitizeReason,
 	stateRoot,
@@ -146,7 +147,10 @@ export async function noteRejection(sessionId) {
 	});
 	try {
 		await mkdir(noticeDir(), { recursive: true, mode: 0o700 });
-		await writeFile(path, fresh, { flag: "wx", mode: 0o600 });
+		// Whole under a temp name, then link()ed to its name, which never replaces one (lib.mjs
+		// `publishExclusive`): no reader ever finds the state half-written, and only one call of
+		// a session wins the create. The temp goes either way.
+		await publishExclusive(path, fresh, { mode: 0o600 });
 		return { first: true, notify: true };
 	} catch (err) {
 		if (err?.code !== "EEXIST") return { first: true, notify: true };
@@ -180,16 +184,62 @@ export async function noteRejection(sessionId) {
 // ---------------------------------------------------------------------------------------------
 // SessionStart: local only.
 
+/**
+ * What PreToolUse wrote for a 401 before rejected keys had a cause of their own: a `gap` with this
+ * reason, no `cause` and no `phase` (other hooks' gaps carry one). Counted too, so the first start
+ * after an upgrade warns of the rejections the install already had, and the mark never moves past
+ * them unreported. 401 only: before, every 403 was a policy refusal by contract (a `would_block`,
+ * never a gap), and a `would_block` was already a visible "would have blocked" record, not a
+ * silent loss; reading a base-era refusal as a rejected key would rewrite what that version
+ * decided.
+ */
+const LEGACY_REASON = "unexpected governance response 401";
+
+/** Whether a watch record is a call the server rejected for its key, in either shape. */
+function isRejectedCall(record) {
+	if (record?.kind !== "gap") return false;
+	if (record.cause === KEY_REJECTED) return true;
+	return (
+		record.cause === undefined && record.phase === undefined && record.reason === LEGACY_REASON
+	);
+}
+
 /** SessionStart's mark: where watch.jsonl stood at the last session start. */
 const markPath = () => join(noticeDir(), "session-start.mark");
 
-/** The mark, or null when there is none or it is unusable. */
+/** The most a mark may be: a real one is under 100 bytes. A larger file is no mark. */
+const MAX_MARK_BYTES = 4096;
+
+/**
+ * The mark, or null when there is none or it is unusable. Read as watch.jsonl is
+ * (`readSince`): opened non-blocking, read only when it is a regular file, and only when it is
+ * no larger than MAX_MARK_BYTES, so a FIFO, a directory or a huge file in its place can neither
+ * hang the start nor slow it. Null reads watch.jsonl from its start: a repeated warning, never a
+ * lost one.
+ */
 function readMark() {
+	let fd;
 	try {
-		const mark = JSON.parse(readFileSync(markPath(), "utf-8"));
+		fd = openSync(markPath(), constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+	} catch {
+		return null;
+	}
+	try {
+		const info = fstatSync(fd);
+		if (!info.isFile() || info.size > MAX_MARK_BYTES) return null;
+		const buffer = Buffer.alloc(info.size);
+		let read = 0;
+		while (read < buffer.length) {
+			const n = readSync(fd, buffer, read, buffer.length - read, read);
+			if (n === 0) break;
+			read += n;
+		}
+		const mark = JSON.parse(buffer.subarray(0, read).toString("utf-8"));
 		return Number.isSafeInteger(mark?.offset) && mark.offset >= 0 ? mark : null;
 	} catch {
 		return null;
+	} finally {
+		closeSync(fd);
 	}
 }
 
@@ -265,14 +315,14 @@ function readSince() {
 		let firstMs = Number.POSITIVE_INFINITY;
 		if (end > start) {
 			for (const line of bytes.subarray(start, end).toString("utf-8").split("\n")) {
-				if (!line.includes(KEY_REJECTED)) continue;
+				if (!line.includes(KEY_REJECTED) && !line.includes(LEGACY_REASON)) continue;
 				let record;
 				try {
 					record = JSON.parse(line);
 				} catch {
 					continue;
 				}
-				if (record?.kind !== "gap" || record.cause !== KEY_REJECTED) continue;
+				if (!isRejectedCall(record)) continue;
 				count += 1;
 				const at = Date.parse(record.started ?? record.at);
 				if (at < firstMs) firstMs = at;
