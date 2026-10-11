@@ -9,7 +9,8 @@ import {
 import type { LadderStatus } from "../lib/wire";
 
 /**
- * §6.1 — the verdict masthead: Khand display voice, the verdict word large,
+ * §6.1 — the verdict masthead: the display voice (on this route the system
+ * stack `--verify-sans`, see brand.css; no brand font draws a verdict), the verdict word large,
  * uppercase, tracked, with the ladder rendered as a three-step indicator.
  *
  * Three design rules from §6 are load-bearing here, not stylistic:

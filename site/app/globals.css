@@ -2,7 +2,88 @@
 @import "fumadocs-ui/css/neutral.css";
 @import "fumadocs-ui/css/preset.css";
 
-/* Fonts loaded via next/font/local in layout.tsx — CSS variables injected on <html> */
+/*
+ * Fonts load at runtime from the brand kit, https://usertrust.ai/kit/, which
+ * serves them with `access-control-allow-origin: *`. No font file lives in this
+ * public repository: brand assets stay out of it, and
+ * site/scripts/no-font-files.test.mts fails if any font file is tracked or any
+ * source names a font URL that is not the kit's. The same faces as
+ * app/r/brand.css, the receipt route's chrome.
+ *
+ * Usertools Sans 400/500/700 (Bold covers 600-700, font-semibold), JetBrains
+ * Mono 400/500/700, and the display voice, Khand 600/700.
+ *
+ * `font-display: swap` and the system stacks in --font-sans / --font-mono
+ * keep the page readable if the kit is unreachable. CSS cannot pin a font's
+ * bytes the way the lattice script is pinned; the server-rendered share cards
+ * pin theirs (app/r/lib/kit-fonts.ts).
+ */
+@font-face {
+	font-family: "Usertools Sans";
+	src: url("https://usertrust.ai/kit/fonts/UsertoolsSans-Regular.woff2") format("woff2");
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: "Usertools Sans";
+	src: url("https://usertrust.ai/kit/fonts/UsertoolsSans-Medium.woff2") format("woff2");
+	font-weight: 500;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: "Usertools Sans";
+	src: url("https://usertrust.ai/kit/fonts/UsertoolsSans-Bold.woff2") format("woff2");
+	font-weight: 600 700;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: "JetBrains Mono";
+	src: url("https://usertrust.ai/kit/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: "JetBrains Mono";
+	src: url("https://usertrust.ai/kit/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+	font-weight: 500;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: "JetBrains Mono";
+	src: url("https://usertrust.ai/kit/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+	font-weight: 700;
+	font-style: normal;
+	font-display: swap;
+}
+/* Display voice — Khand, lowercase verdicts, every headline on the page.
+   Deliberately not TigerBeetle's Big Shoulders. */
+@font-face {
+	font-family: "Khand";
+	src: url("https://usertrust.ai/kit/fonts/Khand-SemiBold.woff2") format("woff2");
+	font-weight: 600;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: "Khand";
+	src: url("https://usertrust.ai/kit/fonts/Khand-Bold.woff2") format("woff2");
+	font-weight: 700;
+	font-style: normal;
+	font-display: swap;
+}
+
+/* The family tokens the components read (font utilities below, SVG
+   fontFamily attributes, and the exhibit-d canvas via getComputedStyle). */
+:root {
+	--font-usertools: "Usertools Sans";
+	--font-jetbrains: "JetBrains Mono";
+	--font-khand: "Khand";
+}
 
 @theme {
 	--color-brand-bg: #0a0a1a;

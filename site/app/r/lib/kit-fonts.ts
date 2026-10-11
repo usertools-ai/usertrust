@@ -18,7 +18,7 @@ import decompress from "wawoff2/decompress";
  */
 export interface PinnedFont {
 	name: string;
-	weight: 500 | 700;
+	weight: 500 | 600 | 700;
 	url: string;
 	integrity: string;
 }
@@ -27,7 +27,7 @@ export interface PinnedFont {
 export interface CardFont {
 	name: string;
 	data: ArrayBuffer;
-	weight: 500 | 700;
+	weight: 500 | 600 | 700;
 	style: "normal";
 }
 
@@ -43,6 +43,26 @@ export const KIT_FONTS: readonly PinnedFont[] = [
 		weight: 500,
 		url: "https://usertrust.ai/kit/fonts/UsertoolsSans-Medium.woff2",
 		integrity: "sha384-z/JCyQWuIoV/SEkZg8aC0AIH1faMb3TiUwkJculoPF5JlGjx8PJ6LNprEGrO5ECG",
+	},
+];
+
+/**
+ * The site's own share card (`app/og/route.tsx`): the hero's display voice,
+ * Khand, from the kit, pinned the same way. Its own list, loaded separately:
+ * a Khand miss must never cost the receipt card its Usertools Sans.
+ */
+export const OG_FONTS: readonly PinnedFont[] = [
+	{
+		name: "Khand",
+		weight: 700,
+		url: "https://usertrust.ai/kit/fonts/Khand-Bold.woff2",
+		integrity: "sha384-nZskZG/VR3PT3RFAYKhrfRrhB2EZ8wdLZSG9fC0/ATx5fjUXG0ag1h08NnL3Gp6E",
+	},
+	{
+		name: "Khand",
+		weight: 600,
+		url: "https://usertrust.ai/kit/fonts/Khand-SemiBold.woff2",
+		integrity: "sha384-Yv+eMKKuXOTAjSK4jpAyv5geD0i+uBFje5k53eXa0Z+e02lFuO8iA/rD0Lzqr6pp",
 	},
 ];
 
@@ -95,16 +115,23 @@ export async function loadPinnedFonts(
 	}
 }
 
-let verified: Promise<CardFont[] | undefined> | undefined;
-
 /**
- * The pinned fonts, loaded once per server instance once they verify. A
- * failure is not cached: the next card tries the kit again.
+ * A getter for one pinned set, loaded once per server instance once it
+ * verifies. A failure is not cached: the next card tries the kit again.
  */
-export function getKitFonts(): Promise<CardFont[] | undefined> {
-	verified ??= loadPinnedFonts().then((fonts) => {
-		if (fonts === undefined) verified = undefined;
-		return fonts;
-	});
-	return verified;
+function cachedPinnedFonts(specs: readonly PinnedFont[]): () => Promise<CardFont[] | undefined> {
+	let verified: Promise<CardFont[] | undefined> | undefined;
+	return () => {
+		verified ??= loadPinnedFonts(specs).then((fonts) => {
+			if (fonts === undefined) verified = undefined;
+			return fonts;
+		});
+		return verified;
+	};
 }
+
+/** The receipt share card's fonts: `KIT_FONTS`. */
+export const getKitFonts: () => Promise<CardFont[] | undefined> = cachedPinnedFonts(KIT_FONTS);
+
+/** The site share card's fonts: `OG_FONTS`. */
+export const getOgFonts: () => Promise<CardFont[] | undefined> = cachedPinnedFonts(OG_FONTS);

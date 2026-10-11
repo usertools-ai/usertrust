@@ -12,7 +12,7 @@ import test from "node:test";
 import compress from "wawoff2/compress";
 // @ts-expect-error -- wawoff2 ships no type declarations
 import decompress from "wawoff2/decompress";
-import { KIT_FONTS, loadPinnedFonts, type PinnedFont } from "./kit-fonts";
+import { KIT_FONTS, loadPinnedFonts, OG_FONTS, type PinnedFont } from "./kit-fonts";
 
 const require = createRequire(import.meta.url);
 const NOTO_TTF = readFileSync(
@@ -54,6 +54,29 @@ test("the pins: Usertools Sans 700 and 500 from the kit, each with its sha384", 
 			],
 		],
 	);
+});
+
+test("the /og pins: Khand 700 and 600 from the kit, its own list, apart from the receipt card's", () => {
+	// The sha384 of the woff2 files this repo self-hosted until the kit took them over.
+	assert.deepEqual(
+		OG_FONTS.map((font) => [font.name, font.weight, font.url, font.integrity]),
+		[
+			[
+				"Khand",
+				700,
+				"https://usertrust.ai/kit/fonts/Khand-Bold.woff2",
+				"sha384-nZskZG/VR3PT3RFAYKhrfRrhB2EZ8wdLZSG9fC0/ATx5fjUXG0ag1h08NnL3Gp6E",
+			],
+			[
+				"Khand",
+				600,
+				"https://usertrust.ai/kit/fonts/Khand-SemiBold.woff2",
+				"sha384-Yv+eMKKuXOTAjSK4jpAyv5geD0i+uBFje5k53eXa0Z+e02lFuO8iA/rD0Lzqr6pp",
+			],
+		],
+	);
+	// All-or-nothing per list: a Khand miss must not cost the receipt card its Usertools Sans.
+	assert.ok(KIT_FONTS.every((font) => font.name !== "Khand"));
 });
 
 test("bytes that match their pin are decoded to a TTF the renderer can read", async () => {
