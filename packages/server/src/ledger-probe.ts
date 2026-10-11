@@ -50,25 +50,35 @@ export interface LedgerProbeOutcome {
 export type LedgerProbeResult = { ok: true } | { ok: false; message: string };
 
 /**
- * The ledger a tenant's governor would use: the `tigerbeetle` section of its usertrust
- * config, resolved as `createGovernor` resolves it: `tenant.configPath`, else the
- * vault's `usertrust.config.json`, else the core's defaults; parsed by the core's own
- * schema (`defineConfig`).
+ * Stands in for the core's DEFAULT_BUDGET, which is not exported, where createGovernor
+ * supplies it: when there is NO config file and the tenant names no budget. Any positive
+ * integer parses alike there, and only the `tigerbeetle` section is read.
+ */
+const ABSENT_FILE_BUDGET = 1;
+
+/**
+ * The ledger a tenant's governor would use, resolved exactly as `createGovernor`
+ * resolves its config: `tenant.configPath`, else the vault's `usertrust.config.json`.
+ * A FILE is parsed with the tenant's budget override and nothing else: createGovernor
+ * gives a file no default budget, so a file without one, for a tenant with none, fails
+ * here at start rather than at that tenant's first request. With NO file, the core's
+ * defaults apply. Parsed by the core's own schema (`defineConfig`).
  */
 async function tenantLedger(config: ServerConfig, tenant: TenantConfig): Promise<LedgerTarget> {
 	const vaultBase = tenantVaultBase(config, tenant);
 	const configPath = tenant.configPath ?? join(vaultBase, VAULT_DIR, "usertrust.config.json");
 	try {
-		const raw: Record<string, unknown> = existsSync(configPath)
-			? (JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>)
-			: {};
-		// `budget` is required by the schema and irrelevant to the ledger address; the
-		// placeholder only stands in where createGovernor would supply its default.
-		const { tigerbeetle } = defineConfig({
-			budget: 1,
-			...raw,
-			...(tenant.budget !== undefined ? { budget: tenant.budget } : {}),
-		} as TrustConfig);
+		let candidate: Record<string, unknown>;
+		if (existsSync(configPath)) {
+			const raw = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
+			candidate = { ...raw, ...(tenant.budget !== undefined ? { budget: tenant.budget } : {}) };
+			if (candidate.budget === undefined) {
+				throw new Error("it has no budget, and the server config gives the tenant none");
+			}
+		} else {
+			candidate = { budget: tenant.budget ?? ABSENT_FILE_BUDGET };
+		}
+		const { tigerbeetle } = defineConfig(candidate as TrustConfig);
 		return { clusterId: tigerbeetle.clusterId, addresses: tigerbeetle.addresses };
 	} catch (err) {
 		throw new Error(

@@ -178,6 +178,17 @@ describe("resolveLedgerTargets", () => {
 		]);
 	});
 
+	it("a config file without a budget, and no tenant budget, fails as createGovernor would", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-probe-"));
+		// createGovernor supplies its default budget only when there is NO file.
+		await writeVaultConfig(join(stateDir, "a", ".usertrust"), {
+			tigerbeetle: { addresses: ["127.0.0.1:4001"] },
+		});
+		await expect(resolveLedgerTargets(serverConfig(stateDir))).rejects.toThrow(
+			/tenant a: cannot read its usertrust config \(.*\): it has no budget/,
+		);
+	});
+
 	it("an unreadable tenant config fails naming the tenant", async () => {
 		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-probe-"));
 		const dir = join(stateDir, "a", ".usertrust");

@@ -50,21 +50,27 @@ async function writeServerConfig(opts: {
 	ledgerPort: number;
 	/** The tenant's ledger address as written, when not `127.0.0.1:<ledgerPort>`. */
 	address?: string;
+	/** "absent": no vault config file; "no-budget": a file without `budget`. */
+	vaultConfig?: "absent" | "no-budget";
+	/** The tenant's own `budget` in the server config. */
+	tenantBudget?: number;
 }): Promise<string> {
 	const dir = await mkdtemp(join(tmpdir(), "utsrv-cli-"));
 	const stateDir = join(dir, "state");
 	const vault = join(stateDir, "acme", ".usertrust");
 	await mkdir(vault, { recursive: true });
-	await writeFile(
-		join(vault, "usertrust.config.json"),
-		JSON.stringify({
-			budget: 50_000,
-			tigerbeetle: {
-				addresses: [opts.address ?? `127.0.0.1:${opts.ledgerPort}`],
-				clusterId: 0,
-			},
-		}),
-	);
+	if (opts.vaultConfig !== "absent") {
+		await writeFile(
+			join(vault, "usertrust.config.json"),
+			JSON.stringify({
+				...(opts.vaultConfig === "no-budget" ? {} : { budget: 50_000 }),
+				tigerbeetle: {
+					addresses: [opts.address ?? `127.0.0.1:${opts.ledgerPort}`],
+					clusterId: 0,
+				},
+			}),
+		);
+	}
 	const path = join(dir, "usertrust-server.config.json");
 	await writeFile(
 		path,
@@ -74,7 +80,13 @@ async function writeServerConfig(opts: {
 			stateDir,
 			dryRun: opts.dryRun,
 			ledgerProbeTimeoutMs: PROBE_TIMEOUT_MS,
-			tenants: [{ id: "acme", keyHash: hashKey("ut_cli_key") }],
+			tenants: [
+				{
+					id: "acme",
+					keyHash: hashKey("ut_cli_key"),
+					...(opts.tenantBudget !== undefined ? { budget: opts.tenantBudget } : {}),
+				},
+			],
 		}),
 	);
 	return path;
@@ -95,6 +107,24 @@ function startCli(configPath: string): { proc: ChildProcess; stderr: () => strin
 	});
 	child = proc;
 	return { proc, stderr: () => stderr };
+}
+
+/** Runs the CLI until it exits or listens, at most SLACK_MS; what it printed, and how it ended. */
+async function runUntilSettled(
+	configPath: string,
+): Promise<{ code: number | null; listened: boolean; stderr: string }> {
+	const { proc, stderr } = startCli(configPath);
+	return new Promise((resolve) => {
+		const settle = (code: number | null) => {
+			clearTimeout(timer);
+			resolve({ code, listened: stderr().includes("listening on"), stderr: stderr() });
+		};
+		const timer = setTimeout(() => settle(null), SLACK_MS);
+		proc.stderr?.on("data", () => {
+			if (stderr().includes("listening on")) settle(null);
+		});
+		proc.once("exit", (code) => settle(code));
+	});
 }
 
 describe("usertrust-server CLI: ledger probe at start", () => {
@@ -154,6 +184,54 @@ describe("usertrust-server CLI: ledger probe at start", () => {
 		expect(stderr()).not.toContain("\x1b");
 		expect(stderr()).not.toContain("\u009b");
 		expect(stderr()).not.toContain("[2J");
+	}, 40_000);
+
+	it("refuses at start when a tenant's config file has no budget and the server gives none", async () => {
+		const port = await freePort();
+		const ledgerPort = await freePort();
+		const configPath = await writeServerConfig({
+			dryRun: false,
+			port,
+			ledgerPort,
+			vaultConfig: "no-budget",
+		});
+		const { code, listened, stderr } = await runUntilSettled(configPath);
+		expect(listened).toBe(false);
+		expect(code).toBe(1);
+		// createGovernor gives a config FILE no default budget: this tenant's first request
+		// would fail. Named at start, not discovered by the probe's timeout.
+		expect(stderr).toContain("tenant acme: cannot read its usertrust config");
+		expect(stderr).toContain("has no budget");
+		expect(stderr).not.toContain("no TigerBeetle answered");
+	}, 40_000);
+
+	it("control: the same file with a tenant budget gets past the config, to the ledger", async () => {
+		const configPath = await writeServerConfig({
+			dryRun: false,
+			port: await freePort(),
+			ledgerPort: await freePort(),
+			vaultConfig: "no-budget",
+			tenantBudget: 50_000,
+		});
+		const { stderr } = await runUntilSettled(configPath);
+		expect(stderr).not.toContain("cannot read its usertrust config");
+		// It reached the ledger probe: refused there (no TigerBeetle on that port, or none
+		// usable on this host), never for its budget.
+		expect(stderr).toContain("TigerBeetle");
+	}, 40_000);
+
+	it("control: an absent config file still gets the default budget", async () => {
+		const configPath = await writeServerConfig({
+			dryRun: false,
+			port: await freePort(),
+			ledgerPort: await freePort(),
+			vaultConfig: "absent",
+		});
+		const { listened, stderr } = await runUntilSettled(configPath);
+		expect(stderr).not.toContain("cannot read its usertrust config");
+		// The default ledger address (127.0.0.1:3001): refused there, or started if a
+		// TigerBeetle happens to listen on it.
+		expect(listened || stderr.includes("TigerBeetle")).toBe(true);
 	}, 40_000);
 
 	it("a dryRun server does not probe: it starts and answers /v1/health", async () => {
