@@ -85,12 +85,20 @@ describe("domain errors", () => {
 		expect(err.cause_message).toBe("connection refused");
 		expect(err).toBeInstanceOf(Error);
 		expect(err.hint).toBe(
-			'Start TigerBeetle with "npx usertrust tb start" or use { dryRun: true } to skip the ledger.',
+			"Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=127.0.0.1:3001) or use { dryRun: true } to skip the ledger.",
 		);
+		expect(err.hint).not.toContain("usertrust tb start");
 		expect(err.docsUrl).toBe("https://usertrust.ai/docs/errors/ledger-unavailable");
 		expect(err.message).toContain("Ledger unavailable: connection refused");
 		expect(err.message).toContain("\n\n  Hint: ");
 		expect(err.message).toContain("\n  Docs: https://usertrust.ai/docs/errors/ledger-unavailable");
+	});
+
+	it("LedgerUnavailableError's hint names the configured ledger address", () => {
+		const err = new LedgerUnavailableError("connection refused", "10.0.0.5:3005");
+		expect(err.hint).toContain("tigerbeetle start --addresses=10.0.0.5:3005)");
+		expect(err.message).toContain("--addresses=10.0.0.5:3005");
+		expect(err.hint).not.toContain("\n");
 	});
 
 	it("AuditDegradedError exists", () => {

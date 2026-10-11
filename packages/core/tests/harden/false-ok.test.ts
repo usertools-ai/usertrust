@@ -279,6 +279,7 @@ describe("false OK — a documented count that stops matching reality", () => {
 			fifteen: 15,
 			sixteen: 16,
 			seventeen: 17,
+			eighteen: 18,
 		};
 		const declaredCount = WORDS[declared as string];
 		expect(declaredCount, `unrecognised number word "${declared}"`).toBeDefined();

@@ -3,7 +3,9 @@
 // Copyright 2026 Usertools, Inc.
 
 import { loadServerConfig } from "../config.js";
+import { probeLedger } from "../ledger-probe.js";
 import { createUsertrustServer } from "../server.js";
+import { scrubForStderr } from "./scrub.js";
 
 function argValue(flag: string): string | undefined {
 	const index = process.argv.indexOf(flag);
@@ -15,9 +17,11 @@ async function main(): Promise<void> {
 	const config = await loadServerConfig(configPath);
 	const portOverride = argValue("--port");
 	if (portOverride) config.port = Number.parseInt(portOverride, 10);
+	// Before anything binds: an unusable ledger would otherwise crash or hang the first request.
+	await probeLedger(config);
 	const server = createUsertrustServer({ config });
 	const { port } = await server.listen();
-	process.stderr.write(`usertrust-server listening on ${config.host}:${port}\n`);
+	process.stderr.write(`usertrust-server listening on ${scrubForStderr(config.host)}:${port}\n`);
 	const shutdown = async (): Promise<void> => {
 		process.stderr.write("usertrust-server shutting down — voiding pending holds\n");
 		await server.close();
@@ -28,8 +32,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-	process.stderr.write(
-		`usertrust-server failed to start: ${err instanceof Error ? err.message : String(err)}\n`,
-	);
+	// The message can carry configured values (a ledger address, a path) and a probe child's
+	// stderr: sanitized here, at the terminal, while probeLedger's own Error keeps them raw.
+	const message = scrubForStderr(err instanceof Error ? err.message : String(err));
+	process.stderr.write(`usertrust-server failed to start: ${message}\n`);
 	process.exit(1);
 });

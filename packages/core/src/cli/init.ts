@@ -14,13 +14,19 @@ import { join } from "node:path";
 import * as clack from "@clack/prompts";
 import type { ModelRates } from "../ledger/pricing.js";
 import { modelsForProvider, PRICING_TABLE, PRICING_TABLE_VERSION } from "../ledger/pricing.js";
-import { VAULT_DIR } from "../shared/constants.js";
+import { DEFAULT_BUDGET, VAULT_DIR } from "../shared/constants.js";
+import { scrubForTerminal } from "./target.js";
 import { detectProvider, maskKey, validateKey } from "./validate-key.js";
 
 export interface CliOptions {
 	json?: boolean;
 	skipVerify?: boolean;
 	reconfigure?: boolean;
+	/**
+	 * False when nobody can answer a prompt (stdin is not a terminal): init then writes
+	 * the defaults the --json path writes, asking nothing. Unset means interactive.
+	 */
+	interactive?: boolean;
 }
 
 const ENV_VAR_MAP: Record<string, string> = {
@@ -114,26 +120,40 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		return;
 	}
 
-	// ── Non-interactive (--json) mode ──
-	if (json) {
+	// ── Non-interactive mode: --json, or no terminal to prompt on ──
+	if (json || opts?.interactive === false) {
+		if (!json && existsSync(vaultPath)) {
+			// --reconfigure with nobody to ask: writing the defaults would overwrite the vault's config.
+			throw new Error(
+				`--reconfigure asks what to change, and stdin is not a terminal. Run it in a terminal to reconfigure ${vaultPath}.`,
+			);
+		}
 		createVault(vaultPath, {
-			budget: 50_000,
+			budget: DEFAULT_BUDGET,
 			providers: [],
 			pricing: "recommended",
 			keys: {},
 		});
-		console.log(
-			JSON.stringify({
-				command: "init",
-				success: true,
-				data: {
-					path: vaultPath,
-					directories: [...SUBDIRS],
-					config: "usertrust.config.json",
-					policy: "policies/default.yml",
-				},
-			}),
-		);
+		if (json) {
+			console.log(
+				JSON.stringify({
+					command: "init",
+					success: true,
+					data: {
+						path: vaultPath,
+						directories: [...SUBDIRS],
+						config: "usertrust.config.json",
+						policy: "policies/default.yml",
+					},
+				}),
+			);
+		} else {
+			console.log(`Vault created at ${scrubForTerminal(vaultPath)}`);
+			console.log(
+				`stdin is not a terminal, so nothing was asked: budget ${DEFAULT_BUDGET} usertokens, recommended rates, no API keys.`,
+			);
+			console.log('Run "usertrust init --reconfigure" in a terminal to change them.');
+		}
 		return;
 	}
 

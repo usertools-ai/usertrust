@@ -18,3 +18,5 @@ export const DEFAULT_HOLD_TTL_MS = 5 * 60 * 1000; // 5 minutes
  */
 export const LEDGER_HOLD_TIMEOUT_MS = 5 * 60 * 1000;
 export const DEFAULT_BUDGET = 50_000;
+/** Where a governor looks for TigerBeetle when its config names no `tigerbeetle.addresses`. */
+export const DEFAULT_TIGERBEETLE_ADDRESS = "127.0.0.1:3001";
