@@ -22,6 +22,7 @@ const COMMANDS = [
 	"skill",
 	"ui",
 	"audit",
+	"report",
 ] as const;
 
 const argv = process.argv.slice(2);
@@ -153,6 +154,12 @@ switch (command) {
 		await import("./audit.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
 	}
+	case "report": {
+		// Forwarded verbatim minus the global --json: report.ts owns which of the rest are flags and which are values.
+		const rest = argv.slice(argv.indexOf("report") + 1).filter((a) => a !== JSON_FLAG);
+		await import("./report.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		break;
+	}
 	default: {
 		if (command && !command.startsWith("-")) {
 			const suggestion = suggestCommand(command);
@@ -181,6 +188,7 @@ Commands:
   skill         Verify skill manifests
   ui            Open the visual ledger (local web UI)
   audit         Repair a torn audit-log tail (quarantine-tail [--dry-run])
+  report        Weekly spend report from the vault (report --week --end <ISO instant>)
 
 Options:
   --json     Output machine-readable JSON`);
