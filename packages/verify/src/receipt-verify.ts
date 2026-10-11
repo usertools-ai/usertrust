@@ -3083,38 +3083,83 @@ function digestAt(object: JsonObject, key: string): string | null {
 }
 
 /**
- * §4a (v0.9.6): the one proof node a receipt can rebuild from its own signed
- * values, or `null` where there is none. Beyond its own leaf it knows two raw
- * leaves: a non-genesis segment's leaf 0, the chain link (`previousSegmentRoot`),
- * and — by the hash chain — the leaf before its own when that is an event
- * (`event.previousHash`). So at an ODD leaf the level-0 sibling is that previous
- * leaf, and at leaf 2 of a non-genesis segment the level-1 sibling is the node
- * over leaves 0 and 1 (sibling 0 when level 0 promotes leaf 2, at treeSize 3).
- * Every other sibling covers a leaf the receipt does not carry. `hash` is
- * `null` when an operand is not a digest: the node is still owed, and nothing
- * can equal it.
+ * §4a (v0.9.6): a segment's KNOWN leaves — raw leaf data by tree index, held
+ * from signed values. Besides its own leaf a receipt knows a non-genesis
+ * segment's leaf 0, the chain link (`previousSegmentRoot`), and — by the hash
+ * chain — the leaf before its own when that is an event (`event.previousHash`).
+ * A served successor adds a THIRD: its signed `segmentStartPreviousHash` IS the
+ * segment's final leaf, `treeSize − 1`. `null` marks a known leaf whose operand
+ * is not a digest: a node over it is still owed, and nothing can equal it.
  */
-function recomputableNode(
+type KnownLeaves = ReadonlyMap<number, string | null>;
+
+function receiptKnownLeaves(
+	leafIndex: number,
+	offset: 0 | 1,
+	checkpoint: JsonObject,
+	event: JsonObject,
+): Map<number, string | null> {
+	const known = new Map<number, string | null>();
+	if (offset === 1) known.set(0, digestAt(checkpoint, "previousSegmentRoot"));
+	if (leafIndex - 1 >= offset) known.set(leafIndex - 1, digestAt(event, "previousHash"));
+	return known;
+}
+
+/**
+ * The node at `level`/`index` of a `treeSize`-leaf tree when EVERY leaf under it
+ * is known, else `undefined`. Odd nodes are promoted, not duplicated (the
+ * Merkle rule), so a node whose right child starts past the tree IS its left.
+ */
+function knownNode(
+	treeSize: number,
+	known: KnownLeaves,
+	level: number,
+	index: number,
+): string | null | undefined {
+	const first = index * 2 ** level;
+	for (let leaf = first; leaf < Math.min(first + 2 ** level, treeSize); leaf += 1) {
+		if (!known.has(leaf)) return undefined;
+	}
+	if (level === 0) {
+		const raw = known.get(index) ?? null;
+		return raw === null ? null : hashLeaf(raw);
+	}
+	const left = knownNode(treeSize, known, level - 1, 2 * index);
+	if (first + 2 ** (level - 1) >= treeSize) return left;
+	const right = knownNode(treeSize, known, level - 1, 2 * index + 1);
+	return left && right ? hashInternal(left, right) : null;
+}
+
+/**
+ * The ONE known-leaf rule: every proof sibling of `leafIndex` that covers only
+ * known leaves — at every level, promoted positions included — is recomputed
+ * and must be the sibling the proof carries. Returns the first sibling position
+ * that is not (fail closed: a missing sibling or a `null` node fails), or `null`.
+ */
+function knownSiblingMismatch(
+	inclusion: JsonObject,
 	leafIndex: number,
 	treeSize: number,
-	offset: 0 | 1,
-	link: string | null,
-	previous: string | null,
-): { readonly index: number; readonly hash: string | null; readonly from: string } | null {
-	const leaf = (raw: string | null): string | null => (raw === null ? null : hashLeaf(raw));
-	if (leafIndex % 2 === 1) {
-		return leafIndex - 1 >= offset
-			? { index: 0, hash: leaf(previous), from: "the predecessor event's leaf" }
-			: { index: 0, hash: leaf(link), from: "the chain link's leaf" };
+	known: KnownLeaves,
+): number | null {
+	const siblings = arrayAt(inclusion, "siblings");
+	let position = 0;
+	for (let level = 0, index = leafIndex, size = treeSize; size > 1; level += 1) {
+		if (index % 2 === 1 || index + 1 < size) {
+			const node = knownNode(treeSize, known, level, index % 2 === 1 ? index - 1 : index + 1);
+			const sibling = siblings?.[position];
+			if (
+				node !== undefined &&
+				(node === null || !isJsonObject(sibling) || stringAt(sibling, "hash") !== node)
+			) {
+				return position;
+			}
+			position += 1;
+		}
+		index = Math.floor(index / 2);
+		size = Math.ceil(size / 2);
 	}
-	if (leafIndex !== 2 || offset !== 1) return null;
-	const left = leaf(link);
-	const right = leaf(previous);
-	return {
-		index: treeSize === 3 ? 0 : 1,
-		hash: left === null || right === null ? null : hashInternal(left, right),
-		from: "the node over the chain link and the predecessor event",
-	};
+	return null;
 }
 
 export function verifyCheckpointStatement(
@@ -3929,19 +3974,12 @@ class BaseRun {
 		// …and every proof node the receipt can RECOMPUTE is the node the tree
 		// holds. Without this, a tree built over a forged chain link or a forged
 		// predecessor folds to a validly signed root.
-		const node = recomputableNode(
-			leafIndex,
-			checkpointTreeSize,
-			offset,
-			digestAt(checkpoint, "previousSegmentRoot"),
-			digestAt(event, "previousHash"),
-		);
-		if (node !== null) {
-			const sibling = arrayAt(inclusion, "siblings")?.[node.index];
-			const siblingHash = isJsonObject(sibling) ? stringAt(sibling, "hash") : null;
-			if (node.hash === null || siblingHash !== node.hash) {
-				return mismatch(`equality 4: proof node ${node.index} is not ${node.from}, recomputed`);
-			}
+		const known = receiptKnownLeaves(leafIndex, offset, checkpoint, event);
+		const position = knownSiblingMismatch(inclusion, leafIndex, checkpointTreeSize, known);
+		if (position !== null) {
+			return mismatch(
+				`equality 4: proof node ${position} is not the node over the chain link and predecessor event the receipt knows, recomputed`,
+			);
 		}
 		// Equality 5 — the leaf-hiding defence the fold cannot make: a proof can
 		// reach the signed root under a treeSize the checkpoint never signed.
@@ -4309,17 +4347,6 @@ export interface ReceiptReport extends Omit<BaseVerdictReport, "verdict" | "step
 const PASSED_OUTCOME: StepOutcome = { result: "passed" };
 const UNAVAILABLE_OUTCOME: StepOutcome = { result: "unavailable" };
 
-/** `event.hash` when the receipt's event sits at its segment's last leaf. Total
- * on a base pass, which bound every member read here. */
-function finalEventHashOf(document: JsonObject, checkpoint: JsonObject): string | null {
-	const event = objectAtKey(document, "event") as JsonObject;
-	const proof = objectAtKey(document, "proof") as JsonObject;
-	const leafIndex = numberAt(objectAtKey(proof, "inclusion") as JsonObject, "leafIndex");
-	return leafIndex === (numberAt(checkpoint, "treeSize") as number) - 1
-		? stringAt(event, "hash")
-		: null;
-}
-
 /** `history[3] (seg_000004)` — untrusted text, sanitized by the reporter. */
 function historyMemberLabel(index: number, member: JsonObject): string {
 	const segmentId = stringAt(member, "segmentId");
@@ -4359,11 +4386,15 @@ function walkCheckpointHistory(
 	// integrity incident §4a makes a hard fail, arriving through the one door
 	// that was left open.
 	const embedded = canonicalize(checkpoint);
-	// §4a (v0.9.6): at its segment's LAST leaf the receipt's event IS the final
-	// event the successor's chain starts from, so a served successor must sign
-	// it as `segmentStartPreviousHash`. Anywhere else the final event is not in
-	// hand, and no checkpoint carries it.
-	const finalEventHash = finalEventHashOf(document, checkpoint);
+	// §4a (v0.9.6): a served successor's signed `segmentStartPreviousHash` IS its
+	// predecessor's final leaf, so it joins the leaves the walk knows. Reads are
+	// total on a base pass, which bound every member read here.
+	const event = objectAtKey(document, "event") as JsonObject;
+	const proof = objectAtKey(document, "proof") as JsonObject;
+	const inclusion = objectAtKey(proof, "inclusion") as JsonObject;
+	const leafIndex = numberAt(inclusion, "leafIndex") as number;
+	const treeSize = numberAt(checkpoint, "treeSize") as number;
+	const known = receiptKnownLeaves(leafIndex, chainLinkOffset(checkpoint), checkpoint, event);
 
 	const seenSegmentIds = new Set<string>();
 	let previous: JsonObject | null = null;
@@ -4439,12 +4470,32 @@ function walkCheckpointHistory(
 			if (stringAt(member, "previousSegmentRoot") !== stringAt(previous, "root")) {
 				return `${label}: previousSegmentRoot is not the preceding checkpoint's root`;
 			}
-			if (
-				previousIsEmbedded &&
-				finalEventHash !== null &&
-				stringAt(member, "segmentStartPreviousHash") !== finalEventHash
-			) {
-				return `${label}: segmentStartPreviousHash is not the receipt's event.hash, though that event is the preceding segment's final event`;
+			// The known-leaf rule, with this member's start hash as the preceding
+			// segment's final leaf. At the receipt's OWN segment: the final leaf is
+			// the receipt's event, or it fixes every proof sibling it completes.
+			// At EVERY pair: a predecessor whose every leaf is known — its chain
+			// link and its final leaf, i.e. a single event — has its signed root
+			// fixed (genesis `leaf(start)`, else `node(leaf(link), leaf(start))`).
+			const start = digestAt(member, "segmentStartPreviousHash");
+			if (previousIsEmbedded && leafIndex === treeSize - 1) {
+				if (start !== stringAt(event, "hash")) {
+					return `${label}: segmentStartPreviousHash is not the receipt's event.hash, though that event is the preceding segment's final event`;
+				}
+			} else if (previousIsEmbedded) {
+				const final = new Map(known).set(treeSize - 1, start);
+				const position = knownSiblingMismatch(inclusion, leafIndex, treeSize, final);
+				if (position !== null) {
+					return `${label}: the receipt's proof node ${position} is not recomputed from segmentStartPreviousHash as the preceding segment's final leaf`;
+				}
+			}
+			const previousLeaves = new Map<number, string | null>();
+			if (previousOffset === 1) previousLeaves.set(0, digestAt(previous, "previousSegmentRoot"));
+			previousLeaves.set(previousTreeSize - 1, start);
+			let rootLevel = 0;
+			while (2 ** rootLevel < previousTreeSize) rootLevel += 1;
+			const root = knownNode(previousTreeSize, previousLeaves, rootLevel, 0);
+			if (root !== undefined && root !== stringAt(previous, "root")) {
+				return `${label}: the preceding checkpoint's root is not the tree over its chain link and segmentStartPreviousHash, its only leaves`;
 			}
 			// §7: "strictly increasing AND contiguous". A predecessor with no EVENT
 			// leaf would satisfy the arithmetic while standing still; the shape

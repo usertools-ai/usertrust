@@ -28,6 +28,19 @@ cumulative; §10.1's binding-qualifier list completed with the
 `billedUnfinalized` exception. Surfaced by the resolver transcription gate,
 which adopted the correct readings from §4/§7.
 
+**v0.10 amendment (2026-10-11): §7's history walk binds two more values the
+receipt exposes.** No format, member or issuance rule changes; a verifier
+gets stricter. (1) A served successor's `segmentStartPreviousHash` is the
+embedded segment's FINAL LEAF, so it joins the leaves equality 4 knows (the
+chain link and `event.previousHash`). Every inclusion-proof sibling covering
+only known leaves, at every level including promoted positions, is
+recomputed and must equal the sibling the proof carries. (2) At EVERY
+adjacent pair, a predecessor whose leaves are all known (a genesis
+`treeSize` of 1, or a non-genesis `treeSize` of 2) must have the root those
+leaves determine. Before this, a history that contradicted either value
+could still reach `VERIFIED_CHECKPOINT_HISTORY`; it is now `HISTORY_INVALID`.
+§4a and §7 are updated to match.
+
 **v0.10 (2026-10-05): CLUSTER receipts (§15) are the ONLY kind issued. The
 session kind is RESERVED — defined, never issued. §6a is re-pinned.**
 
@@ -842,12 +855,15 @@ TODAY, modulo the checkpoint extension below:
   `previousSegmentRoot` is `"genesis"` MUST carry the all-zero value, and
   one whose `previousSegmentRoot` is a root MUST NOT (a successor's first
   event links to a real event); either mismatch is FAIL at step 6. Nothing
-  else in a checkpoint carries the predecessor's last event hash, so §7's
-  history walk cannot cross-check the value between members; what it buys is
-  that the chain-start a verifier or archiver recomputes from is SIGNED. When
-  the receipt's own event is the segment's first event, equality 4 binds the
-  two directly; when it is the segment's FINAL event, §7's history walk binds
-  a served successor's `segmentStartPreviousHash` to it.
+  else in a checkpoint carries the predecessor's last event hash as a
+  member; what it buys is that the chain-start a verifier or archiver
+  recomputes from is SIGNED. It is, by the hash chain, the predecessor's
+  FINAL LEAF (`treeSize − 1`), so a verifier holding it knows that leaf the
+  way it knows the chain link: when the receipt's own event is the segment's
+  first event, equality 4 binds the two directly; when it is the segment's
+  FINAL event, §7's history walk binds a served successor's
+  `segmentStartPreviousHash` to it; and §7's history walk recomputes from it
+  every proof node and every predecessor root it completes.
   `publishedTo` does not exist in the signed statement (publication is
   evidence, not proof — R3-8 unchanged), and neither does `reference` —
   v0.5 carried an anchor locator here, but publication evidence lives
@@ -1317,8 +1333,17 @@ Levels (renamed, R2-2 — names must not overclaim):
   when the receipt's event sits at its segment's LAST leaf
   (`leafIndex === treeSize − 1`), the checkpoint that follows the embedded
   one carries `segmentStartPreviousHash === event.hash` (v0.9.6 — that event
-  is the final one its successor's chain starts from; at any other leaf the
-  final event is not in hand and nothing carries it);
+  is the final one its successor's chain starts from); at any other leaf
+  that successor's `segmentStartPreviousHash` is the embedded segment's
+  final leaf, and joins the leaves equality 4 knows: every inclusion-proof
+  sibling covering only known leaves — the chain link, `event.previousHash`,
+  and this final leaf — at every level, promoted positions included, is
+  recomputed and must equal the sibling the proof carries (#200 r3); and at
+  EVERY adjacent pair, a predecessor whose leaves are all known — a single
+  event, i.e. a genesis `treeSize` of 1 or a non-genesis `treeSize` of 2 —
+  has `prev.root === leaf(next.segmentStartPreviousHash)` (genesis) or
+  `node(leaf(prev.previousSegmentRoot), leaf(next.segmentStartPreviousHash))`
+  (non-genesis), with `leaf`/`node` as in equality 4 (#200 r3);
   **a member that is not a v2 statement STOPS the walk (v0.9.6)** — `v`
   other than `2` (e.g. a v1 `PublishedMerkleRoot`), any of §4a's twelve
   members absent, any member outside them, or a `treeSize` that holds no
