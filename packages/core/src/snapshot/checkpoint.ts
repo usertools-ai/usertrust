@@ -4,7 +4,7 @@
 import type { Dirent } from "node:fs";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { withAuditWriterLock } from "../audit/chain.js";
 
 // ── Types ──
@@ -51,6 +51,38 @@ const INCLUDED_PATHS = new Set([
 
 /** Never captured: advisory lock file living inside audit/. */
 const NEVER_CAPTURE = new Set([".audit-writer.lock"]);
+
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+
+/**
+ * Never captured: a writer's PRIVATE temp file — one that exists only while a single write is in
+ * flight, or after a writer crashed mid-write — matched by its exact name and place, as a path
+ * relative to the vault:
+ *  - `audit/.audit-writer.lock.<writerId>.tmp`: the lock, written in full before it is
+ *    hard-linked into place (`audit/chain.ts`);
+ *  - `audit/events.jsonl.meta.<uuid>.tmp`: the `.meta` head anchor, written before it is renamed
+ *    over the anchor (the atomic anchor write of #293);
+ *  - `audit/quarantine/.<sha256>-<offset>.<uuid>.tmp`: a torn tail's evidence, written before it is
+ *    hard-linked to its `<sha256>-<offset>.torn` name (the quarantine of #293).
+ * Each is either about to become another name — captured under that name once it has — or a crashed
+ * writer's leftover that nothing reads. Capturing one copies a lock without holding it, or a
+ * half-written file; and one removed mid-capture (as every live one soon is) fails the snapshot.
+ *
+ * Exact shapes, not a blanket `*.tmp`: `policies/` and `patterns/` hold the operator's own files,
+ * whose names this code does not own, and anything else under `audit/` is evidence. Only these
+ * names are known to be a writer's scratch.
+ */
+const WRITER_TEMP_FILES: readonly RegExp[] = [
+	new RegExp(`^audit/\\.audit-writer\\.lock\\.${UUID}\\.tmp$`),
+	new RegExp(`^audit/events\\.jsonl\\.meta\\.${UUID}\\.tmp$`),
+	new RegExp(`^audit/quarantine/\\.[0-9a-f]{64}-(?:0|[1-9][0-9]{0,15})\\.${UUID}\\.tmp$`),
+];
+
+/** Is `relPath` (relative to the vault, platform separators) a writer's temp file? */
+function isWriterTempFile(relPath: string): boolean {
+	const path = relPath.split(sep).join("/");
+	return WRITER_TEMP_FILES.some((shape) => shape.test(path));
+}
 
 /**
  * Never captured NOR restored: external-anchoring state (mirror of the
@@ -99,6 +131,8 @@ async function collectFiles(basePath: string, currentPath: string): Promise<stri
 			// Never capture the audit-writer advisory lock — restoring a stale lock
 			// would falsely block a future writer.
 			if (NEVER_CAPTURE.has(entry.name as string)) continue;
+			// Nor a writer's temp file, mid-write or left by a crash (see WRITER_TEMP_FILES).
+			if (isWriterTempFile(relPath)) continue;
 			results.push(relPath);
 		}
 	}
