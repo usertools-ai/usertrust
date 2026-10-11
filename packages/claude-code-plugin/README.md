@@ -475,6 +475,7 @@ both modes.
 | --- | --- | --- |
 | A reservation (200) | No decision: your permission settings apply | No decision |
 | Refused: over budget (402), denied by policy (403), an anomaly cutoff (429) | No decision, and a `would_block` record | `deny`: the call is blocked |
+| The key rejected: a 401, or a 403 whose `error` is `unauthorized` | No decision, a `gap` record (`"cause":"key-rejected"`), and a message shown to you | Blocked (exit 2). With `UT_FAIL_OPEN=1`: as in watch |
 | No usable answer: unreachable, a timeout, any other status, a malformed body | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: no decision, and a `gap` record |
 | A shadow answer from an `evaluate_only` server | No decision | No decision |
 
@@ -687,8 +688,55 @@ mode (only with `UT_FAIL_OPEN=1`) says `"mode":"enforce"`. In transcript mode a 
 loses no usage by itself: the responses the hold would have carried stay in the
 transcript to be posted at a later settle point. In estimate mode
 (`UT_CC_USAGE=estimate`) the call's estimate is not recorded. A record that cannot
-be written goes to stderr instead, and the call proceeds either way. Nothing reads
-the file back, so deleting it is safe — unlike the rest of the state dir.
+be written goes to stderr instead, and the call proceeds either way. Only SessionStart
+reads the file back, the part written since the last session start (see *A rejected key*
+below), so deleting it is safe — unlike the rest of the state dir.
+
+**A rejected key is shown to you, not buried.** A server that rejects the session's key
+(`UT_SERVER_KEY`, or the config file's `key`: mistyped, rotated, or its hash missing from
+the server's config) answers every authorize with a 401. usertrust-server's own 403 is a
+policy refusal (`"error":"policy_denied"`), so only a 403 whose `error` is `unauthorized`
+counts as a rejected key; any other 403, and a 402, is still a `would_block`. A rejected key
+is a configuration problem, not an outage, and every call it touches goes unmetered, so:
+- **PreToolUse shows a message** as the hook's `systemMessage`, the field Claude Code shows to
+  you, on the session's first such call, then at most once every 10 minutes while it lasts:
+
+  ```
+  usertrust: the server rejected this session's key (401): tool calls are NOT being metered. Check the key (UT_SERVER_KEY); see /Users/you/.claude/usertrust-cc/watch.jsonl.
+  ```
+
+  Ten minutes, not a count of calls: a count would nag a busy session and fall silent in a slow
+  one. It never blocks the call in watch mode (exit 0, no decision).
+- **Each call is still one `gap` record**, so `usertrust-job coverage` still sees every
+  unmetered call, with `"cause":"key-rejected"`, the `status`, and the reason `the server
+  rejected this key (401)`. The session's first record also carries a `detail`: the server
+  URL, the key's hash (never the key), the server's answer, and what to check. The later ones
+  are compact:
+
+  ```json
+  {"at":"2026-10-09T10:00:00.000Z","kind":"gap","mode":"watch","session":"<session id>","agent":"main","tool":"Bash","reason":"the server rejected this key (401)","cause":"key-rejected","status":401,"started":"2026-10-09T10:00:00.000Z"}
+  ```
+- **SessionStart warns** of the rejected calls recorded since the last session start, before
+  the mode line:
+
+  ```
+  usertrust: WARNING: 1,946 tool calls since 2026-10-09 were NOT metered (the server rejected the key). Check the key (UT_SERVER_KEY); see /Users/you/.claude/usertrust-cc/watch.jsonl.
+  ```
+
+  It sends nothing. It reads only `watch.jsonl`'s last 1 MiB (about 4,000 records), from where
+  the last session start stopped reading (`key-rejected/session-start.mark` in the state dir);
+  a file that is not the one it read last (deleted and written again) is read from its start.
+  With more than the bound since then, the count reads `at least`. A file it cannot read is the
+  normal banner.
+
+**To fix it**, give the plugin the key the server holds: `export UT_SERVER_KEY=...` (or fix
+the config file's `key`) and start a new session, as a session keeps the key it started with;
+or add the key's SHA-256 hash to the server's config and restart the server, after which the
+running session's calls are metered again. In enforce mode a rejected key blocks every tool
+call (exit 2), as any failed authorization does; with `UT_FAIL_OPEN=1` the calls proceed
+unmetered, and you see the message above. The plugin keeps each session's notice state in
+`key-rejected/` in the state dir (0700, each file 0600). It never stops asking the server after
+a rejection: a key fixed on the server could not be seen without asking.
 
 **When the server stops answering, watch mode stops asking it: the breaker.** A server
 that hangs, its connection open and no answer coming, would cost every hook of every
@@ -840,7 +888,9 @@ misconfigured setup does is write a record, not stop your session.
    - A `gap` record is a call the plugin could not meter: the server was
      unreachable, timed out or answered something unusable. **In enforce mode
      each of these blocks the call**, unless `UT_FAIL_OPEN=1`. Make the gaps go
-     away, or understand them, before you enforce.
+     away, or understand them, before you enforce. A gap with
+     `"cause":"key-rejected"` means the server does not accept the key: see
+     *A rejected key* in [Modes](#modes-watch-only-by-default).
 
    For example: `grep '"kind":"gap"' ~/.claude/usertrust-cc/watch.jsonl`.
 3. **Enforce.** `export UT_CC_MODE=enforce` before launching Claude Code. The

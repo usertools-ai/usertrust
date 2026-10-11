@@ -1347,8 +1347,9 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   it was moved.
 - The stronger variant in a SHIPPED HOOK rather than a `src/` tree: `sanitizeReason` in
   `claude-code-plugin/hooks/lib.mjs`. It is the one sanitizer behind that package's ONE writer:
-  `say` for every stderr line and `announce` for the session-start `systemMessage`, both
-  sanitize-then-clip, plus the permission-decision reason. `tests/terminal-sinks.test.ts` walks
+  `say` for every stderr line and `announce` for every `systemMessage` (the session-start
+  banner, and PreToolUse's rejected-key notice), both sanitize-then-clip, plus the
+  permission-decision reason. `tests/terminal-sinks.test.ts` walks
   every shipped `hooks/*.mjs` and fails on any other write to stderr, stdout or a `systemMessage`,
   with an injected raw write as its positive control. The writer replaced per-site sanitizing
   after review found the same class six times across two rounds. `sanitizeReason` was invisible
