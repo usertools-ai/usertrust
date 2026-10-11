@@ -302,7 +302,7 @@ describe("allocateBudget", () => {
 		expect(created).toBeLessThan(transferred);
 	});
 
-	// AUD-455: the TOCTOU invariant. A balance read before the transfer would be a
+	// The TOCTOU invariant: a balance read before the transfer would be a
 	// check-then-act race; TigerBeetle enforces debits_must_not_exceed_credits atomically.
 	it("never reads the parent balance before transferring", async () => {
 		mockTB.immediateTransfer.mockResolvedValueOnce(42n);

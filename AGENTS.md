@@ -119,7 +119,10 @@ Grepping `catch (denialErr)` therefore finds four, not five. Payloads and ration
 settle's POST, an abort or release parked on its void). At the deadline it takes every remaining
 hold in ONE synchronous step, before its first await: it records each abort or release still in
 flight, and voids and records (`hold_released`, `governor destroyed`) each hold still held. Then it
-voids the engine's remaining pending transfers, and flushes and releases the audit writer. An
+voids the engine's remaining pending transfers, and flushes and releases the audit writer. Every
+teardown step (that drain, the sweep, the flush, the release, then the engine and proxy destroy)
+always runs, through `runTeardownSteps`: a step that throws skips none after it, and destroy()
+rejects with its error (several as one `AggregateError`, in step order) only once the last has run. An
 `authorize()` refuses from destroy()'s start, and one still reserving registers no hold: it gives
 back its accounting and fails, and sends no void (the engine sweep, or the ledger's pending timeout
 within 300 s of its reserve, releases the reservation). While destroy() drains, a `settle()`, `abort()` or `release()` runs as
@@ -129,6 +132,10 @@ A `process.on("beforeExit")` handler calls it too, but that is a net, not a subs
 fires only once the event loop drains, and an open TigerBeetle client is precisely what keeps it
 from draining. The net catches a governor whose client is already closed; it cannot catch the case
 the rule exists for.
+**`destroy()` never rejects because an audit lock was left behind** (its file unreadable or its
+unlink failed — callers often call `destroy()` without await or catch, and an unhandled rejection
+kills the process); it emits a process warning with code `USERTRUST_AUDIT_LOCK_LEFT` naming each
+lock path and its error code, and tears the engine down regardless.
 
 Streams: settlement runs in a `finally`, so a consumer breaking out of `for await` settles the
 consumed cost exactly like a clean end. Only a *thrown* error voids. For Anthropic `MessageStream`,
@@ -1005,6 +1012,22 @@ sibling (refused). Every append is `writeSync` + `fsyncSync` + `closeSync`, and 
 is fsync'd too. Reclaiming a *live* sibling's lock forks the chain, because each writer caches its
 own tail. There is **no** cross-process protection beyond this advisory lock.
 
+**The lock's threat model: accidental concurrent writers, not an adversary.** The lock stops two
+processes, or two writers in one process, from appending to one vault at once. It does not defend
+against someone who can rename or recreate the audit directory: that actor can already write the
+chain directly. Pathname races under a CONCURRENT directory replacement are therefore out of scope,
+and they cannot be closed in this design. Node has no atomic, inode-bound unlink, so every
+check-then-unlink by path has a window in which the directory can be swapped underneath it. That
+covers stale-lock cleanup, release, and the rollback of a create that will not be reported. What is
+checked narrows the window without closing it: an acquire reports success only if, after its
+create, the requested path still holds the very file that create made (its inode and the writer's
+id). Otherwise it throws `AuditWriterLockHeldError`. A kernel advisory lock held on an open fd
+(flock/fcntl) would remove the dependence on pathnames (see issue #288). Holding a file descriptor
+open for the writer's lifetime was rejected earlier, because the lock's semantics are the lock
+file's existence at its path; an open fd adds no exclusion except together with such a kernel lock.
+*Prevents:* a review round "fixing" another pathname race inside this model. Every such fix leaves
+a sibling window, because the window is the model, not a bug. Change the mechanism (#288) instead.
+
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
 `packages/core/src/audit/read.ts`, and `packages/core/src/audit/verify.ts` contain zero filesystem
 write calls. Keep it that way — a verifier that mutates its subject is not a verifier.
@@ -1099,7 +1122,7 @@ declared none**. `scope` is in `HOST_CONTROLLED_POLICY_FIELDS`, so a request bod
 `params.params.scope` cannot volunteer a match. `ruleMatches` still requires a non-empty
 `context.scope` for any rule carrying `scopePatterns`: if the operator sets no `scope`, a scoped
 rule never matches (it does not "narrow a live rule"). An absent `scopePatterns` still matches all
-calls. Do not move `scope` back to `CALLER_SUPPLIED_POLICY_FIELDS` — that was AUD-002, the hole
+calls. Do not move `scope` back to `CALLER_SUPPLIED_POLICY_FIELDS` — that was the hole
 where a remote tenant could satisfy the docs' flagship production-only deny and an honest host
 never could.
 
@@ -1221,7 +1244,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **sixteen** sanitizers, in two variants: **ten** neutralise C1 and **six** do not. Do
+There are **seventeen** sanitizers, in two variants: **eleven** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1273,6 +1296,12 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   `picocolors`, which wraps a string in SGR codes without sanitizing it. Copied rather than imported
   from `cli/budget.ts`: that module statically imports `TrustTBClient` and therefore the native
   `tigerbeetle-node` binding, and the snapshot command must not pull that in to print an error.
+- The stronger variant in the audit writer: `scrubForWarning` in `core/src/audit/chain.ts`, applied
+  to the teardown warning `destroy()` emits when an audit lock is left behind
+  (`USERTRUST_AUDIT_LOCK_LEFT`, on `process.emitWarning` and `console.warn`). That warning names
+  each lock's path, and a vault directory's name can carry escapes. Only the PRINTED text is
+  scrubbed: `AuditLockReleaseError.left` keeps the real path, which a substitution would corrupt.
+  A local copy, not an import from `cli/`: the audit writer must not depend on the CLI.
 - The stronger variant again: `forDisplay` in `verify/src/receipt.ts`, applied to
   every untrusted string the `--tx` receipt prints (model, error, transferId, timestamp, both
   chain hashes, and the `renderNotFound` txId, which is argv). The receipt reads `events.jsonl` —

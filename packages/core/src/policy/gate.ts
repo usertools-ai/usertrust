@@ -133,7 +133,7 @@ function resolveFieldPath(path: string, context: Record<string, unknown>): unkno
 }
 
 // ---------------------------------------------------------------------------
-// Regex safety guard (AUD-463)
+// Regex safety guard
 // ---------------------------------------------------------------------------
 
 /** Maximum allowed length for regex patterns in policy rules. */
@@ -226,7 +226,7 @@ function hasNestedQuantifiedGroup(pattern: string): boolean {
 /**
  * Validate that a regex pattern is safe to compile and execute.
  *
- * **Security** (AUD-463): prevents ReDoS (Regular Expression Denial of Service).
+ * **Security**: prevents ReDoS (Regular Expression Denial of Service).
  * - Patterns longer than 200 characters are rejected.
  * - Adjacent nested quantifiers (`a+*`, `x{2,}+`) are rejected.
  * - A quantified group whose body contains a quantifier/alternation
@@ -672,7 +672,7 @@ export const HOST_CONTROLLED_POLICY_FIELDS = [
  * sanitised — stripping it would have implied it once mattered.
  *
  * `scope` used to live here as "caller-declared, no host source". That was
- * the AUD-002 hole: a remote tenant could volunteer a matching scope via
+ * the hole: a remote tenant could volunteer a matching scope via
  * `params.params.scope`, and an honest host never set one, so the docs'
  * flagship `scopePatterns` deny never fired. It is host-owned now — see
  * {@link HOST_CONTROLLED_POLICY_FIELDS} — because `TrustConfig.scope` /

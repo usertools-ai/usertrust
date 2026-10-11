@@ -156,7 +156,7 @@ export class TrustEngine {
 		const userAccount = this.tb.getAccountId(p.userId);
 		const treasury = this.tb.getTreasuryId();
 
-		// AUD-455: No pre-check — TB enforces debits_must_not_exceed_credits atomically.
+		// No pre-check — TB enforces debits_must_not_exceed_credits atomically.
 		// A lookupBalance + createPendingTransfer sequence has a TOCTOU race.
 
 		const holdTimeoutSeconds = Math.ceil(this.holdTtlMs / 1000);
