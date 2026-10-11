@@ -997,6 +997,22 @@ sibling (refused). Every append is `writeSync` + `fsyncSync` + `closeSync`, and 
 is fsync'd too. Reclaiming a *live* sibling's lock forks the chain, because each writer caches its
 own tail. There is **no** cross-process protection beyond this advisory lock.
 
+**The lock's threat model: accidental concurrent writers, not an adversary.** The lock stops two
+processes, or two writers in one process, from appending to one vault at once. It does not defend
+against someone who can rename or recreate the audit directory: that actor can already write the
+chain directly. Pathname races under a CONCURRENT directory replacement are therefore out of scope,
+and they cannot be closed in this design. Node has no atomic, inode-bound unlink, so every
+check-then-unlink by path has a window in which the directory can be swapped underneath it. That
+covers stale-lock cleanup, release, and the rollback of a create that will not be reported. What is
+checked narrows the window without closing it: an acquire reports success only if, after its
+create, the requested path still holds the very file that create made (its inode and the writer's
+id). Otherwise it throws `AuditWriterLockHeldError`. A kernel advisory lock held on an open fd
+(flock/fcntl) would remove the dependence on pathnames (see issue #288). Holding a file descriptor
+open for the writer's lifetime was rejected earlier, because the lock's semantics are the lock
+file's existence at its path; an open fd adds no exclusion except together with such a kernel lock.
+*Prevents:* a review round "fixing" another pathname race inside this model. Every such fix leaves
+a sibling window, because the window is the model, not a bug. Change the mechanism (#288) instead.
+
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
 `packages/core/src/audit/read.ts`, and `packages/core/src/audit/verify.ts` contain zero filesystem
 write calls. Keep it that way — a verifier that mutates its subject is not a verifier.

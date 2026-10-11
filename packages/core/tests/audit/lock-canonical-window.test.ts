@@ -55,6 +55,8 @@ const nextLockIno: { ino: bigint | undefined } = { ino: undefined };
 const beforeLockCreate: { fn: ((path: string) => void) | undefined } = { fn: undefined };
 /** Runs once, just BEFORE the next non-exclusive open of a lock file (a READ of an existing one). */
 const beforeLockRead: { fn: ((path: string) => void) | undefined } = { fn: undefined };
+/** Runs once, just AFTER the next exclusive create's fd is closed (successfully). */
+const afterLockClose: { fn: ((path: string) => void) | undefined } = { fn: undefined };
 /**
  * Faults injected ONCE into the next matching lock-file operation, then disarmed: a READ of an
  * existing lock (`open` / `fstat` / `read` on a non-exclusive fd), the `close` of an exclusive
@@ -160,7 +162,14 @@ vi.mock("node:fs", async (importOriginal) => {
 		const opened = fdPaths.get(fd);
 		fdPaths.delete(fd);
 		fs.closeSync(fd);
-		if (opened?.excl === true) fault("close", opened.path);
+		if (opened?.excl === true) {
+			fault("close", opened.path);
+			const hook = afterLockClose.fn;
+			if (hook !== undefined) {
+				afterLockClose.fn = undefined;
+				hook(opened.path);
+			}
+		}
 	}) as typeof fs.closeSync;
 	const readFileSync = ((p: unknown, o?: unknown) => {
 		if (typeof p === "number") {
@@ -198,9 +207,12 @@ vi.mock("node:fs", async (importOriginal) => {
 	return { ...fs, ...wrapped, default: { ...fs, ...wrapped } };
 });
 
-const { AuditWriterLockHeldError, createAuditWriter, withAuditWriterLock } = await import(
-	"../../src/audit/chain.js"
-);
+const {
+	AuditWriterLockHeldError,
+	createAuditWriter,
+	releaseAuditWriterForTeardown,
+	withAuditWriterLock,
+} = await import("../../src/audit/chain.js");
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -210,6 +222,7 @@ afterEach(() => {
 	nextLockIno.ino = undefined;
 	beforeLockCreate.fn = undefined;
 	beforeLockRead.fn = undefined;
+	afterLockClose.fn = undefined;
 	lockFaults.length = 0;
 	realpathCalls.native = 0;
 	realpathCalls.js = 0;
@@ -1025,10 +1038,206 @@ describe("#195: a lock that cannot be read, released or closed is never treated 
 				throw fnErr;
 			}).catch((e: unknown) => e);
 			expect(err).toBe(fnErr);
-			expect(reported).toHaveBeenCalledWith(
-				expect.stringContaining("[AUDIT]"),
-				expect.any(AggregateError),
+			// One printed line naming the lock left behind — never the raw error object.
+			expect(reported).toHaveBeenCalledTimes(1);
+			expect(reported.mock.calls[0]).toHaveLength(1);
+			expect(String(reported.mock.calls[0]?.[0])).toContain("[AUDIT]");
+			expect(String(reported.mock.calls[0]?.[0])).toContain(phys(lockOf(vault)));
+		} finally {
+			reported.mockRestore();
+		}
+	});
+});
+
+describe("#195: the threat model's edge — directory replacement during an acquire, and what release reports", () => {
+	const phys = (p: string) => fsHooks.physical(p);
+	const idOf = (lock: string) => JSON.parse(readFileSync(lock, "utf-8")).writerId as string;
+	const char = (code: number) => String.fromCharCode(code);
+	/** C0, DEL and C1 characters in `text`. */
+	const controlsIn = (text: string) =>
+		[...text].filter((ch) => {
+			const code = ch.codePointAt(0) ?? 0;
+			return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+		});
+
+	/**
+	 * A vault whose audit directory is moved to `elsewhere` (a second vault) and replaced by a new,
+	 * empty one right after the lock's create closes its fd — before the acquire reports success.
+	 */
+	function replacedAfterClose(prefix: string, foreignLock?: string) {
+		const parent = scratch(prefix);
+		const vault = join(parent, "vault");
+		const elsewhere = join(parent, "elsewhere");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		mkdirSync(join(elsewhere, ".usertrust"), { recursive: true });
+		let fired = false;
+		afterLockClose.fn = () => {
+			fired = true;
+			renameSync(auditDirOf(vault), auditDirOf(elsewhere));
+			mkdirSync(auditDirOf(vault));
+			if (foreignLock !== undefined) writeFileSync(lockOf(vault), foreignLock);
+		};
+		return { vault, elsewhere, fired: () => fired };
+	}
+
+	it("P1: the audit directory replaced between the create and its success — the acquire THROWS (never reports a lock the requested directory does not have), the callback never runs, and no owner is registered", async () => {
+		const { vault, elsewhere, fired } = replacedAfterClose("trust-audit-replaced-after-close-");
+		let ran = false;
+		const err = await withAuditWriterLock(logOf(vault), () => {
+			ran = true;
+		}).catch((e: unknown) => e);
+
+		expect(fired(), "control: the directory was replaced in that window").toBe(true);
+		expect(err).toBeInstanceOf(AuditWriterLockHeldError);
+		expect(ran, "no critical section without a lock in the requested directory").toBe(false);
+		expect(existsSync(lockOf(vault)), "the requested directory has no lock").toBe(false);
+		// The file the create made moved with the old directory. Unregistered, it is a same-PID lock
+		// nobody here holds: a writer on that directory reclaims it, never refused by a phantom owner.
+		const orphan = idOf(lockOf(elsewhere));
+		track(createAuditWriter(elsewhere, { lockAtCreate: true }));
+		expect(idOf(lockOf(elsewhere))).not.toBe(orphan);
+	});
+
+	it("P1: …and when the new directory already holds ANOTHER writer's lock, that lock is left untouched", () => {
+		const foreign = JSON.stringify({ pid: 999999999, writerId: "someone-else" });
+		const { vault, fired } = replacedAfterClose("trust-audit-replaced-foreign-", foreign);
+		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(
+			AuditWriterLockHeldError,
+		);
+		expect(fired()).toBe(true);
+		expect(readFileSync(lockOf(vault), "utf-8"), "another writer's lock: untouched").toBe(foreign);
+	});
+
+	it("P1: …the check needs the writer id: a replacement lock that REUSES the create's inode (as ext4 does) is not ours", () => {
+		const parent = scratch("trust-audit-replaced-reused-");
+		const vault = join(parent, "vault");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		const foreign = JSON.stringify({ pid: 999999999, writerId: "someone-else" });
+		afterLockClose.fn = () => {
+			const ours = inodeOf(lockOf(vault));
+			renameSync(auditDirOf(vault), join(parent, "old-audit"));
+			mkdirSync(auditDirOf(vault));
+			writeFileSync(lockOf(vault), foreign);
+			lockInoOverride.set(phys(lockOf(vault)), ours); // modelled reuse
+		};
+		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(
+			AuditWriterLockHeldError,
+		);
+		expect(readFileSync(lockOf(vault), "utf-8")).toBe(foreign);
+	});
+
+	it("P1: …and the inode: a byte-identical COPY of the lock (it carries this writer's id) is not the file the create made", () => {
+		const parent = scratch("trust-audit-replaced-copy-");
+		const vault = join(parent, "vault");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		afterLockClose.fn = () => {
+			const bytes = readFileSync(lockOf(vault), "utf-8");
+			renameSync(auditDirOf(vault), join(parent, "old-audit"));
+			mkdirSync(auditDirOf(vault));
+			writeFileSync(lockOf(vault), bytes);
+		};
+		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(
+			AuditWriterLockHeldError,
+		);
+	});
+
+	it("P1: a read error in that check fails the acquire, and the file the create made is rolled back — nothing registered", () => {
+		const vault = scratch("trust-audit-check-eio-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		afterLockClose.fn = (p) => {
+			lockFaults.push({ op: "read", code: "EIO", path: p });
+		};
+		const err = (() => {
+			try {
+				createAuditWriter(vault, { lockAtCreate: true });
+			} catch (e) {
+				return e;
+			}
+		})();
+		expect(lockFaults, "control: the check's read hit the fault").toHaveLength(0);
+		expect((err as { code?: string }).code).toBe("EIO");
+		expect(existsSync(lockOf(vault)), "rolled back").toBe(false);
+		track(createAuditWriter(vault, { lockAtCreate: true }));
+	});
+
+	/** A vault reached through `link`; `move()` renames the physical vault A→B and repoints the link. */
+	function movable(prefix: string) {
+		const parent = scratch(prefix);
+		const a = join(parent, "A");
+		const b = join(parent, "B");
+		mkdirSync(auditDirOf(a), { recursive: true });
+		const link = join(parent, "link");
+		symlinkSync(a, link);
+		return {
+			a,
+			b,
+			link,
+			move() {
+				renameSync(a, b);
+				unlinkSync(link);
+				symlinkSync(b, link);
+			},
+		};
+	}
+
+	it("P2: a lock found at its NEW place (A renamed to B, the link repointed) whose unlink fails is reported at B — in `left` and in the message — never at the obsolete A", async () => {
+		const { a, b, link, move } = movable("trust-audit-report-moved-");
+		const aLock = lockOf(a);
+		const err = await withAuditWriterLock(logOf(link), () => {
+			move();
+			lockFaults.push({ op: "unlink", code: "EACCES", path: phys(lockOf(b)) });
+		}).catch((e: unknown) => e);
+
+		expect(lockFaults, "control: the unlink at B failed").toHaveLength(0);
+		const left = (err as { left?: ReadonlyArray<{ path: string; code?: string }> }).left;
+		expect(left?.[0]).toEqual({ path: phys(lockOf(b)), code: "EACCES" });
+		expect((err as Error).message).toContain(phys(lockOf(b)));
+		expect((err as Error).message).not.toContain(aLock.slice(aLock.lastIndexOf("/A/")));
+	});
+
+	it("P2: …and the teardown warning names B too", () => {
+		const { b, link, move } = movable("trust-audit-warn-moved-");
+		const w = createAuditWriter(link, { lockAtCreate: true });
+		move();
+		lockFaults.push({ op: "unlink", code: "EACCES", path: phys(lockOf(b)) });
+		const emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			releaseAuditWriterForTeardown(w);
+			const [message] = emitWarning.mock.calls[0] as [string];
+			expect(message).toContain(phys(lockOf(b)));
+			expect(message).not.toContain("/A/.usertrust");
+		} finally {
+			emitWarning.mockRestore();
+			warn.mockRestore();
+		}
+	});
+
+	it("P2: when the callback AND release fail, the release failure is printed SCRUBBED — the lock path's planted terminal control never reaches stderr — and the callback's error is the rejection", async () => {
+		// A real directory whose name carries an SGR, an OSC title, CR, DEL and C1's 8-bit CSI.
+		const planted = `vault-planted${char(0x1b)}[31m${char(0x1b)}]0;pwned${char(0x07)}${char(0x0d)}${char(0x7f)}${char(0x9b)}2J`;
+		const vault = join(scratch("trust-audit-scoped-scrub-"), planted);
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		const fnErr = new Error("restore failed");
+		const printed: string[] = [];
+		const reported = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+			printed.push(
+				args.map((a) => (a instanceof Error ? `${a.stack ?? a.message}` : String(a))).join(" "),
 			);
+		});
+		try {
+			const err = await withAuditWriterLock(logOf(vault), () => {
+				lockFaults.push({ op: "unlink", code: "EACCES", path: phys(lockOf(vault)) });
+				throw fnErr;
+			}).catch((e: unknown) => e);
+			expect(err).toBe(fnErr);
+			const out = printed.join("\n");
+			const start = out.indexOf("vault-planted");
+			expect(start, "control: the planted path is printed").toBeGreaterThanOrEqual(0);
+			const end = out.indexOf(".audit-writer.lock", start);
+			expect(end).toBeGreaterThan(start);
+			expect(controlsIn(out.slice(start, end)), "nothing planted reaches stderr").toEqual([]);
+			expect(controlsIn(out), "no control character anywhere in the diagnostic").toEqual([]);
 		} finally {
 			reported.mockRestore();
 		}

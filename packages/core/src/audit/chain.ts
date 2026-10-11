@@ -151,16 +151,25 @@ export function releaseAuditWriterForTeardown(audit: AuditWriter): void {
 	try {
 		audit.release();
 	} catch (err) {
-		const message = scrubForWarning(
-			err instanceof AuditLockReleaseError
-				? err.message
-				: `Audit writer release failed (${err instanceof Error ? err.name : typeof err}${
-						errorCode(err) === undefined ? "" : `: ${errorCode(err)}`
-					}); its lock may be left in place.`,
-		);
+		const message = describeReleaseFailure(err);
 		console.warn(`[AUDIT] ${message}`);
 		process.emitWarning(message, { code: AUDIT_LOCK_LEFT_WARNING });
 	}
+}
+
+/**
+ * A release failure, as ONE line fit for a terminal: each lock path left behind and its error code
+ * (or, for an unexpected error, only its kind and code — never its message), scrubbed. Never the
+ * error object itself: printing that prints its message and every nested error unscrubbed.
+ */
+function describeReleaseFailure(err: unknown): string {
+	return scrubForWarning(
+		err instanceof AuditLockReleaseError
+			? err.message
+			: `Audit writer release failed (${err instanceof Error ? err.name : typeof err}${
+					errorCode(err) === undefined ? "" : `: ${errorCode(err)}`
+				}); its lock may be left in place.`,
+	);
 }
 
 export interface CreateAuditWriterOptions {
@@ -199,6 +208,21 @@ class AsyncMutex {
 }
 
 // ── Advisory Lock ──
+//
+// THREAT MODEL. This lock prevents ACCIDENTAL concurrent writers: two processes, or two writers in
+// one process, appending to one vault's chain — which would fork it, each writer caching its own
+// tail. It is not a defence against an adversary on the host. Anyone who can rename or recreate
+// the audit directory can already write the chain directly, so pathname races under a CONCURRENT
+// directory replacement are out of scope. They cannot be closed here: Node has no atomic,
+// inode-bound unlink, so every check-then-unlink by path — stale-lock cleanup, release, and the
+// rollback of a create that will not be reported — has a window in which the directory can be
+// swapped under it. What IS checked narrows the window without closing it: an acquire reports
+// success only if, after its create, the requested path holds the very file that create made; a
+// replacement after that check is out of scope like the rest. A kernel advisory lock held on an
+// open fd (flock/fcntl) would remove the dependence on pathnames altogether (see issue #288).
+// Holding a file descriptor open for the writer's lifetime was rejected earlier because the lock's
+// semantics are the lock file's EXISTENCE at its path; an open fd adds no exclusion by itself,
+// only together with such a kernel lock.
 
 const LOCK_FILE_NAME = ".audit-writer.lock";
 
@@ -386,20 +410,24 @@ function createLock(lockPath: string, lockContent: string, writerId: string): bo
 			closeSync(fd);
 		}
 	} catch (err) {
-		if (identity !== undefined) {
-			try {
-				// The inode ALONE is not this file: once it is unlinked, Linux (ext4) hands the freed
-				// inode to the very next file created, so a lock another writer put here in the
-				// meantime can carry it. Unlinking that would free a LIVE lock. The writer id this
-				// create wrote must match too; a file whose content never fully landed fails that
-				// check and is left — unregistered, a same-PID lock nobody here holds.
-				const file = readLockFile(lockPath);
-				if (file?.identity === identity && file.writerId === writerId) unlinkSync(lockPath);
-			} catch {
-				/* cannot tell: leave it — unregistered, it is a same-PID lock nobody here holds */
-			}
-		}
+		if (identity !== undefined) rollBackCreate(lockPath, identity, writerId);
 		throw err;
+	}
+	// The create succeeded — but succeeded WHERE? The directory can be replaced between the open
+	// and now, and then the file this create made sits in the old directory while the requested one
+	// has no lock. Success is reported only if the file at the requested path is the one this
+	// create made: its inode AND this writer's id, read through one fd.
+	let there: LockFileView | undefined;
+	try {
+		there = readLockFile(lockPath);
+	} catch (err) {
+		rollBackCreate(lockPath, identity, writerId);
+		throw err;
+	}
+	if (there?.identity !== identity || there.writerId !== writerId) {
+		throw new AuditWriterLockHeldError(
+			`Audit writer lock not taken: the lock file at ${lockPath} is not the one this writer just created — its directory was replaced while the lock was being taken. Only one writer may append to the audit log; retry once the vault is stable.`,
+		);
 	}
 	let mine = heldLocks.get(writerId);
 	if (mine === undefined) {
@@ -408,6 +436,24 @@ function createLock(lockPath: string, lockContent: string, writerId: string): bo
 	}
 	mine.set(identity, { path: lockPath });
 	return true;
+}
+
+/**
+ * Undo a create that will not be reported: unlink the file at `lockPath` if it is still the one
+ * the create made — its inode AND this writer's id. The inode ALONE is not this file: once it is
+ * unlinked, Linux (ext4) hands the freed inode to the very next file created, so a lock another
+ * writer put here in the meantime can carry it, and unlinking that would free a LIVE lock. A file
+ * whose content never fully landed fails the check and is left — unregistered, a same-PID lock
+ * nobody here holds. (Like every check-then-unlink by path here, this has a window if the
+ * directory itself is replaced concurrently: see the threat model at the top of this section.)
+ */
+function rollBackCreate(lockPath: string, identity: string, writerId: string): void {
+	try {
+		const file = readLockFile(lockPath);
+		if (file?.identity === identity && file.writerId === writerId) unlinkSync(lockPath);
+	} catch {
+		/* cannot tell: leave it — unregistered, it is a same-PID lock nobody here holds */
+	}
 }
 
 /**
@@ -494,7 +540,9 @@ function releaseLocks(writerId: string, logPath: string): void {
 		// Each place is looked at once: a read that just failed is not retried as if it were news.
 		const candidates =
 			spelled === undefined || spelled === lock.path ? [lock.path] : [lock.path, spelled];
-		const problems: unknown[] = [];
+		// Where each failure happened: the lock is reported where it was actually found to fail —
+		// after a rename, that is the new place, not the path the lock was last seen at.
+		const problems: Array<{ path: string; error: unknown }> = [];
 		let released = false;
 		for (const candidate of candidates) {
 			try {
@@ -505,11 +553,12 @@ function releaseLocks(writerId: string, logPath: string): void {
 			} catch (err) {
 				// The unlink losing a race to another remover: the lock is gone, which is the point.
 				if (hasFsCode(err, "ENOENT")) released = true;
-				else problems.push(err);
+				else problems.push({ path: candidate, error: err });
 			}
 			if (released) break;
 		}
-		if (!released && problems.length > 0) failures.push({ path: lock.path, error: problems[0] });
+		const failed = problems[0];
+		if (!released && failed !== undefined) failures.push(failed);
 	}
 	if (failures.length > 0) throw new AuditLockReleaseError(failures);
 }
@@ -538,9 +587,10 @@ export async function withAuditWriterLock<T>(
 		try {
 			releaseLocks(writerId, logPath);
 		} catch (releaseErr) {
+			// One scrubbed line, never the error object: its message and nested errors carry the
+			// lock's path raw, and a directory name can carry terminal escapes.
 			console.error(
-				"[AUDIT] Audit writer lock release failed after an error in the locked section",
-				releaseErr,
+				`[AUDIT] Audit writer lock release failed after an error in the locked section: ${describeReleaseFailure(releaseErr)}`,
 			);
 		}
 		throw fnErr;
