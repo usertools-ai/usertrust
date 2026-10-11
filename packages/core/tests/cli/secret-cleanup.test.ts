@@ -67,27 +67,82 @@ vi.mock("../../src/vault/store.js", async (importOriginal) => {
 	};
 });
 
+/**
+ * picocolors fixes colour support when it is imported (from a TTY, `CI`, `FORCE_COLOR`), so the
+ * same test printed SGR codes on CI and none on a laptop. These tests choose it per case instead,
+ * and run every terminal assertion with colours ON and OFF.
+ */
+const colour = vi.hoisted(() => ({ on: false }));
+vi.mock("picocolors", async (importOriginal) => {
+	const mod = (await importOriginal()) as { default?: unknown };
+	const real = (mod.default ?? mod) as typeof import("picocolors");
+	const pc = new Proxy(
+		{},
+		{
+			get: (_target, key) =>
+				(real.createColors(colour.on) as unknown as Record<PropertyKey, unknown>)[key],
+		},
+	);
+	return { default: pc };
+});
+
 const { run } = await import("../../src/cli/secret.js");
 const { AuditLockReleaseError } = await import("../../src/audit/chain.js");
 
 /**
- * Terminal control planted in a directory name, built from char codes (never a literal escape in
- * source): an OSC "set window title" sequence (ESC ] … BEL) and a carriage return. Not `ESC[31m`:
- * picocolors itself emits that around the CLI's own red text.
+ * Terminal control planted in a vault's directory name, built from char codes (never a literal
+ * escape in source): a well-formed SGR (`ESC[31m`), an OSC "set window title" (`ESC]0;…BEL`), CR,
+ * DEL, and C1's 8-bit CSI. The SGR is the point: the planted bytes may look exactly like the
+ * colour codes the CLI itself prints, so nothing is stripped "because it is well-formed" — the
+ * assertion looks only at the text DERIVED FROM THIS PATH, where every one of them must be gone.
  */
-const ESC = String.fromCharCode(0x1b);
-const BEL = String.fromCharCode(0x07);
-const CR = String.fromCharCode(0x0d);
-const HOSTILE = `${ESC}]0;pwned${BEL}${CR}`;
-/** A lock left behind in a vault whose directory name carries {@link HOSTILE}. */
+const char = (code: number) => String.fromCharCode(code);
+const [ESC, BEL, CR, DEL, CSI8] = [0x1b, 0x07, 0x0d, 0x7f, 0x9b].map(char) as [
+	string,
+	string,
+	string,
+	string,
+	string,
+];
+const PLANTED_DIR = `vault-planted${ESC}[31m${ESC}]0;pwned${BEL}${CR}${DEL}${CSI8}2J`;
+const LOCK_TAIL = ".audit-writer.lock";
+/** A lock left behind in a vault whose directory name is {@link PLANTED_DIR}. */
 const hostileLockLeft = () =>
 	new AuditLockReleaseError([
 		{
-			path: join(tmpdir(), `vault${HOSTILE}`, ".usertrust", "audit", ".audit-writer.lock"),
+			path: join(tmpdir(), PLANTED_DIR, ".usertrust", "audit", LOCK_TAIL),
 			error: Object.assign(new Error("EIO: i/o error"), { code: "EIO" }),
 		},
 	]);
-const rawControl = (text: string) => [ESC, BEL, CR].filter((c) => text.includes(c));
+/** C0, DEL and C1 characters in `text`. */
+const controlsIn = (text: string) =>
+	[...text].filter((ch) => {
+		const code = ch.codePointAt(0) ?? 0;
+		return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+	});
+/**
+ * The printed path: from the planted directory name to the end of the lock file name. Whatever
+ * picocolors wraps AROUND the message lies outside it; anything inside came from the path.
+ */
+function plantedPathIn(printed: string): string {
+	const start = printed.indexOf("vault-planted");
+	expect(start, "control: the planted path is printed").toBeGreaterThanOrEqual(0);
+	const end = printed.indexOf(LOCK_TAIL, start);
+	expect(end, "control: the whole path is printed").toBeGreaterThan(start);
+	return printed.slice(start, end + LOCK_TAIL.length);
+}
+/** The terminal assertion, for one colour mode. */
+function expectScrubbed(printed: string) {
+	const path = plantedPathIn(printed);
+	expect(controlsIn(path), "no control character from the planted path survives").toEqual([]);
+	// Substituted, not dropped: the printable remnants of every planted sequence are still there.
+	for (const remnant of ["[31m", "]0;pwned", "2J"]) expect(path).toContain(remnant);
+	if (colour.on) {
+		expect(printed, "control: colours really are on (picocolors wraps the line)").toContain(ESC);
+	} else {
+		expect(controlsIn(printed), "colours off: no control character anywhere").toEqual([]);
+	}
+}
 
 describe("usertrust secret — cleanup never hides the command's outcome", () => {
 	let tmpDir: string;
@@ -111,6 +166,7 @@ describe("usertrust secret — cleanup never hides the command's outcome", () =>
 		origVaultKey = process.env.USERTRUST_VAULT_KEY;
 		process.env.USERTRUST_VAULT_KEY = "test-cli-vault-key-2026";
 		process.exitCode = undefined;
+		colour.on = false;
 		Object.assign(faults, {
 			command: undefined,
 			destroy: undefined,
@@ -180,24 +236,31 @@ describe("usertrust secret — cleanup never hides the command's outcome", () =>
 		expect(faults.released).toBe(1);
 	});
 
-	it("a lock path carrying terminal control is SCRUBBED on stderr after a successful command — no raw ESC, BEL or CR", async () => {
-		faults.release = hostileLockLeft();
+	it.each([
+		["on", true],
+		["off", false],
+	] as const)(
+		"colours %s: a lock path carrying terminal control (SGR, OSC, CR, DEL, 8-bit CSI) is SCRUBBED on stderr after a successful command",
+		async (_mode, on) => {
+			colour.on = on;
+			faults.release = hostileLockLeft();
 
-		await run();
-		const printed = errorOutput.join("\n");
-		expect(process.exitCode).toBe(1);
-		expect(printed, "control: the lock path is printed").toContain("]0;pwned");
-		expect(rawControl(printed)).toEqual([]);
-	});
+			await run();
+			expect(process.exitCode).toBe(1);
+			expectScrubbed(errorOutput.join("\n"));
+		},
+	);
 
-	it("…and in the warning after a FAILED command", async () => {
+	it.each([
+		["on", true],
+		["off", false],
+	] as const)("colours %s: …and in the warning after a FAILED command", async (_mode, on) => {
+		colour.on = on;
 		faults.command = new Error("vault list failed");
 		faults.release = hostileLockLeft();
 
 		await expect(run()).rejects.toThrow("vault list failed");
-		const printed = warnOutput.join("\n");
-		expect(printed, "control: the lock path is printed").toContain("]0;pwned");
-		expect(rawControl(printed)).toEqual([]);
+		expectScrubbed(warnOutput.join("\n"));
 	});
 
 	it("control: nothing fails — exit code untouched, nothing on stderr, both cleanup steps ran", async () => {

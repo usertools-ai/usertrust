@@ -363,7 +363,8 @@ function tryCleanStaleLock(lockPath: string, pid: unknown): void {
  * throws with nothing registered — an owner registered by an acquire that threw could never be
  * released (the caller gets no writer, and a scoped lock never reaches its release) and would
  * refuse this vault in this process for good — and removes the file the create made, if it is
- * still that file, so no lock is left behind for other processes either.
+ * still that file (its inode AND this writer's id: an inode alone is reused on Linux), so no lock
+ * is left behind for other processes either.
  */
 function createLock(lockPath: string, lockContent: string, writerId: string): boolean {
 	let fd: number;
@@ -387,7 +388,13 @@ function createLock(lockPath: string, lockContent: string, writerId: string): bo
 	} catch (err) {
 		if (identity !== undefined) {
 			try {
-				if (readLockFile(lockPath)?.identity === identity) unlinkSync(lockPath);
+				// The inode ALONE is not this file: once it is unlinked, Linux (ext4) hands the freed
+				// inode to the very next file created, so a lock another writer put here in the
+				// meantime can carry it. Unlinking that would free a LIVE lock. The writer id this
+				// create wrote must match too; a file whose content never fully landed fails that
+				// check and is left — unregistered, a same-PID lock nobody here holds.
+				const file = readLockFile(lockPath);
+				if (file?.identity === identity && file.writerId === writerId) unlinkSync(lockPath);
 			} catch {
 				/* cannot tell: leave it — unregistered, it is a same-PID lock nobody here holds */
 			}

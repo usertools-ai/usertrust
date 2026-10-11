@@ -983,6 +983,26 @@ describe("#195: a lock that cannot be read, released or closed is never treated 
 		expect(readFileSync(lockOf(vault), "utf-8"), "not ours: left in place").toBe(foreign);
 	});
 
+	it("P2: …even when the replacement REUSES the inode of the file the create made (Linux ext4 does: the freed inode goes to the next file) — the writer id tells them apart", () => {
+		const vault = scratch("trust-audit-close-reused-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		const foreign = JSON.stringify({ pid: 999999999, writerId: "someone-else" });
+		lockFaults.push({
+			op: "close",
+			code: "EIO",
+			before: () => {
+				const ours = inodeOf(lockOf(vault));
+				unlinkSync(lockOf(vault));
+				writeFileSync(lockOf(vault), foreign);
+				// Modelled reuse, so every platform sees it: the replacement reports our freed inode.
+				lockInoOverride.set(phys(lockOf(vault)), ours);
+			},
+		});
+		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(/EIO/);
+		expect(lockFaults, "control: the close fault was hit").toHaveLength(0);
+		expect(readFileSync(lockOf(vault), "utf-8"), "not ours: left in place").toBe(foreign);
+	});
+
 	it("withAuditWriterLock: when fn succeeds, a release failure rejects (naming the lock)", async () => {
 		const vault = scratch("trust-audit-scoped-release-");
 		mkdirSync(auditDirOf(vault), { recursive: true });
