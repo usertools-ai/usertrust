@@ -60,29 +60,31 @@ let decodeChain: Promise<unknown> = Promise.resolve();
 export const KIT_DECODE_TIMEOUT_MS = 3000;
 
 /**
- * A decode that never settles must not hold the queue (every later card would then wait behind it
- * forever): it is raced against a timeout, which REJECTS, so the chain moves on and the card falls
- * back to unbranded. The stuck decode itself cannot be cancelled; it is simply no longer waited for.
+ * The queue is tied to each decode's ACTUAL settlement, and only the CALLER's wait is bounded. wawoff2
+ * decodes in one shared WASM heap, so a decode that was merely abandoned (its caller timed out) can still
+ * complete late and overwrite the NEXT decode's output if the next one is allowed to start. It is not:
+ * the next decode waits for the abandoned one to really finish. The price of a decode that never settles
+ * is that every later card's wait times out and renders UNBRANDED; the price is never a wrong font.
  */
 export function decodeToTtf(
 	bytes: Uint8Array,
 	timeoutMs: number = KIT_DECODE_TIMEOUT_MS,
 	decode: (woff2: Uint8Array) => Promise<Uint8Array> = decompress,
 ): Promise<ArrayBuffer> {
-	const run = decodeChain.then(async () => {
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const timedOut = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error("font decode timed out")), timeoutMs);
-		});
-		try {
-			const ttf = await Promise.race([decode(bytes), timedOut]);
-			return ttf.buffer.slice(ttf.byteOffset, ttf.byteOffset + ttf.byteLength) as ArrayBuffer;
-		} finally {
-			clearTimeout(timer);
-		}
+	// `actual` settles when THIS decode (and its copy) really does; the chain follows it, not the timer.
+	const actual = decodeChain.then(async () => {
+		const ttf = await decode(bytes);
+		return ttf.buffer.slice(ttf.byteOffset, ttf.byteOffset + ttf.byteLength) as ArrayBuffer;
 	});
-	decodeChain = run.catch(() => undefined);
-	return run;
+	decodeChain = actual.then(
+		() => undefined,
+		() => undefined,
+	);
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timedOut = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => reject(new Error("font decode timed out")), timeoutMs);
+	});
+	return Promise.race([actual, timedOut]).finally(() => clearTimeout(timer));
 }
 
 /** How long the card waits for the kit before it renders without the brand fonts. */

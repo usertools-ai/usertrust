@@ -158,23 +158,44 @@ test("a font that fails to decode does not wedge the next load", async () => {
 
 const NEVER = () => new Promise<Uint8Array>(() => {});
 
-test("a decode that never settles is abandoned: it rejects after the timeout, and the queue is released", {
+/**
+ * A stand-in for wawoff2's SHARED heap: two decodes in flight at once corrupt each other's output (both
+ * come back as 0xFF garbage). A decode that is abandoned but still running counts as in flight.
+ */
+function sharedHeapDecoder(delays: Record<number, number>) {
+	let active = 0;
+	let collided = false;
+	return async (woff2: Uint8Array): Promise<Uint8Array> => {
+		active += 1;
+		if (active > 1) collided = true;
+		const mine = new Uint8Array(woff2);
+		await new Promise((resolve) => setTimeout(resolve, delays[woff2[0] as number] ?? 5));
+		const overlapped = collided;
+		active -= 1;
+		if (active === 0) collided = false;
+		return overlapped ? new Uint8Array(mine.length).fill(0xff) : mine;
+	};
+}
+
+test("a SLOW first decode that times out never lets the next decode run beside it: the next font is its own bytes, not another's", {
 	timeout: 8000,
 }, async () => {
-	const started = Date.now();
-	await assert.rejects(decodeToTtf(new Uint8Array([1]), 40, NEVER), /timed out/);
-	assert.ok(Date.now() - started < 3000, "bounded by the timeout, not by the decode");
-	// The stuck decode must not hold the chain: the next font still decodes.
-	const { bytes } = await woff2Fixture();
-	const ttf = await decodeToTtf(bytes);
-	assert.ok(ttf.byteLength > 0, "the next decode runs after the abandoned one");
+	const decoder = sharedHeapDecoder({ 1: 120, 2: 5 });
+	const first = decodeToTtf(new Uint8Array([1, 1, 1, 1]), 20, decoder);
+	await assert.rejects(first, /timed out/);
+	// started while the abandoned decode is still running: it must wait for it, then decode cleanly
+	const second = await decodeToTtf(new Uint8Array([2, 2, 2, 2]), 2000, decoder);
+	assert.deepEqual(Array.from(new Uint8Array(second)), [2, 2, 2, 2]);
 });
 
-test("a font whose decode never settles leaves the card unbranded, and the next load still works", {
+test("a decode that never settles: its caller times out, and every later decode times out (unbranded), never a wrong font", {
 	timeout: 8000,
 }, async () => {
-	const { bytes, spec } = await woff2Fixture();
-	const stuck = (woff2: Uint8Array) => decodeToTtf(woff2, 40, NEVER);
-	assert.equal(await loadPinnedFonts([spec], served(bytes), 3000, stuck), undefined);
-	assert.ok(await loadPinnedFonts([spec], served(bytes)), "a later card is not wedged behind it");
+	// A fresh module state is not available, so this runs LAST in the file's decode tests: it wedges the chain
+	// on purpose. Later decodes in this process then time out rather than return anything.
+	await assert.rejects(decodeToTtf(new Uint8Array([1]), 40, NEVER), /timed out/);
+	await assert.rejects(
+		decodeToTtf(new Uint8Array([2]), 40, async () => new Uint8Array([2])),
+		/timed out/,
+	);
 });
