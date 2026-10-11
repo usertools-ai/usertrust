@@ -20,10 +20,11 @@ Choose one of two ways to run the server, then write the config below.
 
 **Try it (no ledger).** Add `"dryRun": true` to the config. dryRun skips TigerBeetle, so the server needs no ledger replica. The audit chain and the policy engine still run. This is the fastest way to try the API.
 
-**Full mode, locally (TigerBeetle).** Leave `dryRun` out or set it to `false`, which is the default. The server then needs a running TigerBeetle at `127.0.0.1:3001`, the default address. The client is built against TigerBeetle 0.17.9 (`tigerbeetle-node` ^0.17.9), so run that release. These commands were run on Linux on arm64 with the 0.17.9 `tigerbeetle-aarch64-linux.zip` asset; for another platform, take the asset for your platform from the [0.17.9 release](https://github.com/tigerbeetle/tigerbeetle/releases).
+**Full mode, locally (TigerBeetle).** Leave `dryRun` out or set it to `false`, which is the default. The server then needs a running TigerBeetle at `127.0.0.1:3001`, the default address. Run the TigerBeetle release that matches the ledger client your install resolved. usertrust depends on `tigerbeetle-node` `^0.17.9`, so a later install can resolve a newer 0.17.x client, and a replica evicts a client whose release it does not support (`client_release_too_high` for a client newer than the replica). `npm ls tigerbeetle-node` where you installed usertrust-server (`npm ls -g tigerbeetle-node` for a global install) shows the client's version (0.17.9 when this was written); set `TB_VERSION` below to it. These commands were run on Linux on arm64 with the 0.17.9 `tigerbeetle-aarch64-linux.zip` asset; for another platform, take the asset for your platform from the [release with that version](https://github.com/tigerbeetle/tigerbeetle/releases).
 
 ```bash
-curl -sSL -o tigerbeetle.zip https://github.com/tigerbeetle/tigerbeetle/releases/download/0.17.9/tigerbeetle-aarch64-linux.zip
+TB_VERSION=0.17.9   # the tigerbeetle-node version `npm ls tigerbeetle-node` shows
+curl -sSL -o tigerbeetle.zip "https://github.com/tigerbeetle/tigerbeetle/releases/download/${TB_VERSION}/tigerbeetle-aarch64-linux.zip"
 unzip tigerbeetle.zip
 ./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle
 ./tigerbeetle start --addresses=3001 --development 0_0.tigerbeetle

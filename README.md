@@ -87,7 +87,7 @@ npx usertrust init
 
 usertrust wraps your provider's own client and does not install it: the provider SDKs are optional peer dependencies. Install the one you use: `@anthropic-ai/sdk` for the example above, or `openai`.
 
-`init` is interactive in a terminal. It asks for your provider API key (Anthropic `sk-ant-`, OpenAI `sk-` and Google `AIza` keys are detected from their prefix; any other provider you name yourself), checks the key against that provider's models endpoint (unless you pass `--skip-verify`), and writes it to `.usertrust/.env` with owner-only permissions.
+`init` is interactive in a terminal. It asks for your provider API key (Anthropic `sk-ant-`, OpenAI `sk-` and Google `AIza` keys are detected from their prefix; any other provider you name yourself) and writes it to `.usertrust/.env` with owner-only permissions. An Anthropic, OpenAI or Google key is first checked against that provider's models endpoint (unless you pass `--skip-verify`); a key that fails the check is still written, with a warning. A key for a provider you name yourself is not checked at all, even though `init` reports it as valid, so a wrong key there shows up only on the first real call.
 
 Without a terminal (CI, scripts, a container build), run `npx usertrust init --json`: it creates the vault without prompting and without asking for a key.
 
@@ -289,10 +289,11 @@ Try it first with `dryRun: true`, as in the example at the top. For full mode, r
 
 ### Running TigerBeetle
 
-Full mode needs a TigerBeetle replica at `127.0.0.1:3001`, the default address. The client is built against TigerBeetle 0.17.9 (`tigerbeetle-node` ^0.17.9), so run that release. These commands were run on Linux on arm64 with the 0.17.9 `tigerbeetle-aarch64-linux.zip` asset; for another platform, take the asset for your platform from the [0.17.9 release](https://github.com/tigerbeetle/tigerbeetle/releases).
+Full mode needs a TigerBeetle replica at `127.0.0.1:3001`, the default address. Run the TigerBeetle release that matches the ledger client your install resolved. usertrust depends on `tigerbeetle-node` `^0.17.9`, so a later install can resolve a newer 0.17.x client, and a replica evicts a client whose release it does not support (`client_release_too_high` for a client newer than the replica). `npm ls tigerbeetle-node` in your project shows the client's version (0.17.9 when this was written); set `TB_VERSION` below to it. These commands were run on Linux on arm64 with the 0.17.9 `tigerbeetle-aarch64-linux.zip` asset; for another platform, take the asset for your platform from the [release with that version](https://github.com/tigerbeetle/tigerbeetle/releases).
 
 ```bash
-curl -sSL -o tigerbeetle.zip https://github.com/tigerbeetle/tigerbeetle/releases/download/0.17.9/tigerbeetle-aarch64-linux.zip
+TB_VERSION=0.17.9   # the tigerbeetle-node version `npm ls tigerbeetle-node` shows
+curl -sSL -o tigerbeetle.zip "https://github.com/tigerbeetle/tigerbeetle/releases/download/${TB_VERSION}/tigerbeetle-aarch64-linux.zip"
 unzip tigerbeetle.zip
 ./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle
 ./tigerbeetle start --addresses=3001 --development 0_0.tigerbeetle
