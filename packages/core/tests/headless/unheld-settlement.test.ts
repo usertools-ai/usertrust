@@ -388,3 +388,47 @@ describe("destroy() waits for a record still being appended", () => {
 		expect(audit.release).toHaveBeenCalled();
 	});
 });
+
+describe("caller input is read ONCE", () => {
+	it("a getter that answers differently on a second read cannot put unchecked text on the chain", async () => {
+		const g = await recording().gov();
+		const reads = { usageTo: 0, usageSource: 0, computeMs: 0, transferId: 0, inputTokens: 0 };
+		const params = {
+			get transferId() {
+				reads.transferId += 1;
+				return reads.transferId === 1 ? GONE : "tx_second_read";
+			},
+			get usageTo() {
+				reads.usageTo += 1;
+				return reads.usageTo === 1 ? "2026-10-11T16:00:00.000Z" : "\u001b[2Jevil";
+			},
+			get usageSource() {
+				reads.usageSource += 1;
+				return reads.usageSource === 1 ? "provider" : "not-a-source";
+			},
+			get computeMs() {
+				reads.computeMs += 1;
+				return reads.computeMs === 1 ? 5 : -1;
+			},
+			get inputTokens() {
+				reads.inputTokens += 1;
+				return reads.inputTokens === 1 ? 7 : -1;
+			},
+		} as unknown as Parameters<Governor["recordUnheldSettlement"]>[0];
+		await g.recordUnheldSettlement(params);
+		expect(reads).toEqual({
+			usageTo: 1,
+			usageSource: 1,
+			computeMs: 1,
+			transferId: 1,
+			inputTokens: 1,
+		});
+		expect((audit.events[0] as AppendEventInput).data).toMatchObject({
+			transferIdHash: createHash("sha256").update(GONE).digest("hex"),
+			usageTo: "2026-10-11T16:00:00.000Z",
+			usageSource: "provider",
+			computeMs: 5,
+			usage: { inputTokens: 7 },
+		});
+	});
+});

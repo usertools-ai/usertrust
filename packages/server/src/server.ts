@@ -169,7 +169,9 @@ export function createUsertrustServer(opts: {
 	// RECENTLY_SETTLED_MEMORY) and of settles in flight, so a concurrent or repeated settle is told
 	// apart from one whose hold is gone.
 	// The memory is PER TENANT, so one tenant's settles can never evict another's remembered ids.
-	const recentlySettled = new Map<string, Set<string>>();
+	// id -> how its settle ended: "settled" (it posted) or "ambiguous" (the ledger post's outcome is
+	// unknown: it may have charged). A Map keeps insertion order, so eviction is FIFO.
+	const recentlySettled = new Map<string, Map<string, "settled" | "ambiguous">>();
 	const settling = new Set<string>();
 	// Per tenant, and served only on the authenticated /v1/budget: the unauthenticated /v1/health
 	// must not tell anyone when some tenant's settles are being dropped.
@@ -347,10 +349,10 @@ export function createUsertrustServer(opts: {
 		try {
 			const governor = await pool.get(tenant);
 			const receipt = await governor.settle(entry.auth, usage);
-			// Only a settle that POSTED is remembered as settled: one that reached the ledger and did
-			// not post (`settled: false`, recorded as ambiguous) must not turn a retry into a false
-			// "the charge stands".
-			if (receipt.settled !== false) rememberSettled(tenant.id, transferId);
+			// A settle that reached the ledger and did not confirm (`settled: false`, recorded as
+			// ambiguous) may STILL have charged: its retry is told so (409 settlement_ambiguous), never
+			// "the charge stands" and never "authorize again", which could charge the call twice.
+			rememberSettled(tenant.id, transferId, receipt.settled === false ? "ambiguous" : "settled");
 			bus.publish(tenant.id, {
 				type: "settled",
 				transferId,
@@ -368,16 +370,20 @@ export function createUsertrustServer(opts: {
 		}
 	}
 
-	function rememberSettled(tenantId: string, transferId: string): void {
-		let set = recentlySettled.get(tenantId);
-		if (set === undefined) {
-			set = new Set();
-			recentlySettled.set(tenantId, set);
+	function rememberSettled(
+		tenantId: string,
+		transferId: string,
+		how: "settled" | "ambiguous",
+	): void {
+		let map = recentlySettled.get(tenantId);
+		if (map === undefined) {
+			map = new Map();
+			recentlySettled.set(tenantId, map);
 		}
-		set.add(transferId);
-		if (set.size > RECENTLY_SETTLED_MEMORY) {
-			const oldest = set.values().next().value;
-			if (oldest !== undefined) set.delete(oldest);
+		map.set(transferId, how);
+		if (map.size > RECENTLY_SETTLED_MEMORY) {
+			const oldest = map.keys().next().value;
+			if (oldest !== undefined) map.delete(oldest);
 		}
 	}
 
@@ -403,7 +409,17 @@ export function createUsertrustServer(opts: {
 			});
 			return;
 		}
-		if (recentlySettled.get(tenant.id)?.has(transferId) === true) {
+		const earlier = recentlySettled.get(tenant.id)?.get(transferId);
+		if (earlier === "ambiguous") {
+			sendJson(res, 409, {
+				error: "settlement_ambiguous",
+				reason:
+					"the first settle's ledger post was ambiguous: it may have charged. Do not authorize again to settle it; check the ledger",
+				transferId,
+			});
+			return;
+		}
+		if (earlier === "settled") {
 			sendJson(res, 409, {
 				error: "already_settled",
 				reason: "this transferId was already settled: the charge stands",

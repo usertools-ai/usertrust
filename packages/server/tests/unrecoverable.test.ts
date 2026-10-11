@@ -222,7 +222,7 @@ describe("a retry or a concurrent settle is not an unrecoverable one", () => {
 		expect(await counted(base)).toBe(0);
 	});
 
-	it("a settle that reached the ledger but did NOT post is not remembered as settled: its retry is not a false 'the charge stands'", async () => {
+	it("a settle whose ledger post was AMBIGUOUS (settled: false) may have charged: its retry is a 409 settlement_ambiguous, nothing recorded, never 'authorize again'", async () => {
 		const { base, fake } = await start();
 		const id = await authorize(base);
 		const original = fake.governor.settle;
@@ -232,8 +232,9 @@ describe("a retry or a concurrent settle is not an unrecoverable one", () => {
 		});
 		expect((await post(base, "/v1/settle", { transferId: id })).status).toBe(200);
 		const retry = await post(base, "/v1/settle", { transferId: id });
-		expect(retry.status).toBe(410);
-		expect(fake.calls.unheld).toHaveLength(1);
+		expect(retry.status).toBe(409);
+		expect(await retry.json()).toMatchObject({ error: "settlement_ambiguous", transferId: id });
+		expect(fake.calls.unheld).toEqual([]);
 	});
 
 	it("a failed settle stays retryable and is not remembered as settled", async () => {

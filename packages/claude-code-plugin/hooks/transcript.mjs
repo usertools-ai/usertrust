@@ -140,6 +140,7 @@ import {
 	guardMode,
 	holdUsageStart,
 	isAlreadySettled,
+	isSettleGone,
 	isUnknownRoute,
 	isUnknownTransfer,
 	jobCapable,
@@ -2026,17 +2027,17 @@ async function settleOutcome(transferId, settle, keyed) {
 	// The hold is known gone only when the server says so: this settle's 404
 	// `unknown transferId`, or a confirmed hygiene release.
 	const released = await hygieneRelease(transferId, "transcript settle failed");
-	const holdEnded = released || isUnknownTransfer(settle);
+	const holdEnded = released || isSettleGone(settle);
 	const reason = `settle returned ${settle.status}`;
 	if (settle.status === 400) return { outcome: "released", reason, holdEnded };
 	if (keyed) return { outcome: "unresolved", reason, holdEnded };
 	return {
-		outcome: settle.status === 404 ? "released" : "claimed",
+		outcome: settle.status === 404 || isSettleGone(settle) ? "released" : "claimed",
 		reason,
 		holdEnded,
 		// The server holds no such transfer: the caller of an empty hold's settle at zero reads
 		// this as the hold gone (`returnEmptyHold`).
-		...(isUnknownTransfer(settle) ? { unknownTransfer: true } : {}),
+		...(isSettleGone(settle) ? { unknownTransfer: true } : {}),
 	};
 }
 

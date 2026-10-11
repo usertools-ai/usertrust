@@ -2404,20 +2404,23 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				cacheWrite1hTokens: count(params.cacheWrite1hTokens),
 				chunksDelivered: count(params.chunksDelivered),
 			};
+			// Every remaining field is read ONCE into a local and validated from that local: a getter
+			// that answers differently on a second read cannot get unchecked text onto the chain.
+			const rawComputeMs: unknown = params.computeMs;
 			const computeMs =
-				typeof params.computeMs === "number" &&
-				Number.isFinite(params.computeMs) &&
-				params.computeMs >= 0
-					? params.computeMs
+				typeof rawComputeMs === "number" && Number.isFinite(rawComputeMs) && rawComputeMs >= 0
+					? rawComputeMs
 					: undefined;
+			const rawUsageSource: unknown = params.usageSource;
 			const usageSource =
-				params.usageSource === "provider" || params.usageSource === "estimated"
-					? params.usageSource
+				rawUsageSource === "provider" || rawUsageSource === "estimated"
+					? rawUsageSource
 					: undefined;
 			// The settle path's own rule: an ISO-8601 UTC instant or nothing (an unusable one is dropped).
+			const rawUsageTo: unknown = params.usageTo;
 			const usageTo =
-				typeof params.usageTo === "string" && usageTimeRefusal(params.usageTo) === undefined
-					? params.usageTo
+				typeof rawUsageTo === "string" && usageTimeRefusal(rawUsageTo) === undefined
+					? rawUsageTo
 					: undefined;
 			const principal = capturePrincipal(params.principal);
 			if (destroyed || sweeping) throw new Error("Governor has been destroyed");
