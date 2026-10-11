@@ -94,7 +94,7 @@ describe("TrustEngine", () => {
 
 	describe("spendPending", () => {
 		it("creates a PENDING transfer", async () => {
-			// AUD-455: No pre-check — TB enforces atomically
+			// No pre-check — TB enforces atomically
 			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
 
 			const result = await engine.spendPending({
@@ -126,7 +126,7 @@ describe("TrustEngine", () => {
 		});
 
 		it("throws InsufficientBalanceError when TB rejects due to insufficient balance", async () => {
-			// AUD-455: No pre-check — TB enforces atomically. Simulate TB rejection.
+			// No pre-check — TB enforces atomically. Simulate TB rejection.
 			const tbErr = new Error("Pending transfer failed: exceeds_credits");
 			Object.assign(tbErr, { name: "TBTransferError", code: 22 });
 			mockTB.createPendingTransfer.mockRejectedValueOnce(tbErr);

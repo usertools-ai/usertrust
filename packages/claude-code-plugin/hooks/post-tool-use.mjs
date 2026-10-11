@@ -433,7 +433,7 @@ try {
 		}
 		// Price both legs. The authorize-time input estimate is persisted on the
 		// pending file; if an older file lacks it, re-estimate from tool_input
-		// when the host still sends it (AUD-004).
+		// when the host still sends it.
 		const inputTokens =
 			typeof entry.estimatedInputTokens === "number"
 				? entry.estimatedInputTokens
@@ -443,7 +443,7 @@ try {
 		const usage = {
 			...(inputTokens != null ? { inputTokens } : {}),
 			// Same 16 KiB cap as the output hold so a content-cap result cannot
-			// price above the reservation (AUD-004).
+			// price above the reservation.
 			outputTokens: estimateTokens(
 				JSON.stringify(input.tool_response ?? "").slice(0, MAX_CONTENT_CHARS),
 			),
