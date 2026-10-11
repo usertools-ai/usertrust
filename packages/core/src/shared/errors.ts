@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { DEFAULT_TIGERBEETLE_ADDRESS } from "./constants.js";
+
 /**
  * The correlation handle a governance denial carries back to the caller.
  *
@@ -27,6 +29,19 @@ export interface DenialAuditMetadata {
 	auditEventHash?: string | undefined;
 	/** `true` when the append was attempted, failed, and was dead-lettered. */
 	auditDegraded?: boolean | undefined;
+}
+
+/**
+ * `recordUnheldSettlement()` refused: too many records in the window. Each record is an fsync'd append
+ * on the tenant's audit chain, so a client minting unknown ids must not be able to grow it without
+ * bound. Nothing was recorded: the caller sees the refusal (usertrust-server answers 429) and retries
+ * later, never a silent drop.
+ */
+export class UnheldSettlementRateLimitedError extends Error {
+	constructor(public readonly retryAfterMs: number) {
+		super(`too many unrecoverable-settlement records: retry in ${Math.ceil(retryAfterMs / 1000)}s`);
+		this.name = "UnheldSettlementRateLimitedError";
+	}
 }
 
 export class InsufficientBalanceError extends Error {
@@ -163,9 +178,9 @@ export class LedgerUnavailableError extends Error {
 	public readonly hint: string;
 	public readonly docsUrl: string;
 
-	constructor(reason: string) {
-		const hint =
-			'Start TigerBeetle with "npx usertrust tb start" or use { dryRun: true } to skip the ledger.';
+	/** `address` is the ledger the governor was configured with, when the thrower knows it. */
+	constructor(reason: string, address: string = DEFAULT_TIGERBEETLE_ADDRESS) {
+		const hint = `Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=${address}) or use { dryRun: true } to skip the ledger.`;
 		const docsUrl = "https://usertrust.ai/docs/errors/ledger-unavailable";
 		super(`Ledger unavailable: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "LedgerUnavailableError";

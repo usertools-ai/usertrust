@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
 	computeEntropyScore,
@@ -69,6 +70,43 @@ describe("Entropy — individual signals", () => {
 	// REWRITTEN: no producer kind contains "audit"/"chain"/"verify", so this used
 	// to evaluate zero events. Chain validity is a property of the LOG and is now
 	// supplied by the caller; money/audit desync arrives as `settlement_ambiguous`.
+	it("extractChainIntegrity counts a settlement_unrecoverable as a settlement attempt and a desync, keyed by its hash", () => {
+		const events: EntropyEventInput[] = [
+			{ kind: "llm_call", data: { cost: 1, settled: true, transferId: "t-1" } },
+			{
+				kind: "settlement_unrecoverable",
+				data: { transferIdHash: "h-1", usage: { inputTokens: 5 } },
+			},
+		];
+		const signal = extractChainIntegrity(events, {});
+		expect(signal.total).toBe(2);
+		expect(signal.hits).toBe(1);
+		expect(signal.value).toBeCloseTo(0.5);
+		// pre-fix control: the same record under a kind the signal does not know is invisible
+		const control = extractChainIntegrity(
+			[
+				events[0] as EntropyEventInput,
+				{ ...(events[1] as EntropyEventInput), kind: "not_a_settlement" },
+			],
+			{},
+		);
+		expect(control.total).toBe(1);
+		expect(control.hits).toBe(0);
+	});
+
+	it("extractChainIntegrity counts ONE transfer once, whether a record names it by raw id or by its hash", () => {
+		const hash = createHash("sha256").update("t-1").digest("hex");
+		const signal = extractChainIntegrity(
+			[
+				{ kind: "llm_call", data: { cost: 1, settled: true, transferId: "t-1" } },
+				{ kind: "settlement_unrecoverable", data: { transferIdHash: hash } },
+			],
+			{},
+		);
+		expect(signal.total).toBe(1);
+		expect(signal.hits).toBe(1);
+	});
+
 	it("extractChainIntegrity detects verification failures", () => {
 		// Real producers always stamp `transferId`; the desync rate deduplicates on
 		// it, because `settlement_ambiguous` is a CORRECTION appended alongside the

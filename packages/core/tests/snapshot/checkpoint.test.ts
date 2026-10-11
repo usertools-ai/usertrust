@@ -260,6 +260,49 @@ describe("Checkpoint / Restore", () => {
 		});
 	});
 
+	describe("a writer's temp file is never captured — only its exact name shapes", () => {
+		const WRITER_ID = "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0";
+		const SHA = "ab".repeat(32);
+		/** Plant `rel` (under the vault) and snapshot; the snapshot's file list. */
+		async function captureWith(...rel: string[]): Promise<string[]> {
+			await populateVault();
+			for (const r of rel) {
+				await mkdir(join(vaultPath, r, ".."), { recursive: true });
+				await writeFile(join(vaultPath, r), '{"half":');
+			}
+			return (await createSnapshot(vaultPath, "temps")).files;
+		}
+
+		it.each([
+			["the lock's temp file (audit/chain.ts)", `audit/.audit-writer.lock.${WRITER_ID}.tmp`],
+			["the .meta anchor's temp file (#293)", `audit/events.jsonl.meta.${WRITER_ID}.tmp`],
+			["a quarantine evidence temp file (#293)", `audit/quarantine/.${SHA}-1234.${WRITER_ID}.tmp`],
+			["…at offset 0", `audit/quarantine/.${SHA}-0.${WRITER_ID}.tmp`],
+		])("%s is not captured", async (_name, rel) => {
+			const files = await captureWith(rel);
+			expect(files, "control: the vault's own files are captured").toContain("audit/chain.jsonl");
+			expect(files).not.toContain(rel);
+		});
+
+		it.each([
+			["an operator's policy named *.tmp", "policies/draft.tmp"],
+			[
+				"an operator's pattern named like a lock temp",
+				`patterns/.audit-writer.lock.${WRITER_ID}.tmp`,
+			],
+			["a .tmp under audit/ that is no writer's shape", "audit/notes.tmp"],
+			["a lock temp whose id is not a writer id", "audit/.audit-writer.lock.not-a-writer-id.tmp"],
+			["a .meta temp of another file", `audit/other.jsonl.meta.${WRITER_ID}.tmp`],
+			[
+				"a quarantine temp with a non-canonical offset",
+				`audit/quarantine/.${SHA}-007.${WRITER_ID}.tmp`,
+			],
+			["a quarantine temp outside quarantine/", `audit/.${SHA}-1234.${WRITER_ID}.tmp`],
+		])("%s IS captured — the rule is exact, not *.tmp", async (_name, rel) => {
+			expect(await captureWith(rel)).toContain(rel);
+		});
+	});
+
 	describe("collectFiles with nested directories (lines 54-55)", () => {
 		it("recursively collects files from nested subdirectories", async () => {
 			// Create a deeply nested structure under an included path

@@ -171,13 +171,12 @@ class LedgerUnavailableError extends Error {
 
 **When it fires:** Before any LLM call, during the connection check or PENDING hold attempt. This is failure mode 15.4 -- no tokens are at risk because no hold was placed.
 
-**Hint:** `'Start TigerBeetle with "npx usertrust tb start" or use { dryRun: true } to skip the ledger.'`
+**Hint:** `'Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=<address>) or use { dryRun: true } to skip the ledger.'`, where `<address>` is the ledger the governor was configured with (`127.0.0.1:3001` by default).
 
 <Callout type="warn">
-That hint is the error's own text, quoted verbatim — and `usertrust tb start` is
-a stub that prints a manual command rather than starting anything. Follow the
-[CLI page's `usertrust tb` section](/docs/cli#usertrust-tb) for the command that
-actually starts a node, or pass `{ dryRun: true }` to skip the ledger entirely.
+`usertrust tb start` does not manage TigerBeetle in this version: it prints the same
+format and start commands. Follow the [CLI page's `usertrust tb` section](/docs/cli#usertrust-tb)
+to run a node yourself, or pass `{ dryRun: true }` to skip the ledger entirely.
 </Callout>
 
 <Callout type="warn">

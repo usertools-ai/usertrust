@@ -171,6 +171,28 @@ settle-then-void leaving the ledger holding a debit its accounting does not.
 `release` (a hold given back: neither, and a `hold_released` record). usertrust-server's TTL sweep
 and shutdown release; `POST /v1/release` (capability `release`) exposes it, and answers 200 only
 when the governor says it ended the hold (`{ released: true }`), else 404 `unknown transferId`.
+A settle that arrives for a hold the governor no longer has is recorded, never dropped:
+`Governor.recordUnheldSettlement()` appends `settlement_unrecoverable` (the id as its SHA-256, the
+caller's reported usage, no cost) and **only** that: it never reserves, posts, voids or re-opens a hold,
+touches no budget counter and prices nothing. `POST /v1/settle` answers it as `410`, with `409
+already_settled` for a retry of a settle that went through in this process (bounded memory of 10 000,
+FIFO; past it a retry is recorded again, a duplicate record and never a lost one).
+*In usertrust-server, ONE function (`claim`) is the only way an entry leaves `pending`:* settle, abort,
+release, the TTL sweep and shutdown all go through it, and it registers the terminal in `claimed` in the
+same synchronous step, so a settle that finds the entry gone waits on whatever terminal holds it (bounded)
+instead of polling; it refuses (`NOT_CLAIMED`) unless the entry is still the one in `pending`, so shutdown's snapshot loop
+cannot claim a hold a client terminal already took. A route that took an entry out on its own left a settle racing a slow client
+release or abort nothing to wait on: it answered a 409 the plugin reads as "claimed", and the usage was
+neither charged nor recorded (the same class as the sweep race, patched by handler once). Pinned by
+`tests/claim.test.ts` (exactly one delete call on `pending`, no clear call) and by red-first rows for a
+settle racing a slow release and a slow abort. `usertrust-verify --tx <id>` matches a
+`settlement_unrecoverable` record by the SHA-256 of the queried id, since the record stores no id.
+*Prevents:* a TTL-swept or restarted hold turning a client's real provider spend into a bare `404` that
+nothing records, and the opposite mistake of "recovering" it by moving money from a record. The record
+is deliberately UNATTRIBUTED (`actor: "local"`, no `costCenter`): its hold is gone, so there is no
+capture to read an attribution from, and inventing one from request text would break the structural
+attribution rule above. At most 1 000 new records per minute per governor
+(`UnheldSettlementRateLimitedError`, `429`), because each is an fsync'd append.
 `abort()` answers the same way (`{ aborted: true }` or `{ aborted: false }`, a refused void named in
 `voidError`), and `POST /v1/abort` keeps the same 200/404 rule. An abort or release is in flight
 from its synchronous claim until its record starts (`inFlight`): `destroy()` waits for it, and
@@ -994,13 +1016,61 @@ therefore the one place where "no prompt or response body lands on disk" (below)
 a change made somewhere else — add a prompt-bearing field to any audit event and the DLQ writes it
 in the clear, with no hash chain over it. `0600` is the only thing protecting it.
 
-**Single-writer audit semantics.** In-process `AsyncMutex` + an `O_WRONLY|O_CREAT|O_EXCL` advisory
-lock file + an owner registry that distinguishes a crashed same-PID writer (reclaimable) from a live
+**Single-writer audit semantics.** In-process `AsyncMutex` + an advisory
+lock file (created complete, by hard link: below) + an owner registry that distinguishes a crashed same-PID writer (reclaimable) from a live
 sibling (refused). Every append writes EVERY byte (`writeFully`: a short `writeSync` is looped, and
 one that makes no progress throws, so nothing is claimed durable and the cached tail is dropped),
 then `fsyncSync` + `closeSync`. The `.meta` sidecar is replaced atomically: a temp file, fsync,
 rename, then a directory fsync (only an UNSUPPORTED directory fsync is best effort). Reclaiming a *live* sibling's lock forks the chain, because each writer caches its
 own tail. There is **no** cross-process protection beyond this advisory lock.
+
+**The lock file appears complete, by hard link.** `createLock` writes the full content (a write
+loop) and fsyncs it to a private temp file, `.audit-writer.lock.<writerId>.tmp`, created
+`O_EXCL|O_NOFOLLOW`. Its `fstat` inode becomes the lock's create-time identity. The temp file is then
+`link`ed to the lock's name (EEXIST means taken) and removed on every path, and the directory is
+fsync'd (best effort, reported, never fatal). *Prevents:* the create-then-write window, in which
+another process read the lock empty, judged it corrupt, and unlinked a LIVE writer's lock. Do not
+"simplify" back to `open(O_EXCL)` + write. Three rules come with it:
+- `link` unsupported (`EPERM`/`ENOTSUP`/`EOPNOTSUPP`/`EXDEV`/`ENOSYS`) fails the acquire **closed**,
+  keeping the code. Any fallback reopens the window.
+- Only the exact name `.audit-writer.lock` is ever read as a lock, and never through a symlink
+  (`O_NOFOLLOW`; a symlink there throws `ELOOP`).
+- A writer that has just taken the lock sweeps leftover temp files over a minute old. That age is a
+  housekeeping judgement, never a lock's: removing a live creator's temp file can only fail its link.
+
+A writer that already holds a lock verifies it with one read per append, so an append creates no
+temp file.
+
+**Staleness is judged on one kernel, failing toward live.** `tryCleanStaleLock` judges another
+process's lock. The lock records `bootId` (Linux `/proc/sys/kernel/random/boot_id`) and `pidNs`
+(`/proc/self/ns/pid`) where they can be read. In order:
+1. The same PID in the same namespace (or a lock that names none) is a crashed earlier instance of
+   this PID, and is reclaimed.
+2. A lock from another namespace, or one whose namespace cannot be compared, is HELD, whatever its
+   boot id.
+3. A lock whose boot id and this boot's are both known and differ EXACTLY is reclaimed.
+4. Otherwise `kill(pid, 0)` decides, as before.
+
+*Prevents:*
+- A previous boot's lock whose PID a live, unrelated process now carries reading as held forever.
+- A sibling container's live writer being reclaimed: containers on one host share the boot id, and
+  each often runs its writer as PID 1, so its lock would pass as a same-PID crash.
+- A host and a systemd-nspawn container (or two of them) reclaiming each other's LIVE locks: nspawn
+  gives each container a PRIVATE boot id on the host's kernel. That is why step 2 comes before step
+  3; do not reorder them.
+
+Rules:
+- An unknown boot id on either side is never stale.
+- Never reclaim on a time estimate; an uptime-derived boot time moves with the wall clock.
+- Cache only a SUCCESSFUL identity read.
+- A lock file's fields are untrusted text. Print them only through `describeLockPid` (a non-negative
+  safe integer, else `<invalid>`) or `describeLockField` (the value when it has its shape, else
+  `<invalid>`) — never `String(pid)` or a raw `${pid}`: a restored vault's lock can carry a `pid`
+  string full of terminal controls.
+
+A crashed container restarted into a new PID namespace therefore finds its old lock held, even
+after a reboot, until it is removed by hand (LIMITATIONS §5). That is the price of never reclaiming a live sibling's lock. A
+vault shared between kernels is outside the model.
 
 **The lock's threat model: accidental concurrent writers, not an adversary.** The lock stops two
 processes, or two writers in one process, from appending to one vault at once. It does not defend
@@ -1264,7 +1334,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **seventeen** sanitizers, in two variants: **eleven** neutralise C1 and **six** do not. Do
+There are **eighteen** sanitizers, in two variants: **twelve** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1369,6 +1439,14 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   receipt later prints it at an auditor. It STRIPS C0, DEL and C1 rather than substituting `?`,
   because a stored reason is data, not a render, and then clips at 200 code points. It is
   exported so usertrust-server's `released` event carries exactly the text the chain recorded.
+- The stronger variant in usertrust-server's CLI: `scrubForStderr` in `server/src/cli/scrub.ts`,
+  applied where `cli/main.ts` prints `usertrust-server failed to start: …` (and the configured
+  host in its `listening on` line). That message carries configured values (a ledger address, a
+  config path) and the ledger probe child's quoted stderr. It removes whole escape sequences,
+  7-bit and 8-bit, then STRIPS C0, DEL and C1 line by line, keeping only the line breaks a
+  multi-line refusal needs; then clips at 4096 code points, after sanitizing. Only the printed
+  text is scrubbed: `probeLedger()` throws the raw message, for an embedder that renders it its
+  own way. A local copy, not an import: `scrubForTerminal` is not a public export of `usertrust`.
 
 **THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
 `packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus

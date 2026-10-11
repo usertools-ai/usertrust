@@ -36,6 +36,7 @@ type Ending =
 	| "ok"
 	| "unsettled"
 	| "gone"
+	| "unrecoverable"
 	| "other4xx"
 	| "other404"
 	| "refusal402"
@@ -49,6 +50,11 @@ type Ending =
 const ANSWER: Record<Exclude<Ending, "ok" | "refused">, Reply> = {
 	unsettled: { status: 200, json: { settled: false } },
 	gone: { status: 404, json: { error: "not_found", reason: "unknown transferId" } },
+	// A newer server's settle answer for a hold it no longer has: recorded, not charged (usertrust-server).
+	unrecoverable: {
+		status: 410,
+		json: { error: "settlement_unrecoverable", reason: "no hold", recorded: true },
+	},
 	other4xx: { status: 400, json: { error: "bad_request", reason: "invalid request" } },
 	other404: { status: 404, json: { error: "not_found", reason: "no such thing" } },
 	refusal402: { status: 402, json: { error: "budget_exceeded", reason: "over budget" } },
@@ -442,14 +448,17 @@ describe("PostToolUse's settle of an estimate hold", () => {
 		]);
 	});
 
-	it("404 unknown transferId: the hold expired, and the call is charged once on a fresh hold", async () => {
-		await go("gone");
-		expect(requests("/v1/settle").map((request) => request.body.transferId)).toEqual([
-			"tx_1",
-			"tx_s1",
-		]);
-		expect(await records()).toEqual([]);
-	});
+	it.each<Ending>(["gone", "unrecoverable"])(
+		"%s (404 unknown transferId, or a newer server's 410 settlement_unrecoverable): the hold expired, and the call is charged once on a fresh hold",
+		async (ending) => {
+			await go(ending);
+			expect(requests("/v1/settle").map((request) => request.body.transferId)).toEqual([
+				"tx_1",
+				"tx_s1",
+			]);
+			expect(await records()).toEqual([]);
+		},
+	);
 	it.each<[Ending, string]>([
 		["other4xx", "failed"],
 		["error5xx", "failed"],

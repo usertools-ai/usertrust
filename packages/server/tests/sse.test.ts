@@ -81,7 +81,8 @@ describe("SSE + shadow + sweep", () => {
 		expect(body.shadow).toBe(true);
 		expect(body.decision).toBe("would_deny");
 		// Shadow responses carry a shadowId, never a transferId — there is no
-		// reservation to settle or abort, so those routes 404 on shadow ids.
+		// reservation to settle or abort: abort 404s on a shadow id, and a settle for one is a
+		// recorded 410 (no hold here).
 		expect(body.shadowId).toMatch(/^shadow_/);
 		expect(body.transferId).toBeUndefined();
 		const settle = await fetch(`http://127.0.0.1:${port}/v1/settle`, {
@@ -89,7 +90,7 @@ describe("SSE + shadow + sweep", () => {
 			headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
 			body: JSON.stringify({ transferId: body.shadowId }),
 		});
-		expect(settle.status).toBe(404);
+		expect(settle.status).toBe(410);
 		expect(
 			seen.some(
 				(e) =>
