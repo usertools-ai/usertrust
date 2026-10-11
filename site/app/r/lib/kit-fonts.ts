@@ -46,6 +46,25 @@ export const KIT_FONTS: readonly PinnedFont[] = [
 	},
 ];
 
+/**
+ * wawoff2 runs on ONE shared WASM heap and `decompress` returns a VIEW into it. A second decode
+ * in flight overwrites the first's output before the first's post-`await` copy runs, so the first
+ * font was another font's bytes (or invalid) and `getKitFonts()` then cached that for the whole
+ * server instance. Every decode is therefore serialised TOGETHER with its copy; the fetches and the
+ * integrity checks stay parallel. The chain survives a rejection so one bad font cannot wedge the
+ * next card.
+ */
+let decodeChain: Promise<unknown> = Promise.resolve();
+
+function decodeToTtf(bytes: Uint8Array): Promise<ArrayBuffer> {
+	const run = decodeChain.then(async () => {
+		const ttf: Uint8Array = await decompress(bytes);
+		return ttf.buffer.slice(ttf.byteOffset, ttf.byteOffset + ttf.byteLength) as ArrayBuffer;
+	});
+	decodeChain = run.catch(() => undefined);
+	return run;
+}
+
 /** How long the card waits for the kit before it renders without the brand fonts. */
 export const KIT_FONT_TIMEOUT_MS = 3000;
 
@@ -67,11 +86,7 @@ export async function loadPinnedFonts(
 				const bytes = new Uint8Array(await response.arrayBuffer());
 				const actual = `sha384-${createHash("sha384").update(bytes).digest("base64")}`;
 				if (actual !== spec.integrity) throw new Error(`${spec.url}: integrity mismatch`);
-				const ttf: Uint8Array = await decompress(bytes);
-				const data = ttf.buffer.slice(
-					ttf.byteOffset,
-					ttf.byteOffset + ttf.byteLength,
-				) as ArrayBuffer;
+				const data = await decodeToTtf(bytes);
 				return { name: spec.name, data, weight: spec.weight, style: "normal" as const };
 			}),
 		);
