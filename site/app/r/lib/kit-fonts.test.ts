@@ -222,3 +222,33 @@ test("while a decode is stalled, N later cards each answer UNBRANDED at once: ze
 	assert.equal(fetches, 0, "no fetch while a decode is stalled");
 	assert.equal(decodes, 0, "nothing is enqueued behind the stalled decode");
 });
+
+test("RECOVERY: when the stalled decode finally settles, the stall clears and the next card is branded again", {
+	timeout: 8000,
+}, async () => {
+	// A fresh module instance (its own stall counter): the earlier tests left the shared one stalled.
+	const fresh = (await import(
+		`./kit-fonts.ts?recovery=${Date.now()}`
+	)) as typeof import("./kit-fonts");
+	const { bytes, spec } = await woff2Fixture();
+	let release: (() => void) | undefined;
+	const slow = (woff2: Uint8Array) =>
+		new Promise<Uint8Array>((resolve) => {
+			release = () => resolve(woff2);
+		});
+	await assert.rejects(fresh.decodeToTtf(new Uint8Array([1, 2, 3]), 20, slow), /timed out/);
+	// stalled: a new card answers unbranded with no fetch
+	let fetches = 0;
+	const countingFetch = (async () => {
+		fetches += 1;
+		return new Response(bytes.slice().buffer, { status: 200 });
+	}) as unknown as typeof fetch;
+	assert.equal(await fresh.loadPinnedFonts([spec], countingFetch), undefined);
+	assert.equal(fetches, 0);
+	// the late decode really finishes: the stall clears, and the next card loads normally
+	release?.();
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	const fonts = await fresh.loadPinnedFonts([spec], countingFetch);
+	assert.ok(fonts, "branded again once the stalled decode has settled");
+	assert.equal(fetches, 1);
+});
