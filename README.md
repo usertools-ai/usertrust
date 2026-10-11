@@ -283,9 +283,9 @@ A counter in a database is not a financial ledger. `usertrust` uses the same dou
 
 ## Enforcement
 
-Budget enforcement is local. Connect a TigerBeetle instance for production, or pass `dryRun: true` to skip the ledger (audit and policy still run). Remote proxy mode is not implemented — passing `proxy` to `trust()` or `createGovernor()` throws.
+Budget enforcement is local. Connect a replicated TigerBeetle cluster for production (see [Running TigerBeetle](#running-tigerbeetle)), or pass `dryRun: true` to skip the ledger (audit and policy still run). Remote proxy mode is not implemented — passing `proxy` to `trust()` or `createGovernor()` throws.
 
-Try it first with `dryRun: true`, as in the example at the top. For production, run a TigerBeetle replica as below.
+Try it first with `dryRun: true`, as in the example at the top. For full mode, run TigerBeetle as below.
 
 ### Running TigerBeetle
 
@@ -299,6 +299,8 @@ unzip tigerbeetle.zip
 ```
 
 Format the data file once; start the replica each time you need it.
+
+**These commands start ONE replica in `--development` mode: a local full-mode run, not a production deployment.** A single replica has no replication and no high availability: lose its data file and the ledger is gone. For production, deploy a replicated TigerBeetle cluster following TigerBeetle's own guidance ([cluster recommendations](https://docs.tigerbeetle.com/operating/cluster/), [deploying](https://docs.tigerbeetle.com/operating/deploying/)), and give the governor all the replica addresses (`tigerbeetle.addresses`).
 
 TigerBeetle and its client need `io_uring` on Linux, and Docker's default seccomp profile blocks it; with it blocked, the client cannot start. In a container, run with `--security-opt seccomp=unconfined` (or a seccomp profile that allows `io_uring`). On a host where `kernel.io_uring_disabled` is set, it must be `0`.
 

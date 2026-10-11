@@ -20,7 +20,7 @@ Choose one of two ways to run the server, then write the config below.
 
 **Try it (no ledger).** Add `"dryRun": true` to the config. dryRun skips TigerBeetle, so the server needs no ledger replica. The audit chain and the policy engine still run. This is the fastest way to try the API.
 
-**Production (TigerBeetle).** Leave `dryRun` out or set it to `false`, which is the default. The server then needs a running TigerBeetle replica at `127.0.0.1:3001`, the default address. The client is built against TigerBeetle 0.17.9 (`tigerbeetle-node` ^0.17.9), so run that release. These commands were run on Linux on arm64 with the 0.17.9 `tigerbeetle-aarch64-linux.zip` asset; for another platform, take the asset for your platform from the [0.17.9 release](https://github.com/tigerbeetle/tigerbeetle/releases).
+**Full mode, locally (TigerBeetle).** Leave `dryRun` out or set it to `false`, which is the default. The server then needs a running TigerBeetle at `127.0.0.1:3001`, the default address. The client is built against TigerBeetle 0.17.9 (`tigerbeetle-node` ^0.17.9), so run that release. These commands were run on Linux on arm64 with the 0.17.9 `tigerbeetle-aarch64-linux.zip` asset; for another platform, take the asset for your platform from the [0.17.9 release](https://github.com/tigerbeetle/tigerbeetle/releases).
 
 ```bash
 curl -sSL -o tigerbeetle.zip https://github.com/tigerbeetle/tigerbeetle/releases/download/0.17.9/tigerbeetle-aarch64-linux.zip
@@ -28,6 +28,8 @@ unzip tigerbeetle.zip
 ./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle
 ./tigerbeetle start --addresses=3001 --development 0_0.tigerbeetle
 ```
+
+**These commands start ONE replica in `--development` mode: a local full-mode run, not a production deployment.** A single replica has no replication and no high availability: lose its data file and the ledger is gone. For production, deploy a replicated TigerBeetle cluster following TigerBeetle's own guidance ([cluster recommendations](https://docs.tigerbeetle.com/operating/cluster/), [deploying](https://docs.tigerbeetle.com/operating/deploying/)), and give the governor all the replica addresses (`tigerbeetle.addresses`).
 
 Format the data file once; start the replica each time you need it. TigerBeetle and its client need `io_uring` on Linux, and Docker's default seccomp profile blocks it; with it blocked, the client cannot start. In a container, run with `--security-opt seccomp=unconfined` (or a seccomp profile that allows `io_uring`). On a host where `kernel.io_uring_disabled` is set, it must be `0`.
 
