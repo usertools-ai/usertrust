@@ -125,18 +125,22 @@ export {
 	TrustTBClient,
 	XFER_SPEND,
 } from "./ledger/client.js";
-export type { ModelRates, RateResolution } from "./ledger/pricing.js";
+export type { LongPromptTier, ModelRates, RateResolution } from "./ledger/pricing.js";
 // Pricing
 export {
 	costFromRates,
 	estimateCost,
 	estimateInputTokens,
 	getModelRates,
+	holdTierRates,
 	isModelPriced,
 	PRICING_TABLE_VERSION,
+	promptTierRates,
+	promptTokenCount,
 	requestDeclares1hCache,
 	resolveAppliedRates,
 	resolveRates,
+	snapshotRates,
 	supportsCacheWrite1h,
 } from "./ledger/pricing.js";
 // Usage normalization (spec D2/D5): the one place provider usage becomes the

@@ -65,9 +65,10 @@ export const CACHE_READ_MULT = 0.1;
  * (model-pricing table, retrieved 2026-10-07). claude-sonnet-5 is $2/$10: the
  * page (footnote 3) says the introductory price is now the standard price and
  * the announced 2026-09-01 increase to $3/$15 will not occur, so the kernel and
- * this table agree on it. claude-haiku-5-5 is priced by prompt length ($0.10/$0.50
- * up to 100k tokens, $0.50/$2.50 above); the kernel row holds the over-100k tier,
- * so that is the tier entered here, and the two bases agree on it.
+ * this table agree on it. claude-haiku-5-5 is priced per request by prompt length:
+ * the row here is the up-to-100,000-token tier ($0.10 / $0.50) and LIST_LONG_PROMPT
+ * holds the higher tier ($0.50 / $2.50, page re-read 2026-10-11), selected per line by
+ * that line's own prompt length, exactly as the kernel's `longPrompt` does.
  */
 export const LIST_USD_PER_MTOK: Record<string, { input: number; output: number }> = {
 	"claude-fable-5-1": { input: 10, output: 50 },
@@ -92,9 +93,22 @@ export const LIST_USD_PER_MTOK: Record<string, { input: number; output: number }
 	"claude-sonnet-4-6": { input: 3, output: 15 },
 	"claude-sonnet-4-5": { input: 3, output: 15 },
 	"claude-sonnet-4": { input: 3, output: 15 },
-	"claude-haiku-5-5": { input: 0.5, output: 2.5 },
+	"claude-haiku-5-5": { input: 0.1, output: 0.5 },
 	"claude-haiku-4-5": { input: 1, output: 5 },
 	"claude-3-5-haiku": { input: 0.8, output: 4 },
+};
+
+/**
+ * Per-request prompt tiers of the list price: a line whose prompt (input + cache reads +
+ * cache writes) is OVER `overPromptTokens` prices every category at `input` / `output`.
+ * Mirrors the kernel row's `longPrompt` (same page, same rule; exactly 100,000 is the
+ * lower tier).
+ */
+const LIST_LONG_PROMPT: Record<
+	string,
+	{ overPromptTokens: number; input: number; output: number }
+> = {
+	"claude-haiku-5-5": { overPromptTokens: 100_000, input: 0.5, output: 2.5 },
 };
 
 /** The table key a model id resolves to (exact, then one date suffix stripped), or undefined. */
@@ -132,9 +146,16 @@ export function cacheReadMultFor(model: string): number {
  * guess in the reconciliation block would be exactly the unlabeled-basis
  * mixing spec §6 forbids.
  */
-export function listRatesForModel(model: string): { input: number; output: number } {
+export function listRatesForModel(
+	model: string,
+	promptTokens = 0,
+): { input: number; output: number } {
 	const key = listKeyFor(model);
 	const rates = key === undefined ? undefined : LIST_USD_PER_MTOK[key];
+	const long = key === undefined ? undefined : LIST_LONG_PROMPT[key];
+	if (rates && long && promptTokens > long.overPromptTokens) {
+		return { input: long.input, output: long.output };
+	}
 	if (rates) return rates;
 	throw new Error(
 		`fleet rollup: no published list rate for model "${model}" — add its $/MTok row ` +
@@ -336,7 +357,11 @@ const byOccurredAtThenId = (a: FleetStoreLine, b: FleetStoreLine): number => {
 function listPriceUsdFor(line: FleetStoreLine): number {
 	const usage = line.receipt.usage;
 	if (!usage) throw new Error(`fleet rollup: unreachable — usage checked by caller`);
-	const rates = listRatesForModel(line.receipt.model);
+	// The line's own prompt length picks a per-request tier (claude-haiku-5-5).
+	const rates = listRatesForModel(
+		line.receipt.model,
+		usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens,
+	);
 	const tiers = line.provenance.cacheWriteTiers;
 	return (
 		(usage.inputTokens * rates.input +

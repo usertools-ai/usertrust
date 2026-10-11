@@ -35,7 +35,13 @@
  */
 
 import type { CacheWrite1h, ReceiptUsage } from "../shared/types.js";
-import { type ModelRates, resolveCacheWrite1h, supportsCacheWrite1h } from "./pricing.js";
+import {
+	type ModelRates,
+	promptTierRates,
+	promptTokenCount,
+	resolveCacheWrite1h,
+	supportsCacheWrite1h,
+} from "./pricing.js";
 
 /**
  * A sanitized, four-tier, disjoint usage snapshot.
@@ -235,8 +241,13 @@ export function publishableUsageFields(
 ): { usage?: ReceiptUsage; cacheWrite1h?: CacheWrite1h } {
 	const usage = publishableUsage(snapshot);
 	if (usage === undefined) return {};
+	// The 1-hour rate published is the one THIS call's prompt tier priced it at (a
+	// `longPrompt` row), from the same counts the cost used.
 	const cacheWrite1h = resolveCacheWrite1h(
-		rates,
+		promptTierRates(
+			rates,
+			promptTokenCount(snapshot.inputTokens, snapshot.cacheReadTokens, snapshot.cacheWriteTokens),
+		),
 		snapshot.cacheWrite1hTokens ?? 0,
 		snapshot.cacheWriteTokens,
 	);

@@ -89,7 +89,9 @@ import {
 	estimateInputTokens,
 	holdCacheWriteRate,
 	holdInputRate,
+	holdTierRates,
 	PRICING_TABLE_VERSION,
+	promptTokenCount,
 	resolveAppliedRates,
 	resolveRates,
 	warnCacheRateMigration,
@@ -294,6 +296,12 @@ interface AuthorizationCapture {
 	 * `meteredEstimate` comment at the authorize-time computation.
 	 */
 	readonly meteredEstimate: number;
+	/**
+	 * The prompt length (`promptTokenCount` of the estimated input and cache tiers) that
+	 * `meteredEstimate` was priced at. A tiered row (`longPrompt`) that settles on the
+	 * estimate publishes the tier THIS selected, so its rates match its cost.
+	 */
+	readonly meteredEstimatePromptTokens: number;
 }
 
 /** Parameters for authorizing an LLM call. */
@@ -1304,7 +1312,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// rate only when the request declares a 1-hour TTL.) Consequence, declared in
 			// the CHANGELOG: holds on headless Anthropic calls run about 60% fatter on the
 			// input leg than a 5-minute-only reserve.
-			const holdRate = holdInputRate(rateInfo.rates, true, rateInfo.rateSource !== "table");
+			// A per-request prompt tier (`longPrompt`) is held at its DEARER tier: the input
+			// estimate can land on the wrong side of the threshold, and a hold below the settle
+			// is capped. The two-phase post releases the difference. `holdTierRates` drops the
+			// tier, so the spread below cannot re-select it.
+			const holdRates = holdTierRates(rateInfo.rates);
+			const holdRate = holdInputRate(holdRates, true, rateInfo.rateSource !== "table");
 			// Per-tier hold: each cache tier at ITS OWN rate, resolved from the
 			// UN-inflated rates exactly as settle resolves them (`resolveAppliedRates`).
 			// Only the FRESH-input estimate keeps the D3 write premium — it is the half
@@ -1313,12 +1326,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// published cache-read rate falls back to `inputPer1k`, and that must be the
 			// REAL input rate here, not the inflated hold rate. Tiers omitted → 0, so an
 			// old client's hold is exactly what it was.
-			const appliedForHold = resolveAppliedRates(rateInfo.rates);
+			const appliedForHold = resolveAppliedRates(holdRates);
 			const estCost = costFromRates(
 				{
-					...rateInfo.rates,
+					...holdRates,
 					cacheReadPer1k: appliedForHold.cacheReadPer1k,
-					cacheWritePer1k: holdCacheWriteRate(rateInfo.rates, rateInfo.rateSource !== "table"),
+					cacheWritePer1k: holdCacheWriteRate(holdRates, rateInfo.rateSource !== "table"),
 					inputPer1k: holdRate,
 				},
 				estInputTokens,
@@ -1647,6 +1660,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					envelope: captured,
 					sessionAccounted: !envelopeDebited,
 					meteredEstimate,
+					meteredEstimatePromptTokens: promptTokenCount(
+						estInputTokens,
+						estCacheReadTokens,
+						estCacheWriteTokens,
+					),
 				}),
 			);
 			return auth;
@@ -1812,7 +1830,18 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// self-sufficient: `ceil(sum(counts x appliedRates / 1000))` floored at 1
 				// reproduces `cost` exactly. RESOLVED rates, so the D1 cache fallback is
 				// visible as the number it actually charges rather than as a hole.
-				const appliedRates = resolveAppliedRates(rateInfo.rates);
+				// A tiered row (`longPrompt`) publishes the tier it SETTLED at: from the reported
+				// prompt length when usage was reported, else from the estimate the cost came from.
+				const appliedRates = resolveAppliedRates(
+					rateInfo.rates,
+					usageReported
+						? promptTokenCount(
+								usageSnapshot.inputTokens,
+								usageSnapshot.cacheReadTokens,
+								usageSnapshot.cacheWriteTokens,
+							)
+						: capture.meteredEstimatePromptTokens,
+				);
 
 				// SESSION accounting waits until after the POST attempt below. A
 				// pre-POST throw must not increment: the hold is still PENDING and
