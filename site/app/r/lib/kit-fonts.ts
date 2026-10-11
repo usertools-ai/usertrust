@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 // @ts-expect-error -- wawoff2 ships no type declarations; decompress(woff2) resolves to TTF bytes
 import decompress from "wawoff2/decompress";
+import { fetchPinnedBytes } from "./kit-pinned";
 
 /**
  * The share card's brand fonts, fetched from the brand kit at render time and
@@ -81,11 +81,7 @@ export async function loadPinnedFonts(
 	try {
 		return await Promise.all(
 			specs.map(async (spec) => {
-				const response = await fetchImpl(spec.url, { signal: AbortSignal.timeout(timeoutMs) });
-				if (!response.ok) throw new Error(`${spec.url}: HTTP ${response.status}`);
-				const bytes = new Uint8Array(await response.arrayBuffer());
-				const actual = `sha384-${createHash("sha384").update(bytes).digest("base64")}`;
-				if (actual !== spec.integrity) throw new Error(`${spec.url}: integrity mismatch`);
+				const bytes = await fetchPinnedBytes(spec.url, spec.integrity, fetchImpl, timeoutMs);
 				const data = await decodeToTtf(bytes);
 				return { name: spec.name, data, weight: spec.weight, style: "normal" as const };
 			}),
