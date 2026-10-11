@@ -1559,6 +1559,17 @@ describe("jobCoverage — shapes a record can take", () => {
 		expect(gapText(await run([ok, sessionless(9000, 9100)]))).toContain("names no session");
 		expect(gapText(await run([ok, sessionless(100, 200)]))).toContain("names no session");
 	});
+	it("a SESSIONLESS settlement_unrecoverable (recorded, never charged) is a gap for the job", async () => {
+		const unrecoverable = {
+			kind: "settlement_unrecoverable",
+			actor: "local",
+			data: { transferIdHash: "a".repeat(64), usage: { inputTokens: 5 }, source: "headless" },
+		};
+		expect(gapText(await run([ok, unrecoverable]))).toContain("names no session");
+		// pre-fix control: a kind outside SPEND_LIKE is dropped without a gap, which is exactly how this
+		// record used to read: knownGaps [] over recorded, uncharged usage
+		expect((await run([ok, { ...unrecoverable, kind: "not_a_spend_kind" }])).knownGaps).toEqual([]);
+	});
 	it("untagged settlement metadata with no llm_call, in the interval, is a gap", async () => {
 		const meta = (data: Record<string, unknown>) => ({
 			kind: "settlement_shortfall",

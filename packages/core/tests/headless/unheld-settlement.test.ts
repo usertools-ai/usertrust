@@ -432,3 +432,40 @@ describe("caller input is read ONCE", () => {
 		});
 	});
 });
+
+describe("a rejected append that is already durable is a record, not a failure to retry", () => {
+	it("an error carrying the durable event hash counts as recorded, and the retry writes nothing", async () => {
+		const g = await recording().gov();
+		const append = audit.appendEvent as unknown as ReturnType<typeof vi.fn>;
+		append.mockImplementationOnce(async (input: AppendEventInput) => {
+			// What the writer does when the event is fsynced and its sidecar then fails.
+			audit.events.push(input);
+			throw Object.assign(new Error("sidecar write failed"), {
+				[Symbol.for("usertrust.audit.durableEventHash")]: "d".repeat(64),
+			});
+		});
+		const params = { transferId: GONE, inputTokens: 3 };
+		expect(await g.recordUnheldSettlement(params)).toEqual({
+			outcome: "unrecoverable",
+			recorded: true,
+		});
+		expect(await g.recordUnheldSettlement(params)).toEqual({
+			outcome: "unrecoverable",
+			recorded: false,
+		});
+		expect(audit.events).toHaveLength(1);
+	});
+
+	it("an ordinary failure (nothing durable) is still thrown, and the retry records", async () => {
+		const g = await recording().gov();
+		const append = audit.appendEvent as unknown as ReturnType<typeof vi.fn>;
+		append.mockImplementationOnce(async () => {
+			throw new Error("disk full");
+		});
+		await expect(g.recordUnheldSettlement({ transferId: GONE })).rejects.toThrow("disk full");
+		expect(await g.recordUnheldSettlement({ transferId: GONE })).toEqual({
+			outcome: "unrecoverable",
+			recorded: true,
+		});
+	});
+});

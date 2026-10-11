@@ -42,7 +42,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
-import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import { type AuditWriter, createAuditWriter, readDurableEventHash } from "./audit/chain.js";
 import {
 	appendDenialEvent,
 	classifyPolicyDenial,
@@ -2469,7 +2469,18 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				);
 			}
 			unheldWindow.push(now);
-			const append = audit.appendEvent({ kind: "settlement_unrecoverable", actor: "local", data });
+			// A rejected append has not necessarily written nothing: the writer fsyncs the event, THEN its
+			// sidecar, and records the event's hash on a rejection that came after the event was durable.
+			// Then the record IS on the chain: it counts as recorded, and the retry must not write it a
+			// second time. (Sharers of an in-flight append see the same outcome.)
+			const append = audit
+				.appendEvent({ kind: "settlement_unrecoverable", actor: "local", data })
+				.then(
+					() => undefined,
+					(err: unknown) => {
+						if (readDurableEventHash(err) === undefined) throw err;
+					},
+				);
 			unheldInFlight.set(key, append);
 			try {
 				await append;
