@@ -33,7 +33,11 @@ import { existsSync, mkdirSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
-import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import {
+	type AuditWriter,
+	createAuditWriter,
+	releaseAuditWriterForTeardown,
+} from "./audit/chain.js";
 import {
 	appendDenialEvent,
 	classifyPolicyDenial,
@@ -3570,8 +3574,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 			// Release the audit lock, destroy the engine if connected and the proxy
 			// connection if active: every step runs, whatever an earlier one throws.
+			// destroy() never REJECTS for a lock left behind: callers call it without await or catch,
+			// and an unhandled rejection kills the process. The teardown reports it as a
+			// USERTRUST_AUDIT_LOCK_LEFT warning instead.
 			runTeardownSteps([
-				() => audit.release(),
+				() => releaseAuditWriterForTeardown(audit),
 				() => {
 					if (engine != null && typeof engine.destroy === "function") engine.destroy();
 				},

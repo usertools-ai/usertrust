@@ -3,7 +3,11 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
+import {
+	type AppendEventInput,
+	AuditLockReleaseError,
+	type AuditWriter,
+} from "../../src/audit/chain.js";
 import { runTeardownSteps, type TrustEngine, trust } from "../../src/govern.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
@@ -149,6 +153,106 @@ describe("client.destroy()", () => {
 		expect(engine.destroy).toHaveBeenCalledOnce();
 	});
 
+	// A lock the audit writer could not release is a liveness problem (other processes stay blocked
+	// until this one exits), never a reason for destroy() to REJECT: callers routinely call it
+	// without await or catch, and an unhandled rejection kills the process.
+	describe("a lock left behind", () => {
+		const LEFT = [
+			"/vaults/a/.usertrust/audit/.audit-writer.lock",
+			"/vaults/b/.usertrust/audit/.audit-writer.lock",
+		];
+		const leftBehind = () =>
+			new AuditLockReleaseError([
+				{
+					path: LEFT[0] as string,
+					error: Object.assign(new Error("EIO: i/o error"), { code: "EIO" }),
+				},
+				{
+					path: LEFT[1] as string,
+					error: Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }),
+				},
+			]);
+		let emitWarning: ReturnType<typeof vi.spyOn>;
+		let warn: ReturnType<typeof vi.spyOn>;
+		beforeEach(() => {
+			emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+			warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		});
+		afterEach(() => {
+			emitWarning.mockRestore();
+			warn.mockRestore();
+		});
+
+		async function governedWith(release: () => void) {
+			const engine = makeMockEngine();
+			const mockAudit = makeMockAudit();
+			vi.mocked(mockAudit.release).mockImplementation(release);
+			const governed = await trust(makeAnthropicMock(), {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: mockAudit,
+			});
+			return { governed, engine };
+		}
+
+		it("destroy() RESOLVES, still destroys the engine, and reports each lock left behind as a USERTRUST_AUDIT_LOCK_LEFT warning (and a console warning)", async () => {
+			const { governed, engine } = await governedWith(() => {
+				throw leftBehind();
+			});
+
+			await expect(governed.destroy()).resolves.toBeUndefined();
+			expect(engine.destroy).toHaveBeenCalledOnce();
+			expect(emitWarning).toHaveBeenCalledOnce();
+			const [message, options] = emitWarning.mock.calls[0] as [string, { code?: string }];
+			expect(options.code).toBe("USERTRUST_AUDIT_LOCK_LEFT");
+			for (const path of LEFT) expect(message).toContain(path);
+			expect(message).toContain("EIO");
+			expect(message).toContain("EACCES");
+			expect(String(warn.mock.calls[0]?.[0])).toContain(LEFT[0]);
+		});
+
+		it("a lock path carrying terminal control is SCRUBBED in the warning and on the console — no raw C0, DEL or C1", async () => {
+			// C0 (ESC, BEL, CR), DEL, and C1's 8-bit CSI introducer.
+			const controls = [0x1b, 0x07, 0x0d, 0x7f, 0x9b].map((c) => String.fromCharCode(c));
+			const [ESC, BEL, CR, DEL, CSI] = controls as [string, string, string, string, string];
+			const hostile = `/vaults/x${ESC}]0;pwned${BEL}${CR}${DEL}${CSI}2J/.usertrust/audit/.audit-writer.lock`;
+			const { governed } = await governedWith(() => {
+				throw new AuditLockReleaseError([
+					{ path: hostile, error: Object.assign(new Error("EIO: i/o error"), { code: "EIO" }) },
+				]);
+			});
+
+			await governed.destroy();
+			const [message] = emitWarning.mock.calls[0] as [string];
+			const logged = String(warn.mock.calls[0]?.[0]);
+			for (const text of [message, logged]) {
+				expect(text, "control: the path is reported").toContain("]0;pwned");
+				expect(controls.filter((c) => text.includes(c))).toEqual([]);
+			}
+		});
+
+		it("an unexpected release error also resolves with the warning — naming only its kind and code, never its message", async () => {
+			const { governed } = await governedWith(() => {
+				throw Object.assign(new Error("detail that is not ours to print"), { code: "EBADF" });
+			});
+
+			await expect(governed.destroy()).resolves.toBeUndefined();
+			const [message, options] = emitWarning.mock.calls[0] as [string, { code?: string }];
+			expect(options.code).toBe("USERTRUST_AUDIT_LOCK_LEFT");
+			expect(message).toContain("EBADF");
+			expect(message).not.toContain("detail that is not ours to print");
+		});
+
+		it("control: a release that succeeds emits no warning", async () => {
+			const { governed } = await governedWith(() => {});
+			await governed.destroy();
+			expect(emitWarning).not.toHaveBeenCalled();
+			expect(warn).not.toHaveBeenCalled();
+		});
+	});
+
 	it("calling destroy() twice is safe (idempotent)", async () => {
 		const mockAudit = makeMockAudit();
 		const mockClient = makeAnthropicMock();
@@ -233,26 +337,6 @@ describe("client.destroy()", () => {
 
 	// ── Teardown: every step is attempted, whatever an earlier one does ──
 
-	it("a throwing audit release does not skip the engine's destroy", async () => {
-		const engine = makeMockEngine();
-		const mockAudit = makeMockAudit();
-		const releaseErr = new Error("release failed");
-		(mockAudit.release as ReturnType<typeof vi.fn>).mockImplementation(() => {
-			throw releaseErr;
-		});
-
-		const governed = await trust(makeAnthropicMock(), {
-			dryRun: false,
-			budget: 50_000,
-			vaultBase: tmpVault,
-			_engine: engine,
-			_audit: mockAudit,
-		});
-
-		await expect(governed.destroy()).rejects.toBe(releaseErr);
-		expect(engine.destroy).toHaveBeenCalledOnce();
-	});
-
 	it("a throwing engine destroy still rejects destroy() with the engine's own error", async () => {
 		const engine = makeMockEngine();
 		const engineErr = new Error("engine destroy failed");
@@ -272,36 +356,6 @@ describe("client.destroy()", () => {
 		await expect(governed.destroy()).rejects.toBe(engineErr);
 		expect(mockAudit.release).toHaveBeenCalledOnce();
 		expect(engine.destroy).toHaveBeenCalledOnce();
-	});
-
-	it("two failing steps reject with an AggregateError of both, in teardown order", async () => {
-		const engine = makeMockEngine();
-		const engineErr = new Error("engine destroy failed");
-		(engine.destroy as ReturnType<typeof vi.fn>).mockImplementation(() => {
-			throw engineErr;
-		});
-		const mockAudit = makeMockAudit();
-		const releaseErr = new Error("release failed");
-		(mockAudit.release as ReturnType<typeof vi.fn>).mockImplementation(() => {
-			throw releaseErr;
-		});
-
-		const governed = await trust(makeAnthropicMock(), {
-			dryRun: false,
-			budget: 50_000,
-			vaultBase: tmpVault,
-			_engine: engine,
-			_audit: mockAudit,
-		});
-
-		const err = await governed.destroy().then(
-			() => undefined,
-			(e: unknown) => e,
-		);
-		expect(err).toBeInstanceOf(AggregateError);
-		expect((err as AggregateError).errors).toEqual([releaseErr, engineErr]);
-		expect((err as AggregateError).errors[0]).toBe(releaseErr);
-		expect((err as AggregateError).errors[1]).toBe(engineErr);
 	});
 
 	it("control: no step throws, destroy() resolves and each step runs exactly once", async () => {

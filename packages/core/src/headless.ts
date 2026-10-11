@@ -42,7 +42,11 @@ import { existsSync, mkdirSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
-import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import {
+	type AuditWriter,
+	createAuditWriter,
+	releaseAuditWriterForTeardown,
+} from "./audit/chain.js";
 import {
 	appendDenialEvent,
 	classifyPolicyDenial,
@@ -2435,11 +2439,14 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				}
 			}
 
-			// Flush audit, then release it and destroy the engine and the proxy: every step
-			// runs, whatever an earlier one throws (shared with trust()).
+			// Flush audit, then release its lock and destroy the engine and the proxy: every
+			// step runs, whatever an earlier one throws (shared with trust()).
+			// destroy() never REJECTS for a lock left behind: callers call it without await or catch,
+			// and an unhandled rejection kills the process. The teardown reports it as a
+			// USERTRUST_AUDIT_LOCK_LEFT warning instead.
 			await audit.flush();
 			runTeardownSteps([
-				() => audit.release(),
+				() => releaseAuditWriterForTeardown(audit),
 				() => {
 					if (engine != null && typeof engine.destroy === "function") engine.destroy();
 				},
