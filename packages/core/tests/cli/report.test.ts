@@ -74,6 +74,9 @@ describe("usertrust report --week", () => {
 			["--week", "--end", endIso(), "--format", "pdf"],
 			["--week", "--end", endIso(), "--agent-key", "nope"],
 			["--week", "--end", endIso(), "--segment", "x"],
+			["--week", "--end", endIso(), "--top", "0"],
+			["--week", "--end", endIso(), "--budget", "0"],
+			["--week", "--end", endIso(), "--budget", "5", "--tenant-config", "x.json"],
 			["--week", "--end", endIso(), "--bogus"],
 			["--week", "--end", "--format", "md"],
 			["--week", "--end", endIso(), "--out"],
@@ -119,7 +122,7 @@ describe("usertrust report --week", () => {
 		await vault(
 			[
 				{ cost: 100, data: { costCenter: "agent-a" } },
-				{ cost: 50, data: { costCenter: "agent-b", model: "gpt-5" } },
+				{ cost: 50, data: { principal: { id: "agent-b" }, model: "gpt-5" } },
 			],
 			[{ kind: "policy_denied", data: { rule: "r" } }],
 		);
@@ -133,7 +136,9 @@ describe("usertrust report --week", () => {
 		expect(stdout.indexOf("VERIFIED")).toBeLessThan(stdout.indexOf("Confirmed spend"));
 		expect(stdout).toContain("**Confirmed spend:** $0.02"); // 150 UT = $0.015
 		expect(stdout).toContain("| agent-a | 1 | $0.01 | 66.7% |");
-		expect(stdout).toContain("15.0% used");
+		// only the unattributed 50 UT debits the session wallet; the cost-center 100 UT debits its envelope
+		expect(stdout).toContain("5.0% used");
+		expect(stdout).toContain("NOT charged to this budget");
 		expect(stdout).not.toContain("UNVERIFIED");
 		write.mockRestore();
 	});
@@ -180,6 +185,105 @@ describe("usertrust report --week", () => {
 			expect(stdout, format).toMatch(/cost driver, not avoidable spend/);
 			expect(stdout, format).not.toMatch(/avoidable spend (found|of|is|was|:)/i);
 			expect(stdout, format).toMatch(/Cache write/);
+		}
+		write.mockRestore();
+	});
+
+	it("--budget and --tenant-config name a server tenant's budget, and the report says where it came from", async () => {
+		await vault([{ cost: 100, data: { principal: { id: "a" } } }]);
+		await run(dir, {}, ["--week", "--end", endIso(), "--budget", "1000"]);
+		expect(stdout).toContain("source: --budget");
+		expect(stdout).toContain("10.0% used");
+		stdout = "";
+		const tenant = join(dir, "tenant.config.json");
+		writeFileSync(tenant, JSON.stringify({ budget: 500, tigerbeetle: { addresses: ["x"] } }));
+		await run(dir, {}, ["--week", "--end", endIso(), "--tenant-config", tenant]);
+		expect(stdout).toContain("source: tenant config");
+		expect(stdout).toContain("20.0% used");
+		// an unreadable or budget-less tenant config is refused, not silently "no budget"
+		for (const bad of ["{ not json", JSON.stringify({ budget: "5" }), JSON.stringify({})]) {
+			writeFileSync(tenant, bad);
+			out = [];
+			process.exitCode = undefined;
+			await run(dir, {}, ["--week", "--end", endIso(), "--tenant-config", tenant]);
+			expect(process.exitCode, bad).toBe(1);
+			expect(out.join("\n")).toContain("tenant-config");
+		}
+	});
+
+	it("verdict and figures come from ONE snapshot: a rewrite after the snapshot cannot be reported as verified", async () => {
+		await vault([{ cost: 100 }]);
+		const log = join(dir, ".usertrust", "audit", "events.jsonl");
+		const original = readFileSync(log, "utf-8");
+		const tampered = original.replace(/"cost":100/, '"cost":9999');
+		expect(tampered).not.toBe(original);
+		// the live vault is rewritten right after the report took its snapshot
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
+			afterSnapshot: () => writeFileSync(log, tampered),
+		});
+		const model = JSON.parse(stdout) as {
+			integrity: { verified: boolean };
+			totals: { confirmedUt: number };
+		};
+		// verified bytes AND figures are the snapshot's: 100 UT, verified. Never "verified" over 9,999 UT.
+		expect(model.integrity.verified).toBe(true);
+		expect(model.totals.confirmedUt).toBe(100);
+		expect(process.exitCode).toBeUndefined();
+		// and the NEXT report, which snapshots the rewritten file, sees it for what it is
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		expect((JSON.parse(stdout) as { integrity: { verified: boolean } }).integrity.verified).toBe(
+			false,
+		);
+		expect(process.exitCode).toBe(2);
+		write.mockRestore();
+	});
+
+	it("the integrity verdict is scrubbed: control bytes in an event id cannot erase the UNVERIFIED line", async () => {
+		await vault([{ cost: 100 }]);
+		const log = join(dir, ".usertrust", "audit", "events.jsonl");
+		const lines = readFileSync(log, "utf-8").trim().split("\n");
+		const first = JSON.parse(lines[0] as string) as { id: string };
+		first.id = "evil\u001b[2K\u001b[1A\u009b2Jid";
+		writeFileSync(log, `${[JSON.stringify(first), ...lines.slice(1)].join("\n")}\n`);
+		for (const format of ["md", "html"] as const) {
+			stdout = "";
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", format]);
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting NO control character survives
+			expect(stdout, format).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+			expect(stdout, format).toContain("UNVERIFIED");
+		}
+		write.mockRestore();
+	});
+
+	it("a malformed line in the chain still yields a report: UNVERIFIED, exit 2, no crash", async () => {
+		await vault([{ cost: 100 }]);
+		const log = join(dir, ".usertrust", "audit", "events.jsonl");
+		writeFileSync(
+			log,
+			`${readFileSync(log, "utf-8")}{"id":"x","kind":"llm_call","timestamp":"2026-10-01T00:00:00Z","data":null}\nnot json at all\n`,
+		);
+		await run(dir, {}, ["--week", "--end", endIso()]);
+		expect(process.exitCode).toBe(2);
+		expect(stdout).toContain("UNVERIFIED");
+		expect(stdout).toContain("Confirmed spend");
+		write.mockRestore();
+	});
+
+	it("HTML discloses a settlement shortfall like markdown does", async () => {
+		await vault(
+			[{ cost: 100, data: { transferId: "t-short" } }],
+			[
+				{
+					kind: "settlement_shortfall",
+					data: { transferId: "t-short", actual: 100, posted: 60, shortfall: 40 },
+				},
+			],
+		);
+		for (const format of ["md", "html"] as const) {
+			stdout = "";
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", format]);
+			expect(stdout, format).toContain("settlement_shortfall");
 		}
 		write.mockRestore();
 	});

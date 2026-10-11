@@ -16,7 +16,16 @@
  * UNVERIFIED everywhere, and the exit code is 2 so a cron job notices.
  */
 
-import { existsSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import pc from "picocolors";
 import { loadBudgetConfig, readLedgerEvents } from "../audit/read.js";
@@ -72,6 +81,15 @@ function nonNegativeInt(flag: string, raw: string, max: number): number {
 	return n;
 }
 
+function positiveInt(flag: string, raw: string, max: number): number {
+	if (!/^\d{1,16}$/.test(raw) || Number(raw) < 1) {
+		throw new Error(`Invalid ${flag}: ${scrubForTerminal(raw)} (a positive integer)`);
+	}
+	const n = Number(raw);
+	if (n > max) throw new Error(`Invalid ${flag}: ${n} (at most ${max})`);
+	return n;
+}
+
 export interface ReportArgs {
 	week: boolean;
 	endMs: number;
@@ -80,9 +98,22 @@ export interface ReportArgs {
 	agentKey: AgentKey;
 	segment: number | undefined;
 	top: number;
+	/** `--budget`: the budget in usertokens, overriding the vault config (a server tenant's budget lives in the server's tenant config). */
+	budget: number | undefined;
+	/** `--tenant-config`: a JSON file whose `budget` is the budget in usertokens. */
+	tenantConfig: string | undefined;
 }
 
-const VALUE_FLAGS = ["--end", "--format", "--out", "--agent-key", "--segment", "--top"] as const;
+const VALUE_FLAGS = [
+	"--end",
+	"--format",
+	"--out",
+	"--agent-key",
+	"--segment",
+	"--top",
+	"--budget",
+	"--tenant-config",
+] as const;
 
 export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): ReportArgs {
 	let week = false;
@@ -92,6 +123,8 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 	let agentKey: string | undefined;
 	let segment: string | undefined;
 	let top: string | undefined;
+	let budget: string | undefined;
+	let tenantConfig: string | undefined;
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i] as string;
 		if (a === "--week") {
@@ -109,6 +142,8 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 			else if (name === "--out") out = value;
 			else if (name === "--agent-key") agentKey = value;
 			else if (name === "--segment") segment = value;
+			else if (name === "--budget") budget = value;
+			else if (name === "--tenant-config") tenantConfig = value;
 			else top = value;
 			continue;
 		}
@@ -125,7 +160,10 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 	if (fmt !== "md" && fmt !== "html" && fmt !== "json") {
 		throw new Error(`Invalid --format: ${scrubForTerminal(fmt)} (md, html or json)`);
 	}
-	if (jsonFlag && fmt !== "json") throw new Error("--json conflicts with --format " + fmt);
+	if (jsonFlag && fmt !== "json") throw new Error(`--json conflicts with --format ${fmt}`);
+	if (budget !== undefined && tenantConfig !== undefined) {
+		throw new Error("--budget and --tenant-config both name the budget: give one");
+	}
 	const key = agentKey ?? "auto";
 	if (!(AGENT_KEYS as readonly string[]).includes(key)) {
 		throw new Error(`Invalid --agent-key: ${scrubForTerminal(key)} (${AGENT_KEYS.join(", ")})`);
@@ -137,11 +175,79 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 		out,
 		agentKey: key as AgentKey,
 		segment: segment === undefined ? undefined : nonNegativeInt("--segment", segment, 32),
-		top: top === undefined ? 10 : Math.max(1, nonNegativeInt("--top", top, 100)),
+		// An explicit value is honoured or refused, never rewritten: `--top 0` asks for no rows and is refused.
+		top: top === undefined ? 10 : positiveInt("--top", top, 100),
+		budget:
+			budget === undefined ? undefined : positiveInt("--budget", budget, Number.MAX_SAFE_INTEGER),
+		tenantConfig,
 	};
 }
 
-export async function run(rootDir?: string, opts?: CliOptions, args?: string[]): Promise<void> {
+/**
+ * ONE snapshot of the vault: every audit file is read exactly once into a private temp directory, and the verdict AND the
+ * figures are both computed from that copy. `verifyVault` and `readLedgerEvents` each read the files themselves, so run
+ * against the live vault a writer (or an attacker) changing it between the two reads produced a report stamped VERIFIED
+ * over events that were never verified (a verified 100 UT rewritten to 9,999 UT was reported as verified).
+ * The vault itself is only read.
+ */
+export function snapshotVault(vaultPath: string): { dir: string; cleanup: () => void } {
+	const dir = mkdtempSync(join(tmpdir(), "usertrust-report-"));
+	try {
+		const auditSrc = join(vaultPath, "audit");
+		if (existsSync(auditSrc)) {
+			const auditDst = join(dir, "audit");
+			mkdirSync(auditDst, { recursive: true, mode: 0o700 });
+			for (const name of readdirSync(auditSrc)) {
+				// Regular files only, no dotfiles (the writer lock): segments, their sidecars, the index.
+				if (name.startsWith(".")) continue;
+				let bytes: Buffer;
+				try {
+					bytes = readFileSync(join(auditSrc, name));
+				} catch {
+					continue; // a directory, or a file that vanished: not part of the chain
+				}
+				writeFileSync(join(auditDst, name), bytes, { mode: 0o600 });
+			}
+		}
+		const configSrc = join(vaultPath, "usertrust.config.json");
+		if (existsSync(configSrc)) {
+			writeFileSync(join(dir, "usertrust.config.json"), readFileSync(configSrc), { mode: 0o600 });
+		}
+	} catch (err) {
+		rmSync(dir, { recursive: true, force: true });
+		throw err;
+	}
+	return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+/** `budget` (usertokens, a positive safe integer) from a tenant config file. */
+function readTenantBudget(path: string): number {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(path, "utf-8"));
+	} catch (err) {
+		throw new Error(
+			`--tenant-config ${scrubForTerminal(path)} could not be read as JSON (${err instanceof Error ? scrubForTerminal(err.message) : "error"})`,
+		);
+	}
+	const b = (parsed as { budget?: unknown } | null)?.budget;
+	if (typeof b !== "number" || !Number.isSafeInteger(b) || b < 1) {
+		throw new Error(`--tenant-config ${scrubForTerminal(path)} has no positive integer "budget"`);
+	}
+	return b;
+}
+
+export interface ReportHooks {
+	/** Test seam: runs right after the snapshot is taken, before anything is verified or read. */
+	afterSnapshot?: () => void;
+}
+
+export async function run(
+	rootDir?: string,
+	opts?: CliOptions,
+	args?: string[],
+	hooks?: ReportHooks,
+): Promise<void> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
 	const json = opts?.json === true;
@@ -166,25 +272,48 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 	}
 
 	try {
-		const verdict = verifyVault(vaultPath);
-		const events = readLedgerEvents(vaultPath);
-		const model = buildWeeklyReport(
-			events,
-			{
-				verified: verdict.valid,
-				errors: verdict.errors,
-				chainLength: verdict.chainLength,
-				firstEvent: verdict.firstEvent,
-				lastEvent: verdict.lastEvent,
-			},
-			{
-				endMs: parsed.endMs,
-				agentKey: parsed.agentKey,
-				...(parsed.segment !== undefined ? { segment: parsed.segment } : {}),
-				topN: parsed.top,
-				budget: loadBudgetConfig(vaultPath).budget,
-			},
-		);
+		let budget = 0;
+		let budgetSource = "vault config";
+		if (parsed.budget !== undefined) {
+			budget = parsed.budget;
+			budgetSource = "--budget";
+		} else if (parsed.tenantConfig !== undefined) {
+			budget = readTenantBudget(resolve(root, parsed.tenantConfig));
+			budgetSource = "tenant config";
+		}
+		const snapshot = snapshotVault(vaultPath);
+		let model: ReturnType<typeof buildWeeklyReport>;
+		let verified: boolean;
+		try {
+			hooks?.afterSnapshot?.();
+			// verdict and figures from the SAME bytes
+			const verdict = verifyVault(snapshot.dir);
+			const events = readLedgerEvents(snapshot.dir);
+			verified = verdict.valid;
+			model = buildWeeklyReport(
+				events,
+				{
+					verified: verdict.valid,
+					errors: verdict.errors,
+					chainLength: verdict.chainLength,
+					firstEvent: verdict.firstEvent,
+					lastEvent: verdict.lastEvent,
+				},
+				{
+					endMs: parsed.endMs,
+					agentKey: parsed.agentKey,
+					...(parsed.segment !== undefined ? { segment: parsed.segment } : {}),
+					topN: parsed.top,
+					budget:
+						parsed.budget !== undefined || parsed.tenantConfig !== undefined
+							? budget
+							: loadBudgetConfig(snapshot.dir).budget,
+					budgetSource,
+				},
+			);
+		} finally {
+			snapshot.cleanup();
+		}
 		const text = render(model, parsed.format);
 		if (parsed.out !== undefined) {
 			const target = resolve(root, parsed.out);
@@ -195,13 +324,13 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 					toSafeJson({
 						command: "report",
 						success: true,
-						data: { out: target, verified: verdict.valid },
+						data: { out: target, verified },
 					}),
 				);
 		} else {
 			process.stdout.write(text);
 		}
-		if (!verdict.valid) process.exitCode = 2;
+		if (!verified) process.exitCode = 2;
 	} catch (err) {
 		fail(err instanceof Error ? err.message : String(err));
 	}

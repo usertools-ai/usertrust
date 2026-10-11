@@ -12,7 +12,14 @@
  *   - `llm_call` with a finite, non-negative `data.cost`, in the window, whose `transferId` has NO
  *     `settlement_ambiguous` anywhere in the chain. `settled: true` on `llm_call` is written optimistically BEFORE the
  *     ledger POST (govern.ts), so it cannot be trusted alone: an ambiguous settle is UNCONFIRMED, never spent.
- *   - `endpointClass: "local"` rows carry a nominal 1-UT floor, not dollars: shown, excluded from dollar totals.
+ *   - An explicit `settled: false` is UNCONFIRMED on its own, even with no correction event (the best-effort
+ *     `settlement_ambiguous` append can fail too).
+ *   - Dollars are classified by the recorded DENOMINATION (`costBasis`): `usd-proxy` is dollars (a GPU-amortized local
+ *     endpoint is `usd-proxy`), `nominal` is a unit count, shown and excluded from dollar totals. A row with no
+ *     `costBasis` (headless rows) is counted as dollars unless it says it went to a local endpoint, and is reported as
+ *     unlabelled so the reader knows the denomination was assumed.
+ *   - A row that is not a usable event (no `data` object, no string `kind`) is skipped and counted, never a crash:
+ *     the report still prints, with the verification diagnostics.
  *   - A denied call moved no money. Denials are COUNTED, never given a dollar value ("saved" would be fabricated).
  *   - Nothing here reads the live ledger balance. Budget status compares the vault's configured `budget` with the
  *     spend RECORDED in the chain, and says so.
@@ -52,8 +59,10 @@ export interface ReportOptions {
 	/** With `cost-center` / `auto`: use this 0-based dot-separated segment of the cost center as the agent. */
 	segment?: number;
 	topN?: number;
-	/** `budget` from the vault config; 0 or absent means none configured. */
+	/** The configured budget in usertokens; 0 or absent means none configured. */
 	budget?: number;
+	/** Where `budget` came from, printed beside it ("vault config", "--budget", "tenant config"). */
+	budgetSource?: string;
 }
 
 export interface IntegrityInfo {
@@ -95,12 +104,18 @@ export interface TierBreakdown {
 	inputTokens: number;
 	outputTokens: number;
 	cacheReadTokens: number;
+	/** TOTAL cache-write tokens (5-minute plus 1-hour). */
 	cacheWriteTokens: number;
+	/** Of which written to the 1-hour cache, priced at its own rate (`data.cacheWrite1h`). */
+	cacheWrite1hTokens: number;
 	/** tokens × appliedRates / 1000, per tier. Unrounded: per-call cost is ceil'd, so the tiers sum to ≈ costUt. */
 	inputUt: number;
 	outputUt: number;
 	cacheReadUt: number;
+	/** TOTAL cache-write cost: the 5-minute remainder at `cacheWritePer1k` plus the 1-hour tokens at their own rate. */
 	cacheWriteUt: number;
+	/** Of which the 1-hour tokens. */
+	cacheWrite1hUt: number;
 	/** cacheWriteUt / Σ tiers, 0..1; `null` when there is nothing to divide. A cost DRIVER, never "avoidable". */
 	cacheWriteShare: number | null;
 	/** Σ tiers − costUt: the rounding the per-call ceil introduces. Printed so the tiers visibly reconcile. */
@@ -112,23 +127,30 @@ export interface ReportModel {
 	integrity: IntegrityInfo;
 	agentKey: { requested: AgentKey; segment: number | null };
 	totals: {
-		/** Spend: confirmed, non-local `llm_call` cost. */
+		/** Spend: confirmed `llm_call` cost denominated in dollars (see the module comment). */
 		confirmedUt: number;
 		confirmedCalls: number;
 		/** The part of confirmed spend whose usage was an ESTIMATE (no provider-reported counts). */
 		estimatedUt: number;
 		estimatedCalls: number;
-		/** `llm_call`s with a later/earlier `settlement_ambiguous` for the same transfer: not counted as spent. */
+		/** The part of confirmed spend whose row records no `costBasis`: its denomination is ASSUMED to be dollars. */
+		unlabelledUt: number;
+		unlabelledCalls: number;
+		/** `llm_call`s with a `settlement_ambiguous` for the same transfer, or an explicit `settled: false`: not spent. */
 		unconfirmedUt: number;
 		unconfirmedCalls: number;
-		/** `endpointClass: "local"` rows: nominal units, excluded from dollar totals. */
-		localCalls: number;
-		localNominalUt: number;
+		/** Of those, the ones that are an explicit `settled: false` (the rest have a settlement_ambiguous record). */
+		unsettledCalls: number;
+		/** `costBasis: "nominal"` rows (or an unlabelled local-endpoint row): unit counts, excluded from dollar totals. */
+		nominalCalls: number;
+		nominalUt: number;
 		/** Governed non-LLM actions (kind = action.kind, `data.actionName`): a separate line, never merged. */
 		actionUt: number;
 		actionCalls: number;
 		/** `llm_call` rows in the window with no usable cost, or an unreadable timestamp. */
 		malformedCalls: number;
+		/** Rows that are not events at all (no `data` object, no string `kind`): skipped. */
+		malformedEvents: number;
 	};
 	/** `settlement_shortfall`: the metered cost exceeded what the ledger could post. */
 	shortfall: { events: number; ut: number };
@@ -144,11 +166,21 @@ export interface ReportModel {
 	topCosts: TopCost[];
 	/** Confirmed spend per hour of the window, oldest first; length = days × 24. */
 	hourlyUt: number[];
+	/**
+	 * The configured budget is the SESSION wallet's. What debits it: every `llm_call` and governed action that was not
+	 * attributed to a cost-center envelope, in usertokens (a nominal local call debits its units too). Spend attributed
+	 * to an envelope (`data.costCenter`) debits THAT envelope instead and is reported beside, never against the session
+	 * budget. Both exclude an ambiguous or `settled: false` settle.
+	 */
 	budget: {
 		configuredUt: number | null;
-		windowUt: number;
-		/** Confirmed spend over the WHOLE chain (every time, same exclusions), the figure compared with the budget. */
-		recordedUt: number;
+		source: string | null;
+		/** Session-wallet spend in the window / over the whole chain. */
+		windowSessionUt: number;
+		recordedSessionUt: number;
+		/** Envelope (cost-center) spend in the window / over the whole chain: NOT charged to the session budget. */
+		windowEnvelopeUt: number;
+		recordedEnvelopeUt: number;
 		/** 0..1 used, clamped; `null` when no budget is configured. */
 		usedFraction: number | null;
 		overBudget: boolean;
@@ -199,7 +231,8 @@ function count(v: unknown): number {
 
 export function detectProvider(model: string): string {
 	if (model.startsWith("claude")) return "anthropic";
-	if (model.startsWith("gpt") || model.startsWith("o1") || model.startsWith("o3")) return "openai";
+	// OpenAI reasoning families are `o<digit>` (o1, o3, o4-mini, ...).
+	if (model.startsWith("gpt") || /^o\d/.test(model)) return "openai";
 	if (model.startsWith("gemini")) return "google";
 	if (model.startsWith("command")) return "cohere";
 	if (model.startsWith("mistral") || model.startsWith("mixtral")) return "mistral";
@@ -250,6 +283,50 @@ function toRows(m: Map<string, { calls: number; ut: number }>, total: number): R
 		.sort((a, b) => b.ut - a.ut || a.key.localeCompare(b.key));
 }
 
+/** A row the report can read: an object with a string `kind` and an object `data`. */
+function isUsableEvent(e: unknown): e is PersistedAuditEvent {
+	if (e === null || typeof e !== "object") return false;
+	const r = e as Record<string, unknown>;
+	return (
+		typeof r["kind"] === "string" &&
+		typeof r["timestamp"] === "string" &&
+		r["data"] !== null &&
+		typeof r["data"] === "object" &&
+		!Array.isArray(r["data"])
+	);
+}
+
+/**
+ * The denomination a row's cost is in, from what the row RECORDS (`costBasis`), not from where the call went:
+ * `usd-proxy` is dollars even for a GPU-amortized local endpoint; `nominal` is a unit count. A row with no `costBasis`
+ * (headless rows) is `unlabelled`: counted as dollars, and reported as such, unless it says it went to a local endpoint.
+ */
+function denominationOf(e: PersistedAuditEvent): "usd" | "nominal" | "unlabelled" {
+	const basis = e.data["costBasis"];
+	if (basis === "usd-proxy") return "usd";
+	if (basis === "nominal") return "nominal";
+	return e.data["endpointClass"] === "local" ? "nominal" : "unlabelled";
+}
+
+/**
+ * What a row debited, and from which wallet: a finite non-negative `cost` on an `llm_call` or a governed action,
+ * unless the settle is ambiguous or explicitly `settled: false`. A row carrying a cost center debits that envelope, not
+ * the session wallet the configured budget belongs to. `undefined` for a row that debited nothing readable.
+ */
+function walletDebit(
+	e: PersistedAuditEvent,
+	ambiguous: ReadonlySet<string>,
+): { ut: number; envelope: boolean } | undefined {
+	const isCall = e.kind === "llm_call";
+	const isAction = !NON_ACTION_KINDS.has(e.kind) && str(e.data["actionName"]) !== undefined;
+	if (!isCall && !isAction) return undefined;
+	const c = cost(e.data["cost"]);
+	if (c === undefined || e.data["settled"] === false) return undefined;
+	const tid = str(e.data["transferId"]);
+	if (tid !== undefined && ambiguous.has(tid)) return undefined;
+	return { ut: c, envelope: str(e.data["costCenter"]) !== undefined };
+}
+
 export function buildWeeklyReport(
 	events: readonly PersistedAuditEvent[],
 	integrity: IntegrityInfo,
@@ -261,10 +338,15 @@ export function buildWeeklyReport(
 	const agentKey = opts.agentKey ?? "auto";
 	const topN = opts.topN ?? 10;
 
+	// A row that is not an event (a null, a missing or non-object `data`, a non-string `kind`) cannot be read: it is skipped
+	// and counted, so one bad line never turns the report into a crash with no verification diagnostics.
+	const usable = events.filter(isUsableEvent);
+	const malformedEvents = events.length - usable.length;
+
 	// Whole-chain indexes: an ambiguity or a shortfall can be recorded outside the window of the call it corrects.
 	const ambiguous = new Set<string>();
 	const shortfallByTransfer = new Map<string, number>();
-	for (const e of events) {
+	for (const e of usable) {
 		const tid = str(e.data["transferId"]);
 		if (tid === undefined) continue;
 		if (e.kind === "settlement_ambiguous") ambiguous.add(tid);
@@ -281,11 +363,15 @@ export function buildWeeklyReport(
 		estimatedCalls: 0,
 		unconfirmedUt: 0,
 		unconfirmedCalls: 0,
-		localCalls: 0,
-		localNominalUt: 0,
+		unlabelledUt: 0,
+		unlabelledCalls: 0,
+		unsettledCalls: 0,
+		nominalCalls: 0,
+		nominalUt: 0,
 		actionUt: 0,
 		actionCalls: 0,
 		malformedCalls: 0,
+		malformedEvents,
 	};
 	const agents = new Map<string, { calls: number; ut: number }>();
 	const sessions = new Map<string, { calls: number; ut: number }>();
@@ -297,10 +383,12 @@ export function buildWeeklyReport(
 		outputTokens: 0,
 		cacheReadTokens: 0,
 		cacheWriteTokens: 0,
+		cacheWrite1hTokens: 0,
 		inputUt: 0,
 		outputUt: 0,
 		cacheReadUt: 0,
 		cacheWriteUt: 0,
+		cacheWrite1hUt: 0,
 		cacheWriteShare: null,
 		roundingUt: 0,
 	};
@@ -311,19 +399,33 @@ export function buildWeeklyReport(
 	);
 	let shortfallEvents = 0;
 	let shortfallUt = 0;
-	let recordedUt = 0;
+	let recordedSessionUt = 0;
+	let recordedEnvelopeUt = 0;
+	let windowSessionUt = 0;
+	let windowEnvelopeUt = 0;
 
-	for (const e of events) {
+	for (const e of usable) {
 		const tid = str(e.data["transferId"]);
 		const ms = Date.parse(e.timestamp);
 		const inWindow = Number.isFinite(ms) && ms >= startMs && ms < endMs;
 
+		// BUDGET: every debit of a wallet, `llm_call` and governed action alike, over the WHOLE chain. A call attributed to
+		// a cost-center envelope debits that envelope, not the session wallet the configured budget belongs to.
+		const wallet = walletDebit(e, ambiguous);
+		if (wallet !== undefined) {
+			if (wallet.envelope) recordedEnvelopeUt += wallet.ut;
+			else recordedSessionUt += wallet.ut;
+			if (inWindow) {
+				if (wallet.envelope) windowEnvelopeUt += wallet.ut;
+				else windowSessionUt += wallet.ut;
+			}
+		}
+
 		if (e.kind === "llm_call") {
 			const c = cost(e.data["cost"]);
 			const isAmbiguous = tid !== undefined && ambiguous.has(tid);
-			const isLocal = e.data["endpointClass"] === "local";
-			// Whole-chain recorded spend, for the budget comparison: same exclusions as the window figure.
-			if (c !== undefined && !isAmbiguous && !isLocal) recordedUt += c;
+			const isUnsettled = e.data["settled"] === false;
+			const denomination = denominationOf(e);
 			if (!Number.isFinite(ms)) {
 				t.malformedCalls += 1;
 				continue;
@@ -333,18 +435,23 @@ export function buildWeeklyReport(
 				t.malformedCalls += 1;
 				continue;
 			}
-			if (isAmbiguous) {
+			if (isAmbiguous || isUnsettled) {
 				t.unconfirmedUt += c;
 				t.unconfirmedCalls += 1;
+				if (!isAmbiguous) t.unsettledCalls += 1;
 				continue;
 			}
-			if (isLocal) {
-				t.localCalls += 1;
-				t.localNominalUt += c;
+			if (denomination === "nominal") {
+				t.nominalCalls += 1;
+				t.nominalUt += c;
 				continue;
 			}
 			t.confirmedUt += c;
 			t.confirmedCalls += 1;
+			if (denomination === "unlabelled") {
+				t.unlabelledUt += c;
+				t.unlabelledCalls += 1;
+			}
 			const model = str(e.data["model"]) ?? "unknown";
 			const agent = agentOf(e, agentKey, opts.segment);
 			const a = agents.get(agent) ?? { calls: 0, ut: 0 };
@@ -391,6 +498,14 @@ export function buildWeeklyReport(
 					const out = count(uu["outputTokens"]);
 					const cr = count(uu["cacheReadTokens"]);
 					const cw = count(uu["cacheWriteTokens"]);
+					// The 1-hour share of the write total, with the rate it was priced at (a sibling of `usage` on the
+					// event, as on the receipt). Clamped to the write total so a malformed row cannot make the 5-minute
+					// remainder negative.
+					const w1 = e.data["cacheWrite1h"];
+					const w1Rec =
+						w1 !== null && typeof w1 === "object" ? (w1 as Record<string, unknown>) : undefined;
+					const cw1h = Math.min(cw, count(w1Rec?.["tokens"]));
+					const r1h = count(w1Rec?.["ratePer1k"]);
 					// An absent cache rate prices at the input rate (AGENTS.md D1), so the tier split follows suit.
 					const rin = count(rr["inputPer1k"]);
 					const rout = count(rr["outputPer1k"]);
@@ -403,10 +518,12 @@ export function buildWeeklyReport(
 					tiers.outputTokens += out;
 					tiers.cacheReadTokens += cr;
 					tiers.cacheWriteTokens += cw;
+					tiers.cacheWrite1hTokens += cw1h;
 					tiers.inputUt += (inp * rin) / 1000;
 					tiers.outputUt += (out * rout) / 1000;
 					tiers.cacheReadUt += (cr * rcr) / 1000;
-					tiers.cacheWriteUt += (cw * rcw) / 1000;
+					tiers.cacheWriteUt += ((cw - cw1h) * rcw + cw1h * r1h) / 1000;
+					tiers.cacheWrite1hUt += (cw1h * r1h) / 1000;
 				}
 			}
 			tops.push({
@@ -435,7 +552,11 @@ export function buildWeeklyReport(
 		// A governed non-LLM action: its own line, never merged into model spend.
 		if (!NON_ACTION_KINDS.has(e.kind) && str(e.data["actionName"]) !== undefined) {
 			const c = cost(e.data["cost"]);
-			if (c !== undefined && !(tid !== undefined && ambiguous.has(tid))) {
+			if (
+				c !== undefined &&
+				e.data["settled"] !== false &&
+				!(tid !== undefined && ambiguous.has(tid))
+			) {
 				t.actionUt += c;
 				t.actionCalls += 1;
 			}
@@ -455,7 +576,17 @@ export function buildWeeklyReport(
 	}
 	if (t.unconfirmedCalls > 0) {
 		notes.push(
-			`${t.unconfirmedCalls} call(s) have a settlement_ambiguous record: the ledger POST may not have completed. They are shown as unconfirmed, not counted as spent.`,
+			`${t.unconfirmedCalls} call(s) are unconfirmed (a settlement_ambiguous record, or an explicit settled: false${t.unsettledCalls > 0 ? `, ${t.unsettledCalls} of them` : ""}): the ledger POST may not have completed. They are shown as unconfirmed, not counted as spent.`,
+		);
+	}
+	if (t.unlabelledCalls > 0) {
+		notes.push(
+			`${t.unlabelledCalls} confirmed call(s) record no cost basis (headless rows); their denomination is assumed to be dollars at the usertoken rate.`,
+		);
+	}
+	if (t.malformedEvents > 0) {
+		notes.push(
+			`${t.malformedEvents} row(s) in the chain were not readable events and are in no figure.`,
 		);
 	}
 	if (t.estimatedCalls > 0) {
@@ -463,9 +594,9 @@ export function buildWeeklyReport(
 			`${t.estimatedCalls} confirmed call(s) were priced from an ESTIMATE (the provider reported no usage); they have no token split.`,
 		);
 	}
-	if (t.localCalls > 0) {
+	if (t.nominalCalls > 0) {
 		notes.push(
-			`${t.localCalls} call(s) went to a local endpoint and carry nominal units, excluded from dollar totals.`,
+			`${t.nominalCalls} call(s) are denominated in nominal units (a local endpoint) and are excluded from dollar totals.`,
 		);
 	}
 	if (t.malformedCalls > 0) {
@@ -507,10 +638,13 @@ export function buildWeeklyReport(
 		hourlyUt: hourly,
 		budget: {
 			configuredUt: configured,
-			windowUt: t.confirmedUt,
-			recordedUt,
-			usedFraction: configured === null ? null : Math.min(1, recordedUt / configured),
-			overBudget: configured !== null && recordedUt > configured,
+			source: configured === null ? null : (opts.budgetSource ?? "vault config"),
+			windowSessionUt,
+			recordedSessionUt,
+			windowEnvelopeUt,
+			recordedEnvelopeUt,
+			usedFraction: configured === null ? null : Math.min(1, recordedSessionUt / configured),
+			overBudget: configured !== null && recordedSessionUt > configured,
 		},
 		governance,
 		notes,

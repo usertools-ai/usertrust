@@ -46,11 +46,36 @@ function esc(s: string): string {
 		.replace(/'/g, "&#39;");
 }
 
+/**
+ * The integrity verdict. Its errors and first/last event ids come from a vault that may be hostile, so the WHOLE line is
+ * scrubbed here, at the source of both renderers: a control sequence in an event id must not reach the reader's terminal
+ * and erase the UNVERIFIED warning it sits beside.
+ */
 function verdictLine(m: ReportModel): string {
 	if (m.integrity.verified) {
-		return `Audit chain VERIFIED: ${m.integrity.chainLength} event(s), ${m.integrity.firstEvent ?? "?"} to ${m.integrity.lastEvent ?? "?"}.`;
+		return clean(
+			`Audit chain VERIFIED: ${m.integrity.chainLength} event(s), ${m.integrity.firstEvent ?? "?"} to ${m.integrity.lastEvent ?? "?"}.`,
+		);
 	}
-	return `Audit chain UNVERIFIED: ${m.integrity.errors.length} problem(s). ${m.integrity.errors.slice(0, 3).join(" | ")}`;
+	return clean(
+		`Audit chain UNVERIFIED: ${m.integrity.errors.length} problem(s). ${m.integrity.errors.slice(0, 3).join(" | ")}`,
+	);
+}
+
+function budgetLines(m: ReportModel): string[] {
+	const b = m.budget;
+	if (b.configuredUt === null)
+		return ["No budget is configured for this report (none in the vault config; pass --budget)."];
+	const lines = [
+		`Configured budget ${utStr(b.configuredUt)} (${usd(b.configuredUt)}), source: ${clean(b.source ?? "unknown")}. Session-wallet spend recorded in the chain (model calls and governed actions, not attributed to a cost-center envelope): ${utStr(b.recordedSessionUt)} (${usd(b.recordedSessionUt)}), ${pct(b.usedFraction ?? 0)} used${b.overBudget ? " (OVER BUDGET)" : ""}. This week: ${usd(b.windowSessionUt)}.`,
+	];
+	if (b.recordedEnvelopeUt > 0) {
+		lines.push(
+			`Spend attributed to cost-center envelopes is NOT charged to this budget: ${usd(b.recordedEnvelopeUt)} recorded, ${usd(b.windowEnvelopeUt)} this week.`,
+		);
+	}
+	lines.push("This is the configured budget against recorded spend, not the live ledger balance.");
+	return lines;
 }
 
 /** What this report is not, printed with every rendering. */
@@ -105,7 +130,7 @@ export function renderMarkdown(m: ReportModel): string {
 		"## Headline",
 		"",
 		`- **Confirmed spend:** ${usd(t.confirmedUt)} (${utStr(t.confirmedUt)}) across ${t.confirmedCalls} call(s)`,
-		`- **Unconfirmed:** ${usd(t.unconfirmedUt)} across ${t.unconfirmedCalls} call(s) with an ambiguous settlement (not counted as spent)`,
+		`- **Unconfirmed:** ${usd(t.unconfirmedUt)} across ${t.unconfirmedCalls} call(s) with an ambiguous or unsettled settlement (not counted as spent)`,
 	);
 	if (t.estimatedCalls > 0) {
 		out.push(
@@ -125,15 +150,7 @@ export function renderMarkdown(m: ReportModel): string {
 	out.push("");
 
 	out.push("## Budget status", "");
-	if (m.budget.configuredUt === null) {
-		out.push("No budget is configured in this vault.", "");
-	} else {
-		out.push(
-			`Configured budget ${utStr(m.budget.configuredUt)} (${usd(m.budget.configuredUt)}); spend recorded in the chain ${utStr(m.budget.recordedUt)} (${usd(m.budget.recordedUt)}), ${pct(m.budget.usedFraction ?? 0)} used${m.budget.overBudget ? " (OVER BUDGET)" : ""}.`,
-			`This week: ${usd(m.budget.windowUt)}. This is the configured budget against recorded spend, not the live ledger balance.`,
-			"",
-		);
-	}
+	out.push(...budgetLines(m).map((l) => `${l}\n`), "");
 
 	out.push(...rowsTable("Spend by agent", m.byAgent, "Agent"));
 	out.push(
@@ -155,7 +172,8 @@ export function renderMarkdown(m: ReportModel): string {
 			`| Input | ${tokens(k.inputTokens)} | ${usd(k.inputUt)} |`,
 			`| Output | ${tokens(k.outputTokens)} | ${usd(k.outputUt)} |`,
 			`| Cache read | ${tokens(k.cacheReadTokens)} | ${usd(k.cacheReadUt)} |`,
-			`| Cache write | ${tokens(k.cacheWriteTokens)} | ${usd(k.cacheWriteUt)} |`,
+			`| Cache write (5 min) | ${tokens(k.cacheWriteTokens - k.cacheWrite1hTokens)} | ${usd(k.cacheWriteUt - k.cacheWrite1hUt)} |`,
+			`| Cache write (1 hour) | ${tokens(k.cacheWrite1hTokens)} | ${usd(k.cacheWrite1hUt)} |`,
 			"",
 			`Cache write is ${k.cacheWriteShare === null ? "n/a" : pct(k.cacheWriteShare)} of provider-reported cost. It is a cost driver, not avoidable spend. Tier costs are tokens times the rates applied on each call; per-call rounding makes them differ from the metered ${usd(k.costUt)} by ${utStr(k.roundingUt)}.`,
 			"",
@@ -233,7 +251,7 @@ export function renderHtml(m: ReportModel): string {
 	}
 	body.push(
 		`<header><p class="muted">usertrust</p><h1>Weekly spend report</h1><p class="muted">${esc(m.window.startIso)} to ${esc(m.window.endIso)} (${m.window.days} days, end exclusive)</p><p class="${unverified ? "bad" : "ok"}"><strong>${esc(verdictLine(m))}</strong></p></header>`,
-		`<section class="headline"><div><span class="big">${usd(t.confirmedUt)}</span><span class="muted">confirmed spend, ${t.confirmedCalls} call(s)</span></div><div><span class="big">${usd(t.unconfirmedUt)}</span><span class="muted">unconfirmed (ambiguous settlement), ${t.unconfirmedCalls} call(s)</span></div>${
+		`<section class="headline"><div><span class="big">${usd(t.confirmedUt)}</span><span class="muted">confirmed spend, ${t.confirmedCalls} call(s)</span></div><div><span class="big">${usd(t.unconfirmedUt)}</span><span class="muted">unconfirmed (ambiguous or unsettled), ${t.unconfirmedCalls} call(s)</span></div>${
 			t.estimatedCalls > 0
 				? `<div><span class="big">${usd(t.estimatedUt)}</span><span class="muted">of confirmed spend priced from an estimate</span></div>`
 				: ""
@@ -241,16 +259,15 @@ export function renderHtml(m: ReportModel): string {
 			t.actionCalls > 0
 				? `<div><span class="big">${usd(t.actionUt)}</span><span class="muted">governed actions, reported separately</span></div>`
 				: ""
+		}${
+			m.shortfall.events > 0
+				? `<div><span class="big">${usd(m.shortfall.ut)}</span><span class="muted">metered above what the ledger could post, ${m.shortfall.events} settlement(s) (settlement_shortfall)</span></div>`
+				: ""
 		}</section>`,
 		`<h2>Spend per hour</h2>${barsSvg(m.hourlyUt)}`,
 	);
 	body.push(`<h2>Budget status</h2>`);
-	if (m.budget.configuredUt === null) body.push(`<p>No budget is configured in this vault.</p>`);
-	else {
-		body.push(
-			`<p>Configured budget ${usd(m.budget.configuredUt)}; spend recorded in the chain ${usd(m.budget.recordedUt)} (${pct(m.budget.usedFraction ?? 0)} used${m.budget.overBudget ? ", OVER BUDGET" : ""}). This week: ${usd(m.budget.windowUt)}. Configured budget against recorded spend, not the live ledger balance.</p>`,
-		);
-	}
+	body.push(...budgetLines(m).map((l) => `<p>${esc(l)}</p>`));
 	body.push(htmlRows("Spend by agent", "Agent", m.byAgent));
 	body.push(
 		`<p class="muted">Agent key: ${esc(m.agentKey.requested)}${m.agentKey.segment !== null ? `, cost-center segment ${m.agentKey.segment}` : ""}. Calls with no attribution are one "(unattributed)" row.</p>`,
@@ -271,7 +288,7 @@ export function renderHtml(m: ReportModel): string {
 	if (k.calls === 0) body.push(`<p class="muted">No provider-reported usage in this window.</p>`);
 	else {
 		body.push(
-			`<table><thead><tr><th>Tier</th><th class="n">Tokens</th><th class="n">Cost</th></tr></thead><tbody><tr><td>Input</td><td class="n">${tokens(k.inputTokens)}</td><td class="n">${usd(k.inputUt)}</td></tr><tr><td>Output</td><td class="n">${tokens(k.outputTokens)}</td><td class="n">${usd(k.outputUt)}</td></tr><tr><td>Cache read</td><td class="n">${tokens(k.cacheReadTokens)}</td><td class="n">${usd(k.cacheReadUt)}</td></tr><tr><td>Cache write</td><td class="n">${tokens(k.cacheWriteTokens)}</td><td class="n">${usd(k.cacheWriteUt)}</td></tr></tbody></table><p class="muted">Cache write is ${k.cacheWriteShare === null ? "n/a" : pct(k.cacheWriteShare)} of provider-reported cost: a cost driver, not avoidable spend. Tier costs are tokens times the rates applied on each call; per-call rounding makes them differ from the metered ${usd(k.costUt)} by ${utStr(k.roundingUt)}.</p>`,
+			`<table><thead><tr><th>Tier</th><th class="n">Tokens</th><th class="n">Cost</th></tr></thead><tbody><tr><td>Input</td><td class="n">${tokens(k.inputTokens)}</td><td class="n">${usd(k.inputUt)}</td></tr><tr><td>Output</td><td class="n">${tokens(k.outputTokens)}</td><td class="n">${usd(k.outputUt)}</td></tr><tr><td>Cache read</td><td class="n">${tokens(k.cacheReadTokens)}</td><td class="n">${usd(k.cacheReadUt)}</td></tr><tr><td>Cache write (5 min)</td><td class="n">${tokens(k.cacheWriteTokens - k.cacheWrite1hTokens)}</td><td class="n">${usd(k.cacheWriteUt - k.cacheWrite1hUt)}</td></tr><tr><td>Cache write (1 hour)</td><td class="n">${tokens(k.cacheWrite1hTokens)}</td><td class="n">${usd(k.cacheWrite1hUt)}</td></tr></tbody></table><p class="muted">Cache write is ${k.cacheWriteShare === null ? "n/a" : pct(k.cacheWriteShare)} of provider-reported cost: a cost driver, not avoidable spend. Tier costs are tokens times the rates applied on each call; per-call rounding makes them differ from the metered ${usd(k.costUt)} by ${utStr(k.roundingUt)}.</p>`,
 		);
 	}
 	body.push(`<h3>Top costs</h3>`);

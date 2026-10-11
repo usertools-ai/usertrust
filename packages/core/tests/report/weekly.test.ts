@@ -92,7 +92,7 @@ describe("weekly report model", () => {
 		expect(m.totals.unconfirmedUt).toBe(700);
 		expect(m.totals.unconfirmedCalls).toBe(1);
 		expect(m.notes.join(" ")).toMatch(/settlement_ambiguous/);
-		expect(m.budget.recordedUt).toBe(100); // the budget figure uses the same exclusion
+		expect(m.budget.recordedSessionUt).toBe(100); // the budget figure uses the same exclusion
 	});
 
 	it("a chain that did not verify marks the model UNVERIFIED and says so first in the notes", () => {
@@ -109,14 +109,66 @@ describe("weekly report model", () => {
 		expect(m.notes[0]).toMatch(/did NOT verify/);
 	});
 
-	it("local-endpoint rows are nominal units: counted, excluded from dollar totals", () => {
+	it("nominal-denominated rows are unit counts: counted, excluded from dollar totals", () => {
 		const m = build([
 			call("2026-10-08T01:00:00Z", 100),
-			call("2026-10-08T02:00:00Z", 1, { endpointClass: "local" }),
+			call("2026-10-08T02:00:00Z", 1, { endpointClass: "local", costBasis: "nominal" }),
 		]);
 		expect(m.totals.confirmedUt).toBe(100);
-		expect(m.totals.localCalls).toBe(1);
-		expect(m.totals.localNominalUt).toBe(1);
+		expect(m.totals.nominalCalls).toBe(1);
+		expect(m.totals.nominalUt).toBe(1);
+	});
+
+	it("classification is by recorded DENOMINATION: a GPU-amortized local call (usd-proxy) IS dollars", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 100, { endpointClass: "local", costBasis: "usd-proxy" }),
+		]);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.nominalCalls).toBe(0);
+	});
+
+	it("a row with NO costBasis (headless) is counted as dollars but reported as unlabelled; unlabelled + local is nominal", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 100, { costBasis: undefined, rateSource: undefined }),
+			call("2026-10-08T02:00:00Z", 7, { costBasis: undefined, endpointClass: "local" }),
+		]);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.unlabelledUt).toBe(100);
+		expect(m.totals.unlabelledCalls).toBe(1);
+		expect(m.totals.nominalUt).toBe(7);
+		expect(m.notes.join(" ")).toMatch(/no cost basis/);
+	});
+
+	it("an explicit settled:false is UNCONFIRMED on its own, with no correction event", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 100),
+			call("2026-10-08T02:00:00Z", 40, { settled: false }),
+		]);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.unconfirmedUt).toBe(40);
+		expect(m.totals.unsettledCalls).toBe(1);
+		expect(m.budget.recordedSessionUt).toBe(100);
+	});
+
+	it("malformed ROWS are skipped and counted, never a crash", () => {
+		const good = call("2026-10-08T01:00:00Z", 10);
+		const rows = [
+			good,
+			{ ...good, data: null },
+			{ ...good, data: undefined },
+			{ ...good, data: [] },
+			{ ...good, kind: undefined },
+			{ ...good, timestamp: undefined },
+			null,
+			"junk",
+		] as unknown as PersistedAuditEvent[];
+		let m: ReturnType<typeof build> | undefined;
+		expect(() => {
+			m = build(rows);
+		}).not.toThrow();
+		expect(m?.totals.confirmedUt).toBe(10);
+		expect(m?.totals.malformedEvents).toBe(7);
+		expect(m?.notes.join(" ")).toMatch(/not readable events/);
 	});
 
 	it("estimated rows are confirmed spend flagged as estimates, with no token split", () => {
@@ -172,16 +224,17 @@ describe("weekly report model", () => {
 		expect(m.totals.malformedCalls).toBe(3);
 	});
 
-	it("budget status: configured vs RECORDED spend over the whole chain; none configured is not 100% remaining", () => {
+	it("budget status: configured vs RECORDED session spend over the whole chain; none configured is not 100% remaining", () => {
 		const events = [call("2026-09-01T00:00:00Z", 300), call("2026-10-08T01:00:00Z", 100)];
 		const none = build(events, { budget: 0 });
 		expect(none.budget.configuredUt).toBeNull();
 		expect(none.budget.usedFraction).toBeNull();
-		const some = build(events, { budget: 1000 });
+		const some = build(events, { budget: 1000, budgetSource: "--budget" });
 		expect(some.budget).toMatchObject({
 			configuredUt: 1000,
-			windowUt: 100,
-			recordedUt: 400,
+			source: "--budget",
+			windowSessionUt: 100,
+			recordedSessionUt: 400,
 			usedFraction: 0.4,
 			overBudget: false,
 		});
@@ -189,6 +242,102 @@ describe("weekly report model", () => {
 			usedFraction: 1,
 			overBudget: true,
 		});
+	});
+
+	it("budget utilization includes GOVERNED ACTIONS, in or out of the window, and nominal units that debit the wallet", () => {
+		const events = [
+			call("2026-10-08T01:00:00Z", 100),
+			ev("tool_call", "2026-10-08T02:00:00Z", { actionName: "search", cost: 30, transferId: "a1" }),
+			ev("tool_call", "2026-08-01T02:00:00Z", {
+				actionName: "search",
+				cost: 500,
+				transferId: "a2",
+			}), // far outside the window
+			call("2026-10-08T03:00:00Z", 1, { endpointClass: "local", costBasis: "nominal" }),
+		];
+		const m = build(events, { budget: 10_000 });
+		expect(m.budget.recordedSessionUt).toBe(100 + 30 + 500 + 1);
+		expect(m.budget.windowSessionUt).toBe(100 + 30 + 1);
+	});
+
+	it("spend attributed to a cost-center ENVELOPE debits that envelope, not the session budget", () => {
+		const events = [
+			call("2026-10-08T01:00:00Z", 100), // session wallet
+			call("2026-10-08T02:00:00Z", 900, { costCenter: "team-a" }), // envelope
+			ev("tool_call", "2026-10-08T03:00:00Z", {
+				actionName: "x",
+				cost: 50,
+				costCenter: "team-a",
+				transferId: "a",
+			}),
+		];
+		const m = build(events, { budget: 1000 });
+		expect(m.budget.recordedSessionUt).toBe(100);
+		expect(m.budget.recordedEnvelopeUt).toBe(950);
+		expect(m.budget.windowEnvelopeUt).toBe(950);
+		expect(m.budget.usedFraction).toBe(0.1);
+		expect(m.budget.overBudget).toBe(false);
+	});
+
+	it("an ambiguous or settled:false governed action does not debit the budget", () => {
+		const events = [
+			ev("tool_call", "2026-10-08T02:00:00Z", { actionName: "x", cost: 50, transferId: "amb" }),
+			ev("settlement_ambiguous", "2026-10-08T02:00:01Z", { transferId: "amb" }),
+			ev("tool_call", "2026-10-08T03:00:00Z", {
+				actionName: "y",
+				cost: 70,
+				settled: false,
+				transferId: "u",
+			}),
+		];
+		const m = build(events, { budget: 1000 });
+		expect(m.budget.recordedSessionUt).toBe(0);
+		expect(m.totals.actionUt).toBe(0);
+	});
+
+	it("the 1-hour cache-write tier is priced at its OWN rate and shown, not folded into 'rounding'", () => {
+		// 10,000 one-hour writes at 200/1k = 2,000 UT; at the 5-minute rate (125) it would be 1,250
+		const m = build([
+			call("2026-10-08T01:00:00Z", 2000, {
+				usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 10_000 },
+				cacheWrite1h: { tokens: 10_000, ratePer1k: 200 },
+			}),
+		]);
+		expect(m.tiers.cacheWriteTokens).toBe(10_000);
+		expect(m.tiers.cacheWrite1hTokens).toBe(10_000);
+		expect(m.tiers.cacheWriteUt).toBe(2000);
+		expect(m.tiers.cacheWrite1hUt).toBe(2000);
+		expect(m.tiers.roundingUt).toBe(0);
+	});
+
+	it("a mixed write splits: the 5-minute remainder at the 5-minute rate, the 1-hour tokens at theirs", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 1250 + 400, {
+				usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 12_000 },
+				cacheWrite1h: { tokens: 2000, ratePer1k: 200 },
+			}),
+		]);
+		// (12000-2000)*125/1000 + 2000*200/1000 = 1250 + 400
+		expect(m.tiers.cacheWriteUt).toBe(1650);
+		expect(m.tiers.cacheWrite1hUt).toBe(400);
+	});
+
+	it("a 1-hour share larger than the write total is clamped, never a negative remainder", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 10, {
+				usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 100 },
+				cacheWrite1h: { tokens: 99_999, ratePer1k: 200 },
+			}),
+		]);
+		expect(m.tiers.cacheWrite1hTokens).toBe(100);
+		expect(m.tiers.cacheWriteUt).toBe(20);
+	});
+
+	it("providers: o4 models are OpenAI", async () => {
+		const { detectProvider } = await import("../../src/report/weekly.js");
+		expect(detectProvider("o4-mini")).toBe("openai");
+		expect(detectProvider("o3")).toBe("openai");
+		expect(detectProvider("ollama-x")).toBe("unknown");
 	});
 
 	it("shortfall is reported separately and never changes spend", () => {
