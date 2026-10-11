@@ -21,6 +21,7 @@ const COMMANDS = [
 	"secret",
 	"skill",
 	"ui",
+	"audit",
 ] as const;
 
 const argv = process.argv.slice(2);
@@ -147,6 +148,11 @@ switch (command) {
 		await import("./ui.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
 	}
+	case "audit": {
+		const rest = argv.slice(argv.indexOf("audit") + 1).filter((a) => a !== JSON_FLAG);
+		await import("./audit.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		break;
+	}
 	default: {
 		if (command && !command.startsWith("-")) {
 			const suggestion = suggestCommand(command);
@@ -174,6 +180,7 @@ Commands:
   secret        Manage vault credentials
   skill         Verify skill manifests
   ui            Open the visual ledger (local web UI)
+  audit         Repair a torn audit-log tail (quarantine-tail [--dry-run])
 
 Options:
   --json     Output machine-readable JSON`);
