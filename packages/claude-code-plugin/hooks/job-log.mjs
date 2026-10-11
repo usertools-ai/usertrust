@@ -435,6 +435,10 @@ const SPEND_LIKE = new Set([
 	"llm_call_failed",
 	"policy_denied",
 	"ledger_rejected",
+	// A settle for a hold that was gone: real usage, recorded and NOT charged. It names a hash, never a
+	// transferId or a session, so it matters even with no session: without it a job log reports
+	// knownGaps: [] over recorded, uncharged usage.
+	"settlement_unrecoverable",
 ]);
 
 const BENIGN_KINDS = new Set(["hold_released", "settlement_ambiguous", "settlement_shortfall"]);

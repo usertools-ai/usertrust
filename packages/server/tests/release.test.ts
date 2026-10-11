@@ -119,9 +119,12 @@ describe("POST /v1/release: the contract shipped plugins rely on", () => {
 		const res = await post(started.base, "/v1/release", { transferId, reason: "released at Stop" });
 		expect(res).toEqual({ status: 200, json: { released: true, transferId } });
 		expect(server?.pendingCount()).toBe(0);
-		// Gone for every route: a second release, a settle, an abort.
+		// Gone for every route: a second release and an abort are 404; a settle for it is a
+		// recorded 410 (the hold is gone, and a settle that arrives is spend to record).
 		for (const path of ["/v1/release", "/v1/settle", "/v1/abort"]) {
-			expect((await post(started.base, path, { transferId })).status).toBe(404);
+			expect((await post(started.base, path, { transferId })).status).toBe(
+				path === "/v1/settle" ? 410 : 404,
+			);
 		}
 		const records = (await chain(started)).filter((e) => e.data.transferId === transferId);
 		expect(records.map((e) => e.kind)).toEqual(["hold_released"]);

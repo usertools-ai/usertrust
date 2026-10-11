@@ -96,6 +96,19 @@ describe("statusOf", () => {
 		expect(statusOf(released as never)).toBe("released");
 	});
 
+	it("a settlement_unrecoverable record is failed (spend recorded, not charged), never pending", () => {
+		const [row] = toLedgerRows(
+			[
+				evt({
+					kind: "settlement_unrecoverable",
+					data: { transferIdHash: "a".repeat(64), usage: { inputTokens: 5 } },
+				}),
+			],
+			{ valid: true, breakIndex: null },
+		);
+		expect(statusOf(row as never)).toBe("failed");
+	});
+
 	it("labels a denial as denied, not as a zero-cost failed transaction", () => {
 		// A denial carries an `error` string, which the generic mapping would
 		// otherwise read as a failed CALL — putting refusals in the same column

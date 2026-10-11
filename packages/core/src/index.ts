@@ -110,6 +110,8 @@ export type {
 	Governor,
 	ReleaseOutcome,
 	SettleParams,
+	UnheldSettlementOutcome,
+	UnheldSettlementParams,
 } from "./headless.js";
 // Headless governance (non-SDK integrations)
 export {
@@ -194,6 +196,7 @@ export {
 	PolicyDeniedError,
 	SkillVerificationError,
 	SpendLedgerUnreadableError,
+	UnheldSettlementRateLimitedError,
 	VaultKeyMissingError,
 	VaultNotInitializedError,
 } from "./shared/errors.js";
