@@ -50,6 +50,8 @@ request a mutually agreed-upon extension.
 ### In Scope
 
 - `usertrust` (core SDK)
+- `usertrust-server` (the self-hosted control plane)
+- `usertrust-claude-code` (the Claude Code plugin)
 - `usertrust-verify` (verification package)
 - `usertrust-openclaw` (OpenClaw integration)
 - The usertrust CLI
