@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -7,7 +8,7 @@ import type { ServerConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
 // probeLedger from the package index: an embedder of createUsertrustServer calls it from there.
 import { probeLedger } from "../src/index.js";
-import { classifyLedgerProbe, resolveLedgerTargets } from "../src/ledger-probe.js";
+import { classifyLedgerProbe, resolveLedgerTargets, spawnProbeChild } from "../src/ledger-probe.js";
 
 // Verbatim stderr of the native client panicking under Docker's default seccomp profile.
 const IO_URING_PANIC = [
@@ -228,4 +229,102 @@ describe("probeLedger", () => {
 		await writeFile(join(dir, "usertrust.config.json"), "{ not json");
 		await expect(probeLedger(serverConfig(stateDir, { dryRun: true }))).resolves.toBeUndefined();
 	});
+});
+
+const PRELOAD = join(import.meta.dirname, "helpers", "source-preload.mjs");
+const PROBE_PARENT = join(import.meta.dirname, "helpers", "probe-parent.ts");
+
+function alive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Polls until `pid` is gone, for at most `ms`; true if it went. */
+async function goneWithin(pid: number, ms: number): Promise<boolean> {
+	const deadline = Date.now() + ms;
+	while (Date.now() < deadline) {
+		if (!alive(pid)) return true;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	return !alive(pid);
+}
+
+describe("the probe child never outlives what started it", () => {
+	const savedNodeOptions = process.env.NODE_OPTIONS;
+	const leftovers: number[] = [];
+	afterEach(() => {
+		if (savedNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+		else process.env.NODE_OPTIONS = savedNodeOptions;
+		// A red run must not leak the very process it caught.
+		for (const pid of leftovers.splice(0)) if (alive(pid)) process.kill(pid, "SIGKILL");
+	});
+
+	it("exits when its parent is killed mid-probe", async () => {
+		const ledgerPort = await freePort();
+		const parent = spawn(process.execPath, [PROBE_PARENT, String(ledgerPort), "30000"], {
+			env: {
+				...process.env,
+				NODE_OPTIONS: `${savedNodeOptions ?? ""} --import "${PRELOAD}"`.trim(),
+			},
+			stdio: ["ignore", "pipe", "inherit"],
+		});
+		if (parent.pid !== undefined) leftovers.push(parent.pid);
+		const childPid = await new Promise<number>((resolve, reject) => {
+			let out = "";
+			parent.stdout.setEncoding("utf-8");
+			parent.stdout.on("data", (chunk: string) => {
+				out += chunk;
+				const line = out.split("\n")[0];
+				if (out.includes("\n") && line !== undefined) resolve(Number(line));
+			});
+			parent.once("exit", () => reject(new Error("the parent exited before its child started")));
+		});
+		leftovers.push(childPid);
+		// Let the child get well into its probe: booted, client created, retrying.
+		await new Promise((resolve) => setTimeout(resolve, 1_000));
+		expect(alive(childPid)).toBe(true);
+
+		parent.kill("SIGKILL");
+		expect(await goneWithin(childPid, 2_000)).toBe(true);
+	}, 30_000);
+
+	it("keeps its own deadline: exits non-zero under a parent that never kills it", async () => {
+		process.env.NODE_OPTIONS = `${savedNodeOptions ?? ""} --import "${PRELOAD}"`.trim();
+		const target = { clusterId: 0, addresses: [`127.0.0.1:${await freePort()}`] };
+		const started = Date.now();
+		const child = spawnProbeChild(target, 1_000);
+		if (child.pid !== undefined) leftovers.push(child.pid);
+		let stderr = "";
+		child.stderr?.setEncoding("utf-8");
+		child.stderr?.on("data", (chunk: string) => {
+			stderr += chunk;
+		});
+		const ended = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | null>(
+			(resolve) => {
+				const timer = setTimeout(() => resolve(null), 5_000);
+				child.once("exit", (code, signal) => {
+					clearTimeout(timer);
+					resolve({ code, signal });
+				});
+			},
+		);
+		const elapsed = Date.now() - started;
+
+		expect(ended, "the child was still running 5 s after a 1 s deadline").not.toBeNull();
+		expect(ended?.code).not.toBe(0);
+		expect(elapsed).toBeLessThan(2_500);
+		// Its own deadline reads as the timeout refusal, exactly as the parent's kill does.
+		const result = classifyLedgerProbe(
+			{ exitCode: ended?.code ?? null, signal: ended?.signal ?? null, stderr, timedOut: false },
+			target,
+			1_000,
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.message).toMatch(/^no TigerBeetle answered at /);
+	}, 30_000);
 });

@@ -11,7 +11,7 @@
  * and the server refuses to start unless every one answered.
  */
 
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -26,6 +26,9 @@ export const DEFAULT_LEDGER_PROBE_TIMEOUT_MS = 5_000;
 const STDERR_QUOTE_BYTES = 2_048;
 /** The child's stderr kept while it runs, at most. */
 const STDERR_KEEP_BYTES = 16_384;
+
+/** What the probe child prints when its own deadline fires (cli/ledger-probe-child.ts). */
+const CHILD_DEADLINE_LINE = "ledger probe: no answer before the deadline";
 
 const FIXES = 'or set "dryRun": true in the server config to try it without a ledger.';
 
@@ -115,7 +118,8 @@ export function classifyLedgerProbe(
 				FIXES,
 		};
 	}
-	if (outcome.timedOut) {
+	// The parent's kill, or the child's own deadline (DEADLINE_LINE in cli/ledger-probe-child.ts).
+	if (outcome.timedOut || outcome.stderr.includes(CHILD_DEADLINE_LINE)) {
 		return {
 			ok: false,
 			message: `no TigerBeetle answered at ${where} within ${timeoutMs} ms. Start TigerBeetle 0.17.x on that address, ${FIXES}`,
@@ -139,17 +143,28 @@ function childScript(): string {
 	return join(self, "..", "cli", `ledger-probe-child${self.endsWith(".ts") ? ".ts" : ".js"}`);
 }
 
+/**
+ * Start one probe child for `target`. It never outlives what started it: it keeps
+ * `timeoutMs` as its own deadline, and the IPC channel (stdio[3]) closes when this
+ * process dies by any signal, which the child takes as its cue to exit. The caller owns
+ * it: `runProbeChild` reads its stderr and kills it at the same deadline, as a backstop.
+ */
+export function spawnProbeChild(target: LedgerTarget, timeoutMs: number): ChildProcess {
+	return spawn(
+		process.execPath,
+		[childScript(), String(target.clusterId), JSON.stringify(target.addresses), String(timeoutMs)],
+		{ stdio: ["ignore", "ignore", "pipe", "ipc"] },
+	);
+}
+
 function runProbeChild(target: LedgerTarget, timeoutMs: number): Promise<LedgerProbeOutcome> {
 	return new Promise((resolve) => {
-		const child = spawn(
-			process.execPath,
-			[childScript(), String(target.clusterId), JSON.stringify(target.addresses)],
-			{ stdio: ["ignore", "ignore", "pipe"] },
-		);
+		const child = spawnProbeChild(target, timeoutMs);
 		let stderr = "";
 		let timedOut = false;
-		child.stderr.setEncoding("utf-8");
-		child.stderr.on("data", (chunk: string) => {
+		// stdio[2] is "pipe", so stderr is always present.
+		child.stderr?.setEncoding("utf-8");
+		child.stderr?.on("data", (chunk: string) => {
 			stderr = (stderr + chunk).slice(-STDERR_KEEP_BYTES);
 		});
 		const timer = setTimeout(() => {
@@ -162,6 +177,8 @@ function runProbeChild(target: LedgerTarget, timeoutMs: number): Promise<LedgerP
 		});
 		child.once("close", (exitCode, signal) => {
 			clearTimeout(timer);
+			// The child is gone; its IPC channel must not hold this process open.
+			if (child.connected) child.disconnect();
 			resolve({ exitCode, signal, stderr, timedOut });
 		});
 	});
