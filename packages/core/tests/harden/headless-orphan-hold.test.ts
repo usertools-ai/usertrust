@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * AUD-001 — headless settle() must not orphan a PENDING hold, and must not
+ * Headless settle() must not orphan a PENDING hold, and must not
  * void or under-count an in-flight or transport-ambiguous POST.
  *
  * settle() deletes the auth from `activeAuths` so a concurrent settle cannot

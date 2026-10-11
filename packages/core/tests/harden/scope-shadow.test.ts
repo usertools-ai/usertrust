@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * AUD-002 — caller-supplied `scope` must not satisfy a `scopePatterns` rule.
+ * Caller-supplied `scope` must not satisfy a `scopePatterns` rule.
  *
  * `ruleMatches` requires a non-empty `context.scope` for any rule carrying
  * `scopePatterns`. Before this ship nothing in `src/` set that field, so the

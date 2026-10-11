@@ -1107,7 +1107,7 @@ declared none**. `scope` is in `HOST_CONTROLLED_POLICY_FIELDS`, so a request bod
 `params.params.scope` cannot volunteer a match. `ruleMatches` still requires a non-empty
 `context.scope` for any rule carrying `scopePatterns`: if the operator sets no `scope`, a scoped
 rule never matches (it does not "narrow a live rule"). An absent `scopePatterns` still matches all
-calls. Do not move `scope` back to `CALLER_SUPPLIED_POLICY_FIELDS` — that was AUD-002, the hole
+calls. Do not move `scope` back to `CALLER_SUPPLIED_POLICY_FIELDS` — that was the hole
 where a remote tenant could satisfy the docs' flagship production-only deny and an honest host
 never could.
 

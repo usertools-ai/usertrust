@@ -73,7 +73,7 @@ function makeMockAudit(): AuditWriter {
 	};
 }
 
-// ── AUD-456: connectProxy() throws ──
+// ── connectProxy() throws ──
 
 describe("connectProxy() — AUD-456", () => {
 	it("throws 'proxy mode not yet implemented'", () => {
@@ -91,7 +91,7 @@ describe("connectProxy() — AUD-456", () => {
 	});
 });
 
-// ── AUD-456: trust({ proxy }) throws ──
+// ── trust({ proxy }) throws ──
 
 describe("trust({ proxy }) — AUD-456", () => {
 	let tmpVault: string;

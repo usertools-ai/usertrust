@@ -134,8 +134,8 @@ that uses them is the deployer's work with their own auditors.
 
 Early versions carried a proxy-mode stub for remote governance that returned
 hardcoded success for every spend, settle, and void — which made the entire
-two-phase lifecycle theater and was, in effect, a governance bypass. Under
-AUD-456 we removed it: `connectProxy()` now throws, and passing `proxy` to
+two-phase lifecycle theater and was, in effect, a governance bypass. So
+we removed it: `connectProxy()` now throws, and passing `proxy` to
 `trust()` fails fast with the reason. If proxy mode ships in the future it will
 ship with real financial enforcement behind it. Until then: `dryRun` for
 explicit bypass in testing, a real TigerBeetle for production.
