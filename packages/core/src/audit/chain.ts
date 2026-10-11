@@ -457,6 +457,24 @@ function namespaceOf(lock: LockFileView): "unrecorded" | "same" | "foreign" | "u
 	return lock.pidNs === now ? "same" : "foreign";
 }
 
+/**
+ * A lock file's `pid`, as a message may print it: the number when it is one a process can carry
+ * (a non-negative safe integer), else `<invalid>`. A lock file's content is untrusted — a vault
+ * restored from someone else's snapshot can carry a `pid` string full of terminal controls — so
+ * no field read from a lock reaches a message, a warning or an error except through this or
+ * {@link describeLockField}.
+ */
+function describeLockPid(pid: unknown): string {
+	return typeof pid === "number" && Number.isSafeInteger(pid) && pid >= 0
+		? String(pid)
+		: "<invalid>";
+}
+
+/** A string field read from a lock file (a boot id, a namespace), as printed: itself when it has `shape`, else `<invalid>`. */
+function describeLockField(value: unknown, shape: RegExp): string {
+	return typeof value === "string" && shape.test(value) ? value : "<invalid>";
+}
+
 /** The lock's content: who holds it, and — where they can be read — on which boot and namespace. */
 function lockContentFor(writerId: string): string {
 	const bootId = thisBootId();
@@ -498,16 +516,15 @@ function tryCleanStaleLock(lockPath: string, lock: LockFileView): void {
 		if (namespace === "foreign" || namespace === "unknown") {
 			throw new AuditWriterLockHeldError(
 				namespace === "foreign"
-					? `Audit writer lock held by PID ${String(pid)} in another PID namespace (${String(lock.pidNs)}). This process cannot probe that namespace, so the lock is never reclaimed from here; remove the lock file by hand only once that writer is gone. Lock file: ${lockPath}`
-					: `Audit writer lock held by PID ${String(pid)} in a PID namespace this process cannot compare with its own. The lock is never reclaimed from here; remove the lock file by hand only once that writer is gone. Lock file: ${lockPath}`,
+					? `Audit writer lock held by PID ${describeLockPid(pid)} in another PID namespace (${describeLockField(lock.pidNs, PID_NS)}). This process cannot probe that namespace, so the lock is never reclaimed from here; remove the lock file by hand only once that writer is gone. Lock file: ${lockPath}`
+					: `Audit writer lock held by PID ${describeLockPid(pid)} in a PID namespace this process cannot compare with its own. The lock is never reclaimed from here; remove the lock file by hand only once that writer is gone. Lock file: ${lockPath}`,
 			);
 		}
 		if (writtenBeforeThisBoot(lock)) {
 			// From this namespace (or one unrecorded), and its PID was recorded before this boot: it
-			// names no process of this one, whatever process carries that number now. The boot ids
-			// are validated UUIDs: safe to print.
+			// names no process of this one, whatever process carries that number now.
 			console.warn(
-				`[AUDIT] Reclaiming a lock written before this boot (PID ${String(pid)}, boot ${String(lock.bootId)}; this boot ${String(thisBootId())}).`,
+				`[AUDIT] Reclaiming a lock written before this boot (PID ${describeLockPid(pid)}, boot ${describeLockField(lock.bootId, BOOT_ID)}; this boot ${describeLockField(thisBootId(), BOOT_ID)}).`,
 			);
 			unlinkSync(lockPath);
 			return;
@@ -516,7 +533,7 @@ function tryCleanStaleLock(lockPath: string, lock: LockFileView): void {
 			process.kill(pid as number, 0);
 			// Process is alive — lock is held
 			throw new AuditWriterLockHeldError(
-				`Audit writer lock held by PID ${pid}. Only one process may write to the audit log. Lock file: ${lockPath}`,
+				`Audit writer lock held by PID ${describeLockPid(pid)}. Only one process may write to the audit log. Lock file: ${lockPath}`,
 			);
 		} catch (killErr: unknown) {
 			if (hasFsCode(killErr, "ESRCH")) {
@@ -526,7 +543,7 @@ function tryCleanStaleLock(lockPath: string, lock: LockFileView): void {
 			}
 			if (hasFsCode(killErr, "EPERM")) {
 				throw new AuditWriterLockHeldError(
-					`Audit writer lock held by PID ${pid}. Only one process may write to the audit log. Lock file: ${lockPath}`,
+					`Audit writer lock held by PID ${describeLockPid(pid)}. Only one process may write to the audit log. Lock file: ${lockPath}`,
 				);
 			}
 			throw killErr;

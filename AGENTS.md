@@ -1039,6 +1039,10 @@ Rules:
 - An unknown boot id on either side is never stale.
 - Never reclaim on a time estimate; an uptime-derived boot time moves with the wall clock.
 - Cache only a SUCCESSFUL identity read.
+- A lock file's fields are untrusted text. Print them only through `describeLockPid` (a non-negative
+  safe integer, else `<invalid>`) or `describeLockField` (the value when it has its shape, else
+  `<invalid>`) — never `String(pid)` or a raw `${pid}`: a restored vault's lock can carry a `pid`
+  string full of terminal controls.
 
 A crashed container restarted into a new PID namespace therefore finds its old lock held, even
 after a reboot, until it is removed by hand (LIMITATIONS §5). That is the price of never reclaiming a live sibling's lock. A

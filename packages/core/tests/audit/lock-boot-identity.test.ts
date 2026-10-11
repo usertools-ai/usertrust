@@ -314,3 +314,85 @@ describe("PID namespaces: a lock from another namespace is HELD — this process
 		expect(existsSync(lockOf(v))).toBe(true);
 	});
 });
+
+describe("a lock file's fields never reach a message raw — a pid is printed only as a valid number", () => {
+	const char = (code: number) => String.fromCharCode(code);
+	/** A `pid` carrying an SGR (ESC) and C1's 8-bit CSI, as a lock from an untrusted snapshot could. */
+	const HOSTILE = `1${char(0x1b)}[31m${char(0x9b)}2J`;
+	const VALID = 4242;
+	const controlsIn = (text: string) =>
+		[...text].filter((ch) => {
+			const code = ch.codePointAt(0) ?? 0;
+			return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+		});
+	type Path = "foreign" | "uncomparable" | "reboot" | "alive" | "eperm";
+	/** What each path's message says, so a row proves it reached that message. */
+	const marker: Record<Path, string> = {
+		foreign: "in another PID namespace",
+		uncomparable: "cannot compare with its own",
+		reboot: "written before this boot",
+		alive: "Only one process may write",
+		eperm: "Only one process may write",
+	};
+
+	/** The message the acquire produces for a lock with this `pid` on this path. */
+	async function messageFor(path: Path, pid: unknown): Promise<string> {
+		if (path === "uncomparable") proc.pidNs = { error: "ENOENT" };
+		const chain = await freshChain();
+		const v = vault();
+		plantLock(v, {
+			pid,
+			bootId: path === "reboot" ? OTHER_BOOT : THIS_BOOT,
+			pidNs: path === "foreign" || path === "uncomparable" ? OTHER_NS : THIS_NS,
+		});
+		const realKill = process.kill.bind(process);
+		const kill = vi.spyOn(process, "kill").mockImplementation(((
+			target: number,
+			signal?: string | number,
+		) => {
+			if (target !== pid) return realKill(target, signal);
+			if (path === "eperm") throw Object.assign(new Error("EPERM: injected"), { code: "EPERM" });
+			return true; // alive
+		}) as typeof process.kill);
+		const warned: string[] = [];
+		const warn = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+			warned.push(args.map(String).join(" "));
+		});
+		try {
+			const w = chain.createAuditWriter(v, { lockAtCreate: true });
+			cleanups.unshift(() => w.release());
+			return warned.join("\n");
+		} catch (err) {
+			return (err as Error).message;
+		} finally {
+			kill.mockRestore();
+			warn.mockRestore();
+		}
+	}
+
+	const paths: Path[] = ["foreign", "uncomparable", "reboot", "alive", "eperm"];
+	it.each(
+		paths.flatMap((path) =>
+			[
+				["a string with terminal controls", HOSTILE],
+				["a non-integer", 1.5],
+				["a negative", -3],
+			].map(([what, pid]) => [path, what, pid] as const),
+		),
+	)(
+		"%s: a pid that is %s is printed as <invalid>, and nothing of it reaches the message",
+		async (path, _what, pid) => {
+			const message = await messageFor(path, pid);
+			expect(message, "control: the message is this path's").toContain(marker[path]);
+			expect(message).toContain("PID <invalid>");
+			expect(controlsIn(message)).toEqual([]);
+		},
+	);
+
+	it.each(paths)("%s: a valid pid is printed as itself", async (path) => {
+		const message = await messageFor(path, VALID);
+		expect(message, "control: the message is this path's").toContain(marker[path]);
+		expect(message).toContain(`PID ${VALID}`);
+		expect(controlsIn(message)).toEqual([]);
+	});
+});
