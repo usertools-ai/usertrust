@@ -32,16 +32,13 @@ call it lets through, exactly as they would without it.
 2. Add its SHA-256 hash to your `usertrust-server` config and start the server.
 3. Create the configuration file. Its format, and the requirements on its path, owner and mode, are in [Configuration file](#configuration-file); a file that fails them runs the session in watch-only mode with no requests sent. The minimal file has every required field, not only `url` and `key`:
 
-```sh
-mkdir -p ~/.config/usertrust && chmod 700 ~/.config/usertrust
-```
-
-Write `~/.config/usertrust/claude-code.json`. `stateDir` must be an absolute path, and
-JSON expands nothing, so let the shell put your home directory in. The subshell's
-`umask 077` creates the file owner-only, so the key is never readable by others:
+One block does it all, so copy it whole. `stateDir` must be an absolute path and JSON
+expands nothing, so the shell puts your home directory in. The subshell's `umask 077`
+creates the directory and the file owner-only, so the key is never readable by others,
+and the `chmod` lines also tighten a `~/.config/usertrust` that already existed:
 
 ```sh
-(umask 077 && cat > ~/.config/usertrust/claude-code.json) <<EOF
+(umask 077 && mkdir -p ~/.config/usertrust && cat > ~/.config/usertrust/claude-code.json) <<EOF
 {
   "url": "http://127.0.0.1:4519",
   "key": "<the key from step 1>",
@@ -49,6 +46,7 @@ JSON expands nothing, so let the shell put your home directory in. The subshell'
   "stateDir": "$HOME/.claude/usertrust-cc"
 }
 EOF
+chmod 700 ~/.config/usertrust
 chmod 600 ~/.config/usertrust/claude-code.json
 export UT_CC_CONFIG="$HOME/.config/usertrust/claude-code.json"
 ```
