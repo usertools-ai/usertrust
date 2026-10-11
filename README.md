@@ -23,6 +23,14 @@ console.log(receipt);
 await client.destroy();
 ```
 
+`new Anthropic()` reads your key from `ANTHROPIC_API_KEY`. `usertrust init` saves the key you give it in `.usertrust/.env` but does not export it, so a fresh shell has no key. Run the example with Node's own `.env` loader:
+
+```bash
+node --env-file=.usertrust/.env app.mjs
+```
+
+or `export ANTHROPIC_API_KEY=...` yourself first.
+
 That's it. One function wraps any supported LLM client. Every call is metered, audited, and policy-checked.
 
 ### Expected Output
