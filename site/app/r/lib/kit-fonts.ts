@@ -56,10 +56,30 @@ export const KIT_FONTS: readonly PinnedFont[] = [
  */
 let decodeChain: Promise<unknown> = Promise.resolve();
 
-function decodeToTtf(bytes: Uint8Array): Promise<ArrayBuffer> {
+/** How long one font's decode may run before it is abandoned and the card renders unbranded. */
+export const KIT_DECODE_TIMEOUT_MS = 3000;
+
+/**
+ * A decode that never settles must not hold the queue (every later card would then wait behind it
+ * forever): it is raced against a timeout, which REJECTS, so the chain moves on and the card falls
+ * back to unbranded. The stuck decode itself cannot be cancelled; it is simply no longer waited for.
+ */
+export function decodeToTtf(
+	bytes: Uint8Array,
+	timeoutMs: number = KIT_DECODE_TIMEOUT_MS,
+	decode: (woff2: Uint8Array) => Promise<Uint8Array> = decompress,
+): Promise<ArrayBuffer> {
 	const run = decodeChain.then(async () => {
-		const ttf: Uint8Array = await decompress(bytes);
-		return ttf.buffer.slice(ttf.byteOffset, ttf.byteOffset + ttf.byteLength) as ArrayBuffer;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timedOut = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new Error("font decode timed out")), timeoutMs);
+		});
+		try {
+			const ttf = await Promise.race([decode(bytes), timedOut]);
+			return ttf.buffer.slice(ttf.byteOffset, ttf.byteOffset + ttf.byteLength) as ArrayBuffer;
+		} finally {
+			clearTimeout(timer);
+		}
 	});
 	decodeChain = run.catch(() => undefined);
 	return run;
@@ -77,12 +97,13 @@ export async function loadPinnedFonts(
 	specs: readonly PinnedFont[] = KIT_FONTS,
 	fetchImpl: typeof fetch = fetch,
 	timeoutMs: number = KIT_FONT_TIMEOUT_MS,
+	decodeImpl: (bytes: Uint8Array) => Promise<ArrayBuffer> = decodeToTtf,
 ): Promise<CardFont[] | undefined> {
 	try {
 		return await Promise.all(
 			specs.map(async (spec) => {
 				const bytes = await fetchPinnedBytes(spec.url, spec.integrity, fetchImpl, timeoutMs);
-				const data = await decodeToTtf(bytes);
+				const data = await decodeImpl(bytes);
 				return { name: spec.name, data, weight: spec.weight, style: "normal" as const };
 			}),
 		);

@@ -12,7 +12,7 @@ import test from "node:test";
 import compress from "wawoff2/compress";
 // @ts-expect-error -- wawoff2 ships no type declarations
 import decompress from "wawoff2/decompress";
-import { KIT_FONTS, loadPinnedFonts, type PinnedFont } from "./kit-fonts";
+import { decodeToTtf, KIT_FONTS, loadPinnedFonts, type PinnedFont } from "./kit-fonts";
 
 const require = createRequire(import.meta.url);
 const NOTO_TTF = readFileSync(
@@ -154,4 +154,23 @@ test("a font that fails to decode does not wedge the next load", async () => {
 	const { bytes, spec } = await woff2Fixture();
 	const fonts = await loadPinnedFonts([spec], served(bytes));
 	assert.ok(fonts, "the next load still works");
+});
+
+const NEVER = () => new Promise<Uint8Array>(() => {});
+
+test("a decode that never settles is abandoned: it rejects after the timeout, and the queue is released", { timeout: 8000 }, async () => {
+	const started = Date.now();
+	await assert.rejects(decodeToTtf(new Uint8Array([1]), 40, NEVER), /timed out/);
+	assert.ok(Date.now() - started < 3000, "bounded by the timeout, not by the decode");
+	// The stuck decode must not hold the chain: the next font still decodes.
+	const { bytes } = await woff2Fixture();
+	const ttf = await decodeToTtf(bytes);
+	assert.ok(ttf.byteLength > 0, "the next decode runs after the abandoned one");
+});
+
+test("a font whose decode never settles leaves the card unbranded, and the next load still works", { timeout: 8000 }, async () => {
+	const { bytes, spec } = await woff2Fixture();
+	const stuck = (woff2: Uint8Array) => decodeToTtf(woff2, 40, NEVER);
+	assert.equal(await loadPinnedFonts([spec], served(bytes), 3000, stuck), undefined);
+	assert.ok(await loadPinnedFonts([spec], served(bytes)), "a later card is not wedged behind it");
 });
