@@ -343,6 +343,15 @@ describe("adjudicated review threads", () => {
 		await sweeping;
 	}, 20_000);
 
+	it("a RETRY of an already-settled settle with a long id is 409 already_settled, not 'names no hold here'", async () => {
+		const { base } = await start({ idLength: 300 });
+		const id = await authorize(base);
+		expect((await post(base, "/v1/settle", { transferId: id })).status).toBe(200);
+		const retry = await post(base, "/v1/settle", { transferId: id });
+		expect(retry.status).toBe(409);
+		expect(await retry.json()).toMatchObject({ error: "already_settled" });
+	});
+
 	it("a live hold whose factory issued a long transferId still settles; only the unknown-hold record path refuses an over-long id", async () => {
 		const { base } = await start({ idLength: 300 });
 		const id = await authorize(base);

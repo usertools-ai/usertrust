@@ -38,6 +38,8 @@
  * computes for its own per-line display.
  */
 
+import { createHash } from "node:crypto";
+
 // ── Types ──
 
 export interface EntropyEventInput {
@@ -212,6 +214,19 @@ export function extractBudgetUtilization(
 }
 
 /**
+ * The key a transfer is deduplicated by: the SHA-256 of its id. A `settlement_unrecoverable` names its
+ * transfer only by that hash (the id is never stored), a primary terminal by the raw id, so hashing the
+ * raw one makes the SAME transfer the same key whichever form its records carry (never counted twice).
+ */
+function transferKey(data: Record<string, unknown>): string | undefined {
+	const hash = data.transferIdHash;
+	if (typeof hash === "string" && hash !== "") return hash;
+	const id = data.transferId;
+	if (typeof id === "string" && id !== "") return createHash("sha256").update(id).digest("hex");
+	return undefined;
+}
+
+/**
  * Signal 3: Chain integrity
  *
  * The old implementation required the event KIND to contain "audit", "chain" or
@@ -253,7 +268,7 @@ export function extractChainIntegrity(
 	for (const e of events) {
 		// A `settlement_unrecoverable` names its transfer only as a hash (the id is never stored), so
 		// the dedupe key falls back to it.
-		const id = e.data.transferId ?? e.data.transferIdHash;
+		const id = transferKey(e.data);
 		if (typeof id !== "string" || id === "") continue;
 		// SETTLEMENT ATTEMPTS only. A denial, an anomaly abort and a partial
 		// delivery all carry a `transferId` but never reached settlement, so

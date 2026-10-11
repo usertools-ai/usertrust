@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
 	computeEntropyScore,
@@ -91,6 +92,19 @@ describe("Entropy — individual signals", () => {
 		);
 		expect(control.total).toBe(1);
 		expect(control.hits).toBe(0);
+	});
+
+	it("extractChainIntegrity counts ONE transfer once, whether a record names it by raw id or by its hash", () => {
+		const hash = createHash("sha256").update("t-1").digest("hex");
+		const signal = extractChainIntegrity(
+			[
+				{ kind: "llm_call", data: { cost: 1, settled: true, transferId: "t-1" } },
+				{ kind: "settlement_unrecoverable", data: { transferIdHash: hash } },
+			],
+			{},
+		);
+		expect(signal.total).toBe(1);
+		expect(signal.hits).toBe(1);
 	});
 
 	it("extractChainIntegrity detects verification failures", () => {

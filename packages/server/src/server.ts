@@ -79,6 +79,8 @@ export const RECENTLY_SETTLED_MEMORY = 10_000;
 /** How long a settle that finds its hold mid-release waits for the release before answering 409. */
 const HELD_WAIT_MS = 2_000;
 const HELD_POLL_MS = 50;
+/** The longest a settle waits for the sweep's release to land: past the ledger's own pending timeout. */
+const RELEASE_WAIT_MAX_MS = 30_000;
 /** The longest transferId a settle for an UNKNOWN hold may carry: it is hashed into an audit event. */
 const MAX_RECORDED_TRANSFER_ID = 256;
 /** Max concurrent SSE streams a single tenant may hold open at once. */
@@ -410,15 +412,6 @@ export function createUsertrustServer(opts: {
 		res: ServerResponse,
 	): Promise<void> {
 		const key = `${tenant.id}\0${transferId}`;
-		// The wire accepts any id length (a custom factory may issue long ids for LIVE holds); only the
-		// record of an unknown hold bounds it, because it is hashed into an audit event.
-		if (transferId.length > MAX_RECORDED_TRANSFER_ID) {
-			sendJson(res, 400, {
-				error: "bad_request",
-				reason: `transferId longer than ${MAX_RECORDED_TRANSFER_ID} characters names no hold here`,
-			});
-			return;
-		}
 		if (settling.has(key)) {
 			sendJson(res, 409, {
 				error: "settle_in_progress",
@@ -442,6 +435,17 @@ export function createUsertrustServer(opts: {
 				error: "already_settled",
 				reason: "this transferId was already settled: the charge stands",
 				transferId,
+			});
+			return;
+		}
+		// Only the RECORD of an unknown hold bounds the id (it is hashed into an audit event). The checks
+		// above come first on purpose: a retry of an already-settled settle with a long id (a custom factory
+		// may issue them for live holds) must still be told 409 already_settled / settlement_ambiguous, never
+		// "names no hold here", which could send the client to re-authorize and charge twice.
+		if (transferId.length > MAX_RECORDED_TRANSFER_ID) {
+			sendJson(res, 400, {
+				error: "bad_request",
+				reason: `transferId longer than ${MAX_RECORDED_TRANSFER_ID} characters names no hold here`,
 			});
 			return;
 		}
@@ -469,7 +473,14 @@ export function createUsertrustServer(opts: {
 			// window would turn a slow void into a 409 that the plugin never retries, and the spend would be
 			// neither charged nor recorded. The poll below covers any other path that leaves a hold held.
 			const inFlight = releasing.get(key);
-			if (inFlight !== undefined) await inFlight.catch(() => {});
+			// Bounded beyond the ledger's own timeout: a release that never settles must not hold the settle
+			// forever (it then falls through to the poll, and at worst a 409 hold_active).
+			if (inFlight !== undefined) {
+				await Promise.race([
+					inFlight.catch(() => {}),
+					new Promise<void>((resolve) => setTimeout(resolve, RELEASE_WAIT_MAX_MS).unref()),
+				]);
+			}
 			let outcome = await record();
 			for (
 				let waited = 0;
