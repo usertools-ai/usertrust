@@ -192,6 +192,8 @@ Subcommands:
  *  - The command succeeded: a cleanup failure — an audit lock left behind keeps other processes
  *    off the vault until this one exits — is an error: a message on stderr (stdout keeps the
  *    command's own output, a single JSON line under --json) and a non-zero exit code.
+ * Both messages carry paths (a lock file's, from the vault directory's name), so they are scrubbed
+ * for the terminal like every other untrusted string this command prints.
  */
 function closeAfterCommand(vault: VaultStore, audit: AuditWriter, commandFailed: boolean): void {
 	const failures: string[] = [];
@@ -208,10 +210,12 @@ function closeAfterCommand(vault: VaultStore, audit: AuditWriter, commandFailed:
 	if (failures.length === 0) return;
 	if (commandFailed) {
 		console.warn(
-			pc.yellow(`Warning: cleanup after the failed command also failed: ${failures.join("; ")}`),
+			pc.yellow(
+				`Warning: cleanup after the failed command also failed: ${scrubForTerminal(failures.join("; "))}`,
+			),
 		);
 		return;
 	}
-	console.error(pc.red(`Cleanup failed: ${failures.join("; ")}`));
+	console.error(pc.red(`Cleanup failed: ${scrubForTerminal(failures.join("; "))}`));
 	process.exitCode = 1;
 }

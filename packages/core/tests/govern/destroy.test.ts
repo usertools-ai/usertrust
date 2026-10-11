@@ -213,6 +213,26 @@ describe("client.destroy()", () => {
 			expect(String(warn.mock.calls[0]?.[0])).toContain(LEFT[0]);
 		});
 
+		it("a lock path carrying terminal control is SCRUBBED in the warning and on the console — no raw C0, DEL or C1", async () => {
+			// C0 (ESC, BEL, CR), DEL, and C1's 8-bit CSI introducer.
+			const controls = [0x1b, 0x07, 0x0d, 0x7f, 0x9b].map((c) => String.fromCharCode(c));
+			const [ESC, BEL, CR, DEL, CSI] = controls as [string, string, string, string, string];
+			const hostile = `/vaults/x${ESC}]0;pwned${BEL}${CR}${DEL}${CSI}2J/.usertrust/audit/.audit-writer.lock`;
+			const { governed } = await governedWith(() => {
+				throw new AuditLockReleaseError([
+					{ path: hostile, error: Object.assign(new Error("EIO: i/o error"), { code: "EIO" }) },
+				]);
+			});
+
+			await governed.destroy();
+			const [message] = emitWarning.mock.calls[0] as [string];
+			const logged = String(warn.mock.calls[0]?.[0]);
+			for (const text of [message, logged]) {
+				expect(text, "control: the path is reported").toContain("]0;pwned");
+				expect(controls.filter((c) => text.includes(c))).toEqual([]);
+			}
+		});
+
 		it("an unexpected release error also resolves with the warning — naming only its kind and code, never its message", async () => {
 			const { governed } = await governedWith(() => {
 				throw Object.assign(new Error("detail that is not ours to print"), { code: "EBADF" });

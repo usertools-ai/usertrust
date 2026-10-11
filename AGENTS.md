@@ -1213,7 +1213,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **sixteen** sanitizers, in two variants: **ten** neutralise C1 and **six** do not. Do
+There are **seventeen** sanitizers, in two variants: **eleven** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1265,6 +1265,12 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   `picocolors`, which wraps a string in SGR codes without sanitizing it. Copied rather than imported
   from `cli/budget.ts`: that module statically imports `TrustTBClient` and therefore the native
   `tigerbeetle-node` binding, and the snapshot command must not pull that in to print an error.
+- The stronger variant in the audit writer: `scrubForWarning` in `core/src/audit/chain.ts`, applied
+  to the teardown warning `destroy()` emits when an audit lock is left behind
+  (`USERTRUST_AUDIT_LOCK_LEFT`, on `process.emitWarning` and `console.warn`). That warning names
+  each lock's path, and a vault directory's name can carry escapes. Only the PRINTED text is
+  scrubbed: `AuditLockReleaseError.left` keeps the real path, which a substitution would corrupt.
+  A local copy, not an import from `cli/`: the audit writer must not depend on the CLI.
 - The stronger variant again: `forDisplay` in `verify/src/receipt.ts`, applied to
   every untrusted string the `--tx` receipt prints (model, error, transferId, timestamp, both
   chain hashes, and the `renderNotFound` txId, which is argv). The receipt reads `events.jsonl` —

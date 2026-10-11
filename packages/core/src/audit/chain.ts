@@ -119,6 +119,22 @@ export class AuditLockReleaseError extends AggregateError {
 	}
 }
 
+/**
+ * Untrusted text (a vault path) in a human-facing warning: C0, DEL and C1 become `?`, as
+ * `scrubForError` does in `audit/verify.ts` — a crafted directory name must not drive the terminal
+ * that prints the warning (C1 holds the 8-bit CSI/OSC introducers). Only the PRINTED text is
+ * scrubbed: an error's data (`AuditLockReleaseError.left`) keeps the real path, which a substitution
+ * would corrupt.
+ */
+function scrubForWarning(text: string): string {
+	let out = "";
+	for (const ch of text) {
+		const code = ch.codePointAt(0) ?? 0;
+		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : ch;
+	}
+	return out;
+}
+
 /** The `process.emitWarning` code under which a teardown reports an audit lock left behind. */
 export const AUDIT_LOCK_LEFT_WARNING = "USERTRUST_AUDIT_LOCK_LEFT";
 
@@ -128,18 +144,20 @@ export const AUDIT_LOCK_LEFT_WARNING = "USERTRUST_AUDIT_LOCK_LEFT";
  * kills the process: a stranded lock is a liveness problem (other processes wait until this one
  * exits), not a reason to crash. A failed release is therefore reported, not thrown: as a process
  * warning with the stable code {@link AUDIT_LOCK_LEFT_WARNING}, and on `console.warn`. The report
- * names each lock path left behind and its error code — nothing else from the error.
+ * names each lock path left behind and its error code — nothing else from the error — scrubbed
+ * for the terminal.
  */
 export function releaseAuditWriterForTeardown(audit: AuditWriter): void {
 	try {
 		audit.release();
 	} catch (err) {
-		const message =
+		const message = scrubForWarning(
 			err instanceof AuditLockReleaseError
 				? err.message
 				: `Audit writer release failed (${err instanceof Error ? err.name : typeof err}${
 						errorCode(err) === undefined ? "" : `: ${errorCode(err)}`
-					}); its lock may be left in place.`;
+					}); its lock may be left in place.`,
+		);
 		console.warn(`[AUDIT] ${message}`);
 		process.emitWarning(message, { code: AUDIT_LOCK_LEFT_WARNING });
 	}

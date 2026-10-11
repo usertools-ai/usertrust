@@ -68,6 +68,26 @@ vi.mock("../../src/vault/store.js", async (importOriginal) => {
 });
 
 const { run } = await import("../../src/cli/secret.js");
+const { AuditLockReleaseError } = await import("../../src/audit/chain.js");
+
+/**
+ * Terminal control planted in a directory name, built from char codes (never a literal escape in
+ * source): an OSC "set window title" sequence (ESC ] … BEL) and a carriage return. Not `ESC[31m`:
+ * picocolors itself emits that around the CLI's own red text.
+ */
+const ESC = String.fromCharCode(0x1b);
+const BEL = String.fromCharCode(0x07);
+const CR = String.fromCharCode(0x0d);
+const HOSTILE = `${ESC}]0;pwned${BEL}${CR}`;
+/** A lock left behind in a vault whose directory name carries {@link HOSTILE}. */
+const hostileLockLeft = () =>
+	new AuditLockReleaseError([
+		{
+			path: join(tmpdir(), `vault${HOSTILE}`, ".usertrust", "audit", ".audit-writer.lock"),
+			error: Object.assign(new Error("EIO: i/o error"), { code: "EIO" }),
+		},
+	]);
+const rawControl = (text: string) => [ESC, BEL, CR].filter((c) => text.includes(c));
 
 describe("usertrust secret — cleanup never hides the command's outcome", () => {
 	let tmpDir: string;
@@ -158,6 +178,26 @@ describe("usertrust secret — cleanup never hides the command's outcome", () =>
 		expect(process.exitCode).toBe(1);
 		expect(errorOutput.join("\n")).toContain("vault destroy failed");
 		expect(faults.released).toBe(1);
+	});
+
+	it("a lock path carrying terminal control is SCRUBBED on stderr after a successful command — no raw ESC, BEL or CR", async () => {
+		faults.release = hostileLockLeft();
+
+		await run();
+		const printed = errorOutput.join("\n");
+		expect(process.exitCode).toBe(1);
+		expect(printed, "control: the lock path is printed").toContain("]0;pwned");
+		expect(rawControl(printed)).toEqual([]);
+	});
+
+	it("…and in the warning after a FAILED command", async () => {
+		faults.command = new Error("vault list failed");
+		faults.release = hostileLockLeft();
+
+		await expect(run()).rejects.toThrow("vault list failed");
+		const printed = warnOutput.join("\n");
+		expect(printed, "control: the lock path is printed").toContain("]0;pwned");
+		expect(rawControl(printed)).toEqual([]);
 	});
 
 	it("control: nothing fails — exit code untouched, nothing on stderr, both cleanup steps ran", async () => {
