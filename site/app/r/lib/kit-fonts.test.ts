@@ -158,7 +158,9 @@ test("a font that fails to decode does not wedge the next load", async () => {
 
 const NEVER = () => new Promise<Uint8Array>(() => {});
 
-test("a decode that never settles is abandoned: it rejects after the timeout, and the queue is released", { timeout: 8000 }, async () => {
+test("a decode that never settles is abandoned: it rejects after the timeout, and the queue is released", {
+	timeout: 8000,
+}, async () => {
 	const started = Date.now();
 	await assert.rejects(decodeToTtf(new Uint8Array([1]), 40, NEVER), /timed out/);
 	assert.ok(Date.now() - started < 3000, "bounded by the timeout, not by the decode");
@@ -168,7 +170,9 @@ test("a decode that never settles is abandoned: it rejects after the timeout, an
 	assert.ok(ttf.byteLength > 0, "the next decode runs after the abandoned one");
 });
 
-test("a font whose decode never settles leaves the card unbranded, and the next load still works", { timeout: 8000 }, async () => {
+test("a font whose decode never settles leaves the card unbranded, and the next load still works", {
+	timeout: 8000,
+}, async () => {
 	const { bytes, spec } = await woff2Fixture();
 	const stuck = (woff2: Uint8Array) => decodeToTtf(woff2, 40, NEVER);
 	assert.equal(await loadPinnedFonts([spec], served(bytes), 3000, stuck), undefined);
