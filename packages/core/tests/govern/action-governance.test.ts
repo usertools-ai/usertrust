@@ -465,7 +465,7 @@ describe("governAction() — action governance pipeline", () => {
 	});
 
 	// ─────────────────────────────────────────────────────────────────────
-	// 11. AUD-466: Negative cost validation
+	// 11. Negative cost validation
 	// ─────────────────────────────────────────────────────────────────────
 
 	describe("11. Negative cost validation (AUD-466)", () => {
@@ -541,7 +541,7 @@ describe("governAction() — action governance pipeline", () => {
 	});
 
 	// ─────────────────────────────────────────────────────────────────────
-	// 12. AUD-467: Policy context field shadowing prevention
+	// 12. Policy context field shadowing prevention
 	// ─────────────────────────────────────────────────────────────────────
 
 	describe("12. Policy context field shadowing (AUD-467)", () => {

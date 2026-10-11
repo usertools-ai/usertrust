@@ -111,7 +111,7 @@ function writeLeases(store: LeaseStore, storeDir: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// ID Generation (AUD-466: crypto.randomUUID replaces Math.random)
+// ID Generation (crypto.randomUUID replaces Math.random)
 // ---------------------------------------------------------------------------
 
 function generateLeaseId(): string {
@@ -169,7 +169,7 @@ export function fileMatchesScope(file: string, scope: string[]): boolean {
  * Provides `acquireLease`, `releaseLease`, `findConflicts`, and `expireStale`
  * for coordinating parallel workers operating on overlapping file scopes.
  *
- * AUD-465: Accepts an optional `storeDir` constructor parameter to avoid
+ * Accepts an optional `storeDir` constructor parameter to avoid
  * reliance on module-level mutable state. Falls back to the module-level
  * `moduleStoreDir` for backward compatibility.
  */
@@ -237,7 +237,7 @@ export class ScopeManager {
 	/**
 	 * Renew an existing lease, extending its TTL.
 	 *
-	 * AUD-466: When `actor` is provided, verifies the caller matches the lease
+	 * When `actor` is provided, verifies the caller matches the lease
 	 * owner to prevent unauthorized renewal by a different actor. Callers SHOULD
 	 * always pass `actor` — omitting it is supported only for backward
 	 * compatibility and will be removed in a future major version.
@@ -276,7 +276,7 @@ export class ScopeManager {
 	/**
 	 * Release a lease, marking it as released.
 	 *
-	 * AUD-466: When `actor` is provided, verifies the caller matches the lease
+	 * When `actor` is provided, verifies the caller matches the lease
 	 * owner to prevent unauthorized release by a different actor. Callers SHOULD
 	 * always pass `actor` — omitting it is supported only for backward
 	 * compatibility and will be removed in a future major version.

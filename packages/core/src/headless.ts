@@ -42,7 +42,11 @@ import { existsSync, mkdirSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
-import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import {
+	type AuditWriter,
+	createAuditWriter,
+	releaseAuditWriterForTeardown,
+} from "./audit/chain.js";
 import {
 	appendDenialEvent,
 	classifyPolicyDenial,
@@ -77,6 +81,7 @@ import {
 	preflightEnvelopeRemaining,
 	type ResolvedEnvelope,
 	resolveEnvelope,
+	runTeardownSteps,
 	snapshotEnvelopeRemaining,
 	type TrustEngine,
 	type TrustOpts,
@@ -619,7 +624,7 @@ function normalizeEndpoint(endpoint: Partial<EndpointInfo> | undefined): Endpoin
 	};
 }
 
-// ── Async mutex (same as govern.ts AUD-453) ──
+// ── Async mutex (same as govern.ts) ──
 
 class AsyncMutex {
 	private queue: Promise<void> = Promise.resolve();
@@ -636,7 +641,7 @@ class AsyncMutex {
 	}
 }
 
-// ── Budget persistence (same as govern.ts AUD-457) ──
+// ── Budget persistence (same as govern.ts) ──
 
 interface SpendLedger {
 	budgetSpent: number;
@@ -691,7 +696,7 @@ async function loadSpendLedger(vaultBase: string): Promise<number> {
 async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promise<void> {
 	const dir = join(vaultBase, VAULT_DIR);
 	const ledgerPath = join(dir, "spend-ledger.json");
-	// AUD-457 hardening (RECON #4): UNIQUE tmp path per write. A fixed
+	// Hardening (RECON #4): UNIQUE tmp path per write. A fixed
 	// `spend-ledger.json.tmp` lets two concurrent writers clobber each other's
 	// staging file, so a half-written record can be renamed into place. A pid +
 	// uuid suffix isolates every writer's staging file.
@@ -1087,18 +1092,18 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		resetTimeoutMs: config.circuitBreaker.resetTimeout,
 	});
 
-	// 3. AUD-456: Proxy mode removed — throw early with clear error
+	// 3. Proxy mode removed — throw early with clear error
 	if (opts?.proxy) {
 		throw new Error(
 			"usertrust: proxy mode is not yet implemented (AUD-456). " +
 				"Use dryRun mode for testing, or connect a real TigerBeetle instance for production.",
 		);
 	}
-	// AUD-456: proxyConn is always null now — proxy mode throws above.
+	// proxyConn is always null now — proxy mode throws above.
 	// Cast keeps dead code paths type-safe for future re-enablement.
 	const proxyConn = null as ProxyConnection | null;
 
-	// AUD-457: restore cumulative spend from disk BEFORE building the engine so the
+	// Restore cumulative spend from disk BEFORE building the engine so the
 	// enforcing holding account can be seeded with the REMAINING budget.
 	let budgetSpent = await loadSpendLedger(vaultBase);
 
@@ -1129,7 +1134,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	let inFlightHoldTotal = 0;
 	// Keyed by transferId, holding the GOVERNOR's capture — not the caller's handle.
 	const activeAuths = new Map<string, AuthorizationCapture>();
-	// AUD-001: claimed-but-never-POSTed. settle() deletes from activeAuths FIRST
+	// Claimed-but-never-POSTed. settle() deletes from activeAuths FIRST
 	// so a concurrent settle cannot double-POST. Pre-POST work (metering) is still
 	// sync today, but if it throws the hold is PENDING — this set is that cleanup
 	// path. Populated at claim; cleared the moment settle finishes the POST
@@ -1360,7 +1365,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				estCacheWriteTokens,
 			);
 
-			// Acquire mutex for budget atomicity (AUD-453). The attributed-envelope
+			// Acquire mutex for budget atomicity. The attributed-envelope
 			// preflight read is taken INSIDE this lock (top of the try below) so a
 			// concurrent hold to the same envelope cannot land between the read and the
 			// gate — see the note there.
@@ -1464,7 +1469,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// execution context, which no request body can reach. Asserted after
 						// the spread like every other trusted field, `undefined` included.
 						cost_center: envelope?.attribution.costCenter,
-						// AUD-002: host-owned. This site has the widest blast radius —
+						// Host-owned. This site has the widest blast radius —
 						// packages/server wraps it, so `params.params.scope` arrives in an
 						// HTTP body from a remote tenant. Assert the operator's config/opts
 						// value, `undefined` included.
@@ -1939,7 +1944,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// a transport-ambiguous POST is treated as spent (fail-closed) so the next
 				// run cannot reseed as if the money never moved.
 				if (capture.sessionAccounted) {
-					// AUD-453: Acquire mutex for budget atomicity — prevents concurrent
+					// Acquire mutex for budget atomicity — prevents concurrent
 					// settle() calls from corrupting inFlightHoldTotal or budgetSpent.
 					const releaseLock = await budgetMutex.acquire();
 					try {
@@ -2131,7 +2136,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			if (settling.has(transferId)) {
 				return { aborted: false };
 			}
-			// AUD-001: a settle that threw BEFORE POST has already claimed the
+			// A settle that threw BEFORE POST has already claimed the
 			// auth (deleted from activeAuths) but left the transfer PENDING.
 			// Look there first, then in the claimed-but-never-POSTed set. A miss
 			// in both is already posted, voided, or a transport-ambiguous POST
@@ -2158,7 +2163,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// attributed hold never added to it (see authorize), and the VOID below is
 				// what returns the envelope's funds.
 				if (capture.sessionAccounted) {
-					// AUD-453: Acquire mutex for budget atomicity
+					// Acquire mutex for budget atomicity
 					const releaseLock = await budgetMutex.acquire();
 					try {
 						inFlightHoldTotal -= auth.estimatedCost;
@@ -2286,7 +2291,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						await proxyConn.void(capture.proxyTransferId ?? transferId);
 					} catch {
 						// A proxy's failure carries no cause this governor can read, an expiry
-						// included. (Proxy mode is removed, AUD-456: `proxyConn` is always null.)
+						// included. (Proxy mode is removed: `proxyConn` is always null.)
 						voidError = "proxy_void_failed";
 					}
 				} else if (engine != null && !isDryRun) {
@@ -2359,94 +2364,103 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			activeAuths.clear();
 			unpostedHolds.clear();
 
-			// A terminal still in flight: its void is its own, or the engine sweep's below
-			// (which also reaches this hold: its engine entry goes only when its own void
-			// returns), and the ledger takes one of the two: one mutation either way. The record
-			// says only what destroy() knows, that the void had not completed. It names no
-			// `voidError`: there was no outcome yet. The terminal still answers its caller from
-			// its own void.
-			for (const [txId, capture] of stillInFlight) {
-				await audit
-					.appendEvent({
-						kind: "hold_released",
-						actor: capture.actor,
-						data: {
-							transferId: txId,
-							reason: "governor destroyed (terminal still in flight: its void had not completed)",
-							source: "headless",
-							...(capture.releaseClass === undefined ? {} : { releaseClass: capture.releaseClass }),
-							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
-							...(capture.principal === undefined ? {} : { principal: capture.principal }),
-							...capture.jobAudit,
-						},
-					})
-					.catch(() => {});
-			}
-
-			// Every hold still held: voided and recorded, so destroy() ends no hold without a
-			// record.
-			for (const [txId, capture] of leftovers) {
-				let voidError: string | undefined;
-				if (proxyConn != null && !isDryRun) {
-					try {
-						await proxyConn.void(capture.proxyTransferId ?? txId);
-					} catch {
-						voidError = "proxy_void_failed";
+			// Every step runs, whatever an earlier one throws (shared with trust()); destroy()
+			// rejects with what a step threw only once the last has run, so the TigerBeetle client
+			// is always closed.
+			await runTeardownSteps([
+				async () => {
+					// A terminal still in flight: its void is its own, or the engine sweep's below
+					// (which also reaches this hold: its engine entry goes only when its own void
+					// returns), and the ledger takes one of the two: one mutation either way. The record
+					// says only what destroy() knows, that the void had not completed. It names no
+					// `voidError`: there was no outcome yet. The terminal still answers its caller from
+					// its own void.
+					for (const [txId, capture] of stillInFlight) {
+						await audit
+							.appendEvent({
+								kind: "hold_released",
+								actor: capture.actor,
+								data: {
+									transferId: txId,
+									reason:
+										"governor destroyed (terminal still in flight: its void had not completed)",
+									source: "headless",
+									...(capture.releaseClass === undefined
+										? {}
+										: { releaseClass: capture.releaseClass }),
+									...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+									...(capture.principal === undefined ? {} : { principal: capture.principal }),
+									...capture.jobAudit,
+								},
+							})
+							.catch(() => {});
 					}
-				} else if (engine != null && !isDryRun) {
-					try {
-						await engine.voidPendingSpend(txId);
-					} catch (err) {
-						voidError = releaseVoidError(err);
+
+					// Every hold still held: voided and recorded, so destroy() ends no hold without a
+					// record.
+					for (const [txId, capture] of leftovers) {
+						let voidError: string | undefined;
+						if (proxyConn != null && !isDryRun) {
+							try {
+								await proxyConn.void(capture.proxyTransferId ?? txId);
+							} catch {
+								voidError = "proxy_void_failed";
+							}
+						} else if (engine != null && !isDryRun) {
+							try {
+								await engine.voidPendingSpend(txId);
+							} catch (err) {
+								voidError = releaseVoidError(err);
+							}
+						}
+						// The capture carries no model (#205), so this record names none.
+						await audit
+							.appendEvent({
+								kind: "hold_released",
+								actor: capture.actor,
+								data: {
+									transferId: txId,
+									reason: "governor destroyed",
+									source: "headless",
+									...(voidError === undefined ? {} : { voidError }),
+									...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+									...(capture.principal === undefined ? {} : { principal: capture.principal }),
+									...capture.jobAudit,
+								},
+							})
+							.catch(() => {});
 					}
-				}
-				// The capture carries no model (#205), so this record names none.
-				await audit
-					.appendEvent({
-						kind: "hold_released",
-						actor: capture.actor,
-						data: {
-							transferId: txId,
-							reason: "governor destroyed",
-							source: "headless",
-							...(voidError === undefined ? {} : { voidError }),
-							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
-							...(capture.principal === undefined ? {} : { principal: capture.principal }),
-							...capture.jobAudit,
-						},
-					})
-					.catch(() => {});
-			}
-
-			// AUD-001 / AUD-461: same sweep trust() runs, best-effort, and it writes no
-			// record. What it can still find has one already: a settle whose POST threw
-			// (`settlement_ambiguous`; a void of a transfer TB did post fails closed in the
-			// catch), an abort or release whose own void failed (its record names the
-			// `voidError`, though this sweep may yet return the funds), a terminal still in
-			// flight above (recorded there), and a settle still posting past the deadline (its
-			// own records). Then close the client: a voidAllPending throw must not skip
-			// destroy() and hang the process on the open TigerBeetle socket.
-			if (engine != null && typeof engine.voidAllPending === "function") {
-				try {
-					await engine.voidAllPending();
-				} catch {
-					// Best-effort — TigerBeetle auto-voids pending transfers after 300s.
-				}
-			}
-
-			// Flush audit
-			await audit.flush();
-			audit.release();
-
-			// Destroy engine
-			if (engine != null && typeof engine.destroy === "function") {
-				engine.destroy();
-			}
-
-			// Destroy proxy
-			if (proxyConn != null) {
-				proxyConn.destroy();
-			}
+				},
+				// Same sweep trust() runs, best-effort, and it writes no
+				// record. What it can still find has one already: a settle whose POST threw
+				// (`settlement_ambiguous`; a void of a transfer TB did post fails closed in the
+				// catch), an abort or release whose own void failed (its record names the
+				// `voidError`, though this sweep may yet return the funds), a terminal still in
+				// flight above (recorded there), and a settle still posting past the deadline (its
+				// own records). Then close the client: a voidAllPending throw must not skip
+				// destroy() and hang the process on the open TigerBeetle socket.
+				async () => {
+					if (engine != null && typeof engine.voidAllPending === "function") {
+						try {
+							await engine.voidAllPending();
+						} catch {
+							// Best-effort — TigerBeetle auto-voids pending transfers after 300s.
+						}
+					}
+				},
+				// Flush audit, then release its lock. destroy() never REJECTS for a lock left
+				// behind: callers call it without await or catch, and an unhandled rejection kills
+				// the process. The teardown reports it as a USERTRUST_AUDIT_LOCK_LEFT warning instead.
+				() => audit.flush(),
+				() => releaseAuditWriterForTeardown(audit),
+				// Destroy the engine and the proxy.
+				() => {
+					if (engine != null && typeof engine.destroy === "function") engine.destroy();
+				},
+				() => {
+					if (proxyConn != null) proxyConn.destroy();
+				},
+			]);
 		},
 
 		/**

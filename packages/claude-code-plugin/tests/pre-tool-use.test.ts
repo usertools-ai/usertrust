@@ -260,7 +260,7 @@ describe("pre-tool-use hook", () => {
 		};
 		expect(body.messages[0]?.content.length).toBe(16_384);
 		expect(body.estimatedInputTokens).toBe(4096);
-		// Output hold is the same 16 KiB cap (4096 tokens), not 1 (AUD-004).
+		// Output hold is the same 16 KiB cap (4096 tokens), not 1.
 		expect(body.maxOutputTokens).toBe(4096);
 	});
 

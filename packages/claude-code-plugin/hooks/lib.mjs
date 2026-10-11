@@ -171,8 +171,8 @@ export function estimateTokens(text) {
 export const MAX_CONTENT_CHARS = 16 * 1024;
 
 // Conservative output hold: same 16 KiB cap as input, via estimateTokens, so a
-// settle of (input + output) at the cap cannot price above the reservation
-// (AUD-004). Leaving this at 1 under-debited the wallet on every large result.
+// settle of (input + output) at the cap cannot price above the reservation.
+// Leaving this at 1 under-debited the wallet on every large result.
 export const MAX_OUTPUT_TOKENS = estimateTokens("x".repeat(MAX_CONTENT_CHARS));
 
 /**
@@ -475,7 +475,7 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				...(typeof entry.startedAt === "string" ? { startedAt: entry.startedAt } : {}),
 				// Persist the authorize-time input estimate so settle can price both
 				// legs. Without it, post-tool-use sent only outputTokens and a large
-				// result priced above the 1-token hold (AUD-004).
+				// result priced above the 1-token hold.
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),
@@ -983,7 +983,7 @@ export async function listPending(sessionId, agentId) {
 /**
  * Find the pending hold for a tool call within one agent's holds. A non-empty
  * toolUseId matches that row or returns null — it must NOT fall through to
- * another tool's reservation (AUD-005). The oldest-entry fallback is only for
+ * another tool's reservation. The oldest-entry fallback is only for
  * hosts that omit tool_use_id (missing/null/empty), and it takes the oldest hold
  * recorded under the settle-attempt gate (`isGated`). An unmarked hold, an
  * earlier release's, may have been charged already, so it is never paired with a
