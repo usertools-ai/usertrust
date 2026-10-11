@@ -10,6 +10,7 @@ import {
 	rmSync,
 	symlinkSync,
 	unlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,8 +38,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  *  - `lstatSync` — and `fstatSync` on any fd opened at that path — can report a chosen inode for a
  *    lock file, and `fstatSync` a chosen inode for the next lock files CREATED (O_EXCL) — together
  *    they model a new lock file REUSING an old one's inode;
- *  - `openSync` can run a hook just before the next exclusive create: a seam for "another process
- *    changes the directory in the window before the lock file's create".
+ *  - `openSync` can run a hook just before the next exclusive create (the lock's temp file): a seam
+ *    for "another process changes the directory in the window before the lock file's create";
+ *  - `linkSync` can run a hook just after the lock's link succeeds — the moment the lock file
+ *    appears: a seam for "another process changes the directory between the create and its
+ *    success";
+ *  - every wrapped call can run a PROBE before and after it: a seam for "another process reads the
+ *    lock at this point" — at every point of a create.
+ * A lock's temp file (`<lock>.<writerId>.tmp`) becomes the lock by a hard link — the same inode — so
+ * an inode chosen for a lock path is reported for its temp file's fd too.
  * Real inode reuse cannot be produced on demand, so it is modelled. Overrides are looked up by the
  * physical path, so every spelling of a directory (or of a lock file's directory) matches.
  *
@@ -55,15 +63,22 @@ const nextLockIno: { ino: bigint | undefined } = { ino: undefined };
 const beforeLockCreate: { fn: ((path: string) => void) | undefined } = { fn: undefined };
 /** Runs once, just BEFORE the next non-exclusive open of a lock file (a READ of an existing one). */
 const beforeLockRead: { fn: ((path: string) => void) | undefined } = { fn: undefined };
-/** Runs once, just AFTER the next exclusive create's fd is closed (successfully). */
-const afterLockClose: { fn: ((path: string) => void) | undefined } = { fn: undefined };
+/** Runs once, just AFTER the next link that creates a lock file (successfully) — with its path. */
+const afterLockCreate: { fn: ((path: string) => void) | undefined } = { fn: undefined };
 /**
- * Faults injected ONCE into the next matching lock-file operation, then disarmed: a READ of an
- * existing lock (`open` / `fstat` / `read` on a non-exclusive fd), the `close` of an exclusive
- * create's fd (the real close runs first, then `before`, then the throw), or an `unlink`. `path`
- * (physical) narrows it to one lock file.
+ * Runs before AND after every wrapped fs call (and with the call's name), while armed. It must read
+ * the disk through `fsHooks.real`, never through the wrapped module.
  */
-type LockFaultOp = "open" | "fstat" | "read" | "close" | "unlink";
+const everyStep: { fn: ((step: string) => void) | undefined } = { fn: undefined };
+/**
+ * Faults injected ONCE into the next matching operation on a lock file or a lock's temp file, then
+ * disarmed: a READ of an existing lock (`open` / `fstat` / `read` on a non-exclusive fd), a `write`
+ * or `close` of an exclusive create's fd (the temp file's; for `close` the real close runs first,
+ * then `before`, then the throw), an `fsync` of any fd, a `link` (by its destination), or an
+ * `unlink`. Without a `path` it matches any lock or temp file; with one (physical), exactly that
+ * file — a directory included.
+ */
+type LockFaultOp = "open" | "fstat" | "read" | "write" | "fsync" | "close" | "link" | "unlink";
 const lockFaults: Array<{ op: LockFaultOp; code: string; path?: string; before?: () => void }> = [];
 const realpathCalls = { native: 0, js: 0, nativeAlwaysFails: false };
 /** Paths under these prefixes keep the caller's spelling through the JS realpath (see below). */
@@ -71,10 +86,15 @@ const realpathKeepsSpelling = new Set<string>();
 /** The UNMOCKED physical spelling of a path, even one not created yet (installed by the mock). */
 // vi.hoisted: the factory below runs while this file's own `node:fs` import resolves — before
 // ordinary top-level bindings exist — and it installs `physical` at that moment.
-const fsHooks = vi.hoisted(() => ({ physical: (p: string): string => p }));
+const fsHooks = vi.hoisted(() => ({
+	physical: (p: string): string => p,
+	/** The UNWRAPPED `node:fs` (installed by the mock): what a probe reads the disk through. */
+	real: undefined as unknown as typeof import("node:fs"),
+}));
 vi.mock("node:fs", async (importOriginal) => {
 	const fs = await importOriginal<typeof import("node:fs")>();
 	const path = await import("node:path");
+	fsHooks.real = fs;
 	// The deepest existing ancestor's realpath + the rest: a path not created yet still gets the
 	// spelling it will have once it exists.
 	fsHooks.physical = (p: string) => {
@@ -127,12 +147,19 @@ vi.mock("node:fs", async (importOriginal) => {
 		return forced === undefined ? real : { ...real, ino: forced };
 	}) as typeof fs.lstatSync;
 	// Every open fd remembers its physical path, so an fstat answers the same chosen inode a path
-	// lookup does — whichever way the module under test reads a lock file's identity.
-	const fdPaths = new Map<number, { path: string; excl: boolean }>();
+	// lookup does — whichever way the module under test reads a lock file's identity. A temp file's
+	// fd also remembers the lock it will become (`lock`): the link gives the lock its inode.
+	const fdPaths = new Map<number, { path: string; lock: string; excl: boolean }>();
+	const TEMP = /\.audit-writer\.lock\.[^/\\]+\.tmp$/;
+	const lockOfTemp = (p: string) => (TEMP.test(p) ? p.replace(/\.[^.]+\.tmp$/, "") : p);
+	const step = (name: string) => everyStep.fn?.(name);
+	// A fault with no `path` matches any lock or temp file; one with a `path` matches exactly that
+	// file — a directory included (its fsync).
+	const lockish = (p: string) => p.endsWith(".audit-writer.lock") || TEMP.test(p);
 	const fault = (op: LockFaultOp, physicalPath: string) => {
-		if (!physicalPath.endsWith(".audit-writer.lock")) return;
 		const i = lockFaults.findIndex(
-			(f) => f.op === op && (f.path === undefined || f.path === physicalPath),
+			(f) =>
+				f.op === op && (f.path === undefined ? lockish(physicalPath) : f.path === physicalPath),
 		);
 		if (i < 0) return;
 		const [f] = lockFaults.splice(i, 1);
@@ -154,39 +181,72 @@ vi.mock("node:fs", async (importOriginal) => {
 			hookBox.fn = undefined;
 			hook(String(p));
 		}
+		step("open");
 		const fd = (fs.openSync as (p: string, f?: unknown, m?: unknown) => number)(p, flags, mode);
-		fdPaths.set(fd, { path: fsHooks.physical(String(p)), excl });
+		step("open:done");
+		const physicalPath = fsHooks.physical(String(p));
+		fdPaths.set(fd, { path: physicalPath, lock: lockOfTemp(physicalPath), excl });
 		return fd;
 	}) as typeof fs.openSync;
 	const closeSync = ((fd: number) => {
 		const opened = fdPaths.get(fd);
 		fdPaths.delete(fd);
+		step("close");
 		fs.closeSync(fd);
-		if (opened?.excl === true) {
-			fault("close", opened.path);
-			const hook = afterLockClose.fn;
+		step("close:done");
+		if (opened?.excl === true) fault("close", opened.path);
+	}) as typeof fs.closeSync;
+	const writeSync = ((fd: number, ...rest: unknown[]) => {
+		const opened = fdPaths.get(fd);
+		if (opened?.excl === true) fault("write", opened.path);
+		step("write");
+		const n = (fs.writeSync as (fd: number, ...a: unknown[]) => number)(fd, ...rest);
+		step("write:done");
+		return n;
+	}) as typeof fs.writeSync;
+	const fsyncSync = ((fd: number) => {
+		const opened = fdPaths.get(fd);
+		if (opened !== undefined) fault("fsync", opened.path);
+		step("fsync");
+		fs.fsyncSync(fd);
+		step("fsync:done");
+	}) as typeof fs.fsyncSync;
+	const linkSync = ((existing: string, dest: string) => {
+		const physicalDest = fsHooks.physical(String(dest));
+		fault("link", physicalDest);
+		step("link");
+		fs.linkSync(existing, dest);
+		step("link:done");
+		if (physicalDest.endsWith(".audit-writer.lock")) {
+			const hook = afterLockCreate.fn;
 			if (hook !== undefined) {
-				afterLockClose.fn = undefined;
-				hook(opened.path);
+				afterLockCreate.fn = undefined;
+				hook(physicalDest);
 			}
 		}
-	}) as typeof fs.closeSync;
+	}) as typeof fs.linkSync;
 	const readFileSync = ((p: unknown, o?: unknown) => {
 		if (typeof p === "number") {
 			const opened = fdPaths.get(p);
 			if (opened !== undefined && !opened.excl) fault("read", opened.path);
 		}
-		return (fs.readFileSync as (p: unknown, o?: unknown) => unknown)(p, o);
+		step("read");
+		const content = (fs.readFileSync as (p: unknown, o?: unknown) => unknown)(p, o);
+		step("read:done");
+		return content;
 	}) as typeof fs.readFileSync;
 	const unlinkSync = ((p: string) => {
 		fault("unlink", fsHooks.physical(String(p)));
+		step("unlink");
 		fs.unlinkSync(p);
+		step("unlink:done");
 	}) as typeof fs.unlinkSync;
 	const fstatSync = ((fd: number, o?: unknown) => {
 		const opened = fdPaths.get(fd);
 		if (opened !== undefined && !opened.excl) fault("fstat", opened.path);
+		step("fstat");
 		const real = (fs.fstatSync as (fd: number, o?: unknown) => object)(fd, o);
-		const forced = opened === undefined ? undefined : lockInoOverride.get(opened.path);
+		const forced = opened === undefined ? undefined : lockInoOverride.get(opened.lock);
 		if (forced !== undefined) return { ...real, ino: forced };
 		// `nextLockIno` models the inode a NEW lock file gets: an exclusive create's fd only.
 		if (nextLockIno.ino !== undefined && opened?.excl === true) {
@@ -201,6 +261,9 @@ vi.mock("node:fs", async (importOriginal) => {
 		fstatSync,
 		openSync,
 		closeSync,
+		writeSync,
+		fsyncSync,
+		linkSync,
 		readFileSync,
 		unlinkSync,
 	};
@@ -213,6 +276,7 @@ const {
 	releaseAuditWriterForTeardown,
 	withAuditWriterLock,
 } = await import("../../src/audit/chain.js");
+const { createSnapshot } = await import("../../src/snapshot/checkpoint.js");
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -222,7 +286,8 @@ afterEach(() => {
 	nextLockIno.ino = undefined;
 	beforeLockCreate.fn = undefined;
 	beforeLockRead.fn = undefined;
-	afterLockClose.fn = undefined;
+	afterLockCreate.fn = undefined;
+	everyStep.fn = undefined;
 	lockFaults.length = 0;
 	realpathCalls.native = 0;
 	realpathCalls.js = 0;
@@ -235,6 +300,11 @@ const auditDirOf = (vault: string) => join(vault, ".usertrust", "audit");
 const lockOf = (vault: string) => join(auditDirOf(vault), ".audit-writer.lock");
 const logOf = (vault: string) => join(auditDirOf(vault), "events.jsonl");
 const inodeOf = (path: string) => lstatSync(path, { bigint: true }).ino;
+/** The lock temp files (`.audit-writer.lock.<id>.tmp`) in a vault's audit directory. */
+const tempsIn = (vault: string) =>
+	existsSync(auditDirOf(vault))
+		? readdirSync(auditDirOf(vault)).filter((n) => /^\.audit-writer\.lock\..+\.tmp$/.test(n))
+		: [];
 
 /** A fresh scratch directory, removed after the test. Never a fixed shared path. */
 function scratch(prefix: string): string {
@@ -942,7 +1012,7 @@ describe("#195: a lock that cannot be read, released or closed is never treated 
 	});
 
 	it.each(["writer", "scoped lock"] as const)(
-		"P2: a %s whose lock-file close fails: the acquire throws, the file it created is removed, no owner is left registered, and a later acquire succeeds",
+		"P2: a %s whose lock's temp-file close fails: the acquire throws, no lock and no temp file are left, no owner is left registered, and a later acquire succeeds",
 		async (kind) => {
 			const vault = scratch("trust-audit-close-");
 			mkdirSync(auditDirOf(vault), { recursive: true });
@@ -957,20 +1027,26 @@ describe("#195: a lock that cannot be read, released or closed is never treated 
 			expect(lockFaults, "control: the close fault was hit").toHaveLength(0);
 			expect((err as { code?: string }).code).toBe("EIO");
 			expect(ran).toBe(false);
-			expect(existsSync(lockOf(vault)), "the created lock was rolled back").toBe(false);
+			expect(existsSync(lockOf(vault)), "no lock was ever linked").toBe(false);
+			expect(tempsIn(vault), "the temp file was removed").toEqual([]);
 
 			track(createAuditWriter(vault, { lockAtCreate: true }));
 			expect(JSON.parse(readFileSync(lockOf(vault), "utf-8")).pid).toBe(process.pid);
 		},
 	);
 
-	it("P2: a close failure whose rollback cannot even READ the file leaves it in place UNREGISTERED — a later acquire in this process reclaims it, never refused by a phantom owner", () => {
+	it("P2: a failure after the link whose rollback cannot even READ the file leaves it in place UNREGISTERED — a later acquire in this process reclaims it, never refused by a phantom owner", () => {
 		const vault = scratch("trust-audit-close-unreadable-");
 		mkdirSync(auditDirOf(vault), { recursive: true });
-		lockFaults.push(
-			{ op: "close", code: "EIO" },
-			{ op: "open", code: "EIO", path: phys(lockOf(vault)) },
-		);
+		// The check's read fails, and then so does the rollback's own read of the lock.
+		afterLockCreate.fn = (p) => {
+			lockFaults.push({
+				op: "read",
+				code: "EIO",
+				path: p,
+				before: () => lockFaults.push({ op: "open", code: "EIO", path: p }),
+			});
+		};
 		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(/EIO/);
 		expect(lockFaults, "control: both faults were hit").toHaveLength(0);
 		expect(existsSync(lockOf(vault)), "could not be read, so not removed").toBe(true);
@@ -980,18 +1056,22 @@ describe("#195: a lock that cannot be read, released or closed is never treated 
 		expect(idOf(lockOf(vault))).not.toBe(left);
 	});
 
-	it("P2: the close-failure rollback removes only the file its own create made — a lock that replaced it is left alone", () => {
+	it("P2: the rollback of a failure after the link removes only the file its own create made — a lock that replaced it is left alone", () => {
 		const vault = scratch("trust-audit-close-replaced-");
 		mkdirSync(auditDirOf(vault), { recursive: true });
 		const foreign = JSON.stringify({ pid: 999999999, writerId: "someone-else" });
-		lockFaults.push({
-			op: "close",
-			code: "EIO",
-			before: () => {
-				unlinkSync(lockOf(vault));
-				writeFileSync(lockOf(vault), foreign);
-			},
-		});
+		// The check's read fails — just after another remover replaced the lock.
+		afterLockCreate.fn = (p) => {
+			lockFaults.push({
+				op: "read",
+				code: "EIO",
+				path: p,
+				before: () => {
+					unlinkSync(lockOf(vault));
+					writeFileSync(lockOf(vault), foreign);
+				},
+			});
+		};
 		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(/EIO/);
 		expect(readFileSync(lockOf(vault), "utf-8"), "not ours: left in place").toBe(foreign);
 	});
@@ -1000,19 +1080,22 @@ describe("#195: a lock that cannot be read, released or closed is never treated 
 		const vault = scratch("trust-audit-close-reused-");
 		mkdirSync(auditDirOf(vault), { recursive: true });
 		const foreign = JSON.stringify({ pid: 999999999, writerId: "someone-else" });
-		lockFaults.push({
-			op: "close",
-			code: "EIO",
-			before: () => {
-				const ours = inodeOf(lockOf(vault));
-				unlinkSync(lockOf(vault));
-				writeFileSync(lockOf(vault), foreign);
-				// Modelled reuse, so every platform sees it: the replacement reports our freed inode.
-				lockInoOverride.set(phys(lockOf(vault)), ours);
-			},
-		});
+		afterLockCreate.fn = (p) => {
+			lockFaults.push({
+				op: "read",
+				code: "EIO",
+				path: p,
+				before: () => {
+					const ours = inodeOf(lockOf(vault));
+					unlinkSync(lockOf(vault));
+					writeFileSync(lockOf(vault), foreign);
+					// Modelled reuse, so every platform sees it: the replacement reports our freed inode.
+					lockInoOverride.set(phys(lockOf(vault)), ours);
+				},
+			});
+		};
 		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(/EIO/);
-		expect(lockFaults, "control: the close fault was hit").toHaveLength(0);
+		expect(lockFaults, "control: the check's read fault was hit").toHaveLength(0);
 		expect(readFileSync(lockOf(vault), "utf-8"), "not ours: left in place").toBe(foreign);
 	});
 
@@ -1062,7 +1145,7 @@ describe("#195: the threat model's edge — directory replacement during an acqu
 
 	/**
 	 * A vault whose audit directory is moved to `elsewhere` (a second vault) and replaced by a new,
-	 * empty one right after the lock's create closes its fd — before the acquire reports success.
+	 * empty one right after the lock's link creates it — before the acquire reports success.
 	 */
 	function replacedAfterClose(prefix: string, foreignLock?: string) {
 		const parent = scratch(prefix);
@@ -1071,7 +1154,7 @@ describe("#195: the threat model's edge — directory replacement during an acqu
 		mkdirSync(auditDirOf(vault), { recursive: true });
 		mkdirSync(join(elsewhere, ".usertrust"), { recursive: true });
 		let fired = false;
-		afterLockClose.fn = () => {
+		afterLockCreate.fn = () => {
 			fired = true;
 			renameSync(auditDirOf(vault), auditDirOf(elsewhere));
 			mkdirSync(auditDirOf(vault));
@@ -1113,7 +1196,7 @@ describe("#195: the threat model's edge — directory replacement during an acqu
 		const vault = join(parent, "vault");
 		mkdirSync(auditDirOf(vault), { recursive: true });
 		const foreign = JSON.stringify({ pid: 999999999, writerId: "someone-else" });
-		afterLockClose.fn = () => {
+		afterLockCreate.fn = () => {
 			const ours = inodeOf(lockOf(vault));
 			renameSync(auditDirOf(vault), join(parent, "old-audit"));
 			mkdirSync(auditDirOf(vault));
@@ -1130,7 +1213,7 @@ describe("#195: the threat model's edge — directory replacement during an acqu
 		const parent = scratch("trust-audit-replaced-copy-");
 		const vault = join(parent, "vault");
 		mkdirSync(auditDirOf(vault), { recursive: true });
-		afterLockClose.fn = () => {
+		afterLockCreate.fn = () => {
 			const bytes = readFileSync(lockOf(vault), "utf-8");
 			renameSync(auditDirOf(vault), join(parent, "old-audit"));
 			mkdirSync(auditDirOf(vault));
@@ -1144,7 +1227,7 @@ describe("#195: the threat model's edge — directory replacement during an acqu
 	it("P1: a read error in that check fails the acquire, and the file the create made is rolled back — nothing registered", () => {
 		const vault = scratch("trust-audit-check-eio-");
 		mkdirSync(auditDirOf(vault), { recursive: true });
-		afterLockClose.fn = (p) => {
+		afterLockCreate.fn = (p) => {
 			lockFaults.push({ op: "read", code: "EIO", path: p });
 		};
 		const err = (() => {
@@ -1242,4 +1325,279 @@ describe("#195: the threat model's edge — directory replacement during an acqu
 			reported.mockRestore();
 		}
 	});
+});
+
+describe("the lock appears complete: written to a temp file, then hard-linked into place", () => {
+	const phys = (p: string) => fsHooks.physical(p);
+	const idOf = (lock: string) => JSON.parse(readFileSync(lock, "utf-8")).writerId as string;
+	const code = (e: unknown) => (e as { code?: string } | undefined)?.code;
+	/** A lock file left by a live process other than this one: the parent (as chain.test.ts does). */
+	const heldByAnotherProcess = (vault: string) =>
+		writeFileSync(lockOf(vault), JSON.stringify({ pid: process.ppid, writerId: "other" }));
+	/** What another process reading the lock path sees right now: absent, a complete claim, or not. */
+	function lookAtLock(lock: string): "absent" | "complete" | string {
+		let content: string;
+		try {
+			content = fsHooks.real.readFileSync(lock, "utf-8");
+		} catch (e) {
+			if (code(e) === "ENOENT") return "absent";
+			throw e;
+		}
+		try {
+			const claim = JSON.parse(content) as { pid?: unknown; writerId?: unknown };
+			if (typeof claim.pid === "number" && typeof claim.writerId === "string") return "complete";
+		} catch {
+			/* reported below */
+		}
+		return `INCOMPLETE ${JSON.stringify(content)}`;
+	}
+
+	it.each(["writer", "scoped lock"] as const)(
+		"P1: another process reading the lock path at EVERY point of a %s's create sees no lock or a complete one — never an empty or unparseable lock it would judge corrupt and remove",
+		async (kind) => {
+			const vault = scratch("trust-audit-atomic-probe-");
+			mkdirSync(auditDirOf(vault), { recursive: true });
+			const seen: string[] = [];
+			everyStep.fn = (step) => {
+				seen.push(`${step}: ${lookAtLock(lockOf(vault))}`);
+			};
+			try {
+				if (kind === "writer") {
+					track(createAuditWriter(vault, { lockAtCreate: true }));
+				} else {
+					await withAuditWriterLock(logOf(vault), () => {
+						everyStep.fn = undefined; // the create is over
+					});
+				}
+			} finally {
+				everyStep.fn = undefined;
+			}
+			expect(seen.filter((v) => v.includes("INCOMPLETE"))).toEqual([]);
+			// Controls: the probe ran before the lock existed, and after it appeared.
+			expect(seen.some((v) => v.endsWith(": absent"))).toBe(true);
+			expect(seen.some((v) => v.endsWith(": complete"))).toBe(true);
+		},
+	);
+
+	it("P1: …and through a stale-lock reclaim too: between the stale lock's removal and the new lock, the path is absent, never half-written", () => {
+		const vault = scratch("trust-audit-atomic-reclaim-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		writeFileSync(lockOf(vault), JSON.stringify({ pid: 999999999, writerId: "dead" }));
+		const seen: string[] = [];
+		everyStep.fn = (step) => {
+			seen.push(`${step}: ${lookAtLock(lockOf(vault))}`);
+		};
+		try {
+			track(createAuditWriter(vault, { lockAtCreate: true }));
+		} finally {
+			everyStep.fn = undefined;
+		}
+		expect(seen.filter((v) => v.includes("INCOMPLETE"))).toEqual([]);
+		expect(
+			seen.some((v) => v.endsWith(": absent")),
+			"control: the stale lock was removed",
+		).toBe(true);
+		expect(idOf(lockOf(vault))).not.toBe("dead");
+	});
+
+	it("no temp file is left: after a create, after a refusal (EEXIST), and after release", async () => {
+		const vault = scratch("trust-audit-temp-clean-");
+		const w = createAuditWriter(vault, { lockAtCreate: true });
+		await w.appendEvent({ kind: "k", actor: "a", data: {} });
+		expect(tempsIn(vault), "after the create").toEqual([]);
+		w.release();
+		expect(tempsIn(vault), "after release").toEqual([]);
+
+		heldByAnotherProcess(vault);
+		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(
+			AuditWriterLockHeldError,
+		);
+		expect(tempsIn(vault), "after a refusal").toEqual([]);
+	});
+
+	it.each(["write", "fsync", "close"] as const)(
+		"a %s failure on the temp file fails the acquire with no lock, no temp file and no owner left — a later acquire succeeds",
+		(op) => {
+			const vault = scratch(`trust-audit-temp-${op}-`);
+			mkdirSync(auditDirOf(vault), { recursive: true });
+			lockFaults.push({ op, code: "EIO" });
+			let err: unknown;
+			try {
+				createAuditWriter(vault, { lockAtCreate: true });
+			} catch (e) {
+				err = e;
+			}
+			expect(lockFaults, "control: the fault was hit").toHaveLength(0);
+			expect(code(err)).toBe("EIO");
+			expect(existsSync(lockOf(vault)), "no lock").toBe(false);
+			expect(tempsIn(vault), "no temp file").toEqual([]);
+			track(createAuditWriter(vault, { lockAtCreate: true }));
+		},
+	);
+
+	it("a link that fails for another reason (EIO) fails the acquire with no lock and no temp file", () => {
+		const vault = scratch("trust-audit-link-eio-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		lockFaults.push({ op: "link", code: "EIO" });
+		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(/EIO/);
+		expect(lockFaults, "control: the fault was hit").toHaveLength(0);
+		expect(existsSync(lockOf(vault))).toBe(false);
+		expect(tempsIn(vault)).toEqual([]);
+	});
+
+	it.each(["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "ENOSYS"])(
+		"link() unsupported (%s): the acquire FAILS CLOSED — never falls back to a create-then-write — keeps the code, says why, and leaves no lock, no temp file and no owner",
+		async (linkCode) => {
+			const vault = scratch("trust-audit-link-unsupported-");
+			mkdirSync(auditDirOf(vault), { recursive: true });
+			lockFaults.push({ op: "link", code: linkCode });
+			let ran = false;
+			const err = await withAuditWriterLock(logOf(vault), () => {
+				ran = true;
+			}).catch((e: unknown) => e);
+			expect(lockFaults, "control: the fault was hit").toHaveLength(0);
+			expect(ran).toBe(false);
+			expect(code(err)).toBe(linkCode);
+			expect((err as Error).message).toMatch(/hard link/);
+			expect(((err as Error).cause as { code?: string }).code).toBe(linkCode);
+			expect(existsSync(lockOf(vault)), "no lock was created another way").toBe(false);
+			expect(tempsIn(vault)).toEqual([]);
+			track(createAuditWriter(vault, { lockAtCreate: true }));
+		},
+	);
+
+	it("a temp file whose removal failed after the link does not fail the acquire; the writer's next create removes its own leftover and creates afresh", async () => {
+		const vault = scratch("trust-audit-temp-leftover-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		afterLockCreate.fn = (p) => {
+			// The temp file's removal, just after the link, fails once.
+			const temp = readdirSync(auditDirOf(vault)).find((n) => n.endsWith(".tmp"));
+			lockFaults.push({ op: "unlink", code: "EIO", path: phys(join(p, "..", temp ?? "?")) });
+		};
+		const w = track(createAuditWriter(vault, { lockAtCreate: true }));
+		expect(lockFaults, "control: the temp file's removal failed").toHaveLength(0);
+		const mine = idOf(lockOf(vault));
+		expect(tempsIn(vault), "control: the temp file was left").toEqual([
+			`.audit-writer.lock.${mine}.tmp`,
+		]);
+
+		w.release();
+		expect(existsSync(lockOf(vault)), "released").toBe(false);
+		await w.appendEvent({ kind: "k", actor: "a", data: {} }); // re-acquires: same temp name
+		expect(idOf(lockOf(vault))).toBe(mine);
+		expect(tempsIn(vault), "the leftover was replaced and removed").toEqual([]);
+	});
+
+	it("a lock temp file the writer really made (its removal failed, as after a crash) is never captured by a snapshot", async () => {
+		const vault = scratch("trust-audit-temp-snapshot-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		afterLockCreate.fn = (p) => {
+			const temp = readdirSync(auditDirOf(vault)).find((n) => n.endsWith(".tmp"));
+			lockFaults.push({ op: "unlink", code: "EIO", path: phys(join(p, "..", temp ?? "?")) });
+		};
+		const w = track(createAuditWriter(vault, { lockAtCreate: true }));
+		await w.appendEvent({ kind: "k", actor: "a", data: {} });
+		const temps = tempsIn(vault);
+		expect(temps, "control: the writer's temp file is there").toHaveLength(1);
+
+		const files = (await createSnapshot(join(vault, ".usertrust"), "with-temp")).files;
+		expect(files, "control: the log is captured").toContain("audit/events.jsonl");
+		expect(files).not.toContain(`audit/${temps[0]}`);
+	});
+
+	it("leftover temp files of crashed writers are never read as a lock, and a writer that takes the lock removes those older than a minute — a young one (a live create's) is left", () => {
+		const vault = scratch("trust-audit-temp-sweep-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		const temp = (id: string) => join(auditDirOf(vault), `.audit-writer.lock.${id}.tmp`);
+		const old = ["0", "1", "2"].map((n) => temp(`${n.repeat(8)}-0000-4000-8000-000000000000`));
+		const young = temp("33333333-0000-4000-8000-000000000000");
+		const notOurs = join(auditDirOf(vault), ".audit-writer.lock.not-a-writer-id.tmp");
+		// Each carries a LIVE process's complete claim: were any read as the lock, it would hold.
+		const claim = JSON.stringify({ pid: process.ppid, writerId: "crashed" });
+		for (const f of [...old, young, notOurs]) writeFileSync(f, claim);
+		const anHourAgo = new Date(Date.now() - 3_600_000);
+		for (const f of [...old, notOurs]) utimesSync(f, anHourAgo, anHourAgo);
+
+		track(createAuditWriter(vault, { lockAtCreate: true }));
+		expect(JSON.parse(readFileSync(lockOf(vault), "utf-8")).pid).toBe(process.pid);
+		expect(
+			old.filter((f) => existsSync(f)),
+			"the old leftovers were removed",
+		).toEqual([]);
+		expect(existsSync(young), "a young temp file is left").toBe(true);
+		expect(existsSync(notOurs), "a name not of the temp-file form is never touched").toBe(true);
+	});
+
+	it("a symlink at the lock's name is never followed: the acquire THROWS (ELOOP), and neither the link nor its target is touched", async () => {
+		const parent = scratch("trust-audit-lock-symlink-");
+		const vault = join(parent, "vault");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		// The target holds a dead process's claim: followed, it would be judged stale and reclaimed.
+		const target = join(parent, "elsewhere.json");
+		const dead = JSON.stringify({ pid: 999999999, writerId: "dead" });
+		writeFileSync(target, dead);
+		symlinkSync(target, lockOf(vault));
+		const err = await withAuditWriterLock(logOf(vault), () => {}).catch((e: unknown) => e);
+		expect(code(err)).toBe("ELOOP");
+		expect(lstatSync(lockOf(vault)).isSymbolicLink(), "the symlink is still there").toBe(true);
+		expect(readFileSync(target, "utf-8")).toBe(dead);
+		expect(tempsIn(vault)).toEqual([]);
+	});
+
+	it("a symlink at the writer's temp-file name is never written through: it is removed and the temp file created afresh", async () => {
+		const parent = scratch("trust-audit-temp-symlink-");
+		const vault = join(parent, "vault");
+		const w = track(createAuditWriter(vault, { lockAtCreate: true }));
+		const mine = idOf(lockOf(vault));
+		w.release();
+		const outside = join(parent, "outside.txt");
+		writeFileSync(outside, "untouched");
+		symlinkSync(outside, join(auditDirOf(vault), `.audit-writer.lock.${mine}.tmp`));
+
+		await w.appendEvent({ kind: "k", actor: "a", data: {} });
+		expect(readFileSync(outside, "utf-8")).toBe("untouched");
+		expect(idOf(lockOf(vault))).toBe(mine);
+		expect(lstatSync(lockOf(vault)).isSymbolicLink()).toBe(false);
+		expect(tempsIn(vault)).toEqual([]);
+	});
+
+	it("an append by a writer that holds its lock verifies it by one read — no temp file, no link", async () => {
+		const vault = scratch("trust-audit-fast-verify-");
+		const w = track(createAuditWriter(vault, { lockAtCreate: true }));
+		const steps: string[] = [];
+		everyStep.fn = (step) => {
+			steps.push(step);
+		};
+		try {
+			for (let i = 0; i < 3; i++) await w.appendEvent({ kind: "k", actor: "a", data: { i } });
+		} finally {
+			everyStep.fn = undefined;
+		}
+		expect(steps.filter((s) => s === "link")).toEqual([]);
+		expect(steps.filter((s) => s === "write").length, "control: the probe saw the appends").toBe(
+			6, // each append: the log line and the sidecar
+		);
+	});
+
+	it.each([
+		["EIO", true],
+		["EINVAL", false],
+	] as const)(
+		"the directory is fsync'd after the link; a failure (%s) never fails the acquire — reported unless the platform just cannot (warned: %s)",
+		(fsyncCode, warned) => {
+			const vault = scratch("trust-audit-dir-fsync-");
+			mkdirSync(auditDirOf(vault), { recursive: true });
+			lockFaults.push({ op: "fsync", code: fsyncCode, path: phys(auditDirOf(vault)) });
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				track(createAuditWriter(vault, { lockAtCreate: true }));
+				expect(lockFaults, "control: the directory fsync was attempted").toHaveLength(0);
+				const lines = warn.mock.calls.map((c) => String(c[0]));
+				expect(lines.some((l) => l.includes(`not fsynced (${fsyncCode})`))).toBe(warned);
+			} finally {
+				warn.mockRestore();
+			}
+			expect(JSON.parse(readFileSync(lockOf(vault), "utf-8")).pid).toBe(process.pid);
+		},
+	);
 });
