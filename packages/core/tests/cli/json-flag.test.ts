@@ -387,11 +387,15 @@ describe("CLI --json flag", () => {
 			const result = parseJsonOutput(logOutput) as {
 				command: string;
 				success: boolean;
-				data: { action: string; message: string };
+				data: { action: string; message: string; commands: string[] };
 			};
 			expect(result.command).toBe("tb");
 			expect(result.success).toBe(false);
 			expect(result.data.message).toContain("Not yet implemented");
+			expect(result.data.commands).toEqual([
+				"tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle",
+				"tigerbeetle start --addresses=127.0.0.1:3001 --development 0_0.tigerbeetle",
+			]);
 		});
 
 		it("contains no ANSI escape codes in JSON output", async () => {

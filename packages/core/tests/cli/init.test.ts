@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -230,4 +231,67 @@ describe("usertrust init (interactive)", () => {
 		expect(config.providers).toEqual([]);
 		expect(config.pricing).toBe("recommended");
 	});
+});
+
+/**
+ * The CLI itself, spawned as a shell runs it with no terminal on stdin (CI, a pipe, a
+ * container): its stdin is a pipe, closed at once. tsx runs it from source.
+ */
+describe("usertrust init without a terminal (the CLI)", () => {
+	const repoRoot = join(import.meta.dirname, "..", "..", "..", "..");
+	const TSX = join(repoRoot, "node_modules", ".bin", "tsx");
+	const MAIN = join(repoRoot, "packages", "core", "src", "cli", "main.ts");
+
+	function runCli(cwd: string, args: string[]) {
+		const r = spawnSync(TSX, [MAIN, ...args], {
+			cwd,
+			encoding: "utf-8",
+			timeout: 30_000,
+			input: "",
+		});
+		return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+	}
+
+	let dir: string;
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "trust-init-cli-"));
+	});
+	afterEach(() => {
+		chmodSync(dir, 0o700);
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("creates the vault with the defaults, asks nothing, and exits 0", () => {
+		const { code, stdout, stderr } = runCli(dir, ["init"]);
+		expect(stdout).not.toContain("Paste your API key");
+		expect(stderr).not.toContain("unsettled top-level await");
+		expect(code).toBe(0);
+		const configPath = join(dir, ".usertrust", "usertrust.config.json");
+		expect(existsSync(configPath)).toBe(true);
+		expect(JSON.parse(readFileSync(configPath, "utf-8")).budget).toBe(50_000);
+		expect(stdout).toContain("Vault created at");
+	}, 40_000);
+
+	it("--reconfigure refuses rather than overwrite the vault with the defaults", () => {
+		expect(runCli(dir, ["init"]).code).toBe(0);
+		const configPath = join(dir, ".usertrust", "usertrust.config.json");
+		const before = readFileSync(configPath, "utf-8");
+		const { code, stderr } = runCli(dir, ["init", "--reconfigure"]);
+		expect(code).toBe(1);
+		expect(stderr).toContain("usertrust init failed: --reconfigure asks what to change");
+		expect(readFileSync(configPath, "utf-8")).toBe(before);
+	}, 40_000);
+
+	it.skipIf(process.getuid?.() === 0)(
+		"exits non-zero, with a message, when the vault cannot be written",
+		() => {
+			chmodSync(dir, 0o555);
+			const { code, stderr } = runCli(dir, ["init"]);
+			expect(code).not.toBe(0);
+			expect(code).not.toBeNull();
+			expect(stderr).toContain("usertrust init failed");
+			expect(existsSync(join(dir, ".usertrust"))).toBe(false);
+		},
+		40_000,
+	);
 });

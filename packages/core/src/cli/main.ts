@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { VAULT_DIR } from "../shared/constants.js";
 import { GLOBAL_FLAGS, JSON_FLAG, RECONFIGURE_FLAG, SKIP_VERIFY_FLAG } from "./flags.js";
 import { scrubForTerminal } from "./target.js";
 
@@ -82,12 +85,27 @@ async function refusedStray(cmd: string, valueFlags?: readonly string[]): Promis
 }
 
 switch (command) {
-	case "init":
+	case "init": {
 		if (await refusedStray("init")) break;
-		await import("./init.js").then((m) =>
-			m.run(undefined, { json: jsonFlag, skipVerify, reconfigure }),
-		);
+		const { run } = await import("./init.js");
+		try {
+			// No terminal on stdin means nobody can answer a prompt: one would wait on a
+			// stream that never speaks, and the process would exit with nothing written.
+			const interactive = process.stdin.isTTY === true;
+			await run(undefined, { json: jsonFlag, skipVerify, reconfigure, interactive });
+		} catch (err) {
+			console.error(`usertrust init failed: ${err instanceof Error ? err.message : String(err)}`);
+			process.exitCode = 1;
+			break;
+		}
+		// However init ended (a cancelled prompt, say), no vault means it failed.
+		const vaultPath = join(process.cwd(), VAULT_DIR);
+		if (!existsSync(vaultPath)) {
+			console.error(`usertrust init: no vault was created at ${vaultPath}`);
+			process.exitCode = 1;
+		}
 		break;
+	}
 	case "inspect":
 		if (await refusedStray("inspect")) break;
 		await import("./inspect.js").then((m) => m.run(undefined, { json: jsonFlag }));
