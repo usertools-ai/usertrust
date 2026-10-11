@@ -25,6 +25,71 @@ describe("usertrust health", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
+	it("reports a RUNAWAY persisted spend instead of an ordinary 'used' budget, with the recovery pointer", async () => {
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(join(vaultPath, "audit"), { recursive: true });
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({ budget: 50000 }),
+			"utf-8",
+		);
+		writeFileSync(
+			join(vaultPath, "spend-ledger.json"),
+			JSON.stringify({ budgetSpent: 9.22e18 }),
+			"utf-8",
+		);
+
+		await run(tempDir);
+		const human = logOutput.join("\n");
+		expect(human).toContain("runaway spend");
+		expect(human).toContain("docs/runaway-spend.md");
+
+		logOutput = [];
+		await run(tempDir, { json: true });
+		const parsed = JSON.parse(logOutput.join("")) as {
+			data: { signals: { budgetRunaway?: boolean } };
+		};
+		expect(parsed.data.signals.budgetRunaway).toBe(true);
+	});
+
+	it("CONTROL: an exhausted but ordinary budget is NOT called a runaway", async () => {
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(join(vaultPath, "audit"), { recursive: true });
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({ budget: 50000 }),
+			"utf-8",
+		);
+		writeFileSync(
+			join(vaultPath, "spend-ledger.json"),
+			JSON.stringify({ budgetSpent: 60000 }),
+			"utf-8",
+		);
+
+		await run(tempDir);
+		expect(logOutput.join("\n")).not.toContain("runaway");
+	});
+
+	it("counts calls charged at the estimate because of an implausible usage figure", async () => {
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(join(vaultPath, "audit"), { recursive: true });
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({ budget: 50000 }),
+			"utf-8",
+		);
+		const writer = createAuditWriter(tempDir);
+		await writer.appendEvent({
+			kind: "usage_implausible",
+			actor: "local",
+			data: { transferId: "t1" },
+		});
+		writer.release();
+
+		await run(tempDir);
+		expect(logOutput.join("\n")).toMatch(/Implausible usage:\s+1 call/);
+	});
+
 	it("prints missing vault message when no vault exists", async () => {
 		await run(tempDir);
 

@@ -50,6 +50,26 @@ import {
  * finite integers >= 0, and the tiers do not overlap — summing them gives the
  * total billable tokens for the call.
  */
+/**
+ * The most tokens ONE tier of ONE call may plausibly report: 100 million.
+ *
+ * No real response gets near it (the largest context windows are a few million tokens, and output is bounded by
+ * `max_tokens`), and the bound is far enough above every real figure that it never rejects true usage. What it exists
+ * for is a figure that is finite and absurd: `1e12` tokens priced to 2.77e18 UT, was added to the session counter,
+ * persisted, and refused every later call in the vault. Nothing in the stack bounds it natively: a provider SDK types
+ * a count as `number`, and TigerBeetle's amounts are 128-bit, so only the ledger's cap at the hold (not the counter)
+ * limits what a bad figure does.
+ */
+export const MAX_PLAUSIBLE_TOKENS_PER_TIER = 100_000_000;
+
+/** The tiers a plausibility check can name. */
+export type UsageTier =
+	| "inputTokens"
+	| "outputTokens"
+	| "cacheReadTokens"
+	| "cacheWriteTokens"
+	| "cacheWrite1hTokens";
+
 export interface NormalizedUsage {
 	/** Fresh (non-cached) prompt tokens. */
 	inputTokens: number;
@@ -79,6 +99,12 @@ export interface NormalizedUsage {
 	 * under a provider label — whichever entry point produced it.
 	 */
 	source: "provider" | "estimated";
+	/**
+	 * Present ONLY when a reported count exceeded {@link MAX_PLAUSIBLE_TOKENS_PER_TIER}: the offending tiers and the raw
+	 * figures. The snapshot is then `"estimated"` with zero counts (the call is charged at the estimate, exactly as for a
+	 * missing count) and the caller records a `usage_implausible` event instead of charging the figure.
+	 */
+	implausible?: Partial<Record<UsageTier, number>>;
 }
 
 /** Loose input to {@link sanitizeUsage}: any field may be missing or junk. */
@@ -155,9 +181,12 @@ function disjointInput(promptTokens: number, cacheReadTokens: number, cacheWrite
  * that understates money by pricing fresh input at the 1-usertoken floor.
  * Absent CACHE fields never downgrade: D5 says they legitimately default to 0.
  *
- * Note there is no upper clamp: a finite-but-absurd count passes through and
- * prices high. Overstatement is fail-safe under the D1 money invariant, and
- * `canonicalize` only rejects non-finite values, so the audit write stays safe.
+ * A finite count above {@link MAX_PLAUSIBLE_TOKENS_PER_TIER} is NOT priced: the
+ * snapshot comes back `"estimated"` with zero counts and an `implausible` record, so
+ * the caller charges the estimate and reports the anomaly. (An earlier version let
+ * it through on the reasoning that overstating is fail-safe for money; it is not
+ * fail-safe for availability, because the inflated cost reached the persisted
+ * session counter.)
  */
 export function sanitizeUsage(raw: RawUsageCandidate | null | undefined): NormalizedUsage {
 	const r = raw ?? {};
@@ -166,6 +195,28 @@ export function sanitizeUsage(raw: RawUsageCandidate | null | undefined): Normal
 	const reported = input != null && output != null;
 	const cacheWrite = readCount(r.cacheWriteTokens) ?? 0;
 	const cacheWrite1h = Math.min(readCount(r.cacheWrite1hTokens) ?? 0, cacheWrite);
+	// A finite figure above the plausibility ceiling is not usage: it is charged as an ESTIMATE and reported (see
+	// MAX_PLAUSIBLE_TOKENS_PER_TIER). The raw figures are kept for the chain event, never for pricing.
+	const readings: Array<[UsageTier, number]> = [
+		["inputTokens", input ?? 0],
+		["outputTokens", output ?? 0],
+		["cacheReadTokens", readCount(r.cacheReadTokens) ?? 0],
+		["cacheWriteTokens", cacheWrite],
+	];
+	const implausible: Partial<Record<UsageTier, number>> = {};
+	for (const [tier, value] of readings) {
+		if (value > MAX_PLAUSIBLE_TOKENS_PER_TIER) implausible[tier] = value;
+	}
+	if (Object.keys(implausible).length > 0) {
+		return {
+			inputTokens: 0,
+			outputTokens: 0,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			source: "estimated",
+			implausible,
+		};
+	}
 	return {
 		inputTokens: input ?? 0,
 		outputTokens: output ?? 0,
@@ -177,6 +228,24 @@ export function sanitizeUsage(raw: RawUsageCandidate | null | undefined): Normal
 		// always was.
 		...(cacheWrite1h > 0 ? { cacheWrite1hTokens: cacheWrite1h } : {}),
 		source: r.source === "provider" && reported ? "provider" : "estimated",
+	};
+}
+
+/**
+ * The `data` of the `usage_implausible` chain event for a snapshot that carries an `implausible` record: the raw figures
+ * that were refused (never priced), the ceiling, and what was charged instead. One builder for every settle site.
+ */
+export function implausibleUsageData(
+	snapshot: NormalizedUsage,
+	fields: { model: string; transferId: string },
+): Record<string, unknown> | undefined {
+	if (snapshot.implausible === undefined) return undefined;
+	return {
+		model: fields.model,
+		transferId: fields.transferId,
+		tiers: { ...snapshot.implausible },
+		ceilingTokensPerTier: MAX_PLAUSIBLE_TOKENS_PER_TIER,
+		charged: "estimate",
 	};
 }
 

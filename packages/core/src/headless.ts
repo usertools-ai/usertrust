@@ -103,7 +103,12 @@ import {
 	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
-import { publishableUsageFields, sanitizeUsage, withSupported1hTier } from "./ledger/usage.js";
+import {
+	implausibleUsageData,
+	publishableUsageFields,
+	sanitizeUsage,
+	withSupported1hTier,
+} from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import {
@@ -140,6 +145,7 @@ import {
 	type PrincipalLedgerTags,
 	principalLedgerTags,
 } from "./shared/principal.js";
+import { isPersistableSpend } from "./shared/spend-guard.js";
 import type { EndpointInfo, TrustConfig, TrustReceipt } from "./shared/types.js";
 import { TrustConfigSchema } from "./shared/types.js";
 
@@ -749,6 +755,13 @@ async function loadSpendLedger(vaultBase: string): Promise<number> {
 }
 
 async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promise<void> {
+	// Never persist a value that would brick the vault (see `isPersistableSpend`): the counter stays in memory, loudly.
+	if (!isPersistableSpend(budgetSpent)) {
+		process.stderr.write(
+			`[usertrust] refusing to persist session spend ${String(budgetSpent)}: not a representable count; the vault's spend-ledger.json keeps its last value\n`,
+		);
+		return;
+	}
 	const dir = join(vaultBase, VAULT_DIR);
 	const ledgerPath = join(dir, "spend-ledger.json");
 	// Hardening (RECON #4): UNIQUE tmp path per write. A fixed
@@ -1874,11 +1887,21 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				);
 				// Present IFF provider-sourced (D5) — the single rule, in one place.
 				const usageAudit = publishableUsageFields(usageSnapshot, rateInfo.rates);
+				// An implausible count (above the per-tier ceiling) is not usage: it is charged at the estimate, like a
+				// missing count, and the anomaly is a chain event. Without this the figure reached the session counter and
+				// the persisted ledger and refused every later call.
+				const usageTrusted = usageReported && usageSnapshot.implausible === undefined;
+				const implausibleData = implausibleUsageData(usageSnapshot, { model, transferId });
+				if (implausibleData !== undefined) {
+					process.stderr.write(
+						`[usertrust] implausible usage for ${transferId}: charged at the estimate, not the reported counts\n`,
+					);
+				}
 
 				// Determine actual cost
 				let actualCost: number;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
-				if (usageReported) {
+				if (usageTrusted) {
 					actualCost = costFromRates(
 						rateInfo.rates,
 						usageSnapshot.inputTokens,
@@ -1902,7 +1925,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// prompt length when usage was reported, else from the estimate the cost came from.
 				const appliedRates = resolveAppliedRates(
 					rateInfo.rates,
-					usageReported
+					usageTrusted
 						? promptTokenCount(
 								usageSnapshot.inputTokens,
 								usageSnapshot.cacheReadTokens,
@@ -2012,7 +2035,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					const releaseLock = await budgetMutex.acquire();
 					try {
 						inFlightHoldTotal -= auth.estimatedCost;
-						budgetSpent += actualCost;
+						// What the ledger POSTED when it truncated at the hold, else the metered cost: the counter agrees
+						// with the wallet it mirrors (the receipt and chain keep the true cost).
+						budgetSpent += postedCost ?? actualCost;
 					} finally {
 						releaseLock();
 					}
@@ -2057,6 +2082,21 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					auditHash = auditEvent.hash;
 				} catch {
 					callAuditDegraded = true;
+				}
+
+				// The implausible-usage report, like the truncation correction below, is appended AFTER the `llm_call` it
+				// annotates: `verifyTransaction` resolves a transfer by the FIRST event carrying its transferId, so a report
+				// written ahead of its `llm_call` would render the settled call as PENDING with no cost.
+				if (implausibleData !== undefined) {
+					await audit
+						.appendEvent({
+							kind: "usage_implausible",
+							actor: capture.actor,
+							data: { ...implausibleData, ...costCenterAudit, ...principalAudit, ...jobAudit },
+						})
+						.catch(() => {
+							callAuditDegraded = true;
+						});
 				}
 
 				// D4: the truncation correction, appended AFTER the `llm_call` it annotates

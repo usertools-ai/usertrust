@@ -71,6 +71,7 @@ import {
 import {
 	fromAnthropicUsage,
 	fromProviderResponse,
+	implausibleUsageData,
 	publishableUsageFields,
 	sanitizeUsage,
 	type UsageWireShape,
@@ -90,6 +91,7 @@ import { detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
+import { isPersistableSpend } from "./shared/spend-guard.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
@@ -764,6 +766,13 @@ async function loadSpendLedger(vaultBase: string): Promise<number> {
 }
 
 async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promise<void> {
+	// Never persist a value that would brick the vault (see `isPersistableSpend`): the counter stays in memory, loudly.
+	if (!isPersistableSpend(budgetSpent)) {
+		process.stderr.write(
+			`[usertrust] refusing to persist session spend ${String(budgetSpent)}: not a representable count; the vault's spend-ledger.json keeps its last value\n`,
+		);
+		return;
+	}
 	const dir = join(vaultBase, VAULT_DIR);
 	const ledgerPath = join(dir, "spend-ledger.json");
 	// Hardening (RECON #4): UNIQUE tmp path per write. A fixed
@@ -1337,6 +1346,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			let envelopeDebited = false;
 			/** This call's SESSION-wallet share of an amount: all of it, or none. */
 			const sessionShare = (amount: number): number => (envelopeDebited ? 0 : amount);
+			/**
+			 * What the session counter is charged for a call that cost `cost`: with a ledger, what the ledger will POST,
+			 * which is `min(cost, hold)` (TigerBeetle caps a post at the pending amount, and the hold is `estimatedCost`).
+			 * The receipt and the chain keep the true metered cost; the counter must agree with the wallet it mirrors, or one
+			 * large reading leaves it ahead of the ledger and refuses every later call. Without a ledger (dry run) the
+			 * counter is the only enforcement, so it keeps the full cost.
+			 */
+			const ledgerCountedCost = (cost: number): number =>
+				engine != null && !isDryRun ? Math.min(cost, estimatedCost) : cost;
 			/** Budget persistence, skipped when the session total did not move. */
 			const persistSessionSpend = async (): Promise<void> => {
 				if (envelopeDebited) return;
@@ -1919,6 +1937,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// D5: the record half of the SAME snapshot the cost comes from —
 				// present iff provider-sourced, omitted (never zero-filled) otherwise.
 				const usageAudit = publishableUsageFields(usageSnapshot, rateResolution.rates);
+				// A reported count above the per-tier plausibility ceiling is not usage (see
+				// MAX_PLAUSIBLE_TOKENS_PER_TIER): the snapshot is "estimated", so the call is charged at the
+				// estimate, and the anomaly is reported on stderr and, after the `llm_call` it annotates, on the chain.
+				const implausibleData = implausibleUsageData(usageSnapshot, { model, transferId });
+				if (implausibleData !== undefined) {
+					process.stderr.write(
+						`[usertrust] implausible usage for ${transferId}: charged at the estimate, not the reported counts\n`,
+					);
+				}
 				// The rates this call SETTLES at: a tiered row (`longPrompt`) re-resolves its
 				// tier from the REPORTED prompt length, the same counts `costFromRates` prices
 				// below, so the record reproduces the cost. Without provider usage the cost is
@@ -1957,12 +1984,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
 					inFlightHoldTotal -= sessionShare(estimatedCost);
-					budgetSpent += sessionShare(streamCost);
+					budgetSpent += sessionShare(ledgerCountedCost(streamCost));
 					releaseLock();
 				} else {
 					// Hold already released — still need to record the spend.
 					const releaseLock = await budgetMutex.acquire();
-					budgetSpent += sessionShare(streamCost);
+					budgetSpent += sessionShare(ledgerCountedCost(streamCost));
 					releaseLock();
 				}
 				// Persist cumulative spend to disk (session spend only — an
@@ -2075,6 +2102,20 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					auditHash = auditEvent.hash;
 				} catch {
 					callAuditDegraded = true;
+				}
+
+				// The implausible-usage report, like the truncation correction below, goes AFTER the `llm_call` it
+				// annotates: `verifyTransaction` resolves a transfer by the FIRST event carrying its transferId.
+				if (implausibleData !== undefined) {
+					await audit
+						.appendEvent({
+							kind: "usage_implausible",
+							actor: "local",
+							data: { ...implausibleData, ...costCenterAudit },
+						})
+						.catch(() => {
+							callAuditDegraded = true;
+						});
 				}
 
 				// D4: the truncation correction, appended AFTER the `llm_call` it
@@ -2661,6 +2702,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// D5: the record half of the SAME snapshot the cost comes from. Nothing
 				// below re-reads `response.usage` — one read, one object, two uses.
 				const usageAudit = publishableUsageFields(usageSnapshot, rateResolution.rates);
+				// A reported count above the per-tier plausibility ceiling is not usage (see
+				// MAX_PLAUSIBLE_TOKENS_PER_TIER): the snapshot is "estimated", so the call is charged at the
+				// estimate, and the anomaly is reported on stderr and, after the `llm_call` it annotates, on the chain.
+				const implausibleData = implausibleUsageData(usageSnapshot, { model, transferId });
+				if (implausibleData !== undefined) {
+					process.stderr.write(
+						`[usertrust] implausible usage for ${transferId}: charged at the estimate, not the reported counts\n`,
+					);
+				}
 				// The rates this call SETTLES at: a tiered row (`longPrompt`) re-resolves its
 				// tier from the REPORTED prompt length, the same counts `costFromRates` prices
 				// below, so the record reproduces the cost. Without provider usage the cost is
@@ -2738,6 +2788,21 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					);
 				}
 
+				// The implausible-usage report goes AFTER the `llm_call` it annotates (the first event carrying a
+				// transferId is how `verifyTransaction` finds the settlement). Advisory: a chain that cannot take it
+				// degrades the receipt and never unwinds the call.
+				if (implausibleData !== undefined) {
+					await audit
+						.appendEvent({
+							kind: "usage_implausible",
+							actor: "local",
+							data: { ...implausibleData, ...costCenterAudit },
+						})
+						.catch(() => {
+							callAuditDegraded = true;
+						});
+				}
+
 				// P3-AUDIT-FAILCLOSED: under failClosed a failed llm_call audit ABORTS the
 				// call before any money moves. Throwing here routes to the outer catch,
 				// which VOIDs the hold (once) and never POSTs — the internal ledger holds
@@ -2761,7 +2826,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
 					inFlightHoldTotal -= sessionShare(estimatedCost);
-					budgetSpent += sessionShare(actualCost);
+					budgetSpent += sessionShare(ledgerCountedCost(actualCost));
 					releaseLock();
 				}
 				// Persist cumulative spend to disk (session spend only).
