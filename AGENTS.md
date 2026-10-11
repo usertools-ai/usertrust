@@ -66,7 +66,7 @@ the kit first, never committed here.
 |---|---|
 | Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `config.ts`, `proxy.ts` |
 | Ledger | `ledger/{client,engine,pricing}.ts` |
-| Audit | `audit/{chain,canonical,merkle,verify,read,rotation,entropy,quarantine}.ts` |
+| Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
 | Policy | `policy/{gate,default-rules,pii,injection,canary,decay}.ts` |
 | Board | `board/{board,director,concerns}.ts` |
@@ -970,6 +970,36 @@ must not retry it, and must not surface as a rejection a caller could read as "t
 move." The only escalation is opt-in `config.audit.failClosed` (default `false`), which aborts the
 call *before* money moves.
 *Prevents:* lying to a caller about a spend that happened, in either direction.
+`failClosed: false` means "settle anyway", never "say nothing". A degraded write is reported on
+four surfaces, and a change must keep all four: the receipt's `auditDegraded`; the dead letter
+(which carries the event's `eventHash` when its bytes reached the chain before the failure, e.g. a
+`.meta` sidecar failure after the fsync); a `USERTRUST_AUDIT_DEGRADED` process warning from the
+governor's writer handle, at its first failure and, with the count, at its release (once, not per
+call: a storm of identical warnings gets muted); and `usertrust verify` / `usertrust health`,
+which read the dead letters against the chain (`audit/dead-letters.ts`). A dead-lettered chain
+event that is not on the chain makes the vault INCOMPLETE: verify keeps `valid` (integrity) true,
+reports `complete: false`, and exits 1; health's chain line is critical. A dead-letter queue that
+cannot be read is reported as unknown, never as "nothing missing". The reader trusts a dead letter
+only as far as it can check it: its `checksum` is recomputed exactly as the writer computed it
+(`canonicalize`, or `JSON.stringify` where canonicalize refused the record), and a record that
+fails it, has none, or cannot be serialized again (nested past the serializer's depth), is
+unreadable and counts as missing whatever its `source` says; a dead letter counts as on the chain
+only when the event at its `eventHash` IS it (the same kind, actor and data). `verify --receipts`
+checks the caller's own receipts against the chain, the count the queue cannot give: a receipt is
+audited only when its `auditHash` is its OWN event, one whose `data.transferId` is its transfer and
+whose kind records its spend (`llm_call`, or the action's `actionKind`); another event of the same
+transfer, such as a detection, is not its spend record. A degraded receipt (`auditHash:
+"AUDIT_DEGRADED"` from `trust()`, or `auditDegraded: true` with a headless governor's placeholder
+hash) is audited only when the verified chain holds its own event, by its transfer and its kind (a
+string kind only: an array or an object is never a receipt's own event):
+the primary append's `.meta` update failed after its bytes landed, or a follow-up event failed
+after the primary landed. The dead-letter queue plays no part in the receipt check: it is not
+tamper-evident, and an event can reach the chain with no dead letter at all. A dead letter is written as the bytes its checksum
+covers (canonical, or the `JSON.stringify` form where canonicalize refused the record), so a
+value whose two forms differ (a Buffer) still reads back whole.
+*Prevents:* a vault with half its audit events dead-lettered verifying `valid: true` and reading
+"Chain integrity: verified [ok]": a chain with an event missing still verifies link by link, so
+the hash walk alone can never see a gap.
 
 **A denial's chain event is appended at a FLOW BOUNDARY, outside the budget mutex, and before
 the guarded call.** Two kinds: `policy_denied` for a decision the governor made, `ledger_rejected`
@@ -1035,6 +1065,38 @@ one that makes no progress throws, so nothing is claimed durable and the cached 
 then `fsyncSync` + `closeSync`. The `.meta` sidecar is replaced atomically: a temp file, fsync,
 rename, then a directory fsync (only an UNSUPPORTED directory fsync is best effort). Reclaiming a *live* sibling's lock forks the chain, because each writer caches its
 own tail. There is **no** cross-process protection beyond this advisory lock.
+
+**One writer per vault per PROCESS, shared by every governor.** `trust()` and `createGovernor()`
+never make a writer of their own: each takes a handle from `openSharedAuditWriter(vaultPath)`, and
+every handle on one vault appends through the process's ONE writer for it. The vault is resolved
+ONCE, when the handle is opened, with `realpathSync.native` (the on-disk names, symlinks followed,
+in the directory's own case; the JS `realpathSync` where realpath(3) fails, as on musl without
+`/proc`, and only when its answer is the directory the path opens, by `dev:ino`: it folds a `..` in
+a symlink's target lexically, so a mismatch is refused at open), and the writer is built from those
+canonical, absolute paths; the
+map key is the `dev:ino` of the `.usertrust` and audit directories, the identity the lock registry
+already trusts. Every spelling of one vault (a symlink, a relative path, another case, a firmlinked
+path) is one writer, and no later `chdir` moves a handle (`trust()` and `createGovernor()` also
+make `vaultBase` absolute at creation). Out of scope, as for the lock: a directory replaced while a
+handle on it is open, and filesystems whose `dev:ino` is not stable. A handle joins at its first append
+(when its own writer would have taken the lock), the last handle's `release()` releases the writer
+and the lock, and a handle's `isDegraded()` / `getWriteFailures()` count only its own appends, so
+one client's failure never trips another's `failClosed`. Every append also holds the writer for
+itself until it finishes, and an append after a handle's release (a call that finished past its
+governor's `destroy()`) holds only that: *prevents* a release that lands while an append is still
+queued from releasing the writer under it (the append then re-takes the lock on a writer nothing
+will release), and a destroyed governor's late call re-taking a handle nothing will ever release —
+either kept the writer and its lock after every open client had been destroyed. `createAuditWriter` itself is unchanged
+and still exclusive: two writers of their own on one vault in one process still conflict, by
+design (the quarantine and the tests rely on that).
+*Prevents:* the README's own two-client pattern (`trust(new Anthropic())` and `trust(new OpenAI())`
+on one vault) sending every audit event of the second client to the dead-letter queue on
+`AuditWriterLockHeldError` — a live sibling writer in this process — while its calls settled:
+half the spend off the chain, and invisible to `verify` and `health`, which never read the queue.
+*Scope:* module scope is process scope only for ONE installed copy of usertrust in ONE realm (ESM
+keeps one instance per resolved file, and `require()` of the ES module returns it). Two installed
+copies, or worker threads, each have their own map — and their own lock registry, which is the
+pre-existing hazard LIMITATIONS.md names.
 
 **The lock file appears complete, by hard link.** `createLock` writes the full content (a write
 loop) and fsyncs it to a private temp file, `.audit-writer.lock.<writerId>.tmp`, created
@@ -1131,8 +1193,8 @@ inside the chain; and a "repair" that chooses which evidence is true. `quarantin
 subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evidence as a segment.
 
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
-`packages/core/src/audit/read.ts`, and `packages/core/src/audit/verify.ts` contain zero filesystem
-write calls. Keep it that way — a verifier that mutates its subject is not a verifier.
+`packages/core/src/audit/read.ts`, `packages/core/src/audit/dead-letters.ts`, and
+`packages/core/src/audit/verify.ts` contain zero filesystem write calls. Keep it that way — a verifier that mutates its subject is not a verifier.
 
 **`vaultPath` means two different directories.** `createAuditWriter(vaultPath)` joins
 `vaultPath/.usertrust/audit` — it takes the **project root**. `verifyVault`, `readLedgerEvents`,
