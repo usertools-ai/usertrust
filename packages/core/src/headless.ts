@@ -77,6 +77,7 @@ import {
 	preflightEnvelopeRemaining,
 	type ResolvedEnvelope,
 	resolveEnvelope,
+	runTeardownSteps,
 	snapshotEnvelopeRemaining,
 	type TrustEngine,
 	type TrustOpts,
@@ -2434,19 +2435,18 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				}
 			}
 
-			// Flush audit
+			// Flush audit, then release it and destroy the engine and the proxy: every step
+			// runs, whatever an earlier one throws (shared with trust()).
 			await audit.flush();
-			audit.release();
-
-			// Destroy engine
-			if (engine != null && typeof engine.destroy === "function") {
-				engine.destroy();
-			}
-
-			// Destroy proxy
-			if (proxyConn != null) {
-				proxyConn.destroy();
-			}
+			runTeardownSteps([
+				() => audit.release(),
+				() => {
+					if (engine != null && typeof engine.destroy === "function") engine.destroy();
+				},
+				() => {
+					if (proxyConn != null) proxyConn.destroy();
+				},
+			]);
 		},
 
 		/**

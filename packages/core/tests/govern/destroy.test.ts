@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
-import { type TrustEngine, trust } from "../../src/govern.js";
+import { runTeardownSteps, type TrustEngine, trust } from "../../src/govern.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
 // Mock tigerbeetle-node (native module, never loaded in tests)
@@ -229,5 +229,153 @@ describe("client.destroy()", () => {
 
 		expect(mockAudit.flush).toHaveBeenCalledOnce();
 		expect(mockAudit.release).toHaveBeenCalledOnce();
+	});
+
+	// ── Teardown: every step is attempted, whatever an earlier one does ──
+
+	it("a throwing audit release does not skip the engine's destroy", async () => {
+		const engine = makeMockEngine();
+		const mockAudit = makeMockAudit();
+		const releaseErr = new Error("release failed");
+		(mockAudit.release as ReturnType<typeof vi.fn>).mockImplementation(() => {
+			throw releaseErr;
+		});
+
+		const governed = await trust(makeAnthropicMock(), {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: mockAudit,
+		});
+
+		await expect(governed.destroy()).rejects.toBe(releaseErr);
+		expect(engine.destroy).toHaveBeenCalledOnce();
+	});
+
+	it("a throwing engine destroy still rejects destroy() with the engine's own error", async () => {
+		const engine = makeMockEngine();
+		const engineErr = new Error("engine destroy failed");
+		(engine.destroy as ReturnType<typeof vi.fn>).mockImplementation(() => {
+			throw engineErr;
+		});
+		const mockAudit = makeMockAudit();
+
+		const governed = await trust(makeAnthropicMock(), {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: mockAudit,
+		});
+
+		await expect(governed.destroy()).rejects.toBe(engineErr);
+		expect(mockAudit.release).toHaveBeenCalledOnce();
+		expect(engine.destroy).toHaveBeenCalledOnce();
+	});
+
+	it("two failing steps reject with an AggregateError of both, in teardown order", async () => {
+		const engine = makeMockEngine();
+		const engineErr = new Error("engine destroy failed");
+		(engine.destroy as ReturnType<typeof vi.fn>).mockImplementation(() => {
+			throw engineErr;
+		});
+		const mockAudit = makeMockAudit();
+		const releaseErr = new Error("release failed");
+		(mockAudit.release as ReturnType<typeof vi.fn>).mockImplementation(() => {
+			throw releaseErr;
+		});
+
+		const governed = await trust(makeAnthropicMock(), {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: mockAudit,
+		});
+
+		const err = await governed.destroy().then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(AggregateError);
+		expect((err as AggregateError).errors).toEqual([releaseErr, engineErr]);
+		expect((err as AggregateError).errors[0]).toBe(releaseErr);
+		expect((err as AggregateError).errors[1]).toBe(engineErr);
+	});
+
+	it("control: no step throws, destroy() resolves and each step runs exactly once", async () => {
+		const engine = makeMockEngine();
+		const mockAudit = makeMockAudit();
+
+		const governed = await trust(makeAnthropicMock(), {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: mockAudit,
+		});
+
+		await expect(governed.destroy()).resolves.toBeUndefined();
+		expect(mockAudit.release).toHaveBeenCalledOnce();
+		expect(engine.destroy).toHaveBeenCalledOnce();
+	});
+});
+
+// The proxy connection is the last teardown step in both governors, but no governor can
+// hold one today (proxy mode throws at construction), so its step is pinned here, on the
+// helper both destroy() implementations run their steps through.
+describe("runTeardownSteps()", () => {
+	it("a throwing step does not skip the steps after it, and its error is rethrown as is", () => {
+		const engineErr = new Error("engine destroy failed");
+		const release = vi.fn();
+		const engineDestroy = vi.fn(() => {
+			throw engineErr;
+		});
+		const proxyDestroy = vi.fn();
+
+		let thrown: unknown;
+		try {
+			runTeardownSteps([release, engineDestroy, proxyDestroy]);
+		} catch (e) {
+			thrown = e;
+		}
+
+		expect(thrown).toBe(engineErr);
+		expect(release).toHaveBeenCalledOnce();
+		expect(engineDestroy).toHaveBeenCalledOnce();
+		expect(proxyDestroy).toHaveBeenCalledOnce();
+	});
+
+	it("several throwing steps throw an AggregateError listing them in order", () => {
+		const first = new Error("first");
+		const third = "third, not an Error";
+		const middle = vi.fn();
+
+		let thrown: unknown;
+		try {
+			runTeardownSteps([
+				() => {
+					throw first;
+				},
+				middle,
+				() => {
+					throw third;
+				},
+			]);
+		} catch (e) {
+			thrown = e;
+		}
+
+		expect(thrown).toBeInstanceOf(AggregateError);
+		expect((thrown as AggregateError).errors).toEqual([first, third]);
+		expect(middle).toHaveBeenCalledOnce();
+	});
+
+	it("control: no step throws, every step runs exactly once and nothing is thrown", () => {
+		const steps = [vi.fn(), vi.fn(), vi.fn()];
+
+		expect(() => runTeardownSteps(steps)).not.toThrow();
+		for (const step of steps) expect(step).toHaveBeenCalledOnce();
 	});
 });

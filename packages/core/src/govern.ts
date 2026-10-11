@@ -1116,6 +1116,30 @@ export function envelopeReceiptBudget(
 	};
 }
 
+/**
+ * The last steps of both governors' `destroy()` (release the audit writer, destroy the
+ * engine, destroy the proxy connection), SHARED with `headless.ts`. Each step runs in its
+ * own try, in order, so a step that throws never skips the ones after it: an engine
+ * destroy that throws used to leave the proxy connection open. Once every step has run, a
+ * single failure is rethrown as is and several are thrown together as one
+ * `AggregateError`, in step order, so `destroy()` still rejects with whatever a step
+ * threw. A step that reports its own failure instead of throwing is just one more step.
+ */
+export function runTeardownSteps(steps: ReadonlyArray<() => void>): void {
+	const errors: unknown[] = [];
+	for (const step of steps) {
+		try {
+			step();
+		} catch (err) {
+			errors.push(err);
+		}
+	}
+	if (errors.length === 1) throw errors[0];
+	if (errors.length > 1) {
+		throw new AggregateError(errors, `${errors.length} teardown steps failed`);
+	}
+}
+
 // ── trust() ──
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
@@ -3544,18 +3568,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// Flush audit writes
 			await audit.flush();
 
-			// Release audit lock
-			audit.release();
-
-			// Destroy engine if connected
-			if (engine != null && typeof engine.destroy === "function") {
-				engine.destroy();
-			}
-
-			// Destroy proxy connection if active
-			if (proxyConn != null) {
-				proxyConn.destroy();
-			}
+			// Release the audit lock, destroy the engine if connected and the proxy
+			// connection if active: every step runs, whatever an earlier one throws.
+			runTeardownSteps([
+				() => audit.release(),
+				() => {
+					if (engine != null && typeof engine.destroy === "function") engine.destroy();
+				},
+				() => {
+					if (proxyConn != null) proxyConn.destroy();
+				},
+			]);
 		};
 
 		if (kind === "anthropic") {

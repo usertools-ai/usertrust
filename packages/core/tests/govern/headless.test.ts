@@ -992,4 +992,111 @@ describe("headless governor", () => {
 
 		await gov.destroy();
 	});
+
+	// ── Teardown: every step is attempted, whatever an earlier one does ──
+
+	function teardownAudit(release: () => void): AuditWriter {
+		return {
+			appendEvent: vi.fn(async (input) => ({
+				id: randomUUID(),
+				timestamp: new Date().toISOString(),
+				previousHash: "0".repeat(64),
+				hash: "a".repeat(64),
+				kind: input.kind,
+				actor: input.actor,
+				data: input.data,
+			})),
+			getWriteFailures: () => 0,
+			isDegraded: () => false,
+			flush: async () => {},
+			release: vi.fn(release),
+		};
+	}
+
+	it("destroy: a throwing audit release does not skip the engine's destroy", async () => {
+		const releaseErr = new Error("release failed");
+		const engine = mockEngine();
+		const engineDestroy = vi.fn();
+		engine.destroy = engineDestroy;
+		const audit = teardownAudit(() => {
+			throw releaseErr;
+		});
+
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: engine,
+			_audit: audit,
+		});
+
+		await expect(gov.destroy()).rejects.toBe(releaseErr);
+		expect(engineDestroy).toHaveBeenCalledOnce();
+	});
+
+	it("destroy: a throwing engine destroy still rejects with the engine's own error", async () => {
+		const engineErr = new Error("engine destroy failed");
+		const engine = mockEngine();
+		const engineDestroy = vi.fn(() => {
+			throw engineErr;
+		});
+		engine.destroy = engineDestroy;
+		const audit = teardownAudit(() => {});
+
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: engine,
+			_audit: audit,
+		});
+
+		await expect(gov.destroy()).rejects.toBe(engineErr);
+		expect(audit.release).toHaveBeenCalledOnce();
+		expect(engineDestroy).toHaveBeenCalledOnce();
+	});
+
+	it("destroy: two failing steps reject with an AggregateError of both, in teardown order", async () => {
+		const releaseErr = new Error("release failed");
+		const engineErr = new Error("engine destroy failed");
+		const engine = mockEngine();
+		engine.destroy = () => {
+			throw engineErr;
+		};
+		const audit = teardownAudit(() => {
+			throw releaseErr;
+		});
+
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: engine,
+			_audit: audit,
+		});
+
+		const err = await gov.destroy().then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(AggregateError);
+		expect((err as AggregateError).errors).toEqual([releaseErr, engineErr]);
+		expect((err as AggregateError).errors[0]).toBe(releaseErr);
+		expect((err as AggregateError).errors[1]).toBe(engineErr);
+	});
+
+	it("destroy control: no step throws, it resolves and each step runs exactly once", async () => {
+		const engine = mockEngine();
+		const engineDestroy = vi.fn();
+		engine.destroy = engineDestroy;
+		const audit = teardownAudit(() => {});
+
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: engine,
+			_audit: audit,
+		});
+
+		await expect(gov.destroy()).resolves.toBeUndefined();
+		expect(audit.release).toHaveBeenCalledOnce();
+		expect(engineDestroy).toHaveBeenCalledOnce();
+	});
 });
