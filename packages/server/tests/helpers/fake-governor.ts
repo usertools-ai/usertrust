@@ -51,6 +51,8 @@ export function createFakeGovernor(
 		releaseDelayMs?: number;
 		/** The same for `abort`: a slow void, the id read `held` meanwhile. */
 		abortDelayMs?: number;
+		/** A slow settle: it resolves this long after it starts (the hold stays held meanwhile). */
+		settleDelayMs?: number;
 		/** Pad every minted transferId to this length (a custom factory issuing long ids). */
 		idLength?: number;
 		unheld?: {
@@ -102,6 +104,9 @@ export function createFakeGovernor(
 			return auth;
 		},
 		async settle(auth: Authorization, params?: SettleParams): Promise<TrustReceipt> {
+			if (opts.settleDelayMs !== undefined) {
+				await new Promise((resolve) => setTimeout(resolve, opts.settleDelayMs));
+			}
 			pending.delete(auth.transferId);
 			const cost = (params?.inputTokens ?? 0) + (params?.outputTokens ?? 0) || auth.estimatedCost;
 			budget += auth.estimatedCost - cost;

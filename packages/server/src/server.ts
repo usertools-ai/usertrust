@@ -168,6 +168,9 @@ type TerminalKind = "settle" | "abort" | "release" | "sweep" | "shutdown";
 
 const noop = (): void => {};
 
+/** `claim` found the entry gone or replaced: another terminal owns it, and this caller ended nothing. */
+const NOT_CLAIMED = Symbol("not-claimed");
+
 export function createUsertrustServer(opts: {
 	config: ServerConfig;
 	factory?: GovernorFactory;
@@ -197,6 +200,10 @@ export function createUsertrustServer(opts: {
 	 * THROWS puts the entry back before `done` resolves, so the hold stays retryable and a waiter that wakes sees
 	 * it. Every path that ends a hold goes through here: pinned by tests/claim.test.ts, which requires exactly one
 	 * delete call on `pending` and no clear call in this file, comments aside.
+	 * It refuses (NOT_CLAIMED) unless `entry` is STILL the one in `pending`: a caller holding a stale reference
+	 * (shutdown's snapshot of `pending`, taken before awaits) must not claim an entry a client terminal already
+	 * took, overwrite its registration, or, when its terminal throws, put the entry back into `pending` on a
+	 * closing server. The check lives here so every caller is safe, not only today's routes.
 	 */
 	function claim<T>(
 		tenantId: string,
@@ -205,7 +212,8 @@ export function createUsertrustServer(opts: {
 		kind: TerminalKind,
 		restoreOnThrow: boolean,
 		work: () => Promise<T>,
-	): Promise<T> {
+	): Promise<T | typeof NOT_CLAIMED> {
+		if (pending.get(transferId) !== entry) return Promise.resolve(NOT_CLAIMED);
 		pending.delete(transferId);
 		const key = `${tenantId}\0${transferId}`;
 		const run = (async (): Promise<T> => {
@@ -393,7 +401,7 @@ export function createUsertrustServer(opts: {
 		// Atomic claim: first concurrent caller wins; a governor failure re-inserts
 		// the entry so a transient settle error stays retryable.
 		try {
-			await claim(tenant.id, transferId, entry, "settle", true, async () => {
+			const claimedNow = await claim(tenant.id, transferId, entry, "settle", true, async () => {
 				const governor = await pool.get(tenant);
 				const receipt = await governor.settle(entry.auth, usage);
 				// A settle that reached the ledger and did not confirm (`settled: false`, recorded as
@@ -409,6 +417,8 @@ export function createUsertrustServer(opts: {
 				});
 				sendJson(res, 200, receipt);
 			});
+			// Another terminal took the hold between the lookup and the claim: this is an unheld settle.
+			if (claimedNow === NOT_CLAIMED) await handleUnheldSettle(tenant, transferId, usage, res);
 		} catch (err) {
 			const mapped = toHttpError(err);
 			sendJson(res, mapped.status, mapped.body);
@@ -600,7 +610,7 @@ export function createUsertrustServer(opts: {
 			return;
 		}
 		// Atomic claim with re-insert on failure (same contract as settle).
-		let outcome: AbortOutcome;
+		let outcome: AbortOutcome | typeof NOT_CLAIMED;
 		try {
 			outcome = await claim(tenant.id, transferId, entry, "abort", true, async () => {
 				const governor = await pool.get(tenant);
@@ -611,7 +621,7 @@ export function createUsertrustServer(opts: {
 			sendJson(res, mapped.status, mapped.body);
 			return;
 		}
-		if (!outcome.aborted) {
+		if (outcome === NOT_CLAIMED || !outcome.aborted) {
 			// Release's rule: the governor no longer held it, so this request aborted nothing
 			// and must not say it did, and the entry stays out.
 			sendJson(res, 404, { error: "not_found", reason: "unknown transferId" });
@@ -650,7 +660,7 @@ export function createUsertrustServer(opts: {
 		}
 		// Abort's claim: the first caller wins, and a governor that THROWS puts the entry
 		// back, so the release stays retryable.
-		let outcome: ReleaseOutcome;
+		let outcome: ReleaseOutcome | typeof NOT_CLAIMED;
 		try {
 			outcome = await claim(tenant.id, transferId, entry, "release", true, async () => {
 				const governor = await pool.get(tenant);
@@ -661,7 +671,7 @@ export function createUsertrustServer(opts: {
 			sendJson(res, mapped.status, mapped.body);
 			return;
 		}
-		if (!outcome.released) {
+		if (outcome === NOT_CLAIMED || !outcome.released) {
 			// The governor no longer held it (its settle is in flight, or it already
 			// ended), so this request released nothing and must not say it did. The entry
 			// stays out: a hold the governor does not own is not the sweep's to meet again.
@@ -814,7 +824,7 @@ export function createUsertrustServer(opts: {
 			await claim("", transferId, entry, kind, false, async () => undefined);
 			return undefined;
 		}
-		return claim(
+		const ended = await claim(
 			tenant.id,
 			transferId,
 			entry,
@@ -831,6 +841,7 @@ export function createUsertrustServer(opts: {
 				}
 			},
 		);
+		return ended === NOT_CLAIMED ? undefined : ended;
 	}
 
 	async function sweepExpired(now?: number): Promise<number> {

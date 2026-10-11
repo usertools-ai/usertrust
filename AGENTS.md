@@ -180,7 +180,8 @@ FIFO; past it a retry is recorded again, a duplicate record and never a lost one
 *In usertrust-server, ONE function (`claim`) is the only way an entry leaves `pending`:* settle, abort,
 release, the TTL sweep and shutdown all go through it, and it registers the terminal in `claimed` in the
 same synchronous step, so a settle that finds the entry gone waits on whatever terminal holds it (bounded)
-instead of polling. A route that took an entry out on its own left a settle racing a slow client
+instead of polling; it refuses (`NOT_CLAIMED`) unless the entry is still the one in `pending`, so shutdown's snapshot loop
+cannot claim a hold a client terminal already took. A route that took an entry out on its own left a settle racing a slow client
 release or abort nothing to wait on: it answered a 409 the plugin reads as "claimed", and the usage was
 neither charged nor recorded (the same class as the sweep race, patched by handler once). Pinned by
 `tests/claim.test.ts` (exactly one delete call on `pending`, no clear call) and by red-first rows for a

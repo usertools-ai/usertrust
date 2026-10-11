@@ -14,7 +14,11 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import type { ServerConfig } from "../src/config.js";
+import { hashKey } from "../src/config.js";
+import { createUsertrustServer, type UsertrustServer } from "../src/server.js";
+import { createFakeGovernor } from "./helpers/fake-governor.js";
 
 const source = readFileSync(join(import.meta.dirname, "..", "src", "server.ts"), "utf-8");
 // Comments may name the calls; only code counts.
@@ -42,4 +46,62 @@ describe("the claim is the only way an entry leaves pending", () => {
 		expect(body).toContain("await work()");
 		expect(body).not.toMatch(/\)\.then\(/);
 	});
+});
+
+const KEY = "ut_srv_key";
+const config = (): ServerConfig => ({
+	host: "127.0.0.1",
+	port: 0,
+	stateDir: "/tmp/utsrv-claim",
+	enforcement: "enforce",
+	pendingTtlMs: 300_000,
+	dryRun: true,
+	tenants: [{ id: "acme", keyHash: hashKey(KEY) }],
+});
+let server: UsertrustServer | undefined;
+afterEach(async () => {
+	await server?.close();
+	server = undefined;
+});
+const post = (base: string, path: string, body: unknown): Promise<Response> =>
+	fetch(`${base}${path}`, {
+		method: "POST",
+		headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
+		body: JSON.stringify(body),
+	});
+
+describe("claim refuses an entry that is no longer the one in pending", () => {
+	it("a settle that lands mid-shutdown is charged once and is never released under, nor put back", async () => {
+		// close() snapshots `pending` and releases [A, B, C] one at a time (each void takes 150 ms). A
+		// client settles B in that window; B's settle is slow. When the loop reaches B it must find B
+		// claimed already: a second claim would release B under the settle, and a failed settle would
+		// then restore B into `pending` on a closing server (usage neither charged nor recorded).
+		const fake = createFakeGovernor({ releaseDelayMs: 150, settleDelayMs: 250 });
+		server = createUsertrustServer({ config: config(), factory: async () => fake.governor });
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+		const auth = async (): Promise<string> => {
+			const r = await post(base, "/v1/authorize", {
+				model: "m",
+				estimatedInputTokens: 1,
+				maxOutputTokens: 1,
+			});
+			return ((await r.json()) as { transferId: string }).transferId;
+		};
+		const a = await auth();
+		const b = await auth();
+		const c = await auth();
+		const closing = server.close();
+		await new Promise((r) => setTimeout(r, 30)); // the loop is parked on A's release
+		const settle = await post(base, "/v1/settle", {
+			transferId: b,
+			inputTokens: 5,
+			outputTokens: 5,
+		});
+		await closing;
+		server = undefined;
+		expect(settle.status).toBe(200);
+		expect(fake.calls.settled).toEqual([b]);
+		expect(fake.calls.released).toEqual([a, c]);
+	}, 20_000);
 });
