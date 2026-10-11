@@ -49,6 +49,8 @@ export function createFakeGovernor(
 		/** How `recordUnheldSettlement` answers: as one that fails to append, or one that already recorded it. */
 		/** A slow ledger void: `release` resolves this long after it starts, and the id reads `held` meanwhile. */
 		releaseDelayMs?: number;
+		/** The same for `abort`: a slow void, the id read `held` meanwhile. */
+		abortDelayMs?: number;
 		/** Pad every minted transferId to this length (a custom factory issuing long ids). */
 		idLength?: number;
 		unheld?: {
@@ -119,6 +121,11 @@ export function createFakeGovernor(
 			};
 		},
 		async abort(auth: Authorization): Promise<AbortOutcome> {
+			if (opts.abortDelayMs !== undefined) {
+				releasing.add(auth.transferId);
+				await new Promise((resolve) => setTimeout(resolve, opts.abortDelayMs));
+				releasing.delete(auth.transferId);
+			}
 			if (opts.abort?.throws === true) throw new Error("fake abort failed");
 			if (opts.abort?.notHeld === true) return { aborted: false };
 			pending.delete(auth.transferId);

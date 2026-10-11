@@ -395,6 +395,36 @@ describe("adjudicated review threads", () => {
 		expect((await post(base, "/v1/settle", { transferId: id })).status).toBe(200);
 	}, 20_000);
 
+	it.each([
+		["release", "/v1/release"],
+		["abort", "/v1/abort"],
+	] as const)(
+		"a settle racing a slow client %s ends recorded as settlement_unrecoverable, never a 409 nobody records",
+		async (kind, path) => {
+			const { base, fake } = await start(
+				kind === "release" ? { releaseDelayMs: 2500 } : { abortDelayMs: 2500 },
+			);
+			const id = await authorize(base);
+			const ending = post(base, path, { transferId: id });
+			await new Promise((r) => setTimeout(r, 60)); // the client terminal has claimed the entry
+			const settle = await post(base, "/v1/settle", {
+				transferId: id,
+				inputTokens: 5,
+				outputTokens: 7,
+			});
+			// The settle waited for the terminal (longer than the 2 s poll) and then
+			// recorded what the call cost against a hold that is gone.
+			expect(settle.status).toBe(410);
+			expect(await settle.json()).toMatchObject({
+				error: "settlement_unrecoverable",
+				recorded: true,
+			});
+			expect(fake.calls.unheld.length).toBeGreaterThan(0);
+			expect((await ending).status).toBe(200);
+		},
+		20_000,
+	);
+
 	it("a RETRY of an already-settled settle with a long id is 409 already_settled, not 'names no hold here'", async () => {
 		const { base } = await start({ idLength: 300 });
 		const id = await authorize(base);

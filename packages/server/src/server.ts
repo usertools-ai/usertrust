@@ -164,6 +164,10 @@ export interface UsertrustServer {
 	sweepExpired(now?: number): Promise<number>;
 }
 
+type TerminalKind = "settle" | "abort" | "release" | "sweep" | "shutdown";
+
+const noop = (): void => {};
+
 export function createUsertrustServer(opts: {
 	config: ServerConfig;
 	factory?: GovernorFactory;
@@ -179,11 +183,45 @@ export function createUsertrustServer(opts: {
 	// id -> how its settle ended: "settled" (it posted) or "ambiguous" (the ledger post's outcome is
 	// unknown: it may have charged). A Map keeps insertion order, so eviction is FIFO.
 	const recentlySettled = new Map<string, Map<string, "settled" | "ambiguous">>();
-	const settling = new Set<string>();
-	// `${tenantId}\0${transferId}` -> the release the SWEEP (or a shutdown) has in flight for a hold it already
-	// took out of `pending`. The governor still holds that hold until the release lands, so a settle that finds
-	// it must wait for the release itself (bounded by the governor's own void), not for a fixed window.
-	const releasing = new Map<string, Promise<unknown>>();
+	// `${tenantId}\0${transferId}` -> the terminal that took the hold out of `pending` and is still running:
+	// a settle, an abort, a release, the TTL sweep or a shutdown. The governor still holds the hold until that
+	// terminal lands, so a settle that finds it must wait for the terminal itself (bounded by the governor's
+	// own void), not for a fixed window. `claim` is the ONLY code that removes an entry from `pending`, and it
+	// registers the terminal here in the same synchronous step: a route that took an entry out on its own,
+	// without registering, left a settle racing it nothing to wait on (it polled 2 s and answered a 409 the
+	// plugin reads as "claimed", so the usage was never charged or recorded).
+	const claimed = new Map<string, { kind: TerminalKind; done: Promise<void> }>();
+	/**
+	 * Take an entry out of `pending` and run its terminal, registering the terminal in `claimed` in the same
+	 * step. The first caller wins (the entry is gone for every later one). With `restoreOnThrow`, a terminal that
+	 * THROWS puts the entry back before `done` resolves, so the hold stays retryable and a waiter that wakes sees
+	 * it. Every path that ends a hold goes through here: pinned by tests/claim.test.ts, which requires exactly one
+	 * delete call on `pending` and no clear call in this file, comments aside.
+	 */
+	function claim<T>(
+		tenantId: string,
+		transferId: string,
+		entry: PendingEntry,
+		kind: TerminalKind,
+		restoreOnThrow: boolean,
+		work: () => Promise<T>,
+	): Promise<T> {
+		pending.delete(transferId);
+		const key = `${tenantId}\0${transferId}`;
+		const run = (async (): Promise<T> => {
+			try {
+				return await work();
+			} catch (err) {
+				if (restoreOnThrow) pending.set(transferId, entry);
+				throw err;
+			} finally {
+				claimed.delete(key);
+			}
+		})();
+		claimed.set(key, { kind, done: run.then(noop, noop) });
+		return run;
+	}
+
 	// Per tenant, and served only on the authenticated /v1/budget: the unauthenticated /v1/health
 	// must not tell anyone when some tenant's settles are being dropped.
 	const settlementsUnrecoverable = new Map<string, number>();
@@ -354,30 +392,26 @@ export function createUsertrustServer(opts: {
 		}
 		// Atomic claim: first concurrent caller wins; a governor failure re-inserts
 		// the entry so a transient settle error stays retryable.
-		pending.delete(transferId);
-		const settleKey = `${tenant.id}\0${transferId}`;
-		settling.add(settleKey);
 		try {
-			const governor = await pool.get(tenant);
-			const receipt = await governor.settle(entry.auth, usage);
-			// A settle that reached the ledger and did not confirm (`settled: false`, recorded as
-			// ambiguous) may STILL have charged: its retry is told so (409 settlement_ambiguous), never
-			// "the charge stands" and never "authorize again", which could charge the call twice.
-			rememberSettled(tenant.id, transferId, receipt.settled === false ? "ambiguous" : "settled");
-			bus.publish(tenant.id, {
-				type: "settled",
-				transferId,
-				cost: receipt.cost,
-				budgetRemaining: receipt.budgetRemaining,
-				at: new Date().toISOString(),
+			await claim(tenant.id, transferId, entry, "settle", true, async () => {
+				const governor = await pool.get(tenant);
+				const receipt = await governor.settle(entry.auth, usage);
+				// A settle that reached the ledger and did not confirm (`settled: false`, recorded as
+				// ambiguous) may STILL have charged: its retry is told so (409 settlement_ambiguous), never
+				// "the charge stands" and never "authorize again", which could charge the call twice.
+				rememberSettled(tenant.id, transferId, receipt.settled === false ? "ambiguous" : "settled");
+				bus.publish(tenant.id, {
+					type: "settled",
+					transferId,
+					cost: receipt.cost,
+					budgetRemaining: receipt.budgetRemaining,
+					at: new Date().toISOString(),
+				});
+				sendJson(res, 200, receipt);
 			});
-			sendJson(res, 200, receipt);
 		} catch (err) {
-			pending.set(transferId, entry);
 			const mapped = toHttpError(err);
 			sendJson(res, mapped.status, mapped.body);
-		} finally {
-			settling.delete(settleKey);
 		}
 	}
 
@@ -402,12 +436,12 @@ export function createUsertrustServer(opts: {
 	 * Answers (and returns true) when the id is NOT an unknown hold after all: a settle for it is in flight,
 	 * it was settled in this process, or its entry is back in `pending` (a release or abort that claimed it
 	 * threw and put it back). Checked before EVERY record and once more after the last one: a release or abort
-	 * takes the entry out of `pending` WITHOUT marking `settling`, so a settle that arrived meanwhile must not
+	 * takes the entry out of `pending` under a non-settle terminal (see `claimed`), so a settle that arrived meanwhile must not
 	 * write settlement_unrecoverable and answer 410 ("authorize again") for a charge that stands.
 	 */
 	function answerIfKnown(tenant: TenantConfig, transferId: string, res: ServerResponse): boolean {
 		const key = `${tenant.id}\0${transferId}`;
-		if (settling.has(key)) {
+		if (claimed.get(key)?.kind === "settle") {
 			sendJson(res, 409, {
 				error: "settle_in_progress",
 				reason: "a settle for this transferId is in progress: retry shortly",
@@ -486,20 +520,20 @@ export function createUsertrustServer(opts: {
 					computeMs: usage.computeMs,
 					usageTo: usage.usageTo,
 				});
-			// A settle racing the TTL sweep: the sweep has taken the hold out of `pending` and is
-			// releasing it, and the governor still holds it until the release lands. Wait for it (bounded:
-			// the release is one ledger void) and answer what the settle then IS (a recorded 410), so the
+			// A settle racing a sweep, a client release or a client abort: it has taken the hold out of
+			// `pending` and is ending it, and the governor still holds it until that lands. Wait for it
+			// (bounded: it is one ledger void) and answer what the settle then IS (a recorded 410), so the
 			// race ends as it did when the answer was a 404. Only a hold that is still held after the
 			// wait is a 409 hold_active.
-			// The sweep's own release is awaited directly, however long the ledger void takes: a fixed
+			// The terminal is awaited directly, however long the ledger void takes: a fixed
 			// window would turn a slow void into a 409 that the plugin never retries, and the spend would be
 			// neither charged nor recorded. The poll below covers any other path that leaves a hold held.
-			const inFlight = releasing.get(key);
-			// Bounded beyond the ledger's own timeout: a release that never settles must not hold the settle
+			const inFlight = claimed.get(key);
+			// Bounded beyond the ledger's own timeout: a terminal that never settles must not hold the settle
 			// forever (it then falls through to the poll, and at worst a 409 hold_active).
-			if (inFlight !== undefined) {
+			if (inFlight !== undefined && inFlight.kind !== "settle") {
 				await Promise.race([
-					inFlight.catch(() => {}),
+					inFlight.done,
 					new Promise<void>((resolve) => setTimeout(resolve, RELEASE_WAIT_MAX_MS).unref()),
 				]);
 			}
@@ -566,13 +600,13 @@ export function createUsertrustServer(opts: {
 			return;
 		}
 		// Atomic claim with re-insert on failure (same contract as settle).
-		pending.delete(transferId);
 		let outcome: AbortOutcome;
 		try {
-			const governor = await pool.get(tenant);
-			outcome = await governor.abort(entry.auth, parsed.data.error);
+			outcome = await claim(tenant.id, transferId, entry, "abort", true, async () => {
+				const governor = await pool.get(tenant);
+				return governor.abort(entry.auth, parsed.data.error);
+			});
 		} catch (err) {
-			pending.set(transferId, entry);
 			const mapped = toHttpError(err);
 			sendJson(res, mapped.status, mapped.body);
 			return;
@@ -616,13 +650,13 @@ export function createUsertrustServer(opts: {
 		}
 		// Abort's claim: the first caller wins, and a governor that THROWS puts the entry
 		// back, so the release stays retryable.
-		pending.delete(transferId);
 		let outcome: ReleaseOutcome;
 		try {
-			const governor = await pool.get(tenant);
-			outcome = await governor.release(entry.auth, reason, { releaseClass });
+			outcome = await claim(tenant.id, transferId, entry, "release", true, async () => {
+				const governor = await pool.get(tenant);
+				return governor.release(entry.auth, reason, { releaseClass });
+			});
 		} catch (err) {
-			pending.set(transferId, entry);
 			const mapped = toHttpError(err);
 			sendJson(res, mapped.status, mapped.body);
 			return;
@@ -771,27 +805,32 @@ export function createUsertrustServer(opts: {
 	async function releaseEntry(
 		transferId: string,
 		entry: PendingEntry,
+		kind: "sweep" | "shutdown",
 		reason: string,
 	): Promise<ReleaseOutcome | undefined> {
 		const tenant = config.tenants.find((t) => t.id === entry.tenantId);
-		if (tenant === undefined) return undefined;
-		const key = `${tenant.id}\0${transferId}`;
-		const release = (async (): Promise<ReleaseOutcome | undefined> => {
-			try {
-				const governor = await pool.get(tenant);
-				return await governor.release(entry.auth, reason);
-			} catch {
-				// Best-effort — the Governor's own destroy()/reconciliation voids
-				// anything the control plane fails to release here.
-				return undefined;
-			}
-		})();
-		releasing.set(key, release);
-		try {
-			return await release;
-		} finally {
-			releasing.delete(key);
+		if (tenant === undefined) {
+			// No tenant to ask: the entry still leaves through `claim`, never on its own.
+			await claim("", transferId, entry, kind, false, async () => undefined);
+			return undefined;
 		}
+		return claim(
+			tenant.id,
+			transferId,
+			entry,
+			kind,
+			false,
+			async (): Promise<ReleaseOutcome | undefined> => {
+				try {
+					const governor = await pool.get(tenant);
+					return await governor.release(entry.auth, reason);
+				} catch {
+					// Best-effort — the Governor's own destroy()/reconciliation voids
+					// anything the control plane fails to release here.
+					return undefined;
+				}
+			},
+		);
 	}
 
 	async function sweepExpired(now?: number): Promise<number> {
@@ -807,9 +846,8 @@ export function createUsertrustServer(opts: {
 		let swept = 0;
 		for (const [transferId, entry] of pending) {
 			if (!due(entry)) continue;
-			pending.delete(transferId);
 			swept += 1;
-			await releaseEntry(transferId, entry, "pending TTL expired");
+			await releaseEntry(transferId, entry, "sweep", "pending TTL expired");
 			bus.publish(entry.tenantId, {
 				type: "pending_expired",
 				transferId,
@@ -850,9 +888,8 @@ export function createUsertrustServer(opts: {
 			// and the ledger stay consistent; Governor.destroy() voids at the ledger
 			// layer as the backstop.
 			const remaining = [...pending.entries()];
-			pending.clear();
 			for (const [transferId, entry] of remaining) {
-				const outcome = await releaseEntry(transferId, entry, "server shutdown");
+				const outcome = await releaseEntry(transferId, entry, "shutdown", "server shutdown");
 				// Announced only when the governor says it released the hold: one it no
 				// longer held, or could not be asked about, was not released here.
 				if (outcome?.released !== true) continue;
