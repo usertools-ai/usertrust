@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { run } from "../../src/cli/tb.js";
+import { DEFAULT_TIGERBEETLE_ADDRESS } from "../../src/shared/constants.js";
 
 describe("usertrust tb", () => {
 	let logOutput: string[];
@@ -34,7 +35,25 @@ describe("usertrust tb", () => {
 
 		const combined = logOutput.join("\n");
 		expect(combined).toContain("not yet implemented");
-		expect(combined).toContain("tigerbeetle start");
+		expect(combined).toContain("does not manage TigerBeetle in this version");
+	});
+
+	it("start prints the format step, then a start on the governor's default address", async () => {
+		process.argv = ["node", "usertrust", "tb", "start"];
+
+		await run();
+
+		const combined = logOutput.join("\n");
+		const format = combined.indexOf(
+			"tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle",
+		);
+		const start = combined.indexOf(
+			`tigerbeetle start --addresses=${DEFAULT_TIGERBEETLE_ADDRESS} --development 0_0.tigerbeetle`,
+		);
+		expect(format).toBeGreaterThanOrEqual(0);
+		expect(start).toBeGreaterThan(format);
+		expect(DEFAULT_TIGERBEETLE_ADDRESS).toBe("127.0.0.1:3001");
+		expect(combined).not.toContain("--addresses=3000");
 	});
 
 	it("prints stub message for stop", async () => {

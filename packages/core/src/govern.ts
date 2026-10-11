@@ -1228,7 +1228,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// remaining budget so TigerBeetle atomically REJECTS an over-budget hold.
 			engine = await createTBEngine(config, Math.max(0, config.budget - budgetSpent));
 		} catch (err) {
-			throw new LedgerUnavailableError(err instanceof Error ? err.message : String(err));
+			throw new LedgerUnavailableError(
+				err instanceof Error ? err.message : String(err),
+				config.tigerbeetle.addresses.join(","),
+			);
 		}
 	} else {
 		engine = null;

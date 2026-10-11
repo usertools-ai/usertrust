@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { DEFAULT_TIGERBEETLE_ADDRESS } from "./constants.js";
+
 /**
  * The correlation handle a governance denial carries back to the caller.
  *
@@ -176,9 +178,9 @@ export class LedgerUnavailableError extends Error {
 	public readonly hint: string;
 	public readonly docsUrl: string;
 
-	constructor(reason: string) {
-		const hint =
-			'Start TigerBeetle with "npx usertrust tb start" or use { dryRun: true } to skip the ledger.';
+	/** `address` is the ledger the governor was configured with, when the thrower knows it. */
+	constructor(reason: string, address: string = DEFAULT_TIGERBEETLE_ADDRESS) {
+		const hint = `Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=${address}) or use { dryRun: true } to skip the ledger.`;
 		const docsUrl = "https://usertrust.ai/docs/errors/ledger-unavailable";
 		super(`Ledger unavailable: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "LedgerUnavailableError";
