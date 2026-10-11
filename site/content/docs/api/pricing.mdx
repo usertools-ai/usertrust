@@ -12,7 +12,7 @@ A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.0
 ## Pricing Table
 
 The SDK includes a 42-model pricing table in `ledger/pricing.ts`, current as of
-`PRICING_TABLE_VERSION = "2026-10-08"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
+`PRICING_TABLE_VERSION = "2026-10-11"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
 Rates are in usertokens per 1,000 LLM tokens, across **four tiers**: input (fresh prompt tokens),
 output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation prompt tokens). A
 `—` means the provider publishes no rate for that tier — it is **not** free; see
@@ -40,13 +40,14 @@ output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation pr
 | `claude-sonnet-4-6` | 30 | 150 | 3 | 37.5 | 60 |
 | `claude-sonnet-4-5` | 30 | 150 | 3 | 37.5 | 60 |
 | `claude-sonnet-4` (retired) | 30 | 150 | 3 | 37.5 | 60 |
-| `claude-haiku-5-5` (over-100k tier) | 5 | 25 | 0.5 | 6.25 | 10 |
+| `claude-haiku-5-5` (prompt ≤ 100,000 tokens) | 1 | 5 | 0.1 | 1.25 | 2 |
+| `claude-haiku-5-5` (prompt > 100,000 tokens) | 5 | 25 | 0.5 | 6.25 | 10 |
 | `claude-haiku-4-5` | 10 | 50 | 1 | 12.5 | 20 |
 | `claude-3-5-haiku` (retired) | 8 | 40 | 0.8 | 10 | 16 |
 
 Rates re-verified against Anthropic's published pricing page
 (`platform.claude.com/docs/en/about-claude/pricing`) on 2026-10-07; the 1-hour write column was re-read
-raw on 2026-10-08.
+raw on 2026-10-08, and every row again on 2026-10-11.
 
 Anthropic publishes cache-read at 0.1x base input and 5-minute cache-write at 1.25x, with three
 published exceptions on cache reads: **0.05x** on `claude-opus-5-5` and `claude-sonnet-5-5`, and
@@ -56,6 +57,27 @@ happen. The **1-hour** cache write (2x base input, the last column) is its own t
 `cacheWriteTokens` stays the TOTAL written and a call that reports a 1-hour share
 (`cache_creation.ephemeral_1h_input_tokens`) prices that share at `cacheWrite1hPer1k` and the
 remainder at the 5-minute rate; see [1-hour cache writes](#1-hour-cache-writes).
+
+### Per-request prompt tiers (Claude Haiku 5.5)
+
+`claude-haiku-5-5` is priced **per request by prompt length**. A request whose prompt is over
+100,000 tokens pays the higher row for **every** category, output included; a prompt of exactly
+100,000 tokens pays the lower row. The prompt length counts all of the request's input tokens:
+fresh input, cache reads and cache writes (a 1-hour write is part of the cache writes, so it is
+counted once). Output does not count toward it. Each request is priced on its own.
+
+In the table this is `ModelRates.longPrompt`: the row's own rates are the lower tier, and
+`longPrompt` is `{ thresholdTokens: 100_000, rates }`. `costFromRates` selects the tier from the
+counts it prices, so every estimate, settle and stream applies the same rule, and a receipt's
+`pricing.appliedRates` are the rates of the tier the call was **settled** at: the recompute below
+still reproduces its `cost`. Only built-in table rows carry a tier; `customRates` are flat.
+
+**Holds.** `trust()` and `createGovernor().authorize()` size a hold from an *estimated* prompt,
+which cannot tell which side of the threshold the request will land on. They hold the **higher**
+tier; the settle posts the actual tier and the two-phase post releases the difference at once. A
+short Haiku 5.5 call therefore reserves about 5× what it settles at. The `@usertrust/openshell` gate
+sizes from an upper bound on the prompt, so it holds the lower tier whenever that bound is at or
+under 100,000 tokens.
 
 ### 1-hour cache writes
 
@@ -306,6 +328,10 @@ interface ModelRates {
   cacheReadPer1k?: number;   // usertokens per 1,000 cache-hit tokens; absent ⇒ inputPer1k
   cacheWritePer1k?: number;  // usertokens per 1,000 cache-creation tokens; absent ⇒ inputPer1k
   cacheWrite1hPer1k?: number; // 1-hour cache writes; absent ⇒ max(cacheWritePer1k, 2 × inputPer1k)
+  longPrompt?: {              // a per-request prompt tier (built-in rows only)
+    thresholdTokens: number;  // a prompt OVER this many tokens pays `rates` for every category
+    rates: Omit<ModelRates, "longPrompt">;
+  };
 }
 ```
 
@@ -355,8 +381,8 @@ exactly reproduces usertrust's own configured metered cost (counts × `appliedRa
 1-hour cache writes are priced at the 1-hour rate only when the provider reports the 5m/1h split
 (a flat write total, or a host with no TTL split, bills at the 5-minute rate); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
 hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
-per-model rates by design (`claude-haiku-5-5` is priced at its over-100,000-token tier, which
-overstates every shorter prompt 5×); fast mode is not priced (Opus 5.5 fast is $8 / $40, Opus 5 and
+per-model rates by design, except `claude-haiku-5-5`, which is priced per request by prompt length
+(see "Per-request prompt tiers" at `/docs/api/pricing`); fast mode is not priced (Opus 5.5 fast is $8 / $40, Opus 5 and
 Opus 4.8 fast $10 / $50; `speed` is a usage field, not a model id); per-call `ceil` + 1-UT floor
 differs from provider-side aggregation. Estimates never model cache state.
 

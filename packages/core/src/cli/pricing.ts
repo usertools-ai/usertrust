@@ -11,6 +11,8 @@ import { join } from "node:path";
 import pc from "picocolors";
 import {
 	effectiveCacheWrite1hRate,
+	type LongPromptTier,
+	type ModelRates,
 	modelsForProvider,
 	PRICING_TABLE,
 	PRICING_TABLE_VERSION,
@@ -24,6 +26,27 @@ import { toSafeJson } from "./target.js";
 
 export interface PricingOpts {
 	json: boolean;
+}
+
+/**
+ * The per-request prompt tier that prices a model: the BUILT-IN row's, and only when no
+ * operator custom row replaces it (custom rates are flat, so a custom row has none).
+ */
+function tierOf(custom: unknown, base: ModelRates | undefined): LongPromptTier | undefined {
+	return custom === undefined ? base?.longPrompt : undefined;
+}
+
+/** A row's higher per-request tier in $/MTok, resolved the way settlement charges it. */
+function longPromptPerM(tier: LongPromptTier) {
+	const applied = resolveAppliedRates(tier.rates);
+	return {
+		overPromptTokens: tier.thresholdTokens,
+		inputPerM: applied.inputPer1k / 10,
+		outputPerM: applied.outputPer1k / 10,
+		cacheReadPerM: applied.cacheReadPer1k / 10,
+		cacheWritePerM: applied.cacheWritePer1k / 10,
+		cacheWrite1hPerM: effectiveCacheWrite1hRate(tier.rates) / 10,
+	};
 }
 
 export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
@@ -56,6 +79,15 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 				cacheReadPerM: number;
 				cacheWritePerM: number;
 				cacheWrite1hPerM: number | null;
+				/** Present only for a row priced per request by prompt length (`longPrompt`). */
+				longPrompt?: {
+					overPromptTokens: number;
+					inputPerM: number;
+					outputPerM: number;
+					cacheReadPerM: number;
+					cacheWritePerM: number;
+					cacheWrite1hPerM: number;
+				};
 				source: string;
 			}
 		> = {};
@@ -64,6 +96,7 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 			const base = PRICING_TABLE[model];
 			const source = custom ? "custom" : "recommended";
 			const r = custom ?? base;
+			const tier = tierOf(custom, base);
 			if (r) {
 				// Four resolved tiers (D1): an omitted cache rate is published at
 				// inputPer1k — what the operator is actually charged for it — never
@@ -81,6 +114,9 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 					cacheWrite1hPerM: supportsCacheWrite1h(r, custom !== undefined)
 						? effectiveCacheWrite1hRate(r) / 10
 						: null,
+					// The higher per-request tier: every category above, for a prompt over the
+					// threshold (input + cache reads + cache writes).
+					...(tier === undefined ? {} : { longPrompt: longPromptPerM(tier) }),
 					source,
 				};
 			}
@@ -106,10 +142,21 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 			? ` (1h $${(effectiveCacheWrite1hRate(r) / 10).toFixed(2)})`
 			: "";
 		const tag = custom ? pc.yellow(" (custom)") : "";
+		const tier = tierOf(custom, base);
+		const tiered = tier === undefined ? "" : pc.dim(" (prompts up to the threshold)");
 		console.log(
 			`  ${pc.cyan(model.padEnd(24))} in $${inputPerM} out $${outputPerM} ` +
-				`cache-read $${cacheReadPerM} cache-write $${cacheWritePerM}${oneHour} per 1M${tag}`,
+				`cache-read $${cacheReadPerM} cache-write $${cacheWritePerM}${oneHour} per 1M${tag}${tiered}`,
 		);
+		if (tier !== undefined) {
+			const long = longPromptPerM(tier);
+			const over = `over ${tier.thresholdTokens.toLocaleString("en-US")} prompt tokens`;
+			console.log(
+				`  ${"".padEnd(24)} in $${long.inputPerM.toFixed(2)} out $${long.outputPerM.toFixed(2)} ` +
+					`cache-read $${long.cacheReadPerM.toFixed(2)} cache-write $${long.cacheWritePerM.toFixed(2)}` +
+					` (1h $${long.cacheWrite1hPerM.toFixed(2)}) per 1M ${pc.dim(`(${over})`)}`,
+			);
+		}
 	}
 
 	console.log(pc.dim(`\n  Mode: ${pricing} | Run \`usertrust init --reconfigure\` to change\n`));

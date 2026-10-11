@@ -52,6 +52,23 @@ export interface ModelRates {
 	 * resolves it to the dearer of the 5-minute rate and 2x `inputPer1k`.
 	 */
 	cacheWrite1hPer1k?: number | undefined;
+	/**
+	 * A per-REQUEST price tier by prompt length. A request whose prompt is longer than
+	 * `thresholdTokens` pays `rates` for EVERY category (input, output, cache read and
+	 * both cache writes); a request at or under the threshold pays this row's own rates.
+	 * "Prompt" means all input tokens of the request: fresh input, cache reads and cache
+	 * writes (the 1-hour writes are a subset of the cache writes, counted once). Output
+	 * never counts toward it. The tier is decided per request, by `promptTierRates`, inside
+	 * the one cost function, so every estimate, hold, settle and stream prices it the same
+	 * way. Table rows only: operator `customRates` are flat.
+	 */
+	longPrompt?: LongPromptTier | undefined;
+}
+
+/** The higher price tier of a {@link ModelRates} row, for prompts over `thresholdTokens`. */
+export interface LongPromptTier {
+	thresholdTokens: number;
+	rates: Omit<ModelRates, "longPrompt">;
 }
 
 /**
@@ -70,8 +87,9 @@ export interface ModelRates {
  */
 export const PRICING_TABLE: Record<string, ModelRates> = {
 	// ── Anthropic ──
-	// Every row below was re-derived on 2026-10-07 (and the 1-hour write column re-read
-	// raw on 2026-10-08, all 20 models, which is why the table version is 2026-10-08) from Anthropic's published
+	// Every row below was re-derived on 2026-10-07 (the 1-hour write column re-read raw on
+	// 2026-10-08, all 20 models; every row re-read raw again on 2026-10-11 for Haiku 5.5's
+	// per-request tier, which is why the table version is 2026-10-11) from Anthropic's published
 	// model-pricing table (platform.claude.com/docs/en/about-claude/pricing),
 	// $/MTok x 10 = usertokens per 1k. Published multipliers: 5-minute cache write
 	// 1.25x base input; cache read 0.1x base input EXCEPT 0.05x on Opus 5.5 and
@@ -120,17 +138,28 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		cacheWritePer1k: 10,
 		cacheWrite1hPer1k: 16,
 	},
-	// Haiku 5.5 is priced BY PROMPT LENGTH: $0.10 in / $0.50 out up to 100,000
-	// prompt tokens, $0.50 in / $2.50 out above. A per-model table cannot carry a
-	// per-call tier, so this row holds the OVER-100k tier (5 / 25, cache read 0.5,
-	// 5m write 6.25). That OVERSTATES every prompt of up to 100,000 tokens by 5x —
-	// the fail-safe direction (D1) — and is a documented approximation.
+	// Haiku 5.5 is priced BY PROMPT LENGTH, per request (re-read 2026-10-11): up to
+	// 100,000 prompt tokens $0.10 in / $0.50 out / $0.01 hit / $0.125 5m write / $0.20
+	// 1h write; over 100,000, $0.50 / $2.50 / $0.05 / $0.625 / $1. "A request's prompt
+	// length counts all of its input tokens, including cache reads and cache writes",
+	// and exactly 100,000 is the lower tier. (Until 2026-10-11 this row held only the
+	// higher tier and overstated every prompt of up to 100,000 tokens by 5x.)
 	"claude-haiku-5-5": {
-		inputPer1k: 5,
-		outputPer1k: 25,
-		cacheReadPer1k: 0.5,
-		cacheWritePer1k: 6.25,
-		cacheWrite1hPer1k: 10,
+		inputPer1k: 1,
+		outputPer1k: 5,
+		cacheReadPer1k: 0.1,
+		cacheWritePer1k: 1.25,
+		cacheWrite1hPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 100_000,
+			rates: {
+				inputPer1k: 5,
+				outputPer1k: 25,
+				cacheReadPer1k: 0.5,
+				cacheWritePer1k: 6.25,
+				cacheWrite1hPer1k: 10,
+			},
+		},
 	},
 	"claude-opus-4-6": {
 		inputPer1k: 50,
@@ -350,7 +379,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
  * Bump on every entry change; recorded on receipts so a metered cost can be
  * reproduced against the exact table that priced it.
  */
-export const PRICING_TABLE_VERSION = "2026-10-08";
+export const PRICING_TABLE_VERSION = "2026-10-11";
 
 /**
  * Reduce a model id to its base table key. Strips EXACTLY ONE trailing date
@@ -777,7 +806,12 @@ function clampWrite1h(write1h: number, write: number): number {
  *
  * All four fields are numbers, so the shallow freeze is a deep freeze.
  */
-export function resolveAppliedRates(rates: ModelRates): AppliedRates {
+export function resolveAppliedRates(rowRates: ModelRates, promptTokens?: number): AppliedRates {
+	// A tiered row (`longPrompt`) publishes the tier the call was PRICED at, so
+	// `ceil(sum(counts x appliedRates / 1000))` still reproduces the cost: pass the call's
+	// `promptTokenCount`. Without one, a tiered row publishes its own (lower) tier, which
+	// is right only for a surface that prices nothing (a display).
+	const rates = promptTokens === undefined ? rowRates : promptTierRates(rowRates, promptTokens);
 	return Object.freeze({
 		inputPer1k: rates.inputPer1k,
 		outputPer1k: rates.outputPer1k,
@@ -803,6 +837,87 @@ export function copyAppliedRates(rates: AppliedRates): AppliedRates {
 	return Object.freeze({ ...rates });
 }
 
+/** A token count as the cost function reads it: finite and >= 0, anything else is 0. */
+function usableCount(n: number): number {
+	return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * A request's PROMPT length for a {@link LongPromptTier}: all of its input tokens, meaning
+ * fresh input plus cache reads plus cache writes. The 1-hour writes are a subset of the
+ * cache writes, so they are not added again, and output never counts. Each count is read
+ * the way the cost function reads it (`usableCount`), so the tier and the price are
+ * decided from the same numbers.
+ */
+export function promptTokenCount(
+	inputTokens: number,
+	cacheReadTokens = 0,
+	cacheWriteTokens = 0,
+): number {
+	return usableCount(inputTokens) + usableCount(cacheReadTokens) + usableCount(cacheWriteTokens);
+}
+
+/** A tier whose threshold is a finite count >= 0; anything else is ignored. */
+function usableTier(rates: ModelRates): LongPromptTier | undefined {
+	const tier = rates.longPrompt;
+	if (tier === undefined) return undefined;
+	const t = tier.thresholdTokens;
+	return Number.isFinite(t) && t >= 0 ? tier : undefined;
+}
+
+/**
+ * The rates ONE request is priced at, given its prompt length (`promptTokenCount`): the
+ * row's {@link LongPromptTier} rates when the prompt is longer than the threshold, else
+ * the row's own rates. Strictly greater: a prompt of exactly the threshold is the lower
+ * tier. A row without a tier is returned as is, so untiered pricing is unchanged.
+ *
+ * This is THE tier decision. `tieredCostRaw` calls it, so every estimate, settle and
+ * stream inherits it; the record surfaces (`resolveAppliedRates`, the 1-hour field) are
+ * resolved from its result so a receipt publishes the tier that priced it.
+ */
+export function promptTierRates(rates: ModelRates, promptTokens: number): ModelRates {
+	const tier = usableTier(rates);
+	if (tier === undefined) return rates;
+	return usableCount(promptTokens) > tier.thresholdTokens ? tier.rates : withoutTier(rates);
+}
+
+/**
+ * The rates a HOLD is sized at: the DEARER tier of a tiered row, or the row itself. A hold
+ * sized from an ESTIMATED prompt length cannot know which side of the threshold the
+ * request lands on, and a hold below the settle is capped and under-debits, so it reserves
+ * the dearer tier. The two-phase post releases the difference. The result carries no
+ * tier, so a hold spread such as `{ ...holdTierRates(r), inputPer1k: x }` cannot re-select.
+ * A caller holding against an UPPER BOUND on the prompt (the openshell gate) does not
+ * need this: `costFromRates` tiers by the bound it is given.
+ */
+export function holdTierRates(rates: ModelRates): ModelRates {
+	const tier = usableTier(rates);
+	return tier === undefined ? rates : tier.rates;
+}
+
+/** The row's own rates without its tier, so nothing downstream re-selects. */
+function withoutTier(rates: ModelRates): ModelRates {
+	const { longPrompt: _tier, ...flat } = rates;
+	return flat;
+}
+
+/**
+ * A DEEP-frozen copy of a rate row, for a snapshot that must not change after it is taken
+ * (a hold that settles later). A tiered row's `longPrompt` is an object of its own, so a
+ * shallow copy would still share it with the table.
+ */
+export function snapshotRates(rates: ModelRates): ModelRates {
+	const tier = rates.longPrompt;
+	if (tier === undefined) return Object.freeze({ ...rates });
+	return Object.freeze({
+		...rates,
+		longPrompt: Object.freeze({
+			thresholdTokens: tier.thresholdTokens,
+			rates: Object.freeze({ ...tier.rates }),
+		}),
+	});
+}
+
 /**
  * Raw (unfloored) four-tier cost — the ONE place D1's cache-rate resolution
  * (`effectiveCacheRate`) is applied to token counts. Both `costFromRates` and
@@ -814,19 +929,21 @@ export function copyAppliedRates(rates: AppliedRates): AppliedRates {
  * finite number >= 0 is treated as 0.
  */
 function tieredCostRaw(
-	rates: ModelRates,
+	rowRates: ModelRates,
 	inputTokens: number,
 	outputTokens: number,
 	cacheReadTokens: number,
 	cacheWriteTokens: number,
 	cacheWrite1hTokens: number,
 ): number {
-	const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
-	const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
-	const cacheReadTok =
-		Number.isFinite(cacheReadTokens) && cacheReadTokens > 0 ? cacheReadTokens : 0;
-	const cacheWriteTok =
-		Number.isFinite(cacheWriteTokens) && cacheWriteTokens > 0 ? cacheWriteTokens : 0;
+	const inTok = usableCount(inputTokens);
+	const outTok = usableCount(outputTokens);
+	const cacheReadTok = usableCount(cacheReadTokens);
+	const cacheWriteTok = usableCount(cacheWriteTokens);
+	// The per-request prompt tier (a `longPrompt` row), decided HERE from the same counts
+	// this function prices, so no caller can price a tiered row at one tier by forgetting
+	// a helper. A row without a tier comes back unchanged.
+	const rates = promptTierRates(rowRates, inTok + cacheReadTok + cacheWriteTok);
 
 	// OPERATION ORDER IS PART OF THE CONTRACT (Codex PR-85 P2-4). Multiply THEN
 	// divide — `(tokens * ratePer1k) / 1000`, never `(tokens / 1000) * ratePer1k`.

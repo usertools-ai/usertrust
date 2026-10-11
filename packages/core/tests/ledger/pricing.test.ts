@@ -43,7 +43,11 @@ describe("FALLBACK_RATE", () => {
 	// silently. The maxima are COMPUTED from the table, so a dearer row added later
 	// fails here until the fallback is raised with it.
 	it("FALLBACK_RATE equals the table maximum on every tier it carries", () => {
-		const rows = Object.values(PRICING_TABLE);
+		// Every TIER too: a row's `longPrompt` rates are rates the table charges, so a dearer
+		// tier added later must raise the fallback with it.
+		const rows: ModelRates[] = Object.values(PRICING_TABLE).flatMap((r) =>
+			r.longPrompt === undefined ? [r] : [r, r.longPrompt.rates],
+		);
 		const maxIn = Math.max(...rows.map((r) => r.inputPer1k));
 		const maxOut = Math.max(...rows.map((r) => r.outputPer1k));
 		const maxWrite = Math.max(...rows.map((r) => r.cacheWritePer1k ?? r.inputPer1k));
@@ -400,7 +404,9 @@ describe("PRICING_TABLE_VERSION", () => {
 		// 2026-10-08: the 1-hour cache-write column (cacheWrite1hPer1k) was added to the
 		// Anthropic rows after v4.0.0 shipped with 2026-10-07; one version string must not
 		// label two different tables.
-		expect(PRICING_TABLE_VERSION).toBe("2026-10-08");
+		// 2026-10-11: Claude Haiku 5.5 is priced per request by prompt length; its row gained
+		// the up-to-100,000-token tier and carries the higher tier as `longPrompt`.
+		expect(PRICING_TABLE_VERSION).toBe("2026-10-11");
 	});
 });
 
@@ -545,13 +551,25 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 		cacheReadPer1k: 2.5,
 		cacheWritePer1k: 125,
 	},
-	// OVER-100k-prompt tier of a length-tiered model: $0.50 / $2.50 / $0.05 hit /
-	// $0.625 write. The up-to-100k tier ($0.10 / $0.50) is overstated 5x.
+	// Priced per request by prompt length (re-read 2026-10-11): up to 100,000 prompt
+	// tokens $0.10 / $0.50 / $0.01 hit / $0.125 5m write; over 100,000 the `longPrompt`
+	// tier, $0.50 / $2.50 / $0.05 / $0.625 (and its 1-hour write, $1). Until 2026-10-11 the
+	// row held only the higher tier and overstated every shorter prompt 5x.
 	"claude-haiku-5-5": {
-		inputPer1k: 5,
-		outputPer1k: 25,
-		cacheReadPer1k: 0.5,
-		cacheWritePer1k: 6.25,
+		inputPer1k: 1,
+		outputPer1k: 5,
+		cacheReadPer1k: 0.1,
+		cacheWritePer1k: 1.25,
+		longPrompt: {
+			thresholdTokens: 100_000,
+			rates: {
+				inputPer1k: 5,
+				outputPer1k: 25,
+				cacheReadPer1k: 0.5,
+				cacheWritePer1k: 6.25,
+				cacheWrite1hPer1k: 10,
+			},
+		},
 	},
 	// Deprecated but callable. $25 / $125 per MTok for Project Glasswing participants
 	// (anthropic.com/project/glasswing; status per the model-deprecations page; both
@@ -718,6 +736,14 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 			if (!id.startsWith("claude-")) continue;
 			const expected = mult[id] ?? 0.1;
 			expect((rates.cacheReadPer1k ?? NaN) / rates.inputPer1k, id).toBeCloseTo(expected, 10);
+			// A per-request tier follows the same published multiplier.
+			const tier = rates.longPrompt?.rates;
+			if (tier !== undefined) {
+				expect((tier.cacheReadPer1k ?? NaN) / tier.inputPer1k, `${id} longPrompt`).toBeCloseTo(
+					expected,
+					10,
+				);
+			}
 		}
 	});
 
@@ -1222,7 +1248,7 @@ const PAGE_1H_WRITE_PER_1K: Record<string, number> = {
 	"claude-sonnet-4-6": 60,
 	"claude-sonnet-4-5": 60,
 	"claude-sonnet-4": 60,
-	"claude-haiku-5-5": 10,
+	"claude-haiku-5-5": 2,
 	"claude-haiku-4-5": 20,
 	"claude-3-5-haiku": 16,
 };
