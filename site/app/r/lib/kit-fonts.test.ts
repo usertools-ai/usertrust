@@ -199,3 +199,26 @@ test("a decode that never settles: its caller times out, and every later decode 
 		/timed out/,
 	);
 });
+
+test("while a decode is stalled, N later cards each answer UNBRANDED at once: zero fetches, zero queued decodes (bounded memory)", {
+	timeout: 8000,
+}, async () => {
+	// Runs after the test above, which left a decode stalled on purpose.
+	const { bytes, spec } = await woff2Fixture();
+	let fetches = 0;
+	let decodes = 0;
+	const countingFetch = (async () => {
+		fetches += 1;
+		return new Response(bytes.slice().buffer, { status: 200 });
+	}) as unknown as typeof fetch;
+	const countingDecode = async () => {
+		decodes += 1;
+		return new ArrayBuffer(1);
+	};
+	const answers = await Promise.all(
+		Array.from({ length: 25 }, () => loadPinnedFonts([spec], countingFetch, 3000, countingDecode)),
+	);
+	assert.deepEqual(answers, Array(25).fill(undefined));
+	assert.equal(fetches, 0, "no fetch while a decode is stalled");
+	assert.equal(decodes, 0, "nothing is enqueued behind the stalled decode");
+});

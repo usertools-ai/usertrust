@@ -80,12 +80,34 @@ export function decodeToTtf(
 		() => undefined,
 		() => undefined,
 	);
+	let settled = false;
+	let abandoned = false;
+	const done = (): void => {
+		settled = true;
+		// A decode that outlived its caller's wait has now really finished: the pipeline is free again.
+		if (abandoned) stalledDecodes -= 1;
+	};
+	actual.then(done, done);
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timedOut = new Promise<never>((_, reject) => {
-		timer = setTimeout(() => reject(new Error("font decode timed out")), timeoutMs);
+		timer = setTimeout(() => {
+			if (!settled) {
+				abandoned = true;
+				stalledDecodes += 1;
+			}
+			reject(new Error("font decode timed out"));
+		}, timeoutMs);
 	});
 	return Promise.race([actual, timedOut]).finally(() => clearTimeout(timer));
 }
+
+/**
+ * Decodes whose caller gave up but which have not really finished. While any is stalled, a new card does NOT
+ * fetch fonts or enqueue another decode behind it (each would keep its buffers after its caller timed out:
+ * unbounded memory on a public endpoint): it answers UNBRANDED at once. Single-flight until the stalled
+ * decode actually settles, which also keeps the WASM heap serialised.
+ */
+let stalledDecodes = 0;
 
 /** How long the card waits for the kit before it renders without the brand fonts. */
 export const KIT_FONT_TIMEOUT_MS = 3000;
@@ -101,6 +123,7 @@ export async function loadPinnedFonts(
 	timeoutMs: number = KIT_FONT_TIMEOUT_MS,
 	decodeImpl: (bytes: Uint8Array) => Promise<ArrayBuffer> = decodeToTtf,
 ): Promise<CardFont[] | undefined> {
+	if (stalledDecodes > 0) return undefined;
 	try {
 		return await Promise.all(
 			specs.map(async (spec) => {
