@@ -2364,89 +2364,96 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			activeAuths.clear();
 			unpostedHolds.clear();
 
-			// A terminal still in flight: its void is its own, or the engine sweep's below
-			// (which also reaches this hold: its engine entry goes only when its own void
-			// returns), and the ledger takes one of the two: one mutation either way. The record
-			// says only what destroy() knows, that the void had not completed. It names no
-			// `voidError`: there was no outcome yet. The terminal still answers its caller from
-			// its own void.
-			for (const [txId, capture] of stillInFlight) {
-				await audit
-					.appendEvent({
-						kind: "hold_released",
-						actor: capture.actor,
-						data: {
-							transferId: txId,
-							reason: "governor destroyed (terminal still in flight: its void had not completed)",
-							source: "headless",
-							...(capture.releaseClass === undefined ? {} : { releaseClass: capture.releaseClass }),
-							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
-							...(capture.principal === undefined ? {} : { principal: capture.principal }),
-							...capture.jobAudit,
-						},
-					})
-					.catch(() => {});
-			}
-
-			// Every hold still held: voided and recorded, so destroy() ends no hold without a
-			// record.
-			for (const [txId, capture] of leftovers) {
-				let voidError: string | undefined;
-				if (proxyConn != null && !isDryRun) {
-					try {
-						await proxyConn.void(capture.proxyTransferId ?? txId);
-					} catch {
-						voidError = "proxy_void_failed";
+			// Every step runs, whatever an earlier one throws (shared with trust()); destroy()
+			// rejects with what a step threw only once the last has run, so the TigerBeetle client
+			// is always closed.
+			await runTeardownSteps([
+				async () => {
+					// A terminal still in flight: its void is its own, or the engine sweep's below
+					// (which also reaches this hold: its engine entry goes only when its own void
+					// returns), and the ledger takes one of the two: one mutation either way. The record
+					// says only what destroy() knows, that the void had not completed. It names no
+					// `voidError`: there was no outcome yet. The terminal still answers its caller from
+					// its own void.
+					for (const [txId, capture] of stillInFlight) {
+						await audit
+							.appendEvent({
+								kind: "hold_released",
+								actor: capture.actor,
+								data: {
+									transferId: txId,
+									reason:
+										"governor destroyed (terminal still in flight: its void had not completed)",
+									source: "headless",
+									...(capture.releaseClass === undefined
+										? {}
+										: { releaseClass: capture.releaseClass }),
+									...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+									...(capture.principal === undefined ? {} : { principal: capture.principal }),
+									...capture.jobAudit,
+								},
+							})
+							.catch(() => {});
 					}
-				} else if (engine != null && !isDryRun) {
-					try {
-						await engine.voidPendingSpend(txId);
-					} catch (err) {
-						voidError = releaseVoidError(err);
+
+					// Every hold still held: voided and recorded, so destroy() ends no hold without a
+					// record.
+					for (const [txId, capture] of leftovers) {
+						let voidError: string | undefined;
+						if (proxyConn != null && !isDryRun) {
+							try {
+								await proxyConn.void(capture.proxyTransferId ?? txId);
+							} catch {
+								voidError = "proxy_void_failed";
+							}
+						} else if (engine != null && !isDryRun) {
+							try {
+								await engine.voidPendingSpend(txId);
+							} catch (err) {
+								voidError = releaseVoidError(err);
+							}
+						}
+						// The capture carries no model (#205), so this record names none.
+						await audit
+							.appendEvent({
+								kind: "hold_released",
+								actor: capture.actor,
+								data: {
+									transferId: txId,
+									reason: "governor destroyed",
+									source: "headless",
+									...(voidError === undefined ? {} : { voidError }),
+									...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+									...(capture.principal === undefined ? {} : { principal: capture.principal }),
+									...capture.jobAudit,
+								},
+							})
+							.catch(() => {});
 					}
-				}
-				// The capture carries no model (#205), so this record names none.
-				await audit
-					.appendEvent({
-						kind: "hold_released",
-						actor: capture.actor,
-						data: {
-							transferId: txId,
-							reason: "governor destroyed",
-							source: "headless",
-							...(voidError === undefined ? {} : { voidError }),
-							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
-							...(capture.principal === undefined ? {} : { principal: capture.principal }),
-							...capture.jobAudit,
-						},
-					})
-					.catch(() => {});
-			}
-
-			// AUD-001 / AUD-461: same sweep trust() runs, best-effort, and it writes no
-			// record. What it can still find has one already: a settle whose POST threw
-			// (`settlement_ambiguous`; a void of a transfer TB did post fails closed in the
-			// catch), an abort or release whose own void failed (its record names the
-			// `voidError`, though this sweep may yet return the funds), a terminal still in
-			// flight above (recorded there), and a settle still posting past the deadline (its
-			// own records). Then close the client: a voidAllPending throw must not skip
-			// destroy() and hang the process on the open TigerBeetle socket.
-			if (engine != null && typeof engine.voidAllPending === "function") {
-				try {
-					await engine.voidAllPending();
-				} catch {
-					// Best-effort — TigerBeetle auto-voids pending transfers after 300s.
-				}
-			}
-
-			// Flush audit, then release its lock and destroy the engine and the proxy: every
-			// step runs, whatever an earlier one throws (shared with trust()).
-			// destroy() never REJECTS for a lock left behind: callers call it without await or catch,
-			// and an unhandled rejection kills the process. The teardown reports it as a
-			// USERTRUST_AUDIT_LOCK_LEFT warning instead.
-			await audit.flush();
-			runTeardownSteps([
+				},
+				// AUD-001 / AUD-461: same sweep trust() runs, best-effort, and it writes no
+				// record. What it can still find has one already: a settle whose POST threw
+				// (`settlement_ambiguous`; a void of a transfer TB did post fails closed in the
+				// catch), an abort or release whose own void failed (its record names the
+				// `voidError`, though this sweep may yet return the funds), a terminal still in
+				// flight above (recorded there), and a settle still posting past the deadline (its
+				// own records). Then close the client: a voidAllPending throw must not skip
+				// destroy() and hang the process on the open TigerBeetle socket.
+				async () => {
+					if (engine != null && typeof engine.voidAllPending === "function") {
+						try {
+							await engine.voidAllPending();
+						} catch {
+							// Best-effort — TigerBeetle auto-voids pending transfers after 300s.
+						}
+					}
+				},
+				// Flush audit, then release its lock. destroy() never REJECTS for a lock left
+				// behind: callers call it without await or catch, and an unhandled rejection kills
+				// the process. The teardown reports it as a USERTRUST_AUDIT_LOCK_LEFT warning instead.
+				() => audit.flush(),
 				() => releaseAuditWriterForTeardown(audit),
+				// Destroy the engine and the proxy.
 				() => {
 					if (engine != null && typeof engine.destroy === "function") engine.destroy();
 				},

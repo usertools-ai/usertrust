@@ -1121,19 +1121,21 @@ export function envelopeReceiptBudget(
 }
 
 /**
- * The last steps of both governors' `destroy()` (release the audit writer, destroy the
- * engine, destroy the proxy connection), SHARED with `headless.ts`. Each step runs in its
- * own try, in order, so a step that throws never skips the ones after it: an engine
- * destroy that throws used to leave the proxy connection open. Once every step has run, a
- * single failure is rethrown as is and several are thrown together as one
- * `AggregateError`, in step order, so `destroy()` still rejects with whatever a step
- * threw. A step that reports its own failure instead of throwing is just one more step.
+ * The teardown steps of both governors' `destroy()`, SHARED with `headless.ts`: the drain,
+ * the engine's pending-transfer sweep, the audit flush, the audit release, the engine
+ * destroy and the proxy destroy, in that order. Each step is awaited in its own try, so a
+ * step that throws or rejects never skips the ones after it: a sweep or flush that threw
+ * used to leave the TigerBeetle client open (the process then hangs on it) and the audit
+ * lock held. Once every step has run, a single failure is rethrown as is and several are
+ * thrown together as one `AggregateError`, in step order, so `destroy()` rejects with what
+ * it rejected with before, only later. A step that reports its own failure instead of
+ * throwing (the release) or swallows it (headless's sweep) is just one more step.
  */
-export function runTeardownSteps(steps: ReadonlyArray<() => void>): void {
+export async function runTeardownSteps(steps: ReadonlyArray<() => unknown>): Promise<void> {
 	const errors: unknown[] = [];
 	for (const step of steps) {
 		try {
-			step();
+			await step();
 		} catch (err) {
 			errors.push(err);
 		}
@@ -3562,23 +3564,24 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				beforeExitHandler = null;
 			}
 
-			// AUD-461: Void any remaining pending transfers (best-effort).
-			// TigerBeetle auto-voids pending transfers after 300s, but
-			// explicit voiding releases holds immediately.
-			if (engine != null && typeof engine.voidAllPending === "function") {
-				await engine.voidAllPending();
-			}
-
-			// Flush audit writes
-			await audit.flush();
-
-			// Release the audit lock, destroy the engine if connected and the proxy
-			// connection if active: every step runs, whatever an earlier one throws.
-			// destroy() never REJECTS for a lock left behind: callers call it without await or catch,
-			// and an unhandled rejection kills the process. The teardown reports it as a
-			// USERTRUST_AUDIT_LOCK_LEFT warning instead.
-			runTeardownSteps([
+			// Every step runs, whatever an earlier one throws; destroy() rejects with what a step
+			// threw only once the last has run, so the TigerBeetle client is always closed.
+			await runTeardownSteps([
+				// AUD-461: Void any remaining pending transfers (best-effort).
+				// TigerBeetle auto-voids pending transfers after 300s, but
+				// explicit voiding releases holds immediately.
+				async () => {
+					if (engine != null && typeof engine.voidAllPending === "function") {
+						await engine.voidAllPending();
+					}
+				},
+				// Flush audit writes
+				() => audit.flush(),
+				// Release the audit lock. destroy() never REJECTS for a lock left behind: callers
+				// call it without await or catch, and an unhandled rejection kills the process. The
+				// teardown reports it as a USERTRUST_AUDIT_LOCK_LEFT warning instead.
 				() => releaseAuditWriterForTeardown(audit),
+				// Destroy the engine if connected and the proxy connection if active.
 				() => {
 					if (engine != null && typeof engine.destroy === "function") engine.destroy();
 				},
