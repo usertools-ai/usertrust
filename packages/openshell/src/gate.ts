@@ -19,6 +19,7 @@ import {
 	isModelPriced,
 	type ModelRates,
 	requestDeclares1hCache,
+	snapshotRates,
 	supportsCacheWrite1h,
 } from "usertrust";
 import { DenyReason } from "./reasons.js";
@@ -716,13 +717,19 @@ export function evaluateRequest(
 		w.images * perImage +
 		(hasTools(body) ? config.toolOverheadTokens[match.provider] : 0);
 	// A FROZEN COPY: getModelRates returns the operator's own object, and an in-place edit after
-	// authorize must not change what this hold settles at. ModelRates is flat numbers.
-	const rates: ModelRates = Object.freeze({ ...getModelRates(model, config.customRates) });
+	// authorize must not change what this hold settles at. DEEP-frozen (`snapshotRates`): a
+	// tiered row (`longPrompt`) carries a nested object a shallow copy would still share with
+	// the table.
+	const rates: ModelRates = snapshotRates(getModelRates(model, config.customRates));
 	const operatorOwned =
 		config.customRates !== undefined && Object.hasOwn(config.customRates, model);
 	// Priced at the DEAREST input tier: plain input, cache write (a prompt the provider writes
 	// to its cache bills above plain input) and cache read (#169: an operator's rate may price
 	// a cache read above both). Each tier is linear, so no split of the bound costs more.
+	// A per-request prompt tier (`longPrompt`) needs nothing extra here: every term below
+	// prices a prompt of exactly `inputTokenBound`, an UPPER bound on the real prompt, and
+	// `costFromRates` selects the tier from it. A bound at or under the threshold proves the
+	// request cannot cross it, so the lower tier is exact, and a bound over it holds the higher.
 	const amount = Math.max(
 		costFromRates(rates, inputTokenBound, maxOutputTokens),
 		costFromRates(rates, 0, maxOutputTokens, 0, inputTokenBound),

@@ -4,8 +4,8 @@
 // AGENTS.md calls its "Documented pricing approximations" paragraph "verbatim, also
 // published at /docs/api/pricing". A mirror is only worth anything if it is exact:
 // let the two drift and a contributor reading either one is told a different list of
-// what the pricing table does NOT model (a Haiku 5.5 tier overstated 5x, fast mode
-// unpriced, ...), with nothing failing. This reads both paragraphs out of the repo
+// what the pricing table does NOT model (fast mode unpriced, ...) or models only by
+// exception (Haiku 5.5's per-request prompt tier), with nothing failing. This reads both paragraphs out of the repo
 // and requires them byte-equal.
 
 import { readFileSync } from "node:fs";

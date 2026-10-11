@@ -343,7 +343,18 @@ test("list-price math matches hand-computed fixture values", () => {
 	assert.deepStrictEqual(listRatesForModel("claude-mythos-5"), { input: 10, output: 50 });
 	// Deprecated but callable (Project Glasswing): $25 / $125 per MTok.
 	assert.deepStrictEqual(listRatesForModel("claude-mythos-preview"), { input: 25, output: 125 });
-	assert.deepStrictEqual(listRatesForModel("claude-haiku-5-5"), { input: 0.5, output: 2.5 });
+	// Priced per request by prompt length: exactly 100,000 is the lower tier.
+	assert.deepStrictEqual(listRatesForModel("claude-haiku-5-5"), { input: 0.1, output: 0.5 });
+	assert.deepStrictEqual(listRatesForModel("claude-haiku-5-5", 100_000), {
+		input: 0.1,
+		output: 0.5,
+	});
+	assert.deepStrictEqual(listRatesForModel("claude-haiku-5-5", 100_001), {
+		input: 0.5,
+		output: 2.5,
+	});
+	// An untiered model ignores the prompt length.
+	assert.deepStrictEqual(listRatesForModel("claude-opus-5", 5_000_000), { input: 5, output: 25 });
 	assert.throws(() => listRatesForModel("claude-opus-5-fast"), /no published list rate/);
 	assert.throws(() => listRatesForModel("claude-opus-5-2026010"), /no published list rate/);
 	assert.throws(() => listRatesForModel("totally-unknown-model-x"), /no published list rate/);

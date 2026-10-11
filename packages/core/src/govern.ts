@@ -53,7 +53,9 @@ import {
 	costFromRatesUnfloored,
 	estimateInputTokens,
 	holdInputRate,
+	holdTierRates,
 	PRICING_TABLE_VERSION,
+	promptTokenCount,
 	type RateResolution,
 	resolveAppliedRates,
 	resolveRates,
@@ -1410,13 +1412,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// (Whatever client shape carried the request: an OpenAI-shaped compatibility client
 			// can serve a Claude model. A row with no 1-hour tier reserves nothing for the
 			// marker, so this needs no provider test.)
-			const holdRate = holdInputRate(
-				rateResolution.rates,
-				declares1h,
-				rateResolution.rateSource !== "table",
-			);
+			// A per-request prompt tier (`longPrompt`) is held at its DEARER tier: the
+			// estimate is a heuristic and can land on the wrong side of the threshold, and a
+			// hold below the settle is capped. The two-phase post releases the difference.
+			// `holdTierRates` drops the tier, so the spread below cannot re-select it.
+			const holdRates = holdTierRates(rateResolution.rates);
+			const holdRate = holdInputRate(holdRates, declares1h, rateResolution.rateSource !== "table");
 			const estimatedCost = costFromRates(
-				{ ...rateResolution.rates, inputPer1k: holdRate },
+				{ ...holdRates, inputPer1k: holdRate },
 				estimatedInputTokens,
 				maxOutputTokens,
 			);
@@ -1445,7 +1448,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// used cannot become two different things. This is the D1 resolution, so
 			// an absent cache tier appears as `inputPer1k` (what it actually charges),
 			// never as a hole an auditor would read as free.
-			const appliedRates = resolveAppliedRates(rateResolution.rates);
+			// A tiered row (`longPrompt`) publishes, on the estimate-priced handle, the tier
+			// the ESTIMATE selects (the tier `meteredEstimateCost` was priced at). The
+			// settle and the stream terminal re-resolve from the reported usage
+			// (`settledAppliedRates`), because the tier is decided per request by its real
+			// prompt length. An untiered row resolves to exactly the same object either way.
+			const appliedRates = resolveAppliedRates(rateResolution.rates, estimatedInputTokens);
 
 			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
 			// This prevents concurrent calls from both passing the budget check and
@@ -1878,6 +1886,21 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// D5: the record half of the SAME snapshot the cost comes from —
 				// present iff provider-sourced, omitted (never zero-filled) otherwise.
 				const usageAudit = publishableUsageFields(usageSnapshot, rateResolution.rates);
+				// The rates this call SETTLES at: a tiered row (`longPrompt`) re-resolves its
+				// tier from the REPORTED prompt length, the same counts `costFromRates` prices
+				// below, so the record reproduces the cost. Without provider usage the cost is
+				// the estimate, and so are the rates.
+				const settledAppliedRates =
+					usageSnapshot.source === "provider"
+						? resolveAppliedRates(
+								rateResolution.rates,
+								promptTokenCount(
+									usageSnapshot.inputTokens,
+									usageSnapshot.cacheReadTokens,
+									usageSnapshot.cacheWriteTokens,
+								),
+							)
+						: appliedRates;
 				let streamCost: number;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
 				if (usageSnapshot.source === "provider") {
@@ -1995,7 +2018,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// receipt's meter as costBasis/rateSource/endpointClass). The
 						// relocation was forced by v1's closed `meter` object, which
 						// has no counterpart here. P1-2: its own frozen copy.
-						appliedRates: copyAppliedRates(appliedRates),
+						appliedRates: copyAppliedRates(settledAppliedRates),
 						pricingTableVersion: PRICING_TABLE_VERSION,
 						chunksDelivered: completion.chunksDelivered,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
@@ -2093,7 +2116,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// D5: what the rates WERE, beside where they came from — a sibling
 					// of `meter`, not a member of it (P1-1). P1-2: its own frozen copy.
 					pricing: {
-						appliedRates: copyAppliedRates(appliedRates),
+						appliedRates: copyAppliedRates(settledAppliedRates),
 						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
@@ -2605,6 +2628,21 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// D5: the record half of the SAME snapshot the cost comes from. Nothing
 				// below re-reads `response.usage` — one read, one object, two uses.
 				const usageAudit = publishableUsageFields(usageSnapshot, rateResolution.rates);
+				// The rates this call SETTLES at: a tiered row (`longPrompt`) re-resolves its
+				// tier from the REPORTED prompt length, the same counts `costFromRates` prices
+				// below, so the record reproduces the cost. Without provider usage the cost is
+				// the estimate, and so are the rates.
+				const settledAppliedRates =
+					usageSnapshot.source === "provider"
+						? resolveAppliedRates(
+								rateResolution.rates,
+								promptTokenCount(
+									usageSnapshot.inputTokens,
+									usageSnapshot.cacheReadTokens,
+									usageSnapshot.cacheWriteTokens,
+								),
+							)
+						: appliedRates;
 				if (usageSnapshot.source === "provider") {
 					actualCost = costFromRates(
 						rateResolution.rates,
@@ -2637,7 +2675,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						...usageAudit,
 						// P1-1: flat here by design (see the stream terminal above).
 						// P1-2: its own frozen copy.
-						appliedRates: copyAppliedRates(appliedRates),
+						appliedRates: copyAppliedRates(settledAppliedRates),
 						pricingTableVersion: PRICING_TABLE_VERSION,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
 						endpointClass: endpoint.class,
@@ -2843,7 +2881,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// D5: what the rates WERE, beside where they came from — a sibling
 					// of `meter`, not a member of it (P1-1). P1-2: its own frozen copy.
 					pricing: {
-						appliedRates: copyAppliedRates(appliedRates),
+						appliedRates: copyAppliedRates(settledAppliedRates),
 						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
