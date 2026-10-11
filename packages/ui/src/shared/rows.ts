@@ -117,7 +117,15 @@ export type RowStatus = "settled" | "pending" | "failed" | "denied" | "released"
 export function statusOf(row: LedgerRow): RowStatus {
 	if (DENIAL_KINDS.has(row.kind)) return "denied";
 	if (RELEASE_KINDS.has(row.kind)) return "released";
-	if (row.kind === "llm_call_failed" || row.error !== undefined) return "failed";
+	// A settle for a hold that was gone: real provider spend recorded, NOT charged. It carries no
+	// `settled` field, so without this arm it would read "pending", a hold that might still settle.
+	if (
+		row.kind === "llm_call_failed" ||
+		row.kind === "settlement_unrecoverable" ||
+		row.error !== undefined
+	) {
+		return "failed";
+	}
 	if (row.settled === true) return "settled";
 	return "pending";
 }

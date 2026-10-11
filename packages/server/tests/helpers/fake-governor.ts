@@ -7,8 +7,14 @@ import type {
 	ReleaseOutcome,
 	SettleParams,
 	TrustReceipt,
+	UnheldSettlementOutcome,
+	UnheldSettlementParams,
 } from "usertrust";
-import { InsufficientBalanceError, PolicyDeniedError } from "usertrust";
+import {
+	InsufficientBalanceError,
+	PolicyDeniedError,
+	UnheldSettlementRateLimitedError,
+} from "usertrust";
 
 export interface FakeGovernorHandle {
 	governor: Governor;
@@ -20,6 +26,7 @@ export interface FakeGovernorHandle {
 		releaseReasons: Array<string | undefined>;
 		settleParams: Array<SettleParams | undefined>;
 		authorizeParams: AuthorizeParams[];
+		unheld: UnheldSettlementParams[];
 	};
 }
 
@@ -39,6 +46,8 @@ export function createFakeGovernor(
 		release?: { notHeld?: boolean; voidError?: string; throws?: boolean };
 		/** How `abort` answers, by the same three options as `release`. */
 		abort?: { notHeld?: boolean; voidError?: string; throws?: boolean };
+		/** How `recordUnheldSettlement` answers: as one that fails to append, or one that already recorded it. */
+		unheld?: { throws?: boolean; recorded?: boolean; held?: boolean; rateLimited?: boolean };
 	} = {},
 ): FakeGovernorHandle {
 	let budget = opts.budget ?? 10_000;
@@ -52,6 +61,7 @@ export function createFakeGovernor(
 		releaseReasons: [] as Array<string | undefined>,
 		settleParams: [] as Array<SettleParams | undefined>,
 		authorizeParams: [] as AuthorizeParams[],
+		unheld: [] as UnheldSettlementParams[],
 	};
 
 	const governor: Governor = {
@@ -113,6 +123,15 @@ export function createFakeGovernor(
 			calls.released.push(auth.transferId);
 			const voidError = opts.release?.voidError;
 			return voidError === undefined ? { released: true } : { released: true, voidError };
+		},
+		async recordUnheldSettlement(params: UnheldSettlementParams): Promise<UnheldSettlementOutcome> {
+			calls.unheld.push(params);
+			if (opts.unheld?.throws === true) throw new Error("fake record failed");
+			if (opts.unheld?.rateLimited === true) throw new UnheldSettlementRateLimitedError(30_000);
+			// A real pool gives each tenant its own governor, so another tenant's hold is never "held"
+			// here; a test that wants the answer asks for it.
+			if (opts.unheld?.held === true) return { outcome: "held", transferId: params.transferId };
+			return { outcome: "unrecoverable", recorded: opts.unheld?.recorded ?? true };
 		},
 		async destroy(): Promise<void> {
 			pending.clear();

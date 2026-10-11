@@ -12,6 +12,7 @@ import { resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
 import type { GovernorFactory } from "./pool.js";
 import { GovernorPool } from "./pool.js";
+import type { SettleRequest } from "./wire.js";
 import {
 	AbortRequestSchema,
 	AuthorizeRequestSchema,
@@ -51,6 +52,13 @@ const SERVER_CAPABILITIES = Object.freeze([
 	// `usageTo` (and a `job`/`jobState` it must agree with). All recorded verbatim on
 	// the audit records, none a pricing input, none selecting a wallet.
 	"job",
+	// `settle-unrecoverable`: `POST /v1/settle` for a transferId this server holds no hold for no
+	// longer answers a bare 404 (and drops real provider spend): it answers `410
+	// settlement_unrecoverable` (recorded on the chain, counted per tenant as
+	// `settlementsUnrecoverable` on the authenticated /v1/budget), `409 already_settled` for a retry of a settle that went through in
+	// this process, or `409 settle_in_progress`. BREAKING for a client that read every settle 404 the
+	// same way; it checks this list before relying on the new codes (see the CHANGELOG).
+	"settle-unrecoverable",
 ]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
@@ -60,6 +68,14 @@ const SERVER_CAPABILITIES = Object.freeze([
  */
 const DRY_RUN_CAPABILITIES = Object.freeze([...SERVER_CAPABILITIES]);
 const SWEEP_INTERVAL_MS = 30_000;
+/**
+ * How many settled transferIds the server remembers to tell a RETRY of a settle that went through
+ * from a settle for a hold that is gone. In-process and bounded: the oldest is forgotten first, and a
+ * restart forgets all of them. A retry past that memory reads as an unknown hold and is RECORDED as
+ * `settlement_unrecoverable` (410): a duplicate record of spend the ledger did charge, never a lost
+ * one. That is the declared residue of having no idempotency key.
+ */
+export const RECENTLY_SETTLED_MEMORY = 10_000;
 /** Max concurrent SSE streams a single tenant may hold open at once. */
 const MAX_SSE_PER_TENANT = 8;
 /** Drop an SSE subscriber whose kernel send buffer backs up past this. */
@@ -149,6 +165,15 @@ export function createUsertrustServer(opts: {
 	const bus = new EventBus();
 	const pool = opts.factory ? new GovernorPool(config, opts.factory) : new GovernorPool(config);
 	const pending = new Map<string, PendingEntry>();
+	// `${tenantId}\0${transferId}` of settles that completed in this process (FIFO, bounded by
+	// RECENTLY_SETTLED_MEMORY) and of settles in flight, so a concurrent or repeated settle is told
+	// apart from one whose hold is gone.
+	// The memory is PER TENANT, so one tenant's settles can never evict another's remembered ids.
+	const recentlySettled = new Map<string, Set<string>>();
+	const settling = new Set<string>();
+	// Per tenant, and served only on the authenticated /v1/budget: the unauthenticated /v1/health
+	// must not tell anyone when some tenant's settles are being dropped.
+	const settlementsUnrecoverable = new Map<string, number>();
 	/**
 	 * A hold's age on the monotonic clock: what its authorize answer and the server's own
 	 * sweep both read. No wall-clock step moves it, forward or back, so the sweep never
@@ -289,7 +314,7 @@ export function createUsertrustServer(opts: {
 		const { transferId, job, jobState, ...usage } = parsed.data;
 		const entry = pending.get(transferId);
 		if (!entry || entry.tenantId !== tenant.id) {
-			sendJson(res, 404, { error: "not_found", reason: "unknown transferId" });
+			await handleUnheldSettle(tenant, transferId, usage, res);
 			return;
 		}
 		// The record carries the AUTHORIZE capture's labels. A settle that names a
@@ -317,9 +342,15 @@ export function createUsertrustServer(opts: {
 		// Atomic claim: first concurrent caller wins; a governor failure re-inserts
 		// the entry so a transient settle error stays retryable.
 		pending.delete(transferId);
+		const settleKey = `${tenant.id}\0${transferId}`;
+		settling.add(settleKey);
 		try {
 			const governor = await pool.get(tenant);
 			const receipt = await governor.settle(entry.auth, usage);
+			// Only a settle that POSTED is remembered as settled: one that reached the ledger and did
+			// not post (`settled: false`, recorded as ambiguous) must not turn a retry into a false
+			// "the charge stands".
+			if (receipt.settled !== false) rememberSettled(tenant.id, transferId);
 			bus.publish(tenant.id, {
 				type: "settled",
 				transferId,
@@ -330,6 +361,95 @@ export function createUsertrustServer(opts: {
 			sendJson(res, 200, receipt);
 		} catch (err) {
 			pending.set(transferId, entry);
+			const mapped = toHttpError(err);
+			sendJson(res, mapped.status, mapped.body);
+		} finally {
+			settling.delete(settleKey);
+		}
+	}
+
+	function rememberSettled(tenantId: string, transferId: string): void {
+		let set = recentlySettled.get(tenantId);
+		if (set === undefined) {
+			set = new Set();
+			recentlySettled.set(tenantId, set);
+		}
+		set.add(transferId);
+		if (set.size > RECENTLY_SETTLED_MEMORY) {
+			const oldest = set.values().next().value;
+			if (oldest !== undefined) set.delete(oldest);
+		}
+	}
+
+	/**
+	 * A settle for a transferId this server holds no hold for. It used to be a bare 404, which dropped
+	 * real provider spend the ledger would never charge. Now: a settle in flight or a retry of one that
+	 * went through is a 409 (nothing recorded); anything else is RECORDED on the chain as
+	 * `settlement_unrecoverable` and answers 410. The record moves no money and re-opens nothing; the
+	 * client re-authorizes and settles to be charged.
+	 */
+	async function handleUnheldSettle(
+		tenant: TenantConfig,
+		transferId: string,
+		usage: Omit<SettleRequest, "transferId" | "job" | "jobState">,
+		res: ServerResponse,
+	): Promise<void> {
+		const key = `${tenant.id}\0${transferId}`;
+		if (settling.has(key)) {
+			sendJson(res, 409, {
+				error: "settle_in_progress",
+				reason: "a settle for this transferId is in progress: retry shortly",
+				transferId,
+			});
+			return;
+		}
+		if (recentlySettled.get(tenant.id)?.has(transferId) === true) {
+			sendJson(res, 409, {
+				error: "already_settled",
+				reason: "this transferId was already settled: the charge stands",
+				transferId,
+			});
+			return;
+		}
+		try {
+			const governor = await pool.get(tenant);
+			const outcome = await governor.recordUnheldSettlement({
+				transferId,
+				inputTokens: usage.inputTokens,
+				outputTokens: usage.outputTokens,
+				cacheReadTokens: usage.cacheReadTokens,
+				cacheWriteTokens: usage.cacheWriteTokens,
+				cacheWrite1hTokens: usage.cacheWrite1hTokens,
+				chunksDelivered: usage.chunksDelivered,
+				usageSource: usage.usageSource,
+				computeMs: usage.computeMs,
+				usageTo: usage.usageTo,
+			});
+			if (outcome.outcome === "held") {
+				sendJson(res, 409, {
+					error: "hold_active",
+					reason: "the governor still holds this transferId",
+					transferId,
+				});
+				return;
+			}
+			if (outcome.recorded) {
+				settlementsUnrecoverable.set(tenant.id, (settlementsUnrecoverable.get(tenant.id) ?? 0) + 1);
+			}
+			bus.publish(tenant.id, {
+				type: "settlement_unrecoverable",
+				transferId,
+				recorded: outcome.recorded,
+				at: new Date().toISOString(),
+			});
+			sendJson(res, 410, {
+				error: "settlement_unrecoverable",
+				reason:
+					"no hold for this transferId here (swept, restarted or already settled): the settle is recorded, not charged. Authorize again and settle to be charged.",
+				transferId,
+				recorded: outcome.recorded,
+			});
+		} catch (err) {
 			const mapped = toHttpError(err);
 			sendJson(res, mapped.status, mapped.body);
 		}
@@ -507,7 +627,10 @@ export function createUsertrustServer(opts: {
 		}
 		if (req.method === "GET" && url === "/v1/budget") {
 			const governor = await pool.get(tenant);
-			sendJson(res, 200, { remaining: governor.budgetRemaining() });
+			sendJson(res, 200, {
+				remaining: governor.budgetRemaining(),
+				settlementsUnrecoverable: settlementsUnrecoverable.get(tenant.id) ?? 0,
+			});
 			return;
 		}
 		if (req.method === "GET" && url === "/v1/events") {

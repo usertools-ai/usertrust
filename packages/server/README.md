@@ -33,6 +33,26 @@ curl -s localhost:4519/v1/settle -H "Authorization: Bearer $KEY" \
   -d '{"transferId":"<from authorize>","inputTokens":200,"outputTokens":40}'
 ```
 
+### A settle for a hold the server no longer has (**BREAKING since 4.1.x: was `404`**)
+
+A `POST /v1/settle` for a `transferId` this server holds no hold for (a TTL sweep ended the hold, the
+server restarted, or the settle is a retry) used to answer `404` and drop the spend on the floor. It
+now answers one of three, and `/v1/health` lists the capability `settle-unrecoverable` so a client can
+check before relying on them:
+
+| Status | `error` | Meaning | What a client does |
+|---|---|---|---|
+| `410` | `settlement_unrecoverable` | No hold here. The settle is **recorded on the audit chain** (usage only, the id as its SHA-256) and counted per tenant in `settlementsUnrecoverable` on the authenticated `GET /v1/budget` (never on the unauthenticated `/v1/health`); `recorded: false` marks an exact retry already recorded. **Nothing is charged and no hold is re-opened.** | Authorize again and settle if the spend must be charged. Do not retry the same settle. |
+| `409` | `already_settled` | A retry of a settle that went through in this process. The charge stands. Nothing recorded. | Treat as success. |
+| `409` | `settle_in_progress` | A settle for this id is still running. Nothing recorded. | Retry shortly. |
+
+The server remembers the last 10 000 settled ids PER TENANT (FIFO, in-process; a restart forgets them). Past that
+memory, a retry of an older settle reads as an unknown hold and is **recorded** as
+`settlement_unrecoverable` (a duplicate record of a charged settle, never a lost one). Without an
+idempotency key a late settle and a retry of a charged one cannot be told apart, and a record is the
+safe direction. A record that cannot be appended is a `5xx`, never swallowed. Each record is an fsync'd append, so a tenant may write at most 1 000 new ones per minute: past that the settle is refused with `429 rate_limited` (nothing recorded; retry later). `/v1/abort` and
+`/v1/release` keep their `404`.
+
 `/v1/settle` also accepts `cacheReadTokens` / `cacheWriteTokens` (both optional, disjoint from
 `inputTokens` — do not include cached tokens in `inputTokens` too, or they double-count). Absent
 cache rates for the model still price those tokens at the input rate — see the money invariants
@@ -90,7 +110,7 @@ one you cannot reuse.
 | GET    | `/v1/health`    | none   | Liveness and `capabilities`                         |
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
-`404 not_found` (unknown/already-settled transferId), `413 too_large` (1 MiB body cap).
+`404 not_found` (unknown transferId on `/v1/abort` and `/v1/release`; for `/v1/settle` see the three codes below), `413 too_large` (1 MiB body cap).
 Pending holds are swept and released when their advertised life runs out: `pendingTtlMs` (default 5 min),
 or the ledger's pending timeout when that comes first. The sweep reads hold ages on a monotonic clock, so
 no wall-clock step moves it, and it never ends a hold before its advertised life. Declared: after the host

@@ -7,6 +7,7 @@ import {
 	PolicyDeniedError,
 	principalFieldRefusal,
 	RELEASE_CLASSES,
+	UnheldSettlementRateLimitedError,
 	usageTimeRefusal,
 } from "usertrust";
 import { z } from "zod";
@@ -72,7 +73,8 @@ export const AuthorizeRequestSchema = z
 	});
 
 export const SettleRequestSchema = z.object({
-	transferId: z.string().min(1),
+	// Bounded: the id is hashed into the audit record of a settle whose hold is gone.
+	transferId: z.string().min(1).max(256),
 	inputTokens: z.number().int().nonnegative().optional(),
 	outputTokens: z.number().int().nonnegative().optional(),
 	// Spec D4 row 6: zod strips unrecognized keys by default, so these two
@@ -202,6 +204,9 @@ export function toHttpError(err: unknown): {
 	}
 	if (err instanceof AnomalyError) {
 		return { status: 429, body: { error: "anomaly", reason: err.message } };
+	}
+	if (err instanceof UnheldSettlementRateLimitedError) {
+		return { status: 429, body: { error: "rate_limited", reason: err.message } };
 	}
 	return { status: 500, body: { error: "internal", reason: "internal error" } };
 }

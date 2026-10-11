@@ -164,6 +164,18 @@ settle-then-void leaving the ledger holding a debit its accounting does not.
 `release` (a hold given back: neither, and a `hold_released` record). usertrust-server's TTL sweep
 and shutdown release; `POST /v1/release` (capability `release`) exposes it, and answers 200 only
 when the governor says it ended the hold (`{ released: true }`), else 404 `unknown transferId`.
+A settle that arrives for a hold the governor no longer has is recorded, never dropped:
+`Governor.recordUnheldSettlement()` appends `settlement_unrecoverable` (the id as its SHA-256, the
+caller's reported usage, no cost) and **only** that: it never reserves, posts, voids or re-opens a hold,
+touches no budget counter and prices nothing. `POST /v1/settle` answers it as `410`, with `409
+already_settled` for a retry of a settle that went through in this process (bounded memory of 10 000,
+FIFO; past it a retry is recorded again, a duplicate record and never a lost one).
+*Prevents:* a TTL-swept or restarted hold turning a client's real provider spend into a bare `404` that
+nothing records, and the opposite mistake of "recovering" it by moving money from a record. The record
+is deliberately UNATTRIBUTED (`actor: "local"`, no `costCenter`): its hold is gone, so there is no
+capture to read an attribution from, and inventing one from request text would break the structural
+attribution rule above. At most 1 000 new records per minute per governor
+(`UnheldSettlementRateLimitedError`, `429`), because each is an fsync'd append.
 `abort()` answers the same way (`{ aborted: true }` or `{ aborted: false }`, a refused void named in
 `voidError`), and `POST /v1/abort` keeps the same 200/404 rule. An abort or release is in flight
 from its synchronous claim until its record starts (`inFlight`): `destroy()` waits for it, and
