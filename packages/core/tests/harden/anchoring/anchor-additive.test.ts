@@ -394,11 +394,31 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// dependency; both invariants re-verified directly, every import in
 		// packages/verify/src is still `node:*` or `./`-relative and `dependencies`
 		// is still `{}`. 208 lines of headroom.
+		//
+		// 9900 → 10000, for receipt-spec v0.9.6 (2026-10-05). Post-change total
+		// 9904, so 9900 failed by 4. WHAT WAS ADDED, all in `receipt-verify.ts`:
+		// the twelfth signed checkpoint member (`segmentStartPreviousHash`) with
+		// its genesis rule, and the chain-link offset in equality 4 and in the
+		// history walk's contiguity sum — the verifier catching up to the
+		// checkpoints the proxy-v1 chain actually signs. NO vendored source, no new
+		// dependency: the one new import is `./constants.js`, and `dependencies`
+		// is still `{}`. 96 lines of headroom.
+		//
+		// 10000 → 10100, for the same amendment's review round 2 (2026-10-05).
+		// Post-change total 10038, so 10000 failed by 38. WHAT WAS ADDED, all in
+		// `receipt-verify.ts`: the bindings the amendment's boundaries expose —
+		// the first event's previousHash, every proof node the receipt can
+		// recompute (the chain link at leaf 1, the predecessor at an odd leaf, the
+		// node over both at leaf 2), a served successor's start hash, a sealed
+		// segment's floor of one event — and the refusal of the artifact `work`
+		// variants. NO vendored source, no new
+		// dependency: the new imports are `hashLeaf` / `hashInternal` from
+		// `./verify.js`, and `dependencies` is still `{}`. 62 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(9900);
+		expect(total).toBeLessThan(10100);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {

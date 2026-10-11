@@ -13,6 +13,7 @@ import { loadConfig } from "../config.js";
 import type { ActionKind } from "../shared/types.js";
 import { createVaultStore } from "../vault/store.js";
 import { parseFlags } from "./flags.js";
+import { scrubForTerminal, toSafeJson } from "./target.js";
 
 const SUBCOMMANDS = ["add", "rm", "ls", "get", "rotate"] as const;
 type Sub = (typeof SUBCOMMANDS)[number];
@@ -34,7 +35,7 @@ Subcommands:
   rotate <name> <val>  Rotate a credential`;
 		if (jsonOut) {
 			console.log(
-				JSON.stringify({
+				toSafeJson({
 					command: "secret",
 					success: false,
 					data: { error: sub ? `Unknown subcommand: ${sub}` : "Missing subcommand" },
@@ -59,7 +60,7 @@ Subcommands:
 				if (!name || !value) {
 					if (jsonOut)
 						console.log(
-							JSON.stringify({
+							toSafeJson({
 								command: "secret add",
 								success: false,
 								data: { error: "Name required" },
@@ -70,8 +71,8 @@ Subcommands:
 				}
 				await vault.add(name, value);
 				if (jsonOut)
-					console.log(JSON.stringify({ command: "secret add", success: true, data: { name } }));
-				else console.log(pc.green(`Credential "${name}" stored.`));
+					console.log(toSafeJson({ command: "secret add", success: true, data: { name } }));
+				else console.log(pc.green(`Credential "${scrubForTerminal(name)}" stored.`));
 				break;
 			}
 
@@ -80,7 +81,7 @@ Subcommands:
 				if (!name) {
 					if (jsonOut)
 						console.log(
-							JSON.stringify({
+							toSafeJson({
 								command: "secret rm",
 								success: false,
 								data: { error: "Name required" },
@@ -91,21 +92,21 @@ Subcommands:
 				}
 				await vault.remove(name);
 				if (jsonOut)
-					console.log(JSON.stringify({ command: "secret rm", success: true, data: { name } }));
-				else console.log(pc.green(`Credential "${name}" removed.`));
+					console.log(toSafeJson({ command: "secret rm", success: true, data: { name } }));
+				else console.log(pc.green(`Credential "${scrubForTerminal(name)}" removed.`));
 				break;
 			}
 
 			case "ls": {
 				const entries = await vault.list();
 				if (jsonOut) {
-					console.log(JSON.stringify({ command: "secret ls", success: true, data: entries }));
+					console.log(toSafeJson({ command: "secret ls", success: true, data: entries }));
 				} else if (entries.length === 0) {
 					console.log(pc.dim("No credentials stored."));
 				} else {
 					for (const e of entries) {
 						console.log(
-							`${pc.bold(e.name)}  scope=${JSON.stringify(e.scope)}  rotated=${e.rotatedAt}`,
+							`${pc.bold(scrubForTerminal(e.name))}  scope=${JSON.stringify(e.scope)}  rotated=${e.rotatedAt}`,
 						);
 					}
 				}
@@ -117,7 +118,7 @@ Subcommands:
 				if (!name) {
 					if (jsonOut)
 						console.log(
-							JSON.stringify({
+							toSafeJson({
 								command: "secret get",
 								success: false,
 								data: { error: "Name required" },
@@ -133,11 +134,11 @@ Subcommands:
 				if (jsonOut) {
 					if (result.granted) {
 						process.stdout.write(
-							`${JSON.stringify({ command: "secret get", success: true, data: { name, value: result.value } })}\n`,
+							`${toSafeJson({ command: "secret get", success: true, data: { name, value: result.value } })}\n`,
 						);
 					} else {
 						console.log(
-							JSON.stringify({
+							toSafeJson({
 								command: "secret get",
 								success: false,
 								data: { name, error: result.reason },
@@ -158,7 +159,7 @@ Subcommands:
 				if (!name || !value) {
 					if (jsonOut)
 						console.log(
-							JSON.stringify({
+							toSafeJson({
 								command: "secret rotate",
 								success: false,
 								data: { error: "Name required" },
@@ -169,8 +170,8 @@ Subcommands:
 				}
 				await vault.rotate(name, value);
 				if (jsonOut)
-					console.log(JSON.stringify({ command: "secret rotate", success: true, data: { name } }));
-				else console.log(pc.green(`Credential "${name}" rotated.`));
+					console.log(toSafeJson({ command: "secret rotate", success: true, data: { name } }));
+				else console.log(pc.green(`Credential "${scrubForTerminal(name)}" rotated.`));
 				break;
 			}
 		}

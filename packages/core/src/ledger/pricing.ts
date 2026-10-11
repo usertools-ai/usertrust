@@ -11,6 +11,7 @@
 
 import type {
 	AppliedRates,
+	CacheWrite1h,
 	CostBasis,
 	EndpointClass,
 	RateSource,
@@ -43,6 +44,14 @@ export interface ModelRates {
 	 * and `costFromRates` prices those tokens at `inputPer1k`.
 	 */
 	cacheWritePer1k?: number | undefined;
+	/**
+	 * Rate for 1-HOUR cache-write tokens (Anthropic's `ephemeral_1h` TTL, 2x base
+	 * input), a SUBSET of the cache-write tokens priced by `cacheWritePer1k`, which
+	 * stays the 5-minute rate. Every Anthropic row carries it explicitly. Absent
+	 * means unpublished, not free and not the 5-minute rate: `effectiveCacheWrite1hRate`
+	 * resolves it to the dearer of the 5-minute rate and 2x `inputPer1k`.
+	 */
+	cacheWrite1hPer1k?: number | undefined;
 }
 
 /**
@@ -61,78 +70,195 @@ export interface ModelRates {
  */
 export const PRICING_TABLE: Record<string, ModelRates> = {
 	// ── Anthropic ──
-	// Published multipliers: cache read 0.1x base input, 5-minute cache write
-	// 1.25x. (The 1-hour write is 2x; collapsing per-TTL pricing to the 5m rate
-	// is a documented approximation — operators with 1h-heavy workloads override
-	// via customRates.)
+	// Every row below was re-derived on 2026-10-07 (and the 1-hour write column re-read
+	// raw on 2026-10-08, all 20 models, which is why the table version is 2026-10-08) from Anthropic's published
+	// model-pricing table (platform.claude.com/docs/en/about-claude/pricing),
+	// $/MTok x 10 = usertokens per 1k. Published multipliers: 5-minute cache write
+	// 1.25x base input; cache read 0.1x base input EXCEPT 0.05x on Opus 5.5 and
+	// Sonnet 5.5 and 0.025x on Fable 5.1 and Mythos 5.1 (page footnotes 1 and 2).
+	// (The 1-hour write is 2x; collapsing per-TTL pricing to the 5m rate is a
+	// documented approximation — operators with 1h-heavy workloads override via
+	// customRates.)
+	//
+	// Every id is an EXACT key. There is no prefix matching (#143): `claude-sonnet-5-5`
+	// is a different, separately priced model from `claude-sonnet-5`. A dated
+	// snapshot (`<key>-YYYYMMDD`) resolves to its base key via canonicalModelId.
 	"claude-sonnet-4-6": {
 		inputPer1k: 30,
 		outputPer1k: 150,
 		cacheReadPer1k: 3,
 		cacheWritePer1k: 37.5,
+		cacheWrite1hPer1k: 60,
 	},
-	"claude-haiku-4-5": { inputPer1k: 10, outputPer1k: 50, cacheReadPer1k: 1, cacheWritePer1k: 12.5 },
-	"claude-opus-4-6": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
-	// Retrieved 2026-08-09 from Anthropic's published model-pricing table
-	// (platform.claude.com/docs/en/about-claude/pricing): $10 base input,
-	// $50 output, $1 cache hit, $12.50 5-minute cache write per MTok. The 1-hour
-	// write ($20) collapses to the 5m rate under the same documented
-	// approximation as every other Anthropic row.
+	"claude-sonnet-4-5": {
+		inputPer1k: 30,
+		outputPer1k: 150,
+		cacheReadPer1k: 3,
+		cacheWritePer1k: 37.5,
+		cacheWrite1hPer1k: 60,
+	},
+	// Retired on the first-party API (still served on Bedrock and Google Cloud).
+	"claude-sonnet-4": {
+		inputPer1k: 30,
+		outputPer1k: 150,
+		cacheReadPer1k: 3,
+		cacheWritePer1k: 37.5,
+		cacheWrite1hPer1k: 60,
+	},
+	"claude-haiku-4-5": {
+		inputPer1k: 10,
+		outputPer1k: 50,
+		cacheReadPer1k: 1,
+		cacheWritePer1k: 12.5,
+		cacheWrite1hPer1k: 20,
+	},
+	// Retired on the first-party API. Published id is `claude-3-5-haiku-<date>`.
+	"claude-3-5-haiku": {
+		inputPer1k: 8,
+		outputPer1k: 40,
+		cacheReadPer1k: 0.8,
+		cacheWritePer1k: 10,
+		cacheWrite1hPer1k: 16,
+	},
+	// Haiku 5.5 is priced BY PROMPT LENGTH: $0.10 in / $0.50 out up to 100,000
+	// prompt tokens, $0.50 in / $2.50 out above. A per-model table cannot carry a
+	// per-call tier, so this row holds the OVER-100k tier (5 / 25, cache read 0.5,
+	// 5m write 6.25). That OVERSTATES every prompt of up to 100,000 tokens by 5x —
+	// the fail-safe direction (D1) — and is a documented approximation.
+	"claude-haiku-5-5": {
+		inputPer1k: 5,
+		outputPer1k: 25,
+		cacheReadPer1k: 0.5,
+		cacheWritePer1k: 6.25,
+		cacheWrite1hPer1k: 10,
+	},
+	"claude-opus-4-6": {
+		inputPer1k: 50,
+		outputPer1k: 250,
+		cacheReadPer1k: 5,
+		cacheWritePer1k: 62.5,
+		cacheWrite1hPer1k: 100,
+	},
+	"claude-opus-4-7": {
+		inputPer1k: 50,
+		outputPer1k: 250,
+		cacheReadPer1k: 5,
+		cacheWritePer1k: 62.5,
+		cacheWrite1hPer1k: 100,
+	},
+	"claude-opus-4-5": {
+		inputPer1k: 50,
+		outputPer1k: 250,
+		cacheReadPer1k: 5,
+		cacheWritePer1k: 62.5,
+		cacheWrite1hPer1k: 100,
+	},
+	// Retired on the first-party API: $15 in / $75 out / $1.50 hit / $18.75 write.
+	"claude-opus-4-1": {
+		inputPer1k: 150,
+		outputPer1k: 750,
+		cacheReadPer1k: 15,
+		cacheWritePer1k: 187.5,
+		cacheWrite1hPer1k: 300,
+	},
+	"claude-opus-4": {
+		inputPer1k: 150,
+		outputPer1k: 750,
+		cacheReadPer1k: 15,
+		cacheWritePer1k: 187.5,
+		cacheWrite1hPer1k: 300,
+	},
+	// $10 in / $50 out / $1 hit / $12.50 5m write.
 	"claude-fable-5": {
 		inputPer1k: 100,
 		outputPer1k: 500,
 		cacheReadPer1k: 10,
 		cacheWritePer1k: 125,
+		cacheWrite1hPer1k: 200,
 	},
-	// Retrieved 2026-08-10 from Anthropic's published model-pricing table
-	// (platform.claude.com/docs/en/about-claude/pricing): $5 base input, $25
-	// output, $0.50 cache hit, $6.25 5-minute cache write per MTok. The 1-hour
-	// write ($10) collapses to the 5m rate under the documented approximation.
-	// These are the STANDARD-speed rates; fast mode ($10 in / $50 out) is a
-	// separate speed tier this per-model table does not price.
+	// $10 / $50 / $0.25 hit (0.025x) / $12.50 5m write.
+	"claude-fable-5-1": {
+		inputPer1k: 100,
+		outputPer1k: 500,
+		cacheReadPer1k: 2.5,
+		cacheWritePer1k: 125,
+		cacheWrite1hPer1k: 200,
+	},
+	// Deprecated 2026-06-09 (retirement date "to be announced") but still callable by
+	// Project Glasswing participants, so it needs its own row or it falls to the
+	// fallback. $25 in / $125 out per MTok: https://www.anthropic.com/project/glasswing
+	// ("available to participants of Project Glasswing at $25/$125 per million
+	// input/output tokens"); status: platform.claude.com/docs/en/about-claude/model-deprecations;
+	// both retrieved 2026-10-07. The pricing page has no row for it, so its cache tiers
+	// are the page's published multipliers for models without an exception ("All
+	// other models use the standard 0.1x multiplier"; 5m write 1.25x, 1h write 2x):
+	// read 25, 5m write 312.5.
+	"claude-mythos-preview": {
+		inputPer1k: 250,
+		outputPer1k: 1250,
+		cacheReadPer1k: 25,
+		cacheWritePer1k: 312.5,
+		cacheWrite1hPer1k: 500,
+	},
+	// Limited availability; same rates as Fable 5 / Fable 5.1.
+	"claude-mythos-5": {
+		inputPer1k: 100,
+		outputPer1k: 500,
+		cacheReadPer1k: 10,
+		cacheWritePer1k: 125,
+		cacheWrite1hPer1k: 200,
+	},
+	"claude-mythos-5-1": {
+		inputPer1k: 100,
+		outputPer1k: 500,
+		cacheReadPer1k: 2.5,
+		cacheWritePer1k: 125,
+		cacheWrite1hPer1k: 200,
+	},
+	// $5 in / $25 out / $0.50 hit / $6.25 5m write. These are the STANDARD-speed
+	// rates; fast mode ($10 in / $50 out) is a request `speed` tier this per-model
+	// table does not price.
 	"claude-opus-5": {
 		inputPer1k: 50,
 		outputPer1k: 250,
 		cacheReadPer1k: 5,
 		cacheWritePer1k: 62.5,
+		cacheWrite1hPer1k: 100,
 	},
-	// Retrieved 2026-08-10 from Anthropic's published model-pricing table
-	// (platform.claude.com/docs/en/about-claude/pricing): $3 base input, $15
-	// output, $0.30 cache hit, $3.75 5-minute cache write per MTok — the
-	// STANDARD rate effective 2026-09-01. The $2 in / $10 out introductory
-	// pricing in effect through 2026-08-31 is deliberately NOT entered:
-	// understatement is the dangerous direction, and D1 prefers conservative
-	// overstatement during the promo window. The 1-hour write ($6) collapses
-	// to the 5m rate under the documented approximation.
-	//
-	// THIS ROW HOLDS THE STANDARD RATE, and keeps holding it after the promo
-	// lapses — nothing needs doing on 2026-09-01; the row simply stops differing
-	// from the published card.
-	//
-	// Spelled out because lowering it to a promotional rate does not look like a
-	// mistake while you are making it: read cold against a card showing $2/$10,
-	// this row looks 50% high and reads like a stale entry. It is not. These
-	// rates size the TigerBeetle hold and the settle debit (govern.ts), so a row
-	// that understates does not merely misreport — it lets a capped agent spend
-	// past its cap. Overstatement is the fail-safe direction (D1).
-	// `promo-window-understatement` in tests/ledger/pricing.test.ts fails if this
-	// row is lowered.
+	// $4 in / $20 out / $0.20 hit (0.05x) / $5 5m write. Standard speed; fast mode
+	// ($8 / $40) is not priced here.
+	"claude-opus-5-5": {
+		inputPer1k: 40,
+		outputPer1k: 200,
+		cacheReadPer1k: 2,
+		cacheWritePer1k: 50,
+		cacheWrite1hPer1k: 80,
+	},
+	// $2 in / $10 out / $0.20 hit / $2.50 5m write. Page footnote 3: the $2/$10
+	// introductory price is now the STANDARD price and the scheduled 2026-09-01
+	// increase to $3/$15 will not occur. (This row held $3/$15 from 2026-08-10 to
+	// 2026-10-07 and overstated every Sonnet 5 call by 50%.)
 	"claude-sonnet-5": {
-		inputPer1k: 30,
-		outputPer1k: 150,
-		cacheReadPer1k: 3,
-		cacheWritePer1k: 37.5,
+		inputPer1k: 20,
+		outputPer1k: 100,
+		cacheReadPer1k: 2,
+		cacheWritePer1k: 25,
+		cacheWrite1hPer1k: 40,
 	},
-	// Retrieved 2026-08-10 from Anthropic's published model-pricing table
-	// (platform.claude.com/docs/en/about-claude/pricing): $5 base input, $25
-	// output, $0.50 cache hit, $6.25 5-minute cache write per MTok — identical
-	// to the opus-4-6 row, as published. The 1-hour write ($10) collapses to
-	// the 5m rate under the documented approximation.
+	// $2 in / $10 out / $0.10 hit (0.05x, NOT 0.1x) / $2.50 5m write.
+	"claude-sonnet-5-5": {
+		inputPer1k: 20,
+		outputPer1k: 100,
+		cacheReadPer1k: 1,
+		cacheWritePer1k: 25,
+		cacheWrite1hPer1k: 40,
+	},
 	"claude-opus-4-8": {
 		inputPer1k: 50,
 		outputPer1k: 250,
 		cacheReadPer1k: 5,
 		cacheWritePer1k: 62.5,
+		cacheWrite1hPer1k: 100,
 	},
 
 	// ── OpenAI ──
@@ -147,6 +273,11 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	// gpt-5.6+ entry added here MUST carry an explicit cacheWritePer1k, or its
 	// writes will silently misprice at the (now wrong) inputPer1k fallback.
 	"gpt-4o": { inputPer1k: 25, outputPer1k: 100, cacheReadPer1k: 12.5 },
+	// A dated snapshot priced differently from its alias, so it needs its OWN exact
+	// row (an exact id is looked up before any date is stripped). $5 in / $15 out
+	// per MTok, no cached-input price published (omitted: it prices at inputPer1k,
+	// D1). Source: developers.openai.com/api/docs/pricing, retrieved 2026-10-07.
+	"gpt-4o-2024-05-13": { inputPer1k: 50, outputPer1k: 150 },
 	"gpt-4o-mini": { inputPer1k: 1.5, outputPer1k: 6, cacheReadPer1k: 0.75 },
 	"gpt-5.4": { inputPer1k: 25, outputPer1k: 150, cacheReadPer1k: 2.5 },
 	o3: { inputPer1k: 20, outputPer1k: 80, cacheReadPer1k: 5 },
@@ -184,6 +315,10 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	// quoted in the marketing FAQ is the retired Large 2 rate — do not use it.)
 	// No caching discount published.
 	"mistral-large": { inputPer1k: 5, outputPer1k: 15 },
+	// The published alias that resolves to Mistral Large 3. Exact, not a prefix: an
+	// alias the row above documents pricing must not fall to the fail-dearest
+	// dearest-known fallback now that prefix matching is gone.
+	"mistral-large-latest": { inputPer1k: 5, outputPer1k: 15 },
 
 	// ── DeepSeek ──
 	// No cache pricing resolvable for these alias keys (see task report).
@@ -215,20 +350,64 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
  * Bump on every entry change; recorded on receipts so a metered cost can be
  * reproduced against the exact table that priced it.
  */
-export const PRICING_TABLE_VERSION = "2026-08-10";
-
-/** Pre-sorted entries for prefix matching (longest key first). */
-const SORTED_TABLE = Object.entries(PRICING_TABLE).sort((a, b) => b[0].length - a[0].length);
+export const PRICING_TABLE_VERSION = "2026-10-08";
 
 /**
- * Fallback rate for unknown models (sonnet-class pricing).
+ * Reduce a model id to its base table key. Strips EXACTLY ONE trailing date
+ * suffix, in one of the two forms providers publish a dated snapshot in:
+ * `-YYYYMMDD` (`claude-haiku-4-5-20251001`) or `-YYYY-MM-DD`
+ * (`gpt-4o-2024-08-06`). Nothing else is reduced. This is deliberately NOT prefix
+ * matching: `claude-sonnet-5-5` does not reduce to `claude-sonnet-5`, a
+ * seven-digit or non-numeric suffix is left alone, `-fast` is left alone, and a
+ * Gemini `MM-DD` preview suffix is left alone. Prefix matching priced every
+ * variant at its base row and reported `rateSource: "table"` (#143), which
+ * under-prices whenever the variant is dearer. Other id shapes (Bedrock
+ * `anthropic.…:0`, Vertex `@…`) are not reduced; they resolve to FALLBACK_RATE,
+ * flagged `unknown`.
  *
- * Deliberately two-tier: an unknown model is not known to be Anthropic-shaped,
- * so attaching a cache discount here would silently under-bill every
- * unrecognised model. Leaving both cache fields absent routes cache tokens
- * through the D1 fallback and prices them at inputPer1k instead.
+ * CALLED SECOND, never first: a dated snapshot can cost MORE than its alias
+ * (`gpt-4o-2024-05-13` is $5/$15 against `gpt-4o`'s $2.50/$10), so
+ * `lookupTableRates` tries the exact id before it reduces anything.
  */
-export const FALLBACK_RATE: ModelRates = { inputPer1k: 30, outputPer1k: 150 };
+export function canonicalModelId(model: string): string {
+	return model.replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, "");
+}
+
+/**
+ * Table lookup, in this order: (1) the EXACT id, (2) the id with one date suffix
+ * stripped, then exact. Own keys only. Exact-first is load-bearing: a snapshot
+ * with its own row must never be reduced to its alias's cheaper row.
+ */
+function lookupTableRates(model: string): ModelRates | undefined {
+	for (const key of [model, canonicalModelId(model)]) {
+		if (Object.hasOwn(PRICING_TABLE, key)) {
+			const rates = PRICING_TABLE[key];
+			if (rates) return rates;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Fallback rate for unknown models: the HIGHEST rate the table publishes ("fail
+ * dearest"). An unknown id over-counts visibly (`rateSource: "fallback"`,
+ * `unknown: true`) instead of under-counting silently. input/output are the table
+ * maxima (today claude-mythos-preview, $25 / $125); the cache-write tier is
+ * the dearest effective write rate. The cache-READ
+ * tier is left absent on purpose: D1 prices it at inputPer1k, which is dearer than
+ * any published read rate, and an unknown model is not known to be Anthropic-shaped.
+ * `FALLBACK_RATE equals the table maximum` in tests/ledger/pricing.test.ts computes
+ * the maxima from PRICING_TABLE, so a dearer row added later fails until this moves.
+ */
+export const FALLBACK_RATE: ModelRates = {
+	inputPer1k: 250,
+	outputPer1k: 1250,
+	cacheWritePer1k: 312.5,
+	// Explicit, so a HOLD on an unknown id reserves it: settlement meters 1-hour tokens
+	// at the derived rate, and a hold that derives nothing from silence (table rows with no
+	// 1-hour tier) would be capped below what the settle charged.
+	cacheWrite1hPer1k: 500,
+};
 
 /** Maps provider names to their model key prefixes in PRICING_TABLE. */
 const PROVIDER_MODEL_MAP: Record<string, string[]> = {
@@ -262,31 +441,42 @@ export function modelsForProvider(provider: string): string[] {
 }
 
 /**
- * Look up rates by model string. Falls back to prefix matching,
- * then FALLBACK_RATE for unknown models.
+ * Look up rates by model string: custom rate, exact table key (a dated snapshot
+ * reduces to its base key first), then FALLBACK_RATE — the dearest known rate.
+ * Never a prefix match.
+ *
+ * Pairs with {@link isModelPriced}, which deliberately does NOT canonicalize: the
+ * PRICE canonicalizes a dated snapshot for metering (so a real `-YYYYMMDD` id is
+ * never billed at the fail-dearest fallback), while the CHECK stays exact and
+ * fails closed for enforcement. Pinned together in tests/ledger/pricing.test.ts.
  */
 export function getModelRates(model: string, customRates?: Record<string, ModelRates>): ModelRates {
 	// Object.hasOwn guards both direct lookups against inherited Object.prototype
 	// members: a model string like "constructor"/"__proto__"/"toString" would
 	// otherwise resolve to a Function/object, survive the truthiness check, and
 	// yield NaN cost (NaN then defeats the Math.max(1, ...) floor and poisons the
-	// ledger). Prefix matching below is already own-key-only (SORTED_TABLE).
+	// ledger). The table lookup below is own-key-only as well.
 	if (customRates && Object.hasOwn(customRates, model)) {
 		const custom = customRates[model];
 		if (custom) return custom;
 	}
 
-	if (Object.hasOwn(PRICING_TABLE, model)) {
-		const exact = PRICING_TABLE[model];
-		if (exact) return exact;
-	}
+	return lookupTableRates(model) ?? FALLBACK_RATE;
+}
 
-	// Prefix match — longest key first prevents partial matches
-	for (const [key, rates] of SORTED_TABLE) {
-		if (model.startsWith(key)) return rates;
-	}
-
-	return FALLBACK_RATE;
+/**
+ * True only when `model` has rates of its OWN: a custom rate or an EXACT table entry.
+ * For a caller that must REFUSE what it cannot price exactly (rather than bill it at
+ * a guess). Stricter than {@link getModelRates} on purpose: that lookup reduces a
+ * dated snapshot (`-YYYYMMDD`) to its base row for METERING, whereas this CHECK fails
+ * closed for enforcement. A variant would otherwise be billed at its base's row —
+ * `o3-pro` at `o3`, a `-fast` tier at standard speed, a dated snapshot at whatever
+ * its base costs today — which can UNDER-charge. Such a variant is unpriced here
+ * until the table or the operator names it.
+ */
+export function isModelPriced(model: string, customRates?: Record<string, ModelRates>): boolean {
+	if (customRates && Object.hasOwn(customRates, model) && customRates[model]) return true;
+	return Object.hasOwn(PRICING_TABLE, model) && PRICING_TABLE[model] !== undefined;
 }
 
 /** Models already warned about — unknownModelPolicy "warn" fires once per model per process. */
@@ -303,7 +493,7 @@ export function warnUnknownModel(model: string): void {
 	if (warnedUnknownModels.has(model)) return;
 	warnedUnknownModels.add(model);
 	console.warn(
-		`[usertrust] unknown model "${model}": metering at FALLBACK_RATE (sonnet-class); add it to customRates or set unknownModelPolicy`,
+		`[usertrust] unknown model "${model}": metering at FALLBACK_RATE (the dearest known rate); add it to customRates or set unknownModelPolicy`,
 	);
 }
 
@@ -377,6 +567,191 @@ export function effectiveCacheWriteRate(rates: ModelRates): number {
 }
 
 /**
+ * Resolve the effective 1-HOUR cache-write rate, the one site that decides it.
+ * An explicit finite rate >= 0 is honoured; an absent (or garbage) one resolves to
+ * the DEARER of the 5-minute write rate and 2x `inputPer1k` (Anthropic's published
+ * 1-hour multiple). Never the 5-minute rate alone: a custom row written before this
+ * field existed would otherwise bill 1-hour writes at 1.25x and understate them.
+ */
+export function effectiveCacheWrite1hRate(rates: ModelRates): number {
+	const r = rates.cacheWrite1hPer1k;
+	if (r !== undefined && Number.isFinite(r) && r >= 0) return r;
+	return Math.max(effectiveCacheWriteRate(rates), 2 * rates.inputPer1k);
+}
+
+/**
+ * A reported 1-hour share, or 0 when these rates have no 1-hour tier
+ * (`supportsCacheWrite1h`). For the callers that price a running total outside a
+ * settle (the anomaly detector's spend velocity) and so cannot use a snapshot.
+ */
+export function supported1hTokens(
+	rates: ModelRates,
+	operatorOwned: boolean,
+	cacheWrite1hTokens: number,
+): number {
+	return supportsCacheWrite1h(rates, operatorOwned) ? cacheWrite1hTokens : 0;
+}
+
+/**
+ * The 1-hour write rate a HOLD may reserve. A row that publishes one reserves it. A row
+ * that does not reserves nothing if it is a built-in TABLE row, and the DERIVED rate if
+ * it is operator-owned (`operatorOwned`: a customRates row, a local rate, the fallback):
+ * settlement meters 1-hour tokens on such a row at `effectiveCacheWrite1hRate`, so a
+ * hold that reserved less would be capped below what the settle charged. Silence in a
+ * TABLE row is a model with no 1-hour tier (Mistral, Gemini, OpenAI) and derives nothing,
+ * so those hold exactly as before.
+ */
+function hold1hWriteRate(rates: ModelRates, operatorOwned: boolean): number {
+	return supportsCacheWrite1h(rates, operatorOwned) ? effectiveCacheWrite1hRate(rates) : 0;
+}
+
+/**
+ * Whether these rates HAVE a 1-hour cache-write tier: the row publishes an explicit rate,
+ * or the rates are operator-owned (`operatorOwned`: not a built-in table row), where the
+ * operator may be pricing an Anthropic-shaped model and a silent row means "derive it".
+ * A built-in TABLE row with no explicit 1-hour rate (Mistral, Gemini, OpenAI, ...) is a
+ * model with NO such tier. This ONE predicate decides both halves: a hold reserves the
+ * 1-hour rate only when it is true, and settlement counts a reported 1-hour share only
+ * when it is true (`withSupported1hTier`), so the two can never disagree. A share reported
+ * for a model without the tier is ignored, not priced at an invented 2x input.
+ */
+export function supportsCacheWrite1h(rates: ModelRates, operatorOwned: boolean): boolean {
+	const r = rates.cacheWrite1hPer1k;
+	return (r !== undefined && Number.isFinite(r) && r >= 0) || operatorOwned;
+}
+
+/**
+ * The per-1k rate a HOLD reserves the input leg at. A hold cannot know which of its
+ * input tokens will be written to cache, nor for how long, so the input leg is held
+ * at the dearest of: fresh input, the 5-minute write, and (when `include1hWrite`) the
+ * 1-hour write (spec D3, extended to the 1-hour tier; see `hold1hWriteRate` for which
+ * rows have one). Reserving less lets the capped settle post `min(actual, held)` and
+ * silently under-debit a call that wrote a 1-hour cache. Both hold-sizing sites call
+ * this; do not re-derive the max anywhere else. `operatorOwned` is true when the rates are
+ * not a built-in table row (`rateSource !== "table"`).
+ */
+export function holdInputRate(
+	rates: ModelRates,
+	include1hWrite = true,
+	operatorOwned = false,
+): number {
+	return Math.max(
+		rates.inputPer1k,
+		effectiveCacheWriteRate(rates),
+		include1hWrite ? hold1hWriteRate(rates, operatorOwned) : 0,
+	);
+}
+
+/**
+ * The cache-WRITE rate a hold with a STATED write estimate reserves those tokens at:
+ * the dearer of the 5-minute and the 1-hour rate `hold1hWriteRate` allows, because a
+ * caller that cannot say which TTL its writes will use (a headless authorize, before the
+ * call) must be held at the worst case or a 1-hour write settles above its hold and is
+ * capped.
+ */
+export function holdCacheWriteRate(rates: ModelRates, operatorOwned = false): number {
+	return Math.max(effectiveCacheWriteRate(rates), hold1hWriteRate(rates, operatorOwned));
+}
+
+/**
+ * A request serialized ONCE: `body` is the plain-data parse of the exact JSON text that was
+ * scanned, and `declares1h` is the verdict on that same text. The caller sends `body`, so
+ * the bytes checked and the bytes sent are one object: a stateful getter or `toJSON` that
+ * answers 5-minute to a scan and 1-hour to the SDK has nothing left to flip, because the
+ * SDK never sees the original.
+ */
+export interface SerializedRequest {
+	readonly body: Record<string, unknown>;
+	readonly declares1h: boolean;
+}
+
+/**
+ * Serialize a request once, the way the provider SDKs do (`JSON.stringify`), and scan the
+ * result. Returns `null` when the request cannot be serialized to a JSON object (a cycle, a
+ * BigInt, a throwing getter or `toJSON`, a text too long to build): the caller must then
+ * fail dearest. This replaced a property walk that had to enumerate every way
+ * `JSON.stringify` reads a value (accessors, `toJSON` on objects, arrays and built-ins,
+ * inherited array entries, ...) and found a new one each review round.
+ */
+export function serializeRequest(request: unknown): SerializedRequest | null {
+	let body: unknown;
+	try {
+		const text = JSON.stringify(request);
+		if (typeof text !== "string") return null;
+		body = JSON.parse(text);
+	} catch {
+		return null;
+	}
+	if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+	return { body: body as Record<string, unknown>, declares1h: dataDeclares1h(body) };
+}
+
+/** A `cache_control` object with `ttl: "1h"` anywhere in plain JSON data. Iterative and bounded. */
+function dataDeclares1h(root: unknown): boolean {
+	const MAX_NODES = 200_000;
+	const stack: unknown[] = [root];
+	let nodes = 0;
+	while (stack.length > 0) {
+		const value = stack.pop();
+		if (value === null || typeof value !== "object") continue;
+		if (++nodes > MAX_NODES) return true;
+		if (Array.isArray(value)) {
+			for (const item of value) stack.push(item);
+			continue;
+		}
+		const record = value as Record<string, unknown>;
+		const control = record.cache_control;
+		if (control !== null && typeof control === "object") {
+			if ((control as Record<string, unknown>).ttl === "1h") return true;
+		}
+		for (const key of Object.keys(record)) stack.push(record[key]);
+	}
+	return false;
+}
+
+/**
+ * True when an Anthropic-shaped REQUEST can produce 1-hour cache writes: some object
+ * in it carries `cache_control` with `ttl: "1h"` (a content block, a system block,
+ * a tool, or the top-level automatic-caching field). A request with no such marker
+ * can only write 5-minute cache, so its hold needs no 1-hour reserve. The hold
+ * covers the worst case THIS request can produce, not the worst case any request can.
+ *
+ * Decided on the request's JSON serialization (`serializeRequest`). Fails dearest: a
+ * request that cannot be serialized answers `true`, never `false`. A caller that SENDS the
+ * request must send `serializeRequest(...).body`, not the original, or this verdict
+ * describes bytes other than the ones that leave.
+ */
+export function requestDeclares1hCache(request: unknown): boolean {
+	return serializeRequest(request)?.declares1h ?? true;
+}
+
+/**
+ * The 1-hour cache-write record for a RECEIPT, or undefined when the call wrote none.
+ * A ROOT field (`receipt.cacheWrite1h`), never inside `usage` or `pricing.appliedRates`:
+ * the v2 schema closes both, so a field added there would make every v2 validator
+ * reject every receipt we emit. `tokens` is the 1-hour SUBSET of `usage.cacheWriteTokens`
+ * (clamped to it); an auditor prices `cacheWriteTokens - tokens` at the 5-minute rate
+ * and `tokens` at `ratePer1k`. FROZEN, like `resolveAppliedRates`: one snapshot reaches
+ * several record surfaces.
+ */
+export function resolveCacheWrite1h(
+	rates: ModelRates,
+	cacheWrite1hTokens: number,
+	cacheWriteTokens: number,
+): CacheWrite1h | undefined {
+	const tokens = clampWrite1h(cacheWrite1hTokens, cacheWriteTokens);
+	if (tokens === 0) return undefined;
+	return Object.freeze({ tokens, ratePer1k: effectiveCacheWrite1hRate(rates) });
+}
+
+/** The 1-hour subset of a write count: finite, integer-safe, within [0, total]. */
+function clampWrite1h(write1h: number, write: number): number {
+	const w = Number.isFinite(write) && write > 0 ? write : 0;
+	const h = Number.isFinite(write1h) && write1h > 0 ? write1h : 0;
+	return Math.min(h, w);
+}
+
+/**
  * The four RESOLVED per-1k rates a settle is metered with — the record-surface
  * half of the D1 invariant, and what `receipt.pricing.appliedRates` publishes.
  *
@@ -444,6 +819,7 @@ function tieredCostRaw(
 	outputTokens: number,
 	cacheReadTokens: number,
 	cacheWriteTokens: number,
+	cacheWrite1hTokens: number,
 ): number {
 	const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
 	const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
@@ -466,10 +842,20 @@ function tieredCostRaw(
 	const outputCost = (outTok * rates.outputPer1k) / 1000;
 	const cacheReadCost =
 		(cacheReadTok * effectiveCacheRate(rates.cacheReadPer1k, rates.inputPer1k)) / 1000;
-	const cacheWriteCost =
-		(cacheWriteTok * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k)) / 1000;
+	// The 1-hour tokens are a SUBSET of cacheWriteTok (clamped to it), so the 5-minute
+	// term is the remainder and nothing is counted twice.
+	const write1hTok = clampWrite1h(cacheWrite1hTokens, cacheWriteTok);
+	// Each term multiplies THEN divides on its own, and the terms sum in the documented
+	// order (input, output, read, 5-minute write, 1-hour write): `ceil(sum(counts x rates /
+	// 1000))` is what an auditor recomputes, and summing two numerators before dividing
+	// rounds differently at the boundary (e.g. 607 / 1062 / 2800 / 2367 / 2059 on Sonnet
+	// lands a whole usertoken away from the per-term sum).
+	const cacheWrite5mCost =
+		((cacheWriteTok - write1hTok) * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k)) /
+		1000;
+	const cacheWrite1hCost = (write1hTok * effectiveCacheWrite1hRate(rates)) / 1000;
 
-	return inputCost + outputCost + cacheReadCost + cacheWriteCost;
+	return inputCost + outputCost + cacheReadCost + cacheWrite5mCost + cacheWrite1hCost;
 }
 
 /**
@@ -494,10 +880,20 @@ export function costFromRates(
 	outputTokens: number,
 	cacheReadTokens = 0,
 	cacheWriteTokens = 0,
+	cacheWrite1hTokens = 0,
 ): number {
 	return Math.max(
 		1,
-		Math.ceil(tieredCostRaw(rates, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens)),
+		Math.ceil(
+			tieredCostRaw(
+				rates,
+				inputTokens,
+				outputTokens,
+				cacheReadTokens,
+				cacheWriteTokens,
+				cacheWrite1hTokens,
+			),
+		),
 	);
 }
 
@@ -519,8 +915,16 @@ export function costFromRatesUnfloored(
 	outputTokens: number,
 	cacheReadTokens = 0,
 	cacheWriteTokens = 0,
+	cacheWrite1hTokens = 0,
 ): number {
-	return tieredCostRaw(rates, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
+	return tieredCostRaw(
+		rates,
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+		cacheWrite1hTokens,
+	);
 }
 
 /**
@@ -580,7 +984,7 @@ export interface RateResolution {
 	scope: EndpointClass;
 	costBasis: CostBasis;
 	rateSource: RateSource;
-	/** true when cloud scope missed table+custom+prefix and fell back. */
+	/** true when cloud scope missed custom+table and fell back. */
 	unknown: boolean;
 }
 
@@ -630,17 +1034,15 @@ export function resolveRates(
 		}
 	}
 
-	if (Object.hasOwn(PRICING_TABLE, model)) {
-		const exact = PRICING_TABLE[model];
-		if (exact) {
-			return { rates: exact, scope, costBasis: "usd-proxy", rateSource: "table", unknown: false };
-		}
-	}
-
-	for (const [key, rates] of SORTED_TABLE) {
-		if (model.startsWith(key)) {
-			return { rates, scope, costBasis: "usd-proxy", rateSource: "table", unknown: false };
-		}
+	const tableRates = lookupTableRates(model);
+	if (tableRates) {
+		return {
+			rates: tableRates,
+			scope,
+			costBasis: "usd-proxy",
+			rateSource: "table",
+			unknown: false,
+		};
 	}
 
 	return {

@@ -1338,6 +1338,112 @@ describe("cache tiers survive the MessageStream accumulator", () => {
 		await governed.destroy();
 	});
 
+	/** Sonnet 4.6 1-hour write rate: 60/1k (2x input), against 37.5 for the 5-minute write. */
+	const ONE_HOUR_EVENTS = CACHE_EVENTS.map((e) =>
+		e.type === "message_start"
+			? {
+					...e,
+					message: {
+						usage: {
+							...(e.message as { usage: Record<string, unknown> }).usage,
+							cache_creation: {
+								ephemeral_5m_input_tokens: 600,
+								ephemeral_1h_input_tokens: 400,
+							},
+						},
+					},
+				}
+			: e,
+	);
+
+	async function settleStream(events: unknown[], final: Record<string, unknown>) {
+		const governed = await trust(
+			{
+				messages: {
+					create: vi.fn(),
+					stream: vi.fn(() => new FakeMessageStream({ events, final })),
+				},
+			},
+			{
+				dryRun: false,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+				_engine: makeMockEngine(),
+				_audit: makeMockAudit(),
+			},
+		);
+		const open = (governed.messages as unknown as { stream: (p: unknown) => Promise<unknown> })
+			.stream;
+		const stream = (await open(STREAM_PARAMS)) as FakeMessageStream & {
+			receipt: Promise<TrustReceipt>;
+		};
+		const receipt = await stream.receipt;
+		await governed.destroy();
+		return receipt;
+	}
+
+	it("prices the 1-hour share from the streamEvent tap alone", async () => {
+		// 3 + 30 + 9,000 x 3 / 1000 (27) + 600 x 37.5 / 1000 (22.5) + 400 x 60 / 1000 (24)
+		// = 106.5 -> 107. Pre-fix the whole 1,000 priced at 37.5: 97.5 -> 98.
+		const receipt = await settleStream(ONE_HOUR_EVENTS, {
+			id: "msg_h1",
+			usage: { input_tokens: 100, output_tokens: 200 },
+		});
+		expect(receipt.cost).toBe(107);
+		expect(receipt.cacheWrite1h).toEqual({ tokens: 400, ratePer1k: 60 });
+		expect(receipt.usage?.cacheWriteTokens).toBe(1_000);
+	});
+
+	it("a finalMessage with only the flat write total keeps the 1-hour share the tap accumulated", async () => {
+		// The final payload says nothing about the TTL split, so it must not answer "0 hour"
+		// and overwrite the 400 the streamEvent tap read: 107, not 98.
+		const receipt = await settleStream(ONE_HOUR_EVENTS, {
+			id: "msg_h3",
+			usage: {
+				input_tokens: 100,
+				output_tokens: 200,
+				cache_read_input_tokens: 9_000,
+				cache_creation_input_tokens: 1_000,
+			},
+		});
+		expect(receipt.cost).toBe(107);
+		expect(receipt.cacheWrite1h).toEqual({ tokens: 400, ratePer1k: 60 });
+	});
+
+	it("a final breakdown that carries only the 5-minute field also leaves the tap's share alone", async () => {
+		const receipt = await settleStream(ONE_HOUR_EVENTS, {
+			id: "msg_h4",
+			usage: {
+				input_tokens: 100,
+				output_tokens: 200,
+				cache_creation_input_tokens: 1_000,
+				cache_creation: { ephemeral_5m_input_tokens: 600 },
+			},
+		});
+		expect(receipt.cacheWrite1h).toEqual({ tokens: 400, ratePer1k: 60 });
+		// ...and the flat total (1,000) survives the partial breakdown (600): the cost is the
+		// same 107 as the tap-only case, not the 98 a dropped 400 would give.
+		expect(receipt.usage?.cacheWriteTokens).toBe(1_000);
+		expect(receipt.cost).toBe(107);
+	});
+
+	it("prefers the finalMessage's 1-hour share over the accumulated one", async () => {
+		// finalMessage is the authoritative total: 200 x 37.5 / 1000 (7.5) + 800 x 60 / 1000 (48);
+		// 3 + 30 + 27 + 7.5 + 48 = 115.5 -> 116.
+		const receipt = await settleStream(ONE_HOUR_EVENTS, {
+			id: "msg_h2",
+			usage: {
+				input_tokens: 100,
+				output_tokens: 200,
+				cache_read_input_tokens: 9_000,
+				cache_creation_input_tokens: 1_000,
+				cache_creation: { ephemeral_5m_input_tokens: 200, ephemeral_1h_input_tokens: 800 },
+			},
+		});
+		expect(receipt.cost).toBe(116);
+		expect(receipt.cacheWrite1h).toEqual({ tokens: 800, ratePer1k: 60 });
+	});
+
 	it("prefers the finalMessage cache counters over the accumulated ones", async () => {
 		// finalMessage is the authoritative total: 12000 read, 0 write.
 		// 3 + 30 + (12000/1000)*3 = 69.

@@ -6,6 +6,7 @@
 		{ "path": "packages/monte-cristo" },
 		{ "path": "packages/server" },
 		{ "path": "packages/acs-adapter" },
+		{ "path": "packages/openshell" },
 		{ "path": "packages/ui" }
 	]
 }

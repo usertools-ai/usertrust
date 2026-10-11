@@ -51,54 +51,91 @@ export const CACHE_WRITE_5M_MULT = 1.25;
 export const CACHE_WRITE_1H_MULT = 2;
 
 /**
- * Cache hits (reads) bill at 0.1x base input.
+ * Cache hits (reads) bill at 0.1x base input — the default; four models publish a
+ * lower multiplier, see CACHE_READ_MULT_BY_MODEL.
  * Source: https://platform.claude.com/docs/en/about-claude/pricing
  * ("Prompt caching pricing", retrieved 2026-08-10).
  */
 export const CACHE_READ_MULT = 0.1;
 
 /**
- * Published base-input / output $/MTok per model — the SAME page Task 1 cited
- * for the kernel's PRICING_TABLE rows, so the two bases share one source.
+ * Published base-input / output $/MTok per model — the SAME page the kernel's
+ * PRICING_TABLE rows cite, so the two bases share one source.
  * Source: https://platform.claude.com/docs/en/about-claude/pricing
- * (model-pricing table, retrieved 2026-08-10). claude-sonnet-5 is entered at
- * the published rate for the published window: the $2/$10 INTRODUCTORY rate,
- * in effect through 2026-08-31 (standard $3/$15 after). The kernel's
- * PRICING_TABLE deliberately keeps the standard rate (Task 1 / D1), so that
- * drift is residual cause #2 — real only because the two bases differ here.
- * LEDGERED: the September republish must flip this row to standard $3/$15;
- * the occurrence-date-aware fix is an accepted spec residual.
+ * (model-pricing table, retrieved 2026-10-07). claude-sonnet-5 is $2/$10: the
+ * page (footnote 3) says the introductory price is now the standard price and
+ * the announced 2026-09-01 increase to $3/$15 will not occur, so the kernel and
+ * this table agree on it. claude-haiku-5-5 is priced by prompt length ($0.10/$0.50
+ * up to 100k tokens, $0.50/$2.50 above); the kernel row holds the over-100k tier,
+ * so that is the tier entered here, and the two bases agree on it.
  */
 export const LIST_USD_PER_MTOK: Record<string, { input: number; output: number }> = {
-	"claude-sonnet-4-6": { input: 3, output: 15 },
-	"claude-haiku-4-5": { input: 1, output: 5 },
-	"claude-opus-4-6": { input: 5, output: 25 },
+	"claude-fable-5-1": { input: 10, output: 50 },
 	"claude-fable-5": { input: 10, output: 50 },
+	"claude-mythos-5-1": { input: 10, output: 50 },
+	// Deprecated but callable; $25 / $125 for Project Glasswing participants
+	// (anthropic.com/project/glasswing, retrieved 2026-10-07). Cache tiers follow the
+	// pricing page's multipliers for models without an exception: read 0.1x (the default
+	// here), 5m write 1.25x.
+	"claude-mythos-preview": { input: 25, output: 125 },
+	"claude-mythos-5": { input: 10, output: 50 },
+	"claude-opus-5-5": { input: 4, output: 20 },
 	"claude-opus-5": { input: 5, output: 25 },
-	"claude-sonnet-5": { input: 2, output: 10 },
 	"claude-opus-4-8": { input: 5, output: 25 },
+	"claude-opus-4-7": { input: 5, output: 25 },
+	"claude-opus-4-6": { input: 5, output: 25 },
+	"claude-opus-4-5": { input: 5, output: 25 },
+	"claude-opus-4-1": { input: 15, output: 75 },
+	"claude-opus-4": { input: 15, output: 75 },
+	"claude-sonnet-5-5": { input: 2, output: 10 },
+	"claude-sonnet-5": { input: 2, output: 10 },
+	"claude-sonnet-4-6": { input: 3, output: 15 },
+	"claude-sonnet-4-5": { input: 3, output: 15 },
+	"claude-sonnet-4": { input: 3, output: 15 },
+	"claude-haiku-5-5": { input: 0.5, output: 2.5 },
+	"claude-haiku-4-5": { input: 1, output: 5 },
+	"claude-3-5-haiku": { input: 0.8, output: 4 },
 };
 
-/** Longest-first for prefix matching, mirroring pricing.ts's SORTED_TABLE. */
-const SORTED_LIST_KEYS = Object.keys(LIST_USD_PER_MTOK).sort((a, b) => b.length - a.length);
+/** The table key a model id resolves to (exact, then one date suffix stripped), or undefined. */
+function listKeyFor(model: string): string | undefined {
+	for (const key of [model, model.replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, "")]) {
+		if (Object.hasOwn(LIST_USD_PER_MTOK, key) && LIST_USD_PER_MTOK[key]) return key;
+	}
+	return undefined;
+}
+
+/**
+ * Published cache-read multipliers that differ from the 0.1x default
+ * (platform.claude.com/docs/en/about-claude/pricing, footnotes 1 and 2, retrieved
+ * 2026-10-07): 0.05x on Opus 5.5 / Sonnet 5.5, 0.025x on Fable 5.1 / Mythos 5.1.
+ * A flat 0.1x overstates those models' cache reads 2x / 4x in the list-price block.
+ */
+const CACHE_READ_MULT_BY_MODEL: Record<string, number> = {
+	"claude-opus-5-5": 0.05,
+	"claude-sonnet-5-5": 0.05,
+	"claude-fable-5-1": 0.025,
+	"claude-mythos-5-1": 0.025,
+};
+
+/** Cache-read multiplier of a model's list price: its published override, else {@link CACHE_READ_MULT}. */
+export function cacheReadMultFor(model: string): number {
+	const key = listKeyFor(model);
+	return (key !== undefined ? CACHE_READ_MULT_BY_MODEL[key] : undefined) ?? CACHE_READ_MULT;
+}
 
 /**
  * Resolve a model's published list rates the way `getModelRates` resolves
- * kernel rates (exact key, then longest prefix) — but THROW where the kernel
- * would fall back. A silent sonnet-class guess in the reconciliation block
- * would be exactly the unlabeled-basis mixing spec §6 forbids.
+ * kernel rates — an exact key, then (exact-first) the key after stripping exactly
+ * ONE trailing `-YYYYMMDD` / `-YYYY-MM-DD` dated-snapshot suffix, and NEVER a prefix match (`claude-opus-5-5` is not
+ * `claude-opus-5`) — but THROW where the kernel would fall back. A silent
+ * guess in the reconciliation block would be exactly the unlabeled-basis
+ * mixing spec §6 forbids.
  */
 export function listRatesForModel(model: string): { input: number; output: number } {
-	if (Object.hasOwn(LIST_USD_PER_MTOK, model)) {
-		const exact = LIST_USD_PER_MTOK[model];
-		if (exact) return exact;
-	}
-	for (const key of SORTED_LIST_KEYS) {
-		if (model.startsWith(key)) {
-			const rates = LIST_USD_PER_MTOK[key];
-			if (rates) return rates;
-		}
-	}
+	const key = listKeyFor(model);
+	const rates = key === undefined ? undefined : LIST_USD_PER_MTOK[key];
+	if (rates) return rates;
 	throw new Error(
 		`fleet rollup: no published list rate for model "${model}" — add its $/MTok row ` +
 			`(with a source-URL comment) to LIST_USD_PER_MTOK before rolling up`,
@@ -304,7 +341,7 @@ function listPriceUsdFor(line: FleetStoreLine): number {
 	return (
 		(usage.inputTokens * rates.input +
 			usage.outputTokens * rates.output +
-			usage.cacheReadTokens * rates.input * CACHE_READ_MULT +
+			usage.cacheReadTokens * rates.input * cacheReadMultFor(line.receipt.model) +
 			tiers.m5 * rates.input * CACHE_WRITE_5M_MULT +
 			tiers.h1 * rates.input * CACHE_WRITE_1H_MULT) /
 		1e6

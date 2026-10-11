@@ -5,6 +5,7 @@ export type ServerEvent =
 	| { type: "authorized"; transferId: string; model: string; estimatedCost: number; at: string }
 	| { type: "settled"; transferId: string; cost: number; budgetRemaining: number; at: string }
 	| { type: "aborted"; transferId: string; reason: string; at: string }
+	| { type: "released"; transferId: string; reason: string; at: string }
 	| { type: "denied"; error: string; reason: string; shadow: boolean; at: string }
 	| { type: "pending_expired"; transferId: string; at: string };
 

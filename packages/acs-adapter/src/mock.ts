@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import type { TrustReceipt } from "usertrust";
 import { InsufficientBalanceError } from "usertrust";
 import type {
+	AbortOutcome,
 	Authorization,
 	AuthorizeParams,
 	EnvelopeStatus,
 	Governor,
+	ReleaseOutcome,
 	SettleParams,
 } from "usertrust/headless";
 import type { PolicyDecider } from "./composite.js";
@@ -66,10 +68,18 @@ export function createMockGovernor(opts: { budget?: number } = {}): { governor: 
 				timestamp: new Date().toISOString(),
 			};
 		},
-		async abort(auth: Authorization): Promise<void> {
-			if (holds.delete(auth.transferId)) {
-				budget += auth.estimatedCost;
-			}
+		async abort(auth: Authorization): Promise<AbortOutcome> {
+			if (!holds.delete(auth.transferId)) return { aborted: false };
+			budget += auth.estimatedCost;
+			return { aborted: true };
+		},
+		// The mock has no breaker and no chain, so a release returns the hold exactly as an
+		// abort does; the difference between the two lives in the real governor. Each says
+		// whether it ended the hold, as the real one does.
+		async release(auth: Authorization): Promise<ReleaseOutcome> {
+			if (!holds.delete(auth.transferId)) return { released: false };
+			budget += auth.estimatedCost;
+			return { released: true };
 		},
 		async destroy(): Promise<void> {
 			for (const auth of holds.values()) {

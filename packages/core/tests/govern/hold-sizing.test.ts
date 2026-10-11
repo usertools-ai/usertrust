@@ -237,7 +237,7 @@ describe("headless authorize() hold sizing (spec D3)", () => {
 		await governor.destroy();
 	});
 
-	it("write-premium guard: claude-sonnet-4-6 holds 1.25x fatter on the input half", async () => {
+	it("write-premium guard: claude-sonnet-4-6 holds 2x fatter on the input half (the 1-hour write)", async () => {
 		const governor = await createGovernor({ budget: 1_000_000, vaultBase: tmpVault, dryRun: true });
 		const rates = getModelRates("claude-sonnet-4-6");
 		expect(rates.inputPer1k).toBe(30);
@@ -250,10 +250,14 @@ describe("headless authorize() hold sizing (spec D3)", () => {
 		});
 
 		const preFixHold = costFromRates(rates, 1000, 500);
-		const holdRate = Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates));
-		const expectedHold = costFromRates({ ...rates, inputPer1k: holdRate }, 1000, 500);
+		// A headless authorize cannot see the request's TTLs: the input leg is held at the
+		// dearest write rate, the 1-hour 60/1k (2x input), written out by hand here.
+		const expectedHold = costFromRates({ ...rates, inputPer1k: 60 }, 1000, 500);
 
 		expect(auth.estimatedCost).toBe(expectedHold);
+		expect(auth.estimatedCost).toBeGreaterThan(
+			costFromRates({ ...rates, inputPer1k: 37.5 }, 1000, 500),
+		);
 		expect(auth.estimatedCost).toBeGreaterThan(preFixHold);
 
 		await governor.destroy();
@@ -479,8 +483,9 @@ describe("estimated-settle never charges the write-premium-inflated hold (review
 			maxOutputTokens: 1,
 		});
 
-		// The hold IS the write-premium-inflated number (D3, unaffected by this fix).
-		const holdRate = Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates));
+		// The hold IS the write-premium-inflated number (D3, unaffected by this fix): the
+		// input leg at the 1-hour write rate, 60/1k on Sonnet.
+		const holdRate = Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates), 60);
 		const expectedHold = costFromRates({ ...rates, inputPer1k: holdRate }, 10_000, 1);
 		expect(auth.estimatedCost).toBe(expectedHold);
 

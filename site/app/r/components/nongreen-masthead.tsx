@@ -8,10 +8,12 @@ import type { ReactNode } from "react";
  *
  * Three registers, none of them the green ladder's `--color-ut`:
  *   - `neutral` — pending/terminal-without-a-receipt states that are not
- *     alarms (§7: "Neutral register, no red, no green" / "not danger");
+ *     alarms (§7: "Neutral register, no red, no green" / "not danger"), and
+ *     the 404: since receipt-spec v0.10 §15.13 an ID can be cited before its
+ *     receipt exists, so "no receipt under this ID yet" is never an alarm;
  *   - `warning` — the operational 503 (§10.4's "operational condition, not
  *     a cryptographic mismatch");
- *   - `danger` — the loud failures (404/409) and `billedUnfinalized`, which
+ *   - `danger` — the loud failure (409) and `billedUnfinalized`, which
  *     is danger-registered but explicitly WITHOUT 409's full diagnostic
  *     treatment (§7: "Danger register without the integrity-failure
  *     treatment").
@@ -40,7 +42,7 @@ export default function NonGreenMasthead({
 	return (
 		<header className="flex flex-col gap-4" data-register={register}>
 			<h1
-				className={`font-display text-3xl leading-tight uppercase tracking-[0.06em] sm:text-5xl ${REGISTER_INK[register]}`}
+				className={`font-display text-3xl leading-tight font-medium tracking-[-0.02em] sm:text-5xl ${REGISTER_INK[register]}`}
 			>
 				{word}
 			</h1>

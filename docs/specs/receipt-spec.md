@@ -1,10 +1,10 @@
-# Receipt Spec + ID Format — DRAFT v0.9.5 (usertrust drafts, stealth reviews)
+# Receipt Spec + ID Format — DRAFT v0.10 (usertrust drafts, the operator reviews)
 
-Status: **DRAFT v0.9.5** — the version-history block below is the authority;
+Status: **DRAFT v0.10** — the version-history block below is the authority;
 v0.9.2–v0.9.4 amendments were recorded inline before this bump, so the jump
 from the long-standing v0.6 title is history catching up, not versions
 skipped. The v0.6-era narrative that follows stands as history:
-**(post fresh-eyes round) — the stealth v0.3 review's
+**(post fresh-eyes round) — the operator's v0.3 review's
 rulings applied to the v0.5 text (the handoff's "v0.4 actions", executed
 post-v0.5), then the 2026-08-10 fresh-eyes review's rulings (6 Blocking /
 12 Important / 12 Minor), then **Codex round-4's REVISE rulings (7 P1 /
@@ -12,21 +12,179 @@ post-v0.5), then the 2026-08-10 fresh-eyes review's rulings (6 Blocking /
 the `work`-mirror equality, `posted === assessed`, the hash-pinned
 companion adoption, the per-kind transplant rule, and a representable key
 rotation model — all applied in place at the interface owner's direction;
-version deliberately held at v0.6. B1 RESOLVED by Cam's
+version deliberately held at v0.6. B1 RESOLVED by
 ratification (2026-08-10): ut1 binds to the PROXY's formats — this REVERSES
 v0.5's §4a headline (ut-chain profile), which was flagged for exactly this
 veto. B2 resolved by adopting the resolver spec's reserve→finalize lifecycle
 as normative (§6), which retires §6a's mint-first ID derivation and demotes
 §3 to a registry rule. H1 (EC2 custody), H2 (breakdown in the unsigned
 envelope), and the §9-A confirmations are folded. Codex round-4 runs on this
-text; the resolver spec (#811) updates AFTER this lands so it churns once.**
+text; the resolver spec updates AFTER this lands so it churns once.**
 
 **ERRATA (2026-08-11, transcription-surfaced, editorial only — no semantic
 movement, no verdict round):** §10.15's binding path corrected to
 `terminalEvent.event.hash`; §10.14's anchored trigger phrased as jointly
 cumulative; §10.1's binding-qualifier list completed with the
-`billedUnfinalized` exception. Surfaced by the resolver transcription gate
-(stealth PR #823), which adopted the correct readings from §4/§7.
+`billedUnfinalized` exception. Surfaced by the resolver transcription gate,
+which adopted the correct readings from §4/§7.
+
+**v0.10 (2026-10-05): CLUSTER receipts (§15) are the ONLY kind issued. The
+session kind is RESERVED — defined, never issued. §6a is re-pinned.**
+
+**The ruling.** The interface owner ruled on 2026-10-05:
+
+- a receipt covers every charge to ONE funded ledger account (one agent key)
+  over a SYSTEM-DEFINED window: from first activity until the account has been
+  idle for its idle threshold, judged on the ledger's own timestamps;
+- the idle threshold is 10 minutes by default, adjustable per agent within
+  60 s to 24 h, and every receipt signs it. In v0.10 it is set before an
+  account's first hold and is immutable after it;
+- nobody reserves anything, and nobody chooses a boundary;
+- the receipt ID is deterministic from the account and the window start;
+- each receipt names the account's previous minted receipt, and discloses
+  every window skipped since it;
+- `repoId` is optional for this kind.
+
+**As built, and frozen here (§15):**
+
+- the members are the account's DEBIT HOLDS. A window runs from its first hold
+  to its ACTIVITY END, the latest hold, post or void timestamp in it;
+- a window CLOSES on the LEDGER's clock: every hold resolved, and the ledger's
+  latest timestamp at least one threshold past the activity end. No minter
+  clock decides it, and v1 has no heartbeat;
+- the amount and `transferSetRoot` are the POSTED holds, as §6a pairs.
+  `windowTransfersRoot` commits EVERY transfer of the account in the window;
+- `account` is a KEYED public handle, never a ledger ID;
+- a closed window that cannot be minted is REFUSED with one of 23 closed
+  reasons, and the account's next receipt discloses it.
+
+**Why that still meets the rule it replaces.** The retired rule was "reserve
+first, never a transfer set chosen afterwards". Its intent was that nobody picks
+which spend a receipt covers. System-defined completeness meets that intent
+without a reservation:
+
+- the window is a function of the ledger (§15.3);
+- every mintable window MUST be minted, strictly in order (§15.5);
+- a window that is not minted must be disclosed, with its reason, by the
+  account's next receipt, which also names its predecessor (§15.10). Omitting
+  one takes a false signed disclosure, which the completeness audit catches
+  (§15.11);
+- §15.11 states exactly what is claimed, who can check it, and what a third
+  party without ledger access must trust the operator for. It says plainly that
+  such a party trusts the signed set.
+
+**The session kind is RESERVED: defined, never issued.**
+
+- **Why not deleted.** No session receipt has ever been issued, anywhere. Its
+  text stays VERBATIM so that the public verifier's existing session support
+  stays coherent: §2's block, §3's reservation rule, §6, §6a and the companion
+  section it pins, generations, `sessionAssociation`/`workloadId`, §12's
+  finalization rule, and the resolver's reservation states.
+- **Nobody produces one.** A conformant minter never issues a session receipt,
+  and a conformant resolver never serves one. Banners in §2, §3, §6, §6a and §12
+  say so.
+
+**Shared by both kinds, unchanged:**
+
+- §4/§4a, §5, §8 and §13;
+- §7's nine steps, its four named checks and its closed failure vocabulary —
+  v0.10 adds NO check and NO code;
+- §2's spend, posture, pricing, `startedAt`/`endedAt`, transfer-pair and
+  public-safety rules, which the cluster projection adopts by reference.
+
+**What v0.10 ADDS:**
+
+- §15, including the native ledger primitives it is built on (§15.2);
+- the cluster branch of §7 step 3, a recomputation of the derived ID;
+- the cluster list of §7 step 7;
+- a second derivation in §7 step 8: the skipped-window root;
+- `predecessorLinkage`'s cluster statement, under its existing code
+  `PREDECESSOR_MISMATCH` (§15.10);
+- the completeness AUDIT and the cross-receipt rule `windowDisjointness`, both
+  defined outside §7's verification block (§15.11–§15.12);
+- companion items §10.17–§10.22;
+- the §11 ship-gate rows.
+
+**§6a RE-PINNED.**
+
+- **Why the pin moves.** This revision edits the resolver companion, whose
+  cluster states take it to v0.3, and §6a pins that file's COMPLETE digest. So
+  the pin moves although the pinned "Mint lifecycle" section does not.
+- **Re-read, and its finding.** The section was verified byte-identical, with
+  the command shown in §6a. Nothing inside the pin moved, and the pinned section
+  now describes the reserved session kind only.
+- **The companion's v0.9.5 transcriptions are corrected too.** v0.9.6
+  overrode the companion's copies of the checkpoint member list and of
+  equality 4, and left their correction to the companion's own round. v0.3
+  is that round: both now carry the twelfth signed member and the chain-link
+  offset, outside the pinned section. The companion also marks the artifact
+  `work` variants as refused. Two v0.9.6 additions it does not restate stay
+  governed by this document: equality 4's recomputable proof-node bindings,
+  and `treeSize > offset`.
+
+**Built on v0.9.6.** This revision sits on top of the v0.9.6 checkpoint
+amendment, the twelfth signed member and the chain-link leaf, and changes none
+of it. Another open draft also numbers itself v0.9.6: the R40 framing and a
+reproducible pin recipe. There is no conflict of substance with it. If it lands
+after this revision, it renumbers its entry, and any edit it makes to the
+companion recomputes the §6a pin.
+
+**v0.9.6 (2026-10-05): §4a CAUGHT UP TO THE CHAIN IT DESCRIBES — the
+checkpoint's twelfth signed member, and the chain-link leaf.** Every proxy-v1
+checkpoint ever minted differs from the v0.9.5 text in two ways, and the
+reference verifier written from that text rejected all of them. The minted
+shape is the authority here, because it is the only one with a population;
+the text moves, the chain does not.
+(1) **`segmentStartPreviousHash` is a member of the v2 SIGNED payload**
+(§4a, "Checkpoint statement"): the `previousHash` that the segment's first
+event links to — the predecessor segment's final event hash, or for the
+genesis segment the chain's all-zero genesis hash (64 `0` characters, the
+same value the first event's own `previousHash` carries). It binds the
+segment's hash-chain start into the signature, so the boundary between two
+sealed segments is authenticated on the event chain as well as on the tree
+lineage. Without it in the member list a verifier rejects the real statement
+as carrying an unknown member; with it dropped, the signature fails.
+(2) **A non-genesis segment's tree holds a CHAIN-LINK LEAF at index 0** — the
+predecessor's `root`, hashed as a leaf like any other — so its first event is
+leaf 1 and `treeSize` counts the link. Equality 4 gains the offset
+(`+ 0` genesis, `+ 1` otherwise, read from the signed `previousSegmentRoot`),
+its range starts at the offset, and the same offset corrects §6's covering
+condition and §7's history contiguity (`next.first === prev.first +
+prev.treeSize − offset(prev)`). (3) §7's history walk names what happens at
+a member that is not a v2 statement: it stops, with a named `HISTORY_INVALID`.
+(4) **Every value the receipt exposes is BOUND, or declared unbound.** A
+value the receipt carries and two signatures authenticate is still
+unchecked until something compares it. So equality 4 binds the segment's
+first event to the signed `segmentStartPreviousHash`, and binds every proof
+node the receipt can RECOMPUTE: the chain link (the signed
+`previousSegmentRoot`) and the receipt's predecessor event
+(`event.previousHash` — the tree's leaves are the hash chain) wherever the
+proof exposes them. §7's history walk binds a served successor's signed
+`segmentStartPreviousHash` to the receipt's `event.hash` when that event is
+its segment's final leaf. (5) **The artifact `work` variants are REFUSED.**
+`commit`, `pr` and `issue` fail step 7 even when well formed (§2's semantic
+list): their provider proofs are bound by nothing a verifier holds, so a
+verified status would certify a claim nobody checked. Only the `session`
+variants verify in v1 — a deliberate NARROWING: an artifact receipt v0.9.5
+would have certified now fails. (6) **A sealed segment holds at least one
+event**, so a statement's `treeSize` exceeds its chain-link offset; a
+history's FINAL member is the one this binds, because no successor ever
+reads its `treeSize`.
+**Compatibility: NONE is extended, deliberately.** The v0.9.5 eleven-member
+statement and the offset-free equality 4 were never minted for real. The
+only objects in that shape are this repo's own: the verifier's conformance
+corpus, regenerated in the minted shape by this revision, and the verify
+page's display fixtures, whose signatures are synthetic placeholders that no
+verifier could ever have accepted (their realignment is display work, tracked
+separately). So a verifier accepts ONLY the twelve-member statement and ONLY
+the offset rule.
+Accepting both would let one checkpoint key sign two readings of the same
+segment, which is the ambiguity §8 refuses. The pinned resolver companion
+(§6a) still transcribes the v0.9.5 member list and equality 4 in its proof
+block, and still presents the artifact `work` variants as verifiable; this
+section OVERRIDES those transcriptions under the companion's own
+precedence rule (conflicts resolve in this document's favor), and the pin is
+deliberately NOT moved for it — the companion is corrected in its own round.
 
 **v0.9.5 (2026-08-16): the v0.2 resolver companion ADOPTED as normative, and
 §6a RE-PINNED to it.** §6a's own rule is that a later companion round is never
@@ -65,7 +223,7 @@ or function in `event.data` writes an unparseable line that the reader silently
 skips — the event is accepted, fsync'd, reported durable, then vanishes, and
 the chain reports TAMPERED forever, indistinguishable from real tampering.
 **Scope consequence: correcting canonicalization is its own change across core
-+ verify (+ a proxy fix stealth owns), not a task inside the CLI ship.**
++ verify (+ a proxy fix the operator owns), not a task inside the CLI ship.**
 
 **v0.9 (2026-08-12): `delegationPosture` RULED and normative (§2a, §7); §14
 naming boundary.** The delegated-work gap is closed by a REQUIRED
@@ -89,11 +247,11 @@ NON-CONFORMANCE in `packages/verify/src/canonical.ts` recorded (it renders
 `[1, undefined, 2]` as `[1,,2]` — not valid JSON — where normative is
 `[1,null,2]`; both verified by executing the real modules). Correcting the
 verify copy ships with the `usertrust-verify receipt` CLI, its first ut1
-consumer. (2) §8 records Cam's `genesisChoice: "newVault"` ruling with its
+consumer. (2) §8 records the `genesisChoice: "newVault"` ruling with its
 evidence. **RESOLVED in v0.9 (see below).** Delegated-work posture — since a2a
-delegation holds are always-released (stealth #829), delegated cost debits the
-DELEGATE, so a parent session's receipt EXCLUDES it. Cam ruled "the page states
-it" for now; the offline verifier has no page, so unless the posture is
+delegation holds are always-released, delegated cost debits the
+DELEGATE, so a parent session's receipt EXCLUDES it. The ruling was "the page
+states it" for now; the offline verifier has no page, so unless the posture is
 chain-committed the CLI prints an understated total with no caveat available to
 it. Proposed minimal fix pending ratification: a REQUIRED `delegationPosture:
 "selfOnly" | "includesDelegated"` on the §2 projection.
@@ -105,7 +263,7 @@ check — the union previously assigned codes to steps 1–9 and to the two
 extension checks but none to `predecessorLinkage`, so a
 generation-predecessor contradiction (which §9-A.c answers 409) could not
 be schema-validly reported anywhere a `failed` result requires a code.
-Surfaced by the PR #823 transcription gate (round 2), same mechanical
+Surfaced by the resolver transcription gate (round 2), same mechanical
 class as the errata above; the gate independently corroborated the
 verify-page v0.4 registryBinding rule in the same round. (2) §6a's pinned
 companion adoption is RE-PINNED after applying the three deferred in-pin
@@ -116,22 +274,22 @@ mentions removed) — new digest in §6a. No hold-ceiling/§6a lifecycle
 invariant moves.
 
 **§4a HEADLINE (B1 RATIFIED — proxy profile):** receipts prove against the
-**proxy profile** — the stealth proxy's real envelope, per-segment Merkle
+**proxy profile** — the operator's proxy, with its real envelope, per-segment Merkle
 trees, and a VERSIONED, fully-signed checkpoint that extends
 `PublishedMerkleRoot`. Chosen over v0.5's ut-chain profile because it is the
 smaller change that ships sooner: the proxy's leaf/interior/odd-promotion and
 event-hash rules already match the SDK verbatim, so the delta is envelope
 shape, segment-relative indexing, and the checkpoint statement — NOT a
 production audit-layer migration carried as a rider on the mint feature
-(stealth's recommendation; Cam ratified). The ut-chain convergence (v0.5's
+(the operator's recommendation, ratified). The ut-chain convergence (v0.5's
 choice) is LEDGERED as a deliberate future project, not abandoned. Trade-off
 recorded (§11 ship gate): the zero-dep verifier gains a second profile
 (`profile: "proxy-v1"`) instead of validating proxy receipts unchanged — the
 cost B1-(1) accepts for not blocking mint on a chain migration.
 Interface owner: usertrust (`packages/core` + `packages/verify`). Consumers:
-the stealth proxy mint endpoint (`apps/api`), the resolver API
+the operator's proxy mint endpoint, the resolver API
 (`docs/specs/receipt-resolver-api.md`, this repo's copy — the normative
-companion, pinned by §6a; stealth owns the interface), the public
+companion, pinned by §6a; the operator owns the interface), the public
 verify page at `usertrust.ai/r/<id>`, and the commit-trailer convention.
 Conflicts resolve in THIS document's favor. Companion updates required: §10.
 
@@ -162,7 +320,20 @@ boolean-`settled` paths are **not mintable**. The audit-first `llm_call`
 event is unchanged and is NOT the mint event — it predates settlement
 (R1-F2).
 
+**v0.10: every receipt issued is a CLUSTER receipt (§15).** The paragraph
+above holds for it. Its transfer set is additionally the POSTED holds of one
+CLOSED, system-defined window of one account (§15.4, §15.5), never a session.
+
 ## 2. The projection (the mint event's payload)
+
+> **v0.10 banner — this section's block is the SESSION projection
+> (`scope: "session"`). That kind is RESERVED: defined, never issued (§15.1).**
+> No session receipt has ever been issued. The text stays verbatim so that the
+> public verifier's existing session support stays coherent. Every receipt
+> issued uses the CLUSTER projection (§15.6), which adopts by reference this
+> section's spend block, posture enums, `pricing`, `startedAt`/`endedAt`,
+> `transferSet`/`transferSetRoot`, public-safety rules, and the semantic rules
+> for those fields.
 
 The **projection** is the value of the mint event's `data` field. Every
 field is chain-committed and Merkle-provable (R1-F1/F3). The block below
@@ -176,7 +347,7 @@ so what is not enumerated here cannot be sent.
 {
   "spec": "ut1",
   "scope": "session",            // "call" reserved for ut2 SDK minting
-  "sessionId": "…",              // stealth-defined (§9-A.c)
+  "sessionId": "…",              // operator-defined (§9-A.c)
   "generation": 1,               // integer ≥ 1 — generation 1 attests the COMPLETE
                                  // session; >1 exists only as explicit addenda
                                  // (§6, R3-5) carrying prevGenerationEventHash;
@@ -190,7 +361,9 @@ so what is not enumerated here cannot be sent.
   "work": {                      // CHAIN-COMMITTED and VERIFIED (§6a, B2) — the
                                  // resolver's discriminated union. COMMIT variant
                                  // inline; pr / issue / session variants by reference
-                                 // (enumerated under the block)
+                                 // (enumerated under the block). v0.9.6: a v1
+                                 // VERIFIER refuses this variant and the other two
+                                 // artifact variants (§2's semantic list)
     "kind": "commit",
     "repoId": "github.com:R_kgDOK1x2Yw",  // NORMATIVE scope: the provider's IMMUTABLE
                                  // repository ID, or the keyed "r1_…" form for
@@ -251,7 +424,7 @@ so what is not enumerated here cannot be sent.
   },
   "delegationPosture": "selfDebitsOnly",   // REQUIRED (v0.9). WHAT THE AMOUNT COVERS with
                                  // respect to DELEGATED work. Since a2a delegation holds are
-                                 // always-released (stealth #829), delegated cost debits the
+                                 // always-released, delegated cost debits the
                                  // DELEGATE — so a parent session's amount excludes it unless
                                  // stated. Four values, defined in §2a; v1 conformant minting
                                  // may emit ONLY "selfDebitsOnly" (§2a's minting rule)
@@ -271,7 +444,10 @@ so what is not enumerated here cannot be sent.
 
 - **The `work` union's other variants** (normative, per §6a and the
   resolver's discriminated union — every variant carries `repoId` as the
-  NORMATIVE scope, and `repo` only under the disclosure rule below):
+  NORMATIVE scope, and `repo` only under the disclosure rule below). v0.9.6:
+  a v1 verifier REFUSES the three artifact variants (`commit` above, `pr`,
+  `issue`) — see the semantic list — so their definitions say what it
+  recognizes in order to refuse, not what it certifies:
   - `pr` / `issue`: `{ kind, repoId, repo?, number, providerArtifactId,
     observedRevision, contentBinding } & { repositoryMembership }`, where
     `contentBinding` is the resolver's EXACTLY-ONE union
@@ -344,7 +520,7 @@ so what is not enumerated here cannot be sent.
     define, and `ut1` verifiers reject `posted ≠ assessed` outright.
 - **Spend breakdown (H2, settled v0.6):** the signed projection commits
   TOTALS + `roundingAdjustment` + `pricing.tableVersions` only — this
-  spec's model, accepted by stealth. Per-provider/model/tier breakdown rows
+  spec's model, accepted by the operator. Per-provider/model/tier breakdown rows
   are DISPLAY data in the resolver's **unsigned envelope**, under its
   `display` member (§10.1), explicitly labeled not-chain-committed (the
   same honesty mechanism as `anchorEvidence`); the resolver's recompute
@@ -386,6 +562,16 @@ so what is not enumerated here cannot be sent.
     "workflowAttested"`; `work` matching exactly one union variant (with
     `origin` present iff the fallback session variant);
     `sessionAssociation` present; scope-forbidden fields absent.
+  - **The artifact variants are FAIL (v0.9.6).** `work.kind` `commit`, `pr`
+    or `issue` fails even when every member is well formed: the provider
+    proofs it carries — `repositoryMembership.proofId`, the
+    `oid`/`objectSha256` binding, `contentBinding` — are bound by nothing a
+    verifier can check from the receipt and its trust material, so any
+    verified status would certify an unchecked claim. This is §2a's rule for
+    `includesAllDelegated` applied to `work`: a claim with no validating
+    evidence format is a failed step, permanent in v1 until one exists. The
+    shape rules here still apply first, so a malformed variant names its own
+    defect. Only the two `session` variants verify.
   - **Postures are ATTESTED ENUMS, not verifier-established facts.** The
     verifier checks that `usagePosture` ∈ {provider, mixed, estimated} and
     `pricingPosture` ∈ {exact, conservative}, and that consumers render
@@ -456,8 +642,8 @@ presence rule or a syntax rule, not an intention:
 
 ### 2a. `delegationPosture` — what the amount covers (v0.9, RULED)
 
-The problem this closes: a2a delegation holds are always-released (stealth
-#829), so delegated cost debits the DELEGATE. A parent session's amount
+The problem this closes: a2a delegation holds are always-released, so
+delegated cost debits the DELEGATE. A parent session's amount
 therefore EXCLUDES work it caused — technically correct and universally
 misread. Page copy alone cannot close it, because the OFFLINE verifier has no
 page: absent a chain-committed posture, `usertrust-verify receipt` prints an
@@ -545,6 +731,16 @@ are the interface owner's.)
 
 ## 3. ID format and registry rule (v0.6 — reservation-issued, B2)
 
+> **v0.10 banner — reservation-issued IDs belong to the RESERVED session kind
+> (defined, never issued — §15.1).**
+> - This section's ID FORMAT (16 bytes, canonical base58btc, the `ut1_` prefix,
+>   §12's decode rules) and its REGISTRY rule (locator, not identifier;
+>   first-write-wins; collision is a hard fail) bind every ID, unchanged.
+> - What differs is how a cluster ID is OBTAINED: it is DERIVED from
+>   `(vaultId, account, windowStart)` (§15.9), and is therefore recomputable
+>   offline.
+> - Nothing is reserved, so nothing is claimed at reserve time.
+
 ```
 receiptId = "ut1_" + base58btc( random 16 bytes, mint-side namespace )
 ```
@@ -584,31 +780,47 @@ receiptId = "ut1_" + base58btc( random 16 bytes, mint-side namespace )
 ### 4a. The proxy profile (v0.6 — B1 ratified: bind ut1 to proxy formats)
 
 Every claim in this section is defined against ONE chain profile —
-**`profile: "proxy-v1"`, the stealth proxy's real machinery**
-(`apps/api/src/governance/audit/`) — which the minting chain implements
+**`profile: "proxy-v1"`, the real machinery of the operator's proxy**
+(its audit-chain module) — which the minting chain implements
 TODAY, modulo the checkpoint extension below:
 
 - **Event-hash rule:** `hash = sha256(canonicalize(event − hash))` with
   key-absent (not undefined-valued) exclusion. (Identical on both sides —
-  writer.ts:289-302 ≡ chain.ts; unchanged by B1.)
+  the proxy's audit writer ≡ `chain.ts`; unchanged by B1.)
 - **Proof shape + hashing:** `MerkleInclusionProof` verbatim; raw event hash
   in `leafHash`; leaf = `sha256(0x00 || hexDecode(hash))`; interior =
   `sha256(0x01 || left || right)`; odd nodes promote. (Identical on both
   sides — unchanged by B1.)
-- **Tree scope: ONE TREE PER SEGMENT (proxy reality; merkle-types.ts:8).**
+- **Tree scope: ONE TREE PER SEGMENT (proxy reality).**
   `segmentId` is NORMATIVE and load-bearing; `leafIndex` is
-  segment-relative. Equality 4 becomes
-  `inclusion.leafIndex === event.sequence − checkpoint.segmentFirstSequence`
-  (the checkpoint carries `segmentFirstSequence` for exactly this). The
+  segment-relative. **Chain-link leaf (v0.9.6):** when a segment is
+  sealed, its successor's tree starts with ONE leaf before any event — the
+  sealed segment's `root`, carried in the raw-hash position and hashed as a
+  leaf (`sha256(0x00 || hexDecode(root))`) exactly as an event hash is. It
+  has no sequence. So a segment's **chain-link offset** is
+  `0` when `checkpoint.previousSegmentRoot === "genesis"` and `1`
+  otherwise; its first event is leaf `offset`; and `treeSize` counts the
+  link (event leaves = `treeSize − offset`). A segment is never sealed
+  empty, so a v2 statement has `treeSize > offset` — at least 1 for the
+  genesis segment, 2 for a successor — and one claiming fewer is FAIL at
+  step 6 and stops §7's history walk. Equality 4 becomes
+  `inclusion.leafIndex === event.sequence − checkpoint.segmentFirstSequence
+  + offset` (the checkpoint carries `segmentFirstSequence` for exactly this,
+  and the offset is read from its SIGNED `previousSegmentRoot`). Where the
+  inclusion proof exposes a node built only from the link and the
+  receipt's predecessor event — at leaves 1 and 2 — equality 4 binds it to
+  that signed root; further right the link shares a node with leaves the
+  receipt does not carry. The
   SDK's global tree is NOT this profile; ut-chain convergence is the
   ledgered future project (headline).
 - **Checkpoint statement: `SegmentCheckpoint` v2** — a VERSIONED extension
   of the proxy's `PublishedMerkleRoot` whose canonical SIGNED payload is:
   `{ v: 2, vaultId, profile, root, treeSize, segmentId,
-  segmentFirstSequence, previousSegmentRoot, previousSegmentId, keyId,
-  publishedAt }`,
+  segmentFirstSequence, previousSegmentRoot, previousSegmentId,
+  segmentStartPreviousHash, keyId, publishedAt }` — exactly these twelve
+  members (v0.9.6 added `segmentStartPreviousHash`; see the version entry),
   `sig` = base64 Ed25519 over `canonicalize(unsigned)`. This closes BOTH
-  pre-existing holes the stealth review named: the root-only signature
+  pre-existing holes the operator's review named: the root-only signature
   (treeSize unauthenticated → leaf-hiding) and the unauthenticated lineage
   edge (`previousSegmentRoot` lived in `MerkleTreeState`, outside the signed
   payload — rewritable while every signature verified). **`vaultId` and
@@ -622,6 +834,20 @@ TODAY, modulo the checkpoint extension below:
   vaults). Genesis:
   `previousSegmentRoot`/`previousSegmentId` are the fixed strings
   `"genesis"` for the first segment; contiguity checks are normative in §7.
+  **`segmentStartPreviousHash` (v0.9.6)** is 64 lowercase hex: the
+  `previousHash` the segment's first event carries — the predecessor
+  segment's final event hash. For the genesis segment it is the chain's
+  all-zero genesis hash, `"0000…0000"` (64 `0` characters), never the
+  string `"genesis"`. The two are tied: a statement whose
+  `previousSegmentRoot` is `"genesis"` MUST carry the all-zero value, and
+  one whose `previousSegmentRoot` is a root MUST NOT (a successor's first
+  event links to a real event); either mismatch is FAIL at step 6. Nothing
+  else in a checkpoint carries the predecessor's last event hash, so §7's
+  history walk cannot cross-check the value between members; what it buys is
+  that the chain-start a verifier or archiver recomputes from is SIGNED. When
+  the receipt's own event is the segment's first event, equality 4 binds the
+  two directly; when it is the segment's FINAL event, §7's history walk binds
+  a served successor's `segmentStartPreviousHash` to it.
   `publishedTo` does not exist in the signed statement (publication is
   evidence, not proof — R3-8 unchanged), and neither does `reference` —
   v0.5 carried an anchor locator here, but publication evidence lives
@@ -672,8 +898,8 @@ TODAY, modulo the checkpoint extension below:
   any proof whose supplied siblings disagree — folding the siblings as given
   is non-conformant. (Status corrected round-4: **core already implements
   it** — `packages/core/src/audit/merkle.ts:193`, PR #86 — so only the
-  STEALTH half remains open, `merkle-proofs.ts:84`, tracked as a required
-  code fix there; without it, equality 4 is forgeable by altering
+  operator's half remains open, in its proxy's Merkle-proof module, tracked
+  as a required code fix there; without it, equality 4 is forgeable by altering
   `leafIndex`.)
 
 The receipt embeds the chain's **real** event envelope — **field-complete,
@@ -707,15 +933,42 @@ contradicted it) (proxy profile: the audit writer's envelope
   way and the mint worker adapts.)
 - Checkpoint: `SegmentCheckpoint` v2, §4a — `{ v: 2, vaultId, profile, root,
   treeSize, segmentId, segmentFirstSequence, previousSegmentRoot,
-  previousSegmentId, keyId, publishedAt, sig }`.
+  previousSegmentId, segmentStartPreviousHash, keyId, publishedAt, sig }`.
 - **Required equalities** (verifier MUST enforce, R2-1 as revised by B1):
   1. `event.hash === proof.mintEventHash === inclusion.leafHash`
   2. `event.kind === "receipt_settled"`; `canonicalize(event.actor)` equals the
      canonical form of the chain's registered `mintActor` (§4a/§8)
   3. `event.data` canonicalizes byte-identically to the §2 projection the
      receipt claims (they are the same object — no duplicate copies)
-  4. `inclusion.leafIndex === event.sequence − checkpoint.segmentFirstSequence`,
-     and `0 ≤ leafIndex < checkpoint.treeSize`
+  4. `inclusion.leafIndex === event.sequence − checkpoint.segmentFirstSequence
+     + offset`, and `offset ≤ leafIndex < checkpoint.treeSize`, where
+     `offset` is the §4a chain-link offset (`0` iff
+     `checkpoint.previousSegmentRoot === "genesis"`, else `1`; v0.9.6). The
+     lower bound is the offset, not 0: a non-genesis leaf 0 is the chain
+     link, and no event is ever proved at it. And when `leafIndex === offset`
+     the receipt's event IS the segment's first event, so
+     `event.previousHash === checkpoint.segmentStartPreviousHash` (v0.9.6 —
+     the signed chain start must be the one the event actually links to).
+     And every proof node the receipt can RECOMPUTE is the node the tree
+     holds (v0.9.6). Besides its own leaf the receipt knows two raw leaves:
+     a non-genesis segment's leaf 0, the chain link
+     `checkpoint.previousSegmentRoot`, and the leaf before its own when that
+     is an event of the segment — the predecessor, `event.previousHash`,
+     because the tree's leaves ARE the hash chain. So with
+     `leaf(x) = sha256(0x00 || hexDecode(x))` and
+     `node(l, r) = sha256(0x01 || l || r)`: at an ODD `leafIndex`,
+     `siblings[0].hash` is `leaf(previousSegmentRoot)` when
+     `leafIndex === offset === 1` and `leaf(event.previousHash)` otherwise;
+     at `leafIndex === 2` with `offset === 1`, the level-1 sibling —
+     `siblings[0]` when `treeSize === 3` promotes leaf 2 at level 0,
+     `siblings[1]` otherwise — is `node(leaf(previousSegmentRoot),
+     leaf(event.previousHash))`. No other sibling is recomputable. These
+     comparisons, like the first-event one above, fail CLOSED: a missing
+     sibling, or an operand that is not a digest, fails them as surely as a
+     wrong value. They are decidable from the receipt alone, so step 2 makes
+     them before it resolves the chain; a later step's refusal of the same
+     malformed member could be masked as `UNVERIFIABLE` by a receipt naming
+     an unregistered chain.
   5. `inclusion.treeSize === checkpoint.treeSize`
   6. `inclusion.root === checkpoint.root`
   7. `receipt.scope/spec` agree with the projection; `minter.kind` agrees
@@ -755,7 +1008,8 @@ contradicted it) (proxy profile: the audit writer's envelope
                                          // `work` (canonically identical bytes), never an
                                          // independent assertion. Non-commit variants
                                          // take the §2 union's other shapes, mirrored
-                                         // the same way
+                                         // the same way. (v0.9.6: a v1 verifier
+                                         // refuses the artifact variants, §2)
   "event": { /* §4 envelope, verbatim */ },
   "proof": {
     "profile": "proxy-v1",               // §4a — names the equality set the verifier
@@ -786,6 +1040,14 @@ contradicted it) (proxy profile: the audit writer's envelope
   grow (its `apiVersion` governs it).
 
 ## 6. Mint lifecycle — exactly-once (R2-4)
+
+> **v0.10 banner — this lifecycle and §6a describe the RESERVED session kind
+> (defined, never issued — §15.1).** Every receipt issued follows §15.10.
+> - Session-only: the CLOSING CAS, admission stamping, `(sessionId,
+>   generation)` intents, generations/addenda, and reserve → finalize.
+> - Shared by §15.10: the single-writer rule, the append-boundary fencing
+>   token, the recovery scan's adopt-only-if-byte-identical rule, the wait for
+>   the segment SEAL, and the first-write-wins registry.
 
 State machine; every arrow durable-before-advance; single-writer per vault
 (a stated single-host deployment constraint for the writer, or a
@@ -823,7 +1085,8 @@ session OPEN
      checkpoint forces rotation, so this wait is for the seal, and the
      checkpoint it yields can never be superseded for that segment).
      Covering means checkpoint.segmentId === proof segment and
-     segmentFirstSequence ≤ event.sequence < segmentFirstSequence + treeSize
+     segmentFirstSequence ≤ event.sequence <
+     segmentFirstSequence + treeSize − offset (§4a's chain-link offset)
   → sign (the §5 body's work mirrors the projection's verified work, §6a —
      equality 9);
      persist signed bytes durably
@@ -852,22 +1115,37 @@ session OPEN
 
 ### 6a. Reserve → finalize (v0.6 — B2 resolved; supersedes v0.5's mint-first order)
 
+> **v0.10 banner — reserve → finalize describes the RESERVED session kind
+> (defined, never issued — §15.1).** The adoption below stays in force, and the
+> companion section stays pinned, as the definition of that kind.
+>
+> **Carried into §15 by reference** — rules that are not session machinery:
+> - the logical-transfer ID-PAIR model;
+> - POST-only spend membership;
+> - `timeout = 0` on every armed hold (§15.2 RA-1);
+> - the hold-as-ceiling invariant chain.
+>
+> **The pin moved at v0.10 for an out-of-pin edit only.** The re-read and its
+> command are recorded at the end of this section.
+
 The resolver spec's "Mint lifecycle — normative constraints" section is
 **adopted as normative for §6, by reference and in full** — reserve →
 work → finalize, with every hardening it carries. The adoption is **PINNED
 BY CONTENT HASH (round-4 P1-5)**: it binds that section as of
-**`sha256:e793a1c72fab65f9b80e2c759caca12d24e39361b6d3dc3b4ca20c33d8938041`**
+**`sha256:93ce316d61b7c297482c3363da4e3a2bf0bb086f980e1fae3d6ca55831575929`**
 — the COMPLETE digest of `docs/specs/receipt-resolver-api.md`, this
-directory's copy: the v0.2 companion-updated resolver spec, adopted as the
-normative companion 2026-08-16, whose pinned section carries the three
-corrections the v0.7 re-pin took (anchor-clock paragraph retired per §10.13;
-"separate billing identities" sentence retired per §10.16; the two stale
-in-pin `claimsHash` mentions removed). The pin's chain, oldest first:
+directory's copy: the v0.3 resolver companion (v0.10's cluster states, all
+OUTSIDE the pinned section), whose pinned section is byte-identical to the v0.2
+companion adopted as the normative companion 2026-08-16 — the copy that carries
+the three corrections the v0.7 re-pin took (anchor-clock paragraph retired per
+§10.13; "separate billing identities" sentence retired per §10.16; the two
+stale in-pin `claimsHash` mentions removed). The pin's chain, oldest first:
 `sha256:4c293c35fd9473ba474ff967a2d215e8fa399a43aaa36cb395a9747ca81c04d1`
 (v0.1, the round-35 draft) →
 `sha256:6260043a360e61f2e138c3d2f7832b3b9d1718f188ea1f56f04c0e9b9f62e18e`
-(the v0.7-corrected copy those three corrections produced) → the digest
-above, which supersedes it
+(the v0.7-corrected copy those three corrections produced) →
+`sha256:e793a1c72fab65f9b80e2c759caca12d24e39361b6d3dc3b4ca20c33d8938041`
+(the v0.2 companion, pinned at v0.9.5) → the digest above, which supersedes it
 (verify with `shasum -a 256`; a truncated
 prefix is not a pin) — and NOT whatever that file says later. Later companion rounds do
 NOT adopt automatically; taking them requires an explicit version bump of
@@ -940,7 +1218,7 @@ Consequences fixed here:
 - `sessionAssociation: "workflowAttested" | "ownerAsserted"` joins the
   projection (review hardening 5): `workflowAttested` ONLY when a trusted
   execution workflow controlled the reservation, the model traffic, the
-  workspace, and the artifact creation (the orchestrated minidev pipeline
+  workspace, and the artifact creation (an orchestrated execution pipeline
   qualifies; a human hand-writing the trailer is `ownerAsserted`). The
   "workload identity is chain-committed" requirement is discharged by a
   NAMED projection field: **`workloadId`** (§2) — the SERVER-ASSIGNED
@@ -954,13 +1232,49 @@ Consequences fixed here:
   attested. Pages MUST render the
   postures distinctly — identical rendering is forbidden, on the same
   honesty principle that governs every posture field in this spec: distinct
-  postures MUST render distinctly. (The stealth review stated this rule "the
+  postures MUST render distinctly. (The operator's review stated this rule "the
   same as repository membership"; in ut1 that comparison no longer holds —
   membership is `providerVerified`-only and fail-closed, §2/§6a, so there
   are no two membership postures to render.)
 - Generations interplay (review ruling adopted): a commit's trailer cites
   generation 1 forever; later addenda are advisory-surfaced by the resolver
   exactly like `receipt_superseded` — never a trailer rewrite.
+
+**The v0.10 re-pin: the re-read and its evidence.** The v0.3 companion edits
+only OUTSIDE the pinned section, and the pin moves because it covers the
+whole file. The section itself was checked, not assumed. Both the v0.2 file and
+the v0.3 file yield the same span:
+
+- **17,961 bytes**, with SHA-256
+  `4662f3ad2d363b6211c2599451cfd3d70fc447eab1b6e3bf5a459801f4e25c38`;
+- the span runs from the first byte of the line `## Mint lifecycle — normative
+  constraints on the resolver's semantics`, through the LF that ends the
+  section's last non-empty line;
+- the blank line before the next `## ` heading is excluded, and the next
+  heading itself is excluded.
+
+The boundary is stated in BYTES, and alongside the program that computes it,
+because a recipe nobody can rerun is decoration:
+
+```
+python3 - docs/specs/receipt-resolver-api.md <<'EOF'
+import sys, hashlib
+d = open(sys.argv[1], 'rb').read()
+s = d.index(b'\n## Mint lifecycle') + 1   # first byte of the heading line
+n = d.index(b'\n## ', s + 1) + 1          # first byte of the next '## ' heading
+span = d[s:n][:-1]                       # drop the blank line's LF, keep the last line's
+print(len(span), hashlib.sha256(span).hexdigest())
+EOF
+```
+
+The complete-file pin above is `shasum -a 256 docs/specs/receipt-resolver-api.md`
+over the COMMITTED blob (`git show HEAD:docs/specs/receipt-resolver-api.md |
+shasum -a 256`): a checkout with rewritten line endings hashes different bytes.
+
+**What the re-read found.** Nothing inside the pin moved. Its normative scope
+narrowed by THIS document, not by any edit to it: under v0.10 the pinned
+lifecycle describes the reserved session kind only, which is defined and never
+issued (§15.1).
 
 ## 7. Verification procedure and verdicts (offline)
 
@@ -996,7 +1310,23 @@ Levels (renamed, R2-2 — names must not overclaim):
   passes — each checkpoint's `previousSegmentRoot`/`previousSegmentId`
   equal the prior checkpoint's `root`/`segmentId`, genesis values exact,
   no gaps, `segmentFirstSequence` strictly increasing and contiguous
-  (`next.segmentFirstSequence === prev.segmentFirstSequence + prev.treeSize`);
+  (`next.segmentFirstSequence === prev.segmentFirstSequence + (prev.treeSize
+  − offset(prev))`, evaluated in that order or exactly — the sum is refused
+  outside the safe-integer range — where `offset(prev)` is `prev`'s §4a chain-link offset —
+  its `treeSize` counts a link leaf that is not an event; v0.9.6);
+  when the receipt's event sits at its segment's LAST leaf
+  (`leafIndex === treeSize − 1`), the checkpoint that follows the embedded
+  one carries `segmentStartPreviousHash === event.hash` (v0.9.6 — that event
+  is the final one its successor's chain starts from; at any other leaf the
+  final event is not in hand and nothing carries it);
+  **a member that is not a v2 statement STOPS the walk (v0.9.6)** — `v`
+  other than `2` (e.g. a v1 `PublishedMerkleRoot`), any of §4a's twelve
+  members absent, any member outside them, or a `treeSize` that holds no
+  event (§4a), signed or not: the walk does
+  not skip it, does not infer its lineage, and does not continue past it.
+  The `checkpointHistory` check is `failed` with code `HISTORY_INVALID` and a
+  detail that names the member's position and the §4a rule it breaks; as
+  with every step-9 failure the base verdict is unchanged;
   every checkpoint's `vaultId`/`profile` equal the receipt's `proof.chain`/
   `proof.profile` (they are signed now — §4a);
   and the receipt's embedded checkpoint appears EXACTLY in the supplied
@@ -1075,7 +1405,7 @@ reported by name in verifier output):
 | Check | What it asserts | Offline |
 |---|---|---|
 | `registryBinding` (step 3(b)) | the registry binds this `receiptId` to THIS receipt's `event.hash` | `notApplicable` |
-| `predecessorLinkage` (addenda only) | `prevGenerationEventHash` equals the registry's `event.hash` for `(sessionId, generation − 1)` (§9-A.c) — `notApplicable` at generation 1, since there is no predecessor to check | `notApplicable` |
+| `predecessorLinkage` (session addenda; v0.10: every cluster receipt) | `prevGenerationEventHash` equals the registry's `event.hash` for `(sessionId, generation − 1)` (§9-A.c) — `notApplicable` at generation 1, since there is no predecessor to check. **v0.10, cluster:** `previousReceiptId` is the account's previous minted receipt under §15.10's chain rule — `notApplicable` when it is absent and the account has no earlier receipt | `notApplicable` |
 | `checkpointHistory` (step 9) | the served history walks clean and contains this checkpoint | `notApplicable` unless supplied |
 | `anchorEvidence` (step 9) | Rekor evidence validates against the pinned log key | `notApplicable` unless supplied |
 
@@ -1092,6 +1422,26 @@ previously the vocabulary assigned no code here, making a
 generation-predecessor contradiction unreportable wherever a `failed`
 result requires a code); `checkpointHistory: failed` → `HISTORY_INVALID`;
 `anchorEvidence: failed` → `ANCHOR_INVALID`.
+
+**v0.10 — no new check and no new code.**
+
+- **`predecessorLinkage` gains a cluster statement** (the table above,
+  §15.10). It keeps its code, `PREDECESSOR_MISMATCH`, and its class: `failed`
+  only on a positive contradiction — a named predecessor that is not the
+  account's previous minted receipt, or, with the field absent, an earlier
+  receipt of the account.
+- **Cluster completeness is not a §7 check.** It is a claim about the
+  operator's ledger, which no verifier of a receipt can see.
+  - The completeness AUDIT (§15.11) is run by a party with ledger access. Its
+    result `COMPLETENESS_MISMATCH` belongs to the audit.
+  - The cross-receipt rule `windowDisjointness` (§15.12) is a consumer rule
+    over two receipts. Its result `WINDOW_CONFLICT` belongs to that rule.
+  - **Neither result is a §7 failure code, and neither appears in a receipt's
+    `verification` block.**
+
+What a cluster receipt adds INSIDE §7: a recomputation in step 3, (c) below;
+the cluster list in step 7; a second derivation in step 8; and
+`predecessorLinkage`'s cluster statement.
 
 Steps, given receipt + trust-domain key material (§8):
 
@@ -1118,6 +1468,19 @@ Steps, given receipt + trust-domain key material (§8):
    `VERIFIED_CHECKPOINT` — they NARROW what the verdict asserts, and the
    verifier's output MUST report which of (a)/(b) it actually checked.
    → `ID_MISMATCH`
+
+   **(c) v0.10, `scope: "cluster"` ONLY — a RECOMPUTATION, offline.** This
+   step's heading ("there is NO recomputation") describes session IDs, which
+   are random. A cluster ID is DERIVED (§15.9), so the verifier recomputes it:
+   `receiptId === "ut1_" + base58btc(first16(SHA-256(
+   utf8("usertrust/cluster-receipt-id/v1\n") ‖ utf8(canonicalize({vaultId:
+   proof.chain, account, windowStart})))))`.
+   - It runs ALWAYS — with or without arrival context, online or not.
+   - It is a BASE check.
+   - A mismatch is `failed` → `ID_MISMATCH`.
+   - On a session receipt (c) is `notApplicable`, and the session text above is
+     unchanged.
+   - The verifier's output reports (a), (b) and (c) separately.
 4. Verify mint signature; key role `mint`, minter-kind binding, and a
    permitting key `state` (§8 — `revoked` verifies nothing).
    → `SIG_INVALID`
@@ -1134,13 +1497,29 @@ Steps, given receipt + trust-domain key material (§8):
    → `CHECKPOINT_INVALID`
 7. Semantic validation — exactly §2's enumerated semantic-validation
    constraints (presence/exclusion rules, `0 < posted === assessed`,
-   `0 ≤ roundingAdjustment ≤ transferCount`, posture enum validity), all
-   decidable from the receipt alone. The resolver's display-grade
+   `0 ≤ roundingAdjustment ≤ transferCount`, posture enum validity, the
+   refusal of the artifact `work` variants), all decidable from the receipt
+   alone. The resolver's display-grade
    `A + roundingAdjustment` recomputation is NOT part of this step: it needs
    the unsigned breakdown rows (§2, H2). This step owns the OFFLINE half of
    generation linkage (`prevGenerationEventHash` present iff
    `generation > 1`); the online half is the named `predecessorLinkage`
    check above, reported separately. → `SEMANTIC_INVALID`
+
+   **v0.10: `scope` SELECTS the list.**
+   - `"session"` → §2's list (above), unchanged.
+   - `"cluster"` → §15.6's list: §2's inherited rules for the adopted fields,
+     plus the cluster rules — the `account` handle's format, the window fields
+     and `θ`'s bounds, the OFFLINE half of the receipt chain
+     (`previousReceiptId` well-formed and not the receipt's own ID;
+     `skippedSincePrevious` well-formed and ordered, every listed window
+     before this one), `windowTransferCount` an integer of at least `2 ×
+     transferCount`, the chain-clock order `startedAt ≤ endedAt ≤
+     event.timestamp`, §15.8's `work`, and scope-forbidden fields absent. The
+     ONLINE half of the chain is the named `predecessorLinkage` check,
+     reported separately.
+   - Any other `scope` value fails step 1: it matches no strict schema.
+   - A verifier never applies one scope's list to the other's projection.
 **REQUIRED verifier behavior for `delegationPosture` (v0.9, normative — this
 is the half that closes the offline gap; §2a defines the values).** Every
 consumer that renders an amount — the page, the offline CLI, any gate —
@@ -1193,11 +1572,17 @@ mechanical guard is a negative assertion: `indeterminate` renders NO floor
 claim.** (Same discipline as §8's inherit-by-default rule, pointed the other
 way: nobody has to remember to suppress it.)
 
-Neither the floor claim nor the scope statement may sit behind interaction —
-not a `<details>`, tooltip, or accordion. *A disclosure that requires a click is
-a defence, not a disclosure.* And the retired unconditional promise must not be
-restated anywhere, **including in order to except it**; floor framing is exactly
-what lets the strong claim hold without resurrecting that sentence.
+**Amended 2026-10-05 (the brief receipt).** The amount's posture LABEL must be
+visible next to the amount; one chip is sufficient, and its `title` may carry
+the one-line meaning. The full scope statement and caption must be on the page,
+one disclosure away: the receipt's single "Details". They are no longer required
+to sit above the fold. This replaces the earlier rule that neither could sit
+behind a `<details>`: receipts are read at a glance, and a page that leads with
+four paragraphs of qualification is read by no one. See
+`receipt-amount-framing.md` for the full amendment, including R41 and R6-R8.
+The retired unconditional promise must not be restated anywhere, **including in
+order to except it**; floor framing is exactly what lets the strong claim hold
+without resurrecting that sentence.
 
 **Conformance carve-out, stated so nothing ships silently.** This clause binds
 the PAGE now (verify-page design R39/R40 at v0.9). `usertrust-verify receipt` is
@@ -1241,6 +1626,16 @@ proceeding without it, the answer is reject.
    (Session constituent `eventDigest` was REMOVED from the projection — it
    was not recomputable from the receipt and violated the strict schema to
    supply; the transfer-set commitment carries the membership claim, R2-6.)
+
+   **v0.10, `scope: "cluster"`: a SECOND derivation.** `transferSetRoot` is
+   recomputed exactly as above, over the POSTED holds' pairs. The step also
+   recomputes `skippedSincePrevious.windowsRoot` over `windows` when `count ≤
+   16` (§15.6). Above 16, or with no skipped list, that half is
+   `notApplicable` and the root stays a commitment. A mismatch →
+   `DERIVATION_MISMATCH`, and the verifier's output names WHICH root
+   mismatched. ("The ONE derivation" above is the session statement; a cluster
+   receipt can carry two.) `windowTransfersRoot` is never recomputable from a
+   receipt: it is always a commitment (§15.11).
 9. **EXTENSION checks — upgrade-only, never demoting (P2-3).** Complete
    segment-checkpoint history present + all history checks pass + embedded
    checkpoint present in it → upgrade `VERIFIED_CHECKPOINT_HISTORY`; valid
@@ -1260,9 +1655,18 @@ never implies "not later superseded" (§8).
 
 ### Verification consumers (the B2 transplant rule — verification side)
 
+**v0.9.6:** a v1 verifier REFUSES the artifact `work` variants (§2's
+semantic list), so in v1 every receipt a consumer can verify is a `session`
+receipt and a promotion gate — which requires `kind === "commit"` — accepts
+none. The per-kind artifact rules below stand for the version in which an
+evidence format makes those variants verifiable. **v0.10:** every receipt
+issued is a CLUSTER receipt (§15), and the session kind is reserved, so in
+practice the receipts a consumer meets are cluster receipts, which are
+non-artifact. A promotion gate still accepts none.
+
 Every verdict above is about the RECEIPT. None of them says the receipt
 belongs to the artifact that showed it to you: a trailer copied into a
-different artifact still resolves green in a vacuum (stealth review's
+different artifact still resolves green in a vacuum (the operator review's
 own-gate Blocking, second half). The rule is therefore **PER KIND** — v0.6
 specified only commits, which left PR and issue trailers transplantable
 through the same hole the commit rule closes (round-4 P1-6). An
@@ -1313,6 +1717,17 @@ artifact against the receipt's chain-committed `work` and FAIL on mismatch:
   that happens to cite it. Consumers MUST NOT treat it as artifact
   attestation, and a promotion gate MUST NOT accept it (the gate requires
   `kind === "commit"`).
+- **`kind: "cluster"` (v0.10)** — NON-ARTIFACT, exactly as `session` is.
+  - It attests the POSTED charges to one account in one system-defined window
+    (§15), and nothing about any commit, PR or issue that cites it.
+  - An optional `work.repoId` is the ACCOUNT's configured repository (§15.8),
+    never evidence of artifact membership.
+  - Consumers MUST NOT treat it as artifact attestation, and a promotion gate
+    MUST NOT accept it.
+  - A trailer citing a cluster receipt is a CITATION; nothing about the
+    artifact is finalized.
+  - A consumer holding two cluster receipts of one account applies
+    `windowDisjointness` (§15.12).
 - **The standalone page** (which has no containing artifact in any case)
   scopes its rendered claim to what the receipt EMBEDS, never to whatever
   referred the viewer: "attests commit `<oid>` in `<repoId>`" for commits,
@@ -1320,7 +1735,9 @@ artifact against the receipt's chain-committed `work` and FAIL on mismatch:
   for pr/issue, and — for `session` — "produced under this governed session
   — $X", the resolver's own wording, with no artifact claim at all. It
   never renders "this artifact is verified"; it renders WHAT this receipt
-  attests and leaves the reader to compare.
+  attests and leaves the reader to compare. For `cluster` (v0.10) the form is
+  "charged to this agent key between `<windowStart>` and `<windowEnd>` — $X"
+  (§15.14), again with no artifact claim.
 
 ## 8. Trust model, keys, time (R1-F7, R2-7)
 
@@ -1365,7 +1782,7 @@ them, and both cite this document.
   (short) or claims to start earlier (unregistered) never earns
   `VERIFIED_CHECKPOINT_HISTORY`. Like `mintActor`, the pair is immutable for
   the life of the vault — moving a genesis is a new `vaultId`.
-  **RULED for ut1 (Cam, 2026-08-12): `genesisChoice: "newVault"` — genesis IS
+  **RULED for ut1 (2026-08-12): `genesisChoice: "newVault"` — genesis IS
   the v2 cutover.** The choice was made against evidence, not preference: the
   receipt-chain sweep found segment rotation has NEVER run in production
   (`rotateSegment` has no DEFINITION and no caller anywhere in source — the
@@ -1530,15 +1947,15 @@ them, and both cite this document.
   and online-discoverable via the resolver; it never alters the original's
   cryptographic verdict; the page SHOULD surface it.
 
-## 9. Stealth items (v0.4: pre-review answered what code can answer)
+## 9. Operator-side items (v0.4: pre-review answered what code can answer)
 
-### 9-A. §9 answers — CONFIRMED by the stealth review (2026-08-08), with rulings
+### 9-A. §9 answers — CONFIRMED by the operator's review (2026-08-08), with rulings
 
-Stealth's review confirmed a–c below and added: **(H1) key custody targets
-the EC2 proxy host, never mini2** (the mint worker/registry/chain all live
-in `apps/api` on EC2; mini2 is the trading desk and keeps dev/infra off it;
-env-file custody consistent with the existing SurrealDB/Clerk secrets, or
-KMS if rotation ceremony is wanted; §8's mint-key ≠ checkpoint-key rule
+The operator's review confirmed a–c below and added: **(H1) key custody targets
+the EC2 proxy host, and no other host** (the mint worker, registry and
+chain all live in the proxy service on that host; env-file custody
+consistent with the proxy's existing secrets, or KMS if rotation ceremony is
+wanted; §8's mint-key ≠ checkpoint-key rule
 enforced by the key-registry document). Durability (a) is restated by the
 review as the INTENT-before-TB rule — the §6a lifecycle carries it;
 `sessionId` (c) is the STABLE SCOPE IDENTIFIER, and the reservation handle
@@ -1548,7 +1965,7 @@ billing principal at a time; each generation reserves its own `receiptId`)
 uniqueness + closure requirements are owned here.
 
 - a. **Not durable today.** A mint-worker queue is buildable on the existing
-  WakeManager.rehydrate + desk/store CAS pattern, but session→transfer
+  proxy's existing rehydrate-and-CAS store pattern, but session→transfer
   linkage (the ID-pair model, §6a) is
   not currently mintable: no intent precedes the TB side effect, Score and
   passthrough paths write no session linkage, and the one query truncates at
@@ -1560,10 +1977,12 @@ uniqueness + closure requirements are owned here.
   subsystem (plaintext `MERKLE_SIGNING_KEY` env, undocumented in both
   .env.example files, ephemeral outside production). A distinct mint key must
   be PROVISIONED; §8 rejects shared material.
-- c. **Today's sessionId is a content hash and collides across concurrent
+- c. *(v0.10: a requirement of the RESERVED session kind only. A cluster
+  receipt has no `sessionId`; its scope is `(account, window)`, §15.)*
+  **Today's sessionId is a content hash and collides across concurrent
   runs.** Spec requirement (normative): `sessionId` MUST be a unique
-  identifier minted at session open (nonce/ULID — the desk-planner nonce
-  pattern), never a content hash. Ownership resolved (pre-review conflict 13):
+  identifier minted at session open (a nonce or ULID), never a content
+  hash. Ownership resolved (pre-review conflict 13):
   the companion's reservation-under-exclusive-billing-principal model is
   adopted as the DEFINITION of the reservation; this spec owns the scope
   ID's uniqueness + closure requirements.
@@ -1603,15 +2022,15 @@ uniqueness + closure requirements are owned here.
   `generation+1` exists ONLY for work admitted under a SUBSEQUENT
   reservation on the same session scope.
 
-### 9-B. Stealth net-new implementation (ship-gate for proxy minting — from
+### 9-B. Operator-side net-new implementation (ship-gate for proxy minting — from
 pre-review blocking findings; this is work, not integration)
 
 1. **Checkpoint pipeline** (pre-review 1/2/4/5; SHRUNK by B1, revised
    R3-9): emit `SegmentCheckpoint` v2 statements (§4a) over the EXISTING
    per-segment trees — no global-tree build, no `AnchorRecord` port.
-   **The genesis decision stands and is stealth's to make (reinstated):**
+   **The genesis decision stands and is the operator's to make (reinstated):**
    the v2 checkpoint history ROOTS AT A DECLARED GENESIS BOUNDARY, and
-   stealth chooses explicitly between (a) **verified backfill** — re-issue
+   the operator chooses explicitly between (a) **verified backfill** — re-issue
    v2 statements over all prior segments, whose lineage edges must be
    reconstructed from the existing `MerkleTreeState` and are only as good
    as that unsigned state; or (b) **a new `vaultId`** whose genesis IS the
@@ -1751,7 +2170,7 @@ than `Co-Authored-By`).
    verification step (4), retired in full by §10.14) is retired —
    push-gating must not depend on external sink availability, and the
    status ladder makes the state honest on the wire. Rationale stands
-   unless Cam overrides.
+   unless the interface owner overrides it.
 8. The §6a reservation state is **ALIGNED, not added** (round-4 P2-4): the
    draft's Errors table already carries 202 `{status: "reserved"}` with
    `Cache-Control: no-store`, and this spec confirms it unchanged — the
@@ -1894,7 +2313,7 @@ than `Co-Authored-By`).
     and the current §6a pin carries no trace of it — so this item now records
     a completed retirement rather than an override still in force. Its
     normative content stands on its own, independent of what the pin says:
-    the sentence directly contradicted the stealth ruling this spec adopted,
+    the sentence directly contradicted the operator's ruling this spec adopted,
     because separate
     per-job billing identities REOPEN the shopping attack one level up
     (cheap call under key A, expensive work under key B, finalize A). The
@@ -1908,6 +2327,67 @@ than `Co-Authored-By`).
     adoption is pinned by hash rather than tracking the companion's head:
     automatic adoption would have imported this rule silently (round-4
     P1-5).
+    **v0.10 note, without retracting the above for session receipts.** Under
+    clusters, each agent key's account IS the receipt subject, by ruling (§15).
+    - **Why the attack has no target.** The shopping attack this item closes
+      needs a receipt bound to an ARTIFACT, so that the artifact's cost can be
+      understated by finalizing the cheap identity. Cluster receipts are
+      non-artifact (§7 consumers): no cluster receipt claims what a commit
+      cost, and no promotion gate accepts one. A cheap key's receipt is a true
+      statement about that key, not an understatement of something else.
+    - **How it is closed.** By SCOPE — a cluster receipt claims the charges to
+      one account, never an artifact's or a person's total (§15.1, §15.11) —
+      not by a shared billing principal.
+
+**v0.10 companion updates for CLUSTER receipts (§15).** These are applied to
+the resolver companion at its v0.3, outside the pinned section.
+
+17. **Clusters are served on the existing envelope and ladder.** A minted
+    cluster receipt is a 200 with the same envelope and the same R3-8 statuses
+    as any receipt. The envelope's `apiVersion` does not change:
+    - the SIGNED receipt changes shape, and §5/§7's strict schema governs that
+      by `scope`;
+    - the unsigned envelope does not change shape.
+18. **No 202 and no 410 for clusters; the reservation states belong to the
+    RESERVED session kind.**
+    - 202 `reserved`/`reconciling` and the 410 terminals
+      `cancelled`/`expired`/`notMinted`/`billedUnfinalized` remain defined for
+      that kind only, and are never emitted.
+    - A cluster ID never answers any of them, and has no pre-mint state,
+      `"sealing"` included (§15.13).
+19. **404 covers every unminted ID, with unchanged caching.** That includes a
+    derived cluster ID cited before its receipt exists. The caching stays
+    `public, no-cache, max-age=0, must-revalidate`. The companion's 404 row
+    gains the cluster meaning.
+    - **The LOUD "never allocated — integrity red flag" rendering is RETIRED
+      for every ID.** A cluster ID and a session ID share one format, so no
+      consumer can tell which kind a 404 is answering.
+    - **The verify page's 404 rendering CHANGES**: "no receipt under this ID
+      yet", never forgery, never green (§15.13).
+20. **Identity binding gains the derived-ID recompute and the receipt chain.**
+    On every read serving a cluster receipt, the resolver recomputes §15.9's
+    ID from the stored receipt, in addition to route = body = registry, and
+    checks `predecessorLinkage` against its registry (§15.10).
+    - A non-recomputing ID, or a broken chain link, is the 409 stated once in
+      §15.13.
+    - On a 200, `predecessorLinkage` is `passed`, or `notApplicable` for an
+      account's first receipt. It is never `unavailable`, for the reason
+      `registryBinding` never is: the registry is the resolver's own store.
+21. **No failure code is added.** `predecessorLinkage` gains its cluster
+    statement under its existing code (§7, §15.10).
+    - `COMPLETENESS_MISMATCH` and `WINDOW_CONFLICT` are the results of the
+      completeness audit and of a two-receipt consumer rule (§15.11–§15.12).
+      Neither is a §7 code, so neither appears in a resolver `verification`
+      block.
+    - The four named checks are unchanged, so a resolver response carries no
+      `ledgerCompleteness` member: the resolver does not audit the ledger on
+      the public's behalf.
+    - A future authenticated owner check is a separate product decision, and
+      out of v0.10.
+22. **Rendering sentences for `scope: "cluster"`** (§15.14): the claim line,
+    the R40 scope line, and the scoped never-understates sentence. The
+    public-repo framing record (`receipt-amount-framing.md`) carries both
+    kinds' forms.
 
 ## 11. Codex round-2 closure + ship gate
 
@@ -1925,7 +2405,7 @@ claims (§2).
 
 Ship gate before mint-endpoint implementation:
 - [ ] **B1 decision record (this document, v0.6):** proxy profile ratified
-      by Cam 2026-08-10; trade-off recorded in the headline (second verifier
+      2026-08-10; trade-off recorded in the headline (second verifier
       profile vs. no chain migration riding the mint feature); ut-chain
       convergence ledgered as a future project.
 - [ ] **Pricing-snapshot ledger migration precedes the mint endpoint** (new
@@ -1935,8 +2415,8 @@ Ship gate before mint-endpoint implementation:
       resolver's two-point durability rule; `authorizedMaxUsertokens`
       ceiling invariants per the same section.
 - [x] **DONE (v0.8) — see §13.** Canonicalization frozen as a normative appendix covering **the
-      PROXY's `canonical.ts`** (`apps/api/src/governance/audit/canonical.ts`
-      — B1-(1) makes it the normative implementation; the SDK's is the
+      PROXY's `canonical.ts`** (the proxy's audit canonicalizer — B1-(1)
+      makes it the normative implementation; the SDK's is the
       cross-check) (complete algorithm:
       key sorting, UTF-8/surrogate policy, safe-integer-only numbers, no
       NaN/±Inf/−0, absent ≠ null, duplicate keys rejected, escaping).
@@ -1966,16 +2446,16 @@ Ship gate before mint-endpoint implementation:
       it to this spec): exact byte representation — which fields, UTF-8
       encoding, Unicode normalization, line endings, null-body handling —
       gating pr/issue minting only; the v1 commit path does not need it.
-- [ ] Stealth instance confirms/corrects the pre-review answers (§9-A) and the
-      §4a proxy-profile decision (SETTLED v0.6 — B1 ratified; stealth's confirmation recorded in the 2026-08-08 review).
-- [ ] Stealth 9-B net-new work either scheduled or the profile decision
+- [ ] The operator confirms/corrects the pre-review answers (§9-A) and the
+      §4a proxy-profile decision (SETTLED v0.6 — B1 ratified; the operator's confirmation recorded in the 2026-08-08 review).
+- [ ] The operator's 9-B net-new work either scheduled or the profile decision
       re-opened. **ALL of 9-B.1–9-B.6 are mint blockers (R3-9)** — not only
       checkpoints and durable prerequisites: without the reconciliation
       oracle (§1 has no mintability test), the pricing table version (§2
       unpopulatable), the mint key (§8 rejects), or the sessionId nonce (§6
       unsafe), no conformant receipt can be produced.
 - [ ] Mint worker: takeover states, append-boundary fencing, and fail-closed
-      startup on non-durable stores specified in stealth's implementation
+      startup on non-durable stores specified in the operator's implementation
       plan (R3-6).
 - [ ] Companion updated per §10 (now **sixteen** items: 10.1-10.6 the
       envelope/proof/status/spend reconciliations, 10.7 defer-policy
@@ -1996,6 +2476,46 @@ Ship gate before mint-endpoint implementation:
       key-rotation state model, the §10 corrections, the no-PII
       operationalization, the trailer decode rule, and the named
       canonicalization corpus.)
+
+**v0.10 ship gate for CLUSTER minting.** Each row is a mint blocker for
+`scope: "cluster"`; none of them gates session verification.
+
+- [ ] **Minter:**
+      - closure from LEDGER-TIME EVIDENCE, never the minter's clock, with the
+        ledger clock read BEFORE the account's transfers (§15.4);
+      - enumeration of the window from the LEDGER, debits and credits, to
+        exhaustion (§15.10);
+      - the account's `θ` within its bounds, set before its first debit hold,
+        any later change refused, and signed into every receipt (§15.2);
+      - every mintable window minted, strictly in order per account, and
+        every refusal disclosed by the next receipt (§15.5, §15.10);
+      - new reservations refused.
+- [ ] **Receipt-account configuration:**
+      - RA-1, `timeout = 0` on every armed hold;
+      - RA-2, no client-supplied (`imported`) timestamps;
+      - RA-3, every governed charge a debit hold — each measured on the
+        deployed ledger, not asserted;
+      - RA-4, no unarmed hold with `timeout = 0`. It is a convention, so it
+        is measured but not enforced. The minter carries §15.2's defensive
+        rule: the resolution is final, a later post or void refuses the window
+        it lands in, and admission records are read after the account's
+        transfers.
+- [ ] **`packages/verify`:**
+      - the cluster schema, selected by `scope` (§15.6);
+      - step 3(c), step 7's cluster list, and step 8's second root;
+      - `predecessorLinkage` as `notApplicable` offline;
+      - `windowDisjointness` over a supplied receipt set.
+- [ ] **Conformance corpus:**
+      - §15.15's positive and negative vectors;
+      - at least one conforming cluster receipt end to end;
+      - all three implementations (core, verify, minter) agreeing
+        byte-for-byte, as §13 requires.
+- [ ] **Companion v0.3 states, and the verify page:**
+      - `predecessorLinkage`'s cluster statement and its 409;
+      - the 404 rendering change and the cluster claim forms (§15.13–§15.14);
+      - a cluster fixture rendered end to end.
+- [ ] **Review:** a review round on THIS amendment (§15 + the v0.10 banners),
+      at the same bar as round-4.
 
 ## 12. Trailer grammar (resolver Q5)
 
@@ -2040,7 +2560,15 @@ ignored by this finalization — an artifact may legitimately cite several
 receipts (a commit spanning multiple governed sessions), and forbidding
 them would make honest multi-receipt artifacts unmintable.
 
-The swap replaces `Co-Authored-By` (Cam's
+**v0.10 — clusters:** the grammar, lexical rules and decode rules above bind
+cluster IDs unchanged. They are the same 16-byte format (§15.9). The
+"exactly once" FINALIZATION rule is machinery of the reserved session kind: a
+trailer naming a cluster receipt is a citation, and nothing is finalized
+against it (§7 consumers, `kind: "cluster"`). A cluster ID is derivable once
+the window's first hold commits, so a trailer may cite it before its receipt
+exists. Until the receipt is minted, the ID resolves 404 (§15.13).
+
+The swap replaces `Co-Authored-By` (a
 2026-08-08 directive); repo convention docs update lands with the swap, in
 lockstep.
 
@@ -2131,8 +2659,8 @@ by `JSON.stringify` on the way in and is therefore untouched by the fix.
 Verified both directions 2026-08-12. Storage-round-tripped values show zero
 divergence between the current and corrected algorithms. And both repositories
 were scanned: **180,270 lines, zero corruption** — usertrust 96,867 (fleet
-journals, receipt logs, published chain: zero unparseable lines) and stealth
-83,403 (EC2 prod `audit.jsonl`, re-canonicalized and re-hashed line by line
+journals, receipt logs, published chain: zero unparseable lines) and the
+operator's implementation 83,403 (its production audit log, re-canonicalized and re-hashed line by line
 with every `previousHash` independently checked: zero unparseable, zero hash
 mismatches, zero chain breaks).
 
@@ -2154,8 +2682,8 @@ under both implementations and require zero divergence. An argument that the
 invariant holds is not evidence that it does.
 
 **And the binding form of that test must be one CI can RUN (ruled 2026-08-12).**
-A real-vault corpus lives at `~/.usertrust-fleet`, which does not exist on a
-runner — so a test written against it `skipIf`s in CI, and **a skipped test
+A real-vault corpus lives only on the operator's own machines, which a
+runner does not have — so a test written against it `skipIf`s in CI, and **a skipped test
 reads as green**, which is the defect class this appendix exists to catch. Nor
 may vault events be committed to a public repository. The artifact that
 satisfies both constraints is a **committed corpus of canonical BYTE PAIRS** —
@@ -2284,7 +2812,8 @@ enumerated by path, 2026-08-12) — the rule holds with zero exceptions:
 | Path | Values | Case |
 |---|---|---|
 | `event.kind` (receipt + `terminalEvent`) | `receipt_settled`, `billing_terminal_no_receipt` | snake_case |
-| `work.kind` | `commit`, `pr`, `issue`, `session` | bare |
+| `work.kind` | `commit`, `pr`, `issue`, `session`, `cluster` (v0.10) | bare |
+| `scope` (projection + §5 body) | `session`, `cluster` (v0.10) | bare |
 | `work.origin.kind` | `billedUnfinalized` | camelCase |
 | `work.contentBinding.kind` | `publicSha256`, `privateHmacSha256V1` | camelCase |
 | `minter.kind` | `proxy` | bare |
@@ -2300,3 +2829,1161 @@ same rule, and neither is a typo for the other.
 **Consequence:** a new chain event kind ships snake_case; a new ut1 advisory,
 posture, or union discriminator ships camelCase. Renaming across the boundary
 is never a cleanup — it is a format break.
+
+**v0.10 additions. All but the last follow the rule; the last extends it, on
+the rule's own reasoning:**
+
+- `cluster` is a single-word enum, so it is bare, in both `work.kind` and
+  `scope`.
+- The cluster projection's new members are camelCase: `account`,
+  `windowStart`, `windowEnd`, `idleThresholdNs`, `previousReceiptId`,
+  `skippedSincePrevious` (with `count`, `windows` and `windowsRoot`),
+  `windowTransfersRoot` and `windowTransferCount`.
+- The chain event kind stays `receipt_settled`, because one mint event serves
+  both scopes.
+- The two rows marked v0.10 in the table are RULE-DERIVED, not
+  corpus-verified: the conforming corpus has no cluster fixture yet, and that
+  is a §11 ship-gate row.
+- **The extension: the 23 `skippedSincePrevious` reasons are kebab-case.**
+  They are the minter's refusal codes, transcribed verbatim and frozen by this
+  spec (§15.6). They are values of a `reason` field, not a `kind`, a posture
+  or a union discriminator. As with `event.kind`, the casing tells a reader
+  whose string it is, and renaming them would be a format break. A new reason
+  is a revision of this spec, and ships kebab-case.
+
+## 15. Cluster receipts — the only kind issued (v0.10)
+
+Ruled by the interface owner, 2026-10-05. This section is self-contained for
+the `cluster` scope: where it adopts a rule from another section it says so by
+number, and where it departs from the session text it says that too. It
+freezes the field list the minter and the resolver are built to. It does not
+edit the session text; banners in §2, §3, §6, §6a and §12 point here.
+
+### 15.1 The model, and what happened to the session kind
+
+**Ruled:**
+
+- a receipt covers **every charge to ONE funded ledger account** — one agent
+  key's account — over a **SYSTEM-DEFINED window**: from first activity until
+  the account has been idle for its **idle threshold**, judged on the
+  **ledger's own timestamps**;
+- the idle threshold is **10 minutes by default, adjustable per agent within
+  60 s to 24 h**, and every receipt signs the threshold its window was cut
+  with (`idleThresholdNs`). In v0.10 it is set before the account's first
+  hold and is IMMUTABLE after it (§15.2);
+- **nobody reserves anything and nobody chooses a boundary.** The window is
+  COMPLETE: every charge inside it, none selected;
+- the receipt ID is **deterministic** from the account and the window start
+  (§15.9);
+- **each receipt names the account's previous minted receipt**
+  (`previousReceiptId`), **and discloses every window skipped since it**
+  (`skippedSincePrevious`);
+- `repoId` is **optional** (§15.8).
+
+**As built — which makes "every charge" precise.** A governed call charges an
+account through a DEBIT HOLD: a pending transfer that debits the account,
+later posted or voided (§6a's pair model). So:
+
+- a window's **members are the account's debit holds**. It runs from its first
+  hold to its **activity end**: the latest timestamp of any of its holds, or
+  of their posts and voids (§15.3);
+- the receipt's **amount and `transferSetRoot` are the POSTED holds**, as the
+  §6a `{authorizationTransferId, settlementTransferId}` pairs;
+- its **`windowTransfersRoot` commits EVERY transfer of the account inside the
+  window**: holds, posts, voids, funding credits and anything else. So the
+  completeness claim covers the whole window, not only its charges (§15.6,
+  §15.11);
+- transfers that are not debit holds move no boundary. §15.2's RA-3 makes it
+  an invariant that every governed charge is a hold.
+
+**Why this meets the rule it replaces.** The retired rule was "reserve first,
+never a transfer set chosen afterwards". Its intent was that no one — caller or
+minter — picks which spend a receipt covers. Reservation achieved that by
+fixing the scope BEFORE the work. Clusters achieve it in four ways:
+
+- the scope is a FUNCTION OF THE LEDGER (§15.3);
+- every mintable window MUST be minted, strictly in order (§15.5);
+- a window that cannot be minted is never dropped silently. The account's
+  next receipt must disclose it, with its reason, and names its own
+  predecessor (§15.10). Omitting a window takes a false signed disclosure,
+  which the completeness audit catches (§15.11);
+- the receipt commits to every transfer in its window, and §15.11 states
+  exactly what that claim is and who can check it.
+
+**The session kind is RESERVED: defined, never issued.**
+
+- **None exists.** No session receipt has ever been issued, anywhere.
+- **Why the text stays.** The session text — §2's block, §3's reservation
+  rule, §6, §6a, generations, §12's finalization rule, and the resolver's
+  reservation states — stays verbatim, so that the public verifier's existing
+  session support stays coherent.
+- **Nobody produces one.** A conformant minter never issues a session receipt.
+  A conformant resolver never serves one: it refuses any receipt whose `scope`
+  or `work.kind` is not `cluster`.
+- **Were one ever presented** to an offline verifier, it would verify under
+  that text, unchanged.
+- **The forever-valid rule** — a receipt this spec issued stays valid
+  forever — now binds cluster receipts. For the session kind it is vacuous.
+
+**Shared by both kinds, unchanged:**
+
+- the mint event, its envelope and the proxy-v1 proof machinery (§4, §4a);
+- the receipt document and its signature (§5);
+- keys, trust and time (§8);
+- canonicalization (§13);
+- the verdict ladder, the nine steps, the four named checks and the closed
+  failure vocabulary (§7). v0.10 adds no check and no code:
+  `predecessorLinkage` gains a cluster statement under its existing code
+  (§15.10);
+- §2's spend block, posture enums, `pricing`, `startedAt`/`endedAt`, the pair
+  model, `transferSet`/`transferSetRoot` (same domain, same ≤ 32 rule), and
+  the public-safety rules.
+
+### 15.2 Definitions
+
+- **Receipt account `A`.** One funded ledger account — the receipt's
+  SUBJECT. Today one agent key maps to one ledger account, so agents that share
+  a key share its windows and its threshold. Finer-grained per-agent accounts
+  would each be a receipt account, and change nothing here.
+- **Ledger timestamp `ts(x)`.** The timestamp the ledger assigns transfer `x`
+  when it commits it: nanoseconds since the UNIX epoch, unique across every
+  object the ledger holds, and strictly increasing in commit order across the
+  whole ledger. (TigerBeetle's `Transfer.timestamp`, which the cluster sets to
+  the moment the transfer arrives.) The minter never assigns one.
+- **Ledger clock `L`.** The timestamp of the ledger's most recently committed
+  transfer, on ANY account.
+- **Debit hold.** A pending transfer whose debit account is `A`. `H(A)` is the
+  set of them.
+  - A hold is **ARMED** when the operator wrote a durable admission record for
+    it BEFORE creating it. That record is what the settlement path and the
+    sweep of abandoned holds track the hold by. Every armed hold carries
+    `timeout = 0` (RA-1).
+  - A hold with no admission record is **UNARMED**: it was created outside that
+    path, nothing tracks it to a post or a void, and it may carry a ledger
+    timeout.
+  - A hold is **POSTED** when the ledger commits the post that resolves it,
+    which forms a §6a pair.
+  - A hold is **VOIDED** when the ledger commits the void that resolves it.
+  - A hold is **EXPIRED** when it carries a timeout and the ledger clock has
+    reached its expiry instant, `ts(h) + timeout × 10^9` (the timeout is in
+    seconds). The ledger then accepts no post or void for it, and records no
+    transfer for the expiry.
+  - **Defensive rule: an UNARMED hold with `timeout = 0` counts as RESOLVED
+    at its own timestamp for windowing — ALWAYS, whether or not the ledger
+    ever posts or voids it.** It cannot expire, and nothing tracks it to a
+    post or a void, so without this rule it would hold its window open, and
+    with it the account's chain, forever.
+    - **The resolution is FINAL.** A post or void of such a hold is a
+      NON-boundary transfer at its own timestamp, like a funding credit, and
+      it moves no window's activity end. Inside a window's span, it refuses
+      that window (`unarmed-hold`, §15.5). In an idle gap, it belongs to no
+      window. Either way the hold's own window, refused in any case, is what
+      discloses the hold.
+    - **So it can never touch a minted window.** A minted window was closed
+      at a ledger clock `L ≥ windowEnd + θ`, and anything committed later is
+      timestamped above `L`, so it lands outside that window's span. The
+      partition stays a pure function of the ledger.
+    - Whether a hold is armed MUST be read AFTER the account's transfers. An
+      admission record is written BEFORE its hold exists, so in that order an
+      armed hold is never taken for unarmed.
+    - No current producer path creates such a hold, but nothing enforces
+      that (RA-4). The rule is defense in depth.
+  - A hold is **open** until it is posted, voided or expired, or the
+    defensive rule resolves it. `res(h)` is the post or void that resolved
+    `h`. It names `h` (`pending_id`) and carries `h`'s accounts, so it is
+    itself a transfer of `A`. For an expired hold, `ts(res(h))` means its
+    expiry instant. For a hold the defensive rule resolves, it means `ts(h)`,
+    and an actual post or void of that hold is never `res(h)`.
+- **Activity end `end(W)`** of a set of holds `W`: the latest of their
+  timestamps and their resolutions' timestamps,
+  `max over h ∈ W of max(ts(h), ts(res(h)))`. It is UNBOUNDED while any member
+  of `W` is open.
+- **Pre-provider void.** A void whose reason, as the operator recorded it,
+  shows it happened BEFORE the governed request was sent to any provider — so
+  no provider can have billed for it.
+- **Idle threshold `θ`.** The receipt account's configured threshold, set per
+  agent key: `600000000000` ns (10 minutes) by default, adjustable within
+  `60000000000 ≤ θ ≤ 86400000000000` ns (60 s to 24 h). It is CONFIGURATION,
+  set ahead of the work, never a per-receipt choice:
+  - **The rule: every window keeps the `θ` in force at its first hold**, for
+    its whole life. No change of configuration re-cuts a window that has
+    opened, whether it is open, closed, refused or waiting;
+  - **v0.10 makes the rule true by construction, from a PRECONDITION:** `θ` is
+    set before the account's first debit hold, and is IMMUTABLE after it. The
+    operator's configuration refuses any later change, so every window of the
+    account is cut with the same `θ`;
+  - **so the governing `θ` is simply the account's configured value once it
+    has a debit hold.** Changes made before the first hold bind no window.
+    Two changes therefore never compete for a window, and nothing needs a
+    tie-break;
+  - every receipt signs its window's `θ` (`idleThresholdNs`);
+  - **a `θ` history is RESERVED for a later version:** changes recorded
+    append-only, each with a ledger-time effective-from, which would allow a
+    change while keeping the rule. v0.10 has none (§15.11).
+
+**Native primitives, checked first.** The window and its closure are built on
+what the ledger already provides, as its own documentation states it. They
+define only what the ledger does not.
+
+- **Ordering:** the ledger's own transfer timestamps (above). A boundary is
+  cut on the ledger's clock, never on a minter's.
+- **Holds:** two-phase transfers. A pending transfer is resolved by a post or
+  a void that names it and carries its accounts.
+- **Enumeration:** `get_account_transfers` returns every transfer with the
+  account on either side, ascending by timestamp, paged by timestamp.
+- **The clock:** `query_transfers` with no filter, reversed, limit 1, returns
+  the ledger's latest transfer. Its timestamp is closure's evidence (§15.4).
+- **Expiry, and no chosen time:** an armed hold carries `timeout = 0`, so it
+  ends in a transfer (RA-1). An unarmed hold's ledger timeout gives it a
+  computable expiry instant: its timestamp plus its timeout. An unarmed hold
+  with no timeout falls under the defensive rule above. No transfer carries
+  the `imported` flag (RA-2), so no client chooses a timestamp.
+
+The ledger has no idle-window primitive and no heartbeat. §15.3 and §15.4
+define the window over the primitives above, and v1 adds no heartbeat (§15.4).
+
+**Receipt-account invariants.** These bind the minter and its ledger
+configuration. Each is measured on the deployed system (§11), not assumed.
+
+- **RA-1. No ARMED hold can expire.** Every armed hold carries `timeout = 0`,
+  as §6a already requires of receipt-bound holds, so it ends in a post or a
+  void. An armed hold that expired anyway is an integrity incident, and its
+  window is refused (`cluster-void`, §15.5). An UNARMED hold either expires,
+  which counts as its resolution, or, with `timeout = 0`, the defensive rule
+  resolves it at its own timestamp (above). Either way it never holds a
+  window open forever, and its window is refused (`unarmed-hold`, §15.5).
+- **RA-2. No transfer of a receipt account carries a client-supplied
+  timestamp** (TigerBeetle's `imported` flag). A chosen timestamp would let a
+  transfer's creator place a window boundary, which the ruling forbids.
+- **RA-3. Every governed charge to a receipt account is a debit hold.** The
+  minter MUST NOT charge a governed call any other way.
+  - A debit that is not a hold is not a governed charge, and is outside every
+    receipt's amount. It is still committed by `windowTransfersRoot` when it
+    falls inside a window (§15.6).
+  - Were governed calls charged by single-phase debits, a receipt would
+    understate the account's charges without any rule here noticing. That is
+    why this is an invariant rather than an assumption.
+- **RA-4. No unarmed hold carries `timeout = 0` — a producer CONVENTION,
+  stated as an operator invariant.** A hold's ledger timeout defaults to
+  300 s, and only the ARMED paths pass `timeout = 0`, each right after it
+  records the admission. Nothing enforces this, and a third party cannot
+  check it. That is why §15.2's defensive rule exists.
+
+### 15.3 The window — system-defined (RULED)
+
+**Definition.** Take `H(A)` in timestamp order. The first hold opens a window
+`W`. Each next hold `h′` then either joins `W` or opens a new window:
+
+- `h′` **opens a new window** iff `ts(h′) − end(W) ≥ θ_W`, where `end(W)` is
+  the activity end of `W`'s holds so far, and `θ_W` is the `θ` in force at
+  `W`'s first hold (§15.2) — in v0.10, the account's one immutable `θ`;
+- otherwise `h′` joins `W`. In particular, while any hold of `W` is open,
+  `end(W)` is unbounded, and every next hold joins.
+
+A window's **`windowStart`** is the timestamp of its first hold. Its
+**`windowEnd`** is its activity end, `end(W)`. Its **`idleThresholdNs`** is
+`θ_W`.
+
+**Never re-cut.** Each window's bounds depend only on the ledger and on
+`θ_W`, which v0.10 makes immutable (§15.2). A window that has opened keeps its
+first hold, and so its ID (§15.9). A minter cuts windows
+forward from the end of the account's latest MINTED window, and that yields
+exactly these windows.
+
+**Consequences.** Each one is decidable from the ledger and the account's
+`θ`.
+
+- **A closed window is a pure function of the ledger.** Given `θ` and the
+  timestamps of the holds and their resolutions, the window containing any
+  hold — its members and its bounds — is determined. Nobody
+  reserves or chooses one.
+- **The windows partition `H(A)`.** Every hold belongs to exactly one window.
+- **A logical transfer never straddles two windows.** A hold's post or void
+  lies inside its hold's window, because `windowEnd` is at least its
+  timestamp. No boundary can fall while a hold is in flight. The one
+  exception is the post or void of a hold that §15.2's defensive rule
+  resolves. It is a non-boundary transfer, and any window it lands in is
+  refused (§15.5).
+- **Consecutive windows are disjoint, and at least the EARLIER window's `θ`
+  apart:** `windowStart₂ ≥ windowEnd₁ + θ₁`. §15.10's chain rule and §15.12
+  rely on this.
+- **An OPEN hold moves no boundary.** It blocks CLOSURE (§15.4).
+- **Transfers that are not debit holds move no boundary.** Funding credits and
+  other movements of `A` inside `[windowStart, windowEnd]` are committed by
+  `windowTransfersRoot` (§15.6). Those in an idle gap belong to no window.
+
+### 15.4 Closure — when a window is final
+
+A window `W` of `A` is **CLOSED** iff both hold:
+
+- **(a)** every hold in it is resolved — posted, voided or expired, or by
+  §15.2's defensive rule; and
+- **(b) LEDGER-TIME EVIDENCE:** the ledger clock satisfies
+  `L ≥ windowEnd + θ_W`.
+
+**The read order is normative.** The minter MUST read `L` FIRST. Only then
+does it read `A`'s transfers — both sides, to exhaustion — and it cuts the
+window from that later read.
+
+- **Why that suffices.** The ledger is strictly serializable. Every transfer
+  timestamped at or below `L` was committed before `L` was read, so the later
+  query returns it. Anything committed afterwards carries a timestamp above
+  `L`, hence above `windowEnd + θ_W` too, so it opens a new window (§15.3).
+- **Why the order matters.** Read the other way round, a hold that commits
+  between the two reads is missing from the partition while `L` already
+  covers it. The window would then close without a member it owns.
+
+**(b) makes closure irrevocable.** Ledger timestamps strictly increase in
+commit order. So a closed window can never gain a member, and its activity end
+can never move. Its completeness is a fixed fact, not a race. This holds
+without exception: the defensive rule's resolution is final (§15.2).
+
+- **The minter's clock never decides closure.** It decides only WHEN to look.
+- **No heartbeat in v1.** An idle LEDGER does not advance `L`. A window then
+  waits until some transfer, on any account, lands at or after
+  `windowEnd + θ_W`. That is fail-safe: a window is never closed early. A
+  heartbeat — a transfer committed only to advance the clock, on an account
+  that is not a receipt account — would be a separate change.
+- **A stuck hold blocks closure; it never shortens a window.** An abandoned
+  ARMED hold stays open until the operator's sweep of abandoned holds voids it.
+  That void is not pre-provider, so the window then closes UNMINTABLE
+  (`cluster-void`, §15.5), and the account's next receipt discloses it. An
+  abandoned UNARMED hold resolves when its ledger timeout expires it, or at
+  once by §15.2's defensive rule if it has none. Its window is refused
+  (`unarmed-hold`).
+  - Until the sweep, every later hold of the account joins that window, so one
+    abandoned hold carries the later charges into the refused window with it.
+  - The disclosure shows the refused window's span and reason. How soon the
+    sweep runs is operator policy, which a third party trusts (§15.11).
+
+### 15.5 Mintability, refusal and order
+
+A CLOSED window is **MINTABLE** iff every condition below holds. They are
+checked in this order, and the first one that fails names the window's single
+refusal reason. Within a condition, holds are taken in timestamp order.
+
+1. **Every hold is ARMED** (§15.2), and no post or void of a hold that
+   §15.2's defensive rule resolves lies inside the window's span. An unarmed
+   hold went through no settlement path, so there is no settlement record to
+   price it from or to wait for. Otherwise → `unarmed-hold`.
+2. **Every hold is POSTED, or VOIDED pre-provider** (§15.2).
+   - A pre-provider void is excluded from the pairs, but is still a member: it
+     moved the boundaries like any hold.
+   - **Any other void makes the window UNMINTABLE, and so does an armed hold
+     that expired.** A void after the request could have reached a provider
+     can hide work the provider billed, and minting would understate it.
+     → `cluster-void`.
+   - A void whose recorded reason is not visible yet → WAITING.
+3. **At least one hold is POSTED.** Otherwise → `empty-cluster`.
+4. **Every POSTED hold maps to a priced record whose snapshot hashes to what
+   its settlement event committed**, and whose posted amount is the one that
+   event recorded. The price the receipt sums is the price the chain recorded
+   at settlement. A record or event not written yet → WAITING. Otherwise →
+   `snapshot-missing`, `posted-amount-mismatch`, `snapshot-not-on-chain`,
+   `snapshot-unverifiable` or `unknown-provider`.
+5. **The projection can be built under every §15.6 rule, and passes the
+   minter's own v1 refusals**: an estimate-settled transfer, or a non-exact
+   rate, gets no receipt rather than a wrong amount. Every §15.6 rule that
+   can fail maps to EXACTLY ONE reason:
+
+   | §15.6 rule that fails | Reason |
+   |---|---|
+   | the `account` format | `bad-account` |
+   | the window fields, `θ`'s bounds, `skippedSincePrevious`, `windowTransfersRoot` or `windowTransferCount` (including `≥ 2 × transferCount`) | `bad-window` |
+   | `work`, or the `repoId` syntax | `bad-repo-id` |
+   | a transfer ID that is not canonical, or a pair whose two IDs are equal | `bad-transfer-id` |
+   | a transfer ID that repeats | `duplicate-transfer` |
+   | an estimate-settled constituent, the only way `usagePosture` could be other than `provider` | `estimated-transfer` |
+   | a rate that is not an exact catalog rate. This is also `models`' public-safety rule: a model outside the catalog is never published, so `"custom"` never appears in v1 | `non-exact-rate` |
+   | `providers`' public-safety rule: a constituent whose provider is not in the catalog (found at condition 4) | `unknown-provider` |
+   | `pricing.tableVersions`: a constituent snapshot whose table version is missing or malformed | `snapshot-unverifiable` |
+   | `posted === assessed` | `posted-assessed-mismatch` |
+   | an amount that is not a positive safe integer, or a constituent with no priced rows | `bad-amount` |
+   | the rounding bound | `rounding-out-of-bounds` |
+   | `transferCount ≥ 1` (found at condition 3) | `empty-cluster` |
+   | `startedAt`/`endedAt` that are not RFC 3339 UTC to the millisecond, or `startedAt > endedAt`: the chain's own settlement times disagree with its order | `evidence-inconsistent` |
+
+   Everything else in §15.6 holds by construction: the sorted-unique
+   lists, the fixed `scope`, `delegationPosture` and `work.kind`, the
+   transfer-set root, `previousReceiptId` (taken from the registry), and the
+   key set. A failure there is a defect in the minter, never a disclosed
+   refusal.
+6. **The mint event is consistent:** at most one `receipt_settled` event
+   exists for the window, it equals the projection, and its `timestamp` is
+   not earlier than `endedAt`, the last settlement it cites (otherwise →
+   `duplicate-mint-event` or `mint-event-mismatch`). Once its segment is
+   sealed, the anchor matches (otherwise → `anchor-mismatch`).
+7. **Every POSTED pair reconciles** across the ledger, the operator's store
+   and the audit chain (§1's oracle). Records that disagree →
+   `evidence-inconsistent`; a check that could not run → WAITING.
+8. **No POSTED pair is already consumed by another receipt** (§15.10).
+   Otherwise → `consumed-by-another-receipt`.
+
+**Three outcomes, and no fourth.**
+
+- **MINTED.** The window gets its receipt.
+- **WAITING.** Something is not decidable yet: a resolution or its recorded
+  void reason is not visible, reconciliation has not drained, the segment is
+  not sealed, or a read failed. The window is neither minted nor refused, and
+  every LATER window of the account waits behind it.
+- **REFUSED — UNMINTABLE.** A deterministic refusal from immutable evidence,
+  so it refuses again on every run, with exactly ONE reason from §15.6's
+  closed list. The window never gets a receipt, and its ID answers 404 forever
+  (§15.13). The account's next minted receipt discloses it.
+
+**EVERY mintable window is minted — the minter MUST NOT select.** Choosing
+which windows get receipts would reintroduce cherry-picking at window
+granularity. **Minting is strictly ordered per account:** a window is minted
+only after every earlier window of the account is minted or refused.
+
+### 15.6 The cluster projection (`scope: "cluster"`)
+
+```jsonc
+{
+  "spec": "ut1",
+  "scope": "cluster",
+  "account": "a1_…",                    // the receipt account's PUBLIC HANDLE (§15.7) —
+                                        // never a ledger ID
+  "windowStart": "1791234567890123456", // ledger ns: ts of the window's FIRST hold
+  "windowEnd": "1791234601000000000",   // ledger ns: its ACTIVITY END (§15.3) — the latest
+                                        // hold, post or void timestamp in the window
+  "idleThresholdNs": "600000000000",    // θ, the account's threshold (§15.2)
+                                        // All three are canonical u64 DECIMAL STRINGS.
+                                        // Ledger nanoseconds exceed 2^53, so §13's
+                                        // safe-integer rule forbids JSON numbers for the
+                                        // bounds; θ_W shares their encoding
+  "previousReceiptId": "ut1_…",         // OPTIONAL: the same account's previous MINTED
+                                        // receipt; key-ABSENT on the account's first
+  "skippedSincePrevious": {             // OPTIONAL: key-ABSENT when nothing was skipped
+    "count": 1,                         //   how many windows were REFUSED since then
+    "windows": [ { "windowStart": "…", "windowEnd": "…", "reason": "cluster-void" } ],
+                                        //   the first min(count, 16), ascending
+    "windowsRoot": "…"                  //   commits ALL `count` of them
+  },
+  "windowTransfersRoot": "…",           // COMPLETENESS commitment: EVERY transfer of the
+                                        // account in [windowStart, windowEnd]
+  "windowTransferCount": 3,             // a JSON INTEGER, never a decimal string: how
+                                        // many transfers that root commits
+  "work": { "kind": "cluster" },        // REQUIRED; `repoId` OPTIONAL and key-ABSENT when
+                                        // absent (§15.8)
+  "models": ["…"],                      // §2's rules
+  "providers": ["…"],                   // §2's rules
+  "startedAt": "…",                     // §2's semantics, unchanged: chain timestamps of the
+  "endedAt": "…",                       //   first/last constituent settlement event — clock
+                                        //   CLAIMS (§8), on the CHAIN's clock, not the ledger's
+  "spend": { /* §2's spend block, unchanged — over the POSTED holds */ },
+  "delegationPosture": "selfDebitsOnly",  // §2a; v1 minting emits only this value
+  "pricing": { "tableVersions": ["…"] },
+  "transferSet": [ { "authorizationTransferId": "…", "settlementTransferId": "…" } ],
+                                        // §2's rule unchanged: the POSTED holds' pairs, in
+                                        // chain order; present iff transferCount ≤ 32
+  "transferSetRoot": "…"                // §2's construction unchanged — same domain,
+                                        // "usertrust/receipt-transfers/v1\n"
+}
+```
+
+**`windowTransfersRoot` and `windowTransferCount` — the completeness
+commitment.**
+
+```
+list = every transfer x with A as its debit OR its credit account, and
+       windowStart ≤ ts(x) ≤ windowEnd, in ascending ts(x) order, each as
+       { "id":        the transfer's 128-bit ID as 32 lowercase hex characters
+                      (§2's transfer-ID encoding),
+         "timestamp": ts(x) as a canonical u64 decimal string }
+windowTransfersRoot = lowercase hex of SHA-256( utf8("usertrust/receipt-window-transfers/v1\n")
+                                                || utf8(canonicalize(list)) )
+windowTransferCount = the length of list, as a JSON integer (never a decimal string)
+```
+
+- **Every transfer, not only charges:** holds, posts, voids, funding credits,
+  and any other movement of the account in the range.
+- **Only the root and the count are published.** The list is never in the
+  receipt. Whoever checks it rebuilds it from the ledger (§15.11), so
+  `windowTransfersRoot` is always a COMMITMENT, never recomputable from the
+  receipt.
+- **Every posted pair puts its hold AND its post in the list**, because
+  `windowEnd` is the activity end, which includes resolutions (§15.3). So
+  `windowTransferCount ≥ 2 × spend.transferCount`, and step 7 checks it
+  (below).
+
+**Two commitments, deliberately.**
+
+- `transferSetRoot` keeps exactly §2's meaning: the posted pairs. Every spend
+  rule reads it unchanged.
+- `windowTransfersRoot` is the COMPLETENESS commitment: every transfer of the
+  account in the window, charge or not.
+
+Folding both into one root would change `transferSetRoot`'s meaning per kind,
+and §14's rule is that a meaning, once frozen, is never reused for another.
+
+**`previousReceiptId` and `skippedSincePrevious` — the receipt chain
+(§15.10).**
+
+- **`previousReceiptId`** is the receipt ID of the same account's previous
+  MINTED receipt. It is key-absent on the account's first receipt, and it
+  never names the receipt itself.
+- **`skippedSincePrevious`** discloses every REFUSED window of the account
+  since that receipt — or since the account's first hold, on its first
+  receipt:
+
+  ```
+  S = every refused window between them, ascending, each as
+      { "windowStart": canonical u64 decimal, "windowEnd": canonical u64 decimal,
+        "reason": one of the 23 reasons below }
+  skippedSincePrevious = { "count":       the length of S,
+                           "windows":     the first min(count, 16) entries of S,
+                           "windowsRoot": lowercase hex of SHA-256(
+                                            utf8("usertrust/receipt-skipped-windows/v1\n")
+                                            || utf8(canonicalize(S)) ) }
+  ```
+
+  - It is key-absent when `S` is empty. An absent field asserts that the gap
+    since the previous receipt was genuinely idle.
+  - `windowsRoot` commits ALL of `S`, including any entries past the
+    sixteenth.
+- **The reasons are a CLOSED list of 23: the mint's own refusal reasons,
+  each named by the §15.5 condition that yields it.**
+  - The window's holds (conditions 1–3): `unarmed-hold` (a hold with no
+    admission record), `cluster-void` (a void that was not pre-provider,
+    including the sweep of an abandoned armed hold, or an armed hold that
+    expired) and `empty-cluster` (no posted hold).
+  - A posted hold's priced record (4): `snapshot-missing`,
+    `posted-amount-mismatch`, `snapshot-not-on-chain`,
+    `snapshot-unverifiable` and `unknown-provider`.
+  - The projection's own rules (5): `bad-account`, `bad-window`,
+    `bad-repo-id`, `estimated-transfer`, `non-exact-rate`,
+    `posted-assessed-mismatch`, `duplicate-transfer`, `bad-transfer-id`,
+    `bad-amount` and `rounding-out-of-bounds`.
+  - The mint event and its evidence (6–7): `duplicate-mint-event`,
+    `mint-event-mismatch`, `anchor-mismatch` and `evidence-inconsistent`.
+    `evidence-inconsistent` also covers condition 5's chain settlement times
+    that disagree with their order.
+  - One receipt per charge (8): `consumed-by-another-receipt`.
+
+  A reason outside the list fails step 7. Adding one is a revision of this
+  spec.
+
+**Two clocks, deliberately, with no relation enforced between them.**
+
+- `windowStart`/`windowEnd` are LEDGER timestamps of holds and resolutions.
+  They DEFINE the window, and `windowStart` feeds the ID.
+- `startedAt`/`endedAt` are CHAIN timestamps of SETTLEMENT events, with §2's
+  meaning: display claims.
+
+They are different events on different clocks, so no inequality between them
+is a verification rule. A consumer must not render one pair as if it were the
+other.
+
+**Scope-forbidden — KEY-ABSENT on a cluster projection:**
+
+- `sessionId`, `generation`, `prevGenerationEventHash`: a closed window has
+  nothing to add an addendum to;
+- `sessionAssociation` and `workloadId`;
+- inside `work`: everything except `kind` and `repoId`. That includes `repo`,
+  `repositoryMembership`, `origin`, and the artifact members of the other
+  kinds.
+
+**Semantic validation for `scope: "cluster"`.** It is verifier-enforced,
+decided from the receipt alone, and EXHAUSTIVE for §7 step 7 on this scope.
+
+- **Inherited:** all of §2's rules for the fields this projection adopts —
+  `models`, `providers`, `pricing.tableVersions`, the `spend` relations
+  (`0 < postedUsertokens === assessedUsertokens`, `0 ≤ roundingAdjustment ≤
+  transferCount`, `transferCount ≥ 1`), the `transferSet`/`transferSetRoot`
+  rules, `delegationPosture`, the posture enums, `startedAt`/`endedAt`
+  syntax, the public-safety syntax, and the strict schema.
+- **`account`:** the prefix `a1_`, then a body that §12's two decode rules
+  accept. It decodes to EXACTLY 16 bytes and re-encodes byte-identically, so
+  it is 16–22 base58btc characters.
+- **The window:** `windowStart` and `windowEnd` are canonical u64 decimal
+  strings — they match `^(0|[1-9][0-9]{0,19})$` and are at most `2^64 − 1` —
+  with `windowEnd ≥ windowStart`, compared as integers, never as strings or
+  floats. `idleThresholdNs` is a canonical u64 decimal string with
+  `60000000000 ≤ idleThresholdNs ≤ 86400000000000`.
+- **`previousReceiptId`**, when present: a receipt ID under §3's format and
+  §12's decode rules, and not this receipt's own `receiptId`.
+- **`skippedSincePrevious`**, when present:
+  - exactly the keys `count`, `windows` and `windowsRoot`;
+  - `count` an integer, at least 1;
+  - `windows` exactly `min(count, 16)` long. Each member has exactly the keys
+    `windowStart`, `windowEnd` and `reason`, with canonical u64 bounds,
+    `windowStart ≤ windowEnd`, and a reason from the closed list;
+  - the members ascending and disjoint: each `windowEnd` strictly below the
+    next member's `windowStart`;
+  - `windowsRoot` 64 lowercase hex characters;
+  - EVERY member's `windowEnd` strictly below the receipt's `windowStart`,
+    whatever `count` is. The members are the FIRST `min(count, 16)` refused
+    windows, ascending, so even a truncated list precedes this window, and
+    checking its last member suffices.
+- **`windowTransfersRoot`:** 64 lowercase hex characters.
+  **`windowTransferCount`:** a JSON integer — never a decimal string — in
+  §13's safe range, at least 2, and at least `2 × spend.transferCount`.
+- **`startedAt ≤ endedAt ≤ event.timestamp`.** All three are on ONE clock, the
+  chain's: the constituent settlements are recorded before the mint event that
+  cites them. (This is not a rule across clocks: it never compares a chain
+  timestamp with a ledger one.)
+- **`work`:** exactly `{kind: "cluster"}` or `{kind: "cluster", repoId}`
+  (§15.8).
+- **Scope-forbidden fields** are absent, and so is every key the block above
+  does not list (§2's strict schema).
+
+**Step 8 recomputes what the receipt carries** (§7): `transferSetRoot` over
+`transferSet` when the pairs are listed, and `windowsRoot` over `windows` when
+`count ≤ 16`. Past 16 entries `windowsRoot` is a commitment, like
+`transferSetRoot` past 32 pairs, and like `windowTransfersRoot` always.
+
+### 15.7 `account` — a keyed public handle, never a ledger ID
+
+```
+K       = SHA-256( utf8("usertrust/account-handle-key/v1\n") || S )
+account = "a1_" + base58btc( first 16 bytes of HMAC-SHA256(K, u128be(ledgerAccountId)) )
+```
+
+`S` is an **operator-held handle key**, separate from every signing key: it is
+not the mint key, and not the checkpoint key. `u128be(ledgerAccountId)` is the
+ledger account ID as 16 big-endian bytes.
+
+- **Keyed, deliberately.** A receipt never publishes a ledger account ID, and
+  nobody without `S` can link a handle to a ledger account FROM THE HANDLE.
+  Ledger TRANSFER IDs are another matter: `transferSet` publishes them,
+  unkeyed (§2, inherited), so a party that can query the ledger can resolve a
+  listed transfer, and with it the account (§15.11).
+- **Stable.** One account has one handle, forever. Because `S` is not a signing
+  key, rotating the signing keys (§8) changes no handle.
+- **Rotating `S` is an incident action, never routine.** It would change every
+  handle, and break the receipt chain (§15.10) and the cross-receipt rule
+  (§15.12) across the rotation.
+- **Verifiers validate the FORMAT only** (§15.6). They cannot recompute a
+  handle, and no verification step depends on recomputing one.
+- **`S` is never published**, never appears in a receipt, and is held with the
+  custody discipline of the signing keys.
+
+### 15.8 `work` for clusters — `repoId` optional
+
+`work` is `{ kind: "cluster", repoId? }`.
+
+- **The object is REQUIRED**, so §4 equality 9 — the §5 body's `work` mirrors
+  the projection's — holds unchanged.
+- **`repoId` is OPTIONAL, and key-absent when absent** — never `null`, and
+  never `""`. When present it is a property of the ACCOUNT, never of a
+  receipt: the repository the operator bound the account to. A minter MUST NOT
+  add, change or omit it per receipt, which would be a chosen scope.
+  - **v1 minters omit `work.repoId`.** Every v1 receipt's `work` is exactly
+    `{kind: "cluster"}`.
+  - A future producer that binds an account to a repository MUST make the
+    binding immutable after the account's first debit hold, through the same
+    configuration guard as `θ` (§15.2). Every receipt of the account then
+    carries the same `work` (§15.10).
+  - Readers accept either syntax below whenever `repoId` is present.
+- **Its syntax is decidable from the receipt.** `repoId` matches
+  `^(?:[a-z0-9.-]+:[A-Za-z0-9_=-]{1,200}|r1_[A-Za-z0-9_-]{1,200})$`: the
+  provider's immutable repository ID as `<provider>:<id>`, or §2's keyed `r1_…`
+  form for an undisclosed private repository. Neither form admits `/`, `?`,
+  `#`, `@`, whitespace or a control character, so a receipt can never carry a
+  path, a query string, a fragment or credentials there. The provider form
+  can still LOOK like a URL scheme, so a consumer MUST NOT render `repoId` as
+  a link.
+- **No artifact membership.** A cluster receipt attests NO artifact
+  membership, so `repositoryMembership`, `repo` and `origin` are absent.
+  `repoId` says which repository the account is configured for, and nothing
+  about any commit, PR or issue.
+
+### 15.9 The receipt ID — deterministic, recomputable offline
+
+```
+receiptId = "ut1_" + base58btc( first 16 bytes of
+              SHA-256( utf8("usertrust/cluster-receipt-id/v1\n")
+                       || utf8( canonicalize({ "vaultId": proof.chain,
+                                               "account": account,
+                                               "windowStart": windowStart }) ) ) )
+```
+
+- **Every input is signed.** `account` and `windowStart` are in the projection,
+  which the chain commits. `vaultId` is `proof.chain`, which §4 equality 8 ties
+  to the checkpoint's SIGNED `vaultId`. The vault is included so that IDs cannot
+  collide across chains.
+- **The format is §3/§12's, unchanged:** 16 bytes, canonical base58btc, 16–22
+  characters after `ut1_`. The trailer grammar does not move.
+- **One window ⇒ one ID ⇒ at most one receipt.** The registry's
+  first-write-wins rule and §3's collision rule apply unchanged.
+- **RECOMPUTED, offline (§7 step 3(c)).** §3 retired derivation for the session
+  kind, which had to cite an ID before its event existed. A cluster ID is
+  derived from what the receipt itself commits. The resolver recomputes it on
+  every read as well (§15.13).
+- **It exists before the receipt does.** Anyone who knows `vaultId`, `account`
+  and `windowStart` can compute it once the window's first hold commits, and
+  can cite it then: a window that has opened keeps its first hold (§15.3).
+  §15.13 states what the resolver answers meanwhile.
+
+### 15.10 Mint lifecycle and the receipt chain — exactly-once without a reservation
+
+This replaces §6 and §6a for every receipt v0.10 issues. Every arrow is durable
+before it advances, and §6's single-writer and append-boundary fencing rules
+apply unchanged.
+
+```
+read the ledger clock L; THEN read the account's transfers after the end of its latest
+     MINTED window — both sides, to exhaustion (§15.4's read order). The ledger's
+     answer is the input; a store's copy is not a substitute
+  → cut the windows with the account's θ (§15.2, §15.3); take them IN ORDER:
+  → not CLOSED (§15.4) → WAITING: stop; every later window waits too
+  → mintability (§15.5): WAITING → stop. REFUSED → add the window to the skip list
+     with its reason; go on to the next window
+  → build the projection, with previousReceiptId = the account's latest minted
+     receipt and skippedSincePrevious = the skip list. It is a deterministic
+     function of immutable evidence, so a re-run rebuilds the same canonical bytes
+  → the DURABLE MINT INTENT is the chain's own receipt_settled event, appended
+     under §6's append-boundary fence. Recovery scan: the chain's receipt_settled
+     events with scope "cluster" and this (account, windowStart). ZERO → append;
+     ONE → adopt ONLY IF its data canonicalizes byte-identically to the
+     projection and its actor is the registered mintActor; anything else →
+     REFUSED (duplicate-mint-event, mint-event-mismatch)
+  → wait for the mint event's segment to be SEALED (§6, §4a); check its anchor
+     and the evidence cross-check (§15.5)
+  → sign (§5), and self-verify from the signed bytes
+  → registry write, all or nothing and FIRST-WRITE-WINS: receiptId → event.hash;
+     event.hash → signed bytes; each posted pair consumed under its own key;
+     the account's chain advanced from previousReceiptId
+  → publish; the skip list starts empty again
+```
+
+**The receipt chain.**
+
+- **Strictly ordered per account.** Each receipt's `previousReceiptId` is the
+  account's latest minted receipt at the moment it is minted, and the first
+  receipt has none. The registry keeps the chain linear: at most one receipt
+  names a given predecessor, and at most one is an account's first. It
+  enforces both with a unique key, as it does one receipt per ID and one
+  consumption per posted pair.
+- **Refusals are disclosed, never dropped.** The refused windows since the
+  latest receipt accumulate, and the next minted receipt carries them as
+  `skippedSincePrevious`.
+- **A refusal after the append leaves an event, never a receipt.** A window
+  refused after its `receipt_settled` event was appended leaves that event in
+  the chain. It has no registry row, so the resolver never serves it, and its
+  ID answers 404 (§15.13).
+
+**Producer guarantees: true by construction in v0.10, not yet checked by a
+verifier.** The minter makes each of these true, because `θ` is immutable
+(§15.2) and every window, refused or minted, comes from one partition
+(§15.3). v0.10's step 7, `predecessorLinkage` and `windowDisjointness` do not
+check them; verifier enforcement is deferred to v0.10.1 (§15.11).
+
+1. **The idle gap around skipped windows.** Consecutive listed skipped windows
+   are at least `θ` apart (`next.windowStart ≥ windowEnd + θ`), and the last
+   listed one ends at least `θ` before this receipt's `windowStart`. The
+   verifier checks only their order and that they precede this window
+   (§15.6).
+2. **One `θ` per account.** Every receipt of an account carries the same
+   `idleThresholdNs`. So `predecessorLinkage`'s `prev.idleThresholdNs` and
+   `windowDisjointness`'s `θ₁` are both the account's `θ`.
+3. **One `work` per account.** Every receipt of an account carries the same
+   `work`. v1 minters omit `work.repoId`, so every v1 receipt's `work` is
+   exactly `{kind: "cluster"}`. A future producer that binds a repository
+   must fix the binding at the account's first debit hold, through the same
+   guard as `θ` (§15.8).
+
+**`predecessorLinkage` — §7's named check, cluster statement.** A party with
+registry access checks the chain. The resolver does so on every read.
+
+- **`previousReceiptId` absent:** the account has no receipt before this
+  window. The result is `notApplicable`, as at session generation 1.
+- **`previousReceiptId` present:** exactly one registry row binds that ID, and
+  - it is the same vault (`proof.chain`) and the same `account`;
+  - the row is not trusted for its own window: its ID re-derives from its own
+    `(vault, account, windowStart)` (§15.9), and `prev.windowStart ≤
+    prev.windowEnd < windowStart`;
+  - `prev.windowEnd + prev.idleThresholdNs ≤ windowStart`;
+  - the first skipped window, if any, starts at or after `prev.windowEnd +
+    prev.idleThresholdNs`. A hold inside the predecessor's idle gap would have
+    joined the predecessor's window, so no skipped window can start there;
+    clearing `prev.windowEnd` alone is not enough; and
+  - no receipt of the account lies strictly between the two windows.
+
+  The result is `passed`.
+- **Anything else is `failed` → `PREDECESSOR_MISMATCH`**, its existing code,
+  and the resolver answers 409 (§15.13).
+- **On a resolver 200** the check is `passed`, or `notApplicable` exactly when
+  the field is absent and no earlier receipt exists. It is never
+  `unavailable`: the registry is the resolver's own store, as for
+  `registryBinding` (the companion's "The verdict algebra").
+- **Offline** it is `notApplicable`, as for every online check (§7).
+
+**What disappears, and why each piece is safe to drop:**
+
+- **No reservation, no closing CAS, no admission stamping.** Membership is the
+  ledger's partition (§15.3), not an admission decision.
+- **Exactly-once.** The derived ID is the idempotency key.
+- **One charge, one receipt.** The windows partition `H(A)`, and a hold debits
+  exactly one account, so each POSTED hold lies in exactly one window of
+  exactly one account. The registry also consumes each posted pair under its
+  own key, so no pair is ever counted by two receipts
+  (`consumed-by-another-receipt`).
+- **Latency.** No receipt exists sooner than `θ_W` after the window's activity
+  end on the LEDGER's clock — later on an idle ledger (§15.4) — plus
+  reconciliation and the segment seal.
+
+### 15.11 Completeness — what is claimed, who can check it, and what a third party trusts the operator for
+
+**THE CLAIM.** The operator asserts all of the following, signed and
+chain-committed:
+
+- `windowTransfersRoot` commits, in ledger-timestamp order, EVERY transfer
+  with the account on either side and `windowStart ≤ ts ≤ windowEnd`, and
+  `windowTransferCount` is how many there are;
+- `[windowStart, windowEnd]` is ONE WHOLE window of the account under §15.3,
+  cut with `θ_W = idleThresholdNs`, and it was CLOSED (§15.4) when minted;
+- `transferSet`/`transferSetRoot` is exactly the window's POSTED holds, each
+  with its settlement; every hold of the window was armed; and every other
+  hold of the window was voided pre-provider;
+- `previousReceiptId` is the account's previous minted receipt, or, when
+  absent, there is none;
+- `skippedSincePrevious` lists every window of the account between the two
+  receipts, each refused for the reason given, or, when absent, there is none.
+
+**What it never claims.** A cluster receipt attests ONE account's charges over
+ONE window. It does not claim:
+
+- the total cost of any artifact, task, person or organization;
+- the charges to other agent keys, which are other accounts with their own
+  receipts;
+- delegated work, which debits the delegate (`selfDebitsOnly`, §2a).
+
+**WHAT A THIRD PARTY CAN ESTABLISH — offline, from the receipt alone:**
+
+- **K1.** The bounds, `θ` and the chain fields are in the signed,
+  chain-included `event.data` (equality 3), and well-formed (§15.6). → step 7.
+- **K2.** The ID is the window's own: `receiptId` recomputes from
+  `(proof.chain, account, windowStart)`. → step 3(c), `ID_MISMATCH`.
+- **K3.** When `transferCount ≤ 32` the pairs are listed and recompute to
+  `transferSetRoot`. When `count ≤ 16` the listed skipped windows are all of
+  them, and recompute to `windowsRoot`. → step 8, `DERIVATION_MISMATCH`.
+- **K4.** The amount is internally exact: `posted === assessed`, and the
+  rounding bound holds. → step 7.
+
+**WITH REGISTRY ACCESS** — the resolver, on every read:
+
+- **K5.** The chain link: `predecessorLinkage` (§15.10). →
+  `PREDECESSOR_MISMATCH`, the 409 of §15.13.
+
+**WITH A SECOND RECEIPT** of the same `(proof.chain, account)` in hand:
+
+- **K6.** The two windows are consistent with each other (§15.12).
+
+**WHAT A THIRD PARTY CANNOT ESTABLISH — the declared residue:**
+
+- **the window's transfers:** that `windowTransfersRoot` is the ledger's list,
+  which is never published;
+- **the charges:** that the pairs are ALL the window's posted holds, that
+  every hold was armed, that every excluded hold was voided pre-provider, and
+  that `spend` is what the ledger posted;
+- **the window's bounds:** that it is whole, and that it was closed when
+  minted;
+- **`transferSetRoot` past 32 pairs**, which is a commitment only;
+- **the skipped list:** that it is COMPLETE, which is a ledger fact; windows
+  17 to `count` when `count > 16`, which `windowsRoot` commits but nothing
+  lists; and that the gaps between skipped windows were idle;
+- **time across clocks:** the order of independently signed timestamps.
+  `startedAt`/`endedAt` are chain-clock claims and `windowStart`/`windowEnd`
+  are ledger timestamps, and no verifier orders one clock against the other;
+- **θ's history:** that the account's `θ` never changed after its first
+  hold. v0.10 makes it immutable (§15.2), and a history of changes is
+  reserved for a later version;
+- **unarmed holds with no timeout:** that none exists. RA-4 is a producer
+  convention that nothing enforces, and §15.2's defensive rule keeps the
+  account's chain moving if one does;
+- **the producer guarantees of §15.10:** the `θ` idle gap around listed
+  skipped windows, one `θ` per account, and one `work` per account. The
+  minter makes them true, and no v0.10 verifier checks them; enforcement is
+  deferred to v0.10.1;
+- **identity:** which ledger account the handle names.
+
+Those are facts about the operator's ledger and records, which a third party
+cannot see. **A third party without ledger access TRUSTS THE OPERATOR'S
+SIGNED SET for completeness.** This spec says so plainly, and so must every
+verifier: output that reports a cluster receipt as verified MUST NOT describe
+it as "complete" or "independently complete".
+
+**Declared, too: what a receipt discloses beyond its claim.** When
+`transferCount ≤ 32`, `transferSet` publishes the posted pairs' ledger
+transfer IDs, unkeyed. This is inherited from §2, and is unlike `account`
+(§15.7). They name the transfers to anyone who can query the ledger, which
+then also names the account they debit. Whatever structure the operator
+gives its IDs, such as a time prefix, is published with them.
+
+**WHAT THE SIGNATURE DOES BUY.** The trust is not blind:
+
+- the operator cannot later deny the set it published — the signature, chain
+  inclusion and the sealed checkpoint bind it;
+- the set cannot be changed after the fact without detection;
+- any contradiction found by anyone with ledger access is ATTRIBUTABLE and
+  PERMANENT.
+
+**What a third party must trust the operator for, exactly:**
+
+1. that no transfer of the account in the window is missing from
+   `windowTransfersRoot`, and no posted hold from the pairs;
+2. that every hold in the window was armed, and every excluded hold was
+   voided pre-provider;
+3. that the window's boundaries are §15.3's for the signed `θ`, that the
+   account's `θ` never changed after its first hold (§15.2), and that the
+   window closed on ledger-time evidence (§15.4);
+4. that `skippedSincePrevious` lists every window since the previous receipt,
+   with its true reason;
+5. that the handle names one account, consistently (§15.7);
+6. the pricing inputs — rates, and usage postures (§2, as for any receipt);
+7. that its sweep of abandoned holds runs promptly. While one is open, the
+   account's later charges join its window and are refused with it (§15.4);
+8. the registry the chain is checked against. `predecessorLinkage` runs on
+   the operator's own registry (K5), so "no receipt in between" is the
+   operator's answer.
+
+**What a third party does NOT trust the operator for:**
+
+- that the claim is the one the operator minted;
+- the arithmetic between the claim's numbers;
+- the ID's derivation;
+- the consistency of any two receipts it holds (§15.12).
+
+**WHO CAN ESTABLISH COMPLETENESS:**
+
+- **The account's owner** can compare a receipt with what the operator's API
+  reports for their own account. That catches errors, but it still relies on
+  the operator's API, so it is NOT independent.
+- **A party with READ ACCESS TO THE LEDGER** — the operator, or an auditor it
+  grants access, told which ledger account the handle names — can run the
+  **completeness audit**:
+  1. read the ledger clock, then every transfer of the account, both sides, to
+     exhaustion (§15.4's read order);
+  2. re-derive the windows from the previous receipt's `windowEnd` under
+     §15.3, with the account's `θ` as the receipts sign it. Confirm this
+     window's bounds and its closure, and that every window between the two
+     receipts is disclosed in `skippedSincePrevious`;
+  3. recompute `windowTransfersRoot` and `windowTransferCount` over the
+     window, and `transferSetRoot` over its posted pairs;
+  4. check each excluded hold's recorded void reason.
+
+  A contradiction is reported as **`COMPLETENESS_MISMATCH`**. This is the
+  strongest completeness check there is, and it needs access the public does
+  not have.
+
+  **It is still not independent of the operator.** The ledger does not carry
+  two inputs that the partition and the refusals depend on, and the audit
+  takes both from the operator:
+  - the ADMISSION RECORDS that make a hold armed or unarmed (§15.2), which
+    decide the defensive rule and `unarmed-hold`;
+  - the recorded VOID REASONS that make a void pre-provider or not (step 4,
+    §15.5), which decide `cluster-void`.
+
+  A false admission record or void reason misleads the audit exactly as it
+  would mislead the minter.
+
+  `COMPLETENESS_MISMATCH` is the AUDIT's result. It is not one of §7's closed
+  failure codes, and it never appears in a receipt verification block.
+
+### 15.12 Cross-receipt consistency — `windowDisjointness`
+
+A consumer holding two cluster receipts with equal `(proof.chain, account)` MUST
+check that their windows are disjoint and at least the earlier window's `θ`
+apart: ordered by `windowStart`, `windowEnd₁ + idleThresholdNs₁ ≤
+windowStart₂`. Equal starts are already one ID (§15.9). In v0.10 both
+receipts carry the account's one `θ`, which is a producer guarantee (§15.10).
+
+- **A violation means the two signed windows cannot both be windows of one
+  ledger.** Either the operator equivocated about the partition, or a window
+  was closed early.
+- **The consumer reports `WINDOW_CONFLICT` for BOTH receipts**, and never
+  resolves the conflict by picking one. Like `COMPLETENESS_MISMATCH`, it is
+  this rule's result, outside §7's closed vocabulary.
+- **No resolver endpoint is needed:** the two receipts are the whole input.
+
+### 15.13 Resolver states — frozen with the resolver as built
+
+These are the companion items §10.17–§10.22, applied in the companion's v0.3.
+
+| Code | Body `status` | When | Headers |
+|---|---|---|---|
+| 200 | the R3-8 ladder | A minted cluster receipt. The envelope is unchanged (`apiVersion: "1"`): the new kind lives INSIDE the signed receipt, never in the envelope. `checks.registryBinding` is `passed`; `checks.predecessorLinkage` is `passed`, or `notApplicable` for an account's first receipt, never `unavailable` (§15.10). | strong `ETag`. `If-None-Match` uses WEAK comparison, evaluated only AFTER a successful verification → 304. `?include=checkpointHistory` is a distinct representation with its own `ETag`. |
+| 304 | — | A successful revalidation, after verification. | |
+| 404 | `"unknown"` | **Every ID with no minted receipt.** For a cluster ID that includes a window still open, closed but not reconciled, with its mint event appended but not yet sealed, or refused. | `Cache-Control: public, no-cache, max-age=0, must-revalidate` — FROZEN. Storage is allowed; every reuse revalidates at the origin, so a cached 404 never outlives publication. |
+| 409 | `"unverifiable"` | The stored artifact fails its own verification, including the two cluster cases stated once below the table. The body carries `verification`: the nine steps, the four named checks, and the closed codes. | `Cache-Control: no-store` |
+| 429 | — | Rate-limited. The body is never parsed. | `Cache-Control: no-store` + `Retry-After` |
+| 503 | `"verificationUnavailable"` | The key registry or the receipt store is unreachable. The body is `{apiVersion, status}`, with NO `receiptId`. | `Cache-Control: no-store` + `Retry-After: 30` (digits only) |
+
+**The complete response-code set is {200, 304, 404, 409, 429, 503}.**
+
+- Any other status that a GET under the resolver's path prefix would return,
+  a 500 included, is rewritten to 503. The OPTIONS preflight sits outside the
+  set, as the companion's Endpoint section says.
+- **202 and 410 are RESERVED.** They are defined for the reserved session kind
+  and never emitted, and a consumer that receives one treats it as a protocol
+  error.
+- **No pre-mint state of any kind — `"sealing"` included.** This is ruled
+  ("unminted → 404"). A pre-mint answer for a DERIVABLE ID would also be an
+  unauthenticated oracle for "account A had activity starting at time T".
+
+**The cluster 409 — stated ONCE here; every other mention points here.** A
+stored cluster receipt is never served when either check fails:
+
+- its ID does not recompute from its own `{vaultId: proof.chain, account,
+  windowStart}` (§15.9);
+- or its predecessor link fails (§15.10).
+
+The answer is HTTP `409`, with body `status: "unverifiable"` and
+`Cache-Control: no-store`. Its `verification` block names the failure with
+§7's closed codes. A non-recomputing ID is `steps.registry` `failed` with
+`ID_MISMATCH`. A broken link is `checks.predecessorLinkage` `failed` with
+`PREDECESSOR_MISMATCH`. That holds even when route, body and registry agree
+on the ID.
+
+**The 404 rendering CHANGES for every ID.** A cluster ID cited before minting is
+indistinguishable from one that will never exist, so a consumer renders every
+404 as **"no receipt under this ID yet"**. It explains that a cluster receipt
+is minted once its agent key has been idle for the key's idle threshold — 10
+minutes by default — on the ledger's clock, and its audit segment has sealed.
+A 404 is never rendered as forgery, and never green. The LOUD "never allocated
+— integrity red flag" rendering is retired.
+
+**Identity binding on every read** (§10.1, §10.15) is unchanged, with two
+additions. The resolver recomputes the cluster ID (§15.9) from the stored
+receipt, in addition to route = body = registry. And it checks
+`predecessorLinkage` against its registry (§15.10). Either failure is the 409
+stated above.
+
+### 15.14 Rendering
+
+These forms replace the session forms for `scope: "cluster"`.
+
+| Where | Session form (reserved kind) | Cluster form |
+|---|---|---|
+| The standalone page's claim (§7 consumers) | "produced under this governed session — $X" | "charged to this agent key between `<windowStart>` and `<windowEnd>` — $X" |
+| The R40 scope line (`selfDebitsOnly`) | "Charged to this session · delegated work bills to the delegate" | "Charged to this agent key · delegated work bills to the delegate" |
+| The scoped never-understates claim (§10.5) | "never understates the ledger-POSTed cost of this governed session" | "never understates the ledger-POSTed charges to this agent key in this window" |
+
+- **Times.** `<windowStart>`/`<windowEnd>` render the ledger nanoseconds as RFC
+  3339 UTC, by INTEGER division to milliseconds (no float), labelled as ledger
+  time.
+- **Display only.** `startedAt`/`endedAt` may be shown as settlement times, but
+  never AS the window.
+- **Skipped windows.** A page that shows `skippedSincePrevious` renders each
+  listed window with its reason, states `count` when it exceeds the listed 16,
+  and never renders a skipped window as a receipt or as an amount.
+- **Account.** A page MAY show a short form of `account`. It never shows an
+  agent key, or a name the receipt does not carry.
+- **Non-artifact.** A cluster receipt is NON-ARTIFACT, like the session kind. It
+  is never rendered as the cost of a containing artifact, and a promotion gate
+  MUST NOT accept it: the gate requires `kind === "commit"`.
+
+### 15.15 Conformance vectors
+
+Every vector below was computed three ways, and they agree byte-for-byte:
+
+- by this repository's `packages/core` `canonicalize`, with Node's SHA-256 and
+  HMAC and a base58btc encoder;
+- by executing the minter's own modules;
+- by an independent implementation that shares no code with either.
+
+The cluster IDs were also computed by executing the resolver's ID module, and
+its handle-format check accepts both handles.
+
+**Account handle (§15.7)**, with a TEST handle key `S` of 32 zero bytes:
+
+- `K` = `9ee7bf5e2dee66a0ca82d79de0eb54d8e60daa37d30aebccab87c4a069098d22`.
+- Ledger account 42 — message `0000000000000000000000000000002a` — gives HMAC
+  `9e8a88eb3c744cc4046f2129a600e778e1829158e094a01823d65cb3d9f87a93`, so the
+  handle is `a1_LaVASNboDGARWVkgiqzrkF`.
+- Ledger account 43 gives the handle `a1_4HsRUMjopC7DXxL78ne2uk`.
+
+**Cluster ID (§15.9):**
+
+| vaultId | account | windowStart | SHA-256 (hex) | receiptId |
+|---|---|---|---|---|
+| `vault_example` | `a1_LaVASNboDGARWVkgiqzrkF` | `1791234567890123456` | `2c64e45fd890281ef822c32f44025a2e231c469845cb944745e3def0ea55b882` | `ut1_6UxMu41H9LYXJYXV2CEfoK` |
+| `vault_example` | `a1_LaVASNboDGARWVkgiqzrkF` | `1791234567890123457` | `871ce30197047ed66e6d20755bb9f2e99bc20e26cdad4f5226a10e84ec8b5acd` | `ut1_Hgh1y6opsgk6P9ivuxgDwv` |
+| `vault_other` | `a1_LaVASNboDGARWVkgiqzrkF` | `1791234567890123456` | `25033726e9c1d812719eb431afc8f9e33b03657469136a478e3304ed09e9f812` | `ut1_5a64JCujs5reBDEfKV1Riz` |
+| `vault_example` | `a1_4HsRUMjopC7DXxL78ne2uk` | `1791234567890123456` | `f7aad391f434e4e06be5c39e29b8355ebd763b3aa8f793160fb4e4008359a0f1` | `ut1_XapFpVyWfxM8V6vsJT5Hho` |
+
+- **Preimage of the first row**, after the domain line:
+  `{"account":"a1_LaVASNboDGARWVkgiqzrkF","vaultId":"vault_example","windowStart":"1791234567890123456"}`.
+- Rows 2–4 each change ONE input — one nanosecond of start, the vault, the
+  account. They pin that all three inputs are load-bearing.
+
+**`windowTransfersRoot` (§15.6)** over a hold, a funding credit and the hold's
+post —
+`[{"id":"00000000000000000000000000000101","timestamp":"1791234567890123456"},{"id":"00000000000000000000000000000102","timestamp":"1791234599000000000"},{"id":"00000000000000000000000000000103","timestamp":"1791234601000000000"}]`,
+the canonical bytes exactly as hashed after the domain line — is
+`6ebaf8d020840898bac59226eb8f6c06c87f3205dfc18f14eed3ad03572768e1`, with
+`windowTransferCount` 3.
+
+**`skippedSincePrevious.windowsRoot` (§15.6)** over two refused windows —
+`[{"reason":"cluster-void","windowEnd":"1791230042000000000","windowStart":"1791230000000000000"},{"reason":"empty-cluster","windowEnd":"1791232005000000000","windowStart":"1791232000000000000"}]`,
+the canonical bytes exactly as hashed after the domain line — is
+`463cf739347ff9813d903a1dd0052b6fd765d84e81efca763b784758c9053be4`, with
+`count` 2. The two windows are ascending and disjoint, and both end well
+before the first row's `windowStart`, so the list is valid on a receipt of
+that window (§15.6).
+
+**Partition vectors — §15.2's defensive rule.** These are for the minter's
+corpus. They use `θ = 600000000000` (10 minutes) and `T =
+1791234000000000000`.
+
+- **Setup.**
+  - `h₁` is an UNARMED hold with `timeout = 0` at `T`. The defensive rule
+    resolves it at `T`, so `W₁ = [T, T]`, refused as `unarmed-hold`.
+  - `h₂` is an armed hold at `1791234900000000000` (`T` + 900 s), posted at
+    `1791234960000000000` (`T` + 960 s). It is 900 s ≥ `θ` after `W₁`'s end,
+    so `W₂ = [1791234900000000000, 1791234960000000000]`.
+- **A late post inside a later window.** The ledger posts `h₁` at
+  `1791234930000000000` (`T` + 930 s), which is inside `W₂`'s span.
+  - `W₂` is refused as `unarmed-hold`. `W₁` stays `[T, T]` and `W₂` keeps its
+    bounds.
+  - The negative case: had the post counted as `res(h₁)`, `W₁`'s end would
+    become `T` + 930 s, `h₂` would join `W₁`, and `W₂` would not exist. That
+    is the falsification §15.2's FINAL resolution forbids.
+- **A late post in an idle gap.** The ledger posts `h₁` instead at
+  `1791237000000000000` (`T` + 3000 s), and the account's next hold `h₃` is at
+  `1791239000000000000` (`T` + 5000 s).
+  - The post lies between `W₂`'s end and `h₃`, so it is in no window.
+  - `W₂` is unaffected and mintable on its own merits. `W₁`'s refusal,
+    disclosed by the next receipt, covers `h₁`.
+
+**Refusal vectors.** These are for the minter's corpus, one per §15.5
+mapping that was previously left implicit:
+
+- a constituent whose snapshot prices a model with anything other than an
+  exact catalog rate → `non-exact-rate`;
+- a constituent whose provider is not in the catalog → `unknown-provider`;
+- a constituent snapshot with an empty table version → `snapshot-unverifiable`;
+- settlement events whose first `settledAt` is later than their last, so
+  `startedAt > endedAt` → `evidence-inconsistent`;
+- a `receipt_settled` event timestamped earlier than `endedAt` →
+  `mint-event-mismatch`.
+
+**Negative vectors** the corpus MUST also carry:
+
+- `windowStart` or `windowEnd` with a leading zero, or above `2^64 − 1`;
+- `windowEnd < windowStart`;
+- `idleThresholdNs` below `60000000000` or above `86400000000000`;
+- an `account` without the `a1_` prefix, or whose body does not decode to
+  exactly 16 bytes and re-encode identically;
+- `work` carrying `repo`, `repositoryMembership` or `origin`, or a `repoId`
+  outside §15.8's syntax;
+- any scope-forbidden field present, or an unlisted key such as an inline list
+  of window transfers;
+- `windowTransferCount` as a decimal string, below 2, or below `2 ×
+  spend.transferCount`;
+- `endedAt` before `startedAt`, or after `event.timestamp`;
+- `previousReceiptId` equal to the receipt's own `receiptId`;
+- `skippedSincePrevious` with `count` 0, with `windows` not exactly
+  `min(count, 16)` long, with members out of order or overlapping, with a
+  reason outside the closed list, or with a listed `windowEnd` at or after
+  `windowStart` — including when `count > 16`;
+- a `windowsRoot` that does not recompute when `count ≤ 16` →
+  `DERIVATION_MISMATCH`;
+- a `receiptId` derived with the vault omitted, or with the inputs in another
+  shape (e.g. a `chain` key);
+- with a predecessor in the registry: a first skipped window that starts
+  before `prev.windowEnd + prev.idleThresholdNs`, or a predecessor row whose
+  ID does not re-derive from its own fields → `PREDECESSOR_MISMATCH`;
+- a 202 or 410 resolver response for a cluster ID — a protocol error.

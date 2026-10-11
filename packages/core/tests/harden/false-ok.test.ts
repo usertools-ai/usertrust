@@ -214,6 +214,9 @@ describe("false OK — a documented count that stops matching reality", () => {
 	 * rather than the label — the same move as deriving fixtures from real
 	 * producer call sites instead of inventing them.
 	 */
+	// A 30 s timeout: it imports `typescript` and parses every source file under
+	// packages/*/src and packages/*/hooks, which under coverage, with the whole suite
+	// running beside it, can take longer than vitest's default 5 s.
 	it("AGENTS.md's sanitizer count matches the sanitizers in src/", async () => {
 		const { readFile, readdir } = await import("node:fs/promises");
 		const ts = (await import("typescript")).default;
@@ -809,5 +812,5 @@ describe("false OK — a documented count that stops matching reality", () => {
 		expect(strong, inventory).toBe(declaredStrong);
 		expect(weak, inventory).toBe(declaredWeak);
 		expect(strong + weak, inventory).toBe(declaredCount);
-	});
+	}, 30_000);
 });

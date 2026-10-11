@@ -256,8 +256,12 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 					rates.cacheReadPer1k !== undefined ? `, cache-read=${rates.cacheReadPer1k}/1k` : "";
 				const cacheWritePart =
 					rates.cacheWritePer1k !== undefined ? `, cache-write=${rates.cacheWritePer1k}/1k` : "";
+				const cacheWrite1hPart =
+					rates.cacheWrite1hPer1k !== undefined
+						? `, cache-write-1h=${rates.cacheWrite1hPer1k}/1k`
+						: "";
 				clack.log.step(
-					`  ${model}: input=${rates.inputPer1k}/1k, output=${rates.outputPer1k}/1k${cacheReadPart}${cacheWritePart}`,
+					`  ${model}: input=${rates.inputPer1k}/1k, output=${rates.outputPer1k}/1k${cacheReadPart}${cacheWritePart}${cacheWrite1hPart}`,
 				);
 			}
 		}
@@ -336,6 +340,17 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				return;
 			}
 
+			// The 1-hour cache-write rate. A blank answer OMITS it (never 0): an omitted
+			// 1-hour rate settles at the dearer of the 5-minute write and 2x input.
+			const cacheWrite1hResult = await clack.text({
+				message: `${model} cache-write 1-hour rate ($/1M tokens, blank = the dearer of the 5-minute write rate and 2x the input rate):`,
+			});
+
+			if (clack.isCancel(cacheWrite1hResult)) {
+				clack.log.warn("Setup cancelled.");
+				return;
+			}
+
 			let cacheReadPerM: number | undefined;
 			const cacheReadStr = (cacheReadResult as string).trim();
 			if (cacheReadStr !== "") {
@@ -358,12 +373,24 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				}
 			}
 
+			let cacheWrite1hPerM: number | undefined;
+			const cacheWrite1hStr = (cacheWrite1hResult as string).trim();
+			if (cacheWrite1hStr !== "") {
+				const parsed = Number(cacheWrite1hStr);
+				if (!Number.isFinite(parsed) || parsed < 0) {
+					clack.log.warn("Cache-write 1-hour rate must be a non-negative number. Omitting it.");
+				} else {
+					cacheWrite1hPerM = parsed;
+				}
+			}
+
 			// Convert $/1M to usertokens/1K: $X per 1M = X*10 usertokens per 1K
 			customRates[model] = {
 				inputPer1k: inputPerM * 10,
 				outputPer1k: outputPerM * 10,
 				...(cacheReadPerM !== undefined ? { cacheReadPer1k: cacheReadPerM * 10 } : {}),
 				...(cacheWritePerM !== undefined ? { cacheWritePer1k: cacheWritePerM * 10 } : {}),
+				...(cacheWrite1hPerM !== undefined ? { cacheWrite1hPer1k: cacheWrite1hPerM * 10 } : {}),
 			};
 
 			clack.log.success(`Updated ${model}`);

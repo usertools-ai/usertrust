@@ -13,8 +13,8 @@
  * out-of-band; trust is never read from the vault under audit.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import pc from "picocolors";
 import { parseAnchorsContent } from "../audit/anchor-verify.js";
 import {
@@ -25,7 +25,9 @@ import {
 	type WitnessInput,
 } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
+import { GLOBAL_FLAGS } from "./flags.js";
 import type { CliOptions } from "./init.js";
+import { scrubForTerminal, toSafeJson } from "./target.js";
 
 function parseDurationMs(raw: string): number {
 	const m = /^(\d+)(ms|s|m|h|d)?$/.exec(raw);
@@ -40,6 +42,14 @@ function parseDurationMs(raw: string): number {
 }
 
 interface AnchorFlags {
+	/**
+	 * Bare (non-flag) arguments, in order. Only collected when the caller passed the arguments
+	 * explicitly: the legacy `process.argv` fallback holds the command word and, under a test
+	 * runner, the runner's own arguments, none of which name a vault.
+	 */
+	targets: string[];
+	/** Single-dash tokens: there are no short flags, so each one is an error. */
+	dashTokens: string[];
 	anchorMode: boolean;
 	params: AnchorVerifyParams;
 	requireAnchor: boolean;
@@ -49,9 +59,7 @@ interface AnchorFlags {
 const KNOWN_VERIFY_FLAGS = new Set([
 	// Global flags main.ts accepts for every subcommand — rejecting them here
 	// would break existing `usertrust verify --skip-verify`-style invocations.
-	"--json",
-	"--skip-verify",
-	"--reconfigure",
+	...GLOBAL_FLAGS,
 	// Anchor flags.
 	"--anchor",
 	"--anchors",
@@ -144,8 +152,8 @@ function parseBundle(raw: string): { anchorsRaw: string; receiptsRaw: string[] }
 		throw new Error(`--bundle: rekorReceipts exceeds the ${MAX_BUNDLE_ITEMS} cap`);
 	}
 	return {
-		anchorsRaw: obj.records.map((record) => JSON.stringify(record)).join("\n"),
-		receiptsRaw: receipts.map((receipt) => JSON.stringify(receipt)),
+		anchorsRaw: obj.records.map((record) => toSafeJson(record)).join("\n"),
+		receiptsRaw: receipts.map((receipt) => toSafeJson(receipt)),
 	};
 }
 
@@ -171,7 +179,9 @@ function fetchAnchorUrl(url: string): Promise<{ ok: boolean; body?: string; erro
 	});
 }
 
-async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
+async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promise<AnchorFlags> {
+	const targets: string[] = [];
+	const dashTokens: string[] = [];
 	const anchorFiles: string[] = [];
 	const rekorReceiptFiles: string[] = [];
 	const rekorPubkeyFiles: string[] = [];
@@ -226,6 +236,11 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
 			// Reject unknown flags rather than silently ignoring them — a typoed
 			// --require-anchro must not quietly weaken a CI gate.
 			throw new Error(`Unknown flag: ${arg}`);
+		} else if (collectTargets && !arg.startsWith("--")) {
+			// Flag values were consumed by `next()` above, so what is left here is a path, or a
+			// single-dash token. That token is NEVER skipped as a maybe-flag: `verify -vault`
+			// ignored it and verified the cwd, the false PASS one character from the path asked for.
+			(arg.startsWith("-") ? dashTokens : targets).push(arg);
 		}
 	}
 	const externalAnchorsRaw = anchorFiles.map(readArtifact);
@@ -276,6 +291,8 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
 				}
 			: undefined;
 	return {
+		targets,
+		dashTokens,
 		anchorMode,
 		requireAnchor,
 		requireExternalAnchor,
@@ -302,29 +319,101 @@ function formatAttestedMs(ms: number): string {
 	return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : `${ms} ms`;
 }
 
-export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
-	const root = rootDir ?? process.cwd();
-	const vaultPath = join(root, VAULT_DIR);
+export async function run(rootDir?: string, opts?: CliOptions, args?: string[]): Promise<void> {
 	const json = opts?.json === true;
+
+	const fail = (message: string, code = 1): void => {
+		if (json) {
+			console.log(toSafeJson({ command: "verify", success: false, data: { message } }));
+		} else {
+			// Thrown messages echo argv (a flag name, a value, an unreadable path).
+			console.log(pc.red(scrubForTerminal(message)));
+		}
+		process.exitCode = code;
+	};
 
 	let flags: AnchorFlags;
 	try {
-		flags = await parseAnchorFlags(process.argv.slice(2));
+		flags = await parseAnchorFlags(args ?? process.argv.slice(2), args !== undefined);
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		if (json) {
-			console.log(JSON.stringify({ command: "verify", success: false, data: { message } }));
-		} else {
-			console.log(pc.red(message));
-		}
-		process.exitCode = 1;
+		fail(err instanceof Error ? err.message : String(err));
 		return;
 	}
+
+	// An argument shape the command cannot honour: refuse, exit 2. Taking the first and ignoring
+	// the rest would verify one vault while the operator asked about two.
+	const dash = flags.dashTokens[0];
+	if (dash !== undefined) {
+		fail(
+			`Unknown option "${scrubForTerminal(dash)}": usertrust verify has no short flags. A path that begins with "-" must be written ./${scrubForTerminal(dash)}.`,
+			2,
+		);
+		return;
+	}
+	if (flags.targets.length > 1) {
+		fail(
+			`usertrust verify takes one path, got ${flags.targets.length}: ${flags.targets
+				.map((t) => `"${scrubForTerminal(t)}"`)
+				.join(", ")}.`,
+			2,
+		);
+		return;
+	}
+
+	// A path that was GIVEN is verified or refused, never replaced by the cwd. Falling back turned
+	// `usertrust verify <vault-a>` run inside vault-b into vault-b's chain presented as a verdict
+	// on vault-a.
+	const given = flags.targets[0];
+	if (given === "") {
+		// resolve("") is the cwd: an empty argument must not become the silent fallback.
+		fail("usertrust verify: the path is empty.", 2);
+		return;
+	}
+	// The OS resolves a path ONCE, natively, and everything after is built from that physical
+	// directory. `path.resolve`/`join` collapse `..` LEXICALLY, but the OS applies `..` after it has
+	// followed the link before it: `work/link/../vault` with `link -> other/subdir` is
+	// `other/vault`, and normalising first named `work/vault`, a PASS for a different chain. So
+	// nothing here normalises a path that can still hold a link; a relative argument is
+	// concatenated onto the cwd, not resolved against it.
+	const raw = rootDir ?? given ?? process.cwd();
+	const absolute = isAbsolute(raw) ? raw : `${process.cwd()}${sep}${raw}`;
+	let root = absolute;
+	if (given !== undefined && rootDir === undefined) {
+		const shown = scrubForTerminal(absolute);
+		let isDir = false;
+		try {
+			isDir = statSync(absolute).isDirectory();
+		} catch {
+			// missing, or a directory we cannot traverse: same refusal
+		}
+		if (!isDir) {
+			fail(`Cannot verify ${shown}: not a directory.`);
+			return;
+		}
+		root = realpathSync.native(absolute);
+		if (!existsSync(join(root, VAULT_DIR))) {
+			// `.usertrust` itself is the likeliest wrong argument: say what to pass instead of
+			// guessing. The vault is the project root's, and so is every other command's.
+			fail(
+				basename(root) === VAULT_DIR
+					? `No trust vault found at ${shown}: pass the project root ${scrubForTerminal(dirname(root))}, not the ${VAULT_DIR} directory.`
+					: `No trust vault found at ${shown}. Run \`usertrust init\` there first.`,
+			);
+			return;
+		}
+	} else {
+		try {
+			root = realpathSync.native(absolute);
+		} catch {
+			// not there: the missing-vault answer below says so
+		}
+	}
+	const vaultPath = join(root, VAULT_DIR);
 
 	if (!existsSync(vaultPath)) {
 		if (json) {
 			console.log(
-				JSON.stringify({
+				toSafeJson({
 					command: "verify",
 					success: false,
 					data: { message: "No trust vault found. Run `usertrust init` first." },
@@ -338,17 +427,30 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		return;
 	}
 
+	// Name the vault the verdict is about, by the directory actually read: a symlinked argument
+	// shows its target. Resolved after the existence checks, so it cannot throw on a missing path.
+	// The `.usertrust` itself can be a symlink to another vault, so resolve IT, not just the
+	// project directory: the subject named is the vault actually read.
+	let verifiedVault: string;
+	try {
+		verifiedVault = realpathSync.native(join(root, VAULT_DIR));
+	} catch {
+		fail(`No trust vault found at ${scrubForTerminal(root)}.`);
+		return;
+	}
+	if (!json) console.log(`Vault: ${scrubForTerminal(verifiedVault)}`);
+
 	const verifiedAt = new Date().toISOString();
 
 	if (flags.anchorMode) {
-		const result = verifyVaultWithAnchors(vaultPath, flags.params);
+		const result = verifyVaultWithAnchors(verifiedVault, flags.params);
 		const exitCode = exitCodeForAnchored(result, {
 			requireAnchor: flags.requireAnchor,
 			requireExternalAnchor: flags.requireExternalAnchor,
 		});
 		if (json) {
 			console.log(
-				JSON.stringify({
+				toSafeJson({
 					command: "verify",
 					success: result.valid,
 					data: {
@@ -358,6 +460,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 						merkleRoot: result.merkleRoot,
 						anchorState: result.anchorState,
 						anchoring: result.anchoring,
+						vaultPath: verifiedVault,
 						verifiedAt,
 					},
 				}),
@@ -370,7 +473,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		} else {
 			console.log(pc.red(`Chain verification FAILED: ${result.errors.length} error(s) found.`));
 			for (const err of result.errors) {
-				console.log(pc.red(`  - ${err}`));
+				console.log(pc.red(`  - ${scrubForTerminal(err)}`));
 			}
 		}
 		console.log(`Anchor state: ${result.anchorState} (source: ${result.anchoring.anchorSource})`);
@@ -403,11 +506,11 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		return;
 	}
 
-	const result = verifyVault(vaultPath);
+	const result = verifyVault(verifiedVault);
 
 	if (json) {
 		console.log(
-			JSON.stringify({
+			toSafeJson({
 				command: "verify",
 				success: result.valid,
 				data: {
@@ -416,6 +519,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 					errors: result.errors,
 					merkleRoot: result.merkleRoot,
 					anchorState: "UNANCHORED",
+					vaultPath: verifiedVault,
 					verifiedAt,
 				},
 			}),
@@ -436,7 +540,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		console.log(pc.red(`Chain verification FAILED: ${result.errors.length} error(s) found.`));
 		console.log(`Events checked: ${result.chainLength}`);
 		for (const err of result.errors) {
-			console.log(pc.red(`  - ${err}`));
+			console.log(pc.red(`  - ${scrubForTerminal(err)}`));
 		}
 		// Use process.exitCode (not process.exit) so buffered stdout flushes.
 		process.exitCode = 1;

@@ -18,10 +18,11 @@ import {
 	mkdirSync,
 	openSync,
 	readFileSync,
+	realpathSync,
 	unlinkSync,
 	writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
 import { canonicalize } from "./canonical.js";
@@ -66,6 +67,30 @@ export interface AuditWriter {
 	isDegraded(): boolean;
 	flush(): Promise<void>;
 	release(): void;
+}
+
+/**
+ * The audit writer's advisory lock for a vault is held by another LIVE writer — another
+ * process, or another writer in this process. Only one writer may append to a vault's chain.
+ * A subclass of `Error` with the same message as before, so existing `catch` blocks and
+ * message checks behave as they did.
+ */
+export class AuditWriterLockHeldError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "AuditWriterLockHeldError";
+	}
+}
+
+export interface CreateAuditWriterOptions {
+	/**
+	 * Take the vault's advisory lock NOW, in the factory, instead of at the first append.
+	 * A second writer (another process, or another live writer in this process) then fails
+	 * HERE with {@link AuditWriterLockHeldError} — before its caller does anything that
+	 * assumes it is the one writer. Default `false`: the lock is taken at the first append,
+	 * exactly as before.
+	 */
+	lockAtCreate?: boolean;
 }
 
 // ── AsyncMutex ──
@@ -133,7 +158,7 @@ function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
 		try {
 			process.kill(lockData.pid, 0);
 			// Process is alive — lock is held
-			throw new Error(
+			throw new AuditWriterLockHeldError(
 				`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
 			);
 		} catch (killErr: unknown) {
@@ -145,7 +170,7 @@ function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
 					return true;
 				}
 				if (code === "EPERM") {
-					throw new Error(
+					throw new AuditWriterLockHeldError(
 						`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
 					);
 				}
@@ -153,7 +178,7 @@ function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
 			throw killErr;
 		}
 	} catch (parseErr) {
-		if (parseErr instanceof Error && parseErr.message.includes("Audit writer lock held")) {
+		if (parseErr instanceof AuditWriterLockHeldError) {
 			throw parseErr;
 		}
 		// Corrupt lock file — remove it
@@ -166,12 +191,30 @@ function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
 	}
 }
 
+/**
+ * The ONE spelling of a vault's audit directory every lock key uses. Two spellings of the same
+ * directory (a relative path, a symlink, macOS's /tmp → /private/tmp) must be the same key, or a
+ * second writer in this process misses the first writer's entry, meets EEXIST, and "reclaims"
+ * the LIVE same-PID lock as stale — two live writers, a silently forked chain (AUD-471's class).
+ * `resolve` only when the directory does not exist yet (nothing can hold a lock in it).
+ */
+function canonicalDir(dir: string): string {
+	try {
+		return realpathSync(dir);
+	} catch (err: unknown) {
+		if (err instanceof Error && "code" in err && (err as { code?: string }).code === "ENOENT") {
+			return resolve(dir);
+		}
+		throw err;
+	}
+}
+
 function acquireProcessLock(
 	logPath: string,
 	locksByDir: Map<string, LockEntry>,
 	writerId: string,
 ): void {
-	const dir = dirname(logPath);
+	const dir = canonicalDir(dirname(logPath));
 	if (locksByDir.has(dir)) return;
 
 	// AUD-471: A live writer already holds this dir in THIS process → refuse.
@@ -179,7 +222,7 @@ function acquireProcessLock(
 	// reclaiming a live sibling's lock (same-PID) would fork the chain because
 	// each writer keeps an independent tail cache.
 	if (inProcessLockOwners.has(dir)) {
-		throw new Error(
+		throw new AuditWriterLockHeldError(
 			`Audit writer lock held by another writer in this process (dir ${dir}). Only one writer per vault per process.`,
 		);
 	}
@@ -244,7 +287,7 @@ function acquireProcessLock(
 			"code" in retryErr &&
 			(retryErr as { code?: string }).code === "EEXIST"
 		) {
-			throw new Error(
+			throw new AuditWriterLockHeldError(
 				`Audit writer lock acquired by another process during stale lock cleanup. Lock file: ${candidateLockPath}`,
 			);
 		}
@@ -411,7 +454,10 @@ function writeDeadLetter(
  * Each event's SHA-256 hash covers the previous event's hash, creating a
  * tamper-evident chain. The first event chains from GENESIS_HASH.
  */
-export function createAuditWriter(vaultPath: string): AuditWriter {
+export function createAuditWriter(
+	vaultPath: string,
+	options: CreateAuditWriterOptions = {},
+): AuditWriter {
 	const auditDir = join(vaultPath, VAULT_DIR, "audit");
 	if (!existsSync(auditDir)) {
 		mkdirSync(auditDir, { recursive: true });
@@ -424,6 +470,9 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 	const locksByDir = new Map<string, LockEntry>();
 	let degraded = false;
 	let writeFailures = 0;
+	// Eager: a second writer fails HERE. The append's own acquire is then a no-op for this
+	// writer (the lock is already in `locksByDir`).
+	if (options.lockAtCreate === true) acquireProcessLock(logPath, locksByDir, writerId);
 
 	async function appendEvent(input: AppendEventInput): Promise<AuditEvent> {
 		const release = await mutex.acquire();

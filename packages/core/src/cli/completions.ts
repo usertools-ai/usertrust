@@ -14,6 +14,7 @@
  */
 
 import type { CliOptions } from "./init.js";
+import { toSafeJson } from "./target.js";
 
 const SHELLS = ["bash", "zsh", "fish"] as const;
 type Shell = (typeof SHELLS)[number];
@@ -211,7 +212,7 @@ export async function run(shell?: string, opts?: CliOptions): Promise<void> {
 	if (!shell || !isShell(shell)) {
 		if (json) {
 			console.log(
-				JSON.stringify({
+				toSafeJson({
 					command: "completions",
 					success: false,
 					data: {
@@ -230,7 +231,7 @@ export async function run(shell?: string, opts?: CliOptions): Promise<void> {
 
 	if (json) {
 		console.log(
-			JSON.stringify({
+			toSafeJson({
 				command: "completions",
 				success: true,
 				data: { shell, script },

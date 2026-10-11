@@ -183,8 +183,8 @@ describe("AUD-001 headless claimed-but-unposted holds", () => {
 		expect(engine.voided).toEqual([handle.transferId]);
 		expect(engine.pending.size).toBe(0);
 
-		// A second abort is silent — already voided.
-		await expect(gov.abort(handle)).resolves.toBeUndefined();
+		// A second abort is silent — already voided — and says it ended nothing.
+		await expect(gov.abort(handle)).resolves.toEqual({ aborted: false });
 		expect(engine.voidPendingSpend).toHaveBeenCalledTimes(1);
 
 		await gov.destroy();

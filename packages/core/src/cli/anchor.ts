@@ -36,6 +36,7 @@ import { DEFAULT_REKOR_URL } from "../audit/rekor.js";
 import { parseRekorReceipt, type RekorReceipt } from "../audit/rekor-verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
+import { scrubForTerminal, toSafeJson } from "./target.js";
 
 const REKOR_FLAG = "--sink-rekor";
 const S3_KEYS = new Set(["bucket", "region", "prefix", "endpoint"]);
@@ -364,7 +365,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				} = initAnchorIdentity(root, keyFile !== undefined ? { keyFile } : undefined);
 				if (json) {
 					console.log(
-						JSON.stringify({
+						toSafeJson({
 							command: "anchor init",
 							success: true,
 							data: { vaultId: identity.vaultId, keyId: identity.keyId, keyFile: writtenKeyFile },
@@ -375,7 +376,9 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				console.log(pc.green("Anchor identity created."));
 				console.log(`  vaultId: ${identity.vaultId}`);
 				console.log(`  keyId:   ${identity.keyId}`);
-				console.log(`  private key: ${writtenKeyFile} (mode 0600 — NEVER inside the vault)`);
+				console.log(
+					`  private key: ${scrubForTerminal(writtenKeyFile)} (mode 0600 — NEVER inside the vault)`,
+				);
 				console.log("");
 				console.log("Public key (PEM) — PIN THIS OUT-OF-BAND:");
 				console.log(publicKeyPem.trim());
@@ -402,7 +405,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 					// mirror the non-JSON contract exactly (spec §5.3).
 					const delivered = status.outboxDepth === 0;
 					console.log(
-						JSON.stringify({
+						toSafeJson({
 							command: "anchor now",
 							success: result.emitted && delivered,
 							data: { ...result, outboxDepth: status.outboxDepth, delivered },
@@ -431,7 +434,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				} else if (result.reason === "no-new-events") {
 					console.log("Nothing to anchor (no new events since the last anchor).");
 				} else {
-					console.log(pc.red(`Anchor skipped: ${result.reason}`));
+					console.log(pc.red(`Anchor skipped: ${scrubForTerminal(result.reason ?? "")}`));
 					process.exitCode = 1;
 				}
 				return;
@@ -476,7 +479,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				}
 				if (json) {
 					console.log(
-						JSON.stringify({
+						toSafeJson({
 							command: "anchor status",
 							success: true,
 							data: {
@@ -523,12 +526,12 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				}
 				const { records, errors } = parseAnchorsContent(readFileSync(mirrorPath, "utf-8"));
 				for (const err of errors) {
-					console.error(`# ${err}`);
+					console.error(`# ${scrubForTerminal(String(err))}`);
 				}
 				for (const r of records.filter((r) => r.anchorSeq > since)) {
 					// Records were persisted canonically; re-serialize the parsed
 					// object canonically for byte-stable output.
-					console.log(JSON.stringify(r));
+					console.log(toSafeJson(r));
 				}
 				if (errors.length > 0) process.exitCode = 1;
 				return;
@@ -557,7 +560,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				const failed = reports.some((r) => r.failed);
 				if (json) {
 					console.log(
-						JSON.stringify({
+						toSafeJson({
 							command: "anchor doctor",
 							success: !failed,
 							data: { failed, reports },
@@ -587,14 +590,14 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				if (!result.emitted) {
 					if (json) {
 						console.log(
-							JSON.stringify({
+							toSafeJson({
 								command: "anchor rotate",
 								success: false,
 								data: { reason: result.reason },
 							}),
 						);
 					} else {
-						console.log(pc.red(`Rotation not emitted: ${result.reason}`));
+						console.log(pc.red(`Rotation not emitted: ${scrubForTerminal(result.reason ?? "")}`));
 					}
 					process.exitCode = 1;
 					return;
@@ -610,7 +613,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				const rotateDelivered = rotateStatus.outboxDepth === 0;
 				if (json) {
 					console.log(
-						JSON.stringify({
+						toSafeJson({
 							command: "anchor rotate",
 							success: rotateDelivered,
 							data: {
@@ -626,7 +629,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				}
 				console.log(pc.green(`Rotation anchored (#${result.record?.anchorSeq}).`));
 				console.log(`  new keyId: ${successor.keyId}`);
-				console.log(`  new private key: ${successor.keyFile}`);
+				console.log(`  new private key: ${scrubForTerminal(successor.keyFile)}`);
 				console.log("");
 				console.log("New public key (PEM) — distribute the fingerprint OUT-OF-BAND:");
 				console.log(successor.publicKeyPem.trim());
@@ -701,10 +704,10 @@ Sink flags:
 		const message = err instanceof Error ? err.message : String(err);
 		if (json) {
 			console.log(
-				JSON.stringify({ command: `anchor ${action ?? ""}`, success: false, data: { message } }),
+				toSafeJson({ command: `anchor ${action ?? ""}`, success: false, data: { message } }),
 			);
 		} else {
-			console.log(pc.red(message));
+			console.log(pc.red(scrubForTerminal(message)));
 		}
 		process.exitCode = 1;
 	}

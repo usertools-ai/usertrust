@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+import { principalFieldRefusal } from "./principal.js";
+
+/**
+ * WHICH JOB a spend was for — a reporting label, never a payer.
+ *
+ * Like a principal, a job selects no account, enters no policy context and prices
+ * nothing. It rides the audit records of the call it labels, so per-job cost is a
+ * query over the chain. It is validated by the principal's own field rule, captured
+ * ONCE at authorize, and every later record reads the capture — never the caller's
+ * handle and never a later `SettleParams`.
+ *
+ * - `job`      — an opaque job id (1-128 of `[A-Za-z0-9._:-]`).
+ * - `jobState` — `"invalid"` when the caller's job log could not be trusted, so the
+ *                absence of a `job` says "unknown", not "no job". Exclusive with `job`.
+ * - `usageFrom` / `usageTo` — the window of USAGE the record covers (ISO-8601 UTC),
+ *                never the time the record was appended.
+ */
+export interface JobCapture {
+	readonly job?: string;
+	readonly jobState?: "invalid";
+	readonly usageFrom?: string;
+}
+
+/**
+ * WHY a hold was given back, as a closed set the CLIENT derives from its own hold state and
+ * the governor records verbatim. It is the only thing that can prove a released hold spent
+ * nothing: the free-text `reason` never can.
+ * - `unused`           — no call ran under the hold (superseded, never recorded, or its usage
+ *                        is posted elsewhere): POSITIVE proof that no usage hides behind it.
+ * - `call-unconfirmed` — the hold's call may have run and never reported back.
+ * - `call-ran`         — the call ran and its one settle went unanswered: the charge is unconfirmed.
+ * A release that states none of these (an expiry, a shutdown, any older client) proves nothing.
+ */
+export const RELEASE_CLASSES = ["unused", "call-unconfirmed", "call-ran"] as const;
+export type ReleaseClass = (typeof RELEASE_CLASSES)[number];
+
+/** Why `value` is not a release class, or `undefined` when it is (or is absent). */
+export function releaseClassRefusal(value: unknown): string | undefined {
+	if (value === undefined) return undefined;
+	return (RELEASE_CLASSES as readonly unknown[]).includes(value)
+		? undefined
+		: `releaseClass must be one of ${RELEASE_CLASSES.join(", ")}`;
+}
+
+/** The audit-record spread for a captured job: absent keys for an unlabelled call. */
+export type JobAudit = JobCapture & { readonly usageTo?: string };
+
+// At most MILLISECOND precision: every comparison downstream goes through Date.parse,
+// which truncates finer digits, so ".000000009Z" and ".000000001Z" would compare equal and
+// a settle whose end precedes its start would pass the ordering check.
+const ISO_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?Z$/;
+
+/** Why `value` is not an ISO-8601 UTC instant, or `undefined` when it is. */
+export function usageTimeRefusal(value: unknown): string | undefined {
+	const refusal = "must be an ISO-8601 UTC instant (…Z)";
+	if (typeof value !== "string") return refusal;
+	const m = ISO_UTC.exec(value);
+	if (m === null) return refusal;
+	// Date.parse NORMALIZES an impossible date (Feb 31 becomes Mar 3) instead of refusing
+	// it, which would persist a string that names no real instant and then order it as
+	// another one. The calendar fields must round-trip.
+	const [y, mo, d, h, mi, s] = m.slice(1).map(Number) as [
+		number,
+		number,
+		number,
+		number,
+		number,
+		number,
+	];
+	// Not Date.UTC: it reads years 0-99 as 1900-1999.
+	const at = new Date(0);
+	at.setUTCFullYear(y, mo - 1, d);
+	at.setUTCHours(h, mi, s, 0);
+	if (
+		!Number.isFinite(at.getTime()) ||
+		at.getUTCFullYear() !== y ||
+		at.getUTCMonth() !== mo - 1 ||
+		at.getUTCDate() !== d ||
+		at.getUTCHours() !== h ||
+		at.getUTCMinutes() !== mi ||
+		at.getUTCSeconds() !== s
+	) {
+		return refusal;
+	}
+	return undefined;
+}
+
+function usageTime(field: string, value: unknown): string | undefined {
+	if (value === undefined) return undefined;
+	const refusal = usageTimeRefusal(value);
+	if (refusal !== undefined) throw new TypeError(`${field} ${refusal}`);
+	return value as string;
+}
+
+/**
+ * Capture the authorize-time job fields ONCE. Each is read a single time, validated,
+ * and rebuilt into a frozen object; anything invalid throws a `TypeError` before any
+ * I/O, so a bad label is refused before money moves.
+ */
+export function captureJob(input: {
+	job?: unknown;
+	jobState?: unknown;
+	usageFrom?: unknown;
+}): JobCapture {
+	const job = input.job;
+	const jobState = input.jobState;
+	const usageFrom = usageTime("usageFrom", input.usageFrom);
+	const out: { job?: string; jobState?: "invalid"; usageFrom?: string } = {};
+	if (job !== undefined) {
+		const refusal = principalFieldRefusal(job);
+		if (refusal !== undefined) throw new TypeError(`job ${refusal}`);
+		out.job = job as string;
+	}
+	if (jobState !== undefined) {
+		if (jobState !== "invalid") throw new TypeError('jobState must be "invalid"');
+		if (out.job !== undefined) throw new TypeError("jobState cannot accompany a job");
+		out.jobState = "invalid";
+	}
+	if (usageFrom !== undefined) out.usageFrom = usageFrom;
+	return Object.freeze(out);
+}
+
+/**
+ * A settle's `usageTo`, read ONCE. The usage START is the authorize capture's alone
+ * (`JobCapture.usageFrom`): a settle never states it, so no record can carry two
+ * different "from" values. These are facts about the usage, not a label; the job
+ * itself is never taken from a settle either.
+ */
+export function captureUsageTo(usageTo: unknown): { usageTo?: string } {
+	const to = usageTime("usageTo", usageTo);
+	return to === undefined ? {} : { usageTo: to };
+}

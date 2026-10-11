@@ -41,7 +41,13 @@
 import { createHash, type KeyObject } from "node:crypto";
 import { publicKeyFromPem, publicKeyFromSpkiBase64, verifySignatureRaw } from "./anchor-verify.js";
 import { canonicalize } from "./canonical.js";
-import { type MerkleInclusionProof, verifyInclusionProof } from "./verify.js";
+import { GENESIS_HASH } from "./constants.js";
+import {
+	hashInternal,
+	hashLeaf,
+	type MerkleInclusionProof,
+	verifyInclusionProof,
+} from "./verify.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JSON value model.
@@ -1014,6 +1020,10 @@ const CHECKPOINT_FIELDS: FieldTable = fieldTable({
 	// §4a: the lineage edge, or the fixed genesis string for the first segment.
 	previousSegmentRoot: at("checkpoint", "hex64OrGenesis"),
 	previousSegmentId: at("checkpoint", "nonEmpty"),
+	// §4a (v0.9.6): the `previousHash` the segment's first event links to — the
+	// predecessor's final event hash, or the all-zero chain genesis for the
+	// first segment. Which one is required is `checkpointStatementShape`'s.
+	segmentStartPreviousHash: at("checkpoint", "hex64"),
 	keyId: at("checkpoint", "nonEmpty"),
 	publishedAt: at("checkpoint", "rfc3339UtcMs"),
 	sig: at("checkpoint", "canonicalBase64"),
@@ -2971,6 +2981,7 @@ const CHECKPOINT_STRING_MEMBERS: readonly string[] = [
 	"segmentId",
 	"previousSegmentRoot",
 	"previousSegmentId",
+	"segmentStartPreviousHash",
 	"keyId",
 	"publishedAt",
 	"sig",
@@ -2981,8 +2992,9 @@ const CHECKPOINT_INTEGER_MEMBERS: readonly string[] = ["treeSize", "segmentFirst
  * §7 step 6's first clause, in full. `checkpoint.v === 2` is a LABEL, and a
  * label is not the statement: §4a fixes the v2 canonical signed payload as
  * exactly `{ v, vaultId, profile, root, treeSize, segmentId,
- * segmentFirstSequence, previousSegmentRoot, previousSegmentId, keyId,
- * publishedAt }` + `sig`, and every signature check downstream verifies
+ * segmentFirstSequence, previousSegmentRoot, previousSegmentId,
+ * segmentStartPreviousHash, keyId, publishedAt }` + `sig` (v0.9.6 added
+ * `segmentStartPreviousHash`; the 11-member v0.9.5 statement was never minted), and every signature check downstream verifies
  * whatever payload it is handed. Strip `previousSegmentRoot`, re-sign the
  * reduced object, and the version gate, the lineage pin, the key state and the
  * Ed25519 verification all still pass — while the unauthenticated lineage edge
@@ -3023,7 +3035,86 @@ function checkpointStatementShape(checkpoint: JsonObject): string | null {
 	// reader — so this is the only place the rule can hold for both. Without it
 	// a served history walks clean on roots that are not digests and a
 	// `publishedAt` that is not a time, each duly signed by the checkpoint key.
-	return walkFieldTable(checkpoint, CHECKPOINT_FIELDS, "checkpoint", CHECKPOINT_FORMAT_VISITOR);
+	const formatFailure = walkFieldTable(
+		checkpoint,
+		CHECKPOINT_FIELDS,
+		"checkpoint",
+		CHECKPOINT_FORMAT_VISITOR,
+	);
+	if (formatFailure !== null) return formatFailure;
+	// §4a (v0.9.6): the start hash is the all-zero chain genesis EXACTLY when
+	// the lineage edge is genesis. A genesis segment has no predecessor event to
+	// link to; a successor's first event links to its predecessor's last, which
+	// is a real event hash and never the sentinel.
+	const genesis = stringAt(checkpoint, "previousSegmentRoot") === GENESIS_SENTINEL;
+	if (genesis !== (stringAt(checkpoint, "segmentStartPreviousHash") === GENESIS_HASH)) {
+		return genesis
+			? "the genesis statement's segmentStartPreviousHash is not the all-zero chain genesis"
+			: "a non-genesis statement's segmentStartPreviousHash is the all-zero chain genesis";
+	}
+	// §4a (v0.9.6): a sealed segment holds at least ONE event — the minting
+	// chain never seals an empty one — so `treeSize` exceeds the chain-link
+	// offset. Without this a FINAL history member claiming no events walks
+	// clean: its `treeSize` is read only by a successor's contiguity sum.
+	if ((numberAt(checkpoint, "treeSize") as number) <= chainLinkOffset(checkpoint)) {
+		return "the statement's treeSize holds no event leaf — a sealed segment holds at least one";
+	}
+	return null;
+}
+
+/**
+ * §4a (v0.9.6): leaves a segment's tree holds BEFORE its first event. A
+ * non-genesis segment's leaf 0 is the chain link — the predecessor's root,
+ * hashed as a leaf — so its first event is leaf 1 and `treeSize` counts the
+ * link. A genesis segment has no link. Anything but the genesis string reads
+ * as 1, because step 2 calls this before step 6 has held `previousSegmentRoot`
+ * to its format. A malformed edge still never verifies: on a genesis receipt
+ * equality 4's arithmetic refuses it, at leaves 1 and 2 of any other the
+ * chain-link comparison does, and step 6 refuses it everywhere.
+ */
+export function chainLinkOffset(checkpoint: JsonObject): 0 | 1 {
+	return stringAt(checkpoint, "previousSegmentRoot") === GENESIS_SENTINEL ? 0 : 1;
+}
+
+/** A 64-hex digest member, or `null` when it is anything else. */
+function digestAt(object: JsonObject, key: string): string | null {
+	const value = stringAt(object, key);
+	return value !== null && LOWERCASE_HEX_64.test(value) ? value : null;
+}
+
+/**
+ * §4a (v0.9.6): the one proof node a receipt can rebuild from its own signed
+ * values, or `null` where there is none. Beyond its own leaf it knows two raw
+ * leaves: a non-genesis segment's leaf 0, the chain link (`previousSegmentRoot`),
+ * and — by the hash chain — the leaf before its own when that is an event
+ * (`event.previousHash`). So at an ODD leaf the level-0 sibling is that previous
+ * leaf, and at leaf 2 of a non-genesis segment the level-1 sibling is the node
+ * over leaves 0 and 1 (sibling 0 when level 0 promotes leaf 2, at treeSize 3).
+ * Every other sibling covers a leaf the receipt does not carry. `hash` is
+ * `null` when an operand is not a digest: the node is still owed, and nothing
+ * can equal it.
+ */
+function recomputableNode(
+	leafIndex: number,
+	treeSize: number,
+	offset: 0 | 1,
+	link: string | null,
+	previous: string | null,
+): { readonly index: number; readonly hash: string | null; readonly from: string } | null {
+	const leaf = (raw: string | null): string | null => (raw === null ? null : hashLeaf(raw));
+	if (leafIndex % 2 === 1) {
+		return leafIndex - 1 >= offset
+			? { index: 0, hash: leaf(previous), from: "the predecessor event's leaf" }
+			: { index: 0, hash: leaf(link), from: "the chain link's leaf" };
+	}
+	if (leafIndex !== 2 || offset !== 1) return null;
+	const left = leaf(link);
+	const right = leaf(previous);
+	return {
+		index: treeSize === 3 ? 0 : 1,
+		hash: left === null || right === null ? null : hashInternal(left, right),
+		from: "the node over the chain link and the predecessor event",
+	};
 }
 
 export function verifyCheckpointStatement(
@@ -3217,7 +3308,7 @@ function checkWorkVariant(work: JsonObject): string | null {
 		const oidAlg = stringAt(work, "oidAlg");
 		if (oidAlg !== "sha1" && oidAlg !== "sha256") return "work.oidAlg is not sha1 or sha256";
 		if (stringAt(work, "objectSha256") === null) return "work.objectSha256 is missing";
-		return null;
+		return artifactClaimRefused(kind);
 	}
 
 	// pr / issue.
@@ -3227,12 +3318,25 @@ function checkWorkVariant(work: JsonObject): string | null {
 	const binding = objectAtKey(work, "contentBinding");
 	if (binding === undefined) return "work.contentBinding is missing";
 	if (binding.kind === "publicSha256") {
-		return stringAt(binding, "sha256") === null ? "contentBinding.sha256 is missing" : null;
+		if (stringAt(binding, "sha256") === null) return "contentBinding.sha256 is missing";
+	} else if (binding.kind === "privateHmacSha256V1") {
+		if (stringAt(binding, "commitment") === null) return "contentBinding.commitment is missing";
+	} else {
+		return "contentBinding matches neither arm of §2's EXACTLY-ONE union";
 	}
-	if (binding.kind === "privateHmacSha256V1") {
-		return stringAt(binding, "commitment") === null ? "contentBinding.commitment is missing" : null;
-	}
-	return "contentBinding matches neither arm of §2's EXACTLY-ONE union";
+	return artifactClaimRefused(kind);
+}
+
+/**
+ * §2 (v0.9.6): a WELL-FORMED artifact variant still fails. Its provider proofs
+ * — `repositoryMembership.proofId`, `oid`/`objectSha256`, `contentBinding` —
+ * are bound by nothing a verifier holds, so any verified status would certify
+ * a claim nobody checked. §2a's rule for `includesAllDelegated`: a claim with
+ * no validating evidence format is a failed step. The shape checks above run
+ * first, so a malformed variant still names its own defect.
+ */
+function artifactClaimRefused(kind: string): string {
+	return `work.kind ${kind} is an artifact claim: its provider proofs are bound by nothing a verifier can check, so v1 refuses it rather than certify it`;
 }
 
 function checkTransferSet(projection: JsonObject, transferCount: number): string | null {
@@ -3785,14 +3889,59 @@ class BaseRun {
 		const leafIndex = numberAt(inclusion, "leafIndex");
 		const sequence = numberAt(event, "sequence") as number;
 		if (leafIndex === null) return mismatch("inclusion.leafIndex is not an integer");
-		// Equality 4 — SEGMENT-RELATIVE (§4a: one tree per segment).
-		if (leafIndex !== sequence - segmentFirstSequence) {
+		// Equality 4 — SEGMENT-RELATIVE (§4a: one tree per segment), shifted by
+		// the chain-link leaf a non-genesis segment holds at index 0 (v0.9.6).
+		// `previousSegmentRoot` is a checkpoint member, so its format is step 6's,
+		// not step 1's; step 6 also verifies the signature over it, so an edited
+		// edge cannot pass.
+		const offset = chainLinkOffset(checkpoint);
+		if (leafIndex !== sequence - segmentFirstSequence + offset) {
 			return mismatch(
-				`equality 4: leafIndex ${leafIndex} ≠ sequence ${sequence} − segmentFirstSequence ${segmentFirstSequence}`,
+				`equality 4: leafIndex ${leafIndex} ≠ sequence ${sequence} − segmentFirstSequence ${segmentFirstSequence} + chain-link offset ${offset}`,
 			);
 		}
-		if (leafIndex < 0 || leafIndex >= checkpointTreeSize) {
-			return mismatch(`equality 4: leafIndex ${leafIndex} is outside [0, ${checkpointTreeSize})`);
+		// The lower bound is the offset, not 0: a non-genesis leaf 0 is the chain
+		// link, and no event is ever proved at it.
+		if (leafIndex < offset || leafIndex >= checkpointTreeSize) {
+			return mismatch(
+				`equality 4: leafIndex ${leafIndex} is outside [${offset}, ${checkpointTreeSize})`,
+			);
+		}
+		// At leaf `offset` the receipt's event IS the segment's first event, and
+		// §4a defines the signed `segmentStartPreviousHash` as exactly that event's
+		// `previousHash` (v0.9.6). Both are in the receipt, so the equality is
+		// checkable offline; without it a checkpoint whose signed chain start
+		// contradicts its own first event would verify.
+		//
+		// These comparisons fail CLOSED: a malformed start hash or chain link, or a
+		// missing sibling, fails them as surely as a wrong one. They are decidable
+		// from the receipt alone, so they belong to this phase (the partition note
+		// above `ChainBoundClaims`): deferring them to steps 5 and 6 would let a
+		// renamed `proof.chain` turn them into UNVERIFIABLE.
+		if (
+			leafIndex === offset &&
+			stringAt(event, "previousHash") !== stringAt(checkpoint, "segmentStartPreviousHash")
+		) {
+			return mismatch(
+				"equality 4: the segment's first event's previousHash ≠ checkpoint.segmentStartPreviousHash",
+			);
+		}
+		// …and every proof node the receipt can RECOMPUTE is the node the tree
+		// holds. Without this, a tree built over a forged chain link or a forged
+		// predecessor folds to a validly signed root.
+		const node = recomputableNode(
+			leafIndex,
+			checkpointTreeSize,
+			offset,
+			digestAt(checkpoint, "previousSegmentRoot"),
+			digestAt(event, "previousHash"),
+		);
+		if (node !== null) {
+			const sibling = arrayAt(inclusion, "siblings")?.[node.index];
+			const siblingHash = isJsonObject(sibling) ? stringAt(sibling, "hash") : null;
+			if (node.hash === null || siblingHash !== node.hash) {
+				return mismatch(`equality 4: proof node ${node.index} is not ${node.from}, recomputed`);
+			}
 		}
 		// Equality 5 — the leaf-hiding defence the fold cannot make: a proof can
 		// reach the signed root under a treeSize the checkpoint never signed.
@@ -3829,7 +3978,8 @@ class BaseRun {
 		}
 		// §4 keeps this "defensively" and names it redundant with equality 4, which
 		// is exactly what it is: `sequence < segmentFirstSequence` makes eq 4's
-		// leafIndex negative, and the range check above has already refused it. It
+		// leafIndex fall below the chain-link offset, and the range check above
+		// has already refused it. It
 		// is UNREACHABLE by construction and retained anyway, because the day
 		// someone loosens eq 4 this is what still holds the line. No fixture can
 		// cover it; saying so beats a vector that pretends to.
@@ -4159,6 +4309,17 @@ export interface ReceiptReport extends Omit<BaseVerdictReport, "verdict" | "step
 const PASSED_OUTCOME: StepOutcome = { result: "passed" };
 const UNAVAILABLE_OUTCOME: StepOutcome = { result: "unavailable" };
 
+/** `event.hash` when the receipt's event sits at its segment's last leaf. Total
+ * on a base pass, which bound every member read here. */
+function finalEventHashOf(document: JsonObject, checkpoint: JsonObject): string | null {
+	const event = objectAtKey(document, "event") as JsonObject;
+	const proof = objectAtKey(document, "proof") as JsonObject;
+	const leafIndex = numberAt(objectAtKey(proof, "inclusion") as JsonObject, "leafIndex");
+	return leafIndex === (numberAt(checkpoint, "treeSize") as number) - 1
+		? stringAt(event, "hash")
+		: null;
+}
+
 /** `history[3] (seg_000004)` — untrusted text, sanitized by the reporter. */
 function historyMemberLabel(index: number, member: JsonObject): string {
 	const segmentId = stringAt(member, "segmentId");
@@ -4190,7 +4351,7 @@ function walkCheckpointHistory(
 	// at/after the receipt's segment", which is at minimum one checkpoint.
 	if (supplied.length === 0) return "the served checkpointHistory is empty";
 
-	const { chain, checkpoint } = verified;
+	const { chain, checkpoint, document } = verified;
 	// Byte equality over the whole signed statement INCLUDING `sig`. §7 says the
 	// embedded checkpoint "appears EXACTLY in the supplied history": a
 	// segmentId-keyed lookup would accept a different, internally valid, validly
@@ -4198,9 +4359,15 @@ function walkCheckpointHistory(
 	// integrity incident §4a makes a hard fail, arriving through the one door
 	// that was left open.
 	const embedded = canonicalize(checkpoint);
+	// §4a (v0.9.6): at its segment's LAST leaf the receipt's event IS the final
+	// event the successor's chain starts from, so a served successor must sign
+	// it as `segmentStartPreviousHash`. Anywhere else the final event is not in
+	// hand, and no checkpoint carries it.
+	const finalEventHash = finalEventHashOf(document, checkpoint);
 
 	const seenSegmentIds = new Set<string>();
 	let previous: JsonObject | null = null;
+	let previousIsEmbedded = false;
 	let embeddedFound = false;
 
 	for (let index = 0; index < supplied.length; index += 1) {
@@ -4263,31 +4430,46 @@ function walkCheckpointHistory(
 		} else {
 			const previousFirst = numberAt(previous, "segmentFirstSequence") as number;
 			const previousTreeSize = numberAt(previous, "treeSize") as number;
+			// §4a (v0.9.6): the predecessor's `treeSize` counts its chain-link leaf,
+			// which is not an event, so it does not advance the sequence.
+			const previousOffset = chainLinkOffset(previous);
 			if (stringAt(member, "previousSegmentId") !== stringAt(previous, "segmentId")) {
 				return `${label}: previousSegmentId does not name the preceding checkpoint's segment`;
 			}
 			if (stringAt(member, "previousSegmentRoot") !== stringAt(previous, "root")) {
 				return `${label}: previousSegmentRoot is not the preceding checkpoint's root`;
 			}
-			// §7: "strictly increasing AND contiguous". The two are separate
-			// clauses because a zero-leaf predecessor satisfies the arithmetic
-			// while standing still.
+			if (
+				previousIsEmbedded &&
+				finalEventHash !== null &&
+				stringAt(member, "segmentStartPreviousHash") !== finalEventHash
+			) {
+				return `${label}: segmentStartPreviousHash is not the receipt's event.hash, though that event is the preceding segment's final event`;
+			}
+			// §7: "strictly increasing AND contiguous". A predecessor with no EVENT
+			// leaf would satisfy the arithmetic while standing still; the shape
+			// check now refuses that statement first, and this clause refuses a
+			// member that runs backwards.
 			if (segmentFirstSequence <= previousFirst) {
 				return `${label}: segmentFirstSequence ${segmentFirstSequence} does not strictly increase past ${previousFirst}`;
 			}
-			const expected = previousFirst + previousTreeSize;
+			// The offset comes off the tree size BEFORE the addition: `first +
+			// treeSize − offset` can round in the intermediate sum and land back
+			// on a safe integer that is not the true value.
+			const expected = previousFirst + (previousTreeSize - previousOffset);
 			// Both operands are safe integers; their SUM need not be, and an
 			// imprecise sum compares equal to values that are not it. The whole
 			// walk rests on this one comparison, so it refuses rather than guesses.
 			if (!Number.isSafeInteger(expected)) {
-				return `${label}: the contiguity sum ${previousFirst} + ${previousTreeSize} leaves the safe-integer range`;
+				return `${label}: the contiguity sum ${previousFirst} + (${previousTreeSize} − ${previousOffset}) leaves the safe-integer range`;
 			}
 			if (segmentFirstSequence !== expected) {
-				return `${label}: segmentFirstSequence ${segmentFirstSequence} ≠ ${previousFirst} + ${previousTreeSize} — the walk has a gap`;
+				return `${label}: segmentFirstSequence ${segmentFirstSequence} ≠ ${previousFirst} + (${previousTreeSize} − ${previousOffset}) — the walk has a gap`;
 			}
 		}
 
-		if (canonicalize(member) === embedded) embeddedFound = true;
+		previousIsEmbedded = canonicalize(member) === embedded;
+		if (previousIsEmbedded) embeddedFound = true;
 		previous = member;
 	}
 

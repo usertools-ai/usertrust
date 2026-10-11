@@ -146,6 +146,18 @@ export class IdempotencyConflictError extends Error {
 	}
 }
 
+/**
+ * The ledger engine holds no pending entry for this transferId: it has nothing of
+ * its own to void. Same message as the plain `Error` it replaces, so message checks
+ * behave as before; typed so a caller can name the cause without matching text.
+ */
+export class PendingEntryNotFoundError extends Error {
+	constructor(public readonly transferId: string) {
+		super(`No pending transfer found for ${transferId}`);
+		this.name = "PendingEntryNotFoundError";
+	}
+}
+
 export class LedgerUnavailableError extends Error {
 	public readonly cause_message: string;
 	public readonly hint: string;

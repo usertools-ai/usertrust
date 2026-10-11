@@ -77,7 +77,7 @@
 		},
 		"usage": {
 			"type": "object",
-			"description": "NEW in v2. The four-tier DISJOINT token split this cost was metered from. Present iff usageSource is 'provider' — an estimated settle has no reported counts, so this is omitted outright rather than zero-filled, to avoid inviting a recompute of a cost that was never derived from token counts. inputTokens is fresh (non-cached) prompt tokens only; cacheReadTokens and cacheWriteTokens are separate tiers, so the four fields sum to the call's billable tokens with nothing double-counted. Together with pricing.appliedRates this is the whole reconciliation surface: ceil(sum(counts x rates / 1000)), floored at 1, reproduces cost exactly. Multiply THEN divide: (tokens * ratePer1k) / 1000, not (tokens / 1000) * ratePer1k, which can differ by a whole usertoken after the ceil.",
+			"description": "NEW in v2. The four-tier DISJOINT token split this cost was metered from. Present iff usageSource is 'provider' — an estimated settle has no reported counts, so this is omitted outright rather than zero-filled, to avoid inviting a recompute of a cost that was never derived from token counts. inputTokens is fresh (non-cached) prompt tokens only; cacheReadTokens and cacheWriteTokens are separate tiers, so the four fields sum to the call's billable tokens with nothing double-counted. Together with pricing.appliedRates this is the whole reconciliation surface: ceil(sum(counts x rates / 1000)), floored at 1, reproduces cost exactly (when the call wrote 1-hour cache, split the write term with the root cacheWrite1h field). Multiply THEN divide: (tokens * ratePer1k) / 1000, not (tokens / 1000) * ratePer1k, which can differ by a whole usertoken after the ceil.",
 			"required": ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"],
 			"properties": {
 				"inputTokens": {
@@ -189,6 +189,22 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"cacheWrite1h": {
+			"type": "object",
+			"description": "The 1-HOUR share of usage.cacheWriteTokens and the usertoken rate per 1,000 tokens it was priced at. PRESENT ONLY when the call wrote 1-hour cache; absent otherwise, so every other receipt is unchanged. A ROOT field on purpose: usage and pricing.appliedRates are closed (additionalProperties: false), so a field added inside either would make every existing v2 validator reject the receipt. `tokens` is a SUBSET of usage.cacheWriteTokens, never added to it. The recompute splits the write term: (usage.cacheWriteTokens - cacheWrite1h.tokens) x pricing.appliedRates.cacheWritePer1k + cacheWrite1h.tokens x cacheWrite1h.ratePer1k.",
+			"required": ["tokens", "ratePer1k"],
+			"additionalProperties": false,
+			"properties": {
+				"tokens": {
+					"type": "integer",
+					"minimum": 1
+				},
+				"ratePer1k": {
+					"type": "number",
+					"minimum": 0
+				}
+			}
 		}
 	},
 	"additionalProperties": true,

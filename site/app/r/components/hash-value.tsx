@@ -19,6 +19,11 @@ import { truncateForDisplay } from "../lib/claims";
  * `tone` picks the ink: `paper` for anything inside `ReceiptPaper` (the bright
  * dark-ground accents are FORBIDDEN as text on paper — globals.css), `dark`
  * everywhere else.
+ *
+ * `variant="chip"` puts the truncated value INSIDE its copy chip, on one row
+ * that never wraps and ellipsizes the value when the row runs out. That is the
+ * card header's shape: at 360-390px the split layout wrapped, and the ID
+ * floated above a "receipt ID copy" chip instead of beside it.
  */
 export default function HashValue({
 	value,
@@ -26,6 +31,7 @@ export default function HashValue({
 	head,
 	tone = "dark",
 	copy = true,
+	variant = "split",
 }: {
 	value: string;
 	/** What this value IS — used as the copy affordance's accessible label. */
@@ -38,9 +44,18 @@ export default function HashValue({
 	 * R17's obligation is discharged by the value being there at all.
 	 */
 	copy?: boolean;
+	variant?: "split" | "chip";
 }) {
 	const { full, display, truncated } = truncateForDisplay(value, head);
 	const ink = tone === "paper" ? "text-ink" : "text-white/85";
+	if (variant === "chip") {
+		return (
+			<span className="flex min-w-0 flex-nowrap items-center" title={full} data-hash-chip="">
+				{truncated ? <span className="sr-only">{`${label}, in full: ${full}`}</span> : null}
+				<CopyChip text={full} label={label} display={display} tone={tone} />
+			</span>
+		);
+	}
 	return (
 		<span className="inline-flex flex-wrap items-center gap-2 align-middle">
 			<code className={`font-mono text-[13px] break-all ${ink}`} title={full}>
