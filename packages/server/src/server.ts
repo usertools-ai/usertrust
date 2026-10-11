@@ -79,6 +79,8 @@ export const RECENTLY_SETTLED_MEMORY = 10_000;
 /** How long a settle that finds its hold mid-release waits for the release before answering 409. */
 const HELD_WAIT_MS = 2_000;
 const HELD_POLL_MS = 50;
+/** The longest transferId a settle for an UNKNOWN hold may carry: it is hashed into an audit event. */
+const MAX_RECORDED_TRANSFER_ID = 256;
 /** Max concurrent SSE streams a single tenant may hold open at once. */
 const MAX_SSE_PER_TENANT = 8;
 /** Drop an SSE subscriber whose kernel send buffer backs up past this. */
@@ -176,6 +178,10 @@ export function createUsertrustServer(opts: {
 	// unknown: it may have charged). A Map keeps insertion order, so eviction is FIFO.
 	const recentlySettled = new Map<string, Map<string, "settled" | "ambiguous">>();
 	const settling = new Set<string>();
+	// `${tenantId}\0${transferId}` -> the release the SWEEP (or a shutdown) has in flight for a hold it already
+	// took out of `pending`. The governor still holds that hold until the release lands, so a settle that finds
+	// it must wait for the release itself (bounded by the governor's own void), not for a fixed window.
+	const releasing = new Map<string, Promise<unknown>>();
 	// Per tenant, and served only on the authenticated /v1/budget: the unauthenticated /v1/health
 	// must not tell anyone when some tenant's settles are being dropped.
 	const settlementsUnrecoverable = new Map<string, number>();
@@ -404,6 +410,15 @@ export function createUsertrustServer(opts: {
 		res: ServerResponse,
 	): Promise<void> {
 		const key = `${tenant.id}\0${transferId}`;
+		// The wire accepts any id length (a custom factory may issue long ids for LIVE holds); only the
+		// record of an unknown hold bounds it, because it is hashed into an audit event.
+		if (transferId.length > MAX_RECORDED_TRANSFER_ID) {
+			sendJson(res, 400, {
+				error: "bad_request",
+				reason: `transferId longer than ${MAX_RECORDED_TRANSFER_ID} characters names no hold here`,
+			});
+			return;
+		}
 		if (settling.has(key)) {
 			sendJson(res, 409, {
 				error: "settle_in_progress",
@@ -450,6 +465,11 @@ export function createUsertrustServer(opts: {
 			// the release is one ledger void) and answer what the settle then IS (a recorded 410), so the
 			// race ends as it did when the answer was a 404. Only a hold that is still held after the
 			// wait is a 409 hold_active.
+			// The sweep's own release is awaited directly, however long the ledger void takes: a fixed
+			// window would turn a slow void into a 409 that the plugin never retries, and the spend would be
+			// neither charged nor recorded. The poll below covers any other path that leaves a hold held.
+			const inFlight = releasing.get(key);
+			if (inFlight !== undefined) await inFlight.catch(() => {});
 			let outcome = await record();
 			for (
 				let waited = 0;
@@ -714,16 +734,24 @@ export function createUsertrustServer(opts: {
 		reason: string,
 	): Promise<ReleaseOutcome | undefined> {
 		const tenant = config.tenants.find((t) => t.id === entry.tenantId);
-		if (tenant) {
+		if (tenant === undefined) return undefined;
+		const key = `${tenant.id}\0${transferId}`;
+		const release = (async (): Promise<ReleaseOutcome | undefined> => {
 			try {
 				const governor = await pool.get(tenant);
 				return await governor.release(entry.auth, reason);
 			} catch {
 				// Best-effort — the Governor's own destroy()/reconciliation voids
 				// anything the control plane fails to release here.
+				return undefined;
 			}
+		})();
+		releasing.set(key, release);
+		try {
+			return await release;
+		} finally {
+			releasing.delete(key);
 		}
-		return undefined;
 	}
 
 	async function sweepExpired(now?: number): Promise<number> {

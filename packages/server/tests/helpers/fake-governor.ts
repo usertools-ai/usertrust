@@ -47,6 +47,10 @@ export function createFakeGovernor(
 		/** How `abort` answers, by the same three options as `release`. */
 		abort?: { notHeld?: boolean; voidError?: string; throws?: boolean };
 		/** How `recordUnheldSettlement` answers: as one that fails to append, or one that already recorded it. */
+		/** A slow ledger void: `release` resolves this long after it starts, and the id reads `held` meanwhile. */
+		releaseDelayMs?: number;
+		/** Pad every minted transferId to this length (a custom factory issuing long ids). */
+		idLength?: number;
 		unheld?: {
 			throws?: boolean;
 			recorded?: boolean;
@@ -60,6 +64,8 @@ export function createFakeGovernor(
 	let budget = opts.budget ?? 10_000;
 	let seq = 0;
 	const pending = new Map<string, Authorization>();
+	// ids whose release is in flight: the governor still HOLDS them until it lands.
+	const releasing = new Set<string>();
 	const calls = {
 		authorized: [] as string[],
 		settled: [] as string[],
@@ -82,7 +88,7 @@ export function createFakeGovernor(
 			}
 			seq += 1;
 			const auth: Authorization = {
-				transferId: `tx_fake_${seq}`,
+				transferId: `tx_fake_${seq}`.padEnd(opts.idLength ?? 0, "x"),
 				estimatedCost,
 				model: params.model,
 				createdAt: Date.now(),
@@ -123,6 +129,11 @@ export function createFakeGovernor(
 		},
 		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
 			calls.releaseReasons.push(reason);
+			if (opts.releaseDelayMs !== undefined) {
+				releasing.add(auth.transferId);
+				await new Promise((resolve) => setTimeout(resolve, opts.releaseDelayMs));
+				releasing.delete(auth.transferId);
+			}
 			if (opts.release?.throws === true) throw new Error("fake release failed");
 			if (opts.release?.notHeld === true) return { released: false };
 			pending.delete(auth.transferId);
@@ -137,7 +148,9 @@ export function createFakeGovernor(
 			if (opts.unheld?.rateLimited === true) throw new UnheldSettlementRateLimitedError(30_000);
 			// A real pool gives each tenant its own governor, so another tenant's hold is never "held"
 			// here; a test that wants the answer asks for it.
-			if (opts.unheld?.held === true) return { outcome: "held", transferId: params.transferId };
+			if (opts.unheld?.held === true || releasing.has(params.transferId)) {
+				return { outcome: "held", transferId: params.transferId };
+			}
 			if (opts.unheld?.heldFor !== undefined && calls.unheld.length <= opts.unheld.heldFor) {
 				return { outcome: "held", transferId: params.transferId };
 			}

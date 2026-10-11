@@ -73,8 +73,9 @@ export const AuthorizeRequestSchema = z
 	});
 
 export const SettleRequestSchema = z.object({
-	// Bounded: the id is hashed into the audit record of a settle whose hold is gone.
-	transferId: z.string().min(1).max(256),
+	// Not length-bounded here: a custom factory may issue long ids for LIVE holds. The record of a settle
+	// for an UNKNOWN hold bounds it (server.ts, MAX_RECORDED_TRANSFER_ID).
+	transferId: z.string().min(1),
 	inputTokens: z.number().int().nonnegative().optional(),
 	outputTokens: z.number().int().nonnegative().optional(),
 	// Spec D4 row 6: zod strips unrecognized keys by default, so these two

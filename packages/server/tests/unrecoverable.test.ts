@@ -328,3 +328,27 @@ describe("the recently-settled memory is bounded, and eviction is a recorded dup
 		expect(fake.calls.unheld).toHaveLength(1);
 	}, 120_000);
 });
+
+describe("adjudicated review threads", () => {
+	it("a settle that finds its hold mid-release waits for a SLOW ledger void (longer than the poll window) and is recorded, never a 409", async () => {
+		const { base, fake } = await start({ releaseDelayMs: 3_000 });
+		const id = await authorize(base);
+		// the TTL sweep takes the entry out of `pending` and starts the (slow) release
+		const sweeping = server?.sweepExpired(Date.now() + 10 * 60_000);
+		await new Promise((r) => setTimeout(r, 50));
+		const res = await post(base, "/v1/settle", { transferId: id });
+		expect(res.status).toBe(410);
+		expect(await res.json()).toMatchObject({ error: "settlement_unrecoverable", recorded: true });
+		expect(fake.calls.unheld.length).toBeGreaterThan(0);
+		await sweeping;
+	}, 20_000);
+
+	it("a live hold whose factory issued a long transferId still settles; only the unknown-hold record path refuses an over-long id", async () => {
+		const { base } = await start({ idLength: 300 });
+		const id = await authorize(base);
+		expect(id.length).toBe(300);
+		expect((await post(base, "/v1/settle", { transferId: id })).status).toBe(200);
+		// an unknown id that long is refused on the recording path (400), not recorded or 500
+		expect((await post(base, "/v1/settle", { transferId: "y".repeat(300) })).status).toBe(400);
+	});
+});
