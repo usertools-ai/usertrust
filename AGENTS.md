@@ -994,11 +994,51 @@ therefore the one place where "no prompt or response body lands on disk" (below)
 a change made somewhere else — add a prompt-bearing field to any audit event and the DLQ writes it
 in the clear, with no hash chain over it. `0600` is the only thing protecting it.
 
-**Single-writer audit semantics.** In-process `AsyncMutex` + an `O_WRONLY|O_CREAT|O_EXCL` advisory
-lock file + an owner registry that distinguishes a crashed same-PID writer (reclaimable) from a live
-sibling (refused). Every append is `writeSync` + `fsyncSync` + `closeSync`, and the `.meta` sidecar
-is fsync'd too. Reclaiming a *live* sibling's lock forks the chain, because each writer caches its
-own tail. There is **no** cross-process protection beyond this advisory lock.
+**Single-writer audit semantics.** In-process `AsyncMutex` + an advisory lock file + an owner
+registry that distinguishes a crashed same-PID writer (reclaimable) from a live sibling (refused).
+Every append is `writeSync` + `fsyncSync` + `closeSync`, and the `.meta` sidecar is fsync'd too.
+Reclaiming a *live* sibling's lock forks the chain, because each writer caches its own tail. There
+is **no** cross-process protection beyond this advisory lock.
+
+**The lock file appears complete, by hard link.** `createLock` writes the full content (a write
+loop) and fsyncs it to a private temp file, `.audit-writer.lock.<writerId>.tmp`, created
+`O_EXCL|O_NOFOLLOW`. Its `fstat` inode becomes the lock's create-time identity. The temp file is then
+`link`ed to the lock's name (EEXIST means taken) and removed on every path, and the directory is
+fsync'd (best effort, reported, never fatal). *Prevents:* the create-then-write window, in which
+another process read the lock empty, judged it corrupt, and unlinked a LIVE writer's lock. Do not
+"simplify" back to `open(O_EXCL)` + write. Three rules come with it:
+- `link` unsupported (`EPERM`/`ENOTSUP`/`EOPNOTSUPP`/`EXDEV`/`ENOSYS`) fails the acquire **closed**,
+  keeping the code. Any fallback reopens the window.
+- Only the exact name `.audit-writer.lock` is ever read as a lock, and never through a symlink
+  (`O_NOFOLLOW`; a symlink there throws `ELOOP`).
+- A writer that has just taken the lock sweeps leftover temp files over a minute old. That age is a
+  housekeeping judgement, never a lock's: removing a live creator's temp file can only fail its link.
+
+A writer that already holds a lock verifies it with one read per append, so an append creates no
+temp file.
+
+**Staleness is judged on one kernel, failing toward live.** `tryCleanStaleLock` judges another
+process's lock. The lock records `bootId` (Linux `/proc/sys/kernel/random/boot_id`) and `pidNs`
+(`/proc/self/ns/pid`) where they can be read. In order:
+1. The same PID in the same namespace (or a lock that names none) is a crashed earlier instance of
+   this PID, and is reclaimed.
+2. A lock whose boot id and this boot's are both known and differ EXACTLY is reclaimed.
+3. A lock from another namespace, or one whose namespace cannot be compared, is HELD.
+4. Otherwise `kill(pid, 0)` decides, as before.
+
+*Prevents:*
+- A previous boot's lock whose PID a live, unrelated process now carries reading as held forever.
+- A sibling container's live writer being reclaimed: containers on one host share the boot id, and
+  each often runs its writer as PID 1, so its lock would pass as a same-PID crash.
+
+Rules:
+- An unknown boot id on either side is never stale.
+- Never reclaim on a time estimate; an uptime-derived boot time moves with the wall clock.
+- Cache only a SUCCESSFUL identity read.
+
+A crashed container restarted into a new PID namespace therefore finds its old lock held until it is
+removed by hand (LIMITATIONS §5). That is the price of never reclaiming a live sibling's lock. A
+vault shared between kernels is outside the model.
 
 **The lock's threat model: accidental concurrent writers, not an adversary.** The lock stops two
 processes, or two writers in one process, from appending to one vault at once. It does not defend

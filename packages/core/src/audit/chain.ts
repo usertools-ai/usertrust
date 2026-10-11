@@ -16,9 +16,13 @@ import {
 	constants as fsConstants,
 	fstatSync,
 	fsyncSync,
+	linkSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
+	readdirSync,
 	readFileSync,
+	readlinkSync,
 	realpathSync,
 	unlinkSync,
 	writeSync,
@@ -27,6 +31,25 @@ import { dirname, join } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
 import { canonicalize } from "./canonical.js";
+
+// ── Durable writes ──
+
+/**
+ * Write EVERY byte of `data`, or throw (#194). `writeSync` may write fewer bytes than asked (a
+ * nearly full disk, a signal); ignoring its count reported a partial line as appended and durable —
+ * a torn tail with a durability claim on it. A write that makes no progress throws.
+ */
+function writeFully(fd: number, data: string): void {
+	const buf = Buffer.from(data, "utf-8");
+	let off = 0;
+	while (off < buf.length) {
+		const n = writeSync(fd, buf, off, buf.length - off);
+		if (n <= 0) {
+			throw new Error(`audit write made no progress (${off} of ${buf.length} bytes written)`);
+		}
+		off += n;
+	}
+}
 
 // ── Types ──
 
@@ -223,6 +246,19 @@ class AsyncMutex {
 // Holding a file descriptor open for the writer's lifetime was rejected earlier because the lock's
 // semantics are the lock file's EXISTENCE at its path; an open fd adds no exclusion by itself,
 // only together with such a kernel lock.
+//
+// The lock file APPEARS COMPLETE. Its content is written and fsync'd to a private temp file, which
+// is then hard-linked to the lock's name: `link` fails with EEXIST when the name is taken, so it is
+// the exclusive create, and the name never exists without its full content. (An exclusive create
+// followed by a write left a window in which another process read the lock empty, judged it
+// corrupt, and unlinked a LIVE writer's lock.) A filesystem without hard links cannot host a vault's
+// writer: the acquire fails closed rather than fall back to that window.
+//
+// Liveness is judged on ONE KERNEL. The lock records the writer's PID and, where they can be read,
+// the kernel's boot id and the writer's PID namespace. A lock whose boot id is known and differs
+// from this boot's — both known — was written before a reboot, and its PID names nothing now. A
+// lock from another PID namespace cannot be probed from this one, and is held. A vault shared
+// between kernels (two hosts, two VMs) is outside the model: no PID probe means anything there.
 
 const LOCK_FILE_NAME = ".audit-writer.lock";
 
@@ -275,7 +311,14 @@ interface LockFileView {
 	/** `undefined` when the content is not a JSON object (a corrupt file). */
 	pid: unknown;
 	writerId: unknown;
+	/** The writer's kernel boot id, if it recorded one (see {@link thisBootId}). */
+	bootId: unknown;
+	/** The writer's PID namespace, if it recorded one (see {@link thisPidNamespace}). */
+	pidNs: unknown;
 }
+
+/** `O_NOFOLLOW` where the platform has it (not Windows, which has no such flag). */
+const O_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
 
 /**
  * Read the lock file at `lockPath` — identity and content through the SAME fd, so they are one
@@ -285,11 +328,15 @@ interface LockFileView {
  * Every other failure THROWS — the open, the fstat, the read itself. A lock that could not be read
  * is never "a lock nobody holds": an acquire that took it for one would unlink a LIVE lock and
  * admit a second writer. Only content that WAS read and does not parse is corrupt.
+ *
+ * The name is never followed: a symlink at the lock's name is not a lock any writer made (each
+ * links a regular file there), and the open fails (ELOOP) — so it throws, like any lock that
+ * cannot be read, and is never judged by whatever it points at.
  */
 function readLockFile(lockPath: string): LockFileView | undefined {
 	let fd: number;
 	try {
-		fd = openSync(lockPath, fsConstants.O_RDONLY);
+		fd = openSync(lockPath, fsConstants.O_RDONLY | O_NOFOLLOW);
 	} catch (err) {
 		if (hasFsCode(err, "ENOENT")) return undefined;
 		throw err;
@@ -297,14 +344,20 @@ function readLockFile(lockPath: string): LockFileView | undefined {
 	try {
 		const st = fstatSync(fd, { bigint: true });
 		const content = readFileSync(fd, "utf-8");
-		let claim: { pid?: unknown; writerId?: unknown } | undefined;
+		let claim: { pid?: unknown; writerId?: unknown; bootId?: unknown; pidNs?: unknown } | undefined;
 		try {
 			const parsed: unknown = JSON.parse(content);
 			if (parsed !== null && typeof parsed === "object") claim = parsed;
 		} catch {
 			/* read, but corrupt: no claim */
 		}
-		return { identity: `${st.dev}:${st.ino}`, pid: claim?.pid, writerId: claim?.writerId };
+		return {
+			identity: `${st.dev}:${st.ino}`,
+			pid: claim?.pid,
+			writerId: claim?.writerId,
+			bootId: claim?.bootId,
+			pidNs: claim?.pidNs,
+		};
 	} finally {
 		closeSync(fd);
 	}
@@ -323,13 +376,110 @@ function liveHolderOf(file: LockFileView): { writerId: string; lock: HeldLock } 
 	return lock === undefined ? undefined : { writerId: file.writerId, lock };
 }
 
+// ── Whose kernel, whose namespace ──
+
+/** A boot id as Linux writes it: a lower-case UUID. Anything else is not one this code compares. */
+const BOOT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A PID namespace as Linux names it: the `/proc/<pid>/ns/pid` link target. */
+const PID_NS = /^pid:\[\d+\]$/;
+
+let cachedBootId: string | undefined;
+let cachedPidNs: string | undefined;
+
+/**
+ * This kernel's boot id (Linux: `/proc/sys/kernel/random/boot_id`), or `undefined` when it cannot
+ * be read — not Linux, no `/proc`, or a failed read. Only a SUCCESSFUL read is cached (a boot id
+ * cannot change while this process lives): a transient failure must not leave every later lock
+ * this process writes, and every later judgement it makes, without a boot id for its lifetime.
+ * No other platform's boot identity is read: macOS has one only through a subprocess, which would
+ * sit inside every acquire; there the PID probe decides, as before.
+ */
+function thisBootId(): string | undefined {
+	if (cachedBootId !== undefined) return cachedBootId;
+	try {
+		const id = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
+		if (BOOT_ID.test(id)) cachedBootId = id;
+	} catch {
+		/* unknown — and not cached */
+	}
+	return cachedBootId;
+}
+
+/**
+ * This process's PID namespace (Linux: the `/proc/self/ns/pid` link target), or `undefined` when it
+ * cannot be read. Cached only once read, like {@link thisBootId}. Containers on one host share the
+ * kernel — and its boot id — but `kill(pid, 0)` sees only the caller's own PID namespace, and a
+ * container's writer is often PID 1 there, the same number as a writer in a sibling container.
+ */
+function thisPidNamespace(): string | undefined {
+	if (cachedPidNs !== undefined) return cachedPidNs;
+	try {
+		const ns = readlinkSync("/proc/self/ns/pid");
+		if (PID_NS.test(ns)) cachedPidNs = ns;
+	} catch {
+		/* unknown — and not cached */
+	}
+	return cachedPidNs;
+}
+
+/**
+ * Was this lock written before this boot? ONLY when the lock carries a boot id, this process can
+ * read its own, and the two differ EXACTLY. An unknown boot id on either side is never a verdict
+ * (fail toward live): the PID judgement decides, as it did before boot ids were recorded. Never a
+ * time estimate — an uptime-derived boot time moves with every wall-clock step, and a step would
+ * reclaim a LIVE writer's lock.
+ */
+function writtenBeforeThisBoot(lock: LockFileView): boolean {
+	if (typeof lock.bootId !== "string" || !BOOT_ID.test(lock.bootId)) return false;
+	const now = thisBootId();
+	return now !== undefined && lock.bootId !== now;
+}
+
+/**
+ * How the lock's PID namespace relates to this process's:
+ *  - `unrecorded`: the lock names none (written before namespaces were recorded, or where they
+ *    cannot be read) — the PID is judged as before;
+ *  - `same`: both are known and equal — the PID means the same process here;
+ *  - `foreign`: both are known and differ — this process cannot probe that PID;
+ *  - `unknown`: the lock names one, and this process cannot read its own (or the lock's is not a
+ *    namespace) — it cannot tell, and fails toward live.
+ */
+function namespaceOf(lock: LockFileView): "unrecorded" | "same" | "foreign" | "unknown" {
+	if (lock.pidNs === undefined) return "unrecorded";
+	const now = thisPidNamespace();
+	if (now === undefined || typeof lock.pidNs !== "string" || !PID_NS.test(lock.pidNs)) {
+		return "unknown";
+	}
+	return lock.pidNs === now ? "same" : "foreign";
+}
+
+/** The lock's content: who holds it, and — where they can be read — on which boot and namespace. */
+function lockContentFor(writerId: string): string {
+	const bootId = thisBootId();
+	const pidNs = thisPidNamespace();
+	return JSON.stringify({
+		pid: process.pid,
+		writerId,
+		startedAt: new Date().toISOString(),
+		...(bootId === undefined ? {} : { bootId }),
+		...(pidNs === undefined ? {} : { pidNs }),
+	});
+}
+
 /**
  * Remove a lock file that no live writer in this process holds (the caller has established that,
  * from a successful read). Throws if a live process (another PID) holds it.
+ *
+ * In order: the same PID in the same namespace (or a lock that names none) is a crashed earlier
+ * instance of this PID. Anything else is another process's lock: reclaimed if it was written
+ * before this boot (exact boot ids, both known); HELD if its namespace is another one, or cannot
+ * be compared; otherwise judged by `kill(pid, 0)`, as before.
  */
-function tryCleanStaleLock(lockPath: string, pid: unknown): void {
+function tryCleanStaleLock(lockPath: string, lock: LockFileView): void {
+	const { pid } = lock;
+	const namespace = namespaceOf(lock);
 	try {
-		if (pid === process.pid) {
+		if (pid === process.pid && (namespace === "same" || namespace === "unrecorded")) {
 			// Same PID, and no live writer in this process holds the file (see liveHolderOf): a
 			// crashed earlier instance of this PID — a container's PID 1 is the usual one — or a
 			// copy of a lock. Nothing in this process can be appending under it.
@@ -338,6 +488,22 @@ function tryCleanStaleLock(lockPath: string, pid: unknown): void {
 			);
 			unlinkSync(lockPath);
 			return;
+		}
+		if (writtenBeforeThisBoot(lock)) {
+			// Its PID was recorded before this boot and names no process of this one — whatever
+			// process carries that number now. The boot ids are validated UUIDs: safe to print.
+			console.warn(
+				`[AUDIT] Reclaiming a lock written before this boot (PID ${String(pid)}, boot ${String(lock.bootId)}; this boot ${String(thisBootId())}).`,
+			);
+			unlinkSync(lockPath);
+			return;
+		}
+		if (namespace === "foreign" || namespace === "unknown") {
+			throw new AuditWriterLockHeldError(
+				namespace === "foreign"
+					? `Audit writer lock held by PID ${String(pid)} in another PID namespace (${String(lock.pidNs)}). This process cannot probe that namespace, so the lock is never reclaimed from here; remove the lock file by hand only once that writer is gone. Lock file: ${lockPath}`
+					: `Audit writer lock held by PID ${String(pid)} in a PID namespace this process cannot compare with its own. The lock is never reclaimed from here; remove the lock file by hand only once that writer is gone. Lock file: ${lockPath}`,
+			);
 		}
 		try {
 			process.kill(pid as number, 0);
@@ -372,51 +538,185 @@ function tryCleanStaleLock(lockPath: string, pid: unknown): void {
 }
 
 /**
- * The lock file's exclusive create. On success the lock is this writer's: recorded in
- * {@link heldLocks} and `true` returned. `false` means the file exists (EEXIST).
- *
- * O_WRONLY | O_CREAT | O_EXCL atomically instead of existsSync + openSync('wx'). This
- * eliminates the TOCTOU race where two processes both detect a stale lock, both unlink, and both
- * try to create — one gets EEXIST. This create, at a PATH, is the ONLY cross-process exclusion.
- *
- * The identity is read through the fd, not the path, so it is the file THIS create made, never
- * one swapped in after it. The fd is then closed: the identity is kept in memory, so
- * nothing needs the fd held open.
- *
- * Registered only after EVERYTHING succeeded, the close included. A failure after the create
- * throws with nothing registered — an owner registered by an acquire that threw could never be
- * released (the caller gets no writer, and a scoped lock never reaches its release) and would
- * refuse this vault in this process for good — and removes the file the create made, if it is
- * still that file (its inode AND this writer's id: an inode alone is reused on Linux), so no lock
- * is left behind for other processes either.
+ * A lock's private temp file, `<lock>.<writerId>.tmp` in the lock's own directory. Only the exact
+ * name `.audit-writer.lock` is ever read as a lock: a temp file — complete, half-written, or left
+ * by a writer that crashed — never is.
  */
-function createLock(lockPath: string, lockContent: string, writerId: string): boolean {
+const LOCK_TEMP_NAME =
+	/^\.audit-writer\.lock\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/;
+
+/**
+ * How old a temp file must be before {@link sweepLeftoverTemps} removes it. A live create holds its
+ * temp file for a few syscalls; this is far longer. The age is only ever a HOUSEKEEPING judgement,
+ * never a lock's: removing a live creator's temp file can only fail that create (its link meets
+ * ENOENT), never admit a second writer.
+ */
+const LEFTOVER_TEMP_AGE_MS = 60_000;
+
+/** `link` answers these where the filesystem cannot make a hard link (FAT/exFAT, some network and FUSE mounts). */
+const LINK_UNSUPPORTED = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "ENOSYS"]);
+
+/** Remove a temp file, if it is there. Never throws: an unremoved temp file is never read as a lock. */
+function removeTemp(tmp: string): void {
+	try {
+		unlinkSync(tmp);
+	} catch {
+		/* gone already, or left for the sweep */
+	}
+}
+
+/**
+ * Write `content` to the private temp file `tmp` — created exclusively, never through a symlink,
+ * written in full and fsync'd — and return its `dev:ino`, read through the create's own fd. On any
+ * failure the temp file is removed and the error thrown.
+ *
+ * A temp file already at `tmp` is this writer's own leftover: the name carries the writer's random
+ * id, and one writer never takes two locks at once (every acquire is synchronous). It is removed
+ * and the create made afresh.
+ */
+function writeLockTemp(tmp: string, content: string): string {
+	const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW;
 	let fd: number;
 	try {
-		fd = openSync(lockPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+		fd = openSync(tmp, flags, 0o600);
 	} catch (err) {
-		if (hasFsCode(err, "EEXIST")) return false;
-		throw err;
+		if (!hasFsCode(err, "EEXIST")) throw err;
+		unlinkSync(tmp);
+		fd = openSync(tmp, flags, 0o600);
 	}
-	let identity: string | undefined;
 	try {
 		try {
 			const st = fstatSync(fd, { bigint: true });
-			identity = `${st.dev}:${st.ino}`;
-			writeSync(fd, lockContent);
+			writeFully(fd, content);
 			fsyncSync(fd);
+			return `${st.dev}:${st.ino}`;
 		} finally {
-			// Close fd immediately — lock semantics rely on file existence, not open fd
 			closeSync(fd);
 		}
 	} catch (err) {
-		if (identity !== undefined) rollBackCreate(lockPath, identity, writerId);
+		removeTemp(tmp);
 		throw err;
 	}
-	// The create succeeded — but succeeded WHERE? The directory can be replaced between the open
-	// and now, and then the file this create made sits in the old directory while the requested one
-	// has no lock. Success is reported only if the file at the requested path is the one this
-	// create made: its inode AND this writer's id, read through one fd.
+}
+
+/**
+ * Fsync `dir`, so the lock's link (and its temp file's removal) reach the disk. Best effort, as
+ * the spend ledger's directory fsync is: a platform that cannot fsync a directory is silent, and
+ * any other failure is reported and does not fail the acquire. Nothing depends on the lock
+ * surviving a power loss — every writer that held it dies with that boot.
+ */
+function syncDirectory(dir: string): void {
+	let fd: number | undefined;
+	try {
+		fd = openSync(dir, fsConstants.O_RDONLY);
+		fsyncSync(fd);
+	} catch (err) {
+		const code = errorCode(err);
+		const unsupported =
+			code === "EINVAL" ||
+			code === "ENOTSUP" ||
+			code === "EOPNOTSUPP" ||
+			code === "EISDIR" ||
+			code === "EPERM" ||
+			code === "EBADF";
+		if (!unsupported) {
+			console.warn(
+				`[AUDIT] Audit writer lock directory not fsynced (${code ?? "unknown error"}); the lock is held regardless.`,
+			);
+		}
+	} finally {
+		if (fd !== undefined) {
+			try {
+				closeSync(fd);
+			} catch {
+				/* a directory fd: nothing was written through it */
+			}
+		}
+	}
+}
+
+/**
+ * Remove temp files that crashed writers left in `dir` (a writer that died between its temp file's
+ * create and its removal leaves one behind, one per crash). Run by a writer that has just taken
+ * the lock, so they cannot accumulate without bound. Only names of the temp-file form, only once
+ * older than {@link LEFTOVER_TEMP_AGE_MS}; `lstat` and `unlink` never follow a symlink. Best
+ * effort: a temp file that cannot be judged or removed is left for a later sweep.
+ */
+function sweepLeftoverTemps(dir: string): void {
+	let names: string[];
+	try {
+		names = readdirSync(dir);
+	} catch {
+		return;
+	}
+	const now = Date.now();
+	for (const name of names) {
+		if (!LOCK_TEMP_NAME.test(name)) continue;
+		const path = join(dir, name);
+		try {
+			const st = lstatSync(path);
+			if (st.isDirectory() || now - st.mtimeMs < LEFTOVER_TEMP_AGE_MS) continue;
+			unlinkSync(path);
+		} catch {
+			/* gone, or not removable now: a later sweep tries again */
+		}
+	}
+}
+
+/**
+ * The lock file's exclusive create. On success the lock is this writer's: recorded in
+ * {@link heldLocks} and `true` returned. `false` means the lock file exists (EEXIST).
+ *
+ * The lock APPEARS COMPLETE: its content is written in full and fsync'd to a private temp file
+ * ({@link writeLockTemp}), which is then hard-linked to the lock's name. `link` never replaces an
+ * existing name — it fails with EEXIST — so it is the atomic exclusive create, and two processes
+ * that both found a lock stale and both removed it cannot both take it. And no reader ever finds
+ * the lock's name with no content, or half of it: an exclusive create followed by a write left
+ * exactly that window, and a reader that judged the empty lock corrupt removed a LIVE writer's lock.
+ * `link` does not follow a symlink at the lock's name; a name that is taken is taken. This link,
+ * at a PATH, is the ONLY cross-process exclusion.
+ *
+ * A filesystem that cannot make a hard link fails the acquire, closed: falling back to the exclusive
+ * create and write would bring that window back, and a forked chain is worse than a writer that
+ * cannot start. The error keeps `link`'s code.
+ *
+ * The identity is read through the temp file's create fd — the link gives the lock that very inode
+ * — so it is the file THIS create made, never one swapped in after it. The temp file is removed
+ * on every path, success included.
+ *
+ * Registered only after EVERYTHING succeeded. A failure after the link throws with nothing
+ * registered — an owner registered by an acquire that threw could never be released (the caller
+ * gets no writer, and a scoped lock never reaches its release) and would refuse this vault in this
+ * process for good — and removes the lock the link made, if it is still that file (its inode AND
+ * this writer's id: an inode alone is reused on Linux), so no lock is left behind for other
+ * processes either.
+ */
+function createLock(lockPath: string, lockContent: string, writerId: string): boolean {
+	const tmp = `${lockPath}.${writerId}.tmp`;
+	const identity = writeLockTemp(tmp, lockContent);
+	try {
+		linkSync(tmp, lockPath);
+	} catch (err) {
+		removeTemp(tmp);
+		if (hasFsCode(err, "EEXIST")) return false;
+		const code = errorCode(err);
+		if (code !== undefined && LINK_UNSUPPORTED.has(code)) {
+			throw Object.assign(
+				new Error(
+					`Audit writer lock cannot be created: link() failed with ${code}, so this filesystem cannot make the hard link the lock is created with. A vault's audit directory must be on a filesystem with hard links (see LIMITATIONS.md). Lock file: ${lockPath}`,
+					{ cause: err },
+				),
+				{ code },
+			);
+		}
+		throw err;
+	}
+	removeTemp(tmp);
+	syncDirectory(dirname(lockPath));
+	// The link succeeded — but WHERE? The directory can be replaced between the temp file's create
+	// and now, and then the lock this create made sits in the old directory while the requested one
+	// has none (or another writer's). Success is reported only if the file at the requested path is
+	// the one this create made: its inode AND this writer's id, read through one fd.
 	let there: LockFileView | undefined;
 	try {
 		there = readLockFile(lockPath);
@@ -443,9 +743,9 @@ function createLock(lockPath: string, lockContent: string, writerId: string): bo
  * the create made — its inode AND this writer's id. The inode ALONE is not this file: once it is
  * unlinked, Linux (ext4) hands the freed inode to the very next file created, so a lock another
  * writer put here in the meantime can carry it, and unlinking that would free a LIVE lock. A file
- * whose content never fully landed fails the check and is left — unregistered, a same-PID lock
- * nobody here holds. (Like every check-then-unlink by path here, this has a window if the
- * directory itself is replaced concurrently: see the threat model at the top of this section.)
+ * that cannot be read is left — unregistered, a same-PID lock nobody here holds. (Like every
+ * check-then-unlink by path here, this has a window if the directory itself is replaced
+ * concurrently: see the threat model at the top of this section.)
  */
 function rollBackCreate(lockPath: string, identity: string, writerId: string): void {
 	try {
@@ -454,6 +754,24 @@ function rollBackCreate(lockPath: string, identity: string, writerId: string): v
 	} catch {
 		/* cannot tell: leave it — unregistered, it is a same-PID lock nobody here holds */
 	}
+}
+
+/**
+ * Is `file` — the lock file at `lockPath` — this writer's own? Then remember where it is NOW: the
+ * directory may have been renamed since this writer last saw it (and the caller's symlink
+ * repointed), and release must reach it.
+ */
+function verifyOwnLockFile(file: LockFileView, lockPath: string, writerId: string): boolean {
+	const holder = liveHolderOf(file);
+	if (holder?.writerId !== writerId) return false;
+	holder.lock.path = lockPath;
+	return true;
+}
+
+/** {@link verifyOwnLockFile} on a fresh read of `lockPath`; a read that fails throws. */
+function verifyOwnLock(lockPath: string, writerId: string): boolean {
+	const file = readLockFile(lockPath);
+	return file !== undefined && verifyOwnLockFile(file, lockPath, writerId);
 }
 
 /**
@@ -472,23 +790,23 @@ function acquireProcessLock(logPath: string, writerId: string): boolean {
 	// (#182.1).
 	const dir = realpathSync(dirname(logPath));
 	const lockPath = join(dir, LOCK_FILE_NAME);
-	const lockContent = JSON.stringify({
-		pid: process.pid,
-		writerId,
-		startedAt: new Date().toISOString(),
-	});
 
-	if (createLock(lockPath, lockContent, writerId)) return true;
+	// A writer that already holds a lock first looks for it here, so its every append does not
+	// create (and fsync) a temp file only to meet EEXIST. The same decision from the same read the
+	// create's EEXIST would lead to: the file carries this writer's id and inode, so it is this
+	// writer's. Anything else falls through to the create.
+	if (heldLocks.has(writerId) && verifyOwnLock(lockPath, writerId)) return false;
+
+	const lockContent = lockContentFor(writerId);
+	if (createLock(lockPath, lockContent, writerId)) {
+		sweepLeftoverTemps(dir);
+		return true;
+	}
 
 	// The lock file exists. Whose it is, the file says — and a read that fails throws out of here.
 	const file = readLockFile(lockPath);
+	if (file !== undefined && verifyOwnLockFile(file, lockPath, writerId)) return false;
 	const holder = file === undefined ? undefined : liveHolderOf(file);
-	if (holder?.writerId === writerId) {
-		// Ours. The directory may have been renamed since this writer last saw the lock (and the
-		// caller's symlink repointed): remember where it is NOW, so release reaches it.
-		holder.lock.path = lockPath;
-		return false;
-	}
 	if (holder !== undefined) {
 		// A LIVE writer in this process holds this vault → refuse.
 		throw new AuditWriterLockHeldError(
@@ -496,12 +814,16 @@ function acquireProcessLock(logPath: string, writerId: string): boolean {
 		);
 	}
 
-	// Read, and no live writer in this process holds it: stale, or another process's.
-	tryCleanStaleLock(lockPath, file?.pid);
+	// Read, and no live writer in this process holds it: stale, or another process's. (Gone
+	// since the EEXIST: nothing to clean.)
+	if (file !== undefined) tryCleanStaleLock(lockPath, file);
 
 	// Second attempt after stale lock cleanup. If another process raced us and
 	// already re-created the lock, EEXIST here means they won — report as held.
-	if (createLock(lockPath, lockContent, writerId)) return true;
+	if (createLock(lockPath, lockContent, writerId)) {
+		sweepLeftoverTemps(dir);
+		return true;
+	}
 	throw new AuditWriterLockHeldError(
 		`Audit writer lock acquired by another process during stale lock cleanup. Lock file: ${lockPath}`,
 	);
