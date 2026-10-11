@@ -55,6 +55,14 @@ const nextLockIno: { ino: bigint | undefined } = { ino: undefined };
 const beforeLockCreate: { fn: ((path: string) => void) | undefined } = { fn: undefined };
 /** Runs once, just BEFORE the next non-exclusive open of a lock file (a READ of an existing one). */
 const beforeLockRead: { fn: ((path: string) => void) | undefined } = { fn: undefined };
+/**
+ * Faults injected ONCE into the next matching lock-file operation, then disarmed: a READ of an
+ * existing lock (`open` / `fstat` / `read` on a non-exclusive fd), the `close` of an exclusive
+ * create's fd (the real close runs first, then `before`, then the throw), or an `unlink`. `path`
+ * (physical) narrows it to one lock file.
+ */
+type LockFaultOp = "open" | "fstat" | "read" | "close" | "unlink";
+const lockFaults: Array<{ op: LockFaultOp; code: string; path?: string; before?: () => void }> = [];
 const realpathCalls = { native: 0, js: 0, nativeAlwaysFails: false };
 /** Paths under these prefixes keep the caller's spelling through the JS realpath (see below). */
 const realpathKeepsSpelling = new Set<string>();
@@ -119,8 +127,21 @@ vi.mock("node:fs", async (importOriginal) => {
 	// Every open fd remembers its physical path, so an fstat answers the same chosen inode a path
 	// lookup does — whichever way the module under test reads a lock file's identity.
 	const fdPaths = new Map<number, { path: string; excl: boolean }>();
+	const fault = (op: LockFaultOp, physicalPath: string) => {
+		if (!physicalPath.endsWith(".audit-writer.lock")) return;
+		const i = lockFaults.findIndex(
+			(f) => f.op === op && (f.path === undefined || f.path === physicalPath),
+		);
+		if (i < 0) return;
+		const [f] = lockFaults.splice(i, 1);
+		f?.before?.();
+		throw Object.assign(new Error(`${f?.code}: injected ${op} fault, '${physicalPath}'`), {
+			code: f?.code,
+		});
+	};
 	const openSync = ((p: string, flags?: unknown, mode?: unknown) => {
 		const excl = typeof flags === "number" && (flags & fs.constants.O_EXCL) !== 0;
+		if (!excl) fault("open", fsHooks.physical(String(p)));
 		const hookBox = excl
 			? beforeLockCreate
 			: String(p).endsWith(".audit-writer.lock")
@@ -136,12 +157,26 @@ vi.mock("node:fs", async (importOriginal) => {
 		return fd;
 	}) as typeof fs.openSync;
 	const closeSync = ((fd: number) => {
+		const opened = fdPaths.get(fd);
 		fdPaths.delete(fd);
 		fs.closeSync(fd);
+		if (opened?.excl === true) fault("close", opened.path);
 	}) as typeof fs.closeSync;
+	const readFileSync = ((p: unknown, o?: unknown) => {
+		if (typeof p === "number") {
+			const opened = fdPaths.get(p);
+			if (opened !== undefined && !opened.excl) fault("read", opened.path);
+		}
+		return (fs.readFileSync as (p: unknown, o?: unknown) => unknown)(p, o);
+	}) as typeof fs.readFileSync;
+	const unlinkSync = ((p: string) => {
+		fault("unlink", fsHooks.physical(String(p)));
+		fs.unlinkSync(p);
+	}) as typeof fs.unlinkSync;
 	const fstatSync = ((fd: number, o?: unknown) => {
-		const real = (fs.fstatSync as (fd: number, o?: unknown) => object)(fd, o);
 		const opened = fdPaths.get(fd);
+		if (opened !== undefined && !opened.excl) fault("fstat", opened.path);
+		const real = (fs.fstatSync as (fd: number, o?: unknown) => object)(fd, o);
 		const forced = opened === undefined ? undefined : lockInoOverride.get(opened.path);
 		if (forced !== undefined) return { ...real, ino: forced };
 		// `nextLockIno` models the inode a NEW lock file gets: an exclusive create's fd only.
@@ -150,7 +185,16 @@ vi.mock("node:fs", async (importOriginal) => {
 		}
 		return real;
 	}) as typeof fs.fstatSync;
-	const wrapped = { realpathSync, statSync, lstatSync, fstatSync, openSync, closeSync };
+	const wrapped = {
+		realpathSync,
+		statSync,
+		lstatSync,
+		fstatSync,
+		openSync,
+		closeSync,
+		readFileSync,
+		unlinkSync,
+	};
 	return { ...fs, ...wrapped, default: { ...fs, ...wrapped } };
 });
 
@@ -166,6 +210,7 @@ afterEach(() => {
 	nextLockIno.ino = undefined;
 	beforeLockCreate.fn = undefined;
 	beforeLockRead.fn = undefined;
+	lockFaults.length = 0;
 	realpathCalls.native = 0;
 	realpathCalls.js = 0;
 	realpathCalls.nativeAlwaysFails = false;
@@ -457,10 +502,11 @@ describe("#195 r3→r5: directory inode reuse cannot alias a lock — nothing is
 		);
 		w2.release();
 
-		const e3 = (await w1.appendEvent({ kind: "k", actor: "w1", data: { n: 3 } })) as {
-			previousHash: string;
-			sequence: number;
-		};
+		const e3 = (await w1.appendEvent({
+			kind: "k",
+			actor: "w1",
+			data: { n: 3 },
+		})) as unknown as { previousHash: string; sequence: number };
 		expect(e3.previousHash, "chained from W2's event, not W1's stale cache").toBe(e2.hash);
 		expect(e3.sequence).toBe((e2 as unknown as { sequence: number }).sequence + 1);
 	});
@@ -729,5 +775,242 @@ describe("#195 r5: a lock is held by the writer whose id and lock-file inode it 
 		);
 		w.release();
 		track(createAuditWriter(vault, { lockAtCreate: true }));
+	});
+});
+
+describe("#195: a lock that cannot be read, released or closed is never treated as free", () => {
+	const phys = (p: string) => fsHooks.physical(p);
+	const idOf = (lock: string) => JSON.parse(readFileSync(lock, "utf-8")).writerId as string;
+
+	it.each(["open", "fstat", "read"] as const)(
+		"P1: a %s error reading a LIVE scoped lock makes a second same-process acquire THROW — never reclaim — and the first critical section runs alone",
+		async (op) => {
+			const vault = scratch(`trust-audit-eio-${op}-`);
+			mkdirSync(auditDirOf(vault), { recursive: true });
+			let innerRan = false;
+			let inner: unknown = "never ran";
+			await withAuditWriterLock(logOf(vault), async () => {
+				const before = readFileSync(lockOf(vault), "utf-8");
+				const ino = inodeOf(lockOf(vault));
+				lockFaults.push({ op, code: "EIO", path: phys(lockOf(vault)) });
+				inner = await withAuditWriterLock(logOf(vault), () => {
+					innerRan = true;
+				}).catch((e: unknown) => e);
+				expect(lockFaults, "control: the fault was hit").toHaveLength(0);
+				expect(readFileSync(lockOf(vault), "utf-8"), "the live lock's bytes").toBe(before);
+				expect(inodeOf(lockOf(vault)), "never unlinked and re-created").toBe(ino);
+			});
+			expect(innerRan, "two critical sections never overlap").toBe(false);
+			expect((inner as { code?: string }).code).toBe("EIO");
+			expect(existsSync(lockOf(vault)), "the first section's release removed its lock").toBe(false);
+		},
+	);
+
+	it("P1: a read error while a writer VERIFIES its own lock (the path-refresh path) fails the append and leaves the lock in place; once reads work, the writer appends and releases normally", async () => {
+		const parent = scratch("trust-audit-eio-refresh-");
+		const v1 = join(parent, "v1");
+		const v2 = join(parent, "v2");
+		mkdirSync(auditDirOf(v1), { recursive: true });
+		const link = join(parent, "link");
+		symlinkSync(v1, link);
+		const w = track(createAuditWriter(link, { lockAtCreate: true }));
+		const mine = idOf(lockOf(v1));
+		renameSync(v1, v2);
+		unlinkSync(link);
+		symlinkSync(v2, link);
+		const ino = inodeOf(lockOf(v2));
+
+		lockFaults.push({ op: "read", code: "EIO", path: phys(lockOf(v2)) });
+		const err = await w.appendEvent({ kind: "k", actor: "a", data: {} }).catch((e: unknown) => e);
+		expect((err as { code?: string }).code).toBe("EIO");
+		expect(idOf(lockOf(v2)), "the lock is untouched").toBe(mine);
+		expect(inodeOf(lockOf(v2))).toBe(ino);
+
+		await w.appendEvent({ kind: "k", actor: "a", data: {} });
+		unlinkSync(link); // only the refreshed path can reach it now
+		w.release();
+		expect(existsSync(lockOf(v2))).toBe(false);
+	});
+
+	it("release: a read error leaves the lock file in place and is REPORTED (an AggregateError naming it); the writer's state is reset regardless", async () => {
+		const vault = scratch("trust-audit-eio-release-");
+		const w = createAuditWriter(vault, { lockAtCreate: true });
+		const mine = idOf(lockOf(vault));
+		// Make the writer degraded first, so the reset is observable.
+		lockFaults.push({ op: "read", code: "EIO", path: phys(lockOf(vault)) });
+		await w.appendEvent({ kind: "k", actor: "a", data: {} }).catch(() => {});
+		expect(w.isDegraded(), "control: degraded").toBe(true);
+
+		lockFaults.push({ op: "read", code: "EIO", path: phys(lockOf(vault)) });
+		let err: unknown;
+		try {
+			w.release();
+		} catch (e) {
+			err = e;
+		}
+		expect(err).toBeInstanceOf(AggregateError);
+		expect((err as Error).message).toContain(phys(lockOf(vault)));
+		expect(((err as AggregateError).errors[0] as { cause?: { code?: string } }).cause?.code).toBe(
+			"EIO",
+		);
+		expect(idOf(lockOf(vault)), "a lock it could not read is never unlinked").toBe(mine);
+		expect(w.isDegraded()).toBe(false);
+		expect(w.getWriteFailures()).toBe(0);
+		// Released (deregistered): the left-behind lock is reclaimable by this process.
+		track(createAuditWriter(vault, { lockAtCreate: true }));
+		expect(idOf(lockOf(vault))).not.toBe(mine);
+	});
+
+	it("release: an unlink that fails (other than already-gone) is REPORTED, not swallowed", () => {
+		const vault = scratch("trust-audit-unlink-release-");
+		const w = track(createAuditWriter(vault, { lockAtCreate: true }));
+		lockFaults.push({ op: "unlink", code: "EACCES", path: phys(lockOf(vault)) });
+		expect(() => w.release()).toThrow(AggregateError);
+		expect(existsSync(lockOf(vault)), "control: the unlink really failed").toBe(true);
+	});
+
+	it("release: an unlink that loses the race to another remover (ENOENT) is a released lock, not a failure", () => {
+		const vault = scratch("trust-audit-unlink-race-");
+		const w = track(createAuditWriter(vault, { lockAtCreate: true }));
+		lockFaults.push({
+			op: "unlink",
+			code: "ENOENT",
+			path: phys(lockOf(vault)),
+			before: () => unlinkSync(lockOf(vault)), // the other remover gets there first
+		});
+		expect(() => w.release()).not.toThrow();
+		expect(lockFaults, "control: the race was hit").toHaveLength(0);
+		expect(existsSync(lockOf(vault))).toBe(false);
+	});
+
+	/** A writer that locks A through `link`, then — the link retargeted to B — appends and locks B. */
+	async function writerHoldingTwo(prefix: string) {
+		const parent = scratch(prefix);
+		const a = join(parent, "A");
+		const b = join(parent, "B");
+		mkdirSync(auditDirOf(a), { recursive: true });
+		mkdirSync(auditDirOf(b), { recursive: true });
+		const link = join(parent, "link");
+		symlinkSync(a, link);
+		const w = track(createAuditWriter(link, { lockAtCreate: true }));
+		unlinkSync(link);
+		symlinkSync(b, link);
+		await w.appendEvent({ kind: "k", actor: "a", data: {} });
+		const mine = idOf(lockOf(a));
+		expect(idOf(lockOf(b)), "control: the writer now holds B's lock too").toBe(mine);
+		return { a, b, w, mine };
+	}
+
+	it("P2: a writer that locked A, then (its symlink retargeted) B, releases BOTH — and A is free again", async () => {
+		const { a, b, w, mine } = await writerHoldingTwo("trust-audit-two-");
+		w.release();
+		expect(existsSync(lockOf(a)), "A's lock is not left behind").toBe(false);
+		expect(existsSync(lockOf(b))).toBe(false);
+		track(createAuditWriter(a, { lockAtCreate: true }));
+		expect(idOf(lockOf(a))).not.toBe(mine);
+	});
+
+	it("P2: release continues past one lock's failure — the other is released — and the error names the failed lock", async () => {
+		const { a, b, w, mine } = await writerHoldingTwo("trust-audit-two-fail-");
+		lockFaults.push({ op: "read", code: "EIO", path: phys(lockOf(a)) });
+		let err: unknown;
+		try {
+			w.release();
+		} catch (e) {
+			err = e;
+		}
+		expect(lockFaults, "control: the fault was hit").toHaveLength(0);
+		expect(err).toBeInstanceOf(AggregateError);
+		expect((err as AggregateError).errors).toHaveLength(1);
+		expect((err as Error).message).toContain(phys(lockOf(a)));
+		expect((err as Error).message).not.toContain(phys(lockOf(b)));
+		expect(existsSync(lockOf(b)), "B was still released").toBe(false);
+		expect(idOf(lockOf(a)), "A's unreadable lock is left in place").toBe(mine);
+	});
+
+	it.each(["writer", "scoped lock"] as const)(
+		"P2: a %s whose lock-file close fails: the acquire throws, the file it created is removed, no owner is left registered, and a later acquire succeeds",
+		async (kind) => {
+			const vault = scratch("trust-audit-close-");
+			mkdirSync(auditDirOf(vault), { recursive: true });
+			lockFaults.push({ op: "close", code: "EIO" });
+			let ran = false;
+			const err = await (async () =>
+				kind === "writer"
+					? track(createAuditWriter(vault, { lockAtCreate: true }))
+					: withAuditWriterLock(logOf(vault), () => {
+							ran = true;
+						}))().catch((e: unknown) => e);
+			expect(lockFaults, "control: the close fault was hit").toHaveLength(0);
+			expect((err as { code?: string }).code).toBe("EIO");
+			expect(ran).toBe(false);
+			expect(existsSync(lockOf(vault)), "the created lock was rolled back").toBe(false);
+
+			track(createAuditWriter(vault, { lockAtCreate: true }));
+			expect(JSON.parse(readFileSync(lockOf(vault), "utf-8")).pid).toBe(process.pid);
+		},
+	);
+
+	it("P2: a close failure whose rollback cannot even READ the file leaves it in place UNREGISTERED — a later acquire in this process reclaims it, never refused by a phantom owner", () => {
+		const vault = scratch("trust-audit-close-unreadable-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		lockFaults.push(
+			{ op: "close", code: "EIO" },
+			{ op: "open", code: "EIO", path: phys(lockOf(vault)) },
+		);
+		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(/EIO/);
+		expect(lockFaults, "control: both faults were hit").toHaveLength(0);
+		expect(existsSync(lockOf(vault)), "could not be read, so not removed").toBe(true);
+		const left = idOf(lockOf(vault));
+
+		track(createAuditWriter(vault, { lockAtCreate: true }));
+		expect(idOf(lockOf(vault))).not.toBe(left);
+	});
+
+	it("P2: the close-failure rollback removes only the file its own create made — a lock that replaced it is left alone", () => {
+		const vault = scratch("trust-audit-close-replaced-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		const foreign = JSON.stringify({ pid: 999999999, writerId: "someone-else" });
+		lockFaults.push({
+			op: "close",
+			code: "EIO",
+			before: () => {
+				unlinkSync(lockOf(vault));
+				writeFileSync(lockOf(vault), foreign);
+			},
+		});
+		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(/EIO/);
+		expect(readFileSync(lockOf(vault), "utf-8"), "not ours: left in place").toBe(foreign);
+	});
+
+	it("withAuditWriterLock: when fn succeeds, a release failure rejects (naming the lock)", async () => {
+		const vault = scratch("trust-audit-scoped-release-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		const err = await withAuditWriterLock(logOf(vault), () => {
+			lockFaults.push({ op: "read", code: "EIO", path: phys(lockOf(vault)) });
+			return "done";
+		}).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(AggregateError);
+		expect((err as Error).message).toContain(phys(lockOf(vault)));
+	});
+
+	it("withAuditWriterLock: when fn throws, ITS error is the rejection — the release failure is reported beside it, never masking it", async () => {
+		const vault = scratch("trust-audit-scoped-both-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		const fnErr = new Error("restore failed");
+		const reported = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const err = await withAuditWriterLock(logOf(vault), () => {
+				lockFaults.push({ op: "read", code: "EIO", path: phys(lockOf(vault)) });
+				throw fnErr;
+			}).catch((e: unknown) => e);
+			expect(err).toBe(fnErr);
+			expect(reported).toHaveBeenCalledWith(
+				expect.stringContaining("[AUDIT]"),
+				expect.any(AggregateError),
+			);
+		} finally {
+			reported.mockRestore();
+		}
 	});
 });

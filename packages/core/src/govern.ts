@@ -33,7 +33,11 @@ import { existsSync, mkdirSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
-import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import {
+	type AuditWriter,
+	createAuditWriter,
+	releaseAuditWriterForTeardown,
+} from "./audit/chain.js";
 import {
 	appendDenialEvent,
 	classifyPolicyDenial,
@@ -3456,17 +3460,23 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// Flush audit writes
 			await audit.flush();
 
-			// Release audit lock
-			audit.release();
+			// Release audit lock.
+			// destroy() never REJECTS for a lock left behind: callers call it without await or catch,
+			// and an unhandled rejection kills the process. The teardown reports it as a
+			// USERTRUST_AUDIT_LOCK_LEFT warning instead. The engine and proxy are torn down in the
+			// finally regardless: a throw here must never leave the TigerBeetle client open.
+			try {
+				releaseAuditWriterForTeardown(audit);
+			} finally {
+				// Destroy engine if connected
+				if (engine != null && typeof engine.destroy === "function") {
+					engine.destroy();
+				}
 
-			// Destroy engine if connected
-			if (engine != null && typeof engine.destroy === "function") {
-				engine.destroy();
-			}
-
-			// Destroy proxy connection if active
-			if (proxyConn != null) {
-				proxyConn.destroy();
+				// Destroy proxy connection if active
+				if (proxyConn != null) {
+					proxyConn.destroy();
+				}
 			}
 		};
 

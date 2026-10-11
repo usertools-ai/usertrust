@@ -67,6 +67,12 @@ export interface AuditWriter {
 	getWriteFailures(): number;
 	isDegraded(): boolean;
 	flush(): Promise<void>;
+	/**
+	 * Release every advisory lock this writer holds and reset its state. Every lock is attempted;
+	 * one that could not be released (its file could not be read, or its unlink failed) is left in
+	 * place, and after the last one an {@link AuditLockReleaseError} naming each is thrown. (`destroy()`
+	 * never rejects for it: see {@link releaseAuditWriterForTeardown}.)
+	 */
 	release(): void;
 }
 
@@ -80,6 +86,62 @@ export class AuditWriterLockHeldError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "AuditWriterLockHeldError";
+	}
+}
+
+/** The `code` of an error, if it carries a string one (an `errno` code such as `EIO`). */
+function errorCode(err: unknown): string | undefined {
+	const code = (err as { code?: unknown } | null)?.code;
+	return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * `release()` left one or more lock files in place: each could not be read, or its unlink failed.
+ * Every lock was attempted. A lock left behind keeps other processes off that vault until this
+ * process exits. `errors` holds one error per lock (its `cause` is the filesystem error); `left`
+ * lists each lock's path and that error's code — the message carries only those, never an
+ * underlying message.
+ */
+export class AuditLockReleaseError extends AggregateError {
+	readonly left: ReadonlyArray<{ path: string; code: string | undefined }>;
+	constructor(failures: ReadonlyArray<{ path: string; error: unknown }>) {
+		const left = failures.map((f) => ({ path: f.path, code: errorCode(f.error) }));
+		super(
+			failures.map(
+				(f) => new Error(`Audit writer lock ${f.path} could not be released`, { cause: f.error }),
+			),
+			`Audit writer lock release left ${left.length} lock file(s) in place: ${left
+				.map((l) => `${l.path} (${l.code ?? "unknown error"})`)
+				.join("; ")}`,
+		);
+		this.name = "AuditLockReleaseError";
+		this.left = left;
+	}
+}
+
+/** The `process.emitWarning` code under which a teardown reports an audit lock left behind. */
+export const AUDIT_LOCK_LEFT_WARNING = "USERTRUST_AUDIT_LOCK_LEFT";
+
+/**
+ * Release `audit` for a teardown that must NEVER reject — `destroy()` on `trust()` and
+ * `createGovernor`. Callers routinely call those without await or catch, and an unhandled rejection
+ * kills the process: a stranded lock is a liveness problem (other processes wait until this one
+ * exits), not a reason to crash. A failed release is therefore reported, not thrown: as a process
+ * warning with the stable code {@link AUDIT_LOCK_LEFT_WARNING}, and on `console.warn`. The report
+ * names each lock path left behind and its error code — nothing else from the error.
+ */
+export function releaseAuditWriterForTeardown(audit: AuditWriter): void {
+	try {
+		audit.release();
+	} catch (err) {
+		const message =
+			err instanceof AuditLockReleaseError
+				? err.message
+				: `Audit writer release failed (${err instanceof Error ? err.name : typeof err}${
+						errorCode(err) === undefined ? "" : `: ${errorCode(err)}`
+					}); its lock may be left in place.`;
+		console.warn(`[AUDIT] ${message}`);
+		process.emitWarning(message, { code: AUDIT_LOCK_LEFT_WARNING });
 	}
 }
 
@@ -122,43 +184,44 @@ class AsyncMutex {
 
 const LOCK_FILE_NAME = ".audit-writer.lock";
 
-/**
- * The lock a LIVE writer in this process holds. Both fields are fixed at that lock's exclusive
- * create and kept in memory; neither is ever re-derived from what a directory looks like later.
- */
+/** One lock a live writer holds; keyed in {@link heldLocks} by the lock FILE's `dev:ino`. */
 interface HeldLock {
-	/** `dev:ino` of the lock FILE, read through the fd of its exclusive create. */
-	lockIdentity: string;
 	/**
 	 * Where the lock file was last SEEN: its physical path (the realpath of its directory) at the
 	 * create, refreshed by every acquire that verifies it. Never the caller's spelling — a symlink
 	 * alias can be removed or retargeted while the lock is held. Refreshed because the directory
-	 * can also be RENAMED while held, the lock file moving with it; see {@link releaseLock}.
+	 * can also be RENAMED while held, the lock file moving with it; see {@link releaseLocks}.
 	 */
 	path: string;
 }
 
 /**
- * writerId → the lock that writer holds, for every LIVE writer in this process (#195 r5).
+ * writerId → (lock-file `dev:ino` → {@link HeldLock}): every lock every LIVE writer in this process
+ * holds (#195). The identity is read through the fd of the lock's exclusive create and kept here;
+ * it is never re-derived from what a directory looks like later.
  *
  * This is the ONLY thing that can make a lock file "a live writer's in this process": the file
- * carries a writerId, and it is live iff that writerId is held here AND the file is the very inode
- * that writer's exclusive create made. A same-PID lock file that is not — a crashed earlier
- * instance of this PID, a recycled PID, a copy — is reclaimable; one that is, is refused
- * (AUD-471: reclaiming a live sibling's lock forks the chain, each writer caching its own tail).
+ * carries a writerId, and it is live iff that writer holds the file's own inode here. A same-PID
+ * lock file that is not — a crashed earlier instance of this PID, a recycled PID, a copy — is
+ * reclaimable; one that is, is refused (AUD-471: reclaiming a live sibling's lock forks the chain,
+ * each writer caching its own tail).
  *
- * Deliberately NOT keyed by the directory. r3/r4 keyed it by the directory's `(dev, ino)` and then
- * had to re-verify every hit, because a directory's identity can be stale by the time it is used:
- * a directory replaced between its lookup and the lock's create registered the new lock under the
- * old directory's key, so a second same-process writer missed it and reclaimed the LIVE lock
- * (#195 r5 P1). The lock file itself is the thing held, and it says who holds it.
+ * Deliberately NOT keyed by the directory. Keyed by the directory's `(dev, ino)`, every hit had to
+ * be re-verified, because a directory's identity can be stale by the time it is used: a directory
+ * replaced between its lookup and the lock's create registered the new lock under the old
+ * directory's key, so a second same-process writer missed it and reclaimed the LIVE lock. The lock
+ * file itself is the thing held, and it says who holds it.
  *
- * A writer's entry is replaced when it creates a new lock, and removed only by its release. A writer
- * dropped without `release()` therefore keeps its lock for the life of the process — this process
- * cannot prove the writer is gone (a reference to it may still append), so its lock is not
- * reclaimable here; another process may reclaim it once this PID is dead.
+ * A writer can hold SEVERAL locks: its vault path may be a symlink retargeted to another vault
+ * between appends, and the lock it took on the first vault is still its own to release.
+ *
+ * A lock is registered only once its create has fully succeeded, and a writer's locks leave only
+ * through its release. A writer dropped without `release()` therefore keeps its locks for the life
+ * of the process — this process cannot prove the writer is gone (a reference to it may still
+ * append), so its locks are not reclaimable here; another process may reclaim them once this PID
+ * is dead.
  */
-const heldLocks = new Map<string, HeldLock>();
+const heldLocks = new Map<string, Map<string, HeldLock>>();
 
 function hasFsCode(err: unknown, code: string): boolean {
 	return err instanceof Error && (err as { code?: string }).code === code;
@@ -175,8 +238,11 @@ interface LockFileView {
 /**
  * Read the lock file at `lockPath` — identity and content through the SAME fd, so they are one
  * file's even if the path is swapped meanwhile. `undefined` if it does not exist (it can vanish
- * between a create's EEXIST and this read). Any other failure throws: "could not look" must never
- * read as "nobody holds it", or the caller would reclaim a live lock.
+ * between a create's EEXIST and this read).
+ *
+ * Every other failure THROWS — the open, the fstat, the read itself. A lock that could not be read
+ * is never "a lock nobody holds": an acquire that took it for one would unlink a LIVE lock and
+ * admit a second writer. Only content that WAS read and does not parse is corrupt.
  */
 function readLockFile(lockPath: string): LockFileView | undefined {
 	let fd: number;
@@ -188,12 +254,13 @@ function readLockFile(lockPath: string): LockFileView | undefined {
 	}
 	try {
 		const st = fstatSync(fd, { bigint: true });
+		const content = readFileSync(fd, "utf-8");
 		let claim: { pid?: unknown; writerId?: unknown } | undefined;
 		try {
-			const parsed: unknown = JSON.parse(readFileSync(fd, "utf-8"));
+			const parsed: unknown = JSON.parse(content);
 			if (parsed !== null && typeof parsed === "object") claim = parsed;
 		} catch {
-			/* corrupt: no claim */
+			/* read, but corrupt: no claim */
 		}
 		return { identity: `${st.dev}:${st.ino}`, pid: claim?.pid, writerId: claim?.writerId };
 	} finally {
@@ -202,19 +269,21 @@ function readLockFile(lockPath: string): LockFileView | undefined {
 }
 
 /**
- * The live writer in this process that holds `file`, if any: the writerId it carries is held here,
- * and it is the inode that writer's create made. The writerId alone is not enough — a copy of the
- * file carries it too; the inode alone is not enough — a freed inode is reused by the next file.
- * No pid check: a file carrying a live writerId AND its create-time inode is that writer's file.
+ * The live writer in this process that holds `file`, with its record of that lock — if any: the
+ * writerId the file carries holds the file's own inode. The writerId alone is not enough — a copy
+ * of the file carries it too; the inode alone is not enough — a freed inode is reused by the next
+ * file. No pid check: a file carrying a live writerId AND an inode that writer created is that
+ * writer's file.
  */
-function liveHolderOf(file: LockFileView): string | undefined {
+function liveHolderOf(file: LockFileView): { writerId: string; lock: HeldLock } | undefined {
 	if (typeof file.writerId !== "string") return undefined;
-	return heldLocks.get(file.writerId)?.lockIdentity === file.identity ? file.writerId : undefined;
+	const lock = heldLocks.get(file.writerId)?.get(file.identity);
+	return lock === undefined ? undefined : { writerId: file.writerId, lock };
 }
 
 /**
- * Remove a lock file that no live writer in this process holds (the caller has established that).
- * Throws if a live process (another PID) holds it.
+ * Remove a lock file that no live writer in this process holds (the caller has established that,
+ * from a successful read). Throws if a live process (another PID) holds it.
  */
 function tryCleanStaleLock(lockPath: string, pid: unknown): void {
 	try {
@@ -271,6 +340,12 @@ function tryCleanStaleLock(lockPath: string, pid: unknown): void {
  * The identity is read through the fd, not the path, so it is the file THIS create made, never
  * one swapped in after it. The fd is then closed (AUD-459): the identity is kept in memory, so
  * nothing needs the fd held open.
+ *
+ * Registered only after EVERYTHING succeeded, the close included. A failure after the create
+ * throws with nothing registered — an owner registered by an acquire that threw could never be
+ * released (the caller gets no writer, and a scoped lock never reaches its release) and would
+ * refuse this vault in this process for good — and removes the file the create made, if it is
+ * still that file, so no lock is left behind for other processes either.
  */
 function createLock(lockPath: string, lockContent: string, writerId: string): boolean {
 	let fd: number;
@@ -280,16 +355,34 @@ function createLock(lockPath: string, lockContent: string, writerId: string): bo
 		if (hasFsCode(err, "EEXIST")) return false;
 		throw err;
 	}
+	let identity: string | undefined;
 	try {
-		writeSync(fd, lockContent);
-		fsyncSync(fd);
-		const st = fstatSync(fd, { bigint: true });
-		heldLocks.set(writerId, { lockIdentity: `${st.dev}:${st.ino}`, path: lockPath });
-		return true;
-	} finally {
-		// AUD-459: Close fd immediately — lock semantics rely on file existence, not open fd
-		closeSync(fd);
+		try {
+			const st = fstatSync(fd, { bigint: true });
+			identity = `${st.dev}:${st.ino}`;
+			writeSync(fd, lockContent);
+			fsyncSync(fd);
+		} finally {
+			// AUD-459: Close fd immediately — lock semantics rely on file existence, not open fd
+			closeSync(fd);
+		}
+	} catch (err) {
+		if (identity !== undefined) {
+			try {
+				if (readLockFile(lockPath)?.identity === identity) unlinkSync(lockPath);
+			} catch {
+				/* cannot tell: leave it — unregistered, it is a same-PID lock nobody here holds */
+			}
+		}
+		throw err;
 	}
+	let mine = heldLocks.get(writerId);
+	if (mine === undefined) {
+		mine = new Map();
+		heldLocks.set(writerId, mine);
+	}
+	mine.set(identity, { path: lockPath });
+	return true;
 }
 
 /**
@@ -299,7 +392,8 @@ function createLock(lockPath: string, lockContent: string, writerId: string): bo
  * have appended in that time, and any cached chain tail it holds must not be trusted.
  *
  * Every decision is made from the lock FILE in the requested directory — whose it is, read from
- * the file — never from a directory's identity or a remembered path (#195 r5).
+ * the file — never from a directory's identity or a remembered path. A lock file that cannot be
+ * read makes this THROW: it is never reclaimed.
  */
 function acquireProcessLock(logPath: string, writerId: string): boolean {
 	// The physical spelling (the JS realpath: lstat + readlink, no /proc — never `.native`, which
@@ -315,13 +409,13 @@ function acquireProcessLock(logPath: string, writerId: string): boolean {
 
 	if (createLock(lockPath, lockContent, writerId)) return true;
 
-	// The lock file exists. Whose it is, the file says.
+	// The lock file exists. Whose it is, the file says — and a read that fails throws out of here.
 	const file = readLockFile(lockPath);
 	const holder = file === undefined ? undefined : liveHolderOf(file);
-	if (holder === writerId) {
+	if (holder?.writerId === writerId) {
 		// Ours. The directory may have been renamed since this writer last saw the lock (and the
 		// caller's symlink repointed): remember where it is NOW, so release reaches it.
-		(heldLocks.get(writerId) as HeldLock).path = lockPath;
+		holder.lock.path = lockPath;
 		return false;
 	}
 	if (holder !== undefined) {
@@ -331,7 +425,7 @@ function acquireProcessLock(logPath: string, writerId: string): boolean {
 		);
 	}
 
-	// No live writer in this process holds it: stale, or another process's.
+	// Read, and no live writer in this process holds it: stale, or another process's.
 	tryCleanStaleLock(lockPath, file?.pid);
 
 	// Second attempt after stale lock cleanup. If another process raced us and
@@ -343,49 +437,56 @@ function acquireProcessLock(logPath: string, writerId: string): boolean {
 }
 
 /**
- * Release `writerId`'s lock: unlink the lock file only if it is still THIS writer's (its writerId
- * and its create-time inode). Once it is not, the file at that path belongs to whoever took the
- * lock since — unlinking it would free a LIVE writer's lock for a third writer. If the file cannot
- * be checked, leave it: a left-behind lock naming this PID or a dead one is reclaimable; an
- * unlinked live one is a fork.
+ * Release EVERY lock `writerId` holds. Each is unlinked only if the file is still that lock (the
+ * writerId and the create-time inode). Once it is not, the file at that path belongs to whoever
+ * took the lock since — unlinking it would free a LIVE writer's lock for a third writer.
  *
- * Looked for where it was last seen, then where the caller's spelling leads NOW: a vault renamed
- * while its lock was held (its symlink repointed to the new name) takes the lock file with it,
- * and a writer with no acquire since — a scoped lock above all — never saw it move. Neither place
- * is trusted: the file found must be this writer's.
+ * Each lock is looked for where it was last seen, then where the caller's spelling leads NOW: a
+ * vault renamed while its lock was held (its symlink repointed to the new name) takes the lock
+ * file with it, and a writer with no acquire since — a scoped lock above all — never saw it move.
+ * Neither place is trusted: the file found must be this lock.
+ *
+ * Every lock is attempted, whatever happens to one of them. A lock that could not be READ, or whose
+ * unlink failed, is left in place and REPORTED: after the last lock, one {@link AuditLockReleaseError} lists each
+ * left behind. A left-behind lock stops other processes until this PID exits; this process reclaims
+ * it only after reading it successfully.
+ *
+ * The writer is deregistered in any case — it is done writing, and keeping it registered would
+ * refuse its vaults in this process for good.
  */
-function releaseLock(writerId: string, logPath: string): void {
+function releaseLocks(writerId: string, logPath: string): void {
 	const held = heldLocks.get(writerId);
 	if (held === undefined) return;
+	heldLocks.delete(writerId);
+	let spelled: string | undefined;
 	try {
-		const candidates = [held.path];
-		try {
-			candidates.push(join(realpathSync(dirname(logPath)), LOCK_FILE_NAME));
-		} catch {
-			/* the caller's spelling no longer leads anywhere */
-		}
+		spelled = join(realpathSync(dirname(logPath)), LOCK_FILE_NAME);
+	} catch {
+		/* the caller's spelling no longer leads anywhere */
+	}
+	const failures: Array<{ path: string; error: unknown }> = [];
+	for (const [identity, lock] of held) {
+		// Each place is looked at once: a read that just failed is not retried as if it were news.
+		const candidates =
+			spelled === undefined || spelled === lock.path ? [lock.path] : [lock.path, spelled];
+		const problems: unknown[] = [];
+		let released = false;
 		for (const candidate of candidates) {
-			let ours = false;
 			try {
 				const file = readLockFile(candidate);
-				ours = file !== undefined && liveHolderOf(file) === writerId;
-			} catch {
-				/* cannot tell — leave the file */
+				if (file?.writerId !== writerId || file.identity !== identity) continue;
+				unlinkSync(candidate);
+				released = true;
+			} catch (err) {
+				// The unlink losing a race to another remover: the lock is gone, which is the point.
+				if (hasFsCode(err, "ENOENT")) released = true;
+				else problems.push(err);
 			}
-			if (ours) {
-				try {
-					unlinkSync(candidate);
-				} catch {
-					/* already removed */
-				}
-				return;
-			}
+			if (released) break;
 		}
-	} finally {
-		// Clear the live-writer registration so a subsequent same-process writer
-		// (or a snapshot restore via withAuditWriterLock) can acquire the vault.
-		heldLocks.delete(writerId);
+		if (!released && problems.length > 0) failures.push({ path: lock.path, error: problems[0] });
 	}
+	if (failures.length > 0) throw new AuditLockReleaseError(failures);
 }
 
 /**
@@ -394,7 +495,10 @@ function releaseLock(writerId: string, logPath: string): void {
  * + on-disk lock that {@link createAuditWriter} uses, so a live writer on the
  * same vault in this process is refused. Use this to mutate the audit log
  * outside the writer (e.g. snapshot restore) without risking a forked chain.
- * The lock is always released, even if `fn` throws.
+ *
+ * The lock is always released, even if `fn` throws. A lock that could not be released rejects
+ * with an {@link AuditLockReleaseError} naming it — unless `fn` threw: then `fn`'s error is the rejection,
+ * unchanged, and the release failure is reported to `console.error` beside it.
  */
 export async function withAuditWriterLock<T>(
 	logPath: string,
@@ -402,11 +506,22 @@ export async function withAuditWriterLock<T>(
 ): Promise<T> {
 	const writerId = randomUUID();
 	acquireProcessLock(logPath, writerId);
+	let result: T;
 	try {
-		return await fn();
-	} finally {
-		releaseLock(writerId, logPath);
+		result = await fn();
+	} catch (fnErr) {
+		try {
+			releaseLocks(writerId, logPath);
+		} catch (releaseErr) {
+			console.error(
+				"[AUDIT] Audit writer lock release failed after an error in the locked section",
+				releaseErr,
+			);
+		}
+		throw fnErr;
 	}
+	releaseLocks(writerId, logPath);
+	return result;
 }
 
 // ── Last Event Cache ──
@@ -659,9 +774,10 @@ export function createAuditWriter(
 
 	function releaseWriter(): void {
 		lastEventCache.clear();
-		releaseLock(writerId, logPath);
 		degraded = false;
 		writeFailures = 0;
+		// Last: it throws (AuditLockReleaseError) if a lock was left in place — after every lock was tried.
+		releaseLocks(writerId, logPath);
 	}
 
 	return {

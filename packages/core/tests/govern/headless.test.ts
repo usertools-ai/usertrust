@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AuditWriter } from "../../src/audit/chain.js";
+import { AuditLockReleaseError, type AuditWriter } from "../../src/audit/chain.js";
 import type { TrustEngine } from "../../src/govern.js";
 import type { Governor } from "../../src/headless.js";
 import { createGovernor } from "../../src/headless.js";
@@ -382,6 +382,52 @@ describe("headless governor", () => {
 				proxy: "https://proxy.example.com",
 			}),
 		).rejects.toThrow("dryRun");
+	});
+
+	it("a lock left behind: destroy() RESOLVES, still destroys the engine, and reports it as a USERTRUST_AUDIT_LOCK_LEFT warning — none when release succeeds", async () => {
+		const LEFT = "/vaults/a/.usertrust/audit/.audit-writer.lock";
+		const emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			for (const fails of [true, false]) {
+				emitWarning.mockClear();
+				const mockAudit: AuditWriter = {
+					appendEvent: vi.fn(),
+					getWriteFailures: () => 0,
+					isDegraded: () => false,
+					flush: async () => {},
+					release: () => {
+						if (fails) {
+							throw new AuditLockReleaseError([
+								{ path: LEFT, error: Object.assign(new Error("EIO: i/o error"), { code: "EIO" }) },
+							]);
+						}
+					},
+				};
+				const engine = mockEngine();
+				const engineDestroy = vi.spyOn(engine, "destroy");
+				const gov = await createGovernor({
+					budget: 100_000,
+					vaultBase,
+					_engine: engine,
+					_audit: mockAudit,
+				});
+
+				await expect(gov.destroy()).resolves.toBeUndefined();
+				expect(engineDestroy).toHaveBeenCalledOnce();
+				if (fails) {
+					expect(emitWarning).toHaveBeenCalledWith(
+						expect.stringContaining(LEFT),
+						expect.objectContaining({ code: "USERTRUST_AUDIT_LOCK_LEFT" }),
+					);
+				} else {
+					expect(emitWarning, "control: no warning").not.toHaveBeenCalled();
+				}
+			}
+		} finally {
+			emitWarning.mockRestore();
+			warn.mockRestore();
+		}
 	});
 
 	// ── Engine POST failure in settle() ──

@@ -121,6 +121,10 @@ A `process.on("beforeExit")` handler calls it too, but that is a net, not a subs
 fires only once the event loop drains, and an open TigerBeetle client is precisely what keeps it
 from draining. The net catches a governor whose client is already closed; it cannot catch the case
 the rule exists for.
+**`destroy()` never rejects because an audit lock was left behind** (its file unreadable or its
+unlink failed — callers often call `destroy()` without await or catch, and an unhandled rejection
+kills the process); it emits a process warning with code `USERTRUST_AUDIT_LOCK_LEFT` naming each
+lock path and its error code, and tears the engine down regardless.
 
 Streams: settlement runs in a `finally`, so a consumer breaking out of `for await` settles the
 consumed cost exactly like a clean end. Only a *thrown* error voids. For Anthropic `MessageStream`,

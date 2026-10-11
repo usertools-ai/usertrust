@@ -3,7 +3,11 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
+import {
+	type AppendEventInput,
+	AuditLockReleaseError,
+	type AuditWriter,
+} from "../../src/audit/chain.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
@@ -147,6 +151,86 @@ describe("client.destroy()", () => {
 		await governed.destroy();
 
 		expect(engine.destroy).toHaveBeenCalledOnce();
+	});
+
+	// A lock the audit writer could not release is a liveness problem (other processes stay blocked
+	// until this one exits), never a reason for destroy() to REJECT: callers routinely call it
+	// without await or catch, and an unhandled rejection kills the process.
+	describe("a lock left behind", () => {
+		const LEFT = [
+			"/vaults/a/.usertrust/audit/.audit-writer.lock",
+			"/vaults/b/.usertrust/audit/.audit-writer.lock",
+		];
+		const leftBehind = () =>
+			new AuditLockReleaseError([
+				{
+					path: LEFT[0] as string,
+					error: Object.assign(new Error("EIO: i/o error"), { code: "EIO" }),
+				},
+				{
+					path: LEFT[1] as string,
+					error: Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }),
+				},
+			]);
+		let emitWarning: ReturnType<typeof vi.spyOn>;
+		let warn: ReturnType<typeof vi.spyOn>;
+		beforeEach(() => {
+			emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+			warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		});
+		afterEach(() => {
+			emitWarning.mockRestore();
+			warn.mockRestore();
+		});
+
+		async function governedWith(release: () => void) {
+			const engine = makeMockEngine();
+			const mockAudit = makeMockAudit();
+			vi.mocked(mockAudit.release).mockImplementation(release);
+			const governed = await trust(makeAnthropicMock(), {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: mockAudit,
+			});
+			return { governed, engine };
+		}
+
+		it("destroy() RESOLVES, still destroys the engine, and reports each lock left behind as a USERTRUST_AUDIT_LOCK_LEFT warning (and a console warning)", async () => {
+			const { governed, engine } = await governedWith(() => {
+				throw leftBehind();
+			});
+
+			await expect(governed.destroy()).resolves.toBeUndefined();
+			expect(engine.destroy).toHaveBeenCalledOnce();
+			expect(emitWarning).toHaveBeenCalledOnce();
+			const [message, options] = emitWarning.mock.calls[0] as [string, { code?: string }];
+			expect(options.code).toBe("USERTRUST_AUDIT_LOCK_LEFT");
+			for (const path of LEFT) expect(message).toContain(path);
+			expect(message).toContain("EIO");
+			expect(message).toContain("EACCES");
+			expect(String(warn.mock.calls[0]?.[0])).toContain(LEFT[0]);
+		});
+
+		it("an unexpected release error also resolves with the warning — naming only its kind and code, never its message", async () => {
+			const { governed } = await governedWith(() => {
+				throw Object.assign(new Error("detail that is not ours to print"), { code: "EBADF" });
+			});
+
+			await expect(governed.destroy()).resolves.toBeUndefined();
+			const [message, options] = emitWarning.mock.calls[0] as [string, { code?: string }];
+			expect(options.code).toBe("USERTRUST_AUDIT_LOCK_LEFT");
+			expect(message).toContain("EBADF");
+			expect(message).not.toContain("detail that is not ours to print");
+		});
+
+		it("control: a release that succeeds emits no warning", async () => {
+			const { governed } = await governedWith(() => {});
+			await governed.destroy();
+			expect(emitWarning).not.toHaveBeenCalled();
+			expect(warn).not.toHaveBeenCalled();
+		});
 	});
 
 	it("calling destroy() twice is safe (idempotent)", async () => {

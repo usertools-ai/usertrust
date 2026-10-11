@@ -8,10 +8,10 @@
  */
 
 import pc from "picocolors";
-import { createAuditWriter } from "../audit/chain.js";
+import { type AuditWriter, createAuditWriter } from "../audit/chain.js";
 import { loadConfig } from "../config.js";
 import type { ActionKind } from "../shared/types.js";
-import { createVaultStore } from "../vault/store.js";
+import { createVaultStore, type VaultStore } from "../vault/store.js";
 import { parseFlags } from "./flags.js";
 
 const SUBCOMMANDS = ["add", "rm", "ls", "get", "rotate"] as const;
@@ -51,6 +51,7 @@ Subcommands:
 	const audit = createAuditWriter(cwd);
 	const vault = await createVaultStore({ vaultBase: cwd, config, audit });
 
+	let commandFailed = false;
 	try {
 		switch (sub) {
 			case "add": {
@@ -174,8 +175,42 @@ Subcommands:
 				break;
 			}
 		}
+	} catch (err) {
+		commandFailed = true;
+		throw err;
 	} finally {
-		vault.destroy();
-		audit.release();
+		closeAfterCommand(vault, audit, commandFailed);
 	}
+}
+
+/**
+ * Destroy the vault and release the audit writer — BOTH, whichever throws — and report a failure of
+ * either without ever hiding the command's own outcome. Nothing here throws: a throw from a
+ * `finally` replaces the error the command is propagating.
+ *  - The command failed: its error is what the CLI reports; a cleanup failure is a warning.
+ *  - The command succeeded: a cleanup failure — an audit lock left behind keeps other processes
+ *    off the vault until this one exits — is an error: a message on stderr (stdout keeps the
+ *    command's own output, a single JSON line under --json) and a non-zero exit code.
+ */
+function closeAfterCommand(vault: VaultStore, audit: AuditWriter, commandFailed: boolean): void {
+	const failures: string[] = [];
+	try {
+		vault.destroy();
+	} catch (err) {
+		failures.push(`vault: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	try {
+		audit.release();
+	} catch (err) {
+		failures.push(`audit lock: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	if (failures.length === 0) return;
+	if (commandFailed) {
+		console.warn(
+			pc.yellow(`Warning: cleanup after the failed command also failed: ${failures.join("; ")}`),
+		);
+		return;
+	}
+	console.error(pc.red(`Cleanup failed: ${failures.join("; ")}`));
+	process.exitCode = 1;
 }
