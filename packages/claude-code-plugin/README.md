@@ -32,24 +32,28 @@ call it lets through, exactly as they would without it.
 2. Add its SHA-256 hash to your `usertrust-server` config and start the server.
 3. Create the configuration file. Its format, and the requirements on its path, owner and mode, are in [Configuration file](#configuration-file); a file that fails them runs the session in watch-only mode with no requests sent. The minimal file has every required field, not only `url` and `key`:
 
-One block does it all, so copy it whole. `stateDir` must be an absolute path and JSON
-expands nothing, so the shell puts your home directory in. The subshell's `umask 077`
-creates the directory and the file owner-only, so the key is never readable by others,
-and the `chmod` lines also tighten a `~/.config/usertrust` that already existed:
+One block does it all, so copy it whole.
+
+- **The home directory comes from your account.** The plugin accepts a configuration file only under `.config/usertrust/` in your account's home directory as the system records it (`os.userInfo().homedir`). That is not necessarily `$HOME` or `~`, which can differ under `sudo` and in some containers. The block asks Node for that directory, so every path below uses it.
+- **`stateDir` must be an absolute path.** JSON expands nothing, so the shell puts the directory in.
+- **The key is never readable by others.** The subshell's `umask 077` creates the directory and the file owner-only, and the `chmod` lines also tighten a directory that already existed.
 
 ```sh
-(umask 077 && mkdir -p ~/.config/usertrust && cat > ~/.config/usertrust/claude-code.json) <<EOF
+UT_HOME=$(node -p "require('os').userInfo().homedir")
+(umask 077 && mkdir -p "$UT_HOME/.config/usertrust" && cat > "$UT_HOME/.config/usertrust/claude-code.json") <<EOF
 {
   "url": "http://127.0.0.1:4519",
   "key": "<the key from step 1>",
   "mode": "watch",
-  "stateDir": "$HOME/.claude/usertrust-cc"
+  "stateDir": "$UT_HOME/.claude/usertrust-cc"
 }
 EOF
-chmod 700 ~/.config/usertrust
-chmod 600 ~/.config/usertrust/claude-code.json
-export UT_CC_CONFIG="$HOME/.config/usertrust/claude-code.json"
+chmod 700 "$UT_HOME/.config/usertrust"
+chmod 600 "$UT_HOME/.config/usertrust/claude-code.json"
+export UT_CC_CONFIG="$UT_HOME/.config/usertrust/claude-code.json"
 ```
+
+If the file is in the wrong place, or has the wrong owner or mode, the plugin refuses it. The session then runs watch-only with no key and sends nothing, and the first line Claude Code shows says why: `usertrust: watch-only and key-less — the config file UT_CC_CONFIG names was refused (config: anchor refused (missing)) …`. That is what a file written under a `$HOME` that is not your account's home produces. See [Configuration file](#configuration-file).
 
 4. Start Claude Code. Each session opens with a line naming the mode, for example
    `usertrust: watch-only — nothing is blocked. …`. To block over-budget tool
