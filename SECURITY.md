@@ -8,9 +8,9 @@ software and the safety of our users.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.2.x   | Yes                |
-| 1.1.x   | Security fixes only |
-| 1.0.x   | No                 |
+| 4.1.x   | Yes                |
+| < 4.1   | No                 |
+| usertrust-claude-code 2.1.x | Yes |
 
 ## Reporting a Vulnerability
 

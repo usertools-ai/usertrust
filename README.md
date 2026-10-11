@@ -71,8 +71,15 @@ The `receipt` returned from every governed call:
 ## Install
 
 ```bash
+npm install usertrust
 npx usertrust init
 ```
+
+`npx usertrust init` does not install the package into your project, so the `npm install` line is required. `import { trust } from "usertrust"` fails until it runs.
+
+`init` is interactive in a terminal. It asks for your provider API key (Anthropic `sk-ant-`, OpenAI `sk-` and Google `AIza` keys are detected from their prefix; any other provider you name yourself), checks the key against that provider's models endpoint (unless you pass `--skip-verify`), and writes it to `.usertrust/.env` with owner-only permissions.
+
+Without a terminal (CI, scripts, a container build), run `npx usertrust init --json`: it creates the vault without prompting and without asking for a key.
 
 This creates a `.usertrust/` vault in your project root with default config, policies, and an empty audit chain.
 
@@ -188,6 +195,8 @@ Ledger unavailable: connection refused
   Docs: https://usertrust.ai/docs/errors/ledger-unavailable
 ```
 
+In 4.1.0, `usertrust tb start` only prints the manual steps, so the hint above refers to them. Start TigerBeetle as described in [Running TigerBeetle](#running-tigerbeetle), or use `{ dryRun: true }`.
+
 ## Config
 
 Create `.usertrust/usertrust.config.json`:
@@ -265,6 +274,23 @@ A counter in a database is not a financial ledger. `usertrust` uses the same dou
 ## Enforcement
 
 Budget enforcement is local. Connect a TigerBeetle instance for production, or pass `dryRun: true` to skip the ledger (audit and policy still run). Remote proxy mode is not implemented — passing `proxy` to `trust()` or `createGovernor()` throws.
+
+Try it first with `dryRun: true`, as in the example at the top. For production, run a TigerBeetle replica as below.
+
+### Running TigerBeetle
+
+Full mode needs a TigerBeetle replica at `127.0.0.1:3001`, the default address. The client is built against TigerBeetle 0.17.9 (`tigerbeetle-node` ^0.17.9), so run that release. These commands were run on Linux on arm64 with the 0.17.9 `tigerbeetle-aarch64-linux.zip` asset; for another platform, take the asset for your platform from the [0.17.9 release](https://github.com/tigerbeetle/tigerbeetle/releases).
+
+```bash
+curl -sSL -o tigerbeetle.zip https://github.com/tigerbeetle/tigerbeetle/releases/download/0.17.9/tigerbeetle-aarch64-linux.zip
+unzip tigerbeetle.zip
+./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle
+./tigerbeetle start --addresses=3001 --development 0_0.tigerbeetle
+```
+
+Format the data file once; start the replica each time you need it.
+
+TigerBeetle and its client need `io_uring` on Linux, and Docker's default seccomp profile blocks it; with it blocked, the client cannot start. In a container, run with `--security-opt seccomp=unconfined` (or a seccomp profile that allows `io_uring`). On a host where `kernel.io_uring_disabled` is set, it must be `0`.
 
 ## Verify
 

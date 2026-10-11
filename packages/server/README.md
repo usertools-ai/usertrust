@@ -1,16 +1,35 @@
 # usertrust-server
 
-Self-hostable HTTP control plane for the [usertrust](https://github.com/usertools/usertrust)
+Self-hostable HTTP control plane for the [usertrust](https://github.com/usertools-ai/usertrust)
 governance kernel. Wraps the headless Governor's two-phase lifecycle
 (authorize → settle/abort) with per-tenant isolation, bearer-key auth, and SSE telemetry.
 
 ## Quickstart
 
 ```bash
+npm install -g usertrust-server
+```
+
+```bash
 # Generate a tenant key (high-entropy secret) and its SHA-256 hash for the config:
 KEY=$(openssl rand -hex 32)
 node -e "console.log(require('node:crypto').createHash('sha256').update(process.argv[1]).digest('hex'))" "$KEY"
 ```
+
+Choose one of two ways to run the server, then write the config below.
+
+**Try it (no ledger).** Add `"dryRun": true` to the config. dryRun skips TigerBeetle, so the server needs no ledger replica. The audit chain and the policy engine still run. This is the fastest way to try the API.
+
+**Production (TigerBeetle).** Leave `dryRun` out or set it to `false`, which is the default. The server then needs a running TigerBeetle replica at `127.0.0.1:3001`, the default address. The client is built against TigerBeetle 0.17.9 (`tigerbeetle-node` ^0.17.9), so run that release. These commands were run on Linux on arm64 with the 0.17.9 `tigerbeetle-aarch64-linux.zip` asset; for another platform, take the asset for your platform from the [0.17.9 release](https://github.com/tigerbeetle/tigerbeetle/releases).
+
+```bash
+curl -sSL -o tigerbeetle.zip https://github.com/tigerbeetle/tigerbeetle/releases/download/0.17.9/tigerbeetle-aarch64-linux.zip
+unzip tigerbeetle.zip
+./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle
+./tigerbeetle start --addresses=3001 --development 0_0.tigerbeetle
+```
+
+Format the data file once; start the replica each time you need it. TigerBeetle and its client need `io_uring` on Linux, and Docker's default seccomp profile blocks it; with it blocked, the client cannot start. In a container, run with `--security-opt seccomp=unconfined` (or a seccomp profile that allows `io_uring`). On a host where `kernel.io_uring_disabled` is set, it must be `0`.
 
 `usertrust-server.config.json`:
 

@@ -29,17 +29,34 @@ call it lets through, exactly as they would without it.
 1. Generate a tenant key (high-entropy secret — this is an API-key model, not a password):
    `openssl rand -hex 32`
 2. Add its SHA-256 hash to your `usertrust-server` config and start the server.
-3. Export the plugin environment before launching Claude Code:
+3. Create the configuration file. Its format, and the requirements on its path, owner and mode, are in [Configuration file](#configuration-file); a file that fails them runs the session in watch-only mode with no requests sent. The minimal file has every required field, not only `url` and `key`:
 
 ```sh
-export UT_SERVER_URL="http://127.0.0.1:4519"
-export UT_SERVER_KEY="<the key from step 1>"
+mkdir -p ~/.config/usertrust && chmod 700 ~/.config/usertrust
+```
+
+`~/.config/usertrust/claude-code.json`:
+
+```json
+{
+  "url": "http://127.0.0.1:4519",
+  "key": "<the key from step 1>",
+  "mode": "watch",
+  "stateDir": "/Users/you/.claude/usertrust-cc"
+}
+```
+
+```sh
+chmod 600 ~/.config/usertrust/claude-code.json
+export UT_CC_CONFIG="$HOME/.config/usertrust/claude-code.json"
 ```
 
 4. Start Claude Code. Each session opens with a line naming the mode, for example
    `usertrust: watch-only — nothing is blocked. …`. To block over-budget tool
-   calls instead, also `export UT_CC_MODE=enforce` before launching it — after
+   calls instead, set `"mode": "enforce"` in the configuration file before launching it — after
    watching for a while first: see [From watching to enforcing](#from-watching-to-enforcing).
+
+**Environment variables instead.** You can export `UT_SERVER_URL` and `UT_SERVER_KEY` (and the other `UT_*` variables under [Environment variables](#environment-variables)) before launching Claude Code, and skip the file. The configuration file is preferred: a project's settings can set environment variables for every hook, so a session configured that way is more exposed to them.
 
 ## Environment variables
 
@@ -866,3 +883,7 @@ It never goes to any third party. Set `UT_CC_SEND_CONTENT=0` to send
 input length, so budgets stay accurate. The usertrust audit chain stores
 content hashes, never raw bodies; raw tool input exists only in transit to
 your server and is not persisted by governance.
+
+### Turning tool content off
+
+By default, PreToolUse sends the tool input (truncated at 16 KiB) to **your self-hosted** server for the PII policy, and never to a third party. To send none of it, set `"sendContent": false` in the [configuration file](#configuration-file), or `UT_CC_SEND_CONTENT=0` when you run without one. The server then receives `{"redacted":true}` in place of the content. Budgets stay accurate, because size-based estimation still uses the real input length.
