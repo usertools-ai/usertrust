@@ -82,7 +82,14 @@ export interface StreamCompletion {
 }
 
 export interface GovernedStream<T> extends AsyncIterable<T> {
-	/** Resolves with the trust receipt when the stream completes */
+	/**
+	 * Resolves with the settled trust receipt when the stream completes, or when the
+	 * consumer stops early (the consumed usage settles). Rejects, with the same error the
+	 * iteration threw, when the stream fails mid-way: the hold is then voided, not
+	 * charged. Also rejects when settlement itself is refused (`audit.failClosed`).
+	 * Never an unhandled rejection: a caller that catches the iteration error may leave
+	 * this unawaited.
+	 */
 	receipt: Promise<TrustReceipt>;
 }
 
@@ -422,6 +429,14 @@ export function createGovernedStream<T>(
 		receiptResolve = resolve;
 		receiptReject = reject;
 	});
+	// A stream that fails mid-way (a cut connection, a provider error event) rejects
+	// `.receipt` with the error its iteration throws. A caller that catches the iteration
+	// need not await `.receipt` as well, so Node must never see this rejection unhandled:
+	// that would end the caller's process (exit 1). This handler is a SEPARATE branch.
+	// Promises are multicast, so a caller who awaits `.receipt` still gets the rejection,
+	// as the same error object the iteration threw. The ledger outcome does not depend on
+	// it: the hold is voided by the error terminal below either way.
+	receiptPromise.catch(() => {});
 
 	const wrapped = wrapStream(
 		stream,

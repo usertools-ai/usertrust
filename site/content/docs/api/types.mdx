@@ -305,7 +305,7 @@ Each event's `hash` covers the `previousHash`, forming an append-only chain. The
 
 ### GovernedStream\<T\>
 
-An async iterable that wraps the native LLM stream, adding a `receipt` promise that resolves when the stream completes.
+An async iterable that wraps the native LLM stream, adding a `receipt` promise for the **settled** receipt. It resolves when the stream completes, or when the consumer stops early (the usage consumed so far settles). When the stream fails mid-way (a cut connection, a provider error event), it rejects with the same error the iteration threw, and the hold is voided rather than charged. It never becomes an unhandled rejection, so awaiting it is optional. The `receipt` returned beside `response` is provisional (`settled: false`).
 
 ```typescript
 interface GovernedStream<T> extends AsyncIterable<T> {
@@ -323,12 +323,15 @@ const { response } = await client.messages.create({
   stream: true,
 });
 
-for await (const chunk of response) {
-  // Process chunks as usual
+try {
+  for await (const chunk of response) {
+    // Process chunks as usual
+  }
+  // The settled receipt, after the stream finishes
+  const receipt = await response.receipt;
+} catch (err) {
+  // A cut stream or a provider error: the hold was voided, nothing charged
 }
-
-// Governance receipt resolves after the stream finishes
-const receipt = await response.receipt;
 ```
 
 ### StreamUsage

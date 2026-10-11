@@ -101,24 +101,37 @@ If the client does not match any known shape, `trust()` throws an error at initi
 
 ## Streaming
 
-Streaming is transparent. When you pass `stream: true` to the provider, usertrust returns a `GovernedStream` that yields chunks identically to the native stream. The governance receipt resolves asynchronously after the stream completes:
+Streaming is transparent. When you pass `stream: true` to the provider, usertrust returns a `GovernedStream` that yields chunks identically to the native stream. A streaming call carries two receipts:
+
+- `receipt`, beside `response`, is **provisional**. The stream has not run yet, so it is priced at the estimate and has `settled: false`.
+- `response.receipt` is a promise of the **settled** receipt. It resolves when the stream ends, or when you stop reading early (a `break`), in which case the usage consumed so far is settled.
 
 ```typescript
-const { response } = await client.messages.create({
+const { response, receipt: provisional } = await client.messages.create({
   model: "claude-fable-5",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Write a poem" }],
   stream: true,
 });
+// provisional.settled === false
 
-for await (const chunk of response) {
-  process.stdout.write(chunk.delta?.text ?? "");
+try {
+  for await (const chunk of response) {
+    process.stdout.write(chunk.delta?.text ?? "");
+  }
+} catch (err) {
+  // The connection was cut, or the provider sent an error event.
 }
 
-// Receipt resolves after the stream finishes
-const receipt = await response.receipt;
-console.log(`Cost: ${receipt.cost} UT`);
+try {
+  const receipt = await response.receipt; // settled: true
+  console.log(`Cost: ${receipt.cost} UT`);
+} catch (err) {
+  // The stream failed: its hold was voided, so nothing was charged to the budget.
+}
 ```
+
+**When a stream fails mid-way** (the connection is cut, or the provider sends an error event), iterating it throws the provider SDK's own error, and `response.receipt` rejects with that same error object. The budget hold is voided, not charged, and the audit chain records a `stream_partial_delivery` event with the chunks delivered and the tokens counted before the failure. Awaiting `response.receipt` is optional: a failed stream never leaves an unhandled rejection behind, so a caller that only catches the iteration error is safe.
 
 Token counts are accumulated per-provider from stream chunks:
 - **Anthropic**: `message_start` (input tokens), `message_delta` (output tokens)
@@ -205,14 +218,17 @@ const { response } = await client.messages.create({
   stream: true,
 });
 
-for await (const event of response) {
-  if (event.type === "content_block_delta") {
-    process.stdout.write(event.delta.text);
+try {
+  for await (const event of response) {
+    if (event.type === "content_block_delta") {
+      process.stdout.write(event.delta.text);
+    }
   }
+  const receipt = await response.receipt;
+  console.log(`\n\nCost: ${receipt.cost} UT`);
+} catch (err) {
+  // A cut stream or a provider error: the hold was voided (see Streaming above).
 }
-
-const receipt = await response.receipt;
-console.log(`\n\nCost: ${receipt.cost} UT`);
 
 await client.destroy();
 ```
