@@ -287,6 +287,97 @@ const LEAF_1 = { mintLeafIndex: 1 } as const;
 const FINAL_LEAF = { mintSegmentIndex: 1, mintLeafIndex: 6 } as const;
 const WITH_SUCCESSOR: Pick<MintOptions, "history"> = { history: (_history, all) => [...all] };
 
+/**
+ * §4a: a served successor's signed `segmentStartPreviousHash` IS its
+ * predecessor's final leaf, so it is a KNOWN leaf like the chain link and the
+ * receipt's predecessor event. Each shape below exposes it — as a proof sibling
+ * (level 0, or promoted to a higher level), or as the whole of a single-event
+ * predecessor's tree — and `next` is the member re-signed over a contradictory
+ * start hash. Every shape is also run untampered, as the control.
+ */
+const KNOWN_FINAL_LEAF_SHAPES: readonly {
+	readonly id: string;
+	readonly value: string;
+	readonly shape: Pick<MintOptions, "segments" | "mintSegmentIndex" | "mintLeafIndex">;
+	readonly next: number;
+	readonly detail: string;
+}[] = [
+	{
+		id: "level-0",
+		value: "the receipt at leaf 2 of 4: sibling 0 is the final leaf",
+		shape: {
+			segments: [
+				{ segmentId: "seg_000001", segmentFirstSequence: 1, treeSize: 4 },
+				{ segmentId: "seg_000002", segmentFirstSequence: 5, treeSize: 4 },
+				{ segmentId: "seg_000003", segmentFirstSequence: 8, treeSize: 7 },
+			],
+			mintSegmentIndex: 1,
+			mintLeafIndex: 2,
+		},
+		next: 2,
+		detail: "the preceding segment's final leaf",
+	},
+	{
+		id: "promoted-level-2",
+		value: "the receipt at genesis leaf 1 of 5: the level-2 sibling is leaf 4, promoted",
+		shape: {
+			segments: [
+				{ segmentId: "seg_000001", segmentFirstSequence: 1, treeSize: 5 },
+				{ segmentId: "seg_000002", segmentFirstSequence: 6, treeSize: 7 },
+			],
+			mintSegmentIndex: 0,
+			mintLeafIndex: 1,
+		},
+		next: 1,
+		detail: "the preceding segment's final leaf",
+	},
+	{
+		id: "promoted-level-1",
+		value: "the receipt at leaf 1 of a non-genesis 3: the level-1 sibling is leaf 2, promoted",
+		shape: {
+			segments: [
+				{ segmentId: "seg_000001", segmentFirstSequence: 1, treeSize: 4 },
+				{ segmentId: "seg_000002", segmentFirstSequence: 5, treeSize: 3 },
+				{ segmentId: "seg_000003", segmentFirstSequence: 7, treeSize: 7 },
+			],
+			mintSegmentIndex: 1,
+			mintLeafIndex: 1,
+		},
+		next: 2,
+		detail: "the preceding segment's final leaf",
+	},
+	{
+		id: "genesis-single-event",
+		value: "a one-event genesis predecessor, the receipt two segments later",
+		shape: {
+			segments: [
+				{ segmentId: "seg_000001", segmentFirstSequence: 1, treeSize: 1 },
+				{ segmentId: "seg_000002", segmentFirstSequence: 2, treeSize: 7 },
+				{ segmentId: "seg_000003", segmentFirstSequence: 8, treeSize: 7 },
+			],
+			mintSegmentIndex: 2,
+			mintLeafIndex: 3,
+		},
+		next: 1,
+		detail: "the preceding checkpoint's root is not the tree",
+	},
+	{
+		id: "non-genesis-single-event",
+		value: "a one-event non-genesis predecessor (link + 1), the receipt in the next segment",
+		shape: {
+			segments: [
+				{ segmentId: "seg_000001", segmentFirstSequence: 1, treeSize: 4 },
+				{ segmentId: "seg_000002", segmentFirstSequence: 5, treeSize: 2 },
+				{ segmentId: "seg_000003", segmentFirstSequence: 6, treeSize: 7 },
+			],
+			mintSegmentIndex: 2,
+			mintLeafIndex: 3,
+		},
+		next: 2,
+		detail: "the preceding checkpoint's root is not the tree",
+	},
+];
+
 // ─────────────────────────────────────────────────────────────────────────────
 // §7 step 1 — schema.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1338,6 +1429,36 @@ const HISTORY_ROWS: readonly Row[] = [
 			),
 		expect: historyFailed("previousSegmentId does not name the preceding checkpoint's segment"),
 	},
+	...KNOWN_FINAL_LEAF_SHAPES.flatMap(({ id, value, shape, next, detail }): Row[] => [
+		{
+			id: `history.known-final-leaf.${id}`,
+			value: `${value}; the next member re-signed over a contradictory start hash`,
+			boundTo: "the successor's signed segmentStartPreviousHash, as a known leaf (§4a)",
+			covers: [],
+			run: () =>
+				verify(
+					{
+						...shape,
+						...WITH_SUCCESSOR,
+						...resignedCheckpoint(
+							(c) => ({ ...c, segmentStartPreviousHash: otherHash(`final-${id}`) }),
+							next,
+						),
+					},
+					{ history: true },
+				),
+			expect: historyFailed(detail),
+		},
+		{
+			id: `history.known-final-leaf.${id}.control`,
+			value: `${value}; every value consistent`,
+			boundTo: "the same known-leaf rule, holding",
+			declared: "control: the known-leaf rule must not refuse an honest history",
+			covers: [],
+			run: () => verify({ ...shape, ...WITH_SUCCESSOR }, { history: true }),
+			expect: VERIFIED_HISTORY,
+		},
+	]),
 	{
 		id: "history.two-successors",
 		value: "the receipt at its segment's last leaf, with TWO honest successors served",

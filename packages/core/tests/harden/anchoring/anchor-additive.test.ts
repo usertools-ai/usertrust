@@ -414,11 +414,23 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// variants. NO vendored source, no new
 		// dependency: the new imports are `hashLeaf` / `hashInternal` from
 		// `./verify.js`, and `dependencies` is still `{}`. 62 lines of headroom.
+		//
+		// 10100 → 10200, for #200 r3's two verifier P1s (2026-10-11): the
+		// known-leaf class + single-event predecessor roots. Post-change total
+		// 10128, so 10100 failed by 28. WHAT WAS ADDED, all in
+		// `receipt-verify.ts`: the one-node `recomputableNode` became ONE rule
+		// over a set of KNOWN leaves (`receiptKnownLeaves` / `knownNode` /
+		// `knownSiblingMismatch`) — every proof sibling covering only known
+		// leaves is recomputed at every level, promoted positions included — and
+		// the history walk adds a served successor's signed start hash as the
+		// predecessor's final leaf, which also fixes the root of a single-event
+		// predecessor at every pair. NO vendored source, no new import, and
+		// `dependencies` is still `{}`. 72 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(10100);
+		expect(total).toBeLessThan(10200);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
