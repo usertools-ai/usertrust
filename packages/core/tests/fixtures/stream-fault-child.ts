@@ -12,6 +12,7 @@
  *   surface    anthropic         messages.create({ stream: true })
  *              anthropic-helper  messages.stream()
  *              openai            chat.completions.create({ stream: true })
+ *              openai-responses  responses.create({ stream: true })
  *   fault      ok     a complete stream
  *              cut    the server closes the socket after the first events
  *              error  the provider sends an error event mid-stream
@@ -89,9 +90,69 @@ const openaiChunk = (content: string | null, finish: string | null): unknown => 
 	choices: [{ index: 0, delta: content === null ? {} : { content }, finish_reason: finish }],
 });
 
+const RESPONSE = {
+	id: "resp_1",
+	object: "response",
+	created_at: 0,
+	model: "gpt-4o",
+	output: [],
+};
+
+/** OpenAI Responses events: typed SSE events, as the Responses API streams them. */
+function respondResponses(res: ServerResponse): void {
+	sse(res, "response.created", {
+		type: "response.created",
+		sequence_number: 0,
+		response: { ...RESPONSE, status: "in_progress", usage: null },
+	});
+	sse(res, "response.output_text.delta", {
+		type: "response.output_text.delta",
+		sequence_number: 1,
+		item_id: "msg_1",
+		output_index: 0,
+		content_index: 0,
+		delta: "Hel",
+	});
+	if (fault === "cut") {
+		setTimeout(() => res.socket?.destroy(), 50);
+		return;
+	}
+	if (fault === "error") {
+		// The Responses API's mid-stream error event, in its documented shape.
+		sse(res, "error", {
+			type: "error",
+			code: "server_error",
+			message: "Internal server error",
+			param: null,
+			sequence_number: 2,
+		});
+	} else {
+		sse(res, "response.completed", {
+			type: "response.completed",
+			sequence_number: 2,
+			response: {
+				...RESPONSE,
+				status: "completed",
+				usage: {
+					input_tokens: 12,
+					output_tokens: 5,
+					total_tokens: 17,
+					input_tokens_details: { cached_tokens: 0 },
+					output_tokens_details: { reasoning_tokens: 0 },
+				},
+			},
+		});
+	}
+	res.end();
+}
+
 const server = createServer((req, res) => {
 	req.resume();
 	res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+	if (surface === "openai-responses") {
+		respondResponses(res);
+		return;
+	}
 	const anthropic = surface.startsWith("anthropic");
 	if (anthropic) for (const [e, d] of ANTHROPIC_HEAD) sse(res, e, d);
 	else {
@@ -144,9 +205,12 @@ type Governed = {
 let client: any;
 let governed: Governed;
 const messages = [{ role: "user", content: "probe" }];
-if (surface === "openai") {
+if (surface === "openai" || surface === "openai-responses") {
 	client = await trust(new OpenAI({ apiKey: "x", baseURL: `${origin}/v1`, maxRetries: 0 }), opts);
-	governed = await client.chat.completions.create({ model: "gpt-4o", messages, stream: true });
+	governed =
+		surface === "openai"
+			? await client.chat.completions.create({ model: "gpt-4o", messages, stream: true })
+			: await client.responses.create({ model: "gpt-4o", input: "probe", stream: true });
 } else {
 	client = await trust(new Anthropic({ apiKey: "x", baseURL: origin, maxRetries: 0 }), opts);
 	const params = { model: "claude-sonnet-4-6", max_tokens: 64, messages };

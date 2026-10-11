@@ -75,9 +75,20 @@ function runCustomer(
 	return { code: r.status, stderr: r.stderr, outcome };
 }
 
+/**
+ * The faults that make each surface's ITERATION throw. A Responses stream's mid-stream
+ * error event does not: the OpenAI SDK yields it as an ordinary event (its type is
+ * "error"), so it has a row of its own below.
+ */
+const THROWING_FAULTS = {
+	anthropic: ["cut", "error"],
+	openai: ["cut", "error"],
+	"openai-responses": ["cut"],
+} as const;
+
 describe("a stream that fails mid-way never crashes the caller's process", () => {
-	for (const surface of ["anthropic", "openai"] as const) {
-		for (const fault of ["cut", "error"] as const) {
+	for (const surface of ["anthropic", "openai", "openai-responses"] as const) {
+		for (const fault of THROWING_FAULTS[surface]) {
 			it(`${surface}, ${fault}: the docs pattern (catch the iteration, never await .receipt) exits 0`, () => {
 				const { code, stderr, outcome } = runCustomer(surface, fault, "docs");
 				// Node's crash report ends with its version banner; a clean exit prints none.
@@ -106,6 +117,20 @@ describe("a stream that fails mid-way never crashes the caller's process", () =>
 			});
 		}, 60_000);
 	}
+
+	it("openai-responses, error event: the SDK yields it, so nothing throws and nothing crashes", () => {
+		const docs = runCustomer("openai-responses", "error", "docs");
+		expect(docs.stderr, docs.stderr).not.toMatch(/Node\.js v\d+/);
+		expect(docs.code, docs.stderr).toBe(0);
+		expect(docs.outcome?.iteration).toBe("ended");
+		// Today the stream simply ends, so it settles like any stream that ends: the error
+		// event carries no usage, so at the estimate. Pinned as current behaviour, not as
+		// a ruling on whether a failed Responses stream should be charged.
+		const awaited = runCustomer("openai-responses", "error", "receipt");
+		expect(awaited.code, awaited.stderr).toBe(0);
+		expect(awaited.outcome?.receipt).toBe("resolved");
+		expect(awaited.outcome?.receiptSettled).toBe(true);
+	}, 60_000);
 
 	it("anthropic messages.stream(), cut: the docs pattern exits 0", () => {
 		const { code, stderr, outcome } = runCustomer("anthropic-helper", "cut", "docs");
