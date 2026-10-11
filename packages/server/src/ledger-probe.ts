@@ -157,9 +157,16 @@ export function spawnProbeChild(target: LedgerTarget, timeoutMs: number): ChildP
 	);
 }
 
-function runProbeChild(target: LedgerTarget, timeoutMs: number): Promise<LedgerProbeOutcome> {
+/** How `probeLedger` starts a probe child. Injectable so a test can count or replace them. */
+export type ProbeChildSpawner = (target: LedgerTarget, timeoutMs: number) => ChildProcess;
+
+function runProbeChild(
+	target: LedgerTarget,
+	timeoutMs: number,
+	spawnChild: ProbeChildSpawner,
+): Promise<LedgerProbeOutcome> {
 	return new Promise((resolve) => {
-		const child = spawnProbeChild(target, timeoutMs);
+		const child = spawnChild(target, timeoutMs);
 		let stderr = "";
 		let timedOut = false;
 		// stdio[2] is "pipe", so stderr is always present.
@@ -184,22 +191,46 @@ function runProbeChild(target: LedgerTarget, timeoutMs: number): Promise<LedgerP
 	});
 }
 
+/** In-flight probes, by config: concurrent calls for one config share one probe. */
+const inFlight = new Map<string, Promise<void>>();
+
 /**
  * Refuse to start a server whose ledger is unusable: resolves when every distinct ledger
  * the tenants use answered a round trip, and throws an Error naming the cause and the
  * fixes otherwise. A dryRun server needs no ledger, so it resolves at once without
  * probing. `createUsertrustServer` never calls this; the CLI calls it before listening,
  * and an embedder may do the same.
+ *
+ * At most one probe child runs at a time: the ledgers are probed one after another, and
+ * a call made while the same config's probe is in flight shares it rather than starting
+ * another. `opts.spawnChild` replaces how a child is started (for tests).
  */
-export async function probeLedger(config: ServerConfig): Promise<void> {
-	if (config.dryRun) return;
+export function probeLedger(
+	config: ServerConfig,
+	opts: { spawnChild?: ProbeChildSpawner } = {},
+): Promise<void> {
+	if (config.dryRun) return Promise.resolve();
+	const key = JSON.stringify(config);
+	const existing = inFlight.get(key);
+	if (existing !== undefined) return existing;
+	const probe = probeEveryLedger(config, opts.spawnChild ?? spawnProbeChild).finally(() => {
+		inFlight.delete(key);
+	});
+	inFlight.set(key, probe);
+	return probe;
+}
+
+async function probeEveryLedger(
+	config: ServerConfig,
+	spawnChild: ProbeChildSpawner,
+): Promise<void> {
 	const timeoutMs = config.ledgerProbeTimeoutMs ?? DEFAULT_LEDGER_PROBE_TIMEOUT_MS;
-	const targets = await resolveLedgerTargets(config);
-	const results = await Promise.all(
-		targets.map(async (target) =>
-			classifyLedgerProbe(await runProbeChild(target, timeoutMs), target, timeoutMs),
-		),
-	);
-	const refusals = results.flatMap((result) => (result.ok ? [] : [result.message]));
+	const refusals: string[] = [];
+	// Sequential on purpose: every ledger is checked, one child at a time.
+	for (const target of await resolveLedgerTargets(config)) {
+		const outcome = await runProbeChild(target, timeoutMs, spawnChild);
+		const result = classifyLedgerProbe(outcome, target, timeoutMs);
+		if (!result.ok) refusals.push(result.message);
+	}
 	if (refusals.length > 0) throw new Error(refusals.join("\n"));
 }

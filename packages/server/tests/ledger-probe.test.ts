@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -197,28 +197,86 @@ async function freePort(): Promise<number> {
 	return address.port;
 }
 
-describe("probeLedger", () => {
-	const savedNodeOptions = process.env.NODE_OPTIONS;
-	afterEach(() => {
-		if (savedNodeOptions === undefined) delete process.env.NODE_OPTIONS;
-		else process.env.NODE_OPTIONS = savedNodeOptions;
-	});
+const FAKE_CHILD = join(import.meta.dirname, "helpers", "fake-probe-child.mjs");
 
+/** A spawner that starts fake-probe-child.mjs in `mode`, counting the children it starts. */
+function fakeChild(mode: string) {
+	let spawned = 0;
+	let live = 0;
+	let maxLive = 0;
+	const spawnChild = (): ChildProcess => {
+		const child = spawn(process.execPath, [FAKE_CHILD, mode], {
+			stdio: ["ignore", "ignore", "pipe", "ipc"],
+		});
+		spawned += 1;
+		live += 1;
+		maxLive = Math.max(maxLive, live);
+		child.once("exit", () => {
+			live -= 1;
+		});
+		return child;
+	};
+	return { spawnChild, spawned: () => spawned, maxLive: () => maxLive };
+}
+
+/** A non-dryRun config whose three tenants each use a different ledger. */
+async function threeLedgers(): Promise<ServerConfig> {
+	const stateDir = await mkdtemp(join(tmpdir(), "utsrv-probe-"));
+	const ids = ["a", "b", "c"];
+	for (const [i, id] of ids.entries()) {
+		await writeVaultConfig(join(stateDir, id, ".usertrust"), {
+			budget: 100,
+			tigerbeetle: { addresses: [`127.0.0.1:${4101 + i}`] },
+		});
+	}
+	return serverConfig(stateDir, {
+		ledgerProbeTimeoutMs: 5_000,
+		tenants: ids.map((id) => ({ id, keyHash: hashKey(`key-${id}`) })),
+	});
+}
+
+describe("probeLedger", () => {
 	it("refuses, naming the address, when no TigerBeetle answers in time", async () => {
-		// The probe's child runs the TypeScript sources too: the preload rides NODE_OPTIONS.
-		const preload = join(import.meta.dirname, "helpers", "source-preload.mjs");
-		process.env.NODE_OPTIONS = `${savedNodeOptions ?? ""} --import "${preload}"`.trim();
 		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-probe-"));
-		const ledgerPort = await freePort();
 		await writeVaultConfig(join(stateDir, "a", ".usertrust"), {
 			budget: 100,
-			tigerbeetle: { addresses: [`127.0.0.1:${ledgerPort}`] },
+			tigerbeetle: { addresses: ["127.0.0.1:4100"] },
 		});
+		// A child that never answers: the outcome is the parent's deadline on any host.
 		await expect(
-			probeLedger(serverConfig(stateDir, { ledgerProbeTimeoutMs: 1_000 })),
-		).rejects.toThrow(
-			`no TigerBeetle answered at 127.0.0.1:${ledgerPort} (cluster 0) within 1000 ms`,
+			probeLedger(serverConfig(stateDir, { ledgerProbeTimeoutMs: 1_000 }), {
+				spawnChild: fakeChild("sleep").spawnChild,
+			}),
+		).rejects.toThrow("no TigerBeetle answered at 127.0.0.1:4100 (cluster 0) within 1000 ms");
+	}, 30_000);
+
+	it("probes one ledger at a time, and still reports every refusal", async () => {
+		const config = await threeLedgers();
+		const ok = fakeChild("ok:150");
+		await probeLedger(config, { spawnChild: ok.spawnChild });
+		expect(ok.spawned()).toBe(3);
+		expect(ok.maxLive()).toBe(1);
+
+		const failing = fakeChild("fail");
+		const refusal = await probeLedger(config, { spawnChild: failing.spawnChild }).then(
+			() => null,
+			(err: Error) => err.message,
 		);
+		expect(failing.maxLive()).toBe(1);
+		for (const port of [4101, 4102, 4103]) expect(refusal).toContain(`127.0.0.1:${port}`);
+	}, 30_000);
+
+	it("is single-flight: concurrent calls share one set of children", async () => {
+		const config = await threeLedgers();
+		const ok = fakeChild("ok:150");
+		await Promise.all([
+			probeLedger(config, { spawnChild: ok.spawnChild }),
+			probeLedger(config, { spawnChild: ok.spawnChild }),
+		]);
+		expect(ok.spawned()).toBe(3);
+		// Settled, it is not cached: a later call probes again.
+		await probeLedger(config, { spawnChild: ok.spawnChild });
+		expect(ok.spawned()).toBe(6);
 	}, 30_000);
 
 	it("a dryRun server needs no ledger and does not probe", async () => {
