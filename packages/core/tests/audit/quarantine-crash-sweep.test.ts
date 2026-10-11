@@ -34,6 +34,10 @@ const crash = {
 	count: 0,
 	crashed: false,
 	ops: [] as string[],
+	/** Run `plant` just BEFORE mutating call number `plantAt` (through the real fs, uncounted). */
+	plantAt: 0,
+	plant: undefined as (() => void) | undefined,
+	planted: false,
 };
 const META_TMP = /\.meta\.[0-9a-f-]+\.tmp$/;
 const EVIDENCE_TMP = /[\\/]quarantine[\\/]\.[0-9a-f]{64}[^\\/]*\.tmp$/;
@@ -57,6 +61,10 @@ vi.mock("node:fs", async (importOriginal) => {
 		if (!crash.active) return;
 		crash.count++;
 		crash.ops.push(`${op}:${label(path)}`);
+		if (crash.plant !== undefined && crash.count === crash.plantAt) {
+			crash.plant();
+			crash.planted = true;
+		}
 		if (crash.crashed || crash.count === crash.at) {
 			crash.crashed = true;
 			throw Object.assign(new Error(`EIO: injected crash at step ${crash.count} (${op})`), {
@@ -121,9 +129,12 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 const { createAuditWriter } = await import("../../src/audit/chain.js");
-const { AuditQuarantineRefusedError, QUARANTINE_EVENT_KIND, quarantineTornTail } = await import(
-	"../../src/audit/quarantine.js"
-);
+const {
+	AuditQuarantineInterruptedError,
+	AuditQuarantineRefusedError,
+	QUARANTINE_EVENT_KIND,
+	quarantineTornTail,
+} = await import("../../src/audit/quarantine.js");
 const { verifyVault } = await import("../../src/audit/verify.js");
 const { VAULT_DIR } = await import("../../src/shared/constants.js");
 
@@ -135,7 +146,16 @@ beforeEach(() => {
 });
 afterEach(() => {
 	vi.restoreAllMocks();
-	Object.assign(crash, { active: false, at: 0, count: 0, crashed: false, ops: [] });
+	Object.assign(crash, {
+		active: false,
+		at: 0,
+		count: 0,
+		crashed: false,
+		ops: [],
+		plantAt: 0,
+		plant: undefined,
+		planted: false,
+	});
 	for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -208,12 +228,15 @@ function snapshot(v: string): string {
  * `quarantine/` byte-identical, whatever the start state and whatever step it came from.
  */
 async function run(v: string, opts?: { dryRun?: boolean }) {
-	const before = snapshot(v);
+	// While a test PLANTS a hard link mid-run, the log's link count is the plant's doing, not the
+	// repair's: it is left out of the comparison (contents, names and symlinks still count).
+	const view = (x: string) => (crash.plant === undefined ? x : x.replace(/:nlink=\d+/g, ""));
+	const before = view(snapshot(v));
 	try {
 		return await quarantineTornTail(v, opts);
 	} catch (err) {
 		if (err instanceof AuditQuarantineRefusedError) {
-			expect(snapshot(v), `a refusal changed the vault: ${err.message}`).toBe(before);
+			expect(view(snapshot(v)), `a refusal changed the vault: ${err.message}`).toBe(before);
 		}
 		throw err;
 	}
@@ -404,5 +427,96 @@ describe("quarantine: a REFUSAL changes nothing, from any start state — dry ru
 				await expect(run(v)).rejects.toBeInstanceOf(AuditQuarantineRefusedError);
 			});
 		}
+	}
+});
+
+describe("quarantine: a HARD LINK made to the log at any point of a repair (planted at each fs-call index)", () => {
+	/**
+	 * The authoritative link check runs on the descriptor that is cut, immediately before the
+	 * repair's first write. So, with the link planted just before mutating call N:
+	 *  - N before the first repair write: a REFUSAL, byte-identical (the `run` wrapper asserts it);
+	 *  - N from the first repair write up to (not including) the cut: an INTERRUPTED repair — the
+	 *    log is not cut, the message names what was done and never claims nothing changed;
+	 *  - N at the cut or later: the repair completes (a link raced in between the cut-time check and
+	 *    the truncate itself is the one window no check can close).
+	 * In every case, once the extra name is removed, the next run converges.
+	 */
+	const isRepairWrite = (op: string) =>
+		/^(create|write|rename|link|mkdir):(meta-tmp|meta|evidence-tmp|evidence|quarantine-dir)$/.test(
+			op,
+		) || op === "truncate:log";
+	for (const start of STARTS) {
+		it(`start: ${start.name}`, { timeout: 120_000 }, async () => {
+			// Number the clean run's calls, to place each plant.
+			const probe = await start.make();
+			Object.assign(crash, { active: true, at: Number.POSITIVE_INFINITY, count: 0, ops: [] });
+			await run(probe);
+			crash.active = false;
+			const ops = [...crash.ops];
+			const firstWrite = ops.findIndex(isRepairWrite) + 1;
+			const cutAt = ops.indexOf("truncate:log") + 1;
+			expect(firstWrite, `a first repair write in ${ops.join(" ")}`).toBeGreaterThan(0);
+			expect(cutAt, "a cut").toBeGreaterThan(firstWrite);
+			const outcomes: string[] = [];
+			for (let n = 1; n <= ops.length + 1; n++) {
+				const v = await start.make();
+				const other = join(v, "events-hardlink-planted");
+				const logBefore = readFileSync(logOf(v));
+				Object.assign(crash, {
+					active: true,
+					at: Number.POSITIVE_INFINITY,
+					count: 0,
+					ops: [],
+					plantAt: n,
+					planted: false,
+					plant: () => linkSync(logOf(v), other),
+				});
+				let failure: unknown;
+				try {
+					await run(v);
+				} catch (err) {
+					failure = err;
+				}
+				const planted = crash.planted;
+				Object.assign(crash, { active: false, plant: undefined, planted: false });
+				const where = `link planted before call ${n} (${ops[n - 1] ?? "after the last"})`;
+				if (!planted) {
+					expect(n, "only past the last call does nothing get planted").toBe(ops.length + 1);
+					expect(failure, where).toBeUndefined();
+					break;
+				}
+				const expected = n < firstWrite ? "refused" : n < cutAt ? "interrupted" : "completed";
+				const got =
+					failure instanceof AuditQuarantineRefusedError
+						? "refused"
+						: // guarded: the class is new, so a pre-fix run reports instead of throwing a TypeError
+							typeof AuditQuarantineInterruptedError === "function" &&
+								failure instanceof AuditQuarantineInterruptedError
+							? "interrupted"
+							: failure === undefined
+								? "completed"
+								: `threw ${String(failure)}`;
+				outcomes.push(got[0] as string);
+				expect(got, where).toBe(expected);
+				if (got === "interrupted") {
+					const message = (failure as Error).message;
+					expect(message, `${where}: never claims nothing changed`).not.toMatch(
+						/nothing was changed/i,
+					);
+					expect(
+						(failure as { done: string[] }).done.length,
+						`${where}: names what was done`,
+					).toBeGreaterThan(0);
+					expect(readFileSync(logOf(v)).equals(logBefore), `${where}: the log was not cut`).toBe(
+						true,
+					);
+				}
+				rmSync(other);
+				if (got !== "completed")
+					await expect(run(v), `${where}: the next run`).resolves.toBeDefined();
+				expectConverged(v, start.cuts, where);
+			}
+			expect(outcomes.join(""), "refusals, then interrupted, then completed").toMatch(/^r+i+c+$/);
+		});
 	}
 });

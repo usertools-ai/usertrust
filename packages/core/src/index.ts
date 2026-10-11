@@ -45,6 +45,7 @@ export {
 } from "./audit/merkle.js";
 // Torn-tail quarantine — the one repair the audit chain admits
 export {
+	AuditQuarantineInterruptedError,
 	AuditQuarantineRefusedError,
 	QUARANTINE_EVENT_KIND,
 	type QuarantineResult,

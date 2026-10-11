@@ -34,8 +34,12 @@
  * LIMITATIONS.md: a cut whose record never landed, followed by byte-identical torn bytes at the
  * same offset, is indistinguishable on disk from one interrupted cut, and is recorded once.)
  *
- * Every refusal happens in the read-only analysis, before step 1, so a refusal changes nothing. The
- * crash-point sweep in the tests holds both properties over every durable step and start state.
+ * Every refusal happens before the first write — in the read-only analysis, or in the link check on
+ * the log's own descriptor immediately before the first repair write — so a refusal changes nothing.
+ * The one exception is a hard link made to the log after that check: the cut-time check then
+ * reports an INTERRUPTED repair ({@link AuditQuarantineInterruptedError}), naming what was done,
+ * never a refusal. The crash-point sweep in the tests holds these properties over every durable
+ * step and start state.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -75,6 +79,24 @@ export class AuditQuarantineRefusedError extends Error {
 	constructor(why: string) {
 		super(`audit quarantine refused: ${why}. Nothing was changed.`);
 		this.name = "AuditQuarantineRefusedError";
+	}
+}
+
+/**
+ * A repair that had ALREADY WRITTEN when it found it could not go on, so it is NOT a refusal and
+ * never claims that nothing changed: `done` names each step already taken. The one cause is
+ * another name hard-linked to the log after the repair's pre-write check (another actor working on
+ * the vault mid-repair; see AGENTS.md). The log is never cut then. Everything already done is a
+ * state the next run continues from: remove the other name and run again.
+ */
+export class AuditQuarantineInterruptedError extends Error {
+	readonly done: readonly string[];
+	constructor(why: string, done: readonly string[]) {
+		super(
+			`audit quarantine interrupted: ${why}. The log was NOT cut. Already done: ${done.join("; ")}. Remove the other name and run \`usertrust audit quarantine-tail\` again to finish.`,
+		);
+		this.name = "AuditQuarantineInterruptedError";
+		this.done = done;
 	}
 }
 
@@ -441,7 +463,8 @@ function analyse(auditDir: string, logPath: string, qDir: string, logBytes?: Buf
  * `.usertrust/`. A dry run is READ-ONLY: no lock, no directory, no write — on a mistaken path it
  * refuses instead of creating a vault and calling it clean. A real run takes the vault's writer
  * lock for the whole repair (another live writer: `AuditWriterLockHeldError`) and re-analyses
- * under it. Throws {@link AuditQuarantineRefusedError} for any other state.
+ * under it. Throws {@link AuditQuarantineRefusedError} for any other state, and
+ * {@link AuditQuarantineInterruptedError} if the log gains a hard link mid-repair.
  *
  * The lock is released as `withAuditWriterLock` releases its own: when the repair throws, its error
  * is the rejection and a lock left behind is only reported (a `USERTRUST_AUDIT_LOCK_LEFT` warning);
@@ -514,7 +537,12 @@ async function repairUnderLock(
 		// 1. The verified log is durable BEFORE any head derived from it is published (log before
 		//    sidecar, as the writer orders it): a complete last line with its anchor one behind can be
 		//    an append whose fsync failed or never ran.
-		if (lfd !== undefined) fsyncSync(lfd);
+		if (lfd !== undefined) {
+			fsyncSync(lfd);
+			// The AUTHORITATIVE link check: on the descriptor that is cut, immediately before the
+			// repair's first write. A link made before this point is a clean refusal, nothing changed.
+			assertSingleName(fstatSync(lfd).nlink);
+		}
 		// The anchor is brought to the verified head BEFORE anything is appended — from ONE BEHIND
 		// (an event landed, its `.meta` update failed), or from ABSENT (a chain of at most one event;
 		// an empty one gets the genesis anchor). A record appended first, and then a failed or
@@ -534,15 +562,26 @@ async function repairUnderLock(
 			// 2. The torn bytes, aside, byte for byte (idempotent by the cut's name), through a REAL
 			//    directory, published atomically.
 			ensureRealQuarantineDir(qDir);
-			writeEvidence(auditDir, cutOf(plan.torn.sha256, plan.torn.offset), plan.tailBytes);
+			const cut = cutOf(plan.torn.sha256, plan.torn.offset);
+			writeEvidence(auditDir, cut, plan.tailBytes);
 			fsyncDir(qDir);
 			// The NEW directory entry must be durable in its parent BEFORE the log is cut: a power
 			// loss after the truncation must never lose the quarantine directory.
 			fsyncDir(auditDir);
 			// 3. The log, cut back to its last complete line — on the SAME descriptor, whose file must
-			//    still have ONE name at the moment it is cut (the path was checked, but a hard link can
-			//    be made since: truncating the inode cuts every name).
-			assertSingleName(fstatSync(lfd).nlink);
+			//    still have ONE name at the moment it is cut: truncating the inode cuts every name. A
+			//    link made SINCE the pre-write check found the repair already writing, so this is not a
+			//    refusal: it is reported as an interrupted repair, naming what was done.
+			const nlink = fstatSync(lfd).nlink;
+			if (nlink !== 1) {
+				throw new AuditQuarantineInterruptedError(
+					`audit/events.jsonl gained another hard link during the repair (${nlink} links) — cutting it would cut every other name for the same file`,
+					[
+						...(anchorAdvanced ? ["the .meta head anchor was brought to the verified head"] : []),
+						`the torn bytes were saved as ${cut.file}`,
+					],
+				);
+			}
 			ftruncateSync(lfd, plan.torn.offset);
 			fsyncSync(lfd);
 		}

@@ -9,7 +9,11 @@
 
 import pc from "picocolors";
 import { AuditWriterLockHeldError } from "../audit/chain.js";
-import { AuditQuarantineRefusedError, quarantineTornTail } from "../audit/quarantine.js";
+import {
+	AuditQuarantineInterruptedError,
+	AuditQuarantineRefusedError,
+	quarantineTornTail,
+} from "../audit/quarantine.js";
 import type { CliOptions } from "./init.js";
 import { scrubForTerminal, toSafeJson } from "./target.js";
 
@@ -62,7 +66,9 @@ export async function run(
 		}
 	} catch (err) {
 		const refused =
-			err instanceof AuditQuarantineRefusedError || err instanceof AuditWriterLockHeldError;
+			err instanceof AuditQuarantineRefusedError ||
+			err instanceof AuditQuarantineInterruptedError ||
+			err instanceof AuditWriterLockHeldError;
 		// Scrubbed for the TERMINAL only; the JSON output carries the exact text (C1 escaped).
 		const message = err instanceof Error ? err.message : String(err);
 		const shown = scrubForTerminal(message);

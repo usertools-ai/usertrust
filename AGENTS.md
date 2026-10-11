@@ -1028,11 +1028,22 @@ behind, or absent, to the verified head BEFORE anything is appended, moves the b
 cuts the log, and records a chained `audit.quarantine.torn_tail` naming that file. Anything else is
 refused with nothing changed. A cut's identity is its digest AND offset, in the file name and the
 record alike: a digest alone let an earlier record of identical bytes suppress a later cut's.
-Every refusal comes from the read-only analysis, before the first write, so a refusal changes
-nothing. `tests/audit/quarantine-crash-sweep.test.ts` holds both properties: it crashes the repair at
-each durable step, from each start state, and requires the next run to converge (verifies, anchor
-at the head, one record per cut); and every refusal must leave the log, `.meta` and `quarantine/`
-byte-identical.
+Every refusal (`AuditQuarantineRefusedError`, "Nothing was changed") comes before the first write:
+from the read-only analysis, or from the link check on the log's own descriptor immediately before
+the first repair write. So a refusal changes nothing.
+*The one exception, and how it is reported:* a hard link made to the log AFTER that check, before
+the cut — another actor working on the vault mid-repair, the same class as the directory
+replacement in the lock's threat model, and not closable without an atomic check-and-truncate. The
+cut-time check then throws `AuditQuarantineInterruptedError`, never a refusal: it does not cut, its
+message and `done` name what was already done (the anchor brought to the head, the evidence saved),
+and never claim that nothing changed. That state is one the next run finishes from once the extra
+name is removed. A link made between the cut-time check and the truncate itself cannot be seen at
+all, and the truncate then cuts both names.
+`tests/audit/quarantine-crash-sweep.test.ts` holds these properties: it crashes the repair at each
+durable step, from each start state, and requires the next run to converge (verifies, anchor at the
+head, one record per cut); every refusal must leave the log, `.meta` and `quarantine/` byte-identical;
+and a hard link planted before each fs call of the repair must give a refusal before the first
+write, an interrupted repair from it up to the cut, and convergence once the link is removed.
 *Prevents:* a new line concatenated onto torn bytes, burying them mid-file as an unparseable line
 inside the chain; and a "repair" that chooses which evidence is true. `quarantine/` is a
 subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evidence as a segment.

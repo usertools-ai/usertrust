@@ -121,7 +121,12 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 const { createAuditWriter, readDurableEventHash } = await import("../../src/audit/chain.js");
-const { QUARANTINE_EVENT_KIND, quarantineTornTail } = await import("../../src/audit/quarantine.js");
+const {
+	AuditQuarantineInterruptedError,
+	AuditQuarantineRefusedError,
+	QUARANTINE_EVENT_KIND,
+	quarantineTornTail,
+} = await import("../../src/audit/quarantine.js");
 const { verifyVault } = await import("../../src/audit/verify.js");
 const { VAULT_DIR } = await import("../../src/shared/constants.js");
 
@@ -305,15 +310,25 @@ describe("quarantine: every boundary of a repair leaves a state the next run fin
 		expect(verifyVault(join(v, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 3 });
 	});
 
-	it("a hard link made AFTER every path check but before the cut is caught on the descriptor at the cut: refused, both names untouched", async () => {
+	it("a hard link made AFTER the first repair write but before the cut: an INTERRUPTED repair (never 'nothing was changed'), both names uncut; the next run finishes once the link is gone", async () => {
 		const v = await tornVault();
 		const other = join(v, "events-hardlink-raced");
 		const before = readFileSync(logOf(v));
 		state.linkLogAt = { log: logOf(v), other };
-		await expect(quarantineTornTail(v)).rejects.toThrow(/hard links/);
+		const err = await quarantineTornTail(v).catch((e: unknown) => e);
 		expect(existsSync(other), "the race was staged").toBe(true);
+		expect(err).toBeInstanceOf(AuditQuarantineInterruptedError);
+		expect(err).not.toBeInstanceOf(AuditQuarantineRefusedError);
+		const message = (err as Error).message;
+		expect(message).toMatch(/hard link/);
+		expect(message).not.toMatch(/nothing was changed/i);
+		expect(message).toMatch(/the torn bytes were saved as quarantine\/[0-9a-f]{64}-\d+\.torn/);
 		expect(readFileSync(logOf(v)).equals(before)).toBe(true);
 		expect(readFileSync(other).equals(before)).toBe(true);
+		rmSync(other);
+		const r = await quarantineTornTail(v);
+		expect(r.torn).toMatchObject({ length: 16 });
+		expect(verifyVault(join(v, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 3 });
 	});
 
 	it("quarantine/ swapped for a symlink AFTER the analysis is refused when the directory is made: nothing written through it, the log uncut", async () => {
