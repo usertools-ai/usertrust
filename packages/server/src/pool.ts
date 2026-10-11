@@ -8,6 +8,11 @@ import type { ServerConfig, TenantConfig } from "./config.js";
 
 export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
 
+/** The directory a tenant's governor keeps its vault under. */
+export function tenantVaultBase(config: ServerConfig, tenant: TenantConfig): string {
+	return join(config.stateDir, tenant.id);
+}
+
 /**
  * Lazy per-tenant Governor instances. Tenant isolation comes from per-tenant
  * vaultBase directories (separate audit chains + spend ledgers) and per-tenant
@@ -25,7 +30,7 @@ export class GovernorPool {
 		const existing = this.governors.get(tenant.id);
 		if (existing) return existing;
 		const opts: TrustOpts = {
-			vaultBase: join(this.config.stateDir, tenant.id),
+			vaultBase: tenantVaultBase(this.config, tenant),
 			dryRun: this.config.dryRun,
 		};
 		if (tenant.budget !== undefined) opts.budget = tenant.budget;

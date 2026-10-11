@@ -1,0 +1,231 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import type { ServerConfig } from "../src/config.js";
+import { hashKey } from "../src/config.js";
+// probeLedger from the package index: an embedder of createUsertrustServer calls it from there.
+import { probeLedger } from "../src/index.js";
+import { classifyLedgerProbe, resolveLedgerTargets } from "../src/ledger-probe.js";
+
+// Verbatim stderr of the native client panicking under Docker's default seccomp profile.
+const IO_URING_PANIC = [
+	"error(io): io_uring is not available",
+	"error(io): likely cause: the syscall is disabled by sysctl, try 'sysctl -w kernel.io_uring_disabled=0'",
+	"error(tb_client_context): …: failed to initialize IO: PermissionDenied",
+	"thread 166 panic: attempt to unwrap error: PermissionDenied",
+	"",
+].join("\n");
+
+const TARGET = { clusterId: 0, addresses: ["127.0.0.1:3001"] };
+
+describe("classifyLedgerProbe", () => {
+	it("exit 0 is OK", () => {
+		expect(
+			classifyLedgerProbe(
+				{ exitCode: 0, signal: null, stderr: "", timedOut: false },
+				TARGET,
+				5_000,
+			),
+		).toEqual({ ok: true });
+	});
+
+	it("the io_uring panic names io_uring and both fixes", () => {
+		const result = classifyLedgerProbe(
+			{ exitCode: null, signal: "SIGABRT", stderr: IO_URING_PANIC, timedOut: false },
+			TARGET,
+			5_000,
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.message).toBe(
+			"the TigerBeetle client cannot start here: io_uring is unavailable (blocked by the " +
+				"container's seccomp profile or by kernel.io_uring_disabled). Either run where io_uring " +
+				"is allowed (for Docker: --security-opt seccomp=unconfined, or a profile that allows " +
+				"io_uring; on a host: sysctl kernel.io_uring_disabled=0) with TigerBeetle running, or " +
+				'set "dryRun": true in the server config to try it without a ledger.',
+		);
+	});
+
+	it("the io_uring panic is recognised after a non-zero exit too", () => {
+		const result = classifyLedgerProbe(
+			{ exitCode: 134, signal: null, stderr: IO_URING_PANIC, timedOut: false },
+			TARGET,
+			5_000,
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.message).toContain("io_uring is unavailable");
+	});
+
+	it("a timeout names the addresses, the cluster and the timeout", () => {
+		const result = classifyLedgerProbe(
+			{ exitCode: null, signal: "SIGKILL", stderr: "", timedOut: true },
+			{ clusterId: 7, addresses: ["127.0.0.1:3001", "127.0.0.1:3002"] },
+			1_500,
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.message).toBe(
+			"no TigerBeetle answered at 127.0.0.1:3001,127.0.0.1:3002 (cluster 7) within 1500 ms. " +
+				'Start TigerBeetle 0.17.x on that address, or set "dryRun": true in the server config ' +
+				"to try it without a ledger.",
+		);
+	});
+
+	it("another crash quotes the child's stderr and gives both fixes", () => {
+		const result = classifyLedgerProbe(
+			{
+				exitCode: 1,
+				signal: null,
+				stderr: "Error: Cannot find module 'tigerbeetle-node'\n",
+				timedOut: false,
+			},
+			TARGET,
+			5_000,
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.message).toContain("127.0.0.1:3001 (cluster 0)");
+		expect(result.message).toContain("exit code 1");
+		expect(result.message).toContain("Error: Cannot find module 'tigerbeetle-node'");
+		expect(result.message).toContain("Start TigerBeetle 0.17.x on that address");
+		expect(result.message).toContain('"dryRun": true');
+	});
+
+	it("a crash by signal names the signal", () => {
+		const result = classifyLedgerProbe(
+			{ exitCode: null, signal: "SIGSEGV", stderr: "", timedOut: false },
+			TARGET,
+			5_000,
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.message).toContain("signal SIGSEGV");
+	});
+
+	it("quotes at most ~2 KB of stderr, keeping the end", () => {
+		const noise = Array.from({ length: 400 }, (_, i) => `line ${i} of noise`).join("\n");
+		const result = classifyLedgerProbe(
+			{ exitCode: 1, signal: null, stderr: `${noise}\nTHE LAST LINE\n`, timedOut: false },
+			TARGET,
+			5_000,
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.message).toContain("THE LAST LINE");
+		expect(result.message).not.toContain("line 0 of noise");
+		expect(result.message.length).toBeLessThan(2_600);
+	});
+});
+
+function serverConfig(stateDir: string, overrides: Partial<ServerConfig> = {}): ServerConfig {
+	return {
+		host: "127.0.0.1",
+		port: 0,
+		stateDir,
+		enforcement: "enforce",
+		pendingTtlMs: 300_000,
+		dryRun: false,
+		tenants: [{ id: "a", keyHash: hashKey("key-a") }],
+		...overrides,
+	};
+}
+
+async function writeVaultConfig(dir: string, config: Record<string, unknown>): Promise<string> {
+	await mkdir(dir, { recursive: true });
+	const path = join(dir, "usertrust.config.json");
+	await writeFile(path, JSON.stringify(config));
+	return path;
+}
+
+describe("resolveLedgerTargets", () => {
+	it("a tenant without a vault config resolves to the core's default ledger address", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-probe-"));
+		expect(await resolveLedgerTargets(serverConfig(stateDir))).toEqual([
+			{ clusterId: 0, addresses: ["127.0.0.1:3001"] },
+		]);
+	});
+
+	it("reads each tenant's vault config, or its configPath, and dedupes identical ledgers", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-probe-"));
+		await writeVaultConfig(join(stateDir, "a", ".usertrust"), {
+			budget: 100,
+			tigerbeetle: { addresses: ["127.0.0.1:4001"], clusterId: 3 },
+		});
+		await writeVaultConfig(join(stateDir, "b", ".usertrust"), {
+			budget: 100,
+			tigerbeetle: { addresses: ["127.0.0.1:4001"], clusterId: 3 },
+		});
+		const elsewhere = await writeVaultConfig(join(stateDir, "elsewhere"), {
+			// No budget in the file: the tenant's own budget fills it, as createGovernor does.
+			tigerbeetle: { addresses: ["127.0.0.1:4002"] },
+		});
+		const targets = await resolveLedgerTargets(
+			serverConfig(stateDir, {
+				tenants: [
+					{ id: "a", keyHash: hashKey("key-a") },
+					{ id: "b", keyHash: hashKey("key-b") },
+					{ id: "c", keyHash: hashKey("key-c"), budget: 50, configPath: elsewhere },
+				],
+			}),
+		);
+		expect(targets).toEqual([
+			{ clusterId: 3, addresses: ["127.0.0.1:4001"] },
+			{ clusterId: 0, addresses: ["127.0.0.1:4002"] },
+		]);
+	});
+
+	it("an unreadable tenant config fails naming the tenant", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-probe-"));
+		const dir = join(stateDir, "a", ".usertrust");
+		await mkdir(dir, { recursive: true });
+		await writeFile(join(dir, "usertrust.config.json"), "{ not json");
+		await expect(resolveLedgerTargets(serverConfig(stateDir))).rejects.toThrow(/tenant a/);
+	});
+});
+
+/** A localhost port nothing listens on: bound by the OS, then released. */
+async function freePort(): Promise<number> {
+	const server = createServer();
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const address = server.address();
+	await new Promise<void>((resolve) => server.close(() => resolve()));
+	if (address === null || typeof address === "string") throw new Error("no port");
+	return address.port;
+}
+
+describe("probeLedger", () => {
+	const savedNodeOptions = process.env.NODE_OPTIONS;
+	afterEach(() => {
+		if (savedNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+		else process.env.NODE_OPTIONS = savedNodeOptions;
+	});
+
+	it("refuses, naming the address, when no TigerBeetle answers in time", async () => {
+		// The probe's child runs the TypeScript sources too: the preload rides NODE_OPTIONS.
+		const preload = join(import.meta.dirname, "helpers", "source-preload.mjs");
+		process.env.NODE_OPTIONS = `${savedNodeOptions ?? ""} --import "${preload}"`.trim();
+		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-probe-"));
+		const ledgerPort = await freePort();
+		await writeVaultConfig(join(stateDir, "a", ".usertrust"), {
+			budget: 100,
+			tigerbeetle: { addresses: [`127.0.0.1:${ledgerPort}`] },
+		});
+		await expect(
+			probeLedger(serverConfig(stateDir, { ledgerProbeTimeoutMs: 1_000 })),
+		).rejects.toThrow(
+			`no TigerBeetle answered at 127.0.0.1:${ledgerPort} (cluster 0) within 1000 ms`,
+		);
+	}, 30_000);
+
+	it("a dryRun server needs no ledger and does not probe", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-probe-"));
+		// A config the resolver would refuse proves nothing was read, let alone spawned.
+		const dir = join(stateDir, "a", ".usertrust");
+		await mkdir(dir, { recursive: true });
+		await writeFile(join(dir, "usertrust.config.json"), "{ not json");
+		await expect(probeLedger(serverConfig(stateDir, { dryRun: true }))).resolves.toBeUndefined();
+	});
+});

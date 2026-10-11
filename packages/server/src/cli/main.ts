@@ -3,6 +3,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { loadServerConfig } from "../config.js";
+import { probeLedger } from "../ledger-probe.js";
 import { createUsertrustServer } from "../server.js";
 
 function argValue(flag: string): string | undefined {
@@ -15,6 +16,8 @@ async function main(): Promise<void> {
 	const config = await loadServerConfig(configPath);
 	const portOverride = argValue("--port");
 	if (portOverride) config.port = Number.parseInt(portOverride, 10);
+	// Before anything binds: an unusable ledger would otherwise crash or hang the first request.
+	await probeLedger(config);
 	const server = createUsertrustServer({ config });
 	const { port } = await server.listen();
 	process.stderr.write(`usertrust-server listening on ${config.host}:${port}\n`);
