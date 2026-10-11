@@ -103,14 +103,17 @@ The lock's liveness check works on one kernel, and it fails toward "held":
 - **A lock from another PID namespace is never reclaimed automatically.** One
   container cannot probe another container's processes, so a lock written in a
   different PID namespace on the same kernel is treated as held, even when that
-  writer is gone. A container that crashed without releasing its lock and was
-  restarted into a NEW PID namespace therefore finds that lock held, unless a
-  reboot came between them. Remove
+  writer is gone, and whatever its boot id says: systemd-nspawn gives a
+  container a private boot id on the host's kernel, so a differing boot id does
+  not prove a previous boot across namespaces. A container that crashed without
+  releasing its lock and was restarted into a NEW PID namespace therefore finds
+  that lock held, even after a reboot. Remove
   `.usertrust/audit/.audit-writer.lock` by hand once you know that writer is
   gone, or run the writer in a PID namespace that survives its restarts (for
   example the host's).
 - **Off Linux, and without a readable boot id,** a lock left by a crash before a
-  reboot is reclaimed only if its PID is free now. If an unrelated live process
+  reboot is reclaimed only if its PID is free now. (On Linux, a lock from this
+  PID namespace, or one that names none, is reclaimed when its boot id differs.) If an unrelated live process
   has taken that PID, the lock stays held until it is removed by hand.
 
 If you need multiple concurrent workers, give each its own vault. Merging or

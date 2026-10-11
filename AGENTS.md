@@ -1022,22 +1022,26 @@ process's lock. The lock records `bootId` (Linux `/proc/sys/kernel/random/boot_i
 (`/proc/self/ns/pid`) where they can be read. In order:
 1. The same PID in the same namespace (or a lock that names none) is a crashed earlier instance of
    this PID, and is reclaimed.
-2. A lock whose boot id and this boot's are both known and differ EXACTLY is reclaimed.
-3. A lock from another namespace, or one whose namespace cannot be compared, is HELD.
+2. A lock from another namespace, or one whose namespace cannot be compared, is HELD, whatever its
+   boot id.
+3. A lock whose boot id and this boot's are both known and differ EXACTLY is reclaimed.
 4. Otherwise `kill(pid, 0)` decides, as before.
 
 *Prevents:*
 - A previous boot's lock whose PID a live, unrelated process now carries reading as held forever.
 - A sibling container's live writer being reclaimed: containers on one host share the boot id, and
   each often runs its writer as PID 1, so its lock would pass as a same-PID crash.
+- A host and a systemd-nspawn container (or two of them) reclaiming each other's LIVE locks: nspawn
+  gives each container a PRIVATE boot id on the host's kernel. That is why step 2 comes before step
+  3; do not reorder them.
 
 Rules:
 - An unknown boot id on either side is never stale.
 - Never reclaim on a time estimate; an uptime-derived boot time moves with the wall clock.
 - Cache only a SUCCESSFUL identity read.
 
-A crashed container restarted into a new PID namespace therefore finds its old lock held until it is
-removed by hand (LIMITATIONS §5). That is the price of never reclaiming a live sibling's lock. A
+A crashed container restarted into a new PID namespace therefore finds its old lock held, even
+after a reboot, until it is removed by hand (LIMITATIONS §5). That is the price of never reclaiming a live sibling's lock. A
 vault shared between kernels is outside the model.
 
 **The lock's threat model: accidental concurrent writers, not an adversary.** The lock stops two

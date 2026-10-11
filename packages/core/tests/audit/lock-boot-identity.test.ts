@@ -151,10 +151,10 @@ describe("boot-aware staleness: reclaimed on boot grounds ONLY on an exact misma
 		expect(readLock(v).bootId).toBe(THIS_BOOT);
 	});
 
-	it("…even when the old lock names another PID namespace: namespaces end with their boot", async () => {
+	it("…and a lock that names no namespace, as before namespaces were recorded", async () => {
 		const chain = await freshChain();
 		const v = vault();
-		plantLock(v, { pid: process.pid, bootId: OTHER_BOOT, pidNs: OTHER_NS });
+		plantLock(v, { pid: process.ppid, bootId: OTHER_BOOT });
 		expectReclaimed(chain, v);
 	});
 
@@ -252,6 +252,28 @@ describe("PID namespaces: a lock from another namespace is HELD — this process
 		const chain = await freshChain();
 		const v = vault();
 		const bytes = plantLock(v, { pid: DEAD_PID, bootId: THIS_BOOT, pidNs: OTHER_NS });
+		expectHeld(chain, v, bytes);
+	});
+
+	it.each([
+		["this process's own PID", process.pid],
+		["a live PID", process.ppid],
+		["a dead PID", DEAD_PID],
+	] as const)(
+		"P2: a DIFFERENT boot id does not reclaim a lock from another namespace — %s is held (systemd-nspawn gives a container a private boot id on the host's kernel: a live writer beside this one would read as a previous boot's)",
+		async (_name, pid) => {
+			const chain = await freshChain();
+			const v = vault();
+			const bytes = plantLock(v, { pid, bootId: OTHER_BOOT, pidNs: OTHER_NS });
+			expectHeld(chain, v, bytes);
+		},
+	);
+
+	it("…nor from a namespace that cannot be compared", async () => {
+		proc.pidNs = { error: "ENOENT" };
+		const chain = await freshChain();
+		const v = vault();
+		const bytes = plantLock(v, { pid: process.ppid, bootId: OTHER_BOOT, pidNs: OTHER_NS });
 		expectHeld(chain, v, bytes);
 	});
 

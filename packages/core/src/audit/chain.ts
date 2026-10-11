@@ -255,10 +255,14 @@ class AsyncMutex {
 // writer: the acquire fails closed rather than fall back to that window.
 //
 // Liveness is judged on ONE KERNEL. The lock records the writer's PID and, where they can be read,
-// the kernel's boot id and the writer's PID namespace. A lock whose boot id is known and differs
-// from this boot's — both known — was written before a reboot, and its PID names nothing now. A
-// lock from another PID namespace cannot be probed from this one, and is held. A vault shared
-// between kernels (two hosts, two VMs) is outside the model: no PID probe means anything there.
+// the kernel's boot id and the writer's PID namespace. A lock from another PID namespace cannot be
+// probed from this one, and is held — whatever its boot id says, because a boot id is not always
+// the kernel's: systemd-nspawn gives each container a private one on the host's kernel, so a host
+// and a container sharing a vault read each other's LIVE locks as "before this boot". Only a lock
+// from this namespace (or one that names none) whose boot id is known and differs from this
+// boot's — both known — is taken as written before a reboot, its PID naming nothing now. A vault
+// shared between kernels (two hosts, two VMs) is outside the model: no PID probe means anything
+// there.
 
 const LOCK_FILE_NAME = ".audit-writer.lock";
 
@@ -471,9 +475,11 @@ function lockContentFor(writerId: string): string {
  * from a successful read). Throws if a live process (another PID) holds it.
  *
  * In order: the same PID in the same namespace (or a lock that names none) is a crashed earlier
- * instance of this PID. Anything else is another process's lock: reclaimed if it was written
- * before this boot (exact boot ids, both known); HELD if its namespace is another one, or cannot
- * be compared; otherwise judged by `kill(pid, 0)`, as before.
+ * instance of this PID. Anything else is another process's lock: HELD if its namespace is another
+ * one, or cannot be compared — FIRST, whatever its boot id, since a private boot id (a
+ * systemd-nspawn container's) would otherwise make a live writer beside it look like a previous
+ * boot's; then reclaimed if it was written before this boot (exact boot ids, both known);
+ * otherwise judged by `kill(pid, 0)`, as before.
  */
 function tryCleanStaleLock(lockPath: string, lock: LockFileView): void {
 	const { pid } = lock;
@@ -489,21 +495,22 @@ function tryCleanStaleLock(lockPath: string, lock: LockFileView): void {
 			unlinkSync(lockPath);
 			return;
 		}
-		if (writtenBeforeThisBoot(lock)) {
-			// Its PID was recorded before this boot and names no process of this one — whatever
-			// process carries that number now. The boot ids are validated UUIDs: safe to print.
-			console.warn(
-				`[AUDIT] Reclaiming a lock written before this boot (PID ${String(pid)}, boot ${String(lock.bootId)}; this boot ${String(thisBootId())}).`,
-			);
-			unlinkSync(lockPath);
-			return;
-		}
 		if (namespace === "foreign" || namespace === "unknown") {
 			throw new AuditWriterLockHeldError(
 				namespace === "foreign"
 					? `Audit writer lock held by PID ${String(pid)} in another PID namespace (${String(lock.pidNs)}). This process cannot probe that namespace, so the lock is never reclaimed from here; remove the lock file by hand only once that writer is gone. Lock file: ${lockPath}`
 					: `Audit writer lock held by PID ${String(pid)} in a PID namespace this process cannot compare with its own. The lock is never reclaimed from here; remove the lock file by hand only once that writer is gone. Lock file: ${lockPath}`,
 			);
+		}
+		if (writtenBeforeThisBoot(lock)) {
+			// From this namespace (or one unrecorded), and its PID was recorded before this boot: it
+			// names no process of this one, whatever process carries that number now. The boot ids
+			// are validated UUIDs: safe to print.
+			console.warn(
+				`[AUDIT] Reclaiming a lock written before this boot (PID ${String(pid)}, boot ${String(lock.bootId)}; this boot ${String(thisBootId())}).`,
+			);
+			unlinkSync(lockPath);
+			return;
 		}
 		try {
 			process.kill(pid as number, 0);

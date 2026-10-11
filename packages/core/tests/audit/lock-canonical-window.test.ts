@@ -276,6 +276,7 @@ const {
 	releaseAuditWriterForTeardown,
 	withAuditWriterLock,
 } = await import("../../src/audit/chain.js");
+const { createSnapshot } = await import("../../src/snapshot/checkpoint.js");
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -1485,6 +1486,23 @@ describe("the lock appears complete: written to a temp file, then hard-linked in
 		await w.appendEvent({ kind: "k", actor: "a", data: {} }); // re-acquires: same temp name
 		expect(idOf(lockOf(vault))).toBe(mine);
 		expect(tempsIn(vault), "the leftover was replaced and removed").toEqual([]);
+	});
+
+	it("a lock temp file the writer really made (its removal failed, as after a crash) is never captured by a snapshot", async () => {
+		const vault = scratch("trust-audit-temp-snapshot-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		afterLockCreate.fn = (p) => {
+			const temp = readdirSync(auditDirOf(vault)).find((n) => n.endsWith(".tmp"));
+			lockFaults.push({ op: "unlink", code: "EIO", path: phys(join(p, "..", temp ?? "?")) });
+		};
+		const w = track(createAuditWriter(vault, { lockAtCreate: true }));
+		await w.appendEvent({ kind: "k", actor: "a", data: {} });
+		const temps = tempsIn(vault);
+		expect(temps, "control: the writer's temp file is there").toHaveLength(1);
+
+		const files = (await createSnapshot(join(vault, ".usertrust"), "with-temp")).files;
+		expect(files, "control: the log is captured").toContain("audit/events.jsonl");
+		expect(files).not.toContain(`audit/${temps[0]}`);
 	});
 
 	it("leftover temp files of crashed writers are never read as a lock, and a writer that takes the lock removes those older than a minute — a young one (a live create's) is left", () => {
