@@ -17,22 +17,28 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 /**
- * The audit writer's in-process lock registry is keyed by the audit directory's IDENTITY,
- * `(st_dev, st_ino)` from `statSync(dir, { bigint: true })` — never by a path spelling (#195 r3).
- * The lock FILE is stored at its PHYSICAL path (the JS realpath of its directory), and a registry
- * hit is verified in the directory itself (#195 r4).
+ * Whether a lock file is held by a live writer in THIS process is read from the lock file itself:
+ * the writerId it carries must be held in memory, and the file must be the inode that writer's
+ * exclusive create made (#195 r5). Nothing is keyed by a directory — not a path spelling (r2), not
+ * the directory's `(st_dev, st_ino)` (r3/r4, replaced: a directory's identity can be stale by the
+ * time it is used). The lock's path is remembered PHYSICALLY (the JS realpath of its directory)
+ * and refreshed whenever the lock is verified, so release still reaches it after a rename.
  *
  * `node:fs` is mocked at module level, wrapping a few calls and passing everything else through:
  *  - `realpathSync` and `realpathSync.native` COUNT their calls, and `.native` can be made to fail
  *    on every call (musl without /proc), so a test can pin that the lock never needs realpath(3).
  *    The JS realpath can also be made to KEEP the caller's spelling under a prefix — what it does
- *    with letter case on a case-insensitive mount — so the "a spelling is not a key" property is
+ *    with letter case on a case-insensitive mount — so the "a spelling is not a second lock" property is
  *    pinned on case-sensitive CI too, where the real case-variant test is skipped;
- *  - `statSync` can be ARMED to answer ENOENT once (#182.1's window: the directory does not exist
- *    yet at the identity lookup, and another process creates it before the lock file's open), and
- *    can REPORT A CHOSEN `(dev, ino)` for a directory;
- *  - `lstatSync` can report a chosen inode for a lock file, and `fstatSync` a chosen inode for the
- *    next lock files created — together they model a new lock file REUSING an old one's inode.
+ *  - `statSync` can be ARMED to answer ENOENT once, and can REPORT A CHOSEN `(dev, ino)` for a
+ *    directory (with a hit counter). Nothing in the lock reads a directory's identity any more;
+ *    these stay so tests can PIN that — directory inode reuse and the #182.1 window then cannot
+ *    reach the lock, and a reintroduced identity lookup turns them red;
+ *  - `lstatSync` — and `fstatSync` on any fd opened at that path — can report a chosen inode for a
+ *    lock file, and `fstatSync` a chosen inode for the next lock files CREATED (O_EXCL) — together
+ *    they model a new lock file REUSING an old one's inode;
+ *  - `openSync` can run a hook just before the next exclusive create: a seam for "another process
+ *    changes the directory in the window before the lock file's create".
  * Real inode reuse cannot be produced on demand, so it is modelled. Overrides are looked up by the
  * physical path, so every spelling of a directory (or of a lock file's directory) matches.
  *
@@ -45,6 +51,10 @@ const statWindow = { enoentOnce: false };
 const identityOverride = new Map<string, { dev: bigint; ino: bigint; hits: number }>();
 const lockInoOverride = new Map<string, bigint>();
 const nextLockIno: { ino: bigint | undefined } = { ino: undefined };
+/** Runs once, just BEFORE the next exclusive (O_EXCL) create — the lock file's — is opened. */
+const beforeLockCreate: { fn: ((path: string) => void) | undefined } = { fn: undefined };
+/** Runs once, just BEFORE the next non-exclusive open of a lock file (a READ of an existing one). */
+const beforeLockRead: { fn: ((path: string) => void) | undefined } = { fn: undefined };
 const realpathCalls = { native: 0, js: 0, nativeAlwaysFails: false };
 /** Paths under these prefixes keep the caller's spelling through the JS realpath (see below). */
 const realpathKeepsSpelling = new Set<string>();
@@ -106,11 +116,41 @@ vi.mock("node:fs", async (importOriginal) => {
 		const forced = lockInoOverride.get(fsHooks.physical(p));
 		return forced === undefined ? real : { ...real, ino: forced };
 	}) as typeof fs.lstatSync;
+	// Every open fd remembers its physical path, so an fstat answers the same chosen inode a path
+	// lookup does — whichever way the module under test reads a lock file's identity.
+	const fdPaths = new Map<number, { path: string; excl: boolean }>();
+	const openSync = ((p: string, flags?: unknown, mode?: unknown) => {
+		const excl = typeof flags === "number" && (flags & fs.constants.O_EXCL) !== 0;
+		const hookBox = excl
+			? beforeLockCreate
+			: String(p).endsWith(".audit-writer.lock")
+				? beforeLockRead
+				: undefined;
+		const hook = hookBox?.fn;
+		if (hookBox !== undefined && hook !== undefined) {
+			hookBox.fn = undefined;
+			hook(String(p));
+		}
+		const fd = (fs.openSync as (p: string, f?: unknown, m?: unknown) => number)(p, flags, mode);
+		fdPaths.set(fd, { path: fsHooks.physical(String(p)), excl });
+		return fd;
+	}) as typeof fs.openSync;
+	const closeSync = ((fd: number) => {
+		fdPaths.delete(fd);
+		fs.closeSync(fd);
+	}) as typeof fs.closeSync;
 	const fstatSync = ((fd: number, o?: unknown) => {
 		const real = (fs.fstatSync as (fd: number, o?: unknown) => object)(fd, o);
-		return nextLockIno.ino === undefined ? real : { ...real, ino: nextLockIno.ino };
+		const opened = fdPaths.get(fd);
+		const forced = opened === undefined ? undefined : lockInoOverride.get(opened.path);
+		if (forced !== undefined) return { ...real, ino: forced };
+		// `nextLockIno` models the inode a NEW lock file gets: an exclusive create's fd only.
+		if (nextLockIno.ino !== undefined && opened?.excl === true) {
+			return { ...real, ino: nextLockIno.ino };
+		}
+		return real;
 	}) as typeof fs.fstatSync;
-	const wrapped = { realpathSync, statSync, lstatSync, fstatSync };
+	const wrapped = { realpathSync, statSync, lstatSync, fstatSync, openSync, closeSync };
 	return { ...fs, ...wrapped, default: { ...fs, ...wrapped } };
 });
 
@@ -124,6 +164,8 @@ afterEach(() => {
 	identityOverride.clear();
 	lockInoOverride.clear();
 	nextLockIno.ino = undefined;
+	beforeLockCreate.fn = undefined;
+	beforeLockRead.fn = undefined;
 	realpathCalls.native = 0;
 	realpathCalls.js = 0;
 	realpathCalls.nativeAlwaysFails = false;
@@ -172,7 +214,7 @@ const probeDir = mkdtempSync(join(tmpdir(), "trust-audit-case-"));
 const CASE_INSENSITIVE = caseInsensitive(probeDir);
 rmSync(probeDir, { recursive: true, force: true });
 
-describe("#195 r3: one registry key per directory — its identity, never a spelling", () => {
+describe("one lock per directory, whatever the spelling — the lock file says who holds it", () => {
 	it("a SYMLINK spelling of a live writer's vault is refused (AuditWriterLockHeldError) — never a reclaim; the live lock is untouched", () => {
 		const parent = scratch("trust-audit-link-");
 		const vault = join(parent, "vault");
@@ -206,14 +248,14 @@ describe("#195 r3: one registry key per directory — its identity, never a spel
 		},
 	);
 
-	it("a spelling the JS realpath leaves as given (modelled: the caller's case on a case-insensitive mount) is still ONE key — the second writer is refused, never a reclaim", () => {
+	it("a spelling the JS realpath leaves as given (modelled: the caller's case on a case-insensitive mount) still reaches the ONE lock file — the second writer is refused, never a reclaim", () => {
 		const parent = scratch("trust-audit-spelling-");
 		const vault = join(parent, "vault");
 		mkdirSync(vault);
 		const other = join(parent, "other-spelling");
 		symlinkSync(vault, other);
 		// The JS realpath returns `other…` as given, so the PATH differs from the first writer's;
-		// only the identity says it is the same directory.
+		// only the lock file found through it says it is the same directory.
 		realpathKeepsSpelling.add(other);
 		track(createAuditWriter(vault, { lockAtCreate: true }));
 		const before = readFileSync(lockOf(vault), "utf-8");
@@ -270,7 +312,7 @@ describe("#182.1: no lock without the directory, and the window never reclaims a
 		expect(readdirSync(parent), "no directory, no lock file — nothing at all").toEqual([]);
 	});
 
-	it("the identity lookup answering ENOENT in the window (another process just created the dir) throws — no fallback key — and never reclaims a LIVE writer's lock", async () => {
+	it("there is no directory-identity lookup to race: a stat armed to answer ENOENT is never consulted, and a symlink spelling of a LIVE writer's vault is refused, its lock untouched", async () => {
 		const parent = scratch("trust-audit-window-");
 		const vault = join(parent, "vault");
 		mkdirSync(vault);
@@ -285,23 +327,15 @@ describe("#182.1: no lock without the directory, and the window never reclaims a
 		const err = await withAuditWriterLock(logOf(link), () => {
 			ran = true;
 		}).catch((e: unknown) => e);
-		expect(statWindow.enoentOnce, "the window was actually hit").toBe(false);
-		expect((err as { code?: string }).code).toBe("ENOENT");
+		expect(statWindow.enoentOnce, "the acquire never stat'ed a directory").toBe(true);
+		expect(err).toBeInstanceOf(AuditWriterLockHeldError);
 		expect(ran, "the body never runs beside A's live lock").toBe(false);
 		expect(readFileSync(lockOf(vault), "utf-8"), "A's lock is untouched").toBe(before);
 		expect(inodeOf(lockOf(vault))).toBe(ino);
-
-		// Once the directory answers, the same spelling finds A's registration: refused as held.
-		const again = await withAuditWriterLock(logOf(link), () => {
-			ran = true;
-		}).catch((e: unknown) => e);
-		expect(again).toBeInstanceOf(AuditWriterLockHeldError);
-		expect(ran).toBe(false);
-		expect(readFileSync(lockOf(vault), "utf-8")).toBe(before);
 	});
 });
 
-describe("#195 r3: inode reuse is not an alias (key-and-verify)", () => {
+describe("#195 r3→r5: directory inode reuse cannot alias a lock — nothing is keyed by it", () => {
 	it("(a) a writer whose directory was deleted and re-created with the SAME identity does not short-circuit on its old claim — it creates the new directory's lock file", async () => {
 		const vault = scratch("trust-audit-reuse-self-");
 		shareOneIdentity(auditDirOf(vault));
@@ -316,8 +350,8 @@ describe("#195 r3: inode reuse is not an alias (key-and-verify)", () => {
 
 		await w.appendEvent({ kind: "k", actor: "a", data: {} });
 
-		// Control: the append's key WAS the reused identity (the old claim's key).
-		expect(overrideOf(auditDirOf(vault))?.hits).toBeGreaterThan(hitsBefore);
+		// The directory's (reused) identity is never read: there is no key for it to alias.
+		expect(overrideOf(auditDirOf(vault))?.hits).toBe(hitsBefore);
 		expect(existsSync(lockOf(vault)), "the writer holds a real lock on the new directory").toBe(
 			true,
 		);
@@ -338,8 +372,8 @@ describe("#195 r3: inode reuse is not an alias (key-and-verify)", () => {
 		shareOneIdentity(auditDirOf(vaultA), auditDirOf(vaultB));
 		rmSync(vaultA, { recursive: true, force: true });
 		track(createAuditWriter(vaultB, { lockAtCreate: true }));
-		// Control: B's acquire really was keyed by the shared identity.
-		expect(overrideOf(auditDirOf(vaultB))?.hits).toBeGreaterThan(0);
+		// The shared identity is never read: there is no key for it to alias.
+		expect(overrideOf(auditDirOf(vaultB))?.hits).toBe(0);
 		expect(existsSync(lockOf(vaultB)), "B's own lock file").toBe(true);
 		const lockB = readFileSync(lockOf(vaultB), "utf-8");
 
@@ -432,7 +466,7 @@ describe("#195 r3: inode reuse is not an alias (key-and-verify)", () => {
 	});
 });
 
-describe("#195 r4: a claim is verified in the directory itself, at its physical path", () => {
+describe("#195 r4: a lock is verified in the directory itself, at its physical path", () => {
 	it.each(["removed", "retargeted"] as const)(
 		"P1: a live scoped lock taken through a symlink stays live when the symlink is %s — the real path is refused, and release leaves no lock behind",
 		async (mode) => {
@@ -520,5 +554,180 @@ describe("#195 r4: a claim is verified in the directory itself, at its physical 
 		w.release();
 		expect(existsSync(lockOf(vault))).toBe(false);
 		expect(readFileSync(lockOf(unrelated), "utf-8")).toBe(unrelatedLock);
+	});
+});
+
+describe("#195 r5: a lock is held by the writer whose id and lock-file inode it carries — never by what a directory looks like", () => {
+	it("P1: a directory replaced between the lookup and the lock's create — while the first scoped lock is held, a second same-process scoped lock and a writer are refused, and the live lock is untouched", async () => {
+		const parent = scratch("trust-audit-r5-replace-");
+		const vault = join(parent, "vault");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		let fired = false;
+		// Another process replaces the audit directory in the window before the exclusive create:
+		// the old directory moves aside (so its inode is not reused) and a new one takes its name.
+		beforeLockCreate.fn = () => {
+			fired = true;
+			renameSync(auditDirOf(vault), join(parent, "old-audit"));
+			mkdirSync(auditDirOf(vault));
+		};
+
+		let innerRan = false;
+		let inner: unknown = "never ran";
+		let sibling: unknown = "never ran";
+		await withAuditWriterLock(logOf(vault), async () => {
+			expect(fired, "control: the replacement happened inside the acquire").toBe(true);
+			expect(existsSync(lockOf(vault)), "the lock is in the NEW directory").toBe(true);
+			const before = readFileSync(lockOf(vault), "utf-8");
+			const ino = inodeOf(lockOf(vault));
+
+			inner = await withAuditWriterLock(logOf(vault), () => {
+				innerRan = true;
+			}).catch((e: unknown) => e);
+			try {
+				track(createAuditWriter(vault, { lockAtCreate: true }));
+			} catch (e) {
+				sibling = e;
+			}
+			expect(readFileSync(lockOf(vault), "utf-8"), "the live lock's bytes").toBe(before);
+			expect(inodeOf(lockOf(vault)), "the live lock was never unlinked and re-created").toBe(ino);
+		});
+
+		expect(innerRan, "two scoped locks never overlap").toBe(false);
+		expect(inner).toBeInstanceOf(AuditWriterLockHeldError);
+		expect(sibling).toBeInstanceOf(AuditWriterLockHeldError);
+		expect(existsSync(lockOf(vault)), "release removed the lock it held").toBe(false);
+	});
+
+	/** A vault reached through a symlink; `move()` renames the physical vault and repoints the link. */
+	function movableVault(prefix: string) {
+		const parent = scratch(prefix);
+		const v1 = join(parent, "v1");
+		const v2 = join(parent, "v2");
+		mkdirSync(auditDirOf(v1), { recursive: true });
+		const link = join(parent, "link");
+		symlinkSync(v1, link);
+		return {
+			v2,
+			link,
+			move() {
+				renameSync(v1, v2);
+				unlinkSync(link);
+				symlinkSync(v2, link);
+			},
+		};
+	}
+
+	it("P2: the physical vault renamed and the writer's symlink repointed — an append still verifies the lock, and release removes it at its NEW place", async () => {
+		const { v2, link, move } = movableVault("trust-audit-r5-rename-");
+		const w = track(createAuditWriter(link, { lockAtCreate: true }));
+		const mine = JSON.parse(readFileSync(lockOf(link), "utf-8")).writerId;
+		move();
+		await w.appendEvent({ kind: "k", actor: "a", data: {} });
+		expect(JSON.parse(readFileSync(lockOf(v2), "utf-8")).writerId, "control: still w's lock").toBe(
+			mine,
+		);
+
+		w.release();
+		expect(existsSync(lockOf(v2)), "no lock left behind at the vault's new place").toBe(false);
+		const next = track(createAuditWriter(v2, { lockAtCreate: true }));
+		expect(JSON.parse(readFileSync(lockOf(v2), "utf-8")).writerId).not.toBe(mine);
+		next.release();
+	});
+
+	it("P2: …and release still reaches it when the symlink is removed after that append (the place the append VERIFIED is remembered)", async () => {
+		const { v2, link, move } = movableVault("trust-audit-r5-rename-unlinked-");
+		const w = track(createAuditWriter(link, { lockAtCreate: true }));
+		move();
+		await w.appendEvent({ kind: "k", actor: "a", data: {} });
+		unlinkSync(link);
+
+		w.release();
+		expect(existsSync(lockOf(v2)), "no lock left behind").toBe(false);
+	});
+
+	it.each(["scoped lock", "writer"] as const)(
+		"P2: a %s whose vault is renamed and symlink repointed with NO later acquire — release finds the lock through the caller's spelling",
+		async (kind) => {
+			const { v2, link, move } = movableVault("trust-audit-r5-rename-noappend-");
+			if (kind === "scoped lock") {
+				await withAuditWriterLock(logOf(link), () => {
+					move();
+					expect(existsSync(lockOf(v2)), "control: the lock moved with the vault").toBe(true);
+				});
+			} else {
+				const w = track(createAuditWriter(link, { lockAtCreate: true }));
+				move();
+				expect(existsSync(lockOf(v2)), "control: the lock moved with the vault").toBe(true);
+				w.release();
+			}
+			expect(existsSync(lockOf(v2)), "no lock left behind").toBe(false);
+		},
+	);
+
+	it("a same-PID lock file that reports a LIVE writer's lock-file inode but another writer id (the inode reused) is not that writer's — it is reclaimable", () => {
+		const parent = scratch("trust-audit-r5-ino-reuse-");
+		const a = join(parent, "A");
+		const b = join(parent, "B");
+		mkdirSync(auditDirOf(a), { recursive: true });
+		mkdirSync(auditDirOf(b), { recursive: true });
+		track(createAuditWriter(a, { lockAtCreate: true })); // live, in memory
+		const ino = inodeOf(lockOf(a));
+		// A's lock file is removed under its writer, and B gets a lock file left by a crashed earlier
+		// instance of this PID — on the freed inode, modelled.
+		unlinkSync(lockOf(a));
+		writeFileSync(lockOf(b), JSON.stringify({ pid: process.pid, writerId: "crashed-instance" }));
+		lockInoOverride.set(fsHooks.physical(lockOf(b)), ino);
+		expect(inodeOf(lockOf(b)), "control: B's lock reports A's old inode").toBe(ino);
+
+		let refused: unknown;
+		try {
+			track(createAuditWriter(b, { lockAtCreate: true }));
+		} catch (e) {
+			refused = e;
+		}
+		lockInoOverride.clear();
+		expect(refused, "a reused inode is not a live writer's lock").toBeUndefined();
+		expect(JSON.parse(readFileSync(lockOf(b), "utf-8")).writerId).not.toBe("crashed-instance");
+	});
+
+	it("a lock file that vanishes between the create's EEXIST and the read of it is simply gone — the acquire takes the lock", () => {
+		const vault = scratch("trust-audit-r5-vanish-");
+		mkdirSync(auditDirOf(vault), { recursive: true });
+		// A lock left by a dead process; it is removed (by its own cleanup, say) just as we look.
+		writeFileSync(lockOf(vault), JSON.stringify({ pid: 999999999 }));
+		let fired = false;
+		beforeLockRead.fn = (p) => {
+			fired = true;
+			unlinkSync(p);
+		};
+		track(createAuditWriter(vault, { lockAtCreate: true }));
+		expect(fired, "control: the file vanished in that window").toBe(true);
+		expect(JSON.parse(readFileSync(lockOf(vault), "utf-8")).pid).toBe(process.pid);
+	});
+
+	it("a lock its release could NOT reach (the vault renamed, and no spelling leads to it) is left behind — and, once released, is reclaimable by this process", () => {
+		const parent = scratch("trust-audit-r5-unreachable-");
+		const v1 = join(parent, "v1");
+		const v2 = join(parent, "v2");
+		mkdirSync(auditDirOf(v1), { recursive: true });
+		const w = track(createAuditWriter(v1, { lockAtCreate: true }));
+		const mine = JSON.parse(readFileSync(lockOf(v1), "utf-8")).writerId;
+		renameSync(v1, v2);
+		w.release();
+		expect(JSON.parse(readFileSync(lockOf(v2), "utf-8")).writerId, "left behind").toBe(mine);
+
+		track(createAuditWriter(v2, { lockAtCreate: true }));
+		expect(JSON.parse(readFileSync(lockOf(v2), "utf-8")).writerId).not.toBe(mine);
+	});
+
+	it("a writer that is never released keeps its lock: while its id is held in this process, a same-process writer is refused, and release() frees it", () => {
+		const vault = scratch("trust-audit-r5-unreleased-");
+		const w = createAuditWriter(vault, { lockAtCreate: true }); // never released by the test body
+		cleanups.unshift(() => w.release());
+		expect(() => createAuditWriter(vault, { lockAtCreate: true })).toThrow(
+			AuditWriterLockHeldError,
+		);
+		w.release();
+		track(createAuditWriter(vault, { lockAtCreate: true }));
 	});
 });

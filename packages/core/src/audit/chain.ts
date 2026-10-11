@@ -16,12 +16,10 @@ import {
 	constants as fsConstants,
 	fstatSync,
 	fsyncSync,
-	lstatSync,
 	mkdirSync,
 	openSync,
 	readFileSync,
 	realpathSync,
-	statSync,
 	unlinkSync,
 	writeSync,
 } from "node:fs";
@@ -125,342 +123,268 @@ class AsyncMutex {
 const LOCK_FILE_NAME = ".audit-writer.lock";
 
 /**
- * One lock this process holds, recorded so that a later registry hit can be VERIFIED rather than
- * trusted (#195 r3). The registry key is a directory's inode identity, and an inode number is
- * reused once its directory is deleted — so `key` alone cannot say whether this entry still
- * describes the directory now behind that key. `lockIdentity` + `writerId`, checked in the
- * directory itself, can: see {@link lockStillHeld}.
+ * The lock a LIVE writer in this process holds. Both fields are fixed at that lock's exclusive
+ * create and kept in memory; neither is ever re-derived from what a directory looks like later.
  */
-interface LockEntry {
+interface HeldLock {
+	/** `dev:ino` of the lock FILE, read through the fd of its exclusive create. */
+	lockIdentity: string;
 	/**
-	 * The lock file's PHYSICAL path: the realpath of its directory at acquisition (#195 r4). Never
-	 * the caller's spelling — a symlink alias can be removed or retargeted while the lock is held,
-	 * and release must still reach the lock it created.
+	 * Where the lock file was last SEEN: its physical path (the realpath of its directory) at the
+	 * create, refreshed by every acquire that verifies it. Never the caller's spelling — a symlink
+	 * alias can be removed or retargeted while the lock is held. Refreshed because the directory
+	 * can also be RENAMED while held, the lock file moving with it; see {@link releaseLock}.
 	 */
 	path: string;
-	writerId: string;
-	/** The registry key ({@link dirIdentity} of the audit directory) this entry is stored under. */
-	key: string;
-	/** `dev:ino` of the lock FILE, read from the fd of its exclusive create. */
-	lockIdentity: string;
 }
 
 /**
- * Dirs currently locked by a LIVE writer in THIS process → dirIdentity → that writer's entry.
+ * writerId → the lock that writer holds, for every LIVE writer in this process (#195 r5).
  *
- * A same-PID lock file is only safe to reclaim when NO live writer in this
- * process owns the dir (i.e. the lock is from a crashed prior instance or a
- * recycled PID). This registry is what distinguishes a crashed writer from a
- * live sibling — reclaiming a live sibling's lock would fork the chain, which
- * is exactly the vulnerability the advisory lock exists to prevent.
+ * This is the ONLY thing that can make a lock file "a live writer's in this process": the file
+ * carries a writerId, and it is live iff that writerId is held here AND the file is the very inode
+ * that writer's exclusive create made. A same-PID lock file that is not — a crashed earlier
+ * instance of this PID, a recycled PID, a copy — is reclaimable; one that is, is refused
+ * (AUD-471: reclaiming a live sibling's lock forks the chain, each writer caching its own tail).
  *
- * It holds the whole entry, not just the writerId, so a sibling's claim can be checked against
- * its lock file before it refuses anyone: an entry whose lock file is gone (its directory was
- * deleted, and a new directory now has the same inode) is stale, not a live sibling.
+ * Deliberately NOT keyed by the directory. r3/r4 keyed it by the directory's `(dev, ino)` and then
+ * had to re-verify every hit, because a directory's identity can be stale by the time it is used:
+ * a directory replaced between its lookup and the lock's create registered the new lock under the
+ * old directory's key, so a second same-process writer missed it and reclaimed the LIVE lock
+ * (#195 r5 P1). The lock file itself is the thing held, and it says who holds it.
+ *
+ * A writer's entry is replaced when it creates a new lock, and removed only by its release. A writer
+ * dropped without `release()` therefore keeps its lock for the life of the process — this process
+ * cannot prove the writer is gone (a reference to it may still append), so its lock is not
+ * reclaimable here; another process may reclaim it once this PID is dead.
  */
-const inProcessLockOwners = new Map<string, LockEntry>();
+const heldLocks = new Map<string, HeldLock>();
 
 function hasFsCode(err: unknown, code: string): boolean {
 	return err instanceof Error && (err as { code?: string }).code === code;
 }
 
+/** One read of an existing lock file: its identity and the claim it carries, from ONE fd. */
+interface LockFileView {
+	identity: string;
+	/** `undefined` when the content is not a JSON object (a corrupt file). */
+	pid: unknown;
+	writerId: unknown;
+}
+
 /**
- * Check if a lock file is stale (held by a dead process).
- * Returns true if stale and cleaned up, false if held by a live process.
- * Throws if the lock is actively held.
+ * Read the lock file at `lockPath` — identity and content through the SAME fd, so they are one
+ * file's even if the path is swapped meanwhile. `undefined` if it does not exist (it can vanish
+ * between a create's EEXIST and this read). Any other failure throws: "could not look" must never
+ * read as "nobody holds it", or the caller would reclaim a live lock.
  */
-function tryCleanStaleLock(candidateLockPath: string, key: string): boolean {
+function readLockFile(lockPath: string): LockFileView | undefined {
+	let fd: number;
 	try {
-		const content = readFileSync(candidateLockPath, "utf-8");
-		const lockData = JSON.parse(content) as { pid: number };
-		if (lockData.pid === process.pid && !inProcessLockOwners.has(key)) {
-			// Same PID but no live writer registered for this dir → the lock is
-			// from a crashed prior instance (the registry is cleared on release,
-			// and a stale entry is dropped before we get here) or a recycled PID.
-			// A live sibling is caught earlier by the verified registry guard in
-			// acquireProcessLock, which throws before we ever get here.
+		fd = openSync(lockPath, fsConstants.O_RDONLY);
+	} catch (err) {
+		if (hasFsCode(err, "ENOENT")) return undefined;
+		throw err;
+	}
+	try {
+		const st = fstatSync(fd, { bigint: true });
+		let claim: { pid?: unknown; writerId?: unknown } | undefined;
+		try {
+			const parsed: unknown = JSON.parse(readFileSync(fd, "utf-8"));
+			if (parsed !== null && typeof parsed === "object") claim = parsed;
+		} catch {
+			/* corrupt: no claim */
+		}
+		return { identity: `${st.dev}:${st.ino}`, pid: claim?.pid, writerId: claim?.writerId };
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * The live writer in this process that holds `file`, if any: the writerId it carries is held here,
+ * and it is the inode that writer's create made. The writerId alone is not enough — a copy of the
+ * file carries it too; the inode alone is not enough — a freed inode is reused by the next file.
+ * No pid check: a file carrying a live writerId AND its create-time inode is that writer's file.
+ */
+function liveHolderOf(file: LockFileView): string | undefined {
+	if (typeof file.writerId !== "string") return undefined;
+	return heldLocks.get(file.writerId)?.lockIdentity === file.identity ? file.writerId : undefined;
+}
+
+/**
+ * Remove a lock file that no live writer in this process holds (the caller has established that).
+ * Throws if a live process (another PID) holds it.
+ */
+function tryCleanStaleLock(lockPath: string, pid: unknown): void {
+	try {
+		if (pid === process.pid) {
+			// Same PID, and no live writer in this process holds the file (see liveHolderOf): a
+			// crashed earlier instance of this PID — a container's PID 1 is the usual one — or a
+			// copy of a lock. Nothing in this process can be appending under it.
 			console.warn(
 				`[AUDIT] Reclaiming stale same-PID lock (PID ${process.pid}). Previous process exited without releasing the lock.`,
 			);
-			unlinkSync(candidateLockPath);
-			return true;
+			unlinkSync(lockPath);
+			return;
 		}
 		try {
-			process.kill(lockData.pid, 0);
+			process.kill(pid as number, 0);
 			// Process is alive — lock is held
 			throw new AuditWriterLockHeldError(
-				`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
+				`Audit writer lock held by PID ${pid}. Only one process may write to the audit log. Lock file: ${lockPath}`,
 			);
 		} catch (killErr: unknown) {
-			if (killErr instanceof Error && "code" in killErr) {
-				const code = (killErr as { code?: string }).code;
-				if (code === "ESRCH") {
-					// Process is dead — stale lock
-					unlinkSync(candidateLockPath);
-					return true;
-				}
-				if (code === "EPERM") {
-					throw new AuditWriterLockHeldError(
-						`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
-					);
-				}
+			if (hasFsCode(killErr, "ESRCH")) {
+				// Process is dead — stale lock
+				unlinkSync(lockPath);
+				return;
+			}
+			if (hasFsCode(killErr, "EPERM")) {
+				throw new AuditWriterLockHeldError(
+					`Audit writer lock held by PID ${pid}. Only one process may write to the audit log. Lock file: ${lockPath}`,
+				);
 			}
 			throw killErr;
 		}
-	} catch (parseErr) {
-		if (parseErr instanceof AuditWriterLockHeldError) {
-			throw parseErr;
+	} catch (err) {
+		if (err instanceof AuditWriterLockHeldError) {
+			throw err;
 		}
-		// Corrupt lock file — remove it
+		// Corrupt lock file (no usable pid), or already gone — remove it
 		try {
-			unlinkSync(candidateLockPath);
+			unlinkSync(lockPath);
 		} catch {
 			/* best effort */
 		}
-		return true;
 	}
 }
 
 /**
- * The in-process registry KEY for a vault's audit directory: its IDENTITY, `(st_dev, st_ino)`,
- * never a spelling (#195 r3). Every spelling of one directory — a relative path, a symlink,
- * macOS's /tmp → /private/tmp, a case variant on a case-insensitive volume — must be ONE key, or
- * a second writer in this process misses the first writer's entry, meets EEXIST, and "reclaims"
- * the LIVE same-PID lock as stale: two live writers, a silently forked chain (AUD-471's class).
- * A path spelling cannot give that guarantee everywhere — the JS realpath keeps the caller's
- * case, and realpath(3) fails on musl without /proc — but every spelling stats to the same inode
- * pair. bigint stat: an ino or dev past 2^53 cannot round into a collision. (The JS realpath IS
- * the lock file's stored PATH — see acquireProcessLock: as a path, any case reaches the directory;
- * only as a KEY did keeping the caller's case split one directory in two.)
- *
- * An absent directory throws ENOENT HERE, before any lock is created, exactly as the lock file's
- * open would (#182.1). There is deliberately no fallback key: a key invented for a directory that
- * another process creates in the window between this call and the open could differ from a live
- * writer's key, miss its registration, and "reclaim" its lock.
- *
- * The key is IN-PROCESS ONLY, which is why inode numbers that are unstable across remounts or
- * reported differently on network and overlay filesystems do not weaken anything: exclusion
- * BETWEEN processes is the lock file's O_EXCL create at a PATH, which never consults this key.
- * All the key must do is name one live directory the same way for every spelling, inside one
- * process. Once that directory is deleted its inode can be reused by a new directory, so a
- * registry hit is never trusted on the key alone — see {@link lockStillHeld}.
- */
-function dirIdentity(dir: string): string {
-	const st = statSync(dir, { bigint: true });
-	return `${st.dev}:${st.ino}`;
-}
-
-/**
- * Is `entry`'s lock still held — checked in `dir`, the directory the lock must be in (key-and-
- * verify)? A registry entry is a claim about a directory identity, and identities are recycled:
- * delete a vault directory and a new one can get the same `(dev, ino)`. Trusted on the key alone,
- * `locksByDir`'s hit would let a writer append to the new directory while it holds NO lock file
- * there — beside another process that took the lock legitimately: a cross-process fork. So the
- * claim is LIVE only if both hold:
- *  1. the lock file in `dir` is the inode this entry's exclusive create got (`lockIdentity`);
- *  2. it still names this pid and this entry's writerId — which closes the double reuse (the
- *     directory's inode AND then the lock file's inode recycled) that (1) alone cannot see.
- * `dir` is the directory ITSELF — the physical candidate at acquire, `dirname(entry.path)` at
- * release — never a caller's alias, which can be removed or retargeted while the lock is held.
- *
- * Absent (ENOENT/ENOTDIR) or not this entry's → false: the claim is stale. Any OTHER failure to
- * look throws — "could not look" must never read as "it is gone", or the caller would reclaim a
- * live sibling's lock.
- */
-function lockStillHeld(entry: LockEntry, dir: string): boolean {
-	const lockPath = join(dir, LOCK_FILE_NAME);
-	let holder: unknown;
-	try {
-		// Checking IN `dir` is what closes a re-created directory: at acquire `dir`'s identity IS the
-		// entry's key (computed a line before the lookup), so its lock file is the only one that
-		// counts. A separate `dirIdentity(dir) === entry.key` check was dropped as unreachable: at
-		// release it could only skip a file that the same release unlinks through another entry.
-		const st = lstatSync(lockPath, { bigint: true });
-		if (`${st.dev}:${st.ino}` !== entry.lockIdentity) return false;
-		holder = JSON.parse(readFileSync(lockPath, "utf-8"));
-	} catch (err) {
-		if (hasFsCode(err, "ENOENT") || hasFsCode(err, "ENOTDIR")) return false;
-		// Unparseable: not the content this entry wrote and fsync'd before registering.
-		if (err instanceof SyntaxError) return false;
-		throw err;
-	}
-	const claim = holder as { pid?: unknown; writerId?: unknown } | null;
-	return claim?.pid === process.pid && claim.writerId === entry.writerId;
-}
-
-/**
- * The lock file's exclusive create; returns the new file's `dev:ino`.
+ * The lock file's exclusive create. On success the lock is this writer's: recorded in
+ * {@link heldLocks} and `true` returned. `false` means the file exists (EEXIST).
  *
  * AUD-458: O_WRONLY | O_CREAT | O_EXCL atomically instead of existsSync + openSync('wx'). This
  * eliminates the TOCTOU race where two processes both detect a stale lock, both unlink, and both
  * try to create — one gets EEXIST. This create, at a PATH, is the ONLY cross-process exclusion.
  *
  * The identity is read through the fd, not the path, so it is the file THIS create made, never
- * one swapped in after it.
+ * one swapped in after it. The fd is then closed (AUD-459): the identity is kept in memory, so
+ * nothing needs the fd held open.
  */
-function createLockFile(lockPath: string, lockContent: string): string {
-	const fd = openSync(
-		lockPath,
-		fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
-		0o600,
-	);
+function createLock(lockPath: string, lockContent: string, writerId: string): boolean {
+	let fd: number;
+	try {
+		fd = openSync(lockPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+	} catch (err) {
+		if (hasFsCode(err, "EEXIST")) return false;
+		throw err;
+	}
 	try {
 		writeSync(fd, lockContent);
 		fsyncSync(fd);
 		const st = fstatSync(fd, { bigint: true });
-		return `${st.dev}:${st.ino}`;
+		heldLocks.set(writerId, { lockIdentity: `${st.dev}:${st.ino}`, path: lockPath });
+		return true;
 	} finally {
 		// AUD-459: Close fd immediately — lock semantics rely on file existence, not open fd
 		closeSync(fd);
 	}
 }
 
-function registerLock(
-	locksByDir: Map<string, LockEntry>,
-	key: string,
-	lockPath: string,
-	writerId: string,
-	lockIdentity: string,
-): void {
-	// A writer can still hold an entry under an OLD key (its directory was re-created since). That
-	// entry is never revived, so it is not retired here: a hit is checked in the requested
-	// directory, which must then hold a lock file this entry created — and any lock this writer
-	// creates in a directory is registered under that directory's key, replacing the old entry.
-	// Release checks it the same way, so it unlinks nothing that is not its own.
-	const entry: LockEntry = { path: lockPath, writerId, key, lockIdentity };
-	locksByDir.set(key, entry);
-	inProcessLockOwners.set(key, entry);
-}
-
 /**
  * Take (or confirm) the vault's advisory lock. Returns `true` when a lock file was CREATED by this
  * call, `false` when the writer's existing lock was verified still held. A writer whose earlier
- * lock turned out stale gets `true` here: its lock was lost for a while, someone else may have
- * appended in that time, and any cached chain tail it holds must not be trusted.
+ * lock turned out to be gone gets `true` here: its lock was lost for a while, someone else may
+ * have appended in that time, and any cached chain tail it holds must not be trusted.
+ *
+ * Every decision is made from the lock FILE in the requested directory — whose it is, read from
+ * the file — never from a directory's identity or a remembered path (#195 r5).
  */
-function acquireProcessLock(
-	logPath: string,
-	locksByDir: Map<string, LockEntry>,
-	writerId: string,
-): boolean {
-	// The KEY is the directory's identity; the PATH is the directory's physical spelling (#195 r4).
-	// The JS realpath (lstat + readlink, no /proc — never `.native`, which needs /proc on musl):
-	// stored as `entry.path`, it still reaches this lock after a symlink alias the caller used is
-	// removed or retargeted, so release removes it and later checks find it. Both calls throw
-	// ENOENT for an absent directory before anything is created (#182.1); the identity is read
-	// from the physical spelling, so key and path name one directory.
+function acquireProcessLock(logPath: string, writerId: string): boolean {
+	// The physical spelling (the JS realpath: lstat + readlink, no /proc — never `.native`, which
+	// needs /proc on musl). An absent directory throws ENOENT here, before anything is created
+	// (#182.1).
 	const dir = realpathSync(dirname(logPath));
-	const key = dirIdentity(dir);
-
-	// Every registry hit below is checked in `dir` — the requested directory itself, whose identity
-	// IS `key` — never through a path the claim remembers.
-	const mine = locksByDir.get(key);
-	if (mine !== undefined) {
-		if (lockStillHeld(mine, dir)) return false;
-		// Stale: the lock file this writer created is gone or replaced (its directory was deleted
-		// and this key now names a new one, or the file was removed). Drop the claim and acquire
-		// afresh — never keep appending on a lock that no longer exists.
-		locksByDir.delete(key);
-		if (inProcessLockOwners.get(key)?.writerId === mine.writerId) {
-			inProcessLockOwners.delete(key);
-		}
-	}
-
-	// AUD-471: A live writer already holds this dir in THIS process → refuse.
-	// The advisory lock guarantees exactly one writer per vault per process;
-	// reclaiming a live sibling's lock (same-PID) would fork the chain because
-	// each writer keeps an independent tail cache. "Live" is verified, not assumed:
-	// an owner whose lock file is gone is a stale identity (see lockStillHeld).
-	const owner = inProcessLockOwners.get(key);
-	if (owner !== undefined) {
-		if (lockStillHeld(owner, dir)) {
-			throw new AuditWriterLockHeldError(
-				`Audit writer lock held by another writer in this process (dir ${dir}). Only one writer per vault per process.`,
-			);
-		}
-		// The owner's own `locksByDir` still holds the claim; it fails the same check on that
-		// writer's next acquire and re-acquires (or is refused) then.
-		inProcessLockOwners.delete(key);
-	}
-
-	const candidateLockPath = join(dir, LOCK_FILE_NAME);
+	const lockPath = join(dir, LOCK_FILE_NAME);
 	const lockContent = JSON.stringify({
 		pid: process.pid,
 		writerId,
 		startedAt: new Date().toISOString(),
 	});
 
-	// First attempt: atomic exclusive create
-	try {
-		registerLock(
-			locksByDir,
-			key,
-			candidateLockPath,
-			writerId,
-			createLockFile(candidateLockPath, lockContent),
+	if (createLock(lockPath, lockContent, writerId)) return true;
+
+	// The lock file exists. Whose it is, the file says.
+	const file = readLockFile(lockPath);
+	const holder = file === undefined ? undefined : liveHolderOf(file);
+	if (holder === writerId) {
+		// Ours. The directory may have been renamed since this writer last saw the lock (and the
+		// caller's symlink repointed): remember where it is NOW, so release reaches it.
+		(heldLocks.get(writerId) as HeldLock).path = lockPath;
+		return false;
+	}
+	if (holder !== undefined) {
+		// AUD-471: a LIVE writer in this process holds this vault → refuse.
+		throw new AuditWriterLockHeldError(
+			`Audit writer lock held by another writer in this process (dir ${dir}). Only one writer per vault per process.`,
 		);
-		return true;
-	} catch (err: unknown) {
-		if (!hasFsCode(err, "EEXIST")) {
-			throw err;
-		}
-		// File exists — check if stale
 	}
 
-	// Lock file exists — check if it's stale and clean up if so
-	tryCleanStaleLock(candidateLockPath, key);
+	// No live writer in this process holds it: stale, or another process's.
+	tryCleanStaleLock(lockPath, file?.pid);
 
 	// Second attempt after stale lock cleanup. If another process raced us and
 	// already re-created the lock, EEXIST here means they won — report as held.
-	try {
-		registerLock(
-			locksByDir,
-			key,
-			candidateLockPath,
-			writerId,
-			createLockFile(candidateLockPath, lockContent),
-		);
-		return true;
-	} catch (retryErr: unknown) {
-		if (hasFsCode(retryErr, "EEXIST")) {
-			throw new AuditWriterLockHeldError(
-				`Audit writer lock acquired by another process during stale lock cleanup. Lock file: ${candidateLockPath}`,
-			);
-		}
-		throw retryErr;
-	}
+	if (createLock(lockPath, lockContent, writerId)) return true;
+	throw new AuditWriterLockHeldError(
+		`Audit writer lock acquired by another process during stale lock cleanup. Lock file: ${lockPath}`,
+	);
 }
 
-// AUD-459: fd is closed immediately after writing PID content.
-// releaseLocks only needs to unlink the file — no fd to close.
-function releaseLocks(locksByDir: Map<string, LockEntry>): void {
-	// By the STORED key and physical path only — never the caller's spelling, which may name
-	// another directory by now. The directory may already be deleted: it is never stat'ed here,
-	// only its lock file is looked at.
-	for (const [key, lock] of locksByDir) {
-		// Unlink only a lock file that is still THIS entry's. Once the entry is stale, the file at
-		// its path (if any) belongs to whoever took the lock since — unlinking it would free a LIVE
-		// writer's lock for a third writer. If the file cannot be checked, leave it: a left-behind lock naming this PID or a
-		// dead one is reclaimable; an unlinked live one is a fork.
-		let ours = false;
+/**
+ * Release `writerId`'s lock: unlink the lock file only if it is still THIS writer's (its writerId
+ * and its create-time inode). Once it is not, the file at that path belongs to whoever took the
+ * lock since — unlinking it would free a LIVE writer's lock for a third writer. If the file cannot
+ * be checked, leave it: a left-behind lock naming this PID or a dead one is reclaimable; an
+ * unlinked live one is a fork.
+ *
+ * Looked for where it was last seen, then where the caller's spelling leads NOW: a vault renamed
+ * while its lock was held (its symlink repointed to the new name) takes the lock file with it,
+ * and a writer with no acquire since — a scoped lock above all — never saw it move. Neither place
+ * is trusted: the file found must be this writer's.
+ */
+function releaseLock(writerId: string, logPath: string): void {
+	const held = heldLocks.get(writerId);
+	if (held === undefined) return;
+	try {
+		const candidates = [held.path];
 		try {
-			ours = lockStillHeld(lock, dirname(lock.path));
+			candidates.push(join(realpathSync(dirname(logPath)), LOCK_FILE_NAME));
 		} catch {
-			/* cannot tell — leave the file */
+			/* the caller's spelling no longer leads anywhere */
 		}
-		if (ours) {
+		for (const candidate of candidates) {
+			let ours = false;
 			try {
-				unlinkSync(lock.path);
+				const file = readLockFile(candidate);
+				ours = file !== undefined && liveHolderOf(file) === writerId;
 			} catch {
-				/* already removed */
+				/* cannot tell — leave the file */
+			}
+			if (ours) {
+				try {
+					unlinkSync(candidate);
+				} catch {
+					/* already removed */
+				}
+				return;
 			}
 		}
+	} finally {
 		// Clear the live-writer registration so a subsequent same-process writer
-		// (or a snapshot restore via withAuditWriterLock) can acquire the dir.
-		if (inProcessLockOwners.get(key)?.writerId === lock.writerId) {
-			inProcessLockOwners.delete(key);
-		}
-		locksByDir.delete(key);
+		// (or a snapshot restore via withAuditWriterLock) can acquire the vault.
+		heldLocks.delete(writerId);
 	}
 }
 
@@ -476,13 +400,12 @@ export async function withAuditWriterLock<T>(
 	logPath: string,
 	fn: () => Promise<T> | T,
 ): Promise<T> {
-	const locksByDir = new Map<string, LockEntry>();
 	const writerId = randomUUID();
-	acquireProcessLock(logPath, locksByDir, writerId);
+	acquireProcessLock(logPath, writerId);
 	try {
 		return await fn();
 	} finally {
-		releaseLocks(locksByDir);
+		releaseLock(writerId, logPath);
 	}
 }
 
@@ -618,12 +541,11 @@ export function createAuditWriter(
 	const writerId = randomUUID();
 	const mutex = new AsyncMutex();
 	const lastEventCache = new Map<string, CachedTail>();
-	const locksByDir = new Map<string, LockEntry>();
 	let degraded = false;
 	let writeFailures = 0;
 	// Eager: a second writer fails HERE. The append's own acquire then only verifies this
-	// writer's lock (it is already in `locksByDir`) and creates nothing.
-	if (options.lockAtCreate === true) acquireProcessLock(logPath, locksByDir, writerId);
+	// writer's lock (the file carries this writer's id and inode) and creates nothing.
+	if (options.lockAtCreate === true) acquireProcessLock(logPath, writerId);
 
 	async function appendEvent(input: AppendEventInput): Promise<AuditEvent> {
 		const release = await mutex.acquire();
@@ -635,7 +557,7 @@ export function createAuditWriter(
 			// A lock created by THIS call means this writer did not hold it a moment ago (first
 			// append, or its earlier lock was found stale), and another writer may have appended
 			// meanwhile. Its cached tail is then not the chain's tail: chaining from it forks.
-			if (acquireProcessLock(logPath, locksByDir, writerId)) lastEventCache.clear();
+			if (acquireProcessLock(logPath, writerId)) lastEventCache.clear();
 
 			const last = getLastEvent(logPath, lastEventCache);
 			const previousHash = last?.hash ?? GENESIS_HASH;
@@ -737,7 +659,7 @@ export function createAuditWriter(
 
 	function releaseWriter(): void {
 		lastEventCache.clear();
-		releaseLocks(locksByDir);
+		releaseLock(writerId, logPath);
 		degraded = false;
 		writeFailures = 0;
 	}

@@ -641,7 +641,7 @@ describe("Audit Chain Writer — lockAtCreate (the lock taken in the factory)", 
 	});
 });
 
-describe("Audit Chain Writer — one vault, many spellings (the lock is keyed on the REAL path)", () => {
+describe("Audit Chain Writer — one vault, many spellings (one lock file, whatever the spelling)", () => {
 	let tempDir: string;
 	const writers: Array<ReturnType<typeof createAuditWriter>> = [];
 	const lockPath = () => join(tempDir, ".usertrust", "audit", ".audit-writer.lock");
