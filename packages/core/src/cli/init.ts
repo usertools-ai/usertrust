@@ -15,6 +15,7 @@ import * as clack from "@clack/prompts";
 import type { ModelRates } from "../ledger/pricing.js";
 import { modelsForProvider, PRICING_TABLE, PRICING_TABLE_VERSION } from "../ledger/pricing.js";
 import { DEFAULT_BUDGET, VAULT_DIR } from "../shared/constants.js";
+import { scrubForTerminal } from "./target.js";
 import { detectProvider, maskKey, validateKey } from "./validate-key.js";
 
 export interface CliOptions {
@@ -147,7 +148,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				}),
 			);
 		} else {
-			console.log(`Vault created at ${vaultPath}`);
+			console.log(`Vault created at ${scrubForTerminal(vaultPath)}`);
 			console.log(
 				`stdin is not a terminal, so nothing was asked: budget ${DEFAULT_BUDGET} usertokens, recommended rates, no API keys.`,
 			);

@@ -250,6 +250,20 @@ describe("probeLedger", () => {
 		).rejects.toThrow("no TigerBeetle answered at 127.0.0.1:4100 (cluster 0) within 1000 ms");
 	}, 30_000);
 
+	it("throws the raw message: sanitizing is the printer's job", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-probe-"));
+		const address = "127.0.0.1:4100\x1b[2J\u009b31m";
+		await writeVaultConfig(join(stateDir, "a", ".usertrust"), {
+			budget: 100,
+			tigerbeetle: { addresses: [address] },
+		});
+		await expect(
+			probeLedger(serverConfig(stateDir, { ledgerProbeTimeoutMs: 1_000 }), {
+				spawnChild: fakeChild("sleep").spawnChild,
+			}),
+		).rejects.toThrow(`no TigerBeetle answered at ${address} (cluster 0)`);
+	}, 30_000);
+
 	it("probes one ledger at a time, and still reports every refusal", async () => {
 		const config = await threeLedgers();
 		const ok = fakeChild("ok:150");

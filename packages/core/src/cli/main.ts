@@ -94,14 +94,16 @@ switch (command) {
 			const interactive = process.stdin.isTTY === true;
 			await run(undefined, { json: jsonFlag, skipVerify, reconfigure, interactive });
 		} catch (err) {
-			console.error(`usertrust init failed: ${err instanceof Error ? err.message : String(err)}`);
+			// The message can name the vault path, and a directory's name can carry escapes.
+			const message = err instanceof Error ? err.message : String(err);
+			console.error(`usertrust init failed: ${scrubForTerminal(message)}`);
 			process.exitCode = 1;
 			break;
 		}
 		// However init ended (a cancelled prompt, say), no vault means it failed.
 		const vaultPath = join(process.cwd(), VAULT_DIR);
 		if (!existsSync(vaultPath)) {
-			console.error(`usertrust init: no vault was created at ${vaultPath}`);
+			console.error(`usertrust init: no vault was created at ${scrubForTerminal(vaultPath)}`);
 			process.exitCode = 1;
 		}
 		break;

@@ -48,6 +48,8 @@ async function writeServerConfig(opts: {
 	dryRun: boolean;
 	port: number;
 	ledgerPort: number;
+	/** The tenant's ledger address as written, when not `127.0.0.1:<ledgerPort>`. */
+	address?: string;
 }): Promise<string> {
 	const dir = await mkdtemp(join(tmpdir(), "utsrv-cli-"));
 	const stateDir = join(dir, "state");
@@ -57,7 +59,10 @@ async function writeServerConfig(opts: {
 		join(vault, "usertrust.config.json"),
 		JSON.stringify({
 			budget: 50_000,
-			tigerbeetle: { addresses: [`127.0.0.1:${opts.ledgerPort}`], clusterId: 0 },
+			tigerbeetle: {
+				addresses: [opts.address ?? `127.0.0.1:${opts.ledgerPort}`],
+				clusterId: 0,
+			},
 		}),
 	);
 	const path = join(dir, "usertrust-server.config.json");
@@ -133,6 +138,22 @@ describe("usertrust-server CLI: ledger probe at start", () => {
 		expect(stderr()).toContain("dryRun");
 		expect(stderr()).not.toContain("listening on");
 		expect(everListened).toBe(false);
+	}, 40_000);
+
+	it("prints its refusal with escape sequences and control characters removed", async () => {
+		const port = await freePort();
+		const ledgerPort = await freePort();
+		// A clear-screen sequence and an 8-bit CSI introducer, inside a configured value.
+		const address = `127.0.0.1:${ledgerPort}\x1b[2J\u009b31mX`;
+		const configPath = await writeServerConfig({ dryRun: false, port, ledgerPort, address });
+		const { proc, stderr } = startCli(configPath);
+		const code = await new Promise<number | null>((resolve) => proc.once("exit", resolve));
+
+		expect(code).toBe(1);
+		expect(stderr()).toContain("usertrust-server failed to start:");
+		expect(stderr()).not.toContain("\x1b");
+		expect(stderr()).not.toContain("\u009b");
+		expect(stderr()).not.toContain("[2J");
 	}, 40_000);
 
 	it("a dryRun server does not probe: it starts and answers /v1/health", async () => {

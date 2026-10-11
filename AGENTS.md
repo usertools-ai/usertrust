@@ -1232,7 +1232,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **seventeen** sanitizers, in two variants: **eleven** neutralise C1 and **six** do not. Do
+There are **eighteen** sanitizers, in two variants: **twelve** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1336,6 +1336,14 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   receipt later prints it at an auditor. It STRIPS C0, DEL and C1 rather than substituting `?`,
   because a stored reason is data, not a render, and then clips at 200 code points. It is
   exported so usertrust-server's `released` event carries exactly the text the chain recorded.
+- The stronger variant in usertrust-server's CLI: `scrubForStderr` in `server/src/cli/scrub.ts`,
+  applied where `cli/main.ts` prints `usertrust-server failed to start: …` (and the configured
+  host in its `listening on` line). That message carries configured values (a ledger address, a
+  config path) and the ledger probe child's quoted stderr. It removes whole escape sequences,
+  7-bit and 8-bit, then STRIPS C0, DEL and C1 line by line, keeping only the line breaks a
+  multi-line refusal needs; then clips at 4096 code points, after sanitizing. Only the printed
+  text is scrubbed: `probeLedger()` throws the raw message, for an embedder that renders it its
+  own way. A local copy, not an import: `scrubForTerminal` is not a public export of `usertrust`.
 
 **THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
 `packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus

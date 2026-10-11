@@ -272,6 +272,18 @@ describe("usertrust init without a terminal (the CLI)", () => {
 		expect(stdout).toContain("Vault created at");
 	}, 40_000);
 
+	it("prints a vault path with control characters scrubbed", () => {
+		// A directory name the filesystem accepts and a terminal would act on.
+		const hostile = mkdtempSync(join(dir, "vault-\x1b[2J\u009b31m-"));
+		const { code, stdout, stderr } = runCli(hostile, ["init"]);
+		expect(code).toBe(0);
+		expect(existsSync(join(hostile, ".usertrust", "usertrust.config.json"))).toBe(true);
+		expect(stdout).toContain("Vault created at");
+		expect(stdout + stderr).not.toContain("\x1b");
+		expect(stdout + stderr).not.toContain("\u009b");
+		expect(stdout).toContain("vault-?[2J?31m-");
+	}, 40_000);
+
 	it("--reconfigure refuses rather than overwrite the vault with the defaults", () => {
 		expect(runCli(dir, ["init"]).code).toBe(0);
 		const configPath = join(dir, ".usertrust", "usertrust.config.json");
