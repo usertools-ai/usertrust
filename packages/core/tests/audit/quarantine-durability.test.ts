@@ -24,7 +24,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  *  - `failMetaAfterAppend`: the `.meta` temp-file open that FOLLOWS the next log append fails
  *    EACCES — the record's line lands, its anchor update does not;
  *  - `linkLogAt`: when the evidence temp file is opened — after every path check, before the
- *    cut — another name is hard-linked to the log.
+ *    cut — another name is hard-linked to the log;
+ *  - `swapQuarantineAt`: at the repair's first fsync of the log — after the read-only analysis,
+ *    before the evidence is written — `quarantine/` is created as a symlink to another directory.
  */
 const state = {
 	dirFsync: "ok" as "ok" | "einval" | "eio",
@@ -35,6 +37,7 @@ const state = {
 	failMetaAfterAppend: false,
 	metaArmed: false,
 	linkLogAt: undefined as { log: string; other: string } | undefined,
+	swapQuarantineAt: undefined as { qDir: string; target: string } | undefined,
 };
 const EVIDENCE_TMP = /[\\/]quarantine[\\/]\.[0-9a-f]{64}[^\\/]*\.tmp$/;
 vi.mock("node:fs", async (importOriginal) => {
@@ -72,6 +75,10 @@ vi.mock("node:fs", async (importOriginal) => {
 		return fs.closeSync(fd);
 	}) as typeof fs.closeSync;
 	const fsyncSync = ((fd: number) => {
+		if (state.swapQuarantineAt !== undefined && (fdPaths.get(fd) ?? "").endsWith("events.jsonl")) {
+			fs.symlinkSync(state.swapQuarantineAt.target, state.swapQuarantineAt.qDir);
+			state.swapQuarantineAt = undefined;
+		}
 		const st = fs.fstatSync(fd);
 		if (st.isDirectory()) {
 			state.events.push(`fsync-dir:${st.ino}`);
@@ -128,6 +135,7 @@ afterEach(() => {
 	state.failMetaAfterAppend = false;
 	state.metaArmed = false;
 	state.linkLogAt = undefined;
+	state.swapQuarantineAt = undefined;
 	for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -255,6 +263,22 @@ describe("quarantine: every boundary of a repair leaves a state the next run fin
 		expect(verifyVault(join(v, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 3 });
 	});
 
+	it("an ABSENT anchor (one event) is written BEFORE the record is appended: a record whose anchor update fails leaves it one behind, and the retry repairs it", async () => {
+		const v = mkdtempSync(join(tmpdir(), "trust-qdur-"));
+		dirs.push(v);
+		const w = createAuditWriter(v);
+		await w.appendEvent({ kind: "t", actor: "sys", data: { i: 0 } });
+		w.release();
+		rmSync(`${logOf(v)}.meta`);
+		appendFileSync(logOf(v), TORN);
+		state.failMetaAfterAppend = true; // the record's line lands; its .meta update fails
+		await expect(quarantineTornTail(v)).rejects.toThrow(/EACCES/);
+		expect(recordsOf(v)).toHaveLength(1);
+		const r = await quarantineTornTail(v);
+		expect(r).toMatchObject({ torn: null, recorded: [], anchorAdvanced: true });
+		expect(verifyVault(join(v, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 2 });
+	});
+
 	it("the LOG is fsync'd before a recovered head is published to .meta (log before sidecar)", async () => {
 		const v = await tornVault();
 		writeFileSync(logOf(v), readFileSync(logOf(v), "utf-8").slice(0, -TORN.length)); // no torn tail
@@ -290,5 +314,17 @@ describe("quarantine: every boundary of a repair leaves a state the next run fin
 		expect(existsSync(other), "the race was staged").toBe(true);
 		expect(readFileSync(logOf(v)).equals(before)).toBe(true);
 		expect(readFileSync(other).equals(before)).toBe(true);
+	});
+
+	it("quarantine/ swapped for a symlink AFTER the analysis is refused when the directory is made: nothing written through it, the log uncut", async () => {
+		const v = await tornVault();
+		const elsewhere = mkdtempSync(join(tmpdir(), "trust-elsewhere-"));
+		dirs.push(elsewhere);
+		const before = readFileSync(logOf(v));
+		state.swapQuarantineAt = { qDir: join(v, VAULT_DIR, "audit", "quarantine"), target: elsewhere };
+		await expect(quarantineTornTail(v)).rejects.toThrow(/not a real directory/);
+		expect(state.swapQuarantineAt, "the swap was staged").toBeUndefined();
+		expect(readdirSync(elsewhere)).toEqual([]);
+		expect(readFileSync(logOf(v)).equals(before)).toBe(true);
 	});
 });

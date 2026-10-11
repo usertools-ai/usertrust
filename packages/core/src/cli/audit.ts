@@ -56,8 +56,8 @@ export async function run(
 		if (r.anchorAdvanced === true) {
 			console.log(
 				dryRun
-					? "Would advance the .meta head anchor (one behind) to the verified head."
-					: "Advanced the .meta head anchor (one behind) to the verified head.",
+					? "Would bring the .meta head anchor (one behind, or absent) to the verified head."
+					: "Brought the .meta head anchor (one behind, or absent) to the verified head.",
 			);
 		}
 	} catch (err) {

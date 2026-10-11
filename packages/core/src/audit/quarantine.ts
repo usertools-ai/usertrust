@@ -8,16 +8,17 @@
  * A TORN TAIL is, positively: bytes after the log's last newline that do not parse as JSON —
  * an append that never completed (a crash, a short write). Nothing else qualifies:
  *  - every line before it must verify from genesis (parse, link, sequence, hash);
- *  - the `.meta` head anchor must be absent, at the verified head, or exactly one behind it at
- *    its predecessor (the states the writer itself leaves);
+ *  - the `.meta` head anchor must be at the verified head, exactly one behind it at its
+ *    predecessor, or absent on a chain of at most one event (the states the writer itself leaves);
  *  - the chain must be the single `events.jsonl` (no other segments);
  *  - an unterminated last line that DOES parse is not torn, and is refused (that repair is an
  *    operator's decision, not this tool's).
  *
  * The repair, under the vault's writer lock (taken through `createAuditWriter`'s `lockAtCreate`,
  * so a live writer in this or another process refuses it), in this order:
- *  1. the log is fsync'd, and a `.meta` anchor one behind is advanced to the verified head — before
- *     anything is appended, so no later failure can leave it two behind;
+ *  1. the log is fsync'd, and a `.meta` anchor one behind, or absent, is brought to the verified
+ *     head (the genesis anchor for an empty chain) — before anything is appended, so no later
+ *     failure can leave it in a state no run accepts (two behind, or absent on two events);
  *  2. the torn bytes are copied byte for byte to `audit/quarantine/<sha256>-<offset>.torn`
  *     (fsync'd, with its directory and the directory's parent);
  *  3. the log is truncated at the torn line's offset (fsync'd);
@@ -32,6 +33,9 @@
  * itself lies past X, and the log only grows past it. (The one exception is declared in
  * LIMITATIONS.md: a cut whose record never landed, followed by byte-identical torn bytes at the
  * same offset, is indistinguishable on disk from one interrupted cut, and is recorded once.)
+ *
+ * Every refusal happens in the read-only analysis, before step 1, so a refusal changes nothing. The
+ * crash-point sweep in the tests holds both properties over every durable step and start state.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -88,8 +92,9 @@ export interface QuarantineResult {
 	/** The evidence `file` of each quarantine record appended (or, in a dry run, that would be) —
 	 * the torn tail's, and any cut left unrecorded by an earlier run that died after truncating. */
 	recorded: string[];
-	/** Present (true) only when a `.meta` anchor left ONE BEHIND the verified head (an event landed,
-	 * its anchor update failed) was advanced to the head (or, in a dry run, would be). */
+	/** Present (true) only when the `.meta` anchor was brought to the verified head (or, in a dry run,
+	 * would be): from ONE BEHIND (an event landed, its anchor update failed), or from ABSENT on a
+	 * chain of at most one event (the genesis anchor for an empty one). */
 	anchorAdvanced?: true;
 }
 
@@ -223,6 +228,16 @@ function fsyncDir(path: string): void {
 		if (!isUnsupportedDirSync(err)) throw err;
 	} finally {
 		closeSync(fd);
+	}
+}
+
+/** `lstat` that answers `undefined` for a path that does not exist (a dangling symlink exists). */
+function lstatOrUndefined(path: string): ReturnType<typeof lstatSync> | undefined {
+	try {
+		return lstatSync(path);
+	} catch (err) {
+		if (isCode(err, "ENOENT")) return undefined;
+		throw err;
 	}
 }
 
@@ -376,8 +391,10 @@ function analyse(auditDir: string, logPath: string, qDir: string, logBytes?: Buf
 			.map((e) => e.data?.file as string),
 	);
 	let pending: Cut[] = [];
-	if (existsSync(qDir)) {
-		const st = lstatSync(qDir);
+	// lstat, not exists: a DANGLING quarantine/ symlink must be refused here too, before any repair
+	// step has changed anything.
+	const st = lstatOrUndefined(qDir);
+	if (st !== undefined) {
 		if (st.isSymbolicLink() || !st.isDirectory()) {
 			throw new AuditQuarantineRefusedError(
 				"audit/quarantine is not a real directory (a symlink or a file)",
@@ -407,6 +424,12 @@ function analyse(auditDir: string, logPath: string, qDir: string, logBytes?: Buf
 				);
 			}
 			verifiedEvidence(auditDir, c);
+		}
+		// The torn tail's OWN evidence file may exist already (an earlier run died before the cut).
+		// It is validated HERE, with the rest, so a bad one is refused before anything is changed —
+		// never after the anchor has been advanced (and never only by a real run, not the dry run).
+		if (torn !== null && lstatOrUndefined(join(auditDir, torn.file)) !== undefined) {
+			verifiedEvidence(auditDir, cutOf(torn.sha256, torn.offset));
 		}
 	}
 	const toRecord = torn === null ? pending : [...pending, cutOf(torn.sha256, torn.offset)];
@@ -438,7 +461,9 @@ export async function quarantineTornTail(
 			dryRun,
 			torn: plan.torn,
 			recorded: plan.toRecord.map((c) => c.file),
-			...(plan.anchor === "oneBehind" ? { anchorAdvanced: true as const } : {}),
+			...(plan.anchor === "oneBehind" || (plan.anchor === "absent" && existsSync(logPath))
+				? { anchorAdvanced: true as const }
+				: {}),
 		};
 	}
 	if (!existsSync(auditDir)) {
@@ -490,13 +515,18 @@ async function repairUnderLock(
 		//    sidecar, as the writer orders it): a complete last line with its anchor one behind can be
 		//    an append whose fsync failed or never ran.
 		if (lfd !== undefined) fsyncSync(lfd);
-		// An anchor left ONE BEHIND (an event landed, its `.meta` update failed) is advanced to the
-		// verified head BEFORE anything is appended: a record appended first, and then a failed or
-		// crashed anchor update, would leave it two behind, a state no run accepts.
-		if (plan.anchor === "oneBehind" && plan.head !== null) {
+		// The anchor is brought to the verified head BEFORE anything is appended — from ONE BEHIND
+		// (an event landed, its `.meta` update failed), or from ABSENT (a chain of at most one event;
+		// an empty one gets the genesis anchor). A record appended first, and then a failed or
+		// crashed anchor update, would leave it two behind, or absent on two events: states no run
+		// accepts, so the repair would be refused for good.
+		if (lfd !== undefined && (plan.anchor === "oneBehind" || plan.anchor === "absent")) {
 			writeAnchorAtomically(
 				`${logPath}.meta`,
-				JSON.stringify({ lastHash: plan.head.hash, sequence: plan.head.sequence }),
+				JSON.stringify({
+					lastHash: plan.head?.hash ?? GENESIS_HASH,
+					sequence: plan.head?.sequence ?? 0,
+				}),
 			);
 			anchorAdvanced = true;
 		}
