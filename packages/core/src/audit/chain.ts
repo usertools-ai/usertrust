@@ -245,7 +245,7 @@ interface HeldLock {
  * This is the ONLY thing that can make a lock file "a live writer's in this process": the file
  * carries a writerId, and it is live iff that writer holds the file's own inode here. A same-PID
  * lock file that is not — a crashed earlier instance of this PID, a recycled PID, a copy — is
- * reclaimable; one that is, is refused (AUD-471: reclaiming a live sibling's lock forks the chain,
+ * reclaimable; one that is, is refused (reclaiming a live sibling's lock forks the chain,
  * each writer caching its own tail).
  *
  * Deliberately NOT keyed by the directory. Keyed by the directory's `(dev, ino)`, every hit had to
@@ -375,12 +375,12 @@ function tryCleanStaleLock(lockPath: string, pid: unknown): void {
  * The lock file's exclusive create. On success the lock is this writer's: recorded in
  * {@link heldLocks} and `true` returned. `false` means the file exists (EEXIST).
  *
- * AUD-458: O_WRONLY | O_CREAT | O_EXCL atomically instead of existsSync + openSync('wx'). This
+ * O_WRONLY | O_CREAT | O_EXCL atomically instead of existsSync + openSync('wx'). This
  * eliminates the TOCTOU race where two processes both detect a stale lock, both unlink, and both
  * try to create — one gets EEXIST. This create, at a PATH, is the ONLY cross-process exclusion.
  *
  * The identity is read through the fd, not the path, so it is the file THIS create made, never
- * one swapped in after it. The fd is then closed (AUD-459): the identity is kept in memory, so
+ * one swapped in after it. The fd is then closed: the identity is kept in memory, so
  * nothing needs the fd held open.
  *
  * Registered only after EVERYTHING succeeded, the close included. A failure after the create
@@ -406,7 +406,7 @@ function createLock(lockPath: string, lockContent: string, writerId: string): bo
 			writeSync(fd, lockContent);
 			fsyncSync(fd);
 		} finally {
-			// AUD-459: Close fd immediately — lock semantics rely on file existence, not open fd
+			// Close fd immediately — lock semantics rely on file existence, not open fd
 			closeSync(fd);
 		}
 	} catch (err) {
@@ -490,7 +490,7 @@ function acquireProcessLock(logPath: string, writerId: string): boolean {
 		return false;
 	}
 	if (holder !== undefined) {
-		// AUD-471: a LIVE writer in this process holds this vault → refuse.
+		// A LIVE writer in this process holds this vault → refuse.
 		throw new AuditWriterLockHeldError(
 			`Audit writer lock held by another writer in this process (dir ${dir}). Only one writer per vault per process.`,
 		);
@@ -676,7 +676,7 @@ function writeDeadLetter(
 			mkdirSync(dlqDir, { recursive: true, mode: 0o700 });
 		}
 
-		// AUD-469 / F3: best-effort corruption-detection checksum — NOT
+		// F3: best-effort corruption-detection checksum — NOT
 		// tamper-evidence. Any key readable by this writer is readable by an
 		// attacker with the same host access, so a keyed MAC here would only
 		// imply integrity it cannot provide (the old HMAC key was derived from

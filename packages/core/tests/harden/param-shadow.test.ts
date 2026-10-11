@@ -7,7 +7,7 @@
  *
  * A request that injects `tier`, `estimated_cost`, `budget_remaining`, etc. must
  * not defeat a policy rule keyed on the trusted value. The action path was fixed
- * under AUD-467; this locks the primary LLM `interceptCall` path.
+ * in an earlier change; this locks the primary LLM `interceptCall` path.
  */
 
 import { randomUUID } from "node:crypto";

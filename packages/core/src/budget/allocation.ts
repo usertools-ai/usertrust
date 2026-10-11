@@ -36,7 +36,7 @@
  * child cannot invert the burn rate, but the clamp hides the breach rather than
  * repairing it.
  *
- * NO PRE-CHECK ON THE ALLOCATION PATH (AUD-455): allocation never reads the
+ * NO PRE-CHECK ON THE ALLOCATION PATH: allocation never reads the
  * parent balance before transferring. A `lookupBalance` + transfer sequence is a
  * check-then-act race — the balance can change between the two. TigerBeetle
  * enforces `debits_must_not_exceed_credits` atomically at commit, so the
@@ -333,7 +333,7 @@ export async function allocateBudget(
 		throw new Error("budget: cost center account id does not match its derived id");
 	}
 
-	// AUD-455: No pre-check — TB enforces debits_must_not_exceed_credits atomically.
+	// No pre-check — TB enforces debits_must_not_exceed_credits atomically.
 	// A lookupBalance + immediateTransfer sequence has a TOCTOU race.
 	let transferId: bigint;
 	try {

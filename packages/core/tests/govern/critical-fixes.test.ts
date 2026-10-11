@@ -1,8 +1,8 @@
 /**
  * Tests for critical governance fixes:
- *   AUD-453 — Async mutex prevents concurrent budget overshoot
- *   AUD-455 — No TOCTOU pre-check in spendPending (verified via engine.test.ts too)
- *   AUD-457 — Budget persistence survives destroy + re-init
+ *   Async mutex prevents concurrent budget overshoot
+ *   No TOCTOU pre-check in spendPending (verified via engine.test.ts too)
+ *   Budget persistence survives destroy + re-init
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -78,7 +78,7 @@ function makeMockAudit(): AuditWriter {
 	};
 }
 
-// ── AUD-453: Concurrent calls should not exceed budget ──
+// ── Concurrent calls should not exceed budget ──
 
 describe("AUD-453 — budget mutex prevents concurrent overshoot", () => {
 	let tmpVault: string;
@@ -208,7 +208,7 @@ describe("AUD-453 — budget mutex prevents concurrent overshoot", () => {
 	});
 });
 
-// ── AUD-457: Budget persistence across destroy + re-init ──
+// ── Budget persistence across destroy + re-init ──
 
 describe("AUD-457 — budget persistence", () => {
 	let tmpVault: string;
@@ -370,7 +370,7 @@ describe("AUD-457 — budget persistence", () => {
 	});
 });
 
-// ── AUD-468: in-flight hold accounting must not go negative on policy deny ──
+// ── In-flight hold accounting must not go negative on policy deny ──
 //
 // Regression: previously the outer catch in interceptCall decremented
 // inFlightHoldTotal by estimatedCost without checking whether the hold

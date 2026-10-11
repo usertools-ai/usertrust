@@ -1105,7 +1105,7 @@ describe("trust()", () => {
 		});
 	});
 
-	// ─── AUD-456: Proxy mode removed ───
+	// ─── Proxy mode removed ───
 
 	describe("proxy mode removed (AUD-456)", () => {
 		it("trust() throws when proxy option is set (void path)", async () => {

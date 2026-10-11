@@ -131,13 +131,13 @@ export interface TrustOpts {
 	configPath?: string;
 	/**
 	 * Remote proxy URL.
-	 * @deprecated AUD-456: Proxy mode is not yet implemented. Passing this option
+	 * @deprecated Proxy mode is not yet implemented. Passing this option
 	 * will throw an error. Use dryRun mode for testing.
 	 */
 	proxy?: string;
 	/**
 	 * API key for the proxy.
-	 * @deprecated AUD-456: Proxy mode is not yet implemented.
+	 * @deprecated Proxy mode is not yet implemented.
 	 */
 	key?: string;
 	/** Token budget override. */
@@ -228,7 +228,7 @@ export interface TrustEngine {
 		// biome-ignore lint/suspicious/noConfusingVoidType: load-bearing — an injected engine declaring `Promise<void>` must stay assignable, and `void` is the only member type that accepts it; `undefined` would reject every one.
 	): Promise<{ posted: number; shortfall: number } | void>;
 	voidPendingSpend(transferId: string): Promise<void>;
-	/** AUD-461: Void all remaining pending transfers on destroy. */
+	/** Void all remaining pending transfers on destroy. */
 	voidAllPending?(): Promise<void>;
 	/**
 	 * Read `available` for each account, missing accounts ABSENT from the map — the
@@ -536,7 +536,7 @@ export type TrustedClient<T> = GovernedShape<T> & {
 	): Promise<GovernedActionResult<R>>;
 };
 
-// ── AUD-453: Async mutex for budget atomicity ──
+// ── Async mutex for budget atomicity ──
 // Prevents concurrent interceptCall invocations from racing through
 // the budget-check + PENDING hold sequence.
 
@@ -711,7 +711,7 @@ function looksLikeProviderAuthFailure(err: unknown): boolean {
  */
 export { looksLikeProviderAuthFailure as _looksLikeProviderAuthFailure };
 
-// ── AUD-457: Budget persistence helpers ──
+// ── Budget persistence helpers ──
 
 interface SpendLedger {
 	budgetSpent: number;
@@ -766,7 +766,7 @@ async function loadSpendLedger(vaultBase: string): Promise<number> {
 async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promise<void> {
 	const dir = join(vaultBase, VAULT_DIR);
 	const ledgerPath = join(dir, "spend-ledger.json");
-	// AUD-457 hardening (RECON #4): UNIQUE tmp path per write. A fixed
+	// Hardening (RECON #4): UNIQUE tmp path per write. A fixed
 	// `spend-ledger.json.tmp` lets two concurrent writers clobber each other's
 	// staging file, so a half-written record can be renamed into place. A pid +
 	// uuid suffix isolates every writer's staging file.
@@ -1175,7 +1175,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 
-	// AUD-470: Only accept injected _engine/_audit in test environments.
+	// Only accept injected _engine/_audit in test environments.
 	// In production, silently ignore them to prevent governance bypass.
 	const isTestEnv = process.env.USERTRUST_TEST === "1" || process.env.NODE_ENV === "test";
 
@@ -1202,23 +1202,23 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		resetTimeoutMs: config.circuitBreaker.resetTimeout,
 	});
 
-	// 3. AUD-456: Proxy mode removed — throw early with clear error
+	// 3. Proxy mode removed — throw early with clear error
 	if (opts?.proxy) {
 		throw new Error(
 			"usertrust: proxy mode is not yet implemented (AUD-456). " +
 				"Use dryRun mode for testing, or connect a real TigerBeetle instance for production.",
 		);
 	}
-	// AUD-456: proxyConn is always null now — proxy mode throws above.
+	// proxyConn is always null now — proxy mode throws above.
 	// Cast keeps dead code paths type-safe for future re-enablement.
 	const proxyConn = null as ProxyConnection | null;
 
-	// AUD-457: restore cumulative spend from disk BEFORE building the engine so the
+	// Restore cumulative spend from disk BEFORE building the engine so the
 	// enforcing holding account can be seeded with the REMAINING budget.
 	let budgetSpent = await loadSpendLedger(vaultBase);
 
 	// 4. Engine (injected for tests, real TB client in production, null in dry-run/proxy)
-	// AUD-470: _engine injection only accepted in test environments
+	// _engine injection only accepted in test environments
 	let engine: TrustEngine | null;
 	if (isTestEnv && opts?._engine !== undefined) {
 		engine = opts._engine;
@@ -1243,9 +1243,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// 6. Track state
 	let destroyed = false;
-	const budgetMutex = new AsyncMutex(); // AUD-453: serialise budget-check + hold
-	let inFlightCount = 0; // AUD-462: track in-flight calls for graceful destroy
-	let inFlightStreamCount = 0; // AUD-462: track in-flight streams (consumed after interceptCall returns)
+	const budgetMutex = new AsyncMutex(); // Serialise budget-check + hold
+	let inFlightCount = 0; // Track in-flight calls for graceful destroy
+	let inFlightStreamCount = 0; // Track in-flight streams (consumed after interceptCall returns)
 	let inFlightHoldTotal = 0; // Track estimated cost of in-flight pending holds
 
 	// Streaming anomaly detector — shared across calls so injection-cascade
@@ -1290,7 +1290,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			throw new Error("TrustedClient has been destroyed");
 		}
 
-		// AUD-462: Track in-flight calls so destroy() can wait for them
+		// Track in-flight calls so destroy() can wait for them
 		inFlightCount++;
 
 		try {
@@ -1334,7 +1334,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			let envelopeDebited = false;
 			/** This call's SESSION-wallet share of an amount: all of it, or none. */
 			const sessionShare = (amount: number): number => (envelopeDebited ? 0 : amount);
-			/** AUD-457 persistence, skipped when the session total did not move. */
+			/** Budget persistence, skipped when the session total did not move. */
 			const persistSessionSpend = async (): Promise<void> => {
 				if (envelopeDebited) return;
 				await persistSpendLedger(vaultBase, budgetSpent);
@@ -1485,19 +1485,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// prompt length. An untiered row resolves to exactly the same object either way.
 			const appliedRates = resolveAppliedRates(rateResolution.rates, estimatedInputTokens);
 
-			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
+			// Acquire mutex to serialise budget-check + PENDING hold.
 			// This prevents concurrent calls from both passing the budget check and
 			// overshooting the budget. The attributed-envelope preflight read is taken
 			// INSIDE this lock (top of the try below), so a concurrent hold to the same
 			// envelope cannot land between the read and the gate — see the note there.
 			const releaseBudgetLock = await budgetMutex.acquire();
 
-			// AUD-460: Track the proxy's transferId separately for settle/void
+			// Track the proxy's transferId separately for settle/void
 			let proxyTransferId: string | undefined;
 
-			// AUD-468: Track whether the in-flight hold has been released, so
+			// Track whether the in-flight hold has been released, so
 			// the catch handlers below can't double-decrement inFlightHoldTotal
-			// (mirrors the AUD-465 guard used in governActionImpl).
+			// (mirrors the guard used in governActionImpl).
 			let holdActive = false;
 			async function releaseInFlightHold(): Promise<void> {
 				if (!holdActive) return;
@@ -1606,7 +1606,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// execution context, which no request body can reach. Asserted after
 						// the spread like every other trusted field, `undefined` included.
 						cost_center: envelope?.attribution.costCenter,
-						// AUD-002: host-owned, not caller-declared. A request-body `scope`
+						// Host-owned, not caller-declared. A request-body `scope`
 						// is stripped above; this is the operator's TrustConfig/TrustOpts
 						// value, `undefined` included, so a tenant cannot volunteer into
 						// a scopePatterns deny the host did not opt into.
@@ -1697,7 +1697,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// e. Failure mode 15.4: TigerBeetle / engine unreachable — PENDING hold
 					if (proxyConn != null && !isDryRun) {
 						try {
-							// AUD-460: Capture the proxy's returned transferId
+							// Capture the proxy's returned transferId
 							const proxyResult = await proxyConn.spend({
 								model,
 								estimatedCost,
@@ -1748,9 +1748,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// Track in-flight hold cost for accurate budget calculations — the
 					// SESSION wallet's share of it, which is nothing once the envelope paid.
 					inFlightHoldTotal += sessionShare(estimatedCost);
-					holdActive = true; // AUD-468: arm the guard
+					holdActive = true; // Arm the guard
 				} finally {
-					// AUD-453: Release lock after budget check + hold are complete
+					// Release lock after budget check + hold are complete
 					releaseBudgetLock();
 				}
 			} catch (denialErr) {
@@ -1847,7 +1847,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					auditHash: callAuditDegraded ? "AUDIT_DEGRADED" : streamEstimateHash,
 					chainPath: join(VAULT_DIR, "audit"),
 					receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
-					settled: false, // AUD-454: not settled yet — stream hasn't been consumed
+					settled: false, // Not settled yet — stream hasn't been consumed
 					model,
 					provider: kind,
 					timestamp: new Date().toISOString(),
@@ -1869,7 +1869,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
-					// AUD-456: Flag proxy stub receipts
+					// Flag proxy stub receipts
 					...(proxyConn != null ? { proxyStub: true as const } : {}),
 				};
 			};
@@ -1949,7 +1949,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 
 				// Release in-flight hold and commit budget under mutex.
-				// AUD-468: holdActive guard prevents double-release.
+				// The holdActive guard prevents double-release.
 				if (holdActive) {
 					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
@@ -1962,7 +1962,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					budgetSpent += sessionShare(streamCost);
 					releaseLock();
 				}
-				// AUD-457: Persist cumulative spend to disk (session spend only — an
+				// Persist cumulative spend to disk (session spend only — an
 				// envelope's burn is the ledger's to report, and writing it here would
 				// shrink the next run's holding-wallet seed by money it never paid).
 				await persistSessionSpend();
@@ -1970,7 +1970,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				if (proxyConn != null && !isDryRun) {
 					try {
-						// AUD-460: Use the proxy's transferId for settlement
+						// Use the proxy's transferId for settlement
 						await proxyConn.settle(proxyTransferId ?? transferId, streamCost);
 					} catch (postErr) {
 						settled = false;
@@ -2152,7 +2152,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					...(postedCost !== undefined ? { postedCost } : {}),
 					...(streamBudget !== undefined ? { budget: streamBudget } : {}),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
-					// AUD-456: Flag proxy stub receipts
+					// Flag proxy stub receipts
 					...(proxyConn != null ? { proxyStub: true as const } : {}),
 				};
 				streamSettledReceipt = streamReceipt;
@@ -2169,7 +2169,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			): Promise<void> => {
 				if (!finalizeOnce("void")) return;
 
-				// Release in-flight hold under mutex (AUD-468: guarded).
+				// Release in-flight hold under mutex (guarded).
 				await releaseInFlightHold();
 
 				cb.recordFailure();
@@ -2198,7 +2198,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					.catch(() => {});
 
 				if (proxyConn != null && !isDryRun) {
-					// AUD-460: Use the proxy's transferId for void
+					// Use the proxy's transferId for void
 					proxyConn.void(proxyTransferId ?? transferId).catch(() => {});
 				} else if (engine != null && !isDryRun) {
 					engine.voidPendingSpend(transferId).catch(() => {});
@@ -2614,7 +2614,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						},
 					);
 
-					// AUD-454: For streaming responses, settlement has NOT happened yet.
+					// For streaming responses, settlement has NOT happened yet.
 					// The initial handle carries settled:false at the estimate — the real
 					// settlement status lands on governedStream.receipt after consumption.
 					const estimatedReceipt = buildEstimatedStreamReceipt();
@@ -2752,7 +2752,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				finalizeOnce("settle");
 
 				// Release in-flight hold and commit budget under mutex — money moves only
-				// AFTER the spend is audited. AUD-468: mark hold released before the commit
+				// AFTER the spend is audited. Mark hold released before the commit
 				// so a later throw cannot double-decrement inFlightHoldTotal via the catch.
 				if (holdActive) {
 					holdActive = false;
@@ -2761,7 +2761,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					budgetSpent += sessionShare(actualCost);
 					releaseLock();
 				}
-				// AUD-457: Persist cumulative spend to disk (session spend only).
+				// Persist cumulative spend to disk (session spend only).
 				await persistSessionSpend();
 
 				// g. Circuit breaker: record success
@@ -2817,7 +2817,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// g3. Proxy settlement
 				if (proxyConn != null && !isDryRun) {
 					try {
-						// AUD-460: Use the proxy's transferId for settlement
+						// Use the proxy's transferId for settlement
 						await proxyConn.settle(proxyTransferId ?? transferId, actualCost);
 					} catch (postErr) {
 						settled = false;
@@ -2917,14 +2917,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					...(postedCost !== undefined ? { postedCost } : {}),
 					...(settledBudget !== undefined ? { budget: settledBudget } : {}),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
-					// AUD-456: Flag proxy stub receipts
+					// Flag proxy stub receipts
 					...(proxyConn != null ? { proxyStub: true as const } : {}),
 				};
 
 				return { response, receipt };
 			} catch (err) {
 				// Release in-flight hold under mutex (non-streaming failure)
-				// AUD-468: Use the guarded release — this is a no-op if the
+				// Use the guarded release — this is a no-op if the
 				// success path already released the hold, preventing
 				// inFlightHoldTotal from drifting negative on post-commit throws.
 				await releaseInFlightHold();
@@ -2952,7 +2952,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// Proxy void
 					if (proxyConn != null && !isDryRun) {
 						try {
-							// AUD-460: Use the proxy's transferId for void
+							// Use the proxy's transferId for void
 							await proxyConn.void(proxyTransferId ?? transferId);
 						} catch {
 							// Best-effort void
@@ -3040,7 +3040,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				throw err;
 			}
 		} finally {
-			// AUD-462: Decrement in-flight count so destroy() knows when it's safe
+			// Decrement in-flight count so destroy() knows when it's safe
 			inFlightCount--;
 		}
 	}
@@ -3054,7 +3054,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			throw new Error("TrustedClient has been destroyed");
 		}
 
-		// AUD-466: Validate cost to prevent budget inflation via negative values
+		// Validate cost to prevent budget inflation via negative values
 		if (!Number.isFinite(action.cost) || action.cost < 0) {
 			throw new Error(
 				`action.cost must be a non-negative finite number, got ${String(action.cost)}`,
@@ -3124,7 +3124,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
 
 					// c. Policy gate — action fields available in context
-					// AUD-467: Caller params spread FIRST so governance fields cannot be shadowed.
+					// Caller params spread FIRST so governance fields cannot be shadowed.
 					// P1-BUDGET-PREFLIGHT: budget_remaining_after is the derived field the
 					// block-budget-overshoot default rule compares against zero (a HARD rule
 					// that fails CLOSED if the governor omits it — so it MUST be supplied),
@@ -3162,7 +3162,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// Structurally un-forgeable: it comes from this call's own async
 						// execution context, which `action.params` cannot reach.
 						cost_center: envelope?.attribution.costCenter,
-						// AUD-002: same host assertion as the LLM path — `action.params.scope`
+						// Same host assertion as the LLM path — `action.params.scope`
 						// must not satisfy a scopePatterns rule the operator did not declare.
 						scope: config.scope,
 					});
@@ -3297,7 +3297,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			}
 
 			// f. Execute the action
-			// Guard against double-decrement of inFlightHoldTotal (AUD-465)
+			// Guard against double-decrement of inFlightHoldTotal
 			let holdReleased = false;
 			async function releaseHoldAndCommit(cost?: number): Promise<void> {
 				if (!holdReleased) {
@@ -3491,7 +3491,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				return { result, receipt };
 			} catch (err) {
-				// Release in-flight hold (AUD-465: guard prevents double-decrement)
+				// Release in-flight hold (guard prevents double-decrement)
 				await releaseHoldAndCommit();
 
 				// Circuit breaker: record failure
@@ -3551,7 +3551,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			if (destroyed) return;
 			destroyed = true;
 
-			// AUD-462: Wait up to 5 seconds for in-flight calls to complete.
+			// Wait up to 5 seconds for in-flight calls to complete.
 			// After the deadline, proceed with teardown anyway.
 			const deadline = Date.now() + 5_000;
 			while ((inFlightCount > 0 || inFlightStreamCount > 0) && Date.now() < deadline) {
@@ -3567,7 +3567,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// Every step runs, whatever an earlier one throws; destroy() rejects with what a step
 			// threw only once the last has run, so the TigerBeetle client is always closed.
 			await runTeardownSteps([
-				// AUD-461: Void any remaining pending transfers (best-effort).
+				// Void any remaining pending transfers (best-effort).
 				// TigerBeetle auto-voids pending transfers after 300s, but
 				// explicit voiding releases holds immediately.
 				async () => {
@@ -4087,7 +4087,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			pendingMap.delete(transferId);
 		},
 
-		// AUD-461: Void all remaining pending transfers on destroy.
+		// Void all remaining pending transfers on destroy.
 		// Best-effort — TigerBeetle auto-voids after 300s regardless.
 		async voidAllPending(): Promise<void> {
 			const entries = [...pendingMap.entries()];

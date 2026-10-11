@@ -351,7 +351,7 @@ describe("headless governor", () => {
 		expect(engine.voidedIds).toHaveLength(2);
 	});
 
-	// ── AUD-456: Proxy mode removed ──
+	// ── Proxy mode removed ──
 
 	it("createGovernor throws when proxy is set (AUD-456)", async () => {
 		await expect(
@@ -878,7 +878,7 @@ describe("headless governor", () => {
 		await gov.destroy();
 	});
 
-	// ── AUD-456: Proxy settle failure branch removed ──
+	// ── Proxy settle failure branch removed ──
 
 	it("createGovernor rejects proxy option (AUD-456)", async () => {
 		await expect(

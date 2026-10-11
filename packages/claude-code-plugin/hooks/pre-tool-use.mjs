@@ -20,7 +20,7 @@
 // file's `"sendContent": false`) replaces the content with {"redacted":true} while
 // keeping the size-based estimate.
 // The output hold uses that same 16 KiB bound so a large tool_response cannot
-// price above the reservation (AUD-004).
+// price above the reservation.
 //
 // Transcript usage mode (the default): this hold is also the SETTLEMENT VEHICLE
 // for the agent's new complete transcript messages — one model's worth, the
@@ -519,7 +519,7 @@ async function reserve(input) {
 				{
 					model: window?.model ?? fallbackModel,
 					// Both legs: a 1-token output hold under-debited every large tool result
-					// because settle prices the whole response (AUD-004). A window's usage is
+					// because settle prices the whole response. A window's usage is
 					// ADDED, so the pre-call budget check still covers the upcoming tool.
 					...(window
 						? holdEstimate(window.counts, capabilities, {
