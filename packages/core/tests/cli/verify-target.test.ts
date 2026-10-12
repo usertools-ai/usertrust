@@ -169,6 +169,21 @@ describe("verify <path> verifies that path", () => {
 		expect(j.data.chainLength).toBe(3);
 	}, 60_000);
 
+	it("anchored --json `success` agrees with the exit code under --require-anchor (red-first: it printed success true and exited 1)", () => {
+		// An UNANCHORED vault is a non-zero verdict under --require-anchor; the JSON a pipeline parses must say so too.
+		const r = cli(vaultB, "verify", vaultA, "--require-anchor", "--json");
+		expect(r.code).toBe(1);
+		const j = json(r);
+		expect(j.data.valid).toBe(true); // the chain itself is fine …
+		expect(j.data.anchorState).toBe("UNANCHORED"); // … the anchor requirement is what failed
+		expect(j.success).toBe(false);
+		// control: the same vault WITHOUT the requirement is a pass, and its JSON says so (the plain path — an anchored
+		// pass needs real anchor files; the anchored row above is what the fix changes)
+		const ok = cli(vaultB, "verify", vaultA, "--json");
+		expect(ok.code).toBe(0);
+		expect(json(ok).success).toBe(true);
+	}, 60_000);
+
 	it("T4: a path it cannot use is refused; the cwd (a valid vault) is never used instead", () => {
 		const notDir = join(tmp, "a-file");
 		writeFileSync(notDir, "x");
