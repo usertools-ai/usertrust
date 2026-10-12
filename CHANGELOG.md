@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`usertrust-verify` exports the transfer verdict: `transferVerdict(events)`** (with `selectTransferEvent`, `firstTerminalOf` and `normalizeEvent`). It is the selection `--tx` has always used, moved unchanged into one function, so any caller can give a transfer the verdict `--tx` prints. `verifyTransaction`'s result gains `status` (the same verdict) when the transfer is found.
+- **`usertrust-verify` exports the transfer verdict: `transferVerdict(events)`** (with `selectTransferEvent`, `firstTerminalOf` and `normalizeEvent`), and the transfer match `--tx` makes: `matchesTransfer(event, txId, txHash)`, the same match as keys, `transferKeysOf(event)`, and `transferIdHash(txId)`. It is the selection `--tx` has always used, moved unchanged into one function, so any caller can give a transfer the verdict `--tx` prints. `verifyTransaction`'s result gains `status` (the same verdict) when the transfer is found.
 
 ### Fixed
 
