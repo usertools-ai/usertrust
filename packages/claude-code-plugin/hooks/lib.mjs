@@ -29,7 +29,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import {
-	appendFile,
 	link,
 	mkdir,
 	open,
@@ -333,7 +332,7 @@ export async function recordWatchEvent(event) {
 	});
 	try {
 		await mkdir(stateRoot(), { recursive: true });
-		await appendFile(watchLogPath(), `${line}\n`, { mode: 0o600 });
+		await appendRegular(watchLogPath(), `${line}\n`);
 		return true;
 	} catch (err) {
 		say(
@@ -691,7 +690,7 @@ export async function publishExclusive(path, content, { mode } = {}) {
 	const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
 	const options = mode === undefined ? {} : { mode };
 	try {
-		await writeFile(tmp, content, options);
+		await writeFile(tmp, content, { ...options, flag: "wx" });
 		try {
 			await link(tmp, path);
 		} catch (err) {
@@ -726,7 +725,7 @@ export const READ_BOUND = Object.freeze({
 /** How much of a log `eachLine` reads at a time. */
 const LINE_CHUNK_BYTES = 1024 * 1024;
 
-function readRefused(path, code, why) {
+function refused(path, code, why) {
 	return Object.assign(new Error(`${path}: ${why}`), { code });
 }
 
@@ -740,7 +739,7 @@ export async function openRegular(path) {
 	const handle = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
 	try {
 		const info = await handle.stat();
-		if (!info.isFile()) throw readRefused(path, "ENOTREG", "not a regular file");
+		if (!info.isFile()) throw refused(path, "ENOTREG", "not a regular file");
 		return { handle, info };
 	} catch (err) {
 		await handle.close().catch(() => {});
@@ -757,7 +756,7 @@ export async function openRegular(path) {
 export async function readRegular(path, bound) {
 	const { handle, info } = await openRegular(path);
 	try {
-		if (info.size > bound) throw readRefused(path, "EFBIG", `over ${bound} bytes`);
+		if (info.size > bound) throw refused(path, "EFBIG", `over ${bound} bytes`);
 		const buffer = Buffer.alloc(info.size);
 		let read = 0;
 		while (read < buffer.length) {
@@ -830,6 +829,45 @@ export async function eachLine(
 	} finally {
 		await handle.close().catch(() => {});
 	}
+}
+
+/**
+ * Append `text` to `path`, made with `mode` if it is not there, never waiting: opened
+ * non-blocking, so a FIFO with no reader in a log's place is ENXIO at once, and one with a
+ * reader, or anything else that is not a regular file, is ENOTREG before a byte is written.
+ * O_APPEND, as appendFile: each call's text lands whole at the end. The ONE way the hooks
+ * append (tests/key-rejected.test.ts holds them to it).
+ */
+export async function appendRegular(path, text, { mode = 0o600 } = {}) {
+	const handle = await open(
+		path,
+		constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NONBLOCK ?? 0),
+		mode,
+	);
+	await writeThenClose(path, handle, text);
+}
+
+/**
+ * Write `text` through `handle` (a regular file only), then close it, and throw the FIRST
+ * failure of either: a close can report a write that failed late (EIO, ENOSPC), and a write
+ * that may not have landed must never read as written.
+ */
+async function writeThenClose(path, handle, text, { truncate = false } = {}) {
+	let failure;
+	try {
+		const info = await handle.stat();
+		if (!info.isFile()) throw refused(path, "ENOTREG", "not a regular file");
+		if (truncate) await handle.truncate(0);
+		await handle.writeFile(text);
+	} catch (err) {
+		failure = err;
+	}
+	try {
+		await handle.close();
+	} catch (err) {
+		failure ??= err;
+	}
+	if (failure !== undefined) throw failure;
 }
 
 /**
@@ -933,7 +971,13 @@ export async function quarantineHold(path) {
 	try {
 		const { gate: _gate, ...body } = JSON.parse(await readRegular(path, READ_BOUND.record));
 		// Its call RAN (PostToolUse found the breaker open): Stop gives it back as `call-ran`.
-		await writeFile(path, JSON.stringify({ ...body, ran: true }), { mode: 0o600 });
+		// IN PLACE: a temp file and a rename need the directory's write access, which is what
+		// failed when quarantine runs. Opened without O_CREAT or O_TRUNC (an existing regular
+		// file only, never waiting on a FIFO), truncated and rewritten through that handle.
+		const handle = await open(path, constants.O_WRONLY | (constants.O_NONBLOCK ?? 0));
+		await writeThenClose(path, handle, JSON.stringify({ ...body, ran: true }), {
+			truncate: true,
+		});
 		return "ungated";
 	} catch {
 		try {
@@ -1420,7 +1464,7 @@ export function jobHoldFields(entry) {
 export async function writeFileAtomic(path, text, { mode = 0o600, beforeCommit } = {}) {
 	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
 	try {
-		await writeFile(tmp, text, { mode });
+		await writeFile(tmp, text, { flag: "wx", mode });
 		await beforeCommit?.();
 		await rename(tmp, path);
 	} catch (err) {
