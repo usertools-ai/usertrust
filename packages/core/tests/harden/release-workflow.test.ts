@@ -31,6 +31,10 @@
  *   version on npm): `latest` for the newest release, as npm's default with no --tag so that
  *   npm's own implicit-latest refusal (npm 11.0.0 and later) stays active, and `--tag backfill`
  *   for an older version; nothing is published when that answer cannot be read.
+ * - Before publishing any package, all six are checked on npm: a new release refuses one
+ *   already there (in the dry run, before the push); a republish skips one only if npm holds
+ *   this run's exact tarball (dist.integrity and dist.shasum). Only the registry's own 404 for
+ *   a package reads as "never published"; no npm_config_tag reaches npm.
  * - The publish job runs Node 24 and refuses an npm older than 11 before touching the
  *   registry; the GitHub Release is created only after every package's publish succeeded.
  * - No setup-node restores a cache, and the publish job installs, packs and runs nothing.
@@ -381,6 +385,20 @@ describe("publish.yml", () => {
 		expect(named).toEqual([pinned]);
 	});
 
+	it("the dry run, which refuses a version already on npm, runs in every mode before the push", () => {
+		// release.sh publish checks all six on npm before publishing any, and a new release
+		// refuses one already there; it reads the mode from REPUBLISH, set for every step.
+		expect(publish.env?.REPUBLISH).toMatch(/^\$\{\{ inputs\.republish \}\}$/);
+		const dry = step("publish", "Publish packages (dry run)");
+		expect(dry.if).toBeUndefined();
+		expect(dry.run?.trim()).toMatch(
+			/^bash scripts\/release\.sh publish "\$\{RUNNER_TEMP\}\/release" "\$COMMIT" --dry-run$/,
+		);
+		expect(stepIndex("publish", "Publish packages (dry run)")).toBeLessThan(
+			stepIndex("publish", "Push the release commit and tag"),
+		);
+	});
+
 	it("the GitHub Release is created only after every package's publish succeeded", () => {
 		const pub = step("publish", "Publish packages");
 		const rel = step("publish", "Create GitHub Release");
@@ -441,8 +459,15 @@ const FAKE_NPM = `#!/usr/bin/env bash
 # view <spec> version: answers from $FAKE_REGISTRY ("<spec> yes|no|error" lines; unlisted = no).
 # view <name> versions --json: appends its arguments to $FAKE_LOG.views and answers from a
 #   "<name> versions <answer>" line in $FAKE_REGISTRY: a comma-separated list (a JSON array),
-#   one:<v> (a JSON string), raw:<text> (printed as is), empty (no output) or error; without
-#   one, the "<name>@<v> yes" lines' versions, and E404 (never published) if there are none.
+#   one:<v> (a JSON string), raw:<text> (printed as is), empty (no output), error (ETIMEDOUT),
+#   unpublished, nomatch:<tag> or e404-other (the E404s npm prints for those); without one, the
+#   "<name>@<v> yes" lines' versions, and the registry's 404 for the package if there are none.
+#   As npm does (lib/commands/view.js), the bare name resolves against the tag config: --tag,
+#   else npm_config_tag in the environment (the name in any case), else latest; a tag other
+#   than latest with no "<name> disttag <tag>" line fails E404 "No match found for version".
+#   Failures print npm's --json error object on stdout, and its lines on stderr.
+# view <name>@<v> dist --json: answers from a "<name>@<v> dist <integrity> <shasum>" line, or
+#   "<name>@<v> dist error|raw:<text>"; none = E404.
 # --version: prints $FAKE_NPM_VERSION (11.19.0 if unset).
 # pack ...: writes a ustar tarball, as npm's packer does, of package.json, README.md, LICENSE,
 #   NOTICE and dist/ to --pack-destination; logs "pack|<dir>|<args>".
@@ -475,9 +500,31 @@ with tarfile.open(out, "w:gz", format=tarfile.USTAR_FORMAT) as t:
 PY
 	;;
 view)
+	npmerr() {
+		printf '{\\n  "error": {\\n    "code": "%s",\\n    "summary": "%s",\\n    "detail": ""\\n  }\\n}\\n' "$1" "$2"
+		echo "npm error code $1" >&2
+		echo "npm error 404 $2" >&2
+		exit 1
+	}
+	tag=$(env | awk '{ i = index($0, "="); if (tolower(substr($0, 1, i - 1)) == "npm_config_tag") { print substr($0, i + 1); exit } }')
+	[ -n "$tag" ] || tag=latest
+	prev=""
+	for a in "$@"; do
+		[ "$prev" = --tag ] && tag="$a"
+		prev="$a"
+	done
 	case "$3" in
+	dist)
+		dist=$(awk -v s="$2" '$1 == s && $2 == "dist" { print $3 " " $4 }' "$FAKE_REGISTRY")
+		case "$dist" in
+		"" | " ") npmerr E404 "No match found for version \${2##*@}" ;;
+		"error "*) npmerr ETIMEDOUT "request to https://registry.npmjs.org/ failed" ;;
+		raw:*) echo "\${dist#raw:}" ;;
+		*) printf '{\\n  "integrity": "%s",\\n  "shasum": "%s"\\n}\\n' "\${dist% *}" "\${dist#* }" ;;
+		esac
+		;;
 	version)
-		state=$(awk -v s="$2" '$1 == s { print $2 }' "$FAKE_REGISTRY")
+		state=$(awk -v s="$2" '$1 == s && $2 != "dist" { print $2 }' "$FAKE_REGISTRY")
 		case "$state" in
 		yes) echo "\${2##*@}" ;;
 		error) echo "npm error code ETIMEDOUT" >&2; exit 1 ;;
@@ -490,9 +537,15 @@ view)
 		if [ -z "$answer" ]; then
 			answer=$(awk -v n="$2" 'index($1, n "@") == 1 && $2 == "yes" { print substr($1, length(n) + 2) }' "$FAKE_REGISTRY" | paste -sd, -)
 		fi
+		[ -n "$answer" ] || npmerr E404 "Not Found - GET https://registry.npmjs.org/$2 - Not found"
+		if [ "$tag" != latest ] && ! awk -v s="$2" -v t="$tag" '$1 == s && $2 == "disttag" && $3 == t { f = 1 } END { exit !f }' "$FAKE_REGISTRY"; then
+			npmerr E404 "No match found for version $tag"
+		fi
 		case "$answer" in
-		"") echo "npm error code E404" >&2; exit 1 ;;
-		error) echo "npm error code ETIMEDOUT" >&2; exit 1 ;;
+		error) npmerr ETIMEDOUT "request to https://registry.npmjs.org/$2 failed, reason: timed out" ;;
+		unpublished) npmerr E404 "Unpublished on 2026-01-01T00:00:00.000Z" ;;
+		nomatch:*) npmerr E404 "No match found for version \${answer#nomatch:}" ;;
+		e404-other) npmerr E404 "Not Found - GET https://registry.npmjs.org/some-other-package - Not found" ;;
 		empty) ;;
 		one:*) echo "\\"\${answer#one:}\\"" ;;
 		raw:*) echo "\${answer#raw:}" ;;
@@ -686,6 +739,15 @@ const published = (version: string, dirs: string[], dry: boolean, tag = "latest"
 			`publish|${NAMES[d]}-${version}.tgz|--access public${tag === "latest" ? "" : ` --tag ${tag}`} --provenance --ignore-scripts --registry https://registry.npmjs.org/${dry ? " --dry-run" : ""}|cwd=0|userconfig=${dry ? "" : `//registry.npmjs.org/:_authToken=$${"{"}NODE_AUTH_TOKEN};`}|globalconfig=0|cache=fresh|from=assembled`,
 	);
 
+/** The registry's dist line for <d>@<version>: the digests of the tarball the fake npm was
+ * last handed for it (a previous publish or dry run of the same commit). */
+function distOf(version: string, d: string, bytes?: Buffer): string {
+	const tgz = bytes ?? readFileSync(join(dir, `log.${NAMES[d]}-${version}.tgz`));
+	const sha512 = createHash("sha512").update(tgz).digest("base64");
+	const sha1 = createHash("sha1").update(tgz).digest("hex");
+	return `${NAMES[d]}@${version} dist sha512-${sha512} ${sha1}`;
+}
+
 function run(args: string[], env: Record<string, string> = {}) {
 	const r = spawnSync("bash", [join(repo, "scripts/release.sh"), ...args], {
 		cwd: repo,
@@ -785,21 +847,103 @@ describe("release.sh publish", { timeout: 30_000 }, () => {
 		expect(log()).toEqual(published("1.0.0", DIRS, false));
 	});
 
-	it("skips a version already on npm (finishing a partial publish)", () => {
+	it("a new release refuses a version already on npm, before publishing anything", () => {
+		// Published since the build job's assert-unreleased (the approval can take hours). In
+		// the workflow this is the dry-run step, before the push: nothing is pushed, published
+		// or released.
 		const out = packAll();
-		setRegistry(["usertrust@1.0.0 yes", "usertrust-verify@1.0.0 yes"]);
-		const r = run(["publish", out, "HEAD"]);
-		expect(r.status).toBe(0);
+		setRegistry(["usertrust-openclaw@1.0.0 yes"]);
+		rmSync(join(dir, "calls"), { force: true });
+		for (const args of [
+			["publish", out, "HEAD", "--dry-run"],
+			["publish", out, "HEAD"],
+		]) {
+			const r = run(args);
+			expect(r.status, args.join(" ")).not.toBe(0);
+			expect(r.err).toContain("::error::Already on npm: usertrust-openclaw@1.0.0.");
+		}
+		expect(log()).toEqual([]);
+		expect(readFileSync(join(dir, "calls"), "utf8")).not.toContain("publish");
+	});
+
+	it("refuses to run without a REPUBLISH of true or false", () => {
+		const out = packAll();
+		for (const value of ["", "yes", "TRUE"]) {
+			const r = run(["publish", out, "HEAD", "--dry-run"], { REPUBLISH: value });
+			expect(r.status, value).not.toBe(0);
+			expect(r.err).toContain("not true or false");
+		}
+		expect(log()).toEqual([]);
+	});
+
+	it("a republish skips a version npm holds byte-identical to this run's tarball", () => {
+		const out = packAll();
+		expect(run(["publish", out, "HEAD", "--dry-run"], { REPUBLISH: "true" }).status).toBe(0);
+		rmSync(join(dir, "log"));
+		setRegistry([
+			"usertrust@1.0.0 yes",
+			"usertrust-verify@1.0.0 yes",
+			distOf("1.0.0", "core"),
+			distOf("1.0.0", "verify"),
+		]);
+		const r = run(["publish", out, "HEAD"], { REPUBLISH: "true" });
+		expect(r.status, r.err).toBe(0);
+		expect(r.out).toContain(
+			"::notice::usertrust@1.0.0 is already on npm, byte-identical to this run's tarball; skipping",
+		);
+		expect(r.out).toContain("::notice::usertrust-verify@1.0.0 is already on npm, byte-identical");
 		expect(log()).toEqual(published("1.0.0", DIRS.slice(2), false));
 	});
 
-	it("an unreadable registry stops it before that package, never reads as 'not published'", () => {
+	it("a republish refuses a version npm holds with other bytes, before publishing anything", () => {
+		const out = packAll();
+		expect(run(["publish", out, "HEAD", "--dry-run"], { REPUBLISH: "true" }).status).toBe(0);
+		const ours = distOf("1.0.0", "verify").split(" ");
+		const other = distOf("1.0.0", "verify", Buffer.from("not this run's tarball")).split(" ");
+		for (const [integrity, shasum] of [
+			[other[2], other[3]],
+			[other[2], ours[3]],
+			[ours[2], other[3]],
+		]) {
+			rmSync(join(dir, "log"), { force: true });
+			setRegistry([
+				"usertrust@1.0.0 yes",
+				"usertrust-verify@1.0.0 yes",
+				distOf("1.0.0", "core"),
+				`usertrust-verify@1.0.0 dist ${integrity} ${shasum}`,
+			]);
+			const r = run(["publish", out, "HEAD"], { REPUBLISH: "true" });
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("usertrust-verify@1.0.0 is on npm, but not as the tarball this run");
+			expect(log()).toEqual([]);
+		}
+	});
+
+	it("a republish refuses when npm's digest for a version it holds cannot be read", () => {
+		const out = packAll();
+		for (const dist of [
+			"",
+			"usertrust-verify@1.0.0 dist error",
+			"usertrust-verify@1.0.0 dist raw:not-json",
+			"usertrust-verify@1.0.0 dist raw:{}",
+			"usertrust-verify@1.0.0 dist sha1-abc= 0123456789abcdef0123456789abcdef01234567",
+			"usertrust-verify@1.0.0 dist sha512-QUJD none",
+		]) {
+			setRegistry(["usertrust-verify@1.0.0 yes", dist]);
+			const r = run(["publish", out, "HEAD"], { REPUBLISH: "true" });
+			expect(r.status, dist).not.toBe(0);
+			expect(r.err).toContain("usertrust-verify@1.0.0");
+			expect(log()).toEqual([]);
+		}
+	});
+
+	it("an unreadable registry stops it before publishing anything, never reads as 'not published'", () => {
 		const out = packAll();
 		setRegistry(["usertrust-openclaw@1.0.0 error"]);
 		const r = run(["publish", out, "HEAD"]);
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("usertrust-openclaw@1.0.0");
-		expect(log()).toEqual(published("1.0.0", DIRS.slice(0, 2), false));
+		expect(log()).toEqual([]);
 	});
 
 	it("publishes nothing if any tarball is missing", () => {
@@ -1007,10 +1151,15 @@ describe("release.sh publish: the npm dist-tag", { timeout: 30_000 }, () => {
 		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
 		releaseCommit("1.1.0");
 		const out = packAll();
+		setRegistry(onNpm("1.0.0"));
+		expect(run(["publish", out, "HEAD", "--dry-run"], { REPUBLISH: "true" }).status).toBe(0);
+		rmSync(join(dir, "log"));
 		setRegistry([
 			"usertrust@1.0.0 yes",
 			"usertrust@1.1.0 yes",
 			"usertrust-verify@1.1.0 yes",
+			distOf("1.1.0", "core"),
+			distOf("1.1.0", "verify"),
 			...onNpm("1.0.0").slice(2),
 		]);
 		expect(run(["latest-flag", "1.1.0"]).out.trim()).toBe("true");
@@ -1019,14 +1168,17 @@ describe("release.sh publish: the npm dist-tag", { timeout: 30_000 }, () => {
 		expect(log()).toEqual(published("1.1.0", DIRS.slice(2), false, "latest"));
 	});
 
-	it("a package npm has never published (E404) holds nothing, and npm is asked about all six", () => {
+	it("a package npm has never published (its registry 404) holds nothing; npm is asked about all six", () => {
 		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
 		setRegistry(onNpm("1.0.0").filter((l) => !l.startsWith("usertrust-ui ")));
 		const r = run(["latest-flag", "1.0.0"]);
 		expect(r.status, r.err).toBe(0);
 		expect(r.out.trim()).toBe("true");
 		expect(readFileSync(join(dir, "log.views"), "utf8").trim().split("\n")).toEqual(
-			DIRS.map((d) => `view ${NAMES[d]} versions --json --registry https://registry.npmjs.org/`),
+			DIRS.map(
+				(d) =>
+					`view ${NAMES[d]} versions --json --tag latest --registry https://registry.npmjs.org/`,
+			),
 		);
 	});
 
@@ -1071,6 +1223,52 @@ describe("release.sh publish: the npm dist-tag", { timeout: 30_000 }, () => {
 			expect(r.status).not.toBe(0);
 			expect(r.out).toBe("");
 			expect(r.err).toContain(message);
+		});
+	}
+
+	for (const env of [{ npm_config_tag: "next" }, { NPM_CONFIG_TAG: "next" }]) {
+		it(`${Object.keys(env)[0]}=next in the environment does not hide a higher version on npm`, () => {
+			// npm resolves a bare name against the tag config (lib/commands/view.js): a tag the
+			// package lacks matches no version, and npm answers E404 "No match found". The tag is
+			// dropped before npm runs, view asks for latest explicitly, and that E404 never reads
+			// as "never published".
+			git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+			releaseCommit("1.1.0");
+			const out = packAll();
+			setRegistry(onNpm("1.0.0", { "usertrust-server": "1.0.0,1.2.0" }));
+			const flag = run(["latest-flag", "1.1.0"], env);
+			expect(flag.status, flag.err).toBe(0);
+			expect(flag.out.trim()).toBe("false");
+			expect(run(["dist-tag", "1.1.0"], env).out.trim()).toBe("backfill");
+			const dry = run(["publish", out, "HEAD", "--dry-run"], env);
+			expect(dry.status, dry.err).toBe(0);
+			expect(log()).toEqual(published("1.1.0", DIRS, true, "backfill"));
+			expect(readFileSync(join(dir, "log.tagenv"), "utf8")).toBe("");
+		});
+	}
+
+	for (const [answer, message] of [
+		["nomatch:next", "E404: No match found for version next"],
+		["e404-other", "E404: Not Found - GET https://registry.npmjs.org/some-other-package"],
+		["unpublished", "usertrust-verify was unpublished from npm (Unpublished on 2026-01-01"],
+	] as const) {
+		it(`an npm view E404 other than the package's own 404 (${answer}) refuses before any publish`, () => {
+			git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+			const out = packAll();
+			setRegistry(onNpm("1.0.0", { "usertrust-verify": answer }));
+			rmSync(join(dir, "calls"), { force: true });
+			for (const args of [
+				["publish", out, "HEAD", "--dry-run"],
+				["publish", out, "HEAD"],
+				["latest-flag", "1.0.0"],
+			]) {
+				const r = run(args);
+				expect(r.status, args.join(" ")).not.toBe(0);
+				expect(r.out.trim()).not.toMatch(/^(true|false)$/);
+				expect(r.err).toContain(message);
+			}
+			expect(log()).toEqual([]);
+			expect(readFileSync(join(dir, "calls"), "utf8")).not.toContain("publish");
 		});
 	}
 

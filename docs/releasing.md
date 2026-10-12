@@ -77,12 +77,32 @@ repository or mint an OIDC token for provenance:
       check that decides the GitHub Release's Latest (step 6): `latest` only for the newest
       release, `backfill` for an older version finished by republish, so npm's `latest` never
       moves back to it. The check: no `v*` tag is a higher semver (tags fetched first), and
-      no package has a higher version on npm (`npm view <name> versions --json`, the highest
-      non-prerelease version, which is npm's own rule; a version published without a `v*`
-      tag, or under another dist-tag, still counts; a package npm has never published holds
-      nothing, and a package already at this version is skipped, not counted as higher). A
+      no package has a higher version on npm (`npm view <name> versions --json --tag latest`,
+      the highest non-prerelease version, which is npm's own rule; a version published
+      without a `v*` tag, or under another dist-tag, still counts; a package already at this
+      version is not counted as higher). Only the registry's own 404 for the package
+      (`Not Found - GET https://registry.npmjs.org/<name>`) reads as "never published, holds
+      nothing". Any other E404 refuses: npm resolves a bare name against its `tag` config
+      (`lib/commands/view.js`), so a tag the package lacks answers E404 `No match found for
+      version <tag>` though the package exists, and an unpublished package (`Unpublished on
+      <time>`) no longer shows which versions it held. For the same reason
+      `scripts/release.sh` drops any `npm_config_tag` from its environment (npm reads the
+      name in any case) before running npm at all, and `npm view` is given `--tag latest`. A
       registry it cannot read, or an answer it cannot parse, refuses the release: it never
       defaults to `latest`.
+      **Then it checks all six against npm, before publishing any.** A new release refuses
+      if any `<name>@<version>` is already there: the build job checked none was, but the
+      approval can come hours later, and a version published in between is not this
+      release's. This is the dry-run step, before the push: nothing is pushed, published or
+      released, and the error names each package. A republish skips a package already there
+      only if npm holds exactly the tarball this run assembled (its `dist.integrity` is the
+      sha512, and its `dist.shasum` the sha1, of our tarball; read with `npm view
+      <name>@<version> dist --json`); a different, missing or unreadable digest refuses
+      before anything is published. npm uploads a tarball's bytes unchanged (npm/cli v11.19.0:
+      `workspaces/libnpmpack/lib/index.js` reads the file through pacote, and
+      `workspaces/libnpmpublish/lib/publish.js` computes both digests from those bytes and
+      uploads them), and the same commit assembles the same bytes, so a package an earlier run
+      of this workflow published matches.
       `latest` is applied as npm's default, with **no `--tag`**, so that npm's own refusal to
       apply `latest` implicitly to a version not higher than one it holds stays active as a
       backstop (an explicit `--tag latest` would bypass it); `backfill` is passed as
@@ -248,9 +268,9 @@ OIDC token or `NPM_TOKEN`.
 
 | Mode | Runs | Pushes | Publishes | GitHub Release |
 |---|---|---|---|---|
-| normal | every step | release commit + tag, before publishing | all six, under the dist-tag `latest` | created, marked latest |
+| normal | every step | release commit + tag, before publishing | all six, under the dist-tag `latest`; refused, before the push, if any is already on npm | created, marked latest |
 | `dry_run` | every step through the publish dry run, including the local commit and tag, the artifact and its checks | nothing | nothing (`npm publish --dry-run` only) | none |
-| `republish` | ci-gate; build without bump, commit or tag; publish without the release-commit check or the push | nothing | each package not yet on npm, under `latest` if it is the newest release, else `backfill` | created only if missing (Latest only if it is the newest release) |
+| `republish` | ci-gate; build without bump, commit or tag; publish without the release-commit check or the push | nothing | each package not yet on npm (one already there is skipped only if npm holds this run's exact tarball, else refused), under `latest` if it is the newest release, else `backfill` | created only if missing (Latest only if it is the newest release) |
 
 `dry_run` and `republish` can be combined: a republish rehearsal that pushes and publishes
 nothing.
@@ -267,7 +287,7 @@ avoid is the registry holding a version the repository never recorded. Pushing f
   published. Dispatch the release again.
 - **The publish fails, entirely or part way**: the repository records `v<version>` and the
   registry lacks some or all of it. Recover with **republish**, dispatched on the tag (below).
-  It builds the exact tagged tree, skips what is already on npm, publishes the rest, and
+  It builds the exact tagged tree, skips what npm already holds byte-for-byte, publishes the rest, and
   creates the GitHub Release if it is missing. A normal release refuses to bump past a
   version that is not fully published, so a failed release cannot be abandoned by accident.
 - **The GitHub Release fails** after a good publish: republish on the tag creates it (all

@@ -28,9 +28,11 @@
 #   release.sh publish <dir> <commit> [--dry-run]
 #                                        assembles each package's publish tarball from
 #                                        <commit>'s files and the build tarball in <dir> (see
-#                                        scripts/release-tarball.py), then publishes each
-#                                        one not yet on npm, under the dist-tag above (latest
-#                                        as npm's default, with no --tag; see publish)
+#                                        scripts/release-tarball.py), then publishes them
+#                                        under the dist-tag above (latest as npm's default,
+#                                        with no --tag). A new release refuses if any is on npm
+#                                        already; a republish skips one only if npm holds this
+#                                        run's exact bytes. See publish.
 #
 # Run from the repository root. Fails closed: an answer it cannot read is an error, never a pass.
 #
@@ -50,6 +52,16 @@ shopt -s inherit_errexit 2>/dev/null || true
 set -f
 # Every path given to git is literal, never a pathspec pattern.
 export GIT_LITERAL_PATHSPECS=1
+# npm reads every npm_config_<key> environment variable, the name in any letter case, as
+# config. A tag from there would redirect `npm view <name>` (npm resolves a bare name against
+# the tag config, lib/commands/view.js) and `npm publish` without --tag (it would apply that
+# tag instead of latest). It is dropped here, once, before any npm command runs.
+for _name in $(compgen -e); do
+	case "$(printf '%s' "$_name" | tr '[:upper:]' '[:lower:]')" in
+	npm_config_tag) unset "$_name" ;;
+	esac
+done
+unset _name
 
 # The tool that writes the publish tarballs: this checkout's own copy, next to this script.
 TARBALL_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-tarball.py"
@@ -405,7 +417,7 @@ pack() {
 # active as a backstop; an explicit --tag latest would bypass it. backfill is passed as --tag
 # backfill.
 publish() {
-	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version tag mtime state tgz tmp cfg empty work cache names name
+	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version tag mtime state tgz tmp cfg empty work cache names name skip present
 	if [ -z "$tardir" ] || [ ! -d "$tardir" ] || [ -z "$commit" ]; then
 		err "usage: publish <tarball directory> <commit> [--dry-run]"
 		return 1
@@ -459,13 +471,44 @@ publish() {
 		# (not the shell) expands from this step's environment.
 		printf '//registry.npmjs.org/:_authToken=%s{NODE_AUTH_TOKEN}\n' '$' >"$cfg"
 	fi
+	# Which of the six are already on npm, all checked before any is published. A new release
+	# (REPUBLISH false) refuses if any is: the build job checked none was (assert-unreleased),
+	# but the approval can come hours later, and a version published in between is not this
+	# release's. In a normal release this runs in the dry-run step, before the push. A republish
+	# skips one only if npm holds exactly the tarball this run assembled (same_on_npm).
+	case "${REPUBLISH:-}" in
+	true | false) ;;
+	*)
+		err "REPUBLISH is '${REPUBLISH:-}', not true or false. Refusing to publish."
+		return 1
+		;;
+	esac
+	skip=" "
+	present=""
 	for dir in $(dirs); do
 		pkg=$(name_of "$dir") || return 1
 		state=$(registry_has "${pkg}@${version}") || return 1
-		if [ "$state" = yes ]; then
-			echo "::notice::${pkg}@${version} is already on npm; skipping"
+		[ "$state" = yes ] || continue
+		if [ "$REPUBLISH" != true ]; then
+			present="${present} ${pkg}@${version}"
 			continue
 		fi
+		if ! same_on_npm "${pkg}@${version}" "${tmp}/${dir}/${pkg}-${version}.tgz"; then
+			err "${pkg}@${version} is on npm, but not as the tarball this run assembled from ${commit}. Refusing to publish anything."
+			return 1
+		fi
+		echo "::notice::${pkg}@${version} is already on npm, byte-identical to this run's tarball; skipping"
+		skip="${skip}${dir} "
+	done
+	if [ -n "$present" ]; then
+		err "Already on npm:${present}. A new release publishes only versions nobody has published, and these appeared after the build job checked. Find out how before releasing anything. Refusing to publish anything."
+		return 1
+	fi
+	for dir in $(dirs); do
+		pkg=$(name_of "$dir") || return 1
+		case "$skip" in
+		*" ${dir} "*) continue ;;
+		esac
 		work=$(mktemp -d "${tmp}/work.XXXXXX") || return 1
 		cache=$(mktemp -d "${tmp}/cache.XXXXXX") || return 1
 		# The same command with and without --dry-run, so a dry run exercises the real one.
@@ -485,19 +528,60 @@ publish() {
 		else
 			echo "Publishing ${pkg}@${version} under ${tag}"
 		fi
-		# With no --tag, npm takes the tag from its config, and the environment is config: any
-		# npm_config_tag (npm reads the name in any case) is dropped, so latest means latest.
-		(
-			cd "$work" || exit 1
-			for name in $(compgen -e); do
-				case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
-				npm_config_tag) unset "$name" ;;
-				esac
-			done
-			npm_config_cache="$cache" npm "$@"
-		) || return 1
+		# With no --tag, npm takes the tag from its config: no npm_config_tag reaches it (see
+		# the top of this script), and the user and global configs are ours.
+		(cd "$work" && npm_config_cache="$cache" npm "$@") || return 1
 	done
 	rm -rf "$tmp"
+}
+
+# Whether npm holds <name>@<version> (an explicit version, so no tag config applies) as exactly
+# the bytes of <tgz>: its dist.integrity must be the sha512 of <tgz> and its dist.shasum the
+# sha1. npm uploads a tarball spec's bytes unchanged (libnpmpack hands pacote's read of the file
+# to libnpmpublish, which computes both from those bytes and uploads them; npm/cli v11.19.0),
+# and this script assembles the same bytes from the same commit, so a package an earlier run of
+# this workflow published matches. A missing, unreadable or different answer fails.
+# shellcheck disable=SC2016 # JavaScript, not shell
+SAME_JS='
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const [file, spec] = process.argv.slice(1);
+const fail = (m) => { console.error("::error::" + spec + ": " + m); process.exit(1); };
+let s = "";
+process.stdin.on("data", (d) => { s += d; });
+process.stdin.on("end", () => {
+	let dist;
+	try { dist = JSON.parse(s); } catch (e) { fail("npm answered no JSON for its dist"); }
+	if (dist === null || typeof dist !== "object" || Array.isArray(dist)) fail("npm answered no dist object");
+	if (typeof dist.integrity !== "string" || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(dist.integrity)) {
+		fail("npm gives no single sha512 integrity (" + JSON.stringify(dist.integrity) + ")");
+	}
+	if (typeof dist.shasum !== "string" || !/^[0-9a-f]{40}$/.test(dist.shasum)) {
+		fail("npm gives no sha1 shasum (" + JSON.stringify(dist.shasum) + ")");
+	}
+	const bytes = fs.readFileSync(file);
+	const sha512 = "sha512-" + crypto.createHash("sha512").update(bytes).digest("base64");
+	const sha1 = crypto.createHash("sha1").update(bytes).digest("hex");
+	if (dist.integrity !== sha512) fail("npm holds integrity " + dist.integrity + ", this run assembled " + sha512);
+	if (dist.shasum !== sha1) fail("npm holds shasum " + dist.shasum + ", this run assembled " + sha1);
+});
+'
+
+same_on_npm() {
+	local spec="$1" tgz="$2" out rc errf
+	errf=$(mktemp) || return 1
+	set +e
+	out=$(npm view "$spec" dist --json --registry "$REGISTRY" 2>"$errf")
+	rc=$?
+	set -e
+	if [ "$rc" -ne 0 ]; then
+		err "Could not read ${spec}'s published tarball digest from npm (npm view exited ${rc}):"
+		cat "$errf" >&2
+		rm -f "$errf"
+		return 1
+	fi
+	rm -f "$errf"
+	printf '%s' "$out" | node -e "$SAME_JS" "$tgz" "$spec" || return 1
 }
 
 # Requires the deployment environment the publishing job runs in to exist and to require at
@@ -827,6 +911,34 @@ process.stdin.on("end", () => {
 });
 '
 
+# Classifies a failed `npm view <name> ... --json` from the error npm prints on stdout with
+# --json ({"error": {"code", "summary", "detail"}}; lib/utils/error-message.js, npm 10.9.2 and
+# 11.19.0). Prints "absent" only for the registry's own 404 for the package document, which
+# npm reports as code E404 with the summary "Not Found - GET <registry><name>" (npm-registry-
+# fetch's message; the registry may append " - <reason>"). Prints "unpublished: ..." for E404
+# "Unpublished on <time>" (lib/commands/view.js, when the package's time.unpublished is set),
+# and "other: <code>: <summary>" for anything else, E404 "No match found for version <tag>"
+# included (a version or tag that matched nothing is not a package that does not exist).
+# Argument: the package document's URL.
+# shellcheck disable=SC2016 # JavaScript, not shell
+NPM_404_JS='
+let s = "";
+process.stdin.on("data", (d) => { s += d; });
+process.stdin.on("end", () => {
+	let e;
+	try { e = JSON.parse(s).error; } catch (x) { e = undefined; }
+	if (e === null || typeof e !== "object" || typeof e.code !== "string" || typeof e.summary !== "string") {
+		console.log("other: npm printed no error it names");
+		return;
+	}
+	const head = "Not Found - GET " + process.argv[1];
+	const packageGone = e.summary === head || (e.summary.startsWith(head + " - ") && !e.summary.includes("\n"));
+	if (e.code === "E404" && packageGone) console.log("absent");
+	else if (e.code === "E404" && /^Unpublished on /.test(e.summary)) console.log("unpublished: " + e.summary);
+	else console.log("other: " + e.code + ": " + e.summary.split("\n")[0]);
+});
+'
+
 # Whether no v* release tag is a higher semver than v<version>. Tags are fetched first, so a
 # newer release made since this run started counts. Prints true or false; fails if it cannot
 # tell.
@@ -841,26 +953,36 @@ newest_among_tags() {
 
 # Whether no lockstep package has a published version that is a higher semver than <version>:
 # npm's own rule for refusing an implicit latest (the highest version it holds, prereleases
-# skipped), checked here for all six before any is published. A package npm has never
-# published (E404) holds nothing; an equal version (a partial republish: that package is
-# already on npm, and publish skips it) is not higher. Anything else fails, never reading as
-# "nothing newer": an unreadable registry, an answer that is not a list of versions, or a
-# version in it that is not semver. Prints true or false.
+# skipped), checked here for all six before any is published. `npm view` is given --tag latest
+# so that no tag config (from an .npmrc as well as the environment) narrows what it reads. A
+# package npm has never published (the registry's 404 for it; NPM_404_JS) holds nothing; an
+# equal version (a partial republish) is not higher. Anything else fails, never reading as
+# "nothing newer": an unreadable registry, any other E404 (a version or tag that matched
+# nothing), an unpublished package (which versions it held cannot be read), an answer that is
+# not a list of versions, or a version in it that is not semver. Prints true or false.
 newest_on_npm() {
-	local version="$1" entry pkg out rc errf list all=""
+	local version="$1" entry pkg out rc errf list kind all=""
 	for entry in $PACKAGES; do
 		pkg="${entry##*:}"
 		errf=$(mktemp) || return 1
 		set +e
-		out=$(npm view "$pkg" versions --json --registry "$REGISTRY" 2>"$errf")
+		out=$(npm view "$pkg" versions --json --tag latest --registry "$REGISTRY" 2>"$errf")
 		rc=$?
 		set -e
 		if [ "$rc" -ne 0 ]; then
-			if grep -q 'E404' "$errf"; then
+			kind=$(printf '%s' "$out" | node -e "$NPM_404_JS" "${REGISTRY}${pkg}") || kind="other: unreadable"
+			case "$kind" in
+			absent)
 				rm -f "$errf"
 				continue
-			fi
-			err "Could not read the versions of ${pkg} on npm (npm view exited ${rc}):"
+				;;
+			unpublished:*)
+				err "${pkg} was unpublished from npm (${kind#unpublished: }), so which versions it held cannot be read. Refusing."
+				;;
+			*)
+				err "Could not read the versions of ${pkg} on npm (npm view exited ${rc}; ${kind#other: }):"
+				;;
+			esac
 			cat "$errf" >&2
 			rm -f "$errf"
 			return 1

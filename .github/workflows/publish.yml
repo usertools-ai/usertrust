@@ -388,8 +388,9 @@ jobs:
 
       # ── Publish with provenance ──
       # Assembles the six tarballs again (the same commit gives the same bytes) and publishes
-      # them. Skips a version that is genuinely already on the registry (a republish finishing a
-      # partial publish); any other failure (auth, network, provenance) FAILS the job. A dead
+      # them. A republish skips a version npm already holds byte-for-byte (finishing a partial
+      # publish); a new release refuses one already there, as the dry run did before the push.
+      # Any other failure (auth, network, provenance) FAILS the job. A dead
       # NPM_TOKEN previously surfaced as E404 and was swallowed by a blanket `|| echo
       # warning`: never tolerate errors you haven't identified.
       - name: Publish packages
