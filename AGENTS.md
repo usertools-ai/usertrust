@@ -1047,6 +1047,10 @@ the write reported failure", which is strictly more than either field alone.
 *Prevents:* `failClosed` replacing an actionable denial with an `AuditDegradedError` that hides
 *why* the call was refused. `failClosed` exists to stop an unaudited SPEND from settling; a denial
 has already refused the call and moved no money, so it has nothing left to fail closed about.
+This covers a denial whose append fails DURING the call. A `trust()` client whose writer is already
+degraded when a call starts is refused under `failClosed` before any gate runs
+(`refuseIfAuditDegradedAtStart`): no policy is evaluated, so there is no denial to report, and
+nothing is held, called or appended.
 
 `decision: "deny"` on both kinds is load-bearing — it is what `entropy.ts` counts. That filter
 selects denial kinds by NAME as well as by the `"policy"` substring, because `ledger_rejected` does
