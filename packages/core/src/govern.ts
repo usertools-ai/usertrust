@@ -99,6 +99,7 @@ import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/private-fs.js";
 import { isPersistableSpend } from "./shared/spend-guard.js";
+import { governorVaultBase } from "./shared/vault-base.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
@@ -1198,9 +1199,11 @@ function snapshotActionDescriptor(descriptor: ActionDescriptor): ActionDescripto
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
 	// 1. Load config
-	// Absolute from here: every vault file this client touches is in the vault it was created for,
-	// whatever the working directory becomes later (its audit writer is fixed at creation too).
-	const vaultBase = resolve(opts?.vaultBase ?? process.cwd());
+	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,
+	// so every vault file this client touches is in the vault it was created for, whatever the working
+	// directory becomes later (its audit writer is fixed at creation too). With no `..` left, resolve() only
+	// prefixes the working directory and drops `.` segments; it has nothing to fold.
+	const vaultBase = resolve(governorVaultBase(opts?.vaultBase ?? process.cwd()));
 	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
 	// version left group/world-readable is closed; one another user owns is refused (see
 	// securePrivateVault). This runs before ANYTHING under the vault is read, the config
