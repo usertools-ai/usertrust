@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { EFFECTIVE_BUDGET_FILE } from "../audit/effective-budget.js";
+import { scrubForTerminal } from "../cli/target.js";
 import { PRIVATE_FILE_MODE } from "../shared/private-fs.js";
 
 /**
@@ -196,10 +197,11 @@ function writeRecord(
 			if (code !== "ENOENT")
 				removed = `the earlier record could NOT be removed (${code ?? "error"}); readers show its writtenAt, so it reads as old, never as current`;
 		}
+		// The path is the caller's (a vaultBase), and the error quotes it: scrubbed for the terminal, as every echo is.
 		warnBestEffort(
-			`[usertrust] could not record the enforced budget in ${target}: ${
-				err instanceof Error ? err.message : String(err)
-			}; ${removed}. Enforcement is unaffected; vault readers fall back to the vault config.\n`,
+			`[usertrust] could not record the enforced budget in ${scrubForTerminal(target)}: ${scrubForTerminal(
+				err instanceof Error ? err.message : String(err),
+			)}; ${removed}. Enforcement is unaffected; vault readers fall back to the vault config.\n`,
 		);
 	}
 }

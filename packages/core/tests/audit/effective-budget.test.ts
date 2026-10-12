@@ -573,3 +573,23 @@ describe("the record's warning is best-effort too", () => {
 		await a.destroy();
 	});
 });
+
+describe("the record's warning is scrubbed for the terminal", () => {
+	it("red-first (raw): a vault path and an error carrying ESC and a C1 CSI print neither", () => {
+		const ESC = String.fromCharCode(0x1b);
+		const CSI = String.fromCharCode(0x9b);
+		const dir = join(base, `vault${ESC}[2J${CSI}31m`);
+		mkdirSync(dir, { recursive: true });
+		const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		recordEffectiveBudget(dir, 1_000, {
+			write: (path) => {
+				throw new Error(`EIO: i/o error, open '${path}'${ESC}]0;title${CSI}`);
+			},
+		});
+		const said = err.mock.calls.map((c) => String(c[0])).join("");
+		expect(said).toMatch(/could not record the enforced budget/);
+		expect(said).not.toContain(ESC);
+		expect(said).not.toContain(CSI);
+		expect(said).toContain("vault?[2J?31m");
+	});
+});
