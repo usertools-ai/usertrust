@@ -419,6 +419,24 @@ describe("usertrust report --week", () => {
 		write.mockRestore();
 	});
 
+	it("symlinks inside the vault that point BACK at it (or above it) cannot loop the identity walk", async () => {
+		await vault([{ cost: 1 }]);
+		const vaultDir = join(dir, ".usertrust");
+		symlinkSync(vaultDir, join(vaultDir, "self")); // a link to the vault itself
+		symlinkSync(join(vaultDir, "audit"), join(vaultDir, "audit", "loop")); // a link to its own parent
+		mkdirSync(join(dir, "reports"));
+		process.exitCode = undefined;
+		await run(dir, {}, ["--week", "--end", endIso(), "--out", join(dir, "reports", "ok.md")]);
+		// the walk finished (it did not burn the entry cap on a cycle) and an unrelated directory is allowed
+		expect(process.exitCode).toBeUndefined();
+		expect(existsSync(join(dir, "reports", "ok.md"))).toBe(true);
+		// and writing through the self link is still refused
+		process.exitCode = undefined;
+		await run(dir, {}, ["--week", "--end", endIso(), "--out", join(vaultDir, "self", "x.md")]);
+		expect(process.exitCode).toBe(2);
+		write.mockRestore();
+	});
+
 	it("--tenant-config keeps the user's own spelling: `link/../tenant.json` reads the file the OS resolves, not the lexical one", async () => {
 		await vault([{ cost: 1 }]);
 		const real = join(dir, "real");
