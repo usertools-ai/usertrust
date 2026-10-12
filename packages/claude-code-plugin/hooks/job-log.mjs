@@ -175,15 +175,18 @@ export function parseJobLog(text, sessionId) {
 
 /**
  * Stream the job log at `path` through `jobLogParser`: its parse, in the memory of one line.
- * With `job`, also whether any line names that job (`namesJob`), so a log that cannot be
- * used can still be told apart from one that never mentioned it. Throws as `eachLine` does.
+ * With `job`, also whether any line names that job, or may (a line too long to read)
+ * (`namesJob`), so a log that cannot be used can still be told apart from one that never
+ * mentioned it. Throws as `eachLine` does.
  */
 export async function readJobLog(path, sessionId, job) {
 	const parser = jobLogParser(sessionId);
 	const quoted = job === undefined ? null : `"${job}"`;
 	let namesJob = false;
 	await eachLine(path, (line, terminated) => {
-		if (quoted !== null && line?.includes(quoted)) namesJob = true;
+		// A line too long to read (null) may name the job: counted as naming it, so a log made
+		// invalid by that very line is still reported against the job, never dropped unseen.
+		if (quoted !== null && (line === null || line.includes(quoted))) namesJob = true;
 		parser.line(line, terminated);
 	});
 	return { parsed: parser.result(), namesJob };

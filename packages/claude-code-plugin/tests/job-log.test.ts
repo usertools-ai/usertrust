@@ -1567,6 +1567,33 @@ describe("usertrust-job coverage — the CLI reports gaps, not a verdict", () =>
 		);
 	}, 120_000);
 
+	it("a log naming the job only in a line too long to read is still reported against the job", async () => {
+		const J = "bug-1";
+		const S2 = "sess-long-line";
+		const vault = join(state, "vault-long");
+		await mkdir(join(vault, "audit"), { recursive: true });
+		await writeFile(
+			join(vault, "audit", "events.jsonl"),
+			`${JSON.stringify({ kind: "llm_call", actor: `claude-code:${SID}:main:main`, data: { transferId: "tx_1", cost: 5, job: J, principal: { origin: `claude-code:${SID}` }, usageFrom: iso(T0 + 2000), usageTo: iso(T0 + 3000) } })}\n`,
+		);
+		// A fully recorded session for the job, and one whose only mention of it is in a broken
+		// line past READ_BOUND.line (16 MiB): streamed, that line is never read.
+		await writeLog(
+			start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null),
+		);
+		await writeLog(
+			`${start(S2, T0)}{"sid":"${S2}","op":"start","job":"${J}","pad":"${"x".repeat(17 * 1024 * 1024)}\n`,
+			S2,
+		);
+		const r = await cliOut(["coverage", J, "--vault", vault, "--watch", join(state, "none.jsonl")]);
+		expect(r.code).toBe(0);
+		const out = JSON.parse(r.stdout) as { knownGaps: Array<{ gap: string }> };
+		// mutant: a null line never sets namesJob → the invalid log is dropped, knownGaps: []
+		expect(out.knownGaps.map((g) => g.gap).join(" ")).toContain(
+			`session ${S2}: the job log is invalid (line 2 is too long)`,
+		);
+	}, 60_000);
+
 	it("a FIFO in an audit log's place: no verdict, at once, never a hang", async () => {
 		if (process.platform === "win32") return;
 		const vault = join(state, "vault-fifo");
