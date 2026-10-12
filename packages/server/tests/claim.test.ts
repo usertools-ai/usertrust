@@ -13,7 +13,9 @@
  */
 
 import { readFileSync } from "node:fs";
+import { request } from "node:http";
 import { join } from "node:path";
+import type { Governor } from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ServerConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
@@ -70,14 +72,86 @@ const post = (base: string, path: string, body: unknown): Promise<Response> =>
 		body: JSON.stringify(body),
 	});
 
+interface Deferred {
+	promise: Promise<void>;
+	resolve: () => void;
+}
+function deferred(): Deferred {
+	let resolve!: () => void;
+	const promise = new Promise<void>((r) => {
+		resolve = r;
+	});
+	return { promise, resolve };
+}
+
+/** POST on a new connection that closes after its answer: no keep-alive socket is reused. */
+function postOnFreshConnection(
+	port: number,
+	path: string,
+	body: unknown,
+): Promise<{ status: number; body: string }> {
+	const payload = JSON.stringify(body);
+	return new Promise((resolve, reject) => {
+		const req = request(
+			{
+				host: "127.0.0.1",
+				port,
+				path,
+				method: "POST",
+				agent: false,
+				headers: {
+					"content-type": "application/json",
+					"content-length": Buffer.byteLength(payload),
+					authorization: `Bearer ${KEY}`,
+					connection: "close",
+				},
+			},
+			(res) => {
+				let text = "";
+				res.setEncoding("utf-8");
+				res.on("data", (chunk: string) => {
+					text += chunk;
+				});
+				res.on("end", () => resolve({ status: res.statusCode ?? 0, body: text }));
+				res.on("error", reject);
+			},
+		);
+		req.on("error", reject);
+		req.end(payload);
+	});
+}
+
 describe("claim refuses an entry that is no longer the one in pending", () => {
 	it("a settle that lands mid-shutdown is charged once and is never released under, nor put back", async () => {
 		// close() snapshots `pending` and releases [A, B, C] one at a time (each void takes 150 ms). A
 		// client settles B in that window; B's settle is slow. When the loop reaches B it must find B
 		// claimed already: a second claim would release B under the settle, and a failed settle would
 		// then restore B into `pending` on a closing server (usage neither charged nor recorded).
-		const fake = createFakeGovernor({ releaseDelayMs: 150, settleDelayMs: 250 });
-		server = createUsertrustServer({ config: config(), factory: async () => fake.governor });
+		//
+		// The order is driven by the governor's own signals, never by timers: each step waits for the
+		// one before it to have STARTED. (A 30 ms timer here raced shutdown's closeAllConnections and cut
+		// the settle's socket now and then.)
+		const fake = createFakeGovernor();
+		const releaseStarted = new Map<string, Deferred>();
+		const releaseGo = new Map<string, Deferred>();
+		const settleStarted = deferred();
+		const settleGo = deferred();
+		const governor: Governor = {
+			...fake.governor,
+			async release(auth, reason, o) {
+				releaseStarted.get(auth.transferId)?.resolve();
+				// An id with no gate (B, if a regression ever released it) is not parked: the
+				// `released` assertion below catches it instead of a hang.
+				await releaseGo.get(auth.transferId)?.promise;
+				return fake.governor.release(auth, reason, o);
+			},
+			async settle(auth, params) {
+				settleStarted.resolve();
+				await settleGo.promise;
+				return fake.governor.settle(auth, params);
+			},
+		};
+		server = createUsertrustServer({ config: config(), factory: async () => governor });
 		const { port } = await server.listen();
 		const base = `http://127.0.0.1:${port}`;
 		const auth = async (): Promise<string> => {
@@ -91,16 +165,27 @@ describe("claim refuses an entry that is no longer the one in pending", () => {
 		const a = await auth();
 		const b = await auth();
 		const c = await auth();
+		for (const id of [a, c]) {
+			releaseStarted.set(id, deferred());
+			releaseGo.set(id, deferred());
+		}
 		const closing = server.close();
-		await new Promise((r) => setTimeout(r, 30)); // the loop is parked on A's release
-		const settle = await post(base, "/v1/settle", {
+		await releaseStarted.get(a)?.promise; // the loop is parked on A's release
+		// On a connection of its own, so it never rides a keep-alive socket shutdown may cut.
+		const settle = postOnFreshConnection(port, "/v1/settle", {
 			transferId: b,
 			inputTokens: 5,
 			outputTokens: 5,
 		});
+		await settleStarted.promise; // B is claimed by the settle, which is in flight
+		releaseGo.get(a)?.resolve();
+		await releaseStarted.get(c)?.promise; // the loop has passed B while B's settle is still running
+		settleGo.resolve();
+		const settled = await settle; // answered before the loop can reach closeAllConnections
+		releaseGo.get(c)?.resolve();
 		await closing;
 		server = undefined;
-		expect(settle.status).toBe(200);
+		expect(settled.status).toBe(200);
 		expect(fake.calls.settled).toEqual([b]);
 		expect(fake.calls.released).toEqual([a, c]);
 	}, 20_000);
