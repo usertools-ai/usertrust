@@ -30,10 +30,15 @@ import {
 	renderNotFound,
 	renderReceipt,
 	type TransactionEvent,
-	UNRECOVERABLE_KINDS,
 } from "./receipt.js";
 import { parseRekorReceipt, type RekorVerification, verifyRekorReceipt } from "./rekor-verify.js";
-import { firstTerminalOf, selectTransferEvent, type TransferStatus } from "./verdict.js";
+import {
+	firstTerminalOf,
+	matchesTransfer,
+	selectTransferEvent,
+	type TransferStatus,
+	transferIdHash,
+} from "./verdict.js";
 import {
 	buildMerkleTree,
 	generateInclusionProof,
@@ -93,9 +98,12 @@ export {
 } from "./rekor-verify.js";
 export {
 	firstTerminalOf,
+	matchesTransfer,
 	selectTransferEvent,
 	type TransferStatus,
 	type TransferVerdict,
+	transferIdHash,
+	transferKeysOf,
 	transferVerdict,
 } from "./verdict.js";
 export {
@@ -885,15 +893,10 @@ export function verifyTransaction(
 
 	// No per-use shape guard needed: `normalizeEvent` already guarantees `kind`
 	// is a string, `data` is an object, and `transferId` is a string.
-	// `settlement_unrecoverable` stores only the SHA-256 of its transferId (the id of a hold the server
-	// did not hold is caller text), so that kind matches on the hash of the queried id, as the producer
-	// computes it. Any other kind carrying a coincidental `transferIdHash` field is not matched.
-	const txHash = createHash("sha256").update(txId).digest("hex");
-	const matching = events.filter(
-		(e) =>
-			e.data.transferId === txId ||
-			(UNRECOVERABLE_KINDS.has(e.kind) && e.data.transferIdHash === txHash),
-	);
+	// `settlement_unrecoverable` stores only the SHA-256 of its transferId, so that kind matches on the
+	// hash of the queried id (`matchesTransfer`).
+	const txHash = transferIdHash(txId);
+	const matching = events.filter((e) => matchesTransfer(e, txId, txHash));
 	const firstTerminal = firstTerminalOf(matching);
 	const targetEvent = selectTransferEvent(matching);
 

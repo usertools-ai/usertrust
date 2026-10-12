@@ -9,6 +9,7 @@
  * `settlement_unrecoverable` by the hash of the queried id).
  */
 
+import { createHash } from "node:crypto";
 import {
 	eventStatus,
 	RELEASE_KINDS,
@@ -29,6 +30,38 @@ export interface TransferVerdict {
 	status: TransferStatus;
 	/** The record the verdict rests on. */
 	event: TransactionEvent;
+}
+
+/** The SHA-256 of a transfer id, in hex, as the producer computes `transferIdHash`. */
+export function transferIdHash(transferId: string): string {
+	return createHash("sha256").update(transferId).digest("hex");
+}
+
+/**
+ * Whether `e` is a record of the transfer `txId` (`txHash` is `transferIdHash(txId)`), the match `--tx` makes:
+ * its `transferId`, or, for `settlement_unrecoverable`, the hash it stores in place of one (the id of a hold the server
+ * did not hold is caller text). Any other kind carrying a coincidental `transferIdHash` field is not matched.
+ */
+export function matchesTransfer(e: TransactionEvent, txId: string, txHash: string): boolean {
+	return (
+		e.data.transferId === txId ||
+		(UNRECOVERABLE_KINDS.has(e.kind) && e.data.transferIdHash === txHash)
+	);
+}
+
+/**
+ * The same match as keys, to group a whole chain by transfer: the `transferIdHash` of every transfer `e` belongs to.
+ * For a non-empty id, `matchesTransfer(e, id, transferIdHash(id))` holds exactly when this contains
+ * `transferIdHash(id)`. The key of its own `transferId` comes first.
+ */
+export function transferKeysOf(e: TransactionEvent): string[] {
+	const keys: string[] = [];
+	const id = e.data.transferId;
+	if (id !== undefined && id !== "") keys.push(transferIdHash(id));
+	const hash = e.data.transferIdHash;
+	if (UNRECOVERABLE_KINDS.has(e.kind) && hash !== undefined && !keys.includes(hash))
+		keys.push(hash);
+	return keys;
 }
 
 const isFailureTerminal = (e: TransactionEvent): boolean =>

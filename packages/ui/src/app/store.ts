@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from "react";
 import type { SummaryPayload } from "../shared/api.js";
+import { frameVersion, SnapshotReplay, type Update } from "../shared/replay.js";
 import type { LedgerRow, RowStatus } from "../shared/rows.js";
 
 export interface LedgerData {
@@ -18,11 +19,16 @@ export interface LedgerData {
 	liveIds: Set<string>;
 }
 
-async function fetchAll(): Promise<{ rows: LedgerRow[]; summary: SummaryPayload }> {
+async function fetchAll(): Promise<{
+	rows: LedgerRow[];
+	summary: SummaryPayload;
+	version: number;
+}> {
 	const [eventsRes, summaryRes] = await Promise.all([fetch("/api/events"), fetch("/api/summary")]);
-	const { rows } = (await eventsRes.json()) as { rows: LedgerRow[] };
+	const { rows, version } = (await eventsRes.json()) as { rows: LedgerRow[]; version?: unknown };
 	const summary = (await summaryRes.json()) as SummaryPayload;
-	return { rows, summary };
+	// No version: older than every frame, so every kept frame is re-applied on top.
+	return { rows, summary, version: typeof version === "number" ? version : -1 };
 }
 
 export function useLedger(): LedgerData {
@@ -36,24 +42,37 @@ export function useLedger(): LedgerData {
 	useEffect(() => {
 		let cancelled = false;
 		const flashTimers = new Set<ReturnType<typeof setTimeout>>();
+		// A snapshot replaces the rows wholesale; frames that overtook it are re-applied on top (shared/replay.ts).
+		const replay = new SnapshotReplay<LedgerData>();
+		const frame = (e: Event, apply: Update<LedgerData>): void => {
+			replay.record(frameVersion((e as MessageEvent).lastEventId), apply);
+			setData(apply);
+		};
 		const resync = (): void => {
+			replay.begin();
 			fetchAll()
-				.then(({ rows, summary }) => {
+				.then(({ rows, summary, version }) => {
 					// liveIds is flash state for SSE arrivals only — a resync
-					// replaces the row set wholesale, so it starts clean.
-					if (!cancelled) setData((d) => ({ ...d, rows, summary, liveIds: new Set<string>() }));
+					// replaces the row set wholesale, so it starts clean (after
+					// the replay too: a re-applied frame is not a new arrival).
+					if (!cancelled) {
+						const install = replay.land(version, (d) => ({ ...d, rows, summary }));
+						setData((d) => ({ ...install(d), liveIds: new Set<string>() }));
+					}
 				})
 				.catch((err: unknown) => {
 					// Amendment A6: never leave an unhandled rejection; drop the
 					// live indicator so the UI shows the data may be stale.
 					console.error("usertrust-ui: ledger fetch failed", err);
 					if (!cancelled) setData((d) => ({ ...d, live: false }));
-				});
+				})
+				.finally(() => replay.end());
 		};
 		resync();
 
 		const source = new EventSource("/api/tail");
 		source.addEventListener("open", () => {
+			replay.reset();
 			setData((d) => ({ ...d, live: true }));
 			// Amendment A6: resync on every open — covers rows missed while
 			// disconnected (EventSource auto-reconnects).
@@ -62,7 +81,7 @@ export function useLedger(): LedgerData {
 		source.addEventListener("error", () => setData((d) => ({ ...d, live: false })));
 		source.addEventListener("rows", (e) => {
 			const fresh = JSON.parse((e as MessageEvent).data) as LedgerRow[];
-			setData((d) => {
+			frame(e, (d) => {
 				// Dedup by id: an SSE frame can race the open-triggered resync
 				// fetch and redeliver rows the fetch already returned.
 				const seen = new Set(d.rows.map((r) => r.id));
@@ -95,7 +114,7 @@ export function useLedger(): LedgerData {
 				status: RowStatus;
 			}>;
 			const next = new Map(changes.map((c) => [c.id, c.status]));
-			setData((d) => ({
+			frame(e, (d) => ({
 				...d,
 				rows: d.rows.map((r) => {
 					const status = next.get(r.id);
@@ -105,7 +124,7 @@ export function useLedger(): LedgerData {
 		});
 		source.addEventListener("summary", (e) => {
 			const summary = JSON.parse((e as MessageEvent).data) as SummaryPayload;
-			setData((d) => ({ ...d, summary }));
+			frame(e, (d) => ({ ...d, summary }));
 		});
 		source.addEventListener("resync", resync);
 

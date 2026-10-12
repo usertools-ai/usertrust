@@ -10,13 +10,16 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { verifyTransaction } from "usertrust-verify";
+import { transferIdHash, verifyTransaction } from "usertrust-verify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { loadState } from "../src/server/state.js";
 import { kindClass, VERDICT_STATUS } from "../src/shared/rows.js";
 
-const TRANSFERS: Array<[string, Array<{ kind: string; data: Record<string, unknown> }>]> = [
+// `hashOnly`: the record carries its transferId's hash instead of the id, as an unrecoverable settle writes it.
+const TRANSFERS: Array<
+	[string, Array<{ kind: string; data: Record<string, unknown>; hashOnly?: true }>]
+> = [
 	["tx_settled", [{ kind: "llm_call", data: { settled: true, cost: 5 } }]],
 	[
 		"tx_optimistic",
@@ -50,11 +53,25 @@ const TRANSFERS: Array<[string, Array<{ kind: string; data: Record<string, unkno
 			{ kind: "stream_partial_delivery", data: { error: "cut off" } },
 		],
 	],
+	// A TTL sweep releases the hold, then the late settle finds no hold: one transfer, RELEASED (the first terminal).
+	[
+		"tx_swept_then_unrecoverable",
+		[
+			{ kind: "hold_released", data: { reason: "pending TTL expired" } },
+			{ kind: "settlement_unrecoverable", data: { reason: "no hold" }, hashOnly: true },
+		],
+	],
+	[
+		"tx_unrecoverable",
+		[{ kind: "settlement_unrecoverable", data: { reason: "no hold" }, hashOnly: true }],
+	],
 ];
 
 describe("PARITY: the ledger UI and `usertrust-verify --tx` give every transfer the same verdict", () => {
 	let base: string;
 	let vault: string;
+	/** The ids of the events written for each transfer: a hash-only row carries no transferId to match on. */
+	const written = new Map<string, string[]>();
 
 	beforeAll(async () => {
 		base = mkdtempSync(join(tmpdir(), "trust-verdict-parity-"));
@@ -62,9 +79,17 @@ describe("PARITY: the ledger UI and `usertrust-verify --tx` give every transfer 
 		mkdirSync(join(vault, "audit"), { recursive: true });
 		const writer = createAuditWriter(base);
 		for (const [transferId, events] of TRANSFERS) {
+			const ids: string[] = [];
 			for (const e of events) {
-				await writer.appendEvent({ kind: e.kind, actor: "local", data: { ...e.data, transferId } });
+				const id = e.hashOnly ? { transferIdHash: transferIdHash(transferId) } : { transferId };
+				const event = await writer.appendEvent({
+					kind: e.kind,
+					actor: "local",
+					data: { ...e.data, ...id },
+				});
+				ids.push(event.id);
 			}
+			written.set(transferId, ids);
 		}
 		writer.release();
 	});
@@ -75,12 +100,18 @@ describe("PARITY: the ledger UI and `usertrust-verify --tx` give every transfer 
 		expect(tx.found).toBe(true);
 		expect(tx.status).toBeDefined();
 		const expected = VERDICT_STATUS[tx.status as NonNullable<typeof tx.status>];
+		const ids = written.get(transferId) ?? [];
 		const outcomeRows = loadState(vault).rows.filter(
 			(r) =>
-				r.transferId === transferId &&
+				ids.includes(r.id) &&
 				kindClass(r.kind, r.settled !== undefined ? { settled: r.settled } : {}) === "outcome",
 		);
-		expect(outcomeRows.length).toBeGreaterThan(0);
+		// Every event written for the transfer is an outcome row here, or an annotation.
+		expect(outcomeRows.length).toBe(
+			(TRANSFERS.find(([id]) => id === transferId)?.[1] ?? []).filter(
+				(e) => e.kind !== "anomaly_detected",
+			).length,
+		);
 		for (const r of outcomeRows) expect(r.status, `${r.kind}`).toBe(expected);
 	});
 });

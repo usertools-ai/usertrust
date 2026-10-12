@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import type { PersistedAuditEvent } from "usertrust";
+import { transferIdHash } from "usertrust-verify";
 import { describe, expect, it } from "vitest";
 import { TransferIndex } from "../src/server/verdicts.js";
 import {
@@ -122,6 +123,55 @@ describe("statusOf", () => {
 		).toEqual(["unrecoverable"]);
 	});
 
+	it("red-first (unrecoverable): a hash-only unrecoverable record after a TTL-swept release is RELEASED, as `--tx` says", () => {
+		expect(
+			classify([
+				at(1, {
+					kind: "hold_released",
+					data: { transferId: "tx_swept", reason: "pending TTL expired" },
+				}),
+				at(2, {
+					kind: "settlement_unrecoverable",
+					data: { transferIdHash: transferIdHash("tx_swept"), usage: { inputTokens: 5 } },
+				}),
+			]),
+		).toEqual(["released", "released"]);
+	});
+
+	it("red-first (released): a hash-only record joins a transfer recorded AFTER it; chain order decides", () => {
+		expect(
+			classify([
+				at(1, {
+					kind: "settlement_unrecoverable",
+					data: { transferIdHash: transferIdHash("tx_late") },
+				}),
+				at(2, { kind: "hold_released", data: { transferId: "tx_late", reason: "ttl" } }),
+			]),
+		).toEqual(["unrecoverable", "unrecoverable"]);
+	});
+
+	it("a coincidental transferIdHash on any other kind joins nothing", () => {
+		expect(
+			classify([
+				at(1, { kind: "hold_released", data: { transferId: "tx_h", reason: "ttl" } }),
+				at(2, { data: { transferIdHash: transferIdHash("tx_h"), settled: true } }),
+			]),
+		).toEqual(["released", "settled"]);
+	});
+
+	it("a transfer's cached verdict is dropped when an event joins it", () => {
+		const index = new TransferIndex();
+		const optimistic = at(1, { data: { transferId: "tx_c", settled: true } });
+		index.add([optimistic]);
+		expect(index.verdictOf(optimistic)).toBe("SETTLED");
+		const touched = index.add([
+			at(2, { kind: "settlement_ambiguous", data: { transferId: "tx_c", error: "post failed" } }),
+		]);
+		expect([...touched]).toEqual([transferIdHash("tx_c")]);
+		expect(index.keyOfRow("id-1")).toBe(transferIdHash("tx_c"));
+		expect(index.verdictOf(optimistic)).toBe("AMBIGUOUS");
+	});
+
 	it("labels a denial as denied, not as a zero-cost failed transaction", () => {
 		const events = [
 			at(1, {
@@ -219,6 +269,15 @@ describe("KIND_CLASS", () => {
 		expect(kindClass("deploy_failed", {})).toBe("outcome");
 		expect(kindClass("deploy", { settled: true })).toBe("outcome");
 	});
+
+	it.each(["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"])(
+		"red-first (a function or an object as the status): %s is not a listed kind",
+		(kind) => {
+			expect(kindClass(kind, {})).toBe("unknown");
+			const [row] = toLedgerRows([evt({ kind, data: {} })], { valid: true, breakIndex: null });
+			expect(statusOf(row as never)).toBe("unknown");
+		},
+	);
 
 	it("a kind nobody writes is UNKNOWN, never pending or settled", () => {
 		expect(kindClass("something_new", {})).toBe("unknown");

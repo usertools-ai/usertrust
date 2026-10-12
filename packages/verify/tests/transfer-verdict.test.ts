@@ -12,8 +12,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	matchesTransfer,
 	normalizeEvent,
 	type TransferStatus,
+	transferIdHash,
+	transferKeysOf,
 	transferVerdict,
 	verifyTransaction,
 } from "../src/index.js";
@@ -110,4 +113,51 @@ describe("transferVerdict", () => {
 			}
 		},
 	);
+});
+
+describe("matchesTransfer and transferKeysOf: the `--tx` match, as a predicate and as keys", () => {
+	const H = transferIdHash;
+	const EVENTS: Raw[] = [
+		{ kind: "llm_call", data: { transferId: "tx_a", settled: true } },
+		{ kind: "llm_call", data: { transferId: "" } },
+		{ kind: "llm_call", data: {} },
+		{ kind: "llm_call", data: { transferId: 7 } },
+		// an unrecoverable settle stores only its transferId's hash
+		{ kind: "settlement_unrecoverable", data: { transferIdHash: H("tx_a") } },
+		// both: it matches the id AND the hash
+		{ kind: "settlement_unrecoverable", data: { transferId: "tx_a", transferIdHash: H("tx_b") } },
+		{ kind: "settlement_unrecoverable", data: { transferIdHash: H("tx_a").toUpperCase() } },
+		{ kind: "settlement_unrecoverable", data: { transferIdHash: 7 } },
+		// a coincidental hash on any other kind matches nothing
+		{ kind: "hold_released", data: { transferIdHash: H("tx_a") } },
+	];
+	const IDS = ["tx_a", "tx_b", "tx_c"];
+
+	it.each(EVENTS.map((e, i) => [i, e] as const))(
+		"event %i: the two forms agree for every id",
+		(_i, raw) => {
+			const [e] = chain([raw]).map(normalizeEvent);
+			if (e === undefined) throw new Error("no event");
+			for (const id of IDS) {
+				expect(transferKeysOf(e).includes(H(id)), id).toBe(matchesTransfer(e, id, H(id)));
+			}
+		},
+	);
+
+	it("the keys: a hash-only unrecoverable record joins its transfer; its own id's key comes first", () => {
+		const keys = chain(EVENTS)
+			.map(normalizeEvent)
+			.map((e) => transferKeysOf(e));
+		expect(keys).toEqual([
+			[H("tx_a")],
+			[],
+			[],
+			[],
+			[H("tx_a")],
+			[H("tx_a"), H("tx_b")],
+			[H("tx_a").toUpperCase()],
+			[],
+			[],
+		]);
+	});
 });

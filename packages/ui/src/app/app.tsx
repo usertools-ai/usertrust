@@ -18,7 +18,13 @@ export function App(): React.JSX.Element {
 	const { rows, summary, live, liveIds } = useLedger();
 	const [view, setView] = useState<View>("audit");
 	const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
-	const [open, setOpen] = useState<LedgerRow | null>(null);
+	// The selected row's ID, resolved from the current rows: a `status` correction replaces the row object, and a
+	// panel holding the old one kept showing the old status.
+	const [openId, setOpenId] = useState<string | null>(null);
+	const open = useMemo(
+		() => (openId === null ? null : (rows.find((r) => r.id === openId) ?? null)),
+		[rows, openId],
+	);
 	const filtered = useMemo(() => applyFilters(rows, filters), [rows, filters]);
 
 	// Export what the operator is looking at — the filtered set, not the vault.
@@ -68,11 +74,11 @@ export function App(): React.JSX.Element {
 				<FilterBar rows={rows} filters={filters} onChange={setFilters} />
 			</div>
 			{view === "audit" ? (
-				<AuditTable rows={filtered} liveIds={liveIds} onOpen={setOpen} />
+				<AuditTable rows={filtered} liveIds={liveIds} onOpen={(r: LedgerRow) => setOpenId(r.id)} />
 			) : (
 				<Trends rows={filtered} />
 			)}
-			{open && <RowPanel row={open} onClose={() => setOpen(null)} />}
+			{open && <RowPanel row={open} onClose={() => setOpenId(null)} />}
 		</div>
 	);
 }

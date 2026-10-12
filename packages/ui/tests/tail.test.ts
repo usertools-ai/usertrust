@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { transferIdHash } from "usertrust-verify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { createUiServer, type UiServer } from "../src/server/server.js";
@@ -20,7 +21,7 @@ async function readSse(
 	predicate: (eventName: string) => boolean,
 	act: () => Promise<void>,
 	timeoutMs = 5000,
-): Promise<{ eventName: string; data: string }> {
+): Promise<{ eventName: string; data: string; id: string | undefined }> {
 	const res = await fetch(`http://127.0.0.1:${port}/api/tail`);
 	const reader = (res.body as ReadableStream<Uint8Array>).getReader();
 	await act();
@@ -36,9 +37,10 @@ async function readSse(
 		for (const block of blocks) {
 			const eventName = /event: (.+)/.exec(block)?.[1] ?? "message";
 			const data = /data: (.+)/.exec(block)?.[1] ?? "";
+			const id = /^id: (.+)$/m.exec(block)?.[1];
 			if (predicate(eventName)) {
 				await reader.cancel();
-				return { eventName, data };
+				return { eventName, data, id };
 			}
 		}
 	}
@@ -127,6 +129,58 @@ describe("live tail", () => {
 			["llm_call", "ambiguous"],
 			["settlement_ambiguous", "ambiguous"],
 		]);
+	});
+
+	it("every frame carries the state's version as its SSE id, and a snapshot the version it was taken at", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const events = async () =>
+			(await (await fetch(`http://127.0.0.1:${ui?.port}/api/events`)).json()) as {
+				version: number;
+			};
+		const { version: before } = await events();
+		expect(typeof before).toBe("number");
+		const { id } = await readSse(
+			ui.port,
+			(name) => name === "rows",
+			async () => {
+				const writer = createAuditWriter(tempDir);
+				await writer.appendEvent({
+					kind: "llm_call",
+					actor: "local",
+					data: { cost: 2, transferId: "tx_v" },
+				});
+				writer.release();
+			},
+		);
+		expect(id).toBe(String(before + 1));
+		expect((await events()).version).toBe(before + 1);
+	});
+
+	it("red-first (unrecoverable): a late settle's hash-only record joins its swept transfer live: RELEASED", async () => {
+		const seed = createAuditWriter(tempDir);
+		await seed.appendEvent({
+			kind: "hold_released",
+			actor: "local",
+			data: { transferId: "tx_swept", reason: "pending TTL expired" },
+		});
+		seed.release();
+		ui = await createUiServer(tempDir, { port: 0 });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "rows",
+			async () => {
+				const writer = createAuditWriter(tempDir);
+				await writer.appendEvent({
+					kind: "settlement_unrecoverable",
+					actor: "local",
+					data: { transferIdHash: transferIdHash("tx_swept"), reason: "no hold" },
+				});
+				writer.release();
+			},
+		);
+		expect(
+			(JSON.parse(data) as Array<{ kind: string; status?: string }>).map((r) => [r.kind, r.status]),
+		).toEqual([["settlement_unrecoverable", "released"]]);
 	});
 
 	it("signals resync when the log shrinks", async () => {

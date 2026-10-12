@@ -7,6 +7,9 @@
  * streams SSE: appended events are incrementally verified (linkage AND a
  * full hash recompute via usertrust-verify's canonicalize); any mismatch,
  * parse failure, or file shrink triggers a full reload + `resync` event.
+ * Every state change bumps a version: each SSE frame carries it as its `id`,
+ * and GET /api/events returns the version its snapshot was taken at, so the
+ * client can re-apply frames newer than a snapshot that overtook them.
  *
  * Hardening (Amendment A3): every response carries
  * `X-Content-Type-Options: nosniff`; requests whose Host header is not the
@@ -56,9 +59,11 @@ export async function createUiServer(
 	let port = 0;
 
 	const clients = new Set<ServerResponse>();
+	/** The state's version: bumped on every change, sent as each frame's SSE `id` and with each snapshot. */
+	let version = 0;
 
 	function broadcast(eventName: string, data: unknown): void {
-		const frame = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
+		const frame = `id: ${version}\nevent: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
 		for (const client of clients) client.write(frame);
 	}
 
@@ -91,11 +96,12 @@ export async function createUiServer(
 			// settlement), so every visible row of a touched transfer is re-classified, and each change is sent.
 			const changed: Array<{ id: string; status: RowStatus }> = [];
 			for (const r of state.rows) {
-				if (r.transferId === undefined || !touched.has(r.transferId)) continue;
+				const key = state.transfers.keyOfRow(r.id);
+				if (key === undefined || !touched.has(key)) continue;
 				const status = statusFor(
 					r.kind,
 					r.settled !== undefined ? { settled: r.settled } : {},
-					state.transfers.verdictOfTransfer(r.transferId),
+					state.transfers.verdictOfTransfer(key),
 				);
 				if (status !== r.status) {
 					r.status = status;
@@ -121,6 +127,7 @@ export async function createUiServer(
 				state.summary.truncated = true;
 			}
 			state.summary.rowCount = state.rows.length;
+			version += 1;
 			if (changed.length > 0) broadcast("status", changed);
 			broadcast("rows", rows);
 			broadcast("summary", state.summary);
@@ -131,6 +138,7 @@ export async function createUiServer(
 
 	function handleResync(): void {
 		state = loadState(vaultPath);
+		version += 1;
 		broadcast("resync", {});
 		broadcast("summary", state.summary);
 	}
@@ -181,7 +189,7 @@ export async function createUiServer(
 			return;
 		}
 		if (url.pathname === "/api/events" && req.method === "GET") {
-			sendJson(res, 200, { rows: state.rows });
+			sendJson(res, 200, { rows: state.rows, version });
 			return;
 		}
 		if (url.pathname === "/api/tail" && req.method === "GET") {

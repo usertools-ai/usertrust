@@ -174,8 +174,8 @@ export const KIND_CLASS: Readonly<Record<string, KindClass>> = {
 };
 
 export function kindClass(kind: string, data: Record<string, unknown>): KindClass | "unknown" {
-	const listed = KIND_CLASS[kind];
-	if (listed !== undefined) return listed;
+	// OWN properties only: an action kind is the caller's text, and `KIND_CLASS["constructor"]` is a function.
+	if (Object.hasOwn(KIND_CLASS, kind)) return KIND_CLASS[kind] as KindClass;
 	if (kind.endsWith("_failed") || typeof data.settled === "boolean") return "outcome";
 	return "unknown";
 }
