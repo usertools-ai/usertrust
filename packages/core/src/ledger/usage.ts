@@ -675,23 +675,20 @@ export function fromOpenAICompletionsUsage(usage: unknown): NormalizedUsage {
 	const u = asRecord(usage);
 	const promptDetails = readObject(u, "prompt_tokens_details");
 
-	// The RAW prompt, and each cache figure subtracted from it, is held to the ceiling BEFORE the tiers are derived
-	// (see `component`): an absurd prompt could otherwise hide behind a large cache (150M prompt, 100M cached, 50M
+	// Every figure is read RAW through `component`, so an absurd or invalid one is refused under its tier, never priced
+	// and never read as absent. The raw prompt, and each cache figure subtracted from it, is held to the ceiling BEFORE
+	// the tiers are derived: an absurd prompt could otherwise hide behind a large cache (150M prompt, 100M cached, 50M
 	// fresh input, every derived tier plausible). A refused prompt is attributed to the input tier.
 	const refused: Partial<Record<UsageTier, number>> = {};
-	const prompt = component(readCount(u.prompt_tokens), "inputTokens", refused);
-	const completion = readCount(u.completion_tokens);
+	const prompt = component(u.prompt_tokens, "inputTokens", refused);
+	const completion = component(u.completion_tokens, "outputTokens", refused);
 
-	const cacheRead =
-		component(
-			promptDetails ? readCount(promptDetails.cached_tokens) : null,
-			"cacheReadTokens",
-			refused,
-		) ?? 0;
+	const cacheRead = component(promptDetails?.cached_tokens, "cacheReadTokens", refused) ?? 0;
+	// The fallback is taken only when the first field is MISSING (`??` on the raw values): a present invalid
+	// `cache_write_tokens` is refused, not skipped over.
 	const cacheWrite =
 		component(
-			readCount(u.cache_write_tokens) ??
-				(promptDetails ? readCount(promptDetails.cache_write_tokens) : null),
+			u.cache_write_tokens ?? promptDetails?.cache_write_tokens,
 			"cacheWriteTokens",
 			refused,
 		) ?? 0;
@@ -723,24 +720,18 @@ export function fromOpenAIResponsesUsage(usage: unknown): NormalizedUsage {
 	const u = asRecord(usage);
 	const inputDetails = readObject(u, "input_tokens_details");
 
-	// Same rule as completions: the raw input, and each cache figure subtracted from it, is held to the ceiling before
-	// the tiers are derived; a refused raw input is attributed to the input tier.
+	// Same rule as completions: every figure is read raw through `component`, and the raw input, and each cache figure
+	// subtracted from it, is held to the ceiling before the tiers are derived; a refused raw input is attributed to the
+	// input tier.
 	const refused: Partial<Record<UsageTier, number>> = {};
-	const input = component(readCount(u.input_tokens), "inputTokens", refused);
-	const output = readCount(u.output_tokens);
+	const input = component(u.input_tokens, "inputTokens", refused);
+	const output = component(u.output_tokens, "outputTokens", refused);
 
-	const cacheRead =
-		component(
-			inputDetails ? readCount(inputDetails.cached_tokens) : null,
-			"cacheReadTokens",
-			refused,
-		) ?? 0;
+	const cacheRead = component(inputDetails?.cached_tokens, "cacheReadTokens", refused) ?? 0;
+	// As in completions, the fallback field is read only when the first is MISSING.
 	const cacheWrite =
 		component(
-			inputDetails
-				? (readCount(inputDetails.cache_creation_tokens) ??
-						readCount(inputDetails.cache_write_tokens))
-				: null,
+			inputDetails?.cache_creation_tokens ?? inputDetails?.cache_write_tokens,
 			"cacheWriteTokens",
 			refused,
 		) ?? 0;
