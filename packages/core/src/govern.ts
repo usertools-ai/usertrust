@@ -50,6 +50,7 @@ import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
+import { afcRequested, runGovernedAfc } from "./google-afc.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	copyAppliedRates,
@@ -4544,7 +4545,17 @@ function buildGoogleProxy<T>(
 	const modelsProxy = new Proxy(models, {
 		get(target, prop, receiver) {
 			if (prop === "generateContent") {
-				return (...args: unknown[]) => intercept(originalGenerate, target, args);
+				return (...args: unknown[]) => {
+					// With a callable tool the SDK would loop internally and only the last round would be metered:
+					// run the loop here instead, each round its own governed call (see google-afc.ts).
+					const params = args[0];
+					if (afcRequested(params)) {
+						return runGovernedAfc(params as Record<string, unknown>, (roundParams) =>
+							intercept(originalGenerate, target, [roundParams, ...args.slice(1)]),
+						);
+					}
+					return intercept(originalGenerate, target, args);
+				};
 			}
 			return Reflect.get(target, prop, receiver);
 		},
