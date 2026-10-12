@@ -463,7 +463,12 @@ async function* wrapStreamImpl<T>(
 		// which settlement errors reach it). `errored` stays false: nothing voids, because
 		// a settlement that got this far may already have posted the charge.
 		if (!errored) {
-			const settling = onComplete({ usage: snapshot(), chunksDelivered, usageReported, implausible });
+			const settling = onComplete({
+				usage: snapshot(),
+				chunksDelivered,
+				usageReported,
+				implausible,
+			});
 			if (settling !== undefined) await settling;
 		}
 	}
