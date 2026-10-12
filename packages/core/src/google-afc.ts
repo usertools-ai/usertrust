@@ -562,18 +562,18 @@ function refuseLossyClone(root: unknown, rootAt: string): void {
 }
 
 /**
- * A non-callable tool as data WE own. Its own enumerable string-keyed properties are read
- * ONCE each (an accessor's getter on the original receiver), as `structuredClone(tool)`
- * would read them; every field in SDK_TOOL_FIELDS that those would not carry (inherited, or
- * non-enumerable own) is CAPTURED once (`captureOnce`); all are set as enumerable own data
- * on a plain object, which is then structuredClone'd; SDK_TOOL_PRESENCE_FIELD is left out of
- * it and set on the clone as PRESENT (`undefined`) when `in` would find it, its value never
- * read. So the clone holds every field the SDK
- * reads, `functionDeclarations` included, and the verdict, which reads the clone, sees what
- * the SDK will see: a declarations getter beside a callable tool is the SDK's own local
- * error, not an AFC loop. The VALUE of each of those fields, whichever way it was read, must
- * also clone faithfully at every depth (`refuseLossyClone`), or the call is refused. A tool
- * or field that cannot be copied as data is UncloneableAfcInput.
+ * A non-callable tool as data WE own: EXACTLY the fields the SDK reads, nothing else (its
+ * other properties are neither read nor sent by the SDK, so they are never read here).
+ * Each field in SDK_TOOL_FIELDS is CAPTURED once (`captureOnce`: own, non-enumerable or
+ * inherited, a getter run once), checked to clone faithfully at every depth
+ * (`refuseLossyClone`) and `structuredClone`d AT ONCE, before the next field is read: no
+ * live reference is kept, so a later getter that changes an already-captured value (or a
+ * tool that holds itself) cannot reach the copy. SDK_TOOL_PRESENCE_FIELD is carried as
+ * PRESENT (`undefined`) when `in` would find it, its value never read. So the copy holds
+ * every field the SDK reads, `functionDeclarations` included, and the verdict, which reads
+ * the copy, sees what the SDK will see: a declarations getter beside a callable tool is the
+ * SDK's own local error, not an AFC loop. A field that cannot be copied as data is
+ * UncloneableAfcInput, naming it.
  */
 function cloneDataTool(tool: unknown, at: string): unknown {
 	if (tool === null || typeof tool !== "object") {
@@ -583,44 +583,29 @@ function cloneDataTool(tool: unknown, at: string): unknown {
 			throw new UncloneableAfcInput(at);
 		}
 	}
-	const source: Record<string, unknown> = {};
-	let presenceFieldPresent = false;
-	for (const key of Reflect.ownKeys(tool)) {
-		if (typeof key !== "string") continue; // structuredClone copies no symbol key either
-		const d = Object.getOwnPropertyDescriptor(tool, key);
-		if (d === undefined || d.enumerable !== true) continue;
-		if (key === SDK_TOOL_PRESENCE_FIELD) {
-			presenceFieldPresent = true; // presence only: its value is never read, checked or cloned
-			continue;
-		}
-		let value: unknown;
-		try {
-			value = "value" in d ? d.value : d.get?.call(tool);
-		} catch {
-			throw new UncloneableAfcInput(at); // as structuredClone's own read of it threw
-		}
-		setData(source, key, value);
-	}
+	const out: Record<string, unknown> = {};
 	for (const key of SDK_TOOL_FIELDS) {
-		if (Object.hasOwn(source, key)) continue; // an own enumerable field, read above
+		// Own (enumerable or not) or inherited, an accessor read ONCE.
 		const value = captureOnce(tool, key, at);
-		if (value !== undefined) setData(source, key, value);
+		if (value === undefined) continue; // the SDK's `!= null` / `!== undefined`: as absent
+		const keyAt = `${at}.${key}`;
+		// Checked, then cloned at once: neither runs caller code (the walk reads descriptors
+		// only; a value that passed it is plain data, which structuredClone copies without a
+		// getter), so the clone is exactly what was checked, and a later getter on this tool
+		// that changes the caller's value cannot reach it.
+		refuseLossyClone(value, keyAt);
+		let copy: unknown;
+		try {
+			copy = structuredClone(value);
+		} catch {
+			throw new UncloneableAfcInput(keyAt);
+		}
+		setData(out, key, copy);
 	}
-	// Inherited or non-enumerable own: PRESENT, as `in` sees it, with no getter run.
-	presenceFieldPresent ||= presentOnChain(tool, SDK_TOOL_PRESENCE_FIELD, at);
-	for (const key of SDK_TOOL_FIELDS) {
-		if (Object.hasOwn(source, key)) refuseLossyClone(source[key], `${at}.${key}`);
-	}
-	let out: unknown;
-	try {
-		out = structuredClone(source);
-	} catch {
-		throw new UncloneableAfcInput(at);
-	}
-	// Added AFTER the clone, holding `undefined` whatever the tool held: the SDK only tests
-	// `in`, so a value it never reads (a function, a symbol) must not fail the clone.
-	if (presenceFieldPresent) {
-		setData(out as Record<string, unknown>, SDK_TOOL_PRESENCE_FIELD, undefined);
+	// PRESENT, as `in` sees it (own, inherited or non-enumerable), with no getter run and
+	// `undefined` whatever it holds: the SDK only tests `in`, and never reads the value.
+	if (presentOnChain(tool, SDK_TOOL_PRESENCE_FIELD, at)) {
+		setData(out, SDK_TOOL_PRESENCE_FIELD, undefined);
 	}
 	return out;
 }
@@ -717,11 +702,11 @@ function capturedCopy(
  *     `streamFunctionCallArguments` are values we own, and every field the SDK reads from
  *     them (`mode` and `allowedFunctionNames` too) is carried, inherited ones included.
  *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
- *     non-callable tool is cloned as data (`cloneDataTool`: `structuredClone`, plus every
- *     field the SDK reads that the clone would drop, such as a `functionDeclarations`
- *     getter; a tool that cannot be copied as data, including one whose field values hold
- *     a class instance, accessor, non-enumerable property or sparse array at any depth
- *     (`refuseLossyClone`), is indeterminate, so the call is refused naming where);
+ *     non-callable tool is copied as exactly the fields the SDK reads (`cloneDataTool`:
+ *     each captured once, a `functionDeclarations` getter included, and cloned at once; a
+ *     field that cannot be copied as data, including one holding a class instance,
+ *     accessor, non-enumerable property or sparse array at any depth (`refuseLossyClone`),
+ *     is indeterminate, so the call is refused naming where);
  *     callable tools keep their
  *     reference (generateContent then runs them through runGovernedAfc, which needs the
  *     original objects; the stream refuses them). When the snapshot says AFC IS disabled

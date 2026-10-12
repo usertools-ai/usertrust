@@ -905,6 +905,38 @@ function fakeObjectPrototypeTool(): object {
 	return { functionDeclarations: [declaration] };
 }
 
+/**
+ * Scenario: a data tool whose LATER SDK-read field (`urlContext`, an own enumerable getter) empties its earlier
+ * `functionDeclarations` array when read. Each read of the getter is counted.
+ */
+function clearingTool(reads: { urlContext: number }): object {
+	const declarations: Loose[] = [{ name: "lookup" }];
+	return {
+		functionDeclarations: declarations,
+		get urlContext(): undefined {
+			reads.urlContext++;
+			declarations.length = 0;
+			return undefined;
+		},
+	};
+}
+
+/** Scenario: a data tool that holds ITSELF (`self`) and a one-shot `googleSearch` getter (a second read throws). */
+function selfReferencingTool(reads: { googleSearch: number }): object {
+	const tool: Record<string, unknown> = {};
+	Object.defineProperty(tool, "googleSearch", {
+		get: () => {
+			reads.googleSearch++;
+			if (reads.googleSearch > 1) throw new Error("googleSearch read twice");
+			return {};
+		},
+		enumerable: true,
+		configurable: true,
+	});
+	tool["self"] = tool;
+	return tool;
+}
+
 function declaresLookup(): Loose {
 	return { functionDeclarations: [{ name: "lookup" }] };
 }
@@ -1250,6 +1282,73 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 				expect(gov.requests).toHaveLength(0);
 			});
 		}
+
+		it(`${method}: a tool field the SDK never reads (an uncloneable \`hook\`) is not copied: accepted, not forwarded, the body is the SDK's own`, async () => {
+			const makeParams = () => ({
+				model: "gemini-2.5-flash",
+				contents: "go",
+				config: { tools: [{ googleSearch: {}, hook: () => 1 }] },
+			});
+			const { raw, rawResult, gov, govResult, auditKinds } = await both(method, makeParams);
+
+			expect(rawResult).toBe("ok");
+			expect(govResult).toBe("ok");
+			expect(raw.requests).toHaveLength(1);
+			expect(gov.requests).toHaveLength(1);
+			// natively the converters build the wire tool from the fields they read, so `hook` is dropped there too
+			expect(raw.requests[0]?.body["tools"]).toEqual([{ googleSearch: {} }]);
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			expect(auditKinds).not.toContain("policy_denied");
+		});
+
+		it(`${method}: a later field's getter that empties the captured functionDeclarations cannot reach the snapshot: the SDK's own local rejection, no provider request`, async () => {
+			const rawReads = { urlContext: 0 };
+			const govReads = { urlContext: 0 };
+			let made = 0;
+			const makeParams = () => ({
+				model: "gemini-2.5-flash",
+				contents: "go",
+				config: { tools: [clearingTool(made++ === 0 ? rawReads : govReads), wireCallable()] },
+			});
+			const { raw, rawResult, gov, govResult } = await both(method, makeParams);
+
+			// natively the SDK rejects plain declarations beside a callable tool before its converters read urlContext
+			expect(rawResult).toContain("Incompatible tools found at tools[0]");
+			expect(raw.requests).toHaveLength(0);
+			expect(rawReads.urlContext).toBe(0);
+			// governed: the snapshot reads every SDK field up front, ONCE, after functionDeclarations was already cloned
+			expect(govReads.urlContext).toBe(1);
+			expect(gov.requests).toHaveLength(0);
+			if (method === "generateContent") {
+				// left to the SDK, which rejects the snapshot's (intact) declarations the same way
+				expect(govResult).toBe(rawResult);
+			} else {
+				// a stream with a callable tool is refused by governance either way (control for this method)
+				expect(govResult).toContain(`models.${method} with automatic function calling`);
+			}
+		});
+
+		it(`${method}: a tool that holds itself, with a one-shot googleSearch getter: the getter runs once and the call succeeds, as natively`, async () => {
+			const rawReads = { googleSearch: 0 };
+			const govReads = { googleSearch: 0 };
+			let made = 0;
+			const makeParams = () => ({
+				model: "gemini-2.5-flash",
+				contents: "go",
+				config: { tools: [selfReferencingTool(made++ === 0 ? rawReads : govReads)] },
+			});
+			const { raw, rawResult, gov, govResult, auditKinds } = await both(method, makeParams);
+
+			expect(rawResult).toBe("ok");
+			expect(rawReads.googleSearch).toBe(1);
+			expect(govResult).toBe("ok");
+			expect(govReads.googleSearch).toBe(1);
+			expect(raw.requests).toHaveLength(1);
+			expect(gov.requests).toHaveLength(1);
+			expect(raw.requests[0]?.body["tools"]).toEqual([{ googleSearch: {} }]);
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			expect(auditKinds).not.toContain("policy_denied");
+		});
 	}
 
 	it("generateContent with a callable tool: the governed loop's EVERY round carries the class-instance functionCallingConfig, as the SDK's own loop does", async () => {
