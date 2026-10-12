@@ -366,4 +366,50 @@ describe("A2 on the action path: governAction settles XOR voids its hold", () =>
 		expect(receipt.actionKind).toBe("tool_use");
 		await client.destroy();
 	});
+
+	// ── A descriptor getter that destroys the client ──
+	// The snapshot reads the caller's getters after the first `destroyed` check; a getter can call
+	// destroy() there. destroy() marks the client destroyed synchronously, before its first await.
+
+	it("a name getter that destroys the client: rejected as destroyed, the action never runs, nothing is held", async () => {
+		const { engine, held, posted, voided } = recordingEngine();
+		const client = await governed(true, engine, makeAudit());
+		let destroying: Promise<void> | undefined;
+		const descriptor = {
+			kind: ACTION.kind,
+			get name(): string {
+				// Not awaited: destroy() waits for in-flight calls.
+				destroying ??= client.destroy();
+				return ACTION.name;
+			},
+			cost: ACTION.cost,
+		};
+		const run = vi.fn(async () => "ran");
+
+		const err = await outcome(client.governAction(descriptor, run));
+		await destroying;
+
+		expect(destroying).toBeDefined();
+		expect(run).not.toHaveBeenCalled();
+		expect(held).toEqual([]);
+		expect(posted).toEqual([]);
+		expect(voided).toEqual([]);
+		expect(err).toBeInstanceOf(Error);
+		expect((err as Error).message).toBe("TrustedClient has been destroyed");
+	});
+
+	it("CONTROL, an ordinary descriptor: the action runs and its hold is posted once", async () => {
+		const { engine, held, posted, voided } = recordingEngine();
+		const client = await governed(true, engine, makeAudit());
+		const run = vi.fn(async () => "ran");
+
+		const result = await outcome(client.governAction({ ...ACTION }, run));
+
+		expect(result).not.toBeInstanceOf(Error);
+		expect(run).toHaveBeenCalledOnce();
+		expect(held).toHaveLength(1);
+		expect(posted).toEqual(held);
+		expect(voided).toEqual([]);
+		await client.destroy();
+	});
 });

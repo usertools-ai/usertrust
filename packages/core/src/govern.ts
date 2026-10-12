@@ -3190,6 +3190,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			);
 		}
 
+		// Again: a getter the snapshot read can have called destroy() since the first check.
+		if (destroyed) {
+			throw new Error("TrustedClient has been destroyed");
+		}
+
 		inFlightCount++;
 		let callAuditDegraded = false;
 
