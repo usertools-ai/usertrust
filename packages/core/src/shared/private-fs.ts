@@ -384,7 +384,10 @@ export function writePrivateFileAtomic(
 		fsyncSync(dfd);
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException)?.code;
-		// A platform that cannot fsync a directory at all says nothing worth a warning.
+		// A platform that cannot fsync a directory at all says nothing worth a warning. EPERM and
+		// EBADF (which flushing a read-only directory handle can give on Windows) are warned, not
+		// silenced: elsewhere they are real failures, and the warning still says the file was
+		// replaced.
 		if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EOPNOTSUPP" && code !== "EISDIR") {
 			warn(dirSyncWarning(path, code ?? (err instanceof Error ? err.message : String(err))));
 		}

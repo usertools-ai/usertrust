@@ -4,18 +4,30 @@
 // (a stat-then-read by path could pair one file's mode with another's bytes). Counts the
 // samples where a group- or other-readable file holds a NEW key. Prints "ready", then, once
 // `stopFile` exists, `{"samples":n,"exposed":n}`.
+//
+// It never outlives its test: it also stops when the vault is gone (the test's teardown removed
+// it), and after a hard deadline it exits non-zero, so a test that never writes `stopFile` cannot
+// leave it spinning.
 import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+
+const DEADLINE_MS = 30_000;
 
 const [vaultDir, stopFile] = process.argv.slice(2);
 let samples = 0;
 let exposed = 0;
+const deadline = Date.now() + DEADLINE_MS;
 process.stdout.write("ready\n");
 while (!existsSync(stopFile)) {
+	if (Date.now() > deadline) {
+		process.stderr.write(`env-mode-sampler: no stop file after ${DEADLINE_MS} ms; exiting\n`);
+		process.exit(2);
+	}
 	let names = [];
 	try {
 		names = readdirSync(vaultDir).filter((n) => n.startsWith(".env"));
-	} catch {
+	} catch (err) {
+		if (err?.code === "ENOENT") break; // the vault is gone: nothing left to sample
 		continue;
 	}
 	for (const name of names) {

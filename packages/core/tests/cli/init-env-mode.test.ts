@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { type ChildProcessByStdio, spawn } from "node:child_process";
 import {
 	chmodSync,
 	closeSync,
@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock @clack/prompts before importing init
@@ -79,6 +80,69 @@ function readableOldEnv(envPath: string): void {
 	chmodSync(envPath, 0o644);
 }
 
+const SAMPLER = join(import.meta.dirname, "..", "fixtures", "env-mode-sampler.mjs");
+
+function alive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Collects the sampler's stdout: `ready` resolves once it has printed "ready". */
+function samplerOutput(child: ChildProcessByStdio<null, Readable, null>): {
+	ready: Promise<void>;
+	text: () => string;
+} {
+	let out = "";
+	child.stdout.setEncoding("utf-8");
+	const ready = new Promise<void>((resolve) => {
+		child.stdout.on("data", (chunk: string) => {
+			out += chunk;
+			if (out.includes("ready")) resolve();
+		});
+	});
+	return { ready, text: () => out };
+}
+
+/**
+ * Runs `body` with the sampler watching `vault`, and returns the sampler's output. The teardown
+ * is in a `finally`, so a body that throws (or a test that fails) still writes the stop file,
+ * kills the sampler and WAITS for it to exit: a sampler left running spins on a vault the test's
+ * cleanup removes, and can keep the test worker alive.
+ */
+async function withSampler(
+	vault: string,
+	stopFile: string,
+	body: (child: ChildProcessByStdio<null, Readable, null>) => Promise<void>,
+): Promise<string> {
+	const child = spawn(process.execPath, [SAMPLER, vault, stopFile], {
+		stdio: ["ignore", "pipe", "inherit"],
+	});
+	const exited = new Promise<void>((resolve) => {
+		if (child.exitCode !== null || child.signalCode !== null) resolve();
+		else child.once("exit", () => resolve());
+	});
+	const output = samplerOutput(child);
+	try {
+		await output.ready;
+		await body(child);
+		writeFileSync(stopFile, "");
+		await exited;
+		return output.text();
+	} finally {
+		try {
+			writeFileSync(stopFile, "");
+		} catch {
+			// the root is gone: the sampler stops on its own
+		}
+		if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+		await exited;
+	}
+}
+
 describe("usertrust init: .env is always owner-only", () => {
 	let root: string;
 	let vault: string;
@@ -117,31 +181,14 @@ describe("usertrust init: .env is always owner-only", () => {
 	});
 
 	it("no sampled instant shows a new key in a group- or other-readable file, over 100 reconfigures", async () => {
-		const stopFile = join(root, "stop");
-		const sampler = spawn(
-			process.execPath,
-			[join(import.meta.dirname, "..", "fixtures", "env-mode-sampler.mjs"), vault, stopFile],
-			{ stdio: ["ignore", "pipe", "inherit"] },
-		);
-		let out = "";
-		sampler.stdout.setEncoding("utf-8");
-		const ready = new Promise<void>((resolve) => {
-			sampler.stdout.on("data", (chunk: string) => {
-				out += chunk;
-				if (out.includes("ready")) resolve();
-			});
+		const out = await withSampler(vault, join(root, "stop"), async () => {
+			for (let i = 0; i < 100; i++) {
+				readableOldEnv(envPath);
+				await initWithKey(root, `sk-ant-NEW-${i}`, true);
+				// Hand the sampler the post-reconfigure state as well, not only the write.
+				await new Promise((resolve) => setTimeout(resolve, 2));
+			}
 		});
-		const done = new Promise<void>((resolve) => sampler.once("exit", () => resolve()));
-		await ready;
-
-		for (let i = 0; i < 100; i++) {
-			readableOldEnv(envPath);
-			await initWithKey(root, `sk-ant-NEW-${i}`, true);
-			// Hand the sampler the post-reconfigure state as well, not only the write.
-			await new Promise((resolve) => setTimeout(resolve, 2));
-		}
-		writeFileSync(stopFile, "");
-		await done;
 
 		const result = JSON.parse(out.trim().split("\n").at(-1) ?? "{}") as {
 			samples: number;
@@ -151,6 +198,37 @@ describe("usertrust init: .env is always owner-only", () => {
 		expect(result.samples, seen).toBeGreaterThan(100);
 		expect(result.exposed, seen).toBe(0);
 	}, 60_000);
+
+	it("a reconfigure that throws still leaves no sampler running", async () => {
+		let pid: number | undefined;
+		const forced = new Error("forced reconfigure failure");
+		await expect(
+			withSampler(vault, join(root, "stop"), async (child) => {
+				pid = child.pid;
+				vi.mocked(clack.text).mockRejectedValueOnce(forced);
+				await run(root, { reconfigure: true, skipVerify: true });
+			}),
+		).rejects.toBe(forced);
+		expect(pid).toBeDefined();
+		expect(alive(pid as number)).toBe(false);
+	}, 30_000);
+
+	it("the sampler exits by itself once the vault is gone, with no stop file", async () => {
+		const child = spawn(process.execPath, [SAMPLER, vault, join(root, "never")], {
+			stdio: ["ignore", "pipe", "inherit"],
+		});
+		try {
+			await samplerOutput(child).ready;
+			rmSync(vault, { recursive: true, force: true });
+			const exited = await Promise.race([
+				new Promise<boolean>((resolve) => child.once("exit", () => resolve(true))),
+				new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3_000)),
+			]);
+			expect(exited).toBe(true);
+		} finally {
+			child.kill("SIGKILL");
+		}
+	}, 30_000);
 
 	it("a symlinked .env is replaced by a file; its target is never written", async () => {
 		const target = join(root, "elsewhere.env");
