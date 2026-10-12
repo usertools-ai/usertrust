@@ -2026,6 +2026,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 				// POST settlement
 				let settled = true;
+				// True only once the ledger (or proxy) ANSWERED the post: a dry run never sets it, so a record can tell a
+				// real post from a settle that moved no money.
+				let ledgerPosted = false;
+				// What the ledger actually POSTED, known the moment it answered and so before the `llm_call` is appended. The
+				// call record carries it, so a reader can tell a capped post from a full one from that record alone: the
+				// `settlement_shortfall` is appended AFTER the call and can be late, lost to a crash, or dead-lettered.
+				let ledgerPostedAmount: number | undefined;
 				// D4: set only when the engine capped the post at the reserved hold.
 				let postedCost: number | undefined;
 				// D4 event-order buffer: the truncation is learned at POST time but the
@@ -2039,6 +2046,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				if (proxyConn != null && !isDryRun) {
 					try {
 						await proxyConn.settle(auth.proxyTransferId ?? transferId, actualCost);
+						ledgerPosted = true;
+						// NO posted amount on this path: `settle` resolves void, so the client never learns whether the server
+						// capped the post at its hold. Assuming the metered cost would report a cap as a full, exact post. The
+						// record stays an upper bound until the server reports what it posted (a wire change).
 					} catch (postErr) {
 						settled = false;
 						await audit
@@ -2067,6 +2078,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// Post the ACTUAL consumed cost (RECON #3), capped by the engine at
 						// the reserved hold; a truncation comes back as `shortfall`.
 						const postResult = await engine.postPendingSpend(transferId, actualCost);
+						ledgerPosted = true;
+						// Only what the engine REPORTS. A custom engine whose post resolves void gives no evidence of a full post,
+						// so nothing is recorded and the call stays an upper bound; the built-in engines always return `posted`.
+						if (
+							postResult != null &&
+							Number.isFinite(postResult.posted) &&
+							postResult.posted >= 0
+						) {
+							ledgerPostedAmount = postResult.posted;
+						}
 						if (postResult != null && postResult.shortfall > 0) {
 							postedCost = postResult.posted;
 							// EVENT ORDER: captured here, APPENDED after `llm_call` below.
@@ -2156,6 +2177,17 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							pricingTableVersion: PRICING_TABLE_VERSION,
 							...(input.chunksDelivered != null ? { chunksDelivered: input.chunksDelivered } : {}),
 							source: "headless",
+							// The denomination, on the record: a local call is NOMINAL units, and a reader must not
+							// have to guess it. Additive, like `ledgerPosted`.
+							costBasis: rateInfo.costBasis,
+							endpointClass: endpoint.class,
+							...(ledgerPosted ? { ledgerPosted: true } : {}),
+							// The posted amount the ledger REPORTED, equal to `cost` for a full post and lower for a capped one.
+							// Absent when the settle path reported none (proxy mode, a custom engine resolving void), a dry run,
+							// and records from before this field: such a record cannot say which it was. Additive.
+							...(ledgerPosted && ledgerPostedAmount !== undefined
+								? { postedAmount: ledgerPostedAmount }
+								: {}),
 							...costCenterAudit,
 							...principalAudit,
 							...jobAudit,
