@@ -47,9 +47,16 @@ repository or mint an OIDC token for provenance:
    with node, and GitHub's own checkout, setup-node and download-artifact actions. **It builds
    nothing**: every byte it publishes was built by the build job, on Node 22 (the runtime CI
    tests on); this job only assembles tarballs from those bytes (python3) and runs npm. It
-   runs **Node 24**, for the npm Node 24 bundles (npm 11 or later), and its first step after
+   runs Node 24, for the npm Node 24 bundles (npm 11 or later), and its first step after
    setup-node prints node's and npm's versions and refuses an npm older than 11, before
    anything reads or writes the registry (see step 3 for why).
+   The publish job pins **Node 24.21.0** exactly, which bundles npm 11.19.0 (per
+   nodejs.org/dist/index.json): the version at which the npm sources this page cites
+   (`lib/commands/publish.js`, `lib/utils/oidc.js`) were read, so a release never changes
+   behaviour silently. Bumping that pin is a deliberate act: re-read npm's `publish.js` and
+   `oidc.js` at the npm version the new Node bundles, and update these citations in the same
+   pull request (the release-workflow test requires the pin and this line to name the same
+   version).
    1. Checks the CI gate again, since approval can come long after step 1.
    2. Downloads the artifact and checks the release commit, as git objects, without checking
       it out:
@@ -131,7 +138,7 @@ The publish step authenticates with `NPM_TOKEN`, as `NODE_AUTH_TOKEN`, through t
 `scripts/release.sh` writes, and passes `--provenance`, which signs with the job's GitHub OIDC
 token (`id-token: write`, granted to the publish job only).
 
-The npm the publish job runs (11.x, bundled with Node 24) also tries **npm trusted publishing**
+The npm the publish job runs (11.19.0, bundled with the pinned Node 24.21.0) also tries **npm trusted publishing**
 on every publish, by itself. As read in npm/cli at v11.19.0 (the npm bundled with Node
 v24.21.0):
 

@@ -310,11 +310,13 @@ jobs:
 
       # No registry-url: npm's config for the publish is written by scripts/release.sh.
       # Node 24, for the npm it bundles (11 or later): npm's own refusal to apply latest
-      # implicitly to a lower version is the backstop for the dist-tag check. This job builds
-      # nothing; the build job (Node 22) made every byte it publishes.
+      # implicitly to a lower version is the backstop for the dist-tag check. Pinned exactly:
+      # docs/releasing.md cites npm's source as read at the npm this Node bundles, and names
+      # this version (the release-workflow test keeps the two equal). This job builds nothing;
+      # the build job (Node 22) made every byte it publishes.
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.21.0
           package-manager-cache: false
 
       # Before anything reads or writes the registry: the npm in use, and that it is 11 or later.

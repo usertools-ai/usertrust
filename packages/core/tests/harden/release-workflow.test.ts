@@ -61,6 +61,7 @@ import { archive, gz, member, readTar } from "./tar-fixture.js";
 const ROOT = resolve(import.meta.dirname, "../../../..");
 const PUBLISH = join(ROOT, ".github/workflows/publish.yml");
 const CI = join(ROOT, ".github/workflows/ci.yml");
+const RELEASING = join(ROOT, "docs/releasing.md");
 const SCRIPT = join(ROOT, "scripts/release.sh");
 const TOOL = join(ROOT, "scripts/release-tarball.py");
 
@@ -349,10 +350,10 @@ describe("publish.yml", () => {
 
 	it("the build runs Node 22; the publish job runs Node 24 and requires npm 11 first", () => {
 		const setups = allSteps().filter(([, s]) => s.uses?.startsWith("actions/setup-node@"));
-		expect(setups.map(([j, s]) => `${j}: ${s.with?.["node-version"]}`)).toEqual([
-			"build: 22",
-			"publish: 24",
-		]);
+		// The publish job's major only; the exact pin is the next test's.
+		expect(
+			setups.map(([j, s]) => `${j}: ${String(s.with?.["node-version"]).split(".")[0]}`),
+		).toEqual(["build: 22", "publish: 24"]);
 		// npm 11 added the refusal to apply latest implicitly to a lower version, the backstop
 		// for the dist-tag check: the step right after setup-node refuses an older npm, on every
 		// run (dry runs included), before anything reads or writes the registry.
@@ -366,6 +367,18 @@ describe("publish.yml", () => {
 		expect(assert).toBeLessThan(
 			stepIndex("publish", "Require CI success on the commit being released"),
 		);
+	});
+
+	it("the publish job pins an exact Node version, the one docs/releasing.md names", () => {
+		// The npm behaviour the docs cite was read at the npm this Node bundles; a floating
+		// version would change it silently, and a bump must update the citations with it.
+		const setup = jobSteps("publish").find((s) => s.uses?.startsWith("actions/setup-node@"));
+		const pinned = String(setup?.with?.["node-version"]);
+		expect(pinned).toMatch(/^\d+\.\d+\.\d+$/);
+		const named = [
+			...readFileSync(RELEASING, "utf8").matchAll(/publish job pins \*\*Node (\d+\.\d+\.\d+)\*\*/g),
+		].map((m) => m[1]);
+		expect(named).toEqual([pinned]);
 	});
 
 	it("the GitHub Release is created only after every package's publish succeeded", () => {
