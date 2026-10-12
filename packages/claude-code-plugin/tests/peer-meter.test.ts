@@ -14,12 +14,17 @@ const { peerMeter, settingsDirs, alsoEnabledWarning } = (await import(
 		userDir: string;
 		projectDir: string | null;
 		managed?: string | null;
-	}) => Promise<{ state: "enabled" | "absent" | "unknown"; why: string | null; file?: string }>;
+	}) => Promise<{
+		state: "enabled" | "absent" | "unknown";
+		why: string | null;
+		file?: string;
+		key?: string;
+	}>;
 	settingsDirs: (args: { env: Record<string, string | undefined>; payload: unknown }) => {
 		userDir: string;
 		projectDir: string | null;
 	};
-	alsoEnabledWarning: (file: string) => string;
+	alsoEnabledWarning: (file: string, key: string) => string;
 };
 
 const OLD = "usertrust-claude-code@usertrust";
@@ -136,6 +141,90 @@ describe("peerMeter: is usertrust-claude-code ENABLED", () => {
 		await user({ enabledPlugins: { [OLD]: true } });
 		expect((await peerMeter({ userDir, projectDir: null, managed: null })).state).toBe("unknown");
 	});
+
+	it("a subdirectory's root local file is the one Claude Code writes", async () => {
+		await mkdir(join(projectDir, ".git"));
+		const nested = join(projectDir, "src", "pkg");
+		await mkdir(nested, { recursive: true });
+		const file = await settings(join(projectDir, ".claude"), "settings.local.json", {
+			enabledPlugins: { [OLD]: true },
+		});
+		const read = await peerMeter({ userDir, projectDir: nested, managed: null });
+		expect(read.state).toBe("enabled");
+		expect(read.file).toBe(file);
+		expect(read.key).toBe(OLD);
+	});
+
+	it("a worktree reads the main checkout's local file", async () => {
+		const main = join(root, "main");
+		const gitdir = join(main, ".git", "worktrees", "wt");
+		await mkdir(gitdir, { recursive: true });
+		await writeFile(join(gitdir, "commondir"), "../..\n");
+		const wt = join(root, "wt");
+		await mkdir(wt);
+		await writeFile(join(wt, ".git"), `gitdir: ${gitdir}\n`);
+		const file = await settings(join(main, ".claude"), "settings.local.json", {
+			enabledPlugins: { [OLD]: true },
+		});
+		const read = await peerMeter({ userDir, projectDir: wt, managed: null });
+		expect(read.state).toBe("enabled");
+		expect(read.file).toBe(file);
+	});
+
+	it("the root's local value wins over a legacy starting-dir file", async () => {
+		await mkdir(join(projectDir, ".git"));
+		const nested = join(projectDir, "src");
+		await mkdir(nested);
+		await settings(join(projectDir, ".claude"), "settings.local.json", {
+			enabledPlugins: { [OLD]: false },
+		});
+		await settings(join(nested, ".claude"), "settings.local.json", {
+			enabledPlugins: { [OLD]: true },
+		});
+		expect((await peerMeter({ userDir, projectDir: nested, managed: null })).state).toBe("absent");
+		await settings(join(projectDir, ".claude"), "settings.local.json", {});
+		const read = await peerMeter({ userDir, projectDir: nested, managed: null });
+		expect(read.state).toBe("enabled");
+		expect(read.file).toBe(join(nested, ".claude", "settings.local.json"));
+	});
+
+	it("a .git file that is not a gitdir pointer is unknown", async () => {
+		await writeFile(join(projectDir, ".git"), "not a pointer\n");
+		const read = await check();
+		expect(read.state).toBe("unknown");
+		expect(read.why).toContain(join(projectDir, ".git"));
+		expect(read.why).toContain("not a gitdir pointer");
+	});
+
+	it("a .git FIFO in the walk does not hang the check", async () => {
+		// readRegular cannot tell a directory from a FIFO (both ENOTREG), so the walk takes it
+		// as a repository root and returns; it must not block on the pipe.
+		execFileSync("mkfifo", [join(projectDir, ".git")]);
+		const read = await check();
+		expect(read.state).toBe("absent");
+	});
+
+	it("a worktree whose commondir is missing is unknown", async () => {
+		const gitdir = join(root, "main", ".git", "worktrees", "wt");
+		await mkdir(gitdir, { recursive: true });
+		await writeFile(join(projectDir, ".git"), `gitdir: ${gitdir}\n`);
+		const read = await check();
+		expect(read.state).toBe("unknown");
+		expect(read.why).toContain(join(gitdir, "commondir"));
+	});
+
+	it("names the exact winning key, the higher-precedence scope's when two are true", async () => {
+		const elsewhere = "usertrust-claude-code@elsewhere";
+		await user({ enabledPlugins: { [elsewhere]: true } });
+		const read = await check();
+		expect(read.state).toBe("enabled");
+		expect(read.key).toBe(elsewhere);
+		expect(alsoEnabledWarning(read.file ?? "", read.key ?? "")).toContain(
+			`/plugin uninstall ${elsewhere}`,
+		);
+		await local({ enabledPlugins: { [OLD]: true } });
+		expect((await check()).key).toBe(OLD);
+	});
 });
 
 describe("settingsDirs", () => {
@@ -205,9 +294,9 @@ describe("SessionStart warns of an enabled usertrust-claude-code, and usertools 
 		const start = await run("session-start", "both-1");
 		expect(start.code).toBe(0);
 		const message = JSON.parse(start.stdout).systemMessage as string;
-		expect(message.startsWith(`${alsoEnabledWarning(file)} usertrust: watch-only`)).toBe(true);
-		expect(alsoEnabledWarning("/the/file.json")).toBe(
-			"usertrust: usertrust-claude-code also appears to be enabled (/the/file.json); if it is, every tool call is metered twice. Uninstall it: /plugin uninstall usertrust-claude-code@usertrust",
+		expect(message.startsWith(`${alsoEnabledWarning(file, OLD)} usertrust: watch-only`)).toBe(true);
+		expect(alsoEnabledWarning("/the/file.json", "usertrust-claude-code@sample")).toBe(
+			"usertrust: usertrust-claude-code also appears to be enabled (/the/file.json); if it is, every tool call is metered twice. Uninstall it: /plugin uninstall usertrust-claude-code@sample",
 		);
 		const before = hits;
 		const pre = await run("pre-tool-use", "both-1");

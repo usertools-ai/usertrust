@@ -225,7 +225,7 @@ async function warnOfPeer(input) {
 	} catch (err) {
 		peer = { state: "unknown", why: err?.code ?? "check failed" };
 	}
-	if (peer.state === "enabled") setPeerWarning(alsoEnabledWarning(peer.file));
+	if (peer.state === "enabled") setPeerWarning(alsoEnabledWarning(peer.file, peer.key));
 	else if (peer.state === "unknown") setPeerWarning(unknownWarning(peer.why));
 }
 
