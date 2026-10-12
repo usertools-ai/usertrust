@@ -231,11 +231,12 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 	};
 }
 
-const PAIRED_READ_ATTEMPTS = 8;
+/** How long an identical tail must stay identical before it is called persistent (a slow fsync is not a crash). */
+const PERSIST_MS = 1000;
 
 /** A short synchronous pause between attempts: a writer finishing an append needs milliseconds, not a retry storm. */
-function pause(attempt: number): void {
-	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * attempt);
+function pause(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 /**
@@ -258,9 +259,12 @@ function readPaired(
 	metaPath: string,
 	hooks?: ReportHooks,
 ): { log: Buffer; meta: Buffer } | "busy" {
-	let previous: { meta: Buffer; tail: Buffer } | undefined;
-	for (let attempt = 1; attempt <= PAIRED_READ_ATTEMPTS; attempt++) {
-		if (attempt > 1) pause(attempt);
+	const persistMs = hooks?.persistMs ?? PERSIST_MS;
+	const pauseMs = Math.max(1, Math.min(100, Math.floor(persistMs / 5)));
+	const maxAttempts = Math.ceil((persistMs * 2) / pauseMs) + 6;
+	let previous: { meta: Buffer; tail: Buffer; since: number } | undefined;
+	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		if (attempt > 1) pause(pauseMs);
 		const m1 = readFileSync(metaPath);
 		const log = readFileSync(logPath);
 		hooks?.betweenReads?.(attempt);
@@ -294,8 +298,12 @@ function readPaired(
 		const tail = log.subarray(cut);
 		if (tail.length === 0) return { log, meta: m2 };
 		// A tail exists. Identical to the last attempt's under an identical sidecar: persistent, so kept.
-		if (previous?.meta.equals(m2) === true && previous.tail.equals(tail)) return { log, meta: m2 };
-		previous = { meta: m2, tail: Buffer.from(tail) };
+		// Persistent only once it has stayed identical for the whole window; sooner, it may be a slow fsync.
+		if (previous?.meta.equals(m2) === true && previous.tail.equals(tail)) {
+			if (Date.now() - previous.since >= persistMs) return { log, meta: m2 };
+			continue;
+		}
+		previous = { meta: m2, tail: Buffer.from(tail), since: Date.now() };
 	}
 	return "busy";
 }
@@ -426,6 +434,8 @@ export interface ReportHooks {
 	afterSnapshot?: () => void;
 	/** Test seam: runs between the sidecar/log/sidecar reads of one attempt (a deterministic concurrent append). */
 	betweenReads?: (attempt: number) => void;
+	/** Test seam: how long an identical tail must stay identical before it counts as persistent (default 1000 ms). */
+	persistMs?: number;
 }
 
 export async function run(
@@ -479,7 +489,7 @@ export async function run(
 			// A vault that never read as one stable state is reported as BUSY, in words that are not a broken chain.
 			const busyErrors = snapshot.busy.map(
 				(f) =>
-					`Vault busy: ${f} changed on every read (a writer is appending); this is not a broken chain, run the report again`,
+					`Vault busy: ${f} changed on every read (a writer is appending); this is not itself a broken chain, run the report again. Problems below that name it may be an artifact of the busy read; any others are real`,
 			);
 			verified = verdict.valid && snapshot.problems.length === 0 && snapshot.busy.length === 0;
 			model = buildWeeklyReport(
@@ -487,7 +497,7 @@ export async function run(
 				{
 					// A file the snapshot could not read is part of the verdict, never an omission from it.
 					verified,
-					errors: busyErrors.length > 0 ? busyErrors : [...snapshot.problems, ...verdict.errors],
+					errors: [...busyErrors, ...snapshot.problems, ...verdict.errors],
 					chainLength: verdict.chainLength,
 					firstEvent: verdict.firstEvent,
 					lastEvent: verdict.lastEvent,

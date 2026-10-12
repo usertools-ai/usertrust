@@ -299,6 +299,8 @@ describe("nominal units are headlined, never dollar-formatted", () => {
 		const asDollars: UsdUt = m.totals.nominalUt;
 		// @ts-expect-error and the other way round
 		const asUnits: NominalUt = m.totals.confirmedUt;
-		expect([asDollars, asUnits]).toBeDefined();
+		// @ts-expect-error a budget WalletUt is not dollars either: the dollar formatter never accepts it
+		const walletAsDollars: UsdUt = m.budget.recordedSessionWallet;
+		expect([asDollars, asUnits, walletAsDollars]).toBeDefined();
 	});
 });

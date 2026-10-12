@@ -149,7 +149,7 @@ describe("usertrust report --week", () => {
 		expect(stdout).toContain("**Confirmed spend:** $0.02"); // 150 UT = $0.015
 		expect(stdout).toContain("| `agent-a` | 1 | $0.01 | 66.7% |");
 		// only the unattributed 50 UT debits the session wallet; the cost-center 100 UT debits its envelope
-		expect(stdout).toContain("5.0% used");
+		expect(stdout).toContain("5.0% of the budget used");
 		expect(stdout).toContain("payer is not recorded");
 		expect(stdout).not.toContain("UNVERIFIED");
 		write.mockRestore();
@@ -205,13 +205,13 @@ describe("usertrust report --week", () => {
 		await vault([{ cost: 100, data: { principal: { id: "a" } } }]);
 		await run(dir, {}, ["--week", "--end", endIso(), "--budget", "1000"]);
 		expect(stdout).toContain("source: `--budget`");
-		expect(stdout).toContain("10.0% used");
+		expect(stdout).toContain("10.0% of the budget used");
 		stdout = "";
 		const tenant = join(dir, "tenant.config.json");
 		writeFileSync(tenant, JSON.stringify({ budget: 500, tigerbeetle: { addresses: ["x"] } }));
 		await run(dir, {}, ["--week", "--end", endIso(), "--tenant-config", tenant]);
 		expect(stdout).toContain("source: `tenant config`");
-		expect(stdout).toContain("20.0% used");
+		expect(stdout).toContain("20.0% of the budget used");
 		// an unreadable or budget-less tenant config is refused, not silently "no budget"
 		for (const bad of ["{ not json", JSON.stringify({ budget: "5" }), JSON.stringify({})]) {
 			writeFileSync(tenant, bad);
@@ -375,7 +375,7 @@ describe("usertrust report --week", () => {
 			writeFileSync(join(auditDir(), "events.jsonl.meta"), before.meta);
 			// what the verifier says about these very bytes
 			expect(verifyVault(join(dir, ".usertrust")).valid).toBe(false);
-			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], { persistMs: 100 });
 			const out = JSON.parse(stdout) as {
 				integrity: { verified: boolean };
 				totals: { confirmedCalls: number };
@@ -391,10 +391,62 @@ describe("usertrust report --week", () => {
 			const log = join(auditDir(), "events.jsonl");
 			writeFileSync(log, `${readFileSync(log, "utf-8")}{"id":"half`);
 			const live = verifyVault(join(dir, ".usertrust"));
-			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], { persistMs: 100 });
 			const out = JSON.parse(stdout) as { integrity: { verified: boolean } };
 			expect(out.integrity.verified).toBe(live.valid);
 			expect(process.exitCode).toBe(live.valid ? undefined : 2);
+			write.mockRestore();
+		});
+
+		it("a busy active log does not hide a real mismatch in a stable rotated segment", async () => {
+			await vault([{ cost: 100 }, { cost: 200 }, { cost: 300 }]);
+			const lines = readFileSync(join(auditDir(), "events.jsonl"), "utf-8").trim().split("\n");
+			// rotate by hand: the first line becomes a segment, then tamper with it
+			const tampered = (lines[0] as string).replace('"cost":100', '"cost":999');
+			expect(tampered).not.toBe(lines[0]);
+			writeFileSync(join(auditDir(), "events-0001.jsonl"), `${tampered}\n`);
+			writeFileSync(join(auditDir(), "events.jsonl"), `${lines.slice(1).join("\n")}\n`);
+			let n = 0;
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
+				persistMs: 50,
+				betweenReads: () => {
+					n += 1;
+					writeFileSync(
+						join(auditDir(), "events.jsonl.meta"),
+						JSON.stringify({ lastHash: "x".repeat(64), sequence: n }),
+					);
+				},
+			});
+			const out = JSON.parse(stdout) as { integrity: { verified: boolean; errors: string[] } };
+			expect(out.integrity.verified).toBe(false);
+			const text = out.integrity.errors.join(" | ");
+			expect(text).toMatch(/Vault busy/);
+			expect(text).toMatch(/mismatch|hash|tamper|invalid|sequence/i); // the real problem is still there
+			expect(out.integrity.errors.length).toBeGreaterThan(1);
+			expect(process.exitCode).toBe(2);
+			write.mockRestore();
+		});
+
+		it("a SLOW sidecar replace inside the persistence window reads VERIFIED, not as a broken chain", async () => {
+			const { before, after } = await twoStates();
+			writeFileSync(join(auditDir(), "events.jsonl"), after.log);
+			writeFileSync(join(auditDir(), "events.jsonl.meta"), before.meta);
+			let attempts = 0;
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
+				persistMs: 400,
+				betweenReads: () => {
+					attempts += 1;
+					// the sidecar lands partway through the window, after several identical reads
+					if (attempts === 4) writeFileSync(join(auditDir(), "events.jsonl.meta"), after.meta);
+				},
+			});
+			const out = JSON.parse(stdout) as {
+				integrity: { verified: boolean };
+				totals: { confirmedCalls: number };
+			};
+			expect(attempts).toBeGreaterThanOrEqual(4);
+			expect(out.integrity.verified).toBe(true);
+			expect(out.totals.confirmedCalls).toBe(3);
 			write.mockRestore();
 		});
 

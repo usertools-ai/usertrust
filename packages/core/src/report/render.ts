@@ -18,6 +18,7 @@ import {
 	type Row,
 	type UsdUt,
 	UT_TO_USD,
+	type WalletUt,
 } from "./weekly.js";
 
 export type ReportFormat = "md" | "html" | "json";
@@ -25,6 +26,11 @@ export type ReportFormat = "md" | "html" | "json";
 /** Dollars. Takes ONLY a dollar-denominated amount: a nominal-unit figure here is a compile error, not a review finding. */
 function usd(ut: UsdUt): string {
 	return `$${(ut * UT_TO_USD).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** Budget units: the session wallet the governors enforce (usd-priced and nominal together). Never dollars. */
+function walletStr(ut: WalletUt): string {
+	return `${Math.round(ut).toLocaleString("en-US")} budget units`;
 }
 
 /** A difference of two amounts in the SAME denomination (dollars). */
@@ -100,17 +106,14 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 	const b = m.budget;
 	if (b.configuredUt === null)
 		return ["No budget is configured for this report (none in the vault config; pass --budget)."];
+	const split = (usdPart: UsdUt, nominalPart: NominalUt): string =>
+		`${usd(usdPart)} usd-priced + ${nominalStr(nominalPart)}`;
 	const lines = [
-		`Configured budget ${utStr(b.configuredUt)} (${usd(b.configuredUt)}), source: ${v(b.source ?? "unknown")}. Session-wallet spend recorded in the chain (model calls and governed actions with no cost center): ${utStr(b.recordedSessionUt)} (${usd(b.recordedSessionUt)}), ${pct(b.usedFraction ?? 0)} used${b.overBudget ? " (OVER BUDGET)" : ""}. This week: ${usd(b.windowSessionUt)}.`,
+		`Configured budget ${utStr(b.configuredUt)} (budget units: usd-priced and nominal, as the governor enforces them), source: ${v(b.source ?? "unknown")}. Session-wallet debits recorded in the chain (model calls and governed actions with no cost center): ${walletStr(b.recordedSessionWallet)} = ${split(b.recordedSessionUt, b.recordedSessionNominal)}; ${pct(b.usedFraction ?? 0)} of the budget used${b.overBudget ? " (OVER BUDGET)" : ""}. This week: ${walletStr(b.windowSessionWallet)} = ${split(b.windowSessionUt, b.windowSessionNominal)}.`,
 	];
-	if (b.recordedAttributedUt > 0) {
+	if (b.recordedAttributedWallet > 0) {
 		lines.push(
-			`Spend carrying a cost center is ATTRIBUTED and its payer is not recorded (the cost-center envelope with a ledger, the session in a dry run): ${usd(b.recordedAttributedUt)} recorded, ${usd(b.windowAttributedUt)} this week. If the session paid for all of it, the budget is ${pct(b.usedFractionUpper ?? 0)} used${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}.`,
-		);
-	}
-	if (b.recordedSessionNominal > 0 || b.recordedAttributedNominal > 0) {
-		lines.push(
-			`Local calls debited nominal units, not dollars, and are in none of the dollar figures above: session ${nominalStr(b.recordedSessionNominal)} (${nominalStr(b.windowSessionNominal)} this week), attributed ${nominalStr(b.recordedAttributedNominal)} (${nominalStr(b.windowAttributedNominal)} this week).`,
+			`Spend carrying a cost center is ATTRIBUTED and its payer is not recorded (the cost-center envelope with a ledger, the session in a dry run): ${walletStr(b.recordedAttributedWallet)} = ${split(b.recordedAttributedUt, b.recordedAttributedNominal)} recorded, ${walletStr(b.windowAttributedWallet)} this week. If the session paid for all of it, the budget is ${pct(b.usedFractionUpper ?? 0)} used${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}.`,
 		);
 	}
 	lines.push("This is the configured budget against recorded spend, not the live ledger balance.");

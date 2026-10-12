@@ -68,8 +68,21 @@ export type UsdUt = number & { readonly [usdBrand]: true };
 /** Nominal UNITS (a local, non-priced endpoint). Never summed with, or formatted as, dollars. */
 export type NominalUt = number & { readonly [nominalBrand]: true };
 
+declare const walletBrand: unique symbol;
+/**
+ * Session-WALLET units: what the governors' session counter enforces, i.e. usd-priced debits, nominal units and unlabelled
+ * rows together, one usertoken wallet. The budget ratio is over this and only this. It is not dollars: the dollar
+ * formatter refuses it, and `toWallet` is the ONE place a dollar amount and a nominal amount are added.
+ */
+export type WalletUt = number & { readonly [walletBrand]: true };
+
+/** The one conversion point: usd-priced plus nominal units, as the enforcing counter adds them. */
+export function toWallet(usd: number, nominal: number): WalletUt {
+	return (usd + nominal) as WalletUt;
+}
+
 /** The same shape with the denomination brands removed: what the builder accumulates before the one audited cast. */
-type Plain<T> = T extends UsdUt | NominalUt
+type Plain<T> = T extends UsdUt | NominalUt | WalletUt
 	? number
 	: T extends readonly (infer U)[]
 		? readonly Plain<U>[]
@@ -234,6 +247,14 @@ export interface ReportModel {
 		recordedSessionNominal: NominalUt;
 		windowAttributedNominal: NominalUt;
 		recordedAttributedNominal: NominalUt;
+		/**
+		 * The budget's own unit: ALL session-wallet debits (usd-priced + nominal + unlabelled), matching what enforcement
+		 * counts. `usedFraction` and the over-budget checks are over these; the usd and nominal figures above are the split.
+		 */
+		windowSessionWallet: WalletUt;
+		recordedSessionWallet: WalletUt;
+		windowAttributedWallet: WalletUt;
+		recordedAttributedWallet: WalletUt;
 		/** 0..1 lower bound (session spend only), clamped; `null` when no budget is configured. */
 		usedFraction: number | null;
 		/** 0..1 upper bound (session + attributed spend), clamped; `null` when no budget is configured. */
@@ -906,16 +927,34 @@ function buildPlain(
 			recordedSessionNominal,
 			windowAttributedNominal,
 			recordedAttributedNominal,
-			usedFraction: configured === null ? null : Math.min(1, recordedSessionUt / configured),
+			windowSessionWallet: windowSessionUt + windowSessionNominal,
+			recordedSessionWallet: recordedSessionUt + recordedSessionNominal,
+			windowAttributedWallet: windowAttributedUt + windowAttributedNominal,
+			recordedAttributedWallet: recordedAttributedUt + recordedAttributedNominal,
+			usedFraction:
+				configured === null
+					? null
+					: Math.min(1, (recordedSessionUt + recordedSessionNominal) / configured),
 			usedFractionUpper:
 				configured === null
 					? null
-					: Math.min(1, (recordedSessionUt + recordedAttributedUt) / configured),
-			overBudget: configured !== null && recordedSessionUt > configured,
+					: Math.min(
+							1,
+							(recordedSessionUt +
+								recordedSessionNominal +
+								recordedAttributedUt +
+								recordedAttributedNominal) /
+								configured,
+						),
+			overBudget: configured !== null && recordedSessionUt + recordedSessionNominal > configured,
 			possiblyOverBudget:
 				configured !== null &&
-				recordedSessionUt <= configured &&
-				recordedSessionUt + recordedAttributedUt > configured,
+				recordedSessionUt + recordedSessionNominal <= configured &&
+				recordedSessionUt +
+					recordedSessionNominal +
+					recordedAttributedUt +
+					recordedAttributedNominal >
+					configured,
 		},
 		governance,
 		notes,
