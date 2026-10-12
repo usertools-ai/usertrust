@@ -22,9 +22,11 @@ import {
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Governor } from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
 import { hashKey } from "../src/config.js";
 import { createUsertrustServer, internalErrorLine, type UsertrustServer } from "../src/server.js";
+import { createFakeGovernor } from "./helpers/fake-governor.js";
 
 const CLI = join(import.meta.dirname, "..", "src", "cli", "main.ts");
 const PRELOAD = join(import.meta.dirname, "helpers", "source-preload.mjs");
@@ -139,6 +141,130 @@ describe("an internal error is logged with its reason, and answered as before", 
 	});
 });
 
+/** A dryRun config with one tenant, `t1`, whose governor the test supplies. */
+function inProcessConfig(stateDir: string) {
+	return {
+		host: "127.0.0.1",
+		port: 0,
+		stateDir,
+		enforcement: "enforce" as const,
+		pendingTtlMs: 300_000,
+		dryRun: true,
+		tenants: [{ id: "t1", keyHash: hashKey(KEY), budget: 50_000 }],
+	};
+}
+
+describe("a log sink that throws never breaks a request or a shutdown", () => {
+	it("a forced 500 still answers 500, nothing goes unhandled, and close() completes", async () => {
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			// release throws: shutdown's best-effort release logs, and that log throws too.
+			const fake = createFakeGovernor({ release: { throws: true } });
+			let failNext = false;
+			const governor: Governor = {
+				...fake.governor,
+				async authorize(params) {
+					if (failNext) throw new Error("governor exploded");
+					return fake.governor.authorize(params);
+				},
+			};
+			let sinkCalls = 0;
+			server = createUsertrustServer({
+				config: inProcessConfig(tmp("utsrv-err-sink-")),
+				factory: async () => governor,
+				log: () => {
+					sinkCalls += 1;
+					throw new Error("the log sink is broken");
+				},
+			});
+			const { port } = await server.listen();
+			const base = `http://127.0.0.1:${port}`;
+			const body = { model: "m", estimatedInputTokens: 1, maxOutputTokens: 1 };
+			// A pending hold for shutdown to release.
+			expect((await post(base, "/v1/authorize", body)).status).toBe(200);
+			failNext = true;
+			const res = await fetch(`${base}/v1/authorize`, {
+				method: "POST",
+				headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
+				body: JSON.stringify(body),
+				signal: AbortSignal.timeout(5_000),
+			});
+			expect(res.status).toBe(500);
+			expect(await res.json()).toEqual(OPAQUE_500);
+			await server.close();
+			server = undefined;
+			// One log call for the 500, one for the failed shutdown release: both threw, and were contained.
+			expect(sinkCalls).toBe(2);
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	}, 20_000);
+});
+
+describe("the log line never carries the caller's key", () => {
+	it.each([
+		["thrown inside a route (authorize)", "route"],
+		["escaping the route (the governor cannot be created)", "factory"],
+	])("%s: the key is redacted before the line is written", async (_name, where) => {
+		const message = `bad request: Authorization: Bearer ${KEY} body={"actor":"${KEY}"} x-api-key: ${KEY}`;
+		let thrown: Error | undefined;
+		const fake = createFakeGovernor();
+		const governor: Governor = {
+			...fake.governor,
+			async authorize() {
+				thrown = new Error(message);
+				throw thrown;
+			},
+		};
+		const lines: string[] = [];
+		server = createUsertrustServer({
+			config: inProcessConfig(tmp("utsrv-err-redact-")),
+			factory: async () => {
+				if (where === "factory") {
+					thrown = new Error(message);
+					throw thrown;
+				}
+				return governor;
+			},
+			log: (line) => lines.push(line),
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "m",
+			estimatedInputTokens: 1,
+			maxOutputTokens: 1,
+		});
+		expect(res.status).toBe(500);
+		expect(await res.json()).toEqual(OPAQUE_500);
+		// Positive control: the key WAS in what was thrown, three times.
+		expect(thrown?.message.split(KEY).length).toBe(4);
+		expect(lines).toHaveLength(1);
+		const line = lines[0] ?? "";
+		expect(line.split(KEY).length - 1).toBe(0);
+		expect(line).toContain("[redacted]");
+		expect(line).toContain("tenant=t1 route=POST /v1/authorize");
+	});
+
+	it("a Bearer token and an api-key value are redacted even when the key is not the caller's", () => {
+		const line = internalErrorLine(
+			new Error("upstream said: Authorization: Bearer sk-other-123 and x-api-key=abc.def"),
+			"t1",
+			"sweep",
+		);
+		expect(line).not.toContain("sk-other-123");
+		expect(line).not.toContain("abc.def");
+		expect(line).toBe(
+			"usertrust-server: internal error: tenant=t1 route=sweep: Error: upstream said: Authorization: Bearer [redacted] and x-api-key=[redacted]",
+		);
+	});
+});
+
 describe("the internal-error log line", () => {
 	it("is one line with no escape sequence or control character, whatever the message holds", () => {
 		const err = new TypeError("bad \u001b[2Jthing\nsecond line\u0007 end");
@@ -245,8 +371,10 @@ describe("usertrust-server CLI: the key never reaches its log", () => {
 			const run = startCli(s.configPath, s.cwd);
 			await listening(run);
 
+			// After start: the tenant's vault (created at start, or not yet) becomes a link to a loose target.
 			const target = looseTarget();
 			mkdirSync(join(s.stateDir, "acme"), { recursive: true, mode: 0o700 });
+			rmSync(s.vault, { recursive: true, force: true });
 			symlinkSync(target, s.vault);
 			// The key rides the Authorization header AND the request body: neither may be logged.
 			const res = await post(`http://127.0.0.1:${s.port}`, "/v1/authorize", {
@@ -312,34 +440,67 @@ describe("usertrust-server CLI: a configured tenant vault its governor would ref
 			const s = await serverConfig();
 			mkdirSync(join(s.stateDir, "acme"), { recursive: true, mode: 0o700 });
 			const reason = plant(s.vault);
-			const run = startCli(s.configPath, s.cwd);
-			let exited = false;
-			const exit = run.exited.then((code) => {
-				exited = true;
-				return code;
-			});
-			let everListened = false;
-			const watch = (async () => {
-				while (!exited) {
-					if (await accepts(s.port)) {
-						everListened = true;
-						// A server that started is the failure: stop it now rather than wait out the test.
-						run.proc.kill("SIGKILL");
-					}
-					await new Promise((resolve) => setTimeout(resolve, 50));
-				}
-			})();
-			const code = await exit;
-			await watch;
-			child = undefined;
+			const { code, everListened, stderr } = await runToRefusal(s);
 			expect(code).toBe(1);
 			expect(everListened).toBe(false);
-			expect(run.stderr()).not.toContain("listening on");
-			expect(run.stderr()).toContain(`usertrust-server failed to start: tenant acme: ${reason}`);
+			expect(stderr).not.toContain("listening on");
+			expect(stderr).toContain(`usertrust-server failed to start: tenant acme: ${reason}`);
+		},
+		START_MS * 2,
+	);
+
+	// The start check CREATES the vault, as the governor would on the first request: one it cannot
+	// create refuses here, not as a 500 on every request after the port opened.
+	it.skipIf(process.getuid?.() === 0)(
+		"an absent vault under a read-only state dir: exits non-zero, never listens, names the tenant and the reason",
+		async () => {
+			const s = await serverConfig();
+			mkdirSync(s.stateDir, { mode: 0o500 });
+			spawnSync("/bin/chmod", ["500", s.stateDir]);
+			try {
+				const { code, everListened, stderr } = await runToRefusal(s);
+				expect(code).toBe(1);
+				expect(everListened).toBe(false);
+				expect(stderr).not.toContain("listening on");
+				expect(stderr).toContain(
+					`usertrust-server failed to start: tenant acme: EACCES: permission denied, mkdir '${join(s.stateDir, "acme")}'`,
+				);
+			} finally {
+				spawnSync("/bin/chmod", ["700", s.stateDir]);
+			}
 		},
 		START_MS * 2,
 	);
 });
+
+/** Runs the CLI until it exits, watching the port the whole time; a server that listens is killed. */
+async function runToRefusal(s: {
+	configPath: string;
+	cwd: string;
+	port: number;
+}): Promise<{ code: number | null; everListened: boolean; stderr: string }> {
+	const run = startCli(s.configPath, s.cwd);
+	let exited = false;
+	const exit = run.exited.then((code) => {
+		exited = true;
+		return code;
+	});
+	let everListened = false;
+	const watch = (async () => {
+		while (!exited) {
+			if (await accepts(s.port)) {
+				everListened = true;
+				// A server that started is the failure: stop it now rather than wait out the test.
+				run.proc.kill("SIGKILL");
+			}
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	})();
+	const code = await exit;
+	await watch;
+	child = undefined;
+	return { code, everListened, stderr: run.stderr() };
+}
 
 describe("usertrust-server CLI: a healthy tenant vault starts", () => {
 	it.each([
@@ -348,7 +509,8 @@ describe("usertrust-server CLI: a healthy tenant vault starts", () => {
 			(vault: string) => mkdirSync(vault, { recursive: true, mode: 0o700 }),
 			0o700,
 		],
-		["a vault that does not exist yet", (_vault: string) => {}, undefined],
+		// Created at START, owner-only, rather than on the first request.
+		["a vault that does not exist yet, created at start", (_vault: string) => {}, 0o700],
 		[
 			"a loose real directory, tightened as its governor would",
 			(vault: string) => {

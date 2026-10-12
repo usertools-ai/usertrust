@@ -195,11 +195,12 @@ the tenant's Governor (per-tenant `stateDir/<tenant>` vault: separate audit chai
 spend ledger). Each tenant vault is owner-only (directories `0700`, files `0600`, whatever
 the umask; a vault another user owns is refused), and the server writes nothing outside
 `stateDir`; a `stateDir` the server creates is `0700`, and one you created is left as you
-made it. At start the CLI checks every configured tenant's vault the way its governor will,
-and refuses to start, naming the tenant and the reason, on one the governor would refuse. An
-error a client sees only as the opaque `500 internal` is written to stderr as
-`usertrust-server: internal error: tenant=<id> route=<route>: <reason>`, never with a key, a
-header or a request body. On Windows the server neither sets nor checks permissions: the `stateDir` folder's
+made it. At start the CLI creates every configured tenant's vault that does not exist yet
+(owner-only) and checks each the way its governor will, and refuses to start, naming the tenant
+and the reason, on one it cannot create or the governor would refuse. An error a client sees only
+as the opaque `500 internal` is written to stderr as
+`usertrust-server: internal error: tenant=<id> route=<route>: <reason>`, never with a header or a
+request body; a bearer key or api-key value quoted in the reason is replaced with `[redacted]`. On Windows the server neither sets nor checks permissions: the `stateDir` folder's
 inherited ACL decides who can read it, so keep it under the service account's own profile or
 give it an owner-only ACL (see the repository's `LIMITATIONS.md`). The SSE stream is
 best-effort operational telemetry, NOT an audit source — dropped subscribers lose events.

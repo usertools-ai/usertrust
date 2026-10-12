@@ -184,21 +184,42 @@ function routeOf(req: IncomingMessage): RouteName | "unrouted" {
 	return (ROUTES as readonly string[]).includes(named) ? (named as RouteName) : "unrouted";
 }
 
+/** A bearer token wherever a message quotes one: `Bearer <token>`. */
+const BEARER_TOKEN = /\b(Bearer)\s+[^\s"',;]+/gi;
+/** An api-key style value: `x-api-key: <v>`, `api_key=<v>`, `"api-key": "<v>"`. */
+const API_KEY_VALUE = /\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*["']?)[^\s"',;&]+/gi;
+
+/**
+ * `text` with every `secret` (the caller's own bearer key, when known), every `Bearer <token>` and
+ * every api-key style value replaced by `[redacted]`. Scrubbing is not redaction: `scrubForStderr`
+ * removes terminal control, never a credential.
+ */
+export function redactSecrets(text: string, secrets: readonly string[] = []): string {
+	let out = text;
+	for (const secret of secrets) if (secret !== "") out = out.split(secret).join("[redacted]");
+	return out.replace(BEARER_TOKEN, "$1 [redacted]").replace(API_KEY_VALUE, "$1$2[redacted]");
+}
+
 /**
  * One line for the operator's log about an error a client only ever sees as the opaque
  * `500 internal`: which tenant, which route, and the error's own name and message, so a
  * tenant refused at its first request (its vault, say) says why somewhere. It carries no key,
- * header or request body; the message is the server's or governor's own text, with escape
- * sequences and control characters removed (`scrubForStderr`) and its lines joined into one.
+ * header or request body of its own. The message is the server's or governor's text, which can
+ * quote what a caller sent, so credentials in it are REDACTED (`redactSecrets`, with the caller's
+ * own key in `secrets`) before escape sequences and control characters are removed
+ * (`scrubForStderr`) and its lines joined into one; and once more after, so a key a control
+ * character had split cannot come back together.
  */
 export function internalErrorLine(
 	err: unknown,
 	tenantId: string | undefined,
 	route: RouteName | "unrouted",
+	secrets: readonly string[] = [],
 ): string {
 	const name = err instanceof Error ? err.name : typeof err;
 	const message = err instanceof Error ? err.message : String(err);
-	const text = scrubForStderr(`${name}: ${message}`).replace(/\s*\n\s*/g, " ");
+	const raw = redactSecrets(`${name}: ${message}`, secrets);
+	const text = redactSecrets(scrubForStderr(raw).replace(/\s*\n\s*/g, " "), secrets);
 	const tenant = tenantId === undefined ? "-" : scrubForStderr(tenantId);
 	return `usertrust-server: internal error: tenant=${tenant} route=${route}: ${text}`;
 }
@@ -215,20 +236,58 @@ export function createUsertrustServer(opts: {
 	log?: (line: string) => void;
 }): UsertrustServer {
 	const { config } = opts;
-	const log = opts.log ?? ((line: string): void => void process.stderr.write(`${line}\n`));
-	/** The tenant each request authenticated as, for the log line of an error that escapes its route. */
-	const requestTenant = new WeakMap<IncomingMessage, string>();
+	const sink = opts.log ?? ((line: string): void => void process.stderr.write(`${line}\n`));
+	/**
+	 * The ONLY way this server writes a log line. A sink that throws is contained here, once: it
+	 * must never stop a 500 from being sent, surface as an unhandled rejection, or break the
+	 * sweep's or shutdown's best-effort release. The line then goes to stderr if it can.
+	 */
+	const log = (line: string): void => {
+		try {
+			sink(line);
+		} catch {
+			try {
+				process.stderr.write(`${line}\n`);
+			} catch {
+				/* nowhere left to write it */
+			}
+		}
+	};
+	/** The internal-error line for `err`, logged; an error that cannot even be read is still logged. */
+	function logInternalError(
+		err: unknown,
+		tenantId: string | undefined,
+		route: RouteName | "unrouted",
+		secrets: readonly string[] = [],
+	): void {
+		let line: string;
+		try {
+			line = internalErrorLine(err, tenantId, route, secrets);
+		} catch {
+			const tenant = tenantId === undefined ? "-" : scrubForStderr(tenantId);
+			line = `usertrust-server: internal error: tenant=${tenant} route=${route}: (the error could not be read)`;
+		}
+		log(line);
+	}
+	/**
+	 * Who each request authenticated as, by its response: the tenant, for the log line of an
+	 * error, and the caller's own bearer key, so that line can redact it.
+	 */
+	const requestCaller = new WeakMap<ServerResponse, { tenantId: string; key: string }>();
 	/**
 	 * `toHttpError`, plus the operator's log line for the opaque 500. The client's answer is
 	 * exactly `toHttpError`'s: the reason lands in the log, never in the response.
 	 */
 	function httpError(
 		err: unknown,
-		tenantId: string | undefined,
+		res: ServerResponse,
 		route: RouteName | "unrouted",
 	): ReturnType<typeof toHttpError> {
 		const mapped = toHttpError(err);
-		if (mapped.status === 500) log(internalErrorLine(err, tenantId, route));
+		if (mapped.status === 500) {
+			const caller = requestCaller.get(res);
+			logInternalError(err, caller?.tenantId, route, caller === undefined ? [] : [caller.key]);
+		}
 		return mapped;
 	}
 	const bus = new EventBus();
@@ -391,7 +450,7 @@ export function createUsertrustServer(opts: {
 				...expiresIn(remainingLifeMs(auth, config, monoAge(entry))),
 			});
 		} catch (err) {
-			const mapped = httpError(err, tenant.id, "POST /v1/authorize");
+			const mapped = httpError(err, res, "POST /v1/authorize");
 			const shadow = config.enforcement === "evaluate_only" && mapped.status !== 500;
 			bus.publish(tenant.id, {
 				type: "denied",
@@ -475,7 +534,7 @@ export function createUsertrustServer(opts: {
 			// Another terminal took the hold between the lookup and the claim: this is an unheld settle.
 			if (claimedNow === NOT_CLAIMED) await handleUnheldSettle(tenant, transferId, usage, res);
 		} catch (err) {
-			const mapped = httpError(err, tenant.id, "POST /v1/settle");
+			const mapped = httpError(err, res, "POST /v1/settle");
 			sendJson(res, mapped.status, mapped.body);
 		}
 	}
@@ -643,7 +702,7 @@ export function createUsertrustServer(opts: {
 				recorded: outcome.recorded,
 			});
 		} catch (err) {
-			const mapped = httpError(err, tenant.id, "POST /v1/settle");
+			const mapped = httpError(err, res, "POST /v1/settle");
 			sendJson(res, mapped.status, mapped.body);
 		}
 	}
@@ -672,7 +731,7 @@ export function createUsertrustServer(opts: {
 				return governor.abort(entry.auth, parsed.data.error);
 			});
 		} catch (err) {
-			const mapped = httpError(err, tenant.id, "POST /v1/abort");
+			const mapped = httpError(err, res, "POST /v1/abort");
 			sendJson(res, mapped.status, mapped.body);
 			return;
 		}
@@ -722,7 +781,7 @@ export function createUsertrustServer(opts: {
 				return governor.release(entry.auth, reason, { releaseClass });
 			});
 		} catch (err) {
-			const mapped = httpError(err, tenant.id, "POST /v1/release");
+			const mapped = httpError(err, res, "POST /v1/release");
 			sendJson(res, mapped.status, mapped.body);
 			return;
 		}
@@ -814,11 +873,11 @@ export function createUsertrustServer(opts: {
 		}
 		const key = bearerKey(req);
 		const tenant = key ? resolveTenant(config, key) : null;
-		if (!tenant) {
+		if (!key || !tenant) {
 			sendJson(res, 401, { error: "unauthorized", reason: "missing or invalid bearer key" });
 			return;
 		}
-		requestTenant.set(req, tenant.id);
+		requestCaller.set(res, { tenantId: tenant.id, key });
 		if (req.method === "GET" && url === "/v1/budget") {
 			const governor = await pool.get(tenant);
 			sendJson(res, 200, {
@@ -893,7 +952,7 @@ export function createUsertrustServer(opts: {
 				} catch (err) {
 					// Best-effort — the Governor's own destroy()/reconciliation voids
 					// anything the control plane fails to release here. Logged, never silent.
-					log(internalErrorLine(err, tenant.id, kind));
+					logInternalError(err, tenant.id, kind);
 					return undefined;
 				}
 			},
@@ -934,7 +993,7 @@ export function createUsertrustServer(opts: {
 			return new Promise((resolve, reject) => {
 				httpServer = createServer((req, res) => {
 					route(req, res).catch((err: unknown) => {
-						const mapped = httpError(err, requestTenant.get(req), routeOf(req));
+						const mapped = httpError(err, res, routeOf(req));
 						if (!res.headersSent) sendJson(res, mapped.status, mapped.body);
 					});
 				});

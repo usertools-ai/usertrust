@@ -18,14 +18,16 @@ export function tenantVaultBase(config: ServerConfig, tenant: TenantConfig): str
  * each configured tenant's `<stateDir>/<tenant>/.usertrust` gets the check a governor
  * gives it (`securePrivateVault`), now, before the port opens. A loose real directory is
  * tightened, as the governor would; a symbolic link to a loose target, a dangling link and
- * a non-directory throw, every tenant's reason named. A vault that does not exist yet
- * passes: its governor creates it owner-only.
+ * a non-directory throw, every tenant's reason named. A vault that does not exist yet is
+ * CREATED here, owner-only, as its governor would create it: one that cannot be created (a
+ * read-only state dir, say) refuses the start instead of failing every request once the
+ * port is open.
  */
 export function secureTenantVaults(config: ServerConfig): void {
 	const refusals: string[] = [];
 	for (const tenant of config.tenants) {
 		try {
-			securePrivateVault(join(tenantVaultBase(config, tenant), VAULT_DIR));
+			securePrivateVault(join(tenantVaultBase(config, tenant), VAULT_DIR), { create: true });
 		} catch (err) {
 			refusals.push(`tenant ${tenant.id}: ${err instanceof Error ? err.message : String(err)}`);
 		}
