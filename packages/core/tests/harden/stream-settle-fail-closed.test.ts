@@ -2,9 +2,10 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * Under `audit.failClosed`, a completed stream whose settlement audit fails has
- * ALREADY been charged: the POST lands first, then the `llm_call` write fails, and
- * `.receipt` rejects with `AuditDegradedError`. Nothing is voided.
+ * Under `audit.failClosed`, a completed stream whose settlement audit fails has ALREADY
+ * been settled: the POST runs first (it lands, or it fails and the settlement is
+ * ambiguous), then the `llm_call` write fails, and `.receipt` rejects with
+ * `AuditDegradedError`. Nothing is voided.
  *
  * That rejection used to reach the caller ONLY through `.receipt`, which a caller who
  * catches the iteration need not await (and which can no longer go unhandled). So under
@@ -311,6 +312,24 @@ describe("a completed stream whose settlement audit fails (audit.failClosed)", (
 		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
 		const kinds = vi.mocked(audit.appendEvent).mock.calls.map(([e]) => e.kind);
 		expect(kinds).toContain("settlement_ambiguous");
+		expect(unhandled).toEqual([]);
+		await governed.destroy();
+	});
+
+	it("a failed POST AND a failed audit under failClosed: AuditDegradedError, still nothing voided", async () => {
+		// The refusal does not mean the charge posted: here the POST failed (ambiguous: it
+		// may still post), and the audit refusal surfaces all the same.
+		const { engine } = makeEngine({ failPost: true });
+		const { governed, stream } = await governedStream(
+			true,
+			engine,
+			makeAudit({ failLlmCall: true }),
+		);
+		const caught = await iterate(stream);
+		expect(caught).toBeInstanceOf(AuditDegradedError);
+		await expect(stream.receipt).rejects.toBe(caught);
+		expect(engine.postPendingSpend).toHaveBeenCalledTimes(1);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
 		expect(unhandled).toEqual([]);
 		await governed.destroy();
 	});
