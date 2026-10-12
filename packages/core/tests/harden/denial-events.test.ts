@@ -30,7 +30,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
-import { InsufficientBalanceError, PolicyDeniedError } from "../../src/shared/errors.js";
+import {
+	AuditDegradedError,
+	InsufficientBalanceError,
+	PolicyDeniedError,
+} from "../../src/shared/errors.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
 vi.mock("tigerbeetle-node", () => ({
@@ -822,13 +826,16 @@ describe("denial events — the append-failure contract does not escalate", () =
 		rmSync(vault, { recursive: true, force: true });
 	});
 
+	/** Every append fails, and the writer is degraded from its first failure on, as a real handle is. */
 	function failingWriter(): AuditWriter {
+		let failures = 0;
 		return {
 			appendEvent: vi.fn(async () => {
+				failures++;
 				throw new Error("EACCES: permission denied, open 'events.jsonl'");
 			}),
-			getWriteFailures: vi.fn(() => 1),
-			isDegraded: vi.fn(() => true),
+			getWriteFailures: vi.fn(() => failures),
+			isDegraded: vi.fn(() => failures > 0),
 			flush: vi.fn(async () => {}),
 			release: vi.fn(),
 		};
@@ -864,6 +871,38 @@ describe("denial events — the append-failure contract does not escalate", () =
 			await governed.destroy();
 		});
 	}
+
+	it("failClosed with a writer ALREADY degraded at call start: refused before any gate runs, nothing appended", async () => {
+		// The non-escalation contract above covers a denial whose append fails DURING the call. A
+		// client whose writer was degraded before the call started is refused under failClosed before
+		// the policy gate is evaluated, so there is no denial to report and nothing is appended.
+		writeConfig(vault, {
+			budget: 1_000_000,
+			policies: "./policies/deny.json",
+			audit: { failClosed: true },
+		});
+		writeContentPolicy(vault);
+		const writer = failingWriter();
+		await writer.appendEvent({ kind: "earlier", actor: "local", data: {} }).catch(() => {});
+		expect(writer.isDegraded()).toBe(true);
+		vi.mocked(writer.appendEvent).mockClear();
+		const create = vi.fn();
+		const governed = await trust(
+			{ messages: { create } },
+			{ dryRun: true, vaultBase: vault, _audit: writer },
+		);
+
+		const err = await capture(() =>
+			governed.messages.create({ model: "forbidden-model", max_tokens: 64, messages: PROMPT }),
+		);
+
+		expect(err).toBeInstanceOf(AuditDegradedError);
+		expect(err).not.toBeInstanceOf(PolicyDeniedError);
+		expect(writer.appendEvent).not.toHaveBeenCalled();
+		expect(create).not.toHaveBeenCalled();
+
+		await governed.destroy();
+	});
 
 	it("headless keeps the same best-effort contract", async () => {
 		writeConfig(vault, { budget: 1_000_000, policies: "./policies/deny.json" });

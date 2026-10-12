@@ -53,7 +53,7 @@ const PARAMS = {
 	messages: [{ role: "user", content: "hello" }],
 };
 
-function client(usage: { input_tokens: number; output_tokens: number }) {
+function client(usage: unknown) {
 	return {
 		messages: {
 			create: vi.fn(async (_req: unknown) => ({
@@ -190,6 +190,128 @@ describe.each([
 		expect(rOver.receipt.usageSource).toBe("estimated");
 		expect(over.events.some((e) => e.kind === "usage_implausible")).toBe(true);
 		await gOver.destroy();
+	});
+});
+
+describe.each([
+	["dry-run", true],
+	["with a capped engine", false],
+])("a Gemini usage component is held to the ceiling before it is summed (%s)", (_label, dryRun) => {
+	// Gemini sums components into a tier (candidates + thoughts into output). Each is now held to
+	// the ceiling first and refused by its own figure through the per-tier refused flag, so the
+	// call settles at the ESTIMATE and records usage_implausible, never at a wrapped sum.
+	let vaultBase: string;
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `absurd-gemini-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+	});
+	afterEach(() => {
+		rmSync(vaultBase, { recursive: true, force: true });
+	});
+
+	const GEMINI = { model: "gemini-2.5-flash", contents: "hello" };
+
+	async function settle(usageMetadata: Record<string, number>) {
+		const audit = makeAudit();
+		const gemini = {
+			models: {
+				generateContent: vi.fn(async (_req: unknown) => ({ text: "ok", usageMetadata })),
+			},
+		};
+		const g = await trust(gemini, {
+			budget: 100_000,
+			vaultBase,
+			_audit: audit,
+			...(dryRun ? { dryRun: true } : { _engine: cappedEngine().engine }),
+		});
+		const { receipt } = (await g.models.generateContent(GEMINI)) as { receipt: TrustReceipt };
+		await g.destroy();
+		return { receipt, implausible: audit.events.find((e) => e.kind === "usage_implausible") };
+	}
+
+	it("components whose sum overflows to Infinity: settled at the estimate, refused, and recorded", async () => {
+		const { receipt, implausible } = await settle({
+			promptTokenCount: 10,
+			candidatesTokenCount: 1e308,
+			thoughtsTokenCount: 1e308,
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Number.isSafeInteger(receipt.cost)).toBe(true);
+		expect(receipt.cost).toBeLessThan(100_000);
+		expect(implausible?.data).toMatchObject({
+			transferId: receipt.transferId,
+			charged: "estimate",
+			tiers: { outputTokens: 1e308 },
+			checks: { outputTokens: "refused" },
+		});
+	});
+
+	it("one component over the ceiling beside small ones: refused by its own figure", async () => {
+		const { receipt, implausible } = await settle({
+			promptTokenCount: 10,
+			candidatesTokenCount: 10,
+			thoughtsTokenCount: 200_000_000,
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		expect(implausible?.data).toMatchObject({
+			charged: "estimate",
+			tiers: { outputTokens: 200_000_000 },
+			checks: { outputTokens: "refused" },
+		});
+	});
+
+	it("control: a normal Gemini usage settles at the provider's figures, with no event", async () => {
+		const { receipt, implausible } = await settle({
+			promptTokenCount: 1000,
+			candidatesTokenCount: 50,
+			cachedContentTokenCount: 400,
+			thoughtsTokenCount: 30,
+		});
+		expect(receipt.usageSource).toBe("provider");
+		expect(implausible).toBeUndefined();
+	});
+});
+
+describe.each([
+	["dry-run", true],
+	["with a capped engine", false],
+])("an infinite usage component is refused, not read as absent (%s)", (_label, dryRun) => {
+	// JSON.parse reads `1e400` as Infinity. Read as a missing count, the 1-hour write would drop out
+	// of the write total and the call would settle at the provider's figures, undercharged.
+	let vaultBase: string;
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `absurd-infinite-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+	});
+	afterEach(() => {
+		rmSync(vaultBase, { recursive: true, force: true });
+	});
+
+	it("an infinite 1-hour cache write settles at the estimate and records both write tiers as refused", async () => {
+		const audit = makeAudit();
+		const usage: unknown = JSON.parse(
+			'{"input_tokens":10,"output_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":1e400}}',
+		);
+		const g = await trust(client(usage), {
+			budget: 100_000,
+			vaultBase,
+			_audit: audit,
+			...(dryRun ? { dryRun: true } : { _engine: cappedEngine().engine }),
+		});
+		const { receipt } = (await g.messages.create(PARAMS)) as { receipt: TrustReceipt };
+		await g.destroy();
+
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Number.isSafeInteger(receipt.cost)).toBe(true);
+		expect(receipt.cost).toBeGreaterThan(1);
+		expect(receipt.cost).toBeLessThan(100_000);
+		expect(persistedSpend(vaultBase)).toBe(receipt.cost);
+		expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+			transferId: receipt.transferId,
+			charged: "estimate",
+			tiers: { cacheWriteTokens: Number.MAX_VALUE, cacheWrite1hTokens: Number.MAX_VALUE },
+			checks: { cacheWriteTokens: "refused", cacheWrite1hTokens: "refused" },
+		});
 	});
 });
 
@@ -521,6 +643,62 @@ describe("the ceiling is per provider RESPONSE", () => {
 		const auth2 = await gov.authorize(AUTH);
 		const ok = await gov.settle(auth2, { inputTokens: 0, outputTokens: 20 });
 		expect(ok.usageSource).toBe("provider");
+		await gov.destroy();
+	});
+
+	it("a refused tier whose figure is not a finite count (a direct JS caller) is still a flag, recorded at a finite figure", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const cases: Array<[string, unknown, number]> = [
+			["Infinity", Number.POSITIVE_INFINITY, Number.MAX_VALUE],
+			["NaN", Number.NaN, 1],
+			["-1", -1, 1],
+			["5", 5, 5],
+		];
+		for (const [label, value, figure] of cases) {
+			const auth = await gov.authorize(AUTH);
+			const receipt = await gov.settle(auth, {
+				inputTokens: 10,
+				outputTokens: 20,
+				refused: { inputTokens: value } as unknown as { inputTokens: number },
+			});
+			expect(receipt.usageSource, label).toBe("estimated");
+			const data = audit.events.find(
+				(e) => e.kind === "usage_implausible" && e.data.transferId === auth.transferId,
+			)?.data;
+			expect(data, label).toMatchObject({
+				charged: "estimate",
+				checks: { inputTokens: "refused" },
+				tiers: { inputTokens: figure },
+			});
+			expect(JSON.parse(JSON.stringify(data)), label).toEqual(data);
+		}
+		await gov.destroy();
+	});
+
+	it("CONTROL: a refused tier whose value is undefined or null is not a flag", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		for (const value of [undefined, null]) {
+			const auth = await gov.authorize(AUTH);
+			const receipt = await gov.settle(auth, {
+				inputTokens: 10,
+				outputTokens: 20,
+				refused: { inputTokens: value } as unknown as { inputTokens: number },
+			});
+			expect(receipt.usageSource, String(value)).toBe("provider");
+		}
+		expect(audit.events.map((e) => e.kind)).not.toContain("usage_implausible");
 		await gov.destroy();
 	});
 
