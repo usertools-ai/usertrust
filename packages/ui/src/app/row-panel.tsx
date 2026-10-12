@@ -175,6 +175,13 @@ export function RowPanel(props: { row: LedgerRow; onClose(): void }): React.JSX.
 	const [verify, setVerify] = useState<VerifyResponse | "loading" | "error" | null>(null);
 	const closeRef = useRef<HTMLButtonElement>(null);
 
+	// A receipt fetched for the row's earlier status is stale once a correction changes it (settled → ambiguous): drop
+	// it, so the panel never shows the new status beside the old verdict.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: the status is the trigger, not a value read
+	useEffect(() => {
+		setVerify(null);
+	}, [row.status]);
+
 	// Initial focus moves into the panel; on close it returns to the invoking row.
 	useEffect(() => {
 		const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;

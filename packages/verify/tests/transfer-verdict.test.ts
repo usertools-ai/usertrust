@@ -161,3 +161,24 @@ describe("matchesTransfer and transferKeysOf: the `--tx` match, as a predicate a
 		]);
 	});
 });
+
+describe("the receipt renders an action's failure as one", () => {
+	it("red-first (no reason): `--tx` on a `<kind>_failed` record prints FAILED and the record's error", () => {
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verdict-receipt-"));
+		try {
+			mkdirSync(join(dir, "audit"), { recursive: true });
+			writeFileSync(
+				join(dir, "audit", "events.jsonl"),
+				`${chain([{ kind: "tool_use_failed", data: { ...T, error: "the tool threw" } }])
+					.map((l) => JSON.stringify(l))
+					.join("\n")}\n`,
+			);
+			const res = verifyTransaction(dir, "tx_1");
+			expect(res.status).toBe("FAILED");
+			expect(res.receipt).toContain("FAILED");
+			expect(res.receipt).toContain("the tool threw");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

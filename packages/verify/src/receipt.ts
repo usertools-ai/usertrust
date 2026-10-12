@@ -361,10 +361,9 @@ export function renderReceipt(data: ReceiptData): string {
 	const model = event.data.model ?? "unknown";
 	const provider = detectProvider(model);
 	const cost = event.data.cost;
-	const isFailed =
-		event.kind === "llm_call_failed" ||
-		event.kind === "stream_partial_delivery" ||
-		event.kind === "settlement_ambiguous";
+	// The status's own predicate (`eventStatus`), so every failure it names renders as one: an action's
+	// `<kind>_failed` printed FAILED with no reason block when this listed kinds of its own.
+	const isFailed = status === "FAILED" || status === "AMBIGUOUS";
 	// A denial spent nothing, so it renders no spend lines — but its `error` is
 	// the whole point of the receipt and must still be shown.
 	const isDenied = DENIAL_KINDS.has(event.kind);
