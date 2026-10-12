@@ -5,6 +5,26 @@ plugin marketplace (`/plugin marketplace add usertools-ai/usertrust`), not from
 npm, and its version is its own: the `usertrust` packages and their
 [changelog](../../CHANGELOG.md) are versioned separately.
 
+## [3.0.2] - 2026-10-12
+
+### Fixed
+
+- **The "also enabled" warning reads the local settings file Claude Code writes.** Started in a
+  subdirectory of a git repository, Claude Code reads and writes `.claude/settings.local.json` at
+  the repository root; in a git worktree, at the main checkout's root. A file left in the starting
+  directory from before v2.1.211 is still read, and where both set the same key the root's value
+  applies. The warning now reads those files in that order (managed, the root's local file, the
+  starting directory's local file when it is a different path, the shared `.claude/settings.json`
+  in the starting directory only, then the user's). A `.git` pointer, gitdir, or commondir that
+  exists but cannot be read or parsed is "could not tell", naming the path. **`usertools` always
+  meters:** a reading never stops metering. Without the root file, a plugin enabled only there
+  was not warned about, and both metered every tool call.
+- **The uninstall advice names the exact key that is enabled.** The line now ends
+  `/plugin uninstall <name>@<marketplace>` for the highest-precedence key whose winning value is
+  `true` (for example `usertrust-claude-code@elsewhere`), not always
+  `usertrust-claude-code@usertrust`. A copy enabled under another marketplace was told to
+  uninstall a key that was not the one loaded.
+
 ## [3.0.1] - 2026-10-12
 
 ### Fixed

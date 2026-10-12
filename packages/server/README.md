@@ -163,8 +163,10 @@ pending timeout returns its funds. An unknown id, another tenant's id, or a hold
 aborted or released is `404 { "error": "not_found", "reason": "unknown transferId" }`. An unknown ROUTE
 is `404` with `"reason": "unknown route"` instead, which is how a client that could not read
 `capabilities` tells an older server apart. The sweep and shutdown release, too: an expired hold is not a
-failure. The SSE stream announces each release as `released` (shutdown included), with the reason the
-chain recorded.
+failure. The SSE stream announces each release as `released`, with the reason the chain recorded, except
+at a signal shutdown. A server stopped by SIGINT or SIGTERM with a pending hold sends no `released` event
+for that hold. The hold may stay reserved until the ledger's 300 s timeout, and its release may not be
+recorded on the chain: a known issue in 5.0.0. See the repository's `LIMITATIONS.md`.
 
 `/v1/abort` keeps the same rule: `200 { "aborted": true, "transferId": "…" }` (plus `voidError`) only
 when that request ended the hold, and the `aborted` event only then. A hold the governor no longer held

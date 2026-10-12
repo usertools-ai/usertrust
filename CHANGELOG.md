@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The weekly report's ungoverned section says call attempts.** An `ungoverned_call` record is written as the call is made, so it proves an attempt, not a call that reached the provider. The section is headed "Ungoverned call attempts", its line and method table count attempts, and its note says the record is written before the provider is reached when `audit.failClosed` is set and best-effort otherwise, so an attempt may have failed or never reached the provider, and a call whose record could not be written is not counted. The report's disclaimer says the same. The JSON field `ungoverned: { calls, byMethod }` is unchanged.
 
+- **`usertrust verify --json` on the anchored path reports `success` as the exit code.** With `--require-anchor` or `--require-external-anchor`, an unanchored vault exited 1 but printed `"success": true`, so a pipeline that parsed the JSON saw a pass that the exit code refused. `success` is now `true` exactly when the exit code is 0, whichever check decided it.
+
+- **The standalone `usertrust-verify` CLI scrubs every string from the vault before printing it.** It prints at an auditor's terminal, from a vault owned by the party under audit. Several of the vault's strings reached that terminal verbatim: the chain-error lines (an event's `id` and `previousHash`), `First event:` / `Last event:`, the latest anchor's key id and timestamp, the witness error, each anchoring warning, and the echoes of arguments and caught errors. An escape sequence in any of them could erase a FAILED line and print a forged verdict. Each now goes through `forDisplay`, which replaces control characters (C0, DEL, C1) and every Unicode format character (bidirectional controls, zero-width characters, the byte-order mark) with `?`. The anchor's key id is sanitized first, then clipped by code points.
+
 - **`trust(client, { pii: "block" })` blocks PII.** `TrustOpts` had no `pii` field, so a JavaScript caller's `{ pii: "block" }` was dropped with no error, and a request carrying PII went to the provider under the config file's mode, `warn` by default. `pii` now overrides the config file in `trust()` and `createGovernor()`, as `budget` does, and an invalid value is refused by name. The `PolicyDeniedError` default hint, which pointed at that option, now also names the config file setting.
 
 ## [5.0.0] - 2026-10-12
@@ -193,6 +197,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A stream aborted by the caller's own `AbortSignal` is not charged for the usage it consumed (OpenAI and Anthropic `create({ stream: true })`). Fixed in the next release.
 
 - Under `failClosed`, if the audit writer is already degraded, refusing an ungoverned Anthropic or OpenAI method attempts an audit append and rejects with `PolicyDeniedError` instead of refusing at once with `AuditDegradedError`. No call reaches the provider. Fixed in the next release.
+
+- With a ledger-backed usertrust-server, if the ledger becomes unreachable, authorize calls hang without an answer (health stays ok), and a request the client abandons can leave a hold reserved for up to 300 s after the ledger returns. Use a client timeout.
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold can exit before ending it: the hold may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
 
 ## [4.1.0] - 2026-10-08
 

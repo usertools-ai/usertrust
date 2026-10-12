@@ -1493,7 +1493,15 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   event's `error` text, so one hostile value arrives through two fields. C1 coverage matters here
   for the same reason it does in `budget.ts`. The UI is deliberately NOT patched: it renders
   these into DOM text nodes, where escapes are inert, and it displays this same already-scrubbed
-  receipt string.
+  receipt string. The standalone CLI (`verify/src/cli.ts`) imports this same function for its
+  verdict output — every chain-error line, `First event:`/`Last event:`, the latest anchor's keyId
+  and timestamp, the witness error, each anchoring warning, and the argv/caught-error echoes —
+  because those, too, are strings the audited vault (or argv) controls, printed at the auditor.
+  It is an import, not a copy: the count above is unchanged.
+  Beyond C0, DEL and C1 it also replaces every character that reorders or hides text without a glyph:
+  Unicode's format-character category, tested by its property (`/^\p{Cf}$/u` in `isInvisibleFormat`), never
+  by a hand list of ranges, which missed nine members of the class. The zero-width joiner is included, so an
+  emoji sequence shows its parts joined by `?`.
 - Independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.
@@ -1672,8 +1680,8 @@ Drop every line whose raw text contains `from "`, then require exact string equa
   lines **are** compared, so both packages must import the same names in the same order and may
   differ only in the module path.
 
-Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 10200 (a
-vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900→10000→10100→10200 on this line as
+Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 10300 (a
+vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900→10000→10100→10200→10300 (2026-10-12) on this line as
 `packages/verify` grew legitimate node-builtins-only surface, with master separately raising
 4200→4300→4320 for its own receipt-hardening work over the same period — both lineages are folded
 in here and both are recorded in `packages/core/tests/harden/anchoring/anchor-additive.test.ts`
