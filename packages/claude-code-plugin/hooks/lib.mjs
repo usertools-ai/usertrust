@@ -844,13 +844,30 @@ export async function appendRegular(path, text, { mode = 0o600 } = {}) {
 		constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NONBLOCK ?? 0),
 		mode,
 	);
+	await writeThenClose(path, handle, text);
+}
+
+/**
+ * Write `text` through `handle` (a regular file only), then close it, and throw the FIRST
+ * failure of either: a close can report a write that failed late (EIO, ENOSPC), and a write
+ * that may not have landed must never read as written.
+ */
+async function writeThenClose(path, handle, text, { truncate = false } = {}) {
+	let failure;
 	try {
 		const info = await handle.stat();
 		if (!info.isFile()) throw refused(path, "ENOTREG", "not a regular file");
+		if (truncate) await handle.truncate(0);
 		await handle.writeFile(text);
-	} finally {
-		await handle.close().catch(() => {});
+	} catch (err) {
+		failure = err;
 	}
+	try {
+		await handle.close();
+	} catch (err) {
+		failure ??= err;
+	}
+	if (failure !== undefined) throw failure;
 }
 
 /**
@@ -954,7 +971,13 @@ export async function quarantineHold(path) {
 	try {
 		const { gate: _gate, ...body } = JSON.parse(await readRegular(path, READ_BOUND.record));
 		// Its call RAN (PostToolUse found the breaker open): Stop gives it back as `call-ran`.
-		await writeFileAtomic(path, JSON.stringify({ ...body, ran: true }));
+		// IN PLACE: a temp file and a rename need the directory's write access, which is what
+		// failed when quarantine runs. Opened without O_CREAT or O_TRUNC (an existing regular
+		// file only, never waiting on a FIFO), truncated and rewritten through that handle.
+		const handle = await open(path, constants.O_WRONLY | (constants.O_NONBLOCK ?? 0));
+		await writeThenClose(path, handle, JSON.stringify({ ...body, ran: true }), {
+			truncate: true,
+		});
 		return "ungated";
 	} catch {
 		try {
