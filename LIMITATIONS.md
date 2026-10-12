@@ -36,6 +36,14 @@ On a Google client, the alternative methods still pass through ungoverned. The
 exact, current boundary is enumerated at the source in
 `packages/core/src/detect.ts` and `packages/core/src/default-deny.ts`.
 
+**Threat model.** Default-deny prevents ACCIDENTAL unmetered spend through the
+governed client: a call to a method usertrust does not govern, a helper that
+drives the SDK's raw client, a `withOptions()` copy. It is not a sandbox against
+code that sets out to spend. A caller that keeps the raw client it constructed,
+builds a new one through `client.constructor`, or reads the API key off the
+client (`client.apiKey` is a plain value and passes) is outside it, as with any
+wrapper.
+
 The boundary covers the governed client object. It does not cover the original
 client you passed to `trust()`, a client you construct separately, or transports
 that take a client and open their own connection (OpenAI's Realtime and

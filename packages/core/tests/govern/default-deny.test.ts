@@ -28,7 +28,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { verifyVault } from "../../../verify/src/index.js";
 import type { AuditWriter } from "../../src/audit/chain.js";
 import { run as runVerifyCli } from "../../src/cli/verify.js";
-import { FREE_METHODS } from "../../src/default-deny.js";
+import { FREE_METHODS, transportOptionKeys } from "../../src/default-deny.js";
 import { type TrustEngine, type TrustOpts, trust } from "../../src/govern.js";
 import { AUDIT_DIR, VAULT_DIR } from "../../src/shared/constants.js";
 import { AuditDegradedError, PolicyDeniedError } from "../../src/shared/errors.js";
@@ -398,9 +398,14 @@ describe("OpenAI: every ungoverned SDK method is refused", () => {
 // ── Escape hatches ──
 
 describe("escape hatches", () => {
-	it("Anthropic withOptions({}) stays governed: messages.create holds, settles and audits", async () => {
+	it("Anthropic withOptions(timeout, retries, headers, query) stays governed: messages.create holds, settles and audits", async () => {
 		const { client, engine } = await anthropic();
-		const child = client.withOptions({ timeout: 1000 });
+		const child = client.withOptions({
+			timeout: 1000,
+			maxRetries: 0,
+			defaultHeaders: { "x-row": "1" },
+			defaultQuery: { row: "1" },
+		});
 		const before = chainEvents().length;
 		const out = await child.messages.create(MP);
 		expect(out.receipt).toBeDefined();
@@ -414,9 +419,14 @@ describe("escape hatches", () => {
 		expect(hits).toEqual(["POST /v1/messages"]);
 	});
 
-	it("OpenAI withOptions({}) stays governed, and its ungoverned methods are refused", async () => {
+	it("OpenAI withOptions(timeout, retries, headers, query) stays governed, and its ungoverned methods are refused", async () => {
 		const { client, engine } = await openai();
-		const child = client.withOptions({ timeout: 1000 });
+		const child = client.withOptions({
+			timeout: 1000,
+			maxRetries: 0,
+			defaultHeaders: { "x-row": "1" },
+			defaultQuery: { row: "1" },
+		});
 		const before = chainEvents().length;
 		const out = await child.chat.completions.create(CP);
 		expect(out.receipt).toBeDefined();
@@ -439,6 +449,107 @@ describe("escape hatches", () => {
 		const { client, engine } = await anthropic();
 		const moved = client.withOptions({ baseURL: "http://127.0.0.1:11434" });
 		await expectRefused("withOptions", () => moved.messages.create(MP), engine);
+	});
+
+	it.each([
+		["anthropic", "fetch"],
+		["openai", "fetch"],
+		["anthropic", "fetchOptions"],
+		["openai", "fetchOptions"],
+		["anthropic", "middleware"],
+		["openai", "httpAgent"],
+		["openai", "fetch: undefined"],
+	] as const)(
+		"withOptions that changes the transport (%s %s) refuses every call through it",
+		async (provider, key) => {
+			const customHits: string[] = [];
+			const customFetch = (async (input: unknown) => {
+				customHits.push(String(input));
+				return json({});
+			}) as unknown as typeof fetch;
+			const options: Record<string, unknown> = {
+				fetch: { fetch: customFetch },
+				fetchOptions: { fetchOptions: { dispatcher: {} } },
+				middleware: { middleware: [] },
+				httpAgent: { httpAgent: {} },
+				"fetch: undefined": { fetch: undefined },
+			}[key] as Record<string, unknown>;
+			const { client, engine } = provider === "anthropic" ? await anthropic() : await openai();
+			const moved = client.withOptions(options);
+			await expectRefused(
+				"withOptions",
+				() =>
+					provider === "anthropic" ? moved.messages.create(MP) : moved.chat.completions.create(CP),
+				engine,
+			);
+			expect(customHits, "the custom fetch was never called").toEqual([]);
+		},
+	);
+
+	it("withOptions keys: the transport-changing ones, per SDK; an unknown key fails closed", () => {
+		const governed = {
+			timeout: 1,
+			maxRetries: 1,
+			defaultHeaders: {},
+			defaultQuery: {},
+			logLevel: "warn",
+			logger: console,
+			apiKey: "k",
+		};
+		expect(
+			transportOptionKeys("anthropic", { ...governed, authToken: "t", webhookKey: "w" }),
+		).toEqual([]);
+		expect(
+			transportOptionKeys("openai", {
+				...governed,
+				adminAPIKey: "a",
+				organization: "o",
+				project: "p",
+				webhookSecret: "w",
+			}),
+		).toEqual([]);
+		expect(
+			transportOptionKeys("anthropic", {
+				baseURL: "",
+				fetch: undefined,
+				fetchOptions: {},
+				middleware: [],
+				credentials: {},
+				config: {},
+				profile: "p",
+			}),
+		).toEqual([
+			"baseURL",
+			"fetch",
+			"fetchOptions",
+			"middleware",
+			"credentials",
+			"config",
+			"profile",
+		]);
+		expect(
+			transportOptionKeys("openai", {
+				baseURL: "",
+				fetch: undefined,
+				fetchOptions: {},
+				provider: {},
+				workloadIdentity: {},
+				httpAgent: {},
+				endpoint: "",
+				deployment: "",
+				somethingNew: 1,
+			}),
+		).toEqual([
+			"baseURL",
+			"fetch",
+			"fetchOptions",
+			"provider",
+			"workloadIdentity",
+			"httpAgent",
+			"endpoint",
+			"deployment",
+			"somethingNew",
+		]);
 	});
 
 	it("a resource's _client is refused (Anthropic messages._client.messages.create)", async () => {
@@ -576,6 +687,70 @@ describe("allowUngoverned", () => {
 		const { client } = await openai({ allowUngoverned: ["embeddings.create"] });
 		const out = await client.embeddings.create({ model: "text-embedding-3-small", input: "hi" });
 		expect(out.object).toBe("list");
+		expect(chainEvents().map((e) => e.kind)).toEqual(["ungoverned_call"]);
+	});
+
+	/** An OpenAI client whose fetch answers a chat stream as SSE and notes the chain at each request. */
+	async function openaiStreaming(opts: Partial<TrustOpts>) {
+		const chainAtFetch: string[][] = [];
+		const chunk = {
+			id: "chatcmpl_1",
+			object: "chat.completion.chunk",
+			created: 0,
+			model: "gpt-4o",
+			choices: [{ index: 0, delta: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+		};
+		const sse = (async (input: unknown, init?: RequestInit) => {
+			const url = new URL(String(input instanceof Request ? input.url : input));
+			hits.push(`${init?.method ?? "GET"} ${url.pathname}`);
+			chainAtFetch.push(chainEvents().map((e) => e.kind));
+			return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		}) as unknown as typeof fetch;
+		const raw = new OpenAI({
+			apiKey: "k",
+			baseURL: "https://openai.test/v1",
+			fetch: sse,
+			maxRetries: 0,
+		});
+		const client = (await trust(raw, {
+			budget: 1_000_000,
+			vaultBase: vault,
+			_engine: mockEngine(),
+			...opts,
+		})) as Loose;
+		open.push(client);
+		return { client, chainAtFetch };
+	}
+
+	it("a sync SDK method listed in allowUngoverned stays sync without audit.failClosed", async () => {
+		const { client } = await openaiStreaming({ allowUngoverned: ["chat.completions.stream"] });
+		const result = client.chat.completions.stream(CP);
+		expect(result).not.toBeInstanceOf(Promise);
+		expect(typeof result.finalChatCompletion).toBe("function");
+		const final = await result.finalChatCompletion();
+		expect(final.choices[0].message.content).toBe("hi");
+		expect(hits).toEqual(["POST /v1/chat/completions"]);
+		await client.destroy();
+		expect(chainEvents().map((e) => e.kind)).toEqual(["ungoverned_call"]);
+	});
+
+	it("under audit.failClosed a sync SDK method returns a Promise of its value, audited before the SDK runs", async () => {
+		writeConfig({ audit: { failClosed: true } });
+		const { client, chainAtFetch } = await openaiStreaming({
+			allowUngoverned: ["chat.completions.stream"],
+		});
+		const result = client.chat.completions.stream(CP);
+		expect(result).toBeInstanceOf(Promise);
+		const stream = await result;
+		expect(typeof stream.finalChatCompletion).toBe("function");
+		const final = await stream.finalChatCompletion();
+		expect(final.choices[0].message.content).toBe("hi");
+		expect(hits).toEqual(["POST /v1/chat/completions"]);
+		// The event was on the chain when the SDK sent its request.
+		expect(chainAtFetch).toEqual([["ungoverned_call"]]);
 		expect(chainEvents().map((e) => e.kind)).toEqual(["ungoverned_call"]);
 	});
 });

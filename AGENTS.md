@@ -1607,8 +1607,9 @@ exceptions. Each entry cites its SDK source line and verb; they run with the RAW
 `this`, because `this._client` through the boundary is a refusing stand-in, and
 `default-deny.test.ts` calls every entry and fails on a POST its `FREE_POSTS` does not name and `trust({ allowUngoverned })` (audited as
 `ungoverned_call`). `_client` and the client's raw HTTP members are refused by name; `withOptions`
-is re-wrapped by the same governor. On a Google client everything else passes through. A POST is
-freed only with a reason it cannot start billable work, written in both places; a create that can
+is re-wrapped by the same governor, unless an option outside `GOVERNED_WITH_OPTIONS_KEYS` (an
+allow-list) changes the transport, when the new client is a refusing stand-in. On a Google client
+everything else passes through. A POST is freed only with a reason it cannot start billable work, written in both places; a create that can
 allocate storage is not free. If you add a governed surface, update that doc block and the free list.
 
 ---

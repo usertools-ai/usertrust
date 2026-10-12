@@ -50,10 +50,11 @@ import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
-	endpointMovedError,
 	guardedGet,
 	type MethodBoundary,
 	rawClientStandIn,
+	transportChangedError,
+	transportOptionKeys,
 	UNGOVERNED_CALL_KIND,
 	ungovernedMethodError,
 	validateAllowUngoverned,
@@ -3735,7 +3736,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// one; a sync helper stays sync). Under `audit.failClosed` the call is refused, before the SDK
 	// is reached, when the append failed or the writer is degraded: the event is the only record
 	// of this spend, so the rule that aborts a governed call whose `llm_call` failed applies. The
-	// append is awaited first there, so the call always returns a Promise of the SDK's result.
+	// append is awaited first there, so the call always returns a Promise of the SDK's result: a
+	// method that is synchronous in the SDK (`chat.completions.stream`) returns a Promise of its
+	// value, and a thenable value (`beta.messages.toolRunner`'s runner) is awaited by that Promise.
 	function callUngovernedMethod(
 		path: string,
 		fn: (...fnArgs: unknown[]) => unknown,
@@ -3838,17 +3841,26 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			refuse: refuseUngovernedMethod,
 			allowUngoverned,
 			callUngoverned: callUngovernedMethod,
-			rewrap(fresh: unknown): unknown {
+			rewrap(fresh: unknown, options: unknown): unknown {
 				if (fresh == null || typeof fresh !== "object") return fresh;
-				// Every governed call meters for the endpoint captured at creation (A3), so a
-				// withOptions() client that points elsewhere is refused rather than mis-metered.
+				// Every governed call meters for the endpoint captured at creation (A3), and the
+				// boundary trusts the transport it wrapped. A withOptions() client that changes either
+				// (a transport key, or an endpoint that classifies differently) is refused rather than
+				// mis-metered or sent through a fetch nothing here has seen.
+				const changed = transportOptionKeys(kind, options);
 				const moved = classifyEndpoint(fresh, config, opts?.endpoint);
 				if (
+					changed.length > 0 ||
 					moved.class !== endpoint.class ||
 					moved.runtime !== endpoint.runtime ||
 					moved.baseURL !== endpoint.baseURL
 				) {
-					return rawClientStandIn(fresh, "withOptions", boundary, endpointMovedError(kind));
+					return rawClientStandIn(
+						fresh,
+						"withOptions",
+						boundary,
+						transportChangedError(kind, changed),
+					);
 				}
 				return build(fresh, interceptCall, destroyFn, governActionImpl, boundary);
 			},
@@ -4583,7 +4595,9 @@ function buildAnthropicBetaProxy(
 /**
  * The client-level `withOptions` trap shared by the Anthropic and OpenAI builders. The SDK's
  * `withOptions` returns a NEW raw client (`new this.constructor(...)`); `boundary.rewrap` gives
- * it a governed proxy over the same governor, so it is governed exactly like this one. Returns
+ * it a governed proxy over the same governor, so it is governed exactly like this one — unless the
+ * options change where or how calls are sent (`transportOptionKeys`), when every call through the
+ * new client is refused. Returns
  * undefined when the client has no `withOptions` (an older or duck-typed client), and the name
  * then goes to the boundary like any other.
  */
@@ -4591,7 +4605,7 @@ function governedWithOptions(target: object, boundary: MethodBoundary): unknown 
 	const withOptions: unknown = Reflect.get(target, "withOptions", target);
 	if (typeof withOptions !== "function") return undefined;
 	return (...args: unknown[]) =>
-		boundary.rewrap((withOptions as (...a: unknown[]) => unknown).apply(target, args));
+		boundary.rewrap((withOptions as (...a: unknown[]) => unknown).apply(target, args), args[0]);
 }
 
 function buildAnthropicProxy<T>(

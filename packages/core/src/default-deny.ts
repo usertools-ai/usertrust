@@ -68,7 +68,7 @@ export interface MethodBoundary {
 		args: unknown[],
 	) => unknown;
 	/** Wrap the raw client `withOptions` returned, with the same governor. */
-	readonly rewrap: (fresh: unknown) => unknown;
+	readonly rewrap: (fresh: unknown, options: unknown) => unknown;
 	/** Raw resource → its guarded proxy, so a resource is the same object on every read. */
 	readonly resources: WeakMap<object, object>;
 	/** Stand-in path → (raw object → its stand-in). Stable identity keeps JSON's cycle check working. */
@@ -89,6 +89,10 @@ export interface MethodBoundary {
 // Each entry cites the method's definition in the SDK's CommonJS build (the file that runs).
 // `tests/govern/default-deny.test.ts` calls every entry through the governed client and fails
 // on a POST that is not in its own list of free POSTs.
+//
+// Every GET was checked for one that STARTS work; `beta.environments.work.poll` is the only one.
+// `responses.retrieve({ stream: true })` resumes streaming a response that is already running and
+// billed, and the session event streams observe a session; neither starts or bills anything.
 //
 // GET or DELETE methods that are NOT free, by name:
 // beta.environments.work.poll (resources/beta/environments/work.js:165): GET, but it CLAIMS a queued work item for a self-hosted worker, which then runs the session (billed session runtime).
@@ -433,11 +437,64 @@ function rawClientError(provider: DefaultDenyProvider, path: string): PolicyDeni
 	);
 }
 
-/** The refusal for every call through a `withOptions` client that points somewhere else. */
-export function endpointMovedError(provider: DefaultDenyProvider): PolicyDeniedError {
+/**
+ * The `withOptions()` keys that leave the transport as it was: how long to wait, how often to
+ * retry, extra headers and query, logging, and which credential or account to send. Every other
+ * key can change WHERE or HOW calls are sent, so a `withOptions()` call that passes one (even as
+ * `undefined`: the SDK spreads it over the inherited value) gets a client on which every call is
+ * refused. An allow-list, so a key a subclass or an older SDK adds fails closed. The keys this
+ * refuses on the installed SDKs (`ClientOptions` in each `client.d.ts`):
+ *   - both: `baseURL`, `fetch`, `fetchOptions` (a dispatcher or agent rides here);
+ *   - Anthropic: `middleware` (rewrites each request), `credentials`, `config`, `profile`
+ *     (credential resolution can set the base URL: `_applyCredentialBaseURL`);
+ *   - OpenAI: `provider` (a third-party API provider), `workloadIdentity` (a token exchange);
+ *   - older SDKs and subclasses: `httpAgent`, Azure's `endpoint` / `deployment`, Bedrock's and
+ *     Vertex's region and project, and any key not listed below.
+ */
+const GOVERNED_WITH_OPTIONS_KEYS: Record<DefaultDenyProvider, ReadonlySet<string>> = {
+	anthropic: new Set([
+		"timeout",
+		"maxRetries",
+		"defaultHeaders",
+		"defaultQuery",
+		"logLevel",
+		"logger",
+		"dangerouslyAllowBrowser",
+		"apiKey",
+		"authToken",
+		"webhookKey",
+	]),
+	openai: new Set([
+		"timeout",
+		"maxRetries",
+		"defaultHeaders",
+		"defaultQuery",
+		"logLevel",
+		"logger",
+		"dangerouslyAllowBrowser",
+		"apiKey",
+		"adminAPIKey",
+		"organization",
+		"project",
+		"webhookSecret",
+	]),
+};
+
+/** The `withOptions()` keys that can change where or how calls are sent, in the order given. */
+export function transportOptionKeys(provider: DefaultDenyProvider, options: unknown): string[] {
+	if (options == null || typeof options !== "object") return [];
+	return Object.keys(options).filter((key) => !GOVERNED_WITH_OPTIONS_KEYS[provider].has(key));
+}
+
+/** The refusal for every call through a `withOptions()` client whose transport changed. */
+export function transportChangedError(
+	provider: DefaultDenyProvider,
+	changed: readonly string[],
+): PolicyDeniedError {
+	const what = changed.length > 0 ? ` (${changed.join(", ")})` : " (the endpoint)";
 	return new PolicyDeniedError(
-		`ungoverned_method: withOptions is not governed on ${PROVIDER_NAME[provider]} client when it changes the endpoint`,
-		"A governed client meters every call for the endpoint trust() classified when it wrapped the client, so a withOptions() client that points elsewhere is refused. Wrap a client built for that endpoint with its own trust() call.",
+		`ungoverned_method: withOptions is not governed on ${PROVIDER_NAME[provider]} client when it changes where or how calls are sent${what}`,
+		"A governed client meters every call for the endpoint and transport trust() saw when it wrapped the client, so a withOptions() client with a different baseURL, fetch, fetchOptions, middleware, provider or credential source is refused. timeout, maxRetries, defaultHeaders, defaultQuery, logging and the API key stay governed. Wrap a client built for the new transport with its own trust() call.",
 	);
 }
 

@@ -33,7 +33,8 @@
  * - `trust({ allowUngoverned: ["embeddings.create"] })`, which runs a listed method
  *   ungoverned and audits each call as `ungoverned_call` (no usage, no cost).
  * A resource's `_client` and the client's raw HTTP members (`post`, `get`, `request`, …)
- * are always refused; `withOptions()` returns a client governed by the same governor.
+ * are always refused; `withOptions()` returns a client governed by the same governor, or, when
+ * its options change where or how calls are sent, one on which every call is refused.
  *
  * **Google clients are allow-list only:** methods other than the governed one pass
  * through untouched and bypass governance, audit, and budget enforcement.
