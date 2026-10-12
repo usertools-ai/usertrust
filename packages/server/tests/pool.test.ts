@@ -2,7 +2,7 @@ import type { TrustOpts } from "usertrust";
 import { describe, expect, it } from "vitest";
 import type { ServerConfig, TenantConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
-import { GovernorPool } from "../src/pool.js";
+import { GovernorPool, tenantVaultBase } from "../src/pool.js";
 import { createFakeGovernor } from "./helpers/fake-governor.js";
 
 const TENANT_A: TenantConfig = { id: "a", keyHash: hashKey("ka"), budget: 100 };
@@ -86,5 +86,25 @@ describe("GovernorPool", () => {
 		await pool.get(TENANT_B);
 		await pool.destroyAll();
 		expect(destroyed).toBe(2);
+	});
+});
+
+describe.skipIf(process.platform === "win32")("tenantVaultBase", () => {
+	const base = (stateDir: string): string => tenantVaultBase({ ...config(), stateDir }, TENANT_A);
+
+	it("strips trailing separators, so no `//` reaches a path or a message", () => {
+		expect(base("/srv/state/")).toBe("/srv/state/a");
+		expect(base("/srv/state//")).toBe("/srv/state/a");
+		expect(base("/srv/state")).toBe("/srv/state/a");
+	});
+
+	it("keeps a root's own separator, and reads an empty stateDir as the working directory", () => {
+		expect(base("/")).toBe("/a");
+		expect(base("")).toBe("a");
+	});
+
+	it("resolves nothing: a `..` reaches the governor as written", () => {
+		expect(base("link/../state/")).toBe("link/../state/a");
+		expect(base("./state")).toBe("./state/a");
 	});
 });

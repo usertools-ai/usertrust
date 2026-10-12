@@ -50,6 +50,7 @@ import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
+import { afcRequested, runGovernedAfc } from "./google-afc.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	copyAppliedRates,
@@ -98,6 +99,7 @@ import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/private-fs.js";
 import { isPersistableSpend } from "./shared/spend-guard.js";
+import { governorVaultBase } from "./shared/vault-base.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
@@ -435,8 +437,21 @@ type GovernedResponses<R> =
  * arrives on the streaming shortcut users actually reach for.
  */
 type GovernedGoogleModels<G> = G extends { generateContent: infer C extends AnyMethod }
-	? Omit<G, "generateContent"> & { generateContent: GovernedCreateMethod<C> }
+	? Omit<G, "generateContent"> & { generateContent: GovernedGoogleGenerateMethod<C> }
 	: G;
+
+/**
+ * The Google `generateContent` envelope: `{ response, receipt }` like every other create, plus `receipts`, one per model
+ * round, present when a callable tool made the call a governed automatic-function-calling loop (google-afc.ts). `receipt`
+ * is then the LAST round's, so `receipts` is where a caller sees every charge.
+ */
+type GovernedGoogleGenerateMethod<F> = F extends (...args: infer A) => infer R
+	? (...args: A) => Promise<{
+			response: GovernedResponseOf<Awaited<R>>;
+			receipt: TrustReceipt;
+			receipts?: TrustReceipt[];
+		}>
+	: F;
 
 // ── Provider selection: the type-level twin of detectClientKind ──
 // Each predicate is the full runtime test, both halves: the namespace is a
@@ -1184,9 +1199,11 @@ function snapshotActionDescriptor(descriptor: ActionDescriptor): ActionDescripto
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
 	// 1. Load config
-	// Absolute from here: every vault file this client touches is in the vault it was created for,
-	// whatever the working directory becomes later (its audit writer is fixed at creation too).
-	const vaultBase = resolve(opts?.vaultBase ?? process.cwd());
+	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,
+	// so every vault file this client touches is in the vault it was created for, whatever the working
+	// directory becomes later (its audit writer is fixed at creation too). With no `..` left, resolve() only
+	// prefixes the working directory and drops `.` segments; it has nothing to fold.
+	const vaultBase = resolve(governorVaultBase(opts?.vaultBase ?? process.cwd()));
 	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
 	// version left group/world-readable is closed; one another user owns is refused (see
 	// securePrivateVault). This runs before ANYTHING under the vault is read, the config
@@ -4644,7 +4661,17 @@ function buildGoogleProxy<T>(
 	const modelsProxy = new Proxy(models, {
 		get(target, prop, receiver) {
 			if (prop === "generateContent") {
-				return (...args: unknown[]) => intercept(originalGenerate, target, args);
+				return (...args: unknown[]) => {
+					// With a callable tool the SDK would loop internally and only the last round would be metered:
+					// run the loop here instead, each round its own governed call (see google-afc.ts).
+					const params = args[0];
+					if (afcRequested(params)) {
+						return runGovernedAfc(params as Record<string, unknown>, (roundParams) =>
+							intercept(originalGenerate, target, [roundParams, ...args.slice(1)]),
+						);
+					}
+					return intercept(originalGenerate, target, args);
+				};
 			}
 			return Reflect.get(target, prop, receiver);
 		},

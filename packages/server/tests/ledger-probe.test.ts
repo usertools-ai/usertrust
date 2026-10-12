@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -196,6 +197,41 @@ describe("resolveLedgerTargets", () => {
 		await writeFile(join(dir, "usertrust.config.json"), "{ not json");
 		await expect(resolveLedgerTargets(serverConfig(stateDir))).rejects.toThrow(/tenant a/);
 	});
+
+	// The governor resolves a `..` in its base where the kernel does (createGovernor); the probe
+	// must read the config from that same directory, or it probes a ledger the tenant never uses.
+	describe.skipIf(process.platform === "win32")(
+		"a stateDir with `..` after a symbolic link",
+		() => {
+			it("reads the tenant config the governor will read, at the kernel's location", async () => {
+				const parent = await mkdtemp(join(tmpdir(), "utsrv-probe-dotdot-"));
+				// `link -> <parent>/elsewhere/sub`, so the kernel reads `link/..` as `<parent>/elsewhere`.
+				await mkdir(join(parent, "elsewhere", "sub"), { recursive: true });
+				await symlink(join(parent, "elsewhere", "sub"), join(parent, "link"));
+				const kernel = join(realpathSync.native(join(parent, "elsewhere")), "state");
+				await writeVaultConfig(join(kernel, "a", ".usertrust"), {
+					budget: 100,
+					tigerbeetle: { addresses: ["127.0.0.1:4002"], clusterId: 2 },
+				});
+				// The lexical spelling of the same base, `<parent>/state`: a DIFFERENT ledger.
+				await writeVaultConfig(join(parent, "state", "a", ".usertrust"), {
+					budget: 100,
+					tigerbeetle: { addresses: ["127.0.0.1:4001"], clusterId: 1 },
+				});
+				expect(await resolveLedgerTargets(serverConfig(`${parent}/link/../state`))).toEqual([
+					{ clusterId: 2, addresses: ["127.0.0.1:4002"] },
+				]);
+			});
+
+			it("refuses a `..` after a directory that does not exist, as the governor does", async () => {
+				const parent = await mkdtemp(join(tmpdir(), "utsrv-probe-dotdot-"));
+				const stateDir = `${parent}/missing/../state`;
+				await expect(resolveLedgerTargets(serverConfig(stateDir))).rejects.toThrow(
+					`tenant a: usertrust: the vault base ${stateDir}/a has ".." after ${parent}/missing, which does not exist yet; create it first, or give the base without ".."`,
+				);
+			});
+		},
+	);
 });
 
 /** A localhost port nothing listens on: bound by the OS, then released. */
