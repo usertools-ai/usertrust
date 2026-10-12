@@ -874,4 +874,73 @@ describe("every file the plugin reads goes through ONE bounded, regular-file-onl
 			expect(Date.now() - started).toBeLessThan(2_000);
 		});
 	});
+
+	describe("eachLine (a log is streamed, never read whole)", () => {
+		type Seen = Array<[string | null, boolean]>;
+		async function lines(path: string, options?: Record<string, number>): Promise<Seen> {
+			const { eachLine } = await reader();
+			const seen: Seen = [];
+			await eachLine(
+				path,
+				(line: string | null, terminated: boolean) => {
+					seen.push([line, terminated]);
+				},
+				options,
+			);
+			return seen;
+		}
+
+		it("every line in order, across chunk boundaries, with the final fragment marked", async () => {
+			const path = join(stateDir, "a.jsonl");
+			await writeFile(path, "first\n\nthird line\nfrag");
+			const want: Seen = [
+				["first", true],
+				["", true],
+				["third line", true],
+				["frag", false],
+			];
+			expect(await lines(path)).toEqual(want);
+			// A 3-byte chunk splits every line across reads: the same lines.
+			expect(await lines(path, { chunkBytes: 3 })).toEqual(want);
+		});
+
+		it("a line past maxLineBytes is null, skipped unread, and the next line is whole", async () => {
+			const path = join(stateDir, "b.jsonl");
+			await writeFile(path, `ok\n${"x".repeat(50)}\nafter\n${"y".repeat(50)}`);
+			expect(await lines(path, { maxLineBytes: 10, chunkBytes: 4 })).toEqual([
+				["ok", true],
+				[null, true],
+				["after", true],
+				[null, false],
+			]);
+		});
+
+		it("an empty file is no lines; a missing one is ENOENT; a FIFO is ENOTREG at once", async () => {
+			const { eachLine } = await reader();
+			const empty = join(stateDir, "empty.jsonl");
+			await writeFile(empty, "");
+			expect(await lines(empty)).toEqual([]);
+			await expect(eachLine(join(stateDir, "absent"), () => {})).rejects.toMatchObject({
+				code: "ENOENT",
+			});
+			if (process.platform === "win32") return;
+			const fifo = join(stateDir, "c.fifo");
+			expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+			const started = Date.now();
+			await expect(eachLine(fifo, () => {})).rejects.toMatchObject({ code: "ENOTREG" });
+			expect(Date.now() - started).toBeLessThan(2_000);
+		});
+
+		it("an onLine that returns false stops the read", async () => {
+			const { eachLine } = await reader();
+			const path = join(stateDir, "d.jsonl");
+			await writeFile(path, "a\nb\nc\n");
+			const seen: string[] = [];
+			await eachLine(path, (line: string) => {
+				seen.push(line);
+				return line !== "b";
+			});
+			expect(seen).toEqual(["a", "b"]);
+		});
+	});
 });

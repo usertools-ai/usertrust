@@ -33,8 +33,11 @@ npm, and its version is its own: the `usertrust` packages and their
 - **A FIFO, a directory or a huge file where the plugin expects one of its files can no longer
   hang a hook.** Every file the hooks and `usertrust-job` read (their state, the job logs, the
   audit logs, `watch.jsonl`, the transcript) is opened non-blocking and read only when it is a
-  regular file, and the plugin's own files only up to a bound far above their real size.
-  Anything else reads as an unreadable file, which each caller already handled.
+  regular file. The plugin's own state files are read up to a bound far above their real size;
+  the logs, which only grow, are never read whole but streamed a line at a time, so a log of
+  any size is read in the memory of one line. Anything else reads as an unreadable file, which
+  each caller already handled. `usertrust-job coverage` gives no verdict when a job log cannot
+  be read, instead of reading it as empty.
 
 ### Changed
 

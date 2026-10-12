@@ -2,14 +2,16 @@
 //
 // Job ids here are opaque (`job-a`, `bug-1`). Each test names the mutant it kills.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
+	appendFile,
 	chmod,
 	mkdir,
 	mkdtemp,
 	readdir,
 	readFile,
 	stat,
+	truncate,
 	utimes,
 	writeFile,
 } from "node:fs/promises";
@@ -1534,6 +1536,68 @@ describe("usertrust-job coverage — the CLI reports gaps, not a verdict", () =>
 			"1 audit line(s) could not be parsed",
 		);
 		expect(r.stdout).not.toMatch(/\bexact\b|certified/i);
+	});
+
+	// An audit log only grows: a ceiling on reading it whole would end every verdict for that
+	// vault for good once the log passed it. It is streamed, one line at a time.
+	it("an audit log past 256 MiB still gives a verdict: streamed, a line too long to read counted", async () => {
+		const J = "bug-1";
+		const vault = join(state, "vault-big");
+		await mkdir(join(vault, "audit"), { recursive: true });
+		const events = join(vault, "audit", "events.jsonl");
+		const llmCall = (tx: string, cost: number) =>
+			`${JSON.stringify({ kind: "llm_call", actor: `claude-code:${SID}:main:main`, data: { transferId: tx, cost, job: J, principal: { origin: `claude-code:${SID}` }, usageFrom: iso(T0 + 2000), usageTo: iso(T0 + 3000) } })}\n`;
+		await writeFile(events, llmCall("tx_1", 5));
+		// 300 MiB: a sparse run of zero bytes (one "line" far past READ_BOUND.line), then a record.
+		await truncate(events, 300 * 1024 * 1024);
+		await appendFile(events, `\n${llmCall("tx_2", 7)}`);
+		expect((await stat(events)).size).toBeGreaterThan(256 * 1024 * 1024);
+		await writeLog(
+			start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null),
+		);
+		const r = await cliOut(["coverage", J, "--vault", vault, "--watch", join(state, "none.jsonl")]);
+		// mutant: read whole under a 256 MiB ceiling → EFBIG → "no verdict", exit 1
+		expect(r.stderr).not.toContain("no verdict");
+		expect(r.code).toBe(0);
+		const out = JSON.parse(r.stdout) as { knownGaps: Array<{ gap: string }>; taggedCostUt: string };
+		// Both records on either side of the run are read; the run itself is one unparsed line.
+		expect(out.taggedCostUt).toBe("12");
+		expect(out.knownGaps.map((g) => g.gap).join(" ")).toContain(
+			"1 audit line(s) could not be parsed",
+		);
+	}, 120_000);
+
+	it("a FIFO in an audit log's place: no verdict, at once, never a hang", async () => {
+		if (process.platform === "win32") return;
+		const vault = join(state, "vault-fifo");
+		await mkdir(join(vault, "audit"), { recursive: true });
+		expect(spawnSync("mkfifo", [join(vault, "audit", "events.jsonl")]).status).toBe(0);
+		const started = Date.now();
+		const r = await cliOut([
+			"coverage",
+			"bug-1",
+			"--vault",
+			vault,
+			"--watch",
+			join(state, "none.jsonl"),
+		]);
+		expect(Date.now() - started).toBeLessThan(10_000);
+		expect(r.code).toBe(1);
+		expect(r.stderr).toContain("(ENOTREG): no verdict");
+	}, 30_000);
+});
+
+describe("a job log is streamed: the same answer as its text, in the memory of one line", () => {
+	it("a torn last line outranks an earlier bad one, streamed or read whole", async () => {
+		const { readJobLog, parseJobLog } = (await lib()) as unknown as {
+			readJobLog(p: string, sid: string): Promise<{ parsed: { state: string; reason?: string } }>;
+			parseJobLog(t: string, sid: string): { state: string; reason?: string };
+		};
+		const text = `${start(SID, T0)}not json\n{"sid":`;
+		await writeLog(text);
+		const streamed = (await readJobLog(logFile(), SID)).parsed;
+		expect(streamed).toEqual(parseJobLog(text, SID));
+		expect(streamed.reason).toContain("torn");
 	});
 });
 

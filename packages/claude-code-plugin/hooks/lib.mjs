@@ -704,21 +704,27 @@ export async function publishExclusive(path, content, { mode } = {}) {
 }
 
 /**
- * The most `readRegular` reads of a file, by its class. Every bound is far above what the
- * file is: a refused read fails as an unreadable one does, so a bound must never be reached
- * by a real file.
+ * The bounds the plugin reads files under. A file whose size is naturally bounded is read
+ * whole by `readRegular`, and a bound far above its real size refuses a file that is not what
+ * it should be (a refused read fails as an unreadable one does, so a real file never reaches
+ * it):
  * - `small`: one value: a marker, a stamp, a lock's owner, a session's notice state, the
  *   SessionStart mark. Each is under 200 bytes.
  * - `record`: JSON that carries lists or maps: a transcript cursor (two lists of at most
  *   ID_HISTORY ids, 355 KB measured), a hold, the capabilities cache, the job-capability map
  *   (one entry per server URL, never pruned), a subagent's meta file.
- * - `log`: a log read whole: a session's job log, the vault's audit logs, watch.jsonl.
+ * An append-only LOG (a session's job log, the vault's audit logs, watch.jsonl) only grows:
+ * no ceiling on it is ever right, so it is never read whole. `eachLine` streams it instead,
+ * and `line` bounds one line of it (the memory a read of any size holds).
  */
 export const READ_BOUND = Object.freeze({
 	small: 4 * 1024,
 	record: 64 * 1024 * 1024,
-	log: 256 * 1024 * 1024,
+	line: 16 * 1024 * 1024,
 });
+
+/** How much of a log `eachLine` reads at a time. */
+const LINE_CHUNK_BYTES = 1024 * 1024;
 
 function readRefused(path, code, why) {
 	return Object.assign(new Error(`${path}: ${why}`), { code });
@@ -760,6 +766,67 @@ export async function readRegular(path, bound) {
 			read += bytesRead;
 		}
 		return buffer.toString("utf-8", 0, read);
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+
+/**
+ * Stream the append-only log at `path` line by line, through `openRegular` (non-blocking, a
+ * regular file only): memory holds one chunk and one line, whatever the log's size. Calls
+ * `onLine(text, terminated)` for each line in order:
+ * - `text` is the line without its newline, or null for a line longer than `maxLineBytes`,
+ *   which is skipped unread (the caller counts it, or refuses the log);
+ * - `terminated` is false only for a final fragment with no newline (a write cut short, or one
+ *   in flight).
+ * An `onLine` that returns false stops the read. The log is read to the size it had when it
+ * was opened, so a line appended meanwhile is read next time. Throws as `openRegular` does
+ * (ENOENT is "not there").
+ */
+export async function eachLine(
+	path,
+	onLine,
+	{ maxLineBytes = READ_BOUND.line, chunkBytes = LINE_CHUNK_BYTES } = {},
+) {
+	const { handle, info } = await openRegular(path);
+	try {
+		const chunk = Buffer.alloc(Math.max(1, Math.min(chunkBytes, info.size)));
+		let parts = []; // the line so far, as copies: `chunk` is reused
+		let partBytes = 0;
+		let skipping = false; // the line is over maxLineBytes
+		let position = 0;
+		while (position < info.size) {
+			const want = Math.min(chunk.length, info.size - position);
+			const { bytesRead } = await handle.read(chunk, 0, want, position);
+			if (bytesRead === 0) break;
+			position += bytesRead;
+			const view = chunk.subarray(0, bytesRead);
+			let from = 0;
+			for (let end = view.indexOf(0x0a); end !== -1; end = view.indexOf(0x0a, from)) {
+				const tail = view.subarray(from, end);
+				const line =
+					skipping || partBytes + tail.length > maxLineBytes
+						? null
+						: Buffer.concat([...parts, tail]).toString("utf-8");
+				parts = [];
+				partBytes = 0;
+				skipping = false;
+				from = end + 1;
+				if (onLine(line, true) === false) return;
+			}
+			const rest = view.subarray(from);
+			if (skipping || rest.length === 0) continue;
+			if (partBytes + rest.length > maxLineBytes) {
+				skipping = true;
+				parts = [];
+				partBytes = 0;
+			} else {
+				parts.push(Buffer.from(rest));
+				partBytes += rest.length;
+			}
+		}
+		if (skipping) onLine(null, false);
+		else if (partBytes > 0) onLine(Buffer.concat(parts).toString("utf-8"), false);
 	} finally {
 		await handle.close().catch(() => {});
 	}
