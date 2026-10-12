@@ -187,7 +187,7 @@ When TigerBeetle is unreachable, usertrust refuses to forward the request. This 
 
 ## AuditDegradedError
 
-Thrown (or flagged) when the audit chain write fails after the LLM call and ledger settlement both succeed.
+Thrown (or flagged) when the audit chain write fails after the LLM call and ledger settlement both succeed. Under `audit.failClosed`, a `trust()` client whose audit writer is already degraded also throws it at the start of a call, before anything is charged (below).
 
 ```typescript
 class AuditDegradedError extends Error {
