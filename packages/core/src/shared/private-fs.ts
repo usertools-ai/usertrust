@@ -13,6 +13,7 @@
  */
 
 import {
+	accessSync,
 	closeSync,
 	fchmodSync,
 	constants as fsConstants,
@@ -160,8 +161,9 @@ function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
  * `create`, an absent vault is left absent. An existing one with any group or
  * other bit (a vault an earlier version created 0755, say) is tightened to 0700: the directory
  * is usertrust's own, and closing it closes every file under it, whatever their own modes. A
- * vault that cannot be closed is refused with the reason, never used world-readable. The vault
- * BASE, the directory the caller named, is never touched.
+ * vault that cannot be closed is refused with the reason, never used world-readable. An
+ * owner-only vault this process cannot write to (0100, say) is refused by name, not tightened.
+ * The vault BASE, the directory the caller named, is never touched.
  *
  * A vault ANOTHER USER OWNS is refused, whatever its mode, before anything about it is accepted or
  * changed: its owner can replace the files written in it. The owner is compared with the
@@ -248,7 +250,23 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 	if (!st.isDirectory()) throw notADirectory(vaultDir, st);
 	if (isWindows()) return;
 	if (euid !== undefined && st.uid !== euid) throw foreignVault(vaultDir, st.uid, euid);
-	if ((st.mode & 0o077) === 0) return;
+	if ((st.mode & 0o077) === 0) {
+		// Owner-only and ours: usable if this process can create in it (write and search; read is
+		// not needed). Asked of the kernel, which counts root and ACLs, so a 0100 vault is refused
+		// here by name, never left for the first writer to fail on with a bare EACCES. It is not
+		// tightened instead: the fd path below cannot open a directory without read permission,
+		// and a chmod by path would reopen the link-swap race that path closes.
+		try {
+			accessSync(vaultDir, fsConstants.W_OK | fsConstants.X_OK);
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code !== "EACCES" && code !== "EPERM") throw err;
+			throw new Error(
+				`usertrust: the vault ${vaultDir} is owned by this user but this process cannot write to it (mode ${octal(st.mode)}); make it usable with: chmod 700 ${vaultDir}`,
+			);
+		}
+		return;
+	}
 	const refuse = (reason: string): Error =>
 		new Error(
 			`usertrust: the vault ${vaultDir} is readable by other users (mode ${octal(st.mode)}) and could not be made owner-only: ${reason}`,
