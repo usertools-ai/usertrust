@@ -159,7 +159,9 @@ describe("weekly report model", () => {
 		expect(m.totals.confirmedUt).toBe(100);
 		expect(m.totals.unconfirmedUt).toBe(40);
 		expect(m.totals.unsettledCalls).toBe(1);
-		expect(m.budget.recordedSessionUt).toBe(100 + 40); // the governor's counter added it
+		// a settle marked unsettled with nothing else: the chain cannot say whether the counter added it
+		expect(m.budget.recordedSessionUt).toBe(100);
+		expect(m.budget.recordedSessionUncertain).toBe(40);
 	});
 
 	it("malformed ROWS are skipped and counted, never a crash", () => {
@@ -348,8 +350,9 @@ describe("weekly report model", () => {
 		expect(m.totals.confirmedUt).toBe(100);
 		expect(m.totals.unconfirmedCalls).toBe(1);
 		expect(m.totals.unconfirmedUt).toBe(700);
-		// the call was POSTED (a post-commit failure marker follows), so the counter had added it: counted once per transfer
-		expect(m.budget.recordedSessionUt).toBe(100 + 700);
+		// a settled call that a void marker contradicts, with no post evidence: UNCERTAIN, in the upper bound only
+		expect(m.budget.recordedSessionUt).toBe(100);
+		expect(m.budget.recordedSessionUncertain).toBe(700 + 0);
 		expect(m.totals.actionUt).toBe(0);
 		expect(m.totals.unconfirmedActionCalls).toBe(1);
 		expect(m.totals.unconfirmedActionUt).toBe(40);
@@ -653,6 +656,123 @@ describe("weekly report model", () => {
 		expect(build(base).spendLedger).toMatchObject({ recorded: null, differs: false });
 	});
 
+	describe("the bounded mirror: three classes per transfer from a closed evidence set", () => {
+		const wallet = (events: PersistedAuditEvent[], opts: Record<string, unknown> = {}) =>
+			build(events, { budget: 1000, ...opts }).budget;
+
+		it("post evidence OUTRANKS a failure marker: shortfall, ambiguity or ledgerPosted beside a void is DEBITED", () => {
+			for (const evidence of [
+				ev("settlement_shortfall", "2026-10-08T01:00:01Z", {
+					transferId: "t",
+					actual: 100,
+					posted: 60,
+				}),
+				ev("settlement_ambiguous", "2026-10-08T01:00:01Z", { transferId: "t" }),
+			]) {
+				const b = wallet([
+					call("2026-10-08T01:00:00Z", 100, { transferId: "t" }),
+					evidence,
+					ev("llm_call_failed", "2026-10-08T01:00:02Z", { transferId: "t" }),
+				]);
+				expect(b.recordedSessionWallet, evidence.kind).toBe(100);
+				expect(b.recordedSessionUncertain, evidence.kind).toBe(0);
+			}
+			const posted = wallet([
+				call("2026-10-08T01:00:00Z", 100, {
+					transferId: "t",
+					ledgerPosted: true,
+					source: "headless",
+				}),
+				ev("llm_call_failed", "2026-10-08T01:00:02Z", { transferId: "t" }),
+			]);
+			expect(posted.recordedSessionWallet).toBe(100);
+		});
+
+		it("a settled call a void or release contradicts, with no post evidence, is UNCERTAIN (upper bound only)", () => {
+			for (const marker of ["llm_call_failed", "hold_released"]) {
+				const b = wallet([
+					call("2026-10-08T01:00:00Z", 100, { transferId: "t" }),
+					ev(marker, "2026-10-08T01:00:01Z", { transferId: "t" }),
+				]);
+				expect(b.recordedSessionWallet, marker).toBe(0);
+				expect(b.recordedSessionUncertain, marker).toBe(100);
+				expect(b.uncertainTransfers, marker).toBe(1);
+			}
+		});
+
+		it("a void or a release alone is NOT DEBITED: nothing counted", () => {
+			for (const marker of ["llm_call_failed", "hold_released"]) {
+				const b = wallet([ev(marker, "2026-10-08T01:00:01Z", { transferId: "t", cost: 50 })]);
+				expect(b.recordedSessionWallet, marker).toBe(0);
+				expect(b.recordedSessionUncertain, marker).toBe(0);
+			}
+		});
+
+		it("a standalone ambiguity is DEBITED with its cost (the governor wrote it after adding)", () => {
+			const b = wallet([
+				ev("settlement_ambiguous", "2026-10-08T01:00:01Z", { transferId: "t", cost: 32 }),
+			]);
+			expect(b.recordedSessionWallet).toBe(32);
+		});
+
+		it("'prior charge known' (an unrecoverable record) is NOT post evidence for the transfer it names", () => {
+			const b = wallet([
+				call("2026-10-08T01:00:00Z", 80, { transferId: "t", settled: false }),
+				ev("settlement_unrecoverable", "2026-10-08T02:00:00Z", {
+					transferIdHash: createHash("sha256").update("t").digest("hex"),
+				}),
+			]);
+			expect(b.recordedSessionWallet).toBe(0);
+			expect(b.recordedSessionUncertain).toBe(80);
+		});
+
+		it("an orphan shortfall is wallet units of unknown denomination: out of the usd and nominal figures", () => {
+			const b = wallet([
+				ev("settlement_shortfall", "2026-10-08T01:00:01Z", {
+					transferId: "t",
+					actual: 90,
+					posted: 60,
+				}),
+			]);
+			expect(b.recordedSessionUndenominated).toBe(90);
+			expect(b.recordedSessionWallet).toBe(90);
+			expect(b.recordedSessionUt).toBe(0);
+			expect(b.recordedSessionNominal).toBe(0);
+		});
+
+		it("'over budget' is claimed only on the definite figure; 'possibly over' uses the upper bound", () => {
+			const events = [
+				call("2026-10-08T01:00:00Z", 600, { transferId: "a" }),
+				call("2026-10-08T02:00:00Z", 600, { transferId: "b", settled: false }), // uncertain
+			];
+			const b = build(events, { budget: 1000 }).budget;
+			expect(b.overBudget).toBe(false); // definite 600 <= 1000
+			expect(b.possiblyOverBudget).toBe(true); // 1200 > 1000 with the uncertain one
+			const over = build([call("2026-10-08T01:00:00Z", 1200, { transferId: "a" })], {
+				budget: 1000,
+			}).budget;
+			expect(over.overBudget).toBe(true);
+			expect(over.possiblyOverBudget).toBe(false);
+		});
+
+		it("the persisted counter is flagged only OUTSIDE [definite, definite + uncertain + attributed]", () => {
+			const events = [
+				call("2026-10-08T01:00:00Z", 100, { transferId: "a" }),
+				call("2026-10-08T02:00:00Z", 40, { transferId: "b", settled: false }), // uncertain
+			];
+			for (const [value, differs] of [
+				[99, true],
+				[100, false],
+				[140, false],
+				[141, true],
+			] as const) {
+				expect(build(events, { spendLedger: { value } }).spendLedger.differs, String(value)).toBe(
+					differs,
+				);
+			}
+		});
+	});
+
 	it("an unknown future record kind beside a call unconfirms it by default; shortfall and implausible do not", () => {
 		const m = build([
 			call("2026-10-08T01:00:00Z", 100, { transferId: "t-s" }),
@@ -707,7 +827,8 @@ describe("weekly report model", () => {
 			}),
 		];
 		const m = build(events, { budget: 1000 });
-		expect(m.budget.recordedSessionUt).toBe(50 + 70);
+		expect(m.budget.recordedSessionUt).toBe(50); // the ambiguity is positive evidence the counter added it
+		expect(m.budget.recordedSessionUncertain).toBe(70); // settled:false with nothing else is not
 		expect(m.totals.actionUt).toBe(0);
 	});
 

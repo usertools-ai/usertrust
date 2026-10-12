@@ -267,6 +267,20 @@ export interface ReportModel {
 		recordedSessionWallet: WalletUt;
 		windowAttributedWallet: WalletUt;
 		recordedAttributedWallet: WalletUt;
+		/**
+		 * UNCERTAIN transfers: the chain's evidence does not say whether the governor's counter added them (a settled call a
+		 * void marker contradicts, a settle marked unsettled with nothing else). Counted and disclosed, in NEITHER bound's
+		 * definite figure: the lower bound is the definite wallet, the upper bound adds these (and the attributed spend).
+		 */
+		recordedSessionUncertain: WalletUt;
+		/**
+		 * Wallet units whose DENOMINATION the chain does not say (a standalone shortfall: it carries `actual` and `posted`
+		 * but no cost basis). In the wallet (the governor counted them) and in NEITHER the usd-priced nor the nominal figure.
+		 */
+		recordedSessionUndenominated: WalletUt;
+		recordedAttributedUndenominated: WalletUt;
+		recordedAttributedUncertain: WalletUt;
+		uncertainTransfers: number;
 		/** 0..1 lower bound (session spend only), clamped; `null` when no budget is configured. */
 		usedFraction: number | null;
 		/** 0..1 upper bound (session + attributed spend), clamped; `null` when no budget is configured. */
@@ -477,33 +491,61 @@ function denominationOf(e: PersistedAuditEvent): "usd" | "nominal" | "unlabelled
 }
 
 /**
- * What a record made the governors COUNT against the session wallet, mirroring their counter. Both governors add a call's
- * metered cost to `budgetSpent` once they have decided to post it, whatever follows:
- *   - `trust()` (govern.ts): the stream settle adds `streamCost` BEFORE its POST (so an ambiguous POST is counted), the
- *     non-stream settle adds `actualCost` after the `llm_call` append and before its POST, and a post-commit failClosed
- *     throw happens after the add; a failed `llm_call` append under failClosed throws BEFORE the add, and a void (a
- *     provider failure, an anomaly cutoff) never reaches it;
- *   - the headless governor (headless.ts): `settle()` adds `actualCost` after the POST ATTEMPT, success or ambiguous; an
- *     abort or a release never adds.
- * So the counted set is every call or governed-action record regardless of its standing (ambiguous, `settled: false`,
- * or a failure marker beside it still count), once per transfer, plus a standalone shortfall's `actual` (below). It is
- * NOT filtered by `standing`: that answers "is the charge proven", this answers "what did the counter add".
- * A record carrying a cost center debits that envelope, not the session wallet the configured budget belongs to.
+ * How the governors' session counter treated one TRANSFER, from a CLOSED set of evidence. Both governors add a call's
+ * metered cost to `budgetSpent` once they decide to post it (govern.ts: the stream settle adds `streamCost` before its POST,
+ * the non-stream settle adds `actualCost` after the `llm_call` append and before its POST; headless.ts: `settle()` adds
+ * `actualCost` after the POST ATTEMPT, success or ambiguous; an abort or a release never adds). What the CHAIN can show of
+ * that is only this evidence, per transfer:
+ *   - DEBITED needs POSITIVE evidence the counter added it: a `settlement_shortfall` (a post happened), a
+ *     `settlement_ambiguous` (the governor wrote it after adding), `ledgerPosted` on the record, or a settled call with no
+ *     contrary marker;
+ *   - NOT DEBITED needs a void or a release (`llm_call_failed`, `hold_released`) and NO post evidence;
+ *   - everything else is UNCERTAIN: counted and disclosed, never folded into either bound. No catch-all arm may land in a
+ *     definite class.
+ * Post evidence OUTRANKS a failure marker (a post-commit failure follows a charge that happened). A settled call that a
+ * void or release marker contradicts, with no post evidence, is uncertain. "Prior charge known" (an unrecoverable
+ * record) is not post evidence for the transfer it names.
  */
-function counterDebit(
-	e: PersistedAuditEvent,
-): { ut: number; attributed: boolean; nominal: boolean } | undefined {
-	const isCall = e.kind === "llm_call" && !isActionEvent(e);
-	const isAction = isActionEvent(e);
-	if (!isCall && !isAction) return undefined;
-	const c = cost(e.data["cost"]);
-	if (c === undefined) return undefined;
-	return {
-		ut: c,
-		attributed: str(e.data["costCenter"]) !== undefined,
-		// A local call debits its UNITS: kept in its own accumulator, never summed with dollars.
-		nominal: denominationOf(e) === "nominal",
-	};
+type TransferClass = "debited" | "uncertain" | "not-debited";
+
+interface TransferEvidence {
+	spend?: PersistedAuditEvent; // the first call/action record
+	spendSettledFalse: boolean;
+	ledgerPosted: boolean;
+	ambiguity?: PersistedAuditEvent;
+	shortfall?: PersistedAuditEvent;
+	void: boolean;
+	release: boolean;
+}
+
+function classifyTransfer(ev: TransferEvidence): TransferClass {
+	const post =
+		ev.shortfall !== undefined ||
+		ev.ambiguity !== undefined ||
+		ev.ledgerPosted ||
+		(ev.spend !== undefined && !ev.spendSettledFalse && !ev.void && !ev.release);
+	if (post) return "debited";
+	if ((ev.void || ev.release) && ev.spend === undefined) return "not-debited";
+	// A void or release marker beside a spend record that is not itself post evidence: the record says it was settled, the
+	// marker says it was not. Uncertain. A spend record marked settled:false with nothing else: also uncertain. Anything
+	// else the evidence set does not name is uncertain too: there is no catch-all into a definite class.
+	return "uncertain";
+}
+
+/** The amount the counter would have added for a transfer, from the best record carrying it. */
+function transferAmount(
+	ev: TransferEvidence,
+): { ut: number; event: PersistedAuditEvent } | undefined {
+	for (const e of [ev.spend, ev.ambiguity]) {
+		if (e === undefined) continue;
+		const c = cost(e.data["cost"]);
+		if (c !== undefined) return { ut: c, event: e };
+	}
+	if (ev.shortfall !== undefined) {
+		const actual = cost(ev.shortfall.data["actual"]);
+		if (actual !== undefined) return { ut: actual, event: ev.shortfall };
+	}
+	return undefined;
 }
 
 /**
@@ -689,7 +731,34 @@ function buildPlain(
 		cacheWriteTokens: 0,
 	};
 	const unrecognised = new Map<string, number>();
-	const countedTransfers = new Set<string>();
+	// Per-transfer evidence for the budget leg (see classifyTransfer), over the WHOLE chain, in chain order.
+	const evidence = new Map<string, TransferEvidence>();
+	let anonymous = 0;
+	for (const e of usable) {
+		const k = str(e.data["transferId"]);
+		const isSpend = (e.kind === "llm_call" && !isActionEvent(e)) || isActionEvent(e);
+		const key = k ?? (isSpend ? `\u0000anon:${anonymous++}` : undefined);
+		if (key === undefined) continue;
+		const ev = evidence.get(key) ?? {
+			spendSettledFalse: false,
+			ledgerPosted: false,
+			void: false,
+			release: false,
+		};
+		evidence.set(key, ev);
+		if (isSpend) {
+			if (ev.spend === undefined) {
+				ev.spend = e;
+				ev.spendSettledFalse = e.data["settled"] === false;
+			}
+			if (e.data["ledgerPosted"] === true) ev.ledgerPosted = true;
+		} else if (e.kind === "settlement_ambiguous") ev.ambiguity ??= e;
+		else if (e.kind === "settlement_shortfall") {
+			ev.shortfall ??= e;
+			if (e.data["ledgerPosted"] === true) ev.ledgerPosted = true;
+		} else if (e.kind === "hold_released") ev.release = true;
+		else if (e.kind.endsWith("_failed")) ev.void = true;
+	}
 	// SHA-256 of every spend transfer's id, computed once and only when an unrecoverable record asks (the record stores
 	// the hash of the id, never the id).
 	let spendHashes: Set<string> | undefined;
@@ -712,52 +781,54 @@ function buildPlain(
 	let recordedAttributedNominal = 0;
 	let windowSessionNominal = 0;
 	let windowAttributedNominal = 0;
+	// UNCERTAIN transfers (counted and disclosed, in neither bound's definite figure): a single wallet number, no split.
+	let recordedSessionUndenominated = 0;
+	let recordedAttributedUndenominated = 0;
+	let recordedSessionUncertain = 0;
+	let recordedAttributedUncertain = 0;
+	let uncertainTransfers = 0;
+	for (const ev of evidence.values()) {
+		const klass = classifyTransfer(ev);
+		if (klass === "not-debited") continue;
+		const amt = transferAmount(ev);
+		if (amt === undefined) continue;
+		const attributed = str(amt.event.data["costCenter"]) !== undefined;
+		if (klass === "uncertain") {
+			uncertainTransfers += 1;
+			if (attributed) recordedAttributedUncertain += amt.ut;
+			else recordedSessionUncertain += amt.ut;
+			continue;
+		}
+		const ms = Date.parse(amt.event.timestamp);
+		const inWindow = Number.isFinite(ms) && ms >= startMs && ms < endMs;
+		const nominal = denominationOf(amt.event) === "nominal";
+		// A standalone shortfall has an amount but no denomination: wallet units, out of the usd and nominal figures.
+		if (amt.event.kind === "settlement_shortfall" && denominationOf(amt.event) === "unlabelled") {
+			if (attributed) recordedAttributedUndenominated += amt.ut;
+			else recordedSessionUndenominated += amt.ut;
+			continue;
+		}
+		if (nominal) {
+			if (attributed) recordedAttributedNominal += amt.ut;
+			else recordedSessionNominal += amt.ut;
+			if (inWindow) {
+				if (attributed) windowAttributedNominal += amt.ut;
+				else windowSessionNominal += amt.ut;
+			}
+		} else {
+			if (attributed) recordedAttributedUt += amt.ut;
+			else recordedSessionUt += amt.ut;
+			if (inWindow) {
+				if (attributed) windowAttributedUt += amt.ut;
+				else windowSessionUt += amt.ut;
+			}
+		}
+	}
 
 	for (const e of usable) {
 		const tid = str(e.data["transferId"]);
 		const ms = Date.parse(e.timestamp);
 		const inWindow = Number.isFinite(ms) && ms >= startMs && ms < endMs;
-
-		// BUDGET: every debit of a wallet, `llm_call` and governed action alike, over the WHOLE chain. A call attributed to
-		// a cost-center envelope debits that envelope, not the session wallet the configured budget belongs to.
-		// Once per transfer: the first record is the settle the counter added.
-		const tidKey = tid;
-		let wallet = counterDebit(e);
-		if (wallet !== undefined && tidKey !== undefined) {
-			if (countedTransfers.has(tidKey)) wallet = undefined;
-			else countedTransfers.add(tidKey);
-		}
-		// A standalone shortfall (a capped POST whose call record never landed) is the only trace of a charge the
-		// counter ALSO added: its `actual` is what the governor counted.
-		if (
-			wallet === undefined &&
-			e.kind === "settlement_shortfall" &&
-			(tid === undefined || !spendTransfers.has(tid))
-		) {
-			const actual = cost(e.data["actual"]);
-			if (actual !== undefined) {
-				wallet = {
-					ut: actual,
-					attributed: str(e.data["costCenter"]) !== undefined,
-					nominal: denominationOf(e) === "nominal",
-				};
-			}
-		}
-		if (wallet !== undefined && wallet.nominal) {
-			if (wallet.attributed) recordedAttributedNominal += wallet.ut;
-			else recordedSessionNominal += wallet.ut;
-			if (inWindow) {
-				if (wallet.attributed) windowAttributedNominal += wallet.ut;
-				else windowSessionNominal += wallet.ut;
-			}
-		} else if (wallet !== undefined) {
-			if (wallet.attributed) recordedAttributedUt += wallet.ut;
-			else recordedSessionUt += wallet.ut;
-			if (inWindow) {
-				if (wallet.attributed) windowAttributedUt += wallet.ut;
-				else windowSessionUt += wallet.ut;
-			}
-		}
 
 		if (e.kind === "llm_call" && !isActionEvent(e)) {
 			const c = cost(e.data["cost"]);
@@ -985,8 +1056,14 @@ function buildPlain(
 	tiers.roundingUt = tierSum - tiers.costUt;
 
 	const configured = typeof opts.budget === "number" && opts.budget > 0 ? opts.budget : null;
-	const sessionWallet = recordedSessionUt + recordedSessionNominal;
-	const upperWallet = sessionWallet + recordedAttributedUt + recordedAttributedNominal;
+	const sessionWallet = recordedSessionUt + recordedSessionNominal + recordedSessionUndenominated;
+	const upperWallet =
+		sessionWallet +
+		recordedSessionUncertain +
+		recordedAttributedUt +
+		recordedAttributedNominal +
+		recordedAttributedUndenominated +
+		recordedAttributedUncertain;
 	const ledger = opts.spendLedger;
 	const spendLedgerLeg =
 		ledger === undefined
@@ -1113,33 +1190,21 @@ function buildPlain(
 			windowAttributedNominal,
 			recordedAttributedNominal,
 			windowSessionWallet: windowSessionUt + windowSessionNominal,
-			recordedSessionWallet: recordedSessionUt + recordedSessionNominal,
+			recordedSessionWallet:
+				recordedSessionUt + recordedSessionNominal + recordedSessionUndenominated,
+			recordedSessionUndenominated,
+			recordedAttributedUndenominated,
 			windowAttributedWallet: windowAttributedUt + windowAttributedNominal,
-			recordedAttributedWallet: recordedAttributedUt + recordedAttributedNominal,
-			usedFraction:
-				configured === null
-					? null
-					: Math.min(1, (recordedSessionUt + recordedSessionNominal) / configured),
-			usedFractionUpper:
-				configured === null
-					? null
-					: Math.min(
-							1,
-							(recordedSessionUt +
-								recordedSessionNominal +
-								recordedAttributedUt +
-								recordedAttributedNominal) /
-								configured,
-						),
-			overBudget: configured !== null && recordedSessionUt + recordedSessionNominal > configured,
+			recordedAttributedWallet:
+				recordedAttributedUt + recordedAttributedNominal + recordedAttributedUndenominated,
+			recordedSessionUncertain,
+			recordedAttributedUncertain,
+			uncertainTransfers,
+			usedFraction: configured === null ? null : Math.min(1, sessionWallet / configured),
+			usedFractionUpper: configured === null ? null : Math.min(1, upperWallet / configured),
+			overBudget: configured !== null && sessionWallet > configured,
 			possiblyOverBudget:
-				configured !== null &&
-				recordedSessionUt + recordedSessionNominal <= configured &&
-				recordedSessionUt +
-					recordedSessionNominal +
-					recordedAttributedUt +
-					recordedAttributedNominal >
-					configured,
+				configured !== null && sessionWallet <= configured && upperWallet > configured,
 		},
 		governance,
 		unrecoverable,

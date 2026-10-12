@@ -7,13 +7,13 @@
  * next call. A report that counted dollars only would say 0% used over a wallet enforcement already considers empty.
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../src/audit/chain.js";
 import { run } from "../../src/cli/report.js";
-import type { TrustEngine } from "../../src/govern.js";
+import { type TrustEngine, trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 
@@ -194,5 +194,167 @@ describe("report utilization == the governor's own counter, scenario by scenario
 		await gov.destroy();
 		expect(spent).toBeGreaterThan(0);
 		expect(await reportWallet()).toBe(spent);
+	});
+});
+
+describe("the interval brackets the governor's counter (real governors), and a tampered counter is flagged", () => {
+	let dir: string;
+	let stdout: string;
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "trust-budget-interval-"));
+		mkdirSync(join(dir, VAULT_DIR), { recursive: true });
+		process.env.USERTRUST_TEST = "1";
+		stdout = "";
+		vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+			stdout += String(chunk);
+			return true;
+		});
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		process.exitCode = undefined;
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+		process.exitCode = undefined;
+		process.env.USERTRUST_TEST = "";
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	const engine = (opts: { postFails?: boolean } = {}): TrustEngine => ({
+		spendPending: vi.fn(async (p: { transferId: string; amount: number }) => ({
+			transferId: p.transferId,
+		})),
+		postPendingSpend: vi.fn(async (_id: string, actual?: number) => {
+			if (opts.postFails) throw new Error("tb unreachable");
+			return { posted: actual ?? 0, shortfall: 0 };
+		}),
+		voidPendingSpend: vi.fn(async () => {}),
+		destroy: vi.fn(),
+	});
+
+	async function report() {
+		const end = new Date(Date.now() + 3_600_000).toISOString();
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", end, "--budget", "1000000000", "--format", "json"]);
+		return JSON.parse(stdout) as {
+			budget: {
+				recordedSessionWallet: number;
+				recordedSessionUncertain: number;
+				recordedAttributedWallet: number;
+				recordedAttributedUncertain: number;
+			};
+			spendLedger: { recorded: number | null; differs: boolean };
+		};
+	}
+	const counter = () =>
+		(
+			JSON.parse(readFileSync(join(dir, VAULT_DIR, "spend-ledger.json"), "utf-8")) as {
+				budgetSpent: number;
+			}
+		).budgetSpent;
+	const bracket = (r: Awaited<ReturnType<typeof report>>) => {
+		const lower = r.budget.recordedSessionWallet;
+		const upper =
+			lower +
+			r.budget.recordedSessionUncertain +
+			r.budget.recordedAttributedWallet +
+			r.budget.recordedAttributedUncertain;
+		return { lower, upper };
+	};
+
+	it("a STANDALONE ambiguity (the llm_call append failed after the POST was attempted): the governor counted it; the report's definite figure includes it", async () => {
+		const real = createAuditWriter(dir);
+		const flaky = {
+			...real,
+			appendEvent: (i: Parameters<typeof real.appendEvent>[0]) =>
+				i.kind === "llm_call" ? Promise.reject(new Error("disk full")) : real.appendEvent(i),
+		};
+		const gov = await createGovernor({
+			budget: 1_000_000_000,
+			vaultBase: dir,
+			_engine: engine({ postFails: true }),
+			_audit: flaky as typeof real,
+		});
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 100,
+			maxOutputTokens: 50,
+		});
+		await gov.settle(auth, { inputTokens: 4000, outputTokens: 900, usageSource: "provider" });
+		await gov.destroy();
+		real.release();
+		const r = await report();
+		const { lower, upper } = bracket(r);
+		expect(counter()).toBeGreaterThan(0);
+		expect(lower).toBeLessThanOrEqual(counter());
+		expect(counter()).toBeLessThanOrEqual(upper);
+		expect(lower).toBe(counter()); // the ambiguity is positive evidence: it is DEFINITE
+		expect(r.spendLedger.differs).toBe(false);
+	});
+
+	it("a failClosed PRE-COMMIT void (the llm_call append failed under failClosed): the counter never moved, and the counter is inside the interval", async () => {
+		writeFileSync(
+			join(dir, VAULT_DIR, "usertrust.config.json"),
+			JSON.stringify({ budget: 1_000_000_000, audit: { failClosed: true } }),
+		);
+		const real = createAuditWriter(dir);
+		const flaky = {
+			...real,
+			appendEvent: (i: Parameters<typeof real.appendEvent>[0]) =>
+				i.kind === "llm_call" ? Promise.reject(new Error("disk full")) : real.appendEvent(i),
+		};
+		const client = {
+			messages: {
+				create: vi.fn(async (_req: unknown) => ({
+					id: "m",
+					type: "message",
+					role: "assistant",
+					content: [{ type: "text", text: "ok" }],
+					model: "claude-sonnet-4-6",
+					usage: { input_tokens: 4000, output_tokens: 900 },
+				})),
+			},
+		};
+		const g = await trust(client, {
+			vaultBase: dir,
+			_engine: engine(),
+			_audit: flaky as typeof real,
+		});
+		await expect(
+			g.messages.create({
+				model: "claude-sonnet-4-6",
+				max_tokens: 64,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		).rejects.toThrow();
+		await g.destroy();
+		real.release();
+		const r = await report();
+		const { lower, upper } = bracket(r);
+		const c = existsSync(join(dir, VAULT_DIR, "spend-ledger.json")) ? counter() : 0;
+		expect(c).toBe(0);
+		expect(lower).toBeLessThanOrEqual(c);
+		expect(c).toBeLessThanOrEqual(upper);
+	});
+
+	it("a TAMPERED counter outside the interval is flagged; one inside is silent", async () => {
+		const gov = await createGovernor({ budget: 1_000_000_000, vaultBase: dir, _engine: engine() });
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 100,
+			maxOutputTokens: 50,
+		});
+		await gov.settle(auth, { inputTokens: 40, outputTokens: 9, usageSource: "provider" });
+		await gov.destroy();
+		const honest = await report();
+		expect(honest.spendLedger.differs).toBe(false);
+		const real = counter();
+		for (const bad of [real + 1000, Math.max(0, real - 1) === real ? real + 1 : real - 1]) {
+			writeFileSync(
+				join(dir, VAULT_DIR, "spend-ledger.json"),
+				JSON.stringify({ budgetSpent: bad }),
+			);
+			const r = await report();
+			expect(r.spendLedger.differs, String(bad)).toBe(true);
+		}
 	});
 });

@@ -110,37 +110,67 @@ function verdictLine(m: ReportModel, v: (s: string) => string): string {
 		.join(" | ")}`;
 }
 
+/** The governor's counter against the chain's INTERVAL: rendered whether or not a budget is configured. */
+function reconciliationLines(m: ReportModel): string[] {
+	const b = m.budget;
+	const led = m.spendLedger;
+	const lower = b.recordedSessionWallet;
+	const upper = (b.recordedSessionWallet +
+		b.recordedSessionUncertain +
+		b.recordedAttributedWallet +
+		b.recordedAttributedUncertain) as WalletUt;
+	const out: string[] = [];
+	if (b.uncertainTransfers > 0) {
+		out.push(
+			`${b.uncertainTransfers} transfer(s) are UNCERTAIN: the chain does not say whether the governor's counter added them (${walletStr(b.recordedSessionUncertain)} session, ${walletStr(b.recordedAttributedUncertain)} attributed). They are in the upper bound only, never in the definite figure or the VERIFIED claim.`,
+		);
+	}
+	if (led.unreadable) {
+		out.push(
+			"The governor's spend ledger (spend-ledger.json) exists but could not be read, so it could not be compared with the chain. It is a plain file the chain does not verify.",
+		);
+	} else if (led.differs && led.recorded !== null) {
+		out.push(
+			`DIFFERENCE: the governor's spend ledger (as recorded by the governor; not chain-verified) says ${tokens(led.recorded)} units, outside what the chain accounts for: ${walletStr(lower)} definite, up to ${walletStr(upper)} counting uncertain and cost-center spend. Either leg may be wrong.`,
+		);
+	}
+	return out;
+}
+
 function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 	const b = m.budget;
 	if (b.unknown)
 		return [
 			"Budget unknown (the vault config could not be read). This is not 'no budget configured': fix the read error and run the report again.",
+			...reconciliationLines(m),
 		];
 	if (b.configuredUt === null)
-		return ["No budget is configured for this report (none in the vault config; pass --budget)."];
+		return [
+			"No budget is configured for this report (none in the vault config; pass --budget).",
+			...reconciliationLines(m),
+		];
 	const split = (usdPart: UsdUt, nominalPart: NominalUt): string =>
 		`${usd(usdPart)} usd-priced + ${nominalStr(nominalPart)}`;
+	const undenominated =
+		b.recordedSessionUndenominated > 0
+			? ` + ${walletStr(b.recordedSessionUndenominated)} of undenominated units (a capped settlement with no call record)`
+			: "";
 	const lines = [
-		`Configured budget ${utStr(b.configuredUt)} (budget units: usd-priced and nominal, as the governor enforces them), source: ${v(b.source ?? "unknown")}. Session-wallet debits recorded in the chain (model calls and governed actions with no cost center): ${walletStr(b.recordedSessionWallet)} = ${split(b.recordedSessionUt, b.recordedSessionNominal)}; ${pct(b.usedFraction ?? 0)} of the budget used${b.overBudget ? " (OVER BUDGET)" : ""}. This week: ${walletStr(b.windowSessionWallet)} = ${split(b.windowSessionUt, b.windowSessionNominal)}.`,
+		`Configured budget ${utStr(b.configuredUt)} (budget units: usd-priced and nominal, as the governor enforces them), source: ${v(b.source ?? "unknown")}. Session-wallet debits the chain shows the governor counted (definite): ${walletStr(b.recordedSessionWallet)} = ${split(b.recordedSessionUt, b.recordedSessionNominal)}${undenominated}; ${pct(b.usedFraction ?? 0)} of the budget used${b.overBudget ? " (OVER BUDGET)" : ""}. This week: ${walletStr(b.windowSessionWallet)} = ${split(b.windowSessionUt, b.windowSessionNominal)}.`,
 	];
-	if (b.recordedAttributedWallet > 0) {
+	if (
+		b.recordedAttributedWallet > 0 ||
+		b.recordedSessionUncertain > 0 ||
+		b.recordedAttributedUncertain > 0
+	) {
 		lines.push(
-			`Spend carrying a cost center is ATTRIBUTED and its payer is not recorded (the cost-center envelope with a ledger, the session in a dry run): ${walletStr(b.recordedAttributedWallet)} = ${split(b.recordedAttributedUt, b.recordedAttributedNominal)} recorded, ${walletStr(b.windowAttributedWallet)} this week. If the session paid for all of it, the budget is ${pct(b.usedFractionUpper ?? 0)} used${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}.`,
+			`Upper bound: ${pct(b.usedFractionUpper ?? 0)} of the budget used if the session also paid for the cost-center spend (ATTRIBUTED: its payer is not recorded, the cost-center envelope with a ledger or the session in a dry run; ${walletStr(b.recordedAttributedWallet)} = ${split(b.recordedAttributedUt, b.recordedAttributedNominal)}) and every uncertain transfer was counted${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}. "Over budget" is claimed only on the definite figure.`,
 		);
 	}
+	lines.push(...reconciliationLines(m));
 	lines.push(
-		"Session-wallet debits count what the governor's own counter adds: every recorded call or action, including ones whose charge is unconfirmed, plus a capped settlement whose call record is missing.",
+		"Session-wallet debits mirror what the governor's own counter adds: a call or action once its post was decided (including an ambiguous one), plus a capped settlement whose call record is missing; never a void or a release.",
 	);
-	const led = m.spendLedger;
-	if (led.unreadable) {
-		lines.push(
-			"The governor's spend ledger (spend-ledger.json) exists but could not be read, so it could not be compared with the chain. It is a plain file the chain does not verify.",
-		);
-	} else if (led.differs && led.recorded !== null) {
-		lines.push(
-			`DIFFERENCE: the governor's spend ledger (as recorded by the governor; not chain-verified) says ${tokens(led.recorded)} units, while the chain accounts for ${walletStr(b.recordedSessionWallet)} of session-wallet debits${b.recordedAttributedWallet > 0 ? ` (up to ${walletStr((b.recordedSessionWallet + b.recordedAttributedWallet) as WalletUt)} if the session also paid for the cost-center spend)` : ""}: ${led.difference === null ? "unknown" : `${led.difference > 0 ? "+" : ""}${tokens(led.difference)}`} units. Either leg may be wrong.`,
-		);
-	}
 	lines.push("This is the configured budget against recorded spend, not the live ledger balance.");
 	return lines;
 }

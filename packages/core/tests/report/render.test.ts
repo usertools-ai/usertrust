@@ -421,3 +421,30 @@ describe("the spend-ledger leg is rendered only when it differs", () => {
 		expect(diff).toMatch(/not chain-verified/);
 	});
 });
+
+describe("the reconciliation warning renders with NO configured budget, in md and html", () => {
+	it("a spend ledger outside the chain's interval is flagged in both renderers", () => {
+		const ok = { verified: true, errors: [], chainLength: 1, firstEvent: "a", lastEvent: "a" };
+		const m = buildWeeklyReport(
+			[
+				{
+					id: "i",
+					kind: "llm_call",
+					timestamp: "2026-10-11T00:00:00Z",
+					actor: "local",
+					hash: "h",
+					data: { model: "m", cost: 100, settled: true, transferId: "t" },
+				} as unknown as PersistedAuditEvent,
+			],
+			ok,
+			{ endMs: END, spendLedger: { value: 9999 } },
+		);
+		expect(m.budget.configuredUt).toBeNull();
+		for (const f of ["md", "html"] as const) {
+			const out = render(m, f);
+			expect(out, f).toMatch(/No budget is configured/);
+			expect(out, f).toMatch(/DIFFERENCE/);
+			expect(out, f).toMatch(/not chain-verified/);
+		}
+	});
+});
