@@ -407,6 +407,8 @@ if (txId !== undefined) {
 	const params = anchorMode ? await anchorParamsOrFail() : undefined;
 	const result = verifiedOrFail(() => verifyTransaction(vaultPath, txId, params));
 	console.log(result.receipt);
+	// The receipt carries no errors; the absent range of a missing segment lives only here.
+	for (const error of result.errors) console.log(`  - ${forDisplay(error)}`);
 	// Exit 0: verified, 1: tampered/corrupted, 2: not found
 	if (!result.found) process.exit(2);
 	if (!result.valid) process.exit(1);
