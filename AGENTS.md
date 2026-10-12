@@ -1613,20 +1613,39 @@ constant disagree.
 
 **The governance boundary is documented in `detect.ts`.** Governed: Anthropic
 `messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected), OpenAI
-`chat.completions.create` and `responses.create` when present, Google `models.generateContent`.
+`chat.completions.create` and `responses.create` when present, Google `models.generateContent`
+and `models.generateContentStream`.
 **Anthropic and OpenAI clients are default-deny** (`default-deny.ts`): every other function-valued
 SDK member reached off the governed client, at any depth, is refused through ONE function,
-`refuseUngovernedMethod` in `trust()`, which writes `policy_denied` at the denial boundary and
-rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
+`refuseUngovernedMethod` in `trust()` (the same one Google's refusals use, below), which first runs
+the degraded-audit preflight (under `failClosed`, a writer already degraded refuses with
+`AuditDegradedError` before anything is recorded), then writes `policy_denied` at the denial boundary
+and rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
 requests are all GET or DELETE, plus POSTs named with a reason, minus GET/DELETE methods named as
 exceptions. Each entry cites its SDK source line and verb; they run with the RAW resource as
 `this`, because `this._client` through the boundary is a refusing stand-in, and
 `default-deny.test.ts` calls every entry and fails on a POST its `FREE_POSTS` does not name and `trust({ allowUngoverned })` (audited as
 `ungoverned_call`). `_client` and the client's raw HTTP members are refused by name; `withOptions`
 is re-wrapped by the same governor, unless an option outside `GOVERNED_WITH_OPTIONS_KEYS` (an
-allow-list) changes the transport, when the new client is a refusing stand-in. On a Google client
-everything else passes through. A POST is freed only with a reason it cannot start billable work, written in both places; a create that can
+allow-list) changes the transport, when the new client is a refusing stand-in. A POST is freed only with a reason it cannot start billable work, written in both places; a create that can
 allocate storage is not free. If you add a governed surface, update that doc block and the free list.
+**Google clients are not default-deny**: a listed set of Google's billable methods is **refused**
+by name (`GOOGLE_REFUSED_METHODS` in `govern.ts`:
+`models.embedContent/generateImages/editImage/upscaleImage/generateVideos/recontextImage/
+segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create/
+createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create/update`,
+`fileSearchStores.uploadToFileSearchStore/importFile`), through the same `refuseUngovernedMethod`;
+calls that are not billed
+(`models.countTokens/list/get`, `caches.get`, `files`, and the like) pass through. With automatic
+function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in `google-afc.ts`, a mirror of the
+SDK's `shouldDisableAfc`, made on a snapshot of the request that is then what is forwarded),
+`models.generateContent` runs the loop itself, each round its own governed call
+(`runGovernedAfc`), and `models.generateContentStream` is refused the same way (a streamed loop is
+not metered per round yet). The refused list is NOT a boundary: everything else on a Google client
+passes through, including other paths to the same endpoints (`models.*Internal`, e.g.
+`generateContentInternal`, which also bypasses the per-round AFC metering; `getNextGenClient()`;
+`chats.modelsModule`; `apiClient` on the client and every namespace). Google default-deny is the
+planned fix. If you add a governed or refused Google surface, update `detect.ts`.
 
 ---
 
