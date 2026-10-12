@@ -85,10 +85,13 @@ export interface GovernedStream<T> extends AsyncIterable<T> {
 	/**
 	 * Resolves with the settled trust receipt when the stream completes, or when the
 	 * consumer stops early (the consumed usage settles). Rejects, with the same error the
-	 * iteration threw, when the stream fails mid-way: the hold is then voided, not
-	 * charged. Also rejects when settlement itself is refused (`audit.failClosed`).
-	 * Never an unhandled rejection: a caller that catches the iteration error may leave
-	 * this unawaited.
+	 * iteration threw, when the stream fails mid-way and its iteration THROWS: the hold is
+	 * then voided, not charged. A provider event the SDK yields as a chunk instead of
+	 * throwing (an OpenAI Responses `error` event) ends the stream like any other, and it
+	 * settles and is charged. Also rejects when settlement itself is refused after the
+	 * charge posted (`AuditDegradedError`, under `audit.failClosed`); the governor then
+	 * throws that error from the iteration too (`surfaceSettleFailure`). Never an
+	 * unhandled rejection.
 	 */
 	receipt: Promise<TrustReceipt>;
 }
@@ -272,11 +275,15 @@ export type ChunkHook = (obs: ChunkObservation) => void;
  * when the stream ends, or onError on failure. An optional `onChunk` hook
  * fires per chunk and can throw to abort the stream (used by the anomaly
  * detector to trip a circuit breaker mid-stream).
+ *
+ * When `onComplete` returns a promise, the iteration's last step (the final `next()`,
+ * or the `return()` an early `break` drives) waits for it, and a rejection is thrown
+ * from that step. When it returns nothing, the last step is not delayed.
  */
 export function wrapStream<T>(
 	stream: AsyncIterable<T>,
 	kind: LLMClientKind,
-	onComplete: (completion: StreamCompletion) => void,
+	onComplete: (completion: StreamCompletion) => void | Promise<void>,
 	onError: (error: unknown, partial: StreamCompletion) => void,
 	onChunk?: ChunkHook,
 ): AsyncIterable<T> {
@@ -286,7 +293,7 @@ export function wrapStream<T>(
 async function* wrapStreamImpl<T>(
 	stream: AsyncIterable<T>,
 	kind: LLMClientKind,
-	onComplete: (completion: StreamCompletion) => void,
+	onComplete: (completion: StreamCompletion) => void | Promise<void>,
 	onError: (error: unknown, partial: StreamCompletion) => void,
 	onChunk?: ChunkHook,
 ): AsyncGenerator<T> {
@@ -399,8 +406,13 @@ async function* wrapStreamImpl<T>(
 		// Normal completion AND early termination (consumer break → generator
 		// `.return()`) both settle here. A thrown error already ran `onError` and set
 		// `errored`, so it is the only path that skips settlement (it voids instead).
+		//
+		// A settlement that returns a promise is awaited, and its failure thrown from here,
+		// so it ends the caller's iteration. `errored` stays false: nothing voids, because
+		// a settlement that got this far may already have posted the charge.
 		if (!errored) {
-			onComplete({ usage: snapshot(), chunksDelivered, usageReported });
+			const settling = onComplete({ usage: snapshot(), chunksDelivered, usageReported });
+			if (settling !== undefined) await settling;
 		}
 	}
 }
@@ -415,12 +427,26 @@ async function* wrapStreamImpl<T>(
  *   It should POST the actual cost and return the receipt.
  * - `rejectReceipt` is called on stream error. It should VOID the hold.
  */
+export interface GovernedStreamOptions {
+	/**
+	 * A settlement failure also ends the caller's ITERATION, not only `.receipt`. The
+	 * last step (the final `next()`, or the `return()` an early `break` drives) waits for
+	 * settlement, and if it rejects, throws the same error `.receipt` rejects with.
+	 * The governor sets it from `audit.failClosed`: there a settlement can post the
+	 * charge and THEN refuse (`AuditDegradedError`), and a caller who catches the
+	 * iteration without awaiting `.receipt` must still hear of it. Off (the default),
+	 * the last step is not delayed and settlement runs in the background.
+	 */
+	surfaceSettleFailure?: boolean;
+}
+
 export function createGovernedStream<T>(
 	stream: AsyncIterable<T>,
 	kind: LLMClientKind,
 	resolveReceipt: (completion: StreamCompletion) => Promise<TrustReceipt>,
 	rejectReceipt: (error: unknown, partial: StreamCompletion) => void,
 	onChunk?: ChunkHook,
+	options: GovernedStreamOptions = {},
 ): GovernedStream<T> {
 	let receiptResolve!: (receipt: TrustReceipt) => void;
 	let receiptReject!: (error: unknown) => void;
@@ -442,6 +468,13 @@ export function createGovernedStream<T>(
 		stream,
 		kind,
 		(completion) => {
+			if (options.surfaceSettleFailure === true) {
+				// Returned, so wrapStream awaits it and throws its failure from the iteration.
+				return resolveReceipt(completion).then(receiptResolve, (err: unknown) => {
+					receiptReject(err);
+					throw err;
+				});
+			}
 			resolveReceipt(completion)
 				.then((receipt) => {
 					receiptResolve(receipt);
@@ -449,6 +482,7 @@ export function createGovernedStream<T>(
 				.catch((err: unknown) => {
 					receiptReject(err);
 				});
+			return undefined;
 		},
 		(error, partial) => {
 			rejectReceipt(error, partial);
