@@ -349,12 +349,14 @@ describe("usertrust report --week", () => {
 			write.mockRestore();
 		});
 
-		it("a new log over the OLD sidecar: the log is cut to the prefix the sidecar describes", async () => {
-			const { after } = await twoStates();
+		it("a new log over the OLD sidecar that RESOLVES (the sidecar advances): the settled state is read, nothing dropped", async () => {
+			const { before, after } = await twoStates();
+			// the writer has fsynced the log and not yet replaced the sidecar
+			writeFileSync(join(auditDir(), "events.jsonl"), after.log);
+			writeFileSync(join(auditDir(), "events.jsonl.meta"), before.meta);
 			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
 				betweenReads: (attempt) => {
-					// the writer fsynced the log and has not yet replaced the sidecar
-					if (attempt === 1) writeFileSync(join(auditDir(), "events.jsonl"), after.log);
+					if (attempt === 1) writeFileSync(join(auditDir(), "events.jsonl.meta"), after.meta);
 				},
 			});
 			const out = JSON.parse(stdout) as {
@@ -362,8 +364,37 @@ describe("usertrust report --week", () => {
 				totals: { confirmedCalls: number };
 			};
 			expect(out.integrity.verified).toBe(true);
-			expect(out.totals.confirmedCalls).toBe(2); // the in-flight third event is not in this snapshot
+			expect(out.totals.confirmedCalls).toBe(3);
 			expect(process.exitCode).toBeUndefined();
+			write.mockRestore();
+		});
+
+		it("a PERSISTENT tail (a crash between the log fsync and the sidecar replace) is kept and reported UNVERIFIED, never dropped", async () => {
+			const { before, after } = await twoStates();
+			writeFileSync(join(auditDir(), "events.jsonl"), after.log);
+			writeFileSync(join(auditDir(), "events.jsonl.meta"), before.meta);
+			// what the verifier says about these very bytes
+			expect(verifyVault(join(dir, ".usertrust")).valid).toBe(false);
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			const out = JSON.parse(stdout) as {
+				integrity: { verified: boolean };
+				totals: { confirmedCalls: number };
+			};
+			expect(out.integrity.verified).toBe(false);
+			expect(out.totals.confirmedCalls).toBe(3); // the extra event is in the figures, not silently omitted
+			expect(process.exitCode).toBe(2);
+			write.mockRestore();
+		});
+
+		it("a persistent UNTERMINATED tail gets the same verdict from the report as from the verifier", async () => {
+			await vault([{ cost: 100 }, { cost: 200 }]);
+			const log = join(auditDir(), "events.jsonl");
+			writeFileSync(log, `${readFileSync(log, "utf-8")}{"id":"half`);
+			const live = verifyVault(join(dir, ".usertrust"));
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			const out = JSON.parse(stdout) as { integrity: { verified: boolean } };
+			expect(out.integrity.verified).toBe(live.valid);
+			expect(process.exitCode).toBe(live.valid ? undefined : 2);
 			write.mockRestore();
 		});
 

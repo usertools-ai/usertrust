@@ -231,40 +231,44 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 	};
 }
 
-const PAIRED_READ_ATTEMPTS = 6;
+const PAIRED_READ_ATTEMPTS = 8;
 
-function isInFlightTail(tail: Buffer, headHash: string): boolean {
-	const nl = tail.indexOf(0x0a);
-	if (nl === -1) return true; // empty, or a line the writer has not finished
-	if (!tail.subarray(nl + 1).every((b) => b !== 0x0a)) return false; // more than one complete line
-	try {
-		const e = JSON.parse(tail.subarray(0, nl).toString("utf-8")) as { previousHash?: unknown };
-		return e.previousHash === headHash;
-	} catch {
-		return false;
-	}
+/** A short synchronous pause between attempts: a writer finishing an append needs milliseconds, not a retry storm. */
+function pause(attempt: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * attempt);
 }
 
 /**
  * Reads a log and its `.meta` anchor as one stable state. The writer fsyncs the log BEFORE it replaces the sidecar, so
  * a read that straddles an append sees an old sidecar over a new log (or the reverse), which `verifyVault` would call a
- * broken chain on a healthy vault. Read sidecar, log, sidecar; accept only when both sidecar reads are identical; then
- * keep exactly the log PREFIX the sidecar describes (its `lastHash`), because bytes after it are an in-flight write.
- * This is the same reading of "one extra event" as the writer-states spec (a classifier there is a follow-up).
- * Returns "busy" when the sidecar changed on every attempt. A sidecar that is stable but matches no log line is NOT
- * busy: the log is copied as read and the verifier reports the real mismatch.
+ * broken chain on a healthy vault. Read sidecar, log, sidecar; a pair counts only when both sidecar reads are
+ * identical AND the log has nothing after the line the sidecar describes (its `lastHash`).
+ *
+ * A pair with a TAIL after that line is either an append in flight or a crash between the log fsync and the sidecar
+ * replace. The two are told apart by waiting: a tail that resolves (the sidecar advances, or the tail changes) was an
+ * append in flight, and the next attempt reads the settled state. A tail that is IDENTICAL across attempts under an
+ * identical sidecar is persistent; it is kept in the copy, never dropped, so the verifier reports it. Nothing is ever
+ * dropped from the log. "busy" is returned only when the state kept changing for every attempt. This is the same
+ * reading of "one extra event" as the writer-states spec (a classifier there is a follow-up).
+ * A sidecar that is stable but matches no log line is not busy either: the log is copied as read and the verifier
+ * reports the real mismatch.
  */
 function readPaired(
 	logPath: string,
 	metaPath: string,
 	hooks?: ReportHooks,
 ): { log: Buffer; meta: Buffer } | "busy" {
+	let previous: { meta: Buffer; tail: Buffer } | undefined;
 	for (let attempt = 1; attempt <= PAIRED_READ_ATTEMPTS; attempt++) {
+		if (attempt > 1) pause(attempt);
 		const m1 = readFileSync(metaPath);
 		const log = readFileSync(logPath);
 		hooks?.betweenReads?.(attempt);
 		const m2 = readFileSync(metaPath);
-		if (!m1.equals(m2)) continue;
+		if (!m1.equals(m2)) {
+			previous = undefined;
+			continue;
+		}
 		let lastHash: string | undefined;
 		try {
 			const parsed = JSON.parse(m2.toString("utf-8")) as { lastHash?: unknown };
@@ -277,7 +281,7 @@ function readPaired(
 		let cut = -1;
 		while (offset < log.length) {
 			const nl = log.indexOf(0x0a, offset);
-			if (nl === -1) break; // a line with no newline yet is an in-flight write
+			if (nl === -1) break; // a line with no newline yet
 			try {
 				const e = JSON.parse(log.subarray(offset, nl).toString("utf-8")) as { hash?: unknown };
 				if (e.hash === lastHash) cut = nl + 1;
@@ -287,11 +291,11 @@ function readPaired(
 			offset = nl + 1;
 		}
 		if (cut === -1) return { log, meta: m2 };
-		// Only a tail that LOOKS like an in-flight append is dropped: nothing, a line still being written (no newline
-		// yet), or exactly one complete event that chains from the anchored head. Anything else after the anchor
-		// (garbage, several events, a foreign event) is kept, so the verifier reports it rather than the snapshot hiding it.
-		if (isInFlightTail(log.subarray(cut), lastHash)) return { log: log.subarray(0, cut), meta: m2 };
-		return { log, meta: m2 };
+		const tail = log.subarray(cut);
+		if (tail.length === 0) return { log, meta: m2 };
+		// A tail exists. Identical to the last attempt's under an identical sidecar: persistent, so kept.
+		if (previous?.meta.equals(m2) === true && previous.tail.equals(tail)) return { log, meta: m2 };
+		previous = { meta: m2, tail: Buffer.from(tail) };
 	}
 	return "busy";
 }
