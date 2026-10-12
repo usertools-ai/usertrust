@@ -62,13 +62,17 @@ function makeMockEngine(): TrustEngine {
 
 /**
  * Audit writer that SUCCEEDS on every append (so the critical llm_call event is
- * written and settle is claimed) but reports the writer as degraded — tripping
- * the fail-closed belt-and-suspenders check AFTER the spend has been committed.
+ * written and settle is claimed) but reports the writer as degraded from the
+ * call's first append on — the writer degrades DURING the call, tripping the
+ * fail-closed belt-and-suspenders check AFTER the spend has been committed. (A
+ * writer degraded before the call starts is refused before its hold.)
  */
 function makeDegradedButWritingAudit(): AuditWriter {
+	let degraded = false;
 	return {
-		appendEvent: vi.fn(
-			async (input: AppendEventInput): Promise<AuditEvent> => ({
+		appendEvent: vi.fn(async (input: AppendEventInput): Promise<AuditEvent> => {
+			degraded = true;
+			return {
 				id: randomUUID(),
 				timestamp: new Date().toISOString(),
 				previousHash: "0".repeat(64),
@@ -76,10 +80,10 @@ function makeDegradedButWritingAudit(): AuditWriter {
 				kind: input.kind,
 				actor: input.actor,
 				data: input.data,
-			}),
-		),
-		getWriteFailures: vi.fn(() => 1),
-		isDegraded: vi.fn(() => true),
+			};
+		}),
+		getWriteFailures: vi.fn(() => (degraded ? 1 : 0)),
+		isDegraded: vi.fn(() => degraded),
 		flush: vi.fn(async () => {}),
 		release: vi.fn(),
 	};

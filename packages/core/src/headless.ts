@@ -40,11 +40,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
 import {
 	type AuditWriter,
-	createAuditWriter,
+	openSharedAuditWriter,
 	readDurableEventHash,
 	releaseAuditWriterForTeardown,
 } from "./audit/chain.js";
@@ -103,7 +103,13 @@ import {
 	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
-import { publishableUsageFields, sanitizeUsage, withSupported1hTier } from "./ledger/usage.js";
+import {
+	implausibleUsageData,
+	materializeMaxima,
+	publishableUsageFields,
+	sanitizeUsage,
+	withSupported1hTier,
+} from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import {
@@ -141,6 +147,7 @@ import {
 	principalLedgerTags,
 } from "./shared/principal.js";
 import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/private-fs.js";
+import { isPersistableSpend } from "./shared/spend-guard.js";
 import type { EndpointInfo, TrustConfig, TrustReceipt } from "./shared/types.js";
 import { TrustConfigSchema } from "./shared/types.js";
 
@@ -413,6 +420,40 @@ export interface SettleParams {
 	 * client's settle is metered exactly as before.
 	 */
 	cacheWrite1hTokens?: number | undefined;
+	/**
+	 * How many provider responses these counts SUM (default 1). The plausibility ceiling
+	 * (`MAX_PLAUSIBLE_TOKENS_PER_TIER`) holds per response, so a caller that settles a window of responses
+	 * as one aggregate says so and the per-tier bound scales with it (capped at `MAX_AGGREGATED_RESPONSES`).
+	 */
+	responses?: number | undefined;
+	/**
+	 * With `responses`: the LARGEST single-response count per tier among the responses these counts sum. The server holds
+	 * each to the unscaled ceiling, so one absurd response cannot hide inside a large window. Omitted: the aggregate
+	 * check alone.
+	 */
+	maxima?:
+		| {
+				inputTokens?: number | undefined;
+				outputTokens?: number | undefined;
+				cacheReadTokens?: number | undefined;
+				cacheWriteTokens?: number | undefined;
+				cacheWrite1hTokens?: number | undefined;
+		  }
+		| undefined;
+	/**
+	 * Tiers the caller REFUSED to state as a count (a figure that was invalid, or above its own per-response ceiling),
+	 * as a FLAG per tier (the value is the raw figure when representable). Counts above stay arithmetic-safe; any flagged
+	 * tier makes the settle charge the estimate and record the anomaly.
+	 */
+	refused?:
+		| {
+				inputTokens?: number | undefined;
+				outputTokens?: number | undefined;
+				cacheReadTokens?: number | undefined;
+				cacheWriteTokens?: number | undefined;
+				cacheWrite1hTokens?: number | undefined;
+		  }
+		| undefined;
 	/** Number of streaming chunks delivered (for streaming calls). */
 	chunksDelivered?: number | undefined;
 	/**
@@ -588,6 +629,16 @@ export interface UnheldSettlementParams {
 	cacheReadTokens?: number | undefined;
 	cacheWriteTokens?: number | undefined;
 	cacheWrite1hTokens?: number | undefined;
+	/** Tiers the caller refused to state as a count (see `SettleParams.refused`): recorded as flags, never as zero usage. */
+	refused?:
+		| {
+				inputTokens?: number | undefined;
+				outputTokens?: number | undefined;
+				cacheReadTokens?: number | undefined;
+				cacheWriteTokens?: number | undefined;
+				cacheWrite1hTokens?: number | undefined;
+		  }
+		| undefined;
 	chunksDelivered?: number | undefined;
 	usageSource?: "provider" | "estimated" | undefined;
 	computeMs?: number | undefined;
@@ -603,7 +654,12 @@ export interface UnheldSettlementParams {
  */
 export type UnheldSettlementOutcome =
 	| { readonly outcome: "held"; readonly transferId: string }
-	| { readonly outcome: "unrecoverable"; readonly recorded: boolean };
+	| {
+			readonly outcome: "unrecoverable";
+			readonly recorded: boolean;
+			/** The event IS on the chain, but the writer reported a failure after it (its sidecar write). */
+			readonly auditDegraded?: true;
+	  };
 
 /** Remembered `settlement_unrecoverable` records, so an exact retry is not recorded twice. */
 export const UNHELD_RECORD_MEMORY = 10_000;
@@ -750,6 +806,13 @@ async function loadSpendLedger(vaultBase: string): Promise<number> {
 }
 
 async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promise<void> {
+	// Never persist a value that would brick the vault (see `isPersistableSpend`): the counter stays in memory, loudly.
+	if (!isPersistableSpend(budgetSpent)) {
+		process.stderr.write(
+			`[usertrust] refusing to persist session spend ${String(budgetSpent)}: not a representable count; the vault's spend-ledger.json keeps its last value\n`,
+		);
+		return;
+	}
 	const dir = join(vaultBase, VAULT_DIR);
 	const ledgerPath = join(dir, "spend-ledger.json");
 	// Hardening (RECON #4): UNIQUE tmp path per write. A fixed
@@ -1094,7 +1157,9 @@ function estimateTier(value: unknown, field: string): number {
 
 export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// 1. Load config
-	const vaultBase = opts?.vaultBase ?? process.cwd();
+	// Absolute from here: every vault file this client touches is in the vault it was created for,
+	// whatever the working directory becomes later (its audit writer is fixed at creation too).
+	const vaultBase = resolve(opts?.vaultBase ?? process.cwd());
 	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
 	// version left group/world-readable is closed; one another user owns is refused (see
 	// securePrivateVault). This runs before ANYTHING under the vault is read, the config
@@ -1131,7 +1196,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 	// 2. Initialize subsystems
 	const vaultPath = vaultBase;
-	const audit: AuditWriter = (isTestEnv ? opts?._audit : undefined) ?? createAuditWriter(vaultPath);
+	const audit: AuditWriter =
+		(isTestEnv ? opts?._audit : undefined) ?? openSharedAuditWriter(vaultPath);
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
 	// No `existsSync` preflight: it answers false for a file inside a directory
@@ -1216,8 +1282,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	const settling = new Set<string>();
 	// `recordUnheldSettlement`: the keys of the last UNHELD_RECORD_MEMORY records (FIFO), and the
 	// appends still in flight, so an identical retry never lands twice.
-	const unheldRecorded = new Set<string>();
-	const unheldInFlight = new Map<string, Promise<unknown>>();
+	// key -> whether the record's write was DEGRADED (on the chain, but the writer reported a failure).
+	const unheldRecorded = new Map<string, boolean>();
+	const unheldInFlight = new Map<string, Promise<{ degraded: boolean }>>();
 	const unheldWindow: number[] = []; // performance.now() of each record in the current window
 	// Holds an abort() or release() has CLAIMED and not yet recorded: parked on the
 	// budget lock or on its ledger void, and in neither map. destroy() waits for these
@@ -1765,6 +1832,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				cacheReadTokens: params?.cacheReadTokens,
 				cacheWriteTokens: params?.cacheWriteTokens,
 				cacheWrite1hTokens: params?.cacheWrite1hTokens,
+				responses: params?.responses,
+				// Each tier read by name, once, BEFORE the claim below: a getter that throws changes nothing, and the
+				// governor never touches the caller's object again.
+				maxima: materializeMaxima(params?.maxima),
+				refused: materializeMaxima(params?.refused),
 				usageSource: params?.usageSource,
 				chunksDelivered: params?.chunksDelivered,
 				computeMs: params?.computeMs,
@@ -1845,6 +1917,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					cacheWriteTokens: input.cacheWriteTokens,
 					cacheWrite1hTokens: input.cacheWrite1hTokens,
 				};
+				const responses = input.responses;
+				const maxima = input.maxima;
+				const refused = input.refused;
 				// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
 				// read only input/output, so a settle carrying nothing but cache counts
 				// looked like "nothing reported" and silently fell back to the pre-call
@@ -1867,24 +1942,41 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// canonicalization, which throws on non-finite — and downgrades a
 				// "provider" label whose input/output is unusable.
 				const usageSnapshot = withSupported1hTier(
-					sanitizeUsage({
-						inputTokens: reportedCounts.inputTokens ?? 0,
-						outputTokens: reportedCounts.outputTokens ?? 0,
-						cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
-						cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
-						cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
-						source: usageReported ? (input.usageSource ?? "provider") : "estimated",
-					}),
+					sanitizeUsage(
+						{
+							inputTokens: reportedCounts.inputTokens ?? 0,
+							outputTokens: reportedCounts.outputTokens ?? 0,
+							cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
+							cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
+							cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
+							source: usageReported ? (input.usageSource ?? "provider") : "estimated",
+						},
+						{ responses, maxima, refused },
+					),
 					rateInfo.rates,
 					rateInfo.rateSource !== "table",
 				);
 				// Present IFF provider-sourced (D5) — the single rule, in one place.
 				const usageAudit = publishableUsageFields(usageSnapshot, rateInfo.rates);
+				// An implausible count (above the per-tier ceiling) is not usage: it is charged at the estimate, like a
+				// missing count, and the anomaly is a chain event. Without this the figure reached the session counter and
+				// the persisted ledger and refused every later call.
+				const usageTrusted = usageReported && usageSnapshot.implausible === undefined;
+				const implausibleData = implausibleUsageData(usageSnapshot, {
+					model,
+					transferId,
+					responses,
+				});
+				if (implausibleData !== undefined) {
+					process.stderr.write(
+						`[usertrust] implausible usage for ${transferId}: charged at the estimate, not the reported counts\n`,
+					);
+				}
 
 				// Determine actual cost
 				let actualCost: number;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
-				if (usageReported) {
+				if (usageTrusted) {
 					actualCost = costFromRates(
 						rateInfo.rates,
 						usageSnapshot.inputTokens,
@@ -1908,7 +2000,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// prompt length when usage was reported, else from the estimate the cost came from.
 				const appliedRates = resolveAppliedRates(
 					rateInfo.rates,
-					usageReported
+					usageTrusted
 						? promptTokenCount(
 								usageSnapshot.inputTokens,
 								usageSnapshot.cacheReadTokens,
@@ -2018,6 +2110,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					const releaseLock = await budgetMutex.acquire();
 					try {
 						inFlightHoldTotal -= auth.estimatedCost;
+						// The METERED cost, even when the ledger posted less (`postedCost`): the budget enforces what the
+						// customer pays the provider. The plausibility ceiling and the persist guard keep one absurd figure
+						// from bricking the vault; the shortfall event records the gap to the ledger.
 						budgetSpent += actualCost;
 					} finally {
 						releaseLock();
@@ -2029,6 +2124,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// Audit event
 				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
 				let auditHash = syntheticHash;
+				let llmAppended = false;
 				try {
 					const auditEvent = await audit.appendEvent({
 						kind: "llm_call",
@@ -2061,8 +2157,25 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						},
 					});
 					auditHash = auditEvent.hash;
+					llmAppended = true;
 				} catch {
 					callAuditDegraded = true;
+				}
+
+				// The implausible-usage report, like the truncation correction below, is appended AFTER the `llm_call` it
+				// annotates: `verifyTransaction` resolves a transfer by the FIRST event carrying its transferId, so a report
+				// written ahead of its `llm_call` would render the settled call as PENDING with no cost. Only after a
+				// SUCCESSFUL append, for the same reason: a failed `llm_call` must not leave the annotation as the first event.
+				if (implausibleData !== undefined && llmAppended) {
+					await audit
+						.appendEvent({
+							kind: "usage_implausible",
+							actor: capture.actor,
+							data: { ...implausibleData, ...costCenterAudit, ...principalAudit, ...jobAudit },
+						})
+						.catch(() => {
+							callAuditDegraded = true;
+						});
 				}
 
 				// D4: the truncation correction, appended AFTER the `llm_call` it annotates
@@ -2424,6 +2537,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			};
 			// Every remaining field is read ONCE into a local and validated from that local: a getter
 			// that answers differently on a second read cannot get unchecked text onto the chain.
+			const refusedTiers = materializeMaxima(params.refused);
 			const rawComputeMs: unknown = params.computeMs;
 			const computeMs =
 				typeof rawComputeMs === "number" && Number.isFinite(rawComputeMs) && rawComputeMs >= 0
@@ -2458,6 +2572,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				reason: "no hold for this transferId: swept, restarted or already settled",
 				source: "headless",
 				...(Object.keys(usage).length === 0 ? {} : { usage }),
+				// A refused tier is NOT zero usage: it is recorded as a flag with the raw figure when representable.
+				...(refusedTiers === undefined || Object.keys(refusedTiers).length === 0
+					? {}
+					: { refused: refusedTiers }),
 				...(usageSource === undefined ? {} : { usageSource }),
 				...(computeMs === undefined ? {} : { computeMs }),
 				...(usageTo === undefined ? {} : { usageTo }),
@@ -2468,10 +2586,18 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			if (first !== undefined) {
 				// An identical retry while the first is still being appended shares its outcome (a
 				// failure included): it never answers `recorded: false` for a record not yet on the chain.
-				await first;
-				return { outcome: "unrecoverable", recorded: false };
+				// ... and its degraded flag: a sharer is told the write it shared was degraded.
+				const shared = await first;
+				return shared.degraded
+					? { outcome: "unrecoverable", recorded: false, auditDegraded: true }
+					: { outcome: "unrecoverable", recorded: false };
 			}
-			if (unheldRecorded.has(key)) return { outcome: "unrecoverable", recorded: false };
+			const earlierDegraded = unheldRecorded.get(key);
+			if (earlierDegraded !== undefined) {
+				return earlierDegraded
+					? { outcome: "unrecoverable", recorded: false, auditDegraded: true }
+					: { outcome: "unrecoverable", recorded: false };
+			}
 			// Each record is an fsync'd append: bound them per window so a client minting unknown ids
 			// cannot grow the chain without limit. Refused, never dropped: the caller sees it.
 			const now = performance.now();
@@ -2491,26 +2617,33 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// sidecar, and records the event's hash on a rejection that came after the event was durable.
 			// Then the record IS on the chain: it counts as recorded, and the retry must not write it a
 			// second time. (Sharers of an in-flight append see the same outcome.)
-			const append = audit
+			// The rejection is still a DEGRADED write (the sidecar failed), and the caller is told so: a
+			// record that is on the chain but whose writer reported a failure is not the same answer as a
+			// clean one.
+			const append: Promise<{ degraded: boolean }> = audit
 				.appendEvent({ kind: "settlement_unrecoverable", actor: "local", data })
 				.then(
-					() => undefined,
+					() => ({ degraded: false }),
 					(err: unknown) => {
 						if (readDurableEventHash(err) === undefined) throw err;
+						return { degraded: true };
 					},
 				);
 			unheldInFlight.set(key, append);
+			let degraded: boolean;
 			try {
-				await append;
+				degraded = (await append).degraded;
 			} finally {
 				unheldInFlight.delete(key);
 			}
-			unheldRecorded.add(key);
+			unheldRecorded.set(key, degraded);
 			if (unheldRecorded.size > UNHELD_RECORD_MEMORY) {
-				const oldest = unheldRecorded.values().next().value;
+				const oldest = unheldRecorded.keys().next().value;
 				if (oldest !== undefined) unheldRecorded.delete(oldest);
 			}
-			return { outcome: "unrecoverable", recorded: true };
+			return degraded
+				? { outcome: "unrecoverable", recorded: true, auditDegraded: true }
+				: { outcome: "unrecoverable", recorded: true };
 		},
 
 		async destroy(): Promise<void> {

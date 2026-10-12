@@ -11,14 +11,16 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
+import { describeMissingEvents, readChainDeadLetters } from "../audit/dead-letters.js";
 import {
 	computeEntropyScore,
 	type EntropyEventInput,
 	type EntropyLevel,
 } from "../audit/entropy.js";
-import { verifyVault } from "../audit/verify.js";
+import { verifyVaultReading } from "../audit/verify.js";
 import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
+import { isRunawaySpend } from "../shared/spend-guard.js";
 import type { AuditEvent } from "../shared/types.js";
 import type { CliOptions } from "./init.js";
 import { DEFAULT_POLICIES_PATH, resolvePolicyPath } from "./policy-path.js";
@@ -354,7 +356,27 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// arguments — a log path versus the `.usertrust` directory — which is the
 	// distinction AGENTS.md flags as easy to get wrong, and I got it wrong by
 	// reaching for the one already in hand.
-	const verification = verifyVault(vaultPath);
+	const { result: verification, events: verifiedEvents } = verifyVaultReading(vaultPath);
+
+	// COMPLETENESS is the other half of chain integrity, and the hash walk cannot see it: a chain
+	// with an event missing verifies link by link. Every event that failed to reach the chain is
+	// dead-lettered; one that is not on the chain is an integrity failure here, exactly as a broken
+	// link is (a vault with half its events dead-lettered read "verified [ok]"). A dead-letter
+	// queue that cannot be read is one too: whether events are missing is unknown, not "none".
+	// The dead letters are matched against the events the verification walked, never `events`
+	// above: that is an earlier read, and a log changed between the two had the integrity line
+	// describe one chain and the completeness line another.
+	const eventsByHash = new Map(verifiedEvents.map((e) => [e.hash, e]));
+	const deadLetters = readChainDeadLetters(vaultPath, (hash) => eventsByHash.get(hash));
+	const completenessErrors =
+		"unreadable" in deadLetters
+			? [
+					`dead-letter queue unreadable (${deadLetters.unreadable}): missing audit events cannot be ruled out`,
+				]
+			: deadLetters.missing > 0
+				? [describeMissingEvents(deadLetters)]
+				: [];
+	const missingEvents = "unreadable" in deadLetters ? null : deadLetters.missing;
 
 	// SESSION spend comes from the persisted ledger, not from summing the log.
 	//
@@ -398,6 +420,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// the most reassuring possible answer to a question the tool could not answer
 	// — the same shape as every defect this branch removes, in the branch that
 	// removes them.
+	// A persisted spend that is not representable, or thousands of times the budget, is a RUNAWAY (one absurd usage
+	// figure used to write one), not an ordinary exhausted budget: say so, and say how to recover.
+	const runawaySpend = spent !== undefined && isRunawaySpend(spent, config.budget);
+	const implausibleUsageCount = events.filter((e) => e.kind === "usage_implausible").length;
 	const budgetKnown = config.budget > 0 && spent !== undefined;
 	const budgetPct = budgetKnown ? (((spent as number) / config.budget) * 100).toFixed(1) : null;
 
@@ -412,7 +438,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// computed AFTER the score that needed them.
 	const report = computeEntropyScore(entropyEvents, {
 		budget: { total: config.budget, spent: spent ?? Number.NaN },
-		chain: { valid: verification.valid, errors: verification.errors },
+		chain: { valid: verification.valid, errors: [...verification.errors, ...completenessErrors] },
 	});
 
 	// THE LINE AND THE HEADLINE READ THE SAME SIGNAL — not two computations of one
@@ -423,12 +449,23 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// printed `[critical]` in green. Every one of those is the same defect: one
 	// verdict, two sources, no obligation to agree.
 	const chainSignal = report.signals.find((s) => s.condition === "chain_integrity");
-	const ambiguousTransfers = (chainSignal?.hits ?? 0) - (verification.valid ? 0 : 1);
+	// The chain input FAILED (one hit) when verification failed OR an event is missing.
+	const chainInputFailed =
+		!verification.valid || verification.errors.length > 0 || completenessErrors.length > 0;
+	const ambiguousTransfers = (chainSignal?.hits ?? 0) - (chainInputFailed ? 1 : 0);
+	const ambiguousSuffix =
+		ambiguousTransfers > 0
+			? `, ${ambiguousTransfers} settlement${ambiguousTransfers === 1 ? "" : "s"} ambiguous`
+			: "";
+	const completenessLabel =
+		missingEvents === null
+			? ", dead-letter queue UNREADABLE"
+			: missingEvents > 0
+				? `, ${missingEvents} event${missingEvents === 1 ? "" : "s"} MISSING (dead-lettered)`
+				: "";
 	const chainLabel = !verification.valid
-		? "FAILED"
-		: ambiguousTransfers > 0
-			? `verified, ${ambiguousTransfers} settlement${ambiguousTransfers === 1 ? "" : "s"} ambiguous`
-			: "verified";
+		? `FAILED${completenessLabel}`
+		: `verified${completenessLabel}${ambiguousSuffix}`;
 	const chainStatus = chainSignal?.critical === true ? "[critical]" : "[ok]";
 
 	// Signal values
@@ -468,6 +505,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 						// machine consumer must be able to tell that apart from a vault
 						// that has genuinely spent nothing.
 						budgetUtilization: budgetPct === null ? null : Number.parseFloat(budgetPct),
+						// true when the persisted session spend is unrepresentable or >1000x the budget: recovery is
+						// documented in docs/runaway-spend.md. Absent otherwise.
+						...(runawaySpend ? { budgetRunaway: true } : {}),
+						...(implausibleUsageCount > 0 ? { implausibleUsage: implausibleUsageCount } : {}),
 						// THE THIRD SURFACE FOR ONE VERDICT. The headline floors on the
 						// chain signal and the human line reads it; this reported
 						// `verification.valid` alone, so a vault with a valid chain and an
@@ -480,6 +521,8 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 						// of three.
 						chainIntegrity: chainSignal?.critical !== true,
 						...(ambiguousTransfers > 0 ? { ambiguousSettlements: ambiguousTransfers } : {}),
+						// null: the dead-letter queue could not be read, so the count is unknown.
+						missingEvents,
 						piiDetections: piiHits,
 						// RENAMED to what they measure. `circuitBreakerTrips` counted no
 						// breaker transition — no producer emits one — and reported an
@@ -562,8 +605,9 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	console.log(`  Policy violations (30d):  ${policyHits}   ${policyTag}`);
 
 	// Signal 2: Budget utilization
-	const budgetStatus =
-		budgetPct === null
+	const budgetStatus = runawaySpend
+		? pc.red("[critical: runaway spend, see docs/runaway-spend.md]")
+		: budgetPct === null
 			? pc.yellow("[unknown]")
 			: Number.parseFloat(budgetPct) > 80
 				? pc.yellow("[elevated]")
@@ -580,6 +624,11 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				? "unreadable ledger"
 				: "no budget configured";
 	console.log(`  Budget utilization:      ${budgetText} ${budgetStatus}`);
+	if (implausibleUsageCount > 0) {
+		console.log(
+			`  Implausible usage:       ${implausibleUsageCount} call(s) charged at the estimate ${pc.yellow("[review]")}`,
+		);
+	}
 
 	// Signal 3: Chain integrity
 	// Coloured from the STATUS, not from `verification.valid` — keying the colour
