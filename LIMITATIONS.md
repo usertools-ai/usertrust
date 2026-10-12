@@ -82,10 +82,12 @@ is refused. **`files.upload` sends the file's bytes with no PII scan.** It is
 refused for that reason; listing it in `allowUngoverned` runs it audited as
 `ungoverned_call` but unredacted, as does uploading on the original client. A
 duck-typed Google client is guarded by shape: any object on it with a function
-member or an accessor is treated as a namespace. The shape test is per member: an
-object returned as plain data (no function member) is not looked inside, so a
-callable object nested in data would pass; the classification test pins that
-there is none on the classified SDK version.
+member or an accessor is treated as a namespace. **The shape check is
+member-level.** An object with methods (an SDK resource, or a duck-typed
+namespace) nested inside plain data, meaning an object or array with no function
+member or accessor of its own, is returned as data, and its methods run raw. On the
+real `@google/genai` the classification pin test fails on that shape for the
+classified version; on a duck-typed client, nothing catches it.
 **`models.generateContentStream` is refused** when it would run automatic
 function calling (a streamed loop of provider rounds, which usertrust does not
 yet meter round by round); `models.generateContent` with it is metered per round
