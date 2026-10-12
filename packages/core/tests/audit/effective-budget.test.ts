@@ -692,14 +692,22 @@ describe("a failed publish is retried under the same lock owner", () => {
 		reg.appended();
 		reg.appended();
 		expect(warnings()).toBe(2);
-		// A success ends the streak; the next failure, under a new writer, warns again.
+		// A success ends the streak: the next failure under the SAME writer (a second governor registering, whose
+		// publish fails) warns again, exactly once.
 		io.fail = false;
 		reg.appended();
 		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
 		io.fail = true;
+		const second = registerEnforcedBudget(vaultDir, 2_000, () => owner, { write: io.write });
+		expect(warnings()).toBe(3);
+		reg.appended();
+		second.appended();
+		expect(warnings()).toBe(3);
+		// And a failure under a new writer warns too.
 		owner = "owner-3";
 		reg.appended();
-		expect(warnings()).toBe(3);
+		expect(warnings()).toBe(4);
+		second.release();
 		reg.release();
 	});
 

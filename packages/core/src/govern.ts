@@ -4248,7 +4248,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				() => audit.flush(),
 				// Drop this governor's budget from the vault's record (never throws), once its last
 				// append has landed and BEFORE the audit lock is released: the record is republished
-				// for the governors still live only while this process holds the lock.
+				// for the governors still live only while this process holds the lock. It waits on the
+				// audit flush (an unbounded mutex wait), as the lock release after it does, so a hung
+				// flush keeps a destroyed governor on the record exactly as long as destroy() hangs.
 				() => enforcedBudget?.release(),
 				// Release the audit lock. destroy() never REJECTS for a lock left behind: callers
 				// call it without await or catch, and an unhandled rejection kills the process. The
