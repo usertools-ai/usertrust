@@ -529,6 +529,15 @@ type GovernedResponsesPart<T, K extends keyof T = Extract<keyof T, "responses">>
 type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
 	[P in K]: GovernedGoogleModels<T[P]>;
 };
+/**
+ * `withOptions` returns a client governed by the SAME governor (`boundary.rewrap`), so its type is
+ * the governed shape, never the SDK's `this` — which `Omit<T, …>` would otherwise carry through as
+ * the RAW client, letting a raw-only member of a governed clone compile and then fail at runtime.
+ * Its parameters are the SDK's own. Present only when the client declares it.
+ */
+type GovernedWithOptionsPart<T, K extends keyof T = Extract<keyof T, "withOptions">> = {
+	[P in K]: T[P] extends (...args: infer A) => unknown ? (...args: A) => TrustedClient<T> : T[P];
+};
 
 /**
  * Rewrite the governed surfaces of whichever provider `detectClientKind` would
@@ -546,9 +555,15 @@ type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
  */
 type GovernedShapeOf<T> =
 	IsAnthropicClient<T> extends true
-		? Omit<T, "messages" | "beta"> & GovernedMessagesPart<T> & GovernedBetaPart<T>
+		? Omit<T, "messages" | "beta" | "withOptions"> &
+				GovernedMessagesPart<T> &
+				GovernedBetaPart<T> &
+				GovernedWithOptionsPart<T>
 		: IsOpenAIClient<T> extends true
-			? Omit<T, "chat" | "responses"> & GovernedChatPart<T> & GovernedResponsesPart<T>
+			? Omit<T, "chat" | "responses" | "withOptions"> &
+					GovernedChatPart<T> &
+					GovernedResponsesPart<T> &
+					GovernedWithOptionsPart<T>
 			: IsGoogleClient<T> extends true
 				? Omit<T, "models"> & GovernedModelsPart<T>
 				: T;
