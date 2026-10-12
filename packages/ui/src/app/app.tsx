@@ -18,7 +18,13 @@ export function App(): React.JSX.Element {
 	const { rows, summary, live, liveIds } = useLedger();
 	const [view, setView] = useState<View>("audit");
 	const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
-	const [open, setOpen] = useState<LedgerRow | null>(null);
+	// The selected row's event HASH (unique on the chain, where an id can repeat), resolved from the current rows: a
+	// `status` correction replaces the row object, and a panel holding the old one kept showing the old status.
+	const [openHash, setOpenHash] = useState<string | null>(null);
+	const open = useMemo(
+		() => (openHash === null ? null : (rows.find((r) => r.hash === openHash) ?? null)),
+		[rows, openHash],
+	);
 	const filtered = useMemo(() => applyFilters(rows, filters), [rows, filters]);
 
 	// Export what the operator is looking at — the filtered set, not the vault.
@@ -68,11 +74,15 @@ export function App(): React.JSX.Element {
 				<FilterBar rows={rows} filters={filters} onChange={setFilters} />
 			</div>
 			{view === "audit" ? (
-				<AuditTable rows={filtered} liveIds={liveIds} onOpen={setOpen} />
+				<AuditTable
+					rows={filtered}
+					liveIds={liveIds}
+					onOpen={(r: LedgerRow) => setOpenHash(r.hash)}
+				/>
 			) : (
 				<Trends rows={filtered} />
 			)}
-			{open && <RowPanel row={open} onClose={() => setOpen(null)} />}
+			{open && <RowPanel row={open} onClose={() => setOpenHash(null)} />}
 		</div>
 	);
 }

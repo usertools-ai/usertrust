@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { type LedgerRow, statusOf } from "./rows.js";
+import { type LedgerRow, type RowStatus, statusOf } from "./rows.js";
 
 export interface TimeBucket {
 	bucket: string;
@@ -54,16 +54,32 @@ export interface StatTiles {
 	calls: number;
 	avgCostUt: number;
 	errorRate: number;
+	/** Rows per status, every status present (0 when none): "unknown" and "unrecoverable" are counted, never hidden. */
+	byStatus: Record<RowStatus, number>;
 }
+
+const ALL_STATUSES: readonly RowStatus[] = [
+	"settled",
+	"ambiguous",
+	"failed",
+	"denied",
+	"released",
+	"unrecoverable",
+	"ungoverned",
+	"info",
+	"unknown",
+];
 
 export function statTiles(rows: LedgerRow[]): StatTiles {
 	const totalCostUt = rows.reduce((sum, r) => sum + (r.costUt ?? 0), 0);
 	const costed = rows.filter((r) => r.costUt !== undefined).length;
-	const failed = rows.filter((r) => statusOf(r) === "failed").length;
+	const byStatus = Object.fromEntries(ALL_STATUSES.map((s) => [s, 0])) as Record<RowStatus, number>;
+	for (const r of rows) byStatus[statusOf(r)] += 1;
 	return {
 		totalCostUt,
 		calls: rows.length,
 		avgCostUt: costed > 0 ? totalCostUt / costed : 0,
-		errorRate: rows.length > 0 ? failed / rows.length : 0,
+		errorRate: rows.length > 0 ? byStatus.failed / rows.length : 0,
+		byStatus,
 	};
 }
