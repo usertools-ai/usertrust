@@ -29,6 +29,26 @@ import { parseEnd, parseReportArgs, run } from "../../src/cli/report.js";
 
 const RATES = { inputPer1k: 100, outputPer1k: 500, cacheReadPer1k: 10, cacheWritePer1k: 125 };
 
+/**
+ * A one-shot fault: the next anchor write (the create of its temp file) fails EACCES, after the
+ * append's event was synced to the log. What a failed anchor update leaves: the event on the chain,
+ * the OLD anchor in place (the next append rolls it forward), and the event dead-lettered with its hash.
+ */
+const anchorFault = vi.hoisted(() => ({ armed: false }));
+vi.mock("node:fs", async (importOriginal) => {
+	const fs = await importOriginal<typeof import("node:fs")>();
+	const openSync = ((p: unknown, ...rest: unknown[]) => {
+		if (anchorFault.armed && /\.meta\.[0-9a-f-]+\.tmp$/.test(String(p))) {
+			anchorFault.armed = false;
+			throw Object.assign(new Error(`EACCES: permission denied, open '${String(p)}'`), {
+				code: "EACCES",
+			});
+		}
+		return (fs.openSync as (...a: unknown[]) => number)(p, ...rest);
+	}) as typeof fs.openSync;
+	return { ...fs, openSync, default: { ...fs, openSync } };
+});
+
 describe("usertrust report --week", () => {
 	let dir: string;
 	let out: string[];
@@ -702,25 +722,24 @@ describe("usertrust report --week", () => {
 					data: { transferId: "tx_1", cost: 5 },
 				});
 				// the second event reaches the chain, but its .meta update fails: it is dead-lettered WITH its hash
-				const meta = join(dir, ".usertrust", "audit", "events.jsonl.meta");
-				rmSync(meta, { force: true });
-				mkdirSync(meta);
-				try {
-					await expect(
-						w.appendEvent({
-							kind: "llm_call",
-							actor: "local",
-							data: { transferId: "tx_2", cost: 5 },
-						}),
-					).rejects.toThrow();
-				} finally {
-					rmSync(meta, { recursive: true });
-				}
+				// (a directory in the anchor's place would refuse the append before anything is written)
+				anchorFault.armed = true;
+				await expect(
+					w.appendEvent({
+						kind: "llm_call",
+						actor: "local",
+						data: { transferId: "tx_2", cost: 5 },
+					}),
+				).rejects.toThrow();
+				expect(anchorFault.armed, "the anchor write met the fault").toBe(false);
 			} finally {
 				w.release();
 			}
+			const log = readFileSync(join(dir, ".usertrust", "audit", "events.jsonl"), "utf-8");
+			expect(log.trim().split("\n"), "tx_2's event is on the chain").toHaveLength(2);
 			const out = await readReport();
 			expect(out.integrity.errors.join("\n")).not.toContain("INCOMPLETE");
+			expect(out.integrity.verified).toBe(true);
 			write.mockRestore();
 		});
 
