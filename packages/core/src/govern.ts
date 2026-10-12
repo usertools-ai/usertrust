@@ -1159,6 +1159,25 @@ export async function runTeardownSteps(steps: ReadonlyArray<() => unknown>): Pro
 	}
 }
 
+/**
+ * A caller's action descriptor, read ONCE: each field is read a single time into a plain object
+ * the caller cannot reach. `governAction` reads the descriptor before the hold, again after
+ * `execute()` and after the settle claim, so a live one could size the hold at one cost and post
+ * another (an `execute()` that edits it), or throw from a getter between the settle claim and the
+ * POST. The same reason the LLM path serializes its request once. `params` is the caller's own
+ * object, by reference: the action runs on it, and redaction copies only the audit record.
+ */
+function snapshotActionDescriptor(descriptor: ActionDescriptor): ActionDescriptor {
+	const { kind, name, cost, params, actor } = descriptor;
+	return {
+		kind,
+		name,
+		cost,
+		...(params !== undefined ? { params } : {}),
+		...(actor !== undefined ? { actor } : {}),
+	};
+}
+
 // ── trust() ──
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
@@ -3154,12 +3173,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// 7b. Action governance — simplified pipeline for non-LLM actions
 	async function governActionImpl<R>(
-		action: ActionDescriptor,
+		descriptor: ActionDescriptor,
 		execute: () => Promise<R>,
 	): Promise<GovernedActionResult<R>> {
 		if (destroyed) {
 			throw new Error("TrustedClient has been destroyed");
 		}
+
+		// Every read below is of this snapshot, never of the caller's live descriptor.
+		const action = snapshotActionDescriptor(descriptor);
 
 		// Validate cost to prevent budget inflation via negative values
 		if (!Number.isFinite(action.cost) || action.cost < 0) {

@@ -13,14 +13,14 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
 import { AuditDegradedError } from "../../src/shared/errors.js";
-import type { AuditEvent } from "../../src/shared/types.js";
+import type { ActionDescriptor, AuditEvent } from "../../src/shared/types.js";
 
 vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(() => ({
@@ -271,6 +271,99 @@ describe("A2 on the action path: governAction settles XOR voids its hold", () =>
 		expect(held).toEqual([receipt.transferId]);
 		expect(posted).toEqual(held);
 		expect(voided).toEqual([]);
+		await client.destroy();
+	});
+
+	// ── The caller's descriptor is read ONCE ──
+	// governAction reads its descriptor before the hold and again after execute() and after the
+	// settle claim. A later read of a live descriptor could throw inside the window above, or see a
+	// cost the hold was never sized for. These rows pin that every read uses the first one.
+
+	/** What the governor appended for the action itself (the settlement-defining event). */
+	const actionEvents = (audit: AuditWriter) =>
+		vi
+			.mocked(audit.appendEvent)
+			.mock.calls.map((c) => c[0])
+			.filter((e) => e.kind !== "tool_use_failed");
+
+	it("a cost getter that throws after its first read: the hold is posted once at the first value, never voided", async () => {
+		const { engine, held, posted, voided } = recordingEngine();
+		const audit = makeAudit();
+		const client = await governed(true, engine, audit);
+		let reads = 0;
+		const descriptor = {
+			kind: ACTION.kind,
+			name: ACTION.name,
+			get cost(): number {
+				reads++;
+				if (reads > 1) throw new Error("cost read twice");
+				return 25;
+			},
+		};
+		const run = vi.fn(async () => "ran");
+
+		const result = await outcome(client.governAction(descriptor, run));
+
+		expect(result).not.toBeInstanceOf(Error);
+		expect(run).toHaveBeenCalledOnce();
+		expect(reads).toBe(1);
+		expect(vi.mocked(engine.spendPending).mock.calls.map((c) => c[0].amount)).toEqual([25]);
+		expect(vi.mocked(engine.postPendingSpend).mock.calls).toEqual([[held[0], 25]]);
+		expect(posted).toEqual(held);
+		expect(voided).toEqual([]);
+		await client.destroy();
+	});
+
+	it("execute() raises the descriptor's cost: the hold, commit, POST, receipt, audit and session spend all keep the original", async () => {
+		const { engine, held, posted, voided } = recordingEngine();
+		const audit = makeAudit();
+		const client = await governed(true, engine, audit);
+		const descriptor = { ...ACTION };
+		const run = vi.fn(async () => {
+			descriptor.cost = 999;
+			return "ran";
+		});
+
+		const result = await outcome(client.governAction(descriptor, run));
+
+		expect(result).not.toBeInstanceOf(Error);
+		const { receipt } = result as {
+			receipt: { cost: number; transferId: string; budgetRemaining: number };
+		};
+		expect(vi.mocked(engine.spendPending).mock.calls.map((c) => c[0].amount)).toEqual([25]);
+		expect(vi.mocked(engine.postPendingSpend).mock.calls).toEqual([[receipt.transferId, 25]]);
+		expect(posted).toEqual(held);
+		expect(voided).toEqual([]);
+		expect(receipt.cost).toBe(25);
+		expect(actionEvents(audit).map((e) => (e.data as { cost?: number }).cost)).toEqual([25]);
+		expect(receipt.budgetRemaining).toBe(500_000 - 25);
+		const ledger = JSON.parse(
+			readFileSync(join(vault, ".usertrust", "spend-ledger.json"), "utf-8"),
+		) as { budgetSpent: number };
+		expect(ledger.budgetSpent).toBe(25);
+		await client.destroy();
+	});
+
+	it("execute() renames the descriptor's name and kind: the audit event and the receipt keep the originals", async () => {
+		const { engine } = recordingEngine();
+		const audit = makeAudit();
+		const client = await governed(true, engine, audit);
+		const descriptor: ActionDescriptor = { ...ACTION };
+		const run = vi.fn(async () => {
+			descriptor.name = "renamed";
+			descriptor.kind = "shell_command";
+			return "ran";
+		});
+
+		const result = await outcome(client.governAction(descriptor, run));
+
+		expect(result).not.toBeInstanceOf(Error);
+		const events = actionEvents(audit);
+		expect(events.map((e) => e.kind)).toEqual(["tool_use"]);
+		expect(events.map((e) => (e.data as { actionName?: string }).actionName)).toEqual(["search"]);
+		const { receipt } = result as { receipt: { model?: string; actionKind?: string } };
+		expect(receipt.model).toBe("search");
+		expect(receipt.actionKind).toBe("tool_use");
 		await client.destroy();
 	});
 });
