@@ -60,4 +60,13 @@ describe("applyFilters", () => {
 		).toBe("2");
 		expect(isFiltering({ ...EMPTY_FILTERS, kinds: ["llm_call"] })).toBe(true);
 	});
+
+	it("filters on the ungoverned status", () => {
+		const rows = [...ROWS, row({ id: "u", kind: "ungoverned_call" })];
+		const out = applyFilters(rows, { ...EMPTY_FILTERS, statuses: ["ungoverned"] });
+		expect(out.map((r) => r.id)).toEqual(["u"]);
+		expect(
+			applyFilters(rows, { ...EMPTY_FILTERS, statuses: ["pending"] }).map((r) => r.id),
+		).not.toContain("u");
+	});
 });
