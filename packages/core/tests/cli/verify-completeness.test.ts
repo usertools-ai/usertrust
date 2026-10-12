@@ -27,6 +27,8 @@ beforeEach(() => {
 	tempDir = mkdtempSync(join(tmpdir(), "trust-verify-complete-"));
 	mkdirSync(join(tempDir, VAULT_DIR, "audit"), { recursive: true });
 	out = [];
+	// A verdict that succeeds never sets the exit code: start each row from 0, whatever ran before it.
+	process.exitCode = 0;
 	vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
 		out.push(args.map(String).join(" "));
 	});
@@ -191,6 +193,47 @@ describe("verify: a dead-lettered event makes the vault INCOMPLETE", () => {
 		const r = json();
 		expect(r.data.complete).toBe(true);
 		expect(r.data.deadLetters).toMatchObject({ missing: 0, onChain: 1 });
+		expect(process.exitCode).toBe(0);
+	});
+
+	it("a dead letter records the event AS PERSISTED: an input that serialises differently twice still matches its own event", async () => {
+		// A getter that answers differently on every read. The chain holds the answer the append hashed;
+		// a dead letter that serialised the input again held another, matched no event on the chain, and
+		// verify reported a durable event missing for good.
+		let reads = 0;
+		const data = {
+			transferId: "tx_getter",
+			get note() {
+				reads++;
+				return `read ${reads}`;
+			},
+		};
+		expect(data.note).not.toBe(data.note); // the fixture: two reads, two answers
+		const a = createAuditWriter(tempDir);
+		let h: string;
+		try {
+			await a.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_0" } });
+			h = await appendWithMetaFailure(a, { kind: "llm_call", actor: "local", data });
+			await a.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_after" } });
+		} finally {
+			a.release();
+		}
+		const onChain = readFileSync(join(vaultDir(), "audit", "events.jsonl"), "utf-8")
+			.trim()
+			.split("\n")
+			.map((l) => JSON.parse(l) as { hash: string; data: { note?: string } })
+			.find((e) => e.hash === h);
+		const [letter] = deadLetterLines() as Array<{
+			eventHash?: string;
+			payload: { data: { note?: string } };
+		}>;
+		expect(letter?.eventHash).toBe(h);
+		expect(letter?.payload.data.note).toBe(onChain?.data.note);
+		await verifyRun(tempDir, { json: true });
+		const r = json();
+		expect(r.data.valid).toBe(true);
+		expect(r.data.deadLetters).toMatchObject({ missing: 0, onChain: 1 });
+		expect(r.data.complete).toBe(true);
 		expect(process.exitCode).toBe(0);
 	});
 

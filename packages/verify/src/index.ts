@@ -152,7 +152,8 @@ function scrubForError(raw: string): string {
 /**
  * Verify an entire `.usertrust` vault directory, anchored to the `.meta` head.
  *
- * BYTE-IDENTICAL to the core implementation (packages/core/src/audit/verify.ts):
+ * The same walk, line for line, as the core implementation's `verifyVaultReading`
+ * (packages/core/src/audit/verify.ts), which also hands back the events it read:
  * gathers `events.jsonl` plus every rotated `*.jsonl` segment, orders all events
  * by the persisted global `sequence`, walks a single continuous chain (GENESIS
  * required only at the global head), enforces sequence continuity (so whole-
@@ -532,8 +533,11 @@ function verifySuppliedRekorReceipts(
 /**
  * verifyVault + the spec §7.2 anchor state machine. Existing chain semantics
  * are UNCHANGED (verifyVault runs as-is); anchor evaluation is layered on
- * top additively. IDENTICAL function body in packages/core/src/audit/verify.ts
- * — the anchor differential test pins the two.
+ * top additively. The same evaluation as core's `verifyVaultWithAnchorsReading`
+ * (packages/core/src/audit/verify.ts), and the anchor differential test pins
+ * their verdicts, with one difference: core checks the anchors against the
+ * hashes of the events its walk read, and this function gathers them with a
+ * second read of the log.
  */
 export function verifyVaultWithAnchors(
 	vaultPath: string,

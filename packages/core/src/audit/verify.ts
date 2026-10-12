@@ -14,9 +14,15 @@
  * `verifyVault` extends this across rotated segment files: it parses every
  * `*.jsonl` segment, orders by the persisted global `sequence`, walks ONE
  * continuous chain (GENESIS required only at the global head), and checks the
- * `.meta` tail anchor. This algorithm is mirrored byte-for-byte in the zero-dep
- * `usertrust-verify` package (packages/verify/src/index.ts) — the differential
- * test pins them together.
+ * `.meta` tail anchor. This algorithm is mirrored in the zero-dep
+ * `usertrust-verify` package (packages/verify/src/index.ts, its `verifyVault`) —
+ * the differential test pins their verdicts together.
+ *
+ * ONE READ PER VERDICT. `verifyVaultReading` hands back the events it verified,
+ * and everything the CLI judges after it (the anchors' coverage, the caller's
+ * receipts, the dead letters) is judged against THOSE, never against the log read
+ * again: a log changed between two reads let an unverified second version satisfy
+ * the checks the first one passed.
  */
 
 import { createHash } from "node:crypto";
@@ -30,7 +36,6 @@ import {
 	type AnchorState,
 	type AnchorTrust,
 	evaluateAnchoredVault,
-	gatherOrderedEventHashes,
 	parseAnchorsContent,
 	readAnchorMirror,
 	type WitnessInput,
@@ -39,6 +44,7 @@ import {
 } from "./anchor-verify.js";
 import { canonicalize } from "./canonical.js";
 import { buildMerkleTree } from "./merkle.js";
+import type { PersistedAuditEvent } from "./read.js";
 import { parseRekorReceipt, type RekorVerification, verifyRekorReceipt } from "./rekor-verify.js";
 
 export type { AnchorRecord, AnchorSource, AnchorState, AnchorTrust, WitnessInput };
@@ -60,6 +66,15 @@ export interface VaultVerificationResult {
 	merkleRoot: string | null;
 	firstEvent: string | null;
 	lastEvent: string | null;
+}
+
+/** A vault's verdict, and the events it was reached on: what every later check must read. */
+export interface VaultReading {
+	result: VaultVerificationResult;
+	/** The events walked, in chain order, as parsed from their lines (JSON objects only). */
+	events: readonly PersistedAuditEvent[];
+	/** Every walked line's stored hash, in chain order (`""` where it is not a string). */
+	orderedHashes: readonly string[];
 }
 
 interface Anchor {
@@ -221,6 +236,15 @@ function scrubForError(raw: string): string {
  * "previousHash mismatch"), and checks the `.meta` tail anchor.
  */
 export function verifyVault(vaultPath: string): VaultVerificationResult {
+	return verifyVaultReading(vaultPath).result;
+}
+
+/**
+ * {@link verifyVault}, handing back the events it verified with its verdict. A check that judges
+ * the vault after its verification takes them from here: reading the log a second time judged
+ * whatever the log held THEN, never hash-checked.
+ */
+export function verifyVaultReading(vaultPath: string): VaultReading {
 	const auditDir = join(vaultPath, "audit");
 	const errors: string[] = [];
 
@@ -281,13 +305,17 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 			);
 		}
 		return {
-			valid: errors.length === 0,
-			errors,
-			chainLength: 0,
-			validHashes: 0,
-			merkleRoot: null,
-			firstEvent: null,
-			lastEvent: null,
+			result: {
+				valid: errors.length === 0,
+				errors,
+				chainLength: 0,
+				validHashes: 0,
+				merkleRoot: null,
+				firstEvent: null,
+				lastEvent: null,
+			},
+			events: [],
+			orderedHashes: [],
 		};
 	}
 
@@ -408,13 +436,23 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 
 	// 10.
 	return {
-		valid: errors.length === 0,
-		errors,
-		chainLength: events.length,
-		validHashes,
-		merkleRoot,
-		firstEvent,
-		lastEvent,
+		result: {
+			valid: errors.length === 0,
+			errors,
+			chainLength: events.length,
+			validHashes,
+			merkleRoot,
+			firstEvent,
+			lastEvent,
+		},
+		// A line that parsed to a number, a string or an array was walked (and failed its hash): it
+		// is in the ordered hashes the anchors count, and no event a later check can match.
+		events: ordered
+			.map((e) => e.parsed as unknown)
+			.filter(
+				(p): p is PersistedAuditEvent => p !== null && typeof p === "object" && !Array.isArray(p),
+			),
+		orderedHashes: ordered.map((e) => e.hash),
 	};
 }
 
@@ -469,6 +507,13 @@ export interface AnchoringReport {
 export interface AnchoredVaultVerificationResult extends VaultVerificationResult {
 	anchorState: AnchorState;
 	anchoring: AnchoringReport;
+}
+
+/** {@link VaultReading} for the anchored verdict. */
+export interface AnchoredVaultReading {
+	result: AnchoredVaultVerificationResult;
+	/** The events walked, in chain order: the ones the anchors were checked against. */
+	events: readonly PersistedAuditEvent[];
 }
 
 /**
@@ -588,14 +633,30 @@ function verifySuppliedRekorReceipts(
 /**
  * verifyVault + the spec §7.2 anchor state machine. Existing chain semantics
  * are UNCHANGED (verifyVault runs as-is); anchor evaluation is layered on
- * top additively. IDENTICAL function body in packages/core/src/audit/verify.ts
- * — the anchor differential test pins the two.
+ * top additively. The standalone package's `verifyVaultWithAnchors` makes the
+ * same evaluation, and the anchor differential test pins their verdicts; the
+ * anchors here are checked against the hashes of the very events verified (see
+ * {@link verifyVaultWithAnchorsReading}).
  */
 export function verifyVaultWithAnchors(
 	vaultPath: string,
 	params: AnchorVerifyParams = {},
 ): AnchoredVaultVerificationResult {
-	const base = verifyVault(vaultPath);
+	return verifyVaultWithAnchorsReading(vaultPath, params).result;
+}
+
+/**
+ * {@link verifyVaultWithAnchors}, handing back the events it verified. The anchors are checked
+ * against THOSE events' hashes: gathering them with a second read of the log let a log swapped
+ * between the reads pass its integrity walk as one chain and its anchors as another, an anchored
+ * pass for a chain no anchor covers.
+ */
+export function verifyVaultWithAnchorsReading(
+	vaultPath: string,
+	params: AnchorVerifyParams = {},
+): AnchoredVaultReading {
+	const reading = verifyVaultReading(vaultPath);
+	const base = reading.result;
 	const externalRecords: AnchorRecord[] = [];
 	const externalErrors: string[] = [];
 	for (const raw of params.externalAnchorsRaw ?? []) {
@@ -611,7 +672,7 @@ export function verifyVaultWithAnchors(
 		params.rekorLogPubkeysPem ?? [],
 	);
 	const evaluation = evaluateAnchoredVault({
-		orderedHashes: gatherOrderedEventHashes(vaultPath),
+		orderedHashes: reading.orderedHashes,
 		externalAnchors: externalRecords,
 		externalErrors,
 		mirrorAnchors: mirror.records,
@@ -634,24 +695,27 @@ export function verifyVaultWithAnchors(
 	// machine's own severity ordering so MISMATCH still outranks it.
 	const rekorFailed = rekor !== null && rekor.receiptsFailed > 0;
 	return {
-		...base,
-		valid: base.valid && evaluation.anchorsValid && !rekorFailed,
-		errors: [...base.errors, ...evaluation.errors, ...(rekor?.errors ?? [])],
-		anchorState: rekorFailed
-			? worseAnchorState(evaluation.anchorState, "ANCHOR_INVALID")
-			: evaluation.anchorState,
-		anchoring: {
-			anchorSource: evaluation.anchorSource,
-			anchorCount: evaluation.anchorCount,
-			latestAnchor: evaluation.latestAnchor,
-			unanchoredTail: evaluation.unanchoredTail,
-			witness: evaluation.witness,
-			reasons: rekorFailed
-				? [...new Set([...evaluation.reasons, "rekor-receipt-invalid"])]
-				: evaluation.reasons,
-			warnings: evaluation.warnings,
-			...(rekor !== null ? { rekor } : {}),
+		result: {
+			...base,
+			valid: base.valid && evaluation.anchorsValid && !rekorFailed,
+			errors: [...base.errors, ...evaluation.errors, ...(rekor?.errors ?? [])],
+			anchorState: rekorFailed
+				? worseAnchorState(evaluation.anchorState, "ANCHOR_INVALID")
+				: evaluation.anchorState,
+			anchoring: {
+				anchorSource: evaluation.anchorSource,
+				anchorCount: evaluation.anchorCount,
+				latestAnchor: evaluation.latestAnchor,
+				unanchoredTail: evaluation.unanchoredTail,
+				witness: evaluation.witness,
+				reasons: rekorFailed
+					? [...new Set([...evaluation.reasons, "rekor-receipt-invalid"])]
+					: evaluation.reasons,
+				warnings: evaluation.warnings,
+				...(rekor !== null ? { rekor } : {}),
+			},
 		},
+		events: reading.events,
 	};
 }
 

@@ -4,9 +4,11 @@
 /**
  * CLI: usertrust verify — Verify audit chain integrity
  *
- * Calls verifyVault() on the local vault (anchored to the `.meta` head, spans
- * rotated segments) and displays the result. Sets a nonzero process exit code
- * on a FAILED verdict so CI gates fail on a tampered vault.
+ * Calls verifyVaultReading() on the local vault (anchored to the `.meta` head,
+ * spans rotated segments), judges the dead letters and the caller's receipts
+ * against the events that read verified, and displays the result. Sets a
+ * nonzero process exit code on a FAILED verdict so CI gates fail on a tampered
+ * vault.
  *
  * External-anchor flags (spec §7.5) mirror the standalone usertrust-verify
  * CLI: the caller fetches anchor artifacts and pins the public key
@@ -23,12 +25,12 @@ import {
 	describeMissingEvents,
 	readChainDeadLetters,
 } from "../audit/dead-letters.js";
-import { type PersistedAuditEvent, readLedgerEvents } from "../audit/read.js";
+import type { PersistedAuditEvent } from "../audit/read.js";
 import {
 	type AnchorVerifyParams,
 	exitCodeForAnchored,
-	verifyVault,
-	verifyVaultWithAnchors,
+	verifyVaultReading,
+	verifyVaultWithAnchorsReading,
 	type WitnessInput,
 } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
@@ -331,13 +333,16 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
  * COMPLETENESS, beside integrity. A chain with an event missing still verifies link by link, so the
  * hash check alone answered "valid" for a vault with half its events dead-lettered (two writers in
  * one process). Every event that failed to reach the chain is dead-lettered by the writer; this
- * reads them against the chain just verified. The chain is read only if a dead letter names an
- * event on it.
+ * reads them against `events`, the events the verification just walked, never against the log read
+ * again (a log changed after the walk would put an event on "the chain" that was never hash-checked).
  */
-function deadLettersOf(vault: string): ChainDeadLetters | ChainDeadLettersUnreadable {
+function deadLettersOf(
+	vault: string,
+	events: readonly PersistedAuditEvent[],
+): ChainDeadLetters | ChainDeadLettersUnreadable {
 	let byHash: Map<string, PersistedAuditEvent> | undefined;
 	return readChainDeadLetters(vault, (hash) => {
-		byHash ??= new Map(readLedgerEvents(vault).map((e) => [e.hash, e]));
+		byHash ??= new Map(events.map((e) => [e.hash, e]));
 		return byHash.get(hash);
 	});
 }
@@ -352,7 +357,8 @@ interface ReceiptCheck {
 
 /**
  * The INDEPENDENT count: the caller's own receipts (`--receipts`: JSON Lines, or one JSON array),
- * each checked against the chain. A receipt is audited only if its `auditHash` is its OWN event on
+ * each checked against `events`, the events the verification just walked (never the log read again,
+ * where an event that was never hash-checked could audit a receipt). A receipt is audited only if its `auditHash` is its OWN event on
  * the chain: one whose `data.transferId` is its `transferId` and whose kind is the event that
  * records its spend (`llm_call`, or an action's `actionKind`). Another event of the same transfer (a
  * detection, a settlement follow-up) is not the spend record, and an event naming no transfer is
@@ -366,8 +372,7 @@ interface ReceiptCheck {
  * chain just verified holds ITS OWN event: its transfer, and its kind. The dead-letter queue plays no
  * part here: it is not tamper-evident, and an event can reach the chain with no dead letter at all.
  */
-function checkReceipts(vault: string, raws: string[]): ReceiptCheck {
-	const events = readLedgerEvents(vault);
+function checkReceipts(events: readonly PersistedAuditEvent[], raws: string[]): ReceiptCheck {
 	const byHash = new Map(events.map((e) => [e.hash, e]));
 	// Each transfer's events on the chain, by kind: a degraded receipt's own event is found here.
 	const ownEventOnChain = new Set<string>();
@@ -675,10 +680,10 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 	const verifiedAt = new Date().toISOString();
 
 	if (flags.anchorMode) {
-		const result = verifyVaultWithAnchors(verifiedVault, flags.params);
-		const deadLetters = deadLettersOf(verifiedVault);
+		const { result, events } = verifyVaultWithAnchorsReading(verifiedVault, flags.params);
+		const deadLetters = deadLettersOf(verifiedVault, events);
 		const receipts =
-			flags.receiptsRaw.length > 0 ? checkReceipts(verifiedVault, flags.receiptsRaw) : undefined;
+			flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
 		const complete = isComplete(deadLetters) && receiptsComplete(receipts);
 		const anchoredExit = exitCodeForAnchored(result, {
 			requireAnchor: flags.requireAnchor,
@@ -749,10 +754,10 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		return;
 	}
 
-	const result = verifyVault(verifiedVault);
-	const deadLetters = deadLettersOf(verifiedVault);
+	const { result, events } = verifyVaultReading(verifiedVault);
+	const deadLetters = deadLettersOf(verifiedVault, events);
 	const receipts =
-		flags.receiptsRaw.length > 0 ? checkReceipts(verifiedVault, flags.receiptsRaw) : undefined;
+		flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
 	const complete = isComplete(deadLetters) && receiptsComplete(receipts);
 
 	if (json) {

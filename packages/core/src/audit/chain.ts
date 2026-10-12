@@ -1195,6 +1195,11 @@ function createAuditWriterAt(
 		// still throw (the sidecar above all), and the event is on the chain
 		// regardless — see DURABLE_EVENT_HASH.
 		let durableHash: string | undefined;
+		// The event as it is persisted (its kind, actor and data parsed back from the hashed bytes),
+		// once it is built. A dead letter records THIS, never `input` serialised a second time: an input
+		// that serialises differently twice (a getter, a stateful toJSON) would no longer match its own
+		// event on the chain, and verify would report a durable event missing for good.
+		let persistedInput: AppendEventInput | undefined;
 		try {
 			// A lock created by THIS call means this writer did not hold it a moment ago (first
 			// append, or its earlier lock was found stale), and another writer may have appended
@@ -1234,6 +1239,7 @@ function createAuditWriterAt(
 			const persisted = canonicalize({ ...snapshot, hash });
 			const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
 			fullEvent.hash = hash;
+			persistedInput = { kind: fullEvent.kind, actor: fullEvent.actor, data: fullEvent.data };
 
 			// O_NOFOLLOW: an append never writes THROUGH a symlinked log into a file outside the
 			// vault. Created owner-only: the log is the vault's audit trail.
@@ -1281,7 +1287,7 @@ function createAuditWriterAt(
 			});
 			writeDeadLetter(dlqDir, {
 				source: "audit.chain.appendEvent",
-				payload: input,
+				payload: persistedInput ?? input,
 				error: err instanceof Error ? err.message : String(err),
 				timestamp: new Date().toISOString(),
 				...(durableHash !== undefined ? { eventHash: durableHash } : {}),
