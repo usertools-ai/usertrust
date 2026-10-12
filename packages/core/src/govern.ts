@@ -112,7 +112,7 @@ import {
 	sanitizePolicyContext,
 } from "./policy/gate.js";
 import { detectInjection } from "./policy/injection.js";
-import { detectPII, redactPII } from "./policy/pii.js";
+import { builtInAborted, detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
@@ -2917,7 +2917,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							surfaceAuditRefusal: config.audit.failClosed,
 							// The caller's own abort signal for THIS call: an abort settles the usage
 							// delivered so far (an early stop), it does not void (callerAbortSignal).
-							...(callerSignal !== undefined ? { callerAborted: () => callerSignal.aborted } : {}),
+							// Read through the BUILT-IN getter: an own `aborted` property or getter on
+							// the signal (caller code) can neither hide a real abort nor throw past it.
+							...(callerSignal !== undefined
+								? { callerAborted: () => builtInAborted(callerSignal) === true }
+								: {}),
 						},
 					);
 
@@ -5206,15 +5210,25 @@ function refusingNamespaceProxy(
 	ns: unknown,
 	path: keyof typeof GOOGLE_REFUSED_METHODS,
 	refuse: RefuseFn,
-	cache: WeakMap<object, unknown>,
+	cache: NamespaceProxyCache,
 ): unknown {
 	if (ns == null || typeof ns !== "object") return ns;
-	const cached = cache.get(ns);
+	// Keyed by PATH and object: a duck-typed client may alias one object under two namespaces
+	// (`client.chats === client.caches`), and each alias must get ITS OWN refusal list. Keyed by
+	// the object alone, the first path reached would answer for every alias.
+	let byObject = cache.get(path);
+	if (byObject === undefined) {
+		byObject = new WeakMap();
+		cache.set(path, byObject);
+	}
+	const cached = byObject.get(ns);
 	if (cached !== undefined) return cached;
 	const refused: readonly string[] = GOOGLE_REFUSED_METHODS[path];
+	const passThrough = new WeakMap<object, unknown>();
 	const wrapped = new Proxy(ns as Record<string | symbol, unknown>, {
-		get(target, prop, receiver) {
-			const value = Reflect.get(target, prop, receiver);
+		get(target, prop) {
+			// Read on the RAW object, so a getter backed by a `#private` field does not throw.
+			const value = Reflect.get(target, prop, target);
 			if (typeof prop === "string" && refused.includes(prop) && typeof value === "function") {
 				return (...args: unknown[]) => refuse(`${path}.${prop}`, args);
 			}
@@ -5222,11 +5236,37 @@ function refusingNamespaceProxy(
 			if (path === "live" && prop === "music") {
 				return refusingNamespaceProxy(value, "live.music", refuse, cache);
 			}
-			return value;
+			return onRawReceiver(target, prop, value, passThrough);
 		},
 	});
-	cache.set(ns, wrapped);
+	byObject.set(ns, wrapped);
 	return wrapped;
+}
+
+/** Refusing-namespace proxies, per namespace PATH, then per raw object. */
+type NamespaceProxyCache = Map<string, WeakMap<object, unknown>>;
+
+/**
+ * A pass-through member of a proxied Google namespace. A METHOD is wrapped to run on the RAW
+ * object (`fn.apply(target, args)`), as the governed methods already do: returned bare, it is
+ * called with the proxy as `this`, and a method that reads a `#private` field (`this.#client`)
+ * throws a private-brand TypeError. The wrapper is cached per function, so repeated reads give
+ * the same function. `constructor` and non-functions are returned as they are.
+ */
+function onRawReceiver(
+	target: object,
+	prop: string | symbol,
+	value: unknown,
+	cache: WeakMap<object, unknown>,
+): unknown {
+	if (typeof value !== "function" || prop === "constructor") return value;
+	const fn = value as (...args: unknown[]) => unknown;
+	let wrapper = cache.get(fn);
+	if (wrapper === undefined) {
+		wrapper = (...args: unknown[]) => fn.apply(target, args);
+		cache.set(fn, wrapper);
+	}
+	return wrapper;
 }
 
 /**
@@ -5261,10 +5301,11 @@ function buildGoogleProxy<T>(
 			? (models.generateContentStream as (...args: unknown[]) => unknown)
 			: undefined;
 	const refusedOnModels: readonly string[] = GOOGLE_REFUSED_METHODS.models;
-	const namespaceCache = new WeakMap<object, unknown>();
+	const namespaceCache: NamespaceProxyCache = new Map();
+	const modelsPassThrough = new WeakMap<object, unknown>();
 
 	const modelsProxy = new Proxy(models, {
-		get(target, prop, receiver) {
+		get(target, prop) {
 			if (prop === "generateContent") {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
@@ -5299,7 +5340,8 @@ function buildGoogleProxy<T>(
 					return response;
 				};
 			}
-			const value = Reflect.get(target, prop, receiver);
+			// Read on the RAW object, so a getter backed by a `#private` field does not throw.
+			const value = Reflect.get(target, prop, target);
 			if (
 				typeof prop === "string" &&
 				refusedOnModels.includes(prop) &&
@@ -5307,7 +5349,7 @@ function buildGoogleProxy<T>(
 			) {
 				return (...args: unknown[]) => refuse(`models.${prop}`, args);
 			}
-			return value;
+			return onRawReceiver(target, prop, value, modelsPassThrough);
 		},
 	});
 

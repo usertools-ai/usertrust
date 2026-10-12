@@ -210,6 +210,20 @@ const ABORT_SIGNAL_ABORTED: ((this: unknown) => unknown) | undefined =
 				| undefined)
 		: undefined;
 
+/**
+ * The abort state of `signal` as the BUILT-IN `AbortSignal.prototype.aborted` getter reports it,
+ * never an own `aborted` property or getter decorating the object. `undefined` when the value is
+ * not a real AbortSignal (the getter's brand check throws) or the platform has none.
+ */
+export function builtInAborted(signal: object): boolean | undefined {
+	if (ABORT_SIGNAL_ABORTED === undefined) return undefined;
+	try {
+		return ABORT_SIGNAL_ABORTED.call(signal) === true;
+	} catch {
+		return undefined;
+	}
+}
+
 /** Does the built-in getter accept `value` as its receiver (a real instance, not a look-alike)? */
 function passesBrand(getter: ((this: unknown) => unknown) | undefined, value: object): boolean {
 	if (getter === undefined) return false;

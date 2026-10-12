@@ -2586,3 +2586,217 @@ describe("the caller's abort signal is captured at call time, before the provide
 		});
 	}
 });
+
+// ── Refusing namespaces: keyed by path AND object; pass-through methods on the raw receiver ──
+
+describe("Google refusing namespaces: aliases and raw receivers", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	async function rejection(p: Promise<unknown>): Promise<unknown> {
+		return p.then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+	}
+
+	for (const order of ["chats first", "caches first"] as const) {
+		it(`one object aliased as chats AND caches (${order}): each alias refuses its own list`, async () => {
+			const shared = {
+				create: vi.fn(async () => ({})),
+				update: vi.fn(async () => ({})),
+			};
+			const client = {
+				models: { generateContent: vi.fn(async () => ({})) },
+				chats: shared,
+				caches: shared,
+			};
+			const audit = makeMockAudit();
+			const governed = (await trust(client, {
+				dryRun: true,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_audit: audit,
+			})) as unknown as {
+				chats: { create(p?: unknown): Promise<unknown> };
+				caches: { create(p?: unknown): Promise<unknown>; update(p?: unknown): Promise<unknown> };
+				destroy(): Promise<void>;
+			};
+
+			// Touch the namespaces in the order under test.
+			const first = order === "chats first" ? governed.chats : governed.caches;
+			expect(first).toBeDefined();
+
+			const update = await rejection(governed.caches.update({ name: "c" }));
+			const create = await rejection(governed.caches.create({ model: "m" }));
+			const chat = await rejection(governed.chats.create({ model: "m" }));
+
+			expect((update as Error).message).toContain("caches.update is not governed");
+			expect((create as Error).message).toContain("caches.create is not governed");
+			expect((chat as Error).message).toContain("chats.create is not governed");
+			expect(shared.update).not.toHaveBeenCalled();
+			expect(shared.create).not.toHaveBeenCalled();
+			expect(audit.events.map((e) => e.kind)).toEqual([
+				"policy_denied",
+				"policy_denied",
+				"policy_denied",
+			]);
+			await governed.destroy();
+		});
+	}
+
+	it("a free method that reads a #private field works through the governed client (raw receiver), with a stable identity", async () => {
+		class CachesNamespace {
+			readonly #client = "the raw client";
+			async get(): Promise<string> {
+				return this.#client;
+			}
+			async create(): Promise<unknown> {
+				return {};
+			}
+		}
+		class ModelsNamespace {
+			readonly #tokens = 7;
+			generateContent = vi.fn(async () => ({}));
+			async countTokens(): Promise<{ totalTokens: number }> {
+				return { totalTokens: this.#tokens };
+			}
+		}
+		const client = { models: new ModelsNamespace(), caches: new CachesNamespace() };
+		const governed = (await trust(client, {
+			dryRun: true,
+			budget: 50_000,
+			vaultBase: tmpVault,
+		})) as unknown as {
+			models: { countTokens(): Promise<{ totalTokens: number }> };
+			caches: { get(): Promise<string> };
+			destroy(): Promise<void>;
+		};
+
+		await expect(governed.caches.get()).resolves.toBe("the raw client");
+		await expect(governed.models.countTokens()).resolves.toEqual({ totalTokens: 7 });
+		expect(governed.caches.get).toBe(governed.caches.get);
+		expect(governed.models.countTokens).toBe(governed.models.countTokens);
+		await governed.destroy();
+	});
+});
+
+// ── The caller-abort decision reads the BUILT-IN abort state ──
+
+/** Like `abortableStream`, but the fake SDK reads the signal's real state, as the platform does. */
+function brandAbortableStream(
+	chunks: unknown[],
+	signal: AbortSignal | undefined,
+	failAfterFirst: boolean,
+): AsyncGenerator<unknown> {
+	const aborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get;
+	return (async function* () {
+		for (let i = 0; i < chunks.length; i++) {
+			if (i > 0 && signal !== undefined && aborted?.call(signal) === true) {
+				throw new DOMException("This operation was aborted", "AbortError");
+			}
+			if (i > 0 && failAfterFirst) throw new Error("provider 500 mid-stream");
+			yield chunks[i];
+		}
+	})();
+}
+
+describe("the caller-abort decision reads the built-in abort state, not a decorated property", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	async function googleStream(signal: AbortSignal, failAfterFirst: boolean) {
+		const engine = makeMockEngine();
+		const client = {
+			models: {
+				generateContent: vi.fn(async () => ({})),
+				generateContentStream: vi.fn(
+					async (p: Record<string, unknown> & { config?: { abortSignal?: AbortSignal } }) =>
+						brandAbortableStream(STREAM_WITH_USAGE, p.config?.abortSignal, failAfterFirst),
+				),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+		const stream = (await governed.models.generateContentStream({
+			model: "gemini-2.5-flash",
+			contents: "Hi",
+			config: { abortSignal: signal },
+		})) as GovernedStreamHandle;
+		return { governed, engine, stream };
+	}
+
+	it("a real signal decorated with an own `aborted: false`, then really aborted → settled as a caller abort", async () => {
+		const controller = new AbortController();
+		Object.defineProperty(controller.signal, "aborted", { value: false });
+		const { governed, engine, stream } = await googleStream(controller.signal, false);
+
+		const { thrown } = await abortAfterFirstChunk(stream, controller);
+		const receipt = await stream.receipt;
+
+		expect((thrown as Error).name).toBe("AbortError");
+		expect(receipt.settled).toBe(true);
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		await destroy(governed);
+	});
+
+	it("an own THROWING `aborted` getter, signal not aborted, provider error mid-stream → voids as a provider error (no bypass)", async () => {
+		const controller = new AbortController();
+		Object.defineProperty(controller.signal, "aborted", {
+			get() {
+				throw new Error("decorated getter");
+			},
+		});
+		const { governed, engine, stream } = await googleStream(controller.signal, true);
+		const receiptOutcome = stream.receipt.then(
+			() => "resolved",
+			(e: unknown) => e,
+		);
+
+		await expect(
+			(async () => {
+				for await (const _ of stream) {
+					// consume
+				}
+			})(),
+		).rejects.toThrow(/provider 500 mid-stream/);
+		expect(await receiptOutcome).toBeInstanceOf(Error);
+		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.postPendingSpend).not.toHaveBeenCalled();
+		await destroy(governed);
+	});
+
+	it("an own THROWING `aborted` getter on a signal that IS aborted (built-in state) → settled as a caller abort", async () => {
+		const controller = new AbortController();
+		Object.defineProperty(controller.signal, "aborted", {
+			get() {
+				throw new Error("decorated getter");
+			},
+		});
+		const { governed, engine, stream } = await googleStream(controller.signal, false);
+
+		const { thrown } = await abortAfterFirstChunk(stream, controller);
+		const receipt = await stream.receipt;
+
+		expect((thrown as Error).name).toBe("AbortError");
+		expect(receipt.settled).toBe(true);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		await destroy(governed);
+	});
+});
