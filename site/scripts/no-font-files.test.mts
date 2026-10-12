@@ -33,6 +33,11 @@
  * - The W3C WOFF 1.0 and WOFF2 specifications, section 3 (the header): signature,
  *   flavor, length (of the whole WOFF file) and numTables, big-endian. WOFF data is
  *   compressed, so it shows no sfnt directory: its header is searched for instead.
+ * - Adobe Technical Note 5176 (the Compact Font Format): a bare CFF file is a header
+ *   (major 1, minor, hdrSize >= 4, offSize 1 to 4) followed by a Name INDEX and a Top
+ *   DICT INDEX, each a count, an offSize and offsets that start at 1 and ascend; CFF2
+ *   is a header (major 2, headerSize >= 5, topDictLength) and its Top DICT, then a
+ *   Global Subr INDEX. Checked at offset 0, header AND both structures (`isCff`).
  * - The UFO 3 specification, GLIF: a glyph file is a `<glyph>` with an `<outline>`
  *   of `<contour>`s.
  *
@@ -58,7 +63,9 @@
  *   a PostScript or FontForge font program,
  *   every tracked file, binary or text (`fontsInFile`). The largest tracked file is
  *   14 MB, so each is read whole. Font data in a STORED (uncompressed) zip entry is
- *   found this way too. Not searched embedded: PFR (TrueDoc, an obsolete web format no brand
+ *   found this way too. Not searched embedded: a bare CFF (its header is four weak
+ *   bytes, and CFF data embedded mid-file outside an sfnt is rare; an OpenType CFF
+ *   font's CFF is found by its sfnt directory), PFR (TrueDoc, an obsolete web format no brand
  *   face uses, whose header beyond its four-byte tag no cited source specifies), and
  *   the bitmap formats (out of scope).
  *
@@ -88,7 +95,7 @@ const SITE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = resolve(SITE_ROOT, "..");
 const KIT_FONTS = "https://usertrust.ai/kit/fonts/";
 
-const FONT_FILE = /\.(?:woff2?|ttf|otf|eot|ttc|otc|dfont)$/i;
+const FONT_FILE = /\.(?:woff2?|ttf|otf|eot|ttc|otc|dfont|cff|t42|pfa|pfb|glif)$|\.ufo\//i;
 
 /**
  * A font file's leading bytes, by format (see the header for the sources). The ambiguous
@@ -124,6 +131,68 @@ const FONT_MAGICS: ReadonlyArray<{
 
 function ascii(text: string): number[] {
 	return [...text].map((c) => c.charCodeAt(0));
+}
+
+/**
+ * Where a CFF INDEX (TN 5176, section 5) starting at `at` ends, or null when it is not one: a
+ * count (Card16, or Card32 for CFF2), then if the count is above 0 an offSize of 1 to 4 and
+ * count + 1 offsets that start at 1, never descend, and end inside `bytes`.
+ */
+function cffIndex(
+	bytes: Uint8Array,
+	at: number,
+	countBytes: 2 | 4 = 2,
+): { end: number; count: number; data: number; offsets: number[] } | null {
+	const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	if (at + countBytes > buffer.length) return null;
+	const count = countBytes === 2 ? buffer.readUInt16BE(at) : buffer.readUInt32BE(at);
+	if (count === 0) return { end: at + countBytes, count, data: at + countBytes, offsets: [] };
+	const offSize = buffer[at + countBytes] ?? 0;
+	if (offSize < 1 || offSize > 4) return null;
+	const first = at + countBytes + 1;
+	const data = first + (count + 1) * offSize;
+	if (data > buffer.length) return null;
+	const offsets: number[] = [];
+	for (let i = 0; i <= count; i += 1) offsets.push(buffer.readUIntBE(first + i * offSize, offSize));
+	if (offsets[0] !== 1 || offsets.some((o, i) => i > 0 && o < (offsets[i - 1] ?? 0))) return null;
+	const end = data - 1 + (offsets[count] ?? 0);
+	return end <= buffer.length ? { end, count, data, offsets } : null;
+}
+
+/**
+ * Whether `bytes` starts with a bare CFF or CFF2 font (TN 5176): the header, and after it the
+ * structures that make it one. For CFF, a Name INDEX of printable PostScript names (a deleted
+ * entry starts with NUL) and a Top DICT INDEX with as many entries; for CFF2, its Top DICT
+ * within the file, then a Global Subr INDEX. The header alone is never enough.
+ */
+export function isCff(bytes: Uint8Array): boolean {
+	if (bytes.length < 8) return false;
+	const [major, , hdrSize = 0] = bytes;
+	if (major === 1) {
+		const offSize = bytes[3] ?? 0;
+		if (hdrSize < 4 || offSize < 1 || offSize > 4) return false;
+		const names = cffIndex(bytes, hdrSize);
+		if (names === null || names.count < 1) return false;
+		for (let i = 0; i < names.count; i += 1) {
+			const name = bytes.subarray(
+				names.data - 1 + (names.offsets[i] ?? 0),
+				names.data - 1 + (names.offsets[i + 1] ?? 0),
+			);
+			if (name.length === 0 || (name[0] !== 0 && !name.every((c) => c >= 33 && c <= 126))) {
+				return false;
+			}
+		}
+		const top = cffIndex(bytes, names.end);
+		return top !== null && top.count === names.count;
+	}
+	if (major === 2) {
+		if (hdrSize < 5) return false;
+		const topLength = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).readUInt16BE(3);
+		const topEnd = hdrSize + topLength;
+		if (topLength === 0 || topEnd > bytes.length) return false;
+		return cffIndex(bytes, topEnd, 4) !== null;
+	}
+	return false;
 }
 
 /** The EOT versions the submission defines (section 3.1 to 3.3). */
@@ -296,6 +365,7 @@ export function fontMagic(bytes: Uint8Array, size: number = bytes.length): strin
 		return format;
 	}
 	if (!text && isEot(bytes, size)) return "eot";
+	if (!text && isCff(bytes)) return "cff";
 	return null;
 }
 
@@ -483,6 +553,12 @@ test("the matcher catches every font extension, at any depth and in any case", (
 			"h.ttc",
 			"i/j.OTC",
 			"k/brand.dfont",
+			"l/brand.cff",
+			"m/x.t42",
+			"n/x.pfa",
+			"o/x.PFB",
+			"p/Brand.ufo/glyphs/a.glif",
+			"q/Brand.ufo/metainfo.plist",
 			"site/public/fonts/OFL.txt",
 			"g.woff2.md",
 			"woff2",
@@ -496,6 +572,12 @@ test("the matcher catches every font extension, at any depth and in any case", (
 			"h.ttc",
 			"i/j.OTC",
 			"k/brand.dfont",
+			"l/brand.cff",
+			"m/x.t42",
+			"n/x.pfa",
+			"o/x.PFB",
+			"p/Brand.ufo/glyphs/a.glif",
+			"q/Brand.ufo/metainfo.plist",
 		],
 	);
 });
@@ -1072,4 +1154,65 @@ test("an embedded container must be one: the signature alone, a bad field, a len
 	// Plain text and noise hold none.
 	assert.deepEqual(embeddedFonts(Buffer.from("wOF2 wOFF LP HELP ".repeat(500))), []);
 	assert.deepEqual(embeddedFonts(fakeBinary("GIF89a", 0, 60_000)), []);
+});
+
+/** A bare CFF font (TN 5176): header, Name INDEX, Top DICT INDEX, then some charstring bytes. */
+function fakeCff({
+	name = "Brand-Bold",
+	header = [1, 0, 4, 2],
+	nameOffsets,
+	topCount = 1,
+}: {
+	name?: string;
+	header?: number[];
+	nameOffsets?: number[];
+	topCount?: number;
+} = {}): Buffer {
+	const nameIndex = Buffer.concat([
+		Buffer.from([0, 1, 1]),
+		Buffer.from(nameOffsets ?? [1, 1 + name.length]),
+		Buffer.from(name, "latin1"),
+	]);
+	const dict = Buffer.from([0xf8, 0x1b, 0x00, 0xf8, 0x1c, 0x01]);
+	const topIndex = Buffer.concat([
+		Buffer.from([0, topCount, 1]),
+		Buffer.from(Array.from({ length: topCount + 1 }, (_, i) => 1 + i * dict.length)),
+		...Array.from({ length: topCount }, () => dict),
+	]);
+	return Buffer.concat([Buffer.from(header), nameIndex, topIndex, fakeBinary([0, 0], 0, 400)]);
+}
+
+test("a bare CFF font is found by its header AND its structures, under any name", () => {
+	assert.equal(fontMagic(fakeCff()), "cff");
+	assert.equal(isCff(fakeCff({ header: [1, 0, 4, 1] })), true, "offSize 1");
+	// CFF2: header with topDictLength, its Top DICT, then a Global Subr INDEX (Card32 count 0).
+	const cff2 = Buffer.concat([
+		Buffer.from([2, 0, 5, 0, 6]),
+		Buffer.from([0xf8, 0x1b, 0x00, 0xf8, 0x1c, 0x01]),
+		Buffer.from([0, 0, 0, 0]),
+		fakeBinary([0, 0], 0, 200),
+	]);
+	assert.equal(fontMagic(cff2), "cff");
+});
+
+test("a CFF header alone, or a broken INDEX, is not a font", () => {
+	// The header alone, followed by noise.
+	assert.equal(
+		fontMagic(Buffer.concat([Buffer.from([1, 0, 4, 2]), fakeBinary("x", 0, 400)])),
+		null,
+	);
+	// A Name INDEX whose first offset is not 1, or whose offsets descend.
+	assert.equal(fontMagic(fakeCff({ nameOffsets: [2, 12] })), null);
+	assert.equal(fontMagic(fakeCff({ nameOffsets: [1, 0] })), null);
+	// A name that is not a PostScript name; an offSize out of range; a hdrSize too small.
+	assert.equal(fontMagic(fakeCff({ name: "Brand Bold" })), null);
+	assert.equal(fontMagic(fakeCff({ header: [1, 0, 4, 5] })), null);
+	assert.equal(fontMagic(fakeCff({ header: [1, 0, 3, 2] })), null);
+	// A Top DICT INDEX with a different count from the Name INDEX.
+	assert.equal(fontMagic(fakeCff({ topCount: 2 })), null);
+	// CFF2 with a Top DICT that runs past the end.
+	assert.equal(
+		fontMagic(Buffer.concat([Buffer.from([2, 0, 5, 0xff, 0xff]), fakeBinary([0], 0, 100)])),
+		null,
+	);
 });
