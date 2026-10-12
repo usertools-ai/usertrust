@@ -16,8 +16,10 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
+	realpathSync,
 	rmSync,
 	statSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -250,6 +252,81 @@ describe.each([
 		expect(statSync(vaultPath).mode & 0o777).toBe(0o700);
 		// The directory the caller owns and named is not usertrust's to change.
 		expect(statSync(root).mode & 0o777).toBe(0o755);
+	});
+});
+
+/** Opens the vault at `root` and makes one governed call, so its audit log and ledger exist. */
+const openers: [string, (root: string) => Promise<void>][] = [
+	[
+		"createGovernor",
+		async (root) => {
+			const gov = await createGovernor({ vaultBase: root, dryRun: true, budget: 100_000 });
+			try {
+				const auth = await gov.authorize({
+					model: "claude-sonnet-4-6",
+					estimatedInputTokens: 100,
+					maxOutputTokens: 100,
+				});
+				await gov.settle(auth, { inputTokens: 80, outputTokens: 40 });
+			} finally {
+				await gov.destroy();
+			}
+		},
+	],
+	[
+		"trust",
+		async (root) => {
+			const client = await trust(anthropicMock(), { vaultBase: root, dryRun: true });
+			try {
+				await client.messages.create({
+					model: "claude-sonnet-4-6",
+					max_tokens: 100,
+					messages: [{ role: "user", content: "hi" }],
+				});
+			} finally {
+				await client.destroy();
+			}
+		},
+	],
+];
+
+describe.each(openers)("a vault that is a symbolic link, opened by %s", (_name, open) => {
+	/** `<root>/.usertrust` -> a directory elsewhere, made with `mode`. */
+	function linkedVault(mode: number): { root: string; link: string; target: string } {
+		process.umask(0o022);
+		const root = tmp("ut-perm-link-");
+		const target = join(tmp("ut-perm-target-"), "vault");
+		mkdirSync(target, { mode });
+		chmodSync(target, mode);
+		const link = join(root, VAULT_DIR);
+		symlinkSync(target, link);
+		return { root, link, target: realpathSync(target) };
+	}
+
+	it("refuses a target other users can read, names the fix, and never changes the target", async () => {
+		const { root, link, target } = linkedVault(0o755);
+		const refused = await open(root).then(
+			() => undefined,
+			(err: unknown) => err as Error,
+		);
+		expect.soft(refused).toBeInstanceOf(Error);
+		expect.soft(refused?.message).toContain(link);
+		expect.soft(refused?.message).toContain(target);
+		expect.soft(refused?.message).toContain("mode 755");
+		expect.soft(refused?.message).toContain(`chmod 700 ${target}`);
+		// Never changed through the link, and nothing written into it.
+		expect(statSync(target).mode & 0o777).toBe(0o755);
+		expect(lstatSync(link).isSymbolicLink()).toBe(true);
+		expect(readdirSync(target)).toEqual([]);
+	});
+
+	it("uses an owner-only target, and writes it owner-only", async () => {
+		const { root, link, target } = linkedVault(0o700);
+		await open(root);
+		expect(lstatSync(link).isSymbolicLink()).toBe(true);
+		expect(existsSync(join(target, "audit", "events.jsonl"))).toBe(true);
+		expect(existsSync(join(target, "spend-ledger.json"))).toBe(true);
+		expect(walkModes(target).loose).toEqual([]);
 	});
 });
 

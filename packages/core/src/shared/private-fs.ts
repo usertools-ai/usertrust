@@ -12,7 +12,18 @@
  * intermediates included, and leaves an existing directory as it is.
  */
 
-import { chmodSync, mkdirSync, statSync } from "node:fs";
+import {
+	closeSync,
+	fchmodSync,
+	constants as fsConstants,
+	fstatSync,
+	lstatSync,
+	mkdirSync,
+	openSync,
+	realpathSync,
+	type Stats,
+	statSync,
+} from "node:fs";
 
 /** Mode of every directory usertrust creates in a vault. */
 export const PRIVATE_DIR_MODE = 0o700;
@@ -25,6 +36,8 @@ export function mkdirPrivate(dir: string): void {
 	mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
 }
 
+const octal = (mode: number): string => (mode & 0o777).toString(8);
+
 /**
  * Close a vault directory (`<vaultBase>/.usertrust`) to every user but its owner.
  *
@@ -33,22 +46,68 @@ export function mkdirPrivate(dir: string): void {
  * is usertrust's own, and closing it closes every file under it, whatever their own modes. A
  * vault that cannot be closed (another user owns it) is refused with the reason, never used
  * world-readable. The vault BASE, the directory the caller named, is never touched.
+ *
+ * A vault that is a SYMBOLIC LINK is never changed through the link: its target may be a
+ * directory usertrust does not own. A target any other user can read is refused, naming the
+ * link, the target, its mode and the `chmod` that fixes it; an owner-only target is used.
+ *
+ * The tightening itself never follows a link either. The directory is opened with
+ * `O_NOFOLLOW | O_DIRECTORY` and changed with `fchmod` on that descriptor, after checking it is
+ * the directory `lstat` saw (same device and inode): a link swapped in after the check fails the
+ * open, and a different directory renamed into place fails the inode check. Both are refused.
  */
 export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }): void {
 	if (opts?.create === true) mkdirPrivate(vaultDir);
-	let mode: number;
+	let st: Stats;
 	try {
-		mode = statSync(vaultDir).mode;
+		st = lstatSync(vaultDir);
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
 		throw err;
 	}
-	if ((mode & 0o077) === 0) return;
-	try {
-		chmodSync(vaultDir, PRIVATE_DIR_MODE);
-	} catch (err) {
+
+	if (st.isSymbolicLink()) {
+		let target: string;
+		let targetMode: number;
+		try {
+			target = realpathSync(vaultDir);
+			targetMode = statSync(target).mode;
+		} catch (err) {
+			// A dangling link: there is nothing to read, and no writer can create through it.
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+			throw err;
+		}
+		if ((targetMode & 0o077) === 0) return;
 		throw new Error(
-			`usertrust: the vault ${vaultDir} is readable by other users (mode ${(mode & 0o777).toString(8)}) and could not be made owner-only: ${(err as Error).message}`,
+			`usertrust: the vault ${vaultDir} is a symbolic link to ${target}, which other users can read (mode ${octal(targetMode)}). usertrust does not change a directory through a link; make it owner-only with: chmod 700 ${target}`,
 		);
+	}
+
+	if (!st.isDirectory() || (st.mode & 0o077) === 0) return;
+	const refuse = (reason: string): Error =>
+		new Error(
+			`usertrust: the vault ${vaultDir} is readable by other users (mode ${octal(st.mode)}) and could not be made owner-only: ${reason}`,
+		);
+	let fd: number;
+	try {
+		fd = openSync(
+			vaultDir,
+			fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0),
+		);
+	} catch (err) {
+		throw refuse((err as Error).message);
+	}
+	try {
+		const opened = fstatSync(fd);
+		if (opened.dev !== st.dev || opened.ino !== st.ino) {
+			throw refuse("it was replaced while being checked");
+		}
+		try {
+			fchmodSync(fd, PRIVATE_DIR_MODE);
+		} catch (err) {
+			throw refuse((err as Error).message);
+		}
+	} finally {
+		closeSync(fd);
 	}
 }
