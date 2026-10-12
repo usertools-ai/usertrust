@@ -117,6 +117,15 @@ export interface VaultVerificationResult {
 	lastEvent: string | null;
 }
 
+/** A vault's verdict, and the events it was reached on: what every later check must read. */
+export interface VaultReading {
+	result: VaultVerificationResult;
+	/** The events walked, in chain order, as parsed from their lines (JSON objects only). */
+	events: readonly Record<string, unknown>[];
+	/** Every walked line's stored hash, in chain order (`""` where it is not a string). */
+	orderedHashes: readonly string[];
+}
+
 interface Anchor {
 	lastHash: string;
 	sequence: number;
@@ -152,15 +161,24 @@ function scrubForError(raw: string): string {
 /**
  * Verify an entire `.usertrust` vault directory, anchored to the `.meta` head.
  *
- * BYTE-IDENTICAL to the core implementation (packages/core/src/audit/verify.ts):
- * gathers `events.jsonl` plus every rotated `*.jsonl` segment, orders all events
- * by the persisted global `sequence`, walks a single continuous chain (GENESIS
- * required only at the global head), enforces sequence continuity (so whole-
- * segment deletion surfaces as a sequence gap, not an indistinguishable
- * "previousHash mismatch"), and checks the `.meta` tail anchor. The differential
- * test pins the two implementations together.
+ * BYTE-IDENTICAL to the core implementation (packages/core/src/audit/verify.ts),
+ * in `verifyVaultReading`: gathers `events.jsonl` plus every rotated `*.jsonl`
+ * segment, orders all events by the persisted global `sequence`, walks a single
+ * continuous chain (GENESIS required only at the global head), enforces sequence
+ * continuity (so whole-segment deletion surfaces as a sequence gap, not an
+ * indistinguishable "previousHash mismatch"), and checks the `.meta` tail
+ * anchor. The differential test pins the two implementations together.
  */
 export function verifyVault(vaultPath: string): VaultVerificationResult {
+	return verifyVaultReading(vaultPath).result;
+}
+
+/**
+ * {@link verifyVault}, handing back the events it verified with its verdict. A check that judges
+ * the vault after its verification takes them from here: reading the log a second time judged
+ * whatever the log held THEN, never hash-checked. IDENTICAL in packages/core/src/audit/verify.ts.
+ */
+export function verifyVaultReading(vaultPath: string): VaultReading {
 	const auditDir = join(vaultPath, "audit");
 	const errors: string[] = [];
 
@@ -223,13 +241,17 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 			);
 		}
 		return {
-			valid: errors.length === 0,
-			errors,
-			chainLength: 0,
-			validHashes: 0,
-			merkleRoot: null,
-			firstEvent: null,
-			lastEvent: null,
+			result: {
+				valid: errors.length === 0,
+				errors,
+				chainLength: 0,
+				validHashes: 0,
+				merkleRoot: null,
+				firstEvent: null,
+				lastEvent: null,
+			},
+			events: [],
+			orderedHashes: [],
 		};
 	}
 
@@ -344,13 +366,24 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 
 	// 10.
 	return {
-		valid: errors.length === 0,
-		errors,
-		chainLength: events.length,
-		validHashes,
-		merkleRoot,
-		firstEvent,
-		lastEvent,
+		result: {
+			valid: errors.length === 0,
+			errors,
+			chainLength: events.length,
+			validHashes,
+			merkleRoot,
+			firstEvent,
+			lastEvent,
+		},
+		// A line that parsed to a number, a string or an array was walked (and failed its hash): it
+		// is in the ordered hashes the anchors count, and no event a later check can match.
+		events: ordered
+			.map((e) => e.parsed as unknown)
+			.filter(
+				(p): p is Record<string, unknown> =>
+					p !== null && typeof p === "object" && !Array.isArray(p),
+			),
+		orderedHashes: ordered.map((e) => e.hash),
 	};
 }
 
@@ -413,6 +446,13 @@ export interface AnchoringReport {
 export interface AnchoredVaultVerificationResult extends VaultVerificationResult {
 	anchorState: AnchorState;
 	anchoring: AnchoringReport;
+}
+
+/** {@link VaultReading} for the anchored verdict. */
+export interface AnchoredVaultReading {
+	result: AnchoredVaultVerificationResult;
+	/** The events walked, in chain order: the ones the anchors were checked against. */
+	events: readonly Record<string, unknown>[];
 }
 
 /**
@@ -533,13 +573,27 @@ function verifySuppliedRekorReceipts(
  * verifyVault + the spec §7.2 anchor state machine. Existing chain semantics
  * are UNCHANGED (verifyVault runs as-is); anchor evaluation is layered on
  * top additively. IDENTICAL function body in packages/core/src/audit/verify.ts
- * — the anchor differential test pins the two.
+ * (`verifyVaultWithAnchorsReading`) — the anchor differential test pins the two.
  */
 export function verifyVaultWithAnchors(
 	vaultPath: string,
 	params: AnchorVerifyParams = {},
 ): AnchoredVaultVerificationResult {
-	const base = verifyVault(vaultPath);
+	return verifyVaultWithAnchorsReading(vaultPath, params).result;
+}
+
+/**
+ * {@link verifyVaultWithAnchors}, handing back the events it verified. The anchors are checked
+ * against THOSE events' hashes: gathering them with a second read of the log let a log swapped
+ * between the reads pass its integrity walk as one chain and its anchors as another, an anchored
+ * pass for a chain no anchor covers. IDENTICAL in packages/core/src/audit/verify.ts.
+ */
+export function verifyVaultWithAnchorsReading(
+	vaultPath: string,
+	params: AnchorVerifyParams = {},
+): AnchoredVaultReading {
+	const reading = verifyVaultReading(vaultPath);
+	const base = reading.result;
 	const externalRecords: AnchorRecord[] = [];
 	const externalErrors: string[] = [];
 	for (const raw of params.externalAnchorsRaw ?? []) {
@@ -555,7 +609,7 @@ export function verifyVaultWithAnchors(
 		params.rekorLogPubkeysPem ?? [],
 	);
 	const evaluation = evaluateAnchoredVault({
-		orderedHashes: gatherOrderedEventHashes(vaultPath),
+		orderedHashes: reading.orderedHashes,
 		externalAnchors: externalRecords,
 		externalErrors,
 		mirrorAnchors: mirror.records,
@@ -578,24 +632,27 @@ export function verifyVaultWithAnchors(
 	// machine's own severity ordering so MISMATCH still outranks it.
 	const rekorFailed = rekor !== null && rekor.receiptsFailed > 0;
 	return {
-		...base,
-		valid: base.valid && evaluation.anchorsValid && !rekorFailed,
-		errors: [...base.errors, ...evaluation.errors, ...(rekor?.errors ?? [])],
-		anchorState: rekorFailed
-			? worseAnchorState(evaluation.anchorState, "ANCHOR_INVALID")
-			: evaluation.anchorState,
-		anchoring: {
-			anchorSource: evaluation.anchorSource,
-			anchorCount: evaluation.anchorCount,
-			latestAnchor: evaluation.latestAnchor,
-			unanchoredTail: evaluation.unanchoredTail,
-			witness: evaluation.witness,
-			reasons: rekorFailed
-				? [...new Set([...evaluation.reasons, "rekor-receipt-invalid"])]
-				: evaluation.reasons,
-			warnings: evaluation.warnings,
-			...(rekor !== null ? { rekor } : {}),
+		result: {
+			...base,
+			valid: base.valid && evaluation.anchorsValid && !rekorFailed,
+			errors: [...base.errors, ...evaluation.errors, ...(rekor?.errors ?? [])],
+			anchorState: rekorFailed
+				? worseAnchorState(evaluation.anchorState, "ANCHOR_INVALID")
+				: evaluation.anchorState,
+			anchoring: {
+				anchorSource: evaluation.anchorSource,
+				anchorCount: evaluation.anchorCount,
+				latestAnchor: evaluation.latestAnchor,
+				unanchoredTail: evaluation.unanchoredTail,
+				witness: evaluation.witness,
+				reasons: rekorFailed
+					? [...new Set([...evaluation.reasons, "rekor-receipt-invalid"])]
+					: evaluation.reasons,
+				warnings: evaluation.warnings,
+				...(rekor !== null ? { rekor } : {}),
+			},
 		},
+		events: reading.events,
 	};
 }
 

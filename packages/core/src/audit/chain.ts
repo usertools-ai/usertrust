@@ -25,12 +25,13 @@ import {
 	readlinkSync,
 	realpathSync,
 	renameSync,
+	statSync,
 	unlinkSync,
 	writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
-import { mkdirPrivate, PRIVATE_FILE_MODE } from "../shared/private-fs.js";
+import { mkdirPrivate, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE } from "../shared/private-fs.js";
 import type { AuditEvent } from "../shared/types.js";
 import { canonicalize } from "./canonical.js";
 
@@ -1074,19 +1075,25 @@ function getLastEvent(logPath: string, cache: Map<string, CachedTail>): CachedTa
 // ── DLQ Writer ──
 
 function writeDeadLetter(
-	vaultPath: string,
+	dlqDir: string,
 	entry: {
 		source: string;
 		transferId?: string;
 		payload: unknown;
 		error: string;
 		timestamp: string;
+		/**
+		 * The event's hash when its bytes DID reach the chain before the failure (the `.meta` sidecar
+		 * failed after the fsync): this dead letter then duplicates an event on the chain, and a
+		 * reader can tell it from a lost one (`readChainDeadLetters`). Absent: the event is not known
+		 * to be on the chain.
+		 */
+		eventHash?: string;
 		checksum?: string;
 		checksumAlg?: string;
 	},
 ): void {
 	try {
-		const dlqDir = join(vaultPath, VAULT_DIR, "dlq");
 		if (!existsSync(dlqDir)) {
 			mkdirSync(dlqDir, { recursive: true, mode: 0o700 });
 		}
@@ -1097,23 +1104,39 @@ function writeDeadLetter(
 		// imply integrity it cannot provide (the old HMAC key was derived from
 		// the vault path — forgeable from public inputs). Tamper-evidence for
 		// audit data lives in the hash chain + external anchoring.
-		let checksumSource: string;
+		let canonicalEntry: string | undefined;
 		try {
-			checksumSource = canonicalize(entry);
+			canonicalEntry = canonicalize(entry);
 		} catch {
 			// canonicalize throws on NaN/Infinity — but a payload carrying NaN
 			// is exactly the kind of failure a dead letter must still record.
 			// JSON.stringify coerces them to null (the pre-checksum behavior);
 			// the entry must be persisted, never dropped.
-			checksumSource = JSON.stringify(entry);
+			canonicalEntry = undefined;
 		}
-		const checksum = createHash("sha256").update(checksumSource).digest("hex");
-		const sealed = { ...entry, checksum, checksumAlg: "sha256" };
+		const checksum = createHash("sha256")
+			.update(canonicalEntry ?? JSON.stringify(entry))
+			.digest("hex");
+		// The line is the bytes the checksum covers, so a reader recomputes it from what it reads:
+		// the canonical record (parsed back once, so a getter or a `toJSON` never runs twice), or,
+		// where canonicalize refused it, the JSON.stringify form it was summed over. (Persisting
+		// JSON.stringify of a canonically summed record broke the sum for a value whose two forms
+		// differ, such as a Buffer.)
+		const line =
+			canonicalEntry !== undefined
+				? canonicalize({
+						...(JSON.parse(canonicalEntry) as Record<string, unknown>),
+						checksum,
+						checksumAlg: "sha256",
+					})
+				: JSON.stringify({ ...entry, checksum, checksumAlg: "sha256" });
 
 		const dlqPath = join(dlqDir, "dead-letters.jsonl");
 		const fd = openSync(dlqPath, "a", 0o600);
 		try {
-			writeSync(fd, `${JSON.stringify(sealed)}\n`);
+			// Every byte, as for the log (#194): this line is now the only record of an event the
+			// chain lacks, and `usertrust verify` counts the vault's missing events from it.
+			writeFully(fd, `${line}\n`);
 			fsyncSync(fd);
 		} finally {
 			closeSync(fd);
@@ -1141,6 +1164,20 @@ export function createAuditWriter(
 	if (!existsSync(auditDir)) {
 		mkdirPrivate(auditDir);
 	}
+	return createAuditWriterAt({ auditDir, dlqDir: join(vaultPath, VAULT_DIR, "dlq") }, options);
+}
+
+/** Where a writer writes: its audit directory (the log, `.meta`, the lock) and its dead-letter directory. */
+interface AuditWriterPaths {
+	auditDir: string;
+	dlqDir: string;
+}
+
+/** The writer itself, bound to `paths` exactly as given (the shared writer gives canonical ones). */
+function createAuditWriterAt(
+	{ auditDir, dlqDir }: AuditWriterPaths,
+	options: CreateAuditWriterOptions = {},
+): AuditWriter {
 	const logPath = join(auditDir, "events.jsonl");
 
 	const writerId = randomUUID();
@@ -1158,6 +1195,11 @@ export function createAuditWriter(
 		// still throw (the sidecar above all), and the event is on the chain
 		// regardless — see DURABLE_EVENT_HASH.
 		let durableHash: string | undefined;
+		// The event as it is persisted (its kind, actor and data parsed back from the hashed bytes),
+		// once it is built. A dead letter records THIS, never `input` serialised a second time: an input
+		// that serialises differently twice (a getter, a stateful toJSON) would no longer match its own
+		// event on the chain, and verify would report a durable event missing for good.
+		let persistedInput: AppendEventInput | undefined;
 		try {
 			// A lock created by THIS call means this writer did not hold it a moment ago (first
 			// append, or its earlier lock was found stale), and another writer may have appended
@@ -1197,6 +1239,7 @@ export function createAuditWriter(
 			const persisted = canonicalize({ ...snapshot, hash });
 			const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
 			fullEvent.hash = hash;
+			persistedInput = { kind: fullEvent.kind, actor: fullEvent.actor, data: fullEvent.data };
 
 			// O_NOFOLLOW: an append never writes THROUGH a symlinked log into a file outside the
 			// vault. Created owner-only: the log is the vault's audit trail.
@@ -1242,11 +1285,12 @@ export function createAuditWriter(
 			console.warn("[AUDIT] Audit trail degraded — write failed", {
 				error: err instanceof Error ? err.message : String(err),
 			});
-			writeDeadLetter(vaultPath, {
+			writeDeadLetter(dlqDir, {
 				source: "audit.chain.appendEvent",
-				payload: input,
+				payload: persistedInput ?? input,
 				error: err instanceof Error ? err.message : String(err),
 				timestamp: new Date().toISOString(),
+				...(durableHash !== undefined ? { eventHash: durableHash } : {}),
 			});
 			throw err;
 		} finally {
@@ -1282,4 +1326,291 @@ export function createAuditWriter(
 		flush,
 		release: releaseWriter,
 	};
+}
+
+// ── One writer per vault per process ──
+
+/**
+ * The `process.emitWarning` code under which a governor reports that its audit writes are failing:
+ * once when the first of them fails, and once more, with the count, when it is destroyed. A failed
+ * write never stops a call unless `audit.failClosed` is set, so this, the receipt's `auditDegraded`
+ * and the dead letter are how anyone learns of it; `process.on("warning")` can watch for it.
+ */
+export const AUDIT_DEGRADED_WARNING = "USERTRUST_AUDIT_DEGRADED";
+
+/** The process's one writer for a vault, and how many governors' handles on it are open. */
+interface SharedVaultWriter {
+	writer: AuditWriter;
+	handles: number;
+}
+
+/**
+ * Vault → its shared writer, keyed by the vault's identity on disk ({@link resolveSharedVault}), so
+ * every spelling of one vault (a symlink, a relative path, another case) shares one writer. An entry
+ * lives while a handle is open on it; the last handle's release releases the writer, and the lock.
+ *
+ * Module scope is process scope here: Node keeps ONE instance of an ES module per resolved file,
+ * and `require()` of this ES module returns that same instance, so every `trust()` and
+ * `createGovernor()` of one installed copy of usertrust meets this one map. (Two installed copies,
+ * or worker threads, each have their own — LIMITATIONS.md.)
+ */
+const sharedWriters = new Map<string, SharedVaultWriter>();
+
+/**
+ * A governor's handle on the process's ONE audit writer for `vaultPath`. Every `trust()` client and
+ * `createGovernor()` in a process that names the same vault appends through the same writer: one
+ * mutex, one cached tail, one lock. Before this, each made its own writer, the first to append took
+ * the vault's lock, and every append by the others failed on it (`AuditWriterLockHeldError`, a live
+ * writer in this process): their calls settled with their audit events in the dead-letter queue, off
+ * the chain — the README's own pattern of an Anthropic and an OpenAI client dead-lettered half its
+ * audit trail, and nothing that reads the chain could see it.
+ *
+ * The vault is resolved when the handle is opened, once ({@link resolveSharedVault}): a later
+ * `chdir` does not move a handle opened with a relative path to another vault. The handle joins the
+ * shared writer at its first append, exactly when a writer of its own would have taken the lock, so
+ * a governor that never appends holds nothing. `release()` leaves it, and
+ * the LAST handle to leave releases the writer and its lock. Every append also holds the writer for
+ * itself until it finishes, so a release that lands while an append is still queued (a call that
+ * outlived its governor's `destroy()` drain) leaves the writer to that append, which releases it.
+ * An append after the release joins for that append only, so a destroyed governor never keeps the
+ * writer, or the lock, from being released with the others. What a governor reads back is its own:
+ * `isDegraded()` and `getWriteFailures()` count only this handle's failed appends, so one client's
+ * failure does not trip another's `audit.failClosed`.
+ *
+ * A failed append is reported, never only flagged: its error still propagates (the call site marks
+ * the receipt `auditDegraded`), the writer still dead-letters the event and warns on the console,
+ * and the handle emits {@link AUDIT_DEGRADED_WARNING} at its first failure and, with the count, at
+ * its release.
+ */
+export function openSharedAuditWriter(vaultPath: string): AuditWriter {
+	const vault = resolveSharedVault(vaultPath);
+	let joined: SharedLease | undefined;
+	let released = false;
+	// What the governor reads (`isDegraded()`, `getWriteFailures()`): every failed append of this
+	// handle, for its whole life. A report never resets them: a call still running past the release
+	// reads them (`audit.failClosed` refuses a call on a degraded handle), and an append's own report
+	// runs before its rejection reaches its caller.
+	let degraded = false;
+	let writeFailures = 0;
+	// How many of those failures a warning has reported: the warnings come in batches.
+	let reportedFailures = 0;
+	// Appends started and not yet finished. A release that lands while some are still queued (a
+	// destroy() whose drain timed out) counts THEIR failures too: its count is reported when the last
+	// of them finishes, not before they could fail.
+	let inflight = 0;
+	let releaseCountPending = false;
+
+	function failed(err: unknown): void {
+		degraded = true;
+		writeFailures++;
+		// The batch's first failure.
+		if (writeFailures - reportedFailures === 1) {
+			warnAuditDegraded(vault, `failing: ${describeAppendFailure(err)}`);
+		}
+	}
+
+	/** Report the failures not yet reported, with when they happened; the batch starts over. */
+	function reportCount(when: "open" | "late"): void {
+		const failures = writeFailures - reportedFailures;
+		reportedFailures = writeFailures;
+		if (failures === 0) return;
+		const writes = `${failures} audit write${failures === 1 ? "" : "s"}`;
+		warnAuditDegraded(
+			vault,
+			when === "open"
+				? `${writes} failed while this governor was open`
+				: `${writes} failed after this governor was destroyed`,
+		);
+	}
+
+	async function appendEvent(input: AppendEventInput): Promise<AuditEvent> {
+		// Two holds. The handle's own, from its first append until its release, keeps the writer (and
+		// its lock) between appends, as a writer of its own would. And this APPEND's own, from here
+		// until it finishes: a release that lands while the append is still queued on the writer —
+		// destroy()'s drain timed out on a slow call — must not release the writer under it, or the
+		// append re-takes the lock on a writer no handle will ever release again. After the release,
+		// a late append takes only its own hold, so a destroyed governor never keeps the writer.
+		if (!released) joined ??= joinSharedWriter(vault);
+		const lease = joinSharedWriter(vault);
+		inflight++;
+		try {
+			return await lease.shared.writer.appendEvent(input);
+		} catch (err) {
+			failed(err);
+			throw err;
+		} finally {
+			leaveSharedWriterReporting(lease);
+			inflight--;
+			// After the release, the count is reported once every append in flight has finished: the
+			// release's own (appends it found queued), or a late batch's (appends started after it).
+			if (released && inflight === 0) {
+				reportCount(releaseCountPending ? "open" : "late");
+				releaseCountPending = false;
+			}
+		}
+	}
+
+	async function flush(): Promise<void> {
+		if (joined !== undefined) await joined.shared.writer.flush();
+	}
+
+	function release(): void {
+		if (!released) {
+			released = true;
+			if (inflight === 0) reportCount("open");
+			else releaseCountPending = true;
+		}
+		const was = joined;
+		joined = undefined;
+		// Last: it throws (AuditLockReleaseError) if this was the last handle and a lock was left.
+		if (was !== undefined) leaveSharedWriter(was);
+	}
+
+	return {
+		appendEvent,
+		getWriteFailures: () => writeFailures,
+		isDegraded: () => degraded,
+		flush,
+		release,
+	};
+}
+
+/** One handle's hold on a vault's shared writer: its map key and the entry it counted itself in. */
+interface SharedLease {
+	key: string;
+	shared: SharedVaultWriter;
+}
+
+/** A vault as a shared writer knows it: canonical, absolute paths, and its identity on disk. */
+interface SharedVault {
+	/** The map key: the inode identity of the vault directory and of its audit directory. */
+	key: string;
+	/** The `.usertrust` directory. */
+	vaultDir: string;
+	auditDir: string;
+	dlqDir: string;
+}
+
+/**
+ * Resolve a handle's vault ONCE, when it is opened, with `realpathSync.native`: the on-disk names,
+ * symlinks followed and in the directory's own case (the JS `realpathSync` keeps the caller's case,
+ * so `/x/Vault` and `/x/vault` on a case-insensitive filesystem were two writers, and the second
+ * one's events were dead-lettered). A writer is built from these canonical, absolute paths, its log,
+ * `.meta`, lock and dead letters alike, so no later `chdir` or alias redirects it (a writer built
+ * from a client's `vaultBase: "."` went on writing to whatever `.` meant next, for every client
+ * sharing it). The vault directory itself is never made here: `securePrivateVault` creates it,
+ * exclusively and owner-only, before a governor opens its writer. Only the audit directory inside
+ * it is, owner-only and that one directory alone; a vault that does not exist fails here, at open.
+ *
+ * The map key is the `dev:ino` of the audit directory, read through that resolution, and of the
+ * vault directory. The inode is the identity the lock registry already trusts (it keys each held
+ * lock by its file's `dev:ino`), and it makes every spelling of one directory one writer by
+ * construction. The vault directory's is in the key too, so a writer's dead letters always go to its
+ * own vault's queue: two vaults whose `audit` directories are one (a symlink) get two writers, and
+ * the second one's appends are refused by the lock, loudly, and dead-lettered where its `verify`
+ * reads them.
+ *
+ * Existing vaults need no migration: their files are the same files, reached by their canonical
+ * spelling. Out of scope, as in the lock's threat model: a directory replaced while a handle on it
+ * is open (the writer keeps writing at the canonical path, to whatever is there), and filesystems
+ * whose `dev:ino` is not stable (some network and FUSE mounts), where two handles may get two
+ * writers and the second one's appends are refused by the lock — loudly, and dead-lettered.
+ */
+function resolveSharedVault(vaultPath: string): SharedVault {
+	const auditPath = join(vaultPath, VAULT_DIR, "audit");
+	if (!existsSync(auditPath)) {
+		try {
+			mkdirSync(auditPath, { mode: PRIVATE_DIR_MODE });
+		} catch (err) {
+			// Another handle made it first: that is the directory wanted, and it is checked below.
+			if ((err as { code?: unknown }).code !== "EEXIST") throw err;
+		}
+	}
+	const vaultDir = canonicalPath(join(vaultPath, VAULT_DIR));
+	const auditDir = canonicalPath(join(vaultDir, "audit"));
+	const vaultId = statSync(vaultDir, { bigint: true });
+	const auditId = statSync(auditDir, { bigint: true });
+	return {
+		key: `${vaultId.dev}:${vaultId.ino}/${auditId.dev}:${auditId.ino}`,
+		vaultDir,
+		auditDir,
+		dlqDir: join(vaultDir, "dlq"),
+	};
+}
+
+/**
+ * A directory's real path, in its on-disk case where the platform can say: `realpathSync.native`
+ * (realpath(3)), else the JS `realpathSync`. On musl without `/proc`, realpath(3) fails even for an
+ * existing directory (the lock resolves with the JS resolver for the same reason); the JS resolver
+ * then gives the path with symlinks followed and the caller's case. The writer map does not depend
+ * on which: its key is the directories' `dev:ino`, so every spelling is still one writer.
+ */
+function canonicalPath(path: string): string {
+	try {
+		return realpathSync.native(path);
+	} catch {
+		// The JS resolver folds a `..` inside a symlink's target lexically, so on some layouts it
+		// names another directory than the one the OS opens. Its answer is used only when it IS that
+		// directory (the same `dev:ino` as the path itself, which the OS resolves); otherwise refused.
+		const resolved = realpathSync(path);
+		const opened = statSync(path, { bigint: true });
+		const named = statSync(resolved, { bigint: true });
+		if (opened.dev !== named.dev || opened.ino !== named.ino) {
+			throw new Error(
+				`usertrust: cannot resolve the vault path ${path}: realpath(3) is unavailable, and the portable resolver names another directory (${resolved}) than the one this path opens`,
+			);
+		}
+		return resolved;
+	}
+}
+
+/** Count one more handle on the vault's shared writer, making the writer if there is none. */
+function joinSharedWriter(vault: SharedVault): SharedLease {
+	let shared = sharedWriters.get(vault.key);
+	if (shared === undefined) {
+		shared = {
+			writer: createAuditWriterAt({ auditDir: vault.auditDir, dlqDir: vault.dlqDir }),
+			handles: 0,
+		};
+		sharedWriters.set(vault.key, shared);
+	}
+	shared.handles++;
+	return { key: vault.key, shared };
+}
+
+/**
+ * Count one handle out. The last one out releases the writer and its lock: out of the map FIRST, so
+ * a release that throws (a lock left behind) cannot leave a dead writer for the next handle to join.
+ */
+function leaveSharedWriter(lease: SharedLease): void {
+	lease.shared.handles--;
+	if (lease.shared.handles > 0) return;
+	if (sharedWriters.get(lease.key) === lease.shared) sharedWriters.delete(lease.key);
+	lease.shared.writer.release();
+}
+
+/** {@link leaveSharedWriter} after a late append: a lock left behind is reported, never thrown over the append's own outcome. */
+function leaveSharedWriterReporting(lease: SharedLease): void {
+	try {
+		leaveSharedWriter(lease);
+	} catch (err) {
+		const message = describeReleaseFailure(err);
+		console.warn(`[AUDIT] ${message}`);
+		process.emitWarning(message, { code: AUDIT_LOCK_LEFT_WARNING });
+	}
+}
+
+/** An append's failure, for a warning: its kind and code, and its message scrubbed for the terminal. */
+function describeAppendFailure(err: unknown): string {
+	if (!(err instanceof Error)) return typeof err;
+	const code = errorCode(err);
+	const message = err.message.length > 300 ? `${err.message.slice(0, 300)}…` : err.message;
+	return `${err.name}${code === undefined ? "" : ` (${code})`}: ${message}`;
+}
+
+function warnAuditDegraded(vault: SharedVault, what: string): void {
+	const message = scrubForWarning(
+		`usertrust audit writes to ${vault.auditDir} are degraded — ${what}. Each event that did not reach the chain is in ${join(vault.dlqDir, "dead-letters.jsonl")}, its call's receipt carries auditDegraded, and \`usertrust verify\` reports the vault incomplete.`,
+	);
+	process.emitWarning(message, { code: AUDIT_DEGRADED_WARNING });
 }
