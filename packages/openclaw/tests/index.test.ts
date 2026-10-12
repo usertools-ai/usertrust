@@ -382,19 +382,19 @@ describe("openclaw plugin entry point", () => {
 				const mod = await import("../src/index.js");
 				const registerFn = mod.default;
 
-				let capturedPlugin: ProviderPlugin | null = null;
+				const captured: { plugin: ProviderPlugin | null } = { plugin: null };
 				const api: OpenClawPluginApi = {
 					id: "usertrust",
 					name: "usertrust",
 					pluginConfig: { budget: 100_000, dryRun: true, vaultBase },
 					registerProvider: (p) => {
-						capturedPlugin = p;
+						captured.plugin = p;
 					},
 				};
 
 				registerFn(api);
 
-				const wrapped = capturedPlugin?.wrapStreamFn?.({
+				const wrapped = captured.plugin?.wrapStreamFn?.({
 					provider: "anthropic",
 					modelId: "claude-sonnet-4-6",
 					streamFn: streamOf([startEvent(), textDelta("hello"), doneEvent(makeUsage(50, 20))]),
