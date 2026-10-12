@@ -16,10 +16,24 @@
  *   A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   convenience helper is NOT, and is refused (see below).
- * - Google: `client.models.generateContent()`. With a callable tool the SDK runs an
- *   automatic-function-calling LOOP of several model calls; governance runs that loop
- *   itself, each round its own governed call (`google-afc.ts`), so every round is held,
- *   metered and audited. `generateContentStream()` is NOT governed.
+ * - Google: `client.models.generateContent()` and `client.models.generateContentStream()`.
+ *   With a callable tool the SDK runs an automatic-function-calling LOOP of several
+ *   model calls. On `generateContent` governance runs that loop itself, each round its
+ *   own governed call (`google-afc.ts`), so every round is held, metered and audited. On
+ *   `generateContentStream` a call that would run the loop is REFUSED (a streamed loop is
+ *   not metered round by round yet). Both decide on ONE reading (`afcRequested` /
+ *   `sdkRunsAfc` in google-afc.ts) made on a snapshot of the request, which is what is
+ *   forwarded. A LISTED set of billable Google methods is REFUSED, not passed through: each
+ *   call writes a `policy_denied` audit event and rejects with a PolicyDeniedError naming
+ *   the method, and the SDK is never reached
+ *   (`GOOGLE_REFUSED_METHODS` in govern.ts: `models.embedContent` / `generateImages` /
+ *   `editImage` / `upscaleImage` / `generateVideos` / `recontextImage` /
+ *   `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`,
+ *   `batches.create` / `createEmbeddings`, `interactions.create`, `tunings.tune`,
+ *   `caches.create` / `update`, `fileSearchStores.uploadToFileSearchStore` /
+ *   `importFile`). That list is NOT a boundary: other paths to the same endpoints
+ *   (`models.*Internal`, `getNextGenClient()`, `chats.modelsModule`, `apiClient` on the
+ *   client and every namespace) pass through ungoverned until Google is default-deny.
  *
  * **Anthropic and OpenAI clients are default-deny** (`default-deny.ts`). Every other
  * SDK method reached off the governed client, at any depth, is REFUSED: the call
@@ -39,8 +53,12 @@
  * are always refused; `withOptions()` returns a client governed by the same governor, or, when
  * its options change where or how calls are sent, one on which every call is refused.
  *
- * **Google clients are allow-list only:** methods other than the governed one pass
- * through untouched and bypass governance, audit, and budget enforcement.
+ * **Google clients:** besides the two governed methods and the refused list above, the
+ * calls that are not billed (`models.list/get/update/delete/countTokens/computeTokens`,
+ * `files`, `operations`, and the batch, interaction, tuning, cache and
+ * file-search-store read methods) pass through untouched and bypass governance, audit,
+ * and budget enforcement. A Google client has no default-deny boundary: a method not
+ * listed here passes through.
  */
 
 import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./shared/types.js";
@@ -57,7 +75,9 @@ import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./s
  *   A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   helper is NOT, and is refused.
- * - Google: `client.models.generateContent()`
+ * - Google: `client.models.generateContent()` and `client.models.generateContentStream()`;
+ *   a listed set of billable Google methods is refused by name; it is not a boundary
+ *   (see the file header).
  *
  * Everything else on an Anthropic or OpenAI client is refused, except the free list
  * (reads, lists, deletes and a few named POSTs) and the methods `trust({ allowUngoverned })` lists (see

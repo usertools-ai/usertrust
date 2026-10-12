@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	detectPII,
+	isOpaqueTextFree,
 	type PIIDetection,
 	type RedactedData,
 	redactPII,
@@ -716,5 +717,62 @@ describe("redactPII", () => {
 		expect(data.flag).toBe(true);
 		expect(data.empty).toBe(null);
 		expect(data.email).toBe("[REDACTED:email]");
+	});
+});
+
+describe("redactPII — the closed allowlist kept by reference (AbortSignal only)", () => {
+	const EMAIL = "write to alice@example.com";
+
+	it("a real AbortSignal is kept by reference and not walked", () => {
+		const signal = new AbortController().signal;
+		expect(isOpaqueTextFree(signal)).toBe(true);
+		const out = redactPII({ prompt: EMAIL, config: { abortSignal: signal } }).data as {
+			prompt: string;
+			config: { abortSignal: unknown };
+		};
+		expect(out.prompt).not.toContain("alice@example.com");
+		expect(out.config.abortSignal).toBe(signal);
+	});
+
+	it("a duck-typed fake signal is NOT kept: cloned like any plain object, its strings redacted", () => {
+		const fake = { aborted: false, addEventListener() {}, note: EMAIL };
+		expect(isOpaqueTextFree(fake)).toBe(false);
+		const out = redactPII({ prompt: EMAIL, config: { abortSignal: fake } }).data as {
+			config: { abortSignal: Record<string, unknown> };
+		};
+		expect(out.config.abortSignal).not.toBe(fake);
+		expect(String(out.config.abortSignal.note)).not.toContain("alice@example.com");
+	});
+
+	it("an object made from AbortSignal.prototype is not a real signal (brand check), so not kept", () => {
+		expect(isOpaqueTextFree(Object.create(AbortSignal.prototype) as object)).toBe(false);
+	});
+
+	it("a real AbortSignal carrying an extra own property (where text could hide) is not kept", () => {
+		const signal = Object.assign(new AbortController().signal, { note: EMAIL });
+		expect(isOpaqueTextFree(signal)).toBe(false);
+	});
+
+	it("a real AbortSignal with a non-enumerable toJSON is not opaque, and is never kept outside config.abortSignal", () => {
+		const signal = new AbortController().signal;
+		Object.defineProperty(signal, "toJSON", { value: () => EMAIL, enumerable: false });
+		expect(isOpaqueTextFree(signal)).toBe(false);
+		const clean = new AbortController().signal;
+		const out = redactPII({
+			prompt: EMAIL,
+			contents: [{ parts: [{ functionResponse: { response: { carrier: signal, clean } } }] }],
+			config: { abortSignal: clean },
+		}).data as { config: { abortSignal: unknown }; contents: unknown };
+		expect(JSON.stringify(out)).not.toContain("alice@example.com");
+		// Kept only at the transport slot; nested, even a clean signal is flattened.
+		expect(out.config.abortSignal).toBe(clean);
+		expect(JSON.stringify(out.contents)).not.toContain("alice@example.com");
+	});
+
+	it("binary values are NOT on the allowlist: a Uint8Array keeps today's behaviour (flattened)", () => {
+		const bytes = new Uint8Array([1, 2, 3]);
+		expect(isOpaqueTextFree(bytes)).toBe(false);
+		const out = redactPII({ prompt: EMAIL, data: bytes }).data as { data: unknown };
+		expect(out.data).not.toBe(bytes);
 	});
 });
