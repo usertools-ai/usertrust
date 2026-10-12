@@ -8,6 +8,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -191,6 +192,85 @@ describe("end to end through trust()", () => {
 				messages: [{ role: "user", content: "hello" }],
 			});
 			expect(audit.events.map((e) => e.kind)).not.toContain("usage_implausible");
+			await g.destroy();
+		} finally {
+			rmSync(vaultBase, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("an absurd 1-hour share survives every Anthropic stream path", () => {
+	const START = {
+		type: "message_start",
+		message: {
+			usage: {
+				input_tokens: 10,
+				cache_creation_input_tokens: 100,
+				cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: HUGE },
+			},
+		},
+	};
+
+	it("wrapStream keeps it in the implausible record", async () => {
+		const c = await run("anthropic", [START]);
+		expect(c?.implausible).toMatchObject({ cacheWrite1hTokens: HUGE });
+	});
+
+	it("two TTL counters near 1e308 sum to Infinity; the finite 1h figure is still reported", async () => {
+		const c = await run("anthropic", [
+			{
+				type: "message_start",
+				message: {
+					usage: {
+						input_tokens: 10,
+						cache_creation: {
+							ephemeral_5m_input_tokens: 1e308,
+							ephemeral_1h_input_tokens: 1e308,
+						},
+					},
+				},
+			},
+		]);
+		expect(c?.implausible).toMatchObject({ cacheWrite1hTokens: 1e308 });
+	});
+
+	class Emitter extends EventEmitter {
+		finalMessage(): Promise<unknown> {
+			return Promise.resolve({});
+		}
+		async *[Symbol.asyncIterator](): AsyncIterator<unknown> {}
+	}
+
+	it("MessageStream emitter: settles at the estimate and records the event on a model with the tier", async () => {
+		const vaultBase = join(tmpdir(), `absurd-streams-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+		try {
+			const audit = makeAudit();
+			const stream = new Emitter();
+			const g = await trust(
+				{ messages: { create: vi.fn(), stream: vi.fn(() => stream) } },
+				{ budget: 100_000, vaultBase, dryRun: true, _audit: audit },
+			);
+			const handle = (await g.messages.stream({
+				model: "claude-sonnet-4-6",
+				max_tokens: 64,
+				messages: [{ role: "user", content: "hello" }],
+			})) as Emitter & { receipt: Promise<TrustReceipt> };
+			stream.emit("streamEvent", START);
+			stream.emit("finalMessage", {
+				usage: {
+					input_tokens: 10,
+					output_tokens: 5,
+					cache_creation_input_tokens: 100,
+					cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: HUGE },
+				},
+			});
+			stream.emit("end");
+			const receipt = await handle.receipt;
+			expect(receipt.usageSource).toBe("estimated");
+			expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+				tiers: { cacheWrite1hTokens: HUGE },
+			});
 			await g.destroy();
 		} finally {
 			rmSync(vaultBase, { recursive: true, force: true });

@@ -105,12 +105,6 @@ export interface NormalizedUsage {
 	 * missing count) and the caller records a `usage_implausible` event instead of charging the figure.
 	 */
 	implausible?: Partial<Record<UsageTier, number>>;
-	/**
-	 * The RAW 1-hour share, only when it exceeded the ceiling. Whether it matters depends on the model (a model with
-	 * no 1-hour tier IGNORES the share), and that decision is `withSupported1hTier`'s alone, so `sanitizeUsage` only
-	 * carries the figure; `withSupported1hTier` turns it into an `implausible` record or discards it.
-	 */
-	rawCacheWrite1hOverCeiling?: number;
 }
 
 /** Loose input to {@link sanitizeUsage}: any field may be missing or junk. */
@@ -186,6 +180,12 @@ export const MAX_AGGREGATED_RESPONSES = 1_000_000;
  * The snapshot with `extra` implausible readings merged in (the larger figure per tier): a stream that saw an absurd
  * count in ANY chunk settles at the estimate, even when an earlier chunk reported plausible usage.
  */
+/** True when the 1-hour share is the only over-ceiling reading. */
+function only1h(found: Partial<Record<UsageTier, number>>): boolean {
+	const tiers = Object.keys(found);
+	return tiers.length === 1 && tiers[0] === "cacheWrite1hTokens";
+}
+
 export function withImplausible(
 	snapshot: NormalizedUsage,
 	extra: Partial<Record<UsageTier, number>> | undefined,
@@ -195,6 +195,9 @@ export function withImplausible(
 	for (const [tier, value] of Object.entries(extra) as Array<[UsageTier, number]>) {
 		merged[tier] = Math.max(merged[tier] ?? 0, value);
 	}
+	// An absurd 1-hour share ALONE does not condemn the counts: whether it matters depends on the model, and that is
+	// `withSupported1hTier`'s decision. The counts are kept until then.
+	if (only1h(merged)) return { ...snapshot, implausible: merged };
 	return {
 		inputTokens: 0,
 		outputTokens: 0,
@@ -254,12 +257,15 @@ export function sanitizeUsage(
 		["outputTokens", output ?? 0],
 		["cacheReadTokens", readCount(r.cacheReadTokens) ?? 0],
 		["cacheWriteTokens", cacheWrite],
+		["cacheWrite1hTokens", rawCacheWrite1h],
 	];
 	const implausible: Partial<Record<UsageTier, number>> = {};
 	for (const [tier, value] of readings) {
 		if (value > ceiling) implausible[tier] = value;
 	}
-	if (Object.keys(implausible).length > 0) {
+	// The 1-hour share alone leaves the counts standing until `withSupported1hTier` decides whether the model has the
+	// tier at all (a model without one ignores the share). Any other tier condemns the counts here.
+	if (Object.keys(implausible).length > 0 && !only1h(implausible)) {
 		return {
 			inputTokens: 0,
 			outputTokens: 0,
@@ -280,7 +286,7 @@ export function sanitizeUsage(
 		// always was.
 		...(cacheWrite1h > 0 ? { cacheWrite1hTokens: cacheWrite1h } : {}),
 		source: r.source === "provider" && reported ? "provider" : "estimated",
-		...(rawCacheWrite1h > ceiling ? { rawCacheWrite1hOverCeiling: rawCacheWrite1h } : {}),
+		...(Object.keys(implausible).length > 0 ? { implausible } : {}),
 	};
 }
 
@@ -345,18 +351,34 @@ export function withSupported1hTier(
 	operatorOwned: boolean,
 ): NormalizedUsage {
 	const supported = supportsCacheWrite1h(rates, operatorOwned);
-	if (
-		snapshot.rawCacheWrite1hOverCeiling === undefined &&
-		(snapshot.cacheWrite1hTokens === undefined || supported)
-	) {
+	const found = snapshot.implausible;
+	const has1h = found?.cacheWrite1hTokens !== undefined;
+	if (!has1h) {
+		if (snapshot.cacheWrite1hTokens === undefined || supported) return snapshot;
+		const { cacheWrite1hTokens: _dropped, ...rest } = snapshot;
+		return rest;
+	}
+	if (supported) {
+		// The tier exists, so an absurd share is a real anomaly: the counts are not priced.
+		if (only1h(found)) {
+			return {
+				inputTokens: 0,
+				outputTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				source: "estimated",
+				implausible: found,
+			};
+		}
 		return snapshot;
 	}
-	const { rawCacheWrite1hOverCeiling: over, ...clean } = snapshot;
-	// An absurd share counts only where the tier exists; elsewhere the share is ignored entirely.
-	if (over !== undefined && supported) return withImplausible(clean, { cacheWrite1hTokens: over });
-	if (clean.cacheWrite1hTokens === undefined || supported) return clean;
-	const { cacheWrite1hTokens: _dropped, ...rest } = clean;
-	return rest;
+	// No such tier: the share is IGNORED, and so is its reading. Whatever else was implausible still stands; when the
+	// 1-hour share was the only entry the counts were never condemned and price as reported.
+	const { cacheWrite1hTokens: _share, ...rest } = snapshot;
+	const { cacheWrite1hTokens: _reading, ...others } = found;
+	if (Object.keys(others).length > 0) return { ...rest, implausible: others };
+	const { implausible: _gone, ...clean } = rest;
+	return clean;
 }
 
 /**
