@@ -272,6 +272,36 @@ under your own user profile, which by default only you, administrators and SYSTE
 can read, or give the folder an owner-only ACL yourself. usertrust does not manage
 Windows ACLs.
 
+## 11. PII detection is a pattern scan of the prompt, not data-loss prevention
+
+`pii: "block"`, `"redact"` and `"warn"` act on what a pattern scan finds in the
+request's **prompt text**: `messages` (and a string `system`) for Anthropic,
+`messages` for OpenAI chat, `input` and a string `instructions` for OpenAI
+Responses, `contents` for Google. Everything else in the request is not read:
+tool and function definitions (including Google's callable tool declarations),
+an array-form `system` prompt, Google's `config` (including `systemInstruction`),
+`metadata`, and every other field. The model's response is never scanned. A secret
+in one of those fields goes to the provider as written, and when the prompt scan
+finds nothing, `"redact"` changes nothing.
+
+The patterns cover email, phone, US SSN, credit card (Luhn), IPv4 and seven
+secret and token formats. They do not cover names, postal addresses, dates of
+birth, IPv6, non-US identifiers, bank account numbers or health data, and a string
+is checked as written (no decoding, no object keys, no non-string values). When
+`"redact"` does fire, it replaces every matching string in the whole request body
+in full, not only the matched characters. `createGovernor()` and `usertrust-server`
+scan the `messages` the caller passes and can block, but never redact egress.
+The full scope, per provider, is on the [PII Detection](https://usertrust.ai/docs/policy/pii) page.
+
+## 12. A stream aborted by the caller's own signal is not charged for what it consumed
+
+A governed `create({ stream: true })` call on an OpenAI or Anthropic client that the
+caller aborts with its own `AbortSignal` has its hold voided, so the usage the stream
+had already consumed goes uncharged. A stream the caller ends with an early `break` is
+charged for what it consumed; the abort path is the gap. A provider error mid-stream
+voids the hold, as intended. This is a known gap, fixed in the next release. Until
+then, do not rely on an aborted stream to have been charged.
+
 ---
 
 Found a boundary we haven't documented? That is a bug in this file — open an

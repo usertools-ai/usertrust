@@ -1515,3 +1515,110 @@ describe("a shortfall whose posted amount is unusable never makes the metered co
 		expect(recorded.totals.postProvenUpperCalls).toBe(0);
 	});
 });
+
+describe("calls run ungoverned (allowUngoverned) are counted by method, never as spend", () => {
+	const T = "2026-10-08T01:00:00Z";
+	const ungoverned = (method: unknown, ts = T) =>
+		ev("ungoverned_call", ts, { method, provider: "openai" });
+	const spend = () => [
+		call("2026-10-08T00:30:00Z", 100, { transferId: "t-a" }),
+		call("2026-10-08T00:40:00Z", 250, { transferId: "t-b", costCenter: "eng" }),
+		ev("tool_call", "2026-10-08T00:50:00Z", { actionName: "x", cost: 40, transferId: "t-c" }),
+	];
+	const opts = { budget: 1000, spendLedger: { value: 350 } };
+
+	it("with no ungoverned_call record the count is zero and no format shows a line", () => {
+		const m = build(spend(), opts);
+		expect(m.ungoverned).toEqual({ calls: 0, byMethod: {} });
+		for (const f of ["md", "html"] as const) {
+			expect(render(m, f), f).not.toContain("Calls run ungoverned");
+		}
+		// JSON keeps the model's shape, like `unrecognised: {}`: a zero count, no breakdown
+		expect(JSON.parse(render(m, "json")).ungoverned).toEqual({ calls: 0, byMethod: {} });
+	});
+
+	it("N records over two methods: the count and the per-method breakdown", () => {
+		const m = build([
+			...spend(),
+			ungoverned("embeddings.create"),
+			ungoverned("embeddings.create"),
+			ungoverned("images.generate"),
+			ungoverned("embeddings.create"),
+		]);
+		expect(m.ungoverned).toEqual({
+			calls: 4,
+			byMethod: { "embeddings.create": 3, "images.generate": 1 },
+		});
+	});
+
+	it("every spend, cost, budget, action and governance figure is identical with and without them", () => {
+		const base = spend();
+		const without = build(base, opts);
+		const withThem = build(
+			[
+				...base,
+				ungoverned("embeddings.create"),
+				ungoverned("images.generate"),
+				// even one that carries a cost, a transfer id or an action name is never spend
+				ev("ungoverned_call", T, {
+					method: "embeddings.create",
+					provider: "openai",
+					cost: 9_999,
+					actionName: "x",
+					transferId: "t-u",
+				}),
+			],
+			opts,
+		);
+		const { ungoverned: _w, ...restWith } = withThem;
+		const { ungoverned: _b, ...restWithout } = without;
+		expect(restWith).toEqual(restWithout);
+		expect(withThem.ungoverned.calls).toBe(3);
+		// CONTROL: the spend these fixtures carry is really there, so equality is not two empty reports
+		expect(without.totals.confirmedUt).toBe(350);
+		expect(without.totals.actionUt).toBe(40);
+		expect(without.budget.recordedSessionWallet).toBe(140);
+	});
+
+	it("an ungoverned_call is a known kind; an invented kind is still unrecognised", () => {
+		const m = build([
+			ungoverned("embeddings.create"),
+			ev("some_future_kind", T, { method: "embeddings.create" }),
+		]);
+		expect(m.unrecognised).toEqual({ some_future_kind: 1 });
+		expect(m.ungoverned.calls).toBe(1);
+	});
+
+	it("only records inside the window are counted", () => {
+		const m = build([ungoverned("embeddings.create", "2026-09-01T00:00:00Z")]);
+		expect(m.ungoverned).toEqual({ calls: 0, byMethod: {} });
+	});
+
+	it("a method that is missing, not a string, empty, an accessor or behind a Proxy counts as (unknown method)", () => {
+		const accessor: Record<string, unknown> = { provider: "openai" };
+		Object.defineProperty(accessor, "method", { get: () => "embeddings.create", enumerable: true });
+		// The target holds a real own string: only the Proxy check keeps it from being read.
+		const proxied = new Proxy({ method: "embeddings.create", provider: "openai" }, {});
+		const m = build([
+			ev("ungoverned_call", T, { provider: "openai" }),
+			ungoverned(42),
+			ungoverned(""),
+			ungoverned({ toString: () => "embeddings.create" }),
+			ev("ungoverned_call", T, accessor),
+			ev("ungoverned_call", T, proxied),
+			ungoverned("embeddings.create"),
+		]);
+		expect(m.ungoverned).toEqual({
+			calls: 7,
+			byMethod: { "(unknown method)": 6, "embeddings.create": 1 },
+		});
+	});
+
+	it("hostile method labels cannot grow the breakdown without limit", () => {
+		const events = Array.from({ length: 80 }, (_, i) => ungoverned(`m${i}`));
+		const m = build(events);
+		expect(m.ungoverned.calls).toBe(80);
+		expect(Object.keys(m.ungoverned.byMethod)).toHaveLength(51);
+		expect(m.ungoverned.byMethod["(more methods)"]).toBe(30);
+	});
+});
