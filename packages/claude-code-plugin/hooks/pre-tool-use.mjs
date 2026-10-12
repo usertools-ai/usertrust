@@ -11,7 +11,14 @@
 // something unusable) is written down as a `gap` record. With UT_CC_MODE=enforce
 // it blocks: a denial is enforced (`deny`), and a failed authorization fails closed
 // (exit 2) unless UT_FAIL_OPEN=1, which lets the call through and records the
-// gap. A config file's `mode` and `failOpen` decide the same (config.mjs). Output
+// gap. A config file's `mode` and `failOpen` decide the same (config.mjs).
+//
+// A server that REJECTS the key (a 401, or a 403 saying `unauthorized`: key-rejected.mjs) is a
+// configuration failure, not an outage and not a policy refusal. When the call proceeds (watch,
+// or enforce with failOpen) its gap says so (`"cause":"key-rejected"`), and the user is SHOWN it
+// as a hook `systemMessage`, the one channel Claude Code shows on exit 0: on the session's first
+// such call, then at most once per key-rejected.mjs `NOTICE_INTERVAL_MS`. Enforce mode without
+// failOpen blocks it (exit 2), as any failed authorization. Output
 // contract adapted from the AGT Claude Code plugin's stdin-JSON
 // permissionDecision convention (MIT — see repository NOTICE).
 //
@@ -52,7 +59,16 @@ import { rename, unlink } from "node:fs/promises";
 import { howToSet, settings } from "./config.mjs";
 import { labelsFor, resolveJob } from "./job-log.mjs";
 import {
+	KEY_REJECTED,
+	KeyRejected,
+	keyRejection,
+	noteRejection,
+	noticeText,
+	rejectionDetail,
+} from "./key-rejected.mjs";
+import {
 	abandonHold,
+	announce,
 	breakerOpen,
 	claimForRelease,
 	claimForSettle,
@@ -162,6 +178,8 @@ try {
 			null,
 			`${why}: the fresh hold is not kept, and the call is refused rather than write over that file`,
 		);
+	} else if (err instanceof KeyRejected && (mode === "watch" || settings().failOpen)) {
+		await keyRejectedProceeds(err, why);
 	} else if (mode === "watch" || settings().failOpen) {
 		// The call proceeds unmetered: say so durably, so the gap is never silent.
 		const recorded = await recordWatchEvent({
@@ -182,6 +200,33 @@ try {
 		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
 		process.exit(2);
 	}
+}
+
+/**
+ * The server rejected this session's key, and the call proceeds unmetered (watch, or enforce
+ * with failOpen). Its gap names the cause; the session's first carries the detail, and every
+ * later one is compact. The USER is shown it (`announce`: a `systemMessage`, exit 0, never a
+ * permission decision) on the session's first, then at most once per NOTICE_INTERVAL_MS
+ * (key-rejected.mjs `noteRejection`).
+ */
+async function keyRejectedProceeds(err, why) {
+	const { first, notify } = await noteRejection(sessionId);
+	const recorded = await recordWatchEvent({
+		started: new Date(hookStartedAt()).toISOString(),
+		kind: "gap",
+		mode,
+		session: sessionId,
+		agent: agentId,
+		tool: toolName,
+		reason: why,
+		cause: KEY_REJECTED,
+		status: err.status,
+		...(first ? { detail: rejectionDetail(err) } : {}),
+	});
+	if (notify) announce(noticeText(err.status));
+	proceed(
+		`usertrust${mode === "watch" ? " watch-only" : ""}: this call is not metered (${why}${err.answer === undefined ? "" : `: ${err.answer}`}) — ${recorded ? "recorded as a gap" : "and its gap record could not be written (see above)"}`,
+	);
 }
 
 /**
@@ -606,10 +651,14 @@ async function reserve(input) {
 			// Server text, raw here: `proceed` writes it only through `say`, which
 			// sanitizes it.
 			proceed(`usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
-		} else if (response.status === 402 || response.status === 403 || response.status === 429) {
+		} else if (
+			(response.status === 402 || response.status === 403 || response.status === 429) &&
+			keyRejection(response.status, json) === null
+		) {
 			// A refusal — budget (402), policy (403) or an anomaly cutoff (429) — is a
 			// governance decision, not an outage: enforce denies it whatever UT_FAIL_OPEN
-			// says, and watch records what it would have blocked.
+			// says, and watch records what it would have blocked. A 403 that rejects the KEY
+			// is neither a refusal nor an outage (key-rejected.mjs): it is thrown below.
 			await prepared.abandon?.();
 			const error = sanitizeReason(json?.error, "denied");
 			const reason = sanitizeReason(json?.reason);
@@ -634,7 +683,12 @@ async function reserve(input) {
 				proceed(`usertrust watch-only: would have blocked (${error}: ${reason}) — not enforced`);
 			}
 		} else {
-			throw new Error(`unexpected governance response ${response.status}`);
+			// A rejected key (a 401, or a 403 saying `unauthorized`) is a configuration failure, not
+			// an outage (key-rejected.mjs); anything else is no usable answer.
+			throw (
+				keyRejection(response.status, json) ??
+				new Error(`unexpected governance response ${response.status}`)
+			);
 		}
 	} catch (err) {
 		// Nothing was posted for the window: release it before failing closed (or open).

@@ -7,9 +7,10 @@ const HOOKS = join(import.meta.dirname, "..", "hooks");
 
 /**
  * Where a hook may write to a terminal sink. Everything else goes through these:
- * `say` (stderr, lib.mjs) and `announce` (the SessionStart `systemMessage`,
- * lib.mjs) sanitize C0/DEL/C1 and then clip; `deny` writes PreToolUse's one
- * decision JSON, whose reason it sanitizes the same way.
+ * `say` (stderr, lib.mjs) and `announce` (every `systemMessage`: SessionStart's
+ * banner and PreToolUse's rejected-key notice, lib.mjs) sanitize C0/DEL/C1 and
+ * then clip; `deny` writes PreToolUse's one decision JSON, whose reason it
+ * sanitizes the same way.
  */
 const ALLOWED: Record<string, Array<{ file: string; fn: string }>> = {
 	"process.stderr.write": [{ file: "lib.mjs", fn: "say" }],

@@ -7,7 +7,12 @@
 // any platform, return `systemMessage` in JSON output", and SessionStart
 // decision control: "Claude Code adds stdout it treats as plain text to
 // Claude's context"). No network call: the hook must be fast and cannot fail.
+//
+// It also warns of tool calls the server REJECTED for their key since the last session start
+// (key-rejected.mjs `rejectedSinceLastStart`): read from watch.jsonl, locally and bounded. Any
+// failure to read it is the normal banner, never a thrown error or a wait.
 import { writeSessionStart } from "./job-log.mjs";
+import { rejectedSinceLastStart, warningText } from "./key-rejected.mjs";
 import { announce, modeAnnouncement, readStdin, requireLaunch, say } from "./lib.mjs";
 
 requireLaunch();
@@ -27,4 +32,12 @@ try {
 } catch (err) {
 	say(`usertrust: job log not started: ${err instanceof Error ? err.message : String(err)}`);
 }
-announce(modeAnnouncement());
+// The warning first, so the clip at `announce`'s bound can only ever cut the mode line after it.
+let warning = null;
+try {
+	const rejected = await rejectedSinceLastStart();
+	if (rejected !== null) warning = warningText(rejected);
+} catch {
+	// Never a reason to fail the start: the normal banner.
+}
+announce(warning === null ? modeAnnouncement() : `${warning} ${modeAnnouncement()}`);
