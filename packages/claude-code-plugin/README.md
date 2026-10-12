@@ -36,11 +36,13 @@ One block does it all, so copy it whole.
 
 - **The home directory comes from your account.** The plugin accepts a configuration file only under `.config/usertrust/` in your account's home directory as the system records it (`os.userInfo().homedir`). That is not necessarily `$HOME` or `~`, which can differ under `sudo` and in some containers. The block asks Node for that directory, so every path below uses it.
 - **`stateDir` must be an absolute path.** JSON expands nothing, so the shell puts the directory in.
-- **The key is never readable by others.** The subshell's `umask 077` creates the directory and the file owner-only, and the `chmod` lines also tighten a directory that already existed.
+- **The key is never readable by others, even for a moment.** The key is written into a new file that `mktemp` creates owner-only (mode 600), which then replaces any earlier `claude-code.json` in one `mv`. So the key never sits in a file others can read, even when an earlier file was readable (`umask` covers only new files, so writing into an existing file with `cat >` would keep its old mode). If the block is interrupted, the leftover `claude-code.json.XXXXXX` is owner-only too; delete it. The directory is created owner-only, and `chmod` also tightens one that already existed.
 
 ```sh
 UT_HOME=$(node -p "require('os').userInfo().homedir")
-(umask 077 && mkdir -p "$UT_HOME/.config/usertrust" && cat > "$UT_HOME/.config/usertrust/claude-code.json") <<EOF
+UT_DIR="$UT_HOME/.config/usertrust"
+(umask 077 && mkdir -p "$UT_DIR") && chmod 700 "$UT_DIR"
+UT_TMP=$(mktemp "$UT_DIR/claude-code.json.XXXXXX") && cat > "$UT_TMP" <<EOF && mv -f "$UT_TMP" "$UT_DIR/claude-code.json"
 {
   "url": "http://127.0.0.1:4519",
   "key": "<the key from step 1>",
@@ -48,9 +50,7 @@ UT_HOME=$(node -p "require('os').userInfo().homedir")
   "stateDir": "$UT_HOME/.claude/usertrust-cc"
 }
 EOF
-chmod 700 "$UT_HOME/.config/usertrust"
-chmod 600 "$UT_HOME/.config/usertrust/claude-code.json"
-export UT_CC_CONFIG="$UT_HOME/.config/usertrust/claude-code.json"
+export UT_CC_CONFIG="$UT_DIR/claude-code.json"
 ```
 
 If the file is in the wrong place, or has the wrong owner or mode, the plugin refuses it. The session then runs watch-only with no key and sends nothing, and the first line Claude Code shows says why: `usertrust: watch-only and key-less — the config file UT_CC_CONFIG names was refused (config: anchor refused (missing)) …`. That is what a file written under a `$HOME` that is not your account's home produces. See [Configuration file](#configuration-file).
@@ -96,8 +96,10 @@ Set `UT_CC_CONFIG` to the path of one JSON file, and the plugin reads every
 setting from it:
 
 ```sh
-export UT_CC_CONFIG="$HOME/.config/usertrust/claude-code.json"
+export UT_CC_CONFIG="$(node -p "require('os').userInfo().homedir")/.config/usertrust/claude-code.json"
 ```
+
+The path is built from your account's home directory (`os.userInfo().homedir`), not `$HOME`: the plugin anchors the file there, as the list below says.
 
 ```json
 {
