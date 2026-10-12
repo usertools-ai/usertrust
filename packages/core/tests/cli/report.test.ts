@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../src/audit/chain.js";
 import { verifyVault } from "../../src/audit/verify.js";
+import { reportArgv } from "../../src/cli/flags.js";
 import { parseEnd, parseReportArgs, run } from "../../src/cli/report.js";
 
 const RATES = { inputPer1k: 100, outputPer1k: 500, cacheReadPer1k: 10, cacheWritePer1k: 125 };
@@ -489,7 +490,15 @@ describe("usertrust report --week", () => {
 	});
 
 	it("a malformed vault budget config exits 2 with a named reason, never 'no budget configured'", async () => {
-		for (const bad of ["{not json", '{"budget":"5"}', '{"budget":-1}', "[]", "null"]) {
+		for (const bad of [
+			"{not json",
+			'{"budget":"5"}',
+			'{"budget":-1}',
+			'{"budget":0}',
+			'{"budget":1.5}',
+			"[]",
+			"null",
+		]) {
 			rmSync(join(dir, ".usertrust"), { recursive: true, force: true });
 			await vault([{ cost: 1 }]);
 			writeFileSync(join(dir, ".usertrust", "usertrust.config.json"), bad);
@@ -501,6 +510,27 @@ describe("usertrust report --week", () => {
 			expect(out.join("\n"), bad).toMatch(/vault config/);
 			expect(stdout, bad).not.toMatch(/no budget configured/i);
 		}
+		write.mockRestore();
+	});
+
+	it("a global flag in front of the command is refused like one behind it: both orders", async () => {
+		await vault([{ cost: 1 }]);
+		for (const [label, argv] of [
+			["after", ["report", "--week", "--end", endIso(), "--skip-verify"]],
+			["before", ["--skip-verify", "report", "--week", "--end", endIso()]],
+			["before, reconfigure", ["--reconfigure", "report", "--week", "--end", endIso()]],
+		] as const) {
+			process.exitCode = undefined;
+			await run(dir, {}, reportArgv(argv));
+			expect(process.exitCode, label).toBe(2);
+		}
+		// CONTROL: --json in front is honoured, and a repeated --json (either side) is refused
+		process.exitCode = undefined;
+		await run(dir, {}, reportArgv(["--json", "report", "--week", "--end", endIso()]));
+		expect(process.exitCode).toBeUndefined();
+		process.exitCode = undefined;
+		await run(dir, {}, reportArgv(["--json", "report", "--week", "--end", endIso(), "--json"]));
+		expect(process.exitCode).toBe(2);
 		write.mockRestore();
 	});
 

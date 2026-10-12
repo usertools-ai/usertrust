@@ -33,6 +33,7 @@
  */
 
 import type { PersistedAuditEvent } from "../audit/read.js";
+import { providerOfModel } from "../ledger/pricing.js";
 
 /** 1 usertoken = $0.0001 USD, everywhere (AGENTS.md). */
 export const UT_TO_USD = 0.0001;
@@ -309,6 +310,9 @@ function count(v: unknown): number {
 }
 
 export function detectProvider(model: string): string {
+	// The pricing table's own provider data first: the single source of which vendor publishes which prefix.
+	const known = providerOfModel(model);
+	if (known !== undefined) return known;
 	if (model.startsWith("claude")) return "anthropic";
 	// OpenAI reasoning families are `o<digit>` (o1, o3, o4-mini, ...).
 	if (model.startsWith("gpt") || /^o\d/.test(model)) return "openai";

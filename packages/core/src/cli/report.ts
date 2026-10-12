@@ -35,6 +35,7 @@ import { verifyVault } from "../audit/verify.js";
 import { type ReportFormat, render } from "../report/render.js";
 import { AGENT_KEYS, type AgentKey, buildWeeklyReport } from "../report/weekly.js";
 import { VAULT_DIR } from "../shared/constants.js";
+import { TrustConfigSchema } from "../shared/types.js";
 import type { CliOptions } from "./init.js";
 import { scrubForTerminal, toSafeJson } from "./target.js";
 
@@ -142,12 +143,15 @@ function readVaultBudget(dir: string): number {
 	}
 	const budget = (config as Record<string, unknown>)["budget"];
 	if (budget === undefined) return 0;
-	if (typeof budget !== "number" || !Number.isFinite(budget) || budget < 0) {
+	// The RUNTIME's own schema decides what a budget may be (a positive integer of usertokens), so the report accepts
+	// exactly what the governor can load: 0 and 1.5 are refused here as they are there.
+	const parsed = TrustConfigSchema.shape.budget.safeParse(budget);
+	if (!parsed.success) {
 		throw new UsageError(
-			"The vault config's budget is not a finite non-negative number of usertokens",
+			"The vault config's budget is not a positive integer of usertokens (the governor would not load it)",
 		);
 	}
-	return budget;
+	return parsed.data;
 }
 
 export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): ReportArgs {

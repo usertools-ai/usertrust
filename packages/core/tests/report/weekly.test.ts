@@ -5,8 +5,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PersistedAuditEvent } from "../../src/audit/read.js";
+import { PRICING_TABLE } from "../../src/ledger/pricing.js";
 import {
 	buildWeeklyReport,
+	detectProvider,
 	type IntegrityInfo,
 	UNATTRIBUTED,
 	UNKNOWN_VOID_REASON_PREFIX,
@@ -721,5 +723,19 @@ describe("the unknown-void release reason is still the one headless writes", () 
 	it("headless.ts carries the prefix the report matches", () => {
 		const src = readFileSync(join(import.meta.dirname, "../../src/headless.ts"), "utf-8");
 		expect(src).toContain(UNKNOWN_VOID_REASON_PREFIX);
+	});
+});
+
+describe("every built-in pricing entry has a vendor family", () => {
+	it("no model in the pricing table is labelled 'unknown' (a model added tomorrow cannot regress silently)", () => {
+		const unlabelled = Object.keys(PRICING_TABLE).filter((m) => detectProvider(m) === "unknown");
+		expect(unlabelled).toEqual([]);
+	});
+
+	it("spot checks the families the report used to print as unknown", () => {
+		expect(detectProvider("kimi-k3")).toBe("moonshot");
+		expect(detectProvider("deepseek-chat")).toBe("deepseek");
+		expect(detectProvider("grok-3")).toBe("xai");
+		expect(detectProvider("totally-new-model")).toBe("unknown");
 	});
 });
