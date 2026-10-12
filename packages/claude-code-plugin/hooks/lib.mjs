@@ -1037,12 +1037,17 @@ function countOf(value) {
 	return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
-/** A persisted per-tier maxima object, or undefined when it is not one (a hold from before it existed). */
-function maximaOf(value) {
-	if (value === null || typeof value !== "object") return undefined;
+/** A persisted per-tier REFUSED map (presence is the flag; the value is the raw figure when representable), or undefined. */
+function refusedOf(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
 	const out = {};
-	for (const key of COUNT_FIELDS) out[key] = countOf(value[key]);
-	return out;
+	for (const key of COUNT_FIELDS) {
+		const x = value[key];
+		if (typeof x === "number" && Number.isFinite(x) && x >= 0) {
+			out[key] = Math.min(Math.ceil(x), Number.MAX_SAFE_INTEGER);
+		}
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function transcriptHoldFields(entry) {
@@ -1055,8 +1060,8 @@ function transcriptHoldFields(entry) {
 	};
 	for (const key of COUNT_FIELDS) fields[key] = countOf(entry[key]);
 	// The largest single response per tier: a retry of the settle must send it again, or one absurd response hides in the sum.
-	const maxima = maximaOf(entry.maxima);
-	if (maxima !== undefined) fields.maxima = maxima;
+	const refused = refusedOf(entry.refused);
+	if (refused !== undefined) fields.refused = refused;
 	// A hold authorized under a key also records the key and the agent type its
 	// principal named: what a retry of its settle needs (see transcript.mjs).
 	if (typeof entry.idempotencyKey === "string") fields.idempotencyKey = entry.idempotencyKey;

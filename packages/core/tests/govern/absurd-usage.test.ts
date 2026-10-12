@@ -498,6 +498,32 @@ describe("the ceiling is per provider RESPONSE", () => {
 		await gov.destroy();
 	});
 
+	it("a tier the CALLER refused (a flag, not a count) settles at the estimate and records the event, whatever the counts", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const auth = await gov.authorize(AUTH);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 0,
+			outputTokens: 20,
+			refused: { inputTokens: 150_000_000 },
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+			checks: { inputTokens: "refused" },
+			tiers: { inputTokens: 150_000_000 },
+		});
+		// CONTROL: no flag, same counts: priced as reported
+		const auth2 = await gov.authorize(AUTH);
+		const ok = await gov.settle(auth2, { inputTokens: 0, outputTokens: 20 });
+		expect(ok.usageSource).toBe("provider");
+		await gov.destroy();
+	});
+
 	it("CONTROL: a 600-response window with plausible maxima over 100M total is still charged in full", async () => {
 		const audit = makeAudit();
 		const gov = await createGovernor({

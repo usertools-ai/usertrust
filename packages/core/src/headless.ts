@@ -439,6 +439,20 @@ export interface SettleParams {
 				cacheWrite1hTokens?: number | undefined;
 		  }
 		| undefined;
+	/**
+	 * Tiers the caller REFUSED to state as a count (a figure that was invalid, or above its own per-response ceiling),
+	 * as a FLAG per tier (the value is the raw figure when representable). Counts above stay arithmetic-safe; any flagged
+	 * tier makes the settle charge the estimate and record the anomaly.
+	 */
+	refused?:
+		| {
+				inputTokens?: number | undefined;
+				outputTokens?: number | undefined;
+				cacheReadTokens?: number | undefined;
+				cacheWriteTokens?: number | undefined;
+				cacheWrite1hTokens?: number | undefined;
+		  }
+		| undefined;
 	/** Number of streaming chunks delivered (for streaming calls). */
 	chunksDelivered?: number | undefined;
 	/**
@@ -1797,6 +1811,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// Each tier read by name, once, BEFORE the claim below: a getter that throws changes nothing, and the
 				// governor never touches the caller's object again.
 				maxima: materializeMaxima(params?.maxima),
+				refused: materializeMaxima(params?.refused),
 				usageSource: params?.usageSource,
 				chunksDelivered: params?.chunksDelivered,
 				computeMs: params?.computeMs,
@@ -1879,6 +1894,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				};
 				const responses = input.responses;
 				const maxima = input.maxima;
+				const refused = input.refused;
 				// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
 				// read only input/output, so a settle carrying nothing but cache counts
 				// looked like "nothing reported" and silently fell back to the pre-call
@@ -1910,7 +1926,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
 							source: usageReported ? (input.usageSource ?? "provider") : "estimated",
 						},
-						{ responses, maxima },
+						{ responses, maxima, refused },
 					),
 					rateInfo.rates,
 					rateInfo.rateSource !== "table",

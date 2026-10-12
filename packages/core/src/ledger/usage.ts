@@ -129,7 +129,7 @@ export interface NormalizedUsage {
 	 */
 	implausible?: Partial<Record<UsageTier, number>>;
 	/** Which check put each tier in `implausible`: the aggregate sum (absent) or one response's maximum. */
-	implausibleBy?: Partial<Record<UsageTier, "sum" | "maximum">>;
+	implausibleBy?: Partial<Record<UsageTier, "sum" | "maximum" | "refused">>;
 }
 
 /** Loose input to {@link sanitizeUsage}: any field may be missing or junk. */
@@ -268,6 +268,11 @@ export function sanitizeUsage(
 		responses?: number | undefined;
 		/** The largest single-response count per tier in an aggregate; checked against the BASE ceiling. */
 		maxima?: { [K in UsageTier]?: number | undefined } | undefined;
+		/**
+		 * Tiers the CALLER refused (a figure that was invalid or above its own per-response ceiling): presence is the flag,
+		 * the value is the raw figure when representable. They never entered the counts, which are arithmetic-safe.
+		 */
+		refused?: { [K in UsageTier]?: number | undefined } | undefined;
 	} = {},
 ): NormalizedUsage {
 	const r = raw ?? {};
@@ -298,12 +303,19 @@ export function sanitizeUsage(
 	}
 	// An aggregate's SUM may sit under n x ceiling while one response inside it is absurd: the caller's per-tier maxima
 	// are held to the unscaled ceiling. A caller that sends none keeps the aggregate check alone.
-	const implausibleBy: Partial<Record<UsageTier, "sum" | "maximum">> = {};
+	const implausibleBy: Partial<Record<UsageTier, "sum" | "maximum" | "refused">> = {};
 	for (const tier of USAGE_TIERS) {
 		const value = opts.maxima?.[tier];
 		if (value !== undefined && Number.isFinite(value) && value > MAX_PLAUSIBLE_TOKENS_PER_TIER) {
 			if (implausible[tier] === undefined) implausibleBy[tier] = "maximum";
 			implausible[tier] = Math.max(implausible[tier] ?? 0, value);
+		}
+	}
+	for (const tier of USAGE_TIERS) {
+		const value = opts.refused?.[tier];
+		if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+			if (implausible[tier] === undefined) implausibleBy[tier] = "refused";
+			implausible[tier] = Math.max(implausible[tier] ?? 0, Math.max(1, value));
 		}
 	}
 	// The 1-hour share alone leaves the counts standing until `withSupported1hTier` decides whether the model has the

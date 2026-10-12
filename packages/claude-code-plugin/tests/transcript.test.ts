@@ -534,10 +534,7 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 			]);
 			await run("stop.mjs", stopInput());
 			expect(settles()).toHaveLength(1);
-			expect(settles()[0]?.body).toMatchObject({
-				responses: 2,
-				maxima: { inputTokens: 10, outputTokens: 20 },
-			});
+			expect(settles()[0]?.body).toMatchObject({ responses: 2 });
 		});
 
 		it("a single response carries no `responses` key", async () => {
@@ -545,7 +542,7 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 0, 0)));
 			await run("stop.mjs", stopInput());
 			expect(settles()[0]?.body).not.toHaveProperty("responses");
-			expect(settles()[0]?.body).not.toHaveProperty("maxima");
+			expect(settles()[0]?.body).not.toHaveProperty("refused");
 		});
 	});
 
@@ -3793,37 +3790,26 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 	});
 
 	describe("transcript mode", () => {
-		it("a hold's window sends the per-tier maxima with the sums: journaled, listed back, and settled", async () => {
-			const server = holdingServer();
-			await startServer(server.responder);
-			await writeMain([
-				...responseEntries("msg_a", SONNET, u(150_000_000, 9)),
-				...responseEntries("msg_b", SONNET, u(0, 9)),
-			]);
-			await run("pre-tool-use.mjs", preInput("tu_1"));
-			// the pending record carries them
-			expect((await record()).maxima).toMatchObject({ inputTokens: 150_000_000, outputTokens: 9 });
-			await run("post-tool-use.mjs", postInput("tu_1"));
-			await run("stop.mjs", stopInput());
-			const body = settles().find((x) => x.body.transferId === "tx_1")?.body;
-			expect(body).toMatchObject({
-				responses: 2,
-				maxima: { inputTokens: 150_000_000, outputTokens: 9 },
-			});
-		});
-
-		it("providerCount: absent and null are 0; fractions round UP; every invalid statement is the safe-integer cap, never 0", async () => {
-			const { providerCount } = (await import(/* @vite-ignore */ TRANSCRIPT_HOOK)) as {
-				providerCount: (v: unknown) => number;
+		it("providerFigure: absent and null are 0; fractions round UP; refused figures count 0 and are FLAGGED, never a count", async () => {
+			const { providerFigure } = (await import(/* @vite-ignore */ TRANSCRIPT_HOOK)) as {
+				providerFigure: (v: unknown) => { count: number; refused: boolean; raw: number };
 			};
-			const CAP = Number.MAX_SAFE_INTEGER;
-			expect(providerCount(undefined)).toBe(0);
-			expect(providerCount(null)).toBe(0);
-			expect(providerCount(0)).toBe(0);
-			expect(providerCount(400)).toBe(400);
-			expect(providerCount(400.5)).toBe(401); // a fractional count is real usage, not a released hold
-			expect(providerCount(100_000_000.5)).toBe(100_000_001); // and rounding up can cross the ceiling
-			expect(providerCount(1e16)).toBe(CAP);
+			expect(providerFigure(undefined)).toMatchObject({ count: 0, refused: false });
+			expect(providerFigure(null)).toMatchObject({ count: 0, refused: false });
+			expect(providerFigure(0)).toMatchObject({ count: 0, refused: false });
+			expect(providerFigure(400)).toMatchObject({ count: 400, refused: false });
+			expect(providerFigure(400.5)).toMatchObject({ count: 401, refused: false }); // real usage, not a released hold
+			expect(providerFigure(100_000_000)).toMatchObject({ count: 100_000_000, refused: false }); // AT the ceiling
+			expect(providerFigure(100_000_000.5)).toMatchObject({
+				count: 0,
+				refused: true,
+				raw: 100_000_001,
+			});
+			expect(providerFigure(1e16)).toMatchObject({
+				count: 0,
+				refused: true,
+				raw: Number.MAX_SAFE_INTEGER,
+			});
 			for (const bad of [
 				Number.NaN,
 				Number.POSITIVE_INFINITY,
@@ -3835,100 +3821,152 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				[],
 				true,
 			]) {
-				expect(providerCount(bad), String(bad)).toBe(CAP);
+				const f = providerFigure(bad);
+				expect(f.refused, String(bad)).toBe(true);
+				expect(f.count, String(bad)).toBe(0); // the sentinel never enters arithmetic
 			}
 		});
 
-		it("a single-response window with 1e16 input_tokens is flagged by the SUM alone", async () => {
+		it("the ceiling parity: the plugin's per-response ceiling is core's", async () => {
+			const { PLAUSIBLE_TOKENS_PER_TIER } = (await import(/* @vite-ignore */ TRANSCRIPT_HOOK)) as {
+				PLAUSIBLE_TOKENS_PER_TIER: number;
+			};
+			const core = await import("../../core/src/ledger/usage.js");
+			expect(PLAUSIBLE_TOKENS_PER_TIER).toBe(core.MAX_PLAUSIBLE_TOKENS_PER_TIER);
+		});
+
+		it("a response over the ceiling is FLAGGED through the hold: journaled, listed back, settled; the HOLD is ordinary", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain([
+				...responseEntries("msg_a", SONNET, u(150_000_000, 9)),
+				...responseEntries("msg_b", SONNET, u(0, 9)),
+			]);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			// the authorize hold is sized from COUNTS only: no absurd amount reaches it (no budget denial, no 400)
+			expect(Number(authorizes()[0]?.body.estimatedInputTokens)).toBeLessThan(100_000);
+			// the pending record carries the flag, not a count
+			expect((await record()).refused).toMatchObject({ inputTokens: 150_000_000 });
+			expect((await record()).inputTokens).toBe(0);
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
+				inputTokens: number;
+				refused?: Record<string, number>;
+			};
+			expect(body.refused).toMatchObject({ inputTokens: 150_000_000 });
+			expect(body.inputTokens).toBe(0); // arithmetic-safe: the refused tier counts 0
+		});
+
+		it("1e16 input_tokens in a single response: an ordinary authorize hold, then a flag on the settle", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);
 			await writeMain(responseEntries("msg_a", SONNET, { ...u(10, 20, 0, 0), input: 1e16 }));
 			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(authorizes()).toHaveLength(1);
+			expect(Number(authorizes()[0]?.body.estimatedInputTokens)).toBeLessThan(100_000);
 			await run("post-tool-use.mjs", postInput("tu_1"));
 			await run("stop.mjs", stopInput());
 			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
-				inputTokens?: number;
+				refused?: Record<string, number>;
 			};
-			expect(body.inputTokens).toBeGreaterThan(100_000_000);
+			expect(body.refused?.inputTokens).toBe(Number.MAX_SAFE_INTEGER);
 		});
 
-		it("a 1-hour breakdown of 1e16 is flagged even when it exceeds the write total", async () => {
+		it("a 1-hour breakdown of 1e16 above the write total is flagged (the clamp cannot hide it)", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);
 			const absurd: Usage = {
 				...u(10, 20, 0, 400),
 				cacheCreation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1e16 },
 			};
-			await writeMain([
-				...responseEntries("msg_a", SONNET, absurd),
-				...responseEntries("msg_b", SONNET, u(10, 20, 0, 0)),
-			]);
+			await writeMain(responseEntries("msg_a", SONNET, absurd));
 			await run("pre-tool-use.mjs", preInput("tu_1"));
 			await run("post-tool-use.mjs", postInput("tu_1"));
 			await run("stop.mjs", stopInput());
 			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
-				maxima?: { cacheWrite1hTokens?: number };
+				refused?: Record<string, number>;
 			};
-			expect(body.maxima?.cacheWrite1hTokens).toBeGreaterThan(100_000_000);
+			expect(body.refused).toHaveProperty("cacheWrite1hTokens");
 		});
 
-		it("a fractional count is sent rounded up; 150M beside small responses is caught by the maxima; a normal window is unchanged", async () => {
+		it("a bad 5-minute figure counts 0 for the subtraction: the remainder stays at the dearer 1-hour rate, and the call is flagged", async () => {
+			capabilities = ["cache-write-1h"];
 			const server = holdingServer();
 			await startServer(server.responder);
-			await writeMain([
-				...responseEntries("msg_a", SONNET, { ...u(10, 20, 0, 0), input: 150_000_000 }),
-				...responseEntries("msg_b", SONNET, { ...u(10, 20, 0, 0), input: 400.5 }),
-				...responseEntries("msg_c", SONNET, u(10, 20, 0, 0)),
-			]);
-			await run("pre-tool-use.mjs", preInput("tu_1"));
-			await run("post-tool-use.mjs", postInput("tu_1"));
-			await run("stop.mjs", stopInput());
-			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
-				inputTokens: number;
-				maxima?: { inputTokens?: number };
-			};
-			expect(body.maxima?.inputTokens).toBe(150_000_000);
-			expect(body.inputTokens).toBe(150_000_000 + 401 + 10);
-		});
-
-		it("a tier stated above the safe-integer range is still flagged: its maximum is kept, not normalized to 0", async () => {
-			const server = holdingServer();
-			await startServer(server.responder);
-			const huge: Usage = { ...u(10, 20, 0, 0), input: 1e16 };
-			await writeMain([
-				...responseEntries("msg_a", SONNET, huge),
-				...responseEntries("msg_b", SONNET, u(10, 20, 0, 0)),
-			]);
-			await run("pre-tool-use.mjs", preInput("tu_1"));
-			await run("post-tool-use.mjs", postInput("tu_1"));
-			await run("stop.mjs", stopInput());
-			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
-				maxima?: { inputTokens?: number };
-			};
-			expect(body.maxima?.inputTokens).toBeGreaterThan(100_000_000);
-		});
-
-		it("the 1-hour maximum is the breakdown as STATED, not the value clamped to the write total", async () => {
-			const server = holdingServer();
-			await startServer(server.responder);
-			// 400 written, but the breakdown claims 150M of it was 1-hour: the clamp would hide that
-			const absurd: Usage = {
+			// 400 written; the breakdown names only a 1-hour part (100) and a 5-minute part that is garbage
+			const entries = responseEntries("msg_a", SONNET, {
 				...u(10, 20, 0, 400),
-				cacheCreation: {
-					ephemeral_5m_input_tokens: 0,
-					ephemeral_1h_input_tokens: 150_000_000,
-				},
-			};
-			await writeMain([
-				...responseEntries("msg_a", SONNET, absurd),
-				...responseEntries("msg_b", SONNET, u(10, 20, 0, 0)),
-			]);
+				cacheCreation: { ephemeral_1h_input_tokens: 100, ephemeral_5m_input_tokens: "x" as never },
+			});
+			await writeMain(entries);
 			await run("pre-tool-use.mjs", preInput("tu_1"));
-			expect((await record()).maxima).toMatchObject({ cacheWrite1hTokens: 150_000_000 });
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
+				cacheWriteTokens: number;
+				cacheWrite1hTokens?: number;
+				refused?: Record<string, number>;
+			};
+			expect(body.refused).toHaveProperty("cacheWriteTokens");
+			// the unattributed remainder (400 - 0 - 100 = 300) is counted as 1-hour: 400, never a cheaper-rate split
+			expect(body.cacheWrite1hTokens).toBe(400);
+		});
+
+		it("absent and null tiers are 0 and price normally: nothing is flagged", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 0, 0)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
 			await run("post-tool-use.mjs", postInput("tu_1"));
 			await run("stop.mjs", stopInput());
 			const body = settles().find((x) => x.body.transferId === "tx_1")?.body;
-			expect(body).toMatchObject({ maxima: { cacheWrite1hTokens: 150_000_000 } });
+			expect(body).not.toHaveProperty("refused");
+			expect(body).toMatchObject({ inputTokens: 10, outputTokens: 20 });
+		});
+
+		it("a LEGACY cursor carrying rawMax / rawCacheWrite1hTokens over the ceiling migrates to flags on read", async () => {
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 0, 0)));
+			const legacy = {
+				v: 2,
+				byteOffset: 0,
+				nextSeq: 1,
+				partial: {
+					msg_a: {
+						n: 0,
+						model: SONNET,
+						synthetic: false,
+						complete: true,
+						claimed: false,
+						inputTokens: 0,
+						outputTokens: 20,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						cacheWrite1hTokens: 0,
+						rawMax: {
+							inputTokens: 150_000_000,
+							outputTokens: 0,
+							cacheReadTokens: 0,
+							cacheWriteTokens: 0,
+						},
+						rawCacheWrite1hTokens: 0,
+					},
+				},
+				accounted: [],
+				denied: [],
+				assigned: {},
+				authorizingAt: {},
+				estimateMode: false,
+				estimateReason: null,
+				lastModel: SONNET,
+				unresolved: {},
+			};
+			await mkdir(join(stateDir, "transcripts"), { recursive: true });
+			await writeFile(cursorPath(), JSON.stringify(legacy));
+			await run("stop.mjs", stopInput());
+			const body = settles()[0]?.body as { refused?: Record<string, number> };
+			expect(body.refused).toMatchObject({ inputTokens: 150_000_000 });
 		});
 
 		it("no key: an immediate re-fire settles the first hold's window ONCE at its counts, then holds afresh; nothing written off", async () => {

@@ -89,6 +89,18 @@ export const SettleRequestSchema = z.object({
 	cacheWrite1hTokens: z.number().int().nonnegative().optional(),
 	// How many provider responses these counts sum (default 1): the plausibility ceiling is per response.
 	responses: z.number().int().positive().max(1_000_000).optional(),
+	// Tiers the caller REFUSED to state as a count (invalid, or above its per-response ceiling): a flag per tier whose
+	// value is the raw figure when representable. The settle charges the estimate when any is present.
+	refused: z
+		.object({
+			inputTokens: z.number().int().nonnegative().optional(),
+			outputTokens: z.number().int().nonnegative().optional(),
+			cacheReadTokens: z.number().int().nonnegative().optional(),
+			cacheWriteTokens: z.number().int().nonnegative().optional(),
+			cacheWrite1hTokens: z.number().int().nonnegative().optional(),
+		})
+		.strict()
+		.optional(),
 	// The largest single-response count per tier among those `responses` sums, held to the unscaled ceiling.
 	maxima: z
 		.object({

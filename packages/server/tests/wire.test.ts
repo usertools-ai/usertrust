@@ -70,6 +70,16 @@ describe("request schemas", () => {
 		).toEqual({ inputTokens: Number.MAX_SAFE_INTEGER });
 	});
 
+	it("round-trips refused (a per-tier flag whose value is the raw figure), strictly", () => {
+		expect(
+			SettleRequestSchema.parse({ transferId: "tx_1", refused: { inputTokens: 150_000_000 } })
+				.refused,
+		).toEqual({ inputTokens: 150_000_000 });
+		for (const bad of [{ inputTokens: -1 }, { inputTokens: 1.5 }, { bogus: 1 }]) {
+			expect(() => SettleRequestSchema.parse({ transferId: "tx_1", refused: bad })).toThrow();
+		}
+	});
+
 	it("round-trips maxima, strictly", () => {
 		expect(
 			SettleRequestSchema.parse({ transferId: "tx_1", maxima: { inputTokens: 5 } }).maxima,
