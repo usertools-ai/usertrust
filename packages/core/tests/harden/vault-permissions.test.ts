@@ -73,6 +73,13 @@ vi.mock("node:fs", async (importOriginal) => {
 	return { ...real, mkdirSync, default: { ...real, mkdirSync } };
 });
 
+/**
+ * On Windows usertrust neither sets nor checks a mode or an owner (POSIX modes do not describe
+ * an ACL), so every row that asserts a mode, a uid, or uses a POSIX-only tool (`geteuid`,
+ * `mkfifo`, unprivileged symlinks) is skipped there; the native-Windows row covers that platform.
+ */
+const onWindows = process.platform === "win32";
+
 interface Walk {
 	dirs: number;
 	files: number;
@@ -143,7 +150,7 @@ afterEach(() => {
 	}
 });
 
-describe.each([
+describe.skipIf(onWindows).each([
 	["022", 0o022],
 	["000", 0o000],
 ])("vault writers under umask %s", (label, mask) => {
@@ -245,7 +252,7 @@ describe.each([
 	});
 });
 
-describe.each([
+describe.skipIf(onWindows).each([
 	[
 		"createGovernor",
 		async (root: string) => {
@@ -328,24 +335,27 @@ describe.each(openers)("a vault that is a symbolic link, opened by %s", (_name, 
 		return { root, link, target: realpathSync(target) };
 	}
 
-	it("refuses a target other users can read, names the fix, and never changes the target", async () => {
-		const { root, link, target } = linkedVault(0o755);
-		const refused = await open(root).then(
-			() => undefined,
-			(err: unknown) => err as Error,
-		);
-		expect.soft(refused).toBeInstanceOf(Error);
-		expect.soft(refused?.message).toContain(link);
-		expect.soft(refused?.message).toContain(target);
-		expect.soft(refused?.message).toContain("mode 755");
-		expect.soft(refused?.message).toContain(`chmod 700 ${target}`);
-		// Never changed through the link, and nothing written into it.
-		expect(statSync(target).mode & 0o777).toBe(0o755);
-		expect(lstatSync(link).isSymbolicLink()).toBe(true);
-		expect(readdirSync(target)).toEqual([]);
-	});
+	it.skipIf(onWindows)(
+		"refuses a target other users can read, names the fix, and never changes the target",
+		async () => {
+			const { root, link, target } = linkedVault(0o755);
+			const refused = await open(root).then(
+				() => undefined,
+				(err: unknown) => err as Error,
+			);
+			expect.soft(refused).toBeInstanceOf(Error);
+			expect.soft(refused?.message).toContain(link);
+			expect.soft(refused?.message).toContain(target);
+			expect.soft(refused?.message).toContain("mode 755");
+			expect.soft(refused?.message).toContain(`chmod 700 ${target}`);
+			// Never changed through the link, and nothing written into it.
+			expect(statSync(target).mode & 0o777).toBe(0o755);
+			expect(lstatSync(link).isSymbolicLink()).toBe(true);
+			expect(readdirSync(target)).toEqual([]);
+		},
+	);
 
-	it("uses an owner-only target, and writes it owner-only", async () => {
+	it.skipIf(onWindows)("uses an owner-only target, and writes it owner-only", async () => {
 		const { root, link, target } = linkedVault(0o700);
 		await open(root);
 		expect(lstatSync(link).isSymbolicLink()).toBe(true);
@@ -354,22 +364,25 @@ describe.each(openers)("a vault that is a symbolic link, opened by %s", (_name, 
 		expect(walkModes(target).loose).toEqual([]);
 	});
 
-	it("refuses a dangling link by name, and creates nothing at its target", async () => {
-		process.umask(0o022);
-		const root = tmp("ut-perm-dangling-");
-		const missing = join(realpathSync(tmp("ut-perm-gone-")), "vault");
-		const link = join(root, VAULT_DIR);
-		symlinkSync(missing, link);
-		const refused = await open(root).then(
-			() => undefined,
-			(err: unknown) => err as Error,
-		);
-		expect(refused?.message).toBe(
-			`usertrust: the vault ${link} is a symbolic link to ${missing}, which does not exist; remove the link or create the target owner-only (mkdir -m 700 ${missing})`,
-		);
-		expect(existsSync(missing)).toBe(false);
-		expect(lstatSync(link).isSymbolicLink()).toBe(true);
-	});
+	it.skipIf(onWindows)(
+		"refuses a dangling link by name, and creates nothing at its target",
+		async () => {
+			process.umask(0o022);
+			const root = tmp("ut-perm-dangling-");
+			const missing = join(realpathSync(tmp("ut-perm-gone-")), "vault");
+			const link = join(root, VAULT_DIR);
+			symlinkSync(missing, link);
+			const refused = await open(root).then(
+				() => undefined,
+				(err: unknown) => err as Error,
+			);
+			expect(refused?.message).toBe(
+				`usertrust: the vault ${link} is a symbolic link to ${missing}, which does not exist; remove the link or create the target owner-only (mkdir -m 700 ${missing})`,
+			);
+			expect(existsSync(missing)).toBe(false);
+			expect(lstatSync(link).isSymbolicLink()).toBe(true);
+		},
+	);
 
 	it("refuses a .usertrust that is a regular file by name", async () => {
 		process.umask(0o022);
@@ -407,7 +420,7 @@ function foreignRefusal(vault: string, owner: number, euid: number, target?: str
 	return `the vault ${what}, not by this process (uid ${euid}); usertrust only uses a vault its own user owns. Run as uid ${owner}, or give it to this user with: chown ${euid} ${target ?? vault}`;
 }
 
-describe.skipIf(process.platform === "win32").each(openers)(
+describe.skipIf(onWindows).each(openers)(
 	"a vault another user owns, opened by %s",
 	(_name, open) => {
 		/** Opens `root` as another user; the refusal, or `undefined` when it opened. */
@@ -475,7 +488,7 @@ describe.skipIf(process.platform === "win32").each(openers)(
 	},
 );
 
-describe.skipIf(process.platform === "win32").each(openers)(
+describe.skipIf(onWindows).each(openers)(
 	"a vault the governor creates, opened by %s",
 	(_name, open) => {
 		/** `path` is the vault or something inside it. */
@@ -537,7 +550,7 @@ describe.skipIf(process.platform === "win32").each(openers)(
 	},
 );
 
-describe.skipIf(process.platform === "win32").each(openers)(
+describe.skipIf(onWindows).each(openers)(
 	"a vault another user owns is refused before anything in it is read, opened by %s",
 	(_name, open) => {
 		const BAD_JSON = "{ not json";
@@ -599,7 +612,7 @@ describe.skipIf(process.platform === "win32").each(openers)(
 	},
 );
 
-describe("on Windows", () => {
+describe.skipIf(onWindows)("on Windows, simulated on POSIX", () => {
 	it("no mode or owner is set or checked, and the CLI never warns", () => {
 		process.umask(0o022);
 		const root = tmp("ut-perm-win32-");
@@ -608,7 +621,8 @@ describe("on Windows", () => {
 		chmodSync(vaultPath, 0o755);
 		const fresh = join(root, "fresh", VAULT_DIR);
 		// Foreign AND loose: on POSIX this vault is refused (owner) and warned about (both).
-		const as = asAnotherUser();
+		const as = process.geteuid === undefined ? undefined : asAnotherUser();
+		const original = process.platform;
 		const platform = Object.getOwnPropertyDescriptor(process, "platform");
 		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
 		try {
@@ -617,9 +631,9 @@ describe("on Windows", () => {
 			securePrivateVault(fresh, { create: true });
 		} finally {
 			if (platform !== undefined) Object.defineProperty(process, "platform", platform);
-			as.restore();
+			as?.restore();
 		}
-		expect(process.platform).not.toBe("win32");
+		expect(process.platform).toBe(original);
 		expect(statSync(vaultPath).mode & 0o777).toBe(0o755);
 		expect(statSync(fresh).isDirectory()).toBe(true);
 		// Control: back on this platform, the same vault is warned about.
@@ -636,77 +650,77 @@ async function runCli(command: "inspect" | "health", root: string): Promise<void
 	await run(root, { json: true });
 }
 
-describe.each(["inspect", "health"] as const)("usertrust %s on an existing vault", (command) => {
-	/** Runs the command; its stderr, and whether its JSON answer is a success. */
-	async function capture(root: string): Promise<{ stderr: string; success: boolean }> {
-		let stderr = "";
-		const out: string[] = [];
-		const err = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
-			stderr += String(chunk);
-			return true;
-		});
-		const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
-			out.push(String(line));
-		});
-		try {
-			await runCli(command, root);
-		} finally {
-			err.mockRestore();
-			log.mockRestore();
+describe.skipIf(onWindows).each(["inspect", "health"] as const)(
+	"usertrust %s on an existing vault",
+	(command) => {
+		/** Runs the command; its stderr, and whether its JSON answer is a success. */
+		async function capture(root: string): Promise<{ stderr: string; success: boolean }> {
+			let stderr = "";
+			const out: string[] = [];
+			const err = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+				stderr += String(chunk);
+				return true;
+			});
+			const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+				out.push(String(line));
+			});
+			try {
+				await runCli(command, root);
+			} finally {
+				err.mockRestore();
+				log.mockRestore();
+			}
+			const answer = JSON.parse(out.join("\n")) as { success?: boolean };
+			return { stderr, success: answer.success === true };
 		}
-		const answer = JSON.parse(out.join("\n")) as { success?: boolean };
-		return { stderr, success: answer.success === true };
-	}
 
-	/** A vault with a chain and a ledger in it, then given `mode` the way an earlier version left it. */
-	async function vaultAt(mode: number): Promise<{ root: string; vaultPath: string }> {
-		process.umask(0o022);
-		const root = tmp("ut-perm-cli-");
-		const gov = await createGovernor({ vaultBase: root, dryRun: true, budget: 100_000 });
-		const auth = await gov.authorize({
-			model: "claude-sonnet-4-6",
-			estimatedInputTokens: 100,
-			maxOutputTokens: 100,
+		/** A vault with a chain and a ledger in it, then given `mode` the way an earlier version left it. */
+		async function vaultAt(mode: number): Promise<{ root: string; vaultPath: string }> {
+			process.umask(0o022);
+			const root = tmp("ut-perm-cli-");
+			const gov = await createGovernor({ vaultBase: root, dryRun: true, budget: 100_000 });
+			const auth = await gov.authorize({
+				model: "claude-sonnet-4-6",
+				estimatedInputTokens: 100,
+				maxOutputTokens: 100,
+			});
+			await gov.settle(auth, { inputTokens: 80, outputTokens: 40 });
+			await gov.destroy();
+			const vaultPath = join(root, VAULT_DIR);
+			chmodSync(vaultPath, mode);
+			return { root, vaultPath };
+		}
+
+		it("warns on a vault other users can read, succeeds, and never changes its mode", async () => {
+			const { root, vaultPath } = await vaultAt(0o755);
+			const { stderr, success } = await capture(root);
+			expect
+				.soft(stderr)
+				.toContain(
+					`usertrust: warning: the vault ${vaultPath} is readable by other users (mode 755); make it owner-only with: chmod 700 ${vaultPath}`,
+				);
+			expect.soft(success).toBe(true);
+			expect(statSync(vaultPath).mode & 0o777).toBe(0o755);
 		});
-		await gov.settle(auth, { inputTokens: 80, outputTokens: 40 });
-		await gov.destroy();
-		const vaultPath = join(root, VAULT_DIR);
-		chmodSync(vaultPath, mode);
-		return { root, vaultPath };
-	}
 
-	it("warns on a vault other users can read, succeeds, and never changes its mode", async () => {
-		const { root, vaultPath } = await vaultAt(0o755);
-		const { stderr, success } = await capture(root);
-		expect
-			.soft(stderr)
-			.toContain(
-				`usertrust: warning: the vault ${vaultPath} is readable by other users (mode 755); make it owner-only with: chmod 700 ${vaultPath}`,
-			);
-		expect.soft(success).toBe(true);
-		expect(statSync(vaultPath).mode & 0o777).toBe(0o755);
-	});
+		it("warns with the target for a linked vault, and never changes the target", async () => {
+			process.umask(0o022);
+			const { vaultPath: real } = await vaultAt(0o755);
+			const target = realpathSync(real);
+			const root = tmp("ut-perm-cli-link-");
+			const link = join(root, VAULT_DIR);
+			symlinkSync(target, link);
+			const { stderr, success } = await capture(root);
+			expect
+				.soft(stderr)
+				.toContain(
+					`usertrust: warning: the vault ${link} is a symbolic link to ${target}, which is readable by other users (mode 755); make it owner-only with: chmod 700 ${target}`,
+				);
+			expect.soft(success).toBe(true);
+			expect(statSync(target).mode & 0o777).toBe(0o755);
+		});
 
-	it("warns with the target for a linked vault, and never changes the target", async () => {
-		process.umask(0o022);
-		const { vaultPath: real } = await vaultAt(0o755);
-		const target = realpathSync(real);
-		const root = tmp("ut-perm-cli-link-");
-		const link = join(root, VAULT_DIR);
-		symlinkSync(target, link);
-		const { stderr, success } = await capture(root);
-		expect
-			.soft(stderr)
-			.toContain(
-				`usertrust: warning: the vault ${link} is a symbolic link to ${target}, which is readable by other users (mode 755); make it owner-only with: chmod 700 ${target}`,
-			);
-		expect.soft(success).toBe(true);
-		expect(statSync(target).mode & 0o777).toBe(0o755);
-	});
-
-	it.skipIf(process.platform === "win32")(
-		"warns on a vault another user owns, naming the owner and this process's uid, and changes nothing",
-		async () => {
+		it("warns on a vault another user owns, naming the owner and this process's uid, and changes nothing", async () => {
 			const { root, vaultPath } = await vaultAt(0o700);
 			const as = asAnotherUser();
 			let result: { stderr: string; success: boolean };
@@ -721,19 +735,19 @@ describe.each(["inspect", "health"] as const)("usertrust %s on an existing vault
 			expect.soft(result.success).toBe(true);
 			expect(statSync(vaultPath).mode & 0o777).toBe(0o700);
 			expect(statSync(vaultPath).uid).toBe(as.owner);
-		},
-	);
+		});
 
-	it("says nothing about an owner-only vault", async () => {
-		const { root, vaultPath } = await vaultAt(0o700);
-		const { stderr, success } = await capture(root);
-		expect(stderr).not.toContain("usertrust: warning: the vault");
-		expect(success).toBe(true);
-		expect(statSync(vaultPath).mode & 0o777).toBe(0o700);
-	});
-});
+		it("says nothing about an owner-only vault", async () => {
+			const { root, vaultPath } = await vaultAt(0o700);
+			const { stderr, success } = await capture(root);
+			expect(stderr).not.toContain("usertrust: warning: the vault");
+			expect(success).toBe(true);
+			expect(statSync(vaultPath).mode & 0o777).toBe(0o700);
+		});
+	},
+);
 
-describe("init (control)", () => {
+describe.skipIf(onWindows)("init (control)", () => {
 	it("creates the vault 0700 / 0600 throughout", async () => {
 		process.umask(0o022);
 		const root = tmp("ut-perm-init-");
@@ -747,5 +761,29 @@ describe("init (control)", () => {
 		const walk = walkModes(join(root, VAULT_DIR));
 		expect(walk.files).toBeGreaterThan(0);
 		expect.soft(walk.loose).toEqual([]);
+	});
+});
+
+/**
+ * Native Windows only: it runs on no platform this suite is run on today, and is the only row
+ * that would run on Windows itself. There usertrust sets and checks no mode or owner: a governor
+ * creates the vault and uses an existing one as it is, and the CLI never warns.
+ */
+describe.runIf(onWindows).each(openers)("on native Windows, opened by %s", (_name, open) => {
+	it("creates a fresh vault, uses an existing one unchanged, and never warns", async () => {
+		const fresh = join(tmp("ut-perm-native-win-"), "tenant");
+		await open(fresh);
+		expect(statSync(join(fresh, VAULT_DIR)).isDirectory()).toBe(true);
+		expect(looseVaultWarning(join(fresh, VAULT_DIR))).toBeUndefined();
+
+		const root = tmp("ut-perm-native-win-existing-");
+		const vaultPath = join(root, VAULT_DIR);
+		mkdirSync(vaultPath);
+		const before = statSync(vaultPath).mode;
+		expect(() => securePrivateVault(vaultPath, { create: true })).not.toThrow();
+		await open(root);
+		expect(statSync(vaultPath).mode).toBe(before);
+		expect(existsSync(join(vaultPath, "audit", "events.jsonl"))).toBe(true);
+		expect(looseVaultWarning(vaultPath)).toBeUndefined();
 	});
 });

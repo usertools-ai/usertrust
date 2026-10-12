@@ -26,6 +26,9 @@ import { createUsertrustServer, type UsertrustServer } from "../src/server.js";
 
 const KEY = "ut_vault_perm_key";
 
+/** On Windows usertrust neither sets nor checks modes (see LIMITATIONS.md): these rows are POSIX. */
+const onWindows = process.platform === "win32";
+
 // The CLI runs from its TypeScript sources, as cli.test.ts runs it: the preload compiles them
 // and resolves `usertrust` to the core's sources, so no package needs building first.
 const CLI = join(import.meta.dirname, "..", "src", "cli", "main.ts");
@@ -80,7 +83,7 @@ afterEach(async () => {
 	for (const d of tracked.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
-describe.each([
+describe.skipIf(onWindows).each([
 	["022", 0o022],
 	["000", 0o000],
 ])("usertrust-server tenant vault under umask %s", (label, mask) => {
@@ -174,7 +177,7 @@ describe.each([
  * working directory with the umask under test (a child inherits it). The tenant vault, its audit
  * log and its spend ledger are created by the server, from nothing, through the wire.
  */
-describe.each([
+describe.skipIf(onWindows).each([
 	["022", 0o022],
 	["000", 0o000],
 ])("usertrust-server CLI, a vault it creates, under umask %s", (label, mask) => {
