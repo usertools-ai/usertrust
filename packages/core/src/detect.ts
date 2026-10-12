@@ -12,26 +12,35 @@
  *   `client.messages.parse()`, `client.beta.messages.create()`,
  *   `client.beta.messages.stream()`, `client.beta.messages.parse()`
  * - OpenAI: `client.chat.completions.create()`, and `client.responses.create()`
- *   when present (feature-detected — the Responses API postdates the peer-range
- *   floor, so older clients simply lack it and it stays a pass-through). A streaming
+ *   when present (feature-detected: a duck-typed OpenAI-shaped client may lack it).
+ *   A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
- *   convenience helper is NOT (see below).
+ *   convenience helper is NOT, and is refused (see below).
  * - Google: `client.models.generateContent()`. With a callable tool the SDK runs an
  *   automatic-function-calling LOOP of several model calls; governance runs that loop
  *   itself, each round its own governed call (`google-afc.ts`), so every round is held,
  *   metered and audited. `generateContentStream()` is NOT governed.
  *
- * Remaining ungoverned surfaces (feature-detected pass-throughs, or shapes that do
- * not mirror `create`): `client.messages.batches`, `client.beta.messages.batches`,
- * `client.beta.models`, `client.beta.files`, the OpenAI Responses non-create
- * methods (`client.responses.retrieve/cancel/delete`, plus the
- * `client.responses.stream()` and `client.responses.parse()` helpers — both drive
- * the SDK's raw client internally and so bypass the governed `create`), the OpenAI
- * `client.beta.*` namespace (assistants/threads/realtime — a different shape from
- * Anthropic beta), and the legacy `client.completions.create`. These are **NOT**
- * intercepted and bypass governance, audit, and budget enforcement. Callers relying
- * on ungoverned methods should implement their own budget and audit controls or wrap
- * calls through the governed entry points above.
+ * **Anthropic and OpenAI clients are default-deny** (`default-deny.ts`). Every other
+ * SDK method reached off the governed client, at any depth, is REFUSED: the call
+ * rejects with a PolicyDeniedError naming the method path and writes a `policy_denied`
+ * event, and the SDK is never called. That covers batches, embeddings, images, audio,
+ * fine-tuning, assistants/threads/runs, vector stores, realtime, videos, containers,
+ * evals, the legacy `completions.create`, OpenAI `beta.responses`, and the SDK helpers
+ * that drive the raw client internally (`chat.completions.parse/stream/runTools`,
+ * `responses.parse/stream/compact`, `beta.messages.toolRunner`). Exceptions:
+ * - the free list: every method whose requests are all GET or DELETE (reads, lists,
+ *   deletes), plus POSTs named with a reason (token counts, moderations, cancels,
+ *   pauses, metadata updates), minus a few named exceptions. They run on the raw SDK
+ *   resource, unaudited;
+ * - `trust({ allowUngoverned: ["embeddings.create"] })`, which runs a listed method
+ *   ungoverned and audits each call as `ungoverned_call` (no usage, no cost).
+ * A resource's `_client` and the client's raw HTTP members (`post`, `get`, `request`, …)
+ * are always refused; `withOptions()` returns a client governed by the same governor, or, when
+ * its options change where or how calls are sent, one on which every call is refused.
+ *
+ * **Google clients are allow-list only:** methods other than the governed one pass
+ * through untouched and bypass governance, audit, and budget enforcement.
  */
 
 import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./shared/types.js";
@@ -44,20 +53,16 @@ import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./s
  *   `client.messages.parse()`, `client.beta.messages.create()`,
  *   `client.beta.messages.stream()`, `client.beta.messages.parse()`
  * - OpenAI: `client.chat.completions.create()`, and `client.responses.create()`
- *   when present (feature-detected — the Responses API postdates the peer-range
- *   floor, so older clients simply lack it and it stays a pass-through). A streaming
+ *   when present (feature-detected: a duck-typed OpenAI-shaped client may lack it).
+ *   A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
- *   helper is NOT.
+ *   helper is NOT, and is refused.
  * - Google: `client.models.generateContent()`
  *
- * Remaining ungoverned pass-throughs: `client.messages.batches`,
- * `client.beta.messages.batches`, `client.beta.models`, `client.beta.files`, the
- * OpenAI Responses non-create methods (`client.responses.retrieve/cancel/delete`,
- * plus the `client.responses.stream()` and `client.responses.parse()` helpers,
- * which drive the SDK's raw client and bypass the governed `create`), the OpenAI
- * `client.beta.*` namespace (assistants/threads/realtime), and the legacy
- * `client.completions.create`. These bypass governance, audit, and budget
- * enforcement (they do not mirror the `create` request/response shape).
+ * Everything else on an Anthropic or OpenAI client is refused, except the free list
+ * (reads, lists, deletes and a few named POSTs) and the methods `trust({ allowUngoverned })` lists (see
+ * the module comment and `default-deny.ts`). On a Google client everything else
+ * passes through ungoverned.
  *
  * @throws {Error} if the client does not match any known SDK shape
  */
