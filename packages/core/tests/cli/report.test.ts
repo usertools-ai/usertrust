@@ -437,6 +437,21 @@ describe("usertrust report --week", () => {
 		write.mockRestore();
 	});
 
+	it("`.usertrust/link/../report.md`: the temp file and the report land where the OS resolves the path, never in the vault", async () => {
+		await vault([{ cost: 1 }]);
+		const vaultDir = join(dir, ".usertrust");
+		mkdirSync(join(dir, "reports", "sub"), { recursive: true });
+		symlinkSync(join(dir, "reports", "sub"), join(vaultDir, "link"));
+		const before = readdirSync(vaultDir).sort();
+		process.exitCode = undefined;
+		await run(dir, {}, ["--week", "--end", endIso(), "--out", ".usertrust/link/../report.md"]);
+		expect(process.exitCode).toBeUndefined();
+		// the OS lands `link/..` in reports/, so the report is there and the vault gained no file (no temp, no report)
+		expect(existsSync(join(dir, "reports", "report.md"))).toBe(true);
+		expect(readdirSync(vaultDir).sort()).toEqual(before);
+		write.mockRestore();
+	});
+
 	it("--tenant-config keeps the user's own spelling: `link/../tenant.json` reads the file the OS resolves, not the lexical one", async () => {
 		await vault([{ cost: 1 }]);
 		const real = join(dir, "real");

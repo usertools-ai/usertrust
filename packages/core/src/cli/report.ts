@@ -21,7 +21,6 @@ import {
 	lstatSync,
 	readdirSync,
 	readFileSync,
-	realpathSync,
 	renameSync,
 	rmSync,
 	statSync,
@@ -280,8 +279,9 @@ function readSpendLedger(path: string): { value: number } | { unreadable: true }
 function readTenantBudget(path: string): number {
 	let parsed: unknown;
 	try {
-		// The user's own spelling, resolved by the OS (`link/..` is the link target's parent, not the path's lexical parent).
-		parsed = JSON.parse(readFileSync(realpathSync.native(path), "utf-8"));
+		// The user's own spelling, read directly: the OS resolves `link/..` as the link target's parent, not the path's lexical
+		// parent. (No realpath: `realpath.native` fails on musl without /proc, and the read needs none.)
+		parsed = JSON.parse(readFileSync(path, "utf-8"));
 	} catch (err) {
 		throw new Error(
 			`--tenant-config ${scrubForTerminal(path)} could not be read as JSON (${err instanceof Error ? scrubForTerminal(err.message) : "error"})`,
@@ -431,7 +431,9 @@ function userPath(root: string, p: string): string {
  * `mode` option only applies at creation, so writing through an existing 0644 file left a financial report world-readable.
  */
 function writeReportFile(target: string, text: string): void {
-	const tmp = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now()}.tmp`);
+	// The temp file is built as a STRING in the target's own directory: `path.join` would collapse `link/..` lexically and put the
+	// temp file in a different directory than the OS resolves the target to (inside the vault, for `.usertrust/link/../r.md`).
+	const tmp = `${dirname(target)}${sep}.${basename(target)}.${process.pid}.${Date.now()}.tmp`;
 	try {
 		writeFileSync(tmp, text, { encoding: "utf-8", mode: 0o600, flag: "wx" });
 		renameSync(tmp, target);
