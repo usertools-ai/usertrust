@@ -7,6 +7,12 @@ updates:
       interval: weekly
       day: monday
     groups:
+      # vitest and @vitest/* are one peer family: @vitest/coverage-v8 pins its peer vitest to the
+      # same exact version. Grouped so they always move in one PR; a split PR fails npm's ERESOLVE.
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
       production:
         dependency-type: production
       dev:
