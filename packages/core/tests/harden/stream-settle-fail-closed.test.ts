@@ -95,7 +95,7 @@ function openaiClient() {
 }
 
 /** `postPendingSpend` waits for `release()`, so a test can see what runs before it. */
-function makeEngine(opts: { gatePost?: boolean } = {}) {
+function makeEngine(opts: { gatePost?: boolean; failPost?: boolean } = {}) {
 	let release!: () => void;
 	const gate = new Promise<void>((resolve) => {
 		release = resolve;
@@ -107,6 +107,7 @@ function makeEngine(opts: { gatePost?: boolean } = {}) {
 		})),
 		postPendingSpend: vi.fn(async () => {
 			if (opts.gatePost === true) await gate;
+			if (opts.failPost === true) throw new Error("ledger POST failed");
 			posted = true;
 		}),
 		voidPendingSpend: vi.fn(async () => {}),
@@ -291,6 +292,25 @@ describe("a completed stream whose settlement audit fails (audit.failClosed)", (
 		expect(receipt.auditDegraded).toBe(true);
 		expect(engine.postPendingSpend).toHaveBeenCalledTimes(1);
 		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(unhandled).toEqual([]);
+		await governed.destroy();
+	});
+
+	it("a failed ledger POST under failClosed, audit healthy, is ambiguous: the loop ends cleanly", async () => {
+		// Only the failClosed AUDIT refusal reaches the iteration. A POST that fails is
+		// caught inside settlement and recorded as ambiguous (the hold may still be posted
+		// or voided later), and the receipt says so: settled: false, nothing voided.
+		const { engine } = makeEngine({ failPost: true });
+		const audit = makeAudit({ failLlmCall: false });
+		const { governed, stream } = await governedStream(true, engine, audit);
+		expect(await iterate(stream)).toBeUndefined();
+		const receipt = await stream.receipt;
+		expect(receipt.settled).toBe(false);
+		expect(receipt.auditDegraded).not.toBe(true);
+		expect(engine.postPendingSpend).toHaveBeenCalledTimes(1);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		const kinds = vi.mocked(audit.appendEvent).mock.calls.map(([e]) => e.kind);
+		expect(kinds).toContain("settlement_ambiguous");
 		expect(unhandled).toEqual([]);
 		await governed.destroy();
 	});
