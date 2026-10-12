@@ -8,10 +8,38 @@
  * The listing is `git ls-files` from the repository root, so the guard sees
  * every tracked path in every package, not only `site/`. It lives in the
  * site's suite because that suite already runs in CI (`site-build`).
+ *
+ * THE INVARIANT IS ON BYTES. A font is found by its content, whatever its name
+ * (`fontMagic`, `inlineFonts`). The formats, and where each signature comes from:
+ * - file(1)'s magic database, `Magdir/fonts` (rev 1.46, file 5.41): the sfnt
+ *   versions `\0\1\0\0`, `true` and `typ1`; `OTTO`; `ttcf` (collections, .ttc/.otc);
+ *   `wOFF` and `wOF2`; PostScript Type 1 (`%!PS-AdobeFont-1.`, `%!FontType1`,
+ *   `%!PS-Adobe-3.0 Resource-Font`, at offset 0 as text or at 6 after a PFB segment
+ *   header); X11 BDF (`STARTFONT `); X11 PCF (`\x01fcp`); PFR (`PFR0`, `PFR1`);
+ *   FontForge sources (`SplineFontDB:`).
+ * - The Embedded OpenType submission (W3C, 2008), section 3: EOT has no leading
+ *   signature. Its little-endian header holds MagicNumber 0x504C at offset 34 (`LP`)
+ *   and Version 0x00010000, 0x00020001 or 0x00020002 at offset 8, and EOTSize at
+ *   offset 0 is the whole file's length. All three are required.
+ * - Adobe Technical Note 5012 (Type 42): `%!PS-TrueTypeFont`.
+ * - SVG 1.1, chapter 20: an SVG font is a `<font>` element with `<glyph>` or
+ *   `<font-face>` children inside `<svg>`.
+ * Not covered: legacy bitmap and console formats in the same database (Berkeley
+ * vfont, X11 SNF and Speedo, GRUB PFF2, libGrx, DOS code pages, GEM GDOS, FIGlet),
+ * Windows .fon/.fnt (executables), Mac resource-fork fonts (.dfont), Adobe printer
+ * metrics (.pfm, which carry no glyphs), UFO sources, and a font inside an archive
+ * or another document (zip, PDF). Inline base64 is found only for the formats with
+ * a four-byte leading signature; a base64 EOT or PFB is not.
+ *
+ * THE URL CHECKS ARE BEST EFFORT. `nonKitFontUrls` and `fontSources` catch a
+ * non-kit font URL by its extension or its context, but a static scan of source
+ * can always be bypassed by one more indirection (an imported stylesheet, CSS
+ * built at runtime, a fetch). A gap there is a follow-up; the bytes rule above is
+ * the invariant.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { closeSync, openSync, readFileSync, readSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -23,24 +51,64 @@ const KIT_FONTS = "https://usertrust.ai/kit/fonts/";
 const FONT_FILE = /\.(?:woff2?|ttf|otf|eot|ttc|otc)$/i;
 
 /**
- * A font file's first four bytes, by format: WOFF2, WOFF, OpenType (CFF), a font collection
- * (.ttc/.otc), TrueType (0x00010000) and old Mac TrueType (`true`). A font is found by its
- * BYTES, whatever its name: a font renamed `.png`, or a collection under any name, is still
- * one. The last two are four bytes a text file could start with by chance, so they count only
- * in a binary file.
+ * A font file's leading bytes, by format (see the header for the sources). The ambiguous
+ * four-byte sfnt versions (`\0\1\0\0`, `true`, `typ1`) count only in a binary file, since a
+ * text file could start with them by chance; the text formats (PFA, Type 42, BDF, FontForge)
+ * count only in a text file.
  */
 const FONT_MAGICS: ReadonlyArray<{
 	format: string;
+	at: number;
 	bytes: readonly number[];
-	binaryOnly: boolean;
+	kind: "any" | "binary" | "text";
 }> = [
-	{ format: "woff2", bytes: [0x77, 0x4f, 0x46, 0x32], binaryOnly: false },
-	{ format: "woff", bytes: [0x77, 0x4f, 0x46, 0x46], binaryOnly: false },
-	{ format: "otf", bytes: [0x4f, 0x54, 0x54, 0x4f], binaryOnly: false },
-	{ format: "collection", bytes: [0x74, 0x74, 0x63, 0x66], binaryOnly: false },
-	{ format: "ttf", bytes: [0x00, 0x01, 0x00, 0x00], binaryOnly: true },
-	{ format: "ttf (true)", bytes: [0x74, 0x72, 0x75, 0x65], binaryOnly: true },
+	{ format: "woff2", at: 0, bytes: ascii("wOF2"), kind: "any" },
+	{ format: "woff", at: 0, bytes: ascii("wOFF"), kind: "any" },
+	{ format: "otf", at: 0, bytes: ascii("OTTO"), kind: "any" },
+	{ format: "collection", at: 0, bytes: ascii("ttcf"), kind: "any" },
+	{ format: "ttf", at: 0, bytes: [0x00, 0x01, 0x00, 0x00], kind: "binary" },
+	{ format: "ttf (true)", at: 0, bytes: ascii("true"), kind: "binary" },
+	{ format: "ttf (typ1)", at: 0, bytes: ascii("typ1"), kind: "binary" },
+	{ format: "type1 (pfb)", at: 6, bytes: ascii("%!PS-AdobeFont-1."), kind: "binary" },
+	{ format: "type1 (pfb)", at: 6, bytes: ascii("%!FontType1"), kind: "binary" },
+	{ format: "type1 (pfa)", at: 0, bytes: ascii("%!PS-AdobeFont-1."), kind: "text" },
+	{ format: "type1 (pfa)", at: 0, bytes: ascii("%!FontType1"), kind: "text" },
+	{ format: "type1 (pfa)", at: 0, bytes: ascii("%!PS-Adobe-3.0 Resource-Font"), kind: "text" },
+	{ format: "type42", at: 0, bytes: ascii("%!PS-TrueTypeFont"), kind: "text" },
+	{ format: "bdf", at: 0, bytes: ascii("STARTFONT "), kind: "text" },
+	{ format: "pcf", at: 0, bytes: [0x01, 0x66, 0x63, 0x70], kind: "any" },
+	{ format: "pfr", at: 0, bytes: ascii("PFR0"), kind: "any" },
+	{ format: "pfr", at: 0, bytes: ascii("PFR1"), kind: "any" },
+	{ format: "fontforge", at: 0, bytes: ascii("SplineFontDB:"), kind: "text" },
 ];
+
+function ascii(text: string): number[] {
+	return [...text].map((c) => c.charCodeAt(0));
+}
+
+/** The EOT versions the submission defines (section 3.1 to 3.3). */
+const EOT_VERSIONS = new Set([0x00010000, 0x00020001, 0x00020002]);
+
+/**
+ * Whether `bytes` is an EOT header for a file of `size` bytes: MagicNumber `LP` (0x504C,
+ * little-endian) at offset 34, a defined Version at offset 8, and EOTSize at offset 0 equal to
+ * the file's length, with FontDataSize at offset 4 inside it. All little-endian.
+ */
+function isEot(bytes: Uint8Array, size: number): boolean {
+	if (bytes.length < 36) return false;
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	return (
+		bytes[34] === 0x4c &&
+		bytes[35] === 0x50 &&
+		EOT_VERSIONS.has(view.getUint32(8, true)) &&
+		view.getUint32(0, true) === size &&
+		view.getUint32(4, true) > 0 &&
+		view.getUint32(4, true) < size
+	);
+}
+
+/** An SVG font: a `<font>` with glyphs or a font-face, inside `<svg>` (SVG 1.1, chapter 20). */
+const SVG_FONT = /<svg\b[\s\S]*?<font[\s>][\s\S]*?<(?:glyph|font-face|missing-glyph)\b/i;
 
 /**
  * The same four bytes as they open a base64 run: the first FIVE characters (30 bits). The
@@ -60,13 +128,20 @@ function isText(bytes: Uint8Array): boolean {
 	return !bytes.subarray(0, 8000).includes(0);
 }
 
-/** The font format `bytes` starts with, or null. */
-export function fontMagic(bytes: Uint8Array): string | null {
-	for (const { format, bytes: magic, binaryOnly } of FONT_MAGICS) {
-		if (bytes.length < 12 || !magic.every((b, i) => bytes[i] === b)) continue;
-		if (binaryOnly && isText(bytes)) continue;
+/**
+ * The font format a file is, from its leading `bytes` (at least its first 8000, as `head`
+ * reads them) and its `size`, or null. See the header for the formats and their sources.
+ */
+export function fontMagic(bytes: Uint8Array, size: number = bytes.length): string | null {
+	const text = isText(bytes);
+	for (const { format, at, bytes: magic, kind } of FONT_MAGICS) {
+		if (bytes.length < Math.max(12, at + magic.length)) continue;
+		if (!magic.every((b, i) => bytes[at + i] === b)) continue;
+		if ((kind === "binary" && text) || (kind === "text" && !text)) continue;
 		return format;
 	}
+	if (isEot(bytes, size)) return "eot";
+	if (text && SVG_FONT.test(Buffer.from(bytes).toString("latin1"))) return "svg font";
 	return null;
 }
 
@@ -373,7 +448,7 @@ test("no tracked file is a font by its BYTES, whatever its name", () => {
 	assert.ok(files.length > 100, "the listing is the whole repository");
 	const fonts = files
 		.filter((path) => !Object.hasOwn(ALLOWED_FONT_FILES, path))
-		.map((path) => [path, fontMagic(head(path))] as const)
+		.map((path) => [path, fontMagic(head(path), statSync(join(REPO_ROOT, path)).size)] as const)
 		.filter(([, format]) => format !== null)
 		.map(([path, format]) => `${path}: ${format}`);
 	assert.deepEqual(fonts, [], "font files must load from https://usertrust.ai/kit/ at runtime");
@@ -505,4 +580,94 @@ test("a font source is known by its CONTEXT, whatever its name, and must be the 
 	assert.deepEqual(nonKitFontUrls('<link rel="preload" as="image" href="/hero.avif" />'), []);
 	assert.deepEqual(nonKitFontUrls('.hero { background: url("/hero.avif"); }'), []);
 	assert.deepEqual(nonKitFontUrls('preload("/hero.avif", { as: "image" });'), []);
+});
+
+/** A stand-in file of `size` bytes: `prefix` at offset `at`, then binary filler (NULs in it). */
+function fakeBinary(prefix: number[] | string, at = 0, size = 2048): Buffer {
+	const bytes = Buffer.alloc(size);
+	for (let i = 0; i < size; i += 1) bytes[i] = (i * 7919) % 251;
+	bytes[1] = 0;
+	Buffer.from(typeof prefix === "string" ? Buffer.from(prefix, "latin1") : prefix).copy(bytes, at);
+	return bytes;
+}
+
+/** An EOT header (W3C submission, section 3) over a file of `size` bytes, little-endian. */
+function fakeEot({
+	size = 4096,
+	version = 0x00020001,
+	magic = 0x504c,
+	eotSize = size,
+	fontDataSize = size - 200,
+} = {}): Buffer {
+	const bytes = fakeBinary([], 0, size);
+	bytes.writeUInt32LE(eotSize, 0);
+	bytes.writeUInt32LE(fontDataSize, 4);
+	bytes.writeUInt32LE(version, 8);
+	bytes.writeUInt16LE(magic, 34);
+	return bytes;
+}
+
+test("every font format is found by its bytes under a .bin name (file(1)'s formats, EOT, SVG)", () => {
+	const pfbHeader = (text: string) => [0x80, 0x01, 0x10, 0x27, 0x00, 0x00, ...ascii(text)];
+	const cases: Array<[string, Buffer, string]> = [
+		["font.bin (woff2)", fakeBinary("wOF2"), "woff2"],
+		["font.bin (woff)", fakeBinary("wOFF"), "woff"],
+		["font.bin (OpenType CFF)", fakeBinary("OTTO"), "otf"],
+		["font.bin (collection)", fakeBinary("ttcf"), "collection"],
+		["font.bin (TrueType)", fakeBinary([0x00, 0x01, 0x00, 0x00]), "ttf"],
+		["font.bin (Apple true)", fakeBinary("true"), "ttf (true)"],
+		["font.bin (Apple typ1)", fakeBinary("typ1"), "ttf (typ1)"],
+		["font.bin (EOT v1)", fakeEot({ version: 0x00010000 }), "eot"],
+		["font.bin (EOT v2.1)", fakeEot({ version: 0x00020001 }), "eot"],
+		["font.bin (EOT v2.2)", fakeEot({ version: 0x00020002 }), "eot"],
+		["font.bin (Type 1 PFB)", fakeBinary(pfbHeader("%!PS-AdobeFont-1.0: X 001")), "type1 (pfb)"],
+		[
+			"font.bin (Type 1 PFB, FontType1)",
+			fakeBinary(pfbHeader("%!FontType1-1.0: X")),
+			"type1 (pfb)",
+		],
+		["font.bin (X11 PCF)", fakeBinary([0x01, 0x66, 0x63, 0x70]), "pcf"],
+		["font.bin (PFR)", fakeBinary("PFR1"), "pfr"],
+		[
+			"font.bin (Type 1 PFA)",
+			Buffer.from("%!PS-AdobeFont-1.0: X 001\n/FontName /X def\n"),
+			"type1 (pfa)",
+		],
+		["font.bin (Type 1 resource)", Buffer.from("%!PS-Adobe-3.0 Resource-Font\n"), "type1 (pfa)"],
+		[
+			"font.bin (Type 42)",
+			Buffer.from("%!PS-TrueTypeFont-1.0\n/sfnts [<00010000>] def\n"),
+			"type42",
+		],
+		["font.bin (BDF)", Buffer.from("STARTFONT 2.1\nFONT -x-\nSIZE 16 75 75\n"), "bdf"],
+		["font.bin (FontForge)", Buffer.from("SplineFontDB: 3.2\nFontName: X\n"), "fontforge"],
+		[
+			"font.bin (SVG font)",
+			Buffer.from(
+				'<svg xmlns="http://www.w3.org/2000/svg"><defs><font id="x" horiz-adv-x="500"><font-face font-family="X"/><glyph unicode="a" d="M0 0"/></font></defs></svg>',
+			),
+			"svg font",
+		],
+	];
+	for (const [name, bytes, format] of cases)
+		assert.equal(fontMagic(bytes, bytes.length), format, name);
+});
+
+test("EOT needs all three header facts; near misses and the controls are not fonts", () => {
+	// EOT: the magic alone is not enough, and neither is a header over a file of another size.
+	assert.equal(fontMagic(fakeEot({ magic: 0x4c50 })), null, "MagicNumber byte-swapped");
+	assert.equal(fontMagic(fakeEot({ version: 0x00030000 })), null, "an undefined Version");
+	assert.equal(fontMagic(fakeEot({ eotSize: 4000 })), null, "EOTSize is not the file's length");
+	assert.equal(fontMagic(fakeEot({ fontDataSize: 0 })), null, "no font data");
+	assert.equal(fontMagic(fakeEot({ fontDataSize: 5000 })), null, "font data larger than the file");
+	// A plain binary (an image, a build artifact) and plain text are not fonts.
+	assert.equal(fontMagic(fakeBinary([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), null);
+	assert.equal(fontMagic(fakeBinary("GIF89a")), null);
+	assert.equal(fontMagic(Buffer.from("# Notes\n\nThe font is loaded from the kit.\n")), null);
+	// An ordinary SVG icon is not a font; `<font` without glyphs is not either.
+	assert.equal(fontMagic(Buffer.from('<svg viewBox="0 0 1 1"><path d="M0 0h1v1z"/></svg>')), null);
+	assert.equal(fontMagic(Buffer.from("<svg><text><font>legacy</font></text></svg>")), null);
+	// A text format's signature in a binary file, and a binary one's in text, do not count.
+	assert.equal(fontMagic(fakeBinary("STARTFONT ")), null);
+	assert.equal(fontMagic(Buffer.from("typ1 is a word\n")), null);
 });
