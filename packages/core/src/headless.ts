@@ -602,7 +602,12 @@ export interface UnheldSettlementParams {
  */
 export type UnheldSettlementOutcome =
 	| { readonly outcome: "held"; readonly transferId: string }
-	| { readonly outcome: "unrecoverable"; readonly recorded: boolean };
+	| {
+			readonly outcome: "unrecoverable";
+			readonly recorded: boolean;
+			/** The event IS on the chain, but the writer reported a failure after it (its sidecar write). */
+			readonly auditDegraded?: true;
+	  };
 
 /** Remembered `settlement_unrecoverable` records, so an exact retry is not recorded twice. */
 export const UNHELD_RECORD_MEMORY = 10_000;
@@ -2482,17 +2487,22 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// sidecar, and records the event's hash on a rejection that came after the event was durable.
 			// Then the record IS on the chain: it counts as recorded, and the retry must not write it a
 			// second time. (Sharers of an in-flight append see the same outcome.)
-			const append = audit
+			// The rejection is still a DEGRADED write (the sidecar failed), and the caller is told so: a
+			// record that is on the chain but whose writer reported a failure is not the same answer as a
+			// clean one.
+			const append: Promise<{ degraded: boolean }> = audit
 				.appendEvent({ kind: "settlement_unrecoverable", actor: "local", data })
 				.then(
-					() => undefined,
+					() => ({ degraded: false }),
 					(err: unknown) => {
 						if (readDurableEventHash(err) === undefined) throw err;
+						return { degraded: true };
 					},
 				);
 			unheldInFlight.set(key, append);
+			let degraded: boolean;
 			try {
-				await append;
+				degraded = (await append).degraded;
 			} finally {
 				unheldInFlight.delete(key);
 			}
@@ -2501,7 +2511,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				const oldest = unheldRecorded.values().next().value;
 				if (oldest !== undefined) unheldRecorded.delete(oldest);
 			}
-			return { outcome: "unrecoverable", recorded: true };
+			return degraded
+				? { outcome: "unrecoverable", recorded: true, auditDegraded: true }
+				: { outcome: "unrecoverable", recorded: true };
 		},
 
 		async destroy(): Promise<void> {

@@ -586,6 +586,8 @@ export function createUsertrustServer(opts: {
 					"no hold for this transferId here (swept, restarted or already settled): the settle is recorded, not charged. Authorize again and settle to be charged.",
 				transferId,
 				recorded: outcome.recorded,
+				// On the chain, but the writer reported a failure after it: said, never folded into `recorded`.
+				...(outcome.auditDegraded === true ? { auditDegraded: true } : {}),
 			});
 		} catch (err) {
 			const mapped = toHttpError(err);

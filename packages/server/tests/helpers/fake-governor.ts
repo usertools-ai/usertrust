@@ -62,6 +62,8 @@ export function createFakeGovernor(
 			/** Answer `held` for this many calls, then unrecoverable: a hold mid-release. */
 			heldFor?: number;
 			rateLimited?: boolean;
+			/** Answer recorded with the degraded-write flag: on the chain, but the writer reported a failure. */
+			auditDegraded?: boolean;
 		};
 	} = {},
 ): FakeGovernorHandle {
@@ -166,7 +168,9 @@ export function createFakeGovernor(
 			if (opts.unheld?.heldFor !== undefined && calls.unheld.length <= opts.unheld.heldFor) {
 				return { outcome: "held", transferId: params.transferId };
 			}
-			return { outcome: "unrecoverable", recorded: opts.unheld?.recorded ?? true };
+			return opts.unheld?.auditDegraded === true
+				? { outcome: "unrecoverable", recorded: true, auditDegraded: true }
+				: { outcome: "unrecoverable", recorded: opts.unheld?.recorded ?? true };
 		},
 		async destroy(): Promise<void> {
 			pending.clear();

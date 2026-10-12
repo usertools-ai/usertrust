@@ -445,15 +445,24 @@ describe("a rejected append that is already durable is a record, not a failure t
 			});
 		});
 		const params = { transferId: GONE, inputTokens: 3 };
+		// On the chain, and the writer reported a failure after it: both facts are in the answer.
 		expect(await g.recordUnheldSettlement(params)).toEqual({
 			outcome: "unrecoverable",
 			recorded: true,
+			auditDegraded: true,
 		});
 		expect(await g.recordUnheldSettlement(params)).toEqual({
 			outcome: "unrecoverable",
 			recorded: false,
 		});
 		expect(audit.events).toHaveLength(1);
+	});
+
+	it("a clean append carries no auditDegraded key", async () => {
+		const g = await recording().gov();
+		const r = await g.recordUnheldSettlement({ transferId: GONE, inputTokens: 3 });
+		expect(r).toEqual({ outcome: "unrecoverable", recorded: true });
+		expect("auditDegraded" in r).toBe(false);
 	});
 
 	it("an ordinary failure (nothing durable) is still thrown, and the retry records", async () => {
