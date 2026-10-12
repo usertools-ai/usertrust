@@ -25,19 +25,32 @@
  * - Adobe Technical Note 5012 (Type 42): `%!PS-TrueTypeFont`.
  * - SVG 1.1, chapter 20: an SVG font is a `<font>` element with `<glyph>` or
  *   `<font-face>` children inside `<svg>`.
- * Not covered: legacy bitmap and console formats in the same database (Berkeley
- * vfont, X11 SNF and Speedo, GRUB PFF2, libGrx, DOS code pages, GEM GDOS, FIGlet),
- * Windows .fon/.fnt (executables), Mac resource-fork fonts (.dfont), Adobe printer
- * metrics (.pfm, which carry no glyphs), UFO sources, and a font inside an archive
- * or another document (zip, PDF). Inline base64 is found only for the formats with
- * a four-byte leading signature; a base64 EOT or PFB is not.
+ * - The OpenType specification, "Organization of an OpenType font": every
+ *   TrueType/OpenType font begins with a table directory (sfntVersion, numTables,
+ *   searchRange, entrySelector, rangeShift, then 16-byte table records). It is
+ *   searched for ANYWHERE in a file (`sfntDirectories`), so sfnt data inside an
+ *   uncompressed container (a Mac .dfont or suitcase, any binary) is found.
+ * - The UFO 3 specification, GLIF: a glyph file is a `<glyph>` with an `<outline>`
+ *   of `<contour>`s.
+ *
+ * SCOPE. The invariant protects the brand FACES, which are outline fonts. In scope:
+ * outline-font data (sfnt TrueType/OpenType and CFF, Type 1, and their sources) in
+ * any form a byte scan can see. Out of scope, because they cannot carry a brand face:
+ * bitmap and console formats (Berkeley vfont, X11 SNF and Speedo, GRUB PFF2, libGrx,
+ * DOS code pages, GEM GDOS, FIGlet; BDF and PCF are flagged anyway), Windows .fon/.fnt,
+ * and metrics-only Adobe .pfm. Declared beyond this scan: data in a COMPRESSED
+ * container (zip, gzip, a compressed PDF stream) is beyond any byte scan; inline
+ * base64 is found only for the formats with a four-byte leading signature (a base64
+ * EOT or PFB is not); proprietary editor sources (FontLab .vfb, Glyphs .glyphs) are
+ * not parsed.
  *
  * READ WINDOWS. Each detector reads what its form needs, and no less:
  * - a signature at a fixed offset (every one in `FONT_MAGICS`, at most 36 bytes in;
  *   EOT's MagicNumber at 34, a PFB's header at 6) reads the first HEAD_BYTES (`head`),
  *   which is also the window of git's own text-or-binary test;
- * - a form that can stand ANYWHERE in a file (an SVG font, a `data:` font URL, a
- *   base64 font, an embedded PostScript font program) is searched over the WHOLE file,
+ * - a form that can stand ANYWHERE in a file (an sfnt table directory, an SVG font, a
+ *   UFO glyph, a `data:` font URL, a base64 font, an embedded PostScript font
+ *   program) is searched over the WHOLE file,
  *   every tracked file, binary or text (`fontsInFile`). The largest tracked file is
  *   14 MB, so each is read whole.
  *
@@ -67,7 +80,7 @@ const SITE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = resolve(SITE_ROOT, "..");
 const KIT_FONTS = "https://usertrust.ai/kit/fonts/";
 
-const FONT_FILE = /\.(?:woff2?|ttf|otf|eot|ttc|otc)$/i;
+const FONT_FILE = /\.(?:woff2?|ttf|otf|eot|ttc|otc|dfont)$/i;
 
 /**
  * A font file's leading bytes, by format (see the header for the sources). The ambiguous
@@ -140,6 +153,54 @@ function hasSvgFont(text: string): boolean {
 	);
 }
 
+/** A UFO glyph (UFO 3, GLIF): a `<glyph>` with an `<outline>` of `<contour>`s, anywhere. */
+function hasUfoGlyph(text: string): boolean {
+	return /<glyph\b/.test(text) && /<outline>/.test(text) && /<contour\b/.test(text);
+}
+
+/** The sfnt versions a table directory starts with (OpenType spec; Apple's `true`, `typ1`). */
+const SFNT_VERSIONS = [[0x00, 0x01, 0x00, 0x00], ascii("OTTO"), ascii("true"), ascii("typ1")];
+
+/**
+ * Every offset in `bytes` where an sfnt TABLE DIRECTORY starts (OpenType spec, "Organization
+ * of an OpenType font"): a version word, then numTables (1 to 64), then searchRange,
+ * entrySelector and rangeShift exactly as the spec derives them from numTables, then that
+ * many 16-byte table records whose tags are four printable characters and include `cmap`
+ * and `head`, which every TrueType and OpenType font has. Searched over the whole file, so
+ * sfnt data inside any uncompressed container (a Mac .dfont, a suitcase, any binary) is
+ * found. A version word alone is not a directory.
+ */
+export function sfntDirectories(bytes: Uint8Array): number[] {
+	const found: number[] = [];
+	const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	for (const version of SFNT_VERSIONS) {
+		const word = Buffer.from(version);
+		for (let at = buffer.indexOf(word); at !== -1; at = buffer.indexOf(word, at + 1)) {
+			if (at + 12 > buffer.length) break;
+			const tables = buffer.readUInt16BE(at + 4);
+			if (tables < 1 || tables > 64 || at + 12 + tables * 16 > buffer.length) continue;
+			const power = 2 ** Math.floor(Math.log2(tables));
+			if (
+				buffer.readUInt16BE(at + 6) !== power * 16 ||
+				buffer.readUInt16BE(at + 8) !== Math.log2(power) ||
+				buffer.readUInt16BE(at + 10) !== tables * 16 - power * 16
+			) {
+				continue;
+			}
+			const tags: string[] = [];
+			for (let t = 0; t < tables; t += 1) {
+				const tag = buffer.subarray(at + 12 + t * 16, at + 16 + t * 16);
+				if (!tag.every((c) => c >= 0x20 && c <= 0x7e)) break;
+				tags.push(tag.toString("latin1"));
+			}
+			if (tags.length === tables && tags.includes("cmap") && tags.includes("head")) {
+				found.push(at);
+			}
+		}
+	}
+	return found.sort((a, b) => a - b);
+}
+
 /**
  * A PostScript font program anywhere in a text: a Type 1 or Type 42 font embedded in a
  * PostScript or EPS document (file(1)'s Type 1 signatures and Adobe TN 5012's Type 42 one).
@@ -207,6 +268,7 @@ export function inlineFonts(text: string): string[] {
 	for (const m of text.matchAll(run))
 		found.push(`base64 ${m[0].slice(0, 12)}… (${m[0].length} chars)`);
 	if (hasSvgFont(text)) found.push("svg font");
+	if (hasUfoGlyph(text)) found.push("ufo glyph");
 	const program = POSTSCRIPT_FONT.exec(text);
 	if (program) found.push(`postscript font program (${program[0]})`);
 	return found;
@@ -366,6 +428,7 @@ test("the matcher catches every font extension, at any depth and in any case", (
 			"e/f.eot",
 			"h.ttc",
 			"i/j.OTC",
+			"k/brand.dfont",
 			"site/public/fonts/OFL.txt",
 			"g.woff2.md",
 			"woff2",
@@ -378,6 +441,7 @@ test("the matcher catches every font extension, at any depth and in any case", (
 			"e/f.eot",
 			"h.ttc",
 			"i/j.OTC",
+			"k/brand.dfont",
 		],
 	);
 });
@@ -499,8 +563,10 @@ export function fontsInFile(path: string): string[] {
 	const found: string[] = [];
 	const format = fontMagic(head(absolute), statSync(absolute).size);
 	if (format !== null) found.push(format);
+	const whole = readFileSync(absolute);
+	for (const at of sfntDirectories(whole)) found.push(`sfnt table directory at ${at}`);
 	if (path === SELF) return found;
-	found.push(...inlineFonts(readFileSync(absolute).toString("latin1")));
+	found.push(...inlineFonts(whole.toString("latin1")));
 	return found;
 }
 
@@ -766,4 +832,118 @@ test("a form that can stand anywhere is found anywhere: each one at byte 50,000,
 	assert.deepEqual(at("icons-plain.svg", icons, "</svg>"), []);
 	assert.deepEqual(at("page-plain.md", prose, "The end.\n"), []);
 	assert.deepEqual(at("blob-plain.bin", binary, "trailer"), []);
+});
+
+/** An sfnt table directory (OpenType spec) for `tags`, with the header fields derived as the spec says. */
+function sfntDirectory(
+	version: number[] | string,
+	tags: string[],
+	{ searchRange }: { searchRange?: number } = {},
+): Buffer {
+	const n = tags.length;
+	const power = n === 0 ? 1 : 2 ** Math.floor(Math.log2(n));
+	const bytes = Buffer.alloc(12 + n * 16);
+	Buffer.from(typeof version === "string" ? ascii(version) : version).copy(bytes, 0);
+	bytes.writeUInt16BE(n, 4);
+	bytes.writeUInt16BE(searchRange ?? power * 16, 6);
+	bytes.writeUInt16BE(Math.log2(power), 8);
+	bytes.writeUInt16BE(Math.max(0, n * 16 - power * 16), 10);
+	tags.forEach((tag, i) => {
+		Buffer.from(tag, "latin1").copy(bytes, 12 + i * 16);
+		bytes.writeUInt32BE(0x1234_5678, 16 + i * 16);
+		bytes.writeUInt32BE(256 + i * 64, 20 + i * 16);
+		bytes.writeUInt32BE(64, 24 + i * 16);
+	});
+	return bytes;
+}
+
+const TRUETYPE_TAGS = ["cmap", "glyf", "head", "hhea", "hmtx", "loca", "maxp", "name", "post"];
+
+test("sfnt data is found by its table directory anywhere in a file: embedded, a .dfont, an OpenType CFF", () => {
+	const dir = mkdtempSync(join(tmpdir(), "no-font-files-sfnt-"));
+	const write = (name: string, bytes: Buffer) => {
+		const path = join(dir, name);
+		writeFileSync(path, bytes);
+		return fontsInFile(path);
+	};
+	// TrueType tables embedded 1,000 bytes into an arbitrary binary.
+	const lead = fakeBinary("GIF89a", 0, 1000);
+	const tail = fakeBinary([0, 0], 0, 3000);
+	assert.deepEqual(
+		write("blob.bin", Buffer.concat([lead, sfntDirectory([0, 1, 0, 0], TRUETYPE_TAGS), tail])),
+		["sfnt table directory at 1000"],
+	);
+	// A Mac .dfont: a resource fork whose font resource holds the sfnt data after a length word.
+	const fork = Buffer.alloc(260);
+	fork.writeUInt32BE(256, 0);
+	fork.writeUInt32BE(4096, 256);
+	assert.deepEqual(
+		write("brand.dfont", Buffer.concat([fork, sfntDirectory([0, 1, 0, 0], TRUETYPE_TAGS), tail])),
+		["sfnt table directory at 260"],
+	);
+	// An OpenType CFF font's directory, embedded.
+	assert.deepEqual(
+		write(
+			"cff.bin",
+			Buffer.concat([
+				lead,
+				sfntDirectory("OTTO", [
+					"CFF ",
+					"OS/2",
+					"cmap",
+					"head",
+					"hhea",
+					"hmtx",
+					"maxp",
+					"name",
+					"post",
+				]),
+				tail,
+			]),
+		),
+		["sfnt table directory at 1000"],
+	);
+});
+
+test("an sfnt directory must be one: near misses and plain files hold none", () => {
+	const lead = fakeBinary("GIF89a", 0, 1000);
+	const at = (bytes: Buffer) =>
+		sfntDirectories(Buffer.concat([lead, bytes, fakeBinary([0], 0, 600)]));
+	// The control: the real thing is found.
+	assert.deepEqual(at(sfntDirectory([0, 1, 0, 0], TRUETYPE_TAGS)), [1000]);
+	// A version word alone, with what follows not a directory.
+	assert.deepEqual(at(Buffer.from([0, 1, 0, 0, 0x7f, 0x13, 0x22, 0x01, 0, 0, 0, 0])), []);
+	// A directory without cmap or head is not a font's.
+	assert.deepEqual(at(sfntDirectory([0, 1, 0, 0], ["glyf", "hhea", "loca", "maxp"])), []);
+	assert.deepEqual(at(sfntDirectory([0, 1, 0, 0], ["cmap", "glyf", "loca"])), []);
+	// searchRange not as the spec derives it (nine tables: 8 * 16 = 0x80, not 0x40).
+	assert.deepEqual(at(sfntDirectory([0, 1, 0, 0], TRUETYPE_TAGS, { searchRange: 0x40 })), []);
+	// No tables, too many, or records cut off by the end of the file.
+	assert.deepEqual(at(sfntDirectory([0, 1, 0, 0], [])), []);
+	const many = sfntDirectory([0, 1, 0, 0], TRUETYPE_TAGS);
+	many.writeUInt16BE(200, 4);
+	assert.deepEqual(at(many), []);
+	assert.deepEqual(
+		sfntDirectories(
+			Buffer.concat([lead, sfntDirectory([0, 1, 0, 0], TRUETYPE_TAGS).subarray(0, 60)]),
+		),
+		[],
+	);
+	// Tags that are not printable.
+	const binaryTags = sfntDirectory([0, 1, 0, 0], TRUETYPE_TAGS);
+	binaryTags[12] = 0x01;
+	assert.deepEqual(at(binaryTags), []);
+	// Plain files: noise, an image header, text.
+	assert.deepEqual(sfntDirectories(fakeBinary("GIF89a", 0, 50_000)), []);
+	assert.deepEqual(sfntDirectories(Buffer.from("cmap head glyf ".repeat(1000))), []);
+});
+
+test("a UFO glyph (outline source) is found; a glyph with no outline is not", () => {
+	const glif =
+		'<?xml version="1.0" encoding="UTF-8"?>\n<glyph name="a" format="2"><advance width="500"/><outline><contour><point x="0" y="0" type="line"/></contour></outline></glyph>\n';
+	assert.deepEqual(inlineFonts(glif), ["ufo glyph"]);
+	assert.deepEqual(
+		inlineFonts('<glyph name="space" format="2"><advance width="250"/></glyph>'),
+		[],
+	);
 });
