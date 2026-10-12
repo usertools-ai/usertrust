@@ -174,6 +174,8 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 			week = true;
 			continue;
 		}
+		// The global flag, already honoured by the caller as `jsonFlag`; here only so it is counted like every other option.
+		if (a === "--json") continue;
 		if ((VALUE_FLAGS as readonly string[]).includes(name)) {
 			const inline = eq >= 0;
 			const value = requireValue(name, inline ? a.slice(eq + 1) : argv[i + 1], inline);
@@ -229,6 +231,71 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 	};
 }
 
+const PAIRED_READ_ATTEMPTS = 6;
+
+function isInFlightTail(tail: Buffer, headHash: string): boolean {
+	const nl = tail.indexOf(0x0a);
+	if (nl === -1) return true; // empty, or a line the writer has not finished
+	if (!tail.subarray(nl + 1).every((b) => b !== 0x0a)) return false; // more than one complete line
+	try {
+		const e = JSON.parse(tail.subarray(0, nl).toString("utf-8")) as { previousHash?: unknown };
+		return e.previousHash === headHash;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Reads a log and its `.meta` anchor as one stable state. The writer fsyncs the log BEFORE it replaces the sidecar, so
+ * a read that straddles an append sees an old sidecar over a new log (or the reverse), which `verifyVault` would call a
+ * broken chain on a healthy vault. Read sidecar, log, sidecar; accept only when both sidecar reads are identical; then
+ * keep exactly the log PREFIX the sidecar describes (its `lastHash`), because bytes after it are an in-flight write.
+ * This is the same reading of "one extra event" as the writer-states spec (a classifier there is a follow-up).
+ * Returns "busy" when the sidecar changed on every attempt. A sidecar that is stable but matches no log line is NOT
+ * busy: the log is copied as read and the verifier reports the real mismatch.
+ */
+function readPaired(
+	logPath: string,
+	metaPath: string,
+	hooks?: ReportHooks,
+): { log: Buffer; meta: Buffer } | "busy" {
+	for (let attempt = 1; attempt <= PAIRED_READ_ATTEMPTS; attempt++) {
+		const m1 = readFileSync(metaPath);
+		const log = readFileSync(logPath);
+		hooks?.betweenReads?.(attempt);
+		const m2 = readFileSync(metaPath);
+		if (!m1.equals(m2)) continue;
+		let lastHash: string | undefined;
+		try {
+			const parsed = JSON.parse(m2.toString("utf-8")) as { lastHash?: unknown };
+			if (typeof parsed.lastHash === "string") lastHash = parsed.lastHash;
+		} catch {
+			// a corrupt sidecar is reported by the verifier, not decided here
+		}
+		if (lastHash === undefined) return { log, meta: m2 };
+		let offset = 0;
+		let cut = -1;
+		while (offset < log.length) {
+			const nl = log.indexOf(0x0a, offset);
+			if (nl === -1) break; // a line with no newline yet is an in-flight write
+			try {
+				const e = JSON.parse(log.subarray(offset, nl).toString("utf-8")) as { hash?: unknown };
+				if (e.hash === lastHash) cut = nl + 1;
+			} catch {
+				// not a parseable line: the verifier reports it
+			}
+			offset = nl + 1;
+		}
+		if (cut === -1) return { log, meta: m2 };
+		// Only a tail that LOOKS like an in-flight append is dropped: nothing, a line still being written (no newline
+		// yet), or exactly one complete event that chains from the anchored head. Anything else after the anchor
+		// (garbage, several events, a foreign event) is kept, so the verifier reports it rather than the snapshot hiding it.
+		if (isInFlightTail(log.subarray(cut), lastHash)) return { log: log.subarray(0, cut), meta: m2 };
+		return { log, meta: m2 };
+	}
+	return "busy";
+}
+
 /**
  * ONE snapshot of the vault: every audit file is read exactly once into a private temp directory, and the verdict AND the
  * figures both come from that copy. `verifyVault` and `readLedgerEvents` each read the files themselves, so run against
@@ -241,13 +308,19 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
  * examined is a PROBLEM, returned to the caller, and the report is UNVERIFIED with exit code 2: leaving the file out would
  * let the copy verify as a shorter (even an empty) chain.
  */
-export function snapshotVault(vaultPath: string): {
+export function snapshotVault(
+	vaultPath: string,
+	hooks?: ReportHooks,
+): {
 	dir: string;
 	problems: string[];
+	/** Non-empty when a log and its anchor never read as one stable state: a busy vault, NOT a broken chain. */
+	busy: string[];
 	cleanup: () => void;
 } {
 	const dir = mkdtempSync(join(tmpdir(), "usertrust-report-"));
 	const problems: string[] = [];
+	const busy: string[] = [];
 	const problem = (what: string, err: unknown): void => {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		problems.push(`Could not read ${what}${code !== undefined ? ` (${code})` : ""}`);
@@ -263,9 +336,11 @@ export function snapshotVault(vaultPath: string): {
 			} catch (err) {
 				problem("the audit directory", err);
 			}
+			const paired = new Set<string>();
 			for (const name of names) {
 				// A dot-named log segment is part of the chain the verifier reads; only the writer lock is not.
 				if (name === ".audit-writer.lock") continue;
+				if (paired.has(name)) continue;
 				const src = join(auditSrc, name);
 				let isFile: boolean;
 				try {
@@ -276,6 +351,19 @@ export function snapshotVault(vaultPath: string): {
 				}
 				if (!isFile) continue; // a subdirectory (anchors/, llm_call/) is not part of the chain
 				try {
+					const metaName = `${name}.meta`;
+					if (names.includes(metaName)) {
+						// A log with an anchor sidecar is read as ONE state (see readPaired), not as two independent files.
+						paired.add(metaName);
+						const got = readPaired(src, join(auditSrc, metaName), hooks);
+						if (got === "busy") {
+							busy.push(`audit/${name}`);
+							continue;
+						}
+						writeFileSync(join(auditDst, name), got.log, { mode: 0o600 });
+						writeFileSync(join(auditDst, metaName), got.meta, { mode: 0o600 });
+						continue;
+					}
 					writeFileSync(join(auditDst, name), readFileSync(src), { mode: 0o600 });
 				} catch (err) {
 					problem(`audit/${name}`, err);
@@ -294,7 +382,7 @@ export function snapshotVault(vaultPath: string): {
 		rmSync(dir, { recursive: true, force: true });
 		throw err;
 	}
-	return { dir, problems, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+	return { dir, problems, busy, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 /** `budget` (usertokens, a positive safe integer) from a tenant config file. */
@@ -332,6 +420,8 @@ function writeReportFile(target: string, text: string): void {
 export interface ReportHooks {
 	/** Test seam: runs right after the snapshot is taken, before anything is verified or read. */
 	afterSnapshot?: () => void;
+	/** Test seam: runs between the sidecar/log/sidecar reads of one attempt (a deterministic concurrent append). */
+	betweenReads?: (attempt: number) => void;
 }
 
 export async function run(
@@ -374,7 +464,7 @@ export async function run(
 			budget = readTenantBudget(resolve(root, parsed.tenantConfig));
 			budgetSource = "tenant config";
 		}
-		const snapshot = snapshotVault(vaultPath);
+		const snapshot = snapshotVault(vaultPath, hooks);
 		let model: ReturnType<typeof buildWeeklyReport>;
 		let verified: boolean;
 		try {
@@ -382,13 +472,18 @@ export async function run(
 			// verdict and figures from the SAME bytes
 			const verdict = verifyVault(snapshot.dir);
 			const events = readLedgerEvents(snapshot.dir);
-			verified = verdict.valid && snapshot.problems.length === 0;
+			// A vault that never read as one stable state is reported as BUSY, in words that are not a broken chain.
+			const busyErrors = snapshot.busy.map(
+				(f) =>
+					`Vault busy: ${f} changed on every read (a writer is appending); this is not a broken chain, run the report again`,
+			);
+			verified = verdict.valid && snapshot.problems.length === 0 && snapshot.busy.length === 0;
 			model = buildWeeklyReport(
 				events,
 				{
 					// A file the snapshot could not read is part of the verdict, never an omission from it.
-					verified: verdict.valid && snapshot.problems.length === 0,
-					errors: [...snapshot.problems, ...verdict.errors],
+					verified,
+					errors: busyErrors.length > 0 ? busyErrors : [...snapshot.problems, ...verdict.errors],
 					chainLength: verdict.chainLength,
 					firstEvent: verdict.firstEvent,
 					lastEvent: verdict.lastEvent,

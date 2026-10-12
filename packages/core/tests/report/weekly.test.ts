@@ -264,8 +264,33 @@ describe("weekly report model", () => {
 			call("2026-10-08T03:00:00Z", 1, { endpointClass: "local", costBasis: "nominal" }),
 		];
 		const m = build(events, { budget: 10_000 });
-		expect(m.budget.recordedSessionUt).toBe(100 + 30 + 500 + 1);
-		expect(m.budget.windowSessionUt).toBe(100 + 30 + 1);
+		expect(m.budget.recordedSessionUt).toBe(100 + 30 + 500);
+		expect(m.budget.windowSessionUt).toBe(100 + 30);
+		// the local call debited UNITS: kept in its own accumulator, never summed with the dollar figure
+		expect(m.budget.recordedSessionNominal).toBe(1);
+		expect(m.budget.windowSessionNominal).toBe(1);
+	});
+
+	it("a mixed window keeps session and attributed totals apart per denomination", () => {
+		const m = build(
+			[
+				call("2026-10-08T01:00:00Z", 100),
+				call("2026-10-08T02:00:00Z", 7, { endpointClass: "local", costBasis: "nominal" }),
+				call("2026-10-08T03:00:00Z", 900, { costCenter: "team-a" }),
+				call("2026-10-08T04:00:00Z", 11, {
+					costCenter: "team-a",
+					endpointClass: "local",
+					costBasis: "nominal",
+				}),
+			],
+			{ budget: 10_000 },
+		);
+		expect(m.budget.recordedSessionUt).toBe(100);
+		expect(m.budget.recordedSessionNominal).toBe(7);
+		expect(m.budget.recordedAttributedUt).toBe(900);
+		expect(m.budget.recordedAttributedNominal).toBe(11);
+		expect(m.totals.confirmedUt).toBe(1000);
+		expect(m.totals.nominalUt).toBe(18);
 	});
 
 	it("spend WITH a cost center is ATTRIBUTED, payer not recorded: it bounds the budget instead of being assumed away", () => {

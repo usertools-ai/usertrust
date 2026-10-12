@@ -175,8 +175,10 @@ switch (command) {
 		break;
 	}
 	case "report": {
-		// Forwarded verbatim minus the global --json: report.ts owns which of the rest are flags and which are values.
-		const rest = argv.slice(argv.indexOf("report") + 1).filter((a) => a !== JSON_FLAG);
+		// Forwarded verbatim, --json included wherever it appeared: report.ts owns which of the rest are flags and which
+		// are values, and it counts occurrences, so a repeated --json is refused like any other repeated option.
+		const at = argv.indexOf("report");
+		const rest = [...argv.slice(0, at).filter((a) => a === JSON_FLAG), ...argv.slice(at + 1)];
 		await import("./report.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
 	}

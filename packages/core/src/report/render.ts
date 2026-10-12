@@ -11,12 +11,30 @@
  */
 
 import { scrubForTerminal, toSafeJson } from "../cli/target.js";
-import { type ModelRow, type ReportModel, type Row, UT_TO_USD } from "./weekly.js";
+import {
+	type ModelRow,
+	type NominalUt,
+	type ReportModel,
+	type Row,
+	type UsdUt,
+	UT_TO_USD,
+} from "./weekly.js";
 
 export type ReportFormat = "md" | "html" | "json";
 
-function usd(ut: number): string {
+/** Dollars. Takes ONLY a dollar-denominated amount: a nominal-unit figure here is a compile error, not a review finding. */
+function usd(ut: UsdUt): string {
 	return `$${(ut * UT_TO_USD).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** A difference of two amounts in the SAME denomination (dollars). */
+function usdMinus(a: UsdUt, b: UsdUt): UsdUt {
+	return (a - b) as UsdUt;
+}
+
+/** Nominal units (a local endpoint): never dollars. */
+function nominalStr(ut: NominalUt): string {
+	return `${Math.round(ut).toLocaleString("en-US")} nominal units`;
 }
 
 function utStr(ut: number): string {
@@ -88,6 +106,11 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 	if (b.recordedAttributedUt > 0) {
 		lines.push(
 			`Spend carrying a cost center is ATTRIBUTED and its payer is not recorded (the cost-center envelope with a ledger, the session in a dry run): ${usd(b.recordedAttributedUt)} recorded, ${usd(b.windowAttributedUt)} this week. If the session paid for all of it, the budget is ${pct(b.usedFractionUpper ?? 0)} used${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}.`,
+		);
+	}
+	if (b.recordedSessionNominal > 0 || b.recordedAttributedNominal > 0) {
+		lines.push(
+			`Local calls debited nominal units, not dollars, and are in none of the dollar figures above: session ${nominalStr(b.recordedSessionNominal)} (${nominalStr(b.windowSessionNominal)} this week), attributed ${nominalStr(b.recordedAttributedNominal)} (${nominalStr(b.windowAttributedNominal)} this week).`,
 		);
 	}
 	lines.push("This is the configured budget against recorded spend, not the live ledger balance.");
@@ -163,6 +186,15 @@ export function renderMarkdown(m: ReportModel): string {
 			`- **Governed actions (non-model):** ${usd(t.actionUt)} across ${t.actionCalls} action(s), reported separately`,
 		);
 	}
+	if (t.nominalCalls > 0 || t.unconfirmedNominalCalls > 0) {
+		out.push(
+			`- **Nominal units (local calls, not dollars):** ${nominalStr(t.nominalUt)} across ${t.nominalCalls} confirmed call(s)${
+				t.unconfirmedNominalCalls > 0
+					? `; ${nominalStr(t.unconfirmedNominalUt)} across ${t.unconfirmedNominalCalls} unconfirmed call(s)`
+					: ""
+			}. These are bookkeeping units, in no dollar figure.`,
+		);
+	}
 	if (t.unlabelledCalls > 0) {
 		out.push(
 			`- **Of which denomination not recorded:** ${usd(t.unlabelledUt)} across ${t.unlabelledCalls} call(s) (older headless records: treated as dollars, but may include nominal units)`,
@@ -203,7 +235,7 @@ export function renderMarkdown(m: ReportModel): string {
 			`| Input | ${tokens(k.inputTokens)} | ${usd(k.inputUt)} |`,
 			`| Output | ${tokens(k.outputTokens)} | ${usd(k.outputUt)} |`,
 			`| Cache read | ${tokens(k.cacheReadTokens)} | ${usd(k.cacheReadUt)} |`,
-			`| Cache write (5 min) | ${tokens(k.cacheWriteTokens - k.cacheWrite1hTokens)} | ${usd(k.cacheWriteUt - k.cacheWrite1hUt)} |`,
+			`| Cache write (5 min) | ${tokens(k.cacheWriteTokens - k.cacheWrite1hTokens)} | ${usd(usdMinus(k.cacheWriteUt, k.cacheWrite1hUt))} |`,
 			`| Cache write (1 hour) | ${tokens(k.cacheWrite1hTokens)} | ${usd(k.cacheWrite1hUt)} |`,
 			"",
 			`Cache write is ${k.cacheWriteShare === null ? "n/a" : pct(k.cacheWriteShare)} of provider-reported cost. It is a cost driver, not avoidable spend. Tier costs are tokens times the rates applied on each call; per-call rounding makes them differ from the metered ${usd(k.costUt)} by ${utStr(k.roundingUt)}.`,
@@ -293,6 +325,10 @@ export function renderHtml(m: ReportModel): string {
 				? `<div><span class="big">${usd(t.actionUt)}</span><span class="muted">governed actions, reported separately</span></div>`
 				: ""
 		}${
+			t.nominalCalls > 0 || t.unconfirmedNominalCalls > 0
+				? `<div><span class="big">${nominalStr(t.nominalUt)}</span><span class="muted">nominal units from local calls (not dollars), ${t.nominalCalls} confirmed call(s)${t.unconfirmedNominalCalls > 0 ? `; ${nominalStr(t.unconfirmedNominalUt)} unconfirmed, ${t.unconfirmedNominalCalls} call(s)` : ""}</span></div>`
+				: ""
+		}${
 			t.unlabelledCalls > 0
 				? `<div><span class="big">${usd(t.unlabelledUt)}</span><span class="muted">of confirmed spend with no recorded denomination, ${t.unlabelledCalls} call(s) (may include nominal units)</span></div>`
 				: ""
@@ -329,7 +365,7 @@ export function renderHtml(m: ReportModel): string {
 	if (k.calls === 0) body.push(`<p class="muted">No provider-reported usage in this window.</p>`);
 	else {
 		body.push(
-			`<table><thead><tr><th>Tier</th><th class="n">Tokens</th><th class="n">Cost</th></tr></thead><tbody><tr><td>Input</td><td class="n">${tokens(k.inputTokens)}</td><td class="n">${usd(k.inputUt)}</td></tr><tr><td>Output</td><td class="n">${tokens(k.outputTokens)}</td><td class="n">${usd(k.outputUt)}</td></tr><tr><td>Cache read</td><td class="n">${tokens(k.cacheReadTokens)}</td><td class="n">${usd(k.cacheReadUt)}</td></tr><tr><td>Cache write (5 min)</td><td class="n">${tokens(k.cacheWriteTokens - k.cacheWrite1hTokens)}</td><td class="n">${usd(k.cacheWriteUt - k.cacheWrite1hUt)}</td></tr><tr><td>Cache write (1 hour)</td><td class="n">${tokens(k.cacheWrite1hTokens)}</td><td class="n">${usd(k.cacheWrite1hUt)}</td></tr></tbody></table><p class="muted">Cache write is ${k.cacheWriteShare === null ? "n/a" : pct(k.cacheWriteShare)} of provider-reported cost: a cost driver, not avoidable spend. Tier costs are tokens times the rates applied on each call; per-call rounding makes them differ from the metered ${usd(k.costUt)} by ${utStr(k.roundingUt)}.</p>`,
+			`<table><thead><tr><th>Tier</th><th class="n">Tokens</th><th class="n">Cost</th></tr></thead><tbody><tr><td>Input</td><td class="n">${tokens(k.inputTokens)}</td><td class="n">${usd(k.inputUt)}</td></tr><tr><td>Output</td><td class="n">${tokens(k.outputTokens)}</td><td class="n">${usd(k.outputUt)}</td></tr><tr><td>Cache read</td><td class="n">${tokens(k.cacheReadTokens)}</td><td class="n">${usd(k.cacheReadUt)}</td></tr><tr><td>Cache write (5 min)</td><td class="n">${tokens(k.cacheWriteTokens - k.cacheWrite1hTokens)}</td><td class="n">${usd(usdMinus(k.cacheWriteUt, k.cacheWrite1hUt))}</td></tr><tr><td>Cache write (1 hour)</td><td class="n">${tokens(k.cacheWrite1hTokens)}</td><td class="n">${usd(k.cacheWrite1hUt)}</td></tr></tbody></table><p class="muted">Cache write is ${k.cacheWriteShare === null ? "n/a" : pct(k.cacheWriteShare)} of provider-reported cost: a cost driver, not avoidable spend. Tier costs are tokens times the rates applied on each call; per-call rounding makes them differ from the metered ${usd(k.costUt)} by ${utStr(k.roundingUt)}.</p>`,
 		);
 	}
 	body.push(`<h3>Top costs</h3>`);

@@ -310,6 +310,84 @@ describe("usertrust report --week", () => {
 		write.mockRestore();
 	});
 
+	describe("a writer appending during the snapshot", () => {
+		const auditDir = () => join(dir, ".usertrust", "audit");
+		const state = () => ({
+			log: readFileSync(join(auditDir(), "events.jsonl")),
+			meta: readFileSync(join(auditDir(), "events.jsonl.meta")),
+		});
+
+		async function twoStates() {
+			await vault([{ cost: 100 }, { cost: 200 }]);
+			const before = state();
+			const w = createAuditWriter(dir);
+			await w.appendEvent({
+				kind: "llm_call",
+				actor: "local",
+				data: { model: "m", cost: 300, settled: true, transferId: "t-late" },
+			});
+			w.release();
+			const after = state();
+			writeFileSync(join(auditDir(), "events.jsonl"), before.log);
+			writeFileSync(join(auditDir(), "events.jsonl.meta"), before.meta);
+			return { before, after };
+		}
+
+		it("log and sidecar both replaced between the reads: retried, VERIFIED, not UNVERIFIED", async () => {
+			const { after } = await twoStates();
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
+				betweenReads: (attempt) => {
+					if (attempt !== 1) return;
+					writeFileSync(join(auditDir(), "events.jsonl"), after.log);
+					writeFileSync(join(auditDir(), "events.jsonl.meta"), after.meta);
+				},
+			});
+			expect((JSON.parse(stdout) as { integrity: { verified: boolean } }).integrity.verified).toBe(
+				true,
+			);
+			expect(process.exitCode).toBeUndefined();
+			write.mockRestore();
+		});
+
+		it("a new log over the OLD sidecar: the log is cut to the prefix the sidecar describes", async () => {
+			const { after } = await twoStates();
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
+				betweenReads: (attempt) => {
+					// the writer fsynced the log and has not yet replaced the sidecar
+					if (attempt === 1) writeFileSync(join(auditDir(), "events.jsonl"), after.log);
+				},
+			});
+			const out = JSON.parse(stdout) as {
+				integrity: { verified: boolean };
+				totals: { confirmedCalls: number };
+			};
+			expect(out.integrity.verified).toBe(true);
+			expect(out.totals.confirmedCalls).toBe(2); // the in-flight third event is not in this snapshot
+			expect(process.exitCode).toBeUndefined();
+			write.mockRestore();
+		});
+
+		it("a sidecar that changes on EVERY attempt is reported as a busy vault, not a broken chain, exit 2", async () => {
+			await vault([{ cost: 100 }]);
+			let n = 0;
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
+				betweenReads: () => {
+					n += 1;
+					writeFileSync(
+						join(auditDir(), "events.jsonl.meta"),
+						JSON.stringify({ lastHash: "x".repeat(64), sequence: n }),
+					);
+				},
+			});
+			const out = JSON.parse(stdout) as { integrity: { verified: boolean; errors: string[] } };
+			expect(out.integrity.verified).toBe(false);
+			expect(out.integrity.errors.join(" ")).toMatch(/Vault busy/);
+			expect(out.integrity.errors.join(" ")).not.toMatch(/mismatch|corrupt/i);
+			expect(process.exitCode).toBe(2);
+			write.mockRestore();
+		});
+	});
+
 	it("a repeated option exits 2: every option is single-occurrence, none can silently overwrite another", async () => {
 		await vault([{ cost: 1 }]);
 		for (const argv of [
@@ -318,6 +396,7 @@ describe("usertrust report --week", () => {
 			["--week", "--end", endIso(), "--format=md", "--format", "json"],
 			["--week", "--end", endIso(), "--end", endIso()],
 			["--week", "--end", endIso(), "--top", "3", "--top", "4"],
+			["--json", "--week", "--end", endIso(), "--json"],
 		]) {
 			process.exitCode = undefined;
 			await run(dir, {}, argv);

@@ -58,6 +58,25 @@ export const AGENT_KEYS: readonly AgentKey[] = [
 	"actor",
 ];
 
+declare const usdBrand: unique symbol;
+declare const nominalBrand: unique symbol;
+/**
+ * Usertokens that are DOLLARS (a `usd-proxy` cost basis; an unlabelled row is assumed so and reported as such). The
+ * dollar formatter accepts only this type, so a nominal-unit figure cannot be dollar-formatted: it is a compile error.
+ */
+export type UsdUt = number & { readonly [usdBrand]: true };
+/** Nominal UNITS (a local, non-priced endpoint). Never summed with, or formatted as, dollars. */
+export type NominalUt = number & { readonly [nominalBrand]: true };
+
+/** The same shape with the denomination brands removed: what the builder accumulates before the one audited cast. */
+type Plain<T> = T extends UsdUt | NominalUt
+	? number
+	: T extends readonly (infer U)[]
+		? readonly Plain<U>[]
+		: T extends object
+			? { [K in keyof T]: Plain<T[K]> }
+			: T;
+
 export interface ReportOptions {
 	/** Exclusive end of the window, epoch ms. The window is `windowDays` × 24 h ending here. */
 	endMs: number;
@@ -83,7 +102,7 @@ export interface IntegrityInfo {
 export interface Row {
 	key: string;
 	calls: number;
-	ut: number;
+	ut: UsdUt;
 	/** Share of confirmed spend, 0..1. */
 	share: number;
 }
@@ -99,7 +118,7 @@ export interface TopCost {
 	model: string;
 	agent: string;
 	transferId: string;
-	ut: number;
+	ut: UsdUt;
 	hash: string;
 }
 
@@ -107,7 +126,7 @@ export interface TierBreakdown {
 	/** Calls priced from provider-reported four-tier usage. */
 	calls: number;
 	/** Their metered cost (Σ data.cost). */
-	costUt: number;
+	costUt: UsdUt;
 	inputTokens: number;
 	outputTokens: number;
 	cacheReadTokens: number;
@@ -116,17 +135,17 @@ export interface TierBreakdown {
 	/** Of which written to the 1-hour cache, priced at its own rate (`data.cacheWrite1h`). */
 	cacheWrite1hTokens: number;
 	/** tokens × appliedRates / 1000, per tier. Unrounded: per-call cost is ceil'd, so the tiers sum to ≈ costUt. */
-	inputUt: number;
-	outputUt: number;
-	cacheReadUt: number;
+	inputUt: UsdUt;
+	outputUt: UsdUt;
+	cacheReadUt: UsdUt;
 	/** TOTAL cache-write cost: the 5-minute remainder at `cacheWritePer1k` plus the 1-hour tokens at their own rate. */
-	cacheWriteUt: number;
+	cacheWriteUt: UsdUt;
 	/** Of which the 1-hour tokens. */
-	cacheWrite1hUt: number;
+	cacheWrite1hUt: UsdUt;
 	/** cacheWriteUt / Σ tiers, 0..1; `null` when there is nothing to divide. A cost DRIVER, never "avoidable". */
 	cacheWriteShare: number | null;
 	/** Σ tiers − costUt: the rounding the per-call ceil introduces. Printed so the tiers visibly reconcile. */
-	roundingUt: number;
+	roundingUt: UsdUt;
 }
 
 export interface ReportModel {
@@ -135,22 +154,23 @@ export interface ReportModel {
 	agentKey: { requested: AgentKey; segment: number | null };
 	totals: {
 		/** Spend: confirmed `llm_call` cost denominated in dollars (see the module comment). */
-		confirmedUt: number;
+		confirmedUt: UsdUt;
 		confirmedCalls: number;
 		/** The part of confirmed spend whose usage was an ESTIMATE (no provider-reported counts). */
-		estimatedUt: number;
+		estimatedUt: UsdUt;
 		estimatedCalls: number;
 		/** The part of confirmed spend whose row records no `costBasis`: its denomination is ASSUMED to be dollars. */
-		unlabelledUt: number;
+		unlabelledUt: UsdUt;
 		unlabelledCalls: number;
 		/** `llm_call`s with a `settlement_ambiguous` for the same transfer, or an explicit `settled: false`: not spent. */
-		unconfirmedUt: number;
+		unconfirmedUt: UsdUt;
 		unconfirmedCalls: number;
 		/** Unconfirmed calls denominated in nominal units: counted here, never added to `unconfirmedUt` (dollars). */
 		unconfirmedNominalCalls: number;
+		unconfirmedNominalUt: NominalUt;
 		/** Unconfirmed calls whose record states no denomination: counted here, never added to `unconfirmedUt` (dollars). */
 		unconfirmedUnlabelledCalls: number;
-		unconfirmedUnlabelledUt: number;
+		unconfirmedUnlabelledUt: UsdUt;
 		/** Of those, the ones that are an explicit `settled: false` (the rest have a settlement_ambiguous record). */
 		unsettledCalls: number;
 		/** Of the unconfirmed calls, those contradicted by another record for the same transfer (a failure or ambiguity marker, a release, an unknown kind). */
@@ -160,16 +180,16 @@ export interface ReportModel {
 		/** Of the unconfirmed, those with no `transferId` to correlate. */
 		uncorrelatedCalls: number;
 		/** Confirmed spend whose post is PROVEN by a record written after it (a headless record, or a `settlement_shortfall`). */
-		postProvenUt: number;
+		postProvenUt: UsdUt;
 		postProvenCalls: number;
 		/** Governed actions that are unconfirmed (same rules as calls): counted here, never added to `actionUt`. */
 		unconfirmedActionCalls: number;
-		unconfirmedActionUt: number;
+		unconfirmedActionUt: UsdUt;
 		/** `costBasis: "nominal"` rows (or an unlabelled local-endpoint row): unit counts, excluded from dollar totals. */
 		nominalCalls: number;
-		nominalUt: number;
+		nominalUt: NominalUt;
 		/** Governed non-LLM actions (kind = action.kind, `data.actionName`): a separate line, never merged. */
-		actionUt: number;
+		actionUt: UsdUt;
 		actionCalls: number;
 		/** `llm_call` rows in the window with no usable cost, or an unreadable timestamp. */
 		malformedCalls: number;
@@ -177,7 +197,7 @@ export interface ReportModel {
 		malformedEvents: number;
 	};
 	/** `settlement_shortfall`: the metered cost exceeded what the ledger could post. */
-	shortfall: { events: number; ut: number };
+	shortfall: { events: number; ut: UsdUt };
 	byAgent: Row[];
 	/**
 	 * Spend by `principal.origin` (a plugin-metered Claude Code session is `claude-code:<session id>`), when any call
@@ -189,7 +209,7 @@ export interface ReportModel {
 	tiers: TierBreakdown;
 	topCosts: TopCost[];
 	/** Confirmed spend per hour of the window, oldest first; length = days × 24. */
-	hourlyUt: number[];
+	hourlyUt: UsdUt[];
 	/**
 	 * The configured budget is the SESSION wallet's. What provably debits it: every `llm_call` and governed action that
 	 * carries NO cost center, in usertokens (a nominal local call debits its units too).
@@ -201,14 +221,19 @@ export interface ReportModel {
 	 * spend (the most it could be). Both exclude an ambiguous, voided or `settled: false` settle.
 	 */
 	budget: {
-		configuredUt: number | null;
+		configuredUt: UsdUt | null;
 		source: string | null;
 		/** Spend with no cost center, in the window / over the whole chain: it debited the session wallet. */
-		windowSessionUt: number;
-		recordedSessionUt: number;
+		windowSessionUt: UsdUt;
+		recordedSessionUt: UsdUt;
 		/** Spend WITH a cost center, in the window / over the whole chain: payer not recorded (envelope, or session in dry run). */
-		windowAttributedUt: number;
-		recordedAttributedUt: number;
+		windowAttributedUt: UsdUt;
+		recordedAttributedUt: UsdUt;
+		/** The same four figures for NOMINAL units (a local call debits its units too). Never summed with the dollar ones. */
+		windowSessionNominal: NominalUt;
+		recordedSessionNominal: NominalUt;
+		windowAttributedNominal: NominalUt;
+		recordedAttributedNominal: NominalUt;
 		/** 0..1 lower bound (session spend only), clamped; `null` when no budget is configured. */
 		usedFraction: number | null;
 		/** 0..1 upper bound (session + attributed spend), clamped; `null` when no budget is configured. */
@@ -310,7 +335,7 @@ export function agentOf(
 	}
 }
 
-function toRows(m: Map<string, { calls: number; ut: number }>, total: number): Row[] {
+function toRows(m: Map<string, { calls: number; ut: number }>, total: number): Plain<Row>[] {
 	return [...m.entries()]
 		.map(([key, v]) => ({ key, calls: v.calls, ut: v.ut, share: total > 0 ? v.ut / total : 0 }))
 		.sort((a, b) => b.ut - a.ut || a.key.localeCompare(b.key));
@@ -358,13 +383,18 @@ function denominationOf(e: PersistedAuditEvent): "usd" | "nominal" | "unlabelled
 function walletDebit(
 	e: PersistedAuditEvent,
 	standing: (e: PersistedAuditEvent) => Standing,
-): { ut: number; attributed: boolean } | undefined {
+): { ut: number; attributed: boolean; nominal: boolean } | undefined {
 	const isCall = e.kind === "llm_call";
 	const isAction = isActionEvent(e);
 	if (!isCall && !isAction) return undefined;
 	const c = cost(e.data["cost"]);
 	if (c === undefined || standing(e).kind !== "confirmed") return undefined;
-	return { ut: c, attributed: str(e.data["costCenter"]) !== undefined };
+	return {
+		ut: c,
+		attributed: str(e.data["costCenter"]) !== undefined,
+		// A local call debits its UNITS: kept in its own accumulator, never summed with dollars.
+		nominal: denominationOf(e) === "nominal",
+	};
 }
 
 /**
@@ -401,6 +431,22 @@ export function buildWeeklyReport(
 	integrity: IntegrityInfo,
 	opts: ReportOptions,
 ): ReportModel {
+	return brand(buildPlain(events, integrity, opts));
+}
+
+/**
+ * The ONE place the denomination brands are applied. The builder below keeps one accumulator per denomination and never
+ * sums across them; this cast only stamps what it already kept apart.
+ */
+function brand(m: Plain<ReportModel>): ReportModel {
+	return m as unknown as ReportModel;
+}
+
+function buildPlain(
+	events: readonly PersistedAuditEvent[],
+	integrity: IntegrityInfo,
+	opts: ReportOptions,
+): Plain<ReportModel> {
 	const days = opts.windowDays ?? 7;
 	const endMs = opts.endMs;
 	const startMs = endMs - days * 24 * HOUR_MS;
@@ -481,6 +527,7 @@ export function buildWeeklyReport(
 		unconfirmedUt: 0,
 		unconfirmedCalls: 0,
 		unconfirmedNominalCalls: 0,
+		unconfirmedNominalUt: 0,
 		unconfirmedUnlabelledCalls: 0,
 		unconfirmedUnlabelledUt: 0,
 		contradictedCalls: 0,
@@ -503,7 +550,7 @@ export function buildWeeklyReport(
 	const agents = new Map<string, { calls: number; ut: number }>();
 	const sessions = new Map<string, { calls: number; ut: number }>();
 	const models = new Map<string, { calls: number; ut: number; basis: Set<string> }>();
-	const tiers: TierBreakdown = {
+	const tiers: Plain<TierBreakdown> = {
 		calls: 0,
 		costUt: 0,
 		inputTokens: 0,
@@ -519,7 +566,7 @@ export function buildWeeklyReport(
 		cacheWriteShare: null,
 		roundingUt: 0,
 	};
-	const tops: TopCost[] = [];
+	const tops: Plain<TopCost>[] = [];
 	const hourly = new Array<number>(days * 24).fill(0);
 	const governance: Record<string, number> = Object.fromEntries(
 		GOVERNANCE_KINDS.map((k) => [k, 0]),
@@ -530,6 +577,11 @@ export function buildWeeklyReport(
 	let recordedAttributedUt = 0;
 	let windowSessionUt = 0;
 	let windowAttributedUt = 0;
+	// The same four, in NOMINAL units: a separate accumulator per denomination, so no sum ever crosses them.
+	let recordedSessionNominal = 0;
+	let recordedAttributedNominal = 0;
+	let windowSessionNominal = 0;
+	let windowAttributedNominal = 0;
 
 	for (const e of usable) {
 		const tid = str(e.data["transferId"]);
@@ -539,7 +591,14 @@ export function buildWeeklyReport(
 		// BUDGET: every debit of a wallet, `llm_call` and governed action alike, over the WHOLE chain. A call attributed to
 		// a cost-center envelope debits that envelope, not the session wallet the configured budget belongs to.
 		const wallet = walletDebit(e, standing);
-		if (wallet !== undefined) {
+		if (wallet !== undefined && wallet.nominal) {
+			if (wallet.attributed) recordedAttributedNominal += wallet.ut;
+			else recordedSessionNominal += wallet.ut;
+			if (inWindow) {
+				if (wallet.attributed) windowAttributedNominal += wallet.ut;
+				else windowSessionNominal += wallet.ut;
+			}
+		} else if (wallet !== undefined) {
 			if (wallet.attributed) recordedAttributedUt += wallet.ut;
 			else recordedSessionUt += wallet.ut;
 			if (inWindow) {
@@ -567,8 +626,10 @@ export function buildWeeklyReport(
 			}
 			if (st.kind === "unconfirmed") {
 				// Unconfirmed NOMINAL units are not dollars: they are counted, never added to the dollar figure.
-				if (denomination === "nominal") t.unconfirmedNominalCalls += 1;
-				else if (denomination === "unlabelled") {
+				if (denomination === "nominal") {
+					t.unconfirmedNominalCalls += 1;
+					t.unconfirmedNominalUt += c;
+				} else if (denomination === "unlabelled") {
 					t.unconfirmedUnlabelledCalls += 1;
 					t.unconfirmedUnlabelledUt += c;
 				} else t.unconfirmedUt += c;
@@ -700,8 +761,10 @@ export function buildWeeklyReport(
 			} else {
 				// A standalone ambiguity usually carries no denomination: it is shown, never assumed to be dollars.
 				const d = denominationOf(e);
-				if (d === "nominal") t.unconfirmedNominalCalls += 1;
-				else if (d === "unlabelled") {
+				if (d === "nominal") {
+					t.unconfirmedNominalCalls += 1;
+					if (c !== undefined) t.unconfirmedNominalUt += c;
+				} else if (d === "unlabelled") {
 					t.unconfirmedUnlabelledCalls += 1;
 					if (c !== undefined) t.unconfirmedUnlabelledUt += c;
 				} else if (c !== undefined) t.unconfirmedUt += c;
@@ -839,6 +902,10 @@ export function buildWeeklyReport(
 			recordedSessionUt,
 			windowAttributedUt,
 			recordedAttributedUt,
+			windowSessionNominal,
+			recordedSessionNominal,
+			windowAttributedNominal,
+			recordedAttributedNominal,
 			usedFraction: configured === null ? null : Math.min(1, recordedSessionUt / configured),
 			usedFractionUpper:
 				configured === null

@@ -4,7 +4,12 @@
 import { describe, expect, it } from "vitest";
 import type { PersistedAuditEvent } from "../../src/audit/read.js";
 import { MD_ALLOWED, md, render } from "../../src/report/render.js";
-import { buildWeeklyReport, type IntegrityInfo } from "../../src/report/weekly.js";
+import {
+	buildWeeklyReport,
+	type IntegrityInfo,
+	type NominalUt,
+	type UsdUt,
+} from "../../src/report/weekly.js";
 
 const END = Date.parse("2026-10-12T00:00:00Z");
 const EVIL = "evil\u001b[2K\u001b[1A\u009b2J\u0007id";
@@ -249,5 +254,51 @@ describe("unlabelled spend is headlined", () => {
 			{ endMs: END },
 		);
 		for (const f of ["md", "html"] as const) expect(render(m, f), f).toMatch(/denomination/);
+	});
+});
+
+describe("nominal units are headlined, never dollar-formatted", () => {
+	const local = (cost: number, extra: Record<string, unknown> = {}): PersistedAuditEvent =>
+		({
+			id: "i",
+			kind: "llm_call",
+			timestamp: "2026-10-11T00:00:00Z",
+			actor: "local",
+			hash: "h",
+			data: {
+				model: "llama",
+				cost,
+				settled: true,
+				transferId: `t${cost}`,
+				costBasis: "nominal",
+				endpointClass: "local",
+				...extra,
+			},
+		}) as unknown as PersistedAuditEvent;
+	const ok = { verified: true, errors: [], chainLength: 1, firstEvent: "a", lastEvent: "a" };
+
+	it("a nominal-only window shows its units in md and html, not $0.00 alone", () => {
+		const m = buildWeeklyReport([local(40), local(2)], ok, { endMs: END, budget: 1000 });
+		for (const f of ["md", "html"] as const) {
+			const out = render(m, f);
+			expect(out, f).toContain("42 nominal units");
+			expect(out, f).toMatch(/not dollars/);
+		}
+	});
+
+	it("the budget section reports nominal debits separately and does not add them to a dollar figure", () => {
+		const m = buildWeeklyReport([local(40)], ok, { endMs: END, budget: 1000 });
+		const out = render(m, "md");
+		expect(out).toContain("40 nominal units");
+		expect(m.budget.recordedSessionUt).toBe(0);
+	});
+
+	it("types: a nominal amount cannot be handed to a dollar formatter", () => {
+		const m = buildWeeklyReport([local(40)], ok, { endMs: END });
+		// @ts-expect-error a NominalUt is not a UsdUt: mixing denominations is a compile error
+		const asDollars: UsdUt = m.totals.nominalUt;
+		// @ts-expect-error and the other way round
+		const asUnits: NominalUt = m.totals.confirmedUt;
+		expect([asDollars, asUnits]).toBeDefined();
 	});
 });
