@@ -18,15 +18,19 @@
 #   release.sh verify-release <bundle> <version>
 #                                        imports the release tag from the build job's bundle,
 #                                        verifies the commit, and prints it
-#   release.sh latest-flag <version>     true if v<version> is the newest release, else false
+#   release.sh latest-flag <version>     true if v<version> is the newest release (no v* tag,
+#                                        and no version of any package on npm, is higher)
 #   release.sh dist-tag <version>        the npm dist-tag v<version> publishes under, from
 #                                        latest-flag: latest if true, backfill if false
+#   release.sh assert-npm                prints node's and npm's versions; fails unless npm is
+#                                        11 or later (its implicit-latest refusal; see publish)
 #   release.sh pack <dir>                packs each package (already built) into <dir>
 #   release.sh publish <dir> <commit> [--dry-run]
 #                                        assembles each package's publish tarball from
 #                                        <commit>'s files and the build tarball in <dir> (see
 #                                        scripts/release-tarball.py), then publishes each
-#                                        one not yet on npm, under the dist-tag above
+#                                        one not yet on npm, under the dist-tag above (latest
+#                                        as npm's default, with no --tag; see publish)
 #
 # Run from the repository root. Fails closed: an answer it cannot read is an error, never a pass.
 #
@@ -390,9 +394,16 @@ pack() {
 # rules, under headers it makes. All six are assembled and verified before any is published.
 # npm then publishes that file, from an empty directory, with an explicit registry, a user
 # config this script writes, an empty global config and a fresh cache of its own, so no .npmrc
-# from the artifact or the checkout applies and no build-made file is in npm's reach. Every
-# npm publish, the dry run included, names its dist-tag (dist_tag, decided once, before
-# anything else, for all six); if it cannot be decided, nothing is published.
+# from the artifact or the checkout applies and no build-made file is in npm's reach. The
+# dist-tag (dist_tag) is decided once, before anything else, for all six, and applies to every
+# npm publish, the dry run included; if it cannot be decided, nothing is published. That
+# pre-check decides before ANY package is published (npm's own guard fires per package, so
+# alone it could leave a release half-published) and keeps the GitHub Release's Latest
+# consistent with npm. latest is then applied as npm's default, with no --tag, so that npm's
+# own refusal to apply latest implicitly to a version not higher than one it holds (added in
+# npm 11.0.0, lib/commands/publish.js; the publish job requires npm 11, see assert-npm) stays
+# active as a backstop; an explicit --tag latest would bypass it. backfill is passed as --tag
+# backfill.
 publish() {
 	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version tag mtime state tgz tmp cfg empty work cache names name
 	if [ -z "$tardir" ] || [ ! -d "$tardir" ] || [ -z "$commit" ]; then
@@ -458,15 +469,33 @@ publish() {
 		work=$(mktemp -d "${tmp}/work.XXXXXX") || return 1
 		cache=$(mktemp -d "${tmp}/cache.XXXXXX") || return 1
 		# The same command with and without --dry-run, so a dry run exercises the real one.
-		set -- publish "${tmp}/${dir}/${pkg}-${version}.tgz" --access public --tag "$tag" --provenance \
-			--ignore-scripts --registry "$REGISTRY" --userconfig "$cfg" --globalconfig "$empty"
+		set -- publish "${tmp}/${dir}/${pkg}-${version}.tgz" --access public
+		case "$tag" in
+		latest) ;;
+		backfill) set -- "$@" --tag backfill ;;
+		*)
+			err "Unknown dist-tag '${tag}'. Refusing to publish."
+			return 1
+			;;
+		esac
+		set -- "$@" --provenance --ignore-scripts --registry "$REGISTRY" --userconfig "$cfg" --globalconfig "$empty"
 		if [ "$dry" -eq 1 ]; then
 			set -- "$@" --dry-run
 			echo "Publishing ${pkg}@${version} under ${tag} (dry run)"
 		else
 			echo "Publishing ${pkg}@${version} under ${tag}"
 		fi
-		(cd "$work" && npm_config_cache="$cache" npm "$@") || return 1
+		# With no --tag, npm takes the tag from its config, and the environment is config: any
+		# npm_config_tag (npm reads the name in any case) is dropped, so latest means latest.
+		(
+			cd "$work" || exit 1
+			for name in $(compgen -e); do
+				case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
+				npm_config_tag) unset "$name" ;;
+				esac
+			done
+			npm_config_cache="$cache" npm "$@"
+		) || return 1
 	done
 	rm -rf "$tmp"
 }
@@ -741,51 +770,147 @@ assert_on_master() {
 	echo "${head} is on master."
 }
 
-# Whether v<version> should be the repository's Latest release: only if it is not a
-# prerelease and no v* release tag is a higher semver. A republish of an older version must
-# never take Latest from a newer one. Tags are fetched first, so a newer release made since
-# this run started counts. Prints true or false; fails if it cannot tell.
-latest_flag() {
-	local version="${1:-}"
-	if [ -z "$version" ]; then
-		err "latest-flag needs the version"
-		return 1
-	fi
+# The one semver comparison. Reads versions, whitespace-separated, on stdin, and prints true if
+# <version> (its first argument) is not a prerelease and no release among them (major.minor.patch,
+# an optional leading v) is a higher semver, else false. An equal version is not higher, and a
+# prerelease among them is skipped (npm's own implicit-latest check skips them too). Anything
+# else among them is skipped too, unless the second argument is "strict": then it fails. Fails
+# if <version> is not semver.
+# shellcheck disable=SC2016 # JavaScript, not shell
+NEWEST_JS='
+const SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
+const parse = (t) => {
+	const m = SEMVER.exec(t);
+	return m ? { core: [+m[1], +m[2], +m[3]], pre: m[4] } : null;
+};
+const cmp = (a, b) => {
+	for (let i = 0; i < 3; i++) if (a.core[i] !== b.core[i]) return a.core[i] - b.core[i];
+	return 0;
+};
+const [version, mode] = process.argv.slice(1);
+const me = parse(version);
+if (!me) {
+	console.error(`::error::${version} is not a semver version.`);
+	process.exit(1);
+}
+let s = "";
+process.stdin.on("data", (d) => { s += d; });
+process.stdin.on("end", () => {
+	const tokens = s.split(/\s+/).filter(Boolean);
+	const bad = tokens.filter((t) => !parse(t));
+	if (mode === "strict" && bad.length > 0) {
+		console.error(`::error::Not a semver version: ${JSON.stringify(bad[0])}.`);
+		process.exit(1);
+	}
+	const releases = tokens.map(parse).filter((t) => t && t.pre === undefined);
+	const newest = me.pre === undefined && releases.every((t) => cmp(t, me) <= 0);
+	console.log(newest ? "true" : "false");
+});
+'
+
+# Reads `npm view <name> versions --json` on stdin and prints each version on its own line. The
+# answer must be a JSON array of strings (or one string, for a single version); anything else
+# fails, and so does a string that is not one version (whitespace in it).
+# shellcheck disable=SC2016 # JavaScript, not shell
+VERSIONS_JS='
+let s = "";
+process.stdin.on("data", (d) => { s += d; });
+process.stdin.on("end", () => {
+	let v;
+	try { v = JSON.parse(s); } catch (e) { v = undefined; }
+	const list = typeof v === "string" ? [v] : v;
+	if (!Array.isArray(list) || !list.every((x) => typeof x === "string" && /^\S+$/.test(x))) {
+		console.error(`::error::npm answered ${JSON.stringify(s.slice(0, 200))}, not a list of versions.`);
+		process.exit(1);
+	}
+	for (const x of list) console.log(x);
+});
+'
+
+# Whether no v* release tag is a higher semver than v<version>. Tags are fetched first, so a
+# newer release made since this run started counts. Prints true or false; fails if it cannot
+# tell.
+newest_among_tags() {
+	local version="$1"
 	if ! git fetch --quiet --tags origin; then
 		err "Could not fetch tags from origin, so cannot tell whether v${version} is the newest release."
 		return 1
 	fi
-	# shellcheck disable=SC2016 # JavaScript, not shell
-	git tag -l 'v*' | node -e '
-		const SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
-		const parse = (t) => {
-			const m = SEMVER.exec(t);
-			return m ? { core: [+m[1], +m[2], +m[3]], pre: m[4] } : null;
-		};
-		const cmp = (a, b) => {
-			for (let i = 0; i < 3; i++) if (a.core[i] !== b.core[i]) return a.core[i] - b.core[i];
-			return 0;
-		};
-		const me = parse(process.argv[1]);
-		if (!me) {
-			console.error(`::error::${process.argv[1]} is not a semver version.`);
-			process.exit(1);
-		}
-		let s = "";
-		process.stdin.on("data", (d) => { s += d; });
-		process.stdin.on("end", () => {
-			const releases = s.split(/\s+/).map(parse).filter((t) => t && t.pre === undefined);
-			const newest = me.pre === undefined && releases.every((t) => cmp(t, me) <= 0);
-			console.log(newest ? "true" : "false");
-		});
-	' "$version"
+	git tag -l 'v*' | node -e "$NEWEST_JS" "$version" || return 1
+}
+
+# Whether no lockstep package has a published version that is a higher semver than <version>:
+# npm's own rule for refusing an implicit latest (the highest version it holds, prereleases
+# skipped), checked here for all six before any is published. A package npm has never
+# published (E404) holds nothing; an equal version (a partial republish: that package is
+# already on npm, and publish skips it) is not higher. Anything else fails, never reading as
+# "nothing newer": an unreadable registry, an answer that is not a list of versions, or a
+# version in it that is not semver. Prints true or false.
+newest_on_npm() {
+	local version="$1" entry pkg out rc errf list all=""
+	for entry in $PACKAGES; do
+		pkg="${entry##*:}"
+		errf=$(mktemp) || return 1
+		set +e
+		out=$(npm view "$pkg" versions --json --registry "$REGISTRY" 2>"$errf")
+		rc=$?
+		set -e
+		if [ "$rc" -ne 0 ]; then
+			if grep -q 'E404' "$errf"; then
+				rm -f "$errf"
+				continue
+			fi
+			err "Could not read the versions of ${pkg} on npm (npm view exited ${rc}):"
+			cat "$errf" >&2
+			rm -f "$errf"
+			return 1
+		fi
+		rm -f "$errf"
+		if ! list=$(printf '%s' "$out" | node -e "$VERSIONS_JS"); then
+			err "Could not read the versions of ${pkg} on npm."
+			return 1
+		fi
+		all="${all} ${list}"
+	done
+	if ! printf '%s\n' "$all" | node -e "$NEWEST_JS" "$version" strict; then
+		err "A version npm holds is not semver, so cannot tell whether it is newer than ${version}."
+		return 1
+	fi
+}
+
+# Whether v<version> is the newest release: the one answer that decides both the GitHub
+# Release's Latest and the npm dist-tag (dist_tag). True only if it is not a prerelease, no v*
+# release tag is a higher semver (newest_among_tags), and no package has a higher version on
+# npm (newest_on_npm: a version published without a tag, whose tag was lost, or under another
+# dist-tag still counts). A republish of an older version must never take Latest from a newer one.
+# Prints true or false; fails if either check cannot tell.
+latest_flag() {
+	local version="${1:-}" tags npm
+	if [ -z "$version" ]; then
+		err "latest-flag needs the version"
+		return 1
+	fi
+	tags=$(newest_among_tags "$version") || return 1
+	if ! npm=$(newest_on_npm "$version"); then
+		err "Could not read every package's versions from npm, so cannot tell whether v${version} is the newest release."
+		return 1
+	fi
+	case "${tags}:${npm}" in
+	true:true) echo true ;;
+	true:false | false:true | false:false) echo false ;;
+	*)
+		err "Could not tell whether v${version} is the newest release (tags: '${tags}', npm: '${npm}')."
+		return 1
+		;;
+	esac
 }
 
 # The npm dist-tag v<version> publishes under, decided by latest_flag, the same answer that
 # decides the GitHub Release's Latest: "latest" for the newest release, "backfill" for an
 # older version (a republish), so that finishing an old version never moves npm's latest back
-# to it. (npm 9 and later also refuse to apply latest implicitly to a version lower than the
-# current latest.) Fails if latest_flag cannot tell: it never defaults to latest.
+# to it. latest_flag reads every package's versions on npm as well as the tags, so the decision
+# is made for all six before any is published (see publish). Fails if latest_flag cannot tell: it never
+# defaults to latest.
 dist_tag() {
 	local version="${1:-}" flag
 	if ! flag=$(latest_flag "$version"); then
@@ -800,6 +925,27 @@ dist_tag() {
 		return 1
 		;;
 	esac
+}
+
+# The publish job relies on npm's refusal to apply latest implicitly to a version not higher
+# than one npm holds (see publish), which npm added in 11.0.0 (lib/commands/publish.js; absent
+# in 10.9). Prints node's and npm's versions, and fails unless npm's major is 11 or later.
+assert_npm() {
+	local nodev npmv major
+	nodev=$(node --version) || return 1
+	npmv=$(npm --version) || return 1
+	echo "node ${nodev}, npm ${npmv}"
+	major="${npmv%%.*}"
+	case "$major" in
+	'' | *[!0-9]*)
+		err "Could not read npm's version ('${npmv}'). Refusing to release."
+		return 1
+		;;
+	esac
+	if [ "$major" -lt 11 ]; then
+		err "npm ${npmv} is older than 11, which lacks npm's refusal to apply latest implicitly to a version lower than one it holds (the backstop for the dist-tag check). Refusing to release."
+		return 1
+	fi
 }
 
 gate() {
@@ -823,6 +969,7 @@ verify-release) verify_release "${2:-}" "${3:-}" ;;
 assert-published) assert_published ;;
 assert-unreleased) assert_unreleased ;;
 assert-protected) assert_protected "${2:-}" ;;
+assert-npm) assert_npm ;;
 release-parent) verify_release_commit HEAD ;;
 latest-flag) latest_flag "${2:-}" ;;
 dist-tag) dist_tag "${2:-}" ;;
@@ -830,7 +977,7 @@ pack) pack "${2:-}" ;;
 publish) publish "${2:-}" "${3:-}" "${4:-}" ;;
 gate) gate ;;
 *)
-	err "usage: release.sh dirs | names | version | version-at <commit> | assert-published | assert-unreleased | assert-protected <env> | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run]"
+	err "usage: release.sh dirs | names | version | version-at <commit> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run]"
 	exit 2
 	;;
 esac

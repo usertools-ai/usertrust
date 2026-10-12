@@ -309,10 +309,17 @@ jobs:
           fi
 
       # No registry-url: npm's config for the publish is written by scripts/release.sh.
+      # Node 24, for the npm it bundles (11 or later): npm's own refusal to apply latest
+      # implicitly to a lower version is the backstop for the dist-tag check. This job builds
+      # nothing; the build job (Node 22) made every byte it publishes.
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           package-manager-cache: false
+
+      # Before anything reads or writes the registry: the npm in use, and that it is 11 or later.
+      - name: Require npm 11 or later
+        run: bash scripts/release.sh assert-npm
 
       # Again, now: an approval can come hours after ci-gate ran, and CI can be re-run.
       - name: Require CI success on the commit being released
@@ -392,8 +399,9 @@ jobs:
 
       # ── GitHub Release ──
       # A republish creates it only if the failed run never got this far. Latest is always an
-      # explicit decision (gh's default would make it Latest): only the newest semver release
-      # among the v* tags, so finishing an older version never takes Latest from a newer one.
+      # explicit decision (gh's default would make it Latest): only the newest semver release,
+      # by the v* tags and every package's versions on npm (the check that chose the npm
+      # dist-tag), so finishing an older version never takes Latest from a newer one.
       - name: Create GitHub Release
         if: ${{ !inputs.dry_run }}
         env:

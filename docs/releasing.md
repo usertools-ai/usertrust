@@ -44,7 +44,12 @@ repository or mint an OIDC token for provenance:
 3. **publish**, in the `npm-publish` environment, so it waits for the approval (token:
    `contents: write`, `id-token: write`, `actions: read`; `NPM_TOKEN` in one step). It installs
    nothing and runs no dependency code: only git, gh, jq, python3, node, the npm that ships
-   with node, and GitHub's own checkout, setup-node and download-artifact actions.
+   with node, and GitHub's own checkout, setup-node and download-artifact actions. **It builds
+   nothing**: every byte it publishes was built by the build job, on Node 22 (the runtime CI
+   tests on); this job only assembles tarballs from those bytes (python3) and runs npm. It
+   runs **Node 24**, for the npm Node 24 bundles (npm 11 or later), and its first step after
+   setup-node prints node's and npm's versions and refuses an npm older than 11, before
+   anything reads or writes the registry (see step 3 for why).
    1. Checks the CI gate again, since approval can come long after step 1.
    2. Downloads the artifact and checks the release commit, as git objects, without checking
       it out:
@@ -58,22 +63,37 @@ repository or mint an OIDC token for provenance:
       - each manifest is unchanged but for `version`, and none has `publishConfig`.
    3. **Assembles the tarball npm will publish**, for each package, and verifies it (see "The
       publish tarball is assembled, not taken from the build" below). Then runs
-      `npm publish <assembled tarball> --access public --tag <dist-tag> --provenance
+      `npm publish <assembled tarball> --access public [--tag backfill] --provenance
       --ignore-scripts --registry https://registry.npmjs.org/ --dry-run` for each, from an
       empty directory, with a user config the script writes and a fresh npm cache.
-      **Every publish names its dist-tag**, decided once for all six, before any is
-      published, by the same check that decides the GitHub Release's Latest (step 6):
-      `latest` only for the newest release, `backfill` for an older version finished by
-      republish, so npm's `latest` never moves back to it (npm 9 and later also refuse to
-      apply `latest` implicitly to a version lower than the current one). If that check
-      cannot tell, nothing is published.
+      **The dist-tag is decided once for all six**, before any is published, by the same
+      check that decides the GitHub Release's Latest (step 6): `latest` only for the newest
+      release, `backfill` for an older version finished by republish, so npm's `latest` never
+      moves back to it. The check: no `v*` tag is a higher semver (tags fetched first), and
+      no package has a higher version on npm (`npm view <name> versions --json`, the highest
+      non-prerelease version, which is npm's own rule; a version published without a `v*`
+      tag, or under another dist-tag, still counts; a package npm has never published holds
+      nothing, and a package already at this version is skipped, not counted as higher). A
+      registry it cannot read, or an answer it cannot parse, refuses the release: it never
+      defaults to `latest`.
+      `latest` is applied as npm's default, with **no `--tag`**, so that npm's own refusal to
+      apply `latest` implicitly to a version not higher than one it holds stays active as a
+      backstop (an explicit `--tag latest` would bypass it); `backfill` is passed as
+      `--tag backfill`. npm added that refusal in 11.0.0 (`lib/commands/publish.js`; absent at
+      v10.9.2), which is why the publish job runs Node 24 and refuses an older npm. npm's
+      check runs per package, and treats a registry it cannot read as holding nothing, so
+      alone it could stop a release part-way; the check above runs for all six first.
+      Versions are major.minor.patch only: this workflow does not support prereleases (one
+      would publish under `backfill`).
    4. **Pushes the release commit and tag** to `master`, atomically.
    5. Assembles the six tarballs again (the same commit gives the same bytes) and publishes
       each with the same command, without `--dry-run`. Publishing a tarball runs no lifecycle
       script.
    6. Creates the GitHub Release `v<version>` with generated notes, deciding Latest
-      explicitly: it is Latest only if no `v*` release tag is a higher semver (prereleases
-      never take it), so finishing an older version never takes Latest from a newer one.
+      explicitly: it is Latest only if no `v*` release tag is a higher semver and no package
+      has a higher version on npm (prereleases never take it), so finishing an older version
+      never takes Latest from a newer one. It runs only after every package's publish
+      succeeded.
       This is the same answer that chose the npm dist-tag in steps 3 and 5.
 
    Each step runs only if every step before it succeeded, so a normal release publishes
@@ -97,11 +117,40 @@ the tarballs, the version it reports) as untrusted DATA, never as code or config
   in a dry run), an empty global config, and `npm_config_cache` set to a new private
   directory of its own. No `.npmrc` from the artifact or the checkout applies, and the token
   is only in that step's environment. A `publishConfig` in any released manifest is refused.
-  In npm 10.9.2, `--registry` on the command line already wins over `publishConfig.registry`,
-  but npm's documentation does not say so, so the workflow does not rely on it.
+  In npm 10.9.2 and 11.19.0, `--registry` on the command line already wins over
+  `publishConfig.registry` (`lib/commands/publish.js`, which drops from `publishConfig` every
+  key given as a command-line flag), but npm's documentation does not say so, so the workflow
+  does not rely on it.
 - **No job restores a cache.** Every `actions/setup-node` says `package-manager-cache: false`
   and none says `cache:`, so no npm cache written by another workflow's dependency code
   reaches the release.
+
+### npm authentication and provenance
+
+The publish step authenticates with `NPM_TOKEN`, as `NODE_AUTH_TOKEN`, through the user config
+`scripts/release.sh` writes, and passes `--provenance`, which signs with the job's GitHub OIDC
+token (`id-token: write`, granted to the publish job only).
+
+The npm the publish job runs (11.x, bundled with Node 24) also tries **npm trusted publishing**
+on every publish, by itself. As read in npm/cli at v11.19.0 (the npm bundled with Node
+v24.21.0):
+
+- `lib/commands/publish.js:147` calls `oidc()` from `lib/utils/oidc.js` on every publish, the
+  dry run included. `lib/utils/oidc.js` is absent at v11.4.2 and present from v11.5.0.
+- No setting disables it. It runs whenever the CI environment offers an OIDC token: in GitHub
+  Actions, when `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN` are set
+  (`id-token: write`), or when `NPM_ID_TOKEN` is set. `--provenance` needs the same
+  `ACTIONS_ID_TOKEN_REQUEST_URL` (`ensureProvenanceGeneration` in
+  `workspaces/libnpmpublish/lib/publish.js`), so the exchange cannot be turned off without
+  turning off provenance.
+- It asks npm to exchange the OIDC token for a publish token for that package. If trusted
+  publishing is configured for the package, npm publishes with the exchanged token instead of
+  `NPM_TOKEN`. If it is not, the exchange fails, npm logs it at verbose level only, and
+  publishes with `NPM_TOKEN` as before. It never fails the publish itself.
+
+So the OIDC token is a credential that can publish once trusted publishing is configured,
+which is one more reason `id-token: write` is granted to the publish job and no other (the
+release-workflow test pins this). Configuring it is an owner step (below).
 
 ### The publish tarball is assembled, not taken from the build
 
@@ -258,6 +307,12 @@ The workflow names these; it cannot create or configure them.
     branch, with an edited copy of this file, away from the token. The gate warns, but does
     not refuse, when no deployment-branch policy is set: it cannot see whether the token is an
     environment secret, and without that the policy protects nothing.
+- **npm trusted publishing (optional, on npmjs.com).** This is the package owner's act on
+  npmjs.com, in each package's settings, not a change to this repository. Configure it for
+  each of the six packages, trusting this repository and this workflow file
+  (`.github/workflows/publish.yml`) only, with the environment name `npm-publish` (npm's
+  trusted publisher settings take an optional GitHub environment name). Once one release has
+  published through OIDC, delete the `NPM_TOKEN` secret.
 - **Branch protection on `master`**: requiring the CI checks on `master` would also apply to
   the workflow's own push of the release commit, which never gets a CI run, so that push
   would be refused (safely: before anything is published). Before requiring checks, give the

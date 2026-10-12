@@ -26,10 +26,13 @@
  * - Publishing assembles every tarball (scripts/release-tarball.py, pinned in
  *   release-tarball.test.ts) before publishing any, and npm is handed only those: from an
  *   empty directory, with --ignore-scripts, an explicit registry and a fresh private cache.
- * - Every npm publish, the dry run included, names its dist-tag, decided by the same
- *   latest-flag answer as the GitHub Release's Latest: `latest` for the newest release,
- *   `backfill` for an older version (a republish), and nothing is published when that answer
- *   cannot be read.
+ * - Every npm publish, the dry run included, uses the dist-tag decided by the same latest-flag
+ *   answer as the GitHub Release's Latest (no higher v* tag, and no package with a higher
+ *   version on npm): `latest` for the newest release, as npm's default with no --tag so that
+ *   npm's own implicit-latest refusal (npm 11.0.0 and later) stays active, and `--tag backfill`
+ *   for an older version; nothing is published when that answer cannot be read.
+ * - The publish job runs Node 24 and refuses an npm older than 11 before touching the
+ *   registry; the GitHub Release is created only after every package's publish succeeded.
  * - No setup-node restores a cache, and the publish job installs, packs and runs nothing.
  * - Republish gates on the release commit's parent only when the release commit changes
  *   nothing but the lockstep package.json "version" fields.
@@ -344,6 +347,63 @@ describe("publish.yml", () => {
 		]);
 	});
 
+	it("the build runs Node 22; the publish job runs Node 24 and requires npm 11 first", () => {
+		const setups = allSteps().filter(([, s]) => s.uses?.startsWith("actions/setup-node@"));
+		expect(setups.map(([j, s]) => `${j}: ${s.with?.["node-version"]}`)).toEqual([
+			"build: 22",
+			"publish: 24",
+		]);
+		// npm 11 added the refusal to apply latest implicitly to a lower version, the backstop
+		// for the dist-tag check: the step right after setup-node refuses an older npm, on every
+		// run (dry runs included), before anything reads or writes the registry.
+		const steps = jobSteps("publish");
+		const setup = steps.findIndex((s) => s.uses?.startsWith("actions/setup-node@"));
+		const assert = stepIndex("publish", "Require npm 11 or later");
+		expect(assert).toBe(setup + 1);
+		expect(steps[assert]?.run?.trim()).toBe("bash scripts/release.sh assert-npm");
+		expect(steps[assert]?.if).toBeUndefined();
+		expect(assert).toBeLessThan(stepIndex("publish", "Publish packages (dry run)"));
+		expect(assert).toBeLessThan(
+			stepIndex("publish", "Require CI success on the commit being released"),
+		);
+	});
+
+	it("the GitHub Release is created only after every package's publish succeeded", () => {
+		const pub = step("publish", "Publish packages");
+		const rel = step("publish", "Create GitHub Release");
+		expect(stepIndex("publish", "Create GitHub Release")).toBe(
+			stepIndex("publish", "Publish packages") + 1,
+		);
+		// The same condition, which never runs after a failure (the test above bans always(),
+		// failure(), cancelled() and continue-on-error), and a publish step that cannot swallow
+		// release.sh publish's exit status.
+		expect(pub.if).toMatch(/^\$\{\{ !inputs\.dry_run \}\}$/);
+		expect(rel.if).toBe(pub.if);
+		expect(pub.run?.trim()).toMatch(
+			/^bash scripts\/release\.sh publish "\$\{RUNNER_TEMP\}\/release" "\$COMMIT"$/,
+		);
+	});
+
+	it("publishes with NPM_TOKEN and --provenance; id-token: write is on the publish job only", () => {
+		// npm 11 exchanges the job's OIDC token for a publish token by itself whenever it can
+		// (lib/utils/oidc.js, from v11.5.0), and --provenance signs with the same token: no other
+		// job, and not the workflow as a whole, may be able to mint it.
+		const pub = step("publish", "Publish packages");
+		expect(pub.env?.NODE_AUTH_TOKEN).toMatch(/^\$\{\{ secrets\.NPM_TOKEN \}\}$/);
+		expect(pub.run).toMatch(/release\.sh publish\b/);
+		expect(readFileSync(SCRIPT, "utf8")).toMatch(
+			/set -- "\$@" --provenance --ignore-scripts --registry "\$REGISTRY"/,
+		);
+		expect(publish.permissions ?? {}).not.toHaveProperty("id-token");
+		const minters = Object.entries(publish.jobs)
+			.filter(([, j]) => j.permissions?.["id-token"] !== undefined)
+			.map(([k, j]) => `${k}: ${j.permissions?.["id-token"]}`);
+		expect(minters).toEqual(["publish: write"]);
+		for (const [k, j] of Object.entries(publish.jobs)) {
+			expect(j.permissions, `${k} declares its permissions`).toBeDefined();
+		}
+	});
+
 	it("the release commit is made with a DCO sign-off", () => {
 		const run = step("build", "Commit and tag (local)").run ?? "";
 		const commits = run.split("\n").filter((l) => /\bgit commit\b/.test(l));
@@ -366,12 +426,21 @@ const NAMES: Record<string, string> = {
 const FAKE_NPM = `#!/usr/bin/env bash
 # Every call's subcommand is appended to $FAKE_CALLS.
 # view <spec> version: answers from $FAKE_REGISTRY ("<spec> yes|no|error" lines; unlisted = no).
+# view <name> versions --json: appends its arguments to $FAKE_LOG.views and answers from a
+#   "<name> versions <answer>" line in $FAKE_REGISTRY: a comma-separated list (a JSON array),
+#   one:<v> (a JSON string), raw:<text> (printed as is), empty (no output) or error; without
+#   one, the "<name>@<v> yes" lines' versions, and E404 (never published) if there are none.
+# --version: prints $FAKE_NPM_VERSION (11.19.0 if unset).
 # pack ...: writes a ustar tarball, as npm's packer does, of package.json, README.md, LICENSE,
 #   NOTICE and dist/ to --pack-destination; logs "pack|<dir>|<args>".
 # publish <tgz> ...: records what it was given, and where, in $FAKE_LOG, and keeps a copy of the
-#   tarball as $FAKE_LOG.<tarball name>.
+#   tarball as $FAKE_LOG.<tarball name>. With no --tag, refuses as npm 11 does when
+#   $FAKE_REGISTRY has a "<name> refuses-latest <version>" line (npm's own check finds a
+#   version at least as high, which npm view did not show), and records any npm_config_tag
+#   in its environment in $FAKE_LOG.tagenv.
 echo "$1" >> "$FAKE_CALLS"
 case "$1" in
+--version) echo "\${FAKE_NPM_VERSION-11.19.0}" ;;
 pack)
 	echo "pack|$(basename "$PWD")|$*" >> "$FAKE_LOG"
 	dest=""
@@ -393,11 +462,31 @@ with tarfile.open(out, "w:gz", format=tarfile.USTAR_FORMAT) as t:
 PY
 	;;
 view)
-	state=$(awk -v s="$2" '$1 == s { print $2 }' "$FAKE_REGISTRY")
-	case "$state" in
-	yes) echo "\${2##*@}" ;;
-	error) echo "npm error code ETIMEDOUT" >&2; exit 1 ;;
-	*) echo "npm error code E404" >&2; exit 1 ;;
+	case "$3" in
+	version)
+		state=$(awk -v s="$2" '$1 == s { print $2 }' "$FAKE_REGISTRY")
+		case "$state" in
+		yes) echo "\${2##*@}" ;;
+		error) echo "npm error code ETIMEDOUT" >&2; exit 1 ;;
+		*) echo "npm error code E404" >&2; exit 1 ;;
+		esac
+		;;
+	versions)
+		echo "$*" >> "$FAKE_LOG.views"
+		answer=$(awk -v s="$2" '$1 == s && $2 == "versions" { print $3 }' "$FAKE_REGISTRY")
+		if [ -z "$answer" ]; then
+			answer=$(awk -v n="$2" 'index($1, n "@") == 1 && $2 == "yes" { print substr($1, length(n) + 2) }' "$FAKE_REGISTRY" | paste -sd, -)
+		fi
+		case "$answer" in
+		"") echo "npm error code E404" >&2; exit 1 ;;
+		error) echo "npm error code ETIMEDOUT" >&2; exit 1 ;;
+		empty) ;;
+		one:*) echo "\\"\${answer#one:}\\"" ;;
+		raw:*) echo "\${answer#raw:}" ;;
+		*) echo "[\\"$(echo "$answer" | sed 's/,/", "/g')\\"]" ;;
+		esac
+		;;
+	*) echo "fake npm: unexpected $*" >&2; exit 99 ;;
 	esac
 	;;
 publish)
@@ -416,6 +505,18 @@ publish)
 		esac
 		shift
 	done
+	env | grep -i '^npm_config_tag=' >> "$FAKE_LOG.tagenv"
+	case " $flags " in
+	*" --tag "*) ;;
+	*)
+		name=$(basename "$tgz" | sed 's/-[0-9][0-9.]*\\.tgz$//')
+		higher=$(awk -v s="$name" '$1 == s && $2 == "refuses-latest" { print $3 }' "$FAKE_REGISTRY")
+		if [ -n "$higher" ]; then
+			echo "npm error Cannot implicitly apply the \\"latest\\" tag because previously published version $higher is higher than the new version. You must specify a tag using --tag." >&2
+			exit 1
+		fi
+		;;
+	esac
 	cwd=$(ls -A | wc -l | tr -d ' ')
 	cache=missing
 	if [ -n "\${npm_config_cache:-}" ] && [ -d "$npm_config_cache" ]; then
@@ -563,12 +664,13 @@ function packAll(): string {
 }
 
 /** The fake npm's log line for each publish: the assembled tarball, from an empty directory,
- * with the exact flags (an explicit dist-tag among them), our user config (the token reference
- * only), an empty global config and a fresh private cache. */
+ * with the exact flags (no --tag for latest, npm's default, so npm's own guard applies;
+ * --tag backfill otherwise), our user config (the token reference only), an empty global
+ * config and a fresh private cache. */
 const published = (version: string, dirs: string[], dry: boolean, tag = "latest") =>
 	dirs.map(
 		(d) =>
-			`publish|${NAMES[d]}-${version}.tgz|--access public --tag ${tag} --provenance --ignore-scripts --registry https://registry.npmjs.org/${dry ? " --dry-run" : ""}|cwd=0|userconfig=${dry ? "" : `//registry.npmjs.org/:_authToken=$${"{"}NODE_AUTH_TOKEN};`}|globalconfig=0|cache=fresh|from=assembled`,
+			`publish|${NAMES[d]}-${version}.tgz|--access public${tag === "latest" ? "" : ` --tag ${tag}`} --provenance --ignore-scripts --registry https://registry.npmjs.org/${dry ? " --dry-run" : ""}|cwd=0|userconfig=${dry ? "" : `//registry.npmjs.org/:_authToken=$${"{"}NODE_AUTH_TOKEN};`}|globalconfig=0|cache=fresh|from=assembled`,
 	);
 
 function run(args: string[], env: Record<string, string> = {}) {
@@ -804,6 +906,16 @@ describe("release.sh publish: the npm dist-tag", { timeout: 30_000 }, () => {
 		const real = run(["publish", out, "HEAD"]);
 		expect(real.status, real.err).toBe(0);
 		expect(log()).toEqual(published("1.0.0", DIRS, false, "latest"));
+		expect(log().join("\n")).not.toContain("--tag");
+	});
+
+	it("latest is npm's default, never an explicit --tag, whatever npm_config_tag says", () => {
+		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+		const out = packAll();
+		const r = run(["publish", out, "HEAD"], { npm_config_tag: "next", NPM_CONFIG_TAG: "next" });
+		expect(r.status, r.err).toBe(0);
+		expect(log()).toEqual(published("1.0.0", DIRS, false, "latest"));
+		expect(readFileSync(join(dir, "log.tagenv"), "utf8")).toBe("");
 	});
 
 	it("a republish of an older version publishes under backfill, and is not the GitHub Latest", () => {
@@ -841,6 +953,156 @@ describe("release.sh publish: the npm dist-tag", { timeout: 30_000 }, () => {
 		expect(t.status).not.toBe(0);
 		expect(t.out).toBe("");
 	});
+
+	// npm's versions count as well as the tags (npm's own rule: the highest version it holds,
+	// prereleases skipped), for all six before any is published: a version published without a
+	// v* tag, whose tag was lost, or under another dist-tag would otherwise lose latest to an
+	// older release (an explicit --tag latest bypasses npm's check; its absence alone would
+	// stop the release only part-way, at that package).
+	const onNpm = (versions: string, except: Record<string, string> = {}) =>
+		DIRS.map((d) => {
+			const name = NAMES[d] as string;
+			return `${name} versions ${except[name] ?? versions}`;
+		});
+
+	it("npm holding a higher version with no v* tag makes it backfill, for npm and GitHub alike", () => {
+		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+		releaseCommit("1.1.0");
+		const out = packAll();
+		// Control: with npm at 1.0.0 everywhere, 1.1.0 is the newest release.
+		setRegistry(onNpm("0.9.0,1.0.0"));
+		expect(run(["latest-flag", "1.1.0"]).out.trim()).toBe("true");
+		for (const server of ["0.9.0,1.0.0,1.2.0", "one:1.2.0"]) {
+			setRegistry(onNpm("0.9.0,1.0.0", { "usertrust-server": server }));
+			const flag = run(["latest-flag", "1.1.0"]);
+			expect(flag.status, flag.err).toBe(0);
+			expect(flag.out.trim(), server).toBe("false");
+			expect(run(["dist-tag", "1.1.0"]).out.trim()).toBe("backfill");
+		}
+		const dry = run(["publish", out, "HEAD", "--dry-run"]);
+		expect(dry.status, dry.err).toBe(0);
+		expect(log()).toEqual(published("1.1.0", DIRS, true, "backfill"));
+	});
+
+	it("a higher prerelease on npm does not hold latest (npm's own check skips prereleases)", () => {
+		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+		setRegistry(onNpm("0.9.0,1.0.0", { "usertrust-ui": "1.0.0,2.0.0-rc.1" }));
+		expect(run(["latest-flag", "1.0.1"]).out.trim()).toBe("true");
+	});
+
+	it("a partial republish, some packages already at the version and none higher, stays latest", () => {
+		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+		releaseCommit("1.1.0");
+		const out = packAll();
+		setRegistry([
+			"usertrust@1.0.0 yes",
+			"usertrust@1.1.0 yes",
+			"usertrust-verify@1.1.0 yes",
+			...onNpm("1.0.0").slice(2),
+		]);
+		expect(run(["latest-flag", "1.1.0"]).out.trim()).toBe("true");
+		const r = run(["publish", out, "HEAD"], { REPUBLISH: "true" });
+		expect(r.status, r.err).toBe(0);
+		expect(log()).toEqual(published("1.1.0", DIRS.slice(2), false, "latest"));
+	});
+
+	it("a package npm has never published (E404) holds nothing, and npm is asked about all six", () => {
+		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+		setRegistry(onNpm("1.0.0").filter((l) => !l.startsWith("usertrust-ui ")));
+		const r = run(["latest-flag", "1.0.0"]);
+		expect(r.status, r.err).toBe(0);
+		expect(r.out.trim()).toBe("true");
+		expect(readFileSync(join(dir, "log.views"), "utf8").trim().split("\n")).toEqual(
+			DIRS.map((d) => `view ${NAMES[d]} versions --json --registry https://registry.npmjs.org/`),
+		);
+	});
+
+	it("an unreadable registry refuses before any npm publish, never defaulting to latest", () => {
+		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+		const out = packAll();
+		setRegistry(onNpm("1.0.0", { "usertrust-openclaw": "error" }));
+		rmSync(join(dir, "calls"), { force: true });
+		for (const args of [
+			["publish", out, "HEAD", "--dry-run"],
+			["publish", out, "HEAD"],
+		]) {
+			const r = run(args);
+			expect(r.status, args.join(" ")).not.toBe(0);
+			expect(r.err).toContain("Could not read the versions of usertrust-openclaw on npm");
+			expect(r.err).toContain("::error::Could not tell whether v1.0.0 is the newest release");
+		}
+		expect(log()).toEqual([]);
+		expect(readFileSync(join(dir, "calls"), "utf8")).not.toContain("publish");
+		for (const args of [
+			["latest-flag", "1.0.0"],
+			["dist-tag", "1.0.0"],
+		]) {
+			const r = run(args);
+			expect(r.status, args.join(" ")).not.toBe(0);
+			expect(r.out).toBe("");
+		}
+	});
+
+	for (const [bad, message] of [
+		["raw:not-json", "not a list of versions"],
+		["raw:{}", "not a list of versions"],
+		["raw:[1]", "not a list of versions"],
+		["empty", "not a list of versions"],
+		["1.0.0,banana", 'Not a semver version: "banana"'],
+		["1.0.0,1.0", 'Not a semver version: "1.0"'],
+	] as const) {
+		it(`an answer of ${JSON.stringify(bad)} cannot be compared, and refuses`, () => {
+			git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+			setRegistry(onNpm("1.0.0", { "usertrust-verify": bad }));
+			const r = run(["latest-flag", "1.0.0"]);
+			expect(r.status).not.toBe(0);
+			expect(r.out).toBe("");
+			expect(r.err).toContain(message);
+		});
+	}
+
+	it("npm's own refusal mid-release (the pre-check passed) fails the run before any release", () => {
+		// npm's check finds a version the pre-check's npm view did not show (one published
+		// since). The dry run passed before it appeared; the real publish stops at that package,
+		// non-zero, and nothing here creates or marks a GitHub Release (gh is never called; the
+		// workflow's release step runs only after this one succeeded: see publish.yml above).
+		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+		releaseCommit("1.1.0");
+		const out = packAll();
+		setRegistry(onNpm("1.0.0"));
+		const dry = run(["publish", out, "HEAD", "--dry-run"]);
+		expect(dry.status, dry.err).toBe(0);
+		rmSync(join(dir, "log"));
+		setRegistry([...onNpm("1.0.0"), "usertrust-server refuses-latest 2.0.0"]);
+		const r = run(["publish", out, "HEAD"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain('Cannot implicitly apply the "latest" tag');
+		expect(r.out).toContain("Publishing usertrust-server@1.1.0 under latest");
+		expect(log()).toEqual(published("1.1.0", DIRS.slice(0, 3), false, "latest"));
+		expect(log().some((l) => l.startsWith("gh|"))).toBe(false);
+		// The same refusal under --dry-run (npm 11 checks before its dry-run short-circuit).
+		rmSync(join(dir, "log"));
+		expect(run(["publish", out, "HEAD", "--dry-run"]).status).not.toBe(0);
+		expect(log()).toEqual(published("1.1.0", DIRS.slice(0, 3), true, "latest"));
+	});
+});
+
+describe("release.sh assert-npm", { timeout: 30_000 }, () => {
+	it("prints node's and npm's versions, and passes on npm 11 or later", () => {
+		for (const v of ["11.0.0", "11.19.0", "12.2.0"]) {
+			const r = run(["assert-npm"], { FAKE_NPM_VERSION: v });
+			expect(r.status, `${v}: ${r.err}`).toBe(0);
+			expect(r.out).toContain(`node ${process.version}, npm ${v}`);
+		}
+	});
+
+	for (const v of ["10.9.9", "9.9.4", "", "eleven"]) {
+		it(`refuses npm ${JSON.stringify(v)}`, () => {
+			const r = run(["assert-npm"], { FAKE_NPM_VERSION: v });
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("Refusing to release");
+		});
+	}
 });
 
 describe("release.sh assert-protected", { timeout: 30_000 }, () => {
