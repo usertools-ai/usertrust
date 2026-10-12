@@ -313,7 +313,13 @@ in full, not only the matched characters. `createGovernor()` and `usertrust-serv
 scan the `messages` the caller passes and can block, but never redact egress.
 The full scope, per provider, is on the [PII Detection](https://usertrust.ai/docs/policy/pii) page.
 
-## 12. A ledger-backed server can hang when its ledger is unreachable, and may not audit a hold it releases on SIGINT or SIGTERM
+## 12. A stream aborted by the caller's own signal is not charged for what it consumed
+
+Fixed after 5.0.0: a governed stream the caller aborts with its own `AbortSignal` now settles
+the usage it consumed, as an early `break` does, instead of voiding its hold. 5.0.0 still has
+the gap, on OpenAI and Anthropic `create({ stream: true })`.
+
+## 13. A ledger-backed server can hang when its ledger is unreachable, and may not audit a hold it releases on SIGINT or SIGTERM
 
 A ledger-backed `usertrust-server` answers `POST /v1/authorize` only when its ledger
 answers. If the ledger becomes unreachable, authorize calls hang without an answer, and
