@@ -398,6 +398,41 @@ describe("A2 on the action path: governAction settles XOR voids its hold", () =>
 		expect((err as Error).message).toBe("TrustedClient has been destroyed");
 	});
 
+	it("destroyed while its writer is already degraded under failClosed: rejected as destroyed, not as degraded, and nothing is touched", async () => {
+		// The destroyed re-check runs before the degraded-at-start refusal: a destroyed client
+		// reports that it was destroyed, and appends no audit event, holds nothing, runs nothing.
+		const { engine, held, posted, voided } = recordingEngine();
+		const audit = makeAudit({ failKinds: ["earlier"] });
+		await audit.appendEvent({ kind: "earlier", actor: "local", data: {} }).catch(() => {});
+		expect(audit.isDegraded()).toBe(true);
+		vi.mocked(audit.appendEvent).mockClear();
+		const client = await governed(true, engine, audit);
+		let destroying: Promise<void> | undefined;
+		const descriptor = {
+			kind: ACTION.kind,
+			get name(): string {
+				// Not awaited: destroy() waits for in-flight calls.
+				destroying ??= client.destroy();
+				return ACTION.name;
+			},
+			cost: ACTION.cost,
+		};
+		const run = vi.fn(async () => "ran");
+
+		const err = await outcome(client.governAction(descriptor, run));
+		await destroying;
+
+		expect(destroying).toBeDefined();
+		expect(err).not.toBeInstanceOf(AuditDegradedError);
+		expect(err).toBeInstanceOf(Error);
+		expect((err as Error).message).toBe("TrustedClient has been destroyed");
+		expect(run).not.toHaveBeenCalled();
+		expect(audit.appendEvent).not.toHaveBeenCalled();
+		expect(held).toEqual([]);
+		expect(posted).toEqual([]);
+		expect(voided).toEqual([]);
+	});
+
 	it("CONTROL, an ordinary descriptor: the action runs and its hold is posted once", async () => {
 		const { engine, held, posted, voided } = recordingEngine();
 		const client = await governed(true, engine, makeAudit());
