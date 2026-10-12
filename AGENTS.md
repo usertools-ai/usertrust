@@ -1488,7 +1488,11 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   event's `error` text, so one hostile value arrives through two fields. C1 coverage matters here
   for the same reason it does in `budget.ts`. The UI is deliberately NOT patched: it renders
   these into DOM text nodes, where escapes are inert, and it displays this same already-scrubbed
-  receipt string.
+  receipt string. The standalone CLI (`verify/src/cli.ts`) imports this same function for its
+  verdict output — every chain-error line, `First event:`/`Last event:`, the latest anchor's keyId
+  and timestamp, the witness error, each anchoring warning, and the argv/caught-error echoes —
+  because those, too, are strings the audited vault (or argv) controls, printed at the auditor
+  It is an import, not a copy: the count above is unchanged.
 - Independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.
