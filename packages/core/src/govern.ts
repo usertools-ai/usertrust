@@ -1532,6 +1532,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// and its extractor never reports a 1-hour share, so a flip cannot under-hold there.
 			// A request that cannot be serialized forwards as given and holds dearest.
 			const originalParams = (args[0] ?? {}) as Record<string, unknown>;
+			// The caller's abort signal OBJECT, captured NOW, before any await: a caller that
+			// replaces or deletes `options.signal` while the provider call is pending must not
+			// change which signal decides whether a stream's throw was their own abort.
+			const callerSignal = callerAbortSignal(kind, args);
 			const serialized = serializeRequest(originalParams);
 			const params = (
 				kind !== "google" && serialized !== null ? serialized.body : originalParams
@@ -2780,7 +2784,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					Symbol.asyncIterator in (response as Record<symbol, unknown>)
 				) {
 					const stream = response as AsyncIterable<unknown>;
-					const callerSignal = callerAbortSignal(kind, args);
 					const governedStream = createGovernedStream(
 						stream,
 						kind,

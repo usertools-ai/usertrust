@@ -426,7 +426,11 @@ function ownedDataCopy(obj: unknown, at: string, keys: readonly string[]): unkno
  * chain (to `Object.prototype`, exclusive) is CAPTURED once, on the ORIGINAL receiver
  * (`get.call(obj)`), and stored as own data, so a getter backed by a `#private` field (which
  * would throw on any other receiver) still works, and a getter is never read twice. Own
- * data properties are copied with `setData`; inherited data properties stay inherited. The
+ * data properties are copied, and inherited non-function data captured, the same way.
+ * EVERY value is written ENUMERABLE (`setData`): the copy is an ordinary data object, so the
+ * PII scan and redaction, which walk `Object.keys`, see everything the SDK can read (a class
+ * getter is non-enumerable, and a captured `contents` kept that flag would be detected by
+ * the prompt scan yet skipped by redaction, and sent raw). Methods stay inherited. The
  * `captured` keys are skipped: the snapshot sets those itself. Each prototype on the walk
  * is Proxy-checked before it is touched.
  */
@@ -449,10 +453,13 @@ function capturedCopy(
 			const d = Object.getOwnPropertyDescriptor(o, key);
 			if (d === undefined) continue;
 			if ("value" in d) {
-				if (o === obj) setData(out, key, d.value, d.enumerable === true);
+				// Own data is copied; inherited NON-function data is captured too (a value the
+				// SDK would read through the prototype is one the redactor must see). Methods
+				// stay inherited.
+				if (o === obj || typeof d.value !== "function") setData(out, key, d.value);
 				continue;
 			}
-			setData(out, key, d.get === undefined ? undefined : d.get.call(obj), d.enumerable === true);
+			setData(out, key, d.get === undefined ? undefined : d.get.call(obj));
 		}
 	}
 	return out;

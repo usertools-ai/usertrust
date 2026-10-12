@@ -198,11 +198,68 @@ export function detectPII(data: unknown): PIIDetection {
 	};
 }
 
+// ---------------------------------------------------------------------------
+// Opaque, text-free values: kept BY REFERENCE, never walked
+// ---------------------------------------------------------------------------
+
+/** The built-in `aborted` getter, a brand check: it throws for anything but a real AbortSignal. */
+const ABORT_SIGNAL_ABORTED: ((this: unknown) => unknown) | undefined =
+	typeof AbortSignal === "function"
+		? (Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get as
+				| ((this: unknown) => unknown)
+				| undefined)
+		: undefined;
+
+/** Does the built-in getter accept `value` as its receiver (a real instance, not a look-alike)? */
+function passesBrand(getter: ((this: unknown) => unknown) | undefined, value: object): boolean {
+	if (getter === undefined) return false;
+	try {
+		getter.call(value);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * THE CLOSED ALLOWLIST, in one place: the opaque, text-free types that redaction keeps BY
+ * REFERENCE and the scan does not walk into. Today: `AbortSignal` only. Flattening it into
+ * a plain object (what the generic walk does) made it `{}`, so a redacted request could no
+ * longer be cancelled. Binary values (ArrayBuffer, typed arrays, DataView, Blob/File) are
+ * deliberately NOT here: they carry content this scanner cannot read, so they keep today's
+ * behaviour (flattened by redaction).
+ *
+ * Each member is recognised by BRAND, never by duck-typing: `instanceof` this realm's own
+ * constructor (guarded by `typeof … === "function"`), AND the built-in's own getter
+ * accepting the value as its receiver, so neither a look-alike (`{ aborted: false,
+ * addEventListener() {} }`) nor an object made from the prototype
+ * (`Object.create(AbortSignal.prototype)`) is kept.
+ */
+const OPAQUE_TEXT_FREE: ReadonlyArray<(value: object) => boolean> = [
+	(v) =>
+		typeof AbortSignal === "function" &&
+		v instanceof AbortSignal &&
+		passesBrand(ABORT_SIGNAL_ABORTED, v),
+];
+
+/**
+ * Kept by reference and not walked: `value` is, by brand, a member of OPAQUE_TEXT_FREE, and
+ * carries no own enumerable property (where a string could hide). Everything else that is
+ * not plain data keeps today's behaviour (flattened and redacted): a class instance holding
+ * a PII string must never be sent as it is.
+ */
+export function isOpaqueTextFree(value: object): boolean {
+	return OPAQUE_TEXT_FREE.some((isMember) => isMember(value)) && Object.keys(value).length === 0;
+}
+
 function scanValue(value: unknown, currentPath: string, types: Set<string>, paths: string[]): void {
 	if (typeof value === "string") {
 		scanString(value, currentPath, types, paths);
 		return;
 	}
+
+	// Opaque, text-free values are not walked (see isOpaqueTextFree).
+	if (value !== null && typeof value === "object" && isOpaqueTextFree(value)) return;
 
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i++) {
@@ -301,6 +358,9 @@ function redactValue(value: unknown): unknown {
 	if (Array.isArray(value)) {
 		return value.map((item) => redactValue(item));
 	}
+
+	// Opaque, text-free values are kept BY REFERENCE (see isOpaqueTextFree).
+	if (value !== null && typeof value === "object" && isOpaqueTextFree(value)) return value;
 
 	if (value !== null && typeof value === "object") {
 		const record = value as Record<string, unknown>;

@@ -2305,3 +2305,284 @@ describe("a class-instance request with a #private-backed contents getter", () =
 		await destroy(governed);
 	});
 });
+
+// ── pii "redact": the caller's AbortSignal survives; nothing else is kept by reference ──
+
+describe('pii "redact" keeps the caller\'s AbortSignal (and only that) by reference', () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	const EMAIL = "alice@example.com";
+
+	async function redactingGoogle() {
+		writeVaultConfig(tmpVault, { budget: 5_000_000, pii: "redact" });
+		const engine = makeMockEngine();
+		const received: Array<Record<string, unknown>> = [];
+		const client = {
+			models: {
+				generateContent: vi.fn(async (p: Record<string, unknown>) => {
+					received.push(p);
+					return chunk("ok", {
+						promptTokenCount: 10,
+						candidatesTokenCount: 5,
+						totalTokenCount: 15,
+					});
+				}),
+				generateContentStream: vi.fn(
+					async (p: Record<string, unknown> & { config?: { abortSignal?: AbortSignal } }) => {
+						received.push(p);
+						return abortableStream(STREAM_WITH_USAGE, p.config?.abortSignal, false);
+					},
+				),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+		return { governed, engine, received };
+	}
+
+	it("Google stream: the SDK receives the SAME AbortSignal, the prompt redacted, and aborting it settles like a break", async () => {
+		const { governed, engine, received } = await redactingGoogle();
+		const controller = new AbortController();
+
+		const stream = (await governed.models.generateContentStream({
+			model: "gemini-2.5-flash",
+			contents: `mail ${EMAIL} please`,
+			config: { abortSignal: controller.signal },
+		})) as GovernedStreamHandle;
+		const sent = received[0] as { contents: unknown; config: { abortSignal: unknown } };
+		expect(sent.config.abortSignal).toBe(controller.signal);
+		expect(JSON.stringify(sent.contents)).not.toContain(EMAIL);
+
+		const { thrown, seen } = await abortAfterFirstChunk(stream, controller);
+		const receipt = await stream.receipt;
+		expect((thrown as Error).name).toBe("AbortError");
+		expect(seen).toBe(1);
+		expect(receipt.settled).toBe(true);
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		await destroy(governed);
+	});
+
+	it("NO-REGRESSION: a class instance holding a PII string is NOT sent unredacted", async () => {
+		const { governed, received } = await redactingGoogle();
+		class Note {
+			constructor(readonly text: string) {}
+		}
+
+		await governed.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: [{ role: "user", parts: [new Note(`mail ${EMAIL}`)] }],
+		});
+
+		expect(JSON.stringify(received[0])).not.toContain(EMAIL);
+		await destroy(governed);
+	});
+
+	it("plain objects are still deep-cloned and redacted", async () => {
+		const { governed, received } = await redactingGoogle();
+		const contents = [{ role: "user", parts: [{ text: `mail ${EMAIL}` }] }];
+
+		await governed.models.generateContent({ model: "gemini-2.5-flash", contents });
+
+		const sent = received[0] as { contents: unknown };
+		expect(sent.contents).not.toBe(contents);
+		expect(JSON.stringify(sent)).not.toContain(EMAIL);
+		await destroy(governed);
+	});
+
+	it("a Uint8Array in the request is still NOT forwarded by reference (today's behaviour, pinned: binary is not on the allowlist)", async () => {
+		const { governed, received } = await redactingGoogle();
+		const bytes = new Uint8Array([1, 2, 3]);
+
+		await governed.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: [
+				{ role: "user", parts: [{ text: `mail ${EMAIL}` }, { inlineData: { data: bytes } }] },
+			],
+		});
+
+		const sent = received[0] as { contents: Array<{ parts: Array<Record<string, unknown>> }> };
+		const inline = (sent.contents[0] as { parts: Array<Record<string, unknown>> }).parts[1]
+			?.inlineData as { data: unknown } | undefined;
+		expect(inline).toBeDefined();
+		expect(inline?.data).not.toBe(bytes);
+		await destroy(governed);
+	});
+
+	it("a #private-backed contents getter holding an e-mail is captured ENUMERABLE, so the SDK receives it REDACTED", async () => {
+		const { governed, received } = await redactingGoogle();
+		class SecretRequest {
+			readonly #contents: string;
+			readonly model = "gemini-2.5-flash";
+			constructor(contents: string) {
+				this.#contents = contents;
+			}
+			get contents(): string {
+				return this.#contents;
+			}
+		}
+
+		await governed.models.generateContent(
+			new SecretRequest(`mail ${EMAIL} please`) as unknown as Record<string, unknown>,
+		);
+
+		const sent = received[0] as Record<string, unknown>;
+		expect(String(sent.contents)).toContain("[REDACTED");
+		expect(JSON.stringify(sent)).not.toContain(EMAIL);
+		await destroy(governed);
+	});
+});
+
+// ── The caller's signal is captured when the call is made, before any await ──
+
+function gatedAbortClient(kind: "openai" | "anthropic", failAfterFirst: boolean) {
+	let release!: () => void;
+	const gate = new Promise<void>((r) => {
+		release = r;
+	});
+	let entered!: () => void;
+	const providerEntered = new Promise<void>((r) => {
+		entered = r;
+	});
+	// Like a real SDK, the provider takes the signal it was given at call time.
+	const create = vi.fn(async (_p: unknown, o?: { signal?: AbortSignal }) => {
+		const signal = o?.signal;
+		entered();
+		await gate;
+		return abortableStream(
+			kind === "openai" ? OPENAI_CHUNKS : ANTHROPIC_CHUNKS,
+			signal,
+			failAfterFirst,
+		);
+	});
+	const client =
+		kind === "openai" ? { chat: { completions: { create } } } : { messages: { create } };
+	return { client, providerEntered, release };
+}
+
+async function openGated(
+	kind: "openai" | "anthropic",
+	governed: unknown,
+	options: { signal?: AbortSignal },
+): Promise<{ response: unknown }> {
+	if (kind === "openai") {
+		return (
+			governed as {
+				chat: { completions: { create(p: unknown, o: unknown): Promise<{ response: unknown }> } };
+			}
+		).chat.completions.create({ model: "gpt-4o", messages: MESSAGES, stream: true }, options);
+	}
+	return (
+		governed as { messages: { create(p: unknown, o: unknown): Promise<{ response: unknown }> } }
+	).messages.create(
+		{ model: "claude-sonnet-4-6", max_tokens: 64, messages: MESSAGES, stream: true },
+		options,
+	);
+}
+
+describe("the caller's abort signal is captured at call time, before the provider await", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	const MUTATIONS: Array<[string, (o: { signal?: AbortSignal }) => void]> = [
+		[
+			"replaced with a fresh signal",
+			(o) => {
+				o.signal = new AbortController().signal;
+			},
+		],
+		[
+			"deleted",
+			(o) => {
+				delete o.signal;
+			},
+		],
+	];
+
+	for (const kind of ["openai", "anthropic"] as const) {
+		it.each(MUTATIONS)(
+			`${kind}: options.signal %s during the await, then the ORIGINAL is aborted → settled, no breaker failure`,
+			async (_, mutate) => {
+				const engine = makeMockEngine();
+				const { client, providerEntered, release } = gatedAbortClient(kind, false);
+				const governed = await trust(client, {
+					dryRun: false,
+					budget: 5_000_000,
+					vaultBase: tmpVault,
+					_engine: engine,
+					_audit: makeMockAudit(),
+				});
+				const original = new AbortController();
+				const options: { signal?: AbortSignal } = { signal: original.signal };
+
+				const pending = openGated(kind, governed, options);
+				await providerEntered;
+				mutate(options);
+				release();
+				const stream = (await pending).response as GovernedStreamHandle;
+				const { thrown } = await abortAfterFirstChunk(stream, original);
+				const receipt = await stream.receipt;
+
+				expect((thrown as Error).name).toBe("AbortError");
+				expect(receipt.settled).toBe(true);
+				expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+				expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+				await destroy(governed);
+			},
+		);
+
+		it(`${kind}: options.signal replaced with an ALREADY-ABORTED signal during the await, then a provider error with the original NOT aborted → still VOIDS`, async () => {
+			const engine = makeMockEngine();
+			const { client, providerEntered, release } = gatedAbortClient(kind, true);
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: makeMockAudit(),
+			});
+			const original = new AbortController();
+			const options: { signal?: AbortSignal } = { signal: original.signal };
+
+			const pending = openGated(kind, governed, options);
+			await providerEntered;
+			const replacement = new AbortController();
+			replacement.abort();
+			options.signal = replacement.signal;
+			release();
+			const stream = (await pending).response as GovernedStreamHandle;
+			const receiptOutcome = stream.receipt.then(
+				() => "resolved",
+				(e: unknown) => e,
+			);
+			await expect(
+				(async () => {
+					for await (const _ of stream) {
+						// consume
+					}
+				})(),
+			).rejects.toThrow(/provider 500 mid-stream/);
+
+			expect(original.signal.aborted).toBe(false);
+			expect(await receiptOutcome).toBeInstanceOf(Error);
+			expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+			expect(engine.postPendingSpend).not.toHaveBeenCalled();
+			await destroy(governed);
+		});
+	}
+});
