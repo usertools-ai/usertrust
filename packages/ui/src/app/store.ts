@@ -24,9 +24,14 @@ async function fetchAll(): Promise<{
 	summary: SummaryPayload;
 	version: number;
 }> {
-	const [eventsRes, summaryRes] = await Promise.all([fetch("/api/events"), fetch("/api/summary")]);
-	const { rows, version } = (await eventsRes.json()) as { rows: LedgerRow[]; version?: unknown };
-	const summary = (await summaryRes.json()) as SummaryPayload;
+	// ONE request: the rows and the summary are taken at the same version. Two requests let an append land between
+	// them, and its summary frame (the same version as the newer half) was never re-applied over the stale one.
+	const res = await fetch("/api/events");
+	const { rows, summary, version } = (await res.json()) as {
+		rows: LedgerRow[];
+		summary: SummaryPayload;
+		version?: unknown;
+	};
 	// No version: older than every frame, so every kept frame is re-applied on top.
 	return { rows, summary, version: typeof version === "number" ? version : -1 };
 }
@@ -49,15 +54,17 @@ export function useLedger(): LedgerData {
 			setData(apply);
 		};
 		const resync = (): void => {
-			replay.begin();
+			const generation = replay.begin();
 			fetchAll()
 				.then(({ rows, summary, version }) => {
 					// liveIds is flash state for SSE arrivals only — a resync
 					// replaces the row set wholesale, so it starts clean (after
 					// the replay too: a re-applied frame is not a new arrival).
 					if (!cancelled) {
-						const install = replay.land(version, (d) => ({ ...d, rows, summary }));
-						setData((d) => ({ ...install(d), liveIds: new Set<string>() }));
+						// Undefined: a newer snapshot, or a newer connection's, is already installed.
+						const install = replay.land(generation, version, (d) => ({ ...d, rows, summary }));
+						if (install !== undefined)
+							setData((d) => ({ ...install(d), liveIds: new Set<string>() }));
 					}
 				})
 				.catch((err: unknown) => {

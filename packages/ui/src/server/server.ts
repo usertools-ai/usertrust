@@ -96,7 +96,7 @@ export async function createUiServer(
 			// settlement), so every visible row of a touched transfer is re-classified, and each change is sent.
 			const changed: Array<{ id: string; status: RowStatus }> = [];
 			for (const r of state.rows) {
-				const key = state.transfers.keyOfRow(r.id);
+				const key = state.transfers.keyOfRow(r.hash);
 				if (key === undefined || !touched.has(key)) continue;
 				const status = statusFor(
 					r.kind,
@@ -189,7 +189,7 @@ export async function createUiServer(
 			return;
 		}
 		if (url.pathname === "/api/events" && req.method === "GET") {
-			sendJson(res, 200, { rows: state.rows, version });
+			sendJson(res, 200, { rows: state.rows, summary: state.summary, version });
 			return;
 		}
 		if (url.pathname === "/api/tail" && req.method === "GET") {
@@ -312,8 +312,9 @@ export async function createUiServer(
 	return {
 		server,
 		port,
+		// A reload is a resync: a new version, and every client told to fetch the new snapshot.
 		reload(): void {
-			state = loadState(vaultPath);
+			handleResync();
 		},
 		close(): Promise<void> {
 			stopWatching();

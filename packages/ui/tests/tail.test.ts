@@ -156,6 +156,37 @@ describe("live tail", () => {
 		expect((await events()).version).toBe(before + 1);
 	});
 
+	it("red-first (no version, no resync): reload() is a resync — a new version, and every client told", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const events = async () =>
+			(await (await fetch(`http://127.0.0.1:${ui?.port}/api/events`)).json()) as {
+				version: number;
+			};
+		const { version: before } = await events();
+		const { eventName, id } = await readSse(
+			ui.port,
+			(name) => name === "resync",
+			async () => {
+				ui?.reload();
+			},
+		);
+		expect(eventName).toBe("resync");
+		expect(id).toBe(String(before + 1));
+		expect((await events()).version).toBe(before + 1);
+	});
+
+	it("red-first (two requests): the snapshot carries the summary taken at the same version as its rows", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const snap = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
+			rows: unknown[];
+			summary?: { rowCount: number; chain: { events: number } };
+			version: number;
+		};
+		expect(snap.summary).toBeDefined();
+		expect(snap.summary?.rowCount).toBe(snap.rows.length);
+		expect(snap.summary?.chain.events).toBe(snap.rows.length);
+	});
+
 	it("red-first (unrecoverable): a late settle's hash-only record joins its swept transfer live: RELEASED", async () => {
 		const seed = createAuditWriter(tempDir);
 		await seed.appendEvent({

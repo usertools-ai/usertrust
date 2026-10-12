@@ -24,7 +24,10 @@ import {
 export class TransferIndex {
 	/** Each transfer's events in chain order, by transfer key. */
 	private readonly groups = new Map<string, TransactionEvent[]>();
-	/** The transfer key each event's row shows the verdict of (its own transferId's, when it has one). */
+	/**
+	 * The transfer key each event's row shows the verdict of (its own transferId's, when it has one), by the event's
+	 * HASH: unique on the chain, where an `id` is the writer's text and a later record can reuse one.
+	 */
 	private readonly keyOfEvent = new Map<string, string>();
 	/** Each transfer's verdict, until an event is added to it; one scan per transfer, not one per row. */
 	private readonly verdicts = new Map<string, TransferStatus | undefined>();
@@ -37,7 +40,7 @@ export class TransferIndex {
 			const keys = transferKeysOf(normalized);
 			const [own] = keys;
 			if (own === undefined) continue;
-			this.keyOfEvent.set(e.id, own);
+			this.keyOfEvent.set(e.hash, own);
 			for (const key of keys) {
 				const list = this.groups.get(key);
 				if (list) list.push(normalized);
@@ -49,9 +52,9 @@ export class TransferIndex {
 		return touched;
 	}
 
-	/** The transfer key of a row's event, or undefined for an event outside any transfer. */
-	keyOfRow(eventId: string): string | undefined {
-		return this.keyOfEvent.get(eventId);
+	/** The transfer key of a row's event (by its hash), or undefined for an event outside any transfer. */
+	keyOfRow(eventHash: string): string | undefined {
+		return this.keyOfEvent.get(eventHash);
 	}
 
 	/** The verdict of one transfer, by key. */
@@ -67,7 +70,7 @@ export class TransferIndex {
 	 * own transfer.
 	 */
 	readonly verdictOf = (e: PersistedAuditEvent): TransferStatus | undefined => {
-		const key = this.keyOfEvent.get(e.id);
+		const key = this.keyOfEvent.get(e.hash);
 		return key === undefined
 			? transferVerdict([normalizeEvent(e)])?.status
 			: this.verdictOfTransfer(key);

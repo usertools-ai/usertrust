@@ -87,8 +87,9 @@ describe("statusOf", () => {
 		index.add(events);
 		return toLedgerRows(events, OK, index.verdictOf).map((r) => statusOf(r));
 	}
+	// Each event its own hash, as on a chain: rows are indexed by it.
 	const at = (n: number, o: Partial<PersistedAuditEvent> & { data?: Record<string, unknown> }) =>
-		evt({ id: `id-${n}`, sequence: n, ...o });
+		evt({ id: `id-${n}`, sequence: n, hash: n.toString(16).padStart(64, "0"), ...o });
 
 	it("a failure, a settlement, and a transfer with no terminal (unknown, never pending)", () => {
 		expect(
@@ -150,6 +151,19 @@ describe("statusOf", () => {
 		).toEqual(["unrecoverable", "unrecoverable"]);
 	});
 
+	it("red-first (redirected): a later record REUSING an event id never moves the earlier row to its transfer", () => {
+		expect(
+			classify([
+				at(1, { id: "dup", data: { transferId: "tx_ok", settled: true } }),
+				at(2, {
+					id: "dup",
+					kind: "llm_call_failed",
+					data: { transferId: "tx_bad", error: "boom" },
+				}),
+			]),
+		).toEqual(["settled", "failed"]);
+	});
+
 	it("a coincidental transferIdHash on any other kind joins nothing", () => {
 		expect(
 			classify([
@@ -168,7 +182,7 @@ describe("statusOf", () => {
 			at(2, { kind: "settlement_ambiguous", data: { transferId: "tx_c", error: "post failed" } }),
 		]);
 		expect([...touched]).toEqual([transferIdHash("tx_c")]);
-		expect(index.keyOfRow("id-1")).toBe(transferIdHash("tx_c"));
+		expect(index.keyOfRow(optimistic.hash)).toBe(transferIdHash("tx_c"));
 		expect(index.verdictOf(optimistic)).toBe("AMBIGUOUS");
 	});
 
