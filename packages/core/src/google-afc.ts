@@ -29,19 +29,47 @@ function isObject(v: unknown): v is Loose {
 	return v !== null && typeof v === "object";
 }
 
-function isCallableTool(
-	tool: unknown,
-): tool is { callTool: (calls: unknown[]) => Promise<unknown[]> } {
-	return isObject(tool) && typeof tool["callTool"] === "function";
+type CallableTool = {
+	tool: () => Promise<unknown>;
+	callTool: (calls: unknown[]) => Promise<unknown[]>;
+};
+
+/**
+ * The SDK's own test: `'callTool' in tool && typeof tool.callTool === 'function'`. A function object (a callable tool
+ * implemented as a function carrying `tool` and `callTool` properties) passes it, so it must pass here: rejecting it would
+ * hand the call to the SDK's internal loop under ONE hold, which is an undercharge.
+ */
+function isCallableTool(tool: unknown): tool is CallableTool {
+	return (
+		(typeof tool === "function" || isObject(tool)) &&
+		"callTool" in tool &&
+		typeof (tool as Loose)["callTool"] === "function"
+	);
+}
+
+/**
+ * A callable tool whose `tool()` answers from a snapshot taken once. The SDK's native loop awaits every `tool.tool()` ONCE,
+ * before its first round; each governed round re-enters the public `generateContent`, which would await it again, so a
+ * one-shot or stateful callable could fail on round two and a dynamic one could show different declarations between
+ * rounds. A Proxy keeps everything else about the tool (its prototype, so `instanceof` checks such as the SDK's MCP-usage
+ * header still hold; `callTool` and every other method run against the real tool).
+ */
+function snapshotTool(tool: CallableTool, declaration: unknown): CallableTool {
+	return new Proxy(tool, {
+		get(target, prop) {
+			if (prop === "tool") return () => Promise.resolve(declaration);
+			const value = Reflect.get(target, prop, target) as unknown;
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
 }
 
 /**
  * Would the SDK run its automatic-function-calling loop for these params? The same test as its `generateContent`:
  * a callable tool is present, AFC is not disabled, and `maximumRemoteCalls` is not invalid (the SDK disables AFC with a
  * warning for 0, a negative or a non-integer, and then makes ONE plain call, which the ordinary path already governs).
- * Incompatible non-callable function declarations make the SDK throw; that is left to the SDK, so it is not "requested".
  */
-export function afcRequested(params: unknown): boolean {
+export function sdkRunsAfc(params: unknown): boolean {
 	if (!isObject(params) || !isObject(params["config"])) return false;
 	const config = params["config"];
 	const tools = Array.isArray(config["tools"]) ? (config["tools"] as unknown[]) : [];
@@ -54,7 +82,18 @@ export function afcRequested(params: unknown): boolean {
 	if (max !== undefined && max !== null) {
 		if (typeof max !== "number" || max === 0 || max < 0 || !Number.isInteger(max)) return false;
 	}
-	// A plain function declaration beside a callable tool: the SDK throws a clear error before any call.
+	return true;
+}
+
+/**
+ * Should governance run the loop itself? `sdkRunsAfc` and no plain function declaration beside a callable tool: that
+ * combination makes the SDK throw a clear error before any call, which is left to the SDK. Any other guard on AFC (a
+ * refusal until this loop exists, for example) should use `sdkRunsAfc` alone, so there is ONE predicate for "the SDK would
+ * run its own loop".
+ */
+export function afcRequested(params: unknown): boolean {
+	if (!sdkRunsAfc(params)) return false;
+	const tools = ((params as Loose)["config"] as Loose)["tools"] as unknown[];
 	for (const tool of tools) {
 		if (isCallableTool(tool)) continue;
 		const decls = isObject(tool) ? tool["functionDeclarations"] : undefined;
@@ -151,7 +190,15 @@ export async function runGovernedAfc(
 			? afc["maximumRemoteCalls"]
 			: DEFAULT_MAX_REMOTE_CALLS;
 	const appendHistory = afc["ignoreCallHistory"] !== true;
-	const tools = (config["tools"] as unknown[]).filter(isCallableTool);
+	const configTools = config["tools"] as unknown[];
+	const tools = configTools.filter(isCallableTool);
+	// Declarations are resolved ONCE, in order, before the first round, as the SDK's native loop does; a failing `tool()`
+	// ends the call here, before any round is charged.
+	const declarations = new Map<CallableTool, unknown>();
+	for (const tool of tools) declarations.set(tool, await tool.tool());
+	const roundTools = configTools.map((t) =>
+		isCallableTool(t) ? snapshotTool(t, declarations.get(t)) : t,
+	);
 
 	// The first round is sent the caller's `contents` exactly as given (the SDK normalises only once it appends a turn);
 	// the history starts from the normalised form.
@@ -166,7 +213,7 @@ export async function runGovernedAfc(
 		const roundParams: Loose = {
 			...params,
 			contents,
-			config: { ...config, automaticFunctionCalling: { ...afc, disable: true } },
+			config: { ...config, tools: roundTools, automaticFunctionCalling: { ...afc, disable: true } },
 		};
 		last = await round(roundParams);
 		if (last.receipt !== undefined) receipts.push(last.receipt);

@@ -40,8 +40,10 @@ type Loose = Record<string, unknown>;
 
 function scriptedModel(rounds: Array<{ functionCalls?: Loose[]; text: string }>) {
 	const sent: unknown[] = [];
+	const sentTools: unknown[] = [];
 	const respond = async (params: Loose): Promise<GenerateContentResponse> => {
 		sent.push(structuredClone(params["contents"]));
+		sentTools.push(structuredClone((params["config"] as Loose | undefined)?.["tools"]));
 		const r = rounds[Math.min(sent.length - 1, rounds.length - 1)] as {
 			functionCalls?: Loose[];
 			text: string;
@@ -65,7 +67,7 @@ function scriptedModel(rounds: Array<{ functionCalls?: Loose[]; text: string }>)
 		};
 		return res;
 	};
-	return { respond, sent };
+	return { respond, sent, sentTools };
 }
 
 function makeTool() {
@@ -210,6 +212,90 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 			await governed.destroy();
 		});
 	}
+
+	// How a callable tool is declared is part of the SDK's loop: it awaits every tool.tool() ONCE, before round 1.
+	it("a callable's declaration is resolved ONCE per call, and every round sees that one snapshot (stateful/dynamic tools)", async () => {
+		const makeDynamic = () => {
+			let n = 0;
+			const seen: unknown[] = [];
+			const tool = {
+				tool: async () => {
+					n++;
+					return { functionDeclarations: [{ name: `lookup_v${n}` }] };
+				},
+				callTool: async (calls: unknown[]) => {
+					seen.push(calls);
+					return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+				},
+			};
+			return { tool, calls: () => n };
+		};
+		const a = scriptedModel(ROUNDS);
+		const da = makeDynamic();
+		const sdk = new GoogleGenAI({ apiKey: "test" });
+		(sdk.models as unknown as Loose)["generateContentInternal"] = a.respond;
+		await sdk.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: "go",
+			config: { tools: [da.tool] } as never,
+		});
+
+		const b = scriptedModel(ROUNDS);
+		const db = makeDynamic();
+		const sdk2 = new GoogleGenAI({ apiKey: "test" });
+		(sdk2.models as unknown as Loose)["generateContentInternal"] = b.respond;
+		const governed = await trust(sdk2, { dryRun: true, budget: 500_000, vaultBase: vault });
+		await governed.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: "go",
+			config: { tools: [db.tool] } as never,
+		});
+		expect(da.calls()).toBe(1);
+		expect(db.calls()).toBe(da.calls());
+		// every round was sent the same declarations the SDK's own rounds were sent
+		expect(b.sentTools).toEqual(a.sentTools);
+		await governed.destroy();
+	});
+
+	it("a callable tool implemented as a FUNCTION OBJECT is governed round by round, like the SDK's own loop", async () => {
+		const makeFnTool = () => {
+			const seen: unknown[] = [];
+			const fn = Object.assign(() => undefined, {
+				tool: async () => ({ functionDeclarations: [{ name: "lookup" }] }),
+				callTool: async (calls: unknown[]) => {
+					seen.push(calls);
+					return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+				},
+			});
+			return { fn, seen };
+		};
+		const a = scriptedModel(ROUNDS);
+		const ta = makeFnTool();
+		const sdk = new GoogleGenAI({ apiKey: "test" });
+		(sdk.models as unknown as Loose)["generateContentInternal"] = a.respond;
+		await sdk.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: "go",
+			config: { tools: [ta.fn] } as never,
+		});
+
+		const b = scriptedModel(ROUNDS);
+		const tb = makeFnTool();
+		const sdk2 = new GoogleGenAI({ apiKey: "test" });
+		(sdk2.models as unknown as Loose)["generateContentInternal"] = b.respond;
+		const governed = await trust(sdk2, { dryRun: true, budget: 500_000, vaultBase: vault });
+		const out = (await governed.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: "go",
+			config: { tools: [tb.fn] } as never,
+		})) as unknown as { receipts?: unknown[] };
+		expect(a.sent).toHaveLength(3);
+		expect(b.sent).toEqual(a.sent);
+		expect(tb.seen).toEqual(ta.seen);
+		// the point: one governed receipt per model round, not one hold for the SDK's whole internal loop
+		expect(out.receipts).toHaveLength(3);
+		await governed.destroy();
+	});
 
 	it("a model that never stops calling tools is bounded by the SDK's default of 10 rounds, in both loops", async () => {
 		const endless = [{ functionCalls: [{ name: "lookup", args: {} }], text: "again" }];

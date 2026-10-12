@@ -87,6 +87,8 @@ function sdkLikeClient(rounds: Round[]) {
 		},
 	};
 	const tool = {
+		// a real CallableTool declares itself: the SDK (and so the governed loop) awaits this once before round 1
+		tool: async () => ({ functionDeclarations: [{ name: "lookup" }] }),
 		callTool: vi.fn(async (calls: unknown[]) => {
 			toolCalls.push(calls);
 			return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
@@ -219,6 +221,15 @@ describe("Google automatic function calling is metered round by round", () => {
 			expect(out.receipts).toBeUndefined();
 			await governed.destroy();
 		}
+	});
+
+	it("the envelope's per-round receipts are typed: no cast is needed to read them", async () => {
+		const { client, tool } = sdkLikeClient(TWO_ROUNDS);
+		const governed = await trust(client, { dryRun: true, budget: 500_000, vaultBase: vault });
+		const out = await governed.models.generateContent(call({ config: { tools: [tool] } }));
+		const receipts: Array<{ cost: number }> = out.receipts ?? [];
+		expect(receipts.map((r) => r.cost)).toEqual([6, 11]);
+		await governed.destroy();
 	});
 
 	it("afcRequested mirrors the SDK's decision", () => {

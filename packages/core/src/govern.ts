@@ -434,8 +434,21 @@ type GovernedResponses<R> =
  * arrives on the streaming shortcut users actually reach for.
  */
 type GovernedGoogleModels<G> = G extends { generateContent: infer C extends AnyMethod }
-	? Omit<G, "generateContent"> & { generateContent: GovernedCreateMethod<C> }
+	? Omit<G, "generateContent"> & { generateContent: GovernedGoogleGenerateMethod<C> }
 	: G;
+
+/**
+ * The Google `generateContent` envelope: `{ response, receipt }` like every other create, plus `receipts`, one per model
+ * round, present when a callable tool made the call a governed automatic-function-calling loop (google-afc.ts). `receipt`
+ * is then the LAST round's, so `receipts` is where a caller sees every charge.
+ */
+type GovernedGoogleGenerateMethod<F> = F extends (...args: infer A) => infer R
+	? (...args: A) => Promise<{
+			response: GovernedResponseOf<Awaited<R>>;
+			receipt: TrustReceipt;
+			receipts?: TrustReceipt[];
+		}>
+	: F;
 
 // ── Provider selection: the type-level twin of detectClientKind ──
 // Each predicate is the full runtime test, both halves: the namespace is a
