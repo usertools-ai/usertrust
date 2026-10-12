@@ -16,7 +16,10 @@
  *   A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   convenience helper is NOT, and is refused (see below).
- * - Google: `client.models.generateContent()`
+ * - Google: `client.models.generateContent()`. With a callable tool the SDK runs an
+ *   automatic-function-calling LOOP of several model calls; governance runs that loop
+ *   itself, each round its own governed call (`google-afc.ts`), so every round is held,
+ *   metered and audited. `generateContentStream()` is NOT governed.
  *
  * **Anthropic and OpenAI clients are default-deny** (`default-deny.ts`). Every other
  * SDK method reached off the governed client, at any depth, is REFUSED: the call
