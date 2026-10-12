@@ -44,7 +44,11 @@ builds a new one through `client.constructor`, through the governed client's own
 `Object.getPrototypeOf(trusted).constructor` (closing that path would break
 `trusted instanceof Anthropic` / `OpenAI` / `GoogleGenAI`), or reads the API key off the
 client (`client.apiKey` is a plain value and passes) is outside it, as with any
-wrapper. Deliberate bypass from your own code is out of scope: code that holds a
+wrapper. On Google, a Stream returned by a free or listed call
+(`interactions.get` with `stream`) exposes the SDK's raw next-gen client as a
+public `client` property, unlike the Anthropic and OpenAI SDKs, which keep theirs
+private. Calling a method on it is deliberate bypass, out of scope like
+`constructor` and reading `apiKey`. Deliberate bypass from your own code is out of scope: code that holds a
 provider key can always reach the provider. `usertrust-server` does not change
 that, because it authorizes and settles spend but does not make or forward the
 provider calls; enforcing against deliberate bypass needs the provider key held

@@ -147,9 +147,18 @@ const realFetch = globalThis.fetch;
 let hits: string[] = [];
 
 /** Every request the SDK sends lands here: `METHOD /path`. */
+/** When set, the next responses are a one-event SSE stream (for a streamed next-gen read). */
+let answerWithSse = false;
+
 async function recordingFetch(input: unknown, init?: RequestInit): Promise<Response> {
 	const url = new URL(String(input instanceof Request ? input.url : input));
 	hits.push(`${(init?.method ?? "GET").toUpperCase()} ${url.pathname}`);
+	if (answerWithSse) {
+		return new Response("event: done\ndata: {}\n\n", {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	}
 	if (url.pathname === "/upload/v1beta/files") {
 		return new Response("{}", {
 			status: 200,
@@ -736,6 +745,24 @@ describe("a duck-typed Google client is guarded by shape", () => {
 		expect(reads, "trust() and the shape test ran no getter").toBe(0);
 		await expectRefused("extras.send", () => client.extras.send(), engine);
 		expect(send).not.toHaveBeenCalled();
+	});
+
+	// RESIDUE, pinned so it is visible: the SDK's next-gen Stream keeps its client in a PUBLIC
+	// `client` property, and return values are not wrapped. Calling a method on it is deliberate
+	// bypass (LIMITATIONS.md, "Threat model"). If a future SDK makes the field private, this row
+	// fails: delete it and the LIMITATIONS sentence with it.
+	it("residue: a Stream from the free interactions.get({ stream: true }) exposes the SDK's raw next-gen client as `client`", async () => {
+		const { client, raw } = await google();
+		answerWithSse = true;
+		try {
+			const stream = await client.interactions.get("i_1", { stream: true });
+			expect(stream.client).toBe(raw.getNextGenClient());
+			expect(typeof stream.client.post).toBe("function");
+		} finally {
+			answerWithSse = false;
+		}
+		expect(hits).toEqual(["GET /v1beta/interactions/i_1"]);
+		expect(chainEvents()).toEqual([]);
 	});
 
 	it("plain data stays data: httpOptions reads through as it is", async () => {
