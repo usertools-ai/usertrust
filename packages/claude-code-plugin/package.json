@@ -4,5 +4,12 @@
 	"description": "Ledger-backed governance hooks for Claude Code — two-phase spend authorization on every tool call",
 	"license": "Apache-2.0",
 	"type": "module",
+	"files": [
+		".claude-plugin",
+		"bin",
+		"hooks",
+		"CHANGELOG.md",
+		"README.md"
+	],
 	"private": true
 }

@@ -75,7 +75,7 @@ function makeMockAudit(): AuditWriter {
 
 // ── connectProxy() throws ──
 
-describe("connectProxy() — AUD-456", () => {
+describe("connectProxy()", () => {
 	it("throws 'proxy mode not yet implemented'", () => {
 		expect(() => connectProxy("https://proxy.usertools.ai", "pk_test_123")).toThrow(
 			"proxy mode is not yet implemented",
@@ -83,7 +83,9 @@ describe("connectProxy() — AUD-456", () => {
 	});
 
 	it("throws without a key too", () => {
-		expect(() => connectProxy("https://proxy.usertools.ai")).toThrow("AUD-456");
+		expect(() => connectProxy("https://proxy.usertools.ai")).toThrow(
+			"proxy mode is not yet implemented",
+		);
 	});
 
 	it("error message mentions dryRun as an alternative", () => {
@@ -93,7 +95,7 @@ describe("connectProxy() — AUD-456", () => {
 
 // ── trust({ proxy }) throws ──
 
-describe("trust({ proxy }) — AUD-456", () => {
+describe("trust({ proxy })", () => {
 	let tmpVault: string;
 
 	beforeEach(() => {
@@ -136,7 +138,7 @@ describe("trust({ proxy }) — AUD-456", () => {
 				key: "pk_live_abc123",
 				_audit: mockAudit,
 			}),
-		).rejects.toThrow("AUD-456");
+		).rejects.toThrow("proxy mode is not yet implemented");
 	});
 
 	it("trust() works normally without proxy option", async () => {

@@ -33,6 +33,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { types } from "node:util";
 import type { PersistedAuditEvent } from "../audit/read.js";
 import { providerOfModel } from "../ledger/pricing.js";
 
@@ -380,6 +381,12 @@ export interface ReportModel {
 	 */
 	unrecognised: Record<string, number>;
 	/**
+	 * `ungoverned_call`: a call the caller opted out of governance for (`allowUngoverned`). It went to the provider with no
+	 * hold, no budget check and no cost, so what it spent is not known: counted here by method, in NO spend, cost, budget,
+	 * governed-call or action figure.
+	 */
+	ungoverned: { calls: number; byMethod: Record<string, number> };
+	/**
 	 * Records that only qualify a call (shortfall, ambiguity, implausible-usage note, failure markers) but whose transfer has
 	 * NO spend record in the chain, by kind. `amount` is usertokens with no denomination assumed and is in no spend total.
 	 */
@@ -409,6 +416,8 @@ const KNOWN_KINDS: ReadonlySet<string> = new Set([
 	// Written by the budget primitives (cost-center envelopes) to the same chain; deliberately not read here.
 	"budget_allocated",
 	"budget_reclaimed",
+	// A call run ungoverned through `allowUngoverned`: counted by method, never as spend.
+	"ungoverned_call",
 	...GOVERNANCE_KINDS,
 ]);
 
@@ -437,6 +446,9 @@ const NON_ACTION_KINDS = new Set<string>([
 	"injection_detected",
 	"anomaly_detected",
 	"chunk",
+	// A call run ungoverned moved no metered money: it carries no `actionName` today, and listing it here keeps one that
+	// ever did (or carried a `cost`) out of the action totals.
+	"ungoverned_call",
 ]);
 
 const HOUR_MS = 3_600_000;
@@ -448,6 +460,23 @@ function str(v: unknown): string | undefined {
 function cost(v: unknown): number | undefined {
 	return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
 }
+
+/**
+ * An own DATA property holding a string, read without running any code: an accessor is never called and a Proxy is never
+ * read through, so a label is what the record stored and nothing else.
+ */
+function ownStringDataProperty(obj: unknown, key: string): string | undefined {
+	if (obj === null || typeof obj !== "object") return undefined;
+	if (types.isProxy(obj)) return undefined;
+	try {
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		return d !== undefined && "value" in d && typeof d.value === "string" ? d.value : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+const UNKNOWN_METHOD = "(unknown method)";
 
 function count(v: unknown): number {
 	return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
@@ -827,6 +856,8 @@ function buildPlain(
 		cacheWriteTokens: 0,
 	};
 	const unrecognised = new Map<string, number>();
+	const ungovernedByMethod = new Map<string, number>();
+	let ungovernedCalls = 0;
 	// Per-transfer evidence for the budget leg (see classifyTransfer), over the WHOLE chain, in chain order.
 	const evidence = new Map<string, TransferEvidence>();
 	let anonymous = 0;
@@ -1195,6 +1226,15 @@ function buildPlain(
 			// grow the table without limit.
 			const key = unrecognised.size >= 50 && !unrecognised.has(e.kind) ? "(more kinds)" : e.kind;
 			unrecognised.set(key, (unrecognised.get(key) ?? 0) + 1);
+		} else if (e.kind === "ungoverned_call") {
+			// After the known-kinds gate, so KNOWN_KINDS stays the one place a kind becomes readable. Counted by method and
+			// added to no figure: a `cost` it carries is never summed. The label is vault data, bounded like `unrecognised`.
+			ungovernedCalls += 1;
+			const method = ownStringDataProperty(e.data, "method");
+			const label = method === undefined || method === "" ? UNKNOWN_METHOD : method;
+			const key =
+				ungovernedByMethod.size >= 50 && !ungovernedByMethod.has(label) ? "(more methods)" : label;
+			ungovernedByMethod.set(key, (ungovernedByMethod.get(key) ?? 0) + 1);
 		}
 	}
 
@@ -1370,6 +1410,12 @@ function buildPlain(
 		unrecognised: Object.fromEntries(
 			[...unrecognised.entries()].sort(([a], [b]) => a.localeCompare(b)),
 		),
+		ungoverned: {
+			calls: ungovernedCalls,
+			byMethod: Object.fromEntries(
+				[...ungovernedByMethod.entries()].sort(([a], [b]) => a.localeCompare(b)),
+			),
+		},
 		notes,
 	};
 }

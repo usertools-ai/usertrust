@@ -134,4 +134,14 @@ describe("statusOf", () => {
 		expect(policyDenied?.costUt).toBeUndefined();
 		expect(ledgerRejected?.costUt).toBeUndefined();
 	});
+
+	it("an ungoverned_call is ungoverned: an unmetered call, never a pending hold", () => {
+		// It carries no `settled` and no `error`: without its own arm it read "pending", a hold
+		// that might still settle, hiding that the call ran with no hold at all.
+		const [row] = toLedgerRows(
+			[evt({ kind: "ungoverned_call", data: { method: "embeddings.create", provider: "openai" } })],
+			{ valid: true, breakIndex: null },
+		);
+		expect(statusOf(row as never)).toBe("ungoverned");
+	});
 });
