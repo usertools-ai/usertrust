@@ -94,7 +94,8 @@ export async function createUiServer(
 			const touched = state.transfers.add(fresh);
 			// A new record can change an EARLIER row's verdict (an ambiguity appended after an optimistic
 			// settlement), so every visible row of a touched transfer is re-classified, and each change is sent.
-			const changed: Array<{ id: string; status: RowStatus }> = [];
+			// Each change names its row by event HASH (unique on the chain); the id rides along for display only.
+			const changed: Array<{ id: string; hash: string; status: RowStatus }> = [];
 			for (const r of state.rows) {
 				const key = state.transfers.keyOfRow(r.hash);
 				if (key === undefined || !touched.has(key)) continue;
@@ -105,7 +106,7 @@ export async function createUiServer(
 				);
 				if (status !== r.status) {
 					r.status = status;
-					changed.push({ id: r.id, status });
+					changed.push({ id: r.id, hash: r.hash, status });
 				}
 			}
 			const rows = toLedgerRows(

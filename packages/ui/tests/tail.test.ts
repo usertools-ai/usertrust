@@ -102,7 +102,7 @@ describe("live tail", () => {
 		seed.release();
 		ui = await createUiServer(tempDir, { port: 0 });
 		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
-			rows: Array<{ id: string; transferId?: string; status?: string }>;
+			rows: Array<{ id: string; hash: string; transferId?: string; status?: string }>;
 		};
 		const optimistic = before.rows.find((r) => r.transferId === "tx_opt");
 		expect(optimistic?.status).toBe("settled");
@@ -119,7 +119,9 @@ describe("live tail", () => {
 				writer.release();
 			},
 		);
-		expect(JSON.parse(data)).toEqual([{ id: optimistic?.id, status: "ambiguous" }]);
+		expect(JSON.parse(data)).toEqual([
+			{ id: optimistic?.id, hash: optimistic?.hash, status: "ambiguous" },
+		]);
 		const after = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
 			rows: Array<{ transferId?: string; kind: string; status?: string }>;
 		};

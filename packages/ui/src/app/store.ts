@@ -3,8 +3,9 @@
 
 import { useEffect, useState } from "react";
 import type { SummaryPayload } from "../shared/api.js";
+import { applyStatusChanges, novelRows, type StatusChange } from "../shared/live.js";
 import { frameVersion, SnapshotReplay, type Update } from "../shared/replay.js";
-import type { LedgerRow, RowStatus } from "../shared/rows.js";
+import type { LedgerRow } from "../shared/rows.js";
 
 export interface LedgerData {
 	rows: LedgerRow[];
@@ -89,10 +90,9 @@ export function useLedger(): LedgerData {
 		source.addEventListener("rows", (e) => {
 			const fresh = JSON.parse((e as MessageEvent).data) as LedgerRow[];
 			frame(e, (d) => {
-				// Dedup by id: an SSE frame can race the open-triggered resync
-				// fetch and redeliver rows the fetch already returned.
-				const seen = new Set(d.rows.map((r) => r.id));
-				const novel = fresh.filter((r) => !seen.has(r.id));
+				// Dedup by event hash (shared/live.ts): a frame can redeliver rows
+				// the resync fetch already returned, and an id can repeat.
+				const novel = novelRows(d.rows, fresh);
 				if (novel.length === 0) return d;
 				const liveIds = new Set(d.liveIds);
 				for (const r of novel) liveIds.add(r.id);
@@ -116,18 +116,9 @@ export function useLedger(): LedgerData {
 		// A new record can change an EARLIER row's verdict (an ambiguity after an optimistic settlement): the server
 		// sends each changed row's new status.
 		source.addEventListener("status", (e) => {
-			const changes = JSON.parse((e as MessageEvent).data) as Array<{
-				id: string;
-				status: RowStatus;
-			}>;
-			const next = new Map(changes.map((c) => [c.id, c.status]));
-			frame(e, (d) => ({
-				...d,
-				rows: d.rows.map((r) => {
-					const status = next.get(r.id);
-					return status === undefined ? r : { ...r, status };
-				}),
-			}));
+			const changes = JSON.parse((e as MessageEvent).data) as StatusChange[];
+			// Applied to the row whose event HASH each change names (shared/live.ts), never to every row sharing an id.
+			frame(e, (d) => ({ ...d, rows: applyStatusChanges(d.rows, changes) }));
 		});
 		source.addEventListener("summary", (e) => {
 			const summary = JSON.parse((e as MessageEvent).data) as SummaryPayload;
