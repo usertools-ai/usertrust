@@ -450,3 +450,89 @@ describe("the reconciliation warning renders with NO configured budget, in md an
 		}
 	});
 });
+
+describe("calls run ungoverned are disclosed in every format, by method", () => {
+	const ok = { verified: true, errors: [], chainLength: 1, firstEvent: "a", lastEvent: "a" };
+	const LINE = "Calls run ungoverned (opted out with allowUngoverned, unmetered):";
+	const ungoverned = (method: unknown): PersistedAuditEvent =>
+		({
+			id: "u",
+			kind: "ungoverned_call",
+			timestamp: "2026-10-11T00:00:00Z",
+			actor: "local",
+			hash: "h",
+			data: { method, provider: "openai" },
+		}) as unknown as PersistedAuditEvent;
+	const paid = {
+		id: "i",
+		kind: "llm_call",
+		timestamp: "2026-10-11T00:00:00Z",
+		actor: "local",
+		hash: "h",
+		data: { model: "m", cost: 100, settled: true, transferId: "t" },
+	} as unknown as PersistedAuditEvent;
+
+	it("no line in md or html when there are none", () => {
+		const m = buildWeeklyReport([paid], ok, { endMs: END });
+		for (const f of ["md", "html"] as const) expect(render(m, f), f).not.toContain(LINE);
+	});
+
+	it("4 calls over two methods: the count and the breakdown in md, html and json", () => {
+		const m = buildWeeklyReport(
+			[
+				paid,
+				ungoverned("embeddings.create"),
+				ungoverned("embeddings.create"),
+				ungoverned("images.generate"),
+				ungoverned("embeddings.create"),
+			],
+			ok,
+			{ endMs: END },
+		);
+		const mdOut = render(m, "md");
+		expect(mdOut).toContain(`${LINE} 4`);
+		expect(mdOut).toContain("| `embeddings.create` | 3 |");
+		expect(mdOut).toContain("| `images.generate` | 1 |");
+		const html = render(m, "html");
+		expect(html).toContain(`${LINE} 4`);
+		expect(html).toContain(`<tr><td>embeddings.create</td><td class="n">3</td></tr>`);
+		expect(html).toContain(`<tr><td>images.generate</td><td class="n">1</td></tr>`);
+		const json = JSON.parse(render(m, "json")) as {
+			ungoverned: { calls: number; byMethod: Record<string, number> };
+		};
+		expect(json.ungoverned).toEqual({
+			calls: 4,
+			byMethod: { "embeddings.create": 3, "images.generate": 1 },
+		});
+		// never spend: the one paid call is the whole confirmed figure
+		expect(m.totals.confirmedUt).toBe(100);
+	});
+
+	it("a method label carrying markdown or html control text is neutralised in md and html, exact in json", () => {
+		const label =
+			"a<script>alert(1)</script>|b`c\n| x | y |\n![p](https://evil.example/p)\u001b[2J\u009b1A";
+		const m = buildWeeklyReport([ungoverned(label)], ok, { endMs: END });
+
+		const mdOut = render(m, "md");
+		// the row is ONE table line: the pipe and the newline did not split it
+		expect(mdOut.split("\n")).toContain(`| ${md(label)} | 1 |`);
+		const live = outsideCodeSpans(mdOut);
+		expect(live).not.toMatch(/<[A-Za-z!/]/);
+		expect(live).not.toMatch(/!\[/);
+		expect(live).not.toMatch(/\]\(/);
+		expect(live).not.toContain("evil.example");
+		expect(mdOut).not.toMatch(CONTROL);
+		// CONTROL: the label is there, as text
+		expect(mdOut).toContain("evil.example");
+
+		const html = render(m, "html");
+		expect(html).not.toMatch(/<script/i);
+		expect(html).toContain("a&lt;script&gt;alert(1)&lt;/script&gt;|b`c");
+		expect(html).not.toMatch(CONTROL);
+
+		const json = JSON.parse(render(m, "json")) as {
+			ungoverned: { byMethod: Record<string, number> };
+		};
+		expect(json.ungoverned.byMethod).toEqual({ [label]: 1 });
+	});
+});
