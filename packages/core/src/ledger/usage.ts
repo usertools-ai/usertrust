@@ -272,8 +272,11 @@ export type ImplausibleChecks = NonNullable<NormalizedUsage["implausibleBy"]>;
 
 /**
  * An implausible record with `found` merged in: the larger figure per tier and, per tier, the label of the FIRST check
- * that fired, as `sanitizeUsage` labels it (a tier first seen unlabelled stays a "sum"). Every stream accumulator and
- * the stream settle merge through this, so a refused figure is never relabelled a sum on its way to the record.
+ * that fired, as `sanitizeUsage` labels it. One pairing is the exception: a "refused" label outranks an aggregate "sum"
+ * (an unlabelled tier) that fired first. A figure refused on its own is the more specific finding, and a finalMessage
+ * count re-sanitized before the merge would otherwise reach the record as a sum. Every other pairing keeps the first
+ * label. Every stream accumulator and the stream settle merge through this, so a refused figure is never relabelled a
+ * sum on its way to the record.
  */
 export function mergeImplausible(
 	implausible: Partial<Record<UsageTier, number>> | undefined,
@@ -289,7 +292,9 @@ export function mergeImplausible(
 	let mergedBy = implausibleBy;
 	for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
 		const by = foundBy?.[tier];
-		if (merged[tier] === undefined && by !== undefined) mergedBy = { ...mergedBy, [tier]: by };
+		const firstFired = merged[tier] === undefined;
+		const refusedOverSum = by === "refused" && !firstFired && mergedBy?.[tier] === undefined;
+		if (by !== undefined && (firstFired || refusedOverSum)) mergedBy = { ...mergedBy, [tier]: by };
 		merged[tier] = Math.max(merged[tier] ?? 0, value);
 	}
 	return { implausible: merged, implausibleBy: mergedBy };
@@ -675,22 +680,34 @@ export function fromOpenAICompletionsUsage(usage: unknown): NormalizedUsage {
 	const u = asRecord(usage);
 	const promptDetails = readObject(u, "prompt_tokens_details");
 
-	const prompt = readCount(u.prompt_tokens);
-	const completion = readCount(u.completion_tokens);
+	// Every figure is read RAW through `component`, so an absurd or invalid one is refused under its tier, never priced
+	// and never read as absent. The raw prompt, and each cache figure subtracted from it, is held to the ceiling BEFORE
+	// the tiers are derived: an absurd prompt could otherwise hide behind a large cache (150M prompt, 100M cached, 50M
+	// fresh input, every derived tier plausible). A refused prompt is attributed to the input tier.
+	const refused: Partial<Record<UsageTier, number>> = {};
+	const prompt = component(u.prompt_tokens, "inputTokens", refused);
+	const completion = component(u.completion_tokens, "outputTokens", refused);
 
-	const cacheRead = (promptDetails ? readCount(promptDetails.cached_tokens) : null) ?? 0;
+	const cacheRead = component(promptDetails?.cached_tokens, "cacheReadTokens", refused) ?? 0;
+	// The fallback is taken only when the first field is MISSING (`??` on the raw values): a present invalid
+	// `cache_write_tokens` is refused, not skipped over.
 	const cacheWrite =
-		readCount(u.cache_write_tokens) ??
-		(promptDetails ? readCount(promptDetails.cache_write_tokens) : null) ??
-		0;
+		component(
+			u.cache_write_tokens ?? promptDetails?.cache_write_tokens,
+			"cacheWriteTokens",
+			refused,
+		) ?? 0;
 
-	return sanitizeUsage({
-		inputTokens: disjointInput(prompt ?? 0, cacheRead, cacheWrite),
-		outputTokens: completion ?? 0,
-		cacheReadTokens: cacheRead,
-		cacheWriteTokens: cacheWrite,
-		source: prompt != null && completion != null ? "provider" : "estimated",
-	});
+	return sanitizeUsage(
+		{
+			inputTokens: disjointInput(prompt ?? 0, cacheRead, cacheWrite),
+			outputTokens: completion ?? 0,
+			cacheReadTokens: cacheRead,
+			cacheWriteTokens: cacheWrite,
+			source: prompt != null && completion != null ? "provider" : "estimated",
+		},
+		{ refused },
+	);
 }
 
 /**
@@ -708,23 +725,32 @@ export function fromOpenAIResponsesUsage(usage: unknown): NormalizedUsage {
 	const u = asRecord(usage);
 	const inputDetails = readObject(u, "input_tokens_details");
 
-	const input = readCount(u.input_tokens);
-	const output = readCount(u.output_tokens);
+	// Same rule as completions: every figure is read raw through `component`, and the raw input, and each cache figure
+	// subtracted from it, is held to the ceiling before the tiers are derived; a refused raw input is attributed to the
+	// input tier.
+	const refused: Partial<Record<UsageTier, number>> = {};
+	const input = component(u.input_tokens, "inputTokens", refused);
+	const output = component(u.output_tokens, "outputTokens", refused);
 
-	const cacheRead = (inputDetails ? readCount(inputDetails.cached_tokens) : null) ?? 0;
-	const cacheWrite = inputDetails
-		? (readCount(inputDetails.cache_creation_tokens) ??
-			readCount(inputDetails.cache_write_tokens) ??
-			0)
-		: 0;
+	const cacheRead = component(inputDetails?.cached_tokens, "cacheReadTokens", refused) ?? 0;
+	// As in completions, the fallback field is read only when the first is MISSING.
+	const cacheWrite =
+		component(
+			inputDetails?.cache_creation_tokens ?? inputDetails?.cache_write_tokens,
+			"cacheWriteTokens",
+			refused,
+		) ?? 0;
 
-	return sanitizeUsage({
-		inputTokens: disjointInput(input ?? 0, cacheRead, cacheWrite),
-		outputTokens: output ?? 0,
-		cacheReadTokens: cacheRead,
-		cacheWriteTokens: cacheWrite,
-		source: input != null && output != null ? "provider" : "estimated",
-	});
+	return sanitizeUsage(
+		{
+			inputTokens: disjointInput(input ?? 0, cacheRead, cacheWrite),
+			outputTokens: output ?? 0,
+			cacheReadTokens: cacheRead,
+			cacheWriteTokens: cacheWrite,
+			source: input != null && output != null ? "provider" : "estimated",
+		},
+		{ refused },
+	);
 }
 
 /**
