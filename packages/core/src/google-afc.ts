@@ -454,13 +454,52 @@ const SDK_TOOL_FIELDS = [
 /**
  * A non-callable tool's one PRESENCE-only field: `hasMcpToolUsage` tests `'inputSchema' in
  * tool` (the MCP usage header) and never reads the value, and no converter sends it. So the
- * snapshot carries its presence WITHOUT evaluating it: a getter there is never run (the SDK
- * never runs it), and the copy holds `undefined` unless the tool has it as own enumerable data.
+ * snapshot carries its presence WITHOUT evaluating it: whatever its descriptor (a getter, which
+ * the SDK never runs, or data of any kind), its value is never read, checked or cloned, and
+ * the copy holds `undefined` there.
  */
 const SDK_TOOL_PRESENCE_FIELD = "inputSchema";
 
 /** A canonical array index (`"0"`, `"12"`), as an own key of an array. */
 const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
+
+/** The built-in, captured at module load: a caller who patches it later cannot make a fake constructor look native. */
+const functionToString = Function.prototype.toString;
+
+/** An own DATA property's value, read from its descriptor (never through a getter); `undefined` otherwise. */
+function ownDataValue(obj: object, key: string): { value: unknown } | undefined {
+	const d = Object.getOwnPropertyDescriptor(obj, key);
+	return d !== undefined && "value" in d ? { value: d.value } : undefined;
+}
+
+/**
+ * `proto` is SOME realm's `Object.prototype` (this one, or a `vm` context's, a test runner's):
+ * it has no prototype of its own, and its own `constructor` is a DATA property holding a
+ * native function named "Object" whose own `prototype` is `proto` itself. Read through
+ * descriptors only, with the captured `Function.prototype.toString`, and a Proxy anywhere is
+ * not plain, so no caller code runs. A user class's prototype, a fake "Object" function, or a
+ * bound function (which has no `prototype`) fails it.
+ */
+function isRealmObjectPrototype(proto: unknown): boolean {
+	if (proto === Object.prototype) return true;
+	if (proto === null || typeof proto !== "object" || utilTypes.isProxy(proto)) return false;
+	if (Object.getPrototypeOf(proto) !== null) return false;
+	const ctor = ownDataValue(proto, "constructor")?.value;
+	if (typeof ctor !== "function" || utilTypes.isProxy(ctor)) return false;
+	return (
+		ownDataValue(ctor, "name")?.value === "Object" &&
+		ownDataValue(ctor, "prototype")?.value === proto &&
+		functionToString.call(ctor).includes("[native code]")
+	);
+}
+
+/** `proto` is SOME realm's `Array.prototype`: every realm's `Array.prototype` is itself an array. */
+function isRealmArrayPrototype(proto: unknown): boolean {
+	if (proto === Array.prototype) return true;
+	return (
+		proto !== null && typeof proto === "object" && !utilTypes.isProxy(proto) && Array.isArray(proto)
+	);
+}
 
 /**
  * Refuse (UncloneableAfcInput, naming the path) a value that `structuredClone` would copy
@@ -470,10 +509,10 @@ const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
  * own enumerable data only. Per-type field lists cannot follow a recursive Schema, so below
  * the tool's top-level fields the snapshot does not capture, it REFUSES: "can't tell".
  *
- * Allowed: primitives; plain objects (prototype `Object.prototype` or `null`) whose own
- * string-keyed properties are all enumerable DATA; and DENSE arrays (prototype
- * `Array.prototype`) holding enumerable data at every index and no named property besides
- * `length`. Refused: a class instance (any other prototype: a user class, `Date`, `Map`, a
+ * Allowed: primitives; plain objects (prototype `null` or ANY realm's `Object.prototype`, so
+ * data built in a `vm` context or a test runner's realm counts) whose own string-keyed
+ * properties are all enumerable DATA; and DENSE arrays (any realm's `Array.prototype`)
+ * holding enumerable data at every index and no named property besides `length`. Refused: a class instance (any other prototype: a user class, `Date`, `Map`, a
  * typed array, an array subclass), an accessor, a non-enumerable property, a sparse array,
  * an array with an extra named property, a function. Symbol keys are neither read by the SDK
  * nor copied by structuredClone, so they are ignored.
@@ -496,8 +535,8 @@ function refuseLossyClone(root: unknown, rootAt: string): void {
 		const isArray = Array.isArray(value);
 		const proto = Object.getPrototypeOf(value);
 		const plainProto = isArray
-			? proto === Array.prototype
-			: proto === Object.prototype || proto === null;
+			? isRealmArrayPrototype(proto)
+			: proto === null || isRealmObjectPrototype(proto);
 		if (!plainProto) throw new UncloneableAfcInput(at);
 		const keys = Reflect.ownKeys(value).filter((k): k is string => typeof k === "string");
 		if (isArray) {
@@ -526,10 +565,10 @@ function refuseLossyClone(root: unknown, rootAt: string): void {
  * A non-callable tool as data WE own. Its own enumerable string-keyed properties are read
  * ONCE each (an accessor's getter on the original receiver), as `structuredClone(tool)`
  * would read them; every field in SDK_TOOL_FIELDS that those would not carry (inherited, or
- * non-enumerable own) is CAPTURED once (`captureOnce`); SDK_TOOL_PRESENCE_FIELD is carried
- * as PRESENT (`undefined`) when `in` would find it, with no getter run, its value kept only
- * when it is own enumerable data; all are set as enumerable own data
- * on a plain object, which is then structuredClone'd. So the clone holds every field the SDK
+ * non-enumerable own) is CAPTURED once (`captureOnce`); all are set as enumerable own data
+ * on a plain object, which is then structuredClone'd; SDK_TOOL_PRESENCE_FIELD is left out of
+ * it and set on the clone as PRESENT (`undefined`) when `in` would find it, its value never
+ * read. So the clone holds every field the SDK
  * reads, `functionDeclarations` included, and the verdict, which reads the clone, sees what
  * the SDK will see: a declarations getter beside a callable tool is the SDK's own local
  * error, not an AFC loop. The VALUE of each of those fields, whichever way it was read, must
@@ -545,12 +584,13 @@ function cloneDataTool(tool: unknown, at: string): unknown {
 		}
 	}
 	const source: Record<string, unknown> = {};
+	let presenceFieldPresent = false;
 	for (const key of Reflect.ownKeys(tool)) {
 		if (typeof key !== "string") continue; // structuredClone copies no symbol key either
 		const d = Object.getOwnPropertyDescriptor(tool, key);
 		if (d === undefined || d.enumerable !== true) continue;
-		if (key === SDK_TOOL_PRESENCE_FIELD && !("value" in d)) {
-			setData(source, key, undefined); // present; its getter is never run (see the field)
+		if (key === SDK_TOOL_PRESENCE_FIELD) {
+			presenceFieldPresent = true; // presence only: its value is never read, checked or cloned
 			continue;
 		}
 		let value: unknown;
@@ -567,21 +607,22 @@ function cloneDataTool(tool: unknown, at: string): unknown {
 		if (value !== undefined) setData(source, key, value);
 	}
 	// Inherited or non-enumerable own: PRESENT, as `in` sees it, with no getter run.
-	if (
-		!Object.hasOwn(source, SDK_TOOL_PRESENCE_FIELD) &&
-		presentOnChain(tool, SDK_TOOL_PRESENCE_FIELD, at)
-	) {
-		setData(source, SDK_TOOL_PRESENCE_FIELD, undefined);
-	}
-	// The value fields only: the SDK never reads below the presence field.
+	presenceFieldPresent ||= presentOnChain(tool, SDK_TOOL_PRESENCE_FIELD, at);
 	for (const key of SDK_TOOL_FIELDS) {
 		if (Object.hasOwn(source, key)) refuseLossyClone(source[key], `${at}.${key}`);
 	}
+	let out: unknown;
 	try {
-		return structuredClone(source);
+		out = structuredClone(source);
 	} catch {
 		throw new UncloneableAfcInput(at);
 	}
+	// Added AFTER the clone, holding `undefined` whatever the tool held: the SDK only tests
+	// `in`, so a value it never reads (a function, a symbol) must not fail the clone.
+	if (presenceFieldPresent) {
+		setData(out as Record<string, unknown>, SDK_TOOL_PRESENCE_FIELD, undefined);
+	}
+	return out;
 }
 
 /**

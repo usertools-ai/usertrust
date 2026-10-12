@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { GenerateContentResponse, GoogleGenAI } from "@google/genai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
@@ -854,6 +855,56 @@ function throwingInputSchemaTool(calls: { n: number }): object {
 	return Object.assign(new McpLikeBase(), declaresLookup());
 }
 
+/** An own enumerable DATA `inputSchema` that structuredClone cannot copy; the SDK only tests `in`, never the value. */
+const UNCLONEABLE_INPUT_SCHEMA: Array<[string, () => object]> = [
+	["a FUNCTION", () => ({ ...declaresLookup(), inputSchema: () => ({ type: "object" }) })],
+	["a SYMBOL", () => ({ ...declaresLookup(), inputSchema: Symbol("schema") })],
+];
+
+/** Plain data built in ANOTHER realm (a `vm` context, as a test runner or sandbox makes it). */
+const CROSS_REALM_PLAIN: Array<[string, () => object]> = [
+	[
+		"a whole tool from another realm",
+		() =>
+			runInNewContext(
+				'({ functionDeclarations: [{ name: "lookup", parameters: { type: "OBJECT" } }] })',
+			) as object,
+	],
+	[
+		"a declarations array from another realm",
+		() => ({
+			functionDeclarations: runInNewContext(
+				'[{ name: "lookup", parameters: { type: "OBJECT" } }]',
+			) as unknown[],
+		}),
+	],
+];
+
+/** A class-instance declaration built in another realm: its `name` is a prototype getter there. */
+function crossRealmClassTool(): object {
+	return runInNewContext(
+		'class Decl { get name() { return "lookup"; } }; ({ functionDeclarations: [new Decl()] })',
+	) as object;
+}
+
+/**
+ * A same-realm declaration whose prototype impersonates `Object.prototype`: null-prototyped, with a `constructor` named
+ * "Object" whose `prototype` points back at it, but a user function (not native code), and an inherited getter.
+ */
+function fakeObjectPrototypeTool(): object {
+	function fakeObject(): void {}
+	Object.defineProperty(fakeObject, "name", { value: "Object" });
+	const proto = Object.create(null, {
+		constructor: { value: fakeObject, writable: true, configurable: true },
+		description: { get: () => "look it up", configurable: true },
+	}) as object;
+	fakeObject.prototype = proto;
+	const declaration = Object.create(proto, {
+		name: { value: "lookup", enumerable: true, writable: true, configurable: true },
+	}) as object;
+	return { functionDeclarations: [declaration] };
+}
+
 function declaresLookup(): Loose {
 	return { functionDeclarations: [{ name: "lookup" }] };
 }
@@ -1137,6 +1188,68 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
 			expect(auditKinds).not.toContain("policy_denied");
 		});
+
+		for (const [shape, makeTool] of UNCLONEABLE_INPUT_SCHEMA) {
+			it(`${method}: an own inputSchema holding ${shape} (never read by the SDK) is carried by presence only: same MCP header and body`, async () => {
+				const makeParams = () => ({
+					model: "gemini-2.5-flash",
+					contents: "go",
+					config: { tools: [makeTool()] },
+				});
+				const { raw, rawResult, gov, govResult, auditKinds } = await both(method, makeParams);
+
+				expect(rawResult).toBe("ok");
+				expect(govResult).toBe("ok");
+				expect(raw.requests).toHaveLength(1);
+				expect(gov.requests).toHaveLength(1);
+				expect(raw.requests[0]?.apiClientHeader).toContain("mcp_used/");
+				expect(gov.requests[0]?.apiClientHeader).toBe(raw.requests[0]?.apiClientHeader);
+				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+				expect(auditKinds).not.toContain("policy_denied");
+			});
+		}
+
+		for (const [shape, makeTool] of CROSS_REALM_PLAIN) {
+			it(`${method}: plain declarations in ${shape} are accepted and forwarded as the SDK's own`, async () => {
+				const makeParams = () => ({
+					model: "gemini-2.5-flash",
+					contents: "go",
+					config: { tools: [makeTool()] },
+				});
+				const { raw, rawResult, gov, govResult, auditKinds } = await both(method, makeParams);
+
+				expect(rawResult).toBe("ok");
+				expect(govResult).toBe("ok");
+				expect(raw.requests).toHaveLength(1);
+				expect(gov.requests).toHaveLength(1);
+				expect(raw.requests[0]?.body["tools"]).toEqual([
+					{ functionDeclarations: [{ name: "lookup", parameters: { type: "OBJECT" } }] },
+				]);
+				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+				expect(auditKinds).not.toContain("policy_denied");
+			});
+		}
+
+		const STILL_REFUSED: Array<[string, () => object]> = [
+			["a class-instance declaration from another realm", crossRealmClassTool],
+			["a declaration whose prototype is a FAKE Object.prototype", fakeObjectPrototypeTool],
+		];
+		for (const [shape, makeTool] of STILL_REFUSED) {
+			it(`${method}: ${shape} is still refused as "can't tell" (one policy_denied, no provider request)`, async () => {
+				const makeParams = () => ({
+					model: "gemini-2.5-flash",
+					contents: "go",
+					config: { tools: [makeTool()] },
+				});
+				const { gov, govResult, auditKinds } = await both(method, makeParams);
+
+				expect(govResult).toContain(
+					`models.${method} could not be checked for automatic function calling (params.config.tools[0].functionDeclarations[0] cannot be copied as data)`,
+				);
+				expect(auditKinds).toEqual(["policy_denied"]);
+				expect(gov.requests).toHaveLength(0);
+			});
+		}
 	}
 
 	it("generateContent with a callable tool: the governed loop's EVERY round carries the class-instance functionCallingConfig, as the SDK's own loop does", async () => {
