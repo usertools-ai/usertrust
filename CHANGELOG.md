@@ -11,9 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`allowUngoverned` refuses an entry that names a free or governed method, when the client is created.** Listing `models.list` or `messages.countTokens` (free), or `messages.create` or `chat.completions.create` (governed), was accepted, but the free branch or the governed trap ran first, so those calls carried no `ungoverned_call` event, though the option promises one for every listed method. `trust()` now throws a `TypeError` naming the entry and whether it is free or governed on that client. No billable work escaped; the audit promise was what broke.
 
+### Added
+
+- **`usertrust-verify` exports the transfer verdict: `transferVerdict(events)`** (with `selectTransferEvent`, `firstTerminalOf` and `normalizeEvent`). It is the selection `--tx` has always used, moved unchanged into one function, so any caller can give a transfer the verdict `--tx` prints. `verifyTransaction`'s result gains `status` (the same verdict) when the transfer is found.
+
 ### Fixed
 
 - **The weekly report's ungoverned section says call attempts.** An `ungoverned_call` record is written as the call is made, so it proves an attempt, not a call that reached the provider. The section is headed "Ungoverned call attempts", its line and method table count attempts, and its note says the record is written before the provider is reached when `audit.failClosed` is set and best-effort otherwise, so an attempt may have failed or never reached the provider, and a call whose record could not be written is not counted. The report's disclaimer says the same. The JSON field `ungoverned: { calls, byMethod }` is unchanged.
+
+- **The ledger UI shows each row its TRANSFER's verdict, the one `usertrust-verify --tx` prints, not a guess from the row's own fields.** Every informational record (a shortfall, implausible usage, an injection or anomaly detection, a budget allocation, a quarantine, a credential event) showed as a PENDING hold, in the table, the filters and the CSV. And the audit-first path's optimistic `settled: true`, written before the POST, showed as SETTLED even when the POST then failed and a `settlement_ambiguous` followed. The server now classifies every row through `transferVerdict` over all of its transfer's records, and the live tail re-classifies an earlier row when a later record changes its transfer's verdict. **BREAKING (UI status vocabulary):** the statuses are settled, ambiguous, failed, denied, released, **unrecoverable** (the call ran and was recorded, and was NOT charged: no longer shown as failed), ungoverned, info and unknown. "pending" is gone, because no record marks a hold as open; a transfer with no outcome yet is unknown. The summary counts unrecoverable, ambiguous and unknown rows.
+
+- **`usertrust-verify --tx` prints FAILED for an action's `<kind>_failed` record.** It already counted the record as the transfer's terminal, then printed PENDING for it.
 
 ## [5.0.0] - 2026-10-12
 

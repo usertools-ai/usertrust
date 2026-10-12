@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { deriveChainIntegrity, loadBudgetConfig, readLedgerEvents, verifyVault } from "usertrust";
 import type { SummaryPayload } from "../shared/api.js";
 import { type LedgerRow, toLedgerRows } from "../shared/rows.js";
+import { TransferIndex } from "./verdicts.js";
 
 export type { SummaryPayload } from "../shared/api.js";
 
@@ -14,6 +15,8 @@ const GENESIS = "0".repeat(64);
 
 export interface LedgerState {
 	rows: LedgerRow[];
+	/** Every event by transfer, for each row's TRANSFER verdict; the live tail adds to it. */
+	transfers: TransferIndex;
 	summary: SummaryPayload;
 	lastHash: string;
 	byteOffset: number;
@@ -45,13 +48,17 @@ export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerSt
 		integrity.breakIndex === null
 			? integrity
 			: { valid: false, breakIndex: Math.max(0, integrity.breakIndex - offset) };
-	const rows = toLedgerRows(visible, sliceIntegrity);
+	// Every event, not only the visible slice: a visible row's verdict can rest on an earlier record of its transfer.
+	const transfers = new TransferIndex();
+	transfers.add(events);
+	const rows = toLedgerRows(visible, sliceIntegrity, transfers.verdictOf);
 
 	const logPath = join(vaultPath, "audit", "events.jsonl");
 	const byteOffset = existsSync(logPath) ? statSync(logPath).size : 0;
 
 	return {
 		rows,
+		transfers,
 		summary: {
 			vaultPath,
 			budget,

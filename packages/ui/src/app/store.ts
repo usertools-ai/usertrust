@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from "react";
 import type { SummaryPayload } from "../shared/api.js";
-import type { LedgerRow } from "../shared/rows.js";
+import type { LedgerRow, RowStatus } from "../shared/rows.js";
 
 export interface LedgerData {
 	rows: LedgerRow[];
@@ -86,6 +86,22 @@ export function useLedger(): LedgerData {
 				});
 			}, 1600);
 			flashTimers.add(timer);
+		});
+		// A new record can change an EARLIER row's verdict (an ambiguity after an optimistic settlement): the server
+		// sends each changed row's new status.
+		source.addEventListener("status", (e) => {
+			const changes = JSON.parse((e as MessageEvent).data) as Array<{
+				id: string;
+				status: RowStatus;
+			}>;
+			const next = new Map(changes.map((c) => [c.id, c.status]));
+			setData((d) => ({
+				...d,
+				rows: d.rows.map((r) => {
+					const status = next.get(r.id);
+					return status === undefined ? r : { ...r, status };
+				}),
+			}));
 		});
 		source.addEventListener("summary", (e) => {
 			const summary = JSON.parse((e as MessageEvent).data) as SummaryPayload;

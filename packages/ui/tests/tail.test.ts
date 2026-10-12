@@ -88,6 +88,47 @@ describe("live tail", () => {
 		expect(rows.some((r) => r.transferId === "tx_live")).toBe(true);
 	});
 
+	it("red-first (stays settled): an ambiguity appended after an OPTIMISTIC settlement re-classifies the EARLIER row", async () => {
+		// The audit-first path writes `settled: true` before the POST and appends `settlement_ambiguous` only when the
+		// POST throws: the earlier row's verdict changes after it was sent, so the server sends the change.
+		const seed = createAuditWriter(tempDir);
+		await seed.appendEvent({
+			kind: "llm_call",
+			actor: "local",
+			data: { cost: 3, transferId: "tx_opt", settled: true },
+		});
+		seed.release();
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
+			rows: Array<{ id: string; transferId?: string; status?: string }>;
+		};
+		const optimistic = before.rows.find((r) => r.transferId === "tx_opt");
+		expect(optimistic?.status).toBe("settled");
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "status",
+			async () => {
+				const writer = createAuditWriter(tempDir);
+				await writer.appendEvent({
+					kind: "settlement_ambiguous",
+					actor: "local",
+					data: { transferId: "tx_opt", error: "post failed" },
+				});
+				writer.release();
+			},
+		);
+		expect(JSON.parse(data)).toEqual([{ id: optimistic?.id, status: "ambiguous" }]);
+		const after = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
+			rows: Array<{ transferId?: string; kind: string; status?: string }>;
+		};
+		expect(
+			after.rows.filter((r) => r.transferId === "tx_opt").map((r) => [r.kind, r.status]),
+		).toEqual([
+			["llm_call", "ambiguous"],
+			["settlement_ambiguous", "ambiguous"],
+		]);
+	});
+
 	it("signals resync when the log shrinks", async () => {
 		ui = await createUiServer(tempDir, { port: 0 });
 		const logPath = join(tempDir, ".usertrust", "audit", "events.jsonl");

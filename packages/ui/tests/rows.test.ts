@@ -3,7 +3,14 @@
 
 import type { PersistedAuditEvent } from "usertrust";
 import { describe, expect, it } from "vitest";
-import { statusOf, toLedgerRows } from "../src/shared/rows.js";
+import { TransferIndex } from "../src/server/verdicts.js";
+import {
+	KIND_CLASS,
+	kindClass,
+	statusOf,
+	toLedgerRows,
+	VERDICT_STATUS,
+} from "../src/shared/rows.js";
 
 function evt(
 	overrides: Partial<PersistedAuditEvent> & { data?: Record<string, unknown> },
@@ -72,67 +79,92 @@ describe("toLedgerRows", () => {
 });
 
 describe("statusOf", () => {
-	it("failed kind wins; settled flag otherwise; default pending", () => {
-		const [failed, settled, pending] = toLedgerRows(
-			[
-				evt({ kind: "llm_call_failed", data: { error: "boom" } }),
-				evt({ id: "id-2", sequence: 2, data: { settled: true } }),
-				evt({ id: "id-3", sequence: 3, data: {} }),
-			],
-			{ valid: true, breakIndex: null },
-		);
-		expect(statusOf(failed as never)).toBe("failed");
-		expect(statusOf(settled as never)).toBe("settled");
-		expect(statusOf(pending as never)).toBe("pending");
+	const OK = { valid: true, breakIndex: null } as const;
+	/** Rows as the server builds them: every event indexed by transfer, each row given its TRANSFER's verdict. */
+	function classify(events: PersistedAuditEvent[]) {
+		const index = new TransferIndex();
+		index.add(events);
+		return toLedgerRows(events, OK, index.verdictOf).map((r) => statusOf(r));
+	}
+	const at = (n: number, o: Partial<PersistedAuditEvent> & { data?: Record<string, unknown> }) =>
+		evt({ id: `id-${n}`, sequence: n, ...o });
+
+	it("a failure, a settlement, and a transfer with no terminal (unknown, never pending)", () => {
+		expect(
+			classify([
+				at(1, { kind: "llm_call_failed", data: { transferId: "tx_f", error: "boom" } }),
+				at(2, { data: { transferId: "tx_s", settled: true } }),
+				at(3, { kind: "anomaly_detected", data: { transferId: "tx_u", message: "spike" } }),
+				at(4, { data: { transferId: "tx_u" } }),
+			]),
+		).toEqual(["failed", "settled", "info", "unknown"]);
 	});
 
 	it("labels a released hold as released: never pending, never failed", () => {
-		// A release carries a `reason` and no `settled`: without its own arm it read
-		// "pending", a hold that can never settle shown as one that might.
-		const [released] = toLedgerRows(
-			[evt({ kind: "hold_released", data: { transferId: "tx_1", reason: "pending TTL expired" } })],
-			{ valid: true, breakIndex: null },
-		);
-		expect(statusOf(released as never)).toBe("released");
+		expect(
+			classify([
+				at(1, {
+					kind: "hold_released",
+					data: { transferId: "tx_1", reason: "pending TTL expired" },
+				}),
+			]),
+		).toEqual(["released"]);
 	});
 
-	it("a settlement_unrecoverable record is failed (spend recorded, not charged), never pending", () => {
-		const [row] = toLedgerRows(
-			[
-				evt({
+	it("red-first (failed): a settlement_unrecoverable is UNRECOVERABLE — ran and recorded, not charged", () => {
+		expect(
+			classify([
+				at(1, {
 					kind: "settlement_unrecoverable",
 					data: { transferIdHash: "a".repeat(64), usage: { inputTokens: 5 } },
 				}),
-			],
-			{ valid: true, breakIndex: null },
-		);
-		expect(statusOf(row as never)).toBe("failed");
+			]),
+		).toEqual(["unrecoverable"]);
 	});
 
 	it("labels a denial as denied, not as a zero-cost failed transaction", () => {
-		// A denial carries an `error` string, which the generic mapping would
-		// otherwise read as a failed CALL — putting refusals in the same column
-		// as provider failures and displacing real receipts.
-		const [policyDenied, ledgerRejected] = toLedgerRows(
-			[
-				evt({
-					kind: "policy_denied",
-					data: { decision: "deny", denialClass: "pii", error: "Policy denied: PII detected" },
-				}),
-				evt({
-					id: "id-2",
-					sequence: 2,
-					kind: "ledger_rejected",
-					data: { decision: "deny", transferId: "tx_1", error: "Insufficient balance" },
-				}),
-			],
-			{ valid: true, breakIndex: null },
-		);
-		expect(statusOf(policyDenied as never)).toBe("denied");
-		expect(statusOf(ledgerRejected as never)).toBe("denied");
+		const events = [
+			at(1, {
+				kind: "policy_denied",
+				data: { decision: "deny", denialClass: "pii", error: "Policy denied: PII detected" },
+			}),
+			at(2, {
+				kind: "ledger_rejected",
+				data: { decision: "deny", transferId: "tx_1", error: "Insufficient balance" },
+			}),
+		];
+		expect(classify(events)).toEqual(["denied", "denied"]);
+		const [policyDenied, ledgerRejected] = toLedgerRows(events, OK);
 		// No fabricated zero cost — a denial spent nothing and reports nothing.
 		expect(policyDenied?.costUt).toBeUndefined();
 		expect(ledgerRejected?.costUt).toBeUndefined();
+	});
+
+	it("red-first (settled): the audit-first path's OPTIMISTIC settled:true, then the POST's ambiguity → both AMBIGUOUS", () => {
+		expect(
+			classify([
+				at(1, { data: { transferId: "tx_1", settled: true, cost: 5 } }),
+				at(2, { kind: "settlement_ambiguous", data: { transferId: "tx_1", error: "post failed" } }),
+			]),
+		).toEqual(["ambiguous", "ambiguous"]);
+	});
+
+	it("red-first (pending): the headless path's ambiguity first, then settled:false → both AMBIGUOUS", () => {
+		expect(
+			classify([
+				at(1, { kind: "settlement_ambiguous", data: { transferId: "tx_1", error: "post failed" } }),
+				at(2, { data: { transferId: "tx_1", settled: false, cost: 5 } }),
+			]),
+		).toEqual(["ambiguous", "ambiguous"]);
+	});
+
+	it("an annotation on a settled transfer is info; the settlement row is settled", () => {
+		expect(
+			classify([
+				at(1, { data: { transferId: "tx_1", settled: true, cost: 5 } }),
+				at(2, { kind: "usage_implausible", data: { transferId: "tx_1", charged: "estimate" } }),
+			]),
+		).toEqual(["settled", "info"]);
 	});
 
 	it("an ungoverned_call is ungoverned: an unmetered call, never a pending hold", () => {
@@ -143,5 +175,69 @@ describe("statusOf", () => {
 			{ valid: true, breakIndex: null },
 		);
 		expect(statusOf(row as never)).toBe("ungoverned");
+	});
+});
+
+// Every kind a producer writes, by class: a kind with no mapping is VISIBLE here, never silently pending.
+describe("KIND_CLASS", () => {
+	it.each([
+		["llm_call", "outcome"],
+		["llm_call_failed", "outcome"],
+		["stream_partial_delivery", "outcome"],
+		["settlement_ambiguous", "outcome"],
+		["settlement_unrecoverable", "outcome"],
+		["policy_denied", "outcome"],
+		["ledger_rejected", "outcome"],
+		["hold_released", "outcome"],
+		["tool_use", "outcome"],
+		["file_access", "outcome"],
+		["shell_command", "outcome"],
+		["api_request", "outcome"],
+		["settlement_shortfall", "info"],
+		["usage_implausible", "info"],
+		["injection_detected", "info"],
+		["anomaly_detected", "info"],
+		["budget_allocated", "info"],
+		["budget_reclaimed", "info"],
+		["audit.quarantine.torn_tail", "info"],
+		["credential_added", "info"],
+		["credential_removed", "info"],
+		["credential_rotated", "info"],
+		["credential_access", "info"],
+		["credential_denied", "info"],
+		["ungoverned_call", "ungoverned"],
+	] as const)("%s → %s", (kind, cls) => {
+		expect(KIND_CLASS[kind]).toBe(cls);
+		expect(kindClass(kind, {})).toBe(cls);
+	});
+
+	it("the table is exactly the inventory: no kind added or dropped unreviewed", () => {
+		expect(Object.keys(KIND_CLASS)).toHaveLength(25);
+	});
+
+	it("an action named after the caller's action: `<kind>_failed`, or any kind carrying settled, is an outcome", () => {
+		expect(kindClass("deploy_failed", {})).toBe("outcome");
+		expect(kindClass("deploy", { settled: true })).toBe("outcome");
+	});
+
+	it("a kind nobody writes is UNKNOWN, never pending or settled", () => {
+		expect(kindClass("something_new", {})).toBe("unknown");
+		const [row] = toLedgerRows([evt({ kind: "something_new", data: {} })], {
+			valid: true,
+			breakIndex: null,
+		});
+		expect(statusOf(row as never)).toBe("unknown");
+	});
+
+	it("every transfer verdict has a row status, and PENDING (no terminal yet) is unknown", () => {
+		expect(VERDICT_STATUS).toEqual({
+			SETTLED: "settled",
+			AMBIGUOUS: "ambiguous",
+			FAILED: "failed",
+			DENIED: "denied",
+			RELEASED: "released",
+			UNRECOVERABLE: "unrecoverable",
+			PENDING: "unknown",
+		});
 	});
 });

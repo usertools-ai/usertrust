@@ -8,6 +8,8 @@
  * ZERO DEPENDENCIES — Node built-ins only.
  */
 
+import type { TransferStatus } from "./verdict.js";
+
 // ── Types ──
 
 export interface TransactionEvent {
@@ -290,7 +292,8 @@ export const RELEASE_KINDS = new Set(["hold_released"]);
  */
 export const UNRECOVERABLE_KINDS = new Set(["settlement_unrecoverable"]);
 
-function resolveStatus(event: TransactionEvent): string {
+/** The status ONE record carries on its own; a transfer's verdict picks the record first (`verdict.ts`). */
+export function eventStatus(event: TransactionEvent): TransferStatus {
 	if (DENIAL_KINDS.has(event.kind)) return "DENIED";
 	// `stream_partial_delivery` is a FAILURE TERMINAL (AGENTS.md): the hold was
 	// voided and nothing settled. It is the record that proves a cutoff actually
@@ -305,6 +308,9 @@ function resolveStatus(event: TransactionEvent): string {
 	if (event.kind === "settlement_ambiguous") return "AMBIGUOUS";
 	if (event.kind === "stream_partial_delivery") return "FAILED";
 	if (event.kind === "llm_call_failed") return "FAILED";
+	// An action's `<kind>_failed` (`governAction`'s catch) is a failure terminal too: the selection layer already
+	// counted it as one (`firstTerminalOf`), but its status fell through to PENDING here.
+	if (event.kind.endsWith("_failed")) return "FAILED";
 	if (RELEASE_KINDS.has(event.kind)) return "RELEASED";
 	if (UNRECOVERABLE_KINDS.has(event.kind)) return "UNRECOVERABLE";
 	if (event.data.settled === true) return "SETTLED";
@@ -323,7 +329,7 @@ export function renderReceipt(data: ReceiptData): string {
 		cumulativeSpend,
 		verifiedAt,
 	} = data;
-	const status = resolveStatus(event);
+	const status = eventStatus(event);
 	// `detectProvider` matches on the RAW value — scrubbing first would let a
 	// leading control character hide a real provider prefix and mislabel the
 	// row. Only the rendered copy is scrubbed.

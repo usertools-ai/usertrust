@@ -49,8 +49,13 @@ const STATUS_COLOR: Record<RowStatus, string> = {
 	released: "text-[var(--text)]",
 	failed: "text-[var(--danger)]",
 	denied: "text-[var(--danger)]",
-	pending: "text-[var(--amber)]",
+	ambiguous: "text-[var(--amber)]",
 	ungoverned: "text-[var(--amber)]",
+	// Ran and recorded, NOT charged: a money state of its own colour.
+	unrecoverable: "text-[var(--unrecoverable)]",
+	info: "text-[var(--faint)]",
+	// Never settled's colour: an unknown outcome must not read as a settled one.
+	unknown: "text-[var(--muted)] italic",
 };
 
 function StatusBadge(props: { row: LedgerRow }): React.JSX.Element {

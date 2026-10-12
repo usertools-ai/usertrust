@@ -161,8 +161,11 @@ function CopyHash(props: { label: string; hash: string }): React.JSX.Element {
 const STATUS_TONE: Record<RowStatus, string | undefined> = {
 	failed: "text-[var(--danger)]",
 	denied: "text-[var(--danger)]",
-	pending: "text-[var(--amber)]",
+	ambiguous: "text-[var(--amber)]",
 	ungoverned: "text-[var(--amber)]",
+	unrecoverable: "text-[var(--unrecoverable)]",
+	info: "text-[var(--faint)]",
+	unknown: "text-[var(--muted)] italic",
 	settled: undefined,
 	released: undefined,
 };

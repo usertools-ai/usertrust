@@ -21,7 +21,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exportMarkdown, type PersistedAuditEvent, VAULT_DIR } from "usertrust";
 import { canonicalize, verifyTransaction } from "usertrust-verify";
-import { toLedgerRows } from "../shared/rows.js";
+import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
 import { type LedgerState, loadState, ROW_CAP } from "./state.js";
 import { serveStatic } from "./static.js";
 import { watchLedger } from "./tail.js";
@@ -86,7 +86,27 @@ export async function createUiServer(
 				fresh.push(e);
 				lastHash = e.hash;
 			}
-			const rows = toLedgerRows(fresh, { valid: true, breakIndex: null });
+			const touched = state.transfers.add(fresh);
+			// A new record can change an EARLIER row's verdict (an ambiguity appended after an optimistic
+			// settlement), so every visible row of a touched transfer is re-classified, and each change is sent.
+			const changed: Array<{ id: string; status: RowStatus }> = [];
+			for (const r of state.rows) {
+				if (r.transferId === undefined || !touched.has(r.transferId)) continue;
+				const status = statusFor(
+					r.kind,
+					r.settled !== undefined ? { settled: r.settled } : {},
+					state.transfers.verdictOfTransfer(r.transferId),
+				);
+				if (status !== r.status) {
+					r.status = status;
+					changed.push({ id: r.id, status });
+				}
+			}
+			const rows = toLedgerRows(
+				fresh,
+				{ valid: true, breakIndex: null },
+				state.transfers.verdictOf,
+			);
 			state.rows.push(...rows);
 			state.lastHash = lastHash;
 			state.byteOffset += lastNewline + 1;
@@ -101,6 +121,7 @@ export async function createUiServer(
 				state.summary.truncated = true;
 			}
 			state.summary.rowCount = state.rows.length;
+			if (changed.length > 0) broadcast("status", changed);
 			broadcast("rows", rows);
 			broadcast("summary", state.summary);
 		} catch {

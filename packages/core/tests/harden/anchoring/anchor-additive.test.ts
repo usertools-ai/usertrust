@@ -434,11 +434,20 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// wrap them), so the anchors are checked against the hashes of the very
 		// events the walk read, never a second read of the log. NO vendored source,
 		// no new import, and `dependencies` is still `{}`. 74 lines of headroom.
+		//
+		// 10300 → 10400, for one transfer verdict (2026-10-12). Post-change total
+		// 10302, so 10300 failed by 2 (about 10330 with the forDisplay
+		// format-character change beside it). WHAT WAS ADDED: `verdict.ts`, the
+		// transfer selection moved out of `verifyTransaction` unchanged and exported
+		// as `transferVerdict`, so the ledger UI shows each row the verdict `--tx`
+		// prints; `normalizeEvent` exported; `status` on the `--tx` result; and the
+		// `<kind>_failed` arm in `eventStatus`. NO vendored source, no new import,
+		// and `dependencies` is still `{}`. 98 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(10300);
+		expect(total).toBeLessThan(10400);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
