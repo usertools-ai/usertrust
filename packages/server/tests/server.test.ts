@@ -106,6 +106,7 @@ describe("HTTP control plane", () => {
 				"release",
 				"cache-write-1h",
 				"job",
+				"settle-unrecoverable",
 			]);
 			await server?.close();
 			server = undefined;
@@ -237,19 +238,19 @@ describe("HTTP control plane", () => {
 		expect(res402.status).toBe(402);
 	});
 
-	it("settle/abort of unknown transferId returns 404", async () => {
+	it("abort of an unknown transferId returns 404; a settle of one is a recorded 410 (unrecoverable.test.ts)", async () => {
 		const { base } = await start();
-		expect((await post(base, "/v1/settle", { transferId: "tx_nope" })).status).toBe(404);
+		expect((await post(base, "/v1/settle", { transferId: "tx_nope" })).status).toBe(410);
 		expect((await post(base, "/v1/abort", { transferId: "tx_nope" })).status).toBe(404);
 	});
 
-	it("settling the same transferId twice returns 404 the second time", async () => {
+	it("settling the same transferId twice returns 409 already_settled the second time", async () => {
 		const { base } = await start();
 		const auth = (await (
 			await post(base, "/v1/authorize", { model: "m", estimatedInputTokens: 1, maxOutputTokens: 1 })
 		).json()) as { transferId: string };
 		expect((await post(base, "/v1/settle", { transferId: auth.transferId })).status).toBe(200);
-		expect((await post(base, "/v1/settle", { transferId: auth.transferId })).status).toBe(404);
+		expect((await post(base, "/v1/settle", { transferId: auth.transferId })).status).toBe(409);
 	});
 
 	it("a failed settle re-inserts the pending entry so it is retryable", async () => {
@@ -394,8 +395,9 @@ describe("edge cases and failure paths", () => {
 		const auth = (await (
 			await post(base, "/v1/authorize", { model: "m", estimatedInputTokens: 1, maxOutputTokens: 1 })
 		).json()) as { transferId: string };
+		// Another tenant's hold is just as unknown to the caller: a recorded 410, never a settle.
 		expect((await post(base, "/v1/settle", { transferId: auth.transferId }, KEY2)).status).toBe(
-			404,
+			410,
 		);
 		expect((await post(base, "/v1/settle", { transferId: auth.transferId })).status).toBe(200);
 	});

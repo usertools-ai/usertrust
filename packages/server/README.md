@@ -1,16 +1,38 @@
 # usertrust-server
 
-Self-hostable HTTP control plane for the [usertrust](https://github.com/usertools/usertrust)
+Self-hostable HTTP control plane for the [usertrust](https://github.com/usertools-ai/usertrust)
 governance kernel. Wraps the headless Governor's two-phase lifecycle
 (authorize → settle/abort) with per-tenant isolation, bearer-key auth, and SSE telemetry.
 
 ## Quickstart
 
 ```bash
+npm install -g usertrust-server
+```
+
+```bash
 # Generate a tenant key (high-entropy secret) and its SHA-256 hash for the config:
 KEY=$(openssl rand -hex 32)
 node -e "console.log(require('node:crypto').createHash('sha256').update(process.argv[1]).digest('hex'))" "$KEY"
 ```
+
+Choose one of two ways to run the server, then write the config below.
+
+**Try it (no ledger).** Add `"dryRun": true` to the config. dryRun skips TigerBeetle, so the server needs no ledger replica. The audit chain and the policy engine still run. This is the fastest way to try the API.
+
+**Full mode, locally (TigerBeetle).** Leave `dryRun` out or set it to `false`, which is the default. The server then needs a running TigerBeetle at `127.0.0.1:3001`, the default address. Run the TigerBeetle release that matches the ledger client your install resolved. usertrust depends on `tigerbeetle-node` `^0.17.9`, so a later install can resolve a newer 0.17.x client, and a replica evicts a client whose release it does not support (`client_release_too_high` for a client newer than the replica). `npm ls tigerbeetle-node` where you installed usertrust-server (`npm ls -g tigerbeetle-node` for a global install) shows the client's version (0.17.9 when this was written); set `TB_VERSION` below to it. These commands were run on Linux on arm64 with the 0.17.9 `tigerbeetle-aarch64-linux.zip` asset; for another platform, take the asset for your platform from the [release with that version](https://github.com/tigerbeetle/tigerbeetle/releases).
+
+```bash
+TB_VERSION=0.17.9   # the tigerbeetle-node version `npm ls tigerbeetle-node` shows
+curl -sSL -o tigerbeetle.zip "https://github.com/tigerbeetle/tigerbeetle/releases/download/${TB_VERSION}/tigerbeetle-aarch64-linux.zip"
+unzip tigerbeetle.zip
+./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle
+./tigerbeetle start --addresses=3001 --development 0_0.tigerbeetle
+```
+
+**These commands start ONE replica in `--development` mode: a local full-mode run, not a production deployment.** A single replica has no replication and no high availability: lose its data file and the ledger is gone. For production, deploy a replicated TigerBeetle cluster following TigerBeetle's own guidance ([cluster recommendations](https://docs.tigerbeetle.com/operating/cluster/), [deploying](https://docs.tigerbeetle.com/operating/deploying/)), and give the governor all the replica addresses (`tigerbeetle.addresses`).
+
+Format the data file once; start the replica each time you need it. TigerBeetle and its client need `io_uring` on Linux, and Docker's default seccomp profile blocks it; with it blocked, the client cannot start. In a container, run with `--security-opt seccomp=unconfined` (or a seccomp profile that allows `io_uring`). On a host where `kernel.io_uring_disabled` is set, it must be `0`.
 
 `usertrust-server.config.json`:
 
@@ -32,6 +54,27 @@ curl -s localhost:4519/v1/settle -H "Authorization: Bearer $KEY" \
   -H "content-type: application/json" \
   -d '{"transferId":"<from authorize>","inputTokens":200,"outputTokens":40}'
 ```
+
+### A settle for a hold the server no longer has (**BREAKING since 4.1.x: was `404`**)
+
+A `POST /v1/settle` for a `transferId` this server holds no hold for (a TTL sweep ended the hold, the
+server restarted, or the settle is a retry) used to answer `404` and drop the spend on the floor. It
+now answers one of three, and `/v1/health` lists the capability `settle-unrecoverable` so a client can
+check before relying on them:
+
+| Status | `error` | Meaning | What a client does |
+|---|---|---|---|
+| `410` | `settlement_unrecoverable` | No hold here. The settle is **recorded on the audit chain** (usage only, the id as its SHA-256) and counted per tenant in `settlementsUnrecoverable` on the authenticated `GET /v1/budget` (never on the unauthenticated `/v1/health`); `recorded: false` marks an exact retry already recorded. **Nothing is charged and no hold is re-opened.** | Authorize again and settle if the spend must be charged. Do not retry the same settle. |
+| `409` | `settlement_ambiguous` | The first settle's ledger post was ambiguous (it may have charged). Nothing recorded. | Do **not** authorize again to settle it: check the ledger. |
+| `409` | `already_settled` | A retry of a settle that went through in this process. The charge stands. Nothing recorded. | Treat as success. |
+| `409` | `settle_in_progress` | A settle for this id is still running. Nothing recorded. | Retry shortly. |
+
+The server remembers the last 10 000 settled ids PER TENANT (FIFO, in-process; a restart forgets them). Past that
+memory, a retry of an older settle reads as an unknown hold and is **recorded** as
+`settlement_unrecoverable` (a duplicate record of a charged settle, never a lost one). Without an
+idempotency key a late settle and a retry of a charged one cannot be told apart, and a record is the
+safe direction. A record that cannot be appended is a `5xx`, never swallowed. Each record is an fsync'd append, so a tenant may write at most 1 000 new ones per minute: past that the settle is refused with `429 rate_limited` (nothing recorded; retry later). `/v1/abort` and
+`/v1/release` keep their `404`.
 
 `/v1/settle` also accepts `cacheReadTokens` / `cacheWriteTokens` (both optional, disjoint from
 `inputTokens` — do not include cached tokens in `inputTokens` too, or they double-count). Absent
@@ -90,7 +133,7 @@ one you cannot reuse.
 | GET    | `/v1/health`    | none   | Liveness and `capabilities`                         |
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
-`404 not_found` (unknown/already-settled transferId), `413 too_large` (1 MiB body cap).
+`404 not_found` (unknown transferId on `/v1/abort` and `/v1/release`; for `/v1/settle` see the three codes below), `413 too_large` (1 MiB body cap).
 Pending holds are swept and released when their advertised life runs out: `pendingTtlMs` (default 5 min),
 or the ledger's pending timeout when that comes first. The sweep reads hold ages on a monotonic clock, so
 no wall-clock step moves it, and it never ends a hold before its advertised life. Declared: after the host

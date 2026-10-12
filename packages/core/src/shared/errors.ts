@@ -31,6 +31,19 @@ export interface DenialAuditMetadata {
 	auditDegraded?: boolean | undefined;
 }
 
+/**
+ * `recordUnheldSettlement()` refused: too many records in the window. Each record is an fsync'd append
+ * on the tenant's audit chain, so a client minting unknown ids must not be able to grow it without
+ * bound. Nothing was recorded: the caller sees the refusal (usertrust-server answers 429) and retries
+ * later, never a silent drop.
+ */
+export class UnheldSettlementRateLimitedError extends Error {
+	constructor(public readonly retryAfterMs: number) {
+		super(`too many unrecoverable-settlement records: retry in ${Math.ceil(retryAfterMs / 1000)}s`);
+		this.name = "UnheldSettlementRateLimitedError";
+	}
+}
+
 export class InsufficientBalanceError extends Error {
 	public readonly userId: string;
 	public readonly required: number;

@@ -7,8 +7,14 @@ import type {
 	ReleaseOutcome,
 	SettleParams,
 	TrustReceipt,
+	UnheldSettlementOutcome,
+	UnheldSettlementParams,
 } from "usertrust";
-import { InsufficientBalanceError, PolicyDeniedError } from "usertrust";
+import {
+	InsufficientBalanceError,
+	PolicyDeniedError,
+	UnheldSettlementRateLimitedError,
+} from "usertrust";
 
 export interface FakeGovernorHandle {
 	governor: Governor;
@@ -20,6 +26,7 @@ export interface FakeGovernorHandle {
 		releaseReasons: Array<string | undefined>;
 		settleParams: Array<SettleParams | undefined>;
 		authorizeParams: AuthorizeParams[];
+		unheld: UnheldSettlementParams[];
 	};
 }
 
@@ -39,11 +46,30 @@ export function createFakeGovernor(
 		release?: { notHeld?: boolean; voidError?: string; throws?: boolean };
 		/** How `abort` answers, by the same three options as `release`. */
 		abort?: { notHeld?: boolean; voidError?: string; throws?: boolean };
+		/** How `recordUnheldSettlement` answers: as one that fails to append, or one that already recorded it. */
+		/** A slow ledger void: `release` resolves this long after it starts, and the id reads `held` meanwhile. */
+		releaseDelayMs?: number;
+		/** The same for `abort`: a slow void, the id read `held` meanwhile. */
+		abortDelayMs?: number;
+		/** A slow settle: it resolves this long after it starts (the hold stays held meanwhile). */
+		settleDelayMs?: number;
+		/** Pad every minted transferId to this length (a custom factory issuing long ids). */
+		idLength?: number;
+		unheld?: {
+			throws?: boolean;
+			recorded?: boolean;
+			held?: boolean;
+			/** Answer `held` for this many calls, then unrecoverable: a hold mid-release. */
+			heldFor?: number;
+			rateLimited?: boolean;
+		};
 	} = {},
 ): FakeGovernorHandle {
 	let budget = opts.budget ?? 10_000;
 	let seq = 0;
 	const pending = new Map<string, Authorization>();
+	// ids whose release is in flight: the governor still HOLDS them until it lands.
+	const releasing = new Set<string>();
 	const calls = {
 		authorized: [] as string[],
 		settled: [] as string[],
@@ -52,6 +78,7 @@ export function createFakeGovernor(
 		releaseReasons: [] as Array<string | undefined>,
 		settleParams: [] as Array<SettleParams | undefined>,
 		authorizeParams: [] as AuthorizeParams[],
+		unheld: [] as UnheldSettlementParams[],
 	};
 
 	const governor: Governor = {
@@ -65,7 +92,7 @@ export function createFakeGovernor(
 			}
 			seq += 1;
 			const auth: Authorization = {
-				transferId: `tx_fake_${seq}`,
+				transferId: `tx_fake_${seq}`.padEnd(opts.idLength ?? 0, "x"),
 				estimatedCost,
 				model: params.model,
 				createdAt: Date.now(),
@@ -77,6 +104,9 @@ export function createFakeGovernor(
 			return auth;
 		},
 		async settle(auth: Authorization, params?: SettleParams): Promise<TrustReceipt> {
+			if (opts.settleDelayMs !== undefined) {
+				await new Promise((resolve) => setTimeout(resolve, opts.settleDelayMs));
+			}
 			pending.delete(auth.transferId);
 			const cost = (params?.inputTokens ?? 0) + (params?.outputTokens ?? 0) || auth.estimatedCost;
 			budget += auth.estimatedCost - cost;
@@ -96,6 +126,11 @@ export function createFakeGovernor(
 			};
 		},
 		async abort(auth: Authorization): Promise<AbortOutcome> {
+			if (opts.abortDelayMs !== undefined) {
+				releasing.add(auth.transferId);
+				await new Promise((resolve) => setTimeout(resolve, opts.abortDelayMs));
+				releasing.delete(auth.transferId);
+			}
 			if (opts.abort?.throws === true) throw new Error("fake abort failed");
 			if (opts.abort?.notHeld === true) return { aborted: false };
 			pending.delete(auth.transferId);
@@ -106,6 +141,11 @@ export function createFakeGovernor(
 		},
 		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
 			calls.releaseReasons.push(reason);
+			if (opts.releaseDelayMs !== undefined) {
+				releasing.add(auth.transferId);
+				await new Promise((resolve) => setTimeout(resolve, opts.releaseDelayMs));
+				releasing.delete(auth.transferId);
+			}
 			if (opts.release?.throws === true) throw new Error("fake release failed");
 			if (opts.release?.notHeld === true) return { released: false };
 			pending.delete(auth.transferId);
@@ -113,6 +153,20 @@ export function createFakeGovernor(
 			calls.released.push(auth.transferId);
 			const voidError = opts.release?.voidError;
 			return voidError === undefined ? { released: true } : { released: true, voidError };
+		},
+		async recordUnheldSettlement(params: UnheldSettlementParams): Promise<UnheldSettlementOutcome> {
+			calls.unheld.push(params);
+			if (opts.unheld?.throws === true) throw new Error("fake record failed");
+			if (opts.unheld?.rateLimited === true) throw new UnheldSettlementRateLimitedError(30_000);
+			// A real pool gives each tenant its own governor, so another tenant's hold is never "held"
+			// here; a test that wants the answer asks for it.
+			if (opts.unheld?.held === true || releasing.has(params.transferId)) {
+				return { outcome: "held", transferId: params.transferId };
+			}
+			if (opts.unheld?.heldFor !== undefined && calls.unheld.length <= opts.unheld.heldFor) {
+				return { outcome: "held", transferId: params.transferId };
+			}
+			return { outcome: "unrecoverable", recorded: opts.unheld?.recorded ?? true };
 		},
 		async destroy(): Promise<void> {
 			pending.clear();

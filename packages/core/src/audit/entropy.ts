@@ -38,6 +38,8 @@
  * computes for its own per-line display.
  */
 
+import { createHash } from "node:crypto";
+
 // ── Types ──
 
 export interface EntropyEventInput {
@@ -212,6 +214,19 @@ export function extractBudgetUtilization(
 }
 
 /**
+ * The key a transfer is deduplicated by: the SHA-256 of its id. A `settlement_unrecoverable` names its
+ * transfer only by that hash (the id is never stored), a primary terminal by the raw id, so hashing the
+ * raw one makes the SAME transfer the same key whichever form its records carry (never counted twice).
+ */
+function transferKey(data: Record<string, unknown>): string | undefined {
+	const hash = data.transferIdHash;
+	if (typeof hash === "string" && hash !== "") return hash;
+	const id = data.transferId;
+	if (typeof id === "string" && id !== "") return createHash("sha256").update(id).digest("hex");
+	return undefined;
+}
+
+/**
  * Signal 3: Chain integrity
  *
  * The old implementation required the event KIND to contain "audit", "chain" or
@@ -251,7 +266,9 @@ export function extractChainIntegrity(
 	const observedTransfers = new Set<string>();
 	const ambiguousTransfers = new Set<string>();
 	for (const e of events) {
-		const id = e.data.transferId;
+		// A `settlement_unrecoverable` names its transfer only as a hash (the id is never stored), so
+		// the dedupe key falls back to it.
+		const id = transferKey(e.data);
 		if (typeof id !== "string" || id === "") continue;
 		// SETTLEMENT ATTEMPTS only. A denial, an anomaly abort and a partial
 		// delivery all carry a `transferId` but never reached settlement, so
@@ -264,10 +281,15 @@ export function extractChainIntegrity(
 		const isSettlementAttempt =
 			e.data.settled !== undefined ||
 			e.kind === "settlement_ambiguous" ||
-			e.kind === "settlement_shortfall";
+			e.kind === "settlement_shortfall" ||
+			e.kind === "settlement_unrecoverable";
 		if (!isSettlementAttempt) continue;
 		observedTransfers.add(id);
-		if (e.kind === "settlement_ambiguous") ambiguousTransfers.add(id);
+		// Spend that happened and that the ledger will never charge is the same money-versus-audit
+		// desync as an ambiguous post: the audit chain says a settle arrived, the ledger has no charge.
+		if (e.kind === "settlement_ambiguous" || e.kind === "settlement_unrecoverable") {
+			ambiguousTransfers.add(id);
+		}
 	}
 	const desyncRate =
 		observedTransfers.size > 0 ? ambiguousTransfers.size / observedTransfers.size : 0;

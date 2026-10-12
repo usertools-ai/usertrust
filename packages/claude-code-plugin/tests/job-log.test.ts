@@ -2,8 +2,19 @@
 //
 // Job ids here are opaque (`job-a`, `bug-1`). Each test names the mutant it kills.
 
-import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readdir, readFile, utimes, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import {
+	appendFile,
+	chmod,
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	stat,
+	truncate,
+	utimes,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1348,6 +1359,27 @@ describe("the writers, through their real entry points", () => {
 			expect(JSON.parse(await readFile(cap, "utf-8"))[url]).toBe(true);
 		},
 	);
+	it("a capability map past 4 KiB is still read: a probe keeps every other server's entry", async () => {
+		// One entry per server URL, never pruned: a map that a read bound refused would be read
+		// as empty, and the probe's rewrite would then drop every other server's bit.
+		const jobs = join(state, "jobs");
+		await mkdir(jobs, { recursive: true });
+		const cap = join(jobs, "capability.json");
+		const others = Object.fromEntries(
+			Array.from({ length: 200 }, (_, i) => [`http://server-${i}.example.test:4519`, true]),
+		);
+		await writeFile(cap, JSON.stringify(others));
+		expect((await stat(cap)).size).toBeGreaterThan(4096);
+		const url = "http://127.0.0.1:1";
+		process.env.UT_SERVER_URL = url;
+		vi.resetModules(); // jobCapable reads the map once per process
+		const { jobCapable } = (await import(pathToFileURL(join(HOOKS, "lib.mjs")).href)) as {
+			jobCapable(capabilities: Set<string> | null): Promise<boolean>;
+		};
+		expect(await jobCapable(new Set(["job"]))).toBe(true);
+		// mutant: read at the 4 KiB `small` bound → EFBIG → {} → the map is rewritten as this URL alone
+		expect(JSON.parse(await readFile(cap, "utf-8"))).toEqual({ ...others, [url]: true });
+	});
 });
 
 describe("keyAt — unlabelled stretches are distinct", () => {
@@ -1505,6 +1537,95 @@ describe("usertrust-job coverage — the CLI reports gaps, not a verdict", () =>
 		);
 		expect(r.stdout).not.toMatch(/\bexact\b|certified/i);
 	});
+
+	// An audit log only grows: a ceiling on reading it whole would end every verdict for that
+	// vault for good once the log passed it. It is streamed, one line at a time.
+	it("an audit log past 256 MiB still gives a verdict: streamed, a line too long to read counted", async () => {
+		const J = "bug-1";
+		const vault = join(state, "vault-big");
+		await mkdir(join(vault, "audit"), { recursive: true });
+		const events = join(vault, "audit", "events.jsonl");
+		const llmCall = (tx: string, cost: number) =>
+			`${JSON.stringify({ kind: "llm_call", actor: `claude-code:${SID}:main:main`, data: { transferId: tx, cost, job: J, principal: { origin: `claude-code:${SID}` }, usageFrom: iso(T0 + 2000), usageTo: iso(T0 + 3000) } })}\n`;
+		await writeFile(events, llmCall("tx_1", 5));
+		// 300 MiB: a sparse run of zero bytes (one "line" far past READ_BOUND.line), then a record.
+		await truncate(events, 300 * 1024 * 1024);
+		await appendFile(events, `\n${llmCall("tx_2", 7)}`);
+		expect((await stat(events)).size).toBeGreaterThan(256 * 1024 * 1024);
+		await writeLog(
+			start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null),
+		);
+		const r = await cliOut(["coverage", J, "--vault", vault, "--watch", join(state, "none.jsonl")]);
+		// mutant: read whole under a 256 MiB ceiling → EFBIG → "no verdict", exit 1
+		expect(r.stderr).not.toContain("no verdict");
+		expect(r.code).toBe(0);
+		const out = JSON.parse(r.stdout) as { knownGaps: Array<{ gap: string }>; taggedCostUt: string };
+		// Both records on either side of the run are read; the run itself is one unparsed line.
+		expect(out.taggedCostUt).toBe("12");
+		expect(out.knownGaps.map((g) => g.gap).join(" ")).toContain(
+			"1 audit line(s) could not be parsed",
+		);
+	}, 120_000);
+
+	it("a log naming the job only in a line too long to read is still reported against the job", async () => {
+		const J = "bug-1";
+		const S2 = "sess-long-line";
+		const vault = join(state, "vault-long");
+		await mkdir(join(vault, "audit"), { recursive: true });
+		await writeFile(
+			join(vault, "audit", "events.jsonl"),
+			`${JSON.stringify({ kind: "llm_call", actor: `claude-code:${SID}:main:main`, data: { transferId: "tx_1", cost: 5, job: J, principal: { origin: `claude-code:${SID}` }, usageFrom: iso(T0 + 2000), usageTo: iso(T0 + 3000) } })}\n`,
+		);
+		// A fully recorded session for the job, and one whose only mention of it is in a broken
+		// line past READ_BOUND.line (16 MiB): streamed, that line is never read.
+		await writeLog(
+			start(SID, T0) + op(SID, T0 + 1000, "start", J) + op(SID, T0 + 5000, "stop", null),
+		);
+		await writeLog(
+			`${start(S2, T0)}{"sid":"${S2}","op":"start","job":"${J}","pad":"${"x".repeat(17 * 1024 * 1024)}\n`,
+			S2,
+		);
+		const r = await cliOut(["coverage", J, "--vault", vault, "--watch", join(state, "none.jsonl")]);
+		expect(r.code).toBe(0);
+		const out = JSON.parse(r.stdout) as { knownGaps: Array<{ gap: string }> };
+		// mutant: a null line never sets namesJob → the invalid log is dropped, knownGaps: []
+		expect(out.knownGaps.map((g) => g.gap).join(" ")).toContain(
+			`session ${S2}: the job log is invalid (line 2 is too long)`,
+		);
+	}, 60_000);
+
+	it("a FIFO in an audit log's place: no verdict, at once, never a hang", async () => {
+		if (process.platform === "win32") return;
+		const vault = join(state, "vault-fifo");
+		await mkdir(join(vault, "audit"), { recursive: true });
+		expect(spawnSync("mkfifo", [join(vault, "audit", "events.jsonl")]).status).toBe(0);
+		const started = Date.now();
+		const r = await cliOut([
+			"coverage",
+			"bug-1",
+			"--vault",
+			vault,
+			"--watch",
+			join(state, "none.jsonl"),
+		]);
+		expect(Date.now() - started).toBeLessThan(10_000);
+		expect(r.code).toBe(1);
+		expect(r.stderr).toContain("(ENOTREG): no verdict");
+	}, 30_000);
+});
+
+describe("a job log is streamed: the same answer as its text, in the memory of one line", () => {
+	it("a torn last line outranks an earlier bad one, streamed or read whole", async () => {
+		const { readJobLog, parseJobLog } = (await lib()) as unknown as {
+			readJobLog(p: string, sid: string): Promise<{ parsed: { state: string; reason?: string } }>;
+			parseJobLog(t: string, sid: string): { state: string; reason?: string };
+		};
+		const text = `${start(SID, T0)}not json\n{"sid":`;
+		await writeLog(text);
+		const streamed = (await readJobLog(logFile(), SID)).parsed;
+		expect(streamed).toEqual(parseJobLog(text, SID));
+		expect(streamed.reason).toContain("torn");
+	});
 });
 
 describe("jobCoverage — shapes a record can take", () => {
@@ -1558,6 +1679,17 @@ describe("jobCoverage — shapes a record can take", () => {
 		// mutant: filtered by the intervals of unrelated sessions
 		expect(gapText(await run([ok, sessionless(9000, 9100)]))).toContain("names no session");
 		expect(gapText(await run([ok, sessionless(100, 200)]))).toContain("names no session");
+	});
+	it("a SESSIONLESS settlement_unrecoverable (recorded, never charged) is a gap for the job", async () => {
+		const unrecoverable = {
+			kind: "settlement_unrecoverable",
+			actor: "local",
+			data: { transferIdHash: "a".repeat(64), usage: { inputTokens: 5 }, source: "headless" },
+		};
+		expect(gapText(await run([ok, unrecoverable]))).toContain("names no session");
+		// pre-fix control: a kind outside SPEND_LIKE is dropped without a gap, which is exactly how this
+		// record used to read: knownGaps [] over recorded, uncharged usage
+		expect((await run([ok, { ...unrecoverable, kind: "not_a_spend_kind" }])).knownGaps).toEqual([]);
 	});
 	it("untagged settlement metadata with no llm_call, in the interval, is a gap", async () => {
 		const meta = (data: Record<string, unknown>) => ({

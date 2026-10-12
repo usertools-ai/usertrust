@@ -7,7 +7,8 @@ export type ServerEvent =
 	| { type: "aborted"; transferId: string; reason: string; at: string }
 	| { type: "released"; transferId: string; reason: string; at: string }
 	| { type: "denied"; error: string; reason: string; shadow: boolean; at: string }
-	| { type: "pending_expired"; transferId: string; at: string };
+	| { type: "pending_expired"; transferId: string; at: string }
+	| { type: "settlement_unrecoverable"; transferId: string; recorded: boolean; at: string };
 
 type Listener = (event: ServerEvent) => void;
 
