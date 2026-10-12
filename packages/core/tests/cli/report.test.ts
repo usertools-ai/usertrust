@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
@@ -679,6 +680,90 @@ describe("usertrust report --week", () => {
 			write.mockRestore();
 		},
 	);
+
+	describe("the snapshot holds EXACTLY the verifier's inputs: a listed input that is not a regular file is a problem", () => {
+		type Out = { integrity: { verified: boolean; errors: string[] } };
+		const readReport = async (): Promise<Out> => {
+			stdout = "";
+			process.exitCode = undefined;
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			return JSON.parse(stdout) as Out;
+		};
+		const vaultDir = () => join(dir, ".usertrust");
+		const auditDir = () => join(vaultDir(), "audit");
+		const fifo = (path: string) => execFileSync("mkfifo", [path]);
+		const noFifo = process.platform === "win32";
+
+		it("a DIRECTORY where the main log's sidecar belongs (no log at all): UNVERIFIED, and the live verifier agrees", async () => {
+			mkdirSync(join(auditDir(), "events.jsonl.meta"), { recursive: true });
+			expect(verifyVault(vaultDir()).valid).toBe(false);
+			const out = await readReport();
+			expect(out.integrity.verified).toBe(false);
+			expect(out.integrity.errors.join("\n")).toContain("audit/events.jsonl.meta is a directory");
+			expect(process.exitCode).toBe(2);
+			write.mockRestore();
+		});
+
+		it.skipIf(noFifo)(
+			"a FIFO where the sidecar belongs, beside a valid log: UNVERIFIED, never opened (no hang)",
+			async () => {
+				await vault([{ cost: 1 }]);
+				rmSync(join(auditDir(), "events.jsonl.meta"), { force: true });
+				fifo(join(auditDir(), "events.jsonl.meta"));
+				const out = await readReport();
+				expect(out.integrity.verified).toBe(false);
+				expect(out.integrity.errors.join("\n")).toContain(
+					"events.jsonl.meta is not a regular file",
+				);
+				write.mockRestore();
+			},
+			15_000,
+		);
+
+		it.skipIf(noFifo)(
+			"a FIFO where the log belongs: UNVERIFIED, never opened (no hang)",
+			async () => {
+				mkdirSync(auditDir(), { recursive: true });
+				fifo(join(auditDir(), "events.jsonl"));
+				const out = await readReport();
+				expect(out.integrity.verified).toBe(false);
+				expect(out.integrity.errors.join("\n")).toContain("events.jsonl is not a regular file");
+				write.mockRestore();
+			},
+			15_000,
+		);
+
+		it("a DIRECTORY named like a segment is a problem; a directory with any other name is ignored", async () => {
+			await vault([{ cost: 1 }]);
+			mkdirSync(join(auditDir(), "events-old.jsonl"));
+			let out = await readReport();
+			expect(out.integrity.verified).toBe(false);
+			expect(out.integrity.errors.join("\n")).toContain("audit/events-old.jsonl is a directory");
+			rmSync(join(auditDir(), "events-old.jsonl"), { recursive: true });
+			for (const name of ["anchors", "llm_call", "something-else"]) {
+				mkdirSync(join(auditDir(), name));
+			}
+			out = await readReport();
+			expect(out.integrity.verified).toBe(true);
+			write.mockRestore();
+		});
+
+		it.skipIf(noFifo)(
+			"a FIFO where the dead-letter queue belongs: UNVERIFIED, never opened (no hang)",
+			async () => {
+				await vault([{ cost: 1 }]);
+				mkdirSync(join(vaultDir(), "dlq"), { recursive: true });
+				fifo(join(vaultDir(), "dlq", "dead-letters.jsonl"));
+				const out = await readReport();
+				expect(out.integrity.verified).toBe(false);
+				expect(out.integrity.errors.join("\n")).toContain(
+					"dead-letters.jsonl is not a regular file",
+				);
+				write.mockRestore();
+			},
+			15_000,
+		);
+	});
 
 	describe("COMPLETENESS: a dead-lettered chain event that is not on the chain is not VERIFIED", () => {
 		type Out = { integrity: { verified: boolean; errors: string[] } };

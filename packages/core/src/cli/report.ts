@@ -36,6 +36,7 @@ import {
 	describeMissingEvents,
 	readChainDeadLetters,
 } from "../audit/dead-letters.js";
+import { DEAD_LETTER_QUEUE, MAIN_LOG, verifierInputs } from "../audit/inputs.js";
 import { readLedgerEvents } from "../audit/read.js";
 import { verifyVault } from "../audit/verify.js";
 import { parseDeadLetters } from "../report/dead-letters.js";
@@ -370,47 +371,60 @@ export function snapshotVault(
 	};
 	try {
 		const auditSrc = join(vaultPath, "audit");
+		// What each listed input IS, decided by stat before anything is opened (opening a FIFO would hang). The list is the
+		// verifier's (`verifierInputs`): the snapshot holds exactly those inputs, so it can hold nothing less than `verify`
+		// reads. A listed input that exists as anything but a regular file is a PROBLEM named here, never a skip.
+		const stateOf = (rel: string): "absent" | "file" | "problem" => {
+			try {
+				const st = statSync(join(vaultPath, rel));
+				if (st.isFile()) return "file";
+				problems.push(
+					`${rel} is ${st.isDirectory() ? "a directory" : "not a regular file"} where the verifier reads a file: the chain cannot be read`,
+				);
+				return "problem";
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return "absent";
+				problem(rel, err);
+				return "problem";
+			}
+		};
+		let names: string[] = [];
 		if (existsSync(auditSrc)) {
-			const auditDst = join(dir, "audit");
-			mkdirSync(auditDst, { recursive: true, mode: 0o700 });
-			let names: string[] = [];
 			try {
 				names = readdirSync(auditSrc);
 			} catch (err) {
 				problem("the audit directory", err);
 			}
-			const paired = new Set<string>();
-			for (const name of names) {
-				// A dot-named log segment is part of the chain the verifier reads; only the writer lock is not.
-				if (name === ".audit-writer.lock") continue;
-				if (paired.has(name)) continue;
-				const src = join(auditSrc, name);
-				let isFile: boolean;
-				try {
-					isFile = statSync(src).isFile();
-				} catch (err) {
-					problem(`audit/${name}`, err);
-					continue;
-				}
-				if (!isFile) continue; // a subdirectory (anchors/, llm_call/) is not part of the chain
-				try {
-					const metaName = `${name}.meta`;
-					if (names.includes(metaName)) {
-						// A log with an anchor sidecar is read as ONE state (see readPaired), not as two independent files.
-						paired.add(metaName);
-						const got = readPaired(src, join(auditSrc, metaName), hooks);
-						if (got === "busy") {
-							busy.push(`audit/${name}`);
-							continue;
-						}
-						writeFileSync(join(auditDst, name), got.log, { mode: 0o600 });
-						writeFileSync(join(auditDst, metaName), got.meta, { mode: 0o600 });
+		}
+		const auditInputs = verifierInputs(names).filter((i) => i.rel.startsWith("audit/"));
+		const state = new Map(auditInputs.map((i) => [i.rel, stateOf(i.rel)]));
+		const auditDst = join(dir, "audit");
+		// An absent audit directory stays absent in the snapshot, so the verifier says so rather than reading an empty one.
+		if (existsSync(auditSrc)) mkdirSync(auditDst, { recursive: true, mode: 0o700 });
+		const anchorRel = `audit/${MAIN_LOG}.meta`;
+		for (const input of auditInputs) {
+			if (state.get(input.rel) !== "file") continue;
+			const name = basename(input.rel);
+			const src = join(vaultPath, input.rel);
+			try {
+				if (input.role === "anchor") {
+					// Copied with its log when that log is present (one paired read); alone otherwise.
+					if (state.get(`audit/${MAIN_LOG}`) === "file") continue;
+					writeFileSync(join(auditDst, name), readFileSync(src), { mode: 0o600 });
+				} else if (input.rel === `audit/${MAIN_LOG}` && state.get(anchorRel) === "file") {
+					// A log with an anchor sidecar is read as ONE state (see readPaired), not as two independent files.
+					const got = readPaired(src, join(vaultPath, anchorRel), hooks);
+					if (got === "busy") {
+						busy.push(input.rel);
 						continue;
 					}
+					writeFileSync(join(auditDst, name), got.log, { mode: 0o600 });
+					writeFileSync(join(auditDst, `${name}.meta`), got.meta, { mode: 0o600 });
+				} else {
 					writeFileSync(join(auditDst, name), readFileSync(src), { mode: 0o600 });
-				} catch (err) {
-					problem(`audit/${name}`, err);
 				}
+			} catch (err) {
+				problem(input.rel, err);
 			}
 		}
 		const configSrc = join(vaultPath, "usertrust.config.json");
@@ -448,7 +462,15 @@ export function snapshotVault(
 		// (is a dead-lettered chain event missing from the chain?) and the shortfalls read here are one read of one file.
 		const dlqSrc = deadLetterPath(vaultPath);
 		let queueText: string | undefined;
+		const queueState = stateOf(DEAD_LETTER_QUEUE);
 		try {
+			// A queue that exists as anything but a regular file was already named as a problem above and is never opened.
+			if (queueState === "problem") {
+				throw Object.assign(new Error("not a regular file"), { code: "ENOTSUP" });
+			}
+			if (queueState === "absent") {
+				throw Object.assign(new Error("absent"), { code: "ENOENT" });
+			}
 			queueText = readFileSync(dlqSrc, "utf-8");
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException | undefined)?.code;
