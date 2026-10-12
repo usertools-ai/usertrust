@@ -16,7 +16,7 @@ import pc from "picocolors";
 import { VAULT_DIR } from "../shared/constants.js";
 import { createSnapshot, listSnapshots, restoreSnapshot } from "../snapshot/checkpoint.js";
 import type { CliOptions } from "./init.js";
-import { scrubForTerminal, toSafeJson } from "./target.js";
+import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
 
 /** Untrusted text is clipped AFTER sanitizing, per the AGENTS.md ordering rule. */
 const MAX_ECHOED_LENGTH = 120;
@@ -50,6 +50,7 @@ function forDisplay(raw: string): string {
 export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
+	warnIfVaultLoose(vaultPath);
 	const json = opts?.json === true;
 
 	if (!existsSync(vaultPath)) {

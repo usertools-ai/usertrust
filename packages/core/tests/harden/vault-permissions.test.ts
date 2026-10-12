@@ -362,6 +362,92 @@ describe.each(openers)("a vault that is a symbolic link, opened by %s", (_name, 
 	});
 });
 
+/** A CLI command that opens an existing vault without starting a governor, run as `--json`. */
+async function runCli(command: "inspect" | "health", root: string): Promise<void> {
+	const { run } =
+		command === "inspect"
+			? await import("../../src/cli/inspect.js")
+			: await import("../../src/cli/health.js");
+	await run(root, { json: true });
+}
+
+describe.each(["inspect", "health"] as const)("usertrust %s on an existing vault", (command) => {
+	/** Runs the command; its stderr, and whether its JSON answer is a success. */
+	async function capture(root: string): Promise<{ stderr: string; success: boolean }> {
+		let stderr = "";
+		const out: string[] = [];
+		const err = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+			stderr += String(chunk);
+			return true;
+		});
+		const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+			out.push(String(line));
+		});
+		try {
+			await runCli(command, root);
+		} finally {
+			err.mockRestore();
+			log.mockRestore();
+		}
+		const answer = JSON.parse(out.join("\n")) as { success?: boolean };
+		return { stderr, success: answer.success === true };
+	}
+
+	/** A vault with a chain and a ledger in it, then given `mode` the way an earlier version left it. */
+	async function vaultAt(mode: number): Promise<{ root: string; vaultPath: string }> {
+		process.umask(0o022);
+		const root = tmp("ut-perm-cli-");
+		const gov = await createGovernor({ vaultBase: root, dryRun: true, budget: 100_000 });
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 100,
+			maxOutputTokens: 100,
+		});
+		await gov.settle(auth, { inputTokens: 80, outputTokens: 40 });
+		await gov.destroy();
+		const vaultPath = join(root, VAULT_DIR);
+		chmodSync(vaultPath, mode);
+		return { root, vaultPath };
+	}
+
+	it("warns on a vault other users can read, succeeds, and never changes its mode", async () => {
+		const { root, vaultPath } = await vaultAt(0o755);
+		const { stderr, success } = await capture(root);
+		expect
+			.soft(stderr)
+			.toContain(
+				`usertrust: warning: the vault ${vaultPath} is readable by other users (mode 755); make it owner-only with: chmod 700 ${vaultPath}`,
+			);
+		expect.soft(success).toBe(true);
+		expect(statSync(vaultPath).mode & 0o777).toBe(0o755);
+	});
+
+	it("warns with the target for a linked vault, and never changes the target", async () => {
+		process.umask(0o022);
+		const { vaultPath: real } = await vaultAt(0o755);
+		const target = realpathSync(real);
+		const root = tmp("ut-perm-cli-link-");
+		const link = join(root, VAULT_DIR);
+		symlinkSync(target, link);
+		const { stderr, success } = await capture(root);
+		expect
+			.soft(stderr)
+			.toContain(
+				`usertrust: warning: the vault ${link} is a symbolic link to ${target}, which is readable by other users (mode 755); make it owner-only with: chmod 700 ${target}`,
+			);
+		expect.soft(success).toBe(true);
+		expect(statSync(target).mode & 0o777).toBe(0o755);
+	});
+
+	it("says nothing about an owner-only vault", async () => {
+		const { root, vaultPath } = await vaultAt(0o700);
+		const { stderr, success } = await capture(root);
+		expect(stderr).not.toContain("usertrust: warning: the vault");
+		expect(success).toBe(true);
+		expect(statSync(vaultPath).mode & 0o777).toBe(0o700);
+	});
+});
+
 describe("init (control)", () => {
 	it("creates the vault 0700 / 0600 throughout", async () => {
 		process.umask(0o022);

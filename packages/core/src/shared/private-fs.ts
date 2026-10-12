@@ -142,3 +142,26 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 		closeSync(fd);
 	}
 }
+
+/**
+ * The warning for a vault directory other users can read, or `undefined` when it is owner-only,
+ * absent, or not one this check can read (the command that opens it reports that itself). It
+ * NEVER changes a mode: the CLI commands that open an existing vault without starting a governor
+ * warn with it and proceed. Only a governor and `usertrust init` tighten a vault
+ * ({@link securePrivateVault}). For a symbolic link it names the target, its mode and the fix.
+ */
+export function looseVaultWarning(vaultDir: string): string | undefined {
+	try {
+		const st = lstatSync(vaultDir);
+		if (st.isSymbolicLink()) {
+			const target = realpathSync(vaultDir);
+			const targetStat = statSync(target);
+			if (!targetStat.isDirectory() || (targetStat.mode & 0o077) === 0) return undefined;
+			return `usertrust: warning: the vault ${vaultDir} is a symbolic link to ${target}, which is readable by other users (mode ${octal(targetStat.mode)}); make it owner-only with: chmod 700 ${target}`;
+		}
+		if (!st.isDirectory() || (st.mode & 0o077) === 0) return undefined;
+		return `usertrust: warning: the vault ${vaultDir} is readable by other users (mode ${octal(st.mode)}); make it owner-only with: chmod 700 ${vaultDir}`;
+	} catch {
+		return undefined;
+	}
+}

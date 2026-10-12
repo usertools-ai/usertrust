@@ -22,7 +22,7 @@ import {
 import { VAULT_DIR } from "../shared/constants.js";
 import type { TrustConfig } from "../shared/types.js";
 import { TrustConfigSchema } from "../shared/types.js";
-import { toSafeJson } from "./target.js";
+import { toSafeJson, warnIfVaultLoose } from "./target.js";
 
 export interface PricingOpts {
 	json: boolean;
@@ -51,6 +51,7 @@ function longPromptPerM(tier: LongPromptTier) {
 
 export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 	const root = rootDir ?? process.cwd();
+	warnIfVaultLoose(join(root, VAULT_DIR));
 	const configPath = join(root, VAULT_DIR, "usertrust.config.json");
 	const json = opts?.json === true;
 
