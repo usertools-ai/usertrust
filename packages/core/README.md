@@ -61,7 +61,7 @@ This creates a `.usertrust/` vault in your project root with default config, pol
 
 `npx usertrust init` does not install the package into your project, so the `npm install` line is required.
 
-usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). `@anthropic-ai/sdk` and `openai` are declared as optional peer dependencies. `@google/genai` is not declared at all: usertrust recognises a Google client by its shape (`models.generateContent`), so nothing in the install names that package, and you install it yourself.
+usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). `@anthropic-ai/sdk` (0.116.0 or newer) and `openai` (7.4.0 or newer) are declared as optional peer dependencies. `@google/genai` is not declared at all: usertrust recognises a Google client by its shape (`models.generateContent`), so nothing in the install names that package, and you install it yourself.
 
 ## Integration
 
@@ -92,6 +92,8 @@ const client = await trust(new Anthropic(), {
 ```
 
 On a Google client only `models.generateContent` is governed. `models.generateContentStream` passes through to the SDK untouched: it is not metered, it gets no receipt, and no policy applies to it. Use `generateContent` for calls you need governed.
+
+On an Anthropic or OpenAI client, every SDK method usertrust does not govern is refused unless it cannot start work: `embeddings.create`, `messages.batches.create`, `chat.completions.parse` and the like return a promise that rejects with a `PolicyDeniedError` (`ungoverned_method: <path>`) and write a `policy_denied` audit event, and the SDK is never called. Methods that cannot start work run as before: reads, lists and deletes (every GET or DELETE request) and a few named POSTs such as `messages.countTokens`, `moderations.create` and cancels. To run a refused method unmetered, list it: `trust(client, { allowUngoverned: ["embeddings.create"] })`; each such call is audited as `ungoverned_call`. `client.withOptions(...)` returns a client governed by the same governor, unless it changes where or how calls are sent (`baseURL`, `fetch`, `fetchOptions`, …), which is refused.
 
 Clients in one process share their vault's audit writer. Separate processes cannot write to one vault: give each process its own vault (`vaultBase`), or send their calls through one `usertrust-server`.
 
