@@ -20,6 +20,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { closeSync, constants, openSync } from "node:fs";
 import {
 	appendFile,
 	chmod,
@@ -754,7 +755,7 @@ describe("SessionStart's mark is read like watch.jsonl: non-blocking, a regular 
 	}, 60_000);
 });
 
-describe("every file the plugin reads goes through ONE bounded, regular-file-only reader", () => {
+describe("every file the plugin reads or writes goes through ONE guarded opener", () => {
 	const ROOT = join(import.meta.dirname, "..");
 	/** Every hook and command source: what Claude Code and the user run. */
 	async function sources(): Promise<Array<{ file: string; text: string }>> {
@@ -768,29 +769,44 @@ describe("every file the plugin reads goes through ONE bounded, regular-file-onl
 		return out;
 	}
 
+	/** The text of a call's arguments, from just past its `(` to its matching `)`. */
+	function argsFrom(code: string, from: number): string {
+		let depth = 1;
+		let at = from;
+		while (depth > 0 && at < code.length) {
+			if (code[at] === "(") depth += 1;
+			else if (code[at] === ")") depth -= 1;
+			at += 1;
+		}
+		return code.slice(from, at - 1);
+	}
+
 	/**
-	 * The reads in `text` that could wait on a FIFO or read without a bound: a readFile of a
-	 * PATH (a readFileSync of an `fd` reads one a guarded open already checked), a read stream,
-	 * and an open with neither O_NONBLOCK nor O_EXCL (an exclusive create never opens a FIFO
-	 * that is there). Comments are not code.
+	 * The file accesses in `text` that could wait on a FIFO, or read without a bound:
+	 * - a readFile of a PATH (a readFileSync of an `fd` reads one a guarded open already checked);
+	 * - a read or write stream, or an appendFile (an O_WRONLY open of a FIFO waits for a reader);
+	 * - a writeFile that is not an exclusive create (`"wx"` never opens a file that is there),
+	 *   except to an `fd` or through a handle that a guarded open made;
+	 * - an open with neither O_NONBLOCK nor O_EXCL.
+	 * Comments are not code.
 	 */
-	function rawReads(text: string): string[] {
+	function rawAccess(text: string): string[] {
 		const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 		const found: string[] = [];
 		for (const m of code.matchAll(/\breadFile(Sync)?\(\s*([^,)]*)/g)) {
 			if (m[2]?.trim() !== "fd") found.push(m[0]);
 		}
-		for (const m of code.matchAll(/\bcreateReadStream\(/g)) found.push(m[0]);
+		for (const m of code.matchAll(/\b(createReadStream|createWriteStream|appendFile(Sync)?)\(/g)) {
+			found.push(m[0]);
+		}
+		for (const m of code.matchAll(/(\bhandle\.)?\bwriteFile(Sync)?\(/g)) {
+			if (m[1] !== undefined) continue;
+			const args = argsFrom(code, (m.index ?? 0) + m[0].length);
+			if (/^\s*fd\s*,/.test(args) || /flag:\s*"wx"/.test(args)) continue;
+			found.push(`${m[0]}${args.trim()})`);
+		}
 		for (const m of code.matchAll(/\b(open|openSync)\(/g)) {
-			const from = (m.index ?? 0) + m[0].length;
-			let depth = 1;
-			let at = from;
-			while (depth > 0 && at < code.length) {
-				if (code[at] === "(") depth += 1;
-				else if (code[at] === ")") depth -= 1;
-				at += 1;
-			}
-			const args = code.slice(from, at - 1);
+			const args = argsFrom(code, (m.index ?? 0) + m[0].length);
 			if (!/O_NONBLOCK|O_EXCL/.test(args)) found.push(`${m[1]}(${args.trim()})`);
 		}
 		return found;
@@ -803,29 +819,38 @@ describe("every file the plugin reads goes through ONE bounded, regular-file-onl
 			'await open(path, "r")',
 			"fs.openSync(path, constants.O_RDONLY)",
 			"createReadStream(path)",
+			"createWriteStream(path)",
+			"await appendFile(log, line, { mode: 0o600 })",
+			'await appendFile(log, line, { flag: "a", mode: 0o600 })',
+			"await writeFile(path, text, { mode: 0o600 })",
+			"await writeFile(\n\ttmp,\n\tJSON.stringify({ a: 1 }),\n)",
 		];
-		for (const line of forbidden) expect(rawReads(line), line).toHaveLength(1);
+		for (const line of forbidden) expect(rawAccess(line), line).toHaveLength(1);
 		const allowed = [
 			'fs.readFileSync(fd, "utf-8")',
 			"await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))",
 			"fs.openSync(\n\tpath,\n\tconstants.O_RDONLY | (constants.O_NONBLOCK ?? 0),\n)",
 			"open(log, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600)",
+			'await writeFile(tmp, text, { flag: "wx", mode })',
+			'await writeFile(path, JSON.stringify({ a: f(1) }), { ...options, flag: "wx" })',
+			"await handle.writeFile(text)",
+			"fs.writeFileSync(fd, content)",
 			'// await readFile(path, "utf-8")',
-			'/** `readFile(path, "utf-8")`, bounded */',
+			'/** `readFile(path, "utf-8")`, bounded; appendFile(x) */',
 		];
-		for (const line of allowed) expect(rawReads(line), line).toEqual([]);
+		for (const line of allowed) expect(rawAccess(line), line).toEqual([]);
 	});
 
-	it("no hook or command reads a file any other way", async () => {
+	it("no hook or command reads or writes a file any other way", async () => {
 		const all = await sources();
-		// The sweep reached the code: the hooks, the command, and the reader itself.
+		// The sweep reached the code: the hooks, the command, and the opener itself.
 		expect(all.map((s) => s.file)).toEqual(
 			expect.arrayContaining(["hooks/lib.mjs", "hooks/transcript.mjs", "bin/usertrust-job.mjs"]),
 		);
-		expect(all.find((s) => s.file === "hooks/lib.mjs")?.text).toContain(
-			"export async function openRegular(path)",
-		);
-		const offenders = all.flatMap(({ file, text }) => rawReads(text).map((r) => `${file}: ${r}`));
+		const lib = all.find((s) => s.file === "hooks/lib.mjs")?.text;
+		expect(lib).toContain("export async function openRegular(path)");
+		expect(lib).toContain("export async function appendRegular(path, text");
+		const offenders = all.flatMap(({ file, text }) => rawAccess(text).map((r) => `${file}: ${r}`));
 		expect(offenders).toEqual([]);
 	});
 
@@ -941,6 +966,73 @@ describe("every file the plugin reads goes through ONE bounded, regular-file-onl
 				return line !== "b";
 			});
 			expect(seen).toEqual(["a", "b"]);
+		});
+	});
+
+	describe("appendRegular", () => {
+		it("appends whole lines to a regular file, made 0600 when it is not there", async () => {
+			const { appendRegular } = await reader();
+			const path = join(stateDir, "log.jsonl");
+			await appendRegular(path, "a\n");
+			await appendRegular(path, "b\n");
+			expect(await readFile(path, "utf-8")).toBe("a\nb\n");
+			expect((await stat(path)).mode & 0o777).toBe(0o600);
+		});
+
+		it("a FIFO with no reader: ENXIO at once; with a reader: ENOTREG, nothing written; a directory: refused", async () => {
+			if (process.platform === "win32") return;
+			const { appendRegular } = await reader();
+			const fifo = join(stateDir, "w.fifo");
+			expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+			const started = Date.now();
+			await expect(appendRegular(fifo, "x\n")).rejects.toMatchObject({ code: "ENXIO" });
+			const held = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+			try {
+				await expect(appendRegular(fifo, "x\n")).rejects.toMatchObject({ code: "ENOTREG" });
+			} finally {
+				closeSync(held);
+			}
+			const dir = join(stateDir, "d");
+			await mkdir(dir);
+			await expect(appendRegular(dir, "x\n")).rejects.toMatchObject({ code: "EISDIR" });
+			expect(Date.now() - started).toBeLessThan(2_000);
+		});
+	});
+
+	it("a FIFO in watch.jsonl's place: a rejected call still shows the notice, at once, never a hang", async () => {
+		if (process.platform === "win32") return;
+		const url = await startStub();
+		expect(spawnSync("mkfifo", [join(stateDir, "watch.jsonl")]).status).toBe(0);
+		const started = Date.now();
+		const result = await runHook(PRE, call(newSession(), 1), { ...baseEnv, UT_SERVER_URL: url });
+		expect(Date.now() - started).toBeLessThan(START_BUDGET_MS);
+		expectProceeded(result);
+		expect(String(hookJson(result.stdout)?.systemMessage)).toContain("(401)");
+		// The record could not be written, and the hook says so where it can.
+		expect(result.stderr).toContain("could not write a watch record");
+	}, 30_000);
+
+	describe("readLogs (the job-coverage command's evidence)", () => {
+		// @ts-expect-error TS7016: the hooks are plain .mjs, without type declarations.
+		const jobLog = () => import("../hooks/job-log.mjs");
+
+		it("streams every session log in the directory", async () => {
+			const { readLogs } = await jobLog();
+			const dir = join(stateDir, "jobs");
+			await mkdir(dir);
+			await writeFile(join(dir, "s1.jsonl"), "one\n");
+			await writeFile(join(dir, "notes.txt"), "not a log");
+			expect(Object.keys(await readLogs(dir, "bug-1"))).toEqual(["s1"]);
+		});
+
+		it("a log that cannot be read THROWS, never reads as empty: it may hold the job asked about", async () => {
+			if (process.platform === "win32") return;
+			const { readLogs } = await jobLog();
+			const dir = join(stateDir, "jobs");
+			await mkdir(dir);
+			await writeFile(join(dir, "s1.jsonl"), "one\n");
+			expect(spawnSync("mkfifo", [join(dir, "s2.jsonl")]).status).toBe(0);
+			await expect(readLogs(dir, "bug-1")).rejects.toMatchObject({ code: "ENOTREG" });
 		});
 	});
 });
