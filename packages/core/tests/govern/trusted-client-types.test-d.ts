@@ -540,7 +540,7 @@ type GovGoogle = TrustedClient<FakeGoogle>;
 export type _GoogleGenerateContentEnvelope = Assert<
 	IsExact<
 		ReturnType<GovGoogle["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
 // generateContentStream is UNGOVERNED: buildGoogleProxy traps `generateContent`
@@ -712,7 +712,7 @@ type GovCallableChatWithGoogle = TrustedClient<CallableChatWithGoogle>;
 export type _CallableChatFallsThroughToGoogle = Assert<
 	IsExact<
 		ReturnType<GovCallableChatWithGoogle["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
 export type _CallableChatStaysRaw = Assert<
@@ -733,7 +733,7 @@ type GovCallableCompletions = TrustedClient<CallableCompletionsWithGoogle>;
 export type _CallableCompletionsFallsThroughToGoogle = Assert<
 	IsExact<
 		ReturnType<GovCallableCompletions["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
 export type _CallableCompletionsStaysRaw = Assert<
@@ -836,7 +836,7 @@ export type _ReadonlyModelsStaysReadonly = Assert<
 export type _ReadonlyModelsIsGoverned = Assert<
 	IsExact<
 		ReturnType<GovReadonlyModels["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
 
@@ -866,6 +866,6 @@ export type _UnionAnthropicMemberGoverned = Assert<
 export type _UnionGoogleMemberGoverned = Assert<
 	IsExact<
 		ReturnType<GovUnionGoogle["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
