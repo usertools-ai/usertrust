@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`usertrust-ui` can show the usertrust mark in its header, loaded at runtime from the usertrust brand kit, and off by default.** Set `"remote": { "kit": true }` in `.usertrust/usertrust.config.json` to turn it on. The browser then fetches one SVG, `https://usertrust.ai/kit/images/favicon.svg`, on each page load. The request has no query string, no cookies and no referrer; as a CORS request it carries an `Origin` header naming the dashboard's local address. If the load fails, or takes longer than 5 seconds, no mark is shown and nothing moves. The change takes effect without a restart. No brand asset is shipped in the package, and the SDK ignores the `remote` section.
+
 - **`usertrust-verify` exports the transfer verdict: `transferVerdict(events)`** (with `selectTransferEvent`, `firstTerminalOf` and `normalizeEvent`), and the transfer match `--tx` makes: `matchesTransfer(event, txId, txHash)`, the same match as keys, `transferKeysOf(event)`, and `transferIdHash(txId)`. It is the selection `--tx` has always used, moved unchanged into one function, so any caller can give a transfer the verdict `--tx` prints. `verifyTransaction`'s result gains `status` (the same verdict) when the transfer is found.
 
 ### Changed

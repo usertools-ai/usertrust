@@ -31,7 +31,13 @@ import {
 import { canonicalize, verifyTransaction } from "usertrust-verify";
 import { isHeaderSpend } from "../shared/aggregate.js";
 import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
-import { budgetSummary, type LedgerState, loadState, ROW_CAP } from "./state.js";
+import {
+	budgetSummary,
+	type LedgerState,
+	loadState,
+	ROW_CAP,
+	readRemoteSettings,
+} from "./state.js";
 
 /** How often the budget files are polled for a change (`fs.watchFile`: a missing file is watched too). */
 const BUDGET_POLL_MS = 1000;
@@ -323,22 +329,25 @@ export async function createUiServer(
 		onResync: handleResync,
 	});
 	// The budget's two sources live OUTSIDE `audit/`, which watchLedger watches: a governor writes its record when it
-	// starts, and an operator edits the config. Each change re-reads the budget and sends the summary.
+	// starts, and an operator edits the config. Each change re-reads the budget, and the config's `remote` section, and
+	// sends the summary: turning the kit mark on or off takes effect without a restart.
 	const budgetFiles = [
 		join(vaultPath, EFFECTIVE_BUDGET_FILE),
 		join(vaultPath, "usertrust.config.json"),
 	];
 	const refreshBudget = (): void => {
 		const next = budgetSummary(vaultPath, state.summary.spentUt);
+		const remote = readRemoteSettings(vaultPath);
 		if (
 			next.budget === state.summary.budget &&
 			next.budgetSource === state.summary.budgetSource &&
 			next.budgetWrittenAt === state.summary.budgetWrittenAt &&
 			// the provenance carries an unreadable record's REASON, which can change while the rest does not
-			next.budgetProvenance === state.summary.budgetProvenance
+			next.budgetProvenance === state.summary.budgetProvenance &&
+			remote.kit === state.summary.remote.kit
 		)
 			return;
-		Object.assign(state.summary, next);
+		Object.assign(state.summary, next, { remote });
 		// A state change like any other: a new version, so a snapshot taken before it is not mistaken for one after.
 		version += 1;
 		broadcast("summary", state.summary);

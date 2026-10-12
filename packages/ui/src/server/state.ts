@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	deriveChainIntegrity,
@@ -13,6 +13,7 @@ import {
 } from "usertrust";
 import { isHeaderSpend } from "../shared/aggregate.js";
 import type { SummaryPayload } from "../shared/api.js";
+import { type RemoteSettings, remoteSettings } from "../shared/kit.js";
 import { type LedgerRow, toLedgerRows } from "../shared/rows.js";
 import { TransferIndex } from "./verdicts.js";
 
@@ -57,6 +58,17 @@ export function budgetSummary(
 		budgetProvenance: describeBudgetSource(config),
 		remainingUt: budget === null ? null : budget - spentUt,
 	};
+}
+
+/** The vault config's `remote` section. A missing or unreadable config leaves every remote load off. */
+export function readRemoteSettings(vaultPath: string): RemoteSettings {
+	try {
+		return remoteSettings(
+			JSON.parse(readFileSync(join(vaultPath, "usertrust.config.json"), "utf-8")) as unknown,
+		);
+	} catch {
+		return remoteSettings(undefined);
+	}
 }
 
 /** `verifyVault`'s error for a vault with no audit directory: no evidence either way, not tampering. */
@@ -113,6 +125,7 @@ export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerSt
 				errors,
 			},
 			anchorFile: anchorFile(vaultPath),
+			remote: readRemoteSettings(vaultPath),
 			rowCount: rows.length,
 			truncated,
 		},

@@ -6,6 +6,7 @@ import type { SummaryPayload } from "../shared/api.js";
 import { budgetDisplay, budgetSourceWord } from "../shared/budget-display.js";
 import { anchorView, chainStatus, windowNotice } from "../shared/display.js";
 import { formatUsd, formatUt, formatUtc, middleTruncate } from "../shared/format.js";
+import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
 import type { LiveState } from "./store.js";
 
 const LIVE_LABEL: Record<LiveState, string> = {
@@ -15,11 +16,50 @@ const LIVE_LABEL: Record<LiveState, string> = {
 	offline: "offline",
 };
 
-function TopBar(props: { vaultPath: string | null; live: LiveState }): React.JSX.Element {
+/**
+ * The usertrust mark from the brand kit, rendered only when the vault config opts in (`remote.kit`). The slot is a
+ * fixed size whatever happens, so a mark that loads, fails or times out never moves the header; on a failure or a
+ * timeout the slot stays empty, with no error. Decorative: the wordmark beside it names the product.
+ */
+function KitMark(): React.JSX.Element {
+	const [state, setState] = useState<"loading" | "shown" | "gone">("loading");
+	useEffect(() => {
+		if (state !== "loading") return;
+		// Removing the <img> on timeout also stops a hung request.
+		const timer = setTimeout(() => setState((s) => (s === "loading" ? "gone" : s)), KIT_TIMEOUT_MS);
+		return () => clearTimeout(timer);
+	}, [state]);
+	return (
+		<span className="ut-kitmark" aria-hidden="true">
+			{state !== "gone" && (
+				<img
+					src={KIT_MARK_URL}
+					alt=""
+					width={22}
+					height={22}
+					decoding="async"
+					// No cookies (a CORS request without credentials) and no referrer: the kit learns nothing but the fetch.
+					crossOrigin="anonymous"
+					referrerPolicy="no-referrer"
+					data-st={state}
+					onLoad={() => setState("shown")}
+					onError={() => setState("gone")}
+				/>
+			)}
+		</span>
+	);
+}
+
+function TopBar(props: {
+	vaultPath: string | null;
+	live: LiveState;
+	kit: boolean;
+}): React.JSX.Element {
 	const [copied, setCopied] = useState(false);
 	const path = props.vaultPath;
 	return (
 		<header className="ut-top">
+			{props.kit && <KitMark />}
 			<span className="ut-bword">usertrust</span>
 			<span className="ut-title">ledger</span>
 			{path !== null && (
@@ -151,7 +191,7 @@ export function SummaryStrip(props: {
 	if (!s)
 		return (
 			<>
-				<TopBar vaultPath={null} live={props.live} />
+				<TopBar vaultPath={null} live={props.live} kit={false} />
 				<section className="ut-facts" aria-busy="true" aria-label="vault summary loading">
 					{["Spend", "Budget", "Chain", "Integrity", "Anchor file"].map((label) => (
 						<div key={label} className="ut-fact">
@@ -167,7 +207,7 @@ export function SummaryStrip(props: {
 
 	return (
 		<>
-			<TopBar vaultPath={s.vaultPath} live={props.live} />
+			<TopBar vaultPath={s.vaultPath} live={props.live} kit={s.remote.kit} />
 			{status === "broken" && (
 				<div className="ut-alarm" role="alert">
 					<b>Chain integrity failure</b>

@@ -128,6 +128,24 @@ describe("loadState", () => {
 		});
 	});
 
+	it("the kit mark is off by default, and when the config is unreadable", async () => {
+		await seed(1);
+		expect(loadState(vaultPath).summary.remote).toEqual({ kit: false });
+		writeFileSync(join(vaultPath, "usertrust.config.json"), "{ not json");
+		expect(loadState(vaultPath).summary.remote).toEqual({ kit: false });
+	});
+
+	it("red-first (no setting existed): remote.kit true in the vault config turns the kit mark on, beside the budget", async () => {
+		await seed(1);
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({ budget: 1_000, remote: { kit: true } }),
+		);
+		const { summary } = loadState(vaultPath);
+		expect(summary.remote).toEqual({ kit: true });
+		expect(summary).toMatchObject({ budget: 1_000, budgetSource: "config" });
+	});
+
 	it("reports an absent anchors.jsonl as file-absent, not as a verdict", async () => {
 		await seed(1);
 		const state = loadState(vaultPath);

@@ -159,6 +159,23 @@ body {
 		min-width: 0;
 		min-height: 32px;
 	}
+	.ut-kitmark {
+		flex: 0 0 auto;
+		width: 22px;
+		height: 22px;
+		margin-right: -4px;
+	}
+	.ut-kitmark img {
+		display: block;
+		width: 22px;
+		height: 22px;
+		border-radius: 6px;
+		opacity: 0;
+		transition: opacity 0.2s ease;
+	}
+	.ut-kitmark img[data-st="shown"] {
+		opacity: 1;
+	}
 	.ut-bword {
 		font-size: 15px;
 		font-weight: 500;

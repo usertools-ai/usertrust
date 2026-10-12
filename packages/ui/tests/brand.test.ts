@@ -4,6 +4,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { KIT_MARK_URL } from "../src/shared/kit.js";
 
 const SRC = join(import.meta.dirname, "..", "src");
 
@@ -31,6 +32,31 @@ describe("ui source: brand", () => {
 				},
 			);
 		}
+	});
+
+	// Loopback-only, with one opt-in exception: the kit mark. Any other remote URL in the code the BROWSER runs
+	// (src/app, and src/shared, which the SPA bundles) is a new network request a reviewer has to see. The SVG
+	// namespace is a name, never fetched.
+	it("the only remote URL the page can load is the opt-in kit mark", () => {
+		const allowed = new Set([KIT_MARK_URL, "http://www.w3.org/2000/svg"]);
+		const browser = sources.filter(({ path }) => /[/\\]src[/\\](app|shared)[/\\]/.test(path));
+		expect(browser.length).toBeGreaterThan(0);
+		for (const { path, text } of browser) {
+			const urls = (text.match(/https?:\/\/[^\s"'`)<>]+/g) ?? []).filter((u) => !allowed.has(u));
+			expect({ path, urls }).toEqual({ path, urls: [] });
+		}
+	});
+
+	it("the kit mark is fetched with no cookies and no referrer", () => {
+		const users = sources.filter(
+			({ path, text }) => /[/\\]src[/\\]app[/\\]/.test(path) && text.includes("KIT_MARK_URL"),
+		);
+		expect(users.map(({ path }) => path.slice(path.lastIndexOf("src")))).toEqual([
+			"src/app/summary-strip.tsx",
+		]);
+		const tsx = users[0]?.text ?? "";
+		expect(tsx).toContain('crossOrigin="anonymous"');
+		expect(tsx).toContain('referrerPolicy="no-referrer"');
 	});
 
 	it("no font is embedded or fetched: no @font-face, no font data URL, no remote url()", () => {

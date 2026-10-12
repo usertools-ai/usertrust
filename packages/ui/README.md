@@ -37,6 +37,26 @@ If `usertrust` (the core CLI) is installed alongside, `usertrust ui` launches th
 - **Loopback only.** The server binds `127.0.0.1` and rejects requests whose `Host` header is not loopback (DNS-rebinding guard) and cross-origin POSTs (CSRF guard).
 - **Read-only**, with one exception: `POST /api/export` writes a markdown export, and only to a directory inside the project root (never inside the vault).
 - **No secrets on the wire.** The audit chain stores metadata (hashes, costs, task types) — never raw prompts or completions — so the UI cannot leak them.
+- **Nothing leaves the machine by default.** The one remote load, the usertrust mark, is off unless you turn it on (below).
+
+## The usertrust mark (opt-in)
+
+Off by default. When it is on, the header shows the usertrust mark beside the name, loaded from the usertrust brand kit. The mark is not part of this package.
+
+- **What is fetched:** one SVG, `https://usertrust.ai/kit/images/favicon.svg`. Nothing else.
+- **When, and by what:** your browser fetches it each time the page loads, and only while the setting is on. The usertrust-ui server makes no request.
+- **What is sent:** a plain `GET` with no query string, no cookies (`crossorigin="anonymous"`) and no `Referer` (`referrerpolicy="no-referrer"`). Because it is a CORS request, the browser adds an `Origin` header naming this page's local address, for example `http://127.0.0.1:4180`. Like any web request, it also shows usertrust.ai your IP address, your browser's user agent and the time.
+- **If it fails:** the page shows no mark and no error. A load still unfinished after 5 seconds is abandoned. The header keeps its layout either way.
+
+Turn it on in the vault config, `.usertrust/usertrust.config.json`:
+
+```json
+{
+  "remote": { "kit": true }
+}
+```
+
+To turn it off, set `"kit": false` or remove the `remote` section. Only the JSON boolean `true` turns it on. The page applies a change within a few seconds, without a restart. The `usertrust` SDK ignores this section.
 
 ## Markdown export
 

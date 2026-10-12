@@ -40,6 +40,8 @@ export interface SummaryPayload {
 	// operator-pinned genesis, and inventing one from the vault under audit
 	// would violate "anchor trust never comes from the vault under audit".
 	anchorFile: "present" | "absent";
+	/** The vault config's `remote` section (`shared/kit.ts`): `kit` loads the usertrust mark from usertrust.ai/kit. */
+	remote: { kit: boolean };
 	rowCount: number;
 	truncated: boolean;
 }

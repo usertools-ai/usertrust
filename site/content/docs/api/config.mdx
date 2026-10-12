@@ -188,6 +188,20 @@ Default: `{ addresses: ["127.0.0.1:3001"], clusterId: 0 }`.
 In dry-run mode (`dryRun: true` or `USERTRUST_DRY_RUN=true`), TigerBeetle is skipped entirely. The audit chain and policy engine still run.
 </Callout>
 
+### remote
+
+Read by the local dashboard, `usertrust-ui`, and ignored by the SDK: `TrustConfigSchema` does not declare it, and `loadConfig()` drops it. It lists what the dashboard may load from outside your machine. Each entry is off unless set to the JSON boolean `true`.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `kit` | `false` | Show the usertrust mark in the dashboard header. When this is on, the browser fetches `https://usertrust.ai/kit/images/favicon.svg` on each page load. The request carries no query string, cookies or referrer, but does carry an `Origin` header naming the dashboard's local address. If the load fails, no mark is shown. |
+
+```json
+{
+  "remote": { "kit": true }
+}
+```
+
 ## Environment Variables
 
 | Variable | Effect |

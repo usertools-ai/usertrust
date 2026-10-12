@@ -415,3 +415,38 @@ describe("header spend", () => {
 		expect(JSON.parse(afterCall.data).spentUt).toBe(9);
 	});
 });
+
+describe("remote settings", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-remote-"));
+		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("turning the kit mark on in the vault config reaches the client without a restart", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			remote: { kit: boolean };
+		};
+		expect(before.remote).toEqual({ kit: false });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				writeFileSync(
+					join(tempDir, ".usertrust", "usertrust.config.json"),
+					JSON.stringify({ remote: { kit: true } }),
+				);
+			},
+		);
+		expect(JSON.parse(data).remote).toEqual({ kit: true });
+	});
+});
