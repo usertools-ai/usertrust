@@ -39,18 +39,30 @@ export function mkdirPrivate(dir: string): void {
 }
 
 /**
- * Creates a vault directory EXCLUSIVELY: its parents with `mkdir -p` (each one created is
- * owner-only), the vault itself with a non-recursive mkdir. A directory someone else creates
- * there first makes ours fail EEXIST rather than being adopted silently; EEXIST is carried on
- * from, because what is there is then checked like any existing vault.
+ * Creates a vault directory EXCLUSIVELY, with a non-recursive mkdir. A directory someone else
+ * creates there first makes ours fail EEXIST rather than being adopted silently; EEXIST is
+ * carried on from, because what is there is then checked like any existing vault. The parents
+ * are created (`mkdir -p`, each one created owner-only) only when that mkdir says one is
+ * missing (ENOENT), then the vault is created exclusively once more. An existing vault never
+ * touches its parent, so one under a parent this process cannot write to (a drive root, or a
+ * permission model granting writes to the vault alone) still opens.
  */
 function mkdirVault(vaultDir: string): void {
-	mkdirPrivate(dirname(vaultDir));
-	try {
-		mkdirSync(vaultDir, { mode: PRIVATE_DIR_MODE });
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+	const exclusive = (): NodeJS.ErrnoException | undefined => {
+		try {
+			mkdirSync(vaultDir, { mode: PRIVATE_DIR_MODE });
+			return undefined;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+			return err as NodeJS.ErrnoException;
+		}
+	};
+	let err = exclusive();
+	if (err?.code === "ENOENT") {
+		mkdirPrivate(dirname(vaultDir));
+		err = exclusive();
 	}
+	if (err !== undefined) throw err;
 }
 
 const octal = (mode: number): string => (mode & 0o777).toString(8);
