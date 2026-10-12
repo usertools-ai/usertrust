@@ -30,6 +30,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
+import { mkdirPrivate, PRIVATE_FILE_MODE } from "../shared/private-fs.js";
 import type { AuditEvent } from "../shared/types.js";
 import { canonicalize } from "./canonical.js";
 
@@ -1138,7 +1139,7 @@ export function createAuditWriter(
 ): AuditWriter {
 	const auditDir = join(vaultPath, VAULT_DIR, "audit");
 	if (!existsSync(auditDir)) {
-		mkdirSync(auditDir, { recursive: true });
+		mkdirPrivate(auditDir);
 	}
 	const logPath = join(auditDir, "events.jsonl");
 
@@ -1198,14 +1199,14 @@ export function createAuditWriter(
 			fullEvent.hash = hash;
 
 			// O_NOFOLLOW: an append never writes THROUGH a symlinked log into a file outside the
-			// vault. Mode as `openSync(path, "a")` created it (0o666 & ~umask).
+			// vault. Created owner-only: the log is the vault's audit trail.
 			const fd = openSync(
 				logPath,
 				fsConstants.O_WRONLY |
 					fsConstants.O_APPEND |
 					fsConstants.O_CREAT |
 					(fsConstants.O_NOFOLLOW ?? 0),
-				0o666,
+				PRIVATE_FILE_MODE,
 			);
 			try {
 				writeFully(fd, `${persisted}\n`);

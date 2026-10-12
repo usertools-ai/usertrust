@@ -47,6 +47,7 @@ import {
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
+import { mkdirPrivate } from "../shared/private-fs.js";
 import {
 	type AnchorRecord,
 	anchorPayloadHash,
@@ -274,7 +275,7 @@ export function initAnchorIdentity(
 		mode: 0o600,
 	});
 
-	mkdirSync(join(dir, "outbox"), { recursive: true });
+	mkdirPrivate(join(dir, "outbox"));
 	const identity: AnchorIdentity = {
 		v: 1,
 		vaultId,
@@ -602,7 +603,7 @@ function outboxPath(dir: string, anchorSeq: number): string {
 
 /** Fsync'd outbox write — the record's durable delivery intent. */
 function writeOutboxEntry(dir: string, record: AnchorRecord): void {
-	mkdirSync(join(dir, "outbox"), { recursive: true });
+	mkdirPrivate(join(dir, "outbox"));
 	const fd = openSync(outboxPath(dir, record.anchorSeq), "w", 0o600);
 	try {
 		writeSync(fd, canonicalize(record));
@@ -1060,7 +1061,7 @@ export function resumeAnchorMirror(rootDir: string, latestRecordRaw: string): An
 			`resume: mirror already at anchorSeq ${tail.anchorSeq} (supplied ${record.anchorSeq})`,
 		);
 	}
-	mkdirSync(dir, { recursive: true });
+	mkdirPrivate(dir);
 	const fd = openSync(join(dir, "anchors.jsonl"), "a", 0o600);
 	try {
 		writeSync(fd, `${canonicalize(record)}\n`);

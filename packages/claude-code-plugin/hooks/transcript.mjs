@@ -855,7 +855,7 @@ async function readCursor(path) {
 
 async function writeAtomic(path, text) {
 	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-	await writeFile(tmp, text, { mode: 0o600 });
+	await writeFile(tmp, text, { flag: "wx", mode: 0o600 });
 	await rename(tmp, path);
 }
 
@@ -1403,7 +1403,7 @@ async function claimHolder(claimsDir, id, owner) {
 	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
 	try {
 		await mkdir(dir, { recursive: true, mode: 0o700 });
-		await writeFile(tmp, owner, { mode: 0o600 });
+		await writeFile(tmp, owner, { flag: "wx", mode: 0o600 });
 		await link(tmp, path);
 		return { holder: owner, created: true };
 	} catch (err) {
@@ -1561,7 +1561,7 @@ export async function stampFirstRun() {
 async function publishOnce(path, content) {
 	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
 	try {
-		await writeFile(tmp, content, { mode: 0o600 });
+		await writeFile(tmp, content, { flag: "wx", mode: 0o600 });
 		await link(tmp, path);
 	} catch (err) {
 		if (err?.code === "EEXIST") return;

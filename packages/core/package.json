@@ -64,7 +64,9 @@
 		"prepublishOnly": "tsc"
 	},
 	"files": [
-		"dist"
+		"dist",
+		"LICENSE",
+		"NOTICE"
 	],
 	"peerDependencies": {
 		"@anthropic-ai/sdk": ">=0.30.0",

@@ -48,6 +48,13 @@ npm, and its version is its own: the `usertrust` packages and their
   any size is read in the memory of one line. Anything else reads as an unreadable file, which
   each caller already handled. `usertrust-job coverage` gives no verdict when a job log cannot
   be read, instead of reading it as empty.
+- **Writes can no longer hang a hook either.** `watch.jsonl` and the job logs are appended
+  through a non-blocking open of a regular file: a FIFO in a log's place fails at once, so the
+  hook goes on (and says on stderr that the record could not be written) instead of waiting for
+  a reader, and a close that reports a late write error (EIO, ENOSPC) counts as a failed
+  write. Temporary files are created exclusively. A quarantined hold is rewritten in place
+  (opened write-only and non-blocking, never created, then truncated and rewritten),
+  because quarantine runs exactly when a rename in its directory has failed.
 
 ### Changed
 

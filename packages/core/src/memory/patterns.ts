@@ -3,8 +3,9 @@
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { VAULT_DIR } from "../shared/constants.js";
+import { PRIVATE_DIR_MODE, PRIVATE_FILE_MODE } from "../shared/private-fs.js";
 
 // ── Types ──
 
@@ -64,8 +65,12 @@ interface CacheEntry {
 
 const cacheByVault = new Map<string, CacheEntry>();
 
+/**
+ * Absolute, so a governor's `<vaultBase>/.usertrust` and a caller's default (`.usertrust` in the
+ * working directory) share one cache when they name the same vault.
+ */
 function resolveVaultKey(vaultPath?: string): string {
-	return vaultPath ?? VAULT_DIR;
+	return resolve(vaultPath ?? VAULT_DIR);
 }
 
 function getCache(vaultPath?: string): CacheEntry {
@@ -115,11 +120,14 @@ async function ensureLoaded(vaultPath?: string): Promise<PatternEntry[]> {
 async function persist(entries: PatternEntry[], vaultPath?: string): Promise<void> {
 	const filePath = memoryFilePath(vaultPath);
 	const dir = dirname(filePath);
-	await mkdir(dir, { recursive: true });
+	await mkdir(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
 
 	// Atomic write via rename
 	const tmpPath = `${filePath}.tmp.${Date.now()}`;
-	await writeFile(tmpPath, JSON.stringify(entries, null, "\t"), "utf-8");
+	await writeFile(tmpPath, JSON.stringify(entries, null, "\t"), {
+		encoding: "utf-8",
+		mode: PRIVATE_FILE_MODE,
+	});
 	await rename(tmpPath, filePath);
 }
 

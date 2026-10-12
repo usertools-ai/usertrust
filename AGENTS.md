@@ -1676,10 +1676,11 @@ In the four executable entry points that begin with `#!/usr/bin/env node`, the s
 1 and the header follows on lines 2-3. Check the first three lines, not the first one, before
 concluding a file is missing its header.
 
-This is convention, not machine-enforced, and it is not yet universal: 113 of the 118 files under
-`packages/*/src` carry it — and all 113 carry both lines, never one alone. The five that carry
-neither are all of `packages/acs-adapter/src/`. That is a gap to close when you next touch those
-files — not a header to strip elsewhere for consistency.
+This is convention, not machine-enforced. Every TypeScript and JavaScript source under
+`packages/*/src` (`.ts .tsx .mts .js .mjs`) opens with both lines, never one alone; the last gap,
+`packages/acs-adapter/src/`, was closed when those files were next touched. Other assets there
+(HTML, CSS) take no `//` header: it is not a comment in CSS, and it would sit before an HTML
+doctype. Keep it that way: a new source file opens with the header.
 
 ### Comment style
 

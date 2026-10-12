@@ -27,16 +27,9 @@
  */
 
 import { createHash } from "node:crypto";
-import {
-	closeSync,
-	fsyncSync,
-	mkdirSync,
-	openSync,
-	readdirSync,
-	readFileSync,
-	writeSync,
-} from "node:fs";
+import { closeSync, fsyncSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
+import { mkdirPrivate } from "../shared/private-fs.js";
 // Cyclic by design: anchor.ts builds these sinks from SinkConfig, and the Rekor
 // sink needs the vault's identity + anchors directory. Both bindings are
 // function declarations used only at publish time, so the cycle never observes
@@ -415,7 +408,7 @@ function writeReceipt(rootDir: string, receipt: RekorReceipt): void {
 		throw new Error(`rekor sink: assembled an unparseable receipt (${check.error})`);
 	}
 	const dir = join(anchorsDir(rootDir), "rekor");
-	mkdirSync(dir, { recursive: true });
+	mkdirPrivate(dir);
 	const fd = openSync(rekorReceiptPath(rootDir, receipt.anchorSeq, receipt.log.url), "w", 0o600);
 	try {
 		writeSync(fd, serialized);

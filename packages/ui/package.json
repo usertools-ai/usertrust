@@ -32,7 +32,9 @@
 		"prepublishOnly": "tsc && vite build"
 	},
 	"files": [
-		"dist"
+		"dist",
+		"LICENSE",
+		"NOTICE"
 	],
 	"dependencies": {
 		"usertrust": "*",

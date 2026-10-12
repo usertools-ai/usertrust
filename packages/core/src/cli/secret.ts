@@ -7,13 +7,15 @@
  * Manages credentials in the encrypted vault store.
  */
 
+import { join } from "node:path";
 import pc from "picocolors";
 import { type AuditWriter, createAuditWriter } from "../audit/chain.js";
 import { loadConfig } from "../config.js";
+import { VAULT_DIR } from "../shared/constants.js";
 import type { ActionKind } from "../shared/types.js";
 import { createVaultStore, type VaultStore } from "../vault/store.js";
 import { parseFlags } from "./flags.js";
-import { scrubForTerminal, toSafeJson } from "./target.js";
+import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
 
 const SUBCOMMANDS = ["add", "rm", "ls", "get", "rotate"] as const;
 type Sub = (typeof SUBCOMMANDS)[number];
@@ -48,6 +50,7 @@ Subcommands:
 	}
 
 	const cwd = process.cwd();
+	warnIfVaultLoose(join(cwd, VAULT_DIR));
 	const config = await loadConfig(undefined, cwd);
 	const audit = createAuditWriter(cwd);
 	const vault = await createVaultStore({ vaultBase: cwd, config, audit });
