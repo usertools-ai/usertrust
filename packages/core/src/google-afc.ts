@@ -21,6 +21,8 @@
  * `maximumRemoteCalls` rounds of tool execution at most, then the last model response is returned as it is.
  */
 
+import { redactPII } from "./policy/pii.js";
+
 type Loose = Record<string, unknown>;
 
 const DEFAULT_MAX_REMOTE_CALLS = 10;
@@ -58,11 +60,12 @@ function isCallableTool(tool: unknown): tool is CallableTool {
  * `tool()` that throws goes through the governed lifecycle (hold voided, failure audited), and the SDK itself starts all the
  * tools' `tool()` calls together, as it does natively.
  *
- * REDACTION. In `pii: "redact"` mode the governed call forwards a deep CLONE of the request, and the SDK asks the tool on
- * that clone, so a `tool()` that reads its own state (`return this.declaration`) answers from the REDACTED copy. The method
- * here is a regular function that forwards its `this` for that reason: the real tool is the receiver only when the wrapper
- * itself is. The memo lives in the closure, so the clone and the original share it and every later round reuses the redacted
- * answer. (A `tool()` that answers from a closure variable is outside what request redaction can reach, natively too.)
+ * REDACTION. In `pii: "redact"` mode the governed call forwards a deep CLONE of the request, and the SDK asks the tool on that
+ * clone. `tool()` always runs on the REAL tool, so the state it sets up (a ready flag, a dispatch table, an MCP session)
+ * lives where `callTool` finds it; when the SDK asked through the clone, the ANSWER is redacted, so the declaration the model
+ * sees has passed the same redaction as the rest of the request, whether the tool held it as state or in a closure. When it
+ * asked through the wrapper itself (nothing was cloned) the answer is given as it is, as natively. The memo lives in the
+ * closure, so every later round reuses that one answer.
  *
  * The wrapper is a fresh object, never a Proxy: a frozen tool (`Object.freeze({ tool, callTool })`) cannot be proxied with
  * replacement functions without breaking the Proxy invariant. It keeps the tool's prototype, so `instanceof` checks such as
@@ -87,11 +90,18 @@ function snapshotTool(tool: CallableTool): CallableTool {
 					};
 		Object.defineProperty(wrapper, key, copy);
 	}
-	const realTool = tool.tool;
 	Object.defineProperty(wrapper, "tool", {
 		value: function (this: unknown): Promise<unknown> {
 			// Called synchronously on first use, like the SDK's own `await callableTool.tool()` inside its map.
-			memo ??= (async () => realTool.call(this === wrapper ? tool : this))();
+			memo ??= (async () => {
+				// ALWAYS on the real tool: the state `tool()` sets up (a ready flag, a dispatch table, a session) must live
+				// where `callTool` finds it, which is also the real tool. The accessor is read here, at use, never at wrap time.
+				const declaration = await (Reflect.get(tool, "tool") as () => Promise<unknown>).call(tool);
+				// Asked through the redacted request CLONE (pii "redact" with PII in the prompt): redact the answer itself, so
+				// the declaration the model sees has passed the same redaction as the rest of the request, whether it was held
+				// as state or in a closure. Asked through the wrapper (nothing was cloned): the answer as it is, as natively.
+				return this === wrapper ? declaration : redactPII(declaration).data;
+			})();
 			return memo;
 		},
 		writable: true,
@@ -224,7 +234,10 @@ export async function runGovernedAfc(
 	params: Loose,
 	round: AfcRound,
 ): Promise<AfcRoundResult & { receipts: unknown[] }> {
-	const config = params["config"] as Loose;
+	// The request is read ONCE, as the SDK reads it, not re-read from the caller's object every round (a getter on the params or
+	// the config could answer differently on each read).
+	const baseParams: Loose = { ...params };
+	const config: Loose = { ...(params["config"] as Loose) };
 	const afc = isObject(config["automaticFunctionCalling"])
 		? config["automaticFunctionCalling"]
 		: {};
@@ -241,7 +254,7 @@ export async function runGovernedAfc(
 
 	// The first round is sent the caller's `contents` exactly as given (the SDK normalises only once it appends a turn);
 	// the history starts from the normalised form.
-	let contents: unknown = params["contents"];
+	let contents: unknown = baseParams["contents"];
 	const history: Loose[] = [...toContents(contents)];
 	const receipts: unknown[] = [];
 	let last: AfcRoundResult | undefined;
@@ -250,7 +263,7 @@ export async function runGovernedAfc(
 	while (remoteCalls < max) {
 		// The SDK's own loop is off for this round; everything else about the call is the caller's.
 		const roundParams: Loose = {
-			...params,
+			...baseParams,
 			contents,
 			config: { ...config, tools: roundTools, automaticFunctionCalling: { ...afc, disable: true } },
 		};
