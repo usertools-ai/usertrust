@@ -22,13 +22,14 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import pc from "picocolors";
 import { readLedgerEvents } from "../audit/read.js";
 import { verifyVault } from "../audit/verify.js";
@@ -334,12 +335,15 @@ export function snapshotVault(
 	busy: string[];
 	/** The vault config exists but could not be read: the budget is UNKNOWN, not absent. */
 	configUnreadable: boolean;
+	/** The governor's persisted counter, as recorded (NOT chain-verified), when the vault has one. */
+	spendLedger?: { value: number } | { unreadable: true };
 	cleanup: () => void;
 } {
 	const dir = mkdtempSync(join(tmpdir(), "usertrust-report-"));
 	const problems: string[] = [];
 	const busy: string[] = [];
 	let configUnreadable = false;
+	let spendLedger: { value: number } | { unreadable: true } | undefined;
 	const problem = (what: string, err: unknown): void => {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		problems.push(`Could not read ${what}${code !== undefined ? ` (${code})` : ""}`);
@@ -398,6 +402,21 @@ export function snapshotVault(
 				problem("usertrust.config.json", err);
 			}
 		}
+		// The governor's persisted counter, read ONCE here. It is a plain file the chain does not verify, so an unreadable
+		// one is reported beside the figures and is never a verifier problem.
+		const ledgerSrc = join(vaultPath, "spend-ledger.json");
+		if (existsSync(ledgerSrc)) {
+			try {
+				const parsed = JSON.parse(readFileSync(ledgerSrc, "utf-8")) as { budgetSpent?: unknown };
+				const v = parsed?.budgetSpent;
+				spendLedger =
+					typeof v === "number" && Number.isFinite(v) && v >= 0
+						? { value: v }
+						: { unreadable: true };
+			} catch {
+				spendLedger = { unreadable: true };
+			}
+		}
 	} catch (err) {
 		rmSync(dir, { recursive: true, force: true });
 		throw err;
@@ -407,6 +426,7 @@ export function snapshotVault(
 		problems,
 		busy,
 		configUnreadable,
+		...(spendLedger !== undefined ? { spendLedger } : {}),
 		cleanup: () => rmSync(dir, { recursive: true, force: true }),
 	};
 }
@@ -426,6 +446,35 @@ function readTenantBudget(path: string): number {
 		throw new Error(`--tenant-config ${scrubForTerminal(path)} has no positive integer "budget"`);
 	}
 	return b;
+}
+
+/**
+ * Refuses an `--out` that RESOLVES (through symlinks) inside the vault: the report must never be written into the
+ * integrity substrate it reads, whatever path spelling reaches it. The file's own real path when it exists, else the real
+ * path of its directory plus its name.
+ */
+function assertOutsideVault(target: string, vaultPath: string): void {
+	let vaultReal: string;
+	try {
+		vaultReal = realpathSync(vaultPath);
+	} catch {
+		return; // no vault to protect (the caller has already required one)
+	}
+	let real: string;
+	try {
+		real = realpathSync(target);
+	} catch {
+		try {
+			real = join(realpathSync(dirname(target)), basename(target));
+		} catch {
+			real = target;
+		}
+	}
+	if (real === vaultReal || real.startsWith(`${vaultReal}${sep}`)) {
+		throw new UsageError(
+			`--out resolves inside the vault (${scrubForTerminal(real)}): the report is never written into the audit data it reads`,
+		);
+	}
 }
 
 /**
@@ -526,6 +575,7 @@ export async function run(
 							? budget
 							: readVaultBudget(snapshot.dir),
 					budgetSource,
+					...(snapshot.spendLedger !== undefined ? { spendLedger: snapshot.spendLedger } : {}),
 					// An unreadable config is an UNKNOWN budget, never "no budget configured".
 					budgetUnreadable:
 						snapshot.configUnreadable &&
@@ -539,6 +589,7 @@ export async function run(
 		const text = render(model, parsed.format);
 		if (parsed.out !== undefined) {
 			const target = resolve(root, parsed.out);
+			assertOutsideVault(target, vaultPath);
 			writeReportFile(target, text);
 			if (!json) console.log(`Wrote ${parsed.format} report to ${scrubForTerminal(target)}`);
 			else

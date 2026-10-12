@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -102,7 +103,8 @@ describe("weekly report model", () => {
 		expect(m.totals.unconfirmedCalls).toBe(1);
 		expect(m.totals.contradictedCalls).toBe(1);
 		expect(m.notes.join(" ")).toMatch(/unconfirmed/);
-		expect(m.budget.recordedSessionUt).toBe(100); // the budget figure uses the same exclusion
+		// the governors COUNTED the ambiguous call (their counter adds before/at the POST attempt): the budget mirrors it
+		expect(m.budget.recordedSessionUt).toBe(100 + 700);
 	});
 
 	it("a chain that did not verify marks the model UNVERIFIED and says so first in the notes", () => {
@@ -157,7 +159,7 @@ describe("weekly report model", () => {
 		expect(m.totals.confirmedUt).toBe(100);
 		expect(m.totals.unconfirmedUt).toBe(40);
 		expect(m.totals.unsettledCalls).toBe(1);
-		expect(m.budget.recordedSessionUt).toBe(100);
+		expect(m.budget.recordedSessionUt).toBe(100 + 40); // the governor's counter added it
 	});
 
 	it("malformed ROWS are skipped and counted, never a crash", () => {
@@ -346,7 +348,8 @@ describe("weekly report model", () => {
 		expect(m.totals.confirmedUt).toBe(100);
 		expect(m.totals.unconfirmedCalls).toBe(1);
 		expect(m.totals.unconfirmedUt).toBe(700);
-		expect(m.budget.recordedSessionUt).toBe(100);
+		// the call was POSTED (a post-commit failure marker follows), so the counter had added it: counted once per transfer
+		expect(m.budget.recordedSessionUt).toBe(100 + 700);
 		expect(m.totals.actionUt).toBe(0);
 		expect(m.totals.unconfirmedActionCalls).toBe(1);
 		expect(m.totals.unconfirmedActionUt).toBe(40);
@@ -542,6 +545,7 @@ describe("weekly report model", () => {
 		]);
 		expect(m.unrecoverable).toEqual({
 			records: 1,
+			priorChargeKnown: 0,
 			inputTokens: 40,
 			outputTokens: 7,
 			cacheReadTokens: 900,
@@ -604,6 +608,51 @@ describe("weekly report model", () => {
 		expect(m.unrecognised).toEqual({});
 	});
 
+	it("an unrecoverable record whose transfer is ALSO charged in the chain is counted as prior-charge-known", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 100, { transferId: "t-charged" }),
+			ev("settlement_unrecoverable", "2026-10-08T02:00:00Z", {
+				transferIdHash: createHash("sha256").update("t-charged").digest("hex"),
+				usage: { inputTokens: 1, outputTokens: 1 },
+			}),
+			ev("settlement_unrecoverable", "2026-10-08T03:00:00Z", {
+				transferIdHash: createHash("sha256").update("t-never-seen").digest("hex"),
+				usage: { inputTokens: 1, outputTokens: 1 },
+			}),
+		]);
+		expect(m.unrecoverable.records).toBe(2);
+		expect(m.unrecoverable.priorChargeKnown).toBe(1);
+	});
+
+	it("records without their call are capped at 50 kinds plus '(more kinds)'", () => {
+		const events: PersistedAuditEvent[] = [];
+		for (let i = 0; i < 80; i++) {
+			events.push(
+				ev(`kind_${i}_failed`, "2026-10-08T01:00:00Z", { transferId: `t-${i}`, cost: 1 }),
+			);
+		}
+		const m = build(events);
+		expect(Object.keys(m.withoutCall)).toHaveLength(51);
+		expect(m.withoutCall["(more kinds)"]?.records).toBe(30);
+	});
+
+	it("the spend-ledger leg: equal to the chain is silent; a difference is flagged, either direction", () => {
+		const base = [call("2026-10-08T01:00:00Z", 100)];
+		const eq = build(base, { spendLedger: { value: 100 } });
+		expect(eq.spendLedger).toMatchObject({ recorded: 100, differs: false, difference: null });
+		const low = build(base, { spendLedger: { value: 60 } });
+		expect(low.spendLedger).toMatchObject({ differs: true, difference: -40 });
+		const high = build(base, { spendLedger: { value: 150 } });
+		expect(high.spendLedger).toMatchObject({ differs: true, difference: 50 });
+		// attributed spend widens the band: the payer is not recorded
+		const att = build([...base, call("2026-10-08T02:00:00Z", 50, { costCenter: "a" })], {
+			spendLedger: { value: 150 },
+		});
+		expect(att.spendLedger.differs).toBe(false);
+		expect(build(base, { spendLedger: { unreadable: true } }).spendLedger.unreadable).toBe(true);
+		expect(build(base).spendLedger).toMatchObject({ recorded: null, differs: false });
+	});
+
 	it("an unknown future record kind beside a call unconfirms it by default; shortfall and implausible do not", () => {
 		const m = build([
 			call("2026-10-08T01:00:00Z", 100, { transferId: "t-s" }),
@@ -646,7 +695,7 @@ describe("weekly report model", () => {
 		);
 	});
 
-	it("an ambiguous or settled:false governed action does not debit the budget", () => {
+	it("an ambiguous or settled:false governed action IS counted in the budget (the governor's counter added it) but not in confirmed spend", () => {
 		const events = [
 			ev("tool_call", "2026-10-08T02:00:00Z", { actionName: "x", cost: 50, transferId: "amb" }),
 			ev("settlement_ambiguous", "2026-10-08T02:00:01Z", { transferId: "amb" }),
@@ -658,7 +707,7 @@ describe("weekly report model", () => {
 			}),
 		];
 		const m = build(events, { budget: 1000 });
-		expect(m.budget.recordedSessionUt).toBe(0);
+		expect(m.budget.recordedSessionUt).toBe(50 + 70);
 		expect(m.totals.actionUt).toBe(0);
 	});
 

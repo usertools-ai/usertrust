@@ -32,6 +32,7 @@
  *     spend RECORDED in the chain, and says so.
  */
 
+import { createHash } from "node:crypto";
 import type { PersistedAuditEvent } from "../audit/read.js";
 import { providerOfModel } from "../ledger/pricing.js";
 
@@ -105,6 +106,12 @@ export interface ReportOptions {
 	budgetSource?: string;
 	/** The vault config exists but could not be read: the budget is unknown, which is not the same as none. */
 	budgetUnreadable?: boolean;
+	/**
+	 * The governor's persisted counter (`spend-ledger.json`), read from the same snapshot: `{ value }` when it parsed as a
+	 * number, `{ unreadable: true }` when the file exists and could not be read. Absent when there is no ledger file. It is
+	 * NOT chain-verified and is reported only as "as recorded by the governor", beside the figure the chain gives.
+	 */
+	spendLedger?: { value: number } | { unreadable: true };
 }
 
 export interface IntegrityInfo {
@@ -271,11 +278,30 @@ export interface ReportModel {
 	};
 	governance: Record<string, number>;
 	/**
+	 * The governor's persisted counter against the chain: a third reconciliation leg that catches drift either way. NOT
+	 * chain-verified (the spend ledger is a plain file), so it is never part of the VERIFIED claim. `differs` is true when
+	 * the recorded figure falls outside what the chain accounts for: below the session-wallet debits, or above them plus
+	 * everything attributed to a cost center (whose payer the chain does not record). `null` when there is no ledger file.
+	 */
+	spendLedger: {
+		recorded: number | null;
+		unreadable: boolean;
+		differs: boolean;
+		/** recorded minus the chain's session-wallet total, when it differs (negative: the governor counted less). */
+		difference: number | null;
+	};
+	/**
 	 * `settlement_unrecoverable`: the provider SERVED the call but its hold was gone and the ledger never charged it. The
 	 * record has usage and NO cost, so it is disclosed here (a count and the reported usage) and is in NO spend total.
 	 */
 	unrecoverable: {
 		records: number;
+		/**
+		 * Of those, the records whose transfer ALSO has a spend record in this chain: the server writes this record when a
+		 * settle is retried after a restart or an eviction from its settled-memory, so "never charged" would be false for
+		 * them. The rest have no known prior charge (unknown, not "never charged").
+		 */
+		priorChargeKnown: number;
 		inputTokens: number;
 		outputTokens: number;
 		cacheReadTokens: number;
@@ -322,8 +348,9 @@ const KNOWN_KINDS: ReadonlySet<string> = new Set([
 /** A record that only qualifies a call, never being spend itself. */
 function isQualifierKind(kind: string): boolean {
 	return (
+		// A standalone settlement_ambiguous is NOT listed here: it is already in the unconfirmed totals, and counting it in
+		// two places would double-disclose it.
 		kind === "settlement_shortfall" ||
-		kind === "settlement_ambiguous" ||
 		kind === "usage_implausible" ||
 		kind === "llm_call_failed" ||
 		kind.endsWith("_failed")
@@ -450,19 +477,27 @@ function denominationOf(e: PersistedAuditEvent): "usd" | "nominal" | "unlabelled
 }
 
 /**
- * What a row debited, and from which wallet: a finite non-negative `cost` on an `llm_call` or a governed action,
- * unless the settle is ambiguous or explicitly `settled: false`. A row carrying a cost center debits that envelope, not
- * the session wallet the configured budget belongs to. `undefined` for a row that debited nothing readable.
+ * What a record made the governors COUNT against the session wallet, mirroring their counter. Both governors add a call's
+ * metered cost to `budgetSpent` once they have decided to post it, whatever follows:
+ *   - `trust()` (govern.ts): the stream settle adds `streamCost` BEFORE its POST (so an ambiguous POST is counted), the
+ *     non-stream settle adds `actualCost` after the `llm_call` append and before its POST, and a post-commit failClosed
+ *     throw happens after the add; a failed `llm_call` append under failClosed throws BEFORE the add, and a void (a
+ *     provider failure, an anomaly cutoff) never reaches it;
+ *   - the headless governor (headless.ts): `settle()` adds `actualCost` after the POST ATTEMPT, success or ambiguous; an
+ *     abort or a release never adds.
+ * So the counted set is every call or governed-action record regardless of its standing (ambiguous, `settled: false`,
+ * or a failure marker beside it still count), once per transfer, plus a standalone shortfall's `actual` (below). It is
+ * NOT filtered by `standing`: that answers "is the charge proven", this answers "what did the counter add".
+ * A record carrying a cost center debits that envelope, not the session wallet the configured budget belongs to.
  */
-function walletDebit(
+function counterDebit(
 	e: PersistedAuditEvent,
-	standing: (e: PersistedAuditEvent) => Standing,
 ): { ut: number; attributed: boolean; nominal: boolean } | undefined {
 	const isCall = e.kind === "llm_call" && !isActionEvent(e);
 	const isAction = isActionEvent(e);
 	if (!isCall && !isAction) return undefined;
 	const c = cost(e.data["cost"]);
-	if (c === undefined || standing(e).kind !== "confirmed") return undefined;
+	if (c === undefined) return undefined;
 	return {
 		ut: c,
 		attributed: str(e.data["costCenter"]) !== undefined,
@@ -647,12 +682,23 @@ function buildPlain(
 	);
 	const unrecoverable = {
 		records: 0,
+		priorChargeKnown: 0,
 		inputTokens: 0,
 		outputTokens: 0,
 		cacheReadTokens: 0,
 		cacheWriteTokens: 0,
 	};
 	const unrecognised = new Map<string, number>();
+	const countedTransfers = new Set<string>();
+	// SHA-256 of every spend transfer's id, computed once and only when an unrecoverable record asks (the record stores
+	// the hash of the id, never the id).
+	let spendHashes: Set<string> | undefined;
+	const spendTransferHashes = (): Set<string> => {
+		spendHashes ??= new Set(
+			[...spendTransfers].map((t) => createHash("sha256").update(t).digest("hex")),
+		);
+		return spendHashes;
+	};
 	const orphaned = new Map<string, { records: number; amount: number }>();
 	const orphanedCharge = { records: 0, posted: 0 };
 	let shortfallEvents = 0;
@@ -674,7 +720,29 @@ function buildPlain(
 
 		// BUDGET: every debit of a wallet, `llm_call` and governed action alike, over the WHOLE chain. A call attributed to
 		// a cost-center envelope debits that envelope, not the session wallet the configured budget belongs to.
-		const wallet = walletDebit(e, standing);
+		// Once per transfer: the first record is the settle the counter added.
+		const tidKey = tid;
+		let wallet = counterDebit(e);
+		if (wallet !== undefined && tidKey !== undefined) {
+			if (countedTransfers.has(tidKey)) wallet = undefined;
+			else countedTransfers.add(tidKey);
+		}
+		// A standalone shortfall (a capped POST whose call record never landed) is the only trace of a charge the
+		// counter ALSO added: its `actual` is what the governor counted.
+		if (
+			wallet === undefined &&
+			e.kind === "settlement_shortfall" &&
+			(tid === undefined || !spendTransfers.has(tid))
+		) {
+			const actual = cost(e.data["actual"]);
+			if (actual !== undefined) {
+				wallet = {
+					ut: actual,
+					attributed: str(e.data["costCenter"]) !== undefined,
+					nominal: denominationOf(e) === "nominal",
+				};
+			}
+		}
 		if (wallet !== undefined && wallet.nominal) {
 			if (wallet.attributed) recordedAttributedNominal += wallet.ut;
 			else recordedSessionNominal += wallet.ut;
@@ -839,12 +907,14 @@ function buildPlain(
 		// is shown without assuming a denomination and is in no spend total. A standalone shortfall's `posted` is the
 		// only evidence of a ledger charge whose call record never landed.
 		if (isQualifierKind(e.kind) && (tid === undefined || !spendTransfers.has(tid))) {
-			const row = orphaned.get(e.kind) ?? { records: 0, amount: 0 };
+			// Bounded like `unrecognised`: hostile kinds cannot grow the table without limit.
+			const orphanKey = orphaned.size >= 50 && !orphaned.has(e.kind) ? "(more kinds)" : e.kind;
+			const row = orphaned.get(orphanKey) ?? { records: 0, amount: 0 };
 			row.records += 1;
 			const shown =
 				e.kind === "settlement_shortfall" ? cost(e.data["posted"]) : cost(e.data["cost"]);
 			if (shown !== undefined) row.amount += shown;
-			orphaned.set(e.kind, row);
+			orphaned.set(orphanKey, row);
 			if (e.kind === "settlement_shortfall") {
 				orphanedCharge.records += 1;
 				orphanedCharge.posted += cost(e.data["posted"]) ?? 0;
@@ -893,6 +963,9 @@ function buildPlain(
 		} else if (e.kind === "settlement_unrecoverable") {
 			// Served, never charged: usage and no cost. Disclosed, in no spend or budget figure.
 			unrecoverable.records += 1;
+			const idHash = str(e.data["transferIdHash"]);
+			if (idHash !== undefined && spendTransferHashes().has(idHash))
+				unrecoverable.priorChargeKnown += 1;
 			const u = e.data["usage"];
 			const uu = u !== null && typeof u === "object" ? (u as Record<string, unknown>) : {};
 			unrecoverable.inputTokens += count(uu["inputTokens"]);
@@ -912,6 +985,23 @@ function buildPlain(
 	tiers.roundingUt = tierSum - tiers.costUt;
 
 	const configured = typeof opts.budget === "number" && opts.budget > 0 ? opts.budget : null;
+	const sessionWallet = recordedSessionUt + recordedSessionNominal;
+	const upperWallet = sessionWallet + recordedAttributedUt + recordedAttributedNominal;
+	const ledger = opts.spendLedger;
+	const spendLedgerLeg =
+		ledger === undefined
+			? { recorded: null, unreadable: false, differs: false, difference: null }
+			: "unreadable" in ledger
+				? { recorded: null, unreadable: true, differs: true, difference: null }
+				: {
+						recorded: ledger.value,
+						unreadable: false,
+						differs: ledger.value < sessionWallet || ledger.value > upperWallet,
+						difference:
+							ledger.value < sessionWallet || ledger.value > upperWallet
+								? ledger.value - sessionWallet
+								: null,
+					};
 	const notes: string[] = [];
 	if (!integrity.verified) {
 		notes.push(
@@ -1053,6 +1143,7 @@ function buildPlain(
 		},
 		governance,
 		unrecoverable,
+		spendLedger: spendLedgerLeg,
 		withoutCall: Object.fromEntries([...orphaned.entries()].sort(([a], [b]) => a.localeCompare(b))),
 		chargedUnrecorded: orphanedCharge,
 		unrecognised: Object.fromEntries(

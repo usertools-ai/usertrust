@@ -24,6 +24,14 @@ import {
 export type ReportFormat = "md" | "html" | "json";
 
 /** Dollars. Takes ONLY a dollar-denominated amount: a nominal-unit figure here is a compile error, not a review finding. */
+/**
+ * Appends every item WITHOUT spreading them into a call: `out.push(...items)` throws RangeError past ~120,000 arguments,
+ * and a report with that many distinct agents or models must still render.
+ */
+function pushAll<T>(out: T[], items: readonly T[]): void {
+	for (const item of items) out.push(item);
+}
+
 function usd(ut: UsdUt): string {
 	return `$${(ut * UT_TO_USD).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -118,6 +126,19 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 	if (b.recordedAttributedWallet > 0) {
 		lines.push(
 			`Spend carrying a cost center is ATTRIBUTED and its payer is not recorded (the cost-center envelope with a ledger, the session in a dry run): ${walletStr(b.recordedAttributedWallet)} = ${split(b.recordedAttributedUt, b.recordedAttributedNominal)} recorded, ${walletStr(b.windowAttributedWallet)} this week. If the session paid for all of it, the budget is ${pct(b.usedFractionUpper ?? 0)} used${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}.`,
+		);
+	}
+	lines.push(
+		"Session-wallet debits count what the governor's own counter adds: every recorded call or action, including ones whose charge is unconfirmed, plus a capped settlement whose call record is missing.",
+	);
+	const led = m.spendLedger;
+	if (led.unreadable) {
+		lines.push(
+			"The governor's spend ledger (spend-ledger.json) exists but could not be read, so it could not be compared with the chain. It is a plain file the chain does not verify.",
+		);
+	} else if (led.differs && led.recorded !== null) {
+		lines.push(
+			`DIFFERENCE: the governor's spend ledger (as recorded by the governor; not chain-verified) says ${tokens(led.recorded)} units, while the chain accounts for ${walletStr(b.recordedSessionWallet)} of session-wallet debits${b.recordedAttributedWallet > 0 ? ` (up to ${walletStr((b.recordedSessionWallet + b.recordedAttributedWallet) as WalletUt)} if the session also paid for the cost-center spend)` : ""}: ${led.difference === null ? "unknown" : `${led.difference > 0 ? "+" : ""}${tokens(led.difference)}`} units. Either leg may be wrong.`,
 		);
 	}
 	lines.push("This is the configured budget against recorded spend, not the live ledger balance.");
@@ -222,14 +243,14 @@ export function renderMarkdown(m: ReportModel): string {
 	out.push("## Budget status", "");
 	out.push(...budgetLines(m, md).map((l) => `${l}\n`), "");
 
-	out.push(...rowsTable("Spend by agent", m.byAgent, "Agent"));
+	pushAll(out, rowsTable("Spend by agent", m.byAgent, "Agent"));
 	out.push(
 		`_Agent key: ${m.agentKey.requested}${m.agentKey.segment !== null ? `, cost-center segment ${m.agentKey.segment}` : ""}. Calls with no attribution are one "(unattributed)" row._`,
 		"",
 	);
 	if (m.bySession.length > 0)
-		out.push(...rowsTable("Spend by session / origin", m.bySession, "Origin"));
-	out.push(...modelsTable(m.byModel));
+		pushAll(out, rowsTable("Spend by session / origin", m.bySession, "Origin"));
+	pushAll(out, modelsTable(m.byModel));
 
 	out.push("### Cost drivers: tokens by tier", "");
 	const k = m.tiers;
@@ -277,9 +298,9 @@ export function renderMarkdown(m: ReportModel): string {
 	const r = m.unrecoverable;
 	if (r.records > 0) {
 		out.push(
-			"### Served but never charged",
+			"### Settles reported after their hold was gone",
 			"",
-			`${r.records} call(s) were served by the provider after their hold was lost, so the ledger never charged them. Reported usage: ${tokens(r.inputTokens)} input, ${tokens(r.outputTokens)} output, ${tokens(r.cacheReadTokens)} cache-read and ${tokens(r.cacheWriteTokens)} cache-write tokens. There is no dollar value: they are in no spend or budget figure.`,
+			`${r.records} settle(s) were reported after their hold was gone: the prior charge status is unknown (the call may never have been charged, or may have been charged before a restart). Reported usage: ${tokens(r.inputTokens)} input, ${tokens(r.outputTokens)} output, ${tokens(r.cacheReadTokens)} cache-read and ${tokens(r.cacheWriteTokens)} cache-write tokens. There is no dollar value: they are in no spend or budget figure.${r.priorChargeKnown > 0 ? ` ${r.priorChargeKnown} of them match a transfer that is already charged in this chain.` : ""}`,
 			"",
 		);
 	}
@@ -288,7 +309,7 @@ export function renderMarkdown(m: ReportModel): string {
 		out.push(
 			"### Records without their call",
 			"",
-			"These records qualify a call (a shortfall, an ambiguity, a failure marker) but the chain holds no record of the call itself. Their amounts are usertokens with no denomination assumed, and they are in no spend or budget figure.",
+			"These records qualify a call (a shortfall, an implausible-usage note, a failure marker) but the chain holds no record of the call itself. Their amounts are usertokens with no denomination assumed, and they are in no spend figure. A standalone ambiguity is counted in the unconfirmed totals instead.",
 			"",
 			"| Kind | Records | Amount (usertokens) |",
 			"|---|---:|---:|",
@@ -435,7 +456,7 @@ export function renderHtml(m: ReportModel): string {
 			.join("")}</tbody></table>`,
 		...(m.unrecoverable.records > 0
 			? [
-					`<h3>Served but never charged</h3><p>${m.unrecoverable.records} call(s) were served by the provider after their hold was lost, so the ledger never charged them. Reported usage: ${tokens(m.unrecoverable.inputTokens)} input, ${tokens(m.unrecoverable.outputTokens)} output, ${tokens(m.unrecoverable.cacheReadTokens)} cache-read and ${tokens(m.unrecoverable.cacheWriteTokens)} cache-write tokens. There is no dollar value: they are in no spend or budget figure.</p>`,
+					`<h3>Settles reported after their hold was gone</h3><p>${m.unrecoverable.records} settle(s) were reported after their hold was gone: the prior charge status is unknown (the call may never have been charged, or may have been charged before a restart). Reported usage: ${tokens(m.unrecoverable.inputTokens)} input, ${tokens(m.unrecoverable.outputTokens)} output, ${tokens(m.unrecoverable.cacheReadTokens)} cache-read and ${tokens(m.unrecoverable.cacheWriteTokens)} cache-write tokens. There is no dollar value: they are in no spend or budget figure.${m.unrecoverable.priorChargeKnown > 0 ? ` ${m.unrecoverable.priorChargeKnown} of them match a transfer that is already charged in this chain.` : ""}</p>`,
 				]
 			: []),
 		...(Object.keys(m.withoutCall).length > 0

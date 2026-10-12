@@ -3,12 +3,14 @@
 
 import {
 	chmodSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	rmSync,
 	statSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -531,6 +533,58 @@ describe("usertrust report --week", () => {
 		process.exitCode = undefined;
 		await run(dir, {}, reportArgv(["--json", "report", "--week", "--end", endIso(), "--json"]));
 		expect(process.exitCode).toBe(2);
+		write.mockRestore();
+	});
+
+	it("--out that RESOLVES inside the vault is refused (exit 2), directly or through a symlink; nothing is written", async () => {
+		await vault([{ cost: 1 }]);
+		const vaultDir = join(dir, ".usertrust");
+		const log = join(vaultDir, "audit", "events.jsonl");
+		const before = readFileSync(log, "utf-8");
+		writeFileSync(join(vaultDir, "usertrust.config.json"), JSON.stringify({ budget: 1000 }));
+		const configBefore = readFileSync(join(vaultDir, "usertrust.config.json"), "utf-8");
+		symlinkSync(log, join(dir, "link-into-vault.md"));
+		symlinkSync(join(vaultDir, "audit"), join(dir, "dirlink"));
+		for (const out of [
+			log,
+			join(vaultDir, "usertrust.config.json"),
+			join(dir, "link-into-vault.md"),
+			join(dir, "dirlink", "report.md"),
+			join(vaultDir, "new-file.md"),
+		]) {
+			process.exitCode = undefined;
+			await run(dir, {}, ["--week", "--end", endIso(), "--out", out]);
+			expect(process.exitCode, out).toBe(2);
+		}
+		expect(readFileSync(log, "utf-8")).toBe(before);
+		expect(readFileSync(join(vaultDir, "usertrust.config.json"), "utf-8")).toBe(configBefore);
+		expect(existsSync(join(vaultDir, "new-file.md"))).toBe(false);
+		expect(existsSync(join(vaultDir, "audit", "report.md"))).toBe(false);
+		// CONTROL: a path beside the vault is fine
+		process.exitCode = undefined;
+		await run(dir, {}, ["--week", "--end", endIso(), "--out", join(dir, "ok.md")]);
+		expect(process.exitCode).toBeUndefined();
+		write.mockRestore();
+	});
+
+	it("the governor's spend ledger is read from the same snapshot: equal is silent, a difference is flagged", async () => {
+		await vault([{ cost: 100 }]);
+		const ledger = join(dir, ".usertrust", "spend-ledger.json");
+		writeFileSync(ledger, JSON.stringify({ budgetSpent: 100 }));
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		expect((JSON.parse(stdout) as { spendLedger: { differs: boolean } }).spendLedger.differs).toBe(
+			false,
+		);
+		writeFileSync(ledger, JSON.stringify({ budgetSpent: 9999 }));
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		const out = JSON.parse(stdout) as {
+			spendLedger: { differs: boolean; recorded: number };
+			integrity: { verified: boolean };
+		};
+		expect(out.spendLedger).toMatchObject({ differs: true, recorded: 9999 });
+		expect(out.integrity.verified).toBe(true); // the unverified file never touches the VERIFIED claim
 		write.mockRestore();
 	});
 

@@ -330,7 +330,7 @@ describe("unrecoverable and unrecognised records are disclosed in every format",
 		);
 		for (const f of ["md", "html"] as const) {
 			const out = render(m, f);
-			expect(out, f).toMatch(/Served but never charged/);
+			expect(out, f).toMatch(/Settles reported after their hold was gone/);
 			expect(out, f).toMatch(/40 input/);
 			expect(out, f).toMatch(/Records this report does not read/);
 			expect(out, f).not.toContain("<script>"); // the kind is chain text: neutralised
@@ -370,5 +370,54 @@ describe("records without their call are disclosed in every format", () => {
 		};
 		expect(json.chargedUnrecorded.posted).toBe(60);
 		expect(m.totals.confirmedUt).toBe(0);
+	});
+});
+
+describe("a report with an enormous number of rows still renders", () => {
+	it("130,000 distinct agents render in Markdown without a RangeError (rows are appended, not spread into a call)", () => {
+		const events: PersistedAuditEvent[] = [];
+		for (let i = 0; i < 130_000; i++) {
+			events.push({
+				id: `i${i}`,
+				kind: "llm_call",
+				timestamp: "2026-10-11T00:00:00Z",
+				actor: "local",
+				hash: `h${i}`,
+				data: { model: "m", cost: 1, settled: true, transferId: `t${i}`, costCenter: `cc${i}` },
+			} as unknown as PersistedAuditEvent);
+		}
+		const m = buildWeeklyReport(
+			events,
+			{ verified: true, errors: [], chainLength: 1, firstEvent: "a", lastEvent: "a" },
+			{ endMs: END },
+		);
+		expect(() => render(m, "md")).not.toThrow();
+	}, 60_000);
+});
+
+describe("the spend-ledger leg is rendered only when it differs", () => {
+	const ok = { verified: true, errors: [], chainLength: 1, firstEvent: "a", lastEvent: "a" };
+	const one = [
+		{
+			id: "i",
+			kind: "llm_call",
+			timestamp: "2026-10-11T00:00:00Z",
+			actor: "local",
+			hash: "h",
+			data: { model: "m", cost: 100, settled: true, transferId: "t" },
+		} as unknown as PersistedAuditEvent,
+	];
+	it("silent when equal; labelled 'as recorded by the governor' and not chain-verified when it differs", () => {
+		const eq = render(
+			buildWeeklyReport(one, ok, { endMs: END, budget: 1000, spendLedger: { value: 100 } }),
+			"md",
+		);
+		expect(eq).not.toMatch(/spend ledger/i);
+		const diff = render(
+			buildWeeklyReport(one, ok, { endMs: END, budget: 1000, spendLedger: { value: 7 } }),
+			"md",
+		);
+		expect(diff).toMatch(/as recorded by the governor/);
+		expect(diff).toMatch(/not chain-verified/);
 	});
 });
