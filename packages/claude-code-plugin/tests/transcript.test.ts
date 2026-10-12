@@ -3953,6 +3953,20 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			await run("post-tool-use.mjs", postInput("tu_1"));
 			await run("stop.mjs", stopInput());
 			expect(settles().find((x) => x.body.transferId === "tx_1")).toBeUndefined();
+			// The decision is taken BEFORE the claim: the hold is still the pending record, never claimed (`.settling`) and
+			// never journalled done, and its messages stay unaccounted. A decision after the claim would journal the deferral as
+			// done and the usage would be lost for good (the hold then expires uncharged).
+			const names = await readdir(stateDir);
+			expect(names).toContain(holdFile("tu_1", "tx_1"));
+			expect(names.filter((n) => n.endsWith(".settling") || n.endsWith(".done"))).toEqual([]);
+			expect((await readCursor()).accounted ?? []).not.toContain("msg_a");
+			// A later successful discovery sends them on the next settle.
+			capabilities = ["refused"];
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as
+				| { refused?: Record<string, number> }
+				| undefined;
+			expect(body?.refused).toMatchObject({ inputTokens: 150_000_000 });
 		});
 
 		it("absent and null tiers are 0 and price normally: nothing is flagged", async () => {

@@ -2076,6 +2076,18 @@ async function oneHourSupport(share) {
 }
 
 /**
+ * Every capability a settle body depends on, decided BEFORE the hold is claimed: the 1-hour share (`oneHourSupport`) and a
+ * refused flag (`refused`). Returns `null` when any is UNKNOWN (the server cannot be asked), so the caller defers with the
+ * hold untouched. A decision taken after the claim journals the deferral as done and the usage is lost for good.
+ */
+async function settleCapabilitiesKnown(counts) {
+	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) return null;
+	if (counts.refused !== undefined && (await refreshUnknownServerCapabilities()) === null)
+		return null;
+	return true;
+}
+
+/**
  * The body of a transcript settle. The 1-hour share goes only to a server that prices it
  * (`cache-write-1h`): an older server strips the unknown key, and those tokens would
  * silently bill at the cheaper 5-minute rate. The write TOTAL is always sent, so the
@@ -2115,10 +2127,12 @@ async function settleAt(transferId, counts, { keyed, labels = {} }) {
 	try {
 		const body = await settleBody(transferId, counts, labels);
 		if (body === null) {
+			// `unsent`: nothing left the process. A claiming caller gives the hold back rather than journal it done.
 			return {
 				outcome: "deferred",
+				unsent: true,
 				reason:
-					"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet; the hold is untouched",
+					"the server's capabilities are unknown, so the settle cannot be sent yet; the hold is untouched",
 			};
 		}
 		settle = await serverRequest("/v1/settle", body, { timeoutMs: callTimeout() });
@@ -2246,11 +2260,11 @@ export async function settleTranscriptHold(sessionId, entry) {
 	// A 1-hour share the server may or may not price: decide BEFORE claiming the hold's file,
 	// so an unknown server leaves the pending record in place for a later settle point instead
 	// of journalling a `.done` for a settle that never went out.
-	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) {
+	if ((await settleCapabilitiesKnown(counts)) === null) {
 		return {
 			outcome: "deferred",
 			reason:
-				"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet; the hold is untouched",
+				"the server's capabilities are unknown, so the settle cannot be sent yet (the 1-hour cache-write share, or a refused figure); the hold is untouched",
 		};
 	}
 	// The hold's own file, as its listing found it: never whatever file the call's
@@ -2272,6 +2286,12 @@ export async function settleTranscriptHold(sessionId, entry) {
 	}
 	const keyed = typeof entry.idempotencyKey === "string";
 	const result = await settleAt(entry.transferId, counts, { keyed, labels: jobHoldFields(entry) });
+	if (result.outcome === "deferred" && result.unsent === true) {
+		// The preflight above passed but the capabilities went unknown before the body was built. A claimed hold must not be
+		// journalled as done for a settle that never went out: hand the file back so a later settle point retries it.
+		await rename(`${base}.settling`, livePath).catch(() => {});
+		return result;
+	}
 	try {
 		// Exclusive: an outcome never lands over another hold's. Only a 1.4.0 per-call
 		// name can already be taken (two holds of one call shared it then). That leaves
@@ -2838,9 +2858,9 @@ async function postGroup({
 	// A 1-hour share the server may or may not price: decide BEFORE placing a hold, so an
 	// unknown server leaves the messages unposted for a later settle point rather than
 	// stranding a hold or billing the share at the 5-minute rate.
-	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) {
+	if ((await settleCapabilitiesKnown(counts)) === null) {
 		return unsettled(
-			"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet",
+			"the server's capabilities are unknown, so the settle cannot be sent yet (the 1-hour cache-write share, or a refused figure)",
 		);
 	}
 	let auth;
