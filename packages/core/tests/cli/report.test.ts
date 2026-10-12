@@ -11,6 +11,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	statSync,
 	symlinkSync,
@@ -380,6 +381,64 @@ describe("usertrust report --week", () => {
 		process.exitCode = undefined;
 		await run(dir, {}, ["--week", "--end", endIso(), "--out", join(dir, "ok.md")]);
 		expect(process.exitCode).toBeUndefined();
+		write.mockRestore();
+	});
+
+	it("--out is an IDENTITY check: a symlinked audit/ directory cannot be written through, whatever the spelling", async () => {
+		await vault([{ cost: 1 }]);
+		const vaultDir = join(dir, ".usertrust");
+		// the real audit directory lives ELSEWHERE; the vault holds only a link to it (both realpaths are outside the vault)
+		const elsewhere = join(dir, "elsewhere");
+		mkdirSync(elsewhere);
+		renameSync(join(vaultDir, "audit"), join(elsewhere, "audit"));
+		symlinkSync(join(elsewhere, "audit"), join(vaultDir, "audit"));
+		const log = join(elsewhere, "audit", "events.jsonl");
+		const before = readFileSync(log, "utf-8");
+		const link = join(dir, "link");
+		symlinkSync(join(elsewhere, "audit"), link);
+		for (const out of [
+			join(vaultDir, "audit", "report.md"), // through the link inside the vault
+			join(elsewhere, "audit", "report.md"), // straight at the real directory
+			join(elsewhere, "audit", "events.jsonl"), // the live log itself
+			join(dir, "link", "report.md"), // an outside link to it
+			"link/../.usertrust/new.md", // `link/..` is the vault's own directory to the OS, not `dir`
+		]) {
+			process.exitCode = undefined;
+			await run(dir, {}, ["--week", "--end", endIso(), "--out", out]);
+			expect(process.exitCode, out).toBe(2);
+		}
+		expect(readFileSync(log, "utf-8")).toBe(before);
+		expect(existsSync(join(elsewhere, "audit", "report.md"))).toBe(false);
+		expect(existsSync(join(vaultDir, "new.md"))).toBe(false);
+		// CONTROL: an unrelated directory beside the vault is fine
+		mkdirSync(join(dir, "reports"));
+		process.exitCode = undefined;
+		await run(dir, {}, ["--week", "--end", endIso(), "--out", join(dir, "reports", "ok.md")]);
+		expect(process.exitCode).toBeUndefined();
+		expect(existsSync(join(dir, "reports", "ok.md"))).toBe(true);
+		write.mockRestore();
+	});
+
+	it("--tenant-config keeps the user's own spelling: `link/../tenant.json` reads the file the OS resolves, not the lexical one", async () => {
+		await vault([{ cost: 1 }]);
+		const real = join(dir, "real");
+		mkdirSync(join(real, "sub"), { recursive: true });
+		symlinkSync(join(real, "sub"), join(dir, "conf-link"));
+		writeFileSync(join(real, "tenant.json"), JSON.stringify({ budget: 777 })); // link/.. to the OS
+		writeFileSync(join(dir, "tenant.json"), JSON.stringify({ budget: 111 })); // link/.. lexically
+		stdout = "";
+		await run(dir, {}, [
+			"--week",
+			"--end",
+			endIso(),
+			"--format",
+			"json",
+			"--tenant-config",
+			"conf-link/../tenant.json",
+		]);
+		const out = JSON.parse(stdout) as { budget: { configuredUt: number; source: string } };
+		expect(out.budget.configuredUt).toBe(777);
+		expect(out.budget.source).toBe("tenant config");
 		write.mockRestore();
 	});
 

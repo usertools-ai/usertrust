@@ -18,6 +18,8 @@
 
 import {
 	existsSync,
+	lstatSync,
+	readdirSync,
 	readFileSync,
 	realpathSync,
 	renameSync,
@@ -25,7 +27,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import pc from "picocolors";
 import { verifyVaultComplete } from "../audit/complete.js";
 import { type ReportFormat, render } from "../report/render.js";
@@ -278,7 +280,8 @@ function readSpendLedger(path: string): { value: number } | { unreadable: true }
 function readTenantBudget(path: string): number {
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(readFileSync(path, "utf-8"));
+		// The user's own spelling, resolved by the OS (`link/..` is the link target's parent, not the path's lexical parent).
+		parsed = JSON.parse(readFileSync(realpathSync.native(path), "utf-8"));
 	} catch (err) {
 		throw new Error(
 			`--tenant-config ${scrubForTerminal(path)} could not be read as JSON (${err instanceof Error ? scrubForTerminal(err.message) : "error"})`,
@@ -292,37 +295,115 @@ function readTenantBudget(path: string): number {
 }
 
 /**
- * Refuses an `--out` that RESOLVES (through symlinks) inside the vault: the report must never be written into the
- * integrity substrate it reads, whatever path spelling reaches it. The file's own real path when it exists, else the real
- * path of its directory plus its name.
+ * A file's identity, independent of every path that reaches it: device and inode as BIGINTS (some filesystems report an inode
+ * above 2^53, which a Number silently rounds into another file's). Read through links (`stat`), so it is the target's. On
+ * Windows `dev` is the volume serial and `ino` the NTFS file index; on a filesystem with no stable inode (FAT, some network
+ * shares: `ino` reads 0) there is no identity to compare, and the guard REFUSES rather than pass.
+ */
+class NoStableIdentity extends Error {}
+type BigStats = import("node:fs").BigIntStats;
+const identityOf = (st: { dev: bigint; ino: bigint }): string => {
+	if (st.ino === 0n) throw new NoStableIdentity("this filesystem reports no stable inode");
+	return `${st.dev}:${st.ino}`;
+};
+
+/** The most entries the identity walk will visit before it gives up (and the guard refuses). */
+const MAX_VAULT_ENTRIES = 200_000;
+
+/**
+ * The identity (device and inode) of the vault directory and of EVERYTHING under it: every entry by `lstat` (so a symlink
+ * entry is itself named), and every symlink that resolves to a directory by `stat` plus a walk into it (so a directory
+ * reached through a link inside the vault is the vault's too). `null` when it cannot be completed: unlistable, too large, or
+ * a filesystem with no stable inode.
+ */
+function vaultIdentities(vaultPath: string): Set<string> | null {
+	const ids = new Set<string>();
+	const stack: string[] = [vaultPath];
+	let visited = 0;
+	try {
+		ids.add(identityOf(statSync(vaultPath, { bigint: true })));
+		while (stack.length > 0) {
+			const dirPath = stack.pop() as string;
+			for (const name of readdirSync(dirPath)) {
+				if (++visited > MAX_VAULT_ENTRIES) return null;
+				const entry = join(dirPath, name);
+				const lst = lstatSync(entry, { bigint: true });
+				ids.add(identityOf(lst));
+				let isDir = lst.isDirectory();
+				if (lst.isSymbolicLink()) {
+					// A link out of the vault to a directory: that directory is the vault's too, for the write.
+					let st: BigStats | undefined;
+					try {
+						st = statSync(entry, { bigint: true });
+					} catch {
+						st = undefined; // a dangling link names nothing
+					}
+					if (st !== undefined) {
+						const key = identityOf(st);
+						isDir = st.isDirectory() && !ids.has(key);
+						ids.add(key);
+					} else {
+						isDir = false;
+					}
+				}
+				if (isDir) stack.push(entry);
+			}
+		}
+	} catch {
+		return null; // unlistable, or no stable identity: the caller refuses
+	}
+	return ids;
+}
+
+/**
+ * Refuses an `--out` that would write INTO the vault: the report must never overwrite the audit data it reads.
+ *
+ * An IDENTITY check, not a path comparison. Comparing resolved paths leaked three times in a row (a link into the vault, a link
+ * inside it pointing out, a symlinked `audit/` directory whose real path is elsewhere), because every spelling of a path that
+ * reaches the vault needed its own rule. The write lands in a directory and replaces an entry there, so two facts decide it,
+ * both read from the OS by `stat`, which follows links and resolves `..` the way the open will:
+ *   - the file the name resolves to, when it exists, is not one of the vault's files; and
+ *   - the directory the write lands in is not the vault or a directory under it, reached by any path.
+ * It FAILS CLOSED: a location or a vault that cannot be examined, or on a filesystem with no stable inode, is refused.
  */
 function assertOutsideVault(target: string, vaultPath: string): void {
-	// The OS's resolution (`realpath(3)`), not the JS one: `realpathSync` resolves `..` lexically before it follows a link, so
-	// `link/..` names a different directory than the OS opens. And it FAILS CLOSED: a path that cannot be resolved cannot be
-	// shown to be outside the vault, so it is refused rather than let through.
-	const real = (p: string): string => realpathSync.native(p);
-	const refuse = (what: string): never => {
+	const refuse = (what: string): void => {
 		throw new UsageError(
 			`--out cannot be shown to be outside the vault (${what}): the report is never written into the audit data it reads`,
 		);
 	};
-	let vaultReal: string;
-	try {
-		vaultReal = real(vaultPath);
-	} catch {
-		refuse("the vault path could not be resolved");
-		return; // unreachable: refuse throws
+	const ids = vaultIdentities(vaultPath);
+	if (ids === null) {
+		refuse("the vault could not be examined");
+		return;
 	}
-	const inside = (p: string): boolean => p === vaultReal || p.startsWith(`${vaultReal}${sep}`);
-	// Two paths can be the vault, and either refuses:
-	//  - the file the name RESOLVES to, when it exists (a link from outside pointing in);
-	//  - the directory ENTRY the write replaces: `writeReportFile` renames a temp file over `target` itself, which replaces
-	//    a symlink and does not follow it. A link INSIDE the vault that points outside therefore passes the first test and
-	//    still has the vault's own entry replaced by the report.
-	let resolved: string | undefined;
+	let landingId: string;
+	let landingIsDir: boolean;
 	try {
-		resolved = real(target);
+		const landing = statSync(dirname(target), { bigint: true });
+		landingIsDir = landing.isDirectory();
+		landingId = identityOf(landing);
 	} catch (err) {
+		refuse(
+			err instanceof NoStableIdentity
+				? "its directory's filesystem reports no stable inode, so it cannot be compared"
+				: `its directory could not be examined: ${scrubForTerminal(String((err as NodeJS.ErrnoException | undefined)?.code ?? "unresolvable"))}`,
+		);
+		return;
+	}
+	if (!landingIsDir || ids.has(landingId)) {
+		throw new UsageError(
+			`--out lands in the vault (${scrubForTerminal(dirname(target))}): the report is never written into the audit data it reads`,
+		);
+	}
+	let targetId: string | undefined;
+	try {
+		targetId = identityOf(statSync(target, { bigint: true }));
+	} catch (err) {
+		if (err instanceof NoStableIdentity) {
+			refuse("the target's filesystem reports no stable inode, so it cannot be compared");
+			return;
+		}
 		// Not existing yet is the normal case; any other failure (a symlink loop, no permission) is not a clean answer.
 		if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
 			refuse(
@@ -330,24 +411,19 @@ function assertOutsideVault(target: string, vaultPath: string): void {
 					String((err as NodeJS.ErrnoException | undefined)?.code ?? "unresolvable"),
 				),
 			);
+			return;
 		}
 	}
-	let entry: string;
-	try {
-		entry = join(real(dirname(target)), basename(target));
-	} catch (err) {
-		entry = target;
-		refuse(
-			`its directory could not be resolved: ${scrubForTerminal(String((err as NodeJS.ErrnoException | undefined)?.code ?? "unresolvable"))}`,
-		);
-	}
-	const hit =
-		resolved !== undefined && inside(resolved) ? resolved : inside(entry) ? entry : undefined;
-	if (hit !== undefined) {
+	if (targetId !== undefined && ids.has(targetId)) {
 		throw new UsageError(
-			`--out resolves inside the vault (${scrubForTerminal(hit)}): the report is never written into the audit data it reads`,
+			`--out names a file of the vault (${scrubForTerminal(target)}): the report is never written into the audit data it reads`,
 		);
 	}
+}
+
+/** The user's own spelling of a path, joined to the root as a STRING: `path.join` and `path.resolve` collapse `..` BEFORE links resolve, so `link/..` would name a different directory than the OS opens. */
+function userPath(root: string, p: string): string {
+	return isAbsolute(p) ? p : `${root.endsWith(sep) ? root.slice(0, -1) : root}${sep}${p}`;
 }
 
 /**
@@ -397,7 +473,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			budget = parsed.budget;
 			budgetSource = "--budget";
 		} else if (parsed.tenantConfig !== undefined) {
-			budget = readTenantBudget(resolve(root, parsed.tenantConfig));
+			budget = readTenantBudget(userPath(root, parsed.tenantConfig));
 			budgetSource = "tenant config";
 		}
 		// The verdict is `usertrust verify`'s own, on the LIVE vault: integrity AND completeness, one function shared with that
@@ -446,7 +522,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		);
 		const text = render(model, parsed.format);
 		if (parsed.out !== undefined) {
-			const target = resolve(root, parsed.out);
+			const target = userPath(root, parsed.out);
 			assertOutsideVault(target, vaultPath);
 			writeReportFile(target, text);
 			if (!json) console.log(`Wrote ${parsed.format} report to ${scrubForTerminal(target)}`);
