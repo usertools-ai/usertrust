@@ -4,6 +4,7 @@ import { preconnect, preload } from "react-dom";
 import Cursor from "./components/cursor";
 import { NoiseOverlay } from "./components/noise-overlay";
 import "./globals.css";
+import { KIT_IMAGES } from "./lib/kit-images";
 
 /*
  * No font file lives in this public repository (site/scripts/no-font-files.test.mts
@@ -74,7 +75,7 @@ export const metadata: Metadata = {
 		description,
 		images: [{ url: "/og", width: 1200, height: 630 }],
 	},
-	icons: { icon: "/favicon.svg" },
+	icons: { icon: KIT_IMAGES.favicon },
 };
 
 /*

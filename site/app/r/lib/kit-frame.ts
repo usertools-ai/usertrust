@@ -2,8 +2,8 @@ import { fetchPinnedBytes } from "./kit-pinned";
 
 /**
  * The share card's frame (the dotted field behind the card), loaded from the brand kit at render
- * time and PINNED, the way the card's fonts are (`lib/kit-fonts.ts`). No brand asset lives in this
- * repository, so the card fetches the kit's own file, an inert SVG at a content-addressed path:
+ * time and PINNED, the way the card's fonts are (`lib/kit-fonts.ts`). The frame is never kept in
+ * this repository, so the card fetches the kit's own file, an inert SVG at a content-addressed path:
  * `card-frame.<first 12 hex of its sha384>.svg`. A published frame is never edited; a change is a
  * new file and a reviewed change to the two lines below:
  * `curl -s <url> | openssl dgst -sha384 -binary | openssl base64 -A`.

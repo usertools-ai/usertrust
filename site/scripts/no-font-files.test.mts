@@ -720,8 +720,9 @@ test("no tracked file holds a font, by its BYTES, whatever its name or where in 
 		files.some((f) => f.startsWith("packages/")),
 		"the scan reaches packages/",
 	);
+	// Binary by its bytes (git's NUL test), not by an extension: no image format need be tracked.
 	assert.ok(
-		files.some((f) => f.endsWith(".png")),
+		files.some((f) => !isText(head(f))),
 		"the scan reaches binary files",
 	);
 	const offenders = files
