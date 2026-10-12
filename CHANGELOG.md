@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`usertrust verify --json` on the anchored path reports `success` as the exit code.** With `--require-anchor` or `--require-external-anchor`, an unanchored vault exited 1 but printed `"success": true`, so a pipeline that parsed the JSON saw a pass that the exit code refused. `success` is now `true` exactly when the exit code is 0, whichever check decided it.
+- **The standalone `usertrust-verify` CLI scrubs every string from the vault before printing it.** It prints at an auditor's terminal, from a vault owned by the party under audit. Several of the vault's strings reached that terminal verbatim: the chain-error lines (an event's `id` and `previousHash`), `First event:` / `Last event:`, the latest anchor's key id and timestamp, the witness error, each anchoring warning, and the echoes of arguments and caught errors. An escape sequence in any of them could erase a FAILED line and print a forged verdict. Each now goes through `forDisplay`, which replaces control characters (C0, DEL, C1) and every Unicode format character (bidirectional controls, zero-width characters, the byte-order mark) with `?`. The anchor's key id is sanitized first, then clipped by code points.
+
 ## [5.0.0] - 2026-10-12
 
 ### Read before upgrading
