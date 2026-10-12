@@ -57,7 +57,6 @@ import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
 	guardedGet,
 	type MethodBoundary,
-	type RefuseFn,
 	rawClientStandIn,
 	refuseWrites,
 	transportChangedError,
@@ -222,13 +221,13 @@ export interface TrustOpts {
 	 */
 	endpoint?: Partial<EndpointInfo> | undefined;
 	/**
-	 * SDK methods to let through UNGOVERNED on an Anthropic or OpenAI client, by the path the
-	 * refusal names (`"embeddings.create"`, `"beta.threads.runs.create"`). Every other method
+	 * SDK methods to let through UNGOVERNED, by the path the refusal names
+	 * (`"embeddings.create"`, `"beta.threads.runs.create"`, `"files.upload"`). Every other method
 	 * usertrust does not govern and does not list as free is refused (`default-deny.ts`). A
-	 * listed method runs on the raw SDK resource with no hold, no budget check and no cost, and
-	 * each call appends an `ungoverned_call` event (`{ method, provider }`). Validated at
-	 * creation: an array of non-empty strings, none reaching the SDK's raw client. Has no effect
-	 * on a Google client.
+	 * listed method runs on the raw SDK resource with no hold, no budget check, no PII scan and
+	 * no cost, and each call appends an `ungoverned_call` event (`{ method, provider }`).
+	 * Validated at creation: an array of non-empty strings, none free, none governed, and none
+	 * reaching the SDK's raw client.
 	 *
 	 * SECURITY: TRUSTED-OPERATOR input, same boundary as budget — never derive it from end-user
 	 * or request data.
@@ -542,11 +541,11 @@ export interface TrustEngine {
 // that same generic branch, but its trap unwraps the envelope and resolves to the
 // governed stream itself (GovernedStreamMethod), so the SDK call shape survives.
 // Everything else on those resources is ungoverned (see detect.ts's boundary block).
-// On an Anthropic or OpenAI client the runtime refuses it unless it is free or listed
-// in `allowUngoverned` (default-deny.ts), and the types leave it untouched: a refused
-// method there keeps its SDK signature. On a Google client a listed set of billable methods
-// is refused too (GOOGLE_REFUSED_METHODS), and those ARE typed as refused below. That list
-// is not a boundary: everything else on a Google client passes through (detect.ts).
+// On every provider the runtime refuses it unless it is free or listed in
+// `allowUngoverned` (default-deny.ts), and the types leave it untouched: a refused
+// method keeps its SDK signature, so a method listed in `allowUngoverned` types as the SDK's
+// own. On a Google client the billable methods #326 named (GOOGLE_REFUSED_METHODS) keep
+// their tailored runtime hint, and their SDK signature like every other refused method.
 
 /** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
 type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
@@ -695,36 +694,14 @@ type GovernedResponses<R> =
 			: R;
 
 /**
- * A method the governed client REFUSES: it keeps its parameters and resolves to
- * nothing — the runtime stand-in returns a promise that REJECTS with a PolicyDeniedError
- * naming the method, after the denial is on the audit chain and before the SDK is
- * reached (GOOGLE_REFUSED_METHODS). A non-callable member is left as it is, mirroring
- * the runtime, which only replaces a member that is a function.
- */
-type RefusedMethod<F> = F extends (...args: infer A) => unknown
-	? (...args: A) => Promise<never>
-	: F;
-
-/**
- * Refuse the members `K` of a namespace, homomorphically (every other member,
- * and every modifier, survives as declared). A callable or non-object namespace is
- * left raw, mirroring refusingNamespaceProxy's `typeof ns !== "object"` bail-out.
- */
-type RefuseMembers<N, K extends PropertyKey> =
-	IsCallable<N> extends true
-		? N
-		: N extends object
-			? { [Q in keyof N]: Q extends K ? RefusedMethod<N[Q]> : N[Q] }
-			: N;
-
-/**
  * The Google `models` resource. `generateContent` resolves to the `{ response, receipt }`
  * envelope (plus `receipts` when it ran as a governed AFC loop, GovernedGoogleGenerateMethod); `generateContentStream` resolves to the governed stream ITSELF with a
  * `.receipt` promise (the same contract as Anthropic's `messages.stream`, and what
- * buildGoogleProxy's trap returns); the non-governed generation methods are refused.
+ * buildGoogleProxy's trap returns). Every other member keeps its SDK signature, as on
+ * Anthropic and OpenAI: a method the runtime refuses (default-deny.ts) can be listed in
+ * `allowUngoverned`, and then returns the SDK's own result.
  * Homomorphic, so a fake or older client without `generateContentStream` gets no
  * phantom member, and `countTokens` / `list` / `get` stay exactly as declared.
- * Keep the refused names in step with GOOGLE_REFUSED_METHODS.models.
  */
 type GovernedGoogleModels<G> = G extends { generateContent: AnyMethod }
 	? {
@@ -732,47 +709,9 @@ type GovernedGoogleModels<G> = G extends { generateContent: AnyMethod }
 				? GovernedGoogleGenerateMethod<G[P]>
 				: P extends "generateContentStream"
 					? GovernedStreamMethod<G[P]>
-					: P extends
-								| "embedContent"
-								| "generateImages"
-								| "editImage"
-								| "upscaleImage"
-								| "generateVideos"
-								| "recontextImage"
-								| "segmentImage"
-						? RefusedMethod<G[P]>
-						: G[P];
+					: G[P];
 		}
 	: G;
-
-/** `live.connect` and `live.music.connect` are refused; the rest of `live` is raw. */
-type RefusedGoogleLive<L> =
-	IsCallable<L> extends true
-		? L
-		: L extends object
-			? {
-					[Q in keyof L]: Q extends "connect"
-						? RefusedMethod<L[Q]>
-						: Q extends "music"
-							? RefuseMembers<L[Q], "connect">
-							: L[Q];
-				}
-			: L;
-
-/** One Google namespace with its refused members (GOOGLE_REFUSED_METHODS). */
-type RefusedGoogleNamespace<P, N> = P extends "live"
-	? RefusedGoogleLive<N>
-	: P extends "batches"
-		? RefuseMembers<N, "create" | "createEmbeddings">
-		: P extends "chats" | "interactions"
-			? RefuseMembers<N, "create">
-			: P extends "tunings"
-				? RefuseMembers<N, "tune">
-				: P extends "caches"
-					? RefuseMembers<N, "create" | "update">
-					: P extends "fileSearchStores"
-						? RefuseMembers<N, "uploadToFileSearchStore" | "importFile">
-						: N;
 
 /**
  * The Google `generateContent` envelope: `{ response, receipt }` like every other create, plus `receipts`, one per model
@@ -850,20 +789,6 @@ type GovernedResponsesPart<T, K extends keyof T = Extract<keyof T, "responses">>
 type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
 	[P in K]: GovernedGoogleModels<T[P]>;
 };
-type GoogleRefusingNamespace =
-	| "chats"
-	| "live"
-	| "batches"
-	| "interactions"
-	| "tunings"
-	| "caches"
-	| "fileSearchStores";
-type RefusedGoogleNamespacesPart<
-	T,
-	K extends keyof T = Extract<keyof T, GoogleRefusingNamespace>,
-> = {
-	[P in K]: RefusedGoogleNamespace<P, T[P]>;
-};
 /**
  * `withOptions` returns a client governed by the SAME governor (`boundary.rewrap`), so its type is
  * the governed shape, never the SDK's `this` — which `Omit<T, …>` would otherwise carry through as
@@ -900,9 +825,7 @@ type GovernedShapeOf<T> =
 					GovernedResponsesPart<T> &
 					GovernedWithOptionsPart<T>
 			: IsGoogleClient<T> extends true
-				? Omit<T, "models" | GoogleRefusingNamespace> &
-						GovernedModelsPart<T> &
-						RefusedGoogleNamespacesPart<T>
+				? Omit<T, "models"> & GovernedModelsPart<T>
 				: T;
 
 /**
@@ -4147,8 +4070,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	}
 
 	// 7b. Refusal of an ungoverned provider method: ONE audited path for every provider —
-	// the Anthropic and OpenAI default-deny boundary (default-deny.ts) and the Google
-	// refused methods and AFC refusals (GOOGLE_REFUSED_METHODS, google-afc.ts). It is a
+	// the default-deny boundary (default-deny.ts) and the Google AFC refusals
+	// (google-afc.ts). It is a
 	// governor decision, so it goes through the SAME denial boundary as every other
 	// pre-provider refusal: `appendDenialEvent` writes the `policy_denied` event (the method
 	// path as `actionName`) and attaches its hash to the error, whose contract is flat across
@@ -4157,8 +4080,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// for the boundary to sit outside of or before. Async, because the append is: the
 	// stand-in rejects rather than throws — a sync SDK method (a stream or runner helper)
 	// included — and is counted in-flight so destroy() waits for the append before releasing
-	// the writer. The error defaults to the provider's own: `ungovernedMethodError` for
-	// Anthropic and OpenAI, `ungovernedGoogleMethodError` for Google.
+	// the writer. The error defaults to `ungovernedMethodError`, or, for a Google method
+	// GOOGLE_REFUSED_METHODS names, `ungovernedGoogleMethodError` (its tailored hint).
 	//
 	//
 	// It STARTS with the degraded-audit preflight, for every provider (the same start as
@@ -4185,7 +4108,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const model = ownStringDataProperty(args[0], "model");
 			const denial =
 				error ??
-				(kind === "google" ? ungovernedGoogleMethodError(path) : ungovernedMethodError(kind, path));
+				(kind === "google" && GOOGLE_HINTED_PATHS.has(path)
+					? ungovernedGoogleMethodError(path)
+					: ungovernedMethodError(kind, path));
 			await appendDenialEvent({
 				audit,
 				actor: "local",
@@ -4330,19 +4255,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			]);
 		};
 
-		if (kind === "google") {
-			return buildGoogleProxy(
-				client,
-				interceptCall,
-				destroyFn,
-				governActionImpl,
-				refuseUngovernedMethod,
-				preflightRefusal,
-			);
-		}
-
-		// Anthropic and OpenAI: default-deny. One boundary for the whole tree, `withOptions`
-		// clients included, so they share this governor: its budget, audit writer and engine.
+		// Default-deny on every provider. One boundary for the whole tree, `withOptions` clients
+		// included, so they share this governor: its budget, audit writer and engine.
 		const build = kind === "anthropic" ? buildAnthropicProxy : buildOpenAIProxy;
 		const boundary: MethodBoundary = {
 			provider: kind,
@@ -4379,8 +4293,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			},
 			resources: new Map(),
 			standIns: new Map(),
+			methods: new Map(),
 			readOnly: new WeakMap(),
 		};
+		if (kind === "google") {
+			return buildGoogleProxy(
+				client,
+				interceptCall,
+				destroyFn,
+				governActionImpl,
+				boundary,
+				preflightRefusal,
+			);
+		}
 		return build(client, interceptCall, destroyFn, governActionImpl, boundary);
 	}
 
@@ -4965,10 +4890,9 @@ function callerAbortSignal(kind: LLMClientKind, args: unknown[]): AbortSignal | 
 }
 
 // ── Proxy builders ──
-// Each builder intercepts only the governed calls. On a Google client every other
-// property of the original client passes through untouched; on an Anthropic or OpenAI
-// client every other name goes to the default-deny boundary (`guardedGet`,
-// default-deny.ts), which refuses the SDK methods usertrust does not govern.
+// Each builder intercepts only the governed calls. On every provider every other name
+// goes to the default-deny boundary (`guardedGet`, default-deny.ts), which refuses the SDK
+// methods usertrust does not govern.
 
 type InterceptFn = (
 	originalFn: (...args: unknown[]) => unknown,
@@ -5298,25 +5222,17 @@ function buildOpenAIProxy<T>(
 }
 
 /**
- * The billable methods a Google client exposes that usertrust does NOT govern, by
- * namespace. Each one sends a request Google bills (generation, embedding, tuning, cache
- * storage, file-search indexing), so the governed client refuses it by name rather than
- * letting it run unmetered, unpoliced and unaudited: the call writes a `policy_denied`
- * event and rejects with a PolicyDeniedError, and the SDK is never reached
- * (`refuseUngovernedMethod` in trust()). `chats.create` is here because the `Chat` it
- * returns drives the SDK's RAW `models` (bound when the client was constructed), so
- * every `sendMessage` / `sendMessageStream` would bypass the governed proxy.
+ * The billable Google methods whose refusal carries a tailored hint, by namespace. A HINT
+ * table only: the refusal itself is the default-deny boundary's (default-deny.ts), which
+ * refuses every method that is not governed, free or listed in `allowUngoverned`, these
+ * included. Each one sends a request Google bills (generation, embedding, tuning, cache
+ * storage, file-search indexing), and the hint points at governAction() on the unwrapped
+ * client. `chats.create` is here because the `Chat` it returns drives the SDK's RAW
+ * `models` (bound when the client was constructed), so every `sendMessage` /
+ * `sendMessageStream` would bypass the governed proxy.
  *
- * Everything not listed passes through untouched: the free metadata and read calls
- * (`models.list` / `get` / `update` / `delete` / `countTokens` / `computeTokens`,
- * `batches.list` / `get` / `cancel` / `delete`, `interactions.get` / `cancel` /
- * `delete`, `tunings.list` / `get` / `cancel`, `caches.list` / `get` / `delete`,
- * `fileSearchStores.list` / `get` / `create` / `delete` / `downloadMedia` and its
- * `documents` reads) and the namespaces with nothing billable (`files`, `operations`,
- * `authTokens`, `webhooks`).
- *
- * Exported for the tests, which assert one refusal per entry. The type layer's twin
- * is the `Refused…` mapping above `GovernedShapeOf`; the two must list the same names.
+ * Exported for the tests, which assert one refusal per entry. The types do not mirror it:
+ * a refused method keeps its SDK signature, so a listed one types as the SDK's own.
  */
 export const GOOGLE_REFUSED_METHODS = {
 	models: [
@@ -5340,22 +5256,12 @@ export const GOOGLE_REFUSED_METHODS = {
 
 const GOOGLE_GOVERNED_METHODS = "models.generateContent and models.generateContentStream";
 
-/** The client-level namespaces that carry a refused method (`live.music` hangs off `live`). */
-const GOOGLE_REFUSING_NAMESPACES: ReadonlySet<string> = new Set([
-	"chats",
-	"live",
-	"batches",
-	"interactions",
-	"tunings",
-	"caches",
-	"fileSearchStores",
-]);
-
-function isGoogleRefusingNamespace(
-	prop: string | symbol,
-): prop is Exclude<keyof typeof GOOGLE_REFUSED_METHODS, "models" | "live.music"> {
-	return typeof prop === "string" && GOOGLE_REFUSING_NAMESPACES.has(prop);
-}
+/** GOOGLE_REFUSED_METHODS as full paths: the refusals that carry the tailored hint. */
+const GOOGLE_HINTED_PATHS: ReadonlySet<string> = new Set(
+	Object.entries(GOOGLE_REFUSED_METHODS).flatMap(([ns, methods]) =>
+		methods.map((m) => `${ns}.${m}`),
+	),
+);
 
 /** The refusal a governed client answers a GOOGLE_REFUSED_METHODS call with. */
 function ungovernedGoogleMethodError(path: string): PolicyDeniedError {
@@ -5364,12 +5270,6 @@ function ungovernedGoogleMethodError(path: string): PolicyDeniedError {
 		`usertrust governs ${GOOGLE_GOVERNED_METHODS} on a Google client, and refuses this method rather than let it run unmetered. To make this call anyway, run it on the original (unwrapped) client inside governAction() with a cost estimate.`,
 	);
 }
-
-/**
- * Refuse one ungoverned method call: write its `policy_denied` event at the denial
- * boundary, then reject with the PolicyDeniedError. Built by `trust()`, which owns the
- * audit writer; the proxy builders only know the method's path.
- */
 
 /** `obj[key]` when it is an OWN DATA property holding a string; never runs an accessor or a trap. */
 function ownStringDataProperty(obj: unknown, key: string): string | undefined {
@@ -5438,76 +5338,6 @@ function googleAfcError(
 }
 
 /**
- * Wrap one Google namespace so its refused methods are refused through `refuse`. A namespace that is not a
- * non-null object (absent, or callable) is left raw, and so is a listed member that
- * is not a function: there is nothing to call, so there is nothing to refuse. The
- * wrapper is built per namespace OBJECT and cached, so `client.chats === client.chats`
- * still holds across accesses.
- */
-function refusingNamespaceProxy(
-	ns: unknown,
-	path: keyof typeof GOOGLE_REFUSED_METHODS,
-	refuse: RefuseFn,
-	cache: NamespaceProxyCache,
-): unknown {
-	if (ns == null || typeof ns !== "object") return ns;
-	// Keyed by PATH and object: a duck-typed client may alias one object under two namespaces
-	// (`client.chats === client.caches`), and each alias must get ITS OWN refusal list. Keyed by
-	// the object alone, the first path reached would answer for every alias.
-	let byObject = cache.get(path);
-	if (byObject === undefined) {
-		byObject = new WeakMap();
-		cache.set(path, byObject);
-	}
-	const cached = byObject.get(ns);
-	if (cached !== undefined) return cached;
-	const refused: readonly string[] = GOOGLE_REFUSED_METHODS[path];
-	const passThrough = new WeakMap<object, unknown>();
-	const wrapped = new Proxy(ns as Record<string | symbol, unknown>, {
-		get(target, prop) {
-			// Read on the RAW object, so a getter backed by a `#private` field does not throw.
-			const value = Reflect.get(target, prop, target);
-			if (typeof prop === "string" && refused.includes(prop) && typeof value === "function") {
-				return (...args: unknown[]) => refuse(`${path}.${prop}`, args);
-			}
-			// `live.music` is the one nested namespace with a refused member.
-			if (path === "live" && prop === "music") {
-				return refusingNamespaceProxy(value, "live.music", refuse, cache);
-			}
-			return onRawReceiver(target, prop, value, passThrough);
-		},
-	});
-	byObject.set(ns, wrapped);
-	return wrapped;
-}
-
-/** Refusing-namespace proxies, per namespace PATH, then per raw object. */
-type NamespaceProxyCache = Map<string, WeakMap<object, unknown>>;
-
-/**
- * A pass-through member of a proxied Google namespace. A METHOD is wrapped to run on the RAW
- * object (`fn.apply(target, args)`), as the governed methods already do: returned bare, it is
- * called with the proxy as `this`, and a method that reads a `#private` field (`this.#client`)
- * throws a private-brand TypeError. The wrapper is cached per function, so repeated reads give
- * the same function. `constructor` and non-functions are returned as they are.
- */
-function onRawReceiver(
-	target: object,
-	prop: string | symbol,
-	value: unknown,
-	cache: WeakMap<object, unknown>,
-): unknown {
-	if (typeof value !== "function" || prop === "constructor") return value;
-	const fn = value as (...args: unknown[]) => unknown;
-	let wrapper = cache.get(fn);
-	if (wrapper === undefined) {
-		wrapper = (...args: unknown[]) => fn.apply(target, args);
-		cache.set(fn, wrapper);
-	}
-	return wrapper;
-}
-
-/**
  * Google: `models.generateContent` and `models.generateContentStream` route through
  * interceptCall. The stream's SDK result (a Promise of an AsyncGenerator of
  * `GenerateContentResponse` chunks) takes the generic `Symbol.asyncIterator` branch:
@@ -5517,34 +5347,32 @@ function onRawReceiver(
  * Anthropic `messages.stream` helper, the governed `generateContentStream` resolves to
  * the stream itself (an async generator yielding the SDK's chunks unchanged) with the
  * settled `.receipt` promise on it, so `for await (const c of await
- * models.generateContentStream(p))` keeps its SDK shape. The listed generation
- * methods are refused (GOOGLE_REFUSED_METHODS) through `refuse`, which audits the
- * denial and rejects; everything else passes through, including other paths to the
- * same endpoints (not a boundary: see detect.ts).
+ * models.generateContentStream(p))` keeps its SDK shape. Every other name, on `models`
+ * and off the client at any depth, goes to the default-deny boundary (`guardedGet`,
+ * default-deny.ts): free methods run on the raw namespace, `allowUngoverned` methods run
+ * there audited, and everything else is refused through `refuse`.
  */
 function buildGoogleProxy<T>(
 	client: T,
 	intercept: InterceptFn,
 	destroy: () => Promise<void>,
 	governAction: GovernActionFn,
-	refuse: RefuseFn,
+	boundary: MethodBoundary,
 	preflight: () => void,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const models = original.models as Record<string, unknown>;
 	const originalGenerate = models.generateContent as (...args: unknown[]) => unknown;
 	// Feature-detected like the other optional surfaces: a client without the method
-	// leaves it a raw pass-through (there is nothing to call).
+	// leaves the name to the boundary.
 	const originalGenerateStream =
 		typeof models.generateContentStream === "function"
 			? (models.generateContentStream as (...args: unknown[]) => unknown)
 			: undefined;
-	const refusedOnModels: readonly string[] = GOOGLE_REFUSED_METHODS.models;
-	const namespaceCache: NamespaceProxyCache = new Map();
-	const modelsPassThrough = new WeakMap<object, unknown>();
+	const refuse = boundary.refuse;
 
 	const modelsProxy = new Proxy(models, {
-		get(target, prop) {
+		get(target, prop, receiver) {
 			if (prop === "generateContent") {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
@@ -5579,17 +5407,9 @@ function buildGoogleProxy<T>(
 					return response;
 				};
 			}
-			// Read on the RAW object, so a getter backed by a `#private` field does not throw.
-			const value = Reflect.get(target, prop, target);
-			if (
-				typeof prop === "string" &&
-				refusedOnModels.includes(prop) &&
-				typeof value === "function"
-			) {
-				return (...args: unknown[]) => refuse(`models.${prop}`, args);
-			}
-			return onRawReceiver(target, prop, value, modelsPassThrough);
+			return guardedGet(target, prop, receiver, "models", boundary);
 		},
+		...refuseWrites("models"),
 	});
 
 	const clientProxy = new Proxy(original, {
@@ -5597,16 +5417,9 @@ function buildGoogleProxy<T>(
 			if (prop === "models") return modelsProxy;
 			if (prop === "destroy") return destroy;
 			if (prop === "governAction") return governAction;
-			if (isGoogleRefusingNamespace(prop)) {
-				return refusingNamespaceProxy(
-					Reflect.get(target, prop, receiver),
-					prop,
-					refuse,
-					namespaceCache,
-				);
-			}
-			return Reflect.get(target, prop, receiver);
+			return guardedGet(target, prop, receiver, "", boundary);
 		},
+		...refuseWrites(""),
 	});
 
 	return clientProxy as TrustedClient<T>;

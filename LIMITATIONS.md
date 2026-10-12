@@ -20,7 +20,7 @@ today:
 Streaming through any governed method is governed end to end, including
 mid-stream anomaly cutoff and settle-or-void on completion.
 
-On an Anthropic or OpenAI client, every other SDK method is **refused**, not
+On every client, every other SDK method is **refused**, not
 passed through: batches, embeddings, images, audio, fine-tuning, assistant runs,
 vector stores, realtime, videos, legacy `completions.create()`, OpenAI's
 `beta.responses`, and the helpers that drive the SDK's raw client internally
@@ -32,8 +32,7 @@ DELETE (reads, lists, deletes), and a few POSTs named with a reason (token count
 moderations, cancels, pauses, metadata updates). A method you list in
 `trust({ allowUngoverned })` runs **unmetered**: it reaches the provider without
 a budget hold or a cost, and its only record is an `ungoverned_call` audit event.
-On a Google client there is no default-deny boundary: only the paths named in the
-Google paragraph below are governed or refused, and everything else passes through. The exact, current boundary is enumerated at the source in
+The Google specifics are in the Google paragraph below. The exact, current boundary is enumerated at the source in
 `packages/core/src/detect.ts` and `packages/core/src/default-deny.ts`.
 
 **Threat model.** Default-deny prevents ACCIDENTAL unmetered spend through the
@@ -43,9 +42,13 @@ code that sets out to spend. A caller that keeps the raw client it constructed,
 builds a new one through `client.constructor`, through the governed client's own
 `trusted.constructor`, or through the prototype path
 `Object.getPrototypeOf(trusted).constructor` (closing that path would break
-`trusted instanceof Anthropic` / `OpenAI`), or reads the API key off the
+`trusted instanceof Anthropic` / `OpenAI` / `GoogleGenAI`), or reads the API key off the
 client (`client.apiKey` is a plain value and passes) is outside it, as with any
-wrapper. Deliberate bypass from your own code is out of scope: code that holds a
+wrapper. On Google, a Stream returned by a free or listed call
+(`interactions.get` with `stream`) exposes the SDK's raw next-gen client as a
+public `client` property, unlike the Anthropic and OpenAI SDKs, which keep theirs
+private. Calling a method on it is deliberate bypass, out of scope like
+`constructor` and reading `apiKey`. Deliberate bypass from your own code is out of scope: code that holds a
 provider key can always reach the provider. `usertrust-server` does not change
 that, because it authorizes and settles spend but does not make or forward the
 provider calls; enforcing against deliberate bypass needs the provider key held
@@ -54,7 +57,8 @@ outside that code. Writes through the governed client are refused (assignment,
 and on its transport objects `middleware`, `fetchOptions`, `_options` and
 `_authState`), but two SDK objects are still handed back as they are: the
 client's `logger`, which is the caller's own, and Anthropic's per-request
-auth-flag `WeakMap`, which a proxy cannot wrap.
+auth-flag `WeakMap`, which a proxy cannot wrap. On a Google client, plain data
+objects (`httpOptions`) are handed back as they are too.
 
 The boundary covers the governed client object. It does not cover the original
 client you passed to `trust()`, a client you construct separately, or transports
@@ -63,21 +67,35 @@ Responses WebSocket classes read the client's API key and talk to the provider
 directly). Governed calls price tokens only: server-side tool fees (web search,
 code execution, file search, containers) are not metered.
 
-On a Google client, the calls that are not billed (`models.countTokens`,
-`models.list`, `caches.get`, `files` and the like) pass through ungoverned. Google's other billable methods (`models.embedContent`, the image and
-video methods, `chats`, `live`, `batches.create`, `interactions.create`,
-`tunings.tune`, `caches.create` / `update`, and the `fileSearchStores` upload and
-import) are refused instead: the call rejects with a `PolicyDeniedError` naming
-the method, and records a `policy_denied` audit event, before the SDK is called.
-**That refused list is not a boundary:** those methods are refused when called by those names, but other paths to the same endpoints still pass through ungoverned, among them the SDK's internal `models.*Internal` methods (`generateContentInternal`, which sends the request behind `generateContent`, and the rest), `getNextGenClient()` (whose `interactions.create` reaches the provider), `chats.modelsModule` (the SDK's raw `Models`), the raw transport `apiClient` (on the client and on every namespace), and every namespace and method not listed. A default-deny boundary for Google clients, as Anthropic and OpenAI clients have, is the planned fix.
-So is `models.generateContentStream` when it would run automatic function calling
-(a streamed loop of provider rounds, which usertrust does not yet meter round by
-round); `models.generateContent` with it is metered per round instead, each round
-its own governed call. That per-round metering, like the rest of the Google
-governance, holds only for calls made through `models.generateContent` and
-`models.generateContentStream`: `models.generateContentInternal` (and `generateContent` on
-`chats.modelsModule`) reaches the same endpoint ungoverned, with no hold, no AFC
-check and no audit. Use `generateContent`, or disable AFC with
+A Google client (`@google/genai` 1.52.0 or later) has the same default-deny
+boundary. Its free methods are the reads, lists and deletes (`models.list`,
+`caches.get`, `files.download`, `interactions.get` and the like), plus
+`models.update` (metadata), `models.countTokens` / `computeTokens`, the cancels and
+the operation polls. Everything else is refused: the billable methods
+(`models.embedContent`, the image and video methods, `chats.create`,
+`live.connect`, `batches.create`, `interactions.create`, `tunings.tune`,
+`caches.create` / `update`, the `fileSearchStores` uploads, imports and creates),
+every `*Internal` method (`models.generateContentInternal` sends the request
+behind `generateContent`), `authTokens.create` (it mints Live keys charged to
+your project), `files.upload`, and the SDK's raw transport by name: `apiClient` on
+the client and on every namespace, `getNextGenClient()` and its cached
+`_nextGenClient`, a next-gen resource's `_client`, and `live.auth` /
+`live.webSocketFactory`. A method is decided by the path it is reached at, so
+`chats.modelsModule.generateContent`, the SDK's raw `Models` under another name,
+is refused. **`files.upload` sends the file's bytes with no PII scan.** It is
+refused for that reason; listing it in `allowUngoverned` runs it audited as
+`ungoverned_call` but unredacted, as does uploading on the original client. A
+duck-typed Google client is guarded by shape: any object on it with a function
+member or an accessor is treated as a namespace. **The shape check is
+member-level.** An object with methods (an SDK resource, or a duck-typed
+namespace) nested inside plain data, meaning an object or array with no function
+member or accessor of its own, is returned as data, and its methods run raw. On the
+real `@google/genai` the classification pin test fails on that shape for the
+classified version; on a duck-typed client, nothing catches it.
+**`models.generateContentStream` is refused** when it would run automatic
+function calling (a streamed loop of provider rounds, which usertrust does not
+yet meter round by round); `models.generateContent` with it is metered per round
+instead, each round its own governed call. Use `generateContent`, or disable AFC with
 `config.automaticFunctionCalling.disable: true`, to have the stream governed. The
 check needs plain objects: a Proxy in `params`, `config`, `config.tools`, a tool or
 `config.automaticFunctionCalling` is refused, because a Proxy can show the check

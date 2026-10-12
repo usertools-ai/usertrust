@@ -1618,8 +1618,8 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 ### Client detection
 
 **Duck typing only; never import a provider SDK at runtime.** `detect.ts` imports types only.
-`@anthropic-ai/sdk` and `openai` are **optional** peer dependencies; Google has no peer entry at
-all. Their floors (`>=0.116.0`, `>=7.4.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
+`@anthropic-ai/sdk`, `openai` and `@google/genai` are **optional** peer dependencies. Their floors
+(`>=0.116.0`, `>=7.4.0`, `>=1.52.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
 versions the default-deny free list was classified on. Moving a floor means re-running that
 classification against the new SDK, and `default-deny.test.ts` fails if the floor and the
 constant disagree.
@@ -1628,9 +1628,9 @@ constant disagree.
 `messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected), OpenAI
 `chat.completions.create` and `responses.create` when present, Google `models.generateContent`
 and `models.generateContentStream`.
-**Anthropic and OpenAI clients are default-deny** (`default-deny.ts`): every other function-valued
+**Every client is default-deny** (`default-deny.ts`): every other function-valued
 SDK member reached off the governed client, at any depth, is refused through ONE function,
-`refuseUngovernedMethod` in `trust()` (the same one Google's refusals use, below), which first runs
+`refuseUngovernedMethod` in `trust()` (the same one Google's AFC refusals use, below), which first runs
 the degraded-audit preflight (under `failClosed`, a writer already degraded refuses with
 `AuditDegradedError` before anything is recorded), then writes `policy_denied` at the denial boundary
 and rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
@@ -1642,23 +1642,32 @@ exceptions. Each entry cites its SDK source line and verb; they run with the RAW
 is re-wrapped by the same governor, unless an option outside `GOVERNED_WITH_OPTIONS_KEYS` (an
 allow-list) changes the transport, when the new client is a refusing stand-in. A POST is freed only with a reason it cannot start billable work, written in both places; a create that can
 allocate storage is not free. If you add a governed surface, update that doc block and the free list.
-**Google clients are not default-deny**: a listed set of Google's billable methods is **refused**
-by name (`GOOGLE_REFUSED_METHODS` in `govern.ts`:
-`models.embedContent/generateImages/editImage/upscaleImage/generateVideos/recontextImage/
-segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create/
-createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create/update`,
-`fileSearchStores.uploadToFileSearchStore/importFile`), through the same `refuseUngovernedMethod`;
-calls that are not billed
-(`models.countTokens/list/get`, `caches.get`, `files`, and the like) pass through. With automatic
+A method wrapper is cached per (path, raw target, name), so a method keeps its identity across
+reads; a refused wrapper builds a fresh error per call.
+**Google clients are default-deny through the same boundary**, with four Google rules in
+`default-deny.ts`:
+- members are read with the RAW target as receiver, so the `interactions` / `webhooks` getters run
+  on the raw client (they call `this.getNextGenClient()` and cache on `this`);
+- the raw transport is a refusing stand-in BY NAME, matched before anything else: `apiClient`
+  (client and every namespace), `_client`, `_nextGenClient`, and `auth` / `webSocketFactory`
+  under `live` (`GOOGLE_RAW_MEMBERS`, `GOOGLE_TRANSPORT_OBJECTS`);
+- a resource is recognised by SHAPE (`isResource`): it carries `apiClient` or `_client`, or it is a
+  non-array object with a function member or an accessor, own or inherited below
+  `Object.prototype`, read through descriptors so no getter runs. A duck-typed client's namespaces
+  are guarded too; plain data (`httpOptions`) is returned as it is, unexamined;
+- a method is decided by its PATH: `chats.modelsModule` (the raw `Models`) and the cached
+  `_interactions` / `_webhooks` are guarded at their own paths, where nothing is free.
+`FREE_METHODS.google` cites `dist/node/index.mjs:LINE VERB path` per entry.
+`GOOGLE_REFUSED_METHODS` in `govern.ts` is a HINT table only (its names get the governAction() hint);
+it refuses nothing itself. With automatic
 function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in `google-afc.ts`, a mirror of the
 SDK's `shouldDisableAfc`, made on a snapshot of the request that is then what is forwarded),
 `models.generateContent` runs the loop itself, each round its own governed call
-(`runGovernedAfc`), and `models.generateContentStream` is refused the same way (a streamed loop is
-not metered per round yet). The refused list is NOT a boundary: everything else on a Google client
-passes through, including other paths to the same endpoints (`models.*Internal`, e.g.
-`generateContentInternal`, which also bypasses the per-round AFC metering; `getNextGenClient()`;
-`chats.modelsModule`; `apiClient` on the client and every namespace). Google default-deny is the
-planned fix. If you add a governed or refused Google surface, update `detect.ts`.
+(`runGovernedAfc`, which calls the SDK's own `generateContentInternal` on the RAW `models`), and
+`models.generateContentStream` is refused (a streamed loop is not metered per round yet).
+`google-default-deny.test.ts` pins the classification: it walks a real Gemini and Vertex client and
+fails on a function the table does not name, or a callable object left raw. If you add a governed
+or free Google surface, update `detect.ts`, the free list and that table.
 
 ---
 
