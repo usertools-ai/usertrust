@@ -304,3 +304,42 @@ describe("nominal units are headlined, never dollar-formatted", () => {
 		expect([asDollars, asUnits, walletAsDollars]).toBeDefined();
 	});
 });
+
+describe("unrecoverable and unrecognised records are disclosed in every format", () => {
+	const ok = { verified: true, errors: [], chainLength: 2, firstEvent: "a", lastEvent: "b" };
+	const mk = (kind: string, data: Record<string, unknown>): PersistedAuditEvent =>
+		({
+			id: "i",
+			kind,
+			timestamp: "2026-10-11T00:00:00Z",
+			actor: "local",
+			hash: "h",
+			data,
+		}) as unknown as PersistedAuditEvent;
+
+	it("md, html and json show the unrecoverable call with usage and no dollar value, and the unknown kind", () => {
+		const m = buildWeeklyReport(
+			[
+				mk("settlement_unrecoverable", {
+					usage: { inputTokens: 40, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 0 },
+				}),
+				mk("future_kind<script>", {}),
+			],
+			ok,
+			{ endMs: END },
+		);
+		for (const f of ["md", "html"] as const) {
+			const out = render(m, f);
+			expect(out, f).toMatch(/Served but never charged/);
+			expect(out, f).toMatch(/40 input/);
+			expect(out, f).toMatch(/Records this report does not read/);
+			expect(out, f).not.toContain("<script>"); // the kind is chain text: neutralised
+		}
+		const json = JSON.parse(render(m, "json")) as {
+			unrecoverable: { records: number };
+			unrecognised: Record<string, number>;
+		};
+		expect(json.unrecoverable.records).toBe(1);
+		expect(json.unrecognised).toEqual({ "future_kind<script>": 1 });
+	});
+});

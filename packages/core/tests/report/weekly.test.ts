@@ -531,6 +531,37 @@ describe("weekly report model", () => {
 		expect(m.byModel.map((r) => r.key)).not.toContain("unknown");
 	});
 
+	it("a settlement_unrecoverable record is disclosed with its usage and no dollar value, in no spend total", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 100),
+			ev("settlement_unrecoverable", "2026-10-08T02:00:00Z", {
+				transferIdHash: "a".repeat(64),
+				usage: { inputTokens: 40, outputTokens: 7, cacheReadTokens: 900, cacheWriteTokens: 3 },
+				source: "headless",
+			}),
+		]);
+		expect(m.unrecoverable).toEqual({
+			records: 1,
+			inputTokens: 40,
+			outputTokens: 7,
+			cacheReadTokens: 900,
+			cacheWriteTokens: 3,
+		});
+		expect(m.totals.confirmedUt).toBe(100); // spend is unchanged
+		expect(m.unrecognised).toEqual({}); // it is READ, not "unrecognised"
+	});
+
+	it("a record of an invented kind is counted as unrecognised, never dropped", () => {
+		const m = build([
+			ev("brand_new_kind", "2026-10-08T02:00:00Z", { x: 1 }),
+			ev("brand_new_kind", "2026-10-08T03:00:00Z", { x: 2 }),
+			ev("another_kind", "2026-10-08T04:00:00Z", {}),
+			ev("policy_denied", "2026-10-08T05:00:00Z", {}), // known: governance, not unrecognised
+		]);
+		expect(m.unrecognised).toEqual({ another_kind: 1, brand_new_kind: 2 });
+		expect(m.totals.confirmedUt).toBe(0);
+	});
+
 	it("an unknown future record kind beside a call unconfirms it by default; shortfall and implausible do not", () => {
 		const m = build([
 			call("2026-10-08T01:00:00Z", 100, { transferId: "t-s" }),

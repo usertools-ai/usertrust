@@ -274,6 +274,29 @@ export function renderMarkdown(m: ReportModel): string {
 		"",
 	);
 
+	const r = m.unrecoverable;
+	if (r.records > 0) {
+		out.push(
+			"### Served but never charged",
+			"",
+			`${r.records} call(s) were served by the provider after their hold was lost, so the ledger never charged them. Reported usage: ${tokens(r.inputTokens)} input, ${tokens(r.outputTokens)} output, ${tokens(r.cacheReadTokens)} cache-read and ${tokens(r.cacheWriteTokens)} cache-write tokens. There is no dollar value: they are in no spend or budget figure.`,
+			"",
+		);
+	}
+	const kinds = Object.entries(m.unrecognised);
+	if (kinds.length > 0) {
+		out.push(
+			"### Records this report does not read",
+			"",
+			"Records of these kinds are in the chain but this report has no reading for them; they are counted here so none vanishes silently.",
+			"",
+			"| Kind | Count |",
+			"|---|---:|",
+			...kinds.map(([kind, n]) => `| ${md(kind)} | ${n} |`),
+			"",
+		);
+	}
+
 	out.push("## Notes", "");
 	if (m.notes.length === 0) out.push("None.", "");
 	// Notes are authored by the model builder from counts and fixed text, never from a vault string.
@@ -391,6 +414,20 @@ export function renderHtml(m: ReportModel): string {
 		`<h3>Governance activity (counts only)</h3><table><tbody>${Object.entries(m.governance)
 			.map(([kind, n]) => `<tr><td>${esc(kind)}</td><td class="n">${n}</td></tr>`)
 			.join("")}</tbody></table>`,
+		...(m.unrecoverable.records > 0
+			? [
+					`<h3>Served but never charged</h3><p>${m.unrecoverable.records} call(s) were served by the provider after their hold was lost, so the ledger never charged them. Reported usage: ${tokens(m.unrecoverable.inputTokens)} input, ${tokens(m.unrecoverable.outputTokens)} output, ${tokens(m.unrecoverable.cacheReadTokens)} cache-read and ${tokens(m.unrecoverable.cacheWriteTokens)} cache-write tokens. There is no dollar value: they are in no spend or budget figure.</p>`,
+				]
+			: []),
+		...(Object.keys(m.unrecognised).length > 0
+			? [
+					`<h3>Records this report does not read</h3><p>Records of these kinds are in the chain but this report has no reading for them; they are counted here so none vanishes silently.</p><table><tbody>${Object.entries(
+						m.unrecognised,
+					)
+						.map(([kind, n]) => `<tr><td>${esc(kind)}</td><td class="n">${n}</td></tr>`)
+						.join("")}</tbody></table>`,
+				]
+			: []),
 		`<h2>Notes</h2>${m.notes.length === 0 ? "<p>None.</p>" : `<ul>${m.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`}`,
 		`<h2>What this report does not claim</h2><ul>${NOT_CLAIMED.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`,
 	);

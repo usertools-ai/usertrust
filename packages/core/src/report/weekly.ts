@@ -270,6 +270,22 @@ export interface ReportModel {
 		possiblyOverBudget: boolean;
 	};
 	governance: Record<string, number>;
+	/**
+	 * `settlement_unrecoverable`: the provider SERVED the call but its hold was gone and the ledger never charged it. The
+	 * record has usage and NO cost, so it is disclosed here (a count and the reported usage) and is in NO spend total.
+	 */
+	unrecoverable: {
+		records: number;
+		inputTokens: number;
+		outputTokens: number;
+		cacheReadTokens: number;
+		cacheWriteTokens: number;
+	};
+	/**
+	 * Records in the window of a kind this report does not read (anything outside the closed set it knows), counted by
+	 * kind. A new record kind can never vanish silently: it shows up here until the report learns to read it.
+	 */
+	unrecognised: Record<string, number>;
 	notes: string[];
 }
 
@@ -283,6 +299,15 @@ const GOVERNANCE_KINDS = [
 	"hold_released",
 	"settlement_ambiguous",
 ] as const;
+
+/** Every record kind this report reads or deliberately ignores. A kind outside this set is disclosed as unrecognised. */
+const KNOWN_KINDS: ReadonlySet<string> = new Set([
+	"llm_call",
+	"settlement_shortfall",
+	"usage_implausible",
+	"settlement_unrecoverable",
+	...GOVERNANCE_KINDS,
+]);
 
 /** Kinds that are never a governed action, even if one day they carry a `cost`. */
 const NON_ACTION_KINDS = new Set<string>([
@@ -599,6 +624,14 @@ function buildPlain(
 	const governance: Record<string, number> = Object.fromEntries(
 		GOVERNANCE_KINDS.map((k) => [k, 0]),
 	);
+	const unrecoverable = {
+		records: 0,
+		inputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+	};
+	const unrecognised = new Map<string, number>();
 	let shortfallEvents = 0;
 	let shortfallUt = 0;
 	let recordedSessionUt = 0;
@@ -817,6 +850,20 @@ function buildPlain(
 				t.unconfirmedActionUt += c;
 				t.unconfirmedActionCalls += 1;
 			}
+		} else if (e.kind === "settlement_unrecoverable") {
+			// Served, never charged: usage and no cost. Disclosed, in no spend or budget figure.
+			unrecoverable.records += 1;
+			const u = e.data["usage"];
+			const uu = u !== null && typeof u === "object" ? (u as Record<string, unknown>) : {};
+			unrecoverable.inputTokens += count(uu["inputTokens"]);
+			unrecoverable.outputTokens += count(uu["outputTokens"]);
+			unrecoverable.cacheReadTokens += count(uu["cacheReadTokens"]);
+			unrecoverable.cacheWriteTokens += count(uu["cacheWriteTokens"]);
+		} else if (!KNOWN_KINDS.has(e.kind) && !e.kind.endsWith("_failed")) {
+			// A kind outside the closed set this report reads: counted, never dropped. Bounded so hostile kinds cannot
+			// grow the table without limit.
+			const key = unrecognised.size >= 50 && !unrecognised.has(e.kind) ? "(more kinds)" : e.kind;
+			unrecognised.set(key, (unrecognised.get(key) ?? 0) + 1);
 		}
 	}
 
@@ -965,6 +1012,10 @@ function buildPlain(
 					configured,
 		},
 		governance,
+		unrecoverable,
+		unrecognised: Object.fromEntries(
+			[...unrecognised.entries()].sort(([a], [b]) => a.localeCompare(b)),
+		),
 		notes,
 	};
 }
