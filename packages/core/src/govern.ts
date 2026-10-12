@@ -1292,6 +1292,28 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		costCalculator: scopedAnomalyCostCalculator(config),
 	});
 
+	// Under audit.failClosed, a writer that is ALREADY degraded when a call starts refuses the call
+	// before it does anything: no hold, no provider call or action, no spend, no audit append. A
+	// handle's degraded state lasts the client's whole life, so such a call was always going to be
+	// refused — and the post-settle checks below would refuse it only after its charge had posted.
+	// Those checks stay, for a writer that degrades DURING a call. Deliberately, a probe that throws
+	// is not read as degraded here: the call proceeds as before and the post-settle check reads the
+	// probe again and surfaces its error (the shipped writer's probe is a plain getter).
+	function refuseIfAuditDegradedAtStart(refused: string): void {
+		if (!config.audit.failClosed) return;
+		let degraded: boolean;
+		try {
+			degraded = audit.isDegraded();
+		} catch {
+			return;
+		}
+		if (degraded) {
+			throw new AuditDegradedError(
+				`this client's audit writer has been degraded since an earlier audit write failed (writeFailures=${audit.getWriteFailures()}), so ${refused} and nothing was charged. Fix the audit directory, then recreate the client`,
+			);
+		}
+	}
+
 	// 7. Two-phase intercept
 	async function interceptCall(
 		originalFn: (...args: unknown[]) => unknown,
@@ -1313,6 +1335,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		if (destroyed) {
 			throw new Error("TrustedClient has been destroyed");
 		}
+
+		refuseIfAuditDegradedAtStart("this call was refused before it reached the provider");
 
 		// Track in-flight calls so destroy() can wait for them
 		inFlightCount++;
@@ -3167,6 +3191,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				`action.cost must be a non-negative finite number, got ${String(action.cost)}`,
 			);
 		}
+
+		refuseIfAuditDegradedAtStart("this action was refused before it ran");
 
 		inFlightCount++;
 		let callAuditDegraded = false;
