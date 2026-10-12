@@ -1216,3 +1216,212 @@ describe("Proxy-backed AFC inputs are refused before anything is forwarded", () 
 		});
 	}
 });
+
+// ── What is forwarded is what was checked: the AFC snapshot ──
+
+/** An engine whose hold waits on `release()`: the window in which a caller could mutate. */
+function makeGatedEngine() {
+	let release!: () => void;
+	const gate = new Promise<void>((r) => {
+		release = r;
+	});
+	let entered!: () => void;
+	const holdEntered = new Promise<void>((r) => {
+		entered = r;
+	});
+	const engine = makeMockEngine();
+	engine.spendPending = vi.fn(async (p: { transferId: string; amount: number }) => {
+		entered();
+		await gate;
+		return { transferId: p.transferId };
+	}) as TrustEngine["spendPending"];
+	return { engine, holdEntered, release };
+}
+
+describe("the request is forwarded as a snapshot of the checked AFC config", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	/**
+	 * Start the call, wait until authorization is holding, run `mutate` on the caller's
+	 * params, then let the call finish. Returns what the SDK received and what the
+	 * CALLER's params looked like at the moment the SDK was called.
+	 */
+	async function callWithMutation(
+		method: (typeof AFC_METHODS)[number],
+		params: Record<string, unknown>,
+		mutate: (p: Record<string, unknown>) => void,
+	) {
+		const { engine, holdEntered, release } = makeGatedEngine();
+		const { client, generateContentStream } = makeGoogleClient();
+		const sdk =
+			method === "generateContent" ? client.models.generateContent : generateContentStream;
+		const callerAtSdkCall: { config?: unknown; tools?: unknown[]; disable?: unknown } = {};
+		const original = sdk.getMockImplementation();
+		sdk.mockImplementationOnce(async (received: Record<string, unknown>) => {
+			const config = params.config as Record<string, unknown>;
+			callerAtSdkCall.tools = [...(config.tools as unknown[])];
+			callerAtSdkCall.disable = (
+				config.automaticFunctionCalling as Record<string, unknown> | undefined
+			)?.disable;
+			// biome-ignore lint/style/noNonNullAssertion: the fake always has an implementation
+			return original!(received) as never;
+		});
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const pending = callModels(governed, method, params);
+		await holdEntered;
+		mutate(params);
+		release();
+		const receipt = (await pending) as TrustReceipt;
+		const received = sdk.mock.calls[0]?.[0] as Record<string, unknown>;
+		await destroy(governed);
+		return { receipt, received, callerAtSdkCall, sdk };
+	}
+
+	for (const method of AFC_METHODS) {
+		it(`${method}: a callable tool added to config.tools during authorization never reaches the SDK`, async () => {
+			const params = afcParams({ tools: [{ googleSearch: {} }] });
+			const added = callableTool();
+			const { receipt, received, callerAtSdkCall, sdk } = await callWithMutation(
+				method,
+				params,
+				(p) => {
+					((p.config as Record<string, unknown>).tools as unknown[]).push(added);
+				},
+			);
+
+			// The mutation really happened, before the SDK was called...
+			expect(callerAtSdkCall.tools).toHaveLength(2);
+			expect(callerAtSdkCall.tools?.[1]).toBe(added);
+			// ...and the SDK received the snapshot: one data tool, no callable one.
+			expect(sdk).toHaveBeenCalledOnce();
+			expect(received).not.toBe(params);
+			const tools = (received.config as Record<string, unknown>).tools as unknown[];
+			expect(tools).toEqual([{ googleSearch: {} }]);
+			expect(tools.some((t) => typeof (t as { callTool?: unknown }).callTool === "function")).toBe(
+				false,
+			);
+			expect(receipt.settled).toBe(true);
+		});
+
+		it(`${method}: automaticFunctionCalling.disable flipped to false during authorization is not seen by the SDK`, async () => {
+			const tool = callableTool();
+			const params = afcParams({ tools: [tool], automaticFunctionCalling: { disable: true } });
+			const { received, callerAtSdkCall, sdk } = await callWithMutation(method, params, (p) => {
+				(
+					(p.config as Record<string, unknown>).automaticFunctionCalling as Record<string, unknown>
+				).disable = false;
+			});
+
+			expect(callerAtSdkCall.disable).toBe(false);
+			expect(sdk).toHaveBeenCalledOnce();
+			const config = received.config as Record<string, unknown>;
+			expect((config.automaticFunctionCalling as Record<string, unknown>).disable).toBe(true);
+			expect(config.automaticFunctionCalling).not.toBe(
+				(params.config as Record<string, unknown>).automaticFunctionCalling,
+			);
+		});
+
+		it(`${method}: a non-callable tool that cannot be copied as data, with AFC enabled, is refused`, async () => {
+			const engine = makeMockEngine();
+			const audit = makeMockAudit();
+			const { client, generateContentStream } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: audit,
+			});
+			const params = afcParams({
+				tools: [{ googleSearch: {} }, { googleSearch: {}, hook: () => 1 }],
+			});
+
+			const err = await callModels(governed, method, params).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect((err as Error).message).toContain(
+				`models.${method} could not be checked for automatic function calling (params.config.tools[1] cannot be copied as data)`,
+			);
+			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+			expect(engine.spendPending).not.toHaveBeenCalled();
+			expect(client.models.generateContent).not.toHaveBeenCalled();
+			expect(generateContentStream).not.toHaveBeenCalled();
+			await destroy(governed);
+		});
+
+		it(`${method}: AFC disabled with callable tools is governed, and the SDK receives the same tool references`, async () => {
+			const engine = makeMockEngine();
+			const { client, generateContentStream } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: makeMockAudit(),
+			});
+			const tools = [callableTool(), callableFunctionTool()];
+			const params = afcParams({ tools, automaticFunctionCalling: { disable: true } });
+
+			const receipt = (await callModels(governed, method, params)) as TrustReceipt;
+
+			expect(receipt.settled).toBe(true);
+			const sdk =
+				method === "generateContent" ? client.models.generateContent : generateContentStream;
+			const received = sdk.mock.calls[0]?.[0] as Record<string, unknown>;
+			const receivedTools = (received.config as Record<string, unknown>).tools as unknown[];
+			expect(receivedTools).not.toBe(tools);
+			expect(receivedTools[0]).toBe(tools[0]);
+			expect(receivedTools[1]).toBe(tools[1]);
+			await destroy(governed);
+		});
+
+		it(`${method}: a plain data-only request is governed, and the SDK receives an equal but not identical config`, async () => {
+			const engine = makeMockEngine();
+			const { client, generateContentStream } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: makeMockAudit(),
+			});
+			const params = afcParams({
+				tools: [{ googleSearch: {} }],
+				temperature: 0.2,
+				automaticFunctionCalling: { maximumRemoteCalls: 3 },
+			});
+
+			const receipt = (await callModels(governed, method, params)) as TrustReceipt;
+
+			expect(receipt.settled).toBe(true);
+			const sdk =
+				method === "generateContent" ? client.models.generateContent : generateContentStream;
+			const received = sdk.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(received).toEqual(params);
+			expect(received).not.toBe(params);
+			expect(received.config).not.toBe(params.config);
+			expect((received.config as Record<string, unknown>).tools).not.toBe(
+				(params.config as Record<string, unknown>).tools,
+			);
+			// Outside the AFC parts, the values are the caller's own (shallow copy).
+			expect(received.contents).toBe(params.contents);
+			await destroy(governed);
+		});
+	}
+});

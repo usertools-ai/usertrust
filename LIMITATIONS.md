@@ -35,7 +35,11 @@ usertrust cannot yet meter round by round); disable it with
 `config.automaticFunctionCalling.disable: true` to have the call governed. The
 check needs plain objects: a Proxy in `params`, `config`, `config.tools`, a tool or
 `config.automaticFunctionCalling` is refused, because a Proxy can show the check
-one config and the SDK another.
+one config and the SDK another. The request is forwarded as a snapshot of the
+checked config (with AFC not disabled, each non-callable tool must be copyable as
+data), so a later change to the caller's `config.tools` or
+`config.automaticFunctionCalling` cannot reach the SDK. The snapshot covers those
+AFC fields only: `contents` and the rest of the request are still read live.
 usertrust never pretends to govern these — the exact, current boundary is
 enumerated at the source in `packages/core/src/detect.ts`.
 

@@ -4806,7 +4806,7 @@ function ownStringDataProperty(obj: unknown, key: string): string | undefined {
 type GoogleAfcVerdict =
 	| { kind: "afc" }
 	| { kind: "no_afc" }
-	| { kind: "indeterminate"; proxyAt?: string };
+	| { kind: "indeterminate"; proxyAt?: string; uncloneableAt?: string };
 
 /** A value property access would yield, found WITHOUT running a getter. */
 type DataRead = { value: unknown } | undefined;
@@ -4865,6 +4865,22 @@ function isCallableToolLike(tool: unknown, at: string): boolean {
 		throw INDETERMINATE;
 	}
 	return typeof dataValue(tool, "callTool", at) === "function";
+}
+
+/**
+ * The SDK's invalid-`maximumRemoteCalls` rule, which DISABLES AFC:
+ * `(n && (n < 0 || !Number.isInteger(n))) || n == 0`. A value whose comparison would run
+ * caller code (`valueOf` on an object or function) or throw (a symbol) is indeterminate.
+ */
+function sdkDisablesForMaxCalls(maxCalls: unknown): boolean {
+	if (maxCalls !== null && (typeof maxCalls === "object" || typeof maxCalls === "function")) {
+		throw INDETERMINATE;
+	}
+	if (typeof maxCalls === "symbol") throw INDETERMINATE;
+	// biome-ignore lint/suspicious/noExplicitAny: the SDK's own loose comparison, mirrored verbatim
+	const n = maxCalls as any;
+	// biome-ignore lint/suspicious/noDoubleEquals: `== 0` is the SDK's test (it also matches "0" and false)
+	return Boolean((n && (n < 0 || !Number.isInteger(n))) || n == 0);
 }
 
 /** The tools list as the SDK iterates it (`config?.tools ?? []`); only a plain array is read. */
@@ -4927,15 +4943,7 @@ export function googleAfcVerdict(
 			}
 		}
 		if (!callablePresent) return NO_AFC;
-		const maxCalls = dataValue(afcConfig, "maximumRemoteCalls", afcAt);
-		if (maxCalls !== null && (typeof maxCalls === "object" || typeof maxCalls === "function")) {
-			throw INDETERMINATE;
-		}
-		if (typeof maxCalls === "symbol") throw INDETERMINATE;
-		// biome-ignore lint/suspicious/noExplicitAny: the SDK's own loose comparison, mirrored verbatim
-		const n = maxCalls as any;
-		// biome-ignore lint/suspicious/noDoubleEquals: `== 0` is the SDK's test (it also matches "0" and false)
-		if ((n && (n < 0 || !Number.isInteger(n))) || n == 0) return NO_AFC;
+		if (sdkDisablesForMaxCalls(dataValue(afcConfig, "maximumRemoteCalls", afcAt))) return NO_AFC;
 		// The SDK's own pre-request throws (step 2) — not refused here. Their inputs are
 		// Proxy-checked too: a lying `length` or flag would turn "the SDK throws" into a
 		// forwarded call that runs the AFC loop.
@@ -4970,10 +4978,204 @@ export function googleAfcVerdict(
 	}
 }
 
+/** Thrown while snapshotting when a tool cannot be copied as data; carries where. */
+class UncloneableAfcInput {
+	constructor(readonly at: string) {}
+}
+
+/**
+ * `obj` as an object WE own, for an AFC-relevant config object: every own property must
+ * be a data property (an accessor is indeterminate), and the named `keys` are also
+ * resolved through the prototype chain, as the SDK's plain reads would find them. The
+ * values are the caller's (shallow); the fields the AFC decision reads are primitives.
+ */
+function ownedDataCopy(obj: unknown, at: string, keys: readonly string[]): unknown {
+	if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) return obj;
+	rejectProxy(obj, at);
+	const out: Record<string | symbol, unknown> = {};
+	for (const key of Reflect.ownKeys(obj)) {
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		if (d === undefined) continue;
+		if (!("value" in d)) throw INDETERMINATE;
+		out[key] = d.value;
+	}
+	for (const key of keys) {
+		if (!Object.hasOwn(out, key)) {
+			const value = dataValue(obj, key, at);
+			if (value !== undefined) out[key] = value;
+		}
+	}
+	return out;
+}
+
+/** Copy `obj`'s own properties, descriptor for descriptor, onto a fresh object with its prototype. */
+function shallowDescriptorCopy(obj: object): Record<string | symbol, unknown> {
+	const out = Object.create(Object.getPrototypeOf(obj)) as Record<string | symbol, unknown>;
+	for (const key of Reflect.ownKeys(obj)) {
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		if (d !== undefined) Object.defineProperty(out, key, d);
+	}
+	return out;
+}
+
+function setData(obj: Record<string | symbol, unknown>, key: string, value: unknown): void {
+	Object.defineProperty(obj, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
+/**
+ * "Send what was checked", for AUTOMATIC FUNCTION CALLING only. The SDK reads
+ * `params.config` after an `await` (`generateContent` awaits
+ * `processParamsMaybeAddMcpUsage(params)` before `hasCallableTools` /
+ * `shouldDisableAfc`), and the governor itself awaits authorization first, so a caller
+ * that keeps a reference could add a callable tool, or flip `disable`, after the check
+ * and before the SDK's read. The verdict therefore runs on — and the SDK receives — a
+ * snapshot whose AFC-relevant parts are objects the caller never held:
+ *
+ *   - `params` and `params.config`: fresh shallow copies (same prototype, same property
+ *     descriptors; fields the AFC decision does not read keep their live values/getters).
+ *   - `config.automaticFunctionCalling`, `config.toolConfig` and its
+ *     `functionCallingConfig`: copies of their data properties (an accessor is
+ *     indeterminate), so `disable`, `maximumRemoteCalls` and
+ *     `streamFunctionCallArguments` are values we own.
+ *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
+ *     non-callable tool is `structuredClone`d (a tool that cannot be copied as data is
+ *     indeterminate, so the call is refused naming it); callable tools keep their
+ *     reference, and the verdict refuses them. When the snapshot says AFC IS disabled
+ *     (`disable` truthy, or a `maximumRemoteCalls` the SDK reads as invalid), the tool
+ *     REFERENCES are kept: callable tools are the documented way to run tools yourself,
+ *     and they carry functions that cannot be cloned. That is safe because the
+ *     `disable` / `maximumRemoteCalls` the SDK will read are OUR copies: mutating a tool,
+ *     or the caller's config, afterwards cannot turn AFC back on.
+ *
+ * Every read follows the check's rules (own or inherited DATA properties, no accessor,
+ * no Proxy). This closes AFC only. A general snapshot (`contents`, and what the PII and
+ * injection scans read) is separate future work; everything outside `config`, and the
+ * non-AFC fields inside it, are still read live.
+ */
+function snapshotGoogleAfcParams(
+	params: unknown,
+): { params: unknown } | { verdict: Exclude<GoogleAfcVerdict, { kind: "no_afc" | "afc" }> } {
+	try {
+		if (params === null || (typeof params !== "object" && typeof params !== "function")) {
+			return { params }; // nothing a caller could mutate; the SDK handles the shape
+		}
+		rejectProxy(params, "params");
+		const config = dataValue(params, "config", "params");
+		const outParams = shallowDescriptorCopy(params);
+		if (config === null || (typeof config !== "object" && typeof config !== "function")) {
+			setData(outParams, "config", config);
+			return { params: outParams };
+		}
+		rejectProxy(config, "params.config");
+		const outConfig = shallowDescriptorCopy(config);
+
+		const afcAt = "params.config.automaticFunctionCalling";
+		const afcConfig = ownedDataCopy(
+			dataValue(config, "automaticFunctionCalling", "params.config"),
+			afcAt,
+			["disable", "maximumRemoteCalls", "ignoreCallHistory"],
+		);
+		setData(outConfig, "automaticFunctionCalling", afcConfig);
+
+		const toolConfigAt = "params.config.toolConfig";
+		const toolConfig = ownedDataCopy(
+			dataValue(config, "toolConfig", "params.config"),
+			toolConfigAt,
+			["functionCallingConfig"],
+		);
+		if (toolConfig !== null && typeof toolConfig === "object") {
+			const callingConfig = ownedDataCopy(
+				(toolConfig as Record<string, unknown>).functionCallingConfig,
+				`${toolConfigAt}.functionCallingConfig`,
+				["streamFunctionCallArguments"],
+			);
+			setData(toolConfig as Record<string, unknown>, "functionCallingConfig", callingConfig);
+		}
+		setData(outConfig, "toolConfig", toolConfig);
+
+		const tools = dataValue(config, "tools", "params.config");
+		// The AFC keys are always set as OWN data properties, `undefined` included: the
+		// copies keep the caller's prototypes, and an own key shadows anything a prototype
+		// could be given later.
+		setData(outConfig, "tools", tools);
+		if (tools !== undefined && tools !== null) {
+			rejectProxy(tools, "params.config.tools");
+			if (!Array.isArray(tools)) throw INDETERMINATE;
+			// The SNAPSHOT's own AFC switch, read the way the SDK reads it.
+			const disable = dataValue(afcConfig, "disable", afcAt);
+			const n = dataValue(afcConfig, "maximumRemoteCalls", afcAt);
+			// A value the rule cannot read without running caller code counts as NOT
+			// disabling here, which takes the stricter (cloning) path; the verdict decides
+			// about it only if a callable tool is present, as the SDK does.
+			let invalidMax = false;
+			try {
+				invalidMax = sdkDisablesForMaxCalls(n);
+			} catch {
+				invalidMax = false;
+			}
+			const afcDisabled = Boolean(disable) || invalidMax;
+			const outTools: unknown[] = new Array(tools.length);
+			for (let i = 0; i < tools.length; i++) {
+				if (!(i in tools)) continue; // keep holes as holes
+				const at = `params.config.tools[${i}]`;
+				const tool = dataValue(tools, String(i), "params.config.tools");
+				if (afcDisabled) {
+					outTools[i] = tool; // references: see the doc comment
+					continue;
+				}
+				if (tool !== null && (typeof tool === "object" || typeof tool === "function")) {
+					rejectProxy(tool, at);
+					if (typeof dataValue(tool, "callTool", at) === "function") {
+						outTools[i] = tool; // callable: the verdict refuses it
+						continue;
+					}
+				}
+				try {
+					outTools[i] = structuredClone(tool);
+				} catch {
+					throw new UncloneableAfcInput(at);
+				}
+			}
+			setData(outConfig, "tools", outTools);
+		}
+		setData(outParams, "config", outConfig);
+		return { params: outParams };
+	} catch (err) {
+		if (err instanceof ProxyInAfcInput)
+			return { verdict: { kind: "indeterminate", proxyAt: err.at } };
+		if (err instanceof UncloneableAfcInput) {
+			return { verdict: { kind: "indeterminate", uncloneableAt: err.at } };
+		}
+		return { verdict: { kind: "indeterminate" } };
+	}
+}
+
+/**
+ * The AFC gate both Google traps run before `intercept`: snapshot, then the verdict ON
+ * the snapshot. On "no_afc", `args[0]` is replaced by the snapshot, so what is forwarded
+ * is what was checked; otherwise the refusal error to reject with.
+ */
+function googleAfcGate(
+	args: unknown[],
+	method: "generateContent" | "generateContentStream",
+): PolicyDeniedError | undefined {
+	const snap = snapshotGoogleAfcParams(args[0]);
+	const verdict = "verdict" in snap ? snap.verdict : googleAfcVerdict(snap.params, method);
+	if (verdict.kind !== "no_afc") return googleAfcError(method, verdict);
+	if (args.length > 0 && "params" in snap) args[0] = snap.params;
+	return undefined;
+}
+
 function googleAfcError(
 	method: "generateContent" | "generateContentStream",
 	verdict: Exclude<GoogleAfcVerdict, { kind: "no_afc" }>,
 ): PolicyDeniedError {
+	if (verdict.kind === "indeterminate" && verdict.uncloneableAt !== undefined) {
+		return new PolicyDeniedError(
+			`ungoverned_method: models.${method} could not be checked for automatic function calling (${verdict.uncloneableAt} cannot be copied as data); pass plain objects`,
+			"With automatic function calling not disabled, the request is forwarded as a copy of what was checked, and a tool that structuredClone cannot copy (a function or symbol in it, other than a callable tool's callTool) cannot be. Pass plain data, or set config.automaticFunctionCalling.disable: true.",
+		);
+	}
 	if (verdict.kind === "indeterminate" && verdict.proxyAt !== undefined) {
 		return new PolicyDeniedError(
 			`ungoverned_method: models.${method} could not be checked for automatic function calling (a Proxy in ${verdict.proxyAt}); pass plain objects`,
@@ -5063,9 +5265,10 @@ function buildGoogleProxy<T>(
 			if (prop === "generateContent") {
 				return async (...args: unknown[]) => {
 					// ── AFC gate: fail closed until each AFC round is metered ──
-					const afc = googleAfcVerdict(args[0], "generateContent");
-					if (afc.kind !== "no_afc") {
-						return refuse("models.generateContent", args, googleAfcError("generateContent", afc));
+					// (snapshots args[0]: what is forwarded is what was checked)
+					const afcRefusal = googleAfcGate(args, "generateContent");
+					if (afcRefusal !== undefined) {
+						return refuse("models.generateContent", args, afcRefusal);
 					}
 					// ── end AFC gate ──
 					return intercept(originalGenerate, target, args);
@@ -5074,13 +5277,10 @@ function buildGoogleProxy<T>(
 			if (prop === "generateContentStream" && originalGenerateStream !== undefined) {
 				return async (...args: unknown[]) => {
 					// ── AFC gate: fail closed until each AFC round is metered ──
-					const afc = googleAfcVerdict(args[0], "generateContentStream");
-					if (afc.kind !== "no_afc") {
-						return refuse(
-							"models.generateContentStream",
-							args,
-							googleAfcError("generateContentStream", afc),
-						);
+					// (snapshots args[0]: what is forwarded is what was checked)
+					const afcRefusal = googleAfcGate(args, "generateContentStream");
+					if (afcRefusal !== undefined) {
+						return refuse("models.generateContentStream", args, afcRefusal);
 					}
 					// ── end AFC gate ──
 					const { response } = await intercept(originalGenerateStream, target, args);
