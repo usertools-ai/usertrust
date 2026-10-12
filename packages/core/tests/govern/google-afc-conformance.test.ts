@@ -474,6 +474,69 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 		await governed.destroy();
 	});
 
+	it('pii "redact": a callTool that later writes PII into the tool\'s own declaration object does not leak into later rounds', async () => {
+		const EMAIL = "alice@example.com";
+		const declaration = { functionDeclarations: [{ name: "lookup", description: "clean" }] };
+		const tool = {
+			// the SAME live object every time: a PII-free first answer is what redactPII hands back unchanged
+			tool: async () => declaration,
+			callTool: async () => {
+				declaration.functionDeclarations[0]!.description = EMAIL;
+				return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+			},
+		};
+		const m = scriptedModel(ROUNDS);
+		const sdk = new GoogleGenAI({ apiKey: "test" });
+		(sdk.models as unknown as Loose)["generateContentInternal"] = m.respond;
+		mkdirSync(join(vault, ".usertrust"), { recursive: true });
+		writeFileSync(
+			join(vault, ".usertrust", "usertrust.config.json"),
+			JSON.stringify({ budget: 500_000, pii: "redact" }),
+		);
+		const governed = await trust(sdk, { dryRun: true, budget: 500_000, vaultBase: vault });
+		await governed.models.generateContent({
+			model: "gemini-2.5-flash",
+			// the prompt holds PII, so the request is cloned and the SDK asks the tool through the clone
+			contents: EMAIL,
+			config: { tools: [tool] } as never,
+		});
+		expect(m.sentTools).toHaveLength(3);
+		// round 1 is clean, and the tool's later write never reaches round 2 or 3
+		expect(JSON.stringify(m.sentTools)).not.toContain(EMAIL);
+		await governed.destroy();
+	});
+
+	it("a class-instance request whose contents and config.tools are PROTOTYPE getters runs its rounds", async () => {
+		const tool = {
+			tool: async () => ({ functionDeclarations: [{ name: "lookup" }] }),
+			callTool: async () => [{ functionResponse: { name: "lookup", response: { ok: true } } }],
+		};
+		class Config {
+			get tools() {
+				return [tool];
+			}
+		}
+		class Request {
+			model = "gemini-2.5-flash";
+			get contents() {
+				return "go";
+			}
+			get config() {
+				return new Config();
+			}
+		}
+		const m = scriptedModel(ROUNDS);
+		const sdk = new GoogleGenAI({ apiKey: "test" });
+		(sdk.models as unknown as Loose)["generateContentInternal"] = m.respond;
+		const governed = await trust(sdk, { dryRun: true, budget: 500_000, vaultBase: vault });
+		const out = (await governed.models.generateContent(new Request() as never)) as unknown as {
+			receipts?: unknown[];
+		};
+		expect(out.receipts).toHaveLength(3);
+		expect(m.sent).toHaveLength(3);
+		await governed.destroy();
+	});
+
 	it("a FROZEN callable tool is governed like any other (no Proxy invariant to break)", async () => {
 		const makeFrozen = () => {
 			const seen: unknown[] = [];

@@ -49,6 +49,19 @@ function isCallableTool(tool: unknown): tool is CallableTool {
 	);
 }
 
+/** A deep copy of a declaration (plain data); one that cannot be copied is used as it is rather than failing the call. */
+function detach(value: unknown): unknown {
+	try {
+		return structuredClone(value);
+	} catch {
+		try {
+			return JSON.parse(JSON.stringify(value)) as unknown;
+		} catch {
+			return value;
+		}
+	}
+}
+
 /**
  * A callable tool whose `tool()` is asked ONCE per call, LAZILY, and answers every later round from that one answer.
  *
@@ -100,7 +113,9 @@ function snapshotTool(tool: CallableTool): CallableTool {
 				// Asked through the redacted request CLONE (pii "redact" with PII in the prompt): redact the answer itself, so
 				// the declaration the model sees has passed the same redaction as the rest of the request, whether it was held
 				// as state or in a closure. Asked through the wrapper (nothing was cloned): the answer as it is, as natively.
-				return this === wrapper ? declaration : redactPII(declaration).data;
+				// redactPII hands its input back UNCHANGED when it detects nothing, so redact a DETACHED copy: the memo must never
+				// alias the real tool's live object, or a later callTool() that writes PII into it would leak in later rounds.
+				return this === wrapper ? declaration : redactPII(detach(declaration)).data;
 			})();
 			return memo;
 		},
@@ -234,10 +249,20 @@ export async function runGovernedAfc(
 	params: Loose,
 	round: AfcRound,
 ): Promise<AfcRoundResult & { receipts: unknown[] }> {
-	// The request is read ONCE, as the SDK reads it, not re-read from the caller's object every round (a getter on the params or
-	// the config could answer differently on each read).
-	const baseParams: Loose = { ...params };
-	const config: Loose = { ...(params["config"] as Loose) };
+	// The request is read ONCE, as the SDK reads it, not re-read from the caller's object every round (a getter could answer
+	// differently on each read). The fields the loop consumes are read EXPLICITLY: a spread copies only own properties, so
+	// a `contents` or `tools` defined as a prototype getter (a class-instance request) would otherwise be lost.
+	const rawConfig = params["config"] as Loose;
+	const config: Loose = {
+		...rawConfig,
+		tools: rawConfig["tools"],
+		automaticFunctionCalling: rawConfig["automaticFunctionCalling"],
+	};
+	const baseParams: Loose = {
+		...params,
+		...(params["model"] !== undefined ? { model: params["model"] } : {}),
+		contents: params["contents"],
+	};
 	const afc = isObject(config["automaticFunctionCalling"])
 		? config["automaticFunctionCalling"]
 		: {};
