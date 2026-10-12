@@ -12,7 +12,7 @@ export interface LedgerData {
 	summary: SummaryPayload | null;
 	live: boolean;
 	/**
-	 * Ephemeral UI state (P6): ids that just arrived over SSE, kept for
+	 * Ephemeral UI state (P6): the event hashes of rows that just arrived over SSE, kept for
 	 * ~1.6s so the table can one-shot flash them. Never persisted — reset
 	 * on resync, pruned by per-batch timers so virtualization remounts
 	 * cannot re-trigger the flash.
@@ -95,12 +95,12 @@ export function useLedger(): LedgerData {
 				const novel = novelRows(d.rows, fresh);
 				if (novel.length === 0) return d;
 				const liveIds = new Set(d.liveIds);
-				for (const r of novel) liveIds.add(r.id);
+				for (const r of novel) liveIds.add(r.hash);
 				return { ...d, rows: [...d.rows, ...novel], liveIds };
 			});
 			// One-shot flash (P6): drop this batch's ids once the row-flash
 			// animation window has passed, so remounted virtual rows stay quiet.
-			const ids = fresh.map((r) => r.id);
+			const ids = fresh.map((r) => r.hash);
 			const timer = setTimeout(() => {
 				flashTimers.delete(timer);
 				setData((d) => {

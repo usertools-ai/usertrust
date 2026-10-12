@@ -135,9 +135,10 @@ export function AuditTable(props: {
 							return (
 								<button
 									type="button"
-									key={row.id}
+									// The event hash, unique on the chain: an id can repeat, and duplicate keys drop or duplicate rows.
+									key={row.hash}
 									onClick={() => props.onOpen(row)}
-									className={`absolute left-0 flex w-full border-b border-[var(--border)]/50 px-2 py-2 text-left text-xs tabular-nums transition-colors duration-100 hover:bg-[var(--panel-2)]${props.liveIds?.has(row.id) ? " row-live" : ""}`}
+									className={`absolute left-0 flex w-full border-b border-[var(--border)]/50 px-2 py-2 text-left text-xs tabular-nums transition-colors duration-100 hover:bg-[var(--panel-2)]${props.liveIds?.has(row.hash) ? " row-live" : ""}`}
 									style={{ top: 0, transform: `translateY(${item.start}px)` }}
 								>
 									<span className="w-32 shrink-0 text-[var(--muted)]" title={row.ts}>
