@@ -196,3 +196,35 @@ describe("forDisplay — characters that reorder or hide text are replaced too",
 		expect(out).not.toContain(rlo);
 	}, 60_000);
 });
+
+// An argv-named file that cannot be read: the read error's message quotes the path, which is caller text. Uncaught,
+// Node's own printer wrote it raw, escape sequences included, though the exit code was already 1.
+describe("a failed read of an argv-named anchor input is printed scrubbed", () => {
+	const esc = String.fromCharCode(0x1b);
+	// Each flag with what makes the CLI READ its file (anchor mode on; a successor pin is read only beside a pubkey):
+	// without them the file is never opened, and a row would pass on the hostile vault's own exit 1.
+	it.each([
+		["--rekor-pubkey", ["--require-anchor"]],
+		["--anchor", []],
+		["--rekor-receipts", []],
+		["--pubkey", []],
+		["--successor-pin", ["--pubkey", "READABLE_PEM"]],
+	] as const)(
+		"red-first (raw ESC on stderr): %s naming a missing file with ESC in its name exits 1, no ESC",
+		(flag, extra) => {
+			const dir = mkdtempSync(join(tmpdir(), "verify-cli-argv-"));
+			dirs.push(dir);
+			const readable = join(dir, "root.pem");
+			writeFileSync(readable, "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n");
+			const missing = join(dir, `nope${esc}[2KVERIFIED`);
+			const args = [...extra.map((a) => (a === "READABLE_PEM" ? readable : a)), flag, missing];
+			const res = runCli(hostileVault(), ...args);
+			expect(res.status).toBe(1);
+			// the failure is the READ, reported by the CLI, not the vault's own verdict
+			expect(res.stderr).toContain("Error:");
+			expect(res.stderr).toContain("nope?[2KVERIFIED");
+			expect(`${res.stdout}${res.stderr}`).not.toContain(esc);
+		},
+		60_000,
+	);
+});

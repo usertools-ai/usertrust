@@ -375,10 +375,37 @@ function printAnchorSection(result: AnchoredVaultVerificationResult): void {
 	}
 }
 
+/**
+ * Every failure on the way to a verdict ends here: printed through `forDisplay`, exit 1. The anchor inputs are files
+ * the caller names (`--anchor`, `--rekor-receipts`, `--rekor-pubkey`, `--pubkey`, `--successor-pin`), and a failed read's
+ * message quotes the path, so an uncaught one reached the terminal raw, escape sequences included, through Node's own
+ * uncaught-error printer.
+ */
+function failScrubbed(err: unknown): never {
+	console.error(`Error: ${forDisplay(err instanceof Error ? err.message : String(err))}`);
+	process.exit(1);
+}
+
+async function anchorParamsOrFail(): Promise<AnchorVerifyParams> {
+	try {
+		return await buildAnchorParams();
+	} catch (err) {
+		return failScrubbed(err);
+	}
+}
+
+function verifiedOrFail<T>(verify: () => T): T {
+	try {
+		return verify();
+	} catch (err) {
+		return failScrubbed(err);
+	}
+}
+
 // ── Single transaction mode ──
 if (txId !== undefined) {
-	const params = anchorMode ? await buildAnchorParams() : undefined;
-	const result = verifyTransaction(vaultPath, txId, params);
+	const params = anchorMode ? await anchorParamsOrFail() : undefined;
+	const result = verifiedOrFail(() => verifyTransaction(vaultPath, txId, params));
 	console.log(result.receipt);
 	// Exit 0: verified, 1: tampered/corrupted, 2: not found
 	if (!result.found) process.exit(2);
@@ -399,7 +426,7 @@ if (txId !== undefined) {
 
 // ── Full vault verification ──
 if (!anchorMode) {
-	const result = verifyVault(vaultPath);
+	const result = verifiedOrFail(() => verifyVault(vaultPath));
 	if (result.valid) {
 		console.log("Vault integrity: VERIFIED (UNANCHORED — internal consistency only)");
 	} else {
@@ -419,7 +446,8 @@ if (!anchorMode) {
 	process.exit(exitCodeFor(result));
 }
 
-const result = verifyVaultWithAnchors(vaultPath, await buildAnchorParams());
+const anchorParams = await anchorParamsOrFail();
+const result = verifiedOrFail(() => verifyVaultWithAnchors(vaultPath, anchorParams));
 if (result.valid) {
 	console.log(
 		result.anchorState === "ANCHORED_VERIFIED"
