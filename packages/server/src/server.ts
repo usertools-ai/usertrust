@@ -237,19 +237,39 @@ export function createUsertrustServer(opts: {
 }): UsertrustServer {
 	const { config } = opts;
 	const sink = opts.log ?? ((line: string): void => void process.stderr.write(`${line}\n`));
+	/** The line to stderr, if it can go anywhere at all: never throws. */
+	const toStderr = (line: string): void => {
+		try {
+			process.stderr.write(`${line}\n`);
+		} catch {
+			/* nowhere left to write it */
+		}
+	};
 	/**
-	 * The ONLY way this server writes a log line. A sink that throws is contained here, once: it
+	 * The ONLY way this server writes a log line. A sink that fails is contained here, once: it
 	 * must never stop a 500 from being sent, surface as an unhandled rejection, or break the
-	 * sweep's or shutdown's best-effort release. The line then goes to stderr if it can.
+	 * sweep's or shutdown's best-effort release. The line then goes to stderr if it can. A sink
+	 * may be async (`async (line) => …` satisfies `(line: string) => void`): a promise it returns
+	 * gets a rejection handler, so its failure is contained the same way as a synchronous throw.
 	 */
 	const log = (line: string): void => {
+		let returned: unknown;
 		try {
-			sink(line);
+			returned = sink(line);
 		} catch {
+			toStderr(line);
+			return;
+		}
+		if (
+			returned !== null &&
+			typeof returned === "object" &&
+			typeof (returned as PromiseLike<unknown>).then === "function"
+		) {
 			try {
-				process.stderr.write(`${line}\n`);
+				(returned as PromiseLike<unknown>).then(undefined, () => toStderr(line));
 			} catch {
-				/* nowhere left to write it */
+				// A hostile thenable whose `then` throws: the line still goes somewhere.
+				toStderr(line);
 			}
 		}
 	};

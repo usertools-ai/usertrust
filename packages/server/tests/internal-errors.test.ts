@@ -207,6 +207,60 @@ describe("a log sink that throws never breaks a request or a shutdown", () => {
 	}, 20_000);
 });
 
+describe("an ASYNC log sink that rejects is contained too", () => {
+	it("a forced 500 still answers 500, close() completes, and 0 rejections go unhandled", async () => {
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const fake = createFakeGovernor({ release: { throws: true } });
+			let failNext = false;
+			const governor: Governor = {
+				...fake.governor,
+				async authorize(params) {
+					if (failNext) throw new Error("governor exploded");
+					return fake.governor.authorize(params);
+				},
+			};
+			let sinkCalls = 0;
+			server = createUsertrustServer({
+				config: inProcessConfig(tmp("utsrv-err-async-sink-")),
+				factory: async () => governor,
+				// Type-checks against `(line: string) => void`; what it returns is a promise that rejects.
+				log: async () => {
+					sinkCalls += 1;
+					throw new Error("sink down");
+				},
+			});
+			const { port } = await server.listen();
+			const base = `http://127.0.0.1:${port}`;
+			const body = { model: "m", estimatedInputTokens: 1, maxOutputTokens: 1 };
+			expect((await post(base, "/v1/authorize", body)).status).toBe(200);
+			failNext = true;
+			const res = await fetch(`${base}/v1/authorize`, {
+				method: "POST",
+				headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
+				body: JSON.stringify(body),
+				signal: AbortSignal.timeout(5_000),
+			});
+			expect(res.status).toBe(500);
+			expect(await res.json()).toEqual(OPAQUE_500);
+			await server.close();
+			server = undefined;
+			// One for the 500, one for the failed shutdown release: both rejected.
+			expect(sinkCalls).toBe(2);
+			// A late rejection would surface within these turns.
+			await new Promise((resolve) => setImmediate(resolve));
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	}, 20_000);
+});
+
 describe("the log line never carries the caller's key", () => {
 	it.each([
 		["thrown inside a route (authorize)", "route"],
