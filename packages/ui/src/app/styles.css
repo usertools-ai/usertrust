@@ -5,7 +5,7 @@
  * These tokens are the ONLY colors in the app. Green (--verify) is EARNED
  * by verification: verified/integrity badges, the Verify button, the
  * VERIFIED verdict, and focus rings. Chart marks are --chart, never green.
- * Font weights 400/500/700 are imported in main.tsx (@fontsource, bundled).
+ * Fonts are the system stacks below: none is bundled or fetched.
  */
 
 :root {
@@ -25,7 +25,7 @@
 	--chart-dim: #3d478f;
 	--shadow: 0 8px 24px rgb(0 0 0 / 0.5);
 	--scrim: rgb(5 5 16 / 0.55);
-	--font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 	--font-sans: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
 	color-scheme: dark;
 }

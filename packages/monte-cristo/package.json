@@ -1,6 +1,7 @@
 {
 	"name": "usertrust-monte-cristo",
 	"version": "0.1.0",
+	"private": true,
 	"description": "Monte Carlo simulation foundation for usertrust governance — budget projection, policy what-if, risk quantification.",
 	"license": "Apache-2.0",
 	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",

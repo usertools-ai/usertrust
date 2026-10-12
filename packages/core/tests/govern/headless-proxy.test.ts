@@ -60,7 +60,7 @@ function makeMockAudit(): AuditWriter {
 	};
 }
 
-describe("headless governor — AUD-456 proxy mode removed", () => {
+describe("headless governor — proxy mode removed", () => {
 	let vaultBase: string;
 
 	beforeEach(() => {
@@ -90,7 +90,7 @@ describe("headless governor — AUD-456 proxy mode removed", () => {
 		).rejects.toThrow("proxy mode is not yet implemented");
 	});
 
-	it("createGovernor throws with AUD-456 reference in error message", async () => {
+	it("createGovernor throws the proxy-removal error", async () => {
 		const { createGovernor } = await import("../../src/headless.js");
 
 		await expect(
@@ -99,7 +99,7 @@ describe("headless governor — AUD-456 proxy mode removed", () => {
 				vaultBase,
 				proxy: "https://proxy.example.com",
 			}),
-		).rejects.toThrow("AUD-456");
+		).rejects.toThrow("proxy mode is not yet implemented");
 	});
 
 	it("error message suggests dryRun as alternative", async () => {

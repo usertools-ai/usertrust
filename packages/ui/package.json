@@ -41,7 +41,6 @@
 		"usertrust-verify": "*"
 	},
 	"devDependencies": {
-		"@fontsource/jetbrains-mono": "^5.1.0",
 		"@tailwindcss/vite": "^4.0.0",
 		"@tanstack/react-virtual": "^3.14.9",
 		"@types/react": "^19.2.18",
