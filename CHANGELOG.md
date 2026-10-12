@@ -188,6 +188,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Under `failClosed`, if the audit writer is already degraded, refusing an ungoverned Anthropic or OpenAI method attempts an audit append and rejects with `PolicyDeniedError` instead of refusing at once with `AuditDegradedError`. No call reaches the provider. Fixed in the next release.
 
+- With a ledger-backed usertrust-server, if the ledger becomes unreachable, authorize calls hang without an answer (health stays ok), and a request the client abandons can leave a hold reserved for up to 300 s after the ledger returns. Use a client timeout.
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold can exit before ending it: the hold may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+
 ## [4.1.0] - 2026-10-08
 
 ### Added
