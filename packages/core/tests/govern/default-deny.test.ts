@@ -830,6 +830,22 @@ const FREE_POSTS: Record<string, string> = {
 	"openai:conversations.items.create": "a state object; the spend lands on responses.create",
 };
 
+/**
+ * GET or DELETE methods that stay refused, by the free list's two categories. None may be on the
+ * free list, and each is refused through the governed client.
+ */
+const REFUSED_DESPITE_GET_OR_DELETE: Record<
+	string,
+	"starts billable work" | "lifts a spend control"
+> = {
+	"anthropic:beta.environments.work.poll": "starts billable work",
+	"openai:admin.organization.spendLimit.delete": "lifts a spend control",
+	"openai:admin.organization.projects.spendLimit.delete": "lifts a spend control",
+	"openai:admin.organization.spendAlerts.delete": "lifts a spend control",
+	"openai:admin.organization.projects.spendAlerts.delete": "lifts a spend control",
+	"openai:admin.organization.projects.modelPermissions.delete": "lifts a spend control",
+};
+
 /** The free methods that send nothing at all. */
 const FREE_LOCAL: Record<string, string> = {
 	"anthropic:beta.webhooks.unwrap": "verifies a signature locally",
@@ -919,6 +935,13 @@ describe("every free method sends only GET or DELETE, unless it is a named free 
 	const vaults: Record<string, string> = {};
 	const clients: Record<string, { governed: Loose; raw: Loose; requests: string[] }> = {};
 
+	/** The provider vault's audit chain as text: the refusal rows above write to it too. */
+	const auditText = (provider: string): string =>
+		readFileSync(join(vaults[provider] as string, VAULT_DIR, AUDIT_DIR, "events.jsonl"), {
+			encoding: "utf8",
+			flag: "a+",
+		});
+
 	beforeAll(async () => {
 		for (const provider of providers) {
 			const requests: string[] = [];
@@ -972,6 +995,21 @@ describe("every free method sends only GET or DELETE, unless it is a named free 
 		}
 	});
 
+	it.each(Object.keys(REFUSED_DESPITE_GET_OR_DELETE))(
+		"%s is refused despite its verb (the category in REFUSED_DESPITE_GET_OR_DELETE)",
+		async (key) => {
+			const [provider, path] = key.split(":") as ["anthropic" | "openai", string];
+			expect(FREE_METHODS[provider].has(path), `${key} is not on the free list`).toBe(false);
+			const c = clients[provider] as { governed: Loose; raw: Loose; requests: string[] };
+			c.requests.length = 0;
+			const { fn: rawFn } = resolveMember(c.raw, path);
+			expect(typeof rawFn, `${key} exists on the installed SDK`).toBe("function");
+			const { holder, name } = resolveMember(c.governed, path);
+			await expect(holder[name](...dummyArgs(rawFn))).rejects.toBeInstanceOf(PolicyDeniedError);
+			expect(c.requests, `${key} sent nothing`).toEqual([]);
+		},
+	);
+
 	it.each(
 		providers.flatMap((provider) =>
 			(methods[provider] ?? []).map((path) => [`${provider}:${path}`, provider, path] as const),
@@ -979,6 +1017,7 @@ describe("every free method sends only GET or DELETE, unless it is a named free 
 	)("%s", async (key, provider, path) => {
 		const c = clients[provider] as { governed: Loose; raw: Loose; requests: string[] };
 		c.requests.length = 0;
+		const eventsBefore = auditText(provider);
 		const { fn: rawFn } = resolveMember(c.raw, path);
 		expect(typeof rawFn, `${key} exists on the installed SDK`).toBe("function");
 		const { holder, name } = resolveMember(c.governed, path);
@@ -1006,14 +1045,7 @@ describe("every free method sends only GET or DELETE, unless it is a named free 
 		for (const r of c.requests) {
 			expect(allowed, `${key} sent ${r}`).toContain(r.split(" ")[0]);
 		}
-		const events = readFileSync(
-			join(vaults[provider] as string, VAULT_DIR, AUDIT_DIR, "events.jsonl"),
-			{
-				encoding: "utf8",
-				flag: "a+",
-			},
-		);
-		expect(events, `${key} wrote no audit event`).toBe("");
+		expect(auditText(provider), `${key} wrote no audit event`).toBe(eventsBefore);
 	});
 });
 

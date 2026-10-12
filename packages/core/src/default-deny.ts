@@ -80,7 +80,8 @@ export interface MethodBoundary {
 // and classified by the HTTP verb its source sends (`this._client.get/post/delete/…`, following
 // calls to sibling methods). The rule:
 //   - a method whose requests are all GET or DELETE is free: a read cannot start billable work,
-//     and a delete only reduces storage;
+//     and a delete only reduces storage; and a GET or DELETE is still refused when, in
+//     substance, it starts billable work or lifts a spend control (the two categories below);
 //   - a POST is free only for the reason written beside it (a token count, a moderation, a
 //     cancel or pause, a metadata update, a validation, an access grant, a state object whose
 //     spend lands on a governed method);
@@ -90,17 +91,20 @@ export interface MethodBoundary {
 // `tests/govern/default-deny.test.ts` calls every entry through the governed client and fails
 // on a POST that is not in its own list of free POSTs.
 //
-// Every GET was checked for one that STARTS work; `beta.environments.work.poll` is the only one.
-// `responses.retrieve({ stream: true })` resumes streaming a response that is already running and
-// billed, and the session event streams observe a session; neither starts or bills anything.
-//
-// GET or DELETE methods that are NOT free, by name:
-// beta.environments.work.poll (resources/beta/environments/work.js:165): GET, but it CLAIMS a queued work item for a self-hosted worker, which then runs the session (billed session runtime).
-// admin.organization.projects.modelPermissions.delete (resources/admin/organization/projects/model-permissions.js:55): DELETE, but it removes a project's model restrictions, widening what it can spend on.
-// admin.organization.projects.spendAlerts.delete (resources/admin/organization/projects/spend-alerts.js:112): DELETE, but it removes a project spend alert.
-// admin.organization.projects.spendLimit.delete (resources/admin/organization/projects/spend-limit.js:59): DELETE, but it removes a project's spend limit.
-// admin.organization.spendAlerts.delete (resources/admin/organization/spend-alerts.js:102): DELETE, but it removes a spend alert.
-// admin.organization.spendLimit.delete (resources/admin/organization/spend-limit.js:51): DELETE, but it removes the organization's spend limit: a control on spend, not stored data.
+// Refused despite GET or DELETE, by category:
+// (1) It STARTS billable work. Every GET was checked; this is the only one found.
+//     `responses.retrieve({ stream: true })` resumes a response that is already running and
+//     billed, and the session event streams observe a session; neither starts anything.
+//   - Anthropic beta.environments.work.poll (resources/beta/environments/work.js:165) GET: it
+//     claims a queued work item for a self-hosted worker, which then runs the session (billed
+//     session runtime).
+// (2) It LIFTS a spend control: a governed client must not remove the customer's own limits.
+//   - OpenAI admin.organization.spendLimit.delete (resources/admin/organization/spend-limit.js:51) DELETE
+//   - OpenAI admin.organization.projects.spendLimit.delete (resources/admin/organization/projects/spend-limit.js:59) DELETE
+//   - OpenAI admin.organization.spendAlerts.delete (resources/admin/organization/spend-alerts.js:102) DELETE
+//   - OpenAI admin.organization.projects.spendAlerts.delete (resources/admin/organization/projects/spend-alerts.js:112) DELETE
+//   - OpenAI admin.organization.projects.modelPermissions.delete (resources/admin/organization/projects/model-permissions.js:55) DELETE:
+//     it removes a project's model restrictions, widening what it can spend on.
 
 const ANTHROPIC_FREE_METHODS: ReadonlySet<string> = new Set([
 	// GET and DELETE: the rule.
