@@ -5,7 +5,7 @@ description: Automatic detection of email, phone, SSN, credit card, and IP addre
 
 ## Configuration
 
-Set the `pii` field in `usertrust.config.json`:
+Set the `pii` field in `usertrust.config.json` (or pass `pii` to `trust()`, e.g. `trust(client, { pii: "block" })`, which overrides the file):
 
 ```json
 {

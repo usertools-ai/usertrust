@@ -78,7 +78,7 @@ class PolicyDeniedError extends Error {
 
 **Hint:** `'Check your policy rules in .usertrust/policies/default.yml, or set "pii": "warn" in .usertrust/usertrust.config.json (or pass { pii: "warn" } to trust()) to downgrade PII enforcement.'`
 
-To change PII enforcement, set `pii` in the config file `trust()` reads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath` (which is read instead, so edit that one); passing `pii` to `trust()` itself has no effect.
+To change PII enforcement, set `pii` in the config file `trust()` reads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath` (which is read instead, so edit that one), or pass `pii` to `trust()` itself (e.g. `{ pii: "warn" }`), which overrides the file.
 
 ---
 
