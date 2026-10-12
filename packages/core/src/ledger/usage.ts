@@ -105,6 +105,12 @@ export interface NormalizedUsage {
 	 * missing count) and the caller records a `usage_implausible` event instead of charging the figure.
 	 */
 	implausible?: Partial<Record<UsageTier, number>>;
+	/**
+	 * The RAW 1-hour share, only when it exceeded the ceiling. Whether it matters depends on the model (a model with
+	 * no 1-hour tier IGNORES the share), and that decision is `withSupported1hTier`'s alone, so `sanitizeUsage` only
+	 * carries the figure; `withSupported1hTier` turns it into an `implausible` record or discards it.
+	 */
+	rawCacheWrite1hOverCeiling?: number;
 }
 
 /** Loose input to {@link sanitizeUsage}: any field may be missing or junk. */
@@ -248,7 +254,6 @@ export function sanitizeUsage(
 		["outputTokens", output ?? 0],
 		["cacheReadTokens", readCount(r.cacheReadTokens) ?? 0],
 		["cacheWriteTokens", cacheWrite],
-		["cacheWrite1hTokens", rawCacheWrite1h],
 	];
 	const implausible: Partial<Record<UsageTier, number>> = {};
 	for (const [tier, value] of readings) {
@@ -275,6 +280,7 @@ export function sanitizeUsage(
 		// always was.
 		...(cacheWrite1h > 0 ? { cacheWrite1hTokens: cacheWrite1h } : {}),
 		source: r.source === "provider" && reported ? "provider" : "estimated",
+		...(rawCacheWrite1h > ceiling ? { rawCacheWrite1hOverCeiling: rawCacheWrite1h } : {}),
 	};
 }
 
@@ -338,10 +344,18 @@ export function withSupported1hTier(
 	rates: ModelRates,
 	operatorOwned: boolean,
 ): NormalizedUsage {
-	if (snapshot.cacheWrite1hTokens === undefined || supportsCacheWrite1h(rates, operatorOwned)) {
+	const supported = supportsCacheWrite1h(rates, operatorOwned);
+	if (
+		snapshot.rawCacheWrite1hOverCeiling === undefined &&
+		(snapshot.cacheWrite1hTokens === undefined || supported)
+	) {
 		return snapshot;
 	}
-	const { cacheWrite1hTokens: _dropped, ...rest } = snapshot;
+	const { rawCacheWrite1hOverCeiling: over, ...clean } = snapshot;
+	// An absurd share counts only where the tier exists; elsewhere the share is ignored entirely.
+	if (over !== undefined && supported) return withImplausible(clean, { cacheWrite1hTokens: over });
+	if (clean.cacheWrite1hTokens === undefined || supported) return clean;
+	const { cacheWrite1hTokens: _dropped, ...rest } = clean;
 	return rest;
 }
 

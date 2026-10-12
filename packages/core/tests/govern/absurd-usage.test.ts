@@ -427,6 +427,26 @@ describe("the ceiling is per provider RESPONSE", () => {
 		await gov.destroy();
 	});
 
+	it("a model with NO 1-hour tier ignores the share: an absurd one neither refuses nor re-prices valid usage", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const auth = await gov.authorize({ ...AUTH, model: "gpt-4o" });
+		const receipt = await gov.settle(auth, {
+			inputTokens: 1_000,
+			outputTokens: 500,
+			cacheWriteTokens: 5,
+			cacheWrite1hTokens: 1e12,
+		});
+		expect(receipt.usageSource).toBe("provider");
+		expect(audit.events.map((e) => e.kind)).not.toContain("usage_implausible");
+		await gov.destroy();
+	});
+
 	it("an absurd 1-hour share is reported even when it exceeds the write total (the raw figure is checked, not the clamp)", async () => {
 		const audit = makeAudit();
 		const gov = await createGovernor({
