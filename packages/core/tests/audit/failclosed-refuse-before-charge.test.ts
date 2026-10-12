@@ -46,7 +46,15 @@ const CHUNKS = [
 	{ type: "message_delta", usage: { output_tokens: 30 } },
 ];
 
-const REQUEST = {
+/** The request shape the provider double accepts: a Messages request, streamed or not. */
+interface MessagesRequest {
+	model: string;
+	max_tokens: number;
+	messages: Array<{ role: string; content: string }>;
+	stream?: boolean;
+}
+
+const REQUEST: MessagesRequest = {
 	model: "claude-sonnet-4-6",
 	max_tokens: 64,
 	messages: [{ role: "user", content: "hi" }],
@@ -58,7 +66,7 @@ const ACTION = { kind: "tool_use" as const, name: "search", cost: 25 };
 function provider() {
 	return {
 		messages: {
-			create: vi.fn(async (params: { stream?: boolean }) => {
+			create: vi.fn(async (params: MessagesRequest) => {
 				if (params.stream === true) {
 					async function* gen() {
 						for (const c of CHUNKS) yield c;
