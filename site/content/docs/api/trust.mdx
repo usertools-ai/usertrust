@@ -95,9 +95,11 @@ The `transferId` is the universal join key. Use it to correlate entries across t
 |----------|----------------|-------------------|
 | Anthropic | `client.messages.create` exists | `messages.create()` |
 | OpenAI | `client.chat.completions.create` exists | `chat.completions.create()` |
-| Google | `client.models.generateContent` exists | `models.generateContent()` |
+| Google | `client.models.generateContent` exists | `models.generateContent()`, `models.generateContentStream()` |
 
 If the client does not match any known shape, `trust()` throws an error at initialization time.
+
+On a Google client the other generation methods are refused rather than passed through: `models.embedContent`, `generateImages`, `editImage`, `upscaleImage`, `generateVideos`, `recontextImage`, `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create`, `batches.createEmbeddings` and `interactions.create` throw a `PolicyDeniedError` naming the method before the SDK is called. Calls that generate nothing (`models.countTokens`, `models.list`, `caches`, `files` and the like) pass through ungoverned.
 
 ## Streaming
 
@@ -105,6 +107,8 @@ Streaming is transparent. When you pass `stream: true` to the provider, usertrus
 
 - `receipt`, beside `response`, is **provisional**. The stream has not run yet, so it is priced at the estimate and has `settled: false`.
 - `response.receipt` is a promise of the **settled** receipt. It resolves when the stream ends, or when you stop reading early (a `break`), in which case the usage consumed so far is settled.
+
+Google's `models.generateContentStream()` takes no `stream` flag and returns no envelope: like the SDK's own method it resolves to the stream itself, and the settled receipt is `stream.receipt`. Everything below applies to it the same way.
 
 ```typescript
 import { AuditDegradedError } from "usertrust";
@@ -154,14 +158,14 @@ The billing claim is made in one place only: the catch around `await response.re
 
 **A rejected `response.receipt` does not always mean nothing was charged.** It rejects with either the iteration's own error (the same object: the hold was voided), or, under `audit.failClosed`, an `AuditDegradedError`: settlement already ran (the charge posted, or its POST failed and the outcome is ambiguous: it may still post), then the audit write failed. Either way the work may be billed, so retrying it can charge it twice. `AuditDegradedError` is exported from `usertrust`, so test `err instanceof AuditDegradedError` to tell the two apart. Any other settlement error also rejects `.receipt` alone, after settlement claimed the call, so treat it like the audit refusal: the work may be billed.
 
-**Under `audit.failClosed`, that refusal also ends the iteration** of a `messages.create`, `chat.completions.create` or `responses.create` stream: the loop's last step, or the `break` that ends it early, throws the `AuditDegradedError`. Settlement has already run, and nothing is voided. Only `AuditDegradedError` ends the iteration: any other settlement error rejects `.receipt` alone, and the loop ends cleanly. If your loop body throws, the loop throws YOUR error, not the audit refusal (JavaScript keeps the original throw), so await `.receipt` to see a refusal. A `messages.stream()` caller must await `.receipt` under `failClosed`: its iteration and `finalMessage()` do not carry the audit refusal.
+**Under `audit.failClosed`, that refusal also ends the iteration** of a `messages.create`, `chat.completions.create`, `responses.create` or Google `models.generateContentStream` stream: the loop's last step, or the `break` that ends it early, throws the `AuditDegradedError`. Settlement has already run, and nothing is voided. Only `AuditDegradedError` ends the iteration: any other settlement error rejects `.receipt` alone, and the loop ends cleanly. If your loop body throws, the loop throws YOUR error, not the audit refusal (JavaScript keeps the original throw), so await `.receipt` to see a refusal. A `messages.stream()` caller must await `.receipt` under `failClosed`: its iteration and `finalMessage()` do not carry the audit refusal.
 
-**Skipping `await response.receipt` never crashes the process:** a rejected receipt is never left as an unhandled rejection. On `messages.create`, `chat.completions.create` and `responses.create` streams, a stream failure reaches the iteration, and so does an audit refusal under `failClosed` when the loop ends normally or with a `break` (not when your loop body throws); any other settlement error reaches only `.receipt`. A `messages.stream()` caller under `failClosed` hears of an audit refusal only from `.receipt`.
+**Skipping `await response.receipt` never crashes the process:** a rejected receipt is never left as an unhandled rejection. On `messages.create`, `chat.completions.create`, `responses.create` and `models.generateContentStream` streams, a stream failure reaches the iteration, and so does an audit refusal under `failClosed` when the loop ends normally or with a `break` (not when your loop body throws); any other settlement error reaches only `.receipt`. A `messages.stream()` caller under `failClosed` hears of an audit refusal only from `.receipt`.
 
 Token counts are accumulated per-provider from stream chunks:
 - **Anthropic**: `message_start` (input tokens), `message_delta` (output tokens)
 - **OpenAI**: `usage` field on the final chunk
-- **Google**: `usageMetadata` field
+- **Google**: `usageMetadata` field, read from the latest chunk that carries it (each one is a running total, so nothing is summed)
 
 ## Examples
 
@@ -224,6 +228,15 @@ const { response, receipt } = await client.models.generateContent({
 
 console.log(response.text);
 console.log(`Transfer: ${receipt.transferId}`);
+
+// Streaming: resolves to the stream itself, with the settled receipt on it
+const stream = await client.models.generateContentStream({
+  model: "gemini-2.5-pro",
+  contents: "Explain hash chains",
+});
+for await (const chunk of stream) process.stdout.write(chunk.text ?? "");
+const settled = await stream.receipt;
+console.log(`Settled: ${settled.cost} UT`);
 
 await client.destroy();
 ```

@@ -16,7 +16,13 @@
  *   floor, so older clients simply lack it and it stays a pass-through). A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   convenience helper is NOT (see below).
- * - Google: `client.models.generateContent()`
+ * - Google: `client.models.generateContent()` and `client.models.generateContentStream()`.
+ *   The other Google generation methods are REFUSED, not passed through: they throw
+ *   a PolicyDeniedError naming themselves before the SDK is reached
+ *   (`GOOGLE_REFUSED_METHODS` in govern.ts: `models.embedContent` / `generateImages` /
+ *   `editImage` / `upscaleImage` / `generateVideos` / `recontextImage` /
+ *   `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`,
+ *   `batches.create` / `createEmbeddings`, `interactions.create`).
  *
  * Remaining ungoverned surfaces (feature-detected pass-throughs, or shapes that do
  * not mirror `create`): `client.messages.batches`, `client.beta.messages.batches`,
@@ -25,10 +31,13 @@
  * `client.responses.stream()` and `client.responses.parse()` helpers — both drive
  * the SDK's raw client internally and so bypass the governed `create`), the OpenAI
  * `client.beta.*` namespace (assistants/threads/realtime — a different shape from
- * Anthropic beta), and the legacy `client.completions.create`. These are **NOT**
- * intercepted and bypass governance, audit, and budget enforcement. Callers relying
- * on ungoverned methods should implement their own budget and audit controls or wrap
- * calls through the governed entry points above.
+ * Anthropic beta), the legacy `client.completions.create`, and on a Google client
+ * the non-generation calls (`models.list/get/update/delete/countTokens/computeTokens`,
+ * `caches`, `files`, `operations`, `tunings`, `fileSearchStores`, and the batch and
+ * interaction read methods). These are **NOT** intercepted and bypass governance,
+ * audit, and budget enforcement. Callers relying on ungoverned methods should
+ * implement their own budget and audit controls or wrap calls through the governed
+ * entry points above.
  */
 
 import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./shared/types.js";
@@ -45,7 +54,8 @@ import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./s
  *   floor, so older clients simply lack it and it stays a pass-through). A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   helper is NOT.
- * - Google: `client.models.generateContent()`
+ * - Google: `client.models.generateContent()` and `client.models.generateContentStream()`;
+ *   the other Google generation methods are refused by name (see the file header).
  *
  * Remaining ungoverned pass-throughs: `client.messages.batches`,
  * `client.beta.messages.batches`, `client.beta.models`, `client.beta.files`, the

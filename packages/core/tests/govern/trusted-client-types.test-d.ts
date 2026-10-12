@@ -529,10 +529,35 @@ interface FakeGoogleModels {
 		contents: string;
 	}): Promise<AsyncGenerator<{ text: string }>>;
 	countTokens(params: { model: string }): Promise<{ totalTokens: number }>;
+	embedContent(params: { model: string; contents: string }): Promise<{ embeddings: number[] }>;
+	generateImages(params: { model: string; prompt: string }): Promise<{ images: string[] }>;
+}
+
+interface FakeGoogleChat {
+	sendMessage(params: { message: string }): Promise<{ text: string }>;
 }
 
 interface FakeGoogle {
 	models: FakeGoogleModels;
+	chats: { create(params: { model: string }): FakeGoogleChat };
+	live: {
+		connect(params: { model: string }): Promise<{ close(): void }>;
+		music: {
+			connect(params: { model: string }): Promise<{ close(): void }>;
+			label: string;
+		};
+		label: string;
+	};
+	batches: {
+		create(params: { model: string }): Promise<{ name: string }>;
+		createEmbeddings(params: { model: string }): Promise<{ name: string }>;
+		list(): Promise<{ name: string }[]>;
+	};
+	interactions: {
+		create(params: { model: string }): Promise<{ id: string }>;
+		get(id: string): Promise<{ id: string }>;
+	};
+	caches: { create(params: { model: string }): Promise<{ name: string }> };
 }
 
 type GovGoogle = TrustedClient<FakeGoogle>;
@@ -543,18 +568,83 @@ export type _GoogleGenerateContentEnvelope = Assert<
 		Promise<{ response: { text: string }; receipt: TrustReceipt }>
 	>
 >;
-// generateContentStream is UNGOVERNED: buildGoogleProxy traps `generateContent`
-// only, everything else falls through Reflect.get. Its raw return is a promise of
-// an AsyncGenerator, so a rewrite here would be invisible at the call site until
-// a consumer reached for a `.receipt` that never arrives.
-export type _GoogleGenerateContentStreamRaw = Assert<
+// generateContentStream is GOVERNED: buildGoogleProxy routes it through interceptCall
+// and resolves to the governed stream ITSELF (an async generator of the SDK's chunks)
+// with the settled `.receipt` promise hung off it, the `messages.stream` contract.
+// So the SDK call shape survives (`for await (const c of await ...)`) and `.receipt`
+// is advertised exactly where the runtime puts it.
+export type _GoogleGenerateContentStreamGoverned = Assert<
 	IsExact<
 		ReturnType<GovGoogle["models"]["generateContentStream"]>,
-		Promise<AsyncGenerator<{ text: string }>>
+		Promise<AsyncGenerator<{ text: string }> & { receipt: Promise<TrustReceipt> }>
 	>
 >;
+export type _GoogleGenerateContentStreamParams = Assert<
+	IsExact<
+		Parameters<GovGoogle["models"]["generateContentStream"]>,
+		Parameters<FakeGoogleModels["generateContentStream"]>
+	>
+>;
+// Free metadata calls pass through unchanged.
 export type _GoogleCountTokensRaw = Assert<
 	IsExact<ReturnType<GovGoogle["models"]["countTokens"]>, Promise<{ totalTokens: number }>>
+>;
+// The refused generation methods keep their parameters and never return: the runtime
+// stand-in throws a PolicyDeniedError naming the method before the SDK is reached.
+export type _GoogleEmbedContentRefused = Assert<
+	IsExact<
+		GovGoogle["models"]["embedContent"],
+		(params: { model: string; contents: string }) => never
+	>
+>;
+export type _GoogleGenerateImagesRefused = Assert<
+	IsExact<ReturnType<GovGoogle["models"]["generateImages"]>, never>
+>;
+// `chats.create` is refused (its Chat would drive the SDK's raw `models`).
+export type _GoogleChatsCreateRefused = Assert<
+	IsExact<GovGoogle["chats"]["create"], (params: { model: string }) => never>
+>;
+export type _GoogleLiveConnectRefused = Assert<
+	IsExact<ReturnType<GovGoogle["live"]["connect"]>, never>
+>;
+export type _GoogleLiveMusicConnectRefused = Assert<
+	IsExact<ReturnType<GovGoogle["live"]["music"]["connect"]>, never>
+>;
+export type _GoogleLiveRestRaw = Assert<
+	IsExact<[GovGoogle["live"]["label"], GovGoogle["live"]["music"]["label"]], [string, string]>
+>;
+export type _GoogleBatchesCreateRefused = Assert<
+	IsExact<
+		[
+			ReturnType<GovGoogle["batches"]["create"]>,
+			ReturnType<GovGoogle["batches"]["createEmbeddings"]>,
+		],
+		[never, never]
+	>
+>;
+export type _GoogleBatchesListRaw = Assert<
+	IsExact<GovGoogle["batches"]["list"], FakeGoogle["batches"]["list"]>
+>;
+export type _GoogleInteractionsCreateRefused = Assert<
+	IsExact<ReturnType<GovGoogle["interactions"]["create"]>, never>
+>;
+export type _GoogleInteractionsGetRaw = Assert<
+	IsExact<GovGoogle["interactions"]["get"], FakeGoogle["interactions"]["get"]>
+>;
+// A namespace with nothing refused is not touched at all.
+export type _GoogleCachesRaw = Assert<IsExact<GovGoogle["caches"], FakeGoogle["caches"]>>;
+
+// A Google client WITHOUT the stream method or the refusing namespaces gains no
+// phantom member: the rewrite is homomorphic and the parts are keyed off `keyof T`.
+interface MinimalGoogle {
+	models: { generateContent(params: { model: string }): Promise<{ text: string }> };
+}
+type GovMinimalGoogle = TrustedClient<MinimalGoogle>;
+export type _MinimalGoogleNoStream = Assert<
+	IsExact<"generateContentStream" extends keyof GovMinimalGoogle["models"] ? true : false, false>
+>;
+export type _MinimalGoogleNoChats = Assert<
+	IsExact<"chats" extends keyof GovMinimalGoogle ? true : false, false>
 >;
 export type _GoogleHasDestroy = Assert<Extends<GovGoogle, { destroy(): Promise<void> }>>;
 

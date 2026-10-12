@@ -15,15 +15,19 @@ today:
 - Anthropic: `client.messages.create()`, `client.messages.stream()`, and
   `client.beta.messages.{create,stream,parse}()`
 - OpenAI: `client.chat.completions.create()` and `client.responses.create()`
-- Google: `client.models.generateContent()`
+- Google: `client.models.generateContent()` and `client.models.generateContentStream()`
 
 Streaming through any governed method is governed end to end, including
 mid-stream anomaly cutoff and settle-or-void on completion. A few alternative
 surfaces are still ungoverned pass-throughs — they reach the provider without a
 budget hold, policy check, or audit entry: OpenAI's `responses.stream()` /
 `responses.parse()` helpers and legacy `completions.create()`, Anthropic's
-`messages.batches` and `beta.models` / `beta.files`, and Google's alternative
-methods. usertrust never pretends to govern these — the exact, current boundary
+`messages.batches` and `beta.models` / `beta.files`, and Google's calls that
+generate nothing (`models.countTokens`, `models.list`, `caches`, `files` and the
+like). Google's other generation methods (`models.embedContent`, the image and
+video methods, `chats`, `live`, `batches.create`, `interactions.create`) are
+refused instead: they throw a `PolicyDeniedError` naming the method before the SDK
+is called. usertrust never pretends to govern these — the exact, current boundary
 is enumerated at the source in `packages/core/src/detect.ts`.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.

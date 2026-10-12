@@ -91,7 +91,7 @@ const client = await trust(new Anthropic(), {
 });
 ```
 
-On a Google client only `models.generateContent` is governed. `models.generateContentStream` passes through to the SDK untouched: it is not metered, it gets no receipt, and no policy applies to it. Use `generateContent` for calls you need governed.
+On a Google client `models.generateContent` and `models.generateContentStream` are governed. `generateContentStream` resolves to the stream itself, as the SDK's does, with the settled receipt on it: `const stream = await google.models.generateContentStream({ ... })`, then `for await (const chunk of stream)` and `await stream.receipt`. Every other Google generation method is refused: `models.embedContent`, `generateImages`, `editImage`, `upscaleImage`, `generateVideos`, `recontextImage` and `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create`, `batches.createEmbeddings` and `interactions.create` throw a `PolicyDeniedError` naming the method before the SDK is called, instead of running unmetered. Calls that generate nothing (`models.countTokens`, `models.list`, `caches`, `files` and the like) pass through ungoverned.
 
 Every call returns `{ response, receipt }`:
 

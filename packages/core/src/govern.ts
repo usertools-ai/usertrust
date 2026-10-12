@@ -278,8 +278,12 @@ export interface TrustEngine {
 // via buildGoogleProxy. Neither is a special case — both route through the same
 // interceptCall, and a streaming call on either reaches the GENERIC
 // `Symbol.asyncIterator` branch that returns createGovernedStream's wrapper, not
-// the Anthropic `stream-helper` graft. Everything else on those resources is
-// ungoverned (see detect.ts's boundary block) and passes through untouched.
+// the Anthropic `stream-helper` graft. Google `models.generateContentStream` takes
+// that same generic branch, but its trap unwraps the envelope and resolves to the
+// governed stream itself (GovernedStreamMethod), so the SDK call shape survives.
+// Everything else on the OpenAI and Anthropic resources is ungoverned (see
+// detect.ts's boundary block) and passes through untouched; on a Google client the
+// other GENERATION methods are refused instead (GOOGLE_REFUSED_METHODS).
 
 /** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
 type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
@@ -427,14 +431,75 @@ type GovernedResponses<R> =
 			: R;
 
 /**
- * Rewrite ONLY `generateContent` on a Google `models` resource. `generateContentStream`
- * stays raw: buildGoogleProxy traps the one method and lets everything else fall
- * through `Reflect.get`, so a rewrite here would advertise a `.receipt` that never
- * arrives on the streaming shortcut users actually reach for.
+ * A method the governed client REFUSES: it keeps its parameters and never returns —
+ * the runtime stand-in throws a PolicyDeniedError naming it before the SDK is reached
+ * (GOOGLE_REFUSED_METHODS). A non-callable member is left as it is, mirroring the
+ * runtime, which only replaces a member that is a function.
  */
-type GovernedGoogleModels<G> = G extends { generateContent: infer C extends AnyMethod }
-	? Omit<G, "generateContent"> & { generateContent: GovernedCreateMethod<C> }
+type RefusedMethod<F> = F extends (...args: infer A) => unknown ? (...args: A) => never : F;
+
+/**
+ * Refuse the members `K` of a namespace, homomorphically (every other member,
+ * and every modifier, survives as declared). A callable or non-object namespace is
+ * left raw, mirroring refusingNamespaceProxy's `typeof ns !== "object"` bail-out.
+ */
+type RefuseMembers<N, K extends PropertyKey> =
+	IsCallable<N> extends true
+		? N
+		: N extends object
+			? { [Q in keyof N]: Q extends K ? RefusedMethod<N[Q]> : N[Q] }
+			: N;
+
+/**
+ * The Google `models` resource. `generateContent` resolves to the `{ response, receipt }`
+ * envelope; `generateContentStream` resolves to the governed stream ITSELF with a
+ * `.receipt` promise (the same contract as Anthropic's `messages.stream`, and what
+ * buildGoogleProxy's trap returns); the non-governed generation methods are refused.
+ * Homomorphic, so a fake or older client without `generateContentStream` gets no
+ * phantom member, and `countTokens` / `list` / `get` stay exactly as declared.
+ * Keep the refused names in step with GOOGLE_REFUSED_METHODS.models.
+ */
+type GovernedGoogleModels<G> = G extends { generateContent: AnyMethod }
+	? {
+			[P in keyof G]: P extends "generateContent"
+				? GovernedCreateMethod<G[P]>
+				: P extends "generateContentStream"
+					? GovernedStreamMethod<G[P]>
+					: P extends
+								| "embedContent"
+								| "generateImages"
+								| "editImage"
+								| "upscaleImage"
+								| "generateVideos"
+								| "recontextImage"
+								| "segmentImage"
+						? RefusedMethod<G[P]>
+						: G[P];
+		}
 	: G;
+
+/** `live.connect` and `live.music.connect` are refused; the rest of `live` is raw. */
+type RefusedGoogleLive<L> =
+	IsCallable<L> extends true
+		? L
+		: L extends object
+			? {
+					[Q in keyof L]: Q extends "connect"
+						? RefusedMethod<L[Q]>
+						: Q extends "music"
+							? RefuseMembers<L[Q], "connect">
+							: L[Q];
+				}
+			: L;
+
+/** One Google namespace with its refused members (GOOGLE_REFUSED_METHODS). */
+type RefusedGoogleNamespace<P, N> = P extends "live"
+	? RefusedGoogleLive<N>
+	: P extends "batches"
+		? RefuseMembers<N, "create" | "createEmbeddings">
+		: P extends "chats" | "interactions"
+			? RefuseMembers<N, "create">
+			: N;
 
 // ── Provider selection: the type-level twin of detectClientKind ──
 // Each predicate is the full runtime test, both halves: the namespace is a
@@ -499,6 +564,13 @@ type GovernedResponsesPart<T, K extends keyof T = Extract<keyof T, "responses">>
 type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
 	[P in K]: GovernedGoogleModels<T[P]>;
 };
+type GoogleRefusingNamespace = "chats" | "live" | "batches" | "interactions";
+type RefusedGoogleNamespacesPart<
+	T,
+	K extends keyof T = Extract<keyof T, GoogleRefusingNamespace>,
+> = {
+	[P in K]: RefusedGoogleNamespace<P, T[P]>;
+};
 
 /**
  * Rewrite the governed surfaces of whichever provider `detectClientKind` would
@@ -520,7 +592,9 @@ type GovernedShapeOf<T> =
 		: IsOpenAIClient<T> extends true
 			? Omit<T, "chat" | "responses"> & GovernedChatPart<T> & GovernedResponsesPart<T>
 			: IsGoogleClient<T> extends true
-				? Omit<T, "models"> & GovernedModelsPart<T>
+				? Omit<T, "models" | GoogleRefusingNamespace> &
+						GovernedModelsPart<T> &
+						RefusedGoogleNamespacesPart<T>
 				: T;
 
 /**
@@ -4531,6 +4605,98 @@ function buildOpenAIProxy<T>(
 	return clientProxy as TrustedClient<T>;
 }
 
+/**
+ * The generation methods a Google client exposes that usertrust does NOT govern, by
+ * namespace. Each one sends a billable request, so the governed client refuses it by
+ * name (a PolicyDeniedError, thrown before the SDK is reached) rather than letting it
+ * run unmetered, unpoliced and unaudited. `chats.create` is here because the `Chat` it
+ * returns drives the SDK's RAW `models` (bound when the client was constructed), so
+ * every `sendMessage` / `sendMessageStream` would bypass the governed proxy.
+ *
+ * Everything not listed passes through untouched: the free metadata calls
+ * (`models.list` / `get` / `update` / `delete` / `countTokens` / `computeTokens`,
+ * `batches.list` / `get` / `cancel` / `delete`, `interactions.get` / `cancel` /
+ * `delete`) and the namespaces that are not generation (`caches`, `files`,
+ * `operations`, `authTokens`, `tunings`, `fileSearchStores`, `webhooks`).
+ *
+ * Exported for the tests, which assert one refusal per entry. The type layer's twin
+ * is the `Refused…` mapping above `GovernedShapeOf`; the two must list the same names.
+ */
+export const GOOGLE_REFUSED_METHODS = {
+	models: [
+		"embedContent",
+		"generateImages",
+		"editImage",
+		"upscaleImage",
+		"generateVideos",
+		"recontextImage",
+		"segmentImage",
+	],
+	chats: ["create"],
+	live: ["connect"],
+	"live.music": ["connect"],
+	batches: ["create", "createEmbeddings"],
+	interactions: ["create"],
+} as const satisfies Record<string, readonly string[]>;
+
+const GOOGLE_GOVERNED_METHODS = "models.generateContent and models.generateContentStream";
+
+/** A stand-in for a refused method: it throws, naming itself, and never reaches the SDK. */
+function refuseUngovernedGoogleMethod(path: string): () => never {
+	return () => {
+		throw new PolicyDeniedError(
+			`ungoverned_method: ${path} is not governed on a Google client`,
+			`usertrust governs ${GOOGLE_GOVERNED_METHODS} on a Google client, and refuses every other generation method rather than let it run unmetered. To make this call anyway, run it on the original (unwrapped) client inside governAction() with a cost estimate.`,
+		);
+	};
+}
+
+/**
+ * Wrap one Google namespace so its refused methods throw. A namespace that is not a
+ * non-null object (absent, or callable) is left raw, and so is a listed member that
+ * is not a function: there is nothing to call, so there is nothing to refuse. The
+ * wrapper is built per namespace OBJECT and cached, so `client.chats === client.chats`
+ * still holds across accesses.
+ */
+function refusingNamespaceProxy(
+	ns: unknown,
+	path: keyof typeof GOOGLE_REFUSED_METHODS,
+	cache: WeakMap<object, unknown>,
+): unknown {
+	if (ns == null || typeof ns !== "object") return ns;
+	const cached = cache.get(ns);
+	if (cached !== undefined) return cached;
+	const refused: readonly string[] = GOOGLE_REFUSED_METHODS[path];
+	const wrapped = new Proxy(ns as Record<string | symbol, unknown>, {
+		get(target, prop, receiver) {
+			const value = Reflect.get(target, prop, receiver);
+			if (typeof prop === "string" && refused.includes(prop) && typeof value === "function") {
+				return refuseUngovernedGoogleMethod(`${path}.${prop}`);
+			}
+			// `live.music` is the one nested namespace with a refused member.
+			if (path === "live" && prop === "music") {
+				return refusingNamespaceProxy(value, "live.music", cache);
+			}
+			return value;
+		},
+	});
+	cache.set(ns, wrapped);
+	return wrapped;
+}
+
+/**
+ * Google: `models.generateContent` and `models.generateContentStream` route through
+ * interceptCall. The stream's SDK result (a Promise of an AsyncGenerator of
+ * `GenerateContentResponse` chunks) takes the generic `Symbol.asyncIterator` branch:
+ * createGovernedStream wraps it, `usageMetadata` is read from each chunk as a
+ * replace-with-latest snapshot (streaming.ts, via the same `fromGeminiUsage` the
+ * non-stream settle uses), and the hold settles when the stream ends. Like the
+ * Anthropic `messages.stream` helper, the governed `generateContentStream` resolves to
+ * the stream itself (an async generator yielding the SDK's chunks unchanged) with the
+ * settled `.receipt` promise on it, so `for await (const c of await
+ * models.generateContentStream(p))` keeps its SDK shape. Every other generation
+ * method is refused (GOOGLE_REFUSED_METHODS); everything else passes through.
+ */
 function buildGoogleProxy<T>(
 	client: T,
 	intercept: InterceptFn,
@@ -4540,13 +4706,35 @@ function buildGoogleProxy<T>(
 	const original = client as Record<string, unknown>;
 	const models = original.models as Record<string, unknown>;
 	const originalGenerate = models.generateContent as (...args: unknown[]) => unknown;
+	// Feature-detected like the other optional surfaces: a client without the method
+	// leaves it a raw pass-through (there is nothing to call).
+	const originalGenerateStream =
+		typeof models.generateContentStream === "function"
+			? (models.generateContentStream as (...args: unknown[]) => unknown)
+			: undefined;
+	const refusedOnModels: readonly string[] = GOOGLE_REFUSED_METHODS.models;
+	const namespaceCache = new WeakMap<object, unknown>();
 
 	const modelsProxy = new Proxy(models, {
 		get(target, prop, receiver) {
 			if (prop === "generateContent") {
 				return (...args: unknown[]) => intercept(originalGenerate, target, args);
 			}
-			return Reflect.get(target, prop, receiver);
+			if (prop === "generateContentStream" && originalGenerateStream !== undefined) {
+				return async (...args: unknown[]) => {
+					const { response } = await intercept(originalGenerateStream, target, args);
+					return response;
+				};
+			}
+			const value = Reflect.get(target, prop, receiver);
+			if (
+				typeof prop === "string" &&
+				refusedOnModels.includes(prop) &&
+				typeof value === "function"
+			) {
+				return refuseUngovernedGoogleMethod(`models.${prop}`);
+			}
+			return value;
 		},
 	});
 
@@ -4555,6 +4743,9 @@ function buildGoogleProxy<T>(
 			if (prop === "models") return modelsProxy;
 			if (prop === "destroy") return destroy;
 			if (prop === "governAction") return governAction;
+			if (prop === "chats" || prop === "live" || prop === "batches" || prop === "interactions") {
+				return refusingNamespaceProxy(Reflect.get(target, prop, receiver), prop, namespaceCache);
+			}
 			return Reflect.get(target, prop, receiver);
 		},
 	});
