@@ -9,6 +9,7 @@
 // Claude's context"). No network call: the hook must be fast and cannot fail.
 import { writeSessionStart } from "./job-log.mjs";
 import { announce, modeAnnouncement, readStdin, requireLaunch, say } from "./lib.mjs";
+import { stampFirstRun } from "./transcript.mjs";
 
 requireLaunch();
 
@@ -19,6 +20,14 @@ try {
 } catch {
 	// Nothing to read is fine.
 }
+// The state's first-run time (transcript.mjs `firstRun`), if it has none, before anything
+// else: a transcript entry written before it is never posted, and Claude Code writes a
+// response, `usage` and all, BEFORE the PreToolUse its tool_use fires. Stamped first at that
+// PreToolUse, a fresh install never posted its first response. SessionStart precedes every
+// response of its session, whatever its `source`: a resumed or compacted transcript's
+// history is older than the stamp, and is never posted, and a stamp already made never
+// moves. Local and bounded, and it never throws; in estimate mode it makes nothing.
+await stampFirstRun();
 // The job log: a NEW session id (startup, clear, fork) gets its `session-start` line;
 // resume and compact write nothing, so neither ever ends or invalidates an open job.
 // Failing to write it must never fail a session: `usertrust-job` then refuses loudly.

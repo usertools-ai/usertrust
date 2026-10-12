@@ -7,6 +7,19 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fresh install meters its first response.** The state's first-run time
+  (`transcripts/since`), before which no transcript entry is posted, was first made at the
+  first PreToolUse. Claude Code writes a response, `usage` and all, to the transcript BEFORE
+  the PreToolUse its tool_use fires, so the first session after an install never posted its
+  first response: its hold was released as "no transcript usage was assigned to this hold".
+  In a three-call test session whose tool-call responses each cost the same, that was 29% of
+  its cost. SessionStart now makes the time, whatever its `source`. Unchanged: a transcript
+  resumed or compacted on a fresh install posts none of its history; a time already made never
+  moves; a plugin installed into a session under way posts nothing written before its first
+  hook there.
+
 ## [2.1.0] - 2026-10-09
 
 ### Added
