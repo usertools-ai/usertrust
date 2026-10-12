@@ -8,13 +8,20 @@ import type { ServerConfig, TenantConfig } from "./config.js";
 
 export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
 
+/** Trailing separators on `stateDir`: `/` on POSIX, either separator on Windows. */
+const TRAILING_SEPARATORS = process.platform === "win32" ? /[\\/]+$/ : /\/+$/;
+
 /**
  * The directory a tenant's governor keeps its vault under. Concatenated, never `join`ed: `join`
  * folds a `..` in `stateDir` lexically before the governor sees it, and the governor resolves
- * the base where the kernel does. The tenant id cannot hold `..` (config.ts).
+ * the base where the kernel does. The tenant id cannot hold `..` (config.ts). Trailing
+ * separators are stripped first, so `state/` gives `state/<id>`, not `state//<id>`; that
+ * removes no `..` and resolves nothing. A root (`/`, `C:\`) keeps its separator, and an empty
+ * `stateDir` is the working directory, as `join` read it.
  */
 export function tenantVaultBase(config: ServerConfig, tenant: TenantConfig): string {
-	return `${config.stateDir}${sep}${tenant.id}`;
+	if (config.stateDir === "") return tenant.id;
+	return `${config.stateDir.replace(TRAILING_SEPARATORS, "")}${sep}${tenant.id}`;
 }
 
 /**
