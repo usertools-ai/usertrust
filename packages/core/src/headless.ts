@@ -106,6 +106,7 @@ import {
 import {
 	implausibleUsageData,
 	materializeMaxima,
+	materializeRefused,
 	publishableUsageFields,
 	sanitizeUsage,
 	withSupported1hTier,
@@ -1839,7 +1840,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// Each tier read by name, once, BEFORE the claim below: a getter that throws changes nothing, and the
 				// governor never touches the caller's object again.
 				maxima: materializeMaxima(params?.maxima),
-				refused: materializeMaxima(params?.refused),
+				// A refused tier is kept whatever its value (presence is the flag), never dropped like an unusable maximum.
+				refused: materializeRefused(params?.refused),
 				usageSource: params?.usageSource,
 				chunksDelivered: params?.chunksDelivered,
 				computeMs: params?.computeMs,
@@ -2540,7 +2542,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			};
 			// Every remaining field is read ONCE into a local and validated from that local: a getter
 			// that answers differently on a second read cannot get unchecked text onto the chain.
-			const refusedTiers = materializeMaxima(params.refused);
+			const refusedTiers = materializeRefused(params.refused);
 			const rawComputeMs: unknown = params.computeMs;
 			const computeMs =
 				typeof rawComputeMs === "number" && Number.isFinite(rawComputeMs) && rawComputeMs >= 0
