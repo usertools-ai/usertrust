@@ -32,7 +32,10 @@ the method, and records a `policy_denied` audit event, before the SDK is called.
 So are `models.generateContent` and `models.generateContentStream` when they would
 run automatic function calling (one provider request per tool round, which
 usertrust cannot yet meter round by round); disable it with
-`config.automaticFunctionCalling.disable: true` to have the call governed.
+`config.automaticFunctionCalling.disable: true` to have the call governed. The
+check needs plain objects: a Proxy in `params`, `config`, `config.tools`, a tool or
+`config.automaticFunctionCalling` is refused, because a Proxy can show the check
+one config and the SDK another.
 usertrust never pretends to govern these — the exact, current boundary is
 enumerated at the source in `packages/core/src/detect.ts`.
 

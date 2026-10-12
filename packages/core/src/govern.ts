@@ -32,6 +32,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { types as utilTypes } from "node:util";
 import { CreateTransferStatus } from "tigerbeetle-node";
 import {
 	type AuditWriter,
@@ -4751,11 +4752,12 @@ type RefuseFn = (path: string, args: unknown[], error?: PolicyDeniedError) => Pr
 /** `obj[key]` when it is an OWN DATA property holding a string; never runs an accessor or a trap. */
 function ownStringDataProperty(obj: unknown, key: string): string | undefined {
 	if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) return undefined;
+	if (utilTypes.isProxy(obj)) return undefined; // its descriptor trap is caller code
 	try {
 		const d = Object.getOwnPropertyDescriptor(obj, key);
 		return d !== undefined && "value" in d && typeof d.value === "string" ? d.value : undefined;
 	} catch {
-		return undefined; // a Proxy's descriptor trap threw: no label, the refusal still lands
+		return undefined; // defensive: no label, the refusal still lands
 	}
 }
 
@@ -4768,8 +4770,14 @@ function ownStringDataProperty(obj: unknown, key: string): string | undefined {
 // earlier rounds would go unbilled. Until each round is metered, a call that would run
 // the AFC loop is refused (an audited denial) before any hold or SDK call.
 
-/** The SDK reached `processAfcStream`, or not; or it cannot be told without running caller code. */
-type GoogleAfcVerdict = "afc" | "no_afc" | "indeterminate";
+/**
+ * The SDK would run its AFC loop, or not; or it cannot be told without running caller
+ * code. `proxyAt` names the first AFC-relevant object found to be a Proxy.
+ */
+type GoogleAfcVerdict =
+	| { kind: "afc" }
+	| { kind: "no_afc" }
+	| { kind: "indeterminate"; proxyAt?: string };
 
 /** A value property access would yield, found WITHOUT running a getter. */
 type DataRead = { value: unknown } | undefined;
@@ -4779,9 +4787,12 @@ type DataRead = { value: unknown } | undefined;
  * but return `undefined` (indeterminate) instead of invoking an accessor. Nullish `obj`
  * reads as `undefined`, which is what the SDK's optional chaining yields.
  */
-function readDataProperty(obj: unknown, key: string): DataRead {
+function readDataProperty(obj: unknown, key: string, at: string): DataRead {
 	if (obj == null) return { value: undefined };
 	for (let o: object | null = Object(obj); o !== null; o = Object.getPrototypeOf(o)) {
+		// Checked BEFORE the descriptor read and before the next getPrototypeOf, both of
+		// which would run a Proxy's traps.
+		rejectProxy(o, o === obj ? at : `${at} (its prototype chain)`);
 		const d = Object.getOwnPropertyDescriptor(o, key);
 		if (d !== undefined) return "value" in d ? { value: d.value } : undefined;
 	}
@@ -4791,8 +4802,26 @@ function readDataProperty(obj: unknown, key: string): DataRead {
 /** Thrown inside the predicate when a read cannot be made without running caller code. */
 const INDETERMINATE = Symbol("indeterminate");
 
-function dataValue(obj: unknown, key: string): unknown {
-	const read = readDataProperty(obj, key);
+/** Thrown inside the predicate when an AFC-relevant object is a Proxy; carries where. */
+class ProxyInAfcInput {
+	constructor(readonly at: string) {}
+}
+
+/**
+ * A NARROW fail-closed. A Proxy's `getOwnPropertyDescriptor` / `getPrototypeOf` traps can
+ * show this check a config with no callable tool while its `get` trap hands the SDK one
+ * that has one (the SDK reads with plain property access), so a Proxy anywhere the
+ * check reads is refused rather than believed. `util.types.isProxy` runs no trap. The
+ * planned replacement is a structural snapshot of exactly what was checked, forwarded so
+ * the SDK receives what was checked; until then, a caller that MUTATES plain params
+ * between the call and the SDK's read is still outside this check.
+ */
+function rejectProxy(value: unknown, at: string): void {
+	if (utilTypes.isProxy(value)) throw new ProxyInAfcInput(at);
+}
+
+function dataValue(obj: unknown, key: string, at: string): unknown {
+	const read = readDataProperty(obj, key, at);
 	if (read === undefined) throw INDETERMINATE;
 	return read.value;
 }
@@ -4802,16 +4831,18 @@ function dataValue(obj: unknown, key: string): unknown {
  * `in` accepts any object, function objects included; on a primitive or `null` the SDK's
  * `in` throws a TypeError, which here is indeterminate.
  */
-function isCallableToolLike(tool: unknown): boolean {
+function isCallableToolLike(tool: unknown, at: string): boolean {
 	if (tool === null || (typeof tool !== "object" && typeof tool !== "function")) {
 		throw INDETERMINATE;
 	}
-	return typeof dataValue(tool, "callTool") === "function";
+	return typeof dataValue(tool, "callTool", at) === "function";
 }
 
 /** The tools list as the SDK iterates it (`config?.tools ?? []`); only a plain array is read. */
 function toolsList(config: unknown): unknown[] {
-	const tools = dataValue(config, "tools") ?? [];
+	const tools = dataValue(config, "tools", "params.config") ?? [];
+	// Before Array.isArray (which sees through a Proxy) and before any element read.
+	rejectProxy(tools, "params.config.tools");
 	if (!Array.isArray(tools)) throw INDETERMINATE;
 	return tools;
 }
@@ -4846,22 +4877,28 @@ export function googleAfcVerdict(
 	params: unknown,
 	method: "generateContent" | "generateContentStream",
 ): GoogleAfcVerdict {
+	const AFC: GoogleAfcVerdict = { kind: "afc" };
+	const NO_AFC: GoogleAfcVerdict = { kind: "no_afc" };
 	try {
-		const config = dataValue(params, "config");
-		const afcConfig = dataValue(config, "automaticFunctionCalling");
-		if (dataValue(afcConfig, "disable")) return "no_afc";
+		// Every object is checked for a Proxy before anything is read from it: `dataValue`
+		// does it for the object it reads, and `toolsList` for the array.
+		const config = dataValue(params, "config", "params");
+		const afcConfig = dataValue(config, "automaticFunctionCalling", "params.config");
+		const afcAt = "params.config.automaticFunctionCalling";
+		if (dataValue(afcConfig, "disable", afcAt)) return NO_AFC;
 		const tools = toolsList(config);
 		let callablePresent = false;
 		// By index, not `for...of`: an element getter must not run (a hole reads as
 		// `undefined`, on which the SDK's `in` throws, so it is indeterminate).
 		for (let i = 0; i < tools.length; i++) {
-			if (isCallableToolLike(dataValue(tools, String(i)))) {
+			const tool = dataValue(tools, String(i), "params.config.tools");
+			if (isCallableToolLike(tool, `params.config.tools[${i}]`)) {
 				callablePresent = true;
 				break;
 			}
 		}
-		if (!callablePresent) return "no_afc";
-		const maxCalls = dataValue(afcConfig, "maximumRemoteCalls");
+		if (!callablePresent) return NO_AFC;
+		const maxCalls = dataValue(afcConfig, "maximumRemoteCalls", afcAt);
 		if (maxCalls !== null && (typeof maxCalls === "object" || typeof maxCalls === "function")) {
 			throw INDETERMINATE;
 		}
@@ -4869,36 +4906,52 @@ export function googleAfcVerdict(
 		// biome-ignore lint/suspicious/noExplicitAny: the SDK's own loose comparison, mirrored verbatim
 		const n = maxCalls as any;
 		// biome-ignore lint/suspicious/noDoubleEquals: `== 0` is the SDK's test (it also matches "0" and false)
-		if ((n && (n < 0 || !Number.isInteger(n))) || n == 0) return "no_afc";
-		// The SDK's own pre-request throws (step 2) — not refused here.
+		if ((n && (n < 0 || !Number.isInteger(n))) || n == 0) return NO_AFC;
+		// The SDK's own pre-request throws (step 2) — not refused here. Their inputs are
+		// Proxy-checked too: a lying `length` or flag would turn "the SDK throws" into a
+		// forwarded call that runs the AFC loop.
 		for (let i = 0; i < tools.length; i++) {
 			if (!(i in tools)) continue; // forEach skips holes
-			const tool = dataValue(tools, String(i));
-			if (isCallableToolLike(tool)) continue;
-			const declarations = dataValue(tool, "functionDeclarations");
+			const toolAt = `params.config.tools[${i}]`;
+			const tool = dataValue(tools, String(i), "params.config.tools");
+			if (isCallableToolLike(tool, toolAt)) continue;
+			const declarations = dataValue(tool, "functionDeclarations", toolAt);
 			if (declarations) {
-				const length = dataValue(declarations, "length");
+				const length = dataValue(declarations, "length", `${toolAt}.functionDeclarations`);
 				if (length !== undefined && typeof length !== "number") throw INDETERMINATE;
-				if ((length as number) > 0) return "no_afc";
+				if ((length as number) > 0) return NO_AFC;
 			}
 		}
 		if (method === "generateContentStream") {
-			const toolConfig = dataValue(config, "toolConfig");
-			const callingConfig = dataValue(toolConfig, "functionCallingConfig");
-			if (dataValue(callingConfig, "streamFunctionCallArguments")) return "no_afc";
+			const toolConfig = dataValue(config, "toolConfig", "params.config");
+			const callingConfig = dataValue(
+				toolConfig,
+				"functionCallingConfig",
+				"params.config.toolConfig",
+			);
+			const callingAt = "params.config.toolConfig.functionCallingConfig";
+			if (dataValue(callingConfig, "streamFunctionCallArguments", callingAt)) return NO_AFC;
 		}
-		return "afc";
-	} catch {
-		// INDETERMINATE, or a Proxy trap that threw: fail closed.
-		return "indeterminate";
+		return AFC;
+	} catch (err) {
+		// A Proxy (named), INDETERMINATE, or a trap that threw: fail closed.
+		return err instanceof ProxyInAfcInput
+			? { kind: "indeterminate", proxyAt: err.at }
+			: { kind: "indeterminate" };
 	}
 }
 
 function googleAfcError(
 	method: "generateContent" | "generateContentStream",
-	verdict: "afc" | "indeterminate",
+	verdict: Exclude<GoogleAfcVerdict, { kind: "no_afc" }>,
 ): PolicyDeniedError {
-	return verdict === "afc"
+	if (verdict.kind === "indeterminate" && verdict.proxyAt !== undefined) {
+		return new PolicyDeniedError(
+			`ungoverned_method: models.${method} could not be checked for automatic function calling (a Proxy in ${verdict.proxyAt}); pass plain objects`,
+			"A Proxy can show this check one config and the SDK another, so usertrust refuses it rather than trust what it saw. Pass plain objects for params, params.config, config.tools, each tool and config.automaticFunctionCalling.",
+		);
+	}
+	return verdict.kind === "afc"
 		? new PolicyDeniedError(
 				`ungoverned_method: models.${method} with automatic function calling is not governed yet`,
 				"With a callable tool, the SDK makes one provider request per tool round inside this call, and usertrust cannot yet meter every round. Set config.automaticFunctionCalling.disable: true and run the tool calls yourself, or make the call on the original (unwrapped) client inside governAction() with a cost estimate.",
@@ -4982,7 +5035,7 @@ function buildGoogleProxy<T>(
 				return async (...args: unknown[]) => {
 					// ── AFC gate: fail closed until each AFC round is metered ──
 					const afc = googleAfcVerdict(args[0], "generateContent");
-					if (afc !== "no_afc") {
+					if (afc.kind !== "no_afc") {
 						return refuse("models.generateContent", args, googleAfcError("generateContent", afc));
 					}
 					// ── end AFC gate ──
@@ -4993,7 +5046,7 @@ function buildGoogleProxy<T>(
 				return async (...args: unknown[]) => {
 					// ── AFC gate: fail closed until each AFC round is metered ──
 					const afc = googleAfcVerdict(args[0], "generateContentStream");
-					if (afc !== "no_afc") {
+					if (afc.kind !== "no_afc") {
 						return refuse(
 							"models.generateContentStream",
 							args,

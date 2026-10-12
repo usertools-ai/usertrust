@@ -1086,3 +1086,133 @@ describe("a governed stream closed before its first next() ends its hold", () =>
 		expect(Date.now() - t0).toBeLessThan(1_000);
 	});
 });
+
+// ── A Proxy anywhere the AFC check reads is refused (fail closed) ──
+
+describe("Proxy-backed AFC inputs are refused before anything is forwarded", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	/** A transparent Proxy: it lies about nothing, and is still refused. */
+	const proxied = <T extends object>(target: T): T => new Proxy(target, {});
+
+	const POSITIONS: Array<[string, () => Record<string, unknown>]> = [
+		["params", () => proxied(afcParams({ tools: [callableTool()] }))],
+		[
+			"params.config",
+			() => ({
+				model: "gemini-2.5-flash",
+				contents: "Look it up",
+				config: proxied({ tools: [callableTool()] }),
+			}),
+		],
+		["params.config.tools", () => afcParams({ tools: proxied([callableTool()]) })],
+		[
+			"params.config.tools[1]",
+			() => afcParams({ tools: [{ googleSearch: {} }, proxied(callableTool())] }),
+		],
+		[
+			"params.config.automaticFunctionCalling",
+			() =>
+				afcParams({
+					tools: [callableTool()],
+					automaticFunctionCalling: proxied({ maximumRemoteCalls: 3 }),
+				}),
+		],
+	];
+
+	async function refusedWithoutSdk(
+		method: (typeof AFC_METHODS)[number],
+		params: Record<string, unknown>,
+	): Promise<{ err: unknown; audit: ReturnType<typeof makeMockAudit> }> {
+		const engine = makeMockEngine();
+		const audit = makeMockAudit();
+		const { client, generateContentStream } = makeGoogleClient();
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: audit,
+		});
+		const err = await callModels(governed, method, params).then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+		expect(engine.spendPending).not.toHaveBeenCalled();
+		expect(client.models.generateContent).not.toHaveBeenCalled();
+		expect(generateContentStream).not.toHaveBeenCalled();
+		await destroy(governed);
+		return { err, audit };
+	}
+
+	for (const method of AFC_METHODS) {
+		it.each(POSITIONS)(
+			`${method}: a Proxy in %s → refused, audited, no hold, no SDK call`,
+			async (at, params) => {
+				const { err, audit } = await refusedWithoutSdk(method, params());
+
+				expect(err).toBeInstanceOf(PolicyDeniedError);
+				expect((err as Error).message).toContain(
+					`models.${method} could not be checked for automatic function calling (a Proxy in ${at}); pass plain objects`,
+				);
+				expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+				expect((err as PolicyDeniedError).auditEventHash).toBe(audit.hashes[0]);
+				expect(audit.events[0]?.data).toMatchObject({ actionName: `models.${method}` });
+			},
+		);
+
+		it(`${method}: BYPASS — a params Proxy whose descriptor traps hide the callable tool its get trap returns is refused`, async () => {
+			const shown = { tools: [] as unknown[] }; // what descriptor reads see: no tool
+			const real = { tools: [callableTool()] }; // what the SDK's plain `get` would see
+			const target = { model: "gemini-2.5-flash", contents: "Look it up", config: shown };
+			const descriptorTrap = vi.fn((t: object, key: string | symbol) =>
+				Reflect.getOwnPropertyDescriptor(t, key),
+			);
+			const params = new Proxy<Record<string, unknown>>(target, {
+				getOwnPropertyDescriptor: descriptorTrap,
+				getPrototypeOf: (t) => Reflect.getPrototypeOf(t),
+				get: (t, key, receiver) => (key === "config" ? real : Reflect.get(t, key, receiver)),
+			});
+
+			const { err, audit } = await refusedWithoutSdk(method, params);
+
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect((err as Error).message).toContain("(a Proxy in params); pass plain objects");
+			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+			// The check never asked the Proxy anything.
+			expect(descriptorTrap).not.toHaveBeenCalled();
+		});
+
+		it(`${method}: plain objects with no callable tool are governed (control)`, async () => {
+			const engine = makeMockEngine();
+			const { client, generateContentStream } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: makeMockAudit(),
+			});
+
+			const receipt = (await callModels(
+				governed,
+				method,
+				afcParams({ tools: [{ googleSearch: {} }], automaticFunctionCalling: {} }),
+			)) as TrustReceipt;
+
+			expect(receipt.settled).toBe(true);
+			expect(engine.spendPending).toHaveBeenCalledOnce();
+			const sdk =
+				method === "generateContent" ? client.models.generateContent : generateContentStream;
+			expect(sdk).toHaveBeenCalledOnce();
+
+			await destroy(governed);
+		});
+	}
+});
