@@ -392,13 +392,96 @@ function setData(
 	Object.defineProperty(obj, key, { value, writable: true, enumerable, configurable: true });
 }
 
+// ── What the SDK reads, field by field (@google/genai 1.52.0) ──
+// The SDK reads these objects with plain property access, so a field they INHERIT (a class
+// getter, prototype data) or hold as a NON-ENUMERABLE own property reaches the request. A
+// copy that kept only own enumerable properties would drop it, and the request forwarded
+// would no longer be the caller's.
+
+/** `config.automaticFunctionCalling`: `shouldDisableAfc`, `shouldAppendAfcHistory`, and `generateContent`'s loop bound. */
+const SDK_AFC_CONFIG_FIELDS = ["disable", "maximumRemoteCalls", "ignoreCallHistory"] as const;
+
+/** `config.toolConfig`: `toolConfigToMldev` / `toolConfigToVertex`. */
+const SDK_TOOL_CONFIG_FIELDS = [
+	"functionCallingConfig",
+	"retrievalConfig",
+	"includeServerSideToolInvocations",
+] as const;
+
+/**
+ * `config.toolConfig.functionCallingConfig`: `functionCallingConfigToMldev`, and
+ * `generateContentStream`'s AFC check (`streamFunctionCallArguments`).
+ */
+const SDK_FUNCTION_CALLING_FIELDS = [
+	"mode",
+	"allowedFunctionNames",
+	"streamFunctionCallArguments",
+] as const;
+
+/**
+ * A non-callable tool: `toolToMldev` / `toolToVertex` build the wire tool from exactly these;
+ * `tTool` and `findAfcIncompatibleToolIndexes` read `functionDeclarations`; `hasMcpToolUsage`
+ * tests `'inputSchema' in tool` (the MCP usage header).
+ */
+const SDK_TOOL_FIELDS = [
+	"retrieval",
+	"computerUse",
+	"fileSearch",
+	"googleSearch",
+	"googleMaps",
+	"codeExecution",
+	"enterpriseWebSearch",
+	"functionDeclarations",
+	"googleSearchRetrieval",
+	"parallelAiSearch",
+	"urlContext",
+	"mcpServers",
+	"inputSchema",
+] as const;
+
+/**
+ * A non-callable tool as data WE own: `structuredClone(tool)`, which copies its own
+ * enumerable properties only, plus every field in SDK_TOOL_FIELDS that the clone would not
+ * carry (inherited, or non-enumerable own), CAPTURED once (`captureOnce`) and cloned in as
+ * enumerable own data. So the clone holds every field the SDK reads, `functionDeclarations`
+ * included, and the verdict, which reads the clone, sees what the SDK will see: a
+ * declarations getter beside a callable tool is the SDK's own local error, not an AFC loop.
+ * A tool or captured field that cannot be copied as data is UncloneableAfcInput.
+ */
+function cloneDataTool(tool: unknown, at: string): unknown {
+	let out: unknown;
+	try {
+		out = structuredClone(tool);
+	} catch {
+		throw new UncloneableAfcInput(at);
+	}
+	if (tool === null || typeof tool !== "object" || out === null || typeof out !== "object") {
+		return out;
+	}
+	for (const key of SDK_TOOL_FIELDS) {
+		// An own enumerable field is already in the clone (structuredClone read it, once).
+		if (Object.prototype.propertyIsEnumerable.call(tool, key)) continue;
+		const value = captureOnce(tool, key, at);
+		if (value === undefined) continue;
+		let copy: unknown;
+		try {
+			copy = structuredClone(value);
+		} catch {
+			throw new UncloneableAfcInput(`${at}.${key}`);
+		}
+		setData(out as Record<string, unknown>, key, copy);
+	}
+	return out;
+}
+
 /**
  * `obj` as an object WE own, for an AFC-relevant config object (`automaticFunctionCalling`,
  * `toolConfig`, `functionCallingConfig`): a NULL-PROTOTYPE object, so nothing is inherited
  * from the caller or from `Object.prototype`; every own property captured (an accessor
  * read once, on the original receiver) and written with `setData`; and the named `keys`
- * also resolved through the caller's prototype chain, as the SDK's plain reads would find
- * them. The SDK only reads properties of these objects (and spreads them), so a null
+ * (every field the SDK reads from that object, the SDK_*_FIELDS lists above) also
+ * resolved through the caller's prototype chain, read once, as the SDK's plain reads would
+ * find them. The SDK only reads properties of these objects (and spreads them), so a null
  * prototype is safe for it. The values are the caller's (shallow); the fields the AFC
  * decision reads are primitives.
  */
@@ -480,10 +563,13 @@ function capturedCopy(
  *     absent): anything else is indeterminate.
  *   - `config.automaticFunctionCalling`, `config.toolConfig` and its
  *     `functionCallingConfig`: owned NULL-PROTOTYPE copies (`ownedDataCopy`), so `disable`, `maximumRemoteCalls` and
- *     `streamFunctionCallArguments` are values we own.
+ *     `streamFunctionCallArguments` are values we own, and every field the SDK reads from
+ *     them (`mode` and `allowedFunctionNames` too) is carried, inherited ones included.
  *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
- *     non-callable tool is `structuredClone`d (a tool that cannot be copied as data is
- *     indeterminate, so the call is refused naming it); callable tools keep their
+ *     non-callable tool is cloned as data (`cloneDataTool`: `structuredClone`, plus every
+ *     field the SDK reads that the clone would drop, such as a `functionDeclarations`
+ *     getter; a tool that cannot be copied as data is indeterminate, so the call is
+ *     refused naming it); callable tools keep their
  *     reference (generateContent then runs them through runGovernedAfc, which needs the
  *     original objects; the stream refuses them). When the snapshot says AFC IS disabled
  *     (`disable` truthy, or a `maximumRemoteCalls` the SDK reads as invalid), the tool
@@ -529,7 +615,7 @@ export function snapshotGoogleAfcParams(
 		const afcConfig = ownedDataCopy(
 			captureOnce(config, "automaticFunctionCalling", "params.config"),
 			afcAt,
-			["disable", "maximumRemoteCalls", "ignoreCallHistory"],
+			SDK_AFC_CONFIG_FIELDS,
 		);
 		setData(outConfig, "automaticFunctionCalling", afcConfig);
 
@@ -537,13 +623,13 @@ export function snapshotGoogleAfcParams(
 		const toolConfig = ownedDataCopy(
 			captureOnce(config, "toolConfig", "params.config"),
 			toolConfigAt,
-			["functionCallingConfig"],
+			SDK_TOOL_CONFIG_FIELDS,
 		);
 		if (toolConfig !== null && typeof toolConfig === "object") {
 			const callingConfig = ownedDataCopy(
 				(toolConfig as Record<string, unknown>).functionCallingConfig,
 				`${toolConfigAt}.functionCallingConfig`,
-				["streamFunctionCallArguments"],
+				SDK_FUNCTION_CALLING_FIELDS,
 			);
 			setData(toolConfig as Record<string, unknown>, "functionCallingConfig", callingConfig);
 		}
@@ -599,11 +685,7 @@ export function snapshotGoogleAfcParams(
 						continue;
 					}
 				}
-				try {
-					outTools[i] = structuredClone(tool);
-				} catch {
-					throw new UncloneableAfcInput(at);
-				}
+				outTools[i] = cloneDataTool(tool, at);
 			}
 			// No caller code runs between this check and the verdict (both read data only), and a
 			// tool classified non-callable is our CLONE (or AFC is off on our own copy), so the

@@ -85,7 +85,10 @@ one config and the SDK another. Accessors there are read once and their values
 captured, so the check and the SDK use the same value. The request is forwarded as a snapshot of the
 checked config (with AFC not disabled, each non-callable tool must be copyable as
 data), so a later change to the caller's `config.tools` or
-`config.automaticFunctionCalling` cannot reach the SDK. The snapshot covers those
+`config.automaticFunctionCalling` cannot reach the SDK. It carries every field the
+SDK reads from a non-callable tool, `config.toolConfig` and its
+`functionCallingConfig`, including one a class instance inherits (a getter) or holds
+as a non-enumerable property. The snapshot covers those
 AFC fields only: `contents` and the rest of the request are still read live.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.

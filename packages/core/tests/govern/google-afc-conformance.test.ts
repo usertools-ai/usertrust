@@ -659,3 +659,307 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 		expect(version).toMatch(/^\d+\.\d+\.\d+/);
 	});
 });
+
+// ── The AFC snapshot keeps every field the SDK reads: the WIRE request is the SDK's own ──
+
+type WireRound = { functionCalls?: Loose[]; text: string };
+
+/**
+ * A `fetch` stand-in for the SDK's transport: it records every provider request (URL and parsed JSON body) and answers
+ * each with the next scripted model turn, as JSON or, for `:streamGenerateContent`, as one server-sent event. Unlike the
+ * rows above, nothing inside the SDK is replaced, so its request converters run and the body is what the provider gets.
+ */
+function wire(rounds: WireRound[] = [{ text: "done" }]) {
+	const requests: Array<{ url: string; body: Loose }> = [];
+	const fetchStub = async (url: unknown, init?: { body?: unknown }): Promise<Response> => {
+		requests.push({ url: String(url), body: JSON.parse(String(init?.body)) as Loose });
+		const r = rounds[Math.min(requests.length - 1, rounds.length - 1)] as WireRound;
+		const payload = {
+			candidates: [
+				{
+					content: {
+						role: "model",
+						parts: [
+							...(r.functionCalls ?? []).map((functionCall) => ({ functionCall })),
+							{ text: r.text },
+						],
+					},
+				},
+			],
+			usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+		};
+		return String(url).includes(":streamGenerateContent")
+			? new Response(`data: ${JSON.stringify(payload)}\n\n`, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				})
+			: new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+	};
+	return { requests, fetchStub };
+}
+
+type WireMethod = "generateContent" | "generateContentStream";
+type WireModels = Record<WireMethod, (params: never) => Promise<unknown>>;
+
+/** One call, a stream drained to its end; resolves "ok" or the error's message. */
+async function runOn(models: unknown, method: WireMethod, params: unknown): Promise<string> {
+	try {
+		const out = await (models as WireModels)[method](params as never);
+		if (method === "generateContentStream") {
+			for await (const _ of out as AsyncIterable<unknown>) {
+				// drained
+			}
+		}
+		return "ok";
+	} catch (err) {
+		return (err as Error).message;
+	}
+}
+
+/** A callable tool (the SDK's CallableTool shape). */
+function wireCallable() {
+	return {
+		tool: async () => ({ functionDeclarations: [{ name: "lookup" }] }),
+		callTool: async () => [{ functionResponse: { name: "lookup", response: { ok: true } } }],
+	};
+}
+
+/** `functionCallingConfig` as a class instance: `mode` and `allowedFunctionNames` are PROTOTYPE getters, each read counted. */
+class CallingConfig {
+	readonly #reads: Record<string, number>;
+	readonly #mode: string;
+	constructor(reads: Record<string, number>, mode: string) {
+		this.#reads = reads;
+		this.#mode = mode;
+	}
+	get mode(): string {
+		this.#reads["mode"] = (this.#reads["mode"] ?? 0) + 1;
+		return this.#mode;
+	}
+	get allowedFunctionNames(): string[] {
+		this.#reads["allowedFunctionNames"] = (this.#reads["allowedFunctionNames"] ?? 0) + 1;
+		return ["lookup"];
+	}
+}
+
+/** `toolConfig` as a class instance: `retrievalConfig` and `includeServerSideToolInvocations` are PROTOTYPE getters. */
+class ToolConfigInstance {
+	readonly #reads: Record<string, number>;
+	constructor(reads: Record<string, number>) {
+		this.#reads = reads;
+	}
+	get retrievalConfig(): Loose {
+		this.#reads["retrievalConfig"] = (this.#reads["retrievalConfig"] ?? 0) + 1;
+		return { languageCode: "en-GB", latLng: { latitude: 51.5, longitude: -0.12 } };
+	}
+	get includeServerSideToolInvocations(): boolean {
+		this.#reads["includeServerSideToolInvocations"] =
+			(this.#reads["includeServerSideToolInvocations"] ?? 0) + 1;
+		return true;
+	}
+}
+
+/** A data tool whose `functionDeclarations` structuredClone cannot see: a prototype getter, or a non-enumerable own property. */
+const HIDDEN_DECLARATIONS: Array<[string, (reads: Record<string, number>) => object]> = [
+	[
+		"a PROTOTYPE getter",
+		(reads) => {
+			class DeclaredTool {
+				get functionDeclarations(): Loose[] {
+					reads["functionDeclarations"] = (reads["functionDeclarations"] ?? 0) + 1;
+					return [{ name: "lookup", description: "look it up" }];
+				}
+			}
+			return new DeclaredTool();
+		},
+	],
+	[
+		"a NON-ENUMERABLE own property",
+		() =>
+			Object.defineProperty({}, "functionDeclarations", {
+				value: [{ name: "lookup", description: "look it up" }],
+				enumerable: false,
+			}),
+	],
+];
+
+describe("the AFC snapshot forwards every field the SDK reads (real @google/genai, fetch stubbed)", () => {
+	let vault: string;
+	const realFetch = globalThis.fetch;
+	beforeEach(() => {
+		vault = join(tmpdir(), `trust-afc-wire-${randomUUID()}`);
+		mkdirSync(vault, { recursive: true });
+	});
+	afterEach(() => {
+		globalThis.fetch = realFetch;
+		rmSync(vault, { recursive: true, force: true });
+	});
+
+	/** The same request on the SDK ungoverned, then governed, each on its own client and wire. */
+	async function both(method: WireMethod, makeParams: () => unknown, rounds?: WireRound[]) {
+		const raw = wire(rounds);
+		globalThis.fetch = raw.fetchStub as typeof fetch;
+		const rawResult = await runOn(new GoogleGenAI({ apiKey: "test" }).models, method, makeParams());
+		const gov = wire(rounds);
+		globalThis.fetch = gov.fetchStub as typeof fetch;
+		const governed = await trust(new GoogleGenAI({ apiKey: "test" }), {
+			dryRun: true,
+			budget: 500_000,
+			vaultBase: vault,
+		});
+		const govParams = makeParams();
+		const govResult = await runOn(governed.models, method, govParams);
+		await governed.destroy();
+		return { raw, rawResult, gov, govResult };
+	}
+
+	for (const method of ["generateContent", "generateContentStream"] as const) {
+		it(`${method}: a class-instance functionCallingConfig's PROTOTYPE getters mode and allowedFunctionNames reach the provider, each read once`, async () => {
+			let reads: Record<string, number> = {};
+			const makeParams = () => {
+				reads = {};
+				return {
+					model: "gemini-2.5-flash",
+					contents: "go",
+					config: {
+						tools: [{ functionDeclarations: [{ name: "lookup" }] }],
+						toolConfig: { functionCallingConfig: new CallingConfig(reads, "NONE") },
+					},
+				};
+			};
+			const { raw, rawResult, gov, govResult } = await both(method, makeParams);
+
+			expect(rawResult).toBe("ok");
+			expect(govResult).toBe("ok");
+			// no callable tool: one governed call, one provider request, as natively
+			expect(raw.requests).toHaveLength(1);
+			expect(gov.requests).toHaveLength(1);
+			expect(raw.requests[0]?.body["toolConfig"]).toEqual({
+				functionCallingConfig: { mode: "NONE", allowedFunctionNames: ["lookup"] },
+			});
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			expect(reads).toEqual({ mode: 1, allowedFunctionNames: 1 });
+		});
+
+		it(`${method}: a class-instance toolConfig's PROTOTYPE getters retrievalConfig and includeServerSideToolInvocations reach the provider, each read once`, async () => {
+			let reads: Record<string, number> = {};
+			const makeParams = () => {
+				reads = {};
+				return {
+					model: "gemini-2.5-flash",
+					contents: "go",
+					config: {
+						tools: [{ functionDeclarations: [{ name: "lookup" }] }],
+						toolConfig: new ToolConfigInstance(reads),
+					},
+				};
+			};
+			const { raw, rawResult, gov, govResult } = await both(method, makeParams);
+
+			expect(rawResult).toBe("ok");
+			expect(govResult).toBe("ok");
+			expect(raw.requests).toHaveLength(1);
+			expect(gov.requests).toHaveLength(1);
+			expect(raw.requests[0]?.body["toolConfig"]).toEqual({
+				retrievalConfig: { languageCode: "en-GB", latLng: { latitude: 51.5, longitude: -0.12 } },
+				includeServerSideToolInvocations: true,
+			});
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			expect(reads).toEqual({ retrievalConfig: 1, includeServerSideToolInvocations: 1 });
+		});
+
+		for (const [shape, makeTool] of HIDDEN_DECLARATIONS) {
+			it(`${method}: a data tool whose functionDeclarations is ${shape} reaches the provider with its declarations`, async () => {
+				let reads: Record<string, number> = {};
+				const makeParams = () => {
+					reads = {};
+					return {
+						model: "gemini-2.5-flash",
+						contents: "go",
+						config: { tools: [makeTool(reads)] },
+					};
+				};
+				const { raw, rawResult, gov, govResult } = await both(method, makeParams);
+
+				expect(rawResult).toBe("ok");
+				expect(govResult).toBe("ok");
+				expect(raw.requests).toHaveLength(1);
+				expect(gov.requests).toHaveLength(1);
+				expect(raw.requests[0]?.body["tools"]).toEqual([
+					{ functionDeclarations: [{ name: "lookup", description: "look it up" }] },
+				]);
+				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+				if (shape === "a PROTOTYPE getter") expect(reads).toEqual({ functionDeclarations: 1 });
+			});
+		}
+	}
+
+	it("generateContent with a callable tool: the governed loop's EVERY round carries the class-instance functionCallingConfig, as the SDK's own loop does", async () => {
+		let reads: Record<string, number> = {};
+		const makeParams = () => {
+			reads = {};
+			return {
+				model: "gemini-2.5-flash",
+				contents: "go",
+				config: {
+					tools: [wireCallable()],
+					toolConfig: { functionCallingConfig: new CallingConfig(reads, "ANY") },
+				},
+			};
+		};
+		const rounds = [
+			{ functionCalls: [{ name: "lookup", args: {} }], text: "calling" },
+			{ text: "done" },
+		];
+		const { raw, rawResult, gov, govResult } = await both("generateContent", makeParams, rounds);
+
+		expect(rawResult).toBe("ok");
+		expect(govResult).toBe("ok");
+		// the verdict is unchanged: the SDK's loop made two rounds, and so did the governed one
+		expect(raw.requests).toHaveLength(2);
+		expect(gov.requests).toHaveLength(2);
+		for (const r of raw.requests) {
+			expect(r.body["toolConfig"]).toEqual({
+				functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["lookup"] },
+			});
+		}
+		expect(gov.requests.map((r) => r.body)).toEqual(raw.requests.map((r) => r.body));
+		expect(reads).toEqual({ mode: 1, allowedFunctionNames: 1 });
+	});
+
+	for (const [shape, makeTool] of HIDDEN_DECLARATIONS) {
+		it(`generateContent: a data tool whose functionDeclarations is ${shape}, beside a callable tool, gets the SDK's own local rejection and no provider request`, async () => {
+			const makeParams = () => ({
+				model: "gemini-2.5-flash",
+				contents: "go",
+				config: { tools: [makeTool({}), wireCallable()] },
+			});
+			const { raw, rawResult, gov, govResult } = await both("generateContent", makeParams);
+
+			expect(rawResult).toContain(
+				"Automatic function calling with CallableTools (or MCP objects) and basic FunctionDeclarations is not yet supported. Incompatible tools found at tools[0].",
+			);
+			expect(govResult).toBe(rawResult);
+			expect(raw.requests).toHaveLength(0);
+			expect(gov.requests).toHaveLength(0);
+		});
+
+		it(`generateContentStream: a data tool whose functionDeclarations is ${shape}, beside a callable tool, makes no provider request (control)`, async () => {
+			const makeParams = () => ({
+				model: "gemini-2.5-flash",
+				contents: "go",
+				config: { tools: [makeTool({}), wireCallable()] },
+			});
+			const { raw, rawResult, gov, govResult } = await both("generateContentStream", makeParams);
+
+			// natively the SDK's own error; governed, the stream's AFC refusal: neither reaches the provider
+			expect(rawResult).toContain("Incompatible tools found at tools[0].");
+			expect(govResult).toContain("generateContentStream");
+			expect(raw.requests).toHaveLength(0);
+			expect(gov.requests).toHaveLength(0);
+		});
+	}
+});
