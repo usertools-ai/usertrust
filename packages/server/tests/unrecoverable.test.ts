@@ -80,6 +80,18 @@ const counted = async (base: string, key = KEY): Promise<number> =>
 	).settlementsUnrecoverable;
 
 describe("an unknown transferId on /v1/settle is recorded, not dropped", () => {
+	it("a record that is on the chain but whose writer reported a failure says so in the 410, and a clean one does not", async () => {
+		const degraded = await start({ unheld: { auditDegraded: true } });
+		const a = await post(degraded.base, "/v1/settle", { transferId: "tx_gone", inputTokens: 1 });
+		expect(a.status).toBe(410);
+		expect(await a.json()).toMatchObject({ recorded: true, auditDegraded: true });
+		await server?.close();
+		const clean = await start();
+		const b = await post(clean.base, "/v1/settle", { transferId: "tx_gone2", inputTokens: 1 });
+		expect(b.status).toBe(410);
+		expect(await b.json()).not.toHaveProperty("auditDegraded");
+	});
+
 	it("410 settlement_unrecoverable, handed to the governor with the reported usage, and counted", async () => {
 		const { base, fake } = await start();
 		expect(await counted(base)).toBe(0);
