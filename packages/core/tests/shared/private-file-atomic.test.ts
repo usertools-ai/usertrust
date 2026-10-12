@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { writePrivateFileAtomic } from "../../src/shared/private-fs.js";
+import { dirSyncWarning, writePrivateFileAtomic } from "../../src/shared/private-fs.js";
 
 const isWindows = process.platform === "win32";
 
@@ -98,4 +98,29 @@ describe.skipIf(isWindows)("writePrivateFileAtomic", () => {
 			expect(tmpFiles()).toEqual([]);
 		},
 	);
+});
+
+describe("dirSyncWarning", () => {
+	it("off Windows, says the file is owner-only (mode 600)", () => {
+		const text = dirSyncWarning("/v/.usertrust/.env", "EIO");
+		expect(text).toBe(
+			"usertrust: warning: /v/.usertrust/.env was replaced and is owner-only (mode 600), but its directory could not be synced (EIO), so the new directory entry may not survive a power loss",
+		);
+	});
+
+	it("on Windows, where usertrust sets no permissions, makes no owner-only claim", () => {
+		const real = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+		Object.defineProperty(process, "platform", { ...real, value: "win32" });
+		try {
+			const text = dirSyncWarning("C:\\v\\.usertrust\\.env", "EPERM");
+			expect(text).not.toContain("owner-only");
+			expect(text).not.toContain("mode 600");
+			expect(text).toBe(
+				"usertrust: warning: C:\\v\\.usertrust\\.env was replaced, but its directory could not be synced (EPERM), so the new directory entry may not survive a power loss",
+			);
+		} finally {
+			Object.defineProperty(process, "platform", real);
+		}
+		expect(process.platform).not.toBe("win32");
+	});
 });

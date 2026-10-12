@@ -400,7 +400,13 @@ export function writePrivateFileAtomic(
 	}
 }
 
-/** The warning for a replace that landed but whose directory entry could not be synced. */
+/**
+ * The warning for a replace that landed but whose directory entry could not be synced. On
+ * Windows it makes no owner-only claim: usertrust sets no permissions there (see {@link isWindows}).
+ */
 export function dirSyncWarning(path: string, reason: string): string {
-	return `usertrust: warning: ${path} was replaced and is owner-only (mode 600), but its directory could not be synced (${reason}), so the new directory entry may not survive a power loss`;
+	const replaced = isWindows()
+		? `${path} was replaced`
+		: `${path} was replaced and is owner-only (mode 600)`;
+	return `usertrust: warning: ${replaced}, but its directory could not be synced (${reason}), so the new directory entry may not survive a power loss`;
 }
