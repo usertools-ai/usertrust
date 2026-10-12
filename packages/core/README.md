@@ -93,6 +93,8 @@ const client = await trust(new Anthropic(), {
 
 On a Google client `models.generateContent` and `models.generateContentStream` are governed. `generateContentStream` resolves to the stream itself, as the SDK's does, with the settled receipt on it: `const stream = await google.models.generateContentStream({ ... })`, then `for await (const chunk of stream)` and `await stream.receipt`. Every other billable Google method is refused: `models.embedContent`, `generateImages`, `editImage`, `upscaleImage`, `generateVideos`, `recontextImage` and `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create`, `batches.createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create`, `caches.update`, `fileSearchStores.uploadToFileSearchStore` and `fileSearchStores.importFile` reject with a `PolicyDeniedError` naming the method, and record a `policy_denied` audit event, before the SDK is called, instead of running unmetered. Either method with automatic function calling (a callable tool in `config.tools`, AFC not disabled) is refused the same way for now, because the SDK then makes one provider request per tool round and usertrust cannot yet meter every round: set `config.automaticFunctionCalling.disable: true` and run the tool calls yourself. Calls that are not billed (`models.countTokens`, `models.list`, `caches.get`, `files` and the like) pass through ungoverned.
 
+Clients in one process share their vault's audit writer. Separate processes cannot write to one vault: give each process its own vault (`vaultBase`), or send their calls through one `usertrust-server`.
+
 Every call returns `{ response, receipt }`:
 
 ```typescript
@@ -132,7 +134,7 @@ All commands support `--json` for machine-readable output.
 usertrust init          # Create .usertrust/ vault
 usertrust inspect       # Vault bank statement
 usertrust health        # Entropy diagnostics (6 signals, 0-100 score)
-usertrust verify        # Verify audit chain integrity (+ external anchors)
+usertrust verify        # Verify audit chain integrity and completeness (+ external anchors, --receipts)
 usertrust anchor        # External anchoring: init|now|status|doctor|export|export-bundle|rotate|resume
 usertrust snapshot      # Checkpoint/restore vault state
 usertrust audit quarantine-tail [--dry-run]  # Move a TORN final log line aside, recorded on the chain

@@ -4,9 +4,11 @@
 /**
  * CLI: usertrust verify — Verify audit chain integrity
  *
- * Calls verifyVault() on the local vault (anchored to the `.meta` head, spans
- * rotated segments) and displays the result. Sets a nonzero process exit code
- * on a FAILED verdict so CI gates fail on a tampered vault.
+ * Calls verifyVaultReading() on the local vault (anchored to the `.meta` head,
+ * spans rotated segments), judges the dead letters and the caller's receipts
+ * against the events that read verified, and displays the result. Sets a
+ * nonzero process exit code on a FAILED verdict so CI gates fail on a tampered
+ * vault.
  *
  * External-anchor flags (spec §7.5) mirror the standalone usertrust-verify
  * CLI: the caller fetches anchor artifacts and pins the public key
@@ -18,13 +20,21 @@ import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import pc from "picocolors";
 import { parseAnchorsContent } from "../audit/anchor-verify.js";
 import {
+	type ChainDeadLetters,
+	type ChainDeadLettersUnreadable,
+	describeMissingEvents,
+	readChainDeadLetters,
+} from "../audit/dead-letters.js";
+import type { PersistedAuditEvent } from "../audit/read.js";
+import {
 	type AnchorVerifyParams,
 	exitCodeForAnchored,
-	verifyVault,
-	verifyVaultWithAnchors,
+	verifyVaultReading,
+	verifyVaultWithAnchorsReading,
 	type WitnessInput,
 } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
+import type { ActionKind } from "../shared/types.js";
 import { GLOBAL_FLAGS } from "./flags.js";
 import type { CliOptions } from "./init.js";
 import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
@@ -54,6 +64,8 @@ interface AnchorFlags {
 	params: AnchorVerifyParams;
 	requireAnchor: boolean;
 	requireExternalAnchor: boolean;
+	/** `--receipts` contents, read: the caller's own receipts, checked against the chain. */
+	receiptsRaw: string[];
 }
 
 const KNOWN_VERIFY_FLAGS = new Set([
@@ -74,6 +86,8 @@ const KNOWN_VERIFY_FLAGS = new Set([
 	"--max-anchor-age",
 	"--max-unanchored-events",
 	"--vault-id",
+	// The caller's receipts, cross-checked against the chain (not an anchor flag).
+	"--receipts",
 ]);
 
 const MAX_PEM_BYTES = 16 * 1024;
@@ -194,6 +208,7 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 	let maxAnchorAgeMs: number | undefined;
 	let maxUnanchoredEvents: number | undefined;
 	let vaultId: string | undefined;
+	const receiptFiles: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] as string;
 		const next = (): string | undefined => argv[++i];
@@ -232,7 +247,11 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 				throw new Error(`Invalid --max-unanchored-events: ${v} (non-negative integer required)`);
 			}
 		} else if (arg === "--vault-id") vaultId = next();
-		else if (arg.startsWith("--") && !KNOWN_VERIFY_FLAGS.has(arg)) {
+		else if (arg === "--receipts") {
+			const v = next();
+			if (v === undefined) throw new Error("--receipts requires a file (or - for stdin)");
+			receiptFiles.push(v);
+		} else if (arg.startsWith("--") && !KNOWN_VERIFY_FLAGS.has(arg)) {
 			// Reject unknown flags rather than silently ignoring them — a typoed
 			// --require-anchro must not quietly weaken a CI gate.
 			throw new Error(`Unknown flag: ${arg}`);
@@ -296,6 +315,7 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 		anchorMode,
 		requireAnchor,
 		requireExternalAnchor,
+		receiptsRaw: receiptFiles.map(readArtifact),
 		params: {
 			externalAnchorsRaw,
 			rekorReceiptsRaw,
@@ -307,6 +327,227 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 			...(vaultId !== undefined ? { expectedVaultId: vaultId } : {}),
 		},
 	};
+}
+
+/**
+ * COMPLETENESS, beside integrity. A chain with an event missing still verifies link by link, so the
+ * hash check alone answered "valid" for a vault with half its events dead-lettered (two writers in
+ * one process). Every event that failed to reach the chain is dead-lettered by the writer; this
+ * reads them against `events`, the events the verification just walked, never against the log read
+ * again (a log changed after the walk would put an event on "the chain" that was never hash-checked).
+ */
+function deadLettersOf(
+	vault: string,
+	events: readonly PersistedAuditEvent[],
+): ChainDeadLetters | ChainDeadLettersUnreadable {
+	let byHash: Map<string, PersistedAuditEvent> | undefined;
+	return readChainDeadLetters(vault, (hash) => {
+		byHash ??= new Map(events.map((e) => [e.hash, e]));
+		return byHash.get(hash);
+	});
+}
+
+interface ReceiptCheck {
+	checked: number;
+	/** Receipts with no audit event of their own on the chain, and why. */
+	unaudited: Array<{ transferId: string; reason: string }>;
+	/** Entries that are not receipts this check can read: each counts as unaudited. */
+	unreadable: number;
+}
+
+/**
+ * The INDEPENDENT count: the caller's own receipts (`--receipts`: JSON Lines, or one JSON array),
+ * each checked against `events`, the events the verification just walked (never the log read again,
+ * where an event that was never hash-checked could audit a receipt). A receipt is audited only if its `auditHash` is its OWN event on
+ * the chain: one whose `data.transferId` is its `transferId` and whose kind is the event that
+ * records its spend (`llm_call`, or an action's `actionKind`). Another event of the same transfer (a
+ * detection, a settlement follow-up) is not the spend record, and an event naming no transfer is
+ * no receipt's. This sees a gap the dead-letter queue cannot: a dead letter whose own write failed,
+ * or a queue someone deleted.
+ *
+ * A DEGRADED receipt (`auditHash: "AUDIT_DEGRADED"` from `trust()`, or `auditDegraded: true` with a
+ * placeholder hash from a headless governor) names no event, though its own event may well be on the
+ * chain: the primary append's `.meta` update failed after its bytes were synced, or the primary
+ * landed and a follow-up event (a settlement shortfall, say) failed. It is audited only when the
+ * chain just verified holds ITS OWN event: its transfer, and its kind. The dead-letter queue plays no
+ * part here: it is not tamper-evident, and an event can reach the chain with no dead letter at all.
+ */
+function checkReceipts(events: readonly PersistedAuditEvent[], raws: string[]): ReceiptCheck {
+	const byHash = new Map(events.map((e) => [e.hash, e]));
+	// Each transfer's events on the chain, by kind: a degraded receipt's own event is found here.
+	const ownEventOnChain = new Set<string>();
+	for (const e of events) {
+		const named = (e.data as { transferId?: unknown } | undefined)?.transferId;
+		// A string kind only: an array or an object would stringify into one (`["llm_call"]`), or throw.
+		if (typeof named === "string" && typeof e.kind === "string") {
+			ownEventOnChain.add(`${named}\u0000${e.kind}`);
+		}
+	}
+	const result: ReceiptCheck = { checked: 0, unaudited: [], unreadable: 0 };
+	const entries: unknown[] = [];
+	for (const raw of raws) {
+		const text = raw.trim();
+		// A receipts file the caller named that holds nothing is not "no receipts": a truncated or
+		// empty export would otherwise pass the check with nothing checked. An explicit `[]` says it.
+		if (text === "") {
+			result.unreadable++;
+			continue;
+		}
+		if (text.startsWith("[")) {
+			try {
+				const arr: unknown = JSON.parse(text);
+				// One at a time: spreading a caller-sized array into one call throws past V8's
+				// argument limit (about 120k), which read a valid file as unreadable.
+				if (Array.isArray(arr)) for (const r of arr) entries.push(r);
+				else result.unreadable++;
+			} catch {
+				result.unreadable++;
+			}
+			continue;
+		}
+		for (const line of text.split("\n")) {
+			if (line.trim() === "") continue;
+			try {
+				entries.push(JSON.parse(line));
+			} catch {
+				result.unreadable++;
+			}
+		}
+	}
+	for (const entry of entries) {
+		const r = entry as {
+			transferId?: unknown;
+			auditHash?: unknown;
+			auditDegraded?: unknown;
+			actionKind?: unknown;
+		} | null;
+		if (
+			r === null ||
+			typeof r !== "object" ||
+			typeof r.transferId !== "string" ||
+			typeof r.auditHash !== "string"
+		) {
+			result.unreadable++;
+			continue;
+		}
+		// `actionKind`, when present, must name a governed action: any other kind (a settlement
+		// follow-up, a detection) would let a modified receipt match an event that is not its spend.
+		if (r.actionKind !== undefined && !isActionKind(r.actionKind)) {
+			result.unreadable++;
+			continue;
+		}
+		result.checked++;
+		// The kind of the event that records this receipt's spend: its action's, or an LLM call's.
+		const ownKind = r.actionKind ?? "llm_call";
+		const event = r.auditHash === "AUDIT_DEGRADED" ? undefined : byHash.get(r.auditHash);
+		if (event !== undefined) {
+			const named = (event.data as { transferId?: unknown } | undefined)?.transferId;
+			if (named !== r.transferId) {
+				result.unaudited.push({
+					transferId: r.transferId,
+					reason:
+						typeof named === "string"
+							? `its auditHash is ${named}'s event`
+							: "its auditHash is an event that names no transfer",
+				});
+			} else if (event.kind !== ownKind) {
+				result.unaudited.push({
+					transferId: r.transferId,
+					reason: `its auditHash is its ${typeof event.kind === "string" ? event.kind : "malformed"} event, not the ${ownKind} that records its spend`,
+				});
+			}
+			continue;
+		}
+		if (r.auditHash === "AUDIT_DEGRADED" || r.auditDegraded === true) {
+			if (!ownEventOnChain.has(`${r.transferId}\u0000${ownKind}`)) {
+				result.unaudited.push({
+					transferId: r.transferId,
+					reason: `its audit write degraded, and its ${ownKind} event is not on the chain`,
+				});
+			}
+			continue;
+		}
+		result.unaudited.push({
+			transferId: r.transferId,
+			reason: "its auditHash is not on the chain",
+		});
+	}
+	return result;
+}
+
+/** The governed action kinds (`ActionKind`), complete: a kind added there must be added here. */
+const ACTION_KINDS: Record<ActionKind, true> = {
+	llm_call: true,
+	tool_use: true,
+	file_access: true,
+	shell_command: true,
+	api_request: true,
+};
+
+function isActionKind(kind: unknown): kind is ActionKind {
+	return typeof kind === "string" && Object.hasOwn(ACTION_KINDS, kind);
+}
+
+function receiptsComplete(r: ReceiptCheck | undefined): boolean {
+	return r === undefined || (r.unaudited.length === 0 && r.unreadable === 0);
+}
+
+function printReceiptCheck(r: ReceiptCheck | undefined): void {
+	if (r === undefined) return;
+	if (receiptsComplete(r)) {
+		console.log(
+			pc.green(`Receipts: ${r.checked} checked, each with its audit event on the chain.`),
+		);
+		return;
+	}
+	console.log(
+		pc.red(
+			`INCOMPLETE: ${r.unaudited.length} of ${r.checked} receipt(s) have no audit event on the chain${r.unreadable > 0 ? `, and ${r.unreadable} entr${r.unreadable === 1 ? "y is" : "ies are"} not a readable receipt` : ""}.`,
+		),
+	);
+	for (const u of r.unaudited.slice(0, 10)) {
+		console.log(pc.red(`  - ${scrubForTerminal(u.transferId)}: ${scrubForTerminal(u.reason)}`));
+	}
+	if (r.unaudited.length > 10) console.log(pc.red(`  (+${r.unaudited.length - 10} more)`));
+}
+
+function isComplete(d: ChainDeadLetters | ChainDeadLettersUnreadable): boolean {
+	return !("unreadable" in d) && d.missing === 0;
+}
+
+/** The JSON form: what is missing, never the dead letters' payloads. */
+function deadLettersJson(
+	d: ChainDeadLetters | ChainDeadLettersUnreadable,
+): Record<string, unknown> {
+	if ("unreadable" in d) return { path: d.path, unreadable: d.unreadable };
+	return {
+		path: d.path,
+		missing: d.missing,
+		missingByKind: d.missingByKind,
+		missingTransferIds: d.missingTransferIds,
+		onChain: d.onChain,
+	};
+}
+
+/** The human lines for an incomplete vault (nothing for a complete one). */
+function printIncompleteness(d: ChainDeadLetters | ChainDeadLettersUnreadable): void {
+	if ("unreadable" in d) {
+		console.log(
+			pc.red(
+				`INCOMPLETE?: the dead-letter queue ${scrubForTerminal(d.path)} could not be read (${scrubForTerminal(d.unreadable)}), so whether audit events are missing from the chain is unknown.`,
+			),
+		);
+		return;
+	}
+	if (d.missing === 0) return;
+	console.log(pc.red(`INCOMPLETE: ${scrubForTerminal(describeMissingEvents(d))}.`));
+	const shown = d.missingTransferIds.slice(0, 10).map(scrubForTerminal).join(", ");
+	if (shown !== "") {
+		const more = d.missingTransferIds.length - 10;
+		console.log(
+			pc.red(`  Transfers with no audit event: ${shown}${more > 0 ? ` (+${more} more)` : ""}`),
+		);
+	}
 }
 
 /**
@@ -444,18 +685,27 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 	const verifiedAt = new Date().toISOString();
 
 	if (flags.anchorMode) {
-		const result = verifyVaultWithAnchors(verifiedVault, flags.params);
-		const exitCode = exitCodeForAnchored(result, {
+		const { result, events } = verifyVaultWithAnchorsReading(verifiedVault, flags.params);
+		const deadLetters = deadLettersOf(verifiedVault, events);
+		const receipts =
+			flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
+		const complete = isComplete(deadLetters) && receiptsComplete(receipts);
+		const anchoredExit = exitCodeForAnchored(result, {
 			requireAnchor: flags.requireAnchor,
 			requireExternalAnchor: flags.requireExternalAnchor,
 		});
+		// Exit codes stay 0/1 (constraints §4.3): an incomplete vault fails like an invalid one.
+		const exitCode = anchoredExit !== 0 ? anchoredExit : complete ? 0 : 1;
 		if (json) {
 			console.log(
 				toSafeJson({
 					command: "verify",
-					success: result.valid,
+					success: result.valid && complete,
 					data: {
 						valid: result.valid,
+						complete,
+						deadLetters: deadLettersJson(deadLetters),
+						...(receipts !== undefined ? { receipts } : {}),
 						chainLength: result.chainLength,
 						errors: result.errors,
 						merkleRoot: result.merkleRoot,
@@ -477,6 +727,8 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 				console.log(pc.red(`  - ${scrubForTerminal(err)}`));
 			}
 		}
+		printIncompleteness(deadLetters);
+		printReceiptCheck(receipts);
 		console.log(`Anchor state: ${result.anchorState} (source: ${result.anchoring.anchorSource})`);
 		if (result.anchoring.latestAnchor) {
 			const la = result.anchoring.latestAnchor;
@@ -507,15 +759,22 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		return;
 	}
 
-	const result = verifyVault(verifiedVault);
+	const { result, events } = verifyVaultReading(verifiedVault);
+	const deadLetters = deadLettersOf(verifiedVault, events);
+	const receipts =
+		flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
+	const complete = isComplete(deadLetters) && receiptsComplete(receipts);
 
 	if (json) {
 		console.log(
 			toSafeJson({
 				command: "verify",
-				success: result.valid,
+				success: result.valid && complete,
 				data: {
 					valid: result.valid,
+					complete,
+					deadLetters: deadLettersJson(deadLetters),
+					...(receipts !== undefined ? { receipts } : {}),
 					chainLength: result.chainLength,
 					errors: result.errors,
 					merkleRoot: result.merkleRoot,
@@ -525,12 +784,15 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 				},
 			}),
 		);
-		if (!result.valid) process.exitCode = 1;
+		if (!result.valid || !complete) process.exitCode = 1;
 		return;
 	}
 
+	if (!complete) process.exitCode = 1;
 	if (result.valid) {
 		console.log(pc.green(`Chain verified: ${result.chainLength} events, all hashes valid.`));
+		printIncompleteness(deadLetters);
+		printReceiptCheck(receipts);
 		if (result.merkleRoot) console.log(`Merkle root: ${pc.dim(result.merkleRoot)}`);
 		console.log(
 			pc.dim(
@@ -543,6 +805,8 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		for (const err of result.errors) {
 			console.log(pc.red(`  - ${scrubForTerminal(err)}`));
 		}
+		printIncompleteness(deadLetters);
+		printReceiptCheck(receipts);
 		// Use process.exitCode (not process.exit) so buffered stdout flushes.
 		process.exitCode = 1;
 	}

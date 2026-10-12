@@ -835,6 +835,14 @@ PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"pha
   settle that ends this way is `claimed`, or `unresolved` under a key, which also say whether
   it is retried.
 
+A transcript settle that cannot be built once its hold is claimed (the server's capabilities
+read as unknown only then) sends nothing and hands the hold back for a later settle point:
+`deferred`. If that hand-back fails, the hold stays claimed (`.settling`), which a later settle
+point reads as a settle of unknown outcome: it is `claimed`, or `unresolved` under a key, said
+on stderr, and its record carries `"handBack":"failed"` and the error's `code`. (The hooks claim
+a hold only once the capabilities its settle needs are known, and a known answer is kept for
+the hook's run, so today this path is a guard and is not reached.)
+
 **Redirects.** The plugin follows redirects by hand, up to 20 (fetch's own limit, which earlier
 releases had): each a 307 or a 308 whose `Location` has the origin (scheme, host and port) of
 the URL the plugin asked, re-sent with the same method, body and key. Once the first answer is
