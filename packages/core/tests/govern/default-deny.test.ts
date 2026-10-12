@@ -28,6 +28,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { verifyVault } from "../../../verify/src/index.js";
 import type { AuditWriter } from "../../src/audit/chain.js";
 import { run as runVerifyCli } from "../../src/cli/verify.js";
+import * as defaultDeny from "../../src/default-deny.js";
 import { FREE_METHODS, transportOptionKeys } from "../../src/default-deny.js";
 import { type TrustEngine, type TrustOpts, trust } from "../../src/govern.js";
 import { AUDIT_DIR, VAULT_DIR } from "../../src/shared/constants.js";
@@ -966,6 +967,51 @@ describe("free methods run on the raw SDK resource, unaudited", () => {
 		).rejects.toThrow(/webhook-signature|missing|header/i);
 		expect(hits).toEqual([]);
 		expect(chainEvents()).toEqual([]);
+	});
+});
+
+// ── The supported SDK range IS the classified range ──
+
+/** `major.minor.patch` as numbers; a prerelease or build suffix is ignored. */
+function versionParts(v: string): [number, number, number] {
+	const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v);
+	if (m === null) throw new Error(`not a version: ${v}`);
+	return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+function compareVersions(a: string, b: string): number {
+	const [x, y] = [versionParts(a), versionParts(b)];
+	for (let i = 0; i < 3; i++)
+		if ((x[i] as number) !== (y[i] as number)) return (x[i] as number) - (y[i] as number);
+	return 0;
+}
+
+describe("the SDK peer floors are the versions the free list was classified on", () => {
+	const corePkg = JSON.parse(
+		readFileSync(join(import.meta.dirname, "../../package.json"), "utf8"),
+	) as { peerDependencies: Record<string, string> };
+	const installed = (name: string): string =>
+		(
+			JSON.parse(
+				readFileSync(
+					join(import.meta.dirname, `../../../../node_modules/${name}/package.json`),
+					"utf8",
+				),
+			) as { version: string }
+		).version;
+	const classified = (defaultDeny as { CLASSIFIED_SDK_VERSIONS?: Record<string, string> })
+		.CLASSIFIED_SDK_VERSIONS;
+
+	it.each([
+		["openai", "openai"],
+		["@anthropic-ai/sdk", "anthropic"],
+	] as const)("%s", (pkgName, key) => {
+		expect(classified, "CLASSIFIED_SDK_VERSIONS is exported").toBeDefined();
+		const floor = /^>=(\d+\.\d+\.\d+)$/.exec(corePkg.peerDependencies[pkgName] ?? "")?.[1];
+		expect(floor, `${pkgName}'s peer range is a plain >= floor`).toBeDefined();
+		// A floor moved without re-classifying the free list (or the reverse) fails here.
+		expect(floor).toBe(classified?.[key]);
+		// The SDK this suite runs against is inside the supported range.
+		expect(compareVersions(installed(pkgName), floor as string)).toBeGreaterThanOrEqual(0);
 	});
 });
 

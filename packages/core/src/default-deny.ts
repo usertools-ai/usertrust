@@ -80,6 +80,14 @@ export interface MethodBoundary {
 	readonly readOnly: WeakMap<object, object>;
 }
 
+/**
+ * The SDK versions the free list below was classified on, and so the floors of the
+ * `peerDependencies` in packages/core/package.json: the supported range IS the verified range.
+ * An older SDK exposes method names the classification never saw. `default-deny.test.ts` fails
+ * when a floor and this constant disagree, so neither moves without re-running the classification.
+ */
+export const CLASSIFIED_SDK_VERSIONS = { openai: "7.4.0", anthropic: "0.116.0" } as const;
+
 // ── The free list ──
 // Every method on the resource trees of @anthropic-ai/sdk 0.116.0 and openai 7.4.0 was enumerated
 // and classified by the HTTP verb its source sends (`this._client.get/post/delete/…`, following

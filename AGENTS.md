@@ -1597,7 +1597,10 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 
 **Duck typing only; never import a provider SDK at runtime.** `detect.ts` imports types only.
 `@anthropic-ai/sdk` and `openai` are **optional** peer dependencies; Google has no peer entry at
-all. This is why provider SDK majors can be bumped with no code change.
+all. Their floors (`>=0.116.0`, `>=7.4.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
+versions the default-deny free list was classified on. Moving a floor means re-running that
+classification against the new SDK, and `default-deny.test.ts` fails if the floor and the
+constant disagree.
 
 **The governance boundary is documented in `detect.ts`.** Governed: Anthropic
 `messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected), OpenAI

@@ -12,8 +12,8 @@
  *   `client.messages.parse()`, `client.beta.messages.create()`,
  *   `client.beta.messages.stream()`, `client.beta.messages.parse()`
  * - OpenAI: `client.chat.completions.create()`, and `client.responses.create()`
- *   when present (feature-detected — the Responses API postdates the peer-range
- *   floor, so older clients simply lack it). A streaming
+ *   when present (feature-detected: a duck-typed OpenAI-shaped client may lack it).
+ *   A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   convenience helper is NOT, and is refused (see below).
  * - Google: `client.models.generateContent()`
@@ -50,8 +50,8 @@ import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./s
  *   `client.messages.parse()`, `client.beta.messages.create()`,
  *   `client.beta.messages.stream()`, `client.beta.messages.parse()`
  * - OpenAI: `client.chat.completions.create()`, and `client.responses.create()`
- *   when present (feature-detected — the Responses API postdates the peer-range
- *   floor, so older clients simply lack it). A streaming
+ *   when present (feature-detected: a duck-typed OpenAI-shaped client may lack it).
+ *   A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   helper is NOT, and is refused.
  * - Google: `client.models.generateContent()`

@@ -507,9 +507,9 @@ type IsGoogleClient<T> = T extends { models: infer G }
 // key set derived from `keyof T`, never a hand-written `{ ns: … }` intersection.
 // Three things that buys, all of which a literal intersection silently breaks:
 // a namespace the client does not declare stays ABSENT rather than becoming a
-// phantom property for a surface no proxy installs (an OpenAI client older than
-// the Responses API — ~4.87, under the `>=4.70.0` peer floor — has no `responses`
-// at all); an OPTIONAL namespace stays optional, where re-adding it as required,
+// phantom property for a surface no proxy installs (a duck-typed OpenAI-shaped
+// client, or an SDK older than the Responses API, has no `responses` at all); an
+// OPTIONAL namespace stays optional, where re-adding it as required,
 // or as `X | undefined`, is a different type under `exactOptionalPropertyTypes`
 // and breaks assignability for every consumer holding the original client type;
 // and `readonly` survives, which real `@google/genai` declares on `models`.
@@ -4678,7 +4678,7 @@ function buildAnthropicMessagesProxy(
  * `beta.messages`. Returns undefined on any miss (no beta, non-object beta, a beta
  * getter that throws, or a beta.messages without a create function) so the caller
  * falls back to the default-deny boundary for all of `beta` and NOTHING throws at
- * wrap time (peerDep-range compatibility). create, stream, and parse on beta.messages
+ * wrap time (duck-typed clients may lack `beta`). create, stream, and parse on beta.messages
  * are governed; every other `beta` method goes to the boundary.
  */
 function buildAnthropicBetaProxy(
@@ -4771,8 +4771,8 @@ function buildAnthropicProxy<T>(
  * exposes a create-shaped Responses API. Returns undefined on any miss (no
  * `responses`, non-object `responses`, a getter that throws, or a `responses`
  * without a `create` function) so the caller falls back to raw Reflect.get and
- * NOTHING throws at wrap time — the peer range (`openai >=4.70.0`) predates the
- * Responses API (~4.87), so older clients must keep working untouched.
+ * NOTHING throws at wrap time — a duck-typed OpenAI-shaped client (or an SDK below the
+ * `openai >=7.4.0` peer floor) may have no Responses API, and must keep working untouched.
  *
  * `responses.create` routes through interceptCall on the SEPARATE "openai-responses"
  * surface (A6: no stream_options.include_usage injection; A7: streaming still flows
