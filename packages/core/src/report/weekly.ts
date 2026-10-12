@@ -989,36 +989,36 @@ function buildPlain(
 			if (st.postProven) {
 				// What the ledger POSTED, not the metered cost: a capped post records the lower figure.
 				const chainPosted = tid !== undefined ? postedByTransfer.get(tid) : undefined;
-				if (
-					chainPosted !== undefined ||
-					tid === undefined ||
-					kindsByTransfer.get(tid)?.has("settlement_shortfall")
-				) {
-					t.postProvenUt += chainPosted ?? c;
+				// A USABLE amount only. A shortfall record means the post was LESS than the metered cost, so one whose `posted` is
+				// absent or not a count says "capped" without saying by how much: that is an upper bound, never the metered cost as
+				// if it were exact.
+				const recorded = cost(e.data["postedAmount"]);
+				const dl = opts.deadLetters;
+				const dead =
+					tid !== undefined && dl !== undefined && "shortfalls" in dl
+						? dl.shortfalls.get(tid)
+						: undefined;
+				if (chainPosted !== undefined) {
+					t.postProvenUt += chainPosted;
 					t.postProvenCalls += 1;
+				} else if (recorded !== undefined) {
+					// A record that carries what the ledger POSTED (`postedAmount`, written with the call) is exact by construction:
+					// no later append is needed to tell a capped post from a full one.
+					t.postProvenUt += recorded;
+					t.postProvenCalls += 1;
+				} else if (dead !== undefined) {
+					// Only a dead-lettered shortfall (the writer's queue, read once with the completeness check) gives the posted
+					// amount for an older record; an EMPTY queue proves nothing, because the shortfall may not have been appended yet.
+					t.postProvenUt += dead;
+					t.postProvenCalls += 1;
+					t.postProvenDeadLetterUt += dead;
+					t.postProvenDeadLetterCalls += 1;
 				} else {
-					// Headless, the ledger answered, and no shortfall record is on the chain. This record format cannot tell a
-					// capped post from an uncapped one: the shortfall is appended AFTER the call, so a snapshot taken between
-					// the two appends, or after a crash between them, sees exactly this shape. Only a dead-lettered shortfall
-					// (the writer's queue, read once from the snapshot) gives the posted amount; an EMPTY queue proves nothing,
-					// because the shortfall may not have been appended yet. Everything else is an upper bound.
-					const dl = opts.deadLetters;
-					const dead = dl !== undefined && "shortfalls" in dl ? dl.shortfalls.get(tid) : undefined;
-					// A record that carries what the ledger POSTED (`postedAmount`, written with the call) is exact by
-					// construction: no later append is needed to tell a capped post from a full one.
-					const recorded = cost(e.data["postedAmount"]);
-					if (recorded !== undefined) {
-						t.postProvenUt += recorded;
-						t.postProvenCalls += 1;
-					} else if (dead !== undefined) {
-						t.postProvenUt += dead;
-						t.postProvenCalls += 1;
-						t.postProvenDeadLetterUt += dead;
-						t.postProvenDeadLetterCalls += 1;
-					} else {
-						t.postProvenUpperUt += c;
-						t.postProvenUpperCalls += 1;
-					}
+					// This record format cannot tell a capped post from an uncapped one (the shortfall is appended AFTER the call,
+					// so a snapshot between the two appends, or a crash between them, sees the same shape), and a shortfall with no
+					// usable amount does not say how much moved. At most the metered cost moved.
+					t.postProvenUpperUt += c;
+					t.postProvenUpperCalls += 1;
 				}
 			}
 			if (denomination === "unlabelled") {

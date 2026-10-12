@@ -810,7 +810,10 @@ describe("weekly report model", () => {
 			call("2026-10-08T03:00:00Z", 50, { transferId: undefined }),
 		]);
 		expect(m.totals.confirmedUt).toBe(100);
-		expect(m.totals.postProvenUt).toBe(100);
+		// the shortfall here names no `posted`: the post was LESS than 100 by some unknown amount, so 100 is an upper bound,
+		// not an exact proven figure (changed expectation: it used to be counted as exactly 100)
+		expect(m.totals.postProvenUt).toBe(0);
+		expect(m.totals.postProvenUpperUt).toBe(100);
 		expect(m.totals.unconfirmedUt).toBe(250);
 		expect(m.totals.uncorrelatedCalls).toBe(1);
 	});
@@ -1480,5 +1483,35 @@ describe("a governed action whose name is the empty string is still an action", 
 		expect(m.spendLedger.differs).toBe(false);
 		// and it is NOT treated as a model call
 		expect(m.totals.confirmedUt).toBe(0);
+	});
+});
+
+describe("a shortfall whose posted amount is unusable never makes the metered cost exact", () => {
+	const T = "2026-10-08T01:00:00Z";
+
+	it("posted absent, non-numeric or negative: an UPPER bound, not the full cost as exact", () => {
+		for (const posted of [undefined, "sixty", -5, Number.NaN, null]) {
+			const data: Record<string, unknown> = { transferId: "t", actual: 100, shortfall: 40 };
+			if (posted !== undefined) data["posted"] = posted;
+			const m = build([call(T, 100, { transferId: "t" }), ev("settlement_shortfall", T, data)]);
+			expect(m.totals.confirmedUt, String(posted)).toBe(100);
+			expect(m.totals.postProvenUt, String(posted)).toBe(0);
+			expect(m.totals.postProvenUpperUt, String(posted)).toBe(100);
+			expect(m.totals.postProvenUpperCalls, String(posted)).toBe(1);
+		}
+	});
+
+	it("a usable posted is still exact, and a postedAmount on the call still supplies the amount a bare shortfall lacks", () => {
+		const exact = build([
+			call(T, 100, { transferId: "t" }),
+			ev("settlement_shortfall", T, { transferId: "t", actual: 100, posted: 60, shortfall: 40 }),
+		]);
+		expect(exact.totals.postProvenUt).toBe(60);
+		const recorded = build([
+			call(T, 100, { transferId: "t", source: "headless", ledgerPosted: true, postedAmount: 60 }),
+			ev("settlement_shortfall", T, { transferId: "t", actual: 100, shortfall: 40 }),
+		]);
+		expect(recorded.totals.postProvenUt).toBe(60);
+		expect(recorded.totals.postProvenUpperCalls).toBe(0);
 	});
 });
