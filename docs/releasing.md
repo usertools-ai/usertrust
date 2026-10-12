@@ -278,19 +278,27 @@ check the publish job makes. So the person approving confirms both independently
 approving. The publish job waits for that approval before any of its steps, so nothing has been
 pushed or published yet.
 
+Call the expected version `V`: the committed version bumped by the dispatched `version` input
+(for example `4.1.0` with `minor` gives `4.2.0`).
+
 1. **Download the run's `release` artifact** (the run's page, under Artifacts): the build job's
    tarballs (`*.tgz`) and, for a new release, `release.bundle`.
-2. **Build the dispatched commit yourself**, on a machine you trust: check out the commit the run
-   was dispatched on (shown on the run's page), apply the same version bump the build job applies
-   (its "Bump versions" step in `.github/workflows/publish.yml`, with the `version` input the run was
-   dispatched with), install with `npm ci`, build, and pack with `bash scripts/release.sh pack
-   <dir>`.
-3. **Compare, package by package:**
-   - the same set of paths in each tarball, and every file byte-identical;
-   - `package/package.json` identical as parsed JSON;
-   - the version equal to the committed version bumped by the dispatched input (for example
-     `4.1.0` with `minor` gives `4.2.0`), and no other value.
-4. **Approve only if all three match.** Otherwise reject the deployment.
+2. **Check the release commit in `release.bundle`.** The published `package.json` files and the
+   pushed tag come from this commit, not from the tarballs, so it must be checked on its own. In a
+   clone of the repository that has the dispatched commit (shown on the run's page):
+   - `git bundle verify release.bundle` succeeds;
+   - the bundle holds exactly one tag, and it is `vV` (`git bundle list-heads release.bundle`);
+   - fetch it (`git fetch release.bundle "refs/tags/vV:refs/tags/vV"`), and the tag's commit has
+     exactly one parent, the dispatched commit;
+   - in that commit, all six `packages/<dir>/package.json` files have `"version": "V"`.
+3. **Build the dispatched commit yourself**, on a machine you trust: check out the dispatched
+   commit, apply the same version bump the build job applies (its "Bump versions" step in
+   `.github/workflows/publish.yml`, with the dispatched `version` input), install with `npm ci`,
+   build, and pack with `bash scripts/release.sh pack <dir>`.
+4. **Compare the tarballs, package by package**, yours with the run's:
+   - the same set of paths, and every file byte-identical (this is the check on the `dist/` code);
+   - `package/package.json` identical as parsed JSON, with `"version": "V"`.
+5. **Approve only if every check in steps 2 and 4 passes.** Otherwise reject the deployment.
 
 A republish publishes a version that is already tagged on `master`; compare its tarballs the same
 way against a build of that tag.
