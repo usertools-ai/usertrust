@@ -539,8 +539,9 @@ export interface TrustEngine {
 // Everything else on those resources is ungoverned (see detect.ts's boundary block).
 // On every provider the runtime refuses it unless it is free or listed in
 // `allowUngoverned` (default-deny.ts), and the types leave it untouched: a refused
-// method keeps its SDK signature. On a Google client the billable methods #326 named
-// (GOOGLE_REFUSED_METHODS) ARE typed as refused below, and keep their tailored hint.
+// method keeps its SDK signature, so a method listed in `allowUngoverned` types as the SDK's
+// own. On a Google client the billable methods #326 named (GOOGLE_REFUSED_METHODS) keep
+// their tailored runtime hint, and their SDK signature like every other refused method.
 
 /** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
 type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
@@ -689,36 +690,14 @@ type GovernedResponses<R> =
 			: R;
 
 /**
- * A method the governed client REFUSES: it keeps its parameters and resolves to
- * nothing — the runtime stand-in returns a promise that REJECTS with a PolicyDeniedError
- * naming the method, after the denial is on the audit chain and before the SDK is
- * reached (GOOGLE_REFUSED_METHODS). A non-callable member is left as it is, mirroring
- * the runtime, which only replaces a member that is a function.
- */
-type RefusedMethod<F> = F extends (...args: infer A) => unknown
-	? (...args: A) => Promise<never>
-	: F;
-
-/**
- * Type the members `K` of a namespace as refused, homomorphically (every other member,
- * and every modifier, survives as declared). A callable or non-object namespace is
- * left as declared.
- */
-type RefuseMembers<N, K extends PropertyKey> =
-	IsCallable<N> extends true
-		? N
-		: N extends object
-			? { [Q in keyof N]: Q extends K ? RefusedMethod<N[Q]> : N[Q] }
-			: N;
-
-/**
  * The Google `models` resource. `generateContent` resolves to the `{ response, receipt }`
  * envelope (plus `receipts` when it ran as a governed AFC loop, GovernedGoogleGenerateMethod); `generateContentStream` resolves to the governed stream ITSELF with a
  * `.receipt` promise (the same contract as Anthropic's `messages.stream`, and what
- * buildGoogleProxy's trap returns); the non-governed generation methods are refused.
+ * buildGoogleProxy's trap returns). Every other member keeps its SDK signature, as on
+ * Anthropic and OpenAI: a method the runtime refuses (default-deny.ts) can be listed in
+ * `allowUngoverned`, and then returns the SDK's own result.
  * Homomorphic, so a fake or older client without `generateContentStream` gets no
  * phantom member, and `countTokens` / `list` / `get` stay exactly as declared.
- * Keep the refused names in step with GOOGLE_REFUSED_METHODS.models.
  */
 type GovernedGoogleModels<G> = G extends { generateContent: AnyMethod }
 	? {
@@ -726,47 +705,9 @@ type GovernedGoogleModels<G> = G extends { generateContent: AnyMethod }
 				? GovernedGoogleGenerateMethod<G[P]>
 				: P extends "generateContentStream"
 					? GovernedStreamMethod<G[P]>
-					: P extends
-								| "embedContent"
-								| "generateImages"
-								| "editImage"
-								| "upscaleImage"
-								| "generateVideos"
-								| "recontextImage"
-								| "segmentImage"
-						? RefusedMethod<G[P]>
-						: G[P];
+					: G[P];
 		}
 	: G;
-
-/** `live.connect` and `live.music.connect` are refused; the rest of `live` is raw. */
-type RefusedGoogleLive<L> =
-	IsCallable<L> extends true
-		? L
-		: L extends object
-			? {
-					[Q in keyof L]: Q extends "connect"
-						? RefusedMethod<L[Q]>
-						: Q extends "music"
-							? RefuseMembers<L[Q], "connect">
-							: L[Q];
-				}
-			: L;
-
-/** One Google namespace with its refused members (GOOGLE_REFUSED_METHODS). */
-type RefusedGoogleNamespace<P, N> = P extends "live"
-	? RefusedGoogleLive<N>
-	: P extends "batches"
-		? RefuseMembers<N, "create" | "createEmbeddings">
-		: P extends "chats" | "interactions"
-			? RefuseMembers<N, "create">
-			: P extends "tunings"
-				? RefuseMembers<N, "tune">
-				: P extends "caches"
-					? RefuseMembers<N, "create" | "update">
-					: P extends "fileSearchStores"
-						? RefuseMembers<N, "uploadToFileSearchStore" | "importFile">
-						: N;
 
 /**
  * The Google `generateContent` envelope: `{ response, receipt }` like every other create, plus `receipts`, one per model
@@ -844,20 +785,6 @@ type GovernedResponsesPart<T, K extends keyof T = Extract<keyof T, "responses">>
 type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
 	[P in K]: GovernedGoogleModels<T[P]>;
 };
-type GoogleRefusingNamespace =
-	| "chats"
-	| "live"
-	| "batches"
-	| "interactions"
-	| "tunings"
-	| "caches"
-	| "fileSearchStores";
-type RefusedGoogleNamespacesPart<
-	T,
-	K extends keyof T = Extract<keyof T, GoogleRefusingNamespace>,
-> = {
-	[P in K]: RefusedGoogleNamespace<P, T[P]>;
-};
 /**
  * `withOptions` returns a client governed by the SAME governor (`boundary.rewrap`), so its type is
  * the governed shape, never the SDK's `this` — which `Omit<T, …>` would otherwise carry through as
@@ -894,9 +821,7 @@ type GovernedShapeOf<T> =
 					GovernedResponsesPart<T> &
 					GovernedWithOptionsPart<T>
 			: IsGoogleClient<T> extends true
-				? Omit<T, "models" | GoogleRefusingNamespace> &
-						GovernedModelsPart<T> &
-						RefusedGoogleNamespacesPart<T>
+				? Omit<T, "models"> & GovernedModelsPart<T>
 				: T;
 
 /**
@@ -5287,8 +5212,8 @@ function buildOpenAIProxy<T>(
  * `models` (bound when the client was constructed), so every `sendMessage` /
  * `sendMessageStream` would bypass the governed proxy.
  *
- * Exported for the tests, which assert one refusal per entry. The type layer's twin
- * is the `Refused…` mapping above `GovernedShapeOf`; the two must list the same names.
+ * Exported for the tests, which assert one refusal per entry. The types do not mirror it:
+ * a refused method keeps its SDK signature, so a listed one types as the SDK's own.
  */
 export const GOOGLE_REFUSED_METHODS = {
 	models: [
