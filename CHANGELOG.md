@@ -560,7 +560,7 @@ When to cut that major is a release decision, not this change's: until it is cut
 
 ## [3.2.0] - 2026-08-08
 
-### Fixed
+### Added
 
 - **`usertrust-openclaw`: operator-declared tool→envelope attribution and
   per-turn scarcity injection.** A new `costCenters` plugin config
@@ -585,7 +585,7 @@ When to cut that major is a release decision, not this change's: until it is cut
 
 ## [3.1.0] - 2026-08-06
 
-### Fixed
+### Added
 
 - **Budget envelopes: spend routing, per-envelope caps, and scarcity visibility
   (#79, previously unlisted).** `withCostCenter(costCenter, fn, opts?)`

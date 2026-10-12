@@ -85,7 +85,7 @@ npx usertrust init
 
 `npx usertrust init` does not install the package into your project, so the `npm install` line is required. `import { trust } from "usertrust"` fails until it runs.
 
-usertrust wraps your provider's own client and does not install it: the provider SDKs are optional peer dependencies. Install the one you use: `@anthropic-ai/sdk` for the example above, or `openai`.
+usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). `@anthropic-ai/sdk` and `openai` are declared as optional peer dependencies. `@google/genai` is not declared at all: usertrust recognises a Google client by its shape (`models.generateContent`), so nothing in the install names that package, and you install it yourself.
 
 `init` is interactive in a terminal. It asks for your provider API key (Anthropic `sk-ant-`, OpenAI `sk-` and Google `AIza` keys are detected from their prefix; any other provider you name yourself) and writes it to `.usertrust/.env` with owner-only permissions. An Anthropic, OpenAI or Google key is first checked against that provider's models endpoint (unless you pass `--skip-verify`); a key that fails the check is still written, with a warning. A key for a provider you name yourself is not checked at all, even though `init` reports it as valid, so a wrong key there shows up only on the first real call.
 
@@ -104,12 +104,13 @@ The package ships a single ESM build; `require()` loads it through Node's built-
 
 ## Integration
 
-Works with Anthropic, OpenAI, and Google AI SDKs:
+Works with the Anthropic (`@anthropic-ai/sdk`), OpenAI (`openai`) and Google Gemini (`@google/genai`) SDKs:
 
 ```typescript
 import { trust } from "usertrust";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 
 // Anthropic
 const anthropic = await trust(new Anthropic());
@@ -119,11 +120,17 @@ const { response, receipt } = await anthropic.messages.create({ ... });
 const openai = await trust(new OpenAI());
 const { response, receipt } = await openai.chat.completions.create({ ... });
 
+// Google Gemini: the client reads GOOGLE_API_KEY, the name `init` stores a Google key under
+const google = await trust(new GoogleGenAI({}));
+const { response, receipt } = await google.models.generateContent({ model: "gemini-2.5-flash", contents: "..." });
+
 // With options (full mode — requires TigerBeetle)
 const client = await trust(new Anthropic(), {
   budget: 100_000,
 });
 ```
+
+On a Google client only `models.generateContent` is governed. `models.generateContentStream` passes through to the SDK untouched: it is not metered, it gets no receipt, and no policy applies to it. Use `generateContent` for calls you need governed.
 
 Every call returns `{ response, receipt }`:
 
