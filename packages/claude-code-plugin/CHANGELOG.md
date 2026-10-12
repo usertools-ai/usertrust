@@ -1,11 +1,20 @@
-# Changelog: usertrust-claude-code
+# Changelog: usertools (formerly usertrust-claude-code)
 
 The Claude Code plugin's own changes. It is installed from this repository's
 plugin marketplace (`/plugin marketplace add usertools-ai/usertrust`), not from
 npm, and its version is its own: the `usertrust` packages and their
 [changelog](../../CHANGELOG.md) are versioned separately.
 
-## [Unreleased]
+## [3.0.0] - 2026-10-12
+
+### Changed
+
+- **BREAKING: the plugin is renamed from `usertrust-claude-code` to `usertools`.** Install it
+  with `/plugin install usertools@usertrust`. An existing install does not migrate itself:
+  uninstall `usertrust-claude-code` BEFORE installing `usertools`. With both installed,
+  every tool call is metered twice. Unchanged by the rename: the marketplace name
+  (`usertrust`), the state directory, the configuration path (`~/.config/usertrust/`), the
+  hooks and their behaviour.
 
 ### Fixed
 
