@@ -63,26 +63,66 @@ export function afcRequested(params: unknown): boolean {
 	return true;
 }
 
-/** `contents` as a list of `Content`, the way the SDK normalises it before it appends the round's turns. */
+function isContent(v: unknown): v is Loose {
+	return isObject(v) && "parts" in v && Array.isArray(v["parts"]);
+}
+
+function hasFunctionPart(v: unknown): boolean {
+	return isObject(v) && ("functionCall" in v || "functionResponse" in v);
+}
+
+function toPart(v: unknown): unknown {
+	if (v === null || v === undefined) throw new Error("PartUnion is required");
+	if (typeof v === "object") return v;
+	if (typeof v === "string") return { text: v };
+	throw new Error(`Unsupported part type: ${typeof v}`);
+}
+
+/**
+ * `contents` as a list of `Content`, EXACTLY as the SDK's `tContents` normalises it (including the errors it throws, so a
+ * malformed request fails the same way governed and ungoverned, before any round is charged): an item is a `Content` only
+ * if it has a `parts` ARRAY; an array whose first item is not a Content is ONE user turn of every item (strings become
+ * `{ text }`); mixing Content and Parts is an error; function-call and function-response parts must be wrapped in a
+ * Content.
+ */
 function toContents(contents: unknown): Loose[] {
-	const userText = (text: string): Loose => ({ role: "user", parts: [{ text }] });
-	if (typeof contents === "string") return [userText(contents)];
-	if (Array.isArray(contents)) {
-		if (contents.length === 0) return [];
-		const items = contents as unknown[];
-		// An array of bare parts is ONE user turn; an array of turns (anything with `parts`) is already contents.
-		if (items.every((c) => typeof c === "string")) {
-			return [{ role: "user", parts: items.map((text) => ({ text })) }];
-		}
-		if (items.every((c) => isObject(c) && !("parts" in c) && !("role" in c))) {
-			return [{ role: "user", parts: items }];
-		}
-		return items.map((c) => (typeof c === "string" ? userText(c) : (c as Loose)));
+	if (
+		contents === null ||
+		contents === undefined ||
+		(Array.isArray(contents) && contents.length === 0)
+	) {
+		throw new Error("contents are required");
 	}
-	if (isObject(contents)) {
-		return "parts" in contents ? [contents] : [{ role: "user", parts: [contents] }];
+	if (!Array.isArray(contents)) {
+		if (hasFunctionPart(contents)) {
+			throw new Error(
+				"To specify functionCall or functionResponse parts, please wrap them in a Content object, specifying the role for them",
+			);
+		}
+		return [isContent(contents) ? contents : { role: "user", parts: [toPart(contents)] }];
 	}
-	return [];
+	const result: Loose[] = [];
+	const accumulated: unknown[] = [];
+	const isContentArray = isContent(contents[0]);
+	for (const item of contents as unknown[]) {
+		const itemIsContent = isContent(item);
+		if (itemIsContent !== isContentArray) {
+			throw new Error(
+				"Mixing Content and Parts is not supported, please group the parts into a the appropriate Content objects and specify the roles for them",
+			);
+		}
+		if (itemIsContent) {
+			result.push(item as Loose);
+		} else if (hasFunctionPart(item)) {
+			throw new Error(
+				"To specify functionCall or functionResponse parts, please wrap them, and any other parts, in Content objects as appropriate, specifying the role for them",
+			);
+		} else {
+			accumulated.push(item);
+		}
+	}
+	if (!isContentArray) result.push({ role: "user", parts: accumulated.map(toPart) });
+	return result;
 }
 
 export interface AfcRoundResult {

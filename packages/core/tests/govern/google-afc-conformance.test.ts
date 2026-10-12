@@ -96,6 +96,12 @@ const SHAPES: Array<[string, Loose]> = [
 const CONTENTS: Array<[string, unknown]> = [
 	["a list of turns", [{ role: "user", parts: [{ text: "look it up" }] }]],
 	["a bare string", "look it up"],
+	// the common multimodal prompt: a string and a Part in one array is ONE user turn
+	[
+		"a multimodal [text, inlineData part]",
+		["What is in this image?", { inlineData: { mimeType: "image/png", data: "AAAA" } }],
+	],
+	["a single Part", { text: "look it up" }],
 ];
 
 describe("governed AFC conforms to the real @google/genai loop", () => {
@@ -156,6 +162,53 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 				await governed.destroy();
 			});
 		}
+	}
+
+	// Malformed requests must fail the same way governed and ungoverned, before any round is made or charged.
+	const MALFORMED: Array<[string, unknown]> = [
+		["empty contents", []],
+		["Content mixed with a Part", [{ role: "user", parts: [{ text: "a" }] }, { text: "b" }]],
+		["a Part mixed with Content", [{ text: "b" }, { role: "user", parts: [{ text: "a" }] }]],
+		["a bare functionCall part", { functionCall: { name: "lookup" } }],
+		[
+			"a functionResponse part in a parts array",
+			[{ text: "a" }, { functionResponse: { name: "x" } }],
+		],
+	];
+	for (const [name, contents] of MALFORMED) {
+		it(`${name}: the same error as the SDK, and no round is charged`, async () => {
+			const a = scriptedModel(ROUNDS);
+			const sdk = new GoogleGenAI({ apiKey: "test" });
+			(sdk.models as unknown as Loose)["generateContentInternal"] = a.respond;
+			const expected = await sdk.models
+				.generateContent({
+					model: "gemini-2.5-flash",
+					contents: contents as never,
+					config: { tools: [makeTool().tool] } as never,
+				})
+				.then(
+					() => "no error",
+					(e: Error) => e.message,
+				);
+			const b = scriptedModel(ROUNDS);
+			const sdk2 = new GoogleGenAI({ apiKey: "test" });
+			(sdk2.models as unknown as Loose)["generateContentInternal"] = b.respond;
+			const governed = await trust(sdk2, { dryRun: true, budget: 500_000, vaultBase: vault });
+			const actual = await governed.models
+				.generateContent({
+					model: "gemini-2.5-flash",
+					contents: contents as never,
+					config: { tools: [makeTool().tool] } as never,
+				})
+				.then(
+					() => "no error",
+					(e: Error) => e.message,
+				);
+			expect(actual).toBe(expected);
+			expect(expected).not.toBe("no error");
+			expect(b.sent).toHaveLength(a.sent.length);
+			await governed.destroy();
+		});
 	}
 
 	it("a model that never stops calling tools is bounded by the SDK's default of 10 rounds, in both loops", async () => {
