@@ -48,16 +48,24 @@ function isCallableTool(tool: unknown): tool is CallableTool {
 }
 
 /**
- * A callable tool whose `tool()` answers from a snapshot taken once. The SDK's native loop awaits every `tool.tool()` ONCE,
- * before its first round; each governed round re-enters the public `generateContent`, which would await it again, so a
- * one-shot or stateful callable could fail on round two and a dynamic one could show different declarations between
- * rounds. A Proxy keeps everything else about the tool (its prototype, so `instanceof` checks such as the SDK's MCP-usage
- * header still hold; `callTool` and every other method run against the real tool).
+ * A callable tool whose `tool()` is asked ONCE per call, LAZILY, and answers every later round from that answer.
+ *
+ * The SDK's native loop awaits every `tool.tool()` once, before its first model call, and all of them start together
+ * (`Promise.all` over the tools). Each governed round re-enters the public `generateContent`, which would await them again,
+ * so a one-shot or stateful callable could fail on round two and a dynamic one could show different declarations between
+ * rounds. The snapshot is taken lazily, by the FIRST round's own `generateContent` (inside the governed call, after the
+ * round was authorized and a hold was placed): a denied call (policy, PII, budget) never runs user-supplied declaration
+ * code, a `tool()` that throws goes through the governed lifecycle (the hold is voided, the failure audited) instead of
+ * escaping before it, and the SDK itself starts all the tools' `tool()` calls together, exactly as it does natively.
+ * A Proxy keeps everything else about the tool (its prototype, so `instanceof` checks such as the SDK's MCP-usage header
+ * still hold; `callTool` and every other method run against the real tool).
  */
-function snapshotTool(tool: CallableTool, declaration: unknown): CallableTool {
+function snapshotTool(tool: CallableTool): CallableTool {
+	let asked: Promise<unknown> | undefined;
 	return new Proxy(tool, {
 		get(target, prop) {
-			if (prop === "tool") return () => Promise.resolve(declaration);
+			// Called synchronously on first use, like the SDK's own `await callableTool.tool()` inside its map.
+			if (prop === "tool") return () => (asked ??= (async () => target.tool())());
 			const value = Reflect.get(target, prop, target) as unknown;
 			return typeof value === "function" ? value.bind(target) : value;
 		},
@@ -192,13 +200,9 @@ export async function runGovernedAfc(
 	const appendHistory = afc["ignoreCallHistory"] !== true;
 	const configTools = config["tools"] as unknown[];
 	const tools = configTools.filter(isCallableTool);
-	// Declarations are resolved ONCE, in order, before the first round, as the SDK's native loop does; a failing `tool()`
-	// ends the call here, before any round is charged.
-	const declarations = new Map<CallableTool, unknown>();
-	for (const tool of tools) declarations.set(tool, await tool.tool());
-	const roundTools = configTools.map((t) =>
-		isCallableTool(t) ? snapshotTool(t, declarations.get(t)) : t,
-	);
+	// Declarations are NOT resolved here: the first round's own generateContent asks each tool once, inside the governed call
+	// (see snapshotTool).
+	const roundTools = configTools.map((t) => (isCallableTool(t) ? snapshotTool(t) : t));
 
 	// The first round is sent the caller's `contents` exactly as given (the SDK normalises only once it appends a turn);
 	// the history starts from the normalised form.

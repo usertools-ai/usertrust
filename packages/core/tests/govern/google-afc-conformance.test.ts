@@ -257,6 +257,120 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 		await governed.destroy();
 	});
 
+	it("a call that policy or budget DENIES never runs the user's declaration code: tool() is asked only inside an authorized round", async () => {
+		const asked = { n: 0 };
+		const tool = {
+			tool: async () => {
+				asked.n++;
+				return { functionDeclarations: [{ name: "lookup" }] };
+			},
+			callTool: async () => [{ functionResponse: { name: "lookup", response: { ok: true } } }],
+		};
+		const m = scriptedModel(ROUNDS);
+		const sdk = new GoogleGenAI({ apiKey: "test" });
+		(sdk.models as unknown as Loose)["generateContentInternal"] = m.respond;
+		// a budget the first round cannot be held against: denied before any provider call
+		const governed = await trust(sdk, { dryRun: true, budget: 1, vaultBase: vault });
+		await expect(
+			governed.models.generateContent({
+				model: "gemini-2.5-flash",
+				contents: "go",
+				config: { tools: [tool] } as never,
+			}),
+		).rejects.toThrow();
+		expect(asked.n).toBe(0);
+		expect(m.sent).toHaveLength(0);
+		await governed.destroy();
+	});
+
+	it("tools declare CONCURRENTLY, as in the SDK: two declarations that wait for each other both resolve", async () => {
+		const makePair = () => {
+			let started = 0;
+			let release!: () => void;
+			const both = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const decl = (name: string) => async () => {
+				started++;
+				if (started === 2) release();
+				await both; // never settles unless the SECOND tool() is started while the first is pending
+				return { functionDeclarations: [{ name }] };
+			};
+			const call = async () => [{ functionResponse: { name: "x", response: { ok: true } } }];
+			return [
+				{ tool: decl("a"), callTool: call },
+				{ tool: decl("b"), callTool: call },
+			];
+		};
+		const run = async (governedRun: boolean) => {
+			const m = scriptedModel(ROUNDS);
+			const sdk = new GoogleGenAI({ apiKey: "test" });
+			(sdk.models as unknown as Loose)["generateContentInternal"] = m.respond;
+			const tools = makePair();
+			const target = governedRun
+				? (await trust(sdk, { dryRun: true, budget: 500_000, vaultBase: vault })).models
+				: sdk.models;
+			const done = await Promise.race([
+				(target as typeof sdk.models)
+					.generateContent({
+						model: "gemini-2.5-flash",
+						contents: "go",
+						config: { tools } as never,
+					})
+					.then(() => "resolved"),
+				new Promise<string>((r) => setTimeout(() => r("hung"), 3000)),
+			]);
+			return { done, sentTools: m.sentTools };
+		};
+		const native = await run(false);
+		const governed = await run(true);
+		expect(native.done).toBe("resolved");
+		expect(governed.done).toBe("resolved");
+		expect(governed.sentTools).toEqual(native.sentTools);
+	}, 15_000);
+
+	it("a tool() that throws fails the call the way it fails natively, with no model round made", async () => {
+		const bad = {
+			tool: async () => {
+				throw new Error("declaration service down");
+			},
+			callTool: async () => [],
+		};
+		const expectedMsg = await (async () => {
+			const m = scriptedModel(ROUNDS);
+			const sdk = new GoogleGenAI({ apiKey: "test" });
+			(sdk.models as unknown as Loose)["generateContentInternal"] = m.respond;
+			return sdk.models
+				.generateContent({
+					model: "gemini-2.5-flash",
+					contents: "go",
+					config: { tools: [bad] } as never,
+				})
+				.then(
+					() => "no error",
+					(e: Error) => e.message,
+				);
+		})();
+		const m = scriptedModel(ROUNDS);
+		const sdk = new GoogleGenAI({ apiKey: "test" });
+		(sdk.models as unknown as Loose)["generateContentInternal"] = m.respond;
+		const governed = await trust(sdk, { dryRun: true, budget: 500_000, vaultBase: vault });
+		const actual = await governed.models
+			.generateContent({
+				model: "gemini-2.5-flash",
+				contents: "go",
+				config: { tools: [bad] } as never,
+			})
+			.then(
+				() => "no error",
+				(e: Error) => e.message,
+			);
+		expect(expectedMsg).toBe("declaration service down");
+		expect(actual).toBe(expectedMsg);
+		expect(m.sent).toHaveLength(0);
+		await governed.destroy();
+	});
+
 	it("a callable tool implemented as a FUNCTION OBJECT is governed round by round, like the SDK's own loop", async () => {
 		const makeFnTool = () => {
 			const seen: unknown[] = [];
