@@ -383,17 +383,80 @@ describe("OpenAI: every ungoverned SDK method is refused", () => {
 		await expectRefused(path, () => call(client), engine);
 	});
 
-	it("a request whose model getter throws is still refused with its policy_denied record", async () => {
+	// The refusal labels its policy_denied event with the request's model WITHOUT running caller
+	// code: only an own data property holding a string counts. A getter or a Proxy is never read.
+	function deniedModel(): unknown {
+		const denials = chainEvents().filter((e) => e.kind === "policy_denied");
+		expect(denials).toHaveLength(1);
+		return denials[0]?.data.model;
+	}
+
+	it("a model getter that throws is never called; the call is refused with its policy_denied record", async () => {
 		const { client, engine } = await openai();
+		let calls = 0;
 		const params = {
 			input: "hi",
 			get model(): string {
+				calls++;
 				throw new Error("getter boom");
 			},
 		};
 		await expectRefused("embeddings.create", () => client.embeddings.create(params), engine);
-		const [denial] = chainEvents().filter((e) => e.kind === "policy_denied");
-		expect(denial?.data.model).toBeUndefined();
+		expect(calls, "the getter ran").toBe(0);
+		expect(deniedModel()).toBeUndefined();
+	});
+
+	it("a model getter with a side effect is never called, and no model is recorded", async () => {
+		const { client, engine } = await openai();
+		let calls = 0;
+		const params = {
+			input: "hi",
+			get model(): string {
+				calls++;
+				return "gpt-x";
+			},
+		};
+		await expectRefused("embeddings.create", () => client.embeddings.create(params), engine);
+		expect(calls, "the getter ran").toBe(0);
+		expect(deniedModel()).toBeUndefined();
+	});
+
+	it("a plain model data property is recorded", async () => {
+		const { client, engine } = await openai();
+		await expectRefused(
+			"embeddings.create",
+			() => client.embeddings.create({ model: "text-embedding-3-small", input: "hi" }),
+			engine,
+		);
+		expect(deniedModel()).toBe("text-embedding-3-small");
+	});
+
+	it("a Proxy request records no model and runs none of its traps", async () => {
+		const { client, engine } = await openai();
+		const traps: string[] = [];
+		const counting: ProxyHandler<object> = {};
+		for (const name of [
+			"get",
+			"getOwnPropertyDescriptor",
+			"has",
+			"ownKeys",
+			"getPrototypeOf",
+			"defineProperty",
+			"set",
+			"deleteProperty",
+			"isExtensible",
+			"preventExtensions",
+			"setPrototypeOf",
+		] as const) {
+			(counting as Record<string, unknown>)[name] = (...a: unknown[]) => {
+				traps.push(name);
+				return (Reflect as unknown as Record<string, (...x: unknown[]) => unknown>)[name]?.(...a);
+			};
+		}
+		const params = new Proxy({ model: "gpt-x", input: "hi" }, counting);
+		await expectRefused("embeddings.create", () => client.embeddings.create(params), engine);
+		expect(deniedModel()).toBeUndefined();
+		expect(traps, "a trap ran").toEqual([]);
 	});
 
 	it("a sync SDK helper is refused with a rejected promise, never a sync throw", async () => {

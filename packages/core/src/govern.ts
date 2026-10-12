@@ -32,6 +32,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { types as utilTypes } from "node:util";
 import { CreateTransferStatus } from "tigerbeetle-node";
 import {
 	type AuditWriter,
@@ -3823,18 +3824,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		const attribution = getCurrentCostCenter();
 		inFlightCount++;
 		try {
-			// The model is caller data read through a getter the caller controls: a getter that
-			// throws must not skip the denial record, so a failed read is simply an absent model.
-			let model: unknown;
-			try {
-				const params = args[0];
-				model =
-					params != null && typeof params === "object"
-						? (params as { model?: unknown }).model
-						: undefined;
-			} catch {
-				model = undefined;
-			}
+			// The model label is read without running caller code: an OWN DATA property
+			// that holds a string, or nothing. A `model` getter that throws (or a Proxy trap)
+			// must not turn the refusal into its own error and skip the denial record.
+			const model = ownStringDataProperty(args[0], "model");
 			const denial = error ?? ungovernedMethodError(kind as "anthropic" | "openai", path);
 			await appendDenialEvent({
 				audit,
@@ -3842,7 +3835,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				error: denial,
 				record: { denialClass: "policy" },
 				fields: {
-					...(typeof model === "string" ? { model } : {}),
+					...(model !== undefined ? { model } : {}),
 					actionName: path,
 					endpointClass: endpoint.class,
 					...(attribution !== undefined ? { costCenter: attribution.costCenter } : {}),
@@ -4537,6 +4530,22 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 // declaration to 101 columns, Biome wraps it, and the wrapped signature no longer
 // matches headless.ts's copy — which the parity suite compares as source text.
 export { createTBEngine };
+
+/**
+ * `obj[key]` when it is an OWN DATA property holding a string; never runs an accessor or a trap.
+ * Mirrors the Google refusal path's helper of the same name and signature, so the two governors'
+ * refusals read a label the same way and a later merge keeps one copy.
+ */
+function ownStringDataProperty(obj: unknown, key: string): string | undefined {
+	if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) return undefined;
+	if (utilTypes.isProxy(obj)) return undefined; // its descriptor trap is caller code
+	try {
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		return d !== undefined && "value" in d && typeof d.value === "string" ? d.value : undefined;
+	} catch {
+		return undefined; // defensive: no label, the refusal still lands
+	}
+}
 
 // ── Proxy builders ──
 // Each builder intercepts only the governed calls. On a Google client every other
