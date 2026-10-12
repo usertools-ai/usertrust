@@ -115,7 +115,9 @@ repository or mint an OIDC token for provenance:
       alone it could stop a release part-way; the check above runs for all six first.
       Versions are major.minor.patch only: this workflow does not support prereleases (one
       would publish under `backfill`).
-   4. **Pushes the release commit and tag** to `master`, atomically.
+   4. **Pushes the release commit and tag** to `master`, atomically, and only while `master`
+      is still the dispatched commit (see "Why the commit and tag are pushed before
+      publishing").
    5. Assembles the six tarballs again (the same commit gives the same bytes) and publishes
       each with the same command, without `--dry-run`. Publishing a tarball runs no lifecycle
       script.
@@ -322,8 +324,13 @@ for its approval. Do a `dry_run` before the first release after any change to th
 A version on npm cannot be published again, and unpublishing is restricted. So the state to
 avoid is the registry holding a version the repository never recorded. Pushing first means:
 
-- **The push fails** (master moved after dispatch, or a branch rule refuses it): nothing was
-  published. Dispatch the release again.
+- **The push fails** (master moved after dispatch, in either direction, or a branch rule
+  refuses it): nothing was published. Dispatch the release again. The push carries
+  `--force-with-lease=refs/heads/master:<dispatched commit>`, so it goes through only while
+  master is still the commit the run was dispatched on: a master reset backwards during the
+  approval wait (to retract a commit) refuses it too, where a plain push would have been a
+  fast-forward again and restored what was retracted. The release commit's parent is the
+  dispatched commit, so the push never overwrites anything.
 - **The publish fails, entirely or part way**: the repository records `v<version>` and the
   registry lacks some or all of it. Recover with **republish**, dispatched on the tag (below).
   It builds the exact tagged tree, skips what npm already holds byte-for-byte, publishes the rest, and

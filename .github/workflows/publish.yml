@@ -364,12 +364,19 @@ jobs:
         run: bash scripts/release.sh publish "${RUNNER_TEMP}/release" "$COMMIT" --dry-run
 
       # ── Push the release commit and tag ──
-      # BEFORE publishing. If the push fails (master moved since dispatch, or a branch rule
-      # refuses it), nothing is published and the release can simply be dispatched again. If
+      # BEFORE publishing. If the push fails (master moved in either direction since dispatch,
+      # or a branch rule refuses it), nothing is published and the release can simply be
+      # dispatched again. If
       # publishing then fails, the repository records a version the registry lacks, and
       # republish on the tag finishes it with the same tree. The opposite order can leave the
       # registry with a version the repository never recorded, and npm versions cannot be
       # reused. `--atomic`: the commit and the tag land together or not at all.
+      # `--force-with-lease=refs/heads/master:<dispatched commit>`: the push goes through only
+      # while master is still the commit this run was dispatched on (GITHUB_SHA, which the
+      # checkout was pinned to and the release commit's parent is). Without it, a master reset
+      # BACKWARDS during the approval wait (to retract a commit) would make the release commit a
+      # fast-forward again, and the push would restore what was retracted. The release commit's
+      # parent is that commit, so the push is still a fast-forward: nothing is overwritten.
       # The token is handed to this one git process through the environment (GIT_CONFIG_*),
       # so it is never written to .git/config or any other file a later step could read.
       - name: Push the release commit and tag
@@ -384,7 +391,7 @@ jobs:
           GIT_CONFIG_COUNT=1 \
           GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
           GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
-            git push --atomic origin "${COMMIT}:refs/heads/master" "refs/tags/v${VERSION}"
+            git push --atomic "--force-with-lease=refs/heads/master:${GITHUB_SHA}" origin "${COMMIT}:refs/heads/master" "refs/tags/v${VERSION}"
 
       # ── Publish with provenance ──
       # Assembles the six tarballs again (the same commit gives the same bytes) and publishes

@@ -1496,6 +1496,89 @@ describe("release.sh gate (normal release)", { timeout: 30_000 }, () => {
 	});
 });
 
+// ── The release push: publish.yml's own command, run against a real remote ──
+
+/** The push step's git command, exactly as publish.yml has it. */
+function pushCommand(): string {
+	const lines = (step("publish", "Push the release commit and tag").run ?? "")
+		.split("\n")
+		.map((l) => l.trim())
+		.filter((l) => l.startsWith("git push"));
+	if (lines.length !== 1)
+		throw new Error(`expected one git push in the push step, found ${lines.length}`);
+	return lines[0] as string;
+}
+
+describe("the release push", { timeout: 30_000 }, () => {
+	it("is atomic, and leased on master being the dispatched commit (GITHUB_SHA)", () => {
+		expect(pushCommand()).toMatch(
+			/^git push --atomic "--force-with-lease=refs\/heads\/master:\$\{GITHUB_SHA\}" origin "\$\{COMMIT\}:refs\/heads\/master" "refs\/tags\/v\$\{VERSION\}"$/,
+		);
+		// GitHub's own variable, never set by the workflow: the commit the checkout is pinned to.
+		const push = step("publish", "Push the release commit and tag");
+		expect(push.env ?? {}).not.toHaveProperty("GITHUB_SHA");
+		expect(step("publish", "Pin the checkout to the dispatched commit").run).toContain(
+			'"$GITHUB_SHA"',
+		);
+	});
+
+	/** origin's master at <parent> then <dispatched>; the release commit on <dispatched>, tagged
+	 * v1.0.1 locally, as the publish job holds it before the push. */
+	const setup = () => {
+		const parent = git("rev-parse", "HEAD");
+		writeFileSync(join(repo, "README"), "dispatched\n");
+		git("commit", "-q", "-am", "dispatched");
+		git("push", "-q", "origin", "master");
+		const dispatched = git("rev-parse", "HEAD");
+		releaseCommit("1.0.1");
+		return { parent, dispatched, release: git("rev-parse", "HEAD") };
+	};
+	/** Runs publish.yml's push command in the repository, as the step does (minus the token). */
+	const pushRelease = (dispatched: string, release: string) =>
+		spawnSync("bash", ["-c", pushCommand()], {
+			cwd: repo,
+			encoding: "utf8",
+			env: { ...gitEnv(), COMMIT: release, VERSION: "1.0.1", GITHUB_SHA: dispatched },
+		});
+	const onOrigin = (ref: string): string | null => {
+		const r = spawnSync("git", ["rev-parse", "-q", "--verify", `${ref}^{commit}`], {
+			cwd: join(dir, "origin.git"),
+			encoding: "utf8",
+			env: gitEnv(),
+		});
+		return r.status === 0 ? r.stdout.trim() : null;
+	};
+
+	it("goes through while master is still the dispatched commit: master and the tag land", () => {
+		const { dispatched, release } = setup();
+		const r = pushRelease(dispatched, release);
+		expect(r.status, r.stderr).toBe(0);
+		expect(onOrigin("refs/heads/master")).toBe(release);
+		expect(onOrigin("refs/tags/v1.0.1")).toBe(release);
+	});
+
+	it("is refused when master was reset backwards since dispatch: nothing retracted comes back", () => {
+		const { parent, dispatched, release } = setup();
+		// Someone retracts the dispatched commit during the approval wait.
+		gitIn(join(dir, "origin.git"), "update-ref", "refs/heads/master", parent);
+		const r = pushRelease(dispatched, release);
+		expect(r.status).not.toBe(0);
+		expect(r.stderr).toContain("stale info");
+		expect(onOrigin("refs/heads/master")).toBe(parent);
+		expect(onOrigin("refs/tags/v1.0.1")).toBeNull();
+	});
+
+	it("is refused when master moved forward since dispatch", () => {
+		const { dispatched, release } = setup();
+		const later = git("commit-tree", `${dispatched}^{tree}`, "-p", dispatched, "-m", "later");
+		git("push", "-q", "origin", `${later}:refs/heads/master`);
+		const r = pushRelease(dispatched, release);
+		expect(r.status).not.toBe(0);
+		expect(onOrigin("refs/heads/master")).toBe(later);
+		expect(onOrigin("refs/tags/v1.0.1")).toBeNull();
+	});
+});
+
 describe("release.sh gate (republish)", { timeout: 30_000 }, () => {
 	it("release-parent prints the parent of a version-only release commit", () => {
 		const parent = git("rev-parse", "HEAD");
