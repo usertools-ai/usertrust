@@ -30,6 +30,9 @@
  *   searchRange, entrySelector, rangeShift, then 16-byte table records). It is
  *   searched for ANYWHERE in a file (`sfntDirectories`), so sfnt data inside an
  *   uncompressed container (a Mac .dfont or suitcase, any binary) is found.
+ * - The W3C WOFF 1.0 and WOFF2 specifications, section 3 (the header): signature,
+ *   flavor, length (of the whole WOFF file) and numTables, big-endian. WOFF data is
+ *   compressed, so it shows no sfnt directory: its header is searched for instead.
  * - The UFO 3 specification, GLIF: a glyph file is a `<glyph>` with an `<outline>`
  *   of `<contour>`s.
  *
@@ -48,11 +51,16 @@
  * - a signature at a fixed offset (every one in `FONT_MAGICS`, at most 36 bytes in;
  *   EOT's MagicNumber at 34, a PFB's header at 6) reads the first HEAD_BYTES (`head`),
  *   which is also the window of git's own text-or-binary test;
- * - a form that can stand ANYWHERE in a file (an sfnt table directory, an SVG font, a
- *   UFO glyph, a `data:` font URL, a base64 font, an embedded PostScript font
- *   program) is searched over the WHOLE file,
+ * - a form that can stand ANYWHERE in a file is searched over the WHOLE file: an sfnt
+ *   table directory (which also finds a collection's member fonts), a WOFF or WOFF2
+ *   header, an EOT header (each with its fields checked relative to where it is found;
+ *   `embeddedFonts`), an SVG font, a UFO glyph, a `data:` font URL, a base64 font, and
+ *   a PostScript or FontForge font program,
  *   every tracked file, binary or text (`fontsInFile`). The largest tracked file is
- *   14 MB, so each is read whole.
+ *   14 MB, so each is read whole. Font data in a STORED (uncompressed) zip entry is
+ *   found this way too. Not searched embedded: PFR (TrueDoc, an obsolete web format no brand
+ *   face uses, whose header beyond its four-byte tag no cited source specifies), and
+ *   the bitmap formats (out of scope).
  *
  * THE URL CHECKS ARE BEST EFFORT. `nonKitFontUrls` and `fontSources` catch a
  * non-kit font URL by its extension or its context, but a static scan of source
@@ -127,17 +135,62 @@ const EOT_VERSIONS = new Set([0x00010000, 0x00020001, 0x00020002]);
  * (offset 4) is inside EOTSize (offset 0), which is inside the file. Not EOTSize == size: an
  * EOT with bytes appended after it is still one. All little-endian.
  */
-function isEot(bytes: Uint8Array, size: number): boolean {
-	if (bytes.length < 36) return false;
+function isEot(bytes: Uint8Array, size: number, start = 0): boolean {
+	if (start < 0 || start + 36 > bytes.length) return false;
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	return (
-		bytes[34] === 0x4c &&
-		bytes[35] === 0x50 &&
-		EOT_VERSIONS.has(view.getUint32(8, true)) &&
-		view.getUint32(4, true) > 0 &&
-		view.getUint32(4, true) < view.getUint32(0, true) &&
-		view.getUint32(0, true) <= size
+		bytes[start + 34] === 0x4c &&
+		bytes[start + 35] === 0x50 &&
+		EOT_VERSIONS.has(view.getUint32(start + 8, true)) &&
+		view.getUint32(start + 4, true) > 0 &&
+		view.getUint32(start + 4, true) < view.getUint32(start, true) &&
+		view.getUint32(start, true) <= size - start
 	);
+}
+
+/** The flavors a WOFF or WOFF2 header names (an sfnt version, or `ttcf` for a collection). */
+const WOFF_FLAVORS = new Set([0x00010000, 0x4f54544f, 0x74727565, 0x74746366]);
+
+/** WOFF and WOFF2 headers: their signature and their header's length (W3C, section 3). */
+const WOFF_HEADERS = [
+	{ format: "woff", tag: ascii("wOFF"), header: 44 },
+	{ format: "woff2", tag: ascii("wOF2"), header: 48 },
+];
+
+/**
+ * The font containers in `bytes` past its first byte, each a signature searched for ANYWHERE
+ * with its header checked relative to where it is found (a font at offset 0 is `fontMagic`'s):
+ * - WOFF and WOFF2: the signature, a defined flavor at +4, a length at +8 from the header's
+ *   size to the bytes that remain, and numTables at +12 above 0;
+ * - EOT: every `LP` at p is a candidate start p - 34, held to `isEot` there, with the bytes
+ *   that remain from it as its file.
+ * A sfnt font, or a collection's member font, is found by its table directory
+ * (`sfntDirectories`); Type 1, Type 42 and FontForge programs by their text
+ * (`inlineFonts`).
+ */
+export function embeddedFonts(bytes: Uint8Array): string[] {
+	const found: string[] = [];
+	const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	for (const { format, tag, header } of WOFF_HEADERS) {
+		const word = Buffer.from(tag);
+		for (let at = buffer.indexOf(word, 1); at !== -1; at = buffer.indexOf(word, at + 1)) {
+			if (at + header > buffer.length) break;
+			const length = buffer.readUInt32BE(at + 8);
+			if (
+				WOFF_FLAVORS.has(buffer.readUInt32BE(at + 4)) &&
+				length >= header &&
+				length <= buffer.length - at &&
+				buffer.readUInt16BE(at + 12) > 0
+			) {
+				found.push(`${format} at ${at}`);
+			}
+		}
+	}
+	const magic = Buffer.from([0x4c, 0x50]);
+	for (let p = buffer.indexOf(magic, 35); p !== -1; p = buffer.indexOf(magic, p + 1)) {
+		if (isEot(buffer, buffer.length, p - 34)) found.push(`eot at ${p - 34}`);
+	}
+	return found;
 }
 
 /**
@@ -269,6 +322,7 @@ export function inlineFonts(text: string): string[] {
 		found.push(`base64 ${m[0].slice(0, 12)}… (${m[0].length} chars)`);
 	if (hasSvgFont(text)) found.push("svg font");
 	if (hasUfoGlyph(text)) found.push("ufo glyph");
+	if (/(?:^|\n)SplineFontDB:\s*\d/.test(text)) found.push("fontforge font program");
 	const program = POSTSCRIPT_FONT.exec(text);
 	if (program) found.push(`postscript font program (${program[0]})`);
 	return found;
@@ -565,6 +619,7 @@ export function fontsInFile(path: string): string[] {
 	if (format !== null) found.push(format);
 	const whole = readFileSync(absolute);
 	for (const at of sfntDirectories(whole)) found.push(`sfnt table directory at ${at}`);
+	found.push(...embeddedFonts(whole));
 	if (path === SELF) return found;
 	found.push(...inlineFonts(whole.toString("latin1")));
 	return found;
@@ -946,4 +1001,75 @@ test("a UFO glyph (outline source) is found; a glyph with no outline is not", ()
 		inlineFonts('<glyph name="space" format="2"><advance width="250"/></glyph>'),
 		[],
 	);
+});
+
+/** A WOFF or WOFF2 header (W3C, section 3) over `total` bytes of WOFF data, big-endian. */
+function fakeWoff(
+	tag: "wOFF" | "wOF2",
+	{ total = 3000, flavor = 0x00010000, length = total, tables = 9 } = {},
+): Buffer {
+	const bytes = fakeBinary(tag, 0, total);
+	bytes.writeUInt32BE(flavor, 4);
+	bytes.writeUInt32BE(length, 8);
+	bytes.writeUInt16BE(tables, 12);
+	return bytes;
+}
+
+/** A zip with one STORED (uncompressed) entry: the local file header, the name, the data. */
+function storedZip(name: string, data: Buffer): Buffer {
+	const header = Buffer.alloc(30);
+	header.writeUInt32LE(0x04034b50, 0);
+	header.writeUInt16LE(10, 4);
+	header.writeUInt16LE(0, 8); // method 0: stored
+	header.writeUInt32LE(data.length, 18);
+	header.writeUInt32LE(data.length, 22);
+	header.writeUInt16LE(name.length, 26);
+	return Buffer.concat([header, Buffer.from(name), data]);
+}
+
+test("a font container is found ANYWHERE in a file: a woff2 embedded, a woff stored in a zip, an EOT embedded", () => {
+	const dir = mkdtempSync(join(tmpdir(), "no-font-files-embedded-"));
+	const write = (name: string, bytes: Buffer) => {
+		const path = join(dir, name);
+		writeFileSync(path, bytes);
+		return fontsInFile(path);
+	};
+	const lead = fakeBinary("GIF89a", 0, 1000);
+	const tail = fakeBinary([0, 0], 0, 2000);
+	assert.deepEqual(write("woff2.bin", Buffer.concat([lead, fakeWoff("wOF2"), tail])), [
+		"woff2 at 1000",
+	]);
+	// A WOFF stored, uncompressed, in a zip: the entry's data starts after its header and name.
+	const zip = storedZip("fonts/brand.woff", fakeWoff("wOFF", { flavor: 0x4f54544f }));
+	assert.deepEqual(write("bundle.zip", zip), [`woff at ${30 + "fonts/brand.woff".length}`]);
+	assert.deepEqual(write("eot.bin", Buffer.concat([lead, fakeEot({ size: 4096 }), tail])), [
+		"eot at 1000",
+	]);
+	// A collection's woff2: flavor ttcf.
+	assert.deepEqual(
+		write("ttc.bin", Buffer.concat([lead, fakeWoff("wOF2", { flavor: 0x74746366 }), tail])),
+		["woff2 at 1000"],
+	);
+});
+
+test("an embedded container must be one: the signature alone, a bad field, a length past the end", () => {
+	const lead = fakeBinary("GIF89a", 0, 1000);
+	const tail = fakeBinary([0, 0], 0, 2000);
+	const at = (bytes: Buffer) => embeddedFonts(Buffer.concat([lead, bytes, tail]));
+	// The control: the real thing.
+	assert.deepEqual(at(fakeWoff("wOF2")), ["woff2 at 1000"]);
+	// The signature alone, with no header after it.
+	assert.deepEqual(embeddedFonts(Buffer.concat([lead, Buffer.from("wOF2")])), []);
+	// A flavor no font has, no tables, a length shorter than a header, a length past the end.
+	assert.deepEqual(at(fakeWoff("wOF2", { flavor: 0x12345678 })), []);
+	assert.deepEqual(at(fakeWoff("wOFF", { tables: 0 })), []);
+	assert.deepEqual(at(fakeWoff("wOF2", { length: 20 })), []);
+	assert.deepEqual(at(fakeWoff("wOF2", { length: 6000 })), []);
+	// EOT: `LP` alone, a bad version, and an EOTSize past the bytes that remain.
+	assert.deepEqual(embeddedFonts(Buffer.concat([lead, Buffer.from("LP"), tail])), []);
+	assert.deepEqual(at(fakeEot({ version: 0x00030000 })), []);
+	assert.deepEqual(at(fakeEot({ size: 4096, eotSize: 9000 })), []);
+	// Plain text and noise hold none.
+	assert.deepEqual(embeddedFonts(Buffer.from("wOF2 wOFF LP HELP ".repeat(500))), []);
+	assert.deepEqual(embeddedFonts(fakeBinary("GIF89a", 0, 60_000)), []);
 });
