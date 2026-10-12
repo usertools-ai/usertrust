@@ -11,11 +11,12 @@ import pc from "picocolors";
 import { exportMarkdown } from "../export/markdown.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
-import { scrubForTerminal, toSafeJson } from "./target.js";
+import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
 
 export async function run(rootDir?: string, opts?: CliOptions, args?: string[]): Promise<void> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
+	warnIfVaultLoose(vaultPath);
 	const json = opts?.json === true;
 	const argv = args ?? process.argv.slice(3);
 

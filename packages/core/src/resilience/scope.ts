@@ -12,10 +12,11 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { minimatch } from "minimatch";
 import { VAULT_DIR } from "../shared/constants.js";
+import { mkdirPrivate, PRIVATE_FILE_MODE } from "../shared/private-fs.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -87,7 +88,7 @@ function getLeasesPath(storeDir: string): string {
 
 function ensureStoreDir(storeDir: string): void {
 	if (!existsSync(storeDir)) {
-		mkdirSync(storeDir, { recursive: true });
+		mkdirPrivate(storeDir);
 	}
 }
 
@@ -107,7 +108,9 @@ function readLeases(storeDir: string): LeaseStore {
 
 function writeLeases(store: LeaseStore, storeDir: string): void {
 	ensureStoreDir(storeDir);
-	writeFileSync(getLeasesPath(storeDir), JSON.stringify(store, null, "\t"));
+	writeFileSync(getLeasesPath(storeDir), JSON.stringify(store, null, "\t"), {
+		mode: PRIVATE_FILE_MODE,
+	});
 }
 
 // ---------------------------------------------------------------------------

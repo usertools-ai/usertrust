@@ -641,11 +641,13 @@ describe("headless governor", () => {
 		});
 
 		expect(spy).toHaveBeenCalledOnce();
+		// Into this governor's vault, never a `.usertrust/` relative to the working directory.
 		expect(spy).toHaveBeenCalledWith(
 			expect.objectContaining({
 				model: "claude-sonnet-4-6",
 				success: true,
 			}),
+			join(vaultBase, VAULT_DIR),
 		);
 
 		spy.mockRestore();
