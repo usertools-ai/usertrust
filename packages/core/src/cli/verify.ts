@@ -19,17 +19,16 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import pc from "picocolors";
 import { parseAnchorsContent } from "../audit/anchor-verify.js";
+import { deadLettersAgainst, verifyVaultComplete } from "../audit/complete.js";
 import {
 	type ChainDeadLetters,
 	type ChainDeadLettersUnreadable,
 	describeMissingEvents,
-	readChainDeadLetters,
 } from "../audit/dead-letters.js";
 import type { PersistedAuditEvent } from "../audit/read.js";
 import {
 	type AnchorVerifyParams,
 	exitCodeForAnchored,
-	verifyVaultReading,
 	verifyVaultWithAnchorsReading,
 	type WitnessInput,
 } from "../audit/verify.js";
@@ -327,24 +326,6 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 			...(vaultId !== undefined ? { expectedVaultId: vaultId } : {}),
 		},
 	};
-}
-
-/**
- * COMPLETENESS, beside integrity. A chain with an event missing still verifies link by link, so the
- * hash check alone answered "valid" for a vault with half its events dead-lettered (two writers in
- * one process). Every event that failed to reach the chain is dead-lettered by the writer; this
- * reads them against `events`, the events the verification just walked, never against the log read
- * again (a log changed after the walk would put an event on "the chain" that was never hash-checked).
- */
-function deadLettersOf(
-	vault: string,
-	events: readonly PersistedAuditEvent[],
-): ChainDeadLetters | ChainDeadLettersUnreadable {
-	let byHash: Map<string, PersistedAuditEvent> | undefined;
-	return readChainDeadLetters(vault, (hash) => {
-		byHash ??= new Map(events.map((e) => [e.hash, e]));
-		return byHash.get(hash);
-	});
 }
 
 interface ReceiptCheck {
@@ -686,7 +667,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 
 	if (flags.anchorMode) {
 		const { result, events } = verifyVaultWithAnchorsReading(verifiedVault, flags.params);
-		const deadLetters = deadLettersOf(verifiedVault, events);
+		const deadLetters = deadLettersAgainst(verifiedVault, events);
 		const receipts =
 			flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
 		const complete = isComplete(deadLetters) && receiptsComplete(receipts);
@@ -763,8 +744,11 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		return;
 	}
 
-	const { result, events } = verifyVaultReading(verifiedVault);
-	const deadLetters = deadLettersOf(verifiedVault, events);
+	// Integrity AND completeness, one function shared with `usertrust report` (audit/complete.ts).
+	const {
+		reading: { result, events },
+		deadLetters,
+	} = verifyVaultComplete(verifiedVault);
 	const receipts =
 		flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
 	const complete = isComplete(deadLetters) && receiptsComplete(receipts);
