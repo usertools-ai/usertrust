@@ -21,17 +21,20 @@
 #   release.sh latest-flag <version>     true if v<version> is the newest release, else false
 #   release.sh pack <dir>                packs each package (already built) into <dir>
 #   release.sh publish <dir> <commit> [--dry-run]
-#                                        publishes each packed package not yet on npm, once
-#                                        every tarball's manifest matches <commit>'s
+#                                        assembles each package's publish tarball from
+#                                        <commit>'s files and the build tarball in <dir> (see
+#                                        scripts/release-tarball.py), then publishes each
+#                                        one not yet on npm
 #
 # Run from the repository root. Fails closed: an answer it cannot read is an error, never a pass.
 #
 # UNTRUSTED INPUT. The publish job holds the write token, the OIDC token and NPM_TOKEN, and
 # everything the build job hands it (the git bundle, the commit in it, the tarballs, the version
-# string) was made by dependency code. This script treats all of it as DATA: a manifest is read
-# from a git blob whose mode is checked to be 100644, or from a tarball member streamed to a
-# file this script created, and parsed with JSON.parse; it is never require()d, sourced,
-# executed or checked out, and a path from it is never globbed or matched as a pattern.
+# string) was made by dependency code. This script treats all of it as DATA: a manifest, like
+# every root file the release ships, is read from a git blob whose mode is checked to be 100644,
+# and is parsed with JSON.parse; nothing is require()d, sourced, executed or checked out, and a
+# path from it is never globbed or matched as a pattern. A build tarball is never published, extracted or shown
+# to npm: scripts/release-tarball.py reads it as data and writes the tarball npm publishes.
 
 set -euo pipefail
 # Bash clears -e inside $(...) unless told otherwise (bash 4.4+); on older bash every call
@@ -41,6 +44,9 @@ shopt -s inherit_errexit 2>/dev/null || true
 set -f
 # Every path given to git is literal, never a pathspec pattern.
 export GIT_LITERAL_PATHSPECS=1
+
+# The tool that writes the publish tarballs: this checkout's own copy, next to this script.
+TARBALL_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-tarball.py"
 
 # The lockstep set, as <directory under packages/>:<npm name>, in publish order (a package
 # comes after the packages it depends on). AGENTS.md lists the same six.
@@ -79,6 +85,9 @@ name_of() {
 #   compare <base> <candidate> <name> <version>
 #       the candidate must equal the base in every field but "version", which must be
 #       <version>; its name must be <name>; neither may have publishConfig.
+#   roots <file> <name> <version>
+#       prints the root files "files" names besides dist, one per line; refuses any entry
+#       that is not "dist" or a plain file name at the package root.
 MANIFEST_JS='
 const fs = require("node:fs");
 const fail = (m) => { console.error("::error::" + m); process.exit(1); };
@@ -136,6 +145,25 @@ if (mode === "read") {
 			fail(name + ": field " + JSON.stringify(k) + " differs; only \"version\" may change");
 		}
 	}
+} else if (mode === "roots") {
+	const [file, name, version] = args;
+	const m = load(file);
+	if (m.name !== name) fail(file + " names " + JSON.stringify(m.name) + ", not " + name);
+	if (m.version !== version) fail(name + ": version is " + JSON.stringify(m.version) + ", not " + version);
+	if (has(m, "publishConfig")) fail(name + ": publishConfig is not allowed in a released manifest");
+	if (!Array.isArray(m.files) || !m.files.every((f) => typeof f === "string")) {
+		fail(name + ": the manifest has no \"files\" list of strings; a release ships only what it names");
+	}
+	const special = ["dist", "package.json", "node_modules", "npm-shrinkwrap.json", "binding.gyp"];
+	const roots = new Set();
+	for (const f of m.files) {
+		if (f === "dist") continue;
+		if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(f) || special.includes(f.toLowerCase())) {
+			fail(name + ": \"files\" entry " + JSON.stringify(f) + " is neither dist nor a plain file at the package root");
+		}
+		roots.add(f);
+	}
+	for (const f of roots) console.log(f);
 } else {
 	fail("manifest checker: unknown mode " + mode);
 }
@@ -183,13 +211,13 @@ lockstep_version() {
 	echo "$first"
 }
 
-# Writes packages/<dir>/package.json as recorded in <commit> to <out>, from its git blob,
-# after checking that the tree entry is a regular file (mode 100644): a symlink (120000), an
-# executable (100755) or a missing entry is refused.
-manifest_blob() {
-	local commit="$1" dir="$2" out="$3" path entry meta mode type sha
-	path="packages/${dir}/package.json"
+# Prints the blob id of <path> in <commit>, or nothing if <commit> has no such path, after
+# checking that the tree entry is a regular file (mode 100644): a symlink (120000), an
+# executable (100755), a directory or a submodule is refused.
+blob_id() {
+	local commit="$1" path="$2" entry meta mode type sha
 	entry=$(git ls-tree "$commit" -- "$path") || return 1
+	[ -n "$entry" ] || return 0
 	meta="${entry%%	*}"
 	mode="${meta%% *}"
 	type="${meta#* }"
@@ -199,7 +227,47 @@ manifest_blob() {
 		err "${path} in ${commit} is not a regular file (tree entry: '${entry}'); refusing."
 		return 1
 	fi
+	echo "$sha"
+}
+
+# Writes <path> as recorded in <commit> to <out>, from its git blob (see blob_id). A missing
+# path is refused.
+blob_to() {
+	local commit="$1" path="$2" out="$3" sha
+	sha=$(blob_id "$commit" "$path") || return 1
+	if [ -z "$sha" ]; then
+		err "${path} in ${commit} is not a regular file (tree entry: none); refusing."
+		return 1
+	fi
 	git cat-file blob "$sha" >"$out" || return 1
+}
+
+# Writes packages/<dir>/package.json as recorded in <commit> to <out>.
+manifest_blob() {
+	blob_to "$1" "packages/$2/package.json" "$3"
+}
+
+# Writes into <out> the root files that packages/<dir> ships, as recorded in <commit>, and prints
+# their names: package.json; README.md, LICENSE and NOTICE where <commit> has them; and every
+# root file the manifest's "files" names, which must exist. Each is a git blob of mode 100644.
+root_files() {
+	local commit="$1" dir="$2" version="$3" out="$4" listed name sha names="package.json"
+	manifest_blob "$commit" "$dir" "${out}/package.json" || return 1
+	listed=$(manifest roots "${out}/package.json" "$(name_of "$dir")" "$version") || return 1
+	for name in README.md LICENSE NOTICE; do
+		sha=$(blob_id "$commit" "packages/${dir}/${name}") || return 1
+		[ -n "$sha" ] || continue
+		git cat-file blob "$sha" >"${out}/${name}" || return 1
+		names="${names} ${name}"
+	done
+	for name in $listed; do
+		case " ${names} " in
+		*" ${name} "*) continue ;;
+		esac
+		blob_to "$commit" "packages/${dir}/${name}" "${out}/${name}" || return 1
+		names="${names} ${name}"
+	done
+	echo "$names"
 }
 
 # The lockstep version recorded in <commit>, read from git blobs only.
@@ -313,15 +381,16 @@ pack() {
 	done
 }
 
-# Publishes the tarballs `pack` wrote, never a directory: publishing a tarball runs no
-# lifecycle script and installs nothing, so the job that holds the publishing credentials
-# runs no dependency code. Before ANY is published, every tarball's package/package.json is
-# streamed out (never extracted to disk) and must equal <commit>'s manifest for that package
-# in every field: no publishConfig, no added script, the same name, the expected version.
-# npm runs from an empty directory, with an explicit registry and a user config this script
-# writes, so no .npmrc from the artifact or the checkout can redirect the token.
+# Publishes each package from a tarball this script assembles, never from the build's tarball
+# and never from a directory. For each package, scripts/release-tarball.py reads the build
+# tarball in <dir> as data (bounded, in a limited child process) and writes a new tarball: the
+# root files from <commit>'s git blobs, plus the build's package/dist/ members that pass its
+# rules, under headers it makes. All six are assembled and verified before any is published.
+# npm then publishes that file, from an empty directory, with an explicit registry, a user
+# config this script writes, an empty global config and a fresh cache of its own, so no .npmrc
+# from the artifact or the checkout applies and no build-made file is in npm's reach.
 publish() {
-	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version state tgz tmp cfg empty work
+	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version mtime state tgz tmp cfg empty work cache names name
 	if [ -z "$tardir" ] || [ ! -d "$tardir" ] || [ -z "$commit" ]; then
 		err "usage: publish <tarball directory> <commit> [--dry-run]"
 		return 1
@@ -336,6 +405,14 @@ publish() {
 	esac
 	tardir=$(cd "$tardir" && pwd) || return 1
 	version=$(version_at "$commit") || return 1
+	# Every member's time is the release commit's, so the same commit assembles the same bytes.
+	mtime=$(git show -s --format=%ct "$commit") || return 1
+	case "$mtime" in
+	'' | *[!0-9]*)
+		err "Could not read the commit time of ${commit}."
+		return 1
+		;;
+	esac
 	tmp=$(mktemp -d) || return 1
 	for dir in $(dirs); do
 		pkg=$(name_of "$dir") || return 1
@@ -344,20 +421,19 @@ publish() {
 			err "${pkg}-${version}.tgz is missing from ${tardir}, or is not a regular file"
 			return 1
 		fi
-		manifest_blob "$commit" "$dir" "${tmp}/${dir}.commit.json" || return 1
-		if ! tar -xzOf "$tgz" package/package.json >"${tmp}/${dir}.tarball.json"; then
-			err "${pkg}-${version}.tgz has no readable package/package.json"
-			return 1
-		fi
-		if ! manifest compare "${tmp}/${dir}.commit.json" "${tmp}/${dir}.tarball.json" "$pkg" "$version"; then
-			err "${pkg}-${version}.tgz does not carry ${commit}'s manifest; refusing to publish anything."
+		mkdir "${tmp}/${dir}" "${tmp}/${dir}/root" || return 1
+		names=$(root_files "$commit" "$dir" "$version" "${tmp}/${dir}/root") || return 1
+		set -- assemble --input "$tgz" --output "${tmp}/${dir}/${pkg}-${version}.tgz" --mtime "$mtime"
+		for name in $names; do
+			set -- "$@" --root "${name}=${tmp}/${dir}/root/${name}"
+		done
+		if ! python3 -I "$TARBALL_TOOL" "$@"; then
+			err "${pkg}-${version}.tgz from the build was refused; refusing to publish anything."
 			return 1
 		fi
 	done
 	cfg="${tmp}/npmrc"
 	empty="${tmp}/empty-npmrc"
-	work="${tmp}/work"
-	mkdir "$work"
 	: >"$empty"
 	if [ "$dry" -eq 1 ]; then
 		: >"$cfg"
@@ -373,17 +449,18 @@ publish() {
 			echo "::notice::${pkg}@${version} is already on npm; skipping"
 			continue
 		fi
-		tgz="${tardir}/${pkg}-${version}.tgz"
+		work=$(mktemp -d "${tmp}/work.XXXXXX") || return 1
+		cache=$(mktemp -d "${tmp}/cache.XXXXXX") || return 1
 		# The same command with and without --dry-run, so a dry run exercises the real one.
-		set -- publish "$tgz" --access public --provenance --registry "$REGISTRY" \
-			--userconfig "$cfg" --globalconfig "$empty"
+		set -- publish "${tmp}/${dir}/${pkg}-${version}.tgz" --access public --provenance \
+			--ignore-scripts --registry "$REGISTRY" --userconfig "$cfg" --globalconfig "$empty"
 		if [ "$dry" -eq 1 ]; then
 			set -- "$@" --dry-run
 			echo "Publishing ${pkg}@${version} (dry run)"
 		else
 			echo "Publishing ${pkg}@${version}"
 		fi
-		(cd "$work" && npm "$@") || return 1
+		(cd "$work" && npm_config_cache="$cache" npm "$@") || return 1
 	done
 	rm -rf "$tmp"
 }
@@ -526,10 +603,11 @@ verify_release_commit() {
 }
 
 # For a new release: import the tag v<version> from the build job's bundle (git objects and
-# one ref, nothing else), verify the release commit it names sits on this run's commit, and
-# print it. The version string is validated before it is used in a ref.
+# one ref, nothing else), verify the release commit it names sits on this run's commit and
+# carries a DCO sign-off, and print it. The version string is validated before it is used in a
+# ref.
 verify_release() {
-	local bundle="${1:-}" version="${2:-}" commit
+	local bundle="${1:-}" version="${2:-}" commit ident message
 	if ! valid_version "$version"; then
 		err "The build job reported version '${version}', which is not major.minor.patch; refusing."
 		return 1
@@ -544,6 +622,16 @@ verify_release() {
 	verify_release_commit "$commit" "$(git rev-parse HEAD)" >/dev/null || return 1
 	if [ "$(version_at "$commit")" != "$version" ]; then
 		err "The release commit is not at version ${version}."
+		return 1
+	fi
+	# The message the build job's `git commit -s` writes, and nothing else: the subject and the
+	# DCO sign-off of the commit's own committer.
+	ident=$(git show -s --format='%cn <%ce>' "$commit") || return 1
+	message=$(git show -s --format=%B "$commit") || return 1
+	if [ "$message" != "release: v${version}
+
+Signed-off-by: ${ident}" ]; then
+		err "The release commit's message is not exactly 'release: v${version}' and its committer's DCO sign-off; refusing."
 		return 1
 	fi
 	echo "$commit"

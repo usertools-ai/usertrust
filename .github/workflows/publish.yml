@@ -7,8 +7,12 @@ name: Release
 # Three jobs, so that dependency code never runs next to a credential that can write:
 #   ci-gate  CI passed on the commit, and the npm-publish environment requires a reviewer.
 #   build    installs, typechecks, tests, bumps, builds and packs. Read-only token, no OIDC.
-#   publish  approval, then pushes and publishes the packed tarballs. Holds the write token,
-#            the OIDC token and NPM_TOKEN; installs nothing and runs no dependency code.
+#   publish  approval, then pushes, and publishes tarballs it writes itself from the release
+#            commit's files and the build's dist/ bytes. Holds the write token, the OIDC
+#            token and NPM_TOKEN; installs nothing and runs no dependency code.
+#
+# No job restores a cache: a cache another workflow's dependency code could have written must
+# not reach a release (every setup-node says package-manager-cache: false, and none says cache).
 
 on:
   workflow_dispatch:
@@ -134,7 +138,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          package-manager-cache: false
 
       # With install scripts, as CI installs: the gate certifies CI's result, so the release
       # builds and tests the tree the way CI did. No credential that can write is in this job.
@@ -231,7 +235,7 @@ jobs:
           for dir in $(bash scripts/release.sh dirs); do
             git add "packages/${dir}/package.json"
           done
-          git commit -m "release: v${VERSION}"
+          git commit -s -m "release: v${VERSION}"
           git tag -a "v${VERSION}" -m "v${VERSION}"
 
       # What npm packs comes from packages/. Nothing there may differ from the commit the tag
@@ -246,8 +250,9 @@ jobs:
             exit 1
           fi
 
-      # The tarballs npm will publish, and (for a new release) the release commit and tag as a
-      # git bundle on top of the dispatched commit.
+      # The packed packages, which the publish job reads only as data (it publishes tarballs it
+      # assembles itself), and, for a new release, the release commit and tag as a git bundle on
+      # top of the dispatched commit.
       - name: Pack the packages and the release commit
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -275,14 +280,16 @@ jobs:
     # job can read the token. See "Owner setup" in docs/releasing.md.
     environment: npm-publish
     # `id-token: write` cannot be scoped to one step, so this job runs only the runner's own
-    # tools (git, gh, node, the npm bundled with node) and GitHub's actions: no `npm ci`, no
-    # build, no test, no dependency code. `npm publish` of a tarball runs no lifecycle script.
+    # tools (git, gh, python3, node, the npm bundled with node) and GitHub's actions: no `npm
+    # ci`, no install, pack, build, test or cache, no dependency code.
     #
     # Everything from the build job (the bundle, the commit in it, the tarballs, the version it
     # reports) is untrusted DATA, never code or config. The working tree stays at the
     # dispatched commit, so every script this job runs is the dispatched commit's; the release
-    # commit is never checked out, and its manifests are read as git blobs (mode 100644 only)
-    # and parsed, never require()d. See scripts/release.sh.
+    # commit is never checked out, and its files are read as git blobs (mode 100644 only),
+    # never require()d. A build tarball is never published or shown to npm: it is parsed as
+    # data, and npm publishes a tarball assembled from the release commit's root files and the
+    # build's checked dist/ bytes. See scripts/release.sh and scripts/release-tarball.py.
     permissions:
       contents: write
       id-token: write
@@ -305,6 +312,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+          package-manager-cache: false
 
       # Again, now: an approval can come hours after ci-gate ran, and CI can be re-run.
       - name: Require CI success on the commit being released
@@ -337,9 +345,10 @@ jobs:
           echo "commit=${commit}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
-      # The exact publish command with --dry-run. First it checks every tarball's manifest
-      # against the commit's, field by field; it uploads nothing. In a real release it is the
-      # last check before anything leaves.
+      # The exact publish command with --dry-run; it uploads nothing. First it assembles and
+      # verifies every package's tarball: root files from the release commit's blobs, dist/
+      # bytes from the build tarball read as data. In a real release it is the last check
+      # before anything leaves.
       - name: Publish packages (dry run)
         env:
           COMMIT: ${{ steps.source.outputs.commit }}
@@ -369,7 +378,8 @@ jobs:
             git push --atomic origin "${COMMIT}:refs/heads/master" "refs/tags/v${VERSION}"
 
       # ── Publish with provenance ──
-      # Skips a version that is genuinely already on the registry (a republish finishing a
+      # Assembles the six tarballs again (the same commit gives the same bytes) and publishes
+      # them. Skips a version that is genuinely already on the registry (a republish finishing a
       # partial publish); any other failure (auth, network, provenance) FAILS the job. A dead
       # NPM_TOKEN previously surfaced as E404 and was swallowed by a blanket `|| echo
       # warning`: never tolerate errors you haven't identified.
