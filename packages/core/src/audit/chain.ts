@@ -161,6 +161,21 @@ export interface AuditWriter {
 	 * never rejects for it: see {@link releaseAuditWriterForTeardown}.)
 	 */
 	release(): void;
+	/**
+	 * The id of the writer that holds this vault's advisory lock in this process, or undefined while none does (a
+	 * lazy writer takes the lock at its first append). A new writer has a new id, so a lock released and taken again
+	 * reads as a different owner. Optional: a writer that cannot say (a test double) reads as holding none.
+	 */
+	lockOwner?(): string | undefined;
+}
+
+/** Options for {@link openSharedAuditWriter}. */
+export interface SharedAuditWriterOptions {
+	/**
+	 * Called after each of this handle's appends SUCCEEDS, when the vault's writer therefore holds the lock. It must
+	 * not throw (what it throws is swallowed: an append's outcome is never its listener's).
+	 */
+	onAppended?: () => void;
 }
 
 /**
@@ -1325,6 +1340,7 @@ function createAuditWriterAt(
 		isDegraded: isDegradedFn,
 		flush,
 		release: releaseWriter,
+		lockOwner: () => (heldLocks.has(writerId) ? writerId : undefined),
 	};
 }
 
@@ -1382,7 +1398,10 @@ const sharedWriters = new Map<string, SharedVaultWriter>();
  * and the handle emits {@link AUDIT_DEGRADED_WARNING} at its first failure and, with the count, at
  * its release.
  */
-export function openSharedAuditWriter(vaultPath: string): AuditWriter {
+export function openSharedAuditWriter(
+	vaultPath: string,
+	options: SharedAuditWriterOptions = {},
+): AuditWriter {
 	const vault = resolveSharedVault(vaultPath);
 	let joined: SharedLease | undefined;
 	let released = false;
@@ -1434,7 +1453,13 @@ export function openSharedAuditWriter(vaultPath: string): AuditWriter {
 		const lease = joinSharedWriter(vault);
 		inflight++;
 		try {
-			return await lease.shared.writer.appendEvent(input);
+			const event = await lease.shared.writer.appendEvent(input);
+			try {
+				options.onAppended?.();
+			} catch {
+				// the listener's failure is its own (the budget record is advisory); the event is on the chain
+			}
+			return event;
 		} catch (err) {
 			failed(err);
 			throw err;
@@ -1472,6 +1497,8 @@ export function openSharedAuditWriter(vaultPath: string): AuditWriter {
 		isDegraded: () => degraded,
 		flush,
 		release,
+		// The vault's shared writer, whichever handle joined it: every handle on one vault reads the same owner.
+		lockOwner: () => sharedWriters.get(vault.key)?.writer.lockOwner?.(),
 	};
 }
 

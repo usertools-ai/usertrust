@@ -1211,8 +1211,21 @@ inside the chain; and a "repair" that chooses which evidence is true. `quarantin
 subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evidence as a segment.
 
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
-`packages/core/src/audit/read.ts`, `packages/core/src/audit/dead-letters.ts`, and
+`packages/core/src/audit/read.ts`, `packages/core/src/audit/effective-budget.ts`, `packages/core/src/audit/dead-letters.ts`, and
 `packages/core/src/audit/verify.ts` contain zero filesystem write calls. Keep it that way — a verifier that mutates its subject is not a verifier.
+
+**A vault reader's budget is the one the governor ENFORCES.** `createGovernor` and `trust()` resolve the budget from
+`opts.budget`, `opts.configPath`, the vault's `usertrust.config.json` or the default, then record the result in
+`.usertrust/effective-budget.json` (`budget/effective-record.ts`; advisory, never throws; a failed write removes any
+earlier record). `loadBudgetConfig` reads that record first, then the vault config, and returns `source: "governor" |
+"config" | "several" | "unreadable" | "unpublished"`, the record's `writtenAt` and, for `unreadable`, its `reason`. The
+last three are an UNKNOWN budget, each said as itself (never "no budget configured": every governor enforces one), and
+a reader shows no remaining figure for them. Wherever a budget is SHOWN, its provenance is shown with it, in the one wording
+`describeBudgetSource` gives: only a governor record reads as the enforced figure, always "as of" its `writtenAt` (so a
+record that outlived a failed removal reads as old, never as current); a config budget says "not confirmed as
+enforced". The ledger UI, `inspect`, `health` and `report` all read it; never add a reader that parses the config file
+alone, or a surface that shows the figure without its provenance.
+The governor registers LAST in both constructors, once it has fully started (a failed start enforces nothing), and every step of the record's failure path is non-throwing. The record is PUBLISHED only while this process holds the vault's audit writer lock, which a governor takes lazily at its first append (`AuditWriter.lockOwner`, `openSharedAuditWriter`'s `onAppended`): before the first successful append nothing is published (`unpublished`), and a second process, whose appends fail on the lock, never overwrites the holder's record. Several live governors on one vault are aggregated in-process (`registerEnforcedBudget`): the record is the agreed budget, or `budget: null` with the governor count when they differ, which every reader shows as unknown (`source: "several"`); it is rewritten on every start and every destroy while the lock is held, and again when a new writer takes the lock, never stored as a flag. Readers stat the record before opening it (a FIFO would block them). The ledger UI re-reads it when it or the vault config changes. Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
 
 **`vaultPath` means two different directories.** `createAuditWriter(vaultPath)` joins
 `vaultPath/.usertrust/audit` — it takes the **project root**. `verifyVault`, `readLedgerEvents`,
