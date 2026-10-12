@@ -50,6 +50,34 @@ function kindOf(st: Stats): string {
 	return "an unknown kind of file";
 }
 
+/**
+ * On Windows a vault's access is its ACL, which POSIX modes and owners do not describe: usertrust
+ * neither sets nor checks them there (see LIMITATIONS.md). The platform is checked explicitly;
+ * `process.geteuid` is absent on Windows too, but its absence alone is not relied on.
+ */
+const isWindows = (): boolean => process.platform === "win32";
+
+/**
+ * The EFFECTIVE uid, the one the kernel checks every open and chmod against: a setuid or
+ * privilege-dropping process acts as its euid, not its real uid. `undefined` where there is none.
+ */
+const effectiveUid = (): number | undefined => process.geteuid?.();
+
+/**
+ * Why a vault another user owns is not used. A mode does not prove whose the vault is: another
+ * local user can create `.usertrust` 0700 first, and as its owner replace the files we write in it.
+ */
+function foreignOwner(vaultDir: string, owner: number, euid: number, target?: string): string {
+	const what =
+		target === undefined
+			? `${vaultDir} is owned by uid ${owner}`
+			: `${vaultDir} is a symbolic link to ${target}, which is owned by uid ${owner}`;
+	return `the vault ${what}, not by this process (uid ${euid}); usertrust only uses a vault its own user owns. Run as uid ${owner}, or give it to this user with: chown ${euid} ${target ?? vaultDir}`;
+}
+
+const foreignVault = (...args: Parameters<typeof foreignOwner>): Error =>
+	new Error(`usertrust: ${foreignOwner(...args)}`);
+
 /** A vault path that holds something other than a directory: every writer would fail ENOTDIR. */
 function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
 	const what =
@@ -67,14 +95,20 @@ function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
  * Creates it 0700 when `create` is set and it is absent. An existing one with any group or
  * other bit (a vault an earlier version created 0755, say) is tightened to 0700: the directory
  * is usertrust's own, and closing it closes every file under it, whatever their own modes. A
- * vault that cannot be closed (another user owns it) is refused with the reason, never used
- * world-readable. The vault BASE, the directory the caller named, is never touched.
+ * vault that cannot be closed is refused with the reason, never used world-readable. The vault
+ * BASE, the directory the caller named, is never touched.
+ *
+ * A vault ANOTHER USER OWNS is refused, whatever its mode, before anything about it is accepted or
+ * changed: its owner can replace the files written in it. The owner is compared with the
+ * process's effective uid, and a foreign directory is never chmod'ed or chown'ed, even by root.
+ * On Windows no mode or owner is set or checked (see {@link isWindows}).
  *
  * A vault that is a SYMBOLIC LINK is never changed through the link: its target may be a
  * directory usertrust does not own. A target any other user can read is refused, naming the
- * link, the target, its mode and the `chmod` that fixes it; an owner-only target is used. A
- * dangling link, and a vault path that is not a directory (a regular file, say), are refused by
- * name here, rather than left for the first writer to fail on with a bare ENOENT or ENOTDIR.
+ * link, the target, its mode and the `chmod` that fixes it; an owner-only target this process's
+ * user owns is used. A dangling link, and a vault path that is not a directory (a regular file,
+ * say), are refused by name here, rather than left for the first writer to fail on with a bare
+ * ENOENT or ENOTDIR.
  *
  * The tightening itself never follows a link either. The directory is opened with
  * `O_NOFOLLOW | O_DIRECTORY` and changed with `fchmod` on that descriptor, after checking it is
@@ -91,6 +125,7 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 		return;
 	}
 
+	const euid = effectiveUid();
 	if (st.isSymbolicLink()) {
 		let target: string;
 		let targetStat: Stats;
@@ -106,6 +141,10 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 			);
 		}
 		if (!targetStat.isDirectory()) throw notADirectory(vaultDir, targetStat, target);
+		if (isWindows()) return;
+		if (euid !== undefined && targetStat.uid !== euid) {
+			throw foreignVault(vaultDir, targetStat.uid, euid, target);
+		}
 		const targetMode = targetStat.mode;
 		if ((targetMode & 0o077) === 0) return;
 		throw new Error(
@@ -114,6 +153,8 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 	}
 
 	if (!st.isDirectory()) throw notADirectory(vaultDir, st);
+	if (isWindows()) return;
+	if (euid !== undefined && st.uid !== euid) throw foreignVault(vaultDir, st.uid, euid);
 	if ((st.mode & 0o077) === 0) return;
 	const refuse = (reason: string): Error =>
 		new Error(
@@ -133,6 +174,7 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 		if (opened.dev !== st.dev || opened.ino !== st.ino) {
 			throw refuse("it was replaced while being checked");
 		}
+		if (euid !== undefined && opened.uid !== euid) throw foreignVault(vaultDir, opened.uid, euid);
 		try {
 			fchmodSync(fd, PRIVATE_DIR_MODE);
 		} catch (err) {
@@ -145,21 +187,35 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 
 /**
  * The warning for a vault directory other users can read, or `undefined` when it is owner-only,
- * absent, or not one this check can read (the command that opens it reports that itself). It
- * NEVER changes a mode: the CLI commands that open an existing vault without starting a governor
- * warn with it and proceed. Only a governor and `usertrust init` tighten a vault
+ * absent, or not one this check can read (the command that opens it reports that itself), and
+ * always `undefined` on Windows (see {@link isWindows}). A vault another user owns gets the owner
+ * warning instead, naming the owner and this process's effective uid. It NEVER changes a mode or
+ * an owner: the CLI commands that open an existing vault without starting a governor warn with it
+ * and proceed. Only a governor and `usertrust init` tighten a vault
  * ({@link securePrivateVault}). For a symbolic link it names the target, its mode and the fix.
  */
 export function looseVaultWarning(vaultDir: string): string | undefined {
+	if (isWindows()) return undefined;
+	const euid = effectiveUid();
+	const foreign = (owner: number, target?: string): string | undefined =>
+		euid === undefined || owner === euid
+			? undefined
+			: `usertrust: warning: ${foreignOwner(vaultDir, owner, euid, target)}`;
 	try {
 		const st = lstatSync(vaultDir);
 		if (st.isSymbolicLink()) {
 			const target = realpathSync(vaultDir);
 			const targetStat = statSync(target);
-			if (!targetStat.isDirectory() || (targetStat.mode & 0o077) === 0) return undefined;
+			if (!targetStat.isDirectory()) return undefined;
+			const owner = foreign(targetStat.uid, target);
+			if (owner !== undefined) return owner;
+			if ((targetStat.mode & 0o077) === 0) return undefined;
 			return `usertrust: warning: the vault ${vaultDir} is a symbolic link to ${target}, which is readable by other users (mode ${octal(targetStat.mode)}); make it owner-only with: chmod 700 ${target}`;
 		}
-		if (!st.isDirectory() || (st.mode & 0o077) === 0) return undefined;
+		if (!st.isDirectory()) return undefined;
+		const owner = foreign(st.uid);
+		if (owner !== undefined) return owner;
+		if ((st.mode & 0o077) === 0) return undefined;
 		return `usertrust: warning: the vault ${vaultDir} is readable by other users (mode ${octal(st.mode)}); make it owner-only with: chmod 700 ${vaultDir}`;
 	} catch {
 		return undefined;

@@ -32,6 +32,7 @@ import { trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
 import { ScopeManager } from "../../src/resilience/scope.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
+import { looseVaultWarning, securePrivateVault } from "../../src/shared/private-fs.js";
 import { createSnapshot, restoreSnapshot } from "../../src/snapshot/checkpoint.js";
 
 vi.mock("tigerbeetle-node", () => ({
@@ -362,6 +363,122 @@ describe.each(openers)("a vault that is a symbolic link, opened by %s", (_name, 
 	});
 });
 
+/**
+ * Makes this process look like ANOTHER user to the vault checks: `geteuid` answers our uid + 1, so
+ * a directory we really own is, to them, someone else's. A real foreign owner needs root to make.
+ * `owner` is who really owns what the test creates; `euid` is who the checks think we are.
+ */
+function asAnotherUser(): { owner: number; euid: number; restore: () => void } {
+	const owner = process.geteuid?.() as number;
+	const spy = vi.spyOn(process, "geteuid").mockReturnValue(owner + 1);
+	return { owner, euid: owner + 1, restore: () => spy.mockRestore() };
+}
+
+/** The refusal for a vault `owner` owns, opened by `euid`; `target` for a symbolic link. */
+function foreignRefusal(vault: string, owner: number, euid: number, target?: string): string {
+	const what =
+		target === undefined
+			? `${vault} is owned by uid ${owner}`
+			: `${vault} is a symbolic link to ${target}, which is owned by uid ${owner}`;
+	return `the vault ${what}, not by this process (uid ${euid}); usertrust only uses a vault its own user owns. Run as uid ${owner}, or give it to this user with: chown ${euid} ${target ?? vault}`;
+}
+
+describe.skipIf(process.platform === "win32").each(openers)(
+	"a vault another user owns, opened by %s",
+	(_name, open) => {
+		/** Opens `root` as another user; the refusal, or `undefined` when it opened. */
+		async function openAsAnotherUser(root: string): Promise<Error | undefined> {
+			const as = asAnotherUser();
+			try {
+				return await open(root).then(
+					() => undefined,
+					(err: unknown) => err as Error,
+				);
+			} finally {
+				as.restore();
+			}
+		}
+
+		it.each([
+			["an owner-only", 0o700],
+			["a group/world-readable", 0o755],
+		])("refuses %s directory, changes nothing and writes nothing", async (_label, mode) => {
+			process.umask(0o022);
+			const root = tmp("ut-perm-foreign-");
+			const vaultPath = join(root, VAULT_DIR);
+			mkdirSync(vaultPath, { mode });
+			chmodSync(vaultPath, mode);
+			const owner = process.geteuid?.() as number;
+			const refused = await openAsAnotherUser(root);
+			expect
+				.soft(refused?.message)
+				.toBe(`usertrust: ${foreignRefusal(vaultPath, owner, owner + 1)}`);
+			// Never chmod'ed (even a loose one is not "fixed" for its owner), and nothing written in it.
+			expect(statSync(vaultPath).mode & 0o777).toBe(mode);
+			expect(statSync(vaultPath).uid).toBe(owner);
+			expect(readdirSync(vaultPath)).toEqual([]);
+		});
+
+		it("refuses a link to an owner-only directory another user owns, and never changes the target", async () => {
+			process.umask(0o022);
+			const root = tmp("ut-perm-foreign-link-");
+			const made = join(tmp("ut-perm-foreign-target-"), "vault");
+			mkdirSync(made, { mode: 0o700 });
+			const target = realpathSync(made);
+			const link = join(root, VAULT_DIR);
+			symlinkSync(target, link);
+			const owner = process.geteuid?.() as number;
+			const refused = await openAsAnotherUser(root);
+			expect
+				.soft(refused?.message)
+				.toBe(`usertrust: ${foreignRefusal(link, owner, owner + 1, target)}`);
+			expect(statSync(target).mode & 0o777).toBe(0o700);
+			expect(lstatSync(link).isSymbolicLink()).toBe(true);
+			expect(readdirSync(target)).toEqual([]);
+		});
+
+		it("uses a vault this process's own user owns (control)", async () => {
+			process.umask(0o022);
+			const root = tmp("ut-perm-own-");
+			const vaultPath = join(root, VAULT_DIR);
+			mkdirSync(vaultPath, { mode: 0o700 });
+			// The real effective uid, unmocked: the owner check passes on the directory's real owner.
+			expect(statSync(vaultPath).uid).toBe(process.geteuid?.());
+			await open(root);
+			expect(existsSync(join(vaultPath, "audit", "events.jsonl"))).toBe(true);
+			expect(walkModes(vaultPath).loose).toEqual([]);
+		});
+	},
+);
+
+describe("on Windows", () => {
+	it("no mode or owner is set or checked, and the CLI never warns", () => {
+		process.umask(0o022);
+		const root = tmp("ut-perm-win32-");
+		const vaultPath = join(root, VAULT_DIR);
+		mkdirSync(vaultPath, { mode: 0o755 });
+		chmodSync(vaultPath, 0o755);
+		const fresh = join(root, "fresh", VAULT_DIR);
+		// Foreign AND loose: on POSIX this vault is refused (owner) and warned about (both).
+		const as = asAnotherUser();
+		const platform = Object.getOwnPropertyDescriptor(process, "platform");
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		try {
+			expect.soft(() => securePrivateVault(vaultPath)).not.toThrow();
+			expect.soft(looseVaultWarning(vaultPath)).toBeUndefined();
+			securePrivateVault(fresh, { create: true });
+		} finally {
+			if (platform !== undefined) Object.defineProperty(process, "platform", platform);
+			as.restore();
+		}
+		expect(process.platform).not.toBe("win32");
+		expect(statSync(vaultPath).mode & 0o777).toBe(0o755);
+		expect(statSync(fresh).isDirectory()).toBe(true);
+		// Control: back on this platform, the same vault is warned about.
+		expect(looseVaultWarning(vaultPath)).toContain("is readable by other users (mode 755)");
+	});
+});
+
 /** A CLI command that opens an existing vault without starting a governor, run as `--json`. */
 async function runCli(command: "inspect" | "health", root: string): Promise<void> {
 	const { run } =
@@ -438,6 +555,26 @@ describe.each(["inspect", "health"] as const)("usertrust %s on an existing vault
 		expect.soft(success).toBe(true);
 		expect(statSync(target).mode & 0o777).toBe(0o755);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"warns on a vault another user owns, naming the owner and this process's uid, and changes nothing",
+		async () => {
+			const { root, vaultPath } = await vaultAt(0o700);
+			const as = asAnotherUser();
+			let result: { stderr: string; success: boolean };
+			try {
+				result = await capture(root);
+			} finally {
+				as.restore();
+			}
+			expect
+				.soft(result.stderr)
+				.toContain(`usertrust: warning: ${foreignRefusal(vaultPath, as.owner, as.euid)}`);
+			expect.soft(result.success).toBe(true);
+			expect(statSync(vaultPath).mode & 0o777).toBe(0o700);
+			expect(statSync(vaultPath).uid).toBe(as.owner);
+		},
+	);
 
 	it("says nothing about an owner-only vault", async () => {
 		const { root, vaultPath } = await vaultAt(0o700);

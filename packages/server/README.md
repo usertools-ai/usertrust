@@ -171,7 +171,10 @@ Only Governor-produced receipts and audit-chain records are authoritative. The s
 invents no audit records of its own; every receipt returned by `/v1/settle` comes from
 the tenant's Governor (per-tenant `stateDir/<tenant>` vault: separate audit chain and
 spend ledger). Each tenant vault is owner-only (directories `0700`, files `0600`, whatever
-the umask), and the server writes nothing outside `stateDir`; a `stateDir` the server creates is
-`0700`, and one you created is left as you made it. The SSE stream is best-effort operational telemetry, NOT an audit
-source — dropped subscribers lose events. Shadow denials produce no receipt and are
-not auditable or verifiable.
+the umask; a vault another user owns is refused), and the server writes nothing outside
+`stateDir`; a `stateDir` the server creates is `0700`, and one you created is left as you
+made it. On Windows the server neither sets nor checks permissions: the `stateDir` folder's
+inherited ACL decides who can read it, so keep it under the service account's own profile or
+give it an owner-only ACL (see the repository's `LIMITATIONS.md`). The SSE stream is
+best-effort operational telemetry, NOT an audit source — dropped subscribers lose events.
+Shadow denials produce no receipt and are not auditable or verifiable.

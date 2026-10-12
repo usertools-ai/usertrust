@@ -185,6 +185,21 @@ we removed it: `connectProxy()` now throws, and passing `proxy` to
 ship with real financial enforcement behind it. Until then: `dryRun` for
 explicit bypass in testing, a real TigerBeetle for production.
 
+## 10. On Windows, the vault folder's ACL decides who can read the vault
+
+On Linux and macOS every directory usertrust creates in a vault is `0700` and
+every file `0600`, whatever the umask. A governor closes an existing `.usertrust/`
+that other users can read, and refuses one that another user owns: it compares
+the owner with the process's effective uid, and running as root is no exception.
+On Windows usertrust does not set or check permissions. POSIX modes do not map
+to Windows ACLs, and a mode check there would misreport who can read the vault.
+The vault folder inherits its ACL from the folder it is created in, and that ACL
+governs who can read the audit trail, the spend ledger and, with content capture
+on, prompts and tool inputs. Keep the vault (and a usertrust-server's `stateDir`)
+under your own user profile, which by default only you, administrators and SYSTEM
+can read, or give the folder an owner-only ACL yourself. usertrust does not manage
+Windows ACLs.
+
 ---
 
 Found a boundary we haven't documented? That is a bug in this file — open an

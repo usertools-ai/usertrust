@@ -76,6 +76,8 @@ npx usertrust init
 
 This creates a `.usertrust/` vault in your project root with default config, policies, and an empty audit chain.
 
+The vault is owner-only on Linux and macOS: every directory usertrust creates in it is `0700` and every file `0600`, and a `.usertrust/` another user owns is refused. On Windows usertrust does not set or check permissions, because POSIX modes do not map to ACLs: the vault folder's inherited ACL governs who can read it. Keep the vault (and a usertrust-server's `stateDir`) under your own user profile, or give the folder an owner-only ACL yourself. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md).
+
 Both module systems work on Node ≥ 22.12:
 
 ```js
