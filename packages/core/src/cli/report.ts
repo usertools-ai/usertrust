@@ -18,9 +18,6 @@
 
 import {
 	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readdirSync,
 	readFileSync,
 	realpathSync,
 	renameSync,
@@ -28,24 +25,15 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import pc from "picocolors";
-import {
-	deadLetterPath,
-	describeMissingEvents,
-	readChainDeadLetters,
-} from "../audit/dead-letters.js";
-import { DEAD_LETTER_QUEUE, MAIN_LOG, verifierInputs } from "../audit/inputs.js";
-import { readLedgerEvents } from "../audit/read.js";
-import { verifyVault } from "../audit/verify.js";
-import { parseDeadLetters } from "../report/dead-letters.js";
+import { verifyVaultComplete } from "../audit/complete.js";
 import { type ReportFormat, render } from "../report/render.js";
 import {
 	AGENT_KEYS,
 	type AgentKey,
 	buildWeeklyReport,
-	type DeadLetters,
+	deadLettersForReport,
 } from "../report/weekly.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import { TrustConfigSchema } from "../shared/types.js";
@@ -142,12 +130,10 @@ class UsageError extends Error {}
  * that cannot be read as JSON, or a `budget` that is not a finite non-negative number, is an error: reading it as zero
  * would print "no budget configured" for a vault whose operator configured one.
  */
-function readVaultBudget(dir: string): number {
-	const configPath = join(dir, "usertrust.config.json");
-	if (!existsSync(configPath)) return 0;
+function readVaultBudgetText(text: string): number {
 	let config: unknown;
 	try {
-		config = JSON.parse(readFileSync(configPath, "utf-8"));
+		config = JSON.parse(text);
 	} catch {
 		throw new UsageError("The vault config (usertrust.config.json) is not valid JSON");
 	}
@@ -248,275 +234,44 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 	};
 }
 
-/** How long an identical tail must stay identical before it is called persistent (a slow fsync is not a crash). */
-const PERSIST_MS = 1000;
-
-/** A short synchronous pause between attempts: a writer finishing an append needs milliseconds, not a retry storm. */
-function pause(ms: number): void {
-	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
+/** What a small side file (the vault config, the spend counter) holds. Opened only if it is a regular file. */
+type SideFile =
+	| { state: "absent" }
+	| { state: "file"; text: string }
+	| { state: "unreadable"; code: string };
 
 /**
- * Reads a log and its `.meta` anchor as one stable state. The writer fsyncs the log BEFORE it replaces the sidecar, so
- * a read that straddles an append sees an old sidecar over a new log (or the reverse), which `verifyVault` would call a
- * broken chain on a healthy vault. Read sidecar, log, sidecar; a pair counts only when both sidecar reads are
- * identical AND the log has nothing after the line the sidecar describes (its `lastHash`).
- *
- * A pair with a TAIL after that line is either an append in flight or a crash between the log fsync and the sidecar
- * replace. The two are told apart by waiting: a tail that resolves (the sidecar advances, or the tail changes) was an
- * append in flight, and the next attempt reads the settled state. A tail that is IDENTICAL across attempts under an
- * identical sidecar is persistent; it is kept in the copy, never dropped, so the verifier reports it. Nothing is ever
- * dropped from the log. "busy" is returned only when the state kept changing for every attempt. This is the same
- * reading of "one extra event" as the writer-states spec (a classifier there is a follow-up).
- * A sidecar that is stable but matches no log line is not busy either: the log is copied as read and the verifier
- * reports the real mismatch.
+ * Read a side file the chain verdict does not depend on. Classified by stat before it is opened (a FIFO read would hang);
+ * ENOENT from the stat is absent; anything else that is not a readable regular file is unreadable, never absent.
  */
-function readPaired(
-	logPath: string,
-	metaPath: string,
-	hooks?: ReportHooks,
-): { log: Buffer; meta: Buffer } | "busy" {
-	const persistMs = hooks?.persistMs ?? PERSIST_MS;
-	const pauseMs = Math.max(1, Math.min(100, Math.floor(persistMs / 5)));
-	const maxAttempts = Math.ceil((persistMs * 2) / pauseMs) + 6;
-	let previous: { meta: Buffer; tail: Buffer; since: number } | undefined;
-	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-		if (attempt > 1) pause(pauseMs);
-		const m1 = readFileSync(metaPath);
-		const log = readFileSync(logPath);
-		hooks?.betweenReads?.(attempt);
-		const m2 = readFileSync(metaPath);
-		if (!m1.equals(m2)) {
-			previous = undefined;
-			continue;
-		}
-		let lastHash: string | undefined;
-		try {
-			const parsed = JSON.parse(m2.toString("utf-8")) as { lastHash?: unknown };
-			if (typeof parsed.lastHash === "string") lastHash = parsed.lastHash;
-		} catch {
-			// a corrupt sidecar is reported by the verifier, not decided here
-		}
-		if (lastHash === undefined) return { log, meta: m2 };
-		let offset = 0;
-		let cut = -1;
-		while (offset < log.length) {
-			const nl = log.indexOf(0x0a, offset);
-			if (nl === -1) break; // a line with no newline yet
-			try {
-				const e = JSON.parse(log.subarray(offset, nl).toString("utf-8")) as { hash?: unknown };
-				if (e.hash === lastHash) cut = nl + 1;
-			} catch {
-				// not a parseable line: the verifier reports it
-			}
-			offset = nl + 1;
-		}
-		if (cut === -1) return { log, meta: m2 };
-		const tail = log.subarray(cut);
-		if (tail.length === 0) return { log, meta: m2 };
-		// A tail exists. Identical to the last attempt's under an identical sidecar: persistent, so kept.
-		// Persistent only once it has stayed identical for the whole window; sooner, it may be a slow fsync.
-		if (previous?.meta.equals(m2) === true && previous.tail.equals(tail)) {
-			if (Date.now() - previous.since >= persistMs) return { log, meta: m2 };
-			continue;
-		}
-		previous = { meta: m2, tail: Buffer.from(tail), since: Date.now() };
-	}
-	return "busy";
-}
-
-/**
- * ONE snapshot of the vault: every audit file is read exactly once into a private temp directory, and the verdict AND the
- * figures both come from that copy. `verifyVault` and `readLedgerEvents` each read the files themselves, so run against
- * the live vault a writer (or an attacker) changing it between the two reads produced a report stamped VERIFIED over
- * events that were never verified. The vault itself is only read.
- *
- * ABSENCE IS NOT A VALUE. The copy is the verifier's input set: every regular file of the audit directory except the writer lock
- * (the event log, any rotated segments, their anchor sidecars, the index). Only entries that are not regular files are
- * skipped. A read error on a regular file (EACCES, EIO), a directory that cannot be listed, or a file that cannot be
- * examined is a PROBLEM, returned to the caller, and the report is UNVERIFIED with exit code 2: leaving the file out would
- * let the copy verify as a shorter (even an empty) chain.
- */
-export function snapshotVault(
-	vaultPath: string,
-	hooks?: ReportHooks,
-): {
-	dir: string;
-	problems: string[];
-	/** Non-empty when a log and its anchor never read as one stable state: a busy vault, NOT a broken chain. */
-	busy: string[];
-	/** The vault config exists but could not be read: the budget is UNKNOWN, not absent. */
-	configUnreadable: boolean;
-	/** The governor's persisted counter, as recorded (NOT chain-verified), when the vault has one. */
-	spendLedger?: { value: number } | { unreadable: true };
-	/** The writer's dead-letter queue, read ONCE with the rest (NOT chain-verified). A read error is `unreadable`, never "none". */
-	deadLetters: DeadLetters;
-	/** Set when the queue exists and could not be read (the code): completeness is then UNKNOWN, never "none". */
-	deadLetterReadError?: string;
-	/** The UTC instant the vault was read, taken BEFORE the audit directory was listed: what the VERIFIED claim is about. */
-	readAtIso: string;
-	cleanup: () => void;
-} {
-	const readAtIso = new Date().toISOString();
-	const dir = mkdtempSync(join(tmpdir(), "usertrust-report-"));
-	const problems: string[] = [];
-	const busy: string[] = [];
-	let configUnreadable = false;
-	let spendLedger: { value: number } | { unreadable: true } | undefined;
-	let deadLetters: DeadLetters = { shortfalls: new Map() };
-	let deadLetterReadError: string | undefined;
-	const problem = (what: string, err: unknown): void => {
-		const code = (err as NodeJS.ErrnoException | undefined)?.code;
-		problems.push(`Could not read ${what}${code !== undefined ? ` (${code})` : ""}`);
-	};
+function readSideFile(path: string): SideFile {
 	try {
-		const auditSrc = join(vaultPath, "audit");
-		// What each listed input IS, decided by stat before anything is opened (opening a FIFO would hang). The list is the
-		// verifier's (`verifierInputs`): the snapshot holds exactly those inputs, so it can hold nothing less than `verify`
-		// reads. A listed input that exists as anything but a regular file is a PROBLEM named here, never a skip.
-		const stateOf = (rel: string): "absent" | "file" | "problem" => {
-			try {
-				const st = statSync(join(vaultPath, rel));
-				if (st.isFile()) return "file";
-				problems.push(
-					`${rel} is ${st.isDirectory() ? "a directory" : "not a regular file"} where the verifier reads a file: the chain cannot be read`,
-				);
-				return "problem";
-			} catch (err) {
-				if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return "absent";
-				problem(rel, err);
-				return "problem";
-			}
-		};
-		let names: string[] = [];
-		if (existsSync(auditSrc)) {
-			try {
-				names = readdirSync(auditSrc);
-			} catch (err) {
-				problem("the audit directory", err);
-			}
-		}
-		const auditInputs = verifierInputs(names).filter((i) => i.rel.startsWith("audit/"));
-		const state = new Map(auditInputs.map((i) => [i.rel, stateOf(i.rel)]));
-		const auditDst = join(dir, "audit");
-		// An absent audit directory stays absent in the snapshot, so the verifier says so rather than reading an empty one.
-		if (existsSync(auditSrc)) mkdirSync(auditDst, { recursive: true, mode: 0o700 });
-		const anchorRel = `audit/${MAIN_LOG}.meta`;
-		for (const input of auditInputs) {
-			if (state.get(input.rel) !== "file") continue;
-			const name = basename(input.rel);
-			const src = join(vaultPath, input.rel);
-			try {
-				if (input.role === "anchor") {
-					// Copied with its log when that log is present (one paired read); alone otherwise.
-					if (state.get(`audit/${MAIN_LOG}`) === "file") continue;
-					writeFileSync(join(auditDst, name), readFileSync(src), { mode: 0o600 });
-				} else if (input.rel === `audit/${MAIN_LOG}` && state.get(anchorRel) === "file") {
-					// A log with an anchor sidecar is read as ONE state (see readPaired), not as two independent files.
-					const got = readPaired(src, join(vaultPath, anchorRel), hooks);
-					if (got === "busy") {
-						busy.push(input.rel);
-						continue;
-					}
-					writeFileSync(join(auditDst, name), got.log, { mode: 0o600 });
-					writeFileSync(join(auditDst, `${name}.meta`), got.meta, { mode: 0o600 });
-				} else {
-					writeFileSync(join(auditDst, name), readFileSync(src), { mode: 0o600 });
-				}
-			} catch (err) {
-				problem(input.rel, err);
-			}
-		}
-		const configSrc = join(vaultPath, "usertrust.config.json");
-		if (existsSync(configSrc)) {
-			try {
-				// stat first: opening a FIFO would hang. A config that is not a regular file is unreadable, not absent.
-				if (!statSync(configSrc).isFile()) throw new Error("not a regular file");
-				writeFileSync(join(dir, "usertrust.config.json"), readFileSync(configSrc), { mode: 0o600 });
-			} catch {
-				// The budget is UNKNOWN, but this is not a chain problem: the verifier does not list the config as an input, so
-				// an unreadable one must not make the chain UNVERIFIED.
-				configUnreadable = true;
-			}
-		}
-		// The governor's persisted counter, read ONCE here. It is a plain file the chain does not verify, so an unreadable
-		// one is reported beside the figures and is never a verifier problem.
-		const ledgerSrc = join(vaultPath, "spend-ledger.json");
-		try {
-			// stat first, like every other read here: a FIFO at this path is unreadable, never opened.
-			if (existsSync(ledgerSrc) && !statSync(ledgerSrc).isFile()) {
-				throw Object.assign(new Error("not a regular file"), { code: "ENOTSUP" });
-			}
-			const parsed = JSON.parse(readFileSync(ledgerSrc, "utf-8")) as { budgetSpent?: unknown };
-			const v = parsed?.budgetSpent;
-			spendLedger =
-				typeof v === "number" && Number.isFinite(v) && v >= 0 ? { value: v } : { unreadable: true };
-		} catch (err) {
-			// ABSENT is the governors' own reading too (`loadSpendLedger`: ENOENT is a counter of 0, "the one honest
-			// zero"): a governor that has not persisted yet has counted nothing. Decided by the read's error code, not an
-			// existsSync preflight, so a file that exists and cannot be read stays unreadable. Without this, a chain that
-			// recorded spend before the counter was ever written (a headless ambiguity is appended before the add) could not
-			// be disputed against any counter.
-			spendLedger =
-				(err as NodeJS.ErrnoException | undefined)?.code === "ENOENT"
-					? { value: 0 }
-					: { unreadable: true };
-		}
-		// The writer's dead-letter queue: a capped post whose shortfall append failed is recorded there with the posted
-		// amount. Absent is "no dead letters"; a file that exists and cannot be read is NOT, it leaves only an upper bound.
-		//
-		// The SAME bytes also go into the snapshot (at the path the verifier's reader uses), so the completeness check below
-		// (is a dead-lettered chain event missing from the chain?) and the shortfalls read here are one read of one file.
-		const dlqSrc = deadLetterPath(vaultPath);
-		let queueText: string | undefined;
-		const queueState = stateOf(DEAD_LETTER_QUEUE);
-		try {
-			// A queue that exists as anything but a regular file was already named as a problem above and is never opened.
-			if (queueState === "problem") {
-				throw Object.assign(new Error("not a regular file"), { code: "ENOTSUP" });
-			}
-			if (queueState === "absent") {
-				throw Object.assign(new Error("absent"), { code: "ENOENT" });
-			}
-			queueText = readFileSync(dlqSrc, "utf-8");
-		} catch (err) {
-			const code = (err as NodeJS.ErrnoException | undefined)?.code;
-			// ABSENT (ENOENT on the READ of the vault's file): nothing was ever dead-lettered. Anything else: whether events
-			// are missing is UNKNOWN, never "none".
-			if (code !== "ENOENT") {
-				deadLetters = { unreadable: true };
-				deadLetterReadError = typeof code === "string" ? code : "read failed";
-			}
-		}
-		if (queueText !== undefined) {
-			// The WRITE into the snapshot is judged apart from the read: a failure here (even an ENOENT, a reaped temp
-			// directory) must never be read as "no queue", or the completeness check would find no file and clear a vault
-			// whose queue has missing events.
-			try {
-				mkdirSync(dirname(deadLetterPath(dir)), { recursive: true, mode: 0o700 });
-				writeFileSync(deadLetterPath(dir), queueText, { mode: 0o600 });
-				deadLetters = parseDeadLetters(queueText);
-			} catch (err) {
-				const code = (err as NodeJS.ErrnoException | undefined)?.code;
-				deadLetters = { unreadable: true };
-				deadLetterReadError = `could not copy the queue into the snapshot${typeof code === "string" ? ` (${code})` : ""}`;
-			}
-		}
+		if (!statSync(path).isFile()) return { state: "unreadable", code: "not a regular file" };
+		return { state: "file", text: readFileSync(path, "utf-8") };
 	} catch (err) {
-		rmSync(dir, { recursive: true, force: true });
-		throw err;
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (code === "ENOENT") return { state: "absent" };
+		return { state: "unreadable", code: typeof code === "string" ? code : "read failed" };
 	}
-	return {
-		dir,
-		problems,
-		busy,
-		configUnreadable,
-		deadLetters,
-		...(deadLetterReadError !== undefined ? { deadLetterReadError } : {}),
-		readAtIso,
-		...(spendLedger !== undefined ? { spendLedger } : {}),
-		cleanup: () => rmSync(dir, { recursive: true, force: true }),
-	};
+}
+
+/**
+ * The governor's persisted counter, as recorded (NOT chain-verified). ABSENT is the governors' own reading too
+ * (`loadSpendLedger`: ENOENT is a counter of 0, "the one honest zero"): a governor that has not persisted yet has counted
+ * nothing, which lets the counter leg dispute a definite claim the counter does not support.
+ */
+function readSpendLedger(path: string): { value: number } | { unreadable: true } {
+	const f = readSideFile(path);
+	if (f.state === "absent") return { value: 0 };
+	if (f.state === "unreadable") return { unreadable: true };
+	try {
+		const v = (JSON.parse(f.text) as { budgetSpent?: unknown } | null)?.budgetSpent;
+		return typeof v === "number" && Number.isFinite(v) && v >= 0
+			? { value: v }
+			: { unreadable: true };
+	} catch {
+		return { unreadable: true };
+	}
 }
 
 /** `budget` (usertokens, a positive safe integer) from a tenant config file. */
@@ -542,11 +297,21 @@ function readTenantBudget(path: string): number {
  * path of its directory plus its name.
  */
 function assertOutsideVault(target: string, vaultPath: string): void {
+	// The OS's resolution (`realpath(3)`), not the JS one: `realpathSync` resolves `..` lexically before it follows a link, so
+	// `link/..` names a different directory than the OS opens. And it FAILS CLOSED: a path that cannot be resolved cannot be
+	// shown to be outside the vault, so it is refused rather than let through.
+	const real = (p: string): string => realpathSync.native(p);
+	const refuse = (what: string): never => {
+		throw new UsageError(
+			`--out cannot be shown to be outside the vault (${what}): the report is never written into the audit data it reads`,
+		);
+	};
 	let vaultReal: string;
 	try {
-		vaultReal = realpathSync(vaultPath);
+		vaultReal = real(vaultPath);
 	} catch {
-		return; // no vault to protect (the caller has already required one)
+		refuse("the vault path could not be resolved");
+		return; // unreachable: refuse throws
 	}
 	const inside = (p: string): boolean => p === vaultReal || p.startsWith(`${vaultReal}${sep}`);
 	// Two paths can be the vault, and either refuses:
@@ -556,15 +321,25 @@ function assertOutsideVault(target: string, vaultPath: string): void {
 	//    still has the vault's own entry replaced by the report.
 	let resolved: string | undefined;
 	try {
-		resolved = realpathSync(target);
-	} catch {
-		// does not exist yet
+		resolved = real(target);
+	} catch (err) {
+		// Not existing yet is the normal case; any other failure (a symlink loop, no permission) is not a clean answer.
+		if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
+			refuse(
+				scrubForTerminal(
+					String((err as NodeJS.ErrnoException | undefined)?.code ?? "unresolvable"),
+				),
+			);
+		}
 	}
 	let entry: string;
 	try {
-		entry = join(realpathSync(dirname(target)), basename(target));
-	} catch {
+		entry = join(real(dirname(target)), basename(target));
+	} catch (err) {
 		entry = target;
+		refuse(
+			`its directory could not be resolved: ${scrubForTerminal(String((err as NodeJS.ErrnoException | undefined)?.code ?? "unresolvable"))}`,
+		);
 	}
 	const hit =
 		resolved !== undefined && inside(resolved) ? resolved : inside(entry) ? entry : undefined;
@@ -590,21 +365,7 @@ function writeReportFile(target: string, text: string): void {
 	}
 }
 
-export interface ReportHooks {
-	/** Test seam: runs right after the snapshot is taken, before anything is verified or read. */
-	afterSnapshot?: () => void;
-	/** Test seam: runs between the sidecar/log/sidecar reads of one attempt (a deterministic concurrent append). */
-	betweenReads?: (attempt: number) => void;
-	/** Test seam: how long an identical tail must stay identical before it counts as persistent (default 1000 ms). */
-	persistMs?: number;
-}
-
-export async function run(
-	rootDir?: string,
-	opts?: CliOptions,
-	args?: string[],
-	hooks?: ReportHooks,
-): Promise<void> {
+export async function run(rootDir?: string, opts?: CliOptions, args?: string[]): Promise<void> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
 	const json = opts?.json === true;
@@ -639,76 +400,50 @@ export async function run(
 			budget = readTenantBudget(resolve(root, parsed.tenantConfig));
 			budgetSource = "tenant config";
 		}
-		const snapshot = snapshotVault(vaultPath, hooks);
-		let model: ReturnType<typeof buildWeeklyReport>;
-		let verified: boolean;
-		try {
-			hooks?.afterSnapshot?.();
-			// verdict and figures from the SAME bytes
-			const verdict = verifyVault(snapshot.dir);
-			const events = readLedgerEvents(snapshot.dir);
-			// A vault that never read as one stable state is reported as BUSY, in words that are not a broken chain.
-			const busyErrors = snapshot.busy.map(
-				(f) =>
-					`Vault busy: ${f} changed on every read (a writer is appending); this is not itself a broken chain, run the report again. Problems below that name it may be an artifact of the busy read; any others are real`,
-			);
-			// COMPLETENESS, as `usertrust verify` reports it: a chain with an event missing still verifies link by link, so
-			// the report reads the same dead-letter bytes against the events it just walked. A dead-lettered chain event not
-			// on the chain, or a queue that cannot be read, is not VERIFIED.
-			const byHash = new Map(events.map((e) => [e.hash, e]));
-			const queuePath = deadLetterPath(vaultPath);
-			const dead =
-				snapshot.deadLetterReadError !== undefined
-					? { path: queuePath, unreadable: snapshot.deadLetterReadError }
-					: readChainDeadLetters(snapshot.dir, (hash) => byHash.get(hash));
-			const completenessErrors: string[] = [];
-			if ("unreadable" in dead) {
-				completenessErrors.push(
-					`INCOMPLETE?: the dead-letter queue ${queuePath} could not be read (${dead.unreadable}), so whether audit events are missing from the chain is unknown`,
-				);
-			} else if (dead.missing > 0) {
-				completenessErrors.push(
-					`INCOMPLETE: ${describeMissingEvents({ ...dead, path: queuePath })}`,
-				);
-			}
-			verified =
-				verdict.valid &&
-				snapshot.problems.length === 0 &&
-				snapshot.busy.length === 0 &&
-				completenessErrors.length === 0;
-			model = buildWeeklyReport(
-				events,
-				{
-					// A file the snapshot could not read is part of the verdict, never an omission from it.
-					verified,
-					errors: [...busyErrors, ...snapshot.problems, ...verdict.errors, ...completenessErrors],
-					chainLength: verdict.chainLength,
-					firstEvent: verdict.firstEvent,
-					lastEvent: verdict.lastEvent,
-					readAtIso: snapshot.readAtIso,
-				},
-				{
-					endMs: parsed.endMs,
-					agentKey: parsed.agentKey,
-					...(parsed.segment !== undefined ? { segment: parsed.segment } : {}),
-					topN: parsed.top,
-					budget:
-						parsed.budget !== undefined || parsed.tenantConfig !== undefined
-							? budget
-							: readVaultBudget(snapshot.dir),
-					budgetSource,
-					...(snapshot.spendLedger !== undefined ? { spendLedger: snapshot.spendLedger } : {}),
-					deadLetters: snapshot.deadLetters,
-					// An unreadable config is an UNKNOWN budget, never "no budget configured".
-					budgetUnreadable:
-						snapshot.configUnreadable &&
-						parsed.budget === undefined &&
-						parsed.tenantConfig === undefined,
-				},
-			);
-		} finally {
-			snapshot.cleanup();
-		}
+		// The verdict is `usertrust verify`'s own, on the LIVE vault: integrity AND completeness, one function shared with that
+		// command (audit/complete.ts). The report makes no integrity claim of its own. The instant is taken before the read.
+		const readAtIso = new Date().toISOString();
+		const complete = verifyVaultComplete(vaultPath);
+		const { result } = complete.reading;
+		// The figures come from the events the verifier walked, never from a second read of the log.
+		const events = complete.reading.events;
+		const verified = complete.valid;
+		// A config that cannot be read makes the budget UNKNOWN, not the chain unverified: the verifier does not read it.
+		const config = readSideFile(join(vaultPath, "usertrust.config.json"));
+		const configUnreadable = config.state === "unreadable";
+		const dead = complete.deadLetters;
+		// Shortfall amounts are usable only from a queue read cleanly: an unreadable queue, an unreadable line or a
+		// shortfall that is not one leaves the headless proven figure an upper bound.
+		const deadLetters = deadLettersForReport(dead);
+		const model = buildWeeklyReport(
+			events,
+			{
+				verified,
+				errors: complete.errors,
+				chainLength: result.chainLength,
+				firstEvent: result.firstEvent,
+				lastEvent: result.lastEvent,
+				readAtIso,
+			},
+			{
+				endMs: parsed.endMs,
+				agentKey: parsed.agentKey,
+				...(parsed.segment !== undefined ? { segment: parsed.segment } : {}),
+				topN: parsed.top,
+				budget:
+					parsed.budget !== undefined || parsed.tenantConfig !== undefined
+						? budget
+						: config.state === "file"
+							? readVaultBudgetText(config.text)
+							: 0,
+				budgetSource,
+				spendLedger: readSpendLedger(join(vaultPath, "spend-ledger.json")),
+				deadLetters,
+				// An unreadable config is an UNKNOWN budget, never "no budget configured".
+				budgetUnreadable:
+					configUnreadable && parsed.budget === undefined && parsed.tenantConfig === undefined,
+			},
+		);
 		const text = render(model, parsed.format);
 		if (parsed.out !== undefined) {
 			const target = resolve(root, parsed.out);

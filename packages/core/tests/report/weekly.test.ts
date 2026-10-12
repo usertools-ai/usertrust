@@ -2,16 +2,18 @@
 // Copyright 2026 Usertools, Inc.
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { canonicalize } from "../../src/audit/canonical.js";
+import { readChainDeadLetters } from "../../src/audit/dead-letters.js";
 import type { PersistedAuditEvent } from "../../src/audit/read.js";
 import { PRICING_TABLE } from "../../src/ledger/pricing.js";
-import { parseDeadLetters } from "../../src/report/dead-letters.js";
 import { render } from "../../src/report/render.js";
 import {
 	buildWeeklyReport,
+	deadLettersForReport,
 	detectProvider,
 	type IntegrityInfo,
 	UNATTRIBUTED,
@@ -63,6 +65,18 @@ function call(ts: string, cost: number, over: Record<string, unknown> = {}): Per
 }
 const build = (events: PersistedAuditEvent[], over = {}, integrity: IntegrityInfo = OK) =>
 	buildWeeklyReport(events, integrity, { endMs: END, ...over });
+
+/** What the report would use from a queue holding `text`: the verifier's own reader, then the report's mapping of it. */
+function parseDeadLetters(text: string) {
+	const dir = mkdtempSync(join(tmpdir(), "dl-report-"));
+	try {
+		mkdirSync(join(dir, "dlq"), { recursive: true });
+		writeFileSync(join(dir, "dlq", "dead-letters.jsonl"), text);
+		return deadLettersForReport(readChainDeadLetters(dir, () => undefined));
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
 
 describe("weekly report model", () => {
 	it("sums confirmed spend, and the by-agent and by-model rows reconcile to it exactly", () => {
@@ -621,7 +635,12 @@ describe("weekly report model", () => {
 
 	it("an unrecoverable record whose transfer is ALSO charged in the chain is counted as prior-charge-known", () => {
 		const m = build([
-			call("2026-10-08T01:00:00Z", 100, { transferId: "t-charged" }),
+			// POST evidence: a headless record the ledger answered
+			call("2026-10-08T01:00:00Z", 100, {
+				transferId: "t-charged",
+				source: "headless",
+				ledgerPosted: true,
+			}),
 			ev("settlement_unrecoverable", "2026-10-08T02:00:00Z", {
 				transferIdHash: createHash("sha256").update("t-charged").digest("hex"),
 				usage: { inputTokens: 1, outputTokens: 1 },
@@ -1056,13 +1075,27 @@ describe("one classifier: standing and prior-charge both follow the per-transfer
 
 	it("prior-charge-known still counts a settled call and a capped post", () => {
 		const m = build([
-			call(T, 80, { transferId: "a" }),
+			call(T, 80, { transferId: "a", source: "headless", ledgerPosted: true }),
 			call(T, 80, { transferId: "b" }),
 			ev("settlement_shortfall", T, { transferId: "b", actual: 80, posted: 50, shortfall: 30 }),
 			unrecoverable("a"),
 			unrecoverable("b"),
 		]);
 		expect(m.unrecoverable.priorChargeKnown).toBe(2);
+	});
+
+	it("a DRY-RUN headless settle and an SDK call are NOT 'already charged': no post evidence, so the prior charge reads unknown", () => {
+		const m = build([
+			// dry run: settled, counted by the governor, but the ledger was never asked
+			call(T, 80, { transferId: "dry", source: "headless" }),
+			// an SDK call's record says nothing about the post
+			call(T, 80, { transferId: "sdk" }),
+			unrecoverable("dry"),
+			unrecoverable("sdk"),
+		]);
+		expect(m.unrecoverable.records).toBe(2);
+		expect(m.unrecoverable.priorChargeKnown).toBe(0);
+		expect(render(m, "md")).not.toContain("already charged");
 	});
 
 	it("the renderer never says 'already charged' for an uncharged-or-unknown transfer", () => {
@@ -1421,5 +1454,31 @@ describe("an anomaly DETECTION beside a settled call is an annotation, not a con
 			expect(m.totals.confirmedUt, terminal).toBe(0);
 			expect(m.totals.contradictedCalls, terminal).toBe(1);
 		}
+	});
+});
+
+describe("a governed action whose name is the empty string is still an action", () => {
+	it("counts in the action spend and the session budget, and does not flag the persisted counter", () => {
+		const m = build(
+			[
+				ev("tool_call", "2026-10-08T01:00:00Z", {
+					transferId: "t",
+					actionName: "",
+					actionKind: "tool_call",
+					cost: 100,
+					settled: true,
+					source: "headless",
+					ledgerPosted: true,
+				}),
+			],
+			{ spendLedger: { value: 100 }, deadLetters: { shortfalls: new Map() } },
+		);
+		expect(m.totals.actionUt).toBe(100);
+		expect(m.totals.actionCalls).toBe(1);
+		// the action is in the session wallet, so a counter that agrees is not flagged
+		expect(m.budget.recordedSessionWallet).toBe(100);
+		expect(m.spendLedger.differs).toBe(false);
+		// and it is NOT treated as a model call
+		expect(m.totals.confirmedUt).toBe(0);
 	});
 });

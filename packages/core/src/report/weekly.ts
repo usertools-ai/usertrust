@@ -124,6 +124,24 @@ export interface ReportOptions {
 /** What the dead-letter queue says about capped posts. A plain file: corruption-detecting, not tamper-evident. */
 export type DeadLetters = { shortfalls: ReadonlyMap<string, number> } | { unreadable: true };
 
+/**
+ * What the report may use from the dead-letter queue the verifier just read. Shortfall amounts are usable only from a queue read
+ * cleanly: an unreadable queue, an unreadable line, or a dead-lettered shortfall that is not one leaves the headless proven
+ * figure an UPPER bound, never an exact one.
+ */
+export function deadLettersForReport(d: {
+	unreadable?: string;
+	shortfalls?: ReadonlyMap<string, number>;
+	shortfallsReliable?: boolean;
+	missingByKind?: Record<string, number>;
+}): DeadLetters {
+	if (d.unreadable !== undefined || d.shortfalls === undefined) return { unreadable: true };
+	if (d.shortfallsReliable === false || (d.missingByKind?.["<unreadable>"] ?? 0) > 0) {
+		return { unreadable: true };
+	}
+	return { shortfalls: d.shortfalls };
+}
+
 export interface IntegrityInfo {
 	verified: boolean;
 	errors: readonly string[];
@@ -515,7 +533,8 @@ function isActionEvent(e: PersistedAuditEvent): boolean {
 	// Keyed on `actionName`: `governAction({ kind: "llm_call", name, cost })` is a supported descriptor and writes an
 	// event whose kind IS "llm_call" but which is an ACTION, never a model call. A model call carries no actionName.
 	const kindAllowed = e.kind === "llm_call" || !NON_ACTION_KINDS.has(e.kind);
-	return kindAllowed && !e.kind.endsWith("_failed") && str(e.data["actionName"]) !== undefined;
+	// typeof, not str(): an action named "" is still an accepted action (str() maps "" to undefined and dropped it from every total).
+	return kindAllowed && !e.kind.endsWith("_failed") && typeof e.data["actionName"] === "string";
 }
 
 function denominationOf(e: PersistedAuditEvent): "usd" | "nominal" | "unlabelled" {
@@ -579,7 +598,14 @@ function classifyTransfer(ev: TransferEvidence): TransferClass {
  * "already charged". Derived from the same evidence as `classifyTransfer`, never from the presence of a spend record.
  */
 function chargeEvidenced(ev: TransferEvidence): boolean {
-	return classifyTransfer(ev) === "debited" && ev.ambiguity === undefined;
+	// POST evidence, not merely a debit: a dry-run headless settle is 'debited' (the counter added it) and moved no money, and
+	// an SDK call's record says nothing about the post. Only a record the ledger answered (ledgerPosted / postedAmount) or a
+	// shortfall proves a charge; everything else reads unknown, the conservative direction.
+	return (
+		classifyTransfer(ev) === "debited" &&
+		ev.ambiguity === undefined &&
+		(ev.ledgerPosted || ev.shortfall !== undefined)
+	);
 }
 
 /** The amount the counter would have added for a transfer, from the best record carrying it. */

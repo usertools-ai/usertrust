@@ -47,6 +47,14 @@ export interface ChainDeadLetters {
 	onChain: number;
 	/** Lines from another source: not chain events, reported for completeness only. */
 	otherSources: number;
+	/**
+	 * `posted` of each dead-lettered `settlement_shortfall` chain event, by transfer id: a capped post whose shortfall append
+	 * failed. Read from the SAME lines as the completeness count, so the two cannot disagree. Meaningful only when
+	 * `shortfallsReliable`.
+	 */
+	shortfalls: Map<string, number>;
+	/** False when a dead-lettered shortfall could not be read as one (no string transferId, or `posted` not a count). */
+	shortfallsReliable: boolean;
 }
 
 /** The dead-letter file under a vault directory (the `.usertrust` directory): the ONE place its path is spelled. */
@@ -112,6 +120,8 @@ export function readChainDeadLetters(
 				missingTransferIds: [],
 				onChain: 0,
 				otherSources: 0,
+				shortfalls: new Map(),
+				shortfallsReliable: true,
 			};
 		}
 		const code = (err as { code?: unknown })?.code;
@@ -126,6 +136,8 @@ export function readChainDeadLetters(
 		missingTransferIds: [],
 		onChain: 0,
 		otherSources: 0,
+		shortfalls: new Map(),
+		shortfallsReliable: true,
 	};
 	const countMissing = (kind: string, transferId: unknown) => {
 		result.missing++;
@@ -150,6 +162,19 @@ export function readChainDeadLetters(
 			continue;
 		}
 		const payload = (e.payload ?? {}) as ChainEventView;
+		if (payload.kind === "settlement_shortfall") {
+			const d = (payload.data ?? {}) as { transferId?: unknown; posted?: unknown };
+			if (
+				typeof d.transferId === "string" &&
+				typeof d.posted === "number" &&
+				Number.isFinite(d.posted) &&
+				d.posted >= 0
+			) {
+				result.shortfalls.set(d.transferId, d.posted);
+			} else {
+				result.shortfallsReliable = false;
+			}
+		}
 		if (typeof e.eventHash === "string" && isThisEvent(eventAt(e.eventHash), payload)) {
 			result.onChain++;
 			continue;

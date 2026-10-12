@@ -231,34 +231,6 @@ describe("usertrust report --week", () => {
 		}
 	});
 
-	it("verdict and figures come from ONE snapshot: a rewrite after the snapshot cannot be reported as verified", async () => {
-		await vault([{ cost: 100 }]);
-		const log = join(dir, ".usertrust", "audit", "events.jsonl");
-		const original = readFileSync(log, "utf-8");
-		const tampered = original.replace(/"cost":100/, '"cost":9999');
-		expect(tampered).not.toBe(original);
-		// the live vault is rewritten right after the report took its snapshot
-		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
-			afterSnapshot: () => writeFileSync(log, tampered),
-		});
-		const model = JSON.parse(stdout) as {
-			integrity: { verified: boolean };
-			totals: { confirmedUt: number };
-		};
-		// verified bytes AND figures are the snapshot's: 100 UT, verified. Never "verified" over 9,999 UT.
-		expect(model.integrity.verified).toBe(true);
-		expect(model.totals.confirmedUt).toBe(100);
-		expect(process.exitCode).toBeUndefined();
-		// and the NEXT report, which snapshots the rewritten file, sees it for what it is
-		stdout = "";
-		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
-		expect((JSON.parse(stdout) as { integrity: { verified: boolean } }).integrity.verified).toBe(
-			false,
-		);
-		expect(process.exitCode).toBe(2);
-		write.mockRestore();
-	});
-
 	it("the integrity verdict is scrubbed: control bytes in an event id cannot erase the UNVERIFIED line", async () => {
 		await vault([{ cost: 100 }]);
 		const log = join(dir, ".usertrust", "audit", "events.jsonl");
@@ -316,167 +288,6 @@ describe("usertrust report --week", () => {
 			live.valid,
 		);
 		write.mockRestore();
-	});
-
-	describe("a writer appending during the snapshot", () => {
-		const auditDir = () => join(dir, ".usertrust", "audit");
-		const state = () => ({
-			log: readFileSync(join(auditDir(), "events.jsonl")),
-			meta: readFileSync(join(auditDir(), "events.jsonl.meta")),
-		});
-
-		async function twoStates() {
-			await vault([{ cost: 100 }, { cost: 200 }]);
-			const before = state();
-			const w = createAuditWriter(dir);
-			await w.appendEvent({
-				kind: "llm_call",
-				actor: "local",
-				data: { model: "m", cost: 300, settled: true, transferId: "t-late" },
-			});
-			w.release();
-			const after = state();
-			writeFileSync(join(auditDir(), "events.jsonl"), before.log);
-			writeFileSync(join(auditDir(), "events.jsonl.meta"), before.meta);
-			return { before, after };
-		}
-
-		it("log and sidecar both replaced between the reads: retried, VERIFIED, not UNVERIFIED", async () => {
-			const { after } = await twoStates();
-			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
-				betweenReads: (attempt) => {
-					if (attempt !== 1) return;
-					writeFileSync(join(auditDir(), "events.jsonl"), after.log);
-					writeFileSync(join(auditDir(), "events.jsonl.meta"), after.meta);
-				},
-			});
-			expect((JSON.parse(stdout) as { integrity: { verified: boolean } }).integrity.verified).toBe(
-				true,
-			);
-			expect(process.exitCode).toBeUndefined();
-			write.mockRestore();
-		});
-
-		it("a new log over the OLD sidecar that RESOLVES (the sidecar advances): the settled state is read, nothing dropped", async () => {
-			const { before, after } = await twoStates();
-			// the writer has fsynced the log and not yet replaced the sidecar
-			writeFileSync(join(auditDir(), "events.jsonl"), after.log);
-			writeFileSync(join(auditDir(), "events.jsonl.meta"), before.meta);
-			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
-				betweenReads: (attempt) => {
-					if (attempt === 1) writeFileSync(join(auditDir(), "events.jsonl.meta"), after.meta);
-				},
-			});
-			const out = JSON.parse(stdout) as {
-				integrity: { verified: boolean };
-				totals: { confirmedCalls: number };
-			};
-			expect(out.integrity.verified).toBe(true);
-			expect(out.totals.confirmedCalls).toBe(3);
-			expect(process.exitCode).toBeUndefined();
-			write.mockRestore();
-		});
-
-		it("a PERSISTENT tail (a crash between the log fsync and the sidecar replace) is kept and reported UNVERIFIED, never dropped", async () => {
-			const { before, after } = await twoStates();
-			writeFileSync(join(auditDir(), "events.jsonl"), after.log);
-			writeFileSync(join(auditDir(), "events.jsonl.meta"), before.meta);
-			// what the verifier says about these very bytes
-			expect(verifyVault(join(dir, ".usertrust")).valid).toBe(false);
-			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], { persistMs: 100 });
-			const out = JSON.parse(stdout) as {
-				integrity: { verified: boolean };
-				totals: { confirmedCalls: number };
-			};
-			expect(out.integrity.verified).toBe(false);
-			expect(out.totals.confirmedCalls).toBe(3); // the extra event is in the figures, not silently omitted
-			expect(process.exitCode).toBe(2);
-			write.mockRestore();
-		});
-
-		it("a persistent UNTERMINATED tail gets the same verdict from the report as from the verifier", async () => {
-			await vault([{ cost: 100 }, { cost: 200 }]);
-			const log = join(auditDir(), "events.jsonl");
-			writeFileSync(log, `${readFileSync(log, "utf-8")}{"id":"half`);
-			const live = verifyVault(join(dir, ".usertrust"));
-			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], { persistMs: 100 });
-			const out = JSON.parse(stdout) as { integrity: { verified: boolean } };
-			expect(out.integrity.verified).toBe(live.valid);
-			expect(process.exitCode).toBe(live.valid ? undefined : 2);
-			write.mockRestore();
-		});
-
-		it("a busy active log does not hide a real mismatch in a stable rotated segment", async () => {
-			await vault([{ cost: 100 }, { cost: 200 }, { cost: 300 }]);
-			const lines = readFileSync(join(auditDir(), "events.jsonl"), "utf-8").trim().split("\n");
-			// rotate by hand: the first line becomes a segment, then tamper with it
-			const tampered = (lines[0] as string).replace('"cost":100', '"cost":999');
-			expect(tampered).not.toBe(lines[0]);
-			writeFileSync(join(auditDir(), "events-0001.jsonl"), `${tampered}\n`);
-			writeFileSync(join(auditDir(), "events.jsonl"), `${lines.slice(1).join("\n")}\n`);
-			let n = 0;
-			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
-				persistMs: 50,
-				betweenReads: () => {
-					n += 1;
-					writeFileSync(
-						join(auditDir(), "events.jsonl.meta"),
-						JSON.stringify({ lastHash: "x".repeat(64), sequence: n }),
-					);
-				},
-			});
-			const out = JSON.parse(stdout) as { integrity: { verified: boolean; errors: string[] } };
-			expect(out.integrity.verified).toBe(false);
-			const text = out.integrity.errors.join(" | ");
-			expect(text).toMatch(/Vault busy/);
-			expect(text).toMatch(/mismatch|hash|tamper|invalid|sequence/i); // the real problem is still there
-			expect(out.integrity.errors.length).toBeGreaterThan(1);
-			expect(process.exitCode).toBe(2);
-			write.mockRestore();
-		});
-
-		it("a SLOW sidecar replace inside the persistence window reads VERIFIED, not as a broken chain", async () => {
-			const { before, after } = await twoStates();
-			writeFileSync(join(auditDir(), "events.jsonl"), after.log);
-			writeFileSync(join(auditDir(), "events.jsonl.meta"), before.meta);
-			let attempts = 0;
-			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
-				persistMs: 400,
-				betweenReads: () => {
-					attempts += 1;
-					// the sidecar lands partway through the window, after several identical reads
-					if (attempts === 4) writeFileSync(join(auditDir(), "events.jsonl.meta"), after.meta);
-				},
-			});
-			const out = JSON.parse(stdout) as {
-				integrity: { verified: boolean };
-				totals: { confirmedCalls: number };
-			};
-			expect(attempts).toBeGreaterThanOrEqual(4);
-			expect(out.integrity.verified).toBe(true);
-			expect(out.totals.confirmedCalls).toBe(3);
-			write.mockRestore();
-		});
-
-		it("a sidecar that changes on EVERY attempt is reported as a busy vault, not a broken chain, exit 2", async () => {
-			await vault([{ cost: 100 }]);
-			let n = 0;
-			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"], {
-				betweenReads: () => {
-					n += 1;
-					writeFileSync(
-						join(auditDir(), "events.jsonl.meta"),
-						JSON.stringify({ lastHash: "x".repeat(64), sequence: n }),
-					);
-				},
-			});
-			const out = JSON.parse(stdout) as { integrity: { verified: boolean; errors: string[] } };
-			expect(out.integrity.verified).toBe(false);
-			expect(out.integrity.errors.join(" ")).toMatch(/Vault busy/);
-			expect(out.integrity.errors.join(" ")).not.toMatch(/mismatch|corrupt/i);
-			expect(process.exitCode).toBe(2);
-			write.mockRestore();
-		});
 	});
 
 	it("a repeated option exits 2: every option is single-occurrence, none can silently overwrite another", async () => {
@@ -572,6 +383,25 @@ describe("usertrust report --week", () => {
 		write.mockRestore();
 	});
 
+	it("--out whose location cannot be resolved FAILS CLOSED: refused (exit 2), nothing written, never let through", async () => {
+		await vault([{ cost: 1 }]);
+		const missingDir = join(dir, "no-such-dir", "report.md");
+		process.exitCode = undefined;
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--out", missingDir]);
+		expect(process.exitCode).toBe(2);
+		expect(out.join("\n")).toContain("cannot be shown to be outside the vault");
+		expect(existsSync(missingDir)).toBe(false);
+		// a symlink loop at the target is not a clean "does not exist yet" either
+		const loop = join(dir, "loop.md");
+		symlinkSync(loop, loop);
+		process.exitCode = undefined;
+		out.length = 0;
+		await run(dir, {}, ["--week", "--end", endIso(), "--out", loop]);
+		expect(process.exitCode).toBe(2);
+		write.mockRestore();
+	});
+
 	it("--out naming a SYMLINK that lives inside the vault and points outside is refused: the rename would replace the vault's own entry", async () => {
 		await vault([{ cost: 1 }]);
 		const vaultDir = join(dir, ".usertrust");
@@ -589,7 +419,7 @@ describe("usertrust report --week", () => {
 		write.mockRestore();
 	});
 
-	it("the governor's spend ledger is read from the same snapshot: equal is silent, a difference is flagged", async () => {
+	it("the governor's spend ledger is compared with the chain: equal is silent, a difference is flagged", async () => {
 		await vault([{ cost: 100 }]);
 		const ledger = join(dir, ".usertrust", "spend-ledger.json");
 		writeFileSync(ledger, JSON.stringify({ budgetSpent: 100 }));
@@ -681,7 +511,7 @@ describe("usertrust report --week", () => {
 		},
 	);
 
-	describe("the snapshot holds EXACTLY the verifier's inputs: a listed input that is not a regular file is a problem", () => {
+	describe("the report prints the verifier's own verdict: what verify fails on, the report fails on", () => {
 		type Out = { integrity: { verified: boolean; errors: string[] } };
 		const readReport = async (): Promise<Out> => {
 			stdout = "";
@@ -691,54 +521,27 @@ describe("usertrust report --week", () => {
 		};
 		const vaultDir = () => join(dir, ".usertrust");
 		const auditDir = () => join(vaultDir(), "audit");
-		const fifo = (path: string) => execFileSync("mkfifo", [path]);
-		const noFifo = process.platform === "win32";
 
-		it("a DIRECTORY where the main log's sidecar belongs (no log at all): UNVERIFIED, and the live verifier agrees", async () => {
+		it("a DIRECTORY where the main log's sidecar belongs (no log at all): UNVERIFIED, exactly as the live verifier says", async () => {
 			mkdirSync(join(auditDir(), "events.jsonl.meta"), { recursive: true });
-			expect(verifyVault(vaultDir()).valid).toBe(false);
+			const live = verifyVault(vaultDir());
+			expect(live.valid).toBe(false);
 			const out = await readReport();
 			expect(out.integrity.verified).toBe(false);
-			expect(out.integrity.errors.join("\n")).toContain("audit/events.jsonl.meta is a directory");
+			// the verifier's own words, verbatim: the report makes no integrity claim of its own
+			for (const e of live.errors) expect(out.integrity.errors).toContain(e);
 			expect(process.exitCode).toBe(2);
 			write.mockRestore();
 		});
 
-		it.skipIf(noFifo)(
-			"a FIFO where the sidecar belongs, beside a valid log: UNVERIFIED, never opened (no hang)",
-			async () => {
-				await vault([{ cost: 1 }]);
-				rmSync(join(auditDir(), "events.jsonl.meta"), { force: true });
-				fifo(join(auditDir(), "events.jsonl.meta"));
-				const out = await readReport();
-				expect(out.integrity.verified).toBe(false);
-				expect(out.integrity.errors.join("\n")).toContain(
-					"events.jsonl.meta is not a regular file",
-				);
-				write.mockRestore();
-			},
-			15_000,
-		);
-
-		it.skipIf(noFifo)(
-			"a FIFO where the log belongs: UNVERIFIED, never opened (no hang)",
-			async () => {
-				mkdirSync(auditDir(), { recursive: true });
-				fifo(join(auditDir(), "events.jsonl"));
-				const out = await readReport();
-				expect(out.integrity.verified).toBe(false);
-				expect(out.integrity.errors.join("\n")).toContain("events.jsonl is not a regular file");
-				write.mockRestore();
-			},
-			15_000,
-		);
-
-		it("a DIRECTORY named like a segment is a problem; a directory with any other name is ignored", async () => {
+		it("a DIRECTORY named like a segment fails like verify (segment could not be read); other directories are ignored", async () => {
 			await vault([{ cost: 1 }]);
 			mkdirSync(join(auditDir(), "events-old.jsonl"));
 			let out = await readReport();
 			expect(out.integrity.verified).toBe(false);
-			expect(out.integrity.errors.join("\n")).toContain("audit/events-old.jsonl is a directory");
+			expect(out.integrity.errors.join("\n")).toContain(
+				"Audit segment could not be read: events-old.jsonl",
+			);
 			rmSync(join(auditDir(), "events-old.jsonl"), { recursive: true });
 			for (const name of ["anchors", "llm_call", "something-else"]) {
 				mkdirSync(join(auditDir(), name));
@@ -747,22 +550,6 @@ describe("usertrust report --week", () => {
 			expect(out.integrity.verified).toBe(true);
 			write.mockRestore();
 		});
-
-		it.skipIf(noFifo)(
-			"a FIFO where the dead-letter queue belongs: UNVERIFIED, never opened (no hang)",
-			async () => {
-				await vault([{ cost: 1 }]);
-				mkdirSync(join(vaultDir(), "dlq"), { recursive: true });
-				fifo(join(vaultDir(), "dlq", "dead-letters.jsonl"));
-				const out = await readReport();
-				expect(out.integrity.verified).toBe(false);
-				expect(out.integrity.errors.join("\n")).toContain(
-					"dead-letters.jsonl is not a regular file",
-				);
-				write.mockRestore();
-			},
-			15_000,
-		);
 	});
 
 	describe("COMPLETENESS: a dead-lettered chain event that is not on the chain is not VERIFIED", () => {
@@ -873,7 +660,7 @@ describe("usertrust report --week", () => {
 		});
 	});
 
-	it("the dead-letter queue is read from the snapshot: a dead-lettered shortfall makes a headless post exact at the posted amount, an unreadable queue an upper bound", async () => {
+	it("the dead-letter queue is read ONCE, with the completeness check: a dead-lettered shortfall makes a headless post exact at the posted amount, an unreadable queue an upper bound", async () => {
 		await vault([
 			{
 				cost: 100,
@@ -1056,7 +843,7 @@ describe("usertrust report --week", () => {
 	// Review round 2 (P1, introduced by the snapshot): a read error was turned into ABSENCE, so with the log and its
 	// anchor unreadable the copy verified as an EMPTY chain: VERIFIED, exit 0. The copy is the verifier's input set and
 	// any read error on a regular file makes the report UNVERIFIED, exit 2.
-	describe("the snapshot never turns a read failure into absence", () => {
+	describe("a read failure is never an absence: the verifier's verdict, printed as it is", () => {
 		const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
 		const log = () => join(dir, ".usertrust", "audit", "events.jsonl");
 		const meta = () => join(dir, ".usertrust", "audit", "events.jsonl.meta");
@@ -1075,7 +862,10 @@ describe("usertrust report --week", () => {
 					integrity: { verified: boolean; errors: string[] };
 				};
 				expect(model.integrity.verified).toBe(false);
-				expect(model.integrity.errors.join(" ")).toMatch(/events\.jsonl.*EACCES/);
+				// the verifier's own words
+				expect(model.integrity.errors.join(" ")).toMatch(
+					/Audit segment could not be read: events\.jsonl/,
+				);
 				expect(process.exitCode).toBe(2);
 				write.mockRestore();
 			},
