@@ -29,12 +29,14 @@
 // Deliberately NOT done: skipping the network after a rejection. A key fixed on the SERVER (its
 // hash added back) cannot be seen without asking, so any skip strands a fixed key for its whole
 // window, and asking costs one fast round trip: a rejection is an answer, never a timeout.
-import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { settingName, settings } from "./config.mjs";
 import {
+	openRegular,
 	publishExclusive,
+	READ_BOUND,
+	readRegular,
 	sanitize,
 	sanitizeReason,
 	stateRoot,
@@ -157,9 +159,11 @@ export async function noteRejection(sessionId) {
 	}
 	let state = null;
 	try {
-		state = JSON.parse(await readFile(path, "utf-8"));
+		// Through `readRegular`, as every state file is: a FIFO or a symlink to one at this name
+		// (which also made the create above fail EEXIST) is refused at once, never waited on.
+		state = JSON.parse(await readRegular(path, READ_BOUND.small));
 	} catch {
-		// unreadable: started afresh below
+		// unreadable, not a regular file, or too large: not ours, so started afresh below
 	}
 	const ours =
 		state !== null &&
@@ -207,39 +211,18 @@ function isRejectedCall(record) {
 /** SessionStart's mark: where watch.jsonl stood at the last session start. */
 const markPath = () => join(noticeDir(), "session-start.mark");
 
-/** The most a mark may be: a real one is under 100 bytes. A larger file is no mark. */
-const MAX_MARK_BYTES = 4096;
-
 /**
- * The mark, or null when there is none or it is unusable. Read as watch.jsonl is
- * (`readSince`): opened non-blocking, read only when it is a regular file, and only when it is
- * no larger than MAX_MARK_BYTES, so a FIFO, a directory or a huge file in its place can neither
- * hang the start nor slow it. Null reads watch.jsonl from its start: a repeated warning, never a
- * lost one.
+ * The mark, or null when there is none or it is unusable. Read by `readRegular` at the `small`
+ * bound (a real mark is under 100 bytes), so a FIFO, a directory or a huge file in its place
+ * can neither hang the start nor slow it. Null reads watch.jsonl from its start: a repeated
+ * warning, never a lost one.
  */
-function readMark() {
-	let fd;
+async function readMark() {
 	try {
-		fd = openSync(markPath(), constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
-	} catch {
-		return null;
-	}
-	try {
-		const info = fstatSync(fd);
-		if (!info.isFile() || info.size > MAX_MARK_BYTES) return null;
-		const buffer = Buffer.alloc(info.size);
-		let read = 0;
-		while (read < buffer.length) {
-			const n = readSync(fd, buffer, read, buffer.length - read, read);
-			if (n === 0) break;
-			read += n;
-		}
-		const mark = JSON.parse(buffer.subarray(0, read).toString("utf-8"));
+		const mark = JSON.parse(await readRegular(markPath(), READ_BOUND.small));
 		return Number.isSafeInteger(mark?.offset) && mark.offset >= 0 ? mark : null;
 	} catch {
 		return null;
-	} finally {
-		closeSync(fd);
 	}
 }
 
@@ -263,7 +246,7 @@ function readMark() {
 export async function rejectedSinceLastStart() {
 	let found;
 	try {
-		found = readSince();
+		found = await readSince();
 	} catch {
 		return null;
 	}
@@ -280,17 +263,16 @@ export async function rejectedSinceLastStart() {
 	return found.count > 0 ? found : null;
 }
 
-function readSince() {
-	let fd;
+async function readSince() {
+	let handle;
+	let info;
 	try {
-		fd = openSync(watchLogPath(), constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+		({ handle, info } = await openRegular(watchLogPath()));
 	} catch {
 		return null;
 	}
 	try {
-		const info = fstatSync(fd);
-		if (!info.isFile()) return null;
-		const mark = readMark();
+		const mark = await readMark();
 		const sameFile =
 			mark !== null &&
 			String(mark.dev) === String(info.dev) &&
@@ -301,9 +283,9 @@ function readSince() {
 		const buffer = Buffer.alloc(info.size - from);
 		let read = 0;
 		while (read < buffer.length) {
-			const n = readSync(fd, buffer, read, buffer.length - read, from + read);
-			if (n === 0) break;
-			read += n;
+			const { bytesRead } = await handle.read(buffer, read, buffer.length - read, from + read);
+			if (bytesRead === 0) break;
+			read += bytesRead;
 		}
 		const bytes = buffer.subarray(0, read);
 		const cut = from > since;
@@ -338,7 +320,7 @@ function readSince() {
 			offset: from + end,
 		};
 	} finally {
-		closeSync(fd);
+		await handle.close().catch(() => {});
 	}
 }
 

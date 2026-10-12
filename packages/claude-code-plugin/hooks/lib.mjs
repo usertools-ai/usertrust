@@ -27,12 +27,13 @@
 // settled, journalled and cleared through the path its listing found, so a 1.4.0
 // record is ended through its own name, once.
 import { createHash, randomBytes } from "node:crypto";
+import { constants } from "node:fs";
 import {
 	appendFile,
 	link,
 	mkdir,
+	open,
 	readdir,
-	readFile,
 	rename,
 	stat,
 	unlink,
@@ -703,6 +704,67 @@ export async function publishExclusive(path, content, { mode } = {}) {
 }
 
 /**
+ * The most `readRegular` reads of a file, by its class. Every bound is far above what the
+ * file is: a refused read fails as an unreadable one does, so a bound must never be reached
+ * by a real file.
+ * - `small`: one value: a marker, a stamp, a lock's owner, a session's notice state, the
+ *   SessionStart mark. Each is under 200 bytes.
+ * - `record`: JSON that carries lists: a transcript cursor (two lists of at most ID_HISTORY
+ *   ids, 355 KB measured), a hold, the capabilities cache, a subagent's meta file.
+ * - `log`: a log read whole: a session's job log, the vault's audit logs, watch.jsonl.
+ */
+export const READ_BOUND = Object.freeze({
+	small: 4 * 1024,
+	record: 64 * 1024 * 1024,
+	log: 256 * 1024 * 1024,
+});
+
+function readRefused(path, code, why) {
+	return Object.assign(new Error(`${path}: ${why}`), { code });
+}
+
+/**
+ * Open `path` to read it, never waiting: non-blocking, so a FIFO (or a symlink to one) in a
+ * file's place cannot hang the hook, and then only a regular file, else ENOTREG. Returns the
+ * handle and its stat; the caller closes the handle. The ONE way the hooks open a file they
+ * read (tests/key-rejected.test.ts holds them to it).
+ */
+export async function openRegular(path) {
+	const handle = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+	try {
+		const info = await handle.stat();
+		if (!info.isFile()) throw readRefused(path, "ENOTREG", "not a regular file");
+		return { handle, info };
+	} catch (err) {
+		await handle.close().catch(() => {});
+		throw err;
+	}
+}
+
+/**
+ * `readFile(path, "utf-8")`, through `openRegular`, and refused (EFBIG) past `bound` bytes
+ * (`READ_BOUND`). Throws as readFile does, so ENOENT is still "not there"; anything else is
+ * unreadable to its caller. Reads at most the size it found, so a file growing meanwhile is
+ * read to that size.
+ */
+export async function readRegular(path, bound) {
+	const { handle, info } = await openRegular(path);
+	try {
+		if (info.size > bound) throw readRefused(path, "EFBIG", `over ${bound} bytes`);
+		const buffer = Buffer.alloc(info.size);
+		let read = 0;
+		while (read < buffer.length) {
+			const { bytesRead } = await handle.read(buffer, read, buffer.length - read, read);
+			if (bytesRead === 0) break;
+			read += bytesRead;
+		}
+		return buffer.toString("utf-8", 0, read);
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+
+/**
  * Whether a hold was recorded under the settle-attempt gate: its file carries
  * `gate: 1`. Such a hold's settle is claimed (`.json` → `.settling`) before it is
  * sent, so it is settled at most once. A hold an earlier release recorded has no
@@ -801,7 +863,7 @@ export async function claimForRelease(live) {
  */
 export async function quarantineHold(path) {
 	try {
-		const { gate: _gate, ...body } = JSON.parse(await readFile(path, "utf-8"));
+		const { gate: _gate, ...body } = JSON.parse(await readRegular(path, READ_BOUND.record));
 		// Its call RAN (PostToolUse found the breaker open): Stop gives it back as `call-ran`.
 		await writeFile(path, JSON.stringify({ ...body, ran: true }), { mode: 0o600 });
 		return "ungated";
@@ -850,7 +912,7 @@ async function settlingRecords(sessionId, agentId) {
 		if (!name.startsWith(prefix) || !(releasing || name.endsWith(".settling"))) continue;
 		const path = join(stateDir(), name);
 		try {
-			const body = JSON.parse(await readFile(path, "utf-8"));
+			const body = JSON.parse(await readRegular(path, READ_BOUND.record));
 			if (typeof body?.transferId !== "string") continue;
 			if (wantAgent !== null && sanitize(body.agentId ?? "main") !== wantAgent) continue;
 			const { mtimeMs } = await stat(path);
@@ -943,7 +1005,7 @@ export async function listPending(sessionId, agentId) {
 		if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
 		const path = join(stateDir(), name);
 		try {
-			const parsed = JSON.parse(await readFile(path, "utf-8"));
+			const parsed = JSON.parse(await readRegular(path, READ_BOUND.record));
 			if (!parsed || typeof parsed.transferId !== "string") continue;
 			// agentId lives in the body; the filename's "__" split is ambiguous
 			// because sanitized ids can themselves contain "__".
@@ -1319,7 +1381,7 @@ export function jobCapable(capabilities) {
 		const url = serverBase();
 		let known = {};
 		try {
-			const parsed = JSON.parse(await readFile(file, "utf-8"));
+			const parsed = JSON.parse(await readRegular(file, READ_BOUND.small));
 			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) known = parsed;
 		} catch {
 			// unreadable or absent: nothing remembered
@@ -1429,7 +1491,7 @@ async function rememberCapabilities(capabilities) {
 		const list = [...capabilities].sort();
 		let previous;
 		try {
-			previous = JSON.parse(await readFile(path, "utf-8"));
+			previous = JSON.parse(await readRegular(path, READ_BOUND.record));
 		} catch {
 			previous = undefined;
 		}
@@ -1463,7 +1525,7 @@ async function cachedPrincipal() {
 		const { mtimeMs } = await stat(path);
 		const age = Date.now() - mtimeMs;
 		if (!(age >= 0 && age <= CAPABILITY_CACHE_TTL_MS)) return null;
-		const value = JSON.parse(await readFile(path, "utf-8"));
+		const value = JSON.parse(await readRegular(path, READ_BOUND.record));
 		return Array.isArray(value?.capabilities) && value.capabilities.includes("principal")
 			? new Date(mtimeMs).toISOString()
 			: null;

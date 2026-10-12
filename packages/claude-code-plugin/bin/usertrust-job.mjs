@@ -17,7 +17,7 @@
 // the one write outside the state dir, and `coverage`'s only one.
 //
 // Exit codes: 0 done, 1 refused (no usable log), 2 bad usage.
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { passwdHome, useSession } from "../hooks/config.mjs";
 import {
@@ -28,7 +28,7 @@ import {
 	jobsDir,
 	readLogs,
 } from "../hooks/job-log.mjs";
-import { say, watchLogPath } from "../hooks/lib.mjs";
+import { READ_BOUND, readRegular, say, watchLogPath } from "../hooks/lib.mjs";
 import { sessionSettings } from "../hooks/session.mjs";
 
 const [command, ...rest] = process.argv.slice(2);
@@ -65,7 +65,7 @@ async function readRecords(vault) {
 	let unparsed = 0;
 	for (const name of (await readdir(dir)).sort()) {
 		if (!name.endsWith(".jsonl")) continue;
-		for (const line of (await readFile(join(dir, name), "utf-8")).split("\n")) {
+		for (const line of (await readRegular(join(dir, name), READ_BOUND.log)).split("\n")) {
 			if (line === "") continue;
 			try {
 				records.push(JSON.parse(line));
@@ -84,7 +84,7 @@ async function readWatch(path) {
 	const out = [];
 	let text;
 	try {
-		text = await readFile(path, "utf-8");
+		text = await readRegular(path, READ_BOUND.log);
 	} catch (err) {
 		// Only a file that is not there means "no watch records". One that exists and cannot
 		// be read may hold the very gap or refusal that makes the answer "no": no verdict.

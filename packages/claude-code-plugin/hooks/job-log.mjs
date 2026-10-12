@@ -33,9 +33,17 @@
 //
 // Zero dependencies; reads and writes only the state dir.
 import { constants } from "node:fs";
-import { appendFile, mkdir, open, readdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { guardMode, recordWatchEvent, sanitize, stateRoot, writeFileAtomic } from "./lib.mjs";
+import {
+	guardMode,
+	READ_BOUND,
+	readRegular,
+	recordWatchEvent,
+	sanitize,
+	stateRoot,
+	writeFileAtomic,
+} from "./lib.mjs";
 
 /** 1-128 of `[A-Za-z0-9._:-]`: usertrust core's `PRINCIPAL_FIELD_PATTERN`, pinned by a test. */
 export const JOB_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -192,7 +200,7 @@ export function labelsFor(jobs, tMs) {
 async function noteSuspect(sessionId, maxRawMs) {
 	const marker = join(jobsDir(), `${sanitize(sessionId)}.suspect`);
 	try {
-		const prior = await readFile(marker, "utf-8").catch(() => null);
+		const prior = await readRegular(marker, READ_BOUND.small).catch(() => null);
 		if (prior === String(maxRawMs)) return;
 		// Mark it written ONLY if it was: a transient failure of the watch log must not leave a
 		// marker that stops the gap from ever being written once the log recovers.
@@ -216,7 +224,7 @@ async function noteSuspect(sessionId, maxRawMs) {
 export async function resolveJob(sessionId) {
 	const read = async () => {
 		try {
-			return parseJobLog(await readFile(jobLogPath(sessionId), "utf-8"), sessionId);
+			return parseJobLog(await readRegular(jobLogPath(sessionId), READ_BOUND.log), sessionId);
 		} catch (err) {
 			return err?.code === "ENOENT"
 				? { state: "none" }
@@ -295,7 +303,7 @@ export async function resolveJob(sessionId) {
 
 async function readParsed(log, sessionId) {
 	try {
-		const text = await readFile(log, "utf-8");
+		const text = await readRegular(log, READ_BOUND.log);
 		return { ...parseJobLog(text, sessionId), text };
 	} catch (err) {
 		if (err?.code === "ENOENT") return { state: "none", absent: true };
@@ -821,7 +829,9 @@ export async function readLogs(dir) {
 	const out = {};
 	for (const name of await readdir(dir).catch(() => [])) {
 		if (!name.endsWith(".jsonl")) continue;
-		out[name.slice(0, -".jsonl".length)] = await readFile(join(dir, name), "utf-8").catch(() => "");
+		out[name.slice(0, -".jsonl".length)] = await readRegular(join(dir, name), READ_BOUND.log).catch(
+			() => "",
+		);
 	}
 	return out;
 }

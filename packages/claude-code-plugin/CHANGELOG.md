@@ -30,6 +30,12 @@ npm, and its version is its own: the `usertrust` packages and their
     the breaker as before. A 403 `unauthorized` in enforce mode is now blocked as a failed
     authorization (exit 2) rather than denied as a policy refusal, so with `UT_FAIL_OPEN=1` it
     proceeds unmetered, with the message, as a 401 does.
+- **A FIFO, a directory or a huge file where the plugin expects one of its files can no longer
+  hang a hook.** Every file the hooks and `usertrust-job` read (their state, the job logs, the
+  audit logs, `watch.jsonl`, the transcript) is opened non-blocking and read only when it is a
+  regular file, and the plugin's own files only up to a bound far above their real size.
+  Anything else reads as an unreadable file, which each caller already handled.
+
 ### Changed
 
 - **A settle for a hold the server no longer has is read as the hold gone on a newer server too.** usertrust-server's next major answers such a settle `410 settlement_unrecoverable` (the settle is recorded on its chain, nothing is charged) where an older server answers `404 unknown transferId`. The hooks treat either as the hold being gone (`isSettleGone`), so an expired hold is still re-charged once on a fresh hold. Release and abort keep the `404` on every server.

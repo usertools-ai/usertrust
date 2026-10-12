@@ -23,11 +23,13 @@ import { createHash } from "node:crypto";
 import {
 	appendFile,
 	chmod,
+	lstat,
 	mkdir,
 	mkdtemp,
 	readdir,
 	readFile,
 	stat,
+	symlink,
 	writeFile,
 } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
@@ -248,6 +250,36 @@ describe("watch mode: a rejected key is a configuration failure the user is SHOW
 		expect(Date.parse(String(state.noticeAt))).not.toBeNaN();
 		expect(await readdir(join(stateDir, "key-rejected"))).toEqual([`${session}.json`]);
 	}, 30_000);
+
+	// A FIFO at the state's name makes the exclusive create fail EEXIST, so the state is READ:
+	// an unbounded read there waited for a writer that never comes, past the hook's timeout,
+	// and the rejected call was neither recorded nor shown.
+	for (const how of ["a FIFO", "a symlink to a FIFO"] as const) {
+		it(`${how} in the notice state's place: the gap and the notice, at once, never a hang`, async () => {
+			if (process.platform === "win32") return;
+			const url = await startStub();
+			const env = { ...baseEnv, UT_SERVER_URL: url };
+			const session = newSession();
+			await mkdir(join(stateDir, "key-rejected"), { recursive: true, mode: 0o700 });
+			const fifo = how === "a FIFO" ? noticeState(session) : join(stateDir, "elsewhere.fifo");
+			expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+			if (how !== "a FIFO") await symlink(fifo, noticeState(session));
+
+			const started = Date.now();
+			const result = await runHook(PRE, call(session, 1), env);
+			expect(Date.now() - started).toBeLessThan(START_BUDGET_MS);
+			expectProceeded(result);
+			expect(String(hookJson(result.stdout)?.systemMessage)).toContain("(401)");
+			expect(await watchRecords()).toMatchObject([{ kind: "gap", cause: "key-rejected" }]);
+			// It was not ours, so it was replaced by the session's own state: the next call is
+			// inside the window, silent, and still recorded.
+			expect((await lstat(noticeState(session))).isFile()).toBe(true);
+			const next = await runHook(PRE, call(session, 2), env);
+			expectProceeded(next);
+			expect(next.stdout).toBe("");
+			expect(await watchRecords()).toHaveLength(2);
+		}, 30_000);
+	}
 
 	it("a 403 that says `unauthorized` takes the same path: a configuration failure, not a policy refusal", async () => {
 		const url = await startStub(403, { error: "unauthorized", reason: "key revoked" });
@@ -720,4 +752,126 @@ describe("SessionStart's mark is read like watch.jsonl: non-blocking, a regular 
 		expect(message.startsWith("usertrust: watch-only — nothing is blocked")).toBe(true);
 		expect(tookMs).toBeLessThan(3_000);
 	}, 60_000);
+});
+
+describe("every file the plugin reads goes through ONE bounded, regular-file-only reader", () => {
+	const ROOT = join(import.meta.dirname, "..");
+	/** Every hook and command source: what Claude Code and the user run. */
+	async function sources(): Promise<Array<{ file: string; text: string }>> {
+		const out = [];
+		for (const dir of ["hooks", "bin"]) {
+			for (const name of await readdir(join(ROOT, dir))) {
+				if (!name.endsWith(".mjs")) continue;
+				out.push({ file: `${dir}/${name}`, text: await readFile(join(ROOT, dir, name), "utf-8") });
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * The reads in `text` that could wait on a FIFO or read without a bound: a readFile of a
+	 * PATH (a readFileSync of an `fd` reads one a guarded open already checked), a read stream,
+	 * and an open with neither O_NONBLOCK nor O_EXCL (an exclusive create never opens a FIFO
+	 * that is there). Comments are not code.
+	 */
+	function rawReads(text: string): string[] {
+		const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+		const found: string[] = [];
+		for (const m of code.matchAll(/\breadFile(Sync)?\(\s*([^,)]*)/g)) {
+			if (m[2]?.trim() !== "fd") found.push(m[0]);
+		}
+		for (const m of code.matchAll(/\bcreateReadStream\(/g)) found.push(m[0]);
+		for (const m of code.matchAll(/\b(open|openSync)\(/g)) {
+			const from = (m.index ?? 0) + m[0].length;
+			let depth = 1;
+			let at = from;
+			while (depth > 0 && at < code.length) {
+				if (code[at] === "(") depth += 1;
+				else if (code[at] === ")") depth -= 1;
+				at += 1;
+			}
+			const args = code.slice(from, at - 1);
+			if (!/O_NONBLOCK|O_EXCL/.test(args)) found.push(`${m[1]}(${args.trim()})`);
+		}
+		return found;
+	}
+
+	it("the rule finds what it forbids, and passes what it allows (its own control)", () => {
+		const forbidden = [
+			'await readFile(path, "utf-8")',
+			"readFileSync(join(dir, name))",
+			'await open(path, "r")',
+			"fs.openSync(path, constants.O_RDONLY)",
+			"createReadStream(path)",
+		];
+		for (const line of forbidden) expect(rawReads(line), line).toHaveLength(1);
+		const allowed = [
+			'fs.readFileSync(fd, "utf-8")',
+			"await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))",
+			"fs.openSync(\n\tpath,\n\tconstants.O_RDONLY | (constants.O_NONBLOCK ?? 0),\n)",
+			"open(log, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600)",
+			'// await readFile(path, "utf-8")',
+			'/** `readFile(path, "utf-8")`, bounded */',
+		];
+		for (const line of allowed) expect(rawReads(line), line).toEqual([]);
+	});
+
+	it("no hook or command reads a file any other way", async () => {
+		const all = await sources();
+		// The sweep reached the code: the hooks, the command, and the reader itself.
+		expect(all.map((s) => s.file)).toEqual(
+			expect.arrayContaining(["hooks/lib.mjs", "hooks/transcript.mjs", "bin/usertrust-job.mjs"]),
+		);
+		expect(all.find((s) => s.file === "hooks/lib.mjs")?.text).toContain(
+			"export async function openRegular(path)",
+		);
+		const offenders = all.flatMap(({ file, text }) => rawReads(text).map((r) => `${file}: ${r}`));
+		expect(offenders).toEqual([]);
+	});
+
+	/** The reader, from lib.mjs. */
+	// @ts-expect-error TS7016: the hooks are plain .mjs, without type declarations.
+	const reader = () => import("../hooks/lib.mjs");
+
+	describe("readRegular", () => {
+		it("reads a regular file whole, up to its bound exactly", async () => {
+			const { READ_BOUND, readRegular } = await reader();
+			const path = join(stateDir, "small");
+			await writeFile(path, "x".repeat(READ_BOUND.small));
+			expect(await readRegular(path, READ_BOUND.small)).toHaveLength(READ_BOUND.small);
+		});
+
+		it("past its bound: EFBIG, nothing read", async () => {
+			const { READ_BOUND, readRegular } = await reader();
+			const path = join(stateDir, "big");
+			await writeFile(path, "x".repeat(READ_BOUND.small + 1));
+			await expect(readRegular(path, READ_BOUND.small)).rejects.toMatchObject({ code: "EFBIG" });
+		});
+
+		it("a missing file is ENOENT, as readFile says it", async () => {
+			const { READ_BOUND, readRegular } = await reader();
+			await expect(readRegular(join(stateDir, "absent"), READ_BOUND.small)).rejects.toMatchObject({
+				code: "ENOENT",
+			});
+		});
+
+		it("a FIFO, a symlink to one, a directory: ENOTREG at once, never a wait", async () => {
+			if (process.platform === "win32") return;
+			const { READ_BOUND, openRegular, readRegular } = await reader();
+			const fifo = join(stateDir, "a.fifo");
+			expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+			const link = join(stateDir, "to-fifo");
+			await symlink(fifo, link);
+			const dir = join(stateDir, "a-dir");
+			await mkdir(dir);
+			const started = Date.now();
+			for (const path of [fifo, link, dir]) {
+				for (const bound of Object.values(READ_BOUND)) {
+					await expect(readRegular(path, bound), path).rejects.toMatchObject({ code: "ENOTREG" });
+				}
+				await expect(openRegular(path), path).rejects.toMatchObject({ code: "ENOTREG" });
+			}
+			expect(Date.now() - started).toBeLessThan(2_000);
+		});
+	});
 });
