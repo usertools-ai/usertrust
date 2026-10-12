@@ -886,6 +886,42 @@ describe("allowUngoverned", () => {
 		).rejects.toThrow(/allowUngoverned/);
 	});
 
+	// A free or governed method never reaches the opt-out branch, so it would run WITHOUT the
+	// ungoverned_call event the option promises. It is refused by name when the client is created.
+	function rawClient(provider: "anthropic" | "openai"): unknown {
+		return provider === "anthropic"
+			? new Anthropic({ apiKey: "k", fetch: recordingFetch(hits, "anthropic") })
+			: new OpenAI({ apiKey: "k", fetch: recordingFetch(hits, "openai") });
+	}
+
+	it.each([
+		["openai", "models.list", "an OpenAI"],
+		["openai", "moderations.create", "an OpenAI"],
+		["anthropic", "messages.countTokens", "an Anthropic"],
+		["anthropic", "models.list", "an Anthropic"],
+	] as const)("a FREE entry is refused at creation (%s %s)", async (provider, path, name) => {
+		await expect(
+			trust(rawClient(provider), { dryRun: true, vaultBase: vault, allowUngoverned: [path] }),
+		).rejects.toMatchObject({
+			name: "TypeError",
+			message: `usertrust: allowUngoverned cannot list "${path}": it is free on ${name} client and already runs without governance.`,
+		});
+	});
+
+	it.each([
+		["anthropic", "messages.create", "an Anthropic"],
+		["anthropic", "beta.messages.parse", "an Anthropic"],
+		["openai", "chat.completions.create", "an OpenAI"],
+		["openai", "responses.create", "an OpenAI"],
+	] as const)("a GOVERNED entry is refused at creation (%s %s)", async (provider, path, name) => {
+		await expect(
+			trust(rawClient(provider), { dryRun: true, vaultBase: vault, allowUngoverned: [path] }),
+		).rejects.toMatchObject({
+			name: "TypeError",
+			message: `usertrust: allowUngoverned cannot list "${path}": it is governed on ${name} client.`,
+		});
+	});
+
 	it("the event kind passes the verifiers: verifyVault and `usertrust verify`", async () => {
 		const { client } = await openai({ allowUngoverned: ["embeddings.create"] });
 		await client.embeddings.create({ model: "text-embedding-3-small", input: "hi" });
