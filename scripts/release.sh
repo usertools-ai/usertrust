@@ -13,19 +13,40 @@
 #   release.sh assert-protected <env>    fails unless environment <env> requires a reviewer
 #   release.sh gate                      fails unless CI (ci.yml) passed on the commit released
 #                                        (and, to republish, the tag commit is on master)
-#   release.sh release-parent            verifies HEAD is a version-only release commit tagged
-#                                        v<version>, and prints its parent
+#   release.sh names                     the lockstep npm names, in publish order
+#   release.sh version-at <commit>       the lockstep version recorded in <commit> (git blobs)
+#   release.sh verify-release <bundle> <version>
+#                                        imports the release tag from the build job's bundle,
+#                                        verifies the commit, and prints it
 #   release.sh latest-flag <version>     true if v<version> is the newest release, else false
 #   release.sh pack <dir>                packs each package (already built) into <dir>
-#   release.sh publish <dir> [--dry-run] publishes each packed package not yet on npm
+#   release.sh publish <dir> <commit> [--dry-run]
+#                                        publishes each packed package not yet on npm, once
+#                                        every tarball's manifest matches <commit>'s
 #
 # Run from the repository root. Fails closed: an answer it cannot read is an error, never a pass.
+#
+# UNTRUSTED INPUT. The publish job holds the write token, the OIDC token and NPM_TOKEN, and
+# everything the build job hands it (the git bundle, the commit in it, the tarballs, the version
+# string) was made by dependency code. This script treats all of it as DATA: a manifest is read
+# from a git blob whose mode is checked to be 100644, or from a tarball member streamed to a
+# file this script created, and parsed with JSON.parse; it is never require()d, sourced,
+# executed or checked out, and a path from it is never globbed or matched as a pattern.
 
 set -euo pipefail
+# Bash clears -e inside $(...) unless told otherwise (bash 4.4+); on older bash every call
+# that matters below also says `|| return 1` itself.
+shopt -s inherit_errexit 2>/dev/null || true
+# No pathname expansion anywhere: a path is a literal string.
+set -f
+# Every path given to git is literal, never a pathspec pattern.
+export GIT_LITERAL_PATHSPECS=1
 
 # The lockstep set, as <directory under packages/>:<npm name>, in publish order (a package
 # comes after the packages it depends on). AGENTS.md lists the same six.
 PACKAGES="core:usertrust verify:usertrust-verify openclaw:usertrust-openclaw server:usertrust-server acs-adapter:usertrust-acs-adapter ui:usertrust-ui"
+
+REGISTRY="https://registry.npmjs.org/"
 
 err() { echo "::error::$*" >&2; }
 
@@ -34,28 +55,174 @@ dirs() {
 	for entry in $PACKAGES; do echo "${entry%%:*}"; done
 }
 
-# The version every lockstep package carries. Fails if they differ: a lockstep release
-# publishes one number, and a package that drifted would publish another.
+names() {
+	local entry
+	for entry in $PACKAGES; do echo "${entry##*:}"; done
+}
+
+name_of() {
+	local entry
+	for entry in $PACKAGES; do
+		if [ "${entry%%:*}" = "$1" ]; then
+			echo "${entry##*:}"
+			return 0
+		fi
+	done
+	err "no lockstep package in packages/$1"
+	return 1
+}
+
+# The manifest checker. Its input is data only: it opens each file with O_NOFOLLOW and
+# O_NONBLOCK, requires a regular file (a symlink, a FIFO or a directory is refused, and
+# nothing is followed or waited on), and parses the bytes with JSON.parse.
+#   read <file> <name>                         prints the version; the name must match
+#   compare <base> <candidate> <name> <version>
+#       the candidate must equal the base in every field but "version", which must be
+#       <version>; its name must be <name>; neither may have publishConfig.
+MANIFEST_JS='
+const fs = require("node:fs");
+const fail = (m) => { console.error("::error::" + m); process.exit(1); };
+const load = (file) => {
+	const c = fs.constants;
+	let fd;
+	try {
+		fd = fs.openSync(file, c.O_RDONLY | c.O_NOFOLLOW | c.O_NONBLOCK);
+	} catch (e) {
+		fail(file + " cannot be opened as a regular file (" + e.code + "); a symlink is refused");
+	}
+	if (!fs.fstatSync(fd).isFile()) fail(file + " is not a regular file");
+	const text = fs.readFileSync(fd, "utf8");
+	fs.closeSync(fd);
+	let v;
+	try { v = JSON.parse(text); } catch (e) { fail(file + " is not JSON"); }
+	if (v === null || typeof v !== "object" || Array.isArray(v)) fail(file + " is not a JSON object");
+	return v;
+};
+const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const equal = (a, b) => {
+	if (a === b) return true;
+	if (typeof a !== typeof b || a === null || b === null || typeof a !== "object") return false;
+	if (Array.isArray(a) !== Array.isArray(b)) return false;
+	const ka = Object.keys(a);
+	const kb = Object.keys(b);
+	if (ka.length !== kb.length) return false;
+	return ka.every((k) => has(b, k) && equal(a[k], b[k]));
+};
+const [mode, ...args] = process.argv.slice(1);
+if (mode === "read") {
+	const [file, name] = args;
+	const m = load(file);
+	if (m.name !== name) fail(file + " names " + JSON.stringify(m.name) + ", not " + name);
+	if (has(m, "publishConfig")) fail(file + " has publishConfig");
+	if (typeof m.version !== "string") fail(file + " has no version");
+	console.log(m.version);
+} else if (mode === "compare") {
+	const [baseFile, candFile, name, version] = args;
+	const base = load(baseFile);
+	const cand = load(candFile);
+	if (has(base, "publishConfig") || has(cand, "publishConfig")) {
+		fail(name + ": publishConfig is not allowed in a released manifest");
+	}
+	if (cand.name !== name || base.name !== name) {
+		fail(name + ": the manifest names " + JSON.stringify(cand.name) + ", not " + name);
+	}
+	if (cand.version !== version) {
+		fail(name + ": version is " + JSON.stringify(cand.version) + ", not " + version);
+	}
+	const keys = new Set([...Object.keys(base), ...Object.keys(cand)]);
+	keys.delete("version");
+	for (const k of keys) {
+		if (!has(base, k) || !has(cand, k) || !equal(base[k], cand[k])) {
+			fail(name + ": field " + JSON.stringify(k) + " differs; only \"version\" may change");
+		}
+	}
+} else {
+	fail("manifest checker: unknown mode " + mode);
+}
+'
+
+manifest() { node -e "$MANIFEST_JS" "$@"; }
+
+# A strict release version: three numbers, nothing else (the bump makes no prereleases). Any
+# version string that came from the build job is checked against this before it is used.
+valid_version() {
+	case "$1" in
+	'' | *[!0-9.]* | .* | *. | *..*)
+		return 1
+		;;
+	esac
+	local rest="$1" parts=0
+	while :; do
+		parts=$((parts + 1))
+		case "$rest" in
+		*.*) rest="${rest#*.}" ;;
+		*) break ;;
+		esac
+	done
+	[ "$parts" -eq 3 ]
+}
+
+# The version every lockstep package carries in the working tree (the build job, before the
+# bump is committed). Fails if they differ: a lockstep release publishes one number.
 lockstep_version() {
-	# SC2016: the single quotes hold JavaScript, not shell. SC2046: one argument per directory.
-	# shellcheck disable=SC2016,SC2046
-	node -e '
-		const [first, ...rest] = process.argv.slice(1).map((dir) => ({
-			dir,
-			version: require(`${process.cwd()}/packages/${dir}/package.json`).version,
-		}));
-		for (const p of rest) {
-			if (p.version !== first.version) {
-				console.error(`::error::packages/${p.dir} is at ${p.version} but packages/${first.dir} is at ${first.version}; the lockstep packages must share one version.`);
-				process.exit(1);
-			}
-		}
-		if (typeof first.version !== "string" || first.version === "") {
-			console.error(`::error::packages/${first.dir} has no version.`);
-			process.exit(1);
-		}
-		console.log(first.version);
-	' $(dirs)
+	local dir v first="" firstdir=""
+	for dir in $(dirs); do
+		v=$(manifest read "packages/${dir}/package.json" "$(name_of "$dir")") || return 1
+		if [ -z "$first" ]; then
+			first="$v"
+			firstdir="$dir"
+		elif [ "$v" != "$first" ]; then
+			err "packages/${dir} is at ${v} but packages/${firstdir} is at ${first}; the lockstep packages must share one version."
+			return 1
+		fi
+	done
+	if ! valid_version "$first"; then
+		err "The lockstep version '${first}' is not a release version (major.minor.patch)."
+		return 1
+	fi
+	echo "$first"
+}
+
+# Writes packages/<dir>/package.json as recorded in <commit> to <out>, from its git blob,
+# after checking that the tree entry is a regular file (mode 100644): a symlink (120000), an
+# executable (100755) or a missing entry is refused.
+manifest_blob() {
+	local commit="$1" dir="$2" out="$3" path entry meta mode type sha
+	path="packages/${dir}/package.json"
+	entry=$(git ls-tree "$commit" -- "$path") || return 1
+	meta="${entry%%	*}"
+	mode="${meta%% *}"
+	type="${meta#* }"
+	type="${type%% *}"
+	sha="${meta##* }"
+	if [ "$entry" != "${mode} ${type} ${sha}	${path}" ] || [ "$mode" != 100644 ] || [ "$type" != blob ]; then
+		err "${path} in ${commit} is not a regular file (tree entry: '${entry}'); refusing."
+		return 1
+	fi
+	git cat-file blob "$sha" >"$out" || return 1
+}
+
+# The lockstep version recorded in <commit>, read from git blobs only.
+version_at() {
+	local commit="$1" tmp dir v first="" firstdir=""
+	tmp=$(mktemp -d) || return 1
+	for dir in $(dirs); do
+		manifest_blob "$commit" "$dir" "${tmp}/${dir}.json" || return 1
+		v=$(manifest read "${tmp}/${dir}.json" "$(name_of "$dir")") || return 1
+		if [ -z "$first" ]; then
+			first="$v"
+			firstdir="$dir"
+		elif [ "$v" != "$first" ]; then
+			err "In ${commit}, packages/${dir} is at ${v} but packages/${firstdir} is at ${first}."
+			return 1
+		fi
+	done
+	rm -rf "$tmp"
+	if ! valid_version "$first"; then
+		err "The version '${first}' in ${commit} is not a release version (major.minor.patch)."
+		return 1
+	fi
+	echo "$first"
 }
 
 # Prints "yes" if <name>@<version> is on npm and "no" if it is not. Anything else (network,
@@ -65,7 +232,7 @@ registry_has() {
 	local spec="$1" out rc errf
 	errf=$(mktemp)
 	set +e
-	out=$(npm view "$spec" version 2>"$errf")
+	out=$(npm view "$spec" version --registry "$REGISTRY" 2>"$errf")
 	rc=$?
 	set -e
 	if [ "$rc" -eq 0 ]; then
@@ -91,7 +258,7 @@ registry_has() {
 # state, and bumping past it would abandon a half-published version for good.
 assert_published() {
 	local version entry pkg state missing=""
-	version=$(lockstep_version)
+	version=$(lockstep_version) || return 1
 	for entry in $PACKAGES; do
 		pkg="${entry##*:}"
 		state=$(registry_has "${pkg}@${version}") || return 1
@@ -106,7 +273,7 @@ assert_published() {
 
 assert_unreleased() {
 	local version entry pkg state found=0
-	version=$(lockstep_version)
+	version=$(lockstep_version) || return 1
 	if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
 		err "Tag v${version} already exists. Bump to a version that has not been released, or use republish to finish v${version}."
 		found=1
@@ -131,9 +298,9 @@ pack() {
 		err "pack needs the directory to write the tarballs to"
 		return 1
 	fi
-	version=$(lockstep_version)
+	version=$(lockstep_version) || return 1
 	mkdir -p "$out"
-	out=$(cd "$out" && pwd)
+	out=$(cd "$out" && pwd) || return 1
 	for entry in $PACKAGES; do
 		dir="${entry%%:*}"
 		pkg="${entry##*:}"
@@ -148,56 +315,77 @@ pack() {
 
 # Publishes the tarballs `pack` wrote, never a directory: publishing a tarball runs no
 # lifecycle script and installs nothing, so the job that holds the publishing credentials
-# runs no dependency code. Every tarball is checked to carry the expected name and version
-# BEFORE any is published, then each one not yet on npm is published with provenance.
+# runs no dependency code. Before ANY is published, every tarball's package/package.json is
+# streamed out (never extracted to disk) and must equal <commit>'s manifest for that package
+# in every field: no publishConfig, no added script, the same name, the expected version.
+# npm runs from an empty directory, with an explicit registry and a user config this script
+# writes, so no .npmrc from the artifact or the checkout can redirect the token.
 publish() {
-	local tardir="${1:-}" dry="" entry pkg version state tgz got
-	if [ -z "$tardir" ] || [ ! -d "$tardir" ]; then
-		err "publish needs the directory of packed tarballs, not '${tardir}'"
+	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version state tgz tmp cfg empty work
+	if [ -z "$tardir" ] || [ ! -d "$tardir" ] || [ -z "$commit" ]; then
+		err "usage: publish <tarball directory> <commit> [--dry-run]"
 		return 1
 	fi
-	case "${2:-}" in
-	--dry-run) dry="--dry-run" ;;
+	case "${3:-}" in
+	--dry-run) dry=1 ;;
 	"") ;;
 	*)
-		err "publish takes only --dry-run after the directory, not '$2'"
+		err "publish takes only --dry-run after the commit, not '$3'"
 		return 1
 		;;
 	esac
-	tardir=$(cd "$tardir" && pwd)
-	version=$(lockstep_version)
-	for entry in $PACKAGES; do
-		pkg="${entry##*:}"
+	tardir=$(cd "$tardir" && pwd) || return 1
+	version=$(version_at "$commit") || return 1
+	tmp=$(mktemp -d) || return 1
+	for dir in $(dirs); do
+		pkg=$(name_of "$dir") || return 1
 		tgz="${tardir}/${pkg}-${version}.tgz"
-		if [ ! -f "$tgz" ]; then
-			err "${pkg}-${version}.tgz is missing from ${tardir}"
+		if [ -L "$tgz" ] || [ ! -f "$tgz" ]; then
+			err "${pkg}-${version}.tgz is missing from ${tardir}, or is not a regular file"
 			return 1
 		fi
-		# shellcheck disable=SC2016 # JavaScript, not shell
-		got=$(tar -xzOf "$tgz" package/package.json | node -e '
-			let s = "";
-			process.stdin.on("data", (d) => { s += d; });
-			process.stdin.on("end", () => {
-				const p = JSON.parse(s);
-				console.log(`${p.name}@${p.version}`);
-			});
-		') || got="unreadable"
-		if [ "$got" != "${pkg}@${version}" ]; then
-			err "${pkg}-${version}.tgz holds ${got}, not ${pkg}@${version}"
+		manifest_blob "$commit" "$dir" "${tmp}/${dir}.commit.json" || return 1
+		if ! tar -xzOf "$tgz" package/package.json >"${tmp}/${dir}.tarball.json"; then
+			err "${pkg}-${version}.tgz has no readable package/package.json"
+			return 1
+		fi
+		if ! manifest compare "${tmp}/${dir}.commit.json" "${tmp}/${dir}.tarball.json" "$pkg" "$version"; then
+			err "${pkg}-${version}.tgz does not carry ${commit}'s manifest; refusing to publish anything."
 			return 1
 		fi
 	done
-	for entry in $PACKAGES; do
-		pkg="${entry##*:}"
+	cfg="${tmp}/npmrc"
+	empty="${tmp}/empty-npmrc"
+	work="${tmp}/work"
+	mkdir "$work"
+	: >"$empty"
+	if [ "$dry" -eq 1 ]; then
+		: >"$cfg"
+	else
+		# The token is not in this file: it holds a reference, ${NODE_AUTH_TOKEN}, that npm
+		# (not the shell) expands from this step's environment.
+		printf '//registry.npmjs.org/:_authToken=%s{NODE_AUTH_TOKEN}\n' '$' >"$cfg"
+	fi
+	for dir in $(dirs); do
+		pkg=$(name_of "$dir") || return 1
 		state=$(registry_has "${pkg}@${version}") || return 1
 		if [ "$state" = yes ]; then
 			echo "::notice::${pkg}@${version} is already on npm; skipping"
 			continue
 		fi
-		echo "Publishing ${pkg}@${version}${dry:+ (dry run)}"
+		tgz="${tardir}/${pkg}-${version}.tgz"
 		# The same command with and without --dry-run, so a dry run exercises the real one.
-		(cd "$tardir" && npm publish "./${pkg}-${version}.tgz" --access public --provenance ${dry})
+		set -- publish "$tgz" --access public --provenance --registry "$REGISTRY" \
+			--userconfig "$cfg" --globalconfig "$empty"
+		if [ "$dry" -eq 1 ]; then
+			set -- "$@" --dry-run
+			echo "Publishing ${pkg}@${version} (dry run)"
+		else
+			echo "Publishing ${pkg}@${version}"
+		fi
+		(cd "$work" && npm "$@") || return 1
 	done
+	rm -rf "$tmp"
 }
 
 # Requires the deployment environment the publishing job runs in to exist and to require at
@@ -255,54 +443,110 @@ assert_protected() {
 	echo "Environment '${env}' requires ${reviewers} reviewer(s)."
 }
 
-# A republish runs on the release commit the workflow pushed. That push used the workflow's
-# token, which does not trigger CI, so the release commit itself has no CI run. Accept it
-# only if it changes nothing but the "version" field of lockstep package.json files, and
-# gate on its parent: the commit CI did test, and the tree that was released apart from the
-# version numbers.
-release_commit_parent() {
-	local version head tag_commit nparents changed f dir entry ok
-	version=$(lockstep_version)
-	head=$(git rev-parse HEAD)
+# A release commit is the bump on top of the commit CI tested, and nothing else. For a
+# republish it is the commit the run was dispatched on (pushed with the workflow's token, which
+# triggers no CI, so CI is gated on its parent); for a new release it is the commit in the
+# build job's bundle, about to be pushed. Accept <commit> only if:
+#   - its version (from git blobs) is tagged v<version>, and the tag points at it;
+#   - it has exactly one parent (and that parent is <expected parent>, when one is given);
+#   - it changes exactly the six lockstep package.json paths, compared as literal strings,
+#     each a modified regular file (100644 before and after);
+#   - each changes nothing but "version", and carries no publishConfig.
+# Prints the parent.
+verify_release_commit() {
+	local commit="$1" expected_parent="${2:-}" version tag_commit parents parent raw tmp meta path dir seen count ok
+	commit=$(git rev-parse -q --verify "${commit}^{commit}") || {
+		err "${1} is not a commit."
+		return 1
+	}
+	version=$(version_at "$commit") || return 1
 	if ! tag_commit=$(git rev-parse -q --verify "refs/tags/v${version}^{commit}"); then
-		err "Republish finishes a release that is already tagged, and tag v${version} does not exist. A version with no tag has not been released: run a normal release."
+		err "Tag v${version} does not exist. A version with no tag has not been released: run a normal release."
 		return 1
 	fi
-	if [ "$tag_commit" != "$head" ]; then
-		err "Tag v${version} is ${tag_commit}, but this run is on ${head}. Dispatch the republish on the tag (ref v${version}) so that what is published is what was tagged."
+	if [ "$tag_commit" != "$commit" ]; then
+		err "Tag v${version} is ${tag_commit}, not ${commit}. Dispatch the republish on the tag (ref v${version}) so that what is published is what was tagged."
 		return 1
 	fi
-	nparents=$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')
-	if [ "$nparents" -ne 2 ]; then
-		err "v${version} (${head}) is not a single-parent release commit."
+	parents=$(git rev-list --parents -n 1 "$commit") || return 1
+	parent="${parents#* }"
+	if [ "$parents" = "$commit" ] || [ "$parent" != "${parent%% *}" ]; then
+		err "v${version} (${commit}) is not a single-parent release commit."
 		return 1
 	fi
-	changed=$(git diff --name-only HEAD^ HEAD)
-	if [ -z "$changed" ]; then
-		err "v${version} (${head}) changes no file; it is not a release commit."
+	if [ -n "$expected_parent" ] && [ "$parent" != "$expected_parent" ]; then
+		err "v${version} (${commit}) sits on ${parent}, not on ${expected_parent}."
 		return 1
 	fi
-	for f in $changed; do
-		ok=0
-		for entry in $PACKAGES; do
-			dir="${entry%%:*}"
-			[ "$f" = "packages/${dir}/package.json" ] && ok=1
+	tmp=$(mktemp -d) || return 1
+	raw="${tmp}/diff"
+	if ! git diff-tree -z -r --raw --no-renames --no-ext-diff --no-textconv "$parent" "$commit" >"$raw"; then
+		err "Could not diff ${parent}..${commit}."
+		return 1
+	fi
+	seen=" "
+	count=0
+	while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+		ok=""
+		for dir in $(dirs); do
+			if [ "$path" = "packages/${dir}/package.json" ]; then ok="$dir"; fi
 		done
-		if [ "$ok" -ne 1 ]; then
-			err "v${version} (${head}) changes ${f}; a release commit changes only the lockstep package.json files."
+		if [ -z "$ok" ]; then
+			err "v${version} (${commit}) changes '${path}', which is not one of the six lockstep package.json paths; a release commit changes only those."
 			return 1
 		fi
-		if ! node -e '
-			const [a, b] = process.argv.slice(1).map((s) => JSON.parse(s));
-			delete a.version;
-			delete b.version;
-			process.exit(JSON.stringify(a) === JSON.stringify(b) ? 0 : 1);
-		' "$(git show "HEAD^:${f}")" "$(git show "HEAD:${f}")"; then
-			err "v${version} (${head}) changes ${f} beyond its \"version\" field; a release commit changes only the version."
+		case "$meta" in
+		":100644 100644 "*" M") ;;
+		*)
+			err "v${version} (${commit}) changes '${path}' as '${meta}'; a release commit only modifies regular files (100644)."
+			return 1
+			;;
+		esac
+		case "$seen" in
+		*" ${ok} "*)
+			err "v${version} (${commit}) lists '${path}' twice."
+			return 1
+			;;
+		esac
+		seen="${seen}${ok} "
+		count=$((count + 1))
+		manifest_blob "$parent" "$ok" "${tmp}/${ok}.before.json" || return 1
+		manifest_blob "$commit" "$ok" "${tmp}/${ok}.after.json" || return 1
+		if ! manifest compare "${tmp}/${ok}.before.json" "${tmp}/${ok}.after.json" "$(name_of "$ok")" "$version"; then
+			err "v${version} (${commit}) changes packages/${ok}/package.json beyond its \"version\" field; a release commit changes only the version."
 			return 1
 		fi
-	done
-	git rev-parse HEAD^
+	done <"$raw"
+	if [ "$count" -ne 6 ]; then
+		err "v${version} (${commit}) changes ${count} of the six lockstep package.json files; a release commit bumps all six."
+		return 1
+	fi
+	rm -rf "$tmp"
+	echo "$parent"
+}
+
+# For a new release: import the tag v<version> from the build job's bundle (git objects and
+# one ref, nothing else), verify the release commit it names sits on this run's commit, and
+# print it. The version string is validated before it is used in a ref.
+verify_release() {
+	local bundle="${1:-}" version="${2:-}" commit
+	if ! valid_version "$version"; then
+		err "The build job reported version '${version}', which is not major.minor.patch; refusing."
+		return 1
+	fi
+	if [ -L "$bundle" ] || [ ! -f "$bundle" ]; then
+		err "The release bundle '${bundle}' is missing or not a regular file."
+		return 1
+	fi
+	git bundle verify -q "$bundle" >/dev/null || return 1
+	git fetch --quiet --no-tags "$bundle" "refs/tags/v${version}:refs/tags/v${version}" || return 1
+	commit=$(git rev-parse -q --verify "refs/tags/v${version}^{commit}") || return 1
+	verify_release_commit "$commit" "$(git rev-parse HEAD)" >/dev/null || return 1
+	if [ "$(version_at "$commit")" != "$version" ]; then
+		err "The release commit is not at version ${version}."
+		return 1
+	fi
+	echo "$commit"
 }
 
 # Requires the latest ci.yml run for a push of <sha> to have completed, and every job in it,
@@ -443,8 +687,8 @@ latest_flag() {
 gate() {
 	local sha
 	if [ "${REPUBLISH:-}" = true ]; then
-		sha=$(release_commit_parent)
-		assert_on_master
+		sha=$(verify_release_commit HEAD) || return 1
+		assert_on_master || return 1
 		echo "Republish of $(git rev-parse HEAD): gating on its parent ${sha}, the commit CI tested."
 	else
 		sha=$(git rev-parse HEAD)
@@ -454,17 +698,20 @@ gate() {
 
 case "${1:-}" in
 dirs) dirs ;;
+names) names ;;
 version) lockstep_version ;;
+version-at) version_at "${2:?usage: version-at <commit>}" ;;
+verify-release) verify_release "${2:-}" "${3:-}" ;;
 assert-published) assert_published ;;
 assert-unreleased) assert_unreleased ;;
 assert-protected) assert_protected "${2:-}" ;;
-release-parent) release_commit_parent ;;
+release-parent) verify_release_commit HEAD ;;
 latest-flag) latest_flag "${2:-}" ;;
 pack) pack "${2:-}" ;;
-publish) publish "${2:-}" "${3:-}" ;;
+publish) publish "${2:-}" "${3:-}" "${4:-}" ;;
 gate) gate ;;
 *)
-	err "usage: release.sh dirs | version | assert-published | assert-unreleased | assert-protected <env> | gate | release-parent | latest-flag <version> | pack <dir> | publish <dir> [--dry-run]"
+	err "usage: release.sh dirs | names | version | version-at <commit> | assert-published | assert-unreleased | assert-protected <env> | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | pack <dir> | publish <dir> <commit> [--dry-run]"
 	exit 2
 	;;
 esac

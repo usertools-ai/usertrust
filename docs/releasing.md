@@ -44,20 +44,47 @@ repository or mint an OIDC token for provenance:
    nothing and runs no dependency code: only git, gh, node, the npm that ships with node, and
    GitHub's own checkout, setup-node and download-artifact actions.
    1. Checks the CI gate again, since approval can come long after step 1.
-   2. Downloads the artifact and checks the release commit: one parent, which is the commit
-      this run was dispatched on; nothing changed but the six `version` fields; the tag points
-      at it; and its version is the one the build job reported.
-   3. Runs `npm publish <tarball> --access public --provenance --dry-run` for each package, after
-      checking that every tarball holds the expected name and version.
+   2. Downloads the artifact and checks the release commit, as git objects, without checking
+      it out:
+      - its version (validated as `major.minor.patch` before it is used) is tagged, and the tag
+        points at it;
+      - it has one parent, which is the commit this run was dispatched on;
+      - it changes exactly the six `packages/<dir>/package.json` paths (literal strings), each a
+        regular file (mode 100644) before and after;
+      - each manifest is unchanged but for `version`, and none has `publishConfig`.
+   3. For each tarball, streams `package/package.json` out as data and requires it to equal the
+      release commit's manifest for that package, field by field. Then runs
+      `npm publish <tarball> --access public --provenance --registry https://registry.npmjs.org/
+      --dry-run` for each, from an empty directory, with a user config the script writes.
    4. **Pushes the release commit and tag** to `master`, atomically.
-   5. Publishes each tarball with `npm publish <tarball> --access public --provenance`.
-      Publishing a tarball runs no lifecycle script.
+   5. Publishes each tarball with the same command, without `--dry-run`. Publishing a tarball
+      runs no lifecycle script.
    6. Creates the GitHub Release `v<version>` with generated notes, deciding Latest
       explicitly: it is Latest only if no `v*` release tag is a higher semver (prereleases
       never take it), so finishing an older version never takes Latest from a newer one.
 
    Each step runs only if every step before it succeeded, so a normal release publishes
    nothing unless its push to `master` went through.
+
+### Build output is untrusted data
+
+The publish job treats everything the build job hands it (the git bundle, the commit in it,
+the tarballs, the version it reports) as untrusted DATA, never as code or config:
+
+- The working tree stays at the dispatched commit, so every script the job runs comes from
+  that commit. The release commit is never checked out.
+- A manifest is read from a git blob whose tree entry is checked to be a regular file (mode
+  100644), or from a tarball member streamed to a file the script created. It is opened
+  without following a symlink and without waiting on a FIFO, and it must be a regular file.
+  It is parsed with `JSON.parse`, never `require()`d.
+- Changed paths are compared as literal strings (`git diff-tree -z`, no pathname expansion,
+  literal pathspecs), never as patterns.
+- `npm publish` runs from an empty directory, with `--registry https://registry.npmjs.org/`, a
+  user config holding only the `${NODE_AUTH_TOKEN}` reference (no config in a dry run), and an
+  empty global config. No `.npmrc` from the artifact or the checkout applies, and the token
+  is only in that step's environment. A `publishConfig` in any released manifest is refused.
+  In npm 10.9.2, `--registry` on the command line already wins over `publishConfig.registry`,
+  but npm's documentation does not say so, so the workflow does not rely on it.
 
 ### Credentials
 
