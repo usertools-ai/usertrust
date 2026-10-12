@@ -3995,6 +3995,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						boundary,
 						() => transportChangedError(kind, changed),
 						`withOptions\u0000${changed.join(",")}`,
+						// Still a TrustedClient of the SAME governor: destroy() ends both clients, and
+						// governAction runs the caller's own action under the shared budget and audit (it
+						// sends nothing through the refused transport).
+						{ destroy: destroyFn, governAction: governActionImpl },
 					);
 				}
 				return build(fresh, interceptCall, destroyFn, governActionImpl, boundary);

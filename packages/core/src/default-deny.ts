@@ -686,6 +686,8 @@ function guardResource(resource: object, path: string, boundary: MethodBoundary)
  * holds. `cacheKey` (default: the path) separates stand-ins whose errors differ at one path.
  * Values that are not functions read through unchanged, objects as further stand-ins. Getters run
  * on the raw object, so a getter that reads a `#private` field does not throw on the stand-in.
+ * `own` names members the TOP level answers with as given: a `withOptions()` stand-in is a
+ * `TrustedClient`, so it carries its governor's `destroy` and `governAction` (nested objects do not).
  */
 export function rawClientStandIn(
 	raw: object,
@@ -693,6 +695,7 @@ export function rawClientStandIn(
 	boundary: MethodBoundary,
 	makeError: () => PolicyDeniedError,
 	cacheKey: string = path,
+	own: Readonly<Record<string, unknown>> = {},
 ): object {
 	let byRaw = boundary.standIns.get(cacheKey);
 	if (byRaw === undefined) {
@@ -703,6 +706,7 @@ export function rawClientStandIn(
 	if (cached !== undefined) return cached;
 	const proxy = new Proxy(raw, {
 		get(target, prop) {
+			if (typeof prop === "string" && Object.hasOwn(own, prop)) return own[prop];
 			const value: unknown = Reflect.get(target, prop, target);
 			if (typeof prop === "symbol" || isInertName(prop)) return value;
 			if (typeof value === "function") {

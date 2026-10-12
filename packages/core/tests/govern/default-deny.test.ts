@@ -563,6 +563,46 @@ describe("escape hatches", () => {
 		},
 	);
 
+	// A withOptions() clone shares its parent's governor: destroy() on either ends both.
+	const destroyedError = /TrustedClient has been destroyed/;
+
+	it("a transport-refused clone's destroy() resolves and ends the parent too", async () => {
+		const { client } = await anthropic();
+		const clone = client.withOptions({ fetch: async () => json({}) });
+		await expect(clone.destroy()).resolves.toBeUndefined();
+		await expect(client.messages.create(MP)).rejects.toThrow(destroyedError);
+		expect(hits).toEqual([]);
+	});
+
+	it("a governed clone's destroy() ends the parent", async () => {
+		const { client } = await anthropic();
+		const clone = client.withOptions({ timeout: 1000 });
+		await clone.destroy();
+		await expect(client.messages.create(MP)).rejects.toThrow(destroyedError);
+		expect(hits).toEqual([]);
+	});
+
+	it("the parent's destroy() ends a governed clone", async () => {
+		const { client } = await openai();
+		const clone = client.withOptions({ timeout: 1000 });
+		await client.destroy();
+		await expect(clone.chat.completions.create(CP)).rejects.toThrow(destroyedError);
+		expect(hits).toEqual([]);
+	});
+
+	it("governAction on a transport-refused clone runs under the shared governor", async () => {
+		const { client } = await anthropic();
+		const clone = client.withOptions({ fetch: async () => json({}) });
+		const { result, receipt } = await clone.governAction(
+			{ kind: "tool_use", name: "file_read", cost: 50 },
+			async () => "ok",
+		);
+		expect(result).toBe("ok");
+		expect(receipt.settled).toBe(true);
+		expect(chainEvents().map((e) => e.kind)).toEqual(["tool_use"]);
+		expect(hits).toEqual([]);
+	});
+
 	it("withOptions keys: the transport-changing ones, per SDK; an unknown key fails closed", () => {
 		const governed = {
 			timeout: 1,
