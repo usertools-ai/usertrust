@@ -16,8 +16,9 @@ import type { PolicyDecider } from "./composite.js";
 import { CompositeEvaluator } from "./composite.js";
 
 /**
- * In-memory Governor for demos and tests: real two-phase semantics
- * (hold/settle/void against a budget) with no TigerBeetle and no disk.
+ * Test and demo helper, not for production use. An in-memory Governor with real
+ * two-phase semantics (hold/settle/void against a budget) and no TigerBeetle and no
+ * disk. In production, use `createGovernor()` from `usertrust/headless`.
  * Cost model: 1 token = 1 usertoken.
  */
 export function createMockGovernor(opts: { budget?: number } = {}): { governor: Governor } {
@@ -119,7 +120,10 @@ export function createMockGovernor(opts: { budget?: number } = {}): { governor: 
 	return { governor };
 }
 
-/** Deny actions whose kind is listed; allow everything else. */
+/**
+ * Test and demo helper, not for production use. Denies actions whose kind is listed and
+ * allows everything else.
+ */
 export function mockPolicyDecider(denyKinds: string[]): PolicyDecider {
 	return (action) =>
 		denyKinds.includes(action.kind)
@@ -135,8 +139,9 @@ export interface DemoStep {
 }
 
 /**
- * Infrastructure-free demo of the composite contract: allow+settle, a policy
- * deny that provably consumes no reservation, then budget exhaustion.
+ * Test and demo helper, not for production use. An infrastructure-free demo of the
+ * composite contract: allow+settle, a policy deny that provably consumes no reservation,
+ * then budget exhaustion.
  */
 export async function runDemo(): Promise<DemoStep[]> {
 	const { governor } = createMockGovernor({ budget: 60 });

@@ -37,7 +37,9 @@
 		"prepublishOnly": "tsc -b"
 	},
 	"files": [
-		"dist"
+		"dist",
+		"LICENSE",
+		"NOTICE"
 	],
 	"dependencies": {
 		"usertrust": "*",
