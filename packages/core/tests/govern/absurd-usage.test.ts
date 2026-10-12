@@ -18,6 +18,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -246,6 +247,8 @@ describe("headless governor: the same three rules", () => {
 
 			expect(receipt.usageSource).toBe("estimated");
 			expect(receipt.cost).toBeLessThan(100_000);
+			// the ESTIMATE, not the 1-usertoken floor that zeroed counts would price at
+			expect(receipt.cost).toBeGreaterThan(1);
 			expect(persistedSpend(vaultBase)).toBeLessThan(100_000);
 
 			const kinds = audit.events.map((e) => e.kind);
@@ -310,4 +313,54 @@ describe("a value that cannot be represented is never persisted", () => {
 			rmSync(vaultBase, { recursive: true, force: true });
 		}
 	});
+});
+
+describe("a STREAMING settle gets the same rule", () => {
+	class Stream extends EventEmitter {
+		finalMessage(): Promise<unknown> {
+			return Promise.resolve({});
+		}
+		async *[Symbol.asyncIterator](): AsyncIterator<unknown> {}
+	}
+
+	for (const dryRun of [true, false]) {
+		it(`an absurd final usage is charged at the estimate and reported after its llm_call (${dryRun ? "dry-run" : "capped engine"})`, async () => {
+			const vaultBase = join(tmpdir(), `absurd-usage-stream-${randomUUID()}`);
+			mkdirSync(vaultBase, { recursive: true });
+			try {
+				const audit = makeAudit();
+				const { engine } = cappedEngine();
+				const stream = new Stream();
+				const g = await trust(
+					{ messages: { create: vi.fn(), stream: vi.fn(() => stream) } },
+					{
+						budget: 100_000,
+						vaultBase,
+						_audit: audit,
+						...(dryRun ? { dryRun: true } : { _engine: engine }),
+					},
+				);
+				const handle = (await g.messages.stream(PARAMS)) as Stream & {
+					receipt: Promise<TrustReceipt>;
+				};
+				stream.emit("finalMessage", { usage: { input_tokens: 1e12, output_tokens: 1e12 } });
+				stream.emit("end");
+				const receipt = await handle.receipt;
+
+				expect(receipt.usageSource).toBe("estimated");
+				expect(receipt.cost).toBeGreaterThan(1);
+				expect(receipt.cost).toBeLessThan(100_000);
+				expect(persistedSpend(vaultBase)).toBeLessThan(100_000);
+				const kinds = audit.events.map((e) => e.kind);
+				expect(kinds.indexOf("usage_implausible")).toBeGreaterThan(kinds.indexOf("llm_call"));
+				expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+					transferId: receipt.transferId,
+					tiers: { inputTokens: 1e12, outputTokens: 1e12 },
+				});
+				await g.destroy();
+			} finally {
+				rmSync(vaultBase, { recursive: true, force: true });
+			}
+		});
+	}
 });

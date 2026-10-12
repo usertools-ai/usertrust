@@ -97,8 +97,12 @@ vi.mock("tigerbeetle-node", () => ({
 
 const MODEL = "claude-sonnet-4-6";
 
-/** Calls the day is split across. Every tier below divides by it exactly. */
-const CALLS = 8;
+/**
+ * Calls the day is split across. Every tier below divides by it exactly. It is 16, not fewer, because no single call can
+ * plausibly report more than 100 million tokens in a tier (the plausibility ceiling): 1.14 billion cache reads over 16
+ * calls is 71.25 million each.
+ */
+const CALLS = 16;
 
 /** The day's totals, in tokens. */
 const DAY = {
@@ -126,7 +130,7 @@ const PER_CALL: ReceiptUsage = {
  * record carries the extra term. Written as literals, not as fractions of the tier,
  * so no float rounding can reach a token count.
  */
-const EPHEMERAL_5M = 5_000_000;
+const EPHEMERAL_5M = PER_CALL.cacheWriteTokens;
 const EPHEMERAL_1H = 0;
 
 /**
@@ -142,11 +146,11 @@ const PER_CALL_PROMPT_TOKENS =
 const MAX_OUTPUT_TOKENS = 64_000;
 
 /** The four-tier cost of one call — 705,000 usertokens; see the header table. */
-const PER_CALL_COST = 705_000;
+const PER_CALL_COST = 5_640_000 / CALLS;
 /** The four-tier cost of the whole day. */
 const DAY_COST = PER_CALL_COST * CALLS;
 /** What the two-tier code recorded for one call: fresh input + output only. */
-const PER_CALL_TWO_TIER = 90_000;
+const PER_CALL_TWO_TIER = 720_000 / CALLS;
 
 /** Room for eight ~5.6M-usertoken holds plus the day's real spend. */
 const BUDGET = 200_000_000;
@@ -373,8 +377,12 @@ describe("reconciliation — the 1.14B-cache-read day through trust()", () => {
 		expect(engine.posted.reduce((a, b) => a + b, 0)).toBe(DAY_COST);
 		// No call was capped, so no receipt carries a posted-vs-metered gap.
 		expect(receipts.every((r) => r.postedCost === undefined)).toBe(true);
-		// The session's own budget arithmetic agrees with the ledger's.
-		expect(receipts[CALLS - 1]?.budgetRemaining).toBe(BUDGET - DAY_COST);
+		// The session's own budget arithmetic agrees with what the ledger WOULD post: the session counter is charged
+		// min(cost, hold), because TigerBeetle caps a post at the pending amount. This harness's open engine posts in
+		// full (a fiction, so the day recomputes), but trust() sizes each hold from the request text, which here is small;
+		// the counter follows the hold, the receipts and the chain keep the true metered cost.
+		const counted = engine.held.reduce((sum, held) => sum + Math.min(PER_CALL_COST, held), 0);
+		expect(receipts[CALLS - 1]?.budgetRemaining).toBe(BUDGET - counted);
 
 		// ── The DURABLE record — the chain, not the return value ──
 		// A receipt is an ephemeral object; the claim is only worth something on
