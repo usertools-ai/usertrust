@@ -12,21 +12,26 @@
  * intermediates included, and leaves an existing directory as it is.
  */
 
+import { randomUUID } from "node:crypto";
 import {
 	accessSync,
 	closeSync,
 	fchmodSync,
 	constants as fsConstants,
 	fstatSync,
+	fsyncSync,
 	lstatSync,
 	mkdirSync,
 	openSync,
 	readlinkSync,
 	realpathSync,
+	renameSync,
 	type Stats,
 	statSync,
+	unlinkSync,
+	writeSync,
 } from "node:fs";
-import { dirname, isAbsolute, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 
 /** Mode of every directory usertrust creates in a vault. */
 export const PRIVATE_DIR_MODE = 0o700;
@@ -322,4 +327,98 @@ export function looseVaultWarning(vaultDir: string): string | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+// ── Owner-only atomic replace ──
+
+/**
+ * Replace `path` with `data` in a file that is owner-only from the moment it exists, never by
+ * writing into the file already there. A mode given to an in-place write applies only when the
+ * file is CREATED: rewriting an existing 0644 file leaves it 0644 with the new bytes in it.
+ *
+ * The bytes go into a temp file beside `path` (`<name>.<uuid>.tmp`), created EXCLUSIVELY and not
+ * through a link (`O_CREAT|O_EXCL|O_NOFOLLOW`) with {@link PRIVATE_FILE_MODE}, then fchmod'd to
+ * exactly that mode whatever the umask, written in full, fsync'd and closed; then renamed over
+ * `path`, and the directory fsync'd so the rename survives a crash. The rename replaces `path` as
+ * a directory entry: the old file's inode is never written, and a symbolic link at `path` is
+ * replaced, not followed.
+ *
+ * Every step BEFORE the rename throws on failure, and the temp file is removed. The directory
+ * sync AFTER it (skipped on Windows, where a directory handle cannot be flushed) never throws,
+ * whatever the error: by then `path` IS replaced and owner-only, and a throw would report a
+ * failure for a write that took effect. Its failure is reported once, as
+ * a warning ({@link dirSyncWarning}) passed to `warn` (default: stderr, as given; a CLI caller
+ * passes one that scrubs the path for its terminal).
+ */
+export function writePrivateFileAtomic(
+	path: string,
+	data: string,
+	warn: (message: string) => void = (message) => {
+		process.stderr.write(`${message}\n`);
+	},
+): void {
+	const tmp = join(dirname(path), `${basename(path)}.${randomUUID()}.tmp`);
+	const fd = openSync(
+		tmp,
+		fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0),
+		PRIVATE_FILE_MODE,
+	);
+	try {
+		try {
+			fchmodSync(fd, PRIVATE_FILE_MODE);
+			const bytes = Buffer.from(data, "utf-8");
+			let off = 0;
+			while (off < bytes.length) {
+				const n = writeSync(fd, bytes, off, bytes.length - off);
+				if (n <= 0) throw new Error(`write to ${tmp} made no progress`);
+				off += n;
+			}
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		renameSync(tmp, path);
+	} catch (err) {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			// renamed, or never created
+		}
+		throw err;
+	}
+	// Make the rename durable: best effort for EVERY error, because the replace already happened.
+	// Not on Windows: a read-only directory handle cannot be flushed there (EPERM on every run),
+	// so the attempt could only ever produce a warning.
+	if (isWindows()) return;
+	let dfd: number | undefined;
+	try {
+		dfd = openSync(dirname(path), "r");
+		fsyncSync(dfd);
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException)?.code;
+		// A platform that cannot fsync a directory at all says nothing worth a warning. EPERM and
+		// EBADF (which flushing a read-only directory handle can give on Windows) are warned, not
+		// silenced: elsewhere they are real failures, and the warning still says the file was
+		// replaced.
+		if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EOPNOTSUPP" && code !== "EISDIR") {
+			warn(dirSyncWarning(path, code ?? (err instanceof Error ? err.message : String(err))));
+		}
+	} finally {
+		try {
+			if (dfd !== undefined) closeSync(dfd);
+		} catch {
+			// the descriptor is gone either way
+		}
+	}
+}
+
+/**
+ * The warning for a replace that landed but whose directory entry could not be synced. On
+ * Windows it makes no owner-only claim: usertrust sets no permissions there (see {@link isWindows}).
+ */
+export function dirSyncWarning(path: string, reason: string): string {
+	const replaced = isWindows()
+		? `${path} was replaced`
+		: `${path} was replaced and is owner-only (mode 600)`;
+	return `usertrust: warning: ${replaced}, but its directory could not be synced (${reason}), so the new directory entry may not survive a power loss`;
 }

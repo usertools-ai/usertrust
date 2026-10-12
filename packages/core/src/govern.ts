@@ -1250,6 +1250,25 @@ export async function runTeardownSteps(steps: ReadonlyArray<() => unknown>): Pro
 	}
 }
 
+/**
+ * A caller's action descriptor, read ONCE: each field is read a single time into a plain object
+ * the caller cannot reach. `governAction` reads the descriptor before the hold, again after
+ * `execute()` and after the settle claim, so a live one could size the hold at one cost and post
+ * another (an `execute()` that edits it), or throw from a getter between the settle claim and the
+ * POST. The same reason the LLM path serializes its request once. `params` is the caller's own
+ * object, by reference: the action runs on it, and redaction copies only the audit record.
+ */
+function snapshotActionDescriptor(descriptor: ActionDescriptor): ActionDescriptor {
+	const { kind, name, cost, params, actor } = descriptor;
+	return {
+		kind,
+		name,
+		cost,
+		...(params !== undefined ? { params } : {}),
+		...(actor !== undefined ? { actor } : {}),
+	};
+}
+
 // ── trust() ──
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
@@ -3269,18 +3288,26 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// 7b. Action governance — simplified pipeline for non-LLM actions
 	async function governActionImpl<R>(
-		action: ActionDescriptor,
+		descriptor: ActionDescriptor,
 		execute: () => Promise<R>,
 	): Promise<GovernedActionResult<R>> {
 		if (destroyed) {
 			throw new Error("TrustedClient has been destroyed");
 		}
 
+		// Every read below is of this snapshot, never of the caller's live descriptor.
+		const action = snapshotActionDescriptor(descriptor);
+
 		// Validate cost to prevent budget inflation via negative values
 		if (!Number.isFinite(action.cost) || action.cost < 0) {
 			throw new Error(
 				`action.cost must be a non-negative finite number, got ${String(action.cost)}`,
 			);
+		}
+
+		// Again: a getter the snapshot read can have called destroy() since the first check.
+		if (destroyed) {
+			throw new Error("TrustedClient has been destroyed");
 		}
 
 		refuseIfAuditDegradedAtStart("this action was refused before it ran");
@@ -3537,6 +3564,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 			}
 
+			// A2, as on the LLM path: one finalize gate per hold, so it is settled XOR
+			// voided. A post-settle throw (the failClosed belt below) reaches the catch
+			// with the settle already claimed, and the catch must not void a hold whose
+			// commit and POST have run.
+			let finalizeState: "pending" | "settled" | "voided" = "pending";
+			function finalizeOnce(outcome: "settle" | "void"): boolean {
+				if (finalizeState !== "pending") return false;
+				finalizeState = outcome === "settle" ? "settled" : "voided";
+				return true;
+			}
+
 			try {
 				const result = await execute();
 
@@ -3589,6 +3627,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
 					);
 				}
+
+				// A2: claim the single settle outcome for this hold BEFORE money moves.
+				// Always granted here (no other terminal path runs for an action); the
+				// claim exists so a post-commit throw routes to the outer catch WITHOUT
+				// voiding an already-settled hold. Nothing between this claim and the POST
+				// below may throw: a throw there would leave the hold neither posted nor
+				// voided. action-finalize-gate.test.ts pins it.
+				finalizeOnce("settle");
 
 				// Release in-flight hold and commit budget under mutex — money moves only
 				// AFTER the action is audited.
@@ -3721,20 +3767,26 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// Circuit breaker: record failure
 				cb.recordFailure();
 
-				// VOID the pending hold
-				if (engine != null && !isDryRun) {
-					try {
-						await engine.voidPendingSpend(transferId);
-					} catch {
-						// Best-effort void
+				// VOID the pending hold — but ONLY if this hold has not already claimed a
+				// settle outcome (A2). A pre-commit throw (the action threw, the failClosed
+				// abort on a failed action audit) reaches here with the hold still PENDING
+				// and is voided once. A post-commit throw (the failClosed belt) has already
+				// settled: no void is sent against a posted transfer.
+				if (finalizeOnce("void")) {
+					if (engine != null && !isDryRun) {
+						try {
+							await engine.voidPendingSpend(transferId);
+						} catch {
+							// Best-effort void
+						}
 					}
-				}
 
-				if (proxyConn != null && !isDryRun) {
-					try {
-						await proxyConn.void(proxyTransferId ?? transferId);
-					} catch {
-						// Best-effort void
+					if (proxyConn != null && !isDryRun) {
+						try {
+							await proxyConn.void(proxyTransferId ?? transferId);
+						} catch {
+							// Best-effort void
+						}
 					}
 				}
 
