@@ -1,4 +1,4 @@
-# usertrust-claude-code
+# usertools
 
 Ledger-backed governance for Claude Code: every tool call gets a two-phase spend
 authorization against a [usertrust-server](../server) you host, and the session's
@@ -22,8 +22,20 @@ call it lets through, exactly as they would without it.
 
 ```
 /plugin marketplace add usertools-ai/usertrust
-/plugin install usertrust-claude-code@usertrust
+/plugin install usertools@usertrust
 ```
+
+**Upgrading from `usertrust-claude-code`?** This plugin was renamed to `usertools`
+in 3.0.0. If `usertrust-claude-code` is installed, uninstall it BEFORE installing
+`usertools`:
+
+```
+/plugin uninstall usertrust-claude-code@usertrust
+/plugin install usertools@usertrust
+```
+
+With both installed, every tool call is metered twice. Your configuration file,
+state directory and server settings are unchanged by the rename.
 
 ## Quickstart (against usertrust-server)
 
