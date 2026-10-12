@@ -328,7 +328,78 @@ export function wrapStream<T>(
 	onError: (error: unknown, partial: StreamCompletion) => void,
 	onChunk?: ChunkHook,
 ): AsyncIterable<T> {
-	return wrapStreamImpl(stream, kind, onComplete, onError, onChunk);
+	return endsBeforeStart(
+		wrapStreamImpl(stream, kind, onComplete, onError, onChunk),
+		stream,
+		onComplete,
+		onError,
+	);
+}
+
+/** What a stream that delivered nothing reports to its terminal (a fresh object each time). */
+function nothingConsumed(): StreamCompletion {
+	return { usage: { ...NO_USAGE }, chunksDelivered: 0, usageReported: false };
+}
+
+/**
+ * Give a generator that is closed BEFORE its first `next()` the terminal it would have
+ * had once started.
+ *
+ * An async generator in its start state never runs its body when `.return()` or
+ * `.throw()` is called on it: it completes on the spot, so wrapStreamImpl's `finally`
+ * (settle) and `catch` (void) never run, the hold is never ended, `.receipt` never
+ * settles and the governor's in-flight stream count never drops. This patches the two
+ * methods ON THE GENERATOR ITSELF (it stays a real async generator, and
+ * `Symbol.asyncDispose`, which calls `this.return()`, goes through the patch) and, until
+ * the first `next()`, runs the same terminal a started generator would:
+ *   - `.return(v)` is the early `break` with nothing consumed: the provider stream is
+ *     closed, then `onComplete` runs with zero usage, `usageReported: false` (so the hold
+ *     settles at the ESTIMATE, the rule for any stream that reports no usage), and a
+ *     settlement that `onComplete` returns is awaited, as wrapStreamImpl's `finally` does.
+ *   - `.throw(e)` is what `.throw(e)` does to a started stream: the provider stream is
+ *     closed, then `onError(e)` runs (the hold is VOIDED) and `e` is rethrown.
+ * Once `next()` has been called the patched methods defer to the generator's own.
+ */
+function endsBeforeStart<T>(
+	gen: AsyncGenerator<T>,
+	source: AsyncIterable<T>,
+	onComplete: (completion: StreamCompletion) => void | Promise<void>,
+	onError: (error: unknown, partial: StreamCompletion) => void,
+): AsyncGenerator<T> {
+	let started = false;
+	const ownNext = gen.next.bind(gen);
+	const ownReturn = gen.return.bind(gen);
+	const ownThrow = gen.throw.bind(gen);
+	// Best effort, like the iterator close a `for await` break performs on the source.
+	const closeSource = async (): Promise<void> => {
+		try {
+			await source[Symbol.asyncIterator]().return?.();
+		} catch {
+			// nothing to release, or the source refused: the terminal still runs
+		}
+	};
+	gen.next = (...args: [] | [unknown]) => {
+		started = true;
+		return ownNext(...args);
+	};
+	gen.return = async (value: unknown) => {
+		if (started) return ownReturn(value as never);
+		started = true;
+		await ownReturn(value as never); // complete the generator; its body never runs
+		await closeSource();
+		const settling = onComplete(nothingConsumed());
+		if (settling !== undefined) await settling;
+		return { done: true, value: value as never };
+	};
+	gen.throw = async (error: unknown) => {
+		if (started) return ownThrow(error);
+		started = true;
+		await ownReturn(undefined as never);
+		await closeSource();
+		onError(error, nothingConsumed());
+		throw error;
+	};
+	return gen;
 }
 
 async function* wrapStreamImpl<T>(

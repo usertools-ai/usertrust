@@ -502,7 +502,13 @@ type RefusedGoogleNamespace<P, N> = P extends "live"
 		? RefuseMembers<N, "create" | "createEmbeddings">
 		: P extends "chats" | "interactions"
 			? RefuseMembers<N, "create">
-			: N;
+			: P extends "tunings"
+				? RefuseMembers<N, "tune">
+				: P extends "caches"
+					? RefuseMembers<N, "create" | "update">
+					: P extends "fileSearchStores"
+						? RefuseMembers<N, "uploadToFileSearchStore" | "importFile">
+						: N;
 
 // ── Provider selection: the type-level twin of detectClientKind ──
 // Each predicate is the full runtime test, both halves: the namespace is a
@@ -567,7 +573,14 @@ type GovernedResponsesPart<T, K extends keyof T = Extract<keyof T, "responses">>
 type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
 	[P in K]: GovernedGoogleModels<T[P]>;
 };
-type GoogleRefusingNamespace = "chats" | "live" | "batches" | "interactions";
+type GoogleRefusingNamespace =
+	| "chats"
+	| "live"
+	| "batches"
+	| "interactions"
+	| "tunings"
+	| "caches"
+	| "fileSearchStores";
 type RefusedGoogleNamespacesPart<
 	T,
 	K extends keyof T = Extract<keyof T, GoogleRefusingNamespace>,
@@ -3732,7 +3745,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// called, so there is nothing for the boundary to sit outside of or before. Async,
 	// because the append is: the stand-in rejects rather than throws, and is counted
 	// in-flight so destroy() waits for the append before releasing the writer.
-	async function refuseUngovernedMethod(path: string, args: unknown[]): Promise<never> {
+	async function refuseUngovernedMethod(
+		path: string,
+		args: unknown[],
+		error: PolicyDeniedError = ungovernedGoogleMethodError(path),
+	): Promise<never> {
 		if (destroyed) {
 			throw new Error("TrustedClient has been destroyed");
 		}
@@ -3743,19 +3760,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		const attribution = getCurrentCostCenter();
 		inFlightCount++;
 		try {
-			const params = args[0];
-			const model =
-				params != null && typeof params === "object"
-					? (params as { model?: unknown }).model
-					: undefined;
-			const error = ungovernedGoogleMethodError(path);
+			// The model label is read without running caller code: an OWN DATA property
+			// that holds a string, or nothing. A `model` getter that throws (or a Proxy trap)
+			// must not turn the refusal into its own error and skip the denial record.
+			const model = ownStringDataProperty(args[0], "model");
 			await appendDenialEvent({
 				audit,
 				actor: "local",
 				error,
 				record: { denialClass: "policy" },
 				fields: {
-					...(typeof model === "string" ? { model } : {}),
+					...(model !== undefined ? { model } : {}),
 					actionName: path,
 					endpointClass: endpoint.class,
 					...(attribution !== undefined ? { costCenter: attribution.costCenter } : {}),
@@ -4659,19 +4674,22 @@ function buildOpenAIProxy<T>(
 }
 
 /**
- * The generation methods a Google client exposes that usertrust does NOT govern, by
- * namespace. Each one sends a billable request, so the governed client refuses it by
- * name rather than letting it run unmetered, unpoliced and unaudited: the call writes a
- * `policy_denied` event and rejects with a PolicyDeniedError, and the SDK is never
- * reached (`refuseUngovernedMethod` in trust()). `chats.create` is here because the `Chat` it
+ * The billable methods a Google client exposes that usertrust does NOT govern, by
+ * namespace. Each one sends a request Google bills (generation, embedding, tuning, cache
+ * storage, file-search indexing), so the governed client refuses it by name rather than
+ * letting it run unmetered, unpoliced and unaudited: the call writes a `policy_denied`
+ * event and rejects with a PolicyDeniedError, and the SDK is never reached
+ * (`refuseUngovernedMethod` in trust()). `chats.create` is here because the `Chat` it
  * returns drives the SDK's RAW `models` (bound when the client was constructed), so
  * every `sendMessage` / `sendMessageStream` would bypass the governed proxy.
  *
- * Everything not listed passes through untouched: the free metadata calls
+ * Everything not listed passes through untouched: the free metadata and read calls
  * (`models.list` / `get` / `update` / `delete` / `countTokens` / `computeTokens`,
  * `batches.list` / `get` / `cancel` / `delete`, `interactions.get` / `cancel` /
- * `delete`) and the namespaces that are not generation (`caches`, `files`,
- * `operations`, `authTokens`, `tunings`, `fileSearchStores`, `webhooks`).
+ * `delete`, `tunings.list` / `get` / `cancel`, `caches.list` / `get` / `delete`,
+ * `fileSearchStores.list` / `get` / `create` / `delete` / `downloadMedia` and its
+ * `documents` reads) and the namespaces with nothing billable (`files`, `operations`,
+ * `authTokens`, `webhooks`).
  *
  * Exported for the tests, which assert one refusal per entry. The type layer's twin
  * is the `Refused…` mapping above `GovernedShapeOf`; the two must list the same names.
@@ -4691,15 +4709,35 @@ export const GOOGLE_REFUSED_METHODS = {
 	"live.music": ["connect"],
 	batches: ["create", "createEmbeddings"],
 	interactions: ["create"],
+	tunings: ["tune"],
+	caches: ["create", "update"],
+	fileSearchStores: ["uploadToFileSearchStore", "importFile"],
 } as const satisfies Record<string, readonly string[]>;
 
 const GOOGLE_GOVERNED_METHODS = "models.generateContent and models.generateContentStream";
+
+/** The client-level namespaces that carry a refused method (`live.music` hangs off `live`). */
+const GOOGLE_REFUSING_NAMESPACES: ReadonlySet<string> = new Set([
+	"chats",
+	"live",
+	"batches",
+	"interactions",
+	"tunings",
+	"caches",
+	"fileSearchStores",
+]);
+
+function isGoogleRefusingNamespace(
+	prop: string | symbol,
+): prop is Exclude<keyof typeof GOOGLE_REFUSED_METHODS, "models" | "live.music"> {
+	return typeof prop === "string" && GOOGLE_REFUSING_NAMESPACES.has(prop);
+}
 
 /** The refusal a governed client answers a GOOGLE_REFUSED_METHODS call with. */
 function ungovernedGoogleMethodError(path: string): PolicyDeniedError {
 	return new PolicyDeniedError(
 		`ungoverned_method: ${path} is not governed on a Google client`,
-		`usertrust governs ${GOOGLE_GOVERNED_METHODS} on a Google client, and refuses every other generation method rather than let it run unmetered. To make this call anyway, run it on the original (unwrapped) client inside governAction() with a cost estimate.`,
+		`usertrust governs ${GOOGLE_GOVERNED_METHODS} on a Google client, and refuses every other billable method rather than let it run unmetered. To make this call anyway, run it on the original (unwrapped) client inside governAction() with a cost estimate.`,
 	);
 }
 
@@ -4708,7 +4746,168 @@ function ungovernedGoogleMethodError(path: string): PolicyDeniedError {
  * boundary, then reject with the PolicyDeniedError. Built by `trust()`, which owns the
  * audit writer; the proxy builders only know the method's path.
  */
-type RefuseFn = (path: string, args: unknown[]) => Promise<never>;
+type RefuseFn = (path: string, args: unknown[], error?: PolicyDeniedError) => Promise<never>;
+
+/** `obj[key]` when it is an OWN DATA property holding a string; never runs an accessor or a trap. */
+function ownStringDataProperty(obj: unknown, key: string): string | undefined {
+	if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) return undefined;
+	try {
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		return d !== undefined && "value" in d && typeof d.value === "string" ? d.value : undefined;
+	} catch {
+		return undefined; // a Proxy's descriptor trap threw: no label, the refusal still lands
+	}
+}
+
+// ── Automatic function calling (AFC) on generateContent / generateContentStream ──
+// With a callable tool in `config.tools` and AFC not disabled, @google/genai runs its
+// AFC loop: one provider request PER tool round inside the one call. `generateContent`
+// returns the LAST round's response (so only its `usageMetadata` is seen), and
+// `generateContentStream` (`processAfcStream`) yields every round's chunks through one
+// generator whose replace-with-latest snapshot keeps the last round only. Either way the
+// earlier rounds would go unbilled. Until each round is metered, a call that would run
+// the AFC loop is refused (an audited denial) before any hold or SDK call.
+
+/** The SDK reached `processAfcStream`, or not; or it cannot be told without running caller code. */
+type GoogleAfcVerdict = "afc" | "no_afc" | "indeterminate";
+
+/** A value property access would yield, found WITHOUT running a getter. */
+type DataRead = { value: unknown } | undefined;
+
+/**
+ * Resolve `obj[key]` the way property access does (own, then up the prototype chain),
+ * but return `undefined` (indeterminate) instead of invoking an accessor. Nullish `obj`
+ * reads as `undefined`, which is what the SDK's optional chaining yields.
+ */
+function readDataProperty(obj: unknown, key: string): DataRead {
+	if (obj == null) return { value: undefined };
+	for (let o: object | null = Object(obj); o !== null; o = Object.getPrototypeOf(o)) {
+		const d = Object.getOwnPropertyDescriptor(o, key);
+		if (d !== undefined) return "value" in d ? { value: d.value } : undefined;
+	}
+	return { value: undefined };
+}
+
+/** Thrown inside the predicate when a read cannot be made without running caller code. */
+const INDETERMINATE = Symbol("indeterminate");
+
+function dataValue(obj: unknown, key: string): unknown {
+	const read = readDataProperty(obj, key);
+	if (read === undefined) throw INDETERMINATE;
+	return read.value;
+}
+
+/**
+ * The SDK's `isCallableTool`: `'callTool' in tool && typeof tool.callTool === 'function'`.
+ * `in` accepts any object, function objects included; on a primitive or `null` the SDK's
+ * `in` throws a TypeError, which here is indeterminate.
+ */
+function isCallableToolLike(tool: unknown): boolean {
+	if (tool === null || (typeof tool !== "object" && typeof tool !== "function")) {
+		throw INDETERMINATE;
+	}
+	return typeof dataValue(tool, "callTool") === "function";
+}
+
+/** The tools list as the SDK iterates it (`config?.tools ?? []`); only a plain array is read. */
+function toolsList(config: unknown): unknown[] {
+	const tools = dataValue(config, "tools") ?? [];
+	if (!Array.isArray(tools)) throw INDETERMINATE;
+	return tools;
+}
+
+/**
+ * Would `models.generateContent(params)` / `models.generateContentStream(params)` run the
+ * SDK's AFC loop? ONE predicate for both, a line-for-line mirror of @google/genai 1.52.0
+ * (`shouldDisableAfc`, `isCallableTool`, `hasCallableTools`,
+ * `findAfcIncompatibleToolIndexes`, and the two methods' own guards), reading only data
+ * properties:
+ *
+ *   1. `shouldDisableAfc(config)` true → no AFC: `automaticFunctionCalling.disable`
+ *      truthy; or no callable tool (scanning stops at the first; `generateContent`'s extra
+ *      `hasCallableTools` test is then the same answer); or `maximumRemoteCalls` invalid,
+ *      `(n && (n < 0 || !Number.isInteger(n))) || n == 0`.
+ *   2. Otherwise the SDK THROWS before any request when a non-callable tool carries
+ *      `functionDeclarations` (both methods), or, on the stream only, when
+ *      `toolConfig.functionCallingConfig.streamFunctionCallArguments` is truthy. Those
+ *      calls are left to the SDK ("no_afc"): they reach the governed path, the SDK throws,
+ *      and the hold is voided.
+ *   3. Otherwise the SDK runs its AFC loop → "afc".
+ *
+ * MCP needs no case of its own: `mcpToTool(...)` returns a CallableTool (it has
+ * `callTool`), and a raw MCP client in `config.tools` also has `callTool`, so the SDK
+ * treats both as callable — and so does this check.
+ *
+ * Anything that cannot be read without running caller code (a getter, a non-array
+ * `tools`, a primitive tool, a non-primitive `maximumRemoteCalls` whose comparison would
+ * call `valueOf`, a Proxy trap that throws) is "indeterminate", and the caller refuses it.
+ */
+export function googleAfcVerdict(
+	params: unknown,
+	method: "generateContent" | "generateContentStream",
+): GoogleAfcVerdict {
+	try {
+		const config = dataValue(params, "config");
+		const afcConfig = dataValue(config, "automaticFunctionCalling");
+		if (dataValue(afcConfig, "disable")) return "no_afc";
+		const tools = toolsList(config);
+		let callablePresent = false;
+		// By index, not `for...of`: an element getter must not run (a hole reads as
+		// `undefined`, on which the SDK's `in` throws, so it is indeterminate).
+		for (let i = 0; i < tools.length; i++) {
+			if (isCallableToolLike(dataValue(tools, String(i)))) {
+				callablePresent = true;
+				break;
+			}
+		}
+		if (!callablePresent) return "no_afc";
+		const maxCalls = dataValue(afcConfig, "maximumRemoteCalls");
+		if (maxCalls !== null && (typeof maxCalls === "object" || typeof maxCalls === "function")) {
+			throw INDETERMINATE;
+		}
+		if (typeof maxCalls === "symbol") throw INDETERMINATE;
+		// biome-ignore lint/suspicious/noExplicitAny: the SDK's own loose comparison, mirrored verbatim
+		const n = maxCalls as any;
+		// biome-ignore lint/suspicious/noDoubleEquals: `== 0` is the SDK's test (it also matches "0" and false)
+		if ((n && (n < 0 || !Number.isInteger(n))) || n == 0) return "no_afc";
+		// The SDK's own pre-request throws (step 2) — not refused here.
+		for (let i = 0; i < tools.length; i++) {
+			if (!(i in tools)) continue; // forEach skips holes
+			const tool = dataValue(tools, String(i));
+			if (isCallableToolLike(tool)) continue;
+			const declarations = dataValue(tool, "functionDeclarations");
+			if (declarations) {
+				const length = dataValue(declarations, "length");
+				if (length !== undefined && typeof length !== "number") throw INDETERMINATE;
+				if ((length as number) > 0) return "no_afc";
+			}
+		}
+		if (method === "generateContentStream") {
+			const toolConfig = dataValue(config, "toolConfig");
+			const callingConfig = dataValue(toolConfig, "functionCallingConfig");
+			if (dataValue(callingConfig, "streamFunctionCallArguments")) return "no_afc";
+		}
+		return "afc";
+	} catch {
+		// INDETERMINATE, or a Proxy trap that threw: fail closed.
+		return "indeterminate";
+	}
+}
+
+function googleAfcError(
+	method: "generateContent" | "generateContentStream",
+	verdict: "afc" | "indeterminate",
+): PolicyDeniedError {
+	return verdict === "afc"
+		? new PolicyDeniedError(
+				`ungoverned_method: models.${method} with automatic function calling is not governed yet`,
+				"With a callable tool, the SDK makes one provider request per tool round inside this call, and usertrust cannot yet meter every round. Set config.automaticFunctionCalling.disable: true and run the tool calls yourself, or make the call on the original (unwrapped) client inside governAction() with a cost estimate.",
+			)
+		: new PolicyDeniedError(
+				`ungoverned_method: models.${method} could not be checked for automatic function calling`,
+				"config.automaticFunctionCalling, config.tools or a tool is read through an accessor or is not plain data, so usertrust cannot tell without running your code whether the SDK would run automatic function calling. Pass plain data properties (an array for config.tools).",
+			);
+}
 
 /**
  * Wrap one Google namespace so its refused methods are refused through `refuse`. A namespace that is not a
@@ -4780,10 +4979,28 @@ function buildGoogleProxy<T>(
 	const modelsProxy = new Proxy(models, {
 		get(target, prop, receiver) {
 			if (prop === "generateContent") {
-				return (...args: unknown[]) => intercept(originalGenerate, target, args);
+				return async (...args: unknown[]) => {
+					// ── AFC gate: fail closed until each AFC round is metered ──
+					const afc = googleAfcVerdict(args[0], "generateContent");
+					if (afc !== "no_afc") {
+						return refuse("models.generateContent", args, googleAfcError("generateContent", afc));
+					}
+					// ── end AFC gate ──
+					return intercept(originalGenerate, target, args);
+				};
 			}
 			if (prop === "generateContentStream" && originalGenerateStream !== undefined) {
 				return async (...args: unknown[]) => {
+					// ── AFC gate: fail closed until each AFC round is metered ──
+					const afc = googleAfcVerdict(args[0], "generateContentStream");
+					if (afc !== "no_afc") {
+						return refuse(
+							"models.generateContentStream",
+							args,
+							googleAfcError("generateContentStream", afc),
+						);
+					}
+					// ── end AFC gate ──
 					const { response } = await intercept(originalGenerateStream, target, args);
 					return response;
 				};
@@ -4805,7 +5022,7 @@ function buildGoogleProxy<T>(
 			if (prop === "models") return modelsProxy;
 			if (prop === "destroy") return destroy;
 			if (prop === "governAction") return governAction;
-			if (prop === "chats" || prop === "live" || prop === "batches" || prop === "interactions") {
+			if (isGoogleRefusingNamespace(prop)) {
 				return refusingNamespaceProxy(
 					Reflect.get(target, prop, receiver),
 					prop,

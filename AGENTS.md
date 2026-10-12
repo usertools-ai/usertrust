@@ -1536,14 +1536,18 @@ OpenAI `chat.completions.create` and `responses.create` when present, Google
 `models.generateContent` and `models.generateContentStream`. Explicitly **ungoverned** — these
 bypass governance, audit, and budget enforcement: `messages.batches`, `beta.models`, `beta.files`,
 OpenAI `responses.retrieve/cancel/delete`, the `responses.stream()` / `responses.parse()` helpers,
-the OpenAI `beta.*` namespace, legacy `completions.create`, and Google's calls that generate
-nothing (`models.countTokens/list/get`, `caches`, `files`, and the like). Google's OTHER generation
+the OpenAI `beta.*` namespace, legacy `completions.create`, and Google's calls that are not billed
+(`models.countTokens/list/get`, `caches.get`, `files`, and the like). Google's OTHER billable
 methods are **refused**, not passed through (`GOOGLE_REFUSED_METHODS` in `govern.ts`:
 `models.embedContent/generateImages/editImage/upscaleImage/generateVideos/recontextImage/
 segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create/
-createEmbeddings`, `interactions.create`): each call writes a `policy_denied` event at the denial
-boundary and rejects with a `PolicyDeniedError` naming the method, and the SDK is never reached. If
-you add a governed or refused surface, update that doc block.
+createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create/update`,
+`fileSearchStores.uploadToFileSearchStore/importFile`): each call writes a `policy_denied` event
+at the denial boundary and rejects with a `PolicyDeniedError` naming the method, and the SDK is
+never reached. `models.generateContent` / `generateContentStream` are refused the same way when
+the SDK would run automatic function calling (`googleAfcVerdict`, a mirror of the SDK's
+`shouldDisableAfc`): one request per tool round, not yet metered per round. If you add a governed
+or refused surface, update that doc block.
 
 ---
 

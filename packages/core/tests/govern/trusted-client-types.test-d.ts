@@ -557,7 +557,22 @@ interface FakeGoogle {
 		create(params: { model: string }): Promise<{ id: string }>;
 		get(id: string): Promise<{ id: string }>;
 	};
-	caches: { create(params: { model: string }): Promise<{ name: string }> };
+	tunings: {
+		tune(params: { baseModel: string }): Promise<{ name: string }>;
+		get(params: { name: string }): Promise<{ name: string }>;
+	};
+	caches: {
+		create(params: { model: string }): Promise<{ name: string }>;
+		update(params: { name: string }): Promise<{ name: string }>;
+		get(params: { name: string }): Promise<{ name: string }>;
+	};
+	fileSearchStores: {
+		uploadToFileSearchStore(params: { file: string }): Promise<{ name: string }>;
+		importFile(params: { fileName: string }): Promise<{ name: string }>;
+		create(params: { displayName: string }): Promise<{ name: string }>;
+		documents: { list(params: { parent: string }): Promise<{ name: string }[]> };
+	};
+	files: { upload(params: { file: string }): Promise<{ name: string }> };
 }
 
 type GovGoogle = TrustedClient<FakeGoogle>;
@@ -633,8 +648,37 @@ export type _GoogleInteractionsCreateRefused = Assert<
 export type _GoogleInteractionsGetRaw = Assert<
 	IsExact<GovGoogle["interactions"]["get"], FakeGoogle["interactions"]["get"]>
 >;
+// The billable non-generation calls are refused too; their reads stay raw.
+export type _GoogleBillableNonGenerationRefused = Assert<
+	IsExact<
+		[
+			ReturnType<GovGoogle["tunings"]["tune"]>,
+			ReturnType<GovGoogle["caches"]["create"]>,
+			ReturnType<GovGoogle["caches"]["update"]>,
+			ReturnType<GovGoogle["fileSearchStores"]["uploadToFileSearchStore"]>,
+			ReturnType<GovGoogle["fileSearchStores"]["importFile"]>,
+		],
+		[Promise<never>, Promise<never>, Promise<never>, Promise<never>, Promise<never>]
+	>
+>;
+export type _GoogleBillableNamespacesReadsRaw = Assert<
+	IsExact<
+		[
+			GovGoogle["tunings"]["get"],
+			GovGoogle["caches"]["get"],
+			GovGoogle["fileSearchStores"]["create"],
+			GovGoogle["fileSearchStores"]["documents"],
+		],
+		[
+			FakeGoogle["tunings"]["get"],
+			FakeGoogle["caches"]["get"],
+			FakeGoogle["fileSearchStores"]["create"],
+			FakeGoogle["fileSearchStores"]["documents"],
+		]
+	>
+>;
 // A namespace with nothing refused is not touched at all.
-export type _GoogleCachesRaw = Assert<IsExact<GovGoogle["caches"], FakeGoogle["caches"]>>;
+export type _GoogleFilesRaw = Assert<IsExact<GovGoogle["files"], FakeGoogle["files"]>>;
 
 // A Google client WITHOUT the stream method or the refusing namespaces gains no
 // phantom member: the rewrite is homomorphic and the parts are keyed off `keyof T`.

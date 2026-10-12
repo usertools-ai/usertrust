@@ -16,14 +16,18 @@
  *   floor, so older clients simply lack it and it stays a pass-through). A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   convenience helper is NOT (see below).
- * - Google: `client.models.generateContent()` and `client.models.generateContentStream()`.
- *   The other Google generation methods are REFUSED, not passed through: each call
+ * - Google: `client.models.generateContent()` and `client.models.generateContentStream()`,
+ *   except when the SDK would run automatic function calling (refused, below).
+ *   The other billable Google methods are REFUSED, not passed through: each call
  *   writes a `policy_denied` audit event and rejects with a PolicyDeniedError naming
  *   the method, and the SDK is never reached
  *   (`GOOGLE_REFUSED_METHODS` in govern.ts: `models.embedContent` / `generateImages` /
  *   `editImage` / `upscaleImage` / `generateVideos` / `recontextImage` /
  *   `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`,
- *   `batches.create` / `createEmbeddings`, `interactions.create`).
+ *   `batches.create` / `createEmbeddings`, `interactions.create`, `tunings.tune`,
+ *   `caches.create` / `update`, `fileSearchStores.uploadToFileSearchStore` /
+ *   `importFile`; and `generateContent` / `generateContentStream` with automatic
+ *   function calling, `googleAfcVerdict`).
  *
  * Remaining ungoverned surfaces (feature-detected pass-throughs, or shapes that do
  * not mirror `create`): `client.messages.batches`, `client.beta.messages.batches`,
@@ -33,9 +37,9 @@
  * the SDK's raw client internally and so bypass the governed `create`), the OpenAI
  * `client.beta.*` namespace (assistants/threads/realtime — a different shape from
  * Anthropic beta), the legacy `client.completions.create`, and on a Google client
- * the non-generation calls (`models.list/get/update/delete/countTokens/computeTokens`,
- * `caches`, `files`, `operations`, `tunings`, `fileSearchStores`, and the batch and
- * interaction read methods). These are **NOT** intercepted and bypass governance,
+ * the calls that are not billed (`models.list/get/update/delete/countTokens/
+ * computeTokens`, `files`, `operations`, and the batch, interaction, tuning, cache and
+ * file-search-store read methods). These are **NOT** intercepted and bypass governance,
  * audit, and budget enforcement. Callers relying on ungoverned methods should
  * implement their own budget and audit controls or wrap calls through the governed
  * entry points above.
