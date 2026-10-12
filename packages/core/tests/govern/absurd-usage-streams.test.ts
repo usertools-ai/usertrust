@@ -573,6 +573,19 @@ describe("a stream's implausible record keeps which check fired", () => {
 		expect(data).toMatchObject({ checks: { outputTokens: "refused" }, tiers: { outputTokens: 1 } });
 	});
 
+	it("Anthropic (MessageStream finalMessage): a finite 150M input is recorded as refused, not sum", async () => {
+		// The finalMessage's input is re-sanitized as a count before the merge, where its aggregate check fires first
+		// (unlabelled, a sum); the extractor refused the same figure on its own, and that label wins.
+		const { receipt, data } = await anthropicEmitter((stream) => {
+			stream.emit("finalMessage", { usage: { input_tokens: 150_000_000, output_tokens: 5 } });
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		expect(data).toMatchObject({
+			checks: { inputTokens: "refused" },
+			tiers: { inputTokens: 150_000_000 },
+		});
+	});
+
 	it("Anthropic (MessageStream finalMessage): a negative cache read is recorded as refused", async () => {
 		const { receipt, data } = await anthropicEmitter((stream) => {
 			stream.emit("finalMessage", {
@@ -603,7 +616,7 @@ describe("a stream's implausible record keeps which check fired", () => {
 		});
 	});
 
-	it("CONTROL: an OpenAI chat stream with a finite over-ceiling figure still records sum", async () => {
+	it("an OpenAI chat stream whose raw prompt is over the ceiling records refused, not sum", async () => {
 		const client = {
 			chat: {
 				completions: {
@@ -628,6 +641,93 @@ describe("a stream's implausible record keeps which check fired", () => {
 			),
 		);
 		expect(receipt.usageSource).toBe("estimated");
-		expect(data).toMatchObject({ checks: { inputTokens: "sum" }, tiers: { inputTokens: HUGE } });
+		expect(data).toMatchObject({
+			checks: { inputTokens: "refused" },
+			tiers: { inputTokens: HUGE },
+		});
+	});
+
+	/** Drain one governed OpenAI stream (chat.completions or Responses) whose final chunk is `last`. */
+	async function openaiStream(surface: "chat" | "responses", last: unknown) {
+		const create = vi.fn(async (_req: unknown) =>
+			gen(surface === "chat" ? [{ choices: [{ delta: { content: "hi" } }] }, last] : [last]),
+		);
+		const client = {
+			chat: { completions: { create: surface === "chat" ? create : vi.fn() } },
+			...(surface === "responses" ? { responses: { create } } : {}),
+		};
+		return settle(client, async (g) => {
+			const params = { model: "gpt-4o", stream: true };
+			const result =
+				surface === "chat"
+					? await (
+							g.chat as { completions: { create: (p: unknown) => Promise<unknown> } }
+						).completions.create({ ...params, messages: [{ role: "user", content: "hello" }] })
+					: await (g.responses as { create: (p: unknown) => Promise<unknown> }).create({
+							...params,
+							input: "hello",
+						});
+			return drain(result);
+		});
+	}
+
+	it("an OpenAI chat stream: a 150M prompt hiding behind a 100M cache, and a cached_tokens of -1, record refused", async () => {
+		const hidden = await openaiStream("chat", {
+			usage: {
+				prompt_tokens: 150_000_000,
+				completion_tokens: 10,
+				prompt_tokens_details: { cached_tokens: 100_000_000 },
+			},
+		});
+		expect(hidden.receipt.usageSource).toBe("estimated");
+		expect(hidden.data).toMatchObject({
+			checks: { inputTokens: "refused" },
+			tiers: { inputTokens: 150_000_000 },
+		});
+		const invalid = await openaiStream("chat", {
+			usage: {
+				prompt_tokens: 100,
+				completion_tokens: 10,
+				prompt_tokens_details: { cached_tokens: -1 },
+			},
+		});
+		expect(invalid.receipt.usageSource).toBe("estimated");
+		expect(invalid.data).toMatchObject({
+			checks: { cacheReadTokens: "refused" },
+			tiers: { cacheReadTokens: 1 },
+		});
+	});
+
+	it("an OpenAI Responses stream: a 150M input hiding behind a 100M cache, and a cached_tokens of -1, record refused", async () => {
+		const terminal = (usage: unknown) => ({
+			type: "response.completed",
+			response: { id: "r", usage },
+		});
+		const hidden = await openaiStream(
+			"responses",
+			terminal({
+				input_tokens: 150_000_000,
+				output_tokens: 10,
+				input_tokens_details: { cached_tokens: 100_000_000 },
+			}),
+		);
+		expect(hidden.receipt.usageSource).toBe("estimated");
+		expect(hidden.data).toMatchObject({
+			checks: { inputTokens: "refused" },
+			tiers: { inputTokens: 150_000_000 },
+		});
+		const invalid = await openaiStream(
+			"responses",
+			terminal({
+				input_tokens: 100,
+				output_tokens: 10,
+				input_tokens_details: { cached_tokens: -1 },
+			}),
+		);
+		expect(invalid.receipt.usageSource).toBe("estimated");
+		expect(invalid.data).toMatchObject({
+			checks: { cacheReadTokens: "refused" },
+			tiers: { cacheReadTokens: 1 },
+		});
 	});
 });
