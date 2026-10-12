@@ -102,7 +102,7 @@ const client = await trust(new GoogleGenAI({ apiKey }), { budget: 50_000 });
 const { response } = await client.models.generateContent({ ... });
 ```
 
-On a Google client `models.generateContent` and `models.generateContentStream` are governed; `generateContentStream` resolves to the stream itself with the settled receipt on it (`await stream.receipt`). Every other Google generation method (`models.embedContent`, `generateImages`, `editImage`, `upscaleImage`, `generateVideos`, `recontextImage`, `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create`, `batches.createEmbeddings`, `interactions.create`) throws a `PolicyDeniedError` naming the method before the SDK is called. Calls that generate nothing, such as `models.countTokens`, pass through ungoverned.
+On a Google client `models.generateContent` and `models.generateContentStream` are governed; `generateContentStream` resolves to the stream itself with the settled receipt on it (`await stream.receipt`). Every other Google generation method (`models.embedContent`, `generateImages`, `editImage`, `upscaleImage`, `generateVideos`, `recontextImage`, `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create`, `batches.createEmbeddings`, `interactions.create`) rejects with a `PolicyDeniedError` naming the method, and records a `policy_denied` audit event, before the SDK is called. Calls that generate nothing, such as `models.countTokens`, pass through ungoverned.
 
 ## Streaming
 

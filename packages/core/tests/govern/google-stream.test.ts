@@ -67,17 +67,22 @@ function makeMockEngine(): TrustEngine {
 	};
 }
 
-function makeMockAudit(): AuditWriter & { events: AppendEventInput[] } {
+/** Each appended event gets its own hash (`hashes[i]` for `events[i]`), so a handle can be joined. */
+function makeMockAudit(): AuditWriter & { events: AppendEventInput[]; hashes: string[] } {
 	const events: AppendEventInput[] = [];
+	const hashes: string[] = [];
 	return {
 		events,
+		hashes,
 		appendEvent: vi.fn(async (input: AppendEventInput): Promise<AuditEvent> => {
 			events.push(input);
+			const hash = String(events.length).padStart(64, "0");
+			hashes.push(hash);
 			return {
 				id: randomUUID(),
 				timestamp: new Date().toISOString(),
 				previousHash: "0".repeat(64),
-				hash: "a".repeat(64),
+				hash,
 				kind: input.kind,
 				actor: input.actor,
 				data: input.data,
@@ -146,7 +151,7 @@ function makeGoogleClient(opts: FakeGoogleOpts = {}) {
 	});
 	const spies = {
 		models: {
-			embedContent: vi.fn(async () => ({})),
+			embedContent: vi.fn(async (_params: Record<string, unknown>) => ({})),
 			generateImages: vi.fn(async () => ({})),
 			editImage: vi.fn(async () => ({})),
 			upscaleImage: vi.fn(async () => ({})),
@@ -548,38 +553,100 @@ describe("Google generation methods usertrust does not govern are refused", () =
 		);
 	});
 
-	it.each(REFUSED)("%s.%s throws naming itself, before the SDK is called", async (ns, method) => {
-		const engine = makeMockEngine();
-		const { client, spies } = makeGoogleClient();
-		const governed = await trust(client, {
-			dryRun: false,
-			budget: 50_000,
-			vaultBase: tmpVault,
-			_engine: engine,
-			_audit: makeMockAudit(),
+	it.each(REFUSED)(
+		"%s.%s rejects naming itself, with its policy_denied event on the chain, before the SDK is called",
+		async (ns, method) => {
+			const engine = makeMockEngine();
+			const audit = makeMockAudit();
+			const { client, spies } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: audit,
+			});
+
+			const fn = namespaceOf(governed, ns)[method];
+			expect(typeof fn).toBe("function");
+			// Async: the call returns a promise (it never throws synchronously), because the
+			// denial is appended to the chain before the caller hears of it.
+			let pending: unknown;
+			expect(() => {
+				pending = fn?.({ model: "gemini-2.5-flash", contents: "Say hello" });
+			}).not.toThrow();
+			expect(pending).toBeInstanceOf(Promise);
+			const err = await (pending as Promise<unknown>).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			const denied = err as PolicyDeniedError;
+			expect(denied.message).toContain(`${ns}.${method} is not governed`);
+			expect(denied.message).toContain("models.generateContent and models.generateContentStream");
+
+			// Exactly one chain event, the denial, and the error carries ITS hash.
+			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+			expect(denied.auditEventHash).toBe(audit.hashes[0]);
+			expect(denied.auditDegraded).toBeUndefined();
+			const data = audit.events[0]?.data ?? {};
+			expect(data).toMatchObject({
+				decision: "deny",
+				denialClass: "policy",
+				actionName: `${ns}.${method}`,
+				model: "gemini-2.5-flash",
+				endpointClass: "cloud",
+			});
+			expect(String(data.error)).toContain(`${ns}.${method} is not governed`);
+			// No prompt-derived field: the refusal never read the request's content.
+			expect(data).not.toHaveProperty("promptHash");
+
+			const spy = (spies as Record<string, Record<string, ReturnType<typeof vi.fn>>>)[ns]?.[method];
+			expect(spy).toBeDefined();
+			expect(spy).not.toHaveBeenCalled();
+			expect(engine.spendPending).not.toHaveBeenCalled();
+
+			await destroy(governed);
+		},
+	);
+
+	for (const failClosed of [false, true]) {
+		it(`failClosed:${failClosed} — a failed denial append still rejects with the typed refusal, marked degraded`, async () => {
+			// The same contract every other denial has (appendDenialEvent): failClosed guards an
+			// unaudited SPEND, and a refusal moves no money, so the caller gets the typed
+			// PolicyDeniedError with `auditDegraded`, never an AuditDegradedError.
+			writeVaultConfig(tmpVault, { budget: 50_000, audit: { failClosed } });
+			const { client, spies } = makeGoogleClient();
+			const failingAudit: AuditWriter = {
+				appendEvent: vi.fn(async () => {
+					throw new Error("disk full");
+				}),
+				getWriteFailures: vi.fn(() => 1),
+				isDegraded: vi.fn(() => true),
+				flush: vi.fn(async () => {}),
+				release: vi.fn(),
+			};
+			const governed = await trust(client, {
+				dryRun: true,
+				vaultBase: tmpVault,
+				_audit: failingAudit,
+			});
+
+			const err = await governed.models.embedContent({ model: "gemini-embedding-001" }).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect((err as PolicyDeniedError).auditEventHash).toBeUndefined();
+			expect((err as PolicyDeniedError).auditDegraded).toBe(true);
+			expect(failingAudit.appendEvent).toHaveBeenCalledOnce();
+			expect(spies.models.embedContent).not.toHaveBeenCalled();
+
+			await destroy(governed);
 		});
-
-		const fn = namespaceOf(governed, ns)[method];
-		expect(typeof fn).toBe("function");
-		let thrown: unknown;
-		try {
-			fn?.({ model: "gemini-2.5-flash" });
-		} catch (err) {
-			thrown = err;
-		}
-		expect(thrown).toBeInstanceOf(PolicyDeniedError);
-		expect((thrown as Error).message).toContain(`${ns}.${method} is not governed`);
-		expect((thrown as Error).message).toContain(
-			"models.generateContent and models.generateContentStream",
-		);
-
-		const spy = (spies as Record<string, Record<string, ReturnType<typeof vi.fn>>>)[ns]?.[method];
-		expect(spy).toBeDefined();
-		expect(spy).not.toHaveBeenCalled();
-		expect(engine.spendPending).not.toHaveBeenCalled();
-
-		await destroy(governed);
-	});
+	}
 
 	it("free metadata calls and non-generation namespaces still pass through", async () => {
 		const { client, passThrough } = makeGoogleClient();

@@ -1533,10 +1533,17 @@ all. This is why provider SDK majors can be bumped with no code change.
 **The governance boundary is deliberately partial and is documented in `detect.ts`.** Governed:
 Anthropic `messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected),
 OpenAI `chat.completions.create` and `responses.create` when present, Google
-`models.generateContent`. Explicitly **ungoverned** — these bypass governance, audit, and budget
-enforcement: `messages.batches`, `beta.models`, `beta.files`, OpenAI `responses.retrieve/cancel/
-delete`, the `responses.stream()` / `responses.parse()` helpers, the OpenAI `beta.*` namespace, and
-legacy `completions.create`. If you add a governed surface, update that doc block.
+`models.generateContent` and `models.generateContentStream`. Explicitly **ungoverned** — these
+bypass governance, audit, and budget enforcement: `messages.batches`, `beta.models`, `beta.files`,
+OpenAI `responses.retrieve/cancel/delete`, the `responses.stream()` / `responses.parse()` helpers,
+the OpenAI `beta.*` namespace, legacy `completions.create`, and Google's calls that generate
+nothing (`models.countTokens/list/get`, `caches`, `files`, and the like). Google's OTHER generation
+methods are **refused**, not passed through (`GOOGLE_REFUSED_METHODS` in `govern.ts`:
+`models.embedContent/generateImages/editImage/upscaleImage/generateVideos/recontextImage/
+segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create/
+createEmbeddings`, `interactions.create`): each call writes a `policy_denied` event at the denial
+boundary and rejects with a `PolicyDeniedError` naming the method, and the SDK is never reached. If
+you add a governed or refused surface, update that doc block.
 
 ---
 

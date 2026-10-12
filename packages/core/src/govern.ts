@@ -431,12 +431,15 @@ type GovernedResponses<R> =
 			: R;
 
 /**
- * A method the governed client REFUSES: it keeps its parameters and never returns —
- * the runtime stand-in throws a PolicyDeniedError naming it before the SDK is reached
- * (GOOGLE_REFUSED_METHODS). A non-callable member is left as it is, mirroring the
- * runtime, which only replaces a member that is a function.
+ * A method the governed client REFUSES: it keeps its parameters and resolves to
+ * nothing — the runtime stand-in returns a promise that REJECTS with a PolicyDeniedError
+ * naming the method, after the denial is on the audit chain and before the SDK is
+ * reached (GOOGLE_REFUSED_METHODS). A non-callable member is left as it is, mirroring
+ * the runtime, which only replaces a member that is a function.
  */
-type RefusedMethod<F> = F extends (...args: infer A) => unknown ? (...args: A) => never : F;
+type RefusedMethod<F> = F extends (...args: infer A) => unknown
+	? (...args: A) => Promise<never>
+	: F;
 
 /**
  * Refuse the members `K` of a namespace, homomorphically (every other member,
@@ -3720,6 +3723,50 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		}
 	}
 
+	// 7b. Refusal of an ungoverned provider method (GOOGLE_REFUSED_METHODS). It is a
+	// governor decision, so it goes through the SAME denial boundary as every other
+	// pre-provider refusal: `appendDenialEvent` writes the `policy_denied` event (the
+	// method path as `actionName`) and attaches its hash to the error, whose contract
+	// is flat across `audit.failClosed` (a failed append marks it `auditDegraded`; the
+	// typed denial still reaches the caller). No mutex is taken and no provider is
+	// called, so there is nothing for the boundary to sit outside of or before. Async,
+	// because the append is: the stand-in rejects rather than throws, and is counted
+	// in-flight so destroy() waits for the append before releasing the writer.
+	async function refuseUngovernedMethod(path: string, args: unknown[]): Promise<never> {
+		if (destroyed) {
+			throw new Error("TrustedClient has been destroyed");
+		}
+		// The ALS read happens here, synchronously, in the caller's own context (see
+		// the ALS-discipline note in interceptCall). Only the LABEL is carried: a
+		// refusal debits no envelope, so it has no use for the envelope account and
+		// must not trade the refusal for resolveEnvelope's no-parentUserId error.
+		const attribution = getCurrentCostCenter();
+		inFlightCount++;
+		try {
+			const params = args[0];
+			const model =
+				params != null && typeof params === "object"
+					? (params as { model?: unknown }).model
+					: undefined;
+			const error = ungovernedGoogleMethodError(path);
+			await appendDenialEvent({
+				audit,
+				actor: "local",
+				error,
+				record: { denialClass: "policy" },
+				fields: {
+					...(typeof model === "string" ? { model } : {}),
+					actionName: path,
+					endpointClass: endpoint.class,
+					...(attribution !== undefined ? { costCenter: attribution.costCenter } : {}),
+				},
+			});
+			throw error;
+		} finally {
+			inFlightCount--;
+		}
+	}
+
 	// 8. Safety net: clean up on process exit if destroy() was never called
 	let beforeExitHandler: (() => void) | null = null;
 
@@ -3776,7 +3823,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			return buildOpenAIProxy(client, interceptCall, destroyFn, governActionImpl);
 		}
 		// google
-		return buildGoogleProxy(client, interceptCall, destroyFn, governActionImpl);
+		return buildGoogleProxy(
+			client,
+			interceptCall,
+			destroyFn,
+			governActionImpl,
+			refuseUngovernedMethod,
+		);
 	}
 
 	const governedClient = createClientProxy();
@@ -4608,8 +4661,9 @@ function buildOpenAIProxy<T>(
 /**
  * The generation methods a Google client exposes that usertrust does NOT govern, by
  * namespace. Each one sends a billable request, so the governed client refuses it by
- * name (a PolicyDeniedError, thrown before the SDK is reached) rather than letting it
- * run unmetered, unpoliced and unaudited. `chats.create` is here because the `Chat` it
+ * name rather than letting it run unmetered, unpoliced and unaudited: the call writes a
+ * `policy_denied` event and rejects with a PolicyDeniedError, and the SDK is never
+ * reached (`refuseUngovernedMethod` in trust()). `chats.create` is here because the `Chat` it
  * returns drives the SDK's RAW `models` (bound when the client was constructed), so
  * every `sendMessage` / `sendMessageStream` would bypass the governed proxy.
  *
@@ -4641,18 +4695,23 @@ export const GOOGLE_REFUSED_METHODS = {
 
 const GOOGLE_GOVERNED_METHODS = "models.generateContent and models.generateContentStream";
 
-/** A stand-in for a refused method: it throws, naming itself, and never reaches the SDK. */
-function refuseUngovernedGoogleMethod(path: string): () => never {
-	return () => {
-		throw new PolicyDeniedError(
-			`ungoverned_method: ${path} is not governed on a Google client`,
-			`usertrust governs ${GOOGLE_GOVERNED_METHODS} on a Google client, and refuses every other generation method rather than let it run unmetered. To make this call anyway, run it on the original (unwrapped) client inside governAction() with a cost estimate.`,
-		);
-	};
+/** The refusal a governed client answers a GOOGLE_REFUSED_METHODS call with. */
+function ungovernedGoogleMethodError(path: string): PolicyDeniedError {
+	return new PolicyDeniedError(
+		`ungoverned_method: ${path} is not governed on a Google client`,
+		`usertrust governs ${GOOGLE_GOVERNED_METHODS} on a Google client, and refuses every other generation method rather than let it run unmetered. To make this call anyway, run it on the original (unwrapped) client inside governAction() with a cost estimate.`,
+	);
 }
 
 /**
- * Wrap one Google namespace so its refused methods throw. A namespace that is not a
+ * Refuse one ungoverned method call: write its `policy_denied` event at the denial
+ * boundary, then reject with the PolicyDeniedError. Built by `trust()`, which owns the
+ * audit writer; the proxy builders only know the method's path.
+ */
+type RefuseFn = (path: string, args: unknown[]) => Promise<never>;
+
+/**
+ * Wrap one Google namespace so its refused methods are refused through `refuse`. A namespace that is not a
  * non-null object (absent, or callable) is left raw, and so is a listed member that
  * is not a function: there is nothing to call, so there is nothing to refuse. The
  * wrapper is built per namespace OBJECT and cached, so `client.chats === client.chats`
@@ -4661,6 +4720,7 @@ function refuseUngovernedGoogleMethod(path: string): () => never {
 function refusingNamespaceProxy(
 	ns: unknown,
 	path: keyof typeof GOOGLE_REFUSED_METHODS,
+	refuse: RefuseFn,
 	cache: WeakMap<object, unknown>,
 ): unknown {
 	if (ns == null || typeof ns !== "object") return ns;
@@ -4671,11 +4731,11 @@ function refusingNamespaceProxy(
 		get(target, prop, receiver) {
 			const value = Reflect.get(target, prop, receiver);
 			if (typeof prop === "string" && refused.includes(prop) && typeof value === "function") {
-				return refuseUngovernedGoogleMethod(`${path}.${prop}`);
+				return (...args: unknown[]) => refuse(`${path}.${prop}`, args);
 			}
 			// `live.music` is the one nested namespace with a refused member.
 			if (path === "live" && prop === "music") {
-				return refusingNamespaceProxy(value, "live.music", cache);
+				return refusingNamespaceProxy(value, "live.music", refuse, cache);
 			}
 			return value;
 		},
@@ -4695,13 +4755,15 @@ function refusingNamespaceProxy(
  * the stream itself (an async generator yielding the SDK's chunks unchanged) with the
  * settled `.receipt` promise on it, so `for await (const c of await
  * models.generateContentStream(p))` keeps its SDK shape. Every other generation
- * method is refused (GOOGLE_REFUSED_METHODS); everything else passes through.
+ * method is refused (GOOGLE_REFUSED_METHODS) through `refuse`, which audits the
+ * denial and rejects; everything else passes through.
  */
 function buildGoogleProxy<T>(
 	client: T,
 	intercept: InterceptFn,
 	destroy: () => Promise<void>,
 	governAction: GovernActionFn,
+	refuse: RefuseFn,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const models = original.models as Record<string, unknown>;
@@ -4732,7 +4794,7 @@ function buildGoogleProxy<T>(
 				refusedOnModels.includes(prop) &&
 				typeof value === "function"
 			) {
-				return refuseUngovernedGoogleMethod(`models.${prop}`);
+				return (...args: unknown[]) => refuse(`models.${prop}`, args);
 			}
 			return value;
 		},
@@ -4744,7 +4806,12 @@ function buildGoogleProxy<T>(
 			if (prop === "destroy") return destroy;
 			if (prop === "governAction") return governAction;
 			if (prop === "chats" || prop === "live" || prop === "batches" || prop === "interactions") {
-				return refusingNamespaceProxy(Reflect.get(target, prop, receiver), prop, namespaceCache);
+				return refusingNamespaceProxy(
+					Reflect.get(target, prop, receiver),
+					prop,
+					refuse,
+					namespaceCache,
+				);
 			}
 			return Reflect.get(target, prop, receiver);
 		},

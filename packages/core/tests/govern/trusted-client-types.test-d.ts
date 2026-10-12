@@ -589,26 +589,28 @@ export type _GoogleGenerateContentStreamParams = Assert<
 export type _GoogleCountTokensRaw = Assert<
 	IsExact<ReturnType<GovGoogle["models"]["countTokens"]>, Promise<{ totalTokens: number }>>
 >;
-// The refused generation methods keep their parameters and never return: the runtime
-// stand-in throws a PolicyDeniedError naming the method before the SDK is reached.
+// The refused generation methods keep their parameters and resolve to nothing: the
+// runtime stand-in records a `policy_denied` event, then REJECTS with a PolicyDeniedError
+// naming the method; the SDK is never reached. Async because the audit append is.
 export type _GoogleEmbedContentRefused = Assert<
 	IsExact<
 		GovGoogle["models"]["embedContent"],
-		(params: { model: string; contents: string }) => never
+		(params: { model: string; contents: string }) => Promise<never>
 	>
 >;
 export type _GoogleGenerateImagesRefused = Assert<
-	IsExact<ReturnType<GovGoogle["models"]["generateImages"]>, never>
+	IsExact<ReturnType<GovGoogle["models"]["generateImages"]>, Promise<never>>
 >;
-// `chats.create` is refused (its Chat would drive the SDK's raw `models`).
+// `chats.create` is refused (its Chat would drive the SDK's raw `models`). Synchronous in
+// the SDK, it too returns the rejected promise: there is no Chat to hand back.
 export type _GoogleChatsCreateRefused = Assert<
-	IsExact<GovGoogle["chats"]["create"], (params: { model: string }) => never>
+	IsExact<GovGoogle["chats"]["create"], (params: { model: string }) => Promise<never>>
 >;
 export type _GoogleLiveConnectRefused = Assert<
-	IsExact<ReturnType<GovGoogle["live"]["connect"]>, never>
+	IsExact<ReturnType<GovGoogle["live"]["connect"]>, Promise<never>>
 >;
 export type _GoogleLiveMusicConnectRefused = Assert<
-	IsExact<ReturnType<GovGoogle["live"]["music"]["connect"]>, never>
+	IsExact<ReturnType<GovGoogle["live"]["music"]["connect"]>, Promise<never>>
 >;
 export type _GoogleLiveRestRaw = Assert<
 	IsExact<[GovGoogle["live"]["label"], GovGoogle["live"]["music"]["label"]], [string, string]>
@@ -619,14 +621,14 @@ export type _GoogleBatchesCreateRefused = Assert<
 			ReturnType<GovGoogle["batches"]["create"]>,
 			ReturnType<GovGoogle["batches"]["createEmbeddings"]>,
 		],
-		[never, never]
+		[Promise<never>, Promise<never>]
 	>
 >;
 export type _GoogleBatchesListRaw = Assert<
 	IsExact<GovGoogle["batches"]["list"], FakeGoogle["batches"]["list"]>
 >;
 export type _GoogleInteractionsCreateRefused = Assert<
-	IsExact<ReturnType<GovGoogle["interactions"]["create"]>, never>
+	IsExact<ReturnType<GovGoogle["interactions"]["create"]>, Promise<never>>
 >;
 export type _GoogleInteractionsGetRaw = Assert<
 	IsExact<GovGoogle["interactions"]["get"], FakeGoogle["interactions"]["get"]>

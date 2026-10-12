@@ -26,8 +26,8 @@ budget hold, policy check, or audit entry: OpenAI's `responses.stream()` /
 generate nothing (`models.countTokens`, `models.list`, `caches`, `files` and the
 like). Google's other generation methods (`models.embedContent`, the image and
 video methods, `chats`, `live`, `batches.create`, `interactions.create`) are
-refused instead: they throw a `PolicyDeniedError` naming the method before the SDK
-is called. usertrust never pretends to govern these — the exact, current boundary
+refused instead: the call rejects with a `PolicyDeniedError` naming the method,
+and records a `policy_denied` audit event, before the SDK is called. usertrust never pretends to govern these — the exact, current boundary
 is enumerated at the source in `packages/core/src/detect.ts`.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.

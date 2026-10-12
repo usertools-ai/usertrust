@@ -17,8 +17,9 @@
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   convenience helper is NOT (see below).
  * - Google: `client.models.generateContent()` and `client.models.generateContentStream()`.
- *   The other Google generation methods are REFUSED, not passed through: they throw
- *   a PolicyDeniedError naming themselves before the SDK is reached
+ *   The other Google generation methods are REFUSED, not passed through: each call
+ *   writes a `policy_denied` audit event and rejects with a PolicyDeniedError naming
+ *   the method, and the SDK is never reached
  *   (`GOOGLE_REFUSED_METHODS` in govern.ts: `models.embedContent` / `generateImages` /
  *   `editImage` / `upscaleImage` / `generateVideos` / `recontextImage` /
  *   `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`,

@@ -99,7 +99,7 @@ The `transferId` is the universal join key. Use it to correlate entries across t
 
 If the client does not match any known shape, `trust()` throws an error at initialization time.
 
-On a Google client the other generation methods are refused rather than passed through: `models.embedContent`, `generateImages`, `editImage`, `upscaleImage`, `generateVideos`, `recontextImage`, `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create`, `batches.createEmbeddings` and `interactions.create` throw a `PolicyDeniedError` naming the method before the SDK is called. Calls that generate nothing (`models.countTokens`, `models.list`, `caches`, `files` and the like) pass through ungoverned.
+On a Google client the other generation methods are refused rather than passed through: `models.embedContent`, `generateImages`, `editImage`, `upscaleImage`, `generateVideos`, `recontextImage`, `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create`, `batches.createEmbeddings` and `interactions.create` reject with a `PolicyDeniedError` naming the method (carrying the `auditEventHash` of the `policy_denied` event it records) before the SDK is called. Calls that generate nothing (`models.countTokens`, `models.list`, `caches`, `files` and the like) pass through ungoverned.
 
 ## Streaming
 
