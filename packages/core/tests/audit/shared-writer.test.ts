@@ -484,6 +484,39 @@ describe("a failed append is loud, and each handle's degraded state is its own",
 		expect(after[1]).toMatch(/2 audit writes failed after this governor was destroyed/);
 	});
 
+	it("a report never clears what the governor reads: a late failure stays counted and degraded, through a later late success", async () => {
+		const a = open();
+		await a.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_open" } });
+		a.release();
+		// A call that outlived destroy(): its append fails (a directory where the anchor is renamed to),
+		// and it is the last in flight, so its own report runs before its rejection reaches its caller.
+		const meta = join(auditDir(), "events.jsonl.meta");
+		const anchor = readFileSync(meta);
+		rmSync(meta);
+		mkdirSync(meta);
+		const failedLate = await a
+			.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_late1" } })
+			.then(
+				() => "appended",
+				(err: unknown) => err,
+			);
+		expect(failedLate).toBeInstanceOf(Error);
+		// What that caller reads (`failClosed` refuses on it, and its error names the count):
+		expect(a.getWriteFailures()).toBe(1);
+		expect(a.isDegraded()).toBe(true);
+		rmSync(meta, { recursive: true });
+		writeFileSync(meta, anchor);
+		// A second late call succeeds: the handle stays degraded, so a failClosed call still refuses.
+		await a.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_late2" } });
+		expect(a.isDegraded()).toBe(true);
+		expect(a.getWriteFailures()).toBe(1);
+		await new Promise((r) => setImmediate(r));
+		expect(degradedWarnings().map((w) => w.message)).toEqual([
+			expect.stringMatching(/are degraded — failing:/),
+			expect.stringMatching(/1 audit write failed after this governor was destroyed/),
+		]);
+	});
+
 	it("CONTROL: a handle with no failure emits no warning, at its appends or its release", async () => {
 		const a = open();
 		await a.appendEvent({ kind: "test.ok", actor: "sys", data: {} });

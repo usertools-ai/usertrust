@@ -1386,8 +1386,14 @@ export function openSharedAuditWriter(vaultPath: string): AuditWriter {
 	const vault = resolveSharedVault(vaultPath);
 	let joined: SharedLease | undefined;
 	let released = false;
+	// What the governor reads (`isDegraded()`, `getWriteFailures()`): every failed append of this
+	// handle, for its whole life. A report never resets them: a call still running past the release
+	// reads them (`audit.failClosed` refuses a call on a degraded handle), and an append's own report
+	// runs before its rejection reaches its caller.
 	let degraded = false;
 	let writeFailures = 0;
+	// How many of those failures a warning has reported: the warnings come in batches.
+	let reportedFailures = 0;
 	// Appends started and not yet finished. A release that lands while some are still queued (a
 	// destroy() whose drain timed out) counts THEIR failures too: its count is reported when the last
 	// of them finishes, not before they could fail.
@@ -1397,14 +1403,16 @@ export function openSharedAuditWriter(vaultPath: string): AuditWriter {
 	function failed(err: unknown): void {
 		degraded = true;
 		writeFailures++;
-		if (writeFailures === 1) warnAuditDegraded(vault, `failing: ${describeAppendFailure(err)}`);
+		// The batch's first failure.
+		if (writeFailures - reportedFailures === 1) {
+			warnAuditDegraded(vault, `failing: ${describeAppendFailure(err)}`);
+		}
 	}
 
-	/** Report the failures counted since the last report, with when they happened, and start over. */
+	/** Report the failures not yet reported, with when they happened; the batch starts over. */
 	function reportCount(when: "open" | "late"): void {
-		const failures = writeFailures;
-		degraded = false;
-		writeFailures = 0;
+		const failures = writeFailures - reportedFailures;
+		reportedFailures = writeFailures;
 		if (failures === 0) return;
 		const writes = `${failures} audit write${failures === 1 ? "" : "s"}`;
 		warnAuditDegraded(

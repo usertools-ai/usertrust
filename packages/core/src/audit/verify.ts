@@ -14,9 +14,9 @@
  * `verifyVault` extends this across rotated segment files: it parses every
  * `*.jsonl` segment, orders by the persisted global `sequence`, walks ONE
  * continuous chain (GENESIS required only at the global head), and checks the
- * `.meta` tail anchor. This algorithm is mirrored in the zero-dep
- * `usertrust-verify` package (packages/verify/src/index.ts, its `verifyVault`) —
- * the differential test pins their verdicts together.
+ * `.meta` tail anchor. This algorithm is mirrored byte-for-byte in the zero-dep
+ * `usertrust-verify` package (packages/verify/src/index.ts) — the differential
+ * test pins them together.
  *
  * ONE READ PER VERDICT. `verifyVaultReading` hands back the events it verified,
  * and everything the CLI judges after it (the anchors' coverage, the caller's
@@ -242,7 +242,7 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 /**
  * {@link verifyVault}, handing back the events it verified with its verdict. A check that judges
  * the vault after its verification takes them from here: reading the log a second time judged
- * whatever the log held THEN, never hash-checked.
+ * whatever the log held THEN, never hash-checked. IDENTICAL in packages/verify/src/index.ts.
  */
 export function verifyVaultReading(vaultPath: string): VaultReading {
 	const auditDir = join(vaultPath, "audit");
@@ -633,10 +633,8 @@ function verifySuppliedRekorReceipts(
 /**
  * verifyVault + the spec §7.2 anchor state machine. Existing chain semantics
  * are UNCHANGED (verifyVault runs as-is); anchor evaluation is layered on
- * top additively. The standalone package's `verifyVaultWithAnchors` makes the
- * same evaluation, and the anchor differential test pins their verdicts; the
- * anchors here are checked against the hashes of the very events verified (see
- * {@link verifyVaultWithAnchorsReading}).
+ * top additively. IDENTICAL function body in packages/verify/src/index.ts
+ * (`verifyVaultWithAnchorsReading`) — the anchor differential test pins the two.
  */
 export function verifyVaultWithAnchors(
 	vaultPath: string,
@@ -649,7 +647,7 @@ export function verifyVaultWithAnchors(
  * {@link verifyVaultWithAnchors}, handing back the events it verified. The anchors are checked
  * against THOSE events' hashes: gathering them with a second read of the log let a log swapped
  * between the reads pass its integrity walk as one chain and its anchors as another, an anchored
- * pass for a chain no anchor covers.
+ * pass for a chain no anchor covers. IDENTICAL in packages/verify/src/index.ts.
  */
 export function verifyVaultWithAnchorsReading(
 	vaultPath: string,

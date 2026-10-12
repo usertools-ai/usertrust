@@ -14,7 +14,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { verifyVaultWithAnchors as standaloneVerifyVaultWithAnchors } from "../../../verify/src/index.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
+import { verifyVaultWithAnchors as coreVerifyVaultWithAnchors } from "../../src/audit/verify.js";
 import { run as healthRun } from "../../src/cli/health.js";
 import { run as verifyRun } from "../../src/cli/verify.js";
 import { GENESIS_HASH, VAULT_DIR } from "../../src/shared/constants.js";
@@ -63,9 +65,20 @@ vi.mock("../../src/audit/verify.js", async (importOriginal) => {
 });
 
 // The anchored verification reads the vault's anchor mirror after its walk and before it evaluates
-// the anchors: a log swapped here is one the walk never saw.
+// the anchors: a log swapped here is one the walk never saw. The standalone verifier has its own copy
+// of the module (the parity contract), with the same seam.
 vi.mock("../../src/audit/anchor-verify.js", async (importOriginal) => {
 	const orig = await importOriginal<typeof import("../../src/audit/anchor-verify.js")>();
+	return {
+		...orig,
+		readAnchorMirror: (vaultPath: string) => {
+			fire(seam.beforeMirror);
+			return orig.readAnchorMirror(vaultPath);
+		},
+	};
+});
+vi.mock("../../../verify/src/anchor-verify.js", async (importOriginal) => {
+	const orig = await importOriginal<typeof import("../../../verify/src/anchor-verify.js")>();
 	return {
 		...orig,
 		readAnchorMirror: (vaultPath: string) => {
@@ -283,19 +296,22 @@ describe("verify: the anchors are checked against the hashes of the events walke
 		return { s, args: ["--anchor", s.storeFile, "--pubkey", pubkey] };
 	}
 
-	it("a chain no anchor covers is not certified by the anchored chain swapped back in after its walk", async () => {
-		const { s, args } = await anchored();
-		const genuine = capture(s.root);
-		// Another chain of three events: internally valid, with its own anchor, and covered by no
-		// signed anchor. It is what the walk reads; the genuine chain returns before the anchors are
-		// evaluated.
+	/** Another chain of three events: internally valid, with its own anchor, and covered by no signed anchor. */
+	async function otherChain(): Promise<ChainFiles> {
 		const other = mkdtempSync(join(tmpdir(), "trust-verify-other-"));
 		try {
 			await appendEvents(other, 3);
-			put(capture(other), s.root);
+			return capture(other);
 		} finally {
 			rmSync(other, { recursive: true, force: true });
 		}
+	}
+
+	it("a chain no anchor covers is not certified by the anchored chain swapped back in after its walk", async () => {
+		const { s, args } = await anchored();
+		const genuine = capture(s.root);
+		// The other chain is what the walk reads; the genuine one returns before the anchors are evaluated.
+		put(await otherChain(), s.root);
 		seam.beforeMirror = () => put(genuine, s.root);
 		await verifyRun(s.root, { json: true }, args);
 		expect(seam.fired).toBe(1);
@@ -304,6 +320,33 @@ describe("verify: the anchors are checked against the hashes of the events walke
 		expect(r.data.valid).toBe(false);
 		expect(r.success).toBe(false);
 		expect(process.exitCode).toBe(1);
+	});
+
+	it("the standalone verifier certifies no such chain either, and both verifiers give one verdict", async () => {
+		const { s } = await anchored();
+		const genuine = capture(s.root);
+		const other = await otherChain();
+		const params = { externalAnchorsRaw: [readFileSync(s.storeFile, "utf-8")], trust: s.trust };
+		put(other, s.root);
+		seam.beforeMirror = () => put(genuine, s.root);
+		const standalone = standaloneVerifyVaultWithAnchors(s.vaultPath, params);
+		put(other, s.root);
+		const core = coreVerifyVaultWithAnchors(s.vaultPath, params);
+		expect(seam.fired).toBe(2);
+		expect(standalone.anchorState).not.toBe("ANCHORED_VERIFIED");
+		expect(standalone.valid).toBe(false);
+		expect({ state: standalone.anchorState, valid: standalone.valid }).toEqual({
+			state: core.anchorState,
+			valid: core.valid,
+		});
+	});
+
+	it("CONTROL: the standalone verifier, on the genuine chain unchanged: ANCHORED_VERIFIED", async () => {
+		const { s } = await anchored();
+		const params = { externalAnchorsRaw: [readFileSync(s.storeFile, "utf-8")], trust: s.trust };
+		const standalone = standaloneVerifyVaultWithAnchors(s.vaultPath, params);
+		expect(standalone.anchorState).toBe("ANCHORED_VERIFIED");
+		expect(standalone.valid).toBe(true);
 	});
 
 	it("CONTROL: the genuine chain, unchanged, is ANCHORED_VERIFIED and exits 0", async () => {
