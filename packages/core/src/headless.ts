@@ -1926,6 +1926,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// True only once the ledger (or proxy) ANSWERED the post: a dry run never sets it, so a record can tell a
 				// real post from a settle that moved no money.
 				let ledgerPosted = false;
+				// What the ledger actually POSTED, known the moment it answered and so before the `llm_call` is appended. The
+				// call record carries it, so a reader can tell a capped post from a full one from that record alone: the
+				// `settlement_shortfall` is appended AFTER the call and can be late, lost to a crash, or dead-lettered.
+				let ledgerPostedAmount: number | undefined;
 				// D4: set only when the engine capped the post at the reserved hold.
 				let postedCost: number | undefined;
 				// D4 event-order buffer: the truncation is learned at POST time but the
@@ -1940,6 +1944,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					try {
 						await proxyConn.settle(auth.proxyTransferId ?? transferId, actualCost);
 						ledgerPosted = true;
+						ledgerPostedAmount = actualCost;
 					} catch (postErr) {
 						settled = false;
 						await audit
@@ -1969,6 +1974,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// the reserved hold; a truncation comes back as `shortfall`.
 						const postResult = await engine.postPendingSpend(transferId, actualCost);
 						ledgerPosted = true;
+						// An engine that returns nothing posted the whole amount; a capped one reports what it posted.
+						ledgerPostedAmount =
+							postResult != null && Number.isFinite(postResult.posted) && postResult.posted >= 0
+								? postResult.posted
+								: actualCost;
 						if (postResult != null && postResult.shortfall > 0) {
 							postedCost = postResult.posted;
 							// EVENT ORDER: captured here, APPENDED after `llm_call` below.
@@ -2059,6 +2069,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							costBasis: rateInfo.costBasis,
 							endpointClass: endpoint.class,
 							...(ledgerPosted ? { ledgerPosted: true } : {}),
+							// Present with `ledgerPosted`: the posted amount, equal to `cost` for a full post and lower for a
+							// capped one. Additive, like `ledgerPosted`; a record without it cannot say which it was.
+							...(ledgerPosted && ledgerPostedAmount !== undefined
+								? { postedAmount: ledgerPostedAmount }
+								: {}),
 							...costCenterAudit,
 							...principalAudit,
 							...jobAudit,

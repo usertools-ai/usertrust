@@ -195,6 +195,45 @@ describe("headless settlement_shortfall threading", () => {
 		await dry.destroy();
 	});
 
+	it("the llm_call records the amount the ledger POSTED, so a lost shortfall append cannot hide a cap", async () => {
+		const engine = makeMockEngine(async () => ({ posted: POSTED, shortfall: SHORTFALL }));
+		// call 1 is the llm_call, call 2 the settlement_shortfall: the second append fails
+		const audit = makeMockAudit({ failOnCall: 2 });
+		const gov = await governorWith(engine, audit);
+		const auth = await gov.authorize(AUTHORIZE);
+		await gov.settle(auth, { inputTokens: 80, outputTokens: 20 });
+		expect(shortfallEvents(audit)).toHaveLength(0);
+		const data = audit.events.find((e) => e.kind === "llm_call")?.data;
+		expect(data).toMatchObject({ ledgerPosted: true, postedAmount: POSTED });
+		expect(data?.cost).not.toBe(POSTED);
+		await gov.destroy();
+	});
+
+	it("a FULL post records postedAmount equal to the metered cost; a dry run records neither", async () => {
+		const audit = makeMockAudit();
+		const gov = await governorWith(makeMockEngine(), audit);
+		const auth = await gov.authorize(AUTHORIZE);
+		await gov.settle(auth, { inputTokens: 80, outputTokens: 20 });
+		const data = audit.events.find((e) => e.kind === "llm_call")?.data;
+		expect(data).toMatchObject({ ledgerPosted: true });
+		expect(data?.postedAmount).toBe(data?.cost);
+		await gov.destroy();
+
+		const dryAudit = makeMockAudit();
+		const dry = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			dryRun: true,
+			_audit: dryAudit,
+		});
+		const dryAuth = await dry.authorize(AUTHORIZE);
+		await dry.settle(dryAuth, { inputTokens: 80, outputTokens: 20 });
+		expect(dryAudit.events.find((e) => e.kind === "llm_call")?.data).not.toHaveProperty(
+			"postedAmount",
+		);
+		await dry.destroy();
+	});
+
 	it("audits settlement_shortfall and sets receipt.postedCost when the engine reports truncation", async () => {
 		const engine = makeMockEngine(async () => ({ posted: POSTED, shortfall: SHORTFALL }));
 		const audit = makeMockAudit();

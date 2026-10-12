@@ -1340,3 +1340,26 @@ describe("a headless post with no shortfall record: exact only with a shortfall 
 		expect(m.totals.postProvenUpperUt).toBe(100);
 	});
 });
+
+describe("a headless call that records the amount the ledger posted is exact by construction", () => {
+	const T = "2026-10-08T01:00:00Z";
+	const headless = (cost: number, over: Record<string, unknown> = {}) =>
+		call(T, cost, { transferId: "t", source: "headless", ledgerPosted: true, ...over });
+
+	it("a capped post whose shortfall append was lost is exact at postedAmount, with no queue read", () => {
+		const m = build([headless(100, { postedAmount: 60 })]);
+		expect(m.totals.postProvenUt).toBe(60);
+		expect(m.totals.postProvenUpperCalls).toBe(0);
+	});
+
+	it("a full post is exact at the metered cost", () => {
+		const m = build([headless(100, { postedAmount: 100 })]);
+		expect(m.totals.postProvenUt).toBe(100);
+	});
+
+	it("an older record without postedAmount stays an upper bound", () => {
+		const m = build([headless(100)]);
+		expect(m.totals.postProvenUt).toBe(0);
+		expect(m.totals.postProvenUpperUt).toBe(100);
+	});
+});

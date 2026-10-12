@@ -968,7 +968,13 @@ function buildPlain(
 					// because the shortfall may not have been appended yet. Everything else is an upper bound.
 					const dl = opts.deadLetters;
 					const dead = dl !== undefined && "shortfalls" in dl ? dl.shortfalls.get(tid) : undefined;
-					if (dead !== undefined) {
+					// A record that carries what the ledger POSTED (`postedAmount`, written with the call) is exact by
+					// construction: no later append is needed to tell a capped post from a full one.
+					const recorded = cost(e.data["postedAmount"]);
+					if (recorded !== undefined) {
+						t.postProvenUt += recorded;
+						t.postProvenCalls += 1;
+					} else if (dead !== undefined) {
 						t.postProvenUt += dead;
 						t.postProvenCalls += 1;
 						t.postProvenDeadLetterUt += dead;
