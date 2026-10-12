@@ -18,8 +18,9 @@
 #   release.sh verify-release <bundle> <version>
 #                                        imports the release tag from the build job's bundle,
 #                                        verifies the commit, and prints it
-#   release.sh latest-flag <version>     true if v<version> is the newest release (no v* tag,
-#                                        and no version of any package on npm, is higher)
+#   release.sh latest-flag <version>     true if v<version> is the newest release (no v* tag
+#                                        on master, and no version of any package on npm, is
+#                                        higher)
 #   release.sh dist-tag <version>        the npm dist-tag v<version> publishes under, from
 #                                        latest-flag: latest if true, backfill if false
 #   release.sh assert-npm                prints node's and npm's versions; fails unless npm is
@@ -830,21 +831,31 @@ EOF
 # branch was never released, so its tag must be an ancestor of master as master is NOW: fetched
 # here, in full. A shallow history, a failed fetch or a missing ref cannot show ancestry, so
 # each of them refuses.
-assert_on_master() {
-	local head
-	head=$(git rev-parse HEAD)
+# Fetches master from origin afresh, into refs/remotes/origin/master. Fails, saying <what>
+# cannot be told, if the fetch fails, if origin/master is missing after it, or if the history
+# is shallow: the fetch does not deepen a shallow clone, and shallow history cannot prove that
+# a commit is NOT on master's line, nor, past its boundary, that it is.
+fetch_master() {
+	local what="$1"
 	if ! git fetch --quiet --no-tags origin "+refs/heads/master:refs/remotes/origin/master"; then
-		err "Could not fetch master from origin, so nothing shows that ${head} is on master. Refusing to republish."
+		err "Could not fetch master from origin, so cannot tell ${what}."
 		return 1
 	fi
 	if ! git rev-parse -q --verify "refs/remotes/origin/master^{commit}" >/dev/null; then
-		err "origin/master is missing after the fetch. Refusing to republish."
+		err "origin/master is missing after the fetch, so cannot tell ${what}."
 		return 1
 	fi
-	# After the fetch, which does not deepen a shallow clone: shallow history cannot prove
-	# that a commit is NOT on master's line, nor, past its boundary, that it is.
 	if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
-		err "This history is shallow, so it cannot show that ${head} is on master. Refusing to republish."
+		err "This history is shallow, so cannot tell ${what}."
+		return 1
+	fi
+}
+
+assert_on_master() {
+	local head
+	head=$(git rev-parse HEAD)
+	if ! fetch_master "whether ${head} is on master"; then
+		err "Refusing to republish."
 		return 1
 	fi
 	if ! git merge-base --is-ancestor "$head" "refs/remotes/origin/master"; then
@@ -939,16 +950,23 @@ process.stdin.on("end", () => {
 });
 '
 
-# Whether no v* release tag is a higher semver than v<version>. Tags are fetched first, so a
-# newer release made since this run started counts. Prints true or false; fails if it cannot
-# tell.
+# Whether no v* release tag on master is a higher semver than v<version>. Only a tag whose
+# commit is on master (reachable from origin/master) is a release: a v* tag pushed for an
+# abandoned branch is not, and must not make the newest release look old. Tags and master are
+# fetched first, here, so a newer release made since this run started counts and nothing
+# depends on what ran before; if either cannot be fetched, or the history is shallow, it fails,
+# never counting every tag instead. v<version> itself need not be on master yet (a new
+# release's tag is pushed after this runs): it is compared against the others. Prints true or
+# false; fails if it cannot tell.
 newest_among_tags() {
-	local version="$1"
+	local version="$1" tags
 	if ! git fetch --quiet --tags origin; then
 		err "Could not fetch tags from origin, so cannot tell whether v${version} is the newest release."
 		return 1
 	fi
-	git tag -l 'v*' | node -e "$NEWEST_JS" "$version" || return 1
+	fetch_master "whether v${version} is the newest release" || return 1
+	tags=$(git tag -l 'v*' --merged refs/remotes/origin/master) || return 1
+	printf '%s\n' "$tags" | node -e "$NEWEST_JS" "$version" || return 1
 }
 
 # Whether no lockstep package has a published version that is a higher semver than <version>:
@@ -1002,7 +1020,7 @@ newest_on_npm() {
 
 # Whether v<version> is the newest release: the one answer that decides both the GitHub
 # Release's Latest and the npm dist-tag (dist_tag). True only if it is not a prerelease, no v*
-# release tag is a higher semver (newest_among_tags), and no package has a higher version on
+# release tag on master is a higher semver (newest_among_tags), and no package has a higher version on
 # npm (newest_on_npm: a version published without a tag, whose tag was lost, or under another
 # dist-tag still counts). A republish of an older version must never take Latest from a newer one.
 # Prints true or false; fails if either check cannot tell.

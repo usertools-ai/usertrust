@@ -27,7 +27,7 @@
  *   release-tarball.test.ts) before publishing any, and npm is handed only those: from an
  *   empty directory, with --ignore-scripts, an explicit registry and a fresh private cache.
  * - Every npm publish, the dry run included, uses the dist-tag decided by the same latest-flag
- *   answer as the GitHub Release's Latest (no higher v* tag, and no package with a higher
+ *   answer as the GitHub Release's Latest (no higher v* tag on master, and no package with a higher
  *   version on npm): `latest` for the newest release, as npm's default with no --tag so that
  *   npm's own implicit-latest refusal (npm 11.0.0 and later) stays active, and `--tag backfill`
  *   for an older version; nothing is published when that answer cannot be read.
@@ -1644,6 +1644,78 @@ describe("release.sh latest-flag", { timeout: 30_000 }, () => {
 	it("counts a newer tag that exists only on origin (fetched first)", () => {
 		gitIn(join(dir, "origin.git"), "tag", "v9.0.0", "master");
 		expect(run(["latest-flag", "1.3.0"]).out.trim()).toBe("false");
+	});
+
+	/** A v5.0.0 tag on a commit of a branch master never took, pushed to origin (the branch not). */
+	const sideTag = () => {
+		git("switch", "-q", "-c", "abandoned");
+		writeFileSync(join(repo, "README"), "abandoned\n");
+		git("commit", "-q", "-am", "abandoned direction");
+		git("tag", "-a", "v5.0.0", "-m", "v5.0.0");
+		git("push", "-q", "origin", "refs/tags/v5.0.0");
+		git("switch", "-q", "master");
+	};
+
+	it("a v* tag that is not on master is not a release, and does not hold Latest", () => {
+		tags("v4.1.0");
+		sideTag();
+		releaseCommit("4.2.0"); // its tag is not on master yet: the push comes later
+		const out = packAll();
+		const flag = run(["latest-flag", "4.2.0"]);
+		expect(flag.status, flag.err).toBe(0);
+		expect(flag.out.trim()).toBe("true");
+		expect(run(["dist-tag", "4.2.0"]).out.trim()).toBe("latest");
+		const dry = run(["publish", out, "HEAD", "--dry-run"]);
+		expect(dry.status, dry.err).toBe(0);
+		expect(log()).toEqual(published("4.2.0", DIRS, true, "latest"));
+		// Control: once master takes that commit, v5.0.0 is a release, and 4.2.0 is older.
+		gitIn(join(dir, "origin.git"), "update-ref", "refs/heads/master", "refs/tags/v5.0.0^{commit}");
+		expect(run(["latest-flag", "4.2.0"]).out.trim()).toBe("false");
+	});
+
+	it("a higher v* tag on master still makes an older version backfill", () => {
+		tags("v4.1.0", "v5.0.0");
+		releaseCommit("4.2.0");
+		expect(run(["latest-flag", "4.2.0"]).out.trim()).toBe("false");
+		expect(run(["dist-tag", "4.2.0"]).out.trim()).toBe("backfill");
+	});
+
+	it("refuses, before any npm call, when master cannot be fetched", () => {
+		tags("v4.1.0");
+		sideTag();
+		const out = packAll();
+		gitIn(dir, "init", "-q", "--bare", "-b", "master", "no-master.git");
+		git("remote", "set-url", "origin", join(dir, "no-master.git"));
+		rmSync(join(dir, "calls"), { force: true });
+		for (const args of [
+			["latest-flag", "1.0.0"],
+			["dist-tag", "1.0.0"],
+			["publish", out, "HEAD", "--dry-run"],
+		]) {
+			const r = run(args);
+			expect(r.status, args.join(" ")).not.toBe(0);
+			expect(r.err).toContain(
+				"Could not fetch master from origin, so cannot tell whether v1.0.0 is the newest release",
+			);
+			expect(r.out.trim()).not.toMatch(/^(true|false|latest|backfill)$/);
+		}
+		expect(log()).toEqual([]);
+		expect(existsSync(join(dir, "calls"))).toBe(false);
+	});
+
+	it("refuses in a shallow history, which cannot show what is on master", () => {
+		tags("v4.1.0");
+		const shallow = join(dir, "shallow-latest");
+		gitIn(dir, "clone", "-q", "--depth", "1", `file://${join(dir, "origin.git")}`, shallow);
+		repo = shallow;
+		mkdirSync(join(repo, "scripts"), { recursive: true });
+		writeFileSync(join(repo, "scripts/release.sh"), readFileSync(SCRIPT, "utf8"));
+		const r = run(["latest-flag", "4.2.0"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(
+			"This history is shallow, so cannot tell whether v4.2.0 is the newest release",
+		);
+		expect(r.out).toBe("");
 	});
 
 	it("fails when it cannot fetch the tags", () => {

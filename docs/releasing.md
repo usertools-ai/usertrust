@@ -76,7 +76,10 @@ repository or mint an OIDC token for provenance:
       **The dist-tag is decided once for all six**, before any is published, by the same
       check that decides the GitHub Release's Latest (step 6): `latest` only for the newest
       release, `backfill` for an older version finished by republish, so npm's `latest` never
-      moves back to it. The check: no `v*` tag is a higher semver (tags fetched first), and
+      moves back to it. The check: no `v*` tag on master is a higher semver (tags and master
+      fetched first; a tag whose commit is not on master, such as one pushed for an abandoned
+      branch, is not a release and does not count; if master cannot be fetched, or the history
+      is shallow, the release is refused, never compared against every tag), and
       no package has a higher version on npm (`npm view <name> versions --json --tag latest`,
       the highest non-prerelease version, which is npm's own rule; a version published
       without a `v*` tag, or under another dist-tag, still counts; a package already at this
@@ -117,7 +120,7 @@ repository or mint an OIDC token for provenance:
       each with the same command, without `--dry-run`. Publishing a tarball runs no lifecycle
       script.
    6. Creates the GitHub Release `v<version>` with generated notes, deciding Latest
-      explicitly: it is Latest only if no `v*` release tag is a higher semver and no package
+      explicitly: it is Latest only if no `v*` release tag on master is a higher semver and no package
       has a higher version on npm (prereleases never take it), so finishing an older version
       never takes Latest from a newer one. It runs only after every package's publish
       succeeded.

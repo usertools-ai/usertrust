@@ -403,7 +403,7 @@ jobs:
       # ── GitHub Release ──
       # A republish creates it only if the failed run never got this far. Latest is always an
       # explicit decision (gh's default would make it Latest): only the newest semver release,
-      # by the v* tags and every package's versions on npm (the check that chose the npm
+      # by the v* tags on master and every package's versions on npm (the check that chose the npm
       # dist-tag), so finishing an older version never takes Latest from a newer one.
       - name: Create GitHub Release
         if: ${{ !inputs.dry_run }}
