@@ -29,13 +29,15 @@ video methods, `chats`, `live`, `batches.create`, `interactions.create`,
 `tunings.tune`, `caches.create` / `update`, and the `fileSearchStores` upload and
 import) are refused instead: the call rejects with a `PolicyDeniedError` naming
 the method, and records a `policy_denied` audit event, before the SDK is called.
-So are `models.generateContent` and `models.generateContentStream` when they would
-run automatic function calling (one provider request per tool round, which
-usertrust cannot yet meter round by round); disable it with
-`config.automaticFunctionCalling.disable: true` to have the call governed. The
+So is `models.generateContentStream` when it would run automatic function calling
+(a streamed loop of provider rounds, which usertrust does not yet meter round by
+round); `models.generateContent` with it is metered per round instead, each round
+its own governed call. Use `generateContent`, or disable AFC with
+`config.automaticFunctionCalling.disable: true`, to have the stream governed. The
 check needs plain objects: a Proxy in `params`, `config`, `config.tools`, a tool or
 `config.automaticFunctionCalling` is refused, because a Proxy can show the check
-one config and the SDK another. The request is forwarded as a snapshot of the
+one config and the SDK another. Accessors there are read once and their values
+captured, so the check and the SDK use the same value. The request is forwarded as a snapshot of the
 checked config (with AFC not disabled, each non-callable tool must be copyable as
 data), so a later change to the caller's `config.tools` or
 `config.automaticFunctionCalling` cannot reach the SDK. The snapshot covers those

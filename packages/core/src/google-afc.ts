@@ -1,0 +1,713 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+/**
+ * Governed automatic function calling for the Google SDK.
+ *
+ * With a callable tool in `config.tools`, `@google/genai`'s `generateContent` runs a LOOP: it calls the model, executes the
+ * tool for the function calls it returned, and calls the model again, up to `maximumRemoteCalls` (default 10) times, and
+ * returns ONLY the last response. Its rounds go through the SDK's own instance method, not the public one the governor
+ * traps, and the SDK exposes no per-round hook, so a governed `generateContent` saw only the last round's `usageMetadata`
+ * and every earlier round was never held, metered or audited: real model spend with no ledger entry.
+ *
+ * DECISION: governance runs the loop itself and makes each round its own governed call. The SDK's own loop is switched off
+ * for the call (`automaticFunctionCalling.disable`), the callable tools still run automatically, and the response still
+ * carries `automaticFunctionCallingHistory`, so the caller sees the same result; what changes is that every round is
+ * held, metered and audited. Alternatives rejected: disabling AFC outright would stop callable tools from running at all
+ * (a silent behaviour change for every user), and metering through the SDK's private `generateContentInternal` would
+ * depend on an unexported method that the type declarations mark `private`.
+ *
+ * Duck-typed: nothing here imports the SDK. The semantics mirror the SDK's loop (see `generateContent` in its source):
+ * `maximumRemoteCalls` rounds of tool execution at most, then the last model response is returned as it is.
+ */
+
+import { types as utilTypes } from "node:util";
+import { redactPII } from "./policy/pii.js";
+
+type Loose = Record<string, unknown>;
+
+const DEFAULT_MAX_REMOTE_CALLS = 10;
+
+function isObject(v: unknown): v is Loose {
+	return v !== null && typeof v === "object";
+}
+
+type CallableTool = {
+	tool: () => Promise<unknown>;
+	callTool: (calls: unknown[]) => Promise<unknown[]>;
+};
+
+/**
+ * The SDK's own test: `'callTool' in tool && typeof tool.callTool === 'function'`. A function object (a callable tool
+ * implemented as a function carrying `tool` and `callTool` properties) passes it, so it must pass here: rejecting it would
+ * hand the call to the SDK's internal loop under ONE hold, which is an undercharge.
+ */
+function isCallableTool(tool: unknown): tool is CallableTool {
+	return (
+		(typeof tool === "function" || isObject(tool)) &&
+		"callTool" in tool &&
+		typeof (tool as Loose)["callTool"] === "function"
+	);
+}
+
+/** A deep copy of a declaration (plain data); one that cannot be copied is used as it is rather than failing the call. */
+function detach(value: unknown): unknown {
+	try {
+		return structuredClone(value);
+	} catch {
+		try {
+			return JSON.parse(JSON.stringify(value)) as unknown;
+		} catch {
+			return value;
+		}
+	}
+}
+
+/**
+ * A callable tool whose `tool()` is asked ONCE per call, LAZILY, and answers every later round from that one answer.
+ *
+ * The SDK's native loop awaits every `tool.tool()` once, before its first model call, and all of them start together
+ * (`Promise.all` over the tools). Each governed round re-enters the public `generateContent`, which would await them again,
+ * so a one-shot or stateful callable could fail on round two and a dynamic one could show different declarations between
+ * rounds. The answer is taken lazily, by the FIRST round's own `generateContent` (inside the governed call, after the round
+ * was authorized and a hold was placed): a denied call (policy, PII, budget) never runs user-supplied declaration code, a
+ * `tool()` that throws goes through the governed lifecycle (hold voided, failure audited), and the SDK itself starts all the
+ * tools' `tool()` calls together, as it does natively.
+ *
+ * REDACTION. In `pii: "redact"` mode the governed call forwards a deep CLONE of the request, and the SDK asks the tool on that
+ * clone. `tool()` always runs on the REAL tool, so the state it sets up (a ready flag, a dispatch table, an MCP session)
+ * lives where `callTool` finds it; when the SDK asked through the clone, the ANSWER is redacted, so the declaration the model
+ * sees has passed the same redaction as the rest of the request, whether the tool held it as state or in a closure. When it
+ * asked through the wrapper itself (nothing was cloned) the answer is given as it is, as natively. The memo lives in the
+ * closure, so every later round reuses that one answer.
+ *
+ * The wrapper is a fresh object, never a Proxy: a frozen tool (`Object.freeze({ tool, callTool })`) cannot be proxied with
+ * replacement functions without breaking the Proxy invariant. It keeps the tool's prototype, so `instanceof` checks such as
+ * the SDK's MCP-usage header still hold, copies its own properties (a clone of the wrapper carries the same state), and
+ * delegates `callTool` to the real tool.
+ */
+function snapshotTool(tool: CallableTool): CallableTool {
+	let memo: Promise<unknown> | undefined;
+	const wrapper = Object.create(Object.getPrototypeOf(tool)) as CallableTool;
+	for (const key of Reflect.ownKeys(tool)) {
+		const desc = Object.getOwnPropertyDescriptor(tool, key);
+		if (desc === undefined) continue;
+		const enumerable = desc.enumerable === true;
+		const copy: PropertyDescriptor =
+			"value" in desc
+				? { value: desc.value, writable: true, enumerable, configurable: true }
+				: {
+						...(desc.get ? { get: desc.get } : {}),
+						...(desc.set ? { set: desc.set } : {}),
+						enumerable,
+						configurable: true,
+					};
+		Object.defineProperty(wrapper, key, copy);
+	}
+	Object.defineProperty(wrapper, "tool", {
+		value: function (this: unknown): Promise<unknown> {
+			// Called synchronously on first use, like the SDK's own `await callableTool.tool()` inside its map.
+			memo ??= (async () => {
+				// ALWAYS on the real tool: the state `tool()` sets up (a ready flag, a dispatch table, a session) must live
+				// where `callTool` finds it, which is also the real tool. The accessor is read here, at use, never at wrap time.
+				const declaration = await (Reflect.get(tool, "tool") as () => Promise<unknown>).call(tool);
+				// Asked through the redacted request CLONE (pii "redact" with PII in the prompt): redact the answer itself, so
+				// the declaration the model sees has passed the same redaction as the rest of the request, whether it was held
+				// as state or in a closure. Asked through the wrapper (nothing was cloned): the answer as it is, as natively.
+				// redactPII hands its input back UNCHANGED when it detects nothing, so redact a DETACHED copy: the memo must never
+				// alias the real tool's live object, or a later callTool() that writes PII into it would leak in later rounds.
+				return this === wrapper ? declaration : redactPII(detach(declaration)).data;
+			})();
+			return memo;
+		},
+		writable: true,
+		enumerable: true,
+		configurable: true,
+	});
+	Object.defineProperty(wrapper, "callTool", {
+		value: (calls: unknown[]): Promise<unknown[]> => tool.callTool(calls),
+		writable: true,
+		enumerable: true,
+		configurable: true,
+	});
+	return wrapper;
+}
+
+// ── The ONE AFC decision, and the snapshot it is made on ──
+// `sdkRunsAfc` (the SDK would run its own loop) and `afcRequested` (governance should run
+// the loop itself: `sdkRunsAfc` and no plain declaration beside a callable tool, which the
+// SDK rejects) are two views of ONE reading, `readAfc`. The governor uses their VERDICT
+// forms, which add a third answer, "indeterminate": a Proxy, a hole, a primitive tool, a
+// non-array `tools`, a non-object `config`, a getter that throws. `generateContent` runs
+// `runGovernedAfc` on "afc"; `generateContentStream` with AFC is refused (a streamed loop
+// is not metered round by round yet); "indeterminate" is refused on both. The verdict runs
+// on `snapshotGoogleAfcParams`'s snapshot (accessors read ONCE, their values captured),
+// and the snapshot is what is forwarded: to `runGovernedAfc`, to the single governed call,
+// or to the governed stream.
+
+/**
+ * The SDK would run its AFC loop, or not; or it cannot be told without running caller
+ * code. `proxyAt` names the first AFC-relevant object found to be a Proxy.
+ */
+export type GoogleAfcVerdict =
+	| { kind: "afc" }
+	| { kind: "no_afc" }
+	| { kind: "indeterminate"; proxyAt?: string; uncloneableAt?: string };
+
+/** A value property access would yield, found WITHOUT running a getter. */
+type DataRead = { value: unknown } | undefined;
+
+/**
+ * Resolve `obj[key]` the way property access does (own, then up the prototype chain),
+ * but return `undefined` (indeterminate) instead of invoking an accessor. Nullish `obj`
+ * reads as `undefined`, which is what the SDK's optional chaining yields.
+ */
+function readDataProperty(obj: unknown, key: string, at: string): DataRead {
+	if (obj == null) return { value: undefined };
+	for (let o: object | null = Object(obj); o !== null; o = Object.getPrototypeOf(o)) {
+		// Checked BEFORE the descriptor read and before the next getPrototypeOf, both of
+		// which would run a Proxy's traps.
+		rejectProxy(o, o === obj ? at : `${at} (its prototype chain)`);
+		const d = Object.getOwnPropertyDescriptor(o, key);
+		if (d !== undefined) return "value" in d ? { value: d.value } : undefined;
+	}
+	return { value: undefined };
+}
+
+/** Thrown inside the predicate when a read cannot be made without running caller code. */
+const INDETERMINATE = Symbol("indeterminate");
+
+/** Thrown inside the predicate when an AFC-relevant object is a Proxy; carries where. */
+export class ProxyInAfcInput {
+	constructor(readonly at: string) {}
+}
+
+/**
+ * A NARROW fail-closed. A Proxy's `getOwnPropertyDescriptor` / `getPrototypeOf` traps can
+ * show this check a config with no callable tool while its `get` trap hands the SDK one
+ * that has one (the SDK reads with plain property access), so a Proxy anywhere the
+ * check reads is refused rather than believed. `util.types.isProxy` runs no trap. The
+ * planned replacement is a structural snapshot of exactly what was checked, forwarded so
+ * the SDK receives what was checked; until then, a caller that MUTATES plain params
+ * between the call and the SDK's read is still outside this check.
+ */
+function rejectProxy(value: unknown, at: string): void {
+	if (utilTypes.isProxy(value)) throw new ProxyInAfcInput(at);
+}
+
+function dataValue(obj: unknown, key: string, at: string): unknown {
+	const read = readDataProperty(obj, key, at);
+	if (read === undefined) throw INDETERMINATE;
+	return read.value;
+}
+
+/**
+ * The SDK's `isCallableTool`: `'callTool' in tool && typeof tool.callTool === 'function'`.
+ * `in` accepts any object, function objects included; on a primitive or `null` the SDK's
+ * `in` throws a TypeError, which here is indeterminate.
+ */
+function isCallableToolLike(tool: unknown, at: string): boolean {
+	if (tool === null || (typeof tool !== "object" && typeof tool !== "function")) {
+		throw INDETERMINATE;
+	}
+	return typeof dataValue(tool, "callTool", at) === "function";
+}
+
+/**
+ * The SDK's invalid-`maximumRemoteCalls` rule, which DISABLES AFC:
+ * `(n && (n < 0 || !Number.isInteger(n))) || n == 0`. A value whose comparison would run
+ * caller code (`valueOf` on an object or function) or throw (a symbol) is indeterminate.
+ */
+function sdkDisablesForMaxCalls(maxCalls: unknown): boolean {
+	if (maxCalls !== null && (typeof maxCalls === "object" || typeof maxCalls === "function")) {
+		throw INDETERMINATE;
+	}
+	if (typeof maxCalls === "symbol") throw INDETERMINATE;
+	// Documented DIVERGENCE: NaN passes the SDK's rule (it is falsy and not `== 0`), and the
+	// SDK then makes no model call at all (`remoteCalls < NaN` is false). It is counted
+	// invalid here, so such a call is one ordinary governed call.
+	if (typeof maxCalls === "number" && Number.isNaN(maxCalls)) return true;
+	// biome-ignore lint/suspicious/noExplicitAny: the SDK's own loose comparison, mirrored verbatim
+	const n = maxCalls as any;
+	// biome-ignore lint/suspicious/noDoubleEquals: `== 0` is the SDK's test (it also matches "0" and false)
+	return Boolean((n && (n < 0 || !Number.isInteger(n))) || n == 0);
+}
+
+/** The tools list as the SDK iterates it (`config?.tools ?? []`); only a plain array is read. */
+function toolsList(config: unknown): unknown[] {
+	const tools = dataValue(config, "tools", "params.config") ?? [];
+	// Before Array.isArray (which sees through a Proxy) and before any element read.
+	rejectProxy(tools, "params.config.tools");
+	if (!Array.isArray(tools)) throw INDETERMINATE;
+	return tools;
+}
+
+/** What the SDK's own reading of `params` decides, read by the rules above. */
+interface AfcReading {
+	/** `shouldDisableAfc(config)` is false: the SDK would run its loop. */
+	sdkRuns: boolean;
+	/** A non-callable tool carries `functionDeclarations` beside a callable one: the SDK throws. */
+	incompatible: boolean;
+}
+
+/**
+ * The SDK's AFC decision for `params`, a line-for-line mirror of @google/genai 1.52.0
+ * (`shouldDisableAfc`, `isCallableTool`, `hasCallableTools`,
+ * `findAfcIncompatibleToolIndexes`), reading only DATA properties:
+ *
+ *   - `sdkRuns` is false when `automaticFunctionCalling.disable` is truthy (the SDK's own
+ *     truthiness test); when there is no callable tool (`'callTool' in tool && typeof
+ *     tool.callTool === 'function'`, so a function object carrying `callTool` counts;
+ *     the scan stops at the first; `generateContent`'s extra `hasCallableTools` test is
+ *     then the same answer); or when `maximumRemoteCalls` is invalid,
+ *     `(n && (n < 0 || !Number.isInteger(n))) || n == 0` (and NaN, see
+ *     sdkDisablesForMaxCalls).
+ *   - `incompatible` is the SDK's pre-request throw: a non-callable tool whose
+ *     `functionDeclarations` is truthy with a length above 0.
+ *
+ * MCP needs no case of its own: `mcpToTool(...)` returns a CallableTool, and a raw MCP
+ * client in `config.tools` also has `callTool`, so the SDK treats both as callable.
+ *
+ * Throws INDETERMINATE (or ProxyInAfcInput) for anything that cannot be read without
+ * running caller code: an accessor, a Proxy, a non-array `tools`, a hole or a primitive
+ * where the SDK's `in` would throw, a non-primitive `maximumRemoteCalls`. The governor
+ * runs it on the SNAPSHOT, whose AFC fields are captured data, so an accessor can only
+ * remain on a callable tool kept by reference (its `callTool`), which the snapshot
+ * already refuses.
+ */
+function readAfc(params: unknown): AfcReading {
+	const NONE: AfcReading = { sdkRuns: false, incompatible: false };
+	// Every object is checked for a Proxy before anything is read from it: `dataValue`
+	// does it for the object it reads, and `toolsList` for the array.
+	const config = dataValue(params, "config", "params");
+	const afcConfig = dataValue(config, "automaticFunctionCalling", "params.config");
+	const afcAt = "params.config.automaticFunctionCalling";
+	if (dataValue(afcConfig, "disable", afcAt)) return NONE;
+	const tools = toolsList(config);
+	let callablePresent = false;
+	// By index, not `for...of`: an element getter must not run (a hole reads as
+	// `undefined`, on which the SDK's `in` throws, so it is indeterminate).
+	for (let i = 0; i < tools.length; i++) {
+		const tool = dataValue(tools, String(i), "params.config.tools");
+		if (isCallableToolLike(tool, `params.config.tools[${i}]`)) {
+			callablePresent = true;
+			break;
+		}
+	}
+	if (!callablePresent) return NONE;
+	if (sdkDisablesForMaxCalls(dataValue(afcConfig, "maximumRemoteCalls", afcAt))) return NONE;
+	// The SDK's pre-request throw. Its inputs are Proxy-checked too: a lying `length`
+	// would turn "the SDK throws" into a call that runs the AFC loop.
+	for (let i = 0; i < tools.length; i++) {
+		if (!(i in tools)) continue; // forEach skips holes
+		const toolAt = `params.config.tools[${i}]`;
+		const tool = dataValue(tools, String(i), "params.config.tools");
+		if (isCallableToolLike(tool, toolAt)) continue;
+		const declarations = dataValue(tool, "functionDeclarations", toolAt);
+		if (declarations) {
+			const length = dataValue(declarations, "length", `${toolAt}.functionDeclarations`);
+			if (length !== undefined && typeof length !== "number") throw INDETERMINATE;
+			if ((length as number) > 0) return { sdkRuns: true, incompatible: true };
+		}
+	}
+	return { sdkRuns: true, incompatible: false };
+}
+
+function verdictOf(params: unknown, decide: (r: AfcReading) => boolean): GoogleAfcVerdict {
+	try {
+		return { kind: decide(readAfc(params)) ? "afc" : "no_afc" };
+	} catch (err) {
+		// A Proxy (named), INDETERMINATE, or a trap that threw: fail closed.
+		return err instanceof ProxyInAfcInput
+			? { kind: "indeterminate", proxyAt: err.at }
+			: { kind: "indeterminate" };
+	}
+}
+
+/** "afc" when the SDK would run its own loop (the STREAM refusal uses this). */
+export function sdkRunsAfcVerdict(params: unknown): GoogleAfcVerdict {
+	return verdictOf(params, (r) => r.sdkRuns);
+}
+
+/**
+ * "afc" when governance should run the loop itself: the SDK would run it, and no plain
+ * function declaration sits beside a callable tool (that makes the SDK throw a clear
+ * error before any call, which is left to the SDK). `generateContent` uses this.
+ */
+export function afcRequestedVerdict(params: unknown): GoogleAfcVerdict {
+	return verdictOf(params, (r) => r.sdkRuns && !r.incompatible);
+}
+
+/**
+ * Would the SDK run its automatic-function-calling loop for these params? Boolean view of
+ * `sdkRunsAfcVerdict`, for plain data. Params it cannot read safely answer `false`: the
+ * governor never uses this view, it uses the verdict, which REFUSES them.
+ */
+export function sdkRunsAfc(params: unknown): boolean {
+	return sdkRunsAfcVerdict(params).kind === "afc";
+}
+
+/** Should governance run the loop itself? Boolean view of `afcRequestedVerdict` (see `sdkRunsAfc`). */
+export function afcRequested(params: unknown): boolean {
+	return afcRequestedVerdict(params).kind === "afc";
+}
+
+/** Thrown while snapshotting when a tool cannot be copied as data; carries where. */
+class UncloneableAfcInput {
+	constructor(readonly at: string) {}
+}
+
+/**
+ * `obj[key]` the way plain property access resolves it (own, then up the prototype
+ * chain), reading an ACCESSOR exactly ONCE (its getter runs with `obj` as receiver) and
+ * returning the value it gave, which the snapshot then CAPTURES as data: the check and
+ * the SDK both see that one value, never a second read. Every object on the chain is
+ * Proxy-checked BEFORE it is touched (a Proxy is refused, not read). A getter that throws
+ * propagates, and the snapshot turns it into "indeterminate" (an audited refusal).
+ */
+function captureOnce(obj: unknown, key: string, at: string): unknown {
+	if (obj == null) return undefined;
+	for (let o: object | null = Object(obj); o !== null; o = Object.getPrototypeOf(o)) {
+		rejectProxy(o, o === obj ? at : `${at} (its prototype chain)`);
+		const d = Object.getOwnPropertyDescriptor(o, key);
+		if (d === undefined) continue;
+		if ("value" in d) return d.value;
+		return d.get === undefined ? undefined : d.get.call(obj);
+	}
+	return undefined;
+}
+
+/**
+ * `obj` as an object WE own, for an AFC-relevant config object: every own property is
+ * captured (an accessor read once), and the named `keys` are also resolved through the
+ * prototype chain, as the SDK's plain reads would find them. The values are the caller's
+ * (shallow); the fields the AFC decision reads are primitives.
+ */
+function ownedDataCopy(obj: unknown, at: string, keys: readonly string[]): unknown {
+	if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) return obj;
+	rejectProxy(obj, at);
+	const out: Record<string | symbol, unknown> = {};
+	for (const key of Reflect.ownKeys(obj)) {
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		if (d === undefined) continue;
+		out[key] = "value" in d ? d.value : d.get === undefined ? undefined : d.get.call(obj);
+	}
+	for (const key of keys) {
+		if (!Object.hasOwn(out, key)) {
+			const value = captureOnce(obj, key, at);
+			if (value !== undefined) out[key] = value;
+		}
+	}
+	return out;
+}
+
+/**
+ * Copy `obj`'s own properties, descriptor for descriptor, onto a fresh object with its
+ * prototype, except the `captured` keys, which the snapshot sets itself as owned data (a
+ * copied accessor there would be read again, and a non-configurable one could not be
+ * replaced).
+ */
+function shallowDescriptorCopy(
+	obj: object,
+	captured: readonly string[],
+): Record<string | symbol, unknown> {
+	const out = Object.create(Object.getPrototypeOf(obj)) as Record<string | symbol, unknown>;
+	for (const key of Reflect.ownKeys(obj)) {
+		if (typeof key === "string" && captured.includes(key)) continue;
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		if (d !== undefined) Object.defineProperty(out, key, d);
+	}
+	return out;
+}
+
+function setData(obj: Record<string | symbol, unknown>, key: string, value: unknown): void {
+	Object.defineProperty(obj, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
+/**
+ * "Send what was checked", for AUTOMATIC FUNCTION CALLING only. The SDK reads
+ * `params.config` after an `await` (`generateContent` awaits
+ * `processParamsMaybeAddMcpUsage(params)` before `hasCallableTools` /
+ * `shouldDisableAfc`), and the governor itself awaits authorization first, so a caller
+ * that keeps a reference could add a callable tool, or flip `disable`, after the check
+ * and before the SDK's read. The verdict therefore runs on — and the SDK receives — a
+ * snapshot whose AFC-relevant parts are objects the caller never held:
+ *
+ *   - `params` and `params.config`: fresh shallow copies (same prototype, same property
+ *     descriptors; fields the AFC decision does not read keep their live values/getters).
+ *     `config` itself must be an object (or absent): anything else is indeterminate.
+ *   - `config.automaticFunctionCalling`, `config.toolConfig` and its
+ *     `functionCallingConfig`: owned copies, so `disable`, `maximumRemoteCalls` and
+ *     `streamFunctionCallArguments` are values we own.
+ *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
+ *     non-callable tool is `structuredClone`d (a tool that cannot be copied as data is
+ *     indeterminate, so the call is refused naming it); callable tools keep their
+ *     reference (generateContent then runs them through runGovernedAfc, which needs the
+ *     original objects; the stream refuses them). When the snapshot says AFC IS disabled
+ *     (`disable` truthy, or a `maximumRemoteCalls` the SDK reads as invalid), the tool
+ *     REFERENCES are kept: callable tools are the documented way to run tools yourself,
+ *     and they carry functions that cannot be cloned. That is safe because the
+ *     `disable` / `maximumRemoteCalls` the SDK will read are OUR copies: mutating a tool,
+ *     or the caller's config, afterwards cannot turn AFC back on.
+ *
+ * ACCESSORS are read ONCE and their values captured (`captureOnce`): `params.config`,
+ * `config.tools`, each `tools[i]`, and the AFC config objects' fields. A getter that
+ * answers differently on each read cannot split the check from the SDK, because the SDK
+ * only ever reads the captured snapshot. A getter that throws is indeterminate. PROXIES are
+ * refused, not read. A callable tool whose `callTool` is an accessor is indeterminate too:
+ * a callable tool travels by REFERENCE (it cannot be captured), so its `callTool` would be
+ * read again. This closes AFC only. A general snapshot (`contents`, and what the PII and
+ * injection scans read) is separate future work; everything outside `config`, and the
+ * non-AFC fields inside it, are still read live.
+ */
+export function snapshotGoogleAfcParams(
+	params: unknown,
+): { params: unknown } | { verdict: Exclude<GoogleAfcVerdict, { kind: "no_afc" | "afc" }> } {
+	try {
+		if (params === null || (typeof params !== "object" && typeof params !== "function")) {
+			return { params }; // nothing a caller could mutate; the SDK handles the shape
+		}
+		rejectProxy(params, "params");
+		const config = captureOnce(params, "config", "params");
+		const outParams = shallowDescriptorCopy(params, ["config"]);
+		if (config === undefined || config === null) {
+			setData(outParams, "config", config);
+			return { params: outParams };
+		}
+		// A config that is not an object cannot be read as one: can't tell.
+		if (typeof config !== "object" && typeof config !== "function") throw INDETERMINATE;
+		rejectProxy(config, "params.config");
+		const outConfig = shallowDescriptorCopy(config, [
+			"tools",
+			"automaticFunctionCalling",
+			"toolConfig",
+		]);
+
+		const afcAt = "params.config.automaticFunctionCalling";
+		const afcConfig = ownedDataCopy(
+			captureOnce(config, "automaticFunctionCalling", "params.config"),
+			afcAt,
+			["disable", "maximumRemoteCalls", "ignoreCallHistory"],
+		);
+		setData(outConfig, "automaticFunctionCalling", afcConfig);
+
+		const toolConfigAt = "params.config.toolConfig";
+		const toolConfig = ownedDataCopy(
+			captureOnce(config, "toolConfig", "params.config"),
+			toolConfigAt,
+			["functionCallingConfig"],
+		);
+		if (toolConfig !== null && typeof toolConfig === "object") {
+			const callingConfig = ownedDataCopy(
+				(toolConfig as Record<string, unknown>).functionCallingConfig,
+				`${toolConfigAt}.functionCallingConfig`,
+				["streamFunctionCallArguments"],
+			);
+			setData(toolConfig as Record<string, unknown>, "functionCallingConfig", callingConfig);
+		}
+		setData(outConfig, "toolConfig", toolConfig);
+
+		const tools = captureOnce(config, "tools", "params.config");
+		// The AFC keys are always set as OWN data properties, `undefined` included: the
+		// copies keep the caller's prototypes, and an own key shadows anything a prototype
+		// could be given later.
+		setData(outConfig, "tools", tools);
+		if (tools !== undefined && tools !== null) {
+			rejectProxy(tools, "params.config.tools");
+			if (!Array.isArray(tools)) throw INDETERMINATE;
+			// The SNAPSHOT's own AFC switch, read the way the SDK reads it. Callable tools are
+			// ALWAYS kept by reference (runGovernedAfc wraps them and delegates callTool to the
+			// original object); only non-callable tools are ever cloned.
+			const disable = dataValue(afcConfig, "disable", afcAt);
+			const n = dataValue(afcConfig, "maximumRemoteCalls", afcAt);
+			// A value the rule cannot read without running caller code counts as NOT
+			// disabling here, which takes the stricter (cloning) path; the verdict decides
+			// about it only if a callable tool is present, as the SDK does.
+			let invalidMax = false;
+			try {
+				invalidMax = sdkDisablesForMaxCalls(n);
+			} catch {
+				invalidMax = false;
+			}
+			const afcDisabled = Boolean(disable) || invalidMax;
+			const outTools: unknown[] = new Array(tools.length);
+			for (let i = 0; i < tools.length; i++) {
+				if (!(i in tools)) continue; // keep holes as holes
+				const at = `params.config.tools[${i}]`;
+				const tool = captureOnce(tools, String(i), "params.config.tools");
+				if (afcDisabled) {
+					outTools[i] = tool; // references: see the doc comment
+					continue;
+				}
+				if (tool !== null && (typeof tool === "object" || typeof tool === "function")) {
+					rejectProxy(tool, at);
+					if (typeof dataValue(tool, "callTool", at) === "function") {
+						outTools[i] = tool; // callable: by reference, never cloned
+						continue;
+					}
+				}
+				try {
+					outTools[i] = structuredClone(tool);
+				} catch {
+					throw new UncloneableAfcInput(at);
+				}
+			}
+			setData(outConfig, "tools", outTools);
+		}
+		setData(outParams, "config", outConfig);
+		return { params: outParams };
+	} catch (err) {
+		if (err instanceof ProxyInAfcInput)
+			return { verdict: { kind: "indeterminate", proxyAt: err.at } };
+		if (err instanceof UncloneableAfcInput) {
+			return { verdict: { kind: "indeterminate", uncloneableAt: err.at } };
+		}
+		return { verdict: { kind: "indeterminate" } };
+	}
+}
+
+function isContent(v: unknown): v is Loose {
+	return isObject(v) && "parts" in v && Array.isArray(v["parts"]);
+}
+
+function hasFunctionPart(v: unknown): boolean {
+	return isObject(v) && ("functionCall" in v || "functionResponse" in v);
+}
+
+function toPart(v: unknown): unknown {
+	if (v === null || v === undefined) throw new Error("PartUnion is required");
+	if (typeof v === "object") return v;
+	if (typeof v === "string") return { text: v };
+	throw new Error(`Unsupported part type: ${typeof v}`);
+}
+
+/**
+ * `contents` as a list of `Content`, EXACTLY as the SDK's `tContents` normalises it (including the errors it throws, so a
+ * malformed request fails the same way governed and ungoverned, before any round is charged): an item is a `Content` only
+ * if it has a `parts` ARRAY; an array whose first item is not a Content is ONE user turn of every item (strings become
+ * `{ text }`); mixing Content and Parts is an error; function-call and function-response parts must be wrapped in a
+ * Content.
+ */
+function toContents(contents: unknown): Loose[] {
+	if (
+		contents === null ||
+		contents === undefined ||
+		(Array.isArray(contents) && contents.length === 0)
+	) {
+		throw new Error("contents are required");
+	}
+	if (!Array.isArray(contents)) {
+		if (hasFunctionPart(contents)) {
+			throw new Error(
+				"To specify functionCall or functionResponse parts, please wrap them in a Content object, specifying the role for them",
+			);
+		}
+		return [isContent(contents) ? contents : { role: "user", parts: [toPart(contents)] }];
+	}
+	const result: Loose[] = [];
+	const accumulated: unknown[] = [];
+	const isContentArray = isContent(contents[0]);
+	for (const item of contents as unknown[]) {
+		const itemIsContent = isContent(item);
+		if (itemIsContent !== isContentArray) {
+			throw new Error(
+				"Mixing Content and Parts is not supported, please group the parts into a the appropriate Content objects and specify the roles for them",
+			);
+		}
+		if (itemIsContent) {
+			result.push(item as Loose);
+		} else if (hasFunctionPart(item)) {
+			throw new Error(
+				"To specify functionCall or functionResponse parts, please wrap them, and any other parts, in Content objects as appropriate, specifying the role for them",
+			);
+		} else {
+			accumulated.push(item);
+		}
+	}
+	if (!isContentArray) result.push({ role: "user", parts: accumulated.map(toPart) });
+	return result;
+}
+
+export interface AfcRoundResult {
+	response: unknown;
+	receipt?: unknown;
+}
+
+export type AfcRound = (roundParams: Loose) => Promise<AfcRoundResult>;
+
+/**
+ * Run the loop, one governed `round` per model call. Resolves the envelope the governed call returns: the LAST round's
+ * `response` (carrying `automaticFunctionCallingHistory` unless `ignoreCallHistory`) and receipt, plus `receipts`, one per
+ * round, so the caller can see every charge. A round that throws (a denied policy, an exhausted budget, a provider error)
+ * ends the call there: earlier rounds are already settled, and nothing after it runs.
+ */
+export async function runGovernedAfc(
+	params: Loose,
+	round: AfcRound,
+): Promise<AfcRoundResult & { receipts: unknown[] }> {
+	// The request is read ONCE, as the SDK reads it, not re-read from the caller's object every round (a getter could answer
+	// differently on each read). The fields the loop consumes are read EXPLICITLY: a spread copies only own properties, so
+	// a `contents` or `tools` defined as a prototype getter (a class-instance request) would otherwise be lost.
+	const rawConfig = params["config"] as Loose;
+	const config: Loose = {
+		...rawConfig,
+		tools: rawConfig["tools"],
+		automaticFunctionCalling: rawConfig["automaticFunctionCalling"],
+	};
+	const baseParams: Loose = {
+		...params,
+		...(params["model"] !== undefined ? { model: params["model"] } : {}),
+		contents: params["contents"],
+	};
+	const afc = isObject(config["automaticFunctionCalling"])
+		? config["automaticFunctionCalling"]
+		: {};
+	const max =
+		typeof afc["maximumRemoteCalls"] === "number"
+			? afc["maximumRemoteCalls"]
+			: DEFAULT_MAX_REMOTE_CALLS;
+	const appendHistory = afc["ignoreCallHistory"] !== true;
+	const configTools = config["tools"] as unknown[];
+	const tools = configTools.filter(isCallableTool);
+	// Declarations are NOT resolved here: the first round's own generateContent asks each tool once, inside the governed call
+	// (see snapshotTool).
+	const roundTools = configTools.map((t) => (isCallableTool(t) ? snapshotTool(t) : t));
+
+	// The first round is sent the caller's `contents` exactly as given (the SDK normalises only once it appends a turn);
+	// the history starts from the normalised form.
+	let contents: unknown = baseParams["contents"];
+	const history: Loose[] = [...toContents(contents)];
+	const receipts: unknown[] = [];
+	let last: AfcRoundResult | undefined;
+	let remoteCalls = 0;
+
+	while (remoteCalls < max) {
+		// The SDK's own loop is off for this round; everything else about the call is the caller's.
+		const roundParams: Loose = {
+			...baseParams,
+			contents,
+			config: { ...config, tools: roundTools, automaticFunctionCalling: { ...afc, disable: true } },
+		};
+		last = await round(roundParams);
+		if (last.receipt !== undefined) receipts.push(last.receipt);
+		const response = last.response as Loose | null | undefined;
+		const calls = isObject(response) ? response["functionCalls"] : undefined;
+		if (!Array.isArray(calls) || calls.length === 0) break;
+		const candidates = (response as Loose)["candidates"];
+		const content =
+			Array.isArray(candidates) && isObject(candidates[0]) ? candidates[0]["content"] : undefined;
+		const parts: unknown[] = [];
+		for (const tool of tools) parts.push(...(await tool.callTool(calls)));
+		remoteCalls++;
+		const modelTurn = content as Loose;
+		const toolTurn: Loose = { role: "user", parts };
+		contents = [...toContents(contents), modelTurn, toolTurn];
+		if (appendHistory) history.push(modelTurn, toolTurn);
+	}
+
+	const response = last?.response;
+	if (appendHistory && isObject(response)) {
+		(response as Loose)["automaticFunctionCallingHistory"] = history;
+	}
+	return { response, ...(last?.receipt !== undefined ? { receipt: last.receipt } : {}), receipts };
+}

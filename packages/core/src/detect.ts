@@ -16,18 +16,22 @@
  *   floor, so older clients simply lack it and it stays a pass-through). A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   convenience helper is NOT (see below).
- * - Google: `client.models.generateContent()` and `client.models.generateContentStream()`,
- *   except when the SDK would run automatic function calling (refused, below).
- *   The other billable Google methods are REFUSED, not passed through: each call
- *   writes a `policy_denied` audit event and rejects with a PolicyDeniedError naming
+ * - Google: `client.models.generateContent()` and `client.models.generateContentStream()`.
+ *   With a callable tool the SDK runs an automatic-function-calling LOOP of several
+ *   model calls. On `generateContent` governance runs that loop itself, each round its
+ *   own governed call (`google-afc.ts`), so every round is held, metered and audited. On
+ *   `generateContentStream` a call that would run the loop is REFUSED (a streamed loop is
+ *   not metered round by round yet). Both decide on ONE reading (`afcRequested` /
+ *   `sdkRunsAfc` in google-afc.ts) made on a snapshot of the request, which is what is
+ *   forwarded. The other billable Google methods are REFUSED, not passed through: each
+ *   call writes a `policy_denied` audit event and rejects with a PolicyDeniedError naming
  *   the method, and the SDK is never reached
  *   (`GOOGLE_REFUSED_METHODS` in govern.ts: `models.embedContent` / `generateImages` /
  *   `editImage` / `upscaleImage` / `generateVideos` / `recontextImage` /
  *   `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`,
  *   `batches.create` / `createEmbeddings`, `interactions.create`, `tunings.tune`,
  *   `caches.create` / `update`, `fileSearchStores.uploadToFileSearchStore` /
- *   `importFile`; and `generateContent` / `generateContentStream` with automatic
- *   function calling, `googleAfcVerdict`).
+ *   `importFile`).
  *
  * Remaining ungoverned surfaces (feature-detected pass-throughs, or shapes that do
  * not mirror `create`): `client.messages.batches`, `client.beta.messages.batches`,

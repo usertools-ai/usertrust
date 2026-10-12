@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { GenerateContentResponse, GoogleGenAI } from "@google/genai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { GOOGLE_REFUSED_METHODS, type TrustEngine, trust } from "../../src/govern.js";
@@ -797,7 +798,7 @@ async function callModels(
 	return (result as { receipt: TrustReceipt }).receipt;
 }
 
-describe("automatic function calling is refused on generateContent and generateContentStream", () => {
+describe("automatic function calling: metered per round on generateContent, refused on generateContentStream", () => {
 	let tmpVault: string;
 	beforeEach(() => {
 		tmpVault = makeTmpVault();
@@ -820,7 +821,45 @@ describe("automatic function calling is refused on generateContent and generateC
 		],
 	];
 
-	for (const method of AFC_METHODS) {
+	it.each(REFUSED_AFC)(
+		"generateContent: %s → the governed per-round loop runs on the snapshot (one governed call per round)",
+		async (_, config) => {
+			const engine = makeMockEngine();
+			const audit = makeMockAudit();
+			const { client } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: audit,
+			});
+			const params = afcParams(config());
+
+			const out = (await governed.models.generateContent(params)) as unknown as {
+				receipt: TrustReceipt;
+				receipts?: TrustReceipt[];
+			};
+
+			// The fake model returns no function calls, so the loop is one round.
+			expect(out.receipts).toHaveLength(1);
+			expect(out.receipt.settled).toBe(true);
+			expect(engine.spendPending).toHaveBeenCalledOnce();
+			expect(audit.events.map((e) => e.kind)).toEqual(["llm_call"]);
+			expect(client.models.generateContent).toHaveBeenCalledOnce();
+			const round = client.models.generateContent.mock.calls[0]?.[0] as Record<string, unknown>;
+			const roundConfig = round.config as Record<string, unknown>;
+			// The SDK's own loop is off for the round; the round was built from OUR snapshot.
+			expect(roundConfig.automaticFunctionCalling).toMatchObject({ disable: true });
+			expect(round).not.toBe(params);
+			expect(roundConfig).not.toBe(params.config);
+
+			await destroy(governed);
+		},
+	);
+
+	{
+		const method = "generateContentStream" as const;
 		it.each(REFUSED_AFC)(
 			`${method}: %s → refused, audited, no hold, no SDK call`,
 			async (_, config) => {
@@ -909,12 +948,12 @@ describe("automatic function calling is refused on generateContent and generateC
 		);
 	}
 
-	it("the SDK's own pre-request AFC errors are left to the SDK (governed path: hold, then void)", async () => {
+	it("generateContent: the SDK's own incompatible-declarations error is left to the SDK (one governed call: hold, then void)", async () => {
 		// A callable tool next to a non-callable tool with functionDeclarations: the SDK
-		// throws "incompatible tools" before any request. That is the SDK's error, not ours.
+		// throws "incompatible tools" before any request (afcRequested is false).
 		const engine = makeMockEngine();
-		const { client, generateContentStream } = makeGoogleClient();
-		generateContentStream.mockImplementationOnce(async () => {
+		const { client } = makeGoogleClient();
+		client.models.generateContent.mockImplementationOnce(async () => {
 			throw new Error("Incompatible tools found at tools[1].");
 		});
 		const governed = await trust(client, {
@@ -926,12 +965,11 @@ describe("automatic function calling is refused on generateContent and generateC
 		});
 
 		await expect(
-			openStream(
-				governed,
+			governed.models.generateContent(
 				afcParams({ tools: [callableTool(), { functionDeclarations: [{ name: "x" }] }] }),
 			),
 		).rejects.toThrow(/Incompatible tools/);
-		expect(generateContentStream).toHaveBeenCalledOnce();
+		expect(client.models.generateContent).toHaveBeenCalledOnce();
 		expect(engine.spendPending).toHaveBeenCalledOnce();
 		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
 		expect(engine.postPendingSpend).not.toHaveBeenCalled();
@@ -939,7 +977,70 @@ describe("automatic function calling is refused on generateContent and generateC
 		await destroy(governed);
 	});
 
-	it("config read through a getter is refused WITHOUT running the getter (fail closed)", async () => {
+	it("generateContentStream: the same incompatible-declarations config is REFUSED (the stream refusal uses sdkRunsAfc, which the SDK's own error does not change)", async () => {
+		const engine = makeMockEngine();
+		const audit = makeMockAudit();
+		const { client, generateContentStream } = makeGoogleClient();
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: audit,
+		});
+
+		await expect(
+			openStream(
+				governed,
+				afcParams({ tools: [callableTool(), { functionDeclarations: [{ name: "x" }] }] }),
+			),
+		).rejects.toThrow(
+			/models.generateContentStream with automatic function calling is not governed yet/,
+		);
+		expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+		expect(generateContentStream).not.toHaveBeenCalled();
+		expect(engine.spendPending).not.toHaveBeenCalled();
+
+		await destroy(governed);
+	});
+
+	it("generateContent: the loop runs on the snapshot, so a callable tool added or maximumRemoteCalls changed during round 1's hold never reaches a round", async () => {
+		const { engine, holdEntered, release } = makeGatedEngine();
+		const { client } = makeGoogleClient();
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+		const tool = callableTool();
+		const params = afcParams({
+			tools: [tool],
+			automaticFunctionCalling: { maximumRemoteCalls: 2 },
+		});
+
+		const pending = governed.models.generateContent(params);
+		await holdEntered;
+		const config = params.config as Record<string, unknown>;
+		(config.tools as unknown[]).push(callableTool());
+		(config.automaticFunctionCalling as Record<string, unknown>).maximumRemoteCalls = 9;
+		release();
+		await pending;
+
+		const round = client.models.generateContent.mock.calls[0]?.[0] as Record<string, unknown>;
+		const roundConfig = round.config as Record<string, unknown>;
+		expect(config.tools as unknown[]).toHaveLength(2); // the caller's mutation happened
+		expect(roundConfig.tools as unknown[]).toHaveLength(1);
+		expect(roundConfig.automaticFunctionCalling).toMatchObject({
+			maximumRemoteCalls: 2,
+			disable: true,
+		});
+
+		await destroy(governed);
+	});
+
+	it("a config.tools getter is read ONCE and its value captured: generateContent runs the governed loop on it", async () => {
 		const engine = makeMockEngine();
 		const audit = makeMockAudit();
 		const { client } = makeGoogleClient();
@@ -950,25 +1051,268 @@ describe("automatic function calling is refused on generateContent and generateC
 			_engine: engine,
 			_audit: audit,
 		});
-		const toolsGetter = vi.fn(() => [callableTool()]);
+		const tool = callableTool();
+		const toolsGetter = vi.fn(() => [tool]);
 		const config = Object.defineProperty({}, "tools", { get: toolsGetter, enumerable: true });
 
-		const err = await governed.models.generateContent(afcParams(config)).then(
-			() => undefined,
-			(e: unknown) => e,
-		);
+		const out = (await governed.models.generateContent(afcParams(config))) as unknown as {
+			receipts?: TrustReceipt[];
+		};
 
-		expect(err).toBeInstanceOf(PolicyDeniedError);
-		expect((err as Error).message).toContain(
-			"models.generateContent could not be checked for automatic function calling",
-		);
-		expect(toolsGetter).not.toHaveBeenCalled();
-		expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
-		expect(engine.spendPending).not.toHaveBeenCalled();
-		expect(client.models.generateContent).not.toHaveBeenCalled();
+		expect(toolsGetter).toHaveBeenCalledOnce();
+		expect(out.receipts).toHaveLength(1);
+		expect(audit.events.map((e) => e.kind)).toEqual(["llm_call"]);
+		const round = client.models.generateContent.mock.calls[0]?.[0] as Record<string, unknown>;
+		expect(Object.getOwnPropertyDescriptor(round.config, "tools")).toHaveProperty("value");
 
 		await destroy(governed);
 	});
+
+	for (const method of AFC_METHODS) {
+		it(`${method}: a config getter that THROWS is an audited refusal, never a raw throw`, async () => {
+			const engine = makeMockEngine();
+			const audit = makeMockAudit();
+			const { client, generateContentStream } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: audit,
+			});
+			const params = Object.defineProperty(
+				{ model: "gemini-2.5-flash", contents: "hi" },
+				"config",
+				{
+					get: () => {
+						throw new Error("getter exploded");
+					},
+					enumerable: true,
+				},
+			);
+
+			const err = await callModels(governed, method, params).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect((err as Error).message).toContain(
+				`models.${method} could not be checked for automatic function calling`,
+			);
+			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+			expect((err as PolicyDeniedError).auditEventHash).toBe(audit.hashes[0]);
+			expect(engine.spendPending).not.toHaveBeenCalled();
+			expect(client.models.generateContent).not.toHaveBeenCalled();
+			expect(generateContentStream).not.toHaveBeenCalled();
+			await destroy(governed);
+		});
+
+		it(`${method}: a config that is not an object (here from a getter) is an audited refusal`, async () => {
+			const engine = makeMockEngine();
+			const audit = makeMockAudit();
+			const { client, generateContentStream } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: audit,
+			});
+			const params = Object.defineProperty(
+				{ model: "gemini-2.5-flash", contents: "hi" },
+				"config",
+				{ get: () => 42, enumerable: true },
+			);
+
+			const err = await callModels(governed, method, params).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+			expect((err as PolicyDeniedError).auditEventHash).toBe(audit.hashes[0]);
+			expect(client.models.generateContent).not.toHaveBeenCalled();
+			expect(generateContentStream).not.toHaveBeenCalled();
+			await destroy(governed);
+		});
+	}
+});
+
+// ── Where the unified AFC predicate deliberately differs from the first afcRequested ──
+
+describe("the unified AFC predicate: deliberate differences, each pinned", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	async function governedClient() {
+		const engine = makeMockEngine();
+		const audit = makeMockAudit();
+		const { client, generateContentStream } = makeGoogleClient();
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: audit,
+		});
+		return { governed, engine, audit, client, generateContentStream };
+	}
+
+	it("disable: 1 (truthy, not true) is the SDK's own off switch: one governed call, no loop", async () => {
+		const { governed, engine, client } = await governedClient();
+		const out = (await governed.models.generateContent(
+			afcParams({ tools: [callableTool()], automaticFunctionCalling: { disable: 1 } }),
+		)) as unknown as { receipts?: unknown[] };
+
+		expect(out.receipts).toBeUndefined(); // not the governed loop
+		expect(engine.spendPending).toHaveBeenCalledOnce();
+		const sent = client.models.generateContent.mock.calls[0]?.[0] as Record<string, unknown>;
+		expect((sent.config as Record<string, unknown>).automaticFunctionCalling).toEqual({
+			disable: 1,
+		});
+		await destroy(governed);
+	});
+
+	it("an array-LIKE functionDeclarations beside a callable tool is the SDK's own error (left to the SDK, as an array is)", async () => {
+		const { governed, engine, client } = await governedClient();
+		client.models.generateContent.mockImplementationOnce(async () => {
+			throw new Error("Incompatible tools found at tools[1].");
+		});
+		const arrayLike = { length: 1, 0: { name: "f" } };
+
+		await expect(
+			governed.models.generateContent(
+				afcParams({ tools: [callableTool(), { functionDeclarations: arrayLike }] }),
+			),
+		).rejects.toThrow(/Incompatible tools/);
+		expect(client.models.generateContent).toHaveBeenCalledOnce(); // one call, not the loop
+		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+		await destroy(governed);
+	});
+
+	/** `[<hole>, callableTool()]`, built without a sparse literal. */
+	const holeyTools = (): unknown[] => {
+		const tools: unknown[] = new Array(2);
+		tools[1] = callableTool();
+		return tools;
+	};
+
+	const UNREADABLE: Array<[string, () => Record<string, unknown>]> = [
+		["a hole in config.tools", () => ({ tools: holeyTools() })],
+		["a non-array config.tools", () => ({ tools: { 0: callableTool(), length: 1 } })],
+		["a primitive tool", () => ({ tools: ["search", callableTool()] })],
+		[
+			"an object maximumRemoteCalls",
+			() => ({
+				tools: [callableTool()],
+				automaticFunctionCalling: { maximumRemoteCalls: { n: 3 } },
+			}),
+		],
+	];
+
+	it.each(UNREADABLE)(
+		"%s is 'can't tell': an audited refusal, no hold, no SDK call",
+		async (_, config) => {
+			const { governed, engine, audit, client } = await governedClient();
+
+			const err = await governed.models.generateContent(afcParams(config())).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect((err as Error).message).toContain(
+				"could not be checked for automatic function calling",
+			);
+			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+			expect(engine.spendPending).not.toHaveBeenCalled();
+			expect(client.models.generateContent).not.toHaveBeenCalled();
+			await destroy(governed);
+		},
+	);
+});
+
+// ── A FLIP getter: the check and the REAL SDK must see the same, once-read value ──
+
+describe("a config getter that flips after its first read cannot turn the SDK's own AFC on", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	/** The real @google/genai client, its network calls replaced by a one-round model. */
+	function realSdk() {
+		const sdk = new GoogleGenAI({ apiKey: "test" });
+		const sent: Array<Record<string, unknown>> = [];
+		const reply = () => {
+			const res = new GenerateContentResponse();
+			res.candidates = [{ content: { role: "model", parts: [{ text: "done" }] } }];
+			res.usageMetadata = { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 };
+			return res;
+		};
+		const models = sdk.models as unknown as Record<string, unknown>;
+		models.generateContentInternal = async (p: Record<string, unknown>) => {
+			sent.push(p);
+			return reply();
+		};
+		models.generateContentStreamInternal = async (p: Record<string, unknown>) => {
+			sent.push(p);
+			return (async function* () {
+				yield reply();
+			})();
+		};
+		return { sdk, sent };
+	}
+
+	/** A request whose `config` getter shows NO callable tool on its first read and one on every later read. */
+	function flippingRequest() {
+		const tool = {
+			tool: vi.fn(async () => ({ functionDeclarations: [{ name: "f" }] })),
+			callTool: vi.fn(async () => []),
+		};
+		let reads = 0;
+		const getter = vi.fn(() => {
+			reads++;
+			return reads === 1 ? { tools: [{ googleSearch: {} }] } : { tools: [tool] };
+		});
+		const params = Object.defineProperty({ model: "gemini-2.5-flash", contents: "go" }, "config", {
+			get: getter,
+			enumerable: true,
+		});
+		return { params, getter, tool };
+	}
+
+	for (const method of AFC_METHODS) {
+		it(`${method}: the getter runs ONCE, the SDK gets the captured (callable-free) config, and its own AFC never runs`, async () => {
+			const { sdk, sent } = realSdk();
+			const { params, getter, tool } = flippingRequest();
+			const governed = await trust(sdk, { dryRun: true, budget: 500_000, vaultBase: tmpVault });
+
+			await callModels(governed, method, params as unknown as Record<string, unknown>);
+
+			expect(getter).toHaveBeenCalledOnce();
+			// One model request, carrying the captured tools: no callable tool reached the SDK.
+			expect(sent).toHaveLength(1);
+			const first = sent[0] as Record<string, unknown>;
+			const tools = (first.config as Record<string, unknown>).tools as unknown[];
+			expect(tools).toEqual([{ googleSearch: {} }]);
+			// The SDK's own AFC would have asked the callable tool for its declaration.
+			expect(tool.tool).not.toHaveBeenCalled();
+			expect(tool.callTool).not.toHaveBeenCalled();
+
+			await destroy(governed);
+		});
+	}
 });
 
 // ── A governed stream closed before its first read still ends its hold ──
@@ -1550,7 +1894,9 @@ describe("audit.failClosed: a client already degraded refuses Google refusals be
 		await destroy(governed);
 	});
 
-	it.each(CASES)(
+	// generateContent with a callable tool is no longer a refusal (it runs the metered
+	// per-round loop), so (c) covers the two refusals that remain.
+	it.each(CASES.filter(([name]) => !name.startsWith("(b) generateContent with")))(
 		"(c) failClosed OFF: %s is still the PolicyDeniedError it was",
 		async (_, call) => {
 			writeVaultConfig(tmpVault, { budget: 50_000, audit: { failClosed: false } });

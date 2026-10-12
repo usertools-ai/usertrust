@@ -1613,10 +1613,11 @@ segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.cr
 createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create/update`,
 `fileSearchStores.uploadToFileSearchStore/importFile`): each call writes a `policy_denied` event
 at the denial boundary and rejects with a `PolicyDeniedError` naming the method, and the SDK is
-never reached. `models.generateContent` / `generateContentStream` are refused the same way when
-the SDK would run automatic function calling (`googleAfcVerdict`, a mirror of the SDK's
-`shouldDisableAfc`): one request per tool round, not yet metered per round. If you add a governed
-or refused surface, update that doc block.
+never reached. With automatic function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in
+`google-afc.ts`, a mirror of the SDK's `shouldDisableAfc`, made on a snapshot of the request that is
+then what is forwarded), `models.generateContent` runs the loop itself, each round its own governed
+call (`runGovernedAfc`), and `models.generateContentStream` is refused the same way (a streamed loop
+is not metered per round yet). If you add a governed or refused surface, update that doc block.
 
 ---
 

@@ -51,6 +51,13 @@ import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
+import {
+	afcRequestedVerdict,
+	type GoogleAfcVerdict,
+	runGovernedAfc,
+	sdkRunsAfcVerdict,
+	snapshotGoogleAfcParams,
+} from "./google-afc.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	copyAppliedRates,
@@ -72,8 +79,10 @@ import {
 import {
 	fromAnthropicUsage,
 	fromProviderResponse,
+	type ImplausibleChecks,
 	implausibleUsageData,
 	MAX_PLAUSIBLE_TOKENS_PER_TIER,
+	mergeImplausible,
 	publishableUsageFields,
 	sanitizeUsage,
 	type UsageTier,
@@ -97,6 +106,7 @@ import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/private-fs.js";
 import { isPersistableSpend } from "./shared/spend-guard.js";
+import { governorVaultBase } from "./shared/vault-base.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
@@ -456,7 +466,7 @@ type RefuseMembers<N, K extends PropertyKey> =
 
 /**
  * The Google `models` resource. `generateContent` resolves to the `{ response, receipt }`
- * envelope; `generateContentStream` resolves to the governed stream ITSELF with a
+ * envelope (plus `receipts` when it ran as a governed AFC loop, GovernedGoogleGenerateMethod); `generateContentStream` resolves to the governed stream ITSELF with a
  * `.receipt` promise (the same contract as Anthropic's `messages.stream`, and what
  * buildGoogleProxy's trap returns); the non-governed generation methods are refused.
  * Homomorphic, so a fake or older client without `generateContentStream` gets no
@@ -466,7 +476,7 @@ type RefuseMembers<N, K extends PropertyKey> =
 type GovernedGoogleModels<G> = G extends { generateContent: AnyMethod }
 	? {
 			[P in keyof G]: P extends "generateContent"
-				? GovernedCreateMethod<G[P]>
+				? GovernedGoogleGenerateMethod<G[P]>
 				: P extends "generateContentStream"
 					? GovernedStreamMethod<G[P]>
 					: P extends
@@ -510,6 +520,19 @@ type RefusedGoogleNamespace<P, N> = P extends "live"
 					: P extends "fileSearchStores"
 						? RefuseMembers<N, "uploadToFileSearchStore" | "importFile">
 						: N;
+
+/**
+ * The Google `generateContent` envelope: `{ response, receipt }` like every other create, plus `receipts`, one per model
+ * round, present when a callable tool made the call a governed automatic-function-calling loop (google-afc.ts). `receipt`
+ * is then the LAST round's, so `receipts` is where a caller sees every charge.
+ */
+type GovernedGoogleGenerateMethod<F> = F extends (...args: infer A) => infer R
+	? (...args: A) => Promise<{
+			response: GovernedResponseOf<Awaited<R>>;
+			receipt: TrustReceipt;
+			receipts?: TrustReceipt[];
+		}>
+	: F;
 
 // ── Provider selection: the type-level twin of detectClientKind ──
 // Each predicate is the full runtime test, both halves: the namespace is a
@@ -1273,9 +1296,11 @@ function snapshotActionDescriptor(descriptor: ActionDescriptor): ActionDescripto
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
 	// 1. Load config
-	// Absolute from here: every vault file this client touches is in the vault it was created for,
-	// whatever the working directory becomes later (its audit writer is fixed at creation too).
-	const vaultBase = resolve(opts?.vaultBase ?? process.cwd());
+	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,
+	// so every vault file this client touches is in the vault it was created for, whatever the working
+	// directory becomes later (its audit writer is fixed at creation too). With no `..` left, resolve() only
+	// prefixes the working directory and drops `.` segments; it has nothing to fold.
+	const vaultBase = resolve(governorVaultBase(opts?.vaultBase ?? process.cwd()));
 	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
 	// version left group/world-readable is closed; one another user owns is refused (see
 	// securePrivateVault). This runs before ANYTHING under the vault is read, the config
@@ -2070,6 +2095,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							source: completion.usageReported ? "provider" : "estimated",
 						}),
 						completion.implausible,
+						completion.implausibleBy,
 					),
 					rateResolution.rates,
 					rateResolution.rateSource !== "table",
@@ -2489,12 +2515,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let accCacheWrite1h = 0;
 				let accUsageReported = false;
 				let accImplausible: Partial<Record<UsageTier, number>> | undefined;
-				const noteImplausible = (found: Partial<Record<UsageTier, number>> | undefined): void => {
-					if (found === undefined) return;
-					accImplausible = { ...accImplausible };
-					for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
-						accImplausible[tier] = Math.max(accImplausible[tier] ?? 0, value);
-					}
+				let accImplausibleBy: ImplausibleChecks | undefined;
+				const noteImplausible = (reading: {
+					implausible?: Partial<Record<UsageTier, number>> | undefined;
+					implausibleBy?: ImplausibleChecks | undefined;
+				}): void => {
+					({ implausible: accImplausible, implausibleBy: accImplausibleBy } = mergeImplausible(
+						accImplausible,
+						accImplausibleBy,
+						reading.implausible,
+						reading.implausibleBy,
+					));
 				};
 				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
 				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
@@ -2511,12 +2542,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					chunksDelivered,
 					usageReported: accUsageReported,
 					implausible: accImplausible,
+					implausibleBy: accImplausibleBy,
 				});
 
 				emitter.on("streamEvent", (event: unknown) => {
 					chunksDelivered++;
 					const tokens = extractAnthropicStreamUsage(event);
-					noteImplausible(tokens.implausible);
+					noteImplausible(tokens);
 					let deltaTokens = 0;
 					if (tokens.inputTokens > accInput) {
 						deltaTokens += tokens.inputTokens - accInput;
@@ -2593,7 +2625,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// zeroing it. Reported when EITHER source carried a real number;
 					// otherwise settle on the estimate.
 					const finalUsage = readFinalMessageUsage(msg);
-					noteImplausible(finalUsage.implausible);
+					noteImplausible(finalUsage);
 					const usageReported = finalUsage.reported || accUsageReported;
 					const completion: StreamCompletion = usageReported
 						? {
@@ -2607,6 +2639,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								chunksDelivered,
 								usageReported: true,
 								implausible: accImplausible,
+								implausibleBy: accImplausibleBy,
 							}
 						: {
 								usage: {
@@ -2618,6 +2651,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								chunksDelivered,
 								usageReported: false,
 								implausible: accImplausible,
+								implausibleBy: accImplausibleBy,
 							};
 					finalizeStreamSettle(completion)
 						.then(receiptResolve, receiptReject)
@@ -2678,6 +2712,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						usageReported: false,
 						// An absurd count seen on a streamEvent is not forgotten when only `end` arrives.
 						implausible: accImplausible,
+						implausibleBy: accImplausibleBy,
 					})
 						.then(receiptResolve, receiptReject)
 						.finally(releaseStreamCount);
@@ -4107,6 +4142,8 @@ function readFinalMessageUsage(msg: unknown): {
 	reported: boolean;
 	/** Tiers over the plausibility ceiling (the extractor zeroes them; the settle must still hear of them). */
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	/** Which check put each tier in `implausible`. */
+	implausibleBy?: ImplausibleChecks | undefined;
 } {
 	if (msg != null && typeof msg === "object") {
 		const usage = (msg as Record<string, unknown>).usage;
@@ -4156,6 +4193,7 @@ function readFinalMessageUsage(msg: unknown): {
 							: undefined,
 					reported: true,
 					implausible: cacheTiers.implausible,
+					implausibleBy: cacheTiers.implausibleBy,
 				};
 			}
 			// No usable headline counts: the cache readings are still reported, so an absurd tier is not lost.
@@ -4167,6 +4205,7 @@ function readFinalMessageUsage(msg: unknown): {
 				cacheWrite1hTokens: undefined,
 				reported: false,
 				implausible: cacheTiers.implausible,
+				implausibleBy: cacheTiers.implausibleBy,
 			};
 		}
 	}
@@ -4193,6 +4232,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 	cacheWriteTokens: number;
 	cacheWrite1hTokens: number;
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	implausibleBy?: ImplausibleChecks | undefined;
 } {
 	const none = {
 		inputTokens: 0,
@@ -4221,6 +4261,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 				cacheWriteTokens: tiers.cacheWriteTokens,
 				cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 				implausible: inAbsurd ? { ...tiers.implausible, inputTokens: inTok } : tiers.implausible,
+				implausibleBy: tiers.implausibleBy,
 			};
 		}
 	}
@@ -4236,6 +4277,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 			cacheWriteTokens: tiers.cacheWriteTokens,
 			cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 			implausible: outAbsurd ? { ...tiers.implausible, outputTokens: outTok } : tiers.implausible,
+			implausibleBy: tiers.implausibleBy,
 		};
 	}
 	return none;
@@ -4856,380 +4898,31 @@ function ownStringDataProperty(obj: unknown, key: string): string | undefined {
 	}
 }
 
-// ── Automatic function calling (AFC) on generateContent / generateContentStream ──
-// With a callable tool in `config.tools` and AFC not disabled, @google/genai runs its
-// AFC loop: one provider request PER tool round inside the one call. `generateContent`
-// returns the LAST round's response (so only its `usageMetadata` is seen), and
-// `generateContentStream` (`processAfcStream`) yields every round's chunks through one
-// generator whose replace-with-latest snapshot keeps the last round only. Either way the
-// earlier rounds would go unbilled. Until each round is metered, a call that would run
-// the AFC loop is refused (an audited denial) before any hold or SDK call.
-
 /**
- * The SDK would run its AFC loop, or not; or it cannot be told without running caller
- * code. `proxyAt` names the first AFC-relevant object found to be a Proxy.
- */
-type GoogleAfcVerdict =
-	| { kind: "afc" }
-	| { kind: "no_afc" }
-	| { kind: "indeterminate"; proxyAt?: string; uncloneableAt?: string };
-
-/** A value property access would yield, found WITHOUT running a getter. */
-type DataRead = { value: unknown } | undefined;
-
-/**
- * Resolve `obj[key]` the way property access does (own, then up the prototype chain),
- * but return `undefined` (indeterminate) instead of invoking an accessor. Nullish `obj`
- * reads as `undefined`, which is what the SDK's optional chaining yields.
- */
-function readDataProperty(obj: unknown, key: string, at: string): DataRead {
-	if (obj == null) return { value: undefined };
-	for (let o: object | null = Object(obj); o !== null; o = Object.getPrototypeOf(o)) {
-		// Checked BEFORE the descriptor read and before the next getPrototypeOf, both of
-		// which would run a Proxy's traps.
-		rejectProxy(o, o === obj ? at : `${at} (its prototype chain)`);
-		const d = Object.getOwnPropertyDescriptor(o, key);
-		if (d !== undefined) return "value" in d ? { value: d.value } : undefined;
-	}
-	return { value: undefined };
-}
-
-/** Thrown inside the predicate when a read cannot be made without running caller code. */
-const INDETERMINATE = Symbol("indeterminate");
-
-/** Thrown inside the predicate when an AFC-relevant object is a Proxy; carries where. */
-class ProxyInAfcInput {
-	constructor(readonly at: string) {}
-}
-
-/**
- * A NARROW fail-closed. A Proxy's `getOwnPropertyDescriptor` / `getPrototypeOf` traps can
- * show this check a config with no callable tool while its `get` trap hands the SDK one
- * that has one (the SDK reads with plain property access), so a Proxy anywhere the
- * check reads is refused rather than believed. `util.types.isProxy` runs no trap. The
- * planned replacement is a structural snapshot of exactly what was checked, forwarded so
- * the SDK receives what was checked; until then, a caller that MUTATES plain params
- * between the call and the SDK's read is still outside this check.
- */
-function rejectProxy(value: unknown, at: string): void {
-	if (utilTypes.isProxy(value)) throw new ProxyInAfcInput(at);
-}
-
-function dataValue(obj: unknown, key: string, at: string): unknown {
-	const read = readDataProperty(obj, key, at);
-	if (read === undefined) throw INDETERMINATE;
-	return read.value;
-}
-
-/**
- * The SDK's `isCallableTool`: `'callTool' in tool && typeof tool.callTool === 'function'`.
- * `in` accepts any object, function objects included; on a primitive or `null` the SDK's
- * `in` throws a TypeError, which here is indeterminate.
- */
-function isCallableToolLike(tool: unknown, at: string): boolean {
-	if (tool === null || (typeof tool !== "object" && typeof tool !== "function")) {
-		throw INDETERMINATE;
-	}
-	return typeof dataValue(tool, "callTool", at) === "function";
-}
-
-/**
- * The SDK's invalid-`maximumRemoteCalls` rule, which DISABLES AFC:
- * `(n && (n < 0 || !Number.isInteger(n))) || n == 0`. A value whose comparison would run
- * caller code (`valueOf` on an object or function) or throw (a symbol) is indeterminate.
- */
-function sdkDisablesForMaxCalls(maxCalls: unknown): boolean {
-	if (maxCalls !== null && (typeof maxCalls === "object" || typeof maxCalls === "function")) {
-		throw INDETERMINATE;
-	}
-	if (typeof maxCalls === "symbol") throw INDETERMINATE;
-	// biome-ignore lint/suspicious/noExplicitAny: the SDK's own loose comparison, mirrored verbatim
-	const n = maxCalls as any;
-	// biome-ignore lint/suspicious/noDoubleEquals: `== 0` is the SDK's test (it also matches "0" and false)
-	return Boolean((n && (n < 0 || !Number.isInteger(n))) || n == 0);
-}
-
-/** The tools list as the SDK iterates it (`config?.tools ?? []`); only a plain array is read. */
-function toolsList(config: unknown): unknown[] {
-	const tools = dataValue(config, "tools", "params.config") ?? [];
-	// Before Array.isArray (which sees through a Proxy) and before any element read.
-	rejectProxy(tools, "params.config.tools");
-	if (!Array.isArray(tools)) throw INDETERMINATE;
-	return tools;
-}
-
-/**
- * Would `models.generateContent(params)` / `models.generateContentStream(params)` run the
- * SDK's AFC loop? ONE predicate for both, a line-for-line mirror of @google/genai 1.52.0
- * (`shouldDisableAfc`, `isCallableTool`, `hasCallableTools`,
- * `findAfcIncompatibleToolIndexes`, and the two methods' own guards), reading only data
- * properties:
- *
- *   1. `shouldDisableAfc(config)` true → no AFC: `automaticFunctionCalling.disable`
- *      truthy; or no callable tool (scanning stops at the first; `generateContent`'s extra
- *      `hasCallableTools` test is then the same answer); or `maximumRemoteCalls` invalid,
- *      `(n && (n < 0 || !Number.isInteger(n))) || n == 0`.
- *   2. Otherwise the SDK THROWS before any request when a non-callable tool carries
- *      `functionDeclarations` (both methods), or, on the stream only, when
- *      `toolConfig.functionCallingConfig.streamFunctionCallArguments` is truthy. Those
- *      calls are left to the SDK ("no_afc"): they reach the governed path, the SDK throws,
- *      and the hold is voided.
- *   3. Otherwise the SDK runs its AFC loop → "afc".
- *
- * MCP needs no case of its own: `mcpToTool(...)` returns a CallableTool (it has
- * `callTool`), and a raw MCP client in `config.tools` also has `callTool`, so the SDK
- * treats both as callable — and so does this check.
- *
- * Anything that cannot be read without running caller code (a getter, a non-array
- * `tools`, a primitive tool, a non-primitive `maximumRemoteCalls` whose comparison would
- * call `valueOf`, a Proxy trap that throws) is "indeterminate", and the caller refuses it.
- */
-export function googleAfcVerdict(
-	params: unknown,
-	method: "generateContent" | "generateContentStream",
-): GoogleAfcVerdict {
-	const AFC: GoogleAfcVerdict = { kind: "afc" };
-	const NO_AFC: GoogleAfcVerdict = { kind: "no_afc" };
-	try {
-		// Every object is checked for a Proxy before anything is read from it: `dataValue`
-		// does it for the object it reads, and `toolsList` for the array.
-		const config = dataValue(params, "config", "params");
-		const afcConfig = dataValue(config, "automaticFunctionCalling", "params.config");
-		const afcAt = "params.config.automaticFunctionCalling";
-		if (dataValue(afcConfig, "disable", afcAt)) return NO_AFC;
-		const tools = toolsList(config);
-		let callablePresent = false;
-		// By index, not `for...of`: an element getter must not run (a hole reads as
-		// `undefined`, on which the SDK's `in` throws, so it is indeterminate).
-		for (let i = 0; i < tools.length; i++) {
-			const tool = dataValue(tools, String(i), "params.config.tools");
-			if (isCallableToolLike(tool, `params.config.tools[${i}]`)) {
-				callablePresent = true;
-				break;
-			}
-		}
-		if (!callablePresent) return NO_AFC;
-		if (sdkDisablesForMaxCalls(dataValue(afcConfig, "maximumRemoteCalls", afcAt))) return NO_AFC;
-		// The SDK's own pre-request throws (step 2) — not refused here. Their inputs are
-		// Proxy-checked too: a lying `length` or flag would turn "the SDK throws" into a
-		// forwarded call that runs the AFC loop.
-		for (let i = 0; i < tools.length; i++) {
-			if (!(i in tools)) continue; // forEach skips holes
-			const toolAt = `params.config.tools[${i}]`;
-			const tool = dataValue(tools, String(i), "params.config.tools");
-			if (isCallableToolLike(tool, toolAt)) continue;
-			const declarations = dataValue(tool, "functionDeclarations", toolAt);
-			if (declarations) {
-				const length = dataValue(declarations, "length", `${toolAt}.functionDeclarations`);
-				if (length !== undefined && typeof length !== "number") throw INDETERMINATE;
-				if ((length as number) > 0) return NO_AFC;
-			}
-		}
-		if (method === "generateContentStream") {
-			const toolConfig = dataValue(config, "toolConfig", "params.config");
-			const callingConfig = dataValue(
-				toolConfig,
-				"functionCallingConfig",
-				"params.config.toolConfig",
-			);
-			const callingAt = "params.config.toolConfig.functionCallingConfig";
-			if (dataValue(callingConfig, "streamFunctionCallArguments", callingAt)) return NO_AFC;
-		}
-		return AFC;
-	} catch (err) {
-		// A Proxy (named), INDETERMINATE, or a trap that threw: fail closed.
-		return err instanceof ProxyInAfcInput
-			? { kind: "indeterminate", proxyAt: err.at }
-			: { kind: "indeterminate" };
-	}
-}
-
-/** Thrown while snapshotting when a tool cannot be copied as data; carries where. */
-class UncloneableAfcInput {
-	constructor(readonly at: string) {}
-}
-
-/**
- * `obj` as an object WE own, for an AFC-relevant config object: every own property must
- * be a data property (an accessor is indeterminate), and the named `keys` are also
- * resolved through the prototype chain, as the SDK's plain reads would find them. The
- * values are the caller's (shallow); the fields the AFC decision reads are primitives.
- */
-function ownedDataCopy(obj: unknown, at: string, keys: readonly string[]): unknown {
-	if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) return obj;
-	rejectProxy(obj, at);
-	const out: Record<string | symbol, unknown> = {};
-	for (const key of Reflect.ownKeys(obj)) {
-		const d = Object.getOwnPropertyDescriptor(obj, key);
-		if (d === undefined) continue;
-		if (!("value" in d)) throw INDETERMINATE;
-		out[key] = d.value;
-	}
-	for (const key of keys) {
-		if (!Object.hasOwn(out, key)) {
-			const value = dataValue(obj, key, at);
-			if (value !== undefined) out[key] = value;
-		}
-	}
-	return out;
-}
-
-/** Copy `obj`'s own properties, descriptor for descriptor, onto a fresh object with its prototype. */
-function shallowDescriptorCopy(obj: object): Record<string | symbol, unknown> {
-	const out = Object.create(Object.getPrototypeOf(obj)) as Record<string | symbol, unknown>;
-	for (const key of Reflect.ownKeys(obj)) {
-		const d = Object.getOwnPropertyDescriptor(obj, key);
-		if (d !== undefined) Object.defineProperty(out, key, d);
-	}
-	return out;
-}
-
-function setData(obj: Record<string | symbol, unknown>, key: string, value: unknown): void {
-	Object.defineProperty(obj, key, { value, writable: true, enumerable: true, configurable: true });
-}
-
-/**
- * "Send what was checked", for AUTOMATIC FUNCTION CALLING only. The SDK reads
- * `params.config` after an `await` (`generateContent` awaits
- * `processParamsMaybeAddMcpUsage(params)` before `hasCallableTools` /
- * `shouldDisableAfc`), and the governor itself awaits authorization first, so a caller
- * that keeps a reference could add a callable tool, or flip `disable`, after the check
- * and before the SDK's read. The verdict therefore runs on — and the SDK receives — a
- * snapshot whose AFC-relevant parts are objects the caller never held:
- *
- *   - `params` and `params.config`: fresh shallow copies (same prototype, same property
- *     descriptors; fields the AFC decision does not read keep their live values/getters).
- *   - `config.automaticFunctionCalling`, `config.toolConfig` and its
- *     `functionCallingConfig`: copies of their data properties (an accessor is
- *     indeterminate), so `disable`, `maximumRemoteCalls` and
- *     `streamFunctionCallArguments` are values we own.
- *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
- *     non-callable tool is `structuredClone`d (a tool that cannot be copied as data is
- *     indeterminate, so the call is refused naming it); callable tools keep their
- *     reference, and the verdict refuses them. When the snapshot says AFC IS disabled
- *     (`disable` truthy, or a `maximumRemoteCalls` the SDK reads as invalid), the tool
- *     REFERENCES are kept: callable tools are the documented way to run tools yourself,
- *     and they carry functions that cannot be cloned. That is safe because the
- *     `disable` / `maximumRemoteCalls` the SDK will read are OUR copies: mutating a tool,
- *     or the caller's config, afterwards cannot turn AFC back on.
- *
- * Every read follows the check's rules (own or inherited DATA properties, no accessor,
- * no Proxy). This closes AFC only. A general snapshot (`contents`, and what the PII and
- * injection scans read) is separate future work; everything outside `config`, and the
- * non-AFC fields inside it, are still read live.
- */
-function snapshotGoogleAfcParams(
-	params: unknown,
-): { params: unknown } | { verdict: Exclude<GoogleAfcVerdict, { kind: "no_afc" | "afc" }> } {
-	try {
-		if (params === null || (typeof params !== "object" && typeof params !== "function")) {
-			return { params }; // nothing a caller could mutate; the SDK handles the shape
-		}
-		rejectProxy(params, "params");
-		const config = dataValue(params, "config", "params");
-		const outParams = shallowDescriptorCopy(params);
-		if (config === null || (typeof config !== "object" && typeof config !== "function")) {
-			setData(outParams, "config", config);
-			return { params: outParams };
-		}
-		rejectProxy(config, "params.config");
-		const outConfig = shallowDescriptorCopy(config);
-
-		const afcAt = "params.config.automaticFunctionCalling";
-		const afcConfig = ownedDataCopy(
-			dataValue(config, "automaticFunctionCalling", "params.config"),
-			afcAt,
-			["disable", "maximumRemoteCalls", "ignoreCallHistory"],
-		);
-		setData(outConfig, "automaticFunctionCalling", afcConfig);
-
-		const toolConfigAt = "params.config.toolConfig";
-		const toolConfig = ownedDataCopy(
-			dataValue(config, "toolConfig", "params.config"),
-			toolConfigAt,
-			["functionCallingConfig"],
-		);
-		if (toolConfig !== null && typeof toolConfig === "object") {
-			const callingConfig = ownedDataCopy(
-				(toolConfig as Record<string, unknown>).functionCallingConfig,
-				`${toolConfigAt}.functionCallingConfig`,
-				["streamFunctionCallArguments"],
-			);
-			setData(toolConfig as Record<string, unknown>, "functionCallingConfig", callingConfig);
-		}
-		setData(outConfig, "toolConfig", toolConfig);
-
-		const tools = dataValue(config, "tools", "params.config");
-		// The AFC keys are always set as OWN data properties, `undefined` included: the
-		// copies keep the caller's prototypes, and an own key shadows anything a prototype
-		// could be given later.
-		setData(outConfig, "tools", tools);
-		if (tools !== undefined && tools !== null) {
-			rejectProxy(tools, "params.config.tools");
-			if (!Array.isArray(tools)) throw INDETERMINATE;
-			// The SNAPSHOT's own AFC switch, read the way the SDK reads it.
-			const disable = dataValue(afcConfig, "disable", afcAt);
-			const n = dataValue(afcConfig, "maximumRemoteCalls", afcAt);
-			// A value the rule cannot read without running caller code counts as NOT
-			// disabling here, which takes the stricter (cloning) path; the verdict decides
-			// about it only if a callable tool is present, as the SDK does.
-			let invalidMax = false;
-			try {
-				invalidMax = sdkDisablesForMaxCalls(n);
-			} catch {
-				invalidMax = false;
-			}
-			const afcDisabled = Boolean(disable) || invalidMax;
-			const outTools: unknown[] = new Array(tools.length);
-			for (let i = 0; i < tools.length; i++) {
-				if (!(i in tools)) continue; // keep holes as holes
-				const at = `params.config.tools[${i}]`;
-				const tool = dataValue(tools, String(i), "params.config.tools");
-				if (afcDisabled) {
-					outTools[i] = tool; // references: see the doc comment
-					continue;
-				}
-				if (tool !== null && (typeof tool === "object" || typeof tool === "function")) {
-					rejectProxy(tool, at);
-					if (typeof dataValue(tool, "callTool", at) === "function") {
-						outTools[i] = tool; // callable: the verdict refuses it
-						continue;
-					}
-				}
-				try {
-					outTools[i] = structuredClone(tool);
-				} catch {
-					throw new UncloneableAfcInput(at);
-				}
-			}
-			setData(outConfig, "tools", outTools);
-		}
-		setData(outParams, "config", outConfig);
-		return { params: outParams };
-	} catch (err) {
-		if (err instanceof ProxyInAfcInput)
-			return { verdict: { kind: "indeterminate", proxyAt: err.at } };
-		if (err instanceof UncloneableAfcInput) {
-			return { verdict: { kind: "indeterminate", uncloneableAt: err.at } };
-		}
-		return { verdict: { kind: "indeterminate" } };
-	}
-}
-
-/**
- * The AFC gate both Google traps run before `intercept`: snapshot, then the verdict ON
- * the snapshot. On "no_afc", `args[0]` is replaced by the snapshot, so what is forwarded
- * is what was checked; otherwise the refusal error to reject with.
+ * The AFC gate both Google traps run before `intercept` (after the audit preflight):
+ * snapshot `args[0]` (google-afc.ts), then decide ON the snapshot with the one AFC
+ * reading. `generateContent` uses `afcRequestedVerdict`: "afc" runs the governed per-round
+ * loop on the snapshot. `generateContentStream` uses `sdkRunsAfcVerdict`: "afc" is refused,
+ * because a streamed AFC loop is not metered round by round yet. "indeterminate" is refused
+ * on both. When the call proceeds, `args[0]` IS the snapshot, so what is forwarded (to the
+ * loop or to the single governed call) is what was checked.
  */
 function googleAfcGate(
 	args: unknown[],
 	method: "generateContent" | "generateContentStream",
-): PolicyDeniedError | undefined {
+): { refusal: PolicyDeniedError } | { runAfcLoop: boolean } {
 	const snap = snapshotGoogleAfcParams(args[0]);
-	const verdict = "verdict" in snap ? snap.verdict : googleAfcVerdict(snap.params, method);
-	if (verdict.kind !== "no_afc") return googleAfcError(method, verdict);
-	if (args.length > 0 && "params" in snap) args[0] = snap.params;
-	return undefined;
+	if ("verdict" in snap) return { refusal: googleAfcError(method, snap.verdict) };
+	const verdict =
+		method === "generateContent"
+			? afcRequestedVerdict(snap.params)
+			: sdkRunsAfcVerdict(snap.params);
+	if (verdict.kind === "indeterminate") return { refusal: googleAfcError(method, verdict) };
+	if (verdict.kind === "afc" && method === "generateContentStream") {
+		return { refusal: googleAfcError(method, verdict) };
+	}
+	if (args.length > 0) args[0] = snap.params;
+	return { runAfcLoop: verdict.kind === "afc" };
 }
 
 function googleAfcError(
@@ -5251,11 +4944,11 @@ function googleAfcError(
 	return verdict.kind === "afc"
 		? new PolicyDeniedError(
 				`ungoverned_method: models.${method} with automatic function calling is not governed yet`,
-				"With a callable tool, the SDK makes one provider request per tool round inside this call, and usertrust cannot yet meter every round. Set config.automaticFunctionCalling.disable: true and run the tool calls yourself, or make the call on the original (unwrapped) client inside governAction() with a cost estimate.",
+				"With a callable tool, the SDK streams one provider round after another inside this call, and usertrust does not yet meter a streamed loop round by round (models.generateContent with automatic function calling is metered per round). Use models.generateContent, set config.automaticFunctionCalling.disable: true and run the tool calls yourself, or make the call on the original (unwrapped) client inside governAction() with a cost estimate.",
 			)
 		: new PolicyDeniedError(
 				`ungoverned_method: models.${method} could not be checked for automatic function calling`,
-				"config.automaticFunctionCalling, config.tools or a tool is read through an accessor or is not plain data, so usertrust cannot tell without running your code whether the SDK would run automatic function calling. Pass plain data properties (an array for config.tools).",
+				"The request could not be read safely: a getter threw, config is not an object, config.tools is not an array, a tool is missing (a hole) or not an object, maximumRemoteCalls is an object, or a callable tool's callTool is a getter. usertrust cannot tell whether the SDK would run automatic function calling, so it refuses. Pass plain data (an array of objects for config.tools).",
 			);
 }
 
@@ -5332,11 +5025,18 @@ function buildGoogleProxy<T>(
 			if (prop === "generateContent") {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
-					// ── AFC gate: fail closed until each AFC round is metered ──
-					// (snapshots args[0]: what is forwarded is what was checked)
-					const afcRefusal = googleAfcGate(args, "generateContent");
-					if (afcRefusal !== undefined) {
-						return refuse("models.generateContent", args, afcRefusal);
+					// ── AFC gate (snapshots args[0]: what is forwarded is what was checked) ──
+					const gate = googleAfcGate(args, "generateContent");
+					if ("refusal" in gate) {
+						return refuse("models.generateContent", args, gate.refusal);
+					}
+					if (gate.runAfcLoop) {
+						// With a callable tool the SDK would loop internally and only the last round
+						// would be metered: run the loop here instead, ON THE SNAPSHOT, each round its
+						// own governed call (see google-afc.ts).
+						return runGovernedAfc(args[0] as Record<string, unknown>, (roundParams) =>
+							intercept(originalGenerate, target, [roundParams, ...args.slice(1)]),
+						);
 					}
 					// ── end AFC gate ──
 					return intercept(originalGenerate, target, args);
@@ -5345,11 +5045,11 @@ function buildGoogleProxy<T>(
 			if (prop === "generateContentStream" && originalGenerateStream !== undefined) {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
-					// ── AFC gate: fail closed until each AFC round is metered ──
+					// ── AFC gate: a streamed AFC loop is refused until it is metered per round ──
 					// (snapshots args[0]: what is forwarded is what was checked)
-					const afcRefusal = googleAfcGate(args, "generateContentStream");
-					if (afcRefusal !== undefined) {
-						return refuse("models.generateContentStream", args, afcRefusal);
+					const gate = googleAfcGate(args, "generateContentStream");
+					if ("refusal" in gate) {
+						return refuse("models.generateContentStream", args, gate.refusal);
 					}
 					// ── end AFC gate ──
 					const { response } = await intercept(originalGenerateStream, target, args);
