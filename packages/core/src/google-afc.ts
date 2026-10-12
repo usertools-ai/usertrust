@@ -366,23 +366,28 @@ class UncloneableAfcInput {
  * propagates, and the snapshot turns it into "indeterminate" (an audited refusal).
  */
 function captureOnce(obj: unknown, key: string, at: string): unknown {
-	return captureField(obj, key, at)?.value;
-}
-
-/**
- * `captureOnce`, telling a key that is PRESENT (own or inherited, whatever its value,
- * `undefined` included: what `key in obj` reports) from one that is absent (`undefined`).
- */
-function captureField(obj: unknown, key: string, at: string): { value: unknown } | undefined {
 	if (obj == null) return undefined;
 	for (let o: object | null = Object(obj); o !== null; o = Object.getPrototypeOf(o)) {
 		rejectProxy(o, o === obj ? at : `${at} (its prototype chain)`);
 		const d = Object.getOwnPropertyDescriptor(o, key);
 		if (d === undefined) continue;
-		if ("value" in d) return { value: d.value };
-		return { value: d.get === undefined ? undefined : d.get.call(obj) };
+		if ("value" in d) return d.value;
+		return d.get === undefined ? undefined : d.get.call(obj);
 	}
 	return undefined;
+}
+
+/**
+ * `key in obj`, answered WITHOUT running caller code: own, then up the prototype chain,
+ * descriptors only (no getter runs), each object Proxy-checked before it is touched (a
+ * Proxy's `has` trap is caller code, so it is refused, not asked).
+ */
+function presentOnChain(obj: object, key: string, at: string): boolean {
+	for (let o: object | null = obj; o !== null; o = Object.getPrototypeOf(o)) {
+		rejectProxy(o, o === obj ? at : `${at} (its prototype chain)`);
+		if (Object.getOwnPropertyDescriptor(o, key) !== undefined) return true;
+	}
+	return false;
 }
 
 /**
@@ -427,9 +432,9 @@ const SDK_FUNCTION_CALLING_FIELDS = [
 ] as const;
 
 /**
- * A non-callable tool: `toolToMldev` / `toolToVertex` build the wire tool from exactly these;
- * `tTool` and `findAfcIncompatibleToolIndexes` read `functionDeclarations`; `hasMcpToolUsage`
- * tests `'inputSchema' in tool` (the MCP usage header).
+ * A non-callable tool's VALUE fields: `toolToMldev` / `toolToVertex` build the wire tool from
+ * exactly these (each tested with `!= null` or `!== undefined`); `tTool` and
+ * `findAfcIncompatibleToolIndexes` read `functionDeclarations`.
  */
 const SDK_TOOL_FIELDS = [
 	"retrieval",
@@ -444,8 +449,15 @@ const SDK_TOOL_FIELDS = [
 	"parallelAiSearch",
 	"urlContext",
 	"mcpServers",
-	"inputSchema",
 ] as const;
+
+/**
+ * A non-callable tool's one PRESENCE-only field: `hasMcpToolUsage` tests `'inputSchema' in
+ * tool` (the MCP usage header) and never reads the value, and no converter sends it. So the
+ * snapshot carries its presence WITHOUT evaluating it: a getter there is never run (the SDK
+ * never runs it), and the copy holds `undefined` unless the tool has it as own enumerable data.
+ */
+const SDK_TOOL_PRESENCE_FIELD = "inputSchema";
 
 /** A canonical array index (`"0"`, `"12"`), as an own key of an array. */
 const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
@@ -514,8 +526,9 @@ function refuseLossyClone(root: unknown, rootAt: string): void {
  * A non-callable tool as data WE own. Its own enumerable string-keyed properties are read
  * ONCE each (an accessor's getter on the original receiver), as `structuredClone(tool)`
  * would read them; every field in SDK_TOOL_FIELDS that those would not carry (inherited, or
- * non-enumerable own) is CAPTURED once (`captureField`; a present key is carried even when
- * it holds `undefined`, as `in` sees it); all are set as enumerable own data
+ * non-enumerable own) is CAPTURED once (`captureOnce`); SDK_TOOL_PRESENCE_FIELD is carried
+ * as PRESENT (`undefined`) when `in` would find it, with no getter run, its value kept only
+ * when it is own enumerable data; all are set as enumerable own data
  * on a plain object, which is then structuredClone'd. So the clone holds every field the SDK
  * reads, `functionDeclarations` included, and the verdict, which reads the clone, sees what
  * the SDK will see: a declarations getter beside a callable tool is the SDK's own local
@@ -536,6 +549,10 @@ function cloneDataTool(tool: unknown, at: string): unknown {
 		if (typeof key !== "string") continue; // structuredClone copies no symbol key either
 		const d = Object.getOwnPropertyDescriptor(tool, key);
 		if (d === undefined || d.enumerable !== true) continue;
+		if (key === SDK_TOOL_PRESENCE_FIELD && !("value" in d)) {
+			setData(source, key, undefined); // present; its getter is never run (see the field)
+			continue;
+		}
 		let value: unknown;
 		try {
 			value = "value" in d ? d.value : d.get?.call(tool);
@@ -546,13 +563,17 @@ function cloneDataTool(tool: unknown, at: string): unknown {
 	}
 	for (const key of SDK_TOOL_FIELDS) {
 		if (Object.hasOwn(source, key)) continue; // an own enumerable field, read above
-		// PRESENCE is carried, not only a defined value: the SDK tests `'inputSchema' in tool`
-		// (the MCP usage header), which a present key holding `undefined` passes. For every
-		// other field the SDK reads the value (`!= null` / `!== undefined`), and JSON drops an
-		// undefined one, so carrying it changes nothing there.
-		const field = captureField(tool, key, at);
-		if (field !== undefined) setData(source, key, field.value);
+		const value = captureOnce(tool, key, at);
+		if (value !== undefined) setData(source, key, value);
 	}
+	// Inherited or non-enumerable own: PRESENT, as `in` sees it, with no getter run.
+	if (
+		!Object.hasOwn(source, SDK_TOOL_PRESENCE_FIELD) &&
+		presentOnChain(tool, SDK_TOOL_PRESENCE_FIELD, at)
+	) {
+		setData(source, SDK_TOOL_PRESENCE_FIELD, undefined);
+	}
+	// The value fields only: the SDK never reads below the presence field.
 	for (const key of SDK_TOOL_FIELDS) {
 		if (Object.hasOwn(source, key)) refuseLossyClone(source[key], `${at}.${key}`);
 	}

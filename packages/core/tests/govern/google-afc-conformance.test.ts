@@ -843,6 +843,17 @@ const HIDDEN_INPUT_SCHEMA: Array<[string, () => object]> = [
 	],
 ];
 
+/** A tool that INHERITS a THROWING `inputSchema` getter (the SDK only tests `in`, never runs it); its calls are counted. */
+function throwingInputSchemaTool(calls: { n: number }): object {
+	class McpLikeBase {
+		get inputSchema(): never {
+			calls.n++;
+			throw new Error("inputSchema getter ran");
+		}
+	}
+	return Object.assign(new McpLikeBase(), declaresLookup());
+}
+
 function declaresLookup(): Loose {
 	return { functionDeclarations: [{ name: "lookup" }] };
 }
@@ -1101,6 +1112,31 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 				expect(auditKinds).not.toContain("policy_denied");
 			});
 		}
+
+		it(`${method}: an INHERITED THROWING inputSchema getter is never run; the call succeeds with the SDK's MCP usage header and body`, async () => {
+			const rawCalls = { n: 0 };
+			const govCalls = { n: 0 };
+			let made = 0;
+			// the first params go to the raw SDK, the second to the governed client
+			const makeParams = () => ({
+				model: "gemini-2.5-flash",
+				contents: "go",
+				config: { tools: [throwingInputSchemaTool(made++ === 0 ? rawCalls : govCalls)] },
+			});
+			const { raw, rawResult, gov, govResult, auditKinds } = await both(method, makeParams);
+
+			// natively the SDK only tests `'inputSchema' in tool`: the getter never runs, and the call succeeds
+			expect(rawResult).toBe("ok");
+			expect(rawCalls.n).toBe(0);
+			expect(govResult).toBe("ok");
+			expect(govCalls.n).toBe(0);
+			expect(raw.requests).toHaveLength(1);
+			expect(gov.requests).toHaveLength(1);
+			expect(raw.requests[0]?.apiClientHeader).toContain("mcp_used/");
+			expect(gov.requests[0]?.apiClientHeader).toBe(raw.requests[0]?.apiClientHeader);
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			expect(auditKinds).not.toContain("policy_denied");
+		});
 	}
 
 	it("generateContent with a callable tool: the governed loop's EVERY round carries the class-instance functionCallingConfig, as the SDK's own loop does", async () => {
