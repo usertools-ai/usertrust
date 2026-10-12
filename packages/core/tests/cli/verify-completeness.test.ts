@@ -658,6 +658,37 @@ describe("verify --receipts: the caller's own receipts against the chain", () =>
 		expect(process.exitCode).toBe(0);
 	});
 
+	it("a LOST event's dead letter holds the caller's own input (nothing was built), and is read whole: a Buffer of 11 bytes keeps its checksum", async () => {
+		// The append fails before its event is built (another writer holds the vault), so the dead letter
+		// carries the caller's input as given. A Buffer canonicalizes as an object of index keys, where
+		// "10" sorts before "2": its JSON.stringify form differs in content AND, once parsed back, in key
+		// order. Persisted as anything but its canonical bytes, or read against anything but its canonical
+		// form, the record fails its checksum and reads as an unreadable line.
+		const a = createAuditWriter(tempDir);
+		const b = createAuditWriter(tempDir);
+		try {
+			await a.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_kept" } });
+			await expect(
+				b.appendEvent({
+					kind: "llm_call",
+					actor: "local",
+					data: { transferId: "tx_lost_buf", blob: Buffer.from("eleven byte") },
+				}),
+			).rejects.toThrow();
+		} finally {
+			a.release();
+			b.release();
+		}
+		await verifyRun(tempDir, { json: true });
+		const r = json();
+		expect(r.data.deadLetters).toMatchObject({
+			missing: 1,
+			missingByKind: { llm_call: 1 },
+			missingTransferIds: ["tx_lost_buf"],
+		});
+		expect(process.exitCode).toBe(1);
+	});
+
 	it("a receipt degraded by a FOLLOW-UP event (its llm_call landed; a settlement shortfall's .meta failed) is audited", async () => {
 		const a = createAuditWriter(tempDir);
 		try {
