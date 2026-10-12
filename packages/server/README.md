@@ -164,7 +164,9 @@ aborted or released is `404 { "error": "not_found", "reason": "unknown transferI
 is `404` with `"reason": "unknown route"` instead, which is how a client that could not read
 `capabilities` tells an older server apart. The sweep and shutdown release, too: an expired hold is not a
 failure. The SSE stream announces each release as `released` (shutdown included), with the reason the
-chain recorded.
+chain recorded. On a ledger-backed server, a shutdown by SIGINT or SIGTERM, which runs `destroy()` with a
+pending hold, releases the hold but does not record the release on the chain: a known issue in 5.0.0.
+See the repository's `LIMITATIONS.md`.
 
 `/v1/abort` keeps the same rule: `200 { "aborted": true, "transferId": "…" }` (plus `voidError`) only
 when that request ended the hold, and the `aborted` event only then. A hold the governor no longer held
