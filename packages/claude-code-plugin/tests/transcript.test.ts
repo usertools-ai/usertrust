@@ -314,6 +314,9 @@ const u = (input: number, output: number, cacheRead = 0, cacheWrite = 0): Usage 
 	cacheWrite,
 });
 
+// A variable specifier: the hook is plain .mjs with no declaration file, and a literal import would add a new typed error.
+const TRANSCRIPT_HOOK = "../hooks/transcript.mjs";
+
 const settles = () => requests.filter((r) => r.path === "/v1/settle");
 const authorizes = () => requests.filter((r) => r.path === "/v1/authorize");
 const aborts = () => requests.filter((r) => r.path === "/v1/abort");
@@ -3807,6 +3810,85 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				responses: 2,
 				maxima: { inputTokens: 150_000_000, outputTokens: 9 },
 			});
+		});
+
+		it("providerCount: absent and null are 0; fractions round UP; every invalid statement is the safe-integer cap, never 0", async () => {
+			const { providerCount } = (await import(/* @vite-ignore */ TRANSCRIPT_HOOK)) as {
+				providerCount: (v: unknown) => number;
+			};
+			const CAP = Number.MAX_SAFE_INTEGER;
+			expect(providerCount(undefined)).toBe(0);
+			expect(providerCount(null)).toBe(0);
+			expect(providerCount(0)).toBe(0);
+			expect(providerCount(400)).toBe(400);
+			expect(providerCount(400.5)).toBe(401); // a fractional count is real usage, not a released hold
+			expect(providerCount(100_000_000.5)).toBe(100_000_001); // and rounding up can cross the ceiling
+			expect(providerCount(1e16)).toBe(CAP);
+			for (const bad of [
+				Number.NaN,
+				Number.POSITIVE_INFINITY,
+				Number.NEGATIVE_INFINITY,
+				-1,
+				"abc",
+				"5",
+				{},
+				[],
+				true,
+			]) {
+				expect(providerCount(bad), String(bad)).toBe(CAP);
+			}
+		});
+
+		it("a single-response window with 1e16 input_tokens is flagged by the SUM alone", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, { ...u(10, 20, 0, 0), input: 1e16 }));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
+				inputTokens?: number;
+			};
+			expect(body.inputTokens).toBeGreaterThan(100_000_000);
+		});
+
+		it("a 1-hour breakdown of 1e16 is flagged even when it exceeds the write total", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			const absurd: Usage = {
+				...u(10, 20, 0, 400),
+				cacheCreation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1e16 },
+			};
+			await writeMain([
+				...responseEntries("msg_a", SONNET, absurd),
+				...responseEntries("msg_b", SONNET, u(10, 20, 0, 0)),
+			]);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
+				maxima?: { cacheWrite1hTokens?: number };
+			};
+			expect(body.maxima?.cacheWrite1hTokens).toBeGreaterThan(100_000_000);
+		});
+
+		it("a fractional count is sent rounded up; 150M beside small responses is caught by the maxima; a normal window is unchanged", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain([
+				...responseEntries("msg_a", SONNET, { ...u(10, 20, 0, 0), input: 150_000_000 }),
+				...responseEntries("msg_b", SONNET, { ...u(10, 20, 0, 0), input: 400.5 }),
+				...responseEntries("msg_c", SONNET, u(10, 20, 0, 0)),
+			]);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
+				inputTokens: number;
+				maxima?: { inputTokens?: number };
+			};
+			expect(body.maxima?.inputTokens).toBe(150_000_000);
+			expect(body.inputTokens).toBe(150_000_000 + 401 + 10);
 		});
 
 		it("a tier stated above the safe-integer range is still flagged: its maximum is kept, not normalized to 0", async () => {

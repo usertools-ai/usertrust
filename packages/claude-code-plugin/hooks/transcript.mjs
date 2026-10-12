@@ -306,14 +306,21 @@ function readMaxima(v) {
 }
 
 /**
- * Keeps the largest value a tier STATED, as a finite non-negative number even when it is above the safe-integer range
- * (`count()` maps that to 0, which would price an absurd response as nothing and hide it from the server). Capped at the
- * largest safe integer: it only has to exceed the server's ceiling to be flagged.
+ * A token count a PROVIDER stated (a transcript usage field), for pricing and for the server's plausibility check.
+ * `count()` is for this code's own persisted counters and maps anything unusual to 0; for provider figures that is
+ * wrong, because garbage must never read as "no usage":
+ *   - ABSENT (undefined, and JSON null: some shapes send null for an unused tier) -> 0;
+ *   - a finite number >= 0 -> rounded UP (a fractional count is real usage; flooring it released the hold) and capped
+ *     at the largest safe integer;
+ *   - PRESENT but invalid (NaN, an infinity, a negative, a string, an object, a boolean) -> the largest safe integer,
+ *     which the server's plausibility ceiling refuses, so the call settles at the estimate with the event.
  */
-function noteRawMax(m, key, value) {
-	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return;
-	const stated = Math.min(value, Number.MAX_SAFE_INTEGER);
-	if (stated > (m.rawMax[key] ?? 0)) m.rawMax[key] = stated;
+export function providerCount(value) {
+	if (value === undefined || value === null) return 0;
+	if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+		return Math.min(Math.ceil(value), Number.MAX_SAFE_INTEGER);
+	}
+	return Number.MAX_SAFE_INTEGER;
 }
 
 function sumCounts(messages) {
@@ -324,7 +331,11 @@ function sumCounts(messages) {
 		cacheWriteTokens: 0,
 		cacheWrite1hTokens: 0,
 	};
-	for (const m of messages) for (const key of COUNT_KEYS) sum[key] += m[key];
+	// Capped at the largest safe integer: past it the wire (and any integer arithmetic) is meaningless, and every such
+	// figure is far above the server's ceiling anyway.
+	for (const m of messages) {
+		for (const key of COUNT_KEYS) sum[key] = Math.min(sum[key] + m[key], Number.MAX_SAFE_INTEGER);
+	}
 	// How many provider responses the sum spans: the server's plausibility ceiling is per response, so a window of many
 	// messages is not mistaken for one absurd one.
 	sum.responses = messages.length;
@@ -335,10 +346,9 @@ function sumCounts(messages) {
 	for (const key of COUNT_KEYS) {
 		let top = 0;
 		for (const m of messages) {
+			// The 1-hour share is checked as STATED (before its clamp to the write total), which would hide an absurd one.
 			const seen =
-				key === "cacheWrite1hTokens"
-					? Math.max(m[key], m.rawCacheWrite1hTokens ?? 0)
-					: Math.max(m[key], m.rawMax?.[key] ?? 0);
+				key === "cacheWrite1hTokens" ? Math.max(m[key], m.cacheWrite1hStated ?? 0) : m[key];
 			if (seen > top) top = seen;
 		}
 		sum.maxima[key] = top;
@@ -784,13 +794,7 @@ function parseCursor(raw) {
 			cacheReadTokens: count(m.cacheReadTokens),
 			cacheWriteTokens: count(m.cacheWriteTokens),
 			cacheWrite1hTokens: count(m.cacheWrite1hTokens),
-			rawCacheWrite1hTokens: count(m.rawCacheWrite1hTokens),
-			rawMax: {
-				inputTokens: count(m.rawMax?.inputTokens),
-				outputTokens: count(m.rawMax?.outputTokens),
-				cacheReadTokens: count(m.rawMax?.cacheReadTokens),
-				cacheWriteTokens: count(m.rawMax?.cacheWriteTokens),
-			},
+			cacheWrite1hStated: count(m.cacheWrite1hStated),
 		});
 	}
 	for (const [id, value] of Object.entries(raw.assigned)) {
@@ -1300,11 +1304,9 @@ function foldLine(cursor, bytes, since) {
 			cacheReadTokens: 0,
 			cacheWriteTokens: 0,
 			cacheWrite1hTokens: 0,
-			// The 1-hour breakdown as the transcript STATED it, before the clamp to the write total: the per-response
-			// maximum the server checks must see an absurd share the clamp would hide.
-			rawCacheWrite1hTokens: 0,
-			// The largest value each tier STATED, before `count()` maps anything above the safe-integer range to 0.
-			rawMax: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+			// The 1-hour share as the transcript STATED it (normalized, before the clamp to the write total): the
+			// per-response maximum the server checks must see an absurd share the clamp would hide.
+			cacheWrite1hStated: 0,
 		};
 		cursor.nextSeq += 1;
 		cursor.partial.set(id, m);
@@ -1318,14 +1320,13 @@ function foldLine(cursor, bytes, since) {
 	// min is idempotent however many are re-read.
 	const at = Date.parse(entry?.timestamp);
 	if (Number.isFinite(at) && (m.ts === null || at < m.ts)) m.ts = at;
-	noteRawMax(m, "inputTokens", usage.input_tokens);
-	noteRawMax(m, "outputTokens", usage.output_tokens);
-	noteRawMax(m, "cacheReadTokens", usage.cache_read_input_tokens);
-	noteRawMax(m, "cacheWriteTokens", usage.cache_creation_input_tokens);
-	m.inputTokens = Math.max(m.inputTokens, count(usage.input_tokens));
-	m.outputTokens = Math.max(m.outputTokens, count(usage.output_tokens));
-	m.cacheReadTokens = Math.max(m.cacheReadTokens, count(usage.cache_read_input_tokens));
-	m.cacheWriteTokens = Math.max(m.cacheWriteTokens, count(usage.cache_creation_input_tokens));
+	m.inputTokens = Math.max(m.inputTokens, providerCount(usage.input_tokens));
+	m.outputTokens = Math.max(m.outputTokens, providerCount(usage.output_tokens));
+	m.cacheReadTokens = Math.max(m.cacheReadTokens, providerCount(usage.cache_read_input_tokens));
+	m.cacheWriteTokens = Math.max(
+		m.cacheWriteTokens,
+		providerCount(usage.cache_creation_input_tokens),
+	);
 	// The 1-hour share, from the per-TTL breakdown when the transcript carries one. When
 	// the breakdown names only ONE TTL, what it leaves out of the flat total is a real
 	// write whose TTL it did not attribute; it is counted as 1-hour (the dearer rate), the
@@ -1334,13 +1335,17 @@ function foldLine(cursor, bytes, since) {
 	const breakdown = usage.cache_creation;
 	const names5m = typeof breakdown?.ephemeral_5m_input_tokens === "number";
 	const names1h = typeof breakdown?.ephemeral_1h_input_tokens === "number";
-	const named5m = count(breakdown?.ephemeral_5m_input_tokens);
-	const named1h = count(breakdown?.ephemeral_1h_input_tokens);
+	const named5m = providerCount(breakdown?.ephemeral_5m_input_tokens);
+	const named1h = providerCount(breakdown?.ephemeral_1h_input_tokens);
 	const unattributed =
 		names5m !== names1h
-			? Math.max(0, count(usage.cache_creation_input_tokens) - named5m - named1h)
+			? Math.max(0, providerCount(usage.cache_creation_input_tokens) - named5m - named1h)
 			: 0;
-	m.rawCacheWrite1hTokens = Math.max(m.rawCacheWrite1hTokens ?? 0, named1h + unattributed);
+	// As stated, before the clamp below; capped so the sum stays an integer the wire can carry.
+	m.cacheWrite1hStated = Math.min(
+		Math.max(m.cacheWrite1hStated ?? 0, named1h + unattributed),
+		Number.MAX_SAFE_INTEGER,
+	);
 	m.cacheWrite1hTokens = Math.min(
 		Math.max(m.cacheWrite1hTokens, named1h + unattributed),
 		m.cacheWriteTokens,
