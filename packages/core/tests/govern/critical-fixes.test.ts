@@ -80,7 +80,7 @@ function makeMockAudit(): AuditWriter {
 
 // ── Concurrent calls should not exceed budget ──
 
-describe("AUD-453 — budget mutex prevents concurrent overshoot", () => {
+describe("budget mutex prevents concurrent overshoot", () => {
 	let tmpVault: string;
 
 	beforeEach(() => {
@@ -210,7 +210,7 @@ describe("AUD-453 — budget mutex prevents concurrent overshoot", () => {
 
 // ── Budget persistence across destroy + re-init ──
 
-describe("AUD-457 — budget persistence", () => {
+describe("budget persistence", () => {
 	let tmpVault: string;
 
 	beforeEach(() => {
@@ -377,7 +377,7 @@ describe("AUD-457 — budget persistence", () => {
 // had actually been incremented. A policy-deny throw before the increment
 // would cause inFlightHoldTotal to drift negative, inflating subsequent
 // budgetRemaining beyond the configured budget.
-describe("AUD-468 — inFlightHoldTotal stays accurate on early failure", () => {
+describe("inFlightHoldTotal stays accurate on early failure", () => {
 	let tmpVault: string;
 
 	beforeEach(() => {

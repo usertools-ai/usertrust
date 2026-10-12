@@ -50,7 +50,7 @@ export interface ProxyConnection {
 export function connectProxy(_url: string, _key?: string): never {
 	throw new Error(
 		"usertrust: proxy mode is not yet implemented. " +
-			"The proxy stub bypassed all financial governance (AUD-456). " +
+			"The proxy stub bypassed all financial governance. " +
 			"Use dryRun mode for testing, or connect a real TigerBeetle instance for production.",
 	);
 }
