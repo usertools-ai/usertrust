@@ -186,6 +186,8 @@ const MODEL_ID = /^[^\p{C}\p{Z}]{1,256}$/u;
 const CACHE_TIERS = "authorize-cache-tiers";
 /** The capability of a server that prices `cacheWrite1hTokens` at the 1-hour write rate. */
 const CACHE_WRITE_1H = "cache-write-1h";
+/** The capability of a server that reads a per-tier `refused` flag and charges the estimate for it. */
+const REFUSED_FLAG = "refused";
 
 const CURSOR_VERSION = 2;
 /** v1 cursors (no `unresolved`) are read as v2 with nothing unresolved. */
@@ -297,6 +299,55 @@ function callTimeout(reserveMs = 0) {
 	return Math.min(callTimeoutCap(), timeLeft() - reserveMs);
 }
 
+/**
+ * A persisted per-tier REFUSED map, or undefined when it holds nothing. Presence of a tier is the flag; its value is the
+ * raw figure when one was representable (else 0), kept for the server's event. Never a count: it does not enter arithmetic.
+ */
+function readRefused(v) {
+	if (v === null || typeof v !== "object" || Array.isArray(v)) return undefined;
+	const out = {};
+	for (const key of COUNT_KEYS) {
+		const x = v[key];
+		if (typeof x === "number" && Number.isFinite(x) && x >= 0) {
+			out[key] = Math.min(Math.ceil(x), Number.MAX_SAFE_INTEGER);
+		}
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * The per-response, per-tier plausibility ceiling. Mirrors core's MAX_PLAUSIBLE_TOKENS_PER_TIER (a parity test pins the
+ * two together); the plugin cannot import core.
+ */
+export const PLAUSIBLE_TOKENS_PER_TIER = 100_000_000;
+
+/**
+ * A token figure a PROVIDER stated (a transcript usage field), as `{ count, refused, raw }`:
+ *   - `count` is ARITHMETIC-SAFE and is the only thing holds, sums and subtractions ever read. ABSENT (undefined, and JSON
+ *     null: some shapes send null for an unused tier) is 0; a finite number >= 0 is rounded UP (a fractional count is
+ *     real usage) and capped at the largest safe integer; a REFUSED figure counts 0.
+ *   - `refused` is an explicit flag, never a count: set for a figure that is INVALID (NaN, an infinity, a negative, a
+ *     string, an object, a boolean) or above the per-response ceiling. The server charges the estimate when any tier is
+ *     flagged. A sentinel count here was the old design, and it reached the hold sizing as an absurd amount.
+ *   - `raw` is the figure as stated when it is representable (finite, non-negative), else 0, kept for the event.
+ */
+export function providerFigure(value) {
+	if (value === undefined || value === null) return { count: 0, refused: false, raw: 0 };
+	if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+		const stated = Math.min(Math.ceil(value), Number.MAX_SAFE_INTEGER);
+		if (stated > PLAUSIBLE_TOKENS_PER_TIER) return { count: 0, refused: true, raw: stated };
+		return { count: stated, refused: false, raw: stated };
+	}
+	return { count: 0, refused: true, raw: 0 };
+}
+
+/** Records a refused tier on a message (sticky: it only ever accumulates). */
+function noteRefused(m, key, figure) {
+	if (!figure.refused) return;
+	m.refused ??= {};
+	m.refused[key] = Math.max(m.refused[key] ?? 0, figure.raw);
+}
+
 function sumCounts(messages) {
 	const sum = {
 		inputTokens: 0,
@@ -305,7 +356,25 @@ function sumCounts(messages) {
 		cacheWriteTokens: 0,
 		cacheWrite1hTokens: 0,
 	};
-	for (const m of messages) for (const key of COUNT_KEYS) sum[key] += m[key];
+	// Capped at the largest safe integer: past it the wire (and any integer arithmetic) is meaningless, and every such
+	// figure is far above the server's ceiling anyway.
+	for (const m of messages) {
+		for (const key of COUNT_KEYS) sum[key] = Math.min(sum[key] + m[key], Number.MAX_SAFE_INTEGER);
+	}
+	// How many provider responses the sum spans: the server's plausibility ceiling is per response, so a window of many
+	// messages is not mistaken for one absurd one.
+	sum.responses = messages.length;
+	// A tier REFUSED in any response (invalid, or above the per-response ceiling) is flagged for the whole window: the
+	// server charges the estimate. A flag, never a count: the sums above stay arithmetic-safe.
+	for (const m of messages) {
+		for (const key of COUNT_KEYS) {
+			const raw = m.refused?.[key];
+			if (typeof raw === "number") {
+				sum.refused ??= {};
+				sum.refused[key] = Math.max(sum.refused[key] ?? 0, raw);
+			}
+		}
+	}
 	return sum;
 }
 
@@ -722,6 +791,31 @@ function emptyCursor() {
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isStringArray = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
 
+/**
+ * The refused map of a persisted message, including the OLD side channels: a cursor written by a build that kept
+ * `rawMax` / `rawCacheWrite1hTokens` / `cacheWrite1hStated` carries the figures a tier STATED, and any above the
+ * ceiling migrates to a flag, so a backlog keeps its anomaly across the upgrade.
+ */
+function refusedOnRead(m) {
+	const out = { ...readRefused(m.refused) };
+	const old = {
+		inputTokens: m.rawMax?.inputTokens,
+		outputTokens: m.rawMax?.outputTokens,
+		cacheReadTokens: m.rawMax?.cacheReadTokens,
+		cacheWriteTokens: m.rawMax?.cacheWriteTokens,
+		cacheWrite1hTokens: Math.max(
+			typeof m.rawCacheWrite1hTokens === "number" ? m.rawCacheWrite1hTokens : 0,
+			typeof m.cacheWrite1hStated === "number" ? m.cacheWrite1hStated : 0,
+		),
+	};
+	for (const [key, x] of Object.entries(old)) {
+		if (typeof x === "number" && Number.isFinite(x) && x > PLAUSIBLE_TOKENS_PER_TIER) {
+			out[key] = Math.max(out[key] ?? 0, Math.min(Math.ceil(x), Number.MAX_SAFE_INTEGER));
+		}
+	}
+	return Object.keys(out).length > 0 ? { refused: out } : {};
+}
+
 /** A v1 or v2 cursor, or null if any field is not what this code wrote. */
 function parseCursor(raw) {
 	if (!isObject(raw) || !READABLE_CURSOR_VERSIONS.has(raw.v)) return null;
@@ -747,6 +841,7 @@ function parseCursor(raw) {
 			cacheReadTokens: count(m.cacheReadTokens),
 			cacheWriteTokens: count(m.cacheWriteTokens),
 			cacheWrite1hTokens: count(m.cacheWrite1hTokens),
+			...refusedOnRead(m),
 		});
 	}
 	for (const [id, value] of Object.entries(raw.assigned)) {
@@ -793,6 +888,8 @@ function parseVehicle(key, v) {
 			: {}),
 	};
 	for (const k of COUNT_KEYS) vehicle[k] = count(v[k]);
+	const refused = readRefused(v.refused);
+	if (refused !== undefined) vehicle.refused = refused;
 	// The job labels the vehicle was first sent with: a retry is the SAME charge, so it
 	// carries the same job, never the one open when the retry happens.
 	const labels = jobHoldFields(v.labels);
@@ -818,6 +915,7 @@ function holdVehicle(body) {
 		cacheReadTokens: body.cacheReadTokens,
 		cacheWriteTokens: body.cacheWriteTokens,
 		cacheWrite1hTokens: body.cacheWrite1hTokens,
+		refused: body.refused,
 		labels: body,
 	});
 	return vehicle === null ? null : { key, vehicle };
@@ -1266,10 +1364,18 @@ function foldLine(cursor, bytes, since) {
 	// min is idempotent however many are re-read.
 	const at = Date.parse(entry?.timestamp);
 	if (Number.isFinite(at) && (m.ts === null || at < m.ts)) m.ts = at;
-	m.inputTokens = Math.max(m.inputTokens, count(usage.input_tokens));
-	m.outputTokens = Math.max(m.outputTokens, count(usage.output_tokens));
-	m.cacheReadTokens = Math.max(m.cacheReadTokens, count(usage.cache_read_input_tokens));
-	m.cacheWriteTokens = Math.max(m.cacheWriteTokens, count(usage.cache_creation_input_tokens));
+	const inFig = providerFigure(usage.input_tokens);
+	const outFig = providerFigure(usage.output_tokens);
+	const readFig = providerFigure(usage.cache_read_input_tokens);
+	const writeFig = providerFigure(usage.cache_creation_input_tokens);
+	noteRefused(m, "inputTokens", inFig);
+	noteRefused(m, "outputTokens", outFig);
+	noteRefused(m, "cacheReadTokens", readFig);
+	noteRefused(m, "cacheWriteTokens", writeFig);
+	m.inputTokens = Math.max(m.inputTokens, inFig.count);
+	m.outputTokens = Math.max(m.outputTokens, outFig.count);
+	m.cacheReadTokens = Math.max(m.cacheReadTokens, readFig.count);
+	m.cacheWriteTokens = Math.max(m.cacheWriteTokens, writeFig.count);
 	// The 1-hour share, from the per-TTL breakdown when the transcript carries one. When
 	// the breakdown names only ONE TTL, what it leaves out of the flat total is a real
 	// write whose TTL it did not attribute; it is counted as 1-hour (the dearer rate), the
@@ -1278,12 +1384,16 @@ function foldLine(cursor, bytes, since) {
 	const breakdown = usage.cache_creation;
 	const names5m = typeof breakdown?.ephemeral_5m_input_tokens === "number";
 	const names1h = typeof breakdown?.ephemeral_1h_input_tokens === "number";
-	const named5m = count(breakdown?.ephemeral_5m_input_tokens);
-	const named1h = count(breakdown?.ephemeral_1h_input_tokens);
-	const unattributed =
-		names5m !== names1h
-			? Math.max(0, count(usage.cache_creation_input_tokens) - named5m - named1h)
-			: 0;
+	const fig5m = providerFigure(breakdown?.ephemeral_5m_input_tokens);
+	const fig1h = providerFigure(breakdown?.ephemeral_1h_input_tokens);
+	// Both breakdown components are flagged BEFORE the clamp to the write total hides an absurd share. Their COUNTS (a
+	// refused one is 0) are all the subtraction below reads, so a bad 5-minute figure leaves the remainder at the dearer
+	// 1-hour rate for sizing while the call is flagged for the estimate.
+	noteRefused(m, "cacheWrite1hTokens", fig1h);
+	noteRefused(m, "cacheWriteTokens", fig5m);
+	const named5m = fig5m.count;
+	const named1h = fig1h.count;
+	const unattributed = names5m !== names1h ? Math.max(0, writeFig.count - named5m - named1h) : 0;
 	m.cacheWrite1hTokens = Math.min(
 		Math.max(m.cacheWrite1hTokens, named1h + unattributed),
 		m.cacheWriteTokens,
@@ -1966,13 +2076,35 @@ async function oneHourSupport(share) {
 }
 
 /**
+ * Every capability a settle body depends on, decided BEFORE the hold is claimed: the 1-hour share (`oneHourSupport`) and a
+ * refused flag (`refused`). Returns `null` when any is UNKNOWN (the server cannot be asked), so the caller defers with the
+ * hold untouched. A decision taken after the claim journals the deferral as done and the usage is lost for good.
+ */
+async function settleCapabilitiesKnown(counts) {
+	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) return null;
+	if (counts.refused !== undefined && (await refreshUnknownServerCapabilities()) === null)
+		return null;
+	return true;
+}
+
+/**
  * The body of a transcript settle. The 1-hour share goes only to a server that prices it
  * (`cache-write-1h`): an older server strips the unknown key, and those tokens would
  * silently bill at the cheaper 5-minute rate. The write TOTAL is always sent, so the
  * worst case against an old server is the 5-minute price, never a dropped count.
  */
 async function settleBody(transferId, counts, labels) {
-	const { cacheWrite1hTokens, ...rest } = counts;
+	const { cacheWrite1hTokens, responses, refused, ...rest } = counts;
+	if (refused !== undefined) {
+		// A refused tier is a FLAG the server must understand. An older server strips the unknown key and would price the
+		// zeroed counts at the floor, so for it the counts are WITHHELD: with none the settle falls back to the held estimate
+		// (the conservative figure). Support unknown: no body is built and the caller defers, as for the 1-hour share.
+		const capabilities = await refreshUnknownServerCapabilities();
+		if (capabilities === null) return null;
+		if (!capabilities.has(REFUSED_FLAG)) {
+			return { transferId, usageSource: "estimated", ...settleLabels(labels) };
+		}
+	}
 	const support = await oneHourSupport(cacheWrite1hTokens);
 	// Support UNKNOWN with a share to carry: sending only the flat total would bill the
 	// 1-hour tokens at the 5-minute rate for good, so no body is built; the caller defers.
@@ -1982,6 +2114,9 @@ async function settleBody(transferId, counts, labels) {
 		transferId,
 		...rest,
 		...(sendShare ? { cacheWrite1hTokens } : {}),
+		...(Number.isSafeInteger(responses) && responses > 1 ? { responses } : {}),
+		// A flag per refused tier (invalid or above the per-response ceiling): the server charges the estimate.
+		...(refused !== undefined ? { refused } : {}),
 		usageSource: "provider",
 		...settleLabels(labels),
 	};
@@ -1992,10 +2127,12 @@ async function settleAt(transferId, counts, { keyed, labels = {} }) {
 	try {
 		const body = await settleBody(transferId, counts, labels);
 		if (body === null) {
+			// `unsent`: nothing left the process. A claiming caller gives the hold back rather than journal it done.
 			return {
 				outcome: "deferred",
+				unsent: true,
 				reason:
-					"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet; the hold is untouched",
+					"the server's capabilities are unknown, so the settle cannot be sent yet; the hold is untouched",
 			};
 		}
 		settle = await serverRequest("/v1/settle", body, { timeoutMs: callTimeout() });
@@ -2117,14 +2254,17 @@ export async function settleTranscriptHold(sessionId, entry) {
 	}
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(entry[key]);
+	counts.responses = ids.length;
+	const entryRefused = readRefused(entry.refused);
+	if (entryRefused !== undefined) counts.refused = entryRefused;
 	// A 1-hour share the server may or may not price: decide BEFORE claiming the hold's file,
 	// so an unknown server leaves the pending record in place for a later settle point instead
 	// of journalling a `.done` for a settle that never went out.
-	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) {
+	if ((await settleCapabilitiesKnown(counts)) === null) {
 		return {
 			outcome: "deferred",
 			reason:
-				"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet; the hold is untouched",
+				"the server's capabilities are unknown, so the settle cannot be sent yet (the 1-hour cache-write share, or a refused figure); the hold is untouched",
 		};
 	}
 	// The hold's own file, as its listing found it: never whatever file the call's
@@ -2146,6 +2286,12 @@ export async function settleTranscriptHold(sessionId, entry) {
 	}
 	const keyed = typeof entry.idempotencyKey === "string";
 	const result = await settleAt(entry.transferId, counts, { keyed, labels: jobHoldFields(entry) });
+	if (result.outcome === "deferred" && result.unsent === true) {
+		// The preflight above passed but the capabilities went unknown before the body was built. A claimed hold must not be
+		// journalled as done for a settle that never went out: hand the file back so a later settle point retries it.
+		await rename(`${base}.settling`, livePath).catch(() => {});
+		return result;
+	}
 	try {
 		// Exclusive: an outcome never lands over another hold's. Only a 1.4.0 per-call
 		// name can already be taken (two holds of one call shared it then). That leaves
@@ -2644,6 +2790,9 @@ async function remainderOf(
 function vehicleCounts(vehicle) {
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(vehicle[key]);
+	counts.responses = Array.isArray(vehicle.ids) ? vehicle.ids.length : 1;
+	const vehicleRefused = readRefused(vehicle.refused);
+	if (vehicleRefused !== undefined) counts.refused = vehicleRefused;
 	return counts;
 }
 
@@ -2709,9 +2858,9 @@ async function postGroup({
 	// A 1-hour share the server may or may not price: decide BEFORE placing a hold, so an
 	// unknown server leaves the messages unposted for a later settle point rather than
 	// stranding a hold or billing the share at the 5-minute rate.
-	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) {
+	if ((await settleCapabilitiesKnown(counts)) === null) {
 		return unsettled(
-			"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet",
+			"the server's capabilities are unknown, so the settle cannot be sent yet (the 1-hour cache-write share, or a refused figure)",
 		);
 	}
 	let auth;

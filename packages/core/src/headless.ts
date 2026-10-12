@@ -103,7 +103,13 @@ import {
 	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
-import { publishableUsageFields, sanitizeUsage, withSupported1hTier } from "./ledger/usage.js";
+import {
+	implausibleUsageData,
+	materializeMaxima,
+	publishableUsageFields,
+	sanitizeUsage,
+	withSupported1hTier,
+} from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import {
@@ -141,6 +147,7 @@ import {
 	principalLedgerTags,
 } from "./shared/principal.js";
 import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/private-fs.js";
+import { isPersistableSpend } from "./shared/spend-guard.js";
 import type { EndpointInfo, TrustConfig, TrustReceipt } from "./shared/types.js";
 import { TrustConfigSchema } from "./shared/types.js";
 
@@ -413,6 +420,40 @@ export interface SettleParams {
 	 * client's settle is metered exactly as before.
 	 */
 	cacheWrite1hTokens?: number | undefined;
+	/**
+	 * How many provider responses these counts SUM (default 1). The plausibility ceiling
+	 * (`MAX_PLAUSIBLE_TOKENS_PER_TIER`) holds per response, so a caller that settles a window of responses
+	 * as one aggregate says so and the per-tier bound scales with it (capped at `MAX_AGGREGATED_RESPONSES`).
+	 */
+	responses?: number | undefined;
+	/**
+	 * With `responses`: the LARGEST single-response count per tier among the responses these counts sum. The server holds
+	 * each to the unscaled ceiling, so one absurd response cannot hide inside a large window. Omitted: the aggregate
+	 * check alone.
+	 */
+	maxima?:
+		| {
+				inputTokens?: number | undefined;
+				outputTokens?: number | undefined;
+				cacheReadTokens?: number | undefined;
+				cacheWriteTokens?: number | undefined;
+				cacheWrite1hTokens?: number | undefined;
+		  }
+		| undefined;
+	/**
+	 * Tiers the caller REFUSED to state as a count (a figure that was invalid, or above its own per-response ceiling),
+	 * as a FLAG per tier (the value is the raw figure when representable). Counts above stay arithmetic-safe; any flagged
+	 * tier makes the settle charge the estimate and record the anomaly.
+	 */
+	refused?:
+		| {
+				inputTokens?: number | undefined;
+				outputTokens?: number | undefined;
+				cacheReadTokens?: number | undefined;
+				cacheWriteTokens?: number | undefined;
+				cacheWrite1hTokens?: number | undefined;
+		  }
+		| undefined;
 	/** Number of streaming chunks delivered (for streaming calls). */
 	chunksDelivered?: number | undefined;
 	/**
@@ -588,6 +629,16 @@ export interface UnheldSettlementParams {
 	cacheReadTokens?: number | undefined;
 	cacheWriteTokens?: number | undefined;
 	cacheWrite1hTokens?: number | undefined;
+	/** Tiers the caller refused to state as a count (see `SettleParams.refused`): recorded as flags, never as zero usage. */
+	refused?:
+		| {
+				inputTokens?: number | undefined;
+				outputTokens?: number | undefined;
+				cacheReadTokens?: number | undefined;
+				cacheWriteTokens?: number | undefined;
+				cacheWrite1hTokens?: number | undefined;
+		  }
+		| undefined;
 	chunksDelivered?: number | undefined;
 	usageSource?: "provider" | "estimated" | undefined;
 	computeMs?: number | undefined;
@@ -750,6 +801,13 @@ async function loadSpendLedger(vaultBase: string): Promise<number> {
 }
 
 async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promise<void> {
+	// Never persist a value that would brick the vault (see `isPersistableSpend`): the counter stays in memory, loudly.
+	if (!isPersistableSpend(budgetSpent)) {
+		process.stderr.write(
+			`[usertrust] refusing to persist session spend ${String(budgetSpent)}: not a representable count; the vault's spend-ledger.json keeps its last value\n`,
+		);
+		return;
+	}
 	const dir = join(vaultBase, VAULT_DIR);
 	const ledgerPath = join(dir, "spend-ledger.json");
 	// Hardening (RECON #4): UNIQUE tmp path per write. A fixed
@@ -1765,6 +1823,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				cacheReadTokens: params?.cacheReadTokens,
 				cacheWriteTokens: params?.cacheWriteTokens,
 				cacheWrite1hTokens: params?.cacheWrite1hTokens,
+				responses: params?.responses,
+				// Each tier read by name, once, BEFORE the claim below: a getter that throws changes nothing, and the
+				// governor never touches the caller's object again.
+				maxima: materializeMaxima(params?.maxima),
+				refused: materializeMaxima(params?.refused),
 				usageSource: params?.usageSource,
 				chunksDelivered: params?.chunksDelivered,
 				computeMs: params?.computeMs,
@@ -1845,6 +1908,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					cacheWriteTokens: input.cacheWriteTokens,
 					cacheWrite1hTokens: input.cacheWrite1hTokens,
 				};
+				const responses = input.responses;
+				const maxima = input.maxima;
+				const refused = input.refused;
 				// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
 				// read only input/output, so a settle carrying nothing but cache counts
 				// looked like "nothing reported" and silently fell back to the pre-call
@@ -1867,24 +1933,41 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// canonicalization, which throws on non-finite — and downgrades a
 				// "provider" label whose input/output is unusable.
 				const usageSnapshot = withSupported1hTier(
-					sanitizeUsage({
-						inputTokens: reportedCounts.inputTokens ?? 0,
-						outputTokens: reportedCounts.outputTokens ?? 0,
-						cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
-						cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
-						cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
-						source: usageReported ? (input.usageSource ?? "provider") : "estimated",
-					}),
+					sanitizeUsage(
+						{
+							inputTokens: reportedCounts.inputTokens ?? 0,
+							outputTokens: reportedCounts.outputTokens ?? 0,
+							cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
+							cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
+							cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
+							source: usageReported ? (input.usageSource ?? "provider") : "estimated",
+						},
+						{ responses, maxima, refused },
+					),
 					rateInfo.rates,
 					rateInfo.rateSource !== "table",
 				);
 				// Present IFF provider-sourced (D5) — the single rule, in one place.
 				const usageAudit = publishableUsageFields(usageSnapshot, rateInfo.rates);
+				// An implausible count (above the per-tier ceiling) is not usage: it is charged at the estimate, like a
+				// missing count, and the anomaly is a chain event. Without this the figure reached the session counter and
+				// the persisted ledger and refused every later call.
+				const usageTrusted = usageReported && usageSnapshot.implausible === undefined;
+				const implausibleData = implausibleUsageData(usageSnapshot, {
+					model,
+					transferId,
+					responses,
+				});
+				if (implausibleData !== undefined) {
+					process.stderr.write(
+						`[usertrust] implausible usage for ${transferId}: charged at the estimate, not the reported counts\n`,
+					);
+				}
 
 				// Determine actual cost
 				let actualCost: number;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
-				if (usageReported) {
+				if (usageTrusted) {
 					actualCost = costFromRates(
 						rateInfo.rates,
 						usageSnapshot.inputTokens,
@@ -1908,7 +1991,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// prompt length when usage was reported, else from the estimate the cost came from.
 				const appliedRates = resolveAppliedRates(
 					rateInfo.rates,
-					usageReported
+					usageTrusted
 						? promptTokenCount(
 								usageSnapshot.inputTokens,
 								usageSnapshot.cacheReadTokens,
@@ -2018,6 +2101,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					const releaseLock = await budgetMutex.acquire();
 					try {
 						inFlightHoldTotal -= auth.estimatedCost;
+						// The METERED cost, even when the ledger posted less (`postedCost`): the budget enforces what the
+						// customer pays the provider. The plausibility ceiling and the persist guard keep one absurd figure
+						// from bricking the vault; the shortfall event records the gap to the ledger.
 						budgetSpent += actualCost;
 					} finally {
 						releaseLock();
@@ -2029,6 +2115,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// Audit event
 				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
 				let auditHash = syntheticHash;
+				let llmAppended = false;
 				try {
 					const auditEvent = await audit.appendEvent({
 						kind: "llm_call",
@@ -2061,8 +2148,25 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						},
 					});
 					auditHash = auditEvent.hash;
+					llmAppended = true;
 				} catch {
 					callAuditDegraded = true;
+				}
+
+				// The implausible-usage report, like the truncation correction below, is appended AFTER the `llm_call` it
+				// annotates: `verifyTransaction` resolves a transfer by the FIRST event carrying its transferId, so a report
+				// written ahead of its `llm_call` would render the settled call as PENDING with no cost. Only after a
+				// SUCCESSFUL append, for the same reason: a failed `llm_call` must not leave the annotation as the first event.
+				if (implausibleData !== undefined && llmAppended) {
+					await audit
+						.appendEvent({
+							kind: "usage_implausible",
+							actor: capture.actor,
+							data: { ...implausibleData, ...costCenterAudit, ...principalAudit, ...jobAudit },
+						})
+						.catch(() => {
+							callAuditDegraded = true;
+						});
 				}
 
 				// D4: the truncation correction, appended AFTER the `llm_call` it annotates
@@ -2424,6 +2528,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			};
 			// Every remaining field is read ONCE into a local and validated from that local: a getter
 			// that answers differently on a second read cannot get unchecked text onto the chain.
+			const refusedTiers = materializeMaxima(params.refused);
 			const rawComputeMs: unknown = params.computeMs;
 			const computeMs =
 				typeof rawComputeMs === "number" && Number.isFinite(rawComputeMs) && rawComputeMs >= 0
@@ -2458,6 +2563,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				reason: "no hold for this transferId: swept, restarted or already settled",
 				source: "headless",
 				...(Object.keys(usage).length === 0 ? {} : { usage }),
+				// A refused tier is NOT zero usage: it is recorded as a flag with the raw figure when representable.
+				...(refusedTiers === undefined || Object.keys(refusedTiers).length === 0
+					? {}
+					: { refused: refusedTiers }),
 				...(usageSource === undefined ? {} : { usageSource }),
 				...(computeMs === undefined ? {} : { computeMs }),
 				...(usageTo === undefined ? {} : { usageTo }),

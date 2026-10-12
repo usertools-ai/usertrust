@@ -477,12 +477,19 @@ export function intervalsOf(parsed, job) {
 
 /** Records that are spend's own bookkeeping or a give-back: no usage hides behind them. */
 /** Records that say a charge happened or was attempted, and so need their llm_call. */
-const SPEND_METADATA = new Set(["settlement_ambiguous", "settlement_shortfall", "llm_call_failed"]);
+const SPEND_METADATA = new Set([
+	"settlement_ambiguous",
+	"settlement_shortfall",
+	"llm_call_failed",
+	// An implausible-usage report annotates the llm_call it follows (charged at the estimate).
+	"usage_implausible",
+]);
 
 /** Records that stand for spend or a refusal of it, so they matter even with no session. */
 const SPEND_LIKE = new Set([
 	"settlement_ambiguous",
 	"settlement_shortfall",
+	"usage_implausible",
 	"llm_call_failed",
 	"policy_denied",
 	"ledger_rejected",
@@ -492,7 +499,12 @@ const SPEND_LIKE = new Set([
 	"settlement_unrecoverable",
 ]);
 
-const BENIGN_KINDS = new Set(["hold_released", "settlement_ambiguous", "settlement_shortfall"]);
+const BENIGN_KINDS = new Set([
+	"hold_released",
+	"settlement_ambiguous",
+	"settlement_shortfall",
+	"usage_implausible",
+]);
 
 /**
  * The watch records that are evidence of usage the vault may lack: an unmetered call (`gap`),

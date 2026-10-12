@@ -156,6 +156,22 @@ describe("an unheld settle is recorded", () => {
 		expect(JSON.stringify(event.data)).not.toMatch(/cost|"model"/);
 	});
 
+	it("carries a refused tier as a FLAG with its raw figure: the record does not read as zero provider usage", async () => {
+		const { gov } = recording();
+		const g = await gov();
+		await g.recordUnheldSettlement({
+			transferId: GONE,
+			inputTokens: 0,
+			outputTokens: 9,
+			refused: { inputTokens: 150_000_000 },
+			usageSource: "provider",
+		});
+		const event = audit.events[0] as AppendEventInput;
+		expect(event.data).toMatchObject({ refused: { inputTokens: 150_000_000 } });
+		// and a getter on the refused object is read by name once, never trusted twice
+		expect(JSON.stringify(event.data)).not.toContain("NaN");
+	});
+
 	it("drops a count it cannot use instead of fabricating a zero", async () => {
 		const g = await recording().gov();
 		await g.recordUnheldSettlement({

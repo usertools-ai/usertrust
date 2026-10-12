@@ -61,6 +61,41 @@ describe("request schemas", () => {
 		});
 	});
 
+	it("accepts a maximum at the largest safe integer (the plugin caps an unsafe statement there)", () => {
+		expect(
+			SettleRequestSchema.parse({
+				transferId: "tx_1",
+				maxima: { inputTokens: Number.MAX_SAFE_INTEGER },
+			}).maxima,
+		).toEqual({ inputTokens: Number.MAX_SAFE_INTEGER });
+	});
+
+	it("round-trips refused (a per-tier flag whose value is the raw figure), strictly", () => {
+		expect(
+			SettleRequestSchema.parse({ transferId: "tx_1", refused: { inputTokens: 150_000_000 } })
+				.refused,
+		).toEqual({ inputTokens: 150_000_000 });
+		for (const bad of [{ inputTokens: -1 }, { inputTokens: 1.5 }, { bogus: 1 }]) {
+			expect(() => SettleRequestSchema.parse({ transferId: "tx_1", refused: bad })).toThrow();
+		}
+	});
+
+	it("round-trips maxima, strictly", () => {
+		expect(
+			SettleRequestSchema.parse({ transferId: "tx_1", maxima: { inputTokens: 5 } }).maxima,
+		).toEqual({ inputTokens: 5 });
+		for (const bad of [{ inputTokens: -1 }, { inputTokens: 1.5 }, { bogus: 1 }]) {
+			expect(() => SettleRequestSchema.parse({ transferId: "tx_1", maxima: bad })).toThrow();
+		}
+	});
+
+	it("round-trips responses (the count of provider responses a settle sums) and bounds it", () => {
+		expect(SettleRequestSchema.parse({ transferId: "tx_1", responses: 600 }).responses).toBe(600);
+		for (const bad of [0, -1, 1.5, "7", 1_000_001]) {
+			expect(() => SettleRequestSchema.parse({ transferId: "tx_1", responses: bad })).toThrow();
+		}
+	});
+
 	it("round-trips cacheWrite1hTokens (the 1-hour share of the write total; zod would STRIP an unknown key)", () => {
 		const parsed = SettleRequestSchema.parse({
 			transferId: "tx_1",
