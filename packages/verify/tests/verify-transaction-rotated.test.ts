@@ -10,7 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -174,19 +174,58 @@ describe("verifyTransaction over rotated segments", () => {
 
 	it("an UNREADABLE rotated segment fails loudly, as an unreadable live file always did", () => {
 		const { lines } = buildChain(EVENTS);
-		const rotated = vault("unreadable", {
-			"events-0001.jsonl": lines.slice(0, 3),
-			"events.jsonl": lines.slice(3),
+		const rotated = vault("unreadable", { "events.jsonl": lines.slice(3) });
+		// A DIRECTORY named like a segment: readFileSync throws EISDIR on it, whatever user runs the tests
+		// (a chmod 000 file is readable by root).
+		mkdirSync(join(rotated, "audit", "events-0001.jsonl"));
+		// A verdict here would read "not found" for a transfer whose records sit in the file nobody could
+		// open: the CLI's exit 2, where the vault was never read.
+		expect(() => verifyTransaction(rotated, "tx-x")).toThrow();
+	});
+
+	it("a gap is named from the verdict's own sequences, not each file's first and last lines", () => {
+		// events 1,4,2 in the older segment (out of order), 6.. in the live file: 3 and 5 are absent. A name
+		// built from physical first/last lines said "events 3..5 are absent" (4 exists).
+		const { lines } = buildChain([
+			...EVENTS,
+			{ kind: "llm_call", data: { transferId: "tx-d", model: "m", cost: 1, settled: true } },
+		]);
+		const [e1, e2, , e4, , e6, e7] = lines as [
+			string,
+			string,
+			string,
+			string,
+			string,
+			string,
+			string,
+		];
+		const rotated = vault("shuffled", {
+			"events-0001.jsonl": [e1, e4, e2],
+			"events.jsonl": [e6, e7],
 		});
-		const segment = join(rotated, "audit", "events-0001.jsonl");
-		chmodSync(segment, 0o000);
-		try {
-			// A verdict here would read "not found" for a transfer whose records sit in the file
-			// nobody could open: the CLI's exit 2, where the vault was never read.
-			expect(() => verifyTransaction(rotated, "tx-x")).toThrow();
-		} finally {
-			chmodSync(segment, 0o600);
-		}
+		const result = verifyTransaction(rotated, "tx-c");
+		expect(result.valid).toBe(false);
+		expect(result.errors).toContain(
+			"audit events missing: event 3 is absent inside events-0001.jsonl (between 2 and 4)",
+		);
+		expect(result.errors).toContain(
+			"audit segment missing: event 5 is absent between events-0001.jsonl (ends at 4) and events.jsonl (starts at 6)",
+		);
+		expect(result.errors.some((e) => e.includes("3..5"))).toBe(false);
+	});
+
+	it("a not-found transfer's errors are scrubbed too (a hostile segment name beside the gap)", () => {
+		const { lines } = buildChain(EVENTS);
+		const hostile = vault("hostile-notfound", {
+			"events-\u001b[2K\u009bX.jsonl": lines.slice(0, 2),
+			"events.jsonl": lines.slice(4),
+		});
+		const result = verifyTransaction(hostile, "tx-in-the-missing-segment");
+		expect(result.found).toBe(false);
+		const text = result.errors.join("\n");
+		expect(text).toContain("audit segment missing");
+		expect(text).not.toContain("\u001b");
+		expect(text).not.toContain("\u009b");
 	});
 
 	it("a vault holding only rotated segments is a vault with history, not 'Audit log not found'", () => {

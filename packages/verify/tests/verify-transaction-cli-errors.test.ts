@@ -91,6 +91,17 @@ describe("--tx prints the verdict's errors", () => {
 		expect(out).not.toContain("\u009b");
 	}, 60_000);
 
+	it("a bidi override (U+202E) in a segment file name never reaches stdout", () => {
+		// The library scrubs C0, DEL and C1; U+202E is a format character, so only the CLI's forDisplay stands
+		// between it and the terminal (a name that visually reorders the verdict line).
+		const bidi = String.fromCharCode(0x202e);
+		const vault = vaultMissingMiddle(`events-${bidi}X.jsonl`);
+		const res = runCli(vault, "--tx", "tx-live");
+		const out = res.stdout + res.stderr;
+		expect(out).toContain("audit segment missing");
+		expect(out).not.toContain(bidi);
+	}, 60_000);
+
 	it("a clean transaction prints no error lines", () => {
 		const root = mkdtempSync(join(tmpdir(), "verify-tx-cli-"));
 		dirs.push(root);

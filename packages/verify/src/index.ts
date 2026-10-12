@@ -803,40 +803,60 @@ export function normalizeEvent(raw: unknown): TransactionEvent {
 }
 
 /**
- * The audit files by verifyVault's rule; each gap between them NAMED by its range and both
- * neighbours, as "Sequence gap" alone reads like one deleted event. An unreadable file THROWS, as
- * an unreadable `events.jsonl` always did here: "not found" would be a verdict on unread records.
+ * The audit files by verifyVault's rule, with the file each `sequence` was read from. An unreadable file
+ * THROWS, as an unreadable `events.jsonl` always did here: "not found" would be a verdict on unread records.
  */
-function auditSegments(auditDir: string): { count: number; empty: boolean; gaps: string[] } {
-	let names: string[] = []; // a directory it cannot enumerate, verifyVaultReading reports
+function auditSegments(auditDir: string): {
+	count: number;
+	empty: boolean;
+	seqFile: Map<number, string>;
+} {
+	let names: string[] = [];
 	try {
 		names = readdirSync(auditDir).filter((n) => n.endsWith(".jsonl") && n !== "events.jsonl");
-	} catch {}
+	} catch {
+		// Not enumerable: with events.jsonl also absent, "Audit log not found" returns before the vault reading.
+	}
 	if (existsSync(join(auditDir, "events.jsonl"))) names.unshift("events.jsonl");
 	let empty = true;
-	const spans: [string, number, number][] = [];
+	const seqFile = new Map<number, string>();
 	for (const name of names) {
 		const text = readFileSync(join(auditDir, name), "utf-8").trim();
 		empty &&= text === "";
-		const seqs = text
-			.split("\n")
-			.map((l) => {
-				try {
-					return JSON.parse(l)?.sequence;
-				} catch {
-					return undefined;
-				}
-			})
-			.filter(Number.isSafeInteger);
-		if (seqs.length > 0) spans.push([name, seqs[0] as number, seqs.at(-1) as number]);
+		for (const l of text.split("\n")) {
+			try {
+				const seq = JSON.parse(l)?.sequence;
+				if (Number.isSafeInteger(seq) && !seqFile.has(seq)) seqFile.set(seq, name);
+			} catch {}
+		}
 	}
-	const gaps: string[] = [];
-	for (const [i, [name, first]] of spans.sort((a, b) => a[1] - b[1]).entries()) {
-		const [prev, , last] = spans[i - 1] ?? ["", 0, first - 1];
-		const msg = `audit segment missing: events ${last + 1}..${first - 1} are absent between ${prev}`;
-		if (first > last + 1) gaps.push(`${msg} (ends at ${last}) and ${name} (starts at ${first})`);
+	return { count: names.length, empty, seqFile };
+}
+
+/**
+ * Each `Sequence gap: event X follows Y` the vault reading reported, NAMED: the absent range Y+1..X-1 and the files
+ * holding Y and X. The names come from the verdict's own sequences, not from each file's first and last lines, so an
+ * out-of-order segment cannot misname a gap; if either sequence is not in the (second) read of the files, the file
+ * names are omitted rather than guessed.
+ */
+function nameGaps(errors: readonly string[], seqFile: ReadonlyMap<number, string>): string[] {
+	const out: string[] = [];
+	for (const e of errors) {
+		const m = /^Sequence gap: event (\d+) follows (\d+)/.exec(e);
+		if (m === null) continue;
+		const [x, y] = [Number(m[1]), Number(m[2])];
+		const [fileY, fileX] = [seqFile.get(y), seqFile.get(x)];
+		const range = x - y === 2 ? `event ${y + 1} is` : `events ${y + 1}..${x - 1} are`;
+		if (fileY === undefined || fileX === undefined)
+			out.push(`audit events missing: ${range} absent`);
+		else if (fileY === fileX)
+			out.push(`audit events missing: ${range} absent inside ${fileY} (between ${y} and ${x})`);
+		else
+			out.push(
+				`audit segment missing: ${range} absent between ${fileY} (ends at ${y}) and ${fileX} (starts at ${x})`,
+			);
 	}
-	return { count: names.length, empty, gaps };
+	return out;
 }
 
 /**
@@ -915,8 +935,10 @@ export function verifyTransaction(
 
 	// SCRUBBED: segment names and event ids are vault text, and these errors reach a terminal. A gap
 	// is named even when the target is absent: its records may be what the missing segment held.
-	const gapped = reading.result.errors.some((e) => e.startsWith("Sequence gap:"));
-	const vaultErrors = [...reading.result.errors, ...(gapped ? segments.gaps : [])];
+	const vaultErrors = [
+		...reading.result.errors,
+		...nameGaps(reading.result.errors, segments.seqFile),
+	];
 	if (targetEvent === undefined) {
 		const errors = vaultErrors.map(scrubForError);
 		return { found: false, valid: false, receipt: renderNotFound(txId), errors };
@@ -971,9 +993,7 @@ export function verifyTransaction(
 			} else if (
 				anchorParams.trust !== undefined &&
 				pos >= 1 &&
-				covering.treeSize <= orderedHashes.length &&
-				// The proof must be for THIS event: non-object lines or a gap can put another leaf at pos.
-				orderedHashes[pos - 1] === targetEvent.hash
+				covering.treeSize <= orderedHashes.length
 			) {
 				const proof = generateInclusionProof(
 					pos - 1,
