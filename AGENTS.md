@@ -1629,8 +1629,8 @@ exceptions. Each entry cites its SDK source line and verb; they run with the RAW
 is re-wrapped by the same governor, unless an option outside `GOVERNED_WITH_OPTIONS_KEYS` (an
 allow-list) changes the transport, when the new client is a refusing stand-in. A POST is freed only with a reason it cannot start billable work, written in both places; a create that can
 allocate storage is not free. If you add a governed surface, update that doc block and the free list.
-**Google clients are not default-deny**: Google's billable methods other than the two governed
-ones are **refused** by name (`GOOGLE_REFUSED_METHODS` in `govern.ts`:
+**Google clients are not default-deny**: a listed set of Google's billable methods is **refused**
+by name (`GOOGLE_REFUSED_METHODS` in `govern.ts`:
 `models.embedContent/generateImages/editImage/upscaleImage/generateVideos/recontextImage/
 segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create/
 createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create/update`,
@@ -1641,7 +1641,11 @@ function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in `google-afc.ts`,
 SDK's `shouldDisableAfc`, made on a snapshot of the request that is then what is forwarded),
 `models.generateContent` runs the loop itself, each round its own governed call
 (`runGovernedAfc`), and `models.generateContentStream` is refused the same way (a streamed loop is
-not metered per round yet). If you add a governed or refused Google surface, update `detect.ts`.
+not metered per round yet). The refused list is NOT a boundary: everything else on a Google client
+passes through, including other paths to the same endpoints (`models.*Internal`, e.g.
+`generateContentInternal`, which also bypasses the per-round AFC metering; `getNextGenClient()`;
+`chats.modelsModule`; `apiClient` on the client and every namespace). Google default-deny is the
+planned fix. If you add a governed or refused Google surface, update `detect.ts`.
 
 ---
 

@@ -23,7 +23,7 @@
  *   `generateContentStream` a call that would run the loop is REFUSED (a streamed loop is
  *   not metered round by round yet). Both decide on ONE reading (`afcRequested` /
  *   `sdkRunsAfc` in google-afc.ts) made on a snapshot of the request, which is what is
- *   forwarded. The other billable Google methods are REFUSED, not passed through: each
+ *   forwarded. A LISTED set of billable Google methods is REFUSED, not passed through: each
  *   call writes a `policy_denied` audit event and rejects with a PolicyDeniedError naming
  *   the method, and the SDK is never reached
  *   (`GOOGLE_REFUSED_METHODS` in govern.ts: `models.embedContent` / `generateImages` /
@@ -31,7 +31,9 @@
  *   `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`,
  *   `batches.create` / `createEmbeddings`, `interactions.create`, `tunings.tune`,
  *   `caches.create` / `update`, `fileSearchStores.uploadToFileSearchStore` /
- *   `importFile`).
+ *   `importFile`). That list is NOT a boundary: other paths to the same endpoints
+ *   (`models.*Internal`, `getNextGenClient()`, `chats.modelsModule`, `apiClient` on the
+ *   client and every namespace) pass through ungoverned until Google is default-deny.
  *
  * **Anthropic and OpenAI clients are default-deny** (`default-deny.ts`). Every other
  * SDK method reached off the governed client, at any depth, is REFUSED: the call
@@ -74,7 +76,8 @@ import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./s
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   helper is NOT, and is refused.
  * - Google: `client.models.generateContent()` and `client.models.generateContentStream()`;
- *   the other billable Google methods are refused by name (see the file header).
+ *   a listed set of billable Google methods is refused by name; it is not a boundary
+ *   (see the file header).
  *
  * Everything else on an Anthropic or OpenAI client is refused, except the free list
  * (reads, lists, deletes and a few named POSTs) and the methods `trust({ allowUngoverned })` lists (see

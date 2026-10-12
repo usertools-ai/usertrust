@@ -540,8 +540,9 @@ export interface TrustEngine {
 // Everything else on those resources is ungoverned (see detect.ts's boundary block).
 // On an Anthropic or OpenAI client the runtime refuses it unless it is free or listed
 // in `allowUngoverned` (default-deny.ts), and the types leave it untouched: a refused
-// method there keeps its SDK signature. On a Google client the other billable methods
-// are refused too (GOOGLE_REFUSED_METHODS), and those ARE typed as refused below.
+// method there keeps its SDK signature. On a Google client a listed set of billable methods
+// is refused too (GOOGLE_REFUSED_METHODS), and those ARE typed as refused below. That list
+// is not a boundary: everything else on a Google client passes through (detect.ts).
 
 /** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
 type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
@@ -5341,7 +5342,7 @@ function isGoogleRefusingNamespace(
 function ungovernedGoogleMethodError(path: string): PolicyDeniedError {
 	return new PolicyDeniedError(
 		`ungoverned_method: ${path} is not governed on a Google client`,
-		`usertrust governs ${GOOGLE_GOVERNED_METHODS} on a Google client, and refuses every other billable method rather than let it run unmetered. To make this call anyway, run it on the original (unwrapped) client inside governAction() with a cost estimate.`,
+		`usertrust governs ${GOOGLE_GOVERNED_METHODS} on a Google client, and refuses this method rather than let it run unmetered. To make this call anyway, run it on the original (unwrapped) client inside governAction() with a cost estimate.`,
 	);
 }
 
@@ -5497,9 +5498,10 @@ function onRawReceiver(
  * Anthropic `messages.stream` helper, the governed `generateContentStream` resolves to
  * the stream itself (an async generator yielding the SDK's chunks unchanged) with the
  * settled `.receipt` promise on it, so `for await (const c of await
- * models.generateContentStream(p))` keeps its SDK shape. Every other generation
- * method is refused (GOOGLE_REFUSED_METHODS) through `refuse`, which audits the
- * denial and rejects; everything else passes through.
+ * models.generateContentStream(p))` keeps its SDK shape. The listed generation
+ * methods are refused (GOOGLE_REFUSED_METHODS) through `refuse`, which audits the
+ * denial and rejects; everything else passes through, including other paths to the
+ * same endpoints (not a boundary: see detect.ts).
  */
 function buildGoogleProxy<T>(
 	client: T,

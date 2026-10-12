@@ -32,8 +32,8 @@ DELETE (reads, lists, deletes), and a few POSTs named with a reason (token count
 moderations, cancels, pauses, metadata updates). A method you list in
 `trust({ allowUngoverned })` runs **unmetered**: it reaches the provider without
 a budget hold or a cost, and its only record is an `ungoverned_call` audit event.
-On a Google client there is no default-deny boundary (see the Google paragraph
-below). The exact, current boundary is enumerated at the source in
+On a Google client there is no default-deny boundary: only the paths named in the
+Google paragraph below are governed or refused, and everything else passes through. The exact, current boundary is enumerated at the source in
 `packages/core/src/detect.ts` and `packages/core/src/default-deny.ts`.
 
 **Threat model.** Default-deny prevents ACCIDENTAL unmetered spend through the
@@ -69,10 +69,15 @@ video methods, `chats`, `live`, `batches.create`, `interactions.create`,
 `tunings.tune`, `caches.create` / `update`, and the `fileSearchStores` upload and
 import) are refused instead: the call rejects with a `PolicyDeniedError` naming
 the method, and records a `policy_denied` audit event, before the SDK is called.
+**That refused list is not a boundary:** those methods are refused when called by those names, but other paths to the same endpoints still pass through ungoverned, among them the SDK's internal `models.*Internal` methods (`generateContentInternal`, which sends the request behind `generateContent`, and the rest), `getNextGenClient()` (whose `interactions.create` reaches the provider), `chats.modelsModule` (the SDK's raw `Models`), the raw transport `apiClient` (on the client and on every namespace), and every namespace and method not listed. A default-deny boundary for Google clients, as Anthropic and OpenAI clients have, is the planned fix.
 So is `models.generateContentStream` when it would run automatic function calling
 (a streamed loop of provider rounds, which usertrust does not yet meter round by
 round); `models.generateContent` with it is metered per round instead, each round
-its own governed call. Use `generateContent`, or disable AFC with
+its own governed call. That per-round metering, like the rest of the Google
+governance, holds only for calls made through `models.generateContent` and
+`models.generateContentStream`: `models.generateContentInternal` (and `generateContent` on
+`chats.modelsModule`) reaches the same endpoint ungoverned, with no hold, no AFC
+check and no audit. Use `generateContent`, or disable AFC with
 `config.automaticFunctionCalling.disable: true`, to have the stream governed. The
 check needs plain objects: a Proxy in `params`, `config`, `config.tools`, a tool or
 `config.automaticFunctionCalling` is refused, because a Proxy can show the check
