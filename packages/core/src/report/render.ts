@@ -147,7 +147,11 @@ export function renderMarkdown(m: ReportModel): string {
 		"",
 		`- **Confirmed spend:** ${usd(t.confirmedUt)} (${utStr(t.confirmedUt)}) across ${t.confirmedCalls} call(s)`,
 		`- **Of which ledger-proven:** ${usd(t.postProvenUt)} across ${t.postProvenCalls} call(s). ${PROOF_NOTE}`,
-		`- **Unconfirmed:** ${usd(t.unconfirmedUt)} across ${t.unconfirmedCalls} call(s) whose charge is not proven (not counted as spent)`,
+		`- **Unconfirmed:** ${usd(t.unconfirmedUt)} across ${t.unconfirmedCalls} call(s) whose charge is not proven (not counted as spent)${
+			t.unconfirmedUnlabelledCalls > 0
+				? `; ${t.unconfirmedUnlabelledCalls} of them record no denomination (${tokens(t.unconfirmedUnlabelledUt)} usertokens, not shown as dollars)`
+				: ""
+		}`,
 	);
 	if (t.estimatedCalls > 0) {
 		out.push(
@@ -280,7 +284,7 @@ export function renderHtml(m: ReportModel): string {
 	body.push(
 		`<header><p class="muted">usertrust</p><h1>Weekly spend report</h1><p class="muted">${esc(m.window.startIso)} to ${esc(m.window.endIso)} (${m.window.days} days, end exclusive)</p><p class="${unverified ? "bad" : "ok"}"><strong>${esc(verdictLine(m, (x) => x))}</strong></p></header>`,
 		`<p class="muted">${esc(PROOF_NOTE)}</p>`,
-		`<section class="headline"><div><span class="big">${usd(t.confirmedUt)}</span><span class="muted">confirmed spend, ${t.confirmedCalls} call(s); of which ledger-proven ${usd(t.postProvenUt)}, ${t.postProvenCalls} call(s)</span></div><div><span class="big">${usd(t.unconfirmedUt)}</span><span class="muted">unconfirmed (failed, ambiguous, unsettled or uncorrelated), ${t.unconfirmedCalls} call(s)</span></div>${
+		`<section class="headline"><div><span class="big">${usd(t.confirmedUt)}</span><span class="muted">confirmed spend, ${t.confirmedCalls} call(s); of which ledger-proven ${usd(t.postProvenUt)}, ${t.postProvenCalls} call(s)</span></div><div><span class="big">${usd(t.unconfirmedUt)}</span><span class="muted">unconfirmed (failed, ambiguous, unsettled or uncorrelated), ${t.unconfirmedCalls} call(s)${t.unconfirmedUnlabelledCalls > 0 ? `; ${t.unconfirmedUnlabelledCalls} record no denomination (not shown as dollars)` : ""}</span></div>${
 			t.estimatedCalls > 0
 				? `<div><span class="big">${usd(t.estimatedUt)}</span><span class="muted">of confirmed spend priced from an estimate</span></div>`
 				: ""

@@ -350,10 +350,18 @@ describe("weekly report model", () => {
 
 	it("a settlement_ambiguous with no call of its own is counted as unconfirmed spend", () => {
 		const m = build([
-			ev("settlement_ambiguous", "2026-10-08T02:00:00Z", { transferId: "t-solo", cost: 300 }),
+			ev("settlement_ambiguous", "2026-10-08T02:00:00Z", {
+				transferId: "t-solo",
+				cost: 300,
+				costBasis: "usd-proxy",
+			}),
+			// no denomination on the record: shown, never assumed to be dollars
+			ev("settlement_ambiguous", "2026-10-08T03:00:00Z", { transferId: "t-solo2", cost: 50 }),
 		]);
 		expect(m.totals.unconfirmedUt).toBe(300);
-		expect(m.totals.unconfirmedCalls).toBe(1);
+		expect(m.totals.unconfirmedUnlabelledUt).toBe(50);
+		expect(m.totals.unconfirmedUnlabelledCalls).toBe(1);
+		expect(m.totals.unconfirmedCalls).toBe(2);
 	});
 
 	it("a DRY-RUN headless record (settled: true, no ledgerPosted) is confirmed but not ledger-proven", () => {

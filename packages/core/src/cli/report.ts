@@ -30,7 +30,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import pc from "picocolors";
-import { loadBudgetConfig, readLedgerEvents } from "../audit/read.js";
+import { readLedgerEvents } from "../audit/read.js";
 import { verifyVault } from "../audit/verify.js";
 import { type ReportFormat, render } from "../report/render.js";
 import { AGENT_KEYS, type AgentKey, buildWeeklyReport } from "../report/weekly.js";
@@ -117,6 +117,39 @@ const VALUE_FLAGS = [
 	"--tenant-config",
 ] as const;
 
+/** Options that may appear more than once. Empty on purpose: every option is single-occurrence unless declared here. */
+const REPEATABLE: ReadonlySet<string> = new Set();
+
+/** A malformed invocation or config the operator must fix: exit 2, never a quiet default. */
+class UsageError extends Error {}
+
+/**
+ * The vault config's budget, strictly. An ABSENT config or an absent `budget` key is "no budget configured"; a config
+ * that cannot be read as JSON, or a `budget` that is not a finite non-negative number, is an error: reading it as zero
+ * would print "no budget configured" for a vault whose operator configured one.
+ */
+function readVaultBudget(dir: string): number {
+	const configPath = join(dir, "usertrust.config.json");
+	if (!existsSync(configPath)) return 0;
+	let config: unknown;
+	try {
+		config = JSON.parse(readFileSync(configPath, "utf-8"));
+	} catch {
+		throw new UsageError("The vault config (usertrust.config.json) is not valid JSON");
+	}
+	if (config === null || typeof config !== "object" || Array.isArray(config)) {
+		throw new UsageError("The vault config (usertrust.config.json) is not a JSON object");
+	}
+	const budget = (config as Record<string, unknown>)["budget"];
+	if (budget === undefined) return 0;
+	if (typeof budget !== "number" || !Number.isFinite(budget) || budget < 0) {
+		throw new UsageError(
+			"The vault config's budget is not a finite non-negative number of usertokens",
+		);
+	}
+	return budget;
+}
+
 export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): ReportArgs {
 	let week = false;
 	let end: string | undefined;
@@ -127,14 +160,20 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 	let top: string | undefined;
 	let budget: string | undefined;
 	let tenantConfig: string | undefined;
+	const seen = new Set<string>();
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i] as string;
+		const eq = a.indexOf("=");
+		const name = eq >= 0 ? a.slice(0, eq) : a;
+		// A repeated option would silently overwrite the first, so the report could state a scope nobody asked for.
+		if (name.startsWith("--") && !REPEATABLE.has(name)) {
+			if (seen.has(name)) throw new Error(`Duplicate option: ${scrubForTerminal(name)}`);
+			seen.add(name);
+		}
 		if (a === "--week") {
 			week = true;
 			continue;
 		}
-		const eq = a.indexOf("=");
-		const name = eq >= 0 ? a.slice(0, eq) : a;
 		if ((VALUE_FLAGS as readonly string[]).includes(name)) {
 			const inline = eq >= 0;
 			const value = requireValue(name, inline ? a.slice(eq + 1) : argv[i + 1], inline);
@@ -362,7 +401,7 @@ export async function run(
 					budget:
 						parsed.budget !== undefined || parsed.tenantConfig !== undefined
 							? budget
-							: loadBudgetConfig(snapshot.dir).budget,
+							: readVaultBudget(snapshot.dir),
 					budgetSource,
 				},
 			);
@@ -387,6 +426,6 @@ export async function run(
 		}
 		if (!verified) process.exitCode = 2;
 	} catch (err) {
-		fail(err instanceof Error ? err.message : String(err));
+		fail(err instanceof Error ? err.message : String(err), err instanceof UsageError ? 2 : 1);
 	}
 }

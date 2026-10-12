@@ -310,6 +310,46 @@ describe("usertrust report --week", () => {
 		write.mockRestore();
 	});
 
+	it("a repeated option exits 2: every option is single-occurrence, none can silently overwrite another", async () => {
+		await vault([{ cost: 1 }]);
+		for (const argv of [
+			["--week", "--week", "--end", endIso()],
+			["--week", "--end", endIso(), "--format", "pdf", "--format", "md"],
+			["--week", "--end", endIso(), "--format=md", "--format", "json"],
+			["--week", "--end", endIso(), "--end", endIso()],
+			["--week", "--end", endIso(), "--top", "3", "--top", "4"],
+		]) {
+			process.exitCode = undefined;
+			await run(dir, {}, argv);
+			expect(process.exitCode, JSON.stringify(argv)).toBe(2);
+		}
+		write.mockRestore();
+	});
+
+	it("a malformed vault budget config exits 2 with a named reason, never 'no budget configured'", async () => {
+		for (const bad of ["{not json", '{"budget":"5"}', '{"budget":-1}', "[]", "null"]) {
+			rmSync(join(dir, ".usertrust"), { recursive: true, force: true });
+			await vault([{ cost: 1 }]);
+			writeFileSync(join(dir, ".usertrust", "usertrust.config.json"), bad);
+			stdout = "";
+			out = [];
+			process.exitCode = undefined;
+			await run(dir, {}, ["--week", "--end", endIso()]);
+			expect(process.exitCode, bad).toBe(2);
+			expect(out.join("\n"), bad).toMatch(/vault config/);
+			expect(stdout, bad).not.toMatch(/no budget configured/i);
+		}
+		write.mockRestore();
+	});
+
+	it("CONTROL: an absent budget key or config is 'no budget configured' and succeeds", async () => {
+		await vault([{ cost: 1 }]);
+		writeFileSync(join(dir, ".usertrust", "usertrust.config.json"), "{}");
+		await run(dir, {}, ["--week", "--end", endIso()]);
+		expect(process.exitCode).toBeUndefined();
+		write.mockRestore();
+	});
+
 	it("--segment is accepted with auto and cost-center", async () => {
 		await vault([{ cost: 1 }]);
 		for (const key of ["auto", "cost-center"]) {

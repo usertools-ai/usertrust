@@ -148,6 +148,9 @@ export interface ReportModel {
 		unconfirmedCalls: number;
 		/** Unconfirmed calls denominated in nominal units: counted here, never added to `unconfirmedUt` (dollars). */
 		unconfirmedNominalCalls: number;
+		/** Unconfirmed calls whose record states no denomination: counted here, never added to `unconfirmedUt` (dollars). */
+		unconfirmedUnlabelledCalls: number;
+		unconfirmedUnlabelledUt: number;
 		/** Of those, the ones that are an explicit `settled: false` (the rest have a settlement_ambiguous record). */
 		unsettledCalls: number;
 		/** Of the unconfirmed calls, those contradicted by another record for the same transfer (a failure or ambiguity marker, a release, an unknown kind). */
@@ -478,6 +481,8 @@ export function buildWeeklyReport(
 		unconfirmedUt: 0,
 		unconfirmedCalls: 0,
 		unconfirmedNominalCalls: 0,
+		unconfirmedUnlabelledCalls: 0,
+		unconfirmedUnlabelledUt: 0,
 		contradictedCalls: 0,
 		releasedCalls: 0,
 		uncorrelatedCalls: 0,
@@ -563,7 +568,10 @@ export function buildWeeklyReport(
 			if (st.kind === "unconfirmed") {
 				// Unconfirmed NOMINAL units are not dollars: they are counted, never added to the dollar figure.
 				if (denomination === "nominal") t.unconfirmedNominalCalls += 1;
-				else t.unconfirmedUt += c;
+				else if (denomination === "unlabelled") {
+					t.unconfirmedUnlabelledCalls += 1;
+					t.unconfirmedUnlabelledUt += c;
+				} else t.unconfirmedUt += c;
 				t.unconfirmedCalls += 1;
 				if (st.reason === "unsettled") t.unsettledCalls += 1;
 				else if (st.reason === "uncorrelated") t.uncorrelatedCalls += 1;
@@ -690,8 +698,13 @@ export function buildWeeklyReport(
 				t.unconfirmedActionCalls += 1;
 				if (c !== undefined) t.unconfirmedActionUt += c;
 			} else {
-				if (denominationOf(e) === "nominal") t.unconfirmedNominalCalls += 1;
-				else if (c !== undefined) t.unconfirmedUt += c;
+				// A standalone ambiguity usually carries no denomination: it is shown, never assumed to be dollars.
+				const d = denominationOf(e);
+				if (d === "nominal") t.unconfirmedNominalCalls += 1;
+				else if (d === "unlabelled") {
+					t.unconfirmedUnlabelledCalls += 1;
+					if (c !== undefined) t.unconfirmedUnlabelledUt += c;
+				} else if (c !== undefined) t.unconfirmedUt += c;
 				t.unconfirmedCalls += 1;
 				t.contradictedCalls += 1;
 			}
@@ -745,6 +758,11 @@ export function buildWeeklyReport(
 	if (t.releasedCalls > 0) {
 		notes.push(
 			`${t.releasedCalls} call(s) had their hold released (hold_released): nothing was charged. They are in no spend or budget figure.`,
+		);
+	}
+	if (t.unconfirmedUnlabelledCalls > 0) {
+		notes.push(
+			`${t.unconfirmedUnlabelledCalls} unconfirmed call(s) record no denomination (${t.unconfirmedUnlabelledUt} usertokens): they are not shown as dollars.`,
 		);
 	}
 	if (t.unconfirmedNominalCalls > 0) {
