@@ -654,7 +654,12 @@ export interface UnheldSettlementParams {
  */
 export type UnheldSettlementOutcome =
 	| { readonly outcome: "held"; readonly transferId: string }
-	| { readonly outcome: "unrecoverable"; readonly recorded: boolean };
+	| {
+			readonly outcome: "unrecoverable";
+			readonly recorded: boolean;
+			/** The event IS on the chain, but the writer reported a failure after it (its sidecar write). */
+			readonly auditDegraded?: true;
+	  };
 
 /** Remembered `settlement_unrecoverable` records, so an exact retry is not recorded twice. */
 export const UNHELD_RECORD_MEMORY = 10_000;
@@ -1274,8 +1279,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	const settling = new Set<string>();
 	// `recordUnheldSettlement`: the keys of the last UNHELD_RECORD_MEMORY records (FIFO), and the
 	// appends still in flight, so an identical retry never lands twice.
-	const unheldRecorded = new Set<string>();
-	const unheldInFlight = new Map<string, Promise<unknown>>();
+	// key -> whether the record's write was DEGRADED (on the chain, but the writer reported a failure).
+	const unheldRecorded = new Map<string, boolean>();
+	const unheldInFlight = new Map<string, Promise<{ degraded: boolean }>>();
 	const unheldWindow: number[] = []; // performance.now() of each record in the current window
 	// Holds an abort() or release() has CLAIMED and not yet recorded: parked on the
 	// budget lock or on its ledger void, and in neither map. destroy() waits for these
@@ -2577,10 +2583,18 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			if (first !== undefined) {
 				// An identical retry while the first is still being appended shares its outcome (a
 				// failure included): it never answers `recorded: false` for a record not yet on the chain.
-				await first;
-				return { outcome: "unrecoverable", recorded: false };
+				// ... and its degraded flag: a sharer is told the write it shared was degraded.
+				const shared = await first;
+				return shared.degraded
+					? { outcome: "unrecoverable", recorded: false, auditDegraded: true }
+					: { outcome: "unrecoverable", recorded: false };
 			}
-			if (unheldRecorded.has(key)) return { outcome: "unrecoverable", recorded: false };
+			const earlierDegraded = unheldRecorded.get(key);
+			if (earlierDegraded !== undefined) {
+				return earlierDegraded
+					? { outcome: "unrecoverable", recorded: false, auditDegraded: true }
+					: { outcome: "unrecoverable", recorded: false };
+			}
 			// Each record is an fsync'd append: bound them per window so a client minting unknown ids
 			// cannot grow the chain without limit. Refused, never dropped: the caller sees it.
 			const now = performance.now();
@@ -2600,26 +2614,33 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// sidecar, and records the event's hash on a rejection that came after the event was durable.
 			// Then the record IS on the chain: it counts as recorded, and the retry must not write it a
 			// second time. (Sharers of an in-flight append see the same outcome.)
-			const append = audit
+			// The rejection is still a DEGRADED write (the sidecar failed), and the caller is told so: a
+			// record that is on the chain but whose writer reported a failure is not the same answer as a
+			// clean one.
+			const append: Promise<{ degraded: boolean }> = audit
 				.appendEvent({ kind: "settlement_unrecoverable", actor: "local", data })
 				.then(
-					() => undefined,
+					() => ({ degraded: false }),
 					(err: unknown) => {
 						if (readDurableEventHash(err) === undefined) throw err;
+						return { degraded: true };
 					},
 				);
 			unheldInFlight.set(key, append);
+			let degraded: boolean;
 			try {
-				await append;
+				degraded = (await append).degraded;
 			} finally {
 				unheldInFlight.delete(key);
 			}
-			unheldRecorded.add(key);
+			unheldRecorded.set(key, degraded);
 			if (unheldRecorded.size > UNHELD_RECORD_MEMORY) {
-				const oldest = unheldRecorded.values().next().value;
+				const oldest = unheldRecorded.keys().next().value;
 				if (oldest !== undefined) unheldRecorded.delete(oldest);
 			}
-			return { outcome: "unrecoverable", recorded: true };
+			return degraded
+				? { outcome: "unrecoverable", recorded: true, auditDegraded: true }
+				: { outcome: "unrecoverable", recorded: true };
 		},
 
 		async destroy(): Promise<void> {

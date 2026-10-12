@@ -713,6 +713,10 @@ function normalizeEvent(raw: unknown): TransactionEvent {
 			// false OK, manufactured by the normalizer meant to prevent them.
 			...(str(d.transferId) !== undefined ? { transferId: str(d.transferId) } : {}),
 			...(str(d.transferIdHash) !== undefined ? { transferIdHash: str(d.transferIdHash) } : {}),
+			// The `...d` above carries whatever the file held. A non-string id (a number, an object) must not
+			// reach the renderer, which scrubs strings: drop it, so the event reads as having no id.
+			...(typeof d.transferId !== "string" ? { transferId: undefined } : {}),
+			...(typeof d.transferIdHash !== "string" ? { transferIdHash: undefined } : {}),
 		} as TransactionEvent["data"],
 		// PRESERVED, not defaulted. A legacy segment may legitimately carry no
 		// `sequence` (the v1 event schema allows it), and inventing 0 killed the
