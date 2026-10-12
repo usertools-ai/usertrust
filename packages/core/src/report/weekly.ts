@@ -107,6 +107,8 @@ export interface ReportOptions {
 	budgetSource?: string;
 	/** The vault config exists but could not be read: the budget is unknown, which is not the same as none. */
 	budgetUnreadable?: boolean;
+	/** Why the budget is unknown, in the shared provenance wording (e.g. several live governors that disagree). */
+	budgetUnknownReason?: string;
 	/**
 	 * The governor's persisted counter (`spend-ledger.json`), read from the same snapshot: `{ value }` when it parsed as a
 	 * number, `{ unreadable: true }` when the file exists and could not be read. Absent when there is no ledger file. It is
@@ -291,6 +293,8 @@ export interface ReportModel {
 		configuredUt: UsdUt | null;
 		/** The budget could not be determined (its config was unreadable). Distinct from `configuredUt: null` (none set). */
 		unknown: boolean;
+		/** Why it is unknown, when a reason more specific than an unreadable config is known. */
+		unknownReason: string | null;
 		source: string | null;
 		/** Spend with no cost center, in the window / over the whole chain: it debited the session wallet. */
 		windowSessionUt: UsdUt;
@@ -1371,6 +1375,7 @@ function buildPlain(
 		budget: {
 			configuredUt: configured,
 			unknown: opts.budgetUnreadable === true,
+			unknownReason: opts.budgetUnknownReason ?? null,
 			source: configured === null ? null : (opts.budgetSource ?? "vault config"),
 			windowSessionUt,
 			recordedSessionUt,

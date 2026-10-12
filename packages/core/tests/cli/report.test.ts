@@ -24,6 +24,7 @@ import { canonicalize } from "../../src/audit/canonical.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
 import { readChainDeadLetters } from "../../src/audit/dead-letters.js";
 import { verifyVault } from "../../src/audit/verify.js";
+import { recordEffectiveBudget } from "../../src/budget/effective-record.js";
 import { reportArgv } from "../../src/cli/flags.js";
 import { parseEnd, parseReportArgs, run } from "../../src/cli/report.js";
 
@@ -452,6 +453,105 @@ describe("usertrust report --week", () => {
 		write.mockRestore();
 	});
 
+	// The budget the vault's governor RECORDED as enforced: a server tenant's budget (passed in memory) or an SDK
+	// caller's never reaches the vault config, so with no flag the report read "no budget configured".
+	it("red-first (no budget): with no flag, the governor's recorded budget wins over the vault config", async () => {
+		await vault([{ cost: 1 }]);
+		writeFileSync(
+			join(dir, ".usertrust", "usertrust.config.json"),
+			JSON.stringify({ budget: 1000 }),
+		);
+		recordEffectiveBudget(join(dir, ".usertrust"), 4_000);
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		const out = JSON.parse(stdout) as { budget: { configuredUt: number; source: string } };
+		expect(out.budget.configuredUt).toBe(4_000);
+		// the provenance is SHOWN, with the record's age
+		expect(out.budget.source).toMatch(
+			/^the enforced budget, as of \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+		);
+		// an explicit flag still names the budget over the record
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json", "--budget", "1234"]);
+		const flagged = JSON.parse(stdout) as { budget: { configuredUt: number; source: string } };
+		expect(flagged.budget).toMatchObject({ configuredUt: 1_234, source: "--budget" });
+		write.mockRestore();
+	});
+
+	it("red-first (read as confirmed): a vault-config budget is SHOWN as unconfirmed, in json and markdown", async () => {
+		await vault([{ cost: 1 }]);
+		writeFileSync(
+			join(dir, ".usertrust", "usertrust.config.json"),
+			JSON.stringify({ budget: 1000 }),
+		);
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		const out = JSON.parse(stdout) as { budget: { configuredUt: number; source: string } };
+		expect(out.budget).toMatchObject({
+			configuredUt: 1_000,
+			source: "from usertrust.config.json; not confirmed as enforced",
+		});
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso()]);
+		expect(stdout).toContain("from usertrust.config.json; not confirmed as enforced");
+		write.mockRestore();
+	});
+
+	it("red-first (config unreadable): several live governors that disagree are reported AS several, with the record's age", async () => {
+		await vault([{ cost: 1 }]);
+		writeFileSync(
+			join(dir, ".usertrust", "effective-budget.json"),
+			JSON.stringify({
+				budget: null,
+				governors: 2,
+				writtenAt: "2026-10-12T00:00:00.000Z",
+				pid: 1,
+				processStartedAt: "2026-10-12T00:00:00.000Z",
+			}),
+		);
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		const out = JSON.parse(stdout) as {
+			budget: { unknown: boolean; unknownReason: string | null };
+		};
+		expect(out.budget.unknown).toBe(true);
+		expect(out.budget.unknownReason).toBe(
+			"unknown: several governors with different budgets, as of 2026-10-12T00:00:00.000Z",
+		);
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso()]);
+		expect(stdout).toContain("Budget `unknown: several governors with different budgets");
+		expect(stdout).not.toContain("vault config could not be read");
+		write.mockRestore();
+	});
+
+	it("an UNREADABLE governor record makes the budget unknown, never the vault config's figure", async () => {
+		await vault([{ cost: 1 }]);
+		writeFileSync(
+			join(dir, ".usertrust", "usertrust.config.json"),
+			JSON.stringify({ budget: 1000 }),
+		);
+		writeFileSync(join(dir, ".usertrust", "effective-budget.json"), "{torn");
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		const out = JSON.parse(stdout) as {
+			budget: { configuredUt: number | null; unknown: boolean; unknownReason: string | null };
+		};
+		expect(out.budget).toMatchObject({
+			configuredUt: null,
+			unknown: true,
+			unknownReason: "unknown: the enforced-budget record could not be read; not valid JSON",
+		});
+		// red-first (blamed the config): the text names the RECORD, never the readable vault config.
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso()]);
+		expect(stdout).toContain(
+			"Budget `unknown: the enforced-budget record could not be read; not valid JSON`",
+		);
+		expect(stdout).not.toContain("vault config could not be read");
+		write.mockRestore();
+	});
+
 	it("--tenant-config keeps the user's own spelling: `link/../tenant.json` reads the file the OS resolves, not the lexical one", async () => {
 		await vault([{ cost: 1 }]);
 		const real = join(dir, "real");
@@ -858,11 +958,16 @@ describe("usertrust report --week", () => {
 		15_000,
 	);
 
-	it("CONTROL: an absent budget key or config is 'no budget configured' and succeeds", async () => {
+	it("CONTROL: an absent budget key, with no record, is 'not yet published' (unknown) and succeeds", async () => {
 		await vault([{ cost: 1 }]);
 		writeFileSync(join(dir, ".usertrust", "usertrust.config.json"), "{}");
+		stdout = "";
 		await run(dir, {}, ["--week", "--end", endIso()]);
 		expect(process.exitCode).toBeUndefined();
+		expect(stdout).toContain(
+			"Budget `unknown: not yet published; no governor has recorded the budget it enforces`",
+		);
+		expect(stdout).not.toMatch(/no budget configured\b(?!')/);
 		write.mockRestore();
 	});
 

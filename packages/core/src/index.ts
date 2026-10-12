@@ -29,6 +29,8 @@ export {
 	type CreateAuditWriterOptions,
 	createAuditWriter,
 } from "./audit/chain.js";
+// Vault reading (shared by CLI + usertrust-ui)
+export { EFFECTIVE_BUDGET_FILE } from "./audit/effective-budget.js";
 export type {
 	MerkleConsistencyProof,
 	MerkleInclusionProof,
@@ -53,9 +55,19 @@ export {
 	quarantineTornTail,
 	type TornTail,
 } from "./audit/quarantine.js";
-export type { ChainIntegrity, PersistedAuditEvent } from "./audit/read.js";
-// Vault reading (shared by CLI + usertrust-ui)
-export { deriveChainIntegrity, loadBudgetConfig, readLedgerEvents } from "./audit/read.js";
+export type {
+	BudgetSource,
+	ChainIntegrity,
+	PersistedAuditEvent,
+	VaultBudget,
+} from "./audit/read.js";
+export {
+	deriveChainIntegrity,
+	describeBudgetSource,
+	isKnownBudget,
+	loadBudgetConfig,
+	readLedgerEvents,
+} from "./audit/read.js";
 export type { ChainVerificationResult, VaultVerificationResult } from "./audit/verify.js";
 export { verifyChain, verifyVault } from "./audit/verify.js";
 export type { BoardReviewResult, BoardStats } from "./board/board.js";

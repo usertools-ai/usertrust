@@ -29,6 +29,8 @@ import {
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import pc from "picocolors";
 import { verifyVaultComplete } from "../audit/complete.js";
+import { readEffectiveBudget } from "../audit/effective-budget.js";
+import { describeBudgetSource } from "../audit/read.js";
 import { type ReportFormat, render } from "../report/render.js";
 import {
 	AGENT_KEYS,
@@ -103,7 +105,7 @@ export interface ReportArgs {
 	agentKey: AgentKey;
 	segment: number | undefined;
 	top: number;
-	/** `--budget`: the budget in usertokens, overriding the vault config (a server tenant's budget lives in the server's tenant config). */
+	/** `--budget`: the budget in usertokens, overriding the governor's recorded budget and the vault config. */
 	budget: number | undefined;
 	/** `--tenant-config`: a JSON file whose `budget` is the budget in usertokens. */
 	tenantConfig: string | undefined;
@@ -470,7 +472,8 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 
 	try {
 		let budget = 0;
-		let budgetSource = "vault config";
+		// The vault config's budget is NOT confirmed as the one enforced: the report says so (the shared wording).
+		let budgetSource = describeBudgetSource({ source: "config", writtenAt: null });
 		if (parsed.budget !== undefined) {
 			budget = parsed.budget;
 			budgetSource = "--budget";
@@ -478,6 +481,16 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			budget = readTenantBudget(userPath(root, parsed.tenantConfig));
 			budgetSource = "tenant config";
 		}
+		const explicitBudget = parsed.budget !== undefined || parsed.tenantConfig !== undefined;
+		// With no flag, the budget the vault's governor RECORDED as the one it enforces wins over the vault config: a
+		// server tenant's or an SDK caller's budget never reaches that file. An unreadable record is an UNKNOWN budget.
+		const recorded = explicitBudget ? null : readEffectiveBudget(vaultPath);
+		if (recorded?.state === "recorded") {
+			budget = recorded.budget;
+			budgetSource = describeBudgetSource({ source: "governor", writtenAt: recorded.writtenAt });
+		}
+		// Several live governors with different budgets, or a record that cannot be read: the budget is UNKNOWN.
+		const recordedUnknown = recorded?.state === "unreadable" || recorded?.state === "several";
 		// The verdict is `usertrust verify`'s own, on the LIVE vault: integrity AND completeness, one function shared with that
 		// command (audit/complete.ts). The report makes no integrity claim of its own. The instant is taken before the read.
 		const readAtIso = new Date().toISOString();
@@ -489,6 +502,34 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		// A config that cannot be read makes the budget UNKNOWN, not the chain unverified: the verifier does not read it.
 		const config = readSideFile(join(vaultPath, "usertrust.config.json"));
 		const configUnreadable = config.state === "unreadable";
+		const fromRecordOrFlag = explicitBudget || recorded?.state === "recorded";
+		// Read only when the config decides the budget, as before: an invalid config is a usage error only then.
+		const configBudget =
+			!fromRecordOrFlag && !recordedUnknown && config.state === "file"
+				? readVaultBudgetText(config.text)
+				: 0;
+		// With no flag and no record: an unreadable config is unknown for the CONFIG's reason (the existing wording); a
+		// config with a budget gives it; otherwise no governor has published one yet.
+		const configUnknown = !fromRecordOrFlag && !recordedUnknown && configUnreadable;
+		const unknownReason: string | null =
+			fromRecordOrFlag || recorded === null
+				? null
+				: recorded.state === "several"
+					? describeBudgetSource({ source: "several", writtenAt: recorded.writtenAt })
+					: recorded.state === "unreadable"
+						? describeBudgetSource({
+								source: "unreadable",
+								writtenAt: null,
+								reason: recorded.reason,
+							})
+						: !configUnreadable && !(configBudget > 0)
+							? describeBudgetSource({ source: "unpublished", writtenAt: null })
+							: null;
+		const reportBudget = fromRecordOrFlag
+			? budget
+			: unknownReason !== null || configUnknown
+				? 0
+				: configBudget;
 		const dead = complete.deadLetters;
 		// Shortfall amounts are usable only from a queue read cleanly: an unreadable queue, an unreadable line or a
 		// shortfall that is not one leaves the headless proven figure an upper bound.
@@ -508,18 +549,15 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 				agentKey: parsed.agentKey,
 				...(parsed.segment !== undefined ? { segment: parsed.segment } : {}),
 				topN: parsed.top,
-				budget:
-					parsed.budget !== undefined || parsed.tenantConfig !== undefined
-						? budget
-						: config.state === "file"
-							? readVaultBudgetText(config.text)
-							: 0,
+				budget: reportBudget,
 				budgetSource,
 				spendLedger: readSpendLedger(join(vaultPath, "spend-ledger.json")),
 				deadLetters,
-				// An unreadable config is an UNKNOWN budget, never "no budget configured".
-				budgetUnreadable:
-					configUnreadable && parsed.budget === undefined && parsed.tenantConfig === undefined,
+				// An unknown budget is never "no budget configured". Its reason names the RECORD when the record is the
+				// problem (several, unreadable, or none published and no config budget), and the config only when the
+				// config itself cannot be read.
+				...(unknownReason !== null ? { budgetUnknownReason: unknownReason } : {}),
+				budgetUnreadable: unknownReason !== null || configUnknown,
 			},
 		);
 		const text = render(model, parsed.format);

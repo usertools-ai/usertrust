@@ -49,6 +49,10 @@ import {
 import { writeReceipt } from "./audit/rotation.js";
 import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
+import {
+	type EnforcedBudgetRegistration,
+	registerEnforcedBudget,
+} from "./budget/effective-record.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
 	guardedGet,
@@ -1608,8 +1612,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// 2. Initialise subsystems
 	const vaultPath = vaultBase;
+	// This governor's budget on its vault's record (budget/effective-record.ts); set once it has started. Its first
+	// successful append means this process holds the vault's writer lock, which is when the record may be published.
+	let enforcedBudget: EnforcedBudgetRegistration | undefined;
 	const audit: AuditWriter =
-		(isTestEnv ? opts?._audit : undefined) ?? openSharedAuditWriter(vaultPath);
+		(isTestEnv ? opts?._audit : undefined) ??
+		openSharedAuditWriter(vaultPath, { onAppended: () => enforcedBudget?.appended() });
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
 	// No `existsSync` preflight: it answers false for a file inside a directory
@@ -4280,6 +4288,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		const destroyFn = async (): Promise<void> => {
 			if (destroyed) return;
 			destroyed = true;
+			enforcedBudget?.release();
 
 			// Wait up to 5 seconds for in-flight calls to complete.
 			// After the deadline, proceed with teardown anyway.
@@ -4383,6 +4392,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		}
 	};
 	process.on("beforeExit", beforeExitHandler);
+
+	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
+	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Registered LAST,
+	// once the governor is fully initialised: a start that fails later (an invalid policy) enforces nothing and must not
+	// replace the record of a governor that is running. Published only while this process holds the vault's writer lock
+	// (from the first successful append), so a process that never gets the lock never overwrites the holder's record.
+	// Advisory: it never throws, and a failed write removes any earlier record rather than leave a stale one.
+	enforcedBudget = registerEnforcedBudget(join(vaultBase, VAULT_DIR), config.budget, () =>
+		audit.lockOwner?.(),
+	);
 
 	return governedClient;
 }

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../src/audit/chain.js";
+import { recordEffectiveBudget } from "../../src/budget/effective-record.js";
 import { run } from "../../src/cli/inspect.js";
 
 describe("usertrust inspect", () => {
@@ -132,5 +133,115 @@ describe("usertrust inspect", () => {
 		const combined = logOutput.join("\n");
 		// 50000 - 142 = 49858
 		expect(combined).toContain("49,858");
+	});
+
+	// A server tenant's or SDK caller's budget never reached the vault config: inspect printed a negative remaining.
+	async function spent300(): Promise<string> {
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(join(vaultPath, "audit"), { recursive: true });
+		const writer = createAuditWriter(tempDir);
+		await writer.appendEvent({ kind: "llm_call", actor: "test", data: { cost: 300 } });
+		writer.release();
+		return vaultPath;
+	}
+	function lastJson(): { data: Record<string, unknown> } {
+		return JSON.parse(logOutput.at(-1) as string) as { data: Record<string, unknown> };
+	}
+
+	it("red-first (remaining -300): the governor's recorded budget, and the correct remaining, in --json", async () => {
+		recordEffectiveBudget(await spent300(), 2_000);
+		await run(tempDir, { json: true });
+		expect(lastJson().data).toMatchObject({
+			budget: 2_000,
+			budgetSource: "governor",
+			budgetWrittenAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
+			budgetProvenance: expect.stringMatching(/^the enforced budget, as of \d{4}-/),
+			spent: 300,
+			remaining: 1_700,
+			percentRemaining: 85,
+		});
+	});
+
+	it("no record and no configured budget: UNKNOWN, not yet published — null budget and remaining in --json, and said so in text", async () => {
+		await spent300();
+		await run(tempDir, { json: true });
+		expect(lastJson().data).toMatchObject({
+			budget: null,
+			budgetSource: "unpublished",
+			spent: 300,
+			remaining: null,
+			percentRemaining: null,
+		});
+		logOutput = [];
+		await run(tempDir);
+		const combined = logOutput.join("\n");
+		expect(combined).toContain(
+			"Budget: unknown: not yet published; no governor has recorded the budget it enforces",
+		);
+		expect(combined).not.toContain("-300");
+	});
+
+	it("red-first (none recorded or configured): an UNREADABLE record is unknown WITH its reason, in both modes", async () => {
+		await spent300();
+		writeFileSync(join(tempDir, ".usertrust", "effective-budget.json"), "{torn");
+		await run(tempDir, { json: true });
+		expect(lastJson().data).toMatchObject({
+			budget: null,
+			budgetSource: "unreadable",
+			budgetProvenance: "unknown: the enforced-budget record could not be read; not valid JSON",
+			remaining: null,
+		});
+		logOutput = [];
+		await run(tempDir);
+		const combined = logOutput.join("\n");
+		expect(combined).toContain(
+			"Budget: unknown: the enforced-budget record could not be read; not valid JSON",
+		);
+		expect(combined).not.toContain("none recorded or configured");
+	});
+
+	it("red-first (read as enforced): the text SHOWS where the budget came from — a record with its age, a config as unconfirmed", async () => {
+		const vaultPath = await spent300();
+		writeFileSync(join(vaultPath, "usertrust.config.json"), JSON.stringify({ budget: 1_000 }));
+		await run(tempDir);
+		expect(logOutput.join("\n")).toContain(
+			"(from usertrust.config.json; not confirmed as enforced)",
+		);
+		await run(tempDir, { json: true });
+		expect(lastJson().data).toMatchObject({
+			budgetSource: "config",
+			budgetWrittenAt: null,
+			budgetProvenance: "from usertrust.config.json; not confirmed as enforced",
+		});
+		logOutput = [];
+		recordEffectiveBudget(vaultPath, 2_000);
+		await run(tempDir);
+		expect(logOutput.join("\n")).toMatch(/\(the enforced budget, as of \d{4}-\d{2}-\d{2}T[^)]*Z\)/);
+	});
+
+	it("several live governors with different budgets: unknown in --json and in the text, never a figure", async () => {
+		const vaultPath = await spent300();
+		writeFileSync(
+			join(vaultPath, "effective-budget.json"),
+			JSON.stringify({
+				budget: null,
+				governors: 2,
+				writtenAt: "2026-10-12T00:00:00.000Z",
+				pid: 1,
+				processStartedAt: "2026-10-12T00:00:00.000Z",
+			}),
+		);
+		await run(tempDir, { json: true });
+		expect(lastJson().data).toMatchObject({
+			budget: null,
+			budgetSource: "several",
+			remaining: null,
+		});
+		logOutput = [];
+		await run(tempDir);
+		expect(logOutput.join("\n")).toContain(
+			"Budget: unknown: several governors with different budgets",
+		);
+		expect(logOutput.join("\n")).not.toContain("none recorded or configured");
 	});
 });

@@ -164,7 +164,12 @@ misses the chain is reported: the receipt carries `auditDegraded` (a failed warn
 warning (at the first failure, and with the count when the client is destroyed), and
 `usertrust verify` reports the vault INCOMPLETE and exits 1 for a dead-lettered event (if the dead-letter write itself fails and leaves no bytes, for instance on a full disk, neither `verify` nor `health` sees the gap; a partial line left by a short write counts as an unreadable entry, so the vault reads INCOMPLETE). A `trust()` client with
 `audit.failClosed: true` refuses such calls instead; `createGovernor()` and
-`usertrust-server` do not enforce `audit.failClosed`.
+`usertrust-server` do not enforce `audit.failClosed`. Such a process's budget is
+not visible to vault readers either: the enforced-budget record
+(`effective-budget.json`) is published only by the process that holds the lock, so
+the ledger UI, `inspect`, `health` and `report` show the lock holder's budget, or
+"not yet published" before its first append, while the degraded process goes on
+enforcing its own.
 
 **Load ONE copy of usertrust per process, and use a vault from one thread.** The
 shared writer, and the registry that tells a live writer in this process from a

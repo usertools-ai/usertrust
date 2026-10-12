@@ -3,7 +3,14 @@
 
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { deriveChainIntegrity, loadBudgetConfig, readLedgerEvents, verifyVault } from "usertrust";
+import {
+	deriveChainIntegrity,
+	describeBudgetSource,
+	isKnownBudget,
+	loadBudgetConfig,
+	readLedgerEvents,
+	verifyVault,
+} from "usertrust";
 import type { SummaryPayload } from "../shared/api.js";
 import { type LedgerRow, toLedgerRows } from "../shared/rows.js";
 import { TransferIndex } from "./verdicts.js";
@@ -29,12 +36,32 @@ function anchorFile(vaultPath: string): "present" | "absent" {
 	return existsSync(join(vaultPath, "audit", "anchors", "anchors.jsonl")) ? "present" : "absent";
 }
 
+/**
+ * The summary's budget fields, read from the vault: the governor's record of what it enforces, else the vault config.
+ * The server re-reads them when either file changes (a governor starting writes the record OUTSIDE `audit/`).
+ */
+export function budgetSummary(
+	vaultPath: string,
+	spentUt: number,
+): Pick<
+	SummaryPayload,
+	"budget" | "budgetSource" | "budgetWrittenAt" | "budgetProvenance" | "remainingUt"
+> {
+	const config = loadBudgetConfig(vaultPath);
+	const budget = isKnownBudget(config.source) ? config.budget : null;
+	return {
+		budget,
+		budgetSource: config.source,
+		budgetWrittenAt: config.writtenAt,
+		budgetProvenance: describeBudgetSource(config),
+		remainingUt: budget === null ? null : budget - spentUt,
+	};
+}
+
 export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerState {
 	const events = readLedgerEvents(vaultPath);
 	const integrity = deriveChainIntegrity(events);
 	const vault = verifyVault(vaultPath);
-	const { budget } = loadBudgetConfig(vaultPath);
-
 	let spentUt = 0;
 	for (const e of events) {
 		if (e.kind === "llm_call" && typeof e.data.cost === "number") spentUt += e.data.cost;
@@ -61,9 +88,8 @@ export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerSt
 		transfers,
 		summary: {
 			vaultPath,
-			budget,
+			...budgetSummary(vaultPath, spentUt),
 			spentUt,
-			remainingUt: budget - spentUt,
 			chain: {
 				events: events.length,
 				valid: integrity.valid && vault.valid,
