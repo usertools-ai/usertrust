@@ -186,6 +186,8 @@ const MODEL_ID = /^[^\p{C}\p{Z}]{1,256}$/u;
 const CACHE_TIERS = "authorize-cache-tiers";
 /** The capability of a server that prices `cacheWrite1hTokens` at the 1-hour write rate. */
 const CACHE_WRITE_1H = "cache-write-1h";
+/** The capability of a server that reads a per-tier `refused` flag and charges the estimate for it. */
+const REFUSED_FLAG = "refused";
 
 const CURSOR_VERSION = 2;
 /** v1 cursors (no `unresolved`) are read as v2 with nothing unresolved. */
@@ -2081,6 +2083,16 @@ async function oneHourSupport(share) {
  */
 async function settleBody(transferId, counts, labels) {
 	const { cacheWrite1hTokens, responses, refused, ...rest } = counts;
+	if (refused !== undefined) {
+		// A refused tier is a FLAG the server must understand. An older server strips the unknown key and would price the
+		// zeroed counts at the floor, so for it the counts are WITHHELD: with none the settle falls back to the held estimate
+		// (the conservative figure). Support unknown: no body is built and the caller defers, as for the 1-hour share.
+		const capabilities = await refreshUnknownServerCapabilities();
+		if (capabilities === null) return null;
+		if (!capabilities.has(REFUSED_FLAG)) {
+			return { transferId, usageSource: "estimated", ...settleLabels(labels) };
+		}
+	}
 	const support = await oneHourSupport(cacheWrite1hTokens);
 	// Support UNKNOWN with a share to carry: sending only the flat total would bill the
 	// 1-hour tokens at the 5-minute rate for good, so no body is built; the caller defers.

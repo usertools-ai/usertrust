@@ -2539,6 +2539,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 						chunksDelivered,
 						usageReported: false,
+						// An absurd count seen on a streamEvent is not forgotten when only `end` arrives.
+						implausible: accImplausible,
 					})
 						.then(receiptResolve, receiptReject)
 						.finally(releaseStreamCount);

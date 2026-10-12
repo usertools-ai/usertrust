@@ -107,6 +107,7 @@ describe("HTTP control plane", () => {
 				"cache-write-1h",
 				"job",
 				"settle-unrecoverable",
+				"refused",
 			]);
 			await server?.close();
 			server = undefined;

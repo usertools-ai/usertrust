@@ -373,6 +373,42 @@ describe("an absurd chunk never reaches the anomaly detector's observation", () 
 		}
 	});
 
+	it("an `end` with no message_stop still carries the anomaly a streamEvent saw: the call settles at the estimate with the event", async () => {
+		const vaultBase = join(tmpdir(), `absurd-streams-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+		try {
+			const audit = makeAudit();
+			const stream = new Emitter();
+			const g = await trust(
+				{
+					messages: {
+						create: vi.fn((_req: unknown) => undefined),
+						stream: vi.fn((_req: unknown) => stream),
+					},
+				},
+				{ budget: 100_000, vaultBase, dryRun: true, _audit: audit },
+			);
+			const h = (await g.messages.stream({
+				model: "claude-sonnet-4-6",
+				max_tokens: 64,
+				messages: [{ role: "user", content: "hello" }],
+			})) as Emitter & { receipt: Promise<TrustReceipt> };
+			stream.emit("streamEvent", {
+				type: "message_start",
+				message: { usage: { input_tokens: HUGE } },
+			});
+			stream.emit("end"); // no finalMessage: the fallback builds its own completion
+			const receipt = await h.receipt;
+			expect(receipt.usageSource).toBe("estimated");
+			expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+				tiers: { inputTokens: HUGE },
+			});
+			await g.destroy();
+		} finally {
+			rmSync(vaultBase, { recursive: true, force: true });
+		}
+	});
+
 	it("a finalMessage with only an absurd cache tier (no headline counts) still reports it", async () => {
 		const vaultBase = join(tmpdir(), `absurd-streams-${randomUUID()}`);
 		mkdirSync(vaultBase, { recursive: true });

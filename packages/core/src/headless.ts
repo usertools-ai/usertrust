@@ -629,6 +629,16 @@ export interface UnheldSettlementParams {
 	cacheReadTokens?: number | undefined;
 	cacheWriteTokens?: number | undefined;
 	cacheWrite1hTokens?: number | undefined;
+	/** Tiers the caller refused to state as a count (see `SettleParams.refused`): recorded as flags, never as zero usage. */
+	refused?:
+		| {
+				inputTokens?: number | undefined;
+				outputTokens?: number | undefined;
+				cacheReadTokens?: number | undefined;
+				cacheWriteTokens?: number | undefined;
+				cacheWrite1hTokens?: number | undefined;
+		  }
+		| undefined;
 	chunksDelivered?: number | undefined;
 	usageSource?: "provider" | "estimated" | undefined;
 	computeMs?: number | undefined;
@@ -2518,6 +2528,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			};
 			// Every remaining field is read ONCE into a local and validated from that local: a getter
 			// that answers differently on a second read cannot get unchecked text onto the chain.
+			const refusedTiers = materializeMaxima(params.refused);
 			const rawComputeMs: unknown = params.computeMs;
 			const computeMs =
 				typeof rawComputeMs === "number" && Number.isFinite(rawComputeMs) && rawComputeMs >= 0
@@ -2552,6 +2563,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				reason: "no hold for this transferId: swept, restarted or already settled",
 				source: "headless",
 				...(Object.keys(usage).length === 0 ? {} : { usage }),
+				// A refused tier is NOT zero usage: it is recorded as a flag with the raw figure when representable.
+				...(refusedTiers === undefined || Object.keys(refusedTiers).length === 0
+					? {}
+					: { refused: refusedTiers }),
 				...(usageSource === undefined ? {} : { usageSource }),
 				...(computeMs === undefined ? {} : { computeMs }),
 				...(usageTo === undefined ? {} : { usageTo }),

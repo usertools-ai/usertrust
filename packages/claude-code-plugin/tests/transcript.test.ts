@@ -3836,6 +3836,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 		});
 
 		it("a response over the ceiling is FLAGGED through the hold: journaled, listed back, settled; the HOLD is ordinary", async () => {
+			capabilities = ["refused"];
 			const server = holdingServer();
 			await startServer(server.responder);
 			await writeMain([
@@ -3859,6 +3860,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 		});
 
 		it("1e16 input_tokens in a single response: an ordinary authorize hold, then a flag on the settle", async () => {
+			capabilities = ["refused"];
 			const server = holdingServer();
 			await startServer(server.responder);
 			await writeMain(responseEntries("msg_a", SONNET, { ...u(10, 20, 0, 0), input: 1e16 }));
@@ -3874,6 +3876,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 		});
 
 		it("a 1-hour breakdown of 1e16 above the write total is flagged (the clamp cannot hide it)", async () => {
+			capabilities = ["refused"];
 			const server = holdingServer();
 			await startServer(server.responder);
 			const absurd: Usage = {
@@ -3891,7 +3894,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 		});
 
 		it("a bad 5-minute figure counts 0 for the subtraction: the remainder stays at the dearer 1-hour rate, and the call is flagged", async () => {
-			capabilities = ["cache-write-1h"];
+			capabilities = ["cache-write-1h", "refused"];
 			const server = holdingServer();
 			await startServer(server.responder);
 			// 400 written; the breakdown names only a 1-hour part (100) and a 5-minute part that is garbage
@@ -3913,6 +3916,45 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			expect(body.cacheWrite1hTokens).toBe(400);
 		});
 
+		it("a server WITHOUT the refused capability never receives zeroed counts for a refused window: they are withheld (the held estimate settles)", async () => {
+			capabilities = []; // an older server: it would strip `refused` and price the zeros at the floor
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain([
+				...responseEntries("msg_a", SONNET, u(150_000_000, 9)),
+				...responseEntries("msg_b", SONNET, u(5, 9)),
+			]);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as Record<
+				string,
+				unknown
+			>;
+			expect(body).toBeDefined();
+			for (const k of [
+				"inputTokens",
+				"outputTokens",
+				"cacheReadTokens",
+				"cacheWriteTokens",
+				"refused",
+			]) {
+				expect(body, k).not.toHaveProperty(k);
+			}
+			expect(body.usageSource).toBe("estimated");
+		});
+
+		it("with the capability unknown (the server cannot be asked), a refused window defers instead of settling blind", async () => {
+			capabilities = null;
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(150_000_000, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			expect(settles().find((x) => x.body.transferId === "tx_1")).toBeUndefined();
+		});
+
 		it("absent and null tiers are 0 and price normally: nothing is flagged", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);
@@ -3926,6 +3968,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 		});
 
 		it("a LEGACY cursor carrying rawMax / rawCacheWrite1hTokens over the ceiling migrates to flags on read", async () => {
+			capabilities = ["refused"];
 			await startServer(okResponder);
 			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 0, 0)));
 			const legacy = {
