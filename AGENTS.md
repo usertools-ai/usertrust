@@ -171,6 +171,28 @@ settle-then-void leaving the ledger holding a debit its accounting does not.
 `release` (a hold given back: neither, and a `hold_released` record). usertrust-server's TTL sweep
 and shutdown release; `POST /v1/release` (capability `release`) exposes it, and answers 200 only
 when the governor says it ended the hold (`{ released: true }`), else 404 `unknown transferId`.
+A settle that arrives for a hold the governor no longer has is recorded, never dropped:
+`Governor.recordUnheldSettlement()` appends `settlement_unrecoverable` (the id as its SHA-256, the
+caller's reported usage, no cost) and **only** that: it never reserves, posts, voids or re-opens a hold,
+touches no budget counter and prices nothing. `POST /v1/settle` answers it as `410`, with `409
+already_settled` for a retry of a settle that went through in this process (bounded memory of 10 000,
+FIFO; past it a retry is recorded again, a duplicate record and never a lost one).
+*In usertrust-server, ONE function (`claim`) is the only way an entry leaves `pending`:* settle, abort,
+release, the TTL sweep and shutdown all go through it, and it registers the terminal in `claimed` in the
+same synchronous step, so a settle that finds the entry gone waits on whatever terminal holds it (bounded)
+instead of polling; it refuses (`NOT_CLAIMED`) unless the entry is still the one in `pending`, so shutdown's snapshot loop
+cannot claim a hold a client terminal already took. A route that took an entry out on its own left a settle racing a slow client
+release or abort nothing to wait on: it answered a 409 the plugin reads as "claimed", and the usage was
+neither charged nor recorded (the same class as the sweep race, patched by handler once). Pinned by
+`tests/claim.test.ts` (exactly one delete call on `pending`, no clear call) and by red-first rows for a
+settle racing a slow release and a slow abort. `usertrust-verify --tx <id>` matches a
+`settlement_unrecoverable` record by the SHA-256 of the queried id, since the record stores no id.
+*Prevents:* a TTL-swept or restarted hold turning a client's real provider spend into a bare `404` that
+nothing records, and the opposite mistake of "recovering" it by moving money from a record. The record
+is deliberately UNATTRIBUTED (`actor: "local"`, no `costCenter`): its hold is gone, so there is no
+capture to read an attribution from, and inventing one from request text would break the structural
+attribution rule above. At most 1 000 new records per minute per governor
+(`UnheldSettlementRateLimitedError`, `429`), because each is an fsync'd append.
 `abort()` answers the same way (`{ aborted: true }` or `{ aborted: false }`, a refused void named in
 `voidError`), and `POST /v1/abort` keeps the same 200/404 rule. An abort or release is in flight
 from its synchronous claim until its record starts (`inFlight`): `destroy()` waits for it, and

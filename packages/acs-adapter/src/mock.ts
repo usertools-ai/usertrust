@@ -9,6 +9,8 @@ import type {
 	Governor,
 	ReleaseOutcome,
 	SettleParams,
+	UnheldSettlementOutcome,
+	UnheldSettlementParams,
 } from "usertrust/headless";
 import type { PolicyDecider } from "./composite.js";
 import { CompositeEvaluator } from "./composite.js";
@@ -80,6 +82,12 @@ export function createMockGovernor(opts: { budget?: number } = {}): { governor: 
 			if (!holds.delete(auth.transferId)) return { released: false };
 			budget += auth.estimatedCost;
 			return { released: true };
+		},
+		// The mock has no chain, so an unheld settle has nowhere to be recorded; it answers as the
+		// real governor does for a hold it never had.
+		async recordUnheldSettlement(params: UnheldSettlementParams): Promise<UnheldSettlementOutcome> {
+			if (holds.has(params.transferId)) return { outcome: "held", transferId: params.transferId };
+			return { outcome: "unrecoverable", recorded: true };
 		},
 		async destroy(): Promise<void> {
 			for (const auth of holds.values()) {

@@ -20,6 +20,10 @@ npm, and its version is its own: the `usertrust` packages and their
   moves; a plugin installed into a session under way posts nothing written before its first
   hook there.
 
+### Changed
+
+- **A settle for a hold the server no longer has is read as the hold gone on a newer server too.** usertrust-server's next major answers such a settle `410 settlement_unrecoverable` (the settle is recorded on its chain, nothing is charged) where an older server answers `404 unknown transferId`. The hooks treat either as the hold being gone (`isSettleGone`), so an expired hold is still re-charged once on a fresh hold. Release and abort keep the `404` on every server.
+
 ## [2.1.0] - 2026-10-09
 
 ### Added
