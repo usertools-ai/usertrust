@@ -50,7 +50,7 @@ try {
 } catch {
 	// Never a reason to fail the start: the normal banner.
 }
-// The old plugin's state, when it could not be told (launch.mjs `yieldsToPeer`): first, for the
+// The old plugin's state, when it could not be told (launch.mjs `warnOfPeer`: it looks enabled, or could not be told; this plugin meters either way): first, for the
 // same reason as the rejected-key warning.
 const peerWarning = takePeerWarning();
 if (peerWarning !== null) warning = warning === null ? peerWarning : `${peerWarning} ${warning}`;

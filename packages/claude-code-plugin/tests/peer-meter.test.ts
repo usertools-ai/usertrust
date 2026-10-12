@@ -1,24 +1,25 @@
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runHook } from "./helpers/run-hook.js";
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
-const { peerMeter, settingsDirs, yieldMessage } = (await import(join(HOOKS, "peer-meter.mjs"))) as {
+const { peerMeter, settingsDirs, alsoEnabledWarning } = (await import(
+	join(HOOKS, "peer-meter.mjs")
+)) as {
 	peerMeter: (args: {
 		userDir: string;
 		projectDir: string | null;
 		managed?: string | null;
 	}) => Promise<{ state: "enabled" | "absent" | "unknown"; why: string | null; file?: string }>;
-	settingsDirs: (args: {
-		env: Record<string, string | undefined>;
-		payload: unknown;
-		home: string | null;
-	}) => { userDir: string; projectDir: string | null };
-	yieldMessage: (file: string) => string;
+	settingsDirs: (args: { env: Record<string, string | undefined>; payload: unknown }) => {
+		userDir: string;
+		projectDir: string | null;
+	};
+	alsoEnabledWarning: (file: string) => string;
 };
 
 const OLD = "usertrust-claude-code@usertrust";
@@ -46,12 +47,12 @@ beforeEach(async () => {
 });
 
 describe("peerMeter: is usertrust-claude-code ENABLED", () => {
-	it("both enabled: the old plugin meters, so this one yields", async () => {
+	it("both enabled: the old plugin looks enabled", async () => {
 		await user({ enabledPlugins: { [OLD]: true, "usertools@usertrust": true } });
 		expect((await check()).state).toBe("enabled");
 	});
 
-	it("only usertools: no entry for the old plugin, this one meters", async () => {
+	it("only usertools: no entry for the old plugin", async () => {
 		await user({ enabledPlugins: { "usertools@usertrust": true } });
 		expect((await check()).state).toBe("absent");
 	});
@@ -60,7 +61,7 @@ describe("peerMeter: is usertrust-claude-code ENABLED", () => {
 		expect((await check()).state).toBe("absent");
 	});
 
-	it("old plugin installed but disabled: this one meters", async () => {
+	it("old plugin installed but disabled", async () => {
 		await user({ enabledPlugins: { [OLD]: false, "usertools@usertrust": true } });
 		expect((await check()).state).toBe("absent");
 	});
@@ -143,24 +144,19 @@ describe("settingsDirs", () => {
 			settingsDirs({
 				env: { CLAUDE_CONFIG_DIR: "/cfg", CLAUDE_PROJECT_DIR: "/proj" },
 				payload: { cwd: "/elsewhere" },
-				home: "/h",
 			}),
 		).toEqual({ userDir: "/cfg", projectDir: "/proj" });
-		expect(settingsDirs({ env: {}, payload: { cwd: "/elsewhere" }, home: "/h" })).toEqual({
-			userDir: "/h/.claude",
+		expect(settingsDirs({ env: {}, payload: { cwd: "/elsewhere" } })).toEqual({
+			userDir: join(homedir(), ".claude"),
 			projectDir: "/elsewhere",
 		});
 		expect(
-			settingsDirs({
-				env: { CLAUDE_CONFIG_DIR: "rel", CLAUDE_PROJECT_DIR: "rel" },
-				payload: {},
-				home: "/h",
-			}),
-		).toEqual({ userDir: "/h/.claude", projectDir: null });
+			settingsDirs({ env: { CLAUDE_CONFIG_DIR: "rel", CLAUDE_PROJECT_DIR: "rel" }, payload: {} }),
+		).toEqual({ userDir: join(homedir(), ".claude"), projectDir: null });
 	});
 });
 
-describe("the hooks yield to an enabled usertrust-claude-code", () => {
+describe("SessionStart warns of an enabled usertrust-claude-code, and usertools always meters", () => {
 	let server: Server | undefined;
 	let hits: number;
 	let stateDir: string;
@@ -204,22 +200,29 @@ describe("the hooks yield to an enabled usertrust-claude-code", () => {
 	const run = (hook: string, id: string) =>
 		runHook(join(HOOKS, `${hook}.mjs`), { ...PAYLOAD, session_id: id, cwd: projectDir }, env);
 
-	it("both enabled: SessionStart says so word for word, and no hook meters, writes or sends", async () => {
+	it("both enabled: SessionStart warns word for word, and EVERY hook still meters", async () => {
 		const file = await user({ enabledPlugins: { [OLD]: true } });
 		const start = await run("session-start", "both-1");
 		expect(start.code).toBe(0);
-		expect(JSON.parse(start.stdout)).toEqual({ systemMessage: yieldMessage(file) });
-		expect(yieldMessage("/the/file.json")).toBe(
-			"usertrust: usertrust-claude-code is also enabled; this session is metered by it, not by usertools. Uninstall it: /plugin uninstall usertrust-claude-code@usertrust. If it is not actually installed, remove it from enabledPlugins in /the/file.json",
+		const message = JSON.parse(start.stdout).systemMessage as string;
+		expect(message.startsWith(`${alsoEnabledWarning(file)} usertrust: watch-only`)).toBe(true);
+		expect(alsoEnabledWarning("/the/file.json")).toBe(
+			"usertrust: usertrust-claude-code also appears to be enabled (/the/file.json); if it is, every tool call is metered twice. Uninstall it: /plugin uninstall usertrust-claude-code@usertrust",
 		);
+		const before = hits;
+		const pre = await run("pre-tool-use", "both-1");
+		expect(pre.code).toBe(0);
+		expect(hits, "pre-tool-use sent its request").toBeGreaterThan(before);
+		await expect(readdir(stateDir)).resolves.not.toEqual([]);
+	});
+
+	it("the warning is SessionStart's alone: no other hook says it", async () => {
+		await user({ enabledPlugins: { [OLD]: true } });
 		for (const hook of ["pre-tool-use", "post-tool-use", "stop", "subagent-stop", "session-end"]) {
-			const out = await run(hook, "both-1");
-			expect(out.code, hook).toBe(0);
-			expect(out.stdout, hook).toBe("");
-			expect(out.stderr, hook).toBe("");
+			const out = await run(hook, "both-2");
+			expect(out.stdout, hook).not.toContain("also appears");
+			expect(out.stderr, hook).not.toContain("also appears");
 		}
-		expect(hits).toBe(0);
-		await expect(readdir(stateDir)).rejects.toMatchObject({ code: "ENOENT" });
 	});
 
 	it("only usertools: meters (the normal banner, a request sent)", async () => {

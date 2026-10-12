@@ -34,9 +34,9 @@ in 3.0.0. If `usertrust-claude-code` is installed, uninstall it BEFORE installin
 /plugin install usertools@usertrust
 ```
 
-With both installed, every tool call would be metered twice, so `usertools` yields: when
-`usertrust-claude-code` is also ENABLED it meters nothing and SessionStart says so (the old
-plugin keeps metering until you uninstall it). If it cannot tell, it meters and warns. Your
+With both installed, every tool call is metered twice. `usertools` always meters, and when
+`usertrust-claude-code` looks ENABLED in your settings (or it cannot tell), SessionStart opens
+with a warning naming the settings file. Your
 configuration file, state directory and server settings are unchanged by the rename.
 
 ## Quickstart (against usertrust-server)
