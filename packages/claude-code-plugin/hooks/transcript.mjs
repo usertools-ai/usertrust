@@ -305,6 +305,17 @@ function readMaxima(v) {
 	return out;
 }
 
+/**
+ * Keeps the largest value a tier STATED, as a finite non-negative number even when it is above the safe-integer range
+ * (`count()` maps that to 0, which would price an absurd response as nothing and hide it from the server). Capped at the
+ * largest safe integer: it only has to exceed the server's ceiling to be flagged.
+ */
+function noteRawMax(m, key, value) {
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return;
+	const stated = Math.min(value, Number.MAX_SAFE_INTEGER);
+	if (stated > (m.rawMax[key] ?? 0)) m.rawMax[key] = stated;
+}
+
 function sumCounts(messages) {
 	const sum = {
 		inputTokens: 0,
@@ -325,7 +336,9 @@ function sumCounts(messages) {
 		let top = 0;
 		for (const m of messages) {
 			const seen =
-				key === "cacheWrite1hTokens" ? Math.max(m[key], m.rawCacheWrite1hTokens ?? 0) : m[key];
+				key === "cacheWrite1hTokens"
+					? Math.max(m[key], m.rawCacheWrite1hTokens ?? 0)
+					: Math.max(m[key], m.rawMax?.[key] ?? 0);
 			if (seen > top) top = seen;
 		}
 		sum.maxima[key] = top;
@@ -772,6 +785,12 @@ function parseCursor(raw) {
 			cacheWriteTokens: count(m.cacheWriteTokens),
 			cacheWrite1hTokens: count(m.cacheWrite1hTokens),
 			rawCacheWrite1hTokens: count(m.rawCacheWrite1hTokens),
+			rawMax: {
+				inputTokens: count(m.rawMax?.inputTokens),
+				outputTokens: count(m.rawMax?.outputTokens),
+				cacheReadTokens: count(m.rawMax?.cacheReadTokens),
+				cacheWriteTokens: count(m.rawMax?.cacheWriteTokens),
+			},
 		});
 	}
 	for (const [id, value] of Object.entries(raw.assigned)) {
@@ -1284,6 +1303,8 @@ function foldLine(cursor, bytes, since) {
 			// The 1-hour breakdown as the transcript STATED it, before the clamp to the write total: the per-response
 			// maximum the server checks must see an absurd share the clamp would hide.
 			rawCacheWrite1hTokens: 0,
+			// The largest value each tier STATED, before `count()` maps anything above the safe-integer range to 0.
+			rawMax: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 		};
 		cursor.nextSeq += 1;
 		cursor.partial.set(id, m);
@@ -1297,6 +1318,10 @@ function foldLine(cursor, bytes, since) {
 	// min is idempotent however many are re-read.
 	const at = Date.parse(entry?.timestamp);
 	if (Number.isFinite(at) && (m.ts === null || at < m.ts)) m.ts = at;
+	noteRawMax(m, "inputTokens", usage.input_tokens);
+	noteRawMax(m, "outputTokens", usage.output_tokens);
+	noteRawMax(m, "cacheReadTokens", usage.cache_read_input_tokens);
+	noteRawMax(m, "cacheWriteTokens", usage.cache_creation_input_tokens);
 	m.inputTokens = Math.max(m.inputTokens, count(usage.input_tokens));
 	m.outputTokens = Math.max(m.outputTokens, count(usage.output_tokens));
 	m.cacheReadTokens = Math.max(m.cacheReadTokens, count(usage.cache_read_input_tokens));

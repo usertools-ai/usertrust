@@ -61,6 +61,15 @@ describe("request schemas", () => {
 		});
 	});
 
+	it("accepts a maximum at the largest safe integer (the plugin caps an unsafe statement there)", () => {
+		expect(
+			SettleRequestSchema.parse({
+				transferId: "tx_1",
+				maxima: { inputTokens: Number.MAX_SAFE_INTEGER },
+			}).maxima,
+		).toEqual({ inputTokens: Number.MAX_SAFE_INTEGER });
+	});
+
 	it("round-trips maxima, strictly", () => {
 		expect(
 			SettleRequestSchema.parse({ transferId: "tx_1", maxima: { inputTokens: 5 } }).maxima,

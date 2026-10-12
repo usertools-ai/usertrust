@@ -3809,6 +3809,23 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			});
 		});
 
+		it("a tier stated above the safe-integer range is still flagged: its maximum is kept, not normalized to 0", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			const huge: Usage = { ...u(10, 20, 0, 0), input: 1e16 };
+			await writeMain([
+				...responseEntries("msg_a", SONNET, huge),
+				...responseEntries("msg_b", SONNET, u(10, 20, 0, 0)),
+			]);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
+				maxima?: { inputTokens?: number };
+			};
+			expect(body.maxima?.inputTokens).toBeGreaterThan(100_000_000);
+		});
+
 		it("the 1-hour maximum is the breakdown as STATED, not the value clamped to the write total", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);
