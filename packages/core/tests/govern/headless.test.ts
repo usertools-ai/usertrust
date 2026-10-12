@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditLockReleaseError, type AuditWriter } from "../../src/audit/chain.js";
-import type { TrustEngine } from "../../src/govern.js";
+import { type TrustEngine, type TrustOpts, trust } from "../../src/govern.js";
 import type { Governor } from "../../src/headless.js";
 import { createGovernor } from "../../src/headless.js";
 import { costFromRates, getModelRates } from "../../src/ledger/pricing.js";
@@ -751,6 +751,53 @@ describe("headless governor", () => {
 			'createGovernor(): invalid option pii "blok"',
 		);
 		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
+	// `allowUngoverned` opts SDK methods out of a wrapped client's default-deny boundary; a
+	// governor wraps no client, so createGovernor() refuses it by name. GovernorOpts does not
+	// offer it, but a value typed as TrustOpts still carries it past the type check.
+	const TRUST_ONLY_REFUSAL =
+		'createGovernor(): option "allowUngoverned" applies to trust()-wrapped clients only';
+
+	it("refuses allowUngoverned by name, before anything is created", async () => {
+		await expect(
+			createGovernor({
+				dryRun: true,
+				vaultBase,
+				// @ts-expect-error GovernorOpts does not offer allowUngoverned
+				allowUngoverned: ["embeddings.create"],
+			}),
+		).rejects.toThrow(TRUST_ONLY_REFUSAL);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
+	it("refuses allowUngoverned passed through a value typed as TrustOpts (the type check misses it)", async () => {
+		const asTrustOpts: TrustOpts = {
+			dryRun: true,
+			vaultBase,
+			allowUngoverned: ["embeddings.create"],
+		};
+		await expect(createGovernor(asTrustOpts)).rejects.toThrow(TRUST_ONLY_REFUSAL);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
+	it("does not list allowUngoverned among the options createGovernor() accepts", async () => {
+		const err = await createGovernor({ dryRun: true, vaultBase, pi: "block" } as never).then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+		const accepts = /accepts only: (.*)\.$/.exec((err as Error).message)?.[1];
+		expect(accepts).toBe(
+			"budget, configPath, dryRun, endpoint, parentUserId, pii, scope, vaultBase",
+		);
+	});
+
+	it("trust() still accepts allowUngoverned", async () => {
+		const governed = await trust(
+			{ messages: { create: vi.fn(async (_params: unknown) => ({ id: "msg" })) } },
+			{ dryRun: true, vaultBase, allowUngoverned: ["embeddings.create"] },
+		);
+		await governed.destroy();
 	});
 
 	// Only an omitted (undefined) argument means "no options"; cwd points at the temp

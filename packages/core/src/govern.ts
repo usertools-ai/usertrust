@@ -351,6 +351,8 @@ function inheritedOptionNames(opts: object): string[] {
 
 /**
  * Check a runtime options object and return the copy `fn` reads from.
+ * `misplaced` names options another entry point takes, each with the reason
+ * this one refuses it, so the refusal says why rather than "unknown".
  *
  * Refuses, by name, every option `fn` does not declare. TypeScript already
  * rejects an unknown key in an object literal, but a JavaScript caller (or one
@@ -373,6 +375,7 @@ export function readOwnOptions<O extends object>(
 	fn: string,
 	opts: O | undefined,
 	allowed: Readonly<Record<keyof O, true>>,
+	misplaced: Readonly<Record<string, string>> = {},
 ): O | undefined {
 	// Only an omitted (undefined) argument means "no options", as the signature
 	// says (`opts?:`); `null` is refused like any other non-object, never read as
@@ -385,13 +388,14 @@ export function readOwnOptions<O extends object>(
 	const problems = [
 		...own
 			.filter((key) => !Object.hasOwn(allowed, key))
-			.map(
-				(key) =>
-					`unknown option ${quoteForRefusal(key)}${
-						Object.hasOwn(TrustConfigSchema.shape, key)
-							? " (set it in .usertrust/usertrust.config.json)"
-							: ""
-					}`,
+			.map((key) =>
+				Object.hasOwn(misplaced, key)
+					? `option ${quoteForRefusal(key)} ${misplaced[key]}`
+					: `unknown option ${quoteForRefusal(key)}${
+							Object.hasOwn(TrustConfigSchema.shape, key)
+								? " (set it in .usertrust/usertrust.config.json)"
+								: ""
+						}`,
 			),
 		...inheritedOptionNames(opts).map(
 			(key) =>

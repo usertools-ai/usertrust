@@ -241,7 +241,7 @@ Create `.usertrust/usertrust.config.json`:
 }
 ```
 
-`budget`, `pii`, `parentUserId` and `scope` can also be passed to `trust()` (and to `createGovernor()`), and override the file: `trust(client, { pii: "block" })` blocks PII whatever the file says. Every other setting (`circuitBreaker`, `patterns`, `audit`, …) is read from the file only. Besides these, its own options (`configPath`, `dryRun`, `vaultBase`, `endpoint`, `allowUngoverned`) and `tier` (accepted, but currently not applied), any key passed to `trust()` is refused by name: it throws a `TypeError` such as `trust(): unknown option "circuitBreaker" (set it in .usertrust/usertrust.config.json)` instead of being ignored. So does a `pii` value the config does not allow.
+`budget`, `pii`, `parentUserId` and `scope` can also be passed to `trust()` (and to `createGovernor()`), and override the file: `trust(client, { pii: "block" })` blocks PII whatever the file says. Every other setting (`circuitBreaker`, `patterns`, `audit`, …) is read from the file only. Besides these, its own options (`configPath`, `dryRun`, `vaultBase`, `endpoint`, `allowUngoverned`) and `tier` (accepted, but currently not applied), any key passed to `trust()` is refused by name: it throws a `TypeError` such as `trust(): unknown option "circuitBreaker" (set it in .usertrust/usertrust.config.json)` instead of being ignored. So does a `pii` value the config does not allow. `allowUngoverned` is for `trust()` only: `createGovernor()` refuses it by name.
 
 `defineConfig` is available as a TypeScript type-checking helper for validating config objects in your code. The actual config file must be `usertrust.config.json` (JSON format):
 
