@@ -50,7 +50,7 @@ class InsufficientBalanceError extends Error {
   readonly hint: string;
   readonly docsUrl: string;
   readonly auditEventHash?: string;   // the `ledger_rejected` event's hash
-  readonly auditDegraded?: boolean;   // the append failed and was dead-lettered
+  readonly auditDegraded?: boolean;   // the append failed (and was dead-lettered, when that write succeeded)
 }
 ```
 
@@ -70,7 +70,7 @@ class PolicyDeniedError extends Error {
   readonly hint: string;
   readonly docsUrl: string;
   readonly auditEventHash?: string;   // the `policy_denied` event's hash
-  readonly auditDegraded?: boolean;   // the append failed and was dead-lettered
+  readonly auditDegraded?: boolean;   // the append failed (and was dead-lettered, when that write succeeded)
 }
 ```
 
@@ -78,7 +78,7 @@ class PolicyDeniedError extends Error {
 
 **Hint:** `'Check your policy rules in .usertrust/policies/ or use { pii: "warn" } to downgrade PII enforcement.'`
 
-To change PII enforcement, set `pii` in `.usertrust/usertrust.config.json`; passing it to `trust()` has no effect.
+To change PII enforcement, set `pii` in the config file `trust()` reads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath` (which is read instead, so edit that one); passing `pii` to `trust()` itself has no effect.
 
 ---
 
@@ -108,7 +108,7 @@ The two fields answer different questions, and you need both:
 |---|---|---|
 | set | absent | The denial is on the chain, at that hash. |
 | set | `true` | The event **is** on the chain at that hash, but the write reported failure — the log was fsync'd and the `.meta` sidecar was not. The handle is usable; run `usertrust verify` on the vault. |
-| absent | `true` | The append was attempted, nothing durable landed, and the payload was dead-lettered to `.usertrust/dlq/`. There is no chain record. |
+| absent | `true` | The append was attempted, nothing durable landed, and the payload was dead-lettered to `.usertrust/dlq/` when that write succeeded. There is no chain record. |
 | absent | absent | No append was attempted — an error built by hand, or thrown by a version before denial events existed. |
 
 A failed denial-append never changes the error you receive. `audit.failClosed`
@@ -189,7 +189,7 @@ When TigerBeetle is unreachable, usertrust refuses to forward the request. This 
 
 ## AuditDegradedError
 
-Thrown (or flagged) when the audit chain write fails after the LLM call and ledger settlement both succeed. Under `audit.failClosed`, a `trust()` client whose audit writer is already degraded also throws it at the start of a call, before anything is charged (below).
+Thrown (or flagged) when an audit chain write fails. Usually that is after the LLM call and ledger settlement both succeed. Under `audit.failClosed` a `trust()` client throws it earlier in two cases (below): at the start of a call on a client whose audit writer is already degraded, before anything is charged, and when the call's own primary record (the `llm_call` event, or an action's own event) fails to append, before the ledger POST.
 
 ```typescript
 class AuditDegradedError extends Error {
@@ -199,12 +199,12 @@ class AuditDegradedError extends Error {
 }
 ```
 
-**When it fires:** After the LLM call succeeds and the ledger POST settles. This is failure mode 15.3. The response is still returned to the caller with `auditDegraded: true` on the receipt (except that a failed warn-mode `injection_detected` append is swallowed without marking the call or its receipt). The failed event is written to the dead-letter queue. Under `audit.failClosed`, a `trust()` client whose audit writer was already degraded by an earlier failed write throws it at the start of every later call instead: the call is refused before it reaches the provider, and nothing is charged. Recreate the client after fixing the audit directory.
+**When it fires:** Usually after the LLM call succeeds and the ledger POST settles. This is failure mode 15.3. The response is still returned to the caller with `auditDegraded: true` on the receipt (except that a failed warn-mode `injection_detected` append is swallowed without marking the call or its receipt). The failed event is written to the dead-letter queue when that write succeeds. Under `audit.failClosed`, a failed primary record (the call's own `llm_call` event, or an action's own event) refuses the call before its POST, and the hold is released by a void request (the void is best-effort: see the callout below); a failure of any later record is refused only after the charge posts. Also under `audit.failClosed`, a `trust()` client whose audit writer was already degraded by an earlier failed write throws it at the start of every later call instead: the call is refused before it reaches the provider, and nothing is charged. Recreate the client after fixing the audit directory.
 
 **Hint:** `"Check disk space and permissions on the .usertrust/audit/ directory."`
 
 <Callout type="info">
-By default usertrust does not fail a call because the audit write degraded: if the LLM call succeeded and the ledger settled, the response is returned with `auditDegraded: true` (except that a failed warn-mode `injection_detected` append is swallowed without marking the call or its receipt, though the client is then degraded), the event is written to the dead-letter file when that write succeeds (a sidecar-only failure, where the event was fsynced but its `.meta` write failed, still rejects the append and still writes a dead letter carrying the event's hash; under `audit.failClosed` the call is refused before its POST only when the failed record is the call's primary `llm_call` record; the same sidecar failure on a later record, such as the `settlement_shortfall` append after a capped post, is refused only after the charge has posted), and `usertrust verify` reports any dead-lettered event missing from the chain. If the dead-letter write fails too, the gap is visible only to `usertrust verify --receipts` with your own receipts (it sees a missing primary spend record, the receipt's own `llm_call` or action event, only; a lost auxiliary record such as a settlement shortfall, a detection, an implausible-usage or ambiguous-settlement record is invisible to it, as to `verify` and `health` when its dead letter was not written), and `usertrust health` is blind there as well. With `trust()` and `audit.failClosed: true` the call is refused with `AuditDegradedError` instead, and whether it was charged depends on when the client's audit writer degraded. If the writer was already degraded when the call started, the call is refused at its start, before any policy check, hold, provider call or action runs (after the check that the client was not destroyed, and for an action after its cost input is validated): no hold, no spend, nothing charged. If the writer degrades during a call, the outcome depends on how the call ran: a non-stream call or action whose own audit record is written settles and is then refused after its charge posts; one whose own record fails is voided before settlement and not charged; a streamed call always settles before its record is written, so it may have been charged; wherever the settlement POST failed, the outcome is unknown. Treat an `AuditDegradedError` as possibly charged unless its message says nothing was charged. A retry does not undo a charge that posted: `interceptCall` claims the settle outcome before it POSTs and its outer catch voids only a hold still pending, so the posted transfer stays, and the retry is a new call with a new transfer id; on the same client it is refused at its start until the client is recreated. A `messages.stream()` call is refused only through its `.receipt`: await it, because the helper's iteration, `done()` and `finalMessage()` can still succeed. A client's writer stays degraded until the client is destroyed, so every later call on it is refused at its start in this way until the client is destroyed and recreated; the mark is per client, so another client on the same vault is not affected. `createGovernor()` and `usertrust-server` do not enforce `audit.failClosed`: they report `auditDegraded` and do not refuse.
+By default usertrust does not fail a call because the audit write degraded: if the LLM call succeeded and the ledger settled, the response is returned with `auditDegraded: true` (except that a failed warn-mode `injection_detected` append is swallowed without marking the call or its receipt, though the client is then degraded), the event is written to the dead-letter file when that write succeeds (a sidecar-only failure, where the event was fsynced but its `.meta` write failed, still rejects the append and still writes a dead letter carrying the event's hash; under `audit.failClosed` the call is refused before its POST only when the failed record is the call's primary `llm_call` record; the same sidecar failure on a later record, such as the `settlement_shortfall` append after a capped post, is refused only after the charge has posted), and `usertrust verify` reports any dead-lettered event missing from the chain. If the dead-letter write fails too and leaves no bytes, the gap is visible only to `usertrust verify --receipts` with your own receipts (it sees a missing primary spend record, the receipt's own `llm_call` or action event, only; a lost auxiliary record such as a settlement shortfall, a detection, an implausible-usage or ambiguous-settlement record is invisible to it, as to `verify` and `health` when its dead letter was not written; a partial dead-letter line left by a short write is read as an unreadable entry, so `verify` reports INCOMPLETE), and `usertrust health` is blind there as well. With `trust()` and `audit.failClosed: true` the call is refused with `AuditDegradedError` instead, and whether it was charged depends on when the client's audit writer degraded. If the writer was already degraded when the call started, the call is refused at its start, before any policy check, hold, provider call or action runs (after the check that the client was not destroyed, and for an action after its cost input is validated): no hold, no spend, nothing charged. If the writer degrades during a call, the outcome depends on how the call ran: a non-stream call or action whose own audit record is written settles and is then refused after its charge posts; one whose own record fails is refused before the POST and not charged (the hold is released by a void request; the void is best-effort, so if the ledger refuses it the hold stays reserved until it expires, up to 300 s); a streamed call always settles before its record is written, so it may have been charged; wherever the settlement POST failed, the outcome is unknown. Treat an `AuditDegradedError` as possibly charged unless its message says nothing was charged. A retry does not undo a charge that posted: `interceptCall` claims the settle outcome before it POSTs and its outer catch voids only a hold still pending, so the posted transfer stays, and the retry is a new call with a new transfer id; on the same client it is refused at its start until the client is recreated. A `messages.stream()` call is refused only through its `.receipt`: await it, because the helper's iteration, `done()` and `finalMessage()` can still succeed. A client's writer stays degraded until the client is destroyed, so every later call on it is refused at its start in this way until the client is destroyed and recreated; the mark is per client, so another client on the same vault is not affected. `createGovernor()` and `usertrust-server` do not enforce `audit.failClosed`: they report `auditDegraded` and do not refuse.
 </Callout>
 
 ---
@@ -236,7 +236,7 @@ class VaultNotInitializedError extends Error {
 | `AccountNotFoundError` | Pre-call | No | No |
 | `IdempotencyConflictError` | Pre-call | No | No |
 | `LedgerUnavailableError` | 15.4 | No | No |
-| `AuditDegradedError` | 15.3 | Yes (succeeded); No when `audit.failClosed` refuses a call on an already-degraded client | No (settled); nothing is charged on that refusal |
+| `AuditDegradedError` | 15.3 | Yes when it fires after the provider call (the usual case, and a failed primary record under `audit.failClosed`); No when `audit.failClosed` refuses a call at its start on an already-degraded client | Settled and charged in the usual case; nothing is charged on a start-of-call refusal or a failed primary record (the hold is released by a best-effort void request, see above) |
 | `VaultNotInitializedError` | Pre-call | No | No |
 
 All pre-call errors are thrown before any interaction with the LLM provider. No tokens are consumed and no budget is affected.
