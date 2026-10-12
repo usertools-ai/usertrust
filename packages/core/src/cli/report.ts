@@ -533,6 +533,14 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 				spendLedger: readSpendLedger(join(vaultPath, "spend-ledger.json")),
 				deadLetters,
 				// An unreadable config is an UNKNOWN budget, never "no budget configured".
+				...(recorded?.state === "several"
+					? {
+							budgetUnknownReason: describeBudgetSource({
+								source: "several",
+								writtenAt: recorded.writtenAt,
+							}),
+						}
+					: {}),
 				budgetUnreadable:
 					recordedUnknown ||
 					(configUnreadable && !explicitBudget && recorded?.state !== "recorded"),

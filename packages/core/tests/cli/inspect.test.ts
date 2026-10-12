@@ -219,6 +219,9 @@ describe("usertrust inspect", () => {
 		});
 		logOutput = [];
 		await run(tempDir);
-		expect(logOutput.join("\n")).toContain("Budget: unknown");
+		expect(logOutput.join("\n")).toContain(
+			"Budget: unknown: several governors with different budgets",
+		);
+		expect(logOutput.join("\n")).not.toContain("none recorded or configured");
 	});
 });

@@ -497,6 +497,34 @@ describe("usertrust report --week", () => {
 		write.mockRestore();
 	});
 
+	it("red-first (config unreadable): several live governors that disagree are reported AS several, with the record's age", async () => {
+		await vault([{ cost: 1 }]);
+		writeFileSync(
+			join(dir, ".usertrust", "effective-budget.json"),
+			JSON.stringify({
+				budget: null,
+				governors: 2,
+				writtenAt: "2026-10-12T00:00:00.000Z",
+				pid: 1,
+				processStartedAt: "2026-10-12T00:00:00.000Z",
+			}),
+		);
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		const out = JSON.parse(stdout) as {
+			budget: { unknown: boolean; unknownReason: string | null };
+		};
+		expect(out.budget.unknown).toBe(true);
+		expect(out.budget.unknownReason).toBe(
+			"unknown: several governors with different budgets, as of 2026-10-12T00:00:00.000Z",
+		);
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso()]);
+		expect(stdout).toContain("Budget `unknown: several governors with different budgets");
+		expect(stdout).not.toContain("vault config could not be read");
+		write.mockRestore();
+	});
+
 	it("an UNREADABLE governor record makes the budget unknown, never the vault config's figure", async () => {
 		await vault([{ cost: 1 }]);
 		writeFileSync(

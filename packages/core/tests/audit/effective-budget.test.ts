@@ -18,6 +18,8 @@ import {
 	readFileSync,
 	rmSync,
 	statSync,
+	symlinkSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -349,6 +351,21 @@ describe("several live governors on one vault", () => {
 		await b.destroy();
 		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 3_000, source: "governor" });
 		await a.destroy();
+	});
+
+	it("red-first (separate registries): one vault reached through a SYMLINK alias is one registry", async () => {
+		const alias = join(tmpdir(), `effective-budget-alias-${randomUUID()}`);
+		symlinkSync(base, alias);
+		try {
+			const a = await createGovernor({ dryRun: true, vaultBase: base, budget: 3_000 });
+			const b = await createGovernor({ dryRun: true, vaultBase: alias, budget: 5_000 });
+			expect(loadBudgetConfig(vaultDir).source).toBe("several");
+			await a.destroy();
+			expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 5_000, source: "governor" });
+			await b.destroy();
+		} finally {
+			unlinkSync(alias);
+		}
 	});
 
 	it("a record of several with fewer than two governors is not one: unreadable, unknown", () => {

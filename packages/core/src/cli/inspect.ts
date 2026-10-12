@@ -137,7 +137,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	console.log(
 		`${(
 			remaining === null
-				? `|  Budget: unknown (none recorded or configured), ${spent.toLocaleString()} UT spent`
+				? `|  Budget: ${provenance}, ${spent.toLocaleString()} UT spent`
 				: `|  Budget: ${remaining.toLocaleString()} / ${config.budget.toLocaleString()} UT remaining (${pct}%)`
 		).padEnd(63)}|`,
 	);

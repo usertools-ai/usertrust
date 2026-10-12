@@ -7,7 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { renameSync, rmSync, writeFileSync } from "node:fs";
+import { renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { EFFECTIVE_BUDGET_FILE } from "../audit/effective-budget.js";
 import { PRIVATE_FILE_MODE } from "../shared/private-fs.js";
@@ -57,7 +57,7 @@ export function registerEnforcedBudget(
 	budget: number,
 	seams: Partial<EffectiveRecordIo> = {},
 ): () => void {
-	const key = resolve(vaultDir);
+	const key = vaultIdentity(vaultDir);
 	let live = liveBudgets.get(key);
 	if (live === undefined) {
 		live = new Map();
@@ -65,7 +65,8 @@ export function registerEnforcedBudget(
 	}
 	const id = Symbol("governor");
 	live.set(id, budget);
-	publish(key, live, seams);
+	// The record is written through THIS caller's path: any alias of the vault reaches the same physical file.
+	publish(vaultDir, live, seams);
 	let released = false;
 	return () => {
 		if (released) return;
@@ -75,8 +76,23 @@ export function registerEnforcedBudget(
 			liveBudgets.delete(key);
 			return;
 		}
-		publish(key, live, seams);
+		publish(vaultDir, live, seams);
 	};
+}
+
+/**
+ * One key per PHYSICAL vault directory: its `dev:ino`, the identity the shared audit writer (audit/chain.ts) and the
+ * lock registry trust. A lexical path is not one: a symlink, a case or a firmlink alias of the same vault would get a
+ * second registry, and a disagreement would be invisible. The resolved path is the fallback only when the directory
+ * cannot be stat'ed (the record is advisory and never throws).
+ */
+function vaultIdentity(vaultDir: string): string {
+	try {
+		const id = statSync(vaultDir, { bigint: true });
+		return `${id.dev}:${id.ino}`;
+	} catch {
+		return resolve(vaultDir);
+	}
 }
 
 function publish(
