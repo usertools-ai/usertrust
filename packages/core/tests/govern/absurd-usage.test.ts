@@ -53,7 +53,7 @@ const PARAMS = {
 	messages: [{ role: "user", content: "hello" }],
 };
 
-function client(usage: { input_tokens: number; output_tokens: number }) {
+function client(usage: unknown) {
 	return {
 		messages: {
 			create: vi.fn(async (_req: unknown) => ({
@@ -269,6 +269,49 @@ describe.each([
 		});
 		expect(receipt.usageSource).toBe("provider");
 		expect(implausible).toBeUndefined();
+	});
+});
+
+describe.each([
+	["dry-run", true],
+	["with a capped engine", false],
+])("an infinite usage component is refused, not read as absent (%s)", (_label, dryRun) => {
+	// JSON.parse reads `1e400` as Infinity. Read as a missing count, the 1-hour write would drop out
+	// of the write total and the call would settle at the provider's figures, undercharged.
+	let vaultBase: string;
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `absurd-infinite-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+	});
+	afterEach(() => {
+		rmSync(vaultBase, { recursive: true, force: true });
+	});
+
+	it("an infinite 1-hour cache write settles at the estimate and records both write tiers as refused", async () => {
+		const audit = makeAudit();
+		const usage: unknown = JSON.parse(
+			'{"input_tokens":10,"output_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":1e400}}',
+		);
+		const g = await trust(client(usage), {
+			budget: 100_000,
+			vaultBase,
+			_audit: audit,
+			...(dryRun ? { dryRun: true } : { _engine: cappedEngine().engine }),
+		});
+		const { receipt } = (await g.messages.create(PARAMS)) as { receipt: TrustReceipt };
+		await g.destroy();
+
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Number.isSafeInteger(receipt.cost)).toBe(true);
+		expect(receipt.cost).toBeGreaterThan(1);
+		expect(receipt.cost).toBeLessThan(100_000);
+		expect(persistedSpend(vaultBase)).toBe(receipt.cost);
+		expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+			transferId: receipt.transferId,
+			charged: "estimate",
+			tiers: { cacheWriteTokens: Number.MAX_VALUE, cacheWrite1hTokens: Number.MAX_VALUE },
+			checks: { cacheWriteTokens: "refused", cacheWrite1hTokens: "refused" },
+		});
 	});
 });
 

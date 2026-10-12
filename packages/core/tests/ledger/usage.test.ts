@@ -8,8 +8,11 @@ import {
 	fromGeminiUsage,
 	fromOpenAICompletionsUsage,
 	fromOpenAIResponsesUsage,
+	implausibleUsageData,
+	MAX_PLAUSIBLE_TOKENS_PER_TIER,
 	type NormalizedUsage,
 	sanitizeUsage,
+	type UsageTier,
 } from "../../src/ledger/usage.js";
 
 /**
@@ -516,16 +519,39 @@ describe("D2 row: Gemini (core direct) — inclusive prompt, thinking billed as 
 		expectSafeSnapshot(u);
 	});
 
-	it("sanitizes a garbage toolUsePromptTokenCount to 0 rather than poisoning the snapshot", () => {
+	it("refuses a garbage toolUsePromptTokenCount instead of reading it as absent; null stays absent", () => {
 		// canonicalize() throws on non-finite, so a NaN reaching the snapshot would
-		// fail the audit write for the whole settle (D5).
-		for (const junk of [Number.NaN, Number.POSITIVE_INFINITY, -500, "300", null]) {
+		// fail the audit write for the whole settle (D5). Read as absent, a present
+		// garbage figure would price its tier at 0 under a "provider" label, an
+		// undercharge: it is refused, and the call settles at the estimate.
+		const absent = fromGeminiUsage({
+			promptTokenCount: 100,
+			candidatesTokenCount: 10,
+			toolUsePromptTokenCount: null,
+		});
+		expect(absent.inputTokens).toBe(100);
+		expect(absent.source).toBe("provider");
+		expect(absent.implausible).toBeUndefined();
+		expectSafeSnapshot(absent);
+		for (const [junk, figure] of [
+			[Number.NaN, 1],
+			[Number.POSITIVE_INFINITY, Number.MAX_VALUE],
+			[-500, 1],
+			["300", 1],
+		] as const) {
 			const u = fromGeminiUsage({
 				promptTokenCount: 100,
 				candidatesTokenCount: 10,
 				toolUsePromptTokenCount: junk,
 			});
-			expect(u.inputTokens, String(junk)).toBe(100);
+			expect(u.source, String(junk)).toBe("estimated");
+			expect(u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens).toBe(0);
+			expect(u.implausible, String(junk)).toEqual({ inputTokens: figure });
+			expect(u.implausibleBy, String(junk)).toEqual({ inputTokens: "refused" });
+			expect(
+				(JSON.parse(JSON.stringify(u)) as NormalizedUsage).implausible?.inputTokens,
+				String(junk),
+			).toBe(figure);
 			expectSafeSnapshot(u);
 		}
 	});
@@ -663,6 +689,225 @@ describe("each usage component is held to the ceiling BEFORE it is summed", () =
 			cacheWrite1hTokens: 4,
 			source: "provider",
 		});
+	});
+});
+
+describe("an infinite usage component is refused, not read as absent", () => {
+	// JSON.parse reads a numeric literal past the double range (`1e400`) as Infinity. Read as "the
+	// provider told us nothing", an absurd figure would drop out of a sum (an undercharge) or zero a
+	// tier, still labelled "provider". It is refused like any figure above the ceiling, recorded under
+	// the finite stand-in Number.MAX_VALUE because the raw figure is not representable.
+
+	/** The provider payload as the wire delivers it: the Infinity comes from JSON, not from the test. */
+	const wire = (json: string): unknown => JSON.parse(json);
+
+	it("Anthropic: an infinite 1-hour TTL beside a small 5-minute one refuses the write and the 1-hour share", () => {
+		const u = fromAnthropicUsage(
+			wire(
+				'{"input_tokens":10,"output_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":1e400}}',
+			),
+		);
+		expect(u.source).toBe("estimated");
+		expect(u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens).toBe(0);
+		expect(u.cacheWrite1hTokens).toBeUndefined();
+		expect(u.implausible?.cacheWriteTokens).toBe(Number.MAX_VALUE);
+		expect(u.implausible?.cacheWrite1hTokens).toBe(Number.MAX_VALUE);
+		expect(u.implausibleBy?.cacheWriteTokens).toBe("refused");
+		expect(u.implausibleBy?.cacheWrite1hTokens).toBe("refused");
+		expectSafeSnapshot(u);
+		expect(() => canonicalize(u)).not.toThrow();
+	});
+
+	it("Anthropic: an infinite flat cache_creation_input_tokens is refused as the write tier", () => {
+		const u = fromAnthropicUsage(
+			wire('{"input_tokens":10,"output_tokens":10,"cache_creation_input_tokens":1e400}'),
+		);
+		expect(u.source).toBe("estimated");
+		expect(u.implausible).toEqual({ cacheWriteTokens: Number.MAX_VALUE });
+		expect(u.implausibleBy).toEqual({ cacheWriteTokens: "refused" });
+		expectSafeSnapshot(u);
+	});
+
+	it("Anthropic: an infinite cache_read_input_tokens is refused as the read tier", () => {
+		const u = fromAnthropicUsage(
+			wire('{"input_tokens":10,"output_tokens":10,"cache_read_input_tokens":1e400}'),
+		);
+		expect(u.source).toBe("estimated");
+		expect(u.implausible).toEqual({ cacheReadTokens: Number.MAX_VALUE });
+		expect(u.implausibleBy).toEqual({ cacheReadTokens: "refused" });
+		expectSafeSnapshot(u);
+	});
+
+	it("Anthropic: an infinite input_tokens is refused and recorded, not only estimated", () => {
+		const u = fromAnthropicUsage(wire('{"input_tokens":1e400,"output_tokens":10}'));
+		expect(u.source).toBe("estimated");
+		expect(u.implausible).toEqual({ inputTokens: Number.MAX_VALUE });
+		expect(u.implausibleBy).toEqual({ inputTokens: "refused" });
+		expectSafeSnapshot(u);
+	});
+
+	it("Gemini: an infinite candidatesTokenCount beside a small thoughtsTokenCount is refused as output", () => {
+		const u = fromGeminiUsage(
+			wire('{"promptTokenCount":10,"candidatesTokenCount":1e400,"thoughtsTokenCount":5}'),
+		);
+		expect(u.source).toBe("estimated");
+		expect(u.outputTokens).toBe(0);
+		expect(u.implausible).toEqual({ outputTokens: Number.MAX_VALUE });
+		expect(u.implausibleBy).toEqual({ outputTokens: "refused" });
+		expectSafeSnapshot(u);
+	});
+
+	it("Gemini: an infinite cachedContentTokenCount is refused as the read tier", () => {
+		const u = fromGeminiUsage(
+			wire('{"promptTokenCount":10,"candidatesTokenCount":10,"cachedContentTokenCount":1e400}'),
+		);
+		expect(u.source).toBe("estimated");
+		expect(u.implausible).toEqual({ cacheReadTokens: Number.MAX_VALUE });
+		expect(u.implausibleBy).toEqual({ cacheReadTokens: "refused" });
+		expectSafeSnapshot(u);
+	});
+
+	/** A refused tier's record is a finite number in the snapshot AND in the chain event, and survives JSON as one. */
+	function expectFiniteRecord(u: NormalizedUsage, tier: UsageTier, label: string): void {
+		expect(u.source, label).toBe("estimated");
+		expect(u.implausibleBy?.[tier], label).toBe("refused");
+		expect(Number.isFinite(u.implausible?.[tier]), label).toBe(true);
+		const tiers = implausibleUsageData(u, { model: "m", transferId: "t" })?.tiers as Record<
+			string,
+			unknown
+		>;
+		expect(Number.isFinite(tiers[tier]), label).toBe(true);
+		const rewritten = JSON.parse(JSON.stringify({ snapshot: u, tiers })) as {
+			snapshot: NormalizedUsage;
+			tiers: Record<string, unknown>;
+		};
+		expect(typeof rewritten.snapshot.implausible?.[tier], label).toBe("number");
+		expect(typeof rewritten.tiers[tier], label).toBe("number");
+		expectSafeSnapshot(u);
+		expect(() => canonicalize(u), label).not.toThrow();
+	}
+
+	/** Every PRESENT value that is not a finite count >= 0. NaN is not JSON, so it is built directly. */
+	const INVALID: Array<[string, unknown]> = [
+		["-1e400", wire("-1e400")],
+		["NaN", Number.NaN],
+		["-1", -1],
+		['"1e400"', "1e400"],
+		['"100"', "100"],
+		["true", true],
+		["{}", {}],
+	];
+
+	it("Anthropic: every present invalid cache-read value is refused as the read tier, never read as absent", () => {
+		for (const [label, value] of INVALID) {
+			const u = fromAnthropicUsage({
+				input_tokens: 10,
+				output_tokens: 10,
+				cache_read_input_tokens: value,
+			});
+			expect(u.implausible, label).toEqual({ cacheReadTokens: 1 });
+			expectFiniteRecord(u, "cacheReadTokens", label);
+		}
+	});
+
+	it("Gemini: every present invalid candidatesTokenCount is refused as output, never read as absent", () => {
+		for (const [label, value] of INVALID) {
+			const u = fromGeminiUsage({
+				promptTokenCount: 10,
+				candidatesTokenCount: value,
+				thoughtsTokenCount: 5,
+			});
+			expect(u.implausible, label).toEqual({ outputTokens: 1 });
+			expectFiniteRecord(u, "outputTokens", label);
+		}
+	});
+
+	it("CONTROL: null and a missing field are ABSENT: provider, that tier 0, no record", () => {
+		for (const [label, u] of [
+			[
+				"anthropic null",
+				fromAnthropicUsage({ input_tokens: 10, output_tokens: 10, cache_read_input_tokens: null }),
+			],
+			["anthropic missing", fromAnthropicUsage({ input_tokens: 10, output_tokens: 10 })],
+			[
+				"gemini null",
+				fromGeminiUsage({
+					promptTokenCount: 10,
+					candidatesTokenCount: null,
+					thoughtsTokenCount: 5,
+				}),
+			],
+			["gemini missing", fromGeminiUsage({ promptTokenCount: 10, thoughtsTokenCount: 5 })],
+		] as const) {
+			expect(u.source, label).toBe("provider");
+			expect(u.implausible, label).toBeUndefined();
+			expect(u.implausibleBy, label).toBeUndefined();
+		}
+		expect(
+			fromAnthropicUsage({ input_tokens: 10, output_tokens: 10, cache_read_input_tokens: null })
+				.cacheReadTokens,
+		).toBe(0);
+		// The missing candidates count is absent; thoughts alone are the output.
+		expect(
+			fromGeminiUsage({ promptTokenCount: 10, candidatesTokenCount: null, thoughtsTokenCount: 5 })
+				.outputTokens,
+		).toBe(5);
+	});
+
+	it("CONTROL: a component of exactly the ceiling passes; one token more is refused", () => {
+		const at = fromAnthropicUsage({
+			input_tokens: 10,
+			output_tokens: 10,
+			cache_read_input_tokens: MAX_PLAUSIBLE_TOKENS_PER_TIER,
+		});
+		expect(at.source).toBe("provider");
+		expect(at.cacheReadTokens).toBe(MAX_PLAUSIBLE_TOKENS_PER_TIER);
+		expect(at.implausible).toBeUndefined();
+		const over = fromAnthropicUsage({
+			input_tokens: 10,
+			output_tokens: 10,
+			cache_read_input_tokens: MAX_PLAUSIBLE_TOKENS_PER_TIER + 1,
+		});
+		expect(over.source).toBe("estimated");
+		expect(over.implausible).toEqual({ cacheReadTokens: MAX_PLAUSIBLE_TOKENS_PER_TIER + 1 });
+	});
+
+	it("sanitizeUsage: a refused tier is flagged by its PRESENCE, and its record is always finite", () => {
+		for (const [label, value] of [
+			["Infinity", Number.POSITIVE_INFINITY],
+			["NaN", Number.NaN],
+			["-5", -5],
+			['"x"', "x" as unknown as number],
+		] as const) {
+			const u = sanitizeUsage(
+				{ inputTokens: 10, outputTokens: 10, cacheWriteTokens: 5, source: "provider" },
+				{ refused: { cacheWriteTokens: value } },
+			);
+			expect(u.implausible, label).toEqual({ cacheWriteTokens: Number.MAX_VALUE });
+			expectFiniteRecord(u, "cacheWriteTokens", label);
+		}
+	});
+
+	it("sanitizeUsage: a refused key whose value is undefined is NOT a flag", () => {
+		const u = sanitizeUsage(
+			{ inputTokens: 10, outputTokens: 10, cacheWriteTokens: 5, source: "provider" },
+			{ refused: { cacheWriteTokens: undefined } },
+		);
+		expect(u.source).toBe("provider");
+		expect(u.cacheWriteTokens).toBe(5);
+		expect(u.implausible).toBeUndefined();
+		expect(u.implausibleBy).toBeUndefined();
+	});
+
+	it("sanitizeUsage: a refused key whose value is null is NOT a flag (null is absent, as in a provider field)", () => {
+		const u = sanitizeUsage(
+			{ inputTokens: 10, outputTokens: 10, source: "provider" },
+			{ refused: { inputTokens: null as unknown as number } },
+		);
+		expect(u.source).toBe("provider");
+		expect(u.inputTokens).toBe(10);
+		expect(u.implausible).toBeUndefined();
+		expect(u.implausibleBy).toBeUndefined();
 	});
 });
 

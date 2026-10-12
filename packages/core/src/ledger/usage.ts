@@ -187,15 +187,26 @@ function asRecord(value: unknown): Record<string, unknown> {
  * component above {@link MAX_PLAUSIBLE_TOKENS_PER_TIER} is recorded in `refused` under its tier, by its own figure, and
  * enters the sum as 0; `sanitizeUsage({ refused })` then flags the tier as for any refused figure. Components that
  * pass are each at most the ceiling, so the extractors' sums of two or three of them stay safe integers.
+ *
+ * It takes the RAW value, because `readCount` reads every invalid value as "the provider told us nothing". Only a
+ * MISSING field (`undefined`, or JSON `null`) is absent. A field that is PRESENT but not a finite count >= 0 (an
+ * infinity, NaN, a negative, a string, a boolean, an object) is refused under its tier and enters the sum as 0: read as
+ * absent it would drop out of a sum or zero a tier under a "provider" label, an undercharge. The figure recorded in
+ * `refused` is always a finite number >= 0, for the audit record: a positive Infinity (JSON.parse reads a literal like
+ * `1e400` as one) is recorded as `Number.MAX_VALUE`, its raw figure not being representable; any other invalid value
+ * is recorded as 0, as the plugin's `providerFigure` records it, since it states no figure at all.
  */
 function component(
-	value: number | null,
+	raw: unknown,
 	tiers: UsageTier | UsageTier[],
 	refused: Partial<Record<UsageTier, number>>,
 ): number | null {
-	if (value === null || value <= MAX_PLAUSIBLE_TOKENS_PER_TIER) return value;
+	if (raw === undefined || raw === null) return null;
+	const value = readCount(raw);
+	if (value !== null && value <= MAX_PLAUSIBLE_TOKENS_PER_TIER) return value;
+	const figure = value ?? (raw === Number.POSITIVE_INFINITY ? Number.MAX_VALUE : 0);
 	for (const tier of Array.isArray(tiers) ? tiers : [tiers]) {
-		refused[tier] = Math.max(refused[tier] ?? 0, value);
+		refused[tier] = Math.max(refused[tier] ?? 0, figure);
 	}
 	return 0;
 }
@@ -290,7 +301,9 @@ export function sanitizeUsage(
 		maxima?: { [K in UsageTier]?: number | undefined } | undefined;
 		/**
 		 * Tiers the CALLER refused (a figure that was invalid or above its own per-response ceiling): presence is the flag,
-		 * the value is the raw figure when representable. They never entered the counts, which are arithmetic-safe.
+		 * the value is the raw figure when representable. They never entered the counts, which are arithmetic-safe. A
+		 * present value that is not a finite number >= 0 still flags its tier, recorded as `Number.MAX_VALUE`; `undefined`
+		 * and `null` are absent, as a missing provider field is.
 		 */
 		refused?: { [K in UsageTier]?: number | undefined } | undefined;
 	} = {},
@@ -331,11 +344,17 @@ export function sanitizeUsage(
 			implausible[tier] = Math.max(implausible[tier] ?? 0, value);
 		}
 	}
+	// Presence is the flag: a refused Infinity (or any figure that is not representable) is still a refusal, recorded at
+	// the finite stand-in so the chain event can be written. `undefined` and `null` are not a flag.
 	for (const tier of USAGE_TIERS) {
 		const value = opts.refused?.[tier];
-		if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+		if (value != null) {
+			const figure =
+				typeof value === "number" && Number.isFinite(value) && value >= 0
+					? Math.max(1, value)
+					: Number.MAX_VALUE;
 			if (implausible[tier] === undefined) implausibleBy[tier] = "refused";
-			implausible[tier] = Math.max(implausible[tier] ?? 0, Math.max(1, value));
+			implausible[tier] = Math.max(implausible[tier] ?? 0, figure);
 		}
 	}
 	// The 1-hour share alone leaves the counts standing until `withSupported1hTier` decides whether the model has the
@@ -514,31 +533,29 @@ export function publishableUsageFields(
 export function fromAnthropicUsage(usage: unknown): NormalizedUsage {
 	const u = asRecord(usage);
 
-	const input = readCount(u.input_tokens);
-	const output = readCount(u.output_tokens);
-
-	// The write figures are summed (the two TTLs) and subtracted below, so each is held to the ceiling first. An absurd
-	// TTL share is an absurd write total too, so it is refused as the write tier; an absurd 1-hour share is ALSO
-	// reported as the 1-hour tier, as the sum-then-check path reported it.
+	// Every figure is read through `component`, so an absurd or invalid one (an infinite one included) is refused under
+	// its tier, never priced and never read as absent. The write figures are summed (the two TTLs) and subtracted below,
+	// which is why they are held to the ceiling before that. An absurd TTL share is an absurd write total too, so it is
+	// refused as the write tier; an absurd 1-hour share is ALSO reported as the 1-hour tier, as the sum-then-check path
+	// reported it.
 	const refused: Partial<Record<UsageTier, number>> = {};
+	const input = component(u.input_tokens, "inputTokens", refused);
+	const output = component(u.output_tokens, "outputTokens", refused);
+	const cacheRead = component(u.cache_read_input_tokens, "cacheReadTokens", refused);
 	const breakdown = readObject(u, "cache_creation");
 	const ephemeral5m = breakdown
-		? component(readCount(breakdown.ephemeral_5m_input_tokens), "cacheWriteTokens", refused)
+		? component(breakdown.ephemeral_5m_input_tokens, "cacheWriteTokens", refused)
 		: null;
 	const ephemeral1h = breakdown
 		? component(
-				readCount(breakdown.ephemeral_1h_input_tokens),
+				breakdown.ephemeral_1h_input_tokens,
 				["cacheWriteTokens", "cacheWrite1hTokens"],
 				refused,
 			)
 		: null;
 	const nestedWrite =
 		ephemeral5m == null && ephemeral1h == null ? null : (ephemeral5m ?? 0) + (ephemeral1h ?? 0);
-	const flatWrite = component(
-		readCount(u.cache_creation_input_tokens),
-		"cacheWriteTokens",
-		refused,
-	);
+	const flatWrite = component(u.cache_creation_input_tokens, "cacheWriteTokens", refused);
 	// A COMPLETE breakdown (both TTL fields usable) is authoritative and wins over the flat
 	// total. A PARTIAL one (a single TTL field) sums to less than the whole: the flat total
 	// is the sum of the two TTLs, so what the partial sum leaves out is a real write whose
@@ -552,7 +569,7 @@ export function fromAnthropicUsage(usage: unknown): NormalizedUsage {
 		{
 			inputTokens: input ?? 0,
 			outputTokens: output ?? 0,
-			cacheReadTokens: readCount(u.cache_read_input_tokens) ?? 0,
+			cacheReadTokens: cacheRead ?? 0,
 			cacheWriteTokens: complete ? (nestedWrite ?? 0) : Math.max(nestedWrite ?? 0, flatWrite ?? 0),
 			// Only the per-TTL breakdown can say how much was 1-hour. A payload that carries
 			// just the flat total (no breakdown at all) cannot be told apart from a genuine
@@ -684,13 +701,11 @@ export function fromGeminiUsage(metadata: unknown): NormalizedUsage {
 	// Every component is held to the ceiling BEFORE it is summed (see `component`): input adds the tool-use prompt to
 	// the fresh prompt, output adds thoughts to candidates. A refused component condemns the counts in sanitizeUsage.
 	const refused: Partial<Record<UsageTier, number>> = {};
-	const prompt = component(readCount(m.promptTokenCount), "inputTokens", refused);
-	const candidates = component(readCount(m.candidatesTokenCount), "outputTokens", refused);
-	const thoughts = component(readCount(m.thoughtsTokenCount), "outputTokens", refused);
-	const cacheRead =
-		component(readCount(m.cachedContentTokenCount), "cacheReadTokens", refused) ?? 0;
-	const toolUsePrompt =
-		component(readCount(m.toolUsePromptTokenCount), "inputTokens", refused) ?? 0;
+	const prompt = component(m.promptTokenCount, "inputTokens", refused);
+	const candidates = component(m.candidatesTokenCount, "outputTokens", refused);
+	const thoughts = component(m.thoughtsTokenCount, "outputTokens", refused);
+	const cacheRead = component(m.cachedContentTokenCount, "cacheReadTokens", refused) ?? 0;
+	const toolUsePrompt = component(m.toolUsePromptTokenCount, "inputTokens", refused) ?? 0;
 
 	return sanitizeUsage(
 		{
