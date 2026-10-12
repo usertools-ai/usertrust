@@ -976,24 +976,39 @@ describe("trust()", () => {
 	// ─── Runtime options: an option trust() does not read is refused, by name ───
 
 	describe("runtime options", () => {
-		async function refusal(opts: Record<string, unknown>): Promise<{
+		// Builds the governed client from `options` exactly as given (prototype and
+		// property flags included), sends one prompt carrying a card number when it
+		// constructs, and reports what was thrown and whether the provider was called.
+		async function governWith(options: object): Promise<{
 			err: unknown;
 			createFn: ReturnType<typeof vi.fn>;
 		}> {
 			const createFn = vi.fn(async (_params: unknown) => ({ id: "msg" }));
 			// `as never`: a JavaScript caller has no type check; this models one.
-			const err = await trust({ messages: { create: createFn } }, {
-				dryRun: true,
-				vaultBase: tmpVault,
-				...opts,
-			} as never).then(
+			const err = await trust({ messages: { create: createFn } }, options as never).then(
 				async (governed) => {
-					await governed.destroy();
-					return undefined;
+					try {
+						await governed.messages.create({
+							model: "claude-sonnet-4-6",
+							messages: [{ role: "user", content: "Charge my card 4111 1111 1111 1111 please" }],
+						});
+						return undefined;
+					} catch (e) {
+						return e;
+					} finally {
+						await governed.destroy();
+					}
 				},
 				(e: unknown) => e,
 			);
 			return { err, createFn };
+		}
+
+		async function refusal(opts: Record<string, unknown>): Promise<{
+			err: unknown;
+			createFn: ReturnType<typeof vi.fn>;
+		}> {
+			return governWith({ dryRun: true, vaultBase: tmpVault, ...opts });
 		}
 
 		it("refuses a config-file setting passed as an option, naming it and where it belongs", async () => {
@@ -1047,6 +1062,62 @@ describe("trust()", () => {
 		it("accepts tier, which TrustOpts declares, without refusing it", async () => {
 			const { err } = await refusal({ tier: "pro" });
 			expect(err).toBeUndefined();
+		});
+
+		it("does not advertise tier (accepted, not applied) in a refusal's list", async () => {
+			const { err } = await refusal({ pi: "block" });
+			const accepts = /accepts only: (.*)\.$/.exec((err as Error).message)?.[1];
+			expect(accepts).toBe(
+				"budget, configPath, dryRun, endpoint, parentUserId, pii, scope, vaultBase",
+			);
+		});
+
+		// The check and the reads see the same keys: an inherited option is refused,
+		// never applied; a non-enumerable own one is checked like any other.
+		it("refuses an inherited pii by name, and does not apply it", async () => {
+			const options = Object.create({ pii: "block" }) as Record<string, unknown>;
+			options.dryRun = true;
+			options.vaultBase = tmpVault;
+			const { err, createFn } = await governWith(options);
+			expect(err).toBeInstanceOf(TypeError);
+			expect((err as Error).message).toContain(
+				'trust(): option "pii" is inherited from the options object\'s prototype (pass it as an own property)',
+			);
+			expect(createFn).not.toHaveBeenCalled();
+			expect(existsSync(join(tmpVault, ".usertrust"))).toBe(false);
+		});
+
+		it("refuses an inherited unknown option by name", async () => {
+			const options = Object.create({
+				circuitBreaker: { failureThreshold: 1, resetTimeout: 1 },
+			}) as Record<string, unknown>;
+			options.dryRun = true;
+			options.vaultBase = tmpVault;
+			const { err } = await governWith(options);
+			expect(err).toBeInstanceOf(TypeError);
+			expect((err as Error).message).toContain('trust(): option "circuitBreaker" is inherited');
+		});
+
+		it("refuses a non-enumerable own unknown option by name", async () => {
+			const options = Object.defineProperty({ dryRun: true, vaultBase: tmpVault }, "pi", {
+				value: "block",
+				enumerable: false,
+			});
+			const { err, createFn } = await governWith(options);
+			expect(err).toBeInstanceOf(TypeError);
+			expect((err as Error).message).toContain('trust(): unknown option "pi"');
+			expect(createFn).not.toHaveBeenCalled();
+		});
+
+		it("applies an own pii (the PII never reaches the provider)", async () => {
+			const { err, createFn } = await governWith({
+				dryRun: true,
+				vaultBase: tmpVault,
+				pii: "block",
+			});
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect((err as PolicyDeniedError).reason).toContain("credit_card");
+			expect(createFn).not.toHaveBeenCalled();
 		});
 	});
 

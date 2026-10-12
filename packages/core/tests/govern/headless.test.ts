@@ -752,6 +752,16 @@ describe("headless governor", () => {
 		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
 	});
 
+	it("refuses an inherited pii by name instead of applying it (own properties only)", async () => {
+		const options = Object.create({ pii: "block" }) as Record<string, unknown>;
+		options.dryRun = true;
+		options.vaultBase = vaultBase;
+		await expect(createGovernor(options as never)).rejects.toThrow(
+			'createGovernor(): option "pii" is inherited from the options object\'s prototype',
+		);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
 	// ── D8 migration warning ──
 
 	it(

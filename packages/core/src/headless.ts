@@ -81,7 +81,7 @@ import {
 	envelopeTierFields,
 	preflightEnvelopeRemaining,
 	type ResolvedEnvelope,
-	refuseUnreadOptions,
+	readOwnOptions,
 	resolveEnvelope,
 	runTeardownSteps,
 	snapshotEnvelopeRemaining,
@@ -1168,9 +1168,10 @@ function estimateTier(value: unknown, field: string): number {
 }
 
 export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
-	// 0. An option this function would not read is refused by name, before anything
-	// is read or created (see refuseUnreadOptions; same rule as trust()).
-	refuseUnreadOptions("createGovernor()", opts, GOVERNOR_OPTS_KEYS);
+	// 0. An option this function does not declare is refused by name, before anything
+	// is read or created (see readOwnOptions; same rule as trust()). From here on
+	// `opts` is the checked copy of the caller's OWN properties.
+	opts = readOwnOptions("createGovernor()", opts, GOVERNOR_OPTS_KEYS);
 
 	// 1. Load config
 	const vaultBase = opts?.vaultBase ?? process.cwd();
