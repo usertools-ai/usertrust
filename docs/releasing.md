@@ -267,6 +267,34 @@ OIDC token or `NPM_TOKEN`.
   version bump and nothing else, and the tarball it packs is used only as a source of
   `dist/` bytes.
 
+## Before approving the `npm-publish` deployment
+
+The approval covers what the publish job cannot check by itself. The publish job verifies the
+release commit's shape and assembles the tarballs only from verified sources, but two things
+still come from the build job, which runs dependency code: the `dist/` bytes and the version
+number. A compromised build dependency could choose either, and a tarball with the wrong code at
+the right version, or a consistent release commit at a version nobody asked for, would pass every
+check the publish job makes. So the person approving confirms both independently, before
+approving. The publish job waits for that approval before any of its steps, so nothing has been
+pushed or published yet.
+
+1. **Download the run's `release` artifact** (the run's page, under Artifacts): the build job's
+   tarballs (`*.tgz`) and, for a new release, `release.bundle`.
+2. **Build the dispatched commit yourself**, on a machine you trust: check out the commit the run
+   was dispatched on (shown on the run's page), apply the same version bump the build job applies
+   (its "Bump versions" step in `.github/workflows/publish.yml`, with the `version` input the run was
+   dispatched with), install with `npm ci`, build, and pack with `bash scripts/release.sh pack
+   <dir>`.
+3. **Compare, package by package:**
+   - the same set of paths in each tarball, and every file byte-identical;
+   - `package/package.json` identical as parsed JSON;
+   - the version equal to the committed version bumped by the dispatched input (for example
+     `4.1.0` with `minor` gives `4.2.0`), and no other value.
+4. **Approve only if all three match.** Otherwise reject the deployment.
+
+A republish publishes a version that is already tagged on `master`; compare its tarballs the same
+way against a build of that tag.
+
 ## Modes
 
 | Mode | Runs | Pushes | Publishes | GitHub Release |
