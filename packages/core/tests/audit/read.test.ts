@@ -82,18 +82,20 @@ describe("readLedgerEvents", () => {
 });
 
 describe("loadBudgetConfig", () => {
-	it("a missing or malformed config is source none (UNKNOWN, 0 only as a placeholder); a valid one is source config", () => {
+	it("a missing or malformed config, with no record, is source unpublished (UNKNOWN, 0 only as a placeholder); a valid one is source config", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "trust-cfg-"));
 		const vaultPath = join(tempDir, ".usertrust");
 		mkdirSync(vaultPath, { recursive: true });
-		expect(loadBudgetConfig(vaultPath)).toEqual({ budget: 0, source: "none", writtenAt: null });
+		const unpublished = { budget: 0, source: "unpublished", writtenAt: null, reason: null };
+		expect(loadBudgetConfig(vaultPath)).toEqual(unpublished);
 		writeFileSync(join(vaultPath, "usertrust.config.json"), "{broken");
-		expect(loadBudgetConfig(vaultPath)).toEqual({ budget: 0, source: "none", writtenAt: null });
+		expect(loadBudgetConfig(vaultPath)).toEqual(unpublished);
 		writeFileSync(join(vaultPath, "usertrust.config.json"), JSON.stringify({ budget: 50000 }));
 		expect(loadBudgetConfig(vaultPath)).toEqual({
 			budget: 50000,
 			source: "config",
 			writtenAt: null,
+			reason: null,
 		});
 		rmSync(tempDir, { recursive: true, force: true });
 	});
