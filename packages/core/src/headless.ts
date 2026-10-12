@@ -40,11 +40,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
 import {
 	type AuditWriter,
-	createAuditWriter,
+	openSharedAuditWriter,
 	readDurableEventHash,
 	releaseAuditWriterForTeardown,
 } from "./audit/chain.js";
@@ -1174,7 +1174,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	opts = readOwnOptions("createGovernor()", opts, GOVERNOR_OPTS_KEYS);
 
 	// 1. Load config
-	const vaultBase = opts?.vaultBase ?? process.cwd();
+	// Absolute from here: every vault file this client touches is in the vault it was created for,
+	// whatever the working directory becomes later (its audit writer is fixed at creation too).
+	const vaultBase = resolve(opts?.vaultBase ?? process.cwd());
 	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
 	// version left group/world-readable is closed; one another user owns is refused (see
 	// securePrivateVault). This runs before ANYTHING under the vault is read, the config
@@ -1205,7 +1207,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 	// 2. Initialize subsystems
 	const vaultPath = vaultBase;
-	const audit: AuditWriter = (isTestEnv ? opts?._audit : undefined) ?? createAuditWriter(vaultPath);
+	const audit: AuditWriter =
+		(isTestEnv ? opts?._audit : undefined) ?? openSharedAuditWriter(vaultPath);
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
 	// No `existsSync` preflight: it answers false for a file inside a directory

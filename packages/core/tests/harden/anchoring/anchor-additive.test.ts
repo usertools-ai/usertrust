@@ -426,11 +426,19 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// predecessor's final leaf, which also fixes the root of a single-event
 		// predecessor at every pair. NO vendored source, no new import, and
 		// `dependencies` is still `{}`. 72 lines of headroom.
+		//
+		// 10200 → 10300, for one read per verdict (2026-10-12). Post-change total
+		// 10226, so 10200 failed by 26. WHAT WAS ADDED, all in `index.ts`: core's
+		// `verifyVaultReading` and `verifyVaultWithAnchorsReading`, mirrored as the
+		// parity contract requires (`verifyVault` and `verifyVaultWithAnchors` now
+		// wrap them), so the anchors are checked against the hashes of the very
+		// events the walk read, never a second read of the log. NO vendored source,
+		// no new import, and `dependencies` is still `{}`. 74 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(10200);
+		expect(total).toBeLessThan(10300);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
