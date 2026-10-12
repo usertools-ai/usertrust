@@ -3790,6 +3790,25 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 	});
 
 	describe("transcript mode", () => {
+		it("a hold's window sends the per-tier maxima with the sums: journaled, listed back, and settled", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain([
+				...responseEntries("msg_a", SONNET, u(150_000_000, 9)),
+				...responseEntries("msg_b", SONNET, u(0, 9)),
+			]);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			// the pending record carries them
+			expect((await record()).maxima).toMatchObject({ inputTokens: 150_000_000, outputTokens: 9 });
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body;
+			expect(body).toMatchObject({
+				responses: 2,
+				maxima: { inputTokens: 150_000_000, outputTokens: 9 },
+			});
+		});
+
 		it("no key: an immediate re-fire settles the first hold's window ONCE at its counts, then holds afresh; nothing written off", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);

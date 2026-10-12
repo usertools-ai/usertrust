@@ -105,6 +105,7 @@ import {
 } from "./ledger/pricing.js";
 import {
 	implausibleUsageData,
+	materializeMaxima,
 	publishableUsageFields,
 	sanitizeUsage,
 	withSupported1hTier,
@@ -1793,7 +1794,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				cacheWriteTokens: params?.cacheWriteTokens,
 				cacheWrite1hTokens: params?.cacheWrite1hTokens,
 				responses: params?.responses,
-				maxima: params?.maxima,
+				// Each tier read by name, once, BEFORE the claim below: a getter that throws changes nothing, and the
+				// governor never touches the caller's object again.
+				maxima: materializeMaxima(params?.maxima),
 				usageSource: params?.usageSource,
 				chunksDelivered: params?.chunksDelivered,
 				computeMs: params?.computeMs,

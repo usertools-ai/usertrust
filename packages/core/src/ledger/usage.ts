@@ -62,6 +62,29 @@ import {
  */
 export const MAX_PLAUSIBLE_TOKENS_PER_TIER = 100_000_000;
 
+/** Every tier, in a fixed order: iteration over a caller's object never decides which tiers are read. */
+export const USAGE_TIERS = [
+	"inputTokens",
+	"outputTokens",
+	"cacheReadTokens",
+	"cacheWriteTokens",
+	"cacheWrite1hTokens",
+] as const;
+
+/**
+ * A caller's per-tier maxima as a PLAIN object, each tier read exactly once by name (a getter fires here, before any
+ * hold is claimed; an inherited or non-enumerable tier is still read). Non-finite or negative values are dropped.
+ */
+export function materializeMaxima(raw: unknown): { [K in UsageTier]?: number } | undefined {
+	if (raw === null || typeof raw !== "object") return undefined;
+	const out: { [K in UsageTier]?: number } = {};
+	for (const tier of USAGE_TIERS) {
+		const value = (raw as Record<string, unknown>)[tier];
+		if (typeof value === "number" && Number.isFinite(value) && value >= 0) out[tier] = value;
+	}
+	return out;
+}
+
 /** The tiers a plausibility check can name. */
 export type UsageTier =
 	| "inputTokens"
@@ -105,6 +128,8 @@ export interface NormalizedUsage {
 	 * missing count) and the caller records a `usage_implausible` event instead of charging the figure.
 	 */
 	implausible?: Partial<Record<UsageTier, number>>;
+	/** Which check put each tier in `implausible`: the aggregate sum (absent) or one response's maximum. */
+	implausibleBy?: Partial<Record<UsageTier, "sum" | "maximum">>;
 }
 
 /** Loose input to {@link sanitizeUsage}: any field may be missing or junk. */
@@ -205,6 +230,7 @@ export function withImplausible(
 		cacheWriteTokens: 0,
 		source: "estimated",
 		implausible: merged,
+		...(snapshot.implausibleBy !== undefined ? { implausibleBy: snapshot.implausibleBy } : {}),
 	};
 }
 
@@ -269,10 +295,11 @@ export function sanitizeUsage(
 	}
 	// An aggregate's SUM may sit under n x ceiling while one response inside it is absurd: the caller's per-tier maxima
 	// are held to the unscaled ceiling. A caller that sends none keeps the aggregate check alone.
-	for (const [tier, value] of Object.entries(opts.maxima ?? {}) as Array<
-		[UsageTier, number | undefined]
-	>) {
+	const implausibleBy: Partial<Record<UsageTier, "sum" | "maximum">> = {};
+	for (const tier of USAGE_TIERS) {
+		const value = opts.maxima?.[tier];
 		if (value !== undefined && Number.isFinite(value) && value > MAX_PLAUSIBLE_TOKENS_PER_TIER) {
+			if (implausible[tier] === undefined) implausibleBy[tier] = "maximum";
 			implausible[tier] = Math.max(implausible[tier] ?? 0, value);
 		}
 	}
@@ -286,6 +313,7 @@ export function sanitizeUsage(
 			cacheWriteTokens: 0,
 			source: "estimated",
 			implausible,
+			implausibleBy,
 		};
 	}
 	return {
@@ -299,7 +327,7 @@ export function sanitizeUsage(
 		// always was.
 		...(cacheWrite1h > 0 ? { cacheWrite1hTokens: cacheWrite1h } : {}),
 		source: r.source === "provider" && reported ? "provider" : "estimated",
-		...(Object.keys(implausible).length > 0 ? { implausible } : {}),
+		...(Object.keys(implausible).length > 0 ? { implausible, implausibleBy } : {}),
 	};
 }
 
@@ -312,7 +340,16 @@ export function implausibleUsageData(
 	fields: { model: string; transferId: string; responses?: number | undefined },
 ): Record<string, unknown> | undefined {
 	if (snapshot.implausible === undefined) return undefined;
+	const byMaximum = Object.values(snapshot.implausibleBy ?? {}).includes("maximum");
 	return {
+		// Which check fired for each tier: the aggregate "sum" (scaled ceiling) or one response's "maximum" (unscaled).
+		checks: Object.fromEntries(
+			Object.keys(snapshot.implausible).map((t) => [
+				t,
+				snapshot.implausibleBy?.[t as UsageTier] ?? "sum",
+			]),
+		),
+		...(byMaximum ? { maximumCeilingTokensPerResponse: MAX_PLAUSIBLE_TOKENS_PER_TIER } : {}),
 		model: fields.model,
 		transferId: fields.transferId,
 		tiers: { ...snapshot.implausible },

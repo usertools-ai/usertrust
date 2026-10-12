@@ -319,7 +319,12 @@ function sumCounts(messages) {
 	// The largest single response per tier: the server holds each to the unscaled ceiling, so one absurd response
 	// cannot hide inside a large window.
 	sum.maxima = {};
-	for (const key of COUNT_KEYS) sum.maxima[key] = Math.max(0, ...messages.map((m) => m[key]));
+	// A loop, not Math.max(...spread): a window may hold more messages than a call has arguments.
+	for (const key of COUNT_KEYS) {
+		let top = 0;
+		for (const m of messages) if (m[key] > top) top = m[key];
+		sum.maxima[key] = top;
+	}
 	return sum;
 }
 
@@ -834,6 +839,7 @@ function holdVehicle(body) {
 		cacheReadTokens: body.cacheReadTokens,
 		cacheWriteTokens: body.cacheWriteTokens,
 		cacheWrite1hTokens: body.cacheWrite1hTokens,
+		maxima: body.maxima,
 		labels: body,
 	});
 	return vehicle === null ? null : { key, vehicle };

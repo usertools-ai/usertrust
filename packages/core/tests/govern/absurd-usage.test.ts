@@ -423,6 +423,57 @@ describe("the ceiling is per provider RESPONSE", () => {
 		await gov.destroy();
 	});
 
+	it("the event says which check fired: a single response's maximum against the unscaled ceiling", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const auth = await gov.authorize(AUTH);
+		await gov.settle(auth, {
+			inputTokens: 150_000_000,
+			outputTokens: 1_000,
+			responses: 2,
+			maxima: { inputTokens: 150_000_000 },
+		});
+		expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+			checks: { inputTokens: "maximum" },
+			maximumCeilingTokensPerResponse: MAX_PLAUSIBLE_TOKENS_PER_TIER,
+		});
+		await gov.destroy();
+	});
+
+	it("maxima are read by name before the claim: a throwing getter changes nothing, and an inherited tier counts", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const auth = await gov.authorize(AUTH);
+		const hostile = {
+			get inputTokens(): number {
+				throw new Error("boom");
+			},
+		};
+		await expect(
+			gov.settle(auth, { inputTokens: 5, outputTokens: 5, responses: 2, maxima: hostile }),
+		).rejects.toThrow("boom");
+		// the hold was not consumed: the same authorization still settles, with an INHERITED absurd tier
+		const inherited = Object.create({ inputTokens: 150_000_000 });
+		const receipt = await gov.settle(auth, {
+			inputTokens: 5,
+			outputTokens: 5,
+			responses: 2,
+			maxima: inherited,
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		await gov.destroy();
+	});
+
 	it("CONTROL: a 600-response window with plausible maxima over 100M total is still charged in full", async () => {
 		const audit = makeAudit();
 		const gov = await createGovernor({
