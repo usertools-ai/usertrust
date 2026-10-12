@@ -80,8 +80,10 @@ One caveat from our own release history: the unit suite validates live-ledger en
 The audit chain is a linear SHA-256 hash chain. Two concurrent writers would
 fork it, which is precisely the tampering the chain exists to make evident — so
 usertrust enforces single-writer semantics with an advisory file lock plus an
-in-process mutex. A second process opening the same vault gets a hard error, not
-a silent fork. Stale locks from crashed processes are reclaimed; live ones are
+in-process mutex. A second writer on the same vault (another
+process, or another `trust()` / `createGovernor()` in the same process) cannot
+write: its audit appends fail into the dead-letter queue, and under
+`audit.failClosed` its calls are refused. It does not fork the chain. Stale locks from crashed processes are reclaimed; live ones are
 never stolen.
 
 The lock's liveness check works on one kernel, and it fails toward "held":
