@@ -24,8 +24,9 @@ updates:
       # vitest and @vitest/* are held out of every version update, patch and minor included.
       # Dependabot's npm 10.9.2 crashes in arborist's peer loader on this tree whenever a vitest-family
       # candidate is resolved ("Cannot read properties of null (reading 'edgesOut')"), and that fails
-      # every group run. Upgrade the family by hand, with the suite green. The ignore also mutes
-      # in-major security fixes for these packages, so check their advisories by hand too.
+      # every group run. Upgrade the family by hand, with the suite green. update-types does not
+      # apply to security updates, so a vitest advisory still opens a security-update run. That run
+      # can hit the same crash; if it fails, apply the advisory by hand.
       - dependency-name: "vitest"
         update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
       - dependency-name: "@vitest/*"
