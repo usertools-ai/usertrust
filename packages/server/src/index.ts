@@ -13,7 +13,7 @@ export {
 	resolveLedgerTargets,
 } from "./ledger-probe.js";
 export type { GovernorFactory } from "./pool.js";
-export { GovernorPool } from "./pool.js";
+export { GovernorPool, secureTenantVaults } from "./pool.js";
 export type { UsertrustServer } from "./server.js";
 export { createUsertrustServer } from "./server.js";
 export type {

@@ -3,7 +3,7 @@
 
 import { join } from "node:path";
 import type { Governor, TrustOpts } from "usertrust";
-import { createGovernor } from "usertrust";
+import { createGovernor, securePrivateVault, VAULT_DIR } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
 
 export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
@@ -11,6 +11,26 @@ export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
 /** The directory a tenant's governor keeps its vault under. */
 export function tenantVaultBase(config: ServerConfig, tenant: TenantConfig): string {
 	return join(config.stateDir, tenant.id);
+}
+
+/**
+ * Refuse to start when a tenant's vault would be refused at that tenant's first request:
+ * each configured tenant's `<stateDir>/<tenant>/.usertrust` gets the check a governor
+ * gives it (`securePrivateVault`), now, before the port opens. A loose real directory is
+ * tightened, as the governor would; a symbolic link to a loose target, a dangling link and
+ * a non-directory throw, every tenant's reason named. A vault that does not exist yet
+ * passes: its governor creates it owner-only.
+ */
+export function secureTenantVaults(config: ServerConfig): void {
+	const refusals: string[] = [];
+	for (const tenant of config.tenants) {
+		try {
+			securePrivateVault(join(tenantVaultBase(config, tenant), VAULT_DIR));
+		} catch (err) {
+			refusals.push(`tenant ${tenant.id}: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+	if (refusals.length > 0) throw new Error(refusals.join("\n"));
 }
 
 /**

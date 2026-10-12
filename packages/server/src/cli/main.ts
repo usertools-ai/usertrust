@@ -4,6 +4,7 @@
 
 import { loadServerConfig } from "../config.js";
 import { probeLedger } from "../ledger-probe.js";
+import { secureTenantVaults } from "../pool.js";
 import { createUsertrustServer } from "../server.js";
 import { scrubForStderr } from "./scrub.js";
 
@@ -17,7 +18,9 @@ async function main(): Promise<void> {
 	const config = await loadServerConfig(configPath);
 	const portOverride = argValue("--port");
 	if (portOverride) config.port = Number.parseInt(portOverride, 10);
-	// Before anything binds: an unusable ledger would otherwise crash or hang the first request.
+	// Before anything binds: a tenant vault its governor would refuse, or an unusable ledger,
+	// would otherwise fail every request (an opaque 500) or crash or hang the first one.
+	secureTenantVaults(config);
 	await probeLedger(config);
 	const server = createUsertrustServer({ config });
 	const { port } = await server.listen();

@@ -7,6 +7,7 @@ import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import type { AbortOutcome, Authorization, ReleaseOutcome } from "usertrust";
 import { sanitizeReleaseReason } from "usertrust";
+import { scrubForStderr } from "./cli/scrub.js";
 import type { ServerConfig, TenantConfig } from "./config.js";
 import { resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
@@ -166,6 +167,42 @@ export interface UsertrustServer {
 
 type TerminalKind = "settle" | "abort" | "release" | "sweep" | "shutdown";
 
+/** The routes a request can reach, by the server's own names: a log line never echoes a caller's URL. */
+const ROUTES = [
+	"GET /v1/budget",
+	"GET /v1/events",
+	"POST /v1/authorize",
+	"POST /v1/settle",
+	"POST /v1/abort",
+	"POST /v1/release",
+] as const;
+type RouteName = (typeof ROUTES)[number] | "sweep" | "shutdown";
+
+/** The route a request names, if it is one of the server's own; otherwise "unrouted". */
+function routeOf(req: IncomingMessage): RouteName | "unrouted" {
+	const named = `${req.method ?? ""} ${req.url ?? ""}`;
+	return (ROUTES as readonly string[]).includes(named) ? (named as RouteName) : "unrouted";
+}
+
+/**
+ * One line for the operator's log about an error a client only ever sees as the opaque
+ * `500 internal`: which tenant, which route, and the error's own name and message, so a
+ * tenant refused at its first request (its vault, say) says why somewhere. It carries no key,
+ * header or request body; the message is the server's or governor's own text, with escape
+ * sequences and control characters removed (`scrubForStderr`) and its lines joined into one.
+ */
+export function internalErrorLine(
+	err: unknown,
+	tenantId: string | undefined,
+	route: RouteName | "unrouted",
+): string {
+	const name = err instanceof Error ? err.name : typeof err;
+	const message = err instanceof Error ? err.message : String(err);
+	const text = scrubForStderr(`${name}: ${message}`).replace(/\s*\n\s*/g, " ");
+	const tenant = tenantId === undefined ? "-" : scrubForStderr(tenantId);
+	return `usertrust-server: internal error: tenant=${tenant} route=${route}: ${text}`;
+}
+
 const noop = (): void => {};
 
 /** `claim` found the entry gone or replaced: another terminal owns it, and this caller ended nothing. */
@@ -174,8 +211,26 @@ const NOT_CLAIMED = Symbol("not-claimed");
 export function createUsertrustServer(opts: {
 	config: ServerConfig;
 	factory?: GovernorFactory;
+	/** Where operator log lines go, one line per call. Default: stderr, as the CLI's own lines. */
+	log?: (line: string) => void;
 }): UsertrustServer {
 	const { config } = opts;
+	const log = opts.log ?? ((line: string): void => void process.stderr.write(`${line}\n`));
+	/** The tenant each request authenticated as, for the log line of an error that escapes its route. */
+	const requestTenant = new WeakMap<IncomingMessage, string>();
+	/**
+	 * `toHttpError`, plus the operator's log line for the opaque 500. The client's answer is
+	 * exactly `toHttpError`'s: the reason lands in the log, never in the response.
+	 */
+	function httpError(
+		err: unknown,
+		tenantId: string | undefined,
+		route: RouteName | "unrouted",
+	): ReturnType<typeof toHttpError> {
+		const mapped = toHttpError(err);
+		if (mapped.status === 500) log(internalErrorLine(err, tenantId, route));
+		return mapped;
+	}
 	const bus = new EventBus();
 	const pool = opts.factory ? new GovernorPool(config, opts.factory) : new GovernorPool(config);
 	const pending = new Map<string, PendingEntry>();
@@ -336,7 +391,7 @@ export function createUsertrustServer(opts: {
 				...expiresIn(remainingLifeMs(auth, config, monoAge(entry))),
 			});
 		} catch (err) {
-			const mapped = toHttpError(err);
+			const mapped = httpError(err, tenant.id, "POST /v1/authorize");
 			const shadow = config.enforcement === "evaluate_only" && mapped.status !== 500;
 			bus.publish(tenant.id, {
 				type: "denied",
@@ -420,7 +475,7 @@ export function createUsertrustServer(opts: {
 			// Another terminal took the hold between the lookup and the claim: this is an unheld settle.
 			if (claimedNow === NOT_CLAIMED) await handleUnheldSettle(tenant, transferId, usage, res);
 		} catch (err) {
-			const mapped = toHttpError(err);
+			const mapped = httpError(err, tenant.id, "POST /v1/settle");
 			sendJson(res, mapped.status, mapped.body);
 		}
 	}
@@ -588,7 +643,7 @@ export function createUsertrustServer(opts: {
 				recorded: outcome.recorded,
 			});
 		} catch (err) {
-			const mapped = toHttpError(err);
+			const mapped = httpError(err, tenant.id, "POST /v1/settle");
 			sendJson(res, mapped.status, mapped.body);
 		}
 	}
@@ -617,7 +672,7 @@ export function createUsertrustServer(opts: {
 				return governor.abort(entry.auth, parsed.data.error);
 			});
 		} catch (err) {
-			const mapped = toHttpError(err);
+			const mapped = httpError(err, tenant.id, "POST /v1/abort");
 			sendJson(res, mapped.status, mapped.body);
 			return;
 		}
@@ -667,7 +722,7 @@ export function createUsertrustServer(opts: {
 				return governor.release(entry.auth, reason, { releaseClass });
 			});
 		} catch (err) {
-			const mapped = toHttpError(err);
+			const mapped = httpError(err, tenant.id, "POST /v1/release");
 			sendJson(res, mapped.status, mapped.body);
 			return;
 		}
@@ -763,6 +818,7 @@ export function createUsertrustServer(opts: {
 			sendJson(res, 401, { error: "unauthorized", reason: "missing or invalid bearer key" });
 			return;
 		}
+		requestTenant.set(req, tenant.id);
 		if (req.method === "GET" && url === "/v1/budget") {
 			const governor = await pool.get(tenant);
 			sendJson(res, 200, {
@@ -834,9 +890,10 @@ export function createUsertrustServer(opts: {
 				try {
 					const governor = await pool.get(tenant);
 					return await governor.release(entry.auth, reason);
-				} catch {
+				} catch (err) {
 					// Best-effort — the Governor's own destroy()/reconciliation voids
-					// anything the control plane fails to release here.
+					// anything the control plane fails to release here. Logged, never silent.
+					log(internalErrorLine(err, tenant.id, kind));
 					return undefined;
 				}
 			},
@@ -877,7 +934,7 @@ export function createUsertrustServer(opts: {
 			return new Promise((resolve, reject) => {
 				httpServer = createServer((req, res) => {
 					route(req, res).catch((err: unknown) => {
-						const mapped = toHttpError(err);
+						const mapped = httpError(err, requestTenant.get(req), routeOf(req));
 						if (!res.headersSent) sendJson(res, mapped.status, mapped.body);
 					});
 				});
