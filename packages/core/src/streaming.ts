@@ -400,11 +400,13 @@ function endsBeforeStart<T>(
 	gen.return = async (value: unknown) => {
 		if (started) return ownReturn(value as never);
 		started = true;
-		await ownReturn(value as never); // complete the generator; its body never runs
+		// Complete the generator (its body never runs). Its own result is returned: like a
+		// native `return(v)`, it awaits `v`, so `return(Promise.resolve(123))` yields 123.
+		const result = await ownReturn(value as never);
 		await closeSource();
 		const settling = onComplete(nothingConsumed());
 		if (settling !== undefined) await settling;
-		return { done: true, value: value as never };
+		return result;
 	};
 	gen.throw = async (error: unknown) => {
 		if (started) return ownThrow(error);

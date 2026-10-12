@@ -257,13 +257,34 @@ const OPAQUE_TEXT_FREE: ReadonlyArray<(value: object) => boolean> = [
 ];
 
 /**
- * Kept by reference and not walked: `value` is, by brand, a member of OPAQUE_TEXT_FREE, and
- * carries no own enumerable property (where a string could hide). Everything else that is
- * not plain data keeps today's behaviour (flattened and redacted): a class instance holding
- * a PII string must never be sent as it is.
+ * `value` is, by brand, a member of OPAQUE_TEXT_FREE, and carries no own STRING-named property
+ * at all, enumerable or not (where a string, or a `toJSON` a serializer would call, could hide).
  */
 export function isOpaqueTextFree(value: object): boolean {
-	return OPAQUE_TEXT_FREE.some((isMember) => isMember(value)) && Object.keys(value).length === 0;
+	return (
+		OPAQUE_TEXT_FREE.some((isMember) => isMember(value)) &&
+		Object.getOwnPropertyNames(value).length === 0
+	);
+}
+
+/**
+ * The positions, from the root of the value being scanned or redacted, where an opaque value is
+ * a TRANSPORT input the SDK hands to its HTTP layer and never serializes into the request:
+ * Google's `params.config.abortSignal`. Only there is it kept by reference and not walked.
+ * Anywhere else (nested in a function response, a tool, a part) it is walked and flattened
+ * like any other object, because there a serializer would read it. OpenAI and Anthropic take
+ * their signal in the request OPTIONS, the second argument, which redaction never touches.
+ */
+const TRANSPORT_SLOTS: ReadonlySet<string> = new Set(["config.abortSignal"]);
+
+/** Kept by reference and not walked: an opaque, text-free value at a transport position. */
+function keptByReference(value: unknown, path: string): boolean {
+	return (
+		TRANSPORT_SLOTS.has(path) &&
+		value !== null &&
+		typeof value === "object" &&
+		isOpaqueTextFree(value)
+	);
 }
 
 function scanValue(value: unknown, currentPath: string, types: Set<string>, paths: string[]): void {
@@ -272,8 +293,8 @@ function scanValue(value: unknown, currentPath: string, types: Set<string>, path
 		return;
 	}
 
-	// Opaque, text-free values are not walked (see isOpaqueTextFree).
-	if (value !== null && typeof value === "object" && isOpaqueTextFree(value)) return;
+	// An opaque, text-free value at a transport position is not walked (see TRANSPORT_SLOTS).
+	if (keptByReference(value, currentPath)) return;
 
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i++) {
@@ -360,7 +381,7 @@ function matchedTypes(value: string): string[] {
 }
 
 /** Recursively traverse data and replace PII strings with redacted placeholders. */
-function redactValue(value: unknown): unknown {
+function redactValue(value: unknown, path = ""): unknown {
 	if (typeof value === "string") {
 		const types = matchedTypes(value);
 		if (types.length > 0) {
@@ -370,17 +391,17 @@ function redactValue(value: unknown): unknown {
 	}
 
 	if (Array.isArray(value)) {
-		return value.map((item) => redactValue(item));
+		return value.map((item, i) => redactValue(item, `${path}[${i}]`));
 	}
 
-	// Opaque, text-free values are kept BY REFERENCE (see isOpaqueTextFree).
-	if (value !== null && typeof value === "object" && isOpaqueTextFree(value)) return value;
+	// An opaque, text-free value at a transport position is kept BY REFERENCE (TRANSPORT_SLOTS).
+	if (keptByReference(value, path)) return value;
 
 	if (value !== null && typeof value === "object") {
 		const record = value as Record<string, unknown>;
 		const result: Record<string, unknown> = {};
 		for (const key of Object.keys(record)) {
-			result[key] = redactValue(record[key]);
+			result[key] = redactValue(record[key], path === "" ? key : `${path}.${key}`);
 		}
 		return result;
 	}

@@ -753,6 +753,22 @@ describe("redactPII — the closed allowlist kept by reference (AbortSignal only
 		expect(isOpaqueTextFree(signal)).toBe(false);
 	});
 
+	it("a real AbortSignal with a non-enumerable toJSON is not opaque, and is never kept outside config.abortSignal", () => {
+		const signal = new AbortController().signal;
+		Object.defineProperty(signal, "toJSON", { value: () => EMAIL, enumerable: false });
+		expect(isOpaqueTextFree(signal)).toBe(false);
+		const clean = new AbortController().signal;
+		const out = redactPII({
+			prompt: EMAIL,
+			contents: [{ parts: [{ functionResponse: { response: { carrier: signal, clean } } }] }],
+			config: { abortSignal: clean },
+		}).data as { config: { abortSignal: unknown }; contents: unknown };
+		expect(JSON.stringify(out)).not.toContain("alice@example.com");
+		// Kept only at the transport slot; nested, even a clean signal is flattened.
+		expect(out.config.abortSignal).toBe(clean);
+		expect(JSON.stringify(out.contents)).not.toContain("alice@example.com");
+	});
+
 	it("binary values are NOT on the allowlist: a Uint8Array keeps today's behaviour (flattened)", () => {
 		const bytes = new Uint8Array([1, 2, 3]);
 		expect(isOpaqueTextFree(bytes)).toBe(false);

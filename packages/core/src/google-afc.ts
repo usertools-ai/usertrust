@@ -573,6 +573,15 @@ export function snapshotGoogleAfcParams(
 			}
 			const afcDisabled = Boolean(disable) || invalidMax;
 			const outTools: unknown[] = new Array(tools.length);
+			// Each callable tool is classified ONCE, here, from a CAPTURED `callTool` reference,
+			// and kept by reference (runGovernedAfc needs the original object). Caller code can
+			// still run after a callable was read: a later tool's array-index getter, or the
+			// getters `structuredClone` runs on a later data tool. Such code could clear a
+			// callable's `callTool` so the verdict (`readAfc`, which reads the snapshot) sees no
+			// callable tool, and restore it before the SDK reads the request: one governed call
+			// over the SDK's own AFC loop. So, once every tool is read, each callable must still
+			// hold the SAME captured function, or the request is "can't tell".
+			const callables: Array<{ tool: object; at: string; callTool: unknown }> = [];
 			for (let i = 0; i < tools.length; i++) {
 				if (!(i in tools)) continue; // keep holes as holes
 				const at = `params.config.tools[${i}]`;
@@ -583,7 +592,9 @@ export function snapshotGoogleAfcParams(
 				}
 				if (tool !== null && (typeof tool === "object" || typeof tool === "function")) {
 					rejectProxy(tool, at);
-					if (typeof dataValue(tool, "callTool", at) === "function") {
+					const callTool = dataValue(tool, "callTool", at);
+					if (typeof callTool === "function") {
+						callables.push({ tool, at, callTool });
 						outTools[i] = tool; // callable: by reference, never cloned
 						continue;
 					}
@@ -593,6 +604,13 @@ export function snapshotGoogleAfcParams(
 				} catch {
 					throw new UncloneableAfcInput(at);
 				}
+			}
+			// No caller code runs between this check and the verdict (both read data only), and a
+			// tool classified non-callable is our CLONE (or AFC is off on our own copy), so the
+			// classification cannot change at the boundary in a way that unmeters a round: a
+			// callable that stops being one later goes into rounds whose AFC is off.
+			for (const { tool, at, callTool } of callables) {
+				if (dataValue(tool, "callTool", at) !== callTool) throw INDETERMINATE;
 			}
 			setData(outConfig, "tools", outTools);
 		}

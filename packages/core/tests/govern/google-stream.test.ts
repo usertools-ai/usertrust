@@ -2800,3 +2800,224 @@ describe("the caller-abort decision reads the built-in abort state, not a decora
 		await destroy(governed);
 	});
 });
+
+// ── A callable tool is classified once; a later getter cannot unclassify it ──
+
+describe("a later tool's getter that clears a callable's callTool cannot unmeter the SDK's AFC loop", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	/** The real @google/genai client: round 1 asks for a tool call, round 2 answers. */
+	function toolCallingSdk() {
+		const sdk = new GoogleGenAI({ apiKey: "test" });
+		const sent: unknown[] = [];
+		const reply = () => {
+			const res = new GenerateContentResponse();
+			const asksForTool = sent.length === 1;
+			res.candidates = [
+				{
+					content: {
+						role: "model",
+						parts: asksForTool
+							? [{ functionCall: { name: "lookup", args: { q: "a" } } }]
+							: [{ text: "done" }],
+					},
+				},
+			];
+			res.usageMetadata = { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 };
+			return res;
+		};
+		const models = sdk.models as unknown as Record<string, unknown>;
+		models.generateContentInternal = async (p: unknown) => {
+			sent.push(p);
+			return reply();
+		};
+		models.generateContentStreamInternal = async (p: unknown) => {
+			sent.push(p);
+			const res = reply();
+			return (async function* () {
+				yield res;
+			})();
+		};
+		return { sdk, sent };
+	}
+
+	function callableLookup() {
+		return {
+			tool: vi.fn(async () => ({ functionDeclarations: [{ name: "lookup" }] })),
+			callTool: vi.fn(async () => [
+				{ functionResponse: { name: "lookup", response: { ok: true } } },
+			]),
+		};
+	}
+
+	/** Clear `victim.callTool` now; put it back on a microtask, before the SDK reads the request. */
+	function clearThenRestore(victim: { callTool: unknown }) {
+		const saved = victim.callTool;
+		victim.callTool = undefined;
+		queueMicrotask(() => {
+			victim.callTool = saved;
+		});
+	}
+
+	const SHAPES: Array<[string, (victim: ReturnType<typeof callableLookup>) => unknown[]]> = [
+		[
+			"tools[1] is an array-index getter",
+			(victim) => {
+				const tools: unknown[] = [victim];
+				Object.defineProperty(tools, 1, {
+					get() {
+						clearThenRestore(victim);
+						return { googleSearch: {} };
+					},
+					enumerable: true,
+				});
+				return tools;
+			},
+		],
+		[
+			"tools[1] is a data tool whose nested getter structuredClone runs",
+			(victim) => [
+				victim,
+				{
+					googleSearch: Object.defineProperty({}, "x", {
+						get() {
+							clearThenRestore(victim);
+							return 1;
+						},
+						enumerable: true,
+					}),
+				},
+			],
+		],
+	];
+
+	for (const method of AFC_METHODS) {
+		it.each(SHAPES)(
+			`${method}: %s → refused ("can't tell"), never one governed call over the SDK's AFC`,
+			async (_, build) => {
+				const { sdk, sent } = toolCallingSdk();
+				const victim = callableLookup();
+				const audit = makeMockAudit();
+				const governed = await trust(sdk, {
+					dryRun: true,
+					budget: 500_000,
+					vaultBase: tmpVault,
+					_audit: audit,
+				});
+
+				const err = await callModels(
+					governed,
+					method,
+					afcParams({ tools: build(victim) }) as Record<string, unknown>,
+				).then(
+					() => undefined,
+					(e: unknown) => e,
+				);
+
+				expect(err).toBeInstanceOf(PolicyDeniedError);
+				expect((err as Error).message).toContain(
+					`models.${method} could not be checked for automatic function calling`,
+				);
+				expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+				// The SDK never ran a model round, so its own AFC never ran.
+				expect(sent).toHaveLength(0);
+				expect(victim.callTool).not.toHaveBeenCalled();
+				await destroy(governed);
+			},
+		);
+	}
+});
+
+// ── An AbortSignal is kept by reference only at the transport slot ──
+
+describe('pii "redact": an AbortSignal is kept only at config.abortSignal', () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	const EMAIL = "alice@example.com";
+
+	it("a real AbortSignal with a non-enumerable toJSON (an e-mail) nested in functionResponse.response leaves nothing unredacted; config.abortSignal stays the same object and an abort still settles", async () => {
+		writeVaultConfig(tmpVault, { budget: 5_000_000, pii: "redact" });
+		const engine = makeMockEngine();
+		const received: Array<Record<string, unknown>> = [];
+		const client = {
+			models: {
+				generateContent: vi.fn(async () => ({})),
+				generateContentStream: vi.fn(
+					async (p: Record<string, unknown> & { config?: { abortSignal?: AbortSignal } }) => {
+						received.push(p);
+						return abortableStream(STREAM_WITH_USAGE, p.config?.abortSignal, false);
+					},
+				),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+		const smuggler = new AbortController().signal;
+		Object.defineProperty(smuggler, "toJSON", { value: () => `mail ${EMAIL}`, enumerable: false });
+		const controller = new AbortController();
+
+		const stream = (await governed.models.generateContentStream({
+			model: "gemini-2.5-flash",
+			contents: [
+				{ role: "user", parts: [{ text: `mail ${EMAIL}` }] },
+				{
+					role: "user",
+					parts: [{ functionResponse: { name: "lookup", response: { carrier: smuggler } } }],
+				},
+			],
+			config: { abortSignal: controller.signal },
+		})) as GovernedStreamHandle;
+
+		const sent = received[0] as { config: { abortSignal: unknown } };
+		expect(JSON.stringify(sent)).not.toContain(EMAIL);
+		expect(sent.config.abortSignal).toBe(controller.signal);
+
+		const { thrown } = await abortAfterFirstChunk(stream, controller);
+		const receipt = await stream.receipt;
+		expect((thrown as Error).name).toBe("AbortError");
+		expect(receipt.settled).toBe(true);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		await destroy(governed);
+	});
+});
+
+// ── A pre-start return() returns what the native generator returns ──
+
+describe("a governed stream's pre-start return(v) yields v, as a native return does", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	it("return(Promise.resolve(123)) before the first next() resolves { done: true, value: 123 }", async () => {
+		const { client } = makeGoogleClient();
+		const governed = await trust(client, { dryRun: true, budget: 50_000, vaultBase: tmpVault });
+		const stream = await openStream(governed);
+
+		await expect(stream.return(Promise.resolve(123) as never)).resolves.toEqual({
+			done: true,
+			value: 123,
+		});
+		await expect(stream.receipt).resolves.toMatchObject({ settled: true });
+		await destroy(governed);
+	});
+});
