@@ -1178,6 +1178,57 @@ describe("trust()", () => {
 			expect((err as Error).message).toContain('trust(): option "pii" is inherited');
 		});
 
+		// The copy is read through own descriptors: a getter that changes the options while
+		// they are copied can never make a read resolve through the prototype.
+		it("refuses an own option a getter removed while the options were read (never the inherited value)", async () => {
+			const options = Object.create({ pii: "off" }) as Record<string, unknown>;
+			Object.defineProperty(options, "dryRun", {
+				enumerable: true,
+				get() {
+					delete options.pii;
+					return true;
+				},
+			});
+			options.vaultBase = tmpVault;
+			options.pii = "block";
+			const { err, createFn } = await governWith(options);
+			expect(err).toBeInstanceOf(TypeError);
+			expect((err as Error).message).toBe(
+				'trust(): option "pii" was removed while the options were being read',
+			);
+			expect(createFn).not.toHaveBeenCalled();
+			expect(existsSync(join(tmpVault, ".usertrust"))).toBe(false);
+		});
+
+		it("refuses an option a getter added while the options were read", async () => {
+			const options: Record<string, unknown> = { vaultBase: tmpVault };
+			Object.defineProperty(options, "dryRun", {
+				enumerable: true,
+				get() {
+					options.pii = "off";
+					return true;
+				},
+			});
+			const { err, createFn } = await governWith(options);
+			expect(err).toBeInstanceOf(TypeError);
+			expect((err as Error).message).toBe(
+				'trust(): option "pii" was added while the options were being read',
+			);
+			expect(createFn).not.toHaveBeenCalled();
+		});
+
+		it("applies an own option defined by a getter, read once", async () => {
+			const read = vi.fn(() => "block");
+			const options = Object.defineProperty({ dryRun: true, vaultBase: tmpVault }, "pii", {
+				enumerable: true,
+				get: read,
+			});
+			const { err, createFn } = await governWith(options);
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect(read).toHaveBeenCalledTimes(1);
+			expect(createFn).not.toHaveBeenCalled();
+		});
+
 		it("applies an own pii (the PII never reaches the provider)", async () => {
 			const { err, createFn } = await governWith({
 				dryRun: true,

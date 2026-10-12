@@ -753,6 +753,23 @@ describe("headless governor", () => {
 		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
 	});
 
+	it("refuses an own option a getter removed while the options were read (never the inherited value)", async () => {
+		const options = Object.create({ pii: "off" }) as Record<string, unknown>;
+		Object.defineProperty(options, "dryRun", {
+			enumerable: true,
+			get() {
+				delete options.pii;
+				return true;
+			},
+		});
+		options.vaultBase = vaultBase;
+		options.pii = "block";
+		await expect(createGovernor(options as never)).rejects.toThrow(
+			'createGovernor(): option "pii" was removed while the options were being read',
+		);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
 	// `allowUngoverned` opts SDK methods out of a wrapped client's default-deny boundary; a
 	// governor wraps no client, so createGovernor() refuses it by name. GovernorOpts does not
 	// offer it, but a value typed as TrustOpts still carries it past the type check.

@@ -369,6 +369,13 @@ function inheritedOptionNames(opts: object): string[] {
  * refused by name rather than applied, and the caller reads only the returned
  * copy of the own properties (null prototype, each read once, so a getter
  * cannot answer the check and the governor differently).
+ *
+ * The copy is read through each property's OWN descriptor, never by ordinary
+ * property access: a getter runs while the copy is made, and one that deleted a
+ * later own property would otherwise let that read resolve through the
+ * prototype to a value the check never saw (an own `pii: "block"` shadowing an
+ * inherited `"off"`). So a property that vanished while the copy was made, or
+ * one a getter added, is refused by name: nothing is applied unchecked.
  * @internal
  */
 export function readOwnOptions<O extends object>(
@@ -411,7 +418,21 @@ export function readOwnOptions<O extends object>(
 		);
 	}
 	const copy: Record<string, unknown> = Object.create(null);
-	for (const key of own) copy[key] = (opts as Record<string, unknown>)[key];
+	for (const key of own) {
+		const descriptor = Object.getOwnPropertyDescriptor(opts, key);
+		if (descriptor === undefined) {
+			throw new TypeError(
+				`${fn}: option ${quoteForRefusal(key)} was removed while the options were being read`,
+			);
+		}
+		copy[key] = "value" in descriptor ? descriptor.value : descriptor.get?.call(opts);
+	}
+	const added = Object.getOwnPropertyNames(opts).filter((key) => !own.includes(key));
+	if (added.length > 0) {
+		throw new TypeError(
+			`${fn}: ${added.map((key) => `option ${quoteForRefusal(key)} was added while the options were being read`).join("; ")}`,
+		);
+	}
 	for (const key of ENUM_OVERRIDE_KEYS) {
 		const value = copy[key];
 		if (value === undefined) continue;
