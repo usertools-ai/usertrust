@@ -9,7 +9,7 @@ the vault operator cannot silently rewrite**. An auditor then verifies the vault
 checkpoint they fetched themselves, with a public key they pinned out-of-band — using only the
 zero-dependency [`usertrust-verify`](../packages/verify/README.md) package.
 
-> **Known issue in 4.1.0.** Without an anchor, deleting the most recent audit records is reported by `usertrust verify` only until the next governed call, after which verification passes over the shortened chain. An anchor taken before the deletion still fails verification. Whatever the version, someone who can rewrite both the vault file and its sidecar is caught only by an anchor held outside the vault.
+> **Known issue in 4.1.0.** Without an anchor, deleting the most recent audit records is reported by `usertrust verify` only until the next governed call, after which verification passes over the shortened chain. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Whatever the version, someone who can rewrite both the vault file and its sidecar is caught only by an anchor held outside the vault.
 
 Tamper-**evident**, not tamper-proof: detection produces a hard FAIL verdict, not restored data.
 
