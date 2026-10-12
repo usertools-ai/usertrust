@@ -4010,7 +4010,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 				return build(fresh, interceptCall, destroyFn, governActionImpl, boundary);
 			},
-			resources: new WeakMap(),
+			resources: new Map(),
 			standIns: new Map(),
 			readOnly: new WeakMap(),
 		};
