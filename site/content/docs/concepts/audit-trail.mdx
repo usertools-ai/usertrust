@@ -47,16 +47,16 @@ Events are stored as JSONL (one JSON object per line) in `.usertrust/audit/event
 
 ## Multi-Process Safety
 
-The audit writer allows one writer per vault:
+The audit writer allows one writer per vault, whatever the process:
 
-- **Advisory file lock** -- A second process that opens the same vault does not get to write: its audit writes fail with an error naming the lock holder, and its events go to the dead-letter queue (below). Use one vault per process, or run `usertrust-server` and have every process call it.
-- **Async mutex** -- Serializes writes within a single process so concurrent governed calls append in order.
+- **Advisory file lock** -- A second writer on the same vault does not get to write. That is another process, and it is also another `trust()` or `createGovernor()` in the same process: each one is its own writer. Its audit writes fail with an error naming the lock holder, and its events go to the dead-letter queue (below). With `audit.failClosed`, those calls are refused. Use one vault per client, or run `usertrust-server` and have every client call it.
+- **Async mutex** -- Serializes writes within a single writer so concurrent governed calls append in order.
 
-Chain integrity therefore holds for the one process that owns the vault. It is not shared across processes.
+Chain integrity therefore holds for the one writer that owns the vault. It is not shared across processes or across clients.
 
 ## Dead-Letter Queue
 
-If an audit write fails after the LLM call and ledger settlement have already succeeded, usertrust does **not** throw an error. Instead:
+If an audit write fails after the LLM call and ledger settlement have already succeeded, by default usertrust does **not** throw an error (with `audit.failClosed` it refuses the call). Instead:
 
 1. The failed event is written to `.usertrust/dlq/dead-letters.jsonl` (fsync'd for durability)
 2. The response is returned with an `auditDegraded` flag on the governance receipt
