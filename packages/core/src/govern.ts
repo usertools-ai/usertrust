@@ -2780,6 +2780,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					Symbol.asyncIterator in (response as Record<symbol, unknown>)
 				) {
 					const stream = response as AsyncIterable<unknown>;
+					const callerSignal = callerAbortSignal(kind, args);
 					const governedStream = createGovernedStream(
 						stream,
 						kind,
@@ -2856,7 +2857,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// a throw from the caller's loop body wins over it), so a caller who catches
 						// the loop without awaiting `.receipt` still hears of it. Any other
 						// settlement error rejects `.receipt` alone.
-						{ surfaceAuditRefusal: config.audit.failClosed },
+						{
+							surfaceAuditRefusal: config.audit.failClosed,
+							// The caller's own abort signal for THIS call: an abort settles the usage
+							// delivered so far (an early stop), it does not void (callerAbortSignal).
+							...(callerSignal !== undefined ? { callerAborted: () => callerSignal.aborted } : {}),
+						},
 					);
 
 					// For streaming responses, settlement has NOT happened yet.
@@ -4515,6 +4521,38 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 // declaration to 101 columns, Biome wraps it, and the wrapped signature no longer
 // matches headless.ts's copy — which the parity suite compares as source text.
 export { createTBEngine };
+
+/** An own DATA property of `obj`, without running an accessor or a Proxy trap. */
+function ownDataProperty(obj: unknown, key: string): unknown {
+	if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) return undefined;
+	if (utilTypes.isProxy(obj)) return undefined;
+	try {
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		return d !== undefined && "value" in d ? d.value : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The caller's OWN abort signal for one provider call, where each SDK takes it:
+ *   - Google (`@google/genai`): `params.config.abortSignal` (GenerateContentConfig). On a
+ *     governed Google call `args[0]` is the AFC snapshot, whose `config` is our copy and
+ *     carries the caller's signal object unchanged.
+ *   - OpenAI and Anthropic: the per-request options, the SECOND argument, `{ signal }`
+ *     (`RequestOptions.signal` in both SDKs).
+ * Read as own data properties only (no getter runs, no Proxy is consulted), and counted
+ * only when it is a real AbortSignal; anything else is "no signal", and a throw then
+ * voids as before. A signal handed to the SDK CLIENT's constructor, or a client-wide
+ * fetch wrapper, is not per call and is not seen here.
+ */
+function callerAbortSignal(kind: LLMClientKind, args: unknown[]): AbortSignal | undefined {
+	const signal =
+		kind === "google"
+			? ownDataProperty(ownDataProperty(args[0], "config"), "abortSignal")
+			: ownDataProperty(args[1], "signal");
+	return signal instanceof AbortSignal ? signal : undefined;
+}
 
 // ── Proxy builders ──
 // Each builder intercepts only the `create` / `generateContent` call and

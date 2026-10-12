@@ -378,50 +378,84 @@ function captureOnce(obj: unknown, key: string, at: string): unknown {
 }
 
 /**
- * `obj` as an object WE own, for an AFC-relevant config object: every own property is
- * captured (an accessor read once), and the named `keys` are also resolved through the
- * prototype chain, as the SDK's plain reads would find them. The values are the caller's
- * (shallow); the fields the AFC decision reads are primitives.
+ * Write `key` on `obj` as an own data property. ALWAYS through `defineProperty`, never
+ * `obj[key] = …`: for a caller-controlled key that is `"__proto__"` (an own property, as
+ * `JSON.parse` makes one), plain assignment runs the prototype SETTER and the copy would
+ * INHERIT the caller's object live. `defineProperty` makes it plain data.
+ */
+function setData(
+	obj: Record<string | symbol, unknown>,
+	key: string | symbol,
+	value: unknown,
+	enumerable = true,
+): void {
+	Object.defineProperty(obj, key, { value, writable: true, enumerable, configurable: true });
+}
+
+/**
+ * `obj` as an object WE own, for an AFC-relevant config object (`automaticFunctionCalling`,
+ * `toolConfig`, `functionCallingConfig`): a NULL-PROTOTYPE object, so nothing is inherited
+ * from the caller or from `Object.prototype`; every own property captured (an accessor
+ * read once, on the original receiver) and written with `setData`; and the named `keys`
+ * also resolved through the caller's prototype chain, as the SDK's plain reads would find
+ * them. The SDK only reads properties of these objects (and spreads them), so a null
+ * prototype is safe for it. The values are the caller's (shallow); the fields the AFC
+ * decision reads are primitives.
  */
 function ownedDataCopy(obj: unknown, at: string, keys: readonly string[]): unknown {
 	if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) return obj;
 	rejectProxy(obj, at);
-	const out: Record<string | symbol, unknown> = {};
+	const out = Object.create(null) as Record<string | symbol, unknown>;
 	for (const key of Reflect.ownKeys(obj)) {
 		const d = Object.getOwnPropertyDescriptor(obj, key);
 		if (d === undefined) continue;
-		out[key] = "value" in d ? d.value : d.get === undefined ? undefined : d.get.call(obj);
+		setData(out, key, "value" in d ? d.value : d.get === undefined ? undefined : d.get.call(obj));
 	}
 	for (const key of keys) {
 		if (!Object.hasOwn(out, key)) {
 			const value = captureOnce(obj, key, at);
-			if (value !== undefined) out[key] = value;
+			if (value !== undefined) setData(out, key, value);
 		}
 	}
 	return out;
 }
 
 /**
- * Copy `obj`'s own properties, descriptor for descriptor, onto a fresh object with its
- * prototype, except the `captured` keys, which the snapshot sets itself as owned data (a
- * copied accessor there would be read again, and a non-configurable one could not be
- * replaced).
+ * Copy the request object `obj` (`params`, `params.config`) onto a fresh object with its
+ * prototype, re-installing NO accessor: every accessor found on `obj` or up its prototype
+ * chain (to `Object.prototype`, exclusive) is CAPTURED once, on the ORIGINAL receiver
+ * (`get.call(obj)`), and stored as own data, so a getter backed by a `#private` field (which
+ * would throw on any other receiver) still works, and a getter is never read twice. Own
+ * data properties are copied with `setData`; inherited data properties stay inherited. The
+ * `captured` keys are skipped: the snapshot sets those itself. Each prototype on the walk
+ * is Proxy-checked before it is touched.
  */
-function shallowDescriptorCopy(
+function capturedCopy(
 	obj: object,
 	captured: readonly string[],
+	at: string,
 ): Record<string | symbol, unknown> {
 	const out = Object.create(Object.getPrototypeOf(obj)) as Record<string | symbol, unknown>;
-	for (const key of Reflect.ownKeys(obj)) {
-		if (typeof key === "string" && captured.includes(key)) continue;
-		const d = Object.getOwnPropertyDescriptor(obj, key);
-		if (d !== undefined) Object.defineProperty(out, key, d);
+	const seen = new Set<string | symbol>(captured);
+	for (
+		let o: object | null = obj;
+		o !== null && o !== Object.prototype;
+		o = Object.getPrototypeOf(o)
+	) {
+		rejectProxy(o, o === obj ? at : `${at} (its prototype chain)`);
+		for (const key of Reflect.ownKeys(o)) {
+			if (seen.has(key)) continue;
+			seen.add(key);
+			const d = Object.getOwnPropertyDescriptor(o, key);
+			if (d === undefined) continue;
+			if ("value" in d) {
+				if (o === obj) setData(out, key, d.value, d.enumerable === true);
+				continue;
+			}
+			setData(out, key, d.get === undefined ? undefined : d.get.call(obj), d.enumerable === true);
+		}
 	}
 	return out;
-}
-
-function setData(obj: Record<string | symbol, unknown>, key: string, value: unknown): void {
-	Object.defineProperty(obj, key, { value, writable: true, enumerable: true, configurable: true });
 }
 
 /**
@@ -433,11 +467,12 @@ function setData(obj: Record<string | symbol, unknown>, key: string, value: unkn
  * and before the SDK's read. The verdict therefore runs on — and the SDK receives — a
  * snapshot whose AFC-relevant parts are objects the caller never held:
  *
- *   - `params` and `params.config`: fresh shallow copies (same prototype, same property
- *     descriptors; fields the AFC decision does not read keep their live values/getters).
- *     `config` itself must be an object (or absent): anything else is indeterminate.
+ *   - `params` and `params.config`: fresh shallow copies with the same prototype
+ *     (`capturedCopy`): own data copied, every accessor (own or inherited) CAPTURED once on
+ *     the original receiver, none re-installed. `config` itself must be an object (or
+ *     absent): anything else is indeterminate.
  *   - `config.automaticFunctionCalling`, `config.toolConfig` and its
- *     `functionCallingConfig`: owned copies, so `disable`, `maximumRemoteCalls` and
+ *     `functionCallingConfig`: owned NULL-PROTOTYPE copies (`ownedDataCopy`), so `disable`, `maximumRemoteCalls` and
  *     `streamFunctionCallArguments` are values we own.
  *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
  *     non-callable tool is `structuredClone`d (a tool that cannot be copied as data is
@@ -469,7 +504,7 @@ export function snapshotGoogleAfcParams(
 		}
 		rejectProxy(params, "params");
 		const config = captureOnce(params, "config", "params");
-		const outParams = shallowDescriptorCopy(params, ["config"]);
+		const outParams = capturedCopy(params, ["config"], "params");
 		if (config === undefined || config === null) {
 			setData(outParams, "config", config);
 			return { params: outParams };
@@ -477,11 +512,11 @@ export function snapshotGoogleAfcParams(
 		// A config that is not an object cannot be read as one: can't tell.
 		if (typeof config !== "object" && typeof config !== "function") throw INDETERMINATE;
 		rejectProxy(config, "params.config");
-		const outConfig = shallowDescriptorCopy(config, [
-			"tools",
-			"automaticFunctionCalling",
-			"toolConfig",
-		]);
+		const outConfig = capturedCopy(
+			config,
+			["tools", "automaticFunctionCalling", "toolConfig"],
+			"params.config",
+		);
 
 		const afcAt = "params.config.automaticFunctionCalling";
 		const afcConfig = ownedDataCopy(

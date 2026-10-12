@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { GenerateContentResponse, GoogleGenAI } from "@google/genai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
+import { snapshotGoogleAfcParams } from "../../src/google-afc.js";
 import { GOOGLE_REFUSED_METHODS, type TrustEngine, trust } from "../../src/govern.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import {
@@ -1925,4 +1926,382 @@ describe("audit.failClosed: a client already degraded refuses Google refusals be
 			await destroy(governed);
 		},
 	);
+});
+
+// ── A caller's OWN abort is an early stop (settle), not a failure (void) ──
+
+interface AbortSpec {
+	name: string;
+	/** A client whose stream checks the CALLER's signal before each chunk after the first. */
+	make: (failAfterFirst: boolean) => unknown;
+	/** Open a governed stream, passing `signal` where this SDK takes it. */
+	open: (governed: unknown, signal: AbortSignal) => Promise<GovernedStreamHandle>;
+}
+
+function abortableStream(
+	chunks: unknown[],
+	signal: AbortSignal | undefined,
+	failAfterFirst: boolean,
+): AsyncGenerator<unknown> {
+	return (async function* () {
+		for (let i = 0; i < chunks.length; i++) {
+			if (i > 0 && signal?.aborted === true) {
+				throw new DOMException("This operation was aborted", "AbortError");
+			}
+			if (i > 0 && failAfterFirst) throw new Error("provider 500 mid-stream");
+			yield chunks[i];
+		}
+	})();
+}
+
+const OPENAI_CHUNKS = [
+	{
+		choices: [{ delta: { content: "Hi" } }],
+		usage: { prompt_tokens: 1000, completion_tokens: 100 },
+	},
+	{ choices: [{ delta: { content: " there" } }] },
+	{ choices: [], usage: { prompt_tokens: 1000, completion_tokens: 300 } },
+];
+const ANTHROPIC_CHUNKS = [
+	{ type: "message_start", message: { usage: { input_tokens: 1000, output_tokens: 0 } } },
+	{ type: "content_block_delta", delta: { text: "Hi" } },
+	{ type: "message_delta", usage: { output_tokens: 300 } },
+];
+const MESSAGES = [{ role: "user", content: "Hi" }];
+
+const ABORT_SPECS: AbortSpec[] = [
+	{
+		name: "Google generateContentStream (config.abortSignal)",
+		make: (fail) => ({
+			models: {
+				generateContent: vi.fn(async () => ({})),
+				generateContentStream: vi.fn(async (p: { config?: { abortSignal?: AbortSignal } }) =>
+					abortableStream(STREAM_WITH_USAGE, p.config?.abortSignal, fail),
+				),
+			},
+		}),
+		open: async (governed, signal) =>
+			(await (
+				governed as { models: { generateContentStream(p: unknown): Promise<unknown> } }
+			).models.generateContentStream({
+				model: "gemini-2.5-flash",
+				contents: "Hi",
+				config: { abortSignal: signal },
+			})) as GovernedStreamHandle,
+	},
+	{
+		name: "OpenAI chat.completions stream (options.signal)",
+		make: (fail) => ({
+			chat: {
+				completions: {
+					create: vi.fn(async (_p: unknown, o?: { signal?: AbortSignal }) =>
+						abortableStream(OPENAI_CHUNKS, o?.signal, fail),
+					),
+				},
+			},
+		}),
+		open: async (governed, signal) =>
+			(
+				await (
+					governed as {
+						chat: {
+							completions: { create(p: unknown, o: unknown): Promise<{ response: unknown }> };
+						};
+					}
+				).chat.completions.create({ model: "gpt-4o", messages: MESSAGES, stream: true }, { signal })
+			).response as GovernedStreamHandle,
+	},
+	{
+		name: "Anthropic messages.create stream (options.signal)",
+		make: (fail) => ({
+			messages: {
+				create: vi.fn(async (_p: unknown, o?: { signal?: AbortSignal }) =>
+					abortableStream(ANTHROPIC_CHUNKS, o?.signal, fail),
+				),
+			},
+		}),
+		open: async (governed, signal) =>
+			(
+				await (
+					governed as {
+						messages: { create(p: unknown, o: unknown): Promise<{ response: unknown }> };
+					}
+				).messages.create(
+					{ model: "claude-sonnet-4-6", max_tokens: 64, messages: MESSAGES, stream: true },
+					{ signal },
+				)
+			).response as GovernedStreamHandle,
+	},
+];
+
+/** Read one chunk, abort through the caller's own signal, keep reading: the SDK's iterator throws. */
+async function abortAfterFirstChunk(stream: GovernedStreamHandle, controller: AbortController) {
+	let thrown: unknown;
+	let seen = 0;
+	try {
+		for await (const _ of stream) {
+			seen++;
+			controller.abort();
+		}
+	} catch (err) {
+		thrown = err;
+	}
+	return { thrown, seen };
+}
+
+describe("a caller's own abort settles the consumed usage, like an early break", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	it.each(ABORT_SPECS)(
+		"$name: aborted mid-stream → settled at the consumed usage, no void, receipt settled",
+		async (spec) => {
+			const engine = makeMockEngine();
+			const governed = await trust(spec.make(false), {
+				dryRun: false,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: makeMockAudit(),
+			});
+			const controller = new AbortController();
+			const stream = await spec.open(governed, controller.signal);
+
+			const { thrown, seen } = await abortAfterFirstChunk(stream, controller);
+			const receipt = await stream.receipt;
+
+			// The SDK's abort error still reaches the caller...
+			expect((thrown as Error).name).toBe("AbortError");
+			expect(seen).toBe(1);
+			// ...but the hold SETTLES at what was delivered: no void.
+			expect(receipt.settled).toBe(true);
+			expect(receipt.chunksDelivered).toBe(1);
+			expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+			expect(engine.postPendingSpend).toHaveBeenCalledWith(receipt.transferId, receipt.cost);
+			expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+
+			await destroy(governed);
+		},
+	);
+
+	it.each(ABORT_SPECS)(
+		"$name: a provider error mid-stream with the signal NOT aborted still VOIDS",
+		async (spec) => {
+			const engine = makeMockEngine();
+			const governed = await trust(spec.make(true), {
+				dryRun: false,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: makeMockAudit(),
+			});
+			const controller = new AbortController();
+			const stream = await spec.open(governed, controller.signal);
+			const receiptOutcome = stream.receipt.then(
+				() => "resolved",
+				(e: unknown) => e,
+			);
+
+			await expect(
+				(async () => {
+					for await (const _ of stream) {
+						// consume
+					}
+				})(),
+			).rejects.toThrow(/provider 500 mid-stream/);
+			expect(controller.signal.aborted).toBe(false);
+			expect(await receiptOutcome).toBeInstanceOf(Error);
+			expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+			expect(engine.postPendingSpend).not.toHaveBeenCalled();
+
+			await destroy(governed);
+		},
+	);
+
+	it.each(ABORT_SPECS)(
+		"$name: ten aborts in a row leave the breaker CLOSED, and the next call goes through",
+		async (spec) => {
+			const engine = makeMockEngine();
+			const governed = await trust(spec.make(false), {
+				dryRun: false,
+				budget: 50_000_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: makeMockAudit(),
+			});
+
+			for (let i = 0; i < 10; i++) {
+				const controller = new AbortController();
+				const stream = await spec.open(governed, controller.signal);
+				await abortAfterFirstChunk(stream, controller);
+				await expect(stream.receipt).resolves.toMatchObject({ settled: true });
+			}
+			// The breaker (failureThreshold 5) never saw a failure: the 11th call is let through.
+			const controller = new AbortController();
+			const stream = await spec.open(governed, controller.signal);
+			for await (const _ of stream) {
+				// consume to the end
+			}
+			await expect(stream.receipt).resolves.toMatchObject({ settled: true });
+			expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+			expect(engine.postPendingSpend).toHaveBeenCalledTimes(11);
+
+			await destroy(governed);
+		},
+	);
+});
+
+// ── An own "__proto__" key in the request is plain data in the snapshot ──
+
+describe('an own "__proto__" key in the request cannot make the snapshot inherit the caller\'s object', () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	function protoInAfc() {
+		// JSON.parse makes "__proto__" an OWN property, pointing at { disable: true }.
+		const afc = JSON.parse('{"__proto__": {"disable": true}}') as Record<string, unknown>;
+		const params = afcParams({ tools: [callableTool()], automaticFunctionCalling: afc });
+		// The OWN data property named "__proto__" (not the accessor on Object.prototype).
+		const inherited = Object.getOwnPropertyDescriptor(afc, "__proto__")?.value as Record<
+			string,
+			unknown
+		>;
+		return { params, afc, inherited };
+	}
+
+	function protoInConfig() {
+		const config = JSON.parse(
+			'{"__proto__": {"automaticFunctionCalling": {"disable": true}}}',
+		) as Record<string, unknown>;
+		config.tools = [callableTool()];
+		const params = { model: "gemini-2.5-flash", contents: "Look it up", config };
+		return { params };
+	}
+
+	it("automaticFunctionCalling: the snapshot's copy has no inherited disable; its own __proto__ key is data", () => {
+		const { params } = protoInAfc();
+		const snap = snapshotGoogleAfcParams(params) as { params: Record<string, unknown> };
+		const afc = (snap.params.config as Record<string, unknown>).automaticFunctionCalling as Record<
+			string,
+			unknown
+		>;
+		expect(Object.getPrototypeOf(afc)).toBeNull();
+		expect(afc.disable).toBeUndefined();
+		expect(Object.getOwnPropertyDescriptor(afc, "__proto__")).toHaveProperty("value");
+	});
+
+	it("automaticFunctionCalling with __proto__ → { disable: true }, flipped afterwards: generateContent still runs the METERED loop", async () => {
+		const engine = makeMockEngine();
+		const { client } = makeGoogleClient();
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+		const { params, inherited } = protoInAfc();
+
+		const pending = governed.models.generateContent(params);
+		inherited.disable = false; // the flip: it must not matter, the gate decided on own data
+		const out = (await pending) as unknown as { receipts?: unknown[] };
+
+		// Decided on the snapshot's OWN data (no disable) → the governed per-round loop.
+		expect(out.receipts).toHaveLength(1);
+		const round = client.models.generateContent.mock.calls[0]?.[0] as Record<string, unknown>;
+		expect((round.config as Record<string, unknown>).automaticFunctionCalling).toMatchObject({
+			disable: true,
+		});
+		await destroy(governed);
+	});
+
+	it("config with __proto__ → { automaticFunctionCalling: { disable: true } }: generateContent runs the metered loop", async () => {
+		const { client } = makeGoogleClient();
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: makeMockEngine(),
+			_audit: makeMockAudit(),
+		});
+		const { params } = protoInConfig();
+
+		const out = (await governed.models.generateContent(params)) as unknown as {
+			receipts?: unknown[];
+		};
+
+		expect(out.receipts).toHaveLength(1);
+		await destroy(governed);
+	});
+
+	it("generateContentStream with __proto__ → { disable: true } in automaticFunctionCalling is refused (AFC, decided on own data)", async () => {
+		const { client, generateContentStream } = makeGoogleClient();
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: makeMockEngine(),
+			_audit: makeMockAudit(),
+		});
+		const { params } = protoInAfc();
+
+		await expect(openStream(governed, params)).rejects.toThrow(
+			/models.generateContentStream with automatic function calling is not governed yet/,
+		);
+		expect(generateContentStream).not.toHaveBeenCalled();
+		await destroy(governed);
+	});
+});
+
+// ── A #private-backed getter on a class-instance request ──
+
+describe("a class-instance request with a #private-backed contents getter", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	class PrivateRequest {
+		readonly #contents: string;
+		readonly model = "gemini-2.5-flash";
+		constructor(contents: string) {
+			this.#contents = contents;
+		}
+		get contents(): string {
+			return this.#contents;
+		}
+	}
+
+	it("generateContent with no tools is governed, and the SDK receives the contents", async () => {
+		const { client } = makeGoogleClient();
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: makeMockEngine(),
+			_audit: makeMockAudit(),
+		});
+
+		const result = await governed.models.generateContent(
+			new PrivateRequest("hello from a class") as unknown as Record<string, unknown>,
+		);
+
+		expect(result.receipt.settled).toBe(true);
+		const sent = client.models.generateContent.mock.calls[0]?.[0] as Record<string, unknown>;
+		expect(sent.contents).toBe("hello from a class");
+		await destroy(governed);
+	});
 });
