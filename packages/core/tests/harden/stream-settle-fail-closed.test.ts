@@ -12,7 +12,8 @@
  * failClosed the generic stream path now also ends the ITERATION with that error: the
  * final step (or the `return()` an early `break` drives) waits for settlement and
  * throws it if it is the audit refusal. Any other settlement error rejects `.receipt`
- * only, and the loop ends cleanly. With failClosed off, nothing changes: the loop ends at
+ * only, and the loop ends cleanly; so does a refusal while the caller's own loop body is
+ * throwing (for-await keeps the caller's throw). With failClosed off, nothing changes: the loop ends at
  * once and settlement stays in the background.
  */
 

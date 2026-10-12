@@ -92,8 +92,10 @@ export interface GovernedStream<T> extends AsyncIterable<T> {
 	 * settles and is charged. Also rejects when settlement itself is refused after it ran
 	 * (`AuditDegradedError`, under `audit.failClosed`): the charge posted, or its POST
 	 * failed and may still post, so the work may be billed. The governor then throws that
-	 * error from the iteration too (`surfaceAuditRefusal`); any OTHER settlement error
-	 * rejects only `.receipt`. Never an unhandled rejection.
+	 * error from the iteration too (`surfaceAuditRefusal`), on a normal end or a `break`;
+	 * when the caller's own loop body throws, for-await keeps that throw and drops the
+	 * refusal. Any OTHER settlement error rejects only `.receipt`. Never an unhandled
+	 * rejection.
 	 */
 	receipt: Promise<TrustReceipt>;
 }
@@ -436,7 +438,9 @@ export interface GovernedStreamOptions {
 	 * `.receipt`. The last step (the final `next()`, or the `return()` an early `break`
 	 * drives) waits for settlement; if settlement rejects with `AuditDegradedError`, that
 	 * step throws it, the same error `.receipt` rejects with. ANY OTHER settlement error
-	 * rejects `.receipt` only: the iteration still ends cleanly. The governor sets this
+	 * rejects `.receipt` only: the iteration still ends cleanly. When the caller's own
+	 * loop body throws, for-await awaits `return()` but keeps the caller's throw and drops
+	 * the refusal, which then reaches `.receipt` only. The governor sets this
 	 * from `audit.failClosed`: there settlement can run (post the charge, or fail its
 	 * POST ambiguously) and THEN refuse, and a caller who catches the iteration without
 	 * awaiting `.receipt` must still hear of it. Off (the default), the last step is not
