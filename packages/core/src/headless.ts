@@ -1126,9 +1126,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 	// 2. Initialize subsystems
 	const vaultPath = vaultBase;
-	// The vault is owner-only: one an earlier version left group/world-readable is closed here,
-	// before anything is written to it (see securePrivateVault).
-	securePrivateVault(join(vaultBase, VAULT_DIR));
+	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
+	// version left group/world-readable is closed, before any writer touches it; one another user
+	// owns is refused (see securePrivateVault).
+	securePrivateVault(join(vaultBase, VAULT_DIR), { create: true });
 	const audit: AuditWriter = (isTestEnv ? opts?._audit : undefined) ?? createAuditWriter(vaultPath);
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);

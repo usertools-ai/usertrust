@@ -185,12 +185,21 @@ we removed it: `connectProxy()` now throws, and passing `proxy` to
 ship with real financial enforcement behind it. Until then: `dryRun` for
 explicit bypass in testing, a real TigerBeetle for production.
 
-## 10. On Windows, the vault folder's ACL decides who can read the vault
+## 10. Vault permissions stop at the vault's parent directory, and at Windows
 
 On Linux and macOS every directory usertrust creates in a vault is `0700` and
 every file `0600`, whatever the umask. A governor closes an existing `.usertrust/`
 that other users can read, and refuses one that another user owns: it compares
 the owner with the process's effective uid, and running as root is no exception.
+A governor creates an absent `.usertrust/` itself, exclusively, and then checks
+it like an existing one, so a `.usertrust/` that another user creates first is
+refused, not adopted. That holds in a shared parent directory that is sticky, such
+as `/tmp`, where only an entry's owner can rename or remove it. It cannot hold in
+a parent directory other users can write to that is NOT sticky: any of them can
+rename the vault away and put their own in its place after it was checked, and no
+check on a path prevents that. Keep vaults out of such parents; usertrust does
+not check a vault's parent directories.
+
 On Windows usertrust does not set or check permissions. POSIX modes do not map
 to Windows ACLs, and a mode check there would misreport who can read the vault.
 The vault folder inherits its ACL from the folder it is created in, and that ACL

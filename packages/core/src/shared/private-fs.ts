@@ -38,6 +38,21 @@ export function mkdirPrivate(dir: string): void {
 	mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
 }
 
+/**
+ * Creates a vault directory EXCLUSIVELY: its parents with `mkdir -p` (each one created is
+ * owner-only), the vault itself with a non-recursive mkdir. A directory someone else creates
+ * there first makes ours fail EEXIST rather than being adopted silently; EEXIST is carried on
+ * from, because what is there is then checked like any existing vault.
+ */
+function mkdirVault(vaultDir: string): void {
+	mkdirPrivate(dirname(vaultDir));
+	try {
+		mkdirSync(vaultDir, { mode: PRIVATE_DIR_MODE });
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+	}
+}
+
 const octal = (mode: number): string => (mode & 0o777).toString(8);
 
 /** What a non-directory is, in words. */
@@ -92,7 +107,10 @@ function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
 /**
  * Close a vault directory (`<vaultBase>/.usertrust`) to every user but its owner.
  *
- * Creates it 0700 when `create` is set and it is absent. An existing one with any group or
+ * With `create`, the vault is created first, EXCLUSIVELY (see {@link mkdirVault}), and then put
+ * through every check below like any existing vault: a directory another user created first, in
+ * a shared parent such as /tmp, is refused by the owner check rather than adopted. Without
+ * `create`, an absent vault is left absent. An existing one with any group or
  * other bit (a vault an earlier version created 0755, say) is tightened to 0700: the directory
  * is usertrust's own, and closing it closes every file under it, whatever their own modes. A
  * vault that cannot be closed is refused with the reason, never used world-readable. The vault
@@ -116,12 +134,14 @@ function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
  * open, and a different directory renamed into place fails the inode check. Both are refused.
  */
 export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }): void {
+	const create = opts?.create === true;
+	if (create) mkdirVault(vaultDir);
 	let st: Stats;
 	try {
 		st = lstatSync(vaultDir);
 	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-		if (opts?.create === true) mkdirPrivate(vaultDir);
+		// Absent: nothing to check, unless it was just created (then it vanished: say so).
+		if (create || (err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 		return;
 	}
 

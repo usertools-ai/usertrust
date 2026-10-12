@@ -23,7 +23,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAnchorEmitter, initAnchorIdentity } from "../../src/audit/anchor.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
@@ -49,6 +49,24 @@ vi.mock("tigerbeetle-node", () => ({
 	CreateAccountError: { exists: 1 },
 	amount_max: 0xffffffffffffffffffffffffffffffffn,
 }));
+
+/**
+ * Sees every `mkdirSync` before it runs, while a test sets `before`: the seam for asserting which
+ * mkdir creates a vault, and for racing a directory into place ahead of it. Pass-through otherwise.
+ */
+const mkdirHook = vi.hoisted(() => ({
+	before: undefined as ((path: string, opts: unknown) => void) | undefined,
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+	const real = await importOriginal<typeof import("node:fs")>();
+	const mkdirSync = ((path: import("node:fs").PathLike, opts?: unknown) => {
+		mkdirHook.before?.(String(path), opts);
+		return real.mkdirSync(path, opts as Parameters<typeof real.mkdirSync>[1]);
+	}) as typeof real.mkdirSync;
+	// The default export too, for a module that imports `fs` whole.
+	return { ...real, mkdirSync, default: { ...real, mkdirSync } };
+});
 
 interface Walk {
 	dirs: number;
@@ -107,6 +125,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	mkdirHook.before = undefined;
 	process.chdir(savedCwd);
 	process.umask(savedUmask);
 	for (const d of tracked.splice(0)) {
@@ -447,6 +466,68 @@ describe.skipIf(process.platform === "win32").each(openers)(
 			await open(root);
 			expect(existsSync(join(vaultPath, "audit", "events.jsonl"))).toBe(true);
 			expect(walkModes(vaultPath).loose).toEqual([]);
+		});
+	},
+);
+
+describe.skipIf(process.platform === "win32").each(openers)(
+	"a vault the governor creates, opened by %s",
+	(_name, open) => {
+		/** `path` is the vault or something inside it. */
+		const within = (vault: string, path: string): boolean =>
+			path === vault || path.startsWith(`${vault}${sep}`);
+
+		it("creates an absent vault itself, exclusively, before any writer touches it", async () => {
+			process.umask(0o022);
+			// Neither the vault nor its base exists yet.
+			const root = join(tmp("ut-perm-fresh-"), "tenant");
+			const vaultPath = join(root, VAULT_DIR);
+			const mkdirs: { path: string; recursive: boolean }[] = [];
+			mkdirHook.before = (path, opts) => {
+				if (!within(vaultPath, path)) return;
+				mkdirs.push({ path, recursive: (opts as { recursive?: boolean })?.recursive === true });
+			};
+			await open(root);
+			mkdirHook.before = undefined;
+			// The first mkdir to reach the vault is the governor's exclusive create of the vault
+			// itself: no writer's `mkdir -p` got there first and created it unchecked.
+			expect(mkdirs[0]).toEqual({ path: vaultPath, recursive: false });
+			expect(statSync(vaultPath).mode & 0o777).toBe(0o700);
+			expect(statSync(vaultPath).uid).toBe(process.geteuid?.());
+			expect(existsSync(join(vaultPath, "audit", "events.jsonl"))).toBe(true);
+			expect(walkModes(root).loose).toEqual([]);
+		});
+
+		it("refuses a directory another user creates first, changes nothing and writes nothing", async () => {
+			process.umask(0o022);
+			const root = tmp("ut-perm-race-");
+			const vaultPath = join(root, VAULT_DIR);
+			const owner = process.geteuid?.() as number;
+			// The race: the moment anything is about to create the vault, "another user" creates it
+			// first, owner-only. From then on this process answers to a different uid, so the
+			// directory that appeared is someone else's.
+			let as: ReturnType<typeof asAnotherUser> | undefined;
+			mkdirHook.before = (path) => {
+				if (as !== undefined || !within(vaultPath, path)) return;
+				as = asAnotherUser();
+				mkdirSync(vaultPath, { mode: 0o700 });
+			};
+			let refused: Error | undefined;
+			try {
+				refused = await open(root).then(
+					() => undefined,
+					(err: unknown) => err as Error,
+				);
+			} finally {
+				mkdirHook.before = undefined;
+				as?.restore();
+			}
+			expect(as).toBeDefined();
+			expect
+				.soft(refused?.message)
+				.toBe(`usertrust: ${foreignRefusal(vaultPath, owner, owner + 1)}`);
+			expect(statSync(vaultPath).mode & 0o777).toBe(0o700);
+			expect(readdirSync(vaultPath)).toEqual([]);
 		});
 	},
 );
