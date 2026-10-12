@@ -87,6 +87,31 @@ export const SettleRequestSchema = z.object({
 	// server strips this key, so the write silently bills at the 5-minute rate: a client
 	// sends it only to a server that lists `cache-write-1h` in /v1/health capabilities.
 	cacheWrite1hTokens: z.number().int().nonnegative().optional(),
+	// How many provider responses these counts sum (default 1): the plausibility ceiling is per response.
+	responses: z.number().int().positive().max(1_000_000).optional(),
+	// Tiers the caller REFUSED to state as a count (invalid, or above its per-response ceiling): a flag per tier whose
+	// value is the raw figure when representable. The settle charges the estimate when any is present.
+	refused: z
+		.object({
+			inputTokens: z.number().int().nonnegative().optional(),
+			outputTokens: z.number().int().nonnegative().optional(),
+			cacheReadTokens: z.number().int().nonnegative().optional(),
+			cacheWriteTokens: z.number().int().nonnegative().optional(),
+			cacheWrite1hTokens: z.number().int().nonnegative().optional(),
+		})
+		.strict()
+		.optional(),
+	// The largest single-response count per tier among those `responses` sums, held to the unscaled ceiling.
+	maxima: z
+		.object({
+			inputTokens: z.number().int().nonnegative().optional(),
+			outputTokens: z.number().int().nonnegative().optional(),
+			cacheReadTokens: z.number().int().nonnegative().optional(),
+			cacheWriteTokens: z.number().int().nonnegative().optional(),
+			cacheWrite1hTokens: z.number().int().nonnegative().optional(),
+		})
+		.strict()
+		.optional(),
 	chunksDelivered: z.number().int().nonnegative().optional(),
 	usageSource: z.enum(["provider", "estimated"]).optional(),
 	// Same silent-strip as the D4 cache tiers: computeMs is already a

@@ -314,6 +314,9 @@ const u = (input: number, output: number, cacheRead = 0, cacheWrite = 0): Usage 
 	cacheWrite,
 });
 
+// A variable specifier: the hook is plain .mjs with no declaration file, and a literal import would add a new typed error.
+const TRANSCRIPT_HOOK = "../hooks/transcript.mjs";
+
 const settles = () => requests.filter((r) => r.path === "/v1/settle");
 const authorizes = () => requests.filter((r) => r.path === "/v1/authorize");
 const aborts = () => requests.filter((r) => r.path === "/v1/abort");
@@ -520,6 +523,27 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 		// (Doubling the cache writes, as before, held 3 381.)
 		expect(windowHold(plain)).toBe(3_306);
 		expect(windowHold(plain)).toBeGreaterThanOrEqual(realCost);
+	});
+
+	describe("a window of several responses says how many it sums", () => {
+		it("sends `responses` for a multi-message settle and omits it for a single one", async () => {
+			await startServer(okResponder);
+			await writeMain([
+				...responseEntries("msg_a", SONNET, u(10, 20, 0, 0)),
+				...responseEntries("msg_b", SONNET, u(10, 20, 0, 0)),
+			]);
+			await run("stop.mjs", stopInput());
+			expect(settles()).toHaveLength(1);
+			expect(settles()[0]?.body).toMatchObject({ responses: 2 });
+		});
+
+		it("a single response carries no `responses` key", async () => {
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 0, 0)));
+			await run("stop.mjs", stopInput());
+			expect(settles()[0]?.body).not.toHaveProperty("responses");
+			expect(settles()[0]?.body).not.toHaveProperty("refused");
+		});
 	});
 
 	describe("the 1-hour share of the cache-write tier (#203)", () => {
@@ -3766,6 +3790,242 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 	});
 
 	describe("transcript mode", () => {
+		it("providerFigure: absent and null are 0; fractions round UP; refused figures count 0 and are FLAGGED, never a count", async () => {
+			const { providerFigure } = (await import(/* @vite-ignore */ TRANSCRIPT_HOOK)) as {
+				providerFigure: (v: unknown) => { count: number; refused: boolean; raw: number };
+			};
+			expect(providerFigure(undefined)).toMatchObject({ count: 0, refused: false });
+			expect(providerFigure(null)).toMatchObject({ count: 0, refused: false });
+			expect(providerFigure(0)).toMatchObject({ count: 0, refused: false });
+			expect(providerFigure(400)).toMatchObject({ count: 400, refused: false });
+			expect(providerFigure(400.5)).toMatchObject({ count: 401, refused: false }); // real usage, not a released hold
+			expect(providerFigure(100_000_000)).toMatchObject({ count: 100_000_000, refused: false }); // AT the ceiling
+			expect(providerFigure(100_000_000.5)).toMatchObject({
+				count: 0,
+				refused: true,
+				raw: 100_000_001,
+			});
+			expect(providerFigure(1e16)).toMatchObject({
+				count: 0,
+				refused: true,
+				raw: Number.MAX_SAFE_INTEGER,
+			});
+			for (const bad of [
+				Number.NaN,
+				Number.POSITIVE_INFINITY,
+				Number.NEGATIVE_INFINITY,
+				-1,
+				"abc",
+				"5",
+				{},
+				[],
+				true,
+			]) {
+				const f = providerFigure(bad);
+				expect(f.refused, String(bad)).toBe(true);
+				expect(f.count, String(bad)).toBe(0); // the sentinel never enters arithmetic
+			}
+		});
+
+		it("the ceiling parity: the plugin's per-response ceiling is core's", async () => {
+			const { PLAUSIBLE_TOKENS_PER_TIER } = (await import(/* @vite-ignore */ TRANSCRIPT_HOOK)) as {
+				PLAUSIBLE_TOKENS_PER_TIER: number;
+			};
+			const core = await import("../../core/src/ledger/usage.js");
+			expect(PLAUSIBLE_TOKENS_PER_TIER).toBe(core.MAX_PLAUSIBLE_TOKENS_PER_TIER);
+		});
+
+		it("a response over the ceiling is FLAGGED through the hold: journaled, listed back, settled; the HOLD is ordinary", async () => {
+			capabilities = ["refused"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain([
+				...responseEntries("msg_a", SONNET, u(150_000_000, 9)),
+				...responseEntries("msg_b", SONNET, u(0, 9)),
+			]);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			// the authorize hold is sized from COUNTS only: no absurd amount reaches it (no budget denial, no 400)
+			expect(Number(authorizes()[0]?.body.estimatedInputTokens)).toBeLessThan(100_000);
+			// the pending record carries the flag, not a count
+			expect((await record()).refused).toMatchObject({ inputTokens: 150_000_000 });
+			expect((await record()).inputTokens).toBe(0);
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
+				inputTokens: number;
+				refused?: Record<string, number>;
+			};
+			expect(body.refused).toMatchObject({ inputTokens: 150_000_000 });
+			expect(body.inputTokens).toBe(0); // arithmetic-safe: the refused tier counts 0
+		});
+
+		it("1e16 input_tokens in a single response: an ordinary authorize hold, then a flag on the settle", async () => {
+			capabilities = ["refused"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, { ...u(10, 20, 0, 0), input: 1e16 }));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(authorizes()).toHaveLength(1);
+			expect(Number(authorizes()[0]?.body.estimatedInputTokens)).toBeLessThan(100_000);
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
+				refused?: Record<string, number>;
+			};
+			expect(body.refused?.inputTokens).toBe(Number.MAX_SAFE_INTEGER);
+		});
+
+		it("a 1-hour breakdown of 1e16 above the write total is flagged (the clamp cannot hide it)", async () => {
+			capabilities = ["refused"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			const absurd: Usage = {
+				...u(10, 20, 0, 400),
+				cacheCreation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1e16 },
+			};
+			await writeMain(responseEntries("msg_a", SONNET, absurd));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
+				refused?: Record<string, number>;
+			};
+			expect(body.refused).toHaveProperty("cacheWrite1hTokens");
+		});
+
+		it("a bad 5-minute figure counts 0 for the subtraction: the remainder stays at the dearer 1-hour rate, and the call is flagged", async () => {
+			capabilities = ["cache-write-1h", "refused"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			// 400 written; the breakdown names only a 1-hour part (100) and a 5-minute part that is garbage
+			const entries = responseEntries("msg_a", SONNET, {
+				...u(10, 20, 0, 400),
+				cacheCreation: { ephemeral_1h_input_tokens: 100, ephemeral_5m_input_tokens: "x" as never },
+			});
+			await writeMain(entries);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as {
+				cacheWriteTokens: number;
+				cacheWrite1hTokens?: number;
+				refused?: Record<string, number>;
+			};
+			expect(body.refused).toHaveProperty("cacheWriteTokens");
+			// the unattributed remainder (400 - 0 - 100 = 300) is counted as 1-hour: 400, never a cheaper-rate split
+			expect(body.cacheWrite1hTokens).toBe(400);
+		});
+
+		it("a server WITHOUT the refused capability never receives zeroed counts for a refused window: they are withheld (the held estimate settles)", async () => {
+			capabilities = []; // an older server: it would strip `refused` and price the zeros at the floor
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain([
+				...responseEntries("msg_a", SONNET, u(150_000_000, 9)),
+				...responseEntries("msg_b", SONNET, u(5, 9)),
+			]);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as Record<
+				string,
+				unknown
+			>;
+			expect(body).toBeDefined();
+			for (const k of [
+				"inputTokens",
+				"outputTokens",
+				"cacheReadTokens",
+				"cacheWriteTokens",
+				"refused",
+			]) {
+				expect(body, k).not.toHaveProperty(k);
+			}
+			expect(body.usageSource).toBe("estimated");
+		});
+
+		it("with the capability unknown (the server cannot be asked), a refused window defers instead of settling blind", async () => {
+			capabilities = null;
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(150_000_000, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			expect(settles().find((x) => x.body.transferId === "tx_1")).toBeUndefined();
+			// The decision is taken BEFORE the claim: the hold is still the pending record, never claimed (`.settling`) and
+			// never journalled done, and its messages stay unaccounted. A decision after the claim would journal the deferral as
+			// done and the usage would be lost for good (the hold then expires uncharged).
+			const names = await readdir(stateDir);
+			expect(names).toContain(holdFile("tu_1", "tx_1"));
+			expect(names.filter((n) => n.endsWith(".settling") || n.endsWith(".done"))).toEqual([]);
+			expect((await readCursor()).accounted ?? []).not.toContain("msg_a");
+			// A later successful discovery sends them on the next settle.
+			capabilities = ["refused"];
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body as
+				| { refused?: Record<string, number> }
+				| undefined;
+			expect(body?.refused).toMatchObject({ inputTokens: 150_000_000 });
+		});
+
+		it("absent and null tiers are 0 and price normally: nothing is flagged", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 0, 0)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body;
+			expect(body).not.toHaveProperty("refused");
+			expect(body).toMatchObject({ inputTokens: 10, outputTokens: 20 });
+		});
+
+		it("a LEGACY cursor carrying rawMax / rawCacheWrite1hTokens over the ceiling migrates to flags on read", async () => {
+			capabilities = ["refused"];
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 0, 0)));
+			const legacy = {
+				v: 2,
+				byteOffset: 0,
+				nextSeq: 1,
+				partial: {
+					msg_a: {
+						n: 0,
+						model: SONNET,
+						synthetic: false,
+						complete: true,
+						claimed: false,
+						inputTokens: 0,
+						outputTokens: 20,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						cacheWrite1hTokens: 0,
+						rawMax: {
+							inputTokens: 150_000_000,
+							outputTokens: 0,
+							cacheReadTokens: 0,
+							cacheWriteTokens: 0,
+						},
+						rawCacheWrite1hTokens: 0,
+					},
+				},
+				accounted: [],
+				denied: [],
+				assigned: {},
+				authorizingAt: {},
+				estimateMode: false,
+				estimateReason: null,
+				lastModel: SONNET,
+				unresolved: {},
+			};
+			await mkdir(join(stateDir, "transcripts"), { recursive: true });
+			await writeFile(cursorPath(), JSON.stringify(legacy));
+			await run("stop.mjs", stopInput());
+			const body = settles()[0]?.body as { refused?: Record<string, number> };
+			expect(body.refused).toMatchObject({ inputTokens: 150_000_000 });
+		});
+
 		it("no key: an immediate re-fire settles the first hold's window ONCE at its counts, then holds afresh; nothing written off", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);
