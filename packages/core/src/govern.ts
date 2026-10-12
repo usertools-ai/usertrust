@@ -82,8 +82,10 @@ import {
 import {
 	fromAnthropicUsage,
 	fromProviderResponse,
+	type ImplausibleChecks,
 	implausibleUsageData,
 	MAX_PLAUSIBLE_TOKENS_PER_TIER,
+	mergeImplausible,
 	publishableUsageFields,
 	sanitizeUsage,
 	type UsageTier,
@@ -1187,6 +1189,25 @@ export async function runTeardownSteps(steps: ReadonlyArray<() => unknown>): Pro
 	}
 }
 
+/**
+ * A caller's action descriptor, read ONCE: each field is read a single time into a plain object
+ * the caller cannot reach. `governAction` reads the descriptor before the hold, again after
+ * `execute()` and after the settle claim, so a live one could size the hold at one cost and post
+ * another (an `execute()` that edits it), or throw from a getter between the settle claim and the
+ * POST. The same reason the LLM path serializes its request once. `params` is the caller's own
+ * object, by reference: the action runs on it, and redaction copies only the audit record.
+ */
+function snapshotActionDescriptor(descriptor: ActionDescriptor): ActionDescriptor {
+	const { kind, name, cost, params, actor } = descriptor;
+	return {
+		kind,
+		name,
+		cost,
+		...(params !== undefined ? { params } : {}),
+		...(actor !== undefined ? { actor } : {}),
+	};
+}
+
 // ── trust() ──
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
@@ -1323,6 +1344,28 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		costCalculator: scopedAnomalyCostCalculator(config),
 	});
 
+	// Under audit.failClosed, a writer that is ALREADY degraded when a call starts refuses the call
+	// before it does anything: no hold, no provider call or action, no spend, no audit append. A
+	// handle's degraded state lasts the client's whole life, so such a call was always going to be
+	// refused — and the post-settle checks below would refuse it only after its charge had posted.
+	// Those checks stay, for a writer that degrades DURING a call. Deliberately, a probe that throws
+	// is not read as degraded here: the call proceeds as before and the post-settle check reads the
+	// probe again and surfaces its error (the shipped writer's probe is a plain getter).
+	function refuseIfAuditDegradedAtStart(refused: string): void {
+		if (!config.audit.failClosed) return;
+		let degraded: boolean;
+		try {
+			degraded = audit.isDegraded();
+		} catch {
+			return;
+		}
+		if (degraded) {
+			throw new AuditDegradedError(
+				`this client's audit writer has been degraded since an earlier audit write failed (writeFailures=${audit.getWriteFailures()}), so ${refused} and nothing was charged. Fix the audit directory, then recreate the client`,
+			);
+		}
+	}
+
 	// 7. Two-phase intercept
 	async function interceptCall(
 		originalFn: (...args: unknown[]) => unknown,
@@ -1344,6 +1387,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		if (destroyed) {
 			throw new Error("TrustedClient has been destroyed");
 		}
+
+		refuseIfAuditDegradedAtStart("this call was refused before it reached the provider");
 
 		// Track in-flight calls so destroy() can wait for them
 		inFlightCount++;
@@ -1967,6 +2012,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							source: completion.usageReported ? "provider" : "estimated",
 						}),
 						completion.implausible,
+						completion.implausibleBy,
 					),
 					rateResolution.rates,
 					rateResolution.rateSource !== "table",
@@ -2386,12 +2432,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let accCacheWrite1h = 0;
 				let accUsageReported = false;
 				let accImplausible: Partial<Record<UsageTier, number>> | undefined;
-				const noteImplausible = (found: Partial<Record<UsageTier, number>> | undefined): void => {
-					if (found === undefined) return;
-					accImplausible = { ...accImplausible };
-					for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
-						accImplausible[tier] = Math.max(accImplausible[tier] ?? 0, value);
-					}
+				let accImplausibleBy: ImplausibleChecks | undefined;
+				const noteImplausible = (reading: {
+					implausible?: Partial<Record<UsageTier, number>> | undefined;
+					implausibleBy?: ImplausibleChecks | undefined;
+				}): void => {
+					({ implausible: accImplausible, implausibleBy: accImplausibleBy } = mergeImplausible(
+						accImplausible,
+						accImplausibleBy,
+						reading.implausible,
+						reading.implausibleBy,
+					));
 				};
 				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
 				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
@@ -2408,12 +2459,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					chunksDelivered,
 					usageReported: accUsageReported,
 					implausible: accImplausible,
+					implausibleBy: accImplausibleBy,
 				});
 
 				emitter.on("streamEvent", (event: unknown) => {
 					chunksDelivered++;
 					const tokens = extractAnthropicStreamUsage(event);
-					noteImplausible(tokens.implausible);
+					noteImplausible(tokens);
 					let deltaTokens = 0;
 					if (tokens.inputTokens > accInput) {
 						deltaTokens += tokens.inputTokens - accInput;
@@ -2490,7 +2542,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// zeroing it. Reported when EITHER source carried a real number;
 					// otherwise settle on the estimate.
 					const finalUsage = readFinalMessageUsage(msg);
-					noteImplausible(finalUsage.implausible);
+					noteImplausible(finalUsage);
 					const usageReported = finalUsage.reported || accUsageReported;
 					const completion: StreamCompletion = usageReported
 						? {
@@ -2504,6 +2556,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								chunksDelivered,
 								usageReported: true,
 								implausible: accImplausible,
+								implausibleBy: accImplausibleBy,
 							}
 						: {
 								usage: {
@@ -2515,6 +2568,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								chunksDelivered,
 								usageReported: false,
 								implausible: accImplausible,
+								implausibleBy: accImplausibleBy,
 							};
 					finalizeStreamSettle(completion)
 						.then(receiptResolve, receiptReject)
@@ -2575,6 +2629,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						usageReported: false,
 						// An absurd count seen on a streamEvent is not forgotten when only `end` arrives.
 						implausible: accImplausible,
+						implausibleBy: accImplausibleBy,
 					})
 						.then(receiptResolve, receiptReject)
 						.finally(releaseStreamCount);
@@ -3185,12 +3240,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// 7b. Action governance — simplified pipeline for non-LLM actions
 	async function governActionImpl<R>(
-		action: ActionDescriptor,
+		descriptor: ActionDescriptor,
 		execute: () => Promise<R>,
 	): Promise<GovernedActionResult<R>> {
 		if (destroyed) {
 			throw new Error("TrustedClient has been destroyed");
 		}
+
+		// Every read below is of this snapshot, never of the caller's live descriptor.
+		const action = snapshotActionDescriptor(descriptor);
 
 		// Validate cost to prevent budget inflation via negative values
 		if (!Number.isFinite(action.cost) || action.cost < 0) {
@@ -3198,6 +3256,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				`action.cost must be a non-negative finite number, got ${String(action.cost)}`,
 			);
 		}
+
+		// Again: a getter the snapshot read can have called destroy() since the first check.
+		if (destroyed) {
+			throw new Error("TrustedClient has been destroyed");
+		}
+
+		refuseIfAuditDegradedAtStart("this action was refused before it ran");
 
 		inFlightCount++;
 		let callAuditDegraded = false;
@@ -3451,6 +3516,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 			}
 
+			// A2, as on the LLM path: one finalize gate per hold, so it is settled XOR
+			// voided. A post-settle throw (the failClosed belt below) reaches the catch
+			// with the settle already claimed, and the catch must not void a hold whose
+			// commit and POST have run.
+			let finalizeState: "pending" | "settled" | "voided" = "pending";
+			function finalizeOnce(outcome: "settle" | "void"): boolean {
+				if (finalizeState !== "pending") return false;
+				finalizeState = outcome === "settle" ? "settled" : "voided";
+				return true;
+			}
+
 			try {
 				const result = await execute();
 
@@ -3503,6 +3579,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
 					);
 				}
+
+				// A2: claim the single settle outcome for this hold BEFORE money moves.
+				// Always granted here (no other terminal path runs for an action); the
+				// claim exists so a post-commit throw routes to the outer catch WITHOUT
+				// voiding an already-settled hold. Nothing between this claim and the POST
+				// below may throw: a throw there would leave the hold neither posted nor
+				// voided. action-finalize-gate.test.ts pins it.
+				finalizeOnce("settle");
 
 				// Release in-flight hold and commit budget under mutex — money moves only
 				// AFTER the action is audited.
@@ -3635,20 +3719,26 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// Circuit breaker: record failure
 				cb.recordFailure();
 
-				// VOID the pending hold
-				if (engine != null && !isDryRun) {
-					try {
-						await engine.voidPendingSpend(transferId);
-					} catch {
-						// Best-effort void
+				// VOID the pending hold — but ONLY if this hold has not already claimed a
+				// settle outcome (A2). A pre-commit throw (the action threw, the failClosed
+				// abort on a failed action audit) reaches here with the hold still PENDING
+				// and is voided once. A post-commit throw (the failClosed belt) has already
+				// settled: no void is sent against a posted transfer.
+				if (finalizeOnce("void")) {
+					if (engine != null && !isDryRun) {
+						try {
+							await engine.voidPendingSpend(transferId);
+						} catch {
+							// Best-effort void
+						}
 					}
-				}
 
-				if (proxyConn != null && !isDryRun) {
-					try {
-						await proxyConn.void(proxyTransferId ?? transferId);
-					} catch {
-						// Best-effort void
+					if (proxyConn != null && !isDryRun) {
+						try {
+							await proxyConn.void(proxyTransferId ?? transferId);
+						} catch {
+							// Best-effort void
+						}
 					}
 				}
 
@@ -4044,6 +4134,8 @@ function readFinalMessageUsage(msg: unknown): {
 	reported: boolean;
 	/** Tiers over the plausibility ceiling (the extractor zeroes them; the settle must still hear of them). */
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	/** Which check put each tier in `implausible`. */
+	implausibleBy?: ImplausibleChecks | undefined;
 } {
 	if (msg != null && typeof msg === "object") {
 		const usage = (msg as Record<string, unknown>).usage;
@@ -4093,6 +4185,7 @@ function readFinalMessageUsage(msg: unknown): {
 							: undefined,
 					reported: true,
 					implausible: cacheTiers.implausible,
+					implausibleBy: cacheTiers.implausibleBy,
 				};
 			}
 			// No usable headline counts: the cache readings are still reported, so an absurd tier is not lost.
@@ -4104,6 +4197,7 @@ function readFinalMessageUsage(msg: unknown): {
 				cacheWrite1hTokens: undefined,
 				reported: false,
 				implausible: cacheTiers.implausible,
+				implausibleBy: cacheTiers.implausibleBy,
 			};
 		}
 	}
@@ -4130,6 +4224,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 	cacheWriteTokens: number;
 	cacheWrite1hTokens: number;
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	implausibleBy?: ImplausibleChecks | undefined;
 } {
 	const none = {
 		inputTokens: 0,
@@ -4158,6 +4253,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 				cacheWriteTokens: tiers.cacheWriteTokens,
 				cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 				implausible: inAbsurd ? { ...tiers.implausible, inputTokens: inTok } : tiers.implausible,
+				implausibleBy: tiers.implausibleBy,
 			};
 		}
 	}
@@ -4173,6 +4269,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 			cacheWriteTokens: tiers.cacheWriteTokens,
 			cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 			implausible: outAbsurd ? { ...tiers.implausible, outputTokens: outTok } : tiers.implausible,
+			implausibleBy: tiers.implausibleBy,
 		};
 	}
 	return none;

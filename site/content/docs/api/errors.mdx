@@ -187,7 +187,7 @@ When TigerBeetle is unreachable, usertrust refuses to forward the request. This 
 
 ## AuditDegradedError
 
-Thrown (or flagged) when the audit chain write fails after the LLM call and ledger settlement both succeed.
+Thrown (or flagged) when the audit chain write fails after the LLM call and ledger settlement both succeed. Under `audit.failClosed`, a `trust()` client whose audit writer is already degraded also throws it at the start of a call, before anything is charged (below).
 
 ```typescript
 class AuditDegradedError extends Error {
@@ -197,7 +197,7 @@ class AuditDegradedError extends Error {
 }
 ```
 
-**When it fires:** After the LLM call succeeds and the ledger POST settles. This is failure mode 15.3. The response is still returned to the caller with `auditDegraded: true` on the receipt. The failed event is written to the dead-letter queue.
+**When it fires:** After the LLM call succeeds and the ledger POST settles. This is failure mode 15.3. The response is still returned to the caller with `auditDegraded: true` on the receipt. The failed event is written to the dead-letter queue. Under `audit.failClosed`, a `trust()` client whose audit writer was already degraded by an earlier failed write throws it at the start of every later call instead: the call is refused before it reaches the provider, and nothing is charged. Recreate the client after fixing the audit directory.
 
 **Hint:** `"Check disk space and permissions on the .usertrust/audit/ directory."`
 
@@ -234,7 +234,7 @@ class VaultNotInitializedError extends Error {
 | `AccountNotFoundError` | Pre-call | No | No |
 | `IdempotencyConflictError` | Pre-call | No | No |
 | `LedgerUnavailableError` | 15.4 | No | No |
-| `AuditDegradedError` | 15.3 | Yes (succeeded) | No (settled) |
+| `AuditDegradedError` | 15.3 | Yes (succeeded); No when `audit.failClosed` refuses a call on an already-degraded client | No (settled); nothing is charged on that refusal |
 | `VaultNotInitializedError` | Pre-call | No | No |
 
 All pre-call errors are thrown before any interaction with the LLM provider. No tokens are consumed and no budget is affected.
