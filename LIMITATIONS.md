@@ -42,7 +42,8 @@ drives the SDK's raw client, a `withOptions()` copy. It is not a sandbox against
 code that sets out to spend. A caller that keeps the raw client it constructed,
 builds a new one through `client.constructor`, through the governed client's own
 `trusted.constructor`, or through the prototype path
-`Object.getPrototypeOf(trusted).constructor`, or reads the API key off the
+`Object.getPrototypeOf(trusted).constructor` (closing that path would break
+`trusted instanceof Anthropic` / `OpenAI`), or reads the API key off the
 client (`client.apiKey` is a plain value and passes) is outside it, as with any
 wrapper. Deliberate bypass from your own code is out of scope: code that holds a
 provider key can always reach the provider. `usertrust-server` does not change
