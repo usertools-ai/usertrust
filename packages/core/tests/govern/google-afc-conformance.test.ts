@@ -672,9 +672,17 @@ type WireRound = { functionCalls?: Loose[]; text: string };
  * rows above, nothing inside the SDK is replaced, so its request converters run and the body is what the provider gets.
  */
 function wire(rounds: WireRound[] = [{ text: "done" }]) {
-	const requests: Array<{ url: string; body: Loose }> = [];
-	const fetchStub = async (url: unknown, init?: { body?: unknown }): Promise<Response> => {
-		requests.push({ url: String(url), body: JSON.parse(String(init?.body)) as Loose });
+	const requests: Array<{ url: string; body: Loose; apiClientHeader: string | null }> = [];
+	const fetchStub = async (
+		url: unknown,
+		init?: { body?: unknown; headers?: HeadersInit },
+	): Promise<Response> => {
+		requests.push({
+			url: String(url),
+			body: JSON.parse(String(init?.body)) as Loose,
+			// the SDK's client label, which carries `mcp_used/...` when it sees MCP tool usage
+			apiClientHeader: new Headers(init?.headers).get("x-goog-api-client"),
+		});
 		const r = rounds[Math.min(requests.length - 1, rounds.length - 1)] as WireRound;
 		const payload = {
 			candidates: [
@@ -810,6 +818,33 @@ function recordingAudit(): AuditWriter & { events: AppendEventInput[] } {
 		flush: async () => {},
 		release: () => {},
 	};
+}
+
+/**
+ * A data tool whose `inputSchema` (the SDK's MCP-usage test is `'inputSchema' in tool`) structuredClone would not carry:
+ * inherited, holding `undefined` or an object, or a non-enumerable own property. Each also declares a function.
+ */
+const HIDDEN_INPUT_SCHEMA: Array<[string, () => object]> = [
+	[
+		"an INHERITED inputSchema holding undefined",
+		() => Object.assign(Object.create({ inputSchema: undefined }), declaresLookup()),
+	],
+	[
+		"an INHERITED inputSchema holding an object",
+		() => Object.assign(Object.create({ inputSchema: { type: "object" } }), declaresLookup()),
+	],
+	[
+		"a NON-ENUMERABLE own inputSchema",
+		() =>
+			Object.defineProperty(declaresLookup(), "inputSchema", {
+				value: { type: "object" },
+				enumerable: false,
+			}),
+	],
+];
+
+function declaresLookup(): Loose {
+	return { functionDeclarations: [{ name: "lookup" }] };
 }
 
 /** A declaration as a class instance: `name` and `description` are PROTOTYPE getters, which structuredClone drops. */
@@ -1045,6 +1080,27 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
 			expect(auditKinds).not.toContain("policy_denied");
 		});
+
+		for (const [shape, makeTool] of HIDDEN_INPUT_SCHEMA) {
+			it(`${method}: a data tool with ${shape} keeps the SDK's MCP usage header, and the same body`, async () => {
+				const makeParams = () => ({
+					model: "gemini-2.5-flash",
+					contents: "go",
+					config: { tools: [makeTool()] },
+				});
+				const { raw, rawResult, gov, govResult, auditKinds } = await both(method, makeParams);
+
+				expect(rawResult).toBe("ok");
+				expect(govResult).toBe("ok");
+				expect(raw.requests).toHaveLength(1);
+				expect(gov.requests).toHaveLength(1);
+				// natively `'inputSchema' in tool` is true, so the SDK labels the request as MCP usage
+				expect(raw.requests[0]?.apiClientHeader).toContain("mcp_used/");
+				expect(gov.requests[0]?.apiClientHeader).toBe(raw.requests[0]?.apiClientHeader);
+				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+				expect(auditKinds).not.toContain("policy_denied");
+			});
+		}
 	}
 
 	it("generateContent with a callable tool: the governed loop's EVERY round carries the class-instance functionCallingConfig, as the SDK's own loop does", async () => {

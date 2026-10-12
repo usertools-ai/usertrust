@@ -366,13 +366,21 @@ class UncloneableAfcInput {
  * propagates, and the snapshot turns it into "indeterminate" (an audited refusal).
  */
 function captureOnce(obj: unknown, key: string, at: string): unknown {
+	return captureField(obj, key, at)?.value;
+}
+
+/**
+ * `captureOnce`, telling a key that is PRESENT (own or inherited, whatever its value,
+ * `undefined` included: what `key in obj` reports) from one that is absent (`undefined`).
+ */
+function captureField(obj: unknown, key: string, at: string): { value: unknown } | undefined {
 	if (obj == null) return undefined;
 	for (let o: object | null = Object(obj); o !== null; o = Object.getPrototypeOf(o)) {
 		rejectProxy(o, o === obj ? at : `${at} (its prototype chain)`);
 		const d = Object.getOwnPropertyDescriptor(o, key);
 		if (d === undefined) continue;
-		if ("value" in d) return d.value;
-		return d.get === undefined ? undefined : d.get.call(obj);
+		if ("value" in d) return { value: d.value };
+		return { value: d.get === undefined ? undefined : d.get.call(obj) };
 	}
 	return undefined;
 }
@@ -506,7 +514,8 @@ function refuseLossyClone(root: unknown, rootAt: string): void {
  * A non-callable tool as data WE own. Its own enumerable string-keyed properties are read
  * ONCE each (an accessor's getter on the original receiver), as `structuredClone(tool)`
  * would read them; every field in SDK_TOOL_FIELDS that those would not carry (inherited, or
- * non-enumerable own) is CAPTURED once (`captureOnce`); all are set as enumerable own data
+ * non-enumerable own) is CAPTURED once (`captureField`; a present key is carried even when
+ * it holds `undefined`, as `in` sees it); all are set as enumerable own data
  * on a plain object, which is then structuredClone'd. So the clone holds every field the SDK
  * reads, `functionDeclarations` included, and the verdict, which reads the clone, sees what
  * the SDK will see: a declarations getter beside a callable tool is the SDK's own local
@@ -537,8 +546,12 @@ function cloneDataTool(tool: unknown, at: string): unknown {
 	}
 	for (const key of SDK_TOOL_FIELDS) {
 		if (Object.hasOwn(source, key)) continue; // an own enumerable field, read above
-		const value = captureOnce(tool, key, at);
-		if (value !== undefined) setData(source, key, value);
+		// PRESENCE is carried, not only a defined value: the SDK tests `'inputSchema' in tool`
+		// (the MCP usage header), which a present key holding `undefined` passes. For every
+		// other field the SDK reads the value (`!= null` / `!== undefined`), and JSON drops an
+		// undefined one, so carrying it changes nothing there.
+		const field = captureField(tool, key, at);
+		if (field !== undefined) setData(source, key, field.value);
 	}
 	for (const key of SDK_TOOL_FIELDS) {
 		if (Object.hasOwn(source, key)) refuseLossyClone(source[key], `${at}.${key}`);
