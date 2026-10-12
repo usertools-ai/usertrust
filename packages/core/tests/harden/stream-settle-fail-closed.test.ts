@@ -9,10 +9,11 @@
  *
  * That rejection used to reach the caller ONLY through `.receipt`, which a caller who
  * catches the iteration need not await (and which can no longer go unhandled). So under
- * failClosed the generic stream path now also ends the ITERATION with the error: the
+ * failClosed the generic stream path now also ends the ITERATION with that error: the
  * final step (or the `return()` an early `break` drives) waits for settlement and
- * throws its failure. With failClosed off, nothing changes: the loop ends at once and
- * settlement stays in the background.
+ * throws it if it is the audit refusal. Any other settlement error rejects `.receipt`
+ * only, and the loop ends cleanly. With failClosed off, nothing changes: the loop ends at
+ * once and settlement stays in the background.
  */
 
 import { randomUUID } from "node:crypto";
@@ -117,8 +118,12 @@ function makeEngine(opts: { gatePost?: boolean; failPost?: boolean } = {}) {
 	return { engine, release, posted: () => posted };
 }
 
-/** An audit writer whose `llm_call` write fails, as audit-fail-closed.test.ts degrades it. */
-function makeAudit(opts: { failLlmCall: boolean }): AuditWriter {
+/**
+ * An audit writer whose `llm_call` write fails, as audit-fail-closed.test.ts degrades it.
+ * `probeFails` makes its `isDegraded()` probe throw instead: settlement then rejects with
+ * an error that is NOT the audit refusal (failClosed reads that probe after the POST).
+ */
+function makeAudit(opts: { failLlmCall: boolean; probeFails?: Error }): AuditWriter {
 	let degraded = false;
 	return {
 		appendEvent: vi.fn(async (input: AppendEventInput): Promise<AuditEvent> => {
@@ -137,7 +142,10 @@ function makeAudit(opts: { failLlmCall: boolean }): AuditWriter {
 			};
 		}),
 		getWriteFailures: vi.fn(() => (degraded ? 1 : 0)),
-		isDegraded: vi.fn(() => degraded),
+		isDegraded: vi.fn(() => {
+			if (opts.probeFails !== undefined) throw opts.probeFails;
+			return degraded;
+		}),
 		flush: vi.fn(async () => {}),
 		release: vi.fn(),
 	};
@@ -329,6 +337,44 @@ describe("a completed stream whose settlement audit fails (audit.failClosed)", (
 		expect(caught).toBeInstanceOf(AuditDegradedError);
 		await expect(stream.receipt).rejects.toBe(caught);
 		expect(engine.postPendingSpend).toHaveBeenCalledTimes(1);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(unhandled).toEqual([]);
+		await governed.destroy();
+	});
+
+	it("a settle rejection that is NOT the audit refusal rejects .receipt only: the loop ends cleanly", async () => {
+		// The audit's writes succeed; only its degraded probe throws. Settlement has claimed
+		// the terminal and posted, then rejects with a plain error. Only AuditDegradedError
+		// may end the iteration, so this one reaches the caller through .receipt alone.
+		const probeError = new TypeError("audit probe failed");
+		const { engine } = makeEngine();
+		const { governed, stream } = await governedStream(
+			true,
+			engine,
+			makeAudit({ failLlmCall: false, probeFails: probeError }),
+		);
+		expect(await iterate(stream)).toBeUndefined();
+		await expect(stream.receipt).rejects.toBe(probeError);
+		await settled();
+		expect(engine.postPendingSpend).toHaveBeenCalledTimes(1);
+		// finalizeOnce("settle") claimed the terminal, and the loop did not throw: no void.
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(unhandled).toEqual([]);
+		await governed.destroy();
+	});
+
+	it("an audit refusal AND a failing probe: the refusal wins, and ends the iteration", async () => {
+		// failClosed reads `callAuditDegraded || audit.isDegraded()`: a failed llm_call
+		// write short-circuits it, so the probe is never read and AuditDegradedError wins.
+		const { engine } = makeEngine();
+		const { governed, stream } = await governedStream(
+			true,
+			engine,
+			makeAudit({ failLlmCall: true, probeFails: new TypeError("audit probe failed") }),
+		);
+		const caught = await iterate(stream);
+		expect(caught).toBeInstanceOf(AuditDegradedError);
+		await expect(stream.receipt).rejects.toBe(caught);
 		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
 		expect(unhandled).toEqual([]);
 		await governed.destroy();

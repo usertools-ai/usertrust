@@ -44,6 +44,7 @@ import {
 	fromOpenAICompletionsUsage,
 	fromOpenAIResponsesUsage,
 } from "./ledger/usage.js";
+import { AuditDegradedError } from "./shared/errors.js";
 import type { LLMClientKind, TrustReceipt } from "./shared/types.js";
 
 // ── Public types ──
@@ -91,7 +92,8 @@ export interface GovernedStream<T> extends AsyncIterable<T> {
 	 * settles and is charged. Also rejects when settlement itself is refused after it ran
 	 * (`AuditDegradedError`, under `audit.failClosed`): the charge posted, or its POST
 	 * failed and may still post, so the work may be billed. The governor then throws that
-	 * error from the iteration too (`surfaceSettleFailure`). Never an unhandled rejection.
+	 * error from the iteration too (`surfaceAuditRefusal`); any OTHER settlement error
+	 * rejects only `.receipt`. Never an unhandled rejection.
 	 */
 	receipt: Promise<TrustReceipt>;
 }
@@ -407,8 +409,9 @@ async function* wrapStreamImpl<T>(
 		// `.return()`) both settle here. A thrown error already ran `onError` and set
 		// `errored`, so it is the only path that skips settlement (it voids instead).
 		//
-		// A settlement that returns a promise is awaited, and its failure thrown from here,
-		// so it ends the caller's iteration. `errored` stays false: nothing voids, because
+		// A settlement that returns a promise is awaited, and a rejection of THAT promise is
+		// thrown from here, so it ends the caller's iteration (createGovernedStream decides
+		// which settlement errors reach it). `errored` stays false: nothing voids, because
 		// a settlement that got this far may already have posted the charge.
 		if (!errored) {
 			const settling = onComplete({ usage: snapshot(), chunksDelivered, usageReported });
@@ -429,15 +432,17 @@ async function* wrapStreamImpl<T>(
  */
 export interface GovernedStreamOptions {
 	/**
-	 * A settlement failure also ends the caller's ITERATION, not only `.receipt`. The
-	 * last step (the final `next()`, or the `return()` an early `break` drives) waits for
-	 * settlement, and if it rejects, throws the same error `.receipt` rejects with.
-	 * The governor sets it from `audit.failClosed`: there a settlement can run (post the
-	 * charge, or fail its POST ambiguously) and THEN refuse (`AuditDegradedError`), and a
-	 * caller who catches the iteration without awaiting `.receipt` must still hear of it. Off (the default),
-	 * the last step is not delayed and settlement runs in the background.
+	 * The audit refusal (`AuditDegradedError`) also ends the caller's ITERATION, not only
+	 * `.receipt`. The last step (the final `next()`, or the `return()` an early `break`
+	 * drives) waits for settlement; if settlement rejects with `AuditDegradedError`, that
+	 * step throws it, the same error `.receipt` rejects with. ANY OTHER settlement error
+	 * rejects `.receipt` only: the iteration still ends cleanly. The governor sets this
+	 * from `audit.failClosed`: there settlement can run (post the charge, or fail its
+	 * POST ambiguously) and THEN refuse, and a caller who catches the iteration without
+	 * awaiting `.receipt` must still hear of it. Off (the default), the last step is not
+	 * delayed and settlement runs in the background.
 	 */
-	surfaceSettleFailure?: boolean;
+	surfaceAuditRefusal?: boolean;
 }
 
 export function createGovernedStream<T>(
@@ -468,11 +473,13 @@ export function createGovernedStream<T>(
 		stream,
 		kind,
 		(completion) => {
-			if (options.surfaceSettleFailure === true) {
-				// Returned, so wrapStream awaits it and throws its failure from the iteration.
+			if (options.surfaceAuditRefusal === true) {
+				// Returned, so wrapStream awaits it. Only the audit refusal is rethrown, and so
+				// thrown from the iteration; any other settlement error rejects `.receipt`
+				// (whose pre-attached catch keeps it handled) and the iteration ends cleanly.
 				return resolveReceipt(completion).then(receiptResolve, (err: unknown) => {
 					receiptReject(err);
-					throw err;
+					if (err instanceof AuditDegradedError) throw err;
 				});
 			}
 			resolveReceipt(completion)
