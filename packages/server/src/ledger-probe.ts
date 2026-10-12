@@ -14,9 +14,9 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defineConfig, type TrustConfig, VAULT_DIR } from "usertrust";
+import { defineConfig, kernelVaultBase, type TrustConfig, VAULT_DIR } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
 import { tenantVaultBase } from "./pool.js";
 
@@ -63,9 +63,19 @@ const ABSENT_FILE_BUDGET = 1;
  * gives a file no default budget, so a file without one, for a tenant with none, fails
  * here at start rather than at that tenant's first request. With NO file, the core's
  * defaults apply. Parsed by the core's own schema (`defineConfig`).
+ *
+ * The vault base is resolved as `createGovernor` resolves it, `resolve(kernelVaultBase(...))`,
+ * never `join`ed: `join` folds a `..` in `stateDir` lexically, and would read the config, and so
+ * probe the ledger, of a directory the governor never uses. A base the governor would refuse by
+ * name is refused here by the same words.
  */
 async function tenantLedger(config: ServerConfig, tenant: TenantConfig): Promise<LedgerTarget> {
-	const vaultBase = tenantVaultBase(config, tenant);
+	let vaultBase: string;
+	try {
+		vaultBase = resolve(kernelVaultBase(tenantVaultBase(config, tenant)));
+	} catch (err) {
+		throw new Error(`tenant ${tenant.id}: ${err instanceof Error ? err.message : String(err)}`);
+	}
 	const configPath = tenant.configPath ?? join(vaultBase, VAULT_DIR, "usertrust.config.json");
 	try {
 		let candidate: Record<string, unknown>;
