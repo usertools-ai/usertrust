@@ -72,7 +72,7 @@ The ledger is unreachable before the LLM call starts. usertrust throws a `Ledger
 
 ### Streaming Failure
 
-The LLM stream starts successfully but errors mid-stream. The pending hold is voided, and the governance promise rejects. Partial stream content may have already been consumed by the caller.
+The LLM stream starts successfully but errors mid-stream, and its iteration throws (a cut connection, or an error event the SDK throws). The pending hold is voided, and the governance promise rejects. Partial stream content may have already been consumed by the caller. A throw from the caller's own loop body is not a streaming failure: the early exit settles the consumed usage, and it is charged. See [Streaming](/docs/api/trust#streaming) for the cases that are charged.
 
 ## The TigerBeetle Ledger
 

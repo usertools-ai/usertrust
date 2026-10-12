@@ -205,6 +205,56 @@ describe("a completed stream whose settlement audit fails (audit.failClosed)", (
 
 	const settled = () => new Promise((resolve) => setTimeout(resolve, 50));
 
+	/** A loop whose BODY (the caller's own code) throws `own` after the first chunk. */
+	async function iterateAndThrow(stream: AsyncIterable<unknown>, own: Error): Promise<unknown> {
+		try {
+			for await (const _ of stream) {
+				throw own;
+			}
+			return undefined;
+		} catch (err) {
+			return err;
+		}
+	}
+
+	it("the caller's own loop body throws: an early exit, so it SETTLES and is charged", async () => {
+		// Not a stream failure: for-await calls return() on the governed stream, which
+		// settles what was consumed, exactly like a `break`. Nothing is voided.
+		const own = new Error("the caller's handler failed");
+		const { engine } = makeEngine();
+		const { governed, stream } = await governedStream(
+			false,
+			engine,
+			makeAudit({ failLlmCall: false }),
+		);
+		expect(await iterateAndThrow(stream, own)).toBe(own);
+		const receipt = await stream.receipt;
+		expect(receipt.settled).toBe(true);
+		expect(engine.postPendingSpend).toHaveBeenCalledTimes(1);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(unhandled).toEqual([]);
+		await governed.destroy();
+	});
+
+	it("the caller's loop body throws under failClosed with a degraded audit: the caller's own error wins", async () => {
+		// The refusal is thrown from return(), during an abrupt exit the caller's throw
+		// started. for-await awaits return() (so settlement runs) and then SUPPRESSES its
+		// rejection in favour of the original throw. The refusal reaches .receipt only.
+		const own = new Error("the caller's handler failed");
+		const { engine } = makeEngine();
+		const { governed, stream } = await governedStream(
+			true,
+			engine,
+			makeAudit({ failLlmCall: true }),
+		);
+		expect(await iterateAndThrow(stream, own)).toBe(own);
+		await expect(stream.receipt).rejects.toBeInstanceOf(AuditDegradedError);
+		expect(engine.postPendingSpend).toHaveBeenCalledTimes(1);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(unhandled).toEqual([]);
+		await governed.destroy();
+	});
+
 	it("the charge posts, nothing is voided, and .receipt rejects with AuditDegradedError", async () => {
 		const { engine } = makeEngine();
 		const { governed, stream } = await governedStream(

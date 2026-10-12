@@ -120,8 +120,8 @@ try {
   // The settled receipt, after the stream ends
   const receipt = await response.receipt;
 } catch (err) {
-  // A stream that failed mid-way: voided, nothing charged.
-  // An AuditDegradedError (audit.failClosed): settlement ran first, may be billed.
+  // This catch also covers your own code in the loop, so it cannot say what the
+  // error cost: see Streaming in the trust() docs for how to tell.
 }
 ```
 
