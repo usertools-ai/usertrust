@@ -5,7 +5,7 @@ plugin marketplace (`/plugin marketplace add usertools-ai/usertrust`), not from
 npm, and its version is its own: the `usertrust` packages and their
 [changelog](../../CHANGELOG.md) are versioned separately.
 
-## [Unreleased]
+## [3.0.1] - 2026-10-12
 
 ### Fixed
 
