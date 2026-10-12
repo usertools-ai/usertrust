@@ -3827,14 +3827,27 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// called, so there is nothing for the boundary to sit outside of or before. Async,
 	// because the append is: the stand-in rejects rather than throws, and is counted
 	// in-flight so destroy() waits for the append before releasing the writer.
+	// The start every Google entry point shares, in interceptCall's order: destroyed, then
+	// the pre-degraded audit refusal. The Google traps run it BEFORE their AFC gate, so a
+	// pre-degraded client evaluates no gate at all (the gate's snapshot and verdict read
+	// the caller's params, and its refusal would attempt an append); refuseUngovernedMethod
+	// runs it again for the refused-method stand-ins, which reach it without a trap.
+	function preflightGoogleCall(): void {
+		if (destroyed) {
+			throw new Error("TrustedClient has been destroyed");
+		}
+		refuseIfAuditDegradedAtStart("this call was refused before it reached the provider");
+	}
+
 	async function refuseUngovernedMethod(
 		path: string,
 		args: unknown[],
 		error: PolicyDeniedError = ungovernedGoogleMethodError(path),
 	): Promise<never> {
-		if (destroyed) {
-			throw new Error("TrustedClient has been destroyed");
-		}
+		// The same start as interceptCall: under audit.failClosed, a writer already degraded
+		// refuses here with AuditDegradedError, before attribution, any read of `args` or any
+		// append (no gate runs, so there is no denial to record).
+		preflightGoogleCall();
 		// The ALS read happens here, synchronously, in the caller's own context (see
 		// the ALS-discipline note in interceptCall). Only the LABEL is carried: a
 		// refusal debits no envelope, so it has no use for the envelope account and
@@ -3926,6 +3939,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			destroyFn,
 			governActionImpl,
 			refuseUngovernedMethod,
+			preflightGoogleCall,
 		);
 	}
 
@@ -5299,6 +5313,7 @@ function buildGoogleProxy<T>(
 	destroy: () => Promise<void>,
 	governAction: GovernActionFn,
 	refuse: RefuseFn,
+	preflight: () => void,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const models = original.models as Record<string, unknown>;
@@ -5316,6 +5331,7 @@ function buildGoogleProxy<T>(
 		get(target, prop, receiver) {
 			if (prop === "generateContent") {
 				return async (...args: unknown[]) => {
+					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
 					// ── AFC gate: fail closed until each AFC round is metered ──
 					// (snapshots args[0]: what is forwarded is what was checked)
 					const afcRefusal = googleAfcGate(args, "generateContent");
@@ -5328,6 +5344,7 @@ function buildGoogleProxy<T>(
 			}
 			if (prop === "generateContentStream" && originalGenerateStream !== undefined) {
 				return async (...args: unknown[]) => {
+					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
 					// ── AFC gate: fail closed until each AFC round is metered ──
 					// (snapshots args[0]: what is forwarded is what was checked)
 					const afcRefusal = googleAfcGate(args, "generateContentStream");

@@ -24,7 +24,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { GOOGLE_REFUSED_METHODS, type TrustEngine, trust } from "../../src/govern.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
-import { InsufficientBalanceError, PolicyDeniedError } from "../../src/shared/errors.js";
+import {
+	AuditDegradedError,
+	InsufficientBalanceError,
+	PolicyDeniedError,
+} from "../../src/shared/errors.js";
 import type { AuditEvent, TrustReceipt } from "../../src/shared/types.js";
 
 vi.mock("tigerbeetle-node", () => ({
@@ -638,12 +642,17 @@ describe("Google billable methods usertrust does not govern are refused", () => 
 			// PolicyDeniedError with `auditDegraded`, never an AuditDegradedError.
 			writeVaultConfig(tmpVault, { budget: 50_000, audit: { failClosed } });
 			const { client, spies } = makeGoogleClient();
+			// The writer is healthy when the call starts and fails DURING it (this denial's
+			// append). A writer already degraded at the start is refused earlier, with
+			// AuditDegradedError, under failClosed: see the pre-degraded rows below.
+			let failures = 0;
 			const failingAudit: AuditWriter = {
 				appendEvent: vi.fn(async () => {
+					failures++;
 					throw new Error("disk full");
 				}),
-				getWriteFailures: vi.fn(() => 1),
-				isDegraded: vi.fn(() => true),
+				getWriteFailures: vi.fn(() => failures),
+				isDegraded: vi.fn(() => failures > 0),
 				flush: vi.fn(async () => {}),
 				release: vi.fn(),
 			};
@@ -1424,4 +1433,150 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 			await destroy(governed);
 		});
 	}
+});
+
+// ── A pre-degraded audit writer under failClosed refuses before any Google gate ──
+
+describe("audit.failClosed: a client already degraded refuses Google refusals before they run", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	/** A writer that is ALREADY degraded (as after an earlier failed write); appends are spied. */
+	function degradedWriter() {
+		const appendEvent = vi.fn(
+			async (input: AppendEventInput): Promise<AuditEvent> => ({
+				id: randomUUID(),
+				timestamp: new Date().toISOString(),
+				previousHash: "0".repeat(64),
+				hash: "b".repeat(64),
+				kind: input.kind,
+				actor: input.actor,
+				data: input.data,
+			}),
+		);
+		const writer: AuditWriter = {
+			appendEvent,
+			getWriteFailures: vi.fn(() => 1),
+			isDegraded: vi.fn(() => true),
+			flush: vi.fn(async () => {}),
+			release: vi.fn(),
+		};
+		return { writer, appendEvent };
+	}
+
+	const CASES: Array<[string, (governed: unknown) => Promise<unknown>]> = [
+		[
+			"(a) a refused Google method",
+			(governed) =>
+				(
+					governed as { models: { embedContent(p: unknown): Promise<unknown> } }
+				).models.embedContent({
+					model: "gemini-embedding-001",
+				}),
+		],
+		[
+			"(b) generateContent with a callable tool (the AFC refusal)",
+			(governed) =>
+				(
+					governed as { models: { generateContent(p: unknown): Promise<unknown> } }
+				).models.generateContent(afcParams({ tools: [callableTool()] })),
+		],
+		[
+			"(b) generateContentStream with a callable tool (the AFC refusal)",
+			(governed) =>
+				(
+					governed as { models: { generateContentStream(p: unknown): Promise<unknown> } }
+				).models.generateContentStream(afcParams({ tools: [callableTool()] })),
+		],
+	];
+
+	it.each(CASES)(
+		"%s rejects with AuditDegradedError: no append, no hold, no SDK call",
+		async (_, call) => {
+			writeVaultConfig(tmpVault, { budget: 50_000, audit: { failClosed: true } });
+			const engine = makeMockEngine();
+			const { writer, appendEvent } = degradedWriter();
+			const { client, spies, generateContentStream } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: writer,
+			});
+
+			const err = await call(governed).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+			expect(err).toBeInstanceOf(AuditDegradedError);
+			expect(err).not.toBeInstanceOf(PolicyDeniedError);
+			expect((err as Error).message).toContain("refused before it reached the provider");
+			expect(appendEvent).not.toHaveBeenCalled();
+			expect(engine.spendPending).not.toHaveBeenCalled();
+			expect(spies.models.embedContent).not.toHaveBeenCalled();
+			expect(client.models.generateContent).not.toHaveBeenCalled();
+			expect(generateContentStream).not.toHaveBeenCalled();
+
+			await destroy(governed);
+		},
+	);
+
+	it("the AFC gate itself is not evaluated: no snapshot is built (a nested getter a clone would read never runs)", async () => {
+		writeVaultConfig(tmpVault, { budget: 50_000, audit: { failClosed: true } });
+		const { writer, appendEvent } = degradedWriter();
+		const { client } = makeGoogleClient();
+		const governed = await trust(client, { dryRun: true, vaultBase: tmpVault, _audit: writer });
+		const nestedGetter = vi.fn(() => "x");
+		const dataTool = {
+			googleSearch: Object.defineProperty({}, "x", { get: nestedGetter, enumerable: true }),
+		};
+
+		const err = await governed.models.generateContent(afcParams({ tools: [dataTool] })).then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+
+		expect(err).toBeInstanceOf(AuditDegradedError);
+		expect(nestedGetter).not.toHaveBeenCalled();
+		expect(appendEvent).not.toHaveBeenCalled();
+		expect(client.models.generateContent).not.toHaveBeenCalled();
+
+		await destroy(governed);
+	});
+
+	it.each(CASES)(
+		"(c) failClosed OFF: %s is still the PolicyDeniedError it was",
+		async (_, call) => {
+			writeVaultConfig(tmpVault, { budget: 50_000, audit: { failClosed: false } });
+			const engine = makeMockEngine();
+			const { writer, appendEvent } = degradedWriter();
+			const { client, generateContentStream } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: writer,
+			});
+
+			const err = await call(governed).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect(appendEvent).toHaveBeenCalledOnce();
+			expect(appendEvent.mock.calls[0]?.[0].kind).toBe("policy_denied");
+			expect(engine.spendPending).not.toHaveBeenCalled();
+			expect(client.models.generateContent).not.toHaveBeenCalled();
+			expect(generateContentStream).not.toHaveBeenCalled();
+
+			await destroy(governed);
+		},
+	);
 });
