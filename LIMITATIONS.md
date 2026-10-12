@@ -97,7 +97,7 @@ one log, refused the same way.
 
 **A second process on the same vault cannot write to it.** Each of its audit
 appends fails; it never forks the chain. Its calls still settle, and every event that
-misses the chain is reported: the receipt carries `auditDegraded`, the event goes to
+misses the chain is reported: the receipt carries `auditDegraded` (a failed warn-mode `injection_detected` append is the exception: it is dead-lettered but leaves the receipt unmarked), the event goes to
 `.usertrust/dlq/dead-letters.jsonl` (when that write succeeds), the process gets a `USERTRUST_AUDIT_DEGRADED`
 warning (at the first failure, and with the count when the client is destroyed), and
 `usertrust verify` reports the vault INCOMPLETE and exits 1 for a dead-lettered event (if the dead-letter write itself fails and leaves no bytes, for instance on a full disk, neither `verify` nor `health` sees the gap; a partial line left by a short write counts as an unreadable entry, so the vault reads INCOMPLETE). A `trust()` client with
