@@ -929,7 +929,8 @@ describe("merging implausible readings keeps which check fired first", () => {
 		);
 		expect(second.implausible).toEqual({ outputTokens: 120_000_000, inputTokens: 150_000_000 });
 		expect(second.implausibleBy).toEqual({ outputTokens: "refused", inputTokens: "refused" });
-		// A tier first seen UNLABELLED (a sum) stays a sum when a later reading labels it.
+		// A tier first seen UNLABELLED (a sum) takes a later "refused": a figure refused on its own outranks the
+		// aggregate check, the one pairing where the first label does not win.
 		const sum = mergeImplausible(undefined, undefined, { outputTokens: 120_000_000 }, undefined);
 		const later = mergeImplausible(
 			sum.implausible,
@@ -939,7 +940,23 @@ describe("merging implausible readings keeps which check fired first", () => {
 				outputTokens: "refused",
 			},
 		);
-		expect(later.implausibleBy?.outputTokens).toBeUndefined();
+		expect(later.implausibleBy?.outputTokens).toBe("refused");
+	});
+
+	it("every other pairing keeps the FIRST label: only refused outranks sum", () => {
+		type Check = "sum" | "maximum" | "refused";
+		const merge = (first: Check, then: Check) => {
+			const label = (c: Check) => (c === "sum" ? undefined : { outputTokens: c });
+			const a = mergeImplausible(undefined, undefined, { outputTokens: 5 }, label(first));
+			return mergeImplausible(a.implausible, a.implausibleBy, { outputTokens: 7 }, label(then))
+				.implausibleBy?.outputTokens;
+		};
+		expect(merge("refused", "sum")).toBe("refused");
+		expect(merge("maximum", "sum")).toBe("maximum");
+		expect(merge("sum", "maximum")).toBeUndefined(); // stays a sum
+		expect(merge("maximum", "refused")).toBe("maximum");
+		expect(merge("refused", "maximum")).toBe("refused");
+		expect(merge("sum", "refused")).toBe("refused"); // the one changed pairing
 	});
 
 	it("withImplausible carries the labels of the readings it merges", () => {
@@ -1008,6 +1025,275 @@ describe("D5: provider garbage never escapes the snapshot", () => {
 				cacheWriteTokens: 0,
 				source: "estimated",
 			});
+		}
+	});
+});
+
+describe("the OpenAI raw prompt is held to the ceiling before the tiers are derived from it", () => {
+	// Both OpenAI shapes report an INCLUSIVE prompt and subtract the cache tiers out of it. Checked
+	// only through the derived tiers, an absurd prompt can hide behind a large cache: 150M prompt
+	// tokens with 100M cached leaves 50M of fresh input, and every derived tier passes.
+
+	it("completions: a 150M prompt with 100M cached is refused as input, not priced", () => {
+		const u = fromOpenAICompletionsUsage({
+			prompt_tokens: 150_000_000,
+			completion_tokens: 10,
+			prompt_tokens_details: { cached_tokens: 100_000_000 },
+		});
+		expect(u.source).toBe("estimated");
+		expect(u.implausible?.inputTokens).toBe(150_000_000);
+		expect(u.implausibleBy?.inputTokens).toBe("refused");
+		expect(u.inputTokens).toBe(0);
+		expectSafeSnapshot(u);
+	});
+
+	it("responses: a 150M input with 100M cached is refused as input, not priced", () => {
+		const u = fromOpenAIResponsesUsage({
+			input_tokens: 150_000_000,
+			output_tokens: 10,
+			input_tokens_details: { cached_tokens: 100_000_000 },
+		});
+		expect(u.source).toBe("estimated");
+		expect(u.implausible?.inputTokens).toBe(150_000_000);
+		expect(u.implausibleBy?.inputTokens).toBe("refused");
+		expectSafeSnapshot(u);
+	});
+
+	it("a cache component over the ceiling is refused by its own figure", () => {
+		const completions = fromOpenAICompletionsUsage({
+			prompt_tokens: 10,
+			completion_tokens: 10,
+			cache_write_tokens: 200_000_000,
+		});
+		expect(completions.source).toBe("estimated");
+		expect(completions.implausible?.cacheWriteTokens).toBe(200_000_000);
+		expect(completions.implausibleBy?.cacheWriteTokens).toBe("refused");
+		const responses = fromOpenAIResponsesUsage({
+			input_tokens: 10,
+			output_tokens: 10,
+			input_tokens_details: { cached_tokens: 200_000_000 },
+		});
+		expect(responses.source).toBe("estimated");
+		expect(responses.implausible?.cacheReadTokens).toBe(200_000_000);
+		expect(responses.implausibleBy?.cacheReadTokens).toBe("refused");
+	});
+
+	it("a normal OpenAI usage is unchanged", () => {
+		expect(
+			fromOpenAICompletionsUsage({
+				prompt_tokens: 1000,
+				completion_tokens: 50,
+				prompt_tokens_details: { cached_tokens: 400 },
+			}),
+		).toEqual({
+			inputTokens: 600,
+			outputTokens: 50,
+			cacheReadTokens: 400,
+			cacheWriteTokens: 0,
+			source: "provider",
+		});
+		expect(
+			fromOpenAIResponsesUsage({
+				input_tokens: 1000,
+				output_tokens: 50,
+				input_tokens_details: { cached_tokens: 400, cache_creation_tokens: 100 },
+			}),
+		).toEqual({
+			inputTokens: 500,
+			outputTokens: 50,
+			cacheReadTokens: 400,
+			cacheWriteTokens: 100,
+			source: "provider",
+		});
+	});
+});
+
+describe("every OpenAI tier figure is read raw: a present invalid value is refused, never read as absent", () => {
+	// Read through readCount first, a present invalid figure became "the provider told us nothing": a cache
+	// figure dropped out of the subtraction or its tier, priced at 0 under a "provider" label, an undercharge.
+
+	type Extract = (value: unknown) => NormalizedUsage;
+	const SITES: Array<[string, Extract, UsageTier]> = [
+		[
+			"completions prompt_tokens",
+			(v) => fromOpenAICompletionsUsage({ prompt_tokens: v, completion_tokens: 10 }),
+			"inputTokens",
+		],
+		[
+			"completions completion_tokens",
+			(v) => fromOpenAICompletionsUsage({ prompt_tokens: 10, completion_tokens: v }),
+			"outputTokens",
+		],
+		[
+			"completions prompt_tokens_details.cached_tokens",
+			(v) =>
+				fromOpenAICompletionsUsage({
+					prompt_tokens: 100,
+					completion_tokens: 10,
+					prompt_tokens_details: { cached_tokens: v },
+				}),
+			"cacheReadTokens",
+		],
+		[
+			"completions cache_write_tokens",
+			(v) =>
+				fromOpenAICompletionsUsage({
+					prompt_tokens: 100,
+					completion_tokens: 10,
+					cache_write_tokens: v,
+				}),
+			"cacheWriteTokens",
+		],
+		[
+			"completions prompt_tokens_details.cache_write_tokens",
+			(v) =>
+				fromOpenAICompletionsUsage({
+					prompt_tokens: 100,
+					completion_tokens: 10,
+					prompt_tokens_details: { cache_write_tokens: v },
+				}),
+			"cacheWriteTokens",
+		],
+		[
+			"responses input_tokens",
+			(v) => fromOpenAIResponsesUsage({ input_tokens: v, output_tokens: 10 }),
+			"inputTokens",
+		],
+		[
+			"responses output_tokens",
+			(v) => fromOpenAIResponsesUsage({ input_tokens: 10, output_tokens: v }),
+			"outputTokens",
+		],
+		[
+			"responses input_tokens_details.cached_tokens",
+			(v) =>
+				fromOpenAIResponsesUsage({
+					input_tokens: 100,
+					output_tokens: 10,
+					input_tokens_details: { cached_tokens: v },
+				}),
+			"cacheReadTokens",
+		],
+		[
+			"responses input_tokens_details.cache_creation_tokens",
+			(v) =>
+				fromOpenAIResponsesUsage({
+					input_tokens: 100,
+					output_tokens: 10,
+					input_tokens_details: { cache_creation_tokens: v },
+				}),
+			"cacheWriteTokens",
+		],
+		[
+			"responses input_tokens_details.cache_write_tokens",
+			(v) =>
+				fromOpenAIResponsesUsage({
+					input_tokens: 100,
+					output_tokens: 10,
+					input_tokens_details: { cache_write_tokens: v },
+				}),
+			"cacheWriteTokens",
+		],
+	];
+
+	/** Each present invalid value and the finite figure its refusal records. 1e400 comes from JSON, as on the wire. */
+	const INVALID: Array<[string, unknown, number]> = [
+		["1e400", JSON.parse("1e400"), Number.MAX_VALUE],
+		["-1", -1, 1],
+		["NaN", Number.NaN, 1],
+		['"100"', "100", 1],
+		["{}", {}, 1],
+	];
+
+	it.each(SITES)(
+		"%s: each present invalid value is refused under its tier, at a finite figure",
+		(site, extract, tier) => {
+			for (const [label, value, figure] of INVALID) {
+				const at = `${site} = ${label}`;
+				const u = extract(value);
+				expect(u.source, at).toBe("estimated");
+				expect(u.implausible, at).toEqual({ [tier]: figure });
+				expect(u.implausibleBy, at).toEqual({ [tier]: "refused" });
+				const tiers = implausibleUsageData(u, { model: "m", transferId: "t" })?.tiers as Record<
+					string,
+					unknown
+				>;
+				expect(JSON.parse(JSON.stringify(tiers)), at).toEqual({ [tier]: figure });
+				expectSafeSnapshot(u);
+			}
+		},
+	);
+
+	it("CONTROL: a null or missing cache figure is ABSENT: provider, that tier 0, no record", () => {
+		for (const [site, extract, tier] of SITES) {
+			if (tier === "inputTokens" || tier === "outputTokens") continue; // a missing headline count is estimated
+			for (const value of [null, undefined]) {
+				const u = extract(value);
+				expect(u.source, `${site} = ${value}`).toBe("provider");
+				expect(u[tier as "cacheReadTokens"], `${site} = ${value}`).toBe(0);
+				expect(u.implausible, `${site} = ${value}`).toBeUndefined();
+			}
+		}
+	});
+});
+
+describe("one ceiling rule across the inclusive-prompt providers", () => {
+	// Gemini, chat.completions and Responses all report an INCLUSIVE prompt and subtract the cache from it, so the
+	// same figures must be refused (or pass) identically in each shape.
+	const SHAPES: Array<[string, (prompt: number, cached: number) => NormalizedUsage]> = [
+		[
+			"gemini",
+			(p, c) =>
+				fromGeminiUsage({
+					promptTokenCount: p,
+					candidatesTokenCount: 10,
+					cachedContentTokenCount: c,
+				}),
+		],
+		[
+			"completions",
+			(p, c) =>
+				fromOpenAICompletionsUsage({
+					prompt_tokens: p,
+					completion_tokens: 10,
+					prompt_tokens_details: { cached_tokens: c },
+				}),
+		],
+		[
+			"responses",
+			(p, c) =>
+				fromOpenAIResponsesUsage({
+					input_tokens: p,
+					output_tokens: 10,
+					input_tokens_details: { cached_tokens: c },
+				}),
+		],
+	];
+
+	it("a 150M prompt with 100M cached is refused as input, by its own figure, in every shape", () => {
+		for (const [shape, extract] of SHAPES) {
+			const u = extract(150_000_000, 100_000_000);
+			expect(u.source, shape).toBe("estimated");
+			expect(u.implausible, shape).toEqual({ inputTokens: 150_000_000 });
+			expect(u.implausibleBy, shape).toEqual({ inputTokens: "refused" });
+		}
+	});
+
+	it("a 200M cache figure is refused under the cache tier in every shape", () => {
+		for (const [shape, extract] of SHAPES) {
+			const u = extract(10, 200_000_000);
+			expect(u.source, shape).toBe("estimated");
+			expect(u.implausible, shape).toEqual({ cacheReadTokens: 200_000_000 });
+			expect(u.implausibleBy, shape).toEqual({ cacheReadTokens: "refused" });
+		}
+	});
+
+	it("CONTROL: a prompt and a cache figure of exactly the ceiling pass in every shape", () => {
+		for (const [shape, extract] of SHAPES) {
+			const u = extract(MAX_PLAUSIBLE_TOKENS_PER_TIER, MAX_PLAUSIBLE_TOKENS_PER_TIER);
+			expect(u.source, shape).toBe("provider");
+			expect(u.implausible, shape).toBeUndefined();
+			expect(u.cacheReadTokens, shape).toBe(MAX_PLAUSIBLE_TOKENS_PER_TIER);
 		}
 	});
 });

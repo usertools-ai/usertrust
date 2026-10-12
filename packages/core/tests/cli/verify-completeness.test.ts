@@ -864,6 +864,9 @@ describe("readChainDeadLetters", () => {
 			missingTransferIds: ["tx_a"],
 			onChain: 1,
 			otherSources: 1,
+			// shortfall amounts of dead-lettered chain events (read from the same lines; the weekly report uses them)
+			shortfalls: new Map(),
+			shortfallsReliable: true,
 		});
 	});
 

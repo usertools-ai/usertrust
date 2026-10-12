@@ -85,7 +85,7 @@ npx usertrust init
 
 `npx usertrust init` does not install the package into your project, so the `npm install` line is required. `import { trust } from "usertrust"` fails until it runs.
 
-usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). `@anthropic-ai/sdk` and `openai` are declared as optional peer dependencies. `@google/genai` is not declared at all: usertrust recognises a Google client by its shape (`models.generateContent`), so nothing in the install names that package, and you install it yourself.
+usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). `@anthropic-ai/sdk` (0.116.0 or newer) and `openai` (7.4.0 or newer) are declared as optional peer dependencies. `@google/genai` is not declared at all: usertrust recognises a Google client by its shape (`models.generateContent`), so nothing in the install names that package, and you install it yourself.
 
 `init` is interactive in a terminal. It asks for your provider API key (Anthropic `sk-ant-`, OpenAI `sk-` and Google `AIza` keys are detected from their prefix; any other provider you name yourself) and writes it to `.usertrust/.env`. A new or rewritten `.env` is always owner-only (mode 600): `init --reconfigure` writes a fresh owner-only file and renames it over the old one, whatever the old file's mode, and replaces a symlinked `.env` rather than writing through it. An Anthropic, OpenAI or Google key is first checked against that provider's models endpoint (unless you pass `--skip-verify`); a key that fails the check is still written, with a warning. A key for a provider you name yourself is not checked at all, even though `init` reports it as valid, so a wrong key there shows up only on the first real call.
 
@@ -102,7 +102,7 @@ import { trust } from "usertrust";        // ESM
 const { trust } = require("usertrust");   // CJS
 ```
 
-The package ships a single ESM build; `require()` loads it through Node's built-in `require(esm)` support, which landed unflagged in 22.12. There is no second CJS build, so a process gets exactly one copy of the module graph — and therefore one budget mutex and one set of in-flight hold accounting — whichever way you load it. On Node 22.0–22.11 `require("usertrust")` fails with `ERR_REQUIRE_ESM`; `import` works on any Node ≥ 22.
+The package ships a single ESM build; `require()` loads it through Node's built-in `require(esm)` support, which landed unflagged in 22.12. There is no second CJS build, so a process gets exactly one copy of the module graph, and with it one shared audit writer per vault, whichever way you load it. Budget state is not shared that way: each `trust()` client builds its own budget mutex, in-flight hold accounting and holding wallet. On Node 22.0–22.11 `require("usertrust")` fails with `ERR_REQUIRE_ESM`; `import` works on any Node ≥ 22.
 
 ## Integration
 
@@ -134,6 +134,8 @@ const client = await trust(new Anthropic(), {
 
 On a Google client `models.generateContent` and `models.generateContentStream` are governed. `generateContentStream` resolves to the stream itself, as the SDK's does, with the settled receipt on it: `const stream = await google.models.generateContentStream({ ... })`, then `for await (const chunk of stream)` and `await stream.receipt`. Every other billable Google method is refused: `models.embedContent`, `generateImages`, `editImage`, `upscaleImage`, `generateVideos`, `recontextImage` and `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create`, `batches.createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create`, `caches.update`, `fileSearchStores.uploadToFileSearchStore` and `fileSearchStores.importFile` reject with a `PolicyDeniedError` naming the method, and record a `policy_denied` audit event, before the SDK is called, instead of running unmetered. With automatic function calling (a callable tool in `config.tools`, AFC not disabled), `generateContent` is metered per round: usertrust runs the loop itself, each round its own governed call, and the envelope carries `receipts`, one per round. `generateContentStream` with automatic function calling is refused the same way for now, because a streamed loop is not yet metered round by round: use `generateContent`, or set `config.automaticFunctionCalling.disable: true` and run the tool calls yourself. Calls that are not billed (`models.countTokens`, `models.list`, `caches.get`, `files` and the like) pass through ungoverned.
 
+On an Anthropic or OpenAI client, every SDK method usertrust does not govern is refused unless it cannot start work: `embeddings.create`, `messages.batches.create`, `chat.completions.parse` and the like return a promise that rejects with a `PolicyDeniedError` (`ungoverned_method: <path>`) and write a `policy_denied` audit event, and the SDK is never called. Methods that cannot start work run as before: reads, lists and deletes (every GET or DELETE request) and a few named POSTs such as `messages.countTokens`, `moderations.create` and cancels. To run a refused method unmetered, list it: `trust(client, { allowUngoverned: ["embeddings.create"] })`; each such call is audited as `ungoverned_call`. `client.withOptions(...)` returns a client governed by the same governor, unless it changes where or how calls are sent (`baseURL`, `fetch`, `fetchOptions`, …), which is refused.
+
 Clients in one process share their vault's audit writer. Separate processes cannot write to one vault: give each process its own vault (`vaultBase`), or send their calls through one `usertrust-server`.
 
 Every call returns `{ response, receipt }`:
@@ -152,6 +154,12 @@ Every call returns `{ response, receipt }`:
   timestamp: "2026-03-16T12:00:00.000Z"
 }
 ```
+
+### Settings, budgets and many agents
+
+- **Settings live in the config file.** Options such as `pii` are read from the config file `trust()` loads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath`, which is read INSTEAD of the default (edit the one in use, or a setting such as `pii: "block"` stays off). See [Config](#config). Passing `{ pii: "block" }` as the second argument to `trust()` is not read, and does not enable blocking.
+- **A budget belongs to one `trust()` client, seeded from the spend the vault has recorded.** `trust(client, { budget })` gives that client its own budget, set when the client is created to the budget minus the spend already recorded in the vault (`.usertrust/spend-ledger.json`). Two clients created before either has settled a call each start with the full amount; a client created after another has settled starts with what is left; and a client that is already running does not see another client's later spend. To share one budget across callers, use `usertrust-server`.
+- **With TigerBeetle, do not create one `trust()` per agent.** Each ledger-backed client holds its own connection to the ledger. In our testing, the 9th simultaneously open ledger-backed client in one process never finished connecting, and no error was raised; a TigerBeetle replica also holds at most 64 registered clients and evicts the least recently used. For more than a few agents, run `usertrust-server` (see `packages/server/README.md`): agents call it over HTTP, and it keeps one governor and one ledger connection per tenant, shared by every agent of that tenant.
 
 ## Inspect
 
@@ -336,6 +344,10 @@ All hashes: valid (847/847)
 
 The verify package has zero runtime dependencies. It reads JSONL, recomputes SHA-256 hashes, and checks the chain. Anyone can verify a vault without trusting the usertrust SDK.
 
+`usertrust-verify` takes the path to the `.usertrust` directory; `usertrust verify` takes the project root that contains it. Giving `usertrust-verify` the project root reports a missing audit directory, not a tampered chain.
+
+**Known issue in 4.1.0:** on a vault with no external anchor, deleting the most recent records is reported only until the next governed call from a freshly started process; after that, verification passes over the shortened chain. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Emptying `events.jsonl` while its `.meta` sidecar remains is not silent: the next append continues from the sidecar's hash and verification reports the gap. More generally, someone who can rewrite both the vault file and its sidecar can only be caught by evidence held outside the vault: an external anchor, or receipts you retained. Enable [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) if the chain is your evidence. See `LIMITATIONS.md` section 8.
+
 With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) enabled, verification goes further: the auditor fetches signed checkpoints from an append-only store the operator cannot rewrite and pins the public key out-of-band — so even a fully re-hashed rewrite of the vault fails:
 
 ```bash
@@ -348,6 +360,18 @@ usertrust anchor now    --sink-s3 bucket=audit-anchors,region=us-east-1
 
 npx usertrust-verify .usertrust --anchors anchors.jsonl --pubkey root.pem --require-external-anchor
 ```
+
+## Uninstall
+
+Removing usertrust is more than `npm uninstall`. What it leaves behind, and where:
+
+- **Per project:** delete `.usertrust/`. It holds the audit chain, receipts, spend ledger, config and, if you gave one to `init`, your provider key in `.usertrust/.env`. It also holds the vault's identity and anchor state; read the anchor-key bullet below before deleting it if you want to continue an anchor chain.
+- **Packages:** `npm uninstall usertrust usertrust-server usertrust-verify` (whichever you installed).
+- **Anchor signing key:** `usertrust anchor init` writes the private key outside the vault, at `~/.usertrust/keys/<vaultId>.anchor.pem` (mode 600). Deleting `.usertrust/` does not delete it. `usertrust anchor rotate` always writes each new key to `~/.usertrust/keys/<vaultId>.anchor.<timestamp>.pem`, even when the first key was placed elsewhere with `--key-file`; a key at a `--key-file` path stays wherever you put it. Each of these survives removal too. Keeping the keys does not by itself keep the anchor chain: continuing it needs the vault's own identity and anchor state (under `.usertrust/`) as well as the keys, and a reinitialised vault mints a new id and keypair. Delete the keys securely if you are retiring the vault. Also remove any anchor store you created, such as the file given to `--sink-file`.
+- **usertrust-server:** stop the process, then delete its `stateDir` (one vault per tenant) and its config and tenant-key files. Versions up to and including 4.1.0 also wrote a `.usertrust/patterns/` folder in the server's working directory, outside `stateDir`; delete it if it is there.
+- **Claude Code plugin:** remove the plugin with Claude Code's plugin commands, then delete the configuration file under `~/.config/usertrust/` (it holds the server key), the plugin's state directory (the `stateDir` in the configuration file; with no configuration file, `$UT_CC_STATE_DIR`, else `usertrust-cc` under `$CLAUDE_CONFIG_DIR`, else `~/.claude/usertrust-cc`; and when the file is missing, empty or refused, a session's gap records can fall back to `.claude/usertrust-cc` under the account's home as the system records it, whatever `$CLAUDE_CONFIG_DIR` says), and `~/.local/state/usertrust/` (per-session pins, which can also hold the server key). Each pin in `~/.local/state/usertrust/sessions/` records its session's state directory and keeps it even after the configuration file is gone, so read the pins' `stateDir` fields and delete those directories BEFORE you delete the pins. A later plugin session prunes pins idle for 30 days, so do not wait for that. If the server key may remain on a shared machine, rotate it.
+
+**Where `~` is.** The anchor key lives under the `$HOME` of the account that ran `usertrust anchor init` (Node's `os.homedir()`). The plugin looks for its configuration file and `.local/state/usertrust` under the account's home as the system records it (`os.userInfo().homedir`), which can differ from `$HOME` under `sudo` or in some containers. Find it with `node -p "require('os').userInfo().homedir"` and check both places before concluding the files are gone. The plugin's state directory defaults to `usertrust-cc` under `$CLAUDE_CONFIG_DIR` when that variable is set, and under `~/.claude` otherwise.
 
 ## License
 

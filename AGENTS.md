@@ -43,7 +43,7 @@ Monorepo, npm workspaces (`packages/*`). `site/` is a Next.js app and is **not**
 | `packages/acs-adapter` | `usertrust-acs-adapter` | ACS adapter. |
 | `packages/ui` | `usertrust-ui` | Visual ledger (bundled front end; `build` = `tsc && vite build`). |
 | `packages/monte-cristo` | `usertrust-monte-cristo` | Simulation engine. Not in the release lockstep. |
-| `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. |
+| `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. The workspace name is internal; the plugin is published as `usertools` (`/plugin install usertools@usertrust`). |
 
 The first six are version-locked and released together. `monte-cristo` and `claude-code-plugin`
 are not.
@@ -64,7 +64,7 @@ the kit first, never committed here.
 
 | Area | Files |
 |---|---|
-| Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `config.ts`, `proxy.ts` |
+| Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `default-deny.ts`, `config.ts`, `proxy.ts` |
 | Ledger | `ledger/{client,engine,pricing}.ts` |
 | Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
@@ -1597,27 +1597,40 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 
 **Duck typing only; never import a provider SDK at runtime.** `detect.ts` imports types only.
 `@anthropic-ai/sdk` and `openai` are **optional** peer dependencies; Google has no peer entry at
-all. This is why provider SDK majors can be bumped with no code change.
+all. Their floors (`>=0.116.0`, `>=7.4.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
+versions the default-deny free list was classified on. Moving a floor means re-running that
+classification against the new SDK, and `default-deny.test.ts` fails if the floor and the
+constant disagree.
 
-**The governance boundary is deliberately partial and is documented in `detect.ts`.** Governed:
-Anthropic `messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected),
-OpenAI `chat.completions.create` and `responses.create` when present, Google
-`models.generateContent` and `models.generateContentStream`. Explicitly **ungoverned** — these
-bypass governance, audit, and budget enforcement: `messages.batches`, `beta.models`, `beta.files`,
-OpenAI `responses.retrieve/cancel/delete`, the `responses.stream()` / `responses.parse()` helpers,
-the OpenAI `beta.*` namespace, legacy `completions.create`, and Google's calls that are not billed
-(`models.countTokens/list/get`, `caches.get`, `files`, and the like). Google's OTHER billable
-methods are **refused**, not passed through (`GOOGLE_REFUSED_METHODS` in `govern.ts`:
+**The governance boundary is documented in `detect.ts`.** Governed: Anthropic
+`messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected), OpenAI
+`chat.completions.create` and `responses.create` when present, Google `models.generateContent`
+and `models.generateContentStream`.
+**Anthropic and OpenAI clients are default-deny** (`default-deny.ts`): every other function-valued
+SDK member reached off the governed client, at any depth, is refused through ONE function,
+`refuseUngovernedMethod` in `trust()` (the same one Google's refusals use, below), which writes `policy_denied` at the denial boundary and
+rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
+requests are all GET or DELETE, plus POSTs named with a reason, minus GET/DELETE methods named as
+exceptions. Each entry cites its SDK source line and verb; they run with the RAW resource as
+`this`, because `this._client` through the boundary is a refusing stand-in, and
+`default-deny.test.ts` calls every entry and fails on a POST its `FREE_POSTS` does not name and `trust({ allowUngoverned })` (audited as
+`ungoverned_call`). `_client` and the client's raw HTTP members are refused by name; `withOptions`
+is re-wrapped by the same governor, unless an option outside `GOVERNED_WITH_OPTIONS_KEYS` (an
+allow-list) changes the transport, when the new client is a refusing stand-in. A POST is freed only with a reason it cannot start billable work, written in both places; a create that can
+allocate storage is not free. If you add a governed surface, update that doc block and the free list.
+**Google clients are not default-deny**: Google's billable methods other than the two governed
+ones are **refused** by name (`GOOGLE_REFUSED_METHODS` in `govern.ts`:
 `models.embedContent/generateImages/editImage/upscaleImage/generateVideos/recontextImage/
 segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create/
 createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create/update`,
-`fileSearchStores.uploadToFileSearchStore/importFile`): each call writes a `policy_denied` event
-at the denial boundary and rejects with a `PolicyDeniedError` naming the method, and the SDK is
-never reached. With automatic function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in
-`google-afc.ts`, a mirror of the SDK's `shouldDisableAfc`, made on a snapshot of the request that is
-then what is forwarded), `models.generateContent` runs the loop itself, each round its own governed
-call (`runGovernedAfc`), and `models.generateContentStream` is refused the same way (a streamed loop
-is not metered per round yet). If you add a governed or refused surface, update that doc block.
+`fileSearchStores.uploadToFileSearchStore/importFile`), through the same `refuseUngovernedMethod`
+after the degraded-audit preflight (`refuseGoogle`); calls that are not billed
+(`models.countTokens/list/get`, `caches.get`, `files`, and the like) pass through. With automatic
+function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in `google-afc.ts`, a mirror of the
+SDK's `shouldDisableAfc`, made on a snapshot of the request that is then what is forwarded),
+`models.generateContent` runs the loop itself, each round its own governed call
+(`runGovernedAfc`), and `models.generateContentStream` is refused the same way (a streamed loop is
+not metered per round yet). If you add a governed or refused Google surface, update `detect.ts`.
 
 ---
 

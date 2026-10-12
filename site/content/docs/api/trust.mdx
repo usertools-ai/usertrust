@@ -24,6 +24,7 @@ interface TrustOpts {
   tier?: string;          // Tier override (free | mini | pro | mega | ultra)
   dryRun?: boolean;       // Skip TigerBeetle — audit chain + policy still run
   vaultBase?: string;     // Vault directory override (default: process.cwd())
+  allowUngoverned?: string[]; // SDK methods to run ungoverned (Anthropic and OpenAI)
 }
 ```
 
@@ -36,6 +37,7 @@ interface TrustOpts {
 | `tier` | `"mini"` | Tier classification. Overrides the config file value. |
 | `dryRun` | `false` | Skip TigerBeetle entirely. Also enabled by `USERTRUST_DRY_RUN=true` env var. Useful for CI and testing. |
 | `vaultBase` | `process.cwd()` | Base directory containing the `.usertrust/` vault. |
+| `allowUngoverned` | `[]` | SDK method paths to run **ungoverned** on an Anthropic or OpenAI client, as the refusal names them (`"embeddings.create"`). A listed method runs on the raw SDK with no hold and no cost, and each call appends an `ungoverned_call` audit event (`{ method, provider }`). Validated when `trust()` is called: an array of non-empty paths, none through `_client` or a raw HTTP member such as `post`. Without `audit.failClosed` the method returns what the SDK returns. Under `audit.failClosed` the append is awaited before the SDK is called, a failed append refuses the call, and the method always returns a Promise: a method that is synchronous in the SDK (`chat.completions.stream`) returns a Promise of its value, and `beta.messages.toolRunner`, whose runner is thenable, returns a Promise of the runner's FINAL result (promise resolution adopts the thenable and runs it to completion), not the runner object. |
 
 <Callout type="info">
 The internal `_engine` and `_audit` options exist for testing only. They inject mock subsystems and are not part of the public API.
@@ -81,7 +83,7 @@ interface TrustReceipt {
   model: string;              // Model used for the call
   provider: string;           // "anthropic" | "openai" | "google"
   timestamp: string;          // ISO 8601 timestamp
-  auditDegraded?: boolean;    // true if audit write failed after POST (mode 15.3)
+  auditDegraded?: boolean;    // true if a chain append for the call failed (mode 15.3; a failed rotated-receipt write, with `audit.rotation` on, is ignored and neither sets this nor degrades the writer, even under `failClosed`); its order relative to the settle varies by path and record (a capped non-stream settle posts before its shortfall record is appended); a failed `injection_detected` append in warn mode is swallowed without marking the call, so that receipt carries a normal hash and no flag even though the client is now degraded
 }
 ```
 
@@ -98,6 +100,20 @@ The `transferId` is the universal join key. Use it to correlate entries across t
 | Google | `client.models.generateContent` exists | `models.generateContent()`, `models.generateContentStream()` |
 
 If the client does not match any known shape, `trust()` throws an error at initialization time.
+
+### Everything else on an Anthropic or OpenAI client is refused
+
+The governed methods are `messages.create`, `messages.stream` and `messages.parse` (and the same on `beta.messages`) on Anthropic, and `chat.completions.create` and `responses.create` on OpenAI. Every other function-valued SDK method reached off the governed client, at any depth, is **refused** unless it is on the free list:
+
+- The call returns a promise that rejects with a `PolicyDeniedError` whose `reason` starts `ungoverned_method: <path>`, after a `policy_denied` audit event (the path as `actionName`). The SDK is never called and nothing is held. A synchronous SDK helper (`chat.completions.stream`, `beta.messages.toolRunner`) returns the rejected promise too.
+- **Free list, by rule.** A method whose requests are all GET or DELETE (a retrieve, list, download, delete or poll) runs on the raw SDK resource, unaudited: a read cannot start billable work and a delete only reduces storage. A POST runs free only when it is named with a reason: token counts, `moderations.create`, cancels, pauses, metadata updates and a few others. A local method (webhook signature checks) runs free when named. Six GET or DELETE methods are refused by name because they can start work or lift a spend control: Anthropic `beta.environments.work.poll`, and OpenAI's spend-limit, spend-alert and model-permission deletes. The exact list, with each method's SDK source line and verb, is in `packages/core/src/default-deny.ts`.
+- **Opt-out.** `allowUngoverned: ["embeddings.create"]` runs a listed method ungoverned and audits each call as `ungoverned_call`, with no usage and no cost.
+- **Raw clients.** A resource's `_client` is the SDK's raw client, so every call through it is refused, and so are the client's raw HTTP members (`post`, `get`, `request`, …). `allowUngoverned` cannot list them.
+- **`withOptions()`** returns a client governed by the same governor: same budget, audit chain and ledger. A `withOptions()` clone shares its parent's governor: `destroy()` on either ends both, and `governAction()` on a clone runs under the shared governor, including on a clone whose transport was refused. A `withOptions()` that changes where or how calls are sent is refused: every call through the new client rejects. Only `timeout`, `maxRetries`, `defaultHeaders`, `defaultQuery`, `logLevel`, `logger`, `dangerouslyAllowBrowser` and the API key and account options keep it governed; `baseURL`, `fetch`, `fetchOptions`, Anthropic `middleware`, `credentials`, `config` and `profile`, OpenAI `provider` and `workloadIdentity`, and any other key refuse it.
+
+Symbols, non-function values (`baseURL`, `maxRetries`, …) and `Object.prototype` members pass untouched, so inspection and serialization behave as on the raw client. The `TrustedClient` type still gives a refused method its SDK signature.
+
+### On a Google client
 
 On a Google client the other billable methods are refused rather than passed through: `models.embedContent`, `generateImages`, `editImage`, `upscaleImage`, `generateVideos`, `recontextImage`, `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create`, `batches.createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create`, `caches.update`, `fileSearchStores.uploadToFileSearchStore` and `fileSearchStores.importFile` reject with a `PolicyDeniedError` naming the method (carrying the `auditEventHash` of the `policy_denied` event it records) before the SDK is called. With automatic function calling (a callable tool in `config.tools`, AFC not disabled), `generateContent` is metered per round: usertrust runs the loop itself, each round its own governed call, and the envelope carries `receipts`, one per round. `generateContentStream` with automatic function calling is refused the same way for now, because a streamed loop is not yet metered round by round: use `generateContent`, or set `config.automaticFunctionCalling.disable: true` and run the tool calls yourself. Either method sends the SDK a snapshot of the checked request: accessors (getters) in `config`, `config.tools` and `config.automaticFunctionCalling` are read once and their values captured, and a Proxy there is refused. Calls that are not billed (`models.countTokens`, `models.list`, `caches.get`, `files` and the like) pass through ungoverned.
 
@@ -152,13 +168,13 @@ try {
 
 The billing claim is made in one place only: the catch around `await response.receipt`, which covers none of your code. The loop's body has its own try, so a throw there is never mistaken for a stream failure.
 
-**When a stream fails mid-way and its iteration throws** (a cut connection, or a provider error event that the SDK throws, as Anthropic's and OpenAI's `chat.completions` streams do), `response.receipt` rejects with that same error object. The budget hold is voided, not charged, and the audit chain records a `stream_partial_delivery` event with the chunks delivered and the tokens counted before the failure. A throw from your own loop body is NOT a stream failure: the loop exits early, and the usage consumed so far settles and is charged, as with a `break`.
+**When a stream fails mid-way and its iteration throws** (a cut connection, or a provider error event that the SDK throws, as Anthropic's and OpenAI's `chat.completions` streams do), `response.receipt` rejects with that same error object. The budget hold is released by a void request (best-effort: a void the ledger refuses leaves it reserved until it expires, up to 300 s), not charged, and the audit chain records a `stream_partial_delivery` event with the chunks delivered and the tokens counted before the failure. A throw from your own loop body is NOT a stream failure: the loop exits early, and the usage consumed so far settles and is charged, as with a `break`.
 
 **A stream you cancel with your own abort signal is an early stop, not a failure.** When the signal you passed for that call (Google `config.abortSignal`; OpenAI's and Anthropic's request-options `signal`) is aborted, the SDK's iteration throws its abort error, and it still reaches your loop, but the usage delivered so far settles and is charged, exactly as on a `break` (at the estimate when no usage was reported), and `response.receipt` (or `stream.receipt`) resolves. It records no circuit-breaker failure. The decision reads your signal's state, never the error's name. A provider error with your signal not aborted, and a governance anomaly cutoff, still void.
 
 **An OpenAI Responses `error` event does not throw.** The OpenAI SDK yields a `responses.create({ stream: true })` error event (`type: "error"`) as an ordinary chunk, so the stream ends and settles like any completed stream: at the estimate when no usage arrived. It is charged. Check each chunk's `type` to tell it apart. Whether such a stream should be charged is an open settlement question.
 
-**A rejected `response.receipt` does not always mean nothing was charged.** It rejects with either the iteration's own error (the same object: the hold was voided), or, under `audit.failClosed`, an `AuditDegradedError`: settlement already ran (the charge posted, or its POST failed and the outcome is ambiguous: it may still post), then the audit write failed. Either way the work may be billed, so retrying it can charge it twice. `AuditDegradedError` is exported from `usertrust`, so test `err instanceof AuditDegradedError` to tell the two apart. Any other settlement error also rejects `.receipt` alone, after settlement claimed the call, so treat it like the audit refusal: the work may be billed.
+**A rejected `response.receipt` does not always mean nothing was charged.** It rejects with either the iteration's own error (the same object: the hold's void was requested; the void is best-effort, so a void the ledger refuses leaves the hold reserved until it expires, up to 300 s), or, under `audit.failClosed`, an `AuditDegradedError`: settlement already ran (the charge posted, or its POST failed and the outcome is ambiguous: it may still post), then the audit write failed. Either way the work may be billed, so retrying it can charge it twice. `AuditDegradedError` is exported from `usertrust`, so test `err instanceof AuditDegradedError` to tell the two apart. Any other settlement error also rejects `.receipt` alone, after settlement claimed the call, so treat it like the audit refusal: the work may be billed.
 
 **Under `audit.failClosed`, that refusal also ends the iteration** of a `messages.create`, `chat.completions.create`, `responses.create` or Google `models.generateContentStream` stream: the loop's last step, or the `break` that ends it early, throws the `AuditDegradedError`. Settlement has already run, and nothing is voided. Only `AuditDegradedError` ends the iteration: any other settlement error rejects `.receipt` alone, and the loop ends cleanly. If your loop body throws, the loop throws YOUR error, not the audit refusal (JavaScript keeps the original throw), so await `.receipt` to see a refusal. A `messages.stream()` caller must await `.receipt` under `failClosed`: its iteration and `finalMessage()` do not carry the audit refusal.
 
