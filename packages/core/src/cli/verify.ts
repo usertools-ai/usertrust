@@ -700,7 +700,11 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			console.log(
 				toSafeJson({
 					command: "verify",
-					success: result.valid && complete,
+					// `success` IS the exit code — one verdict. `result.valid && complete` ignored the
+					// anchored gates (--require-anchor, --require-external-anchor), so an UNANCHORED vault under
+					// --require-anchor printed `success: true` while the process exited 1, and a machine reader of
+					// the JSON saw a pass the exit code refused.
+					success: exitCode === 0,
 					data: {
 						valid: result.valid,
 						complete,
