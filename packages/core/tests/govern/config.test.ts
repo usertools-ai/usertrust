@@ -383,7 +383,7 @@ describe("TrustConfigSchema — parentUserId", () => {
 });
 
 describe("TrustConfigSchema — scope", () => {
-	it("accepts a path-like host scope (AUD-002)", () => {
+	it("accepts a path-like host scope", () => {
 		const config = defineConfig({ budget: 1000, scope: ["production/api"] } as never);
 		expect(config.scope).toEqual(["production/api"]);
 	});

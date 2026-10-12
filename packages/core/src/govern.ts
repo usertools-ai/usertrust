@@ -1264,7 +1264,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// 3. Proxy mode removed — throw early with clear error
 	if (opts?.proxy) {
 		throw new Error(
-			"usertrust: proxy mode is not yet implemented (AUD-456). " +
+			"usertrust: proxy mode is not yet implemented. " +
 				"Use dryRun mode for testing, or connect a real TigerBeetle instance for production.",
 		);
 	}
