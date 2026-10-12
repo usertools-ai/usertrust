@@ -57,6 +57,8 @@ When to cut that major is a release decision, not this change's: until it is cut
 
 - **A governor writes nothing outside its vault.** Pattern memory went to `.usertrust/patterns/memory.json` under the process's working directory, whatever vault the governor was given, so usertrust-server left a stray `.usertrust/` wherever it was started. It now goes to the governor's own vault (`<vaultBase>/.usertrust/patterns/`).
 
+- **`usertrust init --reconfigure` no longer writes a new API key into a `.env` other users can read.** `.usertrust/.env` was written in place with `mode: 0o600`, which applies only when a file is CREATED: a reconfigure over an existing 0644 `.env` truncated it and wrote the new key into that 0644 file (and through a symlinked `.env` into its target). The owner-only vault directory above already keeps other users from reaching it; this fixes the file's own mode too, so a key never sits in a group- or world-readable file. `.env` is now written to a fresh temp file beside it, created exclusively, not following a link, owner-only (`fchmod` 0600 whatever the umask), fsync'd, then renamed over `.env`, and the directory fsync'd (`writePrivateFileAtomic`, in `shared/private-fs.ts`). A new or rewritten `.env` is always mode 600, the old file is never written, and a symlink is replaced rather than followed. The temp file is removed on any failure, and the vault's `.gitignore` now also lists `.env.*.tmp`.
+
 - **CI refuses committed agent config: the `agent-config` check.** Agent config runs on the
   machine of anyone who opens a checkout in a coding agent: Claude Code's `.claude/`, an
   `.mcp.json`, and the Grok and Codex CLIs' `.grok/` and `.codex/`, at any depth, matched as a

@@ -15,7 +15,12 @@ import * as clack from "@clack/prompts";
 import type { ModelRates } from "../ledger/pricing.js";
 import { modelsForProvider, PRICING_TABLE, PRICING_TABLE_VERSION } from "../ledger/pricing.js";
 import { DEFAULT_BUDGET, VAULT_DIR } from "../shared/constants.js";
-import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "../shared/private-fs.js";
+import {
+	mkdirPrivate,
+	PRIVATE_FILE_MODE,
+	securePrivateVault,
+	writePrivateFileAtomic,
+} from "../shared/private-fs.js";
 import { scrubForTerminal } from "./target.js";
 import { detectProvider, maskKey, validateKey } from "./validate-key.js";
 
@@ -561,10 +566,11 @@ function createVault(vaultPath: string, data: VaultData): void {
 			const escaped = key.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 			return `${envVarName(provider)}="${escaped}"`;
 		});
-		writeFileSync(join(vaultPath, ".env"), `${envLines.join("\n")}\n`, {
-			encoding: "utf-8",
-			mode: PRIVATE_FILE_MODE,
-		});
+		// Never in place: a mode passed to an in-place write applies only when the file is
+		// CREATED, so a reconfigure over an existing 0644 `.env` put the new key in that 0644
+		// file. A fresh owner-only file is renamed over it instead (a symlink is replaced,
+		// never written through).
+		writePrivateFileAtomic(join(vaultPath, ".env"), `${envLines.join("\n")}\n`);
 	}
 
 	// Write .gitignore
@@ -572,6 +578,7 @@ function createVault(vaultPath: string, data: VaultData): void {
 *.tigerbeetle
 dlq/
 .env
+.env.*.tmp
 `;
 	writeFileSync(join(vaultPath, ".gitignore"), gitignoreContent, {
 		encoding: "utf-8",
