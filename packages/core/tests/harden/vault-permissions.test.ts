@@ -656,35 +656,86 @@ describe.skipIf(onWindows).each(openers)(
 	},
 );
 
-/** Root ignores permission bits, so a directory it "cannot open" does not exist for it. */
+/** Root ignores permission bits: nothing is unreachable or unwritable for it. */
 const isRoot = process.geteuid?.() === 0;
 
 describe.skipIf(onWindows).each(openers)(
-	"a linked vault whose target this process cannot open, opened by %s",
+	"a linked vault and this process's permissions on its target, opened by %s",
 	(_name, open) => {
+		/** `.usertrust` -> `<realpath tmp>/<dir>/vault`, the target made 0700 then given `mode`. */
+		function linkedTo(mode: number, dirMode = 0o700) {
+			process.umask(0o022);
+			const dir = join(realpathSync(tmp("ut-perm-access-")), "dir");
+			const target = join(dir, "vault");
+			mkdirSync(target, { recursive: true, mode: 0o700 });
+			const root = tmp("ut-perm-access-root-");
+			const link = join(root, VAULT_DIR);
+			symlinkSync(target, link);
+			chmodSync(target, mode);
+			chmodSync(dir, dirMode);
+			const restore = (): void => {
+				chmodSync(dir, 0o700);
+				chmodSync(target, 0o700);
+			};
+			return { root, link, dir, target, restore };
+		}
+
+		/** Opens `root`; the refusal, or `undefined` when it opened. */
+		const attempt = (root: string): Promise<Error | undefined> =>
+			open(root).then(
+				() => undefined,
+				(err: unknown) => err as Error,
+			);
+
+		it("uses a write-and-search-only target (0300): reading the directory is not needed", async () => {
+			const { root, target, restore } = linkedTo(0o300);
+			let refused: Error | undefined;
+			try {
+				refused = await attempt(root);
+				expect(statSync(target).mode & 0o777).toBe(0o300);
+			} finally {
+				restore();
+			}
+			expect(refused).toBeUndefined();
+			expect(existsSync(join(target, "audit", "events.jsonl"))).toBe(true);
+			expect(existsSync(join(target, "spend-ledger.json"))).toBe(true);
+			// No write failed into the dead-letter queue.
+			expect(existsSync(join(target, "dlq"))).toBe(false);
+			// Everything written under it is owner-only (the target itself was put back to 0700).
+			expect(walkModes(target).loose).toEqual([]);
+		});
+
 		it.skipIf(isRoot)(
-			"is refused by name (skipped as root, which ignores the mode bits that refuse the open)",
+			"refuses by name a search-only target (0100) it cannot write to (skipped as root)",
 			async () => {
-				process.umask(0o022);
-				const target = join(realpathSync(tmp("ut-perm-unopenable-")), "vault");
-				mkdirSync(target, { mode: 0o700 });
-				const root = tmp("ut-perm-unopenable-root-");
-				const link = join(root, VAULT_DIR);
-				symlinkSync(target, link);
-				// Search-only: stat works, an O_RDONLY open of the directory is refused (EACCES).
-				chmodSync(target, 0o100);
+				const { root, link, target, restore } = linkedTo(0o100);
 				let refused: Error | undefined;
 				try {
-					refused = await open(root).then(
-						() => undefined,
-						(err: unknown) => err as Error,
-					);
+					refused = await attempt(root);
 					expect(statSync(target).mode & 0o777).toBe(0o100);
 				} finally {
-					chmodSync(target, 0o700);
+					restore();
 				}
 				expect(refused?.message).toBe(
-					`usertrust: the vault ${link} is a symbolic link to ${target}, which this process cannot open (EACCES); give this user read and search permission on it, or point the link elsewhere`,
+					`usertrust: the vault ${link} is a symbolic link to ${target}, which this process cannot write to (mode 100); usertrust does not change a directory through a link; make it usable with: chmod 700 ${target}`,
+				);
+				expect(readdirSync(target)).toEqual([]);
+			},
+		);
+
+		it.skipIf(isRoot)(
+			"refuses by name a target it cannot search its way to (skipped as root)",
+			async () => {
+				const { root, link, dir, target, restore } = linkedTo(0o700, 0o000);
+				let refused: Error | undefined;
+				try {
+					refused = await attempt(root);
+					expect(lstatSync(dir).mode & 0o777).toBe(0o000);
+				} finally {
+					restore();
+				}
+				expect(refused?.message).toBe(
+					`usertrust: the vault ${link} is a symbolic link to ${target}, which this process cannot reach (EACCES); give this user search permission on every directory on the way to it, or point the link elsewhere`,
 				);
 				expect(readdirSync(target)).toEqual([]);
 			},

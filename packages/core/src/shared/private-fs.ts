@@ -13,6 +13,7 @@
  */
 
 import {
+	accessSync,
 	closeSync,
 	fchmodSync,
 	constants as fsConstants,
@@ -106,23 +107,6 @@ const foreignVault = (...args: Parameters<typeof foreignOwner>): Error =>
 	new Error(`usertrust: ${foreignOwner(...args)}`);
 
 /**
- * The directory a vault LINK leads to, exactly as the OS opens it for every writer: opened
- * following the link and `fstat`ed. No decision about a linked vault is made from a resolved
- * path. JS `realpathSync` joins a link's target with `path.resolve`, which collapses `..`
- * LEXICALLY: with `.usertrust -> /a/link/../vault` and `/a/link -> /b/sub`, it names /a/vault
- * while the OS opens /b/vault. Throws ENOENT for a dangling link, ENOTDIR for a target that is
- * not a directory (`O_DIRECTORY`, so a FIFO target never blocks the open).
- */
-function statThroughLink(vaultDir: string): Stats {
-	const fd = openSync(vaultDir, fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0));
-	try {
-		return fstatSync(fd);
-	} finally {
-		closeSync(fd);
-	}
-}
-
-/**
  * A link's target as written, joined to the link's directory WITHOUT normalizing `..`, so a
  * shell given it resolves it as the OS does. For messages only.
  */
@@ -171,11 +155,14 @@ function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
  * A vault that is a SYMBOLIC LINK is never changed through the link: its target may be a
  * directory usertrust does not own. A target any other user can read is refused, naming the
  * link, the target, its mode and the `chmod` that fixes it; an owner-only target this process's
- * user owns is used; one this process cannot open is refused by name. The target judged is the
- * directory the OS opens through the link (see {@link statThroughLink}), never a path resolved
- * in JS. A dangling link, and a vault path that is not a directory (a regular file, say), are
- * refused by name here, rather than left for the first writer to fail on with a bare ENOENT or
- * ENOTDIR.
+ * user owns and can write to is used; one it cannot reach or cannot write to is refused by
+ * name. The target judged is the one the KERNEL resolves: `stat` follows the link and the whole
+ * path in the kernel, as every writer's open does, and needs only search permission on the
+ * way, not read permission on the target. No decision comes from a path resolved in JS: JS
+ * `realpathSync` collapses `..` LEXICALLY, so with `.usertrust -> /a/link/../vault` and
+ * `/a/link -> /b/sub` it names /a/vault while the OS opens /b/vault. A dangling link, and a
+ * vault path that is not a directory (a regular file, say), are refused by name here, rather
+ * than left for the first writer to fail on with a bare ENOENT or ENOTDIR.
  *
  * The tightening itself never follows a link either. The directory is opened with
  * `O_NOFOLLOW | O_DIRECTORY` and changed with `fchmod` on that descriptor, after checking it is
@@ -198,9 +185,8 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 	if (st.isSymbolicLink()) {
 		let targetStat: Stats;
 		try {
-			// Windows opens no directory as a file; there only the kind is checked, by a stat the
-			// OS resolves (never a JS realpath).
-			targetStat = isWindows() ? statSync(vaultDir) : statThroughLink(vaultDir);
+			// stat(2): the kernel follows the link and resolves the path (never a JS realpath).
+			targetStat = statSync(vaultDir);
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException).code;
 			if (code === "ENOENT") {
@@ -211,23 +197,14 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 				);
 			}
 			if (code === "EACCES" || code === "EPERM") {
-				// Named here too: a target this process may not open is not judged, and would leave
-				// every writer with a bare EACCES.
+				// Named here too: a target this process cannot even search its way to is not judged,
+				// and would leave every writer with a bare EACCES.
 				throw new Error(
-					`usertrust: the vault ${vaultDir} is a symbolic link to ${linkTarget(vaultDir)}, which this process cannot open (${code}); give this user read and search permission on it, or point the link elsewhere`,
+					`usertrust: the vault ${vaultDir} is a symbolic link to ${linkTarget(vaultDir)}, which this process cannot reach (${code}); give this user search permission on every directory on the way to it, or point the link elsewhere`,
 				);
 			}
 			if (code !== "ENOTDIR") throw err;
-			// The kind, for the message only: what the link leads to is not a directory.
-			let kind: Stats | undefined;
-			try {
-				kind = statSync(vaultDir);
-			} catch {
-				/* a component on the way is not a directory either */
-			}
-			if (kind !== undefined && !kind.isDirectory()) {
-				throw notADirectory(vaultDir, kind, linkTarget(vaultDir));
-			}
+			// A directory on the way to the target is not a directory.
 			throw new Error(
 				`usertrust: the vault ${vaultDir} is a symbolic link to ${linkText(vaultDir)}, which does not lead to a directory; move it aside and the vault is created owner-only`,
 			);
@@ -239,10 +216,23 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 			throw foreignVault(vaultDir, targetStat.uid, euid, target);
 		}
 		const targetMode = targetStat.mode;
-		if ((targetMode & 0o077) === 0) return;
-		throw new Error(
-			`usertrust: the vault ${vaultDir} is a symbolic link to ${target}, which other users can read (mode ${octal(targetMode)}). usertrust does not change a directory through a link; make it owner-only with: chmod 700 ${target}`,
-		);
+		if ((targetMode & 0o077) !== 0) {
+			throw new Error(
+				`usertrust: the vault ${vaultDir} is a symbolic link to ${target}, which other users can read (mode ${octal(targetMode)}). usertrust does not change a directory through a link; make it owner-only with: chmod 700 ${target}`,
+			);
+		}
+		// Owner-only, and ours: usable if this process can create in it (write and search; read is
+		// not needed). Asked of the kernel through the link, so it is never left for the first
+		// writer to fail on with a bare EACCES.
+		try {
+			accessSync(vaultDir, fsConstants.W_OK | fsConstants.X_OK);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "EACCES") throw err;
+			throw new Error(
+				`usertrust: the vault ${vaultDir} is a symbolic link to ${target}, which this process cannot write to (mode ${octal(targetMode)}); usertrust does not change a directory through a link; make it usable with: chmod 700 ${target}`,
+			);
+		}
+		return;
 	}
 
 	if (!st.isDirectory()) throw notADirectory(vaultDir, st);
@@ -297,8 +287,8 @@ export function looseVaultWarning(vaultDir: string): string | undefined {
 	try {
 		const st = lstatSync(vaultDir);
 		if (st.isSymbolicLink()) {
-			// What the OS opens through the link is what is judged; the path is for the message.
-			const targetStat = statThroughLink(vaultDir);
+			// What the kernel resolves through the link is what is judged; the path is for the message.
+			const targetStat = statSync(vaultDir);
 			const target = linkTarget(vaultDir);
 			if (!targetStat.isDirectory()) return undefined;
 			const owner = foreign(targetStat.uid, target);
