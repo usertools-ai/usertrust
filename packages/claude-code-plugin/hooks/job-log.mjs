@@ -33,9 +33,10 @@
 //
 // Zero dependencies; reads and writes only the state dir.
 import { constants } from "node:fs";
-import { appendFile, mkdir, open, readdir } from "node:fs/promises";
+import { mkdir, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
+	appendRegular,
 	eachLine,
 	guardMode,
 	READ_BOUND,
@@ -355,7 +356,7 @@ async function readParsed(log, sessionId) {
 
 /** Append `rec` as one complete line, in one write (no fsync: only SessionStart's line is synced). */
 async function appendLine(log, rec) {
-	await appendFile(log, `${JSON.stringify(rec)}\n`, { flag: "a", mode: 0o600 });
+	await appendRegular(log, `${JSON.stringify(rec)}\n`);
 }
 
 /**
