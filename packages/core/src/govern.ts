@@ -3738,7 +3738,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// of this spend, so the rule that aborts a governed call whose `llm_call` failed applies. The
 	// append is awaited first there, so the call always returns a Promise of the SDK's result: a
 	// method that is synchronous in the SDK (`chat.completions.stream`) returns a Promise of its
-	// value, and a thenable value (`beta.messages.toolRunner`'s runner) is awaited by that Promise.
+	// value, and a thenable value is ADOPTED: `beta.messages.toolRunner` resolves to the runner's final
+	// result, not the runner object.
 	function callUngovernedMethod(
 		path: string,
 		fn: (...fnArgs: unknown[]) => unknown,

@@ -753,6 +753,29 @@ describe("allowUngoverned", () => {
 		expect(chainAtFetch).toEqual([["ungoverned_call"]]);
 		expect(chainEvents().map((e) => e.kind)).toEqual(["ungoverned_call"]);
 	});
+
+	it("under audit.failClosed an opted-out thenable (beta.messages.toolRunner) resolves to its FINAL result, not the runner", async () => {
+		writeConfig({ audit: { failClosed: true } });
+		const { client } = await anthropic({ allowUngoverned: ["beta.messages.toolRunner"] });
+		const result = client.beta.messages.toolRunner({ ...MP, tools: [], max_iterations: 1 });
+		expect(result).toBeInstanceOf(Promise);
+		const settled = await result;
+		// Promise resolution adopts the thenable runner: what arrives is the final message.
+		expect(typeof settled.runUntilDone).toBe("undefined");
+		expect(settled.id).toBe("msg_1");
+		expect(settled.type).toBe("message");
+		expect(hits).toEqual(["POST /v1/messages"]);
+		expect(chainEvents().map((e) => e.kind)).toEqual(["ungoverned_call"]);
+	});
+
+	it("without audit.failClosed an opted-out beta.messages.toolRunner returns the runner itself", async () => {
+		const { client } = await anthropic({ allowUngoverned: ["beta.messages.toolRunner"] });
+		const runner = client.beta.messages.toolRunner({ ...MP, tools: [], max_iterations: 1 });
+		expect(runner).not.toBeInstanceOf(Promise);
+		expect(typeof runner.runUntilDone).toBe("function");
+		const final = await runner.runUntilDone();
+		expect(final.id).toBe("msg_1");
+	});
 });
 
 // ── Free list ──
