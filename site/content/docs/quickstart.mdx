@@ -6,8 +6,10 @@ description: Install usertrust and make your first governed LLM call in 2 minute
 ## Install
 
 ```bash
-npm install usertrust
+npm install usertrust @anthropic-ai/sdk
 ```
+
+usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use: `@anthropic-ai/sdk` for the example below, `openai`, or `@google/genai` for Google Gemini. `@anthropic-ai/sdk` and `openai` are declared as optional peer dependencies; `@google/genai` is not declared, so you install it yourself.
 
 ## Initialize the Vault
 
@@ -100,9 +102,11 @@ const client = await trust(new GoogleGenAI({ apiKey }), { budget: 50_000 });
 const { response } = await client.models.generateContent({ ... });
 ```
 
+On a Google client only `models.generateContent` is governed. `models.generateContentStream` passes through to the SDK untouched: it is not metered, it gets no receipt, and no policy applies to it.
+
 ## Streaming
 
-Streaming works transparently. The governance receipt resolves when the stream completes:
+Streaming works transparently. The settled receipt is `response.receipt`, which resolves when the stream completes (the `receipt` returned beside `response` is provisional, `settled: false`). What a failure costs is in [Streaming](/docs/api/trust#streaming):
 
 ```ts
 const { response } = await client.messages.create({
@@ -112,13 +116,17 @@ const { response } = await client.messages.create({
   stream: true,
 });
 
-// Consume the stream
-for await (const event of response) {
-  process.stdout.write(event.type);
+try {
+  // Consume the stream
+  for await (const event of response) {
+    process.stdout.write(event.type);
+  }
+  // The settled receipt, after the stream ends
+  const receipt = await response.receipt;
+} catch (err) {
+  // This catch also covers your own code in the loop, so it cannot say what the
+  // error cost: see Streaming in the trust() docs for how to tell.
 }
-
-// Receipt is available after stream ends
-const receipt = await response.receipt;
 ```
 
 ## Dry-Run Mode

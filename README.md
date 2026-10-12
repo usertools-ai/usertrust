@@ -23,6 +23,14 @@ console.log(receipt);
 await client.destroy();
 ```
 
+`new Anthropic()` reads your key from `ANTHROPIC_API_KEY`. `usertrust init` saves the key you give it in `.usertrust/.env` but does not export it, so a fresh shell has no key. Run the example with Node's own `.env` loader:
+
+```bash
+node --env-file=.usertrust/.env app.mjs
+```
+
+or `export ANTHROPIC_API_KEY=...` yourself first.
+
 That's it. One function wraps any supported LLM client. Every call is metered, audited, and policy-checked.
 
 ### Expected Output
@@ -71,8 +79,17 @@ The `receipt` returned from every governed call:
 ## Install
 
 ```bash
+npm install usertrust @anthropic-ai/sdk
 npx usertrust init
 ```
+
+`npx usertrust init` does not install the package into your project, so the `npm install` line is required. `import { trust } from "usertrust"` fails until it runs.
+
+usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). `@anthropic-ai/sdk` and `openai` are declared as optional peer dependencies. `@google/genai` is not declared at all: usertrust recognises a Google client by its shape (`models.generateContent`), so nothing in the install names that package, and you install it yourself.
+
+`init` is interactive in a terminal. It asks for your provider API key (Anthropic `sk-ant-`, OpenAI `sk-` and Google `AIza` keys are detected from their prefix; any other provider you name yourself) and writes it to `.usertrust/.env`. A new `.env` is created owner-only (mode 600). `init --reconfigure` rewrites an existing `.env` in place and keeps that file's mode, so if yours is readable by other users, run `chmod 600 .usertrust/.env` before you reconfigure. An Anthropic, OpenAI or Google key is first checked against that provider's models endpoint (unless you pass `--skip-verify`); a key that fails the check is still written, with a warning. A key for a provider you name yourself is not checked at all, even though `init` reports it as valid, so a wrong key there shows up only on the first real call.
+
+Without a terminal (CI, scripts, a container build), run `npx usertrust init --json`: it creates the vault without prompting and without asking for a key.
 
 This creates a `.usertrust/` vault in your project root with default config, policies, and an empty audit chain.
 
@@ -89,12 +106,13 @@ The package ships a single ESM build; `require()` loads it through Node's built-
 
 ## Integration
 
-Works with Anthropic, OpenAI, and Google AI SDKs:
+Works with the Anthropic (`@anthropic-ai/sdk`), OpenAI (`openai`) and Google Gemini (`@google/genai`) SDKs:
 
 ```typescript
 import { trust } from "usertrust";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 
 // Anthropic
 const anthropic = await trust(new Anthropic());
@@ -104,11 +122,17 @@ const { response, receipt } = await anthropic.messages.create({ ... });
 const openai = await trust(new OpenAI());
 const { response, receipt } = await openai.chat.completions.create({ ... });
 
+// Google Gemini: the client reads GOOGLE_API_KEY, the name `init` stores a Google key under
+const google = await trust(new GoogleGenAI({}));
+const { response, receipt } = await google.models.generateContent({ model: "gemini-2.5-flash", contents: "..." });
+
 // With options (full mode — requires TigerBeetle)
 const client = await trust(new Anthropic(), {
   budget: 100_000,
 });
 ```
+
+On a Google client only `models.generateContent` is governed. `models.generateContentStream` passes through to the SDK untouched: it is not metered, it gets no receipt, and no policy applies to it. Use `generateContent` for calls you need governed.
 
 Every call returns `{ response, receipt }`:
 
@@ -190,6 +214,8 @@ Ledger unavailable: connection refused
   Docs: https://usertrust.ai/docs/errors/ledger-unavailable
 ```
 
+In 4.1.0, `usertrust tb start` only prints the manual steps, so the hint above refers to them. Start TigerBeetle as described in [Running TigerBeetle](#running-tigerbeetle), or use `{ dryRun: true }`.
+
 ## Config
 
 Create `.usertrust/usertrust.config.json`:
@@ -266,7 +292,27 @@ A counter in a database is not a financial ledger. `usertrust` uses the same dou
 
 ## Enforcement
 
-Budget enforcement is local. Connect a TigerBeetle instance for production, or pass `dryRun: true` to skip the ledger (audit and policy still run). Remote proxy mode is not implemented — passing `proxy` to `trust()` or `createGovernor()` throws.
+Budget enforcement is local. Connect a replicated TigerBeetle cluster for production (see [Running TigerBeetle](#running-tigerbeetle)), or pass `dryRun: true` to skip the ledger (audit and policy still run). Remote proxy mode is not implemented — passing `proxy` to `trust()` or `createGovernor()` throws.
+
+Try it first with `dryRun: true`, as in the example at the top. For full mode, run TigerBeetle as below.
+
+### Running TigerBeetle
+
+Full mode needs a TigerBeetle replica at `127.0.0.1:3001`, the default address. Run the TigerBeetle release that matches the ledger client your install resolved. usertrust depends on `tigerbeetle-node` `^0.17.9`, so a later install can resolve a newer 0.17.x client, and a replica evicts a client whose release it does not support (`client_release_too_high` for a client newer than the replica). `npm ls tigerbeetle-node` in your project shows the client's version (0.17.9 when this was written); set `TB_VERSION` below to it. These commands were run on Linux on arm64 with the 0.17.9 `tigerbeetle-aarch64-linux.zip` asset; for another platform, take the asset for your platform from the [release with that version](https://github.com/tigerbeetle/tigerbeetle/releases).
+
+```bash
+TB_VERSION=0.17.9   # the tigerbeetle-node version `npm ls tigerbeetle-node` shows
+curl -sSL -o tigerbeetle.zip "https://github.com/tigerbeetle/tigerbeetle/releases/download/${TB_VERSION}/tigerbeetle-aarch64-linux.zip"
+unzip tigerbeetle.zip
+./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle
+./tigerbeetle start --addresses=3001 --development 0_0.tigerbeetle
+```
+
+Format the data file once; start the replica each time you need it.
+
+**These commands start ONE replica in `--development` mode: a local full-mode run, not a production deployment.** A single replica has no replication and no high availability: lose its data file and the ledger is gone. For production, deploy a replicated TigerBeetle cluster following TigerBeetle's own guidance ([cluster recommendations](https://docs.tigerbeetle.com/operating/cluster/), [deploying](https://docs.tigerbeetle.com/operating/deploying/)), and give the governor all the replica addresses (`tigerbeetle.addresses`).
+
+TigerBeetle and its client need `io_uring` on Linux, and Docker's default seccomp profile blocks it; with it blocked, the client cannot start. In a container, run with `--security-opt seccomp=unconfined` (or a seccomp profile that allows `io_uring`). On a host where `kernel.io_uring_disabled` is set, it must be `0`.
 
 ## Verify
 
