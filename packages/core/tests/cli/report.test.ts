@@ -590,6 +590,77 @@ describe("usertrust report --week", () => {
 		write.mockRestore();
 	});
 
+	it("the verdict states the instant the chain was read, in md, html and json", async () => {
+		await vault([{ cost: 1 }]);
+		const before = Date.now();
+		// markdown wraps vault-derived text in a code span, html does not
+		const stamp = /Chain as read at `?(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/;
+		for (const format of ["md", "html"] as const) {
+			stdout = "";
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", format]);
+			const at = stamp.exec(stdout)?.[1];
+			expect(at, format).toBeDefined();
+			const ms = Date.parse(at as string);
+			expect(ms, format).toBeGreaterThanOrEqual(before - 1);
+			expect(ms, format).toBeLessThanOrEqual(Date.now());
+		}
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		const out = JSON.parse(stdout) as { integrity: { readAtIso: string; verified: boolean } };
+		expect(out.integrity.verified).toBe(true);
+		expect(Number.isFinite(Date.parse(out.integrity.readAtIso))).toBe(true);
+		write.mockRestore();
+	});
+
+	it("an ABSENT spend ledger reads as a counter of 0, as the governors read it: a headless ambiguity over budget is disputed, not definite", async () => {
+		// headless settle() appends settlement_ambiguous BEFORE it adds to the counter and persists it
+		await vault([], [{ kind: "settlement_ambiguous", data: { transferId: "t-amb", cost: 1200 } }]);
+		const ledger = join(dir, ".usertrust", "spend-ledger.json");
+		expect(existsSync(ledger)).toBe(false);
+		type Out = {
+			spendLedger: { recorded: number | null; differs: boolean; unreadable: boolean };
+			budget: { overBudget: boolean; overBudgetDisputed: boolean; possiblyOverBudget: boolean };
+		};
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json", "--budget", "1000"]);
+		const out = JSON.parse(stdout) as Out;
+		// the third leg: the chain shows session spend, the counter (absent = 0) shows none
+		expect(out.spendLedger).toMatchObject({ recorded: 0, differs: true, unreadable: false });
+		expect(out.budget).toMatchObject({
+			overBudget: false,
+			overBudgetDisputed: true,
+			possiblyOverBudget: true,
+		});
+		// CONTROL: once the governor has persisted a counter that agrees, the definite claim stands
+		writeFileSync(ledger, JSON.stringify({ budgetSpent: 1200 }));
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json", "--budget", "1000"]);
+		expect((JSON.parse(stdout) as Out).budget).toMatchObject({
+			overBudget: true,
+			overBudgetDisputed: false,
+		});
+		write.mockRestore();
+	});
+
+	it.skipIf(process.getuid?.() === 0)(
+		"a spend ledger that EXISTS but cannot be read stays unreadable, never the absent-file zero",
+		async () => {
+			await vault([{ cost: 100 }]);
+			const ledger = join(dir, ".usertrust", "spend-ledger.json");
+			writeFileSync(ledger, JSON.stringify({ budgetSpent: 100 }));
+			chmodSync(ledger, 0o000);
+			try {
+				stdout = "";
+				await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+				const out = JSON.parse(stdout) as { spendLedger: { unreadable: boolean } };
+				expect(out.spendLedger.unreadable).toBe(true);
+			} finally {
+				chmodSync(ledger, 0o600);
+			}
+			write.mockRestore();
+		},
+	);
+
 	it("the dead-letter queue is read from the snapshot: a dead-lettered shortfall makes a headless post exact at the posted amount, an unreadable queue an upper bound", async () => {
 		await vault([
 			{

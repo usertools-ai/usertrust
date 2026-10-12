@@ -345,8 +345,11 @@ export function snapshotVault(
 	spendLedger?: { value: number } | { unreadable: true };
 	/** The writer's dead-letter queue, read ONCE with the rest (NOT chain-verified). A read error is `unreadable`, never "none". */
 	deadLetters: DeadLetters;
+	/** The UTC instant the vault was read, taken BEFORE the audit directory was listed: what the VERIFIED claim is about. */
+	readAtIso: string;
 	cleanup: () => void;
 } {
+	const readAtIso = new Date().toISOString();
 	const dir = mkdtempSync(join(tmpdir(), "usertrust-report-"));
 	const problems: string[] = [];
 	const busy: string[] = [];
@@ -414,17 +417,21 @@ export function snapshotVault(
 		// The governor's persisted counter, read ONCE here. It is a plain file the chain does not verify, so an unreadable
 		// one is reported beside the figures and is never a verifier problem.
 		const ledgerSrc = join(vaultPath, "spend-ledger.json");
-		if (existsSync(ledgerSrc)) {
-			try {
-				const parsed = JSON.parse(readFileSync(ledgerSrc, "utf-8")) as { budgetSpent?: unknown };
-				const v = parsed?.budgetSpent;
-				spendLedger =
-					typeof v === "number" && Number.isFinite(v) && v >= 0
-						? { value: v }
-						: { unreadable: true };
-			} catch {
-				spendLedger = { unreadable: true };
-			}
+		try {
+			const parsed = JSON.parse(readFileSync(ledgerSrc, "utf-8")) as { budgetSpent?: unknown };
+			const v = parsed?.budgetSpent;
+			spendLedger =
+				typeof v === "number" && Number.isFinite(v) && v >= 0 ? { value: v } : { unreadable: true };
+		} catch (err) {
+			// ABSENT is the governors' own reading too (`loadSpendLedger`: ENOENT is a counter of 0, "the one honest
+			// zero"): a governor that has not persisted yet has counted nothing. Decided by the read's error code, not an
+			// existsSync preflight, so a file that exists and cannot be read stays unreadable. Without this, a chain that
+			// recorded spend before the counter was ever written (a headless ambiguity is appended before the add) could not
+			// be disputed against any counter.
+			spendLedger =
+				(err as NodeJS.ErrnoException | undefined)?.code === "ENOENT"
+					? { value: 0 }
+					: { unreadable: true };
 		}
 		// The writer's dead-letter queue: a capped post whose shortfall append failed is recorded there with the posted
 		// amount. Absent is "no dead letters"; a file that exists and cannot be read is NOT, it leaves only an upper bound.
@@ -446,6 +453,7 @@ export function snapshotVault(
 		busy,
 		configUnreadable,
 		deadLetters,
+		readAtIso,
 		...(spendLedger !== undefined ? { spendLedger } : {}),
 		cleanup: () => rmSync(dir, { recursive: true, force: true }),
 	};
@@ -584,6 +592,7 @@ export async function run(
 					chainLength: verdict.chainLength,
 					firstEvent: verdict.firstEvent,
 					lastEvent: verdict.lastEvent,
+					readAtIso: snapshot.readAtIso,
 				},
 				{
 					endMs: parsed.endMs,

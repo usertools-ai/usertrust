@@ -130,6 +130,11 @@ export interface IntegrityInfo {
 	chainLength: number;
 	firstEvent: string | null;
 	lastEvent: string | null;
+	/**
+	 * The UTC instant the vault was read (taken before the audit directory was listed). The VERIFIED claim is about the
+	 * chain as it stood at this instant, not about the vault after the run; the renderers print it beside the verdict.
+	 */
+	readAtIso?: string;
 }
 
 export interface Row {
@@ -527,8 +532,9 @@ function denominationOf(e: PersistedAuditEvent): "usd" | "nominal" | "unlabelled
  * `actualCost` after the POST ATTEMPT, success or ambiguous; an abort or a release never adds). What the CHAIN can show of
  * that is only this evidence, per transfer:
  *   - DEBITED needs POSITIVE evidence the counter added it: a `settlement_shortfall` (a post happened), a
- *     `settlement_ambiguous` (the governor wrote it after adding), `ledgerPosted` on the record, or a settled call with no
- *     contrary marker;
+ *     `settlement_ambiguous` (the governor decided to post it; the add FOLLOWS the record on the headless path, so a crash
+ *     between the two leaves it uncounted, which the spend-ledger leg catches), `ledgerPosted` on the record, or a settled
+ *     call with no contrary marker;
  *   - NOT DEBITED needs a void or a release (`llm_call_failed`, `hold_released`) and NO post evidence;
  *   - everything else is UNCERTAIN: counted and disclosed, never folded into either bound. No catch-all arm may land in a
  *     definite class.

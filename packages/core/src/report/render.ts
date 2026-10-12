@@ -101,13 +101,17 @@ export function esc(s: string): string {
  * sits beside, and Markdown or HTML in it must not become live.
  */
 function verdictLine(m: ReportModel, v: (s: string) => string): string {
+	// The instant the claim is about: a verdict on an empty or busy vault must not read as a statement about the vault's
+	// state after the run.
+	const asRead =
+		m.integrity.readAtIso !== undefined ? ` Chain as read at ${v(m.integrity.readAtIso)}.` : "";
 	if (m.integrity.verified) {
-		return `Audit chain VERIFIED: ${m.integrity.chainLength} event(s), ${v(m.integrity.firstEvent ?? "?")} to ${v(m.integrity.lastEvent ?? "?")}.`;
+		return `Audit chain VERIFIED: ${m.integrity.chainLength} event(s), ${v(m.integrity.firstEvent ?? "?")} to ${v(m.integrity.lastEvent ?? "?")}.${asRead}`;
 	}
 	return `Audit chain UNVERIFIED: ${m.integrity.errors.length} problem(s). ${m.integrity.errors
 		.slice(0, 3)
 		.map(v)
-		.join(" | ")}`;
+		.join(" | ")}${asRead}`;
 }
 
 /** The governor's counter against the chain's INTERVAL: rendered whether or not a budget is configured. */
