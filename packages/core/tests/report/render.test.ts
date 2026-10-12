@@ -343,3 +343,32 @@ describe("unrecoverable and unrecognised records are disclosed in every format",
 		expect(json.unrecognised).toEqual({ "future_kind<script>": 1 });
 	});
 });
+
+describe("records without their call are disclosed in every format", () => {
+	it("md, html and json show a standalone shortfall as charged-but-unrecorded, without a dollar value", () => {
+		const m = buildWeeklyReport(
+			[
+				{
+					id: "i",
+					kind: "settlement_shortfall",
+					timestamp: "2026-10-11T00:00:00Z",
+					actor: "local",
+					hash: "h",
+					data: { transferId: "t-x", actual: 100, posted: 60, shortfall: 40 },
+				} as unknown as PersistedAuditEvent,
+			],
+			{ verified: true, errors: [], chainLength: 1, firstEvent: "a", lastEvent: "a" },
+			{ endMs: END },
+		);
+		for (const f of ["md", "html"] as const) {
+			const out = render(m, f);
+			expect(out, f).toMatch(/Records without their call/);
+			expect(out, f).toMatch(/Charged but unrecorded/);
+		}
+		const json = JSON.parse(render(m, "json")) as {
+			chargedUnrecorded: { posted: number };
+		};
+		expect(json.chargedUnrecorded.posted).toBe(60);
+		expect(m.totals.confirmedUt).toBe(0);
+	});
+});

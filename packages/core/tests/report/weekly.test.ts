@@ -562,6 +562,48 @@ describe("weekly report model", () => {
 		expect(m.totals.confirmedUt).toBe(0);
 	});
 
+	it("ONE RULE: a record that only qualifies a call, with no spend record for its transfer, is disclosed as a record without its call", () => {
+		const m = build([
+			// a capped post succeeded but the llm_call append failed: the shortfall is the only trace of the charge
+			ev("settlement_shortfall", "2026-10-08T01:00:00Z", {
+				transferId: "t-s",
+				actual: 100,
+				posted: 60,
+				shortfall: 40,
+			}),
+			ev("llm_call_failed", "2026-10-08T02:00:00Z", { transferId: "t-f", cost: 7, error: "x" }),
+			ev("tool_call_failed", "2026-10-08T03:00:00Z", {
+				transferId: "t-g",
+				actionName: "x",
+				cost: 9,
+			}),
+			ev("usage_implausible", "2026-10-08T04:00:00Z", { transferId: "t-u" }),
+			// beside its call: NOT an orphan
+			call("2026-10-08T05:00:00Z", 100, { transferId: "t-ok" }),
+			ev("settlement_shortfall", "2026-10-08T05:00:01Z", {
+				transferId: "t-ok",
+				posted: 80,
+				shortfall: 20,
+			}),
+		]);
+		expect(m.withoutCall["settlement_shortfall"]).toEqual({ records: 1, amount: 60 });
+		expect(m.withoutCall["llm_call_failed"]).toEqual({ records: 1, amount: 7 });
+		expect(m.withoutCall["tool_call_failed"]).toEqual({ records: 1, amount: 9 });
+		expect(m.withoutCall["usage_implausible"]).toEqual({ records: 1, amount: 0 });
+		expect(m.chargedUnrecorded).toEqual({ records: 1, posted: 60 });
+		// never in a spend figure
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.actionUt).toBe(0);
+	});
+
+	it("budget_allocated and budget_reclaimed are known (deliberately not read), so an envelope vault does not list them as unrecognised", () => {
+		const m = build([
+			ev("budget_allocated", "2026-10-08T01:00:00Z", { amount: 5 }),
+			ev("budget_reclaimed", "2026-10-08T02:00:00Z", { amount: 5 }),
+		]);
+		expect(m.unrecognised).toEqual({});
+	});
+
 	it("an unknown future record kind beside a call unconfirms it by default; shortfall and implausible do not", () => {
 		const m = build([
 			call("2026-10-08T01:00:00Z", 100, { transferId: "t-s" }),

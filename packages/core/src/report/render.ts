@@ -283,6 +283,25 @@ export function renderMarkdown(m: ReportModel): string {
 			"",
 		);
 	}
+	const orphans = Object.entries(m.withoutCall);
+	if (orphans.length > 0) {
+		out.push(
+			"### Records without their call",
+			"",
+			"These records qualify a call (a shortfall, an ambiguity, a failure marker) but the chain holds no record of the call itself. Their amounts are usertokens with no denomination assumed, and they are in no spend or budget figure.",
+			"",
+			"| Kind | Records | Amount (usertokens) |",
+			"|---|---:|---:|",
+			...orphans.map(([kind, v]) => `| ${md(kind)} | ${v.records} | ${tokens(v.amount)} |`),
+			"",
+		);
+		if (m.chargedUnrecorded.records > 0) {
+			out.push(
+				`**Charged but unrecorded:** ${m.chargedUnrecorded.records} capped settlement(s) posted ${tokens(m.chargedUnrecorded.posted)} usertokens to the ledger whose call record is missing. That money moved; it is not counted as spend here because the denomination is not recorded.`,
+				"",
+			);
+		}
+	}
 	const kinds = Object.entries(m.unrecognised);
 	if (kinds.length > 0) {
 		out.push(
@@ -417,6 +436,22 @@ export function renderHtml(m: ReportModel): string {
 		...(m.unrecoverable.records > 0
 			? [
 					`<h3>Served but never charged</h3><p>${m.unrecoverable.records} call(s) were served by the provider after their hold was lost, so the ledger never charged them. Reported usage: ${tokens(m.unrecoverable.inputTokens)} input, ${tokens(m.unrecoverable.outputTokens)} output, ${tokens(m.unrecoverable.cacheReadTokens)} cache-read and ${tokens(m.unrecoverable.cacheWriteTokens)} cache-write tokens. There is no dollar value: they are in no spend or budget figure.</p>`,
+				]
+			: []),
+		...(Object.keys(m.withoutCall).length > 0
+			? [
+					`<h3>Records without their call</h3><p>These records qualify a call (a shortfall, an ambiguity, a failure marker) but the chain holds no record of the call itself. Amounts are usertokens with no denomination assumed, in no spend or budget figure.</p><table><thead><tr><th>Kind</th><th class="n">Records</th><th class="n">Amount (usertokens)</th></tr></thead><tbody>${Object.entries(
+						m.withoutCall,
+					)
+						.map(
+							([kind, v]) =>
+								`<tr><td>${esc(kind)}</td><td class="n">${v.records}</td><td class="n">${tokens(v.amount)}</td></tr>`,
+						)
+						.join("")}</tbody></table>${
+						m.chargedUnrecorded.records > 0
+							? `<p><strong>Charged but unrecorded:</strong> ${m.chargedUnrecorded.records} capped settlement(s) posted ${tokens(m.chargedUnrecorded.posted)} usertokens to the ledger whose call record is missing. That money moved; it is not counted as spend here because the denomination is not recorded.</p>`
+							: ""
+					}`,
 				]
 			: []),
 		...(Object.keys(m.unrecognised).length > 0

@@ -286,6 +286,13 @@ export interface ReportModel {
 	 * kind. A new record kind can never vanish silently: it shows up here until the report learns to read it.
 	 */
 	unrecognised: Record<string, number>;
+	/**
+	 * Records that only qualify a call (shortfall, ambiguity, implausible-usage note, failure markers) but whose transfer has
+	 * NO spend record in the chain, by kind. `amount` is usertokens with no denomination assumed and is in no spend total.
+	 */
+	withoutCall: Record<string, { records: number; amount: number }>;
+	/** Of those, standalone shortfalls: the ledger posted `posted` usertokens that no call record accounts for. */
+	chargedUnrecorded: { records: number; posted: number };
 	notes: string[];
 }
 
@@ -306,8 +313,22 @@ const KNOWN_KINDS: ReadonlySet<string> = new Set([
 	"settlement_shortfall",
 	"usage_implausible",
 	"settlement_unrecoverable",
+	// Written by the budget primitives (cost-center envelopes) to the same chain; deliberately not read here.
+	"budget_allocated",
+	"budget_reclaimed",
 	...GOVERNANCE_KINDS,
 ]);
+
+/** A record that only qualifies a call, never being spend itself. */
+function isQualifierKind(kind: string): boolean {
+	return (
+		kind === "settlement_shortfall" ||
+		kind === "settlement_ambiguous" ||
+		kind === "usage_implausible" ||
+		kind === "llm_call_failed" ||
+		kind.endsWith("_failed")
+	);
+}
 
 /** Kinds that are never a governed action, even if one day they carry a `cost`. */
 const NON_ACTION_KINDS = new Set<string>([
@@ -632,6 +653,8 @@ function buildPlain(
 		cacheWriteTokens: 0,
 	};
 	const unrecognised = new Map<string, number>();
+	const orphaned = new Map<string, { records: number; amount: number }>();
+	const orphanedCharge = { records: 0, posted: 0 };
 	let shortfallEvents = 0;
 	let shortfallUt = 0;
 	let recordedSessionUt = 0;
@@ -810,6 +833,23 @@ function buildPlain(
 		}
 
 		if (!inWindow) continue;
+
+		// ONE RULE for every record that only QUALIFIES a call (a shortfall, an ambiguity, an implausible-usage note, a
+		// failure marker): with no spend record for its transfer it is disclosed as a record without its call. Its amount
+		// is shown without assuming a denomination and is in no spend total. A standalone shortfall's `posted` is the
+		// only evidence of a ledger charge whose call record never landed.
+		if (isQualifierKind(e.kind) && (tid === undefined || !spendTransfers.has(tid))) {
+			const row = orphaned.get(e.kind) ?? { records: 0, amount: 0 };
+			row.records += 1;
+			const shown =
+				e.kind === "settlement_shortfall" ? cost(e.data["posted"]) : cost(e.data["cost"]);
+			if (shown !== undefined) row.amount += shown;
+			orphaned.set(e.kind, row);
+			if (e.kind === "settlement_shortfall") {
+				orphanedCharge.records += 1;
+				orphanedCharge.posted += cost(e.data["posted"]) ?? 0;
+			}
+		}
 
 		// An ambiguity with no spend record of its own (a stream that never reached its audit append): the cost it
 		// carries is unconfirmed spend, shown, never dropped.
@@ -1013,6 +1053,8 @@ function buildPlain(
 		},
 		governance,
 		unrecoverable,
+		withoutCall: Object.fromEntries([...orphaned.entries()].sort(([a], [b]) => a.localeCompare(b))),
+		chargedUnrecorded: orphanedCharge,
 		unrecognised: Object.fromEntries(
 			[...unrecognised.entries()].sort(([a], [b]) => a.localeCompare(b)),
 		),
