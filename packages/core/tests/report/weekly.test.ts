@@ -1363,3 +1363,35 @@ describe("a headless call that records the amount the ledger posted is exact by 
 		expect(m.totals.postProvenUpperUt).toBe(100);
 	});
 });
+
+describe("an anomaly DETECTION beside a settled call is an annotation, not a contradiction", () => {
+	const T = "2026-10-08T01:00:00Z";
+	const detection = (tid: string) =>
+		ev("anomaly_detected", T, {
+			transferId: tid,
+			anomalyKind: "velocity",
+			model: "claude-sonnet-5-5",
+		});
+
+	it("detection + a settled llm_call: confirmed spend and a definite budget debit", () => {
+		const m = build([call(T, 100, { transferId: "t" }), detection("t")]);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.contradictedCalls).toBe(0);
+		expect(m.budget.recordedSessionWallet).toBe(100);
+		expect(m.budget.uncertainTransfers).toBe(0);
+		// it is still counted as governance activity
+		expect(m.governance["anomaly_detected"]).toBe(1);
+	});
+
+	it("detection + the abort's own terminal still contradicts the call", () => {
+		for (const terminal of ["llm_call_failed", "stream_partial_delivery"]) {
+			const m = build([
+				call(T, 100, { transferId: "t" }),
+				detection("t"),
+				ev(terminal, T, { transferId: "t" }),
+			]);
+			expect(m.totals.confirmedUt, terminal).toBe(0);
+			expect(m.totals.contradictedCalls, terminal).toBe(1);
+		}
+	});
+});

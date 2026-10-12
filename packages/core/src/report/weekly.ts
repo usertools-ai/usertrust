@@ -620,6 +620,10 @@ const BENIGN_SIBLINGS: ReadonlySet<string> = new Set([
 	"settlement_shortfall",
 	"usage_implausible",
 	"injection_detected",
+	// A DETECTION is not an abort: govern.ts appends it when the anomaly detector trips, and a stream whose settlement wins the
+	// abort race (or whose emitter cannot abort) still settles as an ordinary charged call. An abort that did void the call
+	// leaves its own terminal (`llm_call_failed`, `stream_partial_delivery`), which contradicts the call on its own.
+	"anomaly_detected",
 ]);
 
 /**
