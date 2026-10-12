@@ -242,6 +242,9 @@ export type {
 	TrustedResponse,
 	TrustReceipt,
 } from "./shared/types.js";
+// Where a governor puts a vault base with `..` (the kernel's reading, not the lexical one), for a
+// host that must find a governor's vault files before creating it, as usertrust-server's probe does.
+export { kernelVaultBase } from "./shared/vault-base.js";
 // Streaming
 export type { GovernedStream } from "./streaming.js";
 // Supply Chain
