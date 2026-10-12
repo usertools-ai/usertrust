@@ -845,6 +845,8 @@ function nameGaps(errors: readonly string[], seqFile: ReadonlyMap<number, string
 		const m = /^Sequence gap: event (\d+) follows (\d+)/.exec(e);
 		if (m === null) continue;
 		const [x, y] = [Number(m[1]), Number(m[2])];
+		// A duplicated sequence reads "event 1 follows 1": no event is absent, so it keeps only the verdict's own error.
+		if (!(x > y + 1)) continue;
 		const [fileY, fileX] = [seqFile.get(y), seqFile.get(x)];
 		const range = x - y === 2 ? `event ${y + 1} is` : `events ${y + 1}..${x - 1} are`;
 		if (fileY === undefined || fileX === undefined)

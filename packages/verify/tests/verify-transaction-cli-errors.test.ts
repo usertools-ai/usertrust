@@ -10,7 +10,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -100,6 +100,25 @@ describe("--tx prints the verdict's errors", () => {
 		const out = res.stdout + res.stderr;
 		expect(out).toContain("audit segment missing");
 		expect(out).not.toContain(bidi);
+	}, 60_000);
+
+	it("a long error list reaches a piped stdout whole, the named range included", () => {
+		// 3,000 malformed lines in the older segment: well past a pipe buffer. process.exit does not drain an
+		// asynchronous stdout, so the lines appended last (the named gap) used to be lost to `| tool`.
+		const vault = vaultMissingMiddle("events-0001.jsonl");
+		const first = join(vault, "audit", "events-0001.jsonl");
+		appendFileSync(first, `${Array.from({ length: 3000 }, () => "not json").join("\n")}\n`);
+		// A SLOW reader: the consumer sleeps before reading, so the pipe is backpressured while the CLI exits.
+		const repoRoot = join(import.meta.dirname, "..", "..", "..");
+		const cli = join(repoRoot, "packages", "verify", "src", "cli.ts");
+		const res = spawnSync(
+			"sh",
+			["-c", `npx tsx "$1" "$2" --tx tx-live | (sleep 2; cat)`, "sh", cli, vault],
+			{ cwd: repoRoot, encoding: "utf-8", maxBuffer: 64 * 1024 * 1024 },
+		);
+		const out = res.stdout;
+		expect(out.split("\n").filter((l) => l.startsWith("  - malformed JSON")).length).toBe(3000);
+		expect(out).toContain("audit segment missing: events 3..4 are absent between");
 	}, 60_000);
 
 	it("a clean transaction prints no error lines", () => {

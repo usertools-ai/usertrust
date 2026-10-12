@@ -214,6 +214,19 @@ describe("verifyTransaction over rotated segments", () => {
 		expect(result.errors.some((e) => e.includes("3..5"))).toBe(false);
 	});
 
+	it("a duplicated sequence is not turned into an impossible 'missing' range", () => {
+		const { lines } = buildChain(EVENTS);
+		// events.jsonl repeats event 3: the verdict says "Sequence gap: event 3 follows 3"; nothing is absent.
+		const dup = vault("dup", {
+			"events-0001.jsonl": lines.slice(0, 3),
+			"events.jsonl": lines.slice(2),
+		});
+		const result = verifyTransaction(dup, "tx-x");
+		expect(result.valid).toBe(false);
+		expect(result.errors.some((e) => e.startsWith("Sequence gap:"))).toBe(true);
+		expect(result.errors.some((e) => e.includes("missing"))).toBe(false);
+	});
+
 	it("a not-found transfer's errors are scrubbed too (a hostile segment name beside the gap)", () => {
 		const { lines } = buildChain(EVENTS);
 		const hostile = vault("hostile-notfound", {
