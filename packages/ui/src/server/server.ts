@@ -29,6 +29,7 @@ import {
 	VAULT_DIR,
 } from "usertrust";
 import { canonicalize, verifyTransaction } from "usertrust-verify";
+import { isHeaderSpend } from "../shared/aggregate.js";
 import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
 import { budgetSummary, type LedgerState, loadState, ROW_CAP } from "./state.js";
 
@@ -127,11 +128,13 @@ export async function createUiServer(
 			state.lastHash = lastHash;
 			state.byteOffset += lastNewline + 1;
 			for (const r of rows) {
-				if (r.kind === "llm_call" && r.costUt !== undefined) state.summary.spentUt += r.costUt;
+				if (isHeaderSpend(r.kind, r.costUt)) state.summary.spentUt += r.costUt;
 			}
 			state.summary.remainingUt =
 				state.summary.budget === null ? null : state.summary.budget - state.summary.spentUt;
 			state.summary.chain.events += fresh.length;
+			// A verified append is the first activity of a vault that had none.
+			if (fresh.length > 0) state.summary.chain.empty = false;
 			// Amendment A4: enforce ROW_CAP after append.
 			if (state.rows.length > ROW_CAP) {
 				state.rows.splice(0, state.rows.length - ROW_CAP);

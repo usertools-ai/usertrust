@@ -10,11 +10,13 @@ Then open `http://127.0.0.1:4180` (opens automatically unless `--no-open`).
 
 ## What you get
 
-- **Audit table** — every ledger event as a row: timestamp, kind, task type, transaction id, cost in UT, and chain integrity. Full-text search, faceted filters, column sorting, virtualized for large vaults.
-- **Live tail** — new events stream in over SSE as they are written; each appended event is re-verified (hash + linkage) before it renders. Tampering mid-session raises a red integrity banner.
-- **Row drill-in** — click a row for the full event payload and a one-click **Verify** that replays the independent `usertrust-verify` check and renders a thermal-receipt style result.
-- **Trends** — spend over time and cost by task type.
-- **Summary strip** — budget, spent/remaining UT, chain status, and whether an anchor file is present (file presence, not a verification verdict), always visible.
+- **Audit ledger** — every ledger event as a row: its transfer's outcome, the model, the time in UTC, the actor, the kind, the transfer id, the cost in UT (an estimated cost is marked) and chain integrity. Full-text search, faceted filters with counts, sorting, virtualized for large vaults.
+- **Live tail** — new events stream in over SSE as they are written; each appended event is re-verified (hash + linkage) before it renders. Tampering mid-session raises a red integrity banner. A project with no vault yet shows "No governed calls yet", and its first calls appear as they are written.
+- **Inspector** — select a row to see its call, cost and chain fields, docked beside the list on a wide screen, and a one-click **Verify** that replays the independent `usertrust-verify` check and renders a thermal-receipt style result: verified, failed, or not found in the live log.
+- **Trends** — cost over time (UTC), by kind and by model, for the records in view.
+- **Summary** — spend, the budget and where it came from, chain status, and whether an anchor file is present (file presence, not a verification verdict), always visible.
+
+Dark only. No font is shipped or fetched: the page names its font families, and the browser uses one only where it is already installed.
 
 ## Usage
 

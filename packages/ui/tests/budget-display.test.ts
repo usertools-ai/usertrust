@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { budgetDisplay } from "../src/shared/budget-display.js";
+import { budgetDisplay, budgetSourceWord } from "../src/shared/budget-display.js";
 
 /** What the summary strip shows for the budget: an UNKNOWN budget has no remaining figure at all. */
 describe("budgetDisplay", () => {
@@ -48,5 +48,14 @@ describe("budgetDisplay", () => {
 			kind: "known",
 			provenance: "from usertrust.config.json; not confirmed as enforced",
 		});
+	});
+});
+
+describe("budgetSourceWord", () => {
+	it("only a governor's record reads as enforced; a config budget is unconfirmed; the rest are unknown", () => {
+		expect(budgetSourceWord("governor")).toEqual({ word: "enforced", tone: "ink" });
+		expect(budgetSourceWord("config")).toEqual({ word: "config · unconfirmed", tone: "info" });
+		for (const source of ["several", "unreadable", "unpublished"] as const)
+			expect(budgetSourceWord(source)).toEqual({ word: "unknown", tone: "body" });
 	});
 });

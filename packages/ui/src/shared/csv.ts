@@ -28,6 +28,8 @@ export const CSV_HEADERS = [
 	"event_id",
 	"hash",
 	"previous_hash",
+	// Last, so the columns before it keep their positions: where the usage behind the cost came from.
+	"usage_source",
 ] as const;
 
 /** Leading =,+,-,@ make a cell executable in Excel/Sheets — defang with a quote. */
@@ -67,13 +69,19 @@ export function toCsv(rows: LedgerRow[]): string {
 				cell(r.id),
 				cell(r.hash),
 				cell(r.previousHash),
+				cell(r.usageSource),
 			].join(","),
 		);
 	}
 	return lines.join("\r\n");
 }
 
-export function csvFilename(now: Date, filtered: boolean): string {
+/**
+ * `newestOf`: the server's row window, when it holds only the newest N events. The export then covers those only,
+ * and its name says so.
+ */
+export function csvFilename(now: Date, filtered: boolean, newestOf?: number): string {
 	const day = now.toISOString().slice(0, 10);
-	return `usertrust-ledger-${day}${filtered ? "-filtered" : ""}.csv`;
+	const window = newestOf === undefined ? "" : `-newest-${newestOf}`;
+	return `usertrust-ledger-${day}${window}${filtered ? "-filtered" : ""}.csv`;
 }

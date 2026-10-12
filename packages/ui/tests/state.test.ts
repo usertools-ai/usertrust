@@ -80,6 +80,54 @@ describe("loadState", () => {
 		expect(state.rows.map((r) => r.integrity)).toEqual(["verified", "after-break"]);
 	});
 
+	// A project before its first governed call has no vault, or an audit directory with no log yet. Neither is
+	// tampering, and the dashboard showed both as a red CHAIN INTEGRITY FAILURE (or the second as "verified").
+	it("red-first (red 'Audit directory not found'): a project with no vault yet is EMPTY, valid, with no errors", () => {
+		const fresh = join(tempDir, "fresh-project", ".usertrust");
+		const { summary } = loadState(fresh);
+		expect(summary.chain).toEqual({
+			events: 0,
+			valid: true,
+			empty: true,
+			breakIndex: null,
+			errors: [],
+		});
+	});
+
+	it("red-first (an empty log read as 'verified'): an audit directory with no events is EMPTY", () => {
+		const { summary } = loadState(vaultPath);
+		expect(summary.chain).toMatchObject({ events: 0, valid: true, empty: true, errors: [] });
+	});
+
+	// The over-correction guard: zero events is NOT enough to be empty. A log deleted while its anchor still records
+	// events is the deletion the anchor exists to catch, and it stays a failure.
+	it("a deleted log whose anchor records events stays a FAILURE, never empty", async () => {
+		await seed(3);
+		rmSync(logPath);
+		const { summary } = loadState(vaultPath);
+		expect(summary.chain.events).toBe(0);
+		expect(summary.chain.valid).toBe(false);
+		expect(summary.chain.empty).toBe(false);
+		expect(summary.chain.errors.join(" ")).toContain("deletion detected");
+	});
+
+	it("an emptied log whose anchor records events stays a FAILURE, never empty", async () => {
+		await seed(2);
+		writeFileSync(logPath, "");
+		const { summary } = loadState(vaultPath);
+		expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
+		expect(summary.chain.errors.length).toBeGreaterThan(0);
+	});
+
+	it("a vault with events is not empty", async () => {
+		await seed(1);
+		expect(loadState(vaultPath).summary.chain).toMatchObject({
+			events: 1,
+			valid: true,
+			empty: false,
+		});
+	});
+
 	it("reports an absent anchors.jsonl as file-absent, not as a verdict", async () => {
 		await seed(1);
 		const state = loadState(vaultPath);

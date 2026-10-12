@@ -28,3 +28,16 @@ export function budgetDisplay(
 		provenance: s.budgetProvenance,
 	};
 }
+
+/**
+ * The budget's source as one word, beside the figure; the full provenance sentence is in its tooltip. Only a
+ * governor's record of what it enforces reads as enforced.
+ */
+export function budgetSourceWord(source: SummaryPayload["budgetSource"]): {
+	word: string;
+	tone: "ink" | "info" | "body";
+} {
+	if (source === "governor") return { word: "enforced", tone: "ink" };
+	if (source === "config") return { word: "config · unconfirmed", tone: "info" };
+	return { word: "unknown", tone: "body" };
+}

@@ -3,6 +3,15 @@
 
 import { type LedgerRow, type RowStatus, statusOf } from "./rows.js";
 
+/**
+ * The header's Spend rule: the cost of every `llm_call` record, over the whole vault. ONE predicate, used at load
+ * (`state.ts`) and on every live append (`server.ts`), which each carried their own copy. Trends sums every costed
+ * record in view instead (an action's cost, an ambiguity's), and is labelled as that, not as Spend.
+ */
+export function isHeaderSpend(kind: string, cost: unknown): cost is number {
+	return kind === "llm_call" && typeof cost === "number";
+}
+
 export interface TimeBucket {
 	bucket: string;
 	costUt: number;
@@ -52,6 +61,8 @@ export function costByModel(rows: LedgerRow[]): KeyTotal[] {
 export interface StatTiles {
 	totalCostUt: number;
 	calls: number;
+	/** Rows with a cost: the denominator of `avgCostUt`, which is NOT `calls`. */
+	costed: number;
 	avgCostUt: number;
 	errorRate: number;
 	/** Rows per status, every status present (0 when none): "unknown" and "unrecoverable" are counted, never hidden. */
@@ -78,6 +89,7 @@ export function statTiles(rows: LedgerRow[]): StatTiles {
 	return {
 		totalCostUt,
 		calls: rows.length,
+		costed,
 		avgCostUt: costed > 0 ? totalCostUt / costed : 0,
 		errorRate: rows.length > 0 ? byStatus.failed / rows.length : 0,
 		byStatus,

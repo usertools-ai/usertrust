@@ -11,6 +11,7 @@ import {
 	readLedgerEvents,
 	verifyVault,
 } from "usertrust";
+import { isHeaderSpend } from "../shared/aggregate.js";
 import type { SummaryPayload } from "../shared/api.js";
 import { type LedgerRow, toLedgerRows } from "../shared/rows.js";
 import { TransferIndex } from "./verdicts.js";
@@ -58,14 +59,28 @@ export function budgetSummary(
 	};
 }
 
+/** `verifyVault`'s error for a vault with no audit directory: no evidence either way, not tampering. */
+const NO_AUDIT_DIR = "Audit directory not found:";
+
 export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerState {
 	const events = readLedgerEvents(vaultPath);
 	const integrity = deriveChainIntegrity(events);
 	const vault = verifyVault(vaultPath);
 	let spentUt = 0;
 	for (const e of events) {
-		if (e.kind === "llm_call" && typeof e.data.cost === "number") spentUt += e.data.cost;
+		if (isHeaderSpend(e.kind, e.data.cost)) spentUt += e.data.cost;
 	}
+
+	// A project before its first governed call has no audit directory, and verifyVault reports exactly that, which
+	// the dashboard showed as a red CHAIN INTEGRITY FAILURE. That one error, with no events and the directory really
+	// absent, is dropped; every other error stands. A log deleted while its anchor records events keeps its
+	// "deletion detected" (the anchor lives in the audit directory, so that directory exists), and if verifyVault ever
+	// words the missing-directory error differently, it is kept too: the vault reads as broken, never as clean.
+	const noAuditDir = events.length === 0 && !existsSync(join(vaultPath, "audit"));
+	const errors = noAuditDir
+		? vault.errors.filter((e) => !e.startsWith(NO_AUDIT_DIR))
+		: vault.errors;
+	const valid = integrity.valid && (vault.valid || (noAuditDir && errors.length === 0));
 
 	const truncated = events.length > rowCap;
 	const visible = truncated ? events.slice(-rowCap) : events;
@@ -92,9 +107,10 @@ export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerSt
 			spentUt,
 			chain: {
 				events: events.length,
-				valid: integrity.valid && vault.valid,
+				valid,
+				empty: valid && events.length === 0,
 				breakIndex: integrity.breakIndex,
-				errors: vault.errors,
+				errors,
 			},
 			anchorFile: anchorFile(vaultPath),
 			rowCount: rows.length,

@@ -315,3 +315,103 @@ describe("live tail", () => {
 		expect(eventName).toBe("resync");
 	});
 });
+
+// Before a project's first governed call there is no audit directory, and fs.watch cannot watch a path that does not
+// exist: the dashboard opened on a new project showed "no governed calls yet" and never showed the first one.
+describe("live tail on a project with no vault yet", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-fresh-"));
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("red-first (never delivered): the first event, written after the server started, reaches the client", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			chain: { events: number; empty: boolean };
+		};
+		expect(before.chain).toMatchObject({ events: 0, empty: true });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				const writer = createAuditWriter(tempDir);
+				await writer.appendEvent({
+					kind: "llm_call",
+					actor: "local",
+					data: { cost: 4, settled: true, transferId: "tx_first" },
+				});
+				writer.release();
+			},
+			8000,
+		);
+		expect(JSON.parse(data).chain).toMatchObject({ events: 1, valid: true, empty: false });
+		const { rows } = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
+			rows: Array<{ transferId?: string }>;
+		};
+		expect(rows.map((r) => r.transferId)).toEqual(["tx_first"]);
+	});
+});
+
+describe("header spend", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-spend-"));
+		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	// One rule at load and on a live append: the header counts llm_call costs. Trends shows every costed record in
+	// view under its own label, so the two figures are never presented as one quantity.
+	it("counts the same records at load and on a live append", async () => {
+		const seed = createAuditWriter(tempDir);
+		await seed.appendEvent({
+			kind: "llm_call",
+			actor: "local",
+			data: { cost: 7, transferId: "tx_a" },
+		});
+		await seed.appendEvent({
+			kind: "tool_use",
+			actor: "local",
+			data: { cost: 30, settled: true, transferId: "tx_b" },
+		});
+		seed.release();
+		ui = await createUiServer(tempDir, { port: 0 });
+		const loaded = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			spentUt: number;
+		};
+		expect(loaded.spentUt).toBe(7);
+		const append = (kind: string, data: Record<string, unknown>) => async () => {
+			const writer = createAuditWriter(tempDir);
+			await writer.appendEvent({ kind, actor: "local", data });
+			writer.release();
+		};
+		const port = ui.port;
+		const afterTool = await readSse(
+			port,
+			(name) => name === "summary",
+			append("tool_use", { cost: 40, settled: true, transferId: "tx_c" }),
+		);
+		expect(JSON.parse(afterTool.data).spentUt).toBe(7);
+		const afterCall = await readSse(
+			port,
+			(name) => name === "summary",
+			append("llm_call", { cost: 2, transferId: "tx_d" }),
+		);
+		expect(JSON.parse(afterCall.data).spentUt).toBe(9);
+	});
+});

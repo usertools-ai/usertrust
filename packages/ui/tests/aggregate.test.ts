@@ -2,7 +2,13 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { costByKind, costByModel, spendOverTime, statTiles } from "../src/shared/aggregate.js";
+import {
+	costByKind,
+	costByModel,
+	isHeaderSpend,
+	spendOverTime,
+	statTiles,
+} from "../src/shared/aggregate.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 function row(overrides: Partial<LedgerRow>): LedgerRow {
@@ -60,8 +66,15 @@ describe("aggregate", () => {
 		expect(statTiles(ROWS)).toMatchObject({
 			totalCostUt: 35,
 			calls: 4,
+			costed: 4,
 			avgCostUt: 8.75,
 			errorRate: 0.25,
+		});
+		// the average's denominator is the COSTED rows, which the tile names: a row with no cost is not a free call
+		expect(statTiles([...ROWS, row({ kind: "policy_denied", status: "denied" })])).toMatchObject({
+			calls: 5,
+			costed: 4,
+			avgCostUt: 8.75,
 		});
 	});
 
@@ -86,5 +99,15 @@ describe("aggregate", () => {
 		});
 		// the error rate is FAILED rows only: an unrecoverable settle is a money state, not an error
 		expect(tiles.errorRate).toBeCloseTo(1 / 8);
+	});
+});
+
+describe("isHeaderSpend", () => {
+	it("the header's Spend: an llm_call's numeric cost, nothing else", () => {
+		expect(isHeaderSpend("llm_call", 5)).toBe(true);
+		expect(isHeaderSpend("llm_call", undefined)).toBe(false);
+		expect(isHeaderSpend("llm_call", "5")).toBe(false);
+		expect(isHeaderSpend("tool_use", 5)).toBe(false);
+		expect(isHeaderSpend("settlement_ambiguous", 5)).toBe(false);
 	});
 });
