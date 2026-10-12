@@ -597,6 +597,65 @@ describe.skipIf(onWindows).each(openers)(
 	},
 );
 
+describe.skipIf(onWindows).each(openers)(
+	"a linked vault whose target has `..` after another link, opened by %s",
+	(_name, open) => {
+		/**
+		 * `<a>/link -> <b>/subdir`, and `.usertrust -> <a>/link/../vault`. The OS resolves `..`
+		 * after following `link`, so it opens `<b>/vault`; a lexical resolve (JS realpath) names
+		 * `<a>/vault`. The two candidates get the modes given.
+		 */
+		function dotDotVault(bMode: number, aMode: number) {
+			process.umask(0o022);
+			const base = realpathSync(tmp("ut-perm-dotdot-"));
+			const a = join(base, "a");
+			const b = join(base, "b");
+			mkdirSync(join(b, "subdir"), { recursive: true });
+			mkdirSync(a);
+			symlinkSync(join(b, "subdir"), join(a, "link"));
+			const opened = join(b, "vault");
+			const lexical = join(a, "vault");
+			mkdirSync(opened);
+			chmodSync(opened, bMode);
+			mkdirSync(lexical);
+			chmodSync(lexical, aMode);
+			const root = tmp("ut-perm-dotdot-root-");
+			const link = join(root, VAULT_DIR);
+			symlinkSync(`${a}/link/../vault`, link);
+			return { root, link, opened, lexical };
+		}
+
+		it("refuses when what the OS opens is loose, though the lexical path is owner-only", async () => {
+			const { root, link, opened, lexical } = dotDotVault(0o755, 0o700);
+			expect
+				.soft(looseVaultWarning(link))
+				.toContain(`${opened}, which is readable by other users (mode 755)`);
+			const refused = await open(root).then(
+				() => undefined,
+				(err: unknown) => err as Error,
+			);
+			expect(refused?.message).toBe(
+				`usertrust: the vault ${link} is a symbolic link to ${opened}, which other users can read (mode 755). usertrust does not change a directory through a link; make it owner-only with: chmod 700 ${opened}`,
+			);
+			expect(statSync(opened).mode & 0o777).toBe(0o755);
+			expect(readdirSync(opened)).toEqual([]);
+			expect(readdirSync(lexical)).toEqual([]);
+		});
+
+		it("uses what the OS opens when it is owner-only, though the lexical path is loose", async () => {
+			const { root, link, opened, lexical } = dotDotVault(0o700, 0o755);
+			expect.soft(looseVaultWarning(link)).toBeUndefined();
+			await open(root);
+			// Written where the OS opens. (Not audit/events.jsonl: the audit writer's lock resolves
+			// the vault with JS realpath, the same lexical `..`, so the chain degrades through such
+			// a link; that writer is outside this check.)
+			expect(existsSync(join(opened, "spend-ledger.json"))).toBe(true);
+			expect(readdirSync(lexical)).toEqual([]);
+			expect(statSync(lexical).mode & 0o777).toBe(0o755);
+		});
+	},
+);
+
 /**
  * The same, under Node's real permission model: a child process may write to the vault alone.
  * Runs where this Node strips TypeScript types by default (22.18+), so the child can import the

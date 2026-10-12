@@ -25,7 +25,7 @@ import {
 	type Stats,
 	statSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, sep } from "node:path";
 
 /** Mode of every directory usertrust creates in a vault. */
 export const PRIVATE_DIR_MODE = 0o700;
@@ -105,6 +105,41 @@ function foreignOwner(vaultDir: string, owner: number, euid: number, target?: st
 const foreignVault = (...args: Parameters<typeof foreignOwner>): Error =>
 	new Error(`usertrust: ${foreignOwner(...args)}`);
 
+/**
+ * The directory a vault LINK leads to, exactly as the OS opens it for every writer: opened
+ * following the link and `fstat`ed. No decision about a linked vault is made from a resolved
+ * path. JS `realpathSync` joins a link's target with `path.resolve`, which collapses `..`
+ * LEXICALLY: with `.usertrust -> /a/link/../vault` and `/a/link -> /b/sub`, it names /a/vault
+ * while the OS opens /b/vault. Throws ENOENT for a dangling link, ENOTDIR for a target that is
+ * not a directory (`O_DIRECTORY`, so a FIFO target never blocks the open).
+ */
+function statThroughLink(vaultDir: string): Stats {
+	const fd = openSync(vaultDir, fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0));
+	try {
+		return fstatSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * A link's target as written, joined to the link's directory WITHOUT normalizing `..`, so a
+ * shell given it resolves it as the OS does. For messages only.
+ */
+function linkText(vaultDir: string): string {
+	const raw = readlinkSync(vaultDir);
+	return isAbsolute(raw) ? raw : `${dirname(vaultDir)}${sep}${raw}`;
+}
+
+/** Where a link leads, for messages only: the kernel's realpath(3), else the link as written. */
+function linkTarget(vaultDir: string): string {
+	try {
+		return realpathSync.native(vaultDir);
+	} catch {
+		return linkText(vaultDir);
+	}
+}
+
 /** A vault path that holds something other than a directory: every writer would fail ENOTDIR. */
 function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
 	const what =
@@ -136,7 +171,8 @@ function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
  * A vault that is a SYMBOLIC LINK is never changed through the link: its target may be a
  * directory usertrust does not own. A target any other user can read is refused, naming the
  * link, the target, its mode and the `chmod` that fixes it; an owner-only target this process's
- * user owns is used. A dangling link, and a vault path that is not a directory (a regular file,
+ * user owns is used. The target judged is the directory the OS opens through the link (see
+ * {@link statThroughLink}), never a path resolved in JS. A dangling link, and a vault path that is not a directory (a regular file,
  * say), are refused by name here, rather than left for the first writer to fail on with a bare
  * ENOENT or ENOTDIR.
  *
@@ -159,19 +195,36 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 
 	const euid = effectiveUid();
 	if (st.isSymbolicLink()) {
-		let target: string;
 		let targetStat: Stats;
 		try {
-			target = realpathSync(vaultDir);
-			targetStat = statSync(target);
+			// Windows opens no directory as a file; there only the kind is checked, by a stat the
+			// OS resolves (never a JS realpath).
+			targetStat = isWindows() ? statSync(vaultDir) : statThroughLink(vaultDir);
 		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-			// A dangling link: named here, where every writer would fail later with a bare ENOENT.
-			const missing = resolve(dirname(vaultDir), readlinkSync(vaultDir));
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code === "ENOENT") {
+				// A dangling link: named here, where every writer would fail later with a bare ENOENT.
+				const missing = linkText(vaultDir);
+				throw new Error(
+					`usertrust: the vault ${vaultDir} is a symbolic link to ${missing}, which does not exist; remove the link or create the target owner-only (mkdir -m 700 ${missing})`,
+				);
+			}
+			if (code !== "ENOTDIR") throw err;
+			// The kind, for the message only: what the link leads to is not a directory.
+			let kind: Stats | undefined;
+			try {
+				kind = statSync(vaultDir);
+			} catch {
+				/* a component on the way is not a directory either */
+			}
+			if (kind !== undefined && !kind.isDirectory()) {
+				throw notADirectory(vaultDir, kind, linkTarget(vaultDir));
+			}
 			throw new Error(
-				`usertrust: the vault ${vaultDir} is a symbolic link to ${missing}, which does not exist; remove the link or create the target owner-only (mkdir -m 700 ${missing})`,
+				`usertrust: the vault ${vaultDir} is a symbolic link to ${linkText(vaultDir)}, which does not lead to a directory; move it aside and the vault is created owner-only`,
 			);
 		}
+		const target = linkTarget(vaultDir);
 		if (!targetStat.isDirectory()) throw notADirectory(vaultDir, targetStat, target);
 		if (isWindows()) return;
 		if (euid !== undefined && targetStat.uid !== euid) {
@@ -236,8 +289,9 @@ export function looseVaultWarning(vaultDir: string): string | undefined {
 	try {
 		const st = lstatSync(vaultDir);
 		if (st.isSymbolicLink()) {
-			const target = realpathSync(vaultDir);
-			const targetStat = statSync(target);
+			// What the OS opens through the link is what is judged; the path is for the message.
+			const targetStat = statThroughLink(vaultDir);
+			const target = linkTarget(vaultDir);
 			if (!targetStat.isDirectory()) return undefined;
 			const owner = foreign(targetStat.uid, target);
 			if (owner !== undefined) return owner;
