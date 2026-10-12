@@ -9,7 +9,7 @@
  * writes nothing outside it — no `.usertrust/patterns/` in the process working directory.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	closeSync,
@@ -546,6 +546,185 @@ describe.skipIf(onWindows).each(openers)(
 				.toBe(`usertrust: ${foreignRefusal(vaultPath, owner, owner + 1)}`);
 			expect(statSync(vaultPath).mode & 0o777).toBe(0o700);
 			expect(readdirSync(vaultPath)).toEqual([]);
+		});
+
+		it.each(["ERR_ACCESS_DENIED", "EPERM"])(
+			"opens an existing vault whose parent it may not write to (%s), never creating the parent",
+			async (code) => {
+				process.umask(0o022);
+				const root = tmp("ut-perm-ro-parent-");
+				const vaultPath = join(root, VAULT_DIR);
+				mkdirSync(vaultPath, { mode: 0o700 });
+				// The parent refuses every mkdir, as Node's permission model does when writes are
+				// granted to the vault alone (ERR_ACCESS_DENIED), or a drive root does (EPERM).
+				const parentMkdirs: string[] = [];
+				mkdirHook.before = (path) => {
+					if (path !== root) return;
+					parentMkdirs.push(path);
+					throw Object.assign(new Error(`${code}: mkdir '${path}'`), { code });
+				};
+				await open(root);
+				mkdirHook.before = undefined;
+				expect(parentMkdirs).toEqual([]);
+				expect(statSync(vaultPath).mode & 0o777).toBe(0o700);
+				expect(existsSync(join(vaultPath, "audit", "events.jsonl"))).toBe(true);
+			},
+		);
+
+		it("creates a fresh vault whose parents are missing: the parents 0700, then the vault exclusively", async () => {
+			process.umask(0o022);
+			const top = join(tmp("ut-perm-deep-"), "a");
+			const root = join(top, "b");
+			const vaultPath = join(root, VAULT_DIR);
+			const mkdirs: { path: string; recursive: boolean }[] = [];
+			mkdirHook.before = (path, opts) => {
+				if (path !== root && !within(vaultPath, path)) return;
+				mkdirs.push({ path, recursive: (opts as { recursive?: boolean })?.recursive === true });
+			};
+			await open(root);
+			mkdirHook.before = undefined;
+			// The exclusive mkdir finds a parent missing (ENOENT); the parents are made; the vault is
+			// then created exclusively, before any writer's mkdir reaches it.
+			expect(mkdirs.slice(0, 3)).toEqual([
+				{ path: vaultPath, recursive: false },
+				{ path: root, recursive: true },
+				{ path: vaultPath, recursive: false },
+			]);
+			expect(statSync(vaultPath).uid).toBe(process.geteuid?.());
+			expect(existsSync(join(vaultPath, "audit", "events.jsonl"))).toBe(true);
+			expect(walkModes(top).loose).toEqual([]);
+		});
+	},
+);
+
+describe.skipIf(onWindows).each(openers)(
+	"a linked vault whose target has `..` after another link, opened by %s",
+	(_name, open) => {
+		/**
+		 * `<a>/link -> <b>/subdir`, and `.usertrust -> <a>/link/../vault`. The OS resolves `..`
+		 * after following `link`, so it opens `<b>/vault`; a lexical resolve (JS realpath) names
+		 * `<a>/vault`. The two candidates get the modes given.
+		 */
+		function dotDotVault(bMode: number, aMode: number) {
+			process.umask(0o022);
+			const base = realpathSync(tmp("ut-perm-dotdot-"));
+			const a = join(base, "a");
+			const b = join(base, "b");
+			mkdirSync(join(b, "subdir"), { recursive: true });
+			mkdirSync(a);
+			symlinkSync(join(b, "subdir"), join(a, "link"));
+			const opened = join(b, "vault");
+			const lexical = join(a, "vault");
+			mkdirSync(opened);
+			chmodSync(opened, bMode);
+			mkdirSync(lexical);
+			chmodSync(lexical, aMode);
+			const root = tmp("ut-perm-dotdot-root-");
+			const link = join(root, VAULT_DIR);
+			symlinkSync(`${a}/link/../vault`, link);
+			return { root, link, opened, lexical };
+		}
+
+		it("refuses when what the OS opens is loose, though the lexical path is owner-only", async () => {
+			const { root, link, opened, lexical } = dotDotVault(0o755, 0o700);
+			expect
+				.soft(looseVaultWarning(link))
+				.toContain(`${opened}, which is readable by other users (mode 755)`);
+			const refused = await open(root).then(
+				() => undefined,
+				(err: unknown) => err as Error,
+			);
+			expect(refused?.message).toBe(
+				`usertrust: the vault ${link} is a symbolic link to ${opened}, which other users can read (mode 755). usertrust does not change a directory through a link; make it owner-only with: chmod 700 ${opened}`,
+			);
+			expect(statSync(opened).mode & 0o777).toBe(0o755);
+			expect(readdirSync(opened)).toEqual([]);
+			expect(readdirSync(lexical)).toEqual([]);
+		});
+
+		it("uses what the OS opens when it is owner-only, though the lexical path is loose", async () => {
+			const { root, link, opened, lexical } = dotDotVault(0o700, 0o755);
+			expect.soft(looseVaultWarning(link)).toBeUndefined();
+			await open(root);
+			// Written where the OS opens. (Not audit/events.jsonl: the audit writer's lock resolves
+			// the vault with JS realpath, the same lexical `..`, so the chain degrades through such
+			// a link; that writer is outside this check.)
+			expect(existsSync(join(opened, "spend-ledger.json"))).toBe(true);
+			expect(readdirSync(lexical)).toEqual([]);
+			expect(statSync(lexical).mode & 0o777).toBe(0o755);
+		});
+	},
+);
+
+/** Root ignores permission bits, so a directory it "cannot open" does not exist for it. */
+const isRoot = process.geteuid?.() === 0;
+
+describe.skipIf(onWindows).each(openers)(
+	"a linked vault whose target this process cannot open, opened by %s",
+	(_name, open) => {
+		it.skipIf(isRoot)(
+			"is refused by name (skipped as root, which ignores the mode bits that refuse the open)",
+			async () => {
+				process.umask(0o022);
+				const target = join(realpathSync(tmp("ut-perm-unopenable-")), "vault");
+				mkdirSync(target, { mode: 0o700 });
+				const root = tmp("ut-perm-unopenable-root-");
+				const link = join(root, VAULT_DIR);
+				symlinkSync(target, link);
+				// Search-only: stat works, an O_RDONLY open of the directory is refused (EACCES).
+				chmodSync(target, 0o100);
+				let refused: Error | undefined;
+				try {
+					refused = await open(root).then(
+						() => undefined,
+						(err: unknown) => err as Error,
+					);
+					expect(statSync(target).mode & 0o777).toBe(0o100);
+				} finally {
+					chmodSync(target, 0o700);
+				}
+				expect(refused?.message).toBe(
+					`usertrust: the vault ${link} is a symbolic link to ${target}, which this process cannot open (EACCES); give this user read and search permission on it, or point the link elsewhere`,
+				);
+				expect(readdirSync(target)).toEqual([]);
+			},
+		);
+	},
+);
+
+/**
+ * The same, under Node's real permission model: a child process may write to the vault alone.
+ * Runs where this Node strips TypeScript types by default (22.18+), so the child can import the
+ * module's source directly.
+ */
+describe.skipIf(onWindows || !process.features.typescript)(
+	"an existing vault under Node's permission model, writes granted to the vault alone",
+	() => {
+		it("opens without creating its parent", () => {
+			const root = tmp("ut-perm-node-permission-");
+			const vaultPath = join(realpathSync(root), VAULT_DIR);
+			mkdirSync(vaultPath, { mode: 0o700 });
+			const source = join(import.meta.dirname, "..", "..", "src", "shared", "private-fs.ts");
+			const child = spawnSync(
+				process.execPath,
+				[
+					"--permission",
+					"--allow-fs-read=*",
+					`--allow-fs-write=${vaultPath}`,
+					"--input-type=module",
+					"-e",
+					`import { securePrivateVault } from ${JSON.stringify(source)};
+securePrivateVault(process.argv[1], { create: true });
+process.stdout.write("opened");`,
+					vaultPath,
+				],
+				{ encoding: "utf-8", timeout: 30_000 },
+			);
+			expect(child.stderr).not.toContain("ERR_ACCESS_DENIED");
+			expect(child.status).toBe(0);
+			expect(child.stdout).toBe("opened");
+			// Nothing was created beside the vault.
+			expect(readdirSync(root)).toEqual([VAULT_DIR]);
 		});
 	},
 );
