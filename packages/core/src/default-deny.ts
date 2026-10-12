@@ -626,7 +626,8 @@ export function transportChangedError(
  *     also `apiClient`, `_nextGenClient`, `getNextGenClient`, `_interactions`, `_webhooks` and
  *     the Live transports `auth` / `webSocketFactory`);
  *   - on a Google client, `chats.create` and `processAfcStream`, whose one call hands out or drives
- *     further billable calls (`handsOutUnauditedCalls`);
+ *     further billable calls (`handsOutUnauditedCalls`), and a governed method's name at any other
+ *     path (`chats.modelsModule.generateContent`: `isAliasOfGovernedGoogleMethod`);
  *   - a method on the FREE list or a GOVERNED one: the free branch or the governed trap runs
  *     first, so the entry would never be audited as `ungoverned_call`, which is what listing it
  *     promises.
@@ -681,6 +682,11 @@ export function validateAllowUngoverned(
 				);
 			}
 		}
+		if (provider === "google" && isAliasOfGovernedGoogleMethod(segments)) {
+			throw new TypeError(
+				`usertrust: allowUngoverned cannot list "${entry}": it is an alias of a governed method: call it on models.`,
+			);
+		}
 		paths.add(entry);
 	}
 	return paths;
@@ -732,6 +738,23 @@ function reachesGoogleRawClient(segments: readonly string[]): boolean {
  * `authTokens.create` stays listable: a minted key used outside governance is out of scope, as
  * reading `apiKey` is.
  */
+/**
+ * A governed Google method's NAME (`generateContent`, `generateContentStream`) reached at any path
+ * other than its governed `models.*` one, such as `chats.modelsModule.generateContent` (the SDK's
+ * raw `Models`). Listed, it would run the SDK's own method raw: with a callable tool, its own
+ * automatic-function-calling loop, up to `maximumRemoteCalls` generations on one record (the
+ * stream through `processAfcStream`). The `*Internal` methods each send one request and stay
+ * listable.
+ */
+const GOOGLE_GOVERNED_METHOD_NAMES: ReadonlySet<string> = new Set(
+	[...GOVERNED_PATHS.google].map((path) => path.slice(path.lastIndexOf(".") + 1)),
+);
+
+function isAliasOfGovernedGoogleMethod(segments: readonly string[]): boolean {
+	const last = segments[segments.length - 1] ?? "";
+	return GOOGLE_GOVERNED_METHOD_NAMES.has(last) && !GOVERNED_PATHS.google.has(segments.join("."));
+}
+
 function handsOutUnauditedCalls(segments: readonly string[]): boolean {
 	const last = segments[segments.length - 1];
 	return (

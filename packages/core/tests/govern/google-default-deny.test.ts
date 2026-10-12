@@ -765,6 +765,19 @@ describe("allowUngoverned on a Google client", () => {
 		expect(events[0]?.data).toEqual({ method: "files.upload", provider: "google" });
 	});
 
+	it.each(["models.generateContentInternal", "models.generateContentStreamInternal"])(
+		"%s stays listable: each call sends one request, so one ungoverned_call covers it",
+		async (path) => {
+			const client = await trust(rawClient(false), {
+				dryRun: true,
+				vaultBase: vault,
+				allowUngoverned: [path],
+			});
+			open.push(client);
+			expect(typeof (client as Loose).models[path.split(".")[1] as string]).toBe("function");
+		},
+	);
+
 	it("authTokens.create stays listable: a minted key used outside governance is out of scope, like apiKey", async () => {
 		const { client } = await google({ allowUngoverned: ["authTokens.create"] });
 		await client.authTokens.create({ config: { uses: 1 } }).catch(() => undefined);
@@ -805,6 +818,14 @@ describe("allowUngoverned on a Google client", () => {
 		[
 			"chats.modelsModule.processAfcStream",
 			"it hands out or drives further billable calls that its one ungoverned_call record would not cover.",
+		],
+		[
+			"chats.modelsModule.generateContent",
+			"it is an alias of a governed method: call it on models.",
+		],
+		[
+			"chats.modelsModule.generateContentStream",
+			"it is an alias of a governed method: call it on models.",
 		],
 	])("%s is refused at creation, by name", async (path, why) => {
 		await expect(
