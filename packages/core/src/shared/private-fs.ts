@@ -227,7 +227,8 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 		try {
 			accessSync(vaultDir, fsConstants.W_OK | fsConstants.X_OK);
 		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== "EACCES") throw err;
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code !== "EACCES" && code !== "EPERM") throw err;
 			throw new Error(
 				`usertrust: the vault ${vaultDir} is a symbolic link to ${target}, which this process cannot write to (mode ${octal(targetMode)}); usertrust does not change a directory through a link; make it usable with: chmod 700 ${target}`,
 			);
