@@ -174,6 +174,10 @@ describe("headless settlement_shortfall threading", () => {
 		expect(audit.events.find((e) => e.kind === "llm_call")?.data).toMatchObject({
 			ledgerPosted: true,
 		});
+		expect(audit.events.find((e) => e.kind === "llm_call")?.data).toMatchObject({
+			costBasis: expect.any(String),
+			endpointClass: "cloud",
+		});
 		await gov.destroy();
 
 		const dryAudit = makeMockAudit();

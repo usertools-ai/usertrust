@@ -2054,6 +2054,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							pricingTableVersion: PRICING_TABLE_VERSION,
 							...(input.chunksDelivered != null ? { chunksDelivered: input.chunksDelivered } : {}),
 							source: "headless",
+							// The denomination, on the record: a local call is NOMINAL units, and a reader must not
+							// have to guess it. Additive, like `ledgerPosted`.
+							costBasis: rateInfo.costBasis,
+							endpointClass: endpoint.class,
 							...(ledgerPosted ? { ledgerPosted: true } : {}),
 							...costCenterAudit,
 							...principalAudit,

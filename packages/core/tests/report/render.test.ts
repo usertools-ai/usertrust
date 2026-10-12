@@ -231,3 +231,23 @@ describe("unconfirmed governed actions are headlined", () => {
 		}
 	});
 });
+
+describe("unlabelled spend is headlined", () => {
+	it("md and html show confirmed spend with no recorded denomination", () => {
+		const m = buildWeeklyReport(
+			[
+				{
+					id: "i",
+					kind: "llm_call",
+					timestamp: "2026-10-11T00:00:00Z",
+					actor: "local",
+					hash: "h",
+					data: { model: "m", cost: 5_000, settled: true, transferId: "t", source: "headless" },
+				} as unknown as PersistedAuditEvent,
+			],
+			{ verified: true, errors: [], chainLength: 1, firstEvent: "a", lastEvent: "a" },
+			{ endMs: END },
+		);
+		for (const f of ["md", "html"] as const) expect(render(m, f), f).toMatch(/denomination/);
+	});
+});

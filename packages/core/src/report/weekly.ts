@@ -737,6 +737,11 @@ export function buildWeeklyReport(
 			`${t.unconfirmedActionCalls} governed action(s) are unconfirmed on the same rules and are not in the action total.`,
 		);
 	}
+	if (shortfallEvents > 0) {
+		notes.push(
+			`${shortfallEvents} settlement(s) were capped at the ledger hold. Budget figures use the METERED spend (what the provider charges); the ledger posted ${shortfallUt} usertoken(s) less, shown on the shortfall line.`,
+		);
+	}
 	if (t.releasedCalls > 0) {
 		notes.push(
 			`${t.releasedCalls} call(s) had their hold released (hold_released): nothing was charged. They are in no spend or budget figure.`,
@@ -754,7 +759,7 @@ export function buildWeeklyReport(
 	}
 	if (t.unlabelledCalls > 0) {
 		notes.push(
-			`${t.unlabelledCalls} confirmed call(s) record no cost basis (headless rows); their denomination is assumed to be dollars at the usertoken rate.`,
+			`${t.unlabelledCalls} confirmed call(s) record no cost basis (older headless rows): they are shown as dollars at the usertoken rate, separately labelled, and may include nominal units.`,
 		);
 	}
 	if (t.malformedEvents > 0) {

@@ -443,6 +443,43 @@ describe("weekly report model", () => {
 		expect(m.totals.unconfirmedCalls).toBe(2);
 	});
 
+	it("a headless LOCAL call that records its denomination is nominal, never dollars; an older record with none is labelled", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 10, {
+				transferId: "t-l",
+				source: "headless",
+				costBasis: "nominal",
+				endpointClass: "local",
+			}),
+			call("2026-10-08T02:00:00Z", 20, {
+				transferId: "t-o",
+				source: "headless",
+				costBasis: undefined,
+			}),
+		]);
+		expect(m.totals.nominalCalls).toBe(1);
+		expect(m.totals.confirmedUt).toBe(20);
+		expect(m.totals.unlabelledUt).toBe(20);
+		expect(m.totals.unlabelledCalls).toBe(1);
+	});
+
+	it("budget uses the metered spend when a settlement was capped, and a note says what the ledger posted", () => {
+		const m = build(
+			[
+				call("2026-10-08T01:00:00Z", 100, { transferId: "t-cap" }),
+				ev("settlement_shortfall", "2026-10-08T01:00:01Z", {
+					transferId: "t-cap",
+					actual: 100,
+					posted: 60,
+					shortfall: 40,
+				}),
+			],
+			{ budget: 1000 },
+		);
+		expect(m.budget.recordedSessionUt).toBe(100);
+		expect(m.notes.join(" ")).toMatch(/capped at the ledger hold/);
+	});
+
 	it("an unknown future record kind beside a call unconfirms it by default; shortfall and implausible do not", () => {
 		const m = build([
 			call("2026-10-08T01:00:00Z", 100, { transferId: "t-s" }),

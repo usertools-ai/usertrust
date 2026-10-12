@@ -22,12 +22,13 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import pc from "picocolors";
 import { loadBudgetConfig, readLedgerEvents } from "../audit/read.js";
 import { verifyVault } from "../audit/verify.js";
@@ -169,6 +170,11 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 	if (!(AGENT_KEYS as readonly string[]).includes(key)) {
 		throw new Error(`Invalid --agent-key: ${scrubForTerminal(key)} (${AGENT_KEYS.join(", ")})`);
 	}
+	// `--segment` picks a dot-separated piece of a COST CENTER; every other key ignores it, and a silently ignored
+	// grouping option is a report that does not say what was asked for.
+	if (segment !== undefined && key !== "auto" && key !== "cost-center") {
+		throw new Error(`--segment applies only to --agent-key auto or cost-center, not ${key}`);
+	}
 	return {
 		week,
 		endMs: parseEnd(end),
@@ -269,6 +275,21 @@ function readTenantBudget(path: string): number {
 	return b;
 }
 
+/**
+ * Writes the report 0600 whatever is already at `target`: a 0600 temp file in the SAME directory, renamed into place. A
+ * `mode` option only applies at creation, so writing through an existing 0644 file left a financial report world-readable.
+ */
+function writeReportFile(target: string, text: string): void {
+	const tmp = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now()}.tmp`);
+	try {
+		writeFileSync(tmp, text, { encoding: "utf-8", mode: 0o600, flag: "wx" });
+		renameSync(tmp, target);
+	} catch (err) {
+		rmSync(tmp, { force: true });
+		throw err;
+	}
+}
+
 export interface ReportHooks {
 	/** Test seam: runs right after the snapshot is taken, before anything is verified or read. */
 	afterSnapshot?: () => void;
@@ -285,17 +306,18 @@ export async function run(
 	const json = opts?.json === true;
 	const argv = args ?? process.argv.slice(3);
 
-	const fail = (message: string): void => {
+	// Exit 1 is an unusable path or an operational failure; exit 2 is an argument of the wrong shape.
+	const fail = (message: string, code = 1): void => {
 		if (json) console.log(toSafeJson({ command: "report", success: false, data: { message } }));
 		else console.log(`${pc.red("report failed:")} ${scrubForTerminal(message)}`);
-		process.exitCode = 1;
+		process.exitCode = code;
 	};
 
 	let parsed: ReportArgs;
 	try {
 		parsed = parseReportArgs(argv, json);
 	} catch (err) {
-		fail(err instanceof Error ? err.message : String(err));
+		fail(err instanceof Error ? err.message : String(err), 2);
 		return;
 	}
 	if (!existsSync(vaultPath)) {
@@ -350,7 +372,7 @@ export async function run(
 		const text = render(model, parsed.format);
 		if (parsed.out !== undefined) {
 			const target = resolve(root, parsed.out);
-			writeFileSync(target, text, { encoding: "utf-8", mode: 0o600 });
+			writeReportFile(target, text);
 			if (!json) console.log(`Wrote ${parsed.format} report to ${scrubForTerminal(target)}`);
 			else
 				console.log(

@@ -159,6 +159,11 @@ export function renderMarkdown(m: ReportModel): string {
 			`- **Governed actions (non-model):** ${usd(t.actionUt)} across ${t.actionCalls} action(s), reported separately`,
 		);
 	}
+	if (t.unlabelledCalls > 0) {
+		out.push(
+			`- **Of which denomination not recorded:** ${usd(t.unlabelledUt)} across ${t.unlabelledCalls} call(s) (older headless records: treated as dollars, but may include nominal units)`,
+		);
+	}
 	if (t.unconfirmedActionCalls > 0) {
 		out.push(
 			`- **Governed actions, unconfirmed:** ${usd(t.unconfirmedActionUt)} across ${t.unconfirmedActionCalls} action(s) whose charge is not proven (not counted as spent)`,
@@ -282,6 +287,10 @@ export function renderHtml(m: ReportModel): string {
 		}${
 			t.actionCalls > 0
 				? `<div><span class="big">${usd(t.actionUt)}</span><span class="muted">governed actions, reported separately</span></div>`
+				: ""
+		}${
+			t.unlabelledCalls > 0
+				? `<div><span class="big">${usd(t.unlabelledUt)}</span><span class="muted">of confirmed spend with no recorded denomination, ${t.unlabelledCalls} call(s) (may include nominal units)</span></div>`
 				: ""
 		}${
 			t.unconfirmedActionCalls > 0

@@ -8,6 +8,7 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -83,6 +84,8 @@ describe("usertrust report --week", () => {
 			["--week", "--end", endIso(), "--format", "pdf"],
 			["--week", "--end", endIso(), "--agent-key", "nope"],
 			["--week", "--end", endIso(), "--segment", "x"],
+			["--week", "--end", endIso(), "--agent-key", "actor", "--segment", "1"],
+			["--week", "--end", endIso(), "--agent-key", "principal.id", "--segment", "0"],
 			["--week", "--end", endIso(), "--top", "0"],
 			["--week", "--end", endIso(), "--budget", "0"],
 			["--week", "--end", endIso(), "--budget", "5", "--tenant-config", "x.json"],
@@ -93,7 +96,7 @@ describe("usertrust report --week", () => {
 			out = [];
 			process.exitCode = undefined;
 			await run(dir, {}, argv);
-			expect(process.exitCode, JSON.stringify(argv)).toBe(1);
+			expect(process.exitCode, JSON.stringify(argv)).toBe(2);
 			expect(out.join("\n")).toContain("report failed");
 		}
 	});
@@ -304,6 +307,28 @@ describe("usertrust report --week", () => {
 		expect((JSON.parse(stdout) as { integrity: { verified: boolean } }).integrity.verified).toBe(
 			live.valid,
 		);
+		write.mockRestore();
+	});
+
+	it("--segment is accepted with auto and cost-center", async () => {
+		await vault([{ cost: 1 }]);
+		for (const key of ["auto", "cost-center"]) {
+			process.exitCode = undefined;
+			await run(dir, {}, ["--week", "--end", endIso(), "--agent-key", key, "--segment", "1"]);
+			expect(process.exitCode, key).toBeUndefined();
+		}
+		write.mockRestore();
+	});
+
+	it("--out over an existing 0644 file leaves a 0600 file: the report is never written through", async () => {
+		await vault([{ cost: 100 }]);
+		const target = join(dir, "report.md");
+		writeFileSync(target, "old", { mode: 0o644 });
+		chmodSync(target, 0o644);
+		await run(dir, {}, ["--week", "--end", endIso(), "--out", target]);
+		expect(statSync(target).mode & 0o777).toBe(0o600);
+		expect(readFileSync(target, "utf-8")).toContain("Confirmed spend");
+		expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toHaveLength(0);
 		write.mockRestore();
 	});
 
