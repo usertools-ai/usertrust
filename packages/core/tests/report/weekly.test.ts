@@ -413,8 +413,10 @@ describe("weekly report model", () => {
 			{ deadLetters: { shortfalls: new Map() } },
 		);
 		expect(m.totals.confirmedUt).toBe(100);
-		expect(m.totals.postProvenUt).toBe(55);
-		expect(m.totals.postProvenCalls).toBe(1);
+		// no shortfall record: an upper bound, never an exact proven figure
+		expect(m.totals.postProvenUt).toBe(0);
+		expect(m.totals.postProvenUpperUt).toBe(55);
+		expect(m.totals.postProvenUpperCalls).toBe(1);
 	});
 
 	it("the proven subtotal sums what the ledger POSTED, not the metered cost", () => {
@@ -1239,7 +1241,7 @@ describe("both renderers state the same thing about records without their call",
 	});
 });
 
-describe("a headless post with no shortfall record: the dead-letter queue decides exact versus upper bound", () => {
+describe("a headless post with no shortfall record: exact only with a shortfall record, on the chain or dead-lettered", () => {
 	const T = "2026-10-08T01:00:00Z";
 	const headless = (cost: number, tid = "t") =>
 		call(T, cost, { transferId: tid, source: "headless", ledgerPosted: true });
@@ -1255,10 +1257,14 @@ describe("a headless post with no shortfall record: the dead-letter queue decide
 			data: { transferId: tid, actual: 100, posted, shortfall: 100 - posted },
 		});
 
-	it("a readable queue with no dead letter means NO cap: the proven figure is exact", () => {
+	it("a readable but EMPTY queue proves nothing: the shortfall may not have been appended yet, so it is an upper bound", () => {
 		const m = build([headless(100)], { deadLetters: parseDeadLetters("") });
-		expect(m.totals.postProvenUt).toBe(100);
-		expect(m.totals.postProvenUpperCalls).toBe(0);
+		expect(m.totals.postProvenUt).toBe(0);
+		expect(m.totals.postProvenUpperUt).toBe(100);
+		expect(m.totals.postProvenUpperCalls).toBe(1);
+		expect(render(m, "md")).toContain(
+			"this record format cannot tell a capped post from an uncapped one",
+		);
 	});
 
 	it("a dead-lettered shortfall gives the exact POSTED amount, labelled as read from the queue", () => {
@@ -1326,10 +1332,11 @@ describe("a headless post with no shortfall record: the dead-letter queue decide
 		expect(m.totals.postProvenDeadLetterCalls).toBe(0);
 	});
 
-	it("an unrelated dead letter does not disturb the exact figure", () => {
+	it("an unrelated dead letter is no evidence either way: still an upper bound", () => {
 		const m = build([headless(100)], {
 			deadLetters: parseDeadLetters(`${sealed({ kind: "llm_call", data: { transferId: "x" } })}\n`),
 		});
-		expect(m.totals.postProvenUt).toBe(100);
+		expect(m.totals.postProvenUt).toBe(0);
+		expect(m.totals.postProvenUpperUt).toBe(100);
 	});
 });

@@ -184,7 +184,7 @@ const WITHOUT_CALL_NOTE =
 	"These records qualify a call (a shortfall, an ambiguity, an implausible-usage note, a failure marker) but the chain holds no record of the call itself. Their amounts are usertokens with no denomination assumed, and they are in no spend (dollar) figure. A standalone shortfall or ambiguity is counted in the budget section as undenominated wallet units, because the governor counted it; a standalone ambiguity is also in the unconfirmed totals.";
 
 const UPPER_BOUND_NOTE =
-	"A headless call the ledger answered, with no shortfall record on the chain, is exact only if the post was not capped at its hold. A capped post whose shortfall record failed to append would leave exactly this shape, and the writer's dead-letter queue could not be read to rule it out, so those calls are counted as an upper bound (at most their metered cost), not as an exact figure.";
+	"A headless call the ledger answered, with no shortfall record on the chain or in the dead-letter queue, is counted as an upper bound (at most its metered cost), not as an exact figure: this record format cannot tell a capped post from an uncapped one, because the shortfall is written after the call and may not exist yet, or may have been lost in a crash.";
 const DEAD_LETTER_NOTE =
 	"The posted amount of the dead-lettered call(s) comes from the writer's dead-letter queue, a plain file the chain does not verify; it is never part of the VERIFIED claim.";
 

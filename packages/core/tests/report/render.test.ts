@@ -210,7 +210,9 @@ describe("both evidence tiers are headlined", () => {
 			expect(out, f).toMatch(/not proven|no record contradicts/);
 		}
 		expect(m.totals.confirmedCalls).toBe(2);
-		expect(m.totals.postProvenCalls).toBe(1);
+		// a headless post with no shortfall record cannot be shown exact: it is an upper bound
+		expect(m.totals.postProvenCalls).toBe(0);
+		expect(m.totals.postProvenUpperCalls).toBe(1);
 	});
 });
 

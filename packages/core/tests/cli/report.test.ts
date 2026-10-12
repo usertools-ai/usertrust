@@ -625,12 +625,12 @@ describe("usertrust report --week", () => {
 			postProvenDeadLetterUt: 60,
 			postProvenUpperUt: 0,
 		});
-		// no queue file at all: no dead letters, so the post was not capped
+		// no queue file at all proves nothing: the shortfall may not have been appended yet, so only an upper bound
 		rmSync(dlq);
 		stdout = "";
 		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
 		totals = (JSON.parse(stdout) as { totals: Totals }).totals;
-		expect(totals).toMatchObject({ postProvenUt: 100, postProvenUpperUt: 0 });
+		expect(totals).toMatchObject({ postProvenUt: 0, postProvenUpperUt: 100 });
 		// a corrupt queue: only an upper bound, and the chain verdict is untouched
 		writeFileSync(dlq, "{corrupt\n");
 		stdout = "";

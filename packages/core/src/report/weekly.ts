@@ -961,10 +961,11 @@ function buildPlain(
 					t.postProvenUt += chainPosted ?? c;
 					t.postProvenCalls += 1;
 				} else {
-					// Headless, the ledger answered, and no shortfall record is on the chain. A capped post whose shortfall
-					// append failed looks exactly like this, so the dead-letter queue (read once, from the snapshot) decides:
-					// a dead-lettered shortfall gives the posted amount, a readable queue without one means no cap, and an
-					// unreadable or unread queue leaves only an upper bound.
+					// Headless, the ledger answered, and no shortfall record is on the chain. This record format cannot tell a
+					// capped post from an uncapped one: the shortfall is appended AFTER the call, so a snapshot taken between
+					// the two appends, or after a crash between them, sees exactly this shape. Only a dead-lettered shortfall
+					// (the writer's queue, read once from the snapshot) gives the posted amount; an EMPTY queue proves nothing,
+					// because the shortfall may not have been appended yet. Everything else is an upper bound.
 					const dl = opts.deadLetters;
 					const dead = dl !== undefined && "shortfalls" in dl ? dl.shortfalls.get(tid) : undefined;
 					if (dead !== undefined) {
@@ -972,9 +973,6 @@ function buildPlain(
 						t.postProvenCalls += 1;
 						t.postProvenDeadLetterUt += dead;
 						t.postProvenDeadLetterCalls += 1;
-					} else if (dl !== undefined && "shortfalls" in dl) {
-						t.postProvenUt += c;
-						t.postProvenCalls += 1;
 					} else {
 						t.postProvenUpperUt += c;
 						t.postProvenUpperCalls += 1;
