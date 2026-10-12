@@ -19,21 +19,26 @@
  * (readers never write to the vault); the governor's writer is `budget/effective-record.ts`.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export const EFFECTIVE_BUDGET_FILE = "effective-budget.json";
 
 export type EffectiveBudgetReading =
 	| { state: "recorded"; budget: number; writtenAt: string }
+	/** The vault's live governors enforce DIFFERENT budgets: the budget is unknown. */
+	| { state: "several"; governors: number; writtenAt: string }
 	| { state: "absent" }
 	| { state: "unreadable"; reason: string };
 
 /** The recorded enforced budget. Only a missing file is "absent"; anything else that is not a valid record is unreadable. */
 export function readEffectiveBudget(vaultDir: string): EffectiveBudgetReading {
+	const path = join(vaultDir, EFFECTIVE_BUDGET_FILE);
 	let text: string;
 	try {
-		text = readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE), "utf-8");
+		// stat FIRST: opening a FIFO planted at this path would block every reader (inspect, health, report, the UI).
+		if (!statSync(path).isFile()) return { state: "unreadable", reason: "not a regular file" };
+		text = readFileSync(path, "utf-8");
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		if (code === "ENOENT") return { state: "absent" };
@@ -46,7 +51,13 @@ export function readEffectiveBudget(vaultDir: string): EffectiveBudgetReading {
 		return { state: "unreadable", reason: "not valid JSON" };
 	}
 	const budget = (parsed as { budget?: unknown } | null)?.budget;
-	if (typeof budget !== "number" || !Number.isSafeInteger(budget) || budget <= 0) {
+	const governors = (parsed as { governors?: unknown } | null)?.governors;
+	const several =
+		budget === null &&
+		typeof governors === "number" &&
+		Number.isSafeInteger(governors) &&
+		governors >= 2;
+	if (!several && (typeof budget !== "number" || !Number.isSafeInteger(budget) || budget <= 0)) {
 		return { state: "unreadable", reason: "no positive integer budget" };
 	}
 	// `writtenAt` is the record's age, shown wherever its budget is; a record without a strict ISO-8601 UTC instant is
@@ -59,7 +70,8 @@ export function readEffectiveBudget(vaultDir: string): EffectiveBudgetReading {
 	) {
 		return { state: "unreadable", reason: "no valid writtenAt" };
 	}
-	return { state: "recorded", budget, writtenAt };
+	if (several) return { state: "several", governors: governors as number, writtenAt };
+	return { state: "recorded", budget: budget as number, writtenAt };
 }
 
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;

@@ -49,7 +49,7 @@ import {
 import { writeReceipt } from "./audit/rotation.js";
 import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
-import { recordEffectiveBudget } from "./budget/effective-record.js";
+import { registerEnforcedBudget } from "./budget/effective-record.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
 	guardedGet,
@@ -1276,11 +1276,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		});
 	}
 
-	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
-	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Advisory: it
-	// never throws, and a failed write removes any earlier record rather than leave a stale one (effective-budget.ts).
-	recordEffectiveBudget(join(vaultBase, VAULT_DIR), config.budget);
-
 	// D8: one-time migration warning, evaluated at the config-load path.
 	warnCacheRateMigration(config.pricing === "custom" ? config.customRates : undefined);
 
@@ -1358,6 +1353,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// 6. Track state
 	let destroyed = false;
+	// Drops this governor's budget from its vault's record (budget/effective-record.ts); set once it has started.
+	let releaseEnforcedBudget: (() => void) | undefined;
 	const budgetMutex = new AsyncMutex(); // Serialise budget-check + hold
 	let inFlightCount = 0; // Track in-flight calls for graceful destroy
 	let inFlightStreamCount = 0; // Track in-flight streams (consumed after interceptCall returns)
@@ -3928,6 +3925,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		const destroyFn = async (): Promise<void> => {
 			if (destroyed) return;
 			destroyed = true;
+			releaseEnforcedBudget?.();
 
 			// Wait up to 5 seconds for in-flight calls to complete.
 			// After the deadline, proceed with teardown anyway.
@@ -4024,6 +4022,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		}
 	};
 	process.on("beforeExit", beforeExitHandler);
+
+	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
+	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Recorded LAST,
+	// once the governor is fully initialised: a start that fails later (an invalid policy, a held audit lock) enforces
+	// nothing and must not replace the record of a governor that is running. Advisory: it never throws, and a failed
+	// write removes any earlier record rather than leave a stale one (budget/effective-record.ts).
+	releaseEnforcedBudget = registerEnforcedBudget(join(vaultBase, VAULT_DIR), config.budget);
 
 	return governedClient;
 }

@@ -198,4 +198,27 @@ describe("usertrust inspect", () => {
 		await run(tempDir);
 		expect(logOutput.join("\n")).toMatch(/\(the enforced budget, as of \d{4}-\d{2}-\d{2}T[^)]*Z\)/);
 	});
+
+	it("several live governors with different budgets: unknown in --json and in the text, never a figure", async () => {
+		const vaultPath = await spent300();
+		writeFileSync(
+			join(vaultPath, "effective-budget.json"),
+			JSON.stringify({
+				budget: null,
+				governors: 2,
+				writtenAt: "2026-10-12T00:00:00.000Z",
+				pid: 1,
+				processStartedAt: "2026-10-12T00:00:00.000Z",
+			}),
+		);
+		await run(tempDir, { json: true });
+		expect(lastJson().data).toMatchObject({
+			budget: null,
+			budgetSource: "several",
+			remaining: null,
+		});
+		logOutput = [];
+		await run(tempDir);
+		expect(logOutput.join("\n")).toContain("Budget: unknown");
+	});
 });

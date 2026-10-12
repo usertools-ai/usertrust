@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
+import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
 import { createUiServer, type UiServer } from "../src/server/server.js";
 
 async function readSse(
@@ -86,6 +87,24 @@ describe("live tail", () => {
 		expect(eventName).toBe("rows");
 		const rows = JSON.parse(data) as Array<{ transferId?: string }>;
 		expect(rows.some((r) => r.transferId === "tx_live")).toBe(true);
+	});
+
+	it("red-first (stale): a governor starting while the UI runs updates the summary's budget (the record is outside audit/)", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			budget: number | null;
+		};
+		expect(before.budget).toBeNull();
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				recordEffectiveBudget(join(tempDir, ".usertrust"), 4_000);
+			},
+			8000,
+		);
+		const summary = JSON.parse(data) as { budget: number | null; budgetSource: string };
+		expect(summary).toMatchObject({ budget: 4_000, budgetSource: "governor" });
 	});
 
 	it("signals resync when the log shrinks", async () => {

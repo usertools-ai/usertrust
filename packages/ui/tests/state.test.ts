@@ -143,4 +143,21 @@ describe("loadState", () => {
 			remainingUt: 700,
 		});
 	});
+
+	it("several live governors with different budgets: budget and remaining are null, the source says several", async () => {
+		await spend([300]);
+		writeFileSync(
+			join(vaultPath, "effective-budget.json"),
+			JSON.stringify({
+				budget: null,
+				governors: 2,
+				writtenAt: "2026-10-12T00:00:00.000Z",
+				pid: 1,
+				processStartedAt: "2026-10-12T00:00:00.000Z",
+			}),
+		);
+		const { summary } = loadState(vaultPath);
+		expect(summary).toMatchObject({ budget: null, budgetSource: "several", remainingUt: null });
+		expect(summary.budgetProvenance).toMatch(/^unknown: several governors with different budgets/);
+	});
 });

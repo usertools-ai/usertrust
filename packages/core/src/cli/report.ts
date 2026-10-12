@@ -489,6 +489,8 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			budget = recorded.budget;
 			budgetSource = describeBudgetSource({ source: "governor", writtenAt: recorded.writtenAt });
 		}
+		// Several live governors with different budgets, or a record that cannot be read: the budget is UNKNOWN.
+		const recordedUnknown = recorded?.state === "unreadable" || recorded?.state === "several";
 		// The verdict is `usertrust verify`'s own, on the LIVE vault: integrity AND completeness, one function shared with that
 		// command (audit/complete.ts). The report makes no integrity claim of its own. The instant is taken before the read.
 		const readAtIso = new Date().toISOString();
@@ -522,7 +524,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 				budget:
 					explicitBudget || recorded?.state === "recorded"
 						? budget
-						: recorded?.state === "unreadable"
+						: recordedUnknown
 							? 0
 							: config.state === "file"
 								? readVaultBudgetText(config.text)
@@ -532,7 +534,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 				deadLetters,
 				// An unreadable config is an UNKNOWN budget, never "no budget configured".
 				budgetUnreadable:
-					recorded?.state === "unreadable" ||
+					recordedUnknown ||
 					(configUnreadable && !explicitBudget && recorded?.state !== "recorded"),
 			},
 		);

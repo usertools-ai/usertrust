@@ -68,7 +68,7 @@ import {
 	type EnvelopeStatus,
 	envelopeStatusFrom,
 } from "./budget/context.js";
-import { recordEffectiveBudget } from "./budget/effective-record.js";
+import { registerEnforcedBudget } from "./budget/effective-record.js";
 // The cost-center envelope helpers are SHARED with `govern.ts`, not copied from
 // it (see the block comment above `ResolvedEnvelope` there). D1's throw, A2's
 // pre-gate refusal, A7's unfloored arithmetic and D5's label re-wrap all decide
@@ -1189,11 +1189,6 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		});
 	}
 
-	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
-	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Advisory: it
-	// never throws, and a failed write removes any earlier record rather than leave a stale one (effective-budget.ts).
-	recordEffectiveBudget(join(vaultBase, VAULT_DIR), config.budget);
-
 	const customRates = config.pricing === "custom" ? config.customRates : undefined;
 	// D8: one-time migration warning, evaluated at the config-load path.
 	warnCacheRateMigration(customRates);
@@ -1265,6 +1260,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 	// 5. State
 	let destroyed = false;
+	// Drops this governor's budget from its vault's record (budget/effective-record.ts); set once it has started.
+	let releaseEnforcedBudget: (() => void) | undefined;
 	// Set by destroy() in the same synchronous step that takes every remaining hold, at its
 	// deadline. From then on settle(), abort() and release() refuse at entry, before any
 	// claim. Not `destroyed`, which is set when destroy() BEGINS: while it drains, a terminal
@@ -2692,6 +2689,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		async destroy(): Promise<void> {
 			if (destroyed) return;
 			destroyed = true;
+			releaseEnforcedBudget?.();
 
 			// Never void a hold a terminal is still working on: a settle's POST, or an abort
 			// or release parked on the budget lock or its own void. ONE deadline for both
@@ -2901,6 +2899,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	process.once("beforeExit", cleanupHandler);
 	process.once("SIGTERM", cleanupHandler);
 	process.once("SIGINT", cleanupHandler);
+
+	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
+	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Recorded LAST,
+	// once the governor is fully initialised: a start that fails later (an invalid policy, a held audit lock) enforces
+	// nothing and must not replace the record of a governor that is running. Advisory: it never throws, and a failed
+	// write removes any earlier record rather than leave a stale one (budget/effective-record.ts).
+	releaseEnforcedBudget = registerEnforcedBudget(join(vaultBase, VAULT_DIR), config.budget);
 
 	return governor;
 }

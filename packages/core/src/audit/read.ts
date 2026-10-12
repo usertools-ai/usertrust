@@ -81,10 +81,16 @@ export function readLedgerEvents(vaultPath: string): PersistedAuditEvent[] {
  * Where a vault reader's budget came from:
  * - `governor`: the budget the vault's governor recorded as the one it ENFORCES (`effective-budget.json`);
  * - `config`: no record, so the vault's own `usertrust.config.json`;
+ * - `several`: the vault's live governors enforce different budgets, so the budget is UNKNOWN;
  * - `none`: neither gives one, or the record exists but cannot be read. The budget is then UNKNOWN, and `budget`
  *   is 0 only as a placeholder: a reader must not compute a remaining figure from it.
  */
-export type BudgetSource = "governor" | "config" | "none";
+export type BudgetSource = "governor" | "config" | "several" | "none";
+
+/** Whether a source gives a budget at all: `several` (live governors that disagree) and `none` do not. */
+export function isKnownBudget(source: BudgetSource): boolean {
+	return source === "governor" || source === "config";
+}
 
 export interface VaultBudget {
 	budget: number;
@@ -100,6 +106,9 @@ export function loadBudgetConfig(vaultPath: string): VaultBudget {
 	if (recorded.state === "recorded") {
 		return { budget: recorded.budget, source: "governor", writtenAt: recorded.writtenAt };
 	}
+	// Several live governors enforcing different budgets: unknown, never one of them, and never the config's.
+	if (recorded.state === "several")
+		return { budget: 0, source: "several", writtenAt: recorded.writtenAt };
 	// An unreadable record is not an absent one: the config file may not be what the governor enforced.
 	if (recorded.state === "unreadable") return { ...NO_BUDGET };
 	const configPath = join(vaultPath, "usertrust.config.json");
@@ -124,6 +133,8 @@ export function describeBudgetSource(b: Pick<VaultBudget, "source" | "writtenAt"
 			return `the enforced budget, as of ${b.writtenAt ?? "an unknown time"}`;
 		case "config":
 			return "from usertrust.config.json; not confirmed as enforced";
+		case "several":
+			return `unknown: several governors with different budgets, as of ${b.writtenAt ?? "an unknown time"}`;
 		case "none":
 			return "unknown: none recorded or configured";
 	}

@@ -15,14 +15,23 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, unwatchFile, watchFile } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { exportMarkdown, type PersistedAuditEvent, VAULT_DIR } from "usertrust";
+import {
+	EFFECTIVE_BUDGET_FILE,
+	exportMarkdown,
+	type PersistedAuditEvent,
+	VAULT_DIR,
+} from "usertrust";
 import { canonicalize, verifyTransaction } from "usertrust-verify";
 import { toLedgerRows } from "../shared/rows.js";
-import { type LedgerState, loadState, ROW_CAP } from "./state.js";
+import { budgetSummary, type LedgerState, loadState, ROW_CAP } from "./state.js";
+
+/** How often the budget files are polled for a change (`fs.watchFile`: a missing file is watched too). */
+const BUDGET_POLL_MS = 1000;
+
 import { serveStatic } from "./static.js";
 import { watchLedger } from "./tail.js";
 
@@ -280,6 +289,24 @@ export async function createUiServer(
 		onGrow: handleGrow,
 		onResync: handleResync,
 	});
+	// The budget's two sources live OUTSIDE `audit/`, which watchLedger watches: a governor writes its record when it
+	// starts, and an operator edits the config. Each change re-reads the budget and sends the summary.
+	const budgetFiles = [
+		join(vaultPath, EFFECTIVE_BUDGET_FILE),
+		join(vaultPath, "usertrust.config.json"),
+	];
+	const refreshBudget = (): void => {
+		const next = budgetSummary(vaultPath, state.summary.spentUt);
+		if (
+			next.budget === state.summary.budget &&
+			next.budgetSource === state.summary.budgetSource &&
+			next.budgetWrittenAt === state.summary.budgetWrittenAt
+		)
+			return;
+		Object.assign(state.summary, next);
+		broadcast("summary", state.summary);
+	};
+	for (const f of budgetFiles) watchFile(f, { interval: BUDGET_POLL_MS }, refreshBudget);
 
 	return {
 		server,
@@ -289,6 +316,7 @@ export async function createUiServer(
 		},
 		close(): Promise<void> {
 			stopWatching();
+			for (const f of budgetFiles) unwatchFile(f, refreshBudget);
 			for (const c of clients) c.end();
 			clients.clear();
 			return new Promise((resolvePromise) => server.close(() => resolvePromise()));

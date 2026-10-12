@@ -12,7 +12,12 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
 import { buildMerkleTree } from "../audit/merkle.js";
-import { describeBudgetSource, loadBudgetConfig, readLedgerEvents } from "../audit/read.js";
+import {
+	describeBudgetSource,
+	isKnownBudget,
+	loadBudgetConfig,
+	readLedgerEvents,
+} from "../audit/read.js";
 import { verifyChain } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
@@ -74,7 +79,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const spent = computeSpent(events);
 	// An UNKNOWN budget (no governor record, no configured budget) has no remaining figure: subtracting spend from the
 	// placeholder 0 printed a negative balance for a vault whose governor enforces a real budget elsewhere.
-	const budgetKnown = config.source !== "none";
+	const budgetKnown = isKnownBudget(config.source);
 	const remaining = budgetKnown ? config.budget - spent : null;
 	const pct =
 		remaining !== null && config.budget > 0 ? ((remaining / config.budget) * 100).toFixed(1) : null;

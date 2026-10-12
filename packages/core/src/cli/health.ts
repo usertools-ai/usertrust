@@ -17,7 +17,7 @@ import {
 	type EntropyEventInput,
 	type EntropyLevel,
 } from "../audit/entropy.js";
-import { loadBudgetConfig } from "../audit/read.js";
+import { describeBudgetSource, loadBudgetConfig } from "../audit/read.js";
 import { verifyVaultReading } from "../audit/verify.js";
 import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
@@ -494,6 +494,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 						// machine consumer must be able to tell that apart from a vault
 						// that has genuinely spent nothing.
 						budgetUtilization: budgetPct === null ? null : Number.parseFloat(budgetPct),
+						// Where the budget came from, beside it: only a governor record is the ENFORCED figure, with its age.
+						budgetSource: config.source,
+						budgetWrittenAt: config.writtenAt,
+						budgetProvenance: describeBudgetSource(config),
 						// true when the persisted session spend is unrepresentable or >1000x the budget: recovery is
 						// documented in docs/runaway-spend.md. Absent otherwise.
 						...(runawaySpend ? { budgetRunaway: true } : {}),
@@ -609,10 +613,13 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const budgetText =
 		budgetPct !== null
 			? `${budgetPct}%`
-			: config.budget > 0
-				? "unreadable ledger"
-				: "no budget configured";
+			: config.source === "several"
+				? "unknown (several governors with different budgets)"
+				: config.budget > 0
+					? "unreadable ledger"
+					: "no budget configured";
 	console.log(`  Budget utilization:      ${budgetText} ${budgetStatus}`);
+	console.log(`  Budget source:           ${describeBudgetSource(config)}`);
 	if (implausibleUsageCount > 0) {
 		console.log(
 			`  Implausible usage:       ${implausibleUsageCount} call(s) charged at the estimate ${pc.yellow("[review]")}`,

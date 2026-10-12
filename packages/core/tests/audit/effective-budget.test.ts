@@ -9,6 +9,7 @@
  * because every reader looked only at the vault's own `usertrust.config.json`.
  */
 
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
 	existsSync,
@@ -39,7 +40,7 @@ vi.mock("tigerbeetle-node", () => ({
 }));
 
 import { EFFECTIVE_BUDGET_FILE, readEffectiveBudget } from "../../src/audit/effective-budget.js";
-import { describeBudgetSource, loadBudgetConfig } from "../../src/audit/read.js";
+import { describeBudgetSource, isKnownBudget, loadBudgetConfig } from "../../src/audit/read.js";
 import { recordEffectiveBudget } from "../../src/budget/effective-record.js";
 import { trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
@@ -249,5 +250,112 @@ describe("the governor records what it ENFORCES (red-first: every row read the v
 		const b = await createGovernor({ dryRun: true, vaultBase: base, budget: 4_000 });
 		await b.destroy();
 		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 4_000, source: "governor" });
+	});
+});
+
+// Whole-PR MAX on 534b7c46: the record is a claim about a RUNNING governor, so it is written only once the governor
+// has fully initialised; and nothing on its failure path may reject the constructor.
+describe("the record is published only by a governor that started", () => {
+	it("red-first (overwritten): a start that fails on an invalid policy leaves the earlier record byte-identical", async () => {
+		const first = await createGovernor({ dryRun: true, vaultBase: base, budget: 1_000 });
+		await first.destroy();
+		const before = readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
+		mkdirSync(join(vaultDir, "policies"), { recursive: true });
+		writeFileSync(join(vaultDir, "policies", "default.yml"), "rules: [this is not a rule list\n");
+		await expect(
+			createGovernor({ dryRun: true, vaultBase: base, budget: 9_000 }),
+		).rejects.toThrow();
+		expect(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).equals(before)).toBe(true);
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 1_000, source: "governor" });
+	});
+
+	it("red-first (threw): the rename AND the staging cleanup both fail — it returns, warns, and never throws", () => {
+		const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		expect(() =>
+			recordEffectiveBudget(vaultDir, 2_000, {
+				rename: () => {
+					throw Object.assign(new Error("EROFS: read-only file system, rename"), { code: "EROFS" });
+				},
+				cleanup: () => {
+					throw Object.assign(new Error("EROFS: read-only file system, unlink"), { code: "EROFS" });
+				},
+			}),
+		).not.toThrow();
+		expect(err.mock.calls.map((c) => String(c[0])).join("")).toMatch(
+			/could not record the enforced budget .*EROFS/,
+		);
+	});
+});
+
+describe("a planted non-file at the record's path is never opened", () => {
+	it("red-first (hangs): a FIFO is unreadable at once — no reader blocks on it", () => {
+		execFileSync("mkfifo", [join(vaultDir, EFFECTIVE_BUDGET_FILE)]);
+		const t0 = Date.now();
+		expect(readEffectiveBudget(vaultDir)).toEqual({
+			state: "unreadable",
+			reason: "not a regular file",
+		});
+		expect(loadBudgetConfig(vaultDir)).toEqual({ budget: 0, source: "none", writtenAt: null });
+		expect(Date.now() - t0).toBeLessThan(1_000);
+	});
+
+	it("a directory at the record's path is unreadable too", () => {
+		mkdirSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
+		expect(readEffectiveBudget(vaultDir).state).toBe("unreadable");
+	});
+});
+
+// rkX_9 (orchestra's ruling): several live governors on one vault. One process holds the vault's writer lock, so the
+// record is aggregated in-process: the agreed budget, or "several governors" when they differ. Rewritten on every
+// start and every destroy; no stored conflict flag.
+describe("several live governors on one vault", () => {
+	it("two governors that AGREE: the record is their budget", async () => {
+		const a = await createGovernor({ dryRun: true, vaultBase: base, budget: 3_000 });
+		const b = await createGovernor({ dryRun: true, vaultBase: base, budget: 3_000 });
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 3_000, source: "governor" });
+		await a.destroy();
+		await b.destroy();
+	});
+
+	it("red-first (the last writer's): two that DISAGREE make the budget UNKNOWN on every surface", async () => {
+		const a = await createGovernor({ dryRun: true, vaultBase: base, budget: 3_000 });
+		const b = await createGovernor({ dryRun: true, vaultBase: base, budget: 5_000 });
+		const got = loadBudgetConfig(vaultDir);
+		expect(got).toMatchObject({ budget: 0, source: "several" });
+		expect(isKnownBudget(got.source)).toBe(false);
+		expect(describeBudgetSource(got)).toMatch(
+			/^unknown: several governors with different budgets, as of \d{4}-/,
+		);
+		expect(readEffectiveBudget(vaultDir)).toMatchObject({ state: "several", governors: 2 });
+		await a.destroy();
+		await b.destroy();
+	});
+
+	it("one of them destroyed: the record is the remaining governor's budget", async () => {
+		const a = await createGovernor({ dryRun: true, vaultBase: base, budget: 3_000 });
+		const b = await createGovernor({ dryRun: true, vaultBase: base, budget: 5_000 });
+		await a.destroy();
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 5_000, source: "governor" });
+		await b.destroy();
+		// the last one's destroy leaves the record as it was, read "as of" its writtenAt
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 5_000, source: "governor" });
+	});
+
+	it("trust() clients join the same aggregation", async () => {
+		const client = () => ({ chat: { completions: { create: vi.fn() } } });
+		const a = await trust(client(), { dryRun: true, vaultBase: base, budget: 3_000 });
+		const b = await trust(client(), { dryRun: true, vaultBase: base, budget: 4_000 });
+		expect(loadBudgetConfig(vaultDir).source).toBe("several");
+		await b.destroy();
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 3_000, source: "governor" });
+		await a.destroy();
+	});
+
+	it("a record of several with fewer than two governors is not one: unreadable, unknown", () => {
+		writeFileSync(
+			join(vaultDir, EFFECTIVE_BUDGET_FILE),
+			JSON.stringify({ budget: null, governors: 1, writtenAt: "2026-10-12T00:00:00.000Z" }),
+		);
+		expect(readEffectiveBudget(vaultDir).state).toBe("unreadable");
 	});
 });

@@ -1224,7 +1224,7 @@ shows no remaining figure for it. Wherever a budget is SHOWN, its provenance is 
 record that outlived a failed removal reads as old, never as current); a config budget says "not confirmed as
 enforced". The ledger UI, `inspect`, `health` and `report` all read it; never add a reader that parses the config file
 alone, or a surface that shows the figure without its provenance.
-Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
+The record is written LAST in both constructors, once the governor has fully started (a failed start enforces nothing), and every step of its failure path is non-throwing. Several live governors on one vault are aggregated in-process (`registerEnforcedBudget`: one process holds the vault's writer lock): the record is the agreed budget, or `budget: null` with the governor count when they differ, which every reader shows as unknown (`source: "several"`); it is rewritten on every start and every destroy, never stored as a flag. Readers stat the record before opening it (a FIFO would block them). The ledger UI re-reads it when it or the vault config changes. Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
 
 **`vaultPath` means two different directories.** `createAuditWriter(vaultPath)` joins
 `vaultPath/.usertrust/audit` — it takes the **project root**. `verifyVault`, `readLedgerEvents`,
