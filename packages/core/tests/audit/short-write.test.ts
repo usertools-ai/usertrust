@@ -1,4 +1,12 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -63,6 +71,34 @@ describe("#194.1: an append writes EVERY byte, or fails without claiming durabil
 		w.release();
 		expect(readFileSync(logOf(v), "utf-8").endsWith("\n")).toBe(true);
 		expect(verifyVault(join(v, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 2 });
+	});
+
+	it("a dead letter is written WHOLE too: a short write that makes progress lands the entire line", async () => {
+		const v = vault();
+		// Another live process holds the vault's lock (the parent PID stands in for it), so the append
+		// fails and the writer dead-letters the event — while writes come back short.
+		mkdirSync(join(v, VAULT_DIR, "audit"), { recursive: true });
+		writeFileSync(
+			join(v, VAULT_DIR, "audit", ".audit-writer.lock"),
+			JSON.stringify({ pid: process.ppid, startedAt: "2020-01-01T00:00:00Z" }),
+		);
+		const w = createAuditWriter(v);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		mode.now = "half";
+		const err = await w
+			.appendEvent({
+				kind: "llm_call",
+				actor: "local",
+				data: { transferId: "tx_dl", pad: "x".repeat(400) },
+			})
+			.catch((e: unknown) => e);
+		mode.now = null;
+		warn.mockRestore();
+		w.release();
+		expect(err).toBeInstanceOf(AuditWriterLockHeldError);
+		const dlq = readFileSync(join(v, VAULT_DIR, "dlq", "dead-letters.jsonl"), "utf-8");
+		expect(dlq.endsWith("\n")).toBe(true);
+		expect(JSON.parse(dlq.trim())).toMatchObject({ payload: { data: { transferId: "tx_dl" } } });
 	});
 
 	it("a write that STALLS: the append rejects with no durable hash; the next append refuses the torn tail; quarantine repairs it and appends resume on a verifying chain", async () => {

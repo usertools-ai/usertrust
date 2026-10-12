@@ -12,8 +12,9 @@ through usertrust: it only reads what Claude Code already recorded.
 **Watch-only by default.** Installed, the plugin never blocks a tool call. A call
 the server refuses (over budget, denied by policy, or cut off as an anomaly) is
 written down as one that would have been blocked, and a call that could not be
-metered (the server is unreachable, say) as a gap. Set `UT_CC_MODE=enforce` to
-block — see [Modes](#modes-watch-only-by-default). **In no mode does it approve a
+metered (the server is unreachable, say) as a gap. Set `"mode": "enforce"` in the
+[configuration file](#configuration-file) (or `UT_CC_MODE=enforce` when you run without
+one) to block — see [Modes](#modes-watch-only-by-default). **In no mode does it approve a
 call:** it can only deny, so Claude Code's own permission settings decide every
 call it lets through, exactly as they would without it.
 
@@ -29,17 +30,37 @@ call it lets through, exactly as they would without it.
 1. Generate a tenant key (high-entropy secret — this is an API-key model, not a password):
    `openssl rand -hex 32`
 2. Add its SHA-256 hash to your `usertrust-server` config and start the server.
-3. Export the plugin environment before launching Claude Code:
+3. Create the configuration file. Its format, and the requirements on its path, owner and mode, are in [Configuration file](#configuration-file); a file that fails them runs the session in watch-only mode with no requests sent. The minimal file has every required field, not only `url` and `key`:
+
+One block does it all, so copy it whole.
+
+- **The home directory comes from your account.** The plugin accepts a configuration file only under `.config/usertrust/` in your account's home directory as the system records it (`os.userInfo().homedir`). That is not necessarily `$HOME` or `~`, which can differ under `sudo` and in some containers. The block asks Node for that directory, so every path below uses it.
+- **`stateDir` must be an absolute path.** JSON expands nothing, so the shell puts the directory in.
+- **The key is never readable by others, even for a moment.** The key is written into a new file that `mktemp` creates owner-only (mode 600), which then replaces any earlier `claude-code.json` in one `mv`. So the key never sits in a file others can read, even when an earlier file was readable (`umask` covers only new files, so writing into an existing file with `cat >` would keep its old mode). If the block is interrupted, the leftover `claude-code.json.XXXXXX` is owner-only too; delete it. The directory is created owner-only, and `chmod` also tightens one that already existed.
 
 ```sh
-export UT_SERVER_URL="http://127.0.0.1:4519"
-export UT_SERVER_KEY="<the key from step 1>"
+UT_HOME=$(node -p "require('os').userInfo().homedir")
+UT_DIR="$UT_HOME/.config/usertrust"
+(umask 077 && mkdir -p "$UT_DIR") && chmod 700 "$UT_DIR"
+UT_TMP=$(mktemp "$UT_DIR/claude-code.json.XXXXXX") && cat > "$UT_TMP" <<EOF && mv -f "$UT_TMP" "$UT_DIR/claude-code.json"
+{
+  "url": "http://127.0.0.1:4519",
+  "key": "<the key from step 1>",
+  "mode": "watch",
+  "stateDir": "$UT_HOME/.claude/usertrust-cc"
+}
+EOF
+export UT_CC_CONFIG="$UT_DIR/claude-code.json"
 ```
+
+If the file is in the wrong place, or has the wrong owner or mode, the plugin refuses it. The session then runs watch-only with no key and sends nothing, and the first line Claude Code shows says why: `usertrust: watch-only and key-less — the config file UT_CC_CONFIG names was refused (config: anchor refused (missing)) …`. That is what a file written under a `$HOME` that is not your account's home produces. See [Configuration file](#configuration-file).
 
 4. Start Claude Code. Each session opens with a line naming the mode, for example
    `usertrust: watch-only — nothing is blocked. …`. To block over-budget tool
-   calls instead, also `export UT_CC_MODE=enforce` before launching it — after
+   calls instead, set `"mode": "enforce"` in the configuration file before launching it — after
    watching for a while first: see [From watching to enforcing](#from-watching-to-enforcing).
+
+**Environment variables instead.** You can export `UT_SERVER_URL` and `UT_SERVER_KEY` (and the other `UT_*` variables under [Environment variables](#environment-variables)) before launching Claude Code, and skip the file. The configuration file is preferred: a project's settings can set environment variables for every hook, so a session configured that way is more exposed to them.
 
 ## Environment variables
 
@@ -75,8 +96,10 @@ Set `UT_CC_CONFIG` to the path of one JSON file, and the plugin reads every
 setting from it:
 
 ```sh
-export UT_CC_CONFIG="$HOME/.config/usertrust/claude-code.json"
+export UT_CC_CONFIG="$(node -p "require('os').userInfo().homedir")/.config/usertrust/claude-code.json"
 ```
+
+The path is built from your account's home directory (`os.userInfo().homedir`), not `$HOME`: the plugin anchors the file there, as the list below says.
 
 ```json
 {
@@ -379,9 +402,14 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   entry written before that is never posted: a session resumed after upgrading
   from the estimate-only plugin, or after the state dir was deleted, does not post
   its history again (entries carry Claude Code's timestamp; one without a
-  timestamp counts as after it). After a host crash or power loss (not a process
-  crash), usage posted in the moments before it can be posted again, because the
-  plugin's state files are not fsynced. Idempotency keys on the server (#205) are
+  timestamp counts as after it). SessionStart makes it, whatever its `source`, so a
+  fresh install posts its first session from the first response on. The history of a
+  transcript resumed or compacted then is older than it, and is not posted; and once
+  made it never moves, so a later resume posts what its session left unposted. A
+  plugin installed into a session already under way posts nothing written before its
+  first hook there, the response that triggered that hook included. After a host
+  crash or power loss (not a process crash), usage posted in the moments before it
+  can be posted again, because the plugin's state files are not fsynced. Idempotency keys on the server (#205) are
   the fix. **Restoring an older copy of the state dir can
   re-post what was posted after that copy was made.** The claim files are never
   pruned, and they are what keeps a message from being posted twice: one small
@@ -467,14 +495,17 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
 
 ## Modes: watch-only by default
 
-`UT_CC_MODE` decides what PreToolUse — the one hook that can block — does with the
-server's answer. Reservations, settlement and everything above work the same in
+The mode — `"mode"` in the configuration file, or `UT_CC_MODE` in a session without
+one — decides what PreToolUse, the one hook that can block, does with the
+server's answer. **With `UT_CC_CONFIG` set, every `UT_*` variable is ignored, `UT_CC_MODE`
+and `UT_FAIL_OPEN` included:** set the mode and `failOpen` in the file. Reservations, settlement and everything above work the same in
 both modes.
 
 | The server's answer at PreToolUse | watch (the default) | enforce (`UT_CC_MODE=enforce`) |
 | --- | --- | --- |
 | A reservation (200) | No decision: your permission settings apply | No decision |
 | Refused: over budget (402), denied by policy (403), an anomaly cutoff (429) | No decision, and a `would_block` record | `deny`: the call is blocked |
+| The key rejected: a 401, or a 403 whose `error` is `unauthorized` | No decision, a `gap` record (`"cause":"key-rejected"`), and a message shown to you | Blocked (exit 2). With `UT_FAIL_OPEN=1`: as in watch |
 | No usable answer: unreachable, a timeout, any other status, a malformed body | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: no decision, and a `gap` record |
 | A shadow answer from an `evaluate_only` server | No decision | No decision |
 
@@ -687,8 +718,59 @@ mode (only with `UT_FAIL_OPEN=1`) says `"mode":"enforce"`. In transcript mode a 
 loses no usage by itself: the responses the hold would have carried stay in the
 transcript to be posted at a later settle point. In estimate mode
 (`UT_CC_USAGE=estimate`) the call's estimate is not recorded. A record that cannot
-be written goes to stderr instead, and the call proceeds either way. Nothing reads
-the file back, so deleting it is safe — unlike the rest of the state dir.
+be written goes to stderr instead, and the call proceeds either way. Only SessionStart
+reads the file back, the part written since the last session start (see *A rejected key*
+below), so deleting it is safe — unlike the rest of the state dir.
+
+**A rejected key is shown to you, not buried.** A server that rejects the session's key
+(`UT_SERVER_KEY`, or the config file's `key`: mistyped, rotated, or its hash missing from
+the server's config) answers every authorize with a 401. usertrust-server's own 403 is a
+policy refusal (`"error":"policy_denied"`), so only a 403 whose `error` is `unauthorized`
+counts as a rejected key; any other 403, and a 402, is still a `would_block`. A rejected key
+is a configuration problem, not an outage, and every call it touches goes unmetered, so:
+- **PreToolUse shows a message** as the hook's `systemMessage`, the field Claude Code shows to
+  you, on the session's first such call, then at most once every 10 minutes while it lasts:
+
+  ```
+  usertrust: the server rejected this session's key (401): tool calls are NOT being metered. Check the key (UT_SERVER_KEY); see /Users/you/.claude/usertrust-cc/watch.jsonl.
+  ```
+
+  Ten minutes, not a count of calls: a count would nag a busy session and fall silent in a slow
+  one. It never blocks the call in watch mode (exit 0, no decision).
+- **Each call is still one `gap` record**, so `usertrust-job coverage` still sees every
+  unmetered call, with `"cause":"key-rejected"`, the `status`, and the reason `the server
+  rejected this key (401)`. The session's first record also carries a `detail`: the server
+  URL, the key's hash (never the key), the server's answer, and what to check. The later ones
+  are compact:
+
+  ```json
+  {"at":"2026-10-09T10:00:00.000Z","kind":"gap","mode":"watch","session":"<session id>","agent":"main","tool":"Bash","reason":"the server rejected this key (401)","cause":"key-rejected","status":401,"started":"2026-10-09T10:00:00.000Z"}
+  ```
+- **SessionStart warns** of the rejected calls recorded since the last session start, before
+  the mode line:
+
+  ```
+  usertrust: WARNING: 1,946 tool calls since 2026-10-09 were NOT metered (the server rejected the key). Check the key (UT_SERVER_KEY); see /Users/you/.claude/usertrust-cc/watch.jsonl.
+  ```
+
+  It sends nothing. It reads only `watch.jsonl`'s last 1 MiB (about 4,000 records), from where
+  the last session start stopped reading (`key-rejected/session-start.mark` in the state dir);
+  a file that is not the one it read last (deleted and written again) is read from its start.
+  With more than the bound since then, the count reads `at least`. A file it cannot read is the
+  normal banner, and so is a mark that is not a small regular file (it is then ignored, and
+  `watch.jsonl` read from its start). It also counts the gaps earlier releases wrote for a 401,
+  `"reason":"unexpected governance response 401"` with no `cause`, so the first session start
+  after upgrading warns of rejections the install already had. A 401 only: those releases
+  recorded a 403 as a policy refusal (`would_block`), which stays one.
+
+**To fix it**, give the plugin the key the server holds: `export UT_SERVER_KEY=...` (or fix
+the config file's `key`) and start a new session, as a session keeps the key it started with;
+or add the key's SHA-256 hash to the server's config and restart the server, after which the
+running session's calls are metered again. In enforce mode a rejected key blocks every tool
+call (exit 2), as any failed authorization does; with `UT_FAIL_OPEN=1` the calls proceed
+unmetered, and you see the message above. The plugin keeps each session's notice state in
+`key-rejected/` in the state dir (0700, each file 0600). It never stops asking the server after
+a rejection: a key fixed on the server could not be seen without asking.
 
 **When the server stops answering, watch mode stops asking it: the breaker.** A server
 that hangs, its connection open and no answer coming, would cost every hook of every
@@ -752,6 +834,14 @@ PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"pha
   connection dropped after sending, and the server may still act on it. A transcript hold's
   settle that ends this way is `claimed`, or `unresolved` under a key, which also say whether
   it is retried.
+
+A transcript settle that cannot be built once its hold is claimed (the server's capabilities
+read as unknown only then) sends nothing and hands the hold back for a later settle point:
+`deferred`. If that hand-back fails, the hold stays claimed (`.settling`), which a later settle
+point reads as a settle of unknown outcome: it is `claimed`, or `unresolved` under a key, said
+on stderr, and its record carries `"handBack":"failed"` and the error's `code`. (The hooks claim
+a hold only once the capabilities its settle needs are known, and a known answer is kept for
+the hook's run, so today this path is a guard and is not reached.)
 
 **Redirects.** The plugin follows redirects by hand, up to 20 (fetch's own limit, which earlier
 releases had): each a 307 or a 308 whose `Location` has the origin (scheme, host and port) of
@@ -825,8 +915,8 @@ Enforcement is opt-in. Turn it on in three steps, so the first thing a
 misconfigured setup does is write a record, not stop your session.
 
 1. **Install and watch.** Install the plugin, point it at your server (see the
-   [Quickstart](#quickstart-against-usertrust-server)), and leave `UT_CC_MODE`
-   unset. The plugin authorizes tool calls against your server and settles their
+   [Quickstart](#quickstart-against-usertrust-server)), and keep `"mode": "watch"` in
+   the configuration file (or, without one, leave `UT_CC_MODE` unset). The plugin authorizes tool calls against your server and settles their
    usage, but blocks nothing, and each session opens with `usertrust: watch-only —
    nothing is blocked. …`. Keep the server's `enforcement` at its default, `enforce`: its
    refusals are what show you which calls would be blocked. A server in
@@ -839,23 +929,33 @@ misconfigured setup does is write a record, not stop your session.
      calls you mean to stop. If they are not, fix the budget or the policy first.
    - A `gap` record is a call the plugin could not meter: the server was
      unreachable, timed out or answered something unusable. **In enforce mode
-     each of these blocks the call**, unless `UT_FAIL_OPEN=1`. Make the gaps go
-     away, or understand them, before you enforce.
+     each of these blocks the call**, unless fail-open is on (`"failOpen": true`, or
+     `UT_FAIL_OPEN=1` without a configuration file). Make the gaps go
+     away, or understand them, before you enforce. A gap with
+     `"cause":"key-rejected"` means the server does not accept the key: see
+     *A rejected key* in [Modes](#modes-watch-only-by-default).
 
    For example: `grep '"kind":"gap"' ~/.claude/usertrust-cc/watch.jsonl`.
-3. **Enforce.** `export UT_CC_MODE=enforce` before launching Claude Code. The
-   session-start message now begins `usertrust: ENFORCING`. Over-budget, policy
-   and anomaly refusals are blocked. Then decide what an outage does:
-   - `UT_FAIL_OPEN` unset: while the server cannot answer, every tool call is
-     blocked. Use this where the budget must hold.
-   - `UT_FAIL_OPEN=1`: while the server cannot answer, calls proceed unmetered,
-     and each is recorded as a `gap`. Use this where availability matters more.
+3. **Enforce.** Set `"mode": "enforce"` in the configuration file, then start a NEW
+   Claude Code session (a session keeps the settings it read at its first hook).
+   Without a configuration file, `export UT_CC_MODE=enforce` before launching
+   instead; with one, that variable is ignored. The session-start message now
+   begins `usertrust: ENFORCING`, and if it does not, the session is not enforcing.
+   Over-budget, policy and anomaly refusals are blocked. Then decide what an
+   outage does:
+   - fail-open off (`"failOpen": false`, the default; or `UT_FAIL_OPEN` unset):
+     while the server cannot answer, every tool call is blocked. Use this where
+     the budget must hold.
+   - fail-open on (`"failOpen": true`; or `UT_FAIL_OPEN=1`): while the server
+     cannot answer, calls proceed unmetered, and each is recorded as a `gap`. Use
+     this where availability matters more.
 
    Before enforcing near a tight budget, read the known limitations and the
    known issue in [Modes](#modes-watch-only-by-default).
 
-To go back to watching, unset `UT_CC_MODE` (`enforce` is matched
-case-insensitively; any other value runs watch-only) and relaunch Claude Code.
+To go back to watching, set `"mode": "watch"` in the configuration file (or, without
+one, unset `UT_CC_MODE`; `enforce` is matched case-insensitively there and any other
+value runs watch-only) and start a new Claude Code session.
 
 ## Content flow and audit
 
@@ -866,3 +966,7 @@ It never goes to any third party. Set `UT_CC_SEND_CONTENT=0` to send
 input length, so budgets stay accurate. The usertrust audit chain stores
 content hashes, never raw bodies; raw tool input exists only in transit to
 your server and is not persisted by governance.
+
+### Turning tool content off
+
+By default, PreToolUse sends the tool input (truncated at 16 KiB) to **your self-hosted** server for the PII policy, and never to a third party. To send none of it, set `"sendContent": false` in the [configuration file](#configuration-file), or `UT_CC_SEND_CONTENT=0` when you run without one. The server then receives `{"redacted":true}` in place of the content. Budgets stay accurate, because size-based estimation still uses the real input length.

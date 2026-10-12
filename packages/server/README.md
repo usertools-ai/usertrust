@@ -1,16 +1,38 @@
 # usertrust-server
 
-Self-hostable HTTP control plane for the [usertrust](https://github.com/usertools/usertrust)
+Self-hostable HTTP control plane for the [usertrust](https://github.com/usertools-ai/usertrust)
 governance kernel. Wraps the headless Governor's two-phase lifecycle
 (authorize → settle/abort) with per-tenant isolation, bearer-key auth, and SSE telemetry.
 
 ## Quickstart
 
 ```bash
+npm install -g usertrust-server
+```
+
+```bash
 # Generate a tenant key (high-entropy secret) and its SHA-256 hash for the config:
 KEY=$(openssl rand -hex 32)
 node -e "console.log(require('node:crypto').createHash('sha256').update(process.argv[1]).digest('hex'))" "$KEY"
 ```
+
+Choose one of two ways to run the server, then write the config below.
+
+**Try it (no ledger).** Add `"dryRun": true` to the config. dryRun skips TigerBeetle, so the server needs no ledger replica. The audit chain and the policy engine still run. This is the fastest way to try the API.
+
+**Full mode, locally (TigerBeetle).** Leave `dryRun` out or set it to `false`, which is the default. The server then needs a running TigerBeetle at `127.0.0.1:3001`, the default address. Run the TigerBeetle release that matches the ledger client your install resolved. usertrust depends on `tigerbeetle-node` `^0.17.9`, so a later install can resolve a newer 0.17.x client, and a replica evicts a client whose release it does not support (`client_release_too_high` for a client newer than the replica). `npm ls tigerbeetle-node` where you installed usertrust-server (`npm ls -g tigerbeetle-node` for a global install) shows the client's version (0.17.9 when this was written); set `TB_VERSION` below to it. These commands were run on Linux on arm64 with the 0.17.9 `tigerbeetle-aarch64-linux.zip` asset; for another platform, take the asset for your platform from the [release with that version](https://github.com/tigerbeetle/tigerbeetle/releases).
+
+```bash
+TB_VERSION=0.17.9   # the tigerbeetle-node version `npm ls tigerbeetle-node` shows
+curl -sSL -o tigerbeetle.zip "https://github.com/tigerbeetle/tigerbeetle/releases/download/${TB_VERSION}/tigerbeetle-aarch64-linux.zip"
+unzip tigerbeetle.zip
+./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle
+./tigerbeetle start --addresses=3001 --development 0_0.tigerbeetle
+```
+
+**These commands start ONE replica in `--development` mode: a local full-mode run, not a production deployment.** A single replica has no replication and no high availability: lose its data file and the ledger is gone. For production, deploy a replicated TigerBeetle cluster following TigerBeetle's own guidance ([cluster recommendations](https://docs.tigerbeetle.com/operating/cluster/), [deploying](https://docs.tigerbeetle.com/operating/deploying/)), and give the governor all the replica addresses (`tigerbeetle.addresses`).
+
+Format the data file once; start the replica each time you need it. TigerBeetle and its client need `io_uring` on Linux, and Docker's default seccomp profile blocks it; with it blocked, the client cannot start. In a container, run with `--security-opt seccomp=unconfined` (or a seccomp profile that allows `io_uring`). On a host where `kernel.io_uring_disabled` is set, it must be `0`.
 
 `usertrust-server.config.json`:
 
@@ -42,7 +64,7 @@ check before relying on them:
 
 | Status | `error` | Meaning | What a client does |
 |---|---|---|---|
-| `410` | `settlement_unrecoverable` | No hold here. The settle is **recorded on the audit chain** (usage only, the id as its SHA-256) and counted per tenant in `settlementsUnrecoverable` on the authenticated `GET /v1/budget` (never on the unauthenticated `/v1/health`); `recorded: false` marks an exact retry already recorded. **Nothing is charged and no hold is re-opened.** | Authorize again and settle if the spend must be charged. Do not retry the same settle. |
+| `410` | `settlement_unrecoverable` | No hold here. The settle is **recorded on the audit chain** (usage only, the id as its SHA-256) and counted per tenant in `settlementsUnrecoverable` on the authenticated `GET /v1/budget` (never on the unauthenticated `/v1/health`); `recorded: false` marks an exact retry already recorded, or a request that shares a concurrent identical request's in-flight append. **Nothing is charged and no hold is re-opened.** If the record is on the chain but the writer reported a failure after it, the body also carries `auditDegraded: true`, which means the write this request made OR shares was degraded. `recorded` stays `true` for the request that wrote it and is `false` for a retry or a concurrent sharer, which write nothing. | Authorize again and settle if the spend must be charged. Do not retry the same settle. |
 | `409` | `settlement_ambiguous` | The first settle's ledger post was ambiguous (it may have charged). Nothing recorded. | Do **not** authorize again to settle it: check the ledger. |
 | `409` | `already_settled` | A retry of a settle that went through in this process. The charge stands. Nothing recorded. | Treat as success. |
 | `409` | `settle_in_progress` | A settle for this id is still running. Nothing recorded. | Retry shortly. |
@@ -170,6 +192,11 @@ server-layer semantic; other usertrust layers define their own evaluate-only beh
 Only Governor-produced receipts and audit-chain records are authoritative. The server
 invents no audit records of its own; every receipt returned by `/v1/settle` comes from
 the tenant's Governor (per-tenant `stateDir/<tenant>` vault: separate audit chain and
-spend ledger). The SSE stream is best-effort operational telemetry, NOT an audit
-source — dropped subscribers lose events. Shadow denials produce no receipt and are
-not auditable or verifiable.
+spend ledger). Each tenant vault is owner-only (directories `0700`, files `0600`, whatever
+the umask; a vault another user owns is refused), and the server writes nothing outside
+`stateDir`; a `stateDir` the server creates is `0700`, and one you created is left as you
+made it. On Windows the server neither sets nor checks permissions: the `stateDir` folder's
+inherited ACL decides who can read it, so keep it under the service account's own profile or
+give it an owner-only ACL (see the repository's `LIMITATIONS.md`). The SSE stream is
+best-effort operational telemetry, NOT an audit source — dropped subscribers lose events.
+Shadow denials produce no receipt and are not auditable or verifiable.

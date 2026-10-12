@@ -1,6 +1,6 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { ImageResponse } from "next/og";
+import { getKitPoster } from "../lib/kit-poster";
+import { getOgFonts } from "../r/lib/kit-fonts";
 
 // Deterministic, request-independent image — pre-render at build time and serve
 // as a static, CDN-immutable asset (no per-request function invocation).
@@ -14,13 +14,24 @@ export const dynamic = "force-static";
  *
  * Satori constraints honored here:
  *  - flexbox only; every multi-child element declares display:flex
- *  - woff2 unsupported → Khand ships in this directory as TTF (decompressed
- *    from site/public/fonts/*.woff2, same OFL license, see public/fonts/OFL.txt)
- *  - assets load via fs.readFile, never fetch(new URL(...)): webpack's
+ *  - no font file lives in this repo: Khand is fetched from the brand kit and
+ *    checked against its sha384 pin before it is decoded from woff2 (satori
+ *    reads no woff2) — `getOgFonts()`, the same pinned loader as the receipt
+ *    share card. Prerendered at build, so the build fetches it; if the kit is
+ *    unreachable or a pin fails, the card renders in the renderer's default
+ *    font and the build log says so, rather than failing the build over a
+ *    typeface.
+ *  - the settle frame is a brand image, so it is not kept in this repo either:
+ *    it is fetched from the brand kit and checked against its sha384 pin
+ *    (`getKitPoster()`, lib/kit-poster.ts, the same pinned fetch). If the kit
+ *    is unreachable or the pin fails, the card renders on its plain GROUND and
+ *    the build log says so.
+ *  - nothing loads by fetch(new URL(...)): webpack's
  *    asset-module heuristic rewrites that literal pattern for images into a
  *    bundled public path string, which breaks force-static prerendering.
- *    Slicing to the buffer's own range yields the true ArrayBuffer satori
- *    accepts for <img src>.
+ *    The kit fetch is an absolute https URL, not that pattern; the loader
+ *    slices the bytes to their own range, the true ArrayBuffer satori accepts
+ *    for <img src>.
  */
 const GROUND = "#0a0a1a";
 const EMERALD = "#34d399"; // --color-ut: the hero tagline's exact ink on dark
@@ -37,13 +48,13 @@ const POSTER_TOP = 0;
 const POSTER_LEFT = 270;
 
 export async function GET() {
-	const dir = join(process.cwd(), "app/og");
-	const toArrayBuffer = (b: Buffer) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
-	const [poster, khandBold, khandSemi] = await Promise.all([
-		readFile(join(dir, "intro-poster.jpg")),
-		readFile(join(dir, "Khand-Bold.ttf")),
-		readFile(join(dir, "Khand-SemiBold.ttf")),
-	]);
+	const [poster, fonts] = await Promise.all([getKitPoster(), getOgFonts()]);
+	if (poster === undefined) {
+		console.warn("/og: brand kit poster unavailable; rendering on the plain ground");
+	}
+	if (fonts === undefined) {
+		console.warn("/og: brand kit fonts unavailable; rendering in the default font");
+	}
 	return new ImageResponse(
 		<div
 			style={{
@@ -53,18 +64,20 @@ export async function GET() {
 				display: "flex",
 				alignItems: "center",
 				background: GROUND,
-				fontFamily: "Khand",
+				...(fonts === undefined ? {} : { fontFamily: "Khand" }),
 			}}
 		>
 			{/* The hero settle frame, cover-cropped */}
-			{/* biome-ignore lint/a11y/useAltText: satori OG renderer, decorative */}
-			{/* biome-ignore lint/performance/noImgElement: satori renders via <img>, not next/image */}
-			<img
-				src={toArrayBuffer(poster) as unknown as string}
-				width={POSTER_W}
-				height={POSTER_H}
-				style={{ position: "absolute", top: POSTER_TOP, left: POSTER_LEFT }}
-			/>
+			{poster !== undefined && (
+				// biome-ignore lint/a11y/useAltText: satori OG renderer, decorative
+				// biome-ignore lint/performance/noImgElement: satori renders via <img>, not next/image
+				<img
+					src={poster as unknown as string}
+					width={POSTER_W}
+					height={POSTER_H}
+					style={{ position: "absolute", top: POSTER_TOP, left: POSTER_LEFT }}
+				/>
+			)}
 
 			{/* Left scrim — the hero column's guaranteed contrast, gone by mid-frame
 			    so the suit keeps the poster's own lighting */}
@@ -113,10 +126,7 @@ export async function GET() {
 		{
 			width: 1200,
 			height: 630,
-			fonts: [
-				{ name: "Khand", data: khandBold, weight: 700, style: "normal" },
-				{ name: "Khand", data: khandSemi, weight: 600, style: "normal" },
-			],
+			...(fonts === undefined ? {} : { fonts }),
 		},
 	);
 }

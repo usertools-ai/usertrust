@@ -48,13 +48,25 @@ Monorepo, npm workspaces (`packages/*`). `site/` is a Next.js app and is **not**
 The first six are version-locked and released together. `monte-cristo` and `claude-code-plugin`
 are not.
 
+**No brand asset is committed to this repository**: no font file of any kind (Usertools Sans and
+every other face, first-party or OFL), no logo or mark, no lattice code. `site/` loads them at
+runtime from the brand kit, `https://usertrust.ai/kit/`, served with `access-control-allow-origin: *`:
+`site/app/globals.css` and `site/app/r/brand.css` point `@font-face` at `kit/fonts/` with
+`font-display: swap` and system fallback stacks, and server-rendered images (`/og`, the receipt
+share card) use the sha384-pinned loader `site/app/r/lib/kit-fonts.ts`. The guard is
+`site/scripts/no-font-files.test.mts`, in the site's `npm test` and so in `site-build`: it fails
+on any `.woff`, `.woff2`, `.ttf`, `.otf` or `.eot` that `git ls-files` lists anywhere in the repo,
+and on any site source that names a font URL other than the kit's. A legitimate non-brand fixture
+is allowlisted there by exact path, with its reason. A face the kit does not serve yet is added to
+the kit first, never committed here.
+
 ### `packages/core/src` map
 
 | Area | Files |
 |---|---|
 | Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `config.ts`, `proxy.ts` |
 | Ledger | `ledger/{client,engine,pricing}.ts` |
-| Audit | `audit/{chain,canonical,merkle,verify,read,rotation,entropy,quarantine}.ts` |
+| Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
 | Policy | `policy/{gate,default-rules,pii,injection,canary,decay}.ts` |
 | Board | `board/{board,director,concerns}.ts` |
@@ -540,6 +552,17 @@ not duplicated here.
 **1 usertoken = $0.0001 USD, everywhere.** All pricing rates are usertokens per 1,000 LLM tokens.
 This constant is duplicated in `packages/verify` on purpose.
 
+**A reported usage count above the plausibility ceiling is NOT priced.**
+`sanitizeUsage` returns an `"estimated"` snapshot with an `implausible` record when any tier exceeds
+`MAX_PLAUSIBLE_TOKENS_PER_TIER` (100,000,000); the call settles at the estimate and a `usage_implausible` event is appended
+AFTER its `llm_call` (the first event carrying a transferId is how `verifyTransaction` finds the settlement). With a ledger
+the session counter keeps the METERED cost (the budget enforces what the provider charges; the ledger's shortfall event records any gap), and
+`isPersistableSpend` refuses to write a cumulative spend above `Number.MAX_SAFE_INTEGER`; `usertrust health` reports a runaway
+persisted spend. Recovery is `docs/runaway-spend.md`.
+*Prevents:* one finite-but-absurd provider figure (10^12 tokens priced to 2.77e18 UT) being added to the counter, persisted,
+and refusing every later call in the vault until the file was hand-edited. The ledger already capped the posted money at the
+hold; the earlier "overstatement is fail-safe" reasoning held for money and not for availability.
+
 **Cost is floored at 1 usertoken and clamped against non-finite input.**
 `costFromRates` treats any token count that is not a finite number `> 0` as `0`, then returns
 `Math.max(1, Math.ceil(...))`.
@@ -958,6 +981,39 @@ must not retry it, and must not surface as a rejection a caller could read as "t
 move." The only escalation is opt-in `config.audit.failClosed` (default `false`), which aborts the
 call *before* money moves.
 *Prevents:* lying to a caller about a spend that happened, in either direction.
+`failClosed: false` means "settle anyway", never "say nothing". A degraded write is reported on
+four surfaces, and a change must keep all four: the receipt's `auditDegraded`; the dead letter
+(which carries the event's `eventHash` when its bytes reached the chain before the failure, e.g. a
+`.meta` sidecar failure after the fsync); a `USERTRUST_AUDIT_DEGRADED` process warning from the
+governor's writer handle, at its first failure and, with the count, at its release (once, not per
+call: a storm of identical warnings gets muted; a release that finds appends still queued reports
+their count when the last of them finishes, and appends after the release are counted and reported
+when they drain); and `usertrust verify` / `usertrust health`,
+which read the dead letters against the chain (`audit/dead-letters.ts`). A dead-lettered chain
+event that is not on the chain makes the vault INCOMPLETE: verify keeps `valid` (integrity) true,
+reports `complete: false`, and exits 1; health's chain line is critical. A dead-letter queue that
+cannot be read is reported as unknown, never as "nothing missing". The reader trusts a dead letter
+only as far as it can check it: its `checksum` is recomputed exactly as the writer computed it
+(`canonicalize`, or `JSON.stringify` where canonicalize refused the record), and a record that
+fails it, has none, or cannot be serialized again (nested past the serializer's depth), is
+unreadable and counts as missing whatever its `source` says; a dead letter counts as on the chain
+only when the event at its `eventHash` IS it (the same kind, actor and data). `verify --receipts`
+checks the caller's own receipts against the chain, the count the queue cannot give: a receipt is
+audited only when its `auditHash` is its OWN event, one whose `data.transferId` is its transfer and
+whose kind records its spend (`llm_call`, or the action's `actionKind`, which must name a governed
+action kind or the receipt is unreadable); another event of the same
+transfer, such as a detection, is not its spend record. A degraded receipt (`auditHash:
+"AUDIT_DEGRADED"` from `trust()`, or `auditDegraded: true` with a headless governor's placeholder
+hash) is audited only when the verified chain holds its own event, by its transfer and its kind (a
+string kind only: an array or an object is never a receipt's own event):
+the primary append's `.meta` update failed after its bytes landed, or a follow-up event failed
+after the primary landed. The dead-letter queue plays no part in the receipt check: it is not
+tamper-evident, and an event can reach the chain with no dead letter at all. A dead letter is written as the bytes its checksum
+covers (canonical, or the `JSON.stringify` form where canonicalize refused the record), so a
+value whose two forms differ (a Buffer) still reads back whole.
+*Prevents:* a vault with half its audit events dead-lettered verifying `valid: true` and reading
+"Chain integrity: verified [ok]": a chain with an event missing still verifies link by link, so
+the hash walk alone can never see a gap.
 
 **A denial's chain event is appended at a FLOW BOUNDARY, outside the budget mutex, and before
 the guarded call.** Two kinds: `policy_denied` for a decision the governor made, `ledger_rejected`
@@ -1023,6 +1079,38 @@ one that makes no progress throws, so nothing is claimed durable and the cached 
 then `fsyncSync` + `closeSync`. The `.meta` sidecar is replaced atomically: a temp file, fsync,
 rename, then a directory fsync (only an UNSUPPORTED directory fsync is best effort). Reclaiming a *live* sibling's lock forks the chain, because each writer caches its
 own tail. There is **no** cross-process protection beyond this advisory lock.
+
+**One writer per vault per PROCESS, shared by every governor.** `trust()` and `createGovernor()`
+never make a writer of their own: each takes a handle from `openSharedAuditWriter(vaultPath)`, and
+every handle on one vault appends through the process's ONE writer for it. The vault is resolved
+ONCE, when the handle is opened, with `realpathSync.native` (the on-disk names, symlinks followed,
+in the directory's own case; the JS `realpathSync` where realpath(3) fails, as on musl without
+`/proc`, and only when its answer is the directory the path opens, by `dev:ino`: it folds a `..` in
+a symlink's target lexically, so a mismatch is refused at open), and the writer is built from those
+canonical, absolute paths; the
+map key is the `dev:ino` of the `.usertrust` and audit directories, the identity the lock registry
+already trusts. Every spelling of one vault (a symlink, a relative path, another case, a firmlinked
+path) is one writer, and no later `chdir` moves a handle (`trust()` and `createGovernor()` also
+make `vaultBase` absolute at creation). Out of scope, as for the lock: a directory replaced while a
+handle on it is open, and filesystems whose `dev:ino` is not stable. A handle joins at its first append
+(when its own writer would have taken the lock), the last handle's `release()` releases the writer
+and the lock, and a handle's `isDegraded()` / `getWriteFailures()` count only its own appends, so
+one client's failure never trips another's `failClosed`. Every append also holds the writer for
+itself until it finishes, and an append after a handle's release (a call that finished past its
+governor's `destroy()`) holds only that: *prevents* a release that lands while an append is still
+queued from releasing the writer under it (the append then re-takes the lock on a writer nothing
+will release), and a destroyed governor's late call re-taking a handle nothing will ever release —
+either kept the writer and its lock after every open client had been destroyed. `createAuditWriter` itself is unchanged
+and still exclusive: two writers of their own on one vault in one process still conflict, by
+design (the quarantine and the tests rely on that).
+*Prevents:* the README's own two-client pattern (`trust(new Anthropic())` and `trust(new OpenAI())`
+on one vault) sending every audit event of the second client to the dead-letter queue on
+`AuditWriterLockHeldError` — a live sibling writer in this process — while its calls settled:
+half the spend off the chain, and invisible to `verify` and `health`, which never read the queue.
+*Scope:* module scope is process scope only for ONE installed copy of usertrust in ONE realm (ESM
+keeps one instance per resolved file, and `require()` of the ES module returns it). Two installed
+copies, or worker threads, each have their own map — and their own lock registry, which is the
+pre-existing hazard LIMITATIONS.md names.
 
 **The lock file appears complete, by hard link.** `createLock` writes the full content (a write
 loop) and fsyncs it to a private temp file, `.audit-writer.lock.<writerId>.tmp`, created
@@ -1119,8 +1207,8 @@ inside the chain; and a "repair" that chooses which evidence is true. `quarantin
 subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evidence as a segment.
 
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
-`packages/core/src/audit/read.ts`, and `packages/core/src/audit/verify.ts` contain zero filesystem
-write calls. Keep it that way — a verifier that mutates its subject is not a verifier.
+`packages/core/src/audit/read.ts`, `packages/core/src/audit/dead-letters.ts`, and
+`packages/core/src/audit/verify.ts` contain zero filesystem write calls. Keep it that way — a verifier that mutates its subject is not a verifier.
 
 **`vaultPath` means two different directories.** `createAuditWriter(vaultPath)` joins
 `vaultPath/.usertrust/audit` — it takes the **project root**. `verifyVault`, `readLedgerEvents`,
@@ -1417,8 +1505,9 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   it was moved.
 - The stronger variant in a SHIPPED HOOK rather than a `src/` tree: `sanitizeReason` in
   `claude-code-plugin/hooks/lib.mjs`. It is the one sanitizer behind that package's ONE writer:
-  `say` for every stderr line and `announce` for the session-start `systemMessage`, both
-  sanitize-then-clip, plus the permission-decision reason. `tests/terminal-sinks.test.ts` walks
+  `say` for every stderr line and `announce` for every `systemMessage` (the session-start
+  banner, and PreToolUse's rejected-key notice), both sanitize-then-clip, plus the
+  permission-decision reason. `tests/terminal-sinks.test.ts` walks
   every shipped `hooks/*.mjs` and fails on any other write to stderr, stdout or a `systemMessage`,
   with an injected raw write as its positive control. The writer replaced per-site sanitizing
   after review found the same class six times across two rounds. `sanitizeReason` was invisible
@@ -1541,7 +1630,7 @@ verifier verifies nothing.
 | `core/src/cli/verify.ts` → the `--bundle` helpers (`CONTROL_CHARS`, `clipKey`, `parseBundle`, `readArtifact`, `readPinnedPem`, …) | `verify/src/cli.ts` | **behavioral only, and only on the `--bundle` path** — one test drives both CLIs against a hostile bundle key. No file-diff rule covers this pair, and the two files are not whole-file mirrors. |
 | `core/src/audit/canonical.ts` | `verify/src/canonical.ts` | behavioral tests only — **weakest link; hand-check it**. Code-identical (differ only in comments). Corrected together on `ship/canonicalize-guard` against receipt-spec §13: top-level `undefined` → `null`; in-array `undefined` and holes → `null`; functions/symbols throw. Remaining known divergence vs the harness oracle is **invalid-Date error identity** (`RangeError` from `toISOString` vs the harness's named throw) — not this cut. |
 | `core/src/audit/verify.ts` → `verifyChain` | `verify/src/verify.ts` | differential tests |
-| `core/src/audit/verify.ts` → `verifyVault`, `verifyVaultWithAnchors`, `exitCodeForAnchored` | `verify/src/index.ts` | differential tests |
+| `core/src/audit/verify.ts` → `verifyVault`, `verifyVaultReading`, `verifyVaultWithAnchors`, `verifyVaultWithAnchorsReading`, `exitCodeForAnchored` | `verify/src/index.ts` | differential tests |
 | `core/src/audit/merkle.ts` → all 7 Merkle functions | `verify/src/verify.ts` (there is **no** `merkle.ts` in verify) | differential tests |
 | `verify/src/receipt.ts` → `detectProvider` | mirrored *into* `core/src/export/markdown.ts` and `ui/src/shared/rows.ts` | comment only (verify is the source here) |
 | *(no core counterpart)* | `verify/src/receipt-verify.ts`, `verify/src/receipt-cli.ts` | **not mirrored, by design.** Core never mints a ut1 receipt-spec document — that is the stealth proxy's job — so there is nothing on the core side to keep in lockstep. Both files still sit inside the parity contract above (zero deps, `node:*`/`./`-relative imports only) and reuse `verify.ts`'s Merkle functions, `anchor-verify.ts`'s exported `verifySignatureRaw` + key parsing, and `canonical.ts`'s `canonicalize` (see the row above for its known §13 non-conformance — inherited here, not introduced here) rather than duplicating them a second time inside `packages/verify` itself. Recorded here so the next auditor does not go hunting a phantom `core/src` mirror for it. |
@@ -1663,10 +1752,11 @@ In the four executable entry points that begin with `#!/usr/bin/env node`, the s
 1 and the header follows on lines 2-3. Check the first three lines, not the first one, before
 concluding a file is missing its header.
 
-This is convention, not machine-enforced, and it is not yet universal: 113 of the 118 files under
-`packages/*/src` carry it — and all 113 carry both lines, never one alone. The five that carry
-neither are all of `packages/acs-adapter/src/`. That is a gap to close when you next touch those
-files — not a header to strip elsewhere for consistency.
+This is convention, not machine-enforced. Every TypeScript and JavaScript source under
+`packages/*/src` (`.ts .tsx .mts .js .mjs`) opens with both lines, never one alone; the last gap,
+`packages/acs-adapter/src/`, was closed when those files were next touched. Other assets there
+(HTML, CSS) take no `//` header: it is not a comment in CSS, and it would sit before an HTML
+doctype. Keep it that way: a new source file opens with the header.
 
 ### Comment style
 

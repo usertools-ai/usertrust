@@ -70,6 +70,9 @@ function normalize(route: MeteredRoute, usage: unknown): UsageResult {
 			: route === "openai.chat"
 				? fromOpenAICompletionsUsage(usage)
 				: fromOpenAIResponsesUsage(usage);
+	// A refused reading (a count above the plausibility ceiling) is carried through, not flattened to "no usage": the
+	// money is the same (the caller settles at the hold) but the EVIDENCE of why is kept for `settlementAmounts`.
+	if (u.implausible !== undefined) return { kind: "usage", usage: u };
 	return u.source === "provider" ? { kind: "usage", usage: u } : atHold("no-usage");
 }
 

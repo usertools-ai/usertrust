@@ -50,6 +50,49 @@ import {
  * finite integers >= 0, and the tiers do not overlap — summing them gives the
  * total billable tokens for the call.
  */
+/**
+ * The most tokens ONE tier of ONE call may plausibly report: 100 million.
+ *
+ * No real response gets near it (the largest context windows are a few million tokens, and output is bounded by
+ * `max_tokens`), and the bound is far enough above every real figure that it never rejects true usage. What it exists
+ * for is a figure that is finite and absurd: `1e12` tokens priced to 2.77e18 UT, was added to the session counter,
+ * persisted, and refused every later call in the vault. Nothing in the stack bounds it natively: a provider SDK types
+ * a count as `number`, and TigerBeetle's amounts are 128-bit, so only the ledger's cap at the hold (not the counter)
+ * limits what a bad figure does.
+ */
+export const MAX_PLAUSIBLE_TOKENS_PER_TIER = 100_000_000;
+
+/** Every tier, in a fixed order: iteration over a caller's object never decides which tiers are read. */
+export const USAGE_TIERS = [
+	"inputTokens",
+	"outputTokens",
+	"cacheReadTokens",
+	"cacheWriteTokens",
+	"cacheWrite1hTokens",
+] as const;
+
+/**
+ * A caller's per-tier maxima as a PLAIN object, each tier read exactly once by name (a getter fires here, before any
+ * hold is claimed; an inherited or non-enumerable tier is still read). Non-finite or negative values are dropped.
+ */
+export function materializeMaxima(raw: unknown): { [K in UsageTier]?: number } | undefined {
+	if (raw === null || typeof raw !== "object") return undefined;
+	const out: { [K in UsageTier]?: number } = {};
+	for (const tier of USAGE_TIERS) {
+		const value = (raw as Record<string, unknown>)[tier];
+		if (typeof value === "number" && Number.isFinite(value) && value >= 0) out[tier] = value;
+	}
+	return out;
+}
+
+/** The tiers a plausibility check can name. */
+export type UsageTier =
+	| "inputTokens"
+	| "outputTokens"
+	| "cacheReadTokens"
+	| "cacheWriteTokens"
+	| "cacheWrite1hTokens";
+
 export interface NormalizedUsage {
 	/** Fresh (non-cached) prompt tokens. */
 	inputTokens: number;
@@ -79,6 +122,14 @@ export interface NormalizedUsage {
 	 * under a provider label — whichever entry point produced it.
 	 */
 	source: "provider" | "estimated";
+	/**
+	 * Present ONLY when a reported count exceeded {@link MAX_PLAUSIBLE_TOKENS_PER_TIER}: the offending tiers and the raw
+	 * figures. The snapshot is then `"estimated"` with zero counts (the call is charged at the estimate, exactly as for a
+	 * missing count) and the caller records a `usage_implausible` event instead of charging the figure.
+	 */
+	implausible?: Partial<Record<UsageTier, number>>;
+	/** Which check put each tier in `implausible`: the aggregate sum (absent) or one response's maximum. */
+	implausibleBy?: Partial<Record<UsageTier, "sum" | "maximum" | "refused">>;
 }
 
 /** Loose input to {@link sanitizeUsage}: any field may be missing or junk. */
@@ -135,6 +186,55 @@ function disjointInput(promptTokens: number, cacheReadTokens: number, cacheWrite
 }
 
 /**
+ * The per-tier ceiling for counts that AGGREGATE `responses` provider responses (default 1). The ceiling's premise holds
+ * per provider response, so a caller that sums a window of responses (the plugin's transcript settle) says how many it
+ * summed, and the bound scales with it; a malformed value is one response.
+ */
+export function usageCeiling(responses: number | undefined): number {
+	const n =
+		typeof responses === "number" && Number.isSafeInteger(responses) && responses > 1
+			? Math.min(responses, MAX_AGGREGATED_RESPONSES)
+			: 1;
+	return MAX_PLAUSIBLE_TOKENS_PER_TIER * n;
+}
+
+/** The most responses one settle may claim to aggregate: keeps the scaled ceiling a safe integer. */
+export const MAX_AGGREGATED_RESPONSES = 1_000_000;
+
+/**
+ * The snapshot with `extra` implausible readings merged in (the larger figure per tier): a stream that saw an absurd
+ * count in ANY chunk settles at the estimate, even when an earlier chunk reported plausible usage.
+ */
+/** True when the 1-hour share is the only over-ceiling reading. */
+function only1h(found: Partial<Record<UsageTier, number>>): boolean {
+	const tiers = Object.keys(found);
+	return tiers.length === 1 && tiers[0] === "cacheWrite1hTokens";
+}
+
+export function withImplausible(
+	snapshot: NormalizedUsage,
+	extra: Partial<Record<UsageTier, number>> | undefined,
+): NormalizedUsage {
+	if (extra === undefined || Object.keys(extra).length === 0) return snapshot;
+	const merged: Partial<Record<UsageTier, number>> = { ...snapshot.implausible };
+	for (const [tier, value] of Object.entries(extra) as Array<[UsageTier, number]>) {
+		merged[tier] = Math.max(merged[tier] ?? 0, value);
+	}
+	// An absurd 1-hour share ALONE does not condemn the counts: whether it matters depends on the model, and that is
+	// `withSupported1hTier`'s decision. The counts are kept until then.
+	if (only1h(merged)) return { ...snapshot, implausible: merged };
+	return {
+		inputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		source: "estimated",
+		implausible: merged,
+		...(snapshot.implausibleBy !== undefined ? { implausibleBy: snapshot.implausibleBy } : {}),
+	};
+}
+
+/**
  * The single sanitizer. Every extractor ends here, and any boundary that
  * assembles a snapshot from already-disjoint counters (the pi-ai pass-through
  * rows, headless caller-supplied usage) should route through it too rather
@@ -155,21 +255,86 @@ function disjointInput(promptTokens: number, cacheReadTokens: number, cacheWrite
  * that understates money by pricing fresh input at the 1-usertoken floor.
  * Absent CACHE fields never downgrade: D5 says they legitimately default to 0.
  *
- * Note there is no upper clamp: a finite-but-absurd count passes through and
- * prices high. Overstatement is fail-safe under the D1 money invariant, and
- * `canonicalize` only rejects non-finite values, so the audit write stays safe.
+ * A finite count above {@link MAX_PLAUSIBLE_TOKENS_PER_TIER} is NOT priced: the
+ * snapshot comes back `"estimated"` with zero counts and an `implausible` record, so
+ * the caller charges the estimate and reports the anomaly. (An earlier version let
+ * it through on the reasoning that overstating is fail-safe for money; it is not
+ * fail-safe for availability, because the inflated cost reached the persisted
+ * session counter.)
  */
-export function sanitizeUsage(raw: RawUsageCandidate | null | undefined): NormalizedUsage {
+export function sanitizeUsage(
+	raw: RawUsageCandidate | null | undefined,
+	opts: {
+		responses?: number | undefined;
+		/** The largest single-response count per tier in an aggregate; checked against the BASE ceiling. */
+		maxima?: { [K in UsageTier]?: number | undefined } | undefined;
+		/**
+		 * Tiers the CALLER refused (a figure that was invalid or above its own per-response ceiling): presence is the flag,
+		 * the value is the raw figure when representable. They never entered the counts, which are arithmetic-safe.
+		 */
+		refused?: { [K in UsageTier]?: number | undefined } | undefined;
+	} = {},
+): NormalizedUsage {
 	const r = raw ?? {};
 	const input = readCount(r.inputTokens);
 	const output = readCount(r.outputTokens);
 	const reported = input != null && output != null;
+	// Each raw count is read EXACTLY ONCE and reused: a getter that answers differently on a second read must not
+	// pass the plausibility check on one value and be priced on another.
+	const cacheRead = readCount(r.cacheReadTokens) ?? 0;
 	const cacheWrite = readCount(r.cacheWriteTokens) ?? 0;
-	const cacheWrite1h = Math.min(readCount(r.cacheWrite1hTokens) ?? 0, cacheWrite);
+	// The RAW 1-hour share is checked, not the clamped one: a share above the write total is garbage the clamp would
+	// otherwise hide, and an absurd one must be reported like any other tier.
+	const rawCacheWrite1h = readCount(r.cacheWrite1hTokens) ?? 0;
+	const cacheWrite1h = Math.min(rawCacheWrite1h, cacheWrite);
+	const ceiling = usageCeiling(opts.responses);
+	// A finite figure above the plausibility ceiling is not usage: it is charged as an ESTIMATE and reported (see
+	// MAX_PLAUSIBLE_TOKENS_PER_TIER). The raw figures are kept for the chain event, never for pricing.
+	const readings: Array<[UsageTier, number]> = [
+		["inputTokens", input ?? 0],
+		["outputTokens", output ?? 0],
+		["cacheReadTokens", cacheRead],
+		["cacheWriteTokens", cacheWrite],
+		["cacheWrite1hTokens", rawCacheWrite1h],
+	];
+	const implausible: Partial<Record<UsageTier, number>> = {};
+	for (const [tier, value] of readings) {
+		if (value > ceiling) implausible[tier] = value;
+	}
+	// An aggregate's SUM may sit under n x ceiling while one response inside it is absurd: the caller's per-tier maxima
+	// are held to the unscaled ceiling. A caller that sends none keeps the aggregate check alone.
+	const implausibleBy: Partial<Record<UsageTier, "sum" | "maximum" | "refused">> = {};
+	for (const tier of USAGE_TIERS) {
+		const value = opts.maxima?.[tier];
+		if (value !== undefined && Number.isFinite(value) && value > MAX_PLAUSIBLE_TOKENS_PER_TIER) {
+			if (implausible[tier] === undefined) implausibleBy[tier] = "maximum";
+			implausible[tier] = Math.max(implausible[tier] ?? 0, value);
+		}
+	}
+	for (const tier of USAGE_TIERS) {
+		const value = opts.refused?.[tier];
+		if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+			if (implausible[tier] === undefined) implausibleBy[tier] = "refused";
+			implausible[tier] = Math.max(implausible[tier] ?? 0, Math.max(1, value));
+		}
+	}
+	// The 1-hour share alone leaves the counts standing until `withSupported1hTier` decides whether the model has the
+	// tier at all (a model without one ignores the share). Any other tier condemns the counts here.
+	if (Object.keys(implausible).length > 0 && !only1h(implausible)) {
+		return {
+			inputTokens: 0,
+			outputTokens: 0,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			source: "estimated",
+			implausible,
+			implausibleBy,
+		};
+	}
 	return {
 		inputTokens: input ?? 0,
 		outputTokens: output ?? 0,
-		cacheReadTokens: readCount(r.cacheReadTokens) ?? 0,
+		cacheReadTokens: cacheRead,
 		cacheWriteTokens: cacheWrite,
 		// A SUBSET of the write total: a 1-hour count above it is garbage and clamps, so
 		// the two can never be summed into a larger bill than the provider reported. The
@@ -177,6 +342,34 @@ export function sanitizeUsage(raw: RawUsageCandidate | null | undefined): Normal
 		// always was.
 		...(cacheWrite1h > 0 ? { cacheWrite1hTokens: cacheWrite1h } : {}),
 		source: r.source === "provider" && reported ? "provider" : "estimated",
+		...(Object.keys(implausible).length > 0 ? { implausible, implausibleBy } : {}),
+	};
+}
+
+/**
+ * The `data` of the `usage_implausible` chain event for a snapshot that carries an `implausible` record: the raw figures
+ * that were refused (never priced), the ceiling, and what was charged instead. One builder for every settle site.
+ */
+export function implausibleUsageData(
+	snapshot: NormalizedUsage,
+	fields: { model: string; transferId: string; responses?: number | undefined },
+): Record<string, unknown> | undefined {
+	if (snapshot.implausible === undefined) return undefined;
+	const byMaximum = Object.values(snapshot.implausibleBy ?? {}).includes("maximum");
+	return {
+		// Which check fired for each tier: the aggregate "sum" (scaled ceiling) or one response's "maximum" (unscaled).
+		checks: Object.fromEntries(
+			Object.keys(snapshot.implausible).map((t) => [
+				t,
+				snapshot.implausibleBy?.[t as UsageTier] ?? "sum",
+			]),
+		),
+		...(byMaximum ? { maximumCeilingTokensPerResponse: MAX_PLAUSIBLE_TOKENS_PER_TIER } : {}),
+		model: fields.model,
+		transferId: fields.transferId,
+		tiers: { ...snapshot.implausible },
+		ceilingTokensPerTier: usageCeiling(fields.responses),
+		charged: "estimate",
 	};
 }
 
@@ -222,11 +415,39 @@ export function withSupported1hTier(
 	rates: ModelRates,
 	operatorOwned: boolean,
 ): NormalizedUsage {
-	if (snapshot.cacheWrite1hTokens === undefined || supportsCacheWrite1h(rates, operatorOwned)) {
+	const supported = supportsCacheWrite1h(rates, operatorOwned);
+	const found = snapshot.implausible;
+	const has1h = found?.cacheWrite1hTokens !== undefined;
+	if (!has1h) {
+		if (snapshot.cacheWrite1hTokens === undefined || supported) return snapshot;
+		const { cacheWrite1hTokens: _dropped, ...rest } = snapshot;
+		return rest;
+	}
+	if (supported) {
+		// The tier exists, so an absurd share is a real anomaly: the counts are not priced.
+		if (only1h(found)) {
+			return {
+				inputTokens: 0,
+				outputTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				source: "estimated",
+				implausible: found,
+				...(snapshot.implausibleBy !== undefined ? { implausibleBy: snapshot.implausibleBy } : {}),
+			};
+		}
 		return snapshot;
 	}
-	const { cacheWrite1hTokens: _dropped, ...rest } = snapshot;
-	return rest;
+	// No such tier: the share is IGNORED, and so is its reading. Whatever else was implausible still stands; when the
+	// 1-hour share was the only entry the counts were never condemned and price as reported.
+	const { cacheWrite1hTokens: _share, ...rest } = snapshot;
+	const { cacheWrite1hTokens: _reading, ...others } = found;
+	if (Object.keys(others).length > 0) {
+		const { cacheWrite1hTokens: _by1h, ...othersBy } = snapshot.implausibleBy ?? {};
+		return { ...rest, implausible: others, implausibleBy: othersBy };
+	}
+	const { implausible: _gone, implausibleBy: _by, ...clean } = rest;
+	return clean;
 }
 
 /**

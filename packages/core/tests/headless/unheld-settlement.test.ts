@@ -156,6 +156,22 @@ describe("an unheld settle is recorded", () => {
 		expect(JSON.stringify(event.data)).not.toMatch(/cost|"model"/);
 	});
 
+	it("carries a refused tier as a FLAG with its raw figure: the record does not read as zero provider usage", async () => {
+		const { gov } = recording();
+		const g = await gov();
+		await g.recordUnheldSettlement({
+			transferId: GONE,
+			inputTokens: 0,
+			outputTokens: 9,
+			refused: { inputTokens: 150_000_000 },
+			usageSource: "provider",
+		});
+		const event = audit.events[0] as AppendEventInput;
+		expect(event.data).toMatchObject({ refused: { inputTokens: 150_000_000 } });
+		// and a getter on the refused object is read by name once, never trusted twice
+		expect(JSON.stringify(event.data)).not.toContain("NaN");
+	});
+
 	it("drops a count it cannot use instead of fabricating a zero", async () => {
 		const g = await recording().gov();
 		await g.recordUnheldSettlement({
@@ -445,15 +461,72 @@ describe("a rejected append that is already durable is a record, not a failure t
 			});
 		});
 		const params = { transferId: GONE, inputTokens: 3 };
+		// On the chain, and the writer reported a failure after it: both facts are in the answer.
 		expect(await g.recordUnheldSettlement(params)).toEqual({
 			outcome: "unrecoverable",
 			recorded: true,
+			auditDegraded: true,
 		});
+		// The retry writes nothing, and is told the record it matches was written degraded.
 		expect(await g.recordUnheldSettlement(params)).toEqual({
 			outcome: "unrecoverable",
 			recorded: false,
+			auditDegraded: true,
 		});
 		expect(audit.events).toHaveLength(1);
+	});
+
+	it("an exact retry of a degraded record is told it was degraded too, and still writes nothing", async () => {
+		const g = await recording().gov();
+		const append = audit.appendEvent as unknown as ReturnType<typeof vi.fn>;
+		append.mockImplementationOnce(async (input: AppendEventInput) => {
+			audit.events.push(input);
+			throw Object.assign(new Error("sidecar write failed"), {
+				[Symbol.for("usertrust.audit.durableEventHash")]: "d".repeat(64),
+			});
+		});
+		const params = { transferId: GONE, inputTokens: 3 };
+		await g.recordUnheldSettlement(params);
+		expect(await g.recordUnheldSettlement(params)).toEqual({
+			outcome: "unrecoverable",
+			recorded: false,
+			auditDegraded: true,
+		});
+		expect(audit.events).toHaveLength(1);
+	});
+
+	it("a request that shares an in-flight degraded append sees the same degraded outcome", async () => {
+		const g = await recording().gov();
+		const append = audit.appendEvent as unknown as ReturnType<typeof vi.fn>;
+		let open!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		append.mockImplementationOnce(async (input: AppendEventInput) => {
+			await gate;
+			audit.events.push(input);
+			throw Object.assign(new Error("sidecar write failed"), {
+				[Symbol.for("usertrust.audit.durableEventHash")]: "d".repeat(64),
+			});
+		});
+		const params = { transferId: GONE, inputTokens: 3 };
+		const first = g.recordUnheldSettlement(params);
+		const sharer = g.recordUnheldSettlement(params); // the first is still appending
+		open();
+		expect(await first).toEqual({ outcome: "unrecoverable", recorded: true, auditDegraded: true });
+		expect(await sharer).toEqual({
+			outcome: "unrecoverable",
+			recorded: false,
+			auditDegraded: true,
+		});
+		expect(audit.events).toHaveLength(1);
+	});
+
+	it("a clean append carries no auditDegraded key", async () => {
+		const g = await recording().gov();
+		const r = await g.recordUnheldSettlement({ transferId: GONE, inputTokens: 3 });
+		expect(r).toEqual({ outcome: "unrecoverable", recorded: true });
+		expect("auditDegraded" in r).toBe(false);
 	});
 
 	it("an ordinary failure (nothing durable) is still thrown, and the retry records", async () => {

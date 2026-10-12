@@ -169,6 +169,21 @@ function split(bytes: Uint8Array, cuts: number[]): Uint8Array[] {
 	return units;
 }
 
+describe("a refused (implausible) reading is carried through the parser as evidence", () => {
+	it("an absurd count is a usage result with the implausible record, not flattened to no-usage", () => {
+		const body = enc(
+			JSON.stringify({
+				usage: { input_tokens: 1e12, output_tokens: 5, cache_read_input_tokens: 0 },
+			}),
+		);
+		const out = parse("anthropic.messages", "WHOLE_BODY_BYTES", [body]);
+		expect(typeof out).not.toBe("string"); // not an "unreadable" reason
+		expect((out as { implausible?: Record<string, number> }).implausible).toMatchObject({
+			inputTokens: 1e12,
+		});
+	});
+});
+
 describe("usage parsers: the result is identical under ANY split into units", () => {
 	for (const f of FIXTURES) {
 		it(f.name, () => {

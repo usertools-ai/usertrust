@@ -56,15 +56,17 @@ export function readLedgerEvents(vaultPath: string): PersistedAuditEvent[] {
 		if (content === "") continue;
 		for (const line of content.split("\n")) {
 			if (!line.trim()) continue;
+			let parsed: unknown;
 			try {
-				const parsed: unknown = JSON.parse(line);
-				// A literal `null`, a number or an array parses but is not an event; verification reports it.
-				if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-					events.push(parsed as PersistedAuditEvent);
-				}
+				parsed = JSON.parse(line);
 			} catch {
 				// Malformed line — verification reports it; reading skips it.
+				continue;
 			}
+			// A line that parses but is not an event object (`null`, a number, an array) is malformed
+			// too: verification reports it, and reading it as an event threw on its first field.
+			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+			events.push(parsed as PersistedAuditEvent);
 		}
 	}
 

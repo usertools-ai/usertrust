@@ -27,12 +27,12 @@
 // settled, journalled and cleared through the path its listing found, so a 1.4.0
 // record is ended through its own name, once.
 import { createHash, randomBytes } from "node:crypto";
+import { constants } from "node:fs";
 import {
-	appendFile,
 	link,
 	mkdir,
+	open,
 	readdir,
-	readFile,
 	rename,
 	stat,
 	unlink,
@@ -332,7 +332,7 @@ export async function recordWatchEvent(event) {
 	});
 	try {
 		await mkdir(stateRoot(), { recursive: true });
-		await appendFile(watchLogPath(), `${line}\n`, { mode: 0o600 });
+		await appendRegular(watchLogPath(), `${line}\n`);
 		return true;
 	} catch (err) {
 		say(
@@ -690,7 +690,7 @@ export async function publishExclusive(path, content, { mode } = {}) {
 	const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
 	const options = mode === undefined ? {} : { mode };
 	try {
-		await writeFile(tmp, content, options);
+		await writeFile(tmp, content, { ...options, flag: "wx" });
 		try {
 			await link(tmp, path);
 		} catch (err) {
@@ -700,6 +700,174 @@ export async function publishExclusive(path, content, { mode } = {}) {
 	} finally {
 		await unlink(tmp).catch(() => {});
 	}
+}
+
+/**
+ * The bounds the plugin reads files under. A file whose size is naturally bounded is read
+ * whole by `readRegular`, and a bound far above its real size refuses a file that is not what
+ * it should be (a refused read fails as an unreadable one does, so a real file never reaches
+ * it):
+ * - `small`: one value: a marker, a stamp, a lock's owner, a session's notice state, the
+ *   SessionStart mark. Each is under 200 bytes.
+ * - `record`: JSON that carries lists or maps: a transcript cursor (two lists of at most
+ *   ID_HISTORY ids, 355 KB measured), a hold, the capabilities cache, the job-capability map
+ *   (one entry per server URL, never pruned), a subagent's meta file.
+ * An append-only LOG (a session's job log, the vault's audit logs, watch.jsonl) only grows:
+ * no ceiling on it is ever right, so it is never read whole. `eachLine` streams it instead,
+ * and `line` bounds one line of it (the memory a read of any size holds).
+ */
+export const READ_BOUND = Object.freeze({
+	small: 4 * 1024,
+	record: 64 * 1024 * 1024,
+	line: 16 * 1024 * 1024,
+});
+
+/** How much of a log `eachLine` reads at a time. */
+const LINE_CHUNK_BYTES = 1024 * 1024;
+
+function refused(path, code, why) {
+	return Object.assign(new Error(`${path}: ${why}`), { code });
+}
+
+/**
+ * Open `path` to read it, never waiting: non-blocking, so a FIFO (or a symlink to one) in a
+ * file's place cannot hang the hook, and then only a regular file, else ENOTREG. Returns the
+ * handle and its stat; the caller closes the handle. The ONE way the hooks open a file they
+ * read (tests/key-rejected.test.ts holds them to it).
+ */
+export async function openRegular(path) {
+	const handle = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+	try {
+		const info = await handle.stat();
+		if (!info.isFile()) throw refused(path, "ENOTREG", "not a regular file");
+		return { handle, info };
+	} catch (err) {
+		await handle.close().catch(() => {});
+		throw err;
+	}
+}
+
+/**
+ * `readFile(path, "utf-8")`, through `openRegular`, and refused (EFBIG) past `bound` bytes
+ * (`READ_BOUND`). Throws as readFile does, so ENOENT is still "not there"; anything else is
+ * unreadable to its caller. Reads at most the size it found, so a file growing meanwhile is
+ * read to that size.
+ */
+export async function readRegular(path, bound) {
+	const { handle, info } = await openRegular(path);
+	try {
+		if (info.size > bound) throw refused(path, "EFBIG", `over ${bound} bytes`);
+		const buffer = Buffer.alloc(info.size);
+		let read = 0;
+		while (read < buffer.length) {
+			const { bytesRead } = await handle.read(buffer, read, buffer.length - read, read);
+			if (bytesRead === 0) break;
+			read += bytesRead;
+		}
+		return buffer.toString("utf-8", 0, read);
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+
+/**
+ * Stream the append-only log at `path` line by line, through `openRegular` (non-blocking, a
+ * regular file only): memory holds one chunk and one line, whatever the log's size. Calls
+ * `onLine(text, terminated)` for each line in order:
+ * - `text` is the line without its newline, or null for a line longer than `maxLineBytes`,
+ *   which is skipped unread (the caller counts it, or refuses the log);
+ * - `terminated` is false only for a final fragment with no newline (a write cut short, or one
+ *   in flight).
+ * An `onLine` that returns false stops the read. The log is read to the size it had when it
+ * was opened, so a line appended meanwhile is read next time. Throws as `openRegular` does
+ * (ENOENT is "not there").
+ */
+export async function eachLine(
+	path,
+	onLine,
+	{ maxLineBytes = READ_BOUND.line, chunkBytes = LINE_CHUNK_BYTES } = {},
+) {
+	const { handle, info } = await openRegular(path);
+	try {
+		const chunk = Buffer.alloc(Math.max(1, Math.min(chunkBytes, info.size)));
+		let parts = []; // the line so far, as copies: `chunk` is reused
+		let partBytes = 0;
+		let skipping = false; // the line is over maxLineBytes
+		let position = 0;
+		while (position < info.size) {
+			const want = Math.min(chunk.length, info.size - position);
+			const { bytesRead } = await handle.read(chunk, 0, want, position);
+			if (bytesRead === 0) break;
+			position += bytesRead;
+			const view = chunk.subarray(0, bytesRead);
+			let from = 0;
+			for (let end = view.indexOf(0x0a); end !== -1; end = view.indexOf(0x0a, from)) {
+				const tail = view.subarray(from, end);
+				const line =
+					skipping || partBytes + tail.length > maxLineBytes
+						? null
+						: Buffer.concat([...parts, tail]).toString("utf-8");
+				parts = [];
+				partBytes = 0;
+				skipping = false;
+				from = end + 1;
+				if (onLine(line, true) === false) return;
+			}
+			const rest = view.subarray(from);
+			if (skipping || rest.length === 0) continue;
+			if (partBytes + rest.length > maxLineBytes) {
+				skipping = true;
+				parts = [];
+				partBytes = 0;
+			} else {
+				parts.push(Buffer.from(rest));
+				partBytes += rest.length;
+			}
+		}
+		if (skipping) onLine(null, false);
+		else if (partBytes > 0) onLine(Buffer.concat(parts).toString("utf-8"), false);
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+
+/**
+ * Append `text` to `path`, made with `mode` if it is not there, never waiting: opened
+ * non-blocking, so a FIFO with no reader in a log's place is ENXIO at once, and one with a
+ * reader, or anything else that is not a regular file, is ENOTREG before a byte is written.
+ * O_APPEND, as appendFile: each call's text lands whole at the end. The ONE way the hooks
+ * append (tests/key-rejected.test.ts holds them to it).
+ */
+export async function appendRegular(path, text, { mode = 0o600 } = {}) {
+	const handle = await open(
+		path,
+		constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NONBLOCK ?? 0),
+		mode,
+	);
+	await writeThenClose(path, handle, text);
+}
+
+/**
+ * Write `text` through `handle` (a regular file only), then close it, and throw the FIRST
+ * failure of either: a close can report a write that failed late (EIO, ENOSPC), and a write
+ * that may not have landed must never read as written.
+ */
+async function writeThenClose(path, handle, text, { truncate = false } = {}) {
+	let failure;
+	try {
+		const info = await handle.stat();
+		if (!info.isFile()) throw refused(path, "ENOTREG", "not a regular file");
+		if (truncate) await handle.truncate(0);
+		await handle.writeFile(text);
+	} catch (err) {
+		failure = err;
+	}
+	try {
+		await handle.close();
+	} catch (err) {
+		failure ??= err;
+	}
+	if (failure !== undefined) throw failure;
 }
 
 /**
@@ -801,9 +969,15 @@ export async function claimForRelease(live) {
  */
 export async function quarantineHold(path) {
 	try {
-		const { gate: _gate, ...body } = JSON.parse(await readFile(path, "utf-8"));
+		const { gate: _gate, ...body } = JSON.parse(await readRegular(path, READ_BOUND.record));
 		// Its call RAN (PostToolUse found the breaker open): Stop gives it back as `call-ran`.
-		await writeFile(path, JSON.stringify({ ...body, ran: true }), { mode: 0o600 });
+		// IN PLACE: a temp file and a rename need the directory's write access, which is what
+		// failed when quarantine runs. Opened without O_CREAT or O_TRUNC (an existing regular
+		// file only, never waiting on a FIFO), truncated and rewritten through that handle.
+		const handle = await open(path, constants.O_WRONLY | (constants.O_NONBLOCK ?? 0));
+		await writeThenClose(path, handle, JSON.stringify({ ...body, ran: true }), {
+			truncate: true,
+		});
 		return "ungated";
 	} catch {
 		try {
@@ -850,7 +1024,7 @@ async function settlingRecords(sessionId, agentId) {
 		if (!name.startsWith(prefix) || !(releasing || name.endsWith(".settling"))) continue;
 		const path = join(stateDir(), name);
 		try {
-			const body = JSON.parse(await readFile(path, "utf-8"));
+			const body = JSON.parse(await readRegular(path, READ_BOUND.record));
 			if (typeof body?.transferId !== "string") continue;
 			if (wantAgent !== null && sanitize(body.agentId ?? "main") !== wantAgent) continue;
 			const { mtimeMs } = await stat(path);
@@ -907,6 +1081,19 @@ function countOf(value) {
 	return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
+/** A persisted per-tier REFUSED map (presence is the flag; the value is the raw figure when representable), or undefined. */
+function refusedOf(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const out = {};
+	for (const key of COUNT_FIELDS) {
+		const x = value[key];
+		if (typeof x === "number" && Number.isFinite(x) && x >= 0) {
+			out[key] = Math.min(Math.ceil(x), Number.MAX_SAFE_INTEGER);
+		}
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function transcriptHoldFields(entry) {
 	const fields = {
 		usage: "transcript",
@@ -916,6 +1103,9 @@ function transcriptHoldFields(entry) {
 			: [],
 	};
 	for (const key of COUNT_FIELDS) fields[key] = countOf(entry[key]);
+	// The largest single response per tier: a retry of the settle must send it again, or one absurd response hides in the sum.
+	const refused = refusedOf(entry.refused);
+	if (refused !== undefined) fields.refused = refused;
 	// A hold authorized under a key also records the key and the agent type its
 	// principal named: what a retry of its settle needs (see transcript.mjs).
 	if (typeof entry.idempotencyKey === "string") fields.idempotencyKey = entry.idempotencyKey;
@@ -943,7 +1133,7 @@ export async function listPending(sessionId, agentId) {
 		if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
 		const path = join(stateDir(), name);
 		try {
-			const parsed = JSON.parse(await readFile(path, "utf-8"));
+			const parsed = JSON.parse(await readRegular(path, READ_BOUND.record));
 			if (!parsed || typeof parsed.transferId !== "string") continue;
 			// agentId lives in the body; the filename's "__" split is ambiguous
 			// because sanitized ids can themselves contain "__".
@@ -1290,7 +1480,7 @@ export function jobHoldFields(entry) {
 export async function writeFileAtomic(path, text, { mode = 0o600, beforeCommit } = {}) {
 	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
 	try {
-		await writeFile(tmp, text, { mode });
+		await writeFile(tmp, text, { flag: "wx", mode });
 		await beforeCommit?.();
 		await rename(tmp, path);
 	} catch (err) {
@@ -1319,7 +1509,7 @@ export function jobCapable(capabilities) {
 		const url = serverBase();
 		let known = {};
 		try {
-			const parsed = JSON.parse(await readFile(file, "utf-8"));
+			const parsed = JSON.parse(await readRegular(file, READ_BOUND.record));
 			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) known = parsed;
 		} catch {
 			// unreadable or absent: nothing remembered
@@ -1429,7 +1619,7 @@ async function rememberCapabilities(capabilities) {
 		const list = [...capabilities].sort();
 		let previous;
 		try {
-			previous = JSON.parse(await readFile(path, "utf-8"));
+			previous = JSON.parse(await readRegular(path, READ_BOUND.record));
 		} catch {
 			previous = undefined;
 		}
@@ -1463,7 +1653,7 @@ async function cachedPrincipal() {
 		const { mtimeMs } = await stat(path);
 		const age = Date.now() - mtimeMs;
 		if (!(age >= 0 && age <= CAPABILITY_CACHE_TTL_MS)) return null;
-		const value = JSON.parse(await readFile(path, "utf-8"));
+		const value = JSON.parse(await readRegular(path, READ_BOUND.record));
 		return Array.isArray(value?.capabilities) && value.capabilities.includes("principal")
 			? new Date(mtimeMs).toISOString()
 			: null;

@@ -86,8 +86,11 @@ route's PR description rather than duplicated here.
 
 ## The brand field
 
-The page sits on the usertools dot-lattice, in gold. **No brand asset lives in
-this repository.** The lattice script and the fonts are loaded at runtime from
+The page sits on the usertools dot-lattice, in gold. **No font file, lattice
+copy or brand image is kept for this route** (the marks drawn in code, in
+`brand.css` and the share card, are still here, pending review; brand images
+site-wide are guarded by `site/scripts/no-brand-assets.test.mts`). The lattice
+script and the fonts are loaded at runtime from
 the brand site's kit (`https://usertrust.ai/kit/lattice.js`,
 `https://usertrust.ai/kit/fonts/*.woff2`, served with
 `access-control-allow-origin: *`): `components/lattice-field.tsx` appends the

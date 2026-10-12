@@ -43,7 +43,10 @@ import {
 	fromGeminiUsage,
 	fromOpenAICompletionsUsage,
 	fromOpenAIResponsesUsage,
+	MAX_PLAUSIBLE_TOKENS_PER_TIER,
+	type UsageTier,
 } from "./ledger/usage.js";
+import { AuditDegradedError } from "./shared/errors.js";
 import type { LLMClientKind, TrustReceipt } from "./shared/types.js";
 
 // ── Public types ──
@@ -79,10 +82,29 @@ export interface StreamCompletion {
 	usage: StreamUsage;
 	chunksDelivered: number;
 	usageReported: boolean;
+	/**
+	 * Tiers whose reported count exceeded the plausibility ceiling in ANY chunk (the larger figure per tier). Sticky: an
+	 * absurd count in a later chunk is not undone by a plausible earlier one, so the settle charges the estimate and
+	 * records the anomaly rather than billing zeroed counts under a provider label.
+	 */
+	implausible?: Partial<Record<UsageTier, number>> | undefined;
 }
 
 export interface GovernedStream<T> extends AsyncIterable<T> {
-	/** Resolves with the trust receipt when the stream completes */
+	/**
+	 * Resolves with the settled trust receipt when the stream completes, or when the
+	 * consumer stops early (the consumed usage settles). Rejects, with the same error the
+	 * iteration threw, when the stream fails mid-way and its iteration THROWS: the hold is
+	 * then voided, not charged. A provider event the SDK yields as a chunk instead of
+	 * throwing (an OpenAI Responses `error` event) ends the stream like any other, and it
+	 * settles and is charged. Also rejects when settlement itself is refused after it ran
+	 * (`AuditDegradedError`, under `audit.failClosed`): the charge posted, or its POST
+	 * failed and may still post, so the work may be billed. The governor then throws that
+	 * error from the iteration too (`surfaceAuditRefusal`), on a normal end or a `break`;
+	 * when the caller's own loop body throws, for-await keeps that throw and drops the
+	 * refusal. Any OTHER settlement error rejects only `.receipt`. Never an unhandled
+	 * rejection.
+	 */
 	receipt: Promise<TrustReceipt>;
 }
 
@@ -98,7 +120,26 @@ export interface GovernedStream<T> extends AsyncIterable<T> {
  * `cache_creation.{ephemeral_5m,1h}_input_tokens` breakdown — so the D2 row is
  * implemented in exactly one place.
  */
-function extractAnthropicTokens(chunk: unknown): StreamUsage {
+/**
+ * A raw count above the plausibility ceiling is not usage: it is reported (sticky, to the settle) and contributes ZERO to
+ * the running counters and their deltas, so the anomaly detector never observes a figure the settle refuses to price.
+ */
+function boundedCount(
+	raw: unknown,
+	tier: UsageTier,
+	found: Partial<Record<UsageTier, number>>,
+): number {
+	const n = sanitizeCount(raw);
+	if (n > MAX_PLAUSIBLE_TOKENS_PER_TIER) {
+		found[tier] = n;
+		return 0;
+	}
+	return n;
+}
+
+function extractAnthropicTokens(chunk: unknown): StreamUsage & {
+	implausible?: Partial<Record<UsageTier, number>> | undefined;
+} {
 	if (chunk == null || typeof chunk !== "object") return NO_USAGE;
 
 	const c = chunk as Record<string, unknown>;
@@ -108,12 +149,15 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage {
 		if (msg.usage != null && typeof msg.usage === "object") {
 			const usage = msg.usage as Record<string, unknown>;
 			const normalized = fromAnthropicUsage(usage);
+			const found: Partial<Record<UsageTier, number>> = { ...normalized.implausible };
+			const inputTokens = boundedCount(usage.input_tokens, "inputTokens", found);
 			return {
-				inputTokens: sanitizeCount(usage.input_tokens),
+				inputTokens,
 				outputTokens: 0,
 				cacheReadTokens: normalized.cacheReadTokens,
 				cacheWriteTokens: normalized.cacheWriteTokens,
 				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
+				implausible: Object.keys(found).length > 0 ? found : undefined,
 			};
 		}
 	}
@@ -121,12 +165,15 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage {
 		if (c.usage != null && typeof c.usage === "object") {
 			const usage = c.usage as Record<string, unknown>;
 			const normalized = fromAnthropicUsage(usage);
+			const found: Partial<Record<UsageTier, number>> = { ...normalized.implausible };
+			const outputTokens = boundedCount(usage.output_tokens, "outputTokens", found);
 			return {
 				inputTokens: 0,
-				outputTokens: sanitizeCount(usage.output_tokens),
+				outputTokens,
 				cacheReadTokens: normalized.cacheReadTokens,
 				cacheWriteTokens: normalized.cacheWriteTokens,
 				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
+				implausible: Object.keys(found).length > 0 ? found : undefined,
 			};
 		}
 	}
@@ -147,6 +194,7 @@ function sanitizeCount(value: unknown): number {
  */
 interface SnapshotWithProvenance extends StreamUsage {
 	reported: boolean;
+	implausible?: Partial<Record<UsageTier, number>> | undefined;
 }
 
 /**
@@ -195,6 +243,7 @@ function extractUsageSnapshot(
 						cacheReadTokens: n.cacheReadTokens,
 						cacheWriteTokens: n.cacheWriteTokens,
 						reported: n.source === "provider",
+						implausible: n.implausible,
 					};
 				}
 			}
@@ -210,6 +259,7 @@ function extractUsageSnapshot(
 				cacheReadTokens: n.cacheReadTokens,
 				cacheWriteTokens: n.cacheWriteTokens,
 				reported: n.source === "provider",
+				implausible: n.implausible,
 			};
 		}
 		return null;
@@ -226,6 +276,7 @@ function extractUsageSnapshot(
 			cacheReadTokens: n.cacheReadTokens,
 			cacheWriteTokens: n.cacheWriteTokens,
 			reported: n.source === "provider",
+			implausible: n.implausible,
 		};
 	}
 	return null;
@@ -265,11 +316,15 @@ export type ChunkHook = (obs: ChunkObservation) => void;
  * when the stream ends, or onError on failure. An optional `onChunk` hook
  * fires per chunk and can throw to abort the stream (used by the anomaly
  * detector to trip a circuit breaker mid-stream).
+ *
+ * When `onComplete` returns a promise, the iteration's last step (the final `next()`,
+ * or the `return()` an early `break` drives) waits for it, and a rejection is thrown
+ * from that step. When it returns nothing, the last step is not delayed.
  */
 export function wrapStream<T>(
 	stream: AsyncIterable<T>,
 	kind: LLMClientKind,
-	onComplete: (completion: StreamCompletion) => void,
+	onComplete: (completion: StreamCompletion) => void | Promise<void>,
 	onError: (error: unknown, partial: StreamCompletion) => void,
 	onChunk?: ChunkHook,
 ): AsyncIterable<T> {
@@ -279,7 +334,7 @@ export function wrapStream<T>(
 async function* wrapStreamImpl<T>(
 	stream: AsyncIterable<T>,
 	kind: LLMClientKind,
-	onComplete: (completion: StreamCompletion) => void,
+	onComplete: (completion: StreamCompletion) => void | Promise<void>,
 	onError: (error: unknown, partial: StreamCompletion) => void,
 	onChunk?: ChunkHook,
 ): AsyncGenerator<T> {
@@ -290,6 +345,14 @@ async function* wrapStreamImpl<T>(
 	let cacheWrite1hTokens = 0;
 	let chunksDelivered = 0;
 	let usageReported = false;
+	let implausible: Partial<Record<UsageTier, number>> | undefined;
+	const noteImplausible = (found: Partial<Record<UsageTier, number>> | undefined): void => {
+		if (found === undefined) return;
+		implausible = { ...implausible };
+		for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
+			implausible[tier] = Math.max(implausible[tier] ?? 0, value);
+		}
+	};
 	const snapshot = (): StreamUsage => ({
 		inputTokens,
 		outputTokens,
@@ -318,6 +381,7 @@ async function* wrapStreamImpl<T>(
 				// chunk's values (A7); explicit zeros count as reported usage (A11).
 				const latest = extractUsageSnapshot(chunk, kind);
 				if (latest != null) {
+					noteImplausible(latest.implausible);
 					deltaInput = Math.max(0, latest.inputTokens - inputTokens);
 					deltaOutput = Math.max(0, latest.outputTokens - outputTokens);
 					inputTokens = latest.inputTokens;
@@ -339,6 +403,7 @@ async function* wrapStreamImpl<T>(
 				// Anthropic: message_start carries input, message_delta carries output —
 				// genuinely incremental chunk types; keep the latest non-zero value.
 				const tokens = extractAnthropicTokens(chunk);
+				noteImplausible(tokens.implausible);
 				if (tokens.inputTokens > 0) {
 					deltaInput = Math.max(0, tokens.inputTokens - inputTokens);
 					inputTokens = tokens.inputTokens;
@@ -386,14 +451,25 @@ async function* wrapStreamImpl<T>(
 		}
 	} catch (err) {
 		errored = true;
-		onError(err, { usage: snapshot(), chunksDelivered, usageReported });
+		onError(err, { usage: snapshot(), chunksDelivered, usageReported, implausible });
 		throw err;
 	} finally {
 		// Normal completion AND early termination (consumer break → generator
 		// `.return()`) both settle here. A thrown error already ran `onError` and set
 		// `errored`, so it is the only path that skips settlement (it voids instead).
+		//
+		// A settlement that returns a promise is awaited, and a rejection of THAT promise is
+		// thrown from here, so it ends the caller's iteration (createGovernedStream decides
+		// which settlement errors reach it). `errored` stays false: nothing voids, because
+		// a settlement that got this far may already have posted the charge.
 		if (!errored) {
-			onComplete({ usage: snapshot(), chunksDelivered, usageReported });
+			const settling = onComplete({
+				usage: snapshot(),
+				chunksDelivered,
+				usageReported,
+				implausible,
+			});
+			if (settling !== undefined) await settling;
 		}
 	}
 }
@@ -408,12 +484,30 @@ async function* wrapStreamImpl<T>(
  *   It should POST the actual cost and return the receipt.
  * - `rejectReceipt` is called on stream error. It should VOID the hold.
  */
+export interface GovernedStreamOptions {
+	/**
+	 * The audit refusal (`AuditDegradedError`) also ends the caller's ITERATION, not only
+	 * `.receipt`. The last step (the final `next()`, or the `return()` an early `break`
+	 * drives) waits for settlement; if settlement rejects with `AuditDegradedError`, that
+	 * step throws it, the same error `.receipt` rejects with. ANY OTHER settlement error
+	 * rejects `.receipt` only: the iteration still ends cleanly. When the caller's own
+	 * loop body throws, for-await awaits `return()` but keeps the caller's throw and drops
+	 * the refusal, which then reaches `.receipt` only. The governor sets this
+	 * from `audit.failClosed`: there settlement can run (post the charge, or fail its
+	 * POST ambiguously) and THEN refuse, and a caller who catches the iteration without
+	 * awaiting `.receipt` must still hear of it. Off (the default), the last step is not
+	 * delayed and settlement runs in the background.
+	 */
+	surfaceAuditRefusal?: boolean;
+}
+
 export function createGovernedStream<T>(
 	stream: AsyncIterable<T>,
 	kind: LLMClientKind,
 	resolveReceipt: (completion: StreamCompletion) => Promise<TrustReceipt>,
 	rejectReceipt: (error: unknown, partial: StreamCompletion) => void,
 	onChunk?: ChunkHook,
+	options: GovernedStreamOptions = {},
 ): GovernedStream<T> {
 	let receiptResolve!: (receipt: TrustReceipt) => void;
 	let receiptReject!: (error: unknown) => void;
@@ -422,11 +516,28 @@ export function createGovernedStream<T>(
 		receiptResolve = resolve;
 		receiptReject = reject;
 	});
+	// A stream that fails mid-way (a cut connection, a provider error event) rejects
+	// `.receipt` with the error its iteration throws. A caller that catches the iteration
+	// need not await `.receipt` as well, so Node must never see this rejection unhandled:
+	// that would end the caller's process (exit 1). This handler is a SEPARATE branch.
+	// Promises are multicast, so a caller who awaits `.receipt` still gets the rejection,
+	// as the same error object the iteration threw. The ledger outcome does not depend on
+	// it: the hold is voided by the error terminal below either way.
+	receiptPromise.catch(() => {});
 
 	const wrapped = wrapStream(
 		stream,
 		kind,
 		(completion) => {
+			if (options.surfaceAuditRefusal === true) {
+				// Returned, so wrapStream awaits it. Only the audit refusal is rethrown, and so
+				// thrown from the iteration; any other settlement error rejects `.receipt`
+				// (whose pre-attached catch keeps it handled) and the iteration ends cleanly.
+				return resolveReceipt(completion).then(receiptResolve, (err: unknown) => {
+					receiptReject(err);
+					if (err instanceof AuditDegradedError) throw err;
+				});
+			}
 			resolveReceipt(completion)
 				.then((receipt) => {
 					receiptResolve(receipt);
@@ -434,6 +545,7 @@ export function createGovernedStream<T>(
 				.catch((err: unknown) => {
 					receiptReject(err);
 				});
+			return undefined;
 		},
 		(error, partial) => {
 			rejectReceipt(error, partial);

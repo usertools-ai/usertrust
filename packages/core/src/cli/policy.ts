@@ -24,6 +24,7 @@ import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
 import { resolvePolicyPath } from "./policy-path.js";
+import { warnIfVaultLoose } from "./target.js";
 
 /**
  * Strip control characters from untrusted text before it reaches a terminal.
@@ -103,6 +104,7 @@ export async function run(
 	}
 
 	const vaultPath = rootDir ?? process.cwd();
+	warnIfVaultLoose(join(vaultPath, VAULT_DIR));
 	// Deliberately NOT `loadConfig`: that validates the whole config and throws on
 	// a missing budget, which would make an operator fix their config before they
 	// could find out why their policy stopped enforcing. Linting the policy file

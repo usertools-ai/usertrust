@@ -1,42 +1,29 @@
 import { Analytics } from "@vercel/analytics/next";
 import type { Metadata, Viewport } from "next";
-import localFont from "next/font/local";
+import { preconnect, preload } from "react-dom";
 import Cursor from "./components/cursor";
 import { NoiseOverlay } from "./components/noise-overlay";
 import "./globals.css";
+import { KIT_IMAGES } from "./lib/kit-images";
 
-const usertoolsSans = localFont({
-	src: [
-		{ path: "../public/fonts/UsertoolsSans-Regular.woff2", weight: "400" },
-		{ path: "../public/fonts/UsertoolsSans-Medium.woff2", weight: "500" },
-		{ path: "../public/fonts/UsertoolsSans-Bold.woff2", weight: "600 700" },
-	],
-	variable: "--font-usertools",
-	display: "swap",
-	// Font-loading doctrine: preload display + mono only. Sans is prose voice,
-	// first used below the fold — preloading it would compete with the LCP.
-	preload: false,
-});
-
-const jetbrainsMono = localFont({
-	src: [
-		{ path: "../public/fonts/JetBrainsMono-Regular.woff2", weight: "400" },
-		{ path: "../public/fonts/JetBrainsMono-Bold.woff2", weight: "700" },
-	],
-	variable: "--font-jetbrains",
-	display: "swap",
-});
-
-// Display voice — Khand, lowercase verdicts, every headline on the page.
-// Self-hosted woff2, deliberately not TigerBeetle's Big Shoulders.
-const khand = localFont({
-	src: [
-		{ path: "../public/fonts/Khand-SemiBold.woff2", weight: "600" },
-		{ path: "../public/fonts/Khand-Bold.woff2", weight: "700" },
-	],
-	variable: "--font-khand",
-	display: "swap",
-});
+/*
+ * No font file lives in this public repository (site/scripts/no-font-files.test.mts
+ * fails if one is tracked). The faces are declared in globals.css and load at
+ * runtime from the brand kit, which serves them with
+ * `access-control-allow-origin: *`; `font-display: swap` and the system stacks
+ * behind them keep the page readable if the kit is unreachable.
+ *
+ * Font-loading doctrine: preload display + mono only — the faces the hero
+ * paints first (its headline renders Khand SemiBold). Usertools Sans is the
+ * prose voice, first used below the fold; preloading it would compete with the
+ * LCP. Fonts are always fetched in CORS mode, so the preconnect and the
+ * preloads are anonymous too, or the browser fetches each file twice.
+ */
+const KIT_ORIGIN = "https://usertrust.ai";
+const PRELOADED_FONTS = [
+	"https://usertrust.ai/kit/fonts/Khand-SemiBold.woff2",
+	"https://usertrust.ai/kit/fonts/JetBrainsMono-Regular.woff2",
+] as const;
 
 /*
  * "tamper-evident", not "immutable". The audit chain DETECTS mutation; it does
@@ -88,7 +75,7 @@ export const metadata: Metadata = {
 		description,
 		images: [{ url: "/og", width: 1200, height: 630 }],
 	},
-	icons: { icon: "/favicon.svg" },
+	icons: { icon: KIT_IMAGES.favicon },
 };
 
 /*
@@ -132,11 +119,12 @@ const jsonLd = {
 const isVercelRuntime = process.env.VERCEL === "1";
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+	preconnect(KIT_ORIGIN, { crossOrigin: "anonymous" });
+	for (const href of PRELOADED_FONTS) {
+		preload(href, { as: "font", type: "font/woff2", crossOrigin: "anonymous" });
+	}
 	return (
-		<html
-			lang="en"
-			className={`${usertoolsSans.variable} ${jetbrainsMono.variable} ${khand.variable}`}
-		>
+		<html lang="en">
 			<body className="bg-brand-bg text-white font-sans antialiased overflow-x-hidden">
 				<NoiseOverlay />
 				<Cursor />

@@ -86,9 +86,37 @@ production.
 The audit chain is a linear SHA-256 hash chain. Two concurrent writers would
 fork it, which is precisely the tampering the chain exists to make evident — so
 usertrust enforces single-writer semantics with an advisory file lock plus an
-in-process mutex. A second process opening the same vault gets a hard error, not
-a silent fork. Stale locks from crashed processes are reclaimed; live ones are
+in-process mutex. Stale locks from crashed processes are reclaimed; live ones are
 never stolen.
+
+**Within one process, every client shares the vault's writer.** Any number of
+`trust()` clients and `createGovernor()` governors on one vault (an Anthropic and
+an OpenAI client, say) append through ONE writer, so all their events land on one
+chain. A vault is recognised by its directories' identity on disk, resolved when
+the client is created, so every spelling of it shares the writer. Not covered: a
+vault directory replaced while a client is open on it (the writer keeps writing at
+the path it resolved), and filesystems whose inode numbers are not stable (some
+network and FUSE mounts), where two clients may get two writers and the second
+one's events are refused and dead-lettered, loudly, as for a second process. Two
+vaults whose `audit` directories are one directory (a symlink) are two writers on
+one log, refused the same way.
+
+**A second process on the same vault cannot write to it.** Each of its audit
+appends fails; it never forks the chain. Its calls still settle, and every event that
+misses the chain is reported: the receipt carries `auditDegraded`, the event goes to
+`.usertrust/dlq/dead-letters.jsonl`, the process gets a `USERTRUST_AUDIT_DEGRADED`
+warning (at the first failure, and with the count when the client is destroyed), and
+`usertrust verify` reports the vault INCOMPLETE and exits 1. A `trust()` client with
+`audit.failClosed: true` refuses such calls instead; `createGovernor()` and
+`usertrust-server` do not enforce `audit.failClosed`.
+
+**Load ONE copy of usertrust per process, and use a vault from one thread.** The
+shared writer, and the registry that tells a live writer in this process from a
+crashed earlier one, live in the module. Two installed copies of usertrust (two
+versions in `node_modules`), or worker threads, each have their own: a lock taken
+by the other copy carries this process's PID, is not in this copy's registry, and
+is judged a crashed instance and reclaimed — the fork this section exists to
+prevent.
 
 The lock's liveness check works on one kernel, and it fails toward "held":
 
@@ -184,6 +212,30 @@ we removed it: `connectProxy()` now throws, and passing `proxy` to
 `trust()` fails fast with the reason. If proxy mode ships in the future it will
 ship with real financial enforcement behind it. Until then: `dryRun` for
 explicit bypass in testing, a real TigerBeetle for production.
+
+## 10. Vault permissions stop at the vault's parent directory, and at Windows
+
+On Linux and macOS every directory usertrust creates in a vault is `0700` and
+every file `0600`, whatever the umask. A governor closes an existing `.usertrust/`
+that other users can read, and refuses one that another user owns: it compares
+the owner with the process's effective uid, and running as root is no exception.
+A governor creates an absent `.usertrust/` itself, exclusively, and then checks
+it like an existing one, so a `.usertrust/` that another user creates first is
+refused, not adopted. That holds in a shared parent directory that is sticky, such
+as `/tmp`, where only an entry's owner can rename or remove it. It cannot hold in
+a parent directory other users can write to that is NOT sticky: any of them can
+rename the vault away and put their own in its place after it was checked, and no
+check on a path prevents that. Keep vaults out of such parents; usertrust does
+not check a vault's parent directories.
+
+On Windows usertrust does not set or check permissions. POSIX modes do not map
+to Windows ACLs, and a mode check there would misreport who can read the vault.
+The vault folder inherits its ACL from the folder it is created in, and that ACL
+governs who can read the audit trail, the spend ledger and, with content capture
+on, prompts and tool inputs. Keep the vault (and a usertrust-server's `stateDir`)
+under your own user profile, which by default only you, administrators and SYSTEM
+can read, or give the folder an owner-only ACL yourself. usertrust does not manage
+Windows ACLs.
 
 ---
 

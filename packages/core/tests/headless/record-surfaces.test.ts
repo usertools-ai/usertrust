@@ -443,17 +443,23 @@ describe("headless record surfaces (spec D5)", () => {
 	it("the 1.14B-cache-read day recomputes exactly from the record", async () => {
 		const gov = await governor();
 		const auth = await gov.authorize(AUTHORIZE);
-		const receipt = await gov.settle(auth, {
-			inputTokens: 2_000_000,
-			outputTokens: 500_000,
-			cacheReadTokens: 1_140_000_000,
-			cacheWriteTokens: 12_000_000,
-		});
-
-		expectRecomputable(receipt);
+		// One call cannot plausibly report more than 100 million tokens in a tier (the plausibility ceiling), so the day is
+		// 12 calls of 95 million cache-read tokens each; the day's totals are unchanged.
+		const calls = 12;
+		let receipt!: Awaited<ReturnType<typeof gov.settle>>;
+		for (let i = 0; i < calls; i++) {
+			const a = i === 0 ? auth : await gov.authorize(AUTHORIZE);
+			receipt = await gov.settle(a, {
+				inputTokens: 2_000_000 / calls,
+				outputTokens: 500_000 / calls,
+				cacheReadTokens: 1_140_000_000 / calls,
+				cacheWriteTokens: 12_000_000 / calls,
+			});
+			expectRecomputable(receipt);
+		}
 		// The killed understatement, stated as arithmetic: the pre-fix reading
 		// billed the two cache tiers at ZERO.
-		const preFix = costFromRates(getModelRates(MODEL), 2_000_000, 500_000);
+		const preFix = costFromRates(getModelRates(MODEL), 2_000_000 / calls, 500_000 / calls);
 		expect(receipt.cost).toBeGreaterThan(preFix * 7);
 
 		await gov.destroy();

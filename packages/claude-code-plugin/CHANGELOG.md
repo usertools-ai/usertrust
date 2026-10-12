@@ -7,6 +7,65 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fresh install meters its first response.** The state's first-run time
+  (`transcripts/since`), before which no transcript entry is posted, was first made at the
+  first PreToolUse. Claude Code writes a response, `usage` and all, to the transcript BEFORE
+  the PreToolUse its tool_use fires, so the first session after an install never posted its
+  first response: its hold was released as "no transcript usage was assigned to this hold".
+  In a three-call test session whose tool-call responses each cost the same, that was 29% of
+  its cost. SessionStart now makes the time, whatever its `source`. Unchanged: a transcript
+  resumed or compacted on a fresh install posts none of its history; a time already made never
+  moves; a plugin installed into a session under way posts nothing written before its first
+  hook there.
+- **A rejected key is no longer silent.** In watch mode, a server answering 401 (a mistyped or
+  rotated key) was written down as one more `unexpected governance response 401` gap, its note
+  went to Claude Code's debug log only, and the breaker, which counts timeouts, never saw it:
+  metering could stop for days with nothing shown. A 401, or a 403 whose `error` is
+  `unauthorized`, is now a configuration failure:
+  - PreToolUse shows a `systemMessage` (`usertrust: the server rejected this session's key
+    (401): tool calls are NOT being metered. …`) on the session's first such call, then at most
+    once every 10 minutes. Watch mode still never blocks: exit 0, no decision.
+  - Its `gap` record says `"cause":"key-rejected"` with the `status` and its own reason; the
+    session's first carries a `detail` (server, key hash, the server's answer). Every call still
+    writes one record, so the format and `usertrust-job coverage` are unchanged.
+  - SessionStart warns, before the mode line, of the rejected calls recorded since the last
+    session start, read locally from the last 1 MiB of `watch.jsonl` (`WARNING: 1,946 tool
+    calls since 2026-10-09 were NOT metered …`). A file it cannot read is the normal banner.
+    It counts the `unexpected governance response 401` gaps earlier releases wrote too, so the
+    first start after upgrading warns of the losses an install already had.
+  - Unchanged: enforce mode blocks a rejected key (exit 2) unless `UT_FAIL_OPEN=1`; a 402, a
+    403 `policy_denied` (and any 403 not `unauthorized`) are `would_block`; timeouts go through
+    the breaker as before. A 403 `unauthorized` in enforce mode is now blocked as a failed
+    authorization (exit 2) rather than denied as a policy refusal, so with `UT_FAIL_OPEN=1` it
+    proceeds unmetered, with the message, as a 401 does.
+- **A FIFO, a directory or a huge file where the plugin expects one of its files can no longer
+  hang a hook.** Every file the hooks and `usertrust-job` read (their state, the job logs, the
+  audit logs, `watch.jsonl`, the transcript) is opened non-blocking and read only when it is a
+  regular file. The plugin's own state files are read up to a bound far above their real size;
+  the logs, which only grow, are never read whole but streamed a line at a time, so a log of
+  any size is read in the memory of one line. Anything else reads as an unreadable file, which
+  each caller already handled. `usertrust-job coverage` gives no verdict when a job log cannot
+  be read, instead of reading it as empty.
+- **Writes can no longer hang a hook either.** `watch.jsonl` and the job logs are appended
+  through a non-blocking open of a regular file: a FIFO in a log's place fails at once, so the
+  hook goes on (and says on stderr that the record could not be written) instead of waiting for
+  a reader, and a close that reports a late write error (EIO, ENOSPC) counts as a failed
+  write. Temporary files are created exclusively. A quarantined hold is rewritten in place
+  (opened write-only and non-blocking, never created, then truncated and rewritten),
+  because quarantine runs exactly when a rename in its directory has failed.
+- **A hold that cannot be handed back would no longer be left claimed in silence.** If a
+  transcript settle could not be built after its hold was claimed (the server's capabilities
+  read as unknown only then), nothing is sent and the hold is handed back for a later settle
+  point. A failure of that hand-back was ignored: the hold stayed claimed while the plugin said
+  `deferred` and "the hold is untouched". It now says what is left: `claimed`, or `unresolved`
+  under a key (how a later settle point reads a hold left claimed), on stderr with the error
+  code, and its `gap` record carries `"handBack":"failed"` and the `code`. Today's hooks do not
+  reach this path (capabilities, once read as known, stay known for the hook's run, and the
+  claim is made only after they are), so this guards a future change; a hand-back that works is
+  unchanged.
+
 ### Changed
 
 - **A settle for a hold the server no longer has is read as the hold gone on a newer server too.** usertrust-server's next major answers such a settle `410 settlement_unrecoverable` (the settle is recorded on its chain, nothing is charged) where an older server answers `404 unknown transferId`. The hooks treat either as the hold being gone (`isSettleGone`), so an expired hold is still re-charged once on a fresh hold. Release and abort keep the `404` on every server.

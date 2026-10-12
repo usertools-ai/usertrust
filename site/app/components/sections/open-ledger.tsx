@@ -1,6 +1,7 @@
 import chain from "../../evidence/chain-slice.json";
 import facts from "../../evidence/facts.json";
 import { barcodeBars, chainHeadHash, chainHeadPrefix, isoDate } from "../../lib/barcode";
+import { KIT_IMAGES } from "../../lib/kit-images";
 import CopyChip from "../copy-chip";
 import ReceiptPaper from "../receipt/receipt-paper";
 import TearOff from "./tear-off";
@@ -70,7 +71,7 @@ function MascotPanel() {
 		<figure className="lift-1 bg-[#fbfbfb] md:order-1 md:flex md:flex-col">
 			{/* biome-ignore lint/performance/noImgElement: static brand plate below the fold; intrinsic size is declared so it reserves its own space */}
 			<img
-				src="/brand/mascot-panel.jpg"
+				src={KIT_IMAGES.mascotPanel}
 				alt="the usertrust mascot, full length, on its white studio ground"
 				width={898}
 				height={1200}

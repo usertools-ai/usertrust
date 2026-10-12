@@ -22,6 +22,14 @@ console.log(receipt);
 await client.destroy();
 ```
 
+`new Anthropic()` reads your key from `ANTHROPIC_API_KEY`. `usertrust init` saves the key you give it in `.usertrust/.env` but does not export it, so a fresh shell has no key. Run the example with Node's own `.env` loader:
+
+```bash
+node --env-file=.usertrust/.env app.mjs
+```
+
+or `export ANTHROPIC_API_KEY=...` yourself first.
+
 That's it. One function wraps any supported LLM client. Every call is metered, audited, and policy-checked.
 
 ### Expected Output
@@ -45,19 +53,25 @@ The `receipt` returned from every call:
 ## Install
 
 ```bash
+npm install usertrust @anthropic-ai/sdk
 npx usertrust init
 ```
 
 This creates a `.usertrust/` vault in your project root with default config, policies, and an empty audit chain.
 
+`npx usertrust init` does not install the package into your project, so the `npm install` line is required.
+
+usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). `@anthropic-ai/sdk` and `openai` are declared as optional peer dependencies. `@google/genai` is not declared at all: usertrust recognises a Google client by its shape (`models.generateContent`), so nothing in the install names that package, and you install it yourself.
+
 ## Integration
 
-Works with Anthropic, OpenAI, and Google AI SDKs:
+Works with the Anthropic (`@anthropic-ai/sdk`), OpenAI (`openai`) and Google Gemini (`@google/genai`) SDKs:
 
 ```typescript
 import { trust } from "usertrust";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 
 // Anthropic
 const anthropic = await trust(new Anthropic());
@@ -67,11 +81,19 @@ const { response, receipt } = await anthropic.messages.create({ ... });
 const openai = await trust(new OpenAI());
 const { response, receipt } = await openai.chat.completions.create({ ... });
 
+// Google Gemini: the client reads GOOGLE_API_KEY, the name `init` stores a Google key under
+const google = await trust(new GoogleGenAI({}));
+const { response, receipt } = await google.models.generateContent({ model: "gemini-2.5-flash", contents: "..." });
+
 // With options (full mode — requires TigerBeetle)
 const client = await trust(new Anthropic(), {
   budget: 100_000,
 });
 ```
+
+On a Google client only `models.generateContent` is governed. `models.generateContentStream` passes through to the SDK untouched: it is not metered, it gets no receipt, and no policy applies to it. Use `generateContent` for calls you need governed.
+
+Clients in one process share their vault's audit writer. Separate processes cannot write to one vault: give each process its own vault (`vaultBase`), or send their calls through one `usertrust-server`.
 
 Every call returns `{ response, receipt }`:
 
@@ -112,7 +134,7 @@ All commands support `--json` for machine-readable output.
 usertrust init          # Create .usertrust/ vault
 usertrust inspect       # Vault bank statement
 usertrust health        # Entropy diagnostics (6 signals, 0-100 score)
-usertrust verify        # Verify audit chain integrity (+ external anchors)
+usertrust verify        # Verify audit chain integrity and completeness (+ external anchors, --receipts)
 usertrust anchor        # External anchoring: init|now|status|doctor|export|export-bundle|rotate|resume
 usertrust snapshot      # Checkpoint/restore vault state
 usertrust audit quarantine-tail [--dry-run]  # Move a TORN final log line aside, recorded on the chain
@@ -269,4 +291,4 @@ Apache 2.0
 
 ---
 
-UserTrust™ is a trademark of Usertools, Inc.
+usertrust™ is a trademark of Usertools, Inc.

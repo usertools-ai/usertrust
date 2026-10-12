@@ -22,6 +22,7 @@ export type {
 } from "./anomaly/types.js";
 export {
 	type AppendEventInput,
+	AUDIT_DEGRADED_WARNING,
 	AuditTornTailError,
 	type AuditWriter,
 	AuditWriterLockHeldError,

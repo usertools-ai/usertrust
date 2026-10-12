@@ -16,6 +16,12 @@ export interface SettlementAmounts {
 	post: number;
 	/** Cost above the hold, debited to the budget's debt account (a later slice). */
 	overage: number;
+	/**
+	 * Present ONLY when the reported usage was refused as implausible (a count above the plausibility ceiling): the
+	 * call settles AT THE HOLD, not at the 1-usertoken floor a zeroed snapshot would price to, and the refused figures
+	 * are named here so the caller records the anomaly.
+	 */
+	anomaly?: { implausible: NonNullable<NormalizedUsage["implausible"]> };
 }
 
 /**
@@ -35,6 +41,16 @@ export function settlementAmounts(
 	operatorOwned = false,
 ): SettlementAmounts {
 	const metered = withSupported1hTier(usage, rates, operatorOwned);
+	// An implausible reading survives the tier decision only when it is real for this model: the snapshot is then an
+	// ESTIMATE with zeroed counts, which must never be priced as if the call used nothing.
+	if (metered.implausible !== undefined) {
+		return {
+			actual: hold,
+			post: hold,
+			overage: 0,
+			anomaly: { implausible: { ...metered.implausible } },
+		};
+	}
 	const actual = costFromRates(
 		rates,
 		metered.inputTokens,

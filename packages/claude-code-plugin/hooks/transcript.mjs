@@ -116,9 +116,7 @@ import {
 	link,
 	lstat,
 	mkdir,
-	open,
 	readdir,
-	readFile,
 	rename,
 	rm,
 	stat,
@@ -147,8 +145,11 @@ import {
 	jobHoldFields,
 	LINKLESS,
 	listPending,
+	openRegular,
 	principalCapable,
 	publishExclusive,
+	READ_BOUND,
+	readRegular,
 	recordSettleGap,
 	recordUnconfirmedCall,
 	recordWatchEvent,
@@ -185,6 +186,8 @@ const MODEL_ID = /^[^\p{C}\p{Z}]{1,256}$/u;
 const CACHE_TIERS = "authorize-cache-tiers";
 /** The capability of a server that prices `cacheWrite1hTokens` at the 1-hour write rate. */
 const CACHE_WRITE_1H = "cache-write-1h";
+/** The capability of a server that reads a per-tier `refused` flag and charges the estimate for it. */
+const REFUSED_FLAG = "refused";
 
 const CURSOR_VERSION = 2;
 /** v1 cursors (no `unresolved`) are read as v2 with nothing unresolved. */
@@ -296,6 +299,55 @@ function callTimeout(reserveMs = 0) {
 	return Math.min(callTimeoutCap(), timeLeft() - reserveMs);
 }
 
+/**
+ * A persisted per-tier REFUSED map, or undefined when it holds nothing. Presence of a tier is the flag; its value is the
+ * raw figure when one was representable (else 0), kept for the server's event. Never a count: it does not enter arithmetic.
+ */
+function readRefused(v) {
+	if (v === null || typeof v !== "object" || Array.isArray(v)) return undefined;
+	const out = {};
+	for (const key of COUNT_KEYS) {
+		const x = v[key];
+		if (typeof x === "number" && Number.isFinite(x) && x >= 0) {
+			out[key] = Math.min(Math.ceil(x), Number.MAX_SAFE_INTEGER);
+		}
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * The per-response, per-tier plausibility ceiling. Mirrors core's MAX_PLAUSIBLE_TOKENS_PER_TIER (a parity test pins the
+ * two together); the plugin cannot import core.
+ */
+export const PLAUSIBLE_TOKENS_PER_TIER = 100_000_000;
+
+/**
+ * A token figure a PROVIDER stated (a transcript usage field), as `{ count, refused, raw }`:
+ *   - `count` is ARITHMETIC-SAFE and is the only thing holds, sums and subtractions ever read. ABSENT (undefined, and JSON
+ *     null: some shapes send null for an unused tier) is 0; a finite number >= 0 is rounded UP (a fractional count is
+ *     real usage) and capped at the largest safe integer; a REFUSED figure counts 0.
+ *   - `refused` is an explicit flag, never a count: set for a figure that is INVALID (NaN, an infinity, a negative, a
+ *     string, an object, a boolean) or above the per-response ceiling. The server charges the estimate when any tier is
+ *     flagged. A sentinel count here was the old design, and it reached the hold sizing as an absurd amount.
+ *   - `raw` is the figure as stated when it is representable (finite, non-negative), else 0, kept for the event.
+ */
+export function providerFigure(value) {
+	if (value === undefined || value === null) return { count: 0, refused: false, raw: 0 };
+	if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+		const stated = Math.min(Math.ceil(value), Number.MAX_SAFE_INTEGER);
+		if (stated > PLAUSIBLE_TOKENS_PER_TIER) return { count: 0, refused: true, raw: stated };
+		return { count: stated, refused: false, raw: stated };
+	}
+	return { count: 0, refused: true, raw: 0 };
+}
+
+/** Records a refused tier on a message (sticky: it only ever accumulates). */
+function noteRefused(m, key, figure) {
+	if (!figure.refused) return;
+	m.refused ??= {};
+	m.refused[key] = Math.max(m.refused[key] ?? 0, figure.raw);
+}
+
 function sumCounts(messages) {
 	const sum = {
 		inputTokens: 0,
@@ -304,7 +356,25 @@ function sumCounts(messages) {
 		cacheWriteTokens: 0,
 		cacheWrite1hTokens: 0,
 	};
-	for (const m of messages) for (const key of COUNT_KEYS) sum[key] += m[key];
+	// Capped at the largest safe integer: past it the wire (and any integer arithmetic) is meaningless, and every such
+	// figure is far above the server's ceiling anyway.
+	for (const m of messages) {
+		for (const key of COUNT_KEYS) sum[key] = Math.min(sum[key] + m[key], Number.MAX_SAFE_INTEGER);
+	}
+	// How many provider responses the sum spans: the server's plausibility ceiling is per response, so a window of many
+	// messages is not mistaken for one absurd one.
+	sum.responses = messages.length;
+	// A tier REFUSED in any response (invalid, or above the per-response ceiling) is flagged for the whole window: the
+	// server charges the estimate. A flag, never a count: the sums above stay arithmetic-safe.
+	for (const m of messages) {
+		for (const key of COUNT_KEYS) {
+			const raw = m.refused?.[key];
+			if (typeof raw === "number") {
+				sum.refused ??= {};
+				sum.refused[key] = Math.max(sum.refused[key] ?? 0, raw);
+			}
+		}
+	}
 	return sum;
 }
 
@@ -666,7 +736,7 @@ async function agentTypeFor(transcriptPath, agentId, hinted) {
 	if (agentId === "main") return { name: "main", raw: "main" };
 	try {
 		const meta = JSON.parse(
-			await readFile(transcriptPath.replace(/\.jsonl$/, ".meta.json"), "utf-8"),
+			await readRegular(transcriptPath.replace(/\.jsonl$/, ".meta.json"), READ_BOUND.record),
 		);
 		if (typeof meta?.agentType === "string" && meta.agentType !== "") {
 			return { name: safeName(meta.agentType, "subagent"), raw: meta.agentType.slice(0, 128) };
@@ -721,6 +791,31 @@ function emptyCursor() {
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isStringArray = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
 
+/**
+ * The refused map of a persisted message, including the OLD side channels: a cursor written by a build that kept
+ * `rawMax` / `rawCacheWrite1hTokens` / `cacheWrite1hStated` carries the figures a tier STATED, and any above the
+ * ceiling migrates to a flag, so a backlog keeps its anomaly across the upgrade.
+ */
+function refusedOnRead(m) {
+	const out = { ...readRefused(m.refused) };
+	const old = {
+		inputTokens: m.rawMax?.inputTokens,
+		outputTokens: m.rawMax?.outputTokens,
+		cacheReadTokens: m.rawMax?.cacheReadTokens,
+		cacheWriteTokens: m.rawMax?.cacheWriteTokens,
+		cacheWrite1hTokens: Math.max(
+			typeof m.rawCacheWrite1hTokens === "number" ? m.rawCacheWrite1hTokens : 0,
+			typeof m.cacheWrite1hStated === "number" ? m.cacheWrite1hStated : 0,
+		),
+	};
+	for (const [key, x] of Object.entries(old)) {
+		if (typeof x === "number" && Number.isFinite(x) && x > PLAUSIBLE_TOKENS_PER_TIER) {
+			out[key] = Math.max(out[key] ?? 0, Math.min(Math.ceil(x), Number.MAX_SAFE_INTEGER));
+		}
+	}
+	return Object.keys(out).length > 0 ? { refused: out } : {};
+}
+
 /** A v1 or v2 cursor, or null if any field is not what this code wrote. */
 function parseCursor(raw) {
 	if (!isObject(raw) || !READABLE_CURSOR_VERSIONS.has(raw.v)) return null;
@@ -746,6 +841,7 @@ function parseCursor(raw) {
 			cacheReadTokens: count(m.cacheReadTokens),
 			cacheWriteTokens: count(m.cacheWriteTokens),
 			cacheWrite1hTokens: count(m.cacheWrite1hTokens),
+			...refusedOnRead(m),
 		});
 	}
 	for (const [id, value] of Object.entries(raw.assigned)) {
@@ -792,6 +888,8 @@ function parseVehicle(key, v) {
 			: {}),
 	};
 	for (const k of COUNT_KEYS) vehicle[k] = count(v[k]);
+	const refused = readRefused(v.refused);
+	if (refused !== undefined) vehicle.refused = refused;
 	// The job labels the vehicle was first sent with: a retry is the SAME charge, so it
 	// carries the same job, never the one open when the retry happens.
 	const labels = jobHoldFields(v.labels);
@@ -817,6 +915,7 @@ function holdVehicle(body) {
 		cacheReadTokens: body.cacheReadTokens,
 		cacheWriteTokens: body.cacheWriteTokens,
 		cacheWrite1hTokens: body.cacheWrite1hTokens,
+		refused: body.refused,
 		labels: body,
 	});
 	return vehicle === null ? null : { key, vehicle };
@@ -837,7 +936,7 @@ function unresolvedIds(cursor) {
 async function readCursor(path) {
 	let text;
 	try {
-		text = await readFile(path, "utf-8");
+		text = await readRegular(path, READ_BOUND.record);
 	} catch (err) {
 		if (err?.code === "ENOENT") return { ok: true, cursor: emptyCursor() };
 		return { ok: false, reason: `transcript cursor unreadable (${err?.code ?? "error"})` };
@@ -854,7 +953,7 @@ async function readCursor(path) {
 
 async function writeAtomic(path, text) {
 	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-	await writeFile(tmp, text, { mode: 0o600 });
+	await writeFile(tmp, text, { flag: "wx", mode: 0o600 });
 	await rename(tmp, path);
 }
 
@@ -913,7 +1012,7 @@ async function acquireLock(path, { waitMs = 0 } = {}) {
 		if (await tryLock(lock, token)) {
 			return async () => {
 				try {
-					if ((await readFile(join(lock, "owner"), "utf-8")) === token) {
+					if ((await readRegular(join(lock, "owner"), READ_BOUND.small)) === token) {
 						await rm(lock, { recursive: true, force: true });
 					}
 				} catch {
@@ -944,7 +1043,7 @@ async function tryLock(lock, token) {
 /** The token inside a lock; "" when it has none (its holder died before writing it). */
 async function lockOwner(lock) {
 	try {
-		return await readFile(join(lock, "owner"), "utf-8");
+		return await readRegular(join(lock, "owner"), READ_BOUND.small);
 	} catch (err) {
 		if (err?.code === "ENOENT") return "";
 		throw err;
@@ -1028,7 +1127,7 @@ async function holdJournal(sessionId, agentId) {
 		if (kind === null) continue;
 		const path = join(root, name);
 		try {
-			const body = JSON.parse(await readFile(path, "utf-8"));
+			const body = JSON.parse(await readRegular(path, READ_BOUND.record));
 			if (sanitize(body?.agentId ?? "main") !== want) continue;
 			const ids = isStringArray(body.assignedIds) ? body.assignedIds : [];
 			if (ids.length === 0 && kind === "live") continue;
@@ -1161,7 +1260,7 @@ async function removeFiles(paths) {
 async function ingest(cursor, path, since) {
 	let handle;
 	try {
-		handle = await open(path, "r");
+		({ handle } = await openRegular(path));
 	} catch (err) {
 		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
 	}
@@ -1265,10 +1364,18 @@ function foldLine(cursor, bytes, since) {
 	// min is idempotent however many are re-read.
 	const at = Date.parse(entry?.timestamp);
 	if (Number.isFinite(at) && (m.ts === null || at < m.ts)) m.ts = at;
-	m.inputTokens = Math.max(m.inputTokens, count(usage.input_tokens));
-	m.outputTokens = Math.max(m.outputTokens, count(usage.output_tokens));
-	m.cacheReadTokens = Math.max(m.cacheReadTokens, count(usage.cache_read_input_tokens));
-	m.cacheWriteTokens = Math.max(m.cacheWriteTokens, count(usage.cache_creation_input_tokens));
+	const inFig = providerFigure(usage.input_tokens);
+	const outFig = providerFigure(usage.output_tokens);
+	const readFig = providerFigure(usage.cache_read_input_tokens);
+	const writeFig = providerFigure(usage.cache_creation_input_tokens);
+	noteRefused(m, "inputTokens", inFig);
+	noteRefused(m, "outputTokens", outFig);
+	noteRefused(m, "cacheReadTokens", readFig);
+	noteRefused(m, "cacheWriteTokens", writeFig);
+	m.inputTokens = Math.max(m.inputTokens, inFig.count);
+	m.outputTokens = Math.max(m.outputTokens, outFig.count);
+	m.cacheReadTokens = Math.max(m.cacheReadTokens, readFig.count);
+	m.cacheWriteTokens = Math.max(m.cacheWriteTokens, writeFig.count);
 	// The 1-hour share, from the per-TTL breakdown when the transcript carries one. When
 	// the breakdown names only ONE TTL, what it leaves out of the flat total is a real
 	// write whose TTL it did not attribute; it is counted as 1-hour (the dearer rate), the
@@ -1277,12 +1384,16 @@ function foldLine(cursor, bytes, since) {
 	const breakdown = usage.cache_creation;
 	const names5m = typeof breakdown?.ephemeral_5m_input_tokens === "number";
 	const names1h = typeof breakdown?.ephemeral_1h_input_tokens === "number";
-	const named5m = count(breakdown?.ephemeral_5m_input_tokens);
-	const named1h = count(breakdown?.ephemeral_1h_input_tokens);
-	const unattributed =
-		names5m !== names1h
-			? Math.max(0, count(usage.cache_creation_input_tokens) - named5m - named1h)
-			: 0;
+	const fig5m = providerFigure(breakdown?.ephemeral_5m_input_tokens);
+	const fig1h = providerFigure(breakdown?.ephemeral_1h_input_tokens);
+	// Both breakdown components are flagged BEFORE the clamp to the write total hides an absurd share. Their COUNTS (a
+	// refused one is 0) are all the subtraction below reads, so a bad 5-minute figure leaves the remainder at the dearer
+	// 1-hour rate for sizing while the call is flagged for the estimate.
+	noteRefused(m, "cacheWrite1hTokens", fig1h);
+	noteRefused(m, "cacheWriteTokens", fig5m);
+	const named5m = fig5m.count;
+	const named1h = fig1h.count;
+	const unattributed = names5m !== names1h ? Math.max(0, writeFig.count - named5m - named1h) : 0;
 	m.cacheWrite1hTokens = Math.min(
 		Math.max(m.cacheWrite1hTokens, named1h + unattributed),
 		m.cacheWriteTokens,
@@ -1402,7 +1513,7 @@ async function claimHolder(claimsDir, id, owner) {
 	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
 	try {
 		await mkdir(dir, { recursive: true, mode: 0o700 });
-		await writeFile(tmp, owner, { mode: 0o600 });
+		await writeFile(tmp, owner, { flag: "wx", mode: 0o600 });
 		await link(tmp, path);
 		return { holder: owner, created: true };
 	} catch (err) {
@@ -1420,7 +1531,7 @@ async function claimHolder(claimsDir, id, owner) {
 		await unlink(tmp).catch(() => {});
 	}
 	try {
-		const holder = await readFile(path, "utf-8");
+		const holder = await readRegular(path, READ_BOUND.small);
 		return holder === "" ? { holder: null, code: "EMPTY" } : { holder, created: false };
 	} catch (err) {
 		return { holder: null, code: err?.code ?? "error" };
@@ -1519,7 +1630,7 @@ async function cursorLocation(sessionId, agentId) {
 async function firstRun(dir) {
 	const path = join(dir, SINCE_FILE);
 	const read = () =>
-		readFile(path, "utf-8").catch((err) => {
+		readRegular(path, READ_BOUND.small).catch((err) => {
 			if (err?.code === "ENOENT") return null;
 			throw err;
 		});
@@ -1535,13 +1646,16 @@ async function firstRun(dir) {
 
 /**
  * Stamp this state's first-run time now, if it has none (`firstRun`), and touch nothing else.
+ * SessionStart stamps it, before any response of its session is written (session-start.mjs).
  * A transcript-mode hook that skips the server (its breaker is open) stamps it all the same:
  * otherwise the first hook after the breaker closes would, and every transcript entry of the
- * outage would read as from before this state existed, never posted. Never throws: the next
- * hook that needs the time reads it, and says what failed.
+ * outage would read as from before this state existed, never posted. In estimate mode there is
+ * no transcript state, and nothing is stamped. Never throws: the next hook that needs the time
+ * reads it, and says what failed.
  */
 export async function stampFirstRun() {
 	try {
+		if (usageMode() !== "transcript") return;
 		const dir = await privateStateDir();
 		if (dir.ok) await firstRun(dir.dir);
 	} catch {
@@ -1557,7 +1671,7 @@ export async function stampFirstRun() {
 async function publishOnce(path, content) {
 	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
 	try {
-		await writeFile(tmp, content, { mode: 0o600 });
+		await writeFile(tmp, content, { flag: "wx", mode: 0o600 });
 		await link(tmp, path);
 	} catch (err) {
 		if (err?.code === "EEXIST") return;
@@ -1576,7 +1690,7 @@ async function publishOnce(path, content) {
  */
 async function estimateMarker(path) {
 	try {
-		const text = await readFile(path, "utf-8");
+		const text = await readRegular(path, READ_BOUND.small);
 		return text === "" ? "estimate mode" : text;
 	} catch (err) {
 		if (err?.code === "ENOENT") return null;
@@ -1962,13 +2076,35 @@ async function oneHourSupport(share) {
 }
 
 /**
+ * Every capability a settle body depends on, decided BEFORE the hold is claimed: the 1-hour share (`oneHourSupport`) and a
+ * refused flag (`refused`). Returns `null` when any is UNKNOWN (the server cannot be asked), so the caller defers with the
+ * hold untouched. A decision taken after the claim journals the deferral as done and the usage is lost for good.
+ */
+async function settleCapabilitiesKnown(counts) {
+	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) return null;
+	if (counts.refused !== undefined && (await refreshUnknownServerCapabilities()) === null)
+		return null;
+	return true;
+}
+
+/**
  * The body of a transcript settle. The 1-hour share goes only to a server that prices it
  * (`cache-write-1h`): an older server strips the unknown key, and those tokens would
  * silently bill at the cheaper 5-minute rate. The write TOTAL is always sent, so the
  * worst case against an old server is the 5-minute price, never a dropped count.
  */
 async function settleBody(transferId, counts, labels) {
-	const { cacheWrite1hTokens, ...rest } = counts;
+	const { cacheWrite1hTokens, responses, refused, ...rest } = counts;
+	if (refused !== undefined) {
+		// A refused tier is a FLAG the server must understand. An older server strips the unknown key and would price the
+		// zeroed counts at the floor, so for it the counts are WITHHELD: with none the settle falls back to the held estimate
+		// (the conservative figure). Support unknown: no body is built and the caller defers, as for the 1-hour share.
+		const capabilities = await refreshUnknownServerCapabilities();
+		if (capabilities === null) return null;
+		if (!capabilities.has(REFUSED_FLAG)) {
+			return { transferId, usageSource: "estimated", ...settleLabels(labels) };
+		}
+	}
 	const support = await oneHourSupport(cacheWrite1hTokens);
 	// Support UNKNOWN with a share to carry: sending only the flat total would bill the
 	// 1-hour tokens at the 5-minute rate for good, so no body is built; the caller defers.
@@ -1978,6 +2114,9 @@ async function settleBody(transferId, counts, labels) {
 		transferId,
 		...rest,
 		...(sendShare ? { cacheWrite1hTokens } : {}),
+		...(Number.isSafeInteger(responses) && responses > 1 ? { responses } : {}),
+		// A flag per refused tier (invalid or above the per-response ceiling): the server charges the estimate.
+		...(refused !== undefined ? { refused } : {}),
 		usageSource: "provider",
 		...settleLabels(labels),
 	};
@@ -1988,10 +2127,12 @@ async function settleAt(transferId, counts, { keyed, labels = {} }) {
 	try {
 		const body = await settleBody(transferId, counts, labels);
 		if (body === null) {
+			// `unsent`: nothing left the process. A claiming caller gives the hold back rather than journal it done.
 			return {
 				outcome: "deferred",
+				unsent: true,
 				reason:
-					"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet; the hold is untouched",
+					"the server's capabilities are unknown, so the settle cannot be sent yet; the hold is untouched",
 			};
 		}
 		settle = await serverRequest("/v1/settle", body, { timeoutMs: callTimeout() });
@@ -2099,9 +2240,12 @@ async function returnEmptyHold(transferId) {
  * hold with none is given back — released, on a server that can release; settled
  * at zero (the server's 1-unit floor) on one that cannot. Returns `{ outcome,
  * reason?, holdEnded? }`; `returned` is an empty hold given back, `deferred` means
- * out of time, hold untouched. A windowed hold's `holdEnded` says whether the
- * server is known to hold it no more: settled or spent, a 404 `unknown
- * transferId`, or a confirmed release. Otherwise it may still be live.
+ * out of time, hold untouched. A claimed hold whose settle was not sent and whose file
+ * could not be handed back says so (`handBack: "failed"`, `handBackFailed`): it is
+ * `claimed`, or `unresolved` under a key, never `deferred`. A windowed hold's
+ * `holdEnded` says whether the server is known to hold it no more: settled or
+ * spent, a 404 `unknown transferId`, or a confirmed release. Otherwise it may
+ * still be live.
  */
 export async function settleTranscriptHold(sessionId, entry) {
 	if (callTimeout() < minCall()) return { outcome: "deferred", reason: "out of time" };
@@ -2113,14 +2257,17 @@ export async function settleTranscriptHold(sessionId, entry) {
 	}
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(entry[key]);
+	counts.responses = ids.length;
+	const entryRefused = readRefused(entry.refused);
+	if (entryRefused !== undefined) counts.refused = entryRefused;
 	// A 1-hour share the server may or may not price: decide BEFORE claiming the hold's file,
 	// so an unknown server leaves the pending record in place for a later settle point instead
 	// of journalling a `.done` for a settle that never went out.
-	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) {
+	if ((await settleCapabilitiesKnown(counts)) === null) {
 		return {
 			outcome: "deferred",
 			reason:
-				"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet; the hold is untouched",
+				"the server's capabilities are unknown, so the settle cannot be sent yet (the 1-hour cache-write share, or a refused figure); the hold is untouched",
 		};
 	}
 	// The hold's own file, as its listing found it: never whatever file the call's
@@ -2142,6 +2289,16 @@ export async function settleTranscriptHold(sessionId, entry) {
 	}
 	const keyed = typeof entry.idempotencyKey === "string";
 	const result = await settleAt(entry.transferId, counts, { keyed, labels: jobHoldFields(entry) });
+	if (result.outcome === "deferred" && result.unsent === true) {
+		// The preflight above passed but the capabilities went unknown before the body was built. A claimed hold must not be
+		// journalled as done for a settle that never went out: hand the file back so a later settle point retries it.
+		try {
+			await rename(`${base}.settling`, livePath);
+		} catch (err) {
+			return handBackFailed(err, keyed);
+		}
+		return result;
+	}
 	try {
 		// Exclusive: an outcome never lands over another hold's. Only a 1.4.0 per-call
 		// name can already be taken (two holds of one call shared it then). That leaves
@@ -2184,6 +2341,27 @@ export async function settleTranscriptHold(sessionId, entry) {
 	return result;
 }
 
+/**
+ * A claimed hold whose settle was never sent (`unsent`) and whose file could not be handed back
+ * (`.settling` → `.json`). It is NOT untouched: it stays claimed as `.settling`, so no later settle
+ * point lists it, and the journal reads it as a settle of unknown outcome once stale
+ * (`reconcile`): retried under its key, or (no key) its ids accounted and never posted. The
+ * outcome names that ending, as any other settle's does: `unresolved` under a key, else
+ * `claimed`. The hold itself was not ended (`holdEnded: false`): the ledger's pending timeout
+ * expires it.
+ */
+function handBackFailed(err, keyed) {
+	const code = err?.code ?? "error";
+	return {
+		outcome: keyed ? "unresolved" : "claimed",
+		unsent: true,
+		handBack: "failed",
+		code,
+		reason: `the settle was not sent (the server's capabilities are unknown), and the hold could not be handed back (${code}): it stays claimed as .settling`,
+		holdEnded: false,
+	};
+}
+
 /** What an outcome means for the usage, where its name alone does not say. */
 export const OUTCOME_NOTES = new Map([
 	["unresolved", "; its usage is NOT recorded yet, and is retried under its key at the next Stop"],
@@ -2212,6 +2390,8 @@ export async function recordHoldOutcome(sessionId, entry, result) {
 		// A settle stands for its window's usage, dated by the one rule (`holdUsageStart`). A
 		// give-back stands for no usage: it keeps its call's time.
 		started: release ? callStart(entry) : holdUsageStart(entry),
+		// A settle never sent whose hold stays claimed (`handBackFailed`): the record says so.
+		...(result.handBack === "failed" ? { handBack: "failed", code: result.code } : {}),
 	});
 }
 
@@ -2269,7 +2449,7 @@ export async function awaitFinalResponse(transcriptPath, lastMessage, waitMs = F
 async function lastCompleteText(path) {
 	let handle;
 	try {
-		handle = await open(path, "r");
+		({ handle } = await openRegular(path));
 		const { size } = await handle.stat();
 		const length = Math.min(size, FLUSH_TAIL_BYTES);
 		const buffer = Buffer.alloc(length);
@@ -2640,6 +2820,9 @@ async function remainderOf(
 function vehicleCounts(vehicle) {
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(vehicle[key]);
+	counts.responses = Array.isArray(vehicle.ids) ? vehicle.ids.length : 1;
+	const vehicleRefused = readRefused(vehicle.refused);
+	if (vehicleRefused !== undefined) counts.refused = vehicleRefused;
 	return counts;
 }
 
@@ -2705,9 +2888,9 @@ async function postGroup({
 	// A 1-hour share the server may or may not price: decide BEFORE placing a hold, so an
 	// unknown server leaves the messages unposted for a later settle point rather than
 	// stranding a hold or billing the share at the 5-minute rate.
-	if ((await oneHourSupport(counts.cacheWrite1hTokens)) === null) {
+	if ((await settleCapabilitiesKnown(counts)) === null) {
 		return unsettled(
-			"the server's capabilities are unknown, so the 1-hour cache-write share cannot be priced yet",
+			"the server's capabilities are unknown, so the settle cannot be sent yet (the 1-hour cache-write share, or a refused figure)",
 		);
 	}
 	let auth;
