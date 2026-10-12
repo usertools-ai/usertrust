@@ -1147,6 +1147,17 @@ describe("a vault base made absolute, without folding anything", () => {
 		expect(absoluteVaultBase("vault", "linux", () => "", "/work")).toBe("/work/vault");
 		expect(absoluteVaultBase("vault", "linux", () => "", "/work/")).toBe("/work/vault");
 		expect(absoluteVaultBase("vault", "win32", () => "", "C:\\")).toBe("C:\\vault");
+		// An absolute base never needs the working directory: it must still resolve from a deleted one.
+		const cwdSpy = vi.spyOn(process, "cwd").mockImplementation(() => {
+			throw Object.assign(new Error("ENOENT: uv_cwd"), { code: "ENOENT" });
+		});
+		try {
+			expect(absoluteVaultBase("/x/vault", "linux")).toBe("/x/vault");
+			expect(absoluteVaultBase("C:\\x\\vault", "win32")).toBe("C:\\x\\vault");
+			expect(absoluteVaultBase("C:tenant", "win32", () => "C:\\work")).toBe("C:\\work\\tenant");
+		} finally {
+			cwdSpy.mockRestore();
+		}
 		// A POSIX directory may end in a backslash; only `/` is a separator there.
 		expect(absoluteVaultBase("vault", "linux", () => "", "/work\\")).toBe("/work\\/vault");
 	});
