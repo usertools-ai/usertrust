@@ -45,24 +45,24 @@ interface AuditEvent {
 
 Events are stored as JSONL (one JSON object per line) in `.usertrust/audit/events.jsonl`. A sidecar file (`events.jsonl.meta`) tracks the last hash and sequence number for fast appends without re-reading the entire chain.
 
-## Multi-Process Safety
+## One Writer per Vault
 
-The audit writer allows one writer per vault, whatever the process:
+The audit chain has one writer per vault:
 
-- **Advisory file lock** -- A second writer on the same vault does not get to write. That is another process, and it is also another `trust()` or `createGovernor()` in the same process: each one is its own writer. Its audit writes fail with an error naming the lock holder, and its events go to the dead-letter queue (below). Under `audit.failClosed`, a `trust()` writer's calls are refused; a `createGovernor()` or `usertrust-server` writer never refuses, and reports `auditDegraded` instead. Use one vault per client, or run `usertrust-server` and have every client call it.
-- **Async mutex** -- Serializes writes within a single writer so concurrent governed calls append in order.
+- **Within one process, clients share it.** Every `trust()` client and `createGovernor()` governor in a process that opens the same vault appends through ONE writer (one async mutex, one cached tail), so concurrent governed calls from any of them land on one linked chain.
+- **Across processes, the advisory file lock keeps one.** A second process that opens the same vault does not get to write: its audit writes fail with an error naming the lock holder, and its events go to the dead-letter queue (below), which `usertrust verify` reports. Its calls still settle: only a `trust()` client with `audit.failClosed` refuses them instead; `createGovernor()` and `usertrust-server` never enforce `audit.failClosed`, and report `auditDegraded`. Give each process its own vault (`vaultBase`), or run `usertrust-server` and have every process call it.
 
-Chain integrity therefore holds for the one writer that owns the vault. It is not shared across processes or across clients.
+Chain integrity holds for the one process that owns the vault; it is not shared across processes.
 
 ## Dead-Letter Queue
 
-If an audit write fails after the LLM call and ledger settlement have already succeeded, by default usertrust does **not** throw an error. Instead:
+If an audit write fails, usertrust does **not** throw by default. Only a `trust()` client with `audit.failClosed: true` refuses the call instead (the default is `false`); `createGovernor()` and `usertrust-server` never enforce `audit.failClosed`. Otherwise:
 
-1. The failed event is written to `.usertrust/dlq/dead-letters.jsonl` (fsync'd for durability)
-2. The response is returned with an `auditDegraded` flag on the governance receipt
-3. The entry is preserved in the dead-letter file for recovery; there is no command yet that replays it into the chain, and in 4.1.0 `usertrust verify` does not report entries that are waiting there
+1. The failed event is written to `.usertrust/dlq/dead-letters.jsonl` (fsync'd, with a checksum)
+2. The response is returned with an `auditDegraded` flag on the governance receipt, and the process gets a `USERTRUST_AUDIT_DEGRADED` warning
+3. `usertrust verify` reports the vault INCOMPLETE (`complete: false`, exit 1) while a dead-lettered event is missing from the chain, and `usertrust health` reports it as critical. No command yet puts dead letters back on the chain: keep the file
 
-With `trust()` and `audit.failClosed: true` the call is refused with `AuditDegradedError` instead, and whether it was charged depends on which audit write failed. For a non-stream call, if its main audit record fails, the call is aborted before any money moves: the hold is voided and nothing is charged. If a later audit write fails, after the spend has settled (and for every streamed call), the call is refused, and may have been charged: the settlement has already run (it posted, or its POST outcome is unknown) and is not undone, so retrying the call can charge it twice. Once an audit write on a client has failed, that client's audit writer stays marked degraded until the client is destroyed and recreated, and every later call on it is refused under `audit.failClosed`. Whether such a call was charged depends on how it ran. A non-stream call or action whose own record is written settles, and is then refused after its charge posts. A non-stream call or action whose own record fails again is voided before settlement and not charged. A streamed call always settles before its record is written, so it may have been charged. Wherever the settlement POST failed, the outcome is unknown. Treat any `AuditDegradedError` as possibly charged. `createGovernor()` and `usertrust-server` do not enforce `audit.failClosed`: their receipts report `auditDegraded` and the call is not refused.
+With `trust()` and `audit.failClosed: true` the call is refused with `AuditDegradedError` instead, and whether it was charged depends on how it ran. For a non-stream call or action, if its own audit record fails, the call is aborted before any money moves: the hold is voided and nothing is charged. If its record is written and the spend settles, and a later audit write for the call fails, the call is refused after its charge posts. A streamed call always settles before its record is written, so it may have been charged. Wherever the settlement POST failed, the outcome is unknown. Treat any `AuditDegradedError` as possibly charged. Once an audit write on a client has failed, that client stays marked degraded for the rest of its life: every later call on it is refused under `audit.failClosed`, with the outcomes above, until the client is destroyed and recreated. The mark is per client, so another client on the same vault is not affected. `createGovernor()` and `usertrust-server` do not enforce `audit.failClosed`: their receipts report `auditDegraded` and the call is not refused.
 
 <Callout type="warn">
 The dead-letter queue is a safety net, not normal operation. If events accumulate in the DLQ, investigate the underlying write failure (disk full, permissions, corrupt chain).

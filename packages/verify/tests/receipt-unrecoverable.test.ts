@@ -104,6 +104,28 @@ describe("--tx and settlement_unrecoverable", () => {
 		expect(r.receipt).not.toContain("SETTLED");
 	});
 
+	it.each([
+		["a number", 12345],
+		["an object", { id: "x" }],
+		["an array", ["tx"]],
+	])(
+		"a hash-matched record whose transferId is %s does not crash --tx; the id is dropped",
+		(_label, bad) => {
+			const r = verifyChainOf(
+				[
+					{
+						kind: "settlement_unrecoverable",
+						data: { ...UNRECOVERABLE("tx_lost").data, transferId: bad },
+					},
+				],
+				"tx_lost",
+			);
+			expect(r.found).toBe(true);
+			expect(r.receipt).toContain("UNRECOVERABLE");
+			expect(r.receipt).toContain("TX (sha256)");
+		},
+	);
+
 	it("an empty id still matches nothing", () => {
 		expect(verifyChainOf([UNRECOVERABLE("tx_lost")], "").found).toBe(false);
 	});
