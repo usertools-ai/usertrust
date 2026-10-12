@@ -5,8 +5,10 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { canonicalize } from "../../src/audit/canonical.js";
 import type { PersistedAuditEvent } from "../../src/audit/read.js";
 import { PRICING_TABLE } from "../../src/ledger/pricing.js";
+import { parseDeadLetters } from "../../src/report/dead-letters.js";
 import { render } from "../../src/report/render.js";
 import {
 	buildWeeklyReport,
@@ -399,14 +401,17 @@ describe("weekly report model", () => {
 	});
 
 	it("a DRY-RUN headless record (settled: true, no ledgerPosted) is confirmed but not ledger-proven", () => {
-		const m = build([
-			call("2026-10-08T01:00:00Z", 45, { transferId: "t-dry", source: "headless" }),
-			call("2026-10-08T02:00:00Z", 55, {
-				transferId: "t-real",
-				source: "headless",
-				ledgerPosted: true,
-			}),
-		]);
+		const m = build(
+			[
+				call("2026-10-08T01:00:00Z", 45, { transferId: "t-dry", source: "headless" }),
+				call("2026-10-08T02:00:00Z", 55, {
+					transferId: "t-real",
+					source: "headless",
+					ledgerPosted: true,
+				}),
+			],
+			{ deadLetters: { shortfalls: new Map() } },
+		);
 		expect(m.totals.confirmedUt).toBe(100);
 		expect(m.totals.postProvenUt).toBe(55);
 		expect(m.totals.postProvenCalls).toBe(1);
@@ -1231,5 +1236,84 @@ describe("both renderers state the same thing about records without their call",
 			expect(text, format).toContain("counted in the budget section as undenominated wallet units");
 			expect(text, format).not.toContain("in no spend or budget figure");
 		}
+	});
+});
+
+describe("a headless post with no shortfall record: the dead-letter queue decides exact versus upper bound", () => {
+	const T = "2026-10-08T01:00:00Z";
+	const headless = (cost: number, tid = "t") =>
+		call(T, cost, { transferId: tid, source: "headless", ledgerPosted: true });
+	const sealed = (payload: Record<string, unknown>, over: Record<string, unknown> = {}) => {
+		const entry = { source: "audit.chain.appendEvent", payload, error: "disk full", timestamp: T };
+		const checksum = createHash("sha256").update(canonicalize(entry)).digest("hex");
+		return JSON.stringify({ ...entry, checksum, checksumAlg: "sha256", ...over });
+	};
+	const shortfallLetter = (tid: string, posted: number) =>
+		sealed({
+			kind: "settlement_shortfall",
+			actor: "local",
+			data: { transferId: tid, actual: 100, posted, shortfall: 100 - posted },
+		});
+
+	it("a readable queue with no dead letter means NO cap: the proven figure is exact", () => {
+		const m = build([headless(100)], { deadLetters: parseDeadLetters("") });
+		expect(m.totals.postProvenUt).toBe(100);
+		expect(m.totals.postProvenUpperCalls).toBe(0);
+	});
+
+	it("a dead-lettered shortfall gives the exact POSTED amount, labelled as read from the queue", () => {
+		const m = build([headless(100)], {
+			deadLetters: parseDeadLetters(`${shortfallLetter("t", 60)}\n`),
+		});
+		expect(m.totals.postProvenUt).toBe(60);
+		expect(m.totals.postProvenDeadLetterUt).toBe(60);
+		expect(m.totals.postProvenDeadLetterCalls).toBe(1);
+		expect(m.totals.postProvenUpperCalls).toBe(0);
+		const text = render(m, "md");
+		expect(text).toContain("read from the dead-letter queue");
+		expect(text).toContain("never part of the VERIFIED claim");
+	});
+
+	it("an unreadable queue, a bad checksum or an unparseable line leaves only an UPPER bound, never an exact figure", () => {
+		const bad = [
+			["unreadable", { unreadable: true } as const],
+			["bad checksum", parseDeadLetters(sealed({ kind: "other" }, { checksum: "0".repeat(64) }))],
+			["not json", parseDeadLetters("{nope\n")],
+			["unknown algorithm", parseDeadLetters(sealed({ kind: "other" }, { checksumAlg: "md5" }))],
+		] as const;
+		for (const [name, deadLetters] of bad) {
+			const m = build([headless(100)], { deadLetters });
+			expect(m.totals.postProvenUt, name).toBe(0);
+			expect(m.totals.postProvenUpperUt, name).toBe(100);
+			expect(m.totals.postProvenUpperCalls, name).toBe(1);
+			const text = render(m, "md");
+			expect(text, name).toContain("up to");
+			expect(text, name).toContain("upper bound");
+		}
+	});
+
+	it("a caller that did not read the queue gets the upper bound too (absent is not 'none')", () => {
+		const m = build([headless(100)]);
+		expect(m.totals.postProvenUt).toBe(0);
+		expect(m.totals.postProvenUpperUt).toBe(100);
+	});
+
+	it("a shortfall record ON THE CHAIN wins over the queue, and stays exact", () => {
+		const m = build(
+			[
+				headless(100),
+				ev("settlement_shortfall", T, { transferId: "t", actual: 100, posted: 70, shortfall: 30 }),
+			],
+			{ deadLetters: parseDeadLetters(`${shortfallLetter("t", 60)}\n`) },
+		);
+		expect(m.totals.postProvenUt).toBe(70);
+		expect(m.totals.postProvenDeadLetterCalls).toBe(0);
+	});
+
+	it("an unrelated dead letter does not disturb the exact figure", () => {
+		const m = build([headless(100)], {
+			deadLetters: parseDeadLetters(`${sealed({ kind: "llm_call", data: { transferId: "x" } })}\n`),
+		});
+		expect(m.totals.postProvenUt).toBe(100);
 	});
 });

@@ -33,8 +33,14 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import pc from "picocolors";
 import { readLedgerEvents } from "../audit/read.js";
 import { verifyVault } from "../audit/verify.js";
+import { parseDeadLetters } from "../report/dead-letters.js";
 import { type ReportFormat, render } from "../report/render.js";
-import { AGENT_KEYS, type AgentKey, buildWeeklyReport } from "../report/weekly.js";
+import {
+	AGENT_KEYS,
+	type AgentKey,
+	buildWeeklyReport,
+	type DeadLetters,
+} from "../report/weekly.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import { TrustConfigSchema } from "../shared/types.js";
 import type { CliOptions } from "./init.js";
@@ -337,6 +343,8 @@ export function snapshotVault(
 	configUnreadable: boolean;
 	/** The governor's persisted counter, as recorded (NOT chain-verified), when the vault has one. */
 	spendLedger?: { value: number } | { unreadable: true };
+	/** The writer's dead-letter queue, read ONCE with the rest (NOT chain-verified). A read error is `unreadable`, never "none". */
+	deadLetters: DeadLetters;
 	cleanup: () => void;
 } {
 	const dir = mkdtempSync(join(tmpdir(), "usertrust-report-"));
@@ -344,6 +352,7 @@ export function snapshotVault(
 	const busy: string[] = [];
 	let configUnreadable = false;
 	let spendLedger: { value: number } | { unreadable: true } | undefined;
+	let deadLetters: DeadLetters = { shortfalls: new Map() };
 	const problem = (what: string, err: unknown): void => {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		problems.push(`Could not read ${what}${code !== undefined ? ` (${code})` : ""}`);
@@ -417,6 +426,16 @@ export function snapshotVault(
 				spendLedger = { unreadable: true };
 			}
 		}
+		// The writer's dead-letter queue: a capped post whose shortfall append failed is recorded there with the posted
+		// amount. Absent is "no dead letters"; a file that exists and cannot be read is NOT, it leaves only an upper bound.
+		const dlqSrc = join(vaultPath, "dlq", "dead-letters.jsonl");
+		if (existsSync(dlqSrc)) {
+			try {
+				deadLetters = parseDeadLetters(readFileSync(dlqSrc, "utf-8"));
+			} catch {
+				deadLetters = { unreadable: true };
+			}
+		}
 	} catch (err) {
 		rmSync(dir, { recursive: true, force: true });
 		throw err;
@@ -426,6 +445,7 @@ export function snapshotVault(
 		problems,
 		busy,
 		configUnreadable,
+		deadLetters,
 		...(spendLedger !== undefined ? { spendLedger } : {}),
 		cleanup: () => rmSync(dir, { recursive: true, force: true }),
 	};
@@ -576,6 +596,7 @@ export async function run(
 							: readVaultBudget(snapshot.dir),
 					budgetSource,
 					...(snapshot.spendLedger !== undefined ? { spendLedger: snapshot.spendLedger } : {}),
+					deadLetters: snapshot.deadLetters,
 					// An unreadable config is an UNKNOWN budget, never "no budget configured".
 					budgetUnreadable:
 						snapshot.configUnreadable &&

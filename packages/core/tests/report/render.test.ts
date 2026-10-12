@@ -202,7 +202,7 @@ describe("both evidence tiers are headlined", () => {
 		const m = buildWeeklyReport(
 			[ev({ transferId: "a" }), ev({ transferId: "b", source: "headless", ledgerPosted: true })],
 			{ verified: true, errors: [], chainLength: 2, firstEvent: "a", lastEvent: "b" },
-			{ endMs: END },
+			{ endMs: END, deadLetters: { shortfalls: new Map() } },
 		);
 		for (const f of ["md", "html"] as const) {
 			const out = render(m, f);

@@ -112,7 +112,17 @@ export interface ReportOptions {
 	 * NOT chain-verified and is reported only as "as recorded by the governor", beside the figure the chain gives.
 	 */
 	spendLedger?: { value: number } | { unreadable: true };
+	/**
+	 * Settlement shortfalls found in the writer's dead-letter queue, read from the same snapshot: a shortfall whose chain
+	 * append failed is in the DLQ with the `posted` amount. `{ unreadable: true }` when the queue could not be read, or an
+	 * entry failed its checksum or did not parse. NOT chain-verified. Absent means the caller did not read the queue, which
+	 * is treated as unreadable: the headless proven figure is then an upper bound, never exact.
+	 */
+	deadLetters?: DeadLetters;
 }
+
+/** What the dead-letter queue says about capped posts. A plain file: corruption-detecting, not tamper-evident. */
+export type DeadLetters = { shortfalls: ReadonlyMap<string, number> } | { unreadable: true };
 
 export interface IntegrityInfo {
 	verified: boolean;
@@ -205,6 +215,16 @@ export interface ReportModel {
 		/** Confirmed spend whose post is PROVEN by a record written after it (a headless record, or a `settlement_shortfall`). */
 		postProvenUt: UsdUt;
 		postProvenCalls: number;
+		/**
+		 * A headless call the ledger answered with NO shortfall record on the chain, when the dead-letter queue could not rule
+		 * out a capped post: its metered cost is an UPPER bound on what moved (the ledger caps at the hold). In neither
+		 * `postProvenUt` (the exact part) nor anywhere else as an exact figure.
+		 */
+		postProvenUpperUt: UsdUt;
+		postProvenUpperCalls: number;
+		/** Part of `postProvenUt`: the posted amount comes from a dead-lettered shortfall (the queue is not chain-verified). */
+		postProvenDeadLetterUt: UsdUt;
+		postProvenDeadLetterCalls: number;
 		/** Governed actions that are unconfirmed (same rules as calls): counted here, never added to `actionUt`. */
 		unconfirmedActionCalls: number;
 		unconfirmedActionUt: UsdUt;
@@ -722,6 +742,10 @@ function buildPlain(
 		uncorrelatedCalls: 0,
 		postProvenUt: 0,
 		postProvenCalls: 0,
+		postProvenUpperUt: 0,
+		postProvenUpperCalls: 0,
+		postProvenDeadLetterUt: 0,
+		postProvenDeadLetterCalls: 0,
 		unconfirmedActionCalls: 0,
 		unconfirmedActionUt: 0,
 		unlabelledUt: 0,
@@ -928,8 +952,34 @@ function buildPlain(
 			t.confirmedCalls += 1;
 			if (st.postProven) {
 				// What the ledger POSTED, not the metered cost: a capped post records the lower figure.
-				t.postProvenUt += (tid !== undefined ? postedByTransfer.get(tid) : undefined) ?? c;
-				t.postProvenCalls += 1;
+				const chainPosted = tid !== undefined ? postedByTransfer.get(tid) : undefined;
+				if (
+					chainPosted !== undefined ||
+					tid === undefined ||
+					kindsByTransfer.get(tid)?.has("settlement_shortfall")
+				) {
+					t.postProvenUt += chainPosted ?? c;
+					t.postProvenCalls += 1;
+				} else {
+					// Headless, the ledger answered, and no shortfall record is on the chain. A capped post whose shortfall
+					// append failed looks exactly like this, so the dead-letter queue (read once, from the snapshot) decides:
+					// a dead-lettered shortfall gives the posted amount, a readable queue without one means no cap, and an
+					// unreadable or unread queue leaves only an upper bound.
+					const dl = opts.deadLetters;
+					const dead = dl !== undefined && "shortfalls" in dl ? dl.shortfalls.get(tid) : undefined;
+					if (dead !== undefined) {
+						t.postProvenUt += dead;
+						t.postProvenCalls += 1;
+						t.postProvenDeadLetterUt += dead;
+						t.postProvenDeadLetterCalls += 1;
+					} else if (dl !== undefined && "shortfalls" in dl) {
+						t.postProvenUt += c;
+						t.postProvenCalls += 1;
+					} else {
+						t.postProvenUpperUt += c;
+						t.postProvenUpperCalls += 1;
+					}
+				}
 			}
 			if (denomination === "unlabelled") {
 				t.unlabelledUt += c;

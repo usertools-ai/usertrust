@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	existsSync,
@@ -16,6 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { canonicalize } from "../../src/audit/canonical.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
 import { verifyVault } from "../../src/audit/verify.js";
 import { reportArgv } from "../../src/cli/flags.js";
@@ -585,6 +587,57 @@ describe("usertrust report --week", () => {
 		};
 		expect(out.spendLedger).toMatchObject({ differs: true, recorded: 9999 });
 		expect(out.integrity.verified).toBe(true); // the unverified file never touches the VERIFIED claim
+		write.mockRestore();
+	});
+
+	it("the dead-letter queue is read from the snapshot: a dead-lettered shortfall makes a headless post exact at the posted amount, an unreadable queue an upper bound", async () => {
+		await vault([
+			{
+				cost: 100,
+				data: { transferId: "t-cap", source: "headless", ledgerPosted: true },
+			},
+		]);
+		const dlqDir = join(dir, ".usertrust", "dlq");
+		mkdirSync(dlqDir, { recursive: true });
+		const entry = {
+			source: "audit.chain.appendEvent",
+			payload: {
+				kind: "settlement_shortfall",
+				actor: "local",
+				data: { transferId: "t-cap", actual: 100, posted: 60, shortfall: 40 },
+			},
+			error: "disk full",
+			timestamp: "2026-10-08T01:00:00.000Z",
+		};
+		const checksum = createHash("sha256").update(canonicalize(entry)).digest("hex");
+		const dlq = join(dlqDir, "dead-letters.jsonl");
+		writeFileSync(dlq, `${JSON.stringify({ ...entry, checksum, checksumAlg: "sha256" })}\n`);
+		type Totals = {
+			postProvenUt: number;
+			postProvenDeadLetterUt: number;
+			postProvenUpperUt: number;
+		};
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		let totals = (JSON.parse(stdout) as { totals: Totals }).totals;
+		expect(totals).toMatchObject({
+			postProvenUt: 60,
+			postProvenDeadLetterUt: 60,
+			postProvenUpperUt: 0,
+		});
+		// no queue file at all: no dead letters, so the post was not capped
+		rmSync(dlq);
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		totals = (JSON.parse(stdout) as { totals: Totals }).totals;
+		expect(totals).toMatchObject({ postProvenUt: 100, postProvenUpperUt: 0 });
+		// a corrupt queue: only an upper bound, and the chain verdict is untouched
+		writeFileSync(dlq, "{corrupt\n");
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		const parsed = JSON.parse(stdout) as { totals: Totals; integrity: { verified: boolean } };
+		expect(parsed.totals).toMatchObject({ postProvenUt: 0, postProvenUpperUt: 100 });
+		expect(parsed.integrity.verified).toBe(true);
 		write.mockRestore();
 	});
 

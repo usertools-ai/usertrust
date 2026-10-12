@@ -183,6 +183,27 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 const WITHOUT_CALL_NOTE =
 	"These records qualify a call (a shortfall, an ambiguity, an implausible-usage note, a failure marker) but the chain holds no record of the call itself. Their amounts are usertokens with no denomination assumed, and they are in no spend (dollar) figure. A standalone shortfall or ambiguity is counted in the budget section as undenominated wallet units, because the governor counted it; a standalone ambiguity is also in the unconfirmed totals.";
 
+const UPPER_BOUND_NOTE =
+	"A headless call the ledger answered, with no shortfall record on the chain, is exact only if the post was not capped at its hold. A capped post whose shortfall record failed to append would leave exactly this shape, and the writer's dead-letter queue could not be read to rule it out, so those calls are counted as an upper bound (at most their metered cost), not as an exact figure.";
+const DEAD_LETTER_NOTE =
+	"The posted amount of the dead-lettered call(s) comes from the writer's dead-letter queue, a plain file the chain does not verify; it is never part of the VERIFIED claim.";
+
+/** The ledger-proven headline: the exact part, then any upper-bounded part, then any dead-letter-sourced part, each stated once. */
+function provenText(t: ReportModel["totals"]): string {
+	const parts = [`${usd(t.postProvenUt)} across ${t.postProvenCalls} call(s).`];
+	if (t.postProvenDeadLetterCalls > 0) {
+		parts.push(
+			`Of that, ${usd(t.postProvenDeadLetterUt)} across ${t.postProvenDeadLetterCalls} call(s) is the posted amount read from the dead-letter queue. ${DEAD_LETTER_NOTE}`,
+		);
+	}
+	if (t.postProvenUpperCalls > 0) {
+		parts.push(
+			`Plus up to ${usd(t.postProvenUpperUt)} across ${t.postProvenUpperCalls} call(s) as an upper bound. ${UPPER_BOUND_NOTE}`,
+		);
+	}
+	return parts.join(" ");
+}
+
 /** What this report is not, printed with every rendering. */
 export const NOT_CLAIMED: readonly string[] = [
 	"Only calls that went through usertrust are in this report. Agents or calls that were not metered are not counted and not estimated.",
@@ -236,7 +257,7 @@ export function renderMarkdown(m: ReportModel): string {
 		"## Headline",
 		"",
 		`- **Confirmed spend:** ${usd(t.confirmedUt)} (${utStr(t.confirmedUt)}) across ${t.confirmedCalls} call(s)`,
-		`- **Of which ledger-proven:** ${usd(t.postProvenUt)} across ${t.postProvenCalls} call(s). ${PROOF_NOTE}`,
+		`- **Of which ledger-proven:** ${provenText(t)} ${PROOF_NOTE}`,
 		`- **Unconfirmed:** ${usd(t.unconfirmedUt)} across ${t.unconfirmedCalls} call(s) whose charge is not proven (not counted as spent)${
 			t.unconfirmedUnlabelledCalls > 0
 				? `; ${t.unconfirmedUnlabelledCalls} of them record no denomination (${tokens(t.unconfirmedUnlabelledUt)} usertokens, not shown as dollars)`
@@ -425,7 +446,7 @@ export function renderHtml(m: ReportModel): string {
 	body.push(
 		`<header><p class="muted">usertrust</p><h1>Weekly spend report</h1><p class="muted">${esc(m.window.startIso)} to ${esc(m.window.endIso)} (${m.window.days} days, end exclusive)</p><p class="${unverified ? "bad" : "ok"}"><strong>${esc(verdictLine(m, (x) => x))}</strong></p></header>`,
 		`<p class="muted">${esc(PROOF_NOTE)}</p>`,
-		`<section class="headline"><div><span class="big">${usd(t.confirmedUt)}</span><span class="muted">confirmed spend, ${t.confirmedCalls} call(s); of which ledger-proven ${usd(t.postProvenUt)}, ${t.postProvenCalls} call(s)</span></div><div><span class="big">${usd(t.unconfirmedUt)}</span><span class="muted">unconfirmed (failed, ambiguous, unsettled or uncorrelated), ${t.unconfirmedCalls} call(s)${t.unconfirmedUnlabelledCalls > 0 ? `; ${t.unconfirmedUnlabelledCalls} record no denomination (not shown as dollars)` : ""}</span></div>${
+		`<section class="headline"><div><span class="big">${usd(t.confirmedUt)}</span><span class="muted">confirmed spend, ${t.confirmedCalls} call(s); of which ledger-proven ${esc(provenText(t))}</span></div><div><span class="big">${usd(t.unconfirmedUt)}</span><span class="muted">unconfirmed (failed, ambiguous, unsettled or uncorrelated), ${t.unconfirmedCalls} call(s)${t.unconfirmedUnlabelledCalls > 0 ? `; ${t.unconfirmedUnlabelledCalls} record no denomination (not shown as dollars)` : ""}</span></div>${
 			t.estimatedCalls > 0
 				? `<div><span class="big">${usd(t.estimatedUt)}</span><span class="muted">of confirmed spend priced from an estimate</span></div>`
 				: ""
