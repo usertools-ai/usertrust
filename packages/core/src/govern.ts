@@ -168,8 +168,18 @@ export interface TrustOpts {
 	key?: string;
 	/** Token budget override. */
 	budget?: number;
-	/** Tier override. */
+	/** Tier. Accepted, but currently not applied: the config file's `tier` is used. */
 	tier?: string;
+	/**
+	 * PII enforcement override: overrides `pii` in the config file
+	 * (`"redact" | "warn" | "block" | "off"`, see `TrustConfigSchema.pii`). Any
+	 * other value is refused by name at construction.
+	 *
+	 * SECURITY: TRUSTED-OPERATOR input, same boundary as budget/scope — never
+	 * derive it from end-user or request data: a request that could choose its
+	 * own PII mode could turn `block` off.
+	 */
+	pii?: TrustConfig["pii"] | undefined;
 	/**
 	 * This governor's ledger identity — the parent half of the
 	 * `(parentUserId, costCenter)` tuple every cost-center envelope account is
@@ -228,6 +238,216 @@ export interface TrustOpts {
 	 * @internal
 	 */
 	_audit?: AuditWriter;
+}
+
+/**
+ * Every key `TrustOpts` declares, and no other: the allow-list `trust()` checks
+ * its runtime options against (`readOwnOptions`). Typed as a `Record` over
+ * `keyof TrustOpts`, so a field added to TrustOpts without a row here, or a row
+ * TrustOpts does not declare, fails to compile: the two cannot drift.
+ * @internal
+ */
+export const TRUST_OPTS_KEYS: Readonly<Record<keyof TrustOpts, true>> = {
+	configPath: true,
+	proxy: true,
+	key: true,
+	budget: true,
+	tier: true,
+	pii: true,
+	parentUserId: true,
+	scope: true,
+	dryRun: true,
+	vaultBase: true,
+	endpoint: true,
+	allowUngoverned: true,
+	_engine: true,
+	_audit: true,
+};
+
+/**
+ * The config-file settings an option overrides. Every other config setting is
+ * read from the file only, and passing it as an option is refused by name.
+ */
+const CONFIG_OVERRIDE_KEYS = [
+	"budget",
+	"pii",
+	"parentUserId",
+	"scope",
+] as const satisfies readonly (keyof TrustOpts & keyof TrustConfig)[];
+
+/** Options whose value is one of a closed set the config schema declares. */
+const ENUM_OVERRIDE_KEYS = [
+	"pii",
+] as const satisfies readonly (typeof CONFIG_OVERRIDE_KEYS)[number][];
+
+/**
+ * Accepted (no refusal) but never advertised in a refusal's list: `proxy` and
+ * `key` are deprecated, and `tier` is declared but not currently applied.
+ */
+const UNADVERTISED_OPTS = new Set(["proxy", "key", "tier"]);
+
+/**
+ * The options that override config-file values, ready to spread over the file's
+ * contents before `TrustConfigSchema.parse` validates the result. Undefined
+ * options are left out, so the file's (or the schema's default) value stands.
+ * Only OWN properties are read, the same keys `readOwnOptions` checks, so an
+ * inherited value can never be applied without having been checked. Shared by
+ * `trust()` and `createGovernor()` so the two cannot override differently.
+ * @internal
+ */
+export function trustConfigOverrides(opts: TrustOpts | undefined): Record<string, unknown> {
+	const overrides: Record<string, unknown> = {};
+	if (opts === undefined) return overrides;
+	for (const key of CONFIG_OVERRIDE_KEYS) {
+		const value = Object.hasOwn(opts, key) ? opts[key] : undefined;
+		if (value !== undefined) overrides[key] = value;
+	}
+	return overrides;
+}
+
+/** A caller-supplied key or value, quoted for an error message: clipped, control characters escaped. */
+function quoteForRefusal(value: unknown): string {
+	if (value === null) return "null";
+	return typeof value === "string" ? JSON.stringify(value.slice(0, 64)) : `of type ${typeof value}`;
+}
+
+/**
+ * Whether `proto` is some realm's `Object.prototype`: the root of a plain
+ * object's chain. Decided by shape, not by identity with THIS realm's
+ * `Object.prototype`, so a plain object made in another realm (`node:vm`, a
+ * worker's structured data, an iframe) is not refused for inheriting
+ * `toString`. A null-rooted prototype counts as the root only when it also
+ * looks like one (its own `constructor` is a function whose `prototype` is it,
+ * and it has its own `hasOwnProperty`), because a bare
+ * `Object.create(null, { pii: … })` prototype treated as the root would have
+ * its keys skipped, and dropped in silence. Read through property descriptors,
+ * so no getter runs.
+ */
+function isRootObjectPrototype(proto: object): boolean {
+	if (Object.getPrototypeOf(proto) !== null) return false;
+	const ctor = Object.getOwnPropertyDescriptor(proto, "constructor")?.value;
+	const hasOwn = Object.getOwnPropertyDescriptor(proto, "hasOwnProperty")?.value;
+	return (
+		typeof ctor === "function" &&
+		Object.getOwnPropertyDescriptor(ctor, "prototype")?.value === proto &&
+		typeof hasOwn === "function"
+	);
+}
+
+/**
+ * Every property name the options object inherits from its prototype chain
+ * below the root `Object.prototype` of whichever realm made it (`constructor`
+ * aside), enumerable or not.
+ */
+function inheritedOptionNames(opts: object): string[] {
+	const names = new Set<string>();
+	for (
+		let proto: object | null = Object.getPrototypeOf(opts);
+		proto !== null && !isRootObjectPrototype(proto);
+		proto = Object.getPrototypeOf(proto)
+	) {
+		for (const name of Object.getOwnPropertyNames(proto)) {
+			if (name !== "constructor" && !Object.hasOwn(opts, name)) names.add(name);
+		}
+	}
+	return [...names];
+}
+
+/**
+ * Check a runtime options object and return the copy `fn` reads from.
+ * `misplaced` names options another entry point takes, each with the reason
+ * this one refuses it, so the refusal says why rather than "unknown".
+ *
+ * Refuses, by name, every option `fn` does not declare. TypeScript already
+ * rejects an unknown key in an object literal, but a JavaScript caller (or one
+ * that spreads an untyped object) gets no such check: before this, an option
+ * such as `{ circuitBreaker: … }`, or a misspelt `{ pi: "block" }`, was dropped
+ * in silence and the call ran on the config file's values. A `pii` value the
+ * schema does not allow is refused here too, by name, rather than as a schema
+ * error deep in construction. Thrown before anything is read or created.
+ *
+ * The check and the reads must see the same keys, or one of them is silent: a
+ * key the check skips is dropped, and a key the reads reach through the
+ * prototype is applied unchecked. So every own string key is checked,
+ * enumerable or not, any key inherited from below `Object.prototype` is
+ * refused by name rather than applied, and the caller reads only the returned
+ * copy of the own properties (null prototype, each read once, so a getter
+ * cannot answer the check and the governor differently).
+ *
+ * The copy is read through each property's OWN descriptor, never by ordinary
+ * property access: a getter runs while the copy is made, and one that deleted a
+ * later own property would otherwise let that read resolve through the
+ * prototype to a value the check never saw (an own `pii: "block"` shadowing an
+ * inherited `"off"`). So a property that vanished while the copy was made, or
+ * one a getter added, is refused by name: nothing is applied unchecked.
+ * @internal
+ */
+export function readOwnOptions<O extends object>(
+	fn: string,
+	opts: O | undefined,
+	allowed: Readonly<Record<keyof O, true>>,
+	misplaced: Readonly<Record<string, string>> = {},
+): O | undefined {
+	// Only an omitted (undefined) argument means "no options", as the signature
+	// says (`opts?:`); `null` is refused like any other non-object, never read as
+	// "use the file's values".
+	if (opts === undefined) return undefined;
+	if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+		throw new TypeError(`${fn}: options must be an object, got ${quoteForRefusal(opts)}`);
+	}
+	const own = Object.getOwnPropertyNames(opts);
+	const problems = [
+		...own
+			.filter((key) => !Object.hasOwn(allowed, key))
+			.map((key) =>
+				Object.hasOwn(misplaced, key)
+					? `option ${quoteForRefusal(key)} ${misplaced[key]}`
+					: `unknown option ${quoteForRefusal(key)}${
+							Object.hasOwn(TrustConfigSchema.shape, key)
+								? " (set it in .usertrust/usertrust.config.json)"
+								: ""
+						}`,
+			),
+		...inheritedOptionNames(opts).map(
+			(key) =>
+				`option ${quoteForRefusal(key)} is inherited from the options object's prototype (pass it as an own property)`,
+		),
+	];
+	if (problems.length > 0) {
+		const accepted = Object.keys(allowed)
+			.filter((key) => !key.startsWith("_") && !UNADVERTISED_OPTS.has(key))
+			.sort();
+		throw new TypeError(
+			`${fn}: ${problems.join("; ")}. ${fn} accepts only: ${accepted.join(", ")}.`,
+		);
+	}
+	const copy: Record<string, unknown> = Object.create(null);
+	for (const key of own) {
+		const descriptor = Object.getOwnPropertyDescriptor(opts, key);
+		if (descriptor === undefined) {
+			throw new TypeError(
+				`${fn}: option ${quoteForRefusal(key)} was removed while the options were being read`,
+			);
+		}
+		copy[key] = "value" in descriptor ? descriptor.value : descriptor.get?.call(opts);
+	}
+	const added = Object.getOwnPropertyNames(opts).filter((key) => !own.includes(key));
+	if (added.length > 0) {
+		throw new TypeError(
+			`${fn}: ${added.map((key) => `option ${quoteForRefusal(key)} was added while the options were being read`).join("; ")}`,
+		);
+	}
+	for (const key of ENUM_OVERRIDE_KEYS) {
+		const value = copy[key];
+		if (value === undefined) continue;
+		const values: readonly string[] = TrustConfigSchema.shape[key].unwrap().options;
+		if (typeof value !== "string" || !values.includes(value)) {
+			throw new TypeError(
+				`${fn}: invalid option ${key} ${quoteForRefusal(value)}: expected one of ${values.map((v) => `"${v}"`).join(", ")}`,
+			);
+		}
+	}
+	return copy as O;
 }
 
 /** Minimal engine interface for two-phase spend lifecycle. */
@@ -1246,8 +1466,19 @@ function snapshotActionDescriptor(descriptor: ActionDescriptor): ActionDescripto
 // ── trust() ──
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
-	// 0. Validate the operator's opt-out list before anything touches the vault.
-	const allowUngoverned = validateAllowUngoverned(opts?.allowUngoverned);
+	// 0. An option this function does not declare is refused by name, before anything
+	// is read or created: dropping it would run the call on the file's values. From
+	// here on `opts` is the checked copy of the caller's OWN properties (data only, so
+	// no getter runs again below).
+	opts = readOwnOptions("trust()", opts, TRUST_OPTS_KEYS);
+	// Then validate the operator's opt-out list, read once from that copy, before anything
+	// touches the vault. Its free and governed checks need the client kind; detectClientKind is
+	// a pure shape test, run here only when a list was given (it runs again, unchanged, at step 5).
+	const rawAllowUngoverned = opts?.allowUngoverned;
+	const allowUngoverned = validateAllowUngoverned(
+		rawAllowUngoverned,
+		rawAllowUngoverned === undefined ? undefined : detectClientKind(client),
+	);
 
 	// 1. Load config
 	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,
@@ -1267,16 +1498,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		const raw: unknown = JSON.parse(await readFile(configPath, "utf-8"));
 		config = TrustConfigSchema.parse({
 			...(raw as Record<string, unknown>),
-			...(opts?.budget !== undefined ? { budget: opts.budget } : {}),
-			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
-			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
+			...trustConfigOverrides(opts),
 		});
 	} else {
-		config = TrustConfigSchema.parse({
-			budget: opts?.budget ?? DEFAULT_BUDGET,
-			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
-			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
-		});
+		config = TrustConfigSchema.parse({ budget: DEFAULT_BUDGET, ...trustConfigOverrides(opts) });
 	}
 
 	// D8: one-time migration warning, evaluated at the config-load path.

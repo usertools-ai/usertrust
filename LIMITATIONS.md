@@ -307,6 +307,19 @@ charged for what it consumed; the abort path is the gap. A provider error mid-st
 voids the hold, as intended. This is a known gap, fixed in the next release. Until
 then, do not rely on an aborted stream to have been charged.
 
+## 13. A ledger-backed server can hang when its ledger is unreachable, and may not audit a hold it releases on SIGINT or SIGTERM
+
+A ledger-backed `usertrust-server` answers `POST /v1/authorize` only when its ledger
+answers. If the ledger becomes unreachable, authorize calls hang without an answer, and
+`GET /v1/health` still reports `ok`. A request the client abandons can leave its hold
+reserved for up to 300 seconds after the ledger returns. These are known defects in
+5.0.0. Until a later release fixes them, set a client timeout on every call to the server.
+
+A ledger-backed server stopped by SIGINT or SIGTERM ends each pending hold through
+`destroy()`, which the process can exit before finishing. A hold whose void had not
+reached the ledger stays reserved until the ledger's 300-second hold timeout, and a
+release can be missing from the chain.
+
 ---
 
 Found a boundary we haven't documented? That is a bug in this file — open an

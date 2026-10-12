@@ -85,11 +85,14 @@ import {
 	envelopeTierFields,
 	preflightEnvelopeRemaining,
 	type ResolvedEnvelope,
+	readOwnOptions,
 	resolveEnvelope,
 	runTeardownSteps,
 	snapshotEnvelopeRemaining,
+	TRUST_OPTS_KEYS,
 	type TrustEngine,
 	type TrustOpts,
+	trustConfigOverrides,
 } from "./govern.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
@@ -176,13 +179,18 @@ export { principalFieldRefusal, principalLedgerTags } from "./shared/principal.j
  * Options for createGovernor(): TrustOpts plus a governor-wide default
  * endpoint scope (M2 local-model governance).
  *
+ * `allowUngoverned` is NOT inherited: it opts SDK methods out of a wrapped
+ * client's default-deny boundary, and a governor wraps no client. Passed anyway
+ * (from JavaScript, or through a value typed as TrustOpts), createGovernor()
+ * refuses it by name.
+ *
  * The envelope identity `parentUserId` is INHERITED from TrustOpts — one field
  * and one validation rule across both governors, so a cost center derives the
  * same account whichever one holds the client. Host-owned policy `scope` is
  * inherited the same way — `scopePatterns` match that value, never request
  * content.
  */
-export interface GovernorOpts extends TrustOpts {
+export interface GovernorOpts extends Omit<TrustOpts, "allowUngoverned"> {
 	/**
 	 * Governor-wide default endpoint scope for rate resolution. Applies to every
 	 * authorize() call that does not carry its own per-call `endpoint` override
@@ -202,6 +210,26 @@ export interface GovernorOpts extends TrustOpts {
 	 */
 	_destroyDrainMs?: number;
 }
+
+/**
+ * The TrustOpts fields createGovernor() does not take, each with the reason its
+ * refusal gives. Keyed by exactly the fields GovernorOpts omits, so omitting
+ * another one without a reason fails to compile.
+ */
+const TRUST_ONLY_OPTS: Readonly<Record<Exclude<keyof TrustOpts, keyof GovernorOpts>, string>> = {
+	allowUngoverned: "applies to trust()-wrapped clients only",
+};
+
+/**
+ * Every key `GovernorOpts` declares: `TrustOpts`'s minus the trust()-only ones,
+ * plus its own. A `Record` over `keyof GovernorOpts`, so the list and the
+ * interface cannot drift.
+ */
+const { allowUngoverned: _trustOnly, ...GOVERNOR_TRUST_OPTS_KEYS } = TRUST_OPTS_KEYS;
+const GOVERNOR_OPTS_KEYS: Readonly<Record<keyof GovernorOpts, true>> = {
+	...GOVERNOR_TRUST_OPTS_KEYS,
+	_destroyDrainMs: true,
+};
 
 /** Handle returned by authorize(), passed to settle() or abort(). */
 export interface Authorization {
@@ -1162,6 +1190,11 @@ function estimateTier(value: unknown, field: string): number {
 }
 
 export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
+	// 0. An option this function does not declare is refused by name, before anything
+	// is read or created (see readOwnOptions; same rule as trust()). From here on
+	// `opts` is the checked copy of the caller's OWN properties.
+	opts = readOwnOptions("createGovernor()", opts, GOVERNOR_OPTS_KEYS, TRUST_ONLY_OPTS);
+
 	// 1. Load config
 	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,
 	// so every vault file this client touches is in the vault it was created for, whatever the working
@@ -1180,16 +1213,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		const raw: unknown = JSON.parse(await readFile(configPath, "utf-8"));
 		config = TrustConfigSchema.parse({
 			...(raw as Record<string, unknown>),
-			...(opts?.budget !== undefined ? { budget: opts.budget } : {}),
-			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
-			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
+			...trustConfigOverrides(opts),
 		});
 	} else {
-		config = TrustConfigSchema.parse({
-			budget: opts?.budget ?? DEFAULT_BUDGET,
-			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
-			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
-		});
+		config = TrustConfigSchema.parse({ budget: DEFAULT_BUDGET, ...trustConfigOverrides(opts) });
 	}
 
 	const customRates = config.pricing === "custom" ? config.customRates : undefined;

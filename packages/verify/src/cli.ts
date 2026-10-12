@@ -24,6 +24,7 @@ import {
 	verifyVaultWithAnchors,
 	type WitnessInput,
 } from "./index.js";
+import { clipForDisplay, forDisplay } from "./receipt.js";
 import {
 	RECEIPT_DISPATCH_TOKEN,
 	type ReceiptCliIo,
@@ -87,7 +88,7 @@ Options:
 function parseDurationMs(raw: string): number {
 	const m = /^(\d+)(ms|s|m|h|d)?$/.exec(raw);
 	if (m === null) {
-		console.error(`Invalid duration: ${raw} (use e.g. 500ms, 30s, 15m, 1h, 7d)`);
+		console.error(`Invalid duration: ${forDisplay(raw)} (use e.g. 500ms, 30s, 15m, 1h, 7d)`);
 		process.exit(1);
 	}
 	const n = Number.parseInt(m[1] as string, 10);
@@ -113,12 +114,12 @@ const BUNDLE_KEYS = new Set(["v", "records", "rekorReceipts"]);
 function readPinnedPem(path: string): string {
 	const pem = readFileSync(path, "utf-8");
 	if (Buffer.byteLength(pem, "utf8") > MAX_PEM_BYTES) {
-		console.error(`--rekor-pubkey ${path}: PEM exceeds 16 KiB`);
+		console.error(`--rekor-pubkey ${forDisplay(path)}: PEM exceeds 16 KiB`);
 		process.exit(1);
 	}
 	if (pem.trim().length === 0 || !pem.includes("-----BEGIN PUBLIC KEY-----")) {
 		console.error(
-			`--rekor-pubkey ${path}: not a PEM public key (-----BEGIN PUBLIC KEY----- missing)`,
+			`--rekor-pubkey ${forDisplay(path)}: not a PEM public key (-----BEGIN PUBLIC KEY----- missing)`,
 		);
 		process.exit(1);
 	}
@@ -276,7 +277,7 @@ async function buildAnchorParams(): Promise<AnchorVerifyParams> {
 			externalAnchorsRaw.push(bundle.anchorsRaw);
 			rekorReceiptsRaw.push(...bundle.receiptsRaw);
 		} catch (err) {
-			console.error(err instanceof Error ? err.message : String(err));
+			console.error(forDisplay(err instanceof Error ? err.message : String(err)));
 			process.exit(1);
 		}
 	}
@@ -347,7 +348,7 @@ function printAnchorSection(result: AnchoredVaultVerificationResult): void {
 	console.log(`Anchor state: ${result.anchorState} (source: ${a.anchorSource})`);
 	if (a.latestAnchor) {
 		console.log(
-			`Latest anchor: #${a.latestAnchor.anchorSeq} treeSize ${a.latestAnchor.treeSize} keyId ${a.latestAnchor.keyId.slice(0, 19)}… (${a.latestAnchor.timestamp})`,
+			`Latest anchor: #${a.latestAnchor.anchorSeq} treeSize ${a.latestAnchor.treeSize} keyId ${clipForDisplay(a.latestAnchor.keyId, 19)}… (${forDisplay(a.latestAnchor.timestamp)})`,
 		);
 	}
 	console.log(`Unanchored tail: ${a.unanchoredTail.events} event(s)`);
@@ -360,7 +361,9 @@ function printAnchorSection(result: AnchoredVaultVerificationResult): void {
 		console.log(`Rekor: ${a.rekor.receiptsVerified} receipt(s) verified${failed}${attested}`);
 	}
 	if (a.witness.requested) {
-		console.log(`Witness: ${a.witness.status}${a.witness.error ? ` (${a.witness.error})` : ""}`);
+		console.log(
+			`Witness: ${a.witness.status}${a.witness.error ? ` (${forDisplay(a.witness.error)})` : ""}`,
+		);
 	}
 	if (a.anchorSource === "vault-mirror") {
 		console.log(
@@ -368,14 +371,41 @@ function printAnchorSection(result: AnchoredVaultVerificationResult): void {
 		);
 	}
 	for (const w of a.warnings) {
-		console.log(`WARNING: ${w}`);
+		console.log(`WARNING: ${forDisplay(w)}`);
+	}
+}
+
+/**
+ * Every failure on the way to a verdict ends here: printed through `forDisplay`, exit 1. The anchor inputs are files
+ * the caller names (`--anchor`, `--rekor-receipts`, `--rekor-pubkey`, `--pubkey`, `--successor-pin`), and a failed read's
+ * message quotes the path, so an uncaught one reached the terminal raw, escape sequences included, through Node's own
+ * uncaught-error printer.
+ */
+function failScrubbed(err: unknown): never {
+	console.error(`Error: ${forDisplay(err instanceof Error ? err.message : String(err))}`);
+	process.exit(1);
+}
+
+async function anchorParamsOrFail(): Promise<AnchorVerifyParams> {
+	try {
+		return await buildAnchorParams();
+	} catch (err) {
+		return failScrubbed(err);
+	}
+}
+
+function verifiedOrFail<T>(verify: () => T): T {
+	try {
+		return verify();
+	} catch (err) {
+		return failScrubbed(err);
 	}
 }
 
 // ── Single transaction mode ──
 if (txId !== undefined) {
-	const params = anchorMode ? await buildAnchorParams() : undefined;
-	const result = verifyTransaction(vaultPath, txId, params);
+	const params = anchorMode ? await anchorParamsOrFail() : undefined;
+	const result = verifiedOrFail(() => verifyTransaction(vaultPath, txId, params));
 	console.log(result.receipt);
 	// Exit 0: verified, 1: tampered/corrupted, 2: not found
 	if (!result.found) process.exit(2);
@@ -396,27 +426,28 @@ if (txId !== undefined) {
 
 // ── Full vault verification ──
 if (!anchorMode) {
-	const result = verifyVault(vaultPath);
+	const result = verifiedOrFail(() => verifyVault(vaultPath));
 	if (result.valid) {
 		console.log("Vault integrity: VERIFIED (UNANCHORED — internal consistency only)");
 	} else {
 		console.log("Vault integrity: FAILED");
 		for (const error of result.errors) {
-			console.log(`  - ${error}`);
+			console.log(`  - ${forDisplay(error)}`);
 		}
 	}
 	console.log(`Chain length: ${result.chainLength} events`);
 	console.log(`Merkle root: ${result.merkleRoot ?? "N/A"}`);
 	console.log("Hash algorithm: SHA-256");
-	if (result.firstEvent) console.log(`First event: ${result.firstEvent}`);
-	if (result.lastEvent) console.log(`Last event: ${result.lastEvent}`);
+	if (result.firstEvent) console.log(`First event: ${forDisplay(result.firstEvent)}`);
+	if (result.lastEvent) console.log(`Last event: ${forDisplay(result.lastEvent)}`);
 	if (result.chainLength > 0) {
 		console.log(`All hashes: valid (${result.validHashes}/${result.chainLength})`);
 	}
 	process.exit(exitCodeFor(result));
 }
 
-const result = verifyVaultWithAnchors(vaultPath, await buildAnchorParams());
+const anchorParams = await anchorParamsOrFail();
+const result = verifiedOrFail(() => verifyVaultWithAnchors(vaultPath, anchorParams));
 if (result.valid) {
 	console.log(
 		result.anchorState === "ANCHORED_VERIFIED"
@@ -426,7 +457,7 @@ if (result.valid) {
 } else {
 	console.log(`Vault integrity: FAILED (${result.anchorState})`);
 	for (const error of result.errors) {
-		console.log(`  - ${error}`);
+		console.log(`  - ${forDisplay(error)}`);
 	}
 }
 printAnchorSection(result);
