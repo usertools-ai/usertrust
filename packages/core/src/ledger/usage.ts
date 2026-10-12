@@ -85,6 +85,35 @@ export function materializeMaxima(raw: unknown): { [K in UsageTier]?: number } |
 	return out;
 }
 
+/**
+ * The finite figure a refusal records for a value that states no usable count: `Number.MAX_VALUE` for a positive
+ * Infinity (the most absurd figure, not representable), 0 for anything else (NaN, a negative, a string, an object),
+ * as the plugin's `providerFigure` records it. One rule for a provider's field and a caller's refused tier.
+ */
+function refusedStandIn(raw: unknown): number {
+	return raw === Number.POSITIVE_INFINITY ? Number.MAX_VALUE : 0;
+}
+
+/**
+ * A caller's REFUSED tiers as a PLAIN object, each tier read exactly once by name, as in {@link materializeMaxima}.
+ * Unlike a maximum, a refusal is never dropped for its value: presence is the flag. `undefined` and `null` are absent; a
+ * finite number >= 0 is kept as stated; any other value is kept at its {@link refusedStandIn}, so every figure out is a
+ * finite number >= 0.
+ */
+export function materializeRefused(raw: unknown): { [K in UsageTier]?: number } | undefined {
+	if (raw === null || typeof raw !== "object") return undefined;
+	const out: { [K in UsageTier]?: number } = {};
+	for (const tier of USAGE_TIERS) {
+		const value = (raw as Record<string, unknown>)[tier];
+		if (value === undefined || value === null) continue;
+		out[tier] =
+			typeof value === "number" && Number.isFinite(value) && value >= 0
+				? value
+				: refusedStandIn(value);
+	}
+	return out;
+}
+
 /** The tiers a plausibility check can name. */
 export type UsageTier =
 	| "inputTokens"
@@ -204,7 +233,7 @@ function component(
 	if (raw === undefined || raw === null) return null;
 	const value = readCount(raw);
 	if (value !== null && value <= MAX_PLAUSIBLE_TOKENS_PER_TIER) return value;
-	const figure = value ?? (raw === Number.POSITIVE_INFINITY ? Number.MAX_VALUE : 0);
+	const figure = value ?? refusedStandIn(raw);
 	for (const tier of Array.isArray(tiers) ? tiers : [tiers]) {
 		refused[tier] = Math.max(refused[tier] ?? 0, figure);
 	}

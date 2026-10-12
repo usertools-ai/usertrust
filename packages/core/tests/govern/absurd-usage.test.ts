@@ -646,6 +646,62 @@ describe("the ceiling is per provider RESPONSE", () => {
 		await gov.destroy();
 	});
 
+	it("a refused tier whose figure is not a finite count (a direct JS caller) is still a flag, recorded at a finite figure", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const cases: Array<[string, unknown, number]> = [
+			["Infinity", Number.POSITIVE_INFINITY, Number.MAX_VALUE],
+			["NaN", Number.NaN, 1],
+			["-1", -1, 1],
+			["5", 5, 5],
+		];
+		for (const [label, value, figure] of cases) {
+			const auth = await gov.authorize(AUTH);
+			const receipt = await gov.settle(auth, {
+				inputTokens: 10,
+				outputTokens: 20,
+				refused: { inputTokens: value } as unknown as { inputTokens: number },
+			});
+			expect(receipt.usageSource, label).toBe("estimated");
+			const data = audit.events.find(
+				(e) => e.kind === "usage_implausible" && e.data.transferId === auth.transferId,
+			)?.data;
+			expect(data, label).toMatchObject({
+				charged: "estimate",
+				checks: { inputTokens: "refused" },
+				tiers: { inputTokens: figure },
+			});
+			expect(JSON.parse(JSON.stringify(data)), label).toEqual(data);
+		}
+		await gov.destroy();
+	});
+
+	it("CONTROL: a refused tier whose value is undefined or null is not a flag", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		for (const value of [undefined, null]) {
+			const auth = await gov.authorize(AUTH);
+			const receipt = await gov.settle(auth, {
+				inputTokens: 10,
+				outputTokens: 20,
+				refused: { inputTokens: value } as unknown as { inputTokens: number },
+			});
+			expect(receipt.usageSource, String(value)).toBe("provider");
+		}
+		expect(audit.events.map((e) => e.kind)).not.toContain("usage_implausible");
+		await gov.destroy();
+	});
+
 	it("CONTROL: a 600-response window with plausible maxima over 100M total is still charged in full", async () => {
 		const audit = makeAudit();
 		const gov = await createGovernor({

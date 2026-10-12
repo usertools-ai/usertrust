@@ -172,6 +172,43 @@ describe("an unheld settle is recorded", () => {
 		expect(JSON.stringify(event.data)).not.toContain("NaN");
 	});
 
+	it("keeps a refused tier whose figure is not a finite count (a direct JS caller), at a finite stand-in", async () => {
+		const g = await recording().gov();
+		// Presence is the flag: an unusable figure is still a refusal. Infinity is kept as Number.MAX_VALUE, any
+		// other unusable figure as 0, so the record stays JSON-safe; a finite figure is kept as stated.
+		const cases: Array<[string, unknown, number]> = [
+			["Infinity", Number.POSITIVE_INFINITY, Number.MAX_VALUE],
+			["NaN", Number.NaN, 0],
+			["-1", -1, 0],
+			["5", 5, 5],
+		];
+		for (const [i, [label, value, figure]] of cases.entries()) {
+			await g.recordUnheldSettlement({
+				transferId: `tx_refused_${i}`,
+				inputTokens: 0,
+				outputTokens: 9,
+				refused: { inputTokens: value } as unknown as { inputTokens: number },
+			});
+			const data = (audit.events[i] as AppendEventInput).data as Record<string, unknown>;
+			expect(data.refused, label).toEqual({ inputTokens: figure });
+			expect(JSON.parse(JSON.stringify(data)), label).toEqual(data);
+		}
+	});
+
+	it("CONTROL: a refused tier whose value is undefined or null is not a flag", async () => {
+		const g = await recording().gov();
+		for (const [i, value] of [undefined, null].entries()) {
+			await g.recordUnheldSettlement({
+				transferId: `tx_unflagged_${i}`,
+				inputTokens: 3,
+				outputTokens: 9,
+				refused: { inputTokens: value } as unknown as { inputTokens: number },
+			});
+			const data = (audit.events[i] as AppendEventInput).data as Record<string, unknown>;
+			expect("refused" in data, String(value)).toBe(false);
+		}
+	});
+
 	it("drops a count it cannot use instead of fabricating a zero", async () => {
 		const g = await recording().gov();
 		await g.recordUnheldSettlement({
