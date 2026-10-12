@@ -15,6 +15,7 @@
 
 import { realpathSync } from "node:fs";
 import { isAbsolute, join, parse, sep } from "node:path";
+import { escapeControls } from "./escape-controls.js";
 
 /** Separators a base may be written with: both on Windows, `/` elsewhere. */
 const SEPARATORS = process.platform === "win32" ? /[\\/]/ : /\//;
@@ -39,7 +40,7 @@ export function kernelVaultBase(base: string): string {
 		realpathSync.native(root);
 	} catch (err) {
 		throw new Error(
-			`usertrust: the vault base ${base} contains "..", and this system cannot resolve paths the way the kernel does (realpath(3) failed: ${(err as NodeJS.ErrnoException).code}); give the base without ".." segments`,
+			`usertrust: the vault base ${escapeControls(base)} contains "..", and this system cannot resolve paths the way the kernel does (realpath(3) failed: ${(err as NodeJS.ErrnoException).code}); give the base without ".." segments`,
 		);
 	}
 
@@ -59,23 +60,27 @@ export function kernelVaultBase(base: string): string {
 		if (tail.includes("..")) {
 			const missing = segments.slice(0, i + 1).join(sep);
 			throw new Error(
-				`usertrust: the vault base ${base} has ".." after ${missing}, which does not exist yet; create it first, or give the base without ".."`,
+				`usertrust: the vault base ${escapeControls(base)} has ".." after ${escapeControls(missing)}, which does not exist yet; create it first, or give the base without ".."`,
 			);
 		}
 		return tail.length === 0 ? resolved : join(resolved, ...tail);
 	}
 	// Unreachable: the root resolved above.
-	throw new Error(`usertrust: the vault base ${base} could not be resolved`);
+	throw new Error(`usertrust: the vault base ${escapeControls(base)} could not be resolved`);
 }
 
 /**
  * {@link kernelVaultBase}, and when that changed the base, the mapping said once, on stderr, by
- * the governor being created: `usertrust: vault base "<as given>" resolves to "<real>"`.
+ * the governor being created: `usertrust: vault base "<as given>" resolves to "<real>"`. Both
+ * paths are printed through {@link escapeControls}, as every refusal above names the base: a
+ * directory name can carry a newline or an escape sequence.
  */
 export function governorVaultBase(base: string): string {
 	const resolved = kernelVaultBase(base);
 	if (resolved !== base) {
-		process.stderr.write(`usertrust: vault base "${base}" resolves to "${resolved}"\n`);
+		process.stderr.write(
+			`usertrust: vault base "${escapeControls(base)}" resolves to "${escapeControls(resolved)}"\n`,
+		);
 	}
 	return resolved;
 }

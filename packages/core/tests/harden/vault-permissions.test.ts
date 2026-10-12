@@ -1093,6 +1093,21 @@ async function vaultBaseLines(fn: () => Promise<void>): Promise<string[]> {
 	return lines;
 }
 
+/** Runs `fn`; every raw stderr write it made that is a `usertrust: vault base` notice, unsplit. */
+async function vaultBaseWrites(fn: () => Promise<void>): Promise<string[]> {
+	const writes: string[] = [];
+	const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+		if (String(chunk).startsWith("usertrust: vault base ")) writes.push(String(chunk));
+		return true;
+	});
+	try {
+		await fn();
+	} finally {
+		spy.mockRestore();
+	}
+	return writes;
+}
+
 describe.skipIf(onWindows).each(openers)(
 	"a vault base with `..` after a symbolic link, opened by %s",
 	(_name, open) => {
@@ -1163,6 +1178,41 @@ describe.skipIf(onWindows).each(openers)(
 			const lines = await vaultBaseLines(() => open("plain"));
 			expect(lines).toEqual([]);
 			expect(existsSync(join(cwd, "plain", VAULT_DIR, "spend-ledger.json"))).toBe(true);
+		});
+
+		it("prints a newline and an ESC in the base as escapes, and still lands at the real path", async () => {
+			const { real } = linkedCwd();
+			// A link whose NAME carries a line break and a clear-screen sequence.
+			const name = "l\nk\x1b[2J";
+			symlinkSync(join(cwd, "x", "y"), join(cwd, name));
+			const writes = await vaultBaseWrites(() => open(`${name}/../vault`));
+			expect(writes.join("")).not.toContain("\x1b");
+			expect(writes).toEqual([
+				`usertrust: vault base "l\\nk\\x1b[2J/../vault" resolves to "${real}/vault"\n`,
+			]);
+			expect(existsSync(join(real, "vault", VAULT_DIR, "spend-ledger.json"))).toBe(true);
+		});
+
+		it("prints a C1 byte (U+009B, the 8-bit CSI) in the resolved path as an escape", async () => {
+			const { real } = linkedCwd();
+			const writes = await vaultBaseWrites(() => open("link/../v\u009bault"));
+			expect(writes.join("")).not.toContain("\u009b");
+			expect(writes).toEqual([
+				`usertrust: vault base "link/../v\\x9bault" resolves to "${real}/v\\x9bault"\n`,
+			]);
+			// The vault is at the real name, not at the escaped one.
+			expect(existsSync(join(real, "v\u009bault", VAULT_DIR, "spend-ledger.json"))).toBe(true);
+		});
+
+		it("a refusal names the base with its controls escaped", async () => {
+			process.umask(0o022);
+			const refused = await open(`${cwd}/mi\x1bss\ning/../t`).then(
+				() => undefined,
+				(err: unknown) => err as Error,
+			);
+			expect(refused?.message).toBe(
+				`usertrust: the vault base ${cwd}/mi\\x1bss\\ning/../t has ".." after ${cwd}/mi\\x1bss\\ning, which does not exist yet; create it first, or give the base without ".."`,
+			);
 		});
 
 		it("a base with no `..` keeps its spelling and is not announced (control)", async () => {
