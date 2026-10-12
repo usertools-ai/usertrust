@@ -59,6 +59,10 @@ const SERVER_CAPABILITIES = Object.freeze([
 	// this process, or `409 settle_in_progress`. BREAKING for a client that read every settle 404 the
 	// same way; it checks this list before relying on the new codes (see the CHANGELOG).
 	"settle-unrecoverable",
+	// `refused`: `POST /v1/settle` accepts a per-tier `refused` flag (a figure the client refused to state as a count) and
+	// charges the estimate when any tier is flagged. Without it a client must not send zeroed counts for a refused tier: an
+	// older server strips the unknown key and would price the zeros at the floor.
+	"refused",
 ]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
@@ -525,6 +529,7 @@ export function createUsertrustServer(opts: {
 					cacheReadTokens: usage.cacheReadTokens,
 					cacheWriteTokens: usage.cacheWriteTokens,
 					cacheWrite1hTokens: usage.cacheWrite1hTokens,
+					refused: usage.refused,
 					chunksDelivered: usage.chunksDelivered,
 					usageSource: usage.usageSource,
 					computeMs: usage.computeMs,

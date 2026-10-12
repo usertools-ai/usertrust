@@ -19,6 +19,7 @@ import {
 import { verifyVault } from "../audit/verify.js";
 import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
+import { isRunawaySpend } from "../shared/spend-guard.js";
 import type { AuditEvent } from "../shared/types.js";
 import type { CliOptions } from "./init.js";
 import { DEFAULT_POLICIES_PATH, resolvePolicyPath } from "./policy-path.js";
@@ -398,6 +399,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// the most reassuring possible answer to a question the tool could not answer
 	// — the same shape as every defect this branch removes, in the branch that
 	// removes them.
+	// A persisted spend that is not representable, or thousands of times the budget, is a RUNAWAY (one absurd usage
+	// figure used to write one), not an ordinary exhausted budget: say so, and say how to recover.
+	const runawaySpend = spent !== undefined && isRunawaySpend(spent, config.budget);
+	const implausibleUsageCount = events.filter((e) => e.kind === "usage_implausible").length;
 	const budgetKnown = config.budget > 0 && spent !== undefined;
 	const budgetPct = budgetKnown ? (((spent as number) / config.budget) * 100).toFixed(1) : null;
 
@@ -468,6 +473,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 						// machine consumer must be able to tell that apart from a vault
 						// that has genuinely spent nothing.
 						budgetUtilization: budgetPct === null ? null : Number.parseFloat(budgetPct),
+						// true when the persisted session spend is unrepresentable or >1000x the budget: recovery is
+						// documented in docs/runaway-spend.md. Absent otherwise.
+						...(runawaySpend ? { budgetRunaway: true } : {}),
+						...(implausibleUsageCount > 0 ? { implausibleUsage: implausibleUsageCount } : {}),
 						// THE THIRD SURFACE FOR ONE VERDICT. The headline floors on the
 						// chain signal and the human line reads it; this reported
 						// `verification.valid` alone, so a vault with a valid chain and an
@@ -562,8 +571,9 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	console.log(`  Policy violations (30d):  ${policyHits}   ${policyTag}`);
 
 	// Signal 2: Budget utilization
-	const budgetStatus =
-		budgetPct === null
+	const budgetStatus = runawaySpend
+		? pc.red("[critical: runaway spend, see docs/runaway-spend.md]")
+		: budgetPct === null
 			? pc.yellow("[unknown]")
 			: Number.parseFloat(budgetPct) > 80
 				? pc.yellow("[elevated]")
@@ -580,6 +590,11 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				? "unreadable ledger"
 				: "no budget configured";
 	console.log(`  Budget utilization:      ${budgetText} ${budgetStatus}`);
+	if (implausibleUsageCount > 0) {
+		console.log(
+			`  Implausible usage:       ${implausibleUsageCount} call(s) charged at the estimate ${pc.yellow("[review]")}`,
+		);
+	}
 
 	// Signal 3: Chain integrity
 	// Coloured from the STATUS, not from `verification.valid` — keying the colour
