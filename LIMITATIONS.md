@@ -73,13 +73,7 @@ enforcement — in tests, in evaluation. Every claim about atomic budget
 enforcement (an over-budget PENDING hold rejected by the ledger before the
 provider is called) applies to full mode with a live TigerBeetle instance.
 
-One caveat from our own release history: CI validates live-ledger enforcement
-against a stateful `tigerbeetle-node` fake that implements real double-entry
-balance math and `debits_must_not_exceed_credits` (see
-`packages/core/tests/harden/ledger-funded-wallet.test.ts`) — a behavioral test
-against real ledger semantics, not a mock asserting a mock. It is still a fake.
-Validate against a real TigerBeetle cluster before relying on enforcement in
-production.
+One caveat from our own release history: the unit suite validates live-ledger enforcement against a stateful `tigerbeetle-node` fake that implements real double-entry balance math and `debits_must_not_exceed_credits` (see `packages/core/tests/harden/ledger-funded-wallet.test.ts`) — a behavioral test against real ledger semantics, not a mock asserting a mock. CI also runs a separate job (`tb-integration`) against a real single-node TigerBeetle cluster. Neither is your deployment: validate against your own TigerBeetle cluster before relying on enforcement in production.
 
 ## 5. One audit writer per vault, one process at a time
 
@@ -174,6 +168,10 @@ proofs, a zero-dependency offline verifier — is designed to produce evidence a
 auditor can check without trusting us or this codebase. That is the deliberate
 division of labor: usertrust generates the receipts; certifying a deployment
 that uses them is the deployer's work with their own auditors.
+
+**Known issue in 4.1.0 — deleting the most recent records.** On a vault with no external anchor (the default), deleting the most recent audit records is reported by `usertrust verify` only until the next governed call: that call appends after whatever tail it finds and rewrites the vault's sidecar, after which verification passes over the shortened chain. Records that were anchored before the deletion still fail verification. Editing a record, deleting a record from the middle of the chain, and re-hashing the whole chain against a published anchor are all detected.
+
+**What holds regardless of version.** Anyone who can rewrite both the vault file and its sidecar can produce a chain that verifies on its own. Only an anchor held outside the vault catches that. If you rely on the audit chain as evidence, enable external anchoring and keep the anchors and the public key with your auditor.
 
 ## 9. Proxy mode was deleted rather than shipped as theater
 

@@ -149,6 +149,12 @@ Every call returns `{ response, receipt }`:
 }
 ```
 
+### Settings, budgets and many agents
+
+- **Settings live in the config file.** Options such as `pii` are read from `.usertrust/usertrust.config.json` (see [Config](#config)). Passing `{ pii: "block" }` as the second argument to `trust()` is not read, and does not enable blocking.
+- **A budget belongs to one `trust()` client.** `trust(client, { budget })` gives that client its own budget. Two clients created from the same project each get the full amount; to share one budget across callers, use `usertrust-server`.
+- **With TigerBeetle, do not create one `trust()` per agent.** Each ledger-backed client holds its own connection to the ledger. In our testing, the 9th simultaneously open ledger-backed client in one process never finished connecting, and no error was raised; a TigerBeetle replica also holds at most 64 registered clients and evicts the least recently used. For more than a few agents, run `usertrust-server` (see `packages/server/README.md`): agents call it over HTTP and it keeps one ledger connection for all of them.
+
 ## Inspect
 
 ```bash
@@ -332,6 +338,10 @@ All hashes: valid (847/847)
 
 The verify package has zero runtime dependencies. It reads JSONL, recomputes SHA-256 hashes, and checks the chain. Anyone can verify a vault without trusting the usertrust SDK.
 
+`usertrust-verify` takes the path to the `.usertrust` directory; `usertrust verify` takes the project root that contains it. Giving `usertrust-verify` the project root reports a missing audit directory, not a tampered chain.
+
+**Known issue in 4.1.0:** on a vault with no external anchor, deleting the most recent records is reported only until the next governed call; after that, verification passes over the shortened chain. Records anchored before the deletion still fail verification. More generally, someone who can rewrite both the vault file and its sidecar can only be caught by an anchor held outside the vault, so enable [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) if the chain is your evidence. See `LIMITATIONS.md` section 8.
+
 With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) enabled, verification goes further: the auditor fetches signed checkpoints from an append-only store the operator cannot rewrite and pins the public key out-of-band — so even a fully re-hashed rewrite of the vault fails:
 
 ```bash
@@ -344,6 +354,16 @@ usertrust anchor now    --sink-s3 bucket=audit-anchors,region=us-east-1
 
 npx usertrust-verify .usertrust --anchors anchors.jsonl --pubkey root.pem --require-external-anchor
 ```
+
+## Uninstall
+
+Removing usertrust is more than `npm uninstall`. What it leaves behind, and where:
+
+- **Per project:** delete `.usertrust/`. It holds the audit chain, receipts, spend ledger, config and, if you gave one to `init`, your provider key in `.usertrust/.env`.
+- **Packages:** `npm uninstall usertrust usertrust-server usertrust-verify` (whichever you installed).
+- **Anchor signing key:** `usertrust anchor init` writes the private key outside the vault, at `~/.usertrust/keys/<vaultId>.anchor.pem` (mode 600). Deleting `.usertrust/` does not delete it. Keep it if you want to continue the same anchor chain; delete it securely if you are retiring the vault. Also remove any anchor store you created, such as the file given to `--sink-file`.
+- **usertrust-server:** stop the process, then delete its `stateDir` (one vault per tenant) and its config and tenant-key files. A server may also create a `.usertrust/patterns/` folder in its working directory, outside `stateDir`.
+- **Claude Code plugin:** remove the plugin with Claude Code's plugin commands, then delete the configuration file under `~/.config/usertrust/` (it holds the server key), the plugin's state directory (`~/.claude/usertrust-cc` by default), and `~/.local/state/usertrust/` (per-session pins, which can also hold the server key until they are pruned after 30 days). If the server key may remain on a shared machine, rotate it.
 
 ## License
 

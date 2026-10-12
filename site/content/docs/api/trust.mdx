@@ -81,7 +81,7 @@ interface TrustReceipt {
   model: string;              // Model used for the call
   provider: string;           // "anthropic" | "openai" | "google"
   timestamp: string;          // ISO 8601 timestamp
-  auditDegraded?: boolean;    // true if audit write failed after POST (mode 15.3)
+  auditDegraded?: boolean;    // true if the audit write failed (mode 15.3): after the settle for streams and headless calls, before it for other governed calls
 }
 ```
 

@@ -78,6 +78,8 @@ class PolicyDeniedError extends Error {
 
 **Hint:** `'Check your policy rules in .usertrust/policies/ or use { pii: "warn" } to downgrade PII enforcement.'`
 
+To change PII enforcement, set `pii` in `.usertrust/usertrust.config.json`; passing it to `trust()` has no effect.
+
 ---
 
 ## The denial correlation handle
@@ -202,7 +204,7 @@ class AuditDegradedError extends Error {
 **Hint:** `"Check disk space and permissions on the .usertrust/audit/ directory."`
 
 <Callout type="info">
-usertrust never fails the user on audit degradation. If the LLM call succeeded and the ledger settled, the response is always returned.
+By default usertrust does not fail a call because the audit write degraded: if the LLM call succeeded and the ledger settled, the response is returned with `auditDegraded: true`. With `audit.failClosed: true` the call is refused with `AuditDegradedError` instead, and that refusal can come after the request has reached the provider.
 </Callout>
 
 ---
