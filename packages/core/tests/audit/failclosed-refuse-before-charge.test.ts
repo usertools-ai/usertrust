@@ -144,9 +144,10 @@ describe("audit.failClosed: a client already degraded refuses a call before it i
 		);
 		const client = provider();
 		const answer = client.messages.create.getMockImplementation();
+		if (answer === undefined) throw new Error("the provider mock has no implementation");
 		client.messages.create.mockImplementationOnce(async (params: MessagesRequest) => {
 			heldByAnotherProcess();
-			return (answer as (p: MessagesRequest) => Promise<unknown>)(params);
+			return answer(params);
 		});
 		const engine = makeEngine();
 		const governed = await trust(client, {
@@ -288,7 +289,9 @@ describe("audit.failClosed: a client already degraded refuses a call before it i
 		expect(engine.spendPending).not.toHaveBeenCalled();
 		// Nothing was written, so no audit write failed: once the lock is let go, the next call runs.
 		rmSync(lockPath());
-		const { receipt } = await governed.messages.create(REQUEST);
+		const next = await outcome(governed.messages.create(REQUEST));
+		expect(next, "the next call, once the lock is let go").not.toBeInstanceOf(Error);
+		const { receipt } = next as { receipt: { settled: boolean; transferId: string } };
 		expect(receipt.settled).toBe(true);
 		expect(read(chainPath())).toContain(receipt.transferId);
 		await governed.destroy();

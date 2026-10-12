@@ -13,7 +13,7 @@
  */
 
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -24,11 +24,13 @@ import {
 } from "../../../verify/src/index.js";
 import { readAnchorIdentity } from "../../src/audit/anchor.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
+import { verifyVaultComplete } from "../../src/audit/complete.js";
 import { buildMerkleTree } from "../../src/audit/merkle.js";
 import { verifyVaultWithAnchors as coreVerifyVaultWithAnchors } from "../../src/audit/verify.js";
 import { run as exportRun } from "../../src/cli/export.js";
 import { run as healthRun } from "../../src/cli/health.js";
 import { run as inspectRun } from "../../src/cli/inspect.js";
+import { run as reportRun } from "../../src/cli/report.js";
 import { run as verifyRun } from "../../src/cli/verify.js";
 import { GENESIS_HASH, VAULT_DIR } from "../../src/shared/constants.js";
 import {
@@ -46,6 +48,8 @@ const seam = vi.hoisted(() => ({
 	beforeMirror: undefined as (() => void) | undefined,
 	/** After the standalone's snapshot is taken: any read after it sees what this puts back. */
 	afterSnapshot: undefined as (() => void) | undefined,
+	/** After core's snapshot is taken: the same, for the core verifier's walk. */
+	afterCoreSnapshot: undefined as (() => void) | undefined,
 	/** The standalone's anchor-mirror reads, and records added to the Nth (a mirror that changed). */
 	standaloneMirrorReads: 0,
 	mirrorExtra: undefined as ((read: number) => unknown[] | undefined) | undefined,
@@ -119,6 +123,17 @@ vi.mock("../../../verify/src/anchor-verify.js", async (importOriginal) => {
 	};
 });
 
+vi.mock("../../src/audit/stable-read.js", async (importOriginal) => {
+	const orig = await importOriginal<typeof import("../../src/audit/stable-read.js")>();
+	return {
+		...orig,
+		readVaultSnapshot: (...args: Parameters<typeof orig.readVaultSnapshot>) => {
+			const read = orig.readVaultSnapshot(...args);
+			fire(seam.afterCoreSnapshot);
+			return read;
+		},
+	};
+});
 vi.mock("../../../verify/src/stable-read.js", async (importOriginal) => {
 	const orig = await importOriginal<typeof import("../../../verify/src/stable-read.js")>();
 	return {
@@ -144,6 +159,7 @@ beforeEach(() => {
 	seam.beforeVerify = undefined;
 	seam.beforeMirror = undefined;
 	seam.afterSnapshot = undefined;
+	seam.afterCoreSnapshot = undefined;
 	seam.standaloneMirrorReads = 0;
 	seam.mirrorExtra = undefined;
 	seam.fired = 0;
@@ -542,14 +558,16 @@ describe("verify: the anchors are checked against the hashes of the events walke
 		put(before.chain, s.root);
 		writeFileSync(mirror, before.mirror);
 		writeFileSync(s.storeFile, store);
-		// They land right after the walk, before the anchors are evaluated. Read after the walk, the
-		// mirror held an anchor of 4 events over a walk of 3: a rollback, for an honest vault.
-		seam.beforeMirror = () => {
+		// They land the moment the snapshot is taken, before anything else is read. Read again after
+		// the walk (the mirror, or the vault), it held an anchor of 4 events over a walk of 3: a
+		// rollback, for an honest vault. Once: a second snapshot would see them.
+		seam.afterCoreSnapshot = () => {
+			seam.afterCoreSnapshot = undefined;
 			put(after.chain, s.root);
 			writeFileSync(mirror, after.mirror);
 		};
 		await verifyRun(s.root, { json: true }, args);
-		expect(seam.fired).toBeGreaterThanOrEqual(1);
+		expect(seam.fired).toBe(1);
 		const r = json();
 		expect(r.data.anchorState).toBe("ANCHORED_VERIFIED");
 		expect(r.data.valid).toBe(true);
@@ -691,6 +709,33 @@ describe("a vault that keeps changing while it is read: no verdict, and nothing 
 		);
 	});
 
+	it("report --json: no report from a vault being written, never a week of no spend", async () => {
+		await chainWithDeadLetterOnIt();
+		busy.auditDir = auditDir();
+		const target = join(tempDir, "week.md");
+		await reportRun(tempDir, { json: true }, [
+			"--week",
+			"--end",
+			new Date().toISOString(),
+			"--out",
+			target,
+		]);
+		const r = json();
+		expect(r.success).toBe(false);
+		expect(r.data.message).toMatch(/being written: its audit files kept changing/);
+		expect(existsSync(target)).toBe(false);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("verifyVaultComplete: no dead letters judged against a read that has no snapshot", async () => {
+		await chainWithDeadLetterOnIt();
+		busy.auditDir = auditDir();
+		const v = verifyVaultComplete(join(tempDir, VAULT_DIR));
+		expect(v.reading.result.busy).toBe(true);
+		expect(v).toMatchObject({ deadLetters: null, complete: false, valid: false });
+		expect(v.errors).toEqual([busyLine]);
+	});
+
 	it("CONTROL: the same vault at rest is verified and complete, and inspect and export say so", async () => {
 		await chainWithDeadLetterOnIt();
 		await verifyRun(tempDir, { json: true });
@@ -701,5 +746,22 @@ describe("a vault that keeps changing while it is read: no verdict, and nothing 
 		out.length = 0;
 		await exportRun(tempDir, { json: false }, ["--markdown", join(tempDir, "md-out")]);
 		expect(out.join("\n")).toMatch(/Chain integrity: verified/);
+	});
+
+	it("CONTROL: the same vault at rest is reported on, and its dead letters are judged", async () => {
+		await chainWithDeadLetterOnIt();
+		const target = join(tempDir, "week.md");
+		await reportRun(tempDir, { json: true }, [
+			"--week",
+			"--end",
+			new Date().toISOString(),
+			"--out",
+			target,
+		]);
+		expect(json()).toMatchObject({ success: true, data: { verified: true } });
+		expect(existsSync(target)).toBe(true);
+		const v = verifyVaultComplete(join(tempDir, VAULT_DIR));
+		expect(v).toMatchObject({ complete: true, valid: true });
+		expect(v.deadLetters).not.toBeNull();
 	});
 });
