@@ -156,7 +156,7 @@ Every call returns `{ response, receipt }`:
 ### Settings, budgets and many agents
 
 - **Settings live in the config file.** Options such as `pii` are read from `.usertrust/usertrust.config.json` (see [Config](#config)). Passing `{ pii: "block" }` as the second argument to `trust()` is not read, and does not enable blocking.
-- **A budget belongs to one `trust()` client.** `trust(client, { budget })` gives that client its own budget. Two clients created from the same project each get the full amount; to share one budget across callers, use `usertrust-server`.
+- **A budget belongs to one `trust()` client, seeded from the spend the vault has recorded.** `trust(client, { budget })` gives that client its own budget, set when the client is created to the budget minus the spend already recorded in the vault (`.usertrust/spend-ledger.json`). Two clients created before either has settled a call each start with the full amount; a client created after another has settled starts with what is left; and a client that is already running does not see another client's later spend. To share one budget across callers, use `usertrust-server`.
 - **With TigerBeetle, do not create one `trust()` per agent.** Each ledger-backed client holds its own connection to the ledger. In our testing, the 9th simultaneously open ledger-backed client in one process never finished connecting, and no error was raised; a TigerBeetle replica also holds at most 64 registered clients and evicts the least recently used. For more than a few agents, run `usertrust-server` (see `packages/server/README.md`): agents call it over HTTP, and it keeps one governor and one ledger connection per tenant, shared by every agent of that tenant.
 
 ## Inspect
