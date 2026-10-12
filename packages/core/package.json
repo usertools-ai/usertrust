@@ -69,8 +69,8 @@
 		"NOTICE"
 	],
 	"peerDependencies": {
-		"@anthropic-ai/sdk": ">=0.30.0",
-		"openai": ">=4.70.0"
+		"@anthropic-ai/sdk": ">=0.116.0",
+		"openai": ">=7.4.0"
 	},
 	"peerDependenciesMeta": {
 		"@anthropic-ai/sdk": {

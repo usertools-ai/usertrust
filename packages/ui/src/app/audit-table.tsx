@@ -3,7 +3,7 @@
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useMemo, useRef, useState } from "react";
-import { type LedgerRow, statusOf } from "../shared/rows.js";
+import { type LedgerRow, type RowStatus, statusOf } from "../shared/rows.js";
 
 type SortKey = "seq" | "ts" | "kind" | "actor" | "model" | "costUt";
 type ColumnKey = SortKey | "status" | "integrity" | "transferId";
@@ -39,17 +39,23 @@ function compare(a: LedgerRow, b: LedgerRow, key: SortKey): number {
 	return av.localeCompare(bv);
 }
 
+/**
+ * Settling is normal, not a celebration — neutral text. Green is earned by verification only
+ * (integrity column). A Record, so a new status cannot fall into another's colour unnoticed.
+ * An ungoverned call is amber: it ran unmetered, which an operator should see.
+ */
+const STATUS_COLOR: Record<RowStatus, string> = {
+	settled: "text-[var(--text)]",
+	released: "text-[var(--text)]",
+	failed: "text-[var(--danger)]",
+	denied: "text-[var(--danger)]",
+	pending: "text-[var(--amber)]",
+	ungoverned: "text-[var(--amber)]",
+};
+
 function StatusBadge(props: { row: LedgerRow }): React.JSX.Element {
 	const status = statusOf(props.row);
-	// Settling is normal, not a celebration — neutral text. Green is earned
-	// by verification only (integrity column).
-	const color =
-		status === "settled" || status === "released"
-			? "text-[var(--text)]"
-			: status === "failed" || status === "denied"
-				? "text-[var(--danger)]"
-				: "text-[var(--amber)]";
-	return <span className={`text-xs uppercase ${color}`}>{status}</span>;
+	return <span className={`text-xs uppercase ${STATUS_COLOR[status]}`}>{status}</span>;
 }
 
 function IntegrityBadge(props: { row: LedgerRow }): React.JSX.Element {

@@ -18,20 +18,57 @@ today:
 - Google: `client.models.generateContent()`
 
 Streaming through any governed method is governed end to end, including
-mid-stream anomaly cutoff and settle-or-void on completion. A few alternative
-surfaces are still ungoverned pass-throughs — they reach the provider without a
-budget hold, policy check, or audit entry: OpenAI's `responses.stream()` /
-`responses.parse()` helpers and legacy `completions.create()`, Anthropic's
-`messages.batches` and `beta.models` / `beta.files`, and Google's alternative
-methods. usertrust never pretends to govern these — the exact, current boundary
-is enumerated at the source in `packages/core/src/detect.ts`.
+mid-stream anomaly cutoff and settle-or-void on completion.
+
+On an Anthropic or OpenAI client, every other SDK method is **refused**, not
+passed through: batches, embeddings, images, audio, fine-tuning, assistant runs,
+vector stores, realtime, videos, legacy `completions.create()`, OpenAI's
+`beta.responses`, and the helpers that drive the SDK's raw client internally
+(`chat.completions.parse/stream/runTools`, `responses.parse/stream`,
+`beta.messages.toolRunner`). A refused call rejects with a `PolicyDeniedError`
+and leaves a `policy_denied` audit event; the provider is never called. Methods
+that cannot start work run unaudited: every method whose requests are all GET or
+DELETE (reads, lists, deletes), and a few POSTs named with a reason (token counts,
+moderations, cancels, pauses, metadata updates). A method you list in
+`trust({ allowUngoverned })` runs **unmetered**: it reaches the provider without
+a budget hold or a cost, and its only record is an `ungoverned_call` audit event.
+On a Google client, the alternative methods still pass through ungoverned. The
+exact, current boundary is enumerated at the source in
+`packages/core/src/detect.ts` and `packages/core/src/default-deny.ts`.
+
+**Threat model.** Default-deny prevents ACCIDENTAL unmetered spend through the
+governed client: a call to a method usertrust does not govern, a helper that
+drives the SDK's raw client, a `withOptions()` copy. It is not a sandbox against
+code that sets out to spend. A caller that keeps the raw client it constructed,
+builds a new one through `client.constructor`, through the governed client's own
+`trusted.constructor`, or through the prototype path
+`Object.getPrototypeOf(trusted).constructor` (closing that path would break
+`trusted instanceof Anthropic` / `OpenAI`), or reads the API key off the
+client (`client.apiKey` is a plain value and passes) is outside it, as with any
+wrapper. Deliberate bypass from your own code is out of scope: code that holds a
+provider key can always reach the provider. `usertrust-server` does not change
+that, because it authorizes and settles spend but does not make or forward the
+provider calls; enforcing against deliberate bypass needs the provider key held
+outside that code. Writes through the governed client are refused (assignment,
+`Object.defineProperty` and `delete` on the client, its resources and `_client`,
+and on its transport objects `middleware`, `fetchOptions`, `_options` and
+`_authState`), but two SDK objects are still handed back as they are: the
+client's `logger`, which is the caller's own, and Anthropic's per-request
+auth-flag `WeakMap`, which a proxy cannot wrap.
+
+The boundary covers the governed client object. It does not cover the original
+client you passed to `trust()`, a client you construct separately, or transports
+that take a client and open their own connection (OpenAI's Realtime and
+Responses WebSocket classes read the client's API key and talk to the provider
+directly). Governed calls price tokens only: server-side tool fees (web search,
+code execution, file search, containers) are not metered.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.
 That is what makes it a one-line integration with zero SDK dependencies across
 SDK versions — and it means the governed surface is a set of methods we
-explicitly cover, not an interception of all traffic. If your code relies on an
-ungoverned method, route it through a governed entry point or bring your own
-controls.
+explicitly cover, not an interception of all traffic. A method we do not cover
+is refused rather than trusted, so a new SDK method fails closed until it is
+governed, freed, or listed in `allowUngoverned`.
 
 ## 2. Endpoint classification is a trusted-operator decision
 
@@ -73,13 +110,7 @@ enforcement — in tests, in evaluation. Every claim about atomic budget
 enforcement (an over-budget PENDING hold rejected by the ledger before the
 provider is called) applies to full mode with a live TigerBeetle instance.
 
-One caveat from our own release history: CI validates live-ledger enforcement
-against a stateful `tigerbeetle-node` fake that implements real double-entry
-balance math and `debits_must_not_exceed_credits` (see
-`packages/core/tests/harden/ledger-funded-wallet.test.ts`) — a behavioral test
-against real ledger semantics, not a mock asserting a mock. It is still a fake.
-Validate against a real TigerBeetle cluster before relying on enforcement in
-production.
+One caveat from our own release history: the unit suite validates live-ledger enforcement against a stateful `tigerbeetle-node` fake that implements real double-entry balance math and `debits_must_not_exceed_credits` (see `packages/core/tests/harden/ledger-funded-wallet.test.ts`) — a behavioral test against real ledger semantics, not a mock asserting a mock. CI also runs a separate job (`tb-integration`) against a real single-node TigerBeetle cluster. Neither is your deployment: validate against your own TigerBeetle cluster before relying on enforcement in production.
 
 ## 5. One audit writer per vault, one process at a time
 
@@ -103,10 +134,10 @@ one log, refused the same way.
 
 **A second process on the same vault cannot write to it.** Each of its audit
 appends fails; it never forks the chain. Its calls still settle, and every event that
-misses the chain is reported: the receipt carries `auditDegraded`, the event goes to
-`.usertrust/dlq/dead-letters.jsonl`, the process gets a `USERTRUST_AUDIT_DEGRADED`
+misses the chain is reported: the receipt carries `auditDegraded` (a failed warn-mode `injection_detected` append is the exception: it is dead-lettered but leaves the receipt unmarked), the event goes to
+`.usertrust/dlq/dead-letters.jsonl` (when that write succeeds), the process gets a `USERTRUST_AUDIT_DEGRADED`
 warning (at the first failure, and with the count when the client is destroyed), and
-`usertrust verify` reports the vault INCOMPLETE and exits 1. A `trust()` client with
+`usertrust verify` reports the vault INCOMPLETE and exits 1 for a dead-lettered event (if the dead-letter write itself fails and leaves no bytes, for instance on a full disk, neither `verify` nor `health` sees the gap; a partial line left by a short write counts as an unreadable entry, so the vault reads INCOMPLETE). A `trust()` client with
 `audit.failClosed: true` refuses such calls instead; `createGovernor()` and
 `usertrust-server` do not enforce `audit.failClosed`.
 
@@ -151,7 +182,7 @@ pretends to solve today.
 **A torn tail halts appends until an operator repairs it.** An append that never
 completed (a crash, a full disk) can leave bytes after the log's last newline. The
 writer then refuses every append (`AuditTornTailError`) rather than bury those bytes
-mid-file — so with `audit.failClosed`, governed calls stop too. The repair is
+mid-file — so with `audit.failClosed` (`trust()` only), governed calls stop too. The repair is
 `usertrust audit quarantine-tail`, and it repairs exactly ONE state: unparseable bytes
 after the last newline, on a single `events.jsonl` that otherwise verifies from
 genesis, with an agreeing `.meta` anchor. Every other unverifiable state, including an
@@ -202,6 +233,10 @@ proofs, a zero-dependency offline verifier — is designed to produce evidence a
 auditor can check without trusting us or this codebase. That is the deliberate
 division of labor: usertrust generates the receipts; certifying a deployment
 that uses them is the deployer's work with their own auditors.
+
+**Known issue in 4.1.0 — deleting the most recent records.** On a vault with no external anchor (the default), deleting the most recent audit records is reported by `usertrust verify` only until the next governed call from a freshly started process: that call appends after whatever tail it finds and rewrites the vault's sidecar, after which verification passes over the shortened chain. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Editing a record, deleting a record from the middle of the chain, and re-hashing the whole chain against a published anchor are all detected. Emptying `events.jsonl` while its `.meta` sidecar remains is not a silent tail deletion: the next append continues from the sidecar's hash and verification reports the gap. The bypass applies to a tail deletion that also rewrites the sidecar, or that keeps some earlier lines.
+
+**What holds regardless of version.** Anyone who can rewrite both the vault file and its sidecar can produce a chain that verifies on its own. Only evidence held outside the vault catches that: an external anchor, or receipts you retained (a caller holding an ordinary receipt finds a rewrite of its event, since `usertrust verify --receipts` reports it unaudited and exits 1 even when the rewritten chain and its sidecar agree). If you rely on the audit chain as evidence, enable external anchoring and keep the anchors and the public key with your auditor.
 
 ## 9. Proxy mode was deleted rather than shipped as theater
 
