@@ -446,6 +446,44 @@ describe("a failed append is loud, and each handle's degraded state is its own",
 		});
 	});
 
+	it("a release that lands while failing appends are still queued reports THEIR whole count once they finish; a late batch is counted too", async () => {
+		heldByAnotherProcess();
+		const a = open();
+		const settle = (p: Promise<unknown>) =>
+			p.then(
+				() => "appended",
+				(err: unknown) => err,
+			);
+		const queued = [0, 1, 2].map((i) =>
+			settle(a.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: `tx_q${i}` } })),
+		);
+		// destroy() whose drain timed out: the three are still queued on the writer.
+		a.release();
+		const outcomes = await Promise.all(queued);
+		expect(outcomes.every((o) => o instanceof AuditWriterLockHeldError)).toBe(true);
+		await new Promise((r) => setImmediate(r));
+		const atRelease = degradedWarnings().map((w) => w.message);
+		expect(atRelease).toHaveLength(2);
+		expect(atRelease[0]).toMatch(/are degraded — failing: AuditWriterLockHeldError/);
+		expect(atRelease[1]).toMatch(/3 audit writes failed while this governor was open/);
+		// Late calls after the release: the first failure warns, and the batch's count follows it.
+		const late = await Promise.all(
+			[0, 1].map((i) =>
+				settle(
+					a.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: `tx_l${i}` } }),
+				),
+			),
+		);
+		expect(late.every((o) => o instanceof AuditWriterLockHeldError)).toBe(true);
+		await new Promise((r) => setImmediate(r));
+		const after = degradedWarnings()
+			.map((w) => w.message)
+			.slice(2);
+		expect(after).toHaveLength(2);
+		expect(after[0]).toMatch(/are degraded — failing:/);
+		expect(after[1]).toMatch(/2 audit writes failed after this governor was destroyed/);
+	});
+
 	it("CONTROL: a handle with no failure emits no warning, at its appends or its release", async () => {
 		const a = open();
 		await a.appendEvent({ kind: "test.ok", actor: "sys", data: {} });

@@ -975,7 +975,9 @@ four surfaces, and a change must keep all four: the receipt's `auditDegraded`; t
 (which carries the event's `eventHash` when its bytes reached the chain before the failure, e.g. a
 `.meta` sidecar failure after the fsync); a `USERTRUST_AUDIT_DEGRADED` process warning from the
 governor's writer handle, at its first failure and, with the count, at its release (once, not per
-call: a storm of identical warnings gets muted); and `usertrust verify` / `usertrust health`,
+call: a storm of identical warnings gets muted; a release that finds appends still queued reports
+their count when the last of them finishes, and appends after the release are counted and reported
+when they drain); and `usertrust verify` / `usertrust health`,
 which read the dead letters against the chain (`audit/dead-letters.ts`). A dead-lettered chain
 event that is not on the chain makes the vault INCOMPLETE: verify keeps `valid` (integrity) true,
 reports `complete: false`, and exits 1; health's chain line is critical. A dead-letter queue that
@@ -987,7 +989,8 @@ unreadable and counts as missing whatever its `source` says; a dead letter count
 only when the event at its `eventHash` IS it (the same kind, actor and data). `verify --receipts`
 checks the caller's own receipts against the chain, the count the queue cannot give: a receipt is
 audited only when its `auditHash` is its OWN event, one whose `data.transferId` is its transfer and
-whose kind records its spend (`llm_call`, or the action's `actionKind`); another event of the same
+whose kind records its spend (`llm_call`, or the action's `actionKind`, which must name a governed
+action kind or the receipt is unreadable); another event of the same
 transfer, such as a detection, is not its spend record. A degraded receipt (`auditHash:
 "AUDIT_DEGRADED"` from `trust()`, or `auditDegraded: true` with a headless governor's placeholder
 hash) is audited only when the verified chain holds its own event, by its transfer and its kind (a

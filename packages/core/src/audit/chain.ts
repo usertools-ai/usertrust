@@ -1382,11 +1382,31 @@ export function openSharedAuditWriter(vaultPath: string): AuditWriter {
 	let released = false;
 	let degraded = false;
 	let writeFailures = 0;
+	// Appends started and not yet finished. A release that lands while some are still queued (a
+	// destroy() whose drain timed out) counts THEIR failures too: its count is reported when the last
+	// of them finishes, not before they could fail.
+	let inflight = 0;
+	let releaseCountPending = false;
 
 	function failed(err: unknown): void {
 		degraded = true;
 		writeFailures++;
 		if (writeFailures === 1) warnAuditDegraded(vault, `failing: ${describeAppendFailure(err)}`);
+	}
+
+	/** Report the failures counted since the last report, with when they happened, and start over. */
+	function reportCount(when: "open" | "late"): void {
+		const failures = writeFailures;
+		degraded = false;
+		writeFailures = 0;
+		if (failures === 0) return;
+		const writes = `${failures} audit write${failures === 1 ? "" : "s"}`;
+		warnAuditDegraded(
+			vault,
+			when === "open"
+				? `${writes} failed while this governor was open`
+				: `${writes} failed after this governor was destroyed`,
+		);
 	}
 
 	async function appendEvent(input: AppendEventInput): Promise<AuditEvent> {
@@ -1398,6 +1418,7 @@ export function openSharedAuditWriter(vaultPath: string): AuditWriter {
 		// a late append takes only its own hold, so a destroyed governor never keeps the writer.
 		if (!released) joined ??= joinSharedWriter(vault);
 		const lease = joinSharedWriter(vault);
+		inflight++;
 		try {
 			return await lease.shared.writer.appendEvent(input);
 		} catch (err) {
@@ -1405,6 +1426,13 @@ export function openSharedAuditWriter(vaultPath: string): AuditWriter {
 			throw err;
 		} finally {
 			leaveSharedWriterReporting(lease);
+			inflight--;
+			// After the release, the count is reported once every append in flight has finished: the
+			// release's own (appends it found queued), or a late batch's (appends started after it).
+			if (released && inflight === 0) {
+				reportCount(releaseCountPending ? "open" : "late");
+				releaseCountPending = false;
+			}
 		}
 	}
 
@@ -1413,18 +1441,13 @@ export function openSharedAuditWriter(vaultPath: string): AuditWriter {
 	}
 
 	function release(): void {
-		const failures = writeFailures;
-		degraded = false;
-		writeFailures = 0;
-		released = true;
+		if (!released) {
+			released = true;
+			if (inflight === 0) reportCount("open");
+			else releaseCountPending = true;
+		}
 		const was = joined;
 		joined = undefined;
-		if (failures > 0) {
-			warnAuditDegraded(
-				vault,
-				`${failures} audit write${failures === 1 ? "" : "s"} failed while this governor was open`,
-			);
-		}
 		// Last: it throws (AuditLockReleaseError) if this was the last handle and a lock was left.
 		if (was !== undefined) leaveSharedWriter(was);
 	}

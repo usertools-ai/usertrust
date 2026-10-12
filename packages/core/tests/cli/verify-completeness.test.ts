@@ -689,6 +689,39 @@ describe("verify --receipts: the caller's own receipts against the chain", () =>
 		});
 	});
 
+	it("a receipt's actionKind must name a governed action: a follow-up event's kind makes it unreadable, never audited", async () => {
+		const a = createAuditWriter(tempDir);
+		let shortfall: string;
+		try {
+			await a.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_1" } });
+			shortfall = (
+				await a.appendEvent({
+					kind: "settlement_shortfall",
+					actor: "local",
+					data: { transferId: "tx_z", shortfall: 1 },
+				})
+			).hash;
+		} finally {
+			a.release();
+		}
+		const file = join(tempDir, "receipts.jsonl");
+		writeFileSync(
+			file,
+			[
+				// tx_z's spend record (its llm_call) is not on the chain; its shortfall follow-up is.
+				{ transferId: "tx_z", auditHash: shortfall, actionKind: "settlement_shortfall" },
+				{ transferId: "tx_z", auditHash: "AUDIT_DEGRADED", actionKind: "injection_detected" },
+			]
+				.map((r) => JSON.stringify(r))
+				.join("\n"),
+		);
+		await verifyRun(tempDir, { json: true }, ["--receipts", file]);
+		const r = json();
+		expect(r.data.receipts).toEqual({ checked: 0, unreadable: 2, unaudited: [] });
+		expect(r.data.complete).toBe(false);
+		expect(process.exitCode).toBe(1);
+	});
+
 	it("--receipts with no file is a usage error", async () => {
 		await verifyRun(tempDir, { json: true }, ["--receipts"]);
 		expect(json().success).toBe(false);

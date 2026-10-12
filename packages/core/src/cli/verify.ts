@@ -32,6 +32,7 @@ import {
 	type WitnessInput,
 } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
+import type { ActionKind } from "../shared/types.js";
 import { GLOBAL_FLAGS } from "./flags.js";
 import type { CliOptions } from "./init.js";
 import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
@@ -419,9 +420,15 @@ function checkReceipts(vault: string, raws: string[]): ReceiptCheck {
 			result.unreadable++;
 			continue;
 		}
+		// `actionKind`, when present, must name a governed action: any other kind (a settlement
+		// follow-up, a detection) would let a modified receipt match an event that is not its spend.
+		if (r.actionKind !== undefined && !isActionKind(r.actionKind)) {
+			result.unreadable++;
+			continue;
+		}
 		result.checked++;
 		// The kind of the event that records this receipt's spend: its action's, or an LLM call's.
-		const ownKind = typeof r.actionKind === "string" ? r.actionKind : "llm_call";
+		const ownKind = r.actionKind ?? "llm_call";
 		const event = r.auditHash === "AUDIT_DEGRADED" ? undefined : byHash.get(r.auditHash);
 		if (event !== undefined) {
 			const named = (event.data as { transferId?: unknown } | undefined)?.transferId;
@@ -456,6 +463,19 @@ function checkReceipts(vault: string, raws: string[]): ReceiptCheck {
 		});
 	}
 	return result;
+}
+
+/** The governed action kinds (`ActionKind`), complete: a kind added there must be added here. */
+const ACTION_KINDS: Record<ActionKind, true> = {
+	llm_call: true,
+	tool_use: true,
+	file_access: true,
+	shell_command: true,
+	api_request: true,
+};
+
+function isActionKind(kind: unknown): kind is ActionKind {
+	return typeof kind === "string" && Object.hasOwn(ACTION_KINDS, kind);
 }
 
 function receiptsComplete(r: ReceiptCheck | undefined): boolean {
