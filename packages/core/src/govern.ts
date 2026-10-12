@@ -3872,6 +3872,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		if (destroyed) {
 			return Promise.reject(new Error("TrustedClient has been destroyed"));
 		}
+		// Under failClosed, a writer already degraded refuses the call BEFORE the append: a writer
+		// whose disk has recovered could otherwise record an ungoverned_call that is then refused and
+		// never runs. A no-op without failClosed.
+		try {
+			refuseIfAuditDegradedAtStart(
+				"this ungoverned call was refused before it reached the provider",
+			);
+		} catch (err) {
+			return Promise.reject(err);
+		}
 		const attribution = getCurrentCostCenter();
 		inFlightCount++;
 		const appended = audit

@@ -902,6 +902,46 @@ describe("allowUngoverned", () => {
 		expect(hits).toEqual([]);
 	});
 
+	/** A writer already degraded by an earlier failure, whose disk has since recovered: appends succeed. */
+	function degradedButRecoveredAudit(): AuditWriter {
+		return {
+			appendEvent: vi.fn(async (input: { kind: string }) => ({
+				id: "e",
+				timestamp: new Date().toISOString(),
+				previousHash: "0".repeat(64),
+				hash: "a".repeat(64),
+				kind: input.kind,
+				actor: "local",
+				data: {},
+			})) as unknown as AuditWriter["appendEvent"],
+			getWriteFailures: () => 1,
+			isDegraded: () => true,
+			flush: async () => {},
+			release: () => {},
+		};
+	}
+
+	it("under audit.failClosed a writer degraded at the start refuses the call before anything is appended", async () => {
+		writeConfig({ audit: { failClosed: true } });
+		const audit = degradedButRecoveredAudit();
+		const { client } = await openai({ allowUngoverned: ["embeddings.create"], _audit: audit });
+		await expect(
+			client.embeddings.create({ model: "text-embedding-3-small", input: "hi" }),
+		).rejects.toBeInstanceOf(AuditDegradedError);
+		expect(hits).toEqual([]);
+		// No ungoverned_call is recorded for a call that never ran.
+		expect(audit.appendEvent).not.toHaveBeenCalled();
+	});
+
+	it("control: without audit.failClosed the same degraded writer still lets the opted-out call run", async () => {
+		const audit = degradedButRecoveredAudit();
+		const { client } = await openai({ allowUngoverned: ["embeddings.create"], _audit: audit });
+		const out = await client.embeddings.create({ model: "text-embedding-3-small", input: "hi" });
+		expect(out.object).toBe("list");
+		expect(hits).toEqual(["POST /v1/embeddings"]);
+		expect(audit.appendEvent).toHaveBeenCalledTimes(1);
+	});
+
 	it("under audit.failClosed a healthy append lets the call through", async () => {
 		writeConfig({ audit: { failClosed: true } });
 		const { client } = await openai({ allowUngoverned: ["embeddings.create"] });
