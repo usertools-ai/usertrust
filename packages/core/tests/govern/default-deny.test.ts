@@ -705,6 +705,28 @@ describe("writes through the governed client never reach the raw SDK", () => {
 		expect(chainEvents().map((e) => e.kind)).toEqual(["llm_call"]);
 	});
 
+	it("the read-only views never freeze the raw SDK objects: the SDK can still change its own state", async () => {
+		const { client, raw } = await anthropic();
+		// Read every transport object through the governed client, and try to write through each.
+		for (const name of ["middleware", "_options", "_authState"]) {
+			const view = client[name];
+			expect(view).toBeDefined();
+			expect(() => {
+				view.x = 1;
+			}).toThrow(TypeError);
+		}
+		expect(() => client.middleware.push(async () => new Response("{}"))).toThrow(TypeError);
+		for (const name of ["middleware", "_options", "_authState"]) {
+			expect(Object.isFrozen(raw[name]), `${name} frozen`).toBe(false);
+			expect(Object.isExtensible(raw[name]), `${name} extensible`).toBe(true);
+		}
+		// The SDK's own write to its own state still lands, and the view reads it.
+		const before = raw.middleware.length;
+		raw.middleware.push(async (_req: unknown, next: (r: unknown) => unknown) => next(_req));
+		expect(raw.middleware.length).toBe(before + 1);
+		expect(client.middleware.length).toBe(before + 1);
+	});
+
 	it("reading still works: values, a logger, and JSON of a reachable object", async () => {
 		const { client, raw } = await anthropic();
 		expect(client._options.baseURL).toBe(raw._options.baseURL);
