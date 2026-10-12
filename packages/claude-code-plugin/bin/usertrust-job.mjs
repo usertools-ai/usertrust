@@ -17,7 +17,7 @@
 // the one write outside the state dir, and `coverage`'s only one.
 //
 // Exit codes: 0 done, 1 refused (no usable log), 2 bad usage.
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { passwdHome, useSession } from "../hooks/config.mjs";
 import {
@@ -28,7 +28,7 @@ import {
 	jobsDir,
 	readLogs,
 } from "../hooks/job-log.mjs";
-import { say, watchLogPath } from "../hooks/lib.mjs";
+import { eachLine, say, watchLogPath } from "../hooks/lib.mjs";
 import { sessionSettings } from "../hooks/session.mjs";
 
 const [command, ...rest] = process.argv.slice(2);
@@ -58,23 +58,27 @@ function waitMs() {
 	return Number.isFinite(n) && n >= 0 ? n : DEFAULT_WAIT_MS;
 }
 
-/** Every `*.jsonl` under <vault>/audit, parsed line by line (read-only). */
+/**
+ * Every `*.jsonl` under <vault>/audit, streamed line by line (read-only): an audit log only
+ * grows, so it is never read whole, and a line too long to read counts as one not parsed.
+ */
 async function readRecords(vault) {
 	const dir = join(vault, "audit");
 	const records = [];
 	let unparsed = 0;
 	for (const name of (await readdir(dir)).sort()) {
 		if (!name.endsWith(".jsonl")) continue;
-		for (const line of (await readFile(join(dir, name), "utf-8")).split("\n")) {
-			if (line === "") continue;
+		await eachLine(join(dir, name), (line) => {
+			if (line === "") return;
 			try {
+				if (line === null) throw new Error("too long");
 				records.push(JSON.parse(line));
 			} catch {
 				// Never a silent drop: a line that cannot be read may be spend, so it is counted
 				// and reported as incomplete evidence (verifying the chain is the verifier's job).
 				unparsed += 1;
 			}
-		}
+		});
 	}
 	return { records, unparsed };
 }
@@ -82,24 +86,24 @@ async function readRecords(vault) {
 /** The plugin's watch records (one JSON object per line); a missing file is none, an unreadable one is no verdict. */
 async function readWatch(path) {
 	const out = [];
-	let text;
 	try {
-		text = await readFile(path, "utf-8");
+		// Streamed: watch.jsonl only grows, so it is never read whole.
+		await eachLine(path, (line) => {
+			if (line === "") return;
+			try {
+				if (line === null) throw new Error("too long");
+				out.push(JSON.parse(line));
+			} catch {
+				// A line that cannot be read may be a gap or a refusal: coverage reports it as evidence incomplete.
+				out.push({ kind: "unreadable" });
+			}
+		});
 	} catch (err) {
 		// Only a file that is not there means "no watch records". One that exists and cannot
 		// be read may hold the very gap or refusal that makes the answer "no": no verdict.
 		if (err?.code === "ENOENT") return out;
 		say(`usertrust-job: the watch records cannot be read (${err?.code ?? "error"}): no verdict`);
 		process.exit(1);
-	}
-	for (const line of text.split("\n")) {
-		if (line === "") continue;
-		try {
-			out.push(JSON.parse(line));
-		} catch {
-			// A line that cannot be read may be a gap or a refusal: coverage reports it as evidence incomplete.
-			out.push({ kind: "unreadable" });
-		}
 	}
 	return out;
 }
@@ -145,7 +149,7 @@ try {
 			const audit = await readRecords(flags.get("--vault"));
 			report = jobCoverage({
 				job,
-				logs: await readLogs(flags.get("--jobs") ?? jobsDir()),
+				logs: await readLogs(flags.get("--jobs") ?? jobsDir(), job),
 				records: audit.records,
 				watch: await readWatch(flags.get("--watch") ?? watchLogPath()),
 				unreadable: { audit: audit.unparsed },
