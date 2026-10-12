@@ -402,9 +402,14 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   entry written before that is never posted: a session resumed after upgrading
   from the estimate-only plugin, or after the state dir was deleted, does not post
   its history again (entries carry Claude Code's timestamp; one without a
-  timestamp counts as after it). After a host crash or power loss (not a process
-  crash), usage posted in the moments before it can be posted again, because the
-  plugin's state files are not fsynced. Idempotency keys on the server (#205) are
+  timestamp counts as after it). SessionStart makes it, whatever its `source`, so a
+  fresh install posts its first session from the first response on. The history of a
+  transcript resumed or compacted then is older than it, and is not posted; and once
+  made it never moves, so a later resume posts what its session left unposted. A
+  plugin installed into a session already under way posts nothing written before its
+  first hook there, the response that triggered that hook included. After a host
+  crash or power loss (not a process crash), usage posted in the moments before it
+  can be posted again, because the plugin's state files are not fsynced. Idempotency keys on the server (#205) are
   the fix. **Restoring an older copy of the state dir can
   re-post what was posted after that copy was made.** The claim files are never
   pruned, and they are what keeps a message from being posted twice: one small
