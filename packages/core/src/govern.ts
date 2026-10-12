@@ -72,6 +72,7 @@ import {
 	fromAnthropicUsage,
 	fromProviderResponse,
 	implausibleUsageData,
+	MAX_PLAUSIBLE_TOKENS_PER_TIER,
 	publishableUsageFields,
 	sanitizeUsage,
 	type UsageTier,
@@ -3898,6 +3899,16 @@ function readFinalMessageUsage(msg: unknown): {
 					implausible: cacheTiers.implausible,
 				};
 			}
+			// No usable headline counts: the cache readings are still reported, so an absurd tier is not lost.
+			return {
+				inputTokens: undefined,
+				outputTokens: undefined,
+				cacheReadTokens: undefined,
+				cacheWriteTokens: undefined,
+				cacheWrite1hTokens: undefined,
+				reported: false,
+				implausible: cacheTiers.implausible,
+			};
 		}
 	}
 	return {
@@ -3941,13 +3952,16 @@ function extractAnthropicStreamUsage(event: unknown): {
 			// D2: the SDK's three input counters are DISJOINT — the cache tiers are
 			// pure addition, never subtracted out of input_tokens.
 			const tiers = fromAnthropicUsage(usage);
+			// A count above the plausibility ceiling is reported (sticky) and contributes ZERO here, so the anomaly
+			// detector observes no figure the settle refuses to price.
+			const inAbsurd = Number.isFinite(inTok) && inTok > MAX_PLAUSIBLE_TOKENS_PER_TIER;
 			return {
-				inputTokens: inTok > 0 ? inTok : 0,
+				inputTokens: inTok > 0 && !inAbsurd ? inTok : 0,
 				outputTokens: 0,
 				cacheReadTokens: tiers.cacheReadTokens,
 				cacheWriteTokens: tiers.cacheWriteTokens,
 				cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
-				implausible: tiers.implausible,
+				implausible: inAbsurd ? { ...tiers.implausible, inputTokens: inTok } : tiers.implausible,
 			};
 		}
 	}
@@ -3955,13 +3969,14 @@ function extractAnthropicStreamUsage(event: unknown): {
 		const usage = c.usage as Record<string, unknown>;
 		const outTok = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
 		const tiers = fromAnthropicUsage(usage);
+		const outAbsurd = Number.isFinite(outTok) && outTok > MAX_PLAUSIBLE_TOKENS_PER_TIER;
 		return {
 			inputTokens: 0,
-			outputTokens: outTok > 0 ? outTok : 0,
+			outputTokens: outTok > 0 && !outAbsurd ? outTok : 0,
 			cacheReadTokens: tiers.cacheReadTokens,
 			cacheWriteTokens: tiers.cacheWriteTokens,
 			cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
-			implausible: tiers.implausible,
+			implausible: outAbsurd ? { ...tiers.implausible, outputTokens: outTok } : tiers.implausible,
 		};
 	}
 	return none;

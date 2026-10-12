@@ -474,6 +474,30 @@ describe("the ceiling is per provider RESPONSE", () => {
 		await gov.destroy();
 	});
 
+	it("a maximum on the 1-hour share alone keeps its check through the tier decision", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const auth = await gov.authorize(AUTH);
+		await gov.settle(auth, {
+			inputTokens: 10,
+			outputTokens: 10,
+			cacheWriteTokens: 200_000_000,
+			cacheWrite1hTokens: 150_000_000,
+			responses: 2,
+			maxima: { cacheWrite1hTokens: 150_000_000 },
+		});
+		expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+			checks: { cacheWrite1hTokens: "maximum" },
+			maximumCeilingTokensPerResponse: MAX_PLAUSIBLE_TOKENS_PER_TIER,
+		});
+		await gov.destroy();
+	});
+
 	it("CONTROL: a 600-response window with plausible maxima over 100M total is still charged in full", async () => {
 		const audit = makeAudit();
 		const gov = await createGovernor({

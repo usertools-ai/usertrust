@@ -1139,7 +1139,7 @@ describe("jobCoverage — transfers, and the evidence being there at all", () =>
 	const run = async (records: unknown[], watch: unknown[] = [], logs = { [SID]: logText }) =>
 		(await lib()).jobCoverage({ job: J, logs, records, watch });
 
-	it.each(["settlement_shortfall", "settlement_ambiguous", "llm_call_failed"])(
+	it.each(["settlement_shortfall", "settlement_ambiguous", "llm_call_failed", "usage_implausible"])(
 		"clause 3: a transfer known only through %s metadata has a known gap (never costed as 0)",
 		async (kind) => {
 			const r = await run([call, meta(kind, "tx_2")]);

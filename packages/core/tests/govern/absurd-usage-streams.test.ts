@@ -282,3 +282,105 @@ describe("an absurd 1-hour share survives every Anthropic stream path", () => {
 		}
 	});
 });
+
+describe("an absurd chunk never reaches the anomaly detector's observation", () => {
+	it("wrapStream: a raw input_tokens above the ceiling is reported and observed as ZERO", async () => {
+		const seen: Array<{ deltaTokens: number; cumulativeInputTokens: number }> = [];
+		let completion: Parameters<Parameters<typeof wrapStream>[2]>[0] | undefined;
+		for await (const _ of wrapStream(
+			gen([{ type: "message_start", message: { usage: { input_tokens: HUGE } } }]),
+			"anthropic",
+			(c) => {
+				completion = c;
+			},
+			() => {},
+			(obs) => seen.push(obs),
+		)) {
+			// drain
+		}
+		expect(seen[0]).toMatchObject({ deltaTokens: 0, cumulativeInputTokens: 0 });
+		expect(completion?.implausible).toMatchObject({ inputTokens: HUGE });
+	});
+
+	class Emitter extends EventEmitter {
+		finalMessage(): Promise<unknown> {
+			return Promise.resolve({});
+		}
+		async *[Symbol.asyncIterator](): AsyncIterator<unknown> {}
+	}
+
+	it("MessageStream emitter: an absurd chunk settles at the estimate, the call is not voided, and the next call is not tripped", async () => {
+		const vaultBase = join(tmpdir(), `absurd-streams-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+		try {
+			const audit = makeAudit();
+			const streams = [new Emitter(), new Emitter()];
+			let n = 0;
+			const g = await trust(
+				{
+					messages: {
+						create: vi.fn((_req: unknown) => undefined),
+						stream: vi.fn((_req: unknown) => streams[n++]),
+					},
+				},
+				{ budget: 100_000, vaultBase, dryRun: true, _audit: audit },
+			);
+			const req = {
+				model: "claude-sonnet-4-6",
+				max_tokens: 64,
+				messages: [{ role: "user", content: "hello" }],
+			};
+			const first = (await g.messages.stream(req)) as Emitter & { receipt: Promise<TrustReceipt> };
+			streams[0]?.emit("streamEvent", {
+				type: "message_start",
+				message: { usage: { input_tokens: HUGE } },
+			});
+			streams[0]?.emit("finalMessage", { usage: { input_tokens: HUGE, output_tokens: 5 } });
+			streams[0]?.emit("end");
+			const r1 = await first.receipt;
+			expect(r1.settled).toBe(true);
+			expect(r1.usageSource).toBe("estimated");
+			// the next, normal call is not tripped
+			const second = (await g.messages.stream(req)) as Emitter & { receipt: Promise<TrustReceipt> };
+			streams[1]?.emit("finalMessage", { usage: { input_tokens: 10, output_tokens: 5 } });
+			streams[1]?.emit("end");
+			const r2 = await second.receipt;
+			expect(r2.usageSource).toBe("provider");
+			await g.destroy();
+		} finally {
+			rmSync(vaultBase, { recursive: true, force: true });
+		}
+	});
+
+	it("a finalMessage with only an absurd cache tier (no headline counts) still reports it", async () => {
+		const vaultBase = join(tmpdir(), `absurd-streams-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+		try {
+			const audit = makeAudit();
+			const stream = new Emitter();
+			const g = await trust(
+				{
+					messages: {
+						create: vi.fn((_req: unknown) => undefined),
+						stream: vi.fn((_req: unknown) => stream),
+					},
+				},
+				{ budget: 100_000, vaultBase, dryRun: true, _audit: audit },
+			);
+			const h = (await g.messages.stream({
+				model: "claude-sonnet-4-6",
+				max_tokens: 64,
+				messages: [{ role: "user", content: "hello" }],
+			})) as Emitter & { receipt: Promise<TrustReceipt> };
+			stream.emit("finalMessage", { usage: { cache_read_input_tokens: HUGE } });
+			stream.emit("end");
+			await h.receipt;
+			expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+				tiers: { cacheReadTokens: HUGE },
+			});
+			await g.destroy();
+		} finally {
+			rmSync(vaultBase, { recursive: true, force: true });
+		}
+	});
+});

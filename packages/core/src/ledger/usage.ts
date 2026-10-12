@@ -418,6 +418,7 @@ export function withSupported1hTier(
 				cacheWriteTokens: 0,
 				source: "estimated",
 				implausible: found,
+				...(snapshot.implausibleBy !== undefined ? { implausibleBy: snapshot.implausibleBy } : {}),
 			};
 		}
 		return snapshot;
@@ -426,8 +427,11 @@ export function withSupported1hTier(
 	// 1-hour share was the only entry the counts were never condemned and price as reported.
 	const { cacheWrite1hTokens: _share, ...rest } = snapshot;
 	const { cacheWrite1hTokens: _reading, ...others } = found;
-	if (Object.keys(others).length > 0) return { ...rest, implausible: others };
-	const { implausible: _gone, ...clean } = rest;
+	if (Object.keys(others).length > 0) {
+		const { cacheWrite1hTokens: _by1h, ...othersBy } = snapshot.implausibleBy ?? {};
+		return { ...rest, implausible: others, implausibleBy: othersBy };
+	}
+	const { implausible: _gone, implausibleBy: _by, ...clean } = rest;
 	return clean;
 }
 

@@ -38,12 +38,13 @@
  * ```
  */
 
-import type { UsageTier } from "./ledger/usage.js";
 import {
 	fromAnthropicUsage,
 	fromGeminiUsage,
 	fromOpenAICompletionsUsage,
 	fromOpenAIResponsesUsage,
+	MAX_PLAUSIBLE_TOKENS_PER_TIER,
+	type UsageTier,
 } from "./ledger/usage.js";
 import type { LLMClientKind, TrustReceipt } from "./shared/types.js";
 
@@ -105,6 +106,23 @@ export interface GovernedStream<T> extends AsyncIterable<T> {
  * `cache_creation.{ephemeral_5m,1h}_input_tokens` breakdown — so the D2 row is
  * implemented in exactly one place.
  */
+/**
+ * A raw count above the plausibility ceiling is not usage: it is reported (sticky, to the settle) and contributes ZERO to
+ * the running counters and their deltas, so the anomaly detector never observes a figure the settle refuses to price.
+ */
+function boundedCount(
+	raw: unknown,
+	tier: UsageTier,
+	found: Partial<Record<UsageTier, number>>,
+): number {
+	const n = sanitizeCount(raw);
+	if (n > MAX_PLAUSIBLE_TOKENS_PER_TIER) {
+		found[tier] = n;
+		return 0;
+	}
+	return n;
+}
+
 function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
 } {
@@ -117,13 +135,15 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 		if (msg.usage != null && typeof msg.usage === "object") {
 			const usage = msg.usage as Record<string, unknown>;
 			const normalized = fromAnthropicUsage(usage);
+			const found: Partial<Record<UsageTier, number>> = { ...normalized.implausible };
+			const inputTokens = boundedCount(usage.input_tokens, "inputTokens", found);
 			return {
-				inputTokens: sanitizeCount(usage.input_tokens),
+				inputTokens,
 				outputTokens: 0,
 				cacheReadTokens: normalized.cacheReadTokens,
 				cacheWriteTokens: normalized.cacheWriteTokens,
 				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
-				implausible: normalized.implausible,
+				implausible: Object.keys(found).length > 0 ? found : undefined,
 			};
 		}
 	}
@@ -131,13 +151,15 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 		if (c.usage != null && typeof c.usage === "object") {
 			const usage = c.usage as Record<string, unknown>;
 			const normalized = fromAnthropicUsage(usage);
+			const found: Partial<Record<UsageTier, number>> = { ...normalized.implausible };
+			const outputTokens = boundedCount(usage.output_tokens, "outputTokens", found);
 			return {
 				inputTokens: 0,
-				outputTokens: sanitizeCount(usage.output_tokens),
+				outputTokens,
 				cacheReadTokens: normalized.cacheReadTokens,
 				cacheWriteTokens: normalized.cacheWriteTokens,
 				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
-				implausible: normalized.implausible,
+				implausible: Object.keys(found).length > 0 ? found : undefined,
 			};
 		}
 	}
