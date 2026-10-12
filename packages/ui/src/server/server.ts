@@ -7,6 +7,9 @@
  * streams SSE: appended events are incrementally verified (linkage AND a
  * full hash recompute via usertrust-verify's canonicalize); any mismatch,
  * parse failure, or file shrink triggers a full reload + `resync` event.
+ * Every state change bumps a version: each SSE frame carries it as its `id`,
+ * and GET /api/events returns the version its snapshot was taken at, so the
+ * client can re-apply frames newer than a snapshot that overtook them.
  *
  * Hardening (Amendment A3): every response carries
  * `X-Content-Type-Options: nosniff`; requests whose Host header is not the
@@ -15,14 +18,23 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, unwatchFile, watchFile } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { exportMarkdown, type PersistedAuditEvent, VAULT_DIR } from "usertrust";
+import {
+	EFFECTIVE_BUDGET_FILE,
+	exportMarkdown,
+	type PersistedAuditEvent,
+	VAULT_DIR,
+} from "usertrust";
 import { canonicalize, verifyTransaction } from "usertrust-verify";
-import { toLedgerRows } from "../shared/rows.js";
-import { type LedgerState, loadState, ROW_CAP } from "./state.js";
+import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
+import { budgetSummary, type LedgerState, loadState, ROW_CAP } from "./state.js";
+
+/** How often the budget files are polled for a change (`fs.watchFile`: a missing file is watched too). */
+const BUDGET_POLL_MS = 1000;
+
 import { serveStatic } from "./static.js";
 import { watchLedger } from "./tail.js";
 
@@ -56,9 +68,11 @@ export async function createUiServer(
 	let port = 0;
 
 	const clients = new Set<ServerResponse>();
+	/** The state's version: bumped on every change, sent as each frame's SSE `id` and with each snapshot. */
+	let version = 0;
 
 	function broadcast(eventName: string, data: unknown): void {
-		const frame = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
+		const frame = `id: ${version}\nevent: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
 		for (const client of clients) client.write(frame);
 	}
 
@@ -86,14 +100,37 @@ export async function createUiServer(
 				fresh.push(e);
 				lastHash = e.hash;
 			}
-			const rows = toLedgerRows(fresh, { valid: true, breakIndex: null });
+			const touched = state.transfers.add(fresh);
+			// A new record can change an EARLIER row's verdict (an ambiguity appended after an optimistic
+			// settlement), so every visible row of a touched transfer is re-classified, and each change is sent.
+			// Each change names its row by event HASH (unique on the chain); the id rides along for display only.
+			const changed: Array<{ id: string; hash: string; status: RowStatus }> = [];
+			for (const r of state.rows) {
+				const key = state.transfers.keyOfRow(r.hash);
+				if (key === undefined || !touched.has(key)) continue;
+				const status = statusFor(
+					r.kind,
+					r.settled !== undefined ? { settled: r.settled } : {},
+					state.transfers.verdictOfTransfer(key),
+				);
+				if (status !== r.status) {
+					r.status = status;
+					changed.push({ id: r.id, hash: r.hash, status });
+				}
+			}
+			const rows = toLedgerRows(
+				fresh,
+				{ valid: true, breakIndex: null },
+				state.transfers.verdictOf,
+			);
 			state.rows.push(...rows);
 			state.lastHash = lastHash;
 			state.byteOffset += lastNewline + 1;
 			for (const r of rows) {
 				if (r.kind === "llm_call" && r.costUt !== undefined) state.summary.spentUt += r.costUt;
 			}
-			state.summary.remainingUt = state.summary.budget - state.summary.spentUt;
+			state.summary.remainingUt =
+				state.summary.budget === null ? null : state.summary.budget - state.summary.spentUt;
 			state.summary.chain.events += fresh.length;
 			// Amendment A4: enforce ROW_CAP after append.
 			if (state.rows.length > ROW_CAP) {
@@ -101,6 +138,8 @@ export async function createUiServer(
 				state.summary.truncated = true;
 			}
 			state.summary.rowCount = state.rows.length;
+			version += 1;
+			if (changed.length > 0) broadcast("status", changed);
 			broadcast("rows", rows);
 			broadcast("summary", state.summary);
 		} catch {
@@ -110,6 +149,7 @@ export async function createUiServer(
 
 	function handleResync(): void {
 		state = loadState(vaultPath);
+		version += 1;
 		broadcast("resync", {});
 		broadcast("summary", state.summary);
 	}
@@ -160,7 +200,7 @@ export async function createUiServer(
 			return;
 		}
 		if (url.pathname === "/api/events" && req.method === "GET") {
-			sendJson(res, 200, { rows: state.rows });
+			sendJson(res, 200, { rows: state.rows, summary: state.summary, version });
 			return;
 		}
 		if (url.pathname === "/api/tail" && req.method === "GET") {
@@ -279,15 +319,39 @@ export async function createUiServer(
 		onGrow: handleGrow,
 		onResync: handleResync,
 	});
+	// The budget's two sources live OUTSIDE `audit/`, which watchLedger watches: a governor writes its record when it
+	// starts, and an operator edits the config. Each change re-reads the budget and sends the summary.
+	const budgetFiles = [
+		join(vaultPath, EFFECTIVE_BUDGET_FILE),
+		join(vaultPath, "usertrust.config.json"),
+	];
+	const refreshBudget = (): void => {
+		const next = budgetSummary(vaultPath, state.summary.spentUt);
+		if (
+			next.budget === state.summary.budget &&
+			next.budgetSource === state.summary.budgetSource &&
+			next.budgetWrittenAt === state.summary.budgetWrittenAt &&
+			// the provenance carries an unreadable record's REASON, which can change while the rest does not
+			next.budgetProvenance === state.summary.budgetProvenance
+		)
+			return;
+		Object.assign(state.summary, next);
+		// A state change like any other: a new version, so a snapshot taken before it is not mistaken for one after.
+		version += 1;
+		broadcast("summary", state.summary);
+	};
+	for (const f of budgetFiles) watchFile(f, { interval: BUDGET_POLL_MS }, refreshBudget);
 
 	return {
 		server,
 		port,
+		// A reload is a resync: a new version, and every client told to fetch the new snapshot.
 		reload(): void {
-			state = loadState(vaultPath);
+			handleResync();
 		},
 		close(): Promise<void> {
 			stopWatching();
+			for (const f of budgetFiles) unwatchFile(f, refreshBudget);
 			for (const c of clients) c.end();
 			clients.clear();
 			return new Promise((resolvePromise) => server.close(() => resolvePromise()));

@@ -58,9 +58,25 @@ import {
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { archive, gz, member, readTar } from "./tar-fixture.js";
+
+/** Whether jq runs from PATH. release.sh parses the GitHub API's JSON with it. */
+function jqRunnable(): boolean {
+	const r = spawnSync("jq", ["--version"], { encoding: "utf8" });
+	return r.status === 0 && !r.error;
+}
+
+// Fails the file, naming jq, when it is missing: these tests must not pass where release.sh
+// never ran. vitest marks the rows skipped when this throws, so the file failure is the signal.
+beforeAll(() => {
+	if (!jqRunnable()) {
+		throw new Error(
+			"release-workflow tests need jq on PATH: scripts/release.sh parses GitHub API responses with it (CI's ubuntu runner has it). Install jq (apt-get install jq / brew install jq) and re-run.",
+		);
+	}
+});
 
 const ROOT = resolve(import.meta.dirname, "../../../..");
 const PUBLISH = join(ROOT, ".github/workflows/publish.yml");

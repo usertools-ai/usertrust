@@ -121,6 +121,14 @@ export function Trends(props: { rows: LedgerRow[] }): React.JSX.Element {
 					value={`${(tiles.errorRate * 100).toFixed(1)}%`}
 					danger={tiles.errorRate > 0}
 				/>
+				{/* Money states and unknowns are COUNTED where an operator looks, never folded into another number. */}
+				<Tile
+					label="Unrecoverable"
+					value={tiles.byStatus.unrecoverable.toLocaleString()}
+					danger={tiles.byStatus.unrecoverable > 0}
+				/>
+				<Tile label="Ambiguous" value={tiles.byStatus.ambiguous.toLocaleString()} />
+				<Tile label="Unknown" value={tiles.byStatus.unknown.toLocaleString()} />
 			</div>
 			<div className="reveal reveal-3 flex flex-col gap-3">
 				<div className="rounded border border-[var(--border)] bg-[var(--panel)] p-3">
