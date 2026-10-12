@@ -1536,13 +1536,16 @@ async function firstRun(dir) {
 
 /**
  * Stamp this state's first-run time now, if it has none (`firstRun`), and touch nothing else.
+ * SessionStart stamps it, before any response of its session is written (session-start.mjs).
  * A transcript-mode hook that skips the server (its breaker is open) stamps it all the same:
  * otherwise the first hook after the breaker closes would, and every transcript entry of the
- * outage would read as from before this state existed, never posted. Never throws: the next
- * hook that needs the time reads it, and says what failed.
+ * outage would read as from before this state existed, never posted. In estimate mode there is
+ * no transcript state, and nothing is stamped. Never throws: the next hook that needs the time
+ * reads it, and says what failed.
  */
 export async function stampFirstRun() {
 	try {
+		if (usageMode() !== "transcript") return;
 		const dir = await privateStateDir();
 		if (dir.ok) await firstRun(dir.dir);
 	} catch {
