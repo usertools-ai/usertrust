@@ -19,18 +19,17 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import pc from "picocolors";
 import { parseAnchorsContent } from "../audit/anchor-verify.js";
+import { deadLettersAgainst, verifyVaultComplete } from "../audit/complete.js";
 import {
 	type ChainDeadLetters,
 	type ChainDeadLettersUnreadable,
 	describeMissingEvents,
-	readChainDeadLetters,
 } from "../audit/dead-letters.js";
 import type { PersistedAuditEvent } from "../audit/read.js";
 import {
 	type AnchorVerifyParams,
 	exitCodeForAnchored,
 	type VaultVerificationResult,
-	verifyVaultReading,
 	verifyVaultWithAnchorsReading,
 	type WitnessInput,
 } from "../audit/verify.js";
@@ -328,24 +327,6 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 			...(vaultId !== undefined ? { expectedVaultId: vaultId } : {}),
 		},
 	};
-}
-
-/**
- * COMPLETENESS, beside integrity. A chain with an event missing still verifies link by link, so the
- * hash check alone answered "valid" for a vault with half its events dead-lettered (two writers in
- * one process). Every event that failed to reach the chain is dead-lettered by the writer; this
- * reads them against `events`, the events the verification just walked, never against the log read
- * again (a log changed after the walk would put an event on "the chain" that was never hash-checked).
- */
-function deadLettersOf(
-	vault: string,
-	events: readonly PersistedAuditEvent[],
-): ChainDeadLetters | ChainDeadLettersUnreadable {
-	let byHash: Map<string, PersistedAuditEvent> | undefined;
-	return readChainDeadLetters(vault, (hash) => {
-		byHash ??= new Map(events.map((e) => [e.hash, e]));
-		return byHash.get(hash);
-	});
 }
 
 interface ReceiptCheck {
@@ -747,7 +728,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			process.exitCode = 1;
 			return;
 		}
-		const deadLetters = deadLettersOf(verifiedVault, events);
+		const deadLetters = deadLettersAgainst(verifiedVault, events);
 		const receipts =
 			flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
 		const complete = isComplete(deadLetters) && receiptsComplete(receipts);
@@ -761,7 +742,11 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			console.log(
 				toSafeJson({
 					command: "verify",
-					success: result.valid && complete,
+					// `success` IS the exit code — one verdict. `result.valid && complete` ignored the
+					// anchored gates (--require-anchor, --require-external-anchor), so an UNANCHORED vault under
+					// --require-anchor printed `success: true` while the process exited 1, and a machine reader of
+					// the JSON saw a pass the exit code refused.
+					success: exitCode === 0,
 					data: {
 						valid: result.valid,
 						complete,
@@ -822,8 +807,12 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		return;
 	}
 
-	const { result, events } = verifyVaultReading(verifiedVault);
-	if (result.busy === true) {
+	// Integrity AND completeness, one function shared with `usertrust report` (audit/complete.ts).
+	const {
+		reading: { result, events },
+		deadLetters,
+	} = verifyVaultComplete(verifiedVault);
+	if (result.busy === true || deadLetters === null) {
 		if (json) {
 			console.log(
 				toSafeJson({
@@ -844,7 +833,6 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		process.exitCode = 1;
 		return;
 	}
-	const deadLetters = deadLettersOf(verifiedVault, events);
 	const receipts =
 		flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
 	const complete = isComplete(deadLetters) && receiptsComplete(receipts);

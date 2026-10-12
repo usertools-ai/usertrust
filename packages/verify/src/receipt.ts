@@ -207,13 +207,38 @@ function wordWrap(text: string, maxWidth: number): string[] {
  * failure details, receipt IDs — to the same terminal, and needs the same
  * defense. Exporting this beats writing a third copy of it.
  */
+/**
+ * Characters that REORDER or HIDE text without printing a glyph: Unicode's format-character category (General_Category
+ * Cf). It holds the zero-width spaces and joiners, the LRM/RLM and Arabic letter marks, the bidi embeddings, overrides
+ * and isolates, the word joiner and invisible operators, the deprecated format controls, the Mongolian vowel
+ * separator, the BOM and the tag characters. A vault string carrying one could reorder the verdict line or hide part
+ * of it in an auditor's terminal. The class is tested by its Unicode PROPERTY, not a hand list: a hand list of ranges
+ * missed nine of its members. The zero-width joiner is replaced too, so an emoji sequence shows as its parts joined by
+ * `?`; this is an audit verifier's display, and a joiner is a format character like the rest.
+ */
+const FORMAT_CHARACTER = /^\p{Cf}$/u;
+
+function isInvisibleFormat(ch: string): boolean {
+	return FORMAT_CHARACTER.test(ch);
+}
+
 export function forDisplay(raw: string): string {
 	let out = "";
 	for (const ch of raw) {
 		const code = ch.codePointAt(0) as number;
-		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : ch;
+		// The control test stays in its own conditional: that exact shape is what the sanitizer inventory counts.
+		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : isInvisibleFormat(ch) ? "?" : ch;
 	}
 	return out;
+}
+
+/**
+ * `forDisplay`, then a clip to `max` CODE POINTS — sanitize first, clip after (AGENTS.md's terminal-sanitization
+ * rule). Clipping the raw string by UTF-16 code units first could cut a surrogate pair in half and print a lone
+ * surrogate; counting code points after sanitizing never splits a character.
+ */
+export function clipForDisplay(raw: string, max: number): string {
+	return [...forDisplay(raw)].slice(0, max).join("");
 }
 
 // ── Hash formatting ──

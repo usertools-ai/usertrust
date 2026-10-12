@@ -106,6 +106,7 @@ import {
 import {
 	implausibleUsageData,
 	materializeMaxima,
+	materializeRefused,
 	publishableUsageFields,
 	sanitizeUsage,
 	withSupported1hTier,
@@ -152,6 +153,7 @@ import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/pr
 import { isPersistableSpend } from "./shared/spend-guard.js";
 import type { EndpointInfo, TrustConfig, TrustReceipt } from "./shared/types.js";
 import { TrustConfigSchema } from "./shared/types.js";
+import { governorVaultBase } from "./shared/vault-base.js";
 
 // ── Public types ──
 
@@ -1159,9 +1161,11 @@ function estimateTier(value: unknown, field: string): number {
 
 export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// 1. Load config
-	// Absolute from here: every vault file this client touches is in the vault it was created for,
-	// whatever the working directory becomes later (its audit writer is fixed at creation too).
-	const vaultBase = resolve(opts?.vaultBase ?? process.cwd());
+	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,
+	// so every vault file this client touches is in the vault it was created for, whatever the working
+	// directory becomes later (its audit writer is fixed at creation too). With no `..` left, resolve() only
+	// prefixes the working directory and drops `.` segments; it has nothing to fold.
+	const vaultBase = resolve(governorVaultBase(opts?.vaultBase ?? process.cwd()));
 	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
 	// version left group/world-readable is closed; one another user owns is refused (see
 	// securePrivateVault). This runs before ANYTHING under the vault is read, the config
@@ -1241,7 +1245,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// 3. Proxy mode removed — throw early with clear error
 	if (opts?.proxy) {
 		throw new Error(
-			"usertrust: proxy mode is not yet implemented (AUD-456). " +
+			"usertrust: proxy mode is not yet implemented. " +
 				"Use dryRun mode for testing, or connect a real TigerBeetle instance for production.",
 		);
 	}
@@ -1861,7 +1865,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// Each tier read by name, once, BEFORE the claim below: a getter that throws changes nothing, and the
 				// governor never touches the caller's object again.
 				maxima: materializeMaxima(params?.maxima),
-				refused: materializeMaxima(params?.refused),
+				// A refused tier is kept whatever its value (presence is the flag), never dropped like an unusable maximum.
+				refused: materializeRefused(params?.refused),
 				usageSource: params?.usageSource,
 				chunksDelivered: params?.chunksDelivered,
 				computeMs: params?.computeMs,
@@ -2046,6 +2051,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 				// POST settlement
 				let settled = true;
+				// True only once the ledger (or proxy) ANSWERED the post: a dry run never sets it, so a record can tell a
+				// real post from a settle that moved no money.
+				let ledgerPosted = false;
+				// What the ledger actually POSTED, known the moment it answered and so before the `llm_call` is appended. The
+				// call record carries it, so a reader can tell a capped post from a full one from that record alone: the
+				// `settlement_shortfall` is appended AFTER the call and can be late, lost to a crash, or dead-lettered.
+				let ledgerPostedAmount: number | undefined;
 				// D4: set only when the engine capped the post at the reserved hold.
 				let postedCost: number | undefined;
 				// D4 event-order buffer: the truncation is learned at POST time but the
@@ -2059,6 +2071,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				if (proxyConn != null && !isDryRun) {
 					try {
 						await proxyConn.settle(auth.proxyTransferId ?? transferId, actualCost);
+						ledgerPosted = true;
+						// NO posted amount on this path: `settle` resolves void, so the client never learns whether the server
+						// capped the post at its hold. Assuming the metered cost would report a cap as a full, exact post. The
+						// record stays an upper bound until the server reports what it posted (a wire change).
 					} catch (postErr) {
 						settled = false;
 						await audit
@@ -2087,6 +2103,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// Post the ACTUAL consumed cost (RECON #3), capped by the engine at
 						// the reserved hold; a truncation comes back as `shortfall`.
 						const postResult = await engine.postPendingSpend(transferId, actualCost);
+						ledgerPosted = true;
+						// Only what the engine REPORTS. A custom engine whose post resolves void gives no evidence of a full post,
+						// so nothing is recorded and the call stays an upper bound; the built-in engines always return `posted`.
+						if (
+							postResult != null &&
+							Number.isFinite(postResult.posted) &&
+							postResult.posted >= 0
+						) {
+							ledgerPostedAmount = postResult.posted;
+						}
 						if (postResult != null && postResult.shortfall > 0) {
 							postedCost = postResult.posted;
 							// EVENT ORDER: captured here, APPENDED after `llm_call` below.
@@ -2176,6 +2202,17 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							pricingTableVersion: PRICING_TABLE_VERSION,
 							...(input.chunksDelivered != null ? { chunksDelivered: input.chunksDelivered } : {}),
 							source: "headless",
+							// The denomination, on the record: a local call is NOMINAL units, and a reader must not
+							// have to guess it. Additive, like `ledgerPosted`.
+							costBasis: rateInfo.costBasis,
+							endpointClass: endpoint.class,
+							...(ledgerPosted ? { ledgerPosted: true } : {}),
+							// The posted amount the ledger REPORTED, equal to `cost` for a full post and lower for a capped one.
+							// Absent when the settle path reported none (proxy mode, a custom engine resolving void), a dry run,
+							// and records from before this field: such a record cannot say which it was. Additive.
+							...(ledgerPosted && ledgerPostedAmount !== undefined
+								? { postedAmount: ledgerPostedAmount }
+								: {}),
 							...costCenterAudit,
 							...principalAudit,
 							...jobAudit,
@@ -2562,7 +2599,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			};
 			// Every remaining field is read ONCE into a local and validated from that local: a getter
 			// that answers differently on a second read cannot get unchecked text onto the chain.
-			const refusedTiers = materializeMaxima(params.refused);
+			const refusedTiers = materializeRefused(params.refused);
 			const rawComputeMs: unknown = params.computeMs;
 			const computeMs =
 				typeof rawComputeMs === "number" && Number.isFinite(rawComputeMs) && rawComputeMs >= 0

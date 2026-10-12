@@ -112,11 +112,19 @@ const DENIAL_KINDS = new Set(["policy_denied", "ledger_rejected"]);
  */
 const RELEASE_KINDS = new Set(["hold_released"]);
 
-export type RowStatus = "settled" | "pending" | "failed" | "denied" | "released";
+/**
+ * A call an operator let through `trust({ allowUngoverned })`: it ran unmetered, with no hold and
+ * no cost. It carries no `settled` field, so without this arm it read "pending", a hold that
+ * might still settle, hiding that nothing was ever held.
+ */
+const UNGOVERNED_KINDS = new Set(["ungoverned_call"]);
+
+export type RowStatus = "settled" | "pending" | "failed" | "denied" | "released" | "ungoverned";
 
 export function statusOf(row: LedgerRow): RowStatus {
 	if (DENIAL_KINDS.has(row.kind)) return "denied";
 	if (RELEASE_KINDS.has(row.kind)) return "released";
+	if (UNGOVERNED_KINDS.has(row.kind)) return "ungoverned";
 	// A settle for a hold that was gone: real provider spend recorded, NOT charged. It carries no
 	// `settled` field, so without this arm it would read "pending", a hold that might still settle.
 	if (

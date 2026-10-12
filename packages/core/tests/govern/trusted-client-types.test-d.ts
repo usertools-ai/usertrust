@@ -540,7 +540,7 @@ type GovGoogle = TrustedClient<FakeGoogle>;
 export type _GoogleGenerateContentEnvelope = Assert<
 	IsExact<
 		ReturnType<GovGoogle["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
 // generateContentStream is UNGOVERNED: buildGoogleProxy traps `generateContent`
@@ -712,7 +712,7 @@ type GovCallableChatWithGoogle = TrustedClient<CallableChatWithGoogle>;
 export type _CallableChatFallsThroughToGoogle = Assert<
 	IsExact<
 		ReturnType<GovCallableChatWithGoogle["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
 export type _CallableChatStaysRaw = Assert<
@@ -733,7 +733,7 @@ type GovCallableCompletions = TrustedClient<CallableCompletionsWithGoogle>;
 export type _CallableCompletionsFallsThroughToGoogle = Assert<
 	IsExact<
 		ReturnType<GovCallableCompletions["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
 export type _CallableCompletionsStaysRaw = Assert<
@@ -836,7 +836,7 @@ export type _ReadonlyModelsStaysReadonly = Assert<
 export type _ReadonlyModelsIsGoverned = Assert<
 	IsExact<
 		ReturnType<GovReadonlyModels["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
 
@@ -866,6 +866,26 @@ export type _UnionAnthropicMemberGoverned = Assert<
 export type _UnionGoogleMemberGoverned = Assert<
 	IsExact<
 		ReturnType<GovUnionGoogle["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
+
+// ── withOptions() on a governed client returns the GOVERNED shape ──
+// The SDK declares `withOptions(): this`; carried through `Omit<T, …>` it resolved to the RAW
+// client, so a raw-only member of a governed clone compiled and then failed at runtime. The
+// runtime re-wraps the clone with the same governor (default-deny.ts), and the type must say so.
+
+const govAnthropicClone = govRealAnthropic.withOptions({ timeout: 1000 });
+export type _AnthropicWithOptionsIsGoverned = Assert<
+	IsExact<typeof govAnthropicClone, GovRealAnthropic>
+>;
+// The clone's create resolves to the { response, receipt } envelope, not a raw Message.
+export const _anthropicCloneRawOnly = async () =>
+	// @ts-expect-error `content` is on the raw Message, not on the governed envelope
+	(await govAnthropicClone.messages.create({ model: "m", max_tokens: 1, messages: [] })).content;
+
+const govOpenAIClone = govRealOpenAI.withOptions({ timeout: 1000 });
+export type _OpenAIWithOptionsIsGoverned = Assert<IsExact<typeof govOpenAIClone, GovRealOpenAI>>;
+export const _openaiCloneRawOnly = async () =>
+	// @ts-expect-error `choices` is on the raw ChatCompletion, not on the governed envelope
+	(await govOpenAIClone.chat.completions.create({ model: "m", messages: [] })).choices;

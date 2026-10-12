@@ -25,7 +25,8 @@ Two entry points:
   detection, ledger, audit, receipts.
 - `createGovernor(opts)` (`usertrust/headless`) — SDK-free `authorize` / `settle` / `abort` for
   callers who own their own HTTP path. Deliberately thinner: **no injection detection, no
-  redact-on-egress, no `audit.failClosed` enforcement**, and settlement **re-resolves** rates from
+  redact-on-egress, `audit.failClosed` only as `authorize()`'s audit pre-flight** (`settle()` stays
+  fail-open), and settlement **re-resolves** rates from
   the authorize-captured model and endpoint instead of carrying the authorize-time resolution.
 
 ---
@@ -43,7 +44,7 @@ Monorepo, npm workspaces (`packages/*`). `site/` is a Next.js app and is **not**
 | `packages/acs-adapter` | `usertrust-acs-adapter` | ACS adapter. |
 | `packages/ui` | `usertrust-ui` | Visual ledger (bundled front end; `build` = `tsc && vite build`). |
 | `packages/monte-cristo` | `usertrust-monte-cristo` | Simulation engine. Not in the release lockstep. |
-| `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. |
+| `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. The workspace name is internal; the plugin is published as `usertools` (`/plugin install usertools@usertrust`). |
 
 The first six are version-locked and released together. `monte-cristo` and `claude-code-plugin`
 are not.
@@ -64,7 +65,7 @@ the kit first, never committed here.
 
 | Area | Files |
 |---|---|
-| Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `config.ts`, `proxy.ts` |
+| Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `default-deny.ts`, `config.ts`, `proxy.ts` |
 | Ledger | `ledger/{client,engine,pricing}.ts` |
 | Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
@@ -1434,7 +1435,8 @@ invariant is only as strong as the event shapes themselves: the DLQ persists wha
 carried, verbatim (see the DLQ note above).
 
 **`redactPII` is pure.** It deep-clones and never mutates the caller's object. That is what makes
-`pii: "redact"` safe: the *outbound* request is a redacted clone, so PII never egresses. `"block"`
+`pii: "redact"` safe: PII the prompt scan finds never egresses: the outbound request is a redacted
+clone (fields the scan does not read are not redacted unless the prompt scan fired; see LIMITATIONS §11). `"block"`
 throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
 
 **Signature trust is anchored by the operator's publisher→key registry, never by the embedded key.**
@@ -1518,7 +1520,15 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   event's `error` text, so one hostile value arrives through two fields. C1 coverage matters here
   for the same reason it does in `budget.ts`. The UI is deliberately NOT patched: it renders
   these into DOM text nodes, where escapes are inert, and it displays this same already-scrubbed
-  receipt string.
+  receipt string. The standalone CLI (`verify/src/cli.ts`) imports this same function for its
+  verdict output — every chain-error line, `First event:`/`Last event:`, the latest anchor's keyId
+  and timestamp, the witness error, each anchoring warning, and the argv/caught-error echoes —
+  because those, too, are strings the audited vault (or argv) controls, printed at the auditor.
+  It is an import, not a copy: the count above is unchanged.
+  Beyond C0, DEL and C1 it also replaces every character that reorders or hides text without a glyph:
+  Unicode's format-character category, tested by its property (`/^\p{Cf}$/u` in `isInvisibleFormat`), never
+  by a hand list of ranges, which missed nine members of the class. The zero-width joiner is included, so an
+  emoji sequence shows its parts joined by `?`.
 - Independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.
@@ -1623,15 +1633,27 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 
 **Duck typing only; never import a provider SDK at runtime.** `detect.ts` imports types only.
 `@anthropic-ai/sdk` and `openai` are **optional** peer dependencies; Google has no peer entry at
-all. This is why provider SDK majors can be bumped with no code change.
+all. Their floors (`>=0.116.0`, `>=7.4.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
+versions the default-deny free list was classified on. Moving a floor means re-running that
+classification against the new SDK, and `default-deny.test.ts` fails if the floor and the
+constant disagree.
 
-**The governance boundary is deliberately partial and is documented in `detect.ts`.** Governed:
-Anthropic `messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected),
-OpenAI `chat.completions.create` and `responses.create` when present, Google
-`models.generateContent`. Explicitly **ungoverned** — these bypass governance, audit, and budget
-enforcement: `messages.batches`, `beta.models`, `beta.files`, OpenAI `responses.retrieve/cancel/
-delete`, the `responses.stream()` / `responses.parse()` helpers, the OpenAI `beta.*` namespace, and
-legacy `completions.create`. If you add a governed surface, update that doc block.
+**The governance boundary is documented in `detect.ts`.** Governed: Anthropic
+`messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected), OpenAI
+`chat.completions.create` and `responses.create` when present, Google `models.generateContent`.
+**Anthropic and OpenAI clients are default-deny** (`default-deny.ts`): every other function-valued
+SDK member reached off the governed client, at any depth, is refused through ONE function,
+`refuseUngovernedMethod` in `trust()`, which writes `policy_denied` at the denial boundary and
+rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
+requests are all GET or DELETE, plus POSTs named with a reason, minus GET/DELETE methods named as
+exceptions. Each entry cites its SDK source line and verb; they run with the RAW resource as
+`this`, because `this._client` through the boundary is a refusing stand-in, and
+`default-deny.test.ts` calls every entry and fails on a POST its `FREE_POSTS` does not name and `trust({ allowUngoverned })` (audited as
+`ungoverned_call`). `_client` and the client's raw HTTP members are refused by name; `withOptions`
+is re-wrapped by the same governor, unless an option outside `GOVERNED_WITH_OPTIONS_KEYS` (an
+allow-list) changes the transport, when the new client is a refusing stand-in. On a Google client
+everything else passes through. A POST is freed only with a reason it cannot start billable work, written in both places; a create that can
+allocate storage is not free. If you add a governed surface, update that doc block and the free list.
 
 ---
 
@@ -1685,8 +1707,8 @@ Drop every line whose raw text contains `from "`, then require exact string equa
   lines **are** compared, so both packages must import the same names in the same order and may
   differ only in the module path.
 
-Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 10200 (a
-vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900→10000→10100→10200 on this line as
+Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 10300 (a
+vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900→10000→10100→10200→10300 (2026-10-12) on this line as
 `packages/verify` grew legitimate node-builtins-only surface, with master separately raising
 4200→4300→4320 for its own receipt-hardening work over the same period — both lineages are folded
 in here and both are recorded in `packages/core/tests/harden/anchoring/anchor-additive.test.ts`
@@ -1953,7 +1975,8 @@ Real, verified, and worth knowing before you touch the surrounding code.
   `trust()` nor `createGovernor()` starts an emitter. Anchoring is a CLI/cron surface
   (`usertrust anchor init|now|status|export|export-bundle|doctor|rotate|resume`).
 - **`headless.ts` is a thinner governor than `trust()`** — no injection detection, no
-  redact-on-egress, no `failClosed` enforcement. It also meters differently in shape: `settle()`
+  redact-on-egress, and `failClosed` only as `authorize()`'s audit pre-flight, before any hold
+  (`settle()` stays fail-open). It also meters differently in shape: `settle()`
   calls `resolveRates` a second time — from the authorize-captured model and endpoint — instead of
   carrying the authorize-time resolution the way `trust()` does. Same inputs, so the same answer
   today; but the guarantee rests on `resolveRates` staying a pure function of

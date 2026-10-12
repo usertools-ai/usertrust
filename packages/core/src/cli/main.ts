@@ -5,7 +5,13 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { VAULT_DIR } from "../shared/constants.js";
-import { GLOBAL_FLAGS, JSON_FLAG, RECONFIGURE_FLAG, SKIP_VERIFY_FLAG } from "./flags.js";
+import {
+	GLOBAL_FLAGS,
+	JSON_FLAG,
+	RECONFIGURE_FLAG,
+	reportArgv,
+	SKIP_VERIFY_FLAG,
+} from "./flags.js";
 import { scrubForTerminal } from "./target.js";
 
 const COMMANDS = [
@@ -25,6 +31,7 @@ const COMMANDS = [
 	"skill",
 	"ui",
 	"audit",
+	"report",
 ] as const;
 
 const argv = process.argv.slice(2);
@@ -173,6 +180,13 @@ switch (command) {
 		await import("./audit.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
 	}
+	case "report": {
+		// Forwarded verbatim, --json included wherever it appeared: report.ts owns which of the rest are flags and which
+		// are values, and it counts occurrences, so a repeated --json is refused like any other repeated option.
+		const rest = reportArgv(argv);
+		await import("./report.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		break;
+	}
 	default: {
 		if (command && !command.startsWith("-")) {
 			const suggestion = suggestCommand(command);
@@ -201,6 +215,7 @@ Commands:
   skill         Verify skill manifests
   ui            Open the visual ledger (local web UI)
   audit         Repair a torn audit-log tail (quarantine-tail [--dry-run])
+  report        Weekly spend report from the vault (report --week --end <ISO instant>)
 
 Options:
   --json     Output machine-readable JSON`);

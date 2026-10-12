@@ -32,6 +32,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { types as utilTypes } from "node:util";
 import { CreateTransferStatus } from "tigerbeetle-node";
 import {
 	type AuditWriter,
@@ -49,7 +50,19 @@ import { writeReceipt } from "./audit/rotation.js";
 import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
+import {
+	guardedGet,
+	type MethodBoundary,
+	rawClientStandIn,
+	refuseWrites,
+	transportChangedError,
+	transportOptionKeys,
+	UNGOVERNED_CALL_KIND,
+	ungovernedMethodError,
+	validateAllowUngoverned,
+} from "./default-deny.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
+import { afcRequested, runGovernedAfc } from "./google-afc.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	copyAppliedRates,
@@ -71,8 +84,10 @@ import {
 import {
 	fromAnthropicUsage,
 	fromProviderResponse,
+	type ImplausibleChecks,
 	implausibleUsageData,
 	MAX_PLAUSIBLE_TOKENS_PER_TIER,
+	mergeImplausible,
 	publishableUsageFields,
 	sanitizeUsage,
 	type UsageTier,
@@ -96,6 +111,7 @@ import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/private-fs.js";
 import { isPersistableSpend } from "./shared/spend-guard.js";
+import { governorVaultBase } from "./shared/vault-base.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
@@ -185,6 +201,19 @@ export interface TrustOpts {
 	 * data (A10).
 	 */
 	endpoint?: Partial<EndpointInfo> | undefined;
+	/**
+	 * SDK methods to let through UNGOVERNED on an Anthropic or OpenAI client, by the path the
+	 * refusal names (`"embeddings.create"`, `"beta.threads.runs.create"`). Every other method
+	 * usertrust does not govern and does not list as free is refused (`default-deny.ts`). A
+	 * listed method runs on the raw SDK resource with no hold, no budget check and no cost, and
+	 * each call appends an `ungoverned_call` event (`{ method, provider }`). Validated at
+	 * creation: an array of non-empty strings, none reaching the SDK's raw client. Has no effect
+	 * on a Google client.
+	 *
+	 * SECURITY: TRUSTED-OPERATOR input, same boundary as budget — never derive it from end-user
+	 * or request data.
+	 */
+	allowUngoverned?: string[] | undefined;
 	/**
 	 * Inject a mock/test engine. When set, used instead of TigerBeetle.
 	 * Primarily for testing failure modes.
@@ -280,7 +309,10 @@ export interface TrustEngine {
 // interceptCall, and a streaming call on either reaches the GENERIC
 // `Symbol.asyncIterator` branch that returns createGovernedStream's wrapper, not
 // the Anthropic `stream-helper` graft. Everything else on those resources is
-// ungoverned (see detect.ts's boundary block) and passes through untouched.
+// ungoverned (see detect.ts's boundary block). The types leave it untouched: on a
+// Google client it passes through, and on an Anthropic or OpenAI client the runtime
+// refuses it unless it is free or listed in `allowUngoverned` (default-deny.ts). The
+// refusal is not in these types — a refused method keeps its SDK signature.
 
 /** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
 type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
@@ -385,7 +417,7 @@ type IsCallable<X> = [X] extends [AnyMethod] ? true : false;
 /**
  * Rewrite `beta.messages` when present; otherwise leave `beta` untouched.
  * Both levels are excluded when callable, mirroring buildAnthropicBetaProxy,
- * which returns undefined — leaving `beta` a whole raw pass-through — unless
+ * which returns undefined — leaving all of `beta` to the default-deny boundary — unless
  * `beta` AND `beta.messages` are both non-callable objects.
  */
 type GovernedBeta<B> =
@@ -401,7 +433,8 @@ type GovernedBeta<B> =
  * Rewrite `create` on an OpenAI `chat.completions` resource. `parse`, `stream`,
  * `runTools`, `retrieve` / `update` / `list` / `delete` and the legacy top-level
  * `completions` are all UNGOVERNED (detect.ts's boundary block) and survive the
- * `Omit` untouched — they drive the SDK's raw client and never reach interceptCall.
+ * `Omit` untouched — they never reach interceptCall, and at runtime the default-deny
+ * boundary refuses the billable ones (default-deny.ts).
  */
 type GovernedChatCompletions<CC> = CC extends { create: infer C extends AnyMethod }
 	? Omit<CC, "create"> & { create: GovernedCreateMethod<C> }
@@ -416,8 +449,8 @@ type GovernedChat<C> = C extends { completions: infer CC }
  * Rewrite ONLY `create` on an OpenAI `responses` resource. The guard is the
  * type-level twin of buildOpenAIResponsesProxy's
  * `typeof responsesObj.create !== "function"` bail-out: on that miss the runtime
- * installs no proxy and the WHOLE resource stays a raw pass-through, so a
- * non-callable `create` must leave `R` intact rather than rewrite the rest of it.
+ * installs no governed proxy and the WHOLE resource goes to the default-deny boundary,
+ * so a non-callable `create` must leave `R` intact rather than rewrite the rest of it.
  * `stream` / `parse` / `retrieve` / `cancel` / `delete` / `compact` are ungoverned.
  */
 type GovernedResponses<R> =
@@ -434,8 +467,21 @@ type GovernedResponses<R> =
  * arrives on the streaming shortcut users actually reach for.
  */
 type GovernedGoogleModels<G> = G extends { generateContent: infer C extends AnyMethod }
-	? Omit<G, "generateContent"> & { generateContent: GovernedCreateMethod<C> }
+	? Omit<G, "generateContent"> & { generateContent: GovernedGoogleGenerateMethod<C> }
 	: G;
+
+/**
+ * The Google `generateContent` envelope: `{ response, receipt }` like every other create, plus `receipts`, one per model
+ * round, present when a callable tool made the call a governed automatic-function-calling loop (google-afc.ts). `receipt`
+ * is then the LAST round's, so `receipts` is where a caller sees every charge.
+ */
+type GovernedGoogleGenerateMethod<F> = F extends (...args: infer A) => infer R
+	? (...args: A) => Promise<{
+			response: GovernedResponseOf<Awaited<R>>;
+			receipt: TrustReceipt;
+			receipts?: TrustReceipt[];
+		}>
+	: F;
 
 // ── Provider selection: the type-level twin of detectClientKind ──
 // Each predicate is the full runtime test, both halves: the namespace is a
@@ -478,9 +524,9 @@ type IsGoogleClient<T> = T extends { models: infer G }
 // key set derived from `keyof T`, never a hand-written `{ ns: … }` intersection.
 // Three things that buys, all of which a literal intersection silently breaks:
 // a namespace the client does not declare stays ABSENT rather than becoming a
-// phantom property for a surface no proxy installs (an OpenAI client older than
-// the Responses API — ~4.87, under the `>=4.70.0` peer floor — has no `responses`
-// at all); an OPTIONAL namespace stays optional, where re-adding it as required,
+// phantom property for a surface no proxy installs (a duck-typed OpenAI-shaped
+// client, or an SDK older than the Responses API, has no `responses` at all); an
+// OPTIONAL namespace stays optional, where re-adding it as required,
 // or as `X | undefined`, is a different type under `exactOptionalPropertyTypes`
 // and breaks assignability for every consumer holding the original client type;
 // and `readonly` survives, which real `@google/genai` declares on `models`.
@@ -500,6 +546,15 @@ type GovernedResponsesPart<T, K extends keyof T = Extract<keyof T, "responses">>
 type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
 	[P in K]: GovernedGoogleModels<T[P]>;
 };
+/**
+ * `withOptions` returns a client governed by the SAME governor (`boundary.rewrap`), so its type is
+ * the governed shape, never the SDK's `this` — which `Omit<T, …>` would otherwise carry through as
+ * the RAW client, letting a raw-only member of a governed clone compile and then fail at runtime.
+ * Its parameters are the SDK's own. Present only when the client declares it.
+ */
+type GovernedWithOptionsPart<T, K extends keyof T = Extract<keyof T, "withOptions">> = {
+	[P in K]: T[P] extends (...args: infer A) => unknown ? (...args: A) => TrustedClient<T> : T[P];
+};
 
 /**
  * Rewrite the governed surfaces of whichever provider `detectClientKind` would
@@ -517,9 +572,15 @@ type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
  */
 type GovernedShapeOf<T> =
 	IsAnthropicClient<T> extends true
-		? Omit<T, "messages" | "beta"> & GovernedMessagesPart<T> & GovernedBetaPart<T>
+		? Omit<T, "messages" | "beta" | "withOptions"> &
+				GovernedMessagesPart<T> &
+				GovernedBetaPart<T> &
+				GovernedWithOptionsPart<T>
 		: IsOpenAIClient<T> extends true
-			? Omit<T, "chat" | "responses"> & GovernedChatPart<T> & GovernedResponsesPart<T>
+			? Omit<T, "chat" | "responses" | "withOptions"> &
+					GovernedChatPart<T> &
+					GovernedResponsesPart<T> &
+					GovernedWithOptionsPart<T>
 			: IsGoogleClient<T> extends true
 				? Omit<T, "models"> & GovernedModelsPart<T>
 				: T;
@@ -1160,13 +1221,44 @@ export async function runTeardownSteps(steps: ReadonlyArray<() => unknown>): Pro
 	}
 }
 
+/**
+ * A caller's action descriptor, read ONCE: each field is read a single time into a plain object
+ * the caller cannot reach. `governAction` reads the descriptor before the hold, again after
+ * `execute()` and after the settle claim, so a live one could size the hold at one cost and post
+ * another (an `execute()` that edits it), or throw from a getter between the settle claim and the
+ * POST. The same reason the LLM path serializes its request once. `params` is the caller's own
+ * object, by reference: the action runs on it, and redaction copies only the audit record.
+ */
+function snapshotActionDescriptor(descriptor: ActionDescriptor): ActionDescriptor {
+	const { kind, name, cost, params, actor } = descriptor;
+	return {
+		kind,
+		name,
+		cost,
+		...(params !== undefined ? { params } : {}),
+		...(actor !== undefined ? { actor } : {}),
+	};
+}
+
 // ── trust() ──
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
+	// 0. Validate the operator's opt-out list before anything touches the vault. Its free and governed
+	// checks need the client kind; detectClientKind is a pure shape test, run here only when a list
+	// was given (it runs again, unchanged, at step 5). The option is read ONCE: a getter that answered
+	// differently on a second read could otherwise pass the list to validation but skip the kind check.
+	const rawAllowUngoverned = opts?.allowUngoverned;
+	const allowUngoverned = validateAllowUngoverned(
+		rawAllowUngoverned,
+		rawAllowUngoverned === undefined ? undefined : detectClientKind(client),
+	);
+
 	// 1. Load config
-	// Absolute from here: every vault file this client touches is in the vault it was created for,
-	// whatever the working directory becomes later (its audit writer is fixed at creation too).
-	const vaultBase = resolve(opts?.vaultBase ?? process.cwd());
+	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,
+	// so every vault file this client touches is in the vault it was created for, whatever the working
+	// directory becomes later (its audit writer is fixed at creation too). With no `..` left, resolve() only
+	// prefixes the working directory and drops `.` segments; it has nothing to fold.
+	const vaultBase = resolve(governorVaultBase(opts?.vaultBase ?? process.cwd()));
 	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
 	// version left group/world-readable is closed; one another user owns is refused (see
 	// securePrivateVault). This runs before ANYTHING under the vault is read, the config
@@ -1245,7 +1337,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// 3. Proxy mode removed — throw early with clear error
 	if (opts?.proxy) {
 		throw new Error(
-			"usertrust: proxy mode is not yet implemented (AUD-456). " +
+			"usertrust: proxy mode is not yet implemented. " +
 				"Use dryRun mode for testing, or connect a real TigerBeetle instance for production.",
 		);
 	}
@@ -1981,6 +2073,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							source: completion.usageReported ? "provider" : "estimated",
 						}),
 						completion.implausible,
+						completion.implausibleBy,
 					),
 					rateResolution.rates,
 					rateResolution.rateSource !== "table",
@@ -2400,12 +2493,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let accCacheWrite1h = 0;
 				let accUsageReported = false;
 				let accImplausible: Partial<Record<UsageTier, number>> | undefined;
-				const noteImplausible = (found: Partial<Record<UsageTier, number>> | undefined): void => {
-					if (found === undefined) return;
-					accImplausible = { ...accImplausible };
-					for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
-						accImplausible[tier] = Math.max(accImplausible[tier] ?? 0, value);
-					}
+				let accImplausibleBy: ImplausibleChecks | undefined;
+				const noteImplausible = (reading: {
+					implausible?: Partial<Record<UsageTier, number>> | undefined;
+					implausibleBy?: ImplausibleChecks | undefined;
+				}): void => {
+					({ implausible: accImplausible, implausibleBy: accImplausibleBy } = mergeImplausible(
+						accImplausible,
+						accImplausibleBy,
+						reading.implausible,
+						reading.implausibleBy,
+					));
 				};
 				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
 				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
@@ -2422,12 +2520,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					chunksDelivered,
 					usageReported: accUsageReported,
 					implausible: accImplausible,
+					implausibleBy: accImplausibleBy,
 				});
 
 				emitter.on("streamEvent", (event: unknown) => {
 					chunksDelivered++;
 					const tokens = extractAnthropicStreamUsage(event);
-					noteImplausible(tokens.implausible);
+					noteImplausible(tokens);
 					let deltaTokens = 0;
 					if (tokens.inputTokens > accInput) {
 						deltaTokens += tokens.inputTokens - accInput;
@@ -2504,7 +2603,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// zeroing it. Reported when EITHER source carried a real number;
 					// otherwise settle on the estimate.
 					const finalUsage = readFinalMessageUsage(msg);
-					noteImplausible(finalUsage.implausible);
+					noteImplausible(finalUsage);
 					const usageReported = finalUsage.reported || accUsageReported;
 					const completion: StreamCompletion = usageReported
 						? {
@@ -2518,6 +2617,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								chunksDelivered,
 								usageReported: true,
 								implausible: accImplausible,
+								implausibleBy: accImplausibleBy,
 							}
 						: {
 								usage: {
@@ -2529,6 +2629,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								chunksDelivered,
 								usageReported: false,
 								implausible: accImplausible,
+								implausibleBy: accImplausibleBy,
 							};
 					finalizeStreamSettle(completion)
 						.then(receiptResolve, receiptReject)
@@ -2589,6 +2690,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						usageReported: false,
 						// An absurd count seen on a streamEvent is not forgotten when only `end` arrives.
 						implausible: accImplausible,
+						implausibleBy: accImplausibleBy,
 					})
 						.then(receiptResolve, receiptReject)
 						.finally(releaseStreamCount);
@@ -3199,18 +3301,26 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// 7b. Action governance — simplified pipeline for non-LLM actions
 	async function governActionImpl<R>(
-		action: ActionDescriptor,
+		descriptor: ActionDescriptor,
 		execute: () => Promise<R>,
 	): Promise<GovernedActionResult<R>> {
 		if (destroyed) {
 			throw new Error("TrustedClient has been destroyed");
 		}
 
+		// Every read below is of this snapshot, never of the caller's live descriptor.
+		const action = snapshotActionDescriptor(descriptor);
+
 		// Validate cost to prevent budget inflation via negative values
 		if (!Number.isFinite(action.cost) || action.cost < 0) {
 			throw new Error(
 				`action.cost must be a non-negative finite number, got ${String(action.cost)}`,
 			);
+		}
+
+		// Again: a getter the snapshot read can have called destroy() since the first check.
+		if (destroyed) {
+			throw new Error("TrustedClient has been destroyed");
 		}
 
 		refuseIfAuditDegradedAtStart("this action was refused before it ran");
@@ -3469,6 +3579,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 			}
 
+			// A2, as on the LLM path: one finalize gate per hold, so it is settled XOR
+			// voided. A post-settle throw (the failClosed belt below) reaches the catch
+			// with the settle already claimed, and the catch must not void a hold whose
+			// commit and POST have run.
+			let finalizeState: "pending" | "settled" | "voided" = "pending";
+			function finalizeOnce(outcome: "settle" | "void"): boolean {
+				if (finalizeState !== "pending") return false;
+				finalizeState = outcome === "settle" ? "settled" : "voided";
+				return true;
+			}
+
 			try {
 				const result = await execute();
 
@@ -3521,6 +3642,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
 					);
 				}
+
+				// A2: claim the single settle outcome for this hold BEFORE money moves.
+				// Always granted here (no other terminal path runs for an action); the
+				// claim exists so a post-commit throw routes to the outer catch WITHOUT
+				// voiding an already-settled hold. Nothing between this claim and the POST
+				// below may throw: a throw there would leave the hold neither posted nor
+				// voided. action-finalize-gate.test.ts pins it.
+				finalizeOnce("settle");
 
 				// Release in-flight hold and commit budget under mutex — money moves only
 				// AFTER the action is audited.
@@ -3653,20 +3782,26 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// Circuit breaker: record failure
 				cb.recordFailure();
 
-				// VOID the pending hold
-				if (engine != null && !isDryRun) {
-					try {
-						await engine.voidPendingSpend(transferId);
-					} catch {
-						// Best-effort void
+				// VOID the pending hold — but ONLY if this hold has not already claimed a
+				// settle outcome (A2). A pre-commit throw (the action threw, the failClosed
+				// abort on a failed action audit) reaches here with the hold still PENDING
+				// and is voided once. A post-commit throw (the failClosed belt) has already
+				// settled: no void is sent against a posted transfer.
+				if (finalizeOnce("void")) {
+					if (engine != null && !isDryRun) {
+						try {
+							await engine.voidPendingSpend(transferId);
+						} catch {
+							// Best-effort void
+						}
 					}
-				}
 
-				if (proxyConn != null && !isDryRun) {
-					try {
-						await proxyConn.void(proxyTransferId ?? transferId);
-					} catch {
-						// Best-effort void
+					if (proxyConn != null && !isDryRun) {
+						try {
+							await proxyConn.void(proxyTransferId ?? transferId);
+						} catch {
+							// Best-effort void
+						}
 					}
 				}
 
@@ -3696,6 +3831,117 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		} finally {
 			inFlightCount--;
 		}
+	}
+
+	// 7b. Refusal of an ungoverned provider method (default-deny.ts). It is a governor decision,
+	// so it goes through the SAME denial boundary as every other pre-provider refusal:
+	// `appendDenialEvent` writes the `policy_denied` event (the method path as `actionName`) and
+	// attaches its hash to the error, whose contract is flat across `audit.failClosed` (a failed
+	// append marks it `auditDegraded`; the typed denial still reaches the caller). No mutex is
+	// taken and no provider is called, so there is nothing for the boundary to sit outside of or
+	// before. Async, because the append is: the stand-in rejects rather than throws — a sync SDK
+	// method (a stream or runner helper) included — and is counted in-flight so destroy() waits
+	// for the append before releasing the writer.
+	async function refuseUngovernedMethod(
+		path: string,
+		args: unknown[],
+		error?: PolicyDeniedError,
+	): Promise<never> {
+		if (destroyed) {
+			throw new Error("TrustedClient has been destroyed");
+		}
+		// The ALS read happens here, synchronously, in the caller's own context (see the
+		// ALS-discipline note in interceptCall). Only the LABEL is carried: a refusal debits no
+		// envelope, so it has no use for the envelope account and must not trade the refusal for
+		// resolveEnvelope's no-parentUserId error.
+		const attribution = getCurrentCostCenter();
+		inFlightCount++;
+		try {
+			// The model label is read without running caller code: an OWN DATA property
+			// that holds a string, or nothing. A `model` getter that throws (or a Proxy trap)
+			// must not turn the refusal into its own error and skip the denial record.
+			const model = ownStringDataProperty(args[0], "model");
+			const denial = error ?? ungovernedMethodError(kind as "anthropic" | "openai", path);
+			await appendDenialEvent({
+				audit,
+				actor: "local",
+				error: denial,
+				record: { denialClass: "policy" },
+				fields: {
+					...(model !== undefined ? { model } : {}),
+					actionName: path,
+					endpointClass: endpoint.class,
+					...(attribution !== undefined ? { costCenter: attribution.costCenter } : {}),
+				},
+			});
+			throw denial;
+		} finally {
+			inFlightCount--;
+		}
+	}
+
+	// 7c. An `allowUngoverned` call: the operator chose to run this method unmetered, so it runs on
+	// its raw SDK resource with no hold and no budget check, and leaves an `ungoverned_call` event
+	// (`{ method, provider }`, no usage, no cost) so the chain still shows it happened.
+	// The append follows the advisory-write rules: without `audit.failClosed` it is best-effort
+	// and never blocks the call — a failed write is counted by the writer, dead-lettered and
+	// warned about there — and the SDK's return value comes back unchanged (an APIPromise stays
+	// one; a sync helper stays sync). Under `audit.failClosed` the call is refused, before the SDK
+	// is reached, when the append failed or the writer is degraded: the event is the only record
+	// of this spend, so the rule that aborts a governed call whose `llm_call` failed applies. The
+	// append is awaited first there, so the call always returns a Promise of the SDK's result: a
+	// method that is synchronous in the SDK (`chat.completions.stream`) returns a Promise of its
+	// value, and a thenable value is ADOPTED: `beta.messages.toolRunner` resolves to the runner's final
+	// result, not the runner object.
+	function callUngovernedMethod(
+		path: string,
+		fn: (...fnArgs: unknown[]) => unknown,
+		thisArg: object,
+		args: unknown[],
+	): unknown {
+		if (destroyed) {
+			return Promise.reject(new Error("TrustedClient has been destroyed"));
+		}
+		// Under failClosed, a writer already degraded refuses the call BEFORE the append: a writer
+		// whose disk has recovered could otherwise record an ungoverned_call that is then refused and
+		// never runs. A no-op without failClosed.
+		try {
+			refuseIfAuditDegradedAtStart(
+				"this ungoverned call was refused before it reached the provider",
+			);
+		} catch (err) {
+			return Promise.reject(err);
+		}
+		const attribution = getCurrentCostCenter();
+		inFlightCount++;
+		const appended = audit
+			.appendEvent({
+				kind: UNGOVERNED_CALL_KIND,
+				actor: "local",
+				data: {
+					method: path,
+					provider: kind,
+					...(attribution !== undefined ? { costCenter: attribution.costCenter } : {}),
+				},
+			})
+			.then(
+				() => true,
+				() => false,
+			)
+			.finally(() => {
+				inFlightCount--;
+			});
+		if (!config.audit.failClosed) {
+			return fn.apply(thisArg, args);
+		}
+		return appended.then((ok) => {
+			if (!ok || audit.isDegraded()) {
+				throw new AuditDegradedError(
+					`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ungoverned call ${path}`,
+				);
+			}
+			return fn.apply(thisArg, args);
+		});
 	}
 
 	// 8. Safety net: clean up on process exit if destroy() was never called
@@ -3747,14 +3993,51 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			]);
 		};
 
-		if (kind === "anthropic") {
-			return buildAnthropicProxy(client, interceptCall, destroyFn, governActionImpl);
+		if (kind === "google") {
+			return buildGoogleProxy(client, interceptCall, destroyFn, governActionImpl);
 		}
-		if (kind === "openai") {
-			return buildOpenAIProxy(client, interceptCall, destroyFn, governActionImpl);
-		}
-		// google
-		return buildGoogleProxy(client, interceptCall, destroyFn, governActionImpl);
+
+		// Anthropic and OpenAI: default-deny. One boundary for the whole tree, `withOptions`
+		// clients included, so they share this governor: its budget, audit writer and engine.
+		const build = kind === "anthropic" ? buildAnthropicProxy : buildOpenAIProxy;
+		const boundary: MethodBoundary = {
+			provider: kind,
+			refuse: refuseUngovernedMethod,
+			allowUngoverned,
+			callUngoverned: callUngovernedMethod,
+			rewrap(fresh: unknown, options: unknown): unknown {
+				if (fresh == null || typeof fresh !== "object") return fresh;
+				// Every governed call meters for the endpoint captured at creation (A3), and the
+				// boundary trusts the transport it wrapped. A withOptions() client that changes either
+				// (a transport key, or an endpoint that classifies differently) is refused rather than
+				// mis-metered or sent through a fetch nothing here has seen.
+				const changed = transportOptionKeys(kind, options);
+				const moved = classifyEndpoint(fresh, config, opts?.endpoint);
+				if (
+					changed.length > 0 ||
+					moved.class !== endpoint.class ||
+					moved.runtime !== endpoint.runtime ||
+					moved.baseURL !== endpoint.baseURL
+				) {
+					return rawClientStandIn(
+						fresh,
+						"withOptions",
+						boundary,
+						() => transportChangedError(kind, changed),
+						`withOptions\u0000${changed.join(",")}`,
+						// Still a TrustedClient of the SAME governor: destroy() ends both clients, and
+						// governAction runs the caller's own action under the shared budget and audit (it
+						// sends nothing through the refused transport).
+						{ destroy: destroyFn, governAction: governActionImpl },
+					);
+				}
+				return build(fresh, interceptCall, destroyFn, governActionImpl, boundary);
+			},
+			resources: new WeakMap(),
+			standIns: new Map(),
+			readOnly: new WeakMap(),
+		};
+		return build(client, interceptCall, destroyFn, governActionImpl, boundary);
 	}
 
 	const governedClient = createClientProxy();
@@ -3921,6 +4204,8 @@ function readFinalMessageUsage(msg: unknown): {
 	reported: boolean;
 	/** Tiers over the plausibility ceiling (the extractor zeroes them; the settle must still hear of them). */
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	/** Which check put each tier in `implausible`. */
+	implausibleBy?: ImplausibleChecks | undefined;
 } {
 	if (msg != null && typeof msg === "object") {
 		const usage = (msg as Record<string, unknown>).usage;
@@ -3970,6 +4255,7 @@ function readFinalMessageUsage(msg: unknown): {
 							: undefined,
 					reported: true,
 					implausible: cacheTiers.implausible,
+					implausibleBy: cacheTiers.implausibleBy,
 				};
 			}
 			// No usable headline counts: the cache readings are still reported, so an absurd tier is not lost.
@@ -3981,6 +4267,7 @@ function readFinalMessageUsage(msg: unknown): {
 				cacheWrite1hTokens: undefined,
 				reported: false,
 				implausible: cacheTiers.implausible,
+				implausibleBy: cacheTiers.implausibleBy,
 			};
 		}
 	}
@@ -4007,6 +4294,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 	cacheWriteTokens: number;
 	cacheWrite1hTokens: number;
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	implausibleBy?: ImplausibleChecks | undefined;
 } {
 	const none = {
 		inputTokens: 0,
@@ -4035,6 +4323,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 				cacheWriteTokens: tiers.cacheWriteTokens,
 				cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 				implausible: inAbsurd ? { ...tiers.implausible, inputTokens: inTok } : tiers.implausible,
+				implausibleBy: tiers.implausibleBy,
 			};
 		}
 	}
@@ -4050,6 +4339,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 			cacheWriteTokens: tiers.cacheWriteTokens,
 			cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 			implausible: outAbsurd ? { ...tiers.implausible, outputTokens: outTok } : tiers.implausible,
+			implausibleBy: tiers.implausibleBy,
 		};
 	}
 	return none;
@@ -4288,9 +4578,27 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 // matches headless.ts's copy — which the parity suite compares as source text.
 export { createTBEngine };
 
+/**
+ * `obj[key]` when it is an OWN DATA property holding a string; never runs an accessor or a trap.
+ * Mirrors the Google refusal path's helper of the same name and signature, so the two governors'
+ * refusals read a label the same way and a later merge keeps one copy.
+ */
+function ownStringDataProperty(obj: unknown, key: string): string | undefined {
+	if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) return undefined;
+	if (utilTypes.isProxy(obj)) return undefined; // its descriptor trap is caller code
+	try {
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		return d !== undefined && "value" in d && typeof d.value === "string" ? d.value : undefined;
+	} catch {
+		return undefined; // defensive: no label, the refusal still lands
+	}
+}
+
 // ── Proxy builders ──
-// Each builder intercepts only the `create` / `generateContent` call and
-// preserves all other properties of the original client untouched.
+// Each builder intercepts only the governed calls. On a Google client every other
+// property of the original client passes through untouched; on an Anthropic or OpenAI
+// client every other name goes to the default-deny boundary (`guardedGet`,
+// default-deny.ts), which refuses the SDK methods usertrust does not govern.
 
 type InterceptFn = (
 	originalFn: (...args: unknown[]) => unknown,
@@ -4378,16 +4686,18 @@ function applyAnthropicParseTransform(message: unknown, params: unknown): unknow
  * async (it authorizes before forwarding), so callers `await` the handle, then use
  * `.on()` / `.finalMessage()` / `.abort()` / `.receipt`. `parse`, when present (A5
  * feature-detect), routes its create through governance and applies the SDK parse
- * transform (F4). Everything else (countTokens, batches, …) falls through to
- * Reflect.get untouched.
+ * transform (F4). Everything else (countTokens, batches, toolRunner, …) goes to the
+ * default-deny boundary at `path` ("messages" or "beta.messages").
  */
 function buildAnthropicMessagesProxy(
 	messages: Record<string, unknown>,
 	intercept: InterceptFn,
+	path: string,
+	boundary: MethodBoundary,
 ): Record<string, unknown> {
 	const originalCreate = messages.create as (...args: unknown[]) => unknown;
 	// A5: feature-detect `stream` as a FUNCTION before wrapping it — an older SDK
-	// without the helper leaves it absent and it stays a raw pass-through.
+	// without the helper leaves it absent, and the name goes to the boundary.
 	const originalStream =
 		typeof messages.stream === "function"
 			? (messages.stream as (...args: unknown[]) => unknown)
@@ -4427,8 +4737,9 @@ function buildAnthropicMessagesProxy(
 					return parsed;
 				};
 			}
-			return Reflect.get(target, prop, receiver);
+			return guardedGet(target, prop, receiver, path, boundary);
 		},
+		...refuseWrites(path),
 	});
 }
 
@@ -4436,13 +4747,14 @@ function buildAnthropicMessagesProxy(
  * A5: build a governed proxy over `client.beta` when it exposes a create-shaped
  * `beta.messages`. Returns undefined on any miss (no beta, non-object beta, a beta
  * getter that throws, or a beta.messages without a create function) so the caller
- * falls back to raw Reflect.get and NOTHING throws at wrap time (peerDep-range
- * compatibility). beta.models / beta.files / beta.messages.batches stay documented
- * pass-throughs — create, stream, and parse on beta.messages are governed.
+ * falls back to the default-deny boundary for all of `beta` and NOTHING throws at
+ * wrap time (duck-typed clients may lack `beta`). create, stream, and parse on beta.messages
+ * are governed; every other `beta` method goes to the boundary.
  */
 function buildAnthropicBetaProxy(
 	original: Record<string, unknown>,
 	intercept: InterceptFn,
+	boundary: MethodBoundary,
 ): Record<string, unknown> | undefined {
 	let beta: unknown;
 	try {
@@ -4463,13 +4775,32 @@ function buildAnthropicBetaProxy(
 	const betaMessagesProxy = buildAnthropicMessagesProxy(
 		betaMessages as Record<string, unknown>,
 		intercept,
+		"beta.messages",
+		boundary,
 	);
 	return new Proxy(betaObj, {
 		get(target, prop, receiver) {
 			if (prop === "messages") return betaMessagesProxy;
-			return Reflect.get(target, prop, receiver);
+			return guardedGet(target, prop, receiver, "beta", boundary);
 		},
+		...refuseWrites("beta"),
 	});
+}
+
+/**
+ * The client-level `withOptions` trap shared by the Anthropic and OpenAI builders. The SDK's
+ * `withOptions` returns a NEW raw client (`new this.constructor(...)`); `boundary.rewrap` gives
+ * it a governed proxy over the same governor, so it is governed exactly like this one — unless the
+ * options change where or how calls are sent (`transportOptionKeys`), when every call through the
+ * new client is refused. Returns
+ * undefined when the client has no `withOptions` (an older or duck-typed client), and the name
+ * then goes to the boundary like any other.
+ */
+function governedWithOptions(target: object, boundary: MethodBoundary): unknown {
+	const withOptions: unknown = Reflect.get(target, "withOptions", target);
+	if (typeof withOptions !== "function") return undefined;
+	return (...args: unknown[]) =>
+		boundary.rewrap((withOptions as (...a: unknown[]) => unknown).apply(target, args), args[0]);
 }
 
 function buildAnthropicProxy<T>(
@@ -4477,16 +4808,18 @@ function buildAnthropicProxy<T>(
 	intercept: InterceptFn,
 	destroy: () => Promise<void>,
 	governAction: GovernActionFn,
+	boundary: MethodBoundary,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const messages = original.messages as Record<string, unknown>;
 
 	// Stable messages: governed `create` + (feature-detected) `stream`.
-	const messagesProxy = buildAnthropicMessagesProxy(messages, intercept);
+	const messagesProxy = buildAnthropicMessagesProxy(messages, intercept, "messages", boundary);
 
 	// beta.messages.create/stream/parse — governed identically when present (A5); a
-	// client without `beta` yields undefined and `beta` stays a raw pass-through.
-	const betaProxy = buildAnthropicBetaProxy(original, intercept);
+	// client without `beta.messages` yields undefined and `beta` goes to the boundary.
+	const betaProxy = buildAnthropicBetaProxy(original, intercept, boundary);
+	const withOptions = governedWithOptions(original, boundary);
 
 	const clientProxy = new Proxy(original, {
 		get(target, prop, receiver) {
@@ -4494,8 +4827,10 @@ function buildAnthropicProxy<T>(
 			if (prop === "beta" && betaProxy !== undefined) return betaProxy;
 			if (prop === "destroy") return destroy;
 			if (prop === "governAction") return governAction;
-			return Reflect.get(target, prop, receiver);
+			if (prop === "withOptions" && withOptions !== undefined) return withOptions;
+			return guardedGet(target, prop, receiver, "", boundary);
 		},
+		...refuseWrites(""),
 	});
 
 	return clientProxy as TrustedClient<T>;
@@ -4506,17 +4841,19 @@ function buildAnthropicProxy<T>(
  * exposes a create-shaped Responses API. Returns undefined on any miss (no
  * `responses`, non-object `responses`, a getter that throws, or a `responses`
  * without a `create` function) so the caller falls back to raw Reflect.get and
- * NOTHING throws at wrap time — the peer range (`openai >=4.70.0`) predates the
- * Responses API (~4.87), so older clients must keep working untouched.
+ * NOTHING throws at wrap time — a duck-typed OpenAI-shaped client (or an SDK below the
+ * `openai >=7.4.0` peer floor) may have no Responses API, and must keep working untouched.
  *
  * `responses.create` routes through interceptCall on the SEPARATE "openai-responses"
  * surface (A6: no stream_options.include_usage injection; A7: streaming still flows
  * through the generic createGovernedStream path). `this` binds to the RAW `responses`
- * object. Everything else (retrieve / cancel / delete / …) stays a pass-through.
+ * object. Everything else (retrieve / cancel / delete / parse / stream / …) goes to the
+ * default-deny boundary at "responses".
  */
 function buildOpenAIResponsesProxy(
 	original: Record<string, unknown>,
 	intercept: InterceptFn,
+	boundary: MethodBoundary,
 ): Record<string, unknown> | undefined {
 	let responses: unknown;
 	try {
@@ -4534,8 +4871,9 @@ function buildOpenAIResponsesProxy(
 			if (prop === "create") {
 				return (...args: unknown[]) => intercept(originalCreate, target, args, "openai-responses");
 			}
-			return Reflect.get(target, prop, receiver);
+			return guardedGet(target, prop, receiver, "responses", boundary);
 		},
+		...refuseWrites("responses"),
 	});
 }
 
@@ -4544,6 +4882,7 @@ function buildOpenAIProxy<T>(
 	intercept: InterceptFn,
 	destroy: () => Promise<void>,
 	governAction: GovernActionFn,
+	boundary: MethodBoundary,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const chat = original.chat as Record<string, unknown>;
@@ -4555,20 +4894,23 @@ function buildOpenAIProxy<T>(
 			if (prop === "create") {
 				return (...args: unknown[]) => intercept(originalCreate, target, args);
 			}
-			return Reflect.get(target, prop, receiver);
+			return guardedGet(target, prop, receiver, "chat.completions", boundary);
 		},
+		...refuseWrites("chat.completions"),
 	});
 
 	const chatProxy = new Proxy(chat, {
 		get(target, prop, receiver) {
 			if (prop === "completions") return completionsProxy;
-			return Reflect.get(target, prop, receiver);
+			return guardedGet(target, prop, receiver, "chat", boundary);
 		},
+		...refuseWrites("chat"),
 	});
 
 	// responses.create — governed when present (A5); an older client without the
-	// Responses API yields undefined and `responses` stays a raw pass-through.
-	const responsesProxy = buildOpenAIResponsesProxy(original, intercept);
+	// Responses API yields undefined and `responses` goes to the boundary.
+	const responsesProxy = buildOpenAIResponsesProxy(original, intercept, boundary);
+	const withOptions = governedWithOptions(original, boundary);
 
 	const clientProxy = new Proxy(original, {
 		get(target, prop, receiver) {
@@ -4576,8 +4918,10 @@ function buildOpenAIProxy<T>(
 			if (prop === "responses" && responsesProxy !== undefined) return responsesProxy;
 			if (prop === "destroy") return destroy;
 			if (prop === "governAction") return governAction;
-			return Reflect.get(target, prop, receiver);
+			if (prop === "withOptions" && withOptions !== undefined) return withOptions;
+			return guardedGet(target, prop, receiver, "", boundary);
 		},
+		...refuseWrites(""),
 	});
 
 	return clientProxy as TrustedClient<T>;
@@ -4596,7 +4940,17 @@ function buildGoogleProxy<T>(
 	const modelsProxy = new Proxy(models, {
 		get(target, prop, receiver) {
 			if (prop === "generateContent") {
-				return (...args: unknown[]) => intercept(originalGenerate, target, args);
+				return (...args: unknown[]) => {
+					// With a callable tool the SDK would loop internally and only the last round would be metered:
+					// run the loop here instead, each round its own governed call (see google-afc.ts).
+					const params = args[0];
+					if (afcRequested(params)) {
+						return runGovernedAfc(params as Record<string, unknown>, (roundParams) =>
+							intercept(originalGenerate, target, [roundParams, ...args.slice(1)]),
+						);
+					}
+					return intercept(originalGenerate, target, args);
+				};
 			}
 			return Reflect.get(target, prop, receiver);
 		},

@@ -129,7 +129,7 @@ function snapshotAuth(auth: Authorization): Authorization {
 	return { ...auth };
 }
 
-describe("AUD-001 headless claimed-but-unposted holds", () => {
+describe("headless claimed-but-unposted holds", () => {
 	let vaultBase: string;
 
 	beforeEach(() => {
