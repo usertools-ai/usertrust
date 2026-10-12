@@ -525,6 +525,10 @@ describe("ungoverned call attempts are disclosed in every format, by method", ()
 		);
 		expect(mdOut).not.toContain("Calls run ungoverned");
 		expect(mdOut).toContain("| Method | Attempts |");
+		expect(mdOut).toContain(
+			"before the provider is reached when audit.failClosed is set, best-effort otherwise",
+		);
+		expect(mdOut).toContain("a call whose record could not be written is not counted");
 		const html = render(m, "html");
 		expect(html).toContain('<th>Method</th><th class="n">Attempts</th>');
 		expect(html).toContain("<h3>Ungoverned call attempts</h3>");

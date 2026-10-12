@@ -190,7 +190,7 @@ const WITHOUT_CALL_NOTE =
 /** The disclosure line for ungoverned call attempts, stated ONCE for both renderers; the count follows it. */
 const UNGOVERNED_LINE = "Ungoverned call attempts (opted out with allowUngoverned, unmetered):";
 const UNGOVERNED_NOTE =
-	"Each attempt is recorded when the call is attempted, before the provider is reached, so it may have failed or never reached the provider. The caller opted it out of governance: no budget check, no hold and no recorded cost, so what it spent is not known. Attempts are in no spend, cost or budget figure, and no amount is estimated for them.";
+	"Each attempt is recorded as the call is made: before the provider is reached when audit.failClosed is set, best-effort otherwise, so an attempt may have failed or never reached the provider, and a call whose record could not be written is not counted. The caller opted it out of governance: no budget check, no hold and no recorded cost, so what it spent is not known. Attempts are in no spend, cost or budget figure, and no amount is estimated for them.";
 
 const UPPER_BOUND_NOTE =
 	"A headless call the ledger answered, with no shortfall record on the chain or in the dead-letter queue, is counted as an upper bound (at most its metered cost), not as an exact figure: this record format cannot tell a capped post from an uncapped one, because the shortfall is written after the call and may not exist yet, or may have been lost in a crash.";
