@@ -1211,8 +1211,16 @@ inside the chain; and a "repair" that chooses which evidence is true. `quarantin
 subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evidence as a segment.
 
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
-`packages/core/src/audit/read.ts`, `packages/core/src/audit/dead-letters.ts`, and
+`packages/core/src/audit/read.ts`, `packages/core/src/audit/effective-budget.ts`, `packages/core/src/audit/dead-letters.ts`, and
 `packages/core/src/audit/verify.ts` contain zero filesystem write calls. Keep it that way — a verifier that mutates its subject is not a verifier.
+
+**A vault reader's budget is the one the governor ENFORCES.** `createGovernor` and `trust()` resolve the budget from
+`opts.budget`, `opts.configPath`, the vault's `usertrust.config.json` or the default, then record the result in
+`.usertrust/effective-budget.json` (`budget/effective-record.ts`; advisory, never throws; a failed write removes any
+earlier record). `loadBudgetConfig` reads that record first, then the vault config, and returns `source: "governor" |
+"config" | "none"`; `none` (and an unreadable record) is an UNKNOWN budget, and a reader shows no remaining figure for
+it. The ledger UI, `inspect`, `health` and `report` all read it; never add a reader that parses the config file alone.
+Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
 
 **`vaultPath` means two different directories.** `createAuditWriter(vaultPath)` joins
 `vaultPath/.usertrust/audit` — it takes the **project root**. `verifyVault`, `readLedgerEvents`,

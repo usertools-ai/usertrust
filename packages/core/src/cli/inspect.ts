@@ -72,8 +72,12 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const config = loadBudgetConfig(vaultPath);
 	const events = readLedgerEvents(vaultPath);
 	const spent = computeSpent(events);
-	const remaining = config.budget - spent;
-	const pct = config.budget > 0 ? ((remaining / config.budget) * 100).toFixed(1) : "0.0";
+	// An UNKNOWN budget (no governor record, no configured budget) has no remaining figure: subtracting spend from the
+	// placeholder 0 printed a negative balance for a vault whose governor enforces a real budget elsewhere.
+	const budgetKnown = config.source !== "none";
+	const remaining = budgetKnown ? config.budget - spent : null;
+	const pct =
+		remaining !== null && config.budget > 0 ? ((remaining / config.budget) * 100).toFixed(1) : null;
 
 	// Verify chain
 	const logPath = join(vaultPath, "audit", "events.jsonl");
@@ -99,10 +103,11 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				command: "inspect",
 				success: true,
 				data: {
-					budget: config.budget,
+					budget: budgetKnown ? config.budget : null,
+					budgetSource: config.source,
 					spent,
 					remaining,
-					percentRemaining: Number.parseFloat(pct),
+					percentRemaining: pct === null ? null : Number.parseFloat(pct),
 					chain: {
 						events: verification.eventsVerified,
 						valid: verification.valid,
@@ -120,9 +125,11 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	console.log("+--------------------------------------------------------------+");
 	console.log(`|  ${pc.bold("* usertrust vault")}${" ".repeat(43)}|`);
 	console.log(
-		`${`|  Budget: ${remaining.toLocaleString()} / ${config.budget.toLocaleString()} UT remaining (${pct}%)`.padEnd(
-			63,
-		)}|`,
+		`${(
+			remaining === null
+				? `|  Budget: unknown (none recorded or configured), ${spent.toLocaleString()} UT spent`
+				: `|  Budget: ${remaining.toLocaleString()} / ${config.budget.toLocaleString()} UT remaining (${pct}%)`
+		).padEnd(63)}|`,
 	);
 	console.log(
 		`${`|  Chain: ${verification.eventsVerified} events | Integrity: ${verification.valid ? "SHA-256 verified" : "INTEGRITY FAILURE"}`.padEnd(

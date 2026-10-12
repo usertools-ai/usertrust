@@ -93,7 +93,8 @@ export async function createUiServer(
 			for (const r of rows) {
 				if (r.kind === "llm_call" && r.costUt !== undefined) state.summary.spentUt += r.costUt;
 			}
-			state.summary.remainingUt = state.summary.budget - state.summary.spentUt;
+			state.summary.remainingUt =
+				state.summary.budget === null ? null : state.summary.budget - state.summary.spentUt;
 			state.summary.chain.events += fresh.length;
 			// Amendment A4: enforce ROW_CAP after append.
 			if (state.rows.length > ROW_CAP) {

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../src/audit/chain.js";
+import { recordEffectiveBudget } from "../../src/budget/effective-record.js";
 import { run } from "../../src/cli/inspect.js";
 
 describe("usertrust inspect", () => {
@@ -132,5 +133,47 @@ describe("usertrust inspect", () => {
 		const combined = logOutput.join("\n");
 		// 50000 - 142 = 49858
 		expect(combined).toContain("49,858");
+	});
+
+	// A server tenant's or SDK caller's budget never reached the vault config: inspect printed a negative remaining.
+	async function spent300(): Promise<string> {
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(join(vaultPath, "audit"), { recursive: true });
+		const writer = createAuditWriter(tempDir);
+		await writer.appendEvent({ kind: "llm_call", actor: "test", data: { cost: 300 } });
+		writer.release();
+		return vaultPath;
+	}
+	function lastJson(): { data: Record<string, unknown> } {
+		return JSON.parse(logOutput.at(-1) as string) as { data: Record<string, unknown> };
+	}
+
+	it("red-first (remaining -300): the governor's recorded budget, and the correct remaining, in --json", async () => {
+		recordEffectiveBudget(await spent300(), 2_000);
+		await run(tempDir, { json: true });
+		expect(lastJson().data).toMatchObject({
+			budget: 2_000,
+			budgetSource: "governor",
+			spent: 300,
+			remaining: 1_700,
+			percentRemaining: 85,
+		});
+	});
+
+	it("no record and no configured budget: UNKNOWN — null budget and remaining in --json, and said so in text", async () => {
+		await spent300();
+		await run(tempDir, { json: true });
+		expect(lastJson().data).toMatchObject({
+			budget: null,
+			budgetSource: "none",
+			spent: 300,
+			remaining: null,
+			percentRemaining: null,
+		});
+		logOutput = [];
+		await run(tempDir);
+		const combined = logOutput.join("\n");
+		expect(combined).toContain("Budget: unknown");
+		expect(combined).not.toContain("-300");
 	});
 });

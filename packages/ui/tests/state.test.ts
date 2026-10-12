@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
+import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
 import { loadState } from "../src/server/state.js";
 
 describe("loadState", () => {
@@ -93,5 +94,45 @@ describe("loadState", () => {
 		const state = loadState(vaultPath);
 		expect(state.summary.anchorFile).toBe("present");
 		expect(state.summary).not.toHaveProperty("anchorState");
+	});
+
+	// The pilot dashboard: a server tenant's budget is passed to its governor in memory, so the vault's config file
+	// never held it; the summary read 0 ("no budget set") and a NEGATIVE remaining. The governor's record carries it.
+	async function spend(costs: number[]): Promise<void> {
+		const writer = createAuditWriter(tempDir);
+		for (const cost of costs) {
+			await writer.appendEvent({ kind: "llm_call", actor: "local", data: { cost } });
+		}
+		writer.release();
+	}
+
+	it("red-first (budget 0, remaining -300): a tenant vault shows its enforced budget and the correct remaining", async () => {
+		await spend([100, 200]);
+		recordEffectiveBudget(vaultPath, 2_000);
+		const { summary } = loadState(vaultPath);
+		expect(summary).toMatchObject({
+			budget: 2_000,
+			budgetSource: "governor",
+			spentUt: 300,
+			remainingUt: 1_700,
+		});
+	});
+
+	it("no record and no configured budget: UNKNOWN — budget and remaining are null, never 0 and a negative", async () => {
+		await spend([300]);
+		const { summary } = loadState(vaultPath);
+		expect(summary).toMatchObject({
+			budget: null,
+			budgetSource: "none",
+			spentUt: 300,
+			remainingUt: null,
+		});
+	});
+
+	it("no record: the vault config's budget, labelled as such", async () => {
+		await spend([300]);
+		writeFileSync(join(vaultPath, "usertrust.config.json"), JSON.stringify({ budget: 1_000 }));
+		const { summary } = loadState(vaultPath);
+		expect(summary).toMatchObject({ budget: 1_000, budgetSource: "config", remainingUt: 700 });
 	});
 });

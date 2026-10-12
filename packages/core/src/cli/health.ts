@@ -17,6 +17,7 @@ import {
 	type EntropyEventInput,
 	type EntropyLevel,
 } from "../audit/entropy.js";
+import { loadBudgetConfig } from "../audit/read.js";
 import { verifyVaultReading } from "../audit/verify.js";
 import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
@@ -220,19 +221,6 @@ function toSafeJson(value: unknown): string {
 	});
 }
 
-function loadConfig(vaultPath: string): { budget: number } {
-	const configPath = join(vaultPath, "usertrust.config.json");
-	if (!existsSync(configPath)) return { budget: 0 };
-
-	try {
-		const raw = readFileSync(configPath, "utf-8");
-		const config = JSON.parse(raw) as { budget?: number };
-		return { budget: typeof config.budget === "number" ? config.budget : 0 };
-	} catch {
-		return { budget: 0 };
-	}
-}
-
 /**
  * Cumulative SESSION spend, as the governor persists it.
  *
@@ -332,7 +320,8 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	}
 
 	const events = loadEvents(vaultPath);
-	const config = loadConfig(vaultPath);
+	// The budget the governor ENFORCES when it recorded one, else the vault config (one reader: `loadBudgetConfig`).
+	const config = loadBudgetConfig(vaultPath);
 	const policyStatus = loadPolicyStatus(vaultPath);
 
 	// Convert audit events to entropy event inputs

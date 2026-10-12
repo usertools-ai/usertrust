@@ -48,6 +48,7 @@ import {
 import { writeReceipt } from "./audit/rotation.js";
 import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
+import { recordEffectiveBudget } from "./budget/effective-record.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
 import { afcRequested, runGovernedAfc } from "./google-afc.js";
@@ -1227,6 +1228,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
 		});
 	}
+
+	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
+	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Advisory: it
+	// never throws, and a failed write removes any earlier record rather than leave a stale one (effective-budget.ts).
+	recordEffectiveBudget(join(vaultBase, VAULT_DIR), config.budget);
 
 	// D8: one-time migration warning, evaluated at the config-load path.
 	warnCacheRateMigration(config.pricing === "custom" ? config.customRates : undefined);

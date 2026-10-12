@@ -53,7 +53,7 @@ export {
 	quarantineTornTail,
 	type TornTail,
 } from "./audit/quarantine.js";
-export type { ChainIntegrity, PersistedAuditEvent } from "./audit/read.js";
+export type { BudgetSource, ChainIntegrity, PersistedAuditEvent } from "./audit/read.js";
 // Vault reading (shared by CLI + usertrust-ui)
 export { deriveChainIntegrity, loadBudgetConfig, readLedgerEvents } from "./audit/read.js";
 export type { ChainVerificationResult, VaultVerificationResult } from "./audit/verify.js";

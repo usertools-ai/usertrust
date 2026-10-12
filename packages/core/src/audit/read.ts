@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { GENESIS_HASH } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
 import { canonicalize } from "./canonical.js";
+import { readEffectiveBudget } from "./effective-budget.js";
 
 export interface PersistedAuditEvent extends AuditEvent {
 	sequence?: number;
@@ -76,14 +77,29 @@ export function readLedgerEvents(vaultPath: string): PersistedAuditEvent[] {
 		: events;
 }
 
-export function loadBudgetConfig(vaultPath: string): { budget: number } {
+/**
+ * Where a vault reader's budget came from:
+ * - `governor`: the budget the vault's governor recorded as the one it ENFORCES (`effective-budget.json`);
+ * - `config`: no record, so the vault's own `usertrust.config.json`;
+ * - `none`: neither gives one, or the record exists but cannot be read. The budget is then UNKNOWN, and `budget`
+ *   is 0 only as a placeholder: a reader must not compute a remaining figure from it.
+ */
+export type BudgetSource = "governor" | "config" | "none";
+
+export function loadBudgetConfig(vaultPath: string): { budget: number; source: BudgetSource } {
+	const recorded = readEffectiveBudget(vaultPath);
+	if (recorded.state === "recorded") return { budget: recorded.budget, source: "governor" };
+	// An unreadable record is not an absent one: the config file may not be what the governor enforced.
+	if (recorded.state === "unreadable") return { budget: 0, source: "none" };
 	const configPath = join(vaultPath, "usertrust.config.json");
-	if (!existsSync(configPath)) return { budget: 0 };
+	if (!existsSync(configPath)) return { budget: 0, source: "none" };
 	try {
 		const config = JSON.parse(readFileSync(configPath, "utf-8")) as { budget?: number };
-		return { budget: typeof config.budget === "number" ? config.budget : 0 };
+		return typeof config.budget === "number" && config.budget > 0
+			? { budget: config.budget, source: "config" }
+			: { budget: 0, source: "none" };
 	} catch {
-		return { budget: 0 };
+		return { budget: 0, source: "none" };
 	}
 }
 

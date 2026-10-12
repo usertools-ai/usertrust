@@ -30,7 +30,8 @@ export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerSt
 	const events = readLedgerEvents(vaultPath);
 	const integrity = deriveChainIntegrity(events);
 	const vault = verifyVault(vaultPath);
-	const { budget } = loadBudgetConfig(vaultPath);
+	const config = loadBudgetConfig(vaultPath);
+	const budget = config.source === "none" ? null : config.budget;
 
 	let spentUt = 0;
 	for (const e of events) {
@@ -55,8 +56,9 @@ export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerSt
 		summary: {
 			vaultPath,
 			budget,
+			budgetSource: config.source,
 			spentUt,
-			remainingUt: budget - spentUt,
+			remainingUt: budget === null ? null : budget - spentUt,
 			chain: {
 				events: events.length,
 				valid: integrity.valid && vault.valid,

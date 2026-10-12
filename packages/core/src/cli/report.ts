@@ -29,6 +29,7 @@ import {
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import pc from "picocolors";
 import { verifyVaultComplete } from "../audit/complete.js";
+import { readEffectiveBudget } from "../audit/effective-budget.js";
 import { type ReportFormat, render } from "../report/render.js";
 import {
 	AGENT_KEYS,
@@ -103,7 +104,7 @@ export interface ReportArgs {
 	agentKey: AgentKey;
 	segment: number | undefined;
 	top: number;
-	/** `--budget`: the budget in usertokens, overriding the vault config (a server tenant's budget lives in the server's tenant config). */
+	/** `--budget`: the budget in usertokens, overriding the governor's recorded budget and the vault config. */
 	budget: number | undefined;
 	/** `--tenant-config`: a JSON file whose `budget` is the budget in usertokens. */
 	tenantConfig: string | undefined;
@@ -478,6 +479,14 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			budget = readTenantBudget(userPath(root, parsed.tenantConfig));
 			budgetSource = "tenant config";
 		}
+		const explicitBudget = parsed.budget !== undefined || parsed.tenantConfig !== undefined;
+		// With no flag, the budget the vault's governor RECORDED as the one it enforces wins over the vault config: a
+		// server tenant's or an SDK caller's budget never reaches that file. An unreadable record is an UNKNOWN budget.
+		const recorded = explicitBudget ? null : readEffectiveBudget(vaultPath);
+		if (recorded?.state === "recorded") {
+			budget = recorded.budget;
+			budgetSource = "the governor's record";
+		}
 		// The verdict is `usertrust verify`'s own, on the LIVE vault: integrity AND completeness, one function shared with that
 		// command (audit/complete.ts). The report makes no integrity claim of its own. The instant is taken before the read.
 		const readAtIso = new Date().toISOString();
@@ -509,17 +518,20 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 				...(parsed.segment !== undefined ? { segment: parsed.segment } : {}),
 				topN: parsed.top,
 				budget:
-					parsed.budget !== undefined || parsed.tenantConfig !== undefined
+					explicitBudget || recorded?.state === "recorded"
 						? budget
-						: config.state === "file"
-							? readVaultBudgetText(config.text)
-							: 0,
+						: recorded?.state === "unreadable"
+							? 0
+							: config.state === "file"
+								? readVaultBudgetText(config.text)
+								: 0,
 				budgetSource,
 				spendLedger: readSpendLedger(join(vaultPath, "spend-ledger.json")),
 				deadLetters,
 				// An unreadable config is an UNKNOWN budget, never "no budget configured".
 				budgetUnreadable:
-					configUnreadable && parsed.budget === undefined && parsed.tenantConfig === undefined,
+					recorded?.state === "unreadable" ||
+					(configUnreadable && !explicitBudget && recorded?.state !== "recorded"),
 			},
 		);
 		const text = render(model, parsed.format);

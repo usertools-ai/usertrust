@@ -68,6 +68,7 @@ import {
 	type EnvelopeStatus,
 	envelopeStatusFrom,
 } from "./budget/context.js";
+import { recordEffectiveBudget } from "./budget/effective-record.js";
 // The cost-center envelope helpers are SHARED with `govern.ts`, not copied from
 // it (see the block comment above `ResolvedEnvelope` there). D1's throw, A2's
 // pre-gate refusal, A7's unfloored arithmetic and D5's label re-wrap all decide
@@ -1187,6 +1188,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
 		});
 	}
+
+	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
+	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Advisory: it
+	// never throws, and a failed write removes any earlier record rather than leave a stale one (effective-budget.ts).
+	recordEffectiveBudget(join(vaultBase, VAULT_DIR), config.budget);
 
 	const customRates = config.pricing === "custom" ? config.customRates : undefined;
 	// D8: one-time migration warning, evaluated at the config-load path.
