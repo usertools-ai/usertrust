@@ -43,7 +43,9 @@ import {
 	fromGeminiUsage,
 	fromOpenAICompletionsUsage,
 	fromOpenAIResponsesUsage,
+	type ImplausibleChecks,
 	MAX_PLAUSIBLE_TOKENS_PER_TIER,
+	mergeImplausible,
 	type UsageTier,
 } from "./ledger/usage.js";
 import { AuditDegradedError } from "./shared/errors.js";
@@ -88,6 +90,8 @@ export interface StreamCompletion {
 	 * records the anomaly rather than billing zeroed counts under a provider label.
 	 */
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	/** Which check put each tier in `implausible` (the first that fired for it); a tier with no entry was a "sum". */
+	implausibleBy?: ImplausibleChecks | undefined;
 }
 
 export interface GovernedStream<T> extends AsyncIterable<T> {
@@ -139,6 +143,7 @@ function boundedCount(
 
 function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	implausibleBy?: ImplausibleChecks | undefined;
 } {
 	if (chunk == null || typeof chunk !== "object") return NO_USAGE;
 
@@ -158,6 +163,7 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 				cacheWriteTokens: normalized.cacheWriteTokens,
 				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
 				implausible: Object.keys(found).length > 0 ? found : undefined,
+				implausibleBy: normalized.implausibleBy,
 			};
 		}
 	}
@@ -174,6 +180,7 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 				cacheWriteTokens: normalized.cacheWriteTokens,
 				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
 				implausible: Object.keys(found).length > 0 ? found : undefined,
+				implausibleBy: normalized.implausibleBy,
 			};
 		}
 	}
@@ -195,6 +202,7 @@ function sanitizeCount(value: unknown): number {
 interface SnapshotWithProvenance extends StreamUsage {
 	reported: boolean;
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	implausibleBy?: ImplausibleChecks | undefined;
 }
 
 /**
@@ -244,6 +252,7 @@ function extractUsageSnapshot(
 						cacheWriteTokens: n.cacheWriteTokens,
 						reported: n.source === "provider",
 						implausible: n.implausible,
+						implausibleBy: n.implausibleBy,
 					};
 				}
 			}
@@ -260,6 +269,7 @@ function extractUsageSnapshot(
 				cacheWriteTokens: n.cacheWriteTokens,
 				reported: n.source === "provider",
 				implausible: n.implausible,
+				implausibleBy: n.implausibleBy,
 			};
 		}
 		return null;
@@ -277,6 +287,7 @@ function extractUsageSnapshot(
 			cacheWriteTokens: n.cacheWriteTokens,
 			reported: n.source === "provider",
 			implausible: n.implausible,
+			implausibleBy: n.implausibleBy,
 		};
 	}
 	return null;
@@ -346,12 +357,17 @@ async function* wrapStreamImpl<T>(
 	let chunksDelivered = 0;
 	let usageReported = false;
 	let implausible: Partial<Record<UsageTier, number>> | undefined;
-	const noteImplausible = (found: Partial<Record<UsageTier, number>> | undefined): void => {
-		if (found === undefined) return;
-		implausible = { ...implausible };
-		for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
-			implausible[tier] = Math.max(implausible[tier] ?? 0, value);
-		}
+	let implausibleBy: ImplausibleChecks | undefined;
+	const noteImplausible = (reading: {
+		implausible?: Partial<Record<UsageTier, number>> | undefined;
+		implausibleBy?: ImplausibleChecks | undefined;
+	}): void => {
+		({ implausible, implausibleBy } = mergeImplausible(
+			implausible,
+			implausibleBy,
+			reading.implausible,
+			reading.implausibleBy,
+		));
 	};
 	const snapshot = (): StreamUsage => ({
 		inputTokens,
@@ -381,7 +397,7 @@ async function* wrapStreamImpl<T>(
 				// chunk's values (A7); explicit zeros count as reported usage (A11).
 				const latest = extractUsageSnapshot(chunk, kind);
 				if (latest != null) {
-					noteImplausible(latest.implausible);
+					noteImplausible(latest);
 					deltaInput = Math.max(0, latest.inputTokens - inputTokens);
 					deltaOutput = Math.max(0, latest.outputTokens - outputTokens);
 					inputTokens = latest.inputTokens;
@@ -403,7 +419,7 @@ async function* wrapStreamImpl<T>(
 				// Anthropic: message_start carries input, message_delta carries output —
 				// genuinely incremental chunk types; keep the latest non-zero value.
 				const tokens = extractAnthropicTokens(chunk);
-				noteImplausible(tokens.implausible);
+				noteImplausible(tokens);
 				if (tokens.inputTokens > 0) {
 					deltaInput = Math.max(0, tokens.inputTokens - inputTokens);
 					inputTokens = tokens.inputTokens;
@@ -451,7 +467,7 @@ async function* wrapStreamImpl<T>(
 		}
 	} catch (err) {
 		errored = true;
-		onError(err, { usage: snapshot(), chunksDelivered, usageReported, implausible });
+		onError(err, { usage: snapshot(), chunksDelivered, usageReported, implausible, implausibleBy });
 		throw err;
 	} finally {
 		// Normal completion AND early termination (consumer break → generator
@@ -468,6 +484,7 @@ async function* wrapStreamImpl<T>(
 				chunksDelivered,
 				usageReported,
 				implausible,
+				implausibleBy,
 			});
 			if (settling !== undefined) await settling;
 		}
