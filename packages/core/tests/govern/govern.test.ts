@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { type TrustedClient, trust } from "../../src/govern.js";
@@ -1107,6 +1108,39 @@ describe("trust()", () => {
 			expect(err).toBeInstanceOf(TypeError);
 			expect((err as Error).message).toContain('trust(): unknown option "pi"');
 			expect(createFn).not.toHaveBeenCalled();
+		});
+
+		// Another realm's plain object inherits from ITS Object.prototype, not this
+		// one's: the walk must stop there, or `toString` reads as an inherited option.
+		it("accepts a plain options object from another realm, and applies its pii", async () => {
+			const options = runInNewContext('({ dryRun: true, vaultBase: v, pii: "block" })', {
+				v: tmpVault,
+			}) as object;
+			expect(Object.getPrototypeOf(options)).not.toBe(Object.prototype);
+			const { err, createFn } = await governWith(options);
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect((err as PolicyDeniedError).reason).toContain("credit_card");
+			expect(createFn).not.toHaveBeenCalled();
+		});
+
+		it("still refuses an option inherited from a custom prototype made in another realm", async () => {
+			const options = runInNewContext(
+				'Object.assign(Object.create({ pii: "block" }), { dryRun: true, vaultBase: v })',
+				{ v: tmpVault },
+			) as object;
+			const { err, createFn } = await governWith(options);
+			expect(err).toBeInstanceOf(TypeError);
+			expect((err as Error).message).toContain('trust(): option "pii" is inherited');
+			expect((err as Error).message).not.toContain('"toString"');
+			expect(createFn).not.toHaveBeenCalled();
+		});
+
+		it("refuses an option on a null-rooted prototype that is not an Object.prototype", async () => {
+			const bare = Object.create(null, { pii: { value: "block", enumerable: true } });
+			const options = Object.assign(Object.create(bare), { dryRun: true, vaultBase: tmpVault });
+			const { err } = await governWith(options);
+			expect(err).toBeInstanceOf(TypeError);
+			expect((err as Error).message).toContain('trust(): option "pii" is inherited');
 		});
 
 		it("applies an own pii (the PII never reaches the provider)", async () => {

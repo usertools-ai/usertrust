@@ -277,14 +277,38 @@ function quoteForRefusal(value: unknown): string {
 }
 
 /**
+ * Whether `proto` is some realm's `Object.prototype`: the root of a plain
+ * object's chain. Decided by shape, not by identity with THIS realm's
+ * `Object.prototype`, so a plain object made in another realm (`node:vm`, a
+ * worker's structured data, an iframe) is not refused for inheriting
+ * `toString`. A null-rooted prototype counts as the root only when it also
+ * looks like one (its own `constructor` is a function whose `prototype` is it,
+ * and it has its own `hasOwnProperty`), because a bare
+ * `Object.create(null, { pii: … })` prototype treated as the root would have
+ * its keys skipped, and dropped in silence. Read through property descriptors,
+ * so no getter runs.
+ */
+function isRootObjectPrototype(proto: object): boolean {
+	if (Object.getPrototypeOf(proto) !== null) return false;
+	const ctor = Object.getOwnPropertyDescriptor(proto, "constructor")?.value;
+	const hasOwn = Object.getOwnPropertyDescriptor(proto, "hasOwnProperty")?.value;
+	return (
+		typeof ctor === "function" &&
+		Object.getOwnPropertyDescriptor(ctor, "prototype")?.value === proto &&
+		typeof hasOwn === "function"
+	);
+}
+
+/**
  * Every property name the options object inherits from its prototype chain
- * below `Object.prototype` (`constructor` aside), enumerable or not.
+ * below the root `Object.prototype` of whichever realm made it (`constructor`
+ * aside), enumerable or not.
  */
 function inheritedOptionNames(opts: object): string[] {
 	const names = new Set<string>();
 	for (
 		let proto: object | null = Object.getPrototypeOf(opts);
-		proto !== null && proto !== Object.prototype;
+		proto !== null && !isRootObjectPrototype(proto);
 		proto = Object.getPrototypeOf(proto)
 	) {
 		for (const name of Object.getOwnPropertyNames(proto)) {

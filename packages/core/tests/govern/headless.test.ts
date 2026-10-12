@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditLockReleaseError, type AuditWriter } from "../../src/audit/chain.js";
 import type { TrustEngine } from "../../src/govern.js";
@@ -758,6 +759,36 @@ describe("headless governor", () => {
 		options.vaultBase = vaultBase;
 		await expect(createGovernor(options as never)).rejects.toThrow(
 			'createGovernor(): option "pii" is inherited from the options object\'s prototype',
+		);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
+	it("accepts a plain options object from another realm, and applies its pii", async () => {
+		const engine = mockEngine();
+		const options = runInNewContext('({ vaultBase: v, pii: "block", _engine: e })', {
+			v: vaultBase,
+			e: engine,
+		}) as object;
+		expect(Object.getPrototypeOf(options)).not.toBe(Object.prototype);
+		const gov = await createGovernor(options as never);
+		expect(gov.config.pii).toBe("block");
+		await expect(
+			gov.authorize({
+				model: "claude-sonnet-4-6",
+				messages: [{ role: "user", content: "Charge my card 4111 1111 1111 1111 please" }],
+			}),
+		).rejects.toThrow(/PII detected: .*credit_card/);
+		expect(engine.pendingIds).toHaveLength(0);
+		await gov.destroy();
+	});
+
+	it("still refuses an option inherited from a custom prototype made in another realm", async () => {
+		const options = runInNewContext(
+			'Object.assign(Object.create({ pii: "block" }), { dryRun: true, vaultBase: v })',
+			{ v: vaultBase },
+		) as object;
+		await expect(createGovernor(options as never)).rejects.toThrow(
+			'createGovernor(): option "pii" is inherited',
 		);
 		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
 	});
