@@ -2615,9 +2615,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								);
 							}
 						},
-						// Under audit.failClosed a settlement can post the charge and then refuse
-						// (AuditDegradedError): that refusal also ends the caller's iteration, so a
-						// caller who catches the loop without awaiting `.receipt` still hears of it.
+						// Under audit.failClosed a settlement can run (post, or fail its POST
+						// ambiguously) and then refuse (AuditDegradedError): that refusal also ends
+						// the caller's iteration, so a caller who catches the loop without awaiting
+						// `.receipt` still hears of it.
 						{ surfaceSettleFailure: config.audit.failClosed },
 					);
 

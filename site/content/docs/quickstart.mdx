@@ -121,7 +121,7 @@ try {
   const receipt = await response.receipt;
 } catch (err) {
   // A stream that failed mid-way: voided, nothing charged.
-  // An AuditDegradedError (audit.failClosed): charged first, then refused.
+  // An AuditDegradedError (audit.failClosed): settlement ran first, may be billed.
 }
 ```
 

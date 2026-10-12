@@ -88,10 +88,10 @@ export interface GovernedStream<T> extends AsyncIterable<T> {
 	 * iteration threw, when the stream fails mid-way and its iteration THROWS: the hold is
 	 * then voided, not charged. A provider event the SDK yields as a chunk instead of
 	 * throwing (an OpenAI Responses `error` event) ends the stream like any other, and it
-	 * settles and is charged. Also rejects when settlement itself is refused after the
-	 * charge posted (`AuditDegradedError`, under `audit.failClosed`); the governor then
-	 * throws that error from the iteration too (`surfaceSettleFailure`). Never an
-	 * unhandled rejection.
+	 * settles and is charged. Also rejects when settlement itself is refused after it ran
+	 * (`AuditDegradedError`, under `audit.failClosed`): the charge posted, or its POST
+	 * failed and may still post, so the work may be billed. The governor then throws that
+	 * error from the iteration too (`surfaceSettleFailure`). Never an unhandled rejection.
 	 */
 	receipt: Promise<TrustReceipt>;
 }
@@ -432,9 +432,9 @@ export interface GovernedStreamOptions {
 	 * A settlement failure also ends the caller's ITERATION, not only `.receipt`. The
 	 * last step (the final `next()`, or the `return()` an early `break` drives) waits for
 	 * settlement, and if it rejects, throws the same error `.receipt` rejects with.
-	 * The governor sets it from `audit.failClosed`: there a settlement can post the
-	 * charge and THEN refuse (`AuditDegradedError`), and a caller who catches the
-	 * iteration without awaiting `.receipt` must still hear of it. Off (the default),
+	 * The governor sets it from `audit.failClosed`: there a settlement can run (post the
+	 * charge, or fail its POST ambiguously) and THEN refuse (`AuditDegradedError`), and a
+	 * caller who catches the iteration without awaiting `.receipt` must still hear of it. Off (the default),
 	 * the last step is not delayed and settlement runs in the background.
 	 */
 	surfaceSettleFailure?: boolean;
