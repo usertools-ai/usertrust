@@ -3922,18 +3922,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// the writer. The error defaults to the provider's own: `ungovernedMethodError` for
 	// Anthropic and OpenAI, `ungovernedGoogleMethodError` for Google.
 	//
-	// The degraded-audit preflight (refuseIfAuditDegradedAtStart) is NOT run here: the Google
-	// entry points run it before reaching this function (`refuseGoogle`, and the Google traps
-	// before their AFC gate), while the Anthropic and OpenAI refusals keep their behaviour as
-	// shipped, without it.
+	//
+	// It STARTS with the degraded-audit preflight, for every provider (the same start as
+	// interceptCall): destroyed, then, under audit.failClosed with a writer already degraded,
+	// an AuditDegradedError before attribution, any read of `args` or any append. No gate runs,
+	// so there is no denial to record. (The Google traps also run it before their AFC gate, so a
+	// pre-degraded client evaluates no gate at all.)
 	async function refuseUngovernedMethod(
 		path: string,
 		args: unknown[],
 		error?: PolicyDeniedError,
 	): Promise<never> {
-		if (destroyed) {
-			throw new Error("TrustedClient has been destroyed");
-		}
+		preflightRefusal();
 		// The ALS read happens here, synchronously, in the caller's own context (see the
 		// ALS-discipline note in interceptCall). Only the LABEL is carried: a refusal debits no
 		// envelope, so it has no use for the envelope account and must not trade the refusal for
@@ -3966,24 +3966,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		}
 	}
 
-	// The start every Google entry point shares, in interceptCall's order: destroyed, then
-	// the pre-degraded audit refusal. The Google traps run it BEFORE their AFC gate, so a
-	// pre-degraded client evaluates no gate at all (the gate's snapshot and verdict read
-	// the caller's params, and its refusal would attempt an append).
-	function preflightGoogleCall(): void {
+	// The start every refusal and every Google entry point shares, in interceptCall's order:
+	// destroyed, then the pre-degraded audit refusal. refuseUngovernedMethod runs it first, for
+	// every provider; the Google traps also run it BEFORE their AFC gate, so a pre-degraded
+	// client evaluates no gate at all (the gate's snapshot and verdict read the caller's params,
+	// and its refusal would attempt an append).
+	function preflightRefusal(): void {
 		if (destroyed) {
 			throw new Error("TrustedClient has been destroyed");
 		}
 		refuseIfAuditDegradedAtStart("this call was refused before it reached the provider");
 	}
-
-	// The Google refusals' entry to the shared refusal path: the preflight first (a
-	// pre-degraded client under failClosed refuses with AuditDegradedError before attribution,
-	// any read of `args` or any append), then `refuseUngovernedMethod`.
-	const refuseGoogle: RefuseFn = async (path, args, error) => {
-		preflightGoogleCall();
-		return refuseUngovernedMethod(path, args, error);
-	};
 
 	// 7c. An `allowUngoverned` call: the operator chose to run this method unmetered, so it runs on
 	// its raw SDK resource with no hold and no budget check, and leaves an `ungoverned_call` event
@@ -4104,8 +4097,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				interceptCall,
 				destroyFn,
 				governActionImpl,
-				refuseGoogle,
-				preflightGoogleCall,
+				refuseUngovernedMethod,
+				preflightRefusal,
 			);
 		}
 

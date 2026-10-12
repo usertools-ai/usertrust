@@ -2,13 +2,11 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * FINDING (open): under `audit.failClosed`, a client whose audit writer is ALREADY degraded
- * refuses a call before it does anything: no gate, no append (refuseIfAuditDegradedAtStart).
- * The Anthropic and OpenAI default-deny refusals (`refuseUngovernedMethod`) do not run that
- * preflight: a refused method there still attempts its `policy_denied` append and rejects with
- * a PolicyDeniedError marked `auditDegraded`, instead of an AuditDegradedError with no append.
- * The Google refusals do run it. This row pins the expected behaviour; it is `it.fails` until
- * the default-deny refusals run the preflight too.
+ * Under `audit.failClosed`, a client whose audit writer is ALREADY degraded refuses a call before
+ * it does anything: no gate, no append (refuseIfAuditDegradedAtStart). The Anthropic and OpenAI
+ * default-deny refusals run that preflight too: a refused method rejects with AuditDegradedError
+ * and appends nothing, instead of attempting its `policy_denied` append and rejecting with a
+ * PolicyDeniedError marked `auditDegraded`. With failClosed off, the refusal is unchanged.
  */
 
 import { randomUUID } from "node:crypto";
@@ -19,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { trust } from "../../src/govern.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
-import { AuditDegradedError } from "../../src/shared/errors.js";
+import { AuditDegradedError, PolicyDeniedError } from "../../src/shared/errors.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
 vi.mock("tigerbeetle-node", () => ({
@@ -73,37 +71,92 @@ describe("default-deny refusals and a pre-degraded audit writer under failClosed
 		return { writer, appendEvent };
 	}
 
-	it.fails("Anthropic: a refused ungoverned method rejects with AuditDegradedError and appends nothing", async () => {
-		const { writer, appendEvent } = degradedWriter();
-		const batchesCreate = vi.fn(async () => ({}));
-		const client = {
-			// An SDK resource carries the client it was built from as `_client`; that is how the
-			// default-deny boundary recognises a nested resource.
-			messages: {
-				create: vi.fn(async () => ({})),
-				batches: { _client: {}, create: batchesCreate },
-			},
-		};
-		const governed = (await trust(client, {
-			dryRun: true,
-			vaultBase: vault,
-			_audit: writer,
-		})) as unknown as {
-			messages: { batches: { create(p: unknown): Promise<unknown> } };
-			destroy(): Promise<void>;
-		};
+	/** A duck-typed SDK client with one governed method and one nested resource to refuse. */
+	const PROVIDERS = [
+		{
+			name: "Anthropic",
+			path: "messages.batches.create",
+			make: (refused: ReturnType<typeof vi.fn>) => ({
+				// An SDK resource carries the client it was built from as `_client`; that is how the
+				// default-deny boundary recognises a nested resource.
+				messages: { create: vi.fn(async () => ({})), batches: { _client: {}, create: refused } },
+			}),
+			call: (governed: unknown) =>
+				(
+					governed as { messages: { batches: { create(p: unknown): Promise<unknown> } } }
+				).messages.batches.create({ requests: [] }),
+		},
+		{
+			name: "OpenAI",
+			path: "embeddings.create",
+			make: (refused: ReturnType<typeof vi.fn>) => ({
+				chat: { completions: { create: vi.fn(async () => ({})) } },
+				embeddings: { _client: {}, create: refused },
+			}),
+			call: (governed: unknown) =>
+				(governed as { embeddings: { create(p: unknown): Promise<unknown> } }).embeddings.create({
+					model: "text-embedding-3-small",
+					input: "hi",
+				}),
+		},
+	];
 
-		const err = await governed.messages.batches.create({ requests: [] }).then(
-			() => undefined,
-			(e: unknown) => e,
-		);
+	it.each(PROVIDERS)(
+		"$name: failClosed with a pre-degraded writer → a refused method rejects with AuditDegradedError and appends nothing",
+		async ({ make, call }) => {
+			const { writer, appendEvent } = degradedWriter();
+			const refused = vi.fn(async () => ({}));
+			const governed = (await trust(make(refused), {
+				dryRun: true,
+				vaultBase: vault,
+				_audit: writer,
+			})) as unknown as { destroy(): Promise<void> };
 
-		try {
-			expect(err).toBeInstanceOf(AuditDegradedError);
-			expect(appendEvent).not.toHaveBeenCalled();
-			expect(batchesCreate).not.toHaveBeenCalled();
-		} finally {
-			await governed.destroy();
-		}
-	});
+			const err = await call(governed).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+			try {
+				expect(err).toBeInstanceOf(AuditDegradedError);
+				expect(err).not.toBeInstanceOf(PolicyDeniedError);
+				expect(appendEvent).not.toHaveBeenCalled();
+				expect(refused).not.toHaveBeenCalled();
+			} finally {
+				await governed.destroy();
+			}
+		},
+	);
+
+	it.each(PROVIDERS)(
+		"$name: failClosed OFF → the refusal is still a PolicyDeniedError with exactly one policy_denied append",
+		async ({ make, call, path }) => {
+			writeFileSync(
+				join(vault, VAULT_DIR, "usertrust.config.json"),
+				JSON.stringify({ budget: 50_000, audit: { failClosed: false } }),
+			);
+			const { writer, appendEvent } = degradedWriter();
+			const refused = vi.fn(async () => ({}));
+			const governed = (await trust(make(refused), {
+				dryRun: true,
+				vaultBase: vault,
+				_audit: writer,
+			})) as unknown as { destroy(): Promise<void> };
+
+			const err = await call(governed).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+			try {
+				expect(err).toBeInstanceOf(PolicyDeniedError);
+				expect((err as Error).message).toContain(path);
+				expect(appendEvent).toHaveBeenCalledOnce();
+				expect(appendEvent.mock.calls[0]?.[0].kind).toBe("policy_denied");
+				expect(refused).not.toHaveBeenCalled();
+			} finally {
+				await governed.destroy();
+			}
+		},
+	);
 });

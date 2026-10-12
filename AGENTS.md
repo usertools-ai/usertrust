@@ -1608,8 +1608,10 @@ constant disagree.
 and `models.generateContentStream`.
 **Anthropic and OpenAI clients are default-deny** (`default-deny.ts`): every other function-valued
 SDK member reached off the governed client, at any depth, is refused through ONE function,
-`refuseUngovernedMethod` in `trust()` (the same one Google's refusals use, below), which writes `policy_denied` at the denial boundary and
-rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
+`refuseUngovernedMethod` in `trust()` (the same one Google's refusals use, below), which first runs
+the degraded-audit preflight (under `failClosed`, a writer already degraded refuses with
+`AuditDegradedError` before anything is recorded), then writes `policy_denied` at the denial boundary
+and rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
 requests are all GET or DELETE, plus POSTs named with a reason, minus GET/DELETE methods named as
 exceptions. Each entry cites its SDK source line and verb; they run with the RAW resource as
 `this`, because `this._client` through the boundary is a refusing stand-in, and
@@ -1623,8 +1625,8 @@ ones are **refused** by name (`GOOGLE_REFUSED_METHODS` in `govern.ts`:
 `models.embedContent/generateImages/editImage/upscaleImage/generateVideos/recontextImage/
 segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create/
 createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create/update`,
-`fileSearchStores.uploadToFileSearchStore/importFile`), through the same `refuseUngovernedMethod`
-after the degraded-audit preflight (`refuseGoogle`); calls that are not billed
+`fileSearchStores.uploadToFileSearchStore/importFile`), through the same `refuseUngovernedMethod`;
+calls that are not billed
 (`models.countTokens/list/get`, `caches.get`, `files`, and the like) pass through. With automatic
 function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in `google-afc.ts`, a mirror of the
 SDK's `shouldDisableAfc`, made on a snapshot of the request that is then what is forwarded),
