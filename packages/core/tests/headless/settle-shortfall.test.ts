@@ -209,9 +209,12 @@ describe("headless settlement_shortfall threading", () => {
 		await gov.destroy();
 	});
 
-	it("a FULL post records postedAmount equal to the metered cost; a dry run records neither", async () => {
+	it("a FULL post by an engine that reports it records postedAmount equal to the metered cost; a dry run records none", async () => {
 		const audit = makeMockAudit();
-		const gov = await governorWith(makeMockEngine(), audit);
+		const gov = await governorWith(
+			makeMockEngine(async (_id: string, cost: number) => ({ posted: cost, shortfall: 0 })),
+			audit,
+		);
 		const auth = await gov.authorize(AUTHORIZE);
 		await gov.settle(auth, { inputTokens: 80, outputTokens: 20 });
 		const data = audit.events.find((e) => e.kind === "llm_call")?.data;
@@ -232,6 +235,17 @@ describe("headless settlement_shortfall threading", () => {
 			"postedAmount",
 		);
 		await dry.destroy();
+	});
+
+	it("an engine whose post resolves VOID gives no evidence of a full post: ledgerPosted, but no postedAmount", async () => {
+		const audit = makeMockAudit();
+		const gov = await governorWith(makeMockEngine(), audit);
+		const auth = await gov.authorize(AUTHORIZE);
+		await gov.settle(auth, { inputTokens: 80, outputTokens: 20 });
+		const data = audit.events.find((e) => e.kind === "llm_call")?.data;
+		expect(data).toMatchObject({ ledgerPosted: true });
+		expect(data).not.toHaveProperty("postedAmount");
+		await gov.destroy();
 	});
 
 	it("audits settlement_shortfall and sets receipt.postedCost when the engine reports truncation", async () => {
