@@ -954,6 +954,24 @@ describe("allowUngoverned", () => {
 		});
 	});
 
+	it("the option is read once: a getter that answers differently on a second read still gets the free check", async () => {
+		let reads = 0;
+		const opts = {
+			dryRun: true,
+			vaultBase: vault,
+			get allowUngoverned(): string[] | undefined {
+				reads += 1;
+				return reads === 1 ? ["models.list"] : undefined;
+			},
+		};
+		await expect(trust(rawClient("openai"), opts)).rejects.toMatchObject({
+			name: "TypeError",
+			message:
+				'usertrust: allowUngoverned cannot list "models.list": it is free on an OpenAI client and already runs without governance.',
+		});
+		expect(reads).toBe(1);
+	});
+
 	it("the event kind passes the verifiers: verifyVault and `usertrust verify`", async () => {
 		const { client } = await openai({ allowUngoverned: ["embeddings.create"] });
 		await client.embeddings.create({ model: "text-embedding-3-small", input: "hi" });

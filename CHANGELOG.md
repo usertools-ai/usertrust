@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Read before upgrading
 
 - **`allowUngoverned` refuses an entry that names a free or governed method, when the client is created.** Listing `models.list` or `messages.countTokens` (free), or `messages.create` or `chat.completions.create` (governed), was accepted, but the free branch or the governed trap ran first, so those calls carried no `ungoverned_call` event, though the option promises one for every listed method. `trust()` now throws a `TypeError` naming the entry and whether it is free or governed on that client. No billable work escaped; the audit promise was what broke.
 

@@ -1244,10 +1244,12 @@ function snapshotActionDescriptor(descriptor: ActionDescriptor): ActionDescripto
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
 	// 0. Validate the operator's opt-out list before anything touches the vault. Its free and governed
 	// checks need the client kind; detectClientKind is a pure shape test, run here only when a list
-	// was given (it runs again, unchanged, at step 5).
+	// was given (it runs again, unchanged, at step 5). The option is read ONCE: a getter that answered
+	// differently on a second read could otherwise pass the list to validation but skip the kind check.
+	const rawAllowUngoverned = opts?.allowUngoverned;
 	const allowUngoverned = validateAllowUngoverned(
-		opts?.allowUngoverned,
-		opts?.allowUngoverned === undefined ? undefined : detectClientKind(client),
+		rawAllowUngoverned,
+		rawAllowUngoverned === undefined ? undefined : detectClientKind(client),
 	);
 
 	// 1. Load config
