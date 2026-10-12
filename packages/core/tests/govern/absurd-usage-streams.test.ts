@@ -441,3 +441,193 @@ describe("an absurd chunk never reaches the anomaly detector's observation", () 
 		}
 	});
 });
+
+describe("a stream's implausible record keeps which check fired", () => {
+	// The stream accumulators carried only the tier -> figure map, so the settle's record labelled every tier
+	// "sum" (the default): a REFUSED figure of 1 went on the chain as a sum over the ceiling.
+
+	class Emitter extends EventEmitter {
+		finalMessage(): Promise<unknown> {
+			return Promise.resolve({});
+		}
+		async *[Symbol.asyncIterator](): AsyncIterator<unknown> {}
+	}
+
+	/** Settle one governed call and return its receipt and its usage_implausible data. */
+	async function settle(
+		client: object,
+		call: (g: Record<string, unknown>) => Promise<TrustReceipt>,
+	): Promise<{ receipt: TrustReceipt; data: Record<string, unknown> | undefined }> {
+		const vaultBase = join(tmpdir(), `absurd-streams-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+		try {
+			const audit = makeAudit();
+			const g = await trust(client, { budget: 100_000, vaultBase, dryRun: true, _audit: audit });
+			const receipt = await call(g as unknown as Record<string, unknown>);
+			await g.destroy();
+			const data = audit.events.find((e) => e.kind === "usage_implausible")?.data as
+				| Record<string, unknown>
+				| undefined;
+			return { receipt, data };
+		} finally {
+			rmSync(vaultBase, { recursive: true, force: true });
+		}
+	}
+
+	/** Drain a governed iterable stream and return its receipt. */
+	async function drain(result: unknown): Promise<TrustReceipt> {
+		const stream = (
+			result as { response: AsyncIterable<unknown> & { receipt: Promise<TrustReceipt> } }
+		).response;
+		for await (const _ of stream) {
+			// drain
+		}
+		return stream.receipt;
+	}
+
+	function gemini(chunks: unknown[]) {
+		return { models: { generateContent: vi.fn(async (_req: unknown) => gen(chunks)) } };
+	}
+
+	async function geminiStream(chunks: unknown[]) {
+		return settle(gemini(chunks), async (g) =>
+			drain(
+				await (g.models as { generateContent: (p: unknown) => Promise<unknown> }).generateContent({
+					model: "gemini-2.5-flash",
+					contents: "hello",
+				}),
+			),
+		);
+	}
+
+	/** Drive the MessageStream emitter path with the given events, then `end`. */
+	async function anthropicEmitter(emit: (stream: Emitter) => void) {
+		const stream = new Emitter();
+		const client = {
+			messages: {
+				create: vi.fn((_req: unknown) => undefined),
+				stream: vi.fn((_req: unknown) => stream),
+			},
+		};
+		return settle(client, async (g) => {
+			const handle = (await (g.messages as { stream: (p: unknown) => Promise<unknown> }).stream({
+				model: "claude-sonnet-4-6",
+				max_tokens: 64,
+				messages: [{ role: "user", content: "hello" }],
+			})) as { receipt: Promise<TrustReceipt> };
+			emit(stream);
+			stream.emit("end");
+			return handle.receipt;
+		});
+	}
+
+	it("Gemini: a final chunk with candidatesTokenCount -1 is recorded as refused, at a finite figure", async () => {
+		const { receipt, data } = await geminiStream([
+			{ usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 } },
+			{ usageMetadata: { promptTokenCount: 10, candidatesTokenCount: -1 } },
+		]);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(data).toMatchObject({ checks: { outputTokens: "refused" }, tiers: { outputTokens: 1 } });
+		const tiers = data?.tiers as Record<string, number> | undefined;
+		expect(Number.isFinite(tiers?.outputTokens)).toBe(true);
+		expect(JSON.parse(JSON.stringify(data))).toEqual(data);
+	});
+
+	it("Anthropic (iterable stream): an infinite message_start cache read is recorded as refused", async () => {
+		const start = JSON.parse(
+			'{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":1e400}}}',
+		) as unknown;
+		const client = {
+			messages: {
+				create: vi.fn(async (_req: unknown) =>
+					gen([start, { type: "message_delta", usage: { output_tokens: 5 } }]),
+				),
+			},
+		};
+		const { receipt, data } = await settle(client, async (g) =>
+			drain(
+				await (g.messages as { create: (p: unknown) => Promise<unknown> }).create({
+					model: "claude-sonnet-4-6",
+					max_tokens: 64,
+					messages: [{ role: "user", content: "hello" }],
+					stream: true,
+				}),
+			),
+		);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(data).toMatchObject({
+			checks: { cacheReadTokens: "refused" },
+			tiers: { cacheReadTokens: Number.MAX_VALUE },
+		});
+	});
+
+	it("Anthropic (MessageStream emitter): a NaN message_delta output is recorded as refused", async () => {
+		const { receipt, data } = await anthropicEmitter((stream) => {
+			stream.emit("streamEvent", {
+				type: "message_start",
+				message: { usage: { input_tokens: 10 } },
+			});
+			stream.emit("streamEvent", { type: "message_delta", usage: { output_tokens: Number.NaN } });
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		expect(data).toMatchObject({ checks: { outputTokens: "refused" }, tiers: { outputTokens: 1 } });
+	});
+
+	it("Anthropic (MessageStream finalMessage): a negative cache read is recorded as refused", async () => {
+		const { receipt, data } = await anthropicEmitter((stream) => {
+			stream.emit("finalMessage", {
+				usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: -1 },
+			});
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		expect(data).toMatchObject({
+			checks: { cacheReadTokens: "refused" },
+			tiers: { cacheReadTokens: 1 },
+		});
+	});
+
+	it("CONTROL: a Gemini stream over the ceiling only by its SUM still records sum", async () => {
+		const { receipt, data } = await geminiStream([
+			{
+				usageMetadata: {
+					promptTokenCount: 10,
+					candidatesTokenCount: 60_000_000,
+					thoughtsTokenCount: 60_000_000,
+				},
+			},
+		]);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(data).toMatchObject({
+			checks: { outputTokens: "sum" },
+			tiers: { outputTokens: 120_000_000 },
+		});
+	});
+
+	it("CONTROL: an OpenAI chat stream with a finite over-ceiling figure still records sum", async () => {
+		const client = {
+			chat: {
+				completions: {
+					create: vi.fn(async (_req: unknown) =>
+						gen([
+							{ choices: [{ delta: { content: "hi" } }] },
+							{ usage: { prompt_tokens: HUGE, completion_tokens: 10 } },
+						]),
+					),
+				},
+			},
+		};
+		const { receipt, data } = await settle(client, async (g) =>
+			drain(
+				await (
+					g.chat as { completions: { create: (p: unknown) => Promise<unknown> } }
+				).completions.create({
+					model: "gpt-4o",
+					messages: [{ role: "user", content: "hello" }],
+					stream: true,
+				}),
+			),
+		);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(data).toMatchObject({ checks: { inputTokens: "sum" }, tiers: { inputTokens: HUGE } });
+	});
+});

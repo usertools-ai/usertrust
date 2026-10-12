@@ -10,9 +10,11 @@ import {
 	fromOpenAIResponsesUsage,
 	implausibleUsageData,
 	MAX_PLAUSIBLE_TOKENS_PER_TIER,
+	mergeImplausible,
 	type NormalizedUsage,
 	sanitizeUsage,
 	type UsageTier,
+	withImplausible,
 } from "../../src/ledger/usage.js";
 
 /**
@@ -908,6 +910,48 @@ describe("an infinite usage component is refused, not read as absent", () => {
 		expect(u.inputTokens).toBe(10);
 		expect(u.implausible).toBeUndefined();
 		expect(u.implausibleBy).toBeUndefined();
+	});
+});
+
+describe("merging implausible readings keeps which check fired first", () => {
+	it("the larger figure wins, but each tier keeps the label of the FIRST check that fired for it", () => {
+		const first = mergeImplausible(
+			undefined,
+			undefined,
+			{ outputTokens: 1 },
+			{ outputTokens: "refused" },
+		);
+		const second = mergeImplausible(
+			first.implausible,
+			first.implausibleBy,
+			{ outputTokens: 120_000_000, inputTokens: 150_000_000 },
+			{ inputTokens: "refused" },
+		);
+		expect(second.implausible).toEqual({ outputTokens: 120_000_000, inputTokens: 150_000_000 });
+		expect(second.implausibleBy).toEqual({ outputTokens: "refused", inputTokens: "refused" });
+		// A tier first seen UNLABELLED (a sum) stays a sum when a later reading labels it.
+		const sum = mergeImplausible(undefined, undefined, { outputTokens: 120_000_000 }, undefined);
+		const later = mergeImplausible(
+			sum.implausible,
+			sum.implausibleBy,
+			{ outputTokens: 1 },
+			{
+				outputTokens: "refused",
+			},
+		);
+		expect(later.implausibleBy?.outputTokens).toBeUndefined();
+	});
+
+	it("withImplausible carries the labels of the readings it merges", () => {
+		const settled = withImplausible(
+			sanitizeUsage({ inputTokens: 10, outputTokens: 10, source: "provider" }),
+			{ outputTokens: 1 },
+			{ outputTokens: "refused" },
+		);
+		expect(settled.source).toBe("estimated");
+		expect(implausibleUsageData(settled, { model: "m", transferId: "t" })?.checks).toEqual({
+			outputTokens: "refused",
+		});
 	});
 });
 

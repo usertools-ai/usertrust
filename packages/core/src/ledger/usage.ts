@@ -261,28 +261,62 @@ export function usageCeiling(responses: number | undefined): number {
 /** The most responses one settle may claim to aggregate: keeps the scaled ceiling a safe integer. */
 export const MAX_AGGREGATED_RESPONSES = 1_000_000;
 
-/**
- * The snapshot with `extra` implausible readings merged in (the larger figure per tier): a stream that saw an absurd
- * count in ANY chunk settles at the estimate, even when an earlier chunk reported plausible usage.
- */
 /** True when the 1-hour share is the only over-ceiling reading. */
 function only1h(found: Partial<Record<UsageTier, number>>): boolean {
 	const tiers = Object.keys(found);
 	return tiers.length === 1 && tiers[0] === "cacheWrite1hTokens";
 }
 
+/** Which check put each tier in an implausible record; a tier with no entry was the aggregate "sum". */
+export type ImplausibleChecks = NonNullable<NormalizedUsage["implausibleBy"]>;
+
+/**
+ * An implausible record with `found` merged in: the larger figure per tier and, per tier, the label of the FIRST check
+ * that fired, as `sanitizeUsage` labels it (a tier first seen unlabelled stays a "sum"). Every stream accumulator and
+ * the stream settle merge through this, so a refused figure is never relabelled a sum on its way to the record.
+ */
+export function mergeImplausible(
+	implausible: Partial<Record<UsageTier, number>> | undefined,
+	implausibleBy: ImplausibleChecks | undefined,
+	found: Partial<Record<UsageTier, number>> | undefined,
+	foundBy: ImplausibleChecks | undefined,
+): {
+	implausible: Partial<Record<UsageTier, number>> | undefined;
+	implausibleBy: ImplausibleChecks | undefined;
+} {
+	if (found === undefined) return { implausible, implausibleBy };
+	const merged: Partial<Record<UsageTier, number>> = { ...implausible };
+	let mergedBy = implausibleBy;
+	for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
+		const by = foundBy?.[tier];
+		if (merged[tier] === undefined && by !== undefined) mergedBy = { ...mergedBy, [tier]: by };
+		merged[tier] = Math.max(merged[tier] ?? 0, value);
+	}
+	return { implausible: merged, implausibleBy: mergedBy };
+}
+
+/**
+ * The snapshot with `extra` implausible readings merged in (the larger figure per tier), with `extraBy` saying which
+ * check fired for each: a stream that saw an absurd count in ANY chunk settles at the estimate, even when an earlier
+ * chunk reported plausible usage.
+ */
 export function withImplausible(
 	snapshot: NormalizedUsage,
 	extra: Partial<Record<UsageTier, number>> | undefined,
+	extraBy?: ImplausibleChecks | undefined,
 ): NormalizedUsage {
 	if (extra === undefined || Object.keys(extra).length === 0) return snapshot;
-	const merged: Partial<Record<UsageTier, number>> = { ...snapshot.implausible };
-	for (const [tier, value] of Object.entries(extra) as Array<[UsageTier, number]>) {
-		merged[tier] = Math.max(merged[tier] ?? 0, value);
-	}
+	const { implausible, implausibleBy } = mergeImplausible(
+		snapshot.implausible,
+		snapshot.implausibleBy,
+		extra,
+		extraBy,
+	);
+	const merged = implausible ?? {};
+	const by = implausibleBy !== undefined ? { implausibleBy } : {};
 	// An absurd 1-hour share ALONE does not condemn the counts: whether it matters depends on the model, and that is
 	// `withSupported1hTier`'s decision. The counts are kept until then.
-	if (only1h(merged)) return { ...snapshot, implausible: merged };
+	if (only1h(merged)) return { ...snapshot, implausible: merged, ...by };
 	return {
 		inputTokens: 0,
 		outputTokens: 0,
@@ -290,7 +324,7 @@ export function withImplausible(
 		cacheWriteTokens: 0,
 		source: "estimated",
 		implausible: merged,
-		...(snapshot.implausibleBy !== undefined ? { implausibleBy: snapshot.implausibleBy } : {}),
+		...by,
 	};
 }
 
