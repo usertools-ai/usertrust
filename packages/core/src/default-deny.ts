@@ -35,7 +35,10 @@
  * ESCAPE HATCHES, closed by name: a resource's `_client` is the SDK's raw client, so reading it
  * returns a stand-in on which every call is refused; the client's raw HTTP members (`post`,
  * `get`, `request`, …) are refused and cannot be listed in `allowUngoverned`; and `withOptions`
- * returns a governed client (governed.ts builds it with the same governor).
+ * returns a governed client (govern.ts builds it with the same governor). WRITES through the
+ * governed client (assignment, `defineProperty`, `delete`) throw a TypeError, and the client's
+ * transport objects (`middleware`, `_options`, …) are read through read-only views, because every
+ * proxy's target is the raw SDK object and an untrapped write would land on it.
  *
  * Duck-typed like detect.ts: no provider SDK is imported here.
  */
@@ -73,6 +76,8 @@ export interface MethodBoundary {
 	readonly resources: WeakMap<object, object>;
 	/** Stand-in path → (raw object → its stand-in). Stable identity keeps JSON's cycle check working. */
 	readonly standIns: Map<string, WeakMap<object, object>>;
+	/** Raw transport object → its read-only view (`TRANSPORT_OBJECTS`). */
+	readonly readOnly: WeakMap<object, object>;
 }
 
 // ── The free list ──
@@ -540,6 +545,72 @@ function isInertName(prop: string): boolean {
 	return prop in Object.prototype || prop === "toJSON";
 }
 
+/**
+ * The client's own OBJECTS that steer where or how calls are sent: Anthropic's `middleware` array
+ * (each entry rewrites a request) and `_authState` (holds the resolved base URL), and on both SDKs
+ * `_options` (the constructor options, `fetch` and `baseURL` among them) and `fetchOptions`. They
+ * are read through a read-only view, so `client.middleware.push(fn)` cannot reach the raw client.
+ * The SDK's own code reads them off the raw client and is unaffected.
+ */
+const TRANSPORT_OBJECTS: ReadonlySet<string> = new Set([
+	"middleware",
+	"_authState",
+	"_options",
+	"fetchOptions",
+]);
+
+function writeRefusal(path: string, prop: string | symbol): TypeError {
+	const name = typeof prop === "symbol" ? prop.toString() : prop;
+	const where = path === "" ? "the governed client" : `${path} on the governed client`;
+	return new TypeError(
+		`usertrust: cannot change "${name}" on ${where}: the write would reach the SDK's raw client, outside governance. Configure the client before trust() wraps it.`,
+	);
+}
+
+/**
+ * Proxy traps that refuse every write: assignment, `Object.defineProperty` and `delete`. Every
+ * object the governed client hands out (the client, its resources, `_client` stand-ins, transport
+ * objects) carries them, because the proxy's target IS the raw SDK object: a write the proxy does
+ * not trap lands on it. A sync TypeError, since a write is not a call.
+ */
+export function refuseWrites<T extends object>(
+	path: string,
+): Pick<ProxyHandler<T>, "set" | "defineProperty" | "deleteProperty"> {
+	return {
+		set(_target, prop) {
+			throw writeRefusal(path, prop);
+		},
+		defineProperty(_target, prop) {
+			throw writeRefusal(path, prop);
+		},
+		deleteProperty(_target, prop) {
+			throw writeRefusal(path, prop);
+		},
+	};
+}
+
+/**
+ * A read-only view of a transport object: reads pass (nested objects as further views), writes
+ * throw. A property the raw object pins (non-configurable and non-writable) is returned as it is,
+ * as the Proxy invariants require; a pinned property cannot be written anyway.
+ */
+function readOnlyView(raw: object, path: string, boundary: MethodBoundary): object {
+	const cached = boundary.readOnly.get(raw);
+	if (cached !== undefined) return cached;
+	const proxy = new Proxy(raw, {
+		get(target, prop) {
+			const value: unknown = Reflect.get(target, prop, target);
+			const own = Reflect.getOwnPropertyDescriptor(target, prop);
+			const pinned = own !== undefined && own.configurable === false && own.writable === false;
+			if (pinned || value === null || typeof value !== "object") return value;
+			return readOnlyView(value, `${path}.${String(prop)}`, boundary);
+		},
+		...refuseWrites(path),
+	});
+	boundary.readOnly.set(raw, proxy);
+	return proxy;
+}
+
 /** An SDK resource: every APIResource stores the client it was built from as `_client`. */
 function isResource(value: unknown): value is object {
 	return value !== null && typeof value === "object" && "_client" in value;
@@ -579,6 +650,9 @@ export function guardedGet(
 		return (...args: unknown[]) => boundary.refuse(at, args);
 	}
 	if (isResource(value)) return guardResource(value, at, boundary);
+	if (path === "" && TRANSPORT_OBJECTS.has(prop) && value !== null && typeof value === "object") {
+		return readOnlyView(value, at, boundary);
+	}
 	return value;
 }
 
@@ -590,6 +664,7 @@ function guardResource(resource: object, path: string, boundary: MethodBoundary)
 		get(target, prop, receiver) {
 			return guardedGet(target, prop, receiver, path, boundary);
 		},
+		...refuseWrites(path),
 	});
 	boundary.resources.set(resource, proxy);
 	return proxy;
@@ -626,6 +701,7 @@ export function rawClientStandIn(
 			}
 			return value;
 		},
+		...refuseWrites(path),
 	});
 	byRaw.set(raw, proxy);
 	return proxy;

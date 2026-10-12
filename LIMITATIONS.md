@@ -42,7 +42,12 @@ drives the SDK's raw client, a `withOptions()` copy. It is not a sandbox against
 code that sets out to spend. A caller that keeps the raw client it constructed,
 builds a new one through `client.constructor`, or reads the API key off the
 client (`client.apiKey` is a plain value and passes) is outside it, as with any
-wrapper.
+wrapper. Writes through the governed client are refused (assignment,
+`Object.defineProperty` and `delete` on the client, its resources and `_client`,
+and on its transport objects `middleware`, `fetchOptions`, `_options` and
+`_authState`), but two SDK objects are still handed back as they are: the
+client's `logger`, which is the caller's own, and Anthropic's per-request
+auth-flag `WeakMap`, which a proxy cannot wrap.
 
 The boundary covers the governed client object. It does not cover the original
 client you passed to `trust()`, a client you construct separately, or transports

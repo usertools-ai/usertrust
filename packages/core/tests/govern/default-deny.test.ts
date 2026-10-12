@@ -595,6 +595,92 @@ describe("escape hatches", () => {
 	});
 });
 
+// ── Writes through the governed client ──
+
+describe("writes through the governed client never reach the raw SDK", () => {
+	it("Anthropic: assigning, defining or deleting a client property throws, and the raw client is unchanged", async () => {
+		const { client, raw } = await anthropic();
+		const baseURL = raw.baseURL;
+		expect(() => {
+			client.baseURL = "http://127.0.0.1:11434";
+		}).toThrow(TypeError);
+		expect(() => {
+			client.baseURL = "http://127.0.0.1:11434";
+		}).toThrow(/baseURL/);
+		expect(() => Object.defineProperty(client, "baseURL", { value: "http://x.test" })).toThrow(
+			/baseURL/,
+		);
+		expect(() => {
+			delete client.baseURL;
+		}).toThrow(/baseURL/);
+		expect(() => {
+			client.fetch = async () => new Response("{}");
+		}).toThrow(/fetch/);
+		expect(raw.baseURL).toBe(baseURL);
+	});
+
+	it("Anthropic: a resource, a reachable object and a _client stand-in are read-only too", async () => {
+		const { client, raw } = await anthropic();
+		const rawCreate = raw.messages.batches.create;
+		expect(() => {
+			client.messages.batches.create = async () => ({});
+		}).toThrow(/create/);
+		expect(raw.messages.batches.create).toBe(rawCreate);
+		const middleware = raw.middleware.length;
+		expect(() => client.middleware.push(async () => new Response("{}"))).toThrow(TypeError);
+		expect(raw.middleware.length).toBe(middleware);
+		const optionsBase = raw._options.baseURL;
+		expect(() => {
+			client._options.baseURL = "http://x.test";
+		}).toThrow(/baseURL/);
+		expect(raw._options.baseURL).toBe(optionsBase);
+		expect(() => {
+			client.messages._client.baseURL = "http://x.test";
+		}).toThrow(/baseURL/);
+		expect(raw.baseURL).toBe("https://anthropic.test");
+	});
+
+	it("OpenAI: fetch and _options.fetch cannot be replaced through the governed client", async () => {
+		const { client, raw } = await openai();
+		const rawFetch = raw.fetch;
+		expect(() => {
+			client.fetch = async () => new Response("{}");
+		}).toThrow(/fetch/);
+		expect(() => {
+			client._options.fetch = async () => new Response("{}");
+		}).toThrow(/fetch/);
+		expect(() => {
+			client.chat.completions.create = async () => ({});
+		}).toThrow(/create/);
+		expect(raw.fetch).toBe(rawFetch);
+	});
+
+	it("after refused writes, a governed call is still governed and goes to the original fetch", async () => {
+		const { client, engine } = await anthropic();
+		try {
+			client.baseURL = "http://127.0.0.1:11434";
+		} catch {}
+		try {
+			client.middleware.push(async () => new Response("{}"));
+		} catch {}
+		const out = await client.messages.create(MP);
+		expect(out.receipt.settled).toBe(true);
+		expect(engine.spendPending).toHaveBeenCalledTimes(1);
+		expect(hits).toEqual(["POST /v1/messages"]);
+		expect(chainEvents().map((e) => e.kind)).toEqual(["llm_call"]);
+	});
+
+	it("reading still works: values, a logger, and JSON of a reachable object", async () => {
+		const { client, raw } = await anthropic();
+		expect(client._options.baseURL).toBe(raw._options.baseURL);
+		expect(client.middleware.length).toBe(raw.middleware.length);
+		expect(client.logger).toBe(raw.logger);
+		expect(JSON.stringify(client._options.defaultHeaders ?? null)).toBe(
+			JSON.stringify(raw._options.defaultHeaders ?? null),
+		);
+	});
+});
+
 // ── Opt-out ──
 
 describe("allowUngoverned", () => {

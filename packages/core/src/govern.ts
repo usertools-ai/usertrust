@@ -53,6 +53,7 @@ import {
 	guardedGet,
 	type MethodBoundary,
 	rawClientStandIn,
+	refuseWrites,
 	transportChangedError,
 	transportOptionKeys,
 	UNGOVERNED_CALL_KIND,
@@ -3874,6 +3875,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			},
 			resources: new WeakMap(),
 			standIns: new Map(),
+			readOnly: new WeakMap(),
 		};
 		return build(client, interceptCall, destroyFn, governActionImpl, boundary);
 	}
@@ -4554,6 +4556,7 @@ function buildAnthropicMessagesProxy(
 			}
 			return guardedGet(target, prop, receiver, path, boundary);
 		},
+		...refuseWrites(path),
 	});
 }
 
@@ -4597,6 +4600,7 @@ function buildAnthropicBetaProxy(
 			if (prop === "messages") return betaMessagesProxy;
 			return guardedGet(target, prop, receiver, "beta", boundary);
 		},
+		...refuseWrites("beta"),
 	});
 }
 
@@ -4643,6 +4647,7 @@ function buildAnthropicProxy<T>(
 			if (prop === "withOptions" && withOptions !== undefined) return withOptions;
 			return guardedGet(target, prop, receiver, "", boundary);
 		},
+		...refuseWrites(""),
 	});
 
 	return clientProxy as TrustedClient<T>;
@@ -4685,6 +4690,7 @@ function buildOpenAIResponsesProxy(
 			}
 			return guardedGet(target, prop, receiver, "responses", boundary);
 		},
+		...refuseWrites("responses"),
 	});
 }
 
@@ -4707,6 +4713,7 @@ function buildOpenAIProxy<T>(
 			}
 			return guardedGet(target, prop, receiver, "chat.completions", boundary);
 		},
+		...refuseWrites("chat.completions"),
 	});
 
 	const chatProxy = new Proxy(chat, {
@@ -4714,6 +4721,7 @@ function buildOpenAIProxy<T>(
 			if (prop === "completions") return completionsProxy;
 			return guardedGet(target, prop, receiver, "chat", boundary);
 		},
+		...refuseWrites("chat"),
 	});
 
 	// responses.create — governed when present (A5); an older client without the
@@ -4730,6 +4738,7 @@ function buildOpenAIProxy<T>(
 			if (prop === "withOptions" && withOptions !== undefined) return withOptions;
 			return guardedGet(target, prop, receiver, "", boundary);
 		},
+		...refuseWrites(""),
 	});
 
 	return clientProxy as TrustedClient<T>;
