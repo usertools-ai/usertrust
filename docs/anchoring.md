@@ -9,6 +9,8 @@ the vault operator cannot silently rewrite**. An auditor then verifies the vault
 checkpoint they fetched themselves, with a public key they pinned out-of-band — using only the
 zero-dependency [`usertrust-verify`](../packages/verify/README.md) package.
 
+> **Known issue in 4.1.0.** Without an anchor, deleting the most recent audit records is reported by `usertrust verify` only until the next governed call from a freshly started process, after which verification passes over the shortened chain. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Emptying `events.jsonl` while its `.meta` sidecar remains is not silent: the next append continues from the sidecar's hash and verification reports the gap. Whatever the version, someone who can rewrite both the vault file and its sidecar is caught only by evidence held outside the vault: an anchor, or receipts you retained.
+
 Tamper-**evident**, not tamper-proof: detection produces a hard FAIL verdict, not restored data.
 
 ## Quick start

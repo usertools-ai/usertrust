@@ -16,7 +16,10 @@
  *   floor, so older clients simply lack it and it stays a pass-through). A streaming
  *   `responses.create({ stream: true })` is governed; the `responses.stream()`
  *   convenience helper is NOT (see below).
- * - Google: `client.models.generateContent()`
+ * - Google: `client.models.generateContent()`. With a callable tool the SDK runs an
+ *   automatic-function-calling LOOP of several model calls; governance runs that loop
+ *   itself, each round its own governed call (`google-afc.ts`), so every round is held,
+ *   metered and audited. `generateContentStream()` is NOT governed.
  *
  * Remaining ungoverned surfaces (feature-detected pass-throughs, or shapes that do
  * not mirror `create`): `client.messages.batches`, `client.beta.messages.batches`,

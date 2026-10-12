@@ -50,6 +50,7 @@ import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
+import { afcRequested, runGovernedAfc } from "./google-afc.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	copyAppliedRates,
@@ -71,8 +72,10 @@ import {
 import {
 	fromAnthropicUsage,
 	fromProviderResponse,
+	type ImplausibleChecks,
 	implausibleUsageData,
 	MAX_PLAUSIBLE_TOKENS_PER_TIER,
+	mergeImplausible,
 	publishableUsageFields,
 	sanitizeUsage,
 	type UsageTier,
@@ -96,6 +99,7 @@ import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/private-fs.js";
 import { isPersistableSpend } from "./shared/spend-guard.js";
+import { governorVaultBase } from "./shared/vault-base.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
@@ -627,8 +631,21 @@ type GovernedResponses<R> =
  * arrives on the streaming shortcut users actually reach for.
  */
 type GovernedGoogleModels<G> = G extends { generateContent: infer C extends AnyMethod }
-	? Omit<G, "generateContent"> & { generateContent: GovernedCreateMethod<C> }
+	? Omit<G, "generateContent"> & { generateContent: GovernedGoogleGenerateMethod<C> }
 	: G;
+
+/**
+ * The Google `generateContent` envelope: `{ response, receipt }` like every other create, plus `receipts`, one per model
+ * round, present when a callable tool made the call a governed automatic-function-calling loop (google-afc.ts). `receipt`
+ * is then the LAST round's, so `receipts` is where a caller sees every charge.
+ */
+type GovernedGoogleGenerateMethod<F> = F extends (...args: infer A) => infer R
+	? (...args: A) => Promise<{
+			response: GovernedResponseOf<Awaited<R>>;
+			receipt: TrustReceipt;
+			receipts?: TrustReceipt[];
+		}>
+	: F;
 
 // ── Provider selection: the type-level twin of detectClientKind ──
 // Each predicate is the full runtime test, both halves: the namespace is a
@@ -1381,9 +1398,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	opts = readOwnOptions("trust()", opts, TRUST_OPTS_KEYS);
 
 	// 1. Load config
-	// Absolute from here: every vault file this client touches is in the vault it was created for,
-	// whatever the working directory becomes later (its audit writer is fixed at creation too).
-	const vaultBase = resolve(opts?.vaultBase ?? process.cwd());
+	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,
+	// so every vault file this client touches is in the vault it was created for, whatever the working
+	// directory becomes later (its audit writer is fixed at creation too). With no `..` left, resolve() only
+	// prefixes the working directory and drops `.` segments; it has nothing to fold.
+	const vaultBase = resolve(governorVaultBase(opts?.vaultBase ?? process.cwd()));
 	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
 	// version left group/world-readable is closed; one another user owns is refused (see
 	// securePrivateVault). This runs before ANYTHING under the vault is read, the config
@@ -2172,6 +2191,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							source: completion.usageReported ? "provider" : "estimated",
 						}),
 						completion.implausible,
+						completion.implausibleBy,
 					),
 					rateResolution.rates,
 					rateResolution.rateSource !== "table",
@@ -2591,12 +2611,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let accCacheWrite1h = 0;
 				let accUsageReported = false;
 				let accImplausible: Partial<Record<UsageTier, number>> | undefined;
-				const noteImplausible = (found: Partial<Record<UsageTier, number>> | undefined): void => {
-					if (found === undefined) return;
-					accImplausible = { ...accImplausible };
-					for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
-						accImplausible[tier] = Math.max(accImplausible[tier] ?? 0, value);
-					}
+				let accImplausibleBy: ImplausibleChecks | undefined;
+				const noteImplausible = (reading: {
+					implausible?: Partial<Record<UsageTier, number>> | undefined;
+					implausibleBy?: ImplausibleChecks | undefined;
+				}): void => {
+					({ implausible: accImplausible, implausibleBy: accImplausibleBy } = mergeImplausible(
+						accImplausible,
+						accImplausibleBy,
+						reading.implausible,
+						reading.implausibleBy,
+					));
 				};
 				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
 				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
@@ -2613,12 +2638,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					chunksDelivered,
 					usageReported: accUsageReported,
 					implausible: accImplausible,
+					implausibleBy: accImplausibleBy,
 				});
 
 				emitter.on("streamEvent", (event: unknown) => {
 					chunksDelivered++;
 					const tokens = extractAnthropicStreamUsage(event);
-					noteImplausible(tokens.implausible);
+					noteImplausible(tokens);
 					let deltaTokens = 0;
 					if (tokens.inputTokens > accInput) {
 						deltaTokens += tokens.inputTokens - accInput;
@@ -2695,7 +2721,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// zeroing it. Reported when EITHER source carried a real number;
 					// otherwise settle on the estimate.
 					const finalUsage = readFinalMessageUsage(msg);
-					noteImplausible(finalUsage.implausible);
+					noteImplausible(finalUsage);
 					const usageReported = finalUsage.reported || accUsageReported;
 					const completion: StreamCompletion = usageReported
 						? {
@@ -2709,6 +2735,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								chunksDelivered,
 								usageReported: true,
 								implausible: accImplausible,
+								implausibleBy: accImplausibleBy,
 							}
 						: {
 								usage: {
@@ -2720,6 +2747,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								chunksDelivered,
 								usageReported: false,
 								implausible: accImplausible,
+								implausibleBy: accImplausibleBy,
 							};
 					finalizeStreamSettle(completion)
 						.then(receiptResolve, receiptReject)
@@ -2780,6 +2808,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						usageReported: false,
 						// An absurd count seen on a streamEvent is not forgotten when only `end` arrives.
 						implausible: accImplausible,
+						implausibleBy: accImplausibleBy,
 					})
 						.then(receiptResolve, receiptReject)
 						.finally(releaseStreamCount);
@@ -4143,6 +4172,8 @@ function readFinalMessageUsage(msg: unknown): {
 	reported: boolean;
 	/** Tiers over the plausibility ceiling (the extractor zeroes them; the settle must still hear of them). */
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	/** Which check put each tier in `implausible`. */
+	implausibleBy?: ImplausibleChecks | undefined;
 } {
 	if (msg != null && typeof msg === "object") {
 		const usage = (msg as Record<string, unknown>).usage;
@@ -4192,6 +4223,7 @@ function readFinalMessageUsage(msg: unknown): {
 							: undefined,
 					reported: true,
 					implausible: cacheTiers.implausible,
+					implausibleBy: cacheTiers.implausibleBy,
 				};
 			}
 			// No usable headline counts: the cache readings are still reported, so an absurd tier is not lost.
@@ -4203,6 +4235,7 @@ function readFinalMessageUsage(msg: unknown): {
 				cacheWrite1hTokens: undefined,
 				reported: false,
 				implausible: cacheTiers.implausible,
+				implausibleBy: cacheTiers.implausibleBy,
 			};
 		}
 	}
@@ -4229,6 +4262,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 	cacheWriteTokens: number;
 	cacheWrite1hTokens: number;
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	implausibleBy?: ImplausibleChecks | undefined;
 } {
 	const none = {
 		inputTokens: 0,
@@ -4257,6 +4291,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 				cacheWriteTokens: tiers.cacheWriteTokens,
 				cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 				implausible: inAbsurd ? { ...tiers.implausible, inputTokens: inTok } : tiers.implausible,
+				implausibleBy: tiers.implausibleBy,
 			};
 		}
 	}
@@ -4272,6 +4307,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 			cacheWriteTokens: tiers.cacheWriteTokens,
 			cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
 			implausible: outAbsurd ? { ...tiers.implausible, outputTokens: outTok } : tiers.implausible,
+			implausibleBy: tiers.implausibleBy,
 		};
 	}
 	return none;
@@ -4818,7 +4854,17 @@ function buildGoogleProxy<T>(
 	const modelsProxy = new Proxy(models, {
 		get(target, prop, receiver) {
 			if (prop === "generateContent") {
-				return (...args: unknown[]) => intercept(originalGenerate, target, args);
+				return (...args: unknown[]) => {
+					// With a callable tool the SDK would loop internally and only the last round would be metered:
+					// run the loop here instead, each round its own governed call (see google-afc.ts).
+					const params = args[0];
+					if (afcRequested(params)) {
+						return runGovernedAfc(params as Record<string, unknown>, (roundParams) =>
+							intercept(originalGenerate, target, [roundParams, ...args.slice(1)]),
+						);
+					}
+					return intercept(originalGenerate, target, args);
+				};
 			}
 			return Reflect.get(target, prop, receiver);
 		},

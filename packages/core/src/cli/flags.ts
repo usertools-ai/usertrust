@@ -20,6 +20,17 @@ export const SKIP_VERIFY_FLAG = "--skip-verify";
 export const RECONFIGURE_FLAG = "--reconfigure";
 export const GLOBAL_FLAGS: readonly string[] = [JSON_FLAG, SKIP_VERIFY_FLAG, RECONFIGURE_FLAG];
 
+/**
+ * What `usertrust report` is given after its command word: the arguments behind it AND every global flag that came in
+ * front of the command (`usertrust --skip-verify report ...`). The parser counts them like any other option, so a global
+ * flag the report does not support is refused whichever side of the command it was written on, and a repeated `--json`
+ * is refused wherever it appears.
+ */
+export function reportArgv(argv: readonly string[]): string[] {
+	const at = argv.indexOf("report");
+	return [...argv.slice(0, at).filter((a) => GLOBAL_FLAGS.includes(a)), ...argv.slice(at + 1)];
+}
+
 export interface ParsedFlags {
 	json: boolean;
 	skipVerify: boolean;

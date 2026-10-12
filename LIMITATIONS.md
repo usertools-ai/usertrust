@@ -73,13 +73,7 @@ enforcement — in tests, in evaluation. Every claim about atomic budget
 enforcement (an over-budget PENDING hold rejected by the ledger before the
 provider is called) applies to full mode with a live TigerBeetle instance.
 
-One caveat from our own release history: CI validates live-ledger enforcement
-against a stateful `tigerbeetle-node` fake that implements real double-entry
-balance math and `debits_must_not_exceed_credits` (see
-`packages/core/tests/harden/ledger-funded-wallet.test.ts`) — a behavioral test
-against real ledger semantics, not a mock asserting a mock. It is still a fake.
-Validate against a real TigerBeetle cluster before relying on enforcement in
-production.
+One caveat from our own release history: the unit suite validates live-ledger enforcement against a stateful `tigerbeetle-node` fake that implements real double-entry balance math and `debits_must_not_exceed_credits` (see `packages/core/tests/harden/ledger-funded-wallet.test.ts`) — a behavioral test against real ledger semantics, not a mock asserting a mock. CI also runs a separate job (`tb-integration`) against a real single-node TigerBeetle cluster. Neither is your deployment: validate against your own TigerBeetle cluster before relying on enforcement in production.
 
 ## 5. One audit writer per vault, one process at a time
 
@@ -103,10 +97,10 @@ one log, refused the same way.
 
 **A second process on the same vault cannot write to it.** Each of its audit
 appends fails; it never forks the chain. Its calls still settle, and every event that
-misses the chain is reported: the receipt carries `auditDegraded`, the event goes to
-`.usertrust/dlq/dead-letters.jsonl`, the process gets a `USERTRUST_AUDIT_DEGRADED`
+misses the chain is reported: the receipt carries `auditDegraded` (a failed warn-mode `injection_detected` append is the exception: it is dead-lettered but leaves the receipt unmarked), the event goes to
+`.usertrust/dlq/dead-letters.jsonl` (when that write succeeds), the process gets a `USERTRUST_AUDIT_DEGRADED`
 warning (at the first failure, and with the count when the client is destroyed), and
-`usertrust verify` reports the vault INCOMPLETE and exits 1. A `trust()` client with
+`usertrust verify` reports the vault INCOMPLETE and exits 1 for a dead-lettered event (if the dead-letter write itself fails and leaves no bytes, for instance on a full disk, neither `verify` nor `health` sees the gap; a partial line left by a short write counts as an unreadable entry, so the vault reads INCOMPLETE). A `trust()` client with
 `audit.failClosed: true` refuses such calls instead; `createGovernor()` and
 `usertrust-server` do not enforce `audit.failClosed`.
 
@@ -151,7 +145,7 @@ pretends to solve today.
 **A torn tail halts appends until an operator repairs it.** An append that never
 completed (a crash, a full disk) can leave bytes after the log's last newline. The
 writer then refuses every append (`AuditTornTailError`) rather than bury those bytes
-mid-file — so with `audit.failClosed`, governed calls stop too. The repair is
+mid-file — so with `audit.failClosed` (`trust()` only), governed calls stop too. The repair is
 `usertrust audit quarantine-tail`, and it repairs exactly ONE state: unparseable bytes
 after the last newline, on a single `events.jsonl` that otherwise verifies from
 genesis, with an agreeing `.meta` anchor. Every other unverifiable state, including an
@@ -202,6 +196,10 @@ proofs, a zero-dependency offline verifier — is designed to produce evidence a
 auditor can check without trusting us or this codebase. That is the deliberate
 division of labor: usertrust generates the receipts; certifying a deployment
 that uses them is the deployer's work with their own auditors.
+
+**Known issue in 4.1.0 — deleting the most recent records.** On a vault with no external anchor (the default), deleting the most recent audit records is reported by `usertrust verify` only until the next governed call from a freshly started process: that call appends after whatever tail it finds and rewrites the vault's sidecar, after which verification passes over the shortened chain. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Editing a record, deleting a record from the middle of the chain, and re-hashing the whole chain against a published anchor are all detected. Emptying `events.jsonl` while its `.meta` sidecar remains is not a silent tail deletion: the next append continues from the sidecar's hash and verification reports the gap. The bypass applies to a tail deletion that also rewrites the sidecar, or that keeps some earlier lines.
+
+**What holds regardless of version.** Anyone who can rewrite both the vault file and its sidecar can produce a chain that verifies on its own. Only evidence held outside the vault catches that: an external anchor, or receipts you retained (a caller holding an ordinary receipt finds a rewrite of its event, since `usertrust verify --receipts` reports it unaudited and exits 1 even when the rewritten chain and its sidecar agree). If you rely on the audit chain as evidence, enable external anchoring and keep the anchors and the public key with your auditor.
 
 ## 9. Proxy mode was deleted rather than shipped as theater
 
