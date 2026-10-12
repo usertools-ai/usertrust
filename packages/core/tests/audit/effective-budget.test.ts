@@ -48,8 +48,11 @@ import {
 } from "../../src/audit/chain.js";
 import { EFFECTIVE_BUDGET_FILE, readEffectiveBudget } from "../../src/audit/effective-budget.js";
 import { describeBudgetSource, isKnownBudget, loadBudgetConfig } from "../../src/audit/read.js";
-import { recordEffectiveBudget } from "../../src/budget/effective-record.js";
-import { trust } from "../../src/govern.js";
+import {
+	recordEffectiveBudget,
+	registerEnforcedBudget,
+} from "../../src/budget/effective-record.js";
+import { type TrustEngine, trust } from "../../src/govern.js";
 import { createGovernor, type Governor } from "../../src/headless.js";
 import { DEFAULT_BUDGET, VAULT_DIR } from "../../src/shared/constants.js";
 
@@ -570,6 +573,274 @@ describe("the record's warning is best-effort too", () => {
 		// Every listener the warnings held is gone once their writes have reported.
 		await new Promise((r) => setImmediate(r));
 		expect(process.stderr.listenerCount("error")).toBe(baseline);
+		await a.destroy();
+	});
+});
+
+/** A gate the test opens; every call parked on it waits until then. */
+function gate(): { wait: Promise<void>; open: () => void } {
+	let open = (): void => {};
+	const wait = new Promise<void>((resolve) => {
+		open = resolve;
+	});
+	return { wait, open };
+}
+
+/** A ledger engine whose POST waits on `post`: a settle is in flight until the test opens it. */
+function parkedPostEngine(post: Promise<void>): TrustEngine {
+	return {
+		spendPending: vi.fn(async (p: { transferId: string }) => ({ transferId: p.transferId })),
+		postPendingSpend: vi.fn(async () => {
+			await post;
+		}),
+		voidPendingSpend: vi.fn(async () => {}),
+		voidAllPending: vi.fn(async () => {}),
+		destroy: vi.fn(),
+	};
+}
+
+/** A chat client whose one call waits on `wait`: the call is in flight until the test opens it. */
+function parkedChatClient(wait: Promise<void>) {
+	const client = chatClient();
+	const done = client.chat.completions.create.getMockImplementation();
+	client.chat.completions.create.mockImplementation(async (...args: unknown[]) => {
+		await wait;
+		return done?.(...args);
+	});
+	return client;
+}
+
+/** The record on disk, raw: who wrote it. */
+function rawRecord(): { budget: unknown; pid: unknown } {
+	return JSON.parse(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE), "utf-8")) as {
+		budget: unknown;
+		pid: unknown;
+	};
+}
+
+// A publish that failed was counted as published: `publishedUnder` was set whatever the write did, so every later
+// append under the same lock owner skipped the record, and readers stayed on "not yet published" for the life of
+// that writer. A failed write is now retried at the next append; it warns once per lock owner until one succeeds.
+describe("a failed publish is retried under the same lock owner", () => {
+	function failingIo(): { fail: boolean; writes: number; write: (p: string, d: string) => void } {
+		const io = {
+			fail: true,
+			writes: 0,
+			write: (p: string, d: string): void => {
+				io.writes++;
+				if (io.fail) {
+					throw Object.assign(new Error("ENOSPC: no space left on device, open"), {
+						code: "ENOSPC",
+					});
+				}
+				writeFileSync(p, d, { mode: 0o600, flag: "wx" });
+			},
+		};
+		return io;
+	}
+
+	it("red-first (never retried): the first publish's write fails; a later append under the same owner publishes", () => {
+		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const io = failingIo();
+		// Registered while the lock is held: it publishes at once, and that write fails.
+		const reg = registerEnforcedBudget(vaultDir, 2_000, () => "owner-1", { write: io.write });
+		expect(io.writes).toBe(1);
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		expect(loadBudgetConfig(vaultDir).source).toBe("unpublished");
+		// The filesystem recovers; the next append under the SAME owner publishes.
+		io.fail = false;
+		reg.appended();
+		expect(io.writes).toBe(2);
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
+		// Published now: a later append under the same owner writes nothing more.
+		reg.appended();
+		expect(io.writes).toBe(2);
+		reg.release();
+	});
+
+	it("red-first (never retried): a publish that fails AFTER a success under the same owner is retried too", () => {
+		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const io = failingIo();
+		io.fail = false;
+		const a = registerEnforcedBudget(vaultDir, 2_000, () => "owner-1", { write: io.write });
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
+		// A second governor starts while the lock is held; its publish fails and removes a's record, which alone would
+		// misstate what is enforced.
+		io.fail = true;
+		const b = registerEnforcedBudget(vaultDir, 5_000, () => "owner-1", { write: io.write });
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		io.fail = false;
+		a.appended();
+		expect(readEffectiveBudget(vaultDir)).toMatchObject({ state: "several", governors: 2 });
+		b.release();
+		a.release();
+	});
+
+	it("a write that keeps failing is retried at every append, and warns once per lock owner until one succeeds", () => {
+		const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const warnings = (): number =>
+			err.mock.calls.filter((c) => String(c[0]).includes("could not record the enforced budget"))
+				.length;
+		const io = failingIo();
+		let owner = "owner-1";
+		const reg = registerEnforcedBudget(vaultDir, 2_000, () => owner, { write: io.write });
+		for (let i = 0; i < 5; i++) reg.appended();
+		expect(io.writes).toBe(6);
+		expect(warnings()).toBe(1);
+		// A new writer takes the lock: its first failure is reported too.
+		owner = "owner-2";
+		reg.appended();
+		reg.appended();
+		expect(warnings()).toBe(2);
+		// A success ends the streak; the next failure, under a new writer, warns again.
+		io.fail = false;
+		reg.appended();
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
+		io.fail = true;
+		owner = "owner-3";
+		reg.appended();
+		expect(warnings()).toBe(3);
+		reg.release();
+	});
+
+	it("red-first (never retried): through createGovernor, a write that failed once is published by the next call", async () => {
+		const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const gov = await createGovernor({ dryRun: true, vaultBase: base, budget: 1_234 });
+		// A non-empty directory at the record's path refuses the rename and the removal.
+		mkdirSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
+		writeFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE, "x"), "x");
+		await appendOnce(gov);
+		expect(err.mock.calls.map((c) => String(c[0])).join("")).toMatch(
+			/could not record the enforced budget/,
+		);
+		rmSync(join(vaultDir, EFFECTIVE_BUDGET_FILE), { recursive: true });
+		await appendOnce(gov);
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 1_234, source: "governor" });
+		await gov.destroy();
+	});
+});
+
+// destroy() released the governor's registration FIRST, then drained its in-flight calls. A governor that had not yet
+// appended published nothing at release, and a call that settled during the drain appended (taking the vault's lock)
+// to a registration already released, so the record was never published: readers stayed on "not yet published", or
+// on an earlier process's record. The registration is now released after the drain and its records.
+describe("destroy() and the record", () => {
+	const OLD = "2026-01-02T03:04:05.000Z";
+	function writeOldRecord(): Buffer {
+		const body = JSON.stringify({ budget: 2_000, writtenAt: OLD, pid: 1, processStartedAt: OLD });
+		writeFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE), body);
+		return readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
+	}
+
+	it("red-first (released first): createGovernor, a settle in flight lands during the drain; the record is this process's", async () => {
+		const post = gate();
+		const engine = parkedPostEngine(post.wait);
+		const gov = await createGovernor({ vaultBase: base, budget: 1_234, _engine: engine });
+		const auth = await gov.authorize({
+			model: "claude-haiku-5-5",
+			estimatedInputTokens: 10,
+			maxOutputTokens: 1,
+		});
+		const settling = gov.settle(auth, { inputTokens: 1, outputTokens: 1 });
+		await vi.waitFor(() => expect(engine.postPendingSpend).toHaveBeenCalled());
+		// Nothing has appended yet: nothing is published.
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		const destroying = gov.destroy();
+		post.open();
+		await settling;
+		await destroying;
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 1_234, source: "governor" });
+		expect(rawRecord().pid).toBe(process.pid);
+	});
+
+	it("red-first (released first): trust(), a call in flight lands during the drain; the record is this process's", async () => {
+		const call = gate();
+		const client = parkedChatClient(call.wait);
+		const g = await trust(client, { dryRun: true, vaultBase: base, budget: 1_234 });
+		const calling = callOnce(g);
+		await vi.waitFor(() => expect(client.chat.completions.create).toHaveBeenCalled());
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		const destroying = g.destroy();
+		call.open();
+		await calling;
+		await destroying;
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 1_234, source: "governor" });
+		expect(rawRecord().pid).toBe(process.pid);
+	});
+
+	it("red-first (released first): createGovernor, a hold destroy() records is its first append; the record is published", async () => {
+		const gov = await createGovernor({ dryRun: true, vaultBase: base, budget: 1_234 });
+		await gov.authorize({
+			model: "claude-haiku-5-5",
+			estimatedInputTokens: 10,
+			maxOutputTokens: 1,
+		});
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		// destroy() ends the hold and records it (`hold_released`): this governor's first append.
+		await gov.destroy();
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 1_234, source: "governor" });
+		expect(rawRecord().pid).toBe(process.pid);
+	});
+
+	it.each(["createGovernor", "trust"] as const)(
+		"%s: a destroy with no call and no append publishes nothing; an older record is left as is, shown with its age",
+		async (ctor) => {
+			const before = writeOldRecord();
+			if (ctor === "createGovernor") {
+				const gov = await createGovernor({ dryRun: true, vaultBase: base, budget: 1_234 });
+				await gov.destroy();
+			} else {
+				const g = await trust(chatClient(), { dryRun: true, vaultBase: base, budget: 1_234 });
+				await g.destroy();
+			}
+			expect(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).equals(before)).toBe(true);
+			const got = loadBudgetConfig(vaultDir);
+			expect(got).toEqual({ budget: 2_000, source: "governor", writtenAt: OLD, reason: null });
+			expect(describeBudgetSource(got)).toBe(`the enforced budget, as of ${OLD}`);
+		},
+	);
+
+	it("createGovernor: a drain whose deadline expires still releases; the record is the remaining governor's", async () => {
+		const a = await createGovernor({ dryRun: true, vaultBase: base, budget: 3_000 });
+		await appendOnce(a);
+		const post = gate();
+		const b = await createGovernor({
+			vaultBase: base,
+			budget: 5_000,
+			_engine: parkedPostEngine(post.wait),
+			_destroyDrainMs: 300,
+		});
+		expect(loadBudgetConfig(vaultDir).source).toBe("several");
+		const auth = await b.authorize({
+			model: "claude-haiku-5-5",
+			estimatedInputTokens: 10,
+			maxOutputTokens: 1,
+		});
+		const settling = b.settle(auth, { inputTokens: 1, outputTokens: 1 }).catch(() => {});
+		await expect(b.destroy()).resolves.toBeUndefined();
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 3_000, source: "governor" });
+		post.open();
+		await settling;
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 3_000, source: "governor" });
+		await a.destroy();
+	});
+
+	it("trust(): a drain whose deadline expires still releases; the record is the remaining governor's", {
+		timeout: 20_000,
+	}, async () => {
+		const a = await trust(chatClient(), { dryRun: true, vaultBase: base, budget: 3_000 });
+		await callOnce(a);
+		const call = gate();
+		const client = parkedChatClient(call.wait);
+		const b = await trust(client, { dryRun: true, vaultBase: base, budget: 5_000 });
+		expect(loadBudgetConfig(vaultDir).source).toBe("several");
+		const calling = callOnce(b).catch(() => {});
+		await vi.waitFor(() => expect(client.chat.completions.create).toHaveBeenCalled());
+		await expect(b.destroy()).resolves.toBeUndefined();
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 3_000, source: "governor" });
+		call.open();
+		await calling;
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 3_000, source: "governor" });
 		await a.destroy();
 	});
 });
