@@ -488,19 +488,29 @@ function assertOutsideVault(target: string, vaultPath: string): void {
 	} catch {
 		return; // no vault to protect (the caller has already required one)
 	}
-	let real: string;
+	const inside = (p: string): boolean => p === vaultReal || p.startsWith(`${vaultReal}${sep}`);
+	// Two paths can be the vault, and either refuses:
+	//  - the file the name RESOLVES to, when it exists (a link from outside pointing in);
+	//  - the directory ENTRY the write replaces: `writeReportFile` renames a temp file over `target` itself, which replaces
+	//    a symlink and does not follow it. A link INSIDE the vault that points outside therefore passes the first test and
+	//    still has the vault's own entry replaced by the report.
+	let resolved: string | undefined;
 	try {
-		real = realpathSync(target);
+		resolved = realpathSync(target);
 	} catch {
-		try {
-			real = join(realpathSync(dirname(target)), basename(target));
-		} catch {
-			real = target;
-		}
+		// does not exist yet
 	}
-	if (real === vaultReal || real.startsWith(`${vaultReal}${sep}`)) {
+	let entry: string;
+	try {
+		entry = join(realpathSync(dirname(target)), basename(target));
+	} catch {
+		entry = target;
+	}
+	const hit =
+		resolved !== undefined && inside(resolved) ? resolved : inside(entry) ? entry : undefined;
+	if (hit !== undefined) {
 		throw new UsageError(
-			`--out resolves inside the vault (${scrubForTerminal(real)}): the report is never written into the audit data it reads`,
+			`--out resolves inside the vault (${scrubForTerminal(hit)}): the report is never written into the audit data it reads`,
 		);
 	}
 }

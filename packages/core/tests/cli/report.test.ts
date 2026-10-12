@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -566,6 +567,23 @@ describe("usertrust report --week", () => {
 		process.exitCode = undefined;
 		await run(dir, {}, ["--week", "--end", endIso(), "--out", join(dir, "ok.md")]);
 		expect(process.exitCode).toBeUndefined();
+		write.mockRestore();
+	});
+
+	it("--out naming a SYMLINK that lives inside the vault and points outside is refused: the rename would replace the vault's own entry", async () => {
+		await vault([{ cost: 1 }]);
+		const vaultDir = join(dir, ".usertrust");
+		const outside = join(dir, "outside-target.md");
+		writeFileSync(outside, "ORIGINAL");
+		const inVault = join(vaultDir, "link-out.md");
+		symlinkSync(outside, inVault);
+		process.exitCode = undefined;
+		await run(dir, {}, ["--week", "--end", endIso(), "--out", inVault]);
+		expect(process.exitCode).toBe(2);
+		// both files unchanged: the entry is still the same symlink, and its target was never written
+		expect(readFileSync(outside, "utf-8")).toBe("ORIGINAL");
+		expect(lstatSync(inVault).isSymbolicLink()).toBe(true);
+		expect(readdirSync(vaultDir).filter((n) => n.endsWith(".tmp"))).toEqual([]);
 		write.mockRestore();
 	});
 
