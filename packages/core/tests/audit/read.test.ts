@@ -54,6 +54,17 @@ describe("readLedgerEvents", () => {
 		expect(events).toHaveLength(1);
 	});
 
+	it("skips a line that parses but is not an event (null, a number, an array), and never throws on one", async () => {
+		const writer = createAuditWriter(tempDir);
+		await writer.appendEvent({ kind: "llm_call", actor: "local", data: { cost: 5 } });
+		writer.release();
+		appendFileSync(join(vaultPath, "audit", "events.jsonl"), "null\n7\n[1]\n");
+
+		const read = () => readLedgerEvents(vaultPath);
+		expect(read).not.toThrow();
+		expect(read().map((e) => e.kind)).toEqual(["llm_call"]);
+	});
+
 	it("merges rotated segments ordered by global sequence", async () => {
 		const writer = createAuditWriter(tempDir);
 		await writer.appendEvent({ kind: "llm_call", actor: "local", data: { cost: 1 } });
