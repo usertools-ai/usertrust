@@ -29,7 +29,7 @@ import { verifyVault } from "../../../verify/src/index.js";
 import type { AuditWriter } from "../../src/audit/chain.js";
 import { run as runVerifyCli } from "../../src/cli/verify.js";
 import * as defaultDeny from "../../src/default-deny.js";
-import { FREE_METHODS, transportOptionKeys } from "../../src/default-deny.js";
+import { FREE_METHODS, GOVERNED_PATHS, transportOptionKeys } from "../../src/default-deny.js";
 import { type TrustEngine, type TrustOpts, trust } from "../../src/govern.js";
 import { AUDIT_DIR, VAULT_DIR } from "../../src/shared/constants.js";
 import { AuditDegradedError, PolicyDeniedError } from "../../src/shared/errors.js";
@@ -131,6 +131,35 @@ function json(body: unknown): Response {
 	});
 }
 
+/** A streamed Anthropic message, as the SDK's MessageStream reads it. */
+const ANTHROPIC_STREAM_EVENTS: unknown[] = [
+	{
+		type: "message_start",
+		message: {
+			...ANTHROPIC_MESSAGE,
+			content: [],
+			stop_reason: null,
+			usage: { input_tokens: 10, output_tokens: 0 },
+		},
+	},
+	{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+	{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: '{"ok":true}' } },
+	{ type: "content_block_stop", index: 0 },
+	{
+		type: "message_delta",
+		delta: { stop_reason: "end_turn", stop_sequence: null },
+		usage: { output_tokens: 5 },
+	},
+	{ type: "message_stop" },
+];
+
+function sse(events: unknown[]): Response {
+	const body = events
+		.map((e) => `event: ${(e as { type: string }).type}\ndata: ${JSON.stringify(e)}\n\n`)
+		.join("");
+	return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
 /** The SDK's injected fetch: records `METHOD /path`, answers from the canned bodies above. */
 function recordingFetch(hits: string[], provider: "anthropic" | "openai"): typeof fetch {
 	return (async (input: unknown, init?: RequestInit) => {
@@ -140,7 +169,10 @@ function recordingFetch(hits: string[], provider: "anthropic" | "openai"): typeo
 		if (provider === "anthropic") {
 			if (p === "/v1/messages/count_tokens") return json({ input_tokens: 3 });
 			if (p.startsWith("/v1/messages/batches")) return json(ANTHROPIC_BATCH);
-			if (p === "/v1/messages") return json(ANTHROPIC_MESSAGE);
+			if (p === "/v1/messages") {
+				const streamed = typeof init?.body === "string" && JSON.parse(init.body).stream === true;
+				return streamed ? sse(ANTHROPIC_STREAM_EVENTS) : json(ANTHROPIC_MESSAGE);
+			}
 			if (p === "/v1/models") return json(ANTHROPIC_MODELS);
 			return json({});
 		}
@@ -886,6 +918,60 @@ describe("allowUngoverned", () => {
 		).rejects.toThrow(/allowUngoverned/);
 	});
 
+	// A free or governed method never reaches the opt-out branch, so it would run WITHOUT the
+	// ungoverned_call event the option promises. It is refused by name when the client is created.
+	function rawClient(provider: "anthropic" | "openai"): unknown {
+		return provider === "anthropic"
+			? new Anthropic({ apiKey: "k", fetch: recordingFetch(hits, "anthropic") })
+			: new OpenAI({ apiKey: "k", fetch: recordingFetch(hits, "openai") });
+	}
+
+	it.each([
+		["openai", "models.list", "an OpenAI"],
+		["openai", "moderations.create", "an OpenAI"],
+		["anthropic", "messages.countTokens", "an Anthropic"],
+		["anthropic", "models.list", "an Anthropic"],
+	] as const)("a FREE entry is refused at creation (%s %s)", async (provider, path, name) => {
+		await expect(
+			trust(rawClient(provider), { dryRun: true, vaultBase: vault, allowUngoverned: [path] }),
+		).rejects.toMatchObject({
+			name: "TypeError",
+			message: `usertrust: allowUngoverned cannot list "${path}": it is free on ${name} client and already runs without governance.`,
+		});
+	});
+
+	it.each([
+		["anthropic", "messages.create", "an Anthropic"],
+		["anthropic", "beta.messages.parse", "an Anthropic"],
+		["openai", "chat.completions.create", "an OpenAI"],
+		["openai", "responses.create", "an OpenAI"],
+	] as const)("a GOVERNED entry is refused at creation (%s %s)", async (provider, path, name) => {
+		await expect(
+			trust(rawClient(provider), { dryRun: true, vaultBase: vault, allowUngoverned: [path] }),
+		).rejects.toMatchObject({
+			name: "TypeError",
+			message: `usertrust: allowUngoverned cannot list "${path}": it is governed on ${name} client.`,
+		});
+	});
+
+	it("the option is read once: a getter that answers differently on a second read still gets the free check", async () => {
+		let reads = 0;
+		const opts = {
+			dryRun: true,
+			vaultBase: vault,
+			get allowUngoverned(): string[] | undefined {
+				reads += 1;
+				return reads === 1 ? ["models.list"] : undefined;
+			},
+		};
+		await expect(trust(rawClient("openai"), opts)).rejects.toMatchObject({
+			name: "TypeError",
+			message:
+				'usertrust: allowUngoverned cannot list "models.list": it is free on an OpenAI client and already runs without governance.',
+		});
+		expect(reads).toBe(1);
+	});
+
 	it("the event kind passes the verifiers: verifyVault and `usertrust verify`", async () => {
 		const { client } = await openai({ allowUngoverned: ["embeddings.create"] });
 		await client.embeddings.create({ model: "text-embedding-3-small", input: "hi" });
@@ -1156,6 +1242,107 @@ describe("the SDK peer floors are the versions the free list was classified on",
 		// The SDK this suite runs against is inside the supported range.
 		expect(compareVersions(installed(pkgName), floor as string)).toBeGreaterThanOrEqual(0);
 	});
+});
+
+// ── GOVERNED_PATHS is pinned to the proxies' real traps ──
+// The proxies trap the governed names one by one and do not read GOVERNED_PATHS, so the two could
+// drift. Pinned both ways: every GOVERNED_PATHS entry IS governed (a hold, a settled receipt, one
+// llm_call), and every OTHER method on the installed SDKs' resource trees that is not free is
+// REFUSED, so a trap added for a name GOVERNED_PATHS does not list would not be refused and fails.
+
+/** Call a governed path the way a caller would, and return the settled receipt. */
+async function callGoverned(client: Loose, path: string): Promise<{ settled?: boolean }> {
+	const segments = path.split(".");
+	const name = segments.pop() as string;
+	let holder = client;
+	for (const seg of segments) holder = holder[seg];
+	if (path === "chat.completions.create") return (await holder[name](CP)).receipt;
+	if (path === "responses.create")
+		return (await holder[name]({ model: "gpt-4o", input: "hi" })).receipt;
+	if (name === "create") return (await holder[name](MP)).receipt;
+	if (name === "parse") return (await holder[name](MP)).receipt;
+	if (name === "stream") {
+		const stream = await holder[name](MP);
+		await stream.finalMessage();
+		return await stream.receipt;
+	}
+	throw new Error(`no invocation for governed path ${path}`);
+}
+
+describe("every GOVERNED_PATHS entry is governed by the proxies", () => {
+	it.each(
+		(["anthropic", "openai"] as const).flatMap((provider) =>
+			[...GOVERNED_PATHS[provider]].map((path) => [provider, path] as const),
+		),
+	)("%s %s", async (provider, path) => {
+		const { client, engine } = provider === "anthropic" ? await anthropic() : await openai();
+		const receipt = await callGoverned(client, path);
+		expect(receipt?.settled, `${path} settled a receipt`).toBe(true);
+		expect(engine.spendPending, `${path} held`).toHaveBeenCalledTimes(1);
+		expect(chainEvents().map((e) => e.kind)).toEqual(["llm_call"]);
+		expect(hits.length).toBe(1);
+	});
+});
+
+/** Every method on an SDK client's resource trees, by path (the APIResource base's members excluded). */
+function sdkMethodPaths(raw: Loose): string[] {
+	const out: string[] = [];
+	const seen = new Set<unknown>();
+	const walk = (o: Loose, path: string): void => {
+		if (seen.has(o)) return;
+		seen.add(o);
+		for (const key of Object.keys(o)) {
+			if (key === "_client") continue;
+			const v = o[key];
+			if (v !== null && typeof v === "object" && "_client" in v)
+				walk(v, path === "" ? key : `${path}.${key}`);
+		}
+		if (path === "") return; // client-level members are pinned by the raw-client rows
+		let proto = Object.getPrototypeOf(o);
+		while (
+			proto !== null &&
+			proto !== Object.prototype &&
+			proto.constructor?.name !== "APIResource"
+		) {
+			for (const name of Object.getOwnPropertyNames(proto)) {
+				if (name !== "constructor" && typeof o[name] === "function") out.push(`${path}.${name}`);
+			}
+			proto = Object.getPrototypeOf(proto);
+		}
+	};
+	walk(raw, "");
+	return [...new Set(out)].sort();
+}
+
+describe("every other SDK method that is not free is refused: no trap outside GOVERNED_PATHS", () => {
+	for (const provider of ["anthropic", "openai"] as const) {
+		it(provider, async () => {
+			const { client, raw, engine } = provider === "anthropic" ? await anthropic() : await openai();
+			const paths = sdkMethodPaths(raw).filter(
+				(p) => !GOVERNED_PATHS[provider].has(p) && !FREE_METHODS[provider].has(p),
+			);
+			// Positive control: the walk found the refused families this file pins by name.
+			expect(paths).toContain(
+				provider === "anthropic" ? "messages.batches.create" : "embeddings.create",
+			);
+			const notRefused: string[] = [];
+			for (const path of paths) {
+				const segments = path.split(".");
+				const name = segments.pop() as string;
+				let holder = client;
+				for (const seg of segments) holder = holder[seg];
+				try {
+					await holder[name]("id_1", {});
+					notRefused.push(`${path}: resolved`);
+				} catch (err) {
+					if (!(err instanceof PolicyDeniedError)) notRefused.push(`${path}: ${String(err)}`);
+				}
+			}
+			expect(notRefused).toEqual([]);
+			expect(hits, "a refused method reached the SDK").toEqual([]);
+			expect(engine.spendPending).not.toHaveBeenCalled();
+		});
+	}
 });
 
 // ── The free list's rule, pinned ──
