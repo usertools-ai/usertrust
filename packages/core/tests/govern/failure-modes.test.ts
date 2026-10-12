@@ -508,7 +508,7 @@ describe("Failure mode 15.5: Multiple failures combine gracefully", () => {
 	});
 });
 
-describe("AUD-456: Proxy mode removed", () => {
+describe("Proxy mode removed", () => {
 	let tmpVault: string;
 
 	beforeEach(() => {

@@ -26,7 +26,7 @@
 			},
 			"proxy": {
 				"type": "string",
-				"description": "Not implemented. Remote proxy mode is removed; setting this throws (AUD-456). Use a local TigerBeetle or dryRun for enforcement."
+				"description": "Not implemented. Remote proxy mode is removed; setting this throws. Use a local TigerBeetle or dryRun for enforcement."
 			},
 			"proxyKey": {
 				"type": "string",

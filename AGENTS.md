@@ -1420,7 +1420,8 @@ invariant is only as strong as the event shapes themselves: the DLQ persists wha
 carried, verbatim (see the DLQ note above).
 
 **`redactPII` is pure.** It deep-clones and never mutates the caller's object. That is what makes
-`pii: "redact"` safe: the *outbound* request is a redacted clone, so PII never egresses. `"block"`
+`pii: "redact"` safe: PII the prompt scan finds never egresses: the outbound request is a redacted
+clone (fields the scan does not read are not redacted unless the prompt scan fired; see LIMITATIONS §11). `"block"`
 throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
 
 **Signature trust is anchored by the operator's publisher→key registry, never by the embedded key.**
