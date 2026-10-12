@@ -632,7 +632,7 @@ export function guardedGet(
 	if (typeof prop === "symbol" || isInertName(prop)) return value;
 	const at = path === "" ? prop : `${path}.${prop}`;
 	if (prop === "_client" && value !== null && typeof value === "object") {
-		return rawClientStandIn(value, at, boundary, rawClientError(boundary.provider, at));
+		return rawClientStandIn(value, at, boundary, () => rawClientError(boundary.provider, at));
 	}
 	if (typeof value === "function") {
 		const fn = value as (...args: unknown[]) => unknown;
@@ -672,7 +672,10 @@ function guardResource(resource: object, path: string, boundary: MethodBoundary)
 
 /**
  * A stand-in for a raw client (or anything reached from one): every function reached through it,
- * at any depth, is refused with `error`, under the one `path` the raw client was reached at.
+ * at any depth, is refused under the one `path` the raw client was reached at, with a FRESH error
+ * from `makeError` per call. Stand-ins are cached, and the denial boundary writes the event's hash
+ * onto the error it is given: one shared instance would re-label every error a caller already
+ * holds. `cacheKey` (default: the path) separates stand-ins whose errors differ at one path.
  * Values that are not functions read through unchanged, objects as further stand-ins. Getters run
  * on the raw object, so a getter that reads a `#private` field does not throw on the stand-in.
  */
@@ -680,12 +683,13 @@ export function rawClientStandIn(
 	raw: object,
 	path: string,
 	boundary: MethodBoundary,
-	error: PolicyDeniedError,
+	makeError: () => PolicyDeniedError,
+	cacheKey: string = path,
 ): object {
-	let byRaw = boundary.standIns.get(path);
+	let byRaw = boundary.standIns.get(cacheKey);
 	if (byRaw === undefined) {
 		byRaw = new WeakMap();
-		boundary.standIns.set(path, byRaw);
+		boundary.standIns.set(cacheKey, byRaw);
 	}
 	const cached = byRaw.get(raw);
 	if (cached !== undefined) return cached;
@@ -694,10 +698,10 @@ export function rawClientStandIn(
 			const value: unknown = Reflect.get(target, prop, target);
 			if (typeof prop === "symbol" || isInertName(prop)) return value;
 			if (typeof value === "function") {
-				return (...args: unknown[]) => boundary.refuse(path, args, error);
+				return (...args: unknown[]) => boundary.refuse(path, args, makeError());
 			}
 			if (value !== null && typeof value === "object") {
-				return rawClientStandIn(value, path, boundary, error);
+				return rawClientStandIn(value, path, boundary, makeError, cacheKey);
 			}
 			return value;
 		},

@@ -3973,7 +3973,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						fresh,
 						"withOptions",
 						boundary,
-						transportChangedError(kind, changed),
+						() => transportChangedError(kind, changed),
+						`withOptions\u0000${changed.join(",")}`,
 					);
 				}
 				return build(fresh, interceptCall, destroyFn, governActionImpl, boundary);

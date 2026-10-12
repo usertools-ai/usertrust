@@ -583,6 +583,41 @@ describe("escape hatches", () => {
 		);
 	});
 
+	it.each([
+		["messages._client", (c: Loose) => c.messages._client],
+		["withOptions", (c: Loose) => c.withOptions({ fetch: async () => json({}) })],
+	] as const)(
+		"each refusal through one %s stand-in is its own error, with its own audit hash",
+		async (_label, standInOf) => {
+			const { client } = await anthropic();
+			// ONE stand-in, refused twice: stand-ins are cached, which is where a shared error showed.
+			const standIn = standInOf(client);
+			const refuse = async (): Promise<PolicyDeniedError> => {
+				try {
+					await standIn.messages.create(MP);
+				} catch (err) {
+					return err as PolicyDeniedError;
+				}
+				throw new Error("expected a refusal");
+			};
+			const first = await refuse();
+			const firstHash = first.auditEventHash;
+			const second = await refuse();
+			expect(first).toBeInstanceOf(PolicyDeniedError);
+			expect(second).toBeInstanceOf(PolicyDeniedError);
+			expect(second).not.toBe(first);
+			const denials = chainEvents().filter((e) => e.kind === "policy_denied") as unknown as Array<{
+				hash: string;
+			}>;
+			expect(denials).toHaveLength(2);
+			expect(first.auditEventHash).toBe(denials[0]?.hash);
+			expect(second.auditEventHash).toBe(denials[1]?.hash);
+			// The second refusal did not re-label the error the caller already holds.
+			expect(first.auditEventHash).toBe(firstHash);
+			expect(hits).toEqual([]);
+		},
+	);
+
 	it("client.post is a PolicyDeniedError, not the private-field TypeError", async () => {
 		const a = await anthropic();
 		await expectRefused("post", () => a.client.post("/v1/messages", { body: MP }), a.engine);
