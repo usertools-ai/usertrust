@@ -19,8 +19,9 @@
  *   FontForge sources (`SplineFontDB:`).
  * - The Embedded OpenType submission (W3C, 2008), section 3: EOT has no leading
  *   signature. Its little-endian header holds MagicNumber 0x504C at offset 34 (`LP`)
- *   and Version 0x00010000, 0x00020001 or 0x00020002 at offset 8, and EOTSize at
- *   offset 0 is the whole file's length. All three are required.
+ *   and Version 0x00010000, 0x00020001 or 0x00020002 at offset 8, and its sizes are
+ *   consistent: 0 < FontDataSize (offset 4) < EOTSize (offset 0) <= the file's length
+ *   (a file may carry bytes after the structure). All are required, in a binary file.
  * - Adobe Technical Note 5012 (Type 42): `%!PS-TrueTypeFont`.
  * - SVG 1.1, chapter 20: an SVG font is a `<font>` element with `<glyph>` or
  *   `<font-face>` children inside `<svg>`.
@@ -31,6 +32,15 @@
  * or another document (zip, PDF). Inline base64 is found only for the formats with
  * a four-byte leading signature; a base64 EOT or PFB is not.
  *
+ * READ WINDOWS. Each detector reads what its form needs, and no less:
+ * - a signature at a fixed offset (every one in `FONT_MAGICS`, at most 36 bytes in;
+ *   EOT's MagicNumber at 34, a PFB's header at 6) reads the first HEAD_BYTES (`head`),
+ *   which is also the window of git's own text-or-binary test;
+ * - a form that can stand ANYWHERE in a file (an SVG font, a `data:` font URL, a
+ *   base64 font, an embedded PostScript font program) is searched over the WHOLE file,
+ *   every tracked file, binary or text (`fontsInFile`). The largest tracked file is
+ *   14 MB, so each is read whole.
+ *
  * THE URL CHECKS ARE BEST EFFORT. `nonKitFontUrls` and `fontSources` catch a
  * non-kit font URL by its extension or its context, but a static scan of source
  * can always be bypassed by one more indirection (an imported stylesheet, CSS
@@ -39,7 +49,16 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import {
+	closeSync,
+	mkdtempSync,
+	openSync,
+	readFileSync,
+	readSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -91,8 +110,9 @@ const EOT_VERSIONS = new Set([0x00010000, 0x00020001, 0x00020002]);
 
 /**
  * Whether `bytes` is an EOT header for a file of `size` bytes: MagicNumber `LP` (0x504C,
- * little-endian) at offset 34, a defined Version at offset 8, and EOTSize at offset 0 equal to
- * the file's length, with FontDataSize at offset 4 inside it. All little-endian.
+ * little-endian) at offset 34, a defined Version at offset 8, and sizes that fit: FontDataSize
+ * (offset 4) is inside EOTSize (offset 0), which is inside the file. Not EOTSize == size: an
+ * EOT with bytes appended after it is still one. All little-endian.
  */
 function isEot(bytes: Uint8Array, size: number): boolean {
 	if (bytes.length < 36) return false;
@@ -101,14 +121,34 @@ function isEot(bytes: Uint8Array, size: number): boolean {
 		bytes[34] === 0x4c &&
 		bytes[35] === 0x50 &&
 		EOT_VERSIONS.has(view.getUint32(8, true)) &&
-		view.getUint32(0, true) === size &&
 		view.getUint32(4, true) > 0 &&
-		view.getUint32(4, true) < size
+		view.getUint32(4, true) < view.getUint32(0, true) &&
+		view.getUint32(0, true) <= size
 	);
 }
 
-/** An SVG font: a `<font>` with glyphs or a font-face, inside `<svg>` (SVG 1.1, chapter 20). */
-const SVG_FONT = /<svg\b[\s\S]*?<font[\s>][\s\S]*?<(?:glyph|font-face|missing-glyph)\b/i;
+/**
+ * An SVG font (SVG 1.1, chapter 20): `<svg>`, a `<font>` element, and its `<glyph>`,
+ * `<font-face>` or `<missing-glyph>`, anywhere in the text. Three presence tests, so the
+ * search is linear in the file's length.
+ */
+function hasSvgFont(text: string): boolean {
+	return (
+		/<svg\b/i.test(text) &&
+		/<font[\s>]/i.test(text) &&
+		/<(?:glyph|font-face|missing-glyph)\b/i.test(text)
+	);
+}
+
+/**
+ * A PostScript font program anywhere in a text: a Type 1 or Type 42 font embedded in a
+ * PostScript or EPS document (file(1)'s Type 1 signatures and Adobe TN 5012's Type 42 one).
+ */
+const POSTSCRIPT_FONT =
+	/%!(?:PS-AdobeFont-1\.|FontType1|PS-TrueTypeFont|PS-Adobe-3\.0 Resource-Font)/;
+
+/** How much of a file `head` reads: the window of every fixed-offset signature. */
+const HEAD_BYTES = 8000;
 
 /**
  * The same four bytes as they open a base64 run: the first FIVE characters (30 bits). The
@@ -123,14 +163,15 @@ const FONT_BASE64 = ["d09GM", "d09GR", "T1RUT", "dHRjZ", "AAEAA", "dHJ1Z"];
  */
 const MIN_FONT_BASE64 = 1024;
 
-/** Whether `bytes` is text: no NUL byte in its first 8000, the test git itself uses. */
+/** Whether `bytes` is text: no NUL byte in its first HEAD_BYTES, the test git itself uses. */
 function isText(bytes: Uint8Array): boolean {
-	return !bytes.subarray(0, 8000).includes(0);
+	return !bytes.subarray(0, HEAD_BYTES).includes(0);
 }
 
 /**
- * The font format a file is, from its leading `bytes` (at least its first 8000, as `head`
- * reads them) and its `size`, or null. See the header for the formats and their sources.
+ * The font format a file is, from its leading `bytes` (its first HEAD_BYTES, as `head` reads
+ * them) and its `size`, or null. FIXED-OFFSET signatures only: a form that can stand anywhere
+ * in a file is `inlineFonts`'s, over the whole file. See the header for the sources.
  */
 export function fontMagic(bytes: Uint8Array, size: number = bytes.length): string | null {
 	const text = isText(bytes);
@@ -140,15 +181,16 @@ export function fontMagic(bytes: Uint8Array, size: number = bytes.length): strin
 		if ((kind === "binary" && text) || (kind === "text" && !text)) continue;
 		return format;
 	}
-	if (isEot(bytes, size)) return "eot";
-	if (text && SVG_FONT.test(Buffer.from(bytes).toString("latin1"))) return "svg font";
+	if (!text && isEot(bytes, size)) return "eot";
 	return null;
 }
 
 /**
- * The fonts `text` embeds INLINE, which no URL check sees: a `data:` URL of a font type
- * (`data:font/…`, `data:application/font…`, `data:application/x-font…`, or any type naming
- * woff), and a base64 run of at least MIN_FONT_BASE64 characters that starts as a font does.
+ * The fonts `text` holds ANYWHERE in it, which no URL check and no leading signature sees: a
+ * `data:` URL of a font type (`data:font/...`, `data:application/font...`,
+ * `data:application/x-font...`, or any type naming woff), a base64 run of at least
+ * MIN_FONT_BASE64 characters that starts as a font does, an SVG font, and an embedded
+ * PostScript font program. Its window is the whole of `text`: pass it the whole file.
  */
 export function inlineFonts(text: string): string[] {
 	const found: string[] = [];
@@ -164,6 +206,9 @@ export function inlineFonts(text: string): string[] {
 	);
 	for (const m of text.matchAll(run))
 		found.push(`base64 ${m[0].slice(0, 12)}… (${m[0].length} chars)`);
+	if (hasSvgFont(text)) found.push("svg font");
+	const program = POSTSCRIPT_FONT.exec(text);
+	if (program) found.push(`postscript font program (${program[0]})`);
 	return found;
 }
 
@@ -432,47 +477,54 @@ test("a font URL is judged by its path: a query or a fragment does not hide it",
 /** This guard's own source names every pattern it looks for, so it is the one file not scanned. */
 const SELF = "site/scripts/no-font-files.test.mts";
 
-/** Up to the first 8000 bytes of a tracked file: enough for its magic and the text test. */
+/** Up to the first HEAD_BYTES of a file (repo-relative, or absolute): its signatures' window. */
 function head(path: string): Uint8Array {
-	const fd = openSync(join(REPO_ROOT, path), "r");
+	const fd = openSync(resolve(REPO_ROOT, path), "r");
 	try {
-		const buffer = Buffer.alloc(8000);
+		const buffer = Buffer.alloc(HEAD_BYTES);
 		return buffer.subarray(0, readSync(fd, buffer, 0, buffer.length, 0));
 	} finally {
 		closeSync(fd);
 	}
 }
 
-test("no tracked file is a font by its BYTES, whatever its name", () => {
-	const files = trackedFiles();
-	assert.ok(files.length > 100, "the listing is the whole repository");
-	const fonts = files
-		.filter((path) => !Object.hasOwn(ALLOWED_FONT_FILES, path))
-		.map((path) => [path, fontMagic(head(path), statSync(join(REPO_ROOT, path)).size)] as const)
-		.filter(([, format]) => format !== null)
-		.map(([path, format]) => `${path}: ${format}`);
-	assert.deepEqual(fonts, [], "font files must load from https://usertrust.ai/kit/ at runtime");
-});
+/**
+ * The fonts a file (repo-relative, or absolute) holds, each detector over its own window: the
+ * fixed-offset signatures over its head, and every anywhere-form over the WHOLE file, read as
+ * bytes (latin1), so a binary file is searched too. This guard's own source names every
+ * pattern, so only its signature is checked.
+ */
+export function fontsInFile(path: string): string[] {
+	const absolute = resolve(REPO_ROOT, path);
+	const found: string[] = [];
+	const format = fontMagic(head(absolute), statSync(absolute).size);
+	if (format !== null) found.push(format);
+	if (path === SELF) return found;
+	found.push(...inlineFonts(readFileSync(absolute).toString("latin1")));
+	return found;
+}
 
-test("no tracked text file embeds a font inline (a data: URL, a base64 run)", () => {
-	const texts = trackedFiles().filter((path) => path !== SELF && isText(head(path)));
-	// The control: the scan reaches the site, the docs and the packages.
-	assert.ok(texts.includes("site/app/layout.tsx"), "the scan reaches the root layout");
+test("no tracked file holds a font, by its BYTES, whatever its name or where in it", () => {
+	const files = trackedFiles();
+	// The control: the scan reaches the whole repository, text and binary.
+	assert.ok(files.length > 100, "the listing is the whole repository");
+	assert.ok(files.includes("site/app/layout.tsx"), "the scan reaches the root layout");
 	assert.ok(
-		texts.some((f) => f.endsWith(".mdx")),
+		files.some((f) => f.endsWith(".mdx")),
 		"the scan reaches the MDX docs",
 	);
 	assert.ok(
-		texts.some((f) => f.startsWith("packages/")),
+		files.some((f) => f.startsWith("packages/")),
 		"the scan reaches packages/",
 	);
-	const offenders: string[] = [];
-	for (const path of texts) {
-		for (const found of inlineFonts(readFileSync(join(REPO_ROOT, path), "utf8"))) {
-			offenders.push(`${path}: ${found}`);
-		}
-	}
-	assert.deepEqual(offenders, []);
+	assert.ok(
+		files.some((f) => f.endsWith(".png")),
+		"the scan reaches binary files",
+	);
+	const offenders = files
+		.filter((path) => !Object.hasOwn(ALLOWED_FONT_FILES, path))
+		.flatMap((path) => fontsInFile(path).map((found) => `${path}: ${found}`));
+	assert.deepEqual(offenders, [], "font files must load from https://usertrust.ai/kit/ at runtime");
 });
 
 /** A stand-in font: a magic, then bytes that make it binary, `size` bytes in all. */
@@ -641,25 +693,24 @@ test("every font format is found by its bytes under a .bin name (file(1)'s forma
 		],
 		["font.bin (BDF)", Buffer.from("STARTFONT 2.1\nFONT -x-\nSIZE 16 75 75\n"), "bdf"],
 		["font.bin (FontForge)", Buffer.from("SplineFontDB: 3.2\nFontName: X\n"), "fontforge"],
-		[
-			"font.bin (SVG font)",
-			Buffer.from(
-				'<svg xmlns="http://www.w3.org/2000/svg"><defs><font id="x" horiz-adv-x="500"><font-face font-family="X"/><glyph unicode="a" d="M0 0"/></font></defs></svg>',
-			),
-			"svg font",
-		],
 	];
 	for (const [name, bytes, format] of cases)
 		assert.equal(fontMagic(bytes, bytes.length), format, name);
 });
 
-test("EOT needs all three header facts; near misses and the controls are not fonts", () => {
+test("EOT needs its header facts; near misses and the controls are not fonts", () => {
 	// EOT: the magic alone is not enough, and neither is a header over a file of another size.
 	assert.equal(fontMagic(fakeEot({ magic: 0x4c50 })), null, "MagicNumber byte-swapped");
 	assert.equal(fontMagic(fakeEot({ version: 0x00030000 })), null, "an undefined Version");
-	assert.equal(fontMagic(fakeEot({ eotSize: 4000 })), null, "EOTSize is not the file's length");
+	assert.equal(fontMagic(fakeEot({ eotSize: 5000 })), null, "EOTSize past the end of the file");
 	assert.equal(fontMagic(fakeEot({ fontDataSize: 0 })), null, "no font data");
-	assert.equal(fontMagic(fakeEot({ fontDataSize: 5000 })), null, "font data larger than the file");
+	assert.equal(
+		fontMagic(fakeEot({ eotSize: 3000, fontDataSize: 3500 })),
+		null,
+		"font data past EOTSize",
+	);
+	// An EOT with bytes appended after its structure is still an EOT.
+	assert.equal(fontMagic(fakeEot({ eotSize: 3000, fontDataSize: 2800 })), "eot", "a padded EOT");
 	// A plain binary (an image, a build artifact) and plain text are not fonts.
 	assert.equal(fontMagic(fakeBinary([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), null);
 	assert.equal(fontMagic(fakeBinary("GIF89a")), null);
@@ -670,4 +721,49 @@ test("EOT needs all three header facts; near misses and the controls are not fon
 	// A text format's signature in a binary file, and a binary one's in text, do not count.
 	assert.equal(fontMagic(fakeBinary("STARTFONT ")), null);
 	assert.equal(fontMagic(Buffer.from("typ1 is a word\n")), null);
+});
+
+test("a form that can stand anywhere is found anywhere: each one at byte 50,000, through the real read", () => {
+	const dir = mkdtempSync(join(tmpdir(), "no-font-files-"));
+	const at = (name: string, before: string | Buffer, font: string) => {
+		const path = join(dir, name);
+		const lead = typeof before === "string" ? Buffer.from(before) : before;
+		writeFileSync(path, Buffer.concat([lead, Buffer.from(font)]));
+		return fontsInFile(path);
+	};
+	const icons = `<svg xmlns="http://www.w3.org/2000/svg">${'<path d="M0 0h1v1z"/>'.repeat(2400)}`;
+	const prose = `${"The face loads from the kit. ".repeat(1750)}\n`;
+	const binary = fakeBinary("GIF89a", 0, 50_000);
+	const woff2 = fakeBinary("wOF2").toString("base64");
+	for (const lead of [icons, prose]) assert.ok(Buffer.byteLength(lead) >= 50_000);
+	// Each anywhere-form, past the old 8,000-byte window, in a text file and in a binary one.
+	const cases: Array<[string, string | Buffer, string, string]> = [
+		[
+			"icons.svg",
+			icons,
+			'<defs><font id="x"><font-face font-family="X"/><glyph unicode="a" d="M0 0"/></font></defs></svg>',
+			"svg font",
+		],
+		["page.md", prose, `src: url(data:font/woff2;base64,${woff2.slice(0, 40)})`, "data:font/woff2"],
+		["face.ts", prose, `export const FACE = "${woff2}";`, "base64 d09GM"],
+		[
+			"figure.eps",
+			prose,
+			"%%BeginResource: font X\n%!PS-AdobeFont-1.0: X 001\n",
+			"postscript font program",
+		],
+		["blob.bin", binary, `<svg><font><glyph d="M0 0"/></font></svg>`, "svg font"],
+		["blob2.bin", binary, `x"${woff2}"`, "base64 d09GM"],
+	];
+	for (const [name, before, font, expected] of cases) {
+		const found = at(name, before, font);
+		assert.ok(
+			found.some((f) => f.startsWith(expected)),
+			`${name}: ${JSON.stringify(found)}`,
+		);
+	}
+	// The controls: the same files without the font hold none.
+	assert.deepEqual(at("icons-plain.svg", icons, "</svg>"), []);
+	assert.deepEqual(at("page-plain.md", prose, "The end.\n"), []);
+	assert.deepEqual(at("blob-plain.bin", binary, "trailer"), []);
 });
