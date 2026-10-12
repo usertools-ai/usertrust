@@ -36,15 +36,18 @@ export function parseDeadLetters(text: string): DeadLetters {
 		}
 		const { checksum, checksumAlg, ...entry } = sealed;
 		if (checksumAlg !== "sha256" || typeof checksum !== "string") return { unreadable: true };
-		let source: string;
+		// The writer checksums `canonicalize(entry)`, or `JSON.stringify(entry)` when canonicalize throws on a NaN/Infinity
+		// (which JSON.stringify writes as null). On read that value is already null, so `canonicalize` succeeds and yields
+		// a DIFFERENT string: accept either digest. JSON.parse keeps insertion order, so the second reproduces the writer's
+		// fallback bytes.
+		const digests: string[] = [];
 		try {
-			source = canonicalize(entry);
+			digests.push(createHash("sha256").update(canonicalize(entry)).digest("hex"));
 		} catch {
-			source = JSON.stringify(entry);
+			// not canonicalizable: only the fallback below can match
 		}
-		if (createHash("sha256").update(source).digest("hex") !== checksum) {
-			return { unreadable: true };
-		}
+		digests.push(createHash("sha256").update(JSON.stringify(entry)).digest("hex"));
+		if (!digests.includes(checksum)) return { unreadable: true };
 		const payload = entry["payload"];
 		if (payload === null || typeof payload !== "object") continue;
 		const input = payload as { kind?: unknown; data?: unknown };

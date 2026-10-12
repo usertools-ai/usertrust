@@ -1292,6 +1292,22 @@ describe("a headless post with no shortfall record: the dead-letter queue decide
 		}
 	});
 
+	it("a dead letter the writer sealed with its NaN fallback (JSON.stringify) is READABLE, not a corrupt queue", () => {
+		// the writer: canonicalize throws on NaN, so it checksums JSON.stringify(entry), which writes the NaN as null
+		const entry = {
+			source: "audit.chain.appendEvent",
+			payload: { kind: "llm_call", data: { transferId: "x", cost: Number.NaN } },
+			error: "disk full",
+			timestamp: T,
+		};
+		const checksum = createHash("sha256").update(JSON.stringify(entry)).digest("hex");
+		const line = JSON.stringify({ ...entry, checksum, checksumAlg: "sha256" });
+		const parsed = parseDeadLetters(`${line}\n${shortfallLetter("t", 60)}\n`);
+		expect("shortfalls" in parsed).toBe(true);
+		const m = build([headless(100)], { deadLetters: parsed });
+		expect(m.totals.postProvenUt).toBe(60);
+	});
+
 	it("a caller that did not read the queue gets the upper bound too (absent is not 'none')", () => {
 		const m = build([headless(100)]);
 		expect(m.totals.postProvenUt).toBe(0);
