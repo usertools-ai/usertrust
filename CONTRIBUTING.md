@@ -40,6 +40,11 @@ name of every file you add to letters, digits, `.`, `_`, `-`, `[` and `]`, and r
 differs from another file or directory only in case: a case-insensitive filesystem opens both as
 one.
 
+## Releasing
+
+Maintainers release the npm packages with the Release workflow; see
+[docs/releasing.md](./docs/releasing.md).
+
 ## Code of conduct
 
 This project follows the [Contributor Covenant v2.1](./CODE_OF_CONDUCT.md). By participating, you agree to uphold these standards.
