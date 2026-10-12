@@ -166,6 +166,31 @@ describe("headless settlement_shortfall threading", () => {
 		});
 	}
 
+	it("the llm_call record says ledgerPosted only when the ledger answered the post; a dry run never does", async () => {
+		const audit = makeMockAudit();
+		const gov = await governorWith(makeMockEngine(), audit);
+		const auth = await gov.authorize(AUTHORIZE);
+		await gov.settle(auth, { inputTokens: 80, outputTokens: 20 });
+		expect(audit.events.find((e) => e.kind === "llm_call")?.data).toMatchObject({
+			ledgerPosted: true,
+		});
+		await gov.destroy();
+
+		const dryAudit = makeMockAudit();
+		const dry = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			dryRun: true,
+			_audit: dryAudit,
+		});
+		const dryAuth = await dry.authorize(AUTHORIZE);
+		await dry.settle(dryAuth, { inputTokens: 80, outputTokens: 20 });
+		const data = dryAudit.events.find((e) => e.kind === "llm_call")?.data;
+		expect(data).toMatchObject({ settled: true, source: "headless" });
+		expect(data).not.toHaveProperty("ledgerPosted");
+		await dry.destroy();
+	});
+
 	it("audits settlement_shortfall and sets receipt.postedCost when the engine reports truncation", async () => {
 		const engine = makeMockEngine(async () => ({ posted: POSTED, shortfall: SHORTFALL }));
 		const audit = makeMockAudit();

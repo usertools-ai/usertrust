@@ -195,7 +195,7 @@ describe("both evidence tiers are headlined", () => {
 				data: { model: "m", cost: 100, settled: true, ...data },
 			}) as unknown as PersistedAuditEvent;
 		const m = buildWeeklyReport(
-			[ev({ transferId: "a" }), ev({ transferId: "b", source: "headless" })],
+			[ev({ transferId: "a" }), ev({ transferId: "b", source: "headless", ledgerPosted: true })],
 			{ verified: true, errors: [], chainLength: 2, firstEvent: "a", lastEvent: "b" },
 			{ endMs: END },
 		);
@@ -206,5 +206,28 @@ describe("both evidence tiers are headlined", () => {
 		}
 		expect(m.totals.confirmedCalls).toBe(2);
 		expect(m.totals.postProvenCalls).toBe(1);
+	});
+});
+
+describe("unconfirmed governed actions are headlined", () => {
+	it("a 12,345-UT unconfirmed action shows in md and html, not as $0.00", () => {
+		const m = buildWeeklyReport(
+			[
+				{
+					id: "i",
+					kind: "tool_call",
+					timestamp: "2026-10-11T00:00:00Z",
+					actor: "local",
+					hash: "h",
+					data: { actionName: "x", cost: 12_345, transferId: "t", settled: false },
+				} as unknown as PersistedAuditEvent,
+			],
+			{ verified: true, errors: [], chainLength: 1, firstEvent: "a", lastEvent: "a" },
+			{ endMs: END },
+		);
+		for (const f of ["md", "html"] as const) {
+			expect(render(m, f), f).toMatch(/unconfirmed/i);
+			expect(render(m, f), f).toContain("$1.23");
+		}
 	});
 });

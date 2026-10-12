@@ -1923,6 +1923,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 				// POST settlement
 				let settled = true;
+				// True only once the ledger (or proxy) ANSWERED the post: a dry run never sets it, so a record can tell a
+				// real post from a settle that moved no money.
+				let ledgerPosted = false;
 				// D4: set only when the engine capped the post at the reserved hold.
 				let postedCost: number | undefined;
 				// D4 event-order buffer: the truncation is learned at POST time but the
@@ -1936,6 +1939,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				if (proxyConn != null && !isDryRun) {
 					try {
 						await proxyConn.settle(auth.proxyTransferId ?? transferId, actualCost);
+						ledgerPosted = true;
 					} catch (postErr) {
 						settled = false;
 						await audit
@@ -1964,6 +1968,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// Post the ACTUAL consumed cost (RECON #3), capped by the engine at
 						// the reserved hold; a truncation comes back as `shortfall`.
 						const postResult = await engine.postPendingSpend(transferId, actualCost);
+						ledgerPosted = true;
 						if (postResult != null && postResult.shortfall > 0) {
 							postedCost = postResult.posted;
 							// EVENT ORDER: captured here, APPENDED after `llm_call` below.
@@ -2049,6 +2054,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							pricingTableVersion: PRICING_TABLE_VERSION,
 							...(input.chunksDelivered != null ? { chunksDelivered: input.chunksDelivered } : {}),
 							source: "headless",
+							...(ledgerPosted ? { ledgerPosted: true } : {}),
 							...costCenterAudit,
 							...principalAudit,
 							...jobAudit,

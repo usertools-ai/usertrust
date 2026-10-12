@@ -159,6 +159,11 @@ export function renderMarkdown(m: ReportModel): string {
 			`- **Governed actions (non-model):** ${usd(t.actionUt)} across ${t.actionCalls} action(s), reported separately`,
 		);
 	}
+	if (t.unconfirmedActionCalls > 0) {
+		out.push(
+			`- **Governed actions, unconfirmed:** ${usd(t.unconfirmedActionUt)} across ${t.unconfirmedActionCalls} action(s) whose charge is not proven (not counted as spent)`,
+		);
+	}
 	if (m.shortfall.events > 0) {
 		out.push(
 			`- **Posted below metered:** ${m.shortfall.events} settlement(s) metered ${utStr(m.shortfall.ut)} more than the ledger could post (settlement_shortfall)`,
@@ -277,6 +282,10 @@ export function renderHtml(m: ReportModel): string {
 		}${
 			t.actionCalls > 0
 				? `<div><span class="big">${usd(t.actionUt)}</span><span class="muted">governed actions, reported separately</span></div>`
+				: ""
+		}${
+			t.unconfirmedActionCalls > 0
+				? `<div><span class="big">${usd(t.unconfirmedActionUt)}</span><span class="muted">governed actions unconfirmed, ${t.unconfirmedActionCalls} action(s) (not counted as spent)</span></div>`
 				: ""
 		}${
 			m.shortfall.events > 0

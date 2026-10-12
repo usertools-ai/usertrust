@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PersistedAuditEvent } from "../../src/audit/read.js";
-import { buildWeeklyReport, type IntegrityInfo, UNATTRIBUTED } from "../../src/report/weekly.js";
+import {
+	buildWeeklyReport,
+	type IntegrityInfo,
+	UNATTRIBUTED,
+	UNKNOWN_VOID_REASON_PREFIX,
+} from "../../src/report/weekly.js";
 
 const END = Date.parse("2026-10-12T00:00:00Z");
 const OK: IntegrityInfo = {
@@ -349,6 +356,93 @@ describe("weekly report model", () => {
 		expect(m.totals.unconfirmedCalls).toBe(1);
 	});
 
+	it("a DRY-RUN headless record (settled: true, no ledgerPosted) is confirmed but not ledger-proven", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 45, { transferId: "t-dry", source: "headless" }),
+			call("2026-10-08T02:00:00Z", 55, {
+				transferId: "t-real",
+				source: "headless",
+				ledgerPosted: true,
+			}),
+		]);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.postProvenUt).toBe(55);
+		expect(m.totals.postProvenCalls).toBe(1);
+	});
+
+	it("the proven subtotal sums what the ledger POSTED, not the metered cost", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 100, { transferId: "t-cap" }),
+			ev("settlement_shortfall", "2026-10-08T01:00:01Z", {
+				transferId: "t-cap",
+				actual: 100,
+				posted: 60,
+				shortfall: 40,
+			}),
+		]);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.postProvenUt).toBe(60);
+	});
+
+	it("a warn-mode injection_detected beside a charged call does not unconfirm it (call and action)", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 100, { transferId: "t-inj" }),
+			ev("injection_detected", "2026-10-08T01:00:01Z", { transferId: "t-inj" }),
+			ev("tool_call", "2026-10-08T02:00:00Z", { actionName: "x", cost: 7, transferId: "t-inj2" }),
+			ev("injection_detected", "2026-10-08T02:00:01Z", { transferId: "t-inj2" }),
+		]);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.actionUt).toBe(7);
+		expect(m.totals.unconfirmedCalls).toBe(0);
+	});
+
+	it("a standalone settlement_ambiguous that names an action goes to the ACTION totals", () => {
+		const m = build([
+			ev("settlement_ambiguous", "2026-10-08T02:00:00Z", {
+				transferId: "t-aa",
+				actionKind: "tool_call",
+				actionName: "x",
+				cost: 321,
+			}),
+		]);
+		expect(m.totals.unconfirmedActionUt).toBe(321);
+		expect(m.totals.unconfirmedActionCalls).toBe(1);
+		expect(m.totals.unconfirmedUt).toBe(0);
+		expect(m.totals.unconfirmedCalls).toBe(0);
+	});
+
+	it("a release beside a proven post, or with a failed or unknown void, is unconfirmed, not 'released'", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 10, {
+				transferId: "t-a",
+				source: "headless",
+				ledgerPosted: true,
+			}),
+			ev("hold_released", "2026-10-08T01:00:01Z", { transferId: "t-a" }),
+			call("2026-10-08T02:00:00Z", 20, { transferId: "t-b" }),
+			ev("hold_released", "2026-10-08T02:00:01Z", { transferId: "t-b", voidError: "x" }),
+			call("2026-10-08T03:00:00Z", 30, { transferId: "t-c" }),
+			ev("hold_released", "2026-10-08T03:00:01Z", {
+				transferId: "t-c",
+				reason: `${UNKNOWN_VOID_REASON_PREFIX}: its void had not completed)`,
+			}),
+			call("2026-10-08T04:00:00Z", 40, { transferId: "t-d" }),
+			ev("hold_released", "2026-10-08T04:00:01Z", { transferId: "t-d" }),
+		]);
+		expect(m.totals.releasedCalls).toBe(1);
+		expect(m.totals.unconfirmedCalls).toBe(3);
+		expect(m.totals.confirmedUt).toBe(0);
+	});
+
+	it("two llm_call records for one transfer cannot both be the charge", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 100, { transferId: "t-dup" }),
+			call("2026-10-08T01:00:05Z", 100, { transferId: "t-dup" }),
+		]);
+		expect(m.totals.confirmedUt).toBe(0);
+		expect(m.totals.unconfirmedCalls).toBe(2);
+	});
+
 	it("an unknown future record kind beside a call unconfirms it by default; shortfall and implausible do not", () => {
 		const m = build([
 			call("2026-10-08T01:00:00Z", 100, { transferId: "t-s" }),
@@ -550,5 +644,12 @@ describe("weekly report model", () => {
 		const m = build(events, { topN: 2 });
 		expect(m.topCosts.map((c) => c.ut)).toEqual([90, 70]);
 		expect(m.topCosts[0]?.hash).toMatch(/^h\d+0+$/);
+	});
+});
+
+describe("the unknown-void release reason is still the one headless writes", () => {
+	it("headless.ts carries the prefix the report matches", () => {
+		const src = readFileSync(join(import.meta.dirname, "../../src/headless.ts"), "utf-8");
+		expect(src).toContain(UNKNOWN_VOID_REASON_PREFIX);
 	});
 });

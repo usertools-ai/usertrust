@@ -370,7 +370,23 @@ function walletDebit(
  * failure, an ambiguity, a release, a kind this reader has never heard of) unconfirms the spend: a closed allowlist, so
  * a future kind defaults to unconfirmed rather than to charged.
  */
-const BENIGN_SIBLINGS: ReadonlySet<string> = new Set(["settlement_shortfall", "usage_implausible"]);
+/**
+ * The record `destroy()` writes for a terminal still in flight at its deadline: its void had not completed, so whether
+ * the funds came back is not known. The prefix mirrors the reason text in `headless.ts` (a test pins that it is still
+ * there).
+ */
+export const UNKNOWN_VOID_REASON_PREFIX = "governor destroyed (terminal still in flight";
+
+function isUnknownVoidRelease(e: PersistedAuditEvent): boolean {
+	const reason = e.data["reason"];
+	return typeof reason === "string" && reason.startsWith(UNKNOWN_VOID_REASON_PREFIX);
+}
+
+const BENIGN_SIBLINGS: ReadonlySet<string> = new Set([
+	"settlement_shortfall",
+	"usage_implausible",
+	"injection_detected",
+]);
 
 export type Standing =
 	| { kind: "confirmed"; postProven: boolean }
@@ -394,26 +410,42 @@ export function buildWeeklyReport(
 	const malformedEvents = events.length - usable.length;
 
 	// Whole-chain indexes: a sibling record can sit outside the window of the call it qualifies.
-	const kindsByTransfer = new Map<string, Set<string>>();
+	const kindsByTransfer = new Map<string, Map<string, number>>();
+	const unprovenReleases = new Set<string>();
+	const postedByTransfer = new Map<string, number>();
 	const spendTransfers = new Set<string>();
 	const postProvenTransfers = new Set<string>();
 	const shortfallByTransfer = new Map<string, number>();
 	for (const e of usable) {
 		const tid = str(e.data["transferId"]);
 		if (tid === undefined) continue;
-		const ks = kindsByTransfer.get(tid) ?? new Set<string>();
-		ks.add(e.kind);
+		const ks = kindsByTransfer.get(tid) ?? new Map<string, number>();
+		ks.set(e.kind, (ks.get(e.kind) ?? 0) + 1);
 		kindsByTransfer.set(tid, ks);
+		// A release is proof of "not charged" only when its void is known to have completed.
+		if (
+			e.kind === "hold_released" &&
+			(e.data["voidError"] !== undefined || isUnknownVoidRelease(e))
+		) {
+			unprovenReleases.add(tid);
+		}
 		const isAction = isActionEvent(e);
 		if (e.kind === "llm_call" || isAction) {
 			spendTransfers.add(tid);
-			// A headless record is written after the ledger answered the post.
-			if (e.data["source"] === "headless" && e.data["settled"] === true)
+			// A headless record says `ledgerPosted` only once the ledger ANSWERED the post: a dry run records
+			// `settled: true` too, and moved no money.
+			if (
+				e.data["source"] === "headless" &&
+				e.data["settled"] === true &&
+				e.data["ledgerPosted"] === true
+			)
 				postProvenTransfers.add(tid);
 		} else if (e.kind === "settlement_shortfall") {
 			postProvenTransfers.add(tid);
 			const sf = cost(e.data["shortfall"]);
 			if (sf !== undefined) shortfallByTransfer.set(tid, sf);
+			const posted = cost(e.data["posted"]);
+			if (posted !== undefined) postedByTransfer.set(tid, posted);
 		}
 	}
 
@@ -422,10 +454,18 @@ export function buildWeeklyReport(
 		if (e.data["settled"] === false) return { kind: "unconfirmed", reason: "unsettled" };
 		if (tid === undefined) return { kind: "unconfirmed", reason: "uncorrelated" };
 		const ks = kindsByTransfer.get(tid);
-		if (ks?.has("hold_released")) return { kind: "released" };
-		for (const k of ks ?? []) {
-			if (k !== e.kind && !BENIGN_SIBLINGS.has(k))
+		const proven = postProvenTransfers.has(tid);
+		// Two spend records of one kind for one transfer cannot both be the charge.
+		if ((ks?.get(e.kind) ?? 0) > 1) return { kind: "unconfirmed", reason: "contradicted" };
+		const others = [...(ks?.keys() ?? [])].filter(
+			(k) => k !== e.kind && k !== "hold_released" && !BENIGN_SIBLINGS.has(k),
+		);
+		if (others.length > 0) return { kind: "unconfirmed", reason: "contradicted" };
+		if (ks?.has("hold_released")) {
+			// A release beside a proven post, or one whose void is not known to have completed, proves nothing.
+			if (proven || unprovenReleases.has(tid))
 				return { kind: "unconfirmed", reason: "contradicted" };
+			return { kind: "released" };
 		}
 		return { kind: "confirmed", postProven: postProvenTransfers.has(tid) };
 	};
@@ -538,7 +578,8 @@ export function buildWeeklyReport(
 			t.confirmedUt += c;
 			t.confirmedCalls += 1;
 			if (st.postProven) {
-				t.postProvenUt += c;
+				// What the ledger POSTED, not the metered cost: a capped post records the lower figure.
+				t.postProvenUt += (tid !== undefined ? postedByTransfer.get(tid) : undefined) ?? c;
 				t.postProvenCalls += 1;
 			}
 			if (denomination === "unlabelled") {
@@ -644,10 +685,16 @@ export function buildWeeklyReport(
 		// carries is unconfirmed spend, shown, never dropped.
 		if (e.kind === "settlement_ambiguous" && (tid === undefined || !spendTransfers.has(tid))) {
 			const c = cost(e.data["cost"]);
-			if (denominationOf(e) === "nominal") t.unconfirmedNominalCalls += 1;
-			else if (c !== undefined) t.unconfirmedUt += c;
-			t.unconfirmedCalls += 1;
-			t.contradictedCalls += 1;
+			if (str(e.data["actionKind"]) !== undefined || str(e.data["actionName"]) !== undefined) {
+				// An action's ambiguity belongs to the action totals, never to model spend.
+				t.unconfirmedActionCalls += 1;
+				if (c !== undefined) t.unconfirmedActionUt += c;
+			} else {
+				if (denominationOf(e) === "nominal") t.unconfirmedNominalCalls += 1;
+				else if (c !== undefined) t.unconfirmedUt += c;
+				t.unconfirmedCalls += 1;
+				t.contradictedCalls += 1;
+			}
 		}
 
 		if ((GOVERNANCE_KINDS as readonly string[]).includes(e.kind)) {
