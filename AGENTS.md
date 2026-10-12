@@ -48,6 +48,18 @@ Monorepo, npm workspaces (`packages/*`). `site/` is a Next.js app and is **not**
 The first six are version-locked and released together. `monte-cristo` and `claude-code-plugin`
 are not.
 
+**No brand asset is committed to this repository**: no font file of any kind (Usertools Sans and
+every other face, first-party or OFL), no logo or mark, no lattice code. `site/` loads them at
+runtime from the brand kit, `https://usertrust.ai/kit/`, served with `access-control-allow-origin: *`:
+`site/app/globals.css` and `site/app/r/brand.css` point `@font-face` at `kit/fonts/` with
+`font-display: swap` and system fallback stacks, and server-rendered images (`/og`, the receipt
+share card) use the sha384-pinned loader `site/app/r/lib/kit-fonts.ts`. The guard is
+`site/scripts/no-font-files.test.mts`, in the site's `npm test` and so in `site-build`: it fails
+on any `.woff`, `.woff2`, `.ttf`, `.otf` or `.eot` that `git ls-files` lists anywhere in the repo,
+and on any site source that names a font URL other than the kit's. A legitimate non-brand fixture
+is allowlisted there by exact path, with its reason. A face the kit does not serve yet is added to
+the kit first, never committed here.
+
 ### `packages/core/src` map
 
 | Area | Files |

@@ -203,7 +203,9 @@ test("every external URL the route names is classified: pinned script, chrome fo
 		}
 	}
 	// The enumeration is not vacuous: it found the fonts, the script, the links and the server read.
-	assert.equal([...seen].filter((url) => KIT_FONT.test(url)).length, 5);
+	// Seven kit fonts: brand.css's five chrome faces, plus the two Khand pins the
+	// site's /og card loads through lib/kit-fonts.ts.
+	assert.equal([...seen].filter((url) => KIT_FONT.test(url)).length, 7);
 	assert.ok(seen.has(LATTICE_SRC));
 	assert.ok(seen.has(SERVER));
 	assert.ok(

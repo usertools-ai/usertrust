@@ -23,6 +23,7 @@ import { isRunawaySpend } from "../shared/spend-guard.js";
 import type { AuditEvent } from "../shared/types.js";
 import type { CliOptions } from "./init.js";
 import { DEFAULT_POLICIES_PATH, resolvePolicyPath } from "./policy-path.js";
+import { warnIfVaultLoose } from "./target.js";
 
 /**
  * Load the vault's events — EVERY segment, and validated rather than asserted.
@@ -311,6 +312,7 @@ function coloredTag(value: number, hits: number): string {
 export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
+	warnIfVaultLoose(vaultPath);
 	const json = opts?.json === true;
 
 	if (!existsSync(vaultPath)) {

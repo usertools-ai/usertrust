@@ -29,7 +29,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
@@ -94,6 +94,7 @@ import { detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
+import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/private-fs.js";
 import { isPersistableSpend } from "./shared/spend-guard.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
@@ -786,7 +787,7 @@ async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promi
 	try {
 		// Ensure vault dir exists
 		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
+			mkdirPrivate(dir);
 		}
 		// MONOTONIC guard (RECON #4): cumulative spend must never regress on disk.
 		// A stale/racing writer carrying a lower budgetSpent must not "un-spend"
@@ -808,7 +809,7 @@ async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promi
 		// as a smaller number, which loadSpendLedger now refuses rather than
 		// silently treating as zero spend. Durability here is what keeps that
 		// refusal rare instead of routine.
-		const handle = await open(tmpPath, "w");
+		const handle = await open(tmpPath, "w", PRIVATE_FILE_MODE);
 		try {
 			await handle.writeFile(JSON.stringify(data), "utf-8");
 			// FSYNC FAILURE IS NOT WRITE FAILURE. `sync()` is unsupported on some
@@ -1163,6 +1164,11 @@ export async function runTeardownSteps(steps: ReadonlyArray<() => unknown>): Pro
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
 	// 1. Load config
 	const vaultBase = opts?.vaultBase ?? process.cwd();
+	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
+	// version left group/world-readable is closed; one another user owns is refused (see
+	// securePrivateVault). This runs before ANYTHING under the vault is read, the config
+	// included: a foreign vault's files are never parsed, and a FIFO planted in one never blocks.
+	securePrivateVault(join(vaultBase, VAULT_DIR), { create: true });
 	const configPath = opts?.configPath ?? join(vaultBase, VAULT_DIR, "usertrust.config.json");
 
 	let config: TrustConfig;
@@ -2958,12 +2964,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// i2. Pattern memory
 				if (config.patterns.enabled) {
 					const promptHash = createHash("sha256").update(JSON.stringify(promptParts)).digest("hex");
-					await recordPattern({
-						promptHash,
-						model,
-						cost: actualCost,
-						success: true,
-					}).catch(() => {});
+					await recordPattern(
+						{
+							promptHash,
+							model,
+							cost: actualCost,
+							success: true,
+						},
+						join(vaultPath, VAULT_DIR),
+					).catch(() => {});
 				}
 
 				const budgetRemaining = config.budget - budgetSpent - inFlightHoldTotal;
@@ -3083,12 +3092,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// l. Pattern memory: record failure
 				if (config.patterns.enabled) {
 					const promptHash = createHash("sha256").update(JSON.stringify(promptParts)).digest("hex");
-					await recordPattern({
-						promptHash,
-						model,
-						cost: 0,
-						success: false,
-					}).catch(() => {});
+					await recordPattern(
+						{
+							promptHash,
+							model,
+							cost: 0,
+							success: false,
+						},
+						join(vaultPath, VAULT_DIR),
+					).catch(() => {});
 				}
 
 				// FIRST-RUN-A: name usertrust as HEALTHY when the provider refused the

@@ -7,6 +7,7 @@
  * admits; every other unverifiable state is refused and left for an operator.
  */
 
+import { join } from "node:path";
 import pc from "picocolors";
 import { AuditWriterLockHeldError } from "../audit/chain.js";
 import {
@@ -14,9 +15,10 @@ import {
 	AuditQuarantineRefusedError,
 	quarantineTornTail,
 } from "../audit/quarantine.js";
+import { VAULT_DIR } from "../shared/constants.js";
 import { GLOBAL_FLAGS } from "./flags.js";
 import type { CliOptions } from "./init.js";
-import { scrubForTerminal, toSafeJson } from "./target.js";
+import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
 
 const USAGE = "usage: usertrust audit quarantine-tail [--dry-run] [--json]";
 
@@ -27,6 +29,7 @@ export async function run(
 ): Promise<void> {
 	const json = opts.json === true;
 	const root = rootDir ?? process.cwd();
+	warnIfVaultLoose(join(root, VAULT_DIR));
 	// The global flags (`cli/flags.ts`, the one list) are accepted wherever main.ts forwards them;
 	// anything else that is not this command's own is a malformed invocation: exit 2, as every CLI
 	// command answers an argument of the wrong shape (AGENTS.md). Exit 1 is kept for operational

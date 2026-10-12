@@ -9,12 +9,13 @@
  * config, .env, policy, and .gitignore.
  */
 
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as clack from "@clack/prompts";
 import type { ModelRates } from "../ledger/pricing.js";
 import { modelsForProvider, PRICING_TABLE, PRICING_TABLE_VERSION } from "../ledger/pricing.js";
 import { DEFAULT_BUDGET, VAULT_DIR } from "../shared/constants.js";
+import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "../shared/private-fs.js";
 import { scrubForTerminal } from "./target.js";
 import { detectProvider, maskKey, validateKey } from "./validate-key.js";
 
@@ -506,10 +507,12 @@ interface VaultData {
 }
 
 function createVault(vaultPath: string, data: VaultData): void {
-	// Create directory structure
-	mkdirSync(vaultPath, { recursive: true });
+	// Create directory structure, owner-only throughout: the same modes a governor gives
+	// every directory and file it creates in a vault (shared/private-fs.ts). A vault being
+	// reconfigured that an earlier version left group/world-readable is closed first.
+	securePrivateVault(vaultPath, { create: true });
 	for (const sub of SUBDIRS) {
-		mkdirSync(join(vaultPath, sub), { recursive: true });
+		mkdirPrivate(join(vaultPath, sub));
 	}
 
 	// Build config
@@ -541,14 +544,16 @@ function createVault(vaultPath: string, data: VaultData): void {
 	}
 
 	// Write config
-	writeFileSync(
-		join(vaultPath, "usertrust.config.json"),
-		JSON.stringify(config, null, "\t"),
-		"utf-8",
-	);
+	writeFileSync(join(vaultPath, "usertrust.config.json"), JSON.stringify(config, null, "\t"), {
+		encoding: "utf-8",
+		mode: PRIVATE_FILE_MODE,
+	});
 
 	// Write default policy
-	writeFileSync(join(vaultPath, "policies", "default.yml"), DEFAULT_POLICY, "utf-8");
+	writeFileSync(join(vaultPath, "policies", "default.yml"), DEFAULT_POLICY, {
+		encoding: "utf-8",
+		mode: PRIVATE_FILE_MODE,
+	});
 
 	// Write .env with API keys
 	if (data.keys && Object.keys(data.keys).length > 0) {
@@ -558,7 +563,7 @@ function createVault(vaultPath: string, data: VaultData): void {
 		});
 		writeFileSync(join(vaultPath, ".env"), `${envLines.join("\n")}\n`, {
 			encoding: "utf-8",
-			mode: 0o600,
+			mode: PRIVATE_FILE_MODE,
 		});
 	}
 
@@ -568,8 +573,8 @@ function createVault(vaultPath: string, data: VaultData): void {
 dlq/
 .env
 `;
-	writeFileSync(join(vaultPath, ".gitignore"), gitignoreContent, "utf-8");
-
-	// Set vault permissions to 700 (owner only)
-	chmodSync(vaultPath, 0o700);
+	writeFileSync(join(vaultPath, ".gitignore"), gitignoreContent, {
+		encoding: "utf-8",
+		mode: PRIVATE_FILE_MODE,
+	});
 }

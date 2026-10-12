@@ -6,8 +6,10 @@ description: Install usertrust and make your first governed LLM call in 2 minute
 ## Install
 
 ```bash
-npm install usertrust
+npm install usertrust @anthropic-ai/sdk
 ```
+
+usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use: `@anthropic-ai/sdk` for the example below, `openai`, or `@google/genai` for Google Gemini. `@anthropic-ai/sdk` and `openai` are declared as optional peer dependencies; `@google/genai` is not declared, so you install it yourself.
 
 ## Initialize the Vault
 
@@ -99,6 +101,8 @@ import { GoogleGenAI } from "@google/genai";
 const client = await trust(new GoogleGenAI({ apiKey }), { budget: 50_000 });
 const { response } = await client.models.generateContent({ ... });
 ```
+
+On a Google client only `models.generateContent` is governed. `models.generateContentStream` passes through to the SDK untouched: it is not metered, it gets no receipt, and no policy applies to it.
 
 ## Streaming
 
