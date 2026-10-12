@@ -23,8 +23,9 @@ async function main(): Promise<void> {
 	secureTenantVaults(config);
 	await probeLedger(config);
 	const server = createUsertrustServer({ config });
-	const { port } = await server.listen();
-	process.stderr.write(`usertrust-server listening on ${scrubForStderr(config.host)}:${port}\n`);
+	// The handlers go in BEFORE the server listens: a supervisor (or a test) that signals the
+	// moment it reads the listening line must reach shutdown, never the default action, which
+	// kills the process. close() is safe on a server that is not listening yet.
 	const shutdown = async (): Promise<void> => {
 		process.stderr.write("usertrust-server shutting down — voiding pending holds\n");
 		await server.close();
@@ -32,6 +33,8 @@ async function main(): Promise<void> {
 	};
 	process.on("SIGINT", () => void shutdown());
 	process.on("SIGTERM", () => void shutdown());
+	const { port } = await server.listen();
+	process.stderr.write(`usertrust-server listening on ${scrubForStderr(config.host)}:${port}\n`);
 }
 
 main().catch((err: unknown) => {

@@ -372,3 +372,25 @@ describe("usertrust-server CLI: a healthy tenant vault starts", () => {
 		START_MS * 2,
 	);
 });
+
+describe("usertrust-server CLI: a SIGTERM the moment it says it is listening", () => {
+	it(
+		"always reaches the shutdown handler: exit 0, 20 times out of 20",
+		async () => {
+			const codes: (number | null)[] = [];
+			for (let i = 0; i < 20; i++) {
+				const s = await serverConfig();
+				const run = startCli(s.configPath, s.cwd);
+				// No round trip: signalled from inside the data handler that first sees the line, as a
+				// supervisor that waits for it would.
+				run.proc.stderr?.on("data", () => {
+					if (run.stderr().includes("listening on")) run.proc.kill("SIGTERM");
+				});
+				codes.push(await run.exited);
+				child = undefined;
+			}
+			expect(codes).toEqual(Array(20).fill(0));
+		},
+		START_MS * 4,
+	);
+});
