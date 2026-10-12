@@ -1338,8 +1338,15 @@ function snapshotActionDescriptor(descriptor: ActionDescriptor): ActionDescripto
 // ── trust() ──
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
-	// 0. Validate the operator's opt-out list before anything touches the vault.
-	const allowUngoverned = validateAllowUngoverned(opts?.allowUngoverned);
+	// 0. Validate the operator's opt-out list before anything touches the vault. Its free and governed
+	// checks need the client kind; detectClientKind is a pure shape test, run here only when a list
+	// was given (it runs again, unchanged, at step 5). The option is read ONCE: a getter that answered
+	// differently on a second read could otherwise pass the list to validation but skip the kind check.
+	const rawAllowUngoverned = opts?.allowUngoverned;
+	const allowUngoverned = validateAllowUngoverned(
+		rawAllowUngoverned,
+		rawAllowUngoverned === undefined ? undefined : detectClientKind(client),
+	);
 
 	// 1. Load config
 	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,

@@ -430,10 +430,31 @@ const PROVIDER_NAME: Record<DefaultDenyProvider, string> = {
 	openai: "an OpenAI",
 };
 
-const GOVERNED_METHODS: Record<DefaultDenyProvider, string> = {
-	anthropic: "messages.create, messages.stream and messages.parse (and the same on beta.messages)",
-	openai: "chat.completions.create and responses.create",
+/**
+ * The methods each provider's proxies govern (buildAnthropicProxy / buildOpenAIProxy in govern.ts
+ * trap these names). ONE source for the refusal hint and for validateAllowUngoverned, which refuses
+ * an opt-out entry that names one: the governed trap would win, so the entry could never be audited
+ * as ungoverned_call.
+ */
+export const GOVERNED_PATHS: Readonly<Record<DefaultDenyProvider, ReadonlySet<string>>> = {
+	anthropic: new Set([
+		"messages.create",
+		"messages.stream",
+		"messages.parse",
+		"beta.messages.create",
+		"beta.messages.stream",
+		"beta.messages.parse",
+	]),
+	openai: new Set(["chat.completions.create", "responses.create"]),
 };
+
+/** "a, b and c" over a provider's governed paths, for the refusal hint. */
+function governedMethodsText(provider: DefaultDenyProvider): string {
+	const paths = [...GOVERNED_PATHS[provider]];
+	return paths.length < 2
+		? paths.join("")
+		: `${paths.slice(0, -1).join(", ")} and ${paths[paths.length - 1]}`;
+}
 
 /** The refusal for an SDK method usertrust does not govern and the free list does not name. */
 export function ungovernedMethodError(
@@ -442,7 +463,7 @@ export function ungovernedMethodError(
 ): PolicyDeniedError {
 	return new PolicyDeniedError(
 		`ungoverned_method: ${path} is not governed on ${PROVIDER_NAME[provider]} client`,
-		`usertrust governs ${GOVERNED_METHODS[provider]} on ${PROVIDER_NAME[provider]} client, and refuses every other SDK method that is not on its free list rather than let it run unmetered. To run this one anyway, list it in trust({ allowUngoverned: ["${path}"] }): each call is then audited as ungoverned_call, with no budget hold and no cost.`,
+		`usertrust governs ${governedMethodsText(provider)} on ${PROVIDER_NAME[provider]} client, and refuses every other SDK method that is not on its free list rather than let it run unmetered. To run this one anyway, list it in trust({ allowUngoverned: ["${path}"] }): each call is then audited as ungoverned_call, with no budget hold and no cost.`,
 	);
 }
 
@@ -516,11 +537,19 @@ export function transportChangedError(
 }
 
 /**
- * Validate `trust({ allowUngoverned })` at creation: an array of non-empty method paths. A path
- * through a raw client (`_client`, or a client-level HTTP member) is refused here rather than
- * silently ignored at call time. Returns the set the boundary reads.
+ * Validate `trust({ allowUngoverned })` at creation: an array of non-empty method paths. Refused
+ * here, by name, rather than silently ignored at call time:
+ *   - a path through a raw client (`_client`, or a client-level HTTP member);
+ *   - on an Anthropic or OpenAI client (`provider`), a method on the FREE list or a GOVERNED one:
+ *     the free branch or the governed trap runs first, so the entry would never be audited as
+ *     `ungoverned_call`, which is what listing it promises.
+ * `provider` is the detected client kind; on a Google client (or undefined) only the shape and
+ * raw-client checks apply. Returns the set the boundary reads.
  */
-export function validateAllowUngoverned(value: unknown): ReadonlySet<string> {
+export function validateAllowUngoverned(
+	value: unknown,
+	provider?: DefaultDenyProvider | "google",
+): ReadonlySet<string> {
 	if (value === undefined) return new Set();
 	if (!Array.isArray(value)) {
 		throw new TypeError(
@@ -542,6 +571,18 @@ export function validateAllowUngoverned(value: unknown): ReadonlySet<string> {
 			throw new TypeError(
 				`usertrust: allowUngoverned cannot list "${entry}": it reaches the SDK's raw client, which is always refused.`,
 			);
+		}
+		if (provider === "anthropic" || provider === "openai") {
+			if (FREE_METHODS[provider].has(entry)) {
+				throw new TypeError(
+					`usertrust: allowUngoverned cannot list "${entry}": it is free on ${PROVIDER_NAME[provider]} client and already runs without governance.`,
+				);
+			}
+			if (GOVERNED_PATHS[provider].has(entry)) {
+				throw new TypeError(
+					`usertrust: allowUngoverned cannot list "${entry}": it is governed on ${PROVIDER_NAME[provider]} client.`,
+				);
+			}
 		}
 		paths.add(entry);
 	}
