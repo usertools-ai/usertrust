@@ -19,6 +19,35 @@ npm, and its version is its own: the `usertrust` packages and their
   resumed or compacted on a fresh install posts none of its history; a time already made never
   moves; a plugin installed into a session under way posts nothing written before its first
   hook there.
+- **A rejected key is no longer silent.** In watch mode, a server answering 401 (a mistyped or
+  rotated key) was written down as one more `unexpected governance response 401` gap, its note
+  went to Claude Code's debug log only, and the breaker, which counts timeouts, never saw it:
+  metering could stop for days with nothing shown. A 401, or a 403 whose `error` is
+  `unauthorized`, is now a configuration failure:
+  - PreToolUse shows a `systemMessage` (`usertrust: the server rejected this session's key
+    (401): tool calls are NOT being metered. …`) on the session's first such call, then at most
+    once every 10 minutes. Watch mode still never blocks: exit 0, no decision.
+  - Its `gap` record says `"cause":"key-rejected"` with the `status` and its own reason; the
+    session's first carries a `detail` (server, key hash, the server's answer). Every call still
+    writes one record, so the format and `usertrust-job coverage` are unchanged.
+  - SessionStart warns, before the mode line, of the rejected calls recorded since the last
+    session start, read locally from the last 1 MiB of `watch.jsonl` (`WARNING: 1,946 tool
+    calls since 2026-10-09 were NOT metered …`). A file it cannot read is the normal banner.
+    It counts the `unexpected governance response 401` gaps earlier releases wrote too, so the
+    first start after upgrading warns of the losses an install already had.
+  - Unchanged: enforce mode blocks a rejected key (exit 2) unless `UT_FAIL_OPEN=1`; a 402, a
+    403 `policy_denied` (and any 403 not `unauthorized`) are `would_block`; timeouts go through
+    the breaker as before. A 403 `unauthorized` in enforce mode is now blocked as a failed
+    authorization (exit 2) rather than denied as a policy refusal, so with `UT_FAIL_OPEN=1` it
+    proceeds unmetered, with the message, as a 401 does.
+- **A FIFO, a directory or a huge file where the plugin expects one of its files can no longer
+  hang a hook.** Every file the hooks and `usertrust-job` read (their state, the job logs, the
+  audit logs, `watch.jsonl`, the transcript) is opened non-blocking and read only when it is a
+  regular file. The plugin's own state files are read up to a bound far above their real size;
+  the logs, which only grow, are never read whole but streamed a line at a time, so a log of
+  any size is read in the memory of one line. Anything else reads as an unreadable file, which
+  each caller already handled. `usertrust-job coverage` gives no verdict when a job log cannot
+  be read, instead of reading it as empty.
 
 ### Changed
 

@@ -116,9 +116,7 @@ import {
 	link,
 	lstat,
 	mkdir,
-	open,
 	readdir,
-	readFile,
 	rename,
 	rm,
 	stat,
@@ -147,8 +145,11 @@ import {
 	jobHoldFields,
 	LINKLESS,
 	listPending,
+	openRegular,
 	principalCapable,
 	publishExclusive,
+	READ_BOUND,
+	readRegular,
 	recordSettleGap,
 	recordUnconfirmedCall,
 	recordWatchEvent,
@@ -666,7 +667,7 @@ async function agentTypeFor(transcriptPath, agentId, hinted) {
 	if (agentId === "main") return { name: "main", raw: "main" };
 	try {
 		const meta = JSON.parse(
-			await readFile(transcriptPath.replace(/\.jsonl$/, ".meta.json"), "utf-8"),
+			await readRegular(transcriptPath.replace(/\.jsonl$/, ".meta.json"), READ_BOUND.record),
 		);
 		if (typeof meta?.agentType === "string" && meta.agentType !== "") {
 			return { name: safeName(meta.agentType, "subagent"), raw: meta.agentType.slice(0, 128) };
@@ -837,7 +838,7 @@ function unresolvedIds(cursor) {
 async function readCursor(path) {
 	let text;
 	try {
-		text = await readFile(path, "utf-8");
+		text = await readRegular(path, READ_BOUND.record);
 	} catch (err) {
 		if (err?.code === "ENOENT") return { ok: true, cursor: emptyCursor() };
 		return { ok: false, reason: `transcript cursor unreadable (${err?.code ?? "error"})` };
@@ -913,7 +914,7 @@ async function acquireLock(path, { waitMs = 0 } = {}) {
 		if (await tryLock(lock, token)) {
 			return async () => {
 				try {
-					if ((await readFile(join(lock, "owner"), "utf-8")) === token) {
+					if ((await readRegular(join(lock, "owner"), READ_BOUND.small)) === token) {
 						await rm(lock, { recursive: true, force: true });
 					}
 				} catch {
@@ -944,7 +945,7 @@ async function tryLock(lock, token) {
 /** The token inside a lock; "" when it has none (its holder died before writing it). */
 async function lockOwner(lock) {
 	try {
-		return await readFile(join(lock, "owner"), "utf-8");
+		return await readRegular(join(lock, "owner"), READ_BOUND.small);
 	} catch (err) {
 		if (err?.code === "ENOENT") return "";
 		throw err;
@@ -1028,7 +1029,7 @@ async function holdJournal(sessionId, agentId) {
 		if (kind === null) continue;
 		const path = join(root, name);
 		try {
-			const body = JSON.parse(await readFile(path, "utf-8"));
+			const body = JSON.parse(await readRegular(path, READ_BOUND.record));
 			if (sanitize(body?.agentId ?? "main") !== want) continue;
 			const ids = isStringArray(body.assignedIds) ? body.assignedIds : [];
 			if (ids.length === 0 && kind === "live") continue;
@@ -1161,7 +1162,7 @@ async function removeFiles(paths) {
 async function ingest(cursor, path, since) {
 	let handle;
 	try {
-		handle = await open(path, "r");
+		({ handle } = await openRegular(path));
 	} catch (err) {
 		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
 	}
@@ -1420,7 +1421,7 @@ async function claimHolder(claimsDir, id, owner) {
 		await unlink(tmp).catch(() => {});
 	}
 	try {
-		const holder = await readFile(path, "utf-8");
+		const holder = await readRegular(path, READ_BOUND.small);
 		return holder === "" ? { holder: null, code: "EMPTY" } : { holder, created: false };
 	} catch (err) {
 		return { holder: null, code: err?.code ?? "error" };
@@ -1519,7 +1520,7 @@ async function cursorLocation(sessionId, agentId) {
 async function firstRun(dir) {
 	const path = join(dir, SINCE_FILE);
 	const read = () =>
-		readFile(path, "utf-8").catch((err) => {
+		readRegular(path, READ_BOUND.small).catch((err) => {
 			if (err?.code === "ENOENT") return null;
 			throw err;
 		});
@@ -1579,7 +1580,7 @@ async function publishOnce(path, content) {
  */
 async function estimateMarker(path) {
 	try {
-		const text = await readFile(path, "utf-8");
+		const text = await readRegular(path, READ_BOUND.small);
 		return text === "" ? "estimate mode" : text;
 	} catch (err) {
 		if (err?.code === "ENOENT") return null;
@@ -2272,7 +2273,7 @@ export async function awaitFinalResponse(transcriptPath, lastMessage, waitMs = F
 async function lastCompleteText(path) {
 	let handle;
 	try {
-		handle = await open(path, "r");
+		({ handle } = await openRegular(path));
 		const { size } = await handle.stat();
 		const length = Math.min(size, FLUSH_TAIL_BYTES);
 		const buffer = Buffer.alloc(length);
