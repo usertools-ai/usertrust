@@ -131,7 +131,7 @@ Default: `"./policies/default.yml"`. Path to the YAML policy rules file, resolve
 
 ### pii
 
-Default: `"warn"`. PII detection mode, applied to the prompt text of each governed request (not to the whole request body or to responses; see [PII Detection](/docs/policy/pii) for exactly what is read).
+Default: `"warn"`. PII detection mode, applied to the prompt text of each governed request (not to the whole request body or to responses; see [PII Detection](/docs/policy/pii) for exactly what is read). A `pii` passed to `trust()` overrides this value.
 
 | Mode | Behavior |
 |------|----------|

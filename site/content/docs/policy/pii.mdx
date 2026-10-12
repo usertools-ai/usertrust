@@ -7,7 +7,7 @@ PII detection is a pattern scan of the request's prompt text. It is not a data-l
 
 ## Configuration
 
-Set the `pii` field in the config file `trust()` loads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath` (which is read instead).
+Set the `pii` field in the config file `trust()` loads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath` (which is read instead), or pass `pii` to `trust()` itself (e.g. `trust(client, { pii: "block" })`), which overrides the file.
 
 ```json
 {
