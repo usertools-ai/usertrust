@@ -914,7 +914,7 @@ describe("trust()", () => {
 			await governed.destroy();
 		});
 
-		it("throws when proxy is set (AUD-456: proxy mode removed)", async () => {
+		it("throws when proxy is set (proxy mode removed)", async () => {
 			await expect(
 				trust(makeAnthropicMock(), {
 					dryRun: true,
@@ -1107,7 +1107,7 @@ describe("trust()", () => {
 
 	// ─── Proxy mode removed ───
 
-	describe("proxy mode removed (AUD-456)", () => {
+	describe("proxy mode removed", () => {
 		it("trust() throws when proxy option is set (void path)", async () => {
 			const mockClient = makeAnthropicMock(undefined, async () => {
 				throw new Error("LLM rate limited");
@@ -1135,7 +1135,7 @@ describe("trust()", () => {
 					proxy: "https://proxy.usertools.ai",
 					_engine: null,
 				}),
-			).rejects.toThrow("AUD-456");
+			).rejects.toThrow("proxy mode is not yet implemented");
 		});
 	});
 
