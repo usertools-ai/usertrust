@@ -49,7 +49,7 @@ Events are stored as JSONL (one JSON object per line) in `.usertrust/audit/event
 
 The audit writer allows one writer per vault, whatever the process:
 
-- **Advisory file lock** -- A second writer on the same vault does not get to write. That is another process, and it is also another `trust()` or `createGovernor()` in the same process: each one is its own writer. Its audit writes fail with an error naming the lock holder, and its events go to the dead-letter queue (below). With `audit.failClosed`, those calls are refused. Use one vault per client, or run `usertrust-server` and have every client call it.
+- **Advisory file lock** -- A second writer on the same vault does not get to write. That is another process, and it is also another `trust()` or `createGovernor()` in the same process: each one is its own writer. Its audit writes fail with an error naming the lock holder, and its events go to the dead-letter queue (below). Under `audit.failClosed`, a `trust()` writer's calls are refused; a `createGovernor()` or `usertrust-server` writer never refuses, and reports `auditDegraded` instead. Use one vault per client, or run `usertrust-server` and have every client call it.
 - **Async mutex** -- Serializes writes within a single writer so concurrent governed calls append in order.
 
 Chain integrity therefore holds for the one writer that owns the vault. It is not shared across processes or across clients.
@@ -62,7 +62,7 @@ If an audit write fails after the LLM call and ledger settlement have already su
 2. The response is returned with an `auditDegraded` flag on the governance receipt
 3. The entry is preserved in the dead-letter file for recovery; there is no command yet that replays it into the chain, and in 4.1.0 `usertrust verify` does not report entries that are waiting there
 
-With `audit.failClosed: true` the call is refused with `AuditDegradedError` instead, and whether it was charged depends on which audit write failed. If the call's main audit record fails, the call is aborted before any money moves: the hold is voided and nothing is charged. If a later audit write fails, after the spend has settled (and for streams), the call is refused **and charged**: the settlement has already posted and is not undone, so retrying the call can charge it twice.
+With `trust()` and `audit.failClosed: true` the call is refused with `AuditDegradedError` instead, and whether it was charged depends on which audit write failed. If the call's main audit record fails, the call is aborted before any money moves: the hold is voided and nothing is charged. If a later audit write fails, after the spend has settled (and for streams), the call is refused **and charged**: the settlement has already posted and is not undone, so retrying the call can charge it twice. `createGovernor()` and `usertrust-server` do not enforce `audit.failClosed`: their receipts report `auditDegraded` and the call is not refused.
 
 <Callout type="warn">
 The dead-letter queue is a safety net, not normal operation. If events accumulate in the DLQ, investigate the underlying write failure (disk full, permissions, corrupt chain).

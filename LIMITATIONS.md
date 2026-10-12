@@ -83,7 +83,7 @@ usertrust enforces single-writer semantics with an advisory file lock plus an
 in-process mutex. A second writer on the same vault (another
 process, or another `trust()` / `createGovernor()` in the same process) cannot
 write: its audit appends fail into the dead-letter queue, and under
-`audit.failClosed` its calls are refused. It does not fork the chain. Stale locks from crashed processes are reclaimed; live ones are
+`audit.failClosed` a `trust()` writer's calls are refused (`createGovernor()` and `usertrust-server` do not enforce `failClosed`; they report `auditDegraded` and do not refuse). It does not fork the chain. Stale locks from crashed processes are reclaimed; live ones are
 never stolen.
 
 The lock's liveness check works on one kernel, and it fails toward "held":
@@ -119,7 +119,7 @@ pretends to solve today.
 **A torn tail halts appends until an operator repairs it.** An append that never
 completed (a crash, a full disk) can leave bytes after the log's last newline. The
 writer then refuses every append (`AuditTornTailError`) rather than bury those bytes
-mid-file — so with `audit.failClosed`, governed calls stop too. The repair is
+mid-file — so with `audit.failClosed` (`trust()` only), governed calls stop too. The repair is
 `usertrust audit quarantine-tail`, and it repairs exactly ONE state: unparseable bytes
 after the last newline, on a single `events.jsonl` that otherwise verifies from
 genesis, with an agreeing `.meta` anchor. Every other unverifiable state, including an

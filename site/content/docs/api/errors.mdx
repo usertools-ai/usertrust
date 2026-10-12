@@ -204,7 +204,7 @@ class AuditDegradedError extends Error {
 **Hint:** `"Check disk space and permissions on the .usertrust/audit/ directory."`
 
 <Callout type="info">
-By default usertrust does not fail a call because the audit write degraded: if the LLM call succeeded and the ledger settled, the response is returned with `auditDegraded: true`. With `audit.failClosed: true` the call is refused with `AuditDegradedError` instead, after the request has reached the provider. If the call's main audit record failed, the hold is voided before any money moves and nothing is charged. If a later audit write failed after the settle (and for streams), the call is refused **and charged**, so do not retry it blindly.
+By default usertrust does not fail a call because the audit write degraded: if the LLM call succeeded and the ledger settled, the response is returned with `auditDegraded: true`. With `trust()` and `audit.failClosed: true` the call is refused with `AuditDegradedError` instead, after the request has reached the provider. If the call's main audit record failed, the hold is voided before any money moves and nothing is charged. If a later audit write failed after the settle (and for streams), the call is refused **and charged**, so do not retry it blindly. `createGovernor()` and `usertrust-server` do not enforce `audit.failClosed`: they report `auditDegraded` and do not refuse.
 </Callout>
 
 ---
