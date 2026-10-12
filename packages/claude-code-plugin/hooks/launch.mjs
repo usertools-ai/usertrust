@@ -41,14 +41,23 @@ import { useBreakerHome } from "./breaker.mjs";
 import {
 	childEnv,
 	childUnsupported,
+	claudeDirsEnv,
 	howToSet,
 	isChildEnv,
+	managedSettingsFile,
 	passwdHome,
 	refusedSettings,
 	settings as resolvedSettings,
 	useSession,
 } from "./config.mjs";
-import { launch, readStdin, recordWatchEvent, say } from "./lib.mjs";
+import { announce, launch, readStdin, recordWatchEvent, say } from "./lib.mjs";
+import {
+	peerMeter,
+	setPeerWarning,
+	settingsDirs,
+	unknownWarning,
+	yieldMessage,
+} from "./peer-meter.mjs";
 import { pinnedSettings, readPin, sessionSettings, sweep, touchPin } from "./session.mjs";
 
 const STARTED = Date.now();
@@ -198,12 +207,39 @@ function runInChild(hook, text, input, session, home) {
 /** What the parent knows so far, for `launcherFailed`: the hook's input and its session's settings. */
 const known = { input: null, settings: null };
 
+/**
+ * Whether this hook runs nothing because `usertrust-claude-code` is enabled and meters the
+ * session. SessionStart says so; every other hook is silent. A check that cannot be made, or
+ * a settings file it cannot read, never yields: this plugin meters, and SessionStart warns
+ * (a second meter is visible in the ledger; a silent zero meter is not).
+ */
+async function yieldsToPeer(hook, input, home) {
+	let peer;
+	try {
+		peer = await peerMeter({
+			...settingsDirs({ env: claudeDirsEnv(), payload: input, home }),
+			managed: managedSettingsFile(),
+		});
+	} catch (err) {
+		peer = { state: "unknown", why: err?.code ?? "check failed" };
+	}
+	if (peer.state === "enabled") {
+		if (hook === "session-start") announce(yieldMessage(peer.file));
+		return true;
+	}
+	if (peer.state === "unknown") setPeerWarning(unknownWarning(peer.why));
+	return false;
+}
+
 /** The parent: resolve the session, then run the hook here or as a child. */
 async function parent(hook) {
 	const text = await readStdin();
 	const input = parsePayload(text);
 	known.input = input;
 	const home = passwdHome();
+	// One meter per session (peer-meter.mjs): before any state is read or written, so a
+	// session the old plugin meters is touched by this one in no way at all.
+	if ((await yieldsToPeer(hook, input, home)) === true) return;
 	const uid = currentUid();
 	const session = sessionSettings({ payload: input, passwdHome: home, uid });
 	useSession(session.settings);

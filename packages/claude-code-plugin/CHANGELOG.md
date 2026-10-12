@@ -5,6 +5,36 @@ plugin marketplace (`/plugin marketplace add usertools-ai/usertrust`), not from
 npm, and its version is its own: the `usertrust` packages and their
 [changelog](../../CHANGELOG.md) are versioned separately.
 
+## [Unreleased]
+
+### Fixed
+
+- **One meter per session when both plugin names are enabled.** `usertrust-claude-code` cannot
+  be updated, and with it and `usertools` both enabled every tool call was metered twice (they
+  share one state dir). `usertools` now yields: at every hook it reads Claude Code's
+  `enabledPlugins` setting (managed settings, `.claude/settings.local.json`,
+  `.claude/settings.json`, then the user's `settings.json`, the highest-precedence statement
+  winning), and when `usertrust-claude-code` is enabled under any marketplace it meters nothing,
+  reads and writes no state, and sends no request. SessionStart says so: `usertrust:
+  usertrust-claude-code is also enabled; this session is metered by it, not by usertools.
+  Uninstall it: /plugin uninstall usertrust-claude-code@usertrust. If it is not actually
+  installed, remove it from enabledPlugins in <the settings file that enabled it>`. A `true` left
+  for a plugin that is not present (a manual edit, or managed settings written before the
+  rename) leaves nothing metering: the message names that file so it can be removed. Installed but disabled, or
+  not present: `usertools` meters as before.
+  - **Anything unreadable or ambiguous meters, and warns.** A settings file that is not JSON, is
+    not a regular file (a FIFO), is over the read bound, or holds a value that is not `true` or
+    `false`, or a hook told no project directory: `usertools` meters and SessionStart opens with
+    `usertrust: could not tell whether usertrust-claude-code is also enabled (...)`. A second
+    meter shows in the ledger; a silent zero meter would not.
+  - **Not read** (an old plugin enabled only there is not seen, and both meter): MDM and
+    server-managed settings, `--settings`, `managed-settings.d/`, and the Windows managed path.
+  - **Declared residue:** a `true` for a plugin that is not actually installed makes `usertools`
+    yield with nothing metering (the message above names the file to fix); the per-hook decision
+    is not pinned, so a toggle takes effect at the next hook.
+  - Unchanged: `~/.config/usertrust/`, every `UT_CC_*` variable, the `usertrust-cc` state dir and
+    the `usertrust:` session messages.
+
 ## [3.0.0] - 2026-10-12
 
 ### Changed
