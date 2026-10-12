@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // lib.mjs reads env at call time; set the state dir before importing.
@@ -225,10 +226,18 @@ describe("serverRequest", () => {
 });
 
 describe("writes that cannot be confirmed never read as done", () => {
+	// lib.mjs by URL, typed by what these rows call: the hooks are plain .mjs.
+	const LIB = pathToFileURL(join(import.meta.dirname, "..", "hooks", "lib.mjs")).href;
+	const lib = async () =>
+		(await import(LIB)) as {
+			quarantineHold(path: string): Promise<"ungated" | "removed" | "failed">;
+			recordWatchEvent(event: Record<string, unknown>): Promise<boolean>;
+		};
+
 	it.skipIf(process.getuid?.() === 0)(
 		"quarantineHold rewrites a hold IN PLACE: it works in a directory where no temp file or rename can be made",
 		async () => {
-			const { quarantineHold } = await import("../hooks/lib.mjs");
+			const { quarantineHold } = await lib();
 			const dir = join(stateDir, "holds");
 			await mkdir(dir);
 			const hold = join(dir, "s__main__tu_1.tx_1.json");
@@ -254,7 +263,7 @@ describe("writes that cannot be confirmed never read as done", () => {
 
 	it("quarantineHold never writes through a FIFO in a hold's place: it is removed, at once", async () => {
 		if (process.platform === "win32") return;
-		const { quarantineHold } = await import("../hooks/lib.mjs");
+		const { quarantineHold } = await lib();
 		const fifo = join(stateDir, "s__main__tu_2.tx_2.json");
 		expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
 		const started = Date.now();
@@ -287,7 +296,7 @@ describe("writes that cannot be confirmed never read as done", () => {
 		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 		let said = "";
 		try {
-			const { recordWatchEvent } = await import("../hooks/lib.mjs");
+			const { recordWatchEvent } = await lib();
 			// mutant: close().catch(() => {}) -> true, no warning
 			expect(await recordWatchEvent({ kind: "gap", session: "s", started: null })).toBe(false);
 			said = stderr.mock.calls.map((c) => String(c[0])).join("");
