@@ -49,16 +49,16 @@ tasks/
 # not a trade worth making.
 #
 # But an untracked-only directory has a failure mode: a GIT-based deploy (or a
-# fresh clone) serves a page whose <video> and poster URLs all 404. So the SMALL
-# assets below are COMMITTED — a poster frame and a first-frame still for the
-# hero, plus the 148KB replay clip and its poster — and a Git deploy degrades to
-# a poster-only hero instead of a broken one.
+# fresh clone) serves a page whose <video> and poster URLs all 404. The hero's
+# posters (its first frame and settled frame) are brand images, so they are NOT
+# committed here: the pages load them by absolute URL from the brand kit
+# (site/app/lib/kit-images.ts), which works on every deploy, and a Git deploy
+# degrades to a poster-only hero instead of a broken one. The SMALL replay
+# assets below are COMMITTED: the clip (about 290KB) and its poster.
 #
 # The directory globs must be `dir/*`, never `dir/`: git does not descend into an
 # excluded DIRECTORY, so a negation inside one can never be reached.
 site/public/intro/*
-!site/public/intro/intro-poster.jpg
-!site/public/intro/intro-first.jpg
 site/public/demo/*
 !site/public/demo/runaway-agent.mp4
 !site/public/demo/runaway-agent-poster.jpg

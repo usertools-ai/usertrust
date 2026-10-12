@@ -4,6 +4,7 @@ import localFont from "next/font/local";
 import Cursor from "./components/cursor";
 import { NoiseOverlay } from "./components/noise-overlay";
 import "./globals.css";
+import { KIT_IMAGES } from "./lib/kit-images";
 
 const usertoolsSans = localFont({
 	src: [
@@ -88,7 +89,7 @@ export const metadata: Metadata = {
 		description,
 		images: [{ url: "/og", width: 1200, height: 630 }],
 	},
-	icons: { icon: "/favicon.svg" },
+	icons: { icon: KIT_IMAGES.favicon },
 };
 
 /*

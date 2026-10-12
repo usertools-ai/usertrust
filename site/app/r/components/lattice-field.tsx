@@ -3,9 +3,9 @@
 import { useEffect } from "react";
 
 /**
- * Where the brand field's script lives: the brand site's kit. No brand asset
- * is kept in this public repo, so the lattice is loaded at runtime, never
- * vendored. It is a classic script that finds every `[data-network]` canvas
+ * Where the brand field's script lives: the brand site's kit. The lattice,
+ * like the brand images, is never kept in this public repo, so it is loaded
+ * at runtime, never vendored. It is a classic script that finds every `[data-network]` canvas
  * and starts on load; reduced motion, a missing WebGL context and a hidden tab
  * are handled inside it.
  */

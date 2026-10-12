@@ -4,7 +4,7 @@ import { fetchPinnedBytes } from "./kit-pinned";
 
 /**
  * The share card's brand fonts, fetched from the brand kit at render time and
- * PINNED. No brand asset lives in this repository, so the card loads the
+ * PINNED. The card never takes a font file from this repository: it loads the
  * kit's own files; the kit serves them as woff2, which the image renderer
  * cannot read, so each is decompressed to TTF after its bytes check out.
  *

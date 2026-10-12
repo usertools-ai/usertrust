@@ -1,6 +1,9 @@
 /**
- * No brand asset lives in this public repository. The receipt page loads its
- * fonts and its lattice at runtime from the brand site's kit
+ * The receipt page keeps no font file and no lattice copy in this public
+ * repository (brand images are guarded site-wide by
+ * scripts/no-brand-assets.test.mts; the marks drawn in code are still here,
+ * pending review). It loads its fonts and its lattice at runtime from the
+ * brand site's kit
  * (https://usertrust.ai/kit/), so the route must neither carry a font file or a
  * lattice copy nor point at one anywhere else.
  */
