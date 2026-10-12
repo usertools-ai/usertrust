@@ -62,6 +62,7 @@ export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerSt
 				valid: integrity.valid && vault.valid,
 				breakIndex: integrity.breakIndex,
 				errors: vault.errors,
+				...(vault.busy === true ? { busy: true } : {}),
 			},
 			anchorFile: anchorFile(vaultPath),
 			rowCount: rows.length,

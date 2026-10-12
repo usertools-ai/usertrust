@@ -199,6 +199,8 @@ class AuditDegradedError extends Error {
 
 **When it fires:** After the LLM call succeeds and the ledger POST settles. This is failure mode 15.3. The response is still returned to the caller with `auditDegraded: true` on the receipt. The failed event is written to the dead-letter queue. Under `audit.failClosed`, a `trust()` client whose audit writer was already degraded by an earlier failed write throws it at the start of every later call instead: the call is refused before it reaches the provider, and nothing is charged. Recreate the client after fixing the audit directory.
 
+**Under `audit.failClosed`, it also fires BEFORE the call:** the audit pre-flight classifies the log's tail as the call's own append would, and a vault whose append would be refused (events missing after the anchored head, a torn line, another writer holding it) refuses the call before any hold and before the provider is called. Its `cause` is the refusal: an `AuditTailMismatchError` (`state`, `found`, `anchored`), an `AuditTornTailError` (`kind`, `state`) or an `AuditWriterLockHeldError`. Its hint says to run `usertrust verify`: nothing was written, and nothing was charged.
+
 **Hint:** `"Check disk space and permissions on the .usertrust/audit/ directory."`
 
 <Callout type="info">

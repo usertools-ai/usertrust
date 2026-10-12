@@ -9,6 +9,8 @@ interface VerifyResponse {
 	valid: boolean;
 	receipt: string;
 	errors: string[];
+	/** The vault kept changing while it was read: no verdict (the endpoint answers 503). */
+	busy?: boolean;
 }
 
 /**
@@ -303,12 +305,20 @@ export function RowPanel(props: { row: LedgerRow; onClose(): void }): React.JSX.
 					)}
 					{result && (
 						<span
-							className={`rp-verdict ${result.valid ? "text-[var(--verify)]" : "text-[var(--danger)]"}`}
+							className={`rp-verdict ${
+								result.busy === true
+									? "text-[var(--amber)]"
+									: result.valid
+										? "text-[var(--verify)]"
+										: "text-[var(--danger)]"
+							}`}
 							style={{ animationDelay: `${lines.length * 26 + 150}ms` }}
 						>
-							{result.valid
-								? "VERIFIED"
-								: `FAILED${result.errors.length ? `: ${result.errors[0]}` : ""}`}
+							{result.busy === true
+								? "NO VERDICT: the vault is being written (verify again)"
+								: result.valid
+									? "VERIFIED"
+									: `FAILED${result.errors.length ? `: ${result.errors[0]}` : ""}`}
 						</span>
 					)}
 				</div>

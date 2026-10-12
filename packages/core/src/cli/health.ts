@@ -8,7 +8,7 @@
  * Displays per-signal breakdown with status indicators.
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
 import { describeMissingEvents, readChainDeadLetters } from "../audit/dead-letters.js";
@@ -17,6 +17,7 @@ import {
 	type EntropyEventInput,
 	type EntropyLevel,
 } from "../audit/entropy.js";
+import type { PersistedAuditEvent } from "../audit/read.js";
 import { verifyVaultReading } from "../audit/verify.js";
 import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
@@ -27,9 +28,10 @@ import { DEFAULT_POLICIES_PATH, resolvePolicyPath } from "./policy-path.js";
 import { warnIfVaultLoose } from "./target.js";
 
 /**
- * Load the vault's events — EVERY segment, and validated rather than asserted.
- *
- * Two defects, one root each, both the same shape as this branch's P1.
+ * The vault's events as the health signals read them: EVERY segment, and validated rather than
+ * asserted. They are the events the chain's verdict was reached on (`verifyVaultReading`, one
+ * snapshot), never the files read again: a second read blocked forever on a FIFO in a segment's
+ * place, followed a link, and could describe another chain than the one the integrity line verified.
  *
  * THE LIVE SEGMENT IS NOT THE VAULT. Moving the chain check to `verifyVault`
  * fixed the integrity signal and left this loader reading `events.jsonl` alone,
@@ -46,62 +48,17 @@ import { warnIfVaultLoose } from "./target.js";
  * `usertrust health` outright at `entropy.ts:236`. The type stated the rule and
  * the file was under no obligation to obey it.
  */
-function loadEvents(vaultPath: string): AuditEvent[] {
-	const auditDir = join(vaultPath, "audit");
-	if (!existsSync(auditDir)) return [];
-
-	const segments: string[] = [];
-	const mainLog = join(auditDir, "events.jsonl");
-	if (existsSync(mainLog)) segments.push(mainLog);
-	try {
-		for (const entry of readdirSync(auditDir).sort()) {
-			if (entry.endsWith(".jsonl") && entry !== "events.jsonl") {
-				segments.push(join(auditDir, entry));
-			}
-		}
-	} catch {
-		// Directory read failure — fall back to whatever was already found.
-	}
-
-	const events: (AuditEvent & { sequence?: number })[] = [];
-	for (const segment of segments) {
-		let content: string;
-		try {
-			content = readFileSync(segment, "utf-8").trim();
-		} catch {
-			continue;
-		}
-		if (!content) continue;
-		for (const line of content.split("\n")) {
-			if (!line.trim()) continue;
-			let parsed: unknown;
-			try {
-				parsed = JSON.parse(line);
-			} catch {
-				continue;
-			}
-			if (typeof parsed !== "object" || parsed === null) continue;
-			const record = parsed as Record<string, unknown>;
-			if (typeof record.kind !== "string") continue;
-			// `data` is defaulted, never invented: an absent one reads as no
-			// signals, which is what an event carrying none actually means.
-			const data =
-				typeof record.data === "object" && record.data !== null
-					? (record.data as Record<string, unknown>)
-					: {};
-			events.push({
-				...(record as unknown as AuditEvent),
-				data,
-				...(typeof record.sequence === "number" ? { sequence: record.sequence } : {}),
-			});
-		}
-	}
-
-	// Order by the persisted global sequence when every event carries one, so a
-	// rotated vault presents one chronological stream. Mixed presence keeps file
-	// order rather than inventing an ordering across two different conventions.
-	if (events.length > 0 && events.every((e) => typeof e.sequence === "number")) {
-		events.sort((a, b) => (a.sequence as number) - (b.sequence as number));
+function signalEventsOf(verified: readonly PersistedAuditEvent[]): AuditEvent[] {
+	const events: AuditEvent[] = [];
+	for (const record of verified as unknown as readonly Record<string, unknown>[]) {
+		if (typeof record.kind !== "string") continue;
+		// `data` is defaulted, never invented: an absent one reads as no
+		// signals, which is what an event carrying none actually means.
+		const data =
+			typeof record.data === "object" && record.data !== null
+				? (record.data as Record<string, unknown>)
+				: {};
+		events.push({ ...(record as unknown as AuditEvent), data });
 	}
 	return events;
 }
@@ -331,7 +288,31 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		return;
 	}
 
-	const events = loadEvents(vaultPath);
+	// Verify the WHOLE VAULT, not the live segment, from ONE snapshot: every signal below reads it.
+	//
+	// `verifyChain(logPath)` walked `events.jsonl` alone. On a ROTATED vault that
+	// file's first event links to the previous segment rather than to genesis, and
+	// `.meta.sequence` is global — so a perfectly valid continuous vault failed it.
+	// Feeding that into the new critical floor would report CRITICAL on a healthy
+	// chain the moment a vault had ever rotated: the fix for "a tampered chain
+	// reads healthy" shipping "a healthy chain reads tampered", which is worse,
+	// because a monitor that cries wolf gets muted and then the real signal is
+	// gone too.
+	const { result: verification, events: verifiedEvents } = verifyVaultReading(vaultPath);
+	// A vault that kept changing while it was read has no snapshot, so no signal has anything to read:
+	// no score at all, never one computed over no events (which would read healthy) or a chain called
+	// critical because nobody read it.
+	if (verification.busy === true) {
+		const message =
+			"the vault is being written: its audit files kept changing while they were read, so there is no health verdict (run health again)";
+		if (json) {
+			console.log(toSafeJson({ command: "health", success: false, data: { busy: true, message } }));
+		} else {
+			console.log(pc.yellow(`Health: ${message}.`));
+		}
+		return;
+	}
+	const events = signalEventsOf(verifiedEvents);
 	const config = loadConfig(vaultPath);
 	const policyStatus = loadPolicyStatus(vaultPath);
 
@@ -341,31 +322,13 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		data: e.data,
 	}));
 
-	// Verify the WHOLE VAULT, not the live segment.
-	//
-	// `verifyChain(logPath)` walks `events.jsonl` alone. On a ROTATED vault that
-	// file's first event links to the previous segment rather than to genesis, and
-	// `.meta.sequence` is global — so a perfectly valid continuous vault fails it.
-	// Feeding that into the new critical floor would report CRITICAL on a healthy
-	// chain the moment a vault had ever rotated: the fix for "a tampered chain
-	// reads healthy" shipping "a healthy chain reads tampered", which is worse,
-	// because a monitor that cries wolf gets muted and then the real signal is
-	// gone too.
-	//
-	// `verifyVault` walks every segment as one chain. The two take DIFFERENT
-	// arguments — a log path versus the `.usertrust` directory — which is the
-	// distinction AGENTS.md flags as easy to get wrong, and I got it wrong by
-	// reaching for the one already in hand.
-	const { result: verification, events: verifiedEvents } = verifyVaultReading(vaultPath);
-
 	// COMPLETENESS is the other half of chain integrity, and the hash walk cannot see it: a chain
 	// with an event missing verifies link by link. Every event that failed to reach the chain is
 	// dead-lettered; one that is not on the chain is an integrity failure here, exactly as a broken
 	// link is (a vault with half its events dead-lettered read "verified [ok]"). A dead-letter
 	// queue that cannot be read is one too: whether events are missing is unknown, not "none".
-	// The dead letters are matched against the events the verification walked, never `events`
-	// above: that is an earlier read, and a log changed between the two had the integrity line
-	// describe one chain and the completeness line another.
+	// The dead letters are matched against the events the verification walked: one read, so the
+	// integrity line and the completeness line describe one chain.
 	const eventsByHash = new Map(verifiedEvents.map((e) => [e.hash, e]));
 	const deadLetters = readChainDeadLetters(vaultPath, (hash) => eventsByHash.get(hash));
 	const completenessErrors =
@@ -463,9 +426,43 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			: missingEvents > 0
 				? `, ${missingEvents} event${missingEvents === 1 ? "" : "s"} MISSING (dead-lettered)`
 				: "";
+	// The tail's state, named where it decides the line (`tail-state.ts`): a refused tail (events
+	// missing after the anchored head, a replaced head, a missing anchor, an interrupted recovery) says
+	// which, and what it means; an event one past its anchor (an interrupted write) verifies, with that
+	// said. Bytes after the last newline (a torn tail: the commonest crash leftover) are named FIRST:
+	// they refuse every append whatever the lines before them are, so nothing after them is ever
+	// described as what the next append fixes. Under a writer that holds the vault, they may be a
+	// write still in progress, and that is said too.
+	const tail = verification.tailState ?? null;
+	const torn = tail?.torn ?? null;
+	// quarantine-tail repairs a fragment after a chain it can vouch for: the torn bytes are the only
+	// error, over a state the writer would go on from.
+	const quarantinable =
+		torn?.kind === "fragment" &&
+		verification.errors.length === 1 &&
+		(tail?.state === "FRESH" || tail?.state === "MATCH" || tail?.state === "ONE_PAST_ANCHOR");
+	const tornLabel =
+		torn === null
+			? ""
+			: `: TORN_TAIL (${torn.length} byte(s) after the last newline, a ${torn.kind.replaceAll("_", " ")}${
+					verification.writerLive === true
+						? "; a writer holds the vault: torn, or a write in progress"
+						: quarantinable
+							? "; `usertrust audit quarantine-tail` moves it aside"
+							: ""
+				})`;
+	const linesLabel =
+		tail === null || tail.state === "MATCH" || tail.state === "FRESH"
+			? ""
+			: tail.state === "ONE_PAST_ANCHOR"
+				? torn === null
+					? ", one event past its anchor (an interrupted write: the next append rolls it forward)"
+					: ", one event past its anchor before them"
+				: `${torn === null ? ":" : "; before them,"} ${tail.state} (${scrubForTerminal(tail.note)})`;
+	const tailLabel = `${tornLabel}${linesLabel}`;
 	const chainLabel = !verification.valid
-		? `FAILED${completenessLabel}`
-		: `verified${completenessLabel}${ambiguousSuffix}`;
+		? `FAILED${tailLabel}${completenessLabel}`
+		: `verified${tailLabel}${completenessLabel}${ambiguousSuffix}`;
 	const chainStatus = chainSignal?.critical === true ? "[critical]" : "[ok]";
 
 	// Signal values
@@ -520,6 +517,12 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 						// draws is drawn on every member of its class. It was drawn on two
 						// of three.
 						chainIntegrity: chainSignal?.critical !== true,
+						// The tail's state (`tail-state.ts`): the state of its complete lines, and the bytes after
+						// the last newline when there are any (a torn tail refuses every append, whatever the
+						// state of the lines before it), and whether a writer held the vault meanwhile.
+						chainState: verification.tailState?.state ?? null,
+						...(torn !== null ? { chainTorn: torn } : {}),
+						...(verification.writerLive === true ? { chainWriterLive: true } : {}),
 						...(ambiguousTransfers > 0 ? { ambiguousSettlements: ambiguousTransfers } : {}),
 						// null: the dead-letter queue could not be read, so the count is unknown.
 						missingEvents,

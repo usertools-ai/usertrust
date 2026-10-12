@@ -4,8 +4,8 @@
 // usertrust-verify — Standalone Audit Verification (zero dependencies)
 
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { lstatSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import {
 	type AnchorRecord,
 	type AnchorSource,
@@ -13,10 +13,9 @@ import {
 	type AnchorTrust,
 	dedupeAnchorSet,
 	evaluateAnchoredVault,
-	gatherOrderedEventHashes,
+	parseAnchorMirror,
 	parseAnchorsContent,
 	publicKeyFromSpkiBase64,
-	readAnchorMirror,
 	verifyInclusionAgainstAnchor,
 	type WitnessInput,
 	type WitnessStatus,
@@ -33,13 +32,18 @@ import {
 	UNRECOVERABLE_KINDS,
 } from "./receipt.js";
 import { parseRekorReceipt, type RekorVerification, verifyRekorReceipt } from "./rekor-verify.js";
+import { LOG_NAME, readVaultSnapshot, type StableReadOptions } from "./stable-read.js";
+import { MAX_SEGMENT_BYTES, splitLines } from "./tail-read.js";
 import {
-	buildMerkleTree,
-	generateInclusionProof,
-	readAnchor,
-	verifyChain,
-	verifyInclusionProof,
-} from "./verify.js";
+	classifyAuditTail,
+	type FileObservation,
+	type LogObservation,
+	parseLine,
+	type TailState,
+	trailingKind,
+	verdictErrors,
+} from "./tail-state.js";
+import { buildMerkleTree, generateInclusionProof } from "./verify.js";
 
 export {
 	type AnchorChainResult,
@@ -92,7 +96,6 @@ export {
 } from "./rekor-verify.js";
 export {
 	buildMerkleTree,
-	type ChainVerificationResult,
 	generateConsistencyProof,
 	generateInclusionProof,
 	hashInternal,
@@ -100,7 +103,6 @@ export {
 	type MerkleConsistencyProof,
 	type MerkleInclusionProof,
 	type MerkleSibling,
-	verifyChain,
 	verifyConsistencyProof,
 	verifyInclusionProof,
 } from "./verify.js";
@@ -115,6 +117,16 @@ export interface VaultVerificationResult {
 	merkleRoot: string | null;
 	firstEvent: string | null;
 	lastEvent: string | null;
+	/**
+	 * The chain's tail against its anchor (`tail-state.ts`): `MATCH`, `FRESH`, `ONE_PAST_ANCHOR` (an
+	 * interrupted write: valid, with its note), or the state that refuses it. `null` when no consistent
+	 * snapshot could be read (`busy`).
+	 */
+	tailState?: TailState | null;
+	/** The vault's files kept changing while they were read: no verdict, never "broken". */
+	busy?: true;
+	/** A torn tail under a writer that holds the vault: torn, or a write still in progress. */
+	writerLive?: true;
 }
 
 /** A vault's verdict, and the events it was reached on: what every later check must read. */
@@ -124,11 +136,56 @@ export interface VaultReading {
 	events: readonly Record<string, unknown>[];
 	/** Every walked line's stored hash, in chain order (`""` where it is not a string). */
 	orderedHashes: readonly string[];
+	/** The anchor mirror as the same snapshot read it, when asked for (`opts.mirror`). */
+	mirror?: FileObservation;
 }
 
-interface Anchor {
-	lastHash: string;
-	sequence: number;
+export interface ChainVerificationResult {
+	valid: boolean;
+	eventsVerified: number;
+	errors: string[];
+	skipped: number;
+	latestHash: string;
+	verifiedAt: string;
+	/** The log's tail against its anchor (`tail-state.ts`); `null` when there was no snapshot (`busy`). */
+	tailState?: TailState | null;
+	/** The log kept changing while it was read: no verdict, never "broken". */
+	busy?: true;
+	/** A torn tail under a writer that holds the vault: torn, or a write still in progress. */
+	writerLive?: true;
+}
+
+/**
+ * The chain in ONE log file and its `.meta` anchor (`<audit dir>/events.jsonl`, or any one log under
+ * its own name), verified exactly as `verifyVault` verifies a vault: the same bracketed snapshot, the
+ * directory's real inventory (an interrupted recovery is seen), the same walk (links, sequence at its
+ * position, every hash), and the writer's own classification of the tail. ONE answer path: this used
+ * to read the log and its anchor unbracketed, with an empty inventory made up for the classifier, and
+ * no position rule, so it could pass what `verifyVault` refused. A log that is not there is an empty
+ * chain, as it always was. `eventsVerified` counts the complete lines walked, events or not.
+ */
+export function verifyChain(
+	logPath: string,
+	opts: StableReadOptions = {},
+): ChainVerificationResult {
+	const verifiedAt = new Date().toISOString();
+	const { result, orderedHashes, lines, skipped } = readAuditDirectory(
+		dirname(logPath),
+		opts,
+		basename(logPath),
+		"chain",
+	);
+	return {
+		valid: result.valid,
+		eventsVerified: lines,
+		errors: result.errors,
+		skipped,
+		latestHash: orderedHashes[orderedHashes.length - 1] ?? GENESIS_HASH,
+		verifiedAt,
+		tailState: result.tailState ?? null,
+		...(result.busy === true ? { busy: true as const } : {}),
+		...(result.writerLive === true ? { writerLive: true as const } : {}),
+	};
 }
 
 interface ParsedEvent {
@@ -138,6 +195,8 @@ interface ParsedEvent {
 	sequence?: number | undefined;
 	timestamp?: string | undefined;
 	parsed: Record<string, unknown>;
+	/** The line as read, for the tail's classification. */
+	raw: Buffer;
 	sourceFile: string;
 	line: number;
 }
@@ -178,129 +237,180 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
  * the vault after its verification takes them from here: reading the log a second time judged
  * whatever the log held THEN, never hash-checked. IDENTICAL in packages/core/src/audit/verify.ts.
  */
-export function verifyVaultReading(vaultPath: string): VaultReading {
-	const auditDir = join(vaultPath, "audit");
+export function verifyVaultReading(vaultPath: string, opts: StableReadOptions = {}): VaultReading {
+	const { result, events, orderedHashes, mirror } = readAuditDirectory(
+		join(vaultPath, "audit"),
+		opts,
+		LOG_NAME,
+		"vault",
+	);
+	return { result, events, orderedHashes, ...(mirror !== undefined ? { mirror } : {}) };
+}
+
+/** A verdict over one audit directory's snapshot, with the count of complete lines it walked. */
+interface AuditDirectoryReading extends VaultReading {
+	/** The complete lines read, events or not. */
+	lines: number;
+	/** The complete lines that are not events: not JSON, not an event, or a malformed sequence. */
+	skipped: number;
+}
+
+/**
+ * The one walk every verifier entry point gives its verdict from: `vault`, a vault's audit directory
+ * (`verifyVault`), which must be there; `chain`, one log file verified alone (`verifyChain`), where a
+ * directory that is not there holds an absent log, an empty chain. IDENTICAL in
+ * packages/core/src/audit/verify.ts.
+ */
+function readAuditDirectory(
+	auditDir: string,
+	opts: StableReadOptions,
+	logName: string,
+	mode: "vault" | "chain",
+): AuditDirectoryReading {
 	const errors: string[] = [];
 
-	// 1-2. Gather segment files: events.jsonl first, then every other *.jsonl.
-	const segmentFiles: string[] = [];
-	const mainLog = join(auditDir, "events.jsonl");
-	if (existsSync(mainLog)) {
-		segmentFiles.push(mainLog);
-	}
-	if (existsSync(auditDir)) {
-		try {
-			for (const entry of readdirSync(auditDir).sort()) {
-				if (entry.endsWith(".jsonl") && entry !== "events.jsonl") {
-					segmentFiles.push(join(auditDir, entry));
-				}
-			}
-		} catch (err) {
-			// NOT "non-fatal". Mirrors `packages/core/src/audit/verify.ts` verbatim
-			// per the parity requirement in AGENTS.md. A directory that exists but
-			// cannot be enumerated is a vault we did not read, and swallowing that
-			// produced the worst possible answer: with `events.jsonl` also absent or
-			// unreadable, `segmentFiles` stayed empty, the branch below found the
-			// directory present so pushed no error, and verification returned
-			// `valid: true, chainLength: 0` — a clean bill of health, exit 0, on a
-			// vault nobody could open. Fixing only the core copy would have left the
-			// STANDALONE verifier — the one an auditor is told to trust instead of
-			// us — still answering valid.
-			// SCRUBBED. Both halves are attacker-influenced: `auditDir` comes from a
-			// caller-supplied path and `err.message` embeds it. The non-JSON CLI
-			// prints this string, so an escape sequence in either could repaint the
-			// very FAILED verdict this error exists to produce — the terminal-forgery
-			// surface AGENTS.md already names for every other value on that output.
-			errors.push(
-				scrubForError(
-					`Audit directory could not be enumerated: ${auditDir} (${err instanceof Error ? err.message : String(err)})`,
-				),
-			);
-		}
-	}
-
-	// 3. Read the head anchor, fail-closed.
-	const anchorRaw = readAnchor(`${mainLog}.meta`);
-	let anchor: Anchor | null = null;
-	if (anchorRaw !== null) {
-		if ("corrupt" in anchorRaw) {
-			errors.push("Audit anchor (.meta) present but corrupt");
-		} else {
-			anchor = anchorRaw;
-		}
-	}
-
-	// 4. No segment files.
-	if (segmentFiles.length === 0) {
-		if (!existsSync(auditDir)) {
-			errors.push(`Audit directory not found: ${auditDir}`);
-		}
-		if (anchor && anchor.sequence > 0) {
-			errors.push(
-				`Audit log missing but anchor records ${anchor.sequence} event(s) (deletion detected)`,
-			);
-		}
+	// 1. ONE snapshot (`stable-read.ts`): every phase below reads it, never the files again. A vault's
+	// chain is every segment in its directory; one log verified alone is that file alone.
+	const read = readVaultSnapshot(auditDir, opts, logName, mode === "vault");
+	if (read.kind === "busy") {
 		return {
 			result: {
-				valid: errors.length === 0,
-				errors,
+				valid: false,
+				errors: [
+					"the vault is being written: its audit files kept changing while they were read, so there is no verdict (run verify again)",
+				],
 				chainLength: 0,
 				validHashes: 0,
 				merkleRoot: null,
 				firstEvent: null,
 				lastEvent: null,
+				tailState: null,
+				busy: true,
 			},
 			events: [],
 			orderedHashes: [],
+			lines: 0,
+			skipped: 0,
 		};
 	}
+	const { snapshot } = read;
+	if (read.kind === "torn_writer_live") {
+		errors.push(
+			"the log ends in bytes after its last newline while a writer holds the vault: torn, or a write in progress (stop the writer to classify it)",
+		);
+	}
 
-	// 5. Parse every line of every segment.
+	// 2. The directory. One that exists but cannot be listed is a vault nobody read: never "0 events,
+	// all valid" (SCRUBBED: the path is the caller's, and the non-JSON CLI prints this).
+	if (snapshot.audit.kind === "missing") {
+		if (mode === "vault") errors.push(`Audit directory not found: ${auditDir}`);
+	} else if (snapshot.audit.kind !== "ok") {
+		errors.push(
+			scrubForError(
+				`Audit directory could not be enumerated: ${auditDir} (${
+					snapshot.audit.kind === "unreadable"
+						? snapshot.audit.code
+						: `over ${snapshot.audit.count} names`
+				})`,
+			),
+		);
+	}
+
+	// 3. Every segment's complete lines, split as BYTES (`splitLines`: a log over V8's string limit is
+	// never decoded whole) and each parsed alone. A segment that cannot be read, or is over the bound
+	// for one read, is reported, never skipped as if absent; bytes after its last newline are refused
+	// by name, whatever they are; a line that is not JSON, not an event, or an event with a malformed
+	// sequence is an error, never read on trust.
 	const events: ParsedEvent[] = [];
-	for (const segmentFile of segmentFiles) {
-		let content: string;
-		try {
-			content = readFileSync(segmentFile, "utf-8").trim();
-		} catch {
-			// FAIL CLOSED — mirrors `core/src/audit/verify.ts`, error string included.
-			// Skipping made an unreadable segment indistinguishable from an absent
-			// one, so a vault nobody could open verified as clean.
-			// SCRUBBED — mirrors core, error string included. The filename comes from
-			// the audited vault and both CLIs print it verbatim, so an escape in a
-			// segment's name could repaint the FAILED verdict.
-			errors.push(`Audit segment could not be read: ${scrubForError(basename(segmentFile))}`);
+	// The log's complete lines in file order, for the tail's classification.
+	let liveLines: Buffer[] = [];
+	let liveTrailing: Buffer = Buffer.alloc(0);
+	let liveTrailingOffset = 0;
+	let unreadableSegment: LogObservation | undefined;
+	let lineCount = 0;
+	let skipped = 0;
+	for (const segment of snapshot.segments) {
+		// SCRUBBED: a segment's name comes from the audited vault, and both CLIs print it.
+		const name = scrubForError(segment.name);
+		const file = segment.file;
+		if (file.kind === "absent") continue;
+		if (file.kind !== "read") {
+			errors.push(
+				file.kind === "not_regular"
+					? `Audit segment could not be read: ${name} (a ${file.fileKind}, not a regular file)`
+					: file.kind === "oversize"
+						? `Audit segment could not be read: ${name} (${file.size} bytes, over the ${MAX_SEGMENT_BYTES}-byte bound for one read)`
+						: `Audit segment could not be read: ${name}`,
+			);
+			unreadableSegment ??=
+				file.kind === "not_regular" || file.kind === "oversize"
+					? file
+					: { kind: "unavailable", code: "EUNREADABLE" };
 			continue;
 		}
-		if (content === "") continue;
-		const lines = content.split("\n").filter((l) => l.trim());
+		const { lines, trailing, trailingOffset } = splitLines(file.bytes);
+		if (trailing.length > 0) {
+			errors.push(
+				`torn tail: ${trailing.length} byte(s) after the last newline of ${name} (${trailingKind(trailing).replaceAll("_", " ")})`,
+			);
+		}
+		if (segment.name === logName) {
+			liveLines = lines;
+			liveTrailing = trailing;
+			liveTrailingOffset = trailingOffset;
+		}
+		lineCount += lines.length;
+		// The writer appends in sequence order: within one segment, a sequence never follows a larger
+		// one (lines swapped, or moved, keep their hashes and links, and sort back into a valid chain).
+		let previousInFile: number | undefined;
 		for (let i = 0; i < lines.length; i++) {
-			const raw = lines[i] as string;
-			try {
-				const parsed = JSON.parse(raw) as Record<string, unknown>;
-				events.push({
-					id: typeof parsed.id === "string" ? parsed.id : "",
-					hash: typeof parsed.hash === "string" ? parsed.hash : "",
-					previousHash: typeof parsed.previousHash === "string" ? parsed.previousHash : "",
-					sequence: typeof parsed.sequence === "number" ? parsed.sequence : undefined,
-					timestamp: typeof parsed.timestamp === "string" ? parsed.timestamp : undefined,
-					parsed,
-					sourceFile: segmentFile,
-					line: i + 1,
-				});
-			} catch {
-				errors.push(`malformed JSON (${basename(segmentFile)}:${i + 1})`);
+			const raw = lines[i] as Buffer;
+			const line = parseLine(raw);
+			if (line.kind !== "event") skipped++;
+			if (line.kind === "event" && line.sequence !== undefined) {
+				if (previousInFile !== undefined && line.sequence <= previousInFile) {
+					errors.push(
+						`sequence ${line.sequence} follows ${previousInFile} in the file, out of order (${name}:${i + 1})`,
+					);
+				}
+				previousInFile = line.sequence;
 			}
+			if (line.kind === "unparseable") {
+				errors.push(`malformed JSON (${name}:${i + 1})`);
+				continue;
+			}
+			if (line.kind === "non_event") {
+				errors.push(`not an audit event (${name}:${i + 1})`);
+				continue;
+			}
+			if (line.kind === "malformed") {
+				errors.push(`malformed sequence, not a positive safe integer (${name}:${i + 1})`);
+				continue;
+			}
+			const { event } = line;
+			events.push({
+				id: typeof event.id === "string" ? event.id : "",
+				hash: line.hash,
+				previousHash: line.previousHash,
+				sequence: line.sequence,
+				timestamp: typeof event.timestamp === "string" ? event.timestamp : undefined,
+				parsed: event,
+				raw,
+				sourceFile: segment.name,
+				line: i + 1,
+			});
 		}
 	}
 
-	// 6. Order by the persisted global sequence when available (legacy fallback:
-	// file order, for hand-built sequence-less single-segment fixtures).
+	// 4. Order by the persisted global sequence when every event has one (a legacy chain, with events
+	// written before sequences: file order, each event at its line).
 	const allHaveSeq = events.every((e) => typeof e.sequence === "number");
 	const ordered = allHaveSeq
 		? [...events].sort((a, b) => (a.sequence as number) - (b.sequence as number))
 		: events;
 
-	// 7. One continuous continuity walk.
+	// 5. One continuous walk: links, sequence continuity (every present sequence is its position),
+	// and every hash recomputed, TOTALLY: an event canonicalization refuses is an error at that event.
 	let expectedPrev = GENESIS_HASH;
 	let validHashes = 0;
 	let firstEvent: string | null = null;
@@ -325,10 +435,20 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 				);
 			}
 		}
+		if (!allHaveSeq && e.sequence !== undefined && e.sequence !== i + 1) {
+			errors.push(`Event ${i + 1} (${e.id}): sequence ${e.sequence} is not its position ${i + 1}`);
+		}
 
 		const { hash: _storedHash, ...rest } = e.parsed;
-		const computed = createHash("sha256").update(canonicalize(rest)).digest("hex");
-		if (e.hash !== computed) {
+		let computed: string | undefined;
+		try {
+			computed = createHash("sha256").update(canonicalize(rest)).digest("hex");
+		} catch {
+			computed = undefined;
+		}
+		if (computed === undefined) {
+			errors.push(`Event ${i + 1} (${e.id}): unhashable (its canonical form cannot be computed)`);
+		} else if (e.hash !== computed) {
 			errors.push(`Event ${i + 1} (${e.id}): hash mismatch. Expected ${computed}, got ${e.hash}`);
 		} else {
 			validHashes++;
@@ -342,29 +462,44 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 		expectedPrev = e.hash;
 	}
 
-	// 8. Tail anchor (only when the anchor is present and well-formed).
-	if (anchor) {
-		const last = ordered.at(-1);
-		if (last && last.hash !== anchor.lastHash) {
-			errors.push(
-				`anchor mismatch: expected last hash ${anchor.lastHash}, got ${last.hash} (tail truncation)`,
-			);
-		}
-		if (ordered.length !== anchor.sequence) {
-			errors.push(
-				`anchor mismatch: expected ${anchor.sequence} event(s), found ${ordered.length} (truncation/deletion)`,
-			);
-		}
-	}
+	// 6. The tail against its anchor: ONE classification (`tail-state.ts`), the writer's own. The
+	// chain's last lines are the log's, in file order, unless ANY other segment is there: then they are
+	// the last events by sequence, across every segment. (Judged on the log's lines alone, a chain whose
+	// only segment is a rotated one read as an empty log: a truncated chain renamed, its anchor deleted,
+	// was FRESH and valid.) An event ONE past the anchor that chains from it is an interrupted write's,
+	// rolled forward by the next append: valid, with a note.
+	const rotated = snapshot.segments.some((sg) => sg.name !== logName && sg.file.kind !== "absent");
+	const chainLines = rotated ? ordered.map((e) => e.raw) : liveLines;
+	const log: LogObservation =
+		unreadableSegment !== undefined
+			? unreadableSegment
+			: snapshot.segments.every((sg) => sg.file.kind === "absent")
+				? { kind: "absent" }
+				: {
+						kind: "tail",
+						tail: {
+							lines: chainLines.slice(-2),
+							fromStart: chainLines.length <= 2,
+							count: chainLines.length,
+							trailing: liveTrailing,
+							trailingOffset: liveTrailingOffset,
+						},
+					};
+	const tailState = classifyAuditTail(
+		{ audit: snapshot.audit, quarantine: snapshot.quarantine, log, anchor: snapshot.anchor },
+		"reader",
+	);
+	// The state's own error, and the count the anchor records (`verdictErrors`).
+	errors.push(...verdictErrors(tailState, snapshot.anchor, ordered.length, errors.length));
 
-	// 9. Merkle root over the ordered event hashes (informational).
+	// 7. Merkle root over the ordered event hashes (informational).
 	let merkleRoot: string | null = null;
 	if (ordered.length > 0) {
 		const tree = buildMerkleTree(ordered.map((e) => e.hash));
 		merkleRoot = tree.root ?? null;
 	}
 
-	// 10.
+	// 8.
 	return {
 		result: {
 			valid: errors.length === 0,
@@ -374,16 +509,14 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 			merkleRoot,
 			firstEvent,
 			lastEvent,
+			tailState,
+			...(read.kind === "torn_writer_live" ? { writerLive: true as const } : {}),
 		},
-		// A line that parsed to a number, a string or an array was walked (and failed its hash): it
-		// is in the ordered hashes the anchors count, and no event a later check can match.
-		events: ordered
-			.map((e) => e.parsed as unknown)
-			.filter(
-				(p): p is Record<string, unknown> =>
-					p !== null && typeof p === "object" && !Array.isArray(p),
-			),
+		events: ordered.map((e) => e.parsed),
 		orderedHashes: ordered.map((e) => e.hash),
+		lines: lineCount,
+		skipped,
+		...(snapshot.mirror !== undefined ? { mirror: snapshot.mirror } : {}),
 	};
 }
 
@@ -453,6 +586,14 @@ export interface AnchoredVaultReading {
 	result: AnchoredVaultVerificationResult;
 	/** The events walked, in chain order: the ones the anchors were checked against. */
 	events: readonly Record<string, unknown>[];
+	/** Their hashes, in the same order: the leaves the anchors cover. */
+	orderedHashes: readonly string[];
+	/**
+	 * The anchor records the verdict was reached on, as read ONCE: the caller's and the vault mirror's.
+	 * Anything built on the verdict (`--tx`'s covering anchor and its rotation keys) takes them from
+	 * here: the mirror read again could hold records the state machine never checked.
+	 */
+	anchors: { external: readonly AnchorRecord[]; mirror: readonly AnchorRecord[] };
 }
 
 /**
@@ -592,8 +733,33 @@ export function verifyVaultWithAnchorsReading(
 	vaultPath: string,
 	params: AnchorVerifyParams = {},
 ): AnchoredVaultReading {
-	const reading = verifyVaultReading(vaultPath);
+	// The anchor mirror comes from the same bracketed snapshot as the chain: read after it, a mirror
+	// that gained an anchor (and the log its events) while the walk ran judged the walk's chain against
+	// an anchor it never held (a rollback, for an honest vault).
+	const reading = verifyVaultReading(vaultPath, { mirror: true });
 	const base = reading.result;
+	// No snapshot (`busy`): there is nothing to check the anchors against. Never evaluated over a chain
+	// of no events, which every anchor would call a deletion: not evaluated, and said so.
+	if (base.busy === true) {
+		return {
+			result: {
+				...base,
+				anchorState: "ANCHOR_UNVERIFIABLE",
+				anchoring: {
+					anchorSource: "none",
+					anchorCount: 0,
+					latestAnchor: null,
+					unanchoredTail: { events: 0, sinceTimestampMs: null },
+					witness: { requested: params.witness?.requested === true, status: "not-consulted" },
+					reasons: ["busy"],
+					warnings: [],
+				},
+			},
+			events: reading.events,
+			orderedHashes: reading.orderedHashes,
+			anchors: { external: [], mirror: [] },
+		};
+	}
 	const externalRecords: AnchorRecord[] = [];
 	const externalErrors: string[] = [];
 	for (const raw of params.externalAnchorsRaw ?? []) {
@@ -601,7 +767,7 @@ export function verifyVaultWithAnchorsReading(
 		externalRecords.push(...parsed.records);
 		externalErrors.push(...parsed.errors);
 	}
-	const mirror = readAnchorMirror(vaultPath);
+	const mirror = parseAnchorMirror(reading.mirror ?? { kind: "absent" });
 	const rekor = verifySuppliedRekorReceipts(
 		params.rekorReceiptsRaw ?? [],
 		externalRecords,
@@ -653,6 +819,8 @@ export function verifyVaultWithAnchorsReading(
 			},
 		},
 		events: reading.events,
+		orderedHashes: reading.orderedHashes,
+		anchors: { external: externalRecords, mirror: mirror.records },
 	};
 }
 
@@ -699,6 +867,10 @@ export interface TransactionVerificationResult {
 	 * be enforced in --tx mode too. */
 	readonly anchorState?: AnchorState | undefined;
 	readonly anchoring?: AnchoringReport | undefined;
+	/** The vault kept changing while it was read: no search, no verdict (`errors` says so). */
+	readonly busy?: true | undefined;
+	/** The vault's chain could not be read at all (`errors` says why): a failure, never "not found". */
+	readonly failed?: true | undefined;
 }
 
 /**
@@ -785,6 +957,16 @@ function normalizeEvent(raw: unknown): TransactionEvent {
 	};
 }
 
+/** Whether anything at all is at `path`, a dangling link included: only ENOENT is nothing. */
+function somethingAt(path: string): boolean {
+	try {
+		lstatSync(path);
+		return true;
+	} catch (err) {
+		return (err as { code?: unknown } | null)?.code !== "ENOENT";
+	}
+}
+
 /**
  * Verify a single transaction and return a formatted receipt.
  *
@@ -803,7 +985,11 @@ export function verifyTransaction(
 	const auditDir = join(vaultPath, "audit");
 	const mainLog = join(auditDir, "events.jsonl");
 
-	if (!existsSync(mainLog)) {
+	// Nothing at all at the audit directory's path: there is no log to search, so not found. Anything
+	// there (a directory whose chain is only in a rotated segment, a link leading nowhere) is read by
+	// the snapshot below and judged: a chain found there is searched, and one that cannot be read is a
+	// failure, never "not found".
+	if (!somethingAt(auditDir)) {
 		return {
 			found: false,
 			valid: false,
@@ -812,27 +998,41 @@ export function verifyTransaction(
 		};
 	}
 
-	const content = readFileSync(mainLog, "utf-8").trim();
-	if (!content) {
+	// ONE snapshot of the vault: the event searched for, the chain's verdict and the inclusion proof's
+	// hashes all come from it. Reading the log again for each let a log changed between the reads be
+	// searched as one chain and proved as another: a forged event shown under a proof of the genuine one.
+	const anchored =
+		anchorParams === undefined ? undefined : verifyVaultWithAnchorsReading(vaultPath, anchorParams);
+	const reading = anchored ?? verifyVaultReading(vaultPath);
+	// No snapshot: nothing was searched, so nothing is "not found" (and no verdict is given).
+	if (reading.result.busy === true) {
 		return {
 			found: false,
 			valid: false,
+			busy: true,
 			receipt: renderNotFound(txId),
-			errors: ["Audit log is empty"],
+			errors: reading.result.errors,
 		};
 	}
-
-	const lines = content.split("\n").filter((l) => l.trim());
-	const events: TransactionEvent[] = [];
-	const parseErrors: string[] = [];
-
-	for (let i = 0; i < lines.length; i++) {
-		try {
-			events.push(normalizeEvent(JSON.parse(lines[i] as string)));
-		} catch {
-			parseErrors.push(`Event ${i + 1}: malformed JSON`);
-		}
+	if (reading.result.chainLength === 0) {
+		// An empty log is one where nothing can be found; a log that could not be read is a failure.
+		return reading.result.errors.length === 0
+			? {
+					found: false,
+					valid: false,
+					receipt: renderNotFound(txId),
+					errors: ["Audit log is empty"],
+				}
+			: {
+					found: false,
+					valid: false,
+					failed: true,
+					receipt: renderNotFound(txId),
+					errors: reading.result.errors,
+				};
 	}
+
+	const events: TransactionEvent[] = reading.events.map(normalizeEvent);
 
 	// Find the target event.
 	//
@@ -970,15 +1170,14 @@ export function verifyTransaction(
 		};
 	}
 
-	// Verify the full chain
-	const chainResult = verifyChain(mainLog);
-	const chainVerified = chainResult.valid;
+	// The chain's verdict, from the same snapshot.
+	const chainVerified = reading.result.valid;
 
 	// Merkle root over the stored hashes — informational display only. The
 	// self-referential inclusion check (F1: proof AND root computed from the
 	// same allHashes) is retired; inclusion is only ever claimed against a
 	// verified EXTERNAL anchor root below (AC-5.2).
-	const allHashes = events.map((e) => e.hash);
+	const allHashes = [...reading.orderedHashes];
 	const tree = buildMerkleTree(allHashes);
 	let merkleRoot = tree.root ?? "";
 	const leafIndex = events.indexOf(targetEvent);
@@ -997,21 +1196,19 @@ export function verifyTransaction(
 		// AC-5.4: the anchor state machine runs over the WHOLE vault first —
 		// an ANCHOR_INVALID / ANCHOR_MISMATCH vault must never render
 		// "INCLUSION VERIFIED", whatever the single-event proof says.
-		const vaultResult = verifyVaultWithAnchors(vaultPath, anchorParams);
+		const vaultResult = (anchored as AnchoredVaultReading).result;
 		anchorsValid = vaultResult.valid;
 		anchorState = vaultResult.anchorState;
 		anchoring = vaultResult.anchoring;
 		anchorErrors.push(...vaultResult.anchoring.reasons.map((r) => `anchor: ${r}`));
 		const state = vaultResult.anchorState;
 		if (state === "ANCHORED_VERIFIED" || state === "ANCHOR_STALE") {
-			const orderedHashes = gatherOrderedEventHashes(vaultPath);
+			const orderedHashes = (anchored as AnchoredVaultReading).orderedHashes;
 			const pos = typeof targetEvent.sequence === "number" ? targetEvent.sequence : leafIndex + 1;
-			const candidates: AnchorRecord[] = [];
-			for (const raw of anchorParams.externalAnchorsRaw ?? []) {
-				candidates.push(...parseAnchorsContent(raw).records);
-			}
-			candidates.push(...readAnchorMirror(vaultPath).records);
-			const uniqueAnchors = dedupeAnchorSet(candidates).unique;
+			// The records the verdict was reached on, never the mirror read again: a mirror changed since
+			// could add a rotation, and a record under its key, that the state machine never checked.
+			const { external, mirror } = (anchored as AnchoredVaultReading).anchors;
+			const uniqueAnchors = dedupeAnchorSet([...external, ...mirror]).unique;
 			const covering = uniqueAnchors
 				.filter((r) => r.treeSize >= pos)
 				.sort((a, b) => a.treeSize - b.treeSize)[0];
@@ -1111,7 +1308,7 @@ export function verifyTransaction(
 		merkleLabel,
 	};
 
-	const allErrors = [...parseErrors, ...chainResult.errors, ...anchorErrors];
+	const allErrors = [...reading.result.errors, ...anchorErrors];
 
 	return {
 		found: true,

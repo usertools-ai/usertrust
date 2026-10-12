@@ -3,6 +3,10 @@
 
 import {
 	AnomalyError,
+	AuditDegradedError,
+	AuditTailMismatchError,
+	AuditTornTailError,
+	AuditWriterLockHeldError,
 	InsufficientBalanceError,
 	PolicyDeniedError,
 	principalFieldRefusal,
@@ -214,8 +218,18 @@ export interface ShadowResponse {
  */
 export function toHttpError(err: unknown): {
 	status: number;
-	body: { error: string; reason: string };
+	body: { error: string; reason: string; state?: string };
 } {
+	if (err instanceof AuditDegradedError || isAuditRefusal(err)) {
+		// The tenant's audit trail cannot be appended to (its tail refused, a torn line, another writer
+		// holding its vault): this server cannot record the call, so it takes none, by name. Not a policy
+		// decision: `evaluate_only` never shadows it (the shadow rule is below 500). Built from the
+		// refusal's STATE, never its message, which names the vault's path. The refusal itself, thrown
+		// where nothing wrapped it (a settle whose record could not be written), is mapped the same way:
+		// never an opaque 500.
+		const cause = err instanceof AuditDegradedError ? err.cause : err;
+		return { status: 503, body: { error: "audit_refused", ...auditRefusal(cause) } };
+	}
 	if (err instanceof PolicyDeniedError) {
 		return { status: 403, body: { error: "policy_denied", reason: err.reason } };
 	}
@@ -235,4 +249,41 @@ export function toHttpError(err: unknown): {
 		return { status: 429, body: { error: "rate_limited", reason: err.message } };
 	}
 	return { status: 500, body: { error: "internal", reason: "internal error" } };
+}
+
+/** Whether `err` is the audit writer's own refusal of an append. */
+function isAuditRefusal(err: unknown): boolean {
+	return (
+		err instanceof AuditTailMismatchError ||
+		err instanceof AuditTornTailError ||
+		err instanceof AuditWriterLockHeldError
+	);
+}
+
+/** An audit refusal for the wire: its state and one path-free sentence. */
+function auditRefusal(cause: unknown): { reason: string; state: string } {
+	if (cause instanceof AuditTailMismatchError) {
+		return { reason: `the audit trail's tail is refused (${cause.state})`, state: cause.state };
+	}
+	if (cause instanceof AuditTornTailError) {
+		const torn = `the audit log ends in a torn line${cause.kind === undefined ? "" : ` (${cause.kind})`}`;
+		// The lines before the torn bytes can be refused in their own right (events missing after the
+		// anchored head, say): that state is the one named, so it never reads as a torn write that
+		// `quarantine-tail` repairs.
+		const linesRefused =
+			cause.state !== undefined &&
+			cause.state !== "FRESH" &&
+			cause.state !== "MATCH" &&
+			cause.state !== "ONE_PAST_ANCHOR";
+		return linesRefused
+			? {
+					reason: `the audit trail's tail is refused (${cause.state}), and ${torn}`,
+					state: cause.state as string,
+				}
+			: { reason: torn, state: "TORN_TAIL" };
+	}
+	if (cause instanceof AuditWriterLockHeldError) {
+		return { reason: "another writer holds the tenant's audit trail", state: "WRITER_LOCK_HELD" };
+	}
+	return { reason: "the audit trail cannot be appended to", state: "UNKNOWN" };
 }

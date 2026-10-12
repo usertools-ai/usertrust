@@ -549,10 +549,36 @@ describe("usertrust health — vault states", () => {
 			prev = hash;
 		}
 		writeFileSync(liveLog(), `${legacy.join("\n")}\n`);
+		// Its anchor, as the writer keeps it: the head and the count.
+		writeFileSync(`${liveLog()}.meta`, JSON.stringify({ lastHash: prev, sequence: 3 }));
 
 		await run(tempDir);
 
 		expect(out()).toContain("verified");
+	});
+
+	it("does NOT report verified for a legacy chain of several events whose anchor is missing", async () => {
+		// An older version that never wrote `.meta`, or a deleted one: with no anchor, a truncated log
+		// cannot be told from a whole one, so a chain of more than one event is refused after upgrade.
+		let prev = "0".repeat(64);
+		const legacy: string[] = [];
+		for (let i = 1; i <= 3; i++) {
+			const body = {
+				id: `legacy-${i}`,
+				timestamp: `2026-08-14T00:00:0${i}.000Z`,
+				kind: "llm.call",
+				previousHash: prev,
+			};
+			const hash = createHash("sha256").update(canonicalize(body)).digest("hex");
+			legacy.push(JSON.stringify({ ...body, hash }));
+			prev = hash;
+		}
+		writeFileSync(liveLog(), `${legacy.join("\n")}\n`);
+
+		await run(tempDir);
+
+		expect(out()).not.toContain("verified");
+		expect(out()).toMatch(/FAILED: ANCHOR_MISSING \(no anchor on a chain of 3 events/);
 	});
 
 	it("does NOT report verified for a segment it could not read", async () => {

@@ -23,6 +23,7 @@ export type {
 export {
 	type AppendEventInput,
 	AUDIT_DEGRADED_WARNING,
+	AuditTailMismatchError,
 	AuditTornTailError,
 	type AuditWriter,
 	AuditWriterLockHeldError,
@@ -56,6 +57,7 @@ export {
 export type { ChainIntegrity, PersistedAuditEvent } from "./audit/read.js";
 // Vault reading (shared by CLI + usertrust-ui)
 export { deriveChainIntegrity, loadBudgetConfig, readLedgerEvents } from "./audit/read.js";
+export type { TailState, TailStateName, TrailingKind } from "./audit/tail-state.js";
 export type { ChainVerificationResult, VaultVerificationResult } from "./audit/verify.js";
 export { verifyChain, verifyVault } from "./audit/verify.js";
 export type { BoardReviewResult, BoardStats } from "./board/board.js";

@@ -27,9 +27,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalize } from "./canonical.js";
+import { acquireWholeFile, listDirectory, MAX_INVENTORY_NAMES, splitLines } from "./tail-read.js";
 
 /** The `source` the chain writer stamps on a dead-lettered append. */
 export const CHAIN_APPEND_DEAD_LETTER_SOURCE = "audit.chain.appendEvent";
@@ -72,23 +72,45 @@ export function readChainDeadLetters(
 	vaultDir: string,
 	eventAt: (hash: string) => ChainEventView | undefined,
 ): ChainDeadLetters | ChainDeadLettersUnreadable {
-	const path = join(vaultDir, "dlq", "dead-letters.jsonl");
-	let raw: string;
-	try {
-		raw = readFileSync(path, "utf-8");
-	} catch (err) {
-		if ((err as { code?: unknown })?.code === "ENOENT") {
-			return {
-				path,
-				missing: 0,
-				missingByKind: Object.create(null) as Record<string, number>,
-				missingTransferIds: [],
-				onChain: 0,
-				otherSources: 0,
-			};
-		}
-		const code = (err as { code?: unknown })?.code;
-		return { path, unreadable: typeof code === "string" ? code : "read failed" };
+	const dlqDir = join(vaultDir, "dlq");
+	const path = join(dlqDir, "dead-letters.jsonl");
+	// Acquired, never read blind: through no link (a dangling link is not "no queue"), never
+	// blocking on a FIFO, only as a regular file, and within a bound. Absent: nothing was ever
+	// dead-lettered, unless the queue's DIRECTORY is a link that leads nowhere (or cannot be listed):
+	// the file is then not known to be absent, only unreachable.
+	const file = acquireWholeFile(path).file;
+	const dir = file.kind === "absent" ? listDirectory(dlqDir, MAX_INVENTORY_NAMES, true) : undefined;
+	if (dir !== undefined && dir.kind !== "missing" && dir.kind !== "ok") {
+		return {
+			path,
+			unreadable:
+				dir.kind === "unreadable"
+					? `its directory cannot be read (${dir.code})`
+					: "its directory cannot be read",
+		};
+	}
+	if (file.kind === "absent") {
+		return {
+			path,
+			missing: 0,
+			missingByKind: Object.create(null) as Record<string, number>,
+			missingTransferIds: [],
+			onChain: 0,
+			otherSources: 0,
+		};
+	}
+	if (file.kind !== "read") {
+		return {
+			path,
+			unreadable:
+				file.kind === "not_regular"
+					? `a ${file.fileKind}, not a regular file`
+					: file.kind === "unavailable"
+						? file.code
+						: file.kind === "oversize"
+							? `${file.size} bytes, over the bound for one read`
+							: "read failed",
+		};
 	}
 	const result: ChainDeadLetters = {
 		path,
@@ -106,10 +128,14 @@ export function readChainDeadLetters(
 		if (typeof transferId === "string" && transferId !== "")
 			result.missingTransferIds.push(transferId);
 	};
-	for (const line of raw.split("\n")) {
-		if (line.trim() === "") continue;
+	// Split as bytes and decoded one line at a time: a queue over V8's string limit (512 MiB) cannot
+	// be decoded whole, and a line that cannot be decoded is an unreadable letter, never a crash.
+	const { lines, trailing } = splitLines(file.bytes);
+	for (const bytes of trailing.length > 0 ? [...lines, trailing] : lines) {
 		let entry: unknown;
 		try {
+			const line = bytes.toString("utf-8");
+			if (line.trim() === "") continue;
 			entry = JSON.parse(line);
 		} catch {
 			countMissing("<unreadable>", undefined);

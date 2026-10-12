@@ -39,6 +39,26 @@ import { securePrivateVault } from "../../src/shared/private-fs.js";
 
 let tempDir: string;
 const handles: AuditWriter[] = [];
+
+/**
+ * A one-shot fault: the next anchor write (the create of its temp file) fails EACCES, after the
+ * append's event was synced to the log. What a failed anchor update leaves: the event on the chain,
+ * the OLD anchor in place (the next append rolls it forward), and the event dead-lettered with its hash.
+ */
+const anchorFault = vi.hoisted(() => ({ armed: false }));
+vi.mock("node:fs", async (importOriginal) => {
+	const fs = await importOriginal<typeof import("node:fs")>();
+	const openSync = ((p: unknown, ...rest: unknown[]) => {
+		if (anchorFault.armed && /\.meta\.[0-9a-f-]+\.tmp$/.test(String(p))) {
+			anchorFault.armed = false;
+			throw Object.assign(new Error(`EACCES: permission denied, open '${String(p)}'`), {
+				code: "EACCES",
+			});
+		}
+		return (fs.openSync as (...a: unknown[]) => number)(p, ...rest);
+	}) as typeof fs.openSync;
+	return { ...fs, openSync, default: { ...fs, openSync } };
+});
 const warnings: Array<{ code: string | undefined; message: string }> = [];
 const onWarning = (w: Error & { code?: string }) =>
 	warnings.push({ code: w.code, message: w.message });
@@ -142,7 +162,9 @@ describe("openSharedAuditWriter: one writer per vault per process", () => {
 		expect(a.getWriteFailures() + b.getWriteFailures()).toBe(0);
 		expect(a.isDegraded() || b.isDegraded()).toBe(false);
 		expect(verifyVault(join(tempDir, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 60 });
-	});
+		// 60 appends, each classifying its tail and syncing its log and its anchor, are disk-bound:
+		// seconds on a loaded machine. The default 5 s budget measured the disk, not the writer.
+	}, 30_000);
 
 	it("CONTROL: two writers of their own (the old shape) — the second's every append fails on the lock", async () => {
 		const { createAuditWriter } = await import("../../src/audit/chain.js");
@@ -488,12 +510,9 @@ describe("a failed append is loud, and each handle's degraded state is its own",
 		const a = open();
 		await a.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_open" } });
 		a.release();
-		// A call that outlived destroy(): its append fails (a directory where the anchor is renamed to),
+		// A call that outlived destroy(): its append fails (its anchor write, after its event is synced),
 		// and it is the last in flight, so its own report runs before its rejection reaches its caller.
-		const meta = join(auditDir(), "events.jsonl.meta");
-		const anchor = readFileSync(meta);
-		rmSync(meta);
-		mkdirSync(meta);
+		anchorFault.armed = true;
 		const failedLate = await a
 			.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_late1" } })
 			.then(
@@ -504,8 +523,6 @@ describe("a failed append is loud, and each handle's degraded state is its own",
 		// What that caller reads (`failClosed` refuses on it, and its error names the count):
 		expect(a.getWriteFailures()).toBe(1);
 		expect(a.isDegraded()).toBe(true);
-		rmSync(meta, { recursive: true });
-		writeFileSync(meta, anchor);
 		// A second late call succeeds: the handle stays degraded, so a failClosed call still refuses.
 		await a.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_late2" } });
 		expect(a.isDegraded()).toBe(true);
@@ -560,11 +577,9 @@ describe("a failed append is loud, and each handle's degraded state is its own",
 	it("an event whose bytes DID reach the chain before the failure is dead-lettered WITH its hash, and is not counted missing", async () => {
 		const a = open();
 		await a.appendEvent({ kind: "test.first", actor: "sys", data: {} });
-		// The `.meta` anchor cannot be replaced (a directory in its place): the next append's log line is
-		// fsync'd, then the anchor write fails, and the append rejects for an event that IS on the chain.
-		const meta = join(auditDir(), "events.jsonl.meta");
-		rmSync(meta);
-		mkdirSync(meta);
+		// The next append's log line is fsync'd, then its anchor write fails, and the append rejects for an
+		// event that IS on the chain.
+		anchorFault.armed = true;
 		await expect(a.appendEvent({ kind: "test.second", actor: "sys", data: {} })).rejects.toThrow();
 		const chain = logLines();
 		expect(chain).toHaveLength(2);

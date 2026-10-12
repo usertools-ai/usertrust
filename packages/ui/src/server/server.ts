@@ -254,7 +254,13 @@ export async function createUiServer(
 				return;
 			}
 			const result = verifyTransaction(vaultPath, txId);
-			sendJson(res, result.found ? 200 : 404, result);
+			// A vault being written has no verdict (503: try again); one whose chain could not be read is
+			// the server's fault (500). Neither is "not found".
+			sendJson(
+				res,
+				result.busy === true ? 503 : result.failed === true ? 500 : result.found ? 200 : 404,
+				result,
+			);
 			return;
 		}
 		if (url.pathname.startsWith("/api/")) {

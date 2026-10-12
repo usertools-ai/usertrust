@@ -62,7 +62,6 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
-import { canonicalize } from "./canonical.js";
 import {
 	type AuditWriter,
 	createAuditWriter,
@@ -70,6 +69,14 @@ import {
 	releaseAuditWriterForTeardown,
 	writeAnchorAtomically,
 } from "./chain.js";
+import { acquireSmallFile, listDirectory, MAX_INVENTORY_NAMES, splitLines } from "./tail-read.js";
+import {
+	classifyAuditTail,
+	eventHashHolds,
+	MAX_ANCHOR_BYTES,
+	parseLine,
+	type TailState,
+} from "./tail-state.js";
 
 export const QUARANTINE_EVENT_KIND = "audit.quarantine.torn_tail";
 const QUARANTINE_ACTOR = "usertrust-cli";
@@ -128,68 +135,97 @@ interface ChainEvent {
 	sequence?: unknown;
 }
 
-/** Verify the complete lines `text` from genesis; returns the events (throws a refusal). */
-function verifyPrefix(text: string): ChainEvent[] {
+/**
+ * Verify every complete line from genesis; returns the events (throws a refusal). Each line is judged
+ * before any field is read (`parseLine`): JSON that is not an event is refused by name. The one
+ * absent-sequence policy: an event without `sequence` (written by an older version) is at its line,
+ * and one with a sequence must carry exactly that. Hashing is total: an event canonicalization
+ * refuses is a refusal here, never a throw.
+ */
+function verifyPrefix(lines: readonly Buffer[]): ChainEvent[] {
 	const events: ChainEvent[] = [];
 	let prev = GENESIS_HASH;
-	let seq = 0;
-	for (const raw of text.split("\n")) {
-		if (raw === "") continue;
-		let e: Record<string, unknown>;
-		try {
-			e = JSON.parse(raw) as Record<string, unknown>;
-		} catch {
+	for (let i = 0; i < lines.length; i++) {
+		const line = parseLine(lines[i] as Buffer);
+		if (line.kind === "unparseable") {
 			throw new AuditQuarantineRefusedError(
-				`the line after sequence ${seq} does not parse — corruption before the tail`,
+				`the line after sequence ${i} does not parse — corruption before the tail`,
 			);
 		}
-		const { hash, ...rest } = e;
+		if (line.kind === "non_event") {
+			throw new AuditQuarantineRefusedError(
+				`line ${i + 1} is JSON but not an audit event — corruption before the tail`,
+			);
+		}
+		if (line.kind === "malformed") {
+			throw new AuditQuarantineRefusedError(
+				`line ${i + 1} carries a sequence that is not a positive safe integer — corruption before the tail`,
+			);
+		}
 		const ok =
-			typeof hash === "string" &&
-			e.previousHash === prev &&
-			e.sequence === seq + 1 &&
-			createHash("sha256").update(canonicalize(rest)).digest("hex") === hash;
+			line.previousHash === prev &&
+			(line.sequence === undefined || line.sequence === i + 1) &&
+			eventHashHolds(line.event);
 		if (!ok) {
 			throw new AuditQuarantineRefusedError(
-				`sequence ${seq + 1} does not verify — corruption before the tail`,
+				`sequence ${i + 1} does not verify — corruption before the tail`,
 			);
 		}
-		events.push(e as unknown as ChainEvent);
-		prev = hash as string;
-		seq++;
+		events.push(line.event as unknown as ChainEvent);
+		prev = line.hash;
 	}
 	return events;
 }
 
-function checkAnchor(metaPath: string, events: ChainEvent[]): "absent" | "head" | "oneBehind" {
-	if (!existsSync(metaPath)) {
-		// The writer anchors every append, so only a chain of at most ONE event (its first anchor
-		// update failed) can lack one. A longer chain without its anchor has lost it: the anchor is
-		// what tells a truncation of whole lines from a complete log, so nothing is repaired.
-		if (events.length > 1) {
+/**
+ * The anchor against the verified chain, as the writer's own classification decides it
+ * (`tail-state.ts`): at the head (`MATCH`, or `FRESH` under a genesis anchor), ONE behind it (an event
+ * landed and its anchor update failed: `ONE_PAST_ANCHOR`), or absent on a chain of at most one event
+ * (`FRESH`, or the first event's `ONE_PAST_ANCHOR`). Every other state is refused before anything is
+ * written: a recovery in progress, another segment, an anchor or a tail that cannot be read, and any
+ * disagreement, which is a truncation, not a torn tail.
+ */
+function repairableAnchor(tail: TailState): "absent" | "head" | "oneBehind" {
+	switch (tail.state) {
+		case "FRESH":
+			return tail.anchored === null ? "absent" : "head";
+		case "MATCH":
+			return "head";
+		case "ONE_PAST_ANCHOR":
+			return tail.anchored === null ? "absent" : "oneBehind";
+		case "RECOVERY_PENDING":
 			throw new AuditQuarantineRefusedError(
-				`the .meta head anchor is missing on a chain of ${events.length} events — it cannot be told from a truncated log`,
+				"a recovery was interrupted (audit/quarantine/PENDING): it must finish before anything else repairs this vault",
 			);
-		}
-		return "absent";
+		case "SEGMENTED":
+			throw new AuditQuarantineRefusedError("the chain has other segments");
+		case "INVENTORY_UNREADABLE":
+		case "LOG_UNREADABLE":
+		case "LOG_NOT_REGULAR":
+		case "TAIL_OVERSIZE":
+		case "ANCHOR_UNREADABLE":
+		case "TAIL_UNPARSEABLE":
+		case "TAIL_NOT_AN_EVENT":
+		case "TAIL_MALFORMED":
+		case "CORRUPT_TAIL":
+			throw new AuditQuarantineRefusedError(`${tail.note} (${tail.state})`);
+		case "LOG_EMPTY_ANCHOR_RECORDS_EVENTS":
+		case "ANCHOR_MISSING":
+		case "HEAD_MISMATCH":
+		case "FEWER_THAN_ANCHOR":
+		case "UNCHAINED_PAST_ANCHOR":
+		case "MORE_THAN_ONE_PAST_ANCHOR":
+		case "SEQUENCE_EXHAUSTED":
+			throw new AuditQuarantineRefusedError(
+				`the .meta head anchor disagrees with the verified chain (${tail.state}: ${tail.note}) — a truncation, not a torn tail`,
+			);
+		default:
+			return assertNever(tail.state);
 	}
-	let a: { lastHash?: unknown; sequence?: unknown };
-	try {
-		a = JSON.parse(readFileSync(metaPath, "utf-8")) as typeof a;
-	} catch {
-		throw new AuditQuarantineRefusedError("the .meta head anchor does not parse");
-	}
-	const head = events.at(-1);
-	const headSeq = events.length;
-	const isHead = a.sequence === headSeq && a.lastHash === (head?.hash ?? GENESIS_HASH);
-	const oneBehind =
-		head !== undefined && a.sequence === headSeq - 1 && a.lastHash === head.previousHash;
-	if (!isHead && !oneBehind) {
-		throw new AuditQuarantineRefusedError(
-			`the .meta head anchor (sequence ${String(a.sequence)}) disagrees with the verified chain (sequence ${headSeq}) — a truncation, not a torn tail`,
-		);
-	}
-	return isHead ? "head" : "oneBehind";
+}
+
+function assertNever(state: never): never {
+	throw new Error(`quarantine: unhandled tail state ${String(state)}`);
 }
 
 /**
@@ -375,25 +411,51 @@ function analyse(auditDir: string, logPath: string, qDir: string, logBytes?: Buf
 	if (!existsSync(auditDir)) {
 		throw new AuditQuarantineRefusedError(`there is no audit directory at ${auditDir}`);
 	}
-	const segments = readdirSync(auditDir).filter(
-		(f) => f.endsWith(".jsonl") && f !== "events.jsonl",
+	assertRegularLog(logPath);
+	// `quarantine/` must be a real directory before anything about it is read (a dangling symlink there
+	// included), so the refusal names it.
+	const qSt = lstatOrUndefined(qDir);
+	if (qSt !== undefined && (qSt.isSymbolicLink() || !qSt.isDirectory())) {
+		throw new AuditQuarantineRefusedError(
+			"audit/quarantine is not a real directory (a symlink or a file)",
+		);
+	}
+	// The audit directory is the one the OS opens at its path, as the writer and every reader list it.
+	const inventory = listDirectory(auditDir, MAX_INVENTORY_NAMES, true);
+	const absent = logBytes === undefined && !existsSync(logPath);
+	const bytes = logBytes ?? (absent ? Buffer.alloc(0) : readFileSync(logPath));
+	// Split as bytes (`splitLines`): a log over V8's string limit is never decoded whole. `cut` is 0
+	// when there is no newline at all.
+	const { lines, trailing: tailBytes, trailingOffset: cut } = splitLines(bytes);
+	// ONE classification, the writer's own: what this tool may repair is what the writer would go on
+	// from, with nothing but a torn FRAGMENT after it.
+	const tail = classifyAuditTail(
+		{
+			audit: inventory,
+			quarantine: listDirectory(qDir),
+			log: absent
+				? { kind: "absent" }
+				: {
+						kind: "tail",
+						tail: {
+							lines: lines.slice(-2),
+							fromStart: lines.length <= 2,
+							count: lines.length,
+							trailing: tailBytes,
+							trailingOffset: cut,
+						},
+					},
+			anchor: acquireSmallFile(`${logPath}.meta`, MAX_ANCHOR_BYTES),
+		},
+		"writer",
 	);
-	if (segments.length > 0) {
+	if (tail.state === "SEGMENTED" && inventory.kind === "ok") {
+		const segments = inventory.names.filter((f) => f.endsWith(".jsonl") && f !== "events.jsonl");
 		throw new AuditQuarantineRefusedError(`the chain has other segments (${segments.join(", ")})`);
 	}
-	assertRegularLog(logPath);
-	const bytes = logBytes ?? (existsSync(logPath) ? readFileSync(logPath) : Buffer.alloc(0));
-	const cut = bytes.lastIndexOf(0x0a) + 1; // 0 when there is no newline at all
-	const tailBytes = bytes.subarray(cut);
 	let torn: TornTail | null = null;
-	if (tailBytes.length > 0) {
-		let parses = true;
-		try {
-			JSON.parse(tailBytes.toString("utf-8"));
-		} catch {
-			parses = false;
-		}
-		if (parses) {
+	if (tail.torn !== null) {
+		if (tail.torn.kind !== "fragment") {
 			throw new AuditQuarantineRefusedError(
 				"the unterminated last line parses as JSON — it is not a torn write. If it is a complete, genuine event, verify it and terminate it with a newline, then run `usertrust verify`; otherwise restore the log from a backup",
 			);
@@ -401,10 +463,11 @@ function analyse(auditDir: string, logPath: string, qDir: string, logBytes?: Buf
 		const sha256 = createHash("sha256").update(tailBytes).digest("hex");
 		torn = { ...cutOf(sha256, cut), length: tailBytes.length };
 	}
-	const events = verifyPrefix(bytes.subarray(0, cut).toString("utf-8"));
-	const anchor = checkAnchor(`${logPath}.meta`, events);
-	const last = events.at(-1);
-	const head = last === undefined ? null : { hash: last.hash, sequence: events.length };
+	const anchor = repairableAnchor(tail);
+	// The whole prefix, not only its tail: a torn tail is repaired only after a chain that verifies.
+	const events = verifyPrefix(lines);
+	const head =
+		tail.found === null ? null : { hash: tail.found.hash, sequence: tail.found.sequence };
 
 	// A cut is recorded iff a chained record names its evidence FILE (digest AND offset).
 	const recordedFiles = new Set(
@@ -413,15 +476,8 @@ function analyse(auditDir: string, logPath: string, qDir: string, logBytes?: Buf
 			.map((e) => e.data?.file as string),
 	);
 	let pending: Cut[] = [];
-	// lstat, not exists: a DANGLING quarantine/ symlink must be refused here too, before any repair
-	// step has changed anything.
-	const st = lstatOrUndefined(qDir);
-	if (st !== undefined) {
-		if (st.isSymbolicLink() || !st.isDirectory()) {
-			throw new AuditQuarantineRefusedError(
-				"audit/quarantine is not a real directory (a symlink or a file)",
-			);
-		}
+	// Refused above if it is not a real directory (a dangling symlink included).
+	if (qSt !== undefined) {
 		const names = readdirSync(qDir).filter((f) => f.endsWith(".torn"));
 		const cuts: Cut[] = [];
 		for (const name of names) {

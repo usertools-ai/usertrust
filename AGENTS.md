@@ -974,6 +974,30 @@ either still verifies), and the binding of `leafHash` to an externally expected 
 caller's job. Hash-string *encoding* is likewise unvalidated beyond `typeof === "string"`; Node's
 hex decoder is permissive, and tightening it needs its own compatibility analysis.
 
+**The writer never appends over a tail it cannot explain.** ONE classifier (`audit/tail-state.ts`,
+mirrored byte for byte into `packages/verify`) maps every (inventory, log, anchor) observation to one
+named state, with no catch-all: every caller `switch`es with a `never` check, and the classifier
+never throws (an input it cannot read is a state). The writer, `quarantine-tail`, `verify` (core and
+standalone), `health` and the `failClosed` pre-flight all read it, and one wording of each state
+(`verdictErrors`) serves every verifier entry point. The writer goes on only from `FRESH`, `MATCH`, or
+`ONE_PAST_ANCHOR`, which it rolls forward. Rules that keep it honest:
+- **Nothing is cached between appends.** Each append opens the log BY PATH (`O_RDWR | O_APPEND |
+  O_NOFOLLOW | O_NONBLOCK`), classifies the tail through that descriptor, and writes through it.
+- **Nothing is written in a refused state:** no log created, no anchor touched, the event
+  dead-lettered as any failed append's is. An absent log is created only for a `FRESH` vault, with
+  the event in hand, `O_CREAT | O_EXCL`.
+- **A roll-forward syncs the log before its anchor records it.**
+- **After a failed append, or a lock taken anew, the audit directory is synced before anything
+  chains** from what is there (a rename whose directory sync failed would otherwise be chained from).
+- **One snapshot per verdict.** `verify` and `health` read the vault once (`audit/stable-read.ts`:
+  bracketed, retried; `busy` when it keeps changing; torn-or-in-progress under a live writer), and
+  every phase reads only that snapshot.
+- **`audit.failClosed` runs the append's own classification before any hold** (`preflight()` on the
+  writer, under its mutex and lock), at every `trust()` entry point and headless `authorize()`.
+*Prevents:* the writer adopting whatever last line it found and rewriting `.meta` to it, so a
+truncation became the anchored truth at the next call and `verify` passed the shortened chain; and
+an honest interrupted write reading as tampering.
+
 **Audit-write failure degrades; it never unwinds committed money.** The writer dead-letters to
 `.usertrust/dlq/dead-letters.jsonl` (dir `0700`, file `0600`, fsync'd) and **re-throws**; governance
 call sites catch it and mark the call audit-degraded. A failed append must not unwind the transfer,
@@ -1079,10 +1103,12 @@ in the clear, with no hash chain over it. `0600` is the only thing protecting it
 **Single-writer audit semantics.** In-process `AsyncMutex` + an advisory
 lock file (created complete, by hard link: below) + an owner registry that distinguishes a crashed same-PID writer (reclaimable) from a live
 sibling (refused). Every append writes EVERY byte (`writeFully`: a short `writeSync` is looped, and
-one that makes no progress throws, so nothing is claimed durable and the cached tail is dropped),
-then `fsyncSync` + `closeSync`. The `.meta` sidecar is replaced atomically: a temp file, fsync,
-rename, then a directory fsync (only an UNSUPPORTED directory fsync is best effort). Reclaiming a *live* sibling's lock forks the chain, because each writer caches its
-own tail. There is **no** cross-process protection beyond this advisory lock.
+one that makes no progress throws, so nothing is claimed durable),
+then `fsyncSync` + `closeSync`. Nothing about the tail is cached between appends: every append (and
+every pre-flight) opens the log by path and classifies its tail against `.meta` anew (`tail-state.ts`).
+The `.meta` sidecar is replaced atomically: a temp file, fsync,
+rename, then a directory fsync (only an UNSUPPORTED directory fsync is best effort). Reclaiming a *live* sibling's lock forks the chain: two writers append, each from the
+tail it read. There is **no** cross-process protection beyond this advisory lock.
 
 **One writer per vault per PROCESS, shared by every governor.** `trust()` and `createGovernor()`
 never make a writer of their own: each takes a handle from `openSharedAuditWriter(vaultPath)`, and
@@ -1629,12 +1655,12 @@ verifier verifies nothing.
 
 | Core | Verify | Enforced by |
 |---|---|---|
-| `core/src/audit/anchor-verify.ts` | `verify/src/anchor-verify.ts` | file-diff test (differs in exactly 2 lines per side: the `GENESIS_HASH` import, and `./merkle.js` vs `./verify.js`) |
+| `core/src/audit/anchor-verify.ts` | `verify/src/anchor-verify.ts` | file-diff test (differs in its import lines only: the `GENESIS_HASH` import, `./merkle.js` vs `./verify.js`, and where the sorted `./tail-read.js` import falls) |
 | `core/src/audit/rekor-verify.ts` | `verify/src/rekor-verify.ts` | file-diff test (currently byte-identical) |
+| `core/src/audit/tail-state.ts`, `tail-read.ts`, `stable-read.ts` | `verify/src/tail-state.ts`, `tail-read.ts`, `stable-read.ts` | file-diff test (`tests/audit/tail-mirror.test.ts`; `tail-state.ts` differs in its `GENESIS_HASH` import line) |
 | `core/src/cli/verify.ts` → the `--bundle` helpers (`CONTROL_CHARS`, `clipKey`, `parseBundle`, `readArtifact`, `readPinnedPem`, …) | `verify/src/cli.ts` | **behavioral only, and only on the `--bundle` path** — one test drives both CLIs against a hostile bundle key. No file-diff rule covers this pair, and the two files are not whole-file mirrors. |
 | `core/src/audit/canonical.ts` | `verify/src/canonical.ts` | behavioral tests only — **weakest link; hand-check it**. Code-identical (differ only in comments). Corrected together on `ship/canonicalize-guard` against receipt-spec §13: top-level `undefined` → `null`; in-array `undefined` and holes → `null`; functions/symbols throw. Remaining known divergence vs the harness oracle is **invalid-Date error identity** (`RangeError` from `toISOString` vs the harness's named throw) — not this cut. |
-| `core/src/audit/verify.ts` → `verifyChain` | `verify/src/verify.ts` | differential tests |
-| `core/src/audit/verify.ts` → `verifyVault`, `verifyVaultReading`, `verifyVaultWithAnchors`, `verifyVaultWithAnchorsReading`, `exitCodeForAnchored` | `verify/src/index.ts` | differential tests |
+| `core/src/audit/verify.ts` → `verifyChain`, `verifyVault`, `verifyVaultReading`, `verifyVaultWithAnchors`, `verifyVaultWithAnchorsReading`, `exitCodeForAnchored`, and the one walk they share (`readAuditDirectory`) | `verify/src/index.ts` (`verifyChain` moved here from `verify.ts`: it is the vault's own walk over one log, not a second one) | differential tests (`tests/audit/verify-hostile.test.ts` runs its vault-verdict, `verifyChain` and anchor-mirror rows through both packages) |
 | `core/src/audit/merkle.ts` → all 7 Merkle functions | `verify/src/verify.ts` (there is **no** `merkle.ts` in verify) | differential tests |
 | `verify/src/receipt.ts` → `detectProvider` | mirrored *into* `core/src/export/markdown.ts` and `ui/src/shared/rows.ts` | comment only (verify is the source here) |
 | *(no core counterpart)* | `verify/src/receipt-verify.ts`, `verify/src/receipt-cli.ts` | **not mirrored, by design.** Core never mints a ut1 receipt-spec document — that is the stealth proxy's job — so there is nothing on the core side to keep in lockstep. Both files still sit inside the parity contract above (zero deps, `node:*`/`./`-relative imports only) and reuse `verify.ts`'s Merkle functions, `anchor-verify.ts`'s exported `verifySignatureRaw` + key parsing, and `canonical.ts`'s `canonicalize` (see the row above for its known §13 non-conformance — inherited here, not introduced here) rather than duplicating them a second time inside `packages/verify` itself. Recorded here so the next auditor does not go hunting a phantom `core/src` mirror for it. |

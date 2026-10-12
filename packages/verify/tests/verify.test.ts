@@ -61,9 +61,15 @@ function buildChain(events: EventData[]): string[] {
 	return lines;
 }
 
+/** The log, and its anchor as the writer keeps it: the last line's hash and the count. */
 function writeChainToVault(vaultPath: string, lines: string[]): void {
 	const logPath = join(vaultPath, "audit", "events.jsonl");
 	writeFileSync(logPath, `${lines.join("\n")}\n`);
+	const last = lines.at(-1);
+	if (last !== undefined) {
+		const { hash } = JSON.parse(last) as { hash: string };
+		writeFileSync(`${logPath}.meta`, JSON.stringify({ lastHash: hash, sequence: lines.length }));
+	}
 }
 
 /** Generate N distinct hex hashes for Merkle tree tests */
@@ -124,13 +130,25 @@ describe("verifyChain", () => {
 		expect(result.latestHash).toBe(GENESIS_HASH);
 	});
 
-	it("returns valid for a file with only whitespace", () => {
+	it("an EMPTY log is valid: no events, the genesis head", () => {
 		const logPath = join(vaultPath, "audit", "events.jsonl");
-		writeFileSync(logPath, "   \n  \n  ");
+		writeFileSync(logPath, "");
 		const result = verifyChain(logPath);
 		expect(result.valid).toBe(true);
 		expect(result.eventsVerified).toBe(0);
 		expect(result.latestHash).toBe(GENESIS_HASH);
+	});
+
+	it("a log of blank lines and spaces is not an empty one: its lines and its unterminated bytes are errors", () => {
+		const logPath = join(vaultPath, "audit", "events.jsonl");
+		writeFileSync(logPath, "   \n  \n  ");
+		const result = verifyChain(logPath);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toMatch(/malformed JSON/);
+		// One answer path: the vault's own wording, which names the file.
+		expect(result.errors).toContain(
+			"torn tail: 2 byte(s) after the last newline of events.jsonl (fragment)",
+		);
 	});
 
 	it("returns valid for a correctly chained log", () => {
@@ -139,8 +157,8 @@ describe("verifyChain", () => {
 			{ kind: "llm_call", actor: "local", data: { model: "gpt-4o" } },
 			{ kind: "llm_call", actor: "local", data: { model: "gemini-2.0-flash" } },
 		]);
+		writeChainToVault(vaultPath, lines);
 		const logPath = join(vaultPath, "audit", "events.jsonl");
-		writeFileSync(logPath, `${lines.join("\n")}\n`);
 
 		const result = verifyChain(logPath);
 		expect(result.valid).toBe(true);
@@ -1335,14 +1353,32 @@ describe("verifyVault", () => {
 		expect(result.chainLength).toBe(1);
 	});
 
-	it("handles events.jsonl that exists but is empty (no content after trim)", () => {
+	it("an EMPTY events.jsonl is a fresh chain: valid, no events, no root", () => {
 		const logPath = join(vaultPath, "audit", "events.jsonl");
-		writeFileSync(logPath, "  \n  \n  ");
+		writeFileSync(logPath, "");
 
 		const result = verifyVault(vaultPath);
 		expect(result.valid).toBe(true);
 		expect(result.chainLength).toBe(0);
 		expect(result.merkleRoot).toBeNull();
+		expect(result.tailState?.state).toBe("FRESH");
+	});
+
+	it("a log of blank lines and spaces is not an empty one: each line, and the bytes after the last newline, are errors", () => {
+		// The writer never writes a blank line or leaves bytes unterminated: these were trimmed away, and
+		// the vault read as an empty, valid chain.
+		const logPath = join(vaultPath, "audit", "events.jsonl");
+		writeFileSync(logPath, "  \n  \n  ");
+
+		const result = verifyVault(vaultPath);
+		expect(result.valid).toBe(false);
+		expect(result.errors).toEqual(
+			expect.arrayContaining([
+				"malformed JSON (events.jsonl:1)",
+				"malformed JSON (events.jsonl:2)",
+				"torn tail: 2 byte(s) after the last newline of events.jsonl (fragment)",
+			]),
+		);
 	});
 
 	it("handles vault with all-malformed JSON (no hashes collected, no merkle root)", () => {

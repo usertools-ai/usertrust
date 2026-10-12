@@ -49,7 +49,12 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			console.log(
 				`Exported ${result.written} receipt note(s) to ${scrubForTerminal(result.outDir)}`,
 			);
-			if (result.chainValid && result.vaultValid) {
+			if (result.vaultBusy === true) {
+				// No verdict, never "BROKEN": the vault kept changing while it was read.
+				console.log(
+					`Chain integrity: ${pc.yellow("no verdict")} (the vault was being written while it was read; export again)`,
+				);
+			} else if (result.chainValid && result.vaultValid) {
 				console.log("Chain integrity: verified");
 			} else {
 				console.log(`Chain integrity: ${pc.red("BROKEN")}`);

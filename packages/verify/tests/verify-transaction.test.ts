@@ -44,10 +44,19 @@ function buildChain(
 	return lines;
 }
 
+/** The log as the writer leaves it: every line terminated, and its anchor (the head and the count). */
 function writeAuditLog(vaultPath: string, lines: string[]): void {
 	const auditDir = join(vaultPath, "audit");
 	mkdirSync(auditDir, { recursive: true });
-	writeFileSync(join(auditDir, "events.jsonl"), lines.join("\n"), "utf-8");
+	writeFileSync(join(auditDir, "events.jsonl"), `${lines.join("\n")}\n`, "utf-8");
+	const last = lines.at(-1);
+	if (last !== undefined) {
+		const { hash } = JSON.parse(last) as { hash: string };
+		writeFileSync(
+			join(auditDir, "events.jsonl.meta"),
+			JSON.stringify({ lastHash: hash, sequence: lines.length }),
+		);
+	}
 }
 
 // ── Tests ──

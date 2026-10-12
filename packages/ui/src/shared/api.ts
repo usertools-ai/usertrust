@@ -11,7 +11,14 @@ export interface SummaryPayload {
 	budget: number;
 	spentUt: number;
 	remainingUt: number;
-	chain: { events: number; valid: boolean; breakIndex: number | null; errors: string[] };
+	/** `busy`: the vault kept changing while it was read, so there is no verdict (`valid` means nothing). */
+	chain: {
+		events: number;
+		valid: boolean;
+		breakIndex: number | null;
+		errors: string[];
+		busy?: boolean;
+	};
 	// File presence only — not a verification verdict. The UI has no
 	// operator-pinned genesis, and inventing one from the vault under audit
 	// would violate "anchor trust never comes from the vault under audit".

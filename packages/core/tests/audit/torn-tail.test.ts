@@ -373,7 +373,12 @@ describe("#196 r2: the LOG is never followed through a link, and a one-behind an
 			`${logOf(v)}.meta`,
 			JSON.stringify({ lastHash: head.previousHash, sequence: head.sequence - 1 }),
 		);
-		expect(verifyVault(join(v, VAULT_DIR)).valid).toBe(false);
+		// One event past its anchor, chaining from it: an interrupted write, valid with its note (it once
+		// read as truncation), and the repair below brings the anchor to the head all the same.
+		expect(verifyVault(join(v, VAULT_DIR))).toMatchObject({
+			valid: true,
+			tailState: { state: "ONE_PAST_ANCHOR" },
+		});
 		expect(await quarantineTornTail(v, { dryRun: true })).toMatchObject({
 			anchorAdvanced: true,
 			recorded: [],

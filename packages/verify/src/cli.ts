@@ -372,10 +372,27 @@ function printAnchorSection(result: AnchoredVaultVerificationResult): void {
 	}
 }
 
+/** A vault being written has no verdict: said so, never as FAILED (exit 1). */
+const BUSY_LINE =
+	"Vault integrity: BUSY (the vault is being written: its audit files kept changing while they were read; no verdict, run again)";
+
 // ── Single transaction mode ──
 if (txId !== undefined) {
 	const params = anchorMode ? await buildAnchorParams() : undefined;
 	const result = verifyTransaction(vaultPath, txId, params);
+	// Neither is "not found" (exit 2): a vault read while it kept changing has no verdict, and one whose
+	// chain could not be read at all has failed.
+	if (result.busy === true) {
+		console.log(BUSY_LINE);
+		process.exit(1);
+	}
+	if (result.failed === true) {
+		console.log("Vault integrity: FAILED");
+		for (const error of result.errors) {
+			console.log(`  - ${error}`);
+		}
+		process.exit(1);
+	}
 	console.log(result.receipt);
 	// Exit 0: verified, 1: tampered/corrupted, 2: not found
 	if (!result.found) process.exit(2);
@@ -395,10 +412,19 @@ if (txId !== undefined) {
 }
 
 // ── Full vault verification ──
+
+/** A valid chain whose tail says more: an event one past its anchor, from an interrupted write. */
+function printTailNote(result: { tailState?: { state: string; note: string } | null }): void {
+	if (result.tailState?.state === "ONE_PAST_ANCHOR") console.log(`Note: ${result.tailState.note}.`);
+}
+
 if (!anchorMode) {
 	const result = verifyVault(vaultPath);
-	if (result.valid) {
+	if (result.busy === true) {
+		console.log(BUSY_LINE);
+	} else if (result.valid) {
 		console.log("Vault integrity: VERIFIED (UNANCHORED — internal consistency only)");
+		printTailNote(result);
 	} else {
 		console.log("Vault integrity: FAILED");
 		for (const error of result.errors) {
@@ -417,12 +443,15 @@ if (!anchorMode) {
 }
 
 const result = verifyVaultWithAnchors(vaultPath, await buildAnchorParams());
-if (result.valid) {
+if (result.busy === true) {
+	console.log(BUSY_LINE);
+} else if (result.valid) {
 	console.log(
 		result.anchorState === "ANCHORED_VERIFIED"
 			? `Vault integrity: VERIFIED (${result.anchoring.anchorSource === "external" ? "externally anchored" : "vault-mirror anchors only"})`
 			: `Vault integrity: VERIFIED (${result.anchorState})`,
 	);
+	printTailNote(result);
 } else {
 	console.log(`Vault integrity: FAILED (${result.anchorState})`);
 	for (const error of result.errors) {

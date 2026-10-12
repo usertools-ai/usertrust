@@ -341,7 +341,10 @@ export function createUsertrustServer(opts: {
 			});
 		} catch (err) {
 			const mapped = toHttpError(err);
-			const shadow = config.enforcement === "evaluate_only" && mapped.status !== 500;
+			// Shadowed: policy and budget decisions (4xx). Never a 5xx: an internal error, and an
+			// audit refusal (503), are the server's inability to govern or record the call, not a
+			// decision `evaluate_only` may observe and wave through.
+			const shadow = config.enforcement === "evaluate_only" && mapped.status < 500;
 			bus.publish(tenant.id, {
 				type: "denied",
 				error: mapped.body.error,

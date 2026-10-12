@@ -124,6 +124,8 @@ import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 import {
+	AUDIT_PREFLIGHT_HINT,
+	AuditDegradedError,
 	InsufficientBalanceError,
 	LedgerUnavailableError,
 	PendingEntryNotFoundError,
@@ -1199,6 +1201,23 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	const audit: AuditWriter =
 		(isTestEnv ? opts?._audit : undefined) ?? openSharedAuditWriter(vaultPath);
 
+	/**
+	 * Under `audit.failClosed`, the audit writer's pre-flight, as `trust()` runs it: the tail classified
+	 * exactly as the append would classify it. Headless honours the flag at `authorize()`, where nothing
+	 * has moved; `settle()` stays fail-open.
+	 */
+	async function preflightAudit(): Promise<void> {
+		if (!config.audit.failClosed || audit.preflight === undefined) return;
+		try {
+			await audit.preflight();
+		} catch (err) {
+			throw new AuditDegradedError(
+				`the audit trail cannot be appended to (${err instanceof Error ? err.message : String(err)}); refused before any hold`,
+				{ cause: err, hint: AUDIT_PREFLIGHT_HINT },
+			);
+		}
+	}
+
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
 	// No `existsSync` preflight: it answers false for a file inside a directory
 	// it cannot traverse, which would report an unreadable policy as an absent
@@ -1385,6 +1404,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const denial: DenialRecord = { denialClass: "policy" };
 			const costCenterAudit: { costCenter?: string } =
 				envelope === undefined ? {} : { costCenter: envelope.attribution.costCenter };
+
+			// The audit pre-flight (audit.failClosed): after every check that needs no I/O, before the
+			// circuit breaker and any hold. A vault whose append would be refused refuses here, where
+			// nothing has moved, so a server tenant whose audit tail is refused serves nothing it could
+			// not record. (`settle()` stays fail-open: by then the caller's call has happened.)
+			await preflightAudit();
 
 			// Circuit breaker — key on "headless" since we don't have a client kind
 			const cb = breaker.get("headless" as never);

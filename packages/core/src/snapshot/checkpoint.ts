@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { withAuditWriterLock } from "../audit/chain.js";
+import { LOG_NAME, readVaultSnapshot } from "../audit/stable-read.js";
 import { PRIVATE_DIR_MODE, PRIVATE_FILE_MODE } from "../shared/private-fs.js";
 
 // ── Types ──
@@ -212,25 +213,74 @@ function validateSnapshotName(name: string): void {
  */
 export async function createSnapshot(vaultPath: string, name: string): Promise<SnapshotMeta> {
 	validateSnapshotName(name);
-	const files = await gatherVaultFiles(vaultPath);
+	// The chain (its log segments and their `.meta` anchor) comes from ONE consistent snapshot
+	// (`stable-read.ts`), taken without the writer's lock, so a live vault can still be snapshotted.
+	// Read file by file, an append landing between the log and its anchor captured an anchor AHEAD of
+	// its log: a snapshot that restores into a vault every writer refuses (events "deleted"). A vault
+	// that keeps changing, or ends in a line a live writer may still be writing, is not captured.
+	const chain = readVaultSnapshot(join(vaultPath, "audit"));
+	if (chain.kind !== "final") {
+		throw new Error(
+			chain.kind === "busy"
+				? "Cannot snapshot the vault now: its audit chain kept changing while it was read. Try again."
+				: "Cannot snapshot the vault: its audit log ends in bytes after its last newline, unchanged, while a writer holds the vault: torn, or a write in progress. Stop the writer and try again (if the bytes are still there, `usertrust audit quarantine-tail` repairs a torn tail).",
+		);
+	}
+	// An audit directory that cannot be listed is a vault nobody read (as `gatherVaultFiles` refuses
+	// one), and a chain file that is there but could not be read whole (not a regular file, over the
+	// bound, an error) refuses the snapshot too: left out, it would be restored as a file that never
+	// existed.
+	const inventory = chain.snapshot.audit;
+	if (inventory.kind === "unreadable" || inventory.kind === "oversize") {
+		throw new Error(
+			`Cannot enumerate vault for snapshot: ${join(vaultPath, "audit")} (${
+				inventory.kind === "unreadable" ? inventory.code : `over ${inventory.count} names`
+			})`,
+		);
+	}
+	const chainBytes = new Map<string, Buffer>();
+	for (const [name, file] of [
+		...chain.snapshot.segments.map((sg) => [sg.name, sg.file] as const),
+		[`${LOG_NAME}.meta`, chain.snapshot.anchor] as const,
+	]) {
+		if (file.kind === "absent") continue;
+		if (file.kind !== "read") {
+			throw new Error(
+				`Cannot snapshot the vault: its audit file ${name} could not be read whole (${file.kind}).`,
+			);
+		}
+		chainBytes.set(join("audit", name), file.bytes);
+	}
+	// Paths as `gatherVaultFiles` lists them: with this platform's separator.
+	const isChainFile = (relPath: string): boolean => {
+		const path = relPath.split(sep).join("/");
+		return path === `audit/${LOG_NAME}.meta` || /^audit\/[^/]+\.jsonl$/.test(path);
+	};
+	// Every other file as listed; the chain's files exactly as the snapshot holds them.
+	const files = [
+		...(await gatherVaultFiles(vaultPath)).filter((relPath) => !isChainFile(relPath)),
+		...chainBytes.keys(),
+	].sort();
 	const entries: Record<string, string> = {};
 	let totalSize = 0;
 
 	for (const relPath of files) {
-		const fullPath = join(vaultPath, relPath);
-		const content = await readFile(fullPath);
+		const content = chainBytes.get(relPath) ?? (await readFile(join(vaultPath, relPath)));
 		entries[relPath] = content.toString("base64");
 		totalSize += content.length;
 	}
 
 	// Forensic head anchors: the audit chain head and money-mirror value at capture
 	// time. Best-effort (a fresh vault has neither); the desync guard on restore keys
-	// off payload presence, not these fields, so their absence never weakens it.
+	// off payload presence, not these fields, so their absence never weakens it. The head is the
+	// captured anchor's, never the file read again.
 	let auditHead: SnapshotMeta["auditHead"];
 	try {
-		const metaRaw = await readFile(join(vaultPath, "audit", "events.jsonl.meta"), "utf-8");
-		const m = JSON.parse(metaRaw) as { lastHash: string; sequence: number };
-		auditHead = { lastHash: m.lastHash, sequence: m.sequence };
+		const metaRaw = chainBytes.get(join("audit", `${LOG_NAME}.meta`))?.toString("utf-8");
+		if (metaRaw !== undefined) {
+			const m = JSON.parse(metaRaw) as { lastHash: string; sequence: number };
+			auditHead = { lastHash: m.lastHash, sequence: m.sequence };
+		}
 	} catch {
 		/* no audit head yet */
 	}

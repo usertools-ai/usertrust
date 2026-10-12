@@ -8,13 +8,12 @@
  * recent transactions, and Merkle root in a formatted table.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
-import { buildMerkleTree } from "../audit/merkle.js";
-import { loadBudgetConfig, readLedgerEvents } from "../audit/read.js";
-import { verifyChain } from "../audit/verify.js";
-import { VAULT_DIR } from "../shared/constants.js";
+import { loadBudgetConfig, type PersistedAuditEvent } from "../audit/read.js";
+import { type VaultReading, verifyVaultReading } from "../audit/verify.js";
+import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
 import type { CliOptions } from "./init.js";
 import { toSafeJson, warnIfVaultLoose } from "./target.js";
@@ -29,6 +28,32 @@ function computeSpent(events: AuditEvent[]): number {
 		}
 	}
 	return spent;
+}
+
+/**
+ * The vault's chain, read ONCE (`verifyVaultReading`): its verdict, and the events the spend, the
+ * transactions and the Merkle root are taken from. A vault with nothing at its audit directory's path
+ * (nothing governed yet) holds no events; anything else there is read, and judged.
+ */
+function readChain(vaultPath: string): VaultReading | undefined {
+	try {
+		lstatSync(join(vaultPath, "audit"));
+	} catch (err) {
+		if ((err as { code?: unknown } | null)?.code === "ENOENT") return undefined;
+	}
+	return verifyVaultReading(vaultPath);
+}
+
+/** The walk's events as this statement reads them: an event without `data` carries none. */
+function statementEvents(events: readonly PersistedAuditEvent[]): AuditEvent[] {
+	return events.map((e) => {
+		const record = e as unknown as Record<string, unknown>;
+		const data =
+			typeof record.data === "object" && record.data !== null
+				? (record.data as Record<string, unknown>)
+				: {};
+		return { ...(e as AuditEvent), data } as AuditEvent;
+	});
 }
 
 function formatTime(timestamp: string): string {
@@ -70,18 +95,28 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	}
 
 	const config = loadBudgetConfig(vaultPath);
-	const events = readLedgerEvents(vaultPath);
+	const reading = readChain(vaultPath);
+	// A vault that kept changing while it was read has no snapshot: no statement is made from it.
+	if (reading?.result.busy === true) {
+		const message =
+			"the vault is being written: its audit files kept changing while they were read, so there is no statement (run inspect again)";
+		if (json) {
+			console.log(
+				toSafeJson({ command: "inspect", success: false, data: { busy: true, message } }),
+			);
+		} else {
+			console.log(pc.yellow(`Chain: ${message}.`));
+		}
+		process.exitCode = 1;
+		return;
+	}
+	const verification = reading?.result ?? { valid: true, errors: [], merkleRoot: null };
+	const events = statementEvents(reading?.events ?? []);
 	const spent = computeSpent(events);
 	const remaining = config.budget - spent;
 	const pct = config.budget > 0 ? ((remaining / config.budget) * 100).toFixed(1) : "0.0";
-
-	// Verify chain
-	const logPath = join(vaultPath, "audit", "events.jsonl");
-	const verification = verifyChain(logPath);
-
-	// Build Merkle tree from event hashes
-	const eventHashes = events.map((e) => e.hash);
-	const { root: merkleRoot } = buildMerkleTree(eventHashes);
+	const merkleRoot = verification.merkleRoot;
+	const latestHash = reading?.orderedHashes[reading.orderedHashes.length - 1] ?? GENESIS_HASH;
 
 	if (json) {
 		const transactions = events
@@ -104,9 +139,9 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 					remaining,
 					percentRemaining: Number.parseFloat(pct),
 					chain: {
-						events: verification.eventsVerified,
+						events: events.length,
 						valid: verification.valid,
-						latestHash: verification.latestHash,
+						latestHash,
 					},
 					merkleRoot: merkleRoot ?? null,
 					transactions,
@@ -125,7 +160,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		)}|`,
 	);
 	console.log(
-		`${`|  Chain: ${verification.eventsVerified} events | Integrity: ${verification.valid ? "SHA-256 verified" : "INTEGRITY FAILURE"}`.padEnd(
+		`${`|  Chain: ${events.length} events | Integrity: ${verification.valid ? "SHA-256 verified" : "INTEGRITY FAILURE"}`.padEnd(
 			63,
 		)}|`,
 	);

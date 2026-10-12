@@ -56,7 +56,7 @@ export function SummaryStrip(props: {
 	return (
 		<div className="reveal reveal-1 flex flex-col gap-2">
 			<style>{stripCss}</style>
-			{!s.chain.valid && (
+			{!s.chain.valid && s.chain.busy !== true && (
 				<div className="flex flex-col gap-1 rounded border border-[var(--danger)] bg-[var(--danger)]/10 px-3 py-2 text-sm text-[var(--danger)]">
 					<span>
 						⚠ CHAIN INTEGRITY FAILURE — tampering or corruption detected
@@ -104,11 +104,15 @@ export function SummaryStrip(props: {
 							)}
 						</div>
 						<Stat label="Chain" value={`${s.chain.events.toLocaleString()} events`} />
-						<Stat
-							label="Integrity"
-							value={s.chain.valid ? "verified" : "BROKEN"}
-							tone={s.chain.valid ? "ok" : "bad"}
-						/>
+						{s.chain.busy === true ? (
+							<Stat label="Integrity" value="no verdict (being written)" />
+						) : (
+							<Stat
+								label="Integrity"
+								value={s.chain.valid ? "verified" : "BROKEN"}
+								tone={s.chain.valid ? "ok" : "bad"}
+							/>
+						)}
 						<Stat
 							label="Anchor file"
 							value={
