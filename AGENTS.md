@@ -1601,13 +1601,15 @@ all. This is why provider SDK majors can be bumped with no code change.
 **Anthropic and OpenAI clients are default-deny** (`default-deny.ts`): every other function-valued
 SDK member reached off the governed client, at any depth, is refused through ONE function,
 `refuseUngovernedMethod` in `trust()`, which writes `policy_denied` at the denial boundary and
-rejects. The exceptions are the free list in `default-deny.ts` (methods that cannot spend, each
-cited to its SDK source line; they run with the RAW resource as `this`, because `this._client`
-through the boundary is a refusing stand-in) and `trust({ allowUngoverned })` (audited as
+rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
+requests are all GET or DELETE, plus POSTs named with a reason, minus GET/DELETE methods named as
+exceptions. Each entry cites its SDK source line and verb; they run with the RAW resource as
+`this`, because `this._client` through the boundary is a refusing stand-in, and
+`default-deny.test.ts` calls every entry and fails on a POST its `FREE_POSTS` does not name and `trust({ allowUngoverned })` (audited as
 `ungoverned_call`). `_client` and the client's raw HTTP members are refused by name; `withOptions`
-is re-wrapped by the same governor. On a Google client everything else passes through. A method is
-freed only with SDK evidence that it cannot start billable work; a create that can allocate storage
-is not free. If you add a governed surface, update that doc block and the free list.
+is re-wrapped by the same governor. On a Google client everything else passes through. A POST is
+freed only with a reason it cannot start billable work, written in both places; a create that can
+allocate storage is not free. If you add a governed surface, update that doc block and the free list.
 
 ---
 

@@ -27,8 +27,9 @@ vector stores, realtime, videos, legacy `completions.create()`, OpenAI's
 (`chat.completions.parse/stream/runTools`, `responses.parse/stream`,
 `beta.messages.toolRunner`). A refused call rejects with a `PolicyDeniedError`
 and leaves a `policy_denied` audit event; the provider is never called. Methods
-that cannot spend (model lists, token counts, moderations, reads and deletes of
-stored objects) run unaudited from a fixed free list. A method you list in
+that cannot start work run unaudited: every method whose requests are all GET or
+DELETE (reads, lists, deletes), and a few POSTs named with a reason (token counts,
+moderations, cancels, pauses, metadata updates). A method you list in
 `trust({ allowUngoverned })` runs **unmetered**: it reaches the provider without
 a budget hold or a cost, and its only record is an `ungoverned_call` audit event.
 On a Google client, the alternative methods still pass through ungoverned. The

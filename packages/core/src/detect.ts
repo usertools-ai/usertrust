@@ -26,9 +26,10 @@
  * evals, the legacy `completions.create`, OpenAI `beta.responses`, and the SDK helpers
  * that drive the raw client internally (`chat.completions.parse/stream/runTools`,
  * `responses.parse/stream/compact`, `beta.messages.toolRunner`). Exceptions:
- * - a free list of methods that cannot spend (model lists, token counts, moderations,
- *   and the retrieve/list/cancel/delete of batches, files, jobs and stored objects),
- *   which run on the raw SDK resource, unaudited;
+ * - the free list: every method whose requests are all GET or DELETE (reads, lists,
+ *   deletes), plus POSTs named with a reason (token counts, moderations, cancels,
+ *   pauses, metadata updates), minus a few named exceptions. They run on the raw SDK
+ *   resource, unaudited;
  * - `trust({ allowUngoverned: ["embeddings.create"] })`, which runs a listed method
  *   ungoverned and audits each call as `ungoverned_call` (no usage, no cost).
  * A resource's `_client` and the client's raw HTTP members (`post`, `get`, `request`, …)
@@ -54,8 +55,8 @@ import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./s
  *   helper is NOT, and is refused.
  * - Google: `client.models.generateContent()`
  *
- * Everything else on an Anthropic or OpenAI client is refused, except a free list of
- * methods that cannot spend and the methods `trust({ allowUngoverned })` lists (see
+ * Everything else on an Anthropic or OpenAI client is refused, except the free list
+ * (reads, lists, deletes and a few named POSTs) and the methods `trust({ allowUngoverned })` lists (see
  * the module comment and `default-deny.ts`). On a Google client everything else
  * passes through ungoverned.
  *

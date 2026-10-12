@@ -28,6 +28,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { verifyVault } from "../../../verify/src/index.js";
 import type { AuditWriter } from "../../src/audit/chain.js";
 import { run as runVerifyCli } from "../../src/cli/verify.js";
+import { FREE_METHODS } from "../../src/default-deny.js";
 import { type TrustEngine, type TrustOpts, trust } from "../../src/govern.js";
 import { AUDIT_DIR, VAULT_DIR } from "../../src/shared/constants.js";
 import { AuditDegradedError, PolicyDeniedError } from "../../src/shared/errors.js";
@@ -611,6 +612,233 @@ describe("free methods run on the raw SDK resource, unaudited", () => {
 		).rejects.toThrow(/webhook-signature|missing|header/i);
 		expect(hits).toEqual([]);
 		expect(chainEvents()).toEqual([]);
+	});
+});
+
+// ── The free list's rule, pinned ──
+
+/**
+ * The free POSTs, each with the reason it cannot start billable work. Every other free method
+ * must send only GET or DELETE: adding a POST to the free list without adding it here fails.
+ */
+const FREE_POSTS: Record<string, string> = {
+	"anthropic:messages.countTokens": "counts tokens; runs no model and is not billed",
+	"anthropic:beta.messages.countTokens": "counts tokens; runs no model and is not billed",
+	"anthropic:messages.batches.cancel": "cancel: stops work",
+	"anthropic:beta.messages.batches.cancel": "cancel: stops work",
+	"anthropic:beta.dreams.cancel": "cancel: stops work",
+	"anthropic:beta.deployments.pause": "pause: stops scheduled runs",
+	"openai:moderations.create": 'priced "Free"',
+	"openai:chat.completions.update": "metadata only, on a stored completion",
+	"openai:responses.cancel": "cancel: stops work",
+	"openai:beta.responses.cancel": "cancel: stops work",
+	"openai:batches.cancel": "cancel: stops work",
+	"openai:fineTuning.jobs.cancel": "cancel: stops work",
+	"openai:fineTuning.jobs.pause": "pause: stops work",
+	"openai:fineTuning.checkpoints.permissions.create": "an access grant on a checkpoint",
+	"openai:fineTuning.alpha.graders.validate": "validates a grader definition; runs no grader",
+	"openai:beta.assistants.update": "update params only reference existing vector stores",
+	"openai:beta.threads.update": "update params only reference existing vector stores",
+	"openai:beta.threads.messages.update": "metadata only",
+	"openai:beta.threads.runs.cancel": "cancel: stops a run",
+	"openai:vectorStores.fileBatches.cancel": "cancel: stops ingestion",
+	"openai:uploads.cancel": "cancel: drops an upload",
+	"openai:beta.chatkit.sessions.cancel": "cancel: ends a session",
+	"openai:realtime.calls.hangup": "ends a call",
+	"openai:realtime.calls.reject": "declines a call",
+	"openai:realtime.calls.refer": "transfers a call away from the model",
+	"openai:evals.create": "an eval definition; evals.runs.create is refused",
+	"openai:evals.update": "metadata of an eval definition",
+	"openai:evals.runs.cancel": "cancel: stops a run",
+	"openai:conversations.create": "a state object; the spend lands on responses.create",
+	"openai:conversations.update": "metadata only",
+	"openai:conversations.items.create": "a state object; the spend lands on responses.create",
+};
+
+/** The free methods that send nothing at all. */
+const FREE_LOCAL: Record<string, string> = {
+	"anthropic:beta.webhooks.unwrap": "verifies a signature locally",
+	"openai:webhooks.unwrap": "verifies a signature locally",
+	"openai:webhooks.verifySignature": "verifies a signature locally",
+};
+
+/** Split a parameter list at its top-level commas (destructured defaults hold commas too). */
+function parameterNames(fn: (...a: unknown[]) => unknown): string[] {
+	const src = fn.toString();
+	const open = src.indexOf("(");
+	let depth = 0;
+	let close = open;
+	for (let i = open; i < src.length; i++) {
+		const ch = src[i];
+		if (ch === "(" || ch === "{" || ch === "[") depth++;
+		if (ch === ")" || ch === "}" || ch === "]") depth--;
+		if (depth === 0) {
+			close = i;
+			break;
+		}
+	}
+	const parts: string[] = [];
+	let cur = "";
+	depth = 0;
+	for (const ch of src.slice(open + 1, close)) {
+		if (ch === "{" || ch === "[" || ch === "(") depth++;
+		if (ch === "}" || ch === "]" || ch === ")") depth--;
+		if (ch === "," && depth === 0) {
+			parts.push(cur.trim());
+			cur = "";
+		} else cur += ch;
+	}
+	if (cur.trim() !== "") parts.push(cur.trim());
+	return parts;
+}
+
+/**
+ * Params that name their parent resources: a nested method reads its parent's id off `params`
+ * (`{ vector_store_id }`, `{ fine_tuned_model_checkpoint }`) and the SDK refuses to build a path with an undefined segment.
+ */
+const PARENT_IDS = new Proxy(
+	{},
+	{
+		get: (_t, key) =>
+			typeof key === "string" && /(_id|ID|Id|_checkpoint)$/.test(key) ? "id_1" : undefined,
+	},
+);
+
+/** Dummy arguments: a string for each leading path parameter, params with parent ids, no options. */
+function dummyArgs(fn: (...a: unknown[]) => unknown): unknown[] {
+	return parameterNames(fn).map((part) => {
+		const name = (part.split("=")[0] ?? "").trim();
+		if (name === "options") return undefined;
+		if (name.startsWith("{") || /^(params|query|body)$/.test(name)) return PARENT_IDS;
+		return "id_1";
+	});
+}
+
+/** A body every free method can read: terminal statuses end the SDK's poll loops at once. */
+function anyBody(pathname: string): Record<string, unknown> {
+	return {
+		id: "id_1",
+		object: "list",
+		status:
+			/\/files\/[^/]+$/.test(pathname) && !pathname.includes("vector_stores")
+				? "processed"
+				: "completed",
+		data: [],
+		has_more: false,
+		first_id: null,
+		last_id: null,
+	};
+}
+
+function resolveMember(root: Loose, path: string): { holder: Loose; fn: Loose; name: string } {
+	const segments = path.split(".");
+	const name = segments.pop() as string;
+	let holder = root;
+	for (const s of segments) holder = holder[s];
+	return { holder, fn: holder[name], name };
+}
+
+describe("every free method sends only GET or DELETE, unless it is a named free POST", () => {
+	const providers = ["anthropic", "openai"] as const;
+	const methods: Record<string, string[]> = {};
+	const vaults: Record<string, string> = {};
+	const clients: Record<string, { governed: Loose; raw: Loose; requests: string[] }> = {};
+
+	beforeAll(async () => {
+		for (const provider of providers) {
+			const requests: string[] = [];
+			const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+				const url = new URL(String(input instanceof Request ? input.url : input));
+				requests.push(`${(init?.method ?? "GET").toUpperCase()} ${url.pathname}`);
+				return json(anyBody(url.pathname));
+			}) as unknown as typeof fetch;
+			const raw =
+				provider === "anthropic"
+					? new Anthropic({
+							apiKey: "k",
+							baseURL: "https://anthropic.test",
+							fetch: fetchImpl,
+							maxRetries: 0,
+						})
+					: new OpenAI({
+							apiKey: "k",
+							adminAPIKey: "k",
+							webhookSecret: "whsec_AAAA",
+							baseURL: "https://openai.test/v1",
+							fetch: fetchImpl,
+							maxRetries: 0,
+						});
+			vaults[provider] = join(tmpdir(), `default-deny-free-${randomUUID()}`);
+			mkdirSync(vaults[provider] as string, { recursive: true });
+			const governed = await trust(raw, {
+				budget: 1_000_000,
+				vaultBase: vaults[provider],
+				_engine: mockEngine(),
+			});
+			clients[provider] = { governed, raw, requests };
+		}
+	});
+
+	afterAll(async () => {
+		for (const provider of providers) {
+			await clients[provider]?.governed.destroy();
+			rmSync(vaults[provider] as string, { recursive: true, force: true });
+		}
+	});
+
+	for (const provider of providers) {
+		methods[provider] = [...FREE_METHODS[provider]].sort();
+	}
+
+	it("the named sets name only free methods", () => {
+		for (const key of [...Object.keys(FREE_POSTS), ...Object.keys(FREE_LOCAL)]) {
+			const [provider, path] = key.split(":") as ["anthropic" | "openai", string];
+			expect(FREE_METHODS[provider].has(path), key).toBe(true);
+		}
+	});
+
+	it.each(
+		providers.flatMap((provider) =>
+			(methods[provider] ?? []).map((path) => [`${provider}:${path}`, provider, path] as const),
+		),
+	)("%s", async (key, provider, path) => {
+		const c = clients[provider] as { governed: Loose; raw: Loose; requests: string[] };
+		c.requests.length = 0;
+		const { fn: rawFn } = resolveMember(c.raw, path);
+		expect(typeof rawFn, `${key} exists on the installed SDK`).toBe("function");
+		const { holder, name } = resolveMember(c.governed, path);
+		let caught: unknown;
+		try {
+			await Promise.race([
+				(async () => await holder[name](...dummyArgs(rawFn)))(),
+				new Promise((_, reject) =>
+					setTimeout(() => reject(new Error(`${key}: no answer in 3s`)), 3000),
+				),
+			]);
+		} catch (err) {
+			caught = err;
+		}
+		// An SDK-side error over the dummy arguments is fine; a refusal or a hang is not.
+		expect(caught, `${key} was refused`).not.toBeInstanceOf(PolicyDeniedError);
+		expect(String((caught as Error | undefined)?.message ?? "")).not.toMatch(/no answer in 3s/);
+		if (FREE_LOCAL[key] !== undefined) {
+			expect(c.requests, `${key} is local`).toEqual([]);
+			return;
+		}
+		// Positive control: the call reached the recording fetch, so the verb check below has a subject.
+		expect(c.requests.length, `${key} sent a request`).toBeGreaterThan(0);
+		const allowed = FREE_POSTS[key] !== undefined ? ["GET", "DELETE", "POST"] : ["GET", "DELETE"];
+		for (const r of c.requests) {
+			expect(allowed, `${key} sent ${r}`).toContain(r.split(" ")[0]);
+		}
+		const events = readFileSync(
+			join(vaults[provider] as string, VAULT_DIR, AUDIT_DIR, "events.jsonl"),
+			{
+				encoding: "utf8",
+				flag: "a+",
+			},
+		);
+		expect(events, `${key} wrote no audit event`).toBe("");
 	});
 });
 
