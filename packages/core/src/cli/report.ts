@@ -31,7 +31,11 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import pc from "picocolors";
-import { deadLetterPath } from "../audit/dead-letters.js";
+import {
+	deadLetterPath,
+	describeMissingEvents,
+	readChainDeadLetters,
+} from "../audit/dead-letters.js";
 import { readLedgerEvents } from "../audit/read.js";
 import { verifyVault } from "../audit/verify.js";
 import { parseDeadLetters } from "../report/dead-letters.js";
@@ -346,6 +350,8 @@ export function snapshotVault(
 	spendLedger?: { value: number } | { unreadable: true };
 	/** The writer's dead-letter queue, read ONCE with the rest (NOT chain-verified). A read error is `unreadable`, never "none". */
 	deadLetters: DeadLetters;
+	/** Set when the queue exists and could not be read (the code): completeness is then UNKNOWN, never "none". */
+	deadLetterReadError?: string;
 	/** The UTC instant the vault was read, taken BEFORE the audit directory was listed: what the VERIFIED claim is about. */
 	readAtIso: string;
 	cleanup: () => void;
@@ -357,6 +363,7 @@ export function snapshotVault(
 	let configUnreadable = false;
 	let spendLedger: { value: number } | { unreadable: true } | undefined;
 	let deadLetters: DeadLetters = { shortfalls: new Map() };
+	let deadLetterReadError: string | undefined;
 	const problem = (what: string, err: unknown): void => {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		problems.push(`Could not read ${what}${code !== undefined ? ` (${code})` : ""}`);
@@ -436,12 +443,21 @@ export function snapshotVault(
 		}
 		// The writer's dead-letter queue: a capped post whose shortfall append failed is recorded there with the posted
 		// amount. Absent is "no dead letters"; a file that exists and cannot be read is NOT, it leaves only an upper bound.
+		//
+		// The SAME bytes also go into the snapshot (at the path the verifier's reader uses), so the completeness check below
+		// (is a dead-lettered chain event missing from the chain?) and the shortfalls read here are one read of one file.
 		const dlqSrc = deadLetterPath(vaultPath);
-		if (existsSync(dlqSrc)) {
-			try {
-				deadLetters = parseDeadLetters(readFileSync(dlqSrc, "utf-8"));
-			} catch {
+		try {
+			const text = readFileSync(dlqSrc, "utf-8");
+			mkdirSync(dirname(deadLetterPath(dir)), { recursive: true, mode: 0o700 });
+			writeFileSync(deadLetterPath(dir), text, { mode: 0o600 });
+			deadLetters = parseDeadLetters(text);
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException | undefined)?.code;
+			// ABSENT: nothing was ever dead-lettered. Anything else: whether events are missing is UNKNOWN, never "none".
+			if (code !== "ENOENT") {
 				deadLetters = { unreadable: true };
+				deadLetterReadError = typeof code === "string" ? code : "read failed";
 			}
 		}
 	} catch (err) {
@@ -454,6 +470,7 @@ export function snapshotVault(
 		busy,
 		configUnreadable,
 		deadLetters,
+		...(deadLetterReadError !== undefined ? { deadLetterReadError } : {}),
 		readAtIso,
 		...(spendLedger !== undefined ? { spendLedger } : {}),
 		cleanup: () => rmSync(dir, { recursive: true, force: true }),
@@ -593,13 +610,36 @@ export async function run(
 				(f) =>
 					`Vault busy: ${f} changed on every read (a writer is appending); this is not itself a broken chain, run the report again. Problems below that name it may be an artifact of the busy read; any others are real`,
 			);
-			verified = verdict.valid && snapshot.problems.length === 0 && snapshot.busy.length === 0;
+			// COMPLETENESS, as `usertrust verify` reports it: a chain with an event missing still verifies link by link, so
+			// the report reads the same dead-letter bytes against the events it just walked. A dead-lettered chain event not
+			// on the chain, or a queue that cannot be read, is not VERIFIED.
+			const byHash = new Map(events.map((e) => [e.hash, e]));
+			const queuePath = deadLetterPath(vaultPath);
+			const dead =
+				snapshot.deadLetterReadError !== undefined
+					? { path: queuePath, unreadable: snapshot.deadLetterReadError }
+					: readChainDeadLetters(snapshot.dir, (hash) => byHash.get(hash));
+			const completenessErrors: string[] = [];
+			if ("unreadable" in dead) {
+				completenessErrors.push(
+					`INCOMPLETE?: the dead-letter queue ${queuePath} could not be read (${dead.unreadable}), so whether audit events are missing from the chain is unknown`,
+				);
+			} else if (dead.missing > 0) {
+				completenessErrors.push(
+					`INCOMPLETE: ${describeMissingEvents({ ...dead, path: queuePath })}`,
+				);
+			}
+			verified =
+				verdict.valid &&
+				snapshot.problems.length === 0 &&
+				snapshot.busy.length === 0 &&
+				completenessErrors.length === 0;
 			model = buildWeeklyReport(
 				events,
 				{
 					// A file the snapshot could not read is part of the verdict, never an omission from it.
 					verified,
-					errors: [...busyErrors, ...snapshot.problems, ...verdict.errors],
+					errors: [...busyErrors, ...snapshot.problems, ...verdict.errors, ...completenessErrors],
 					chainLength: verdict.chainLength,
 					firstEvent: verdict.firstEvent,
 					lastEvent: verdict.lastEvent,

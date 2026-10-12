@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { canonicalize } from "../../src/audit/canonical.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
+import { readChainDeadLetters } from "../../src/audit/dead-letters.js";
 import { verifyVault } from "../../src/audit/verify.js";
 import { reportArgv } from "../../src/cli/flags.js";
 import { parseEnd, parseReportArgs, run } from "../../src/cli/report.js";
@@ -679,6 +680,114 @@ describe("usertrust report --week", () => {
 		},
 	);
 
+	describe("COMPLETENESS: a dead-lettered chain event that is not on the chain is not VERIFIED", () => {
+		type Out = { integrity: { verified: boolean; errors: string[] } };
+		const readReport = async (): Promise<Out> => {
+			stdout = "";
+			process.exitCode = undefined;
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			return JSON.parse(stdout) as Out;
+		};
+
+		/** tx_kept on the chain from writer A; tx_lost from writer B (a second writer): rejected and dead-lettered. */
+		async function vaultWithOneLostEvent(): Promise<void> {
+			mkdirSync(join(dir, ".usertrust", "audit"), { recursive: true });
+			const a = createAuditWriter(dir);
+			const b = createAuditWriter(dir);
+			try {
+				await a.appendEvent({
+					kind: "llm_call",
+					actor: "local",
+					data: { transferId: "tx_kept", cost: 5 },
+				});
+				await expect(
+					b.appendEvent({
+						kind: "llm_call",
+						actor: "local",
+						data: { transferId: "tx_lost", cost: 7 },
+					}),
+				).rejects.toThrow();
+			} finally {
+				a.release();
+				b.release();
+			}
+		}
+
+		it("an event dead-lettered and absent from the chain: UNVERIFIED and INCOMPLETE, and `verify` agrees on the same vault", async () => {
+			await vaultWithOneLostEvent();
+			const out = await readReport();
+			expect(out.integrity.verified).toBe(false);
+			expect(out.integrity.errors.join("\n")).toContain("INCOMPLETE");
+			expect(out.integrity.errors.join("\n")).toContain("never reached the chain");
+			expect(process.exitCode).toBe(2);
+			// the verifier's own reader, on the real vault, agrees on the count
+			const verifier = readChainDeadLetters(join(dir, ".usertrust"), () => undefined);
+			expect("missing" in verifier && verifier.missing).toBe(1);
+			// the message names the vault's real queue, never the snapshot's temp path
+			expect(out.integrity.errors.join("\n")).toContain(join(dir, ".usertrust", "dlq"));
+			write.mockRestore();
+		});
+
+		it("a dead letter whose event DID reach the chain (its eventHash is on it) stays VERIFIED", async () => {
+			mkdirSync(join(dir, ".usertrust", "audit"), { recursive: true });
+			const w = createAuditWriter(dir);
+			try {
+				await w.appendEvent({
+					kind: "llm_call",
+					actor: "local",
+					data: { transferId: "tx_1", cost: 5 },
+				});
+				// the second event reaches the chain, but its .meta update fails: it is dead-lettered WITH its hash
+				const meta = join(dir, ".usertrust", "audit", "events.jsonl.meta");
+				rmSync(meta, { force: true });
+				mkdirSync(meta);
+				try {
+					await expect(
+						w.appendEvent({
+							kind: "llm_call",
+							actor: "local",
+							data: { transferId: "tx_2", cost: 5 },
+						}),
+					).rejects.toThrow();
+				} finally {
+					rmSync(meta, { recursive: true });
+				}
+			} finally {
+				w.release();
+			}
+			const out = await readReport();
+			expect(out.integrity.errors.join("\n")).not.toContain("INCOMPLETE");
+			write.mockRestore();
+		});
+
+		it.skipIf(process.getuid?.() === 0)(
+			"a queue that EXISTS but cannot be read is UNVERIFIED (INCOMPLETE?), never 'no dead letters'",
+			async () => {
+				await vault([{ cost: 1 }]);
+				const dlqDir = join(dir, ".usertrust", "dlq");
+				mkdirSync(dlqDir, { recursive: true });
+				const queue = join(dlqDir, "dead-letters.jsonl");
+				writeFileSync(queue, "");
+				chmodSync(queue, 0o000);
+				try {
+					const out = await readReport();
+					expect(out.integrity.verified).toBe(false);
+					expect(out.integrity.errors.join("\n")).toContain("INCOMPLETE?");
+				} finally {
+					chmodSync(queue, 0o600);
+				}
+				write.mockRestore();
+			},
+		);
+
+		it("no queue at all: nothing was ever dead-lettered, so VERIFIED stands", async () => {
+			await vault([{ cost: 1 }]);
+			const out = await readReport();
+			expect(out.integrity.verified).toBe(true);
+			write.mockRestore();
+		});
+	});
+
 	it("the dead-letter queue is read from the snapshot: a dead-lettered shortfall makes a headless post exact at the posted amount, an unreadable queue an upper bound", async () => {
 		await vault([
 			{
@@ -720,13 +829,14 @@ describe("usertrust report --week", () => {
 		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
 		totals = (JSON.parse(stdout) as { totals: Totals }).totals;
 		expect(totals).toMatchObject({ postProvenUt: 0, postProvenUpperUt: 100 });
-		// a corrupt queue: only an upper bound, and the chain verdict is untouched
+		// a corrupt queue: only an upper bound, and completeness is unknown
 		writeFileSync(dlq, "{corrupt\n");
 		stdout = "";
 		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
 		const parsed = JSON.parse(stdout) as { totals: Totals; integrity: { verified: boolean } };
 		expect(parsed.totals).toMatchObject({ postProvenUt: 0, postProvenUpperUt: 100 });
-		expect(parsed.integrity.verified).toBe(true);
+		// an unreadable queue means completeness is unknown: the chain is not VERIFIED
+		expect(parsed.integrity.verified).toBe(false);
 		write.mockRestore();
 	});
 
