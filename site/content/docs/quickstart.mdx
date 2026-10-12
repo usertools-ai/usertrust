@@ -102,7 +102,7 @@ const { response } = await client.models.generateContent({ ... });
 
 ## Streaming
 
-Streaming works transparently. The governance receipt resolves when the stream completes:
+Streaming works transparently. The settled receipt is `response.receipt`, which resolves when the stream completes (the `receipt` returned beside `response` is provisional, `settled: false`). What a failure costs is in [Streaming](/docs/api/trust#streaming):
 
 ```ts
 const { response } = await client.messages.create({
@@ -112,13 +112,17 @@ const { response } = await client.messages.create({
   stream: true,
 });
 
-// Consume the stream
-for await (const event of response) {
-  process.stdout.write(event.type);
+try {
+  // Consume the stream
+  for await (const event of response) {
+    process.stdout.write(event.type);
+  }
+  // The settled receipt, after the stream ends
+  const receipt = await response.receipt;
+} catch (err) {
+  // This catch also covers your own code in the loop, so it cannot say what the
+  // error cost: see Streaming in the trust() docs for how to tell.
 }
-
-// Receipt is available after stream ends
-const receipt = await response.receipt;
 ```
 
 ## Dry-Run Mode
