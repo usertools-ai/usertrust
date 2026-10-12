@@ -81,11 +81,14 @@ import {
 	envelopeTierFields,
 	preflightEnvelopeRemaining,
 	type ResolvedEnvelope,
+	refuseUnreadOptions,
 	resolveEnvelope,
 	runTeardownSteps,
 	snapshotEnvelopeRemaining,
+	TRUST_OPTS_KEYS,
 	type TrustEngine,
 	type TrustOpts,
+	trustConfigOverrides,
 } from "./govern.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
@@ -196,6 +199,15 @@ export interface GovernorOpts extends TrustOpts {
 	 */
 	_destroyDrainMs?: number;
 }
+
+/**
+ * Every key `GovernorOpts` declares: `TrustOpts`'s, plus its own. A `Record`
+ * over `keyof GovernorOpts`, so the list and the interface cannot drift.
+ */
+const GOVERNOR_OPTS_KEYS: Readonly<Record<keyof GovernorOpts, true>> = {
+	...TRUST_OPTS_KEYS,
+	_destroyDrainMs: true,
+};
 
 /** Handle returned by authorize(), passed to settle() or abort(). */
 export interface Authorization {
@@ -1156,6 +1168,10 @@ function estimateTier(value: unknown, field: string): number {
 }
 
 export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
+	// 0. An option this function would not read is refused by name, before anything
+	// is read or created (see refuseUnreadOptions; same rule as trust()).
+	refuseUnreadOptions("createGovernor()", opts, GOVERNOR_OPTS_KEYS);
+
 	// 1. Load config
 	const vaultBase = opts?.vaultBase ?? process.cwd();
 	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
@@ -1170,16 +1186,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		const raw: unknown = JSON.parse(await readFile(configPath, "utf-8"));
 		config = TrustConfigSchema.parse({
 			...(raw as Record<string, unknown>),
-			...(opts?.budget !== undefined ? { budget: opts.budget } : {}),
-			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
-			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
+			...trustConfigOverrides(opts),
 		});
 	} else {
-		config = TrustConfigSchema.parse({
-			budget: opts?.budget ?? DEFAULT_BUDGET,
-			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
-			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
-		});
+		config = TrustConfigSchema.parse({ budget: DEFAULT_BUDGET, ...trustConfigOverrides(opts) });
 	}
 
 	const customRates = config.pricing === "custom" ? config.customRates : undefined;

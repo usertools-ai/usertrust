@@ -148,8 +148,18 @@ export interface TrustOpts {
 	key?: string;
 	/** Token budget override. */
 	budget?: number;
-	/** Tier override. */
+	/** Tier. Accepted, but currently not applied: the config file's `tier` is used. */
 	tier?: string;
+	/**
+	 * PII enforcement override: overrides `pii` in the config file
+	 * (`"redact" | "warn" | "block" | "off"`, see `TrustConfigSchema.pii`). Any
+	 * other value is refused by name at construction.
+	 *
+	 * SECURITY: TRUSTED-OPERATOR input, same boundary as budget/scope — never
+	 * derive it from end-user or request data: a request that could choose its
+	 * own PII mode could turn `block` off.
+	 */
+	pii?: TrustConfig["pii"] | undefined;
 	/**
 	 * This governor's ledger identity — the parent half of the
 	 * `(parentUserId, costCenter)` tuple every cost-center envelope account is
@@ -195,6 +205,118 @@ export interface TrustOpts {
 	 * @internal
 	 */
 	_audit?: AuditWriter;
+}
+
+/**
+ * Every key `TrustOpts` declares, and no other: the allow-list `trust()` checks
+ * its runtime options against (`refuseUnreadOptions`). Typed as a `Record` over
+ * `keyof TrustOpts`, so a field added to TrustOpts without a row here, or a row
+ * TrustOpts does not declare, fails to compile: the two cannot drift.
+ * @internal
+ */
+export const TRUST_OPTS_KEYS: Readonly<Record<keyof TrustOpts, true>> = {
+	configPath: true,
+	proxy: true,
+	key: true,
+	budget: true,
+	tier: true,
+	pii: true,
+	parentUserId: true,
+	scope: true,
+	dryRun: true,
+	vaultBase: true,
+	endpoint: true,
+	_engine: true,
+	_audit: true,
+};
+
+/**
+ * The config-file settings an option overrides. Every other config setting is
+ * read from the file only, and passing it as an option is refused by name.
+ */
+const CONFIG_OVERRIDE_KEYS = [
+	"budget",
+	"pii",
+	"parentUserId",
+	"scope",
+] as const satisfies readonly (keyof TrustOpts & keyof TrustConfig)[];
+
+/** Options whose value is one of a closed set the config schema declares. */
+const ENUM_OVERRIDE_KEYS = [
+	"pii",
+] as const satisfies readonly (typeof CONFIG_OVERRIDE_KEYS)[number][];
+
+/** Deprecated options: accepted (with their existing behaviour), never advertised in a refusal. */
+const UNADVERTISED_OPTS = new Set(["proxy", "key"]);
+
+/**
+ * The options that override config-file values, ready to spread over the file's
+ * contents before `TrustConfigSchema.parse` validates the result. Undefined
+ * options are left out, so the file's (or the schema's default) value stands.
+ * Shared by `trust()` and `createGovernor()` so the two cannot override
+ * differently.
+ * @internal
+ */
+export function trustConfigOverrides(opts: TrustOpts | undefined): Record<string, unknown> {
+	const overrides: Record<string, unknown> = {};
+	for (const key of CONFIG_OVERRIDE_KEYS) {
+		const value = opts?.[key];
+		if (value !== undefined) overrides[key] = value;
+	}
+	return overrides;
+}
+
+/** A caller-supplied key or value, quoted for an error message: clipped, control characters escaped. */
+function quoteForRefusal(value: unknown): string {
+	return typeof value === "string" ? JSON.stringify(value.slice(0, 64)) : `of type ${typeof value}`;
+}
+
+/**
+ * Refuse, by name, every runtime option `fn` does not declare. TypeScript already
+ * rejects an unknown key in an object literal, but a JavaScript caller (or one
+ * that spreads an untyped object) gets no such check: before this, an option
+ * such as `{ circuitBreaker: … }`, or a misspelt `{ pi: "block" }`, was dropped
+ * in silence and the call ran on the config file's values. A `pii` value the
+ * schema does not allow is refused here too, by name, rather than as a schema
+ * error deep in construction. Thrown before anything is read or
+ * created.
+ * @internal
+ */
+export function refuseUnreadOptions(
+	fn: string,
+	opts: unknown,
+	allowed: Readonly<Record<string, true>>,
+): void {
+	if (opts === undefined || opts === null) return;
+	if (typeof opts !== "object" || Array.isArray(opts)) {
+		throw new TypeError(`${fn}: options must be an object, got ${quoteForRefusal(opts)}`);
+	}
+	const unknown = Object.keys(opts).filter((key) => !Object.hasOwn(allowed, key));
+	if (unknown.length > 0) {
+		const named = unknown.map(
+			(key) =>
+				`unknown option ${quoteForRefusal(key)}${
+					Object.hasOwn(TrustConfigSchema.shape, key)
+						? " (set it in .usertrust/usertrust.config.json)"
+						: ""
+				}`,
+		);
+		const accepted = Object.keys(allowed)
+			.filter((key) => !key.startsWith("_") && !UNADVERTISED_OPTS.has(key))
+			.sort();
+		throw new TypeError(`${fn}: ${named.join("; ")}. ${fn} accepts only: ${accepted.join(", ")}.`);
+	}
+	const given = opts as Record<string, unknown>;
+	for (const key of ENUM_OVERRIDE_KEYS) {
+		const value = given[key];
+		if (value === undefined) continue;
+		const values: readonly string[] = TrustConfigSchema.shape[key].unwrap().options;
+		if (typeof value !== "string" || !values.includes(value)) {
+			throw new TypeError(
+				`${fn}: invalid option ${key} ${quoteForRefusal(value)}: expected one of ${values.map((v) => `"${v}"`).join(", ")}`,
+			);
+		}
+	}
 }
 
 /** Minimal engine interface for two-phase spend lifecycle. */
@@ -1162,6 +1284,10 @@ export async function runTeardownSteps(steps: ReadonlyArray<() => unknown>): Pro
 // ── trust() ──
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
+	// 0. An option this function would not read is refused by name, before anything
+	// is read or created: dropping it would run the call on the file's values.
+	refuseUnreadOptions("trust()", opts, TRUST_OPTS_KEYS);
+
 	// 1. Load config
 	const vaultBase = opts?.vaultBase ?? process.cwd();
 	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
@@ -1176,16 +1302,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		const raw: unknown = JSON.parse(await readFile(configPath, "utf-8"));
 		config = TrustConfigSchema.parse({
 			...(raw as Record<string, unknown>),
-			...(opts?.budget !== undefined ? { budget: opts.budget } : {}),
-			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
-			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
+			...trustConfigOverrides(opts),
 		});
 	} else {
-		config = TrustConfigSchema.parse({
-			budget: opts?.budget ?? DEFAULT_BUDGET,
-			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
-			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
-		});
+		config = TrustConfigSchema.parse({ budget: DEFAULT_BUDGET, ...trustConfigOverrides(opts) });
 	}
 
 	// D8: one-time migration warning, evaluated at the config-load path.

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -891,6 +891,162 @@ describe("trust()", () => {
 			expect(result.receipt).toBeDefined();
 
 			await governed.destroy();
+		});
+
+		// The `pii` option overrides the config file, exactly as `budget` does. Before,
+		// TrustOpts had no `pii` field, so `{ pii: "block" }` from JavaScript was
+		// dropped and the PII went to the provider under the file's `warn`.
+		const CARD_PROMPT = "Charge my card 4111 1111 1111 1111 please";
+
+		async function piiDenial(opts: { pii?: "block" }): Promise<{
+			err: unknown;
+			createFn: ReturnType<typeof vi.fn>;
+		}> {
+			const createFn = vi.fn(async (_params: unknown) => ({ id: "msg" }));
+			const governed = await trust(
+				{ messages: { create: createFn } },
+				{
+					dryRun: true,
+					vaultBase: tmpVault,
+					...opts,
+				},
+			);
+			const err = await governed.messages
+				.create({ model: "claude-sonnet-4-6", messages: [{ role: "user", content: CARD_PROMPT }] })
+				.then(
+					() => undefined,
+					(e: unknown) => e,
+				);
+			await governed.destroy();
+			return { err, createFn };
+		}
+
+		it('{ pii: "block" } blocks over a config file of warn, with the denial a config-file block gives', async () => {
+			const configDir = join(tmpVault, ".usertrust");
+			mkdirSync(configDir, { recursive: true });
+			const configFile = join(configDir, "usertrust.config.json");
+
+			writeFileSync(configFile, JSON.stringify({ budget: 50_000, pii: "block" }));
+			const fromFile = await piiDenial({});
+
+			writeFileSync(configFile, JSON.stringify({ budget: 50_000, pii: "warn" }));
+			const fromOption = await piiDenial({ pii: "block" });
+
+			expect(fromFile.err).toBeInstanceOf(PolicyDeniedError);
+			expect(fromOption.err).toBeInstanceOf(PolicyDeniedError);
+			const fileErr = fromFile.err as PolicyDeniedError;
+			const optionErr = fromOption.err as PolicyDeniedError;
+			expect(optionErr.reason).toContain("credit_card");
+			expect(optionErr.reason).toBe(fileErr.reason);
+			expect(optionErr.hint).toBe(fileErr.hint);
+			expect(fromFile.createFn).not.toHaveBeenCalled();
+			expect(fromOption.createFn).not.toHaveBeenCalled();
+		});
+
+		it('{ pii: "block" } blocks with no config file (default warn)', async () => {
+			const { err, createFn } = await piiDenial({ pii: "block" });
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect((err as PolicyDeniedError).reason).toContain("credit_card");
+			expect(createFn).not.toHaveBeenCalled();
+		});
+
+		it('{ pii: "warn" } over a config file of block warns and forwards', async () => {
+			const configDir = join(tmpVault, ".usertrust");
+			mkdirSync(configDir, { recursive: true });
+			writeFileSync(
+				join(configDir, "usertrust.config.json"),
+				JSON.stringify({ budget: 50_000, pii: "block" }),
+			);
+
+			const mockClient = makeAnthropicMock();
+			const governed = await trust(mockClient, { dryRun: true, vaultBase: tmpVault, pii: "warn" });
+
+			const result = await governed.messages.create({
+				model: "claude-sonnet-4-6",
+				messages: [{ role: "user", content: CARD_PROMPT }],
+			});
+
+			expect(result.receipt).toBeDefined();
+			expect(mockClient.messages.create).toHaveBeenCalledTimes(1);
+
+			await governed.destroy();
+		});
+	});
+
+	// ─── Runtime options: an option trust() does not read is refused, by name ───
+
+	describe("runtime options", () => {
+		async function refusal(opts: Record<string, unknown>): Promise<{
+			err: unknown;
+			createFn: ReturnType<typeof vi.fn>;
+		}> {
+			const createFn = vi.fn(async (_params: unknown) => ({ id: "msg" }));
+			// `as never`: a JavaScript caller has no type check; this models one.
+			const err = await trust({ messages: { create: createFn } }, {
+				dryRun: true,
+				vaultBase: tmpVault,
+				...opts,
+			} as never).then(
+				async (governed) => {
+					await governed.destroy();
+					return undefined;
+				},
+				(e: unknown) => e,
+			);
+			return { err, createFn };
+		}
+
+		it("refuses a config-file setting passed as an option, naming it and where it belongs", async () => {
+			const { err, createFn } = await refusal({
+				circuitBreaker: { failureThreshold: 1, resetTimeout: 1 },
+			});
+			expect(err).toBeInstanceOf(TypeError);
+			expect((err as Error).message).toContain(
+				'trust(): unknown option "circuitBreaker" (set it in .usertrust/usertrust.config.json)',
+			);
+			expect(createFn).not.toHaveBeenCalled();
+			// Refused before anything is read or created: the vault was never made.
+			expect(existsSync(join(tmpVault, ".usertrust"))).toBe(false);
+		});
+
+		it("refuses a misspelt option by name, and lists what trust() accepts", async () => {
+			const { err, createFn } = await refusal({ pi: "block" });
+			expect(err).toBeInstanceOf(TypeError);
+			const message = (err as Error).message;
+			expect(message).toContain('trust(): unknown option "pi"');
+			expect(message).not.toContain('"pi" (set it in');
+			expect(message).toContain("trust() accepts only:");
+			expect(message).toContain("pii");
+			expect(createFn).not.toHaveBeenCalled();
+			expect(existsSync(join(tmpVault, ".usertrust"))).toBe(false);
+		});
+
+		it("names every unknown option, not just the first", async () => {
+			const { err } = await refusal({ patterns: { enabled: true }, piiMode: "block" });
+			const message = (err as Error).message;
+			expect(message).toContain('unknown option "patterns" (set it in');
+			expect(message).toContain('unknown option "piiMode"');
+		});
+
+		it("refuses an invalid pii value by name, with the values it allows", async () => {
+			const { err, createFn } = await refusal({ pii: "blok" });
+			expect(err).toBeInstanceOf(TypeError);
+			expect((err as Error).message).toBe(
+				'trust(): invalid option pii "blok": expected one of "redact", "warn", "block", "off"',
+			);
+			expect(createFn).not.toHaveBeenCalled();
+		});
+
+		it("refuses options that are not an object", async () => {
+			const createFn = vi.fn();
+			await expect(
+				trust({ messages: { create: createFn } }, "config.json" as never),
+			).rejects.toThrow('trust(): options must be an object, got "config.json"');
+		});
+
+		it("accepts tier, which TrustOpts declares, without refusing it", async () => {
+			const { err } = await refusal({ tier: "pro" });
+			expect(err).toBeUndefined();
 		});
 	});
 

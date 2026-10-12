@@ -76,7 +76,7 @@ class PolicyDeniedError extends Error {
 
 **When it fires:** During policy evaluation, before the LLM call. The `reason` field describes which rule or PII type triggered the denial.
 
-**Hint:** `'Check your policy rules in .usertrust/policies/ or use { pii: "warn" } to downgrade PII enforcement.'`
+**Hint:** `'Check your policy rules in .usertrust/policies/default.yml, or set "pii": "warn" in .usertrust/usertrust.config.json (or pass { pii: "warn" } to trust()) to downgrade PII enforcement.'`
 
 ---
 

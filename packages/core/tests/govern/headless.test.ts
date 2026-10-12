@@ -686,6 +686,72 @@ describe("headless governor", () => {
 		await gov.destroy();
 	});
 
+	// The `pii` option overrides the config file in createGovernor() exactly as in
+	// trust(): the two build their config with one shared override list.
+	it('{ pii: "block" } blocks over a config file of warn, before any hold', async () => {
+		const configDir = join(vaultBase, VAULT_DIR);
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			join(configDir, "usertrust.config.json"),
+			JSON.stringify({ budget: 100_000, pii: "warn" }),
+		);
+		const engine = mockEngine();
+
+		const gov = await createGovernor({ _engine: engine, vaultBase, pii: "block" });
+
+		expect(gov.config.pii).toBe("block");
+		await expect(
+			gov.authorize({
+				model: "claude-sonnet-4-6",
+				messages: [{ role: "user", content: "Charge my card 4111 1111 1111 1111 please" }],
+			}),
+		).rejects.toThrow(/PII detected: .*credit_card/);
+		expect(engine.pendingIds).toHaveLength(0);
+
+		await gov.destroy();
+	});
+
+	it('{ pii: "warn" } over a config file of block authorizes', async () => {
+		const configDir = join(vaultBase, VAULT_DIR);
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			join(configDir, "usertrust.config.json"),
+			JSON.stringify({ budget: 100_000, pii: "block" }),
+		);
+
+		const gov = await createGovernor({ dryRun: true, vaultBase, pii: "warn" });
+
+		expect(gov.config.pii).toBe("warn");
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			messages: [{ role: "user", content: "Charge my card 4111 1111 1111 1111 please" }],
+		});
+		expect(auth.transferId).toMatch(/^tx_/);
+
+		await gov.settle(auth);
+		await gov.destroy();
+	});
+
+	it("refuses an option it does not read, by name, before the vault is created", async () => {
+		// `as never`: a JavaScript caller has no type check; this models one.
+		await expect(
+			createGovernor({
+				dryRun: true,
+				vaultBase,
+				circuitBreaker: { failureThreshold: 1, resetTimeout: 1 },
+			} as never),
+		).rejects.toThrow(
+			'createGovernor(): unknown option "circuitBreaker" (set it in .usertrust/usertrust.config.json)',
+		);
+		await expect(createGovernor({ dryRun: true, vaultBase, pi: "block" } as never)).rejects.toThrow(
+			'createGovernor(): unknown option "pi"',
+		);
+		await expect(createGovernor({ dryRun: true, vaultBase, pii: "blok" } as never)).rejects.toThrow(
+			'createGovernor(): invalid option pii "blok"',
+		);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
 	// ── D8 migration warning ──
 
 	it(

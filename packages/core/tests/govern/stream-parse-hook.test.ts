@@ -145,7 +145,7 @@ describe("a governed call keeps the structured-output parse hook the SDK reads c
 	});
 
 	async function governedClient(config: Record<string, unknown> = {}) {
-		// Policy knobs such as `pii` are read from the vault's config file, not from trust()'s opts.
+		// Policy knobs are written to the vault's config file here (`pii` could also be passed to trust()).
 		const dir = join(vault, VAULT_DIR);
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
