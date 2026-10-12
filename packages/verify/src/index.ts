@@ -43,7 +43,6 @@ import {
 	buildMerkleTree,
 	generateInclusionProof,
 	readAnchor,
-	verifyChain,
 	verifyInclusionProof,
 } from "./verify.js";
 
@@ -804,6 +803,43 @@ export function normalizeEvent(raw: unknown): TransactionEvent {
 }
 
 /**
+ * The audit files by verifyVault's rule; each gap between them NAMED by its range and both
+ * neighbours, as "Sequence gap" alone reads like one deleted event. An unreadable file THROWS, as
+ * an unreadable `events.jsonl` always did here: "not found" would be a verdict on unread records.
+ */
+function auditSegments(auditDir: string): { count: number; empty: boolean; gaps: string[] } {
+	let names: string[] = []; // a directory it cannot enumerate, verifyVaultReading reports
+	try {
+		names = readdirSync(auditDir).filter((n) => n.endsWith(".jsonl") && n !== "events.jsonl");
+	} catch {}
+	if (existsSync(join(auditDir, "events.jsonl"))) names.unshift("events.jsonl");
+	let empty = true;
+	const spans: [string, number, number][] = [];
+	for (const name of names) {
+		const text = readFileSync(join(auditDir, name), "utf-8").trim();
+		empty &&= text === "";
+		const seqs = text
+			.split("\n")
+			.map((l) => {
+				try {
+					return JSON.parse(l)?.sequence;
+				} catch {
+					return undefined;
+				}
+			})
+			.filter(Number.isSafeInteger);
+		if (seqs.length > 0) spans.push([name, seqs[0] as number, seqs.at(-1) as number]);
+	}
+	const gaps: string[] = [];
+	for (const [i, [name, first]] of spans.sort((a, b) => a[1] - b[1]).entries()) {
+		const [prev, , last] = spans[i - 1] ?? ["", 0, first - 1];
+		const msg = `audit segment missing: events ${last + 1}..${first - 1} are absent between ${prev}`;
+		if (first > last + 1) gaps.push(`${msg} (ends at ${last}) and ${name} (starts at ${first})`);
+	}
+	return { count: names.length, empty, gaps };
+}
+
+/**
  * Verify a single transaction and return a formatted receipt.
  *
  * Finds the event matching `txId` (by `data.transferId`) and verifies the
@@ -818,38 +854,12 @@ export function verifyTransaction(
 	txId: string,
 	anchorParams?: AnchorVerifyParams,
 ): TransactionVerificationResult {
-	const auditDir = join(vaultPath, "audit");
-	const mainLog = join(auditDir, "events.jsonl");
-
-	if (!existsSync(mainLog)) {
-		return {
-			found: false,
-			valid: false,
-			receipt: renderNotFound(txId),
-			errors: [`Audit log not found: ${mainLog}`],
-		};
-	}
-
-	const content = readFileSync(mainLog, "utf-8").trim();
-	if (!content) {
-		return {
-			found: false,
-			valid: false,
-			receipt: renderNotFound(txId),
-			errors: ["Audit log is empty"],
-		};
-	}
-
-	const lines = content.split("\n").filter((l) => l.trim());
-	const events: TransactionEvent[] = [];
-	const parseErrors: string[] = [];
-
-	for (let i = 0; i < lines.length; i++) {
-		try {
-			events.push(normalizeEvent(JSON.parse(lines[i] as string)));
-		} catch {
-			parseErrors.push(`Event ${i + 1}: malformed JSON`);
-		}
+	const mainLog = join(vaultPath, "audit", "events.jsonl");
+	// EVERY segment: a rotated transfer straddles files, and the live file alone lacks its history.
+	const segments = auditSegments(join(vaultPath, "audit"));
+	if (segments.count === 0 || segments.empty) {
+		const error = segments.count === 0 ? `Audit log not found: ${mainLog}` : "Audit log is empty";
+		return { found: false, valid: false, receipt: renderNotFound(txId), errors: [error] };
 	}
 
 	// Find the target event.
@@ -891,6 +901,9 @@ export function verifyTransaction(
 		};
 	}
 
+	// The events AND the verdict come from one vault reading, in the chain verifier's order.
+	const reading = verifyVaultReading(vaultPath);
+	const events = reading.events.map(normalizeEvent);
 	// No per-use shape guard needed: `normalizeEvent` already guarantees `kind`
 	// is a string, `data` is an object, and `transferId` is a string.
 	// `settlement_unrecoverable` stores only the SHA-256 of its transferId, so that kind matches on the
@@ -900,25 +913,22 @@ export function verifyTransaction(
 	const firstTerminal = firstTerminalOf(matching);
 	const targetEvent = selectTransferEvent(matching);
 
+	// SCRUBBED: segment names and event ids are vault text, and these errors reach a terminal. A gap
+	// is named even when the target is absent: its records may be what the missing segment held.
+	const gapped = reading.result.errors.some((e) => e.startsWith("Sequence gap:"));
+	const vaultErrors = [...reading.result.errors, ...(gapped ? segments.gaps : [])];
 	if (targetEvent === undefined) {
-		return {
-			found: false,
-			valid: false,
-			receipt: renderNotFound(txId),
-			errors: [],
-		};
+		const errors = vaultErrors.map(scrubForError);
+		return { found: false, valid: false, receipt: renderNotFound(txId), errors };
 	}
 
-	// Verify the full chain
-	const chainResult = verifyChain(mainLog);
-	const chainVerified = chainResult.valid;
+	const chainVerified = reading.result.valid;
 
 	// Merkle root over the stored hashes — informational display only. The
 	// self-referential inclusion check (F1: proof AND root computed from the
 	// same allHashes) is retired; inclusion is only ever claimed against a
 	// verified EXTERNAL anchor root below (AC-5.2).
-	const allHashes = events.map((e) => e.hash);
-	const tree = buildMerkleTree(allHashes);
+	const tree = buildMerkleTree([...reading.orderedHashes]);
 	let merkleRoot = tree.root ?? "";
 	const leafIndex = events.indexOf(targetEvent);
 
@@ -961,7 +971,9 @@ export function verifyTransaction(
 			} else if (
 				anchorParams.trust !== undefined &&
 				pos >= 1 &&
-				covering.treeSize <= orderedHashes.length
+				covering.treeSize <= orderedHashes.length &&
+				// The proof must be for THIS event: non-object lines or a gap can put another leaf at pos.
+				orderedHashes[pos - 1] === targetEvent.hash
 			) {
 				const proof = generateInclusionProof(
 					pos - 1,
@@ -1041,7 +1053,7 @@ export function verifyTransaction(
 	const receiptData: ReceiptData = {
 		event: targetEvent,
 		...(detectionReason !== undefined ? { detectionReason } : {}),
-		chainLength: events.length,
+		chainLength: reading.result.chainLength,
 		merkleRoot,
 		merkleVerified,
 		chainVerified,
@@ -1050,7 +1062,7 @@ export function verifyTransaction(
 		merkleLabel,
 	};
 
-	const allErrors = [...parseErrors, ...chainResult.errors, ...anchorErrors];
+	const allErrors = [...vaultErrors, ...anchorErrors].map(scrubForError);
 
 	return {
 		found: true,
