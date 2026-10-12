@@ -193,6 +193,85 @@ describe.each([
 	});
 });
 
+describe.each([
+	["dry-run", true],
+	["with a capped engine", false],
+])("a Gemini usage component is held to the ceiling before it is summed (%s)", (_label, dryRun) => {
+	// Gemini sums components into a tier (candidates + thoughts into output). Each is now held to
+	// the ceiling first and refused by its own figure through the per-tier refused flag, so the
+	// call settles at the ESTIMATE and records usage_implausible, never at a wrapped sum.
+	let vaultBase: string;
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `absurd-gemini-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+	});
+	afterEach(() => {
+		rmSync(vaultBase, { recursive: true, force: true });
+	});
+
+	const GEMINI = { model: "gemini-2.5-flash", contents: "hello" };
+
+	async function settle(usageMetadata: Record<string, number>) {
+		const audit = makeAudit();
+		const gemini = {
+			models: {
+				generateContent: vi.fn(async (_req: unknown) => ({ text: "ok", usageMetadata })),
+			},
+		};
+		const g = await trust(gemini, {
+			budget: 100_000,
+			vaultBase,
+			_audit: audit,
+			...(dryRun ? { dryRun: true } : { _engine: cappedEngine().engine }),
+		});
+		const { receipt } = (await g.models.generateContent(GEMINI)) as { receipt: TrustReceipt };
+		await g.destroy();
+		return { receipt, implausible: audit.events.find((e) => e.kind === "usage_implausible") };
+	}
+
+	it("components whose sum overflows to Infinity: settled at the estimate, refused, and recorded", async () => {
+		const { receipt, implausible } = await settle({
+			promptTokenCount: 10,
+			candidatesTokenCount: 1e308,
+			thoughtsTokenCount: 1e308,
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Number.isSafeInteger(receipt.cost)).toBe(true);
+		expect(receipt.cost).toBeLessThan(100_000);
+		expect(implausible?.data).toMatchObject({
+			transferId: receipt.transferId,
+			charged: "estimate",
+			tiers: { outputTokens: 1e308 },
+			checks: { outputTokens: "refused" },
+		});
+	});
+
+	it("one component over the ceiling beside small ones: refused by its own figure", async () => {
+		const { receipt, implausible } = await settle({
+			promptTokenCount: 10,
+			candidatesTokenCount: 10,
+			thoughtsTokenCount: 200_000_000,
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		expect(implausible?.data).toMatchObject({
+			charged: "estimate",
+			tiers: { outputTokens: 200_000_000 },
+			checks: { outputTokens: "refused" },
+		});
+	});
+
+	it("control: a normal Gemini usage settles at the provider's figures, with no event", async () => {
+		const { receipt, implausible } = await settle({
+			promptTokenCount: 1000,
+			candidatesTokenCount: 50,
+			cachedContentTokenCount: 400,
+			thoughtsTokenCount: 30,
+		});
+		expect(receipt.usageSource).toBe("provider");
+		expect(implausible).toBeUndefined();
+	});
+});
+
 describe("the session counter keeps the metered cost", () => {
 	let vaultBase: string;
 	beforeEach(() => {
