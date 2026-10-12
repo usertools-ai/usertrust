@@ -137,7 +137,7 @@ describe("end to end through trust()", () => {
 			const client = {
 				chat: {
 					completions: {
-						create: vi.fn(async () =>
+						create: vi.fn(async (_req: unknown) =>
 							gen([
 								{ choices: [{ delta: { content: "hi" } }] },
 								{ usage: { prompt_tokens: 100, completion_tokens: 10 } },
@@ -175,7 +175,7 @@ describe("end to end through trust()", () => {
 			const audit = makeAudit(true);
 			const client = {
 				messages: {
-					create: vi.fn(async () => ({
+					create: vi.fn(async (_req: unknown) => ({
 						id: "m",
 						type: "message",
 						role: "assistant",
@@ -248,7 +248,12 @@ describe("an absurd 1-hour share survives every Anthropic stream path", () => {
 			const audit = makeAudit();
 			const stream = new Emitter();
 			const g = await trust(
-				{ messages: { create: vi.fn(), stream: vi.fn(() => stream) } },
+				{
+					messages: {
+						create: vi.fn((_req: unknown) => undefined),
+						stream: vi.fn((_req: unknown) => stream),
+					},
+				},
 				{ budget: 100_000, vaultBase, dryRun: true, _audit: audit },
 			);
 			const handle = (await g.messages.stream({

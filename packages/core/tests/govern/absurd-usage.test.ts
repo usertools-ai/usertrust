@@ -56,7 +56,7 @@ const PARAMS = {
 function client(usage: { input_tokens: number; output_tokens: number }) {
 	return {
 		messages: {
-			create: vi.fn(async () => ({
+			create: vi.fn(async (_req: unknown) => ({
 				id: "msg_1",
 				type: "message",
 				role: "assistant",
@@ -333,7 +333,12 @@ describe("a STREAMING settle gets the same rule", () => {
 				const { engine } = cappedEngine();
 				const stream = new Stream();
 				const g = await trust(
-					{ messages: { create: vi.fn(), stream: vi.fn(() => stream) } },
+					{
+						messages: {
+							create: vi.fn((_req: unknown) => undefined),
+							stream: vi.fn((_req: unknown) => stream),
+						},
+					},
 					{
 						budget: 100_000,
 						vaultBase,
