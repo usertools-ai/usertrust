@@ -82,12 +82,16 @@ export function readLedgerEvents(vaultPath: string): PersistedAuditEvent[] {
  * - `governor`: the budget the vault's governor recorded as the one it ENFORCES (`effective-budget.json`);
  * - `config`: no record, so the vault's own `usertrust.config.json`;
  * - `several`: the vault's live governors enforce different budgets, so the budget is UNKNOWN;
- * - `none`: neither gives one, or the record exists but cannot be read. The budget is then UNKNOWN, and `budget`
- *   is 0 only as a placeholder: a reader must not compute a remaining figure from it.
+ * - `unreadable`: the record exists but cannot be read (`reason` says why). UNKNOWN, never the config's figure: the
+ *   config file may not be what the governor enforced;
+ * - `unpublished`: no record and no config budget. UNKNOWN: a governor publishes its budget only once it holds the
+ *   vault's writer lock (its first append), so a vault whose governor has not yet appended has none to read. Never
+ *   "no budget configured": every governor enforces one, the built-in default at least.
+ * For the three unknown sources `budget` is 0 only as a placeholder: a reader must not compute a remaining figure from it.
  */
-export type BudgetSource = "governor" | "config" | "several" | "none";
+export type BudgetSource = "governor" | "config" | "several" | "unreadable" | "unpublished";
 
-/** Whether a source gives a budget at all: `several` (live governors that disagree) and `none` do not. */
+/** Whether a source gives a budget at all: `several`, `unreadable` and `unpublished` do not. */
 export function isKnownBudget(source: BudgetSource): boolean {
 	return source === "governor" || source === "config";
 }
@@ -95,31 +99,44 @@ export function isKnownBudget(source: BudgetSource): boolean {
 export interface VaultBudget {
 	budget: number;
 	source: BudgetSource;
-	/** When the governor wrote its record (`source: "governor"` only, else null): the figure's age, always shown. */
+	/** When the governor wrote its record (`governor` and `several`, else null): the figure's age, always shown. */
 	writtenAt: string | null;
+	/** Why the record could not be read (`unreadable` only, else null). */
+	reason: string | null;
 }
 
-const NO_BUDGET: VaultBudget = { budget: 0, source: "none", writtenAt: null };
+const UNPUBLISHED: VaultBudget = {
+	budget: 0,
+	source: "unpublished",
+	writtenAt: null,
+	reason: null,
+};
 
 export function loadBudgetConfig(vaultPath: string): VaultBudget {
 	const recorded = readEffectiveBudget(vaultPath);
 	if (recorded.state === "recorded") {
-		return { budget: recorded.budget, source: "governor", writtenAt: recorded.writtenAt };
+		return {
+			budget: recorded.budget,
+			source: "governor",
+			writtenAt: recorded.writtenAt,
+			reason: null,
+		};
 	}
 	// Several live governors enforcing different budgets: unknown, never one of them, and never the config's.
 	if (recorded.state === "several")
-		return { budget: 0, source: "several", writtenAt: recorded.writtenAt };
+		return { budget: 0, source: "several", writtenAt: recorded.writtenAt, reason: null };
 	// An unreadable record is not an absent one: the config file may not be what the governor enforced.
-	if (recorded.state === "unreadable") return { ...NO_BUDGET };
+	if (recorded.state === "unreadable")
+		return { budget: 0, source: "unreadable", writtenAt: null, reason: recorded.reason };
 	const configPath = join(vaultPath, "usertrust.config.json");
-	if (!existsSync(configPath)) return { ...NO_BUDGET };
+	if (!existsSync(configPath)) return { ...UNPUBLISHED };
 	try {
 		const config = JSON.parse(readFileSync(configPath, "utf-8")) as { budget?: number };
 		return typeof config.budget === "number" && config.budget > 0
-			? { budget: config.budget, source: "config", writtenAt: null }
-			: { ...NO_BUDGET };
+			? { budget: config.budget, source: "config", writtenAt: null, reason: null }
+			: { ...UNPUBLISHED };
 	} catch {
-		return { ...NO_BUDGET };
+		return { ...UNPUBLISHED };
 	}
 }
 
@@ -127,7 +144,9 @@ export function loadBudgetConfig(vaultPath: string): VaultBudget {
  * The one wording of a budget's PROVENANCE, shown wherever the budget is (the ledger UI, inspect, report). Only a
  * governor record reads as the enforced figure, and always with its age; a config budget says it is unconfirmed.
  */
-export function describeBudgetSource(b: Pick<VaultBudget, "source" | "writtenAt">): string {
+export function describeBudgetSource(
+	b: Pick<VaultBudget, "source" | "writtenAt"> & { reason?: string | null },
+): string {
 	switch (b.source) {
 		case "governor":
 			return `the enforced budget, as of ${b.writtenAt ?? "an unknown time"}`;
@@ -135,8 +154,10 @@ export function describeBudgetSource(b: Pick<VaultBudget, "source" | "writtenAt"
 			return "from usertrust.config.json; not confirmed as enforced";
 		case "several":
 			return `unknown: several governors with different budgets, as of ${b.writtenAt ?? "an unknown time"}`;
-		case "none":
-			return "unknown: none recorded or configured";
+		case "unreadable":
+			return `unknown: the enforced-budget record could not be read; ${b.reason ?? "unreadable"}`;
+		case "unpublished":
+			return "unknown: not yet published; no governor has recorded the budget it enforces";
 	}
 }
 

@@ -40,44 +40,84 @@ const REAL_IO: EffectiveRecordIo = {
 };
 
 /**
- * The budgets the LIVE governors in this process enforce, per vault. One process holds a vault's audit writer lock,
- * so every governor that can enforce on a vault is in this map: the record is aggregated here, in-process, with no
- * cross-process liveness. A stored "conflict" flag would go stale; the record is instead rewritten on every start and
- * every destroy, as the agreed budget or as "several governors".
+ * The budgets the LIVE governors in this process enforce, per vault, and the lock owner the record was last published
+ * under. The record is published ONLY while this process holds the vault's audit writer lock: the holder is the one
+ * process whose appends reach the chain, so every governor that can enforce on the vault through it is in this map.
+ * A governor takes the lock lazily, at its first append, so before that nothing is published; a process that loses
+ * the race (its appends fail on the lock and it runs degraded) never overwrites the holder's record. A stored
+ * "conflict" flag would go stale; the record is instead rewritten on every start and every destroy while the lock is
+ * held, and once more when the lock is taken by a writer it was not published under.
  */
-const liveBudgets = new Map<string, Map<symbol, number>>();
+interface VaultRegistry {
+	live: Map<symbol, number>;
+	/** The lock owner the record was last published under, or undefined if it never was. */
+	publishedUnder: string | undefined;
+}
+const registries = new Map<string, VaultRegistry>();
+
+/** A governor's registration: `appended` after each of its successful appends, `release` from its destroy(). */
+export interface EnforcedBudgetRegistration {
+	/** The process now holds the vault's writer lock: publish if the record was not published under this owner. */
+	appended(): void;
+	/** Drop this governor and republish for the rest while the lock is held (the last one's leaves the record as it was, read "as of" its writtenAt). */
+	release(): void;
+}
 
 /**
- * Register a governor's enforced budget on its vault (`vaultDir` is the `.usertrust` directory) and publish the
- * vault's record. Returns the release a destroy() calls: it drops this governor and republishes for the rest (the last
- * one's release leaves the record as it was, read "as of" its writtenAt). Never throws.
+ * Register a governor's enforced budget on its vault (`vaultDir` is the `.usertrust` directory). `lockOwner` reads
+ * which writer holds the vault's lock in this process (the governor's audit handle, `AuditWriter.lockOwner`);
+ * undefined means none, and nothing is published. Never throws.
  */
 export function registerEnforcedBudget(
 	vaultDir: string,
 	budget: number,
+	lockOwner: () => string | undefined,
 	seams: Partial<EffectiveRecordIo> = {},
-): () => void {
+): EnforcedBudgetRegistration {
 	const key = vaultIdentity(vaultDir);
-	let live = liveBudgets.get(key);
-	if (live === undefined) {
-		live = new Map();
-		liveBudgets.set(key, live);
+	let registry = registries.get(key);
+	if (registry === undefined) {
+		registry = { live: new Map(), publishedUnder: undefined };
+		registries.set(key, registry);
 	}
+	const reg = registry;
 	const id = Symbol("governor");
-	live.set(id, budget);
+	reg.live.set(id, budget);
 	// The record is written through THIS caller's path: any alias of the vault reaches the same physical file.
-	publish(vaultDir, live, seams);
-	let released = false;
-	return () => {
-		if (released) return;
-		released = true;
-		live.delete(id);
-		if (live.size === 0) {
-			liveBudgets.delete(key);
-			return;
-		}
-		publish(vaultDir, live, seams);
+	const publishIfHeld = (): void => {
+		const owner = ownerOf(lockOwner);
+		if (owner === undefined) return;
+		publish(vaultDir, reg.live, seams);
+		reg.publishedUnder = owner;
 	};
+	publishIfHeld();
+	let released = false;
+	return {
+		appended: () => {
+			if (released) return;
+			const owner = ownerOf(lockOwner);
+			if (owner !== undefined && owner !== reg.publishedUnder) publishIfHeld();
+		},
+		release: () => {
+			if (released) return;
+			released = true;
+			reg.live.delete(id);
+			if (reg.live.size === 0) {
+				if (registries.get(key) === reg) registries.delete(key);
+				return;
+			}
+			publishIfHeld();
+		},
+	};
+}
+
+/** The lock owner, or undefined if it cannot be read: the record is advisory and never throws. */
+function ownerOf(lockOwner: () => string | undefined): string | undefined {
+	try {
+		return lockOwner();
+	} catch {
+		return undefined;
+	}
 }
 
 /**

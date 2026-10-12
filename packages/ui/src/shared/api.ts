@@ -13,8 +13,11 @@ export interface SummaryPayload {
 	 * gives none. Never 0 standing in for "unknown".
 	 */
 	budget: number | null;
-	/** Where `budget` came from: the governor's record of what it enforces, the vault config, or nowhere. */
-	budgetSource: "governor" | "config" | "several" | "none";
+	/**
+	 * Where `budget` came from: the governor's record of what it enforces, or the vault config. Unknown: `several`
+	 * governors that disagree, an `unreadable` record, or `unpublished` (no governor has published one yet).
+	 */
+	budgetSource: "governor" | "config" | "several" | "unreadable" | "unpublished";
 	/** When the governor wrote its record (`budgetSource: "governor"` only, else null). */
 	budgetWrittenAt: string | null;
 	/** Where the budget came from, in words, SHOWN beside it: only a governor record reads as enforced, with its age. */

@@ -125,7 +125,9 @@ describe("loadState", () => {
 		const { summary } = loadState(vaultPath);
 		expect(summary).toMatchObject({
 			budget: null,
-			budgetSource: "none",
+			budgetSource: "unpublished",
+			budgetProvenance:
+				"unknown: not yet published; no governor has recorded the budget it enforces",
 			spentUt: 300,
 			remainingUt: null,
 		});

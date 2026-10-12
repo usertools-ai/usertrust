@@ -17,7 +17,7 @@ import {
 	type EntropyEventInput,
 	type EntropyLevel,
 } from "../audit/entropy.js";
-import { describeBudgetSource, loadBudgetConfig } from "../audit/read.js";
+import { describeBudgetSource, isKnownBudget, loadBudgetConfig } from "../audit/read.js";
 import { verifyVaultReading } from "../audit/verify.js";
 import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
@@ -610,14 +610,14 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// configured budget, or a malformed/non-positive one) or the NUMERATOR is
 	// (an unreadable or lost ledger). Reporting "unreadable ledger" for a config
 	// problem points at an artifact that may be perfectly fine.
+	// An UNKNOWN budget (several governors, an unreadable record, none published yet) says which, in the shared
+	// wording: never "no budget configured", since every governor enforces one.
 	const budgetText =
 		budgetPct !== null
 			? `${budgetPct}%`
-			: config.source === "several"
-				? "unknown (several governors with different budgets)"
-				: config.budget > 0
-					? "unreadable ledger"
-					: "no budget configured";
+			: isKnownBudget(config.source)
+				? "unreadable ledger"
+				: describeBudgetSource(config);
 	console.log(`  Budget utilization:      ${budgetText} ${budgetStatus}`);
 	console.log(`  Budget source:           ${describeBudgetSource(config)}`);
 	if (implausibleUsageCount > 0) {

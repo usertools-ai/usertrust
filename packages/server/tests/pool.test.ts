@@ -121,7 +121,14 @@ describe("a tenant vault carries the tenant's enforced budget (red-first: read a
 		try {
 			const tenant: TenantConfig = { id: "acme", keyHash: hashKey("k"), budget: 2_000 };
 			const pool = new GovernorPool({ ...config(), stateDir, tenants: [tenant] });
-			await pool.get(tenant);
+			const governor = await pool.get(tenant);
+			// Published from its first append: the process then holds the tenant vault's writer lock.
+			const auth = await governor.authorize({
+				model: "claude-haiku-5-5",
+				estimatedInputTokens: 10,
+				maxOutputTokens: 1,
+			});
+			await governor.settle(auth, { inputTokens: 1, outputTokens: 1 });
 			await pool.destroyAll();
 			const vault = join(tenantVaultBase({ ...config(), stateDir }, tenant), ".usertrust");
 			expect(loadBudgetConfig(vault)).toMatchObject({ budget: 2_000, source: "governor" });

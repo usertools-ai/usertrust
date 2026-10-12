@@ -502,6 +502,34 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		// A config that cannot be read makes the budget UNKNOWN, not the chain unverified: the verifier does not read it.
 		const config = readSideFile(join(vaultPath, "usertrust.config.json"));
 		const configUnreadable = config.state === "unreadable";
+		const fromRecordOrFlag = explicitBudget || recorded?.state === "recorded";
+		// Read only when the config decides the budget, as before: an invalid config is a usage error only then.
+		const configBudget =
+			!fromRecordOrFlag && !recordedUnknown && config.state === "file"
+				? readVaultBudgetText(config.text)
+				: 0;
+		// With no flag and no record: an unreadable config is unknown for the CONFIG's reason (the existing wording); a
+		// config with a budget gives it; otherwise no governor has published one yet.
+		const configUnknown = !fromRecordOrFlag && !recordedUnknown && configUnreadable;
+		const unknownReason: string | null =
+			fromRecordOrFlag || recorded === null
+				? null
+				: recorded.state === "several"
+					? describeBudgetSource({ source: "several", writtenAt: recorded.writtenAt })
+					: recorded.state === "unreadable"
+						? describeBudgetSource({
+								source: "unreadable",
+								writtenAt: null,
+								reason: recorded.reason,
+							})
+						: !configUnreadable && !(configBudget > 0)
+							? describeBudgetSource({ source: "unpublished", writtenAt: null })
+							: null;
+		const reportBudget = fromRecordOrFlag
+			? budget
+			: unknownReason !== null || configUnknown
+				? 0
+				: configBudget;
 		const dead = complete.deadLetters;
 		// Shortfall amounts are usable only from a queue read cleanly: an unreadable queue, an unreadable line or a
 		// shortfall that is not one leaves the headless proven figure an upper bound.
@@ -521,29 +549,15 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 				agentKey: parsed.agentKey,
 				...(parsed.segment !== undefined ? { segment: parsed.segment } : {}),
 				topN: parsed.top,
-				budget:
-					explicitBudget || recorded?.state === "recorded"
-						? budget
-						: recordedUnknown
-							? 0
-							: config.state === "file"
-								? readVaultBudgetText(config.text)
-								: 0,
+				budget: reportBudget,
 				budgetSource,
 				spendLedger: readSpendLedger(join(vaultPath, "spend-ledger.json")),
 				deadLetters,
-				// An unreadable config is an UNKNOWN budget, never "no budget configured".
-				...(recorded?.state === "several"
-					? {
-							budgetUnknownReason: describeBudgetSource({
-								source: "several",
-								writtenAt: recorded.writtenAt,
-							}),
-						}
-					: {}),
-				budgetUnreadable:
-					recordedUnknown ||
-					(configUnreadable && !explicitBudget && recorded?.state !== "recorded"),
+				// An unknown budget is never "no budget configured". Its reason names the RECORD when the record is the
+				// problem (several, unreadable, or none published and no config budget), and the config only when the
+				// config itself cannot be read.
+				...(unknownReason !== null ? { budgetUnknownReason: unknownReason } : {}),
+				budgetUnreadable: unknownReason !== null || configUnknown,
 			},
 		);
 		const text = render(model, parsed.format);

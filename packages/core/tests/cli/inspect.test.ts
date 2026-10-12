@@ -162,12 +162,12 @@ describe("usertrust inspect", () => {
 		});
 	});
 
-	it("no record and no configured budget: UNKNOWN — null budget and remaining in --json, and said so in text", async () => {
+	it("no record and no configured budget: UNKNOWN, not yet published — null budget and remaining in --json, and said so in text", async () => {
 		await spent300();
 		await run(tempDir, { json: true });
 		expect(lastJson().data).toMatchObject({
 			budget: null,
-			budgetSource: "none",
+			budgetSource: "unpublished",
 			spent: 300,
 			remaining: null,
 			percentRemaining: null,
@@ -175,9 +175,29 @@ describe("usertrust inspect", () => {
 		logOutput = [];
 		await run(tempDir);
 		const combined = logOutput.join("\n");
-		expect(combined).toContain("Budget: unknown");
-		expect(combined).not.toContain("enforced");
+		expect(combined).toContain(
+			"Budget: unknown: not yet published; no governor has recorded the budget it enforces",
+		);
 		expect(combined).not.toContain("-300");
+	});
+
+	it("red-first (none recorded or configured): an UNREADABLE record is unknown WITH its reason, in both modes", async () => {
+		await spent300();
+		writeFileSync(join(tempDir, ".usertrust", "effective-budget.json"), "{torn");
+		await run(tempDir, { json: true });
+		expect(lastJson().data).toMatchObject({
+			budget: null,
+			budgetSource: "unreadable",
+			budgetProvenance: "unknown: the enforced-budget record could not be read; not valid JSON",
+			remaining: null,
+		});
+		logOutput = [];
+		await run(tempDir);
+		const combined = logOutput.join("\n");
+		expect(combined).toContain(
+			"Budget: unknown: the enforced-budget record could not be read; not valid JSON",
+		);
+		expect(combined).not.toContain("none recorded or configured");
 	});
 
 	it("red-first (read as enforced): the text SHOWS where the budget came from — a record with its age, a config as unconfirmed", async () => {

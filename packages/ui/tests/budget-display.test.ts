@@ -21,7 +21,21 @@ describe("budgetDisplay", () => {
 		],
 	] as const)("%s", (_n, budget, remainingUt, expected) => {
 		const shown = budgetDisplay({ budget, remainingUt, budgetProvenance: "P" });
-		expect(shown).toEqual(expected.kind === "known" ? { ...expected, provenance: "P" } : expected);
+		expect(shown).toEqual({ ...expected, provenance: "P" });
+	});
+
+	it("red-first (no reason): an unknown budget is shown WITH which unknown it is", () => {
+		for (const provenance of [
+			"unknown: not yet published; no governor has recorded the budget it enforces",
+			"unknown: the enforced-budget record could not be read; not valid JSON",
+		]) {
+			expect(
+				budgetDisplay({ budget: null, remainingUt: null, budgetProvenance: provenance }),
+			).toEqual({
+				kind: "unknown",
+				provenance,
+			});
+		}
 	});
 
 	it("red-first (no provenance): a config budget's figure is shown WITH 'not confirmed as enforced'", () => {

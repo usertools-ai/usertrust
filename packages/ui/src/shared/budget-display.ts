@@ -8,13 +8,15 @@ import type { SummaryPayload } from "./api.js";
  * one from a placeholder printed a negative balance for a vault whose governor enforces a real budget.
  */
 export type BudgetDisplay =
-	| { kind: "unknown" }
+	| { kind: "unknown"; provenance: string }
 	| { kind: "known"; pct: number; fill: "chart" | "amber" | "danger"; provenance: string };
 
 export function budgetDisplay(
 	s: Pick<SummaryPayload, "budget" | "remainingUt" | "budgetProvenance">,
 ): BudgetDisplay {
-	if (s.budget === null || s.remainingUt === null || s.budget <= 0) return { kind: "unknown" };
+	// An unknown budget says WHICH unknown (several governors, an unreadable record, none published yet).
+	if (s.budget === null || s.remainingUt === null || s.budget <= 0)
+		return { kind: "unknown", provenance: s.budgetProvenance };
 	const frac = s.remainingUt / s.budget;
 	// Healthy budget is --chart (connectivity-neutral), never green: amber under 20% remaining, danger under 5%.
 	const fill = frac > 0.2 ? "chart" : frac >= 0.05 ? "amber" : "danger";

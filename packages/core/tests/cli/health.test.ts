@@ -640,4 +640,30 @@ describe("usertrust health: the budget's provenance, in both modes", () => {
 		await run(dir);
 		expect(lines.join("\n")).toMatch(/Budget source: +the enforced budget, as of \d{4}-/);
 	});
+
+	it("red-first (no budget configured): an UNREADABLE record is unknown with its reason, never 'no budget configured'", async () => {
+		writeFileSync(join(dir, ".usertrust", "effective-budget.json"), "{torn");
+		await run(dir);
+		const text = lines.join("\n");
+		expect(text).toContain(
+			"Budget utilization:      unknown: the enforced-budget record could not be read; not valid JSON",
+		);
+		expect(text).not.toContain("no budget configured");
+		lines = [];
+		await run(dir, { json: true });
+		const out = JSON.parse(lines.join("")) as { data: { signals: Record<string, unknown> } };
+		expect(out.data.signals).toMatchObject({
+			budgetSource: "unreadable",
+			budgetProvenance: "unknown: the enforced-budget record could not be read; not valid JSON",
+		});
+	});
+
+	it("no record and no config: 'not yet published', never 'no budget configured'", async () => {
+		await run(dir);
+		const text = lines.join("\n");
+		expect(text).toContain(
+			"Budget utilization:      unknown: not yet published; no governor has recorded the budget it enforces",
+		);
+		expect(text).not.toContain("no budget configured");
+	});
 });

@@ -100,7 +100,10 @@ export function SummaryStrip(props: {
 									<span className="text-[10px] text-[var(--faint)]">{budget.provenance}</span>
 								</>
 							) : (
-								<span className="text-xs italic text-[var(--faint)]">budget unknown</span>
+								<>
+									<span className="text-xs italic text-[var(--faint)]">budget unknown</span>
+									<span className="text-[10px] text-[var(--faint)]">{budget.provenance}</span>
+								</>
 							)}
 						</div>
 						<Stat label="Chain" value={`${s.chain.events.toLocaleString()} events`} />
