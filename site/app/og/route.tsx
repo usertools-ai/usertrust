@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ImageResponse } from "next/og";
+import { getOgFonts } from "../r/lib/kit-fonts";
 
 // Deterministic, request-independent image — pre-render at build time and serve
 // as a static, CDN-immutable asset (no per-request function invocation).
@@ -14,8 +15,13 @@ export const dynamic = "force-static";
  *
  * Satori constraints honored here:
  *  - flexbox only; every multi-child element declares display:flex
- *  - woff2 unsupported → Khand ships in this directory as TTF (decompressed
- *    from site/public/fonts/*.woff2, same OFL license, see public/fonts/OFL.txt)
+ *  - no font file lives in this repo: Khand is fetched from the brand kit and
+ *    checked against its sha384 pin before it is decoded from woff2 (satori
+ *    reads no woff2) — `getOgFonts()`, the same pinned loader as the receipt
+ *    share card. Prerendered at build, so the build fetches it; if the kit is
+ *    unreachable or a pin fails, the card renders in the renderer's default
+ *    font and the build log says so, rather than failing the build over a
+ *    typeface.
  *  - assets load via fs.readFile, never fetch(new URL(...)): webpack's
  *    asset-module heuristic rewrites that literal pattern for images into a
  *    bundled public path string, which breaks force-static prerendering.
@@ -39,11 +45,13 @@ const POSTER_LEFT = 270;
 export async function GET() {
 	const dir = join(process.cwd(), "app/og");
 	const toArrayBuffer = (b: Buffer) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
-	const [poster, khandBold, khandSemi] = await Promise.all([
+	const [poster, fonts] = await Promise.all([
 		readFile(join(dir, "intro-poster.jpg")),
-		readFile(join(dir, "Khand-Bold.ttf")),
-		readFile(join(dir, "Khand-SemiBold.ttf")),
+		getOgFonts(),
 	]);
+	if (fonts === undefined) {
+		console.warn("/og: brand kit fonts unavailable; rendering in the default font");
+	}
 	return new ImageResponse(
 		<div
 			style={{
@@ -53,7 +61,7 @@ export async function GET() {
 				display: "flex",
 				alignItems: "center",
 				background: GROUND,
-				fontFamily: "Khand",
+				...(fonts === undefined ? {} : { fontFamily: "Khand" }),
 			}}
 		>
 			{/* The hero settle frame, cover-cropped */}
@@ -113,10 +121,7 @@ export async function GET() {
 		{
 			width: 1200,
 			height: 630,
-			fonts: [
-				{ name: "Khand", data: khandBold, weight: 700, style: "normal" },
-				{ name: "Khand", data: khandSemi, weight: 600, style: "normal" },
-			],
+			...(fonts === undefined ? {} : { fonts }),
 		},
 	);
 }
