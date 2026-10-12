@@ -625,6 +625,8 @@ export function transportChangedError(
  *   - a path through a raw client (`_client`, or a client-level HTTP member; on a Google client
  *     also `apiClient`, `_nextGenClient`, `getNextGenClient`, `_interactions`, `_webhooks` and
  *     the Live transports `auth` / `webSocketFactory`);
+ *   - on a Google client, `chats.create` and `processAfcStream`, whose one call hands out or drives
+ *     further billable calls (`handsOutUnauditedCalls`);
  *   - a method on the FREE list or a GOVERNED one: the free branch or the governed trap runs
  *     first, so the entry would never be audited as `ungoverned_call`, which is what listing it
  *     promises.
@@ -660,6 +662,11 @@ export function validateAllowUngoverned(
 		if (provider === "google" && reachesGoogleRawClient(segments)) {
 			throw new TypeError(
 				`usertrust: allowUngoverned cannot list "${entry}": it reaches the SDK's raw client, which is always refused.`,
+			);
+		}
+		if (provider === "google" && handsOutUnauditedCalls(segments)) {
+			throw new TypeError(
+				`usertrust: allowUngoverned cannot list "${entry}": it hands out or drives further billable calls that its one ungoverned_call record would not cover.`,
 			);
 		}
 		if (provider !== undefined) {
@@ -711,6 +718,24 @@ function reachesGoogleRawClient(segments: readonly string[]): boolean {
 			GOOGLE_RAW_MEMBERS.has(seg) ||
 			GOOGLE_UNLISTABLE_SEGMENTS.has(seg) ||
 			(GOOGLE_TRANSPORT_OBJECTS.has(seg) && segments[0] === "live" && i > 0),
+	);
+}
+
+/**
+ * Google methods whose ONE listed call would hand out, or drive, billable calls that the single
+ * `ungoverned_call` record does not cover, so they cannot be listed in `allowUngoverned`:
+ *   - `chats.create` (at any path ending so): it sends nothing, but the `Chat` it returns is built
+ *     on the SDK's raw `Models`, so every later `sendMessage` / `sendMessageStream` is an
+ *     unaudited generation;
+ *   - `processAfcStream` (on any namespace, `chats.modelsModule` included): one call drives a
+ *     repeated `streamGenerateContent` loop.
+ * `authTokens.create` stays listable: a minted key used outside governance is out of scope, as
+ * reading `apiKey` is.
+ */
+function handsOutUnauditedCalls(segments: readonly string[]): boolean {
+	const last = segments[segments.length - 1];
+	return (
+		last === "processAfcStream" || (last === "create" && segments[segments.length - 2] === "chats")
 	);
 }
 

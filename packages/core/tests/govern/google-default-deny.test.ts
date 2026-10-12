@@ -765,6 +765,14 @@ describe("allowUngoverned on a Google client", () => {
 		expect(events[0]?.data).toEqual({ method: "files.upload", provider: "google" });
 	});
 
+	it("authTokens.create stays listable: a minted key used outside governance is out of scope, like apiKey", async () => {
+		const { client } = await google({ allowUngoverned: ["authTokens.create"] });
+		await client.authTokens.create({ config: { uses: 1 } }).catch(() => undefined);
+		expect(hits).toEqual(["POST /v1beta/auth_tokens"]);
+		await client.destroy();
+		expect(chainEvents().map((e) => e.kind)).toEqual(["ungoverned_call"]);
+	});
+
 	it("a method that is not listed is still refused", async () => {
 		const { client, engine } = await google({ allowUngoverned: ["files.upload"] });
 		await expectRefused("models.embedContent", () => client.models.embedContent(GP), engine);
@@ -786,6 +794,18 @@ describe("allowUngoverned on a Google client", () => {
 		["live.webSocketFactory.create", RAW],
 		["live.music.webSocketFactory.create", RAW],
 		["getNextGenClient", RAW],
+		[
+			"chats.create",
+			"it hands out or drives further billable calls that its one ungoverned_call record would not cover.",
+		],
+		[
+			"models.processAfcStream",
+			"it hands out or drives further billable calls that its one ungoverned_call record would not cover.",
+		],
+		[
+			"chats.modelsModule.processAfcStream",
+			"it hands out or drives further billable calls that its one ungoverned_call record would not cover.",
+		],
 	])("%s is refused at creation, by name", async (path, why) => {
 		await expect(
 			trust(rawClient(false), { dryRun: true, vaultBase: vault, allowUngoverned: [path] }),
