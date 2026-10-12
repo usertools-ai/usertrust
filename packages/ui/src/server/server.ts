@@ -336,6 +336,8 @@ export async function createUiServer(
 		)
 			return;
 		Object.assign(state.summary, next);
+		// A state change like any other: a new version, so a snapshot taken before it is not mistaken for one after.
+		version += 1;
 		broadcast("summary", state.summary);
 	};
 	for (const f of budgetFiles) watchFile(f, { interval: BUDGET_POLL_MS }, refreshBudget);

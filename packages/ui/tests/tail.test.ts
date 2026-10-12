@@ -258,6 +258,23 @@ describe("live tail", () => {
 		expect(summary.budgetProvenance).toContain("not a regular file");
 	});
 
+	it("red-first (same version): a budget refresh is a state change: its summary frame carries a NEWER version than a snapshot taken before it", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const snap = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
+			version: number;
+		};
+		const { id, data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				recordEffectiveBudget(join(tempDir, ".usertrust"), 4_000);
+			},
+			8000,
+		);
+		expect(JSON.parse(data)).toMatchObject({ budget: 4_000 });
+		expect(Number(id)).toBeGreaterThan(snap.version);
+	});
+
 	it("signals resync when the log shrinks", async () => {
 		ui = await createUiServer(tempDir, { port: 0 });
 		const logPath = join(tempDir, ".usertrust", "audit", "events.jsonl");
