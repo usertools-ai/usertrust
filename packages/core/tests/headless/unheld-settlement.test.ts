@@ -451,9 +451,57 @@ describe("a rejected append that is already durable is a record, not a failure t
 			recorded: true,
 			auditDegraded: true,
 		});
+		// The retry writes nothing, and is told the record it matches was written degraded.
 		expect(await g.recordUnheldSettlement(params)).toEqual({
 			outcome: "unrecoverable",
 			recorded: false,
+			auditDegraded: true,
+		});
+		expect(audit.events).toHaveLength(1);
+	});
+
+	it("an exact retry of a degraded record is told it was degraded too, and still writes nothing", async () => {
+		const g = await recording().gov();
+		const append = audit.appendEvent as unknown as ReturnType<typeof vi.fn>;
+		append.mockImplementationOnce(async (input: AppendEventInput) => {
+			audit.events.push(input);
+			throw Object.assign(new Error("sidecar write failed"), {
+				[Symbol.for("usertrust.audit.durableEventHash")]: "d".repeat(64),
+			});
+		});
+		const params = { transferId: GONE, inputTokens: 3 };
+		await g.recordUnheldSettlement(params);
+		expect(await g.recordUnheldSettlement(params)).toEqual({
+			outcome: "unrecoverable",
+			recorded: false,
+			auditDegraded: true,
+		});
+		expect(audit.events).toHaveLength(1);
+	});
+
+	it("a request that shares an in-flight degraded append sees the same degraded outcome", async () => {
+		const g = await recording().gov();
+		const append = audit.appendEvent as unknown as ReturnType<typeof vi.fn>;
+		let open!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		append.mockImplementationOnce(async (input: AppendEventInput) => {
+			await gate;
+			audit.events.push(input);
+			throw Object.assign(new Error("sidecar write failed"), {
+				[Symbol.for("usertrust.audit.durableEventHash")]: "d".repeat(64),
+			});
+		});
+		const params = { transferId: GONE, inputTokens: 3 };
+		const first = g.recordUnheldSettlement(params);
+		const sharer = g.recordUnheldSettlement(params); // the first is still appending
+		open();
+		expect(await first).toEqual({ outcome: "unrecoverable", recorded: true, auditDegraded: true });
+		expect(await sharer).toEqual({
+			outcome: "unrecoverable",
+			recorded: false,
+			auditDegraded: true,
 		});
 		expect(audit.events).toHaveLength(1);
 	});
