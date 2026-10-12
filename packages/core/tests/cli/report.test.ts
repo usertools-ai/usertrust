@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../src/audit/chain.js";
+import { verifyVault } from "../../src/audit/verify.js";
 import { parseEnd, parseReportArgs, run } from "../../src/cli/report.js";
 
 const RATES = { inputPer1k: 100, outputPer1k: 500, cacheReadPer1k: 10, cacheWritePer1k: 125 };
@@ -275,6 +276,34 @@ describe("usertrust report --week", () => {
 		expect(process.exitCode).toBe(2);
 		expect(stdout).toContain("UNVERIFIED");
 		expect(stdout).toContain("Confirmed spend");
+		write.mockRestore();
+	});
+
+	it("a literal null line in the log yields a report, never a crash: UNVERIFIED, exit 2", async () => {
+		await vault([{ cost: 100 }]);
+		const log = join(dir, ".usertrust", "audit", "events.jsonl");
+		writeFileSync(log, `${readFileSync(log, "utf-8")}null\n`);
+		await run(dir, {}, ["--week", "--end", endIso()]);
+		expect(process.exitCode).toBe(2);
+		expect(stdout).toContain("UNVERIFIED");
+		write.mockRestore();
+	});
+
+	it("a dot-named log segment is part of the snapshot: the verdict matches the live vault's", async () => {
+		await vault([{ cost: 100 }, { cost: 200 }, { cost: 300 }]);
+		const lines = readFileSync(join(dir, ".usertrust", "audit", "events.jsonl"), "utf-8")
+			.trim()
+			.split("\n");
+		writeFileSync(join(dir, ".usertrust", "audit", ".hidden-0001.jsonl"), `${lines[0]}\n`);
+		writeFileSync(
+			join(dir, ".usertrust", "audit", "events.jsonl"),
+			`${lines.slice(1).join("\n")}\n`,
+		);
+		const live = verifyVault(join(dir, ".usertrust"));
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		expect((JSON.parse(stdout) as { integrity: { verified: boolean } }).integrity.verified).toBe(
+			live.valid,
+		);
 		write.mockRestore();
 	});
 

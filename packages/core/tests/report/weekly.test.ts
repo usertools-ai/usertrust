@@ -91,7 +91,8 @@ describe("weekly report model", () => {
 		expect(m.totals.confirmedUt).toBe(100);
 		expect(m.totals.unconfirmedUt).toBe(700);
 		expect(m.totals.unconfirmedCalls).toBe(1);
-		expect(m.notes.join(" ")).toMatch(/settlement_ambiguous/);
+		expect(m.totals.contradictedCalls).toBe(1);
+		expect(m.notes.join(" ")).toMatch(/unconfirmed/);
 		expect(m.budget.recordedSessionUt).toBe(100); // the budget figure uses the same exclusion
 	});
 
@@ -291,29 +292,76 @@ describe("weekly report model", () => {
 		expect(m.budget.possiblyOverBudget).toBe(false);
 	});
 
-	it("a voided call (llm_call_failed after its llm_call) is no spend and no budget debit", () => {
+	it("llm_call_failed beside an llm_call is UNCONFIRMED: shown, never dropped, never counted as spent", () => {
 		const m = build(
 			[
 				call("2026-10-08T01:00:00Z", 100),
-				call("2026-10-08T02:00:00Z", 700, { transferId: "t-void" }),
+				call("2026-10-08T02:00:00Z", 700, { transferId: "t-fail" }),
 				ev("llm_call_failed", "2026-10-08T02:00:01Z", {
-					transferId: "t-void",
+					transferId: "t-fail",
 					error: "audit unavailable",
 				}),
 				ev("tool_call", "2026-10-08T03:00:00Z", {
 					actionName: "x",
 					cost: 40,
-					transferId: "t-void",
+					transferId: "t-fail",
 				}),
 			],
 			{ budget: 1000 },
 		);
 		expect(m.totals.confirmedUt).toBe(100);
-		expect(m.totals.voidedCalls).toBe(1);
-		expect(m.totals.voidedUt).toBe(700);
+		expect(m.totals.unconfirmedCalls).toBe(1);
+		expect(m.totals.unconfirmedUt).toBe(700);
 		expect(m.budget.recordedSessionUt).toBe(100);
 		expect(m.totals.actionUt).toBe(0);
-		expect(m.notes.join(" ")).toMatch(/voided/);
+		expect(m.totals.unconfirmedActionCalls).toBe(1);
+		expect(m.totals.unconfirmedActionUt).toBe(40);
+	});
+
+	it("a failed-action marker is unconfirmed, and never itself a governed action", () => {
+		const m = build([
+			ev("tool_call", "2026-10-08T03:00:00Z", { actionName: "x", cost: 40, transferId: "t-a" }),
+			ev("tool_call_failed", "2026-10-08T03:00:01Z", {
+				actionName: "x",
+				cost: 40,
+				transferId: "t-a",
+			}),
+		]);
+		expect(m.totals.actionUt).toBe(0);
+		expect(m.totals.unconfirmedActionCalls).toBe(1);
+	});
+
+	it("a hold_released beside a call is proven not charged: in no figure", () => {
+		const m = build([
+			call("2026-10-08T02:00:00Z", 700, { transferId: "t-rel" }),
+			ev("hold_released", "2026-10-08T02:00:01Z", { transferId: "t-rel" }),
+		]);
+		expect(m.totals.confirmedUt).toBe(0);
+		expect(m.totals.unconfirmedCalls).toBe(0);
+		expect(m.totals.releasedCalls).toBe(1);
+	});
+
+	it("a settlement_ambiguous with no call of its own is counted as unconfirmed spend", () => {
+		const m = build([
+			ev("settlement_ambiguous", "2026-10-08T02:00:00Z", { transferId: "t-solo", cost: 300 }),
+		]);
+		expect(m.totals.unconfirmedUt).toBe(300);
+		expect(m.totals.unconfirmedCalls).toBe(1);
+	});
+
+	it("an unknown future record kind beside a call unconfirms it by default; shortfall and implausible do not", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 100, { transferId: "t-s" }),
+			ev("settlement_shortfall", "2026-10-08T01:00:01Z", { transferId: "t-s", shortfall: 5 }),
+			ev("usage_implausible", "2026-10-08T01:00:02Z", { transferId: "t-s" }),
+			call("2026-10-08T02:00:00Z", 200, { transferId: "t-u" }),
+			ev("brand_new_kind", "2026-10-08T02:00:01Z", { transferId: "t-u" }),
+			call("2026-10-08T03:00:00Z", 50, { transferId: undefined }),
+		]);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.postProvenUt).toBe(100);
+		expect(m.totals.unconfirmedUt).toBe(250);
+		expect(m.totals.uncorrelatedCalls).toBe(1);
 	});
 
 	it("unconfirmed NOMINAL units are counted, never added to the dollar figure", () => {

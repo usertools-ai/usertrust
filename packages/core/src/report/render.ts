@@ -34,22 +34,21 @@ function tokens(n: number): string {
 const clean = (s: string): string => scrubForTerminal(s);
 
 /**
- * THE ESCAPING BOUNDARIES: every string that came from the vault (a model, an agent, a cost center, an id, a hash, an
+ * THE OUTPUT BOUNDARIES: every string that came from the vault (a model, an agent, a cost center, an id, a hash, an
  * integrity error, a cost basis) leaves this module through exactly one of these two functions, whichever field it is:
- *  - `md` for Markdown: control bytes scrubbed, then rendered as a literal CODE SPAN, so Markdown syntax, a link, an image
- *    (`![x](https://remote/pixel)`) and raw HTML in it stay text when the report is opened or forwarded. The fence is one
- *    backtick longer than the longest run inside, and `|` is escaped for table cells.
+ *  - `md` for Markdown is an ALLOWLIST, not an escaper: only letters, digits, space and `. , : ; _ @ / + = -` survive;
+ *    every other code point becomes `?` (which is not itself in the set, so a placeholder is never mistaken for input).
+ *    Nothing that survives is Markdown or HTML syntax, so there is no escape to break out of: the earlier escape-based
+ *    version was beaten twice (a `\|` the escaper doubled into `\\|`, closing the cell). The result is still wrapped in a
+ *    code span so an `https://` value cannot autolink. The exact value is in the JSON report.
  *  - `esc` for HTML: control bytes scrubbed, then `& < > " '` escaped. The page has no remote resource of its own.
- * Round 1 scrubbed the verdict; round 2 found Markdown and HTML in the model name: the same class one field over. The
- * fields are no longer enumerated at the call sites; a new vault-derived string has exactly these two exits.
  */
+export const MD_ALLOWED = /^[A-Za-z0-9 .,:;_@/+=-]*$/;
+const MD_DISALLOWED = /[^A-Za-z0-9 .,:;_@/+=-]/gu;
+
 export function md(s: string): string {
-	const text = clean(s).replace(/\|/g, "\\|");
-	const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
-	const fence = "`".repeat(longest + 1);
-	// a code span that starts or ends with a backtick, or is only spaces, needs padding to parse as written
-	const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
-	return `${fence}${pad}${text === "" ? " " : text}${pad}${fence}`;
+	const text = s.replace(MD_DISALLOWED, "?");
+	return `\`${text === "" ? " " : text}\``;
 }
 
 export function esc(s: string): string {

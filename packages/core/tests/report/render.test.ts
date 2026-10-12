@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { PersistedAuditEvent } from "../../src/audit/read.js";
-import { render } from "../../src/report/render.js";
+import { MD_ALLOWED, md, render } from "../../src/report/render.js";
 import { buildWeeklyReport, type IntegrityInfo } from "../../src/report/weekly.js";
 
 const END = Date.parse("2026-10-12T00:00:00Z");
@@ -158,5 +158,27 @@ describe("every vault-derived string passes ONE escaping boundary per format", (
 		const live = outsideCodeSpans(render(m, "md"));
 		expect(live).not.toMatch(/!\[/);
 		expect(live).not.toContain("evil.example");
+	});
+});
+
+describe("md() is an allowlist, not an escaper", () => {
+	it("keeps only letters, digits, space and . , : ; _ @ / + = - ; everything else becomes a visible placeholder", () => {
+		for (const hostile of [
+			"a\\|b",
+			"x`y",
+			"![p](https://remote/pixel)",
+			"<img src=x onerror=1>",
+			"\u202eevil\u0000\u009b",
+			"| a | b |\n| - | - |",
+		]) {
+			const out = md(hostile);
+			expect(out.startsWith("`") && out.endsWith("`"), hostile).toBe(true);
+			const inner = out.slice(1, -1);
+			expect(MD_ALLOWED.test(inner) || /^[A-Za-z0-9 .,:;_@/+=?-]*$/.test(inner), hostile).toBe(
+				true,
+			);
+			expect(inner, hostile).not.toMatch(/[|\\`<>!()[\]\n]/);
+		}
+		expect(md("claude-sonnet-5-5")).toBe("`claude-sonnet-5-5`");
 	});
 });

@@ -190,7 +190,7 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
  * the live vault a writer (or an attacker) changing it between the two reads produced a report stamped VERIFIED over
  * events that were never verified. The vault itself is only read.
  *
- * ABSENCE IS NOT A VALUE. The copy is the verifier's input set: every non-dotfile regular file of the audit directory
+ * ABSENCE IS NOT A VALUE. The copy is the verifier's input set: every regular file of the audit directory except the writer lock
  * (the event log, any rotated segments, their anchor sidecars, the index). Only entries that are not regular files are
  * skipped. A read error on a regular file (EACCES, EIO), a directory that cannot be listed, or a file that cannot be
  * examined is a PROBLEM, returned to the caller, and the report is UNVERIFIED with exit code 2: leaving the file out would
@@ -219,7 +219,8 @@ export function snapshotVault(vaultPath: string): {
 				problem("the audit directory", err);
 			}
 			for (const name of names) {
-				if (name.startsWith(".")) continue;
+				// A dot-named log segment is part of the chain the verifier reads; only the writer lock is not.
+				if (name === ".audit-writer.lock") continue;
 				const src = join(auditSrc, name);
 				let isFile: boolean;
 				try {

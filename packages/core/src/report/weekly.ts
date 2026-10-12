@@ -8,12 +8,19 @@
  * recompute it, and each rule below states what the figure is NOT, because the report is the one artifact a
  * customer forwards to someone who never saw the chain.
  *
- * What is counted as SPEND, and what is deliberately not:
- *   - `llm_call` with a finite, non-negative `data.cost`, in the window, whose `transferId` has NO
- *     `settlement_ambiguous` anywhere in the chain. `settled: true` on `llm_call` is written optimistically BEFORE the
- *     ledger POST (govern.ts), so it cannot be trusted alone: an ambiguous settle is UNCONFIRMED, never spent.
- *   - An explicit `settled: false` is UNCONFIRMED on its own, even with no correction event (the best-effort
- *     `settlement_ambiguous` append can fail too).
+ * What is counted as SPEND, and what is deliberately not. CLASSIFICATION IS BY EVIDENCE, and anything the chain does not
+ * prove is UNCONFIRMED, shown as such, never silently dropped and never silently counted:
+ *   - CONFIRMED: an `llm_call` (or a governed action) with a finite non-negative `cost`, not `settled: false`, and NO record
+ *     for its `transferId` other than itself and the closed set of annotations written after a post landed
+ *     (`settlement_shortfall`, `usage_implausible`). Of those, the ones with POSITIVE evidence of a landed post (a headless
+ *     record, which is written after the ledger POST, or a `settlement_shortfall`) are counted separately; the rest were
+ *     audited before the POST (`trust()` writes `llm_call` first, by design, and writes nothing more on success), so the
+ *     chain alone cannot prove the post and the report says so.
+ *   - UNCONFIRMED: everything else: `settled: false`; ANY other record for the transfer (`settlement_ambiguous`,
+ *     `llm_call_failed`, `<kind>_failed`, a release, a kind this code has never seen), because a failure marker does not
+ *     prove a void (a post-commit throw also appends `llm_call_failed` for a call that WAS charged); a row with no
+ *     `transferId`; and a standalone `settlement_ambiguous` with no call. The set of kinds that can confirm is closed; a
+ *     new kind therefore unconfirms by default instead of leaking into spend.
  *   - Dollars are classified by the recorded DENOMINATION (`costBasis`): `usd-proxy` is dollars (a GPU-amortized local
  *     endpoint is `usd-proxy`), `nominal` is a unit count, shown and excluded from dollar totals. A row with no
  *     `costBasis` (headless rows) is counted as dollars unless it says it went to a local endpoint, and is reported as
@@ -143,9 +150,18 @@ export interface ReportModel {
 		unconfirmedNominalCalls: number;
 		/** Of those, the ones that are an explicit `settled: false` (the rest have a settlement_ambiguous record). */
 		unsettledCalls: number;
-		/** `llm_call`s whose hold was voided afterwards (`llm_call_failed`): audited, never charged. Dollar-denominated only. */
-		voidedUt: number;
-		voidedCalls: number;
+		/** Of the unconfirmed calls, those contradicted by another record for the same transfer (a failure or ambiguity marker, a release, an unknown kind). */
+		contradictedCalls: number;
+		/** Calls whose hold was proven released: nothing was charged, and they are in no spend or budget figure. */
+		releasedCalls: number;
+		/** Of the unconfirmed, those with no `transferId` to correlate. */
+		uncorrelatedCalls: number;
+		/** Confirmed spend whose post is PROVEN by a record written after it (a headless record, or a `settlement_shortfall`). */
+		postProvenUt: number;
+		postProvenCalls: number;
+		/** Governed actions that are unconfirmed (same rules as calls): counted here, never added to `actionUt`. */
+		unconfirmedActionCalls: number;
+		unconfirmedActionUt: number;
 		/** `costBasis: "nominal"` rows (or an unlabelled local-endpoint row): unit counts, excluded from dollar totals. */
 		nominalCalls: number;
 		nominalUt: number;
@@ -315,6 +331,15 @@ function isUsableEvent(e: unknown): e is PersistedAuditEvent {
  * `usd-proxy` is dollars even for a GPU-amortized local endpoint; `nominal` is a unit count. A row with no `costBasis`
  * (headless rows) is `unlabelled`: counted as dollars, and reported as such, unless it says it went to a local endpoint.
  */
+/** A governed action's spend record. A `<kind>_failed` marker is never one, whatever else it carries. */
+function isActionEvent(e: PersistedAuditEvent): boolean {
+	return (
+		!NON_ACTION_KINDS.has(e.kind) &&
+		!e.kind.endsWith("_failed") &&
+		str(e.data["actionName"]) !== undefined
+	);
+}
+
 function denominationOf(e: PersistedAuditEvent): "usd" | "nominal" | "unlabelled" {
 	const basis = e.data["costBasis"];
 	if (basis === "usd-proxy") return "usd";
@@ -329,17 +354,28 @@ function denominationOf(e: PersistedAuditEvent): "usd" | "nominal" | "unlabelled
  */
 function walletDebit(
 	e: PersistedAuditEvent,
-	notCharged: ReadonlySet<string>,
+	standing: (e: PersistedAuditEvent) => Standing,
 ): { ut: number; attributed: boolean } | undefined {
 	const isCall = e.kind === "llm_call";
-	const isAction = !NON_ACTION_KINDS.has(e.kind) && str(e.data["actionName"]) !== undefined;
+	const isAction = isActionEvent(e);
 	if (!isCall && !isAction) return undefined;
 	const c = cost(e.data["cost"]);
-	if (c === undefined || e.data["settled"] === false) return undefined;
-	const tid = str(e.data["transferId"]);
-	if (tid !== undefined && notCharged.has(tid)) return undefined;
+	if (c === undefined || standing(e).kind !== "confirmed") return undefined;
 	return { ut: c, attributed: str(e.data["costCenter"]) !== undefined };
 }
+
+/**
+ * Records that may sit beside a spend record for one transfer without contradicting it: a shortfall is the ledger
+ * reporting the posted amount, an implausible-usage flag is an annotation. Any OTHER kind for the same transfer (a
+ * failure, an ambiguity, a release, a kind this reader has never heard of) unconfirms the spend: a closed allowlist, so
+ * a future kind defaults to unconfirmed rather than to charged.
+ */
+const BENIGN_SIBLINGS: ReadonlySet<string> = new Set(["settlement_shortfall", "usage_implausible"]);
+
+export type Standing =
+	| { kind: "confirmed"; postProven: boolean }
+	| { kind: "unconfirmed"; reason: "unsettled" | "uncorrelated" | "contradicted" }
+	| { kind: "released" };
 
 export function buildWeeklyReport(
 	events: readonly PersistedAuditEvent[],
@@ -356,27 +392,43 @@ export function buildWeeklyReport(
 	// and counted, so one bad line never turns the report into a crash with no verification diagnostics.
 	const usable = events.filter(isUsableEvent);
 	const malformedEvents = events.length - usable.length;
-	const notCharged = new Set<string>();
 
-	// Whole-chain indexes: an ambiguity or a shortfall can be recorded outside the window of the call it corrects.
-	const ambiguous = new Set<string>();
-	// A call whose hold was VOIDED after its `llm_call` was audited (`audit.failClosed`, or a failed terminal): the
-	// `llm_call` event persists, the money never moved.
-	const voided = new Set<string>();
+	// Whole-chain indexes: a sibling record can sit outside the window of the call it qualifies.
+	const kindsByTransfer = new Map<string, Set<string>>();
+	const spendTransfers = new Set<string>();
+	const postProvenTransfers = new Set<string>();
 	const shortfallByTransfer = new Map<string, number>();
 	for (const e of usable) {
 		const tid = str(e.data["transferId"]);
 		if (tid === undefined) continue;
-		if (e.kind === "settlement_ambiguous") ambiguous.add(tid);
-		else if (e.kind === "llm_call_failed") voided.add(tid);
-		else if (e.kind === "settlement_shortfall") {
-			const s = cost(e.data["shortfall"]);
-			if (s !== undefined) shortfallByTransfer.set(tid, s);
+		const ks = kindsByTransfer.get(tid) ?? new Set<string>();
+		ks.add(e.kind);
+		kindsByTransfer.set(tid, ks);
+		const isAction = isActionEvent(e);
+		if (e.kind === "llm_call" || isAction) {
+			spendTransfers.add(tid);
+			// A headless record is written after the ledger answered the post.
+			if (e.data["source"] === "headless" && e.data["settled"] === true)
+				postProvenTransfers.add(tid);
+		} else if (e.kind === "settlement_shortfall") {
+			postProvenTransfers.add(tid);
+			const sf = cost(e.data["shortfall"]);
+			if (sf !== undefined) shortfallByTransfer.set(tid, sf);
 		}
 	}
 
-	for (const tid of ambiguous) notCharged.add(tid);
-	for (const tid of voided) notCharged.add(tid);
+	const standing = (e: PersistedAuditEvent): Standing => {
+		const tid = str(e.data["transferId"]);
+		if (e.data["settled"] === false) return { kind: "unconfirmed", reason: "unsettled" };
+		if (tid === undefined) return { kind: "unconfirmed", reason: "uncorrelated" };
+		const ks = kindsByTransfer.get(tid);
+		if (ks?.has("hold_released")) return { kind: "released" };
+		for (const k of ks ?? []) {
+			if (k !== e.kind && !BENIGN_SIBLINGS.has(k))
+				return { kind: "unconfirmed", reason: "contradicted" };
+		}
+		return { kind: "confirmed", postProven: postProvenTransfers.has(tid) };
+	};
 
 	const t = {
 		confirmedUt: 0,
@@ -386,8 +438,13 @@ export function buildWeeklyReport(
 		unconfirmedUt: 0,
 		unconfirmedCalls: 0,
 		unconfirmedNominalCalls: 0,
-		voidedUt: 0,
-		voidedCalls: 0,
+		contradictedCalls: 0,
+		releasedCalls: 0,
+		uncorrelatedCalls: 0,
+		postProvenUt: 0,
+		postProvenCalls: 0,
+		unconfirmedActionCalls: 0,
+		unconfirmedActionUt: 0,
 		unlabelledUt: 0,
 		unlabelledCalls: 0,
 		unsettledCalls: 0,
@@ -436,7 +493,7 @@ export function buildWeeklyReport(
 
 		// BUDGET: every debit of a wallet, `llm_call` and governed action alike, over the WHOLE chain. A call attributed to
 		// a cost-center envelope debits that envelope, not the session wallet the configured budget belongs to.
-		const wallet = walletDebit(e, notCharged);
+		const wallet = walletDebit(e, standing);
 		if (wallet !== undefined) {
 			if (wallet.attributed) recordedAttributedUt += wallet.ut;
 			else recordedSessionUt += wallet.ut;
@@ -448,8 +505,6 @@ export function buildWeeklyReport(
 
 		if (e.kind === "llm_call") {
 			const c = cost(e.data["cost"]);
-			const isAmbiguous = tid !== undefined && ambiguous.has(tid);
-			const isUnsettled = e.data["settled"] === false;
 			const denomination = denominationOf(e);
 			if (!Number.isFinite(ms)) {
 				t.malformedCalls += 1;
@@ -460,17 +515,19 @@ export function buildWeeklyReport(
 				t.malformedCalls += 1;
 				continue;
 			}
-			if (tid !== undefined && voided.has(tid)) {
-				t.voidedCalls += 1;
-				if (denomination !== "nominal") t.voidedUt += c;
+			const st = standing(e);
+			if (st.kind === "released") {
+				t.releasedCalls += 1;
 				continue;
 			}
-			if (isAmbiguous || isUnsettled) {
+			if (st.kind === "unconfirmed") {
 				// Unconfirmed NOMINAL units are not dollars: they are counted, never added to the dollar figure.
 				if (denomination === "nominal") t.unconfirmedNominalCalls += 1;
 				else t.unconfirmedUt += c;
 				t.unconfirmedCalls += 1;
-				if (!isAmbiguous) t.unsettledCalls += 1;
+				if (st.reason === "unsettled") t.unsettledCalls += 1;
+				else if (st.reason === "uncorrelated") t.uncorrelatedCalls += 1;
+				else t.contradictedCalls += 1;
 				continue;
 			}
 			if (denomination === "nominal") {
@@ -480,6 +537,10 @@ export function buildWeeklyReport(
 			}
 			t.confirmedUt += c;
 			t.confirmedCalls += 1;
+			if (st.postProven) {
+				t.postProvenUt += c;
+				t.postProvenCalls += 1;
+			}
 			if (denomination === "unlabelled") {
 				t.unlabelledUt += c;
 				t.unlabelledCalls += 1;
@@ -579,20 +640,31 @@ export function buildWeeklyReport(
 
 		if (!inWindow) continue;
 
+		// An ambiguity with no spend record of its own (a stream that never reached its audit append): the cost it
+		// carries is unconfirmed spend, shown, never dropped.
+		if (e.kind === "settlement_ambiguous" && (tid === undefined || !spendTransfers.has(tid))) {
+			const c = cost(e.data["cost"]);
+			if (denominationOf(e) === "nominal") t.unconfirmedNominalCalls += 1;
+			else if (c !== undefined) t.unconfirmedUt += c;
+			t.unconfirmedCalls += 1;
+			t.contradictedCalls += 1;
+		}
+
 		if ((GOVERNANCE_KINDS as readonly string[]).includes(e.kind)) {
 			governance[e.kind] = (governance[e.kind] ?? 0) + 1;
 			continue;
 		}
 		// A governed non-LLM action: its own line, never merged into model spend.
-		if (!NON_ACTION_KINDS.has(e.kind) && str(e.data["actionName"]) !== undefined) {
+		if (isActionEvent(e)) {
 			const c = cost(e.data["cost"]);
-			if (
-				c !== undefined &&
-				e.data["settled"] !== false &&
-				!(tid !== undefined && notCharged.has(tid))
-			) {
+			if (c === undefined) continue;
+			const st = standing(e);
+			if (st.kind === "confirmed") {
 				t.actionUt += c;
 				t.actionCalls += 1;
+			} else if (st.kind === "unconfirmed") {
+				t.unconfirmedActionUt += c;
+				t.unconfirmedActionCalls += 1;
 			}
 		}
 	}
@@ -610,12 +682,17 @@ export function buildWeeklyReport(
 	}
 	if (t.unconfirmedCalls > 0) {
 		notes.push(
-			`${t.unconfirmedCalls} call(s) are unconfirmed (a settlement_ambiguous record, or an explicit settled: false${t.unsettledCalls > 0 ? `, ${t.unsettledCalls} of them` : ""}): the ledger POST may not have completed. They are shown as unconfirmed, not counted as spent.`,
+			`${t.unconfirmedCalls} call(s) are unconfirmed (${t.contradictedCalls} with a failure, ambiguity or other record beside them, ${t.unsettledCalls} explicitly settled: false, ${t.uncorrelatedCalls} with no transfer id): the ledger charge is not proven. They are shown as unconfirmed, not counted as spent.`,
 		);
 	}
-	if (t.voidedCalls > 0) {
+	if (t.unconfirmedActionCalls > 0) {
 		notes.push(
-			`${t.voidedCalls} call(s) were audited and then voided (llm_call_failed): the hold was released and nothing was charged. They are in no spend or budget figure.`,
+			`${t.unconfirmedActionCalls} governed action(s) are unconfirmed on the same rules and are not in the action total.`,
+		);
+	}
+	if (t.releasedCalls > 0) {
+		notes.push(
+			`${t.releasedCalls} call(s) had their hold released (hold_released): nothing was charged. They are in no spend or budget figure.`,
 		);
 	}
 	if (t.unconfirmedNominalCalls > 0) {
