@@ -1516,7 +1516,7 @@ describe("a shortfall whose posted amount is unusable never makes the metered co
 	});
 });
 
-describe("calls run ungoverned (allowUngoverned) are counted by method, never as spend", () => {
+describe("ungoverned call attempts (allowUngoverned) are counted by method, never as spend", () => {
 	const T = "2026-10-08T01:00:00Z";
 	const ungoverned = (method: unknown, ts = T) =>
 		ev("ungoverned_call", ts, { method, provider: "openai" });
@@ -1531,6 +1531,7 @@ describe("calls run ungoverned (allowUngoverned) are counted by method, never as
 		const m = build(spend(), opts);
 		expect(m.ungoverned).toEqual({ calls: 0, byMethod: {} });
 		for (const f of ["md", "html"] as const) {
+			expect(render(m, f), f).not.toContain("Ungoverned call attempts");
 			expect(render(m, f), f).not.toContain("Calls run ungoverned");
 		}
 		// JSON keeps the model's shape, like `unrecognised: {}`: a zero count, no breakdown

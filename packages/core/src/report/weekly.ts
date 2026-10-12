@@ -381,8 +381,9 @@ export interface ReportModel {
 	 */
 	unrecognised: Record<string, number>;
 	/**
-	 * `ungoverned_call`: a call the caller opted out of governance for (`allowUngoverned`). It went to the provider with no
-	 * hold, no budget check and no cost, so what it spent is not known: counted here by method, in NO spend, cost, budget,
+	 * `ungoverned_call`: an attempt the caller opted out of governance for (`allowUngoverned`). The record is written before
+	 * the SDK call, so it proves the call was attempted, not that it reached the provider. No hold, no budget check and no
+	 * cost, so what it spent is not known. `calls` counts recorded attempts, by method, in NO spend, cost, budget,
 	 * governed-call or action figure.
 	 */
 	ungoverned: { calls: number; byMethod: Record<string, number> };
@@ -416,7 +417,7 @@ const KNOWN_KINDS: ReadonlySet<string> = new Set([
 	// Written by the budget primitives (cost-center envelopes) to the same chain; deliberately not read here.
 	"budget_allocated",
 	"budget_reclaimed",
-	// A call run ungoverned through `allowUngoverned`: counted by method, never as spend.
+	// An ungoverned call attempt through `allowUngoverned`: the record proves an attempt, counted by method, never as spend.
 	"ungoverned_call",
 	...GOVERNANCE_KINDS,
 ]);
@@ -446,8 +447,8 @@ const NON_ACTION_KINDS = new Set<string>([
 	"injection_detected",
 	"anomaly_detected",
 	"chunk",
-	// A call run ungoverned moved no metered money: it carries no `actionName` today, and listing it here keeps one that
-	// ever did (or carried a `cost`) out of the action totals.
+	// An ungoverned call attempt moved no metered money: the record proves an attempt. It carries no `actionName` today,
+	// and listing it here keeps one that ever did (or carried a `cost`) out of the action totals.
 	"ungoverned_call",
 ]);
 
