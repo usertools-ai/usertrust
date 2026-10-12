@@ -336,8 +336,9 @@ export function looseVaultWarning(vaultDir: string): string | undefined {
  * replaced, not followed.
  *
  * Every step BEFORE the rename throws on failure, and the temp file is removed. The directory
- * sync AFTER it never throws, whatever the error: by then `path` IS replaced and owner-only, and
- * a throw would report a failure for a write that took effect. Its failure is reported once, as
+ * sync AFTER it (skipped on Windows, where a directory handle cannot be flushed) never throws,
+ * whatever the error: by then `path` IS replaced and owner-only, and a throw would report a
+ * failure for a write that took effect. Its failure is reported once, as
  * a warning ({@link dirSyncWarning}) passed to `warn` (default: stderr, as given; a CLI caller
  * passes one that scrubs the path for its terminal).
  */
@@ -378,6 +379,9 @@ export function writePrivateFileAtomic(
 		throw err;
 	}
 	// Make the rename durable: best effort for EVERY error, because the replace already happened.
+	// Not on Windows: a read-only directory handle cannot be flushed there (EPERM on every run),
+	// so the attempt could only ever produce a warning.
+	if (isWindows()) return;
 	let dfd: number | undefined;
 	try {
 		dfd = openSync(dirname(path), "r");

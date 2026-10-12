@@ -84,7 +84,8 @@ describe.skipIf(process.platform === "win32")(
 
 		for (const code of ["EPERM", "EBADF"]) {
 			it(`${code}: the reconfigure completes, writes .gitignore, and warns that .env was replaced`, async () => {
-				// .gitignore is written AFTER .env: its absence would show init stopped there.
+				// Removed so the reconfigure must write it again (now before .env); that it gets past
+				// the failed directory sync is shown by the reconfigure resolving at all.
 				unlinkSync(join(vault, ".gitignore"));
 				const stderr: string[] = [];
 				vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {

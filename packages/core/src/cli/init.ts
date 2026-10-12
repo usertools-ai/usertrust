@@ -560,6 +560,21 @@ function createVault(vaultPath: string, data: VaultData): void {
 		mode: PRIVATE_FILE_MODE,
 	});
 
+	// Write .gitignore BEFORE .env: `.env` goes through a temp file beside it (`.env.<uuid>.tmp`),
+	// and a process killed between that file's creation and its rename leaves the key in it. It
+	// must already be ignored then, on a fresh vault and on one whose .gitignore predates the
+	// pattern alike.
+	const gitignoreContent = `tigerbeetle/
+*.tigerbeetle
+dlq/
+.env
+.env.*.tmp
+`;
+	writeFileSync(join(vaultPath, ".gitignore"), gitignoreContent, {
+		encoding: "utf-8",
+		mode: PRIVATE_FILE_MODE,
+	});
+
 	// Write .env with API keys
 	if (data.keys && Object.keys(data.keys).length > 0) {
 		const envLines = Object.entries(data.keys).map(([provider, key]) => {
@@ -574,16 +589,4 @@ function createVault(vaultPath: string, data: VaultData): void {
 			process.stderr.write(`${scrubForTerminal(message)}\n`);
 		});
 	}
-
-	// Write .gitignore
-	const gitignoreContent = `tigerbeetle/
-*.tigerbeetle
-dlq/
-.env
-.env.*.tmp
-`;
-	writeFileSync(join(vaultPath, ".gitignore"), gitignoreContent, {
-		encoding: "utf-8",
-		mode: PRIVATE_FILE_MODE,
-	});
 }
