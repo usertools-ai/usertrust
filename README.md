@@ -367,6 +367,8 @@ Removing usertrust is more than `npm uninstall`. What it leaves behind, and wher
 - **usertrust-server:** stop the process, then delete its `stateDir` (one vault per tenant) and its config and tenant-key files. Versions up to and including 4.1.0 also wrote a `.usertrust/patterns/` folder in the server's working directory, outside `stateDir`; delete it if it is there.
 - **Claude Code plugin:** remove the plugin with Claude Code's plugin commands, then delete the configuration file under `~/.config/usertrust/` (it holds the server key), the plugin's state directory (`~/.claude/usertrust-cc` by default), and `~/.local/state/usertrust/` (per-session pins, which can also hold the server key until they are pruned after 30 days). If the server key may remain on a shared machine, rotate it.
 
+**Where `~` is.** The anchor key lives under the `$HOME` of the account that ran `usertrust anchor init` (Node's `os.homedir()`). The plugin looks for its configuration file and `.local/state/usertrust` under the account's home as the system records it (`os.userInfo().homedir`), which can differ from `$HOME` under `sudo` or in some containers. Find it with `node -p "require('os').userInfo().homedir"` and check both places before concluding the files are gone. The plugin's state directory defaults to `usertrust-cc` under `$CLAUDE_CONFIG_DIR` when that variable is set, and under `~/.claude` otherwise.
+
 ## License
 
 Apache 2.0
