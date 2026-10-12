@@ -709,8 +709,9 @@ export async function publishExclusive(path, content, { mode } = {}) {
  * by a real file.
  * - `small`: one value: a marker, a stamp, a lock's owner, a session's notice state, the
  *   SessionStart mark. Each is under 200 bytes.
- * - `record`: JSON that carries lists: a transcript cursor (two lists of at most ID_HISTORY
- *   ids, 355 KB measured), a hold, the capabilities cache, a subagent's meta file.
+ * - `record`: JSON that carries lists or maps: a transcript cursor (two lists of at most
+ *   ID_HISTORY ids, 355 KB measured), a hold, the capabilities cache, the job-capability map
+ *   (one entry per server URL, never pruned), a subagent's meta file.
  * - `log`: a log read whole: a session's job log, the vault's audit logs, watch.jsonl.
  */
 export const READ_BOUND = Object.freeze({
@@ -1381,7 +1382,7 @@ export function jobCapable(capabilities) {
 		const url = serverBase();
 		let known = {};
 		try {
-			const parsed = JSON.parse(await readRegular(file, READ_BOUND.small));
+			const parsed = JSON.parse(await readRegular(file, READ_BOUND.record));
 			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) known = parsed;
 		} catch {
 			// unreadable or absent: nothing remembered

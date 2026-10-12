@@ -3,7 +3,16 @@
 // Job ids here are opaque (`job-a`, `bug-1`). Each test names the mutant it kills.
 
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readdir, readFile, utimes, writeFile } from "node:fs/promises";
+import {
+	chmod,
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	stat,
+	utimes,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1348,6 +1357,27 @@ describe("the writers, through their real entry points", () => {
 			expect(JSON.parse(await readFile(cap, "utf-8"))[url]).toBe(true);
 		},
 	);
+	it("a capability map past 4 KiB is still read: a probe keeps every other server's entry", async () => {
+		// One entry per server URL, never pruned: a map that a read bound refused would be read
+		// as empty, and the probe's rewrite would then drop every other server's bit.
+		const jobs = join(state, "jobs");
+		await mkdir(jobs, { recursive: true });
+		const cap = join(jobs, "capability.json");
+		const others = Object.fromEntries(
+			Array.from({ length: 200 }, (_, i) => [`http://server-${i}.example.test:4519`, true]),
+		);
+		await writeFile(cap, JSON.stringify(others));
+		expect((await stat(cap)).size).toBeGreaterThan(4096);
+		const url = "http://127.0.0.1:1";
+		process.env.UT_SERVER_URL = url;
+		vi.resetModules(); // jobCapable reads the map once per process
+		const { jobCapable } = (await import(pathToFileURL(join(HOOKS, "lib.mjs")).href)) as {
+			jobCapable(capabilities: Set<string> | null): Promise<boolean>;
+		};
+		expect(await jobCapable(new Set(["job"]))).toBe(true);
+		// mutant: read at the 4 KiB `small` bound → EFBIG → {} → the map is rewritten as this URL alone
+		expect(JSON.parse(await readFile(cap, "utf-8"))).toEqual({ ...others, [url]: true });
+	});
 });
 
 describe("keyAt — unlabelled stretches are distinct", () => {
