@@ -208,18 +208,18 @@ function wordWrap(text: string, maxWidth: number): string[] {
  * defense. Exporting this beats writing a third copy of it.
  */
 /**
- * Characters that REORDER or HIDE text without printing a glyph: zero-width space/joiners and the LRM/RLM marks
- * (U+200B–U+200F), bidi embeddings and overrides (U+202A–U+202E), bidi isolates (U+2066–U+2069), and the zero-width
- * no-break space (U+FEFF). A vault string carrying one could reorder the verdict line or hide part of it in an
- * auditor's terminal. Written as numbers on purpose: a literal one in this file would be invisible to review.
+ * Characters that REORDER or HIDE text without printing a glyph: Unicode's format-character category (General_Category
+ * Cf). It holds the zero-width spaces and joiners, the LRM/RLM and Arabic letter marks, the bidi embeddings, overrides
+ * and isolates, the word joiner and invisible operators, the deprecated format controls, the Mongolian vowel
+ * separator, the BOM and the tag characters. A vault string carrying one could reorder the verdict line or hide part
+ * of it in an auditor's terminal. The class is tested by its Unicode PROPERTY, not a hand list: a hand list of ranges
+ * missed nine of its members. The zero-width joiner is replaced too, so an emoji sequence shows as its parts joined by
+ * `?`; this is an audit verifier's display, and a joiner is a format character like the rest.
  */
-function isInvisibleFormat(code: number): boolean {
-	return (
-		(code >= 0x200b && code <= 0x200f) ||
-		(code >= 0x202a && code <= 0x202e) ||
-		(code >= 0x2066 && code <= 0x2069) ||
-		code === 0xfeff
-	);
+const FORMAT_CHARACTER = /^\p{Cf}$/u;
+
+function isInvisibleFormat(ch: string): boolean {
+	return FORMAT_CHARACTER.test(ch);
 }
 
 export function forDisplay(raw: string): string {
@@ -227,8 +227,7 @@ export function forDisplay(raw: string): string {
 	for (const ch of raw) {
 		const code = ch.codePointAt(0) as number;
 		// The control test stays in its own conditional: that exact shape is what the sanitizer inventory counts.
-		out +=
-			code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : isInvisibleFormat(code) ? "?" : ch;
+		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : isInvisibleFormat(ch) ? "?" : ch;
 	}
 	return out;
 }

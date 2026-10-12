@@ -103,14 +103,77 @@ describe("forDisplay — characters that reorder or hide text are replaced too",
 		0x2069, // bidi isolates
 		0xfeff, // zero-width no-break space
 	];
-	it.each(INVISIBLE)("U+%s is replaced with ? (red-first: passed through)", (code) => {
+	const hex = (code: number): [string, number] => [
+		code.toString(16).toUpperCase().padStart(4, "0"),
+		code,
+	];
+	it.each(INVISIBLE.map(hex))("U+%s is replaced with ? (red-first: passed through)", (_h, code) => {
 		expect(forDisplay(`a${String.fromCodePoint(code)}b`)).toBe("a?b");
 	});
 	it("control: the neighbours of each range are printable and left alone", () => {
-		for (const code of [0x200a, 0x2010, 0x2029, 0x202f, 0x2065, 0x206a, 0xfefe, 0xff01]) {
+		for (const code of [0x200a, 0x2010, 0x2029, 0x202f, 0x2065, 0x2070, 0xfefe, 0xff01]) {
 			const ch = String.fromCodePoint(code);
 			expect(forDisplay(`a${ch}b`)).toBe(`a${ch}b`);
 		}
+	});
+	// The format characters a hand list of ranges missed: the Arabic letter mark, the word joiner and invisible
+	// operators, the deprecated format controls, and the Mongolian vowel separator.
+	const MISSED = [
+		0x061c, // Arabic letter mark
+		0x2060,
+		0x2061,
+		0x2062,
+		0x2063,
+		0x2064, // word joiner, invisible operators
+		0x206a,
+		0x206b,
+		0x206c,
+		0x206d,
+		0x206e,
+		0x206f, // deprecated format controls
+		0x180e, // Mongolian vowel separator
+	];
+	it.each(MISSED.map(hex))(
+		"U+%s is replaced with ? (red-first: the hand list passed it through)",
+		(_h, code) => {
+			expect(forDisplay(`a${String.fromCodePoint(code)}b`)).toBe("a?b");
+		},
+	);
+	it("GENERATIVE: every BMP code point in Unicode's format-character category is replaced", () => {
+		const cf = /^\p{Cf}$/u;
+		const missed: string[] = [];
+		let checked = 0;
+		for (let code = 0; code <= 0xffff; code++) {
+			if (code >= 0xd800 && code <= 0xdfff) continue; // lone surrogates are not characters
+			const ch = String.fromCodePoint(code);
+			if (!cf.test(ch)) continue;
+			checked++;
+			if (forDisplay(`a${ch}b`) !== "a?b") missed.push(code.toString(16));
+		}
+		expect(missed).toEqual([]);
+		// The walk reaches the class at all: every named member above is in it, and so are the 15 listed earlier.
+		expect(checked).toBeGreaterThanOrEqual(MISSED.length + INVISIBLE.length);
+		for (const code of [...MISSED, ...INVISIBLE])
+			expect(cf.test(String.fromCodePoint(code))).toBe(true);
+	});
+	it("control: ordinary text, accents, CJK and emoji WITHOUT a joiner pass unchanged", () => {
+		const text = [
+			"Verified: 12 events, ",
+			String.fromCodePoint(0x77, 0xf6, 0x72, 0x6c, 0x64), // w-o-umlaut-r-l-d
+			" ",
+			String.fromCodePoint(0x65e5, 0x672c, 0x8a9e), // three CJK ideographs
+			" ",
+			String.fromCodePoint(0x1f44d, 0x1f3fd), // thumbs up with a skin-tone modifier
+			String.fromCodePoint(0x1f1fa, 0x1f1f8), // a flag from two regional indicators
+			String.fromCodePoint(0x2764, 0xfe0f), // heart with a variation selector
+		].join("");
+		expect(forDisplay(text)).toBe(text);
+	});
+	it("the zero-width joiner is replaced: an emoji sequence shows its parts joined by ?", () => {
+		const family = String.fromCodePoint(0x1f469, 0x200d, 0x1f467);
+		expect(forDisplay(family)).toBe(
+			`${String.fromCodePoint(0x1f469)}?${String.fromCodePoint(0x1f467)}`,
+		);
 	});
 	it("the CLI: an RLO in a vault event id never reaches the terminal", () => {
 		const rlo = String.fromCodePoint(0x202e);

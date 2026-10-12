@@ -1495,11 +1495,12 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   receipt string. The standalone CLI (`verify/src/cli.ts`) imports this same function for its
   verdict output — every chain-error line, `First event:`/`Last event:`, the latest anchor's keyId
   and timestamp, the witness error, each anchoring warning, and the argv/caught-error echoes —
-  because those, too, are strings the audited vault (or argv) controls, printed at the auditor
+  because those, too, are strings the audited vault (or argv) controls, printed at the auditor.
   It is an import, not a copy: the count above is unchanged.
-  Beyond C0, DEL and C1 it also replaces the characters that reorder or hide text without a glyph —
-  zero-width U+200B–U+200F and U+FEFF, bidi embeddings/overrides U+202A–U+202E and isolates U+2066–U+2069 —
-  written as numeric ranges (`isInvisibleFormat`), never as literal characters.
+  Beyond C0, DEL and C1 it also replaces every character that reorders or hides text without a glyph:
+  Unicode's format-character category, tested by its property (`/^\p{Cf}$/u` in `isInvisibleFormat`), never
+  by a hand list of ranges, which missed nine members of the class. The zero-width joiner is included, so an
+  emoji sequence shows its parts joined by `?`.
 - Independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.
