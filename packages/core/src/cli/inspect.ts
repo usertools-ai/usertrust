@@ -11,20 +11,15 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
-import { buildMerkleTree } from "../audit/merkle.js";
-import {
-	describeBudgetSource,
-	isKnownBudget,
-	loadBudgetConfig,
-	readLedgerEvents,
-} from "../audit/read.js";
-import { verifyChain } from "../audit/verify.js";
-import { VAULT_DIR } from "../shared/constants.js";
+import { describeBudgetSource, isKnownBudget, loadBudgetConfig } from "../audit/read.js";
+import { verifyVaultReading } from "../audit/verify.js";
+import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
+import { describeMissingSegments } from "./audit-segments.js";
 import type { CliOptions } from "./init.js";
-import { toSafeJson, warnIfVaultLoose } from "./target.js";
+import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
 
-function computeSpent(events: AuditEvent[]): number {
+function computeSpent(events: readonly AuditEvent[]): number {
 	let spent = 0;
 	for (const e of events) {
 		if (e.kind !== "llm_call") continue;
@@ -75,7 +70,14 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	}
 
 	const config = loadBudgetConfig(vaultPath);
-	const events = readLedgerEvents(vaultPath);
+	// ONE READING for the verdict, the count, the latest hash, the Merkle root, the spend and the table:
+	// every audit segment, ordered by `sequence`, walked as one chain, exactly as `usertrust verify`
+	// reads it. Verifying the live log alone failed every rotated vault (its first event links to the
+	// previous segment, not to GENESIS, and the `.meta` anchor counts every event), and listing events
+	// from a second read let the table and the root describe a log the verdict never judged.
+	const reading = verifyVaultReading(vaultPath);
+	const verification = reading.result;
+	const events = reading.events;
 	const spent = computeSpent(events);
 	// An UNKNOWN budget (no governor record, no configured budget) has no remaining figure: subtracting spend from the
 	// placeholder 0 printed a negative balance for a vault whose governor enforces a real budget elsewhere.
@@ -87,13 +89,15 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// carries its age; a config budget says it is unconfirmed.
 	const provenance = describeBudgetSource(config);
 
-	// Verify chain
-	const logPath = join(vaultPath, "audit", "events.jsonl");
-	const verification = verifyChain(logPath);
-
-	// Build Merkle tree from event hashes
-	const eventHashes = events.map((e) => e.hash);
-	const { root: merkleRoot } = buildMerkleTree(eventHashes);
+	const latestHash = reading.orderedHashes.at(-1) ?? GENESIS_HASH;
+	const merkleRoot = verification.merkleRoot;
+	// A `Sequence gap:` says an event follows the wrong one, not which file is gone: name the absent
+	// range and its neighbouring segments beside it. SCRUBBED, every line: event ids and segment file
+	// names inside these errors are text from the vault under inspection, printed at a terminal.
+	const chainErrors = [
+		...verification.errors,
+		...describeMissingSegments(join(vaultPath, "audit"), verification.errors),
+	].map(scrubForTerminal);
 
 	if (json) {
 		const transactions = events
@@ -119,9 +123,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 					remaining,
 					percentRemaining: pct === null ? null : Number.parseFloat(pct),
 					chain: {
-						events: verification.eventsVerified,
+						events: verification.chainLength,
 						valid: verification.valid,
-						latestHash: verification.latestHash,
+						latestHash,
+						errors: chainErrors,
 					},
 					merkleRoot: merkleRoot ?? null,
 					transactions,
@@ -143,7 +148,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	);
 	if (remaining !== null) console.log(`${`|    (${provenance})`.padEnd(63)}|`);
 	console.log(
-		`${`|  Chain: ${verification.eventsVerified} events | Integrity: ${verification.valid ? "SHA-256 verified" : "INTEGRITY FAILURE"}`.padEnd(
+		`${`|  Chain: ${verification.chainLength} events | Integrity: ${verification.valid ? "SHA-256 verified" : "INTEGRITY FAILURE"}`.padEnd(
 			63,
 		)}|`,
 	);
@@ -176,5 +181,6 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// Show integrity status with color below the table
 	if (!verification.valid) {
 		console.log(pc.red("WARNING: Chain integrity check failed!"));
+		for (const err of chainErrors) console.log(pc.red(`  - ${err}`));
 	}
 }
