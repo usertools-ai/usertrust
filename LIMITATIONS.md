@@ -293,6 +293,15 @@ in full, not only the matched characters. `createGovernor()` and `usertrust-serv
 scan the `messages` the caller passes and can block, but never redact egress.
 The full scope, per provider, is on the [PII Detection](https://usertrust.ai/docs/policy/pii) page.
 
+## 12. A stream aborted by the caller's own signal is not charged for what it consumed
+
+A governed `create({ stream: true })` call on an OpenAI or Anthropic client that the
+caller aborts with its own `AbortSignal` has its hold voided, so the usage the stream
+had already consumed goes uncharged. A stream the caller ends with an early `break` is
+charged for what it consumed; the abort path is the gap. A provider error mid-stream
+voids the hold, as intended. This is a known gap, fixed in the next release. Until
+then, do not rely on an aborted stream to have been charged.
+
 ---
 
 Found a boundary we haven't documented? That is a bug in this file — open an
