@@ -74,9 +74,14 @@ export function kernelVaultBase(base: string): string {
 		try {
 			resolved = realpathSync.native(prefix);
 		} catch (err) {
-			const code = (err as NodeJS.ErrnoException).code;
+			const { code, errno, syscall } = err as NodeJS.ErrnoException;
 			if (code === "ENOENT" || code === "ENOTDIR") continue;
-			throw err;
+			// Node's message embeds the path verbatim, and so would `err` as the cause: an inspected
+			// Error prints its cause. The cause keeps the errno and leaves the path out.
+			throw new Error(
+				`usertrust: cannot resolve the vault base ${escapeControls(base)} (realpath(3) failed: ${code}); fix the path, or give the base without ".." segments`,
+				{ cause: Object.assign(new Error(String(code)), { code, errno, syscall }) },
+			);
 		}
 		const tail = segments.slice(i).filter((s) => s !== "" && s !== ".");
 		if (tail.includes("..")) {

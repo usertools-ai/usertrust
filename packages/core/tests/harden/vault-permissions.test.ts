@@ -29,6 +29,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
+import { inspect } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAnchorEmitter, initAnchorIdentity } from "../../src/audit/anchor.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
@@ -1249,6 +1250,25 @@ describe.skipIf(onWindows).each(openers)(
 			expect(refused?.message).toBe(
 				`usertrust: the vault base ${cwd}/mi\\x1bss\\ning/../t has ".." after ${cwd}/mi\\x1bss\\ning, which does not exist yet; create it first, or give the base without ".."`,
 			);
+		});
+
+		it("a realpath(3) failure (ELOOP) names the base escaped, and keeps the errno as its cause", async () => {
+			process.umask(0o022);
+			// A symbolic-link loop, `a -> b -> a`, inside a directory whose name clears the screen.
+			const dir = join(cwd, "d\x1b[2J");
+			mkdirSync(dir);
+			symlinkSync("b", join(dir, "a"));
+			symlinkSync("a", join(dir, "b"));
+			const refused = await open(`${dir}/a/../vault`).then(
+				() => undefined,
+				(err: unknown) => err as Error,
+			);
+			expect(refused?.message).not.toContain("\x1b");
+			expect(refused?.message).toContain("\\x1b[2J");
+			expect(refused?.message).toContain("ELOOP");
+			expect((refused?.cause as NodeJS.ErrnoException | undefined)?.code).toBe("ELOOP");
+			// Printed whole, as an uncaught error is: the cause carries no raw path either.
+			expect(inspect(refused)).not.toContain("\x1b");
 		});
 
 		it("a base with no `..` keeps its spelling and is not announced (control)", async () => {
