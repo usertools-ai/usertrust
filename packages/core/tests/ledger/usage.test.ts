@@ -548,6 +548,124 @@ describe("D2 row: Gemini (core direct) — inclusive prompt, thinking billed as 
 	});
 });
 
+describe("each usage component is held to the ceiling BEFORE it is summed", () => {
+	// The extractors add components into one tier (Gemini: prompt + tool-use prompt into input,
+	// candidates + thoughts into output; Anthropic: the two cache-write TTLs into the write total).
+	// Summed first, two finite components can pass the safe-integer range, or reach Infinity, before
+	// any check sees them; and an absurd component is reported only inside a sum.
+
+	it("Gemini: two components whose sum is Infinity are refused, not read as a missing count", () => {
+		const u = fromGeminiUsage({
+			promptTokenCount: 10,
+			candidatesTokenCount: 1e308,
+			thoughtsTokenCount: 1e308,
+		});
+		expect(u.source).toBe("estimated");
+		expect(u.implausible?.outputTokens).toBe(1e308);
+		expect(u.implausibleBy?.outputTokens).toBe("refused");
+		expect(u.outputTokens).toBe(0);
+		expectSafeSnapshot(u);
+	});
+
+	it("Gemini: components whose sum passes MAX_SAFE_INTEGER are refused by their own figures", () => {
+		const u = fromGeminiUsage({
+			promptTokenCount: 5e15,
+			toolUsePromptTokenCount: 5e15,
+			candidatesTokenCount: 10,
+		});
+		expect(u.source).toBe("estimated");
+		expect(u.implausible?.inputTokens).toBe(5e15);
+		expect(Number.isSafeInteger(u.implausible?.inputTokens)).toBe(true);
+		expect(u.implausibleBy?.inputTokens).toBe("refused");
+		expectSafeSnapshot(u);
+	});
+
+	it("Gemini: components each under the ceiling whose sum is over it are flagged as a sum", () => {
+		const u = fromGeminiUsage({
+			promptTokenCount: 10,
+			candidatesTokenCount: 60_000_000,
+			thoughtsTokenCount: 60_000_000,
+		});
+		expect(u.source).toBe("estimated");
+		expect(u.implausible?.outputTokens).toBe(120_000_000);
+		// No `implausibleBy` entry is the aggregate ("sum") check, as implausibleUsageData reads it.
+		expect(u.implausibleBy?.outputTokens).toBeUndefined();
+		expectSafeSnapshot(u);
+	});
+
+	it("Gemini: one component over the ceiling, beside small ones, is flagged on that component", () => {
+		const u = fromGeminiUsage({
+			promptTokenCount: 10,
+			candidatesTokenCount: 10,
+			thoughtsTokenCount: 200_000_000,
+		});
+		expect(u.implausible).toEqual({ outputTokens: 200_000_000 });
+		expect(u.implausibleBy).toEqual({ outputTokens: "refused" });
+		expectSafeSnapshot(u);
+	});
+
+	it("Gemini: an over-ceiling prompt is refused even when the cache leaves fresh input under it", () => {
+		const u = fromGeminiUsage({
+			promptTokenCount: 150_000_000,
+			cachedContentTokenCount: 100_000_000,
+			candidatesTokenCount: 10,
+		});
+		expect(u.source).toBe("estimated");
+		expect(u.implausible?.inputTokens).toBe(150_000_000);
+		expect(u.implausibleBy?.inputTokens).toBe("refused");
+	});
+
+	it("Gemini: a normal usage is unchanged", () => {
+		expect(
+			fromGeminiUsage({
+				promptTokenCount: 1000,
+				candidatesTokenCount: 50,
+				cachedContentTokenCount: 400,
+				thoughtsTokenCount: 30,
+				toolUsePromptTokenCount: 7,
+			}),
+		).toEqual({
+			inputTokens: 607,
+			outputTokens: 80,
+			cacheReadTokens: 400,
+			cacheWriteTokens: 0,
+			source: "provider",
+		});
+	});
+
+	it("Anthropic: two cache-write TTLs whose sum is Infinity are refused, not dropped to 0", () => {
+		const u = fromAnthropicUsage({
+			input_tokens: 10,
+			output_tokens: 10,
+			cache_creation: { ephemeral_5m_input_tokens: 1e308, ephemeral_1h_input_tokens: 1e308 },
+		});
+		expect(u.source).toBe("estimated");
+		expect(u.implausible?.cacheWriteTokens).toBe(1e308);
+		expect(u.implausibleBy?.cacheWriteTokens).toBe("refused");
+		// The 1-hour share is reported as its own tier too, as the stream paths expect.
+		expect(u.implausible?.cacheWrite1hTokens).toBe(1e308);
+		expectSafeSnapshot(u);
+	});
+
+	it("Anthropic: a normal breakdown is unchanged", () => {
+		expect(
+			fromAnthropicUsage({
+				input_tokens: 10,
+				output_tokens: 20,
+				cache_read_input_tokens: 5,
+				cache_creation: { ephemeral_5m_input_tokens: 3, ephemeral_1h_input_tokens: 4 },
+			}),
+		).toEqual({
+			inputTokens: 10,
+			outputTokens: 20,
+			cacheReadTokens: 5,
+			cacheWriteTokens: 7,
+			cacheWrite1hTokens: 4,
+			source: "provider",
+		});
+	});
+});
+
 describe("D5: provider garbage never escapes the snapshot", () => {
 	// `canonicalize` THROWS on NaN and Infinity ("canonicalize: NaN is not
 	// allowed in audit data" / "...Infinity..."), so a raw provider count that

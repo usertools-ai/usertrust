@@ -180,6 +180,26 @@ function asRecord(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
+/**
+ * Hold ONE component of a tier to the single-response ceiling BEFORE an extractor sums it with another. Summed first,
+ * two finite components can pass the safe-integer range, or reach Infinity (which `readCount` then reads as a missing
+ * count), before `sanitizeUsage` sees the total; and an absurd component would be reported only inside a sum. A
+ * component above {@link MAX_PLAUSIBLE_TOKENS_PER_TIER} is recorded in `refused` under its tier, by its own figure, and
+ * enters the sum as 0; `sanitizeUsage({ refused })` then flags the tier as for any refused figure. Components that
+ * pass are each at most the ceiling, so the extractors' sums of two or three of them stay safe integers.
+ */
+function component(
+	value: number | null,
+	tiers: UsageTier | UsageTier[],
+	refused: Partial<Record<UsageTier, number>>,
+): number | null {
+	if (value === null || value <= MAX_PLAUSIBLE_TOKENS_PER_TIER) return value;
+	for (const tier of Array.isArray(tiers) ? tiers : [tiers]) {
+		refused[tier] = Math.max(refused[tier] ?? 0, value);
+	}
+	return 0;
+}
+
 /** Subtract inclusive cache tiers out of an inclusive prompt count (clamp >= 0). */
 function disjointInput(promptTokens: number, cacheReadTokens: number, cacheWriteTokens: number) {
 	return Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens);
@@ -497,12 +517,28 @@ export function fromAnthropicUsage(usage: unknown): NormalizedUsage {
 	const input = readCount(u.input_tokens);
 	const output = readCount(u.output_tokens);
 
+	// The write figures are summed (the two TTLs) and subtracted below, so each is held to the ceiling first. An absurd
+	// TTL share is an absurd write total too, so it is refused as the write tier; an absurd 1-hour share is ALSO
+	// reported as the 1-hour tier, as the sum-then-check path reported it.
+	const refused: Partial<Record<UsageTier, number>> = {};
 	const breakdown = readObject(u, "cache_creation");
-	const ephemeral5m = breakdown ? readCount(breakdown.ephemeral_5m_input_tokens) : null;
-	const ephemeral1h = breakdown ? readCount(breakdown.ephemeral_1h_input_tokens) : null;
+	const ephemeral5m = breakdown
+		? component(readCount(breakdown.ephemeral_5m_input_tokens), "cacheWriteTokens", refused)
+		: null;
+	const ephemeral1h = breakdown
+		? component(
+				readCount(breakdown.ephemeral_1h_input_tokens),
+				["cacheWriteTokens", "cacheWrite1hTokens"],
+				refused,
+			)
+		: null;
 	const nestedWrite =
 		ephemeral5m == null && ephemeral1h == null ? null : (ephemeral5m ?? 0) + (ephemeral1h ?? 0);
-	const flatWrite = readCount(u.cache_creation_input_tokens);
+	const flatWrite = component(
+		readCount(u.cache_creation_input_tokens),
+		"cacheWriteTokens",
+		refused,
+	);
 	// A COMPLETE breakdown (both TTL fields usable) is authoritative and wins over the flat
 	// total. A PARTIAL one (a single TTL field) sums to less than the whole: the flat total
 	// is the sum of the two TTLs, so what the partial sum leaves out is a real write whose
@@ -512,17 +548,20 @@ export function fromAnthropicUsage(usage: unknown): NormalizedUsage {
 	const unattributed =
 		complete || nestedWrite == null ? 0 : Math.max(0, (flatWrite ?? 0) - nestedWrite);
 
-	return sanitizeUsage({
-		inputTokens: input ?? 0,
-		outputTokens: output ?? 0,
-		cacheReadTokens: readCount(u.cache_read_input_tokens) ?? 0,
-		cacheWriteTokens: complete ? (nestedWrite ?? 0) : Math.max(nestedWrite ?? 0, flatWrite ?? 0),
-		// Only the per-TTL breakdown can say how much was 1-hour. A payload that carries
-		// just the flat total (no breakdown at all) cannot be told apart from a genuine
-		// 5-minute write and is priced at the 5-minute rate; the API reports the breakdown.
-		cacheWrite1hTokens: (ephemeral1h ?? 0) + unattributed,
-		source: input != null && output != null ? "provider" : "estimated",
-	});
+	return sanitizeUsage(
+		{
+			inputTokens: input ?? 0,
+			outputTokens: output ?? 0,
+			cacheReadTokens: readCount(u.cache_read_input_tokens) ?? 0,
+			cacheWriteTokens: complete ? (nestedWrite ?? 0) : Math.max(nestedWrite ?? 0, flatWrite ?? 0),
+			// Only the per-TTL breakdown can say how much was 1-hour. A payload that carries
+			// just the flat total (no breakdown at all) cannot be told apart from a genuine
+			// 5-minute write and is priced at the 5-minute rate; the API reports the breakdown.
+			cacheWrite1hTokens: (ephemeral1h ?? 0) + unattributed,
+			source: input != null && output != null ? "provider" : "estimated",
+		},
+		{ refused },
+	);
 }
 
 /**
@@ -642,19 +681,27 @@ export function fromOpenAIResponsesUsage(usage: unknown): NormalizedUsage {
 export function fromGeminiUsage(metadata: unknown): NormalizedUsage {
 	const m = asRecord(metadata);
 
-	const prompt = readCount(m.promptTokenCount);
-	const candidates = readCount(m.candidatesTokenCount);
-	const thoughts = readCount(m.thoughtsTokenCount);
-	const cacheRead = readCount(m.cachedContentTokenCount) ?? 0;
-	const toolUsePrompt = readCount(m.toolUsePromptTokenCount) ?? 0;
+	// Every component is held to the ceiling BEFORE it is summed (see `component`): input adds the tool-use prompt to
+	// the fresh prompt, output adds thoughts to candidates. A refused component condemns the counts in sanitizeUsage.
+	const refused: Partial<Record<UsageTier, number>> = {};
+	const prompt = component(readCount(m.promptTokenCount), "inputTokens", refused);
+	const candidates = component(readCount(m.candidatesTokenCount), "outputTokens", refused);
+	const thoughts = component(readCount(m.thoughtsTokenCount), "outputTokens", refused);
+	const cacheRead =
+		component(readCount(m.cachedContentTokenCount), "cacheReadTokens", refused) ?? 0;
+	const toolUsePrompt =
+		component(readCount(m.toolUsePromptTokenCount), "inputTokens", refused) ?? 0;
 
-	return sanitizeUsage({
-		inputTokens: disjointInput(prompt ?? 0, cacheRead, 0) + toolUsePrompt,
-		outputTokens: (candidates ?? 0) + (thoughts ?? 0),
-		cacheReadTokens: cacheRead,
-		cacheWriteTokens: 0,
-		source: prompt != null && (candidates != null || thoughts != null) ? "provider" : "estimated",
-	});
+	return sanitizeUsage(
+		{
+			inputTokens: disjointInput(prompt ?? 0, cacheRead, 0) + toolUsePrompt,
+			outputTokens: (candidates ?? 0) + (thoughts ?? 0),
+			cacheReadTokens: cacheRead,
+			cacheWriteTokens: 0,
+			source: prompt != null && (candidates != null || thoughts != null) ? "provider" : "estimated",
+		},
+		{ refused },
+	);
 }
 
 /**
