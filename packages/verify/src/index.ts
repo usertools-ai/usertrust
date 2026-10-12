@@ -1007,15 +1007,6 @@ export function verifyTransaction(
 		}
 	}
 
-	// Compute cumulative spend up to and including this event
-	let cumulativeSpend = 0;
-	for (const evt of events) {
-		if (evt.data.cost !== undefined && evt.kind === "llm_call") {
-			cumulativeSpend += evt.data.cost;
-		}
-		if (evt === targetEvent) break;
-	}
-
 	// Carry the DETECTOR's reason across terminal selection. Ranking a terminal
 	// above the detection is right for status and wrong for reason: a successful
 	// anomaly cutoff selects `stream_partial_delivery`, whose `error` is the SDK's
@@ -1045,7 +1036,6 @@ export function verifyTransaction(
 		merkleRoot,
 		merkleVerified,
 		chainVerified,
-		cumulativeSpend,
 		verifiedAt: new Date(),
 		merkleLabel,
 	};
