@@ -25,6 +25,7 @@ interface TrustOpts {
   pii?: "redact" | "warn" | "block" | "off"; // PII enforcement override
   dryRun?: boolean;       // Skip TigerBeetle — audit chain + policy still run
   vaultBase?: string;     // Vault directory override (default: process.cwd())
+  allowUngoverned?: string[]; // SDK methods to run ungoverned (Anthropic and OpenAI)
 }
 ```
 
@@ -38,6 +39,7 @@ interface TrustOpts {
 | `pii` | Config value or `"warn"` | PII enforcement: `"redact"`, `"warn"`, `"block"` or `"off"`. Overrides the config file value. Any other value is refused by name. |
 | `dryRun` | `false` | Skip TigerBeetle entirely. Also enabled by `USERTRUST_DRY_RUN=true` env var. Useful for CI and testing. |
 | `vaultBase` | `process.cwd()` | Base directory containing the `.usertrust/` vault. |
+| `allowUngoverned` | `[]` | SDK method paths to run **ungoverned** on an Anthropic or OpenAI client, as the refusal names them (`"embeddings.create"`). A listed method runs on the raw SDK with no hold and no cost, and each call appends an `ungoverned_call` audit event (`{ method, provider }`). Validated when `trust()` is called: an array of non-empty paths, none through `_client` or a raw HTTP member such as `post`. Without `audit.failClosed` the method returns what the SDK returns. Under `audit.failClosed` the append is awaited before the SDK is called, a failed append refuses the call, and the method always returns a Promise: a method that is synchronous in the SDK (`chat.completions.stream`) returns a Promise of its value, and `beta.messages.toolRunner`, whose runner is thenable, returns a Promise of the runner's FINAL result (promise resolution adopts the thenable and runs it to completion), not the runner object. |
 
 Every other config setting (`circuitBreaker`, `patterns`, `audit`, …) is read from the config file only. `trust()` refuses an option it does not declare: it throws a `TypeError` that names each unknown key, before anything is read or created, instead of ignoring it.
 
@@ -102,6 +104,18 @@ The `transferId` is the universal join key. Use it to correlate entries across t
 | Google | `client.models.generateContent` exists | `models.generateContent()` |
 
 If the client does not match any known shape, `trust()` throws an error at initialization time.
+
+### Everything else on an Anthropic or OpenAI client is refused
+
+The governed methods are `messages.create`, `messages.stream` and `messages.parse` (and the same on `beta.messages`) on Anthropic, and `chat.completions.create` and `responses.create` on OpenAI. Every other function-valued SDK method reached off the governed client, at any depth, is **refused** unless it is on the free list:
+
+- The call returns a promise that rejects with a `PolicyDeniedError` whose `reason` starts `ungoverned_method: <path>`, after a `policy_denied` audit event (the path as `actionName`). The SDK is never called and nothing is held. A synchronous SDK helper (`chat.completions.stream`, `beta.messages.toolRunner`) returns the rejected promise too.
+- **Free list, by rule.** A method whose requests are all GET or DELETE (a retrieve, list, download, delete or poll) runs on the raw SDK resource, unaudited: a read cannot start billable work and a delete only reduces storage. A POST runs free only when it is named with a reason: token counts, `moderations.create`, cancels, pauses, metadata updates and a few others. A local method (webhook signature checks) runs free when named. Six GET or DELETE methods are refused by name because they can start work or lift a spend control: Anthropic `beta.environments.work.poll`, and OpenAI's spend-limit, spend-alert and model-permission deletes. The exact list, with each method's SDK source line and verb, is in `packages/core/src/default-deny.ts`.
+- **Opt-out.** `allowUngoverned: ["embeddings.create"]` runs a listed method ungoverned and audits each call as `ungoverned_call`, with no usage and no cost.
+- **Raw clients.** A resource's `_client` is the SDK's raw client, so every call through it is refused, and so are the client's raw HTTP members (`post`, `get`, `request`, …). `allowUngoverned` cannot list them.
+- **`withOptions()`** returns a client governed by the same governor: same budget, audit chain and ledger. A `withOptions()` clone shares its parent's governor: `destroy()` on either ends both, and `governAction()` on a clone runs under the shared governor, including on a clone whose transport was refused. A `withOptions()` that changes where or how calls are sent is refused: every call through the new client rejects. Only `timeout`, `maxRetries`, `defaultHeaders`, `defaultQuery`, `logLevel`, `logger`, `dangerouslyAllowBrowser` and the API key and account options keep it governed; `baseURL`, `fetch`, `fetchOptions`, Anthropic `middleware`, `credentials`, `config` and `profile`, OpenAI `provider` and `workloadIdentity`, and any other key refuse it.
+
+Symbols, non-function values (`baseURL`, `maxRetries`, …) and `Object.prototype` members pass untouched, so inspection and serialization behave as on the raw client. The `TrustedClient` type still gives a refused method its SDK signature.
 
 ## Streaming
 

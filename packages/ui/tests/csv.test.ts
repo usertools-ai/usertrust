@@ -81,4 +81,11 @@ describe("csvFilename", () => {
 			"usertrust-ledger-2026-07-27-filtered.csv",
 		);
 	});
+
+	it("writes an ungoverned_call's status as ungoverned", () => {
+		const { settled: _s, costUt: _c, costUsd: _u, ...base } = row({ kind: "ungoverned_call" });
+		const lines = toCsv([base]).split("\r\n");
+		const statusIndex = CSV_HEADERS.indexOf("status");
+		expect(lines[1]?.split(",")[statusIndex]).toBe("ungoverned");
+	});
 });

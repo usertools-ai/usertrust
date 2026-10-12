@@ -1104,7 +1104,7 @@ describe("trust()", () => {
 			const { err } = await refusal({ pi: "block" });
 			const accepts = /accepts only: (.*)\.$/.exec((err as Error).message)?.[1];
 			expect(accepts).toBe(
-				"budget, configPath, dryRun, endpoint, parentUserId, pii, scope, vaultBase",
+				"allowUngoverned, budget, configPath, dryRun, endpoint, parentUserId, pii, scope, vaultBase",
 			);
 		});
 

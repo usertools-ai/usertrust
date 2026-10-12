@@ -74,7 +74,7 @@ class PolicyDeniedError extends Error {
 }
 ```
 
-**When it fires:** During policy evaluation, before the LLM call. The `reason` field describes which rule or PII type triggered the denial.
+**When it fires:** During policy evaluation, before the LLM call. The `reason` field describes which rule or PII type triggered the denial. On an Anthropic or OpenAI client it also fires when you call an SDK method usertrust does not govern and does not list as free: the `reason` starts `ungoverned_method: <path>` (for example `ungoverned_method: embeddings.create`), the promise rejects without calling the SDK, and `trust({ allowUngoverned: ["<path>"] })` lets that method through, audited as `ungoverned_call`.
 
 **Hint:** `'Check your policy rules in .usertrust/policies/default.yml, or set "pii": "warn" in .usertrust/usertrust.config.json (or pass { pii: "warn" } to trust()) to downgrade PII enforcement.'`
 
@@ -87,8 +87,8 @@ To change PII enforcement, set `pii` in the config file `trust()` reads: `.usert
 Both denial errors above carry `auditEventHash` — the hash of the chain event
 the governor wrote when it refused the call. It is the join between the
 exception your code logged and the record an auditor reads: `policy_denied` for
-a governor decision (a policy rule, a budget-family rule, PII, injection, or an
-unpriceable model), `ledger_rejected` for the ledger's own atomic refusal of the
+a governor decision (a policy rule, a budget-family rule, PII, injection, an
+unpriceable model, or a refused ungoverned SDK method), `ledger_rejected` for the ledger's own atomic refusal of the
 hold.
 
 ```typescript
