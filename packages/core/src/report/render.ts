@@ -187,10 +187,10 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 const WITHOUT_CALL_NOTE =
 	"These records qualify a call (a shortfall, an ambiguity, an implausible-usage note, a failure marker) but the chain holds no record of the call itself. Their amounts are usertokens with no denomination assumed, and they are in no spend (dollar) figure. A standalone shortfall or ambiguity is counted in the budget section as undenominated wallet units, because the governor counted it; a standalone ambiguity is also in the unconfirmed totals.";
 
-/** The disclosure line for calls run ungoverned, stated ONCE for both renderers; the count follows it. */
-const UNGOVERNED_LINE = "Calls run ungoverned (opted out with allowUngoverned, unmetered):";
+/** The disclosure line for ungoverned call attempts, stated ONCE for both renderers; the count follows it. */
+const UNGOVERNED_LINE = "Ungoverned call attempts (opted out with allowUngoverned, unmetered):";
 const UNGOVERNED_NOTE =
-	"The caller opted these calls out of governance: they went to the provider with no budget check, no hold and no recorded cost, so what they spent is not known. They are in no spend, cost or budget figure, and no amount is estimated for them.";
+	"Each attempt is recorded as the call is made: before the provider is reached when audit.failClosed is set, best-effort otherwise, so an attempt may have failed or never reached the provider, and a call whose record could not be written is not counted. The caller opted it out of governance: no budget check, no hold and no recorded cost, so what it spent is not known. Attempts are in no spend, cost or budget figure, and no amount is estimated for them.";
 
 const UPPER_BOUND_NOTE =
 	"A headless call the ledger answered, with no shortfall record on the chain or in the dead-letter queue, is counted as an upper bound (at most its metered cost), not as an exact figure: this record format cannot tell a capped post from an uncapped one, because the shortfall is written after the call and may not exist yet, or may have been lost in a crash.";
@@ -215,7 +215,7 @@ function provenText(t: ReportModel["totals"]): string {
 
 /** What this report is not, printed with every rendering. */
 export const NOT_CLAIMED: readonly string[] = [
-	"Only calls that went through usertrust are in this report. Agents or calls that were not metered are not counted and not estimated, except calls run unmetered through allowUngoverned, which are counted by method with no amount.",
+	"Only calls that went through usertrust are in this report. Agents or calls that were not metered are not counted and not estimated, except call attempts made unmetered through allowUngoverned, which are counted by method with no amount.",
 	"Dollars are API-equivalent at the rates recorded on each call (usertoken = $0.0001), not an invoice.",
 	"Denied or blocked calls moved no money and carry no dollar figure. Nothing here claims money was saved or prevented.",
 	"Cache-write cost is shown as a cost driver, not as avoidable spend.",
@@ -394,13 +394,13 @@ export function renderMarkdown(m: ReportModel): string {
 	}
 	if (m.ungoverned.calls > 0) {
 		out.push(
-			"### Calls run ungoverned",
+			"### Ungoverned call attempts",
 			"",
 			`${UNGOVERNED_LINE} ${m.ungoverned.calls}`,
 			"",
 			UNGOVERNED_NOTE,
 			"",
-			"| Method | Calls |",
+			"| Method | Attempts |",
 			"|---|---:|",
 			...Object.entries(m.ungoverned.byMethod).map(([method, n]) => `| ${md(method)} | ${n} |`),
 			"",
@@ -560,7 +560,7 @@ export function renderHtml(m: ReportModel): string {
 			: []),
 		...(m.ungoverned.calls > 0
 			? [
-					`<h3>Calls run ungoverned</h3><p>${esc(`${UNGOVERNED_LINE} ${m.ungoverned.calls}`)}</p><p>${esc(UNGOVERNED_NOTE)}</p><table><thead><tr><th>Method</th><th class="n">Calls</th></tr></thead><tbody>${Object.entries(
+					`<h3>Ungoverned call attempts</h3><p>${esc(`${UNGOVERNED_LINE} ${m.ungoverned.calls}`)}</p><p>${esc(UNGOVERNED_NOTE)}</p><table><thead><tr><th>Method</th><th class="n">Attempts</th></tr></thead><tbody>${Object.entries(
 						m.ungoverned.byMethod,
 					)
 						.map(([method, n]) => `<tr><td>${esc(method)}</td><td class="n">${n}</td></tr>`)
