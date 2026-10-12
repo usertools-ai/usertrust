@@ -328,6 +328,38 @@ describe.each(openers)("a vault that is a symbolic link, opened by %s", (_name, 
 		expect(existsSync(join(target, "spend-ledger.json"))).toBe(true);
 		expect(walkModes(target).loose).toEqual([]);
 	});
+
+	it("refuses a dangling link by name, and creates nothing at its target", async () => {
+		process.umask(0o022);
+		const root = tmp("ut-perm-dangling-");
+		const missing = join(realpathSync(tmp("ut-perm-gone-")), "vault");
+		const link = join(root, VAULT_DIR);
+		symlinkSync(missing, link);
+		const refused = await open(root).then(
+			() => undefined,
+			(err: unknown) => err as Error,
+		);
+		expect(refused?.message).toBe(
+			`usertrust: the vault ${link} is a symbolic link to ${missing}, which does not exist; remove the link or create the target owner-only (mkdir -m 700 ${missing})`,
+		);
+		expect(existsSync(missing)).toBe(false);
+		expect(lstatSync(link).isSymbolicLink()).toBe(true);
+	});
+
+	it("refuses a .usertrust that is a regular file by name", async () => {
+		process.umask(0o022);
+		const root = tmp("ut-perm-file-");
+		const vaultPath = join(root, VAULT_DIR);
+		writeFileSync(vaultPath, "not a vault");
+		const refused = await open(root).then(
+			() => undefined,
+			(err: unknown) => err as Error,
+		);
+		expect(refused?.message).toBe(
+			`usertrust: the vault ${vaultPath} is a regular file, not a directory; move it aside and the vault is created owner-only`,
+		);
+		expect(statSync(vaultPath).isFile()).toBe(true);
+	});
 });
 
 describe("init (control)", () => {

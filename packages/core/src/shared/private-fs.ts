@@ -20,10 +20,12 @@ import {
 	lstatSync,
 	mkdirSync,
 	openSync,
+	readlinkSync,
 	realpathSync,
 	type Stats,
 	statSync,
 } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 /** Mode of every directory usertrust creates in a vault. */
 export const PRIVATE_DIR_MODE = 0o700;
@@ -38,6 +40,27 @@ export function mkdirPrivate(dir: string): void {
 
 const octal = (mode: number): string => (mode & 0o777).toString(8);
 
+/** What a non-directory is, in words. */
+function kindOf(st: Stats): string {
+	if (st.isFile()) return "a regular file";
+	if (st.isFIFO()) return "a FIFO";
+	if (st.isSocket()) return "a socket";
+	if (st.isCharacterDevice()) return "a character device";
+	if (st.isBlockDevice()) return "a block device";
+	return "an unknown kind of file";
+}
+
+/** A vault path that holds something other than a directory: every writer would fail ENOTDIR. */
+function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
+	const what =
+		target === undefined
+			? `is ${kindOf(st)}`
+			: `is a symbolic link to ${target}, which is ${kindOf(st)}`;
+	return new Error(
+		`usertrust: the vault ${vaultDir} ${what}, not a directory; move it aside and the vault is created owner-only`,
+	);
+}
+
 /**
  * Close a vault directory (`<vaultBase>/.usertrust`) to every user but its owner.
  *
@@ -49,7 +72,9 @@ const octal = (mode: number): string => (mode & 0o777).toString(8);
  *
  * A vault that is a SYMBOLIC LINK is never changed through the link: its target may be a
  * directory usertrust does not own. A target any other user can read is refused, naming the
- * link, the target, its mode and the `chmod` that fixes it; an owner-only target is used.
+ * link, the target, its mode and the `chmod` that fixes it; an owner-only target is used. A
+ * dangling link, and a vault path that is not a directory (a regular file, say), are refused by
+ * name here, rather than left for the first writer to fail on with a bare ENOENT or ENOTDIR.
  *
  * The tightening itself never follows a link either. The directory is opened with
  * `O_NOFOLLOW | O_DIRECTORY` and changed with `fchmod` on that descriptor, after checking it is
@@ -57,33 +82,39 @@ const octal = (mode: number): string => (mode & 0o777).toString(8);
  * open, and a different directory renamed into place fails the inode check. Both are refused.
  */
 export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }): void {
-	if (opts?.create === true) mkdirPrivate(vaultDir);
 	let st: Stats;
 	try {
 		st = lstatSync(vaultDir);
 	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
-		throw err;
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+		if (opts?.create === true) mkdirPrivate(vaultDir);
+		return;
 	}
 
 	if (st.isSymbolicLink()) {
 		let target: string;
-		let targetMode: number;
+		let targetStat: Stats;
 		try {
 			target = realpathSync(vaultDir);
-			targetMode = statSync(target).mode;
+			targetStat = statSync(target);
 		} catch (err) {
-			// A dangling link: there is nothing to read, and no writer can create through it.
-			if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
-			throw err;
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			// A dangling link: named here, where every writer would fail later with a bare ENOENT.
+			const missing = resolve(dirname(vaultDir), readlinkSync(vaultDir));
+			throw new Error(
+				`usertrust: the vault ${vaultDir} is a symbolic link to ${missing}, which does not exist; remove the link or create the target owner-only (mkdir -m 700 ${missing})`,
+			);
 		}
+		if (!targetStat.isDirectory()) throw notADirectory(vaultDir, targetStat, target);
+		const targetMode = targetStat.mode;
 		if ((targetMode & 0o077) === 0) return;
 		throw new Error(
 			`usertrust: the vault ${vaultDir} is a symbolic link to ${target}, which other users can read (mode ${octal(targetMode)}). usertrust does not change a directory through a link; make it owner-only with: chmod 700 ${target}`,
 		);
 	}
 
-	if (!st.isDirectory() || (st.mode & 0o077) === 0) return;
+	if (!st.isDirectory()) throw notADirectory(vaultDir, st);
+	if ((st.mode & 0o077) === 0) return;
 	const refuse = (reason: string): Error =>
 		new Error(
 			`usertrust: the vault ${vaultDir} is readable by other users (mode ${octal(st.mode)}) and could not be made owner-only: ${reason}`,
