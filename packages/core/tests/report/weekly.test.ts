@@ -1129,3 +1129,43 @@ describe("undenominated wallet units are carried like the other denominations", 
 		expect(week).toContain("of undenominated units");
 	});
 });
+
+describe("no definite over-budget claim when the governor's counter contradicts the lower bound", () => {
+	// A bare non-stream SDK call is recorded BEFORE its budget commit, so after a crash between the two the chain can
+	// include a call the counter never added. The lower bound is then not definite.
+	const events = () => [call("2026-10-08T01:00:00Z", 1200, { transferId: "a" })];
+
+	it("counter BELOW the lower bound: a range with 'possibly over', neutral wording, never 'OVER BUDGET'", () => {
+		const m = build(events(), { budget: 1000, spendLedger: { value: 0 } });
+		expect(m.budget.overBudget).toBe(false);
+		expect(m.budget.overBudgetDisputed).toBe(true);
+		expect(m.budget.possiblyOverBudget).toBe(true);
+		const text = render(m, "md");
+		expect(text).not.toContain("(OVER BUDGET)");
+		expect(text).toContain("POSSIBLY OVER BUDGET");
+		expect(text).toContain(
+			"The chain and the governor's counter disagree: a crash between an SDK call's audit record and its budget commit, or a counter error.",
+		);
+		// neutral: it never asserts the counter is wrong
+		expect(text).toContain("Either leg may be wrong.");
+	});
+
+	it("an AGREEING counter: the definite claim stands", () => {
+		const m = build(events(), { budget: 1000, spendLedger: { value: 1200 } });
+		expect(m.budget.overBudget).toBe(true);
+		expect(m.budget.overBudgetDisputed).toBe(false);
+		expect(render(m, "md")).toContain("(OVER BUDGET)");
+	});
+
+	it("no counter file, or an unreadable one: nothing contradicts the chain, so the claim stands", () => {
+		expect(build(events(), { budget: 1000 }).budget.overBudget).toBe(true);
+		expect(
+			build(events(), { budget: 1000, spendLedger: { unreadable: true } }).budget.overBudget,
+		).toBe(true);
+	});
+
+	it("a counter ABOVE the lower bound does not dispute it", () => {
+		const m = build(events(), { budget: 1000, spendLedger: { value: 1500 } });
+		expect(m.budget.overBudget).toBe(true);
+	});
+});

@@ -131,7 +131,7 @@ function reconciliationLines(m: ReportModel): string[] {
 		);
 	} else if (led.differs && led.recorded !== null) {
 		out.push(
-			`DIFFERENCE: the governor's spend ledger (as recorded by the governor; not chain-verified) says ${tokens(led.recorded)} units, outside what the chain accounts for: ${walletStr(lower)} definite, up to ${walletStr(upper)} counting uncertain and cost-center spend. Either leg may be wrong.`,
+			`DIFFERENCE: the governor's spend ledger (as recorded by the governor; not chain-verified) says ${tokens(led.recorded)} units, outside what the chain accounts for: ${walletStr(lower)} definite, up to ${walletStr(upper)} counting uncertain and cost-center spend. The chain and the governor's counter disagree: a crash between an SDK call's audit record and its budget commit, or a counter error. Either leg may be wrong.`,
 		);
 	}
 	return out;
@@ -157,7 +157,7 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 			: "";
 	const undenominated = undenom(b.recordedSessionUndenominated);
 	const lines = [
-		`Configured budget ${utStr(b.configuredUt)} (budget units: usd-priced and nominal, as the governor enforces them), source: ${v(b.source ?? "unknown")}. Session-wallet debits the chain shows the governor counted (definite): ${walletStr(b.recordedSessionWallet)} = ${split(b.recordedSessionUt, b.recordedSessionNominal)}${undenominated}; ${pct(b.usedFraction ?? 0)} of the budget used${b.overBudget ? " (OVER BUDGET)" : ""}. This week: ${walletStr(b.windowSessionWallet)} = ${split(b.windowSessionUt, b.windowSessionNominal)}${undenom(b.windowSessionUndenominated)}.`,
+		`Configured budget ${utStr(b.configuredUt)} (budget units: usd-priced and nominal, as the governor enforces them), source: ${v(b.source ?? "unknown")}. Session-wallet debits the chain shows the governor counted (definite): ${walletStr(b.recordedSessionWallet)} = ${split(b.recordedSessionUt, b.recordedSessionNominal)}${undenominated}; ${pct(b.usedFraction ?? 0)} of the budget used${b.overBudget ? " (OVER BUDGET)" : b.overBudgetDisputed ? " (POSSIBLY OVER BUDGET: the chain and the governor's counter disagree, so no definite claim is made)" : ""}. This week: ${walletStr(b.windowSessionWallet)} = ${split(b.windowSessionUt, b.windowSessionNominal)}${undenom(b.windowSessionUndenominated)}.`,
 	];
 	if (
 		b.recordedAttributedWallet > 0 ||
@@ -165,7 +165,7 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 		b.recordedAttributedUncertain > 0
 	) {
 		lines.push(
-			`Upper bound: ${pct(b.usedFractionUpper ?? 0)} of the budget used if the session also paid for the cost-center spend (ATTRIBUTED: its payer is not recorded, the cost-center envelope with a ledger or the session in a dry run; ${walletStr(b.recordedAttributedWallet)} = ${split(b.recordedAttributedUt, b.recordedAttributedNominal)}${undenom(b.recordedAttributedUndenominated)}) and every uncertain transfer was counted${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}. "Over budget" is claimed only on the definite figure.`,
+			`Upper bound: ${pct(b.usedFractionUpper ?? 0)} of the budget used if the session also paid for the cost-center spend (ATTRIBUTED: its payer is not recorded, the cost-center envelope with a ledger or the session in a dry run; ${walletStr(b.recordedAttributedWallet)} = ${split(b.recordedAttributedUt, b.recordedAttributedNominal)}${undenom(b.recordedAttributedUndenominated)}) and every uncertain transfer was counted${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}. "Over budget" is claimed only on the definite figure, and only when the governor's counter does not contradict it.`,
 		);
 	}
 	lines.push(...reconciliationLines(m));
@@ -183,6 +183,7 @@ export const NOT_CLAIMED: readonly string[] = [
 	"Denied or blocked calls moved no money and carry no dollar figure. Nothing here claims money was saved or prevented.",
 	"Cache-write cost is shown as a cost driver, not as avoidable spend.",
 	"Budget status compares the vault's configured budget with spend recorded in the chain. It is not the live ledger balance.",
+	"After a crash between an SDK call's audit record and its budget commit, the definite lower bound can include that call. The governor's counter leg flags the disagreement, and no definite over-budget claim is made then.",
 ];
 
 function rowsTable(title: string, rows: readonly Row[], keyHeader: string): string[] {

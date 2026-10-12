@@ -288,8 +288,15 @@ export interface ReportModel {
 		usedFraction: number | null;
 		/** 0..1 upper bound (session + attributed spend), clamped; `null` when no budget is configured. */
 		usedFractionUpper: number | null;
-		/** The unattributed spend alone exceeds the budget. */
+		/** The unattributed spend alone exceeds the budget, and the governor's own counter does not contradict it. */
 		overBudget: boolean;
+		/**
+		 * The lower bound exceeds the budget but the governor's persisted counter is BELOW it. A bare SDK call is
+		 * recorded before its budget commit, so after a crash between the two the chain can include a call the counter never
+		 * added. No definite over-budget claim is made then: it is shown as a range ("possibly over"). Neutral by design: the
+		 * report does not say which leg is wrong.
+		 */
+		overBudgetDisputed: boolean;
 		/** Only counting the attributed spend as well would exceed it: the payer decides. */
 		possiblyOverBudget: boolean;
 	};
@@ -1095,6 +1102,9 @@ function buildPlain(
 		recordedAttributedUndenominated +
 		recordedAttributedUncertain;
 	const ledger = opts.spendLedger;
+	// The counter is BELOW the lower bound: the one disagreement that could make a definite claim false (see overBudgetDisputed).
+	const counterBelowLower =
+		ledger !== undefined && !("unreadable" in ledger) && ledger.value < sessionWallet;
 	const spendLedgerLeg =
 		ledger === undefined
 			? { recorded: null, unreadable: false, differs: false, difference: null }
@@ -1235,9 +1245,12 @@ function buildPlain(
 			uncertainTransfers,
 			usedFraction: configured === null ? null : Math.min(1, sessionWallet / configured),
 			usedFractionUpper: configured === null ? null : Math.min(1, upperWallet / configured),
-			overBudget: configured !== null && sessionWallet > configured,
+			overBudget: configured !== null && sessionWallet > configured && !counterBelowLower,
+			overBudgetDisputed: configured !== null && sessionWallet > configured && counterBelowLower,
 			possiblyOverBudget:
-				configured !== null && sessionWallet <= configured && upperWallet > configured,
+				configured !== null &&
+				((sessionWallet > configured && counterBelowLower) ||
+					(sessionWallet <= configured && upperWallet > configured)),
 		},
 		governance,
 		unrecoverable,
