@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -135,10 +143,10 @@ describe("usertrust report --week", () => {
 		expect(stdout).toContain("Audit chain VERIFIED");
 		expect(stdout.indexOf("VERIFIED")).toBeLessThan(stdout.indexOf("Confirmed spend"));
 		expect(stdout).toContain("**Confirmed spend:** $0.02"); // 150 UT = $0.015
-		expect(stdout).toContain("| agent-a | 1 | $0.01 | 66.7% |");
+		expect(stdout).toContain("| `agent-a` | 1 | $0.01 | 66.7% |");
 		// only the unattributed 50 UT debits the session wallet; the cost-center 100 UT debits its envelope
 		expect(stdout).toContain("5.0% used");
-		expect(stdout).toContain("NOT charged to this budget");
+		expect(stdout).toContain("payer is not recorded");
 		expect(stdout).not.toContain("UNVERIFIED");
 		write.mockRestore();
 	});
@@ -192,13 +200,13 @@ describe("usertrust report --week", () => {
 	it("--budget and --tenant-config name a server tenant's budget, and the report says where it came from", async () => {
 		await vault([{ cost: 100, data: { principal: { id: "a" } } }]);
 		await run(dir, {}, ["--week", "--end", endIso(), "--budget", "1000"]);
-		expect(stdout).toContain("source: --budget");
+		expect(stdout).toContain("source: `--budget`");
 		expect(stdout).toContain("10.0% used");
 		stdout = "";
 		const tenant = join(dir, "tenant.config.json");
 		writeFileSync(tenant, JSON.stringify({ budget: 500, tigerbeetle: { addresses: ["x"] } }));
 		await run(dir, {}, ["--week", "--end", endIso(), "--tenant-config", tenant]);
-		expect(stdout).toContain("source: tenant config");
+		expect(stdout).toContain("source: `tenant config`");
 		expect(stdout).toContain("20.0% used");
 		// an unreadable or budget-less tenant config is refused, not silently "no budget"
 		for (const bad of ["{ not json", JSON.stringify({ budget: "5" }), JSON.stringify({})]) {
@@ -312,5 +320,95 @@ describe("usertrust report --week", () => {
 			}
 		}
 		write.mockRestore();
+	});
+
+	// Review round 2 (P1, introduced by the snapshot): a read error was turned into ABSENCE, so with the log and its
+	// anchor unreadable the copy verified as an EMPTY chain: VERIFIED, exit 0. The copy is the verifier's input set and
+	// any read error on a regular file makes the report UNVERIFIED, exit 2.
+	describe("the snapshot never turns a read failure into absence", () => {
+		const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
+		const log = () => join(dir, ".usertrust", "audit", "events.jsonl");
+		const meta = () => join(dir, ".usertrust", "audit", "events.jsonl.meta");
+
+		it.skipIf(asRoot)(
+			"an unreadable LOG is UNVERIFIED, exit 2, never a shorter chain",
+			async () => {
+				await vault([{ cost: 100 }, { cost: 200 }]);
+				chmodSync(log(), 0o000);
+				try {
+					await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+				} finally {
+					chmodSync(log(), 0o600);
+				}
+				const model = JSON.parse(stdout) as {
+					integrity: { verified: boolean; errors: string[] };
+				};
+				expect(model.integrity.verified).toBe(false);
+				expect(model.integrity.errors.join(" ")).toMatch(/events\.jsonl.*EACCES/);
+				expect(process.exitCode).toBe(2);
+				write.mockRestore();
+			},
+		);
+
+		it.skipIf(asRoot)("an unreadable ANCHOR (.meta) is UNVERIFIED, exit 2", async () => {
+			await vault([{ cost: 100 }]);
+			chmodSync(meta(), 0o000);
+			try {
+				await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			} finally {
+				chmodSync(meta(), 0o600);
+			}
+			expect((JSON.parse(stdout) as { integrity: { verified: boolean } }).integrity.verified).toBe(
+				false,
+			);
+			expect(process.exitCode).toBe(2);
+			write.mockRestore();
+		});
+
+		it.skipIf(asRoot)(
+			"the log AND its anchor both unreadable cannot verify as an empty chain",
+			async () => {
+				await vault([{ cost: 100 }]);
+				chmodSync(log(), 0o000);
+				chmodSync(meta(), 0o000);
+				try {
+					await run(dir, {}, ["--week", "--end", endIso(), "--format", "md"]);
+				} finally {
+					chmodSync(log(), 0o600);
+					chmodSync(meta(), 0o600);
+				}
+				expect(stdout).toContain("UNVERIFIED");
+				expect(stdout).not.toContain("Audit chain VERIFIED");
+				expect(process.exitCode).toBe(2);
+				write.mockRestore();
+			},
+		);
+
+		it("a MISSING segment (a deleted rotated file) is UNVERIFIED, exit 2", async () => {
+			await vault([{ cost: 100 }, { cost: 200 }, { cost: 300 }]);
+			// rotate by hand: move the first line out into a segment, then delete the segment
+			const lines = readFileSync(log(), "utf-8").trim().split("\n");
+			const seg = join(dir, ".usertrust", "audit", "events-0001.jsonl");
+			writeFileSync(seg, `${lines[0]}\n`);
+			writeFileSync(log(), `${lines.slice(1).join("\n")}\n`);
+			rmSync(seg);
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			expect((JSON.parse(stdout) as { integrity: { verified: boolean } }).integrity.verified).toBe(
+				false,
+			);
+			expect(process.exitCode).toBe(2);
+			write.mockRestore();
+		});
+
+		it("CONTROL: with every file readable the same vault verifies, exit 0", async () => {
+			await vault([{ cost: 100 }, { cost: 200 }]);
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			expect((JSON.parse(stdout) as { integrity: { verified: boolean } }).integrity.verified).toBe(
+				true,
+			);
+			expect(process.exitCode).toBeUndefined();
+			expect(readdirSync(join(dir, ".usertrust", "audit")).length).toBeGreaterThan(0);
+			write.mockRestore();
+		});
 	});
 });

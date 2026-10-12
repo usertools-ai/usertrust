@@ -33,11 +33,26 @@ function tokens(n: number): string {
 
 const clean = (s: string): string => scrubForTerminal(s);
 
-function mdCell(s: string): string {
-	return clean(s).replace(/\|/g, "\\|");
+/**
+ * THE ESCAPING BOUNDARIES: every string that came from the vault (a model, an agent, a cost center, an id, a hash, an
+ * integrity error, a cost basis) leaves this module through exactly one of these two functions, whichever field it is:
+ *  - `md` for Markdown: control bytes scrubbed, then rendered as a literal CODE SPAN, so Markdown syntax, a link, an image
+ *    (`![x](https://remote/pixel)`) and raw HTML in it stay text when the report is opened or forwarded. The fence is one
+ *    backtick longer than the longest run inside, and `|` is escaped for table cells.
+ *  - `esc` for HTML: control bytes scrubbed, then `& < > " '` escaped. The page has no remote resource of its own.
+ * Round 1 scrubbed the verdict; round 2 found Markdown and HTML in the model name: the same class one field over. The
+ * fields are no longer enumerated at the call sites; a new vault-derived string has exactly these two exits.
+ */
+export function md(s: string): string {
+	const text = clean(s).replace(/\|/g, "\\|");
+	const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+	const fence = "`".repeat(longest + 1);
+	// a code span that starts or ends with a backtick, or is only spaces, needs padding to parse as written
+	const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+	return `${fence}${pad}${text === "" ? " " : text}${pad}${fence}`;
 }
 
-function esc(s: string): string {
+export function esc(s: string): string {
 	return clean(s)
 		.replace(/&/g, "&amp;")
 		.replace(/</g, "&lt;")
@@ -47,31 +62,30 @@ function esc(s: string): string {
 }
 
 /**
- * The integrity verdict. Its errors and first/last event ids come from a vault that may be hostile, so the WHOLE line is
- * scrubbed here, at the source of both renderers: a control sequence in an event id must not reach the reader's terminal
- * and erase the UNVERIFIED warning it sits beside.
+ * The integrity verdict, with every vault-derived piece (error text, first/last event id) passed through `v`, the
+ * format's own boundary. A control sequence in an event id must not reach a terminal and erase the UNVERIFIED warning it
+ * sits beside, and Markdown or HTML in it must not become live.
  */
-function verdictLine(m: ReportModel): string {
+function verdictLine(m: ReportModel, v: (s: string) => string): string {
 	if (m.integrity.verified) {
-		return clean(
-			`Audit chain VERIFIED: ${m.integrity.chainLength} event(s), ${m.integrity.firstEvent ?? "?"} to ${m.integrity.lastEvent ?? "?"}.`,
-		);
+		return `Audit chain VERIFIED: ${m.integrity.chainLength} event(s), ${v(m.integrity.firstEvent ?? "?")} to ${v(m.integrity.lastEvent ?? "?")}.`;
 	}
-	return clean(
-		`Audit chain UNVERIFIED: ${m.integrity.errors.length} problem(s). ${m.integrity.errors.slice(0, 3).join(" | ")}`,
-	);
+	return `Audit chain UNVERIFIED: ${m.integrity.errors.length} problem(s). ${m.integrity.errors
+		.slice(0, 3)
+		.map(v)
+		.join(" | ")}`;
 }
 
-function budgetLines(m: ReportModel): string[] {
+function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 	const b = m.budget;
 	if (b.configuredUt === null)
 		return ["No budget is configured for this report (none in the vault config; pass --budget)."];
 	const lines = [
-		`Configured budget ${utStr(b.configuredUt)} (${usd(b.configuredUt)}), source: ${clean(b.source ?? "unknown")}. Session-wallet spend recorded in the chain (model calls and governed actions, not attributed to a cost-center envelope): ${utStr(b.recordedSessionUt)} (${usd(b.recordedSessionUt)}), ${pct(b.usedFraction ?? 0)} used${b.overBudget ? " (OVER BUDGET)" : ""}. This week: ${usd(b.windowSessionUt)}.`,
+		`Configured budget ${utStr(b.configuredUt)} (${usd(b.configuredUt)}), source: ${v(b.source ?? "unknown")}. Session-wallet spend recorded in the chain (model calls and governed actions with no cost center): ${utStr(b.recordedSessionUt)} (${usd(b.recordedSessionUt)}), ${pct(b.usedFraction ?? 0)} used${b.overBudget ? " (OVER BUDGET)" : ""}. This week: ${usd(b.windowSessionUt)}.`,
 	];
-	if (b.recordedEnvelopeUt > 0) {
+	if (b.recordedAttributedUt > 0) {
 		lines.push(
-			`Spend attributed to cost-center envelopes is NOT charged to this budget: ${usd(b.recordedEnvelopeUt)} recorded, ${usd(b.windowEnvelopeUt)} this week.`,
+			`Spend carrying a cost center is ATTRIBUTED and its payer is not recorded (the cost-center envelope with a ledger, the session in a dry run): ${usd(b.recordedAttributedUt)} recorded, ${usd(b.windowAttributedUt)} this week. If the session paid for all of it, the budget is ${pct(b.usedFractionUpper ?? 0)} used${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}.`,
 		);
 	}
 	lines.push("This is the configured budget against recorded spend, not the live ledger balance.");
@@ -94,7 +108,7 @@ function rowsTable(title: string, rows: readonly Row[], keyHeader: string): stri
 		"",
 		`| ${keyHeader} | Calls | Spend | Share |`,
 		"|---|---:|---:|---:|",
-		...rows.map((r) => `| ${mdCell(r.key)} | ${r.calls} | ${usd(r.ut)} | ${pct(r.share)} |`),
+		...rows.map((r) => `| ${md(r.key)} | ${r.calls} | ${usd(r.ut)} | ${pct(r.share)} |`),
 		"",
 	];
 }
@@ -108,7 +122,7 @@ function modelsTable(rows: readonly ModelRow[]): string[] {
 		"|---|---|---:|---:|---:|---|",
 		...rows.map(
 			(r) =>
-				`| ${mdCell(r.key)} | ${r.provider} | ${r.calls} | ${usd(r.ut)} | ${pct(r.share)} | ${mdCell(r.costBasis.join(", "))} |`,
+				`| ${md(r.key)} | ${r.provider} | ${r.calls} | ${usd(r.ut)} | ${pct(r.share)} | ${md(r.costBasis.join(", "))} |`,
 		),
 		"",
 	];
@@ -125,7 +139,7 @@ export function renderMarkdown(m: ReportModel): string {
 		"",
 		`Window: ${m.window.startIso} to ${m.window.endIso} (${m.window.days} days, end exclusive)`,
 		"",
-		`**${verdictLine(m)}**`,
+		`**${verdictLine(m, md)}**`,
 		"",
 		"## Headline",
 		"",
@@ -150,7 +164,7 @@ export function renderMarkdown(m: ReportModel): string {
 	out.push("");
 
 	out.push("## Budget status", "");
-	out.push(...budgetLines(m).map((l) => `${l}\n`), "");
+	out.push(...budgetLines(m, md).map((l) => `${l}\n`), "");
 
 	out.push(...rowsTable("Spend by agent", m.byAgent, "Agent"));
 	out.push(
@@ -188,7 +202,7 @@ export function renderMarkdown(m: ReportModel): string {
 			"|---:|---|---|---|---|---|",
 			...m.topCosts.map(
 				(c) =>
-					`| ${usd(c.ut)} | ${mdCell(c.timestamp)} | ${mdCell(c.model)} | ${mdCell(c.agent)} | ${mdCell(c.transferId)} | \`${mdCell(c.hash.slice(0, 16))}\` |`,
+					`| ${usd(c.ut)} | ${md(c.timestamp)} | ${md(c.model)} | ${md(c.agent)} | ${md(c.transferId)} | ${md(c.hash.slice(0, 16))} |`,
 			),
 			"",
 			"_The chain hash locates the exact event for `usertrust-verify`._",
@@ -206,7 +220,8 @@ export function renderMarkdown(m: ReportModel): string {
 
 	out.push("## Notes", "");
 	if (m.notes.length === 0) out.push("None.", "");
-	else out.push(...m.notes.map((n) => `- ${mdCell(n)}`), "");
+	// Notes are authored by the model builder from counts and fixed text, never from a vault string.
+	else out.push(...m.notes.map((n) => `- ${clean(n)}`), "");
 	out.push("## What this report does not claim", "", ...NOT_CLAIMED.map((n) => `- ${n}`), "");
 	return `${out.join("\n")}\n`;
 }
@@ -250,7 +265,7 @@ export function renderHtml(m: ReportModel): string {
 		);
 	}
 	body.push(
-		`<header><p class="muted">usertrust</p><h1>Weekly spend report</h1><p class="muted">${esc(m.window.startIso)} to ${esc(m.window.endIso)} (${m.window.days} days, end exclusive)</p><p class="${unverified ? "bad" : "ok"}"><strong>${esc(verdictLine(m))}</strong></p></header>`,
+		`<header><p class="muted">usertrust</p><h1>Weekly spend report</h1><p class="muted">${esc(m.window.startIso)} to ${esc(m.window.endIso)} (${m.window.days} days, end exclusive)</p><p class="${unverified ? "bad" : "ok"}"><strong>${esc(verdictLine(m, (x) => x))}</strong></p></header>`,
 		`<section class="headline"><div><span class="big">${usd(t.confirmedUt)}</span><span class="muted">confirmed spend, ${t.confirmedCalls} call(s)</span></div><div><span class="big">${usd(t.unconfirmedUt)}</span><span class="muted">unconfirmed (ambiguous or unsettled), ${t.unconfirmedCalls} call(s)</span></div>${
 			t.estimatedCalls > 0
 				? `<div><span class="big">${usd(t.estimatedUt)}</span><span class="muted">of confirmed spend priced from an estimate</span></div>`
@@ -267,7 +282,7 @@ export function renderHtml(m: ReportModel): string {
 		`<h2>Spend per hour</h2>${barsSvg(m.hourlyUt)}`,
 	);
 	body.push(`<h2>Budget status</h2>`);
-	body.push(...budgetLines(m).map((l) => `<p>${esc(l)}</p>`));
+	body.push(...budgetLines(m, (x) => x).map((l) => `<p>${esc(l)}</p>`));
 	body.push(htmlRows("Spend by agent", "Agent", m.byAgent));
 	body.push(
 		`<p class="muted">Agent key: ${esc(m.agentKey.requested)}${m.agentKey.segment !== null ? `, cost-center segment ${m.agentKey.segment}` : ""}. Calls with no attribution are one "(unattributed)" row.</p>`,

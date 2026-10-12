@@ -139,8 +139,13 @@ export interface ReportModel {
 		/** `llm_call`s with a `settlement_ambiguous` for the same transfer, or an explicit `settled: false`: not spent. */
 		unconfirmedUt: number;
 		unconfirmedCalls: number;
+		/** Unconfirmed calls denominated in nominal units: counted here, never added to `unconfirmedUt` (dollars). */
+		unconfirmedNominalCalls: number;
 		/** Of those, the ones that are an explicit `settled: false` (the rest have a settlement_ambiguous record). */
 		unsettledCalls: number;
+		/** `llm_call`s whose hold was voided afterwards (`llm_call_failed`): audited, never charged. Dollar-denominated only. */
+		voidedUt: number;
+		voidedCalls: number;
 		/** `costBasis: "nominal"` rows (or an unlabelled local-endpoint row): unit counts, excluded from dollar totals. */
 		nominalCalls: number;
 		nominalUt: number;
@@ -167,23 +172,32 @@ export interface ReportModel {
 	/** Confirmed spend per hour of the window, oldest first; length = days × 24. */
 	hourlyUt: number[];
 	/**
-	 * The configured budget is the SESSION wallet's. What debits it: every `llm_call` and governed action that was not
-	 * attributed to a cost-center envelope, in usertokens (a nominal local call debits its units too). Spend attributed
-	 * to an envelope (`data.costCenter`) debits THAT envelope instead and is reported beside, never against the session
-	 * budget. Both exclude an ambiguous or `settled: false` settle.
+	 * The configured budget is the SESSION wallet's. What provably debits it: every `llm_call` and governed action that
+	 * carries NO cost center, in usertokens (a nominal local call debits its units too).
+	 *
+	 * A call WITH a cost center is a different matter, and the chain does not say who paid: with a ledger it debits that
+	 * cost-center envelope, but a dry-run call attributed to a cost center still debits the session. A label is not proof of
+	 * a payer, so that spend is reported as ATTRIBUTED (payer not recorded) and bounds the answer instead of being assumed
+	 * away: `usedFraction` counts only the unattributed spend (a lower bound), `usedFractionUpper` adds the attributed
+	 * spend (the most it could be). Both exclude an ambiguous, voided or `settled: false` settle.
 	 */
 	budget: {
 		configuredUt: number | null;
 		source: string | null;
-		/** Session-wallet spend in the window / over the whole chain. */
+		/** Spend with no cost center, in the window / over the whole chain: it debited the session wallet. */
 		windowSessionUt: number;
 		recordedSessionUt: number;
-		/** Envelope (cost-center) spend in the window / over the whole chain: NOT charged to the session budget. */
-		windowEnvelopeUt: number;
-		recordedEnvelopeUt: number;
-		/** 0..1 used, clamped; `null` when no budget is configured. */
+		/** Spend WITH a cost center, in the window / over the whole chain: payer not recorded (envelope, or session in dry run). */
+		windowAttributedUt: number;
+		recordedAttributedUt: number;
+		/** 0..1 lower bound (session spend only), clamped; `null` when no budget is configured. */
 		usedFraction: number | null;
+		/** 0..1 upper bound (session + attributed spend), clamped; `null` when no budget is configured. */
+		usedFractionUpper: number | null;
+		/** The unattributed spend alone exceeds the budget. */
 		overBudget: boolean;
+		/** Only counting the attributed spend as well would exceed it: the payer decides. */
+		possiblyOverBudget: boolean;
 	};
 	governance: Record<string, number>;
 	notes: string[];
@@ -315,16 +329,16 @@ function denominationOf(e: PersistedAuditEvent): "usd" | "nominal" | "unlabelled
  */
 function walletDebit(
 	e: PersistedAuditEvent,
-	ambiguous: ReadonlySet<string>,
-): { ut: number; envelope: boolean } | undefined {
+	notCharged: ReadonlySet<string>,
+): { ut: number; attributed: boolean } | undefined {
 	const isCall = e.kind === "llm_call";
 	const isAction = !NON_ACTION_KINDS.has(e.kind) && str(e.data["actionName"]) !== undefined;
 	if (!isCall && !isAction) return undefined;
 	const c = cost(e.data["cost"]);
 	if (c === undefined || e.data["settled"] === false) return undefined;
 	const tid = str(e.data["transferId"]);
-	if (tid !== undefined && ambiguous.has(tid)) return undefined;
-	return { ut: c, envelope: str(e.data["costCenter"]) !== undefined };
+	if (tid !== undefined && notCharged.has(tid)) return undefined;
+	return { ut: c, attributed: str(e.data["costCenter"]) !== undefined };
 }
 
 export function buildWeeklyReport(
@@ -342,19 +356,27 @@ export function buildWeeklyReport(
 	// and counted, so one bad line never turns the report into a crash with no verification diagnostics.
 	const usable = events.filter(isUsableEvent);
 	const malformedEvents = events.length - usable.length;
+	const notCharged = new Set<string>();
 
 	// Whole-chain indexes: an ambiguity or a shortfall can be recorded outside the window of the call it corrects.
 	const ambiguous = new Set<string>();
+	// A call whose hold was VOIDED after its `llm_call` was audited (`audit.failClosed`, or a failed terminal): the
+	// `llm_call` event persists, the money never moved.
+	const voided = new Set<string>();
 	const shortfallByTransfer = new Map<string, number>();
 	for (const e of usable) {
 		const tid = str(e.data["transferId"]);
 		if (tid === undefined) continue;
 		if (e.kind === "settlement_ambiguous") ambiguous.add(tid);
+		else if (e.kind === "llm_call_failed") voided.add(tid);
 		else if (e.kind === "settlement_shortfall") {
 			const s = cost(e.data["shortfall"]);
 			if (s !== undefined) shortfallByTransfer.set(tid, s);
 		}
 	}
+
+	for (const tid of ambiguous) notCharged.add(tid);
+	for (const tid of voided) notCharged.add(tid);
 
 	const t = {
 		confirmedUt: 0,
@@ -363,6 +385,9 @@ export function buildWeeklyReport(
 		estimatedCalls: 0,
 		unconfirmedUt: 0,
 		unconfirmedCalls: 0,
+		unconfirmedNominalCalls: 0,
+		voidedUt: 0,
+		voidedCalls: 0,
 		unlabelledUt: 0,
 		unlabelledCalls: 0,
 		unsettledCalls: 0,
@@ -400,9 +425,9 @@ export function buildWeeklyReport(
 	let shortfallEvents = 0;
 	let shortfallUt = 0;
 	let recordedSessionUt = 0;
-	let recordedEnvelopeUt = 0;
+	let recordedAttributedUt = 0;
 	let windowSessionUt = 0;
-	let windowEnvelopeUt = 0;
+	let windowAttributedUt = 0;
 
 	for (const e of usable) {
 		const tid = str(e.data["transferId"]);
@@ -411,12 +436,12 @@ export function buildWeeklyReport(
 
 		// BUDGET: every debit of a wallet, `llm_call` and governed action alike, over the WHOLE chain. A call attributed to
 		// a cost-center envelope debits that envelope, not the session wallet the configured budget belongs to.
-		const wallet = walletDebit(e, ambiguous);
+		const wallet = walletDebit(e, notCharged);
 		if (wallet !== undefined) {
-			if (wallet.envelope) recordedEnvelopeUt += wallet.ut;
+			if (wallet.attributed) recordedAttributedUt += wallet.ut;
 			else recordedSessionUt += wallet.ut;
 			if (inWindow) {
-				if (wallet.envelope) windowEnvelopeUt += wallet.ut;
+				if (wallet.attributed) windowAttributedUt += wallet.ut;
 				else windowSessionUt += wallet.ut;
 			}
 		}
@@ -435,8 +460,15 @@ export function buildWeeklyReport(
 				t.malformedCalls += 1;
 				continue;
 			}
+			if (tid !== undefined && voided.has(tid)) {
+				t.voidedCalls += 1;
+				if (denomination !== "nominal") t.voidedUt += c;
+				continue;
+			}
 			if (isAmbiguous || isUnsettled) {
-				t.unconfirmedUt += c;
+				// Unconfirmed NOMINAL units are not dollars: they are counted, never added to the dollar figure.
+				if (denomination === "nominal") t.unconfirmedNominalCalls += 1;
+				else t.unconfirmedUt += c;
 				t.unconfirmedCalls += 1;
 				if (!isAmbiguous) t.unsettledCalls += 1;
 				continue;
@@ -526,14 +558,16 @@ export function buildWeeklyReport(
 					tiers.cacheWrite1hUt += (cw1h * r1h) / 1000;
 				}
 			}
+			// `id` and `hash` come from a vault that may be malformed: a missing or non-string one is an empty string,
+			// never a crash in the renderer or the tie-break sort.
 			tops.push({
-				id: e.id,
+				id: typeof e.id === "string" ? e.id : "",
 				timestamp: e.timestamp,
 				model,
 				agent,
 				transferId: tid ?? "",
 				ut: c,
-				hash: e.hash,
+				hash: typeof e.hash === "string" ? e.hash : "",
 			});
 			const sf = tid !== undefined ? shortfallByTransfer.get(tid) : undefined;
 			if (sf !== undefined && sf > 0) {
@@ -555,7 +589,7 @@ export function buildWeeklyReport(
 			if (
 				c !== undefined &&
 				e.data["settled"] !== false &&
-				!(tid !== undefined && ambiguous.has(tid))
+				!(tid !== undefined && notCharged.has(tid))
 			) {
 				t.actionUt += c;
 				t.actionCalls += 1;
@@ -577,6 +611,21 @@ export function buildWeeklyReport(
 	if (t.unconfirmedCalls > 0) {
 		notes.push(
 			`${t.unconfirmedCalls} call(s) are unconfirmed (a settlement_ambiguous record, or an explicit settled: false${t.unsettledCalls > 0 ? `, ${t.unsettledCalls} of them` : ""}): the ledger POST may not have completed. They are shown as unconfirmed, not counted as spent.`,
+		);
+	}
+	if (t.voidedCalls > 0) {
+		notes.push(
+			`${t.voidedCalls} call(s) were audited and then voided (llm_call_failed): the hold was released and nothing was charged. They are in no spend or budget figure.`,
+		);
+	}
+	if (t.unconfirmedNominalCalls > 0) {
+		notes.push(
+			`${t.unconfirmedNominalCalls} unconfirmed call(s) are denominated in nominal units and are not shown as dollars.`,
+		);
+	}
+	if (recordedAttributedUt > 0) {
+		notes.push(
+			"Spend carrying a cost center is reported as attributed: the chain does not record whether the cost-center envelope or the session paid, so it bounds the budget figure instead of being assumed away.",
 		);
 	}
 	if (t.unlabelledCalls > 0) {
@@ -641,10 +690,18 @@ export function buildWeeklyReport(
 			source: configured === null ? null : (opts.budgetSource ?? "vault config"),
 			windowSessionUt,
 			recordedSessionUt,
-			windowEnvelopeUt,
-			recordedEnvelopeUt,
+			windowAttributedUt,
+			recordedAttributedUt,
 			usedFraction: configured === null ? null : Math.min(1, recordedSessionUt / configured),
+			usedFractionUpper:
+				configured === null
+					? null
+					: Math.min(1, (recordedSessionUt + recordedAttributedUt) / configured),
 			overBudget: configured !== null && recordedSessionUt > configured,
+			possiblyOverBudget:
+				configured !== null &&
+				recordedSessionUt <= configured &&
+				recordedSessionUt + recordedAttributedUt > configured,
 		},
 		governance,
 		notes,

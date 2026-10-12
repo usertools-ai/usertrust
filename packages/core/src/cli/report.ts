@@ -23,6 +23,7 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -185,39 +186,69 @@ export function parseReportArgs(argv: readonly string[], jsonFlag: boolean): Rep
 
 /**
  * ONE snapshot of the vault: every audit file is read exactly once into a private temp directory, and the verdict AND the
- * figures are both computed from that copy. `verifyVault` and `readLedgerEvents` each read the files themselves, so run
- * against the live vault a writer (or an attacker) changing it between the two reads produced a report stamped VERIFIED
- * over events that were never verified (a verified 100 UT rewritten to 9,999 UT was reported as verified).
- * The vault itself is only read.
+ * figures both come from that copy. `verifyVault` and `readLedgerEvents` each read the files themselves, so run against
+ * the live vault a writer (or an attacker) changing it between the two reads produced a report stamped VERIFIED over
+ * events that were never verified. The vault itself is only read.
+ *
+ * ABSENCE IS NOT A VALUE. The copy is the verifier's input set: every non-dotfile regular file of the audit directory
+ * (the event log, any rotated segments, their anchor sidecars, the index). Only entries that are not regular files are
+ * skipped. A read error on a regular file (EACCES, EIO), a directory that cannot be listed, or a file that cannot be
+ * examined is a PROBLEM, returned to the caller, and the report is UNVERIFIED with exit code 2: leaving the file out would
+ * let the copy verify as a shorter (even an empty) chain.
  */
-export function snapshotVault(vaultPath: string): { dir: string; cleanup: () => void } {
+export function snapshotVault(vaultPath: string): {
+	dir: string;
+	problems: string[];
+	cleanup: () => void;
+} {
 	const dir = mkdtempSync(join(tmpdir(), "usertrust-report-"));
+	const problems: string[] = [];
+	const problem = (what: string, err: unknown): void => {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		problems.push(`Could not read ${what}${code !== undefined ? ` (${code})` : ""}`);
+	};
 	try {
 		const auditSrc = join(vaultPath, "audit");
 		if (existsSync(auditSrc)) {
 			const auditDst = join(dir, "audit");
 			mkdirSync(auditDst, { recursive: true, mode: 0o700 });
-			for (const name of readdirSync(auditSrc)) {
-				// Regular files only, no dotfiles (the writer lock): segments, their sidecars, the index.
+			let names: string[] = [];
+			try {
+				names = readdirSync(auditSrc);
+			} catch (err) {
+				problem("the audit directory", err);
+			}
+			for (const name of names) {
 				if (name.startsWith(".")) continue;
-				let bytes: Buffer;
+				const src = join(auditSrc, name);
+				let isFile: boolean;
 				try {
-					bytes = readFileSync(join(auditSrc, name));
-				} catch {
-					continue; // a directory, or a file that vanished: not part of the chain
+					isFile = statSync(src).isFile();
+				} catch (err) {
+					problem(`audit/${name}`, err);
+					continue;
 				}
-				writeFileSync(join(auditDst, name), bytes, { mode: 0o600 });
+				if (!isFile) continue; // a subdirectory (anchors/, llm_call/) is not part of the chain
+				try {
+					writeFileSync(join(auditDst, name), readFileSync(src), { mode: 0o600 });
+				} catch (err) {
+					problem(`audit/${name}`, err);
+				}
 			}
 		}
 		const configSrc = join(vaultPath, "usertrust.config.json");
 		if (existsSync(configSrc)) {
-			writeFileSync(join(dir, "usertrust.config.json"), readFileSync(configSrc), { mode: 0o600 });
+			try {
+				writeFileSync(join(dir, "usertrust.config.json"), readFileSync(configSrc), { mode: 0o600 });
+			} catch (err) {
+				problem("usertrust.config.json", err);
+			}
 		}
 	} catch (err) {
 		rmSync(dir, { recursive: true, force: true });
 		throw err;
 	}
-	return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+	return { dir, problems, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 /** `budget` (usertokens, a positive safe integer) from a tenant config file. */
@@ -289,12 +320,13 @@ export async function run(
 			// verdict and figures from the SAME bytes
 			const verdict = verifyVault(snapshot.dir);
 			const events = readLedgerEvents(snapshot.dir);
-			verified = verdict.valid;
+			verified = verdict.valid && snapshot.problems.length === 0;
 			model = buildWeeklyReport(
 				events,
 				{
-					verified: verdict.valid,
-					errors: verdict.errors,
+					// A file the snapshot could not read is part of the verdict, never an omission from it.
+					verified: verdict.valid && snapshot.problems.length === 0,
+					errors: [...snapshot.problems, ...verdict.errors],
 					chainLength: verdict.chainLength,
 					firstEvent: verdict.firstEvent,
 					lastEvent: verdict.lastEvent,

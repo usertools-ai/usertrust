@@ -260,10 +260,10 @@ describe("weekly report model", () => {
 		expect(m.budget.windowSessionUt).toBe(100 + 30 + 1);
 	});
 
-	it("spend attributed to a cost-center ENVELOPE debits that envelope, not the session budget", () => {
+	it("spend WITH a cost center is ATTRIBUTED, payer not recorded: it bounds the budget instead of being assumed away", () => {
 		const events = [
-			call("2026-10-08T01:00:00Z", 100), // session wallet
-			call("2026-10-08T02:00:00Z", 900, { costCenter: "team-a" }), // envelope
+			call("2026-10-08T01:00:00Z", 100), // no cost center: debited the session wallet
+			call("2026-10-08T02:00:00Z", 900, { costCenter: "team-a" }), // payer not recorded
 			ev("tool_call", "2026-10-08T03:00:00Z", {
 				actionName: "x",
 				cost: 50,
@@ -273,10 +273,74 @@ describe("weekly report model", () => {
 		];
 		const m = build(events, { budget: 1000 });
 		expect(m.budget.recordedSessionUt).toBe(100);
-		expect(m.budget.recordedEnvelopeUt).toBe(950);
-		expect(m.budget.windowEnvelopeUt).toBe(950);
-		expect(m.budget.usedFraction).toBe(0.1);
+		expect(m.budget.recordedAttributedUt).toBe(950);
+		expect(m.budget.windowAttributedUt).toBe(950);
+		expect(m.budget.usedFraction).toBe(0.1); // the lower bound: only what provably debited the session
+		expect(m.budget.usedFractionUpper).toBe(1); // clamped: if the session paid for all of it
 		expect(m.budget.overBudget).toBe(false);
+		expect(m.budget.possiblyOverBudget).toBe(true);
+		expect(m.notes.join(" ")).toMatch(/payer|envelope or the session/);
+	});
+
+	it("a dry-run call attributed to a cost center is NOT read as 0% used: the upper bound shows it (a label is not a payer)", () => {
+		const m = build([call("2026-10-08T01:00:00Z", 400, { costCenter: "team-a" })], {
+			budget: 1000,
+		});
+		expect(m.budget.usedFraction).toBe(0);
+		expect(m.budget.usedFractionUpper).toBe(0.4);
+		expect(m.budget.possiblyOverBudget).toBe(false);
+	});
+
+	it("a voided call (llm_call_failed after its llm_call) is no spend and no budget debit", () => {
+		const m = build(
+			[
+				call("2026-10-08T01:00:00Z", 100),
+				call("2026-10-08T02:00:00Z", 700, { transferId: "t-void" }),
+				ev("llm_call_failed", "2026-10-08T02:00:01Z", {
+					transferId: "t-void",
+					error: "audit unavailable",
+				}),
+				ev("tool_call", "2026-10-08T03:00:00Z", {
+					actionName: "x",
+					cost: 40,
+					transferId: "t-void",
+				}),
+			],
+			{ budget: 1000 },
+		);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.voidedCalls).toBe(1);
+		expect(m.totals.voidedUt).toBe(700);
+		expect(m.budget.recordedSessionUt).toBe(100);
+		expect(m.totals.actionUt).toBe(0);
+		expect(m.notes.join(" ")).toMatch(/voided/);
+	});
+
+	it("unconfirmed NOMINAL units are counted, never added to the dollar figure", () => {
+		const m = build([
+			call("2026-10-08T01:00:00Z", 100),
+			call("2026-10-08T02:00:00Z", 55, {
+				costBasis: "nominal",
+				endpointClass: "local",
+				settled: false,
+			}),
+			call("2026-10-08T03:00:00Z", 60, { costBasis: "nominal", transferId: "t-amb-n" }),
+			ev("settlement_ambiguous", "2026-10-08T03:00:01Z", { transferId: "t-amb-n" }),
+		]);
+		expect(m.totals.unconfirmedUt).toBe(0);
+		expect(m.totals.unconfirmedCalls).toBe(2);
+		expect(m.totals.unconfirmedNominalCalls).toBe(2);
+	});
+
+	it("a malformed hash or id never crashes the render: top costs normalise them", () => {
+		const bad = call("2026-10-08T01:00:00Z", 50) as unknown as Record<string, unknown>;
+		bad["hash"] = undefined;
+		bad["id"] = 7;
+		const m = build([bad as unknown as PersistedAuditEvent, call("2026-10-08T02:00:00Z", 50)]);
+		expect(m.topCosts).toHaveLength(2);
+		expect(m.topCosts.every((c) => typeof c.hash === "string" && typeof c.id === "string")).toBe(
+			true,
+		);
 	});
 
 	it("an ambiguous or settled:false governed action does not debit the budget", () => {
