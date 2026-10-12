@@ -157,7 +157,7 @@ Every call returns `{ response, receipt }`:
 
 ### Settings, budgets and many agents
 
-- **Settings live in the config file.** Options such as `pii` are read from the config file `trust()` loads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath`, which is read INSTEAD of the default (edit the one in use, or a setting such as `pii: "block"` stays off). See [Config](#config). Passing `{ pii: "block" }` as the second argument to `trust()` is not read, and does not enable blocking.
+- **Settings live in the config file.** Options such as `pii` are read from the config file `trust()` loads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath`, which is read INSTEAD of the default (edit the one in use, or a setting such as `pii: "block"` stays off). See [Config](#config). `pii` can also be passed to `trust()` itself, e.g. `trust(client, { pii: "block" })`, which overrides the file; any option `trust()` does not declare is refused by name rather than ignored.
 - **A budget belongs to one `trust()` client, seeded from the spend the vault has recorded.** `trust(client, { budget })` gives that client its own budget, set when the client is created to the budget minus the spend already recorded in the vault (`.usertrust/spend-ledger.json`). Two clients created before either has settled a call each start with the full amount; a client created after another has settled starts with what is left; and a client that is already running does not see another client's later spend. To share one budget across callers, use `usertrust-server`.
 - **With TigerBeetle, do not create one `trust()` per agent.** Each ledger-backed client holds its own connection to the ledger. In our testing, the 9th simultaneously open ledger-backed client in one process never finished connecting, and no error was raised; a TigerBeetle replica also holds at most 64 registered clients and evicts the least recently used. For more than a few agents, run `usertrust-server` (see `packages/server/README.md`): agents call it over HTTP, and it keeps one governor and one ledger connection per tenant, shared by every agent of that tenant.
 
@@ -240,6 +240,8 @@ Create `.usertrust/usertrust.config.json`:
   "audit": { "rotation": "daily", "indexLimit": 10000 }
 }
 ```
+
+`budget`, `pii`, `parentUserId` and `scope` can also be passed to `trust()` (and to `createGovernor()`), and override the file: `trust(client, { pii: "block" })` blocks PII whatever the file says. Every other setting (`circuitBreaker`, `patterns`, `audit`, …) is read from the file only. Besides these, its own options (`configPath`, `dryRun`, `vaultBase`, `endpoint`, `allowUngoverned`) and `tier` (accepted, but currently not applied), any key passed to `trust()` is refused by name: it throws a `TypeError` such as `trust(): unknown option "circuitBreaker" (set it in .usertrust/usertrust.config.json)` instead of being ignored. So does a `pii` value the config does not allow. `allowUngoverned` is for `trust()` only: `createGovernor()` refuses it by name.
 
 `defineConfig` is available as a TypeScript type-checking helper for validating config objects in your code. The actual config file must be `usertrust.config.json` (JSON format):
 

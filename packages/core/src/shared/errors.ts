@@ -116,7 +116,7 @@ export class PolicyDeniedError extends Error {
 	constructor(reason: string, hintOverride?: string, auditMeta?: DenialAuditMetadata) {
 		const hint =
 			hintOverride ??
-			'Check your policy rules in .usertrust/policies/default.yml or use { pii: "warn" } to downgrade PII enforcement.';
+			'Check your policy rules in .usertrust/policies/default.yml, or set "pii": "warn" in .usertrust/usertrust.config.json (or pass { pii: "warn" } to trust()) to downgrade PII enforcement.';
 		const docsUrl = "https://usertrust.ai/docs/errors/policy-denied";
 		super(`Policy denied: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "PolicyDeniedError";

@@ -21,7 +21,8 @@ interface TrustOpts {
   proxy?: string;         // Deprecated — not implemented; setting this throws
   key?: string;           // Deprecated — proxy API key; unused because proxy throws
   budget?: number;        // Token budget override (in usertokens)
-  tier?: string;          // Tier override (free | mini | pro | mega | ultra)
+  tier?: string;          // Accepted, but currently not applied (the config file's tier is used)
+  pii?: "redact" | "warn" | "block" | "off"; // PII enforcement override
   dryRun?: boolean;       // Skip TigerBeetle — audit chain + policy still run
   vaultBase?: string;     // Vault directory override (default: process.cwd())
   allowUngoverned?: string[]; // SDK methods to run ungoverned (Anthropic and OpenAI)
@@ -34,10 +35,13 @@ interface TrustOpts {
 | `proxy` | `undefined` | **Not implemented.** Setting this option throws. Use a local TigerBeetle or `dryRun` for enforcement. |
 | `key` | `undefined` | **Not implemented.** API key for the removed proxy. Unused; `proxy` throws first. |
 | `budget` | Config value or `10_000` | Total usertoken budget for this client. Overrides the config file value. |
-| `tier` | `"mini"` | Tier classification. Overrides the config file value. |
+| `tier` | `"mini"` | Tier classification. Accepted, but currently not applied: the config file's `tier` is used. |
+| `pii` | Config value or `"warn"` | PII enforcement: `"redact"`, `"warn"`, `"block"` or `"off"`. Overrides the config file value. Any other value is refused by name. |
 | `dryRun` | `false` | Skip TigerBeetle entirely. Also enabled by `USERTRUST_DRY_RUN=true` env var. Useful for CI and testing. |
 | `vaultBase` | `process.cwd()` | Base directory containing the `.usertrust/` vault. |
-| `allowUngoverned` | `[]` | SDK method paths to run **ungoverned** on an Anthropic or OpenAI client, as the refusal names them (`"embeddings.create"`). A listed method runs on the raw SDK with no hold and no cost, and each call appends an `ungoverned_call` audit event (`{ method, provider }`). Validated when `trust()` is called: an array of non-empty paths, none through `_client` or a raw HTTP member such as `post`. Without `audit.failClosed` the method returns what the SDK returns. Under `audit.failClosed` the append is awaited before the SDK is called, a failed append refuses the call, and the method always returns a Promise: a method that is synchronous in the SDK (`chat.completions.stream`) returns a Promise of its value, and `beta.messages.toolRunner`, whose runner is thenable, returns a Promise of the runner's FINAL result (promise resolution adopts the thenable and runs it to completion), not the runner object. |
+| `allowUngoverned` | `[]` | `trust()` only: `createGovernor()` refuses it by name. SDK method paths to run **ungoverned** on an Anthropic or OpenAI client, as the refusal names them (`"embeddings.create"`). A listed method runs on the raw SDK with no hold and no cost, and each call appends an `ungoverned_call` audit event (`{ method, provider }`). Validated when `trust()` is called: an array of non-empty paths, none through `_client` or a raw HTTP member such as `post`. Without `audit.failClosed` the method returns what the SDK returns. Under `audit.failClosed` the append is awaited before the SDK is called, a failed append refuses the call, and the method always returns a Promise: a method that is synchronous in the SDK (`chat.completions.stream`) returns a Promise of its value, and `beta.messages.toolRunner`, whose runner is thenable, returns a Promise of the runner's FINAL result (promise resolution adopts the thenable and runs it to completion), not the runner object. |
+
+Every other config setting (`circuitBreaker`, `patterns`, `audit`, …) is read from the config file only. `trust()` refuses an option it does not declare: it throws a `TypeError` that names each unknown key, before anything is read or created, instead of ignoring it.
 
 <Callout type="info">
 The internal `_engine` and `_audit` options exist for testing only. They inject mock subsystems and are not part of the public API.
