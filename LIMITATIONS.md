@@ -40,9 +40,15 @@ exact, current boundary is enumerated at the source in
 governed client: a call to a method usertrust does not govern, a helper that
 drives the SDK's raw client, a `withOptions()` copy. It is not a sandbox against
 code that sets out to spend. A caller that keeps the raw client it constructed,
-builds a new one through `client.constructor`, or reads the API key off the
+builds a new one through `client.constructor`, through the governed client's own
+`trusted.constructor`, or through the prototype path
+`Object.getPrototypeOf(trusted).constructor`, or reads the API key off the
 client (`client.apiKey` is a plain value and passes) is outside it, as with any
-wrapper. Writes through the governed client are refused (assignment,
+wrapper. Deliberate bypass from your own code is out of scope: code that holds a
+provider key can always reach the provider. `usertrust-server` does not change
+that, because it authorizes and settles spend but does not make or forward the
+provider calls; enforcing against deliberate bypass needs the provider key held
+outside that code. Writes through the governed client are refused (assignment,
 `Object.defineProperty` and `delete` on the client, its resources and `_client`,
 and on its transport objects `middleware`, `fetchOptions`, `_options` and
 `_authState`), but two SDK objects are still handed back as they are: the
