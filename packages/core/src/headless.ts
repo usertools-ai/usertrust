@@ -424,6 +424,20 @@ export interface SettleParams {
 	 * as one aggregate says so and the per-tier bound scales with it (capped at `MAX_AGGREGATED_RESPONSES`).
 	 */
 	responses?: number | undefined;
+	/**
+	 * With `responses`: the LARGEST single-response count per tier among the responses these counts sum. The server holds
+	 * each to the unscaled ceiling, so one absurd response cannot hide inside a large window. Omitted: the aggregate
+	 * check alone.
+	 */
+	maxima?:
+		| {
+				inputTokens?: number | undefined;
+				outputTokens?: number | undefined;
+				cacheReadTokens?: number | undefined;
+				cacheWriteTokens?: number | undefined;
+				cacheWrite1hTokens?: number | undefined;
+		  }
+		| undefined;
 	/** Number of streaming chunks delivered (for streaming calls). */
 	chunksDelivered?: number | undefined;
 	/**
@@ -1779,6 +1793,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				cacheWriteTokens: params?.cacheWriteTokens,
 				cacheWrite1hTokens: params?.cacheWrite1hTokens,
 				responses: params?.responses,
+				maxima: params?.maxima,
 				usageSource: params?.usageSource,
 				chunksDelivered: params?.chunksDelivered,
 				computeMs: params?.computeMs,
@@ -1860,6 +1875,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					cacheWrite1hTokens: input.cacheWrite1hTokens,
 				};
 				const responses = input.responses;
+				const maxima = input.maxima;
 				// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
 				// read only input/output, so a settle carrying nothing but cache counts
 				// looked like "nothing reported" and silently fell back to the pre-call
@@ -1891,7 +1907,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
 							source: usageReported ? (input.usageSource ?? "provider") : "estimated",
 						},
-						{ responses },
+						{ responses, maxima },
 					),
 					rateInfo.rates,
 					rateInfo.rateSource !== "table",

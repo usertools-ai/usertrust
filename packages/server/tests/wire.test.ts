@@ -61,6 +61,15 @@ describe("request schemas", () => {
 		});
 	});
 
+	it("round-trips maxima, strictly", () => {
+		expect(
+			SettleRequestSchema.parse({ transferId: "tx_1", maxima: { inputTokens: 5 } }).maxima,
+		).toEqual({ inputTokens: 5 });
+		for (const bad of [{ inputTokens: -1 }, { inputTokens: 1.5 }, { bogus: 1 }]) {
+			expect(() => SettleRequestSchema.parse({ transferId: "tx_1", maxima: bad })).toThrow();
+		}
+	});
+
 	it("round-trips responses (the count of provider responses a settle sums) and bounds it", () => {
 		expect(SettleRequestSchema.parse({ transferId: "tx_1", responses: 600 }).responses).toBe(600);
 		for (const bad of [0, -1, 1.5, "7", 1_000_001]) {

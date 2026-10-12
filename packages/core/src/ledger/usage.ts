@@ -238,7 +238,11 @@ export function withImplausible(
  */
 export function sanitizeUsage(
 	raw: RawUsageCandidate | null | undefined,
-	opts: { responses?: number | undefined } = {},
+	opts: {
+		responses?: number | undefined;
+		/** The largest single-response count per tier in an aggregate; checked against the BASE ceiling. */
+		maxima?: { [K in UsageTier]?: number | undefined } | undefined;
+	} = {},
 ): NormalizedUsage {
 	const r = raw ?? {};
 	const input = readCount(r.inputTokens);
@@ -262,6 +266,15 @@ export function sanitizeUsage(
 	const implausible: Partial<Record<UsageTier, number>> = {};
 	for (const [tier, value] of readings) {
 		if (value > ceiling) implausible[tier] = value;
+	}
+	// An aggregate's SUM may sit under n x ceiling while one response inside it is absurd: the caller's per-tier maxima
+	// are held to the unscaled ceiling. A caller that sends none keeps the aggregate check alone.
+	for (const [tier, value] of Object.entries(opts.maxima ?? {}) as Array<
+		[UsageTier, number | undefined]
+	>) {
+		if (value !== undefined && Number.isFinite(value) && value > MAX_PLAUSIBLE_TOKENS_PER_TIER) {
+			implausible[tier] = Math.max(implausible[tier] ?? 0, value);
+		}
 	}
 	// The 1-hour share alone leaves the counts standing until `withSupported1hTier` decides whether the model has the
 	// tier at all (a model without one ignores the share). Any other tier condemns the counts here.

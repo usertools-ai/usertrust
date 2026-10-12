@@ -531,7 +531,10 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 			]);
 			await run("stop.mjs", stopInput());
 			expect(settles()).toHaveLength(1);
-			expect(settles()[0]?.body).toMatchObject({ responses: 2 });
+			expect(settles()[0]?.body).toMatchObject({
+				responses: 2,
+				maxima: { inputTokens: 10, outputTokens: 20 },
+			});
 		});
 
 		it("a single response carries no `responses` key", async () => {
@@ -539,6 +542,7 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 0, 0)));
 			await run("stop.mjs", stopInput());
 			expect(settles()[0]?.body).not.toHaveProperty("responses");
+			expect(settles()[0]?.body).not.toHaveProperty("maxima");
 		});
 	});
 

@@ -401,6 +401,48 @@ describe("the ceiling is per provider RESPONSE", () => {
 		await gov.destroy();
 	});
 
+	it("one 150M response beside a 0 in a 2-response window is refused when the maxima say so", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const auth = await gov.authorize(AUTH);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 150_000_000,
+			outputTokens: 1_000,
+			responses: 2,
+			maxima: { inputTokens: 150_000_000, outputTokens: 1_000 },
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+			tiers: { inputTokens: 150_000_000 },
+		});
+		await gov.destroy();
+	});
+
+	it("CONTROL: a 600-response window with plausible maxima over 100M total is still charged in full", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const auth = await gov.authorize(AUTH);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 150_000_000,
+			outputTokens: 1_000,
+			responses: 600,
+			maxima: { inputTokens: 300_000, outputTokens: 10 },
+		});
+		expect(receipt.usageSource).toBe("provider");
+		expect(audit.events.map((e) => e.kind)).not.toContain("usage_implausible");
+		await gov.destroy();
+	});
+
 	it("CONTROL: the same total claimed as ONE response is refused", async () => {
 		const audit = makeAudit();
 		const gov = await createGovernor({

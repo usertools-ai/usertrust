@@ -296,6 +296,14 @@ function callTimeout(reserveMs = 0) {
 	return Math.min(callTimeoutCap(), timeLeft() - reserveMs);
 }
 
+/** A persisted per-tier maxima object, or undefined when it is not one (a record from before it existed). */
+function readMaxima(v) {
+	if (v === null || typeof v !== "object") return undefined;
+	const out = {};
+	for (const key of COUNT_KEYS) out[key] = count(v[key]);
+	return out;
+}
+
 function sumCounts(messages) {
 	const sum = {
 		inputTokens: 0,
@@ -308,6 +316,10 @@ function sumCounts(messages) {
 	// How many provider responses the sum spans: the server's plausibility ceiling is per response, so a window of many
 	// messages is not mistaken for one absurd one.
 	sum.responses = messages.length;
+	// The largest single response per tier: the server holds each to the unscaled ceiling, so one absurd response
+	// cannot hide inside a large window.
+	sum.maxima = {};
+	for (const key of COUNT_KEYS) sum.maxima[key] = Math.max(0, ...messages.map((m) => m[key]));
 	return sum;
 }
 
@@ -795,6 +807,8 @@ function parseVehicle(key, v) {
 			: {}),
 	};
 	for (const k of COUNT_KEYS) vehicle[k] = count(v[k]);
+	const maxima = readMaxima(v.maxima);
+	if (maxima !== undefined) vehicle.maxima = maxima;
 	// The job labels the vehicle was first sent with: a retry is the SAME charge, so it
 	// carries the same job, never the one open when the retry happens.
 	const labels = jobHoldFields(v.labels);
@@ -1971,7 +1985,7 @@ async function oneHourSupport(share) {
  * worst case against an old server is the 5-minute price, never a dropped count.
  */
 async function settleBody(transferId, counts, labels) {
-	const { cacheWrite1hTokens, responses, ...rest } = counts;
+	const { cacheWrite1hTokens, responses, maxima, ...rest } = counts;
 	const support = await oneHourSupport(cacheWrite1hTokens);
 	// Support UNKNOWN with a share to carry: sending only the flat total would bill the
 	// 1-hour tokens at the 5-minute rate for good, so no body is built; the caller defers.
@@ -1982,6 +1996,7 @@ async function settleBody(transferId, counts, labels) {
 		...rest,
 		...(sendShare ? { cacheWrite1hTokens } : {}),
 		...(Number.isSafeInteger(responses) && responses > 1 ? { responses } : {}),
+		...(Number.isSafeInteger(responses) && responses > 1 && maxima !== undefined ? { maxima } : {}),
 		usageSource: "provider",
 		...settleLabels(labels),
 	};
@@ -2118,6 +2133,8 @@ export async function settleTranscriptHold(sessionId, entry) {
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(entry[key]);
 	counts.responses = ids.length;
+	const entryMaxima = readMaxima(entry.maxima);
+	if (entryMaxima !== undefined) counts.maxima = entryMaxima;
 	// A 1-hour share the server may or may not price: decide BEFORE claiming the hold's file,
 	// so an unknown server leaves the pending record in place for a later settle point instead
 	// of journalling a `.done` for a settle that never went out.
@@ -2646,6 +2663,8 @@ function vehicleCounts(vehicle) {
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(vehicle[key]);
 	counts.responses = Array.isArray(vehicle.ids) ? vehicle.ids.length : 1;
+	const vehicleMaxima = readMaxima(vehicle.maxima);
+	if (vehicleMaxima !== undefined) counts.maxima = vehicleMaxima;
 	return counts;
 }
 
