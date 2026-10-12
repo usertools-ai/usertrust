@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { withAuditWriterLock } from "../audit/chain.js";
+import { PRIVATE_DIR_MODE, PRIVATE_FILE_MODE } from "../shared/private-fs.js";
 
 // ── Types ──
 
@@ -255,10 +256,13 @@ export async function createSnapshot(vaultPath: string, name: string): Promise<S
 	const payload: SnapshotPayload = { meta, entries };
 
 	const dir = snapshotsDir(vaultPath);
-	await mkdir(dir, { recursive: true });
+	await mkdir(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
 
 	const filePath = snapshotFilePath(vaultPath, name);
-	await writeFile(filePath, JSON.stringify(payload, null, "\t"), "utf-8");
+	await writeFile(filePath, JSON.stringify(payload, null, "\t"), {
+		encoding: "utf-8",
+		mode: PRIVATE_FILE_MODE,
+	});
 
 	return meta;
 }
@@ -304,7 +308,7 @@ export async function restoreSnapshot(
 
 	// The advisory lock lives in audit/; ensure the dir exists so we can take it.
 	const auditDir = join(vaultPath, "audit");
-	await mkdir(auditDir, { recursive: true });
+	await mkdir(auditDir, { recursive: true, mode: PRIVATE_DIR_MODE });
 	const logPath = join(auditDir, "events.jsonl");
 
 	await withAuditWriterLock(logPath, async () => {
@@ -329,9 +333,9 @@ export async function restoreSnapshot(
 				if (!resolvedPath.startsWith(`${resolvedVault}/`)) {
 					throw new Error(`Path traversal detected in snapshot: ${relPath}`);
 				}
-				await mkdir(dirname(fullPath), { recursive: true });
+				await mkdir(dirname(fullPath), { recursive: true, mode: PRIVATE_DIR_MODE });
 				const tmpPath = `${fullPath}.restore-tmp`;
-				await writeFile(tmpPath, Buffer.from(b64Content, "base64"));
+				await writeFile(tmpPath, Buffer.from(b64Content, "base64"), { mode: PRIVATE_FILE_MODE });
 				staged.push({ finalPath: fullPath, tmpPath });
 			}
 			// Phase 2: commit — rename staged temps into place. Renames are fast and

@@ -14,6 +14,7 @@
  */
 
 import pc from "picocolors";
+import { looseVaultWarning } from "../shared/private-fs.js";
 import { GLOBAL_FLAGS, JSON_FLAG } from "./flags.js";
 
 /**
@@ -24,6 +25,15 @@ import { GLOBAL_FLAGS, JSON_FLAG } from "./flags.js";
 export function scrubForTerminal(text: string): string {
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: the control-character strip is a terminal-injection defense
 	return text.replace(/[\x00-\x1f\x7f-\x9f]/g, "?");
+}
+
+/**
+ * Warn on stderr, and proceed, when the vault a command opens is readable by other users. It never
+ * changes a mode (see `looseVaultWarning`): only a governor and `usertrust init` tighten a vault.
+ */
+export function warnIfVaultLoose(vaultDir: string): void {
+	const warning = looseVaultWarning(vaultDir);
+	if (warning !== undefined) process.stderr.write(`${scrubForTerminal(warning)}\n`);
 }
 
 /**

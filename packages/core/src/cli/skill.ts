@@ -8,13 +8,15 @@
  */
 
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import pc from "picocolors";
 import { loadConfig } from "../config.js";
+import { VAULT_DIR } from "../shared/constants.js";
 import { validateManifest } from "../supply-chain/manifest.js";
 import { enforceSkillLoad } from "../supply-chain/permissions.js";
 import { verifySignature } from "../supply-chain/sign.js";
 import { parseFlags } from "./flags.js";
-import { scrubForTerminal, toSafeJson } from "./target.js";
+import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
 
 export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise<void> {
 	const { json, positional } = parseFlags();
@@ -81,6 +83,7 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 		return;
 	}
 
+	warnIfVaultLoose(join(process.cwd(), VAULT_DIR));
 	const config = await loadConfig(undefined, process.cwd());
 	const registeredKeys = config.supplyChain.publisherKeys[manifest.publisher] ?? [];
 	const sigValid = verifySignature(manifest, registeredKeys);
