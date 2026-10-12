@@ -102,20 +102,74 @@ test("every allowlisted font file is tracked and carries a reason", () => {
 	}
 });
 
-test("no site source points at a local font file; every font URL is the kit's", () => {
-	const sources = trackedFiles().filter(
-		(f) =>
-			f.startsWith("site/") &&
-			/\.(?:tsx?|mts|mjs|js|css)$/.test(f) &&
-			!/\.test\.(?:tsx?|mts)$/.test(f),
+/** Whether `bytes` is text: no NUL byte in its first 8000, the test git itself uses. */
+function isText(bytes: Uint8Array): boolean {
+	return !bytes.subarray(0, 8000).includes(0);
+}
+
+/**
+ * The site sources the URL scan reads: EVERY tracked text file under `site/`, whatever its
+ * extension (pages, MDX docs, styles, config, JSON), not a list of extensions that a new
+ * kind of source would fall outside of. Binary files (images, video) are skipped by their
+ * bytes. Test files are skipped: their rows plant font URLs on purpose.
+ */
+export function siteSources(
+	paths: readonly string[],
+	read: (path: string) => Uint8Array,
+): string[] {
+	return paths.filter(
+		(path) => path.startsWith("site/") && !/\.test\.[^/]+$/.test(path) && isText(read(path)),
 	);
+}
+
+test("the scan reads every text file under site/, by its bytes, not by an extension list", () => {
+	const files: Record<string, Uint8Array> = {
+		"site/app/layout.tsx": Buffer.from("export default 1;"),
+		"site/content/docs/index.mdx": Buffer.from("# Docs"),
+		"site/app/globals.css": Buffer.from("body {}"),
+		"site/source.config.json": Buffer.from("{}"),
+		"site/notes": Buffer.from("no extension, still text"),
+		"site/public/og.png": Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x00]),
+		"site/scripts/no-font-files.test.mts": Buffer.from("planted"),
+		"packages/x/index.ts": Buffer.from("outside site/"),
+	};
+	assert.deepEqual(
+		siteSources(Object.keys(files), (path) => files[path] ?? new Uint8Array()),
+		[
+			"site/app/layout.tsx",
+			"site/content/docs/index.mdx",
+			"site/app/globals.css",
+			"site/source.config.json",
+			"site/notes",
+		],
+	);
+});
+
+test("no site source points at a local font file; every font URL is the kit's", () => {
+	const sources = siteSources(trackedFiles(), (path) => readFileSync(join(REPO_ROOT, path)));
+	// The control: the scan reaches the root layout, the MDX docs and the styles.
 	assert.ok(sources.includes("site/app/layout.tsx"), "the scan reaches the root layout");
+	assert.ok(
+		sources.some((f) => f.startsWith("site/content/docs/") && f.endsWith(".mdx")),
+		"the scan reaches the MDX docs pages",
+	);
+	assert.ok(sources.includes("site/app/globals.css"), "the scan reaches the styles");
 	const offenders: string[] = [];
 	for (const file of sources) {
 		const text = readFileSync(join(REPO_ROOT, file), "utf8");
 		for (const url of nonKitFontUrls(text)) offenders.push(`${file}: ${url}`);
 	}
 	assert.deepEqual(offenders, []);
+});
+
+test("a font URL in an MDX page is caught, in JSX styles and in a link", () => {
+	const page = [
+		"# Fonts",
+		'<style>{`@font-face { font-family: X; src: url("/fonts/local.woff2"); }`}</style>',
+		"Download [the face](/fonts/Other.ttf).",
+		'<link rel="preload" href="https://usertrust.ai/kit/fonts/Khand-Bold.woff2" />',
+	].join("\n");
+	assert.deepEqual(nonKitFontUrls(page), ["/fonts/local.woff2", "/fonts/Other.ttf"]);
 });
 
 test("a font URL is judged by its path: a query or a fragment does not hide it", () => {
