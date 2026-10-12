@@ -1142,6 +1142,13 @@ describe("a vault base made absolute, without folding anything", () => {
 	it("a POSIX relative base is concatenated with the working directory, unfolded", () => {
 		expect(absoluteVaultBase("a:b/../vault", "linux")).toBe(`${process.cwd()}/a:b/../vault`);
 		expect(absoluteVaultBase("/x/../y", "linux")).toBe("/x/../y");
+		expect(absoluteVaultBase("vault", "linux", () => "", "/")).toBe("/vault");
+		expect(absoluteVaultBase("a/../vault", "linux", () => "", "/")).toBe("/a/../vault");
+		expect(absoluteVaultBase("vault", "linux", () => "", "/work")).toBe("/work/vault");
+		expect(absoluteVaultBase("vault", "linux", () => "", "/work/")).toBe("/work/vault");
+		expect(absoluteVaultBase("vault", "win32", () => "", "C:\\")).toBe("C:\\vault");
+		// A POSIX directory may end in a backslash; only `/` is a separator there.
+		expect(absoluteVaultBase("vault", "linux", () => "", "/work\\")).toBe("/work\\/vault");
 	});
 });
 
