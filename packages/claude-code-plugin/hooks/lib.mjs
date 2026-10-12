@@ -1496,6 +1496,19 @@ export function isUnknownTransfer(response) {
 }
 
 /**
+ * A SETTLE's answer that the server holds no such hold, so the hold is gone: an older server's 404
+ * `unknown transferId`, or a newer one's 410 `settlement_unrecoverable` (the settle was recorded on its
+ * chain; nothing is charged and no hold re-opened). Release and abort keep the 404 on every server, so
+ * they keep `isUnknownTransfer`.
+ */
+export function isSettleGone(response) {
+	return (
+		isUnknownTransfer(response) ||
+		(response.status === 410 && response.json?.error === "settlement_unrecoverable")
+	);
+}
+
+/**
  * The server's answer that a key's charge already stands (usertrust #205): from
  * `/v1/authorize` when an earlier settle under the key landed, and from
  * `/v1/settle` when another hold already charged it.

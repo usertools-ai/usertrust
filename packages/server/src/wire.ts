@@ -7,6 +7,7 @@ import {
 	PolicyDeniedError,
 	principalFieldRefusal,
 	RELEASE_CLASSES,
+	UnheldSettlementRateLimitedError,
 	usageTimeRefusal,
 } from "usertrust";
 import { z } from "zod";
@@ -72,6 +73,8 @@ export const AuthorizeRequestSchema = z
 	});
 
 export const SettleRequestSchema = z.object({
+	// Not length-bounded here: a custom factory may issue long ids for LIVE holds. The record of a settle
+	// for an UNKNOWN hold bounds it (server.ts, MAX_RECORDED_TRANSFER_ID).
 	transferId: z.string().min(1),
 	inputTokens: z.number().int().nonnegative().optional(),
 	outputTokens: z.number().int().nonnegative().optional(),
@@ -202,6 +205,9 @@ export function toHttpError(err: unknown): {
 	}
 	if (err instanceof AnomalyError) {
 		return { status: 429, body: { error: "anomaly", reason: err.message } };
+	}
+	if (err instanceof UnheldSettlementRateLimitedError) {
+		return { status: 429, body: { error: "rate_limited", reason: err.message } };
 	}
 	return { status: 500, body: { error: "internal", reason: "internal error" } };
 }
