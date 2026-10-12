@@ -1169,3 +1169,67 @@ describe("no definite over-budget claim when the governor's counter contradicts 
 		expect(m.budget.overBudget).toBe(true);
 	});
 });
+
+describe("an unrecognised sibling kind never leaves a transfer definite (one sibling definition)", () => {
+	const T = "2026-10-08T01:00:00Z";
+
+	it("an invented kind beside a settled call puts it in the UNCERTAIN band, not the definite lower bound", () => {
+		const m = build([
+			call(T, 100, { transferId: "t" }),
+			ev("brand_new_kind", T, { transferId: "t" }),
+		]);
+		expect(m.budget.recordedSessionWallet).toBe(0);
+		expect(m.budget.recordedSessionUncertain).toBe(100);
+		expect(m.budget.uncertainTransfers).toBe(1);
+		// and the spend side agrees: the call is unconfirmed, not confirmed
+		expect(m.totals.confirmedUt).toBe(0);
+		expect(m.totals.contradictedCalls).toBe(1);
+	});
+
+	it("two spend records of one kind for one transfer are uncertain in the budget too", () => {
+		const m = build([
+			call(T, 100, { transferId: "t" }),
+			call("2026-10-08T01:00:05Z", 100, { transferId: "t" }),
+		]);
+		expect(m.budget.recordedSessionWallet).toBe(0);
+		expect(m.budget.recordedSessionUncertain).toBe(100);
+	});
+
+	it("post evidence still outranks the unknown sibling", () => {
+		const m = build([
+			call(T, 100, { transferId: "t" }),
+			ev("settlement_shortfall", T, { transferId: "t", actual: 100, posted: 60, shortfall: 40 }),
+			ev("brand_new_kind", T, { transferId: "t" }),
+		]);
+		expect(m.budget.recordedSessionWallet).toBeGreaterThan(0);
+	});
+
+	it("a benign sibling (an implausible-usage note) does not disturb a definite call", () => {
+		const m = build([
+			call(T, 100, { transferId: "t" }),
+			ev("usage_implausible", T, { transferId: "t" }),
+		]);
+		expect(m.budget.recordedSessionWallet).toBe(100);
+	});
+});
+
+describe("both renderers state the same thing about records without their call", () => {
+	it("markdown and html carry the same note: in no dollar figure, but in the budget as undenominated units", () => {
+		const m = build(
+			[
+				ev("settlement_shortfall", "2026-10-08T01:00:00Z", {
+					transferId: "o",
+					actual: 90,
+					posted: 60,
+				}),
+			],
+			{ budget: 1000 },
+		);
+		for (const format of ["md", "html"] as const) {
+			const text = render(m, format);
+			expect(text, format).toContain("in no spend (dollar) figure");
+			expect(text, format).toContain("counted in the budget section as undenominated wallet units");
+			expect(text, format).not.toContain("in no spend or budget figure");
+		}
+	});
+});

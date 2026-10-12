@@ -176,6 +176,13 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 	return lines;
 }
 
+/**
+ * What a record without its call is, stated ONCE for both renderers. It is in no spend (dollar) figure, but a standalone
+ * shortfall or ambiguity IS counted in the budget section as undenominated wallet units, because the governor counted it.
+ */
+const WITHOUT_CALL_NOTE =
+	"These records qualify a call (a shortfall, an ambiguity, an implausible-usage note, a failure marker) but the chain holds no record of the call itself. Their amounts are usertokens with no denomination assumed, and they are in no spend (dollar) figure. A standalone shortfall or ambiguity is counted in the budget section as undenominated wallet units, because the governor counted it; a standalone ambiguity is also in the unconfirmed totals.";
+
 /** What this report is not, printed with every rendering. */
 export const NOT_CLAIMED: readonly string[] = [
 	"Only calls that went through usertrust are in this report. Agents or calls that were not metered are not counted and not estimated.",
@@ -341,7 +348,7 @@ export function renderMarkdown(m: ReportModel): string {
 		out.push(
 			"### Records without their call",
 			"",
-			"These records qualify a call (a shortfall, an implausible-usage note, a failure marker) but the chain holds no record of the call itself. Their amounts are usertokens with no denomination assumed, and they are in no spend figure. A standalone ambiguity is counted in the unconfirmed totals instead.",
+			WITHOUT_CALL_NOTE,
 			"",
 			"| Kind | Records | Amount (usertokens) |",
 			"|---|---:|---:|",
@@ -493,7 +500,7 @@ export function renderHtml(m: ReportModel): string {
 			: []),
 		...(Object.keys(m.withoutCall).length > 0
 			? [
-					`<h3>Records without their call</h3><p>These records qualify a call (a shortfall, an ambiguity, a failure marker) but the chain holds no record of the call itself. Amounts are usertokens with no denomination assumed, in no spend or budget figure.</p><table><thead><tr><th>Kind</th><th class="n">Records</th><th class="n">Amount (usertokens)</th></tr></thead><tbody>${Object.entries(
+					`<h3>Records without their call</h3><p>${esc(WITHOUT_CALL_NOTE)}</p><table><thead><tr><th>Kind</th><th class="n">Records</th><th class="n">Amount (usertokens)</th></tr></thead><tbody>${Object.entries(
 						m.withoutCall,
 					)
 						.map(

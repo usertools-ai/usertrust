@@ -526,6 +526,11 @@ interface TransferEvidence {
 	shortfall?: PersistedAuditEvent;
 	void: boolean;
 	release: boolean;
+	/**
+	 * Something the evidence set does not name sits beside the spend record: a sibling of an unrecognised kind, or a second
+	 * spend record of one kind. It is not post evidence and not a void: the settled-call arm cannot call it definite.
+	 */
+	foreign: boolean;
 }
 
 function classifyTransfer(ev: TransferEvidence): TransferClass {
@@ -533,7 +538,7 @@ function classifyTransfer(ev: TransferEvidence): TransferClass {
 		ev.shortfall !== undefined ||
 		ev.ambiguity !== undefined ||
 		ev.ledgerPosted ||
-		(ev.spend !== undefined && !ev.spendSettledFalse && !ev.void && !ev.release);
+		(ev.spend !== undefined && !ev.spendSettledFalse && !ev.void && !ev.release && !ev.foreign);
 	if (post) return "debited";
 	if ((ev.void || ev.release) && ev.spend === undefined) return "not-debited";
 	// A void or release marker beside a spend record that is not itself post evidence: the record says it was settled, the
@@ -590,6 +595,18 @@ const BENIGN_SIBLINGS: ReadonlySet<string> = new Set([
 	"usage_implausible",
 	"injection_detected",
 ]);
+
+/**
+ * The kinds recorded beside one transfer's spend record that can contradict it: everything but its own kind, a release
+ * (judged on its own terms) and the benign allowlist. The ONE definition, read by `standing()` and by the budget
+ * classifier alike, so an invented kind unconfirms the spend in the one and leaves the transfer uncertain in the other
+ * instead of passing as definite in the second.
+ */
+function siblingKinds(ks: ReadonlyMap<string, number> | undefined, ownKind: string | undefined) {
+	return [...(ks?.keys() ?? [])].filter(
+		(k) => k !== ownKind && k !== "hold_released" && !BENIGN_SIBLINGS.has(k),
+	);
+}
 
 export type Standing =
 	| { kind: "confirmed"; postProven: boolean }
@@ -678,13 +695,7 @@ function buildPlain(
 		if ((ks?.get(e.kind) ?? 0) > 1) return { kind: "unconfirmed", reason: "contradicted" };
 		// Post evidence OUTRANKS a failure marker, as in `classifyTransfer`: a post-commit failure (failClosed) follows a
 		// charge that already happened and must not turn it back into an uncharged call.
-		const others = [...(ks?.keys() ?? [])].filter(
-			(k) =>
-				k !== e.kind &&
-				k !== "hold_released" &&
-				!BENIGN_SIBLINGS.has(k) &&
-				!(proven && k.endsWith("_failed")),
-		);
+		const others = siblingKinds(ks, e.kind).filter((k) => !(proven && k.endsWith("_failed")));
 		if (others.length > 0) return { kind: "unconfirmed", reason: "contradicted" };
 		if (ks?.has("hold_released")) {
 			// A release beside a proven post, or one whose void is not known to have completed, proves nothing.
@@ -769,6 +780,7 @@ function buildPlain(
 			ledgerPosted: false,
 			void: false,
 			release: false,
+			foreign: false,
 		};
 		evidence.set(key, ev);
 		if (isSpend) {
@@ -783,6 +795,14 @@ function buildPlain(
 			if (e.data["ledgerPosted"] === true) ev.ledgerPosted = true;
 		} else if (e.kind === "hold_released") ev.release = true;
 		else if (e.kind.endsWith("_failed")) ev.void = true;
+	}
+	for (const [key, ev] of evidence) {
+		if (key.startsWith("\u0000")) continue;
+		const ks = kindsByTransfer.get(key);
+		const own = ev.spend?.kind;
+		ev.foreign =
+			siblingKinds(ks, own).some((k) => k !== "settlement_ambiguous" && !k.endsWith("_failed")) ||
+			(own !== undefined && (ks?.get(own) ?? 0) > 1);
 	}
 	// SHA-256 of every spend transfer's id, computed once and only when an unrecoverable record asks (the record stores
 	// the hash of the id, never the id).
