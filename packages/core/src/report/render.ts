@@ -46,6 +46,9 @@ const clean = (s: string): string => scrubForTerminal(s);
 export const MD_ALLOWED = /^[A-Za-z0-9 .,:;_@/+=-]*$/;
 const MD_DISALLOWED = /[^A-Za-z0-9 .,:;_@/+=-]/gu;
 
+const PROOF_NOTE =
+	"Confirmed means no record contradicts the call; ledger-proven means a record written after the ledger post proves it. The SDK path records the call before the ledger post, so its spend is confirmed but not proven.";
+
 export function md(s: string): string {
 	const text = s.replace(MD_DISALLOWED, "?");
 	return `\`${text === "" ? " " : text}\``;
@@ -143,7 +146,8 @@ export function renderMarkdown(m: ReportModel): string {
 		"## Headline",
 		"",
 		`- **Confirmed spend:** ${usd(t.confirmedUt)} (${utStr(t.confirmedUt)}) across ${t.confirmedCalls} call(s)`,
-		`- **Unconfirmed:** ${usd(t.unconfirmedUt)} across ${t.unconfirmedCalls} call(s) with an ambiguous or unsettled settlement (not counted as spent)`,
+		`- **Of which ledger-proven:** ${usd(t.postProvenUt)} across ${t.postProvenCalls} call(s). ${PROOF_NOTE}`,
+		`- **Unconfirmed:** ${usd(t.unconfirmedUt)} across ${t.unconfirmedCalls} call(s) whose charge is not proven (not counted as spent)`,
 	);
 	if (t.estimatedCalls > 0) {
 		out.push(
@@ -265,7 +269,8 @@ export function renderHtml(m: ReportModel): string {
 	}
 	body.push(
 		`<header><p class="muted">usertrust</p><h1>Weekly spend report</h1><p class="muted">${esc(m.window.startIso)} to ${esc(m.window.endIso)} (${m.window.days} days, end exclusive)</p><p class="${unverified ? "bad" : "ok"}"><strong>${esc(verdictLine(m, (x) => x))}</strong></p></header>`,
-		`<section class="headline"><div><span class="big">${usd(t.confirmedUt)}</span><span class="muted">confirmed spend, ${t.confirmedCalls} call(s)</span></div><div><span class="big">${usd(t.unconfirmedUt)}</span><span class="muted">unconfirmed (ambiguous or unsettled), ${t.unconfirmedCalls} call(s)</span></div>${
+		`<p class="muted">${esc(PROOF_NOTE)}</p>`,
+		`<section class="headline"><div><span class="big">${usd(t.confirmedUt)}</span><span class="muted">confirmed spend, ${t.confirmedCalls} call(s); of which ledger-proven ${usd(t.postProvenUt)}, ${t.postProvenCalls} call(s)</span></div><div><span class="big">${usd(t.unconfirmedUt)}</span><span class="muted">unconfirmed (failed, ambiguous, unsettled or uncorrelated), ${t.unconfirmedCalls} call(s)</span></div>${
 			t.estimatedCalls > 0
 				? `<div><span class="big">${usd(t.estimatedUt)}</span><span class="muted">of confirmed spend priced from an estimate</span></div>`
 				: ""

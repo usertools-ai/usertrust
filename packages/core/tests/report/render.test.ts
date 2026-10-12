@@ -182,3 +182,29 @@ describe("md() is an allowlist, not an escaper", () => {
 		expect(md("claude-sonnet-5-5")).toBe("`claude-sonnet-5-5`");
 	});
 });
+
+describe("both evidence tiers are headlined", () => {
+	it("md and html show confirmed spend and the ledger-proven part, with the plain sentence", () => {
+		const ev = (data: Record<string, unknown>): PersistedAuditEvent =>
+			({
+				id: "i",
+				kind: "llm_call",
+				timestamp: "2026-10-11T00:00:00Z",
+				actor: "local",
+				hash: "h",
+				data: { model: "m", cost: 100, settled: true, ...data },
+			}) as unknown as PersistedAuditEvent;
+		const m = buildWeeklyReport(
+			[ev({ transferId: "a" }), ev({ transferId: "b", source: "headless" })],
+			{ verified: true, errors: [], chainLength: 2, firstEvent: "a", lastEvent: "b" },
+			{ endMs: END },
+		);
+		for (const f of ["md", "html"] as const) {
+			const out = render(m, f);
+			expect(out, f).toMatch(/ledger-proven/);
+			expect(out, f).toMatch(/not proven|no record contradicts/);
+		}
+		expect(m.totals.confirmedCalls).toBe(2);
+		expect(m.totals.postProvenCalls).toBe(1);
+	});
+});
