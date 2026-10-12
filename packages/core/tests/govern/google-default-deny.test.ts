@@ -812,6 +812,14 @@ describe("allowUngoverned on a Google client", () => {
 			"it hands out or drives further billable calls that its one ungoverned_call record would not cover.",
 		],
 		[
+			"live.connect",
+			"it hands out or drives further billable calls that its one ungoverned_call record would not cover.",
+		],
+		[
+			"live.music.connect",
+			"it hands out or drives further billable calls that its one ungoverned_call record would not cover.",
+		],
+		[
 			"models.processAfcStream",
 			"it hands out or drives further billable calls that its one ungoverned_call record would not cover.",
 		],

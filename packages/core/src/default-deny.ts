@@ -625,7 +625,8 @@ export function transportChangedError(
  *   - a path through a raw client (`_client`, or a client-level HTTP member; on a Google client
  *     also `apiClient`, `_nextGenClient`, `getNextGenClient`, `_interactions`, `_webhooks` and
  *     the Live transports `auth` / `webSocketFactory`);
- *   - on a Google client, `chats.create` and `processAfcStream`, whose one call hands out or drives
+ *   - on a Google client, `chats.create`, `live.connect`, `live.music.connect` and
+ *     `processAfcStream`, whose one call hands out or drives
  *     further billable calls (`handsOutUnauditedCalls`), and a governed method's name at any other
  *     path (`chats.modelsModule.generateContent`: `isAliasOfGovernedGoogleMethod`);
  *   - a method on the FREE list or a GOVERNED one: the free branch or the governed trap runs
@@ -727,17 +728,11 @@ function reachesGoogleRawClient(segments: readonly string[]): boolean {
 	);
 }
 
-/**
- * Google methods whose ONE listed call would hand out, or drive, billable calls that the single
- * `ungoverned_call` record does not cover, so they cannot be listed in `allowUngoverned`:
- *   - `chats.create` (at any path ending so): it sends nothing, but the `Chat` it returns is built
- *     on the SDK's raw `Models`, so every later `sendMessage` / `sendMessageStream` is an
- *     unaudited generation;
- *   - `processAfcStream` (on any namespace, `chats.modelsModule` included): one call drives a
- *     repeated `streamGenerateContent` loop.
- * `authTokens.create` stays listable: a minted key used outside governance is out of scope, as
- * reading `apiKey` is.
- */
+/** The last segments of the governed Google paths: `generateContent`, `generateContentStream`. */
+const GOOGLE_GOVERNED_METHOD_NAMES: ReadonlySet<string> = new Set(
+	[...GOVERNED_PATHS.google].map((path) => path.slice(path.lastIndexOf(".") + 1)),
+);
+
 /**
  * A governed Google method's NAME (`generateContent`, `generateContentStream`) reached at any path
  * other than its governed `models.*` one, such as `chats.modelsModule.generateContent` (the SDK's
@@ -746,19 +741,33 @@ function reachesGoogleRawClient(segments: readonly string[]): boolean {
  * stream through `processAfcStream`). The `*Internal` methods each send one request and stay
  * listable.
  */
-const GOOGLE_GOVERNED_METHOD_NAMES: ReadonlySet<string> = new Set(
-	[...GOVERNED_PATHS.google].map((path) => path.slice(path.lastIndexOf(".") + 1)),
-);
-
 function isAliasOfGovernedGoogleMethod(segments: readonly string[]): boolean {
 	const last = segments[segments.length - 1] ?? "";
 	return GOOGLE_GOVERNED_METHOD_NAMES.has(last) && !GOVERNED_PATHS.google.has(segments.join("."));
 }
 
+/**
+ * Google methods whose ONE listed call would hand out, or drive, billable calls that the single
+ * `ungoverned_call` record does not cover, so they cannot be listed in `allowUngoverned`:
+ *   - `chats.create` (at any path ending so): it sends nothing, but the `Chat` it returns is built
+ *     on the SDK's raw `Models`, so every later `sendMessage` / `sendMessageStream` is an
+ *     unaudited generation;
+ *   - `live.connect` and `live.music.connect` (at any path ending so): the `Session` /
+ *     `LiveMusicSession` they return sends billable frames over the open socket
+ *     (`sendClientContent`, `sendRealtimeInput`, `sendToolResponse`; `setWeightedPrompts`, `play`
+ *     and the other music controls);
+ *   - `processAfcStream` (on any namespace, `chats.modelsModule` included): one call drives a
+ *     repeated `streamGenerateContent` loop.
+ * `authTokens.create` stays listable: a minted key used outside governance is out of scope, as
+ * reading `apiKey` is.
+ */
 function handsOutUnauditedCalls(segments: readonly string[]): boolean {
 	const last = segments[segments.length - 1];
+	const parent = segments[segments.length - 2];
 	return (
-		last === "processAfcStream" || (last === "create" && segments[segments.length - 2] === "chats")
+		last === "processAfcStream" ||
+		(last === "create" && parent === "chats") ||
+		(last === "connect" && (parent === "live" || parent === "music"))
 	);
 }
 
