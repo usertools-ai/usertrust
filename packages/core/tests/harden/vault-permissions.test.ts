@@ -63,14 +63,33 @@ const mkdirHook = vi.hoisted(() => ({
 	before: undefined as ((path: string, opts: unknown) => void) | undefined,
 }));
 
+/** While a test sets `fail`, `realpathSync.native` throws what it returns: realpath(3) unusable. */
+const nativeHook = vi.hoisted(() => ({
+	fail: undefined as ((path: string) => NodeJS.ErrnoException | undefined) | undefined,
+}));
+
 vi.mock("node:fs", async (importOriginal) => {
 	const real = await importOriginal<typeof import("node:fs")>();
 	const mkdirSync = ((path: import("node:fs").PathLike, opts?: unknown) => {
 		mkdirHook.before?.(String(path), opts);
 		return real.mkdirSync(path, opts as Parameters<typeof real.mkdirSync>[1]);
 	}) as typeof real.mkdirSync;
+	const native = ((path: import("node:fs").PathLike, opts?: unknown) => {
+		const err = nativeHook.fail?.(String(path));
+		if (err !== undefined) throw err;
+		return real.realpathSync.native(path, opts as Parameters<typeof real.realpathSync.native>[1]);
+	}) as typeof real.realpathSync.native;
+	const realpathSync = Object.assign(
+		(...args: Parameters<typeof real.realpathSync>) => real.realpathSync(...args),
+		{ native },
+	) as typeof real.realpathSync;
 	// The default export too, for a module that imports `fs` whole.
-	return { ...real, mkdirSync, default: { ...real, mkdirSync } };
+	return {
+		...real,
+		mkdirSync,
+		realpathSync,
+		default: { ...real, mkdirSync, realpathSync },
+	};
 });
 
 /**
@@ -138,6 +157,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	mkdirHook.before = undefined;
+	nativeHook.fail = undefined;
 	process.chdir(savedCwd);
 	process.umask(savedUmask);
 	for (const d of tracked.splice(0)) {
@@ -948,6 +968,105 @@ describe.skipIf(onWindows)("init (control)", () => {
  * that would run on Windows itself. There usertrust sets and checks no mode or owner: a governor
  * creates the vault and uses an existing one as it is, and the CLI never warns.
  */
+/** Runs `fn`; every `usertrust: vault base` line it wrote to stderr. */
+async function vaultBaseLines(fn: () => Promise<void>): Promise<string[]> {
+	const lines: string[] = [];
+	const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+		for (const line of String(chunk).split("\n")) {
+			if (line.startsWith("usertrust: vault base ")) lines.push(line);
+		}
+		return true;
+	});
+	try {
+		await fn();
+	} finally {
+		spy.mockRestore();
+	}
+	return lines;
+}
+
+describe.skipIf(onWindows).each(openers)(
+	"a vault base with `..` after a symbolic link, opened by %s",
+	(_name, open) => {
+		/** In the working directory: `x/y`, and `link -> x/y`. `link/..` is `x` to the kernel. */
+		function linkedCwd(): { real: string } {
+			process.umask(0o022);
+			mkdirSync(join(cwd, "x", "y"), { recursive: true });
+			symlinkSync(join(cwd, "x", "y"), join(cwd, "link"));
+			return { real: realpathSync.native(join(cwd, "x")) };
+		}
+
+		it("a relative `link/../vault` lands where the kernel resolves it, and says so once", async () => {
+			const { real } = linkedCwd();
+			const lines = await vaultBaseLines(() => open("link/../vault"));
+			expect
+				.soft(lines)
+				.toEqual([`usertrust: vault base "link/../vault" resolves to "${real}/vault"`]);
+			expect(existsSync(join(real, "vault", VAULT_DIR, "spend-ledger.json"))).toBe(true);
+			expect(statSync(join(real, "vault", VAULT_DIR)).mode & 0o777).toBe(0o700);
+			// Nothing at the lexical spelling, `<cwd>/vault`.
+			expect(existsSync(join(cwd, "vault"))).toBe(false);
+		});
+
+		it("an absolute `<cwd>/link/../vault` lands where the kernel resolves it", async () => {
+			const { real } = linkedCwd();
+			const base = `${cwd}/link/../vault`;
+			const lines = await vaultBaseLines(() => open(base));
+			expect.soft(lines).toEqual([`usertrust: vault base "${base}" resolves to "${real}/vault"`]);
+			expect(existsSync(join(real, "vault", VAULT_DIR, "spend-ledger.json"))).toBe(true);
+			expect(existsSync(join(cwd, "vault"))).toBe(false);
+		});
+
+		it("a tail that does not exist yet is created owner-only at the kernel's location", async () => {
+			const { real } = linkedCwd();
+			await open(`${cwd}/link/../new/tenant`);
+			expect(existsSync(join(real, "new", "tenant", VAULT_DIR, "spend-ledger.json"))).toBe(true);
+			expect(statSync(join(real, "new")).mode & 0o777).toBe(0o700);
+			expect(statSync(join(real, "new", "tenant")).mode & 0o777).toBe(0o700);
+			expect(existsSync(join(cwd, "new"))).toBe(false);
+		});
+
+		it("refuses a `..` in the part that does not exist yet, and creates nothing", async () => {
+			process.umask(0o022);
+			const base = `${cwd}/missing/../t`;
+			const refused = await open(base).then(
+				() => undefined,
+				(err: unknown) => err as Error,
+			);
+			expect(refused?.message).toBe(
+				`usertrust: the vault base ${base} has ".." after ${cwd}/missing, which does not exist yet; create it first, or give the base without ".."`,
+			);
+			expect(readdirSync(cwd)).toEqual([]);
+		});
+
+		it("where realpath(3) cannot work, refuses a `..` base by name and still opens a plain one", async () => {
+			linkedCwd();
+			nativeHook.fail = () => Object.assign(new Error("ENOENT: realpath"), { code: "ENOENT" });
+			const refused = await open("link/../vault").then(
+				() => undefined,
+				(err: unknown) => err as Error,
+			);
+			expect(refused?.message).toBe(
+				`usertrust: the vault base link/../vault contains "..", and this system cannot resolve paths the way the kernel does (realpath(3) failed: ENOENT); give the base without ".." segments`,
+			);
+			expect(existsSync(join(cwd, "vault"))).toBe(false);
+			expect(existsSync(join(cwd, "x", "vault"))).toBe(false);
+			// A base with no `..` needs no resolution.
+			const lines = await vaultBaseLines(() => open("plain"));
+			expect(lines).toEqual([]);
+			expect(existsSync(join(cwd, "plain", VAULT_DIR, "spend-ledger.json"))).toBe(true);
+		});
+
+		it("a base with no `..` keeps its spelling and is not announced (control)", async () => {
+			process.umask(0o022);
+			const root = tmp("ut-perm-plain-base-");
+			const lines = await vaultBaseLines(() => open(root));
+			expect(lines).toEqual([]);
+			expect(existsSync(join(root, VAULT_DIR, "spend-ledger.json"))).toBe(true);
+		});
+	},
+);
+
 describe.runIf(onWindows).each(openers)("on native Windows, opened by %s", (_name, open) => {
 	it("creates a fresh vault, uses an existing one unchanged, and never warns", async () => {
 		const fresh = join(tmp("ut-perm-native-win-"), "tenant");

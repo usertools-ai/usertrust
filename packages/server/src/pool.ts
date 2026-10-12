@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { join } from "node:path";
+import { sep } from "node:path";
 import type { Governor, TrustOpts } from "usertrust";
 import { createGovernor } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
 
 export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
 
-/** The directory a tenant's governor keeps its vault under. */
+/**
+ * The directory a tenant's governor keeps its vault under. Concatenated, never `join`ed: `join`
+ * folds a `..` in `stateDir` lexically before the governor sees it, and the governor resolves
+ * the base where the kernel does. The tenant id cannot hold `..` (config.ts).
+ */
 export function tenantVaultBase(config: ServerConfig, tenant: TenantConfig): string {
-	return join(config.stateDir, tenant.id);
+	return `${config.stateDir}${sep}${tenant.id}`;
 }
 
 /**
