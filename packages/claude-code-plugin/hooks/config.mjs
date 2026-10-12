@@ -421,6 +421,26 @@ export function isChildEnv(env = process.env) {
 }
 
 /**
+ * The managed-settings file the docs name for the platform
+ * (https://code.claude.com/docs/en/managed-settings), or null where none is read (Windows).
+ */
+export function managedSettingsFile(platform = process.platform) {
+	if (platform === "darwin") return "/Library/Application Support/ClaudeCode/managed-settings.json";
+	if (platform === "linux") return "/etc/claude-code/managed-settings.json";
+	return null;
+}
+
+/**
+ * Where Claude Code keeps its settings files, for the parent process only (peer-meter.mjs
+ * reads `enabledPlugins` there): its own CLAUDE_CONFIG_DIR and CLAUDE_PROJECT_DIR. Not in
+ * `HOST_VARIABLES`, so a configured session's child is never given them.
+ */
+export function claudeDirsEnv() {
+	const { CLAUDE_CONFIG_DIR: configDir, CLAUDE_PROJECT_DIR: projectDir } = process.env;
+	return { CLAUDE_CONFIG_DIR: configDir, CLAUDE_PROJECT_DIR: projectDir };
+}
+
+/**
  * The variables Claude Code itself defines that a hook may read (`HOST_VARIABLES`),
  * and only those.
  */

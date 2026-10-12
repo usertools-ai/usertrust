@@ -451,9 +451,9 @@ describe("the reconciliation warning renders with NO configured budget, in md an
 	});
 });
 
-describe("calls run ungoverned are disclosed in every format, by method", () => {
+describe("ungoverned call attempts are disclosed in every format, by method", () => {
 	const ok = { verified: true, errors: [], chainLength: 1, firstEvent: "a", lastEvent: "a" };
-	const LINE = "Calls run ungoverned (opted out with allowUngoverned, unmetered):";
+	const LINE = "Ungoverned call attempts (opted out with allowUngoverned, unmetered):";
 	const ungoverned = (method: unknown): PersistedAuditEvent =>
 		({
 			id: "u",
@@ -477,7 +477,7 @@ describe("calls run ungoverned are disclosed in every format, by method", () => 
 		for (const f of ["md", "html"] as const) expect(render(m, f), f).not.toContain(LINE);
 	});
 
-	it("4 calls over two methods: the count and the breakdown in md, html and json", () => {
+	it("4 attempts over two methods: the count and the breakdown in md, html and json", () => {
 		const m = buildWeeklyReport(
 			[
 				paid,
@@ -506,6 +506,45 @@ describe("calls run ungoverned are disclosed in every format, by method", () => 
 		});
 		// never spend: the one paid call is the whole confirmed figure
 		expect(m.totals.confirmedUt).toBe(100);
+	});
+
+	it("3 attempts: markdown and html say call attempts, json keeps ungoverned.calls, and the disclaimer names attempts", () => {
+		const m = buildWeeklyReport(
+			[
+				ungoverned("embeddings.create"),
+				ungoverned("embeddings.create"),
+				ungoverned("images.generate"),
+			],
+			ok,
+			{ endMs: END },
+		);
+		const mdOut = render(m, "md");
+		expect(mdOut).toContain("### Ungoverned call attempts");
+		expect(mdOut).toContain(
+			"Ungoverned call attempts (opted out with allowUngoverned, unmetered): 3",
+		);
+		expect(mdOut).not.toContain("Calls run ungoverned");
+		expect(mdOut).toContain("| Method | Attempts |");
+		expect(mdOut).toContain(
+			"before the provider is reached when audit.failClosed is set, best-effort otherwise",
+		);
+		expect(mdOut).toContain("a call whose record could not be written is not counted");
+		const html = render(m, "html");
+		expect(html).toContain('<th>Method</th><th class="n">Attempts</th>');
+		expect(html).toContain("<h3>Ungoverned call attempts</h3>");
+		expect(html).toContain(
+			"Ungoverned call attempts (opted out with allowUngoverned, unmetered): 3",
+		);
+		expect(html).not.toContain("Calls run ungoverned");
+		const json = JSON.parse(render(m, "json")) as {
+			ungoverned: { calls: number; byMethod: Record<string, number> };
+		};
+		expect(json.ungoverned).toEqual({
+			calls: 3,
+			byMethod: { "embeddings.create": 2, "images.generate": 1 },
+		});
+		expect(mdOut).toContain("call attempts made unmetered through allowUngoverned");
+		expect(html).toContain("call attempts made unmetered through allowUngoverned");
 	});
 
 	it("a method label carrying markdown or html control text is neutralised in md and html, exact in json", () => {

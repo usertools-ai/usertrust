@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`allowUngoverned` refuses an entry that names a free or governed method, when the client is created.** Listing `models.list` or `messages.countTokens` (free), or `messages.create` or `chat.completions.create` (governed), was accepted, but the free branch or the governed trap ran first, so those calls carried no `ungoverned_call` event, though the option promises one for every listed method. `trust()` now throws a `TypeError` naming the entry and whether it is free or governed on that client. No billable work escaped; the audit promise was what broke.
 
+### Fixed
+
+- **The weekly report's ungoverned section says call attempts.** An `ungoverned_call` record is written as the call is made, so it proves an attempt, not a call that reached the provider. The section is headed "Ungoverned call attempts", its line and method table count attempts, and its note says the record is written before the provider is reached when `audit.failClosed` is set and best-effort otherwise, so an attempt may have failed or never reached the provider, and a call whose record could not be written is not counted. The report's disclaimer says the same. The JSON field `ungoverned: { calls, byMethod }` is unchanged.
+
 ## [5.0.0] - 2026-10-12
 
 ### Read before upgrading
