@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The weekly report's ungoverned section says call attempts.** An `ungoverned_call` record is written as the call is made, so it proves an attempt, not a call that reached the provider. The section is headed "Ungoverned call attempts", its line and method table count attempts, and its note says the record is written before the provider is reached when `audit.failClosed` is set and best-effort otherwise, so an attempt may have failed or never reached the provider, and a call whose record could not be written is not counted. The report's disclaimer says the same. The JSON field `ungoverned: { calls, byMethod }` is unchanged.
+
 - **`trust(client, { pii: "block" })` blocks PII.** `TrustOpts` had no `pii` field, so a JavaScript caller's `{ pii: "block" }` was dropped with no error, and a request carrying PII went to the provider under the config file's mode, `warn` by default. `pii` now overrides the config file in `trust()` and `createGovernor()`, as `budget` does, and an invalid value is refused by name. The `PolicyDeniedError` default hint, which pointed at that option, now also names the config file setting.
 
 ## [5.0.0] - 2026-10-12
