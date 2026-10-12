@@ -36,7 +36,7 @@ const KNOWN_JSONL: Record<string, string[]> = {
 		"export/markdown.ts",
 	],
 	"dead-letter.jsonl": ["ledger/engine.ts"],
-	"dead-letters.jsonl": ["audit/chain.ts"],
+	"dead-letters.jsonl": ["audit/chain.ts", "audit/dead-letters.ts"],
 	"events.jsonl": [
 		"audit/anchor-verify.ts",
 		"audit/chain.ts",

@@ -712,6 +712,63 @@ describe.skipIf(onWindows).each(openers)(
 	},
 );
 
+describe.skipIf(onWindows).each(openers)(
+	"a real vault directory and this process's permissions on it, opened by %s",
+	(_name, open) => {
+		/** `<root>/.usertrust`, a real directory made 0700 and then given `mode`. */
+		function realVault(mode: number): { root: string; vaultPath: string } {
+			process.umask(0o022);
+			const root = tmp("ut-perm-real-access-");
+			const vaultPath = join(root, VAULT_DIR);
+			mkdirSync(vaultPath, { mode: 0o700 });
+			chmodSync(vaultPath, mode);
+			return { root, vaultPath };
+		}
+
+		it.skipIf(isRoot)(
+			"refuses by name an owner-only vault it cannot write to (0100), changing nothing (skipped as root)",
+			async () => {
+				const { root, vaultPath } = realVault(0o100);
+				let refused: Error | undefined;
+				try {
+					refused = await open(root).then(
+						() => undefined,
+						(err: unknown) => err as Error,
+					);
+					expect(statSync(vaultPath).mode & 0o777).toBe(0o100);
+				} finally {
+					chmodSync(vaultPath, 0o700);
+				}
+				expect(refused?.message).toBe(
+					`usertrust: the vault ${vaultPath} is owned by this user but this process cannot write to it (mode 100); make it usable with: chmod 700 ${vaultPath}`,
+				);
+				expect(readdirSync(vaultPath)).toEqual([]);
+			},
+		);
+
+		it("uses an owner-only vault it can write to but not read (0300), and leaves its mode", async () => {
+			const { root, vaultPath } = realVault(0o300);
+			let refused: Error | undefined;
+			try {
+				refused = await open(root).then(
+					() => undefined,
+					(err: unknown) => err as Error,
+				);
+				// Owner-only already: never chmod'ed.
+				expect(statSync(vaultPath).mode & 0o777).toBe(0o300);
+			} finally {
+				chmodSync(vaultPath, 0o700);
+			}
+			expect(refused).toBeUndefined();
+			expect(existsSync(join(vaultPath, "audit", "events.jsonl"))).toBe(true);
+			expect(existsSync(join(vaultPath, "spend-ledger.json"))).toBe(true);
+			// No write failed into the dead-letter queue, and everything written is owner-only.
+			expect(existsSync(join(vaultPath, "dlq"))).toBe(false);
+			expect(walkModes(vaultPath).loose).toEqual([]);
+		});
+	},
+);
+
 /**
  * The same, under Node's real permission model: a child process may write to the vault alone.
  * Runs where this Node strips TypeScript types by default (22.18+), so the child can import the

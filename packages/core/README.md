@@ -93,6 +93,8 @@ const client = await trust(new Anthropic(), {
 
 On a Google client only `models.generateContent` is governed. `models.generateContentStream` passes through to the SDK untouched: it is not metered, it gets no receipt, and no policy applies to it. Use `generateContent` for calls you need governed.
 
+Clients in one process share their vault's audit writer. Separate processes cannot write to one vault: give each process its own vault (`vaultBase`), or send their calls through one `usertrust-server`.
+
 Every call returns `{ response, receipt }`:
 
 ```typescript
@@ -132,7 +134,7 @@ All commands support `--json` for machine-readable output.
 usertrust init          # Create .usertrust/ vault
 usertrust inspect       # Vault bank statement
 usertrust health        # Entropy diagnostics (6 signals, 0-100 score)
-usertrust verify        # Verify audit chain integrity (+ external anchors)
+usertrust verify        # Verify audit chain integrity and completeness (+ external anchors, --receipts)
 usertrust anchor        # External anchoring: init|now|status|doctor|export|export-bundle|rotate|resume
 usertrust snapshot      # Checkpoint/restore vault state
 usertrust audit quarantine-tail [--dry-run]  # Move a TORN final log line aside, recorded on the chain
