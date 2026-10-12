@@ -49,6 +49,33 @@ export interface ChainDeadLetters {
 	otherSources: number;
 }
 
+/** The dead-letter file under a vault directory (the `.usertrust` directory): the ONE place its path is spelled. */
+export function deadLetterPath(vaultDir: string): string {
+	return join(vaultDir, "dlq", "dead-letters.jsonl");
+}
+
+/** One line of the file: a record whose checksum holds, or one that cannot be read as a dead letter. */
+export type DeadLetterLine =
+	| { unreadable: true }
+	| { unreadable?: false; entry: Record<string, unknown> };
+
+/**
+ * Parse one non-blank line of the dead-letter file. EVERY reader of the file goes through this: a line that does not
+ * parse, is not an object, or fails the writer's checksum is `unreadable`, and no reader may look inside it. The
+ * checksum is recomputed exactly as the writer computes it, including its `JSON.stringify` fallback for a `NaN` payload.
+ */
+export function parseDeadLetterLine(line: string): DeadLetterLine {
+	let entry: unknown;
+	try {
+		entry = JSON.parse(line);
+	} catch {
+		return { unreadable: true };
+	}
+	if (entry === null || typeof entry !== "object") return { unreadable: true };
+	if (!checksumHolds(entry as Record<string, unknown>)) return { unreadable: true };
+	return { entry: entry as Record<string, unknown> };
+}
+
 /** What the reader compares of the chain's event at a dead letter's `eventHash`. */
 export interface ChainEventView {
 	kind?: unknown;
@@ -72,7 +99,7 @@ export function readChainDeadLetters(
 	vaultDir: string,
 	eventAt: (hash: string) => ChainEventView | undefined,
 ): ChainDeadLetters | ChainDeadLettersUnreadable {
-	const path = join(vaultDir, "dlq", "dead-letters.jsonl");
+	const path = deadLetterPath(vaultDir);
 	let raw: string;
 	try {
 		raw = readFileSync(path, "utf-8");
@@ -108,22 +135,12 @@ export function readChainDeadLetters(
 	};
 	for (const line of raw.split("\n")) {
 		if (line.trim() === "") continue;
-		let entry: unknown;
-		try {
-			entry = JSON.parse(line);
-		} catch {
+		const parsed = parseDeadLetterLine(line);
+		if (parsed.unreadable === true) {
 			countMissing("<unreadable>", undefined);
 			continue;
 		}
-		if (entry === null || typeof entry !== "object") {
-			countMissing("<unreadable>", undefined);
-			continue;
-		}
-		if (!checksumHolds(entry as Record<string, unknown>)) {
-			countMissing("<unreadable>", undefined);
-			continue;
-		}
-		const e = entry as { source?: unknown; eventHash?: unknown; payload?: unknown };
+		const e = parsed.entry as { source?: unknown; eventHash?: unknown; payload?: unknown };
 		if (e.source !== CHAIN_APPEND_DEAD_LETTER_SOURCE) {
 			if (typeof e.source === "string") {
 				result.otherSources++;

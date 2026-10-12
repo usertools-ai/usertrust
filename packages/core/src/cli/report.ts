@@ -31,6 +31,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import pc from "picocolors";
+import { deadLetterPath } from "../audit/dead-letters.js";
 import { readLedgerEvents } from "../audit/read.js";
 import { verifyVault } from "../audit/verify.js";
 import { parseDeadLetters } from "../report/dead-letters.js";
@@ -435,7 +436,7 @@ export function snapshotVault(
 		}
 		// The writer's dead-letter queue: a capped post whose shortfall append failed is recorded there with the posted
 		// amount. Absent is "no dead letters"; a file that exists and cannot be read is NOT, it leaves only an upper bound.
-		const dlqSrc = join(vaultPath, "dlq", "dead-letters.jsonl");
+		const dlqSrc = deadLetterPath(vaultPath);
 		if (existsSync(dlqSrc)) {
 			try {
 				deadLetters = parseDeadLetters(readFileSync(dlqSrc, "utf-8"));
