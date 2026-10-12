@@ -171,10 +171,11 @@ function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
  * A vault that is a SYMBOLIC LINK is never changed through the link: its target may be a
  * directory usertrust does not own. A target any other user can read is refused, naming the
  * link, the target, its mode and the `chmod` that fixes it; an owner-only target this process's
- * user owns is used. The target judged is the directory the OS opens through the link (see
- * {@link statThroughLink}), never a path resolved in JS. A dangling link, and a vault path that is not a directory (a regular file,
- * say), are refused by name here, rather than left for the first writer to fail on with a bare
- * ENOENT or ENOTDIR.
+ * user owns is used; one this process cannot open is refused by name. The target judged is the
+ * directory the OS opens through the link (see {@link statThroughLink}), never a path resolved
+ * in JS. A dangling link, and a vault path that is not a directory (a regular file, say), are
+ * refused by name here, rather than left for the first writer to fail on with a bare ENOENT or
+ * ENOTDIR.
  *
  * The tightening itself never follows a link either. The directory is opened with
  * `O_NOFOLLOW | O_DIRECTORY` and changed with `fchmod` on that descriptor, after checking it is
@@ -207,6 +208,13 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 				const missing = linkText(vaultDir);
 				throw new Error(
 					`usertrust: the vault ${vaultDir} is a symbolic link to ${missing}, which does not exist; remove the link or create the target owner-only (mkdir -m 700 ${missing})`,
+				);
+			}
+			if (code === "EACCES" || code === "EPERM") {
+				// Named here too: a target this process may not open is not judged, and would leave
+				// every writer with a bare EACCES.
+				throw new Error(
+					`usertrust: the vault ${vaultDir} is a symbolic link to ${linkTarget(vaultDir)}, which this process cannot open (${code}); give this user read and search permission on it, or point the link elsewhere`,
 				);
 			}
 			if (code !== "ENOTDIR") throw err;

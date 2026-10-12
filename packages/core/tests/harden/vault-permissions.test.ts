@@ -656,6 +656,42 @@ describe.skipIf(onWindows).each(openers)(
 	},
 );
 
+/** Root ignores permission bits, so a directory it "cannot open" does not exist for it. */
+const isRoot = process.geteuid?.() === 0;
+
+describe.skipIf(onWindows).each(openers)(
+	"a linked vault whose target this process cannot open, opened by %s",
+	(_name, open) => {
+		it.skipIf(isRoot)(
+			"is refused by name (skipped as root, which ignores the mode bits that refuse the open)",
+			async () => {
+				process.umask(0o022);
+				const target = join(realpathSync(tmp("ut-perm-unopenable-")), "vault");
+				mkdirSync(target, { mode: 0o700 });
+				const root = tmp("ut-perm-unopenable-root-");
+				const link = join(root, VAULT_DIR);
+				symlinkSync(target, link);
+				// Search-only: stat works, an O_RDONLY open of the directory is refused (EACCES).
+				chmodSync(target, 0o100);
+				let refused: Error | undefined;
+				try {
+					refused = await open(root).then(
+						() => undefined,
+						(err: unknown) => err as Error,
+					);
+					expect(statSync(target).mode & 0o777).toBe(0o100);
+				} finally {
+					chmodSync(target, 0o700);
+				}
+				expect(refused?.message).toBe(
+					`usertrust: the vault ${link} is a symbolic link to ${target}, which this process cannot open (EACCES); give this user read and search permission on it, or point the link elsewhere`,
+				);
+				expect(readdirSync(target)).toEqual([]);
+			},
+		);
+	},
+);
+
 /**
  * The same, under Node's real permission model: a child process may write to the vault alone.
  * Runs where this Node strips TypeScript types by default (22.18+), so the child can import the
