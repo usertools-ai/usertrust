@@ -48,28 +48,63 @@ function isCallableTool(tool: unknown): tool is CallableTool {
 }
 
 /**
- * A callable tool whose `tool()` is asked ONCE per call, LAZILY, and answers every later round from that answer.
+ * A callable tool whose `tool()` is asked ONCE per call, LAZILY, and answers every later round from that one answer.
  *
  * The SDK's native loop awaits every `tool.tool()` once, before its first model call, and all of them start together
  * (`Promise.all` over the tools). Each governed round re-enters the public `generateContent`, which would await them again,
  * so a one-shot or stateful callable could fail on round two and a dynamic one could show different declarations between
- * rounds. The snapshot is taken lazily, by the FIRST round's own `generateContent` (inside the governed call, after the
- * round was authorized and a hold was placed): a denied call (policy, PII, budget) never runs user-supplied declaration
- * code, a `tool()` that throws goes through the governed lifecycle (the hold is voided, the failure audited) instead of
- * escaping before it, and the SDK itself starts all the tools' `tool()` calls together, exactly as it does natively.
- * A Proxy keeps everything else about the tool (its prototype, so `instanceof` checks such as the SDK's MCP-usage header
- * still hold; `callTool` and every other method run against the real tool).
+ * rounds. The answer is taken lazily, by the FIRST round's own `generateContent` (inside the governed call, after the round
+ * was authorized and a hold was placed): a denied call (policy, PII, budget) never runs user-supplied declaration code, a
+ * `tool()` that throws goes through the governed lifecycle (hold voided, failure audited), and the SDK itself starts all the
+ * tools' `tool()` calls together, as it does natively.
+ *
+ * REDACTION. In `pii: "redact"` mode the governed call forwards a deep CLONE of the request, and the SDK asks the tool on
+ * that clone, so a `tool()` that reads its own state (`return this.declaration`) answers from the REDACTED copy. The method
+ * here is a regular function that forwards its `this` for that reason: the real tool is the receiver only when the wrapper
+ * itself is. The memo lives in the closure, so the clone and the original share it and every later round reuses the redacted
+ * answer. (A `tool()` that answers from a closure variable is outside what request redaction can reach, natively too.)
+ *
+ * The wrapper is a fresh object, never a Proxy: a frozen tool (`Object.freeze({ tool, callTool })`) cannot be proxied with
+ * replacement functions without breaking the Proxy invariant. It keeps the tool's prototype, so `instanceof` checks such as
+ * the SDK's MCP-usage header still hold, copies its own properties (a clone of the wrapper carries the same state), and
+ * delegates `callTool` to the real tool.
  */
 function snapshotTool(tool: CallableTool): CallableTool {
-	let asked: Promise<unknown> | undefined;
-	return new Proxy(tool, {
-		get(target, prop) {
+	let memo: Promise<unknown> | undefined;
+	const wrapper = Object.create(Object.getPrototypeOf(tool)) as CallableTool;
+	for (const key of Reflect.ownKeys(tool)) {
+		const desc = Object.getOwnPropertyDescriptor(tool, key);
+		if (desc === undefined) continue;
+		const enumerable = desc.enumerable === true;
+		const copy: PropertyDescriptor =
+			"value" in desc
+				? { value: desc.value, writable: true, enumerable, configurable: true }
+				: {
+						...(desc.get ? { get: desc.get } : {}),
+						...(desc.set ? { set: desc.set } : {}),
+						enumerable,
+						configurable: true,
+					};
+		Object.defineProperty(wrapper, key, copy);
+	}
+	const realTool = tool.tool;
+	Object.defineProperty(wrapper, "tool", {
+		value: function (this: unknown): Promise<unknown> {
 			// Called synchronously on first use, like the SDK's own `await callableTool.tool()` inside its map.
-			if (prop === "tool") return () => (asked ??= (async () => target.tool())());
-			const value = Reflect.get(target, prop, target) as unknown;
-			return typeof value === "function" ? value.bind(target) : value;
+			memo ??= (async () => realTool.call(this === wrapper ? tool : this))();
+			return memo;
 		},
+		writable: true,
+		enumerable: true,
+		configurable: true,
 	});
+	Object.defineProperty(wrapper, "callTool", {
+		value: (calls: unknown[]): Promise<unknown[]> => tool.callTool(calls),
+		writable: true,
+		enumerable: true,
+		configurable: true,
+	});
+	return wrapper;
 }
 
 /**

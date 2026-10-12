@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -368,6 +368,81 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 		expect(expectedMsg).toBe("declaration service down");
 		expect(actual).toBe(expectedMsg);
 		expect(m.sent).toHaveLength(0);
+		await governed.destroy();
+	});
+
+	// In pii "redact" mode the governed call forwards a deep CLONE of the request, and the SDK asks the tool on that clone.
+	// (The PII detector matches a string that IS the value, so the email stands alone in each field.)
+	it('pii "redact": a declaration that answers from its own state reaches the model REDACTED, in every round', async () => {
+		const EMAIL = "alice@example.com";
+		const makeTool = () => ({
+			declaration: { functionDeclarations: [{ name: "lookup", description: EMAIL }] },
+			tool(this: { declaration: unknown }) {
+				return Promise.resolve(this.declaration);
+			},
+			callTool: async () => [{ functionResponse: { name: "lookup", response: { ok: true } } }],
+		});
+		const run = async (pii: "redact" | "warn") => {
+			const m = scriptedModel(ROUNDS);
+			const sdk = new GoogleGenAI({ apiKey: "test" });
+			(sdk.models as unknown as Loose)["generateContentInternal"] = m.respond;
+			// Policy knobs such as `pii` are read from the vault's config file, not from trust()'s opts.
+			mkdirSync(join(vault, ".usertrust"), { recursive: true });
+			writeFileSync(
+				join(vault, ".usertrust", "usertrust.config.json"),
+				JSON.stringify({ budget: 500_000, pii }),
+			);
+			const governed = await trust(sdk, { dryRun: true, budget: 500_000, vaultBase: vault });
+			await governed.models.generateContent({
+				model: "gemini-2.5-flash",
+				contents: EMAIL,
+				config: { tools: [makeTool()] } as never,
+			});
+			await governed.destroy();
+			return JSON.stringify([m.sent, m.sentTools]);
+		};
+		const redacted = await run("redact");
+		expect(redacted).not.toContain(EMAIL);
+		expect(redacted).toContain("REDACTED");
+		// CONTROL: without redaction the same value does reach the model, so the row can fail
+		expect(await run("warn")).toContain(EMAIL);
+	});
+
+	it("a FROZEN callable tool is governed like any other (no Proxy invariant to break)", async () => {
+		const makeFrozen = () => {
+			const seen: unknown[] = [];
+			const tool = Object.freeze({
+				tool: async () => ({ functionDeclarations: [{ name: "lookup" }] }),
+				callTool: async (calls: unknown[]) => {
+					seen.push(calls);
+					return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+				},
+			});
+			return { tool, seen };
+		};
+		const a = scriptedModel(ROUNDS);
+		const fa = makeFrozen();
+		const sdk = new GoogleGenAI({ apiKey: "test" });
+		(sdk.models as unknown as Loose)["generateContentInternal"] = a.respond;
+		await sdk.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: "go",
+			config: { tools: [fa.tool] } as never,
+		});
+		const b = scriptedModel(ROUNDS);
+		const fb = makeFrozen();
+		const sdk2 = new GoogleGenAI({ apiKey: "test" });
+		(sdk2.models as unknown as Loose)["generateContentInternal"] = b.respond;
+		const governed = await trust(sdk2, { dryRun: true, budget: 500_000, vaultBase: vault });
+		const out = (await governed.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: "go",
+			config: { tools: [fb.tool] } as never,
+		})) as unknown as { receipts?: unknown[] };
+		expect(b.sent).toEqual(a.sent);
+		expect(b.sentTools).toEqual(a.sentTools);
+		expect(fb.seen).toEqual(fa.seen);
+		expect(out.receipts).toHaveLength(a.sent.length);
 		await governed.destroy();
 	});
 

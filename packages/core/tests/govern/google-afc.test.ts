@@ -27,6 +27,13 @@ vi.mock("tigerbeetle-node", () => ({
  * last round's response. `rounds` scripts the model: round N answers with `rounds[N]`.
  */
 type Loose = Record<string, unknown>;
+/** The slice of a Gemini response the fake SDK loop reads. */
+type Resp = {
+	functionCalls?: unknown[];
+	candidates: Array<{ content: { parts: Array<{ text?: string }> } }>;
+	automaticFunctionCallingHistory?: unknown;
+	[k: string]: unknown;
+};
 type Tool = { callTool?: (calls: unknown[]) => Promise<unknown[]> };
 
 interface Round {
@@ -61,13 +68,13 @@ function sdkLikeClient(rounds: Round[]) {
 			const afcOn =
 				afcCfg["disable"] !== true && tools.some((t) => typeof t.callTool === "function");
 			if (!afcOn) return internal(params);
-			let response: Loose = {};
+			let response: Resp = { candidates: [] };
 			let contents: unknown[] = Array.isArray(params["contents"]) ? [...params["contents"]] : [];
 			const history = [...contents];
 			const max = (afcCfg["maximumRemoteCalls"] as number | undefined) ?? 10;
 			let remote = 0;
 			while (remote < max) {
-				response = await internal({ ...params, contents });
+				response = (await internal({ ...params, contents })) as Resp;
 				if (!response.functionCalls || response.functionCalls.length === 0) break;
 				const parts: unknown[] = [];
 				for (const t of tools) {
@@ -75,7 +82,7 @@ function sdkLikeClient(rounds: Round[]) {
 						parts.push(...(await t.callTool(response.functionCalls)));
 				}
 				remote++;
-				const turn = response.candidates[0].content;
+				const turn = response.candidates[0]?.content;
 				const toolTurn = { role: "user", parts };
 				contents = [...contents, turn, toolTurn];
 				if (afcCfg["ignoreCallHistory"] !== true) history.push(turn, toolTurn);
@@ -142,9 +149,9 @@ describe("Google automatic function calling is metered round by round", () => {
 		const governed = await trust(client, { dryRun: true, budget: 500_000, vaultBase: vault });
 		const out = (await governed.models.generateContent(
 			call({ config: { tools: [tool] } }),
-		)) as unknown as { response: Loose; receipt: { cost: number } };
+		)) as unknown as { response: Resp; receipt: { cost: number } };
 		expect(tool.callTool).toHaveBeenCalledTimes(1);
-		expect(out.response.candidates[0].content.parts[0].text).toBe("round 2");
+		expect(out.response.candidates[0]?.content.parts[0]?.text).toBe("round 2");
 		// original turn, the model's function call turn, the tool's reply
 		expect(out.response.automaticFunctionCallingHistory).toHaveLength(3);
 		expect(out.receipt.cost).toBe(11); // the envelope's own receipt is the LAST round's
