@@ -1493,6 +1493,9 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   and timestamp, the witness error, each anchoring warning, and the argv/caught-error echoes —
   because those, too, are strings the audited vault (or argv) controls, printed at the auditor
   It is an import, not a copy: the count above is unchanged.
+  Beyond C0, DEL and C1 it also replaces the characters that reorder or hide text without a glyph —
+  zero-width U+200B–U+200F and U+FEFF, bidi embeddings/overrides U+202A–U+202E and isolates U+2066–U+2069 —
+  written as numeric ranges (`isInvisibleFormat`), never as literal characters.
 - Independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.

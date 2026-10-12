@@ -207,11 +207,28 @@ function wordWrap(text: string, maxWidth: number): string[] {
  * failure details, receipt IDs — to the same terminal, and needs the same
  * defense. Exporting this beats writing a third copy of it.
  */
+/**
+ * Characters that REORDER or HIDE text without printing a glyph: zero-width space/joiners and the LRM/RLM marks
+ * (U+200B–U+200F), bidi embeddings and overrides (U+202A–U+202E), bidi isolates (U+2066–U+2069), and the zero-width
+ * no-break space (U+FEFF). A vault string carrying one could reorder the verdict line or hide part of it in an
+ * auditor's terminal. Written as numbers on purpose: a literal one in this file would be invisible to review.
+ */
+function isInvisibleFormat(code: number): boolean {
+	return (
+		(code >= 0x200b && code <= 0x200f) ||
+		(code >= 0x202a && code <= 0x202e) ||
+		(code >= 0x2066 && code <= 0x2069) ||
+		code === 0xfeff
+	);
+}
+
 export function forDisplay(raw: string): string {
 	let out = "";
 	for (const ch of raw) {
 		const code = ch.codePointAt(0) as number;
-		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : ch;
+		// The control test stays in its own conditional: that exact shape is what the sanitizer inventory counts.
+		out +=
+			code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : isInvisibleFormat(code) ? "?" : ch;
 	}
 	return out;
 }
