@@ -119,12 +119,100 @@ function trackedFiles(): string[] {
  */
 export function nonKitFontUrls(text: string): string[] {
 	const offenders: string[] = [];
+	const add = (url: string) => {
+		if (!offenders.includes(url)) offenders.push(url);
+	};
 	for (const m of text.matchAll(/['"(`]([^'"()`\s]+)['")`]/g)) {
 		const url = m[1] ?? "";
 		const path = url.replace(/[?#].*$/, "");
-		if (FONT_FILE.test(path) && !path.startsWith(KIT_FONTS)) offenders.push(url);
+		if (FONT_FILE.test(path) && !path.startsWith(KIT_FONTS)) add(url);
+	}
+	// A font source by its CONTEXT, whatever its name: it must be the kit's.
+	for (const url of fontSources(text)) {
+		if (!url.replace(/[?#].*$/, "").startsWith(KIT_FONTS)) add(url);
 	}
 	return offenders;
+}
+
+/** The URL inside a CSS `url(...)`, quoted or not. */
+const CSS_URL = /url\(\s*(["']?)([^"')]*?)\1\s*\)/gi;
+
+/**
+ * Every URL `text` uses AS A FONT, known by where it stands rather than by its name (an
+ * endpoint such as `https://cdn.example/font?id=123` has no font extension):
+ * - every `url()` inside an `@font-face` block;
+ * - every `url()` followed by a `format()` hint, wherever it is;
+ * - the `href` of a `<link>` with `as="font"`;
+ * - the first argument of a `preload(…, { as: "font" })` call. A literal is taken as it is; an
+ *   identifier is followed to the string (`const x = "…"`) or the array of strings
+ *   (`for (const x of LIST)`, `const LIST = [ "…", … ]`) it names in the same text, and one
+ *   that cannot be followed is reported as `<unresolved: x>`: a font source that cannot be
+ *   checked is never passed.
+ */
+export function fontSources(text: string): string[] {
+	const found: string[] = [];
+	for (const block of text.matchAll(/@font-face\s*\{([^}]*)\}/gi)) {
+		for (const m of (block[1] ?? "").matchAll(CSS_URL)) found.push(m[2] ?? "");
+	}
+	for (const m of text.matchAll(/url\(\s*(["']?)([^"')]*?)\1\s*\)\s*format\(/gi))
+		found.push(m[2] ?? "");
+	for (const tag of text.matchAll(/<link\b[^>]*>/gi)) {
+		const attrs = tag[0];
+		if (!/\bas\s*=\s*\{?\s*["'`]font["'`]/i.test(attrs)) continue;
+		const href = /\bhref\s*=\s*\{?\s*["'`]([^"'`]+)["'`]/i.exec(attrs);
+		found.push(href?.[1] ?? "<unresolved: href>");
+	}
+	for (const call of preloadCalls(text)) {
+		if (/\bas\s*:\s*["'`]font["'`]/.test(call.rest))
+			found.push(...resolveStrings(text, call.first));
+	}
+	return found;
+}
+
+/**
+ * Every `preload(` call: its first argument, and the rest of its arguments, split at the first
+ * comma outside brackets, to the call's own closing paren. A scan, not a pattern, so an
+ * argument that is itself a call (`preload(pick(), …)`) is read whole.
+ */
+function preloadCalls(text: string): Array<{ first: string; rest: string }> {
+	const calls: Array<{ first: string; rest: string }> = [];
+	for (const m of text.matchAll(/\bpreload\(/g)) {
+		const from = (m.index ?? 0) + m[0].length;
+		let depth = 0;
+		let comma = -1;
+		let at = from;
+		for (; at < text.length; at += 1) {
+			const c = text[at];
+			if (c === "(" || c === "[" || c === "{") depth += 1;
+			else if (c === ")" || c === "]" || c === "}") {
+				if (depth === 0) break;
+				depth -= 1;
+			} else if (c === "," && depth === 0 && comma === -1) comma = at;
+		}
+		if (comma === -1) continue;
+		calls.push({ first: text.slice(from, comma).trim(), rest: text.slice(comma + 1, at) });
+	}
+	return calls;
+}
+
+/** The strings an argument names: a literal, or an identifier followed one step (see above). */
+function resolveStrings(text: string, arg: string): string[] {
+	const literal = /^["'`]([^"'`]*)["'`]$/.exec(arg);
+	if (literal) return [literal[1] ?? ""];
+	if (!/^[A-Za-z_$][\w$]*$/.test(arg)) return [`<unresolved: ${arg}>`];
+	const value = new RegExp(`\\bconst\\s+${arg}\\s*=\\s*["'\`]([^"'\`]*)["'\`]`).exec(text);
+	if (value) return [value[1] ?? ""];
+	const loop = new RegExp(
+		`\\bfor\\s*\\(\\s*const\\s+${arg}\\s+of\\s+([A-Za-z_$][\\w$]*)\\s*\\)`,
+	).exec(text);
+	const list = loop
+		? new RegExp(`\\bconst\\s+${loop[1]}\\s*=\\s*\\[([^\\]]*)\\]`).exec(text)
+		: null;
+	if (list) {
+		const strings = [...(list[1] ?? "").matchAll(/["'`]([^"'`]*)["'`]/g)].map((s) => s[1] ?? "");
+		if (strings.length > 0) return strings;
+	}
+	return [`<unresolved: ${arg}>`];
 }
 
 /** The font files among `paths` that are not explicitly allowlisted. */
@@ -259,9 +347,11 @@ test("a font URL is judged by its path: a query or a fragment does not hide it",
 	// The kit, with or without a query, is the one host allowed.
 	assert.deepEqual(local("https://usertrust.ai/kit/fonts/X.woff2"), []);
 	assert.deepEqual(local("https://usertrust.ai/kit/fonts/X.woff2?v=1"), []);
-	// A name that only CONTAINS a font extension is not a font.
-	assert.deepEqual(local("/fonts/X.woff2.md"), []);
-	assert.deepEqual(local("/fonts/X.woff2x?v=1"), []);
+	// Outside a font context, a name that only CONTAINS a font extension is not a font.
+	assert.deepEqual(nonKitFontUrls('const doc = "/fonts/X.woff2.md";'), []);
+	assert.deepEqual(nonKitFontUrls('const doc = "/fonts/X.woff2x?v=1";'), []);
+	// Inside one (here a format() hint), it is a font source whatever its name.
+	assert.deepEqual(local("/fonts/X.woff2.md"), ["/fonts/X.woff2.md"]);
 });
 
 /** This guard's own source names every pattern it looks for, so it is the one file not scanned. */
@@ -373,4 +463,46 @@ test("a font inline: a data: URL of a font type, and a base64 font in a .tsx", (
 	assert.deepEqual(inlineFonts('src="data:image/png;base64,iVBORw0KGgo="'), []);
 	assert.deepEqual(inlineFonts('url("https://usertrust.ai/kit/fonts/Khand-Bold.woff2")'), []);
 	assert.deepEqual(inlineFonts(`x${woff2}`), []);
+});
+
+test("a font source is known by its CONTEXT, whatever its name, and must be the kit's", () => {
+	// An extensionless @font-face source: no font extension, still a font.
+	const face = `@font-face {
+		font-family: X;
+		src: url("https://cdn.example/font?id=123") format("woff2"), url(https://cdn.example/b);
+	}`;
+	assert.deepEqual(nonKitFontUrls(face), [
+		"https://cdn.example/font?id=123",
+		"https://cdn.example/b",
+	]);
+	// A url() with a format() hint, outside any @font-face (CSS built in a string).
+	assert.deepEqual(nonKitFontUrls("const src = \"url(/api/face) format('woff')\";"), ["/api/face"]);
+	// A preload as a font: a <link> in any attribute order, and a preload() call.
+	assert.deepEqual(
+		nonKitFontUrls(
+			'<link href="https://cdn.example/f?id=1" crossOrigin="" as="font" rel="preload" />',
+		),
+		["https://cdn.example/f?id=1"],
+	);
+	assert.deepEqual(nonKitFontUrls('preload("https://cdn.example/f", { as: "font" });'), [
+		"https://cdn.example/f",
+	]);
+	// A preload() of an identifier is followed to the strings it names; one that cannot be
+	// followed is reported, never passed.
+	const looped = `const FACES = ["https://usertrust.ai/kit/fonts/A.woff2", "https://cdn.example/b"];
+		for (const href of FACES) {
+			preload(href, { as: "font", crossOrigin: "anonymous" });
+		}`;
+	assert.deepEqual(nonKitFontUrls(looped), ["https://cdn.example/b"]);
+	assert.deepEqual(nonKitFontUrls('preload(pick(), { as: "font" });'), ["<unresolved: pick()>"]);
+	assert.deepEqual(nonKitFontUrls('preload(face, { as: "font" });'), ["<unresolved: face>"]);
+	// The kit, with or without a query, in every context: allowed.
+	const kit = "https://usertrust.ai/kit/fonts/Khand-Bold.woff2?v=2";
+	assert.deepEqual(nonKitFontUrls(`@font-face { src: url("${kit}") format("woff2"); }`), []);
+	assert.deepEqual(nonKitFontUrls(`<link rel="preload" as="font" href="${kit}" />`), []);
+	assert.deepEqual(nonKitFontUrls(`preload("${kit}", { as: "font" });`), []);
+	// The controls: an image preload and a background url() are not font sources.
+	assert.deepEqual(nonKitFontUrls('<link rel="preload" as="image" href="/hero.avif" />'), []);
+	assert.deepEqual(nonKitFontUrls('.hero { background: url("/hero.avif"); }'), []);
+	assert.deepEqual(nonKitFontUrls('preload("/hero.avif", { as: "image" });'), []);
 });
