@@ -430,16 +430,23 @@ export function snapshotVault(
 		const configSrc = join(vaultPath, "usertrust.config.json");
 		if (existsSync(configSrc)) {
 			try {
+				// stat first: opening a FIFO would hang. A config that is not a regular file is unreadable, not absent.
+				if (!statSync(configSrc).isFile()) throw new Error("not a regular file");
 				writeFileSync(join(dir, "usertrust.config.json"), readFileSync(configSrc), { mode: 0o600 });
-			} catch (err) {
+			} catch {
+				// The budget is UNKNOWN, but this is not a chain problem: the verifier does not list the config as an input, so
+				// an unreadable one must not make the chain UNVERIFIED.
 				configUnreadable = true;
-				problem("usertrust.config.json", err);
 			}
 		}
 		// The governor's persisted counter, read ONCE here. It is a plain file the chain does not verify, so an unreadable
 		// one is reported beside the figures and is never a verifier problem.
 		const ledgerSrc = join(vaultPath, "spend-ledger.json");
 		try {
+			// stat first, like every other read here: a FIFO at this path is unreadable, never opened.
+			if (existsSync(ledgerSrc) && !statSync(ledgerSrc).isFile()) {
+				throw Object.assign(new Error("not a regular file"), { code: "ENOTSUP" });
+			}
 			const parsed = JSON.parse(readFileSync(ledgerSrc, "utf-8")) as { budgetSpent?: unknown };
 			const v = parsed?.budgetSpent;
 			spendLedger =

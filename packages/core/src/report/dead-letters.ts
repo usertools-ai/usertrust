@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { parseDeadLetterLine } from "../audit/dead-letters.js";
+import { CHAIN_APPEND_DEAD_LETTER_SOURCE, parseDeadLetterLine } from "../audit/dead-letters.js";
 import type { DeadLetters } from "./weekly.js";
 
 /**
@@ -22,6 +22,12 @@ export function parseDeadLetters(text: string): DeadLetters {
 		if (line.trim() === "") continue;
 		const parsed = parseDeadLetterLine(line);
 		if (parsed.unreadable === true) return { unreadable: true };
+		// Only a dead-lettered CHAIN append is a chain event: the verifier's own classification. A line from another source
+		// (the ledger engine's dead letters share the directory) is not one, whatever its payload looks like, and a source that
+		// is not a string is a record the verifier counts unreadable.
+		const source = parsed.entry["source"];
+		if (typeof source !== "string") return { unreadable: true };
+		if (source !== CHAIN_APPEND_DEAD_LETTER_SOURCE) continue;
 		const payload = parsed.entry["payload"];
 		if (payload === null || typeof payload !== "object") continue;
 		const input = payload as { kind?: unknown; data?: unknown };

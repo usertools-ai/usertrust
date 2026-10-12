@@ -1320,6 +1320,34 @@ describe("a headless post with no shortfall record: exact only with a shortfall 
 		expect(m.totals.postProvenUpperUt).toBe(100);
 	});
 
+	it("only a dead-lettered CHAIN append counts: a shortfall-shaped payload from another source leaves an upper bound", () => {
+		const foreign = sealed(
+			{
+				kind: "settlement_shortfall",
+				actor: "local",
+				data: { transferId: "t", actual: 100, posted: 60, shortfall: 40 },
+			},
+			{},
+		);
+		// re-seal under another source (the ledger engine shares the directory)
+		const other = (() => {
+			const entry = {
+				source: "ledger.engine.postSettlement",
+				payload: JSON.parse(foreign).payload,
+				error: "x",
+				timestamp: T,
+			};
+			const checksum = createHash("sha256").update(canonicalize(entry)).digest("hex");
+			return JSON.stringify({ ...entry, checksum, checksumAlg: "sha256" });
+		})();
+		const m = build([headless(100)], { deadLetters: parseDeadLetters(`${other}\n`) });
+		expect(m.totals.postProvenUt).toBe(0);
+		expect(m.totals.postProvenUpperUt).toBe(100);
+		// the same entry under the chain source is exact
+		const m2 = build([headless(100)], { deadLetters: parseDeadLetters(`${foreign}\n`) });
+		expect(m2.totals.postProvenUt).toBe(60);
+	});
+
 	it("a shortfall record ON THE CHAIN wins over the queue, and stays exact", () => {
 		const m = build(
 			[

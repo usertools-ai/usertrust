@@ -940,13 +940,43 @@ describe("usertrust report --week", () => {
 					await run(dir, {}, ["--week", "--end", endIso(), "--format", format]);
 					expect(stdout, format).toMatch(/Budget unknown/);
 					expect(stdout, format).not.toMatch(/No budget is configured/);
-					expect(process.exitCode, format).toBe(2);
+					// the config is not a chain input: the budget is unknown, the chain is still VERIFIED (exit 0)
+					expect(process.exitCode, format).toBeUndefined();
 				}
+				// with an explicit --budget the report is also fully VERIFIED
+				stdout = "";
+				process.exitCode = undefined;
+				await run(dir, {}, ["--week", "--end", endIso(), "--format", "json", "--budget", "1000"]);
+				const out = JSON.parse(stdout) as { integrity: { verified: boolean; errors: string[] } };
+				expect(out.integrity.verified).toBe(true);
+				expect(out.integrity.errors).toEqual([]);
+				expect(process.exitCode).toBeUndefined();
 			} finally {
 				chmodSync(cfg, 0o600);
 			}
 			write.mockRestore();
 		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"a FIFO where the config or the spend ledger belongs is unreadable, never opened (no hang), and not a chain problem",
+		async () => {
+			await vault([{ cost: 1 }]);
+			execFileSync("mkfifo", [join(dir, ".usertrust", "usertrust.config.json")]);
+			execFileSync("mkfifo", [join(dir, ".usertrust", "spend-ledger.json")]);
+			stdout = "";
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			const out = JSON.parse(stdout) as {
+				integrity: { verified: boolean };
+				budget: { unknown: boolean };
+				spendLedger: { unreadable: boolean };
+			};
+			expect(out.integrity.verified).toBe(true);
+			expect(out.budget.unknown).toBe(true);
+			expect(out.spendLedger.unreadable).toBe(true);
+			write.mockRestore();
+		},
+		15_000,
 	);
 
 	it("CONTROL: an absent budget key or config is 'no budget configured' and succeeds", async () => {
