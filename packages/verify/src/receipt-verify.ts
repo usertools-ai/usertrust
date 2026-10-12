@@ -3276,7 +3276,7 @@ function sortedUniqueStrings(value: JsonValue | undefined, field: string): strin
  * (`<providerHost>/<owner>/<name>`), ≤ 256 characters, and nothing else — no
  * local paths, no remote strings with credentials, no branch or worktree
  * decoration". A length-only check accepts
- * `/Users/cam/private/customer-acme/secret` on a document §2 calls PUBLIC,
+ * `/path/to/private/file` on a document §2 calls PUBLIC,
  * which is the exact leak the rule exists to prevent.
  *
  * Three slash-separated parts, no more and no fewer. That one shape decides
