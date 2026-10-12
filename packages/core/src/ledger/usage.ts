@@ -180,6 +180,26 @@ function asRecord(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
+/**
+ * Hold ONE component of a tier to the single-response ceiling BEFORE an extractor sums it with another. Summed first,
+ * two finite components can pass the safe-integer range, or reach Infinity (which `readCount` then reads as a missing
+ * count), before `sanitizeUsage` sees the total; and an absurd component would be reported only inside a sum. A
+ * component above {@link MAX_PLAUSIBLE_TOKENS_PER_TIER} is recorded in `refused` under its tier, by its own figure, and
+ * enters the sum as 0; `sanitizeUsage({ refused })` then flags the tier as for any refused figure. Components that
+ * pass are each at most the ceiling, so the extractors' sums of two or three of them stay safe integers.
+ */
+function component(
+	value: number | null,
+	tiers: UsageTier | UsageTier[],
+	refused: Partial<Record<UsageTier, number>>,
+): number | null {
+	if (value === null || value <= MAX_PLAUSIBLE_TOKENS_PER_TIER) return value;
+	for (const tier of Array.isArray(tiers) ? tiers : [tiers]) {
+		refused[tier] = Math.max(refused[tier] ?? 0, value);
+	}
+	return 0;
+}
+
 /** Subtract inclusive cache tiers out of an inclusive prompt count (clamp >= 0). */
 function disjointInput(promptTokens: number, cacheReadTokens: number, cacheWriteTokens: number) {
 	return Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens);
@@ -556,22 +576,37 @@ export function fromOpenAICompletionsUsage(usage: unknown): NormalizedUsage {
 	const u = asRecord(usage);
 	const promptDetails = readObject(u, "prompt_tokens_details");
 
-	const prompt = readCount(u.prompt_tokens);
+	// The RAW prompt, and each cache figure subtracted from it, is held to the ceiling BEFORE the tiers are derived
+	// (see `component`): an absurd prompt could otherwise hide behind a large cache (150M prompt, 100M cached, 50M
+	// fresh input, every derived tier plausible). A refused prompt is attributed to the input tier.
+	const refused: Partial<Record<UsageTier, number>> = {};
+	const prompt = component(readCount(u.prompt_tokens), "inputTokens", refused);
 	const completion = readCount(u.completion_tokens);
 
-	const cacheRead = (promptDetails ? readCount(promptDetails.cached_tokens) : null) ?? 0;
+	const cacheRead =
+		component(
+			promptDetails ? readCount(promptDetails.cached_tokens) : null,
+			"cacheReadTokens",
+			refused,
+		) ?? 0;
 	const cacheWrite =
-		readCount(u.cache_write_tokens) ??
-		(promptDetails ? readCount(promptDetails.cache_write_tokens) : null) ??
-		0;
+		component(
+			readCount(u.cache_write_tokens) ??
+				(promptDetails ? readCount(promptDetails.cache_write_tokens) : null),
+			"cacheWriteTokens",
+			refused,
+		) ?? 0;
 
-	return sanitizeUsage({
-		inputTokens: disjointInput(prompt ?? 0, cacheRead, cacheWrite),
-		outputTokens: completion ?? 0,
-		cacheReadTokens: cacheRead,
-		cacheWriteTokens: cacheWrite,
-		source: prompt != null && completion != null ? "provider" : "estimated",
-	});
+	return sanitizeUsage(
+		{
+			inputTokens: disjointInput(prompt ?? 0, cacheRead, cacheWrite),
+			outputTokens: completion ?? 0,
+			cacheReadTokens: cacheRead,
+			cacheWriteTokens: cacheWrite,
+			source: prompt != null && completion != null ? "provider" : "estimated",
+		},
+		{ refused },
+	);
 }
 
 /**
@@ -589,23 +624,38 @@ export function fromOpenAIResponsesUsage(usage: unknown): NormalizedUsage {
 	const u = asRecord(usage);
 	const inputDetails = readObject(u, "input_tokens_details");
 
-	const input = readCount(u.input_tokens);
+	// Same rule as completions: the raw input, and each cache figure subtracted from it, is held to the ceiling before
+	// the tiers are derived; a refused raw input is attributed to the input tier.
+	const refused: Partial<Record<UsageTier, number>> = {};
+	const input = component(readCount(u.input_tokens), "inputTokens", refused);
 	const output = readCount(u.output_tokens);
 
-	const cacheRead = (inputDetails ? readCount(inputDetails.cached_tokens) : null) ?? 0;
-	const cacheWrite = inputDetails
-		? (readCount(inputDetails.cache_creation_tokens) ??
-			readCount(inputDetails.cache_write_tokens) ??
-			0)
-		: 0;
+	const cacheRead =
+		component(
+			inputDetails ? readCount(inputDetails.cached_tokens) : null,
+			"cacheReadTokens",
+			refused,
+		) ?? 0;
+	const cacheWrite =
+		component(
+			inputDetails
+				? (readCount(inputDetails.cache_creation_tokens) ??
+						readCount(inputDetails.cache_write_tokens))
+				: null,
+			"cacheWriteTokens",
+			refused,
+		) ?? 0;
 
-	return sanitizeUsage({
-		inputTokens: disjointInput(input ?? 0, cacheRead, cacheWrite),
-		outputTokens: output ?? 0,
-		cacheReadTokens: cacheRead,
-		cacheWriteTokens: cacheWrite,
-		source: input != null && output != null ? "provider" : "estimated",
-	});
+	return sanitizeUsage(
+		{
+			inputTokens: disjointInput(input ?? 0, cacheRead, cacheWrite),
+			outputTokens: output ?? 0,
+			cacheReadTokens: cacheRead,
+			cacheWriteTokens: cacheWrite,
+			source: input != null && output != null ? "provider" : "estimated",
+		},
+		{ refused },
+	);
 }
 
 /**

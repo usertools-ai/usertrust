@@ -604,3 +604,82 @@ describe("D5: provider garbage never escapes the snapshot", () => {
 		}
 	});
 });
+
+describe("the OpenAI raw prompt is held to the ceiling before the tiers are derived from it", () => {
+	// Both OpenAI shapes report an INCLUSIVE prompt and subtract the cache tiers out of it. Checked
+	// only through the derived tiers, an absurd prompt can hide behind a large cache: 150M prompt
+	// tokens with 100M cached leaves 50M of fresh input, and every derived tier passes.
+
+	it("completions: a 150M prompt with 100M cached is refused as input, not priced", () => {
+		const u = fromOpenAICompletionsUsage({
+			prompt_tokens: 150_000_000,
+			completion_tokens: 10,
+			prompt_tokens_details: { cached_tokens: 100_000_000 },
+		});
+		expect(u.source).toBe("estimated");
+		expect(u.implausible?.inputTokens).toBe(150_000_000);
+		expect(u.implausibleBy?.inputTokens).toBe("refused");
+		expect(u.inputTokens).toBe(0);
+		expectSafeSnapshot(u);
+	});
+
+	it("responses: a 150M input with 100M cached is refused as input, not priced", () => {
+		const u = fromOpenAIResponsesUsage({
+			input_tokens: 150_000_000,
+			output_tokens: 10,
+			input_tokens_details: { cached_tokens: 100_000_000 },
+		});
+		expect(u.source).toBe("estimated");
+		expect(u.implausible?.inputTokens).toBe(150_000_000);
+		expect(u.implausibleBy?.inputTokens).toBe("refused");
+		expectSafeSnapshot(u);
+	});
+
+	it("a cache component over the ceiling is refused by its own figure", () => {
+		const completions = fromOpenAICompletionsUsage({
+			prompt_tokens: 10,
+			completion_tokens: 10,
+			cache_write_tokens: 200_000_000,
+		});
+		expect(completions.source).toBe("estimated");
+		expect(completions.implausible?.cacheWriteTokens).toBe(200_000_000);
+		expect(completions.implausibleBy?.cacheWriteTokens).toBe("refused");
+		const responses = fromOpenAIResponsesUsage({
+			input_tokens: 10,
+			output_tokens: 10,
+			input_tokens_details: { cached_tokens: 200_000_000 },
+		});
+		expect(responses.source).toBe("estimated");
+		expect(responses.implausible?.cacheReadTokens).toBe(200_000_000);
+		expect(responses.implausibleBy?.cacheReadTokens).toBe("refused");
+	});
+
+	it("a normal OpenAI usage is unchanged", () => {
+		expect(
+			fromOpenAICompletionsUsage({
+				prompt_tokens: 1000,
+				completion_tokens: 50,
+				prompt_tokens_details: { cached_tokens: 400 },
+			}),
+		).toEqual({
+			inputTokens: 600,
+			outputTokens: 50,
+			cacheReadTokens: 400,
+			cacheWriteTokens: 0,
+			source: "provider",
+		});
+		expect(
+			fromOpenAIResponsesUsage({
+				input_tokens: 1000,
+				output_tokens: 50,
+				input_tokens_details: { cached_tokens: 400, cache_creation_tokens: 100 },
+			}),
+		).toEqual({
+			inputTokens: 500,
+			outputTokens: 50,
+			cacheReadTokens: 400,
+			cacheWriteTokens: 100,
+			source: "provider",
+		});
+	});
+});

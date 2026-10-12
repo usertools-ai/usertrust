@@ -645,3 +645,56 @@ describe("sanitizeUsage reads each raw count exactly once", () => {
 		}
 	});
 });
+
+describe.each([
+	["dry-run", true],
+	["with a capped engine", false],
+])("an OpenAI raw prompt is held to the ceiling (%s)", (_label, dryRun) => {
+	let vaultBase: string;
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `absurd-openai-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+	});
+	afterEach(() => {
+		rmSync(vaultBase, { recursive: true, force: true });
+	});
+
+	it("a 150M prompt hidden behind a 100M cache settles at the estimate and records usage_implausible", async () => {
+		const audit = makeAudit();
+		const openai = {
+			chat: {
+				completions: {
+					create: vi.fn(async (_req: unknown) => ({
+						id: "chatcmpl-1",
+						choices: [{ message: { role: "assistant", content: "ok" } }],
+						usage: {
+							prompt_tokens: 150_000_000,
+							completion_tokens: 10,
+							prompt_tokens_details: { cached_tokens: 100_000_000 },
+						},
+					})),
+				},
+			},
+		};
+		const g = await trust(openai, {
+			budget: 100_000,
+			vaultBase,
+			_audit: audit,
+			...(dryRun ? { dryRun: true } : { _engine: cappedEngine().engine }),
+		});
+		const { receipt } = (await g.chat.completions.create({
+			model: "gpt-4o",
+			messages: [{ role: "user", content: "hello" }],
+		})) as { receipt: TrustReceipt };
+		await g.destroy();
+
+		expect(receipt.usageSource).toBe("estimated");
+		expect(receipt.cost).toBeLessThan(100_000);
+		expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+			transferId: receipt.transferId,
+			charged: "estimate",
+			tiers: { inputTokens: 150_000_000 },
+			checks: { inputTokens: "refused" },
+		});
+	});
+});
