@@ -15,6 +15,10 @@ export interface SummaryPayload {
 	budget: number | null;
 	/** Where `budget` came from: the governor's record of what it enforces, the vault config, or nowhere. */
 	budgetSource: "governor" | "config" | "none";
+	/** When the governor wrote its record (`budgetSource: "governor"` only, else null). */
+	budgetWrittenAt: string | null;
+	/** Where the budget came from, in words, SHOWN beside it: only a governor record reads as enforced, with its age. */
+	budgetProvenance: string;
 	spentUt: number;
 	/** `budget - spentUt`, or null when the budget is unknown: there is no remaining figure without a budget. */
 	remainingUt: number | null;

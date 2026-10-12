@@ -113,6 +113,8 @@ describe("loadState", () => {
 		expect(summary).toMatchObject({
 			budget: 2_000,
 			budgetSource: "governor",
+			budgetWrittenAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
+			budgetProvenance: expect.stringMatching(/^the enforced budget, as of \d{4}-/),
 			spentUt: 300,
 			remainingUt: 1_700,
 		});
@@ -133,6 +135,12 @@ describe("loadState", () => {
 		await spend([300]);
 		writeFileSync(join(vaultPath, "usertrust.config.json"), JSON.stringify({ budget: 1_000 }));
 		const { summary } = loadState(vaultPath);
-		expect(summary).toMatchObject({ budget: 1_000, budgetSource: "config", remainingUt: 700 });
+		expect(summary).toMatchObject({
+			budget: 1_000,
+			budgetSource: "config",
+			budgetWrittenAt: null,
+			budgetProvenance: "from usertrust.config.json; not confirmed as enforced",
+			remainingUt: 700,
+		});
 	});
 });

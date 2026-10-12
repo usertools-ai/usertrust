@@ -90,12 +90,15 @@ export function SummaryStrip(props: {
 								Budget remaining{budget.kind === "known" ? ` ${budget.pct.toFixed(1)}%` : ""}
 							</span>
 							{budget.kind === "known" ? (
-								<div className="h-1.5 rounded bg-[var(--bg)]">
-									<div
-										className="h-1.5 rounded"
-										style={{ width: `${budget.pct}%`, background: `var(--${budget.fill})` }}
-									/>
-								</div>
+								<>
+									<div className="h-1.5 rounded bg-[var(--bg)]">
+										<div
+											className="h-1.5 rounded"
+											style={{ width: `${budget.pct}%`, background: `var(--${budget.fill})` }}
+										/>
+									</div>
+									<span className="text-[10px] text-[var(--faint)]">{budget.provenance}</span>
+								</>
 							) : (
 								<span className="text-xs italic text-[var(--faint)]">budget unknown</span>
 							)}

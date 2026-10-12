@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
 import { buildMerkleTree } from "../audit/merkle.js";
-import { loadBudgetConfig, readLedgerEvents } from "../audit/read.js";
+import { describeBudgetSource, loadBudgetConfig, readLedgerEvents } from "../audit/read.js";
 import { verifyChain } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
@@ -78,6 +78,9 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const remaining = budgetKnown ? config.budget - spent : null;
 	const pct =
 		remaining !== null && config.budget > 0 ? ((remaining / config.budget) * 100).toFixed(1) : null;
+	// Wherever the budget is shown, so is where it came from: only a governor record is the ENFORCED figure, and it
+	// carries its age; a config budget says it is unconfirmed.
+	const provenance = describeBudgetSource(config);
 
 	// Verify chain
 	const logPath = join(vaultPath, "audit", "events.jsonl");
@@ -105,6 +108,8 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				data: {
 					budget: budgetKnown ? config.budget : null,
 					budgetSource: config.source,
+					budgetWrittenAt: config.writtenAt,
+					budgetProvenance: provenance,
 					spent,
 					remaining,
 					percentRemaining: pct === null ? null : Number.parseFloat(pct),
@@ -131,6 +136,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				: `|  Budget: ${remaining.toLocaleString()} / ${config.budget.toLocaleString()} UT remaining (${pct}%)`
 		).padEnd(63)}|`,
 	);
+	if (remaining !== null) console.log(`${`|    (${provenance})`.padEnd(63)}|`);
 	console.log(
 		`${`|  Chain: ${verification.eventsVerified} events | Integrity: ${verification.valid ? "SHA-256 verified" : "INTEGRITY FAILURE"}`.padEnd(
 			63,

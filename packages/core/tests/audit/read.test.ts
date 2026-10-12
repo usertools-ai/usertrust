@@ -86,11 +86,15 @@ describe("loadBudgetConfig", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "trust-cfg-"));
 		const vaultPath = join(tempDir, ".usertrust");
 		mkdirSync(vaultPath, { recursive: true });
-		expect(loadBudgetConfig(vaultPath)).toEqual({ budget: 0, source: "none" });
+		expect(loadBudgetConfig(vaultPath)).toEqual({ budget: 0, source: "none", writtenAt: null });
 		writeFileSync(join(vaultPath, "usertrust.config.json"), "{broken");
-		expect(loadBudgetConfig(vaultPath)).toEqual({ budget: 0, source: "none" });
+		expect(loadBudgetConfig(vaultPath)).toEqual({ budget: 0, source: "none", writtenAt: null });
 		writeFileSync(join(vaultPath, "usertrust.config.json"), JSON.stringify({ budget: 50000 }));
-		expect(loadBudgetConfig(vaultPath)).toEqual({ budget: 50000, source: "config" });
+		expect(loadBudgetConfig(vaultPath)).toEqual({
+			budget: 50000,
+			source: "config",
+			writtenAt: null,
+		});
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 });

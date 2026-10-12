@@ -20,6 +20,19 @@ describe("budgetDisplay", () => {
 			{ kind: "known", pct: 0, fill: "danger" },
 		],
 	] as const)("%s", (_n, budget, remainingUt, expected) => {
-		expect(budgetDisplay({ budget, remainingUt })).toEqual(expected);
+		const shown = budgetDisplay({ budget, remainingUt, budgetProvenance: "P" });
+		expect(shown).toEqual(expected.kind === "known" ? { ...expected, provenance: "P" } : expected);
+	});
+
+	it("red-first (no provenance): a config budget's figure is shown WITH 'not confirmed as enforced'", () => {
+		const shown = budgetDisplay({
+			budget: 1_000,
+			remainingUt: 700,
+			budgetProvenance: "from usertrust.config.json; not confirmed as enforced",
+		});
+		expect(shown).toMatchObject({
+			kind: "known",
+			provenance: "from usertrust.config.json; not confirmed as enforced",
+		});
 	});
 });

@@ -86,20 +86,46 @@ export function readLedgerEvents(vaultPath: string): PersistedAuditEvent[] {
  */
 export type BudgetSource = "governor" | "config" | "none";
 
-export function loadBudgetConfig(vaultPath: string): { budget: number; source: BudgetSource } {
+export interface VaultBudget {
+	budget: number;
+	source: BudgetSource;
+	/** When the governor wrote its record (`source: "governor"` only, else null): the figure's age, always shown. */
+	writtenAt: string | null;
+}
+
+const NO_BUDGET: VaultBudget = { budget: 0, source: "none", writtenAt: null };
+
+export function loadBudgetConfig(vaultPath: string): VaultBudget {
 	const recorded = readEffectiveBudget(vaultPath);
-	if (recorded.state === "recorded") return { budget: recorded.budget, source: "governor" };
+	if (recorded.state === "recorded") {
+		return { budget: recorded.budget, source: "governor", writtenAt: recorded.writtenAt };
+	}
 	// An unreadable record is not an absent one: the config file may not be what the governor enforced.
-	if (recorded.state === "unreadable") return { budget: 0, source: "none" };
+	if (recorded.state === "unreadable") return { ...NO_BUDGET };
 	const configPath = join(vaultPath, "usertrust.config.json");
-	if (!existsSync(configPath)) return { budget: 0, source: "none" };
+	if (!existsSync(configPath)) return { ...NO_BUDGET };
 	try {
 		const config = JSON.parse(readFileSync(configPath, "utf-8")) as { budget?: number };
 		return typeof config.budget === "number" && config.budget > 0
-			? { budget: config.budget, source: "config" }
-			: { budget: 0, source: "none" };
+			? { budget: config.budget, source: "config", writtenAt: null }
+			: { ...NO_BUDGET };
 	} catch {
-		return { budget: 0, source: "none" };
+		return { ...NO_BUDGET };
+	}
+}
+
+/**
+ * The one wording of a budget's PROVENANCE, shown wherever the budget is (the ledger UI, inspect, report). Only a
+ * governor record reads as the enforced figure, and always with its age; a config budget says it is unconfirmed.
+ */
+export function describeBudgetSource(b: Pick<VaultBudget, "source" | "writtenAt">): string {
+	switch (b.source) {
+		case "governor":
+			return `the enforced budget, as of ${b.writtenAt ?? "an unknown time"}`;
+		case "config":
+			return "from usertrust.config.json; not confirmed as enforced";
+		case "none":
+			return "unknown: none recorded or configured";
 	}
 }
 

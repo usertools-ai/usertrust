@@ -3,7 +3,13 @@
 
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { deriveChainIntegrity, loadBudgetConfig, readLedgerEvents, verifyVault } from "usertrust";
+import {
+	deriveChainIntegrity,
+	describeBudgetSource,
+	loadBudgetConfig,
+	readLedgerEvents,
+	verifyVault,
+} from "usertrust";
 import type { SummaryPayload } from "../shared/api.js";
 import { type LedgerRow, toLedgerRows } from "../shared/rows.js";
 
@@ -57,6 +63,8 @@ export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerSt
 			vaultPath,
 			budget,
 			budgetSource: config.source,
+			budgetWrittenAt: config.writtenAt,
+			budgetProvenance: describeBudgetSource(config),
 			spentUt,
 			remainingUt: budget === null ? null : budget - spentUt,
 			chain: {

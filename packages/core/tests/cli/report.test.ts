@@ -465,12 +465,35 @@ describe("usertrust report --week", () => {
 		stdout = "";
 		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
 		const out = JSON.parse(stdout) as { budget: { configuredUt: number; source: string } };
-		expect(out.budget).toMatchObject({ configuredUt: 4_000, source: "the governor's record" });
+		expect(out.budget.configuredUt).toBe(4_000);
+		// the provenance is SHOWN, with the record's age
+		expect(out.budget.source).toMatch(
+			/^the enforced budget, as of \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+		);
 		// an explicit flag still names the budget over the record
 		stdout = "";
 		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json", "--budget", "1234"]);
 		const flagged = JSON.parse(stdout) as { budget: { configuredUt: number; source: string } };
 		expect(flagged.budget).toMatchObject({ configuredUt: 1_234, source: "--budget" });
+		write.mockRestore();
+	});
+
+	it("red-first (read as confirmed): a vault-config budget is SHOWN as unconfirmed, in json and markdown", async () => {
+		await vault([{ cost: 1 }]);
+		writeFileSync(
+			join(dir, ".usertrust", "usertrust.config.json"),
+			JSON.stringify({ budget: 1000 }),
+		);
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+		const out = JSON.parse(stdout) as { budget: { configuredUt: number; source: string } };
+		expect(out.budget).toMatchObject({
+			configuredUt: 1_000,
+			source: "from usertrust.config.json; not confirmed as enforced",
+		});
+		stdout = "";
+		await run(dir, {}, ["--week", "--end", endIso()]);
+		expect(stdout).toContain("from usertrust.config.json; not confirmed as enforced");
 		write.mockRestore();
 	});
 

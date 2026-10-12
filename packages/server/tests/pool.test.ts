@@ -124,7 +124,7 @@ describe("a tenant vault carries the tenant's enforced budget (red-first: read a
 			await pool.get(tenant);
 			await pool.destroyAll();
 			const vault = join(tenantVaultBase({ ...config(), stateDir }, tenant), ".usertrust");
-			expect(loadBudgetConfig(vault)).toEqual({ budget: 2_000, source: "governor" });
+			expect(loadBudgetConfig(vault)).toMatchObject({ budget: 2_000, source: "governor" });
 		} finally {
 			await rm(stateDir, { recursive: true, force: true });
 		}

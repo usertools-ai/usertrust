@@ -154,6 +154,8 @@ describe("usertrust inspect", () => {
 		expect(lastJson().data).toMatchObject({
 			budget: 2_000,
 			budgetSource: "governor",
+			budgetWrittenAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
+			budgetProvenance: expect.stringMatching(/^the enforced budget, as of \d{4}-/),
 			spent: 300,
 			remaining: 1_700,
 			percentRemaining: 85,
@@ -174,6 +176,26 @@ describe("usertrust inspect", () => {
 		await run(tempDir);
 		const combined = logOutput.join("\n");
 		expect(combined).toContain("Budget: unknown");
+		expect(combined).not.toContain("enforced");
 		expect(combined).not.toContain("-300");
+	});
+
+	it("red-first (read as enforced): the text SHOWS where the budget came from — a record with its age, a config as unconfirmed", async () => {
+		const vaultPath = await spent300();
+		writeFileSync(join(vaultPath, "usertrust.config.json"), JSON.stringify({ budget: 1_000 }));
+		await run(tempDir);
+		expect(logOutput.join("\n")).toContain(
+			"(from usertrust.config.json; not confirmed as enforced)",
+		);
+		await run(tempDir, { json: true });
+		expect(lastJson().data).toMatchObject({
+			budgetSource: "config",
+			budgetWrittenAt: null,
+			budgetProvenance: "from usertrust.config.json; not confirmed as enforced",
+		});
+		logOutput = [];
+		recordEffectiveBudget(vaultPath, 2_000);
+		await run(tempDir);
+		expect(logOutput.join("\n")).toMatch(/\(the enforced budget, as of \d{4}-\d{2}-\d{2}T[^)]*Z\)/);
 	});
 });

@@ -25,7 +25,7 @@ import { join } from "node:path";
 export const EFFECTIVE_BUDGET_FILE = "effective-budget.json";
 
 export type EffectiveBudgetReading =
-	| { state: "recorded"; budget: number }
+	| { state: "recorded"; budget: number; writtenAt: string }
 	| { state: "absent" }
 	| { state: "unreadable"; reason: string };
 
@@ -49,5 +49,17 @@ export function readEffectiveBudget(vaultDir: string): EffectiveBudgetReading {
 	if (typeof budget !== "number" || !Number.isSafeInteger(budget) || budget <= 0) {
 		return { state: "unreadable", reason: "no positive integer budget" };
 	}
-	return { state: "recorded", budget };
+	// `writtenAt` is the record's age, shown wherever its budget is; a record without a strict ISO-8601 UTC instant is
+	// not one. The strict shape also makes the value safe to print as-is: digits, `-`, `:`, `.`, `T` and `Z` only.
+	const writtenAt = (parsed as { writtenAt?: unknown }).writtenAt;
+	if (
+		typeof writtenAt !== "string" ||
+		!ISO_INSTANT.test(writtenAt) ||
+		Number.isNaN(Date.parse(writtenAt))
+	) {
+		return { state: "unreadable", reason: "no valid writtenAt" };
+	}
+	return { state: "recorded", budget, writtenAt };
 }
+
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;

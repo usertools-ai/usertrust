@@ -30,6 +30,7 @@ import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import pc from "picocolors";
 import { verifyVaultComplete } from "../audit/complete.js";
 import { readEffectiveBudget } from "../audit/effective-budget.js";
+import { describeBudgetSource } from "../audit/read.js";
 import { type ReportFormat, render } from "../report/render.js";
 import {
 	AGENT_KEYS,
@@ -471,7 +472,8 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 
 	try {
 		let budget = 0;
-		let budgetSource = "vault config";
+		// The vault config's budget is NOT confirmed as the one enforced: the report says so (the shared wording).
+		let budgetSource = describeBudgetSource({ source: "config", writtenAt: null });
 		if (parsed.budget !== undefined) {
 			budget = parsed.budget;
 			budgetSource = "--budget";
@@ -485,7 +487,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		const recorded = explicitBudget ? null : readEffectiveBudget(vaultPath);
 		if (recorded?.state === "recorded") {
 			budget = recorded.budget;
-			budgetSource = "the governor's record";
+			budgetSource = describeBudgetSource({ source: "governor", writtenAt: recorded.writtenAt });
 		}
 		// The verdict is `usertrust verify`'s own, on the LIVE vault: integrity AND completeness, one function shared with that
 		// command (audit/complete.ts). The report makes no integrity claim of its own. The instant is taken before the read.

@@ -1218,8 +1218,12 @@ subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evid
 `opts.budget`, `opts.configPath`, the vault's `usertrust.config.json` or the default, then record the result in
 `.usertrust/effective-budget.json` (`budget/effective-record.ts`; advisory, never throws; a failed write removes any
 earlier record). `loadBudgetConfig` reads that record first, then the vault config, and returns `source: "governor" |
-"config" | "none"`; `none` (and an unreadable record) is an UNKNOWN budget, and a reader shows no remaining figure for
-it. The ledger UI, `inspect`, `health` and `report` all read it; never add a reader that parses the config file alone.
+"config" | "none"` and the record's `writtenAt`; `none` (and an unreadable record) is an UNKNOWN budget, and a reader
+shows no remaining figure for it. Wherever a budget is SHOWN, its provenance is shown with it, in the one wording
+`describeBudgetSource` gives: only a governor record reads as the enforced figure, always "as of" its `writtenAt` (so a
+record that outlived a failed removal reads as old, never as current); a config budget says "not confirmed as
+enforced". The ledger UI, `inspect`, `health` and `report` all read it; never add a reader that parses the config file
+alone, or a surface that shows the figure without its provenance.
 Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
 
 **`vaultPath` means two different directories.** `createAuditWriter(vaultPath)` joins
