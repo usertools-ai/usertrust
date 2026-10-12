@@ -2240,9 +2240,12 @@ async function returnEmptyHold(transferId) {
  * hold with none is given back — released, on a server that can release; settled
  * at zero (the server's 1-unit floor) on one that cannot. Returns `{ outcome,
  * reason?, holdEnded? }`; `returned` is an empty hold given back, `deferred` means
- * out of time, hold untouched. A windowed hold's `holdEnded` says whether the
- * server is known to hold it no more: settled or spent, a 404 `unknown
- * transferId`, or a confirmed release. Otherwise it may still be live.
+ * out of time, hold untouched. A claimed hold whose settle was not sent and whose file
+ * could not be handed back says so (`handBack: "failed"`, `handBackFailed`): it is
+ * `claimed`, or `unresolved` under a key, never `deferred`. A windowed hold's
+ * `holdEnded` says whether the server is known to hold it no more: settled or
+ * spent, a 404 `unknown transferId`, or a confirmed release. Otherwise it may
+ * still be live.
  */
 export async function settleTranscriptHold(sessionId, entry) {
 	if (callTimeout() < minCall()) return { outcome: "deferred", reason: "out of time" };
@@ -2289,7 +2292,11 @@ export async function settleTranscriptHold(sessionId, entry) {
 	if (result.outcome === "deferred" && result.unsent === true) {
 		// The preflight above passed but the capabilities went unknown before the body was built. A claimed hold must not be
 		// journalled as done for a settle that never went out: hand the file back so a later settle point retries it.
-		await rename(`${base}.settling`, livePath).catch(() => {});
+		try {
+			await rename(`${base}.settling`, livePath);
+		} catch (err) {
+			return handBackFailed(err, keyed);
+		}
 		return result;
 	}
 	try {
@@ -2334,6 +2341,27 @@ export async function settleTranscriptHold(sessionId, entry) {
 	return result;
 }
 
+/**
+ * A claimed hold whose settle was never sent (`unsent`) and whose file could not be handed back
+ * (`.settling` → `.json`). It is NOT untouched: it stays claimed as `.settling`, so no later settle
+ * point lists it, and the journal reads it as a settle of unknown outcome once stale
+ * (`reconcile`): retried under its key, or (no key) its ids accounted and never posted. The
+ * outcome names that ending, as any other settle's does: `unresolved` under a key, else
+ * `claimed`. The hold itself was not ended (`holdEnded: false`): the ledger's pending timeout
+ * expires it.
+ */
+function handBackFailed(err, keyed) {
+	const code = err?.code ?? "error";
+	return {
+		outcome: keyed ? "unresolved" : "claimed",
+		unsent: true,
+		handBack: "failed",
+		code,
+		reason: `the settle was not sent (the server's capabilities are unknown), and the hold could not be handed back (${code}): it stays claimed as .settling`,
+		holdEnded: false,
+	};
+}
+
 /** What an outcome means for the usage, where its name alone does not say. */
 export const OUTCOME_NOTES = new Map([
 	["unresolved", "; its usage is NOT recorded yet, and is retried under its key at the next Stop"],
@@ -2362,6 +2390,8 @@ export async function recordHoldOutcome(sessionId, entry, result) {
 		// A settle stands for its window's usage, dated by the one rule (`holdUsageStart`). A
 		// give-back stands for no usage: it keeps its call's time.
 		started: release ? callStart(entry) : holdUsageStart(entry),
+		// A settle never sent whose hold stays claimed (`handBackFailed`): the record says so.
+		...(result.handBack === "failed" ? { handBack: "failed", code: result.code } : {}),
 	});
 }
 

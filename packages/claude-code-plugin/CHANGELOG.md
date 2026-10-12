@@ -55,6 +55,16 @@ npm, and its version is its own: the `usertrust` packages and their
   write. Temporary files are created exclusively. A quarantined hold is rewritten in place
   (opened write-only and non-blocking, never created, then truncated and rewritten),
   because quarantine runs exactly when a rename in its directory has failed.
+- **A hold that cannot be handed back would no longer be left claimed in silence.** If a
+  transcript settle could not be built after its hold was claimed (the server's capabilities
+  read as unknown only then), nothing is sent and the hold is handed back for a later settle
+  point. A failure of that hand-back was ignored: the hold stayed claimed while the plugin said
+  `deferred` and "the hold is untouched". It now says what is left: `claimed`, or `unresolved`
+  under a key (how a later settle point reads a hold left claimed), on stderr with the error
+  code, and its `gap` record carries `"handBack":"failed"` and the `code`. Today's hooks do not
+  reach this path (capabilities, once read as known, stay known for the hook's run, and the
+  claim is made only after they are), so this guards a future change; a hand-back that works is
+  unchanged.
 
 ### Changed
 
