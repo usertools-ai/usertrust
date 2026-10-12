@@ -43,8 +43,8 @@ repository or mint an OIDC token for provenance:
       tarballs are never published: the publish job reads them as data (below).
 3. **publish**, in the `npm-publish` environment, so it waits for the approval (token:
    `contents: write`, `id-token: write`, `actions: read`; `NPM_TOKEN` in one step). It installs
-   nothing and runs no dependency code: only git, gh, python3, node, the npm that ships with
-   node, and GitHub's own checkout, setup-node and download-artifact actions.
+   nothing and runs no dependency code: only git, gh, jq, python3, node, the npm that ships
+   with node, and GitHub's own checkout, setup-node and download-artifact actions.
    1. Checks the CI gate again, since approval can come long after step 1.
    2. Downloads the artifact and checks the release commit, as git objects, without checking
       it out:

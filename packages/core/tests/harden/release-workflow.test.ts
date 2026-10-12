@@ -825,6 +825,11 @@ describe("release.sh assert-protected", { timeout: 30_000 }, () => {
 		["an unparseable answer", () => setEnvironment("<html>oops</html>"), "not an environment"],
 		["an empty answer", () => setEnvironment(""), "not an environment"],
 		[
+			"two JSON documents in one answer",
+			() => setEnvironment(JSON.stringify(protectedEnv()).repeat(2)),
+			"not an environment",
+		],
+		[
 			"another environment's answer",
 			() => setEnvironment({ ...protectedEnv(), name: "staging" }),
 			"not an environment",

@@ -494,8 +494,11 @@ assert_protected() {
 		return 1
 	fi
 	rm -f "$errf"
-	if ! reviewers=$(printf '%s' "$body" | jq -er --arg env "$env" '
-		if (type == "object") and (.name == $env) and ((.protection_rules // []) | type == "array")
+	# Slurped, so the answer must be exactly one JSON document: jq 1.6 does not fail `-e` on
+	# empty input, and an answer of several documents would otherwise be read one by one.
+	if ! reviewers=$(printf '%s' "$body" | jq -ers --arg env "$env" '
+		if length != 1 then error("not an environment") else .[0] end
+		| if (type == "object") and (.name == $env) and ((.protection_rules // []) | type == "array")
 		then [(.protection_rules // [])[] | select(.type == "required_reviewers") | (.reviewers // []) | length] | add // 0
 		else error("not an environment") end' 2>/dev/null); then
 		err "Could not read environment '${env}': the answer is not an environment. Refusing to release."

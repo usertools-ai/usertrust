@@ -280,8 +280,8 @@ jobs:
     # job can read the token. See "Owner setup" in docs/releasing.md.
     environment: npm-publish
     # `id-token: write` cannot be scoped to one step, so this job runs only the runner's own
-    # tools (git, gh, python3, node, the npm bundled with node) and GitHub's actions: no `npm
-    # ci`, no install, pack, build, test or cache, no dependency code.
+    # tools (git, gh, jq, python3, node, the npm bundled with node) and GitHub's actions: no
+    # `npm ci`, no install, pack, build, test or cache, no dependency code.
     #
     # Everything from the build job (the bundle, the commit in it, the tarballs, the version it
     # reports) is untrusted DATA, never code or config. The working tree stays at the
