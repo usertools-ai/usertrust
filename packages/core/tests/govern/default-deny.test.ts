@@ -382,6 +382,19 @@ describe("OpenAI: every ungoverned SDK method is refused", () => {
 		await expectRefused(path, () => call(client), engine);
 	});
 
+	it("a request whose model getter throws is still refused with its policy_denied record", async () => {
+		const { client, engine } = await openai();
+		const params = {
+			input: "hi",
+			get model(): string {
+				throw new Error("getter boom");
+			},
+		};
+		await expectRefused("embeddings.create", () => client.embeddings.create(params), engine);
+		const [denial] = chainEvents().filter((e) => e.kind === "policy_denied");
+		expect(denial?.data.model).toBeUndefined();
+	});
+
 	it("a sync SDK helper is refused with a rejected promise, never a sync throw", async () => {
 		const { client, engine } = await openai();
 		let result: unknown;

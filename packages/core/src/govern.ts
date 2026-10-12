@@ -3703,11 +3703,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		const attribution = getCurrentCostCenter();
 		inFlightCount++;
 		try {
-			const params = args[0];
-			const model =
-				params != null && typeof params === "object"
-					? (params as { model?: unknown }).model
-					: undefined;
+			// The model is caller data read through a getter the caller controls: a getter that
+			// throws must not skip the denial record, so a failed read is simply an absent model.
+			let model: unknown;
+			try {
+				const params = args[0];
+				model =
+					params != null && typeof params === "object"
+						? (params as { model?: unknown }).model
+						: undefined;
+			} catch {
+				model = undefined;
+			}
 			const denial = error ?? ungovernedMethodError(kind as "anthropic" | "openai", path);
 			await appendDenialEvent({
 				audit,
