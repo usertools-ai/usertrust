@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writePrivateFileAtomic } from "../../src/shared/private-fs.js";
 
 const isWindows = process.platform === "win32";
@@ -23,6 +23,8 @@ describe.skipIf(isWindows)("writePrivateFileAtomic", () => {
 		dir = mkdtempSync(join(tmpdir(), "private-atomic-"));
 	});
 	afterEach(() => {
+		chmodSync(dir, 0o700);
+		vi.restoreAllMocks();
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -68,4 +70,32 @@ describe.skipIf(isWindows)("writePrivateFileAtomic", () => {
 		expect(tmpFiles()).toEqual([]);
 		expect(readFileSync(join(path, "inside"), "utf-8")).toBe("x");
 	});
+
+	it.skipIf(process.getuid?.() === 0)(
+		"a directory that cannot be synced after the rename warns, and does not throw",
+		() => {
+			const path = join(dir, ".env");
+			writeFileSync(path, "OLD\n");
+			chmodSync(path, 0o644);
+			// Write and search, but not read: the temp file's create and the rename succeed,
+			// and only the post-rename directory open fails (EACCES).
+			chmodSync(dir, 0o300);
+			const warnings: string[] = [];
+			vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+				warnings.push(String(chunk));
+				return true;
+			});
+
+			expect(() => writePrivateFileAtomic(path, "NEW\n")).not.toThrow();
+
+			chmodSync(dir, 0o700);
+			expect(statSync(path).mode & 0o777).toBe(0o600);
+			expect(readFileSync(path, "utf-8")).toBe("NEW\n");
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain("was replaced");
+			expect(warnings[0]).toContain("owner-only");
+			expect(warnings[0]).toContain("EACCES");
+			expect(tmpFiles()).toEqual([]);
+		},
+	);
 });

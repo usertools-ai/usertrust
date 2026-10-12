@@ -570,7 +570,9 @@ function createVault(vaultPath: string, data: VaultData): void {
 		// CREATED, so a reconfigure over an existing 0644 `.env` put the new key in that 0644
 		// file. A fresh owner-only file is renamed over it instead (a symlink is replaced,
 		// never written through).
-		writePrivateFileAtomic(join(vaultPath, ".env"), `${envLines.join("\n")}\n`);
+		writePrivateFileAtomic(join(vaultPath, ".env"), `${envLines.join("\n")}\n`, (message) => {
+			process.stderr.write(`${scrubForTerminal(message)}\n`);
+		});
 	}
 
 	// Write .gitignore

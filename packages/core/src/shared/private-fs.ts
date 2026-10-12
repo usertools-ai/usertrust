@@ -333,9 +333,21 @@ export function looseVaultWarning(vaultDir: string): string | undefined {
  * exactly that mode whatever the umask, written in full, fsync'd and closed; then renamed over
  * `path`, and the directory fsync'd so the rename survives a crash. The rename replaces `path` as
  * a directory entry: the old file's inode is never written, and a symbolic link at `path` is
- * replaced, not followed. The temp file is removed on any failure before the rename.
+ * replaced, not followed.
+ *
+ * Every step BEFORE the rename throws on failure, and the temp file is removed. The directory
+ * sync AFTER it never throws, whatever the error: by then `path` IS replaced and owner-only, and
+ * a throw would report a failure for a write that took effect. Its failure is reported once, as
+ * a warning ({@link dirSyncWarning}) passed to `warn` (default: stderr, as given; a CLI caller
+ * passes one that scrubs the path for its terminal).
  */
-export function writePrivateFileAtomic(path: string, data: string): void {
+export function writePrivateFileAtomic(
+	path: string,
+	data: string,
+	warn: (message: string) => void = (message) => {
+		process.stderr.write(`${message}\n`);
+	},
+): void {
 	const tmp = join(dirname(path), `${basename(path)}.${randomUUID()}.tmp`);
 	const fd = openSync(
 		tmp,
@@ -365,17 +377,27 @@ export function writePrivateFileAtomic(path: string, data: string): void {
 		}
 		throw err;
 	}
-	// Make the rename durable. A platform that cannot fsync a directory is best effort.
+	// Make the rename durable: best effort for EVERY error, because the replace already happened.
 	let dfd: number | undefined;
 	try {
 		dfd = openSync(dirname(path), "r");
 		fsyncSync(dfd);
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException)?.code;
+		// A platform that cannot fsync a directory at all says nothing worth a warning.
 		if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EOPNOTSUPP" && code !== "EISDIR") {
-			throw err;
+			warn(dirSyncWarning(path, code ?? (err instanceof Error ? err.message : String(err))));
 		}
 	} finally {
-		if (dfd !== undefined) closeSync(dfd);
+		try {
+			if (dfd !== undefined) closeSync(dfd);
+		} catch {
+			// the descriptor is gone either way
+		}
 	}
+}
+
+/** The warning for a replace that landed but whose directory entry could not be synced. */
+export function dirSyncWarning(path: string, reason: string): string {
+	return `usertrust: warning: ${path} was replaced and is owner-only (mode 600), but its directory could not be synced (${reason}), so the new directory entry may not survive a power loss`;
 }
