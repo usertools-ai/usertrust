@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One SDK resource object reachable at two paths on a governed Anthropic or OpenAI client is guarded separately at each path.** The boundary decides a method by the path it was reached at, so each path's free list and `allowUngoverned` entries now apply at that path. Before, the guarded resource was cached by object alone, so the first path read decided for both: a method free at one path ran on the raw SDK, unmetered and unaudited, when called through the other path, and a refusal named the wrong path. The pinned SDKs expose no resource object at two paths, so this affects duck-typed or modified clients. Reading one path twice still returns the same object.
+
 - **The weekly report's ungoverned section says call attempts.** An `ungoverned_call` record is written as the call is made, so it proves an attempt, not a call that reached the provider. The section is headed "Ungoverned call attempts", its line and method table count attempts, and its note says the record is written before the provider is reached when `audit.failClosed` is set and best-effort otherwise, so an attempt may have failed or never reached the provider, and a call whose record could not be written is not counted. The report's disclaimer says the same. The JSON field `ungoverned: { calls, byMethod }` is unchanged.
 
 - **`usertrust verify --json` on the anchored path reports `success` as the exit code.** With `--require-anchor` or `--require-external-anchor`, an unanchored vault exited 1 but printed `"success": true`, so a pipeline that parsed the JSON saw a pass that the exit code refused. `success` is now `true` exactly when the exit code is 0, whichever check decided it.

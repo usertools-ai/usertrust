@@ -72,8 +72,12 @@ export interface MethodBoundary {
 	) => unknown;
 	/** Wrap the raw client `withOptions` returned, with the same governor. */
 	readonly rewrap: (fresh: unknown, options: unknown) => unknown;
-	/** Raw resource → its guarded proxy, so a resource is the same object on every read. */
-	readonly resources: WeakMap<object, object>;
+	/**
+	 * Resource path → (raw resource → its guarded proxy), so a resource is the same object on every
+	 * read. Keyed by path first: a proxy decides by the path it was reached at, so one raw object
+	 * reachable at two paths gets one proxy per path.
+	 */
+	readonly resources: Map<string, WeakMap<object, object>>;
 	/** Stand-in path → (raw object → its stand-in). Stable identity keeps JSON's cycle check working. */
 	readonly standIns: Map<string, WeakMap<object, object>>;
 	/** Raw transport object → its read-only view (`TRANSPORT_OBJECTS`). */
@@ -705,9 +709,18 @@ export function guardedGet(
 	return value;
 }
 
-/** A nested SDK resource behind the boundary. One proxy per raw resource. */
+/**
+ * A nested SDK resource behind the boundary. One proxy per (path, raw resource): the proxy's
+ * free-list and `allowUngoverned` decisions depend on its path, so a raw resource reachable at
+ * two paths must not answer at the second with the first path's proxy.
+ */
 function guardResource(resource: object, path: string, boundary: MethodBoundary): object {
-	const cached = boundary.resources.get(resource);
+	let byRaw = boundary.resources.get(path);
+	if (byRaw === undefined) {
+		byRaw = new WeakMap();
+		boundary.resources.set(path, byRaw);
+	}
+	const cached = byRaw.get(resource);
 	if (cached !== undefined) return cached;
 	const proxy = new Proxy(resource, {
 		get(target, prop, receiver) {
@@ -715,7 +728,7 @@ function guardResource(resource: object, path: string, boundary: MethodBoundary)
 		},
 		...refuseWrites(path),
 	});
-	boundary.resources.set(resource, proxy);
+	byRaw.set(resource, proxy);
 	return proxy;
 }
 

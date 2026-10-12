@@ -250,7 +250,8 @@ async function anthropic(opts: Partial<TrustOpts> = {}) {
 	return { client: client as Loose, raw: raw as Loose, engine };
 }
 
-async function openai(opts: Partial<TrustOpts> = {}) {
+/** `prepare` runs on the raw client before `trust()` wraps it. */
+async function openai(opts: Partial<TrustOpts> = {}, prepare?: (raw: Loose) => void) {
 	const engine = mockEngine();
 	const raw = new OpenAI({
 		apiKey: "k",
@@ -258,6 +259,7 @@ async function openai(opts: Partial<TrustOpts> = {}) {
 		fetch: recordingFetch(hits, "openai"),
 		maxRetries: 0,
 	});
+	prepare?.(raw);
 	const client = await trust(raw, {
 		budget: 1_000_000,
 		vaultBase: vault,
@@ -1197,6 +1199,97 @@ describe("free methods run on the raw SDK resource, unaudited", () => {
 		expect(hits).toEqual([]);
 		expect(chainEvents()).toEqual([]);
 	});
+});
+
+// The boundary decides a method by the PATH it was reached at, so one raw resource object
+// reachable at two paths is guarded separately at each. The pinned SDKs expose no such alias;
+// these rows build one on the raw client (a duck-typed or modified client could carry it), and
+// run in both read orders, since the first path read used to decide for both.
+describe("one resource object reachable at two paths is guarded per path", () => {
+	const ORDERS = ["the free path read first", "the gated path read first"] as const;
+
+	/** `models` (where `list` is free) is also reachable at `aliasedModels` (where it is not). */
+	async function aliasedModels(order: (typeof ORDERS)[number]) {
+		let list: ReturnType<typeof vi.fn> | undefined;
+		const built = await openai({}, (raw) => {
+			raw.aliasedModels = raw.models;
+			list = vi.spyOn(raw.models, "list");
+		});
+		const { client } = built;
+		let free: Loose;
+		let gated: Loose;
+		if (order === ORDERS[0]) {
+			free = client.models;
+			gated = client.aliasedModels;
+		} else {
+			gated = client.aliasedModels;
+			free = client.models;
+		}
+		return { ...built, free, gated, list: list as ReturnType<typeof vi.fn> };
+	}
+
+	it.each(ORDERS)("%s: the method is refused through the gated path", async (order) => {
+		const { gated, list, engine } = await aliasedModels(order);
+		await expectRefused("aliasedModels.list", () => gated.list(), engine);
+		expect(list).not.toHaveBeenCalled();
+	});
+
+	it.each(ORDERS)(
+		"%s: the method runs on the raw resource through the free path",
+		async (order) => {
+			const { free, list, raw, engine } = await aliasedModels(order);
+			const page = await free.list();
+			expect(page.data.map((m: { id: string }) => m.id)).toEqual(["gpt-x"]);
+			expect(list).toHaveBeenCalledTimes(1);
+			expect(list.mock.contexts[0]).toBe(raw.models);
+			expect(hits).toEqual(["GET /v1/models"]);
+			expect(engine.spendPending).not.toHaveBeenCalled();
+			expect(chainEvents()).toEqual([]);
+		},
+	);
+
+	it.each(ORDERS)("%s: each path is the same object on every read", async (order) => {
+		const { client, free, gated } = await aliasedModels(order);
+		expect(client.models).toBe(free);
+		expect(client.aliasedModels).toBe(gated);
+		expect(free).not.toBe(gated);
+	});
+
+	it.each(["the listed path read first", "the unlisted path read first"] as const)(
+		"%s: allowUngoverned applies only at the path it lists",
+		async (order) => {
+			let create: ReturnType<typeof vi.fn> | undefined;
+			const { client, engine } = await openai({ allowUngoverned: ["embeddings.create"] }, (raw) => {
+				raw.aliasedEmbeddings = raw.embeddings;
+				create = vi.spyOn(raw.embeddings, "create");
+			});
+			let listed: Loose;
+			let unlisted: Loose;
+			if (order === "the listed path read first") {
+				listed = client.embeddings;
+				unlisted = client.aliasedEmbeddings;
+			} else {
+				unlisted = client.aliasedEmbeddings;
+				listed = client.embeddings;
+			}
+			await expectRefused(
+				"aliasedEmbeddings.create",
+				() => unlisted.create({ model: "text-embedding-3-small", input: "hi" }),
+				engine,
+			);
+			expect(create).not.toHaveBeenCalled();
+			await listed.create({
+				model: "text-embedding-3-small",
+				input: "hi",
+				encoding_format: "float",
+			});
+			expect(create).toHaveBeenCalledTimes(1);
+			await client.destroy();
+			const events = chainEvents();
+			expect(events.map((e) => e.kind)).toEqual(["policy_denied", "ungoverned_call"]);
+			expect(events[1]?.data).toEqual({ method: "embeddings.create", provider: "openai" });
+		},
+	);
 });
 
 // ── The supported SDK range IS the classified range ──
