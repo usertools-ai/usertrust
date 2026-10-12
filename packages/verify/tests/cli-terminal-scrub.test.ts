@@ -16,6 +16,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { clipForDisplay } from "../src/receipt.js";
 
 const ERASE_LINE = "\u001b[2K";
 const C1_CSI = "\u009b";
@@ -66,4 +67,20 @@ describe("the standalone CLI never prints a vault-controlled control byte", () =
 			expect(out).not.toContain(C1_CSI);
 		}, 60_000);
 	}
+});
+
+describe("clipForDisplay — sanitize first, then clip by code points", () => {
+	it("red-first (a lone surrogate): a clip falling inside a surrogate pair keeps the WHOLE character", () => {
+		const emoji = String.fromCodePoint(0x1f600); // two UTF-16 code units
+		const keyId = `${"a".repeat(18)}${emoji}zz`;
+		const out = clipForDisplay(keyId, 19);
+		expect(out).toBe(`${"a".repeat(18)}${emoji}`);
+		expect(out).not.toMatch(
+			/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u,
+		);
+	});
+	it("a control byte is replaced, then counted as one character", () => {
+		const esc = String.fromCharCode(0x1b);
+		expect(clipForDisplay(`${esc}[2Kabcdef`, 4)).toBe("?[2K");
+	});
 });

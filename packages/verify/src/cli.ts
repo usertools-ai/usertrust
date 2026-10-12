@@ -24,7 +24,7 @@ import {
 	verifyVaultWithAnchors,
 	type WitnessInput,
 } from "./index.js";
-import { forDisplay } from "./receipt.js";
+import { clipForDisplay, forDisplay } from "./receipt.js";
 import {
 	RECEIPT_DISPATCH_TOKEN,
 	type ReceiptCliIo,
@@ -348,7 +348,7 @@ function printAnchorSection(result: AnchoredVaultVerificationResult): void {
 	console.log(`Anchor state: ${result.anchorState} (source: ${a.anchorSource})`);
 	if (a.latestAnchor) {
 		console.log(
-			`Latest anchor: #${a.latestAnchor.anchorSeq} treeSize ${a.latestAnchor.treeSize} keyId ${forDisplay(a.latestAnchor.keyId.slice(0, 19))}… (${forDisplay(a.latestAnchor.timestamp)})`,
+			`Latest anchor: #${a.latestAnchor.anchorSeq} treeSize ${a.latestAnchor.treeSize} keyId ${clipForDisplay(a.latestAnchor.keyId, 19)}… (${forDisplay(a.latestAnchor.timestamp)})`,
 		);
 	}
 	console.log(`Unanchored tail: ${a.unanchoredTail.events} event(s)`);

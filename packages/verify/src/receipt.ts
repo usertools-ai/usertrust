@@ -216,6 +216,15 @@ export function forDisplay(raw: string): string {
 	return out;
 }
 
+/**
+ * `forDisplay`, then a clip to `max` CODE POINTS — sanitize first, clip after (AGENTS.md's terminal-sanitization
+ * rule). Clipping the raw string by UTF-16 code units first could cut a surrogate pair in half and print a lone
+ * surrogate; counting code points after sanitizing never splits a character.
+ */
+export function clipForDisplay(raw: string, max: number): string {
+	return [...forDisplay(raw)].slice(0, max).join("");
+}
+
 // ── Hash formatting ──
 
 function truncHash(hash: string, len = 8): string {
