@@ -332,11 +332,14 @@ export function snapshotVault(
 	problems: string[];
 	/** Non-empty when a log and its anchor never read as one stable state: a busy vault, NOT a broken chain. */
 	busy: string[];
+	/** The vault config exists but could not be read: the budget is UNKNOWN, not absent. */
+	configUnreadable: boolean;
 	cleanup: () => void;
 } {
 	const dir = mkdtempSync(join(tmpdir(), "usertrust-report-"));
 	const problems: string[] = [];
 	const busy: string[] = [];
+	let configUnreadable = false;
 	const problem = (what: string, err: unknown): void => {
 		const code = (err as NodeJS.ErrnoException | undefined)?.code;
 		problems.push(`Could not read ${what}${code !== undefined ? ` (${code})` : ""}`);
@@ -391,6 +394,7 @@ export function snapshotVault(
 			try {
 				writeFileSync(join(dir, "usertrust.config.json"), readFileSync(configSrc), { mode: 0o600 });
 			} catch (err) {
+				configUnreadable = true;
 				problem("usertrust.config.json", err);
 			}
 		}
@@ -398,7 +402,13 @@ export function snapshotVault(
 		rmSync(dir, { recursive: true, force: true });
 		throw err;
 	}
-	return { dir, problems, busy, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+	return {
+		dir,
+		problems,
+		busy,
+		configUnreadable,
+		cleanup: () => rmSync(dir, { recursive: true, force: true }),
+	};
 }
 
 /** `budget` (usertokens, a positive safe integer) from a tenant config file. */
@@ -516,6 +526,11 @@ export async function run(
 							? budget
 							: readVaultBudget(snapshot.dir),
 					budgetSource,
+					// An unreadable config is an UNKNOWN budget, never "no budget configured".
+					budgetUnreadable:
+						snapshot.configUnreadable &&
+						parsed.budget === undefined &&
+						parsed.tenantConfig === undefined,
 				},
 			);
 		} finally {

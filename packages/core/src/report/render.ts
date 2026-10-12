@@ -104,6 +104,10 @@ function verdictLine(m: ReportModel, v: (s: string) => string): string {
 
 function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 	const b = m.budget;
+	if (b.unknown)
+		return [
+			"Budget unknown (the vault config could not be read). This is not 'no budget configured': fix the read error and run the report again.",
+		];
 	if (b.configuredUt === null)
 		return ["No budget is configured for this report (none in the vault config; pass --budget)."];
 	const split = (usdPart: UsdUt, nominalPart: NominalUt): string =>

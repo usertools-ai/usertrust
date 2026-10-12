@@ -534,6 +534,26 @@ describe("usertrust report --week", () => {
 		write.mockRestore();
 	});
 
+	it("an UNREADABLE vault config reads as 'budget unknown', never 'no budget configured'", async () => {
+		await vault([{ cost: 1 }]);
+		const cfg = join(dir, ".usertrust", "usertrust.config.json");
+		writeFileSync(cfg, JSON.stringify({ budget: 1000 }));
+		chmodSync(cfg, 0o000);
+		try {
+			for (const format of ["md", "html"] as const) {
+				stdout = "";
+				process.exitCode = undefined;
+				await run(dir, {}, ["--week", "--end", endIso(), "--format", format]);
+				expect(stdout, format).toMatch(/Budget unknown/);
+				expect(stdout, format).not.toMatch(/No budget is configured/);
+				expect(process.exitCode, format).toBe(2);
+			}
+		} finally {
+			chmodSync(cfg, 0o600);
+		}
+		write.mockRestore();
+	});
+
 	it("CONTROL: an absent budget key or config is 'no budget configured' and succeeds", async () => {
 		await vault([{ cost: 1 }]);
 		writeFileSync(join(dir, ".usertrust", "usertrust.config.json"), "{}");

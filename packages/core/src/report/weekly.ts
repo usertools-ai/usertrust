@@ -103,6 +103,8 @@ export interface ReportOptions {
 	budget?: number;
 	/** Where `budget` came from, printed beside it ("vault config", "--budget", "tenant config"). */
 	budgetSource?: string;
+	/** The vault config exists but could not be read: the budget is unknown, which is not the same as none. */
+	budgetUnreadable?: boolean;
 }
 
 export interface IntegrityInfo {
@@ -236,6 +238,8 @@ export interface ReportModel {
 	 */
 	budget: {
 		configuredUt: UsdUt | null;
+		/** The budget could not be determined (its config was unreadable). Distinct from `configuredUt: null` (none set). */
+		unknown: boolean;
 		source: string | null;
 		/** Spend with no cost center, in the window / over the whole chain: it debited the session wallet. */
 		windowSessionUt: UsdUt;
@@ -386,11 +390,10 @@ function isUsableEvent(e: unknown): e is PersistedAuditEvent {
  */
 /** A governed action's spend record. A `<kind>_failed` marker is never one, whatever else it carries. */
 function isActionEvent(e: PersistedAuditEvent): boolean {
-	return (
-		!NON_ACTION_KINDS.has(e.kind) &&
-		!e.kind.endsWith("_failed") &&
-		str(e.data["actionName"]) !== undefined
-	);
+	// Keyed on `actionName`: `governAction({ kind: "llm_call", name, cost })` is a supported descriptor and writes an
+	// event whose kind IS "llm_call" but which is an ACTION, never a model call. A model call carries no actionName.
+	const kindAllowed = e.kind === "llm_call" || !NON_ACTION_KINDS.has(e.kind);
+	return kindAllowed && !e.kind.endsWith("_failed") && str(e.data["actionName"]) !== undefined;
 }
 
 function denominationOf(e: PersistedAuditEvent): "usd" | "nominal" | "unlabelled" {
@@ -409,7 +412,7 @@ function walletDebit(
 	e: PersistedAuditEvent,
 	standing: (e: PersistedAuditEvent) => Standing,
 ): { ut: number; attributed: boolean; nominal: boolean } | undefined {
-	const isCall = e.kind === "llm_call";
+	const isCall = e.kind === "llm_call" && !isActionEvent(e);
 	const isAction = isActionEvent(e);
 	if (!isCall && !isAction) return undefined;
 	const c = cost(e.data["cost"]);
@@ -632,7 +635,7 @@ function buildPlain(
 			}
 		}
 
-		if (e.kind === "llm_call") {
+		if (e.kind === "llm_call" && !isActionEvent(e)) {
 			const c = cost(e.data["cost"]);
 			const denomination = denominationOf(e);
 			if (!Number.isFinite(ms)) {
@@ -922,6 +925,7 @@ function buildPlain(
 		hourlyUt: hourly,
 		budget: {
 			configuredUt: configured,
+			unknown: opts.budgetUnreadable === true,
 			source: configured === null ? null : (opts.budgetSource ?? "vault config"),
 			windowSessionUt,
 			recordedSessionUt,

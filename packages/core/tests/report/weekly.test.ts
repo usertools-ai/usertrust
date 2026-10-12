@@ -515,6 +515,22 @@ describe("weekly report model", () => {
 		expect(m.notes.join(" ")).toMatch(/capped at the ledger hold/);
 	});
 
+	it("governAction({ kind: 'llm_call' }) is an ACTION, not an unknown-model call: keyed on actionName", () => {
+		const m = build([
+			ev("llm_call", "2026-10-08T02:00:00Z", {
+				actionName: "search",
+				cost: 40,
+				transferId: "t-act",
+			}),
+			call("2026-10-08T03:00:00Z", 100),
+		]);
+		expect(m.totals.actionUt).toBe(40);
+		expect(m.totals.actionCalls).toBe(1);
+		expect(m.totals.confirmedUt).toBe(100); // only the model call is model spend
+		expect(m.totals.confirmedCalls).toBe(1);
+		expect(m.byModel.map((r) => r.key)).not.toContain("unknown");
+	});
+
 	it("an unknown future record kind beside a call unconfirms it by default; shortfall and implausible do not", () => {
 		const m = build([
 			call("2026-10-08T01:00:00Z", 100, { transferId: "t-s" }),
