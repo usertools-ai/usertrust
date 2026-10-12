@@ -49,10 +49,15 @@ import {
 import { writeReceipt } from "./audit/rotation.js";
 import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
+import {
+	type EnforcedBudgetRegistration,
+	registerEnforcedBudget,
+} from "./budget/effective-record.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
 	guardedGet,
 	type MethodBoundary,
+	type RefuseFn,
 	rawClientStandIn,
 	refuseWrites,
 	transportChangedError,
@@ -62,7 +67,13 @@ import {
 	validateAllowUngoverned,
 } from "./default-deny.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
-import { afcRequested, runGovernedAfc } from "./google-afc.js";
+import {
+	afcRequestedVerdict,
+	type GoogleAfcVerdict,
+	runGovernedAfc,
+	sdkRunsAfcVerdict,
+	snapshotGoogleAfcParams,
+} from "./google-afc.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	copyAppliedRates,
@@ -105,7 +116,7 @@ import {
 	sanitizePolicyContext,
 } from "./policy/gate.js";
 import { detectInjection } from "./policy/injection.js";
-import { detectPII, redactPII } from "./policy/pii.js";
+import { builtInAborted, detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
@@ -528,11 +539,15 @@ export interface TrustEngine {
 // via buildGoogleProxy. Neither is a special case — both route through the same
 // interceptCall, and a streaming call on either reaches the GENERIC
 // `Symbol.asyncIterator` branch that returns createGovernedStream's wrapper, not
-// the Anthropic `stream-helper` graft. Everything else on those resources is
-// ungoverned (see detect.ts's boundary block). The types leave it untouched: on a
-// Google client it passes through, and on an Anthropic or OpenAI client the runtime
-// refuses it unless it is free or listed in `allowUngoverned` (default-deny.ts). The
-// refusal is not in these types — a refused method keeps its SDK signature.
+// the Anthropic `stream-helper` graft. Google `models.generateContentStream` takes
+// that same generic branch, but its trap unwraps the envelope and resolves to the
+// governed stream itself (GovernedStreamMethod), so the SDK call shape survives.
+// Everything else on those resources is ungoverned (see detect.ts's boundary block).
+// On an Anthropic or OpenAI client the runtime refuses it unless it is free or listed
+// in `allowUngoverned` (default-deny.ts), and the types leave it untouched: a refused
+// method there keeps its SDK signature. On a Google client a listed set of billable methods
+// is refused too (GOOGLE_REFUSED_METHODS), and those ARE typed as refused below. That list
+// is not a boundary: everything else on a Google client passes through (detect.ts).
 
 /** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
 type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
@@ -681,14 +696,84 @@ type GovernedResponses<R> =
 			: R;
 
 /**
- * Rewrite ONLY `generateContent` on a Google `models` resource. `generateContentStream`
- * stays raw: buildGoogleProxy traps the one method and lets everything else fall
- * through `Reflect.get`, so a rewrite here would advertise a `.receipt` that never
- * arrives on the streaming shortcut users actually reach for.
+ * A method the governed client REFUSES: it keeps its parameters and resolves to
+ * nothing — the runtime stand-in returns a promise that REJECTS with a PolicyDeniedError
+ * naming the method, after the denial is on the audit chain and before the SDK is
+ * reached (GOOGLE_REFUSED_METHODS). A non-callable member is left as it is, mirroring
+ * the runtime, which only replaces a member that is a function.
  */
-type GovernedGoogleModels<G> = G extends { generateContent: infer C extends AnyMethod }
-	? Omit<G, "generateContent"> & { generateContent: GovernedGoogleGenerateMethod<C> }
+type RefusedMethod<F> = F extends (...args: infer A) => unknown
+	? (...args: A) => Promise<never>
+	: F;
+
+/**
+ * Refuse the members `K` of a namespace, homomorphically (every other member,
+ * and every modifier, survives as declared). A callable or non-object namespace is
+ * left raw, mirroring refusingNamespaceProxy's `typeof ns !== "object"` bail-out.
+ */
+type RefuseMembers<N, K extends PropertyKey> =
+	IsCallable<N> extends true
+		? N
+		: N extends object
+			? { [Q in keyof N]: Q extends K ? RefusedMethod<N[Q]> : N[Q] }
+			: N;
+
+/**
+ * The Google `models` resource. `generateContent` resolves to the `{ response, receipt }`
+ * envelope (plus `receipts` when it ran as a governed AFC loop, GovernedGoogleGenerateMethod); `generateContentStream` resolves to the governed stream ITSELF with a
+ * `.receipt` promise (the same contract as Anthropic's `messages.stream`, and what
+ * buildGoogleProxy's trap returns); the non-governed generation methods are refused.
+ * Homomorphic, so a fake or older client without `generateContentStream` gets no
+ * phantom member, and `countTokens` / `list` / `get` stay exactly as declared.
+ * Keep the refused names in step with GOOGLE_REFUSED_METHODS.models.
+ */
+type GovernedGoogleModels<G> = G extends { generateContent: AnyMethod }
+	? {
+			[P in keyof G]: P extends "generateContent"
+				? GovernedGoogleGenerateMethod<G[P]>
+				: P extends "generateContentStream"
+					? GovernedStreamMethod<G[P]>
+					: P extends
+								| "embedContent"
+								| "generateImages"
+								| "editImage"
+								| "upscaleImage"
+								| "generateVideos"
+								| "recontextImage"
+								| "segmentImage"
+						? RefusedMethod<G[P]>
+						: G[P];
+		}
 	: G;
+
+/** `live.connect` and `live.music.connect` are refused; the rest of `live` is raw. */
+type RefusedGoogleLive<L> =
+	IsCallable<L> extends true
+		? L
+		: L extends object
+			? {
+					[Q in keyof L]: Q extends "connect"
+						? RefusedMethod<L[Q]>
+						: Q extends "music"
+							? RefuseMembers<L[Q], "connect">
+							: L[Q];
+				}
+			: L;
+
+/** One Google namespace with its refused members (GOOGLE_REFUSED_METHODS). */
+type RefusedGoogleNamespace<P, N> = P extends "live"
+	? RefusedGoogleLive<N>
+	: P extends "batches"
+		? RefuseMembers<N, "create" | "createEmbeddings">
+		: P extends "chats" | "interactions"
+			? RefuseMembers<N, "create">
+			: P extends "tunings"
+				? RefuseMembers<N, "tune">
+				: P extends "caches"
+					? RefuseMembers<N, "create" | "update">
+					: P extends "fileSearchStores"
+						? RefuseMembers<N, "uploadToFileSearchStore" | "importFile">
+						: N;
 
 /**
  * The Google `generateContent` envelope: `{ response, receipt }` like every other create, plus `receipts`, one per model
@@ -766,6 +851,20 @@ type GovernedResponsesPart<T, K extends keyof T = Extract<keyof T, "responses">>
 type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
 	[P in K]: GovernedGoogleModels<T[P]>;
 };
+type GoogleRefusingNamespace =
+	| "chats"
+	| "live"
+	| "batches"
+	| "interactions"
+	| "tunings"
+	| "caches"
+	| "fileSearchStores";
+type RefusedGoogleNamespacesPart<
+	T,
+	K extends keyof T = Extract<keyof T, GoogleRefusingNamespace>,
+> = {
+	[P in K]: RefusedGoogleNamespace<P, T[P]>;
+};
 /**
  * `withOptions` returns a client governed by the SAME governor (`boundary.rewrap`), so its type is
  * the governed shape, never the SDK's `this` — which `Omit<T, …>` would otherwise carry through as
@@ -802,7 +901,9 @@ type GovernedShapeOf<T> =
 					GovernedResponsesPart<T> &
 					GovernedWithOptionsPart<T>
 			: IsGoogleClient<T> extends true
-				? Omit<T, "models"> & GovernedModelsPart<T>
+				? Omit<T, "models" | GoogleRefusingNamespace> &
+						GovernedModelsPart<T> &
+						RefusedGoogleNamespacesPart<T>
 				: T;
 
 /**
@@ -1512,8 +1613,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// 2. Initialise subsystems
 	const vaultPath = vaultBase;
+	// This governor's budget on its vault's record (budget/effective-record.ts); set once it has started. Its first
+	// successful append means this process holds the vault's writer lock, which is when the record may be published.
+	let enforcedBudget: EnforcedBudgetRegistration | undefined;
 	const audit: AuditWriter =
-		(isTestEnv ? opts?._audit : undefined) ?? openSharedAuditWriter(vaultPath);
+		(isTestEnv ? opts?._audit : undefined) ??
+		openSharedAuditWriter(vaultPath, { onAppended: () => enforcedBudget?.appended() });
 
 	/**
 	 * Under `audit.failClosed`, the audit writer's pre-flight: the tail classified exactly as the
@@ -1728,6 +1833,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// and its extractor never reports a 1-hour share, so a flip cannot under-hold there.
 			// A request that cannot be serialized forwards as given and holds dearest.
 			const originalParams = (args[0] ?? {}) as Record<string, unknown>;
+			// The caller's abort signal OBJECT, captured NOW, before any await: a caller that
+			// replaces or deletes `options.signal` while the provider call is pending must not
+			// change which signal decides whether a stream's throw was their own abort.
+			const callerSignal = callerAbortSignal(kind, args);
 			const serialized = serializeRequest(originalParams);
 			const params = (
 				kind !== "google" && serialized !== null ? serialized.body : originalParams
@@ -3052,7 +3161,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// a throw from the caller's loop body wins over it), so a caller who catches
 						// the loop without awaiting `.receipt` still hears of it. Any other
 						// settlement error rejects `.receipt` alone.
-						{ surfaceAuditRefusal: config.audit.failClosed },
+						{
+							surfaceAuditRefusal: config.audit.failClosed,
+							// The caller's own abort signal for THIS call: an abort settles the usage
+							// delivered so far (an early stop), it does not void (callerAbortSignal).
+							// Read through the BUILT-IN getter: an own `aborted` property or getter on
+							// the signal (caller code) can neither hide a real abort nor throw past it.
+							...(callerSignal !== undefined
+								? { callerAborted: () => builtInAborted(callerSignal) === true }
+								: {}),
+						},
 					);
 
 					// For streaming responses, settlement has NOT happened yet.
@@ -4051,23 +4169,32 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		}
 	}
 
-	// 7b. Refusal of an ungoverned provider method (default-deny.ts). It is a governor decision,
-	// so it goes through the SAME denial boundary as every other pre-provider refusal:
-	// `appendDenialEvent` writes the `policy_denied` event (the method path as `actionName`) and
-	// attaches its hash to the error, whose contract is flat across `audit.failClosed` (a failed
-	// append marks it `auditDegraded`; the typed denial still reaches the caller). No mutex is
-	// taken and no provider is called, so there is nothing for the boundary to sit outside of or
-	// before. Async, because the append is: the stand-in rejects rather than throws — a sync SDK
-	// method (a stream or runner helper) included — and is counted in-flight so destroy() waits
-	// for the append before releasing the writer.
+	// 7b. Refusal of an ungoverned provider method: ONE audited path for every provider —
+	// the Anthropic and OpenAI default-deny boundary (default-deny.ts) and the Google
+	// refused methods and AFC refusals (GOOGLE_REFUSED_METHODS, google-afc.ts). It is a
+	// governor decision, so it goes through the SAME denial boundary as every other
+	// pre-provider refusal: `appendDenialEvent` writes the `policy_denied` event (the method
+	// path as `actionName`) and attaches its hash to the error, whose contract is flat across
+	// `audit.failClosed` (a failed append marks it `auditDegraded`; the typed denial still
+	// reaches the caller). No mutex is taken and no provider is called, so there is nothing
+	// for the boundary to sit outside of or before. Async, because the append is: the
+	// stand-in rejects rather than throws — a sync SDK method (a stream or runner helper)
+	// included — and is counted in-flight so destroy() waits for the append before releasing
+	// the writer. The error defaults to the provider's own: `ungovernedMethodError` for
+	// Anthropic and OpenAI, `ungovernedGoogleMethodError` for Google.
+	//
+	//
+	// It STARTS with the degraded-audit preflight, for every provider (the same start as
+	// interceptCall): destroyed, then, under audit.failClosed with a writer already degraded,
+	// an AuditDegradedError before attribution, any read of `args` or any append. No gate runs,
+	// so there is no denial to record. (The Google traps also run it before their AFC gate, so a
+	// pre-degraded client evaluates no gate at all.)
 	async function refuseUngovernedMethod(
 		path: string,
 		args: unknown[],
 		error?: PolicyDeniedError,
 	): Promise<never> {
-		if (destroyed) {
-			throw new Error("TrustedClient has been destroyed");
-		}
+		preflightRefusal();
 		// The ALS read happens here, synchronously, in the caller's own context (see the
 		// ALS-discipline note in interceptCall). Only the LABEL is carried: a refusal debits no
 		// envelope, so it has no use for the envelope account and must not trade the refusal for
@@ -4079,7 +4206,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// that holds a string, or nothing. A `model` getter that throws (or a Proxy trap)
 			// must not turn the refusal into its own error and skip the denial record.
 			const model = ownStringDataProperty(args[0], "model");
-			const denial = error ?? ungovernedMethodError(kind as "anthropic" | "openai", path);
+			const denial =
+				error ??
+				(kind === "google" ? ungovernedGoogleMethodError(path) : ungovernedMethodError(kind, path));
 			await appendDenialEvent({
 				audit,
 				actor: "local",
@@ -4096,6 +4225,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		} finally {
 			inFlightCount--;
 		}
+	}
+
+	// The start every refusal and every Google entry point shares, in interceptCall's order:
+	// destroyed, then the pre-degraded audit refusal. refuseUngovernedMethod runs it first, for
+	// every provider; the Google traps also run it BEFORE their AFC gate, so a pre-degraded
+	// client evaluates no gate at all (the gate's snapshot and verdict read the caller's params,
+	// and its refusal would attempt an append).
+	function preflightRefusal(): void {
+		if (destroyed) {
+			throw new Error("TrustedClient has been destroyed");
+		}
+		refuseIfAuditDegradedAtStart("this call was refused before it reached the provider");
 	}
 
 	// 7c. An `allowUngoverned` call: the operator chose to run this method unmetered, so it runs on
@@ -4170,6 +4311,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		const destroyFn = async (): Promise<void> => {
 			if (destroyed) return;
 			destroyed = true;
+			enforcedBudget?.release();
 
 			// Wait up to 5 seconds for in-flight calls to complete.
 			// After the deadline, proceed with teardown anyway.
@@ -4212,7 +4354,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		};
 
 		if (kind === "google") {
-			return buildGoogleProxy(client, interceptCall, destroyFn, governActionImpl);
+			return buildGoogleProxy(
+				client,
+				interceptCall,
+				destroyFn,
+				governActionImpl,
+				refuseUngovernedMethod,
+				preflightRefusal,
+			);
 		}
 
 		// Anthropic and OpenAI: default-deny. One boundary for the whole tree, `withOptions`
@@ -4266,6 +4415,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		}
 	};
 	process.on("beforeExit", beforeExitHandler);
+
+	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
+	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Registered LAST,
+	// once the governor is fully initialised: a start that fails later (an invalid policy) enforces nothing and must not
+	// replace the record of a governor that is running. Published only while this process holds the vault's writer lock
+	// (from the first successful append), so a process that never gets the lock never overwrites the holder's record.
+	// Advisory: it never throws, and a failed write removes any earlier record rather than leave a stale one.
+	enforcedBudget = registerEnforcedBudget(join(vaultBase, VAULT_DIR), config.budget, () =>
+		audit.lockOwner?.(),
+	);
 
 	return governedClient;
 }
@@ -4796,20 +4955,36 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 // matches headless.ts's copy — which the parity suite compares as source text.
 export { createTBEngine };
 
-/**
- * `obj[key]` when it is an OWN DATA property holding a string; never runs an accessor or a trap.
- * Mirrors the Google refusal path's helper of the same name and signature, so the two governors'
- * refusals read a label the same way and a later merge keeps one copy.
- */
-function ownStringDataProperty(obj: unknown, key: string): string | undefined {
+/** An own DATA property of `obj`, without running an accessor or a Proxy trap. */
+function ownDataProperty(obj: unknown, key: string): unknown {
 	if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) return undefined;
-	if (utilTypes.isProxy(obj)) return undefined; // its descriptor trap is caller code
+	if (utilTypes.isProxy(obj)) return undefined;
 	try {
 		const d = Object.getOwnPropertyDescriptor(obj, key);
-		return d !== undefined && "value" in d && typeof d.value === "string" ? d.value : undefined;
+		return d !== undefined && "value" in d ? d.value : undefined;
 	} catch {
-		return undefined; // defensive: no label, the refusal still lands
+		return undefined;
 	}
+}
+
+/**
+ * The caller's OWN abort signal for one provider call, where each SDK takes it:
+ *   - Google (`@google/genai`): `params.config.abortSignal` (GenerateContentConfig). On a
+ *     governed Google call `args[0]` is the AFC snapshot, whose `config` is our copy and
+ *     carries the caller's signal object unchanged.
+ *   - OpenAI and Anthropic: the per-request options, the SECOND argument, `{ signal }`
+ *     (`RequestOptions.signal` in both SDKs).
+ * Read as own data properties only (no getter runs, no Proxy is consulted), and counted
+ * only when it is a real AbortSignal; anything else is "no signal", and a throw then
+ * voids as before. A signal handed to the SDK CLIENT's constructor, or a client-wide
+ * fetch wrapper, is not per call and is not seen here.
+ */
+function callerAbortSignal(kind: LLMClientKind, args: unknown[]): AbortSignal | undefined {
+	const signal =
+		kind === "google"
+			? ownDataProperty(ownDataProperty(args[0], "config"), "abortSignal")
+			: ownDataProperty(args[1], "signal");
+	return signal instanceof AbortSignal ? signal : undefined;
 }
 
 // ── Proxy builders ──
@@ -5145,32 +5320,298 @@ function buildOpenAIProxy<T>(
 	return clientProxy as TrustedClient<T>;
 }
 
+/**
+ * The billable methods a Google client exposes that usertrust does NOT govern, by
+ * namespace. Each one sends a request Google bills (generation, embedding, tuning, cache
+ * storage, file-search indexing), so the governed client refuses it by name rather than
+ * letting it run unmetered, unpoliced and unaudited: the call writes a `policy_denied`
+ * event and rejects with a PolicyDeniedError, and the SDK is never reached
+ * (`refuseUngovernedMethod` in trust()). `chats.create` is here because the `Chat` it
+ * returns drives the SDK's RAW `models` (bound when the client was constructed), so
+ * every `sendMessage` / `sendMessageStream` would bypass the governed proxy.
+ *
+ * Everything not listed passes through untouched: the free metadata and read calls
+ * (`models.list` / `get` / `update` / `delete` / `countTokens` / `computeTokens`,
+ * `batches.list` / `get` / `cancel` / `delete`, `interactions.get` / `cancel` /
+ * `delete`, `tunings.list` / `get` / `cancel`, `caches.list` / `get` / `delete`,
+ * `fileSearchStores.list` / `get` / `create` / `delete` / `downloadMedia` and its
+ * `documents` reads) and the namespaces with nothing billable (`files`, `operations`,
+ * `authTokens`, `webhooks`).
+ *
+ * Exported for the tests, which assert one refusal per entry. The type layer's twin
+ * is the `Refused…` mapping above `GovernedShapeOf`; the two must list the same names.
+ */
+export const GOOGLE_REFUSED_METHODS = {
+	models: [
+		"embedContent",
+		"generateImages",
+		"editImage",
+		"upscaleImage",
+		"generateVideos",
+		"recontextImage",
+		"segmentImage",
+	],
+	chats: ["create"],
+	live: ["connect"],
+	"live.music": ["connect"],
+	batches: ["create", "createEmbeddings"],
+	interactions: ["create"],
+	tunings: ["tune"],
+	caches: ["create", "update"],
+	fileSearchStores: ["uploadToFileSearchStore", "importFile"],
+} as const satisfies Record<string, readonly string[]>;
+
+const GOOGLE_GOVERNED_METHODS = "models.generateContent and models.generateContentStream";
+
+/** The client-level namespaces that carry a refused method (`live.music` hangs off `live`). */
+const GOOGLE_REFUSING_NAMESPACES: ReadonlySet<string> = new Set([
+	"chats",
+	"live",
+	"batches",
+	"interactions",
+	"tunings",
+	"caches",
+	"fileSearchStores",
+]);
+
+function isGoogleRefusingNamespace(
+	prop: string | symbol,
+): prop is Exclude<keyof typeof GOOGLE_REFUSED_METHODS, "models" | "live.music"> {
+	return typeof prop === "string" && GOOGLE_REFUSING_NAMESPACES.has(prop);
+}
+
+/** The refusal a governed client answers a GOOGLE_REFUSED_METHODS call with. */
+function ungovernedGoogleMethodError(path: string): PolicyDeniedError {
+	return new PolicyDeniedError(
+		`ungoverned_method: ${path} is not governed on a Google client`,
+		`usertrust governs ${GOOGLE_GOVERNED_METHODS} on a Google client, and refuses this method rather than let it run unmetered. To make this call anyway, run it on the original (unwrapped) client inside governAction() with a cost estimate.`,
+	);
+}
+
+/**
+ * Refuse one ungoverned method call: write its `policy_denied` event at the denial
+ * boundary, then reject with the PolicyDeniedError. Built by `trust()`, which owns the
+ * audit writer; the proxy builders only know the method's path.
+ */
+
+/** `obj[key]` when it is an OWN DATA property holding a string; never runs an accessor or a trap. */
+function ownStringDataProperty(obj: unknown, key: string): string | undefined {
+	if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) return undefined;
+	if (utilTypes.isProxy(obj)) return undefined; // its descriptor trap is caller code
+	try {
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		return d !== undefined && "value" in d && typeof d.value === "string" ? d.value : undefined;
+	} catch {
+		return undefined; // defensive: no label, the refusal still lands
+	}
+}
+
+/**
+ * The AFC gate both Google traps run before `intercept` (after the audit preflight):
+ * snapshot `args[0]` (google-afc.ts), then decide ON the snapshot with the one AFC
+ * reading. `generateContent` uses `afcRequestedVerdict`: "afc" runs the governed per-round
+ * loop on the snapshot. `generateContentStream` uses `sdkRunsAfcVerdict`: "afc" is refused,
+ * because a streamed AFC loop is not metered round by round yet. "indeterminate" is refused
+ * on both. When the call proceeds, `args[0]` IS the snapshot, so what is forwarded (to the
+ * loop or to the single governed call) is what was checked.
+ */
+function googleAfcGate(
+	args: unknown[],
+	method: "generateContent" | "generateContentStream",
+): { refusal: PolicyDeniedError } | { runAfcLoop: boolean } {
+	const snap = snapshotGoogleAfcParams(args[0]);
+	if ("verdict" in snap) return { refusal: googleAfcError(method, snap.verdict) };
+	const verdict =
+		method === "generateContent"
+			? afcRequestedVerdict(snap.params)
+			: sdkRunsAfcVerdict(snap.params);
+	if (verdict.kind === "indeterminate") return { refusal: googleAfcError(method, verdict) };
+	if (verdict.kind === "afc" && method === "generateContentStream") {
+		return { refusal: googleAfcError(method, verdict) };
+	}
+	if (args.length > 0) args[0] = snap.params;
+	return { runAfcLoop: verdict.kind === "afc" };
+}
+
+function googleAfcError(
+	method: "generateContent" | "generateContentStream",
+	verdict: Exclude<GoogleAfcVerdict, { kind: "no_afc" }>,
+): PolicyDeniedError {
+	if (verdict.kind === "indeterminate" && verdict.uncloneableAt !== undefined) {
+		return new PolicyDeniedError(
+			`ungoverned_method: models.${method} could not be checked for automatic function calling (${verdict.uncloneableAt} cannot be copied as data); pass plain objects`,
+			"With automatic function calling not disabled, the request is forwarded as a copy of what was checked, and a tool that structuredClone cannot copy (a function or symbol in it, other than a callable tool's callTool) cannot be. Pass plain data, or set config.automaticFunctionCalling.disable: true.",
+		);
+	}
+	if (verdict.kind === "indeterminate" && verdict.proxyAt !== undefined) {
+		return new PolicyDeniedError(
+			`ungoverned_method: models.${method} could not be checked for automatic function calling (a Proxy in ${verdict.proxyAt}); pass plain objects`,
+			"A Proxy can show this check one config and the SDK another, so usertrust refuses it rather than trust what it saw. Pass plain objects for params, params.config, config.tools, each tool and config.automaticFunctionCalling.",
+		);
+	}
+	return verdict.kind === "afc"
+		? new PolicyDeniedError(
+				`ungoverned_method: models.${method} with automatic function calling is not governed yet`,
+				"With a callable tool, the SDK streams one provider round after another inside this call, and usertrust does not yet meter a streamed loop round by round (models.generateContent with automatic function calling is metered per round). Use models.generateContent, set config.automaticFunctionCalling.disable: true and run the tool calls yourself, or make the call on the original (unwrapped) client inside governAction() with a cost estimate.",
+			)
+		: new PolicyDeniedError(
+				`ungoverned_method: models.${method} could not be checked for automatic function calling`,
+				"The request could not be read safely: a getter threw, config is not an object, config.tools is not an array, a tool is missing (a hole) or not an object, maximumRemoteCalls is an object, or a callable tool's callTool is a getter. usertrust cannot tell whether the SDK would run automatic function calling, so it refuses. Pass plain data (an array of objects for config.tools).",
+			);
+}
+
+/**
+ * Wrap one Google namespace so its refused methods are refused through `refuse`. A namespace that is not a
+ * non-null object (absent, or callable) is left raw, and so is a listed member that
+ * is not a function: there is nothing to call, so there is nothing to refuse. The
+ * wrapper is built per namespace OBJECT and cached, so `client.chats === client.chats`
+ * still holds across accesses.
+ */
+function refusingNamespaceProxy(
+	ns: unknown,
+	path: keyof typeof GOOGLE_REFUSED_METHODS,
+	refuse: RefuseFn,
+	cache: NamespaceProxyCache,
+): unknown {
+	if (ns == null || typeof ns !== "object") return ns;
+	// Keyed by PATH and object: a duck-typed client may alias one object under two namespaces
+	// (`client.chats === client.caches`), and each alias must get ITS OWN refusal list. Keyed by
+	// the object alone, the first path reached would answer for every alias.
+	let byObject = cache.get(path);
+	if (byObject === undefined) {
+		byObject = new WeakMap();
+		cache.set(path, byObject);
+	}
+	const cached = byObject.get(ns);
+	if (cached !== undefined) return cached;
+	const refused: readonly string[] = GOOGLE_REFUSED_METHODS[path];
+	const passThrough = new WeakMap<object, unknown>();
+	const wrapped = new Proxy(ns as Record<string | symbol, unknown>, {
+		get(target, prop) {
+			// Read on the RAW object, so a getter backed by a `#private` field does not throw.
+			const value = Reflect.get(target, prop, target);
+			if (typeof prop === "string" && refused.includes(prop) && typeof value === "function") {
+				return (...args: unknown[]) => refuse(`${path}.${prop}`, args);
+			}
+			// `live.music` is the one nested namespace with a refused member.
+			if (path === "live" && prop === "music") {
+				return refusingNamespaceProxy(value, "live.music", refuse, cache);
+			}
+			return onRawReceiver(target, prop, value, passThrough);
+		},
+	});
+	byObject.set(ns, wrapped);
+	return wrapped;
+}
+
+/** Refusing-namespace proxies, per namespace PATH, then per raw object. */
+type NamespaceProxyCache = Map<string, WeakMap<object, unknown>>;
+
+/**
+ * A pass-through member of a proxied Google namespace. A METHOD is wrapped to run on the RAW
+ * object (`fn.apply(target, args)`), as the governed methods already do: returned bare, it is
+ * called with the proxy as `this`, and a method that reads a `#private` field (`this.#client`)
+ * throws a private-brand TypeError. The wrapper is cached per function, so repeated reads give
+ * the same function. `constructor` and non-functions are returned as they are.
+ */
+function onRawReceiver(
+	target: object,
+	prop: string | symbol,
+	value: unknown,
+	cache: WeakMap<object, unknown>,
+): unknown {
+	if (typeof value !== "function" || prop === "constructor") return value;
+	const fn = value as (...args: unknown[]) => unknown;
+	let wrapper = cache.get(fn);
+	if (wrapper === undefined) {
+		wrapper = (...args: unknown[]) => fn.apply(target, args);
+		cache.set(fn, wrapper);
+	}
+	return wrapper;
+}
+
+/**
+ * Google: `models.generateContent` and `models.generateContentStream` route through
+ * interceptCall. The stream's SDK result (a Promise of an AsyncGenerator of
+ * `GenerateContentResponse` chunks) takes the generic `Symbol.asyncIterator` branch:
+ * createGovernedStream wraps it, `usageMetadata` is read from each chunk as a
+ * replace-with-latest snapshot (streaming.ts, via the same `fromGeminiUsage` the
+ * non-stream settle uses), and the hold settles when the stream ends. Like the
+ * Anthropic `messages.stream` helper, the governed `generateContentStream` resolves to
+ * the stream itself (an async generator yielding the SDK's chunks unchanged) with the
+ * settled `.receipt` promise on it, so `for await (const c of await
+ * models.generateContentStream(p))` keeps its SDK shape. The listed generation
+ * methods are refused (GOOGLE_REFUSED_METHODS) through `refuse`, which audits the
+ * denial and rejects; everything else passes through, including other paths to the
+ * same endpoints (not a boundary: see detect.ts).
+ */
 function buildGoogleProxy<T>(
 	client: T,
 	intercept: InterceptFn,
 	destroy: () => Promise<void>,
 	governAction: GovernActionFn,
+	refuse: RefuseFn,
+	preflight: () => void,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const models = original.models as Record<string, unknown>;
 	const originalGenerate = models.generateContent as (...args: unknown[]) => unknown;
+	// Feature-detected like the other optional surfaces: a client without the method
+	// leaves it a raw pass-through (there is nothing to call).
+	const originalGenerateStream =
+		typeof models.generateContentStream === "function"
+			? (models.generateContentStream as (...args: unknown[]) => unknown)
+			: undefined;
+	const refusedOnModels: readonly string[] = GOOGLE_REFUSED_METHODS.models;
+	const namespaceCache: NamespaceProxyCache = new Map();
+	const modelsPassThrough = new WeakMap<object, unknown>();
 
 	const modelsProxy = new Proxy(models, {
-		get(target, prop, receiver) {
+		get(target, prop) {
 			if (prop === "generateContent") {
-				return (...args: unknown[]) => {
-					// With a callable tool the SDK would loop internally and only the last round would be metered:
-					// run the loop here instead, each round its own governed call (see google-afc.ts).
-					const params = args[0];
-					if (afcRequested(params)) {
-						return runGovernedAfc(params as Record<string, unknown>, (roundParams) =>
+				return async (...args: unknown[]) => {
+					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
+					// ── AFC gate (snapshots args[0]: what is forwarded is what was checked) ──
+					const gate = googleAfcGate(args, "generateContent");
+					if ("refusal" in gate) {
+						return refuse("models.generateContent", args, gate.refusal);
+					}
+					if (gate.runAfcLoop) {
+						// With a callable tool the SDK would loop internally and only the last round
+						// would be metered: run the loop here instead, ON THE SNAPSHOT, each round its
+						// own governed call (see google-afc.ts).
+						return runGovernedAfc(args[0] as Record<string, unknown>, (roundParams) =>
 							intercept(originalGenerate, target, [roundParams, ...args.slice(1)]),
 						);
 					}
+					// ── end AFC gate ──
 					return intercept(originalGenerate, target, args);
 				};
 			}
-			return Reflect.get(target, prop, receiver);
+			if (prop === "generateContentStream" && originalGenerateStream !== undefined) {
+				return async (...args: unknown[]) => {
+					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
+					// ── AFC gate: a streamed AFC loop is refused until it is metered per round ──
+					// (snapshots args[0]: what is forwarded is what was checked)
+					const gate = googleAfcGate(args, "generateContentStream");
+					if ("refusal" in gate) {
+						return refuse("models.generateContentStream", args, gate.refusal);
+					}
+					// ── end AFC gate ──
+					const { response } = await intercept(originalGenerateStream, target, args);
+					return response;
+				};
+			}
+			// Read on the RAW object, so a getter backed by a `#private` field does not throw.
+			const value = Reflect.get(target, prop, target);
+			if (
+				typeof prop === "string" &&
+				refusedOnModels.includes(prop) &&
+				typeof value === "function"
+			) {
+				return (...args: unknown[]) => refuse(`models.${prop}`, args);
+			}
+			return onRawReceiver(target, prop, value, modelsPassThrough);
 		},
 	});
 
@@ -5179,6 +5620,14 @@ function buildGoogleProxy<T>(
 			if (prop === "models") return modelsProxy;
 			if (prop === "destroy") return destroy;
 			if (prop === "governAction") return governAction;
+			if (isGoogleRefusingNamespace(prop)) {
+				return refusingNamespaceProxy(
+					Reflect.get(target, prop, receiver),
+					prop,
+					refuse,
+					namespaceCache,
+				);
+			}
 			return Reflect.get(target, prop, receiver);
 		},
 	});

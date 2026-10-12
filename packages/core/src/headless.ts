@@ -68,6 +68,10 @@ import {
 	type EnvelopeStatus,
 	envelopeStatusFrom,
 } from "./budget/context.js";
+import {
+	type EnforcedBudgetRegistration,
+	registerEnforcedBudget,
+} from "./budget/effective-record.js";
 // The cost-center envelope helpers are SHARED with `govern.ts`, not copied from
 // it (see the block comment above `ResolvedEnvelope` there). D1's throw, A2's
 // pre-gate refusal, A7's unfloored arithmetic and D5's label re-wrap all decide
@@ -1229,8 +1233,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 	// 2. Initialize subsystems
 	const vaultPath = vaultBase;
+	// This governor's budget on its vault's record (budget/effective-record.ts); set once it has started. Its first
+	// successful append means this process holds the vault's writer lock, which is when the record may be published.
+	let enforcedBudget: EnforcedBudgetRegistration | undefined;
 	const audit: AuditWriter =
-		(isTestEnv ? opts?._audit : undefined) ?? openSharedAuditWriter(vaultPath);
+		(isTestEnv ? opts?._audit : undefined) ??
+		openSharedAuditWriter(vaultPath, { onAppended: () => enforcedBudget?.appended() });
 
 	/**
 	 * Under `audit.failClosed`, the audit writer's pre-flight, as `trust()` runs it: the tail classified
@@ -2738,6 +2746,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		async destroy(): Promise<void> {
 			if (destroyed) return;
 			destroyed = true;
+			enforcedBudget?.release();
 
 			// Never void a hold a terminal is still working on: a settle's POST, or an abort
 			// or release parked on the budget lock or its own void. ONE deadline for both
@@ -2947,6 +2956,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	process.once("beforeExit", cleanupHandler);
 	process.once("SIGTERM", cleanupHandler);
 	process.once("SIGINT", cleanupHandler);
+
+	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
+	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Registered LAST,
+	// once the governor is fully initialised: a start that fails later (an invalid policy) enforces nothing and must not
+	// replace the record of a governor that is running. Published only while this process holds the vault's writer lock
+	// (from the first successful append), so a process that never gets the lock never overwrites the holder's record.
+	// Advisory: it never throws, and a failed write removes any earlier record rather than leave a stale one.
+	enforcedBudget = registerEnforcedBudget(join(vaultBase, VAULT_DIR), config.budget, () =>
+		audit.lockOwner?.(),
+	);
 
 	return governor;
 }

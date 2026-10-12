@@ -88,7 +88,7 @@ Both denial errors above carry `auditEventHash` — the hash of the chain event
 the governor wrote when it refused the call. It is the join between the
 exception your code logged and the record an auditor reads: `policy_denied` for
 a governor decision (a policy rule, a budget-family rule, PII, injection, an
-unpriceable model, or a refused ungoverned SDK method), `ledger_rejected` for the ledger's own atomic refusal of the
+unpriceable model, or a refused ungoverned SDK method on any provider), `ledger_rejected` for the ledger's own atomic refusal of the
 hold.
 
 ```typescript

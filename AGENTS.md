@@ -1238,8 +1238,21 @@ inside the chain; and a "repair" that chooses which evidence is true. `quarantin
 subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evidence as a segment.
 
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
-`packages/core/src/audit/read.ts`, `packages/core/src/audit/dead-letters.ts`, and
+`packages/core/src/audit/read.ts`, `packages/core/src/audit/effective-budget.ts`, `packages/core/src/audit/dead-letters.ts`, and
 `packages/core/src/audit/verify.ts` contain zero filesystem write calls. Keep it that way — a verifier that mutates its subject is not a verifier.
+
+**A vault reader's budget is the one the governor ENFORCES.** `createGovernor` and `trust()` resolve the budget from
+`opts.budget`, `opts.configPath`, the vault's `usertrust.config.json` or the default, then record the result in
+`.usertrust/effective-budget.json` (`budget/effective-record.ts`; advisory, never throws; a failed write removes any
+earlier record). `loadBudgetConfig` reads that record first, then the vault config, and returns `source: "governor" |
+"config" | "several" | "unreadable" | "unpublished"`, the record's `writtenAt` and, for `unreadable`, its `reason`. The
+last three are an UNKNOWN budget, each said as itself (never "no budget configured": every governor enforces one), and
+a reader shows no remaining figure for them. Wherever a budget is SHOWN, its provenance is shown with it, in the one wording
+`describeBudgetSource` gives: only a governor record reads as the enforced figure, always "as of" its `writtenAt` (so a
+record that outlived a failed removal reads as old, never as current); a config budget says "not confirmed as
+enforced". The ledger UI, `inspect`, `health` and `report` all read it; never add a reader that parses the config file
+alone, or a surface that shows the figure without its provenance.
+The governor registers LAST in both constructors, once it has fully started (a failed start enforces nothing), and every step of the record's failure path is non-throwing. The record is PUBLISHED only while this process holds the vault's audit writer lock, which a governor takes lazily at its first append (`AuditWriter.lockOwner`, `openSharedAuditWriter`'s `onAppended`): before the first successful append nothing is published (`unpublished`), and a second process, whose appends fail on the lock, never overwrites the holder's record. Several live governors on one vault are aggregated in-process (`registerEnforcedBudget`): the record is the agreed budget, or `budget: null` with the governor count when they differ, which every reader shows as unknown (`source: "several"`); it is rewritten on every start and every destroy while the lock is held, and again when a new writer takes the lock, never stored as a flag. Readers stat the record before opening it (a FIFO would block them). The ledger UI re-reads it when it or the vault config changes. Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
 
 **`vaultPath` means two different directories.** `createAuditWriter(vaultPath)` joins
 `vaultPath/.usertrust/audit` — it takes the **project root**. `verifyVault`, `readLedgerEvents`,
@@ -1640,20 +1653,39 @@ constant disagree.
 
 **The governance boundary is documented in `detect.ts`.** Governed: Anthropic
 `messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected), OpenAI
-`chat.completions.create` and `responses.create` when present, Google `models.generateContent`.
+`chat.completions.create` and `responses.create` when present, Google `models.generateContent`
+and `models.generateContentStream`.
 **Anthropic and OpenAI clients are default-deny** (`default-deny.ts`): every other function-valued
 SDK member reached off the governed client, at any depth, is refused through ONE function,
-`refuseUngovernedMethod` in `trust()`, which writes `policy_denied` at the denial boundary and
-rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
+`refuseUngovernedMethod` in `trust()` (the same one Google's refusals use, below), which first runs
+the degraded-audit preflight (under `failClosed`, a writer already degraded refuses with
+`AuditDegradedError` before anything is recorded), then writes `policy_denied` at the denial boundary
+and rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
 requests are all GET or DELETE, plus POSTs named with a reason, minus GET/DELETE methods named as
 exceptions. Each entry cites its SDK source line and verb; they run with the RAW resource as
 `this`, because `this._client` through the boundary is a refusing stand-in, and
 `default-deny.test.ts` calls every entry and fails on a POST its `FREE_POSTS` does not name and `trust({ allowUngoverned })` (audited as
 `ungoverned_call`). `_client` and the client's raw HTTP members are refused by name; `withOptions`
 is re-wrapped by the same governor, unless an option outside `GOVERNED_WITH_OPTIONS_KEYS` (an
-allow-list) changes the transport, when the new client is a refusing stand-in. On a Google client
-everything else passes through. A POST is freed only with a reason it cannot start billable work, written in both places; a create that can
+allow-list) changes the transport, when the new client is a refusing stand-in. A POST is freed only with a reason it cannot start billable work, written in both places; a create that can
 allocate storage is not free. If you add a governed surface, update that doc block and the free list.
+**Google clients are not default-deny**: a listed set of Google's billable methods is **refused**
+by name (`GOOGLE_REFUSED_METHODS` in `govern.ts`:
+`models.embedContent/generateImages/editImage/upscaleImage/generateVideos/recontextImage/
+segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create/
+createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create/update`,
+`fileSearchStores.uploadToFileSearchStore/importFile`), through the same `refuseUngovernedMethod`;
+calls that are not billed
+(`models.countTokens/list/get`, `caches.get`, `files`, and the like) pass through. With automatic
+function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in `google-afc.ts`, a mirror of the
+SDK's `shouldDisableAfc`, made on a snapshot of the request that is then what is forwarded),
+`models.generateContent` runs the loop itself, each round its own governed call
+(`runGovernedAfc`), and `models.generateContentStream` is refused the same way (a streamed loop is
+not metered per round yet). The refused list is NOT a boundary: everything else on a Google client
+passes through, including other paths to the same endpoints (`models.*Internal`, e.g.
+`generateContentInternal`, which also bypasses the per-round AFC metering; `getNextGenClient()`;
+`chats.modelsModule`; `apiClient` on the client and every namespace). Google default-deny is the
+planned fix. If you add a governed or refused Google surface, update `detect.ts`.
 
 ---
 

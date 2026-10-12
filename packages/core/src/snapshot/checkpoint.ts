@@ -49,6 +49,8 @@ const INCLUDED_PATHS = new Set([
 	// SNAP-1: the durable money mirror. Captured so a restore rolls the audit chain
 	// and the money ledger back together, never one without the other.
 	"spend-ledger.json",
+	// NOT `effective-budget.json`: it is derived (the budget the governor enforces, rewritten at every start), so a
+	// restore never brings back an older run's budget as if it were current.
 ]);
 
 /** Never captured: advisory lock file living inside audit/. */

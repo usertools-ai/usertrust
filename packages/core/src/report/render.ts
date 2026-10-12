@@ -145,7 +145,9 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 	const b = m.budget;
 	if (b.unknown)
 		return [
-			"Budget unknown (the vault config could not be read). This is not 'no budget configured': fix the read error and run the report again.",
+			b.unknownReason !== null
+				? `Budget ${v(b.unknownReason)}. This is not 'no budget configured'.`
+				: "Budget unknown (the vault config could not be read). This is not 'no budget configured': fix the read error and run the report again.",
 			...reconciliationLines(m),
 		];
 	if (b.configuredUt === null)

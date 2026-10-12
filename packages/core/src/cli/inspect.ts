@@ -11,7 +11,12 @@
 import { existsSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
-import { loadBudgetConfig, type PersistedAuditEvent } from "../audit/read.js";
+import {
+	describeBudgetSource,
+	isKnownBudget,
+	loadBudgetConfig,
+	type PersistedAuditEvent,
+} from "../audit/read.js";
 import { type VaultReading, verifyVaultReading } from "../audit/verify.js";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
@@ -113,8 +118,15 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const verification = reading?.result ?? { valid: true, errors: [], merkleRoot: null };
 	const events = statementEvents(reading?.events ?? []);
 	const spent = computeSpent(events);
-	const remaining = config.budget - spent;
-	const pct = config.budget > 0 ? ((remaining / config.budget) * 100).toFixed(1) : "0.0";
+	// An UNKNOWN budget (no governor record, no configured budget) has no remaining figure: subtracting spend from the
+	// placeholder 0 printed a negative balance for a vault whose governor enforces a real budget elsewhere.
+	const budgetKnown = isKnownBudget(config.source);
+	const remaining = budgetKnown ? config.budget - spent : null;
+	const pct =
+		remaining !== null && config.budget > 0 ? ((remaining / config.budget) * 100).toFixed(1) : null;
+	// Wherever the budget is shown, so is where it came from: only a governor record is the ENFORCED figure, and it
+	// carries its age; a config budget says it is unconfirmed.
+	const provenance = describeBudgetSource(config);
 	const merkleRoot = verification.merkleRoot;
 	const latestHash = reading?.orderedHashes[reading.orderedHashes.length - 1] ?? GENESIS_HASH;
 
@@ -134,10 +146,13 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				command: "inspect",
 				success: true,
 				data: {
-					budget: config.budget,
+					budget: budgetKnown ? config.budget : null,
+					budgetSource: config.source,
+					budgetWrittenAt: config.writtenAt,
+					budgetProvenance: provenance,
 					spent,
 					remaining,
-					percentRemaining: Number.parseFloat(pct),
+					percentRemaining: pct === null ? null : Number.parseFloat(pct),
 					chain: {
 						events: events.length,
 						valid: verification.valid,
@@ -155,10 +170,13 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	console.log("+--------------------------------------------------------------+");
 	console.log(`|  ${pc.bold("* usertrust vault")}${" ".repeat(43)}|`);
 	console.log(
-		`${`|  Budget: ${remaining.toLocaleString()} / ${config.budget.toLocaleString()} UT remaining (${pct}%)`.padEnd(
-			63,
-		)}|`,
+		`${(
+			remaining === null
+				? `|  Budget: ${provenance}, ${spent.toLocaleString()} UT spent`
+				: `|  Budget: ${remaining.toLocaleString()} / ${config.budget.toLocaleString()} UT remaining (${pct}%)`
+		).padEnd(63)}|`,
 	);
+	if (remaining !== null) console.log(`${`|    (${provenance})`.padEnd(63)}|`);
 	console.log(
 		`${`|  Chain: ${events.length} events | Integrity: ${verification.valid ? "SHA-256 verified" : "INTEGRITY FAILURE"}`.padEnd(
 			63,

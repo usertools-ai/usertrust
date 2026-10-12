@@ -15,7 +15,7 @@ today:
 - Anthropic: `client.messages.create()`, `client.messages.stream()`, and
   `client.beta.messages.{create,stream,parse}()`
 - OpenAI: `client.chat.completions.create()` and `client.responses.create()`
-- Google: `client.models.generateContent()`
+- Google: `client.models.generateContent()` and `client.models.generateContentStream()`
 
 Streaming through any governed method is governed end to end, including
 mid-stream anomaly cutoff and settle-or-void on completion.
@@ -32,8 +32,8 @@ DELETE (reads, lists, deletes), and a few POSTs named with a reason (token count
 moderations, cancels, pauses, metadata updates). A method you list in
 `trust({ allowUngoverned })` runs **unmetered**: it reaches the provider without
 a budget hold or a cost, and its only record is an `ungoverned_call` audit event.
-On a Google client, the alternative methods still pass through ungoverned. The
-exact, current boundary is enumerated at the source in
+On a Google client there is no default-deny boundary: only the paths named in the
+Google paragraph below are governed or refused, and everything else passes through. The exact, current boundary is enumerated at the source in
 `packages/core/src/detect.ts` and `packages/core/src/default-deny.ts`.
 
 **Threat model.** Default-deny prevents ACCIDENTAL unmetered spend through the
@@ -62,6 +62,31 @@ that take a client and open their own connection (OpenAI's Realtime and
 Responses WebSocket classes read the client's API key and talk to the provider
 directly). Governed calls price tokens only: server-side tool fees (web search,
 code execution, file search, containers) are not metered.
+
+On a Google client, the calls that are not billed (`models.countTokens`,
+`models.list`, `caches.get`, `files` and the like) pass through ungoverned. Google's other billable methods (`models.embedContent`, the image and
+video methods, `chats`, `live`, `batches.create`, `interactions.create`,
+`tunings.tune`, `caches.create` / `update`, and the `fileSearchStores` upload and
+import) are refused instead: the call rejects with a `PolicyDeniedError` naming
+the method, and records a `policy_denied` audit event, before the SDK is called.
+**That refused list is not a boundary:** those methods are refused when called by those names, but other paths to the same endpoints still pass through ungoverned, among them the SDK's internal `models.*Internal` methods (`generateContentInternal`, which sends the request behind `generateContent`, and the rest), `getNextGenClient()` (whose `interactions.create` reaches the provider), `chats.modelsModule` (the SDK's raw `Models`), the raw transport `apiClient` (on the client and on every namespace), and every namespace and method not listed. A default-deny boundary for Google clients, as Anthropic and OpenAI clients have, is the planned fix.
+So is `models.generateContentStream` when it would run automatic function calling
+(a streamed loop of provider rounds, which usertrust does not yet meter round by
+round); `models.generateContent` with it is metered per round instead, each round
+its own governed call. That per-round metering, like the rest of the Google
+governance, holds only for calls made through `models.generateContent` and
+`models.generateContentStream`: `models.generateContentInternal` (and `generateContent` on
+`chats.modelsModule`) reaches the same endpoint ungoverned, with no hold, no AFC
+check and no audit. Use `generateContent`, or disable AFC with
+`config.automaticFunctionCalling.disable: true`, to have the stream governed. The
+check needs plain objects: a Proxy in `params`, `config`, `config.tools`, a tool or
+`config.automaticFunctionCalling` is refused, because a Proxy can show the check
+one config and the SDK another. Accessors there are read once and their values
+captured, so the check and the SDK use the same value. The request is forwarded as a snapshot of the
+checked config (with AFC not disabled, each non-callable tool must be copyable as
+data), so a later change to the caller's `config.tools` or
+`config.automaticFunctionCalling` cannot reach the SDK. The snapshot covers those
+AFC fields only: `contents` and the rest of the request are still read live.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.
 That is what makes it a one-line integration with zero SDK dependencies across
@@ -140,7 +165,12 @@ warning (at the first failure, and with the count when the client is destroyed),
 `usertrust verify` reports the vault INCOMPLETE and exits 1 for a dead-lettered event (if the dead-letter write itself fails and leaves no bytes, for instance on a full disk, neither `verify` nor `health` sees the gap; a partial line left by a short write counts as an unreadable entry, so the vault reads INCOMPLETE). With
 `audit.failClosed: true`, such calls are refused instead, before any hold: every governed
 `trust()` call and action, and headless `authorize()` (whose `settle()` stays fail-open);
-`usertrust-server` answers that tenant's authorize with `503 audit_refused`.
+`usertrust-server` answers that tenant's authorize with `503 audit_refused`. Such a process's budget is
+not visible to vault readers either: the enforced-budget record
+(`effective-budget.json`) is published only by the process that holds the lock, so
+the ledger UI, `inspect`, `health` and `report` show the lock holder's budget, or
+"not yet published" before its first append, while the degraded process goes on
+enforcing its own.
 
 **Load ONE copy of usertrust per process, and use a vault from one thread.** The
 shared writer, and the registry that tells a live writer in this process from a
@@ -326,12 +356,9 @@ The full scope, per provider, is on the [PII Detection](https://usertrust.ai/doc
 
 ## 12. A stream aborted by the caller's own signal is not charged for what it consumed
 
-A governed `create({ stream: true })` call on an OpenAI or Anthropic client that the
-caller aborts with its own `AbortSignal` has its hold voided, so the usage the stream
-had already consumed goes uncharged. A stream the caller ends with an early `break` is
-charged for what it consumed; the abort path is the gap. A provider error mid-stream
-voids the hold, as intended. This is a known gap, fixed in the next release. Until
-then, do not rely on an aborted stream to have been charged.
+Fixed after 5.0.0: a governed stream the caller aborts with its own `AbortSignal` now settles
+the usage it consumed, as an early `break` does, instead of voiding its hold. 5.0.0 still has
+the gap, on OpenAI and Anthropic `create({ stream: true })`.
 
 ## 13. A ledger-backed server can hang when its ledger is unreachable, and may not audit a hold it releases on SIGINT or SIGTERM
 

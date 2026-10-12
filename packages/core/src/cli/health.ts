@@ -17,7 +17,12 @@ import {
 	type EntropyEventInput,
 	type EntropyLevel,
 } from "../audit/entropy.js";
-import type { PersistedAuditEvent } from "../audit/read.js";
+import {
+	describeBudgetSource,
+	isKnownBudget,
+	loadBudgetConfig,
+	type PersistedAuditEvent,
+} from "../audit/read.js";
 import { verifyVaultReading } from "../audit/verify.js";
 import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
@@ -177,19 +182,6 @@ function toSafeJson(value: unknown): string {
 	});
 }
 
-function loadConfig(vaultPath: string): { budget: number } {
-	const configPath = join(vaultPath, "usertrust.config.json");
-	if (!existsSync(configPath)) return { budget: 0 };
-
-	try {
-		const raw = readFileSync(configPath, "utf-8");
-		const config = JSON.parse(raw) as { budget?: number };
-		return { budget: typeof config.budget === "number" ? config.budget : 0 };
-	} catch {
-		return { budget: 0 };
-	}
-}
-
 /**
  * Cumulative SESSION spend, as the governor persists it.
  *
@@ -313,7 +305,8 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		return;
 	}
 	const events = signalEventsOf(verifiedEvents);
-	const config = loadConfig(vaultPath);
+	// The budget the governor ENFORCES when it recorded one, else the vault config (one reader: `loadBudgetConfig`).
+	const config = loadBudgetConfig(vaultPath);
 	const policyStatus = loadPolicyStatus(vaultPath);
 
 	// Convert audit events to entropy event inputs
@@ -502,6 +495,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 						// machine consumer must be able to tell that apart from a vault
 						// that has genuinely spent nothing.
 						budgetUtilization: budgetPct === null ? null : Number.parseFloat(budgetPct),
+						// Where the budget came from, beside it: only a governor record is the ENFORCED figure, with its age.
+						budgetSource: config.source,
+						budgetWrittenAt: config.writtenAt,
+						budgetProvenance: describeBudgetSource(config),
 						// true when the persisted session spend is unrepresentable or >1000x the budget: recovery is
 						// documented in docs/runaway-spend.md. Absent otherwise.
 						...(runawaySpend ? { budgetRunaway: true } : {}),
@@ -620,13 +617,16 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// configured budget, or a malformed/non-positive one) or the NUMERATOR is
 	// (an unreadable or lost ledger). Reporting "unreadable ledger" for a config
 	// problem points at an artifact that may be perfectly fine.
+	// An UNKNOWN budget (several governors, an unreadable record, none published yet) says which, in the shared
+	// wording: never "no budget configured", since every governor enforces one.
 	const budgetText =
 		budgetPct !== null
 			? `${budgetPct}%`
-			: config.budget > 0
+			: isKnownBudget(config.source)
 				? "unreadable ledger"
-				: "no budget configured";
+				: describeBudgetSource(config);
 	console.log(`  Budget utilization:      ${budgetText} ${budgetStatus}`);
+	console.log(`  Budget source:           ${describeBudgetSource(config)}`);
 	if (implausibleUsageCount > 0) {
 		console.log(
 			`  Implausible usage:       ${implausibleUsageCount} call(s) charged at the estimate ${pc.yellow("[review]")}`,

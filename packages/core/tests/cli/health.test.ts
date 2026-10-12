@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { canonicalize } from "../../src/audit/canonical.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
+import { recordEffectiveBudget } from "../../src/budget/effective-record.js";
 import { run } from "../../src/cli/health.js";
 
 describe("usertrust health", () => {
@@ -616,5 +617,79 @@ describe("usertrust health — vault states", () => {
 		await run(tempDir);
 
 		expect(out()).toContain("FAILED");
+	});
+});
+
+// Whole-PR MAX on 534b7c46: health shows a budget's provenance like every other surface.
+describe("usertrust health: the budget's provenance, in both modes", () => {
+	let dir: string;
+	let lines: string[];
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "trust-health-prov-"));
+		lines = [];
+		vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+			lines.push(args.map(String).join(" "));
+		});
+		mkdirSync(join(dir, ".usertrust", "audit"), { recursive: true });
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("red-first (absent): a governor record reads as enforced, with its age; a config budget as unconfirmed", async () => {
+		writeFileSync(
+			join(dir, ".usertrust", "usertrust.config.json"),
+			JSON.stringify({ budget: 1_000 }),
+		);
+		await run(dir);
+		expect(lines.join("\n")).toContain(
+			"Budget source:           from usertrust.config.json; not confirmed as enforced",
+		);
+		lines = [];
+		await run(dir, { json: true });
+		const cfg = JSON.parse(lines.join("")) as { data: { signals: Record<string, unknown> } };
+		expect(cfg.data.signals).toMatchObject({
+			budgetSource: "config",
+			budgetWrittenAt: null,
+			budgetProvenance: "from usertrust.config.json; not confirmed as enforced",
+		});
+		recordEffectiveBudget(join(dir, ".usertrust"), 2_000);
+		lines = [];
+		await run(dir, { json: true });
+		const rec = JSON.parse(lines.join("")) as { data: { signals: Record<string, unknown> } };
+		expect(rec.data.signals.budgetSource).toBe("governor");
+		expect(rec.data.signals.budgetProvenance).toMatch(
+			/^the enforced budget, as of \d{4}-\d{2}-\d{2}T/,
+		);
+		lines = [];
+		await run(dir);
+		expect(lines.join("\n")).toMatch(/Budget source: +the enforced budget, as of \d{4}-/);
+	});
+
+	it("red-first (no budget configured): an UNREADABLE record is unknown with its reason, never 'no budget configured'", async () => {
+		writeFileSync(join(dir, ".usertrust", "effective-budget.json"), "{torn");
+		await run(dir);
+		const text = lines.join("\n");
+		expect(text).toContain(
+			"Budget utilization:      unknown: the enforced-budget record could not be read; not valid JSON",
+		);
+		expect(text).not.toContain("no budget configured");
+		lines = [];
+		await run(dir, { json: true });
+		const out = JSON.parse(lines.join("")) as { data: { signals: Record<string, unknown> } };
+		expect(out.data.signals).toMatchObject({
+			budgetSource: "unreadable",
+			budgetProvenance: "unknown: the enforced-budget record could not be read; not valid JSON",
+		});
+	});
+
+	it("no record and no config: 'not yet published', never 'no budget configured'", async () => {
+		await run(dir);
+		const text = lines.join("\n");
+		expect(text).toContain(
+			"Budget utilization:      unknown: not yet published; no governor has recorded the budget it enforces",
+		);
+		expect(text).not.toContain("no budget configured");
 	});
 });

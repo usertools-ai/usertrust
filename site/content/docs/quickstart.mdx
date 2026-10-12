@@ -88,7 +88,7 @@ usertrust detects your SDK by structural shape:
 |----------|-----------|-------------------|
 | Anthropic | `client.messages.create` | `messages.create()` |
 | OpenAI | `client.chat.completions.create` | `chat.completions.create()` |
-| Google | `client.models.generateContent` | `models.generateContent()` |
+| Google | `client.models.generateContent` | `models.generateContent()`, `models.generateContentStream()` |
 
 ```ts
 // OpenAI
@@ -102,7 +102,7 @@ const client = await trust(new GoogleGenAI({ apiKey }), { budget: 50_000 });
 const { response } = await client.models.generateContent({ ... });
 ```
 
-On a Google client only `models.generateContent` is governed. `models.generateContentStream` passes through to the SDK untouched: it is not metered, it gets no receipt, and no policy applies to it.
+On a Google client `models.generateContent` and `models.generateContentStream` are governed; `generateContentStream` resolves to the stream itself with the settled receipt on it (`await stream.receipt`). These billable Google methods (`models.embedContent`, `generateImages`, `editImage`, `upscaleImage`, `generateVideos`, `recontextImage`, `segmentImage`, `chats.create`, `live.connect`, `live.music.connect`, `batches.create`, `batches.createEmbeddings`, `interactions.create`, `tunings.tune`, `caches.create`, `caches.update`, `fileSearchStores.uploadToFileSearchStore`, `fileSearchStores.importFile`) rejects with a `PolicyDeniedError` naming the method, and records a `policy_denied` audit event, before the SDK is called. That list is not a governance boundary: other paths to the same endpoints still pass through ungoverned, among them the SDK's internal `models.*Internal` methods (`generateContentInternal` sends the request behind `generateContent`), `getNextGenClient()`, `chats.modelsModule` and the raw transport `apiClient`, on the client and on every namespace. A default-deny boundary for Google clients, as Anthropic and OpenAI clients have, is planned. With automatic function calling (a callable tool in `config.tools`, AFC not disabled), `generateContent` is metered per round: usertrust runs the loop itself, each round its own governed call, and the envelope carries `receipts`, one per round. `generateContentStream` with automatic function calling is refused the same way for now, because a streamed loop is not yet metered round by round: use `generateContent`, or set `config.automaticFunctionCalling.disable: true` and run the tool calls yourself. Calls that are not billed, such as `models.countTokens`, pass through ungoverned.
 
 On an Anthropic or OpenAI client, every SDK method usertrust does not govern is refused unless it cannot start work: `embeddings.create`, `messages.batches.create`, `chat.completions.parse` and the like return a promise that rejects with a `PolicyDeniedError` (`ungoverned_method: <path>`) and write a `policy_denied` audit event, and the SDK is never called. Methods that cannot start work run as before: reads, lists and deletes (every GET or DELETE request) and a few named POSTs such as `messages.countTokens`, `moderations.create` and cancels. To run a refused method unmetered, list it: `trust(client, { allowUngoverned: ["embeddings.create"] })`; each such call is audited as `ungoverned_call`. `client.withOptions(...)` returns a client governed by the same governor, unless it changes where or how calls are sent (`baseURL`, `fetch`, `fetchOptions`, …), which is refused.
 
