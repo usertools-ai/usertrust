@@ -447,17 +447,30 @@ export function snapshotVault(
 		// The SAME bytes also go into the snapshot (at the path the verifier's reader uses), so the completeness check below
 		// (is a dead-lettered chain event missing from the chain?) and the shortfalls read here are one read of one file.
 		const dlqSrc = deadLetterPath(vaultPath);
+		let queueText: string | undefined;
 		try {
-			const text = readFileSync(dlqSrc, "utf-8");
-			mkdirSync(dirname(deadLetterPath(dir)), { recursive: true, mode: 0o700 });
-			writeFileSync(deadLetterPath(dir), text, { mode: 0o600 });
-			deadLetters = parseDeadLetters(text);
+			queueText = readFileSync(dlqSrc, "utf-8");
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException | undefined)?.code;
-			// ABSENT: nothing was ever dead-lettered. Anything else: whether events are missing is UNKNOWN, never "none".
+			// ABSENT (ENOENT on the READ of the vault's file): nothing was ever dead-lettered. Anything else: whether events
+			// are missing is UNKNOWN, never "none".
 			if (code !== "ENOENT") {
 				deadLetters = { unreadable: true };
 				deadLetterReadError = typeof code === "string" ? code : "read failed";
+			}
+		}
+		if (queueText !== undefined) {
+			// The WRITE into the snapshot is judged apart from the read: a failure here (even an ENOENT, a reaped temp
+			// directory) must never be read as "no queue", or the completeness check would find no file and clear a vault
+			// whose queue has missing events.
+			try {
+				mkdirSync(dirname(deadLetterPath(dir)), { recursive: true, mode: 0o700 });
+				writeFileSync(deadLetterPath(dir), queueText, { mode: 0o600 });
+				deadLetters = parseDeadLetters(queueText);
+			} catch (err) {
+				const code = (err as NodeJS.ErrnoException | undefined)?.code;
+				deadLetters = { unreadable: true };
+				deadLetterReadError = `could not copy the queue into the snapshot${typeof code === "string" ? ` (${code})` : ""}`;
 			}
 		}
 	} catch (err) {
