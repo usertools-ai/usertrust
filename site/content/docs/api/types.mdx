@@ -305,7 +305,7 @@ Each event's `hash` covers the `previousHash`, forming an append-only chain. The
 
 ### GovernedStream\<T\>
 
-An async iterable that wraps the native LLM stream, adding a `receipt` promise for the **settled** receipt. It resolves when the stream completes, or when the consumer stops early (the usage consumed so far settles). When the stream fails mid-way (a cut connection, a provider error event), it rejects with the same error the iteration threw, and the hold is voided rather than charged. It never becomes an unhandled rejection, so awaiting it is optional. The `receipt` returned beside `response` is provisional (`settled: false`).
+An async iterable that wraps the native LLM stream, adding a `receipt` promise for the **settled** receipt. It resolves when the stream completes, or when the consumer stops early (the usage consumed so far settles). When the stream fails mid-way and its iteration throws (a cut connection, or a provider error event the SDK throws), it rejects with that same error, and the hold is voided rather than charged. An OpenAI Responses `error` event is not thrown: the SDK yields it as a chunk, and the stream settles, and is charged, like a completed one. Under `audit.failClosed` it can also reject with `AuditDegradedError` after the charge posted; on the governed `create` streams that error also ends the iteration. A rejected `receipt` never becomes an unhandled rejection. The `receipt` returned beside `response` is provisional (`settled: false`). See [Streaming](/docs/api/trust#streaming).
 
 ```typescript
 interface GovernedStream<T> extends AsyncIterable<T> {
@@ -330,7 +330,8 @@ try {
   // The settled receipt, after the stream finishes
   const receipt = await response.receipt;
 } catch (err) {
-  // A cut stream or a provider error: the hold was voided, nothing charged
+  // A stream that failed mid-way: voided, nothing charged.
+  // An AuditDegradedError (audit.failClosed): charged first, then refused.
 }
 ```
 

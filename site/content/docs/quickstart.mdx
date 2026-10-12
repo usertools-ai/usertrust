@@ -102,7 +102,7 @@ const { response } = await client.models.generateContent({ ... });
 
 ## Streaming
 
-Streaming works transparently. The settled receipt is `response.receipt`, which resolves when the stream completes (the `receipt` returned beside `response` is provisional, `settled: false`):
+Streaming works transparently. The settled receipt is `response.receipt`, which resolves when the stream completes (the `receipt` returned beside `response` is provisional, `settled: false`). What a failure costs is in [Streaming](/docs/api/trust#streaming):
 
 ```ts
 const { response } = await client.messages.create({
@@ -120,7 +120,8 @@ try {
   // The settled receipt, after the stream ends
   const receipt = await response.receipt;
 } catch (err) {
-  // A cut stream or a provider error: the hold was voided, nothing charged
+  // A stream that failed mid-way: voided, nothing charged.
+  // An AuditDegradedError (audit.failClosed): charged first, then refused.
 }
 ```
 
