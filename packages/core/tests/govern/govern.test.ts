@@ -1053,6 +1053,41 @@ describe("trust()", () => {
 			expect(createFn).not.toHaveBeenCalled();
 		});
 
+		// Only an omitted (undefined) argument means "no options". `process.cwd()` is
+		// pointed at the temp vault so a regression (null read as omitted) builds its
+		// vault there, where the assertion sees it, and never in the repository.
+		it("refuses null options by name, before anything is created", async () => {
+			const cwd = vi.spyOn(process, "cwd").mockReturnValue(tmpVault);
+			try {
+				const createFn = vi.fn();
+				await expect(trust({ messages: { create: createFn } }, null as never)).rejects.toThrow(
+					"trust(): options must be an object, got null",
+				);
+				expect(existsSync(join(tmpVault, ".usertrust"))).toBe(false);
+			} finally {
+				cwd.mockRestore();
+			}
+		});
+
+		it("still treats an undefined options argument as none", async () => {
+			const cwd = vi.spyOn(process, "cwd").mockReturnValue(tmpVault);
+			vi.stubEnv("USERTRUST_DRY_RUN", "true");
+			try {
+				const governed = await trust(makeAnthropicMock(), undefined);
+				const result = await governed.messages.create({
+					model: "claude-sonnet-4-6",
+					max_tokens: 16,
+					messages: [{ role: "user", content: "Hello" }],
+				});
+				expect(result.receipt).toBeDefined();
+				expect(existsSync(join(tmpVault, ".usertrust"))).toBe(true);
+				await governed.destroy();
+			} finally {
+				vi.unstubAllEnvs();
+				cwd.mockRestore();
+			}
+		});
+
 		it("refuses options that are not an object", async () => {
 			const createFn = vi.fn();
 			await expect(

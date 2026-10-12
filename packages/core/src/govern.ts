@@ -273,6 +273,7 @@ export function trustConfigOverrides(opts: TrustOpts | undefined): Record<string
 
 /** A caller-supplied key or value, quoted for an error message: clipped, control characters escaped. */
 function quoteForRefusal(value: unknown): string {
+	if (value === null) return "null";
 	return typeof value === "string" ? JSON.stringify(value.slice(0, 64)) : `of type ${typeof value}`;
 }
 
@@ -343,8 +344,11 @@ export function readOwnOptions<O extends object>(
 	opts: O | undefined,
 	allowed: Readonly<Record<keyof O, true>>,
 ): O | undefined {
-	if (opts === undefined || opts === null) return undefined;
-	if (typeof opts !== "object" || Array.isArray(opts)) {
+	// Only an omitted (undefined) argument means "no options", as the signature
+	// says (`opts?:`); `null` is refused like any other non-object, never read as
+	// "use the file's values".
+	if (opts === undefined) return undefined;
+	if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
 		throw new TypeError(`${fn}: options must be an object, got ${quoteForRefusal(opts)}`);
 	}
 	const own = Object.getOwnPropertyNames(opts);

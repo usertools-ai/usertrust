@@ -753,6 +753,34 @@ describe("headless governor", () => {
 		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
 	});
 
+	// Only an omitted (undefined) argument means "no options"; cwd points at the temp
+	// vault so a regression builds its vault where the assertion sees it.
+	it("refuses null options by name, before anything is created", async () => {
+		const cwd = vi.spyOn(process, "cwd").mockReturnValue(vaultBase);
+		try {
+			await expect(createGovernor(null as never)).rejects.toThrow(
+				"createGovernor(): options must be an object, got null",
+			);
+			expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+		} finally {
+			cwd.mockRestore();
+		}
+	});
+
+	it("still treats an undefined options argument as none", async () => {
+		const cwd = vi.spyOn(process, "cwd").mockReturnValue(vaultBase);
+		vi.stubEnv("USERTRUST_DRY_RUN", "true");
+		try {
+			const gov = await createGovernor(undefined);
+			expect(gov.config.pii).toBe("warn");
+			expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(true);
+			await gov.destroy();
+		} finally {
+			vi.unstubAllEnvs();
+			cwd.mockRestore();
+		}
+	});
+
 	it("refuses an inherited pii by name instead of applying it (own properties only)", async () => {
 		const options = Object.create({ pii: "block" }) as Record<string, unknown>;
 		options.dryRun = true;
