@@ -38,6 +38,7 @@ import { createGovernor } from "../../src/headless.js";
 import { ScopeManager } from "../../src/resilience/scope.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import { looseVaultWarning, securePrivateVault } from "../../src/shared/private-fs.js";
+import { absoluteVaultBase } from "../../src/shared/vault-base.js";
 import { createSnapshot, restoreSnapshot } from "../../src/snapshot/checkpoint.js";
 
 vi.mock("tigerbeetle-node", () => ({
@@ -1107,6 +1108,41 @@ async function vaultBaseWrites(fn: () => Promise<void>): Promise<string[]> {
 	}
 	return writes;
 }
+
+describe("a vault base made absolute, without folding anything", () => {
+	/** The working directory of the drive asked for; the test's stand-in for Windows' per-drive cwd. */
+	const driveCwd = (drive: string): string => {
+		expect(drive).toBe("C:");
+		return "C:\\work";
+	};
+
+	it("a Windows drive-relative base is anchored to THAT drive's working directory", () => {
+		expect(absoluteVaultBase("C:tenant\\..\\vault", "win32", driveCwd)).toBe(
+			"C:\\work\\tenant\\..\\vault",
+		);
+	});
+
+	it("a drive whose working directory is its root gets one separator, not two", () => {
+		expect(absoluteVaultBase("C:tenant\\..\\vault", "win32", () => "C:\\")).toBe(
+			"C:\\tenant\\..\\vault",
+		);
+	});
+
+	it("a UNC path and an ordinary absolute Windows path are unchanged", () => {
+		const never = (): string => {
+			throw new Error("no drive's working directory is needed");
+		};
+		expect(absoluteVaultBase("\\\\server\\share\\x\\..\\y", "win32", never)).toBe(
+			"\\\\server\\share\\x\\..\\y",
+		);
+		expect(absoluteVaultBase("C:\\x\\..\\y", "win32", never)).toBe("C:\\x\\..\\y");
+	});
+
+	it("a POSIX relative base is concatenated with the working directory, unfolded", () => {
+		expect(absoluteVaultBase("a:b/../vault", "linux")).toBe(`${process.cwd()}/a:b/../vault`);
+		expect(absoluteVaultBase("/x/../y", "linux")).toBe("/x/../y");
+	});
+});
 
 describe.skipIf(onWindows).each(openers)(
 	"a vault base with `..` after a symbolic link, opened by %s",

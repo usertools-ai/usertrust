@@ -14,15 +14,37 @@
  */
 
 import { realpathSync } from "node:fs";
-import { isAbsolute, join, parse, sep } from "node:path";
+import { join, parse, posix, sep, win32 } from "node:path";
 import { escapeControls } from "./escape-controls.js";
 
 /** Separators a base may be written with: both on Windows, `/` elsewhere. */
 const SEPARATORS = process.platform === "win32" ? /[\\/]/ : /\//;
 
 /**
+ * `base` made absolute WITHOUT folding anything: concatenated with the working directory, never
+ * `path.resolve`d. On Windows a drive-relative base (`C:tenant\..\vault`) is not absolute, and is
+ * relative to THAT drive's working directory, which `win32.resolve("C:")` names without touching
+ * the tail; prefixing `process.cwd()` gave `D:\work\C:tenant\..\vault`. The platform and the
+ * drive lookup are parameters so the Windows reading can be tested on any system.
+ */
+export function absoluteVaultBase(
+	base: string,
+	platform: NodeJS.Platform = process.platform,
+	driveCwd: (drive: string) => string = (drive) => win32.resolve(drive),
+): string {
+	const path = platform === "win32" ? win32 : posix;
+	if (path.isAbsolute(base)) return base;
+	const drive = platform === "win32" ? /^[A-Za-z]:/.exec(base)?.[0] : undefined;
+	if (drive !== undefined) {
+		// A drive whose working directory is its root (`C:\`) must not give `C:\\tenant`.
+		return `${driveCwd(drive).replace(/[\\/]+$/, "")}${path.sep}${base.slice(drive.length)}`;
+	}
+	return `${process.cwd()}${path.sep}${base}`;
+}
+
+/**
  * `base` as the kernel resolves it, or `base` itself when no segment is `..`. Made absolute by
- * concatenation with the working directory (never `path.resolve`), then:
+ * {@link absoluteVaultBase} (never `path.resolve`), then:
  *
  * - the deepest EXISTING prefix is resolved with realpath(3) and the rest appended, `.` dropped;
  * - a `..` in the part that does not exist yet is refused by name: the kernel cannot resolve
@@ -31,7 +53,7 @@ const SEPARATORS = process.platform === "win32" ? /[\\/]/ : /\//;
  *   name. It never falls back to JS `realpathSync`, which folds `..` lexically.
  */
 export function kernelVaultBase(base: string): string {
-	const absolute = isAbsolute(base) ? base : `${process.cwd()}${sep}${base}`;
+	const absolute = absoluteVaultBase(base);
 	const segments = absolute.split(SEPARATORS);
 	if (!segments.includes("..")) return base;
 
