@@ -13,7 +13,8 @@
  * Three rules, each with rows in dry-run and with an engine:
  *  - a count above the plausibility ceiling is not charged: the call settles at the estimate (the same rule as a missing
  *    count), and the anomaly is a chain event, not a silent charge;
- *  - the session counter follows what the ledger posted (min of the cost and the hold), not the claimed cost;
+ *  - the session counter keeps the METERED cost of a plausible call, even above its hold: the ceiling and the persist
+ *    guard are what stop a bad figure, and the shortfall event records the gap to the ledger;
  *  - a value that cannot be represented is never persisted.
  */
 
@@ -192,7 +193,7 @@ describe.each([
 	});
 });
 
-describe("the session counter follows the ledger's cap", () => {
+describe("the session counter keeps the metered cost", () => {
 	let vaultBase: string;
 	beforeEach(() => {
 		vaultBase = join(tmpdir(), `absurd-usage-cap-${randomUUID()}`);
@@ -202,7 +203,7 @@ describe("the session counter follows the ledger's cap", () => {
 		rmSync(vaultBase, { recursive: true, force: true });
 	});
 
-	it("a plausible but over-hold usage adds the POSTED amount (the hold) to the counter, not the claimed cost", async () => {
+	it("a plausible but over-hold usage adds the METERED cost to the counter, not the amount the ledger posted", async () => {
 		const { engine, holds } = cappedEngine();
 		const g = await trust(client({ input_tokens: 5_000_000, output_tokens: 10 }), {
 			budget: 100_000_000,
@@ -215,7 +216,7 @@ describe("the session counter follows the ledger's cap", () => {
 
 		expect(receipt.cost).toBeGreaterThan(hold); // the receipt keeps the TRUE metered cost
 		expect(receipt.postedCost).toBe(hold);
-		expect(persistedSpend(vaultBase)).toBe(hold); // the counter agrees with the ledger
+		expect(persistedSpend(vaultBase)).toBe(receipt.cost); // the budget enforces the metered spend
 		await g.destroy();
 	});
 });
@@ -268,7 +269,7 @@ describe("headless governor: the same three rules", () => {
 		});
 	}
 
-	it("the counter follows what the ledger posted when it truncated at the hold", async () => {
+	it("the counter keeps the metered cost when the ledger truncated at the hold", async () => {
 		const { engine, holds } = cappedEngine();
 		const gov = await createGovernor({
 			budget: 100_000_000,
@@ -280,7 +281,7 @@ describe("headless governor: the same three rules", () => {
 		const receipt = await gov.settle(auth, { inputTokens: 5_000_000, outputTokens: 10 });
 		const hold = [...holds.values()][0] as number;
 		expect(receipt.cost).toBeGreaterThan(hold);
-		expect(persistedSpend(vaultBase)).toBe(hold);
+		expect(persistedSpend(vaultBase)).toBe(receipt.cost);
 		await gov.destroy();
 	});
 });
@@ -363,4 +364,88 @@ describe("a STREAMING settle gets the same rule", () => {
 			}
 		});
 	}
+});
+
+describe("the ceiling is per provider RESPONSE", () => {
+	let vaultBase: string;
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `absurd-usage-agg-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+	});
+	afterEach(() => {
+		rmSync(vaultBase, { recursive: true, force: true });
+	});
+	const AUTH = { model: "claude-sonnet-4-6", estimatedInputTokens: 100, maxOutputTokens: 50 };
+
+	it("a 600-response window summing past the single-response ceiling is charged in full", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const auth = await gov.authorize(AUTH);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 150_000_000,
+			outputTokens: 1_000,
+			responses: 600,
+		});
+		expect(receipt.usageSource).toBe("provider");
+		expect(audit.events.map((e) => e.kind)).not.toContain("usage_implausible");
+		await gov.destroy();
+	});
+
+	it("CONTROL: the same total claimed as ONE response is refused", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const auth = await gov.authorize(AUTH);
+		const receipt = await gov.settle(auth, { inputTokens: 150_000_000, outputTokens: 1_000 });
+		expect(receipt.usageSource).toBe("estimated");
+		expect(audit.events.map((e) => e.kind)).toContain("usage_implausible");
+		await gov.destroy();
+	});
+
+	it("a count above the scaled bound is still refused, and the event names the scaled ceiling", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const auth = await gov.authorize(AUTH);
+		await gov.settle(auth, { inputTokens: 1e12, outputTokens: 1, responses: 600 });
+		expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+			ceilingTokensPerTier: MAX_PLAUSIBLE_TOKENS_PER_TIER * 600,
+		});
+		await gov.destroy();
+	});
+
+	it("an absurd 1-hour share is reported even when it exceeds the write total (the raw figure is checked, not the clamp)", async () => {
+		const audit = makeAudit();
+		const gov = await createGovernor({
+			budget: 10_000_000_000,
+			vaultBase,
+			dryRun: true,
+			_audit: audit,
+		});
+		const auth = await gov.authorize(AUTH);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 10,
+			outputTokens: 10,
+			cacheWriteTokens: 5,
+			cacheWrite1hTokens: 1e12,
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		expect(audit.events.find((e) => e.kind === "usage_implausible")?.data).toMatchObject({
+			tiers: { cacheWrite1hTokens: 1e12 },
+		});
+		await gov.destroy();
+	});
 });

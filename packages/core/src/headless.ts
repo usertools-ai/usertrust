@@ -418,6 +418,12 @@ export interface SettleParams {
 	 * client's settle is metered exactly as before.
 	 */
 	cacheWrite1hTokens?: number | undefined;
+	/**
+	 * How many provider responses these counts SUM (default 1). The plausibility ceiling
+	 * (`MAX_PLAUSIBLE_TOKENS_PER_TIER`) holds per response, so a caller that settles a window of responses
+	 * as one aggregate says so and the per-tier bound scales with it (capped at `MAX_AGGREGATED_RESPONSES`).
+	 */
+	responses?: number | undefined;
 	/** Number of streaming chunks delivered (for streaming calls). */
 	chunksDelivered?: number | undefined;
 	/**
@@ -1772,6 +1778,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				cacheReadTokens: params?.cacheReadTokens,
 				cacheWriteTokens: params?.cacheWriteTokens,
 				cacheWrite1hTokens: params?.cacheWrite1hTokens,
+				responses: params?.responses,
 				usageSource: params?.usageSource,
 				chunksDelivered: params?.chunksDelivered,
 				computeMs: params?.computeMs,
@@ -1852,6 +1859,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					cacheWriteTokens: input.cacheWriteTokens,
 					cacheWrite1hTokens: input.cacheWrite1hTokens,
 				};
+				const responses = input.responses;
 				// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
 				// read only input/output, so a settle carrying nothing but cache counts
 				// looked like "nothing reported" and silently fell back to the pre-call
@@ -1874,14 +1882,17 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// canonicalization, which throws on non-finite — and downgrades a
 				// "provider" label whose input/output is unusable.
 				const usageSnapshot = withSupported1hTier(
-					sanitizeUsage({
-						inputTokens: reportedCounts.inputTokens ?? 0,
-						outputTokens: reportedCounts.outputTokens ?? 0,
-						cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
-						cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
-						cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
-						source: usageReported ? (input.usageSource ?? "provider") : "estimated",
-					}),
+					sanitizeUsage(
+						{
+							inputTokens: reportedCounts.inputTokens ?? 0,
+							outputTokens: reportedCounts.outputTokens ?? 0,
+							cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
+							cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
+							cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
+							source: usageReported ? (input.usageSource ?? "provider") : "estimated",
+						},
+						{ responses },
+					),
 					rateInfo.rates,
 					rateInfo.rateSource !== "table",
 				);
@@ -1891,7 +1902,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// missing count, and the anomaly is a chain event. Without this the figure reached the session counter and
 				// the persisted ledger and refused every later call.
 				const usageTrusted = usageReported && usageSnapshot.implausible === undefined;
-				const implausibleData = implausibleUsageData(usageSnapshot, { model, transferId });
+				const implausibleData = implausibleUsageData(usageSnapshot, {
+					model,
+					transferId,
+					responses,
+				});
 				if (implausibleData !== undefined) {
 					process.stderr.write(
 						`[usertrust] implausible usage for ${transferId}: charged at the estimate, not the reported counts\n`,
@@ -2035,9 +2050,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					const releaseLock = await budgetMutex.acquire();
 					try {
 						inFlightHoldTotal -= auth.estimatedCost;
-						// What the ledger POSTED when it truncated at the hold, else the metered cost: the counter agrees
-						// with the wallet it mirrors (the receipt and chain keep the true cost).
-						budgetSpent += postedCost ?? actualCost;
+						// The METERED cost, even when the ledger posted less (`postedCost`): the budget enforces what the
+						// customer pays the provider. The plausibility ceiling and the persist guard keep one absurd figure
+						// from bricking the vault; the shortfall event records the gap to the ledger.
+						budgetSpent += actualCost;
 					} finally {
 						releaseLock();
 					}
@@ -2048,6 +2064,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// Audit event
 				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
 				let auditHash = syntheticHash;
+				let llmAppended = false;
 				try {
 					const auditEvent = await audit.appendEvent({
 						kind: "llm_call",
@@ -2080,14 +2097,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						},
 					});
 					auditHash = auditEvent.hash;
+					llmAppended = true;
 				} catch {
 					callAuditDegraded = true;
 				}
 
 				// The implausible-usage report, like the truncation correction below, is appended AFTER the `llm_call` it
 				// annotates: `verifyTransaction` resolves a transfer by the FIRST event carrying its transferId, so a report
-				// written ahead of its `llm_call` would render the settled call as PENDING with no cost.
-				if (implausibleData !== undefined) {
+				// written ahead of its `llm_call` would render the settled call as PENDING with no cost. Only after a
+				// SUCCESSFUL append, for the same reason: a failed `llm_call` must not leave the annotation as the first event.
+				if (implausibleData !== undefined && llmAppended) {
 					await audit
 						.appendEvent({
 							kind: "usage_implausible",

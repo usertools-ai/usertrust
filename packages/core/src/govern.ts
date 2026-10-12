@@ -74,7 +74,9 @@ import {
 	implausibleUsageData,
 	publishableUsageFields,
 	sanitizeUsage,
+	type UsageTier,
 	type UsageWireShape,
+	withImplausible,
 	withSupported1hTier,
 } from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
@@ -1346,15 +1348,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			let envelopeDebited = false;
 			/** This call's SESSION-wallet share of an amount: all of it, or none. */
 			const sessionShare = (amount: number): number => (envelopeDebited ? 0 : amount);
-			/**
-			 * What the session counter is charged for a call that cost `cost`: with a ledger, what the ledger will POST,
-			 * which is `min(cost, hold)` (TigerBeetle caps a post at the pending amount, and the hold is `estimatedCost`).
-			 * The receipt and the chain keep the true metered cost; the counter must agree with the wallet it mirrors, or one
-			 * large reading leaves it ahead of the ledger and refuses every later call. Without a ledger (dry run) the
-			 * counter is the only enforcement, so it keeps the full cost.
-			 */
-			const ledgerCountedCost = (cost: number): number =>
-				engine != null && !isDryRun ? Math.min(cost, estimatedCost) : cost;
 			/** Budget persistence, skipped when the session total did not move. */
 			const persistSessionSpend = async (): Promise<void> => {
 				if (envelopeDebited) return;
@@ -1923,14 +1916,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// counts, so a stream that reported neither cannot be published as
 				// provider-sourced.
 				const usageSnapshot = withSupported1hTier(
-					sanitizeUsage({
-						inputTokens: completion.usage.inputTokens,
-						outputTokens: completion.usage.outputTokens,
-						cacheReadTokens: completion.usage.cacheReadTokens,
-						cacheWriteTokens: completion.usage.cacheWriteTokens,
-						cacheWrite1hTokens: completion.usage.cacheWrite1hTokens,
-						source: completion.usageReported ? "provider" : "estimated",
-					}),
+					withImplausible(
+						sanitizeUsage({
+							inputTokens: completion.usage.inputTokens,
+							outputTokens: completion.usage.outputTokens,
+							cacheReadTokens: completion.usage.cacheReadTokens,
+							cacheWriteTokens: completion.usage.cacheWriteTokens,
+							cacheWrite1hTokens: completion.usage.cacheWrite1hTokens,
+							source: completion.usageReported ? "provider" : "estimated",
+						}),
+						completion.implausible,
+					),
 					rateResolution.rates,
 					rateResolution.rateSource !== "table",
 				);
@@ -1984,12 +1980,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
 					inFlightHoldTotal -= sessionShare(estimatedCost);
-					budgetSpent += sessionShare(ledgerCountedCost(streamCost));
+					budgetSpent += sessionShare(streamCost);
 					releaseLock();
 				} else {
 					// Hold already released — still need to record the spend.
 					const releaseLock = await budgetMutex.acquire();
-					budgetSpent += sessionShare(ledgerCountedCost(streamCost));
+					budgetSpent += sessionShare(streamCost);
 					releaseLock();
 				}
 				// Persist cumulative spend to disk (session spend only — an
@@ -2062,6 +2058,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
 				let auditHash = syntheticHash;
+				let streamLlmAppended = false;
 				try {
 					const auditEventData: Record<string, unknown> = {
 						model,
@@ -2100,13 +2097,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						data: auditEventData,
 					});
 					auditHash = auditEvent.hash;
+					streamLlmAppended = true;
 				} catch {
 					callAuditDegraded = true;
 				}
 
 				// The implausible-usage report, like the truncation correction below, goes AFTER the `llm_call` it
-				// annotates: `verifyTransaction` resolves a transfer by the FIRST event carrying its transferId.
-				if (implausibleData !== undefined) {
+				// annotates: `verifyTransaction` resolves a transfer by the FIRST event carrying its transferId. Only
+				// after a SUCCESSFUL `llm_call` append: otherwise it would become the transfer's first event, and the
+				// settlement would resolve to an annotation (or, under failClosed, a refused call would leave one).
+				if (implausibleData !== undefined && streamLlmAppended) {
 					await audit
 						.appendEvent({
 							kind: "usage_implausible",
@@ -2344,6 +2344,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let accCacheWrite = 0;
 				let accCacheWrite1h = 0;
 				let accUsageReported = false;
+				let accImplausible: Partial<Record<UsageTier, number>> | undefined;
+				const noteImplausible = (found: Partial<Record<UsageTier, number>> | undefined): void => {
+					if (found === undefined) return;
+					accImplausible = { ...accImplausible };
+					for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
+						accImplausible[tier] = Math.max(accImplausible[tier] ?? 0, value);
+					}
+				};
 				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
 				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
 				// failure) from a genuine consumer abort (F9 settle-partial).
@@ -2358,11 +2366,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					},
 					chunksDelivered,
 					usageReported: accUsageReported,
+					implausible: accImplausible,
 				});
 
 				emitter.on("streamEvent", (event: unknown) => {
 					chunksDelivered++;
 					const tokens = extractAnthropicStreamUsage(event);
+					noteImplausible(tokens.implausible);
 					let deltaTokens = 0;
 					if (tokens.inputTokens > accInput) {
 						deltaTokens += tokens.inputTokens - accInput;
@@ -2439,6 +2449,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// zeroing it. Reported when EITHER source carried a real number;
 					// otherwise settle on the estimate.
 					const finalUsage = readFinalMessageUsage(msg);
+					noteImplausible(finalUsage.implausible);
 					const usageReported = finalUsage.reported || accUsageReported;
 					const completion: StreamCompletion = usageReported
 						? {
@@ -2451,6 +2462,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								},
 								chunksDelivered,
 								usageReported: true,
+								implausible: accImplausible,
 							}
 						: {
 								usage: {
@@ -2461,6 +2473,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								},
 								chunksDelivered,
 								usageReported: false,
+								implausible: accImplausible,
 							};
 					finalizeStreamSettle(completion)
 						.then(receiptResolve, receiptReject)
@@ -2791,7 +2804,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// The implausible-usage report goes AFTER the `llm_call` it annotates (the first event carrying a
 				// transferId is how `verifyTransaction` finds the settlement). Advisory: a chain that cannot take it
 				// degrades the receipt and never unwinds the call.
-				if (implausibleData !== undefined) {
+				// Only after a SUCCESSFUL `llm_call` append, for the reason given at the stream site.
+				if (implausibleData !== undefined && !llmAuditFailed) {
 					await audit
 						.appendEvent({
 							kind: "usage_implausible",
@@ -2826,7 +2840,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
 					inFlightHoldTotal -= sessionShare(estimatedCost);
-					budgetSpent += sessionShare(ledgerCountedCost(actualCost));
+					budgetSpent += sessionShare(actualCost);
 					releaseLock();
 				}
 				// Persist cumulative spend to disk (session spend only).
@@ -3831,6 +3845,8 @@ function readFinalMessageUsage(msg: unknown): {
 	/** The 1-hour share of the write tier; undefined whenever the write tier is. */
 	cacheWrite1hTokens: number | undefined;
 	reported: boolean;
+	/** Tiers over the plausibility ceiling (the extractor zeroes them; the settle must still hear of them). */
+	implausible?: Partial<Record<UsageTier, number>> | undefined;
 } {
 	if (msg != null && typeof msg === "object") {
 		const usage = (msg as Record<string, unknown>).usage;
@@ -3879,6 +3895,7 @@ function readFinalMessageUsage(msg: unknown): {
 							? (cacheTiers.cacheWrite1hTokens ?? 0)
 							: undefined,
 					reported: true,
+					implausible: cacheTiers.implausible,
 				};
 			}
 		}
@@ -3905,6 +3922,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
 	cacheWrite1hTokens: number;
+	implausible?: Partial<Record<UsageTier, number>> | undefined;
 } {
 	const none = {
 		inputTokens: 0,
@@ -3929,6 +3947,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 				cacheReadTokens: tiers.cacheReadTokens,
 				cacheWriteTokens: tiers.cacheWriteTokens,
 				cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
+				implausible: tiers.implausible,
 			};
 		}
 	}
@@ -3942,6 +3961,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 			cacheReadTokens: tiers.cacheReadTokens,
 			cacheWriteTokens: tiers.cacheWriteTokens,
 			cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,
+			implausible: tiers.implausible,
 		};
 	}
 	return none;

@@ -15,8 +15,7 @@ Three things now prevent it:
   is not charged. The call settles at the estimate, exactly as for a missing count, and a `usage_implausible` event is
   appended to the audit chain (and a line is written to stderr) naming the call, the model, the refused figures and the
   ceiling.
-- **The counter follows the ledger.** With a ledger, the session counter is charged what the ledger posts, `min(cost,
-  hold)`. The receipt and the chain keep the true metered cost; `receipt.postedCost` and `settlement_shortfall` show the gap.
+- **The counter keeps the metered cost.** The budget enforces what the provider charges, so a plausible call that costs more than its hold is counted in full; `receipt.postedCost` and `settlement_shortfall` show the gap to what the ledger posted. The ceiling above and the persist guard below are what keep one bad figure from refusing every later call.
 - **No unrepresentable value is persisted.** A cumulative spend above `Number.MAX_SAFE_INTEGER` is never written; the file
   keeps its last safe value and a line is written to stderr.
 

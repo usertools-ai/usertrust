@@ -161,6 +161,45 @@ function disjointInput(promptTokens: number, cacheReadTokens: number, cacheWrite
 }
 
 /**
+ * The per-tier ceiling for counts that AGGREGATE `responses` provider responses (default 1). The ceiling's premise holds
+ * per provider response, so a caller that sums a window of responses (the plugin's transcript settle) says how many it
+ * summed, and the bound scales with it; a malformed value is one response.
+ */
+export function usageCeiling(responses: number | undefined): number {
+	const n =
+		typeof responses === "number" && Number.isSafeInteger(responses) && responses > 1
+			? Math.min(responses, MAX_AGGREGATED_RESPONSES)
+			: 1;
+	return MAX_PLAUSIBLE_TOKENS_PER_TIER * n;
+}
+
+/** The most responses one settle may claim to aggregate: keeps the scaled ceiling a safe integer. */
+export const MAX_AGGREGATED_RESPONSES = 1_000_000;
+
+/**
+ * The snapshot with `extra` implausible readings merged in (the larger figure per tier): a stream that saw an absurd
+ * count in ANY chunk settles at the estimate, even when an earlier chunk reported plausible usage.
+ */
+export function withImplausible(
+	snapshot: NormalizedUsage,
+	extra: Partial<Record<UsageTier, number>> | undefined,
+): NormalizedUsage {
+	if (extra === undefined || Object.keys(extra).length === 0) return snapshot;
+	const merged: Partial<Record<UsageTier, number>> = { ...snapshot.implausible };
+	for (const [tier, value] of Object.entries(extra) as Array<[UsageTier, number]>) {
+		merged[tier] = Math.max(merged[tier] ?? 0, value);
+	}
+	return {
+		inputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		source: "estimated",
+		implausible: merged,
+	};
+}
+
+/**
  * The single sanitizer. Every extractor ends here, and any boundary that
  * assembles a snapshot from already-disjoint counters (the pi-ai pass-through
  * rows, headless caller-supplied usage) should route through it too rather
@@ -188,13 +227,20 @@ function disjointInput(promptTokens: number, cacheReadTokens: number, cacheWrite
  * fail-safe for availability, because the inflated cost reached the persisted
  * session counter.)
  */
-export function sanitizeUsage(raw: RawUsageCandidate | null | undefined): NormalizedUsage {
+export function sanitizeUsage(
+	raw: RawUsageCandidate | null | undefined,
+	opts: { responses?: number | undefined } = {},
+): NormalizedUsage {
 	const r = raw ?? {};
 	const input = readCount(r.inputTokens);
 	const output = readCount(r.outputTokens);
 	const reported = input != null && output != null;
 	const cacheWrite = readCount(r.cacheWriteTokens) ?? 0;
-	const cacheWrite1h = Math.min(readCount(r.cacheWrite1hTokens) ?? 0, cacheWrite);
+	// The RAW 1-hour share is checked, not the clamped one: a share above the write total is garbage the clamp would
+	// otherwise hide, and an absurd one must be reported like any other tier.
+	const rawCacheWrite1h = readCount(r.cacheWrite1hTokens) ?? 0;
+	const cacheWrite1h = Math.min(rawCacheWrite1h, cacheWrite);
+	const ceiling = usageCeiling(opts.responses);
 	// A finite figure above the plausibility ceiling is not usage: it is charged as an ESTIMATE and reported (see
 	// MAX_PLAUSIBLE_TOKENS_PER_TIER). The raw figures are kept for the chain event, never for pricing.
 	const readings: Array<[UsageTier, number]> = [
@@ -202,10 +248,11 @@ export function sanitizeUsage(raw: RawUsageCandidate | null | undefined): Normal
 		["outputTokens", output ?? 0],
 		["cacheReadTokens", readCount(r.cacheReadTokens) ?? 0],
 		["cacheWriteTokens", cacheWrite],
+		["cacheWrite1hTokens", rawCacheWrite1h],
 	];
 	const implausible: Partial<Record<UsageTier, number>> = {};
 	for (const [tier, value] of readings) {
-		if (value > MAX_PLAUSIBLE_TOKENS_PER_TIER) implausible[tier] = value;
+		if (value > ceiling) implausible[tier] = value;
 	}
 	if (Object.keys(implausible).length > 0) {
 		return {
@@ -237,14 +284,14 @@ export function sanitizeUsage(raw: RawUsageCandidate | null | undefined): Normal
  */
 export function implausibleUsageData(
 	snapshot: NormalizedUsage,
-	fields: { model: string; transferId: string },
+	fields: { model: string; transferId: string; responses?: number | undefined },
 ): Record<string, unknown> | undefined {
 	if (snapshot.implausible === undefined) return undefined;
 	return {
 		model: fields.model,
 		transferId: fields.transferId,
 		tiers: { ...snapshot.implausible },
-		ceilingTokensPerTier: MAX_PLAUSIBLE_TOKENS_PER_TIER,
+		ceilingTokensPerTier: usageCeiling(fields.responses),
 		charged: "estimate",
 	};
 }

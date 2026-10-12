@@ -87,6 +87,8 @@ export const SettleRequestSchema = z.object({
 	// server strips this key, so the write silently bills at the 5-minute rate: a client
 	// sends it only to a server that lists `cache-write-1h` in /v1/health capabilities.
 	cacheWrite1hTokens: z.number().int().nonnegative().optional(),
+	// How many provider responses these counts sum (default 1): the plausibility ceiling is per response.
+	responses: z.number().int().positive().max(1_000_000).optional(),
 	chunksDelivered: z.number().int().nonnegative().optional(),
 	usageSource: z.enum(["provider", "estimated"]).optional(),
 	// Same silent-strip as the D4 cache tiers: computeMs is already a

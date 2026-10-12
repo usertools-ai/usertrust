@@ -305,6 +305,9 @@ function sumCounts(messages) {
 		cacheWrite1hTokens: 0,
 	};
 	for (const m of messages) for (const key of COUNT_KEYS) sum[key] += m[key];
+	// How many provider responses the sum spans: the server's plausibility ceiling is per response, so a window of many
+	// messages is not mistaken for one absurd one.
+	sum.responses = messages.length;
 	return sum;
 }
 
@@ -1968,7 +1971,7 @@ async function oneHourSupport(share) {
  * worst case against an old server is the 5-minute price, never a dropped count.
  */
 async function settleBody(transferId, counts, labels) {
-	const { cacheWrite1hTokens, ...rest } = counts;
+	const { cacheWrite1hTokens, responses, ...rest } = counts;
 	const support = await oneHourSupport(cacheWrite1hTokens);
 	// Support UNKNOWN with a share to carry: sending only the flat total would bill the
 	// 1-hour tokens at the 5-minute rate for good, so no body is built; the caller defers.
@@ -1978,6 +1981,7 @@ async function settleBody(transferId, counts, labels) {
 		transferId,
 		...rest,
 		...(sendShare ? { cacheWrite1hTokens } : {}),
+		...(Number.isSafeInteger(responses) && responses > 1 ? { responses } : {}),
 		usageSource: "provider",
 		...settleLabels(labels),
 	};
@@ -2113,6 +2117,7 @@ export async function settleTranscriptHold(sessionId, entry) {
 	}
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(entry[key]);
+	counts.responses = ids.length;
 	// A 1-hour share the server may or may not price: decide BEFORE claiming the hold's file,
 	// so an unknown server leaves the pending record in place for a later settle point instead
 	// of journalling a `.done` for a settle that never went out.
@@ -2640,6 +2645,7 @@ async function remainderOf(
 function vehicleCounts(vehicle) {
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(vehicle[key]);
+	counts.responses = Array.isArray(vehicle.ids) ? vehicle.ids.length : 1;
 	return counts;
 }
 

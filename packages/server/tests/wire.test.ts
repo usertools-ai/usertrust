@@ -61,6 +61,13 @@ describe("request schemas", () => {
 		});
 	});
 
+	it("round-trips responses (the count of provider responses a settle sums) and bounds it", () => {
+		expect(SettleRequestSchema.parse({ transferId: "tx_1", responses: 600 }).responses).toBe(600);
+		for (const bad of [0, -1, 1.5, "7", 1_000_001]) {
+			expect(() => SettleRequestSchema.parse({ transferId: "tx_1", responses: bad })).toThrow();
+		}
+	});
+
 	it("round-trips cacheWrite1hTokens (the 1-hour share of the write total; zod would STRIP an unknown key)", () => {
 		const parsed = SettleRequestSchema.parse({
 			transferId: "tx_1",

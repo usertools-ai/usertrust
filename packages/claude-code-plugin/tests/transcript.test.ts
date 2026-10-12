@@ -522,6 +522,26 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 		expect(windowHold(plain)).toBeGreaterThanOrEqual(realCost);
 	});
 
+	describe("a window of several responses says how many it sums", () => {
+		it("sends `responses` for a multi-message settle and omits it for a single one", async () => {
+			await startServer(okResponder);
+			await writeMain([
+				...responseEntries("msg_a", SONNET, u(10, 20, 0, 0)),
+				...responseEntries("msg_b", SONNET, u(10, 20, 0, 0)),
+			]);
+			await run("stop.mjs", stopInput());
+			expect(settles()).toHaveLength(1);
+			expect(settles()[0]?.body).toMatchObject({ responses: 2 });
+		});
+
+		it("a single response carries no `responses` key", async () => {
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 0, 0)));
+			await run("stop.mjs", stopInput());
+			expect(settles()[0]?.body).not.toHaveProperty("responses");
+		});
+	});
+
 	describe("the 1-hour share of the cache-write tier (#203)", () => {
 		const oneHour = (): Usage => ({ ...u(10, 20, 3_000, 400), cacheWrite1h: 150 });
 

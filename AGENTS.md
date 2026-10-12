@@ -540,11 +540,11 @@ not duplicated here.
 **1 usertoken = $0.0001 USD, everywhere.** All pricing rates are usertokens per 1,000 LLM tokens.
 This constant is duplicated in `packages/verify` on purpose.
 
-**A reported usage count above the plausibility ceiling is NOT priced, and the session counter follows the ledger.**
+**A reported usage count above the plausibility ceiling is NOT priced.**
 `sanitizeUsage` returns an `"estimated"` snapshot with an `implausible` record when any tier exceeds
 `MAX_PLAUSIBLE_TOKENS_PER_TIER` (100,000,000); the call settles at the estimate and a `usage_implausible` event is appended
 AFTER its `llm_call` (the first event carrying a transferId is how `verifyTransaction` finds the settlement). With a ledger
-the session counter is charged `min(cost, hold)` (what the ledger posts), without one (dry run) the full cost, and
+the session counter keeps the METERED cost (the budget enforces what the provider charges; the ledger's shortfall event records any gap), and
 `isPersistableSpend` refuses to write a cumulative spend above `Number.MAX_SAFE_INTEGER`; `usertrust health` reports a runaway
 persisted spend. Recovery is `docs/runaway-spend.md`.
 *Prevents:* one finite-but-absurd provider figure (10^12 tokens priced to 2.77e18 UT) being added to the counter, persisted,

@@ -38,6 +38,7 @@
  * ```
  */
 
+import type { UsageTier } from "./ledger/usage.js";
 import {
 	fromAnthropicUsage,
 	fromGeminiUsage,
@@ -79,6 +80,12 @@ export interface StreamCompletion {
 	usage: StreamUsage;
 	chunksDelivered: number;
 	usageReported: boolean;
+	/**
+	 * Tiers whose reported count exceeded the plausibility ceiling in ANY chunk (the larger figure per tier). Sticky: an
+	 * absurd count in a later chunk is not undone by a plausible earlier one, so the settle charges the estimate and
+	 * records the anomaly rather than billing zeroed counts under a provider label.
+	 */
+	implausible?: Partial<Record<UsageTier, number>> | undefined;
 }
 
 export interface GovernedStream<T> extends AsyncIterable<T> {
@@ -98,7 +105,9 @@ export interface GovernedStream<T> extends AsyncIterable<T> {
  * `cache_creation.{ephemeral_5m,1h}_input_tokens` breakdown — so the D2 row is
  * implemented in exactly one place.
  */
-function extractAnthropicTokens(chunk: unknown): StreamUsage {
+function extractAnthropicTokens(chunk: unknown): StreamUsage & {
+	implausible?: Partial<Record<UsageTier, number>> | undefined;
+} {
 	if (chunk == null || typeof chunk !== "object") return NO_USAGE;
 
 	const c = chunk as Record<string, unknown>;
@@ -114,6 +123,7 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage {
 				cacheReadTokens: normalized.cacheReadTokens,
 				cacheWriteTokens: normalized.cacheWriteTokens,
 				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
+				implausible: normalized.implausible,
 			};
 		}
 	}
@@ -127,6 +137,7 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage {
 				cacheReadTokens: normalized.cacheReadTokens,
 				cacheWriteTokens: normalized.cacheWriteTokens,
 				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
+				implausible: normalized.implausible,
 			};
 		}
 	}
@@ -147,6 +158,7 @@ function sanitizeCount(value: unknown): number {
  */
 interface SnapshotWithProvenance extends StreamUsage {
 	reported: boolean;
+	implausible?: Partial<Record<UsageTier, number>> | undefined;
 }
 
 /**
@@ -195,6 +207,7 @@ function extractUsageSnapshot(
 						cacheReadTokens: n.cacheReadTokens,
 						cacheWriteTokens: n.cacheWriteTokens,
 						reported: n.source === "provider",
+						implausible: n.implausible,
 					};
 				}
 			}
@@ -210,6 +223,7 @@ function extractUsageSnapshot(
 				cacheReadTokens: n.cacheReadTokens,
 				cacheWriteTokens: n.cacheWriteTokens,
 				reported: n.source === "provider",
+				implausible: n.implausible,
 			};
 		}
 		return null;
@@ -226,6 +240,7 @@ function extractUsageSnapshot(
 			cacheReadTokens: n.cacheReadTokens,
 			cacheWriteTokens: n.cacheWriteTokens,
 			reported: n.source === "provider",
+			implausible: n.implausible,
 		};
 	}
 	return null;
@@ -290,6 +305,14 @@ async function* wrapStreamImpl<T>(
 	let cacheWrite1hTokens = 0;
 	let chunksDelivered = 0;
 	let usageReported = false;
+	let implausible: Partial<Record<UsageTier, number>> | undefined;
+	const noteImplausible = (found: Partial<Record<UsageTier, number>> | undefined): void => {
+		if (found === undefined) return;
+		implausible = { ...implausible };
+		for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
+			implausible[tier] = Math.max(implausible[tier] ?? 0, value);
+		}
+	};
 	const snapshot = (): StreamUsage => ({
 		inputTokens,
 		outputTokens,
@@ -318,6 +341,7 @@ async function* wrapStreamImpl<T>(
 				// chunk's values (A7); explicit zeros count as reported usage (A11).
 				const latest = extractUsageSnapshot(chunk, kind);
 				if (latest != null) {
+					noteImplausible(latest.implausible);
 					deltaInput = Math.max(0, latest.inputTokens - inputTokens);
 					deltaOutput = Math.max(0, latest.outputTokens - outputTokens);
 					inputTokens = latest.inputTokens;
@@ -339,6 +363,7 @@ async function* wrapStreamImpl<T>(
 				// Anthropic: message_start carries input, message_delta carries output —
 				// genuinely incremental chunk types; keep the latest non-zero value.
 				const tokens = extractAnthropicTokens(chunk);
+				noteImplausible(tokens.implausible);
 				if (tokens.inputTokens > 0) {
 					deltaInput = Math.max(0, tokens.inputTokens - inputTokens);
 					inputTokens = tokens.inputTokens;
@@ -386,14 +411,14 @@ async function* wrapStreamImpl<T>(
 		}
 	} catch (err) {
 		errored = true;
-		onError(err, { usage: snapshot(), chunksDelivered, usageReported });
+		onError(err, { usage: snapshot(), chunksDelivered, usageReported, implausible });
 		throw err;
 	} finally {
 		// Normal completion AND early termination (consumer break → generator
 		// `.return()`) both settle here. A thrown error already ran `onError` and set
 		// `errored`, so it is the only path that skips settlement (it voids instead).
 		if (!errored) {
-			onComplete({ usage: snapshot(), chunksDelivered, usageReported });
+			onComplete({ usage: snapshot(), chunksDelivered, usageReported, implausible });
 		}
 	}
 }

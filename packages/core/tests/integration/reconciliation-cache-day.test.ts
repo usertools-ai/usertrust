@@ -377,12 +377,8 @@ describe("reconciliation — the 1.14B-cache-read day through trust()", () => {
 		expect(engine.posted.reduce((a, b) => a + b, 0)).toBe(DAY_COST);
 		// No call was capped, so no receipt carries a posted-vs-metered gap.
 		expect(receipts.every((r) => r.postedCost === undefined)).toBe(true);
-		// The session's own budget arithmetic agrees with what the ledger WOULD post: the session counter is charged
-		// min(cost, hold), because TigerBeetle caps a post at the pending amount. This harness's open engine posts in
-		// full (a fiction, so the day recomputes), but trust() sizes each hold from the request text, which here is small;
-		// the counter follows the hold, the receipts and the chain keep the true metered cost.
-		const counted = engine.held.reduce((sum, held) => sum + Math.min(PER_CALL_COST, held), 0);
-		expect(receipts[CALLS - 1]?.budgetRemaining).toBe(BUDGET - counted);
+		// The session's budget counts the METERED cost (what the provider charges), whatever the ledger would post.
+		expect(receipts[CALLS - 1]?.budgetRemaining).toBe(BUDGET - DAY_COST);
 
 		// ── The DURABLE record — the chain, not the return value ──
 		// A receipt is an ephemeral object; the claim is only worth something on
