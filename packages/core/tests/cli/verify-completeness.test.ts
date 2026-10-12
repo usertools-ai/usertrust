@@ -359,6 +359,33 @@ describe("verify --receipts: the caller's own receipts against the chain", () =>
 		expect(process.exitCode).toBe(1);
 	});
 
+	it("a receipts file that holds nothing (empty, or only whitespace) is unreadable, never 'every receipt found'", async () => {
+		await twoEvents();
+		for (const content of ["", " \n\t\n"]) {
+			out.length = 0;
+			process.exitCode = 0;
+			const file = join(tempDir, "receipts.jsonl");
+			writeFileSync(file, content);
+			await verifyRun(tempDir, { json: true }, ["--receipts", file]);
+			const r = json();
+			expect(r.data.receipts).toEqual({ checked: 0, unreadable: 1, unaudited: [] });
+			expect(r.data.complete).toBe(false);
+			expect(r.success).toBe(false);
+			expect(process.exitCode).toBe(1);
+		}
+	});
+
+	it("CONTROL: an explicit empty array is a caller with no receipts: nothing to check, complete", async () => {
+		await twoEvents();
+		const file = join(tempDir, "receipts.json");
+		writeFileSync(file, "[]");
+		await verifyRun(tempDir, { json: true }, ["--receipts", file]);
+		const r = json();
+		expect(r.data.receipts).toEqual({ checked: 0, unreadable: 0, unaudited: [] });
+		expect(r.data.complete).toBe(true);
+		expect(process.exitCode).toBe(0);
+	});
+
 	it("a large receipts array is read whole, never as unreadable (no spread into one call)", async () => {
 		await twoEvents();
 		const file = join(tempDir, "receipts.json");

@@ -387,7 +387,12 @@ function checkReceipts(events: readonly PersistedAuditEvent[], raws: string[]): 
 	const entries: unknown[] = [];
 	for (const raw of raws) {
 		const text = raw.trim();
-		if (text === "") continue;
+		// A receipts file the caller named that holds nothing is not "no receipts": a truncated or
+		// empty export would otherwise pass the check with nothing checked. An explicit `[]` says it.
+		if (text === "") {
+			result.unreadable++;
+			continue;
+		}
 		if (text.startsWith("[")) {
 			try {
 				const arr: unknown = JSON.parse(text);
