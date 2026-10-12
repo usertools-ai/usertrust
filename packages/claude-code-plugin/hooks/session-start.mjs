@@ -7,8 +7,14 @@
 // any platform, return `systemMessage` in JSON output", and SessionStart
 // decision control: "Claude Code adds stdout it treats as plain text to
 // Claude's context"). No network call: the hook must be fast and cannot fail.
+//
+// It also warns of tool calls the server REJECTED for their key since the last session start
+// (key-rejected.mjs `rejectedSinceLastStart`): read from watch.jsonl, locally and bounded. Any
+// failure to read it is the normal banner, never a thrown error or a wait.
 import { writeSessionStart } from "./job-log.mjs";
+import { rejectedSinceLastStart, warningText } from "./key-rejected.mjs";
 import { announce, modeAnnouncement, readStdin, requireLaunch, say } from "./lib.mjs";
+import { stampFirstRun } from "./transcript.mjs";
 
 requireLaunch();
 
@@ -19,6 +25,14 @@ try {
 } catch {
 	// Nothing to read is fine.
 }
+// The state's first-run time (transcript.mjs `firstRun`), if it has none, before anything
+// else: a transcript entry written before it is never posted, and Claude Code writes a
+// response, `usage` and all, BEFORE the PreToolUse its tool_use fires. Stamped first at that
+// PreToolUse, a fresh install never posted its first response. SessionStart precedes every
+// response of its session, whatever its `source`: a resumed or compacted transcript's
+// history is older than the stamp, and is never posted, and a stamp already made never
+// moves. Local and bounded, and it never throws; in estimate mode it makes nothing.
+await stampFirstRun();
 // The job log: a NEW session id (startup, clear, fork) gets its `session-start` line;
 // resume and compact write nothing, so neither ever ends or invalidates an open job.
 // Failing to write it must never fail a session: `usertrust-job` then refuses loudly.
@@ -27,4 +41,12 @@ try {
 } catch (err) {
 	say(`usertrust: job log not started: ${err instanceof Error ? err.message : String(err)}`);
 }
-announce(modeAnnouncement());
+// The warning first, so the clip at `announce`'s bound can only ever cut the mode line after it.
+let warning = null;
+try {
+	const rejected = await rejectedSinceLastStart();
+	if (rejected !== null) warning = warningText(rejected);
+} catch {
+	// Never a reason to fail the start: the normal banner.
+}
+announce(warning === null ? modeAnnouncement() : `${warning} ${modeAnnouncement()}`);

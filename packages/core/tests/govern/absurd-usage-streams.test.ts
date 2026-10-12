@@ -302,6 +302,27 @@ describe("an absurd chunk never reaches the anomaly detector's observation", () 
 		expect(completion?.implausible).toMatchObject({ inputTokens: HUGE });
 	});
 
+	it("merged behaviours: an absurd chunk is observed as zero AND a failing settle still surfaces in the iteration", async () => {
+		const seen: number[] = [];
+		const failure = new Error("settle refused (audit degraded)");
+		await expect(
+			(async () => {
+				for await (const _ of wrapStream(
+					gen([{ type: "message_start", message: { usage: { input_tokens: HUGE } } }]),
+					"anthropic",
+					async () => {
+						throw failure;
+					},
+					() => {},
+					(obs) => seen.push(obs.deltaTokens),
+				)) {
+					// drain
+				}
+			})(),
+		).rejects.toBe(failure);
+		expect(seen).toEqual([0]);
+	});
+
 	class Emitter extends EventEmitter {
 		finalMessage(): Promise<unknown> {
 			return Promise.resolve({});
