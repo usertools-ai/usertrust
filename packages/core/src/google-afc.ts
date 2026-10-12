@@ -439,39 +439,115 @@ const SDK_TOOL_FIELDS = [
 	"inputSchema",
 ] as const;
 
+/** A canonical array index (`"0"`, `"12"`), as an own key of an array. */
+const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
+
 /**
- * A non-callable tool as data WE own: `structuredClone(tool)`, which copies its own
- * enumerable properties only, plus every field in SDK_TOOL_FIELDS that the clone would not
- * carry (inherited, or non-enumerable own), CAPTURED once (`captureOnce`) and cloned in as
- * enumerable own data. So the clone holds every field the SDK reads, `functionDeclarations`
- * included, and the verdict, which reads the clone, sees what the SDK will see: a
- * declarations getter beside a callable tool is the SDK's own local error, not an AFC loop.
- * A tool or captured field that cannot be copied as data is UncloneableAfcInput.
+ * Refuse (UncloneableAfcInput, naming the path) a value that `structuredClone` would copy
+ * LOSSILY for the SDK. The SDK reads below a tool field with plain property access too (a
+ * declaration's `name`, a `parameters` Schema, recursively), so an inherited getter or a
+ * non-enumerable property there reaches the provider natively, while structuredClone keeps
+ * own enumerable data only. Per-type field lists cannot follow a recursive Schema, so below
+ * the tool's top-level fields the snapshot does not capture, it REFUSES: "can't tell".
+ *
+ * Allowed: primitives; plain objects (prototype `Object.prototype` or `null`) whose own
+ * string-keyed properties are all enumerable DATA; and DENSE arrays (prototype
+ * `Array.prototype`) holding enumerable data at every index and no named property besides
+ * `length`. Refused: a class instance (any other prototype: a user class, `Date`, `Map`, a
+ * typed array, an array subclass), an accessor, a non-enumerable property, a sparse array,
+ * an array with an extra named property, a function. Symbol keys are neither read by the SDK
+ * nor copied by structuredClone, so they are ignored.
+ *
+ * The walk runs NO caller code: every object is Proxy-checked (`util.types.isProxy`, no
+ * trap) before its prototype or descriptors are read, and only descriptors are read, never
+ * a value through an accessor. It is iterative (no recursion depth limit) and visits each
+ * object once, so a cycle ends it.
+ */
+function refuseLossyClone(root: unknown, rootAt: string): void {
+	const visited = new Set<object>();
+	const pending: Array<{ value: unknown; at: string }> = [{ value: root, at: rootAt }];
+	for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+		const { value, at } = next;
+		if (typeof value === "function") throw new UncloneableAfcInput(at);
+		if (value === null || typeof value !== "object") continue;
+		if (visited.has(value)) continue;
+		visited.add(value);
+		rejectProxy(value, at);
+		const isArray = Array.isArray(value);
+		const proto = Object.getPrototypeOf(value);
+		const plainProto = isArray
+			? proto === Array.prototype
+			: proto === Object.prototype || proto === null;
+		if (!plainProto) throw new UncloneableAfcInput(at);
+		const keys = Reflect.ownKeys(value).filter((k): k is string => typeof k === "string");
+		if (isArray) {
+			const length = (value as unknown[]).length; // `length` is own data on a real array
+			let indexes = 0;
+			for (const key of keys) {
+				if (key === "length") continue;
+				if (!ARRAY_INDEX.test(key)) throw new UncloneableAfcInput(`${at}.${key}`);
+				indexes++;
+			}
+			if (indexes !== length) throw new UncloneableAfcInput(at); // sparse
+		}
+		for (const key of keys) {
+			if (isArray && key === "length") continue;
+			const keyAt = isArray ? `${at}[${key}]` : `${at}.${key}`;
+			const d = Object.getOwnPropertyDescriptor(value, key);
+			if (d === undefined || !("value" in d) || d.enumerable !== true) {
+				throw new UncloneableAfcInput(keyAt);
+			}
+			pending.push({ value: d.value, at: keyAt });
+		}
+	}
+}
+
+/**
+ * A non-callable tool as data WE own. Its own enumerable string-keyed properties are read
+ * ONCE each (an accessor's getter on the original receiver), as `structuredClone(tool)`
+ * would read them; every field in SDK_TOOL_FIELDS that those would not carry (inherited, or
+ * non-enumerable own) is CAPTURED once (`captureOnce`); all are set as enumerable own data
+ * on a plain object, which is then structuredClone'd. So the clone holds every field the SDK
+ * reads, `functionDeclarations` included, and the verdict, which reads the clone, sees what
+ * the SDK will see: a declarations getter beside a callable tool is the SDK's own local
+ * error, not an AFC loop. The VALUE of each of those fields, whichever way it was read, must
+ * also clone faithfully at every depth (`refuseLossyClone`), or the call is refused. A tool
+ * or field that cannot be copied as data is UncloneableAfcInput.
  */
 function cloneDataTool(tool: unknown, at: string): unknown {
-	let out: unknown;
+	if (tool === null || typeof tool !== "object") {
+		try {
+			return structuredClone(tool);
+		} catch {
+			throw new UncloneableAfcInput(at);
+		}
+	}
+	const source: Record<string, unknown> = {};
+	for (const key of Reflect.ownKeys(tool)) {
+		if (typeof key !== "string") continue; // structuredClone copies no symbol key either
+		const d = Object.getOwnPropertyDescriptor(tool, key);
+		if (d === undefined || d.enumerable !== true) continue;
+		let value: unknown;
+		try {
+			value = "value" in d ? d.value : d.get?.call(tool);
+		} catch {
+			throw new UncloneableAfcInput(at); // as structuredClone's own read of it threw
+		}
+		setData(source, key, value);
+	}
+	for (const key of SDK_TOOL_FIELDS) {
+		if (Object.hasOwn(source, key)) continue; // an own enumerable field, read above
+		const value = captureOnce(tool, key, at);
+		if (value !== undefined) setData(source, key, value);
+	}
+	for (const key of SDK_TOOL_FIELDS) {
+		if (Object.hasOwn(source, key)) refuseLossyClone(source[key], `${at}.${key}`);
+	}
 	try {
-		out = structuredClone(tool);
+		return structuredClone(source);
 	} catch {
 		throw new UncloneableAfcInput(at);
 	}
-	if (tool === null || typeof tool !== "object" || out === null || typeof out !== "object") {
-		return out;
-	}
-	for (const key of SDK_TOOL_FIELDS) {
-		// An own enumerable field is already in the clone (structuredClone read it, once).
-		if (Object.prototype.propertyIsEnumerable.call(tool, key)) continue;
-		const value = captureOnce(tool, key, at);
-		if (value === undefined) continue;
-		let copy: unknown;
-		try {
-			copy = structuredClone(value);
-		} catch {
-			throw new UncloneableAfcInput(`${at}.${key}`);
-		}
-		setData(out as Record<string, unknown>, key, copy);
-	}
-	return out;
 }
 
 /**
@@ -568,8 +644,10 @@ function capturedCopy(
  *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
  *     non-callable tool is cloned as data (`cloneDataTool`: `structuredClone`, plus every
  *     field the SDK reads that the clone would drop, such as a `functionDeclarations`
- *     getter; a tool that cannot be copied as data is indeterminate, so the call is
- *     refused naming it); callable tools keep their
+ *     getter; a tool that cannot be copied as data, including one whose field values hold
+ *     a class instance, accessor, non-enumerable property or sparse array at any depth
+ *     (`refuseLossyClone`), is indeterminate, so the call is refused naming where);
+ *     callable tools keep their
  *     reference (generateContent then runs them through runGovernedAfc, which needs the
  *     original objects; the stream refuses them). When the snapshot says AFC IS disabled
  *     (`disable` truthy, or a `maximumRemoteCalls` the SDK reads as invalid), the tool

@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { GenerateContentResponse, GoogleGenAI } from "@google/genai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { trust } from "../../src/govern.js";
+import type { AuditEvent } from "../../src/shared/types.js";
 
 vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(() => ({
@@ -786,6 +788,59 @@ const HIDDEN_DECLARATIONS: Array<[string, (reads: Record<string, number>) => obj
 	],
 ];
 
+/** An audit writer that records each appended event (a fresh hash per event). */
+function recordingAudit(): AuditWriter & { events: AppendEventInput[] } {
+	const events: AppendEventInput[] = [];
+	return {
+		events,
+		appendEvent: async (input: AppendEventInput): Promise<AuditEvent> => {
+			events.push(input);
+			return {
+				id: randomUUID(),
+				timestamp: new Date().toISOString(),
+				previousHash: "0".repeat(64),
+				hash: String(events.length).padStart(64, "0"),
+				kind: input.kind,
+				actor: input.actor,
+				data: input.data,
+			};
+		},
+		getWriteFailures: () => 0,
+		isDegraded: () => false,
+		flush: async () => {},
+		release: () => {},
+	};
+}
+
+/** A declaration as a class instance: `name` and `description` are PROTOTYPE getters, which structuredClone drops. */
+class DeclarationInstance {
+	get name(): string {
+		return "lookup";
+	}
+	get description(): string {
+		return "look it up";
+	}
+}
+
+/** A tool holding a class-instance declaration, in an own enumerable array or behind a getter on the tool. */
+const NESTED_INSTANCE: Array<[string, () => object]> = [
+	[
+		"in an own enumerable functionDeclarations array",
+		() => ({ functionDeclarations: [new DeclarationInstance()] }),
+	],
+	[
+		"in a functionDeclarations array a PROTOTYPE getter returns",
+		() => {
+			class DeclaredTool {
+				get functionDeclarations(): unknown[] {
+					return [new DeclarationInstance()];
+				}
+			}
+			return new DeclaredTool();
+		},
+	],
+];
+
 describe("the AFC snapshot forwards every field the SDK reads (real @google/genai, fetch stubbed)", () => {
 	let vault: string;
 	const realFetch = globalThis.fetch;
@@ -798,22 +853,27 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 		rmSync(vault, { recursive: true, force: true });
 	});
 
-	/** The same request on the SDK ungoverned, then governed, each on its own client and wire. */
+	/**
+	 * The same request on the SDK ungoverned, then governed, each on its own client and wire. `auditKinds` lists the
+	 * governed call's audit events, by kind.
+	 */
 	async function both(method: WireMethod, makeParams: () => unknown, rounds?: WireRound[]) {
 		const raw = wire(rounds);
 		globalThis.fetch = raw.fetchStub as typeof fetch;
 		const rawResult = await runOn(new GoogleGenAI({ apiKey: "test" }).models, method, makeParams());
 		const gov = wire(rounds);
 		globalThis.fetch = gov.fetchStub as typeof fetch;
+		const audit = recordingAudit();
 		const governed = await trust(new GoogleGenAI({ apiKey: "test" }), {
 			dryRun: true,
 			budget: 500_000,
 			vaultBase: vault,
+			_audit: audit,
 		});
 		const govParams = makeParams();
 		const govResult = await runOn(governed.models, method, govParams);
 		await governed.destroy();
-		return { raw, rawResult, gov, govResult };
+		return { raw, rawResult, gov, govResult, auditKinds: audit.events.map((e) => e.kind) };
 	}
 
 	for (const method of ["generateContent", "generateContentStream"] as const) {
@@ -895,6 +955,96 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 				if (shape === "a PROTOTYPE getter") expect(reads).toEqual({ functionDeclarations: 1 });
 			});
 		}
+
+		// Below a tool's top-level fields the snapshot cannot capture field by field (a `parameters` Schema is recursive),
+		// so a value structuredClone would copy lossily there is refused as "can't tell", never forwarded emptied.
+		for (const [shape, makeTool] of NESTED_INSTANCE) {
+			it(`${method}: a class-instance declaration ${shape} is refused as "can't tell" (one policy_denied, no provider request)`, async () => {
+				const makeParams = () => ({
+					model: "gemini-2.5-flash",
+					contents: "go",
+					config: { tools: [makeTool()] },
+				});
+				const { raw, rawResult, gov, govResult, auditKinds } = await both(method, makeParams);
+
+				// Natively, what the SDK sends depends on the backend: the Gemini API passes each declaration through as it
+				// is, so JSON.stringify drops its getters...
+				expect(rawResult).toBe("ok");
+				expect(raw.requests).toHaveLength(1);
+				expect(raw.requests[0]?.body["tools"]).toEqual([{ functionDeclarations: [{}] }]);
+				// ...while Vertex AI reads each field (functionDeclarationToVertex) and sends the declaration.
+				const vertex = wire();
+				globalThis.fetch = vertex.fetchStub as typeof fetch;
+				const vertexResult = await runOn(
+					new GoogleGenAI({ vertexai: true, apiKey: "test" }).models,
+					method,
+					makeParams(),
+				);
+				expect(vertexResult).toBe("ok");
+				expect(vertex.requests).toHaveLength(1);
+				expect(vertex.requests[0]?.body["tools"]).toEqual([
+					{ functionDeclarations: [{ name: "lookup", description: "look it up" }] },
+				]);
+				// A structuredClone would empty it for both; the snapshot cannot match both, so the governed call refuses
+				expect(govResult).toContain(
+					`models.${method} could not be checked for automatic function calling (params.config.tools[0].functionDeclarations[0] cannot be copied as data)`,
+				);
+				expect(auditKinds).toEqual(["policy_denied"]);
+				expect(gov.requests).toHaveLength(0);
+			});
+		}
+
+		it(`${method}: a SPARSE functionDeclarations array is refused as "can't tell" (one policy_denied, no provider request)`, async () => {
+			const makeParams = () => {
+				const declarations: Loose[] = [{ name: "lookup" }];
+				declarations[2] = { name: "other" }; // index 1 is a hole
+				return {
+					model: "gemini-2.5-flash",
+					contents: "go",
+					config: { tools: [{ functionDeclarations: declarations }] },
+				};
+			};
+			const { gov, govResult, auditKinds } = await both(method, makeParams);
+
+			expect(govResult).toContain(
+				`models.${method} could not be checked for automatic function calling (params.config.tools[0].functionDeclarations cannot be copied as data)`,
+			);
+			expect(auditKinds).toEqual(["policy_denied"]);
+			expect(gov.requests).toHaveLength(0);
+		});
+
+		it(`${method}: a plain array of plain declarations, nested Schema included, is walked and forwarded as the SDK's own (control)`, async () => {
+			const makeParams = () => ({
+				model: "gemini-2.5-flash",
+				contents: "go",
+				config: {
+					tools: [
+						{
+							functionDeclarations: [
+								{
+									name: "lookup",
+									parameters: {
+										type: "OBJECT",
+										properties: { q: { type: "STRING" }, tags: { type: "ARRAY" } },
+										required: ["q"],
+									},
+								},
+								{ name: "other" },
+							],
+						},
+						{ googleSearch: {} },
+					],
+				},
+			});
+			const { raw, rawResult, gov, govResult, auditKinds } = await both(method, makeParams);
+
+			expect(rawResult).toBe("ok");
+			expect(govResult).toBe("ok");
+			expect(raw.requests).toHaveLength(1);
+			expect(gov.requests).toHaveLength(1);
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			expect(auditKinds).not.toContain("policy_denied");
+		});
 	}
 
 	it("generateContent with a callable tool: the governed loop's EVERY round carries the class-instance functionCallingConfig, as the SDK's own loop does", async () => {

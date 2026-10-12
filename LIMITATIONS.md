@@ -88,7 +88,10 @@ data), so a later change to the caller's `config.tools` or
 `config.automaticFunctionCalling` cannot reach the SDK. It carries every field the
 SDK reads from a non-callable tool, `config.toolConfig` and its
 `functionCallingConfig`, including one a class instance inherits (a getter) or holds
-as a non-enumerable property. The snapshot covers those
+as a non-enumerable property. Deeper inside a tool's fields (a declaration, a
+`parameters` schema) it does not capture field by field: a class instance, an
+accessor, a non-enumerable property or a sparse array there is refused, as a call
+that could not be checked. The snapshot covers those
 AFC fields only: `contents` and the rest of the request are still read live.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.
