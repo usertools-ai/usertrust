@@ -3021,3 +3021,75 @@ describe("a governed stream's pre-start return(v) yields v, as a native return d
 		await destroy(governed);
 	});
 });
+
+// ── A pre-start return(rejected promise) still ends the hold ──
+
+describe("a governed stream's pre-start return(Promise.reject(err)) rejects natively and still ends its hold", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		rmSync(tmpVault, { recursive: true, force: true });
+	});
+
+	async function expectRejectedReturnEndsHold(
+		governed: unknown,
+		stream: GovernedStreamHandle,
+		engine: TrustEngine,
+	): Promise<void> {
+		const err = new Error("rejected return value");
+		await expect(stream.return(Promise.reject(err) as never)).rejects.toBe(err);
+		const receipt = await stream.receipt;
+
+		// Settled at the estimate, as any pre-start return(): nothing was consumed.
+		expect(receipt.settled).toBe(true);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(receipt.chunksDelivered).toBe(0);
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+
+		// The in-flight stream count dropped: destroy() is not held to its 5 s deadline.
+		const t0 = Date.now();
+		await destroy(governed);
+		expect(Date.now() - t0).toBeLessThan(1_000);
+	}
+
+	it("Google: rejects with the same error, settles at the estimate, .receipt resolves, destroy() does not wait", async () => {
+		const engine = makeMockEngine();
+		const { client } = makeGoogleClient();
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+		const stream = await openStream(governed);
+
+		await expectRejectedReturnEndsHold(governed, stream, engine);
+	});
+
+	it("OpenAI chat.completions stream: rejects with the same error, settles at the estimate, .receipt resolves, destroy() does not wait", async () => {
+		const engine = makeMockEngine();
+		const { client } = makeOpenAIStreamClient();
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+		const result = await governed.chat.completions.create({
+			model: "gpt-4o",
+			messages: [{ role: "user", content: "Hi" }],
+			stream: true,
+		});
+
+		await expectRejectedReturnEndsHold(
+			governed,
+			result.response as unknown as GovernedStreamHandle,
+			engine,
+		);
+	});
+});

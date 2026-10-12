@@ -400,17 +400,26 @@ function endsBeforeStart<T>(
 	gen.return = async (value: unknown) => {
 		if (started) return ownReturn(value as never);
 		started = true;
-		// Complete the generator (its body never runs). Its own result is returned: like a
-		// native `return(v)`, it awaits `v`, so `return(Promise.resolve(123))` yields 123.
-		const result = await ownReturn(value as never);
+		// Complete the generator (its body never runs). Its own outcome is the caller's: like a
+		// native `return(v)`, it awaits `v`, so `return(Promise.resolve(123))` yields 123 and
+		// `return(Promise.reject(err))` rejects with `err`. Either way the source is closed and
+		// the hold settled FIRST: `started` is already true, so no later call would end it.
+		let outcome: { ok: true; result: IteratorResult<T> } | { ok: false; error: unknown };
+		try {
+			outcome = { ok: true, result: await ownReturn(value as never) };
+		} catch (error) {
+			outcome = { ok: false, error };
+		}
 		await closeSource();
 		const settling = onComplete(nothingConsumed());
 		if (settling !== undefined) await settling;
-		return result;
+		if (!outcome.ok) throw outcome.error;
+		return outcome.result;
 	};
 	gen.throw = async (error: unknown) => {
 		if (started) return ownThrow(error);
 		started = true;
+		// `return(undefined)` awaits nothing that can reject, so this cannot skip the void below.
 		await ownReturn(undefined as never);
 		await closeSource();
 		onError(error, nothingConsumed());
