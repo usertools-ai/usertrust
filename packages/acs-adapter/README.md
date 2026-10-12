@@ -45,6 +45,10 @@ if (result.verdict.decision === "allow") {
 } // denied? nothing to clean up — no reservation was made
 ```
 
+`createMockGovernor`, `mockPolicyDecider` and `runDemo` are test and demo helpers, not for
+production use. The mock keeps budgets in memory, with no ledger and no disk. In production,
+give `CompositeEvaluator` a governor from `createGovernor()` in `usertrust/headless`.
+
 `runDemo()` produces an infrastructure-free transcript of all three contract lines.
 
 ## evaluate_only mode

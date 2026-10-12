@@ -1,6 +1,8 @@
-import { mkdtemp, stat, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // lib.mjs reads env at call time; set the state dir before importing.
@@ -220,5 +222,91 @@ describe("serverRequest", () => {
 			}),
 		);
 		await expect(serverRequest("/v1/authorize", {})).rejects.toThrow(TransportError);
+	});
+});
+
+describe("writes that cannot be confirmed never read as done", () => {
+	// lib.mjs by URL, typed by what these rows call: the hooks are plain .mjs.
+	const LIB = pathToFileURL(join(import.meta.dirname, "..", "hooks", "lib.mjs")).href;
+	const lib = async () =>
+		(await import(LIB)) as {
+			quarantineHold(path: string): Promise<"ungated" | "removed" | "failed">;
+			recordWatchEvent(event: Record<string, unknown>): Promise<boolean>;
+		};
+
+	it.skipIf(process.getuid?.() === 0)(
+		"quarantineHold rewrites a hold IN PLACE: it works in a directory where no temp file or rename can be made",
+		async () => {
+			const { quarantineHold } = await lib();
+			const dir = join(stateDir, "holds");
+			await mkdir(dir);
+			const hold = join(dir, "s__main__tu_1.tx_1.json");
+			await writeFile(hold, JSON.stringify({ transferId: "tx_1", toolUseId: "tu_1", gate: 1 }), {
+				mode: 0o600,
+			});
+			// Quarantine runs when a rename in this directory has failed: no new entry can be made.
+			await chmod(dir, 0o500);
+			try {
+				// mutant: a temp file plus rename (writeFileAtomic) -> EACCES -> "removed" or "failed"
+				expect(await quarantineHold(hold)).toBe("ungated");
+			} finally {
+				await chmod(dir, 0o700);
+			}
+			expect(JSON.parse(await readFile(hold, "utf-8"))).toEqual({
+				transferId: "tx_1",
+				toolUseId: "tu_1",
+				ran: true,
+			});
+			expect(await readdir(dir)).toEqual(["s__main__tu_1.tx_1.json"]);
+		},
+	);
+
+	it("quarantineHold never writes through a FIFO in a hold's place: it is removed, at once", async () => {
+		if (process.platform === "win32") return;
+		const { quarantineHold } = await lib();
+		const fifo = join(stateDir, "s__main__tu_2.tx_2.json");
+		expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+		const started = Date.now();
+		expect(await quarantineHold(fifo)).toBe("removed");
+		expect(Date.now() - started).toBeLessThan(2_000);
+	});
+
+	it("a close that fails (EIO) after the append is a record NOT written, and the hook says so", async () => {
+		// A FileHandle's close is its own property, so the failure is injected where lib.mjs
+		// opens: every handle it opens has a close that closes, then reports the late EIO a full
+		// or failing disk gives.
+		let failures = 0;
+		vi.doMock("node:fs/promises", async (importOriginal) => {
+			const real = await importOriginal<typeof import("node:fs/promises")>();
+			return {
+				...real,
+				open: async (...args: Parameters<typeof real.open>) => {
+					const handle = await real.open(...args);
+					const close = handle.close.bind(handle);
+					handle.close = async () => {
+						await close();
+						failures += 1;
+						throw Object.assign(new Error("EIO: i/o error, close"), { code: "EIO" });
+					};
+					return handle;
+				},
+			};
+		});
+		vi.resetModules();
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		let said = "";
+		try {
+			const { recordWatchEvent } = await lib();
+			// mutant: close().catch(() => {}) -> true, no warning
+			expect(await recordWatchEvent({ kind: "gap", session: "s", started: null })).toBe(false);
+			said = stderr.mock.calls.map((c) => String(c[0])).join("");
+		} finally {
+			stderr.mockRestore();
+			vi.doUnmock("node:fs/promises");
+			vi.resetModules();
+		}
+		expect(failures).toBe(1);
+		expect(said).toContain("could not write a watch record");
+		expect(said).toContain("EIO");
 	});
 });

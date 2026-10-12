@@ -62,12 +62,15 @@ export function forgetPins(env: Record<string, string>): void {
  *   mode-dependent test. Each test passes the ones it means.
  * - Every run gets the passwd-home preload (`passwdHomeFor`). `nodeArgs` go before
  *   launch.mjs's path (another test-only `--import` preload, say).
+ * - `timeoutMs`, when given, kills a hook that runs longer (exit code 1): a test of a
+ *   hook that must never hang reports the hang as a failure instead of hanging itself.
  */
 export function runHook(
 	hookPath: string,
 	input: unknown,
 	env: Record<string, string>,
 	nodeArgs: string[] = [],
+	{ timeoutMs }: { timeoutMs?: number } = {},
 ): Promise<HookRunResult> {
 	const inherited = Object.fromEntries(
 		Object.entries(process.env).filter(([name]) => !name.startsWith("UT_")),
@@ -81,6 +84,7 @@ export function runHook(
 		const child = spawn(process.execPath, [...preload, ...nodeArgs, ...script], {
 			env: { ...inherited, ...env, TEST_PASSWD_HOME: passwdHomeFor(env) },
 			stdio: ["pipe", "pipe", "pipe"],
+			...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
 		});
 		let stdout = "";
 		let stderr = "";

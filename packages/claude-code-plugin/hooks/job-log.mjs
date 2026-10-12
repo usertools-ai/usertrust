@@ -33,9 +33,19 @@
 //
 // Zero dependencies; reads and writes only the state dir.
 import { constants } from "node:fs";
-import { appendFile, mkdir, open, readdir, readFile } from "node:fs/promises";
+import { mkdir, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { guardMode, recordWatchEvent, sanitize, stateRoot, writeFileAtomic } from "./lib.mjs";
+import {
+	appendRegular,
+	eachLine,
+	guardMode,
+	READ_BOUND,
+	readRegular,
+	recordWatchEvent,
+	sanitize,
+	stateRoot,
+	writeFileAtomic,
+} from "./lib.mjs";
 
 /** 1-128 of `[A-Za-z0-9._:-]`: usertrust core's `PRINCIPAL_FIELD_PATTERN`, pinned by a test. */
 export const JOB_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -63,19 +73,16 @@ export function jobLogPath(sessionId) {
 }
 
 /**
- * Parse a log's text for `sessionId`. Returns { state: "none" } (nothing complete is
- * written yet), { state: "invalid", reason }, or { state: "ok", events, last } where
- * each event is { tsMs, ts, op, job }.
+ * A job log's parser, fed one line at a time, so a log of any size is parsed in the memory
+ * of one line (`readJobLog` streams it). `line(text, terminated)` takes each line in order,
+ * as `eachLine` gives it (null for a line too long to read); `result()` is { state: "none" }
+ * (nothing written), { state: "invalid", reason }, or { state: "ok", events, last, clockSteps,
+ * maxRawMs } where each event is { index, tsMs, ts, op, job }.
  */
-export function parseJobLog(text, sessionId) {
-	if (text === "") return { state: "none" };
-	// Every writer appends ONE complete line in one write, so a final fragment with no newline
-	// is not a write in progress: it is a line that was cut short (a crash, a full disk). The
-	// reader never repairs a log, and never ignores such a line: the log is INVALID.
-	if (!text.endsWith("\n")) {
-		return { state: "invalid", reason: TORN_REASON };
-	}
-	const lines = text.split("\n").slice(0, -1);
+export function jobLogParser(sessionId) {
+	let i = 0;
+	let invalid = null;
+	let torn = false;
 	const events = [];
 	// Order is POSITION. A line's effective time is the running maximum of the stamps so far,
 	// so a stamp that runs backwards (a clock step, a late writer) cannot place a `start` before
@@ -86,25 +93,21 @@ export function parseJobLog(text, sessionId) {
 	const clockSteps = [];
 	// The latest raw stamp in the log: one far AHEAD of the clock that reads it is a fast clock.
 	let maxRawMs = Number.NEGATIVE_INFINITY;
-	for (const [i, line] of lines.entries()) {
+	const check = (line) => {
+		if (line === null) return `line ${i + 1} is too long`;
 		let rec;
 		try {
 			rec = JSON.parse(line);
 		} catch {
-			return { state: "invalid", reason: `line ${i + 1} is not JSON` };
+			return `line ${i + 1} is not JSON`;
 		}
 		if (rec === null || typeof rec !== "object" || Array.isArray(rec)) {
-			return { state: "invalid", reason: `line ${i + 1} is not an object` };
+			return `line ${i + 1} is not an object`;
 		}
-		if (rec.sid !== sessionId)
-			return { state: "invalid", reason: `line ${i + 1} names another session` };
-		if (!OPS.has(rec.op)) return { state: "invalid", reason: `line ${i + 1} has an unknown op` };
-		if (i === 0 && rec.op !== "session-start") {
-			return { state: "invalid", reason: "the first line is not session-start" };
-		}
-		if (i > 0 && rec.op === "session-start") {
-			return { state: "invalid", reason: `line ${i + 1} repeats session-start` };
-		}
+		if (rec.sid !== sessionId) return `line ${i + 1} names another session`;
+		if (!OPS.has(rec.op)) return `line ${i + 1} has an unknown op`;
+		if (i === 0 && rec.op !== "session-start") return "the first line is not session-start";
+		if (i > 0 && rec.op === "session-start") return `line ${i + 1} repeats session-start`;
 		if (
 			typeof rec.ts !== "string" ||
 			!ISO_UTC.test(rec.ts) ||
@@ -113,7 +116,7 @@ export function parseJobLog(text, sessionId) {
 			// instant must print back as the very string the CLI wrote.
 			new Date(Date.parse(rec.ts)).toISOString() !== rec.ts
 		) {
-			return { state: "invalid", reason: `line ${i + 1} has a bad ts` };
+			return `line ${i + 1} has a bad ts`;
 		}
 		const rawMs = Date.parse(rec.ts);
 		if (effectiveMs - rawMs > CLOCK_STEP_MS) {
@@ -126,7 +129,7 @@ export function parseJobLog(text, sessionId) {
 		}
 		const tsMs = Math.max(rawMs, effectiveMs);
 		if (rec.op === "start" && !(typeof rec.job === "string" && JOB_ID.test(rec.job))) {
-			return { state: "invalid", reason: `line ${i + 1} has a bad job id` };
+			return `line ${i + 1} has a bad job id`;
 		}
 		effectiveMs = tsMs;
 		maxRawMs = Math.max(maxRawMs, rawMs);
@@ -137,8 +140,57 @@ export function parseJobLog(text, sessionId) {
 			op: rec.op,
 			job: rec.op === "start" ? rec.job : null,
 		});
-	}
-	return { state: "ok", events, last: events[events.length - 1], clockSteps, maxRawMs };
+		return null;
+	};
+	return {
+		line(text, terminated) {
+			// Every writer appends ONE complete line in one write, so a final fragment with no
+			// newline is not a write in progress: it is a line that was cut short (a crash, a full
+			// disk). The reader never repairs a log, and never ignores such a line: the log is
+			// INVALID, whatever came before it.
+			if (!terminated) {
+				torn = true;
+				return;
+			}
+			if (invalid === null) invalid = check(text);
+			i += 1;
+		},
+		result() {
+			if (torn) return { state: "invalid", reason: TORN_REASON };
+			if (invalid !== null) return { state: "invalid", reason: invalid };
+			if (i === 0) return { state: "none" };
+			return { state: "ok", events, last: events[events.length - 1], clockSteps, maxRawMs };
+		},
+	};
+}
+
+/** Parse a log's text for `sessionId`: `jobLogParser` over its lines. */
+export function parseJobLog(text, sessionId) {
+	const parser = jobLogParser(sessionId);
+	const lines = text.split("\n");
+	const fragment = lines.pop() ?? "";
+	for (const line of lines) parser.line(line, true);
+	if (fragment !== "") parser.line(fragment, false);
+	return parser.result();
+}
+
+/**
+ * Stream the job log at `path` through `jobLogParser`: its parse, in the memory of one line.
+ * With `job`, also whether any line names that job, or may (a line too long to read)
+ * (`namesJob`), so a log that cannot be used can still be told apart from one that never
+ * mentioned it. Throws as `eachLine` does.
+ */
+export async function readJobLog(path, sessionId, job) {
+	const parser = jobLogParser(sessionId);
+	const quoted = job === undefined ? null : `"${job}"`;
+	let namesJob = false;
+	await eachLine(path, (line, terminated) => {
+		// A line too long to read (null) may name the job: counted as naming it, so a log made
+		// invalid by that very line is still reported against the job, never dropped unseen.
+		if (quoted !== null && (line === null || line.includes(quoted))) namesJob = true;
+		parser.line(line, terminated);
+	});
+	return { parsed: parser.result(), namesJob };
 }
 
 /** The job open at `tMs`: every line applies strictly AFTER its own ts. */
@@ -192,7 +244,7 @@ export function labelsFor(jobs, tMs) {
 async function noteSuspect(sessionId, maxRawMs) {
 	const marker = join(jobsDir(), `${sanitize(sessionId)}.suspect`);
 	try {
-		const prior = await readFile(marker, "utf-8").catch(() => null);
+		const prior = await readRegular(marker, READ_BOUND.small).catch(() => null);
 		if (prior === String(maxRawMs)) return;
 		// Mark it written ONLY if it was: a transient failure of the watch log must not leave a
 		// marker that stops the gap from ever being written once the log recovers.
@@ -216,7 +268,7 @@ async function noteSuspect(sessionId, maxRawMs) {
 export async function resolveJob(sessionId) {
 	const read = async () => {
 		try {
-			return parseJobLog(await readFile(jobLogPath(sessionId), "utf-8"), sessionId);
+			return (await readJobLog(jobLogPath(sessionId), sessionId)).parsed;
 		} catch (err) {
 			return err?.code === "ENOENT"
 				? { state: "none" }
@@ -295,8 +347,7 @@ export async function resolveJob(sessionId) {
 
 async function readParsed(log, sessionId) {
 	try {
-		const text = await readFile(log, "utf-8");
-		return { ...parseJobLog(text, sessionId), text };
+		return (await readJobLog(log, sessionId)).parsed;
 	} catch (err) {
 		if (err?.code === "ENOENT") return { state: "none", absent: true };
 		throw err;
@@ -305,7 +356,7 @@ async function readParsed(log, sessionId) {
 
 /** Append `rec` as one complete line, in one write (no fsync: only SessionStart's line is synced). */
 async function appendLine(log, rec) {
-	await appendFile(log, `${JSON.stringify(rec)}\n`, { flag: "a", mode: 0o600 });
+	await appendRegular(log, `${JSON.stringify(rec)}\n`);
 }
 
 /**
@@ -455,7 +506,7 @@ const ms = (value) => (typeof value === "string" ? Date.parse(value) : Number.Na
 /**
  * The job's tagged cost, and the KNOWN GAPS in the evidence behind it.
  *
- *   jobCoverage({ job, logs: { <sid>: <log text> }, records: [<audit event>, ...],
+ *   jobCoverage({ job, logs: { <sid>: <readLogs entry, or log text> }, records: [<audit event>, ...],
  *                 watch: [<watch record>, ...], unreadable: { audit, watch } })
  *     → { job, diagnostic: true, note, taggedCostUt: <integer string>, transferIds: [...],
  *         knownGaps: [{ gap, evidence }] }
@@ -484,13 +535,23 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 	// ── Evidence: the logs, the intervals, the cost ──
 	// A session's log is USABLE when it was supplied and parses as valid. Everything that
 	// places an event in time goes through a usable log of the event's OWN session.
+	// A log is a streamed read (`readLogs`: { parsed, namesJob }) or, in memory, its text;
+	// both are parsed by `jobLogParser`.
 	const parsedLogs = new Map();
-	for (const [sid, text] of Object.entries(logs ?? {})) parsedLogs.set(sid, parseJobLog(text, sid));
+	const namingJob = new Set();
+	for (const [sid, log] of Object.entries(logs ?? {})) {
+		const { parsed, namesJob } =
+			typeof log === "string"
+				? { parsed: parseJobLog(log, sid), namesJob: log.includes(`"${job}"`) }
+				: log;
+		parsedLogs.set(sid, parsed);
+		if (namesJob) namingJob.add(sid);
+	}
 	const usable = (sid) => parsedLogs.get(sid)?.state === "ok";
 	const intervalsBySession = new Map();
 	const allIntervals = [];
 	for (const [sid, parsed] of parsedLogs) {
-		if (parsed.state === "invalid" && logs[sid].includes(`"${job}"`)) {
+		if (parsed.state === "invalid" && namingJob.has(sid)) {
 			why(`session ${sid}: the job log is invalid (${parsed.reason})`, { session: sid });
 		}
 		if (parsed.state !== "ok") continue;
@@ -816,12 +877,22 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 	};
 }
 
-/** Every session log under `dir`, as { sid: text } (read-only). */
-export async function readLogs(dir) {
+/**
+ * Every session log under `dir`, streamed (`readJobLog`), as { sid: { parsed, namesJob } }
+ * (read-only): what `jobCoverage` takes for `logs`. A log gone since the listing is skipped;
+ * one that cannot be read (not a regular file, an I/O error) THROWS: it may hold the very job
+ * asked about, so read as empty it could turn a verdict, and the caller gives none instead.
+ */
+export async function readLogs(dir, job) {
 	const out = {};
 	for (const name of await readdir(dir).catch(() => [])) {
 		if (!name.endsWith(".jsonl")) continue;
-		out[name.slice(0, -".jsonl".length)] = await readFile(join(dir, name), "utf-8").catch(() => "");
+		const sid = name.slice(0, -".jsonl".length);
+		try {
+			out[sid] = await readJobLog(join(dir, name), sid, job);
+		} catch (err) {
+			if (err?.code !== "ENOENT") throw err;
+		}
 	}
 	return out;
 }

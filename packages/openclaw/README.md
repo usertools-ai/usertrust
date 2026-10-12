@@ -238,4 +238,4 @@ the `-N` suffix before comparing, so that check is unaffected.
 
 ## License
 
-Apache 2.0 · UserTrust™ is a trademark of Usertools, Inc.
+Apache 2.0 · usertrust™ is a trademark of Usertools, Inc.

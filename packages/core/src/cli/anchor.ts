@@ -36,7 +36,7 @@ import { DEFAULT_REKOR_URL } from "../audit/rekor.js";
 import { parseRekorReceipt, type RekorReceipt } from "../audit/rekor-verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
-import { scrubForTerminal, toSafeJson } from "./target.js";
+import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
 
 const REKOR_FLAG = "--sink-rekor";
 const S3_KEYS = new Set(["bucket", "region", "prefix", "endpoint"]);
@@ -352,6 +352,7 @@ function readReceipts(root: string, errors: string[]): RekorReceipt[] {
 export async function run(args: string[] = [], opts?: CliOptions): Promise<void> {
 	const json = opts?.json === true;
 	const root = process.cwd();
+	warnIfVaultLoose(join(root, VAULT_DIR));
 	const action = args[0];
 
 	try {

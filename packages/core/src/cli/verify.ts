@@ -27,7 +27,7 @@ import {
 import { VAULT_DIR } from "../shared/constants.js";
 import { GLOBAL_FLAGS } from "./flags.js";
 import type { CliOptions } from "./init.js";
-import { scrubForTerminal, toSafeJson } from "./target.js";
+import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
 
 function parseDurationMs(raw: string): number {
 	const m = /^(\d+)(ms|s|m|h|d)?$/.exec(raw);
@@ -409,6 +409,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		}
 	}
 	const vaultPath = join(root, VAULT_DIR);
+	warnIfVaultLoose(vaultPath);
 
 	if (!existsSync(vaultPath)) {
 		if (json) {

@@ -45,7 +45,7 @@ import { TrustTBClient } from "../ledger/client.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import { GLOBAL_FLAGS } from "./flags.js";
 import type { CliOptions } from "./init.js";
-import { toSafeJson } from "./target.js";
+import { toSafeJson, warnIfVaultLoose } from "./target.js";
 
 const USAGE =
 	"Usage: usertrust budget --cost-center <name> --allocated <int> [--parent <id>] [--period-start <iso>] [--period-end <iso>] [--json]";
@@ -374,6 +374,7 @@ function processArgs(): string[] {
 export async function run(rootDir?: string, opts?: CliOptions, args?: string[]): Promise<void> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
+	warnIfVaultLoose(vaultPath);
 	const json = opts?.json === true;
 
 	// Use process.exitCode (not process.exit) so buffered stdout flushes.

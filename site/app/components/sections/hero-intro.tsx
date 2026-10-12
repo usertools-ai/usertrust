@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { KIT_IMAGES } from "../../lib/kit-images";
 import { INTRO_VIDEO_SOURCES } from "./intro-video-sources";
 
 /*
@@ -49,7 +50,7 @@ export default function HeroIntro() {
 			    reintroduces the settle-swap jump this shift exists to remove. */}
 			{/* biome-ignore lint/performance/noImgElement: decorative full-bleed backdrop swapped via plain src, not the LCP candidate (the headline is) */}
 			<img
-				src={settled ? "/intro/intro-poster.jpg" : "/intro/intro-first.jpg"}
+				src={settled ? KIT_IMAGES.introPoster : KIT_IMAGES.introFirst}
 				alt=""
 				className="absolute inset-0 h-full w-full object-cover md:scale-[1.2] md:translate-x-[19%] md:translate-y-[16%] 2xl:scale-[1.3]"
 			/>

@@ -48,6 +48,18 @@ Monorepo, npm workspaces (`packages/*`). `site/` is a Next.js app and is **not**
 The first six are version-locked and released together. `monte-cristo` and `claude-code-plugin`
 are not.
 
+**No brand asset is committed to this repository**: no font file of any kind (Usertools Sans and
+every other face, first-party or OFL), no logo or mark, no lattice code. `site/` loads them at
+runtime from the brand kit, `https://usertrust.ai/kit/`, served with `access-control-allow-origin: *`:
+`site/app/globals.css` and `site/app/r/brand.css` point `@font-face` at `kit/fonts/` with
+`font-display: swap` and system fallback stacks, and server-rendered images (`/og`, the receipt
+share card) use the sha384-pinned loader `site/app/r/lib/kit-fonts.ts`. The guard is
+`site/scripts/no-font-files.test.mts`, in the site's `npm test` and so in `site-build`: it fails
+on any `.woff`, `.woff2`, `.ttf`, `.otf` or `.eot` that `git ls-files` lists anywhere in the repo,
+and on any site source that names a font URL other than the kit's. A legitimate non-brand fixture
+is allowlisted there by exact path, with its reason. A face the kit does not serve yet is added to
+the kit first, never committed here.
+
 ### `packages/core/src` map
 
 | Area | Files |
@@ -1417,8 +1429,9 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   it was moved.
 - The stronger variant in a SHIPPED HOOK rather than a `src/` tree: `sanitizeReason` in
   `claude-code-plugin/hooks/lib.mjs`. It is the one sanitizer behind that package's ONE writer:
-  `say` for every stderr line and `announce` for the session-start `systemMessage`, both
-  sanitize-then-clip, plus the permission-decision reason. `tests/terminal-sinks.test.ts` walks
+  `say` for every stderr line and `announce` for every `systemMessage` (the session-start
+  banner, and PreToolUse's rejected-key notice), both sanitize-then-clip, plus the
+  permission-decision reason. `tests/terminal-sinks.test.ts` walks
   every shipped `hooks/*.mjs` and fails on any other write to stderr, stdout or a `systemMessage`,
   with an injected raw write as its positive control. The writer replaced per-site sanitizing
   after review found the same class six times across two rounds. `sanitizeReason` was invisible
@@ -1663,10 +1676,11 @@ In the four executable entry points that begin with `#!/usr/bin/env node`, the s
 1 and the header follows on lines 2-3. Check the first three lines, not the first one, before
 concluding a file is missing its header.
 
-This is convention, not machine-enforced, and it is not yet universal: 113 of the 118 files under
-`packages/*/src` carry it — and all 113 carry both lines, never one alone. The five that carry
-neither are all of `packages/acs-adapter/src/`. That is a gap to close when you next touch those
-files — not a header to strip elsewhere for consistency.
+This is convention, not machine-enforced. Every TypeScript and JavaScript source under
+`packages/*/src` (`.ts .tsx .mts .js .mjs`) opens with both lines, never one alone; the last gap,
+`packages/acs-adapter/src/`, was closed when those files were next touched. Other assets there
+(HTML, CSS) take no `//` header: it is not a comment in CSS, and it would sit before an HTML
+doctype. Keep it that way: a new source file opens with the header.
 
 ### Comment style
 

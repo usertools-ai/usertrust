@@ -8,9 +8,11 @@
  * keep their class names and the page's logic is untouched. The rest of the
  * site keeps its own palette.
  *
- * No brand asset lives in this public repo. The fonts (and the lattice, see
- * components/lattice-field.tsx) are loaded at runtime from the brand site's
- * kit, https://usertrust.ai/kit/, which serves them with
+ * This route's fonts (and the lattice, see components/lattice-field.tsx) are
+ * not kept in this public repo, and neither are the site's brand images: they
+ * are loaded at runtime from the brand site's kit, https://usertrust.ai/kit/
+ * (the marks drawn in code, like the "ut" mark below, are still here, pending
+ * review). The kit serves them with
  * `access-control-allow-origin: *` — so they load both through usertrust.ai's
  * /r/ rewrite and on verify.usertrust.ai. `font-display: swap` and the system
  * fallbacks in --sans / --mono keep the chrome readable if the kit is down.

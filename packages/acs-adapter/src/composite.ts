@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 import type { TrustReceipt } from "usertrust";
 import { InsufficientBalanceError, PolicyDeniedError } from "usertrust";
 import type { Authorization, Governor } from "usertrust/headless";
