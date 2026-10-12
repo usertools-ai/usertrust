@@ -929,7 +929,8 @@ describe("merging implausible readings keeps which check fired first", () => {
 		);
 		expect(second.implausible).toEqual({ outputTokens: 120_000_000, inputTokens: 150_000_000 });
 		expect(second.implausibleBy).toEqual({ outputTokens: "refused", inputTokens: "refused" });
-		// A tier first seen UNLABELLED (a sum) stays a sum when a later reading labels it.
+		// A tier first seen UNLABELLED (a sum) takes a later "refused": a figure refused on its own outranks the
+		// aggregate check, the one pairing where the first label does not win.
 		const sum = mergeImplausible(undefined, undefined, { outputTokens: 120_000_000 }, undefined);
 		const later = mergeImplausible(
 			sum.implausible,
@@ -939,7 +940,23 @@ describe("merging implausible readings keeps which check fired first", () => {
 				outputTokens: "refused",
 			},
 		);
-		expect(later.implausibleBy?.outputTokens).toBeUndefined();
+		expect(later.implausibleBy?.outputTokens).toBe("refused");
+	});
+
+	it("every other pairing keeps the FIRST label: only refused outranks sum", () => {
+		type Check = "sum" | "maximum" | "refused";
+		const merge = (first: Check, then: Check) => {
+			const label = (c: Check) => (c === "sum" ? undefined : { outputTokens: c });
+			const a = mergeImplausible(undefined, undefined, { outputTokens: 5 }, label(first));
+			return mergeImplausible(a.implausible, a.implausibleBy, { outputTokens: 7 }, label(then))
+				.implausibleBy?.outputTokens;
+		};
+		expect(merge("refused", "sum")).toBe("refused");
+		expect(merge("maximum", "sum")).toBe("maximum");
+		expect(merge("sum", "maximum")).toBeUndefined(); // stays a sum
+		expect(merge("maximum", "refused")).toBe("maximum");
+		expect(merge("refused", "maximum")).toBe("refused");
+		expect(merge("sum", "refused")).toBe("refused"); // the one changed pairing
 	});
 
 	it("withImplausible carries the labels of the readings it merges", () => {

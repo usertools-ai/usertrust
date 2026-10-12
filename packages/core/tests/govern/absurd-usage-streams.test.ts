@@ -573,6 +573,19 @@ describe("a stream's implausible record keeps which check fired", () => {
 		expect(data).toMatchObject({ checks: { outputTokens: "refused" }, tiers: { outputTokens: 1 } });
 	});
 
+	it("Anthropic (MessageStream finalMessage): a finite 150M input is recorded as refused, not sum", async () => {
+		// The finalMessage's input is re-sanitized as a count before the merge, where its aggregate check fires first
+		// (unlabelled, a sum); the extractor refused the same figure on its own, and that label wins.
+		const { receipt, data } = await anthropicEmitter((stream) => {
+			stream.emit("finalMessage", { usage: { input_tokens: 150_000_000, output_tokens: 5 } });
+		});
+		expect(receipt.usageSource).toBe("estimated");
+		expect(data).toMatchObject({
+			checks: { inputTokens: "refused" },
+			tiers: { inputTokens: 150_000_000 },
+		});
+	});
+
 	it("Anthropic (MessageStream finalMessage): a negative cache read is recorded as refused", async () => {
 		const { receipt, data } = await anthropicEmitter((stream) => {
 			stream.emit("finalMessage", {

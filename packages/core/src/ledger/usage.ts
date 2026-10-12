@@ -272,8 +272,11 @@ export type ImplausibleChecks = NonNullable<NormalizedUsage["implausibleBy"]>;
 
 /**
  * An implausible record with `found` merged in: the larger figure per tier and, per tier, the label of the FIRST check
- * that fired, as `sanitizeUsage` labels it (a tier first seen unlabelled stays a "sum"). Every stream accumulator and
- * the stream settle merge through this, so a refused figure is never relabelled a sum on its way to the record.
+ * that fired, as `sanitizeUsage` labels it. One pairing is the exception: a "refused" label outranks an aggregate "sum"
+ * (an unlabelled tier) that fired first. A figure refused on its own is the more specific finding, and a finalMessage
+ * count re-sanitized before the merge would otherwise reach the record as a sum. Every other pairing keeps the first
+ * label. Every stream accumulator and the stream settle merge through this, so a refused figure is never relabelled a
+ * sum on its way to the record.
  */
 export function mergeImplausible(
 	implausible: Partial<Record<UsageTier, number>> | undefined,
@@ -289,7 +292,9 @@ export function mergeImplausible(
 	let mergedBy = implausibleBy;
 	for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
 		const by = foundBy?.[tier];
-		if (merged[tier] === undefined && by !== undefined) mergedBy = { ...mergedBy, [tier]: by };
+		const firstFired = merged[tier] === undefined;
+		const refusedOverSum = by === "refused" && !firstFired && mergedBy?.[tier] === undefined;
+		if (by !== undefined && (firstFired || refusedOverSum)) mergedBy = { ...mergedBy, [tier]: by };
 		merged[tier] = Math.max(merged[tier] ?? 0, value);
 	}
 	return { implausible: merged, implausibleBy: mergedBy };
