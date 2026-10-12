@@ -16,7 +16,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
 import { AuditDegradedError } from "../../src/shared/errors.js";
@@ -102,10 +102,11 @@ const outcome = <T>(p: Promise<T>): Promise<T | unknown> =>
 
 describe("A2 on the action path: governAction settles XOR voids its hold", () => {
 	let vault: string;
+	let stderr: MockInstance<typeof process.stderr.write>;
 	beforeEach(() => {
 		vault = join(tmpdir(), `action-finalize-gate-${randomUUID()}`);
 		mkdirSync(join(vault, ".usertrust"), { recursive: true });
-		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -197,6 +198,75 @@ describe("A2 on the action path: governAction settles XOR voids its hold", () =>
 		const { result, receipt } = await client.governAction(ACTION, run);
 
 		expect(result).toBe("ran");
+		expect(receipt.settled).toBe(true);
+		expect(held).toEqual([receipt.transferId]);
+		expect(posted).toEqual(held);
+		expect(voided).toEqual([]);
+		await client.destroy();
+	});
+
+	// ── The window between the settle claim and the POST must not throw ──
+	// The claim sits before the budget commit, the session-spend persist and the breaker's
+	// success, on both paths: a throw in that window would leave the hold neither posted nor
+	// voided. The one step there that touches the filesystem is the session-spend persist, which
+	// catches its own failures. These rows make that persist fail for real — a DIRECTORY where
+	// spend-ledger.json must be written, placed after the client opened its vault — and pin that
+	// the hold is still posted once and never voided.
+
+	/** The persist failed through its own code path: its stderr line, not a mock, is the proof. */
+	const persistFailed = () =>
+		stderr.mock.calls.some((c) => String(c[0]).includes("spend ledger write FAILED"));
+	const occupySpendLedger = () =>
+		mkdirSync(join(vault, ".usertrust", "spend-ledger.json"), { recursive: true });
+
+	it("governAction: the session-spend persist fails inside the window; the hold is still posted once, never voided", async () => {
+		const { engine, held, posted, voided } = recordingEngine();
+		const client = await governed(true, engine, makeAudit());
+		occupySpendLedger();
+		const run = vi.fn(async () => "ran");
+
+		const result = await outcome(client.governAction(ACTION, run));
+
+		expect(persistFailed()).toBe(true);
+		expect(result).not.toBeInstanceOf(Error);
+		const { receipt } = result as { receipt: { settled: boolean; transferId: string } };
+		expect(receipt.settled).toBe(true);
+		expect(held).toEqual([receipt.transferId]);
+		expect(posted).toEqual(held);
+		expect(voided).toEqual([]);
+		await client.destroy();
+	});
+
+	it("an LLM call: the session-spend persist fails inside the window; the hold is still posted once, never voided", async () => {
+		writeFileSync(
+			join(vault, ".usertrust", "usertrust.config.json"),
+			JSON.stringify({ budget: 500_000, audit: { failClosed: true } }),
+		);
+		const { engine, held, posted, voided } = recordingEngine();
+		const client = await trust(
+			{
+				messages: {
+					create: vi.fn(async (_params: unknown) => ({
+						id: "m",
+						usage: { input_tokens: 10, output_tokens: 5 },
+					})),
+				},
+			},
+			{ dryRun: false, vaultBase: vault, _engine: engine, _audit: makeAudit() },
+		);
+		occupySpendLedger();
+
+		const result = await outcome(
+			client.messages.create({
+				model: "claude-sonnet-4-6",
+				max_tokens: 64,
+				messages: [{ role: "user", content: "hi" }],
+			}),
+		);
+
+		expect(persistFailed()).toBe(true);
+		expect(result).not.toBeInstanceOf(Error);
+		const { receipt } = result as { receipt: { settled: boolean; transferId: string } };
 		expect(receipt.settled).toBe(true);
 		expect(held).toEqual([receipt.transferId]);
 		expect(posted).toEqual(held);

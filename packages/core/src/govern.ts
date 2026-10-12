@@ -3487,7 +3487,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// A2: claim the single settle outcome for this hold BEFORE money moves.
 				// Always granted here (no other terminal path runs for an action); the
 				// claim exists so a post-commit throw routes to the outer catch WITHOUT
-				// voiding an already-settled hold.
+				// voiding an already-settled hold. Nothing between this claim and the POST
+				// below may throw: a throw there would leave the hold neither posted nor
+				// voided. action-finalize-gate.test.ts pins it.
 				finalizeOnce("settle");
 
 				// Release in-flight hold and commit budget under mutex — money moves only
