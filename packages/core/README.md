@@ -93,6 +93,8 @@ const client = await trust(new Anthropic(), {
 
 On a Google client only `models.generateContent` is governed. `models.generateContentStream` passes through to the SDK untouched: it is not metered, it gets no receipt, and no policy applies to it. Use `generateContent` for calls you need governed.
 
+On an Anthropic or OpenAI client, every SDK method usertrust does not govern is refused unless it cannot spend: `embeddings.create`, `messages.batches.create`, `chat.completions.parse` and the like return a promise that rejects with a `PolicyDeniedError` (`ungoverned_method: <path>`) and write a `policy_denied` audit event, and the SDK is never called. Free methods (`models.list`, `messages.countTokens`, `moderations.create`, reads and deletes of stored objects) run as before. To run a refused method unmetered, list it: `trust(client, { allowUngoverned: ["embeddings.create"] })`; each such call is audited as `ungoverned_call`. `client.withOptions(...)` returns a client governed by the same governor.
+
 Clients in one process share their vault's audit writer. Separate processes cannot write to one vault: give each process its own vault (`vaultBase`), or send their calls through one `usertrust-server`.
 
 Every call returns `{ response, receipt }`:

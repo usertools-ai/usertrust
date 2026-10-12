@@ -64,7 +64,7 @@ the kit first, never committed here.
 
 | Area | Files |
 |---|---|
-| Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `config.ts`, `proxy.ts` |
+| Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `default-deny.ts`, `config.ts`, `proxy.ts` |
 | Ledger | `ledger/{client,engine,pricing}.ts` |
 | Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
@@ -1595,13 +1595,19 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 `@anthropic-ai/sdk` and `openai` are **optional** peer dependencies; Google has no peer entry at
 all. This is why provider SDK majors can be bumped with no code change.
 
-**The governance boundary is deliberately partial and is documented in `detect.ts`.** Governed:
-Anthropic `messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected),
-OpenAI `chat.completions.create` and `responses.create` when present, Google
-`models.generateContent`. Explicitly **ungoverned** — these bypass governance, audit, and budget
-enforcement: `messages.batches`, `beta.models`, `beta.files`, OpenAI `responses.retrieve/cancel/
-delete`, the `responses.stream()` / `responses.parse()` helpers, the OpenAI `beta.*` namespace, and
-legacy `completions.create`. If you add a governed surface, update that doc block.
+**The governance boundary is documented in `detect.ts`.** Governed: Anthropic
+`messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected), OpenAI
+`chat.completions.create` and `responses.create` when present, Google `models.generateContent`.
+**Anthropic and OpenAI clients are default-deny** (`default-deny.ts`): every other function-valued
+SDK member reached off the governed client, at any depth, is refused through ONE function,
+`refuseUngovernedMethod` in `trust()`, which writes `policy_denied` at the denial boundary and
+rejects. The exceptions are the free list in `default-deny.ts` (methods that cannot spend, each
+cited to its SDK source line; they run with the RAW resource as `this`, because `this._client`
+through the boundary is a refusing stand-in) and `trust({ allowUngoverned })` (audited as
+`ungoverned_call`). `_client` and the client's raw HTTP members are refused by name; `withOptions`
+is re-wrapped by the same governor. On a Google client everything else passes through. A method is
+freed only with SDK evidence that it cannot start billable work; a create that can allocate storage
+is not free. If you add a governed surface, update that doc block and the free list.
 
 ---
 
