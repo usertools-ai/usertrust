@@ -58,9 +58,15 @@ repository or mint an OIDC token for provenance:
       - each manifest is unchanged but for `version`, and none has `publishConfig`.
    3. **Assembles the tarball npm will publish**, for each package, and verifies it (see "The
       publish tarball is assembled, not taken from the build" below). Then runs
-      `npm publish <assembled tarball> --access public --provenance --ignore-scripts
-      --registry https://registry.npmjs.org/ --dry-run` for each, from an empty directory,
-      with a user config the script writes and a fresh npm cache.
+      `npm publish <assembled tarball> --access public --tag <dist-tag> --provenance
+      --ignore-scripts --registry https://registry.npmjs.org/ --dry-run` for each, from an
+      empty directory, with a user config the script writes and a fresh npm cache.
+      **Every publish names its dist-tag**, decided once for all six, before any is
+      published, by the same check that decides the GitHub Release's Latest (step 6):
+      `latest` only for the newest release, `backfill` for an older version finished by
+      republish, so npm's `latest` never moves back to it (npm 9 and later also refuse to
+      apply `latest` implicitly to a version lower than the current one). If that check
+      cannot tell, nothing is published.
    4. **Pushes the release commit and tag** to `master`, atomically.
    5. Assembles the six tarballs again (the same commit gives the same bytes) and publishes
       each with the same command, without `--dry-run`. Publishing a tarball runs no lifecycle
@@ -68,6 +74,7 @@ repository or mint an OIDC token for provenance:
    6. Creates the GitHub Release `v<version>` with generated notes, deciding Latest
       explicitly: it is Latest only if no `v*` release tag is a higher semver (prereleases
       never take it), so finishing an older version never takes Latest from a newer one.
+      This is the same answer that chose the npm dist-tag in steps 3 and 5.
 
    Each step runs only if every step before it succeeded, so a normal release publishes
    nothing unless its push to `master` went through.
@@ -185,9 +192,9 @@ OIDC token or `NPM_TOKEN`.
 
 | Mode | Runs | Pushes | Publishes | GitHub Release |
 |---|---|---|---|---|
-| normal | every step | release commit + tag, before publishing | all six | created, marked latest |
+| normal | every step | release commit + tag, before publishing | all six, under the dist-tag `latest` | created, marked latest |
 | `dry_run` | every step through the publish dry run, including the local commit and tag, the artifact and its checks | nothing | nothing (`npm publish --dry-run` only) | none |
-| `republish` | ci-gate; build without bump, commit or tag; publish without the release-commit check or the push | nothing | each package not yet on npm | created only if missing |
+| `republish` | ci-gate; build without bump, commit or tag; publish without the release-commit check or the push | nothing | each package not yet on npm, under `latest` if it is the newest release, else `backfill` | created only if missing (Latest only if it is the newest release) |
 
 `dry_run` and `republish` can be combined: a republish rehearsal that pushes and publishes
 nothing.
@@ -226,7 +233,9 @@ ran on. (The release commit itself has no CI run: pushes made with the workflow'
 trigger workflows.) It also fetches `master` afresh and requires the tag's commit to be on it:
 a version-only commit tagged on a side branch was never released and is refused, and so is a
 shallow history or a `master` it cannot fetch. Dispatching on `master` also works while
-`master` is still the release commit.
+`master` is still the release commit. A republish of a version older than the newest `v*`
+release publishes under the dist-tag `backfill`, not `latest`, so npm users who install
+without a version keep getting the newest release.
 
 ## The required CI checks
 

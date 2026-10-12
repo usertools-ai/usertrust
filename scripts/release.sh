@@ -19,12 +19,14 @@
 #                                        imports the release tag from the build job's bundle,
 #                                        verifies the commit, and prints it
 #   release.sh latest-flag <version>     true if v<version> is the newest release, else false
+#   release.sh dist-tag <version>        the npm dist-tag v<version> publishes under, from
+#                                        latest-flag: latest if true, backfill if false
 #   release.sh pack <dir>                packs each package (already built) into <dir>
 #   release.sh publish <dir> <commit> [--dry-run]
 #                                        assembles each package's publish tarball from
 #                                        <commit>'s files and the build tarball in <dir> (see
 #                                        scripts/release-tarball.py), then publishes each
-#                                        one not yet on npm
+#                                        one not yet on npm, under the dist-tag above
 #
 # Run from the repository root. Fails closed: an answer it cannot read is an error, never a pass.
 #
@@ -388,9 +390,11 @@ pack() {
 # rules, under headers it makes. All six are assembled and verified before any is published.
 # npm then publishes that file, from an empty directory, with an explicit registry, a user
 # config this script writes, an empty global config and a fresh cache of its own, so no .npmrc
-# from the artifact or the checkout applies and no build-made file is in npm's reach.
+# from the artifact or the checkout applies and no build-made file is in npm's reach. Every
+# npm publish, the dry run included, names its dist-tag (dist_tag, decided once, before
+# anything else, for all six); if it cannot be decided, nothing is published.
 publish() {
-	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version mtime state tgz tmp cfg empty work cache names name
+	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version tag mtime state tgz tmp cfg empty work cache names name
 	if [ -z "$tardir" ] || [ ! -d "$tardir" ] || [ -z "$commit" ]; then
 		err "usage: publish <tarball directory> <commit> [--dry-run]"
 		return 1
@@ -405,6 +409,8 @@ publish() {
 	esac
 	tardir=$(cd "$tardir" && pwd) || return 1
 	version=$(version_at "$commit") || return 1
+	tag=$(dist_tag "$version") || return 1
+	echo "npm dist-tag for ${version}: ${tag}"
 	# Every member's time is the release commit's, so the same commit assembles the same bytes.
 	mtime=$(git show -s --format=%ct "$commit") || return 1
 	case "$mtime" in
@@ -452,13 +458,13 @@ publish() {
 		work=$(mktemp -d "${tmp}/work.XXXXXX") || return 1
 		cache=$(mktemp -d "${tmp}/cache.XXXXXX") || return 1
 		# The same command with and without --dry-run, so a dry run exercises the real one.
-		set -- publish "${tmp}/${dir}/${pkg}-${version}.tgz" --access public --provenance \
+		set -- publish "${tmp}/${dir}/${pkg}-${version}.tgz" --access public --tag "$tag" --provenance \
 			--ignore-scripts --registry "$REGISTRY" --userconfig "$cfg" --globalconfig "$empty"
 		if [ "$dry" -eq 1 ]; then
 			set -- "$@" --dry-run
-			echo "Publishing ${pkg}@${version} (dry run)"
+			echo "Publishing ${pkg}@${version} under ${tag} (dry run)"
 		else
-			echo "Publishing ${pkg}@${version}"
+			echo "Publishing ${pkg}@${version} under ${tag}"
 		fi
 		(cd "$work" && npm_config_cache="$cache" npm "$@") || return 1
 	done
@@ -775,6 +781,27 @@ latest_flag() {
 	' "$version"
 }
 
+# The npm dist-tag v<version> publishes under, decided by latest_flag, the same answer that
+# decides the GitHub Release's Latest: "latest" for the newest release, "backfill" for an
+# older version (a republish), so that finishing an old version never moves npm's latest back
+# to it. (npm 9 and later also refuse to apply latest implicitly to a version lower than the
+# current latest.) Fails if latest_flag cannot tell: it never defaults to latest.
+dist_tag() {
+	local version="${1:-}" flag
+	if ! flag=$(latest_flag "$version"); then
+		err "Could not tell whether v${version} is the newest release, so its npm dist-tag is unknown. Refusing to publish."
+		return 1
+	fi
+	case "$flag" in
+	true) echo latest ;;
+	false) echo backfill ;;
+	*)
+		err "latest-flag answered '${flag}' for v${version}, not true or false. Refusing to publish."
+		return 1
+		;;
+	esac
+}
+
 gate() {
 	local sha
 	if [ "${REPUBLISH:-}" = true ]; then
@@ -798,11 +825,12 @@ assert-unreleased) assert_unreleased ;;
 assert-protected) assert_protected "${2:-}" ;;
 release-parent) verify_release_commit HEAD ;;
 latest-flag) latest_flag "${2:-}" ;;
+dist-tag) dist_tag "${2:-}" ;;
 pack) pack "${2:-}" ;;
 publish) publish "${2:-}" "${3:-}" "${4:-}" ;;
 gate) gate ;;
 *)
-	err "usage: release.sh dirs | names | version | version-at <commit> | assert-published | assert-unreleased | assert-protected <env> | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | pack <dir> | publish <dir> <commit> [--dry-run]"
+	err "usage: release.sh dirs | names | version | version-at <commit> | assert-published | assert-unreleased | assert-protected <env> | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run]"
 	exit 2
 	;;
 esac

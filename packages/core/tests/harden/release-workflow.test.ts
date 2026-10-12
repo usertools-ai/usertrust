@@ -26,6 +26,10 @@
  * - Publishing assembles every tarball (scripts/release-tarball.py, pinned in
  *   release-tarball.test.ts) before publishing any, and npm is handed only those: from an
  *   empty directory, with --ignore-scripts, an explicit registry and a fresh private cache.
+ * - Every npm publish, the dry run included, names its dist-tag, decided by the same
+ *   latest-flag answer as the GitHub Release's Latest: `latest` for the newest release,
+ *   `backfill` for an older version (a republish), and nothing is published when that answer
+ *   cannot be read.
  * - No setup-node restores a cache, and the publish job installs, packs and runs nothing.
  * - Republish gates on the release commit's parent only when the release commit changes
  *   nothing but the lockstep package.json "version" fields.
@@ -559,12 +563,12 @@ function packAll(): string {
 }
 
 /** The fake npm's log line for each publish: the assembled tarball, from an empty directory,
- * with the exact flags, our user config (the token reference only), an empty global config
- * and a fresh private cache. */
-const published = (version: string, dirs: string[], dry: boolean) =>
+ * with the exact flags (an explicit dist-tag among them), our user config (the token reference
+ * only), an empty global config and a fresh private cache. */
+const published = (version: string, dirs: string[], dry: boolean, tag = "latest") =>
 	dirs.map(
 		(d) =>
-			`publish|${NAMES[d]}-${version}.tgz|--access public --provenance --ignore-scripts --registry https://registry.npmjs.org/${dry ? " --dry-run" : ""}|cwd=0|userconfig=${dry ? "" : `//registry.npmjs.org/:_authToken=$${"{"}NODE_AUTH_TOKEN};`}|globalconfig=0|cache=fresh|from=assembled`,
+			`publish|${NAMES[d]}-${version}.tgz|--access public --tag ${tag} --provenance --ignore-scripts --registry https://registry.npmjs.org/${dry ? " --dry-run" : ""}|cwd=0|userconfig=${dry ? "" : `//registry.npmjs.org/:_authToken=$${"{"}NODE_AUTH_TOKEN};`}|globalconfig=0|cache=fresh|from=assembled`,
 	);
 
 function run(args: string[], env: Record<string, string> = {}) {
@@ -784,6 +788,58 @@ describe("release.sh publish", { timeout: 30_000 }, () => {
 		expect(run(["publish", "--dry-run"]).status).not.toBe(0);
 		expect(run(["publish"]).status).not.toBe(0);
 		expect(log()).toEqual([]);
+	});
+});
+
+describe("release.sh publish: the npm dist-tag", { timeout: 30_000 }, () => {
+	it("the newest release publishes all six under latest, dry run and real", () => {
+		gitIn(join(dir, "origin.git"), "tag", "v0.9.0", "master");
+		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+		expect(run(["dist-tag", "1.0.0"]).out.trim()).toBe("latest");
+		const out = packAll();
+		const dry = run(["publish", out, "HEAD", "--dry-run"]);
+		expect(dry.status, dry.err).toBe(0);
+		expect(log()).toEqual(published("1.0.0", DIRS, true, "latest"));
+		rmSync(join(dir, "log"));
+		const real = run(["publish", out, "HEAD"]);
+		expect(real.status, real.err).toBe(0);
+		expect(log()).toEqual(published("1.0.0", DIRS, false, "latest"));
+	});
+
+	it("a republish of an older version publishes under backfill, and is not the GitHub Latest", () => {
+		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
+		gitIn(join(dir, "origin.git"), "tag", "v1.1.0", "master");
+		const out = packAll();
+		const dry = run(["publish", out, "HEAD", "--dry-run"], { REPUBLISH: "true" });
+		expect(dry.status, dry.err).toBe(0);
+		expect(log()).toEqual(published("1.0.0", DIRS, true, "backfill"));
+		rmSync(join(dir, "log"));
+		const real = run(["publish", out, "HEAD"], { REPUBLISH: "true" });
+		expect(real.status, real.err).toBe(0);
+		expect(log()).toEqual(published("1.0.0", DIRS, false, "backfill"));
+		// The GitHub Release reads the same function, and gets the same answer.
+		expect(run(["latest-flag", "1.0.0"]).out.trim()).toBe("false");
+		expect(run(["dist-tag", "1.0.0"]).out.trim()).toBe("backfill");
+	});
+
+	it("refuses before any npm call when latest-flag cannot tell, never defaulting to latest", () => {
+		const out = packAll();
+		rmSync(join(dir, "calls"), { force: true });
+		git("remote", "set-url", "origin", join(dir, "nowhere.git"));
+		for (const args of [
+			["publish", out, "HEAD", "--dry-run"],
+			["publish", out, "HEAD"],
+		]) {
+			const r = run(args);
+			expect(r.status, args.join(" ")).not.toBe(0);
+			expect(r.err).toContain("Could not fetch tags");
+			expect(r.err).toContain("::error::Could not tell whether v1.0.0 is the newest release");
+		}
+		expect(log()).toEqual([]);
+		expect(existsSync(join(dir, "calls"))).toBe(false);
+		const t = run(["dist-tag", "1.0.0"]);
+		expect(t.status).not.toBe(0);
+		expect(t.out).toBe("");
 	});
 });
 
