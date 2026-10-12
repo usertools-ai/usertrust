@@ -3,6 +3,12 @@ name: Release
 # How a release runs, its three modes, how to recover a failed one, and the repository
 # settings it relies on: docs/releasing.md. The shell logic lives in scripts/release.sh;
 # packages/core/tests/harden/release-workflow.test.ts pins both.
+#
+# Three jobs, so that dependency code never runs next to a credential that can write:
+#   ci-gate  CI passed on the commit, and the npm-publish environment requires a reviewer.
+#   build    installs, typechecks, tests, bumps, builds and packs. Read-only token, no OIDC.
+#   publish  approval, then pushes and publishes the packed tarballs. Holds the write token,
+#            the OIDC token and NPM_TOKEN; installs nothing and runs no dependency code.
 
 on:
   workflow_dispatch:
@@ -54,13 +60,12 @@ env:
   REPUBLISH: ${{ inputs.republish }}
 
 jobs:
-  # Runs before the environment's approval is requested, so that whoever approves the release
-  # can see CI already passed on the commit. The release job checks again after approval.
   ci-gate:
     name: ci-gate
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # Reads the CI run's jobs, and the environment's protection rules.
       actions: read
     steps:
       - name: Ensure a releasable ref
@@ -96,23 +101,28 @@ jobs:
           fi
           bash scripts/release.sh gate
 
-  release:
+      # The approval gate is a repository setting. Until the owner has given the environment
+      # a required reviewer, every release (dry runs included) is refused here.
+      - name: Require an approval on the npm-publish environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release.sh assert-protected npm-publish
+
+  build:
     needs: ci-gate
     runs-on: ubuntu-latest
-    # The approval gate. Its protection (required reviewers, which refs may deploy to it) is
-    # a repository setting the owner configures; this file only names it. Until it exists
-    # with reviewers, GitHub creates it on the first run with no protection at all. If
-    # NPM_TOKEN is moved into it as an environment secret, only this job can read the token.
-    # See "Owner setup" in docs/releasing.md.
-    environment: npm-publish
+    # Everything that runs dependency code (install scripts, typecheck, tests, the builds,
+    # biome) runs here, with a read-only token and no OIDC token. What it hands on (tarballs
+    # and the release commit) is checked by the publish job before anything is pushed.
     permissions:
-      contents: write
-      id-token: write
-      actions: read
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Pin the checkout to the dispatched commit
         run: |
@@ -124,15 +134,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
           cache: npm
 
-      # Again, now: an approval can come hours after ci-gate ran, and CI can be re-run.
-      - name: Require CI success on the commit being released
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash scripts/release.sh gate
-
+      # With install scripts, as CI installs: the gate certifies CI's result, so the release
+      # builds and tests the tree the way CI did. No credential that can write is in this job.
       - run: npm ci
 
       # ── Quality gate ──
@@ -213,8 +218,9 @@ jobs:
           done
 
       # ── Commit and tag the bump, locally ──
-      # Before anything is published, so that the tag names exactly the tree that is about to
-      # be packed. Runs in a dry run too (nothing is pushed there), to exercise it.
+      # Before anything is packed, so that the tag names exactly the tree in the tarballs. It
+      # is never pushed from here: this job cannot push. The publish job verifies it and
+      # pushes it.
       - name: Commit and tag (local)
         if: ${{ !inputs.republish }}
         env:
@@ -240,11 +246,100 @@ jobs:
             exit 1
           fi
 
-      # ── Publish, dry run (every mode) ──
-      # The exact publish command with --dry-run: packs and checks each package, uploads
-      # nothing. In a real release it is the last check before anything leaves the runner.
+      # The tarballs npm will publish, and (for a new release) the release commit and tag as a
+      # git bundle on top of the dispatched commit.
+      - name: Pack the packages and the release commit
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          out="${RUNNER_TEMP}/release"
+          bash scripts/release.sh pack "$out"
+          if [ "$REPUBLISH" != true ]; then
+            git bundle create "${out}/release.bundle" "refs/tags/v${VERSION}" "^${GITHUB_SHA}"
+          fi
+          ls -l "$out"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # The approval gate. Its protection (required reviewers, which refs may deploy to it) is
+    # a repository setting the owner configures; ci-gate refuses to release until it has a
+    # required reviewer. If NPM_TOKEN is moved into it as an environment secret, only this
+    # job can read the token. See "Owner setup" in docs/releasing.md.
+    environment: npm-publish
+    # `id-token: write` cannot be scoped to one step, so this job runs only the runner's own
+    # tools (git, gh, node, the npm bundled with node) and GitHub's actions: no `npm ci`, no
+    # build, no test, no dependency code. `npm publish` of a tarball runs no lifecycle script.
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+    steps:
+      # No credential is persisted: the token reaches git only inside the push step.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Pin the checkout to the dispatched commit
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
+            echo "::error::Checked out $(git rev-parse HEAD), but this run is for ${GITHUB_SHA}."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Again, now: an approval can come hours after ci-gate ran, and CI can be re-run.
+      - name: Require CI success on the commit being released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release.sh gate
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+
+      # The release commit was made in the build job, which ran dependency code. Push it only
+      # if it is exactly a version bump on top of the dispatched commit: one parent, that
+      # parent is this run's commit, it changes nothing but the six "version" fields, the tag
+      # points at it, and its version is the one the build job reported.
+      - name: Check out and verify the release commit
+        if: ${{ !inputs.republish }}
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          trusted="${RUNNER_TEMP}/release.sh"
+          cp scripts/release.sh "$trusted"
+          bundle="${RUNNER_TEMP}/release/release.bundle"
+          git bundle verify "$bundle"
+          git fetch --no-tags "$bundle" "refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+          git checkout --detach "refs/tags/v${VERSION}^{commit}"
+          parent=$(bash "$trusted" release-parent)
+          if [ "$parent" != "$GITHUB_SHA" ]; then
+            echo "::error::The release commit's parent is ${parent}, not ${GITHUB_SHA}."
+            exit 1
+          fi
+          if [ "$(bash "$trusted" version)" != "$VERSION" ]; then
+            echo "::error::The release commit is not at version ${VERSION}."
+            exit 1
+          fi
+
+      # The exact publish command with --dry-run: checks every tarball's name and version,
+      # uploads nothing. In a real release it is the last check before anything leaves.
       - name: Publish packages (dry run)
-        run: bash scripts/release.sh publish --dry-run
+        run: bash scripts/release.sh publish "${RUNNER_TEMP}/release" --dry-run
 
       # ── Push the release commit and tag ──
       # BEFORE publishing. If the push fails (master moved since dispatch, or a branch rule
@@ -253,11 +348,20 @@ jobs:
       # republish on the tag finishes it with the same tree. The opposite order can leave the
       # registry with a version the repository never recorded, and npm versions cannot be
       # reused. `--atomic`: the commit and the tag land together or not at all.
+      # The token is handed to this one git process through the environment (GIT_CONFIG_*),
+      # so it is never written to .git/config or any other file a later step could read.
       - name: Push the release commit and tag
         if: ${{ !inputs.dry_run && !inputs.republish }}
         env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: git push --atomic origin "HEAD:refs/heads/master" "refs/tags/v${VERSION}"
+          VERSION: ${{ needs.build.outputs.version }}
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
+          echo "::add-mask::${auth}"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
+            git push --atomic origin "HEAD:refs/heads/master" "refs/tags/v${VERSION}"
 
       # ── Publish with provenance ──
       # Skips a version that is genuinely already on the registry (a republish finishing a
@@ -268,35 +372,34 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: bash scripts/release.sh publish
+        run: bash scripts/release.sh publish "${RUNNER_TEMP}/release"
 
       # ── GitHub Release ──
-      # A republish creates it only if the failed run never got this far.
+      # A republish creates it only if the failed run never got this far. Latest is always an
+      # explicit decision (gh's default would make it Latest): only the newest semver release
+      # among the v* tags, so finishing an older version never takes Latest from a newer one.
       - name: Create GitHub Release
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
-          if [ "$REPUBLISH" = true ]; then
-            if gh release view "v${VERSION}" >/dev/null 2>&1; then
-              echo "GitHub Release v${VERSION} already exists."
-              exit 0
-            fi
-            # No --latest: an older tag being finished must not become "Latest".
-            gh release create "v${VERSION}" --verify-tag --title "v${VERSION}" --generate-notes
-          else
-            gh release create "v${VERSION}" \
-              --verify-tag \
-              --title "v${VERSION}" \
-              --generate-notes \
-              --latest
+          if [ "$REPUBLISH" = true ] && gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "GitHub Release v${VERSION} already exists."
+            exit 0
           fi
+          latest=$(bash scripts/release.sh latest-flag "$VERSION")
+          echo "Latest: ${latest}"
+          gh release create "v${VERSION}" \
+            --verify-tag \
+            --title "v${VERSION}" \
+            --generate-notes \
+            "--latest=${latest}"
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           {
             echo "### Dry run: nothing pushed, published or released"

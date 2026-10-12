@@ -2,7 +2,8 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * THE RELEASE WORKFLOW PUBLISHES ONLY WHAT CI PASSED, AND A DRY RUN CHANGES NOTHING.
+ * THE RELEASE WORKFLOW PUBLISHES ONLY WHAT CI PASSED, ONLY AFTER AN APPROVAL, AND KEEPS ITS
+ * WRITE CREDENTIALS AWAY FROM DEPENDENCY CODE. A DRY RUN CHANGES NOTHING.
  *
  * .github/workflows/publish.yml is read as YAML (not matched as prose) and scripts/release.sh,
  * which holds its shell logic, is run against a fake `npm` and `gh` in a throwaway git
@@ -11,12 +12,18 @@
  * Pinned:
  * - REQUIRED_CI_JOBS names exactly the jobs ci.yml runs on a push to master, so adding,
  *   renaming or removing a CI job fails here until the release's list follows.
- * - The release job waits for the ci-gate job and runs under the `npm-publish` environment.
- * - Order: commit and tag locally, publish dry run, push, publish, GitHub Release. Nothing
- *   is published before the commit and tag are pushed.
+ * - Jobs: ci-gate, then build (read-only token, no OIDC: everything that runs dependency
+ *   code), then publish (the `npm-publish` environment; write token, OIDC, NPM_TOKEN). No job
+ *   that can write or mint an OIDC token installs, builds, tests or lints.
+ * - No checkout persists a credential; the write token reaches git only in the push step.
+ * - ci-gate refuses unless the environment requires a reviewer; a 404, a 403 and an
+ *   unreadable answer all refuse.
+ * - Order: commit and tag locally, pack, publish dry run, push, publish, GitHub Release.
+ *   Nothing is published before the commit and tag are pushed.
  * - A dry run never pushes, publishes or creates a release.
- * - The gate fails closed and names the check: missing, pending, skipped and failed CI jobs,
- *   no CI run at all, and an unreadable registry all stop the release.
+ * - The CI gate fails closed and names the check: missing, pending, skipped and failed CI
+ *   jobs, no CI run at all, and an unreadable registry all stop the release.
+ * - Publishing checks every tarball's name and version before publishing any.
  * - Republish gates on the release commit's parent only when the release commit changes
  *   nothing but the lockstep package.json "version" fields.
  */
@@ -36,6 +43,7 @@ const SCRIPT = join(ROOT, "scripts/release.sh");
 interface Step {
 	name?: string;
 	uses?: string;
+	with?: Record<string, unknown>;
 	if?: string;
 	run?: string;
 	env?: Record<string, unknown>;
@@ -67,12 +75,28 @@ function pushName(key: string, job: Job): string {
 }
 
 const requiredJobs = (publish.env?.REQUIRED_CI_JOBS ?? "").split(/\s+/).filter(Boolean);
-const releaseSteps = publish.jobs.release?.steps ?? [];
-const stepIndex = (name: string): number => {
-	const i = releaseSteps.findIndex((s) => s.name === name);
-	if (i < 0) throw new Error(`release job has no step named "${name}"`);
+const jobSteps = (job: string): Step[] => {
+	const steps = publish.jobs[job]?.steps;
+	if (!Array.isArray(steps)) throw new Error(`publish.yml has no job "${job}"`);
+	return steps;
+};
+const allSteps = (): [string, Step][] =>
+	Object.keys(publish.jobs).flatMap((j) => jobSteps(j).map((s): [string, Step] => [j, s]));
+const stepIndex = (job: string, name: string): number => {
+	const i = jobSteps(job).findIndex((s) => s.name === name);
+	if (i < 0) throw new Error(`job ${job} has no step named "${name}"`);
 	return i;
 };
+const step = (job: string, name: string): Step => jobSteps(job)[stepIndex(job, name)] as Step;
+const envName = (job: Job): string | undefined =>
+	typeof job.environment === "string" ? job.environment : job.environment?.name;
+/** Holds a credential that can write to the repository or mint an OIDC token. */
+const privileged = (job: Job): boolean =>
+	job.permissions?.contents === "write" || job.permissions?.["id-token"] === "write";
+/** Runs code from the repository's dependencies (or the package manager on their behalf). */
+const DEPENDENCY_CODE =
+	/\bnpm\s+(ci|install|i|run|test|exec|version|rebuild)\b|\bnpx\b|\bvitest\b|\btsc\b|\bbiome\b|\bvite\b|\btsx\b/;
+const WRITE_TOKEN = /github\.token|secrets\.GITHUB_TOKEN/;
 
 describe("publish.yml", () => {
 	it("REQUIRED_CI_JOBS names exactly the jobs ci.yml runs on a push", () => {
@@ -81,70 +105,173 @@ describe("publish.yml", () => {
 		expect(requiredJobs.length).toBeGreaterThanOrEqual(7);
 	});
 
-	it("release waits for ci-gate and runs under the npm-publish environment", () => {
-		const release = publish.jobs.release as Job;
-		const needs = [release.needs ?? []].flat();
-		expect(needs).toContain("ci-gate");
-		const env = release.environment;
-		expect(typeof env === "string" ? env : env?.name).toBe("npm-publish");
+	it("runs ci-gate, then build, then publish under the npm-publish environment", () => {
+		expect(Object.keys(publish.jobs).sort()).toEqual(["build", "ci-gate", "publish"]);
+		expect([publish.jobs.build?.needs ?? []].flat()).toEqual(["ci-gate"]);
+		expect([publish.jobs.publish?.needs ?? []].flat()).toEqual(["build"]);
+		expect(envName(publish.jobs.publish as Job)).toBe("npm-publish");
+		expect(envName(publish.jobs.build as Job)).toBeUndefined();
 	});
 
-	it("the gate can read Actions runs, and the workflow grants nothing by default", () => {
+	it("grants nothing by default, and write and OIDC only to the publish job", () => {
 		expect(publish.permissions).toEqual({});
 		expect(publish.jobs["ci-gate"]?.permissions).toEqual({ contents: "read", actions: "read" });
-		expect(publish.jobs.release?.permissions?.actions).toBe("read");
+		expect(publish.jobs.build?.permissions).toEqual({ contents: "read" });
+		expect(publish.jobs.publish?.permissions).toEqual({
+			contents: "write",
+			"id-token": "write",
+			actions: "read",
+		});
+		const holders = Object.entries(publish.jobs)
+			.filter(([, j]) => privileged(j))
+			.map(([k]) => k);
+		expect(holders).toEqual(["publish"]);
 	});
 
-	it("both jobs run the gate, and the release job runs it before installing anything", () => {
-		for (const job of ["ci-gate", "release"]) {
-			const steps = publish.jobs[job]?.steps ?? [];
-			expect(steps.some((s) => /release\.sh gate\b/.test(s.run ?? ""))).toBe(true);
+	it("no job that can write or mint an OIDC token runs dependency code", () => {
+		for (const [name, job] of Object.entries(publish.jobs)) {
+			if (!privileged(job)) continue;
+			for (const s of job.steps ?? []) {
+				expect(s.run ?? "", `${name}: ${s.name}`).not.toMatch(DEPENDENCY_CODE);
+				if (s.uses) {
+					expect(s.uses).toMatch(/^actions\/(checkout|setup-node|download-artifact)@/);
+					expect(s.with?.cache, `${name}: ${s.uses} restores no cache`).toBeUndefined();
+				}
+			}
 		}
-		const gate = releaseSteps.findIndex((s) => /release\.sh gate\b/.test(s.run ?? ""));
-		const install = releaseSteps.findIndex((s) => s.run === "npm ci");
-		expect(gate).toBeGreaterThanOrEqual(0);
-		expect(gate).toBeLessThan(install);
+		// The control: the build job does run it, so the pattern can see it.
+		expect(jobSteps("build").some((s) => DEPENDENCY_CODE.test(s.run ?? ""))).toBe(true);
 	});
 
-	it("commits and tags, dry-runs, pushes, publishes, then releases, in that order", () => {
-		const order = [
-			"Commit and tag (local)",
-			"The tree to publish is the tree committed",
-			"Publish packages (dry run)",
+	it("no checkout persists a credential", () => {
+		const checkouts = allSteps().filter(([, s]) => s.uses?.startsWith("actions/checkout@"));
+		expect(checkouts.length).toBe(3);
+		for (const [job, s] of checkouts) {
+			expect(s.with?.["persist-credentials"], `${job}: checkout`).toBe(false);
+		}
+	});
+
+	it("in a privileged job, the write token reaches only the gate, the push and the release", () => {
+		const withToken = jobSteps("publish").filter((s) => WRITE_TOKEN.test(JSON.stringify(s)));
+		expect(withToken.map((s) => s.name)).toEqual([
+			"Require CI success on the commit being released",
 			"Push the release commit and tag",
-			"Publish packages",
 			"Create GitHub Release",
-		].map(stepIndex);
+		]);
+		// Only the push hands it to git, through the environment of one process, never a file.
+		const handsToGit = allSteps().filter(([, s]) => /extraheader|GIT_CONFIG_/.test(s.run ?? ""));
+		expect(handsToGit.map(([, s]) => s.name)).toEqual(["Push the release commit and tag"]);
+		const push = step("publish", "Push the release commit and tag");
+		expect(push.run).toContain("GIT_CONFIG_VALUE_0=");
+		expect(push.run).not.toMatch(/git\s+config|git\s+remote|>>|\btee\b|GITHUB_ENV/);
+		// And no step anywhere writes git credentials to a file.
+		for (const [job, s] of allSteps()) {
+			expect(s.run ?? "", `${job}: ${s.name}`).not.toMatch(
+				/git\s+config[^\n]*(extraheader|credential|url\.)|git\s+remote\s+set-url/,
+			);
+		}
+	});
+
+	it("ci-gate requires an approval on the environment the publish job uses", () => {
+		const gate = jobSteps("ci-gate").filter((s) =>
+			/release\.sh assert-protected\b/.test(s.run ?? ""),
+		);
+		expect(gate.length).toBe(1);
+		expect(gate[0]?.run).toMatch(
+			new RegExp(`release\\.sh assert-protected ${envName(publish.jobs.publish as Job)}\\s*$`),
+		);
+		expect(gate[0]?.if).toBeUndefined();
+	});
+
+	it("the CI gate runs in ci-gate and again in publish, before the artifacts are used", () => {
+		expect(jobSteps("ci-gate").some((s) => /release\.sh gate\b/.test(s.run ?? ""))).toBe(true);
+		const gate = jobSteps("publish").findIndex((s) => /release\.sh gate\b/.test(s.run ?? ""));
+		const download = jobSteps("publish").findIndex((s) =>
+			s.uses?.startsWith("actions/download-artifact@"),
+		);
+		expect(gate).toBeGreaterThanOrEqual(0);
+		expect(gate).toBeLessThan(download);
+	});
+
+	it("build commits, tags and packs, in that order, and hands the result on", () => {
+		const order = [
+			stepIndex("build", "Commit and tag (local)"),
+			stepIndex("build", "The tree to publish is the tree committed"),
+			stepIndex("build", "Pack the packages and the release commit"),
+			jobSteps("build").findIndex((s) => s.uses?.startsWith("actions/upload-artifact@")),
+		];
+		expect(order).toEqual([...order].sort((a, b) => a - b));
+		expect(order[3]).toBeGreaterThan(0);
+	});
+
+	it("publish verifies, dry-runs, pushes, publishes, then releases, in that order", () => {
+		const order = [
+			jobSteps("publish").findIndex((s) => s.uses?.startsWith("actions/download-artifact@")),
+			stepIndex("publish", "Check out and verify the release commit"),
+			stepIndex("publish", "Publish packages (dry run)"),
+			stepIndex("publish", "Push the release commit and tag"),
+			stepIndex("publish", "Publish packages"),
+			stepIndex("publish", "Create GitHub Release"),
+		];
+		expect(order[0]).toBeGreaterThan(0);
 		expect(order).toEqual([...order].sort((a, b) => a - b));
 	});
 
 	it("a dry run never pushes, publishes or creates a release", () => {
 		const effects =
-			/\bgit push\b|\bgh release create\b|\bnpm publish\b(?!\s+--dry-run)|release\.sh publish(?!\s+--dry-run)/;
-		const effectful = releaseSteps.filter((s) => effects.test(s.run ?? ""));
-		expect(effectful.map((s) => s.name)).toEqual([
-			"Push the release commit and tag",
-			"Publish packages",
-			"Create GitHub Release",
+			/\bgit push\b|\bgh release create\b|\bnpm publish\b(?![^\n]*--dry-run)|release\.sh publish\b(?![^\n]*--dry-run)/;
+		const effectful = allSteps().filter(([, s]) => effects.test(s.run ?? ""));
+		expect(effectful.map(([j, s]) => `${j}: ${s.name}`)).toEqual([
+			"publish: Push the release commit and tag",
+			"publish: Publish packages",
+			"publish: Create GitHub Release",
 		]);
-		for (const step of effectful) expect(step.if ?? "").toContain("!inputs.dry_run");
+		for (const [, s] of effectful) expect(s.if ?? "").toContain("!inputs.dry_run");
 	});
 
 	it("a republish never bumps, commits, tags or pushes", () => {
-		for (const name of [
-			"Refuse to bump past a version that is not fully published",
-			"Refuse a version that is already released",
-			"Format package.json after bump",
-			"Commit and tag (local)",
-			"Push the release commit and tag",
-		]) {
-			expect(releaseSteps[stepIndex(name)]?.if ?? "").toContain("!inputs.republish");
+		for (const [job, name] of [
+			["build", "Refuse to bump past a version that is not fully published"],
+			["build", "Refuse a version that is already released"],
+			["build", "Format package.json after bump"],
+			["build", "Commit and tag (local)"],
+			["publish", "Check out and verify the release commit"],
+			["publish", "Push the release commit and tag"],
+		] as const) {
+			expect(step(job, name).if ?? "", `${job}: ${name}`).toContain("!inputs.republish");
 		}
 	});
 
+	it("a normal release publishes only after its push succeeded", () => {
+		const push = step("publish", "Push the release commit and tag");
+		const pub = step("publish", "Publish packages");
+		const rel = step("publish", "Create GitHub Release");
+		expect(stepIndex("publish", push.name as string)).toBeLessThan(
+			stepIndex("publish", pub.name as string),
+		);
+		// A failed step skips every later step unless one asks to run anyway; none may.
+		for (const s of jobSteps("publish")) {
+			expect(s, `publish: ${s.name}`).not.toHaveProperty("continue-on-error");
+			expect(s.if ?? "", `publish: ${s.name}`).not.toMatch(/always\(|failure\(|cancelled\(/);
+		}
+		expect(publish.jobs.publish).not.toHaveProperty("continue-on-error");
+		// And the push itself cannot swallow its own failure.
+		expect(push.run).not.toMatch(/\|\||set \+e|\btrue\b/);
+		expect(rel.if).toBe(pub.if);
+	});
+
+	it("every GitHub Release states Latest explicitly, from the semver comparison", () => {
+		const rel = step("publish", "Create GitHub Release").run ?? "";
+		expect(rel).toMatch(/latest=\$\(bash scripts\/release\.sh latest-flag "\$VERSION"\)/);
+		const creates = rel.split("\n").filter((l) => /gh release create/.test(l));
+		expect(creates.length).toBe(1);
+		expect(rel).toMatch(/"--latest=\$\{latest\}"/);
+		expect(rel).not.toMatch(/--latest(?!=\$\{latest\})/);
+	});
+
 	it("only the publish step sees the npm token", () => {
-		const withToken = releaseSteps.filter((s) => JSON.stringify(s).includes("NPM_TOKEN"));
-		expect(withToken.map((s) => s.name)).toEqual(["Publish packages"]);
+		const withToken = allSteps().filter(([, s]) => JSON.stringify(s).includes("NPM_TOKEN"));
+		expect(withToken.map(([j, s]) => `${j}: ${s.name}`)).toEqual(["publish: Publish packages"]);
 	});
 });
 
@@ -162,8 +289,23 @@ const NAMES: Record<string, string> = {
 
 const FAKE_NPM = `#!/usr/bin/env bash
 # view <spec> version: answers from $FAKE_REGISTRY ("<spec> yes|no|error" lines; unlisted = no).
-# publish ...: records "<package dir>|<args>" in $FAKE_LOG.
+# pack ...: writes a real tarball of ./package.json to --pack-destination; logs "pack|<dir>|<args>".
+# publish ...: records "<cwd>|<args>" in $FAKE_LOG.
 case "$1" in
+pack)
+	echo "pack|$(basename "$PWD")|$*" >> "$FAKE_LOG"
+	dest=""
+	while [ $# -gt 0 ]; do
+		[ "$1" = --pack-destination ] && dest="$2"
+		shift
+	done
+	name=$(node -p 'require("./package.json").name')
+	ver=$(node -p 'require("./package.json").version')
+	tmp=$(mktemp -d)
+	mkdir "$tmp/package"
+	cp package.json "$tmp/package/"
+	tar -czf "$dest/$name-$ver.tgz" -C "$tmp" package
+	;;
 view)
 	state=$(awk -v s="$2" '$1 == s { print $2 }' "$FAKE_REGISTRY")
 	case "$state" in
@@ -178,12 +320,21 @@ esac
 `;
 
 const FAKE_GH = `#!/usr/bin/env bash
-# api <path>: records the path in $FAKE_LOG; answers runs from $FAKE_RUNS, jobs from $FAKE_JOBS.
+# api <path>: records the path in $FAKE_LOG; answers runs from $FAKE_RUNS, jobs from $FAKE_JOBS,
+# an environment from $FAKE_ENV, or fails with HTTP $FAKE_ENV_HTTP when that is set.
 [ "$1" = api ] || { echo "fake gh: unexpected $*" >&2; exit 99; }
 echo "gh|$2" >> "$FAKE_LOG"
 case "$2" in
 */actions/workflows/ci.yml/runs*) cat "$FAKE_RUNS" ;;
 */actions/runs/*/jobs*) cat "$FAKE_JOBS" ;;
+*/environments/*)
+	if [ -n "\${FAKE_ENV_HTTP:-}" ]; then
+		echo '{"message":"error"}'
+		echo "gh: error (HTTP \${FAKE_ENV_HTTP})" >&2
+		exit 1
+	fi
+	cat "$FAKE_ENV"
+	;;
 *) echo "fake gh: unexpected path $2" >&2; exit 99 ;;
 esac
 `;
@@ -193,6 +344,12 @@ let repo: string;
 
 function git(...args: string[]): string {
 	const r = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: gitEnv() });
+	if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+	return r.stdout.trim();
+}
+
+function gitIn(cwd: string, ...args: string[]): string {
+	const r = spawnSync("git", args, { cwd, encoding: "utf8", env: gitEnv() });
 	if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
 	return r.stdout.trim();
 }
@@ -255,6 +412,45 @@ function setCi(
 
 const allGreen = () => requiredJobs.map((n) => job(n, "success"));
 
+const reviewersRule = (n: number, preventSelfReview = true) => ({
+	id: 2,
+	type: "required_reviewers",
+	prevent_self_review: preventSelfReview,
+	reviewers: Array.from({ length: n }, (_, i) => ({
+		type: "User",
+		reviewer: { login: `r${i}`, id: i },
+	})),
+});
+
+function setEnvironment(body: unknown): void {
+	writeFileSync(join(dir, "env.json"), typeof body === "string" ? body : JSON.stringify(body));
+}
+
+const protectedEnv = (
+	rules: unknown[] = [reviewersRule(1)],
+	policy: unknown = { protected_branches: false, custom_branch_policies: true },
+) => ({
+	id: 1,
+	name: "npm-publish",
+	protection_rules: rules,
+	deployment_branch_policy: policy,
+});
+
+/** The tarballs `release.sh pack` writes, through the fake npm, into <dir>/tarballs. */
+function packAll(): string {
+	const out = join(dir, "tarballs");
+	const r = run(["pack", out]);
+	if (r.status !== 0) throw new Error(`pack failed: ${r.err}`);
+	rmSync(join(dir, "log"), { force: true });
+	return out;
+}
+
+const published = (version: string, dirs: string[], dry: boolean) =>
+	dirs.map(
+		(d) =>
+			`tarballs|publish ./${NAMES[d]}-${version}.tgz --access public --provenance${dry ? " --dry-run" : ""}`,
+	);
+
 function run(args: string[], env: Record<string, string> = {}) {
 	const r = spawnSync("bash", [join(repo, "scripts/release.sh"), ...args], {
 		cwd: repo,
@@ -266,6 +462,7 @@ function run(args: string[], env: Record<string, string> = {}) {
 			FAKE_RUNS: join(dir, "runs.json"),
 			FAKE_JOBS: join(dir, "jobs.json"),
 			FAKE_LOG: join(dir, "log"),
+			FAKE_ENV: join(dir, "env.json"),
 			GITHUB_REPOSITORY: "owner/repo",
 			REQUIRED_CI_JOBS: publish.env?.REQUIRED_CI_JOBS ?? "",
 			REPUBLISH: "false",
@@ -309,55 +506,183 @@ beforeEach(() => {
 	git("init", "-q", "-b", "master");
 	git("add", ".");
 	git("commit", "-q", "-m", "base");
+	// The remote the script fetches master and tags from.
+	gitIn(dir, "init", "-q", "--bare", "-b", "master", "origin.git");
+	git("remote", "add", "origin", join(dir, "origin.git"));
+	git("push", "-q", "origin", "master");
 	setRegistry([]);
 	setCi(allGreen());
+	setEnvironment(protectedEnv());
 });
 
 afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-describe("release.sh publish", { timeout: 30_000 }, () => {
-	it("dry run: the real publish command plus --dry-run, for every package, in order", () => {
-		const r = run(["publish", "--dry-run"]);
+describe("release.sh pack", { timeout: 30_000 }, () => {
+	it("packs every package, running no lifecycle script", () => {
+		const out = join(dir, "tarballs");
+		const r = run(["pack", out]);
 		expect(r.status).toBe(0);
-		expect(log()).toEqual(DIRS.map((d) => `${d}|publish --access public --provenance --dry-run`));
+		expect(log()).toEqual(
+			DIRS.map((d) => `pack|${d}|pack --ignore-scripts --pack-destination ${out}`),
+		);
+		for (const d of DIRS) expect(r.out).toContain(`packed ${NAMES[d]}-1.0.0.tgz`);
+	});
+});
+
+describe("release.sh publish", { timeout: 30_000 }, () => {
+	it("dry run: the real publish command plus --dry-run, for every tarball, in order", () => {
+		const out = packAll();
+		const r = run(["publish", out, "--dry-run"]);
+		expect(r.status).toBe(0);
+		expect(log()).toEqual(published("1.0.0", DIRS, true));
 	});
 
 	it("real run: the same command without --dry-run", () => {
-		const r = run(["publish"]);
+		const out = packAll();
+		const r = run(["publish", out]);
 		expect(r.status).toBe(0);
-		expect(log()).toEqual(DIRS.map((d) => `${d}|publish --access public --provenance`));
+		expect(log()).toEqual(published("1.0.0", DIRS, false));
 	});
 
 	it("skips a version already on npm (finishing a partial publish)", () => {
+		const out = packAll();
 		setRegistry(["usertrust@1.0.0 yes", "usertrust-verify@1.0.0 yes"]);
-		const r = run(["publish"]);
+		const r = run(["publish", out]);
 		expect(r.status).toBe(0);
-		expect(log()).toEqual(DIRS.slice(2).map((d) => `${d}|publish --access public --provenance`));
+		expect(log()).toEqual(published("1.0.0", DIRS.slice(2), false));
 	});
 
 	it("an unreadable registry stops it before that package, never reads as 'not published'", () => {
+		const out = packAll();
 		setRegistry(["usertrust-openclaw@1.0.0 error"]);
-		const r = run(["publish"]);
+		const r = run(["publish", out]);
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("usertrust-openclaw@1.0.0");
-		expect(log()).toEqual(DIRS.slice(0, 2).map((d) => `${d}|publish --access public --provenance`));
+		expect(log()).toEqual(published("1.0.0", DIRS.slice(0, 2), false));
+	});
+
+	it("publishes nothing if any tarball is missing", () => {
+		const out = packAll();
+		rmSync(join(out, "usertrust-ui-1.0.0.tgz"));
+		const r = run(["publish", out]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("usertrust-ui-1.0.0.tgz is missing");
+		expect(log()).toEqual([]);
+	});
+
+	it("publishes nothing if a tarball holds another version than its name says", () => {
+		const out = packAll();
+		const tmp = join(dir, "forged");
+		mkdirSync(join(tmp, "package"), { recursive: true });
+		writeFileSync(
+			join(tmp, "package/package.json"),
+			JSON.stringify({ name: "usertrust-server", version: "1.0.9" }),
+		);
+		const t = spawnSync("tar", [
+			"-czf",
+			join(out, "usertrust-server-1.0.0.tgz"),
+			"-C",
+			tmp,
+			"package",
+		]);
+		expect(t.status).toBe(0);
+		const r = run(["publish", out]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("holds usertrust-server@1.0.9");
+		expect(log()).toEqual([]);
 	});
 
 	it("refuses packages that disagree on the version", () => {
+		const out = packAll();
 		writeFileSync(
 			join(repo, "packages/ui/package.json"),
 			JSON.stringify({ name: "usertrust-ui", version: "1.0.1" }),
 		);
-		const r = run(["publish", "--dry-run"]);
+		const r = run(["publish", out, "--dry-run"]);
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("packages/ui is at 1.0.1");
 		expect(log()).toEqual([]);
 	});
 
-	it("rejects an unknown flag", () => {
-		expect(run(["publish", "--force"]).status).not.toBe(0);
+	it("rejects an unknown flag, and a missing directory", () => {
+		const out = packAll();
+		expect(run(["publish", out, "--force"]).status).not.toBe(0);
+		expect(run(["publish", "--dry-run"]).status).not.toBe(0);
+		expect(run(["publish"]).status).not.toBe(0);
+		expect(log()).toEqual([]);
+	});
+});
+
+describe("release.sh assert-protected", { timeout: 30_000 }, () => {
+	it("passes when the environment requires one reviewer, and asks about that environment", () => {
+		const r = run(["assert-protected", "npm-publish"]);
+		expect(r.status).toBe(0);
+		expect(r.out).toContain("requires 1 reviewer(s)");
+		expect(log()).toEqual(["gh|repos/owner/repo/environments/npm-publish"]);
+	});
+
+	it("passes with a warning when there is no deployment-branch policy", () => {
+		setEnvironment(protectedEnv([reviewersRule(2)], null));
+		const r = run(["assert-protected", "npm-publish"]);
+		expect(r.status).toBe(0);
+		expect(r.out).toContain("no deployment-branch policy");
+	});
+
+	const refusals: [string, () => void, string][] = [
+		["a 404 (no such environment)", () => {}, "does not exist"],
+		["a 403 (permission)", () => {}, "actions: read"],
+		["another HTTP error", () => {}, "Could not read environment"],
+		["no protection rules", () => setEnvironment(protectedEnv([])), "requires no reviewer"],
+		[
+			"a required_reviewers rule with 0 reviewers",
+			() => setEnvironment(protectedEnv([reviewersRule(0)])),
+			"requires no reviewer",
+		],
+		[
+			"only a wait timer",
+			() => setEnvironment(protectedEnv([{ id: 3, type: "wait_timer", wait_timer: 30 }])),
+			"requires no reviewer",
+		],
+		[
+			"protection_rules missing",
+			() => setEnvironment({ id: 1, name: "npm-publish" }),
+			"requires no reviewer",
+		],
+		["an unparseable answer", () => setEnvironment("<html>oops</html>"), "not an environment"],
+		["an empty answer", () => setEnvironment(""), "not an environment"],
+		[
+			"another environment's answer",
+			() => setEnvironment({ ...protectedEnv(), name: "staging" }),
+			"not an environment",
+		],
+	];
+	const http: Record<string, string> = {
+		"a 404 (no such environment)": "404",
+		"a 403 (permission)": "403",
+		"another HTTP error": "502",
+	};
+	for (const [what, arrange, message] of refusals) {
+		it(`refuses on ${what}`, () => {
+			arrange();
+			const r = run(
+				["assert-protected", "npm-publish"],
+				http[what] ? { FAKE_ENV_HTTP: http[what] } : {},
+			);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain(message);
+			expect(r.err).toContain("Refusing to release");
+		});
+	}
+
+	it("the 404 refusal names the owner step", () => {
+		const r = run(["assert-protected", "npm-publish"], { FAKE_ENV_HTTP: "404" });
+		expect(r.err).toContain("Owner step: create 'npm-publish'");
+	});
+
+	it("refuses without an environment name", () => {
+		expect(run(["assert-protected"]).status).not.toBe(0);
 		expect(log()).toEqual([]);
 	});
 });
@@ -466,12 +791,77 @@ describe("release.sh gate (normal release)", { timeout: 30_000 }, () => {
 });
 
 describe("release.sh gate (republish)", { timeout: 30_000 }, () => {
-	it("gates on the parent of a version-only release commit", () => {
+	it("release-parent prints the parent of a version-only release commit", () => {
 		const parent = git("rev-parse", "HEAD");
 		releaseCommit("1.0.1");
+		const r = run(["release-parent"]);
+		expect(r.status).toBe(0);
+		expect(r.out.trim()).toBe(parent);
+	});
+
+	it("gates on the parent of a version-only release commit that is on master", () => {
+		const parent = git("rev-parse", "HEAD");
+		releaseCommit("1.0.1");
+		git("push", "-q", "origin", "master");
 		const r = run(["gate"], { REPUBLISH: "true" });
 		expect(r.status).toBe(0);
+		expect(r.out).toContain("is on master");
 		expect(log()[0]).toContain(`head_sha=${parent}&`);
+	});
+
+	it("refuses a version-only release commit tagged on a side branch, never on master", () => {
+		git("switch", "-q", "-c", "side");
+		releaseCommit("1.0.1");
+		const r = run(["gate"], { REPUBLISH: "true" });
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("is not on master");
+		expect(r.err).toContain("side branch");
+		expect(log()).toEqual([]);
+	});
+
+	it("checks master as it is now, not a stale local origin/master", () => {
+		releaseCommit("1.0.1");
+		git("push", "-q", "origin", "master");
+		// The remote's master is rewound past the release; the local ref still has it.
+		const base = git("rev-parse", "HEAD^");
+		gitIn(join(dir, "origin.git"), "update-ref", "refs/heads/master", base);
+		const r = run(["gate"], { REPUBLISH: "true" });
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("is not on master");
+	});
+
+	it("refuses when origin has no master to check against", () => {
+		releaseCommit("1.0.1");
+		gitIn(dir, "init", "-q", "--bare", "-b", "trunk", "empty.git");
+		git("remote", "set-url", "origin", join(dir, "empty.git"));
+		const r = run(["gate"], { REPUBLISH: "true" });
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("Could not fetch master");
+		expect(log()).toEqual([]);
+	});
+
+	it("refuses in a shallow checkout, which cannot show ancestry", () => {
+		releaseCommit("1.0.1");
+		git("push", "-q", "origin", "master", "--follow-tags");
+		const shallow = join(dir, "shallow");
+		gitIn(
+			dir,
+			"clone",
+			"-q",
+			"--depth",
+			"2",
+			"--branch",
+			"v1.0.1",
+			`file://${join(dir, "origin.git")}`,
+			shallow,
+		);
+		repo = shallow;
+		mkdirSync(join(repo, "scripts"), { recursive: true });
+		writeFileSync(join(repo, "scripts/release.sh"), readFileSync(SCRIPT, "utf8"));
+		const r = run(["gate"], { REPUBLISH: "true" });
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("shallow");
+		expect(log()).toEqual([]);
 	});
 
 	it("refuses when the tag is not the checked-out commit", () => {
@@ -510,5 +900,49 @@ describe("release.sh gate (republish)", { timeout: 30_000 }, () => {
 		const r = run(["gate"], { REPUBLISH: "true" });
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("changes README");
+	});
+});
+
+describe("release.sh latest-flag", { timeout: 30_000 }, () => {
+	const tags = (...names: string[]) => {
+		for (const t of names) git("tag", "-a", t, "-m", t);
+		git("push", "-q", "origin", "--tags");
+	};
+
+	it("an older version than the newest v* release is not Latest (an old republish)", () => {
+		tags("v1.0.0", "v1.1.0", "v1.2.0");
+		const r = run(["latest-flag", "1.1.0"]);
+		expect(r.status).toBe(0);
+		expect(r.out.trim()).toBe("false");
+	});
+
+	it("the newest version is Latest, its own tag included", () => {
+		tags("v1.0.0", "v1.2.0");
+		expect(run(["latest-flag", "1.2.0"]).out.trim()).toBe("true");
+		expect(run(["latest-flag", "1.3.0"]).out.trim()).toBe("true");
+	});
+
+	it("compares semver, not text: 1.10.0 is newer than 1.9.0", () => {
+		tags("v1.9.0", "v1.10.0");
+		expect(run(["latest-flag", "1.10.0"]).out.trim()).toBe("true");
+		expect(run(["latest-flag", "1.9.0"]).out.trim()).toBe("false");
+	});
+
+	it("a higher prerelease tag does not hold Latest, and a prerelease never takes it", () => {
+		tags("v1.2.0", "v2.0.0-rc.1", "round6-backup", "wip-full");
+		expect(run(["latest-flag", "1.3.0"]).out.trim()).toBe("true");
+		expect(run(["latest-flag", "2.0.0-rc.2"]).out.trim()).toBe("false");
+	});
+
+	it("counts a newer tag that exists only on origin (fetched first)", () => {
+		gitIn(join(dir, "origin.git"), "tag", "v9.0.0", "master");
+		expect(run(["latest-flag", "1.3.0"]).out.trim()).toBe("false");
+	});
+
+	it("fails when it cannot fetch the tags", () => {
+		git("remote", "set-url", "origin", join(dir, "nowhere.git"));
+		const r = run(["latest-flag", "1.3.0"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("Could not fetch tags");
 	});
 });

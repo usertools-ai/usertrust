@@ -6,12 +6,18 @@
 # every step reads the same package list and packages/core/tests/harden/release-workflow.test.ts
 # can run it against a fake `npm`, `gh` and git history. See docs/releasing.md.
 #
-#   release.sh dirs                  the lockstep package directories, one per line, in publish order
-#   release.sh version               the lockstep version; fails if the six packages disagree
-#   release.sh assert-published      fails unless every <package>@<version> is on npm
-#   release.sh assert-unreleased     fails if tag v<version> or any <package>@<version> already exists
-#   release.sh publish [--dry-run]   publishes each package not yet on npm, with provenance
-#   release.sh gate                  fails unless CI (ci.yml) passed on the commit being released
+#   release.sh dirs                      the lockstep package directories, in publish order
+#   release.sh version                   the lockstep version; fails if the six packages disagree
+#   release.sh assert-published          fails unless every <package>@<version> is on npm
+#   release.sh assert-unreleased         fails if tag v<version> or any <package>@<version> exists
+#   release.sh assert-protected <env>    fails unless environment <env> requires a reviewer
+#   release.sh gate                      fails unless CI (ci.yml) passed on the commit released
+#                                        (and, to republish, the tag commit is on master)
+#   release.sh release-parent            verifies HEAD is a version-only release commit tagged
+#                                        v<version>, and prints its parent
+#   release.sh latest-flag <version>     true if v<version> is the newest release, else false
+#   release.sh pack <dir>                packs each package (already built) into <dir>
+#   release.sh publish <dir> [--dry-run] publishes each packed package not yet on npm
 #
 # Run from the repository root. Fails closed: an answer it cannot read is an error, never a pass.
 
@@ -117,19 +123,71 @@ assert_unreleased() {
 	echo "v${version}: no tag, and none of the six packages is on npm."
 }
 
+# Packs each package, already built, into <dir> as <name>-<version>.tgz. No lifecycle
+# scripts: the build ran in its own step, and packing must not rebuild anything.
+pack() {
+	local out="${1:-}" entry dir pkg version
+	if [ -z "$out" ]; then
+		err "pack needs the directory to write the tarballs to"
+		return 1
+	fi
+	version=$(lockstep_version)
+	mkdir -p "$out"
+	out=$(cd "$out" && pwd)
+	for entry in $PACKAGES; do
+		dir="${entry%%:*}"
+		pkg="${entry##*:}"
+		(cd "packages/${dir}" && npm pack --ignore-scripts --pack-destination "$out" >/dev/null)
+		if [ ! -f "${out}/${pkg}-${version}.tgz" ]; then
+			err "npm pack did not write ${pkg}-${version}.tgz to ${out}"
+			return 1
+		fi
+		echo "packed ${pkg}-${version}.tgz"
+	done
+}
+
+# Publishes the tarballs `pack` wrote, never a directory: publishing a tarball runs no
+# lifecycle script and installs nothing, so the job that holds the publishing credentials
+# runs no dependency code. Every tarball is checked to carry the expected name and version
+# BEFORE any is published, then each one not yet on npm is published with provenance.
 publish() {
-	local dry="" entry dir pkg version state
-	case "${1:-}" in
+	local tardir="${1:-}" dry="" entry pkg version state tgz got
+	if [ -z "$tardir" ] || [ ! -d "$tardir" ]; then
+		err "publish needs the directory of packed tarballs, not '${tardir}'"
+		return 1
+	fi
+	case "${2:-}" in
 	--dry-run) dry="--dry-run" ;;
 	"") ;;
 	*)
-		err "publish takes only --dry-run, not '$1'"
+		err "publish takes only --dry-run after the directory, not '$2'"
 		return 1
 		;;
 	esac
+	tardir=$(cd "$tardir" && pwd)
 	version=$(lockstep_version)
 	for entry in $PACKAGES; do
-		dir="${entry%%:*}"
+		pkg="${entry##*:}"
+		tgz="${tardir}/${pkg}-${version}.tgz"
+		if [ ! -f "$tgz" ]; then
+			err "${pkg}-${version}.tgz is missing from ${tardir}"
+			return 1
+		fi
+		# shellcheck disable=SC2016 # JavaScript, not shell
+		got=$(tar -xzOf "$tgz" package/package.json | node -e '
+			let s = "";
+			process.stdin.on("data", (d) => { s += d; });
+			process.stdin.on("end", () => {
+				const p = JSON.parse(s);
+				console.log(`${p.name}@${p.version}`);
+			});
+		') || got="unreadable"
+		if [ "$got" != "${pkg}@${version}" ]; then
+			err "${pkg}-${version}.tgz holds ${got}, not ${pkg}@${version}"
+			return 1
+		fi
+	done
+	for entry in $PACKAGES; do
 		pkg="${entry##*:}"
 		state=$(registry_has "${pkg}@${version}") || return 1
 		if [ "$state" = yes ]; then
@@ -138,8 +196,63 @@ publish() {
 		fi
 		echo "Publishing ${pkg}@${version}${dry:+ (dry run)}"
 		# The same command with and without --dry-run, so a dry run exercises the real one.
-		(cd "packages/${dir}" && npm publish --access public --provenance ${dry})
+		(cd "$tardir" && npm publish "./${pkg}-${version}.tgz" --access public --provenance ${dry})
 	done
+}
+
+# Requires the deployment environment the publishing job runs in to exist and to require at
+# least one reviewer, so that no dispatch publishes without an approval. Reading an
+# environment's protection rules needs the token's `actions: read`. A missing environment,
+# a permission error and an answer it cannot read all REFUSE: none of them shows a reviewer.
+assert_protected() {
+	local env="${1:-}" body rc errf reviewers
+	if [ -z "$env" ]; then
+		err "assert-protected needs the environment name"
+		return 1
+	fi
+	: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}"
+	errf=$(mktemp)
+	set +e
+	body=$(gh api "repos/${GITHUB_REPOSITORY}/environments/${env}" 2>"$errf")
+	rc=$?
+	set -e
+	if [ "$rc" -ne 0 ]; then
+		if grep -q 'HTTP 404' "$errf"; then
+			err "Environment '${env}' does not exist, so nothing requires an approval before publishing. Owner step: create '${env}' (Settings > Environments) with at least one required reviewer; see docs/releasing.md. Refusing to release."
+		elif grep -q 'HTTP 403' "$errf"; then
+			err "Not allowed to read environment '${env}' (HTTP 403). Reading its protection rules needs the job token's 'actions: read' permission. Refusing to release."
+		else
+			err "Could not read environment '${env}' (gh api exited ${rc}). Refusing to release."
+		fi
+		cat "$errf" >&2
+		rm -f "$errf"
+		return 1
+	fi
+	rm -f "$errf"
+	if ! reviewers=$(printf '%s' "$body" | jq -er --arg env "$env" '
+		if (type == "object") and (.name == $env) and ((.protection_rules // []) | type == "array")
+		then [(.protection_rules // [])[] | select(.type == "required_reviewers") | (.reviewers // []) | length] | add // 0
+		else error("not an environment") end' 2>/dev/null); then
+		err "Could not read environment '${env}': the answer is not an environment. Refusing to release."
+		return 1
+	fi
+	case "$reviewers" in
+	'' | *[!0-9]*)
+		err "Could not read environment '${env}': reviewer count '${reviewers}'. Refusing to release."
+		return 1
+		;;
+	esac
+	if [ "$reviewers" -lt 1 ]; then
+		err "Environment '${env}' requires no reviewer, so a dispatch would publish without an approval. Owner step: add at least one required reviewer to '${env}'; see docs/releasing.md. Refusing to release."
+		return 1
+	fi
+	if [ "$(printf '%s' "$body" | jq -r '.deployment_branch_policy == null')" = true ]; then
+		echo "::warning::Environment '${env}' has no deployment-branch policy; docs/releasing.md recommends master and tags v*."
+	fi
+	if [ "$(printf '%s' "$body" | jq -r '[.protection_rules[] | select(.type == "required_reviewers") | .prevent_self_review] | any')" != true ]; then
+		echo "::warning::Environment '${env}' lets whoever dispatches the release approve it; consider 'Prevent self-review'."
+	fi
+	echo "Environment '${env}' requires ${reviewers} reviewer(s)."
 }
 
 # A republish runs on the release commit the workflow pushed. That push used the workflow's
@@ -259,10 +372,79 @@ EOF
 	echo "CI passed on ${sha}."
 }
 
+# A republish finishes a release that master records. A version-only commit tagged on a side
+# branch was never released, so its tag must be an ancestor of master as master is NOW: fetched
+# here, in full. A shallow history, a failed fetch or a missing ref cannot show ancestry, so
+# each of them refuses.
+assert_on_master() {
+	local head
+	head=$(git rev-parse HEAD)
+	if ! git fetch --quiet --no-tags origin "+refs/heads/master:refs/remotes/origin/master"; then
+		err "Could not fetch master from origin, so nothing shows that ${head} is on master. Refusing to republish."
+		return 1
+	fi
+	if ! git rev-parse -q --verify "refs/remotes/origin/master^{commit}" >/dev/null; then
+		err "origin/master is missing after the fetch. Refusing to republish."
+		return 1
+	fi
+	# After the fetch, which does not deepen a shallow clone: shallow history cannot prove
+	# that a commit is NOT on master's line, nor, past its boundary, that it is.
+	if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
+		err "This history is shallow, so it cannot show that ${head} is on master. Refusing to republish."
+		return 1
+	fi
+	if ! git merge-base --is-ancestor "$head" "refs/remotes/origin/master"; then
+		err "${head} is not on master (not an ancestor of origin/master): a tag on a side branch is not a release. Refusing to republish."
+		return 1
+	fi
+	echo "${head} is on master."
+}
+
+# Whether v<version> should be the repository's Latest release: only if it is not a
+# prerelease and no v* release tag is a higher semver. A republish of an older version must
+# never take Latest from a newer one. Tags are fetched first, so a newer release made since
+# this run started counts. Prints true or false; fails if it cannot tell.
+latest_flag() {
+	local version="${1:-}"
+	if [ -z "$version" ]; then
+		err "latest-flag needs the version"
+		return 1
+	fi
+	if ! git fetch --quiet --tags origin; then
+		err "Could not fetch tags from origin, so cannot tell whether v${version} is the newest release."
+		return 1
+	fi
+	# shellcheck disable=SC2016 # JavaScript, not shell
+	git tag -l 'v*' | node -e '
+		const SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
+		const parse = (t) => {
+			const m = SEMVER.exec(t);
+			return m ? { core: [+m[1], +m[2], +m[3]], pre: m[4] } : null;
+		};
+		const cmp = (a, b) => {
+			for (let i = 0; i < 3; i++) if (a.core[i] !== b.core[i]) return a.core[i] - b.core[i];
+			return 0;
+		};
+		const me = parse(process.argv[1]);
+		if (!me) {
+			console.error(`::error::${process.argv[1]} is not a semver version.`);
+			process.exit(1);
+		}
+		let s = "";
+		process.stdin.on("data", (d) => { s += d; });
+		process.stdin.on("end", () => {
+			const releases = s.split(/\s+/).map(parse).filter((t) => t && t.pre === undefined);
+			const newest = me.pre === undefined && releases.every((t) => cmp(t, me) <= 0);
+			console.log(newest ? "true" : "false");
+		});
+	' "$version"
+}
+
 gate() {
 	local sha
 	if [ "${REPUBLISH:-}" = true ]; then
 		sha=$(release_commit_parent)
+		assert_on_master
 		echo "Republish of $(git rev-parse HEAD): gating on its parent ${sha}, the commit CI tested."
 	else
 		sha=$(git rev-parse HEAD)
@@ -275,10 +457,14 @@ dirs) dirs ;;
 version) lockstep_version ;;
 assert-published) assert_published ;;
 assert-unreleased) assert_unreleased ;;
-publish) publish "${2:-}" ;;
+assert-protected) assert_protected "${2:-}" ;;
+release-parent) release_commit_parent ;;
+latest-flag) latest_flag "${2:-}" ;;
+pack) pack "${2:-}" ;;
+publish) publish "${2:-}" "${3:-}" ;;
 gate) gate ;;
 *)
-	err "usage: release.sh dirs | version | assert-published | assert-unreleased | publish [--dry-run] | gate"
+	err "usage: release.sh dirs | version | assert-published | assert-unreleased | assert-protected <env> | gate | release-parent | latest-flag <version> | pack <dir> | publish <dir> [--dry-run]"
 	exit 2
 	;;
 esac

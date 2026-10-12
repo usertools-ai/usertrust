@@ -9,42 +9,83 @@ version, by the **Release** workflow (`.github/workflows/publish.yml`). It is st
 `usertrust-monte-cristo` and the Claude Code plugin are not part of this release; see
 `AGENTS.md`.
 
+## Before the first release: owner setup
+
+**Every release is refused until the environment `npm-publish` exists with at least one
+required reviewer** (see "Owner setup" below). This is intended: without it, anyone who can
+dispatch the workflow could publish with no approval. The refusal comes from the `ci-gate`
+job and names the step to take.
+
 ## What a release does
 
-1. **ci-gate** (a job of its own, before any approval). The run must be on `master`, or, for a
-   republish only, on a release tag. CI (`ci.yml`) must have passed on the exact commit being
-   released: its latest run for a push of that commit must have completed with every job
-   `success`, including each job named in `REQUIRED_CI_JOBS`. A missing, pending, skipped,
-   cancelled or failed job stops the release and is named in the error.
-2. **release**, in the `npm-publish` environment (so it waits for any approval the owner has
-   configured):
-   1. Checks the CI gate again, since approval can come long after step 1.
-   2. Installs, typechecks and tests.
-   3. Refuses to start if the committed version is not fully on npm (finish it with republish
+Three jobs, so that dependency code never runs next to a credential that can push to the
+repository or mint an OIDC token for provenance:
+
+1. **ci-gate** (token: `contents: read`, `actions: read`).
+   - The run must be on `master`, or, for a republish only, on a release tag.
+   - CI (`ci.yml`) must have passed on the exact commit being released: its latest run for a
+     push of that commit must have completed with every job `success`, including each job
+     named in `REQUIRED_CI_JOBS`. A missing, pending, skipped, cancelled or failed job stops
+     the release and is named in the error.
+   - The `npm-publish` environment must require at least one reviewer. A missing environment,
+     a permission error, or an answer that cannot be read is a refusal, never a pass. (Reading
+     an environment's protection rules needs `actions: read`.)
+2. **build** (token: `contents: read` only; no OIDC token, no secret).
+   1. Installs (`npm ci`, with install scripts, exactly as CI does), typechecks and tests.
+   2. Refuses to start if the committed version is not fully on npm (finish it with republish
       first), bumps all six packages by the chosen `version` (patch, minor or major), and
       refuses if the new version already has a tag or is already on npm.
-   4. Builds, then **commits the bump and creates the tag `v<version>` locally**, and checks
+   3. Builds, then **commits the bump and creates the tag `v<version>` locally**, and checks
       that nothing under `packages/` differs from that commit.
-   5. Runs `npm publish --access public --provenance --dry-run` for each package: the publish
-      command itself, uploading nothing.
-   6. **Pushes the release commit and tag** to `master`, atomically.
-   7. Publishes each package with `npm publish --access public --provenance`.
-   8. Creates the GitHub Release `v<version>` with generated notes.
+   4. Packs each package into a tarball (`npm pack --ignore-scripts`), bundles the release
+      commit and tag (`git bundle`), and uploads both as the `release` artifact.
+3. **publish**, in the `npm-publish` environment, so it waits for the approval (token:
+   `contents: write`, `id-token: write`, `actions: read`; `NPM_TOKEN` in one step). It installs
+   nothing and runs no dependency code: only git, gh, node, the npm that ships with node, and
+   GitHub's own checkout, setup-node and download-artifact actions.
+   1. Checks the CI gate again, since approval can come long after step 1.
+   2. Downloads the artifact and checks the release commit: one parent, which is the commit
+      this run was dispatched on; nothing changed but the six `version` fields; the tag points
+      at it; and its version is the one the build job reported.
+   3. Runs `npm publish <tarball> --access public --provenance --dry-run` for each package, after
+      checking that every tarball holds the expected name and version.
+   4. **Pushes the release commit and tag** to `master`, atomically.
+   5. Publishes each tarball with `npm publish <tarball> --access public --provenance`.
+      Publishing a tarball runs no lifecycle script.
+   6. Creates the GitHub Release `v<version>` with generated notes, deciding Latest
+      explicitly: it is Latest only if no `v*` release tag is a higher semver (prereleases
+      never take it), so finishing an older version never takes Latest from a newer one.
+
+   Each step runs only if every step before it succeeded, so a normal release publishes
+   nothing unless its push to `master` went through.
+
+### Credentials
+
+- No checkout persists a credential (`persist-credentials: false`). The write token reaches
+  git only in the push step, through the environment of that one `git push`
+  (`GIT_CONFIG_*`), so it is never written to `.git/config` or any other file.
+- In the publish job the same token is also used by the CI re-check and by `gh release
+  create`, both of which run only `gh`.
+- **What remains:** GitHub cannot scope `id-token: write` to one step, so every step of the
+  publish job could mint an OIDC token; those steps are the tools above and nothing from the
+  repository's dependencies. The tarballs themselves are built in the build job, from
+  dependency code: a compromised build dependency could still alter what is published, as it
+  could before. The split stops it reaching the push, the OIDC token and `NPM_TOKEN`; the
+  release commit it hands on is checked to be a version bump and nothing else.
 
 ## Modes
 
 | Mode | Runs | Pushes | Publishes | GitHub Release |
 |---|---|---|---|---|
 | normal | every step | release commit + tag, before publishing | all six | created, marked latest |
-| `dry_run` | every step through the publish dry run, including the local commit and tag | nothing | nothing (`npm publish --dry-run` only) | none |
-| `republish` | gate, install, typecheck, test, build, publish dry run, publish | nothing | each package not yet on npm | created only if missing |
+| `dry_run` | every step through the publish dry run, including the local commit and tag, the artifact and its checks | nothing | nothing (`npm publish --dry-run` only) | none |
+| `republish` | ci-gate; build without bump, commit or tag; publish without the release-commit check or the push | nothing | each package not yet on npm | created only if missing |
 
 `dry_run` and `republish` can be combined: a republish rehearsal that pushes and publishes
 nothing.
 
-Every mode, dry runs included, waits for the `npm-publish` environment's approval once the
-owner has configured one. Do a `dry_run` before the first release after any change to the
-workflow.
+Every mode, dry runs included, is refused until the environment is protected, and then waits
+for its approval. Do a `dry_run` before the first release after any change to the workflow.
 
 ## Why the commit and tag are pushed before publishing
 
@@ -74,8 +115,10 @@ Dispatch the Release workflow **on the tag** (`Use workflow from` → tag `v<ver
 `republish` checked. The ci-gate job checks that the tag's commit changes nothing but the
 `version` field of the lockstep `package.json` files, and gates on its parent, the commit CI
 ran on. (The release commit itself has no CI run: pushes made with the workflow's token do not
-trigger workflows.) Dispatching on `master` also works while `master` is still the release
-commit.
+trigger workflows.) It also fetches `master` afresh and requires the tag's commit to be on it:
+a version-only commit tagged on a side branch was never released and is refused, and so is a
+shallow history or a `master` it cannot fetch. Dispatching on `master` also works while
+`master` is still the release commit.
 
 ## The required CI checks
 
@@ -88,13 +131,16 @@ must still pass.
 
 The workflow names these; it cannot create or configure them.
 
-- **Create the environment `npm-publish`** (Settings → Environments) with **required
-  reviewer(s)**. Until it exists, the first run creates it with no protection, and a release
-  needs no approval.
-  - Optionally restrict its deployment refs to `master` and tags matching `v*` (republish runs
-    on a tag).
-  - Optionally **move `NPM_TOKEN` into it as an environment secret** and delete the
-    repository secret, so that only the approved release job can read the token.
+- **Create the environment `npm-publish`** (Settings → Environments) with **at least one
+  required reviewer**. Until then every release is refused by `ci-gate`. Consider turning on
+  "Prevent self-review" (the gate warns when it is off).
+  - **Move `NPM_TOKEN` into it as an environment secret** and delete the repository secret,
+    so that only the approved publish job can read the token.
+  - Restrict its deployment refs to `master` and tags matching `v*` (republish runs on a tag).
+    Together with the environment secret, this keeps a workflow dispatched from any other
+    branch, with an edited copy of this file, away from the token. The gate warns, but does
+    not refuse, when no deployment-branch policy is set: it cannot see whether the token is an
+    environment secret, and without that the policy protects nothing.
 - **Branch protection on `master`**: requiring the CI checks on `master` would also apply to
   the workflow's own push of the release commit, which never gets a CI run, so that push
   would be refused (safely: before anything is published). Before requiring checks, give the
