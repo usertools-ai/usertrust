@@ -79,7 +79,7 @@ export const MD_ALLOWED = /^[A-Za-z0-9 .,:;_@/+=-]*$/;
 const MD_DISALLOWED = /[^A-Za-z0-9 .,:;_@/+=-]/gu;
 
 const PROOF_NOTE =
-	"Confirmed means no record contradicts the call; ledger-proven means a record written after the ledger post proves it. The SDK path records the call before the ledger post, so its spend is confirmed but not proven.";
+	"Confirmed means no record contradicts the call; ledger-proven means a record written after the ledger post proves it. The SDK path's call records do not say whether the ledger post took place, so its spend is confirmed but not proven.";
 
 export function md(s: string): string {
 	const text = s.replace(MD_DISALLOWED, "?");
