@@ -98,9 +98,9 @@ one log, refused the same way.
 **A second process on the same vault cannot write to it.** Each of its audit
 appends fails; it never forks the chain. Its calls still settle, and every event that
 misses the chain is reported: the receipt carries `auditDegraded`, the event goes to
-`.usertrust/dlq/dead-letters.jsonl`, the process gets a `USERTRUST_AUDIT_DEGRADED`
+`.usertrust/dlq/dead-letters.jsonl` (when that write succeeds), the process gets a `USERTRUST_AUDIT_DEGRADED`
 warning (at the first failure, and with the count when the client is destroyed), and
-`usertrust verify` reports the vault INCOMPLETE and exits 1. A `trust()` client with
+`usertrust verify` reports the vault INCOMPLETE and exits 1 for a dead-lettered event (if the dead-letter write itself fails, for instance on a full disk, neither `verify` nor `health` sees the gap). A `trust()` client with
 `audit.failClosed: true` refuses such calls instead; `createGovernor()` and
 `usertrust-server` do not enforce `audit.failClosed`.
 
@@ -197,7 +197,7 @@ auditor can check without trusting us or this codebase. That is the deliberate
 division of labor: usertrust generates the receipts; certifying a deployment
 that uses them is the deployer's work with their own auditors.
 
-**Known issue in 4.1.0 — deleting the most recent records.** On a vault with no external anchor (the default), deleting the most recent audit records is reported by `usertrust verify` only until the next governed call: that call appends after whatever tail it finds and rewrites the vault's sidecar, after which verification passes over the shortened chain. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Editing a record, deleting a record from the middle of the chain, and re-hashing the whole chain against a published anchor are all detected.
+**Known issue in 4.1.0 — deleting the most recent records.** On a vault with no external anchor (the default), deleting the most recent audit records is reported by `usertrust verify` only until the next governed call from a freshly started process: that call appends after whatever tail it finds and rewrites the vault's sidecar, after which verification passes over the shortened chain. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Editing a record, deleting a record from the middle of the chain, and re-hashing the whole chain against a published anchor are all detected.
 
 **What holds regardless of version.** Anyone who can rewrite both the vault file and its sidecar can produce a chain that verifies on its own. Only an anchor held outside the vault catches that. If you rely on the audit chain as evidence, enable external anchoring and keep the anchors and the public key with your auditor.
 
