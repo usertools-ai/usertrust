@@ -8,6 +8,7 @@ import {
 	readFileSync,
 	rmSync,
 	truncateSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -105,6 +106,28 @@ describe("live tail", () => {
 		);
 		const summary = JSON.parse(data) as { budget: number | null; budgetSource: string };
 		expect(summary).toMatchObject({ budget: 4_000, budgetSource: "governor" });
+	});
+
+	it("red-first (stale reason): an unreadable record whose REASON changes updates the summary's provenance", async () => {
+		const record = join(tempDir, ".usertrust", "effective-budget.json");
+		writeFileSync(record, "{torn");
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			budgetProvenance: string;
+		};
+		expect(before.budgetProvenance).toContain("not valid JSON");
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				rmSync(record);
+				mkdirSync(record);
+			},
+			8000,
+		);
+		const summary = JSON.parse(data) as { budget: number | null; budgetProvenance: string };
+		expect(summary.budget).toBeNull();
+		expect(summary.budgetProvenance).toContain("not a regular file");
 	});
 
 	it("signals resync when the log shrinks", async () => {

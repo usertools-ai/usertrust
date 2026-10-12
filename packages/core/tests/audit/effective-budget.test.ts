@@ -514,3 +514,62 @@ describe("the record is published only under the vault's writer lock", () => {
 		expect(h.lockOwner?.()).toBeUndefined();
 	});
 });
+
+// The failure path's own warning must not fail the governor (rule (b) of the review's stop rule): stderr can fail where
+// the record did. With the lock held, a second governor's start and the first's destroy both publish.
+describe("the record's warning is best-effort too", () => {
+	/** Make every publish fail: a non-empty DIRECTORY at the record's path refuses the rename and the removal. */
+	function blockTheRecord(): void {
+		rmSync(join(vaultDir, EFFECTIVE_BUDGET_FILE), { force: true });
+		mkdirSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
+		writeFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE, "x"), "x");
+	}
+
+	it("red-first (rejected the start): the record write AND stderr both fail; a governor still starts and tears down", async () => {
+		const a = await createGovernor({ dryRun: true, vaultBase: base, budget: 3_000 });
+		await appendOnce(a);
+		blockTheRecord();
+		const write = vi.spyOn(process.stderr, "write").mockImplementation(() => {
+			throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+		});
+		// Registered while the lock is held: it publishes at once, and that publish fails.
+		const b = await createGovernor({ dryRun: true, vaultBase: base, budget: 5_000 });
+		await appendOnce(b);
+		// The destroy republishes for the rest (it fails too) and then runs every teardown step.
+		await expect(b.destroy()).resolves.toBeUndefined();
+		await expect(appendOnce(b)).rejects.toThrow(/destroyed/);
+		expect(write).toHaveBeenCalled();
+		write.mockRestore();
+		await a.destroy();
+	});
+
+	it("red-first (uncaught): a stream 'error' from the warning's write is contained", async () => {
+		const baseline = process.stderr.listenerCount("error");
+		const a = await createGovernor({ dryRun: true, vaultBase: base, budget: 3_000 });
+		await appendOnce(a);
+		blockTheRecord();
+		const write = vi.spyOn(process.stderr, "write").mockImplementation(((
+			_chunk: unknown,
+			cb?: (err?: Error) => void,
+		) => {
+			const err = Object.assign(new Error("ENOSPC: no space left on device, write"), {
+				code: "ENOSPC",
+			});
+			// As a failed stream write does: the callback with the error, then 'error' on the stream.
+			process.nextTick(() => {
+				cb?.(err);
+				process.stderr.emit("error", err);
+			});
+			return false;
+		}) as typeof process.stderr.write);
+		const b = await createGovernor({ dryRun: true, vaultBase: base, budget: 5_000 });
+		await new Promise((r) => setImmediate(r));
+		await expect(b.destroy()).resolves.toBeUndefined();
+		await new Promise((r) => setImmediate(r));
+		write.mockRestore();
+		// Every listener the warnings held is gone once their writes have reported.
+		await new Promise((r) => setImmediate(r));
+		expect(process.stderr.listenerCount("error")).toBe(baseline);
+		await a.destroy();
+	});
+});

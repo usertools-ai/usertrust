@@ -196,10 +196,27 @@ function writeRecord(
 			if (code !== "ENOENT")
 				removed = `the earlier record could NOT be removed (${code ?? "error"}); readers show its writtenAt, so it reads as old, never as current`;
 		}
-		process.stderr.write(
+		warnBestEffort(
 			`[usertrust] could not record the enforced budget in ${target}: ${
 				err instanceof Error ? err.message : String(err)
 			}; ${removed}. Enforcement is unaffected; vault readers fall back to the vault config.\n`,
 		);
+	}
+}
+
+/**
+ * The warning is best-effort too. stderr can fail where the record did (the same full or read-only filesystem): a
+ * write that throws, or a stream `'error'`, which with no listener is an uncaught exception. Either would reject an
+ * initialised governor at registration, or escape a destroy() before its teardown steps. The throw is caught, and an
+ * `'error'` from THIS write is contained by a listener held until a turn after the write's callback.
+ */
+function warnBestEffort(message: string): void {
+	const stderr = process.stderr;
+	const contain = (): void => {};
+	try {
+		stderr.on("error", contain);
+		stderr.write(message, () => setImmediate(() => stderr.off("error", contain)));
+	} catch {
+		stderr.off("error", contain);
 	}
 }

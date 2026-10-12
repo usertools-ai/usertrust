@@ -300,7 +300,9 @@ export async function createUiServer(
 		if (
 			next.budget === state.summary.budget &&
 			next.budgetSource === state.summary.budgetSource &&
-			next.budgetWrittenAt === state.summary.budgetWrittenAt
+			next.budgetWrittenAt === state.summary.budgetWrittenAt &&
+			// the provenance carries an unreadable record's REASON, which can change while the rest does not
+			next.budgetProvenance === state.summary.budgetProvenance
 		)
 			return;
 		Object.assign(state.summary, next);
