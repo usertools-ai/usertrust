@@ -170,6 +170,8 @@ server-layer semantic; other usertrust layers define their own evaluate-only beh
 Only Governor-produced receipts and audit-chain records are authoritative. The server
 invents no audit records of its own; every receipt returned by `/v1/settle` comes from
 the tenant's Governor (per-tenant `stateDir/<tenant>` vault: separate audit chain and
-spend ledger). The SSE stream is best-effort operational telemetry, NOT an audit
+spend ledger). Each tenant vault is owner-only (directories `0700`, files `0600`, whatever
+the umask), and the server writes nothing outside `stateDir`; a `stateDir` the server creates is
+`0700`, and one you created is left as you made it. The SSE stream is best-effort operational telemetry, NOT an audit
 source — dropped subscribers lose events. Shadow denials produce no receipt and are
 not auditable or verifiable.

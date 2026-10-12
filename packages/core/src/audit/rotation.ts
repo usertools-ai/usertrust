@@ -11,10 +11,11 @@
  * Structure: .usertrust/audit/<kind>/<YYYY-MM-DD>/<receiptId>.json
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AUDIT_DIR, RECEIPT_VERSION, VAULT_DIR } from "../shared/constants.js";
 import { trustId } from "../shared/ids.js";
+import { mkdirPrivate, PRIVATE_FILE_MODE } from "../shared/private-fs.js";
 
 // ── Types ──
 
@@ -79,7 +80,7 @@ function updateIndex(auditRoot: string, entry: IndexEntry, indexLimit: number): 
 			index = index.slice(-indexLimit);
 		}
 
-		writeFileSync(indexPath, JSON.stringify(index, null, "\t"));
+		writeFileSync(indexPath, JSON.stringify(index, null, "\t"), { mode: PRIVATE_FILE_MODE });
 	} catch {
 		// Index update failure is non-fatal
 	}
@@ -121,10 +122,10 @@ export function writeReceipt(
 		// Write individual receipt file with daily rotation
 		const dailyDir = getDailyDir(auditRoot, input.kind);
 		if (!existsSync(dailyDir)) {
-			mkdirSync(dailyDir, { recursive: true });
+			mkdirPrivate(dailyDir);
 		}
 		const receiptFile = join(dailyDir, `${receiptId}.json`);
-		writeFileSync(receiptFile, JSON.stringify(receipt, null, "\t"));
+		writeFileSync(receiptFile, JSON.stringify(receipt, null, "\t"), { mode: PRIVATE_FILE_MODE });
 
 		// Update index
 		updateIndex(

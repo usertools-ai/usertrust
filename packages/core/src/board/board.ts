@@ -14,10 +14,11 @@
  * Persists JSONL session history with a 100-review buffer.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { VAULT_DIR } from "../shared/constants.js";
 import { trustId } from "../shared/ids.js";
+import { mkdirPrivate, PRIVATE_FILE_MODE } from "../shared/private-fs.js";
 import type { BoardDecision } from "../shared/types.js";
 import type { BoardRequest } from "./concerns.js";
 import type { DirectorReview } from "./director.js";
@@ -165,7 +166,7 @@ function historyPath(vaultPath: string): string {
 function ensureDir(vaultPath: string): void {
 	const dir = boardDir(vaultPath);
 	if (!existsSync(dir)) {
-		mkdirSync(dir, { recursive: true });
+		mkdirPrivate(dir);
 	}
 }
 
@@ -197,12 +198,16 @@ function loadSession(vaultPath: string): BoardSession {
 function saveSession(vaultPath: string, session: BoardSession): void {
 	ensureDir(vaultPath);
 	session.lastActivityAt = new Date().toISOString();
-	writeFileSync(sessionPath(vaultPath), JSON.stringify(session, null, "\t"));
+	writeFileSync(sessionPath(vaultPath), JSON.stringify(session, null, "\t"), {
+		mode: PRIVATE_FILE_MODE,
+	});
 }
 
 function appendHistory(vaultPath: string, result: BoardReviewResult): void {
 	ensureDir(vaultPath);
-	appendFileSync(historyPath(vaultPath), `${JSON.stringify(result)}\n`);
+	appendFileSync(historyPath(vaultPath), `${JSON.stringify(result)}\n`, {
+		mode: PRIVATE_FILE_MODE,
+	});
 }
 
 // ── Factory ──
