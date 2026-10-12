@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { costFromRates, getModelRates } from "usertrust";
+import { costFromRates, getModelRates, sanitizeUsage } from "usertrust";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_GATE_CONFIG, evaluateRequest } from "../src/gate.js";
 import { classifyResponse } from "../src/settle.js";
@@ -84,6 +84,35 @@ describe("settlement amounts", () => {
 		expect(settlementAmounts(rates, withHour, withHourActual + 5).actual).toBe(withHourActual);
 		// Dropping the field falls back to the all-5-minute price: that is the bug this pins.
 		expect(settlementAmounts(rates, usage, withHourActual + 5).actual).toBe(actual);
+	});
+	it("an implausible reading settles AT THE HOLD with the anomaly named, never at the floor of a zeroed snapshot", () => {
+		// the 1-hour share alone is absurd, on a model that HAS a 1-hour tier: the decider refuses the counts
+		const absurd = sanitizeUsage({
+			inputTokens: 10,
+			outputTokens: 10,
+			cacheWriteTokens: 5,
+			cacheWrite1hTokens: 1e12,
+			source: "provider",
+		});
+		const out = settlementAmounts(rates, absurd, 4242);
+		expect(out).toMatchObject({ actual: 4242, post: 4242, overage: 0 });
+		expect(out.anomaly?.implausible).toMatchObject({ cacheWrite1hTokens: 1e12 });
+		// any other tier is refused the same way
+		const huge = sanitizeUsage({ inputTokens: 1e12, outputTokens: 1, source: "provider" });
+		expect(settlementAmounts(rates, huge, 77)).toMatchObject({ actual: 77, post: 77 });
+	});
+	it("CONTROL: an absurd 1-hour share on a model with NO 1-hour tier is ignored, and the usage prices as reported", () => {
+		const gpt = getModelRates("gpt-4o");
+		const absurd = sanitizeUsage({
+			inputTokens: 1000,
+			outputTokens: 500,
+			cacheWriteTokens: 5,
+			cacheWrite1hTokens: 1e12,
+			source: "provider",
+		});
+		const out = settlementAmounts(gpt, absurd, 100_000);
+		expect(out.anomaly).toBeUndefined();
+		expect(out.actual).toBe(costFromRates(gpt, 1000, 500, 0, 5));
 	});
 	it("over the hold it posts the hold and the excess is overage", () => {
 		expect(settlementAmounts(rates, usage, actual - 7)).toEqual({

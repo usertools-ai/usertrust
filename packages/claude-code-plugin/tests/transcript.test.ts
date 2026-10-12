@@ -3809,6 +3809,29 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			});
 		});
 
+		it("the 1-hour maximum is the breakdown as STATED, not the value clamped to the write total", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			// 400 written, but the breakdown claims 150M of it was 1-hour: the clamp would hide that
+			const absurd: Usage = {
+				...u(10, 20, 0, 400),
+				cacheCreation: {
+					ephemeral_5m_input_tokens: 0,
+					ephemeral_1h_input_tokens: 150_000_000,
+				},
+			};
+			await writeMain([
+				...responseEntries("msg_a", SONNET, absurd),
+				...responseEntries("msg_b", SONNET, u(10, 20, 0, 0)),
+			]);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect((await record()).maxima).toMatchObject({ cacheWrite1hTokens: 150_000_000 });
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const body = settles().find((x) => x.body.transferId === "tx_1")?.body;
+			expect(body).toMatchObject({ maxima: { cacheWrite1hTokens: 150_000_000 } });
+		});
+
 		it("no key: an immediate re-fire settles the first hold's window ONCE at its counts, then holds afresh; nothing written off", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);

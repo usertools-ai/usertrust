@@ -323,7 +323,11 @@ function sumCounts(messages) {
 	// A loop, not Math.max(...spread): a window may hold more messages than a call has arguments.
 	for (const key of COUNT_KEYS) {
 		let top = 0;
-		for (const m of messages) if (m[key] > top) top = m[key];
+		for (const m of messages) {
+			const seen =
+				key === "cacheWrite1hTokens" ? Math.max(m[key], m.rawCacheWrite1hTokens ?? 0) : m[key];
+			if (seen > top) top = seen;
+		}
 		sum.maxima[key] = top;
 	}
 	return sum;
@@ -767,6 +771,7 @@ function parseCursor(raw) {
 			cacheReadTokens: count(m.cacheReadTokens),
 			cacheWriteTokens: count(m.cacheWriteTokens),
 			cacheWrite1hTokens: count(m.cacheWrite1hTokens),
+			rawCacheWrite1hTokens: count(m.rawCacheWrite1hTokens),
 		});
 	}
 	for (const [id, value] of Object.entries(raw.assigned)) {
@@ -1276,6 +1281,9 @@ function foldLine(cursor, bytes, since) {
 			cacheReadTokens: 0,
 			cacheWriteTokens: 0,
 			cacheWrite1hTokens: 0,
+			// The 1-hour breakdown as the transcript STATED it, before the clamp to the write total: the per-response
+			// maximum the server checks must see an absurd share the clamp would hide.
+			rawCacheWrite1hTokens: 0,
 		};
 		cursor.nextSeq += 1;
 		cursor.partial.set(id, m);
@@ -1307,6 +1315,7 @@ function foldLine(cursor, bytes, since) {
 		names5m !== names1h
 			? Math.max(0, count(usage.cache_creation_input_tokens) - named5m - named1h)
 			: 0;
+	m.rawCacheWrite1hTokens = Math.max(m.rawCacheWrite1hTokens ?? 0, named1h + unattributed);
 	m.cacheWrite1hTokens = Math.min(
 		Math.max(m.cacheWrite1hTokens, named1h + unattributed),
 		m.cacheWriteTokens,

@@ -274,6 +274,9 @@ export function sanitizeUsage(
 	const input = readCount(r.inputTokens);
 	const output = readCount(r.outputTokens);
 	const reported = input != null && output != null;
+	// Each raw count is read EXACTLY ONCE and reused: a getter that answers differently on a second read must not
+	// pass the plausibility check on one value and be priced on another.
+	const cacheRead = readCount(r.cacheReadTokens) ?? 0;
 	const cacheWrite = readCount(r.cacheWriteTokens) ?? 0;
 	// The RAW 1-hour share is checked, not the clamped one: a share above the write total is garbage the clamp would
 	// otherwise hide, and an absurd one must be reported like any other tier.
@@ -285,7 +288,7 @@ export function sanitizeUsage(
 	const readings: Array<[UsageTier, number]> = [
 		["inputTokens", input ?? 0],
 		["outputTokens", output ?? 0],
-		["cacheReadTokens", readCount(r.cacheReadTokens) ?? 0],
+		["cacheReadTokens", cacheRead],
 		["cacheWriteTokens", cacheWrite],
 		["cacheWrite1hTokens", rawCacheWrite1h],
 	];
@@ -319,7 +322,7 @@ export function sanitizeUsage(
 	return {
 		inputTokens: input ?? 0,
 		outputTokens: output ?? 0,
-		cacheReadTokens: readCount(r.cacheReadTokens) ?? 0,
+		cacheReadTokens: cacheRead,
 		cacheWriteTokens: cacheWrite,
 		// A SUBSET of the write total: a 1-hour count above it is garbage and clamps, so
 		// the two can never be summed into a larger bill than the provider reported. The

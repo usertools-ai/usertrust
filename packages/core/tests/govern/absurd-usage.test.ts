@@ -27,7 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
-import { MAX_PLAUSIBLE_TOKENS_PER_TIER } from "../../src/ledger/usage.js";
+import { MAX_PLAUSIBLE_TOKENS_PER_TIER, sanitizeUsage } from "../../src/ledger/usage.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import type { AuditEvent, TrustReceipt } from "../../src/shared/types.js";
 
@@ -589,5 +589,33 @@ describe("the ceiling is per provider RESPONSE", () => {
 			tiers: { cacheWrite1hTokens: 1e12 },
 		});
 		await gov.destroy();
+	});
+});
+
+describe("sanitizeUsage reads each raw count exactly once", () => {
+	it("a getter that answers differently on a second read cannot pass the check on one value and be priced on another", () => {
+		for (const field of [
+			"inputTokens",
+			"outputTokens",
+			"cacheReadTokens",
+			"cacheWriteTokens",
+			"cacheWrite1hTokens",
+		] as const) {
+			let reads = 0;
+			const raw = {
+				inputTokens: 10,
+				outputTokens: 10,
+				source: "provider" as const,
+				get [field](): number {
+					reads += 1;
+					return reads === 1 ? 0 : 1e12;
+				},
+			};
+			const out = sanitizeUsage(raw);
+			expect(reads, field).toBe(1);
+			// whatever the single read answered is what was checked AND what is priced
+			expect(out.implausible, field).toBeUndefined();
+			expect(out[field as "inputTokens"] ?? 0, field).toBeLessThan(MAX_PLAUSIBLE_TOKENS_PER_TIER);
+		}
 	});
 });
