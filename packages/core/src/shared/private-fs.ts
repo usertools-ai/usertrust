@@ -25,7 +25,7 @@ import {
 	type Stats,
 	statSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, sep } from "node:path";
 
 /** Mode of every directory usertrust creates in a vault. */
 export const PRIVATE_DIR_MODE = 0o700;
@@ -39,18 +39,30 @@ export function mkdirPrivate(dir: string): void {
 }
 
 /**
- * Creates a vault directory EXCLUSIVELY: its parents with `mkdir -p` (each one created is
- * owner-only), the vault itself with a non-recursive mkdir. A directory someone else creates
- * there first makes ours fail EEXIST rather than being adopted silently; EEXIST is carried on
- * from, because what is there is then checked like any existing vault.
+ * Creates a vault directory EXCLUSIVELY, with a non-recursive mkdir. A directory someone else
+ * creates there first makes ours fail EEXIST rather than being adopted silently; EEXIST is
+ * carried on from, because what is there is then checked like any existing vault. The parents
+ * are created (`mkdir -p`, each one created owner-only) only when that mkdir says one is
+ * missing (ENOENT), then the vault is created exclusively once more. An existing vault never
+ * touches its parent, so one under a parent this process cannot write to (a drive root, or a
+ * permission model granting writes to the vault alone) still opens.
  */
 function mkdirVault(vaultDir: string): void {
-	mkdirPrivate(dirname(vaultDir));
-	try {
-		mkdirSync(vaultDir, { mode: PRIVATE_DIR_MODE });
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+	const exclusive = (): NodeJS.ErrnoException | undefined => {
+		try {
+			mkdirSync(vaultDir, { mode: PRIVATE_DIR_MODE });
+			return undefined;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+			return err as NodeJS.ErrnoException;
+		}
+	};
+	let err = exclusive();
+	if (err?.code === "ENOENT") {
+		mkdirPrivate(dirname(vaultDir));
+		err = exclusive();
 	}
+	if (err !== undefined) throw err;
 }
 
 const octal = (mode: number): string => (mode & 0o777).toString(8);
@@ -93,6 +105,41 @@ function foreignOwner(vaultDir: string, owner: number, euid: number, target?: st
 const foreignVault = (...args: Parameters<typeof foreignOwner>): Error =>
 	new Error(`usertrust: ${foreignOwner(...args)}`);
 
+/**
+ * The directory a vault LINK leads to, exactly as the OS opens it for every writer: opened
+ * following the link and `fstat`ed. No decision about a linked vault is made from a resolved
+ * path. JS `realpathSync` joins a link's target with `path.resolve`, which collapses `..`
+ * LEXICALLY: with `.usertrust -> /a/link/../vault` and `/a/link -> /b/sub`, it names /a/vault
+ * while the OS opens /b/vault. Throws ENOENT for a dangling link, ENOTDIR for a target that is
+ * not a directory (`O_DIRECTORY`, so a FIFO target never blocks the open).
+ */
+function statThroughLink(vaultDir: string): Stats {
+	const fd = openSync(vaultDir, fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0));
+	try {
+		return fstatSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * A link's target as written, joined to the link's directory WITHOUT normalizing `..`, so a
+ * shell given it resolves it as the OS does. For messages only.
+ */
+function linkText(vaultDir: string): string {
+	const raw = readlinkSync(vaultDir);
+	return isAbsolute(raw) ? raw : `${dirname(vaultDir)}${sep}${raw}`;
+}
+
+/** Where a link leads, for messages only: the kernel's realpath(3), else the link as written. */
+function linkTarget(vaultDir: string): string {
+	try {
+		return realpathSync.native(vaultDir);
+	} catch {
+		return linkText(vaultDir);
+	}
+}
+
 /** A vault path that holds something other than a directory: every writer would fail ENOTDIR. */
 function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
 	const what =
@@ -124,9 +171,11 @@ function notADirectory(vaultDir: string, st: Stats, target?: string): Error {
  * A vault that is a SYMBOLIC LINK is never changed through the link: its target may be a
  * directory usertrust does not own. A target any other user can read is refused, naming the
  * link, the target, its mode and the `chmod` that fixes it; an owner-only target this process's
- * user owns is used. A dangling link, and a vault path that is not a directory (a regular file,
- * say), are refused by name here, rather than left for the first writer to fail on with a bare
- * ENOENT or ENOTDIR.
+ * user owns is used; one this process cannot open is refused by name. The target judged is the
+ * directory the OS opens through the link (see {@link statThroughLink}), never a path resolved
+ * in JS. A dangling link, and a vault path that is not a directory (a regular file, say), are
+ * refused by name here, rather than left for the first writer to fail on with a bare ENOENT or
+ * ENOTDIR.
  *
  * The tightening itself never follows a link either. The directory is opened with
  * `O_NOFOLLOW | O_DIRECTORY` and changed with `fchmod` on that descriptor, after checking it is
@@ -147,19 +196,43 @@ export function securePrivateVault(vaultDir: string, opts?: { create?: boolean }
 
 	const euid = effectiveUid();
 	if (st.isSymbolicLink()) {
-		let target: string;
 		let targetStat: Stats;
 		try {
-			target = realpathSync(vaultDir);
-			targetStat = statSync(target);
+			// Windows opens no directory as a file; there only the kind is checked, by a stat the
+			// OS resolves (never a JS realpath).
+			targetStat = isWindows() ? statSync(vaultDir) : statThroughLink(vaultDir);
 		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-			// A dangling link: named here, where every writer would fail later with a bare ENOENT.
-			const missing = resolve(dirname(vaultDir), readlinkSync(vaultDir));
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code === "ENOENT") {
+				// A dangling link: named here, where every writer would fail later with a bare ENOENT.
+				const missing = linkText(vaultDir);
+				throw new Error(
+					`usertrust: the vault ${vaultDir} is a symbolic link to ${missing}, which does not exist; remove the link or create the target owner-only (mkdir -m 700 ${missing})`,
+				);
+			}
+			if (code === "EACCES" || code === "EPERM") {
+				// Named here too: a target this process may not open is not judged, and would leave
+				// every writer with a bare EACCES.
+				throw new Error(
+					`usertrust: the vault ${vaultDir} is a symbolic link to ${linkTarget(vaultDir)}, which this process cannot open (${code}); give this user read and search permission on it, or point the link elsewhere`,
+				);
+			}
+			if (code !== "ENOTDIR") throw err;
+			// The kind, for the message only: what the link leads to is not a directory.
+			let kind: Stats | undefined;
+			try {
+				kind = statSync(vaultDir);
+			} catch {
+				/* a component on the way is not a directory either */
+			}
+			if (kind !== undefined && !kind.isDirectory()) {
+				throw notADirectory(vaultDir, kind, linkTarget(vaultDir));
+			}
 			throw new Error(
-				`usertrust: the vault ${vaultDir} is a symbolic link to ${missing}, which does not exist; remove the link or create the target owner-only (mkdir -m 700 ${missing})`,
+				`usertrust: the vault ${vaultDir} is a symbolic link to ${linkText(vaultDir)}, which does not lead to a directory; move it aside and the vault is created owner-only`,
 			);
 		}
+		const target = linkTarget(vaultDir);
 		if (!targetStat.isDirectory()) throw notADirectory(vaultDir, targetStat, target);
 		if (isWindows()) return;
 		if (euid !== undefined && targetStat.uid !== euid) {
@@ -224,8 +297,9 @@ export function looseVaultWarning(vaultDir: string): string | undefined {
 	try {
 		const st = lstatSync(vaultDir);
 		if (st.isSymbolicLink()) {
-			const target = realpathSync(vaultDir);
-			const targetStat = statSync(target);
+			// What the OS opens through the link is what is judged; the path is for the message.
+			const targetStat = statThroughLink(vaultDir);
+			const target = linkTarget(vaultDir);
 			if (!targetStat.isDirectory()) return undefined;
 			const owner = foreign(targetStat.uid, target);
 			if (owner !== undefined) return owner;
