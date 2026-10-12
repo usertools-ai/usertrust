@@ -7,7 +7,17 @@
  * `.usertrust/patterns/` in its working directory).
  */
 
-import { existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { type ChildProcess, spawn } from "node:child_process";
+import {
+	existsSync,
+	lstatSync,
+	mkdtempSync,
+	readdirSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -15,6 +25,13 @@ import { hashKey } from "../src/config.js";
 import { createUsertrustServer, type UsertrustServer } from "../src/server.js";
 
 const KEY = "ut_vault_perm_key";
+
+// The CLI runs from its TypeScript sources, as cli.test.ts runs it: the preload compiles them
+// and resolves `usertrust` to the core's sources, so no package needs building first.
+const CLI = join(import.meta.dirname, "..", "src", "cli", "main.ts");
+const PRELOAD = join(import.meta.dirname, "helpers", "source-preload.mjs");
+/** Covers compiling the sources on a cold CI runner. */
+const START_MS = 30_000;
 
 /** Every directory and file under `root` (root included), and the ones not owner-only. */
 function walkModes(root: string): { dirs: number; files: number; loose: string[] } {
@@ -32,7 +49,18 @@ function walkModes(root: string): { dirs: number; files: number; loose: string[]
 	return out;
 }
 
+/** A localhost port nothing listens on: bound by the OS, then released (the config needs >= 1). */
+async function freePort(): Promise<number> {
+	const probe = createServer();
+	await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+	const address = probe.address();
+	await new Promise<void>((resolve) => probe.close(() => resolve()));
+	if (address === null || typeof address === "string") throw new Error("no port");
+	return address.port;
+}
+
 let server: UsertrustServer | undefined;
+let child: ChildProcess | undefined;
 let savedCwd: string;
 let savedUmask: number;
 const tracked: string[] = [];
@@ -45,6 +73,8 @@ beforeEach(() => {
 afterEach(async () => {
 	await server?.close();
 	server = undefined;
+	child?.kill("SIGKILL");
+	child = undefined;
 	process.chdir(savedCwd);
 	process.umask(savedUmask);
 	for (const d of tracked.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -137,4 +167,108 @@ describe.each([
 		expect(readdirSync(cwd)).toEqual([]);
 		expect(readdirSync(parent)).toEqual(["state"]);
 	});
+});
+
+/**
+ * The real start-up: `usertrust-server --config <file>` as its own process, started in an empty
+ * working directory with the umask under test (a child inherits it). The tenant vault, its audit
+ * log and its spend ledger are created by the server, from nothing, through the wire.
+ */
+describe.each([
+	["022", 0o022],
+	["000", 0o000],
+])("usertrust-server CLI, a vault it creates, under umask %s", (label, mask) => {
+	it(
+		"every directory is 0700 and every file 0600, and nothing lands in the process's cwd",
+		async () => {
+			const cwd = mkdtempSync(join(tmpdir(), "utsrv-cli-perm-cwd-"));
+			const parent = mkdtempSync(join(tmpdir(), "utsrv-cli-perm-"));
+			tracked.push(cwd, parent);
+			const stateDir = join(parent, "state");
+			const configPath = join(parent, "usertrust-server.config.json");
+			writeFileSync(
+				configPath,
+				JSON.stringify({
+					host: "127.0.0.1",
+					port: await freePort(),
+					stateDir,
+					dryRun: true,
+					tenants: [{ id: "acme", keyHash: hashKey(KEY), budget: 50_000 }],
+				}),
+			);
+
+			process.umask(mask);
+			let stderr = "";
+			const proc = spawn(process.execPath, [CLI, "--config", configPath], {
+				cwd,
+				env: {
+					...process.env,
+					NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import "${PRELOAD}"`.trim(),
+				},
+				stdio: ["ignore", "ignore", "pipe"],
+			});
+			child = proc;
+			process.umask(savedUmask);
+			const exited = new Promise<number | null>((resolve) => proc.once("exit", resolve));
+			proc.stderr?.setEncoding("utf-8");
+			const port = await new Promise<number>((resolve, reject) => {
+				const timer = setTimeout(() => reject(new Error(`no listen: ${stderr}`)), START_MS);
+				proc.stderr?.on("data", (chunk: string) => {
+					stderr += chunk;
+					const m = /listening on [^\n]*:(\d+)\n/.exec(stderr);
+					if (m?.[1] !== undefined) {
+						clearTimeout(timer);
+						resolve(Number(m[1]));
+					}
+				});
+				void exited.then((code) => reject(new Error(`exited ${code}: ${stderr}`)));
+			});
+
+			const base = `http://127.0.0.1:${port}`;
+			const headers = { "content-type": "application/json", authorization: `Bearer ${KEY}` };
+			const authorize = async (): Promise<string> => {
+				const res = await fetch(`${base}/v1/authorize`, {
+					method: "POST",
+					headers,
+					body: JSON.stringify({
+						model: "claude-sonnet-4-6",
+						estimatedInputTokens: 200,
+						maxOutputTokens: 100,
+					}),
+				});
+				expect(res.status).toBe(200);
+				return ((await res.json()) as { transferId: string }).transferId;
+			};
+			const settle = await fetch(`${base}/v1/settle`, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({
+					transferId: await authorize(),
+					inputTokens: 200,
+					outputTokens: 40,
+					usageSource: "provider",
+				}),
+			});
+			expect(settle.status).toBe(200);
+
+			// While it runs, then after a clean shutdown.
+			expect.soft(walkModes(stateDir).loose).toEqual([]);
+			proc.kill("SIGTERM");
+			expect(await exited).toBe(0);
+			child = undefined;
+
+			const walk = walkModes(stateDir);
+			console.log(
+				`server CLI, umask ${label}: ${walk.dirs} dirs, ${walk.files} files, ${walk.loose.length} not owner-only`,
+			);
+			expect.soft(walk.loose).toEqual([]);
+			const vault = join(stateDir, "acme", ".usertrust");
+			for (const rel of ["audit/events.jsonl", "audit/events.jsonl.meta", "spend-ledger.json"]) {
+				expect.soft(existsSync(join(vault, rel)), rel).toBe(true);
+			}
+			// Nothing in the server process's working directory.
+			expect(readdirSync(cwd)).toEqual([]);
+		},
+		START_MS * 2,
+	);
 });
