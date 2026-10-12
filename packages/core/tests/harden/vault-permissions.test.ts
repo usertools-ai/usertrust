@@ -9,13 +9,18 @@
  * writes nothing outside it — no `.usertrust/patterns/` in the process working directory.
  */
 
+import { execFileSync } from "node:child_process";
 import {
 	chmodSync,
+	closeSync,
 	existsSync,
+	constants as fsConstants,
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
+	openSync,
 	readdirSync,
+	readFileSync,
 	realpathSync,
 	rmSync,
 	statSync,
@@ -529,6 +534,68 @@ describe.skipIf(process.platform === "win32").each(openers)(
 			expect(statSync(vaultPath).mode & 0o777).toBe(0o700);
 			expect(readdirSync(vaultPath)).toEqual([]);
 		});
+	},
+);
+
+describe.skipIf(process.platform === "win32").each(openers)(
+	"a vault another user owns is refused before anything in it is read, opened by %s",
+	(_name, open) => {
+		const BAD_JSON = "{ not json";
+		/** Unblocks a reader stuck opening the FIFO at `path`, if one is: a writer opens it once. */
+		function releaseFifo(path: string): void {
+			try {
+				closeSync(openSync(path, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK));
+			} catch {
+				/* ENXIO: no reader is waiting on it */
+			}
+		}
+
+		it.each([
+			[
+				"a usertrust.config.json that does not parse",
+				(file: string) => writeFileSync(file, BAD_JSON, { mode: 0o600 }),
+				(file: string) => expect(readFileSync(file, "utf-8")).toBe(BAD_JSON),
+			],
+			[
+				"a usertrust.config.json that is a FIFO (a read would block)",
+				(file: string) => execFileSync("mkfifo", ["-m", "600", file]),
+				(file: string) => expect(lstatSync(file).isFIFO()).toBe(true),
+			],
+		])(
+			"holding %s: the owner refusal, not a config error or a hang",
+			async (_label, plant, unchanged) => {
+				process.umask(0o022);
+				const root = tmp("ut-perm-foreign-config-");
+				const vaultPath = join(root, VAULT_DIR);
+				mkdirSync(vaultPath, { mode: 0o700 });
+				const configFile = join(vaultPath, "usertrust.config.json");
+				plant(configFile);
+				const as = asAnotherUser();
+				let timer: NodeJS.Timeout | undefined;
+				let outcome: Error | "opened" | "hung";
+				try {
+					outcome = await Promise.race([
+						open(root).then(
+							() => "opened" as const,
+							(err: unknown) => err as Error,
+						),
+						new Promise<"hung">((done) => {
+							timer = setTimeout(() => done("hung"), 3_000);
+						}),
+					]);
+				} finally {
+					clearTimeout(timer);
+					as.restore();
+					releaseFifo(configFile);
+				}
+				expect(outcome).toBeInstanceOf(Error);
+				expect((outcome as Error).message).toBe(
+					`usertrust: ${foreignRefusal(vaultPath, as.owner, as.euid)}`,
+				);
+				unchanged(configFile);
+				expect(readdirSync(vaultPath)).toEqual(["usertrust.config.json"]);
+			},
+		);
 	},
 );
 

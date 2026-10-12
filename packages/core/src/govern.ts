@@ -1152,6 +1152,11 @@ export async function runTeardownSteps(steps: ReadonlyArray<() => unknown>): Pro
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
 	// 1. Load config
 	const vaultBase = opts?.vaultBase ?? process.cwd();
+	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
+	// version left group/world-readable is closed; one another user owns is refused (see
+	// securePrivateVault). This runs before ANYTHING under the vault is read, the config
+	// included: a foreign vault's files are never parsed, and a FIFO planted in one never blocks.
+	securePrivateVault(join(vaultBase, VAULT_DIR), { create: true });
 	const configPath = opts?.configPath ?? join(vaultBase, VAULT_DIR, "usertrust.config.json");
 
 	let config: TrustConfig;
@@ -1182,10 +1187,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// 2. Initialise subsystems
 	const vaultPath = vaultBase;
-	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
-	// version left group/world-readable is closed, before any writer touches it; one another user
-	// owns is refused (see securePrivateVault).
-	securePrivateVault(join(vaultBase, VAULT_DIR), { create: true });
 	const audit: AuditWriter = (isTestEnv ? opts?._audit : undefined) ?? createAuditWriter(vaultPath);
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
