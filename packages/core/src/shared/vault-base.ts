@@ -31,6 +31,7 @@ export function absoluteVaultBase(
 	base: string,
 	platform: NodeJS.Platform = process.platform,
 	driveCwd: (drive: string) => string = (drive) => win32.resolve(drive),
+	cwd?: string,
 ): string {
 	const path = platform === "win32" ? win32 : posix;
 	if (path.isAbsolute(base)) return base;
@@ -39,7 +40,14 @@ export function absoluteVaultBase(
 		// A drive whose working directory is its root (`C:\`) must not give `C:\\tenant`.
 		return `${driveCwd(drive).replace(/[\\/]+$/, "")}${path.sep}${base.slice(drive.length)}`;
 	}
-	return `${process.cwd()}${path.sep}${base}`;
+	// A working directory that is the root (`/`, or `C:\`) must not give `//vault`: a leading
+	// `//` is a UNC-style root on Windows, and a different spelling than the kernel's for the
+	// same directory.
+	// Only the PLATFORM's separators: on POSIX a trailing backslash is part of a directory's name.
+	const trailing = platform === "win32" ? /[\\/]+$/ : /\/+$/;
+	// Read only here: an absolute base (above) never needed the working directory, and must still
+	// work from a deleted one, where process.cwd() throws.
+	return `${(cwd ?? process.cwd()).replace(trailing, "")}${path.sep}${base}`;
 }
 
 /**

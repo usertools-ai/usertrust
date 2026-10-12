@@ -5,6 +5,30 @@ plugin marketplace (`/plugin marketplace add usertools-ai/usertrust`), not from
 npm, and its version is its own: the `usertrust` packages and their
 [changelog](../../CHANGELOG.md) are versioned separately.
 
+## [3.0.1] - 2026-10-12
+
+### Fixed
+
+- **A warning when both plugin names are enabled.** `usertrust-claude-code` cannot be updated,
+  and with it and `usertools` both loaded every tool call is metered twice (they share one state
+  dir). At SessionStart, `usertools` reads Claude Code's `enabledPlugins` setting (managed
+  settings, `.claude/settings.local.json`, `.claude/settings.json`, then the user's
+  `settings.json`, the highest-precedence statement winning) and, when `usertrust-claude-code`
+  looks enabled under any marketplace, opens its line with `usertrust: usertrust-claude-code also
+  appears to be enabled (<the settings file>); if it is, every tool call is metered twice.
+  Uninstall it: /plugin uninstall usertrust-claude-code@usertrust`. **`usertools` always meters.**
+  Settings files are evidence of what Claude Code loaded, not proof (`--settings`,
+  `--setting-sources`, a change made after the session started, a different home), and a wrong
+  "enabled" that stopped metering would be a silent zero meter; a wrong warning costs one line.
+  - **Anything unreadable or ambiguous warns too:** a settings file that is not JSON, is not a
+    regular file (a FIFO), is over the read bound, holds a value that is not `true` or `false`,
+    or a hook told no project directory opens the line with `usertrust: could not tell whether
+    usertrust-claude-code is also enabled (...)`.
+  - **May not warn** (an old plugin enabled only there is not seen): MDM and server-managed
+    settings, `--settings`, `managed-settings.d/`, and the Windows managed path.
+  - Unchanged: `~/.config/usertrust/`, every `UT_CC_*` variable, the `usertrust-cc` state dir and
+    the `usertrust:` session messages.
+
 ## [3.0.0] - 2026-10-12
 
 ### Changed
