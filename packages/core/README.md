@@ -289,4 +289,4 @@ Apache 2.0
 
 ---
 
-UserTrust™ is a trademark of Usertools, Inc.
+usertrust™ is a trademark of Usertools, Inc.

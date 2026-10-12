@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 export type { AcsAction, CompositeResult, PolicyDecider } from "./composite.js";
 export { CompositeEvaluator } from "./composite.js";
 export type { AcsApproval } from "./identity.js";
