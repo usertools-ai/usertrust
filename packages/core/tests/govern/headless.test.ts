@@ -354,7 +354,7 @@ describe("headless governor", () => {
 
 	// ── Proxy mode removed ──
 
-	it("createGovernor throws when proxy is set (AUD-456)", async () => {
+	it("createGovernor throws when proxy is set", async () => {
 		await expect(
 			createGovernor({
 				budget: 100_000,
@@ -365,14 +365,14 @@ describe("headless governor", () => {
 		).rejects.toThrow("proxy mode is not yet implemented");
 	});
 
-	it("createGovernor throws with AUD-456 reference when proxy is set", async () => {
+	it("createGovernor throws the proxy-removal error when proxy is set", async () => {
 		await expect(
 			createGovernor({
 				budget: 100_000,
 				vaultBase,
 				proxy: "https://proxy.example.com",
 			}),
-		).rejects.toThrow("AUD-456");
+		).rejects.toThrow("proxy mode is not yet implemented");
 	});
 
 	it("createGovernor error suggests dryRun when proxy is set", async () => {
@@ -1064,7 +1064,7 @@ describe("headless governor", () => {
 
 	// ── Proxy settle failure branch removed ──
 
-	it("createGovernor rejects proxy option (AUD-456)", async () => {
+	it("createGovernor rejects proxy option", async () => {
 		await expect(
 			createGovernor({
 				budget: 100_000,

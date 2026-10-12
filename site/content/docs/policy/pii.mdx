@@ -1,11 +1,13 @@
 ---
 title: PII Detection
-description: Automatic detection of email, phone, SSN, credit card, and IP address patterns.
+description: What the pattern scan reads, what it detects, and what it does not cover.
 ---
+
+PII detection is a pattern scan of the request's prompt text. It is not a data-loss-prevention system. This page states exactly what it reads, what it matches, what each mode does, and what it leaves alone.
 
 ## Configuration
 
-Set the `pii` field in `usertrust.config.json` (or pass `pii` to `trust()`, e.g. `trust(client, { pii: "block" })`, which overrides the file):
+Set the `pii` field in the config file `trust()` loads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath` (which is read instead), or pass `pii` to `trust()` itself (e.g. `trust(client, { pii: "block" })`), which overrides the file.
 
 ```json
 {
@@ -15,28 +17,75 @@ Set the `pii` field in `usertrust.config.json` (or pass `pii` to `trust()`, e.g.
 
 | Mode | Behavior |
 |------|----------|
-| `"redact"` | Replace PII with `[REDACTED]` before forwarding to LLM |
-| `"warn"` | Allow but log a warning (default) |
-| `"block"` | Throw `PolicyDeniedError` |
-| `"off"` | Disable PII detection |
+| `"warn"` | Default. Forward the request unchanged. The `llm_call` audit event records the PII types and the paths where they were found, never the values. |
+| `"block"` | Throw `PolicyDeniedError` before anything is sent, when the prompt scan finds PII. |
+| `"redact"` | When the prompt scan finds PII, forward a redacted copy of the whole request body (see [What redaction does](#what-redaction-does)). |
+| `"off"` | Disable PII detection. |
 
-## Detected Types
+## What the scan reads
 
-| Type | Pattern | Example |
-|------|---------|---------|
-| Email | RFC 5322 simplified | `user@example.com` |
-| Phone | US/international formats | `+1-555-123-4567` |
-| SSN | XXX-XX-XXXX (dashes required) | `123-45-6789` |
-| Credit Card | 13-19 digits, Luhn-validated | `4111111111111111` |
-| IPv4 | 0-255.0-255.0-255.0-255 | `192.168.1.1` |
+The scan reads the request's **prompt text**, not the whole request. Every string value inside the parts below is checked, at any depth, so a nested tool result or tool-call argument inside `messages` is read.
 
-## PIIDetection Result
+| Client method | Scanned | Not scanned |
+|---|---|---|
+| Anthropic `messages.create`, `messages.stream`, `messages.parse` (and the `beta.messages` equivalents) | `messages`, and `system` when it is a plain string | `system` given as an array of blocks, `tools` (definitions and descriptions), `tool_choice`, `metadata`, `stop_sequences`, and every other request field |
+| OpenAI `chat.completions.create` | `messages` | `tools` and `functions` (definitions), `tool_choice`, `response_format`, `metadata`, `user`, and every other request field |
+| OpenAI `responses.create` | `input` (a string, or an array or object of parts) and `instructions` when it is a string | `tools`, `prompt`, `metadata`, `text`, `previous_response_id` and every other request field; content held server-side by an earlier response |
+| Google `models.generateContent` | `contents` | everything in `config`, including `systemInstruction` and callable tool declarations (`tools`), and every other request field |
+
+Other things the scan never reads:
+
+- **Responses.** Only the request is scanned. The model's output is not.
+- **Object keys.** Only string values are checked, so a key that spells an email address is not.
+- **Non-string values.** A phone number stored as a JSON number is not a string and is not checked.
+- **Encoded content.** A string is checked as written. Base64, images, PDFs and other encodings are not decoded.
+
+### Governed actions and the headless governor
+
+- **`governAction`** scans the action's `params`. In `"block"` mode a match refuses the action. In `"redact"` mode only the audit copy is redacted; the action itself runs on the original input.
+- **`createGovernor()` and `usertrust-server`** scan the `messages` the caller passes to `authorize`. They support `"block"`. They never redact egress: `"redact"` behaves like `"warn"`, and redacting what goes to the provider is the integrating host's job.
+
+## Detected types
+
+Each string is tested against these patterns. A match anywhere inside the string counts.
+
+| Type | Pattern |
+|------|---------|
+| `email` | `local@domain.tld`, simplified RFC 5322 |
+| `phone` | US and international formats, such as `+1-555-123-4567` or `(555) 123-4567` |
+| `ssn` | `XXX-XX-XXXX`, or a bare or space-separated nine digits that pass the Social Security Administration's structural rules |
+| `credit_card` | 13 to 19 digits, Luhn-validated |
+| `ipv4` | `0-255.0-255.0-255.0-255` |
+| `api_key` | `sk-` (OpenAI and Anthropic) and `sk_live_` / `sk_test_` (Stripe) keys |
+| `aws_key` | `AKIA` followed by 16 upper-case letters or digits |
+| `github_token` | `ghp_`, `gho_`, `ghs_`, `ghr_` or `github_pat_` tokens |
+| `bearer_token` | `Bearer` followed by a token of 20 or more characters |
+| `jwt` | `eyJ...` three-part JSON Web Tokens |
+| `private_key` | a PEM `-----BEGIN ... PRIVATE KEY-----` header |
+| `generic_secret` | Slack (`xox...`), SendGrid (`SG.`), GitLab (`glpat-`) and npm (`npm_`) tokens, and hex strings of 64 or more characters |
+
+**Not detected:** personal names, postal addresses, dates of birth, IPv6 addresses, national identifiers other than the US Social Security number, bank account and IBAN numbers, health information, and any value written in a form the patterns above do not match (for example `name at example dot com`, or a number split across fields).
+
+## What redaction does
+
+`"redact"` is triggered only by the **prompt scan** above. When it finds PII, usertrust forwards a deep copy of the **whole request body** in which every string value that matches a pattern is replaced by `[REDACTED:<types>]`, for example `[REDACTED:email,phone]`.
+
+- The replacement is for the **whole string value**, not just the matched characters: a message that contains one email address is replaced in full.
+- Because it is applied to the whole body, a match in `tools`, an array-form `system` prompt or `config` is redacted too, but only on a call where the prompt scan found PII.
+- If the prompt scan finds nothing, **nothing is redacted and nothing is blocked**, even when PII sits in a field the scan does not read. A secret in a `tools` description, a `system` block array or a Google `config.systemInstruction` goes to the provider as written.
+- Your own object is never changed; usertrust redacts a copy.
+
+## What is recorded
+
+With `"warn"` or `"redact"`, the `llm_call` audit event carries `piiDetected` (the types) and `piiPaths` (where, for example `[0].content(email)`), computed from the prompt scan. The values themselves are never stored.
+
+## PIIDetection result
 
 ```typescript
 interface PIIDetection {
   found: boolean;
   types: string[];    // ["email", "ssn", ...]
-  paths: string[];    // dot-paths where PII was found
+  paths: string[];    // paths where PII was found, e.g. "messages[0].content(email)"
 }
 ```
 
@@ -58,5 +107,5 @@ const result = detectPII({
     { role: "user", content: "My email is test@example.com and SSN is 123-45-6789" }
   ]
 });
-// { found: true, types: ["email", "ssn"], paths: ["messages.0.content"] }
+// { found: true, types: ["email", "ssn"], paths: ["messages[0].content(email)", "messages[0].content(ssn)"] }
 ```

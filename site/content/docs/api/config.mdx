@@ -131,16 +131,16 @@ Default: `"./policies/default.yml"`. Path to the YAML policy rules file, resolve
 
 ### pii
 
-Default: `"warn"`. PII detection mode applied to all outgoing prompts. A `pii` passed to `trust()` overrides this value.
+Default: `"warn"`. PII detection mode, applied to the prompt text of each governed request (not to the whole request body or to responses; see [PII Detection](/docs/policy/pii) for exactly what is read). A `pii` passed to `trust()` overrides this value.
 
 | Mode | Behavior |
 |------|----------|
-| `redact` | Replace detected PII with `[REDACTED]` before sending to the provider |
-| `warn` | Allow the request but attach a warning to the receipt |
-| `block` | Throw a `PolicyDeniedError` if PII is detected |
+| `redact` | When the prompt scan finds PII, forward a copy of the whole request body in which each matching string value is replaced by `[REDACTED:<types>]` |
+| `warn` | Allow the request unchanged; the `llm_call` audit event records the PII types and paths (never the values) |
+| `block` | Throw a `PolicyDeniedError` if the prompt scan finds PII |
 | `off` | Disable PII detection entirely |
 
-Detected PII types: email addresses, phone numbers, SSNs, credit card numbers (Luhn-validated), and IPv4 addresses.
+Detected types: email, phone, SSN, credit card (Luhn-validated), IPv4, and the secret formats `api_key`, `aws_key`, `github_token`, `bearer_token`, `jwt`, `private_key` and `generic_secret`. Fields outside the prompt text, such as tool definitions, an array-form `system` prompt or Google's `config`, are not scanned. See [PII Detection](/docs/policy/pii).
 
 ### circuitBreaker
 

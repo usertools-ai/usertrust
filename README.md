@@ -271,7 +271,7 @@ const config = defineConfig({
 
 **Policy engine** — 12 field operators (`eq`, `gt`, `in`, `regex`, etc.) with soft/hard enforcement. Block specific models, cap costs, require approvals.
 
-**PII detection** — Luhn-validated credit card numbers, SSN patterns, email addresses, phone numbers, IPv4 addresses. Block or warn before data leaves your network.
+**PII detection** — a pattern scan of each request's prompt text for email, phone, SSN, Luhn-validated credit card, IPv4 and common secret formats (API keys, cloud and GitHub tokens, JWTs, private keys). Block, redact or warn before the prompt leaves your process. It reads the prompt (messages, input, contents), not tool definitions or other request fields, and never the response; see [what it does and does not cover](https://usertrust.ai/docs/policy/pii).
 
 **Circuit breakers** — Per-provider failure isolation. When a provider starts failing, the breaker opens and requests fail fast instead of cascading.
 
