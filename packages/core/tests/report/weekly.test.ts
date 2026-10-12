@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PersistedAuditEvent } from "../../src/audit/read.js";
 import { PRICING_TABLE } from "../../src/ledger/pricing.js";
+import { render } from "../../src/report/render.js";
 import {
 	buildWeeklyReport,
 	detectProvider,
@@ -996,5 +997,135 @@ describe("every built-in pricing entry has a vendor family", () => {
 		expect(detectProvider("deepseek-chat")).toBe("deepseek");
 		expect(detectProvider("grok-3")).toBe("xai");
 		expect(detectProvider("totally-new-model")).toBe("unknown");
+	});
+});
+
+describe("one classifier: standing and prior-charge both follow the per-transfer evidence", () => {
+	const T = "2026-10-08T01:00:00Z";
+	const hash = (t: string) => createHash("sha256").update(t).digest("hex");
+	const unrecoverable = (t: string) =>
+		ev("settlement_unrecoverable", "2026-10-08T02:00:00Z", {
+			transferIdHash: hash(t),
+			usage: { inputTokens: 1, outputTokens: 1 },
+		});
+
+	it("a capped post followed by a post-commit failure marker stays CONFIRMED spend (post outranks failure)", () => {
+		const m = build([
+			call(T, 100, { transferId: "t" }),
+			ev("settlement_shortfall", T, { transferId: "t", actual: 100, posted: 60, shortfall: 40 }),
+			ev("llm_call_failed", T, { transferId: "t", error: "audit degraded" }),
+		]);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.postProvenUt).toBe(60);
+		expect(m.totals.contradictedCalls).toBe(0);
+		expect(m.shortfall).toEqual({ events: 1, ut: 40 });
+	});
+
+	it("the same failure marker with NO post evidence still contradicts the call", () => {
+		const m = build([
+			call(T, 100, { transferId: "t" }),
+			ev("llm_call_failed", T, { transferId: "t", error: "boom" }),
+		]);
+		expect(m.totals.confirmedUt).toBe(0);
+		expect(m.totals.contradictedCalls).toBe(1);
+	});
+
+	it("prior-charge-known needs the charge evidenced: a settled:false call, or an ambiguous one, is not 'already charged'", () => {
+		for (const [name, events] of [
+			["settled:false", [call(T, 80, { transferId: "t", settled: false })]],
+			[
+				"ambiguous",
+				[
+					call(T, 80, { transferId: "t" }),
+					ev("settlement_ambiguous", T, { transferId: "t", cost: 80 }),
+				],
+			],
+		] as const) {
+			const m = build([...events, unrecoverable("t")]);
+			expect(m.unrecoverable.records, name).toBe(1);
+			expect(m.unrecoverable.priorChargeKnown, name).toBe(0);
+		}
+	});
+
+	it("prior-charge-known still counts a settled call and a capped post", () => {
+		const m = build([
+			call(T, 80, { transferId: "a" }),
+			call(T, 80, { transferId: "b" }),
+			ev("settlement_shortfall", T, { transferId: "b", actual: 80, posted: 50, shortfall: 30 }),
+			unrecoverable("a"),
+			unrecoverable("b"),
+		]);
+		expect(m.unrecoverable.priorChargeKnown).toBe(2);
+	});
+
+	it("the renderer never says 'already charged' for an uncharged-or-unknown transfer", () => {
+		const m = build([call(T, 80, { transferId: "t", settled: false }), unrecoverable("t")]);
+		expect(render(m, "md")).not.toContain("already charged");
+	});
+});
+
+describe("undenominated wallet units are carried like the other denominations", () => {
+	const IN_WEEK = "2026-10-08T01:00:00Z";
+	const BEFORE = "2026-09-01T01:00:00Z";
+
+	it("an orphan shortfall INSIDE the week is in 'This week', and one outside the week only in the total", () => {
+		const m = build([
+			ev("settlement_shortfall", IN_WEEK, { transferId: "in", actual: 90, posted: 60 }),
+			ev("settlement_shortfall", BEFORE, { transferId: "out", actual: 40, posted: 30 }),
+		]).budget;
+		expect(m.recordedSessionUndenominated).toBe(130);
+		expect(m.windowSessionUndenominated).toBe(90);
+		expect(m.windowSessionWallet).toBe(90);
+		expect(m.windowSessionUt).toBe(0);
+	});
+
+	it("a standalone ambiguity with no denomination is undenominated, out of the usd-priced figure", () => {
+		const b = build([ev("settlement_ambiguous", IN_WEEK, { transferId: "t", cost: 32 })]).budget;
+		expect(b.recordedSessionUndenominated).toBe(32);
+		expect(b.windowSessionUndenominated).toBe(32);
+		expect(b.recordedSessionUt).toBe(0);
+		expect(b.windowSessionUt).toBe(0);
+		expect(b.recordedSessionWallet).toBe(32);
+	});
+
+	it("a standalone ambiguity that CARRIES its denomination keeps it", () => {
+		const b = build([
+			ev("settlement_ambiguous", IN_WEEK, { transferId: "t", cost: 32, costBasis: "usd-proxy" }),
+		]).budget;
+		expect(b.recordedSessionUt).toBe(32);
+		expect(b.recordedSessionUndenominated).toBe(0);
+	});
+
+	it("an ATTRIBUTED orphan is carried into the attributed wallet, and the rendered split adds up", () => {
+		const m = build(
+			[
+				call(IN_WEEK, 100, { transferId: "a", costCenter: "cc.1" }),
+				ev("settlement_shortfall", IN_WEEK, {
+					transferId: "b",
+					actual: 70,
+					posted: 50,
+					costCenter: "cc.1",
+				}),
+			],
+			{ budget: 1000 },
+		);
+		expect(m.budget.recordedAttributedUndenominated).toBe(70);
+		expect(m.budget.recordedAttributedWallet).toBe(170);
+		expect(m.budget.windowAttributedWallet).toBe(170);
+		const text = render(m, "md");
+		// the attributed wallet total, with its undenominated part stated beside it
+		expect(text).toContain("170 budget units");
+		expect(text).toContain("70 budget units of undenominated units");
+	});
+
+	it("the 'This week' line states the undenominated part, so its figure adds up", () => {
+		const m = build(
+			[ev("settlement_shortfall", IN_WEEK, { transferId: "in", actual: 90, posted: 60 })],
+			{ budget: 1000 },
+		);
+		const week = render(m, "md")
+			.split("\n")
+			.find((l) => l.includes("This week:"));
+		expect(week).toContain("of undenominated units");
 	});
 });

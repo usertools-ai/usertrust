@@ -151,12 +151,13 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 		];
 	const split = (usdPart: UsdUt, nominalPart: NominalUt): string =>
 		`${usd(usdPart)} usd-priced + ${nominalStr(nominalPart)}`;
-	const undenominated =
-		b.recordedSessionUndenominated > 0
-			? ` + ${walletStr(b.recordedSessionUndenominated)} of undenominated units (a capped settlement with no call record)`
+	const undenom = (amount: WalletUt): string =>
+		amount > 0
+			? ` + ${walletStr(amount)} of undenominated units (a settlement record with no call record)`
 			: "";
+	const undenominated = undenom(b.recordedSessionUndenominated);
 	const lines = [
-		`Configured budget ${utStr(b.configuredUt)} (budget units: usd-priced and nominal, as the governor enforces them), source: ${v(b.source ?? "unknown")}. Session-wallet debits the chain shows the governor counted (definite): ${walletStr(b.recordedSessionWallet)} = ${split(b.recordedSessionUt, b.recordedSessionNominal)}${undenominated}; ${pct(b.usedFraction ?? 0)} of the budget used${b.overBudget ? " (OVER BUDGET)" : ""}. This week: ${walletStr(b.windowSessionWallet)} = ${split(b.windowSessionUt, b.windowSessionNominal)}.`,
+		`Configured budget ${utStr(b.configuredUt)} (budget units: usd-priced and nominal, as the governor enforces them), source: ${v(b.source ?? "unknown")}. Session-wallet debits the chain shows the governor counted (definite): ${walletStr(b.recordedSessionWallet)} = ${split(b.recordedSessionUt, b.recordedSessionNominal)}${undenominated}; ${pct(b.usedFraction ?? 0)} of the budget used${b.overBudget ? " (OVER BUDGET)" : ""}. This week: ${walletStr(b.windowSessionWallet)} = ${split(b.windowSessionUt, b.windowSessionNominal)}${undenom(b.windowSessionUndenominated)}.`,
 	];
 	if (
 		b.recordedAttributedWallet > 0 ||
@@ -164,7 +165,7 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 		b.recordedAttributedUncertain > 0
 	) {
 		lines.push(
-			`Upper bound: ${pct(b.usedFractionUpper ?? 0)} of the budget used if the session also paid for the cost-center spend (ATTRIBUTED: its payer is not recorded, the cost-center envelope with a ledger or the session in a dry run; ${walletStr(b.recordedAttributedWallet)} = ${split(b.recordedAttributedUt, b.recordedAttributedNominal)}) and every uncertain transfer was counted${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}. "Over budget" is claimed only on the definite figure.`,
+			`Upper bound: ${pct(b.usedFractionUpper ?? 0)} of the budget used if the session also paid for the cost-center spend (ATTRIBUTED: its payer is not recorded, the cost-center envelope with a ledger or the session in a dry run; ${walletStr(b.recordedAttributedWallet)} = ${split(b.recordedAttributedUt, b.recordedAttributedNominal)}${undenom(b.recordedAttributedUndenominated)}) and every uncertain transfer was counted${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}. "Over budget" is claimed only on the definite figure.`,
 		);
 	}
 	lines.push(...reconciliationLines(m));

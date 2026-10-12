@@ -279,6 +279,9 @@ export interface ReportModel {
 		 */
 		recordedSessionUndenominated: WalletUt;
 		recordedAttributedUndenominated: WalletUt;
+		/** The same undenominated units that fall inside the report window (they are in `windowSessionWallet`). */
+		windowSessionUndenominated: WalletUt;
+		windowAttributedUndenominated: WalletUt;
 		recordedAttributedUncertain: WalletUt;
 		uncertainTransfers: number;
 		/** 0..1 lower bound (session spend only), clamped; `null` when no budget is configured. */
@@ -532,6 +535,15 @@ function classifyTransfer(ev: TransferEvidence): TransferClass {
 	return "uncertain";
 }
 
+/**
+ * "This transfer's charge is known": the debited class AND no ambiguity. An ambiguous settle is counted by the governor's
+ * counter, but whether the LEDGER charged it is exactly what the ambiguity says is unknown, so it is never claimed as
+ * "already charged". Derived from the same evidence as `classifyTransfer`, never from the presence of a spend record.
+ */
+function chargeEvidenced(ev: TransferEvidence): boolean {
+	return classifyTransfer(ev) === "debited" && ev.ambiguity === undefined;
+}
+
 /** The amount the counter would have added for a transfer, from the best record carrying it. */
 function transferAmount(
 	ev: TransferEvidence,
@@ -657,8 +669,14 @@ function buildPlain(
 		const proven = postProvenTransfers.has(tid);
 		// Two spend records of one kind for one transfer cannot both be the charge.
 		if ((ks?.get(e.kind) ?? 0) > 1) return { kind: "unconfirmed", reason: "contradicted" };
+		// Post evidence OUTRANKS a failure marker, as in `classifyTransfer`: a post-commit failure (failClosed) follows a
+		// charge that already happened and must not turn it back into an uncharged call.
 		const others = [...(ks?.keys() ?? [])].filter(
-			(k) => k !== e.kind && k !== "hold_released" && !BENIGN_SIBLINGS.has(k),
+			(k) =>
+				k !== e.kind &&
+				k !== "hold_released" &&
+				!BENIGN_SIBLINGS.has(k) &&
+				!(proven && k.endsWith("_failed")),
 		);
 		if (others.length > 0) return { kind: "unconfirmed", reason: "contradicted" };
 		if (ks?.has("hold_released")) {
@@ -764,7 +782,9 @@ function buildPlain(
 	let spendHashes: Set<string> | undefined;
 	const spendTransferHashes = (): Set<string> => {
 		spendHashes ??= new Set(
-			[...spendTransfers].map((t) => createHash("sha256").update(t).digest("hex")),
+			[...evidence.entries()]
+				.filter(([key, ev]) => !key.startsWith("\u0000") && chargeEvidenced(ev))
+				.map(([key]) => createHash("sha256").update(key).digest("hex")),
 		);
 		return spendHashes;
 	};
@@ -784,6 +804,8 @@ function buildPlain(
 	// UNCERTAIN transfers (counted and disclosed, in neither bound's definite figure): a single wallet number, no split.
 	let recordedSessionUndenominated = 0;
 	let recordedAttributedUndenominated = 0;
+	let windowSessionUndenominated = 0;
+	let windowAttributedUndenominated = 0;
 	let recordedSessionUncertain = 0;
 	let recordedAttributedUncertain = 0;
 	let uncertainTransfers = 0;
@@ -802,10 +824,18 @@ function buildPlain(
 		const ms = Date.parse(amt.event.timestamp);
 		const inWindow = Number.isFinite(ms) && ms >= startMs && ms < endMs;
 		const nominal = denominationOf(amt.event) === "nominal";
-		// A standalone shortfall has an amount but no denomination: wallet units, out of the usd and nominal figures.
-		if (amt.event.kind === "settlement_shortfall" && denominationOf(amt.event) === "unlabelled") {
+		// A standalone shortfall or ambiguity (the call record never landed) has an amount but usually no denomination:
+		// wallet units, out of the usd and nominal figures. A call record's own unlabelled cost stays where it was.
+		if (
+			(amt.event.kind === "settlement_shortfall" || amt.event.kind === "settlement_ambiguous") &&
+			denominationOf(amt.event) === "unlabelled"
+		) {
 			if (attributed) recordedAttributedUndenominated += amt.ut;
 			else recordedSessionUndenominated += amt.ut;
+			if (inWindow) {
+				if (attributed) windowAttributedUndenominated += amt.ut;
+				else windowSessionUndenominated += amt.ut;
+			}
 			continue;
 		}
 		if (nominal) {
@@ -1189,12 +1219,15 @@ function buildPlain(
 			recordedSessionNominal,
 			windowAttributedNominal,
 			recordedAttributedNominal,
-			windowSessionWallet: windowSessionUt + windowSessionNominal,
+			windowSessionWallet: windowSessionUt + windowSessionNominal + windowSessionUndenominated,
 			recordedSessionWallet:
 				recordedSessionUt + recordedSessionNominal + recordedSessionUndenominated,
 			recordedSessionUndenominated,
 			recordedAttributedUndenominated,
-			windowAttributedWallet: windowAttributedUt + windowAttributedNominal,
+			windowSessionUndenominated,
+			windowAttributedUndenominated,
+			windowAttributedWallet:
+				windowAttributedUt + windowAttributedNominal + windowAttributedUndenominated,
 			recordedAttributedWallet:
 				recordedAttributedUt + recordedAttributedNominal + recordedAttributedUndenominated,
 			recordedSessionUncertain,
