@@ -3420,6 +3420,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 			}
 
+			// A2, as on the LLM path: one finalize gate per hold, so it is settled XOR
+			// voided. A post-settle throw (the failClosed belt below) reaches the catch
+			// with the settle already claimed, and the catch must not void a hold whose
+			// commit and POST have run.
+			let finalizeState: "pending" | "settled" | "voided" = "pending";
+			function finalizeOnce(outcome: "settle" | "void"): boolean {
+				if (finalizeState !== "pending") return false;
+				finalizeState = outcome === "settle" ? "settled" : "voided";
+				return true;
+			}
+
 			try {
 				const result = await execute();
 
@@ -3472,6 +3483,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
 					);
 				}
+
+				// A2: claim the single settle outcome for this hold BEFORE money moves.
+				// Always granted here (no other terminal path runs for an action); the
+				// claim exists so a post-commit throw routes to the outer catch WITHOUT
+				// voiding an already-settled hold.
+				finalizeOnce("settle");
 
 				// Release in-flight hold and commit budget under mutex — money moves only
 				// AFTER the action is audited.
@@ -3604,20 +3621,26 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// Circuit breaker: record failure
 				cb.recordFailure();
 
-				// VOID the pending hold
-				if (engine != null && !isDryRun) {
-					try {
-						await engine.voidPendingSpend(transferId);
-					} catch {
-						// Best-effort void
+				// VOID the pending hold — but ONLY if this hold has not already claimed a
+				// settle outcome (A2). A pre-commit throw (the action threw, the failClosed
+				// abort on a failed action audit) reaches here with the hold still PENDING
+				// and is voided once. A post-commit throw (the failClosed belt) has already
+				// settled: no void is sent against a posted transfer.
+				if (finalizeOnce("void")) {
+					if (engine != null && !isDryRun) {
+						try {
+							await engine.voidPendingSpend(transferId);
+						} catch {
+							// Best-effort void
+						}
 					}
-				}
 
-				if (proxyConn != null && !isDryRun) {
-					try {
-						await proxyConn.void(proxyTransferId ?? transferId);
-					} catch {
-						// Best-effort void
+					if (proxyConn != null && !isDryRun) {
+						try {
+							await proxyConn.void(proxyTransferId ?? transferId);
+						} catch {
+							// Best-effort void
+						}
 					}
 				}
 
