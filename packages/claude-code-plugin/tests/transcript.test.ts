@@ -66,6 +66,8 @@ interface Recorded {
 	arrivalSeq: number;
 	/** When its answer was DECIDED (where it is logged): the same counter. */
 	responseSeq: number;
+	/** Whether the answer reached the client: not when it had hung up, nor when the answer is lost (status 0). */
+	delivered: boolean;
 }
 
 interface Cursor {
@@ -105,7 +107,9 @@ function secondSettles(log: Recorded[]): string[] {
 		| { at: number; kind: "settle"; transferId: string };
 	const events: Event[] = [];
 	for (const r of log) {
-		if (r.path === "/v1/authorize" && r.status === 200) {
+		// Only an answer the client RECEIVED can return the hold to it: a reissue whose client had
+		// hung up gave the plugin nothing to settle again.
+		if (r.path === "/v1/authorize" && r.status === 200 && r.delivered) {
 			const key = r.body.idempotencyKey;
 			const transferId = (r.response as { transferId?: unknown } | null)?.transferId;
 			if (typeof key === "string" && typeof transferId === "string") {
@@ -206,6 +210,7 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 					response: out.json,
 					arrivalSeq,
 					responseSeq: ++serverSeq,
+					delivered: !res.destroyed && out.status !== 0,
 				});
 				if (res.destroyed) return;
 				// Status 0: the request was processed, and its answer is lost.
@@ -394,12 +399,14 @@ describe("the no-second-settle invariant (`secondSettles`), on logs built by han
 		transferId: string,
 		status = 200,
 		at?: { arrival: number; response: number },
+		delivered = true,
 	): Recorded => ({
 		path: "/v1/authorize",
 		body: key === undefined ? {} : { idempotencyKey: key },
 		status,
 		response: status === 200 ? { transferId } : { error: "internal" },
 		...stamps(at),
+		delivered,
 	});
 	const settle = (transferId: string, at?: { arrival: number; response: number }): Recorded => ({
 		path: "/v1/settle",
@@ -407,6 +414,7 @@ describe("the no-second-settle invariant (`secondSettles`), on logs built by han
 		status: 200,
 		response: { settled: true },
 		...stamps(at),
+		delivered: true,
 	});
 	it("an unkeyed second settle of a hold is reported", () => {
 		expect(secondSettles([authorize(undefined, "tx_1"), settle("tx_1"), settle("tx_1")])).toEqual([
@@ -450,6 +458,15 @@ describe("the no-second-settle invariant (`secondSettles`), on logs built by han
 			settle("tx_1", { arrival: 9, response: 10 }),
 		];
 		expect(secondSettles(retry)).toEqual([]);
+	});
+	it("a reissue whose answer never reached the client (it had hung up) does not excuse a later second settle", () => {
+		const log = [
+			authorize("k1", "tx_1"),
+			settle("tx_1"),
+			authorize("k1", "tx_1", 200, undefined, false),
+			settle("tx_1"),
+		];
+		expect(secondSettles(log)).toEqual(["tx_1"]);
 	});
 	it("a hold returned under two DIFFERENT keys is reported, as is one the same key never returned again", () => {
 		expect(
