@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The dashboard (`usertrust-ui`) no longer depends on the operating system delivering every file-change event: when its audit directory exists at start, it also checks the log once a second, so an append, a shrink or a removal of the log or audit directory shows within about a second even if the event comes late or never. Not covered: deleting an audit directory that held no log bytes (no log, only an anchor, or an empty log) still reads as before.
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading
