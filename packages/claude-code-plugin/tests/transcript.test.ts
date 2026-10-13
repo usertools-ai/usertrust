@@ -62,6 +62,10 @@ interface Recorded {
 	body: Record<string, unknown>;
 	status: number;
 	response: unknown;
+	/** When the request ARRIVED (its body read, before any delay or forward): one shared counter. */
+	arrivalSeq: number;
+	/** When its answer was DECIDED (where it is logged): the same counter. */
+	responseSeq: number;
 }
 
 interface Cursor {
@@ -84,39 +88,54 @@ let port: number;
 let requests: Recorded[];
 
 /**
- * Every settle of a transferId past the number it may have AT THAT POINT in the log: ONE, but for
- * the standard idempotent retry. Read in request order, a hold that successful authorizes under the
- * SAME idempotency key have returned N times so far (the server gave back the live hold it holds for
- * that key) may by then have been settled N times, the most under any one key: the retry settles
- * again, at most once per reissue, and only after the reissue. Each settle past that number is
- * reported (unkeyed, a hold returned under different keys, one a key never returned again, and one
- * that a LATER reissue would have covered).
+ * Every settle of a transferId past the number it may have when it was SENT: ONE, but for the
+ * standard idempotent retry. A hold that successful authorizes under the SAME idempotency key have
+ * returned N times may be settled N times, the most under any one key: the retry settles again, at
+ * most once per reissue. Order is read from the server's own stamps, never from the log's order
+ * (which is completion order): a settle counts when it ARRIVED (`arrivalSeq`), and a reissue
+ * raises the allowance only when it was ANSWERED (`responseSeq`), since the plugin cannot know the
+ * hold came back before then. So a settle sent before its reissue was answered is reported, as are
+ * an unkeyed repeat, a hold returned under different keys, and one a key never returned again.
  */
 function secondSettles(log: Recorded[]): string[] {
-	const allowed = new Map<string, number>();
-	const returned = new Map<string, Map<string, number>>();
-	const settled = new Map<string, number>();
-	const over: string[] = [];
+	type Event =
+		| { at: number; kind: "returned"; key: string; transferId: string }
+		| { at: number; kind: "settle"; transferId: string };
+	const events: Event[] = [];
 	for (const r of log) {
 		if (r.path === "/v1/authorize" && r.status === 200) {
 			const key = r.body.idempotencyKey;
 			const transferId = (r.response as { transferId?: unknown } | null)?.transferId;
-			if (typeof key !== "string" || typeof transferId !== "string") continue;
-			const byHold = returned.get(key) ?? new Map<string, number>();
-			const n = (byHold.get(transferId) ?? 0) + 1;
-			byHold.set(transferId, n);
-			returned.set(key, byHold);
-			allowed.set(transferId, Math.max(allowed.get(transferId) ?? 1, n));
+			if (typeof key === "string" && typeof transferId === "string") {
+				events.push({ at: r.responseSeq, kind: "returned", key, transferId });
+			}
 		} else if (r.path === "/v1/settle") {
-			const id = String(r.body.transferId);
-			const n = (settled.get(id) ?? 0) + 1;
-			settled.set(id, n);
-			if (n > (allowed.get(id) ?? 1)) over.push(id);
+			events.push({ at: r.arrivalSeq, kind: "settle", transferId: String(r.body.transferId) });
+		}
+	}
+	events.sort((a, b) => a.at - b.at);
+	const allowed = new Map<string, number>();
+	const returned = new Map<string, Map<string, number>>();
+	const settled = new Map<string, number>();
+	const over: string[] = [];
+	for (const e of events) {
+		if (e.kind === "returned") {
+			const byHold = returned.get(e.key) ?? new Map<string, number>();
+			const n = (byHold.get(e.transferId) ?? 0) + 1;
+			byHold.set(e.transferId, n);
+			returned.set(e.key, byHold);
+			allowed.set(e.transferId, Math.max(allowed.get(e.transferId) ?? 1, n));
+		} else {
+			const n = (settled.get(e.transferId) ?? 0) + 1;
+			settled.set(e.transferId, n);
+			if (n > (allowed.get(e.transferId) ?? 1)) over.push(e.transferId);
 		}
 	}
 	return over;
 }
 let delayMs: number;
+/** One counter for the fake server's arrival and response stamps (`Recorded`), never reset: only order matters. */
+let serverSeq = 0;
 /** What the fake server's /v1/health publishes: none, an older server, unless a test says. Null: health fails. */
 let capabilities: string[] | null;
 /** The next N /v1/health probes fail (503) before it answers `capabilities`: a TRANSIENT failure. */
@@ -153,6 +172,8 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 				raw += c;
 			});
 			req.on("end", async () => {
+				// Stamped before any await: the order requests reached the server.
+				const arrivalSeq = ++serverSeq;
 				const path = req.url ?? "";
 				const body = JSON.parse(raw || "{}") as Record<string, unknown>;
 				if (delay > 0) await new Promise((r) => setTimeout(r, delay));
@@ -176,7 +197,14 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 					});
 					out = { status: r.status, json: await r.json() };
 				}
-				log.push({ path, body, status: out.status, response: out.json });
+				log.push({
+					path,
+					body,
+					status: out.status,
+					response: out.json,
+					arrivalSeq,
+					responseSeq: ++serverSeq,
+				});
 				if (res.destroyed) return;
 				// Status 0: the request was processed, and its answer is lost.
 				if (out.status === 0) {
@@ -352,17 +380,31 @@ const u = (input: number, output: number, cacheRead = 0, cacheWrite = 0): Usage 
 const TRANSCRIPT_HOOK = "../hooks/transcript.mjs";
 
 describe("the no-second-settle invariant (`secondSettles`), on logs built by hand", () => {
-	const authorize = (key: string | undefined, transferId: string, status = 200): Recorded => ({
+	// Stamped in array order unless a row says otherwise: arrived and answered at its own place.
+	let seq = 0;
+	const stamps = (at?: { arrival: number; response: number }) => {
+		if (at !== undefined) return { arrivalSeq: at.arrival, responseSeq: at.response };
+		seq += 1;
+		return { arrivalSeq: seq, responseSeq: seq };
+	};
+	const authorize = (
+		key: string | undefined,
+		transferId: string,
+		status = 200,
+		at?: { arrival: number; response: number },
+	): Recorded => ({
 		path: "/v1/authorize",
 		body: key === undefined ? {} : { idempotencyKey: key },
 		status,
 		response: status === 200 ? { transferId } : { error: "internal" },
+		...stamps(at),
 	});
-	const settle = (transferId: string): Recorded => ({
+	const settle = (transferId: string, at?: { arrival: number; response: number }): Recorded => ({
 		path: "/v1/settle",
 		body: { transferId },
 		status: 200,
 		response: { settled: true },
+		...stamps(at),
 	});
 	it("an unkeyed second settle of a hold is reported", () => {
 		expect(secondSettles([authorize(undefined, "tx_1"), settle("tx_1"), settle("tx_1")])).toEqual([
@@ -386,6 +428,26 @@ describe("the no-second-settle invariant (`secondSettles`), on logs built by han
 	it("a LATER reissue does not excuse an EARLIER second settle", () => {
 		const log = [authorize("k1", "tx_1"), settle("tx_1"), settle("tx_1"), authorize("k1", "tx_1")];
 		expect(secondSettles(log)).toEqual(["tx_1"]);
+	});
+	it("a settle SENT before its reissue was ANSWERED is reported, though it was answered after", () => {
+		// The log is in completion order: the reissue (answered at 8) is logged before the second
+		// settle (arrived at 6, delayed, answered at 9). The second settle went out before the
+		// plugin could know the hold came back, so it is a second settle.
+		const log = [
+			authorize("k1", "tx_1", 200, { arrival: 1, response: 2 }),
+			settle("tx_1", { arrival: 3, response: 4 }),
+			authorize("k1", "tx_1", 200, { arrival: 5, response: 8 }),
+			settle("tx_1", { arrival: 6, response: 9 }),
+		];
+		expect(secondSettles(log)).toEqual(["tx_1"]);
+		// The same calls, the settle sent after the reissue was answered: the standard retry.
+		const retry = [
+			authorize("k1", "tx_1", 200, { arrival: 1, response: 2 }),
+			settle("tx_1", { arrival: 3, response: 4 }),
+			authorize("k1", "tx_1", 200, { arrival: 5, response: 8 }),
+			settle("tx_1", { arrival: 9, response: 10 }),
+		];
+		expect(secondSettles(retry)).toEqual([]);
 	});
 	it("a hold returned under two DIFFERENT keys is reported, as is one the same key never returned again", () => {
 		expect(
