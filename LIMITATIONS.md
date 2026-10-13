@@ -147,17 +147,28 @@ listed. Among the refused ones, as measured:
   `baseUrlResourceScope`.
 
 A key counts when it is present, even as `undefined` (the SDK copies that too). Options
-given as a Proxy are refused whole, and an accessor is never called.
+given as a Proxy are refused whole, and an option held by an accessor (a getter), allowed
+or not, is refused and never called. **What is forwarded is a copy:** a new options object
+(on Google, a new `httpOptions` in a shallow copy of the request) holding only the allowed
+keys, each read once. A key the caller adds, or a value it changes, after the call starts
+cannot reach the SDK.
 
-**A client that rewrites every request** is refused by `trust()`, and every call refuses
-too if one is changed later on the raw client the caller kept:
+**A client that rewrites every request** is refused by `trust()`, before the ledger client
+is built, and every call refuses too if one is changed later on the raw client the caller
+kept:
 - an Anthropic client constructed with `middleware`, including the SDK's own
   `betaRefusalFallbackMiddleware`, which re-sends a refused call to a fallback model
   after it was priced;
+- an Anthropic or OpenAI client constructed with `fetchOptions` carrying `body` or
+  `method`. The SDK spreads a client's `fetchOptions` over every request after the body.
+  Its transport keys, such as a proxy `dispatcher`, stay allowed;
 - a Google client whose `httpOptions` carry `extraBody`.
 
 A default client has no middleware. A cloud-provider subclass's `backendMiddleware()`,
-which signs requests, is not refused.
+which signs requests, is never read. The row that pins this uses a stand-in subclass that
+overrides `backendMiddleware()`, not a published cloud SDK, which this package does not
+install. A change made to the raw client between a call's check and its send, from the
+caller's own code, is deliberate bypass, out of scope as above.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.
 That is what makes it a one-line integration with zero SDK dependencies across

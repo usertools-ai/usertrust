@@ -24,6 +24,7 @@ import { join } from "node:path";
 import Anthropic, { betaRefusalFallbackMiddleware } from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
+import { createClient } from "tigerbeetle-node";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { movedClientOptions, movedRequestOptions } from "../../src/default-deny.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
@@ -57,9 +58,12 @@ const json = (body: unknown) =>
 
 /** Every request any SDK sends: `METHOD url`. */
 let sent: string[] = [];
+/** Every request body any SDK sends, in order. */
+let bodies: string[] = [];
 async function recordingFetch(input: unknown, init?: RequestInit): Promise<Response> {
 	const url = String(input instanceof Request ? input.url : input);
 	sent.push(`${init?.method ?? "GET"} ${url}`);
+	bodies.push(typeof init?.body === "string" ? init.body : "");
 	const path = new URL(url).pathname;
 	const streamed = typeof init?.body === "string" && JSON.parse(init.body).stream === true;
 	if (path.endsWith("/messages") && streamed) return sse(ANTHROPIC_STREAM);
@@ -146,7 +150,9 @@ beforeEach(() => {
 	vault = join(tmpdir(), `request-options-${randomUUID()}`);
 	mkdirSync(vault, { recursive: true });
 	sent = [];
+	bodies = [];
 	open = [];
+	vi.mocked(createClient).mockClear();
 });
 afterEach(async () => {
 	for (const c of open) await c.destroy().catch(() => {});
@@ -570,6 +576,138 @@ describe("the SDK helpers' own options are on the governed list", () => {
 		await client.messages.parse(A);
 		expect(sent).toEqual(["POST https://anthropic.test/v1/messages"]);
 		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("what is forwarded is a copy of the governed options, never the caller's object", () => {
+	const SECRET = "ssn 123-45-6789";
+	it("Anthropic: a body added to the options after the call starts never reaches the wire", async () => {
+		const { client } = await anthropic();
+		const options: Record<string, unknown> = {};
+		const pending = client.messages.create(A, options);
+		options.body = { ...A, messages: [{ role: "user", content: SECRET }] };
+		await pending;
+		expect(bodies).toHaveLength(1);
+		expect(bodies[0]).not.toContain(SECRET);
+	});
+
+	it("OpenAI chat: a fetchOptions body added after the call starts never reaches the wire", async () => {
+		const { client } = await openai();
+		const options: Record<string, unknown> = {};
+		const pending = client.chat.completions.create(C, options);
+		options.fetchOptions = {
+			body: JSON.stringify({ ...C, messages: [{ role: "user", content: SECRET }] }),
+		};
+		await pending;
+		expect(bodies).toHaveLength(1);
+		expect(bodies[0]).not.toContain(SECRET);
+	});
+
+	it("OpenAI Responses: a body added after the call starts never reaches the wire", async () => {
+		const { client } = await openai();
+		const options: Record<string, unknown> = {};
+		const pending = client.responses.create(R, options);
+		options.body = { ...R, input: SECRET };
+		await pending;
+		expect(bodies).toHaveLength(1);
+		expect(bodies[0]).not.toContain(SECRET);
+	});
+
+	it("Google: an extraBody added to config.httpOptions after the call starts never reaches the wire", async () => {
+		const { client } = await google();
+		const httpOptions: Record<string, unknown> = { timeout: 5000 };
+		const pending = client.models.generateContent({ ...G, config: { httpOptions } });
+		httpOptions.extraBody = { systemInstruction: { parts: [{ text: SECRET }] } };
+		await pending;
+		expect(bodies).toHaveLength(1);
+		expect(bodies[0]).not.toContain(SECRET);
+	});
+
+	it("an ALLOWED option held by an accessor is refused, and the accessor never runs", async () => {
+		const { client, eng } = await anthropic();
+		const getter = vi.fn(() => 5000);
+		const options = {};
+		Object.defineProperty(options, "timeout", { get: getter, enumerable: true });
+		await expectRefused(() => client.messages.create(A, options), eng, /timeout \(an accessor\)/);
+		expect(getter).not.toHaveBeenCalled();
+	});
+
+	it("a Google request given as a Proxy is refused whole (by whichever check reaches it first), nothing sent or held", async () => {
+		const { client, eng } = await google();
+		const err = await client.models.generateContent(new Proxy({ ...G }, {})).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(PolicyDeniedError);
+		expect(sent).toEqual([]);
+		expect(eng.spendPending).not.toHaveBeenCalled();
+	});
+});
+
+describe("a client constructed with fetchOptions that replace the body is refused", () => {
+	for (const [name, make] of [
+		[
+			"Anthropic",
+			(fetchOptions: object) =>
+				new Anthropic({
+					apiKey: "k",
+					baseURL: "https://anthropic.test",
+					fetch: recordingFetch as typeof fetch,
+					maxRetries: 0,
+					fetchOptions: fetchOptions as Loose,
+				}),
+		],
+		[
+			"OpenAI",
+			(fetchOptions: object) =>
+				new OpenAI({
+					apiKey: "k",
+					baseURL: "https://openai.test/v1",
+					fetch: recordingFetch as typeof fetch,
+					maxRetries: 0,
+					fetchOptions: fetchOptions as Loose,
+				}),
+		],
+	] as const) {
+		it(`${name}: fetchOptions.body is refused at trust()`, async () => {
+			await expect(
+				trust(make({ body: "{}" }) as Loose, {
+					budget: 1_000_000,
+					vaultBase: vault,
+					_engine: engine(),
+				}),
+			).rejects.toThrow(/request_option_refused.*client fetchOptions\.body/s);
+		});
+		it(`${name}: fetchOptions.method is refused at trust()`, async () => {
+			await expect(
+				trust(make({ method: "GET" }) as Loose, {
+					budget: 1_000_000,
+					vaultBase: vault,
+					_engine: engine(),
+				}),
+			).rejects.toThrow(/client fetchOptions\.method/);
+		});
+		it(`${name}: a transport-only fetchOptions (a proxy dispatcher) is governed and passes`, async () => {
+			const { client, eng } = await govern(make({ dispatcher: {} }));
+			await (name === "Anthropic" ? client.messages.create(A) : client.chat.completions.create(C));
+			expect(sent).toHaveLength(1);
+			expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		});
+	}
+
+	it("a refusal at trust() builds no ledger client: nothing is left to keep the process alive", async () => {
+		const raw = new Anthropic({
+			apiKey: "k",
+			baseURL: "https://anthropic.test",
+			fetch: recordingFetch as typeof fetch,
+			maxRetries: 0,
+			middleware: [async (req: Loose, next: Loose) => next(req)],
+		});
+		// No injected engine and not a dry run: trust() would build the ledger client next.
+		await expect(trust(raw as Loose, { budget: 1_000_000, vaultBase: vault })).rejects.toThrow(
+			/client middleware/,
+		);
+		expect(vi.mocked(createClient)).not.toHaveBeenCalled();
 	});
 });
 

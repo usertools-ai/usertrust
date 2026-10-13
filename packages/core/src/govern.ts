@@ -55,6 +55,7 @@ import {
 } from "./budget/effective-record.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
+	detachedArgs,
 	guardedGet,
 	type MethodBoundary,
 	movedClientOptions,
@@ -1580,6 +1581,25 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// enforcing holding account can be seeded with the REMAINING budget.
 	let budgetSpent = await loadSpendLedger(vaultBase);
 
+	// A client that rewrites every request after governance reads it (Anthropic middleware or a
+	// client `fetchOptions` carrying `body`/`method`, Google httpOptions.extraBody) is refused here:
+	// after the spend ledger is read, so a corrupt one is refused for what it is, and before the
+	// engine is built, so a refusal leaves no native ledger client behind. Every call through such a
+	// client would be refused too (`movedRequestOptions`). A client of no known kind is left to
+	// step 5, which refuses it as before.
+	{
+		let clientKind: LLMClientKind | undefined;
+		try {
+			clientKind = detectClientKind(client);
+		} catch {
+			clientKind = undefined;
+		}
+		if (clientKind !== undefined) {
+			const clientMoved = movedClientOptions(clientKind, client);
+			if (clientMoved.length > 0) throw movedRequestError(clientKind, clientMoved);
+		}
+	}
+
 	// 4. Engine (injected for tests, real TB client in production, null in dry-run/proxy)
 	// _engine injection only accepted in test environments
 	let engine: TrustEngine | null;
@@ -1605,11 +1625,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// class, not the model string, picks local vs cloud metering (A3: this scope
 	// is captured once here and used verbatim at every authorize/settle below).
 	const kind: LLMClientKind = detectClientKind(client);
-	// A client that rewrites every request after governance reads it (Anthropic middleware given to
-	// the constructor, Google httpOptions.extraBody) is refused here, where an unsupported client is,
-	// as every call through it would be (`movedRequestOptions` reads the same per call).
-	const clientMoved = movedClientOptions(kind, client);
-	if (clientMoved.length > 0) throw movedRequestError(kind, clientMoved);
 	const endpoint: EndpointInfo = classifyEndpoint(client, config, opts?.endpoint);
 
 	// 6. Track state
@@ -1665,7 +1680,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	async function interceptCall(
 		originalFn: (...args: unknown[]) => unknown,
 		thisArg: unknown,
-		args: unknown[],
+		callerArgs: unknown[],
 		// A1: which provider surface this call arrived through. "create" is the
 		// default request/response (and create-stream) path. "stream-helper" is the
 		// Anthropic messages.stream / beta.messages.stream convenience helper, whose
@@ -1684,6 +1699,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		}
 
 		refuseIfAuditDegradedAtStart("this call was refused before it reached the provider");
+
+		// What this call forwards: the caller's arguments until the request options are checked,
+		// then a copy holding only the governed options (`detachedArgs`), never the caller's object.
+		let args = callerArgs;
 
 		// Track in-flight calls so destroy() can wait for them
 		inFlightCount++;
@@ -1723,6 +1742,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				});
 				throw refusal;
 			}
+			args = detachedArgs(kind, args);
 			const envelope = resolveEnvelope(attribution, config.parentUserId);
 			// Spread into every audit record this call emits (A1: an attributed hold
 			// must leave an attributed forensic trail on the settle AND the void

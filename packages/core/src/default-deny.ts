@@ -649,9 +649,30 @@ const GOVERNED_GOOGLE_HTTP_OPTIONS: ReadonlySet<string> = new Set([
 function ungovernedKeysOf(obj: unknown, governed: ReadonlySet<string>, at: string): string[] {
 	if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) return [];
 	if (utilTypes.isProxy(obj)) return [`${at} (a Proxy)`];
-	return Object.getOwnPropertyNames(obj)
-		.filter((key) => key.startsWith("__") || !governed.has(key))
-		.map((key) => (key.startsWith("__") ? `${at}${key} (internal)` : `${at}${key}`));
+	return Object.getOwnPropertyNames(obj).flatMap((key) => {
+		if (key.startsWith("__")) return [`${at}${key} (internal)`];
+		if (!governed.has(key)) return [`${at}${key}`];
+		// An allowed key held by an accessor could answer one value to this check and another to
+		// the SDK: refused, and never called.
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		return d !== undefined && !("value" in d) ? [`${at}${key} (an accessor)`] : [];
+	});
+}
+
+/**
+ * A NEW object holding only `obj`'s own data properties that `governed` allows, each read once.
+ * What is forwarded is this copy, never the caller's object, so a key the caller adds (or a value
+ * it changes) after the check cannot reach the SDK. Called only after `ungovernedKeysOf` found
+ * nothing, so every listed key is a data property.
+ */
+function governedCopy(obj: object, governed: ReadonlySet<string>): Record<string, unknown> {
+	const copy: Record<string, unknown> = {};
+	for (const key of Object.getOwnPropertyNames(obj)) {
+		if (!governed.has(key)) continue;
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		if (d !== undefined && "value" in d) copy[key] = d.value;
+	}
+	return copy;
 }
 
 /** An own data property, or undefined: no accessor and no Proxy trap runs. */
@@ -669,9 +690,22 @@ function ownData(obj: unknown, key: string): unknown {
  * priced). Google: `httpOptions.extraBody`, merged into every body. `client` is the SDK client.
  */
 export function movedClientOptions(provider: DefaultDenyProvider, client: unknown): string[] {
-	if (provider === "anthropic") {
-		const middleware = ownData(client, "middleware");
-		return Array.isArray(middleware) && middleware.length > 0 ? ["client middleware"] : [];
+	if (provider === "anthropic" || provider === "openai") {
+		// A client's own `fetchOptions` is spread over every request after the body, so a `body` or
+		// `method` there replaces what was governed. Its transport keys (a proxy `dispatcher`) stay.
+		const fetchOptions = ownData(client, "fetchOptions");
+		const moved = utilTypes.isProxy(fetchOptions)
+			? ["client fetchOptions (a Proxy)"]
+			: fetchOptions !== null && typeof fetchOptions === "object"
+				? Object.getOwnPropertyNames(fetchOptions)
+						.filter((key) => key === "body" || key === "method")
+						.map((key) => `client fetchOptions.${key}`)
+				: [];
+		if (provider === "anthropic") {
+			const middleware = ownData(client, "middleware");
+			if (Array.isArray(middleware) && middleware.length > 0) moved.push("client middleware");
+		}
+		return moved;
 	}
 	if (provider === "google") {
 		const http = ownData(
@@ -704,6 +738,7 @@ export function movedRequestOptions(
 	const config = ownData(args[0], "config");
 	const http = ownData(ownData(ownData(target, "apiClient"), "clientOptions"), "httpOptions");
 	return [
+		...(utilTypes.isProxy(args[0]) ? ["request (a Proxy)"] : []),
 		...(utilTypes.isProxy(config) ? ["config (a Proxy)"] : []),
 		...ungovernedKeysOf(
 			ownData(config, "httpOptions"),
@@ -711,6 +746,35 @@ export function movedRequestOptions(
 			"config.httpOptions.",
 		),
 		...(ownData(http, "extraBody") !== undefined ? ["client httpOptions.extraBody"] : []),
+	];
+}
+
+/**
+ * The argument list to FORWARD for a governed call `movedRequestOptions` passed: the caller's
+ * request, with its request options replaced by a new object holding only the governed keys, each
+ * read once (Anthropic and OpenAI: `args[1]`; Google: `config.httpOptions`, in a shallow copy of
+ * the request and its config, which keeps every callable member). A later change to the caller's
+ * own options cannot reach the SDK, and the copy cannot carry an unlisted key.
+ */
+export function detachedArgs(provider: DefaultDenyProvider, args: readonly unknown[]): unknown[] {
+	if (provider !== "google") {
+		const options = args[1];
+		if (options == null || typeof options !== "object") return [...args];
+		return [args[0], governedCopy(options, GOVERNED_REQUEST_OPTIONS), ...args.slice(2)];
+	}
+	const request = args[0];
+	const config = ownData(request, "config");
+	const http = ownData(config, "httpOptions");
+	if (http == null || typeof http !== "object") return [...args];
+	return [
+		{
+			...(request as Record<string, unknown>),
+			config: {
+				...(config as Record<string, unknown>),
+				httpOptions: governedCopy(http, GOVERNED_GOOGLE_HTTP_OPTIONS),
+			},
+		},
+		...args.slice(1),
 	];
 }
 
