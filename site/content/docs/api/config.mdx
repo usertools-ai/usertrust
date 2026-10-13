@@ -194,7 +194,7 @@ Read by the local dashboard, `usertrust-ui`, and ignored by the SDK: `TrustConfi
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `kit` | `false` | Show the usertrust mark in the dashboard header. When this is on, the browser fetches `https://usertrust.ai/kit/images/favicon.svg` on each page load. The request carries no query string, cookies or referrer, but does carry an `Origin` header naming the dashboard's local address. If the load fails, no mark is shown. |
+| `kit` | `false` | Show the usertrust mark in the dashboard header. When this is on, the browser fetches the usertrust website's icon, `https://usertrust.ai/favicon.svg`, on each page load. The request carries no query string, cookies or referrer, but does carry an `Origin` header naming the dashboard's local address. If the load fails, no mark is shown. |
 
 ```json
 {

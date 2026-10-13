@@ -17,7 +17,7 @@ const LIVE_LABEL: Record<LiveState, string> = {
 };
 
 /**
- * The usertrust mark from the brand kit, rendered only when the vault config opts in (`remote.kit`). The slot is a
+ * The usertrust mark from usertrust.ai, rendered only when the vault config opts in (`remote.kit`). The slot is a
  * fixed size whatever happens, so a mark that loads, fails or times out never moves the header; on a failure or a
  * timeout the slot stays empty, with no error. Decorative: the wordmark beside it names the product.
  */

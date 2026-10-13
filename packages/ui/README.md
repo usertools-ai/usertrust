@@ -41,9 +41,9 @@ If `usertrust` (the core CLI) is installed alongside, `usertrust ui` launches th
 
 ## The usertrust mark (opt-in)
 
-Off by default. When it is on, the header shows the usertrust mark beside the name, loaded from the usertrust brand kit. The mark is not part of this package.
+Off by default. When it is on, the header shows the usertrust mark beside the name, loaded from the usertrust website. The mark is not part of this package.
 
-- **What is fetched:** one SVG, `https://usertrust.ai/kit/images/favicon.svg`. Nothing else.
+- **What is fetched:** one SVG, the usertrust website's own icon, `https://usertrust.ai/favicon.svg`. Nothing else.
 - **When, and by what:** your browser fetches it each time the page loads, and only while the setting is on. The usertrust-ui server makes no request.
 - **What is sent:** a plain `GET` with no query string, no cookies (`crossorigin="anonymous"`) and no `Referer` (`referrerpolicy="no-referrer"`). Because it is a CORS request, the browser adds an `Origin` header naming this page's local address, for example `http://127.0.0.1:4180`. Like any web request, it also shows usertrust.ai your IP address, your browser's user agent and the time.
 - **If it fails:** the page shows no mark and no error. A load still unfinished after 5 seconds is abandoned. The header keeps its layout either way.

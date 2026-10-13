@@ -6,11 +6,11 @@ import { KIT_MARK_URL, remoteSettings } from "../src/shared/kit.js";
 
 describe("the kit mark's URL", () => {
 	// The browser fetches exactly this. Anything in the query, fragment or userinfo could carry an identifier.
-	it("is a fixed https URL on the kit, with no query string, fragment or credentials", () => {
+	it("is the usertrust website's own icon, over https, with no query string, fragment or credentials", () => {
 		const url = new URL(KIT_MARK_URL);
 		expect(url.protocol).toBe("https:");
 		expect(url.host).toBe("usertrust.ai");
-		expect(url.pathname.startsWith("/kit/")).toBe(true);
+		expect(url.pathname).toBe("/favicon.svg");
 		expect(url.search).toBe("");
 		expect(url.hash).toBe("");
 		expect(url.username + url.password).toBe("");
