@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.2] - 2026-10-13
+
 ### Read before upgrading
 
 - **Per-call request options are refused unless they are on the allowed list.** The allowed options are `timeout`, `maxRetries`, `signal`, `headers`, `query`, `method`, `idempotencyKey` and `stream`; on Google, `httpOptions` `apiVersion`, `headers`, `timeout` and `retryOptions`. Anything else is refused, with a `PolicyDeniedError` naming the option, after one `policy_denied` event, before anything is held or sent. Among the refused options are `body`; `fetchOptions` (its `body` wins); Anthropic's `middleware` and `fallbackState`; `path`; `defaultBaseURL`; every internal `__` option; and Google's `httpOptions.extraBody`, `baseUrl` and `baseUrlResourceScope`. Instead, put the request in the call's parameters, and configure transport on the client.
@@ -54,6 +56,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Measured: a ~100k-token cached Anthropic system was held at 11 units against a cost of 2996, and under a budget of 500 it was sent and spent 2996. The input leg is now the larger of the old estimate and an estimate of the whole request body, read from the one serialized snapshot, in UTF-8 bytes, so non-ASCII text is no longer under-held. The output leg reads each provider's cap per candidate: OpenAI chat's `max_completion_tokens` and `n`, Google's `maxOutputTokens` and `candidateCount`. Google documents `maxOutputTokens` as bounding thought tokens too, so a capped call holds that cap per candidate; an uncapped one never holds below 4096 per candidate, nor below its thinking budget. No hold shrinks on input, and ordinary requests grow by their own structure: measured at 7 to 19 tokens. Calibration against real tokenizers is unmeasured. (LIMITATIONS.md, "4. Hard budget atomicity applies to full mode, not `dryRun`".)
 
 - **The request-option checks now read an inherited property where the SDK reads it.** The SDKs read a client's `fetchOptions`, `middleware`, `_client`, `clientOptions` and `httpOptions`, and a request's `config` and `httpOptions`, by plain property access, which finds a value on the prototype. The checks read own properties only, so a client wrapped as `Object.create(client)`, a resource whose `_client` was inherited, or Google `clientOptions` inheriting an `httpOptions` with `extraBody` sent a body the check never saw. Each is now read along its prototype chain and refused as before; a Proxy on that chain is refused as unreadable, and none of its traps runs, as is a chain longer than 64 objects. A Google client's own `httpOptions` must now be a plain object of this realm (or with no prototype), and must carry neither `extraBody` (own or inherited) nor `toJSON` (the SDK JSON-copies it under a call's own `httpOptions`). A revoked Proxy as an Anthropic client's `middleware` is now refused with a `policy_denied` event, instead of throwing a `TypeError` before the event was recorded.
+
+### Known issues
+
+The known issue in 5.0.1 about `npx` version mixing is fixed in this release (see *Fixed*). These remain:
+
+- With a ledger-backed usertrust-server, if the ledger becomes unreachable, authorize calls hang without an answer (health stays ok), and a request the client abandons can leave a hold reserved for up to 300 s after the ledger returns. Use a client timeout.
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold can exit before ending it: the hold may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
 
 ## [5.0.1] - 2026-10-13
 
