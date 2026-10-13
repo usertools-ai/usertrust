@@ -2014,5 +2014,151 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 				expect(gov.requests).toHaveLength(0);
 			});
 		}
+
+		// The SDK reads toolConfig and functionCallingConfig (by name on the Gemini API, by JSON.stringify on Vertex AI)
+		// only in its request converters, after findAfcIncompatibleToolIndexes and after every tool's converter.
+		const LATE_HOOKS: Array<[string, boolean, (reads: Reads, empty: () => void) => Loose]> = [
+			[
+				"a functionCallingConfig toJSON hook",
+				true,
+				(reads, empty) => ({
+					functionCallingConfig: Object.defineProperty({ mode: "ANY" }, "toJSON", {
+						value: () => {
+							counted(reads, "toJSON");
+							empty();
+							return { mode: "ANY" };
+						},
+						enumerable: false,
+					}),
+				}),
+			],
+			[
+				"a functionCallingConfig mode getter",
+				false,
+				(reads, empty) => ({
+					functionCallingConfig: withGetter({}, "mode", reads, () => {
+						empty();
+						return "ANY";
+					}),
+				}),
+			],
+			[
+				"a toolConfig retrievalConfig getter",
+				false,
+				(reads, empty) =>
+					withGetter({}, "retrievalConfig", reads, () => {
+						empty();
+						return undefined;
+					}),
+			],
+		];
+		for (const [hook, vertexOnly, makeToolConfig] of LATE_HOOKS) {
+			for (const [backend, vertex] of BACKENDS) {
+				if (vertexOnly && !vertex) continue;
+				it(`${method} on ${backend}: ${hook} that empties a plain tool's declarations runs after the tools are read: the SDK's own local rejection beside a callable tool, no provider request`, async () => {
+					const rawReads: Reads = {};
+					const govReads: Reads = {};
+					const params = (reads: Reads) => () => {
+						const declarations: Loose[] = [{ name: "lookup" }];
+						return {
+							model: "gemini-2.5-flash",
+							contents: "go",
+							config: {
+								tools: [{ functionDeclarations: declarations }, wireCallable()],
+								toolConfig: makeToolConfig(reads, () => {
+									declarations.length = 0;
+								}),
+							},
+						};
+					};
+					const { raw, rawResult, gov, govResult } = await nativeThenGoverned(
+						method,
+						{ native: params(rawReads), governed: params(govReads) },
+						{ vertex },
+					);
+
+					// natively findAfcIncompatibleToolIndexes rejects before any converter reads toolConfig
+					expect(rawResult).toContain("Incompatible tools found at tools[0]");
+					expect(raw.requests).toHaveLength(0);
+					expect(gov.requests).toHaveLength(0);
+					expect(rawReads).toEqual({});
+					// the snapshot reads it once, after every tool field was captured
+					expect(Object.values(govReads)).toEqual([1]);
+					if (method === "generateContent") {
+						expect(govResult).toBe(rawResult);
+					} else {
+						expect(govResult).toContain(`models.${method} with automatic function calling`);
+					}
+				});
+			}
+		}
+
+		it(`${method} on Vertex AI, pii "redact": a functionCallingConfig toJSON read after the tools still runs once, and its output is sent redacted`, async () => {
+			const rawReads: Reads = {};
+			const govReads: Reads = {};
+			const params = (reads: Reads, prompt: string, name: string) => () => ({
+				model: "gemini-2.5-flash",
+				contents: prompt,
+				config: {
+					tools: [{ functionDeclarations: [{ name: "lookup" }] }, { googleSearch: {} }],
+					toolConfig: {
+						functionCallingConfig: Object.defineProperty({ mode: "ANY" }, "toJSON", {
+							value: () => {
+								counted(reads, "toJSON");
+								return { mode: "ANY", allowedFunctionNames: [name] };
+							},
+							enumerable: false,
+						}),
+					},
+				},
+			});
+			const { raw, rawResult, gov, govResult } = await nativeThenGoverned(
+				method,
+				{
+					native: params(rawReads, "[REDACTED:email]", "[REDACTED:email]"),
+					governed: params(govReads, `write to ${EMAIL}`, EMAIL),
+				},
+				{ vertex: true, pii: "redact" },
+			);
+
+			expect(rawResult).toBe("ok");
+			expect(govResult).toBe("ok");
+			expect(gov.requests).toHaveLength(1);
+			expect(JSON.stringify(gov.requests)).not.toContain(EMAIL);
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			expect(rawReads).toEqual({ toJSON: 1 });
+			expect(govReads).toEqual(rawReads);
+		});
+
+		it(`${method}: a toolConfig getter that clears a callable tool's callTool, and restores it a moment later, is refused as "can't tell": never one governed call over the SDK's own loop`, async () => {
+			const params = () => {
+				const callable: Loose = wireCallable();
+				const callTool = callable["callTool"];
+				return {
+					model: "gemini-2.5-flash",
+					contents: "go",
+					config: {
+						tools: [callable],
+						toolConfig: withGetter({}, "retrievalConfig", {}, () => {
+							callable["callTool"] = undefined;
+							queueMicrotask(() => {
+								callable["callTool"] = callTool;
+							});
+							return undefined;
+						}),
+					},
+				};
+			};
+			const { gov, govResult, auditKinds } = await nativeThenGoverned(method, {
+				native: params,
+				governed: params,
+			});
+
+			expect(govResult).toContain(
+				`models.${method} could not be checked for automatic function calling`,
+			);
+			expect(auditKinds).toEqual(["policy_denied"]);
+			expect(gov.requests).toHaveLength(0);
+		});
 	}
 });

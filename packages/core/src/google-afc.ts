@@ -780,6 +780,26 @@ function vertexWireForm(callingConfig: unknown, at: string): unknown {
 }
 
 /**
+ * `config.toolConfig` as data we own (`ownedDataCopy`), with its `functionCallingConfig` copied
+ * as the backend's converter reads it: field by field on the Gemini API, as its JSON wire form on
+ * Vertex AI (`vertexWireForm`). The snapshot calls this after every tool has been read.
+ */
+function copyToolConfig(callerToolConfig: unknown, vertexAI: boolean): unknown {
+	const toolConfigAt = "params.config.toolConfig";
+	const toolConfig = ownedDataCopy(callerToolConfig, toolConfigAt, SDK_TOOL_CONFIG_FIELDS);
+	if (toolConfig !== null && typeof toolConfig === "object") {
+		const callingAt = `${toolConfigAt}.functionCallingConfig`;
+		const captured = (toolConfig as Record<string, unknown>)["functionCallingConfig"];
+		// The Gemini API reads its fields by name; Vertex AI serializes it whole.
+		const callingConfig = vertexAI
+			? vertexWireForm(captured, callingAt)
+			: ownedDataCopy(captured, callingAt, SDK_FUNCTION_CALLING_FIELDS);
+		setData(toolConfig as Record<string, unknown>, "functionCallingConfig", callingConfig);
+	}
+	return toolConfig;
+}
+
+/**
  * Copy the request object `obj` (`params`, `params.config`) onto a fresh object with its
  * prototype, re-installing NO accessor: every accessor found on `obj` or up its prototype
  * chain (to `Object.prototype`, exclusive) is CAPTURED once, on the ORIGINAL receiver
@@ -862,7 +882,8 @@ export function googleClientIsVertexAI(client: unknown): boolean {
  *     `options.vertexAI` (the client sends to Vertex AI, which serializes
  *     `functionCallingConfig` whole), that object is instead forwarded as its wire form,
  *     computed once (`vertexWireForm`): plain data, sent as natively, all of it seen by
- *     redaction.
+ *     redaction. `toolConfig`'s fields (and that hook) are read AFTER every tool, where the
+ *     SDK's request converters read them (`copyToolConfig`).
  *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
  *     non-callable tool is copied as exactly the fields the SDK reads, in the order the SDK
  *     reads them (`copyDataTools`: each captured once, a `functionDeclarations` getter
@@ -924,24 +945,11 @@ export function snapshotGoogleAfcParams(
 		);
 		setData(outConfig, "automaticFunctionCalling", afcConfig);
 
-		const toolConfigAt = "params.config.toolConfig";
-		const toolConfig = ownedDataCopy(
-			captureOnce(config, "toolConfig", "params.config"),
-			toolConfigAt,
-			SDK_TOOL_CONFIG_FIELDS,
-		);
-		if (toolConfig !== null && typeof toolConfig === "object") {
-			const callingAt = `${toolConfigAt}.functionCallingConfig`;
-			const captured = (toolConfig as Record<string, unknown>).functionCallingConfig;
-			// The Gemini API reads its fields by name; Vertex AI serializes it whole.
-			const callingConfig =
-				options.vertexAI === true
-					? vertexWireForm(captured, callingAt)
-					: ownedDataCopy(captured, callingAt, SDK_FUNCTION_CALLING_FIELDS);
-			setData(toolConfig as Record<string, unknown>, "functionCallingConfig", callingConfig);
-		}
-		setData(outConfig, "toolConfig", toolConfig);
+		// The config's own `toolConfig` accessor is read here, with the other config fields; the
+		// object's FIELDS are read last (copyToolConfig below), as the SDK reads them.
+		const callerToolConfig = captureOnce(config, "toolConfig", "params.config");
 
+		const callables: Array<{ tool: object; at: string; callTool: unknown }> = [];
 		const tools = captureOnce(config, "tools", "params.config");
 		// The AFC keys are always set as OWN data properties, `undefined` included: the
 		// copies keep the caller's prototypes, and an own key shadows anything a prototype
@@ -974,7 +982,6 @@ export function snapshotGoogleAfcParams(
 			// the SDK reads the request: one governed call over the SDK's own AFC loop. So, once
 			// every tool is read, each callable must still hold the SAME captured function, or
 			// the request is "can't tell".
-			const callables: Array<{ tool: object; at: string; callTool: unknown }> = [];
 			const dataTools: DataToolCopy[] = [];
 			// Every element first, each read once, as the SDK iterates the whole array
 			// (`tools.map` in processParamsMaybeAddMcpUsage) before it reads any tool's field.
@@ -1006,14 +1013,21 @@ export function snapshotGoogleAfcParams(
 			// Then their fields, in the SDK's read order. AFC is not disabled here, so with a
 			// callable tool the SDK would run findAfcIncompatibleToolIndexes.
 			copyDataTools(dataTools, callables.length > 0);
-			// No caller code runs between this check and the verdict (both read data only), and a
-			// tool classified non-callable is our CLONE (or AFC is off on our own copy), so the
-			// classification cannot change at the boundary in a way that unmeters a round: a
-			// callable that stops being one later goes into rounds whose AFC is off.
-			for (const { tool, at, callTool } of callables) {
-				if (dataValue(tool, "callTool", at) !== callTool) throw INDETERMINATE;
-			}
 			setData(outConfig, "tools", outTools);
+		}
+		// toolConfig LAST, after every tool read: the SDK reads its fields only in its request
+		// converters (`toolConfigToMldev(fromToolConfig)` at 10071, `toolConfigToVertex` at
+		// 10244), after `findAfcIncompatibleToolIndexes` and after every tool's converter (10064,
+		// 10237), and Vertex AI runs a `toJSON` hook later still, when it serializes. A getter or
+		// hook there that changes a tool therefore cannot reach the snapshot's tools, as natively.
+		setData(outConfig, "toolConfig", copyToolConfig(callerToolConfig, options.vertexAI === true));
+		// The callable check runs after ALL caller code the snapshot runs (tool getters, toolConfig
+		// getters, a toJSON hook). No caller code runs between it and the verdict (both read data
+		// only), and a tool classified non-callable is our CLONE (or AFC is off on our own copy),
+		// so the classification cannot change at the boundary in a way that unmeters a round: a
+		// callable that stops being one later goes into rounds whose AFC is off.
+		for (const { tool, at, callTool } of callables) {
+			if (dataValue(tool, "callTool", at) !== callTool) throw INDETERMINATE;
 		}
 		setData(outParams, "config", outConfig);
 		return { params: outParams };
