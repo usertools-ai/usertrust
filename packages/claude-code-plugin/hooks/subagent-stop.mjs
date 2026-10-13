@@ -45,7 +45,7 @@ try {
 	const sessionId = input.session_id ?? "unknown";
 	const agentId = input.agent_id;
 	if (typeof agentId === "string" && agentId !== "" && (await breakerOpen())) {
-		if (usageMode() === "transcript") await stampFirstRun();
+		if (usageMode() === "transcript") await stampFirstRun(input.session_id);
 		await skipSettlePoint({
 			kind: "deferred",
 			phase: "subagent-stop",

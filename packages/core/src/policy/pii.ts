@@ -277,6 +277,17 @@ export function isOpaqueTextFree(value: object): boolean {
  */
 const TRANSPORT_SLOTS: ReadonlySet<string> = new Set(["config.abortSignal"]);
 
+/**
+ * Every strict prefix of a transport slot ("config" for "config.abortSignal"): an object reached
+ * there may hold a slot, so its clone depends on WHERE it is walked, not only on what it is.
+ */
+const TRANSPORT_PREFIXES: ReadonlySet<string> = new Set(
+	[...TRANSPORT_SLOTS].flatMap((slot) => {
+		const parts = slot.split(".");
+		return parts.slice(1).map((_, i) => parts.slice(0, i + 1).join("."));
+	}),
+);
+
 /** Kept by reference and not walked: an opaque, text-free value at a transport position. */
 function keptByReference(value: unknown, path: string): boolean {
 	return (
@@ -369,19 +380,58 @@ export function redactMessages(messages: unknown): RedactedData {
 	return redactPII(messages);
 }
 
-/** Return matched PII type names for a string value. */
+/**
+ * Return matched PII type names for a string value. Built with `filter` / `map`, which define each
+ * element rather than assign it, so an index setter on Array.prototype cannot swallow a name.
+ */
 function matchedTypes(value: string): string[] {
-	const matched: string[] = [];
-	for (const pattern of PII_PATTERNS) {
-		if (pattern.test(value)) {
-			matched.push(pattern.type);
-		}
+	return PII_PATTERNS.filter((pattern) => pattern.test(value)).map((pattern) => pattern.type);
+}
+
+function defineData(obj: object, key: string, value: unknown, enumerable: boolean): void {
+	Object.defineProperty(obj, key, { value, writable: true, enumerable, configurable: true });
+}
+
+/**
+ * The clones made so far in one redaction walk. `anywhere` maps each object or array to its clone,
+ * registered BEFORE its properties are walked, so a revisit (a cycle, such as a hidden
+ * back-reference to a parent, or one object referenced twice) answers that clone: the copy keeps
+ * the original's shape and the walk always ends. At a prefix of a transport slot the clone depends
+ * on the path (walked there, it keeps the signal by reference; walked anywhere else, the signal is
+ * flattened), so reuse never crosses that line, in either direction: at such a path only a clone
+ * made at that same path is answered, from `atPrefix`, and a clone made there is never answered
+ * anywhere else. Finitely many prefixes exist, so a cycle through one still ends.
+ */
+interface Clones {
+	anywhere: WeakMap<object, unknown>;
+	atPrefix: Map<string, WeakMap<object, unknown>>;
+}
+
+function cachedClone(clones: Clones, value: object, path: string): unknown {
+	return TRANSPORT_PREFIXES.has(path)
+		? clones.atPrefix.get(path)?.get(value)
+		: clones.anywhere.get(value);
+}
+
+function registerClone(clones: Clones, value: object, path: string, clone: unknown): void {
+	if (!TRANSPORT_PREFIXES.has(path)) {
+		clones.anywhere.set(value, clone);
+		return;
 	}
-	return matched;
+	let atPath = clones.atPrefix.get(path);
+	if (atPath === undefined) {
+		atPath = new WeakMap();
+		clones.atPrefix.set(path, atPath);
+	}
+	atPath.set(value, clone);
 }
 
 /** Recursively traverse data and replace PII strings with redacted placeholders. */
-function redactValue(value: unknown, path = ""): unknown {
+function redactValue(
+	value: unknown,
+	path = "",
+	clones: Clones = { anywhere: new WeakMap(), atPrefix: new Map() },
+): unknown {
 	if (typeof value === "string") {
 		const types = matchedTypes(value);
 		if (types.length > 0) {
@@ -391,17 +441,56 @@ function redactValue(value: unknown, path = ""): unknown {
 	}
 
 	if (Array.isArray(value)) {
-		return value.map((item, i) => redactValue(item, `${path}[${i}]`));
+		const clone = cachedClone(clones, value, path);
+		if (clone !== undefined) return clone;
+		// Built by index, not with `map`, so the clone is registered before its items are walked. As
+		// with `map`: the length read once, a hole stays a hole, and each item is an own property.
+		const length = value.length;
+		const result: unknown[] = new Array(length);
+		registerClone(clones, value, path, result);
+		for (let i = 0; i < length; i++) {
+			// Defined, never assigned: an index setter on Array.prototype must not swallow the item.
+			if (i in value)
+				defineData(result, String(i), redactValue(value[i], `${path}[${i}]`, clones), true);
+		}
+		return result;
 	}
 
 	// An opaque, text-free value at a transport position is kept BY REFERENCE (TRANSPORT_SLOTS).
 	if (keptByReference(value, path)) return value;
 
 	if (value !== null && typeof value === "object") {
+		// Looked up only after the transport check: the same signal is kept by reference at its
+		// transport slot even when it was flattened where it appeared earlier.
+		const clone = cachedClone(clones, value, path);
+		if (clone !== undefined) return clone;
 		const record = value as Record<string, unknown>;
 		const result: Record<string, unknown> = {};
+		registerClone(clones, value, path, result);
+		// Every key is DEFINED, never assigned: an own "__proto__" key (as JSON.parse makes one) stays
+		// a key of the clone instead of becoming its prototype.
 		for (const key of Object.keys(record)) {
-			result[key] = redactValue(record[key], path === "" ? key : `${path}.${key}`);
+			defineData(
+				result,
+				key,
+				redactValue(record[key], path === "" ? key : `${path}.${key}`, clones),
+				true,
+			);
+		}
+		// A non-enumerable own DATA property stays one, redacted, so a consumer that reads the request
+		// by name still finds the field, and JSON.stringify still skips it. Data only: a function (a
+		// hidden `toJSON` hook) is never carried into the clone, where serializing would run it; an
+		// accessor is never invoked.
+		for (const key of Object.getOwnPropertyNames(record)) {
+			const d = Object.getOwnPropertyDescriptor(record, key);
+			if (d === undefined || d.enumerable === true || !("value" in d)) continue;
+			if (typeof d.value === "function") continue;
+			defineData(
+				result,
+				key,
+				redactValue(d.value, path === "" ? key : `${path}.${key}`, clones),
+				false,
+			);
 		}
 		return result;
 	}

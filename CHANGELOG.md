@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`usertrust inspect`, `usertrust health` and the ledger UI no longer block on a FIFO at `.usertrust/usertrust.config.json`.** With no enforced-budget record, the budget reader opened the vault config without checking what it was, so a named pipe planted at that path hung each of them until something wrote to the pipe. The path is now checked first, as the UI's remote-settings reader and the enforced-budget reader already did: anything that is not a regular file gives no budget (the budget reads as not yet published), and is never opened.
+
+- **PII redaction now keeps a field that is non-enumerable, and an own `"__proto__"` key.** When `pii: "redact"` rewrote a request, the copy it built dropped every non-enumerable field, and turned an own `"__proto__"` key, which a request built by `JSON.parse` can carry, into the copy's prototype instead of a key. Both are now kept, redacted like any other field: a non-enumerable field stays non-enumerable, and `"__proto__"` stays an ordinary key. A non-enumerable function (such as a hidden `toJSON`) or getter is still left out of the copy, and the getter is never run. A field that refers back to an object enclosing it, or one object referenced from two places, keeps that shape in the copy. Requests built from plain object literals are redacted exactly as before.
+
 - **Only request options that change neither the body nor where it is sent are allowed on a governed call.** A governed call is scanned for PII and injection, held and priced from its request parameters. But the SDKs also take per-call request options, and some of them replace what those parameters describe, so the call sent something governance never saw. Under `pii: "block"`, a clean request whose `options.body` carried a US SSN was sent, unrefused.
 
   Per-call options are now governed by a list, as default-deny governs methods:
