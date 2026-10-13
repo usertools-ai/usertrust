@@ -26,6 +26,11 @@ npm, and its version is its own: the `usertrust` packages and their
   responses were written is not kept, so two jobs that share a session name the same entry.
   It counts each agent's transcript, so a fork's copied history counts again: an upper bound. A session the state already held a cursor for before this change keeps the
   state's time, so a response it left unposted is still posted.
+  Two edges are declared, not fixed:
+  - A session that ran an older SessionStart but had no cursor yet at the upgrade is stamped at
+    its first hook after it, so what it wrote in between is declared `pre-metering`, once.
+  - Two agents of a session whose first hooks race keep the stamp published first, which may be
+    the later clock by milliseconds.
 
 ## [3.0.2] - 2026-10-12
 

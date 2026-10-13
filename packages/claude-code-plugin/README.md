@@ -432,7 +432,17 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   settled late onto its first hold. Those responses are **declared** instead, once per agent of
   the session, as a `pre-metering` watch record (below): not billed, and never a gap. A session
   the state already held a cursor for before per-session times existed keeps the state's time,
-  so what it left unposted is still posted. One case is stamped in the wrong place: a hook
+  so what it left unposted is still posted. Two upgrade and timing edges are declared, not
+  fixed:
+  - A session that ran an older plugin's SessionStart but had no transcript cursor yet when this
+    version was installed is stamped at its first hook after the upgrade. The responses it wrote
+    between that SessionStart and the upgrade are declared `pre-metering`, not billed. This
+    happens once per such session.
+  - When two agents of one session reach their first hook at the same instant, the session's time
+    is the one published first, which may be the later of the two clocks by milliseconds. A
+    response written by the other agent inside that window counts as before metering.
+
+  One case is stamped in the wrong place: a hook
   refused with a configuration whose state dir cannot be used writes its record, and its stamp,
   to the default state dir. When the repaired configuration names another state dir, the
   refused period counts as before metering there. After a host
