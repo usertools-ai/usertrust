@@ -57,6 +57,8 @@ vi.mock("usertrust-verify", async (importOriginal) => {
 
 const { loadState } = await import("../src/server/state.js");
 const { createUiServer } = await import("../src/server/server.js");
+const { chainStatus } = await import("../src/shared/display.js");
+const { verifyOutcome } = await import("../src/shared/verify-view.js");
 
 let tempDir: string;
 beforeEach(() => {
@@ -94,5 +96,32 @@ describe("the UI on a vault with no verdict", () => {
 		} finally {
 			await ui.close();
 		}
+	});
+});
+
+describe("the dashboard's words for a vault with no verdict", () => {
+	const chain = { events: 0, valid: false, empty: false, breakIndex: null, errors: ["e"] };
+
+	it("the summary's status is busy, never broken", () => {
+		expect(chainStatus({ ...chain, busy: true })).toBe("busy");
+	});
+
+	it("CONTROL: the same chain without busy is broken", () => {
+		expect(chainStatus(chain)).toBe("broken");
+	});
+
+	it("a verify answer of busy is no verdict, and a failed read is a failure: neither is 'not found'", () => {
+		const body = { found: false, valid: false, receipt: "", errors: ["why"] };
+		expect(verifyOutcome(503, { ...body, busy: true })).toEqual({ kind: "busy", reason: "why" });
+		expect(verifyOutcome(500, { ...body, failed: true })).toEqual({
+			kind: "failed",
+			receipt: "",
+			reason: "why",
+		});
+	});
+
+	it("CONTROL: the same answer without either flag is 'not found'", () => {
+		const body = { found: false, valid: false, receipt: "", errors: ["why"] };
+		expect(verifyOutcome(404, body)).toEqual({ kind: "not-found", receipt: "", reason: "why" });
 	});
 });

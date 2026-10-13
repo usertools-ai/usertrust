@@ -743,6 +743,8 @@ describe("a vault that keeps changing while it is read: no verdict, and nothing 
 		out.length = 0;
 		await inspectRun(tempDir, { json: true });
 		expect(json().data).toMatchObject({ chain: { valid: true, events: 3 } });
+		// The statement's rows come from the walk's events, not only its count.
+		expect(json().data.transactions).toHaveLength(3);
 		out.length = 0;
 		await exportRun(tempDir, { json: false }, ["--markdown", join(tempDir, "md-out")]);
 		expect(out.join("\n")).toMatch(/Chain integrity: verified/);
