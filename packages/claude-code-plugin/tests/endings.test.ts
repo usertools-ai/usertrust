@@ -1479,11 +1479,18 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 		await writeLines(main(), [V(), A()]);
 	};
 	const scenarios: Array<[string, Scenario]> = [
-		["every group posted (the control)", { lines: TWO, selected: 2, posted: 2, deferred: [] }],
+		// These two rows test no timing: they run at a budget whose per-call cap (about 1.75 s) a
+		// loaded host's stall cannot reach. The default 1.2 s gives each call about 300 ms, and a
+		// reply slower than that is aborted client-side (the test after this table pins that outcome).
+		[
+			"every group posted (the control)",
+			{ lines: TWO, budgetMs: 6_000, selected: 2, posted: 2, deferred: [] },
+		],
 		[
 			"a group refused (402)",
 			{
 				lines: TWO,
+				budgetMs: 6_000,
 				prepare: async () => {
 					fixed.set("/v1/authorize#1", ANSWER.refusal402 as Reply);
 				},
@@ -1737,6 +1744,41 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 				for (const record of deferred) expect(String(record.reason)).toContain(scenario.why);
 			}
 			if (scenario.said !== undefined) expect(end.stderr).toContain(scenario.said);
+		},
+		LONG,
+	);
+
+	it(
+		"a 402 slower than the call's time limit: the group is released with its gap, the next deferred, nothing else sent, and each message accounted for exactly once",
+		async () => {
+			await backdate();
+			await mkdir(join(stateDir, "jobs"), { recursive: true });
+			await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), JOB_LOG);
+			await writeLines(main(), TWO());
+			// At the default 1.2 s budget each call gets about 300 ms. The 402 below is sent only after
+			// the hook's WHOLE budget (1.5 s with its margin), so a loaded host would have to stall the
+			// hook's own abort by well over a second before the client could see it (the server did send it).
+			fixed.set("/v1/authorize#1", { ...(ANSWER.refusal402 as Answer), delayMs: 2_000 });
+			await runHook(join(HOOKS, "session-end.mjs"), seInput(), envFor(seBudget(1_200)));
+			await chmod(join(stateDir, "transcripts", "claims"), 0o700).catch(() => {});
+			expect(seen.map((request) => request.path)).toEqual(["/v1/health", "/v1/authorize"]);
+			expect(requests("/v1/settle")).toEqual([]);
+			const remainder = await phased("remainder");
+			const released = remainder.filter((r) => r.outcome === "released");
+			const deferred = remainder.filter((r) => r.outcome === "deferred");
+			expect(released).toHaveLength(1);
+			expect(released[0]).toMatchObject({ started: T.A, messages: 1 });
+			expect(String(released[0]?.reason)).toContain("authorize unreachable");
+			expect(deferred).toHaveLength(1);
+			expect(deferred[0]).toMatchObject({ agent: "main", started: T.B, messages: 1 });
+			expect(String(deferred[0]?.reason)).toContain("not posted (the server stopped answering)");
+			// Both are gap records, and nothing else is written for either message, anywhere.
+			expect(released[0]?.kind).toBe("gap");
+			expect(await records()).toEqual(remainder);
+			// Every message selected is accounted for exactly once, each by its own start.
+			const sum = remainder.reduce((n, r) => n + Number(r.messages ?? 0), 0);
+			expect(sum).toBe(2);
+			expect(remainder.map((r) => String(r.started)).sort()).toEqual([T.A, T.B].sort());
 		},
 		LONG,
 	);
