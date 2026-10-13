@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	deriveChainIntegrity,
@@ -29,8 +29,21 @@ export interface LedgerState {
 	summary: SummaryPayload;
 	lastHash: string;
 	byteOffset: number;
-	/** Whether the audit directory existed at this load: once a server has seen it, its absence is a deletion. */
+	/**
+	 * Whether the audit directory EXISTED at this load (a `stat` of it succeeded), readable or not: once a server has
+	 * seen it, its absence is a deletion, so a directory that was there and could not be listed still counts.
+	 */
 	auditDirPresent: boolean;
+	/**
+	 * Whether the audit directory existed AND could be listed at this load. False when it is absent and when it is
+	 * unreadable alike: a verdict raised from no readable log cannot be extended by an append, only re-derived.
+	 */
+	auditDirReadable: boolean;
+	/**
+	 * Whether this load found a deletion: the audit directory is absent after the process had seen it, or an earlier
+	 * load's deletion was carried in (`loadState`'s `deletionSeen`). The caller latches it for the life of the process.
+	 */
+	deletionDetected: boolean;
 }
 
 // Presence of the mirror file is not a verdict — a planted empty/junk file
@@ -77,24 +90,42 @@ export function readRemoteSettings(vaultPath: string): RemoteSettings {
 }
 
 /**
- * Whether the vault's audit directory is ABSENT, present, or could not be checked (its error code). Only ENOENT is
- * absence: `existsSync` is false on EACCES (no search permission on the vault) and on ENOTDIR too, and both readers
- * then see no events, so treating those as absence showed a vault this process cannot read as empty and clean.
+ * What the vault's audit directory is: `dir` is "absent", "present", or the error code of a check that could not be
+ * made, and `listError` is the error code of listing a PRESENT directory (undefined when it lists).
+ * Only ENOENT is absence: `existsSync` is false on EACCES (no search permission on the vault) and on ENOTDIR too, and
+ * both readers then see no events, so treating those as absence showed a vault this process cannot read as empty and
+ * clean. Presence is decided by `stat` alone and listing is kept apart from it: a directory that exists and cannot be
+ * listed (mode 111) is still there, so deleting it later is a deletion and never a first run.
  */
-function auditDirState(vaultPath: string): "absent" | "present" | string {
+function auditDirState(vaultPath: string): {
+	dir: "absent" | "present" | string;
+	listError?: string;
+} {
 	const auditPath = join(vaultPath, "audit");
 	try {
 		statSync(auditPath);
-		return "present";
 	} catch (err) {
-		const code = (err as NodeJS.ErrnoException).code;
-		if (code !== "ENOENT") return code ?? "unknown error";
-		// statSync follows links, so a link whose target is missing (an unmounted volume, say) throws ENOENT too: the vault
-		// is out of reach, not absent. Either link counts: the audit entry or the vault directory itself.
-		if (isDanglingLink(auditPath) || isDanglingLink(vaultPath))
-			return "a symbolic link on its path has no target";
-		return "absent";
+		return { dir: statFailure(vaultPath, auditPath, err) };
 	}
+	// A directory this process may stat but not list (no read permission on it) is present and unreadable: both readers
+	// see no events, and the verifier names it "could not be enumerated". Listing it here says so as an unreadable read.
+	try {
+		readdirSync(auditPath);
+	} catch (err) {
+		return { dir: "present", listError: (err as NodeJS.ErrnoException).code ?? "unknown error" };
+	}
+	return { dir: "present" };
+}
+
+/** "absent" for a path that is really missing, else the code (or reason) the check could not be made. */
+function statFailure(vaultPath: string, auditPath: string, err: unknown): string {
+	const code = (err as NodeJS.ErrnoException).code;
+	if (code !== "ENOENT") return code ?? "unknown error";
+	// statSync follows links, so a link whose target is missing (an unmounted volume, say) throws ENOENT too: the vault
+	// is out of reach, not absent. Either link counts: the audit entry or the vault directory itself.
+	if (isDanglingLink(auditPath) || isDanglingLink(vaultPath))
+		return "a symbolic link on its path has no target";
+	return "absent";
 }
 
 /** True for a symbolic link that does not resolve; false for anything else, including a path that does not exist. */
@@ -115,15 +146,26 @@ function isDanglingLink(path: string): boolean {
 /** `verifyVault`'s error for a vault with no audit directory: no evidence either way, not tampering. */
 const NO_AUDIT_DIR = "Audit directory not found:";
 
+/** The chain error a deletion detected while the dashboard was open carries, on every load for as long as it is latched. */
+const DELETION_ERROR =
+	"The audit directory disappeared while this dashboard was open (deletion detected)";
+
 /**
  * `auditDirSeen`: whether this process has ever seen the vault's audit directory. A first run has none; a directory that
  * existed and is gone was deleted, whatever it held (events, malformed lines, nothing), and must never read as a first
  * run. A count of parsed events missed a log of malformed lines only, which verification fails with zero events.
+ *
+ * `deletionSeen`: whether an earlier load of this process already detected such a deletion. The caller latches the
+ * returned `deletionDetected` and passes it back, and it holds for the life of the process: the deletion error stays in
+ * `summary.chain.errors` and the chain stays invalid whatever the directory holds afterwards, because a directory
+ * recreated with a fresh valid chain is not the one that was destroyed. Its events may still load and show as rows; only
+ * the verdict is fixed. A first run (never seen, nothing deleted) is unaffected.
  */
 export function loadState(
 	vaultPath: string,
 	rowCap: number = ROW_CAP,
 	auditDirSeen = false,
+	deletionSeen = false,
 ): LedgerState {
 	const events = readLedgerEvents(vaultPath);
 	const integrity = deriveChainIntegrity(events);
@@ -140,24 +182,24 @@ export function loadState(
 	// words the missing-directory error differently, it is kept too: the vault reads as broken, never as clean.
 	// The exception is for an audit directory this process has never seen: one deleted while the dashboard was open
 	// (the live tail resyncs, and the reload finds it gone) is evidence destroyed, not a first run.
-	const auditDir = auditDirState(vaultPath);
-	const deletedWhileOpen = auditDir === "absent" && auditDirSeen;
-	const noAuditDir = events.length === 0 && auditDir === "absent" && !auditDirSeen;
-	const errors = noAuditDir
+	const { dir: auditDir, listError } = auditDirState(vaultPath);
+	// A deletion is latched: once detected it is carried by every later load, so a directory recreated in its place
+	// (even one holding a valid chain) cannot clear the evidence that the original was destroyed.
+	const deletionDetected = (auditDir === "absent" && auditDirSeen) || deletionSeen;
+	const noAuditDir =
+		events.length === 0 && auditDir === "absent" && !auditDirSeen && !deletionDetected;
+	const readErrors = noAuditDir
 		? vault.errors.filter((e) => !e.startsWith(NO_AUDIT_DIR))
-		: deletedWhileOpen
-			? [
+		: auditDir === "absent" || (auditDir === "present" && listError === undefined)
+			? vault.errors
+			: // verifyVault calls an unreadable directory "not found": say what actually stopped the read.
+				[
 					...vault.errors,
-					"The audit directory disappeared while this dashboard was open (deletion detected)",
-				]
-			: auditDir === "absent" || auditDir === "present"
-				? vault.errors
-				: // verifyVault calls an unreadable directory "not found": say what actually stopped the read.
-					[
-						...vault.errors,
-						`Audit directory could not be read (${auditDir}): this vault was not verified`,
-					];
-	const valid = integrity.valid && (vault.valid || (noAuditDir && errors.length === 0));
+					`Audit directory could not be read (${listError ?? auditDir}): this vault was not verified`,
+				];
+	const errors = deletionDetected ? [...readErrors, DELETION_ERROR] : readErrors;
+	const valid =
+		integrity.valid && !deletionDetected && (vault.valid || (noAuditDir && errors.length === 0));
 
 	const truncated = events.length > rowCap;
 	const visible = truncated ? events.slice(-rowCap) : events;
@@ -197,5 +239,7 @@ export function loadState(
 		lastHash: events.at(-1)?.hash ?? GENESIS,
 		byteOffset,
 		auditDirPresent: auditDir === "present",
+		auditDirReadable: auditDir === "present" && listError === undefined,
+		deletionDetected,
 	};
 }
