@@ -1414,6 +1414,37 @@ describe("what the unserializable-request check leaves as it was", () => {
 		expect(policyDenied()).toEqual([]);
 	});
 
+	it.each<[string, () => AbortSignal]>([
+		["AbortSignal.timeout()", () => AbortSignal.timeout(60_000)],
+		["AbortSignal.any()", () => AbortSignal.any([new AbortController().signal])],
+	])(
+		"Google: a real signal from %s with an own cycle is the transport's too, and is sent",
+		async (_, make) => {
+			const { client, eng } = await google();
+			const signal = make();
+			Object.assign(signal, { self: signal });
+			await client.models.generateContent({ ...G, config: { abortSignal: signal } });
+			expect(sent).toHaveLength(1);
+			expect(eng.spendPending).toHaveBeenCalledTimes(1);
+			expect(policyDenied()).toEqual([]);
+		},
+	);
+
+	it("Google: a spread copy of a signal (its own state, a plain prototype) with a cycle is the request's, and is refused before any hold", async () => {
+		const { client, eng } = await google();
+		const copy: Record<string, unknown> = { ...new AbortController().signal };
+		copy.self = copy;
+		const err = await client.models.generateContent({ ...G, config: { abortSignal: copy } }).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(PolicyDeniedError);
+		expect(String((err as Error).message)).toMatch(/request_unserializable/);
+		expect(sent).toEqual([]);
+		expect(eng.spendPending).not.toHaveBeenCalled();
+		expect(policyDenied()).toHaveLength(1);
+	});
+
 	it.each(["generateContent", "generateContentStream"] as const)(
 		"Google %s: a NON-signal object with a cycle at config.abortSignal is the request's, and is refused before any hold (it never reached the wire before either: the SDK's transport threw on it, after a hold)",
 		async (method) => {

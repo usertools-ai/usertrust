@@ -1231,16 +1231,19 @@ const ENVELOPE_FUNDING_HINT =
 	"another envelope. Raising the trust()/createGovernor() budget funds the session wallet, " +
 	"which an attributed call never debits.";
 
-/** The native `aborted` getter of this realm's AbortSignal, captured at load: a brand check. */
+/** This realm's AbortSignal prototype and its native `aborted` getter, captured at load. */
+const abortSignalPrototype: object | undefined = globalThis.AbortSignal?.prototype;
 const abortSignalAborted = Object.getOwnPropertyDescriptor(
-	globalThis.AbortSignal?.prototype ?? {},
+	abortSignalPrototype ?? {},
 	"aborted",
 )?.get;
 
 /**
  * Whether `value` is a real AbortSignal of this realm, decided without running caller code: no
- * Proxy anywhere on its prototype chain (a bounded walk), and the native `aborted` getter accepts
- * it (it throws for anything without the signal's internal state). A lookalike is not one.
+ * Proxy anywhere on its prototype chain (a bounded walk), its prototype IS this realm's
+ * `AbortSignal.prototype` (a spread copy of a signal carries the signal's own state, symbols
+ * included, so the getter alone would take it), and the native `aborted` getter accepts it (it
+ * throws for anything without the signal's state). A lookalike is not one.
  */
 function isRealAbortSignal(value: unknown): boolean {
 	if (abortSignalAborted === undefined || value === null || typeof value !== "object") return false;
@@ -1249,6 +1252,7 @@ function isRealAbortSignal(value: unknown): boolean {
 		if (depth >= 64 || utilTypes.isProxy(o)) return false;
 		o = Object.getPrototypeOf(o);
 	}
+	if (Object.getPrototypeOf(value) !== abortSignalPrototype) return false;
 	try {
 		abortSignalAborted.call(value);
 		return true;
