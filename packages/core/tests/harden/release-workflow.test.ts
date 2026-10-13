@@ -886,9 +886,7 @@ beforeAll(() => {
 		calls: join(store, "calls"),
 		head: git("rev-parse", "HEAD"),
 	};
-	// The default hook limit is 10 s. A world and a pack take under a second idle, but they are
-	// all process creation, which is what a loaded machine stretches.
-}, 60_000);
+});
 
 afterAll(() => {
 	if (template) rmSync(template, { recursive: true, force: true });
@@ -922,23 +920,7 @@ describe("release.sh pack", { timeout: 30_000 }, () => {
 	});
 });
 
-// Limits for the rows that run `release.sh publish`, which is ~100 child processes (20 node, 6
-// python3 assemblies, ~40 git, the fake npm's bash and awk) and so is process creation almost
-// end to end: 1.9 s idle, 2.3 s in a coverage run, and several times that when the box is
-// busy. A row runs it once to six times. The slowest rows, measured on a 14-core box with
-// coverage on (the file's rows sum to ~190 s idle):
-//   idle                               12.1 s  the six-answer row (six publishes)
-//   full suite                         16.5 s  the same row
-//   full suite + 14 busy loops         40.0 s  the same row; 30.1 s the four-publish row;
-//                                              21.6 s the slowest of the other rows
-// against the 30 s every row had. The two rows with four or more publishes failed or sat on
-// the edge, so they get twice the worst figure, rounded up; every other row in the two publish
-// groups gets about three times the slowest of the rest. These limits are hang guards: no row
-// asserts how long it took, and each `run()` has its own 20 s kill.
-const PUBLISH_ROW_TIMEOUT_MS = 60_000;
-const MANY_PUBLISH_ROW_TIMEOUT_MS = 90_000;
-
-describe("release.sh publish", { timeout: PUBLISH_ROW_TIMEOUT_MS }, () => {
+describe("release.sh publish", { timeout: 30_000 }, () => {
 	it("dry run: the real publish command plus --dry-run, for every tarball, in order", () => {
 		const out = packAll();
 		const r = run(["publish", out, "HEAD", "--dry-run"]);
@@ -1001,10 +983,7 @@ describe("release.sh publish", { timeout: PUBLISH_ROW_TIMEOUT_MS }, () => {
 		expect(log()).toEqual(published("1.0.0", DIRS.slice(2), false));
 	});
 
-	// A dry run and three more publishes: see MANY_PUBLISH_ROW_TIMEOUT_MS.
-	it("a republish refuses a version npm holds with other bytes, before publishing anything", {
-		timeout: MANY_PUBLISH_ROW_TIMEOUT_MS,
-	}, () => {
+	it("a republish refuses a version npm holds with other bytes, before publishing anything", () => {
 		const out = packAll();
 		expect(run(["publish", out, "HEAD", "--dry-run"], { REPUBLISH: "true" }).status).toBe(0);
 		const ours = distOf("1.0.0", "verify").split(" ");
@@ -1030,10 +1009,9 @@ describe("release.sh publish", { timeout: PUBLISH_ROW_TIMEOUT_MS }, () => {
 
 	// Six registry answers, each a full `release.sh publish`: the pack is shared across the six,
 	// the publish is not, because each answer must reach the digest check on its own run. This
-	// is the slowest row in the file (see MANY_PUBLISH_ROW_TIMEOUT_MS).
-	it("a republish refuses when npm's digest for a version it holds cannot be read", {
-		timeout: MANY_PUBLISH_ROW_TIMEOUT_MS,
-	}, () => {
+	// is the slowest row in the file: ~12 s idle against the 30 s limit, which is the limit it
+	// had before the shared world and pack, and stays.
+	it("a republish refuses when npm's digest for a version it holds cannot be read", () => {
 		const out = packAll();
 		for (const dist of [
 			"",
@@ -1164,7 +1142,7 @@ describe("release.sh publish", { timeout: PUBLISH_ROW_TIMEOUT_MS }, () => {
 	});
 });
 
-describe("release.sh publish: the npm dist-tag", { timeout: PUBLISH_ROW_TIMEOUT_MS }, () => {
+describe("release.sh publish: the npm dist-tag", { timeout: 30_000 }, () => {
 	it("the newest release publishes all six under latest, dry run and real", () => {
 		gitIn(join(dir, "origin.git"), "tag", "v0.9.0", "master");
 		git("tag", "-a", "v1.0.0", "-m", "v1.0.0");
