@@ -2315,7 +2315,7 @@ describe("a getter config that answers a different httpOptions on its later read
 	}
 });
 
-describe("an accessor anywhere on the option path is read when the SDK reads it, and governed on what was read", () => {
+describe("an accessor config or httpOptions is read when the SDK reads it, and governed on what was read; an accessor key inside httpOptions is refused at call start", () => {
 	const SECRET = "ssn 123-45-6789";
 	const EXTRA = () => ({ extraBody: { labels: { secret: SECRET } } });
 
@@ -2328,7 +2328,7 @@ describe("an accessor anywhere on the option path is read when the SDK reads it,
 		expect(r.gov.requests).toHaveLength(0);
 	}
 
-	/** Each accessor level, holding what `answer` gives. */
+	/** Each deferred accessor level, holding what `answer` gives. */
 	const levels: Array<[string, (answer: () => Loose) => () => Loose]> = [
 		[
 			"a getter config.httpOptions (own)",
@@ -2342,18 +2342,22 @@ describe("an accessor anywhere on the option path is read when the SDK reads it,
 			(answer) => () =>
 				request(Object.create(Object.defineProperty({}, "httpOptions", { get: answer })) as Loose),
 		],
-		[
-			"a getter key inside a data httpOptions",
-			(answer) => () => {
-				const value = answer();
-				const options = {};
-				for (const [key, v] of Object.entries(value)) {
-					Object.defineProperty(options, key, { get: () => v, enumerable: true });
-				}
-				return request({ httpOptions: options });
-			},
-		],
 	];
+
+	/** A data httpOptions whose every key is a getter answering `value`'s, its runs counted. */
+	function getterKeys(value: Loose, runs: { n: number }) {
+		const options = {};
+		for (const [key, v] of Object.entries(value)) {
+			Object.defineProperty(options, key, {
+				get: () => {
+					runs.n++;
+					return v;
+				},
+				enumerable: true,
+			});
+		}
+		return request({ httpOptions: options });
+	}
 
 	for (const method of METHODS) {
 		for (const [backend, vertex] of BACKENDS) {
@@ -2372,6 +2376,33 @@ describe("an accessor anywhere on the option path is read when the SDK reads it,
 				it(`${on}, ${level} holding extraBody: refused on what the SDK read, nothing sent`, async () => {
 					const r = await nativeThenGoverned(method, same(make(EXTRA)), { vertex });
 					expectRefusedOnWhatWasRead(r);
+				});
+			}
+
+			for (const [held, value, name] of [
+				[
+					"only an allowed key",
+					{ headers: { "x-test": "via an accessor" } },
+					"config.httpOptions.headers (an accessor)",
+				],
+				["extraBody", EXTRA(), "config.httpOptions.extraBody"],
+			] as const) {
+				it(`${on}, a getter key inside a data httpOptions holding ${held}: refused at call start, as on master, its getter never run, nothing sent`, async () => {
+					const runs = { native: { n: 0 }, governed: { n: 0 } };
+					const r = await nativeThenGoverned(
+						method,
+						{
+							native: () => getterKeys(value, runs.native),
+							governed: () => getterKeys(value, runs.governed),
+						},
+						{ vertex },
+					);
+					expect(r.rawResult).toBe("ok"); // natively it is sent
+					expect(r.govResult).toContain("request_option_refused");
+					expect(r.govResult).toContain(name);
+					expect(r.auditKinds).toEqual(["policy_denied"]);
+					expect(r.gov.requests).toHaveLength(0);
+					expect(runs.governed.n).toBe(0);
 				});
 			}
 

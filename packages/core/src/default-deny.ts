@@ -938,10 +938,12 @@ export function movedRequestOptions(
  * - a Proxy (or a chain too deep) anywhere on the path cannot be read: REFUSED, as the per-call
  *   option check names it; that includes a Proxy as `httpOptions` itself (`ungovernedKeysOf`);
  * - an option key off the list held as DATA is REFUSED, as that check refuses it;
- * - an ACCESSOR anywhere on the path (a getter `config`, a getter `httpOptions`, own or inherited,
- *   or a getter key inside `httpOptions`) is DEFERRED: not refused, nothing pinned (`pinned:
- *   undefined`); the request gate's dry run reads it as the SDK does, and the per-call option check
- *   on the request that is sent governs what was read, before anything is held or sent;
+ * - an ACCESSOR key inside a data `httpOptions` is REFUSED, its getter never run, as that check
+ *   refuses it on master (`ungovernedKeysOf`'s "(an accessor)");
+ * - an ACCESSOR `config`, or an accessor `httpOptions` (own or inherited), is DEFERRED: not refused,
+ *   nothing pinned (`pinned: undefined`); the request gate's dry run reads it as the SDK does, and
+ *   the per-call option check on the request that is sent governs what was read, before anything is
+ *   held or sent (master sends these);
  * - a path that is plain data throughout is PINNED for that path at every later read: a NEW object
  *   holding only the governed keys of the first data `httpOptions` on the chain (and whether the
  *   SDK's own key listing of config sees it: own and enumerable), or absent when there is none.
@@ -967,28 +969,13 @@ export function googleHttpOptionsAtCallStart(request: unknown):
 	if (http.kind === "accessor") return { pinned: undefined };
 	if (http.kind === "absent" || http.value === undefined || http.value === null) return absent;
 	const options = http.value;
-	// A getter key inside httpOptions is deferred too; a data key off the list beside it is not.
-	const accessorKeys = plainObject(options)
-		? Object.getOwnPropertyNames(options).filter((key) => {
-				const d = Object.getOwnPropertyDescriptor(options, key);
-				return d !== undefined && !("value" in d);
-			})
-		: [];
-	const deferredNames = new Set(
-		accessorKeys.flatMap((key) => [
-			`config.httpOptions.${key}`,
-			`config.httpOptions.${key} (an accessor)`,
-			`config.httpOptions.${key} (internal)`,
-		]),
-	);
 	const refused = ungovernedKeysOf(
 		options,
 		GOVERNED_GOOGLE_HTTP_OPTIONS,
 		"config.httpOptions.",
 		"config.httpOptions",
-	).filter((name) => !deferredNames.has(name));
+	);
 	if (refused.length > 0) return { refused };
-	if (accessorKeys.length > 0) return { pinned: undefined };
 	const own = utilTypes.isProxy(config.value)
 		? undefined
 		: Object.getOwnPropertyDescriptor(config.value as object, "httpOptions");
