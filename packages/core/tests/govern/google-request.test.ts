@@ -1967,6 +1967,36 @@ describe("the hold is sized from the request that is sent", () => {
 		expect(held[0]).toBeGreaterThanOrEqual(posted[0] as number);
 	});
 
+	it("generateContent: the same, with a field beside model, contents and config: still held for what is sent, and the body is the native one (the field is never sent)", async () => {
+		const long = "lorem ipsum dolor sit amet ".repeat(15_000);
+		const usage = { promptTokenCount: 100_000, candidatesTokenCount: 10, totalTokenCount: 100_010 };
+		const late = async (models: unknown, w: ReturnType<typeof wire>) => {
+			globalThis.fetch = w.fetchStub as typeof fetch;
+			const params: Loose = { ...request({}, "short"), metadata: { classification: "internal" } };
+			const pending = runOn(models, "generateContent", params);
+			params["contents"] = long;
+			return (await pending).result;
+		};
+		const raw = wire([{ text: "done" }], usage);
+		expect(await late(sdkClient(false).models, raw)).toBe("ok");
+		const { engine, held, posted } = recordingEngine();
+		const governed = await trust(sdkClient(false), {
+			dryRun: false,
+			budget: 50_000_000,
+			vaultBase: vault,
+			_engine: engine,
+			_audit: recordingAudit(),
+		});
+		const gov = wire([{ text: "done" }], usage);
+		expect(await late(governed.models, gov)).toBe("ok");
+		await governed.destroy();
+		expect(gov.requests.map((q) => q.body)).toEqual(raw.requests.map((q) => q.body));
+		expect(JSON.stringify(gov.requests)).not.toContain("classification");
+		expect(held).toHaveLength(1);
+		expect(posted).toHaveLength(1);
+		expect(held[0]).toBeGreaterThanOrEqual(posted[0] as number);
+	});
+
 	// REGRESSION GUARD, not evidence for the request pipeline: master's own hold estimate makes this
 	// pass with or without it (it counts a Google prompt's contents). It stays to keep the Google path
 	// on that estimate.
@@ -2599,6 +2629,30 @@ describe("a request's own fields beside model, contents and config reach the pol
 				expect(out.result).toContain("[classified]");
 				expect(reads.n).toBe(1);
 				expect(w.requests).toHaveLength(0);
+			});
+
+			it(`${on}: with no policy on it, a getter for the field runs once, as on the base (measured there: 1), and the call is sent as natively`, async () => {
+				const reads = { native: 0, governed: 0 };
+				const make = (side: "native" | "governed") => () => {
+					const params = request({ temperature: 0.5 });
+					Object.defineProperty(params, "metadata", {
+						get() {
+							reads[side]++;
+							return { classification: "secret" };
+						},
+						enumerable: true,
+					});
+					return params;
+				};
+				const r = await nativeThenGoverned(
+					method,
+					{ native: make("native"), governed: make("governed") },
+					{ vertex },
+				);
+				expect(r.govResult).toBe("ok");
+				expectSameSend(r);
+				expect(reads.native).toBe(0); // the SDK never reads it
+				expect(reads.governed).toBe(1); // the base read it once, for the policy
 			});
 
 			it(`${on}: with no policy on it, the field is not on the wire: governed == native, the self-check passing`, async () => {
