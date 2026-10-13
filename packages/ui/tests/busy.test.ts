@@ -15,6 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const stand = vi.hoisted(() => ({
 	vault: undefined as "busy" | undefined,
+	/** The next this many vault reads are busy, then the vault holds still (a writer that stopped). */
+	busyReads: 0,
 	tx: undefined as "busy" | "failed" | undefined,
 }));
 
@@ -23,7 +25,7 @@ vi.mock("usertrust", async (importOriginal) => {
 	return {
 		...orig,
 		verifyVault: (vaultPath: string) =>
-			stand.vault === "busy"
+			stand.vault === "busy" || (stand.busyReads > 0 && stand.busyReads-- > 0)
 				? {
 						valid: false,
 						errors: ["the vault is being written: no verdict (run verify again)"],
@@ -56,6 +58,7 @@ vi.mock("usertrust-verify", async (importOriginal) => {
 });
 
 const { loadState } = await import("../src/server/state.js");
+const { createAuditWriter } = await import("../../core/src/audit/chain.js");
 const { createUiServer } = await import("../src/server/server.js");
 const { chainStatus } = await import("../src/shared/display.js");
 const { verifyOutcome } = await import("../src/shared/verify-view.js");
@@ -65,6 +68,7 @@ beforeEach(() => {
 	tempDir = mkdtempSync(join(tmpdir(), "trust-ui-busy-"));
 	mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
 	stand.vault = undefined;
+	stand.busyReads = 0;
 	stand.tx = undefined;
 });
 afterEach(() => {
@@ -123,5 +127,62 @@ describe("the dashboard's words for a vault with no verdict", () => {
 	it("CONTROL: the same answer without either flag is 'not found'", () => {
 		const body = { found: false, valid: false, receipt: "", errors: ["why"] };
 		expect(verifyOutcome(404, body)).toEqual({ kind: "not-found", receipt: "", reason: "why" });
+	});
+});
+
+describe("a busy verdict on the live dashboard clears once the vault holds still", () => {
+	/** One event on the chain, so a load sees log bytes and only `busy` can send a grow to a full reload. */
+	async function oneEvent(n: number): Promise<void> {
+		const w = createAuditWriter(tempDir);
+		try {
+			await w.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: `tx_${n}` } });
+		} finally {
+			w.release();
+		}
+	}
+
+	/** The summary's chain, polled until `done` holds or `ms` pass: the last one read. */
+	async function chainUntil(
+		port: number,
+		done: (chain: Record<string, unknown>) => boolean,
+		ms: number,
+	): Promise<Record<string, unknown>> {
+		const deadline = Date.now() + ms;
+		for (;;) {
+			const body = (await (await fetch(`http://127.0.0.1:${port}/api/summary`)).json()) as {
+				chain: Record<string, unknown>;
+			};
+			if (done(body.chain) || Date.now() > deadline) return body.chain;
+			await new Promise((r) => setTimeout(r, 50));
+		}
+	}
+
+	it("with no append at all: the vault is read again until a load gives a verdict (a busy re-read included)", async () => {
+		await oneEvent(1);
+		// The first load and the first re-read are busy; the writer then stops.
+		stand.busyReads = 2;
+		const ui = await createUiServer(tempDir, { port: 0, busyRecheckMs: 50 });
+		try {
+			const chain = await chainUntil(ui.port, (c) => c.busy !== true, 5_000);
+			expect(chain).toMatchObject({ valid: true, events: 1 });
+			expect(chain.busy).toBeUndefined();
+		} finally {
+			await ui.close();
+		}
+	});
+
+	it("an append while busy is a full reload, which gives the verdict (the re-read timer too far off to)", async () => {
+		await oneEvent(1);
+		stand.busyReads = 1;
+		const ui = await createUiServer(tempDir, { port: 0, busyRecheckMs: 600_000 });
+		try {
+			expect((await chainUntil(ui.port, () => true, 0)).busy).toBe(true);
+			await oneEvent(2);
+			const chain = await chainUntil(ui.port, (c) => c.busy !== true, 5_000);
+			expect(chain).toMatchObject({ valid: true, events: 2 });
+			expect(chain.busy).toBeUndefined();
+		} finally {
+			await ui.close();
+		}
 	});
 });

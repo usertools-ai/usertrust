@@ -41,6 +41,7 @@ import {
 	listDirectory,
 	MAX_EVENT_LINE_BYTES,
 	MAX_INVENTORY_NAMES,
+	MAX_TAIL_BYTES,
 	openFailure,
 	readLogTail,
 } from "./tail-read.js";
@@ -1139,11 +1140,15 @@ function isLegacyEvent(line: Buffer): boolean {
  * pre-flight while such a line is one of the last two (a vault's first appends after an upgrade).
  * A read that fails on the open log is LOG_UNREADABLE, by name, like any other input.
  */
+/**
+ * The tail as an append would classify it, through the descriptor it would write through, with the
+ * length in bytes of the log's last complete line as that read found it (0 with no log, or no line).
+ */
 function classifyForAppend(
 	auditDir: string,
 	logPath: string,
 	opened: ReturnType<typeof openLogByPath>,
-): TailState {
+): { tail: TailState; lastLineBytes: number } {
 	let log: LogObservation;
 	if (opened.fd === undefined) {
 		log = opened.log;
@@ -1163,7 +1168,7 @@ function classifyForAppend(
 			log = { kind: "unavailable", code: errorCode(err) ?? "EUNKNOWN" };
 		}
 	}
-	return classifyAuditTail(
+	const tail = classifyAuditTail(
 		{
 			audit: listDirectory(auditDir, MAX_INVENTORY_NAMES, true),
 			quarantine: listDirectory(join(auditDir, "quarantine")),
@@ -1172,6 +1177,8 @@ function classifyForAppend(
 		},
 		"writer",
 	);
+	const lastLineBytes = log.kind === "tail" ? (log.tail.lines.at(-1)?.length ?? 0) : 0;
+	return { tail, lastLineBytes };
 }
 
 /** The error an append refused in `tail` throws: nothing has been written. */
@@ -1409,10 +1416,15 @@ function createAuditWriterAt(
 	 * open log (the caller owns it), or no descriptor for a FRESH vault without one: the log is never
 	 * created here, only by the append, with its event in hand.
 	 */
-	function prepareAppend(): { fd: number | undefined; previousHash: string; sequence: number } {
+	function prepareAppend(): {
+		fd: number | undefined;
+		previousHash: string;
+		sequence: number;
+		lastLineBytes: number;
+	} {
 		const opened = openLogByPath(logPath);
 		try {
-			const tail = classifyForAppend(auditDir, logPath, opened);
+			const { tail, lastLineBytes } = classifyForAppend(auditDir, logPath, opened);
 			const action = writerAction(tail);
 			if (action === "refuse") throw refusalOf(logPath, tail);
 			if (!baselineDurable) {
@@ -1431,7 +1443,12 @@ function createAuditWriterAt(
 				);
 			}
 			const head = tail.found ?? { hash: GENESIS_HASH, sequence: 0 };
-			return { fd: opened.fd, previousHash: head.hash, sequence: head.sequence + 1 };
+			return {
+				fd: opened.fd,
+				previousHash: head.hash,
+				sequence: head.sequence + 1,
+				lastLineBytes,
+			};
 		} catch (err) {
 			if (opened.fd !== undefined) closeSync(opened.fd);
 			throw err;
@@ -1474,6 +1491,16 @@ function createAuditWriterAt(
 					if (lineBytes > MAX_EVENT_LINE_BYTES) {
 						throw new Error(
 							`audit event refused: its line is ${lineBytes} bytes, over the ${MAX_EVENT_LINE_BYTES}-byte bound for one event (this event was not written)`,
+						);
+					}
+					// Nor a tail the NEXT append could not read: this line, the last one before it and the
+					// newline before that, within the bound the tail is read within. Only a last line an
+					// older writer left over the bound for one event can break that (a legacy vault): the
+					// event is refused, and an ordinary one after it still goes on.
+					const tailBytes = head.lastLineBytes + lineBytes + 3;
+					if (tailBytes > MAX_TAIL_BYTES) {
+						throw new Error(
+							`audit event refused: with it, the log's last two lines would take ${tailBytes} bytes, over the ${MAX_TAIL_BYTES}-byte bound they are read within (this event was not written)`,
 						);
 					}
 					if (fd !== undefined) break;
@@ -1562,7 +1589,7 @@ function createAuditWriterAt(
 			holdLock();
 			const opened = openLogByPath(logPath);
 			try {
-				const tail = classifyForAppend(auditDir, logPath, opened);
+				const { tail } = classifyForAppend(auditDir, logPath, opened);
 				if (writerAction(tail) === "refuse") throw refusalOf(logPath, tail);
 			} finally {
 				if (opened.fd !== undefined) closeSync(opened.fd);

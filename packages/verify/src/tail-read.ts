@@ -41,9 +41,9 @@ import type {
 export const MAX_TAIL_BYTES = 64 * 1024 * 1024;
 
 /**
- * The most bytes one event's line may take. The writer refuses a larger event before writing it, so
- * the last two lines and a torn third always fit `MAX_TAIL_BYTES`: a writer never writes a tail it
- * would then refuse to read.
+ * The most bytes one event's line may take. The writer refuses a larger event before writing it, and
+ * one that, with the last line before it, would not fit `MAX_TAIL_BYTES` (a last line an older writer
+ * left over this bound): a writer never writes a tail it would then refuse to read.
  */
 export const MAX_EVENT_LINE_BYTES = 16 * 1024 * 1024;
 

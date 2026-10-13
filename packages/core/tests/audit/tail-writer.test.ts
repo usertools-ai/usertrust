@@ -755,6 +755,120 @@ describe("the writer's own limits: a line it could not read back, a new log's di
 		expect(verifyVault(join(root, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 2 });
 	});
 
+	const MIB = 1024 * 1024;
+	/** The vault's files by digest: a buffer of tens of MiB in an assertion's diff would exhaust the heap. */
+	const digests = () =>
+		Object.fromEntries(
+			Object.entries(files()).map(([k, v]) => [
+				k,
+				v instanceof Buffer ? createHash("sha256").update(v).digest("hex") : v,
+			]),
+		);
+
+	/**
+	 * A legacy vault: one event, then one an older writer left over the bound for one event (`pad` bytes of
+	 * filler), correctly chained and anchored, so its tail is MATCH. Returns that last line's length.
+	 */
+	async function legacyBigTail(pad: number): Promise<number> {
+		await vaultOf(1);
+		const first = JSON.parse(lines()[0] as string) as { hash: string };
+		const body = {
+			id: "legacy-big",
+			timestamp: "2026-10-01T00:00:00.000Z",
+			previousHash: first.hash,
+			kind: "llm_call",
+			actor: "local",
+			data: { transferId: "tx_legacy", pad: "x".repeat(pad) },
+			sequence: 2,
+		};
+		const hash = createHash("sha256").update(canonicalize(body)).digest("hex");
+		const line = canonicalize({ ...body, hash });
+		writeFileSync(logPath(), `${readFileSync(logPath(), "utf-8")}${line}\n`);
+		writeFileSync(metaPath(), JSON.stringify({ lastHash: hash, sequence: 2 }));
+		return Buffer.byteLength(line);
+	}
+
+	const padded = (transferId: string, pad: number) => ({
+		kind: "tool_use",
+		actor: "local",
+		data: { transferId, pad: "x".repeat(pad) },
+	});
+
+	it("a legacy last line over the bound for one event: an event that would leave a tail over the read bound is refused, a 1 KiB one goes on, and the vault stays appendable", async () => {
+		await legacyBigTail(50 * MIB);
+		const before = digests();
+		const w = createAuditWriter(root);
+		let refused: unknown;
+		try {
+			// 15 MiB is within the bound for one event, but with the 50 MiB line before it the tail is not
+			// one the next append (or pre-flight) could read: TAIL_OVERSIZE, for good, for every event.
+			refused = await outcome(w.appendEvent(padded("tx_15m", 15 * MIB)));
+			expect(digests(), "nothing written").toEqual(before);
+			await w.appendEvent(padded("tx_1k", 1024));
+			await w.appendEvent(input(4));
+		} finally {
+			w.release();
+		}
+		expect(refused).toBeInstanceOf(Error);
+		expect(message(refused)).toMatch(
+			/over the 67108864-byte bound they are read within \(this event was not written\)/,
+		);
+		expect(deadLetters()).toHaveLength(1);
+		// A writer that opens the vault afresh classifies it, and appends: it stayed appendable.
+		const again = createAuditWriter(root);
+		try {
+			await again.appendEvent(input(5));
+		} finally {
+			again.release();
+		}
+		expect(verifyVault(join(root, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 5 });
+	});
+
+	it("the tail bound to the byte: one byte over it is refused; exactly at it is written, and the next append reads that tail", async () => {
+		const legacy = await legacyBigTail(50 * MIB);
+		// The writer's line for `padded(id, pad)` at sequence 3 is `pad` plus a fixed overhead: measured on a
+		// probe vault's third event (the same shape, the same digit counts).
+		const probeRoot = mkdtempSync(join(tmpdir(), "tail-writer-probe-"));
+		let overhead: number;
+		try {
+			const probe = createAuditWriter(probeRoot);
+			try {
+				await probe.appendEvent(input(1));
+				await probe.appendEvent(input(2));
+				await probe.appendEvent(padded("tx_edge", 10));
+			} finally {
+				probe.release();
+			}
+			const probeLines = readFileSync(join(probeRoot, VAULT_DIR, "audit", "events.jsonl"), "utf-8")
+				.trim()
+				.split("\n");
+			overhead = Buffer.byteLength(probeLines[2] as string) - 10;
+		} finally {
+			rmSync(probeRoot, { recursive: true, force: true });
+		}
+		// The tail after the append: the legacy line, the new one, and three newlines.
+		const atBound = 64 * MIB - 3 - legacy - overhead;
+		const w = createAuditWriter(root);
+		let over: unknown;
+		let at: unknown;
+		try {
+			over = await outcome(w.appendEvent(padded("tx_edge", atBound + 1)));
+			at = await outcome(w.appendEvent(padded("tx_edge", atBound)));
+		} finally {
+			w.release();
+		}
+		expect(message(over)).toMatch(/would take 67108865 bytes, over the 67108864-byte bound/);
+		expect(at).toBe("resolved");
+		expect(Buffer.byteLength(lines()[2] as string)).toBe(64 * MIB - 3 - legacy);
+		const next = createAuditWriter(root);
+		try {
+			expect(await outcome(next.appendEvent(input(4)))).toBe("resolved");
+		} finally {
+			next.release();
+		}
+		expect(verifyVault(join(root, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 4 });
+	});
+
 	it("a log this append creates is synced into its directory before the event is claimed durable", async () => {
 		fault.trace = [];
 		await vaultOf(1);

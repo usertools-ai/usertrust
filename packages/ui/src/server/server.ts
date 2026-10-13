@@ -41,6 +41,11 @@ import {
 
 /** How often the budget files are polled for a change (`fs.watchFile`: a missing file is watched too). */
 const BUDGET_POLL_MS = 1000;
+/**
+ * While the verdict is `busy` (the vault kept changing while it was read), a quiet vault is read again this often
+ * until a load gives one: no append may ever come to trigger a reload.
+ */
+const BUSY_RECHECK_MS = 1000;
 
 import { serveStatic } from "./static.js";
 import { watchLedger } from "./tail.js";
@@ -66,7 +71,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 export async function createUiServer(
 	rootDir: string,
-	opts?: { port?: number; appDir?: string },
+	opts?: { port?: number; appDir?: string; busyRecheckMs?: number },
 ): Promise<UiServer> {
 	const vaultPath = join(rootDir, VAULT_DIR);
 	// Compiled location is dist/server/ — the built SPA sits beside it in dist/app/.
@@ -104,7 +109,9 @@ export async function createUiServer(
 		// (an empty one, one with only an anchor) gave a verdict with nothing to check, and a truncated log that arrives
 		// later still links from genesis, so extending that state read as verified over a mismatched anchor. When the last
 		// load saw no log bytes, a grow re-derives the verdict from the whole vault.
-		if (!state.auditDirReadable || state.byteOffset === 0) {
+		// And a load that gave NO VERDICT (`busy`: the vault kept changing while it was read) has none to extend: every
+		// change while it stands is a full reload, which gives one once the vault holds still.
+		if (!state.auditDirReadable || state.byteOffset === 0 || state.summary.chain.busy === true) {
 			handleResync();
 			return;
 		}
@@ -188,6 +195,19 @@ export async function createUiServer(
 		version += 1;
 		broadcast("resync", {});
 		broadcast("summary", state.summary);
+		scheduleBusyRecheck();
+	}
+
+	/** The re-read of a busy verdict, pending: one at a time, never keeping the process alive, cleared on close. */
+	let busyRecheck: ReturnType<typeof setTimeout> | undefined;
+	let closed = false;
+	function scheduleBusyRecheck(): void {
+		if (closed || busyRecheck !== undefined || state.summary.chain.busy !== true) return;
+		busyRecheck = setTimeout(() => {
+			busyRecheck = undefined;
+			if (!closed && state.summary.chain.busy === true) handleResync();
+		}, opts?.busyRecheckMs ?? BUSY_RECHECK_MS);
+		busyRecheck.unref();
 	}
 
 	const handler = (req: IncomingMessage, res: ServerResponse): void => {
@@ -394,6 +414,8 @@ export async function createUiServer(
 		broadcast("summary", state.summary);
 	};
 	for (const f of budgetFiles) watchFile(f, { interval: BUDGET_POLL_MS }, refreshBudget);
+	// A first load that gave no verdict is read again until one does.
+	scheduleBusyRecheck();
 
 	return {
 		server,
@@ -403,6 +425,9 @@ export async function createUiServer(
 			handleResync();
 		},
 		close(): Promise<void> {
+			closed = true;
+			if (busyRecheck !== undefined) clearTimeout(busyRecheck);
+			busyRecheck = undefined;
 			stopWatching();
 			for (const f of budgetFiles) unwatchFile(f, refreshBudget);
 			for (const c of clients) c.end();
