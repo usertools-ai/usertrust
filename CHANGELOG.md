@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Request options that change what a governed call sends are refused.** A governed call is scanned for PII and injection, held and priced from its request parameters. But the SDKs also take per-call request options, and some of them replace what those parameters describe, so the call sent something governance never saw:
+  - **Anthropic and OpenAI, the second argument:** `body`; `fetchOptions` (its `body` wins); Anthropic's `middleware`; `path`; `defaultBaseURL`; and every internal `__` option (`__binaryResponse` skipped reading usage, so the call settled at its estimate).
+  - **Google:** `config.httpOptions.extraBody` and `config.httpOptions.baseUrl`.
+
+  For example, under `pii: "block"`, a clean request whose `options.body` carried a US SSN was sent, unrefused.
+
+  Every governed method (create, stream and parse alike) now rejects such a call with a `PolicyDeniedError` naming the option, after one `policy_denied` event, before anything is held or sent. A Google client created with `httpOptions.extraBody` is refused by `trust()`. `timeout`, `maxRetries`, `signal`, `headers`, `query`, `method`, `idempotencyKey`, and Google's `apiVersion`, `headers` and `timeout` stay governed. (LIMITATIONS.md, "1. The governance surface is the wrapped SDK methods — nothing else".)
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading

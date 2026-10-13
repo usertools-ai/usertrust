@@ -57,6 +57,8 @@ import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
 	guardedGet,
 	type MethodBoundary,
+	movedRequestError,
+	movedRequestOptions,
 	rawClientStandIn,
 	refuseWrites,
 	transportChangedError,
@@ -1694,6 +1696,27 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// reason. `budget/attribution.ts` documents the mechanics and its suite
 			// pins the emitter-tick hazard as a negative case.
 			const attribution = getCurrentCostCenter();
+			// ── Request options that would move what is sent past governance ──
+			// Read before anything is scanned, held or priced, and without running caller code
+			// (default-deny.ts `movedRequestOptions`): every governed method of every provider
+			// enters here, so one check covers create, stream and parse alike.
+			const moved = movedRequestOptions(kind, args, thisArg);
+			if (moved.length > 0) {
+				const refusal = movedRequestError(kind, moved);
+				const model = ownStringDataProperty(args[0], "model");
+				await appendDenialEvent({
+					audit,
+					actor: "local",
+					error: refusal,
+					record: { denialClass: "policy" },
+					fields: {
+						...(model !== undefined ? { model } : {}),
+						endpointClass: endpoint.class,
+						...(attribution !== undefined ? { costCenter: attribution.costCenter } : {}),
+					},
+				});
+				throw refusal;
+			}
 			const envelope = resolveEnvelope(attribution, config.parentUserId);
 			// Spread into every audit record this call emits (A1: an attributed hold
 			// must leave an attributed forensic trail on the settle AND the void
@@ -4309,6 +4332,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			readOnly: new WeakMap(),
 		};
 		if (kind === "google") {
+			// A client whose own httpOptions carry `extraBody` merges it into every request: refused
+			// here, at creation, as every call through it would be (`movedRequestOptions`).
+			const clientMoved = movedRequestOptions(kind, [], ownDataProperty(client, "models"));
+			if (clientMoved.length > 0) throw movedRequestError(kind, clientMoved);
 			return buildGoogleProxy(
 				client,
 				interceptCall,

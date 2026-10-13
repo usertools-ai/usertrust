@@ -51,6 +51,7 @@
  * Duck-typed like detect.ts: no provider SDK is imported here.
  */
 
+import { types as utilTypes } from "node:util";
 import { PolicyDeniedError } from "./shared/errors.js";
 
 export type DefaultDenyProvider = "anthropic" | "openai" | "google";
@@ -605,6 +606,91 @@ const GOVERNED_WITH_OPTIONS_KEYS: Record<DefaultDenyProvider, ReadonlySet<string
 export function transportOptionKeys(provider: DefaultDenyProvider, options: unknown): string[] {
 	if (options == null || typeof options !== "object") return [];
 	return Object.keys(options).filter((key) => !GOVERNED_WITH_OPTIONS_KEYS[provider].has(key));
+}
+
+/**
+ * The per-call request options (the SECOND argument on Anthropic and OpenAI) that would change
+ * what is sent past governance. Each SDK posts `{ body, ...options }` and spreads `fetchOptions`
+ * last over the request, so these replace what trust() scanned, held and priced:
+ *   - the body: `body`, `fetchOptions` (its `body` replaces the request's), `middleware` (Anthropic:
+ *     it rewrites the request after the SDK built it);
+ *   - the destination: `path` (another endpoint, one default-deny may refuse as a method),
+ *     `defaultBaseURL` (another host, on a client left on its default one);
+ *   - how the answer is read: every `__`-prefixed key (internal, not public API; `__binaryResponse`
+ *     returns the raw body, so usage is never extracted and the call settles at its estimate).
+ * Measured through the real SDKs. `timeout`, `maxRetries`, `signal`, `headers`, `query`, `method`
+ * and `idempotencyKey` change neither the body nor the host and stay governed.
+ */
+const MOVED_REQUEST_OPTIONS: ReadonlySet<string> = new Set([
+	"body",
+	"fetchOptions",
+	"middleware",
+	"path",
+	"defaultBaseURL",
+]);
+
+/** Google's `httpOptions` keys that do the same: `extraBody` merges into the body, `baseUrl` moves the host. */
+const MOVED_GOOGLE_HTTP_OPTIONS: ReadonlySet<string> = new Set(["extraBody", "baseUrl"]);
+
+/**
+ * The refused keys `obj` carries, each named under `at`. A key counts when it is present at all,
+ * whatever its value: the SDK's spread copies an `undefined` too, so `{ path: undefined }` replaces
+ * the call's path. Fails CLOSED where it cannot read without running caller code: a Proxy is
+ * refused whole (the spread would run its traps), and an accessor is never called.
+ */
+function refusedKeysOf(obj: unknown, refused: (key: string) => boolean, at: string): string[] {
+	if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) return [];
+	if (utilTypes.isProxy(obj)) return [`${at} (a Proxy)`];
+	return Object.getOwnPropertyNames(obj)
+		.filter(refused)
+		.map((key) => `${at}${key}`);
+}
+
+/** An own data property, or undefined: no accessor and no Proxy trap runs. */
+function ownData(obj: unknown, key: string): unknown {
+	if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) return undefined;
+	if (utilTypes.isProxy(obj)) return undefined;
+	const d = Object.getOwnPropertyDescriptor(obj, key);
+	return d !== undefined && "value" in d ? d.value : undefined;
+}
+
+/**
+ * What a governed call carries that would change what is sent past governance (empty: nothing).
+ * Anthropic and OpenAI: the per-call request options, `args[1]`. Google: the request's
+ * `config.httpOptions`, and, through `target` (the SDK resource the call runs on), the client's own
+ * `httpOptions`, which the SDK merges into every request.
+ */
+export function movedRequestOptions(
+	provider: DefaultDenyProvider,
+	args: readonly unknown[],
+	target?: unknown,
+): string[] {
+	if (provider !== "google") {
+		return refusedKeysOf(
+			args[1],
+			(key) => MOVED_REQUEST_OPTIONS.has(key) || key.startsWith("__"),
+			"",
+		);
+	}
+	const config = ownData(args[0], "config");
+	const perCall = ownData(config, "httpOptions");
+	const client = ownData(ownData(ownData(target, "apiClient"), "clientOptions"), "httpOptions");
+	return [
+		...(utilTypes.isProxy(config) ? ["config (a Proxy)"] : []),
+		...refusedKeysOf(perCall, (key) => MOVED_GOOGLE_HTTP_OPTIONS.has(key), "config.httpOptions."),
+		...refusedKeysOf(client, (key) => key === "extraBody", "client httpOptions."),
+	];
+}
+
+/** The refusal for a governed call whose request options would move what is sent (`movedRequestOptions`). */
+export function movedRequestError(
+	provider: DefaultDenyProvider,
+	keys: readonly string[],
+): PolicyDeniedError {
+	return new PolicyDeniedError(
+		`request_option_refused: ${PROVIDER_NAME[provider]} call's request options would change what is sent past governance (${keys.join(", ")})`,
+		"A governed call is scanned, held and priced from its request parameters, so options that replace its body (body, fetchOptions, middleware, Google's httpOptions.extraBody), move it to another endpoint or host (path, defaultBaseURL, Google's httpOptions.baseUrl), or change how its answer is read (any __ option) are refused. timeout, maxRetries, signal, headers, query, method and idempotencyKey stay governed. Put the request in the call's parameters, or wrap a client built for that transport with its own trust() call.",
+	);
 }
 
 /** The refusal for every call through a `withOptions()` client whose transport changed. */
