@@ -833,6 +833,70 @@ describe("nothing that cannot be read without running caller code is read as abs
 		);
 	});
 
+	it("an INHERITED allowed option is refused, not silently dropped from the copy", async () => {
+		const { client, eng } = await anthropic();
+		const options = Object.create({ headers: { "anthropic-beta": "x" } });
+		await expectRefused(
+			() => client.messages.create(A, options),
+			eng,
+			/options \(not a plain object\)/,
+		);
+	});
+
+	it("a null-prototype options object is plain, and an accessor on it is still refused, uncalled", async () => {
+		const { client, eng } = await anthropic();
+		const getter = vi.fn(() => 5000);
+		const options = Object.create(null);
+		Object.defineProperty(options, "timeout", { get: getter, enumerable: true });
+		await expectRefused(() => client.messages.create(A, options), eng, /timeout \(an accessor\)/);
+		expect(getter).not.toHaveBeenCalled();
+		// and a null-prototype object of data passes, copied
+		const { client: c2, eng: e2 } = await anthropic();
+		const plain = Object.assign(Object.create(null), { timeout: 5000 });
+		await c2.messages.create(A, plain);
+		expect(e2.spendPending).toHaveBeenCalledTimes(1);
+	});
+
+	it("Google: a per-call config held by an accessor, or given as a Proxy, is refused", async () => {
+		const { client, eng } = await google();
+		const request: Record<string, unknown> = { ...G };
+		Object.defineProperty(request, "config", {
+			get: () => ({ httpOptions: { extraBody: { a: 1 } } }),
+			enumerable: true,
+		});
+		const err = await client.models.generateContent(request).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(PolicyDeniedError);
+		expect(sent).toEqual([]);
+		expect(eng.spendPending).not.toHaveBeenCalled();
+		const err2 = await client.models
+			.generateContent({ ...G, config: new Proxy({ httpOptions: { extraBody: { a: 1 } } }, {}) })
+			.then(
+				() => null,
+				(e: unknown) => e,
+			);
+		expect(err2).toBeInstanceOf(PolicyDeniedError);
+		expect(sent).toEqual([]);
+	});
+
+	it("the trusted root is no wider than the root: a Proxy client whose resource carries a plain _client with fetchOptions.body is refused", async () => {
+		const raw = rawAnthropic();
+		const tainted = Object.create(raw.messages);
+		// a fresh, plain stand-in for the resource's client, carrying a body in its fetchOptions
+		Object.defineProperty(tainted, "_client", {
+			value: { fetchOptions: { body: "{}" } },
+			enumerable: true,
+		});
+		const wrapped = new Proxy(raw, {
+			get: (target, key, receiver) =>
+				key === "messages" ? tainted : Reflect.get(target, key, receiver),
+		});
+		const { client, eng } = await govern(wrapped);
+		await expectRefused(() => client.messages.create(A), eng, /client fetchOptions\.body/);
+	});
+
 	it("DECLARED: a client handed to trust() inside a forwarding Proxy is trusted transport, and works", async () => {
 		const { client, eng } = await govern(new Proxy(rawAnthropic(), {}));
 		await client.messages.create(A);
