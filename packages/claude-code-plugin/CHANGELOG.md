@@ -5,6 +5,33 @@ plugin marketplace (`/plugin marketplace add usertools-ai/usertrust`), not from
 npm, and its version is its own: the `usertrust` packages and their
 [changelog](../../CHANGELOG.md) are versioned separately.
 
+## [Unreleased]
+
+### Fixed
+
+- **A session metered later no longer bills what it did before.** The plugin kept one first-run
+  time per state directory. A session that first ran with no hook of this plugin (a lane switched
+  on later, or a session already open at install) had every response since that time settled at
+  its first metered hook, onto that hook's hold, stamped with the wrong time. Each session now has
+  its own first-run time, stamped by the first hook of this plugin that touches the session in
+  that state directory, whatever the hook does: SessionStart, or any later hook, including one
+  that only writes a gap, a refusal or a deferral, since metering was on then. A session first met
+  at a later hook (one that ran with no hook at all) is stamped there. Nothing a session wrote
+  before its own time is posted. Those responses are
+  declared once per agent instead, as a `pre-metering` watch record
+  (`{"kind":"pre-metering","session":…,"agent":…,"responses":N,"reason":"written before this session was metered; not billed","started":null}`).
+  It is never billed and never a `gap`: the gap figure counts only calls missed while metering
+  was on. The job report names the count in its own `beforeMetering` field, apart from
+  `knownGaps`, per session (`unattributed.sessions`) and attributed to no job: when those
+  responses were written is not kept, so two jobs that share a session name the same entry.
+  It counts each agent's transcript, so a fork's copied history counts again: an upper bound. A session the state already held a cursor for before this change keeps the
+  state's time, so a response it left unposted is still posted.
+  Two edges are declared, not fixed:
+  - A session that ran an older SessionStart but had no cursor yet at the upgrade is stamped at
+    its first hook after it, so what it wrote in between is declared `pre-metering`, once.
+  - Two agents of a session whose first hooks race keep the stamp published first, which may be
+    the later clock by milliseconds.
+
 ## [3.0.2] - 2026-10-12
 
 ### Fixed

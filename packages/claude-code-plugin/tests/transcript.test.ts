@@ -1475,6 +1475,7 @@ describe("idempotency and concurrency", () => {
 			`${SESSION}__main.json`,
 			"claims",
 			"since",
+			"since-session",
 		]);
 	});
 
@@ -2682,7 +2683,11 @@ describe("estimate holds", () => {
 		// one stderr line is watch mode's (the default) reason for letting the call
 		// through, which lands in Claude Code's debug log; there is no other note.
 		expect(pre.stderr).toBe("usertrust: reserved tx_1 (1 ut)\n");
-		expect((await readdir(join(stateDir, "transcripts"))).sort()).toEqual(["estimate", "since"]);
+		expect((await readdir(join(stateDir, "transcripts"))).sort()).toEqual([
+			"estimate",
+			"since",
+			"since-session",
+		]);
 		expect(
 			await readFile(join(stateDir, "transcripts", "estimate", `${SESSION}__main`), "utf-8"),
 		).toBe("UT_CC_USAGE=estimate");

@@ -502,9 +502,13 @@ describe("under an open breaker, every hook sends nothing and touches nothing", 
 			},
 		]);
 		// The agent's transcript state is untouched: no cursor, no window, no marker. Only the
-		// state's first-run time is stamped (transcript.mjs `stampFirstRun`).
+		// state's first-run time and the session's are stamped (transcript.mjs `stampFirstRun`).
 		expect(await readdir(stateDir)).toEqual(["transcripts", "watch.jsonl"]);
-		expect(await readdir(join(stateDir, "transcripts"))).toEqual(["since"]);
+		expect((await readdir(join(stateDir, "transcripts"))).sort()).toEqual([
+			"since",
+			"since-session",
+		]);
+		expect(await readdir(join(stateDir, "transcripts", "since-session"))).toEqual([SESSION]);
 		// Another session: a session's settings, its usage included, are pinned at its first hook.
 		await run("pre-tool-use", preInput("tu_2", "estimate-session"), { UT_CC_USAGE: "estimate" });
 		expect(seen).toEqual([]);
@@ -522,7 +526,13 @@ describe("under an open breaker, every hook sends nothing and touches nothing", 
 		const post = await run("post-tool-use", postInput("tu_1"));
 		expect(post.code).toBe(0);
 		expect(seen).toEqual([]);
-		expect(await snapshot(stateDir, ["watch.jsonl", join("transcripts", "since")])).toEqual(before);
+		expect(
+			await snapshot(stateDir, [
+				"watch.jsonl",
+				join("transcripts", "since"),
+				join("transcripts", "since-session", SESSION),
+			]),
+		).toEqual(before);
 		expect(await records()).toMatchObject([
 			{
 				kind: "deferred",
@@ -576,6 +586,31 @@ describe("under an open breaker, every hook sends nothing and touches nothing", 
 			await run("stop", { session_id: SESSION, transcript_path: transcriptPath() });
 			expect(settles()).toHaveLength(1);
 			expect(settles()[0]?.body).toMatchObject({ inputTokens: 5, outputTokens: 6 });
+		},
+	);
+
+	it.each<[string, () => Record<string, unknown>]>([
+		["pre-tool-use", () => preInput("tu_1")],
+		["post-tool-use", () => postInput("tu_1")],
+		["stop", bare],
+		["subagent-stop", () => ({ session_id: SESSION, agent_id: "agent1" })],
+		["session-end", bare],
+	])(
+		"on a state that already has a first-run time, the %s skip stamps the SESSION's: the outage's usage is posted after the close, not declared as pre-metering",
+		async (hook, input) => {
+			// Another session made the state's time earlier; this session's first hook is the skip.
+			await run("session-start", { session_id: "another-session", source: "startup" });
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			await openBreaker();
+			await run(hook, input());
+			expect(seen).toEqual([]);
+			await writeTranscript(SESSION, "msg_a", new Date().toISOString());
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			await dueBreaker();
+			await run("stop", { session_id: SESSION, transcript_path: transcriptPath() });
+			expect(settles()).toHaveLength(1);
+			expect(settles()[0]?.body).toMatchObject({ inputTokens: 5, outputTokens: 6 });
+			expect((await records()).filter((r) => r.kind === "pre-metering")).toEqual([]);
 		},
 	);
 
