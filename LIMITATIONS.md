@@ -136,9 +136,10 @@ own:
   options are. The SDK is given that copy (only the allowed keys) wherever it
   later reads `params.config.httpOptions`, even through a `config` added or
   replaced after the call started; with none at the start, none is given. Your
-  own `httpOptions` is never read again. An `httpOptions` the config inherits is
-  not pinned: the SDK reads it through the prototype, as before, and the request
-  it builds is checked again before anything is sent.
+  own `httpOptions` is never read again. It is read as the SDK finds it, through
+  the prototype chain, so one the config inherits is checked and pinned the same
+  way. An accessor or a Proxy on the way (for `config` too), or a chain longer than
+  64 objects, cannot be read without running your code, and the call is refused.
 - **Every other field is read when the SDK reads it, not when the call starts.**
   The SDK reads the request after its own first `await`, so a field you change
   right after calling (a `systemInstruction`, `contents`) is sent as it is then,

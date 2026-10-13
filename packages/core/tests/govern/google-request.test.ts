@@ -1810,3 +1810,100 @@ describe("the hold is sized from the request that is sent", () => {
 		expect(held[0]).toBeGreaterThanOrEqual(posted[0] as number);
 	});
 });
+
+describe("an inherited config.httpOptions is read at call start as the SDK finds it, through the prototype chain, and governed", () => {
+	/** Refused at call start as a per-call option: audited, nothing sent. */
+	function expectOptionRefused(r: Outcome, named: string): void {
+		expect(r.govResult).toContain("request_option_refused");
+		expect(r.govResult).toContain(named);
+		expect(r.auditKinds).toEqual(["policy_denied"]);
+		expect(r.gov.requests).toHaveLength(0);
+	}
+
+	/** A config whose prototype holds `proto`'s own properties (no tools: the SDK reads httpOptions by name). */
+	const inheriting = (proto: object) => request(Object.create(proto) as Loose);
+
+	for (const method of METHODS) {
+		for (const [backend, vertex] of BACKENDS) {
+			const on = `${method} on ${backend}`;
+
+			it(`${on}: an INHERITED httpOptions holding only allowed keys is sent as natively (headers, timeout)`, async () => {
+				const make = () =>
+					inheriting({ httpOptions: { headers: { "x-test": "inherited" }, timeout: 7000 } });
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expectSameSend(r);
+				const seen = (q: { testHeader: string | null; timeoutHeader: string | null }) => [
+					q.testHeader,
+					q.timeoutHeader,
+				];
+				expect(r.raw.requests.map(seen)).toEqual([["inherited", "7"]]);
+				expect(r.gov.requests.map(seen)).toEqual(r.raw.requests.map(seen));
+			});
+
+			it(`${on}: an INHERITED httpOptions carrying extraBody is refused, nothing sent`, async () => {
+				const make = () => inheriting({ httpOptions: { extraBody: { labels: { a: "b" } } } });
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expect(r.raw.requests).toHaveLength(1); // natively merged and sent
+				expectOptionRefused(r, "config.httpOptions.extraBody");
+			});
+
+			it(`${on}: an httpOptions ACCESSOR on the config's prototype is refused, and the getter never runs`, async () => {
+				const getter = vi.fn(() => ({ headers: { "x-test": "from a getter" } }));
+				const make = () => inheriting(Object.defineProperty({}, "httpOptions", { get: getter }));
+				const r = await nativeThenGoverned(
+					method,
+					{ native: () => request({}), governed: make },
+					{ vertex },
+				);
+				expectOptionRefused(r, "config.httpOptions (unreadable, inherited)");
+				expect(getter).not.toHaveBeenCalled();
+			});
+
+			it(`${on}: a Proxy on the config's prototype chain is refused, and none of its traps runs`, async () => {
+				const traps = { n: 0 };
+				const count = () => {
+					traps.n++;
+				};
+				const proto = new Proxy(
+					{ httpOptions: { headers: { "x-test": "behind a Proxy" } } },
+					{
+						get: (t, k, r) => {
+							count();
+							return Reflect.get(t, k, r);
+						},
+						has: (t, k) => {
+							count();
+							return Reflect.has(t, k);
+						},
+						getOwnPropertyDescriptor: (t, k) => {
+							count();
+							return Reflect.getOwnPropertyDescriptor(t, k);
+						},
+						getPrototypeOf: (t) => {
+							count();
+							return Reflect.getPrototypeOf(t);
+						},
+					},
+				);
+				const make = () => inheriting(proto);
+				const r = await nativeThenGoverned(
+					method,
+					{ native: () => request({}), governed: make },
+					{ vertex },
+				);
+				expectOptionRefused(r, "config.httpOptions (unreadable, inherited)");
+				expect(traps.n).toBe(0);
+			});
+
+			it(`${on}: a config whose prototype chain is 65 objects deep is refused (past 64, it cannot be told), nothing sent`, async () => {
+				const make = () => {
+					let proto: object = {};
+					for (let i = 0; i < 64; i++) proto = Object.create(proto) as object;
+					return request(Object.create(proto) as Loose);
+				};
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expectOptionRefused(r, "config.httpOptions (unreadable, inherited)");
+			});
+		}
+	}
+});

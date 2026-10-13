@@ -906,38 +906,75 @@ export function movedRequestOptions(
 	];
 }
 
+// TEMPORARY: verbatim copy of B-464's readThroughChain; replaced by the import when it merges
+/** How many objects `readThroughChain` walks before it gives up and reads the property as unreadable. */
+const MAX_CHAIN_DEPTH = 64;
+
 /**
- * A Google request's `config.httpOptions` as call start pins it, for every later read of the path
- * `params.config.httpOptions`: when `readOwn` finds a plain object there (an own data property,
- * enumerable or not), a NEW object holding only its governed keys, each read once, and whether it
- * was enumerable; when there is none, absent. `undefined` (nothing pinned, the SDK reads the path
- * as it would) only when the config inherits an `httpOptions`, which is left to the SDK as before.
- * Run after `movedRequestOptions` passed the request (which refused any key off the list), so
- * nothing here runs caller code: the prototype chain is walked through descriptors, stopping at a
- * Proxy.
+ * Property `key` of `holder` as the SDK's own `holder[key]` finds it, read without running caller
+ * code: the prototype chain is walked from `holder`, and the first object holding `key` decides.
+ * Its value when that is a data property, `undefined` when no object on the chain holds it, and
+ * `UNREADABLE` when it cannot be read that way: an object on the chain up to that point is a Proxy
+ * (its descriptor and prototype traps are caller code), the property is an accessor, or the holder
+ * itself was unreadable. An inherited property is read, not taken as absent: the SDK reads these
+ * keys by plain property access, so a client built with `Object.create(client)`, or options whose
+ * prototype carries the key, would otherwise send what the check never saw. Fails CLOSED: every
+ * check below REFUSES what is unreadable, and never reads it as absent, so an accessor or a Proxy
+ * at any step of a chain is refused. A chain longer than `MAX_CHAIN_DEPTH` objects is unreadable
+ * too: no SDK object comes near it, and the walk stays bounded however the chain was built.
  */
-export function pinnedGoogleHttpOptions(
-	request: unknown,
-): { httpOptions: Record<string, unknown> | undefined; enumerable: boolean } | undefined {
-	const config = readOwn(request, "config");
-	const http = readOwn(config, "httpOptions");
-	if (http === undefined && inheritsKey(config, "httpOptions")) return undefined;
-	if (!plainObject(http)) return { httpOptions: undefined, enumerable: false };
-	const d = Object.getOwnPropertyDescriptor(config as object, "httpOptions");
-	return {
-		httpOptions: governedCopy(http, GOVERNED_GOOGLE_HTTP_OPTIONS),
-		enumerable: d?.enumerable === true,
-	};
+export function readThroughChain(holder: unknown, key: string): unknown {
+	if (holder === UNREADABLE) return UNREADABLE;
+	if (holder == null || (typeof holder !== "object" && typeof holder !== "function")) {
+		return undefined;
+	}
+	let o: object | null = holder;
+	for (let depth = 0; o !== null; depth++) {
+		if (depth >= MAX_CHAIN_DEPTH || utilTypes.isProxy(o)) return UNREADABLE;
+		const d = Object.getOwnPropertyDescriptor(o, key);
+		if (d !== undefined) return "value" in d ? d.value : UNREADABLE;
+		o = Object.getPrototypeOf(o);
+	}
+	return undefined;
 }
 
-/** Does `obj` (not a Proxy) hold `key` below itself, on its prototype chain? Descriptors only, stopping at a Proxy. */
-function inheritsKey(obj: unknown, key: string): boolean {
-	if (obj === null || typeof obj !== "object" || utilTypes.isProxy(obj)) return false;
-	for (let o = Object.getPrototypeOf(obj); o !== null; o = Object.getPrototypeOf(o)) {
-		if (utilTypes.isProxy(o)) return false;
-		if (Object.getOwnPropertyDescriptor(o, key) !== undefined) return true;
+/**
+ * A Google request's `params.config.httpOptions` at call start, read as the SDK's own plain property
+ * access finds it, through the prototype chain (`readThroughChain`: no caller code runs), and
+ * governed: what to refuse (the per-call option check's names: an unreadable step, an accessor or a
+ * Proxy on the chain, or a key off the list), or the pin served for that PATH at every later read:
+ * the first data `httpOptions` on the chain, as a NEW object holding only its governed keys (and
+ * whether the SDK's own key listing of config would see it: own and enumerable), or absent.
+ */
+export function googleHttpOptionsAtCallStart(
+	request: unknown,
+):
+	| { refused: string[] }
+	| { pinned: { httpOptions: Record<string, unknown> | undefined; enumerable: boolean } } {
+	const config = readThroughChain(request, "config");
+	if (config === UNREADABLE) return { refused: ["config (unreadable)"] };
+	const http = readThroughChain(config, "httpOptions");
+	const own =
+		config !== null && typeof config === "object" && !utilTypes.isProxy(config)
+			? Object.getOwnPropertyDescriptor(config, "httpOptions")
+			: undefined;
+	const name = own === undefined ? "config.httpOptions (inherited)" : "config.httpOptions";
+	if (http === UNREADABLE) {
+		return {
+			refused: [
+				own === undefined ? "config.httpOptions (unreadable, inherited)" : `${name} (unreadable)`,
+			],
+		};
 	}
-	return false;
+	const refused = ungovernedKeysOf(http, GOVERNED_GOOGLE_HTTP_OPTIONS, "config.httpOptions.", name);
+	if (refused.length > 0) return { refused };
+	if (!plainObject(http)) return { pinned: { httpOptions: undefined, enumerable: false } };
+	return {
+		pinned: {
+			httpOptions: governedCopy(http, GOVERNED_GOOGLE_HTTP_OPTIONS),
+			enumerable: own?.enumerable === true,
+		},
+	};
 }
 
 /**

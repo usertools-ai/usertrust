@@ -57,12 +57,12 @@ import {
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
 	detachedArgs,
+	googleHttpOptionsAtCallStart,
 	guardedGet,
 	type MethodBoundary,
 	movedClientOptions,
 	movedRequestError,
 	movedRequestOptions,
-	pinnedGoogleHttpOptions,
 	rawClientStandIn,
 	refuseWrites,
 	transportChangedError,
@@ -1691,7 +1691,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		thisArg: unknown,
 		attribution: ReturnType<typeof getCurrentCostCenter>,
 	): Promise<never> | undefined {
-		const moved = movedRequestOptions(kind, args, thisArg);
+		return optionsRefusal(movedRequestOptions(kind, args, thisArg), args, attribution);
+	}
+
+	/** The refusal for request options named `moved` (none: `undefined`): its denial event, then the error. */
+	function optionsRefusal(
+		moved: readonly string[],
+		args: readonly unknown[],
+		attribution: ReturnType<typeof getCurrentCostCenter>,
+	): Promise<never> | undefined {
 		if (moved.length === 0) return undefined;
 		const refusal = movedRequestError(kind, moved);
 		const model = ownStringDataProperty(args[0], "model");
@@ -1722,8 +1730,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		args: readonly unknown[],
 		thisArg: unknown,
 	): { refused: Promise<never> } | { pinned: PinnedHttpOptions | undefined } {
-		const refused = movedOptionsRefusal(args, thisArg, getCurrentCostCenter());
-		if (refused === undefined) return { pinned: pinnedGoogleHttpOptions(args[0]) };
+		const attribution = getCurrentCostCenter();
+		const moved = movedRequestOptions(kind, args, thisArg);
+		// `config.httpOptions` as the SDK will find it, through the prototype chain: governed, then
+		// pinned for its path (or refused, as the per-call option check refuses).
+		const atStart = moved.length > 0 ? undefined : googleHttpOptionsAtCallStart(args[0]);
+		const refused = optionsRefusal(
+			atStart !== undefined && "refused" in atStart ? atStart.refused : moved,
+			args,
+			attribution,
+		);
+		if (refused === undefined) {
+			return { pinned: atStart !== undefined && "pinned" in atStart ? atStart.pinned : undefined };
+		}
 		// Counted in flight, like every refusal, so destroy() waits for its audit append.
 		inFlightCount++;
 		return {
