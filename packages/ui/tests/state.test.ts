@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { execFileSync } from "node:child_process";
 import {
 	appendFileSync,
+	chmodSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -11,10 +13,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
-import { loadState } from "../src/server/state.js";
+import { loadState, readRemoteSettings } from "../src/server/state.js";
 
 describe("loadState", () => {
 	let tempDir: string;
@@ -118,6 +121,68 @@ describe("loadState", () => {
 		expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
 		expect(summary.chain.errors.length).toBeGreaterThan(0);
 	});
+
+	// existsSync is false for a directory this process cannot reach, not only for an absent one, and both readers
+	// then see no events: the empty-vault exception made such a vault read as clean.
+	it("red-first (an unreadable vault read as clean): a vault path that is not a directory is a FAILURE, never empty", () => {
+		const blocked = join(tempDir, "blocked");
+		mkdirSync(blocked);
+		const notADir = join(blocked, ".usertrust");
+		writeFileSync(notADir, "not a directory");
+		const { summary } = loadState(notADir);
+		expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
+		expect(summary.chain.errors.join(" ")).toContain("could not be read (ENOTDIR)");
+	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"red-first (an unreadable vault read as clean): a vault this process may not search is a FAILURE, never empty",
+		async () => {
+			await seed(2);
+			chmodSync(vaultPath, 0o000);
+			try {
+				const { summary } = loadState(vaultPath);
+				expect(summary.chain).toMatchObject({ valid: false, empty: false });
+				expect(summary.chain.errors.join(" ")).toContain("could not be read (EACCES)");
+			} finally {
+				chmodSync(vaultPath, 0o700);
+			}
+		},
+	);
+
+	// Opening a FIFO blocks until a writer appears: a FIFO planted at the config path froze the server at startup and
+	// on every config poll. A helper thread opens the FIFO's write end after 1.5 s (non-blocking, so it never waits
+	// itself): it unblocks a reader that wrongly opened it, so a regression FAILS on the time bound instead of hanging.
+	it.skipIf(process.platform === "win32")(
+		"red-first (blocked on open): a FIFO at the config path is refused without being opened",
+		async () => {
+			const fifo = join(vaultPath, "usertrust.config.json");
+			execFileSync("mkfifo", [fifo]);
+			const helper = new Worker(
+				`const { openSync, writeSync, closeSync, constants } = require("node:fs");
+				const { workerData } = require("node:worker_threads");
+				const pause = new Int32Array(new SharedArrayBuffer(4));
+				Atomics.wait(pause, 0, 0, 1500);
+				const until = Date.now() + 5000;
+				while (Date.now() < until) {
+					try {
+						const fd = openSync(workerData, constants.O_WRONLY | constants.O_NONBLOCK);
+						writeSync(fd, '{"remote":{"kit":true}}');
+						closeSync(fd);
+						break;
+					} catch {
+						Atomics.wait(pause, 0, 0, 50);
+					}
+				}`,
+				{ eval: true, workerData: fifo },
+			);
+			const started = Date.now();
+			const remote = readRemoteSettings(vaultPath);
+			const elapsed = Date.now() - started;
+			await helper.terminate();
+			expect(elapsed).toBeLessThan(1000);
+			expect(remote).toEqual({ kit: false });
+		},
+	);
 
 	it("a vault with events is not empty", async () => {
 		await seed(1);

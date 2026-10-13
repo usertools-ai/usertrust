@@ -22,8 +22,24 @@ function Facet(props: {
 }): React.JSX.Element {
 	const { label, options, selected, onChange } = props;
 	const [open, setOpen] = useState(false);
+	// Placed when it opens: aligned to the trigger's right edge when it would otherwise run past the window's, and no
+	// taller than the room below the trigger, so no option is cut off at a window edge.
+	const [place, setPlace] = useState({ right: false, maxHeight: 300 });
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const triggerRef = useRef<HTMLButtonElement | null>(null);
+
+	const toggle = (): void => {
+		const trigger = triggerRef.current;
+		if (!open && trigger !== null) {
+			const r = trigger.getBoundingClientRect();
+			const width = Math.min(320, window.innerWidth - 32);
+			setPlace({
+				right: r.left + width > window.innerWidth - 16,
+				maxHeight: Math.max(140, Math.min(300, window.innerHeight - r.bottom - 24)),
+			});
+		}
+		setOpen((o) => !o);
+	};
 
 	useEffect(() => {
 		if (!open) return;
@@ -52,7 +68,7 @@ function Facet(props: {
 				type="button"
 				aria-haspopup="true"
 				aria-expanded={open}
-				onClick={() => setOpen((o) => !o)}
+				onClick={toggle}
 				title={active ? `${label}: ${selected.join(", ")}` : `filter by ${label}`}
 				className={`ut-chip${active ? " on" : ""}`}
 			>
@@ -63,7 +79,10 @@ function Facet(props: {
 				</span>
 			</button>
 			{open && (
-				<fieldset className="ut-pop">
+				<fieldset
+					className={`ut-pop${place.right ? " right" : ""}`}
+					style={{ maxHeight: place.maxHeight }}
+				>
 					<legend className="sr-only">filter by {label}</legend>
 					{options.length === 0 ? (
 						<div className="ut-opt">no values</div>

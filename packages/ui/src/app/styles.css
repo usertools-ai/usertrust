@@ -468,8 +468,9 @@ body {
 		position: absolute;
 		z-index: 30;
 		top: calc(100% + 8px);
-		min-width: 220px;
-		max-width: 320px;
+		left: 0;
+		min-width: min(220px, calc(100vw - 32px));
+		max-width: min(320px, calc(100vw - 32px));
 		max-height: 300px;
 		overflow: auto;
 		padding: 6px;
@@ -479,7 +480,12 @@ body {
 		box-shadow: var(--shadow);
 		animation: ut-swap 0.16s var(--ease-enter) both;
 	}
+	.ut-pop.right {
+		left: auto;
+		right: 0;
+	}
 	.ut-pop.text {
+		left: auto;
 		padding: 12px 14px;
 		font: 400 12.5px/1.5 var(--sans);
 		color: #d6d6db;
@@ -502,7 +508,8 @@ body {
 		flex-direction: column;
 		border: 1px solid var(--line);
 		border-radius: 16px;
-		overflow: hidden;
+		/* Not clipped here: the filter popovers open from this panel's bar and must reach past it. The body below
+		   clips the list and the inspector to the rounded corners. */
 		background: var(--page);
 	}
 	.ut-head {
@@ -740,6 +747,8 @@ body {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr);
 		min-height: 0;
+		overflow: hidden;
+		border-radius: 0 0 15px 15px;
 	}
 	.ut-body[data-docked="true"] {
 		grid-template-columns: minmax(0, 1fr) 380px;

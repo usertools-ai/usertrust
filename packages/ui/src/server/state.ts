@@ -60,14 +60,32 @@ export function budgetSummary(
 	};
 }
 
-/** The vault config's `remote` section. A missing or unreadable config leaves every remote load off. */
+/**
+ * The vault config's `remote` section. A missing or unreadable config leaves every remote load off. The path is
+ * statted FIRST: opening a FIFO planted there would block this process (at startup, and on every config poll).
+ */
 export function readRemoteSettings(vaultPath: string): RemoteSettings {
+	const path = join(vaultPath, "usertrust.config.json");
 	try {
-		return remoteSettings(
-			JSON.parse(readFileSync(join(vaultPath, "usertrust.config.json"), "utf-8")) as unknown,
-		);
+		if (!statSync(path).isFile()) return remoteSettings(undefined);
+		return remoteSettings(JSON.parse(readFileSync(path, "utf-8")) as unknown);
 	} catch {
 		return remoteSettings(undefined);
+	}
+}
+
+/**
+ * Whether the vault's audit directory is ABSENT, present, or could not be checked (its error code). Only ENOENT is
+ * absence: `existsSync` is false on EACCES (no search permission on the vault) and on ENOTDIR too, and both readers
+ * then see no events, so treating those as absence showed a vault this process cannot read as empty and clean.
+ */
+function auditDirState(vaultPath: string): "absent" | "present" | string {
+	try {
+		statSync(join(vaultPath, "audit"));
+		return "present";
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		return code === "ENOENT" ? "absent" : (code ?? "unknown error");
 	}
 }
 
@@ -88,10 +106,17 @@ export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerSt
 	// absent, is dropped; every other error stands. A log deleted while its anchor records events keeps its
 	// "deletion detected" (the anchor lives in the audit directory, so that directory exists), and if verifyVault ever
 	// words the missing-directory error differently, it is kept too: the vault reads as broken, never as clean.
-	const noAuditDir = events.length === 0 && !existsSync(join(vaultPath, "audit"));
+	const auditDir = auditDirState(vaultPath);
+	const noAuditDir = events.length === 0 && auditDir === "absent";
 	const errors = noAuditDir
 		? vault.errors.filter((e) => !e.startsWith(NO_AUDIT_DIR))
-		: vault.errors;
+		: auditDir === "absent" || auditDir === "present"
+			? vault.errors
+			: // verifyVault calls an unreadable directory "not found": say what actually stopped the read.
+				[
+					...vault.errors,
+					`Audit directory could not be read (${auditDir}): this vault was not verified`,
+				];
 	const valid = integrity.valid && (vault.valid || (noAuditDir && errors.length === 0));
 
 	const truncated = events.length > rowCap;
