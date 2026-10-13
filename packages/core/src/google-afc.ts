@@ -1121,14 +1121,28 @@ export function snapshotGoogleAfcParams(
 			schemaReadsAfterCopy: () => {
 				if (sdkCopiesConfig) readResponseSchemaAsGenerateContentDoes(readOnce, outConfig);
 			},
-			/** generateContentStream: `maybeMoveToResponseJsonSchem` runs FIRST, its `Object.keys` included. */
+			/** generateContentStream: `maybeMoveToResponseJsonSchem` runs FIRST; its by-name reads. */
 			schemaReadsFirst: () => {
 				schema = readOnce("responseSchema");
 				if (schema) jsonSchema = readOnce("responseJsonSchema");
 			},
-			/** Its `Object.keys(responseSchema)` (a Proxy's `ownKeys` trap), when that is truthy and `responseJsonSchema` falsy. */
+			// Its `Object.keys(responseSchema)` (a Proxy's `ownKeys` trap, when that is truthy and
+			// `responseJsonSchema` falsy) is made here ONLY where the SDK will not make it itself on the
+			// forwarded snapshot: with the copy (`tools` set) and a `responseSchema` the copy will not carry.
+			// Anywhere else the snapshot forwards the schema and the SDK inspects it once, as natively; a
+			// second inspection here could see a stateful trap answer differently. It needs `tools`, so it
+			// runs after it (and before the entries, which an `ownKeys` trap may still extend), not
+			// before `automaticFunctionCalling` as natively: a trap that changes that, or replaces
+			// `config.tools`, is not seen (master made no such inspection at all).
 			schemaKeys: () => {
-				if (schema && !jsonSchema) schemaMoves = Object.keys(schema).includes("$schema");
+				if (
+					sdkCopiesConfig &&
+					schema &&
+					!jsonSchema &&
+					!isOwnEnumerable(config, "responseSchema")
+				) {
+					schemaMoves = Object.keys(schema).includes("$schema");
+				}
 			},
 			streamMove: () => {
 				if (sdkCopiesConfig) {
@@ -1160,9 +1174,9 @@ export function snapshotGoogleAfcParams(
 			options.method === "generateContentStream"
 				? [
 						step.schemaReadsFirst,
-						step.schemaKeys,
 						step.automaticFunctionCalling,
 						step.tools,
+						step.schemaKeys,
 						step.toolEntries,
 						step.httpOptions,
 						step.configCopy,

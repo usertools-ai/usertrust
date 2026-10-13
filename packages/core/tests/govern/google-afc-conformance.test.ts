@@ -2601,11 +2601,7 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 
 				for (const withTools of [true, false]) {
 					const beside = withTools ? "beside tools" : "WITHOUT tools";
-					it(`${on}: an OWN ENUMERABLE responseSchema whose Object.keys throws ${beside}: ${
-						method === "generateContentStream"
-							? "refused, as the stream's Object.keys runs first (natively the SDK throws there); no request either way"
-							: "fails as natively, the SDK inspecting the forwarded copy itself; no request either way"
-					} (control)`, async () => {
+					it(`${on}: an OWN ENUMERABLE responseSchema whose Object.keys throws ${beside} fails as natively: the snapshot forwards it and the SDK inspects it once, itself; no request either way (control)`, async () => {
 						const r = await nativeThenGoverned(
 							method,
 							sameConfig(() => ({
@@ -2617,15 +2613,44 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 
 						expect(r.rawResult).toContain("ownKeys trap threw");
 						expect(r.raw.requests).toHaveLength(0);
-						if (method === "generateContentStream") {
-							// maybeMoveToResponseJsonSchem runs before anything else on the stream, so the snapshot's
-							// own Object.keys throws: an audited refusal, nothing charged.
-							expectRefused(r, method);
-						} else {
-							expect(r.govResult).toBe(r.rawResult);
-							expect(r.gov.requests).toHaveLength(0);
-						}
+						expect(r.govResult).toBe(r.rawResult);
+						expect(r.gov.requests).toHaveLength(0);
 					});
+
+					if (method === "generateContentStream") {
+						it(`${on}: an OWN ENUMERABLE responseSchema whose ownKeys answers differently on each call ${beside}: the snapshot makes no inspection of its own (one more trap call than natively: the governor's cost estimate, as on master)`, async () => {
+							const calls = { native: 0, governed: 0 };
+							const params = (who: keyof typeof calls) => () => {
+								const schema = new Proxy(
+									{ $schema: "https://json-schema.org/draft/2020-12/schema", type: "object" },
+									{
+										ownKeys(target) {
+											calls[who]++;
+											// the first inspection sees no $schema; any later one does
+											return calls[who] === 1 ? ["type"] : Reflect.ownKeys(target);
+										},
+									},
+								);
+								return request({
+									...(withTools ? { tools: SEARCH() } : {}),
+									responseSchema: schema,
+								});
+							};
+							const r = await nativeThenGoverned(
+								method,
+								{ native: params("native"), governed: params("governed") },
+								{ vertex },
+							);
+
+							expect(r.rawResult).toBe("ok");
+							expect(r.govResult).toBe("ok");
+							// interceptCall's cost estimate serializes the request (serializeRequest's JSON.stringify) before
+							// the SDK runs: one inspection outside the snapshot, made on master too, which a trap that
+							// answers differently each time sees first. The snapshot adds none: the SDK's own inspection of
+							// the forwarded schema is the only other one, as natively.
+							expect(calls.governed).toBe(calls.native + 1);
+						});
+					}
 				}
 
 				// generateContent's processParamsMaybeAddMcpUsage reads every tools ENTRY (`tools.map`) before it copies the
@@ -2814,7 +2839,20 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 							expect(r.govResult).toBe("ok");
 							expect(r.gov.requests.map((q) => q.body)).toEqual(r.raw.requests.map((q) => q.body));
 						}
-						expect(firstTouches(logs.governed)).toEqual(firstTouches(logs.native));
+						if (method === "generateContentStream") {
+							// The ONE declared difference: the stream's own Object.keys (needed only where the SDK will not
+							// inspect the schema itself) depends on `tools`, so it runs after `tools` and before the entries,
+							// where natively it runs first. Every other touch is in the SDK's order.
+							const KEYS = "responseSchema.ownKeys";
+							const governed = firstTouches(logs.governed);
+							expect(firstTouches(logs.native).indexOf(KEYS)).toBe(1);
+							expect(governed.indexOf(KEYS)).toBe(governed.indexOf("tools") + 1);
+							expect(governed.indexOf("tools[0]")).toBe(governed.indexOf(KEYS) + 1);
+							const without = (log: string[]) => firstTouches(log).filter((key) => key !== KEYS);
+							expect(without(logs.governed)).toEqual(without(logs.native));
+						} else {
+							expect(firstTouches(logs.governed)).toEqual(firstTouches(logs.native));
+						}
 					});
 				}
 
