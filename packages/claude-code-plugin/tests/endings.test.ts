@@ -1755,9 +1755,10 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			await mkdir(join(stateDir, "jobs"), { recursive: true });
 			await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), JOB_LOG);
 			await writeLines(main(), TWO());
-			// At the default 1.2 s budget each call gets about 300 ms: the 402 below arrives after
-			// the client has aborted, so the client never sees it (the server did send it).
-			fixed.set("/v1/authorize#1", { ...(ANSWER.refusal402 as Answer), delayMs: 600 });
+			// At the default 1.2 s budget each call gets about 300 ms. The 402 below is sent only after
+			// the hook's WHOLE budget (1.5 s with its margin), so a loaded host would have to stall the
+			// hook's own abort by well over a second before the client could see it (the server did send it).
+			fixed.set("/v1/authorize#1", { ...(ANSWER.refusal402 as Answer), delayMs: 2_000 });
 			await runHook(join(HOOKS, "session-end.mjs"), seInput(), envFor(seBudget(1_200)));
 			await chmod(join(stateDir, "transcripts", "claims"), 0o700).catch(() => {});
 			expect(seen.map((request) => request.path)).toEqual(["/v1/health", "/v1/authorize"]);
