@@ -24,6 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - an Anthropic or OpenAI client constructed with `fetchOptions` carrying `body` or `method`;
   - a Google client created with `httpOptions.extraBody`. A default client, and a cloud-provider subclass that signs requests, are unaffected. (LIMITATIONS.md, "1. The governance surface is the wrapped SDK methods — nothing else".)
 
+- **The budget hold now covers what the provider bills for.** A call is held before it is sent, and the ledger posts at most what it held, so a hold below the real cost under-debits the wallet. Worse, a budget check made against that hold lets a call through that the budget does not cover. The hold was sized from the prompt's message parts alone, which never counted:
+  - an Anthropic `system` given as text blocks (the form prompt caching needs);
+  - tools;
+  - Google `contents` (only 16 characters per message were counted, whatever the text);
+  - Google's `systemInstruction` and other config;
+  - Responses prompt variables.
+
+  Measured: a ~100k-token cached Anthropic system was held at 11 units against a cost of 2996, and under a budget of 500 it was sent and spent 2996. The input leg is now the larger of the old estimate and an estimate of the whole request body, read from the one serialized snapshot, in UTF-8 bytes, so non-ASCII text is no longer under-held. The output leg reads each provider's cap per candidate: OpenAI chat's `max_completion_tokens` and `n`, Google's `maxOutputTokens`, `candidateCount` and thinking budget. Google never holds below 4096 output tokens per candidate, because its thoughts are billed outside its candidates. No hold shrinks on input, and ordinary requests grow by their own structure: measured at 7 to 19 tokens. Calibration against real tokenizers is unmeasured. (LIMITATIONS.md, "4. Hard budget atomicity applies to full mode, not `dryRun`".)
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading

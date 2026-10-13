@@ -24,9 +24,29 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { scopedAnomalyCostCalculator, type TrustEngine, trust } from "../../src/govern.js";
+import {
+	extractPromptParts,
+	scopedAnomalyCostCalculator,
+	type TrustEngine,
+	trust,
+} from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
+import { holdInputTokens } from "../../src/ledger/pricing.js";
 import { TrustConfigSchema, type TrustReceipt } from "../../src/shared/types.js";
+
+/**
+ * The input tokens trust() holds for `request` (`holdInputTokens`: the prompt parts' estimate or
+ * the whole body's, whichever is larger), taken from the estimator for the exact request sent.
+ * These rows test which RATE the input leg is held at, not the estimator (hold-estimate.test.ts).
+ */
+const heldInput = (request: unknown, kind: "anthropic" | "openai" = "anthropic"): number =>
+	holdInputTokens(
+		extractPromptParts(request as Record<string, unknown>, kind),
+		JSON.parse(JSON.stringify(request)),
+	);
+/** The hold for `tokens` at an input rate (per 1k), plus max_tokens 1 of output (0.15). */
+const at = (tokens: number, inputPer1k: number): number =>
+	Math.ceil((tokens * inputPer1k) / 1000 + 0.15);
 
 vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(() => ({
@@ -111,33 +131,34 @@ describe("1-hour cache writes: governed paths", () => {
 
 	// ── 1. trust(): the hold covers the worst case THIS REQUEST can produce ──
 
-	async function holdFor(extra: Record<string, unknown>, content = "x".repeat(2000)) {
+	/** The hold trust() made for this request, and the tokens its input leg covers. */
+	async function holdFor(extra: Record<string, unknown>, content: unknown = "x".repeat(2000)) {
 		const engine = makeCappingEngine();
 		const governed = await trust(anthropic({ input_tokens: 10, output_tokens: 1 }), {
 			budget: 1_000_000,
 			vaultBase: tmpVault,
 			_engine: asEngine(engine),
 		});
-		await governed.messages.create({
+		const request = {
 			model: MODEL,
 			max_tokens: 1,
 			messages: [{ role: "user", content }],
 			...extra,
-		});
+		};
+		await governed.messages.create(request);
 		await governed.destroy();
-		return heldAmount(engine);
+		return { held: heldAmount(engine), tokens: heldInput(request) };
 	}
 
-	// 2000 chars -> estimateInputTokens = ceil((16 + 2000) / 4) x 1.5 = 756; max_tokens 1.
-	// 756 x 37.5 / 1000 = 28.35 (+ 0.15 output) -> 29;  756 x 60 / 1000 = 45.36 (+ 0.15) -> 46.
+	// The 5-minute input rate is 37.5 per 1k, the 1-hour one 60 (max_tokens 1 adds 0.15).
 	it("no 1h marker: held at the 5-minute rate, exactly as before", async () => {
-		expect(await holdFor({})).toBe(29);
+		const plain = await holdFor({});
+		expect(plain.held).toBe(at(plain.tokens, 37.5));
 		// A 5-minute marker is not a 1-hour one.
-		expect(
-			await holdFor({
-				system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "5m" } }],
-			}),
-		).toBe(29);
+		const fiveMinute = await holdFor({
+			system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "5m" } }],
+		});
+		expect(fiveMinute.held).toBe(at(fiveMinute.tokens, 37.5));
 	});
 
 	it("a 1h marker anywhere in the request holds the input leg at the 1h rate", async () => {
@@ -147,11 +168,13 @@ describe("1-hour cache writes: governed paths", () => {
 			{ tools: [{ name: "t", input_schema: {}, cache_control: marker }] },
 			{ cache_control: marker }, // top-level automatic caching
 		]) {
-			expect(await holdFor(extra), JSON.stringify(extra)).toBe(46);
+			const hold = await holdFor(extra);
+			expect(hold.held, JSON.stringify(extra)).toBe(at(hold.tokens, 60));
 		}
 		// A marker on a message content block.
 		const block = [{ type: "text", text: "x".repeat(2000), cache_control: marker }];
-		expect(await holdFor({ messages: [{ role: "user", content: block }] })).toBe(46);
+		const marked = await holdFor({}, block);
+		expect(marked.held).toBe(at(marked.tokens, 60));
 	});
 
 	// The bytes scanned are the bytes sent: the SDK is handed the plain-data parse of the one
@@ -184,9 +207,9 @@ describe("1-hour cache writes: governed paths", () => {
 		await governed.destroy();
 		// Counted before any assertion: an assertion's own diffing reads the original too.
 		const readsDuringCall = reads;
-		// Held at the 5-minute rate because the ONE read said 5m...
-		expect(heldAmount(engine)).toBe(29);
 		const sent = client.messages.create.mock.calls[0]?.[0] as typeof original;
+		// Held at the 5-minute rate because the ONE read said 5m...
+		expect(heldAmount(engine)).toBe(at(heldInput(sent), 37.5));
 		// ...and that same answer is what the SDK got: plain data, not the flipping original.
 		expect(sent).not.toBe(original);
 		const block = Object.getOwnPropertyDescriptor(sent.system[0], "cache_control");
@@ -217,8 +240,8 @@ describe("1-hour cache writes: governed paths", () => {
 			system: [hook],
 		});
 		await governed.destroy();
-		expect(heldAmount(engine)).toBe(29);
 		const sent = client.messages.create.mock.calls[0]?.[0] as { system: unknown[] };
+		expect(heldAmount(engine)).toBe(at(heldInput(sent), 37.5));
 		expect(JSON.stringify(sent.system)).toBe(
 			'[{"type":"text","text":"s","cache_control":{"ttl":"5m"}}]',
 		);
@@ -578,20 +601,17 @@ describe("1-hour cache writes: governed paths", () => {
 				vaultBase: tmpVault,
 				_engine: asEngine(engine),
 			});
-			await governed.chat.completions.create({
-				model: MODEL,
-				max_tokens: 1,
-				messages: [{ role: "user", content }],
-			});
+			const request = { model: MODEL, max_tokens: 1, messages: [{ role: "user", content }] };
+			await governed.chat.completions.create(request);
 			await governed.destroy();
-			return heldAmount(engine);
+			return { held: heldAmount(engine), tokens: heldInput(request, "openai") };
 		};
 		const plain = await mk("x".repeat(2000));
 		const marked = await mk([
 			{ type: "text", text: "x".repeat(2000), cache_control: { type: "ephemeral", ttl: "1h" } },
 		]);
-		expect(plain).toBe(29);
-		expect(marked).toBe(46); // 756 x 60 / 1000 + 0.15, the 1h rate, not the 5m 37.5
+		expect(plain.held).toBe(at(plain.tokens, 37.5));
+		expect(marked.held).toBe(at(marked.tokens, 60)); // the 1h rate, not the 5m 37.5
 	});
 
 	it("headless authorize() holds the worst case: input leg and stated writes at the 1h rate", async () => {
