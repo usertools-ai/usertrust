@@ -2600,20 +2600,64 @@ describe("a `.releasing` record whose give-back fails is kept, through SessionEn
 		expect(await holdFiles()).toEqual([RELEASING]);
 	});
 
-	it("SessionStart drops a marked record older than its bound (24 h), and keeps a younger one, even past the ledger's timeout, and an unmarked one", async () => {
-		const old = holdName("tu_old", "tx_old", "main", "releasing");
-		const younger = holdName("tu_younger", "tx_younger", "main", "releasing");
-		const unmarked = holdName("tu_unmarked", "tx_unmarked", "main", "releasing");
-		await seedHold("tu_old", "tx_old", { ...ESTIMATE, gapWritten: true }, "releasing");
-		await seedHold("tu_younger", "tx_younger", { ...ESTIMATE, gapWritten: true }, "releasing");
-		await seedHold("tu_unmarked", "tx_unmarked", { ...ESTIMATE }, "releasing");
+	it("SessionStart drops any record older than its bound (24 h), and keeps a younger one, marked or not, even past the ledger's timeout", async () => {
+		const names = {
+			oldMarked: holdName("tu_om", "tx_om", "main", "releasing"),
+			oldUnmarked: holdName("tu_ou", "tx_ou", "main", "releasing"),
+			youngMarked: holdName("tu_ym", "tx_ym", "main", "releasing"),
+			youngUnmarked: holdName("tu_yu", "tx_yu", "main", "releasing"),
+		};
+		await seedHold("tu_om", "tx_om", { ...ESTIMATE, gapWritten: true }, "releasing");
+		await seedHold("tu_ou", "tx_ou", { ...ESTIMATE }, "releasing");
+		await seedHold("tu_ym", "tx_ym", { ...ESTIMATE, gapWritten: true }, "releasing");
+		await seedHold("tu_yu", "tx_yu", { ...ESTIMATE }, "releasing");
 		const ago = (ms: number) => new Date(Date.now() - ms);
-		await utimes(join(stateDir, old), ago(25 * 3_600_000), ago(25 * 3_600_000));
-		await utimes(join(stateDir, unmarked), ago(25 * 3_600_000), ago(25 * 3_600_000));
+		for (const name of [names.oldMarked, names.oldUnmarked]) {
+			await utimes(join(stateDir, name), ago(25 * 3_600_000), ago(25 * 3_600_000));
+		}
 		// Past the ledger's 5-minute pending timeout, but far inside the sweep's bound: kept.
-		await utimes(join(stateDir, younger), ago(12 * 60_000), ago(12 * 60_000));
+		for (const name of [names.youngMarked, names.youngUnmarked]) {
+			await utimes(join(stateDir, name), ago(12 * 60_000), ago(12 * 60_000));
+		}
 		await run("session-start", { session_id: SESSION, source: "startup" });
-		expect((await holdFiles()).sort()).toEqual([unmarked, younger].sort());
+		expect((await holdFiles()).sort()).toEqual([names.youngMarked, names.youngUnmarked].sort());
+		// The marked one's gaps were on record already; the unmarked one gets its last gap.
+		expect(await phased("release")).toMatchObject([
+			{ outcome: "unresolved", transferId: "tx_ou", releaseClass: "unused" },
+		]);
+	});
+
+	it("an unmarked `ran` record past the bound is dropped with its last gaps: its call's and an unresolved release", async () => {
+		const name = holdName("tu_1", "tx_1", "main", "releasing");
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE, ran: true }, "releasing");
+		await utimes(
+			join(stateDir, name),
+			new Date(Date.now() - 25 * 3_600_000),
+			new Date(Date.now() - 25 * 3_600_000),
+		);
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect(await holdFiles()).toEqual([]);
+		expect(await unconfirmed()).toMatchObject([{ transferId: "tx_1", releaseClass: "call-ran" }]);
+		expect(await phased("release")).toMatchObject([
+			{ outcome: "unresolved", transferId: "tx_1", releaseClass: "call-ran" },
+		]);
+	});
+
+	it("DECLARED: with watch.jsonl unwritable for a whole day, an unmarked record is still dropped past the bound (its gap lost), and its call is no longer refused", async () => {
+		capabilities = ["release", "job"];
+		const name = holdName("tu_1", "tx_1", "main", "releasing");
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE, windowJournalled: true }, "releasing");
+		await utimes(
+			join(stateDir, name),
+			new Date(Date.now() - 25 * 3_600_000),
+			new Date(Date.now() - 25 * 3_600_000),
+		);
+		await mkdir(join(stateDir, "watch.jsonl"));
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect(await holdFiles()).toEqual([]);
+		nodeFs.rmSync(join(stateDir, "watch.jsonl"), { recursive: true, force: true });
+		await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+		expect(requests("/v1/authorize")).toHaveLength(1);
 	});
 
 	it.each<[string, Record<string, unknown>, number]>([

@@ -1140,36 +1140,53 @@ async function settlingRecords(sessionId, agentId) {
 			if (typeof body?.transferId !== "string") continue;
 			if (wantAgent !== null && sanitize(body.agentId ?? "main") !== wantAgent) continue;
 			const { mtimeMs } = await stat(path);
-			held.push({
-				path,
-				transferId: body.transferId,
-				toolUseId: body.toolUseId ?? null,
-				agentId: sanitize(body.agentId ?? "main"),
-				...jobHoldFields(body),
-				...(typeof body.startedAt === "string" ? { startedAt: body.startedAt } : {}),
-				// Why the hold was claimed: `release` when its call was deferred and the claim only
-				// serves to end the hold (the hold was claimed into `.releasing`), otherwise a settle attempt.
-				...(releasing ? { intent: "release" } : {}),
-				// A hold whose call ran though its claim says only release (`noCallRan`).
-				...(body.ran === true ? { ran: true } : {}),
-				// A windowed hold kept only to be given back, its window's outcome already journalled
-				// (pre-tool-use.mjs `keepForRelease`): given back with no class, and no second gap.
-				...(body.windowJournalled === true ? { windowJournalled: true } : {}),
-				// A kept `.releasing` record whose gaps are written already (`markGapWritten`).
-				...(body.gapWritten === true ? { gapWritten: true } : {}),
-				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
-				transcript: body.usage === "transcript",
-				// Which server and tenant made the hold (`tenantBinding`), as written.
-				...(typeof body.serverUrl === "string" ? { serverUrl: body.serverUrl } : {}),
-				...(typeof body.keyHash === "string" ? { keyHash: body.keyHash } : {}),
-				// How long its settle has been in flight: a claim touches the file first.
-				mtimeMs,
-			});
+			held.push(heldOf(path, body, mtimeMs, releasing));
 		} catch {
 			// Corrupt or concurrently removed — skip.
 		}
 	}
 	return held;
+}
+
+/**
+ * A settle-attempted or `.releasing` record's entry, as `cleanup` and `sweepReleasing` read it, from
+ * its file's `path`, parsed `body` and `mtimeMs`. `releasing`: the record's name is `.releasing`.
+ */
+function heldOf(path, body, mtimeMs, releasing) {
+	return {
+		path,
+		transferId: body.transferId,
+		toolUseId: body.toolUseId ?? null,
+		agentId: sanitize(body.agentId ?? "main"),
+		...jobHoldFields(body),
+		...(typeof body.startedAt === "string" ? { startedAt: body.startedAt } : {}),
+		// Why the hold was claimed: `release` when its call was deferred and the claim only
+		// serves to end the hold (the hold was claimed into `.releasing`), otherwise a settle attempt.
+		...(releasing ? { intent: "release" } : {}),
+		// A hold whose call ran though its claim says only release (`noCallRan`).
+		...(body.ran === true ? { ran: true } : {}),
+		// A windowed hold kept only to be given back, its window's outcome already journalled
+		// (pre-tool-use.mjs `keepForRelease`): given back with no class, and no second gap.
+		...(body.windowJournalled === true ? { windowJournalled: true } : {}),
+		// A kept `.releasing` record whose gaps are written already (`markGapWritten`).
+		...(body.gapWritten === true ? { gapWritten: true } : {}),
+		assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
+		transcript: body.usage === "transcript",
+		// Which server and tenant made the hold (`tenantBinding`), as written.
+		...(typeof body.serverUrl === "string" ? { serverUrl: body.serverUrl } : {}),
+		...(typeof body.keyHash === "string" ? { keyHash: body.keyHash } : {}),
+		// How long its settle has been in flight: a claim touches the file first.
+		mtimeMs,
+	};
+}
+
+/**
+ * The class a give-back of `held` carries: none for a windowed hold whose window is journalled
+ * (`windowJournalled`), `unused` for a claim whose call never ran (`noCallRan`), `call-ran` otherwise.
+ */
+function releaseClassOf(held) {
+	if (held.windowJournalled === true) return undefined;
+	return noCallRan(held) ? "unused" : "call-ran";
 }
 
 /**
@@ -2074,7 +2091,7 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 		} else if (!gapWritten) {
 			gapsOnRecord = true;
 		}
-		const releaseClass = journalled ? undefined : releasing ? "unused" : "call-ran";
+		const releaseClass = releaseClassOf(held);
 		let failed = null;
 		try {
 			const response = await releaseHold(
@@ -2141,17 +2158,43 @@ async function markGapWritten(path) {
  * sweep is only garbage collection: any bound above the ledger's pending timeout (core's
  * `LEDGER_HOLD_TIMEOUT_MS`, 5 min) is correct, so it is set far above it. Declared: the age is read
  * on the wall clock, so a clock stepped forward by more than this could drop the name of a hold
- * that is still live, and a re-fire could then reserve beside it until the ledger voids it.
+ * that is still live, and a re-fire could then reserve beside it until the ledger voids it. And a
+ * record whose gaps could not be written (watch.jsonl unwritable) for this whole time loses them:
+ * the sweep tries once more, and drops the record either way.
  */
 export const RELEASING_SWEEP_MS = 24 * 60 * 60_000;
 
 /**
- * Drop every `.releasing` record (of any session) that is marked `gapWritten` and older than
- * `maxAgeMs`: run at SessionStart, so a record kept for a re-fire cannot live forever. Its gaps
- * are written already, and past the ledger's pending timeout (`maxAgeMs` is far above it) the
- * hold is voided, so dropping its name cannot let a re-fire reserve beside a live hold. Its age
- * is its file's mtime, which is never earlier than the hold. Local, bounded to one listing, and
- * it never throws. Returns how many it dropped.
+ * The gaps of a `.releasing` record dropped with none on record (`sweepReleasing`): its call's,
+ * when the call ran and its window is not journalled, and a release gap, `unresolved`, since its
+ * give-back was never confirmed. Best effort: the writers never throw.
+ */
+async function lastGaps(sessionId, held) {
+	if (!noCallRan(held) && held.windowJournalled !== true) {
+		await recordUnconfirmedCall(sessionId, held, "call-ran");
+	}
+	await recordSettleGap({
+		phase: "release",
+		outcome: "unresolved",
+		session: sessionId,
+		agent: held.agentId,
+		transferId: held.transferId,
+		reason:
+			"its give-back was never confirmed; its record is dropped past the ledger's pending timeout",
+		started: callStart(held),
+		releaseClass: releaseClassOf(held),
+	});
+}
+
+/**
+ * Drop every `.releasing` record (of any session) older than `maxAgeMs`: run at SessionStart, so a
+ * record kept for a re-fire cannot live forever. Past the ledger's pending timeout (`maxAgeMs` is
+ * far above it) the hold is voided, so dropping its name cannot let a re-fire reserve beside a
+ * live hold. Its age is its file's mtime, which is never earlier than the hold. The sweep depends
+ * on age alone: a record whose gaps are not on record (`gapWritten` unset: its give-back never
+ * confirmed, or its gaps could not be written) gets one last attempt to write them, as an
+ * `unresolved` give-back, and is dropped whether that attempt succeeds or not. Local, bounded to
+ * one listing, and it never throws. Returns how many it dropped.
  */
 export async function sweepReleasing(maxAgeMs) {
 	let names;
@@ -2167,8 +2210,15 @@ export async function sweepReleasing(maxAgeMs) {
 		try {
 			const { mtimeMs } = await stat(path);
 			if (!(Date.now() - mtimeMs > maxAgeMs)) continue;
-			const body = JSON.parse(await readRegular(path, READ_BOUND.record));
-			if (body?.gapWritten !== true) continue;
+			let body = null;
+			try {
+				body = JSON.parse(await readRegular(path, READ_BOUND.record));
+			} catch {
+				// Unreadable: nothing to write its gaps from. Dropped all the same.
+			}
+			if (body?.gapWritten !== true && typeof body?.transferId === "string") {
+				await lastGaps(name.slice(0, name.indexOf("__")), heldOf(path, body, mtimeMs, true));
+			}
 			await unlink(path);
 			dropped += 1;
 		} catch {
