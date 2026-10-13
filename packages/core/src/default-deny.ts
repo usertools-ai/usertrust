@@ -906,38 +906,6 @@ export function movedRequestOptions(
 	];
 }
 
-// TEMPORARY: verbatim copy of B-464's readThroughChain; replaced by the import when it merges
-/** How many objects `readThroughChain` walks before it gives up and reads the property as unreadable. */
-const MAX_CHAIN_DEPTH = 64;
-
-/**
- * Property `key` of `holder` as the SDK's own `holder[key]` finds it, read without running caller
- * code: the prototype chain is walked from `holder`, and the first object holding `key` decides.
- * Its value when that is a data property, `undefined` when no object on the chain holds it, and
- * `UNREADABLE` when it cannot be read that way: an object on the chain up to that point is a Proxy
- * (its descriptor and prototype traps are caller code), the property is an accessor, or the holder
- * itself was unreadable. An inherited property is read, not taken as absent: the SDK reads these
- * keys by plain property access, so a client built with `Object.create(client)`, or options whose
- * prototype carries the key, would otherwise send what the check never saw. Fails CLOSED: every
- * check below REFUSES what is unreadable, and never reads it as absent, so an accessor or a Proxy
- * at any step of a chain is refused. A chain longer than `MAX_CHAIN_DEPTH` objects is unreadable
- * too: no SDK object comes near it, and the walk stays bounded however the chain was built.
- */
-export function readThroughChain(holder: unknown, key: string): unknown {
-	if (holder === UNREADABLE) return UNREADABLE;
-	if (holder == null || (typeof holder !== "object" && typeof holder !== "function")) {
-		return undefined;
-	}
-	let o: object | null = holder;
-	for (let depth = 0; o !== null; depth++) {
-		if (depth >= MAX_CHAIN_DEPTH || utilTypes.isProxy(o)) return UNREADABLE;
-		const d = Object.getOwnPropertyDescriptor(o, key);
-		if (d !== undefined) return "value" in d ? d.value : UNREADABLE;
-		o = Object.getPrototypeOf(o);
-	}
-	return undefined;
-}
-
 /**
  * A Google request's `params.config.httpOptions` at call start, read as the SDK's own plain property
  * access finds it, through the prototype chain (`readThroughChain`: no caller code runs), and
