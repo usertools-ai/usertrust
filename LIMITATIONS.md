@@ -137,8 +137,8 @@ own:
   later reads `params.config.httpOptions`, even through a `config` added or
   replaced after the call started; with none at the start, none is given. Your
   own `httpOptions` is never read again. An `httpOptions` the config inherits is
-  not an own property, so it is not read at the start, and none is sent, where the
-  SDK alone would send its headers.
+  not pinned: the SDK reads it through the prototype, as before, and the request
+  it builds is checked again before anything is sent.
 - **Every other field is read when the SDK reads it, not when the call starts.**
   The SDK reads the request after its own first `await`, so a field you change
   right after calling (a `systemInstruction`, `contents`) is sent as it is then,

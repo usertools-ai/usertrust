@@ -1005,6 +1005,34 @@ describe("config.httpOptions is read at call start, as per-call request options 
 				expect(raw.requests.map((q) => q.testHeader)).toEqual(["late"]);
 				expect(gov.requests.map((q) => q.testHeader)).toEqual(["early"]);
 			});
+
+			if (method === "generateContentStream") {
+				it(`${on}: a NON-ENUMERABLE own $schema responseSchema beside tools, with httpOptions present, is still moved and sent as the SDK sends it, nothing of the request being copied on its way out: governed == native`, async () => {
+					const make = () =>
+						request(
+							Object.defineProperty(
+								{
+									tools: [{ googleSearch: {} }],
+									responseMimeType: "application/json",
+									httpOptions: { headers: { "x-test": "h" } },
+								},
+								"responseSchema",
+								{
+									value: {
+										$schema: "https://json-schema.org/draft/2020-12/schema",
+										type: "object",
+									},
+									enumerable: false,
+									writable: true,
+									configurable: true,
+								},
+							),
+						);
+					const r = await nativeThenGoverned(method, same(make), { vertex });
+					expectSameSend(r);
+					expect(JSON.stringify(r.raw.requests[0]?.body)).toContain("$schema");
+				});
+			}
 		}
 	}
 });

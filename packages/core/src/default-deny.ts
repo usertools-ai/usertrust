@@ -910,21 +910,34 @@ export function movedRequestOptions(
  * A Google request's `config.httpOptions` as call start pins it, for every later read of the path
  * `params.config.httpOptions`: when `readOwn` finds a plain object there (an own data property,
  * enumerable or not), a NEW object holding only its governed keys, each read once, and whether it
- * was enumerable; otherwise absent. Run after `movedRequestOptions` passed the request (which
- * refused any key off the list), so nothing here runs caller code.
+ * was enumerable; when there is none, absent. `undefined` (nothing pinned, the SDK reads the path
+ * as it would) only when the config inherits an `httpOptions`, which is left to the SDK as before.
+ * Run after `movedRequestOptions` passed the request (which refused any key off the list), so
+ * nothing here runs caller code: the prototype chain is walked through descriptors, stopping at a
+ * Proxy.
  */
-export function pinnedGoogleHttpOptions(request: unknown): {
-	httpOptions: Record<string, unknown> | undefined;
-	enumerable: boolean;
-} {
+export function pinnedGoogleHttpOptions(
+	request: unknown,
+): { httpOptions: Record<string, unknown> | undefined; enumerable: boolean } | undefined {
 	const config = readOwn(request, "config");
 	const http = readOwn(config, "httpOptions");
+	if (http === undefined && inheritsKey(config, "httpOptions")) return undefined;
 	if (!plainObject(http)) return { httpOptions: undefined, enumerable: false };
 	const d = Object.getOwnPropertyDescriptor(config as object, "httpOptions");
 	return {
 		httpOptions: governedCopy(http, GOVERNED_GOOGLE_HTTP_OPTIONS),
 		enumerable: d?.enumerable === true,
 	};
+}
+
+/** Does `obj` (not a Proxy) hold `key` below itself, on its prototype chain? Descriptors only, stopping at a Proxy. */
+function inheritsKey(obj: unknown, key: string): boolean {
+	if (obj === null || typeof obj !== "object" || utilTypes.isProxy(obj)) return false;
+	for (let o = Object.getPrototypeOf(obj); o !== null; o = Object.getPrototypeOf(o)) {
+		if (utilTypes.isProxy(o)) return false;
+		if (Object.getOwnPropertyDescriptor(o, key) !== undefined) return true;
+	}
+	return false;
 }
 
 /**
