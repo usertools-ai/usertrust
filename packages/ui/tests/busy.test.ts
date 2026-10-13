@@ -130,7 +130,11 @@ describe("the dashboard's words for a vault with no verdict", () => {
 	});
 });
 
-describe("a busy verdict on the live dashboard clears once the vault holds still", () => {
+// Each row polls for at most 3 s, well inside its own 15 s limit: a verdict that never clears fails the
+// row's assertion, never its timeout.
+describe("a busy verdict on the live dashboard clears once the vault holds still", {
+	timeout: 15_000,
+}, () => {
 	/** One event on the chain, so a load sees log bytes and only `busy` can send a grow to a full reload. */
 	async function oneEvent(n: number): Promise<void> {
 		const w = createAuditWriter(tempDir);
@@ -163,7 +167,7 @@ describe("a busy verdict on the live dashboard clears once the vault holds still
 		stand.busyReads = 2;
 		const ui = await createUiServer(tempDir, { port: 0, busyRecheckMs: 50 });
 		try {
-			const chain = await chainUntil(ui.port, (c) => c.busy !== true, 5_000);
+			const chain = await chainUntil(ui.port, (c) => c.busy !== true, 3_000);
 			expect(chain).toMatchObject({ valid: true, events: 1 });
 			expect(chain.busy).toBeUndefined();
 		} finally {
@@ -178,7 +182,7 @@ describe("a busy verdict on the live dashboard clears once the vault holds still
 		try {
 			expect((await chainUntil(ui.port, () => true, 0)).busy).toBe(true);
 			await oneEvent(2);
-			const chain = await chainUntil(ui.port, (c) => c.busy !== true, 5_000);
+			const chain = await chainUntil(ui.port, (c) => c.busy !== true, 3_000);
 			expect(chain).toMatchObject({ valid: true, events: 2 });
 			expect(chain.busy).toBeUndefined();
 		} finally {
