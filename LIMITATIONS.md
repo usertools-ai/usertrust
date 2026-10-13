@@ -144,7 +144,8 @@ own:
   and copied as data for the policy rules; before, the rules read it, and any
   getter inside it, when they were evaluated. A function there is a value that
   exists for an `exists` rule but is never called. These fields are not forwarded:
-  a Google-shaped client that is not the SDK no longer receives them.
+  a Google-shaped client that is not the SDK no longer receives them. They were
+  never scanned for PII, held for or metered, so only what was is forwarded.
 - **`config.httpOptions` is read at the start of the call**, as per-call request
   options are. The SDK is given that copy (only the allowed keys) wherever it
   later reads `params.config.httpOptions`, even through a `config` added or
