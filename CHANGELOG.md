@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The ledger UI reads only the new part of the audit log on each change, and checks a replaced log in full.** It used to read the whole log on every change while the log's last line was unfinished, so a 2 MiB log cost 2 MiB per change; it now reads only what follows the part it has already checked. A log replaced by another file (renamed over it, or deleted and created again) is now checked in full, where the dashboard could add the new file's last events to the old file's verdict and read verified over an altered earlier event. A complete line written after an unfinished one (a writer that stopped mid-line) is no longer added to the chain while the unfinished line stays counted as malformed; the dashboard reloads the whole log instead, as a restart would. Not covered: a log rewritten in place that does not get shorter, including a same-size rewrite within the file system's timestamp step (1 s on HFS+, 2 s on FAT, coarser on some network mounts); a log deleted and created again on a file system that reuses its inode number, unless the system reports a file birth time; and file systems without stable inode numbers, where every change reloads the whole log (slower, never wrong). A log that keeps changing while the dashboard reads it is read up to four times, and the next change after that reloads the whole log again, until the writes pause. A restart, or `usertrust verify`, checks the vault as it is.
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading
