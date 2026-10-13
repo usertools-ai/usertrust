@@ -1038,35 +1038,28 @@ describe("Stop's give-back of a leftover estimate hold", () => {
 	// The same loops give back two holds behind which no call's charge can hide: a transcript hold
 	// with no usage (its window is posted by message) and a `.releasing` hold (claimed only to END
 	// a deferred call's earlier hold). Each is given back as `unused`: no call gap, whatever the
-	// ending; a give-back that did not end cleanly is its release gap alone. A `.releasing` hold is
-	// dropped with that gap only at the final Stop (SessionEnd): a plain Stop keeps it for the
-	// next one (the rows after these).
-	const unused: Array<
-		[string, Record<string, unknown>, string, Record<string, string>, "stop" | "session-end"]
-	> = [
-		["a transcript hold that carries no usage (.json)", EMPTY, "json", {}, "stop"],
-		["a .releasing hold, at SessionEnd", ESTIMATE, "releasing", ESTIMATE_MODE, "session-end"],
+	// ending; a give-back that did not end cleanly is its release gap alone.
+	const unused: Array<[string, Record<string, unknown>, string, Record<string, string>]> = [
+		["a transcript hold that carries no usage (.json)", EMPTY, "json", {}],
+		["a .releasing hold", ESTIMATE, "releasing", ESTIMATE_MODE],
 	];
 	const giveBackUnused = async (
 		ending: Ending,
 		fields: Record<string, unknown>,
 		kind: string,
 		mode: Record<string, string>,
-		hook: "stop" | "session-end" = "stop",
 	) => {
 		// `job`: the server records why a hold is given back, so the release names its class.
 		capabilities = ["release", "job"];
 		await seedHold("tu_1", "tx_1", fields, kind);
 		aim("/v1/release", 1, ending, ["/v1/health", 1]);
-		return hook === "stop"
-			? run("stop", stopInput(), mode)
-			: run("session-end", seInput(), { ...mode, ...seBudget(1_200) });
+		return run("stop", stopInput(), mode);
 	};
 	it.each(unused)(
 		"%s, 200 and 404 unknown transferId: given back, and nothing recorded",
-		async (_, fields, kind, mode, hook) => {
+		async (_, fields, kind, mode) => {
 			for (const ending of ["ok", "gone"] as const) {
-				await giveBackUnused(ending, fields, kind, mode, hook);
+				await giveBackUnused(ending, fields, kind, mode);
 				expect(requests("/v1/release")).toMatchObject([
 					{ body: { transferId: "tx_1", releaseClass: "unused" } },
 				]);
@@ -1078,7 +1071,7 @@ describe("Stop's give-back of a leftover estimate hold", () => {
 		},
 	);
 	it.each(
-		unused.flatMap(([what, fields, kind, mode, hook]) =>
+		unused.flatMap(([what, fields, kind, mode]) =>
 			(
 				[
 					["other4xx", "failed"],
@@ -1089,39 +1082,16 @@ describe("Stop's give-back of a leftover estimate hold", () => {
 					["dropped", "unknown"],
 					["redirect", "failed"],
 				] as Array<[Ending, string]>
-			).map(([ending, outcome]) => [what, ending, outcome, fields, kind, mode, hook] as const),
+			).map(([ending, outcome]) => [what, ending, outcome, fields, kind, mode] as const),
 		),
 	)(
 		"%s, %s: no call gap; a release gap, %s, as unused",
-		async (_, ending, outcome, fields, kind, mode, hook) => {
-			await giveBackUnused(ending, fields, kind, mode, hook);
+		async (_, ending, outcome, fields, kind, mode) => {
+			await giveBackUnused(ending, fields, kind, mode);
 			expect(await unconfirmed()).toEqual([]);
 			expect(await records()).toMatchObject([
 				{ kind: "gap", phase: "release", outcome, transferId: "tx_1", releaseClass: "unused" },
 			]);
-		},
-		LONG,
-	);
-	it.each<Ending>([
-		"other4xx",
-		"other404",
-		"error5xx",
-		"timeout",
-		"refused",
-		"dropped",
-		"redirect",
-	])(
-		"a .releasing hold at a plain Stop, %s: kept for the next Stop, and nothing written yet",
-		async (ending) => {
-			await giveBackUnused(ending, ESTIMATE, "releasing", ESTIMATE_MODE);
-			// A refused connection reaches no server, so only the others record the give-back.
-			if (ending !== "refused") {
-				expect(requests("/v1/release")).toMatchObject([
-					{ body: { transferId: "tx_1", releaseClass: "unused" } },
-				]);
-			}
-			expect(await records()).toEqual([]);
-			expect(await holdFiles()).toEqual([holdName("tu_1", "tx_1", "main", "releasing")]);
 		},
 		LONG,
 	);
@@ -2534,7 +2504,7 @@ describe("a redirect the plugin follows by hand: to the same origin, a 307 or a 
 	});
 });
 
-describe("a `.releasing` record whose give-back fails is kept for the next Stop, and its gaps are written once, when it goes", () => {
+describe("a `.releasing` record whose give-back fails is kept, through SessionEnd, with its gaps written once", () => {
 	const RELEASING = holdName("tu_1", "tx_1", "main", "releasing");
 	const kinds: Array<[string, Record<string, unknown>, string | undefined, number]> = [
 		["a deferred call's claim (unused)", { ...ESTIMATE }, "unused", 0],
@@ -2547,69 +2517,102 @@ describe("a `.releasing` record whose give-back fails is kept for the next Stop,
 		],
 	];
 	const classes = () => requests("/v1/release").map((r) => r.body.releaseClass);
+	const kept = async () =>
+		JSON.parse(await readFile(join(stateDir, RELEASING), "utf-8")) as Record<string, unknown>;
 
 	it.each(kinds)(
-		"%s: a 503 keeps it with nothing written; the next Stop's 200 gives it back and drops it, its gaps written once",
+		"%s: a 503 writes its gaps at once and keeps it, marked; the next Stop's 200 drops it with no second gap",
 		async (_, fields, releaseClass, callGaps) => {
 			capabilities = ["release", "job"];
 			await seedHold("tu_1", "tx_1", fields, "releasing");
 			fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
 			await run("stop", stopInput(), ESTIMATE_MODE);
+			// Written at the first failure: a session killed now still has them.
+			expect(await phased("release")).toMatchObject([{ outcome: "failed", transferId: "tx_1" }]);
+			expect(await unconfirmed()).toHaveLength(callGaps);
 			expect(await holdFiles()).toEqual([RELEASING]);
-			expect(await gaps()).toEqual([]);
+			expect(await kept()).toMatchObject({ transferId: "tx_1", gapWritten: true });
 			await run("stop", stopInput(), ESTIMATE_MODE);
 			expect(classes()).toEqual([releaseClass, releaseClass]);
 			expect(await holdFiles()).toEqual([]);
-			expect(await phased("release")).toEqual([]);
+			expect(await phased("release")).toHaveLength(1);
 			expect(await unconfirmed()).toHaveLength(callGaps);
 		},
 		LONG,
 	);
 
 	it.each(kinds)(
-		"%s: kept on a 503, then a 404 (unknown transferId) says it is gone: dropped, no release gap",
-		async (_, fields, _class, callGaps) => {
-			capabilities = ["release", "job"];
-			await seedHold("tu_1", "tx_1", fields, "releasing");
-			fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
-			fixed.set("/v1/release#2", ANSWER.gone as Reply);
-			await run("stop", stopInput(), ESTIMATE_MODE);
-			expect(await holdFiles()).toEqual([RELEASING]);
-			await run("stop", stopInput(), ESTIMATE_MODE);
-			expect(await holdFiles()).toEqual([]);
-			expect(await phased("release")).toEqual([]);
-			expect(await unconfirmed()).toHaveLength(callGaps);
-		},
-		LONG,
-	);
-
-	it.each(kinds)(
-		"%s: at SessionEnd, after two failed Stops, it is dropped with exactly one release gap",
+		"%s: failed at two Stops and at SessionEnd, it is still kept, with exactly one release gap; a later 404 drops it with none",
 		async (_, fields, releaseClass, callGaps) => {
 			capabilities = ["release", "job"];
 			await seedHold("tu_1", "tx_1", fields, "releasing");
 			for (const n of [1, 2, 3]) fixed.set(`/v1/release#${n}`, ANSWER.error5xx as Reply);
+			fixed.set("/v1/release#4", ANSWER.gone as Reply);
 			await run("stop", stopInput(), ESTIMATE_MODE);
 			await run("stop", stopInput(), ESTIMATE_MODE);
-			expect(await holdFiles()).toEqual([RELEASING]);
-			expect(await gaps()).toEqual([]);
 			await run("session-end", seInput(), { ...ESTIMATE_MODE, ...seBudget(1_200) });
 			expect(classes()).toEqual([releaseClass, releaseClass, releaseClass]);
+			expect(await holdFiles()).toEqual([RELEASING]);
+			expect(await phased("release")).toHaveLength(1);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+			// A resumed session's Stop: the 404 says the hold is gone.
+			await run("stop", stopInput(), ESTIMATE_MODE);
 			expect(await holdFiles()).toEqual([]);
-			expect(await phased("release")).toMatchObject([{ outcome: "failed", transferId: "tx_1" }]);
+			expect(await phased("release")).toHaveLength(1);
 			expect(await unconfirmed()).toHaveLength(callGaps);
 		},
 		LONG,
 	);
 
-	it("the kept record still names the hold: a re-fire of its call reserves nothing beside it", async () => {
+	it.each<Ending>([
+		"other4xx",
+		"other404",
+		"error5xx",
+		"timeout",
+		"refused",
+		"dropped",
+		"redirect",
+	])(
+		"a deferred call's claim at a plain Stop, %s: its release gap written, and the hold kept, marked",
+		async (ending) => {
+			capabilities = ["release", "job"];
+			await seedHold("tu_1", "tx_1", { ...ESTIMATE }, "releasing");
+			aim("/v1/release", 1, ending, ["/v1/health", 1]);
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await phased("release")).toMatchObject([
+				{ transferId: "tx_1", releaseClass: "unused" },
+			]);
+			expect(await holdFiles()).toEqual([RELEASING]);
+			expect(await kept()).toMatchObject({ gapWritten: true });
+		},
+		LONG,
+	);
+
+	it("`claude --resume` after SessionEnd re-fires the deferred call: the kept record still names its hold, so it reserves nothing beside it", async () => {
 		capabilities = ["release", "job"];
 		await seedHold("tu_1", "tx_1", { ...ESTIMATE, windowJournalled: true }, "releasing");
 		fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
+		fixed.set("/v1/release#2", ANSWER.error5xx as Reply);
 		await run("stop", stopInput(), ESTIMATE_MODE);
+		await run("session-end", seInput(), { ...ESTIMATE_MODE, ...seBudget(1_200) });
 		await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
 		expect(requests("/v1/authorize")).toEqual([]);
 		expect(await holdFiles()).toEqual([RELEASING]);
+	});
+
+	it("SessionStart drops a marked record older than the ledger's pending timeout, and keeps a young one and an unmarked one", async () => {
+		const old = holdName("tu_old", "tx_old", "main", "releasing");
+		const young = holdName("tu_young", "tx_young", "main", "releasing");
+		const unmarked = holdName("tu_unmarked", "tx_unmarked", "main", "releasing");
+		await seedHold("tu_old", "tx_old", { ...ESTIMATE, gapWritten: true }, "releasing");
+		await seedHold("tu_young", "tx_young", { ...ESTIMATE, gapWritten: true }, "releasing");
+		await seedHold("tu_unmarked", "tx_unmarked", { ...ESTIMATE }, "releasing");
+		// Older than STALE_SETTLING_MS (10 min), which stays above the ledger's 5-minute timeout.
+		const stale = new Date(Date.now() - 11 * 60_000);
+		await utimes(join(stateDir, old), stale, stale);
+		await utimes(join(stateDir, unmarked), stale, stale);
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect((await holdFiles()).sort()).toEqual([unmarked, young].sort());
 	});
 
 	it("control: a `.settling` record's call ran and is never re-fired: a 503 drops it, with its call gap and its release gap, as before", async () => {

@@ -1155,6 +1155,8 @@ async function settlingRecords(sessionId, agentId) {
 				// A windowed hold kept only to be given back, its window's outcome already journalled
 				// (pre-tool-use.mjs `keepForRelease`): given back with no class, and no second gap.
 				...(body.windowJournalled === true ? { windowJournalled: true } : {}),
+				// A kept `.releasing` record whose gaps are written already (`markGapWritten`).
+				...(body.gapWritten === true ? { gapWritten: true } : {}),
 				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
 				transcript: body.usage === "transcript",
 				// Which server and tenant made the hold (`tenantBinding`), as written.
@@ -2053,13 +2055,17 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 		const callRan = !releasing && !journalled;
 		// A `.releasing` record is the NAME a re-fired PreToolUse of the same call finds
 		// (`holdOfCall`), and is refused by instead of reserving beside a hold that may be live. So
-		// one whose give-back fails is KEPT for the next Stop, which retries it (a release is
-		// idempotent by transferId: a 200 ends it, a 404 says it is gone, as the ledger's pending
-		// timeout makes it). Its gaps are written once, when the record is dropped, never per
-		// attempt. Not at the final Stop: no later fire in this session reads the name. A `.settling`
-		// record's call ran, and is never re-fired: it is given back once and dropped, as before.
-		const keepOnFailure = held.path.endsWith(".releasing") && !final;
-		if (callRan && !keepOnFailure) await recordUnconfirmedCall(sessionId, held, "call-ran");
+		// one whose give-back fails is KEPT, at every Stop and at SessionEnd too: a resumed session
+		// (`claude --resume`) can re-fire the deferred call later. The next Stop retries it (a
+		// release is idempotent by transferId: a 200 ends it, a 404 says it is gone, as the
+		// ledger's pending timeout makes it), and SessionStart drops one past that timeout
+		// (`sweepReleasing`). Its gaps are written at the FIRST failed give-back, so a session
+		// killed afterwards still has them, and the record is marked `gapWritten` so no later
+		// attempt writes them again. A `.settling` record's call ran, and is never re-fired: it is
+		// given back once and dropped, as before.
+		const keepOnFailure = held.path.endsWith(".releasing");
+		const gapWritten = held.gapWritten === true;
+		if (callRan && !gapWritten) await recordUnconfirmedCall(sessionId, held, "call-ran");
 		const releaseClass = journalled ? undefined : releasing ? "unused" : "call-ran";
 		let failed = null;
 		try {
@@ -2078,13 +2084,7 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 			say(`usertrust: failed to give back ${held.transferId}: ${why}`);
 			failed = { outcome: failureOutcome(err), reason: `give-back unanswered: ${why}` };
 		}
-		if (failed !== null && keepOnFailure) {
-			say(`usertrust: hold ${held.transferId} is kept for the next Stop to give back`);
-			continue;
-		}
-		// Written before the record goes, so dropping it never erases them.
-		if (callRan && keepOnFailure) await recordUnconfirmedCall(sessionId, held, "call-ran");
-		if (failed !== null) {
+		if (failed !== null && !gapWritten) {
 			await recordSettleGap({
 				phase: "release",
 				outcome: failed.outcome,
@@ -2096,6 +2096,61 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 				releaseClass,
 			});
 		}
+		if (failed !== null && keepOnFailure) {
+			if (!gapWritten) await markGapWritten(held.path);
+			say(`usertrust: hold ${held.transferId} is kept for a later Stop to give back`);
+			continue;
+		}
 		await unlink(held.path).catch(() => {});
 	}
+}
+
+/**
+ * Mark a kept `.releasing` record `gapWritten` (its gaps are written), through the record's own
+ * atomic rewrite, so no later give-back of it writes them again. A record already gone is left
+ * gone. Should another hook remove it between this read and the rename, the rename puts it back:
+ * harmless, since it is marked, a later Stop's give-back is idempotent (a 404 drops it, with no
+ * gap), and `sweepReleasing` ends it in any case.
+ */
+async function markGapWritten(path) {
+	try {
+		const body = JSON.parse(await readRegular(path, READ_BOUND.record));
+		if (body === null || typeof body !== "object" || Array.isArray(body)) return;
+		await writeFileAtomic(path, JSON.stringify({ ...body, gapWritten: true }));
+	} catch {
+		// Gone, or unreadable: a later give-back writes its gaps again rather than none.
+	}
+}
+
+/**
+ * Drop every `.releasing` record (of any session) that is marked `gapWritten` and older than
+ * `maxAgeMs`: run at SessionStart, so a record kept for a re-fire cannot outlive its hold. Its
+ * gaps are written already, and past the ledger's pending timeout (`maxAgeMs` is above it) the
+ * hold is voided, so dropping its name cannot let a re-fire reserve beside a live hold. Its age
+ * is its file's mtime, which is never earlier than the hold. Local, bounded to one listing, and
+ * it never throws. Returns how many it dropped.
+ */
+export async function sweepReleasing(maxAgeMs) {
+	let names;
+	try {
+		names = await readdir(stateDir());
+	} catch {
+		return 0;
+	}
+	let dropped = 0;
+	for (const name of names) {
+		if (!name.endsWith(".releasing")) continue;
+		const path = join(stateDir(), name);
+		try {
+			const { mtimeMs } = await stat(path);
+			if (!(Date.now() - mtimeMs > maxAgeMs)) continue;
+			const body = JSON.parse(await readRegular(path, READ_BOUND.record));
+			if (body?.gapWritten !== true) continue;
+			await unlink(path);
+			dropped += 1;
+		} catch {
+			// Gone, or unreadable: left as it is.
+		}
+	}
+	return dropped;
 }
