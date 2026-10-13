@@ -2721,7 +2721,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		async destroy(): Promise<void> {
 			if (destroyed) return;
 			destroyed = true;
-			enforcedBudget?.release();
+			// This governor's budget stays on the vault's record until the teardown step that
+			// releases it, after the drain and the records below: a call that settles while
+			// destroy() drains, or a hold destroy() records, is still this governor's, and may be
+			// its first append, which takes the vault's lock and publishes the record
+			// (budget/effective-record.ts).
 
 			// Never void a hold a terminal is still working on: a settle's POST, or an abort
 			// or release parked on the budget lock or its own void. ONE deadline for both
@@ -2842,6 +2846,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// behind: callers call it without await or catch, and an unhandled rejection kills
 				// the process. The teardown reports it as a USERTRUST_AUDIT_LOCK_LEFT warning instead.
 				() => audit.flush(),
+				// Drop this governor's budget from the vault's record (never throws), once its last
+				// append has landed and BEFORE the audit lock is released: the record is republished
+				// for the governors still live only while this process holds the lock. It waits on the
+				// audit flush (an unbounded mutex wait), as the lock release after it does, so a hung
+				// flush keeps a destroyed governor on the record exactly as long as destroy() hangs.
+				() => enforcedBudget?.release(),
 				() => releaseAuditWriterForTeardown(audit),
 				// Destroy the engine and the proxy.
 				() => {

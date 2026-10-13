@@ -4213,7 +4213,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		const destroyFn = async (): Promise<void> => {
 			if (destroyed) return;
 			destroyed = true;
-			enforcedBudget?.release();
+			// This governor's budget stays on the vault's record until the step below that releases
+			// it, after the drain: a call that settles while destroy() drains is still enforced by
+			// it, and may be the governor's first append, which takes the vault's lock and publishes
+			// the record (budget/effective-record.ts).
 
 			// Wait up to 5 seconds for in-flight calls to complete.
 			// After the deadline, proceed with teardown anyway.
@@ -4222,15 +4225,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				await new Promise<void>((r) => setTimeout(r, 50));
 			}
 
-			// Remove beforeExit safety net
-			if (beforeExitHandler != null) {
-				process.removeListener("beforeExit", beforeExitHandler);
-				beforeExitHandler = null;
-			}
-
 			// Every step runs, whatever an earlier one throws; destroy() rejects with what a step
-			// threw only once the last has run, so the TigerBeetle client is always closed.
+			// threw only once the last has run, so the TigerBeetle client is always closed, and the
+			// budget's registration always released.
 			await runTeardownSteps([
+				// Remove beforeExit safety net
+				() => {
+					if (beforeExitHandler != null) {
+						process.removeListener("beforeExit", beforeExitHandler);
+						beforeExitHandler = null;
+					}
+				},
 				// Void any remaining pending transfers (best-effort).
 				// TigerBeetle auto-voids pending transfers after 300s, but
 				// explicit voiding releases holds immediately.
@@ -4241,6 +4246,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				},
 				// Flush audit writes
 				() => audit.flush(),
+				// Drop this governor's budget from the vault's record (never throws), once its last
+				// append has landed and BEFORE the audit lock is released: the record is republished
+				// for the governors still live only while this process holds the lock. It waits on the
+				// audit flush (an unbounded mutex wait), as the lock release after it does, so a hung
+				// flush keeps a destroyed governor on the record exactly as long as destroy() hangs.
+				() => enforcedBudget?.release(),
 				// Release the audit lock. destroy() never REJECTS for a lock left behind: callers
 				// call it without await or catch, and an unhandled rejection kills the process. The
 				// teardown reports it as a USERTRUST_AUDIT_LOCK_LEFT warning instead.
