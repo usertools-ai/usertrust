@@ -63,8 +63,8 @@ function Verdict(props: { outcome: VerifyOutcome; delayMs: number }): React.JSX.
 						not found
 					</span>
 					<span className="ut-why">
-						This transaction is not in the live audit log (events.jsonl), the log the verifier
-						reads. Not finding it is not a failed check.
+						This transaction is in none of the vault's audit segments (events.jsonl and any rotated
+						segment), the records the verifier reads. Not finding it is not a failed check.
 						{outcome.reason !== undefined && ` ${outcome.reason}.`}
 					</span>
 				</div>

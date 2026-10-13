@@ -12,8 +12,8 @@ export type VerifyOutcome =
 	| { kind: "request-failed"; reason: string };
 
 /**
- * `found: false` is NOT a failed verification: the transaction is not in the log `--tx` reads (no live log, an empty
- * one, or a record outside it). The panel read `valid` alone and printed a red "FAILED: Audit log not found".
+ * `found: false` is NOT a failed verification: the transaction is in none of the audit segments `--tx` reads (no
+ * segment at all, empty ones, or a record outside them). The panel read `valid` alone and printed a red "FAILED: Audit log not found".
  * Anything that is not a verification result (a 400, a proxy's error page) is a failed request.
  */
 export function verifyOutcome(httpStatus: number, body: unknown): VerifyOutcome {

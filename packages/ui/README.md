@@ -12,7 +12,7 @@ Then open `http://127.0.0.1:4180` (opens automatically unless `--no-open`).
 
 - **Audit ledger** — every ledger event as a row: its transfer's outcome, the model, the time in UTC, the actor, the kind, the transfer id, the cost in UT (an estimated cost is marked) and chain integrity. Full-text search, faceted filters with counts, sorting, virtualized for large vaults.
 - **Live tail** — new events stream in over SSE as they are written; each appended event is re-verified (hash + linkage) before it renders. Tampering mid-session raises a red integrity banner. A project with no vault yet shows "No governed calls yet", and its first calls appear as they are written.
-- **Inspector** — select a row to see its call, cost and chain fields, docked beside the list on a wide screen, and a one-click **Verify** that replays the independent `usertrust-verify` check and renders a thermal-receipt style result: verified, failed, or not found in the live log.
+- **Inspector** — select a row to see its call, cost and chain fields, docked beside the list on a wide screen, and a one-click **Verify** that replays the independent `usertrust-verify` check and renders a thermal-receipt style result: verified, failed, or not found in any of the vault's audit segments.
 - **Trends** — cost over time (UTC), by kind and by model, for the records in view.
 - **Summary** — spend, the budget and where it came from, chain status, and whether an anchor file is present (file presence, not a verification verdict), always visible.
 
