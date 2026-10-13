@@ -880,7 +880,9 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 	// attributed to NO job: when those responses were written is not kept, so their span is
 	// everything up to the session's first metered time, inside no finite interval. A job's
 	// report names it per session of the job, keyed by session, so two jobs that share a session
-	// show the same entry and never two backlogs; it carries no total of its own to sum.
+	// show the same entry and never two backlogs; it carries no total of its own to sum. Each
+	// record counts one agent's transcript, and a fork's transcript begins with copies of its
+	// ancestor's messages, so a session with forks counts those again: an upper bound, never billed.
 	const unattributed = {};
 	for (const w of watch) {
 		if (w?.kind !== PRE_METERING || !(intervalsBySession.get(w.session)?.length > 0)) continue;
@@ -902,7 +904,7 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 			note:
 				sessionsBefore === 0
 					? "Before metering began: none in this job's sessions"
-					: `Before metering began, in ${sessionsBefore} of this job's sessions: responses not billed and attributed to no job (when they were written is not kept); count them by session`,
+					: `Before metering began, in ${sessionsBefore} of this job's sessions: responses not billed and attributed to no job (when they were written is not kept), counted per agent transcript, so a fork's copied history counts again (an upper bound); count them by session`,
 		},
 		knownGaps: knownGaps.filter((g) => {
 			const key = `${g.gap}\u0000${JSON.stringify(g.evidence)}`;

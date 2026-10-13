@@ -416,17 +416,21 @@ export async function recordWatchEvent(event) {
 		...event,
 		started: event.started === undefined ? null : event.started,
 	});
+	let written = false;
 	try {
 		await mkdir(stateRoot(), { recursive: true });
 		await appendRegular(watchLogPath(), `${line}\n`);
-		await stampSessionSeen(event.session, at);
-		return true;
+		written = true;
 	} catch (err) {
 		say(
 			`usertrust: could not write a watch record to ${watchLogPath()} (${err instanceof Error ? err.message : String(err)}): ${line}`,
 		);
-		return false;
 	}
+	// The hook ran, for this session, whether or not its record could be written: the session
+	// was metered from here on. A failed append must not leave what follows to be read as
+	// written before metering (never posted). `stampSessionSeen` never throws.
+	await stampSessionSeen(event.session, at);
+	return written;
 }
 
 // Every hook gets a wall-clock budget inside the time Claude Code gives it, so a

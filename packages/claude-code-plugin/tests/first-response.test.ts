@@ -276,9 +276,10 @@ async function since() {
  * through the same writer (as launch.mjs does for a hook whose process failed). In a child
  * process, under the hooks' environment.
  */
-function gapOnly(sessionId: string): Promise<void> {
+function gapOnly(sessionId: string, { written = true } = {}): Promise<void> {
+	// `written`: whether the record must land (exit 1 if not), or must NOT (exit 1 if it did).
 	const code = `const m = await import(${JSON.stringify(join(HOOKS, "lib.mjs"))});
-if (!(await m.recordWatchEvent({ kind: "gap", mode: "watch", session: ${JSON.stringify(sessionId)}, agent: "main", reason: "launch: the hook's process failed (signal SIGKILL)", started: null }))) process.exit(1);`;
+if ((await m.recordWatchEvent({ kind: "gap", mode: "watch", session: ${JSON.stringify(sessionId)}, agent: "main", reason: "launch: the hook's process failed (signal SIGKILL)", started: null })) !== ${written}) process.exit(1);`;
 	return new Promise((resolve, reject) => {
 		execFile(
 			process.execPath,
@@ -449,6 +450,29 @@ describe("what the first-run time keeps out", () => {
 		]);
 		const watch = (await watchRecords()).filter((w) => w.session === id);
 		expect(watch.map((w) => w.kind)).toEqual(["gap"]);
+	});
+
+	it("a gap-only hook whose record CANNOT be written still stamps the session: what it wrote after that is posted", async () => {
+		await session().start("startup");
+		await sleep(5);
+		const id = randomUUID();
+		const b = session(id);
+		// The watch log cannot be appended to: a directory holds its name.
+		await mkdir(join(stateDir, "watch.jsonl"), { recursive: true });
+		await gapOnly(id, { written: false });
+		await sleep(5);
+		await b.transcript.userText("Task.");
+		await b.transcript.assistant(usage("7000:70"), { toolUseId: "toolu_during" });
+		await b.transcript.toolResult("toolu_during");
+		await b.transcript.assistant(usage("8000:80"));
+		await b.toolCall(CALL);
+		await b.end(FINAL);
+		// Metering was on from the failed hook: the two responses after it are posted, not
+		// skipped as written before metering.
+		expect(llmCalls(await chain()).map((e) => e.data.usage)).toEqual([
+			{ inputTokens: 16000, outputTokens: 350, cacheReadTokens: 500, cacheWriteTokens: 100 },
+			recorded(FINAL),
+		]);
 	});
 
 	it("a session this state already metered BEFORE per-session times, first touched again by a gap-only hook, keeps the state's time: its left-over answer is still posted", async () => {

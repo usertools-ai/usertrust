@@ -525,7 +525,7 @@ describe("jobCoverage — a diagnostic, not a certification", () => {
 		expect(withIt.beforeMetering).toEqual({
 			responses: 0,
 			unattributed: { sessions: { [SID]: 3 } },
-			note: "Before metering began, in 1 of this job's sessions: responses not billed and attributed to no job (when they were written is not kept); count them by session",
+			note: "Before metering began, in 1 of this job's sessions: responses not billed and attributed to no job (when they were written is not kept), counted per agent transcript, so a fork's copied history counts again (an upper bound); count them by session",
 		});
 		expect(without.beforeMetering).toEqual({
 			responses: 0,

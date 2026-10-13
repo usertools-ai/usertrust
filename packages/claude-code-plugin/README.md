@@ -524,6 +524,8 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
   `{ "responses": 0, "unattributed": { "sessions": { "<session>": N } }, "note": … }`: never billed,
   never one of the `knownGaps`, and attributed to no job, since when they were written is not kept.
   Two jobs that share a session both name the same entry, so total it by session, never by job.
+  It counts each agent's transcript, and a fork's transcript starts with copies of its ancestor's
+  messages, so a session with forks counts those again: an upper bound, never billed.
 
 ## Modes: watch-only by default
 
@@ -747,7 +749,8 @@ trimmed:
 
 A `pre-metering` record counts the responses a session's transcript held from before that
 session was metered (see the first-run time above): `responses` is how many, by message id,
-and nothing else about them is kept. They are never billed, and **a `pre-metering` record is
+and nothing else about them is kept. One record per agent transcript: a fork's transcript
+starts with copies of its ancestor's messages, which it counts again. They are never billed, and **a `pre-metering` record is
 never a gap**: a gap is a call missed while metering was on, and this usage predates it. The
 job report names them separately, per session and attributed to no job (`beforeMetering`).
 
