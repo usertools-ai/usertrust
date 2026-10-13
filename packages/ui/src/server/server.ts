@@ -102,7 +102,8 @@ export async function createUiServer(
 	let head: LogHead | undefined = state.head;
 	/**
 	 * Whether the last full load read the whole vault (`loadState`'s `loadSucceeded`), set by every full load. While it
-	 * is false, every grow, and every check, is a full reload, until a load succeeds again.
+	 * is false, every grow is a full reload, and the watcher retries the read in full: at once on any change it sees, and
+	 * otherwise at most every ten seconds (`watchLedger`), until a load succeeds again.
 	 */
 	let lastLoadSucceeded = state.loadSucceeded;
 	/** When a full load last read the whole vault: the summary's `verifiedAt`, kept through loads that failed. */

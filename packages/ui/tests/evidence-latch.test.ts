@@ -1073,3 +1073,96 @@ describe("the last verified event: what a full load must still hold, and when fu
 		}
 	});
 });
+
+// A read that keeps failing is retried, never taken for a verdict, but not on every check: a full load of a large vault
+// takes about half a second and is broadcast to every client. Only the backstop asks for checks here, on a short tick, and
+// the retry window is shortened through the same seam.
+describe("a read that keeps failing is retried at most once per retry window", {
+	timeout: 30_000,
+}, () => {
+	const original = { ...tailSeam };
+	const TICK = 100;
+	const RETRY = 700;
+	const SPELL = 3500;
+	let root: string;
+	let ui: Awaited<ReturnType<typeof createUiServer>> | undefined;
+	let restore: { path: string; mode: number }[] = [];
+	const meta = (): string => join(root, ".usertrust", "audit", "events.jsonl.meta");
+	const asRoot = process.getuid?.() === 0;
+
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "trust-latch-retry-"));
+		tailSeam.backstopMs = TICK;
+		tailSeam.reverifyMs = 3_600_000;
+		tailSeam.failedReadRetryMs = RETRY;
+		// A watcher that never calls back: every check is the backstop's.
+		tailSeam.watch = (() => {
+			const w = new EventEmitter() as EventEmitter & { close(): void };
+			w.close = () => {};
+			return w;
+		}) as unknown as typeof tailSeam.watch;
+	});
+	afterEach(async () => {
+		for (const { path, mode } of restore.reverse()) {
+			try {
+				chmodSync(path, mode);
+			} catch {
+				// Already removed: nothing to restore.
+			}
+		}
+		restore = [];
+		loadSeam.afterPass = undefined;
+		await ui?.close();
+		ui = undefined;
+		Object.assign(tailSeam, original);
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it.skipIf(asRoot)(
+		"red-first (a reload per tick): an anchor that stays unreadable is read in full, and broadcast, at most once per window; once readable it reads valid within one",
+		async () => {
+			await appendEvents(root, 3, "tx");
+			ui = await createUiServer(root, { port: 0 });
+			const port = ui.port;
+			expect(await chainOf(port)).toMatchObject({ events: 3, valid: true });
+			restore.push({ path: meta(), mode: statSync(meta()).mode & 0o777 });
+			chmodSync(meta(), 0o000);
+			// The anchor's permission changes nothing a check sees: a reload starts the failed spell.
+			const server = ui;
+			const loads: boolean[] = [];
+			const frames = await framesDuring(
+				port,
+				() => {
+					server.reload();
+					loadSeam.afterPass = (pass) => loads.push(pass.readSucceeded);
+				},
+				() => false,
+				SPELL,
+			);
+			loadSeam.afterPass = undefined;
+			// N ticks of the spell, and the bound on full loads over them.
+			const bound = Math.ceil(SPELL / RETRY);
+			const resyncs = frames.filter((f) => f === "resync").length - 1;
+			// Positive control: the failed read is retried at all, and every retry failed.
+			expect(loads.length).toBeGreaterThanOrEqual(1);
+			expect(loads.every((ok) => !ok)).toBe(true);
+			expect(loads.length).toBeLessThanOrEqual(bound);
+			expect(resyncs).toBeGreaterThanOrEqual(1);
+			expect(resyncs).toBeLessThanOrEqual(bound);
+			const during = await chainOf(port);
+			expect(during.valid).toBe(false);
+			expect(during.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+
+			chmodSync(meta(), 0o600);
+			const readableAt = Date.now();
+			const after = await chainWhen(
+				port,
+				(c) => c.valid && c.events === 3 && c.errors.length === 0,
+				RETRY + 2000,
+			);
+			expect(after).toMatchObject({ events: 3, valid: true, errors: [] });
+			// Within one window, plus a tick and the summary poll's own interval.
+			expect(Date.now() - readableAt).toBeLessThanOrEqual(RETRY + TICK + 400);
+		},
+	);
+});

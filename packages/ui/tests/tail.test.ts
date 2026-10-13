@@ -1782,15 +1782,132 @@ describe("fs.watch mode's backstop when file-change events arrive late or never"
 				}
 			});
 
-			it("after a full load that failed, every check reloads, with nothing changed, until a load succeeds", () => {
+			it("after a full load that failed, nothing changed: the read is retried once per retry window, until a load succeeds", () => {
+				__tailTestSeam.failedReadRetryMs = 5 * BOUND;
 				let failed = true;
 				const w = startLoaded({ failed: () => failed });
 				try {
-					tick(3);
-					expect(w.what()).toEqual(["resync", "resync", "resync"]);
+					// The failure is first seen at the first tick; the window runs from there.
+					tick(5);
+					expect(w.what()).toEqual([]);
+					tick(1);
+					expect(w.what()).toEqual(["resync"]);
+					tick(5);
+					expect(w.what()).toEqual(["resync", "resync"]);
 					failed = false;
+					tick(10);
+					expect(w.what()).toEqual(["resync", "resync"]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			// The rows below count reloads over N ticks against the bound ceil(N x tick / retry): a retry on every tick
+			// fails the first.
+			const N = 60;
+			const RETRY = 7 * BOUND;
+			const bound = Math.ceil((N * BOUND) / RETRY);
+
+			it("red-first (a reload per tick): a read that keeps failing, with nothing changed, reloads at most once per retry window", () => {
+				__tailTestSeam.failedReadRetryMs = RETRY;
+				const w = startLoaded({ failed: () => true });
+				try {
+					tick(N);
+					const resyncs = w.delivered.filter((d) => d.what === "resync");
+					// Positive control: the failed read is retried at all.
+					expect(resyncs.length).toBeGreaterThanOrEqual(1);
+					expect(resyncs.length).toBeLessThanOrEqual(bound);
+					const ats = resyncs.map((d) => d.at);
+					for (let i = 1; i < ats.length; i++) {
+						expect((ats[i] ?? 0) - (ats[i - 1] ?? 0)).toBeGreaterThanOrEqual(RETRY);
+					}
+					expect(w.what().filter((x) => x !== "resync")).toEqual([]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			it("the same when the log itself cannot be stat'd: a stat error that stays the same reloads at most once per window", () => {
+				__tailTestSeam.failedReadRetryMs = RETRY;
+				__tailTestSeam.statLog = () => {
+					throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+				};
+				const delivered: string[] = [];
+				const stop = watchLedger(
+					vault,
+					() => 0,
+					{ onGrow: () => delivered.push("grow"), onResync: () => delivered.push("resync") },
+					() => undefined,
+					undefined,
+					() => undefined,
+					() => true,
+				);
+				try {
+					tick(N);
+					expect(delivered.length).toBeGreaterThanOrEqual(1);
+					expect(delivered.length).toBeLessThanOrEqual(bound);
+				} finally {
+					stop();
+				}
+			});
+
+			it("recovery: once the read succeeds again, the reloads stop; the retry that succeeded came within one window", () => {
+				__tailTestSeam.failedReadRetryMs = RETRY;
+				let failed = true;
+				// The caller's load succeeds from `readableAt` on, as a read of a vault made readable again does.
+				let readableAt = Number.POSITIVE_INFINITY;
+				let recoveredAt: number | undefined;
+				let held = recorded();
+				const delivered: number[] = [];
+				const stop = watchLedger(
+					vault,
+					() => 3,
+					{
+						onGrow: () => {},
+						onResync: () => {
+							delivered.push(Date.now());
+							held = recorded();
+							if (Date.now() >= readableAt) {
+								failed = false;
+								recoveredAt ??= Date.now();
+							}
+						},
+					},
+					() => held.id,
+					undefined,
+					() => held.times,
+					() => failed,
+				);
+				try {
+					tick(17);
+					readableAt = Date.now();
+					tick(RETRY / BOUND);
+					expect(recoveredAt).toBeDefined();
+					expect((recoveredAt ?? 0) - readableAt).toBeLessThanOrEqual(RETRY);
+					const count = delivered.length;
+					tick(N);
+					expect(delivered.length).toBe(count);
+				} finally {
+					stop();
+				}
+			});
+
+			it("a grow while the read keeps failing reloads at the next check, without waiting for the retry window", () => {
+				__tailTestSeam.failedReadRetryMs = 1000 * BOUND;
+				const w = startLoaded({ failed: () => true });
+				try {
 					tick(3);
-					expect(w.what()).toEqual(["resync", "resync", "resync"]);
+					expect(w.what()).toEqual([]);
+					appendFileSync(logPath(), "{}\n");
+					tick();
+					// The known size is the row's own (3), so the grow is delivered as a grow: the server makes it a full load.
+					expect(w.what()).toEqual(["grow"]);
+					tick(5);
+					expect(w.what()).toEqual(["grow"]);
+					// A same-size change the key shows (new timestamps) goes on at once too.
+					utimesSync(logPath(), new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+					tick();
+					expect(w.what()).toEqual(["grow", "grow"]);
 				} finally {
 					w.stop();
 				}

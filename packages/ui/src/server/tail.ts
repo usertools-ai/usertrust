@@ -34,10 +34,16 @@ const REVERIFY_MS = 5 * 60 * 1000;
  * full load of 50 000 events takes about half a second: a churn of such changes must not keep the dashboard reloading.
  */
 const SAME_SIZE_RELOAD_MS = 30 * 1000;
+/**
+ * The least time between two full loads retried, on an unchanged vault, after a full load failed: a full load of 50 000
+ * events takes about half a second and is broadcast to every client, so a read that keeps failing costs one load per
+ * window, and a vault that becomes readable again (an anchor's permission restored) reads correctly within about one.
+ */
+const FAILED_READ_RETRY_MS = 10 * 1000;
 
 /**
  * For tests only, never exported from the package: the backstop's interval, the re-verify interval, the least time
- * between two same-size reloads, the clock that time is measured on, the fs.watch function, and the stat of the log that
+ * between two same-size reloads, the least time between two retries of a failed read, the clock that time is measured on, the fs.watch function, and the stat of the log that
  * the memo key and every check are built from, read once when `watchLedger` starts. Tests shorten the intervals, replace
  * the watcher with one that never calls back or that emits `error`, and hand the checks chosen stats. The defaults are
  * the production behaviour.
@@ -46,6 +52,7 @@ export const __tailTestSeam: {
 	backstopMs: number;
 	reverifyMs: number;
 	sameSizeReloadMs: number;
+	failedReadRetryMs: number;
 	now: () => number;
 	watch: typeof watch;
 	statLog: (path: string) => BigIntStats;
@@ -53,6 +60,7 @@ export const __tailTestSeam: {
 	backstopMs: BACKSTOP_MS,
 	reverifyMs: REVERIFY_MS,
 	sameSizeReloadMs: SAME_SIZE_RELOAD_MS,
+	failedReadRetryMs: FAILED_READ_RETRY_MS,
 	now: () => performance.now(),
 	watch,
 	statLog: (path) => statSync(path, { bigint: true }),
@@ -62,10 +70,10 @@ export const __tailTestSeam: {
  * Watches the vault's log and calls back on a change. `sizeOf` is the log size the caller holds; `identityOf` the log's
  * identity its last load recorded (`fileIdentity`); `auditDirIdOf` the audit directory's identity when the caller first
  * saw it; `timesOf` the log's mtime and ctime as its last load or grow saw them; `reloadPending` whether the caller's
- * last full load failed. Each check compares the directory's identity (absent where one was seen, or another directory
- * at the path, is a resync), then the log's size (a shrink resyncs, a grow is incremental), then at the same size: its
- * identity (another file resyncs), whether the last full load failed (every check after a failed read reloads, until one
- * succeeds), and its timestamps (a rewrite in place at the same length; guarded, see `rewrittenAtSameSize`).
+ * last full load failed (see `failedReadRetry`). Each check compares the directory's identity (absent where one was seen,
+ * or another directory at the path, is a resync), then the log's size (a shrink resyncs, a grow is incremental), then at
+ * the same size: its identity (another file resyncs), whether the last full load failed (a failed read is retried), and
+ * its timestamps (a rewrite in place at the same length; guarded, see `rewrittenAtSameSize`).
  * With `events.onReverify`, the whole vault is also re-verified every `REVERIFY_MS`, whatever the checks saw.
  */
 export function watchLedger(
@@ -88,17 +96,28 @@ export function watchLedger(
 		backstopMs,
 		reverifyMs,
 		sameSizeReloadMs,
+		failedReadRetryMs,
 		now: clock,
 		watch: watchDir,
 		statLog,
 	} = __tailTestSeam;
 
-	const statOfLog = (): BigIntStats | undefined => {
+	/**
+	 * The log's stat (none where it failed), and a key of every field of it a check compares, or of its error, and of
+	 * the audit directory's state: two equal keys are a vault no check could tell apart. The log's fields come from ONE
+	 * BigInt stat: a JS number cannot hold a 64-bit file id (Windows' exceed 2^53), and two ids that round to one value
+	 * would let a key hide a replacement.
+	 */
+	const readLog = (): { st: BigIntStats | undefined; key: string } => {
+		let st: BigIntStats | undefined;
+		let key: string;
 		try {
-			return statLog(logPath);
-		} catch {
-			return undefined;
+			st = statLog(logPath);
+			key = `${st.size}:${st.mtimeNs}:${st.ctimeNs}:${st.dev}:${st.ino}:${st.birthtimeNs}`;
+		} catch (err) {
+			key = `error:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
 		}
+		return { st, key: `${key}|${auditDirNow()}` };
 	};
 
 	/** The audit directory as a stat sees it: its identity, "absent", or "unknown" (another error, or inode 0). */
@@ -138,15 +157,52 @@ export function watchLedger(
 	/** When the last same-size reload was asked for, on a monotonic clock (the seam's `now`); none yet. */
 	let lastSameSizeReload = Number.NEGATIVE_INFINITY;
 
+	/**
+	 * The vault's key (`readLog`) at the last check that went on: the state the last full load it could have asked for
+	 * read, or a later one. Taken first when the watcher starts, just after the caller's first load.
+	 */
+	let lastKey: string | undefined;
+	/** When the failed read was last retried (or first seen failed), on the seam's clock; none outside a failed spell. */
+	let lastFailedRetry: number | undefined;
+	/** Whether a retry of the failed read is due by time alone: none seen yet, or a window since the last one. */
+	const failedRetryDue = (): boolean =>
+		lastFailedRetry === undefined || clock() - lastFailedRetry >= failedReadRetryMs;
+
+	/**
+	 * Whether this check may go on. While the caller's last full load failed (`reloadPending`): a read that failed is
+	 * not a verdict, and its recovery may change nothing a check sees (an anchor's permission restored), so it is
+	 * retried in full: at once when the vault changed in any way its key shows since the last check (a grow, a shrink,
+	 * another file, new timestamps, the directory gone or replaced, a stat error that began or ended), else at most once
+	 * per `FAILED_READ_RETRY_MS`, counted from when the failure was first seen. A retry on every check re-read a vault
+	 * whose read kept failing in full once a second, with a resync to every client each time.
+	 */
+	const failedReadRetry = (key: string): boolean => {
+		const changed = key !== lastKey;
+		lastKey = key;
+		if (reloadPending?.() !== true) {
+			lastFailedRetry = undefined;
+			return true;
+		}
+		if (lastFailedRetry === undefined) {
+			// The load that failed ran just before this check: the window starts now, and only a change goes on.
+			lastFailedRetry = clock();
+			return changed;
+		}
+		if (!changed && clock() - lastFailedRetry < failedReadRetryMs) return false;
+		lastFailedRetry = clock();
+		return true;
+	};
+
 	const check = (): void => {
+		// Size, identity and timestamps from ONE stat, so a check never pairs one file's size with another's identity.
+		const { st, key } = readLog();
+		if (!failedReadRetry(key)) return;
 		// The directory first: a vault replaced in one step can hold a log of any size, and a directory deleted while it
 		// held no log bytes changes no size at all (an absent log reads as 0).
 		if (auditDirMoved()) {
 			events.onResync();
 			return;
 		}
-		// Size, identity and timestamps from ONE stat, so a check never pairs one file's size with another's identity.
-		const st = statOfLog();
 		const size = st === undefined ? 0 : Number(st.size);
 		const known = sizeOf();
 		if (size !== known) timesMoved = false;
@@ -156,8 +212,8 @@ export function watchLedger(
 			timesMoved = false;
 			events.onResync();
 		}
-		// A read that failed is not a verdict: every check after it reloads in full until one succeeds, whatever changed
-		// (a permission restored changes neither the log's size nor its identity).
+		// A read that failed is not a verdict: a check `failedReadRetry` let through reloads in full, whatever changed (a
+		// permission restored changes neither the log's size nor its identity).
 		else if (reloadPending?.() === true) events.onResync();
 		else if (identityOf !== undefined && rewrittenAtSameSize(st)) events.onResync();
 	};
@@ -199,6 +255,7 @@ export function watchLedger(
 		return true;
 	};
 
+	lastKey = readLog().key;
 	try {
 		watcher = watchDir(auditDir, () => {
 			if (timer) clearTimeout(timer);
@@ -221,21 +278,13 @@ export function watchLedger(
 		// The memo stops a torn last line (a writer that died mid-line) from being re-read in full every tick: check()
 		// runs only when the log's size, timestamps or identity, its stat error, the audit directory's identity (or
 		// absence), or the known size moved since the last call, while a timestamp change waits for its second check or
-		// for the same-size limit, or while the last full load failed.
-		// Every field check() compares is in the key, or a skip could hide it. The log's fields come from ONE BigInt stat:
-		// a JS number cannot hold a 64-bit file id (Windows' exceed 2^53), and two ids that round to one value would let
-		// a skip hide a replacement.
+		// for the same-size limit, or, while the last full load failed, once a retry of it is due (`failedReadRetry`).
+		// Every field check() compares is in the key (`readLog`'s, and the known size), or a skip could hide it.
 		let memo: string | undefined;
 		backstop = setInterval(() => {
-			let seen: string;
-			try {
-				const st = statLog(logPath);
-				seen = `${st.size}:${st.mtimeNs}:${st.ctimeNs}:${st.dev}:${st.ino}:${st.birthtimeNs}`;
-			} catch (err) {
-				seen = `error:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
-			}
-			seen += `|${auditDirNow()}|${sizeOf()}`;
-			if (seen === memo && !timesMoved && reloadPending?.() !== true) return;
+			const seen = `${readLog().key}|${sizeOf()}`;
+			const retryDue = reloadPending?.() === true && failedRetryDue();
+			if (seen === memo && !timesMoved && !retryDue) return;
 			memo = seen;
 			check();
 		}, backstopMs);
