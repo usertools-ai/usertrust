@@ -793,7 +793,10 @@ function makeMembrane(
 					if (!hasDefaultSpecies(v))
 						throw new CannotTell("an array whose class names its own Symbol.species");
 					// So would a toJSON its class holds, which then rewrites what is sent: can't tell.
-					if (classHoldsToJSON(v)) throw new CannotTell("an array whose class holds a toJSON");
+					// (Not at config.tools: the SDK maps that array but never serializes what it builds.)
+					if (rec.role !== "tools" && classHoldsToJSON(v)) {
+						throw new CannotTell("an array whose class holds a toJSON");
+					}
 					return Array;
 				}
 				// A built-in method goes to the SDK as it is. Any other function (an own or a

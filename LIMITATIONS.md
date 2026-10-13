@@ -140,8 +140,9 @@ own:
   constructor of its own is built as a plain `Array`, its constructor never run;
   a constructor that returns some other object is not reflected. A subclass that
   names its own `Symbol.species`, or whose prototype (up to `Array.prototype`)
-  holds a `toJSON`, is refused instead: what that class would build, or what its
-  hook would make of it, is not known without running it.
+  holds a `toJSON` (outside `config.tools`, whose array the SDK never
+  serializes), is refused instead: what that class would build, or what its hook
+  would make of it, is not known without running it.
 - **Policy fields are read once, when the request is checked.** A field beside
   `model`, `contents` and `config` is read then (a getter there run once, as
   before) and kept beside the request for the policy rules, never sent,

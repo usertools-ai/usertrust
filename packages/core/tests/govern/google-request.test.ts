@@ -1491,6 +1491,23 @@ describe("caller code reached from the request cannot change what is sent after 
 				expect(c.governed.json).toBe(0);
 			});
 
+			it(`${on}: config.tools in an Array subclass whose prototype holds a toJSON goes as natively (the SDK never serializes that array): governed == native, the hook never run by governance, as on the base`, async () => {
+				const c = counts();
+				const make = (side: "native" | "governed") => () => {
+					const Tools = protoToJSON(c[side], ["rewritten"]);
+					return request({ tools: Tools.from([{ googleSearch: {} }]) });
+				};
+				const r = await nativeThenGoverned(
+					method,
+					{ native: make("native"), governed: make("governed") },
+					{ vertex },
+				);
+				expect(r.rawResult).toBe("ok");
+				expectSameSend(r);
+				expect(JSON.stringify(r.gov.requests)).not.toContain("rewritten");
+				expect(c.governed.json).toBe(0);
+			});
+
 			for (const place of ["parts", "tools"] as const) {
 				it(`${on}: ${place} in an Array subclass with a constructor of its own go through as a plain array: governed == native, its constructor never run by governance`, async () => {
 					const c = counts();
