@@ -46,7 +46,9 @@ Monorepo, npm workspaces (`packages/*`). `site/` is a Next.js app and is **not**
 | `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. The workspace name is internal; the plugin is published as `usertools` (`/plugin install usertools@usertrust`). |
 
 The first six are version-locked and released together. `monte-cristo` and `claude-code-plugin`
-are not.
+are not. Each of the six names any other it depends on at exactly its own version, never a range
+such as `"*"`: the release sets and checks those pins (docs/releasing.md, "Sibling dependencies
+are pinned").
 
 **No brand asset is committed to this repository**: no font file of any kind (Usertools Sans and
 every other face, first-party or OFL), no logo or mark, no lattice code. `site/` loads them at

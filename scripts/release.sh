@@ -8,6 +8,8 @@
 #
 #   release.sh dirs                      the lockstep package directories, in publish order
 #   release.sh version                   the lockstep version; fails if the six packages disagree
+#   release.sh pin-siblings              sets every lockstep package a manifest depends on to
+#                                        the lockstep version (the bump's second half)
 #   release.sh assert-published          fails unless every <package>@<version> is on npm
 #   release.sh assert-unreleased         fails if tag v<version> or any <package>@<version> exists
 #   release.sh assert-protected <env>    fails unless environment <env> requires a reviewer
@@ -100,13 +102,25 @@ name_of() {
 # The manifest checker. Its input is data only: it opens each file with O_NOFOLLOW and
 # O_NONBLOCK, requires a regular file (a symlink, a FIFO or a directory is refused, and
 # nothing is followed or waited on), and parses the bytes with JSON.parse.
+#
+# A SIBLING is a lockstep package (LOCKSTEP_NAMES, set by manifest() below) that a manifest
+# names in one of its dependency fields (dependencies, optionalDependencies, peerDependencies,
+# devDependencies). A released manifest names every sibling at exactly the release's version.
+# A range such as "*" is satisfied by a sibling an earlier install left behind, and a package
+# run against an older sibling can fail to start (an export it imports does not exist there).
 #   read <file> <name>                         prints the version; the name must match
 #   compare <base> <candidate> <name> <version>
-#       the candidate must equal the base in every field but "version", which must be
-#       <version>; its name must be <name>; neither may have publishConfig.
+#       the candidate's "version" must be <version>, and each sibling it names must be at
+#       exactly <version>; it must equal the base in everything else (the same fields, and
+#       in each dependency field the same names, with every non-sibling spec unchanged). Its
+#       name must be <name>; neither may have publishConfig.
 #   roots <file> <name> <version>
 #       prints the root files "files" names besides dist, one per line; refuses any entry
-#       that is not "dist" or a plain file name at the package root.
+#       that is not "dist" or a plain file name at the package root, and any sibling that is
+#       not at exactly <version>.
+#   pin <file> <name> <version>
+#       sets each sibling the manifest names to <version>, rewriting the file only if that
+#       changes it, and prints each change; the manifest's own version must be <version>.
 MANIFEST_JS='
 const fs = require("node:fs");
 const fail = (m) => { console.error("::error::" + m); process.exit(1); };
@@ -136,6 +150,28 @@ const equal = (a, b) => {
 	if (ka.length !== kb.length) return false;
 	return ka.every((k) => has(b, k) && equal(a[k], b[k]));
 };
+const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const LOCKSTEP = (process.env.LOCKSTEP_NAMES || "").split("\n").filter(Boolean);
+if (LOCKSTEP.length === 0) fail("manifest checker: LOCKSTEP_NAMES is empty");
+const DEP_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies", "devDependencies"];
+// The siblings <m> names, as [field, name] pairs. A dependency field that is not an object is
+// refused: what it names cannot be read.
+const siblings = (m, name) => {
+	const found = [];
+	for (const f of DEP_FIELDS) {
+		if (!has(m, f)) continue;
+		if (!isObject(m[f])) fail(name + ": " + JSON.stringify(f) + " is not an object");
+		for (const k of Object.keys(m[f])) if (LOCKSTEP.includes(k)) found.push([f, k]);
+	}
+	return found;
+};
+const requirePinned = (m, name, version) => {
+	for (const [f, k] of siblings(m, name)) {
+		if (m[f][k] !== version) {
+			fail(name + ": " + f + " names " + k + " at " + JSON.stringify(m[f][k]) + ", not " + version + "; a release names each lockstep sibling at exactly its own version");
+		}
+	}
+};
 const [mode, ...args] = process.argv.slice(1);
 if (mode === "read") {
 	const [file, name] = args;
@@ -157,11 +193,25 @@ if (mode === "read") {
 	if (cand.version !== version) {
 		fail(name + ": version is " + JSON.stringify(cand.version) + ", not " + version);
 	}
+	requirePinned(cand, name, version);
 	const keys = new Set([...Object.keys(base), ...Object.keys(cand)]);
 	keys.delete("version");
 	for (const k of keys) {
-		if (!has(base, k) || !has(cand, k) || !equal(base[k], cand[k])) {
-			fail(name + ": field " + JSON.stringify(k) + " differs; only \"version\" may change");
+		const differs = name + ": field " + JSON.stringify(k) + " differs; only \"version\" and the lockstep siblings may change";
+		if (!has(base, k) || !has(cand, k)) fail(differs);
+		if (!DEP_FIELDS.includes(k)) {
+			if (!equal(base[k], cand[k])) fail(differs);
+			continue;
+		}
+		if (!isObject(base[k]) || !isObject(cand[k])) fail(differs);
+		const deps = new Set([...Object.keys(base[k]), ...Object.keys(cand[k])]);
+		for (const d of deps) {
+			if (!has(base[k], d) || !has(cand[k], d)) {
+				fail(name + ": " + k + " " + (has(cand[k], d) ? "adds " : "drops ") + d + "; a release adds and drops no dependency");
+			}
+			if (!LOCKSTEP.includes(d) && !equal(base[k][d], cand[k][d])) {
+				fail(name + ": " + k + " changes " + d + "; a release changes only the lockstep siblings");
+			}
 		}
 	}
 } else if (mode === "roots") {
@@ -170,6 +220,7 @@ if (mode === "read") {
 	if (m.name !== name) fail(file + " names " + JSON.stringify(m.name) + ", not " + name);
 	if (m.version !== version) fail(name + ": version is " + JSON.stringify(m.version) + ", not " + version);
 	if (has(m, "publishConfig")) fail(name + ": publishConfig is not allowed in a released manifest");
+	requirePinned(m, name, version);
 	if (!Array.isArray(m.files) || !m.files.every((f) => typeof f === "string")) {
 		fail(name + ": the manifest has no \"files\" list of strings; a release ships only what it names");
 	}
@@ -183,12 +234,32 @@ if (mode === "read") {
 		roots.add(f);
 	}
 	for (const f of roots) console.log(f);
+} else if (mode === "pin") {
+	const [file, name, version] = args;
+	const m = load(file);
+	if (m.name !== name) fail(file + " names " + JSON.stringify(m.name) + ", not " + name);
+	if (m.version !== version) fail(name + ": version is " + JSON.stringify(m.version) + ", not " + version);
+	const changes = [];
+	for (const [f, k] of siblings(m, name)) {
+		if (m[f][k] === version) continue;
+		changes.push(name + ": " + f + " " + k + " " + JSON.stringify(m[f][k]) + " -> " + JSON.stringify(version));
+		m[f][k] = version;
+	}
+	if (changes.length > 0) {
+		// The format npm and biome give these files: tabs, and a final newline.
+		const c = fs.constants;
+		const fd = fs.openSync(file, c.O_WRONLY | c.O_TRUNC | c.O_NOFOLLOW);
+		fs.writeFileSync(fd, JSON.stringify(m, null, "\t") + "\n");
+		fs.closeSync(fd);
+	}
+	for (const line of changes) console.log(line);
 } else {
 	fail("manifest checker: unknown mode " + mode);
 }
 '
 
-manifest() { node -e "$MANIFEST_JS" "$@"; }
+# The checker reads the lockstep names from its environment, one per line.
+manifest() { LOCKSTEP_NAMES="$(names)" node -e "$MANIFEST_JS" "$@"; }
 
 # A strict release version: three numbers, nothing else (the bump makes no prereleases). Any
 # version string that came from the build job is checked against this before it is used.
@@ -228,6 +299,21 @@ lockstep_version() {
 		return 1
 	fi
 	echo "$first"
+}
+
+# The bump's second half, in the working tree. `npm version` sets each package's own version
+# and nothing else: it never rewrites a spec that names the package it bumped (npm has no
+# workspace protocol, and the publish tarball's package.json comes from the release commit, so
+# nothing rewrites one later either). This sets every sibling each manifest names to the
+# lockstep version, so that the release commit, and the packages published from it, require
+# exactly the siblings they are released with. verify_release_commit accepts exactly these
+# changes.
+pin_siblings() {
+	local version dir
+	version=$(lockstep_version) || return 1
+	for dir in $(dirs); do
+		manifest pin "packages/${dir}/package.json" "$(name_of "$dir")" "$version" || return 1
+	done
 }
 
 # Prints the blob id of <path> in <commit>, or nothing if <commit> has no such path, after
@@ -651,7 +737,8 @@ assert_protected() {
 #   - it has exactly one parent (and that parent is <expected parent>, when one is given);
 #   - it changes exactly the six lockstep package.json paths, compared as literal strings,
 #     each a modified regular file (100644 before and after);
-#   - each changes nothing but "version", and carries no publishConfig.
+#   - each names every lockstep sibling at exactly <version>, changes nothing but "version"
+#     and those siblings' specs (pin_siblings), and carries no publishConfig.
 # Prints the parent.
 verify_release_commit() {
 	local commit="$1" expected_parent="${2:-}" version tag_commit parents parent raw tmp meta path dir seen count ok
@@ -713,7 +800,7 @@ verify_release_commit() {
 		manifest_blob "$parent" "$ok" "${tmp}/${ok}.before.json" || return 1
 		manifest_blob "$commit" "$ok" "${tmp}/${ok}.after.json" || return 1
 		if ! manifest compare "${tmp}/${ok}.before.json" "${tmp}/${ok}.after.json" "$(name_of "$ok")" "$version"; then
-			err "v${version} (${commit}) changes packages/${ok}/package.json beyond its \"version\" field; a release commit changes only the version."
+			err "v${version} (${commit}) changes packages/${ok}/package.json beyond its \"version\" and its lockstep siblings, or leaves a sibling at another version; a release commit sets exactly those to v${version}."
 			return 1
 		fi
 	done <"$raw"
@@ -827,7 +914,7 @@ EOF
 	echo "CI passed on ${sha}."
 }
 
-# A republish finishes a release that master records. A version-only commit tagged on a side
+# A republish finishes a release that master records. A release-shaped commit tagged on a side
 # branch was never released, so its tag must be an ancestor of master as master is NOW: fetched
 # here, in full. A shallow history, a failed fetch or a missing ref cannot show ancestry, so
 # each of them refuses.
@@ -1104,6 +1191,7 @@ case "${1:-}" in
 dirs) dirs ;;
 names) names ;;
 version) lockstep_version ;;
+pin-siblings) pin_siblings ;;
 version-at) version_at "${2:?usage: version-at <commit>}" ;;
 verify-release) verify_release "${2:-}" "${3:-}" ;;
 assert-published) assert_published ;;
@@ -1117,7 +1205,7 @@ pack) pack "${2:-}" ;;
 publish) publish "${2:-}" "${3:-}" "${4:-}" ;;
 gate) gate ;;
 *)
-	err "usage: release.sh dirs | names | version | version-at <commit> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run]"
+	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run]"
 	exit 2
 	;;
 esac
