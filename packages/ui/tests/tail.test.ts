@@ -436,7 +436,7 @@ describe("header spend", () => {
 		expect(JSON.parse(afterCall.data).spentUt).toBe(9);
 	});
 
-	// Measured on the unfixed close(): about 3.7 s here, against 1-5 ms once it closes the remaining connections.
+	// Measured on the unfixed close(): about 3.7 s here, against about CLOSE_GRACE_MS (400 ms) once it cuts the remaining connections.
 	// One live-tail wait leaves close() fast; two in a row hold it. Which connection is held is not established.
 	it("close() resolves in well under two seconds after two live-tail waits", async () => {
 		ui = await createUiServer(tempDir, { port: 0 });
