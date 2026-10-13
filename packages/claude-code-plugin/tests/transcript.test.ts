@@ -82,6 +82,30 @@ let fake: Server | undefined;
 let real: UsertrustServer | undefined;
 let port: number;
 let requests: Recorded[];
+
+/**
+ * Every transferId the plugin settled more than once, but for the standard idempotent retry: a
+ * hold that two authorizes under the SAME idempotency key both returned (the server gave back
+ * the live hold it holds for that key), which the retry may settle again, at most once by key.
+ * Any other second settle (unkeyed, or of a hold no repeated same-key authorize returned) is
+ * reported.
+ */
+function secondSettles(log: Recorded[]): string[] {
+	const reissued = new Set<string>();
+	const byKey = new Map<string, string[]>();
+	for (const r of log) {
+		if (r.path !== "/v1/authorize" || r.status !== 200) continue;
+		const key = r.body.idempotencyKey;
+		const transferId = (r.response as { transferId?: unknown } | null)?.transferId;
+		if (typeof key !== "string" || typeof transferId !== "string") continue;
+		const returned = byKey.get(key) ?? [];
+		if (returned.includes(transferId)) reissued.add(transferId);
+		returned.push(transferId);
+		byKey.set(key, returned);
+	}
+	const settled = log.filter((r) => r.path === "/v1/settle").map((r) => String(r.body.transferId));
+	return settled.filter((id, i) => settled.indexOf(id) !== i && !reissued.has(id));
+}
 let delayMs: number;
 /** What the fake server's /v1/health publishes: none, an older server, unless a test says. Null: health fails. */
 let capabilities: string[] | null;
@@ -317,6 +341,57 @@ const u = (input: number, output: number, cacheRead = 0, cacheWrite = 0): Usage 
 // A variable specifier: the hook is plain .mjs with no declaration file, and a literal import would add a new typed error.
 const TRANSCRIPT_HOOK = "../hooks/transcript.mjs";
 
+describe("the no-second-settle invariant (`secondSettles`), on logs built by hand", () => {
+	const authorize = (key: string | undefined, transferId: string, status = 200): Recorded => ({
+		path: "/v1/authorize",
+		body: key === undefined ? {} : { idempotencyKey: key },
+		status,
+		response: status === 200 ? { transferId } : { error: "internal" },
+	});
+	const settle = (transferId: string): Recorded => ({
+		path: "/v1/settle",
+		body: { transferId },
+		status: 200,
+		response: { settled: true },
+	});
+	it("an unkeyed second settle of a hold is reported", () => {
+		expect(secondSettles([authorize(undefined, "tx_1"), settle("tx_1"), settle("tx_1")])).toEqual([
+			"tx_1",
+		]);
+	});
+	it("a hold two authorizes under the SAME key returned may be settled again", () => {
+		const log = [authorize("k1", "tx_1"), settle("tx_1"), authorize("k1", "tx_1"), settle("tx_1")];
+		expect(secondSettles(log)).toEqual([]);
+	});
+	it("a hold returned under two DIFFERENT keys is reported, as is one the same key never returned again", () => {
+		expect(
+			secondSettles([
+				authorize("k1", "tx_1"),
+				authorize("k2", "tx_1"),
+				settle("tx_1"),
+				settle("tx_1"),
+			]),
+		).toEqual(["tx_1"]);
+		expect(
+			secondSettles([
+				authorize("k1", "tx_1"),
+				authorize("k1", "tx_2"),
+				settle("tx_1"),
+				settle("tx_1"),
+			]),
+		).toEqual(["tx_1"]);
+	});
+	it("a failed authorize under the key does not count as returning the hold", () => {
+		const log = [
+			authorize("k1", "tx_1"),
+			authorize("k1", "tx_1", 500),
+			settle("tx_1"),
+			settle("tx_1"),
+		];
+		expect(secondSettles(log)).toEqual(["tx_1"]);
+	});
+});
+
 const settles = () => requests.filter((r) => r.path === "/v1/settle");
 const authorizes = () => requests.filter((r) => r.path === "/v1/authorize");
 const aborts = () => requests.filter((r) => r.path === "/v1/abort");
@@ -351,14 +426,9 @@ beforeEach(async () => {
 afterEach(async () => {
 	// The invariant a settle's 404 rests on (post-tool-use.mjs `settleEstimateHold`):
 	// across every path these tests drive — estimate, transcript window, remainder,
-	// retries, faults — the plugin never sends a second settle for any transferId.
-	const settled = requests
-		.filter((r) => r.path === "/v1/settle")
-		.map((r) => String(r.body.transferId));
-	expect(
-		settled.filter((id, i) => settled.indexOf(id) !== i),
-		"a transferId was settled twice",
-	).toEqual([]);
+	// retries, faults — the plugin never sends a second settle for any transferId, but
+	// for the one idempotent retry (`secondSettles`).
+	expect(secondSettles(requests), "a transferId was settled twice").toEqual([]);
 	fake?.closeAllConnections();
 	fake?.close();
 	fake = undefined;
@@ -4081,6 +4151,40 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			]);
 			expect((await readCursor()).accounted).toEqual(["msg_a"]);
 			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("keyed: a window whose settle fails while its hold stays live is retried at Stop under its key, and the SAME hold is settled again, once by key", async () => {
+			capabilities = [...ALL_CAPABILITIES];
+			const server = keyedServer();
+			let failing = true;
+			await startServer((path, body) => {
+				if (failing && body.transferId === "tx_1" && path === "/v1/settle") {
+					return { status: 500, json: { error: "internal" } };
+				}
+				if (
+					failing &&
+					body.transferId === "tx_1" &&
+					(path === "/v1/release" || path === "/v1/abort")
+				) {
+					return { status: 503, json: { error: "unavailable" } };
+				}
+				return server.responder(path, body);
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			failing = false;
+			await run("stop.mjs", stopInput());
+			// The retry's authorize carried the window's key, and the server gave back tx_1: the live
+			// hold it holds for that key. Settling it again is the idempotent retry, charged once.
+			const forTx1 = authorizes().filter((r) => transferOf(r) === "tx_1");
+			expect(forTx1).toHaveLength(2);
+			expect(forTx1[1]?.body.idempotencyKey).toBe(forTx1[0]?.body.idempotencyKey);
+			expect(settles().map((r) => r.body.transferId)).toEqual(["tx_1", "tx_1"]);
+			expect(server.charges).toEqual([
+				{ key: keyOf("main", ["msg_a"]), transferId: "tx_1", inputTokens: 5 },
+			]);
+			expect(secondSettles(requests)).toEqual([]);
 		});
 
 		it("keyed: an expired first hold's window is retried under its key at Stop, charged once", async () => {
