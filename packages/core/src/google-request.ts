@@ -426,46 +426,17 @@ function hasDefaultSpecies(ctor: unknown): boolean {
 }
 
 /**
- * Is `o` an intrinsic `Array.prototype`: this realm's by identity, another realm's by its own
- * `constructor`, a data property holding a function whose native source text is `Array`'s (as
- * `isBuiltInMethod`)? Descriptors only.
+ * Is `ctor` another realm's intrinsic `Array` (an array made in a `vm` context, say)? Not a Proxy,
+ * and its source text, read through the `Function.prototype.toString` captured when this module
+ * loads, is `Array`'s native one, which only a built-in prints (as `isBuiltInMethod`).
  */
-function isIntrinsicArrayPrototype(o: object): boolean {
-	if (o === Array.prototype) return true;
-	const ctor = Reflect.getOwnPropertyDescriptor(o, "constructor");
-	if (ctor === undefined || !("value" in ctor) || typeof ctor.value !== "function") return false;
-	if (utilTypes.isProxy(ctor.value)) return false;
+function isAnotherRealmsArray(ctor: unknown): boolean {
+	if (typeof ctor !== "function" || ctor === Array || utilTypes.isProxy(ctor)) return false;
 	try {
-		return Reflect.apply(functionSource, ctor.value, []) === "function Array() { [native code] }";
+		return Reflect.apply(functionSource, ctor, []) === "function Array() { [native code] }";
 	} catch {
 		return false;
 	}
-}
-
-/**
- * Does the class `ctor` of an array (one with the default species) hold a `toJSON`: any object from
- * `ctor.prototype` up to (not including) the intrinsic `Array.prototype` with an own `toJSON`, data
- * or accessor? The SDK's own `map` natively builds an instance of that class, which serializes
- * through the hook; the plain array answered for it would not. Descriptors only, the hook never
- * read or run; a Proxy on the way, a `prototype` that is not plain data, or a chain past 64 cannot
- * be told and counts as holding one.
- */
-function classHoldsToJSON(ctor: object): boolean {
-	const proto = Reflect.getOwnPropertyDescriptor(ctor, "prototype");
-	if (proto === undefined || !("value" in proto)) return true;
-	let o: unknown = proto.value;
-	for (let depth = 0; depth < 64; depth++) {
-		if (o === null) return false;
-		if (typeof o !== "object" && typeof o !== "function") return true;
-		if (utilTypes.isProxy(o)) return true;
-		if (o === Array.prototype) return false; // this realm's intrinsic, by identity
-		// Before another realm's is recognised: an object forging one (its `constructor` this realm's
-		// Array) still holds the toJSON it carries.
-		if (Reflect.getOwnPropertyDescriptor(o, "toJSON") !== undefined) return true;
-		if (isIntrinsicArrayPrototype(o)) return false; // another realm's, by native source
-		o = Object.getPrototypeOf(o);
-	}
-	return true;
 }
 
 /** For each well-known symbol, the source text of this realm's built-in methods held under it. */
@@ -787,19 +758,23 @@ function makeMembrane(
 				}
 				rec.readByName = true;
 				// An array's `constructor` is read by the SDK's own array methods (`map`, `filter`) to make
-				// their result (ArraySpeciesCreate). Natively another realm's Array is replaced by this
-				// realm's there; a caller's Array subclass would be constructed, running its code. Both
-				// answer this realm's Array: the result is a plain array, which serializes the same.
+				// their result (ArraySpeciesCreate), and answered this realm's Array: the result is a plain
+				// array, and no caller code runs to build it.
 				if (key === "constructor" && isArray && typeof v === "function" && v !== Array) {
-					// A species of the caller's own would be constructed natively (what it builds is not
-					// the plain array answered here): can't tell, and it never runs.
+					// Another realm's Array: natively that realm's species builds the result. With the
+					// default species that is a plain array of that realm, which serializes the same.
+					if (isAnotherRealmsArray(v)) {
+						if (!hasDefaultSpecies(v)) {
+							throw new CannotTell("an array whose realm's Array names its own Symbol.species");
+						}
+						return Array;
+					}
+					// Any other class: natively its constructor builds the result, and that code decides
+					// what is sent (it can give each instance a toJSON); can't tell, and it never runs.
+					// Not at config.tools: the SDK maps that array but never serializes what it builds.
+					if (rec.role !== "tools") throw new CannotTell("an array of a class other than Array");
 					if (!hasDefaultSpecies(v))
 						throw new CannotTell("an array whose class names its own Symbol.species");
-					// So would a toJSON its class holds, which then rewrites what is sent: can't tell.
-					// (Not at config.tools: the SDK maps that array but never serializes what it builds.)
-					if (rec.role !== "tools" && classHoldsToJSON(v)) {
-						throw new CannotTell("an array whose class holds a toJSON");
-					}
 					return Array;
 				}
 				// A built-in method goes to the SDK as it is. Any other function (an own or a

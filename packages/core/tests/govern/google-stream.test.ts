@@ -1687,6 +1687,7 @@ class DeclarationInstance {
 
 /** An array subclass: a real array whose prototype is the subclass's, not Array.prototype. */
 class DeclarationList<T> extends Array<T> {}
+const ARRAY_SUBCLASS = "an array whose prototype is not Array's (an array subclass)";
 
 /**
  * One row per shape the snapshot refuses inside a field the SDK sends from a non-callable
@@ -1708,7 +1709,7 @@ const UNCOPYABLE_SHAPES: Array<[shape: string, tool: () => object, at: string, h
 		/\bobject whose prototype\b/,
 	],
 	[
-		"an array whose prototype is not Array's (an array subclass)",
+		ARRAY_SUBCLASS,
 		() => ({ functionDeclarations: DeclarationList.of({ name: "lookup" }) }),
 		"params.config.tools[0].functionDeclarations",
 		/\barray whose prototype\b/,
@@ -1918,7 +1919,9 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 				"a function inside a field the SDK sends",
 				() => ({ googleSearch: { hook: () => 1 } }),
 			] as const,
-			...UNCOPYABLE_SHAPES.map(([shape, makeTool]) => [shape, makeTool] as const),
+			...UNCOPYABLE_SHAPES.filter(([shape]) => shape !== ARRAY_SUBCLASS).map(
+				([shape, makeTool]) => [shape, makeTool] as const,
+			),
 		]) {
 			it(`${method}: ${shape} in a tool is governed as natively`, async () => {
 				const params = () => afcParams({ tools: [{ googleSearch: {} }, makeTool()] });
@@ -1948,6 +1951,34 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 				await destroy(governed);
 			});
 		}
+
+		it(`${method}: an array subclass in a tool (functionDeclarations) is refused, nothing held or sent, as on the base`, async () => {
+			const engine = makeMockEngine();
+			const audit = makeMockAudit();
+			const { client, generateContentStream } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: audit,
+			});
+			const params = afcParams({
+				tools: [
+					{ googleSearch: {} },
+					{ functionDeclarations: DeclarationList.of({ name: "lookup" }) },
+				],
+			});
+			await expect(callModels(governed, method, params)).rejects.toThrow(
+				/could not be checked for automatic function calling/,
+			);
+			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+			expect(engine.spendPending).not.toHaveBeenCalled();
+			const sdk =
+				method === "generateContent" ? client.models.generateContent : generateContentStream;
+			expect(sdk).not.toHaveBeenCalled();
+			await destroy(governed);
+		});
 
 		for (const [shape, makeTool] of COPYABLE_ARRAYS) {
 			it(`${method}: ${shape} is accepted and forwarded as equal data (control)`, async () => {

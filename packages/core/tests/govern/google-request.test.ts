@@ -1397,11 +1397,13 @@ describe("caller code reached from the request cannot change what is sent after 
 				expect(r.gov.requests).toHaveLength(0);
 			});
 
-			it(`${on}: parts in an Array subclass (its map inherited from Array.prototype) go through: governed == native (control)`, async () => {
+			it(`${on}: parts in a plain Array subclass are refused: natively its constructor builds what is sent, and governance runs no caller code to find out (the base sent them)`, async () => {
 				class Parts extends Array<unknown> {}
 				const make = () => request({}, [{ role: "user", parts: Parts.from([{ text: "safe" }]) }]);
 				const r = await nativeThenGoverned(method, same(make), { vertex });
-				expectSameSend(r);
+				expect(r.rawResult).toBe("ok");
+				expect(r.govResult).toContain("could not be checked for automatic function calling");
+				expect(r.gov.requests).toHaveLength(0);
 			});
 
 			/** Counters per side, so a native run never counts as governance's. */
@@ -1491,7 +1493,7 @@ describe("caller code reached from the request cannot change what is sent after 
 				expect(c.governed.json).toBe(0);
 			});
 
-			it(`${on}: parts in an Array subclass under a forged Array.prototype holding a toJSON are refused (this realm's Array.prototype is known by identity, and a toJSON is looked for before another realm's is recognised), the hook never run`, async () => {
+			it(`${on}: parts in an Array subclass under a forged Array.prototype holding a toJSON are refused, the hook never run`, async () => {
 				const c = counts();
 				const make = (side: "native" | "governed") => () => {
 					class Parts extends Array<unknown> {}
@@ -1519,8 +1521,8 @@ describe("caller code reached from the request cannot change what is sent after 
 				expect(c.governed.json).toBe(0);
 			});
 
-			for (const shape of ["a plain array", "a plain Array subclass"] as const) {
-				it(`${on}: parts as ${shape} while this realm's Array.prototype holds a toJSON: sent, rewritten, as on the base (5a7b2cf7: ok, one request)`, async () => {
+			{
+				it(`${on}: parts as a plain array while this realm's Array.prototype holds a toJSON: sent, rewritten, as on the base`, async () => {
 					const before = Object.getOwnPropertyDescriptor(Array.prototype, "toJSON");
 					Object.defineProperty(Array.prototype, "toJSON", {
 						value(this: unknown[]) {
@@ -1540,9 +1542,7 @@ describe("caller code reached from the request cannot change what is sent after 
 							vaultBase: vault,
 							_audit: recordingAudit(),
 						});
-						class Parts extends Array<unknown> {}
-						const parts =
-							shape === "a plain array" ? [{ text: EMAIL }] : Parts.from([{ text: EMAIL }]);
+						const parts = [{ text: EMAIL }];
 						const { result } = await runOn(
 							governed.models,
 							method,
@@ -1562,7 +1562,7 @@ describe("caller code reached from the request cannot change what is sent after 
 				});
 			}
 
-			it(`${on}: parts in an Array subclass with a Proxy on its class's prototype chain are refused, with the traps that run before the refusal unchanged (1, as measured before this order)`, async () => {
+			it(`${on}: parts in an Array subclass with a Proxy on its class's prototype chain are refused, nothing sent (the base sent them), one trap run before the refusal`, async () => {
 				const traps = { n: 0 };
 				class Parts extends Array<unknown> {}
 				const count =
@@ -1617,7 +1617,48 @@ describe("caller code reached from the request cannot change what is sent after 
 				expect(c.governed.json).toBe(0);
 			});
 
-			for (const place of ["parts", "tools"] as const) {
+			for (const [kind, ownHook] of [
+				["a constructor of its own", false],
+				["a constructor that gives each instance a toJSON", true],
+			] as const) {
+				it(`${on}: parts in an Array subclass with ${kind} are refused, the constructor never run by governance (natively it builds what is sent${ownHook ? ", its hook rewriting it" : ""})`, async () => {
+					const c = counts();
+					const make = (side: "native" | "governed") => () => {
+						class Counted extends Array<unknown> {
+							constructor(...items: unknown[]) {
+								super(...(items as []));
+								c[side].ctor++;
+								if (ownHook) {
+									Object.defineProperty(this, "toJSON", {
+										value() {
+											c[side].json++;
+											return [{ text: "[redacted]" }];
+										},
+									});
+								}
+							}
+						}
+						const parts = Counted.from([{ text: EMAIL }]);
+						c[side].ctor = 0;
+						c[side].json = 0;
+						return request({}, [{ role: "user", parts }]);
+					};
+					const r = await nativeThenGoverned(
+						method,
+						{ native: make("native"), governed: make("governed") },
+						{ vertex },
+					);
+					expect(r.rawResult).toBe("ok");
+					expect(c.native.ctor).toBeGreaterThan(0);
+					if (ownHook) expect(JSON.stringify(r.raw.requests)).not.toContain(EMAIL);
+					expect(r.govResult).toContain("could not be checked for automatic function calling");
+					expect(r.gov.requests).toHaveLength(0);
+					expect(c.governed.ctor).toBe(0);
+					expect(c.governed.json).toBe(0);
+				});
+			}
+
+			for (const place of ["tools"] as const) {
 				it(`${on}: ${place} in an Array subclass with a constructor of its own go through as a plain array: governed == native, its constructor never run by governance`, async () => {
 					const c = counts();
 					const make = (side: "native" | "governed") => () => {
@@ -1627,14 +1668,9 @@ describe("caller code reached from the request cannot change what is sent after 
 								c[side].ctor++;
 							}
 						}
-						const list =
-							place === "parts"
-								? Counted.from([{ text: "safe" }])
-								: Counted.from([{ googleSearch: {} }]);
+						const list = Counted.from([{ googleSearch: {} }]);
 						c[side].ctor = 0;
-						return place === "parts"
-							? request({}, [{ role: "user", parts: list }])
-							: request({ tools: list });
+						return request({ [place]: list });
 					};
 					const r = await nativeThenGoverned(
 						method,
@@ -1675,29 +1711,77 @@ describe("caller code reached from the request cannot change what is sent after 
 				});
 			}
 
-			it(`${on}: parts in another realm's Array subclass whose prototype holds a toJSON are refused; another realm's plain subclass goes as natively (its Array.prototype is known by its native source)`, async () => {
-				const realm = (withHook: boolean) =>
-					runInNewContext(
-						`class Parts extends Array {}
-						${withHook ? 'Object.defineProperty(Parts.prototype, "toJSON", { value() { return [{ text: "[redacted]" }]; } });' : ""}
-						Parts.from([{ text: email }])`,
-						{ email: EMAIL },
-					) as unknown[];
-				const hooked = await nativeThenGoverned(
+			it(`${on}: parts as another realm's plain array go as natively (its Array, known by native source, with the default species)`, async () => {
+				const make = () =>
+					request({}, [
+						{
+							role: "user",
+							parts: runInNewContext("[{ text: email }]", { email: EMAIL }) as unknown[],
+						},
+					]);
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expect(r.rawResult).toBe("ok");
+				expectSameSend(r);
+			});
+
+			it(`${on}: parts as another realm's array whose Array.prototype holds a toJSON are refused by the per-call self-check, nothing sent (the base sent the hook's rewrite)`, async () => {
+				const make = () =>
+					request({}, [
+						{
+							role: "user",
+							parts: runInNewContext(
+								'Object.defineProperty(Array.prototype, "toJSON", { value() { return [{ text: "[redacted]" }]; } }); [{ text: email }]',
+								{ email: EMAIL },
+							) as unknown[],
+						},
+					]);
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expect(r.rawResult).toBe("ok");
+				expect(JSON.stringify(r.raw.requests)).not.toContain(EMAIL);
+				expect(r.govResult).toContain("could not be checked for automatic function calling");
+				expect(r.gov.requests).toHaveLength(0);
+			});
+
+			it(`${on}: parts as another realm's array whose Array names its own Symbol.species are refused, the species never constructed (the base sent what it built)`, async () => {
+				const built = { native: 0, governed: 0 };
+				const make = (side: "native" | "governed") => () =>
+					request({}, [
+						{
+							role: "user",
+							parts: runInNewContext(
+								`class Built extends Array { constructor(...a) { super(...a); bump(); } }
+								Object.defineProperty(Array, Symbol.species, { get() { return Built; } });
+								[{ text: "go" }]`,
+								{ bump: () => built[side]++ },
+							) as unknown[],
+						},
+					]);
+				const r = await nativeThenGoverned(
 					method,
-					same(() => request({}, [{ role: "user", parts: realm(true) }])),
+					{ native: make("native"), governed: make("governed") },
 					{ vertex },
 				);
-				expect(hooked.rawResult).toBe("ok");
-				expect(JSON.stringify(hooked.raw.requests)).not.toContain(EMAIL);
-				expect(hooked.govResult).toContain("could not be checked for automatic function calling");
-				expect(hooked.gov.requests).toHaveLength(0);
-				const plain = await nativeThenGoverned(
-					method,
-					same(() => request({}, [{ role: "user", parts: realm(false) }])),
-					{ vertex },
-				);
-				expectSameSend(plain);
+				expect(r.rawResult).toBe("ok");
+				expect(built.native).toBeGreaterThan(0);
+				expect(r.govResult).toContain("could not be checked for automatic function calling");
+				expect(r.gov.requests).toHaveLength(0);
+				expect(built.governed).toBe(0);
+			});
+
+			it(`${on}: parts in a subclass of another realm's Array are refused, as any array of a class other than Array (the base sent them)`, async () => {
+				const make = () =>
+					request({}, [
+						{
+							role: "user",
+							parts: runInNewContext(
+								"class Parts extends Array {} Parts.from([{ text: 'go' }])",
+							) as unknown[],
+						},
+					]);
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expect(r.rawResult).toBe("ok");
+				expect(r.govResult).toContain("could not be checked for automatic function calling");
+				expect(r.gov.requests).toHaveLength(0);
 			});
 
 			it(`${on}: parts holding a toJSON of their own (on the array, not its class) go as natively: governed == native, the hook never run`, async () => {

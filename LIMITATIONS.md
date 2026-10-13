@@ -133,16 +133,19 @@ own:
   transport or that code would make of them. A function of yours that the SDK
   calls is never run: the call is refused instead. Your own iterator on
   `config.tools` counts as one.
-- **An `Array` subclass is mapped as a plain array.** When the SDK's own array
-  methods (`map`, `filter`) build their result from an array of yours, they build
-  a plain array rather than constructing your subclass, so your subclass's
-  constructor does not run. The result serializes the same. So a subclass with a
-  constructor of its own is built as a plain `Array`, its constructor never run;
-  a constructor that returns some other object is not reflected. A subclass that
-  names its own `Symbol.species`, or whose prototype (up to `Array.prototype`)
-  holds a `toJSON` (outside `config.tools`, whose array the SDK never
-  serializes), is refused instead: what that class would build, or what its hook
-  would make of it, is not known without running it.
+- **An array whose class is not `Array` is refused where the SDK maps it.** When
+  the SDK's own array methods (`map`, `filter`) build their result from an array
+  of yours, natively they construct its class, and that class's constructor
+  decides what is sent (it can give each instance a `toJSON`). usertrust does not
+  run your code to find out, so such an array, a subclass from any realm, inside
+  `contents` or in a config field other than `config.tools`, is refused: pass a
+  plain array. (At `config.tools` the SDK maps the array but never serializes
+  what it builds, so a subclass there is built as a plain `Array`, its
+  constructor never run.) Another realm's own `Array` is mapped as natively when
+  that realm's `Array[Symbol.species]` is its default; when it was replaced, the
+  call is refused, and so is one whose realm's `Array.prototype.toJSON` was
+  replaced (the per-call self-check cannot reproduce it). The previous release
+  sent all of these.
 - **Policy fields are read once, when the request is checked.** A field beside
   `model`, `contents` and `config` is read then (a getter there run once, as
   before) and kept beside the request for the policy rules, never sent,
