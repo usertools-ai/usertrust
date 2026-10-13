@@ -47,6 +47,9 @@ const BUDGET_POLL_MS = 1000;
 import { serveStatic } from "./static.js";
 import { watchLedger } from "./tail.js";
 
+/** How long close() lets in-flight requests finish before it cuts the connections still open. */
+export const CLOSE_GRACE_MS = 400;
+
 /** Amendment A5: maximum accepted /api/export request body, in bytes. */
 const EXPORT_BODY_CAP = 64 * 1024;
 
@@ -421,9 +424,18 @@ export async function createUiServer(
 			for (const f of budgetFiles) unwatchFile(f, refreshBudget);
 			for (const c of clients) c.end();
 			clients.clear();
-			const closed = new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
-			// server.close() waits for every connection to end, and a connected client can hold it for seconds.
-			server.closeAllConnections();
+			// In-flight requests get the grace to finish; anything still open after it is closed, so a held
+			// connection can't hold close() for seconds. The timer is cleared once every connection has ended
+			// on its own, and unref'd so it never keeps the process alive.
+			let cutTimer: NodeJS.Timeout | undefined;
+			const closed = new Promise<void>((resolvePromise) =>
+				server.close(() => {
+					if (cutTimer !== undefined) clearTimeout(cutTimer);
+					resolvePromise();
+				}),
+			);
+			cutTimer = setTimeout(() => server.closeAllConnections(), CLOSE_GRACE_MS);
+			cutTimer.unref();
 			return closed;
 		},
 	};

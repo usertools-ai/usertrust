@@ -2,11 +2,13 @@
 // Copyright 2026 Usertools, Inc.
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { request } from "node:http";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
-import { createUiServer, type UiServer } from "../src/server/server.js";
+import { CLOSE_GRACE_MS, createUiServer, type UiServer } from "../src/server/server.js";
 
 describe("POST /api/export", () => {
 	let tempDir: string;
@@ -81,5 +83,123 @@ describe("POST /api/export", () => {
 		const res = await post(JSON.stringify({ outDir: ".USERTRUST/exfil" }));
 		expect(res.status).toBe(400);
 		expect(existsSync(join(tempDir, ".usertrust", "exfil"))).toBe(false);
+	});
+
+	describe("close()", () => {
+		const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+		it("lets an export still receiving its body at close() complete", async () => {
+			ui = await createUiServer(tempDir, { port: 0 });
+			const body = JSON.stringify({ outDir: "in-flight-out" });
+			const cut = Math.floor(body.length / 2);
+			const result = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+				const req = request(
+					{
+						host: "127.0.0.1",
+						port: ui?.port,
+						path: "/api/export",
+						method: "POST",
+						headers: {
+							"content-type": "application/json",
+							"content-length": Buffer.byteLength(body),
+						},
+					},
+					(res) => {
+						let text = "";
+						res.setEncoding("utf8");
+						res.on("data", (chunk: string) => {
+							text += chunk;
+						});
+						res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
+					},
+				);
+				req.on("error", reject);
+				req.write(body.slice(0, cut));
+				void (async () => {
+					await sleep(50);
+					const closing = ui?.close();
+					await sleep(50);
+					req.end(body.slice(cut));
+					await closing;
+					ui = undefined;
+				})().catch(reject);
+			});
+			expect(result.status).toBe(200);
+			expect((JSON.parse(result.text) as { written: number }).written).toBe(1);
+			expect(existsSync(join(tempDir, "in-flight-out", "Receipts.base"))).toBe(true);
+		});
+
+		it("cuts a request still open after the grace, so close() is held no longer than that", async () => {
+			ui = await createUiServer(tempDir, { port: 0 });
+			const socket = connect(ui.port, "127.0.0.1");
+			await new Promise<void>((r) => socket.once("connect", () => r()));
+			socket.on("error", () => undefined);
+			socket.write(
+				`POST /api/export HTTP/1.1\r\nHost: 127.0.0.1:${ui.port}\r\n` +
+					"Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{",
+			);
+			await sleep(50);
+			const started = Date.now();
+			await ui.close();
+			const elapsedMs = Date.now() - started;
+			ui = undefined;
+			socket.destroy();
+			expect(elapsedMs).toBeGreaterThanOrEqual(CLOSE_GRACE_MS - 100);
+			expect(elapsedMs).toBeLessThan(CLOSE_GRACE_MS + 600);
+		});
+
+		it("the timer that cuts connections is unref'd, so it never keeps the process alive", async () => {
+			ui = await createUiServer(tempDir, { port: 0 });
+			const socket = connect(ui.port, "127.0.0.1");
+			await new Promise<void>((r) => socket.once("connect", () => r()));
+			socket.on("error", () => undefined);
+			socket.write(
+				`POST /api/export HTTP/1.1\r\nHost: 127.0.0.1:${ui.port}\r\n` +
+					"Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{",
+			);
+			await sleep(50);
+			// The request is still open, so the timer is pending when close() returns: hasRef() is only
+			// meaningful before the timer is cleared (a cleared timer reports no ref either way).
+			const created: Array<{ ms: unknown; timer: NodeJS.Timeout }> = [];
+			const realSetTimeout = globalThis.setTimeout;
+			const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+				fn: () => void,
+				ms?: number,
+			) => {
+				const timer = realSetTimeout(fn, ms);
+				created.push({ ms, timer });
+				return timer;
+			}) as unknown as typeof setTimeout);
+			let closing: Promise<void> | undefined;
+			try {
+				closing = ui.close();
+			} finally {
+				spy.mockRestore();
+			}
+			const grace = created.filter((c) => c.ms === CLOSE_GRACE_MS);
+			expect(grace).toHaveLength(1);
+			expect(grace[0]?.timer.hasRef()).toBe(false);
+			await closing;
+			ui = undefined;
+			socket.destroy();
+		});
+
+		it("resolves without waiting for the grace when nothing is open", async () => {
+			ui = await createUiServer(tempDir, { port: 0 });
+			const started = Date.now();
+			await ui.close();
+			const elapsedMs = Date.now() - started;
+			ui = undefined;
+			expect(elapsedMs).toBeLessThan(CLOSE_GRACE_MS / 2);
+		});
+
+		it("does not cut connections after the grace once every connection ended on its own", async () => {
+			ui = await createUiServer(tempDir, { port: 0 });
+			const cutAll = vi.spyOn(ui.server, "closeAllConnections");
+			await ui.close();
+			ui = undefined;
+			await sleep(CLOSE_GRACE_MS + 150);
+			expect(cutAll).not.toHaveBeenCalled();
+		});
 	});
 });
