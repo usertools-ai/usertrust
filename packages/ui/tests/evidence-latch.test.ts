@@ -274,6 +274,8 @@ describe("a log that loses or changes events the dashboard held", { timeout: 30_
 	});
 	afterEach(async () => {
 		loadSeam.afterDescriptor = undefined;
+		loadSeam.afterReaders = undefined;
+		loadSeam.afterPass = undefined;
 		io.afterListing = undefined;
 		await ui?.close();
 		ui = undefined;
@@ -377,6 +379,43 @@ describe("a log that loses or changes events the dashboard held", { timeout: 30_
 		expect(state.summary.chain.events).toBe(4);
 	});
 
+	it("red-first (latched deletion): a segment listed by the reader and removed before it read it is an inconsistent pass, read again, never an empty read of it", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		const genesis = "0".repeat(64);
+		const e1 = eventLine(genesis, "tx_1");
+		const e2 = eventLine(e1.hash, "tx_2");
+		const e3 = eventLine(e2.hash, "tx_3");
+		const segment = join(auditDir(), "events.0001.jsonl");
+		writeFileSync(segment, e1.line + e2.line + e3.line);
+		writeFileSync(log(), eventLine(e3.hash, "tx_4").line);
+		const vault = join(root, ".usertrust");
+		const before = loadState(vault);
+		expect(before.head).toMatchObject({ count: 4 });
+		const aside = join(root, "aside.jsonl");
+		const passes: { consistent: boolean; readSucceeded: boolean; contained: boolean }[] = [];
+		loadSeam.afterDescriptor = () => {
+			if (passes.length > 0) return;
+			// The first pass's reader lists the segment, then finds it gone (ENOENT, which it reads as absence).
+			io.afterListing = { suffix: "audit", run: () => renameSync(segment, aside) };
+		};
+		loadSeam.afterPass = (pass) => {
+			passes.push(pass);
+			// Put back, the same file, before the next pass begins: that pass reads the vault whole.
+			if (passes.length === 1) renameSync(aside, segment);
+		};
+		const state = loadState(vault, undefined, true, [], before.auditDirId, before.head);
+		// The first pass read three events fewer than the head, and is not judged on them: the segment it listed went
+		// before it was read, so the pass did not read one unchanged set of files.
+		expect(passes).toEqual([
+			{ consistent: false, readSucceeded: true, contained: false },
+			{ consistent: true, readSucceeded: true, contained: true },
+		]);
+		expect(state.deletionCauses).toEqual([]);
+		expect(state.summary.chain.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+		expect(state.summary.chain.events).toBe(4);
+		expect(state.head).toEqual(before.head);
+	});
+
 	it("guard: a normal append stays incremental (rows, no resync), and a reload after it holds every event", async () => {
 		await appendEvents(root, 3, "tx");
 		ui = await createUiServer(root, { port: 0 });
@@ -440,6 +479,7 @@ describe("an audit directory or log that could not be read, then could again", {
 		restore = [];
 		loadSeam.afterDescriptor = undefined;
 		loadSeam.afterReaders = undefined;
+		loadSeam.afterPass = undefined;
 		await ui?.close();
 		ui = undefined;
 		rmSync(root, { recursive: true, force: true });
@@ -591,6 +631,106 @@ describe("an audit directory or log that could not be read, then could again", {
 			expect(healed.deletionCauses).toEqual([]);
 			expect(healed.summary.chain).toMatchObject({ events: 3, valid: true, errors: [] });
 			expect(healed.head).toEqual(held);
+		},
+	);
+
+	it.skipIf(asRoot)(
+		"red-first (head replaced by an empty reading): the anchor alone unreadable is a read that failed, latches nothing, keeps the head, and heals",
+		async () => {
+			await appendEvents(root, 3, "tx");
+			const vault = join(root, ".usertrust");
+			const before = loadState(vault);
+			expect(before.head).toMatchObject({ count: 3 });
+			const held = before.head;
+			chmodFor(`${log()}.meta`, 0o000);
+			const passes: { readSucceeded: boolean }[] = [];
+			loadSeam.afterPass = (pass) => passes.push(pass);
+			const state = loadState(vault, undefined, true, [], before.auditDirId, held);
+			loadSeam.afterPass = undefined;
+			// The log and the directory read; the anchor did not, so the pass's read failed.
+			expect(passes.map((p) => p.readSucceeded)).toEqual([false]);
+			expect(state.head).toBeUndefined();
+			expect(state.deletionCauses).toEqual([]);
+			expect(state.summary.chain.valid).toBe(false);
+			expect(state.summary.chain.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+			chmodSync(`${log()}.meta`, 0o600);
+			const healed = loadState(
+				vault,
+				undefined,
+				true,
+				state.deletionCauses,
+				before.auditDirId,
+				held,
+			);
+			expect(healed.deletionCauses).toEqual([]);
+			expect(healed.summary.chain).toMatchObject({ events: 3, valid: true, errors: [] });
+			expect(healed.head).toEqual(held);
+		},
+	);
+
+	it.skipIf(asRoot)(
+		"red-first (latched deletion): a permission change after the pass began and before its reads makes that pass's read FAIL, never a read of no events",
+		async () => {
+			await appendEvents(root, 3, "tx");
+			const vault = join(root, ".usertrust");
+			const before = loadState(vault);
+			const held = before.head;
+			const passes: { readSucceeded: boolean }[] = [];
+			// The log opens for the pass's opening snapshot, then loses its read permission before the readers run. Nothing
+			// probes the log after that: only the reader's own failed read can say the pass read nothing.
+			loadSeam.afterDescriptor = () => {
+				if (passes.length === 0) chmodFor(log(), 0o000);
+			};
+			loadSeam.afterPass = (pass) => passes.push(pass);
+			const state = loadState(vault, undefined, true, [], before.auditDirId, held);
+			loadSeam.afterDescriptor = undefined;
+			loadSeam.afterPass = undefined;
+			expect(passes.length).toBeGreaterThanOrEqual(1);
+			expect(passes.every((p) => !p.readSucceeded)).toBe(true);
+			expect(state.head).toBeUndefined();
+			expect(state.deletionCauses).toEqual([]);
+			expect(state.summary.chain.valid).toBe(false);
+			expect(state.summary.chain.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+			chmodSync(log(), 0o600);
+			const healed = loadState(
+				vault,
+				undefined,
+				true,
+				state.deletionCauses,
+				before.auditDirId,
+				held,
+			);
+			expect(healed.deletionCauses).toEqual([]);
+			expect(healed.summary.chain).toMatchObject({ events: 3, valid: true, errors: [] });
+			expect(healed.head).toEqual(held);
+		},
+	);
+
+	it.skipIf(asRoot)(
+		"red-first (last good state shown): an audit directory that stays unreadable reads INVALID on every check, never valid, empty or latched",
+		async () => {
+			await appendEvents(root, 3, "tx");
+			ui = await createUiServer(root, { port: 0 });
+			expect(await chainOf(ui.port)).toMatchObject({ events: 3, valid: true });
+			chmodFor(auditDir(), 0o000);
+			await chainWhen(ui.port, unreadable);
+			// Over three backstop ticks and more, with a forced reload among them.
+			const seen = await chainsFor(ui.port, 1800);
+			ui.reload();
+			seen.push(...(await chainsFor(ui.port, 1800)));
+			expect(seen.length).toBeGreaterThan(10);
+			for (const c of seen) {
+				expect(c).toMatchObject({ events: 0, valid: false, empty: false });
+				expect(
+					c.errors.some((e) => /could not be (read|enumerated)/.test(e)),
+					c.errors.join(" | "),
+				).toBe(true);
+				expect(c.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+			}
+			chmodSync(auditDir(), 0o700);
+			expect(
+				await chainWhen(ui.port, (c) => c.valid && c.events === 3 && c.errors.length === 0),
+			).toMatchObject({ events: 3, valid: true, errors: [] });
 		},
 	);
 });
