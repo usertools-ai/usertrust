@@ -402,7 +402,10 @@ export async function createUiServer(
 			for (const f of budgetFiles) unwatchFile(f, refreshBudget);
 			for (const c of clients) c.end();
 			clients.clear();
-			return new Promise((resolvePromise) => server.close(() => resolvePromise()));
+			const closed = new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
+			// server.close() waits for every connection to end, and a connected client can hold it for seconds.
+			server.closeAllConnections();
+			return closed;
 		},
 	};
 }
