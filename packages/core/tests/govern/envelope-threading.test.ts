@@ -577,7 +577,9 @@ describe("attributed calls spend from the cost-center envelope", () => {
 	});
 
 	it("names the envelope LABEL and the right remedy when the ledger rejects the hold", async () => {
-		const engine = makeMockEngine({ balance: 10 });
+		// The preflight reads a balance above this call's hold, so the policy gate passes and the
+		// LEDGER is what rejects the hold (the rejection below), the path this row is about.
+		const engine = makeMockEngine({ balance: 1000 });
 		// What the T4 engine seam throws for an exhausted envelope: the derived
 		// ACCOUNT id, because the label lives in the governor.
 		engine.spendPending.mockRejectedValueOnce(

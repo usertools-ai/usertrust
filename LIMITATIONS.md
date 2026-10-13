@@ -242,6 +242,42 @@ enforcement — in tests, in evaluation. Every claim about atomic budget
 enforcement (an over-budget PENDING hold rejected by the ledger before the
 provider is called) applies to full mode with a live TigerBeetle instance.
 
+**The hold is an estimate, made before the call.** Its input leg is the larger of two
+figures, both read from the one serialized snapshot of the request, never the live
+object:
+- the prompt parts' estimate;
+- an estimate of the whole request body: the UTF-8 bytes of every key and value, / 4 × 1.5.
+
+Its output leg is the request's own cap, per candidate:
+- Anthropic `max_tokens`;
+- OpenAI chat `max_completion_tokens`, else `max_tokens`, times `n`;
+- Responses `max_output_tokens`;
+- Google `maxOutputTokens`, times `candidateCount`. Google bills its thoughts apart from its
+  candidates, but documents `maxOutputTokens` as a hard cutoff on everything a response
+  generates, thought tokens included
+  (https://ai.google.dev/gemini-api/docs/thinking, "Token limits and max_output_tokens"), so the
+  thinking budget is not added to it. With no cap: never below 4096 per candidate, nor below
+  `thinkingConfig.thinkingBudget`.
+
+A request with no cap holds 4096 output tokens.
+
+A call whose real cost turns out above its hold is posted capped at the hold, and the
+truncation is recorded as a `settlement_shortfall` event: visible, never silent. These
+are known to land there:
+- **content passed by reference:** Anthropic `url`/`file_id` sources, OpenAI image URLs
+  and `file_id` inputs, Google `fileData.fileUri`. A document by URL is a few dozen bytes
+  of body and can bill tens of thousands of tokens;
+- **a Google callable or MCP tool:** its declarations are resolved after authorization;
+- **an uncapped output** above 4096, and Google dynamic thinking with no `maxOutputTokens`;
+- **a Google request whose getter or `toJSON` answers differently** when the SDK reads it
+  later: Google forwards its original object;
+- **a request that cannot be serialized**, which keeps the prompt parts' estimate.
+
+The estimate's byte heuristic is **not calibrated against any provider's tokenizer**
+(Anthropic, OpenAI and Google are all unmeasured), so a dense input such as a JSON schema
+can bill above it. The calibration corpus and the format for recorded counts are in
+`packages/core/tests/fixtures/token-calibration/`.
+
 One caveat from our own release history: the unit suite validates live-ledger enforcement against a stateful `tigerbeetle-node` fake that implements real double-entry balance math and `debits_must_not_exceed_credits` (see `packages/core/tests/harden/ledger-funded-wallet.test.ts`) — a behavioral test against real ledger semantics, not a mock asserting a mock. CI also runs a separate job (`tb-integration`) against a real single-node TigerBeetle cluster. Neither is your deployment: validate against your own TigerBeetle cluster before relying on enforcement in production.
 
 ## 5. One audit writer per vault, one process at a time

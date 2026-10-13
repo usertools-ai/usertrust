@@ -1236,6 +1236,95 @@ function estimateBlockTokens(block: Record<string, unknown>): number {
 }
 
 /**
+ * The input-token estimate of a WHOLE request body: the UTF-8 byte length of every key and every
+ * scalar (string, number, boolean) in it, at the estimator's own heuristic and margin
+ * (bytes / 4 x 1.5). `body` is the plain-data snapshot `serializeRequest` makes, the body that is
+ * sent, so nothing is skipped by name: a field an SDK adds later is counted by default, a
+ * user-named prompt variable is text like any other, schema keys and numeric payloads are billed
+ * and counted. Bytes, not UTF-16 chars, so non-ASCII text holds near what tokenizers bill. Iterative
+ * (no recursion), and a JSON parse has no cycles.
+ */
+export function estimateBodyTokens(body: unknown): number {
+	let bytes = 0;
+	const stack: unknown[] = [body];
+	while (stack.length > 0) {
+		const value = stack.pop();
+		if (typeof value === "string") {
+			bytes += Buffer.byteLength(value, "utf8");
+		} else if (typeof value === "number" || typeof value === "boolean") {
+			bytes += String(value).length;
+		} else if (Array.isArray(value)) {
+			for (const item of value) stack.push(item);
+		} else if (value !== null && typeof value === "object") {
+			for (const [key, item] of Object.entries(value)) {
+				bytes += Buffer.byteLength(key, "utf8");
+				stack.push(item);
+			}
+		}
+	}
+	return Math.max(1, Math.ceil((bytes / 4) * 1.5));
+}
+
+/**
+ * The input tokens a hold reserves: the prompt parts' estimate or the whole body's, whichever is
+ * larger, so no hold shrinks on input. `snapshot` is the serialized request body, or undefined
+ * when the request could not be serialized (the parts' estimate alone then).
+ */
+export function holdInputTokens(promptParts: unknown[], snapshot: unknown): number {
+	return Math.max(
+		estimateInputTokens(promptParts),
+		snapshot !== undefined ? estimateBodyTokens(snapshot) : 0,
+	);
+}
+
+/** The output tokens a hold reserves when a request names no cap. */
+export const DEFAULT_OUTPUT_HOLD = 4096;
+
+/**
+ * The output tokens a hold reserves: the cap the request names, per candidate, times the number
+ * of candidates it asks for. A cap that is not a finite positive number, or a count that is not a
+ * positive integer, reads as absent.
+ * - Anthropic: `max_tokens`, which bounds thinking too (`budget_tokens` must be below it).
+ * - OpenAI Responses: `max_output_tokens`, reasoning included.
+ * - OpenAI chat: `max_completion_tokens`, else `max_tokens`, reasoning included, times `n`.
+ * - Google: `maxOutputTokens` when it names one, per candidate. Google documents it as a hard
+ *   cutoff on everything a response generates, thought tokens included
+ *   (https://ai.google.dev/gemini-api/docs/thinking, "Token limits and max_output_tokens"), so
+ *   the thinking budget is not added to it. With no cap, never below the default, and never below
+ *   the thinking budget. Either way, times `candidateCount`.
+ * Anything else: the cap if named, else the default.
+ */
+export function holdOutputTokens(
+	kind: "anthropic" | "openai" | "google" | string,
+	request: Record<string, unknown>,
+	surface: "chat" | "responses" | "other" = "other",
+): number {
+	const cap = (value: unknown): number | undefined =>
+		typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+	const count = (value: unknown): number =>
+		typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 1;
+	if (kind === "google") {
+		const config = request.config;
+		const c =
+			config !== null && typeof config === "object" ? (config as Record<string, unknown>) : {};
+		const thinking =
+			c.thinkingConfig !== null && typeof c.thinkingConfig === "object"
+				? (c.thinkingConfig as Record<string, unknown>)
+				: {};
+		const perCandidate =
+			cap(c.maxOutputTokens) ?? Math.max(DEFAULT_OUTPUT_HOLD, cap(thinking.thinkingBudget) ?? 0);
+		return perCandidate * count(c.candidateCount);
+	}
+	if (kind === "openai" && surface === "chat") {
+		return (
+			(cap(request.max_completion_tokens) ?? cap(request.max_tokens) ?? DEFAULT_OUTPUT_HOLD) *
+			count(request.n)
+		);
+	}
+	return cap(request.max_output_tokens) ?? cap(request.max_tokens) ?? DEFAULT_OUTPUT_HOLD;
+}
+
+/**
  * Estimate input token count from a messages array.
  * Heuristic: ~4 chars/token with a 1.5x safety margin so the PENDING
  * hold exceeds actual cost in the vast majority of cases.
