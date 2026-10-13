@@ -4047,7 +4047,9 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			expect(await holdStateFiles()).toEqual([]);
 		});
 
-		it("no key: a re-fire whose settle fails AND whose give-back fails keeps the first hold named: the next fire reserves nothing beside it, and Stop gives it back once", async () => {
+		it("no key: a re-fire whose settle fails AND whose give-back fails keeps the first hold named: the next fire reserves nothing beside it, and Stop gives it back once, with no class and no second gap", async () => {
+			// A job-capable server: a give-back may carry a `releaseClass`, which the server records.
+			capabilities = ["release", "job"];
 			const server = holdingServer();
 			let failing = true;
 			const giveBack = (r: { path: string; body: Record<string, unknown> }) =>
@@ -4074,10 +4076,21 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			await run("pre-tool-use.mjs", preInput("tu_1"));
 			expect(authorizes()).toHaveLength(1);
 			expect(await holdStateFiles()).toEqual([expect.stringMatching(/\.releasing$/)]);
-			// Stop gives tx_1 back, once, and forgets it.
+			// Stop gives tx_1 back, once, and forgets it. Its call ran and its window's outcome is
+			// journalled already: the give-back carries NO class (never `unused`, which would claim
+			// nothing hides behind it), and Stop writes no second gap about it.
+			const tx1Gaps = async () =>
+				(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+					.split("\n")
+					.filter((line) => line !== "")
+					.map((line) => JSON.parse(line) as { kind?: string; transferId?: string })
+					.filter((g) => g.kind === "gap" && g.transferId === "tx_1");
+			const gapsBefore = (await tx1Gaps()).length;
 			failing = false;
 			await run("stop.mjs", stopInput());
 			expect(requests.filter(giveBack).map((r) => r.status)).toEqual([503, 200]);
+			expect(requests.filter(giveBack)[1]?.body).not.toHaveProperty("releaseClass");
+			expect(await tx1Gaps()).toHaveLength(gapsBefore);
 			expect(await holdStateFiles()).toEqual([]);
 			// The call then reserves afresh, and a later Stop never gives tx_1 back again.
 			await run("pre-tool-use.mjs", preInput("tu_1"));

@@ -1040,6 +1040,9 @@ async function settlingRecords(sessionId, agentId) {
 				...(releasing ? { intent: "release" } : {}),
 				// A hold whose call ran though its claim says only release (`noCallRan`).
 				...(body.ran === true ? { ran: true } : {}),
+				// A windowed hold kept only to be given back, its window's outcome already journalled
+				// (pre-tool-use.mjs `keepForRelease`): given back with no class, and no second gap.
+				...(body.windowJournalled === true ? { windowJournalled: true } : {}),
 				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
 				transcript: body.usage === "transcript",
 				// Which server and tenant made the hold (`tenantBinding`), as written.
@@ -1929,10 +1932,14 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 		// `unused`: that call never ran, so there is nothing to confirm and no gap. Unless it is
 		// marked `ran`: then its call ran, as any settle-attempted hold's did (`noCallRan`).
 		const releasing = noCallRan(held);
+		// A windowed hold kept only to be given back (`windowJournalled`): its call ran, and its
+		// window's outcome, a gap where it may be unrecorded, is journalled already. It is given back
+		// with NO class, as the hygiene release does: `unused` would claim no usage hides behind it.
+		const journalled = held.windowJournalled === true;
 		// Otherwise the call RAN and its one settle went unanswered: the charge is unconfirmed, and a
 		// give-back of the hold proves nothing about what was charged. Written down as a gap.
-		if (!releasing) await recordUnconfirmedCall(sessionId, held, "call-ran");
-		const releaseClass = releasing ? "unused" : "call-ran";
+		if (!releasing && !journalled) await recordUnconfirmedCall(sessionId, held, "call-ran");
+		const releaseClass = journalled ? undefined : releasing ? "unused" : "call-ran";
 		const unconfirmed = (outcome, reason) =>
 			recordSettleGap({
 				phase: "release",

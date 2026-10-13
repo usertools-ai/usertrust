@@ -318,7 +318,8 @@ function abandon(entry) {
  * Keep a windowed hold that `retire` could not confirm ended NAMED, as a hold claimed only to
  * be ended (`<hold>.releasing`, the name `claimForRelease` gives). Its window's outcome is
  * already journalled, so the record carries no window, only what ends the hold: its transferId,
- * its call, its agent and its tenant binding. A later PreToolUse of the same call then finds it
+ * its call, its agent and its tenant binding, marked `windowJournalled` so Stop gives it back
+ * with no `releaseClass` (as the hygiene release does) and writes no second gap. A later PreToolUse of the same call then finds it
  * (`holdOfCall`) and is refused instead of reserving beside a hold that may be live, and Stop
  * gives it back once (lib.mjs `cleanup`: a release, idempotent by transferId on the server: a
  * 200 ends it, a 404 says it is gone), after any retry of its window. Past that, the ledger's
@@ -331,6 +332,9 @@ async function keepForRelease(entry) {
 		transferId: entry.transferId,
 		toolUseId: entry.toolUseId,
 		agentId: entry.agentId,
+		// Its call ran and its window's outcome is already journalled (a gap where it may be
+		// unrecorded): Stop gives it back with no class and writes no second gap.
+		windowJournalled: true,
 		...(typeof entry.startedAt === "string" ? { startedAt: entry.startedAt } : {}),
 		...jobHoldFields(entry),
 		...(typeof entry.serverUrl === "string" ? { serverUrl: entry.serverUrl } : {}),
