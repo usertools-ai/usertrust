@@ -2820,6 +2820,10 @@ describe("destroy() called right after a call starts waits for that call, as for
 	}
 });
 
+/**
+ * THE SPECIFICATION of the request-options path for a Google request: every cell is the base's
+ * measured outcome and request count (5a7b2cf7), and any change to this path keeps every cell equal.
+ */
 describe("every level of the option path refuses or sends as the base does (the base's measured table)", () => {
 	const EXTRA_BODY = { extraBody: { injected: "SECRET-X" } };
 	const ALLOWED = { headers: { "x-test": "ok" } };
@@ -2874,6 +2878,10 @@ describe("every level of the option path refuses or sends as the base does (the 
 					) as Loose,
 				),
 		],
+		[
+			"a getter httpOptions -> an internal data key",
+			(v) => getterHttpOptions({ ...v, __internal: 1 }),
+		],
 	];
 
 	/**
@@ -2915,6 +2923,10 @@ describe("every level of the option path refuses or sends as the base does (the 
 		"an inherited getter httpOptions -> a getter key": {
 			extraBody: "config.httpOptions.extraBody",
 			allowed: "config.httpOptions.headers (an accessor)",
+		},
+		"a getter httpOptions -> an internal data key": {
+			extraBody: "config.httpOptions.extraBody, config.httpOptions.__internal (internal)",
+			allowed: "config.httpOptions.__internal (internal)",
 		},
 	};
 

@@ -168,6 +168,11 @@ own:
     read without running your code, and the call is refused;
   - a key off the list is refused, at the start of the call when the path is data,
     and when the SDK reaches it past a getter.
+
+  A table in the tests pins this, 104 cases (each shape of the path holding an
+  allowed option or `extraBody`, on both methods and both backends), each
+  asserting the outcome and the number of requests; any change to this path
+  keeps every case equal.
 - **Every other field is read when the SDK reads it, not when the call starts.**
   The SDK reads the request after its own first `await`, so a field you change
   right after calling (a `systemInstruction`, `contents`) is sent as it is then,
