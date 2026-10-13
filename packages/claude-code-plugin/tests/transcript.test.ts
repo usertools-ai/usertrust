@@ -62,6 +62,12 @@ interface Recorded {
 	body: Record<string, unknown>;
 	status: number;
 	response: unknown;
+	/** When the request ARRIVED (its body read, before any delay or forward): one shared counter. */
+	arrivalSeq: number;
+	/** When its answer was DECIDED (where it is logged): the same counter. */
+	responseSeq: number;
+	/** Whether the answer reached the client: not when it had hung up, nor when the answer is lost (status 0). */
+	delivered: boolean;
 }
 
 interface Cursor {
@@ -82,7 +88,68 @@ let fake: Server | undefined;
 let real: UsertrustServer | undefined;
 let port: number;
 let requests: Recorded[];
+
+/**
+ * Every settle of a transferId past the number it may have when it was SENT: ONE, but for the
+ * standard idempotent retry. A delivered reissue of the hold under the SAME idempotency key that
+ * returned it before raises its allowance by one, and only when every settle it was allowed has
+ * already arrived (an outstanding settle attempt): the retry settles again once per reissue. So
+ * two hooks that authorize under one key before either settles are allowed ONE settle between them,
+ * and their double settle is reported. Order is read from the server's own stamps, never from the log's order
+ * (which is completion order): a settle counts when it ARRIVED (`arrivalSeq`), and a reissue
+ * raises the allowance only when it was ANSWERED (`responseSeq`), since the plugin cannot know the
+ * hold came back before then. So a settle sent before its reissue was answered is reported, as are
+ * an unkeyed repeat, a hold returned under different keys, and one a key never returned again.
+ * The order is the fake server's, not the hook's: a settle racing a reissue's answer inside the
+ * server is ordered by when it arrived there, not by what the hook had observed when it sent it.
+ */
+function secondSettles(log: Recorded[]): string[] {
+	type Event =
+		| { at: number; kind: "returned"; key: string; transferId: string }
+		| { at: number; kind: "settle"; transferId: string };
+	const events: Event[] = [];
+	for (const r of log) {
+		// Only an answer the client RECEIVED can return the hold to it: a reissue whose client had
+		// hung up gave the plugin nothing to settle again.
+		if (r.path === "/v1/authorize" && r.status === 200 && r.delivered) {
+			const key = r.body.idempotencyKey;
+			const transferId = (r.response as { transferId?: unknown } | null)?.transferId;
+			if (typeof key === "string" && typeof transferId === "string") {
+				events.push({ at: r.responseSeq, kind: "returned", key, transferId });
+			}
+		} else if (r.path === "/v1/settle") {
+			events.push({ at: r.arrivalSeq, kind: "settle", transferId: String(r.body.transferId) });
+		}
+	}
+	events.sort((a, b) => a.at - b.at);
+	const allowed = new Map<string, number>();
+	const returned = new Map<string, Map<string, number>>();
+	const settled = new Map<string, number>();
+	const over: string[] = [];
+	for (const e of events) {
+		if (e.kind === "returned") {
+			const byHold = returned.get(e.key) ?? new Map<string, number>();
+			const before = byHold.get(e.transferId) ?? 0;
+			byHold.set(e.transferId, before + 1);
+			returned.set(e.key, byHold);
+			// A reissue (this key returned the hold before) grants one more settle, for the settle it
+			// retries: only while every settle the hold was allowed has been attempted, so two
+			// authorizes ahead of any settle grant nothing between them.
+			const allowance = allowed.get(e.transferId) ?? 1;
+			if (before > 0 && (settled.get(e.transferId) ?? 0) >= allowance) {
+				allowed.set(e.transferId, allowance + 1);
+			}
+		} else {
+			const n = (settled.get(e.transferId) ?? 0) + 1;
+			settled.set(e.transferId, n);
+			if (n > (allowed.get(e.transferId) ?? 1)) over.push(e.transferId);
+		}
+	}
+	return over;
+}
 let delayMs: number;
+/** One counter for the fake server's arrival and response stamps (`Recorded`), never reset: only order matters. */
+let serverSeq = 0;
 /** What the fake server's /v1/health publishes: none, an older server, unless a test says. Null: health fails. */
 let capabilities: string[] | null;
 /** The next N /v1/health probes fail (503) before it answers `capabilities`: a TRANSIENT failure. */
@@ -119,6 +186,8 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 				raw += c;
 			});
 			req.on("end", async () => {
+				// Stamped before any await: the order requests reached the server.
+				const arrivalSeq = ++serverSeq;
 				const path = req.url ?? "";
 				const body = JSON.parse(raw || "{}") as Record<string, unknown>;
 				if (delay > 0) await new Promise((r) => setTimeout(r, delay));
@@ -142,7 +211,15 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 					});
 					out = { status: r.status, json: await r.json() };
 				}
-				log.push({ path, body, status: out.status, response: out.json });
+				log.push({
+					path,
+					body,
+					status: out.status,
+					response: out.json,
+					arrivalSeq,
+					responseSeq: ++serverSeq,
+					delivered: !res.destroyed && out.status !== 0,
+				});
 				if (res.destroyed) return;
 				// Status 0: the request was processed, and its answer is lost.
 				if (out.status === 0) {
@@ -317,6 +394,134 @@ const u = (input: number, output: number, cacheRead = 0, cacheWrite = 0): Usage 
 // A variable specifier: the hook is plain .mjs with no declaration file, and a literal import would add a new typed error.
 const TRANSCRIPT_HOOK = "../hooks/transcript.mjs";
 
+describe("the no-second-settle invariant (`secondSettles`), on logs built by hand", () => {
+	// Stamped in array order unless a row says otherwise: arrived and answered at its own place.
+	let seq = 0;
+	const stamps = (at?: { arrival: number; response: number }) => {
+		if (at !== undefined) return { arrivalSeq: at.arrival, responseSeq: at.response };
+		seq += 1;
+		return { arrivalSeq: seq, responseSeq: seq };
+	};
+	const authorize = (
+		key: string | undefined,
+		transferId: string,
+		status = 200,
+		at?: { arrival: number; response: number },
+		delivered = true,
+	): Recorded => ({
+		path: "/v1/authorize",
+		body: key === undefined ? {} : { idempotencyKey: key },
+		status,
+		response: status === 200 ? { transferId } : { error: "internal" },
+		...stamps(at),
+		delivered,
+	});
+	const settle = (transferId: string, at?: { arrival: number; response: number }): Recorded => ({
+		path: "/v1/settle",
+		body: { transferId },
+		status: 200,
+		response: { settled: true },
+		...stamps(at),
+		delivered: true,
+	});
+	it("an unkeyed second settle of a hold is reported", () => {
+		expect(secondSettles([authorize(undefined, "tx_1"), settle("tx_1"), settle("tx_1")])).toEqual([
+			"tx_1",
+		]);
+	});
+	it("a hold two authorizes under the SAME key returned may be settled again", () => {
+		const log = [authorize("k1", "tx_1"), settle("tx_1"), authorize("k1", "tx_1"), settle("tx_1")];
+		expect(secondSettles(log)).toEqual([]);
+	});
+	it("…but once per reissue: a THIRD settle after one reissue is reported", () => {
+		const log = [
+			authorize("k1", "tx_1"),
+			settle("tx_1"),
+			authorize("k1", "tx_1"),
+			settle("tx_1"),
+			settle("tx_1"),
+		];
+		expect(secondSettles(log)).toEqual(["tx_1"]);
+	});
+	it("a LATER reissue does not excuse an EARLIER second settle", () => {
+		const log = [authorize("k1", "tx_1"), settle("tx_1"), settle("tx_1"), authorize("k1", "tx_1")];
+		expect(secondSettles(log)).toEqual(["tx_1"]);
+	});
+	it("a settle SENT before its reissue was ANSWERED is reported, though it was answered after", () => {
+		// The log is in completion order: the reissue (answered at 8) is logged before the second
+		// settle (arrived at 6, delayed, answered at 9). The second settle went out before the
+		// plugin could know the hold came back, so it is a second settle.
+		const log = [
+			authorize("k1", "tx_1", 200, { arrival: 1, response: 2 }),
+			settle("tx_1", { arrival: 3, response: 4 }),
+			authorize("k1", "tx_1", 200, { arrival: 5, response: 8 }),
+			settle("tx_1", { arrival: 6, response: 9 }),
+		];
+		expect(secondSettles(log)).toEqual(["tx_1"]);
+		// The same calls, the settle sent after the reissue was answered: the standard retry.
+		const retry = [
+			authorize("k1", "tx_1", 200, { arrival: 1, response: 2 }),
+			settle("tx_1", { arrival: 3, response: 4 }),
+			authorize("k1", "tx_1", 200, { arrival: 5, response: 8 }),
+			settle("tx_1", { arrival: 9, response: 10 }),
+		];
+		expect(secondSettles(retry)).toEqual([]);
+	});
+	it("a reissue whose answer never reached the client (it had hung up) does not excuse a later second settle", () => {
+		const log = [
+			authorize("k1", "tx_1"),
+			settle("tx_1"),
+			authorize("k1", "tx_1", 200, undefined, false),
+			settle("tx_1"),
+		];
+		expect(secondSettles(log)).toEqual(["tx_1"]);
+	});
+	it("two authorizes under one key BEFORE either settles allow one settle between them: their double settle is reported", () => {
+		const concurrent = [
+			authorize("k1", "tx_1"),
+			authorize("k1", "tx_1"),
+			settle("tx_1"),
+			settle("tx_1"),
+		];
+		expect(secondSettles(concurrent)).toEqual(["tx_1"]);
+		// The sequential retry, a settle between the two authorizes, still passes.
+		const retry = [
+			authorize("k1", "tx_1"),
+			settle("tx_1"),
+			authorize("k1", "tx_1"),
+			settle("tx_1"),
+		];
+		expect(secondSettles(retry)).toEqual([]);
+	});
+	it("a hold returned under two DIFFERENT keys is reported, as is one the same key never returned again", () => {
+		expect(
+			secondSettles([
+				authorize("k1", "tx_1"),
+				authorize("k2", "tx_1"),
+				settle("tx_1"),
+				settle("tx_1"),
+			]),
+		).toEqual(["tx_1"]);
+		expect(
+			secondSettles([
+				authorize("k1", "tx_1"),
+				authorize("k1", "tx_2"),
+				settle("tx_1"),
+				settle("tx_1"),
+			]),
+		).toEqual(["tx_1"]);
+	});
+	it("a failed authorize under the key does not count as returning the hold", () => {
+		const log = [
+			authorize("k1", "tx_1"),
+			authorize("k1", "tx_1", 500),
+			settle("tx_1"),
+			settle("tx_1"),
+		];
+		expect(secondSettles(log)).toEqual(["tx_1"]);
+	});
+});
+
 const settles = () => requests.filter((r) => r.path === "/v1/settle");
 const authorizes = () => requests.filter((r) => r.path === "/v1/authorize");
 const aborts = () => requests.filter((r) => r.path === "/v1/abort");
@@ -351,14 +556,9 @@ beforeEach(async () => {
 afterEach(async () => {
 	// The invariant a settle's 404 rests on (post-tool-use.mjs `settleEstimateHold`):
 	// across every path these tests drive — estimate, transcript window, remainder,
-	// retries, faults — the plugin never sends a second settle for any transferId.
-	const settled = requests
-		.filter((r) => r.path === "/v1/settle")
-		.map((r) => String(r.body.transferId));
-	expect(
-		settled.filter((id, i) => settled.indexOf(id) !== i),
-		"a transferId was settled twice",
-	).toEqual([]);
+	// retries, faults — the plugin never sends a second settle for any transferId, but
+	// for the one idempotent retry (`secondSettles`).
+	expect(secondSettles(requests), "a transferId was settled twice").toEqual([]);
 	fake?.closeAllConnections();
 	fake?.close();
 	fake = undefined;
@@ -1275,6 +1475,7 @@ describe("idempotency and concurrency", () => {
 			`${SESSION}__main.json`,
 			"claims",
 			"since",
+			"since-session",
 		]);
 	});
 
@@ -2482,7 +2683,11 @@ describe("estimate holds", () => {
 		// one stderr line is watch mode's (the default) reason for letting the call
 		// through, which lands in Claude Code's debug log; there is no other note.
 		expect(pre.stderr).toBe("usertrust: reserved tx_1 (1 ut)\n");
-		expect((await readdir(join(stateDir, "transcripts"))).sort()).toEqual(["estimate", "since"]);
+		expect((await readdir(join(stateDir, "transcripts"))).sort()).toEqual([
+			"estimate",
+			"since",
+			"since-session",
+		]);
 		expect(
 			await readFile(join(stateDir, "transcripts", "estimate", `${SESSION}__main`), "utf-8"),
 		).toBe("UT_CC_USAGE=estimate");
@@ -4184,6 +4389,40 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			]);
 			expect((await readCursor()).accounted).toEqual(["msg_a"]);
 			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("keyed: a window whose settle fails while its hold stays live is retried at Stop under its key, and the SAME hold is settled again, once by key", async () => {
+			capabilities = [...ALL_CAPABILITIES];
+			const server = keyedServer();
+			let failing = true;
+			await startServer((path, body) => {
+				if (failing && body.transferId === "tx_1" && path === "/v1/settle") {
+					return { status: 500, json: { error: "internal" } };
+				}
+				if (
+					failing &&
+					body.transferId === "tx_1" &&
+					(path === "/v1/release" || path === "/v1/abort")
+				) {
+					return { status: 503, json: { error: "unavailable" } };
+				}
+				return server.responder(path, body);
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			failing = false;
+			await run("stop.mjs", stopInput());
+			// The retry's authorize carried the window's key, and the server gave back tx_1: the live
+			// hold it holds for that key. Settling it again is the idempotent retry, charged once.
+			const forTx1 = authorizes().filter((r) => transferOf(r) === "tx_1");
+			expect(forTx1).toHaveLength(2);
+			expect(forTx1[1]?.body.idempotencyKey).toBe(forTx1[0]?.body.idempotencyKey);
+			expect(settles().map((r) => r.body.transferId)).toEqual(["tx_1", "tx_1"]);
+			expect(server.charges).toEqual([
+				{ key: keyOf("main", ["msg_a"]), transferId: "tx_1", inputTokens: 5 },
+			]);
+			expect(secondSettles(requests)).toEqual([]);
 		});
 
 		it("keyed: an expired first hold's window is retried under its key at Stop, charged once", async () => {

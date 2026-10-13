@@ -1288,9 +1288,10 @@ describe("SessionEnd, the last settle point: what it cannot finish is written do
 	it("a backlog spanning two jobs: one deferred gap per job, each a known gap of its own job's coverage", async () => {
 		const now = Date.now();
 		const at = (offsetS: number) => new Date(now + offsetS * 1000).toISOString();
-		// The state is older than the backlog, so both messages are the session's to post.
+		// The state (and the session) are older than the backlog, so both messages are the session's to post.
 		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
 		await writeFile(join(stateDir, "transcripts", "since"), "2000-01-01T00:00:00.000Z");
+		await backdateSession(stateDir, SESSION);
 		const line = (ts: string, op: string, job: string | null) =>
 			JSON.stringify({ sid: SESSION, ts, op, job });
 		const log = [
@@ -1406,7 +1407,17 @@ const writeLines = (path: string, lines: string[]) =>
 async function backdate(): Promise<void> {
 	await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
 	await writeFile(join(stateDir, "transcripts", "since"), "2000-01-01T00:00:00.000Z");
+	await backdateSession(stateDir, SESSION);
 }
+/**
+ * The session's own first-run time, as old as the state's (`transcripts/since-session/<id>`): a
+ * session that ran SessionStart has one, so every message this test writes is the session's to post.
+ */
+async function backdateSession(dir: string, session: string): Promise<void> {
+	await mkdir(join(dir, "transcripts", "since-session"), { recursive: true, mode: 0o700 });
+	await writeFile(join(dir, "transcripts", "since-session", session), "2000-01-01T00:00:00.000Z");
+}
+
 const answered = (request: Seen, status: number) =>
 	typeof request.reply === "object" && request.reply.status === status;
 const replyJson = (request: Seen) =>

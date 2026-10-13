@@ -16,9 +16,19 @@
 // entries. The hooks run as hooks.json runs them (launch.mjs), against a REAL usertrust-server
 // in dryRun, and the assertions read the server's own audit chain.
 
+import { execFile } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { appendFile, chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import {
+	appendFile,
+	chmod,
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readLedgerEvents } from "usertrust";
@@ -261,6 +271,34 @@ async function since() {
 	return Date.parse(await readFile(join(stateDir, "transcripts", "since"), "utf-8"));
 }
 
+/**
+ * What a hook that only writes a gap does, and nothing else: one session-tagged watch record,
+ * through the same writer (as launch.mjs does for a hook whose process failed). In a child
+ * process, under the hooks' environment.
+ */
+function gapOnly(sessionId: string, { written = true } = {}): Promise<void> {
+	// `written`: whether the record must land (exit 1 if not), or must NOT (exit 1 if it did).
+	const code = `const m = await import(${JSON.stringify(join(HOOKS, "lib.mjs"))});
+if ((await m.recordWatchEvent({ kind: "gap", mode: "watch", session: ${JSON.stringify(sessionId)}, agent: "main", reason: "launch: the hook's process failed (signal SIGKILL)", started: null })) !== ${written}) process.exit(1);`;
+	return new Promise((resolve, reject) => {
+		execFile(
+			process.execPath,
+			["--input-type=module", "-e", code],
+			{ env: { PATH: process.env.PATH ?? "", ...hookEnv } },
+			(err) => (err ? reject(err) : resolve()),
+		);
+	});
+}
+
+/** The plugin's watch records (`watch.jsonl`), parsed. */
+async function watchRecords(): Promise<Array<Record<string, unknown>>> {
+	const text = await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => "");
+	return text
+		.split("\n")
+		.filter((line) => line !== "")
+		.map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const CALL = usage("1000:200:500:100");
@@ -350,6 +388,172 @@ describe("what the first-run time keeps out", () => {
 			// response (both Sonnet, so one settle carrying both).
 			{ inputTokens: 1000, outputTokens: 180, cacheReadTokens: 0, cacheWriteTokens: 0 },
 		]);
+	});
+
+	it("red-first: a lane metered later, on a state that already has a first-run time, posts nothing it wrote before its first hook, and declares it once as pre-metering, never a gap", async () => {
+		// Lane A: the state's first session makes the state's first-run time.
+		await session().start("startup");
+		await sleep(5);
+		// Lane B runs with NO hook of this plugin (unmetered), after that time: two responses.
+		const id = randomUUID();
+		const b = session(id);
+		await b.transcript.userText("Unmetered task.");
+		await b.transcript.assistant(usage("7000:70"), { toolUseId: "toolu_unmetered" });
+		await b.transcript.toolResult("toolu_unmetered");
+		await b.transcript.assistant(usage("8000:80"));
+		await sleep(5);
+		// Lane B becomes metered: its first hook is a PreToolUse (no SessionStart for it). The
+		// response that triggered it was written before it, as for a mid-session install.
+		await b.transcript.userText("Metered task.");
+		await b.toolCall(usage("2000:20"));
+		await b.toolCall(CALL);
+		await b.end(FINAL);
+		// Before the fix the backlog settled onto the first hold: 7000 + 8000 + 2000 input.
+		expect(llmCalls(await chain()).map((e) => e.data.usage)).toEqual([
+			recorded(CALL),
+			recorded(FINAL),
+		]);
+		const watch = await watchRecords();
+		expect(watch.filter((w) => w.kind === "pre-metering")).toEqual([
+			expect.objectContaining({
+				kind: "pre-metering",
+				session: id,
+				agent: "main",
+				responses: 3,
+				reason: "written before this session was metered; not billed",
+				started: null,
+			}),
+		]);
+		// Never a gap: the gap figure counts calls missed while metering was on.
+		expect(watch.filter((w) => w.kind === "gap")).toEqual([]);
+	});
+
+	it("a hook that only writes a gap stamps the session: what it wrote after that is metering ON, posted, never pre-metering", async () => {
+		await session().start("startup");
+		await sleep(5);
+		const id = randomUUID();
+		const b = session(id);
+		// The session's first hook only writes a gap (its process failed): metering was on, and failing.
+		await gapOnly(id);
+		await sleep(5);
+		await b.transcript.userText("Task.");
+		await b.transcript.assistant(usage("7000:70"), { toolUseId: "toolu_during" });
+		await b.transcript.toolResult("toolu_during");
+		await b.transcript.assistant(usage("8000:80"));
+		await b.toolCall(CALL);
+		await b.end(FINAL);
+		const calls = llmCalls(await chain());
+		// The two responses after the gap ride the first hold with its own call's response.
+		expect(calls.map((e) => e.data.usage)).toEqual([
+			{ inputTokens: 16000, outputTokens: 350, cacheReadTokens: 500, cacheWriteTokens: 100 },
+			recorded(FINAL),
+		]);
+		const watch = (await watchRecords()).filter((w) => w.session === id);
+		expect(watch.map((w) => w.kind)).toEqual(["gap"]);
+	});
+
+	it("a gap-only hook whose record CANNOT be written still stamps the session: what it wrote after that is posted", async () => {
+		await session().start("startup");
+		await sleep(5);
+		const id = randomUUID();
+		const b = session(id);
+		// The watch log cannot be appended to: a directory holds its name.
+		await mkdir(join(stateDir, "watch.jsonl"), { recursive: true });
+		await gapOnly(id, { written: false });
+		await sleep(5);
+		await b.transcript.userText("Task.");
+		await b.transcript.assistant(usage("7000:70"), { toolUseId: "toolu_during" });
+		await b.transcript.toolResult("toolu_during");
+		await b.transcript.assistant(usage("8000:80"));
+		await b.toolCall(CALL);
+		await b.end(FINAL);
+		// Metering was on from the failed hook: the two responses after it are posted, not
+		// skipped as written before metering.
+		expect(llmCalls(await chain()).map((e) => e.data.usage)).toEqual([
+			{ inputTokens: 16000, outputTokens: 350, cacheReadTokens: 500, cacheWriteTokens: 100 },
+			recorded(FINAL),
+		]);
+	});
+
+	it("a session this state already metered BEFORE per-session times, first touched again by a gap-only hook, keeps the state's time: its left-over answer is still posted", async () => {
+		const id = randomUUID();
+		const s = session(id);
+		await s.start("startup");
+		await s.transcript.userText("Task.");
+		await s.toolCall(CALL);
+		await s.transcript.assistant(usage("600:60"));
+		await sleep(20);
+		// The state as an older plugin left it (a cursor, no per-session time), and the session's
+		// first hook after the upgrade only writes a gap.
+		await rm(join(stateDir, "transcripts", "since-session", id));
+		await gapOnly(id);
+		expect(
+			Date.parse(await readFile(join(stateDir, "transcripts", "since-session", id), "utf-8")),
+		).toBe(await since());
+		await s.end(FINAL);
+		expect(llmCalls(await chain()).map((e) => e.data.usage)).toEqual([
+			recorded(CALL),
+			{ inputTokens: 1000, outputTokens: 180, cacheReadTokens: 0, cacheWriteTokens: 0 },
+		]);
+		expect((await watchRecords()).filter((w) => w.kind === "pre-metering")).toEqual([]);
+	});
+
+	it("a pre-metering backlog that ends in a line still being written is not declared until that line is whole: then once, counting it", async () => {
+		await session().start("startup");
+		await sleep(5);
+		const id = randomUUID();
+		const b = session(id);
+		await b.transcript.userText("Unmetered task.");
+		await b.transcript.assistant(usage("7000:70"));
+		// The next response, half written (no newline yet): built in a scratch transcript.
+		const scratch = new Transcript(join(projectDir, `scratch-${id}.jsonl`), id, projectDir);
+		await scratch.assistant(usage("8000:80"));
+		const line = (await readFile(scratch.path, "utf-8")).trimEnd();
+		const half = Math.floor(line.length / 2);
+		await appendFile(b.transcript.path, line.slice(0, half));
+		const stop = () =>
+			runHook(
+				join(HOOKS, "stop.mjs"),
+				{
+					session_id: id,
+					transcript_path: b.transcript.path,
+					cwd: projectDir,
+					permission_mode: "default",
+					hook_event_name: "Stop",
+					stop_hook_active: false,
+				},
+				hookEnv,
+			);
+		await stop();
+		expect((await watchRecords()).filter((w) => w.kind === "pre-metering")).toEqual([]);
+		await appendFile(b.transcript.path, `${line.slice(half)}\n`);
+		await stop();
+		expect((await watchRecords()).filter((w) => w.kind === "pre-metering")).toEqual([
+			expect.objectContaining({ session: id, responses: 2 }),
+		]);
+	});
+
+	it("a session this state already metered BEFORE per-session times keeps the state's time: a response it left unposted is still posted, once", async () => {
+		const id = randomUUID();
+		const s = session(id);
+		await s.start("startup");
+		await s.transcript.userText("Task.");
+		await s.toolCall(CALL);
+		await s.transcript.assistant(usage("600:60"));
+		await sleep(20);
+		// The state as an older plugin left it: a cursor for the session, no per-session time.
+		await rm(join(stateDir, "transcripts", "since-session", id));
+		await s.start("resume");
+		expect(
+			Date.parse(await readFile(join(stateDir, "transcripts", "since-session", id), "utf-8")),
+		).toBe(await since());
+		await s.transcript.userText("Go on.");
+		await s.end(FINAL);
+		expect(llmCalls(await chain()).map((e) => e.data.usage)).toEqual([
+			recorded(CALL),
+			{ inputTokens: 1000, outputTokens: 180, cacheReadTokens: 0, cacheWriteTokens: 0 },
+		]);
+		expect((await watchRecords()).filter((w) => w.kind === "pre-metering")).toEqual([]);
 	});
 
 	it("a plugin installed MID-SESSION posts none of the turns before its first hook; the responses after it are posted", async () => {

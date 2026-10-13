@@ -101,10 +101,15 @@ beforeEach(async () => {
 	capabilities = ["job", "principal", "release"];
 	override = undefined;
 	healthDelayMs = 0;
-	// Entries older than the state's first run are never posted: back-date it so the
-	// synthetic transcript's timeline (all in the past) is eligible.
+	// Entries older than the state's (and the session's) first run are never posted: back-date
+	// both so the synthetic transcript's timeline (all in the past) is eligible.
 	await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
 	await writeFile(join(stateDir, "transcripts", "since"), "2000-01-01T00:00:00.000Z");
+	await mkdir(join(stateDir, "transcripts", "since-session"), { recursive: true, mode: 0o700 });
+	await writeFile(
+		join(stateDir, "transcripts", "since-session", SESSION),
+		"2000-01-01T00:00:00.000Z",
+	);
 });
 afterEach(async () => {
 	fake?.closeAllConnections();
