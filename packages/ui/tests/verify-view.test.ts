@@ -37,6 +37,11 @@ describe("verifyOutcome", () => {
 			reason: "malformed percent-encoding",
 		});
 		expect(verifyOutcome(502, "<html>")).toEqual({ kind: "request-failed", reason: "HTTP 502" });
+		// The server's answer when an audit segment cannot be read: a failed request with its reason, never a receipt.
+		expect(verifyOutcome(500, { error: "audit log could not be read" })).toEqual({
+			kind: "request-failed",
+			reason: "audit log could not be read",
+		});
 		expect(verifyOutcome(200, { found: "yes", valid: true, receipt: "R" })).toMatchObject({
 			kind: "request-failed",
 		});

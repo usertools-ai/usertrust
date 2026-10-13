@@ -146,6 +146,8 @@ export function RowPanel(props: {
 		let outcome: VerifyOutcome;
 		try {
 			const res = await fetch(`/api/verify/${encodeURIComponent(forRow.transferId)}`);
+			// A 500 (an audit segment that cannot be read) carries `{ error }`, not a receipt, and a proxy's page is not JSON:
+			// verifyOutcome makes either a failed request ("not checked"), never a receipt read off the wrong body.
 			const body: unknown = await res.json().catch(() => null);
 			outcome = verifyOutcome(res.status, body);
 		} catch (err) {

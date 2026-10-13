@@ -18,13 +18,16 @@ import { looseVaultWarning } from "../shared/private-fs.js";
 import { GLOBAL_FLAGS, JSON_FLAG } from "./flags.js";
 
 /**
- * Untrusted text (argv, a resolved path) echoed at a terminal. Replaces C0, DEL and C1 with `?`.
- * C1 is covered because it holds the 8-bit CSI/OSC introducers. NOT clipped: a clipped path is
+ * Untrusted text (argv, a resolved path) echoed at a terminal. Replaces C0, DEL, C1 and Unicode
+ * format characters (`\p{Cf}`) with `?`. C1 is covered because it holds the 8-bit CSI/OSC
+ * introducers; `Cf` because bidi overrides and isolates (U+202E, U+2066..2069) and zero-width
+ * characters reorder or hide the text around them, which can disguise a verdict line. Same set
+ * `usertrust-verify`'s `forDisplay` strips. NOT clipped: a clipped path is
  * not the path that was verified, and printing the subject of a verdict is the point.
  */
 export function scrubForTerminal(text: string): string {
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: the control-character strip is a terminal-injection defense
-	return text.replace(/[\x00-\x1f\x7f-\x9f]/g, "?");
+	return text.replace(/[\x00-\x1f\x7f-\x9f\p{Cf}]/gu, "?");
 }
 
 /**
@@ -38,13 +41,20 @@ export function warnIfVaultLoose(vaultDir: string): void {
 
 /**
  * `JSON.stringify` for a record that carries an untrusted string: C0 is already escaped by
- * `JSON.stringify`, and C1 is escaped here AFTER serialization as `\uXXXX`, so the field still
- * parses back to the real path. Substituting would corrupt a machine-readable value.
+ * `JSON.stringify`, and C1 plus Unicode format characters (`\p{Cf}`: bidi overrides, zero-width) are
+ * escaped here AFTER serialization as `\uXXXX`, so the field still parses back to the real path. Substituting would corrupt a machine-readable value.
  */
 export function toSafeJson(value: unknown): string {
 	return JSON.stringify(value).replace(
-		/[\u007f-\u009f]/g,
-		(c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+		/[\u007f-\u009f\p{Cf}]/gu,
+		// One `\uXXXX` per UTF-16 unit: some `Cf` members (the tag characters U+E0001..E007F) are
+		// supplementary-plane, so the match is a surrogate PAIR, and a 5-hex-digit code point escape
+		// is not valid JSON.
+		(c) =>
+			Array.from(
+				{ length: c.length },
+				(_, i) => `\\u${c.charCodeAt(i).toString(16).padStart(4, "0")}`,
+			).join(""),
 	);
 }
 
