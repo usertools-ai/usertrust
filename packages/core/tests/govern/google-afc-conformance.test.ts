@@ -1522,6 +1522,29 @@ const BACKENDS = [
 
 const EMAIL = "jane.doe@example.com";
 
+/**
+ * A `functionCallingConfig` whose own enumerable data is `own` and whose serialization hook is HIDDEN from an
+ * `Object.keys` walk: a non-enumerable own `toJSON`, or one a class instance inherits. JSON.stringify runs either.
+ */
+const HIDDEN_TO_JSON: Array<[string, (own: Loose, hook: () => unknown) => object]> = [
+	[
+		"a NON-ENUMERABLE own toJSON",
+		(own, hook) =>
+			Object.defineProperty({ ...own }, "toJSON", { value: () => hook(), enumerable: false }),
+	],
+	[
+		"an INHERITED toJSON (a class method)",
+		(own, hook) => {
+			class CallingConfigWithHook {
+				toJSON(): unknown {
+					return hook();
+				}
+			}
+			return Object.assign(new CallingConfigWithHook(), own);
+		},
+	],
+];
+
 describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex AI what the SDK sends (real @google/genai, fetch stubbed)", () => {
 	let vault: string;
 	const realFetch = globalThis.fetch;
@@ -1845,6 +1868,150 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 				});
 				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
 				expect(auditKinds).not.toContain("policy_denied");
+			});
+		}
+
+		// Vertex AI sends functionCallingConfig as JSON.stringify makes it, running its toJSON hook however it is held.
+		for (const [shape, make] of HIDDEN_TO_JSON) {
+			const hooked = (contents: string, hook: () => unknown, reads: Reads) => () => ({
+				model: "gemini-2.5-flash",
+				contents,
+				config: {
+					tools: [{ functionDeclarations: [{ name: "lookup" }] }],
+					toolConfig: {
+						functionCallingConfig: make({ mode: "ANY", allowedFunctionNames: ["lookup"] }, () => {
+							counted(reads, "toJSON");
+							return hook();
+						}),
+					},
+				},
+			});
+			const toNone = () => ({ mode: "NONE" });
+			const CASES = [
+				['pii "redact" and an e-mail address in the prompt', "redact", `write to ${EMAIL}`],
+				['pii "redact" and a clean prompt', "redact", "go"],
+				["no redaction", undefined, `write to ${EMAIL}`],
+			] as const;
+
+			for (const [backend, vertex] of BACKENDS) {
+				for (const [name, pii, prompt] of CASES) {
+					it(`${method} on ${backend}, ${name}: ${shape} returning mode NONE is honoured as the SDK honours it, and runs once`, async () => {
+						const rawReads: Reads = {};
+						const govReads: Reads = {};
+						const nativePrompt = pii === "redact" && prompt !== "go" ? "[REDACTED:email]" : prompt;
+						const { raw, rawResult, gov, govResult, auditKinds } = await nativeThenGoverned(
+							method,
+							{
+								native: hooked(nativePrompt, toNone, rawReads),
+								governed: hooked(prompt, toNone, govReads),
+							},
+							{ vertex, ...(pii !== undefined ? { pii } : {}) },
+						);
+
+						expect(rawResult).toBe("ok");
+						expect(govResult).toBe("ok");
+						expect(raw.requests).toHaveLength(1);
+						expect(gov.requests).toHaveLength(1);
+						// Vertex AI passes the object to JSON.stringify, which runs the hook; the Gemini API reads fields by name
+						expect(raw.requests[0]?.body["toolConfig"]).toEqual({
+							functionCallingConfig: vertex
+								? { mode: "NONE" }
+								: { mode: "ANY", allowedFunctionNames: ["lookup"] },
+						});
+						expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+						expect(auditKinds).not.toContain("policy_denied");
+						// the hook is caller code: on Vertex AI the SDK runs it once per request, and so does the snapshot
+						expect(rawReads).toEqual(vertex ? { toJSON: 1 } : {});
+						if (vertex) {
+							expect(govReads).toEqual(rawReads);
+						} else {
+							// the Gemini API never runs it; the governor's own JSON.stringify of a request (serializeRequest, for
+							// its 1-hour cache check, not what a Google call sends) runs an own hook the copy carries, once
+							expect(govReads.toJSON ?? 0).toBeLessThanOrEqual(1);
+						}
+					});
+				}
+			}
+
+			it(`${method} on Vertex AI, pii "redact", ${shape} whose output holds an e-mail address: it is sent REDACTED, never raw`, async () => {
+				const withEmail = (name: string) => () => ({ mode: "ANY", allowedFunctionNames: [name] });
+				const { raw, rawResult, gov, govResult } = await nativeThenGoverned(
+					method,
+					{
+						native: hooked("[REDACTED:email]", withEmail("[REDACTED:email]"), {}),
+						governed: hooked(`write to ${EMAIL}`, withEmail(EMAIL), {}),
+					},
+					{ vertex: true, pii: "redact" },
+				);
+
+				expect(rawResult).toBe("ok");
+				expect(govResult).toBe("ok");
+				expect(gov.requests).toHaveLength(1);
+				expect(JSON.stringify(gov.requests)).not.toContain(EMAIL);
+				expect(gov.requests[0]?.body["toolConfig"]).toEqual({
+					functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["[REDACTED:email]"] },
+				});
+				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			});
+
+			const NON_OBJECT: Array<[string, () => unknown, unknown]> = [
+				["a string", () => "NONE", { functionCallingConfig: "NONE" }],
+				["undefined", () => undefined, {}],
+			];
+			for (const [what, hook, sent] of NON_OBJECT) {
+				it(`${method} on Vertex AI: ${shape} returning ${what} sends what the SDK sends`, async () => {
+					const p = hooked("go", hook, {});
+					const { raw, rawResult, gov, govResult } = await nativeThenGoverned(
+						method,
+						{ native: p, governed: p },
+						{ vertex: true },
+					);
+
+					expect(rawResult).toBe("ok");
+					expect(govResult).toBe("ok");
+					expect(raw.requests[0]?.body["toolConfig"]).toEqual(sent);
+					expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+				});
+			}
+
+			it(`${method} on Vertex AI: ${shape} returning null (sent as null natively, which the request converter would drop from a copy) is refused as "can't tell", no provider request`, async () => {
+				const p = hooked("go", () => null, {});
+				const { raw, rawResult, gov, govResult, auditKinds } = await nativeThenGoverned(
+					method,
+					{ native: p, governed: p },
+					{ vertex: true },
+				);
+
+				expect(rawResult).toBe("ok");
+				expect(raw.requests[0]?.body["toolConfig"]).toEqual({ functionCallingConfig: null });
+				expect(govResult).toContain(
+					`models.${method} could not be checked for automatic function calling (params.config.toolConfig.functionCallingConfig cannot be copied as data)`,
+				);
+				expect(auditKinds).toEqual(["policy_denied"]);
+				expect(gov.requests).toHaveLength(0);
+			});
+
+			it(`${method} on Vertex AI: ${shape} that THROWS fails natively and is refused governed, no provider request either way`, async () => {
+				const p = hooked(
+					"go",
+					() => {
+						throw new Error("toJSON hook threw");
+					},
+					{},
+				);
+				const { raw, rawResult, gov, govResult, auditKinds } = await nativeThenGoverned(
+					method,
+					{ native: p, governed: p },
+					{ vertex: true },
+				);
+
+				expect(rawResult).toContain("toJSON hook threw");
+				expect(raw.requests).toHaveLength(0);
+				expect(govResult).toContain(
+					`models.${method} could not be checked for automatic function calling (params.config.toolConfig.functionCallingConfig cannot be copied as data)`,
+				);
+				expect(auditKinds).toEqual(["policy_denied"]);
+				expect(gov.requests).toHaveLength(0);
 			});
 		}
 	}

@@ -426,9 +426,7 @@ const SDK_TOOL_CONFIG_FIELDS = [
  * reads these by name, and `generateContentStream`'s AFC check reads
  * `streamFunctionCallArguments`. Vertex AI reads NONE of them: `toolConfigToVertex`
  * (`dist/node/index.mjs` 12188) passes the object through as it is (12200), so the request
- * carries what `JSON.stringify` makes of it, its own enumerable properties only. The snapshot
- * therefore keeps the caller's enumerability for this object on Vertex AI
- * (`ownedDataCopy`'s `keepEnumerability`).
+ * carries whatever `JSON.stringify` makes of it (see `vertexWireForm`).
  */
 const SDK_FUNCTION_CALLING_FIELDS = [
 	"mode",
@@ -681,42 +679,64 @@ function cloneNonObjectTool(tool: unknown, at: string): unknown {
  * find them. The SDK only reads properties of these objects (and spreads them), so a null
  * prototype is safe for it. The values are the caller's (shallow); the fields the AFC
  * decision reads are primitives.
- *
- * ENUMERABILITY. By default every captured field is written ENUMERABLE, so the PII redaction
- * walk (`Object.keys`) sees each field the SDK reads by name and sends. `keepEnumerability` is for
- * an object the SDK sends by SERIALIZING it whole rather than field by field (Vertex AI's
- * `functionCallingConfig`, see SDK_FUNCTION_CALLING_FIELDS): `JSON.stringify` sends only own
- * enumerable properties, so there a field that was own and enumerable on the caller's object
- * stays enumerable, and one that was inherited or non-enumerable is written NON-enumerable,
- * still readable by name, but neither serialized nor walked by redaction, exactly as natively.
  */
-function ownedDataCopy(
-	obj: unknown,
-	at: string,
-	keys: readonly string[],
-	keepEnumerability = false,
-): unknown {
+function ownedDataCopy(obj: unknown, at: string, keys: readonly string[]): unknown {
 	if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) return obj;
 	rejectProxy(obj, at);
 	const out = Object.create(null) as Record<string | symbol, unknown>;
 	for (const key of Reflect.ownKeys(obj)) {
 		const d = Object.getOwnPropertyDescriptor(obj, key);
 		if (d === undefined) continue;
-		setData(
-			out,
-			key,
-			"value" in d ? d.value : d.get === undefined ? undefined : d.get.call(obj),
-			!keepEnumerability || d.enumerable === true,
-		);
+		setData(out, key, "value" in d ? d.value : d.get === undefined ? undefined : d.get.call(obj));
 	}
 	for (const key of keys) {
 		if (!Object.hasOwn(out, key)) {
 			const value = captureOnce(obj, key, at);
-			// Inherited: never serialized by JSON.stringify.
-			if (value !== undefined) setData(out, key, value, !keepEnumerability);
+			if (value !== undefined) setData(out, key, value);
 		}
 	}
 	return out;
+}
+
+/**
+ * `functionCallingConfig` as Vertex AI sends it, computed ONCE, as plain JSON data. On Vertex AI
+ * the SDK sends the caller's object through `JSON.stringify`, so its wire form is whatever that
+ * makes of it: a `toJSON` hook runs (own or inherited, enumerable or not), and its result is
+ * what is sent; otherwise own enumerable properties only (an accessor read once), recursively,
+ * hooks included. A copy of the object's fields cannot be that: a hook hidden from `Object.keys`
+ * (non-enumerable, or a class method) survives the forwarded copy but not the PII redaction
+ * clone, which rebuilds the request from `Object.keys`, so with PII in the prompt a hook that
+ * restricts function calling (`toJSON` returning `{ mode: "NONE" }`) was silently dropped.
+ *
+ * So the snapshot runs that same serialization here, once, under the key the request
+ * converter gives it (`toJSON` receives the key), and forwards the result: plain data, sent
+ * byte for byte as the SDK would send the caller's object, and every field of it walked by
+ * redaction. The SDK's later `JSON.stringify` runs no caller code on it. Caller code runs once,
+ * as it does natively per request; a Proxy is refused before any trap runs. A serialization
+ * that throws (a throwing hook or getter, a cycle, a BigInt), and one that yields `null`
+ * (natively sent as `null`, but the converter drops a `null` value before serializing), are
+ * UncloneableAfcInput: the call is refused, naming the path. A hook that yields `undefined`
+ * leaves the field out, as natively. No AFC decision reads this object on Vertex AI: the SDK's
+ * one read of it by name (`streamFunctionCallArguments`, 14699) is in the AFC stream branch,
+ * which the governed stream refuses before the SDK runs.
+ */
+function vertexWireForm(callingConfig: unknown, at: string): unknown {
+	if (
+		callingConfig === null ||
+		(typeof callingConfig !== "object" && typeof callingConfig !== "function")
+	) {
+		return callingConfig;
+	}
+	rejectProxy(callingConfig, at);
+	let wire: unknown;
+	try {
+		const text = JSON.stringify({ functionCallingConfig: callingConfig });
+		wire = (JSON.parse(text) as Record<string, unknown>)["functionCallingConfig"];
+	} catch {
+		throw new UncloneableAfcInput(at);
+	}
+	if (wire === null) throw new UncloneableAfcInput(at);
+	return wire;
 }
 
 /**
@@ -800,9 +820,9 @@ export function googleClientIsVertexAI(client: unknown): boolean {
  *     `streamFunctionCallArguments` are values we own, and every field the SDK reads from
  *     them (`mode` and `allowedFunctionNames` too) is carried, inherited ones included. With
  *     `options.vertexAI` (the client sends to Vertex AI, which serializes
- *     `functionCallingConfig` whole), a field that was inherited or non-enumerable there is
- *     carried NON-enumerable: as natively, it is not sent, and redaction (which walks what
- *     is sent) does not walk it.
+ *     `functionCallingConfig` whole), that object is instead forwarded as its wire form,
+ *     computed once (`vertexWireForm`): plain data, sent as natively, all of it seen by
+ *     redaction.
  *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
  *     non-callable tool is copied as exactly the fields the SDK reads, in the order the SDK
  *     reads them (`copyDataTools`: each captured once, a `functionDeclarations` getter
@@ -868,13 +888,13 @@ export function snapshotGoogleAfcParams(
 			SDK_TOOL_CONFIG_FIELDS,
 		);
 		if (toolConfig !== null && typeof toolConfig === "object") {
-			// On Vertex AI the SDK serializes this object whole: keep what JSON.stringify sees.
-			const callingConfig = ownedDataCopy(
-				(toolConfig as Record<string, unknown>).functionCallingConfig,
-				`${toolConfigAt}.functionCallingConfig`,
-				SDK_FUNCTION_CALLING_FIELDS,
-				options.vertexAI === true,
-			);
+			const callingAt = `${toolConfigAt}.functionCallingConfig`;
+			const captured = (toolConfig as Record<string, unknown>).functionCallingConfig;
+			// The Gemini API reads its fields by name; Vertex AI serializes it whole.
+			const callingConfig =
+				options.vertexAI === true
+					? vertexWireForm(captured, callingAt)
+					: ownedDataCopy(captured, callingAt, SDK_FUNCTION_CALLING_FIELDS);
 			setData(toolConfig as Record<string, unknown>, "functionCallingConfig", callingConfig);
 		}
 		setData(outConfig, "toolConfig", toolConfig);
