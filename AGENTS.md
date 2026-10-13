@@ -1667,8 +1667,9 @@ reads; a refused wrapper builds a fresh error per call.
 `FREE_METHODS.google` cites `dist/node/index.mjs:LINE VERB path` per entry.
 `GOOGLE_REFUSED_METHODS` in `govern.ts` is a HINT table only (its names get the governAction() hint);
 it refuses nothing itself. With automatic
-function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in `google-afc.ts`, a mirror of the
-SDK's `shouldDisableAfc`, made on a snapshot of the request that is then what is forwarded),
+function calling (decided by the SDK itself: `google-request.ts` runs the SDK's own request pipeline
+over the request against a transport stand-in that sends nothing, and the plain-data copy of what
+it read, checked per call by a second run, is what is forwarded),
 `models.generateContent` runs the loop itself, each round its own governed call
 (`runGovernedAfc`, which calls the SDK's own `generateContentInternal` on the RAW `models`), and
 `models.generateContentStream` is refused (a streamed loop is not metered per round yet).

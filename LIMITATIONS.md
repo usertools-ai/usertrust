@@ -96,26 +96,39 @@ classified version; on a duck-typed client, nothing catches it.
 function calling (a streamed loop of provider rounds, which usertrust does not
 yet meter round by round); `models.generateContent` with it is metered per round
 instead, each round its own governed call. Use `generateContent`, or disable AFC with
-`config.automaticFunctionCalling.disable: true`, to have the stream governed. The
-check needs plain objects: a Proxy in `params`, `config`, `config.tools`, a tool or
-`config.automaticFunctionCalling` is refused, because a Proxy can show the check
-one config and the SDK another. Accessors there are read once and their values
-captured, so the check and the SDK use the same value. The request is forwarded as a snapshot of the
-checked config (with AFC not disabled, a non-callable tool is forwarded as exactly the
-fields the SDK reads, each of which must be copyable as data), so a later change to the caller's `config.tools` or
-`config.automaticFunctionCalling` cannot reach the SDK. It carries every field the
-SDK reads from a non-callable tool, `config.toolConfig` and its
-`functionCallingConfig`, including one a class instance inherits (a getter) or holds
-as a non-enumerable property. Inside the values of a tool's fields (a declaration, a
-`parameters` schema) it does not capture field by field: a function, a symbol, an
-object whose prototype is not Object's or `null` (a class instance, or one made with
-`Object.create` from another object), an array whose prototype is not Array's, an
-accessor, a non-enumerable property, a sparse array or an array with a named property
-at any depth there is refused, as a call that could not be checked. The prototype check
-recognises Object's and Array's prototypes by shape, so a deliberately forged prototype
-can pass it; the effect is limited to how faithfully nested fields are copied, never to
-what governance decides or charges, which use the same copy that is sent. The snapshot covers those
-AFC fields only: `contents` and the rest of the request are still read live.
+`config.automaticFunctionCalling.disable: true`, to have the stream governed.
+Whether a call would run that loop is the SDK's own decision. Before anything is
+checked, charged or sent, usertrust runs the SDK's request pipeline over the
+request, against a stand-in for its transport that sends nothing. The pipeline is
+the client's own `Models` class, or else the installed `@google/genai`'s, each
+accepted only after a short behavioural check. A client with neither is refused.
+In that run every getter, `toJSON` hook and Proxy trap in the request runs as
+often, and in the same order, as when the SDK sends it. The SDK's own writes
+(moving a `$schema` `responseSchema`, rewriting a declaration's `parameters`) land
+on your objects as they would natively, once per call. What the SDK read becomes
+a plain-data copy, and that copy is what the PII scan, redaction, the meter and
+the SDK then use. A callable tool and an `AbortSignal` go by reference. Per call,
+usertrust runs the SDK again over a second copy. It must make exactly the requests
+it made over yours (path, method, body bytes, `httpOptions`) and reach the same
+automatic-function-calling decision, or the call is refused. This costs two extra
+runs of the SDK's request conversion per call, with no I/O: about 7 ms for a
+request carrying 1 MB of inline data. Where a governed call differs from the SDK's
+own:
+- **A value that answers differently on two reads is refused.** If the change
+  would alter what is sent (a getter, a hook or a Proxy trap), the copy cannot hold
+  both answers, so the call is refused rather than sent. The same goes for an
+  object the SDK both reads field by field and serializes through `toJSON`, and for
+  a cycle.
+- **Later AFC rounds reuse the copy.** With automatic function calling on
+  `generateContent`, rounds after the first reuse the copy instead of re-reading
+  your objects. Every round is still its own governed, metered call.
+- **A callable tool's `tool()` runs later.** It runs after authorization, once per
+  call; the SDK runs it before its first request. A denied call never runs it, and
+  a `tool()` that changes your config does not change what is sent.
+- **A local SDK rejection is the SDK's own error.** For a request the SDK rejects
+  locally (incompatible tools, empty `contents`, a getter that throws), the call
+  throws the SDK's own error after a `policy_denied` audit event, with nothing sent
+  or charged.
 
 **Only request options that change neither the body nor where it is sent are allowed.**
 A governed call is scanned, held and priced from its request parameters. But each SDK
