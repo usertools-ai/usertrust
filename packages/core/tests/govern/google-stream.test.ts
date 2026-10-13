@@ -1701,7 +1701,7 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 			);
 		});
 
-		it(`${method}: a non-callable tool that cannot be copied as data, with AFC enabled, is refused`, async () => {
+		it(`${method}: a non-callable tool whose SDK-read field cannot be copied as data, with AFC enabled, is refused`, async () => {
 			const engine = makeMockEngine();
 			const audit = makeMockAudit();
 			const { client, generateContentStream } = makeGoogleClient();
@@ -1712,8 +1712,10 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 				_engine: engine,
 				_audit: audit,
 			});
+			// The function sits inside `googleSearch`, a field the SDK reads and sends; a tool's
+			// OTHER fields are never copied (see the row below).
 			const params = afcParams({
-				tools: [{ googleSearch: {} }, { googleSearch: {}, hook: () => 1 }],
+				tools: [{ googleSearch: {} }, { googleSearch: { hook: () => 1 } }],
 			});
 
 			const err = await callModels(governed, method, params).then(
@@ -1723,7 +1725,7 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 
 			expect(err).toBeInstanceOf(PolicyDeniedError);
 			expect((err as Error).message).toContain(
-				`models.${method} could not be checked for automatic function calling (params.config.tools[1] cannot be copied as data)`,
+				`models.${method} could not be checked for automatic function calling (params.config.tools[1].googleSearch.hook cannot be copied as data)`,
 			);
 			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
 			expect(engine.spendPending).not.toHaveBeenCalled();

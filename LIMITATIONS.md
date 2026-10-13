@@ -101,9 +101,15 @@ check needs plain objects: a Proxy in `params`, `config`, `config.tools`, a tool
 `config.automaticFunctionCalling` is refused, because a Proxy can show the check
 one config and the SDK another. Accessors there are read once and their values
 captured, so the check and the SDK use the same value. The request is forwarded as a snapshot of the
-checked config (with AFC not disabled, each non-callable tool must be copyable as
-data), so a later change to the caller's `config.tools` or
-`config.automaticFunctionCalling` cannot reach the SDK. The snapshot covers those
+checked config (with AFC not disabled, a non-callable tool is forwarded as exactly the
+fields the SDK reads, each of which must be copyable as data), so a later change to the caller's `config.tools` or
+`config.automaticFunctionCalling` cannot reach the SDK. It carries every field the
+SDK reads from a non-callable tool, `config.toolConfig` and its
+`functionCallingConfig`, including one a class instance inherits (a getter) or holds
+as a non-enumerable property. Deeper inside a tool's fields (a declaration, a
+`parameters` schema) it does not capture field by field: a class instance, an
+accessor, a non-enumerable property or a sparse array there is refused, as a call
+that could not be checked. The snapshot covers those
 AFC fields only: `contents` and the rest of the request are still read live.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.
