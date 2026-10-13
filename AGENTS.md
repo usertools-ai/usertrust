@@ -46,7 +46,9 @@ Monorepo, npm workspaces (`packages/*`). `site/` is a Next.js app and is **not**
 | `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. The workspace name is internal; the plugin is published as `usertools` (`/plugin install usertools@usertrust`). |
 
 The first six are version-locked and released together. `monte-cristo` and `claude-code-plugin`
-are not.
+are not. Each of the six names any other it depends on at exactly its own version, never a range
+such as `"*"`: the release sets and checks those pins (docs/releasing.md, "Sibling dependencies
+are pinned").
 
 **No brand asset is committed to this repository**: no font file of any kind (Usertools Sans and
 every other face, first-party or OFL), no logo or mark, no lattice code. `site/` loads them at
@@ -118,13 +120,15 @@ rejection of the hold — throws out to its flow's **denial boundary**, which ap
 as `auditEventHash`, and rethrows. The boundary is a `catch` wrapped **around** the
 try/finally that releases the budget mutex, so the append runs with the lock already
 released; and it ends **lexically before** the provider call in step 6, so a provider that
-throws a same-typed error is never audited as a governor decision. There are **five append
-sites**: the mutex-section boundary in each of the three flows, plus a pre-mutex
-unknown-model site in `interceptCall` and headless `authorize` — actions have no model to
-price, so `governActionImpl` has only the mutex one. Four of the five are `catch (denialErr)`
-blocks; the exception is headless's pre-mutex site, which appends inline before an
-unconditional `throw` because the throw is right there and needs no catch to intercept it.
-Grepping `catch (denialErr)` therefore finds four, not five. Payloads and rationale live in
+throws a same-typed error is never audited as a governor decision. There are **six append
+sites**: the mutex-section boundary in each of the three flows, a pre-mutex unknown-model
+site in `interceptCall` and in headless `authorize` (actions have no model to price, so
+`governActionImpl` has only the mutex one), and the pre-mutex request-option refusal at the
+top of `interceptCall` (`movedRequestOptions`, before anything is held, scanned or sent).
+Four of the six are `catch (denialErr)` blocks. The exceptions are headless's pre-mutex
+unknown-model site and `interceptCall`'s request-option refusal, which append inline
+before an unconditional `throw`, because the throw is right there and needs no catch to
+intercept it. Grepping `catch (denialErr)` therefore finds four, not six. Payloads and rationale live in
 `audit/denial-events.ts`.
 
 `destroy()` waits up to 5s, one deadline for all of them, for the terminals still working (a

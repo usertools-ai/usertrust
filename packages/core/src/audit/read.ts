@@ -12,7 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { GENESIS_HASH } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
@@ -129,8 +129,10 @@ export function loadBudgetConfig(vaultPath: string): VaultBudget {
 	if (recorded.state === "unreadable")
 		return { budget: 0, source: "unreadable", writtenAt: null, reason: recorded.reason };
 	const configPath = join(vaultPath, "usertrust.config.json");
-	if (!existsSync(configPath)) return { ...UNPUBLISHED };
 	try {
+		// stat FIRST: opening a FIFO planted at this path would block every reader (inspect, health, the UI). A missing
+		// config, or one that is not a regular file, gives no budget.
+		if (!statSync(configPath).isFile()) return { ...UNPUBLISHED };
 		const config = JSON.parse(readFileSync(configPath, "utf-8")) as { budget?: number };
 		return typeof config.budget === "number" && config.budget > 0
 			? { budget: config.budget, source: "config", writtenAt: null, reason: null }

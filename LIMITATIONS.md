@@ -117,6 +117,77 @@ can pass it; the effect is limited to how faithfully nested fields are copied, n
 what governance decides or charges, which use the same copy that is sent. The snapshot covers those
 AFC fields only: `contents` and the rest of the request are still read live.
 
+**Only request options that change neither the body nor where it is sent are allowed.**
+A governed call is scanned, held and priced from its request parameters. But each SDK
+takes per-call request options too: the second argument on Anthropic and OpenAI, and
+`config.httpOptions` on Google. Some of them replace what those parameters describe, so
+they are governed by a list, as default-deny governs methods.
+
+**Allowed, because they were measured to change neither the body nor the host:**
+- `timeout`, `maxRetries`, `signal`, `idempotencyKey`;
+- `stream`, which the SDK sets itself after reading the options;
+- `headers`: a beta header, such as Anthropic's long-context one, is priced from the
+  usage the provider reports;
+- `query`, which changes only the URL's query string;
+- `method`;
+- on Google, `httpOptions` `apiVersion`, `headers`, `timeout` and `retryOptions`.
+
+**Every other option is refused** before anything is held or sent, with a
+`policy_denied` event. An option an SDK adds later is refused until it is measured and
+listed. Among the refused ones, as measured:
+- `body`;
+- `fetchOptions`, which is spread over the request last, so its `body` wins;
+- Anthropic's per-call `middleware`, which rewrites the built request;
+- `path`, which can name an endpoint default-deny refuses as a method;
+- `defaultBaseURL`;
+- Anthropic's beta-only `fallbackState`, which is not measured;
+- every internal `__` option, named as such: `__binaryResponse` returns the raw body, so
+  usage would never be read and the call would settle at its estimate;
+- on Google, `httpOptions.extraBody` (merged into the body), `baseUrl` and
+  `baseUrlResourceScope`.
+
+A key counts when it is present, even as `undefined` (the SDK copies that too). Request
+options must be a plain object: a function, an array, a class instance or a Proxy is
+refused whole, and an option held by an accessor (a getter), allowed or not, is refused
+and never called. Nothing in these checks runs caller code. Anything on the way that could
+only be read that way, whether an accessor or a Proxy at any step from a resource's
+`_client` to a client's `fetchOptions`, `middleware` or Google `httpOptions`, is refused,
+never read as absent. **What is forwarded is a copy:** a new options object
+(on Google, a new `httpOptions` in a shallow copy of the request) holding only the allowed
+keys, each read once. A key the caller adds, or a value it changes, after the call starts
+cannot reach the SDK.
+
+**A client that rewrites every request** is refused by `trust()`, before the ledger client
+is built, and every call refuses too if one is changed later on the raw client the caller
+kept:
+- an Anthropic client constructed with `middleware`, including the SDK's own
+  `betaRefusalFallbackMiddleware`, which re-sends a refused call to a fallback model
+  after it was priced;
+- an Anthropic or OpenAI client constructed with `fetchOptions` carrying `body` or
+  `method`. The SDK spreads a client's `fetchOptions` over every request after the body.
+  Its transport keys, such as a proxy `dispatcher`, stay allowed;
+- a Google client whose `httpOptions` carry `extraBody`.
+
+A default client has no middleware. A cloud-provider subclass's `backendMiddleware()`,
+which signs requests, is never read. **A client handed to `trust()` inside a Proxy is trusted
+as transport, and is not refused.** Observability wrappers return the SDK client inside a
+forwarding Proxy. A Proxy's traps can show these checks one value and the SDK another, so
+nothing is read through it, and a Proxy built to do that is deliberate bypass, out of scope
+as above. To have the checks read the client itself, wrap the raw client with `trust()`
+first, then instrument the trusted client. Only the Proxy itself is trusted: the per-call
+checks still read the SDK resource each call runs on, and its client, so a body-moving
+option reached through a Proxy client is refused all the same. The checks hold every
+object they read to being plain: request options and client `fetchOptions` must be plain
+objects, and a client's `middleware` must be a plain array (no own iterator or other own
+key, no accessor index), so the check and the SDK read the same thing. **A client constructed with its own `fetch` is
+trusted transport and is not refused.** That `fetch` can rewrite any request, body
+included; proxies, test harnesses and instrumentation use it legitimately. It is the
+transport `trust()` wraps, so what it does to a request is the caller's own code, out of
+scope as above. The row that pins this uses a stand-in subclass that
+overrides `backendMiddleware()`, not a published cloud SDK, which this package does not
+install. A change made to the raw client between a call's check and its send, from the
+caller's own code, is deliberate bypass, out of scope as above.
+
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.
 That is what makes it a one-line integration with zero SDK dependencies across
 SDK versions — and it means the governed surface is a set of methods we

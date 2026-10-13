@@ -809,13 +809,16 @@ export function normalizeEvent(raw: unknown): TransactionEvent {
 function auditSegments(auditDir: string): {
 	count: number;
 	empty: boolean;
+	enumerated: boolean;
 	seqFile: Map<number, string>;
 } {
 	let names: string[] = [];
+	let enumerated = true;
 	try {
 		names = readdirSync(auditDir).filter((n) => n.endsWith(".jsonl") && n !== "events.jsonl");
 	} catch {
 		// Not enumerable: with events.jsonl also absent, "Audit log not found" returns before the vault reading.
+		enumerated = false;
 	}
 	if (existsSync(join(auditDir, "events.jsonl"))) names.unshift("events.jsonl");
 	let empty = true;
@@ -830,7 +833,7 @@ function auditSegments(auditDir: string): {
 			} catch {}
 		}
 	}
-	return { count: names.length, empty, seqFile };
+	return { count: names.length, empty, enumerated, seqFile };
 }
 
 /**
@@ -879,9 +882,24 @@ export function verifyTransaction(
 	const mainLog = join(vaultPath, "audit", "events.jsonl");
 	// EVERY segment: a rotated transfer straddles files, and the live file alone lacks its history.
 	const segments = auditSegments(join(vaultPath, "audit"));
-	if (segments.count === 0 || segments.empty) {
+	// An empty live log is a clean, empty reading only when the directory was listed: an unlistable one may
+	// hold the records in segments, so it falls through to the vault reading, which reports the enumeration error.
+	if (segments.count === 0 || (segments.empty && segments.enumerated)) {
+		// No log at all means nothing could be read; an empty log is a clean, empty reading.
 		const error = segments.count === 0 ? `Audit log not found: ${mainLog}` : "Audit log is empty";
-		return { found: false, valid: false, receipt: renderNotFound(txId), errors: [error] };
+		// An empty log is a complete reading only beside an anchor that agrees it is empty: absent, or at
+		// sequence 0 on the genesis hash. An anchor that records events, or cannot be read, means the
+		// records are gone, and the receipt must not assert the transfer never existed.
+		const anchor = readAnchor(`${mainLog}.meta`);
+		const anchorClean =
+			anchor === null ||
+			(!("corrupt" in anchor) && anchor.sequence === 0 && anchor.lastHash === GENESIS_HASH);
+		return {
+			found: false,
+			valid: false,
+			receipt: renderNotFound(txId, segments.count !== 0 && anchorClean),
+			errors: [error],
+		};
 	}
 
 	// Find the target event.
@@ -943,7 +961,10 @@ export function verifyTransaction(
 	];
 	if (targetEvent === undefined) {
 		const errors = vaultErrors.map(scrubForError);
-		return { found: false, valid: false, receipt: renderNotFound(txId), errors };
+		// The absolute sentence only for a reading with no errors: a missing segment, an unreadable
+		// directory or a failed chain may hold the records that were asked for.
+		const receipt = renderNotFound(txId, vaultErrors.length === 0);
+		return { found: false, valid: false, receipt, errors };
 	}
 
 	const chainVerified = reading.result.valid;
