@@ -1,7 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+	type BigIntStats,
+	closeSync,
+	existsSync,
+	fstatSync,
+	lstatSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	readSync,
+	statSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
 	deriveChainIntegrity,
@@ -28,7 +39,24 @@ export interface LedgerState {
 	transfers: TransferIndex;
 	summary: SummaryPayload;
 	lastHash: string;
+	/**
+	 * Where the next read of `events.jsonl` starts: the log's size as the load's descriptor saw it (0 when absent), a
+	 * fragment after its last newline included. Not the offset after that newline: the load already counted such a
+	 * fragment as a malformed line, so a range read from there could join it to a later line onto a verdict that has
+	 * counted it once; and a dead writer's fragment would then read as a grow on every check.
+	 */
 	byteOffset: number;
+	/**
+	 * Whether the load saw bytes after the log's last newline (a writer mid-line, or one that died mid-line). The load
+	 * counted them as a malformed line, so a grow after such a load is a full reload, never an extension.
+	 */
+	pendingFragment: boolean;
+	/**
+	 * The identity of the `events.jsonl` that `lastHash` and `byteOffset` describe (`fileIdentity`), taken from the
+	 * descriptor its bytes were read through. Undefined when the log was absent, when the filesystem gives no inode
+	 * number, or when no load could read one unchanged file throughout: every grow is then a full reload.
+	 */
+	logId: string | undefined;
 	/**
 	 * Whether the audit directory EXISTED at this load (a `stat` of it succeeded), readable or not: once a server has
 	 * seen it, its absence is a deletion, so a directory that was there and could not be listed still counts.
@@ -167,9 +195,48 @@ export function loadState(
 	auditDirSeen = false,
 	deletionSeen = false,
 ): LedgerState {
+	// A retry redoes the WHOLE load, so one pass's identity is never paired with another pass's events, verdict or offset.
+	for (let retry = 0; ; retry++) {
+		const pass = loadPass(vaultPath, rowCap, auditDirSeen, deletionSeen);
+		if (pass.consistent) return pass.state;
+		// Still changing: every later grow is a full reload until a load reads one unchanged file throughout.
+		if (retry === LOAD_RETRIES) return { ...pass.state, logId: undefined };
+		// What a discarded pass OBSERVED about the directory stays observed (a recreated directory must not undo a
+		// deletion it saw); only what it read from the file (events, verdict, offset, identity) is rebuilt.
+		auditDirSeen ||= pass.state.auditDirPresent;
+		deletionSeen ||= pass.state.deletionDetected;
+	}
+}
+
+/** How many times a load whose log changed under it is redone before its identity is left unknown. */
+const LOAD_RETRIES = 3;
+
+/**
+ * Test-only: called between a load's steps, so a row can change the log at a chosen point. Not exported from the
+ * package (its entry point is `server.js`).
+ */
+export const loadSeam: {
+	afterDescriptor?: (() => void) | undefined;
+	afterReaders?: (() => void) | undefined;
+} = {};
+
+function loadPass(
+	vaultPath: string,
+	rowCap: number,
+	auditDirSeen: boolean,
+	deletionSeen: boolean,
+): { state: LedgerState; consistent: boolean } {
+	const logPath = join(vaultPath, "audit", "events.jsonl");
+	const snapshot = snapshotLog(logPath);
+	loadSeam.afterDescriptor?.();
 	const events = readLedgerEvents(vaultPath);
 	const integrity = deriveChainIntegrity(events);
 	const vault = verifyVault(vaultPath);
+	loadSeam.afterReaders?.();
+	// The readers read by PATH. Only if the path still names the file the descriptor read, with the same size and mtime,
+	// do `lastHash`, `byteOffset` and `logId` all describe one file; otherwise (a rename, an append) the load is redone.
+	// The bracket covers `events.jsonl` only, not rotated segments: the incremental path tails that file alone.
+	const consistent = snapshot === undefined || snapshot.fingerprint === pathFingerprint(logPath);
 	let spentUt = 0;
 	for (const e of events) {
 		if (isHeaderSpend(e.kind, e.data.cost)) spentUt += e.data.cost;
@@ -214,10 +281,7 @@ export function loadState(
 	transfers.add(events);
 	const rows = toLedgerRows(visible, sliceIntegrity, transfers.verdictOf);
 
-	const logPath = join(vaultPath, "audit", "events.jsonl");
-	const byteOffset = existsSync(logPath) ? statSync(logPath).size : 0;
-
-	return {
+	const state: LedgerState = {
 		rows,
 		transfers,
 		summary: {
@@ -237,9 +301,129 @@ export function loadState(
 			truncated,
 		},
 		lastHash: events.at(-1)?.hash ?? GENESIS,
-		byteOffset,
+		byteOffset: snapshot?.byteOffset ?? 0,
+		pendingFragment: snapshot?.pendingFragment ?? false,
+		logId: snapshot?.id,
 		auditDirPresent: auditDir === "present",
 		auditDirReadable: auditDir === "present" && listError === undefined,
 		deletionDetected,
 	};
+	return { state, consistent };
+}
+
+/**
+ * A file's identity: device and inode number, plus its birth time where the platform reports one (so a log deleted and
+ * recreated on an inode number the filesystem reused still reads as another file). BigInt fields throughout: Windows
+ * file ids exceed 2^53. Undefined for inode 0, which some filesystems report for every file.
+ *
+ * What it cannot see: a rewrite in place (same inode) that does not shorten the log, and a delete-and-recreate that
+ * reuses the inode number where no birth time is reported. The load's bracket compares size and mtime as well, and
+ * mtime is coarse on every filesystem (a few milliseconds on Linux's local filesystems, 1 s on HFS+, 2 s on FAT, coarser
+ * on some network mounts), so a same-size rewrite within one tick passes it too.
+ */
+export function fileIdentity(st: BigIntStats): string | undefined {
+	if (st.ino === 0n) return undefined;
+	return st.birthtimeNs === 0n ? `${st.dev}:${st.ino}` : `${st.dev}:${st.ino}:${st.birthtimeNs}`;
+}
+
+/** The identity plus the size and mtime: what must not change between a load's descriptor read and its by-path reads. */
+function fingerprintOf(st: BigIntStats): string {
+	return `${st.dev}:${st.ino}:${st.birthtimeNs}:${st.size}:${st.mtimeNs}`;
+}
+
+function pathFingerprint(logPath: string): string | undefined {
+	try {
+		return fingerprintOf(statSync(logPath, { bigint: true }));
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The log as one descriptor sees it: its identity, its fingerprint, its size, and whether bytes follow its last newline.
+ * Undefined when it cannot be read (absent, say): the offset is then 0, so every grow is a full reload.
+ */
+function snapshotLog(
+	logPath: string,
+):
+	| { id: string | undefined; fingerprint: string; byteOffset: number; pendingFragment: boolean }
+	| undefined {
+	let fd: number;
+	try {
+		fd = openSync(logPath, "r");
+	} catch {
+		return undefined;
+	}
+	try {
+		const st = fstatSync(fd, { bigint: true });
+		const size = Number(st.size);
+		return {
+			id: fileIdentity(st),
+			fingerprint: fingerprintOf(st),
+			byteOffset: size,
+			pendingFragment: afterLastNewline(fd, size) < size,
+		};
+	} catch {
+		return undefined;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/** The offset just after the last newline in `[0, size)` of `fd`, read backwards from the end; 0 when there is none. */
+function afterLastNewline(fd: number, size: number): number {
+	const chunk = Buffer.alloc(64 * 1024);
+	let end = size;
+	while (end > 0) {
+		const start = Math.max(0, end - chunk.length);
+		const buf = readRange(fd, start, end, chunk);
+		const at = buf.lastIndexOf(0x0a);
+		if (at !== -1) return start + at + 1;
+		end = start;
+	}
+	return 0;
+}
+
+/** Reads `[start, end)` of `fd` into `into` (or a new buffer), looping on short reads; stops early at end of file. */
+function readRange(fd: number, start: number, end: number, into?: Buffer): Buffer {
+	const buf = into ?? Buffer.alloc(end - start);
+	let filled = 0;
+	while (filled < end - start) {
+		const n = readSync(fd, buf, filled, end - start - filled, start + filled);
+		if (n === 0) break;
+		filled += n;
+	}
+	return buf.subarray(0, filled);
+}
+
+export type Appended =
+	| { kind: "bytes"; buf: Buffer }
+	| { kind: "shrunk" }
+	| { kind: "replaced" }
+	| { kind: "unknown" };
+
+/**
+ * The bytes appended to the log after `byteOffset`, read through one descriptor whose identity is checked against
+ * `logId` (the identity the last load recorded): only `[byteOffset, size)` is read, never the prefix this process has
+ * already verified. "replaced" is another file at the path, "shrunk" a log shorter than the offset, and "unknown" an
+ * identity that cannot be compared (none recorded, or inode 0); each calls for a full reload. A read that throws
+ * (the log absent, unreadable) propagates.
+ */
+export function readAppended(
+	logPath: string,
+	byteOffset: number,
+	logId: string | undefined,
+): Appended {
+	const fd = openSync(logPath, "r");
+	try {
+		const st = fstatSync(fd, { bigint: true });
+		const id = fileIdentity(st);
+		if (id === undefined || logId === undefined) return { kind: "unknown" };
+		if (id !== logId) return { kind: "replaced" };
+		const size = Number(st.size);
+		if (size < byteOffset) return { kind: "shrunk" };
+		return { kind: "bytes", buf: readRange(fd, byteOffset, size) };
+	} finally {
+		closeSync(fd);
+	}
 }
