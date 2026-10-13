@@ -56,6 +56,10 @@ npm, and its version is its own: the `usertrust` packages and their
   them first. A `.settling` hold, whose call ran and is never re-fired, is
   unchanged.
 
+- **A kept release record carries its session id, so its gaps are placed in the right session.**
+  Every hold's record now stores its session id, and SessionStart reads it from there instead of
+  from the record's file name, which a session id containing `__` could split in the wrong place.
+
 ## [3.0.2] - 2026-10-12
 
 ### Fixed
