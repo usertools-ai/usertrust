@@ -3,10 +3,11 @@
 
 // Evidence the dashboard has read stays reported when it is taken away. Two latches feed the deletion verdict: the audit
 // directory's identity (another directory swapped in between two checks, or one that held no log bytes deleted), and the
-// events the dashboard held (a log that no longer holds them was truncated, emptied or replaced by another chain). Each
-// is latched until a restart, whatever the vault holds afterwards.
+// event the dashboard last verified (a vault that no longer holds it, or holds nothing where it held something, was
+// truncated, emptied or replaced by another chain). Each is latched until a restart, whatever the vault holds afterwards.
 
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import type * as realFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,6 +57,7 @@ const { canonicalize } = await import("usertrust-verify");
 const { createAuditWriter } = await import("../../core/src/audit/chain.js");
 const { createUiServer } = await import("../src/server/server.js");
 const { loadSeam, loadState } = await import("../src/server/state.js");
+const { __tailTestSeam: tailSeam } = await import("../src/server/tail.js");
 
 type Chain = { events: number; valid: boolean; empty: boolean; errors: string[] };
 
@@ -241,6 +243,13 @@ describe("the audit directory replaced or deleted under an open dashboard", {
 	});
 });
 
+/** The hash of the last line of a log: the event a load of it verifies last. */
+function lastHashOf(path: string): string {
+	return (
+		JSON.parse(readFileSync(path, "utf-8").trim().split("\n").at(-1) as string) as { hash: string }
+	).hash;
+}
+
 /** One event line, chained after `previousHash`, as the writer persists it; `sequence` left out when undefined. */
 function eventLine(
 	previousHash: string,
@@ -347,7 +356,7 @@ describe("a log that loses or changes events the dashboard held", { timeout: 30_
 		await appendEvents(root, 3, "tx");
 		const vault = join(root, ".usertrust");
 		const before = loadState(vault);
-		expect(before.head).toMatchObject({ count: 3 });
+		expect(before.head).toEqual({ verifiedHash: lastHashOf(log()), hadEvidence: true });
 		const held = before.head;
 		// The rotation's two steps, as a writer would make them: the log's events copied into a segment, then the log
 		// rewritten with only the next event.
@@ -390,7 +399,8 @@ describe("a log that loses or changes events the dashboard held", { timeout: 30_
 		writeFileSync(log(), eventLine(e3.hash, "tx_4").line);
 		const vault = join(root, ".usertrust");
 		const before = loadState(vault);
-		expect(before.head).toMatchObject({ count: 4 });
+		// In file order the log is read before the segment, so the last event read is the segment's last.
+		expect(before.head).toEqual({ verifiedHash: e3.hash, hadEvidence: true });
 		const aside = join(root, "aside.jsonl");
 		const passes: { consistent: boolean; readSucceeded: boolean; contained: boolean }[] = [];
 		loadSeam.afterDescriptor = () => {
@@ -575,7 +585,7 @@ describe("an audit directory or log that could not be read, then could again", {
 			await appendEvents(root, 3, "tx");
 			const vault = join(root, ".usertrust");
 			const before = loadState(vault);
-			expect(before.head).toMatchObject({ count: 3 });
+			expect(before.head).toEqual({ verifiedHash: lastHashOf(log()), hadEvidence: true });
 			const held = before.head;
 			// Each pass's readers fail, each in its own way: the first finds the audit directory unlistable (EACCES); the
 			// second finds it listable again and `events.jsonl` unreadable (EACCES). Each change lands after its pass's
@@ -640,7 +650,7 @@ describe("an audit directory or log that could not be read, then could again", {
 			await appendEvents(root, 3, "tx");
 			const vault = join(root, ".usertrust");
 			const before = loadState(vault);
-			expect(before.head).toMatchObject({ count: 3 });
+			expect(before.head).toEqual({ verifiedHash: lastHashOf(log()), hadEvidence: true });
 			const held = before.head;
 			chmodFor(`${log()}.meta`, 0o000);
 			const passes: { readSucceeded: boolean }[] = [];
@@ -733,4 +743,333 @@ describe("an audit directory or log that could not be read, then could again", {
 			).toMatchObject({ events: 3, valid: true, errors: [] });
 		},
 	);
+});
+
+describe("the last verified event: what a full load must still hold, and when full loads run", {
+	timeout: 30_000,
+}, () => {
+	const original = { ...tailSeam };
+	let root: string;
+	let ui: Awaited<ReturnType<typeof createUiServer>> | undefined;
+	/** The audit directory's change listener the server registered; the only thing that asks for a check here. */
+	let listener: (() => void) | undefined;
+	let restore: { path: string; mode: number }[] = [];
+	const vault = (): string => join(root, ".usertrust");
+	const auditDir = (): string => join(vault(), "audit");
+	const log = (): string => join(auditDir(), "events.jsonl");
+	const meta = (): string => `${log()}.meta`;
+	const asRoot = process.getuid?.() === 0;
+
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "trust-latch-verified-"));
+		listener = undefined;
+		// No backstop and no re-verify unless a row asks for one: a check runs only when the row calls `check()`.
+		tailSeam.backstopMs = 3_600_000;
+		tailSeam.reverifyMs = 3_600_000;
+		tailSeam.watch = ((_dir: string, cb: () => void) => {
+			listener = cb;
+			const w = new EventEmitter() as EventEmitter & { close(): void };
+			w.close = () => {};
+			return w;
+		}) as unknown as typeof tailSeam.watch;
+	});
+	afterEach(async () => {
+		for (const { path, mode } of restore.reverse()) {
+			try {
+				chmodSync(path, mode);
+			} catch {
+				// Already removed: nothing to restore.
+			}
+		}
+		restore = [];
+		loadSeam.afterDescriptor = undefined;
+		loadSeam.afterReaders = undefined;
+		loadSeam.afterPass = undefined;
+		io.afterListing = undefined;
+		vi.restoreAllMocks();
+		await ui?.close();
+		ui = undefined;
+		Object.assign(tailSeam, original);
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	function chmodFor(path: string, mode: number): void {
+		restore.push({ path, mode: statSync(path).mode & 0o777 });
+		chmodSync(path, mode);
+	}
+
+	/** One check of the log, as a file-change event asks for it (after the watcher's debounce). */
+	const check = (): void => (listener as () => void)();
+
+	async function summaryOf(port: number): Promise<{ chain: Chain; verifiedAt: string | null }> {
+		return (await (await fetch(`http://127.0.0.1:${port}/api/summary`)).json()) as {
+			chain: Chain;
+			verifiedAt: string | null;
+		};
+	}
+
+	/** The next event chained after the log's last line, with its sequence. */
+	function nextEvent(transferId: string): { line: string; hash: string } {
+		const last = JSON.parse(readFileSync(log(), "utf-8").trim().split("\n").at(-1) as string) as {
+			hash: string;
+			sequence: number;
+		};
+		return eventLine(last.hash, transferId, last.sequence + 1);
+	}
+
+	it.skipIf(asRoot)(
+		"red-first (false clean): another chain renamed in while the anchor could not be read, then appended to, is latched at the next full load, never valid",
+		async () => {
+			await appendEvents(root, 3, "tx");
+			ui = await createUiServer(root, { port: 0 });
+			const port = ui.port;
+			expect(await chainOf(port)).toMatchObject({ events: 3, valid: true });
+			// Another valid chain of three, with its own anchor, put in place while the anchor is unreadable.
+			const stage = mkdtempSync(join(tmpdir(), "trust-latch-verified-stage-"));
+			try {
+				await appendEvents(stage, 3, "tx_other");
+				const staged = join(stage, ".usertrust", "audit", "events.jsonl");
+				cpSync(`${staged}.meta`, meta());
+				chmodFor(meta(), 0o000);
+				renameSync(staged, log());
+			} finally {
+				rmSync(stage, { recursive: true, force: true });
+			}
+			ui.reload();
+			const failed = await chainOf(port);
+			expect(failed.valid).toBe(false);
+			expect(failed.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+			// Readable again, and appended to by the real writer before any full load.
+			chmodSync(meta(), 0o600);
+			await appendEvents(root, 1, "tx_more");
+			// The append is a full reload (the last full load failed), never an extension onto the unverified chain.
+			const names = await framesDuring(
+				port,
+				check,
+				(n) => n.includes("resync") || n.includes("rows"),
+			);
+			expect(names).toContain("resync");
+			expect(names).not.toContain("rows");
+			const after = await chainOf(port);
+			expect(after.events).toBe(4);
+			expect(after.valid).toBe(false);
+			expect(after.errors).toContain(EVENTS_ERROR);
+			// The event the load looks for is still the first chain's: a reload stays latched.
+			const server = ui;
+			server.reload();
+			expect((await chainOf(port)).errors).toContain(EVENTS_ERROR);
+			expect(loadState(vault()).summary.chain.valid).toBe(true);
+		},
+	);
+
+	it.skipIf(asRoot)(
+		"a failed read, then an append (a full reload, which moves no verified event), then the log replaced by one holding only that append: latched",
+		async () => {
+			await appendEvents(root, 3, "tx");
+			ui = await createUiServer(root, { port: 0 });
+			const port = ui.port;
+			chmodFor(meta(), 0o000);
+			ui.reload();
+			expect((await chainOf(port)).valid).toBe(false);
+			const appended = nextEvent("tx_appended");
+			appendFileSync(log(), appended.line);
+			const names = await framesDuring(
+				port,
+				check,
+				(n) => n.includes("resync") || n.includes("rows"),
+			);
+			expect(names).toContain("resync");
+			expect(names).not.toContain("rows");
+			// The three events the last successful load verified are gone; only the event appended during the failure is left.
+			const next = join(auditDir(), "next.tmp");
+			writeFileSync(next, appended.line);
+			renameSync(next, log());
+			chmodSync(meta(), 0o600);
+			ui.reload();
+			const after = await chainOf(port);
+			expect(after.valid).toBe(false);
+			expect(after.errors).toContain(EVENTS_ERROR);
+		},
+	);
+
+	it("events appended after a successful full load, then the log truncated back to its first three, are latched", async () => {
+		await appendEvents(root, 3, "tx");
+		const text = readFileSync(log(), "utf-8");
+		const anchor = readFileSync(meta(), "utf-8");
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		await appendEvents(root, 2, "tx_more");
+		const names = await framesDuring(
+			port,
+			check,
+			(n) => n.includes("rows") || n.includes("resync"),
+		);
+		expect(names).toContain("rows");
+		expect(names).not.toContain("resync");
+		expect(await chainOf(port)).toMatchObject({ events: 5, valid: true });
+		// Events 4 and 5 removed, and the anchor put back as it was: on its own, the vault verifies.
+		writeFileSync(log(), text);
+		writeFileSync(meta(), anchor);
+		expect(loadState(vault()).summary.chain.valid).toBe(true);
+		check();
+		const after = await chainWhen(port, isDeletion);
+		expect(after).toMatchObject({ events: 3, valid: false });
+		expect(after.errors).toContain(EVENTS_ERROR);
+	});
+
+	it("red-first (false red): a load that sees a rotation between its two steps (every event twice), then the finished rotation, latches nothing", async () => {
+		await appendEvents(root, 3, "tx");
+		const before = loadState(vault());
+		const text = readFileSync(log(), "utf-8");
+		const next = nextEvent("tx_next").line;
+		// Step one: the log's events copied into a segment. The log still holds them, so a load reads each event twice.
+		writeFileSync(join(auditDir(), "events.0001.jsonl"), text);
+		const between = loadState(vault(), undefined, true, [], before.auditDirId, before.head);
+		expect(between.deletionCauses).toEqual([]);
+		// Step two: the log rewritten with only the next event.
+		writeFileSync(log(), next);
+		const after = loadState(
+			vault(),
+			undefined,
+			true,
+			between.deletionCauses,
+			before.auditDirId,
+			between.head ?? before.head,
+		);
+		expect(after.deletionCauses).toEqual([]);
+		expect(after.summary.chain.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+		expect(after.summary.chain.events).toBe(4);
+	});
+
+	it("red-first (deletion read as valid and empty): a log of malformed lines only, then the log and its anchor removed, is latched", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		writeFileSync(log(), "not an event\n{also not\n");
+		writeFileSync(meta(), JSON.stringify({ lastHash: "0".repeat(64), sequence: 0 }));
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		expect(await chainOf(port)).toMatchObject({ events: 0, valid: false });
+		rmSync(meta());
+		rmSync(log());
+		ui.reload();
+		const after = await chainOf(port);
+		expect(after).toMatchObject({ events: 0, valid: false, empty: false });
+		expect(after.errors).toContain(EVENTS_ERROR);
+	});
+
+	it("guard: the log renamed away and back during one pass's read is not latched: the confirming pass reads it whole", async () => {
+		await appendEvents(root, 3, "tx");
+		const before = loadState(vault());
+		const aside = join(root, "aside.jsonl");
+		const passes: { consistent: boolean; readSucceeded: boolean; contained: boolean }[] = [];
+		loadSeam.afterDescriptor = () => {
+			if (passes.length > 0) return;
+			// The reader checks the log exists and lists the directory; the log is gone when it reads it (ENOENT).
+			io.afterListing = { suffix: "audit", run: () => renameSync(log(), aside) };
+		};
+		loadSeam.afterReaders = () => {
+			// Back, the same file, before the pass's closing stat: the pass reads as one unchanged vault.
+			if (passes.length === 0) renameSync(aside, log());
+		};
+		loadSeam.afterPass = (pass) => passes.push(pass);
+		const state = loadState(vault(), undefined, true, [], before.auditDirId, before.head);
+		expect(passes).toEqual([
+			{ consistent: true, readSucceeded: true, contained: false },
+			{ consistent: true, readSucceeded: true, contained: true },
+		]);
+		expect(state.deletionCauses).toEqual([]);
+		expect(state.summary.chain).toMatchObject({ events: 3, valid: true, errors: [] });
+	});
+
+	it("a same-length rewrite of an earlier event plus an append, inside one check, is extended by the append path and read INVALID at the periodic re-verify", async () => {
+		tailSeam.reverifyMs = 2000;
+		await appendEvents(root, 3, "tx");
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		const first = await summaryOf(port);
+		// Event 1's cost changed in place (same length), and a correctly chained event appended, in one write.
+		const text = readFileSync(log(), "utf-8");
+		const appended = nextEvent("tx_appended");
+		const rewritten = text.replace('"cost":1', '"cost":7');
+		expect(rewritten.length).toBe(text.length);
+		writeFileSync(log(), rewritten + appended.line);
+		const names = await framesDuring(
+			port,
+			check,
+			(n) => n.includes("rows") || n.includes("resync"),
+		);
+		// The append path checks only what was appended: the rewrite is not seen.
+		expect(names).toContain("rows");
+		expect(names).not.toContain("resync");
+		expect((await summaryOf(port)).chain).toMatchObject({ events: 4, valid: true });
+		// The periodic full re-verify reads the whole log: the break at event 1 makes it invalid. The verified event
+		// (the appended one) is still there, so nothing is latched: the outcome is an INVALID chain, not a deletion.
+		const after = await chainWhen(port, (c) => !c.valid, 5000);
+		expect(after.valid).toBe(false);
+		expect(after.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+		expect((await summaryOf(port)).verifiedAt).not.toBe(first.verifiedAt);
+	});
+
+	it.skipIf(asRoot)(
+		"verifiedAt: set by a full load that read the vault, unchanged by an append and by a failed read",
+		async () => {
+			await appendEvents(root, 3, "tx");
+			ui = await createUiServer(root, { port: 0 });
+			const port = ui.port;
+			const first = (await summaryOf(port)).verifiedAt;
+			expect(first).not.toBeNull();
+			expect(Number.isNaN(Date.parse(first as string))).toBe(false);
+			await sleep(20);
+			await appendEvents(root, 1, "tx_more");
+			const names = await framesDuring(port, check, (n) => n.includes("rows"));
+			expect(names).toContain("rows");
+			expect((await summaryOf(port)).verifiedAt).toBe(first);
+			chmodFor(meta(), 0o000);
+			ui.reload();
+			const failed = await summaryOf(port);
+			expect(failed.chain.valid).toBe(false);
+			expect(failed.verifiedAt).toBe(first);
+			chmodSync(meta(), 0o600);
+			await sleep(20);
+			ui.reload();
+			const healed = await summaryOf(port);
+			expect(healed.chain.valid).toBe(true);
+			expect(Date.parse(healed.verifiedAt as string)).toBeGreaterThan(Date.parse(first as string));
+		},
+	);
+
+	it("the periodic re-verify is unref'd, runs the full load, is skipped while a load runs, and is cleared on close()", async () => {
+		const setSpy = vi.spyOn(globalThis, "setInterval");
+		const clearSpy = vi.spyOn(globalThis, "clearInterval");
+		tailSeam.reverifyMs = 3_600_001;
+		await appendEvents(root, 3, "tx");
+		ui = await createUiServer(root, { port: 0 });
+		const at = setSpy.mock.calls.findIndex((c) => c[1] === 3_600_001);
+		expect(at).not.toBe(-1);
+		const reverify = setSpy.mock.calls[at]?.[0] as () => void;
+		const timer = setSpy.mock.results[at]?.value as NodeJS.Timeout;
+		expect(timer.hasRef()).toBe(false);
+		// It runs the full load: one load's passes, and a resync frame.
+		let passes = 0;
+		loadSeam.afterPass = () => {
+			passes += 1;
+		};
+		const names = await framesDuring(port(), reverify, (n) => n.includes("resync"));
+		expect(names).toContain("resync");
+		expect(passes).toBe(1);
+		// Fired while a load runs (from inside it), it is skipped: no second, nested load.
+		passes = 0;
+		loadSeam.afterPass = () => {
+			passes += 1;
+			if (passes === 1) reverify();
+		};
+		(ui as NonNullable<typeof ui>).reload();
+		expect(passes).toBe(1);
+		await (ui as NonNullable<typeof ui>).close();
+		ui = undefined;
+		expect(clearSpy.mock.calls.some((c) => c[0] === timer)).toBe(true);
+
+		function port(): number {
+			return (ui as NonNullable<typeof ui>).port;
+		}
+	});
 });

@@ -10,6 +10,11 @@ export interface TailEvents {
 	onGrow(): void;
 	/** File shrank or was replaced: caller must fully reload + notify clients. */
 	onResync(): void;
+	/**
+	 * The periodic full re-verify (`REVERIFY_MS`): the caller reloads in full, unless a load is already running. Only a
+	 * watcher given it runs the interval.
+	 */
+	onReverify?(): void;
 }
 
 const DEBOUNCE_MS = 250;
@@ -17,18 +22,38 @@ const DEBOUNCE_MS = 250;
 const MISSING_DIR_POLL_MS = 1000;
 /** How often the log is checked in fs.watch mode whether or not an event arrived: the bound on a late or lost event. */
 const BACKSTOP_MS = 1000;
+/**
+ * How often the whole vault is re-verified whatever the checks saw. An append is verified incrementally, and a check
+ * compares sizes, identities and timestamps, so a rewrite in place that none of them sees (a same-length edit of an
+ * earlier event beside an append, inside one check) is only seen by a full read: this bounds how long it can go unseen.
+ */
+const REVERIFY_MS = 5 * 60 * 1000;
+/**
+ * The least time between two full loads asked for by a timestamp change at an unchanged size. ctime moves on a mode
+ * change, an extended-attribute write by a sync or backup agent and a hard link, none of which changes the log, and a
+ * full load of 50 000 events takes about half a second: a churn of such changes must not keep the dashboard reloading.
+ */
+const SAME_SIZE_RELOAD_MS = 30 * 1000;
 
 /**
- * For tests only, never exported from the package: the backstop's interval, the fs.watch function, and the stat its
- * memo key is built from, read once when `watchLedger` starts. Tests shorten the interval, replace the watcher with one
- * that never calls back or that emits `error`, and hand the memo chosen stats. The defaults are the production behaviour.
+ * For tests only, never exported from the package: the backstop's interval, the re-verify interval, the least time
+ * between two same-size reloads, the clock that time is measured on, the fs.watch function, and the stat of the log that
+ * the memo key and every check are built from, read once when `watchLedger` starts. Tests shorten the intervals, replace
+ * the watcher with one that never calls back or that emits `error`, and hand the checks chosen stats. The defaults are
+ * the production behaviour.
  */
 export const __tailTestSeam: {
 	backstopMs: number;
+	reverifyMs: number;
+	sameSizeReloadMs: number;
+	now: () => number;
 	watch: typeof watch;
 	statLog: (path: string) => BigIntStats;
 } = {
 	backstopMs: BACKSTOP_MS,
+	reverifyMs: REVERIFY_MS,
+	sameSizeReloadMs: SAME_SIZE_RELOAD_MS,
+	now: () => performance.now(),
 	watch,
 	statLog: (path) => statSync(path, { bigint: true }),
 };
@@ -36,9 +61,12 @@ export const __tailTestSeam: {
 /**
  * Watches the vault's log and calls back on a change. `sizeOf` is the log size the caller holds; `identityOf` the log's
  * identity its last load recorded (`fileIdentity`); `auditDirIdOf` the audit directory's identity when the caller first
- * saw it; `timesOf` the log's mtime and ctime as its last load or grow saw them. Each check compares the directory's
- * identity (absent where one was seen, or another directory at the path, is a resync), then the log's size, then at the
- * same size its identity, or its timestamps when the identity is unknown.
+ * saw it; `timesOf` the log's mtime and ctime as its last load or grow saw them; `reloadPending` whether the caller's
+ * last full load failed. Each check compares the directory's identity (absent where one was seen, or another directory
+ * at the path, is a resync), then the log's size (a shrink resyncs, a grow is incremental), then at the same size: its
+ * identity (another file resyncs), whether the last full load failed (every check after a failed read reloads, until one
+ * succeeds), and its timestamps (a rewrite in place at the same length; guarded, see `rewrittenAtSameSize`).
+ * With `events.onReverify`, the whole vault is also re-verified every `REVERIFY_MS`, whatever the checks saw.
  */
 export function watchLedger(
 	vaultPath: string,
@@ -47,6 +75,7 @@ export function watchLedger(
 	identityOf?: () => string | undefined,
 	auditDirIdOf?: () => string | undefined,
 	timesOf?: () => LogTimes | undefined,
+	reloadPending?: () => boolean,
 ): () => void {
 	const auditDir = join(vaultPath, "audit");
 	const logPath = join(auditDir, "events.jsonl");
@@ -54,13 +83,21 @@ export function watchLedger(
 	let watcher: FSWatcher | undefined;
 	let poller: NodeJS.Timeout | undefined;
 	let backstop: NodeJS.Timeout | undefined;
-	const { backstopMs, watch: watchDir, statLog } = __tailTestSeam;
+	let reverify: NodeJS.Timeout | undefined;
+	const {
+		backstopMs,
+		reverifyMs,
+		sameSizeReloadMs,
+		now: clock,
+		watch: watchDir,
+		statLog,
+	} = __tailTestSeam;
 
-	const sizeOfLog = (): number => {
+	const statOfLog = (): BigIntStats | undefined => {
 		try {
-			return statSync(logPath).size;
+			return statLog(logPath);
 		} catch {
-			return 0;
+			return undefined;
 		}
 	};
 
@@ -94,12 +131,12 @@ export function watchLedger(
 	};
 
 	/**
-	 * Whether the log's timestamps moved at the same size on the previous check too. A filesystem with no stable inode
-	 * numbers (inode 0) gives no identity, so a same-size replacement is seen by its mtime and ctime instead. Both must
-	 * differ from the recorded ones on TWO consecutive checks: some systems update a write's timestamps before its size,
-	 * and one check can land between the two halves of an append.
+	 * Whether the log's timestamps differed from the recorded ones, at the same size, on the previous check too (and so
+	 * a same-size reload is waiting: for its second check, or for the limit below).
 	 */
 	let timesMoved = false;
+	/** When the last same-size reload was asked for, on a monotonic clock (the seam's `now`); none yet. */
+	let lastSameSizeReload = Number.NEGATIVE_INFINITY;
 
 	const check = (): void => {
 		// The directory first: a vault replaced in one step can hold a log of any size, and a directory deleted while it
@@ -108,46 +145,58 @@ export function watchLedger(
 			events.onResync();
 			return;
 		}
-		const size = sizeOfLog();
+		// Size, identity and timestamps from ONE stat, so a check never pairs one file's size with another's identity.
+		const st = statOfLog();
+		const size = st === undefined ? 0 : Number(st.size);
 		const known = sizeOf();
 		if (size !== known) timesMoved = false;
 		if (size < known) events.onResync();
 		else if (size > known) events.onGrow();
-		else if (identityOf !== undefined) {
-			// A same-size replacement changes no size, so the identity is compared, or the timestamps where it is unknown.
-			const knownId = identityOf();
-			if (knownId !== undefined) {
-				timesMoved = false;
-				if (replacedAtSameSize(knownId)) events.onResync();
-			} else if (rewrittenAtSameSize()) events.onResync();
+		else if (identityOf !== undefined && replacedAtSameSize(st, identityOf())) {
+			timesMoved = false;
+			events.onResync();
 		}
+		// A read that failed is not a verdict: every check after it reloads in full until one succeeds, whatever changed
+		// (a permission restored changes neither the log's size nor its identity).
+		else if (reloadPending?.() === true) events.onResync();
+		else if (identityOf !== undefined && rewrittenAtSameSize(st)) events.onResync();
 	};
 
-	const rewrittenAtSameSize = (): boolean => {
+	/** Another file at the log's path, where the caller recorded an identity. Unknown on either side proves nothing. */
+	const replacedAtSameSize = (st: BigIntStats | undefined, known: string | undefined): boolean => {
+		if (known === undefined || st === undefined) return false;
+		const id = fileIdentity(st);
+		return id !== undefined && id !== known;
+	};
+
+	/**
+	 * A rewrite in place at the same length: the log's mtime or ctime differ from the ones the caller recorded. On a
+	 * file system with no stable inode numbers (inode 0) this is also how a same-size replacement is seen. Two guards,
+	 * both binding. The change must hold on TWO consecutive checks: on Linux a write updates ctime before the size, so
+	 * one check can land inside an append. And at most one such reload runs per `SAME_SIZE_RELOAD_MS`: ctime also moves
+	 * on a mode change, an extended-attribute write or a hard link. A change held back by the limit stays waiting, and
+	 * reloads once the limit allows.
+	 */
+	const rewrittenAtSameSize = (st: BigIntStats | undefined): boolean => {
 		const known = timesOf?.();
-		let moved = false;
-		if (known !== undefined) {
-			try {
-				const st = statSync(logPath, { bigint: true });
-				moved = st.mtimeNs !== known.mtimeNs || st.ctimeNs !== known.ctimeNs;
-			} catch {
-				moved = false;
-			}
-		}
-		const confirmed = moved && timesMoved;
-		// A resync records new timestamps; the next difference starts its own count.
-		timesMoved = moved && !confirmed;
-		return confirmed;
-	};
-
-	const replacedAtSameSize = (known: string | undefined): boolean => {
-		if (known === undefined) return false;
-		try {
-			const now = fileIdentity(statSync(logPath, { bigint: true }));
-			return now !== undefined && now !== known;
-		} catch {
+		const moved =
+			known !== undefined &&
+			st !== undefined &&
+			(st.mtimeNs !== known.mtimeNs || st.ctimeNs !== known.ctimeNs);
+		if (!moved) {
+			timesMoved = false;
 			return false;
 		}
+		if (!timesMoved) {
+			timesMoved = true;
+			return false;
+		}
+		const at = clock();
+		if (at - lastSameSizeReload < sameSizeReloadMs) return false;
+		lastSameSizeReload = at;
+		// A resync records new timestamps; the next difference starts its own count.
+		timesMoved = false;
+		return true;
 	};
 
 	try {
@@ -171,7 +220,8 @@ export function watchLedger(
 		// the events do. It checks the log by PATH, so it also sees a directory replaced under the watcher.
 		// The memo stops a torn last line (a writer that died mid-line) from being re-read in full every tick: check()
 		// runs only when the log's size, timestamps or identity, its stat error, the audit directory's identity (or
-		// absence), or the known size moved since the last call, or while a timestamp change waits for its second check.
+		// absence), or the known size moved since the last call, while a timestamp change waits for its second check or
+		// for the same-size limit, or while the last full load failed.
 		// Every field check() compares is in the key, or a skip could hide it. The log's fields come from ONE BigInt stat:
 		// a JS number cannot hold a 64-bit file id (Windows' exceed 2^53), and two ids that round to one value would let
 		// a skip hide a replacement.
@@ -185,7 +235,7 @@ export function watchLedger(
 				seen = `error:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
 			}
 			seen += `|${auditDirNow()}|${sizeOf()}`;
-			if (seen === memo && !timesMoved) return;
+			if (seen === memo && !timesMoved && reloadPending?.() !== true) return;
 			memo = seen;
 			check();
 		}, backstopMs);
@@ -222,8 +272,16 @@ export function watchLedger(
 		poller.unref();
 	}
 
+	// The periodic full re-verify, in either mode. Like the other intervals it never keeps a process alive on its own.
+	if (events.onReverify !== undefined) {
+		const onReverify = events.onReverify;
+		reverify = setInterval(() => onReverify(), reverifyMs);
+		reverify.unref();
+	}
+
 	return () => {
 		if (timer) clearTimeout(timer);
+		if (reverify) clearInterval(reverify);
 		watcher?.close();
 		if (backstop) clearInterval(backstop);
 		if (poller) clearInterval(poller);

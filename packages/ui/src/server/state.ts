@@ -80,23 +80,30 @@ export interface LedgerState {
 	auditDirId: string | undefined;
 	/**
 	 * Whether this load found a deletion: the audit directory is absent after the process had seen it, or replaced by
-	 * another directory, or the log lost or changed events an earlier load held, or an earlier load's deletion was carried
+	 * another directory, or the vault lost the event the dashboard last verified, or an earlier load's deletion was carried
 	 * in (`loadState`'s `deletionSeen`). The caller latches `deletionCauses` for the life of the process.
 	 */
 	deletionDetected: boolean;
 	/** What this load's `deletionDetected` rests on, the carried-in causes included: one chain error per cause. */
 	deletionCauses: DeletionCause[];
 	/**
-	 * The events this load read: their number and the last one's hash (`LogHead`). Undefined when no pass of the load read
-	 * the vault unchanged throughout, or when its read failed (an audit directory or audit file that could not be read):
-	 * the caller then keeps the head it had, because a read that failed is not evidence of what the vault holds.
+	 * What this load verified (`LogHead`): the hash of the last event it read, and whether the vault held any evidence.
+	 * Undefined when no pass of the load read the vault unchanged throughout, when its read failed (an audit directory or
+	 * audit file that could not be read), or when its own check latched a deletion of events: the caller then keeps the
+	 * head it had, because a read that failed is not evidence of what the vault holds.
 	 */
 	head: LogHead | undefined;
+	/**
+	 * Whether this load read the vault whole: one pass read it unchanged throughout, and its reads succeeded (an absent
+	 * audit directory is a read of nothing). The caller keeps it as the last full load's outcome: while it is false, no
+	 * append is extended onto the state and every check reloads in full, until a load succeeds again.
+	 */
+	loadSucceeded: boolean;
 }
 
 /**
  * Why a deletion was detected: "directory", the audit directory disappeared or was replaced by another one; "events",
- * the log no longer holds events an earlier load or verified append held.
+ * the vault no longer holds the event the dashboard last verified, or holds nothing where it held something (`LogHead`).
  */
 export type DeletionCause = "directory" | "events";
 
@@ -106,10 +113,23 @@ export interface LogTimes {
 	ctimeNs: bigint;
 }
 
-/** The events a load or a verified append left the dashboard holding: how many, and the hash of the last one. */
+/**
+ * What the dashboard last verified of the log, and what every later full load must still hold.
+ *
+ * `verifiedHash` is the hash of the last event a full load read, or of the last event a verified append added while the
+ * last full load had succeeded. Each event's hash commits to every event before it, so an honest later log still holds
+ * an event with that hash, whatever was appended or rotated since; one that does not was truncated, emptied or replaced
+ * by another chain. Undefined when the load read no event with a hash.
+ *
+ * `hadEvidence` is whether the vault held anything: log bytes (malformed lines included), an anchor, or events. A log
+ * of malformed lines only has no event to remember, so its removal is seen by this instead.
+ *
+ * No count and no position: a load that races a rotation written in two steps reads some events twice, and a count
+ * taken there is larger than the finished rotation's; in file order a rotation moves positions.
+ */
 export interface LogHead {
-	count: number;
-	hash: string | undefined;
+	verifiedHash: string | undefined;
+	hadEvidence: boolean;
 }
 
 // Presence of the mirror file is not a verdict — a planted empty/junk file
@@ -245,19 +265,20 @@ const DELETION_ERRORS: Record<DeletionCause, string> = {
  * with a different identity is another directory in its place (removed, and a fresh vault renamed in, between two
  * checks): a deletion, as its absence would be. Unknown on either side (none recorded, inode 0) proves nothing.
  *
- * `head`: the events the dashboard held before this load (`LogHead`). The events read now must include the head's hash
- * and number at least its count; a log that does not was truncated, emptied or replaced by another chain, whatever its
- * own verdict. Membership, not position: in file order (events without `sequence`) `events.jsonl` is read before the
- * rotated segments, so a rotation moves positions. A pass that fails it is read again, and the deletion is latched only
- * when the failure persists on a pass that read the vault unchanged throughout (`consistent`): a read that raced a
- * rotation written in two steps (a segment, then `events.jsonl`) can see events missing that never were. Containment is
- * judged only on a read that SUCCEEDED, as the pass's own reads report it: the audit directory present and listable,
- * the events' reader (`readLedgerEvents`, through `onReadError`) naming no directory, log or segment it could not read,
- * and the pass's read of the `.meta` anchor not failing; an absent file (ENOENT) is a read of nothing. No separate
- * probe of the files decides it, since a permission change between a probe and the read would let a failed read pass.
- * A directory or file that could not be read gives no events, which is not evidence that events are gone. Such a read
- * never latches a deletion and returns no head; its own verdict (unreadable, invalid) stands, and a later read that
- * succeeds is judged against the head the caller kept.
+ * `head`: what the dashboard last verified (`LogHead`). A load fails the check when the head names a verified hash and
+ * no event read now has it, or when the head had evidence and this read found no log bytes, no anchor and no events:
+ * the log was truncated, emptied or replaced by another chain, whatever its own verdict. Membership only, never a count
+ * or a position: a rotation moves positions, and a load that raced a rotation written in two steps (a segment, then
+ * `events.jsonl`) reads events twice. A pass that fails it is read again, and the deletion is latched only when a
+ * second pass that read the vault unchanged throughout (`consistent`) fails it too: a log renamed away and back during
+ * one pass's read gives that pass no events that were ever missing. The check is judged only on a read that SUCCEEDED,
+ * as the pass's own reads report it: the audit directory present and listable, the events' reader (`readLedgerEvents`,
+ * through `onReadError`) naming no directory, log or segment it could not read, and the pass's read of the `.meta`
+ * anchor not failing; an absent file (ENOENT) is a read of nothing. No separate probe of the files decides it, since a
+ * permission change between a probe and the read would let a failed read pass. A directory or file that could not be
+ * read gives no events, which is not evidence that events are gone. Such a read never latches a deletion and returns no
+ * head; its own verdict (unreadable, invalid) stands, and a later read that succeeds is judged against the head the
+ * caller kept.
  */
 export function loadState(
 	vaultPath: string,
@@ -287,7 +308,14 @@ export function loadState(
 		// never read consistently twice latches nothing, and its verdict stands on its own. A consistent first failure on
 		// the last retry still gets its confirming pass.
 		if (retry >= LOAD_RETRIES && !unconfirmed)
-			return { ...pass.state, logId: undefined, logTimes: undefined, head: undefined };
+			return {
+				...pass.state,
+				logId: undefined,
+				logTimes: undefined,
+				head: undefined,
+				loadSucceeded: false,
+				summary: { ...pass.state.summary, verifiedAt: null },
+			};
 		failedBefore ||= !pass.contained;
 		// What a discarded pass OBSERVED about the directory stays observed (a recreated directory must not undo a
 		// deletion it saw); only what it read from the file (events, verdict, offset, identity) is rebuilt.
@@ -330,8 +358,8 @@ function loadPass(
 	// stat or list, a log or segment it could not read), and the anchor's read. ENOENT is absence, which is a read.
 	const unread: string[] = [];
 	const events = readLedgerEvents(vaultPath, { onReadError: (_path, code) => unread.push(code) });
-	const anchorUnread = readAnchor(`${logPath}.meta`);
-	if (anchorUnread !== undefined) unread.push(anchorUnread);
+	const anchor = readAnchor(`${logPath}.meta`);
+	if (anchor.error !== undefined) unread.push(anchor.error);
 	const integrity = deriveChainIntegrity(events);
 	const vault = verifyVault(vaultPath);
 	loadSeam.afterReaders?.();
@@ -352,9 +380,16 @@ function loadPass(
 	// events are gone: its verdict stands on its own (the readability errors fail it), and it is never compared with the
 	// head, nor recorded as one.
 	const readSucceeded = auditDir === "present" && listError === undefined && unread.length === 0;
-	// Containment is evaluated only on a read that succeeded; a failed one holds the head trivially, so it is neither
-	// read again for a confirmation nor latched.
-	const contained = !readSucceeded || holdsHead(events, head);
+	// What the vault held, as this pass read it: log bytes (the descriptor's size; the bracket checked it did not change),
+	// an anchor, or events (a rotated segment).
+	const evidence = {
+		logBytes: (snapshot?.byteOffset ?? 0) > 0,
+		anchor: anchor.present,
+		events: events.length > 0,
+	};
+	// The check is evaluated only on a read that succeeded; a failed one holds the head trivially, so it is neither read
+	// again for a confirmation nor latched.
+	const contained = !readSucceeded || holdsHead(events, evidence, head);
 	let spentUt = 0;
 	for (const e of events) {
 		if (isHeaderSpend(e.kind, e.data.cost)) spentUt += e.data.cost;
@@ -375,9 +410,13 @@ function loadPass(
 	if ((auditDir === "absent" && auditDirSeen) || replaced) causes.add("directory");
 	// Only a CONFIRMING pass that read the vault unchanged throughout latches a containment failure. A directory gone or
 	// replaced lost its events with it, so that deletion is named once, by its directory.
-	if (confirming && consistent && !contained && !causes.has("directory")) causes.add("events");
+	const latchesEvents = confirming && consistent && !contained && !causes.has("directory");
+	if (latchesEvents) causes.add("events");
 	const deletionCauses = (["directory", "events"] as const).filter((c) => causes.has(c));
 	const deletionDetected = deletionCauses.length > 0;
+	// The whole vault was read: one unchanged set of files, every read succeeded, or there was no audit directory to read.
+	const loadSucceeded =
+		consistent && (readSucceeded || (auditDir === "absent" && unread.length === 0));
 	const noAuditDir =
 		events.length === 0 && auditDir === "absent" && !auditDirSeen && !deletionDetected;
 	const readErrors = noAuditDir
@@ -424,6 +463,7 @@ function loadPass(
 			remote: readRemoteSettings(vaultPath),
 			rowCount: rows.length,
 			truncated,
+			verifiedAt: loadSucceeded ? new Date().toISOString() : null,
 		},
 		lastHash: events.at(-1)?.hash ?? GENESIS,
 		byteOffset: snapshot?.byteOffset ?? 0,
@@ -435,7 +475,16 @@ function loadPass(
 		auditDirId: dirId,
 		deletionDetected,
 		deletionCauses,
-		head: readSucceeded ? { count: events.length, hash: headHash(events) } : undefined,
+		// Set only by a pass that read the whole vault and whose own check did not latch. A pass that latched keeps the head
+		// it was judged against: the events it read are not the ones verified.
+		head:
+			loadSucceeded && readSucceeded && !latchesEvents
+				? {
+						verifiedHash: headHash(events),
+						hadEvidence: evidence.logBytes || evidence.anchor || evidence.events,
+					}
+				: undefined,
+		loadSucceeded,
 	};
 	loadSeam.afterPass?.({ consistent, readSucceeded, contained });
 	return { state, consistent, contained };
@@ -448,13 +497,19 @@ function headHash(events: readonly { hash?: unknown }[]): string | undefined {
 }
 
 /**
- * Whether `events` still hold `head`: at least its count, and its hash among them (anywhere: a rotation moves positions
- * in file order). No head, or a head of no events, holds trivially.
+ * Whether a read still holds `head`: an event with its verified hash (anywhere: a rotation moves positions in file
+ * order), and, when the head had evidence, some evidence still (log bytes, an anchor, or an event). No head holds
+ * trivially.
  */
-function holdsHead(events: readonly { hash?: unknown }[], head: LogHead | undefined): boolean {
-	if (head === undefined || head.count === 0) return true;
-	if (events.length < head.count) return false;
-	return head.hash === undefined || events.some((e) => e.hash === head.hash);
+function holdsHead(
+	events: readonly { hash?: unknown }[],
+	evidence: { logBytes: boolean; anchor: boolean; events: boolean },
+	head: LogHead | undefined,
+): boolean {
+	if (head === undefined) return true;
+	if (head.verifiedHash !== undefined && !events.some((e) => e.hash === head.verifiedHash))
+		return false;
+	return !head.hadEvidence || evidence.logBytes || evidence.anchor || evidence.events;
 }
 
 /**
@@ -493,18 +548,19 @@ function segmentsFingerprint(auditPath: string): string {
 }
 
 /**
- * Reads the `.meta` anchor, and returns the error code of that read, or undefined when it read or is absent (ENOENT).
+ * Reads the `.meta` anchor: whether it is there, and the error code of a read that failed (none when it read, or is
+ * absent: ENOENT).
  * `verifyVault` reads the anchor too, but folds a read that failed into "present but corrupt", the same answer as bytes
  * that do not parse, and it is the mirror of the standalone verifier, so it gives no way to see the code. This read is
  * the pass's own read of the anchor's bytes, made beside the events' read: its result is what the pass knows.
  */
-function readAnchor(metaPath: string): string | undefined {
+function readAnchor(metaPath: string): { present: boolean; error?: string } {
 	try {
 		readFileSync(metaPath);
-		return undefined;
+		return { present: true };
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;
-		return code === "ENOENT" ? undefined : (code ?? "unknown");
+		return code === "ENOENT" ? { present: false } : { present: true, error: code ?? "unknown" };
 	}
 }
 

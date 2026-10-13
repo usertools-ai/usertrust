@@ -24,6 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
 import { createUiServer, type UiServer } from "../src/server/server.js";
+import { fileIdentity } from "../src/server/state.js";
 import { __tailTestSeam, watchLedger } from "../src/server/tail.js";
 
 async function readSse(
@@ -1669,6 +1670,158 @@ describe("fs.watch mode's backstop when file-change events arrive late or never"
 			}
 		});
 
+		describe("full loads at an unchanged size, and on a schedule", () => {
+			/** The log's identity and timestamps now, as a load records them. */
+			const recorded = (): {
+				id: string | undefined;
+				times: { mtimeNs: bigint; ctimeNs: bigint };
+			} => {
+				const st = statSync(logPath(), { bigint: true });
+				return {
+					id: fileIdentity(st),
+					times: { mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs },
+				};
+			};
+
+			/**
+			 * The watcher with a known identity, as the server runs it: a resync records the log's new timestamps, as the
+			 * full load it asks for would. `failed` says whether the last full load failed.
+			 */
+			function startLoaded(opts: { failed?: () => boolean; onReverify?: () => void } = {}) {
+				let held = recorded();
+				const delivered: { what: string; at: number }[] = [];
+				const stop = watchLedger(
+					vault,
+					() => 3,
+					{
+						onGrow: () => delivered.push({ what: "grow", at: Date.now() }),
+						onResync: () => {
+							delivered.push({ what: "resync", at: Date.now() });
+							held = recorded();
+						},
+						...(opts.onReverify !== undefined ? { onReverify: opts.onReverify } : {}),
+					},
+					() => held.id,
+					undefined,
+					() => held.times,
+					opts.failed,
+				);
+				return { delivered, stop, what: () => delivered.map((d) => d.what) };
+			}
+
+			beforeEach(() => {
+				__tailTestSeam.now = () => Date.now();
+				writeFileSync(logPath(), "{}\n");
+			});
+
+			it("guard (a reload per ctime change): a mode-change churn at an unchanged size reloads at most once per window", () => {
+				__tailTestSeam.sameSizeReloadMs = 5 * BOUND;
+				const w = startLoaded();
+				try {
+					for (let i = 0; i < 30; i++) {
+						chmodSync(logPath(), i % 2 === 0 ? 0o644 : 0o600);
+						tick();
+					}
+					const resyncs = w.delivered.filter((d) => d.what === "resync");
+					// Positive control: the churn is seen at all.
+					expect(resyncs.length).toBeGreaterThanOrEqual(1);
+					expect(resyncs.length).toBeLessThanOrEqual(6);
+					const ats = resyncs.map((d) => d.at);
+					for (let i = 1; i < ats.length; i++) {
+						expect((ats[i] ?? 0) - (ats[i - 1] ?? 0)).toBeGreaterThanOrEqual(5 * BOUND);
+					}
+					expect(w.what().filter((x) => x !== "resync")).toEqual([]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			it("guard (a reload inside an append): new timestamps at the old size on one check, then the size catching up, is a grow and never a reload", () => {
+				// The seam is read when the watcher starts: the stat it gets moves the times only while `midAppend` is set.
+				const real = __tailTestSeam.statLog;
+				let midAppend = false;
+				__tailTestSeam.statLog = (p) => {
+					const st = real(p);
+					if (!midAppend) return st;
+					return Object.assign(Object.create(Object.getPrototypeOf(st)), st, {
+						mtimeNs: st.mtimeNs + 1_000_000n,
+						ctimeNs: st.ctimeNs + 1_000_000n,
+					});
+				};
+				const w = startLoaded();
+				try {
+					tick(2);
+					expect(w.what()).toEqual([]);
+					// The first half of an append, as Linux can show it: the times moved, the size not yet.
+					midAppend = true;
+					tick();
+					expect(w.what()).toEqual([]);
+					midAppend = false;
+					appendFileSync(logPath(), "{}\n");
+					tick(3);
+					expect(w.what()).toEqual(["grow"]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			it("a same-length rewrite in place (new times at the same size, on two checks) reloads once", () => {
+				const w = startLoaded();
+				try {
+					tick(2);
+					writeFileSync(logPath(), "[]\n");
+					utimesSync(logPath(), new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+					tick();
+					expect(w.what()).toEqual([]);
+					tick();
+					expect(w.what()).toEqual(["resync"]);
+					tick(5);
+					expect(w.what()).toEqual(["resync"]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			it("after a full load that failed, every check reloads, with nothing changed, until a load succeeds", () => {
+				let failed = true;
+				const w = startLoaded({ failed: () => failed });
+				try {
+					tick(3);
+					expect(w.what()).toEqual(["resync", "resync", "resync"]);
+					failed = false;
+					tick(3);
+					expect(w.what()).toEqual(["resync", "resync", "resync"]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			it("the periodic re-verify runs on its interval, and stops with the watcher", () => {
+				__tailTestSeam.reverifyMs = 5 * BOUND;
+				let reverified = 0;
+				const w = startLoaded({
+					onReverify: () => {
+						reverified += 1;
+					},
+				});
+				try {
+					tick(4);
+					expect(reverified).toBe(0);
+					tick(1);
+					expect(reverified).toBe(1);
+					tick(10);
+					expect(reverified).toBe(3);
+					// It is a full load of its own, not a check: nothing is delivered through the check's callbacks.
+					expect(w.what()).toEqual([]);
+				} finally {
+					w.stop();
+				}
+				expect(vi.getTimerCount()).toBe(0);
+				tick(20);
+				expect(reverified).toBe(3);
+			});
+		});
+
 		it("red-first (leak): a stopped watcher checks no more, and reacts to nothing after it is stopped", () => {
 			writeFileSync(logPath(), "{}\n");
 			const w = start(() => 3);
@@ -1683,6 +1836,24 @@ describe("fs.watch mode's backstop when file-change events arrive late or never"
 			expect(w.sizeOfCalls()).toBe(atStop);
 			expect(w.delivered).toEqual([]);
 		});
+	});
+
+	it("the periodic re-verify interval is unref'd", () => {
+		__tailTestSeam.reverifyMs = 3_600_002;
+		const spy = vi.spyOn(globalThis, "setInterval");
+		const stop = watchLedger(vault, () => 0, {
+			onGrow: () => {},
+			onResync: () => {},
+			onReverify: () => {},
+		});
+		try {
+			const call = spy.mock.calls.findIndex((c) => c[1] === 3_600_002);
+			expect(call).not.toBe(-1);
+			const timer = spy.mock.results[call]?.value as NodeJS.Timeout;
+			expect(timer.hasRef()).toBe(false);
+		} finally {
+			stop();
+		}
 	});
 
 	it("red-first (keeps the process alive): the backstop interval is unref'd", () => {
