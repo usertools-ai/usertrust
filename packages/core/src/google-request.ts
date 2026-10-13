@@ -286,7 +286,6 @@ interface Recording {
 interface Wrapped {
 	real: object;
 	rec: Recording;
-	jsonHook?: (key: unknown) => unknown;
 }
 
 const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
@@ -381,6 +380,51 @@ function isBuiltInMethod(fn: unknown, key: string): boolean {
 	}
 }
 
+/** For each well-known symbol, the source text of this realm's built-in methods held under it. */
+const INTRINSIC_SYMBOL_SOURCES: ReadonlyMap<symbol, ReadonlySet<string>> = (() => {
+	const sources = new Map<symbol, Set<string>>();
+	for (const proto of INTRINSIC_PROTOTYPES) {
+		for (const key of Object.getOwnPropertySymbols(proto)) {
+			const d = Object.getOwnPropertyDescriptor(proto, key);
+			if (d === undefined || !("value" in d) || typeof d.value !== "function") continue;
+			let set = sources.get(key);
+			if (set === undefined) {
+				set = new Set();
+				sources.set(key, set);
+			}
+			set.add(Reflect.apply(functionSource, d.value, []) as string);
+		}
+	}
+	return sources;
+})();
+
+/**
+ * Is `fn`, read at the symbol `key`, a built-in method (an array's own `[Symbol.iterator]`, say)?
+ * This realm's by identity; another realm's when its source text is that of this realm's built-in
+ * under the same symbol, which only a built-in prints (V8's `Function.prototype.toString`, as
+ * `isBuiltInMethod`). A built-in iterator over a membrane proxy reads its items through the
+ * membrane; a caller's iterator could hand the SDK raw objects, past the membrane and its stand-ins.
+ */
+function isBuiltInSymbolMethod(fn: unknown, key: symbol): boolean {
+	if (INTRINSIC_METHODS.has(fn)) return true;
+	if (typeof fn !== "function" || utilTypes.isProxy(fn)) return false;
+	try {
+		return INTRINSIC_SYMBOL_SOURCES.get(key)?.has(Reflect.apply(functionSource, fn, [])) === true;
+	} catch {
+		return false;
+	}
+}
+
+/** What a boxed primitive serializes as (`JSON.stringify` unboxes Number, String and Boolean objects). */
+function unboxed(value: object): unknown {
+	if (utilTypes.isNumberObject(value)) return Number.prototype.valueOf.call(value);
+	if (utilTypes.isStringObject(value)) return String.prototype.valueOf.call(value);
+	if (utilTypes.isBooleanObject(value)) return Boolean.prototype.valueOf.call(value);
+	// A BigInt object throws in JSON.stringify, natively and in the capture, before any mirror is built.
+	if (utilTypes.isBigIntObject(value)) throw new CannotTell("a BigInt in the request");
+	return {}; // a Symbol object serializes as an empty object
+}
+
 function childRole(parent: Role, key: string): Role {
 	if (parent === "params" && key === "config") return "config";
 	if (parent === "config" && key === "tools") return "tools";
@@ -397,33 +441,25 @@ interface Membrane {
 	tripped(): string | undefined;
 }
 
-function makeMembrane(): Membrane {
+/**
+ * `absorbing()` answers true once the dry run has made its first request: from then on the SDK's
+ * writes react to the recorder's scripted answers, not to the caller's request, so they are absorbed
+ * (neither written through to the caller's objects nor recorded).
+ */
+function makeMembrane(absorbing: () => boolean = () => false): Membrane {
 	const proxies = new Map<object, Wrapped>(); // proxy -> what it wraps
 	const byReal = new WeakMap<object, object>(); // caller's object -> its proxy
 	const standIns: StandIns = { afcRan: false, count: 0 };
-	/** Set when the SDK called a function of the caller's: its output was not recorded, so the mirror cannot be told. */
-	let tripped: string | undefined;
-	const tripwires = new WeakMap<object, (...args: unknown[]) => unknown>();
-
 	/**
-	 * A caller's function as the SDK gets it: it calls through to the real one (with the caller's
-	 * object, not our proxy, as `this`), so the capture stays native, and marks the request as one
-	 * the mirror cannot reproduce: what the function returned to the SDK is not recorded anywhere.
+	 * Set when the SDK called a function of the caller's. The function never runs: its proxy throws
+	 * instead (what it would have returned is unknown, and could hand the SDK raw caller objects past
+	 * the membrane), and the request is refused even if the SDK swallowed that throw.
 	 */
-	function tripwire(fn: (...args: unknown[]) => unknown): (...args: unknown[]) => unknown {
-		let t = tripwires.get(fn);
-		if (t === undefined) {
-			t = function (this: unknown, ...args: unknown[]): unknown {
-				tripped ??= "the SDK called a function the request holds";
-				const self =
-					this !== null && (typeof this === "object" || typeof this === "function")
-						? (proxies.get(this)?.real ?? this)
-						: this;
-				return Reflect.apply(fn, self, args);
-			};
-			tripwires.set(fn, t);
-		}
-		return t;
+	let tripped: string | undefined;
+
+	function trip(): never {
+		tripped ??= "the SDK called a function the request holds";
+		throw new CannotTell(tripped);
 	}
 
 	/** Replace every membrane proxy inside an SDK-built value with the caller's real object. */
@@ -470,8 +506,9 @@ function makeMembrane(): Membrane {
 	 */
 	function wrap(value: unknown, role: Role, place?: Recording): unknown {
 		if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
-		// A function is data only as a tool entry (a callable implemented as a function object).
-		if (typeof value === "function" && role !== "toolEntry") return value;
+		// A boxed primitive goes as it is: it has no fields the SDK reads, and JSON.stringify unboxes
+		// it (the mirror unboxes it the same way).
+		if (utilTypes.isBoxedPrimitive(value)) return value;
 		if (proxies.has(value)) return value;
 		const known = byReal.get(value);
 		if (known !== undefined) {
@@ -487,12 +524,18 @@ function makeMembrane(): Membrane {
 			place.isFunction === (typeof real === "function")
 				? place
 				: newRecording(real, role);
-		const shadow: object = typeof real === "function" ? () => undefined : isArray ? [] : {};
+		// A function's shadow is constructible, so `new` reaches the construct trap (which trips).
+		const shadow: object = typeof real === "function" ? function shadow() {} : isArray ? [] : {};
 		if (isArray) (shadow as unknown[]).length = (real as unknown[]).length;
 		const self: Wrapped = { real, rec };
 		const proxy = new Proxy(shadow, {
 			get(_t, key) {
-				if (typeof key === "symbol") return Reflect.get(real, key, real);
+				if (typeof key === "symbol") {
+					const sv = Reflect.get(real, key, real);
+					if (typeof sv === "function")
+						return isBuiltInSymbolMethod(sv, key) ? sv : wrap(sv, undefined);
+					return sv !== null && typeof sv === "object" ? wrap(sv, undefined) : sv;
+				}
 				rec.touched = true;
 				// PASS-THROUGH: every access reads the caller's object, with it as the receiver.
 				const v = Reflect.get(real, key, real);
@@ -516,25 +559,27 @@ function makeMembrane(): Membrane {
 				}
 				if (key === "toJSON") {
 					if (typeof v !== "function") return v;
-					// JSON.stringify calls the hook with its key: the real hook runs on the real object,
-					// each time, as natively; its FIRST result is what this place serialized to.
-					self.jsonHook ??= (k: unknown) => {
-						const out = wrap(Reflect.apply(v as (k: unknown) => unknown, real, [k]), undefined);
+					// JSON.stringify calls the hook with its key: the hook read NOW runs on the real object,
+					// each time, as natively (a getter may answer a different hook on each read); the FIRST
+					// result is what this place serialized to, and the self-check sees any later difference.
+					const hook = v as (k: unknown) => unknown;
+					return (k: unknown) => {
+						const out = wrap(Reflect.apply(hook, real, [k]), undefined);
 						rec.jsonOut ??= { value: out };
 						return out;
 					};
-					return self.jsonHook;
 				}
 				rec.readByName = true;
-				// A function the SDK may call: a built-in method goes as it is; any other (an own or a
-				// user-prototype method) is the caller's code, handed out behind a tripwire.
-				if (
-					typeof v === "function" &&
-					childRole(rec.role, key) !== "toolEntry" &&
-					!isBuiltInMethod(v, key)
-				) {
-					return tripwire(v as (...args: unknown[]) => unknown);
-				}
+				// An array's `constructor` is read by the SDK's own array methods (`map`, `filter`) to make
+				// their result (ArraySpeciesCreate). Natively another realm's Array is replaced by this
+				// realm's there; a caller's Array subclass would be constructed, running its code. Both
+				// answer this realm's Array: the result is a plain array, which serializes the same.
+				if (key === "constructor" && isArray && typeof v === "function" && v !== Array)
+					return Array;
+				// A built-in method goes to the SDK as it is. Any other function (an own or a
+				// user-prototype method, a function-valued field) is the caller's: it is data to the
+				// membrane (its fields and its toJSON read through, recorded), and calling it trips.
+				if (typeof v === "function" && isBuiltInMethod(v, key)) return v;
 				const prior = rec.reads.get(key);
 				const priorRec =
 					prior !== null && typeof prior === "object" ? proxies.get(prior)?.rec : undefined;
@@ -575,12 +620,15 @@ function makeMembrane(): Membrane {
 			// WRITE-THROUGH: the SDK's writes land on the caller's object, as natively, with no
 			// membrane proxy stored in it. They are not recorded: the SDK writes them again over the
 			// mirror, which keeps the state the SDK first read.
+			// After the dry run's first request, writes are absorbed (see makeMembrane).
 			set(_t, key, v) {
+				if (absorbing()) return true;
 				rec.touched = true;
 				if (typeof key === "string" && !rec.reads.has(key)) rec.sdkWrote.add(key);
 				return Reflect.set(real, key, unwrapDeep(v), real);
 			},
 			deleteProperty(_t, key) {
+				if (absorbing()) return true;
 				rec.touched = true;
 				return Reflect.deleteProperty(real, key);
 			},
@@ -590,8 +638,11 @@ function makeMembrane(): Membrane {
 				if (!("proto" in rec)) rec.proto = proto;
 				return proto;
 			},
-			apply(_t, thisArg, args) {
-				return Reflect.apply(real as (...a: unknown[]) => unknown, thisArg, args);
+			apply() {
+				return trip();
+			},
+			construct() {
+				return trip();
 			},
 			defineProperty() {
 				throw new CannotTell("the SDK defined a property on the request");
@@ -641,6 +692,7 @@ function makeMembrane(): Membrane {
 		toolSlot: boolean,
 	): unknown {
 		if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
+		if (utilTypes.isBoxedPrimitive(value)) return unboxed(value);
 		const w = proxies.get(value);
 		if (w === undefined) return value; // not one of ours: a value the SDK built
 		const rec = w.rec;
@@ -665,15 +717,18 @@ function makeMembrane(): Membrane {
 			}
 			return materializeNode(rec.jsonOut.value, build, stack, false);
 		}
+		// A function of the caller's (never called: calling it trips) is a fresh inert function holding
+		// what the SDK read of it: JSON.stringify omits a function, as natively.
+		const shell = (): object => (rec.isFunction ? () => undefined : {});
 		// Never read: a transport value (an AbortSignal) goes as it is; anything else sends nothing of
-		// itself, so it is an empty object, never the caller's.
-		if (!rec.touched) return rec.transport === true ? w.real : rec.isArray ? [] : {};
+		// itself, so it is an empty object (or an inert function), never the caller's.
+		if (!rec.touched) return rec.transport === true ? w.real : rec.isArray ? [] : shell();
 		if (stack.has(rec)) throw new CannotTell("a cycle in the request");
 		stack.add(rec);
 		try {
 			return rec.isArray
 				? materializeArray(rec, build, stack)
-				: materializeObject(rec, build, stack, {});
+				: materializeObject(rec, build, stack, shell());
 		} finally {
 			stack.delete(rec);
 		}
@@ -711,13 +766,16 @@ function makeMembrane(): Membrane {
 	): object {
 		const readKeys = [...rec.reads.keys()];
 		const own = rec.keysSeen?.filter((k): k is string => typeof k === "string") ?? [];
+		// Membership by Set (the arrays keep the order): a large object is materialized in linear time.
+		const ownSet = new Set(own);
+		const skipSet = new Set(skip);
 		const order = [
 			...own.filter((k) => rec.reads.has(k) || rec.present.has(k)),
-			...readKeys.filter((k) => !own.includes(k)),
-			...[...rec.present].filter((k) => !own.includes(k) && !rec.reads.has(k)),
+			...readKeys.filter((k) => !ownSet.has(k)),
+			...[...rec.present].filter((k) => !ownSet.has(k) && !rec.reads.has(k)),
 		];
 		for (const key of order) {
-			if (skip.includes(key)) continue;
+			if (skipSet.has(key)) continue;
 			const value = rec.reads.has(key)
 				? materializeNode(rec.reads.get(key), build, stack, false)
 				: undefined;
@@ -847,12 +905,15 @@ export async function snapshotGoogleRequest(
 	method: GoogleMethod,
 	params: unknown,
 ): Promise<GoogleSnapshot> {
-	const membrane = makeMembrane();
 	const captured: RecordedRequest[] = [];
+	const membrane = makeMembrane(() => captured.length > 0);
 	const root = membrane.wrap(params, "params");
 	try {
 		await runPipeline(pipeline, method, root, captured, membrane.markTransport);
 	} catch (error) {
+		// A caller function the SDK called was never run: whatever the SDK made of that, can't tell.
+		const why = membrane.tripped();
+		if (why !== undefined) return { kind: "refuse", reason: why };
 		if (error instanceof CannotTell) return { kind: "refuse", reason: error.reason };
 		// Before any request, the error is the SDK's own local rejection of the caller's request.
 		// After one, it answers the recorder's scripted reply, not anything the caller sent: natively

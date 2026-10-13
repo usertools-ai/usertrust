@@ -123,7 +123,13 @@ own:
   that is not a string, a function of yours in the request that the SDK calls (a
   built-in method such as an array's `map` is fine), and a callable tool the
   request also holds outside `config.tools`. The copy cannot reproduce what the
-  transport or that code would make of them.
+  transport or that code would make of them. A function of yours that the SDK
+  calls is never run: the call is refused instead. Your own iterator on
+  `config.tools` counts as one.
+- **An `Array` subclass is mapped as a plain array.** When the SDK's own array
+  methods (`map`, `filter`) build their result from an array of yours, they build
+  a plain array rather than constructing your subclass, so your subclass's
+  constructor does not run. The result serializes the same.
 - **A callable tool reaches the SDK as a wrapper.** Its `tool()` runs inside the
   first governed round, and `callTool()` is passed through; nothing else of the
   tool object is reachable from the request. A call the SDK sends without its own

@@ -41,6 +41,7 @@ import {
 } from "./audit/chain.js";
 import {
 	appendDenialEvent,
+	attachDenialAudit,
 	classifyPolicyDenial,
 	type DenialRecord,
 	isGovernanceDenial,
@@ -5415,7 +5416,11 @@ async function googleRequestGate(
 	return { runAfcLoop: snap.afcRan };
 }
 
-/** A local SDK rejection: audited as a refusal carrying the SDK's message, then the SDK's own error. */
+/**
+ * A local SDK rejection: audited as a refusal carrying the SDK's message, then the SDK's own error,
+ * which carries the denial's correlation handle (`auditEventHash` / `auditDegraded`), attached to
+ * that same error object as on every other denial.
+ */
 async function refuseWithSdkError(
 	refuse: MethodBoundary["refuse"],
 	path: string,
@@ -5427,7 +5432,18 @@ async function refuseWithSdkError(
 	} catch (err) {
 		if (err !== gate.denial) throw err; // destroyed, or a pre-degraded audit: that error wins
 	}
-	throw gate.sdkError;
+	const sdkError = gate.sdkError;
+	if (sdkError !== null && (typeof sdkError === "object" || typeof sdkError === "function")) {
+		try {
+			attachDenialAudit(sdkError, {
+				auditEventHash: gate.denial.auditEventHash,
+				auditDegraded: gate.denial.auditDegraded,
+			});
+		} catch {
+			// a frozen error cannot carry it; the SDK's error is still what the call throws
+		}
+	}
+	throw sdkError;
 }
 
 /**

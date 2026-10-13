@@ -6,7 +6,11 @@ import { types as utilTypes } from "node:util";
 import { GoogleGenAI } from "@google/genai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
-import { type GoogleModelsCtor, snapshotGoogleRequest } from "../../src/google-request.js";
+import {
+	type GoogleModelsCtor,
+	resolveGooglePipeline,
+	snapshotGoogleRequest,
+} from "../../src/google-request.js";
 import { trust } from "../../src/govern.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
@@ -1122,7 +1126,7 @@ describe("caller code reached from the request cannot change what is sent after 
 				});
 			});
 
-			it(`${on}: an own map method on contents' parts, which the SDK calls, is refused (its output is not recorded); it ran as often as natively`, async () => {
+			it(`${on}: an own map method on contents' parts, which the SDK calls, is refused without ever running (its output could hand the SDK anything)`, async () => {
 				const runs = { native: 0, governed: 0 };
 				const make = (side: "native" | "governed") => () => {
 					const parts: unknown[] = [{ text: "safe" }];
@@ -1142,7 +1146,7 @@ describe("caller code reached from the request cannot change what is sent after 
 				);
 				expect(r.rawResult).toBe("ok");
 				expect(runs.native).toBeGreaterThan(0);
-				expect(runs.governed).toBe(runs.native);
+				expect(runs.governed).toBe(0);
 				expect(r.govResult).toContain("could not be checked for automatic function calling");
 				expect(r.gov.requests).toHaveLength(0);
 			});
@@ -1317,4 +1321,172 @@ describe('pii "redact" with a clean prompt: a hidden config field and the same f
 			}
 		}
 	}
+});
+
+describe("the dry run never hands the SDK a caller's object past the membrane, nor writes its own answers into the request", () => {
+	for (const method of METHODS) {
+		it(`${method}: config.tools with its own Symbol.iterator yielding the raw callable is refused, and neither tool() nor callTool() runs`, async () => {
+			const nat = callable();
+			const gov = callable();
+			const make = (c: ReturnType<typeof callable>) => () => {
+				const tools: unknown[] = [c.tool];
+				Object.defineProperty(tools, Symbol.iterator, {
+					value: function* () {
+						yield c.tool;
+					},
+					enumerable: false,
+				});
+				return request({ tools });
+			};
+			const r = await nativeThenGoverned(
+				method,
+				{ native: make(nat), governed: make(gov) },
+				{ rounds: LOOP },
+			);
+			expect(nat.calls.tool).toBeGreaterThan(0); // natively the SDK runs it
+			expect(r.govResult).toContain("could not be checked for automatic function calling");
+			expect(r.auditKinds).toEqual(["policy_denied"]);
+			expect(r.gov.requests).toHaveLength(0);
+			expect(gov.calls).toEqual({ tool: 0, callTool: 0 });
+		});
+	}
+
+	it("generateContentStream with AFC on: refused, and the caller's contents are left exactly as they were (the dry run's scripted turns are never written into them)", async () => {
+		const c = callable();
+		const contents = [{ role: "user", parts: [{ text: "go" }] }];
+		const before = JSON.stringify(contents);
+		const params = request({ tools: [c.tool] }, contents);
+		const r = await nativeThenGoverned(
+			"generateContentStream",
+			{ native: () => request({ tools: [callable().tool] }), governed: () => params },
+			{ rounds: LOOP },
+		);
+		expect(r.govResult).toContain("with automatic function calling is not governed yet");
+		expect(params.contents).toBe(contents);
+		expect(JSON.stringify(params.contents)).toBe(before);
+		expect(JSON.stringify(params)).not.toContain(PROBE);
+	});
+});
+
+describe("a local SDK rejection carries the denial's audit handle", () => {
+	const incompatible = () =>
+		request({ tools: [callable().tool, { functionDeclarations: [{ name: "other" }] }] });
+
+	for (const method of METHODS) {
+		it(`${method}: the SDK's own error carries auditEventHash, the hash of its policy_denied event`, async () => {
+			const r = await nativeThenGoverned(method, same(incompatible));
+			expectSdkError(r);
+			const err = r.govError as { auditEventHash?: string; auditDegraded?: boolean };
+			expect(err.auditEventHash).toBe("1".padStart(64, "0"));
+			expect(err.auditDegraded).toBeUndefined();
+			expect(Object.getOwnPropertyDescriptor(err, "auditEventHash")?.enumerable).toBe(true);
+		});
+
+		it(`${method}: with the audit append failing, the SDK's own error carries auditDegraded`, async () => {
+			const audit = recordingAudit();
+			audit.appendEvent = async () => {
+				throw new Error("audit disk full");
+			};
+			vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+			const governed = await trust(sdkClient(false), {
+				dryRun: true,
+				budget: 500_000,
+				vaultBase: vault,
+				_audit: audit,
+			});
+			const { error } = await runOn(governed.models, method, incompatible());
+			await governed.destroy();
+			vi.restoreAllMocks();
+			expect((error as Error).message).toContain("Incompatible tools");
+			expect((error as { auditDegraded?: boolean }).auditDegraded).toBe(true);
+		});
+	}
+});
+
+describe("values inside a function response serialize as natively", () => {
+	/** A conversation ending in a function response carrying `response`. */
+	const withResponse = (response: unknown) =>
+		request({}, [
+			{ role: "user", parts: [{ text: "go" }] },
+			{ role: "model", parts: [{ functionCall: { name: "lookup", args: {} } }] },
+			{ role: "user", parts: [{ functionResponse: { name: "lookup", response } }] },
+		]);
+
+	for (const method of METHODS) {
+		for (const [backend, vertex] of BACKENDS) {
+			const on = `${method} on ${backend}`;
+
+			it(`${on}: boxed primitives (new Boolean(false), new String("hello"), new Number(3)) are sent unboxed, as natively`, async () => {
+				const make = () =>
+					withResponse({ b: new Boolean(false), s: new String("hello"), n: new Number(3) });
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expectSameSend(r);
+				expect(JSON.stringify(r.raw.requests[0]?.body)).toContain('"b":false,"s":"hello","n":3');
+			});
+
+			it(`${on}: a function-valued field with its own toJSON is sent as its hook's output, as natively`, async () => {
+				const make = () => {
+					const ready = Object.assign(() => "never sent", { toJSON: () => ({ status: "ready" }) });
+					return withResponse({ state: ready });
+				};
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expectSameSend(r);
+				expect(JSON.stringify(r.raw.requests[0]?.body)).toContain('"state":{"status":"ready"}');
+			});
+
+			it(`${on}: a shared object whose toJSON getter answers a different hook on each read: governed == native, or refused, never an altered request`, async () => {
+				const make = () => {
+					let reads = 0;
+					const shared = {};
+					Object.defineProperty(shared, "toJSON", {
+						get: () => {
+							reads++;
+							const n = reads;
+							return () => n;
+						},
+					});
+					return withResponse({ a: shared, b: shared });
+				};
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expect(JSON.stringify(r.raw.requests[0]?.body)).toContain('"a":1,"b":2');
+				if (r.govResult === "ok") {
+					expectSameSend(r);
+				} else {
+					expect(r.govResult).toContain("could not be checked for automatic function calling");
+					expect(r.gov.requests).toHaveLength(0);
+				}
+			});
+		}
+	}
+});
+
+describe("a large function response is snapshot in linear time", () => {
+	it("a 30,000-key response takes about 4 times a 7,500-key one, not 16 (the ratio, so the machine's speed cancels)", async () => {
+		const pipeline = await resolveGooglePipeline(sdkClient(false), false);
+		if (pipeline === undefined) throw new Error("the installed SDK's pipeline did not resolve");
+		const make = (n: number) => {
+			const response: Record<string, string> = {};
+			for (let i = 0; i < n; i++) response[`key_${i}`] = `value ${i}`;
+			return request({}, [
+				{ role: "user", parts: [{ text: "go" }] },
+				{ role: "model", parts: [{ functionCall: { name: "lookup", args: {} } }] },
+				{ role: "user", parts: [{ functionResponse: { name: "lookup", response } }] },
+			]);
+		};
+		const median = async (n: number) => {
+			const times: number[] = [];
+			for (let i = 0; i < 5; i++) {
+				const params = make(n);
+				const start = performance.now();
+				expect((await snapshotGoogleRequest(pipeline, "generateContent", params)).kind).toBe("ok");
+				times.push(performance.now() - start);
+			}
+			return times.sort((x, y) => x - y)[2] as number;
+		};
+		await median(2_000); // warm-up
+		const small = await median(7_500);
+		const large = await median(30_000);
+		// linear: about 4 (measured 4.2 to 4.7); quadratic membership checks: about 13 to 16
+		expect(large / small).toBeLessThan(8);
+	});
 });
