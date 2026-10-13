@@ -43,7 +43,6 @@ import {
 	buildMerkleTree,
 	generateInclusionProof,
 	readAnchor,
-	verifyChain,
 	verifyInclusionProof,
 } from "./verify.js";
 
@@ -804,6 +803,65 @@ export function normalizeEvent(raw: unknown): TransactionEvent {
 }
 
 /**
+ * The audit files by verifyVault's rule, with the file each `sequence` was read from. An unreadable file
+ * THROWS, as an unreadable `events.jsonl` always did here: "not found" would be a verdict on unread records.
+ */
+function auditSegments(auditDir: string): {
+	count: number;
+	empty: boolean;
+	seqFile: Map<number, string>;
+} {
+	let names: string[] = [];
+	try {
+		names = readdirSync(auditDir).filter((n) => n.endsWith(".jsonl") && n !== "events.jsonl");
+	} catch {
+		// Not enumerable: with events.jsonl also absent, "Audit log not found" returns before the vault reading.
+	}
+	if (existsSync(join(auditDir, "events.jsonl"))) names.unshift("events.jsonl");
+	let empty = true;
+	const seqFile = new Map<number, string>();
+	for (const name of names) {
+		const text = readFileSync(join(auditDir, name), "utf-8").trim();
+		empty &&= text === "";
+		for (const l of text.split("\n")) {
+			try {
+				const seq = JSON.parse(l)?.sequence;
+				if (Number.isSafeInteger(seq) && !seqFile.has(seq)) seqFile.set(seq, name);
+			} catch {}
+		}
+	}
+	return { count: names.length, empty, seqFile };
+}
+
+/**
+ * Each `Sequence gap: event X follows Y` the vault reading reported, NAMED: the absent range Y+1..X-1 and the files
+ * holding Y and X. The names come from the verdict's own sequences, not from each file's first and last lines, so an
+ * out-of-order segment cannot misname a gap; if either sequence is not in the (second) read of the files, the file
+ * names are omitted rather than guessed.
+ */
+function nameGaps(errors: readonly string[], seqFile: ReadonlyMap<number, string>): string[] {
+	const out: string[] = [];
+	for (const e of errors) {
+		const m = /^Sequence gap: event (\d+) follows (\d+)/.exec(e);
+		if (m === null) continue;
+		const [x, y] = [Number(m[1]), Number(m[2])];
+		// A duplicated sequence reads "event 1 follows 1": no event is absent, so it keeps only the verdict's own error.
+		if (!(x > y + 1)) continue;
+		const [fileY, fileX] = [seqFile.get(y), seqFile.get(x)];
+		const range = x - y === 2 ? `event ${y + 1} is` : `events ${y + 1}..${x - 1} are`;
+		if (fileY === undefined || fileX === undefined)
+			out.push(`audit events missing: ${range} absent`);
+		else if (fileY === fileX)
+			out.push(`audit events missing: ${range} absent inside ${fileY} (between ${y} and ${x})`);
+		else
+			out.push(
+				`audit segment missing: ${range} absent between ${fileY} (ends at ${y}) and ${fileX} (starts at ${x})`,
+			);
+	}
+	return out;
+}
+
+/**
  * Verify a single transaction and return a formatted receipt.
  *
  * Finds the event matching `txId` (by `data.transferId`) and verifies the
@@ -818,38 +876,12 @@ export function verifyTransaction(
 	txId: string,
 	anchorParams?: AnchorVerifyParams,
 ): TransactionVerificationResult {
-	const auditDir = join(vaultPath, "audit");
-	const mainLog = join(auditDir, "events.jsonl");
-
-	if (!existsSync(mainLog)) {
-		return {
-			found: false,
-			valid: false,
-			receipt: renderNotFound(txId),
-			errors: [`Audit log not found: ${mainLog}`],
-		};
-	}
-
-	const content = readFileSync(mainLog, "utf-8").trim();
-	if (!content) {
-		return {
-			found: false,
-			valid: false,
-			receipt: renderNotFound(txId),
-			errors: ["Audit log is empty"],
-		};
-	}
-
-	const lines = content.split("\n").filter((l) => l.trim());
-	const events: TransactionEvent[] = [];
-	const parseErrors: string[] = [];
-
-	for (let i = 0; i < lines.length; i++) {
-		try {
-			events.push(normalizeEvent(JSON.parse(lines[i] as string)));
-		} catch {
-			parseErrors.push(`Event ${i + 1}: malformed JSON`);
-		}
+	const mainLog = join(vaultPath, "audit", "events.jsonl");
+	// EVERY segment: a rotated transfer straddles files, and the live file alone lacks its history.
+	const segments = auditSegments(join(vaultPath, "audit"));
+	if (segments.count === 0 || segments.empty) {
+		const error = segments.count === 0 ? `Audit log not found: ${mainLog}` : "Audit log is empty";
+		return { found: false, valid: false, receipt: renderNotFound(txId), errors: [error] };
 	}
 
 	// Find the target event.
@@ -891,6 +923,9 @@ export function verifyTransaction(
 		};
 	}
 
+	// The events AND the verdict come from one vault reading, in the chain verifier's order.
+	const reading = verifyVaultReading(vaultPath);
+	const events = reading.events.map(normalizeEvent);
 	// No per-use shape guard needed: `normalizeEvent` already guarantees `kind`
 	// is a string, `data` is an object, and `transferId` is a string.
 	// `settlement_unrecoverable` stores only the SHA-256 of its transferId, so that kind matches on the
@@ -900,25 +935,24 @@ export function verifyTransaction(
 	const firstTerminal = firstTerminalOf(matching);
 	const targetEvent = selectTransferEvent(matching);
 
+	// SCRUBBED: segment names and event ids are vault text, and these errors reach a terminal. A gap
+	// is named even when the target is absent: its records may be what the missing segment held.
+	const vaultErrors = [
+		...reading.result.errors,
+		...nameGaps(reading.result.errors, segments.seqFile),
+	];
 	if (targetEvent === undefined) {
-		return {
-			found: false,
-			valid: false,
-			receipt: renderNotFound(txId),
-			errors: [],
-		};
+		const errors = vaultErrors.map(scrubForError);
+		return { found: false, valid: false, receipt: renderNotFound(txId), errors };
 	}
 
-	// Verify the full chain
-	const chainResult = verifyChain(mainLog);
-	const chainVerified = chainResult.valid;
+	const chainVerified = reading.result.valid;
 
 	// Merkle root over the stored hashes — informational display only. The
 	// self-referential inclusion check (F1: proof AND root computed from the
 	// same allHashes) is retired; inclusion is only ever claimed against a
 	// verified EXTERNAL anchor root below (AC-5.2).
-	const allHashes = events.map((e) => e.hash);
-	const tree = buildMerkleTree(allHashes);
+	const tree = buildMerkleTree([...reading.orderedHashes]);
 	let merkleRoot = tree.root ?? "";
 	const leafIndex = events.indexOf(targetEvent);
 
@@ -961,7 +995,11 @@ export function verifyTransaction(
 			} else if (
 				anchorParams.trust !== undefined &&
 				pos >= 1 &&
-				covering.treeSize <= orderedHashes.length
+				covering.treeSize <= orderedHashes.length &&
+				// The proof must be for THIS event. `pos` is the event's stored `sequence`, but the leaf at that
+				// position is whatever the ordered chain holds there: a sequence-less or duplicated-sequence record
+				// can put ANOTHER event's leaf at `pos`, and a proof for that leaf would label this one VERIFIED.
+				orderedHashes[pos - 1] === targetEvent.hash
 			) {
 				const proof = generateInclusionProof(
 					pos - 1,
@@ -1041,7 +1079,7 @@ export function verifyTransaction(
 	const receiptData: ReceiptData = {
 		event: targetEvent,
 		...(detectionReason !== undefined ? { detectionReason } : {}),
-		chainLength: events.length,
+		chainLength: reading.result.chainLength,
 		merkleRoot,
 		merkleVerified,
 		chainVerified,
@@ -1050,7 +1088,7 @@ export function verifyTransaction(
 		merkleLabel,
 	};
 
-	const allErrors = [...parseErrors, ...chainResult.errors, ...anchorErrors];
+	const allErrors = [...vaultErrors, ...anchorErrors].map(scrubForError);
 
 	return {
 		found: true,

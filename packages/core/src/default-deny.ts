@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * Default-deny for Anthropic and OpenAI clients.
+ * Default-deny for Anthropic, OpenAI and Google clients.
  *
  * `trust()` governs a handful of methods on each client (see detect.ts's boundary block). Every
  * OTHER method reached off the governed client, at any depth, is refused: the call rejects with a
@@ -22,18 +22,26 @@
  *   2. its value is a function (strings, numbers, booleans and plain config pass);
  *   3. its name is not one `Object.prototype` carries (`constructor`, `toString`, `valueOf`,
  *      `hasOwnProperty`, …) and is not `toJSON`, so inspection and serialization keep working.
- * A value that is an SDK resource (an object carrying the SDK's `_client`) is wrapped the same
- * way, recursively, so `client.beta.threads.runs.create` is refused. Return values of calls (a
- * Page, a Batch) are never wrapped. `then` is never defined by the SDK, so it stays `undefined`
- * and neither the client nor a resource becomes thenable.
+ * A value that is an SDK resource (an object carrying the SDK's `_client`; on Google, see
+ * `isResource`) is wrapped the same way, recursively, so `client.beta.threads.runs.create` is
+ * refused. A method keeps its identity across reads. Return values of calls (a Page, a Batch, a
+ * Pager) are never wrapped. `then` is never defined by the SDK, so it stays `undefined` and
+ * neither the client nor a resource becomes thenable.
+ *
+ * ON GOOGLE, members are read with the RAW target as receiver, so the client's `interactions` /
+ * `webhooks` getters run on the raw client (they call `this.getNextGenClient()` and cache on
+ * `this`). The transport members are stand-ins by name (`GOOGLE_RAW_MEMBERS`,
+ * `GOOGLE_TRANSPORT_OBJECTS`), and a method is decided by its PATH: the SDK's raw `Models` reached
+ * as `chats.modelsModule` is guarded there, where `generateContent` is not governed.
  *
  * WHY FREE METHODS RUN ON THE RAW RESOURCE. An SDK method reaches the network through
  * `this._client`, and some read `#private` members off `this` (OpenAI's webhooks). Through the
  * boundary `this._client` is a refusing stand-in, so a free method bound to the proxy would be
  * refused by its own transport.
  *
- * ESCAPE HATCHES, closed by name: a resource's `_client` is the SDK's raw client, so reading it
- * returns a stand-in on which every call is refused; the client's raw HTTP members (`post`,
+ * ESCAPE HATCHES, closed by name: a resource's `_client` (on Google also `apiClient`,
+ * `_nextGenClient` and the Live transports) is the SDK's raw client, so reading it returns a
+ * stand-in on which every call is refused; the client's raw HTTP members (`post`,
  * `get`, `request`, …) are refused and cannot be listed in `allowUngoverned`; and `withOptions`
  * returns a governed client (govern.ts builds it with the same governor). WRITES through the
  * governed client (assignment, `defineProperty`, `delete`) throw a TypeError, and the client's
@@ -45,7 +53,7 @@
 
 import { PolicyDeniedError } from "./shared/errors.js";
 
-export type DefaultDenyProvider = "anthropic" | "openai";
+export type DefaultDenyProvider = "anthropic" | "openai" | "google";
 
 /** The event kind an `allowUngoverned` call appends. Carries no usage and no cost. */
 export const UNGOVERNED_CALL_KIND = "ungoverned_call" as const;
@@ -56,6 +64,12 @@ export const UNGOVERNED_CALL_KIND = "ungoverned_call" as const;
  * which owns the audit writer; the proxies only know the method's path.
  */
 export type RefuseFn = (path: string, args: unknown[], error?: PolicyDeniedError) => Promise<never>;
+
+/** A cached method wrapper, with the raw function it was built for. */
+export interface MethodWrapper {
+	readonly fn: unknown;
+	readonly wrapper: (...args: unknown[]) => unknown;
+}
 
 /** Everything the boundary needs from the governor that built it. One per `trust()` call. */
 export interface MethodBoundary {
@@ -80,6 +94,13 @@ export interface MethodBoundary {
 	readonly resources: Map<string, WeakMap<object, object>>;
 	/** Stand-in path → (raw object → its stand-in). Stable identity keeps JSON's cycle check working. */
 	readonly standIns: Map<string, WeakMap<object, object>>;
+	/**
+	 * Method wrappers, so `client.models.list === client.models.list`: resource path → raw target →
+	 * member name → the wrapper (and the raw function it was built for). Keyed by target, not by the
+	 * raw function: a prototype method is shared by every instance, and each wrapper closes over its
+	 * own target. A member the SDK later replaces gets a new wrapper.
+	 */
+	readonly methods: Map<string, WeakMap<object, Map<string, MethodWrapper>>>;
 	/** Raw transport object → its read-only view (`TRANSPORT_OBJECTS`). */
 	readonly readOnly: WeakMap<object, object>;
 }
@@ -90,10 +111,15 @@ export interface MethodBoundary {
  * An older SDK exposes method names the classification never saw. `default-deny.test.ts` fails
  * when a floor and this constant disagree, so neither moves without re-running the classification.
  */
-export const CLASSIFIED_SDK_VERSIONS = { openai: "7.4.0", anthropic: "0.116.0" } as const;
+export const CLASSIFIED_SDK_VERSIONS = {
+	openai: "7.4.0",
+	anthropic: "0.116.0",
+	google: "1.52.0",
+} as const;
 
 // ── The free list ──
-// Every method on the resource trees of @anthropic-ai/sdk 0.116.0 and openai 7.4.0 was enumerated
+// Every method on the resource trees of @anthropic-ai/sdk 0.116.0 and openai 7.4.0 (and, further
+// below, @google/genai 1.52.0) was enumerated
 // and classified by the HTTP verb its source sends (`this._client.get/post/delete/…`, following
 // calls to sibling methods). The rule:
 //   - a method whose requests are all GET or DELETE is free: a read cannot start billable work,
@@ -401,10 +427,59 @@ const OPENAI_FREE_METHODS: ReadonlySet<string> = new Set([
 	"webhooks.verifySignature", // resources/webhooks/webhooks.js:32 local: verifies a signature, sends nothing
 ]);
 
+// @google/genai 1.52.0, by the same rule. Each entry cites the method's definition in
+// `dist/node/index.mjs` (the ESM build the runtime loads), with the request it sends. Gemini and
+// Vertex send the same verb unless noted. Not free, by the rule: every `*Internal` method (GET
+// twins included), the private helpers that send nothing but have no caller need
+// (`models.processParamsMaybeAddMcpUsage`, `batches.getGcsUri`, ...), `getNextGenClient`, and
+// the four webhook configuration POSTs (`webhooks.create` / `update` / `ping` /
+// `rotateSigningSecret`), which stay refused until a reason is named. `files.upload` is refused:
+// it sends the file's bytes with no PII scan, whatever Google charges for storage.
+const GOOGLE_FREE_METHODS: ReadonlySet<string> = new Set([
+	// GET and DELETE: the rule.
+	"batches.delete", // dist/node/index.mjs:5728 DELETE batches/{name} (Vertex: batchPredictionJobs/{name})
+	"batches.get", // dist/node/index.mjs:5551 GET batches/{name} (Vertex: batchPredictionJobs/{name})
+	"batches.list", // dist/node/index.mjs:5313 GET batches (Vertex: batchPredictionJobs)
+	"caches.delete", // dist/node/index.mjs:6808 DELETE {name}
+	"caches.get", // dist/node/index.mjs:6747 GET {name}
+	"caches.list", // dist/node/index.mjs:6656 GET cachedContents
+	"fileSearchStores.delete", // dist/node/index.mjs:17381 DELETE {name}
+	"fileSearchStores.documents.delete", // dist/node/index.mjs:17133 DELETE {name}
+	"fileSearchStores.documents.get", // dist/node/index.mjs:17097 GET {name}
+	"fileSearchStores.documents.list", // dist/node/index.mjs:17087 GET {parent}/documents
+	"fileSearchStores.downloadMedia", // dist/node/index.mjs:17270 GET .../media/...
+	"fileSearchStores.get", // dist/node/index.mjs:17345 GET {name}
+	"fileSearchStores.list", // dist/node/index.mjs:17216 GET fileSearchStores
+	"files.delete", // dist/node/index.mjs:7788 DELETE files/{file}
+	"files.download", // dist/node/index.mjs:7642 GET files/{name}:download
+	"files.get", // dist/node/index.mjs:7744 GET files/{file}
+	"files.list", // dist/node/index.mjs:7569 GET files
+	"interactions.delete", // dist/node/index.mjs:18134 DELETE /{v}/interactions/{id}
+	"interactions.get", // dist/node/index.mjs:18153 GET /{v}/interactions/{id}; with stream it resumes an existing interaction, as responses.retrieve does
+	"models.delete", // dist/node/index.mjs:15787 DELETE {name}
+	"models.get", // dist/node/index.mjs:15587 GET {name}
+	"models.list", // dist/node/index.mjs:14763 GET {models_url}
+	"tunings.get", // dist/node/index.mjs:20491 GET {name}
+	"tunings.list", // dist/node/index.mjs:20479 GET tuningJobs
+	"webhooks.delete", // dist/node/index.mjs:18193 DELETE /{v}/webhooks/{id}
+	"webhooks.get", // dist/node/index.mjs:18200 GET /{v}/webhooks/{id}
+	"webhooks.list", // dist/node/index.mjs:18186 GET /{v}/webhooks
+	// POST (or PATCH), each free for the reason given.
+	"batches.cancel", // dist/node/index.mjs:5614 POST batches/{name}:cancel: cancel: stops work
+	"interactions.cancel", // dist/node/index.mjs:18149 POST /{v}/interactions/{id}/cancel: cancel: stops work
+	"models.computeTokens", // dist/node/index.mjs:15957 POST {model}:computeTokens: tokenization; runs no generation
+	"models.countTokens", // dist/node/index.mjs:15871 POST {model}:countTokens: counts tokens; runs no generation
+	"models.update", // dist/node/index.mjs:15724 PATCH {model}: metadata only (displayName, description, defaultCheckpointId)
+	"operations.get", // dist/node/index.mjs:16113 GET {operationName} (Vertex: POST {resourceName}:fetchPredictOperation): polls an existing operation
+	"operations.getVideosOperation", // dist/node/index.mjs:16074 GET {operationName} (Vertex: POST {resourceName}:fetchPredictOperation): polls an existing operation
+	"tunings.cancel", // dist/node/index.mjs:20657 POST {name}:cancel: cancel: stops work
+]);
+
 /** The free list, by provider. Exported for the test that pins its rule. */
 export const FREE_METHODS: Readonly<Record<DefaultDenyProvider, ReadonlySet<string>>> = {
 	anthropic: ANTHROPIC_FREE_METHODS,
 	openai: OPENAI_FREE_METHODS,
+	google: GOOGLE_FREE_METHODS,
 };
 
 /**
@@ -432,6 +507,7 @@ const RAW_TRANSPORT_METHODS: ReadonlySet<string> = new Set([
 const PROVIDER_NAME: Record<DefaultDenyProvider, string> = {
 	anthropic: "an Anthropic",
 	openai: "an OpenAI",
+	google: "a Google",
 };
 
 /**
@@ -450,6 +526,7 @@ export const GOVERNED_PATHS: Readonly<Record<DefaultDenyProvider, ReadonlySet<st
 		"beta.messages.parse",
 	]),
 	openai: new Set(["chat.completions.create", "responses.create"]),
+	google: new Set(["models.generateContent", "models.generateContentStream"]),
 };
 
 /** "a, b and c" over a provider's governed paths, for the refusal hint. */
@@ -520,6 +597,8 @@ const GOVERNED_WITH_OPTIONS_KEYS: Record<DefaultDenyProvider, ReadonlySet<string
 		"project",
 		"webhookSecret",
 	]),
+	// @google/genai has no withOptions; the entry exists so the record covers every provider.
+	google: new Set(),
 };
 
 /** The `withOptions()` keys that can change where or how calls are sent, in the order given. */
@@ -543,16 +622,22 @@ export function transportChangedError(
 /**
  * Validate `trust({ allowUngoverned })` at creation: an array of non-empty method paths. Refused
  * here, by name, rather than silently ignored at call time:
- *   - a path through a raw client (`_client`, or a client-level HTTP member);
- *   - on an Anthropic or OpenAI client (`provider`), a method on the FREE list or a GOVERNED one:
- *     the free branch or the governed trap runs first, so the entry would never be audited as
- *     `ungoverned_call`, which is what listing it promises.
- * `provider` is the detected client kind; on a Google client (or undefined) only the shape and
- * raw-client checks apply. Returns the set the boundary reads.
+ *   - a path through a raw client (`_client`, or a client-level HTTP member; on a Google client
+ *     also `apiClient`, `_nextGenClient`, `getNextGenClient`, `_interactions`, `_webhooks` and
+ *     the Live transports `auth` / `webSocketFactory`);
+ *   - on a Google client, `chats.create`, `live.connect`, `live.music.connect` and
+ *     `processAfcStream`, whose one call hands out or drives
+ *     further billable calls (`handsOutUnauditedCalls`), and a governed method's name at any other
+ *     path (`chats.modelsModule.generateContent`: `isAliasOfGovernedGoogleMethod`);
+ *   - a method on the FREE list or a GOVERNED one: the free branch or the governed trap runs
+ *     first, so the entry would never be audited as `ungoverned_call`, which is what listing it
+ *     promises.
+ * `provider` is the detected client kind; when it is undefined only the shape and `_client`
+ * checks apply. Returns the set the boundary reads.
  */
 export function validateAllowUngoverned(
 	value: unknown,
-	provider?: DefaultDenyProvider | "google",
+	provider?: DefaultDenyProvider,
 ): ReadonlySet<string> {
 	if (value === undefined) return new Set();
 	if (!Array.isArray(value)) {
@@ -576,7 +661,17 @@ export function validateAllowUngoverned(
 				`usertrust: allowUngoverned cannot list "${entry}": it reaches the SDK's raw client, which is always refused.`,
 			);
 		}
-		if (provider === "anthropic" || provider === "openai") {
+		if (provider === "google" && reachesGoogleRawClient(segments)) {
+			throw new TypeError(
+				`usertrust: allowUngoverned cannot list "${entry}": it reaches the SDK's raw client, which is always refused.`,
+			);
+		}
+		if (provider === "google" && handsOutUnauditedCalls(segments)) {
+			throw new TypeError(
+				`usertrust: allowUngoverned cannot list "${entry}": it hands out or drives further billable calls that its one ungoverned_call record would not cover.`,
+			);
+		}
+		if (provider !== undefined) {
 			if (FREE_METHODS[provider].has(entry)) {
 				throw new TypeError(
 					`usertrust: allowUngoverned cannot list "${entry}": it is free on ${PROVIDER_NAME[provider]} client and already runs without governance.`,
@@ -588,9 +683,113 @@ export function validateAllowUngoverned(
 				);
 			}
 		}
+		if (provider === "google" && isAliasOfGovernedGoogleMethod(segments)) {
+			throw new TypeError(
+				`usertrust: allowUngoverned cannot list "${entry}": it is an alias of a governed method: call it on models.`,
+			);
+		}
 		paths.add(entry);
 	}
 	return paths;
+}
+
+/**
+ * The members of a Google client that hold, or hand out, a raw transport. Each is read as a
+ * refusing stand-in, and a path through one cannot be listed in `allowUngoverned`:
+ *   - `apiClient` (on the client and every namespace): the SDK's `ApiClient`, whose `request` /
+ *     `requestStream` send any verb to any path with the client's credentials;
+ *   - `_nextGenClient`: the raw next-gen client the first `getNextGenClient()` caches;
+ *   - `auth` and `webSocketFactory` on `live` and `live.music` (`GOOGLE_TRANSPORT_OBJECTS`): the
+ *     credential writer and the socket factory a Live session is built from, without `connect`.
+ * `_interactions` / `_webhooks` (the raw next-gen resources the `interactions` / `webhooks`
+ * getters cache) are guarded at their own paths, where nothing is free; only the public
+ * `interactions.*` / `webhooks.*` paths can be listed. `getNextGenClient` returns the raw
+ * next-gen client and is never listable.
+ */
+const GOOGLE_RAW_MEMBERS: ReadonlySet<string> = new Set(["apiClient", "_nextGenClient"]);
+const GOOGLE_TRANSPORT_OBJECTS: ReadonlySet<string> = new Set(["auth", "webSocketFactory"]);
+const GOOGLE_UNLISTABLE_SEGMENTS: ReadonlySet<string> = new Set([
+	"_interactions",
+	"_webhooks",
+	"getNextGenClient",
+]);
+
+/** `live.auth`, `live.webSocketFactory` and the same two on `live.music` (and deeper under `live`). */
+function isGoogleTransportObject(path: string, prop: string): boolean {
+	return GOOGLE_TRANSPORT_OBJECTS.has(prop) && (path === "live" || path.startsWith("live."));
+}
+
+function reachesGoogleRawClient(segments: readonly string[]): boolean {
+	return segments.some(
+		(seg, i) =>
+			GOOGLE_RAW_MEMBERS.has(seg) ||
+			GOOGLE_UNLISTABLE_SEGMENTS.has(seg) ||
+			(GOOGLE_TRANSPORT_OBJECTS.has(seg) && segments[0] === "live" && i > 0),
+	);
+}
+
+/** The last segments of the governed Google paths: `generateContent`, `generateContentStream`. */
+const GOOGLE_GOVERNED_METHOD_NAMES: ReadonlySet<string> = new Set(
+	[...GOVERNED_PATHS.google].map((path) => path.slice(path.lastIndexOf(".") + 1)),
+);
+
+/**
+ * A governed Google method's NAME (`generateContent`, `generateContentStream`) reached at any path
+ * other than its governed `models.*` one, such as `chats.modelsModule.generateContent` (the SDK's
+ * raw `Models`). Listed, it would run the SDK's own method raw: with a callable tool, its own
+ * automatic-function-calling loop, up to `maximumRemoteCalls` generations on one record (the
+ * stream through `processAfcStream`). The `*Internal` methods each send one request and stay
+ * listable.
+ */
+function isAliasOfGovernedGoogleMethod(segments: readonly string[]): boolean {
+	const last = segments[segments.length - 1] ?? "";
+	return GOOGLE_GOVERNED_METHOD_NAMES.has(last) && !GOVERNED_PATHS.google.has(segments.join("."));
+}
+
+/**
+ * Google methods whose ONE listed call would hand out, or drive, billable calls that the single
+ * `ungoverned_call` record does not cover, so they cannot be listed in `allowUngoverned`:
+ *   - `chats.create` (at any path ending so): it sends nothing, but the `Chat` it returns is built
+ *     on the SDK's raw `Models`, so every later `sendMessage` / `sendMessageStream` is an
+ *     unaudited generation;
+ *   - `live.connect` and `live.music.connect` (at any path ending so): the `Session` /
+ *     `LiveMusicSession` they return sends billable frames over the open socket
+ *     (`sendClientContent`, `sendRealtimeInput`, `sendToolResponse`; `setWeightedPrompts`, `play`
+ *     and the other music controls);
+ *   - `processAfcStream` (on any namespace, `chats.modelsModule` included): one call drives a
+ *     repeated `streamGenerateContent` loop.
+ * `authTokens.create` stays listable: a minted key used outside governance is out of scope, as
+ * reading `apiKey` is.
+ */
+function handsOutUnauditedCalls(segments: readonly string[]): boolean {
+	const last = segments[segments.length - 1];
+	const parent = segments[segments.length - 2];
+	return (
+		last === "processAfcStream" ||
+		(last === "create" && parent === "chats") ||
+		(last === "connect" && (parent === "live" || parent === "music"))
+	);
+}
+
+/**
+ * Whether a non-array object has a function member: an own property, or one inherited from a
+ * prototype below `Object.prototype` (a class's methods, its `constructor` included), that holds a
+ * function or is an accessor (a getter may return one). Read through property descriptors, so no
+ * getter runs.
+ */
+function hasFunctionMember(value: object): boolean {
+	for (
+		let o: object | null = value;
+		o !== null && o !== Object.prototype;
+		o = Object.getPrototypeOf(o) as object | null
+	) {
+		for (const name of Object.getOwnPropertyNames(o)) {
+			const d = Object.getOwnPropertyDescriptor(o, name);
+			if (d === undefined) continue;
+			if (!("value" in d) || typeof d.value === "function") return true;
+		}
+	}
+	return false;
 }
 
 /** Names that pass whatever they hold: Object.prototype's members, and JSON's `toJSON` hook. */
@@ -664,9 +863,19 @@ function readOnlyView(raw: object, path: string, boundary: MethodBoundary): obje
 	return proxy;
 }
 
-/** An SDK resource: every APIResource stores the client it was built from as `_client`. */
-function isResource(value: unknown): value is object {
-	return value !== null && typeof value === "object" && "_client" in value;
+/**
+ * An SDK resource. Anthropic and OpenAI: an object carrying `_client` (every APIResource stores
+ * the client it was built from there). Google, by SHAPE: an object carrying `apiClient` (every
+ * `BaseModule` namespace) or `_client` (the next-gen `interactions` / `webhooks`), or any other
+ * non-array object with a function member, so a namespace of a duck-typed client, or an object
+ * the classification never saw, is guarded too: each of its functions is free, listed or refused
+ * by its path. Plain data (`httpOptions`) has no function member and is returned as it is.
+ */
+function isResource(value: unknown, provider: DefaultDenyProvider): value is object {
+	if (value === null || typeof value !== "object") return false;
+	if ("_client" in value) return true;
+	if (provider !== "google") return false;
+	return "apiClient" in value || (!Array.isArray(value) && hasFunctionMember(value));
 }
 
 /**
@@ -681,32 +890,69 @@ export function guardedGet(
 	path: string,
 	boundary: MethodBoundary,
 ): unknown {
-	const value: unknown = Reflect.get(target, prop, receiver);
+	const google = boundary.provider === "google";
+	// On Google the getters run on the RAW target: `interactions` / `webhooks` call
+	// `this.getNextGenClient()` and cache on `this`, which through the proxy would be refused.
+	const value: unknown = Reflect.get(target, prop, google ? target : receiver);
 	if (typeof prop === "symbol" || isInertName(prop)) return value;
 	const at = path === "" ? prop : `${path}.${prop}`;
-	if (prop === "_client" && value !== null && typeof value === "object") {
+	// The raw transports, by name, before the shape test: they have function members too.
+	if (
+		(prop === "_client" ||
+			(google && (GOOGLE_RAW_MEMBERS.has(prop) || isGoogleTransportObject(path, prop)))) &&
+		value !== null &&
+		typeof value === "object"
+	) {
 		return rawClientStandIn(value, at, boundary, () => rawClientError(boundary.provider, at));
 	}
 	if (typeof value === "function") {
-		const fn = value as (...args: unknown[]) => unknown;
-		if (path === "" && RAW_TRANSPORT_METHODS.has(prop)) {
-			return (...args: unknown[]) =>
-				boundary.refuse(at, args, rawClientError(boundary.provider, at));
-		}
-		// Free and listed methods run on the RAW resource: see the module comment.
-		if (FREE_METHODS[boundary.provider].has(at)) {
-			return (...args: unknown[]) => fn.apply(target, args);
-		}
-		if (boundary.allowUngoverned.has(at)) {
-			return (...args: unknown[]) => boundary.callUngoverned(at, fn, target, args);
-		}
-		return (...args: unknown[]) => boundary.refuse(at, args);
+		return methodWrapper(target, prop, value as (...args: unknown[]) => unknown, path, boundary);
 	}
-	if (isResource(value)) return guardResource(value, at, boundary);
+	if (isResource(value, boundary.provider)) return guardResource(value, at, boundary);
 	if (path === "" && TRANSPORT_OBJECTS.has(prop) && value !== null && typeof value === "object") {
 		return readOnlyView(value, at, boundary);
 	}
 	return value;
+}
+
+/**
+ * The function a governed read of method `prop` on `target` (reached at `path`) returns: free and
+ * listed methods run on the RAW resource (see the module comment), everything else is refused.
+ * Cached per (path, raw target, name), so a method keeps its identity across reads; the decision
+ * is fixed per path, and a refused wrapper builds a fresh error per call.
+ */
+function methodWrapper(
+	target: object,
+	prop: string,
+	fn: (...args: unknown[]) => unknown,
+	path: string,
+	boundary: MethodBoundary,
+): (...args: unknown[]) => unknown {
+	let byTarget = boundary.methods.get(path);
+	if (byTarget === undefined) {
+		byTarget = new WeakMap();
+		boundary.methods.set(path, byTarget);
+	}
+	let byName = byTarget.get(target);
+	if (byName === undefined) {
+		byName = new Map();
+		byTarget.set(target, byName);
+	}
+	const cached = byName.get(prop);
+	if (cached !== undefined && cached.fn === fn) return cached.wrapper;
+	const at = path === "" ? prop : `${path}.${prop}`;
+	let wrapper: (...args: unknown[]) => unknown;
+	if (path === "" && RAW_TRANSPORT_METHODS.has(prop)) {
+		wrapper = (...args) => boundary.refuse(at, args, rawClientError(boundary.provider, at));
+	} else if (FREE_METHODS[boundary.provider].has(at)) {
+		wrapper = (...args) => fn.apply(target, args);
+	} else if (boundary.allowUngoverned.has(at)) {
+		wrapper = (...args) => boundary.callUngoverned(at, fn, target, args);
+	} else {
+		wrapper = (...args) => boundary.refuse(at, args);
+	}
+	byName.set(prop, { fn, wrapper });
+	return wrapper;
 }
 
 /**

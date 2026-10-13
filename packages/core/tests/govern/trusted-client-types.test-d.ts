@@ -25,6 +25,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import type { Message, RawMessageStreamEvent } from "@anthropic-ai/sdk/resources/messages/messages";
 import type { Stream } from "@anthropic-ai/sdk/streaming";
+import type { EmbedContentResponse, GoogleGenAI } from "@google/genai";
 import type OpenAI from "openai";
 import type { Stream as OpenAIStream } from "openai/core/streaming";
 import type {
@@ -604,52 +605,54 @@ export type _GoogleGenerateContentStreamParams = Assert<
 export type _GoogleCountTokensRaw = Assert<
 	IsExact<ReturnType<GovGoogle["models"]["countTokens"]>, Promise<{ totalTokens: number }>>
 >;
-// The refused generation methods keep their parameters and resolve to nothing: the
-// runtime stand-in records a `policy_denied` event, then REJECTS with a PolicyDeniedError
-// naming the method; the SDK is never reached. Async because the audit append is.
-export type _GoogleEmbedContentRefused = Assert<
-	IsExact<
-		GovGoogle["models"]["embedContent"],
-		(params: { model: string; contents: string }) => Promise<never>
-	>
+// A method the runtime refuses keeps its SDK signature, as on Anthropic and OpenAI: listed in
+// `allowUngoverned` it runs on the raw SDK and returns the SDK's own result, so the type must
+// let that result be read. (Unlisted, the call rejects with a PolicyDeniedError at runtime.)
+export type _GoogleEmbedContentKeepsSignature = Assert<
+	IsExact<GovGoogle["models"]["embedContent"], FakeGoogleModels["embedContent"]>
 >;
-export type _GoogleGenerateImagesRefused = Assert<
-	IsExact<ReturnType<GovGoogle["models"]["generateImages"]>, Promise<never>>
+export type _GoogleGenerateImagesKeepsSignature = Assert<
+	IsExact<ReturnType<GovGoogle["models"]["generateImages"]>, Promise<{ images: string[] }>>
 >;
-// `chats.create` is refused (its Chat would drive the SDK's raw `models`). Synchronous in
-// the SDK, it too returns the rejected promise: there is no Chat to hand back.
-export type _GoogleChatsCreateRefused = Assert<
-	IsExact<GovGoogle["chats"]["create"], (params: { model: string }) => Promise<never>>
+// A listed `models.embedContent`'s result reads without a cast.
+declare const govGoogle: GovGoogle;
+const listedEmbedding = govGoogle.models.embedContent({ model: "m", contents: "hi" });
+export type _GoogleListedEmbedContentReads = Assert<
+	IsExact<Awaited<typeof listedEmbedding>["embeddings"], number[]>
 >;
-export type _GoogleLiveConnectRefused = Assert<
-	IsExact<ReturnType<GovGoogle["live"]["connect"]>, Promise<never>>
+// `chats.create` keeps its signature too (at runtime it is refused, and cannot be listed).
+export type _GoogleChatsCreateKeepsSignature = Assert<
+	IsExact<GovGoogle["chats"]["create"], FakeGoogle["chats"]["create"]>
 >;
-export type _GoogleLiveMusicConnectRefused = Assert<
-	IsExact<ReturnType<GovGoogle["live"]["music"]["connect"]>, Promise<never>>
+export type _GoogleLiveConnectKeepsSignature = Assert<
+	IsExact<ReturnType<GovGoogle["live"]["connect"]>, Promise<{ close(): void }>>
+>;
+export type _GoogleLiveMusicConnectKeepsSignature = Assert<
+	IsExact<ReturnType<GovGoogle["live"]["music"]["connect"]>, Promise<{ close(): void }>>
 >;
 export type _GoogleLiveRestRaw = Assert<
 	IsExact<[GovGoogle["live"]["label"], GovGoogle["live"]["music"]["label"]], [string, string]>
 >;
-export type _GoogleBatchesCreateRefused = Assert<
+export type _GoogleBatchesCreateKeepsSignature = Assert<
 	IsExact<
 		[
 			ReturnType<GovGoogle["batches"]["create"]>,
 			ReturnType<GovGoogle["batches"]["createEmbeddings"]>,
 		],
-		[Promise<never>, Promise<never>]
+		[Promise<{ name: string }>, Promise<{ name: string }>]
 	>
 >;
 export type _GoogleBatchesListRaw = Assert<
 	IsExact<GovGoogle["batches"]["list"], FakeGoogle["batches"]["list"]>
 >;
-export type _GoogleInteractionsCreateRefused = Assert<
-	IsExact<ReturnType<GovGoogle["interactions"]["create"]>, Promise<never>>
+export type _GoogleInteractionsCreateKeepsSignature = Assert<
+	IsExact<ReturnType<GovGoogle["interactions"]["create"]>, Promise<{ id: string }>>
 >;
 export type _GoogleInteractionsGetRaw = Assert<
 	IsExact<GovGoogle["interactions"]["get"], FakeGoogle["interactions"]["get"]>
 >;
-// The billable non-generation calls are refused too; their reads stay raw.
-export type _GoogleBillableNonGenerationRefused = Assert<
+// The billable non-generation calls keep their signatures too; so do their reads.
+export type _GoogleBillableNonGenerationKeepsSignature = Assert<
 	IsExact<
 		[
 			ReturnType<GovGoogle["tunings"]["tune"]>,
@@ -658,8 +661,30 @@ export type _GoogleBillableNonGenerationRefused = Assert<
 			ReturnType<GovGoogle["fileSearchStores"]["uploadToFileSearchStore"]>,
 			ReturnType<GovGoogle["fileSearchStores"]["importFile"]>,
 		],
-		[Promise<never>, Promise<never>, Promise<never>, Promise<never>, Promise<never>]
+		[
+			Promise<{ name: string }>,
+			Promise<{ name: string }>,
+			Promise<{ name: string }>,
+			Promise<{ name: string }>,
+			Promise<{ name: string }>,
+		]
 	>
+>;
+// The real @google/genai: a listed `models.embedContent` resolves to the SDK's
+// EmbedContentResponse, and `.embeddings` reads without a cast.
+declare const govRealGoogle: TrustedClient<GoogleGenAI>;
+const realListedEmbedding = govRealGoogle.models.embedContent({
+	model: "gemini-embedding-001",
+	contents: "hi",
+});
+export type _RealGoogleListedEmbedContent = Assert<
+	IsExact<Awaited<typeof realListedEmbedding>, EmbedContentResponse>
+>;
+export type _RealGoogleListedEmbeddingsRead = Assert<
+	IsExact<Awaited<typeof realListedEmbedding>["embeddings"], EmbedContentResponse["embeddings"]>
+>;
+export type _RealGoogleChatsCreateKeepsSignature = Assert<
+	IsExact<TrustedClient<GoogleGenAI>["chats"]["create"], GoogleGenAI["chats"]["create"]>
 >;
 export type _GoogleBillableNamespacesReadsRaw = Assert<
 	IsExact<
