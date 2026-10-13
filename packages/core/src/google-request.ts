@@ -426,18 +426,39 @@ function hasDefaultSpecies(ctor: unknown): boolean {
 }
 
 /**
- * Does any prototype of `array`, from its own up to (not including) this realm's `Array.prototype`,
- * hold a `toJSON` of its own? The SDK's own `map` natively builds an instance of the array's class,
- * which serializes through that hook; the plain array answered for it would not. Descriptors only,
- * no getter run; a Proxy on the way, or a chain past 64, cannot be told and counts as holding one.
+ * Is `o` an intrinsic `Array.prototype`: this realm's by identity, another realm's by its own
+ * `constructor`, a data property holding a function whose native source text is `Array`'s (as
+ * `isBuiltInMethod`)? Descriptors only.
  */
-function classHoldsToJSON(array: object): boolean {
-	if (utilTypes.isProxy(array)) return true;
-	let o: unknown = Object.getPrototypeOf(array);
+function isIntrinsicArrayPrototype(o: object): boolean {
+	if (o === Array.prototype) return true;
+	const ctor = Reflect.getOwnPropertyDescriptor(o, "constructor");
+	if (ctor === undefined || !("value" in ctor) || typeof ctor.value !== "function") return false;
+	if (utilTypes.isProxy(ctor.value)) return false;
+	try {
+		return Reflect.apply(functionSource, ctor.value, []) === "function Array() { [native code] }";
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Does the class `ctor` of an array (one with the default species) hold a `toJSON`: any object from
+ * `ctor.prototype` up to (not including) the intrinsic `Array.prototype` with an own `toJSON`, data
+ * or accessor? The SDK's own `map` natively builds an instance of that class, which serializes
+ * through the hook; the plain array answered for it would not. Descriptors only, the hook never
+ * read or run; a Proxy on the way, a `prototype` that is not plain data, or a chain past 64 cannot
+ * be told and counts as holding one.
+ */
+function classHoldsToJSON(ctor: object): boolean {
+	const proto = Reflect.getOwnPropertyDescriptor(ctor, "prototype");
+	if (proto === undefined || !("value" in proto)) return true;
+	let o: unknown = proto.value;
 	for (let depth = 0; depth < 64; depth++) {
-		if (o === null || o === Array.prototype) return false;
-		if (typeof o !== "object" && typeof o !== "function") return false;
+		if (o === null) return false;
+		if (typeof o !== "object" && typeof o !== "function") return true;
 		if (utilTypes.isProxy(o)) return true;
+		if (isIntrinsicArrayPrototype(o)) return false;
 		if (Reflect.getOwnPropertyDescriptor(o, "toJSON") !== undefined) return true;
 		o = Object.getPrototypeOf(o);
 	}
@@ -772,7 +793,7 @@ function makeMembrane(
 					if (!hasDefaultSpecies(v))
 						throw new CannotTell("an array whose class names its own Symbol.species");
 					// So would a toJSON its class holds, which then rewrites what is sent: can't tell.
-					if (classHoldsToJSON(real)) throw new CannotTell("an array whose class holds a toJSON");
+					if (classHoldsToJSON(v)) throw new CannotTell("an array whose class holds a toJSON");
 					return Array;
 				}
 				// A built-in method goes to the SDK as it is. Any other function (an own or a

@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { types as utilTypes } from "node:util";
+import { runInNewContext } from "node:vm";
 import { GoogleGenAI } from "@google/genai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
@@ -1425,6 +1426,8 @@ describe("caller code reached from the request cannot change what is sent after 
 				["prototype", 1],
 				["prototype two levels up", 2],
 			] as const) {
+				// Deliberate, fail closed: the base sent the hook's rewrite (exact parity would run caller code
+				// on an array the SDK built).
 				it(`${on}: parts in an Array subclass whose ${shape} holds a toJSON are refused (natively the SDK's map builds that class, and its hook rewrites what is sent), the hook never run`, async () => {
 					const c = counts();
 					const make = (side: "native" | "governed") => () => {
@@ -1444,7 +1447,31 @@ describe("caller code reached from the request cannot change what is sent after 
 				});
 			}
 
-			it(`${on}: functionDeclarations in an Array subclass whose prototype holds a toJSON are refused, the hook never run`, async () => {
+			it(`${on}: parts in an Array subclass whose prototype holds toJSON as an accessor are refused, the accessor never read`, async () => {
+				const reads = { native: 0, governed: 0 };
+				const make = (side: "native" | "governed") => () => {
+					class Parts extends Array<unknown> {}
+					Object.defineProperty(Parts.prototype, "toJSON", {
+						get() {
+							reads[side]++;
+							return () => [{ text: "[redacted]" }];
+						},
+					});
+					return request({}, [{ role: "user", parts: Parts.from([{ text: EMAIL }]) }]);
+				};
+				const r = await nativeThenGoverned(
+					method,
+					{ native: make("native"), governed: make("governed") },
+					{ vertex },
+				);
+				expect(r.rawResult).toBe("ok");
+				expect(reads.native).toBeGreaterThan(0);
+				expect(r.govResult).toContain("could not be checked for automatic function calling");
+				expect(r.gov.requests).toHaveLength(0);
+				expect(reads.governed).toBe(0);
+			});
+
+			it(`${on}: functionDeclarations in an Array subclass whose prototype holds a toJSON are refused, the hook never run, as on the base`, async () => {
 				const c = counts();
 				const make = (side: "native" | "governed") => () => {
 					const Decls = protoToJSON(c[side], [{ name: "redacted" }]);
@@ -1493,6 +1520,59 @@ describe("caller code reached from the request cannot change what is sent after 
 					expect(c.governed.ctor).toBe(0);
 				});
 			}
+
+			for (const kind of ["a constructor of its own", "a prototype toJSON"] as const) {
+				it(`${on}: contents itself an Array subclass with ${kind} (the SDK never constructs one there): governed == native, as on the base`, async () => {
+					const c = counts();
+					const make = (side: "native" | "governed") => () => {
+						const Contents =
+							kind === "a prototype toJSON"
+								? protoToJSON(c[side], ["rewritten"])
+								: class extends Array<unknown> {
+										constructor(...items: unknown[]) {
+											super(...(items as []));
+											c[side].ctor++;
+										}
+									};
+						const contents = Contents.from([{ role: "user", parts: [{ text: "go" }] }]);
+						c[side].ctor = 0;
+						return request({}, contents);
+					};
+					const r = await nativeThenGoverned(
+						method,
+						{ native: make("native"), governed: make("governed") },
+						{ vertex },
+					);
+					expectSameSend(r);
+					expect(c.governed.json).toBe(c.native.json);
+					expect(c.governed.ctor).toBe(0);
+				});
+			}
+
+			it(`${on}: parts in another realm's Array subclass whose prototype holds a toJSON are refused; another realm's plain subclass goes as natively (its Array.prototype is known by its native source)`, async () => {
+				const realm = (withHook: boolean) =>
+					runInNewContext(
+						`class Parts extends Array {}
+						${withHook ? 'Object.defineProperty(Parts.prototype, "toJSON", { value() { return [{ text: "[redacted]" }]; } });' : ""}
+						Parts.from([{ text: email }])`,
+						{ email: EMAIL },
+					) as unknown[];
+				const hooked = await nativeThenGoverned(
+					method,
+					same(() => request({}, [{ role: "user", parts: realm(true) }])),
+					{ vertex },
+				);
+				expect(hooked.rawResult).toBe("ok");
+				expect(JSON.stringify(hooked.raw.requests)).not.toContain(EMAIL);
+				expect(hooked.govResult).toContain("could not be checked for automatic function calling");
+				expect(hooked.gov.requests).toHaveLength(0);
+				const plain = await nativeThenGoverned(
+					method,
+					same(() => request({}, [{ role: "user", parts: realm(false) }])),
+					{ vertex },
+				);
+				expectSameSend(plain);
+			});
 
 			it(`${on}: parts holding a toJSON of their own (on the array, not its class) go as natively: governed == native, the hook never run`, async () => {
 				const c = counts();
