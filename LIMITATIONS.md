@@ -112,8 +112,8 @@ on your objects as they would natively, once per call. What the SDK read becomes
 a plain-data copy, and that copy is what the PII scan, redaction, the meter and
 the SDK then use. A callable tool and an `AbortSignal` go by reference. Fields
 beside `model`, `contents` and `config` (a `metadata` a policy rule matches), which
-the SDK neither reads nor sends, are read as before (a getter once) and kept
-beside the copy, so policy rules and redaction still see them. Per call,
+the SDK neither reads nor sends, are read for the policy rules only, never placed
+on the copy that is serialized, held for and sent. Per call,
 usertrust runs the SDK again over a second copy. It must make exactly the requests
 it made over yours (path, method, body bytes, `httpOptions`) and reach the same
 automatic-function-calling decision, or the call is refused. This costs two extra
@@ -136,7 +136,15 @@ own:
 - **An `Array` subclass is mapped as a plain array.** When the SDK's own array
   methods (`map`, `filter`) build their result from an array of yours, they build
   a plain array rather than constructing your subclass, so your subclass's
-  constructor does not run. The result serializes the same.
+  constructor does not run. The result serializes the same. A subclass that names
+  its own `Symbol.species` is refused instead: what that class would build is not
+  known without running it.
+- **Policy fields are read once, when the request is checked.** A field beside
+  `model`, `contents` and `config` is read then, a getter at any depth run once,
+  and copied as data for the policy rules; before, the rules read it, and any
+  getter inside it, when they were evaluated. A function there is a value that
+  exists for an `exists` rule but is never called. These fields are not forwarded:
+  a Google-shaped client that is not the SDK no longer receives them.
 - **`config.httpOptions` is read at the start of the call**, as per-call request
   options are. The SDK is given that copy (only the allowed keys) wherever it
   later reads `params.config.httpOptions`, even through a `config` added or

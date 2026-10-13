@@ -1403,6 +1403,31 @@ describe("caller code reached from the request cannot change what is sent after 
 				expectSameSend(r);
 			});
 
+			it(`${on}: parts in an Array subclass naming its own Symbol.species are refused, its species never constructed (natively the SDK's map builds one)`, async () => {
+				const built = { native: 0, governed: 0 };
+				const make = (side: "native" | "governed") => () => {
+					class Built extends Array<unknown> {
+						constructor(...items: unknown[]) {
+							super(...(items as []));
+							built[side]++;
+						}
+					}
+					class Parts extends Array<unknown> {}
+					Object.defineProperty(Parts, Symbol.species, { get: () => Built });
+					return request({}, [{ role: "user", parts: Parts.from([{ text: "safe" }]) }]);
+				};
+				const r = await nativeThenGoverned(
+					method,
+					{ native: make("native"), governed: make("governed") },
+					{ vertex },
+				);
+				expect(r.rawResult).toBe("ok");
+				expect(built.native).toBeGreaterThan(0);
+				expect(built.governed).toBe(0);
+				expect(r.govResult).toContain("could not be checked for automatic function calling");
+				expect(r.gov.requests).toHaveLength(0);
+			});
+
 			/** One object as both config.tools[0] and config.automaticFunctionCalling; its tool() turns AFC back on. */
 			const aliasing = (calls: { tool: number; callTool: number }) => () => {
 				const shared: Loose = { disable: true };
@@ -2929,5 +2954,326 @@ describe("every level of the option path refuses or sends as the base does (the 
 				}
 			}
 		}
+	}
+});
+
+describe("policy fields beside the request travel off the sent request, as data", () => {
+	function denyPolicy(field: string): void {
+		mkdirSync(join(vault, ".usertrust", "policies"), { recursive: true });
+		writeFileSync(
+			join(vault, ".usertrust", "policies", "default.yml"),
+			`rules:\n  - name: present\n    effect: deny\n    enforcement: hard\n    conditions:\n      - field: ${field}\n        operator: exists\n`,
+		);
+	}
+	async function governedRun(method: Method, params: unknown, budget = 500_000) {
+		const w = wire();
+		globalThis.fetch = w.fetchStub as typeof fetch;
+		const audit = recordingAudit();
+		const governed = await trust(sdkClient(false), {
+			dryRun: true,
+			budget,
+			vaultBase: vault,
+			_audit: audit,
+		});
+		const { result } = await runOn(governed.models, method, params);
+		await governed.destroy();
+		return { result, requests: w.requests, kinds: audit.events.map((e) => e.kind) };
+	}
+
+	for (const method of METHODS) {
+		for (const enumerable of [true, false]) {
+			it(`${method}: a request's own ${enumerable ? "enumerable" : "non-enumerable"} toJSON answering without its large config never sizes the hold: refused at a budget of 200, the hook never run`, async () => {
+				const runs = { n: 0 };
+				const params = request({ systemInstruction: "word ".repeat(40_000) });
+				Object.defineProperty(params, "toJSON", {
+					value: () => {
+						runs.n++;
+						return { model: "gemini-2.5-flash", contents: "go" };
+					},
+					enumerable,
+					writable: true,
+					configurable: true,
+				});
+				const r = await governedRun(method, params, 200);
+				expect(r.result).toContain("block-budget-overshoot");
+				expect(r.requests).toHaveLength(0);
+				expect(r.kinds).toEqual(["policy_denied"]);
+				expect(runs.n).toBe(0);
+			});
+		}
+
+		it(`${method}: a hard deny on a function-valued field's existence denies, as before, and the function never runs`, async () => {
+			denyPolicy("hook");
+			const runs = { n: 0 };
+			const r = await governedRun(method, {
+				...request({}),
+				hook: () => {
+					runs.n++;
+					return "x";
+				},
+			});
+			expect(r.result).toContain("[present]");
+			expect(r.requests).toHaveLength(0);
+			expect(runs.n).toBe(0);
+		});
+
+		it(`${method}: a nested getter in a policy field is read once, when the call starts its gate, and denies on what it answered`, async () => {
+			denyPolicy("metadata.classification");
+			const reads = { n: 0 };
+			const r = await governedRun(method, {
+				...request({}),
+				metadata: {
+					get classification() {
+						reads.n++;
+						return "secret";
+					},
+				},
+			});
+			expect(r.result).toContain("[present]");
+			expect(reads.n).toBe(1);
+			expect(r.requests).toHaveLength(0);
+		});
+	}
+
+	it("generateContent: what is forwarded holds no caller object by reference but the abort signal at its path, and no policy field", async () => {
+		const received: unknown[] = [];
+		const response = {
+			candidates: [{ content: { role: "model", parts: [{ text: "hi" }] } }],
+			usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+			text: "hi",
+		};
+		const client = {
+			models: {
+				generateContent: vi.fn(async (p: unknown) => {
+					received.push(p);
+					return response;
+				}),
+				generateContentStream: vi.fn(),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: true,
+			budget: 500_000,
+			vaultBase: vault,
+			_audit: recordingAudit(),
+		});
+		const signal = new AbortController().signal;
+		const caller = new Set<object>();
+		const note = <T extends object>(o: T): T => {
+			caller.add(o);
+			return o;
+		};
+		const params = note({
+			model: "gemini-2.5-flash",
+			contents: note([note({ role: "user", parts: note([note({ text: "go" })]) })]),
+			config: note({
+				abortSignal: signal,
+				systemInstruction: note({ parts: note([note({ text: "be brief" })]) }),
+				tools: note([note({ functionDeclarations: note([note({ name: "f" })]) })]),
+			}),
+			metadata: note({ classification: "internal" }),
+		});
+		expect((await runOn(governed.models, "generateContent", params)).result).toBe("ok");
+		await governed.destroy();
+		const shared: unknown[] = [];
+		const walk = (v: unknown, seen = new Set<unknown>()): void => {
+			if (v === null || typeof v !== "object" || seen.has(v)) return;
+			seen.add(v);
+			if (caller.has(v)) shared.push(v);
+			if (v === signal) return;
+			for (const key of Reflect.ownKeys(v)) {
+				const d = Object.getOwnPropertyDescriptor(v, key);
+				if (d !== undefined && "value" in d) walk(d.value, seen);
+			}
+		};
+		walk(received[0]);
+		expect(shared).toEqual([]);
+		expect((received[0] as { config: Loose }).config["abortSignal"]).toBe(signal);
+		expect(received[0]).not.toHaveProperty("metadata");
+	});
+});
+
+describe("after destroy() begins, no new provider request starts; a request already sent settles", () => {
+	/** A wire whose first answer asks for the callable's tool, then answers; each request recorded. */
+	function loopWire() {
+		const requests: Loose[] = [];
+		const fetchStub = async (_url: unknown, init?: { body?: unknown }) => {
+			requests.push(JSON.parse(String(init?.body)) as Loose);
+			const parts =
+				requests.length === 1
+					? [{ functionCall: { name: "lookup", args: {} } }, { text: "" }]
+					: [{ text: "done" }];
+			return new Response(
+				JSON.stringify({
+					candidates: [{ content: { role: "model", parts } }],
+					usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		};
+		return { requests, fetchStub };
+	}
+
+	it("generateContent: an AFC round whose callTool is pending across destroy(): the next round is refused as destroyed, one request in all, and destroy() does not wait for it", async () => {
+		let release: () => void = () => {};
+		const pending = new Promise<void>((r) => {
+			release = r;
+		});
+		let called: () => void = () => {};
+		const callToolCalled = new Promise<void>((r) => {
+			called = r;
+		});
+		const tool = {
+			tool: async () => ({ functionDeclarations: [{ name: "lookup" }] }),
+			callTool: async () => {
+				called();
+				await pending;
+				return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+			},
+		};
+		const w = loopWire();
+		globalThis.fetch = w.fetchStub as typeof fetch;
+		const audit = recordingAudit();
+		const governed = await trust(sdkClient(false), {
+			dryRun: true,
+			budget: 500_000,
+			vaultBase: vault,
+			_audit: audit,
+		});
+		const call = runOn(governed.models, "generateContent", request({ tools: [tool] }));
+		await callToolCalled;
+		const started = Date.now();
+		await governed.destroy();
+		expect(Date.now() - started).toBeLessThan(1_000);
+		release();
+		expect((await call).result).toBe("TrustedClient has been destroyed");
+		expect(w.requests).toHaveLength(1);
+		expect(audit.events.map((e) => e.kind)).toEqual(["llm_call"]);
+	});
+
+	it("generateContent: an AFC round that would start while destroy() is still draining another call's request is refused: the drain waits for requests already sent, it starts none", async () => {
+		let releaseTool: () => void = () => {};
+		const toolPending = new Promise<void>((r) => {
+			releaseTool = r;
+		});
+		let called: () => void = () => {};
+		const callToolCalled = new Promise<void>((r) => {
+			called = r;
+		});
+		const tool = {
+			tool: async () => ({ functionDeclarations: [{ name: "lookup" }] }),
+			callTool: async () => {
+				called();
+				await toolPending;
+				return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+			},
+		};
+		// The AFC call's requests, and a second call whose one request is held on the wire.
+		const afc = loopWire();
+		const held = wire();
+		let answerHeld: () => void = () => {};
+		const heldAnswered = new Promise<void>((r) => {
+			answerHeld = r;
+		});
+		let heldSent: () => void = () => {};
+		const heldOnWire = new Promise<void>((r) => {
+			heldSent = r;
+		});
+		globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+			if (String(init?.body).includes("held")) {
+				heldSent();
+				await heldAnswered;
+				return held.fetchStub(url, init);
+			}
+			return afc.fetchStub(url, init);
+		}) as typeof fetch;
+		const audit = recordingAudit();
+		const governed = await trust(sdkClient(false), {
+			dryRun: true,
+			budget: 500_000,
+			vaultBase: vault,
+			_audit: audit,
+		});
+		const looping = runOn(governed.models, "generateContent", request({ tools: [tool] }));
+		await callToolCalled;
+		const onWire = runOn(governed.models, "generateContent", request({}, "held"));
+		await heldOnWire;
+		const destroyed = governed.destroy();
+		releaseTool(); // the AFC call's next round now tries to start, during the drain
+		expect((await looping).result).toBe("TrustedClient has been destroyed");
+		answerHeld();
+		expect((await onWire).result).toBe("ok");
+		await destroyed;
+		expect(afc.requests).toHaveLength(1);
+		expect(held.requests).toHaveLength(1);
+	});
+
+	for (const method of METHODS) {
+		it(`${method}: a request already on the wire when destroy() begins settles, is metered, and destroy() resolves after it`, async () => {
+			let answer: () => void = () => {};
+			const answered = new Promise<void>((r) => {
+				answer = r;
+			});
+			let sent: () => void = () => {};
+			const onWire = new Promise<void>((r) => {
+				sent = r;
+			});
+			const w = wire();
+			globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+				sent();
+				await answered;
+				return w.fetchStub(url, init);
+			}) as typeof fetch;
+			const audit = recordingAudit();
+			const governed = await trust(sdkClient(false), {
+				dryRun: true,
+				budget: 500_000,
+				vaultBase: vault,
+				_audit: audit,
+			});
+			const order: string[] = [];
+			const call = runOn(governed.models, method, request({})).then((r) => {
+				order.push("call");
+				return r;
+			});
+			await onWire;
+			const destroyed = governed.destroy().then(() => order.push("destroy"));
+			answer();
+			await Promise.all([call, destroyed]);
+			expect((await call).result).toBe("ok");
+			expect(w.requests).toHaveLength(1);
+			expect(audit.events.map((e) => e.kind)).toEqual(["llm_call"]);
+			expect(order).toEqual(["call", "destroy"]);
+		});
+
+		it(`${method}: a call the caller aborts before its request answers releases its admission: destroy() does not wait for it, and nothing more is sent`, async () => {
+			const controller = new AbortController();
+			let sent: () => void = () => {};
+			const onWire = new Promise<void>((r) => {
+				sent = r;
+			});
+			let requests = 0;
+			globalThis.fetch = (async (_url: unknown, init?: { signal?: AbortSignal }) => {
+				requests++;
+				sent();
+				return await new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => reject(new Error("aborted by the caller")));
+				});
+			}) as typeof fetch;
+			const governed = await trust(sdkClient(false), {
+				dryRun: true,
+				budget: 500_000,
+				vaultBase: vault,
+				_audit: recordingAudit(),
+			});
+			const call = runOn(governed.models, method, request({ abortSignal: controller.signal }));
+			await onWire;
+			controller.abort();
+			expect((await call).result).not.toBe("ok");
+			const started = Date.now();
+			await governed.destroy();
+			expect(Date.now() - started).toBeLessThan(1_000);
+			expect(requests).toBe(1);
+		});
 	}
 });

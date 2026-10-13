@@ -1722,26 +1722,42 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	/** The argument lists of Google calls admitted before a destroy(): interceptCall takes them anyway. */
 	const admittedArgs = new WeakSet<unknown[]>();
+	/** Set when destroy()'s drain deadline passes: no admission licenses a request after it. */
+	let admissionsRevoked = false;
+	/**
+	 * The policy fields a Google call's request gate read beside the request (google-request.ts
+	 * `policyFields`), for each argument list it forwards: data the policy gate reads, kept OFF the
+	 * request, so nothing of them is serialized, held for or sent.
+	 */
+	const googlePolicyFields = new WeakMap<unknown[], Record<string | symbol, unknown>>();
 
 	/**
-	 * A Google call's admission, taken synchronously when the call starts, before the request gate's
-	 * first await: counted in flight (destroy() waits for it, as for a call already in interceptCall),
-	 * and its forwarded argument lists marked, so interceptCall runs them even once destroy() has begun.
-	 * Released on every exit, once.
+	 * A Google call's admission: ONE record, taken synchronously when its trap is entered, before the
+	 * request gate's first await, and counted in flight, so a destroy() that begins while the call is
+	 * still behind the gate waits for it. It licenses the call's FIRST provider request only: that
+	 * argument list is admitted past a destroy() begun since (interceptCall), and the record is
+	 * released as soon as that request has started (interceptCall counts it from there, as it counts
+	 * any call on the wire). Every later request of the call (an AFC round) is a new request, and
+	 * after destroy() begins it is refused as destroyed. Released on every exit, once; past destroy()'s
+	 * drain deadline, revoked: it licenses nothing.
 	 */
-	function admitGoogleCall(): { mark(args: unknown[]): unknown[]; release(): void } {
+	function admitGoogleCall(): GoogleAdmission {
 		inFlightCount++;
 		let released = false;
+		let used = false;
+		const release = (): void => {
+			if (released) return;
+			released = true;
+			inFlightCount--;
+		};
 		return {
-			mark(args) {
-				admittedArgs.add(args);
+			forward(args, policy) {
+				googlePolicyFields.set(args, policy);
+				if (!used && !admissionsRevoked) admittedArgs.add(args);
+				used = true;
 				return args;
 			},
-			release() {
-				if (released) return;
-				released = true;
-				inFlightCount--;
-			},
+			release,
 		};
 	}
 
@@ -1800,7 +1816,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		// injection (A6) — the surface flag suppresses it below.
 		surfaceKind: "create" | "stream-helper" | "openai-responses" = "create",
 	): Promise<TrustedResponse<unknown>> {
-		if (destroyed && !admittedArgs.has(callerArgs)) {
+		if (destroyed && !(admittedArgs.has(callerArgs) && !admissionsRevoked)) {
 			throw new Error("TrustedClient has been destroyed");
 		}
 
@@ -2124,7 +2140,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// now simply ABSENT rather than caller-chosen, which is the fail-closed
 						// answer. See HOST_CONTROLLED_POLICY_FIELDS for why the hand-maintained
 						// list needed a mechanism behind it.
-						...sanitizePolicyContext(params),
+						// Google: the policy fields its request gate read beside the request (data, never
+						// sent), under the request's own fields.
+						...sanitizePolicyContext({ ...googlePolicyFields.get(callerArgs), ...params }),
 						model,
 						tier: config.tier,
 						estimated_cost: estimatedCost,
@@ -4375,6 +4393,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			while ((inFlightCount > 0 || inFlightStreamCount > 0) && Date.now() < deadline) {
 				await new Promise<void>((r) => setTimeout(r, 50));
 			}
+			// What is left admitted now licenses no request: a Google call still behind its gate past
+			// the deadline is refused as destroyed when it reaches interceptCall.
+			admissionsRevoked = true;
 
 			// Every step runs, whatever an earlier one throws; destroy() rejects with what a step
 			// threw only once the last has run, so the TigerBeetle client is always closed, and the
@@ -5472,7 +5493,7 @@ async function googleRequestGate(
 	| { refusal: PolicyDeniedError }
 	| { optionRefused: string[] }
 	| { sdkError: unknown; denial: PolicyDeniedError }
-	| { runAfcLoop: boolean }
+	| { runAfcLoop: boolean; policy: Record<string | symbol, unknown> }
 > {
 	const resolved = await pipeline();
 	if (resolved === undefined) {
@@ -5513,7 +5534,7 @@ async function googleRequestGate(
 			};
 	}
 	if (args.length > 0) args[0] = snap.params;
-	return { runAfcLoop: snap.afcRan };
+	return { runAfcLoop: snap.afcRan, policy: snap.policy };
 }
 
 /**
@@ -5566,6 +5587,13 @@ async function refuseWithSdkError(
  * default-deny.ts): free methods run on the raw namespace, `allowUngoverned` methods run
  * there audited, and everything else is refused through `refuse`.
  */
+/** A Google call's admission (see trust()'s `admitGoogleCall`). */
+interface GoogleAdmission {
+	/** One argument list the call forwards, with the policy fields its gate read; the first is admitted. */
+	forward(args: unknown[], policy: Record<string | symbol, unknown>): unknown[];
+	release(): void;
+}
+
 function buildGoogleProxy<T>(
 	client: T,
 	intercept: InterceptFn,
@@ -5577,7 +5605,7 @@ function buildGoogleProxy<T>(
 		args: readonly unknown[],
 		thisArg: unknown,
 	) => { refused: Promise<never> } | { pinned: PinnedHttpOptions | undefined },
-	admit: () => { mark(args: unknown[]): unknown[]; release(): void },
+	admit: () => GoogleAdmission,
 	refuseOptions: (names: string[], args: unknown[]) => Promise<never>,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
@@ -5635,16 +5663,20 @@ function buildGoogleProxy<T>(
 							// httpOptions), and every round, like the single-call forward, is built from
 							// the send tree, `args[0]` after the gate. Nothing reads the caller's object
 							// after the gate.
-							return await runGovernedAfc(args[0] as Record<string, unknown>, (roundParams) =>
-								intercept(
+							return await runGovernedAfc(args[0] as Record<string, unknown>, (roundParams) => {
+								const round = intercept(
 									originalGenerate,
 									target,
-									admission.mark([roundParams, ...args.slice(1)]),
-								),
-							);
+									admission.forward([roundParams, ...args.slice(1)], gate.policy),
+								);
+								admission.release(); // the first round has started: interceptCall counts it
+								return round;
+							});
 						}
 						// ── end AFC gate ──
-						return await intercept(originalGenerate, target, admission.mark(args));
+						const sent = intercept(originalGenerate, target, admission.forward(args, gate.policy));
+						admission.release(); // the request has started: interceptCall counts it
+						return await sent;
 					} finally {
 						admission.release();
 					}
@@ -5674,11 +5706,13 @@ function buildGoogleProxy<T>(
 							return await refuse("models.generateContentStream", args, gate.refusal);
 						}
 						// ── end AFC gate ──
-						const { response } = await intercept(
+						const sent = intercept(
 							originalGenerateStream,
 							target,
-							admission.mark(args),
+							admission.forward(args, gate.policy),
 						);
+						admission.release(); // the request has started: interceptCall counts it
+						const { response } = await sent;
 						return response;
 					} finally {
 						admission.release();

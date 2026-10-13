@@ -51,7 +51,7 @@ export interface GooglePipeline {
 
 /** What one governed request becomes. */
 export type GoogleSnapshot =
-	| { kind: "ok"; params: unknown; afcRan: boolean }
+	| { kind: "ok"; params: unknown; afcRan: boolean; policy: Record<string | symbol, unknown> }
 	| { kind: "afcStream" }
 	| { kind: "refuse"; reason: string }
 	| { kind: "optionRefused"; names: string[] }
@@ -391,6 +391,40 @@ function isBuiltInMethod(fn: unknown, key: string): boolean {
 	}
 }
 
+const ARRAY_SPECIES_GETTER = Object.getOwnPropertyDescriptor(Array, Symbol.species)?.get;
+const ARRAY_SPECIES_SOURCE =
+	ARRAY_SPECIES_GETTER === undefined
+		? undefined
+		: Reflect.apply(functionSource, ARRAY_SPECIES_GETTER, []);
+
+/**
+ * Does an array's constructor `ctor` (an Array subclass, or another realm's Array) take the default
+ * `Symbol.species`, the built-in getter it inherits from Array (this realm's by identity, another's
+ * by its native source text, as `isBuiltInMethod`)? Then the SDK's own `map` natively builds an
+ * instance of that class with the same items, which serializes as the plain array answered for it.
+ * Descriptors only, no caller code; a Proxy on the way, or a chain past 64, is not the default.
+ */
+function hasDefaultSpecies(ctor: unknown): boolean {
+	let o: unknown = ctor;
+	for (let depth = 0; depth < 64; depth++) {
+		if (o === null || (typeof o !== "object" && typeof o !== "function")) return true;
+		if (utilTypes.isProxy(o)) return false;
+		const d = Object.getOwnPropertyDescriptor(o, Symbol.species);
+		if (d !== undefined) {
+			const get = "get" in d ? d.get : undefined;
+			if (get === undefined || utilTypes.isProxy(get)) return false;
+			if (get === ARRAY_SPECIES_GETTER) return true;
+			try {
+				return Reflect.apply(functionSource, get, []) === ARRAY_SPECIES_SOURCE;
+			} catch {
+				return false;
+			}
+		}
+		o = Object.getPrototypeOf(o);
+	}
+	return false;
+}
+
 /** For each well-known symbol, the source text of this realm's built-in methods held under it. */
 const INTRINSIC_SYMBOL_SOURCES: ReadonlyMap<symbol, ReadonlySet<string>> = (() => {
 	const sources = new Map<symbol, Set<string>>();
@@ -713,8 +747,13 @@ function makeMembrane(
 				// their result (ArraySpeciesCreate). Natively another realm's Array is replaced by this
 				// realm's there; a caller's Array subclass would be constructed, running its code. Both
 				// answer this realm's Array: the result is a plain array, which serializes the same.
-				if (key === "constructor" && isArray && typeof v === "function" && v !== Array)
+				if (key === "constructor" && isArray && typeof v === "function" && v !== Array) {
+					// A species of the caller's own would be constructed natively (what it builds is not
+					// the plain array answered here): can't tell, and it never runs.
+					if (!hasDefaultSpecies(v))
+						throw new CannotTell("an array whose class names its own Symbol.species");
 					return Array;
+				}
 				// A built-in method goes to the SDK as it is. Any other function (an own or a
 				// user-prototype method, a function-valued field) is the caller's: it is data to the
 				// membrane (its fields and its toJSON read through, recorded), and calling it trips.
@@ -1135,61 +1174,99 @@ export async function snapshotGoogleRequest(
 	// maximumRemoteCalls of NaN runs zero rounds) has no loop to stop, and forcing the SDK's early
 	// path would make it send one.
 	if (!afcRan && captured.length > 0) forceAfcOff(send);
-	const carried = carryCallerFields(send, params);
-	if (carried !== undefined) return { kind: "refuse", reason: carried };
-	return { kind: "ok", params: send, afcRan };
+	const policy = policyFields(params, send);
+	if ("refuse" in policy) return { kind: "refuse", reason: policy.refuse };
+	return { kind: "ok", params: send, afcRan, policy: policy.fields };
 }
 
 /** The request fields the SDK builds its request from; every other top-level field is the caller's own. */
 const SDK_REQUEST_FIELDS: ReadonlySet<string | symbol> = new Set(["model", "contents", "config"]);
 
 /**
- * The caller's request fields the SDK does not read (a `metadata` a policy rule matches, say), put
- * beside the mirror on the send tree, so policy and redaction see them as they did before this
- * pipeline; the SDK builds its request from `model`, `contents` and `config` only, so they are never
- * sent. Read as before: walking `params` and its prototype chain up to `Object.prototype` (a Proxy on
- * the way ends the walk unread), an own data value as it is, an inherited one unless it is a
- * function, a getter run once with `params` as `this`; values by reference. A key the mirror already
- * holds is left alone. A getter that throws: the reason the request cannot be told; otherwise
- * `undefined`.
+ * A function, or a value past `POLICY_DEPTH`, in a policy field: the key EXISTS for a policy rule,
+ * and nothing callable or live of the caller's is carried. Frozen, with no prototype.
  */
-function carryCallerFields(send: unknown, params: unknown): string | undefined {
-	if (send === null || typeof send !== "object") return undefined;
-	if (params === null || (typeof params !== "object" && typeof params !== "function"))
-		return undefined;
-	const seen = new Set<string | symbol>(SDK_REQUEST_FIELDS);
-	for (const key of Reflect.ownKeys(send)) seen.add(key);
-	for (
-		let o: object | null = params;
-		o !== null && o !== Object.prototype;
-		o = Object.getPrototypeOf(o)
-	) {
-		if (utilTypes.isProxy(o)) return undefined;
-		for (const key of Reflect.ownKeys(o)) {
-			if (seen.has(key)) continue;
-			seen.add(key);
-			const d = Object.getOwnPropertyDescriptor(o, key);
-			if (d === undefined) continue;
-			let value: unknown;
-			if ("value" in d) {
-				if (o !== params && typeof d.value === "function") continue;
-				value = d.value;
-			} else {
-				try {
-					value = d.get === undefined ? undefined : Reflect.apply(d.get, params, []);
-				} catch {
-					return "a request field's getter threw";
-				}
-			}
-			Object.defineProperty(send, key, {
-				value,
-				writable: true,
-				enumerable: true,
-				configurable: true,
-			});
-		}
+export const OPAQUE_POLICY_VALUE: object = Object.freeze(Object.create(null));
+const POLICY_DEPTH = 64;
+
+/**
+ * The caller's request fields the SDK does not read (a `metadata` a policy rule matches, say), for
+ * the policy gate only: a SIDE CHANNEL beside the send tree, never on it, so nothing of them is
+ * serialized, sized for the hold or sent. Read once, here, at the request gate, as DATA: the top
+ * level as before (`params` and its prototype chain up to `Object.prototype`, a Proxy on the way
+ * ending the walk; own data, inherited data that is not a function, a getter run once with `params`
+ * as `this`), and every value below it copied deep (own keys, each getter run once); a function,
+ * at any depth, is `OPAQUE_POLICY_VALUE`. A key the send tree holds is left out. A getter that
+ * throws: the reason the request cannot be told.
+ */
+function policyFields(
+	params: unknown,
+	send: unknown,
+): { fields: Record<string | symbol, unknown> } | { refuse: string } {
+	const fields: Record<string | symbol, unknown> = {};
+	if (params === null || (typeof params !== "object" && typeof params !== "function")) {
+		return { fields };
 	}
-	return undefined;
+	const seen = new Set<string | symbol>(SDK_REQUEST_FIELDS);
+	if (send !== null && typeof send === "object")
+		for (const key of Reflect.ownKeys(send)) seen.add(key);
+	const copies = new Map<object, unknown>();
+	try {
+		for (
+			let o: object | null = params;
+			o !== null && o !== Object.prototype;
+			o = Object.getPrototypeOf(o)
+		) {
+			if (utilTypes.isProxy(o)) break;
+			for (const key of Reflect.ownKeys(o)) {
+				if (seen.has(key)) continue;
+				seen.add(key);
+				const d = Object.getOwnPropertyDescriptor(o, key);
+				if (d === undefined) continue;
+				if ("value" in d && o !== params && typeof d.value === "function") continue;
+				const value =
+					"value" in d
+						? d.value
+						: d.get === undefined
+							? undefined
+							: Reflect.apply(d.get, params, []);
+				fields[key] = policyCopy(value, copies, 1);
+			}
+		}
+	} catch {
+		return { refuse: "a request field's getter threw" };
+	}
+	return { fields };
+}
+
+/** A deep data copy of one policy value (see `policyFields`); one object reached twice is copied once. */
+function policyCopy(value: unknown, copies: Map<object, unknown>, depth: number): unknown {
+	if (typeof value === "function") return OPAQUE_POLICY_VALUE;
+	if (value === null || typeof value !== "object") return value;
+	const known = copies.get(value);
+	if (known !== undefined) return known;
+	if (depth > POLICY_DEPTH) return OPAQUE_POLICY_VALUE;
+	const out = (Array.isArray(value) ? [] : {}) as Record<string | symbol, unknown>;
+	copies.set(value, out);
+	for (const key of Reflect.ownKeys(value)) {
+		const d = Reflect.getOwnPropertyDescriptor(value, key);
+		if (d === undefined) continue;
+		const v =
+			"value" in d ? d.value : d.get === undefined ? undefined : Reflect.apply(d.get, value, []);
+		if (Array.isArray(out) && key === "length") {
+			if (typeof v === "number" && Number.isInteger(v) && v >= out.length && v < 2 ** 32) {
+				out.length = v;
+			}
+			continue;
+		}
+		Object.defineProperty(out, key, {
+			value: policyCopy(v, copies, depth + 1),
+			writable: true,
+			enumerable: d.enumerable === true,
+			configurable: true,
+		});
+	}
+	return out;
 }
 
 /**
