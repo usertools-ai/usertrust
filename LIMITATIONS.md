@@ -174,7 +174,12 @@ as transport, and is not refused.** Observability wrappers return the SDK client
 forwarding Proxy. A Proxy's traps can show these checks one value and the SDK another, so
 nothing is read through it, and a Proxy built to do that is deliberate bypass, out of scope
 as above. To have the checks read the client itself, wrap the raw client with `trust()`
-first, then instrument the trusted client. **A client constructed with its own `fetch` is
+first, then instrument the trusted client. Only the Proxy itself is trusted: the per-call
+checks still read the SDK resource each call runs on, and its client, so a body-moving
+option reached through a Proxy client is refused all the same. The checks hold every
+object they read to being plain: request options and client `fetchOptions` must be plain
+objects, and a client's `middleware` must be a plain array (no own iterator or other own
+key, no accessor index), so the check and the SDK read the same thing. **A client constructed with its own `fetch` is
 trusted transport and is not refused.** That `fetch` can rewrite any request, body
 included; proxies, test harnesses and instrumentation use it legitimately. It is the
 transport `trust()` wraps, so what it does to a request is the caller's own code, out of

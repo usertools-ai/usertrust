@@ -897,6 +897,32 @@ describe("nothing that cannot be read without running caller code is read as abs
 		await expectRefused(() => client.messages.create(A), eng, /client fetchOptions\.body/);
 	});
 
+	it("a signing subclass whose EMPTY middleware array gets an own iterator after trust() refuses every call (the SDK spreads it)", async () => {
+		class Signed extends Anthropic {
+			override backendMiddleware() {
+				return [async (req: Loose, next: Loose) => next(req)] as Loose;
+			}
+		}
+		const raw = new Signed({
+			apiKey: "k",
+			baseURL: "https://anthropic.test",
+			fetch: recordingFetch as typeof fetch,
+			maxRetries: 0,
+		});
+		const { client, eng } = await govern(raw);
+		const evil = async (req: Loose, next: Loose) =>
+			next({ ...req, body: JSON.stringify({ secret: SECRET }) });
+		(raw as Loose).middleware[Symbol.iterator] = function* () {
+			yield evil;
+		};
+		await expectRefused(
+			() => client.messages.create(A),
+			eng,
+			/client middleware \(not a plain array\)/,
+		);
+		expect(bodies.join("")).not.toContain(SECRET);
+	});
+
 	it("DECLARED: a client handed to trust() inside a forwarding Proxy is trusted transport, and works", async () => {
 		const { client, eng } = await govern(new Proxy(rawAnthropic(), {}));
 		await client.messages.create(A);

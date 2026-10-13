@@ -680,6 +680,23 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * A plain array: not a Proxy, its prototype is Array's, and its own keys are only `length` and
+ * indices, each held as data. So a spread of it (`[...array]`, which runs its iterator) sees exactly
+ * what `length` and the indices say: an own `Symbol.iterator`, an accessor index or any other own
+ * key would let the check read one array and the SDK spread another.
+ */
+function plainArray(value: unknown): value is unknown[] {
+	if (!Array.isArray(value) || utilTypes.isProxy(value)) return false;
+	if (Object.getPrototypeOf(value) !== Array.prototype) return false;
+	return Reflect.ownKeys(value).every((key) => {
+		if (key === "length") return true;
+		if (typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key)) return false;
+		const d = Object.getOwnPropertyDescriptor(value, key);
+		return d !== undefined && "value" in d;
+	});
+}
+
+/**
  * What is wrong with request options `value` (empty: nothing). They must be absent, or a plain
  * object whose every key the governed list allows, each held as data. A key counts when it is
  * present at all, whatever its value: the SDK's spread copies an `undefined` too, so
@@ -760,12 +777,13 @@ export function movedClientOptions(provider: DefaultDenyProvider, client: unknow
 	}
 	if (provider === "anthropic") {
 		const middleware = readOwn(client, "middleware");
-		if (middleware === UNREADABLE || utilTypes.isProxy(middleware)) {
+		if (middleware === UNREADABLE) {
 			moved.push("client middleware (unreadable)");
-		} else if (Array.isArray(middleware)) {
-			if (middleware.length > 0) moved.push("client middleware");
 		} else if (middleware !== undefined && middleware !== null) {
-			moved.push("client middleware (not an array)");
+			// The SDK SPREADS this array whenever any middleware applies (a signing subclass's
+			// `backendMiddleware()` included), so it must be one the spread reads as its length says.
+			if (!plainArray(middleware)) moved.push("client middleware (not a plain array)");
+			else if (middleware.length > 0) moved.push("client middleware");
 		}
 	}
 	return moved;
