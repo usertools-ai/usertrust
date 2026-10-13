@@ -425,6 +425,25 @@ function hasDefaultSpecies(ctor: unknown): boolean {
 	return false;
 }
 
+/**
+ * Does any prototype of `array`, from its own up to (not including) this realm's `Array.prototype`,
+ * hold a `toJSON` of its own? The SDK's own `map` natively builds an instance of the array's class,
+ * which serializes through that hook; the plain array answered for it would not. Descriptors only,
+ * no getter run; a Proxy on the way, or a chain past 64, cannot be told and counts as holding one.
+ */
+function classHoldsToJSON(array: object): boolean {
+	if (utilTypes.isProxy(array)) return true;
+	let o: unknown = Object.getPrototypeOf(array);
+	for (let depth = 0; depth < 64; depth++) {
+		if (o === null || o === Array.prototype) return false;
+		if (typeof o !== "object" && typeof o !== "function") return false;
+		if (utilTypes.isProxy(o)) return true;
+		if (Reflect.getOwnPropertyDescriptor(o, "toJSON") !== undefined) return true;
+		o = Object.getPrototypeOf(o);
+	}
+	return true;
+}
+
 /** For each well-known symbol, the source text of this realm's built-in methods held under it. */
 const INTRINSIC_SYMBOL_SOURCES: ReadonlyMap<symbol, ReadonlySet<string>> = (() => {
 	const sources = new Map<symbol, Set<string>>();
@@ -752,6 +771,8 @@ function makeMembrane(
 					// the plain array answered here): can't tell, and it never runs.
 					if (!hasDefaultSpecies(v))
 						throw new CannotTell("an array whose class names its own Symbol.species");
+					// So would a toJSON its class holds, which then rewrites what is sent: can't tell.
+					if (classHoldsToJSON(real)) throw new CannotTell("an array whose class holds a toJSON");
 					return Array;
 				}
 				// A built-in method goes to the SDK as it is. Any other function (an own or a

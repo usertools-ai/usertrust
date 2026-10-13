@@ -1403,6 +1403,119 @@ describe("caller code reached from the request cannot change what is sent after 
 				expectSameSend(r);
 			});
 
+			/** Counters per side, so a native run never counts as governance's. */
+			const counts = () => ({
+				native: { json: 0, ctor: 0 },
+				governed: { json: 0, ctor: 0 },
+			});
+			/** An Array subclass whose prototype (`levels` up) holds a toJSON rewriting it to `rewrite`. */
+			const protoToJSON = (c: { json: number }, rewrite: unknown[], levels = 1) => {
+				class A extends Array<unknown> {}
+				Object.defineProperty(A.prototype, "toJSON", {
+					value() {
+						c.json++;
+						return rewrite;
+					},
+				});
+				class B extends A {}
+				return levels === 1 ? A : B;
+			};
+
+			for (const [shape, levels] of [
+				["prototype", 1],
+				["prototype two levels up", 2],
+			] as const) {
+				it(`${on}: parts in an Array subclass whose ${shape} holds a toJSON are refused (natively the SDK's map builds that class, and its hook rewrites what is sent), the hook never run`, async () => {
+					const c = counts();
+					const make = (side: "native" | "governed") => () => {
+						const Parts = protoToJSON(c[side], [{ text: "[redacted]" }], levels);
+						return request({}, [{ role: "user", parts: Parts.from([{ text: EMAIL }]) }]);
+					};
+					const r = await nativeThenGoverned(
+						method,
+						{ native: make("native"), governed: make("governed") },
+						{ vertex },
+					);
+					expect(r.rawResult).toBe("ok");
+					expect(JSON.stringify(r.raw.requests)).not.toContain(EMAIL); // the hook's rewrite is sent natively
+					expect(r.govResult).toContain("could not be checked for automatic function calling");
+					expect(r.gov.requests).toHaveLength(0);
+					expect(c.governed.json).toBe(0);
+				});
+			}
+
+			it(`${on}: functionDeclarations in an Array subclass whose prototype holds a toJSON are refused, the hook never run`, async () => {
+				const c = counts();
+				const make = (side: "native" | "governed") => () => {
+					const Decls = protoToJSON(c[side], [{ name: "redacted" }]);
+					return request({
+						tools: [{ functionDeclarations: Decls.from([{ name: "lookup_secret" }]) }],
+					});
+				};
+				const r = await nativeThenGoverned(
+					method,
+					{ native: make("native"), governed: make("governed") },
+					{ vertex },
+				);
+				expect(r.rawResult).toBe("ok");
+				expect(JSON.stringify(r.raw.requests)).not.toContain("lookup_secret");
+				expect(r.govResult).toContain("could not be checked for automatic function calling");
+				expect(r.gov.requests).toHaveLength(0);
+				expect(c.governed.json).toBe(0);
+			});
+
+			for (const place of ["parts", "tools"] as const) {
+				it(`${on}: ${place} in an Array subclass with a constructor of its own go through as a plain array: governed == native, its constructor never run by governance`, async () => {
+					const c = counts();
+					const make = (side: "native" | "governed") => () => {
+						class Counted extends Array<unknown> {
+							constructor(...items: unknown[]) {
+								super(...(items as []));
+								c[side].ctor++;
+							}
+						}
+						const list =
+							place === "parts"
+								? Counted.from([{ text: "safe" }])
+								: Counted.from([{ googleSearch: {} }]);
+						c[side].ctor = 0;
+						return place === "parts"
+							? request({}, [{ role: "user", parts: list }])
+							: request({ tools: list });
+					};
+					const r = await nativeThenGoverned(
+						method,
+						{ native: make("native"), governed: make("governed") },
+						{ vertex },
+					);
+					expectSameSend(r);
+					expect(c.native.ctor).toBeGreaterThan(0); // natively the SDK's map constructs it
+					expect(c.governed.ctor).toBe(0);
+				});
+			}
+
+			it(`${on}: parts holding a toJSON of their own (on the array, not its class) go as natively: governed == native, the hook never run`, async () => {
+				const c = counts();
+				const make = (side: "native" | "governed") => () => {
+					const parts: unknown[] = [{ text: "go" }];
+					Object.defineProperty(parts, "toJSON", {
+						value() {
+							c[side].json++;
+							return [{ text: "[redacted]" }];
+						},
+					});
+					return request({}, [{ role: "user", parts }]);
+				};
+				const r = await nativeThenGoverned(
+					method,
+					{ native: make("native"), governed: make("governed") },
+					{ vertex },
+				);
+				expectSameSend(r);
+				expect(c.native.json).toBe(0); // the SDK's map builds a new array, without it
+				expect(c.governed.json).toBe(0);
+			});
+
 			it(`${on}: parts in an Array subclass naming its own Symbol.species are refused, its species never constructed (natively the SDK's map builds one)`, async () => {
 				const built = { native: 0, governed: 0 };
 				const make = (side: "native" | "governed") => () => {
