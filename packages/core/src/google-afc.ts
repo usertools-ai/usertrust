@@ -920,21 +920,27 @@ function moveResponseSchemaAsTheStreamDoes(
 /**
  * `generateContent` with `config.tools` set: the SDK runs `maybeMoveToResponseJsonSchem` on the
  * caller's config AFTER `processParamsMaybeAddMcpUsage` copied it. What it writes never reaches the
- * request, but what it READS is read: `responseSchema` by name, then `responseJsonSchema` by name
- * when `responseSchema` is truthy, so a getter there that throws fails the call natively, before
- * any request. Each is read here, once, where the copy (`outConfig`) did not already read it, and
- * the value is discarded; a throw is INDETERMINATE, as for any getter that throws.
+ * request, but what it READS is read: `responseSchema` by name; when that is truthy,
+ * `responseJsonSchema` by name; and when that is falsy, `Object.keys(responseSchema)`, which runs a
+ * Proxy's `ownKeys` trap. So a getter or a trap there that throws fails the call natively, before
+ * any request. Each field is read here, once, where the copy (`outConfig`) did not already read it,
+ * and its value is otherwise discarded. `Object.keys` runs here only on a `responseSchema` the copy
+ * did NOT take: a copied one is the same value the SDK inspects on the forwarded copy, once, as
+ * natively. A throw is INDETERMINATE, as for any getter that throws.
  */
 function readResponseSchemaAsGenerateContentDoes(
 	config: object,
 	outConfig: Record<string | symbol, unknown>,
 ): void {
-	const schema = Object.hasOwn(outConfig, "responseSchema")
+	const schemaCopied = Object.hasOwn(outConfig, "responseSchema");
+	const schema = schemaCopied
 		? outConfig["responseSchema"]
 		: captureOnce(config, "responseSchema", "params.config");
-	if (schema && !Object.hasOwn(outConfig, "responseJsonSchema")) {
-		captureOnce(config, "responseJsonSchema", "params.config");
-	}
+	if (!schema) return;
+	const jsonSchema = Object.hasOwn(outConfig, "responseJsonSchema")
+		? outConfig["responseJsonSchema"]
+		: captureOnce(config, "responseJsonSchema", "params.config");
+	if (!jsonSchema && !schemaCopied) Object.keys(schema);
 }
 
 /**

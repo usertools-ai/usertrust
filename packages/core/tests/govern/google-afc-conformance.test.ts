@@ -2546,6 +2546,72 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 					}
 				});
 
+				// maybeMoveToResponseJsonSchem also runs `Object.keys(responseSchema)` when responseSchema is truthy and
+				// responseJsonSchema falsy: on a Proxy, that runs its `ownKeys` trap.
+				const keysThrow = () =>
+					new Proxy(
+						{},
+						{
+							ownKeys() {
+								throw new Error("ownKeys trap threw");
+							},
+						},
+					);
+				const HIDDEN_SCHEMA: Array<[string, (schema: () => object) => object]> = [
+					[
+						"an INHERITED",
+						(schema) =>
+							Object.assign(Object.create({ responseSchema: schema() }), { tools: SEARCH() }),
+					],
+					[
+						"a NON-ENUMERABLE own",
+						(schema) =>
+							Object.defineProperty({ tools: SEARCH() }, "responseSchema", {
+								value: schema(),
+								enumerable: false,
+							}),
+					],
+				];
+				for (const [shape, withSchema] of HIDDEN_SCHEMA) {
+					it(`${on}: ${shape} responseSchema whose Object.keys throws (a Proxy's ownKeys trap) beside tools fails natively and is refused governed, no request either way`, async () => {
+						const r = await nativeThenGoverned(
+							method,
+							sameConfig(() => withSchema(keysThrow)).params,
+							{ vertex },
+						);
+
+						expect(r.rawResult).toContain("ownKeys trap threw");
+						expect(r.raw.requests).toHaveLength(0);
+						expectRefused(r, method);
+					});
+
+					if (method === "generateContent") {
+						it(`${on}: ${shape} PLAIN responseSchema (no $schema) beside tools is read and goes through: the same body as natively, no schema sent (control)`, async () => {
+							const r = await nativeThenGoverned(
+								method,
+								sameConfig(() => withSchema(() => ({ type: "object" }))).params,
+								{ vertex },
+							);
+
+							expectSameRequest(r);
+							expect(r.raw.requests[0]?.body["generationConfig"]).toEqual({});
+						});
+					}
+				}
+
+				it(`${on}: an OWN ENUMERABLE (copied) responseSchema whose Object.keys throws beside tools fails as natively: the SDK inspects the forwarded copy itself, no request either way (control)`, async () => {
+					const r = await nativeThenGoverned(
+						method,
+						sameConfig(() => ({ tools: SEARCH(), responseSchema: keysThrow() })).params,
+						{ vertex },
+					);
+
+					expect(r.rawResult).toContain("ownKeys trap threw");
+					expect(r.raw.requests).toHaveLength(0);
+					expect(r.govResult).toBe(r.rawResult);
+					expect(r.gov.requests).toHaveLength(0);
+				});
+
 				// generateContent reads automaticFunctionCalling only beside a callable tool (`!hasCallableTools(params) ||
 				// shouldDisableAfc(...)`), and the snapshot reads it either way, so its row carries one.
 				const ORDER_TOOLS: Array<[string, () => unknown[]]> =
