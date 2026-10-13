@@ -1624,14 +1624,14 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 
 ### Client detection
 
-**Duck typing only; never import a provider SDK at runtime.** `detect.ts` imports types only.
-Detection stays duck-typed, and the provider SDKs stay optional peers. The ONE exception:
-`packages/core/src/google-request.ts` may `import()` the optional peer `@google/genai`, only to
-obtain the `Models` pipeline that the behavioural probe accepts; if it is absent or fails the probe,
-every governed Google call is refused. Nothing else imports a provider SDK at runtime:
-`packages/core/tests/detect/no-runtime-provider-import.test.ts` fails on any other runtime import,
+Detection stays duck-typed, and provider SDKs stay optional peers. `detect.ts` imports types only.
+The ONE exception: `packages/core/src/google-request.ts` may `import()` the optional peer
+`@google/genai`, only to obtain the `Models` pipeline the behavioural probe accepts; if it is absent
+or fails the probe, every governed Google call is refused. Nothing else imports a provider SDK at
+runtime: `tests/detect/no-runtime-provider-import.test.ts` fails on any other runtime reference,
 including a specifier held in a variable. The reason: usertrust never runs a client's own,
-unverified `Models` before authorization.
+unverified `Models` before authorization; the SDK exports no request converters or transport hook,
+so its own pipeline is the only way to build the exact request it sends.
 `@anthropic-ai/sdk`, `openai` and `@google/genai` are **optional** peer dependencies. Their floors
 (`>=0.116.0`, `>=7.4.0`, `>=1.52.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
 versions the default-deny free list was classified on. Moving a floor means re-running that
