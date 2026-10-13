@@ -69,6 +69,7 @@ import { classifyEndpoint, detectClientKind } from "./detect.js";
 import {
 	afcRequestedVerdict,
 	type GoogleAfcVerdict,
+	googleClientIsVertexAI,
 	runGovernedAfc,
 	sdkRunsAfcVerdict,
 	snapshotGoogleAfcParams,
@@ -5301,13 +5302,15 @@ function ownStringDataProperty(obj: unknown, key: string): string | undefined {
  * loop on the snapshot. `generateContentStream` uses `sdkRunsAfcVerdict`: "afc" is refused,
  * because a streamed AFC loop is not metered round by round yet. "indeterminate" is refused
  * on both. When the call proceeds, `args[0]` IS the snapshot, so what is forwarded (to the
- * loop or to the single governed call) is what was checked.
+ * loop or to the single governed call) is what was checked. `vertexAI` is the client's backend,
+ * which decides how the SDK serializes `functionCallingConfig` (see snapshotGoogleAfcParams).
  */
 function googleAfcGate(
 	args: unknown[],
 	method: "generateContent" | "generateContentStream",
+	vertexAI: boolean,
 ): { refusal: PolicyDeniedError } | { runAfcLoop: boolean } {
-	const snap = snapshotGoogleAfcParams(args[0]);
+	const snap = snapshotGoogleAfcParams(args[0], { vertexAI });
 	if ("verdict" in snap) return { refusal: googleAfcError(method, snap.verdict) };
 	const verdict =
 		method === "generateContent"
@@ -5381,6 +5384,9 @@ function buildGoogleProxy<T>(
 			? (models.generateContentStream as (...args: unknown[]) => unknown)
 			: undefined;
 	const refuse = boundary.refuse;
+	// The backend the SDK serializes each request for, read ONCE from the raw client (never
+	// through a proxy): the AFC snapshot sends on Vertex AI what the SDK sends there.
+	const vertexAI = googleClientIsVertexAI(original);
 
 	const modelsProxy = new Proxy(models, {
 		get(target, prop, receiver) {
@@ -5388,7 +5394,7 @@ function buildGoogleProxy<T>(
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
 					// ── AFC gate (snapshots args[0]: what is forwarded is what was checked) ──
-					const gate = googleAfcGate(args, "generateContent");
+					const gate = googleAfcGate(args, "generateContent", vertexAI);
 					if ("refusal" in gate) {
 						return refuse("models.generateContent", args, gate.refusal);
 					}
@@ -5409,7 +5415,7 @@ function buildGoogleProxy<T>(
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
 					// ── AFC gate: a streamed AFC loop is refused until it is metered per round ──
 					// (snapshots args[0]: what is forwarded is what was checked)
-					const gate = googleAfcGate(args, "generateContentStream");
+					const gate = googleAfcGate(args, "generateContentStream", vertexAI);
 					if ("refusal" in gate) {
 						return refuse("models.generateContentStream", args, gate.refusal);
 					}

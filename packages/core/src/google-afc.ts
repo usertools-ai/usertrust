@@ -422,8 +422,13 @@ const SDK_TOOL_CONFIG_FIELDS = [
 ] as const;
 
 /**
- * `config.toolConfig.functionCallingConfig`: `functionCallingConfigToMldev`, and
- * `generateContentStream`'s AFC check (`streamFunctionCallArguments`).
+ * `config.toolConfig.functionCallingConfig`: `functionCallingConfigToMldev` (the Gemini API)
+ * reads these by name, and `generateContentStream`'s AFC check reads
+ * `streamFunctionCallArguments`. Vertex AI reads NONE of them: `toolConfigToVertex`
+ * (`dist/node/index.mjs` 12188) passes the object through as it is (12200), so the request
+ * carries what `JSON.stringify` makes of it, its own enumerable properties only. The snapshot
+ * therefore keeps the caller's enumerability for this object on Vertex AI
+ * (`ownedDataCopy`'s `keepEnumerability`).
  */
 const SDK_FUNCTION_CALLING_FIELDS = [
 	"mode",
@@ -432,9 +437,10 @@ const SDK_FUNCTION_CALLING_FIELDS = [
 ] as const;
 
 /**
- * A non-callable tool's VALUE fields: `toolToMldev` / `toolToVertex` build the wire tool from
- * exactly these (each tested with `!= null` or `!== undefined`); `tTool` and
- * `findAfcIncompatibleToolIndexes` read `functionDeclarations`.
+ * A non-callable tool's VALUE fields, in the order the converters read them: `toolToMldev` /
+ * `toolToVertex` build the wire tool from exactly these (each tested with `!= null` or `!==
+ * undefined`), both in this order; `tTool` and `findAfcIncompatibleToolIndexes` read
+ * `functionDeclarations` before them (the read order is set out below).
  */
 const SDK_TOOL_FIELDS = [
 	"retrieval",
@@ -459,6 +465,33 @@ const SDK_TOOL_FIELDS = [
  * the copy holds `undefined` there.
  */
 const SDK_TOOL_PRESENCE_FIELD = "inputSchema";
+
+// ── The order the SDK reads a non-callable tool in (@google/genai 1.52.0, dist/node/index.mjs) ──
+// The snapshot reads in the same order, so a getter on one field runs only after every field the
+// SDK read before it has been captured, as natively:
+//
+//   1. `generateContent` first awaits `processParamsMaybeAddMcpUsage` (call at 14592, defined at
+//      14927), which iterates every tool (14933) and then calls `hasMcpToolUsage` (14948, defined
+//      at 13583): `'inputSchema' in tool` for EVERY tool (13588), before any field is read.
+//   2. When its AFC loop would run (a callable tool, AFC not disabled: 14594),
+//      `findAfcIncompatibleToolIndexes` (14597, defined at 14470) reads EVERY tool's
+//      `functionDeclarations` (14482), and the SDK rejects the call there if one is non-empty.
+//   3. Then the request converters, TOOL BY TOOL (`toolToMldev$1(tTool(item))` at 10064,
+//      `toolToVertex(tTool(item))` at 10237): `tTool` (3322) reads `functionDeclarations` (3323),
+//      then `toolToMldev$1` (12208) / `toolToVertex` (12275) read SDK_TOOL_FIELDS in order.
+//
+// So `inputSchema` presence is captured for every tool first; then, with a callable tool, every
+// tool's `functionDeclarations`; then, tool by tool, its `functionDeclarations` (unless step 2 took
+// it) and the rest in the converters' order. Each field is still read ONCE: where the SDK reads one
+// twice (`functionDeclarations`, in step 2 or `tTool` and again in its converter), the snapshot
+// keeps the FIRST read, the one the SDK decides on. `generateContentStream` makes the same reads,
+// except that with a callable tool it runs step 2 (14690) before step 1 (14994); the governed
+// stream refuses every such call before the SDK reads anything, so that order cannot reach it.
+
+/** The converters' fields that follow `functionDeclarations`'s first read (step 3 above). */
+const SDK_TOOL_FIELDS_AFTER_DECLARATIONS = SDK_TOOL_FIELDS.filter(
+	(key) => key !== "functionDeclarations",
+);
 
 /** A canonical array index (`"0"`, `"12"`), as an own key of an array. */
 const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
@@ -564,50 +597,78 @@ function refuseLossyClone(root: unknown, rootAt: string): void {
 /**
  * A non-callable tool as data WE own: EXACTLY the fields the SDK reads, nothing else (its
  * other properties are neither read nor sent by the SDK, so they are never read here).
- * Each field in SDK_TOOL_FIELDS is CAPTURED once (`captureOnce`: own, non-enumerable or
- * inherited, a getter run once), checked to clone faithfully at every depth
- * (`refuseLossyClone`) and `structuredClone`d AT ONCE, before the next field is read: no
- * live reference is kept, so a later getter that changes an already-captured value (or a
- * tool that holds itself) cannot reach the copy. SDK_TOOL_PRESENCE_FIELD is carried as
- * PRESENT (`undefined`) when `in` would find it, its value never read. So the copy holds
- * every field the SDK reads, `functionDeclarations` included, and the verdict, which reads
- * the copy, sees what the SDK will see: a declarations getter beside a callable tool is the
- * SDK's own local error, not an AFC loop. A field that cannot be copied as data is
- * UncloneableAfcInput, naming it.
+ * `copyDataTools` fills it in the SDK's read order (see above), across all the tools of one
+ * request, with the helpers below. So the copy holds every field the SDK reads,
+ * `functionDeclarations` included, and the verdict, which reads the copy, sees what the SDK
+ * will see: a declarations getter beside a callable tool is the SDK's own local error, not an
+ * AFC loop.
  */
-function cloneDataTool(tool: unknown, at: string): unknown {
-	if (tool === null || typeof tool !== "object") {
-		try {
-			return structuredClone(tool);
-		} catch {
-			throw new UncloneableAfcInput(at);
-		}
+interface DataToolCopy {
+	/** The caller's tool, read field by field, each field once. */
+	tool: object;
+	at: string;
+	/** The copy, forwarded in the tool's place. */
+	out: Record<string, unknown>;
+}
+
+/**
+ * SDK_TOOL_PRESENCE_FIELD carried as PRESENT (`undefined`) when `in` would find it (own,
+ * inherited or non-enumerable), with no getter run and `undefined` whatever it holds: the SDK
+ * only tests `in`, and never reads the value.
+ */
+function captureToolPresence(copy: DataToolCopy): void {
+	if (presentOnChain(copy.tool, SDK_TOOL_PRESENCE_FIELD, copy.at)) {
+		setData(copy.out, SDK_TOOL_PRESENCE_FIELD, undefined);
 	}
-	const out: Record<string, unknown> = {};
-	for (const key of SDK_TOOL_FIELDS) {
-		// Own (enumerable or not) or inherited, an accessor read ONCE.
-		const value = captureOnce(tool, key, at);
-		if (value === undefined) continue; // the SDK's `!= null` / `!== undefined`: as absent
-		const keyAt = `${at}.${key}`;
-		// Checked, then cloned at once: neither runs caller code (the walk reads descriptors
-		// only; a value that passed it is plain data, which structuredClone copies without a
-		// getter), so the clone is exactly what was checked, and a later getter on this tool
-		// that changes the caller's value cannot reach it.
-		refuseLossyClone(value, keyAt);
-		let copy: unknown;
-		try {
-			copy = structuredClone(value);
-		} catch {
-			throw new UncloneableAfcInput(keyAt);
-		}
-		setData(out, key, copy);
+}
+
+/**
+ * One field CAPTURED once (`captureOnce`: own, non-enumerable or inherited, a getter run once),
+ * checked to clone faithfully at every depth (`refuseLossyClone`) and `structuredClone`d AT
+ * ONCE, before the next field is read: no live reference is kept, so a later getter that changes
+ * an already-captured value (or a tool that holds itself) cannot reach the copy. A field that
+ * cannot be copied as data is UncloneableAfcInput, naming it.
+ */
+function captureToolField(copy: DataToolCopy, key: string): void {
+	const value = captureOnce(copy.tool, key, copy.at);
+	if (value === undefined) return; // the SDK's `!= null` / `!== undefined`: as absent
+	const keyAt = `${copy.at}.${key}`;
+	// Checked, then cloned at once: neither runs caller code (the walk reads descriptors
+	// only; a value that passed it is plain data, which structuredClone copies without a
+	// getter), so the clone is exactly what was checked.
+	refuseLossyClone(value, keyAt);
+	let cloned: unknown;
+	try {
+		cloned = structuredClone(value);
+	} catch {
+		throw new UncloneableAfcInput(keyAt);
 	}
-	// PRESENT, as `in` sees it (own, inherited or non-enumerable), with no getter run and
-	// `undefined` whatever it holds: the SDK only tests `in`, and never reads the value.
-	if (presentOnChain(tool, SDK_TOOL_PRESENCE_FIELD, at)) {
-		setData(out, SDK_TOOL_PRESENCE_FIELD, undefined);
+	setData(copy.out, key, cloned);
+}
+
+/**
+ * The data tools of one request, read in the SDK's order: every tool's `inputSchema` presence;
+ * with a callable tool in the request (`afcRuns`), every tool's `functionDeclarations`; then,
+ * tool by tool, the converters' reads. Each field is read once.
+ */
+function copyDataTools(copies: readonly DataToolCopy[], afcRuns: boolean): void {
+	for (const copy of copies) captureToolPresence(copy);
+	if (afcRuns) {
+		for (const copy of copies) captureToolField(copy, "functionDeclarations");
 	}
-	return out;
+	for (const copy of copies) {
+		if (!afcRuns) captureToolField(copy, "functionDeclarations");
+		for (const key of SDK_TOOL_FIELDS_AFTER_DECLARATIONS) captureToolField(copy, key);
+	}
+}
+
+/** A tool that is not an object, copied as data (`structuredClone`), or UncloneableAfcInput. */
+function cloneNonObjectTool(tool: unknown, at: string): unknown {
+	try {
+		return structuredClone(tool);
+	} catch {
+		throw new UncloneableAfcInput(at);
+	}
 }
 
 /**
@@ -620,20 +681,39 @@ function cloneDataTool(tool: unknown, at: string): unknown {
  * find them. The SDK only reads properties of these objects (and spreads them), so a null
  * prototype is safe for it. The values are the caller's (shallow); the fields the AFC
  * decision reads are primitives.
+ *
+ * ENUMERABILITY. By default every captured field is written ENUMERABLE, so the PII redaction
+ * walk (`Object.keys`) sees each field the SDK reads by name and sends. `keepEnumerability` is for
+ * an object the SDK sends by SERIALIZING it whole rather than field by field (Vertex AI's
+ * `functionCallingConfig`, see SDK_FUNCTION_CALLING_FIELDS): `JSON.stringify` sends only own
+ * enumerable properties, so there a field that was own and enumerable on the caller's object
+ * stays enumerable, and one that was inherited or non-enumerable is written NON-enumerable,
+ * still readable by name, but neither serialized nor walked by redaction, exactly as natively.
  */
-function ownedDataCopy(obj: unknown, at: string, keys: readonly string[]): unknown {
+function ownedDataCopy(
+	obj: unknown,
+	at: string,
+	keys: readonly string[],
+	keepEnumerability = false,
+): unknown {
 	if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) return obj;
 	rejectProxy(obj, at);
 	const out = Object.create(null) as Record<string | symbol, unknown>;
 	for (const key of Reflect.ownKeys(obj)) {
 		const d = Object.getOwnPropertyDescriptor(obj, key);
 		if (d === undefined) continue;
-		setData(out, key, "value" in d ? d.value : d.get === undefined ? undefined : d.get.call(obj));
+		setData(
+			out,
+			key,
+			"value" in d ? d.value : d.get === undefined ? undefined : d.get.call(obj),
+			!keepEnumerability || d.enumerable === true,
+		);
 	}
 	for (const key of keys) {
 		if (!Object.hasOwn(out, key)) {
 			const value = captureOnce(obj, key, at);
-			if (value !== undefined) setData(out, key, value);
+			// Inherited: never serialized by JSON.stringify.
+			if (value !== undefined) setData(out, key, value, !keepEnumerability);
 		}
 	}
 	return out;
@@ -685,6 +765,24 @@ function capturedCopy(
 }
 
 /**
+ * Does this Google client send to Vertex AI? The SDK picks its request converters per call
+ * with `this.apiClient.isVertexAI()` (`dist/node/index.mjs` 12987: `clientOptions.vertexai`,
+ * tested for truthiness), and `GoogleGenAI`'s constructor stores that same value as its own
+ * `vertexai` data property (21266, `resolveCloudFlag`: the `vertexai` or `enterprise` option, or
+ * their environment variables) before handing it to the ApiClient. Read from the RAW client,
+ * once, from its descriptor: no getter or Proxy trap runs. Anything else (no such property, an
+ * accessor, a Proxy) answers false, the Gemini API reading, under which every captured field is
+ * enumerable and so seen by redaction.
+ */
+export function googleClientIsVertexAI(client: unknown): boolean {
+	if (client === null || (typeof client !== "object" && typeof client !== "function")) {
+		return false;
+	}
+	if (utilTypes.isProxy(client)) return false;
+	return Boolean(ownDataValue(client, "vertexai")?.value);
+}
+
+/**
  * "Send what was checked", for AUTOMATIC FUNCTION CALLING only. The SDK reads
  * `params.config` after an `await` (`generateContent` awaits
  * `processParamsMaybeAddMcpUsage(params)` before `hasCallableTools` /
@@ -700,10 +798,15 @@ function capturedCopy(
  *   - `config.automaticFunctionCalling`, `config.toolConfig` and its
  *     `functionCallingConfig`: owned NULL-PROTOTYPE copies (`ownedDataCopy`), so `disable`, `maximumRemoteCalls` and
  *     `streamFunctionCallArguments` are values we own, and every field the SDK reads from
- *     them (`mode` and `allowedFunctionNames` too) is carried, inherited ones included.
+ *     them (`mode` and `allowedFunctionNames` too) is carried, inherited ones included. With
+ *     `options.vertexAI` (the client sends to Vertex AI, which serializes
+ *     `functionCallingConfig` whole), a field that was inherited or non-enumerable there is
+ *     carried NON-enumerable: as natively, it is not sent, and redaction (which walks what
+ *     is sent) does not walk it.
  *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
- *     non-callable tool is copied as exactly the fields the SDK reads (`cloneDataTool`:
- *     each captured once, a `functionDeclarations` getter included, and cloned at once; a
+ *     non-callable tool is copied as exactly the fields the SDK reads, in the order the SDK
+ *     reads them (`copyDataTools`: each captured once, a `functionDeclarations` getter
+ *     included, and cloned at once; a
  *     field that cannot be copied as data, including one holding a class instance,
  *     accessor, non-enumerable property or sparse array at any depth (`refuseLossyClone`),
  *     is indeterminate, so the call is refused naming where);
@@ -728,6 +831,7 @@ function capturedCopy(
  */
 export function snapshotGoogleAfcParams(
 	params: unknown,
+	options: { vertexAI?: boolean } = {},
 ): { params: unknown } | { verdict: Exclude<GoogleAfcVerdict, { kind: "no_afc" | "afc" }> } {
 	try {
 		if (params === null || (typeof params !== "object" && typeof params !== "function")) {
@@ -764,10 +868,12 @@ export function snapshotGoogleAfcParams(
 			SDK_TOOL_CONFIG_FIELDS,
 		);
 		if (toolConfig !== null && typeof toolConfig === "object") {
+			// On Vertex AI the SDK serializes this object whole: keep what JSON.stringify sees.
 			const callingConfig = ownedDataCopy(
 				(toolConfig as Record<string, unknown>).functionCallingConfig,
 				`${toolConfigAt}.functionCallingConfig`,
 				SDK_FUNCTION_CALLING_FIELDS,
+				options.vertexAI === true,
 			);
 			setData(toolConfig as Record<string, unknown>, "functionCallingConfig", callingConfig);
 		}
@@ -799,13 +905,16 @@ export function snapshotGoogleAfcParams(
 			const outTools: unknown[] = new Array(tools.length);
 			// Each callable tool is classified ONCE, here, from a CAPTURED `callTool` reference,
 			// and kept by reference (runGovernedAfc needs the original object). Caller code can
-			// still run after a callable was read: a later tool's array-index getter, or the
-			// getters `structuredClone` runs on a later data tool. Such code could clear a
-			// callable's `callTool` so the verdict (`readAfc`, which reads the snapshot) sees no
-			// callable tool, and restore it before the SDK reads the request: one governed call
-			// over the SDK's own AFC loop. So, once every tool is read, each callable must still
-			// hold the SAME captured function, or the request is "can't tell".
+			// still run after a callable was read: a later tool's array-index getter, or a data
+			// tool's field getter. Such code could clear a callable's `callTool` so the verdict
+			// (`readAfc`, which reads the snapshot) sees no callable tool, and restore it before
+			// the SDK reads the request: one governed call over the SDK's own AFC loop. So, once
+			// every tool is read, each callable must still hold the SAME captured function, or
+			// the request is "can't tell".
 			const callables: Array<{ tool: object; at: string; callTool: unknown }> = [];
+			const dataTools: DataToolCopy[] = [];
+			// Every element first, each read once, as the SDK iterates the whole array
+			// (`tools.map` in processParamsMaybeAddMcpUsage) before it reads any tool's field.
 			for (let i = 0; i < tools.length; i++) {
 				if (!(i in tools)) continue; // keep holes as holes
 				const at = `params.config.tools[${i}]`;
@@ -814,17 +923,26 @@ export function snapshotGoogleAfcParams(
 					outTools[i] = tool; // references: see the doc comment
 					continue;
 				}
-				if (tool !== null && (typeof tool === "object" || typeof tool === "function")) {
-					rejectProxy(tool, at);
-					const callTool = dataValue(tool, "callTool", at);
-					if (typeof callTool === "function") {
-						callables.push({ tool, at, callTool });
-						outTools[i] = tool; // callable: by reference, never cloned
-						continue;
-					}
+				if (tool === null || (typeof tool !== "object" && typeof tool !== "function")) {
+					outTools[i] = cloneNonObjectTool(tool, at);
+					continue;
 				}
-				outTools[i] = cloneDataTool(tool, at);
+				rejectProxy(tool, at);
+				const callTool = dataValue(tool, "callTool", at);
+				if (typeof callTool === "function") {
+					callables.push({ tool, at, callTool });
+					outTools[i] = tool; // callable: by reference, never cloned
+					continue;
+				}
+				// A function that is not a callable tool cannot be copied as data.
+				if (typeof tool === "function") throw new UncloneableAfcInput(at);
+				const copy: DataToolCopy = { tool, at, out: {} };
+				dataTools.push(copy);
+				outTools[i] = copy.out;
 			}
+			// Then their fields, in the SDK's read order. AFC is not disabled here, so with a
+			// callable tool the SDK would run findAfcIncompatibleToolIndexes.
+			copyDataTools(dataTools, callables.length > 0);
 			// No caller code runs between this check and the verdict (both read data only), and a
 			// tool classified non-callable is our CLONE (or AFC is off on our own copy), so the
 			// classification cannot change at the boundary in a way that unmeters a round: a

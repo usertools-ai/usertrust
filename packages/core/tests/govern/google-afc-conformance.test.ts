@@ -1417,3 +1417,435 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 		});
 	}
 });
+
+// ── The snapshot reads a tool in the SDK's order, and sends on Vertex AI what the SDK sends ──
+
+type Reads = Record<string, number>;
+
+function counted(reads: Reads, key: string): void {
+	reads[key] = (reads[key] ?? 0) + 1;
+}
+
+/** An own enumerable getter on `obj` that counts its reads and runs `effect` on each. */
+function withGetter(obj: Loose, key: string, reads: Reads, effect: () => unknown): Loose {
+	Object.defineProperty(obj, key, {
+		get: () => {
+			counted(reads, key);
+			return effect();
+		},
+		enumerable: true,
+		configurable: true,
+	});
+	return obj;
+}
+
+/** (a) A `googleSearch` getter that empties the same tool's `functionDeclarations` when read. */
+function searchEmptiesDeclarations(reads: Reads): object {
+	const declarations: Loose[] = [{ name: "lookup" }];
+	return withGetter({ functionDeclarations: declarations }, "googleSearch", reads, () => {
+		declarations.length = 0;
+		return undefined;
+	});
+}
+
+/** (b) A `googleSearch` getter that deletes the same tool's own `inputSchema` when read. */
+function searchDeletesInputSchema(reads: Reads): object {
+	const tool: Loose = {
+		inputSchema: { type: "object" },
+		functionDeclarations: [{ name: "lookup" }],
+	};
+	return withGetter(tool, "googleSearch", reads, () => {
+		delete tool["inputSchema"];
+		return undefined;
+	});
+}
+
+/** (b) A `googleSearch` getter that gives the same tool an `inputSchema` when read. */
+function searchAddsInputSchema(reads: Reads): object {
+	const tool: Loose = { functionDeclarations: [{ name: "lookup" }] };
+	return withGetter(tool, "googleSearch", reads, () => {
+		tool["inputSchema"] = { type: "object" };
+		return undefined;
+	});
+}
+
+/** A `functionDeclarations` getter that turns on the same tool's `googleSearch` when read. */
+function declarationsEnableSearch(reads: Reads): object {
+	const tool: Loose = {};
+	return withGetter(tool, "functionDeclarations", reads, () => {
+		tool["googleSearch"] = {};
+		return [{ name: "lookup" }];
+	});
+}
+
+/** Two tools: the FIRST one's `googleSearch` getter runs `act` on the SECOND one. */
+function pairWhere(reads: Reads, second: Loose, act: (second: Loose) => void): [object, Loose] {
+	const first = withGetter({}, "googleSearch", reads, () => {
+		act(second);
+		return undefined;
+	});
+	return [first, second];
+}
+
+/** A `functionCallingConfig` carrying `fields` in a way JSON.stringify does not see. */
+const HIDDEN_CALLING_FIELDS: Array<[string, (fields: Loose) => object]> = [
+	["INHERITED prototype data", (fields) => Object.create(fields) as object],
+	[
+		"class PROTOTYPE getters",
+		(fields) => {
+			class CallingFields {}
+			for (const [key, value] of Object.entries(fields)) {
+				Object.defineProperty(CallingFields.prototype, key, {
+					get: () => value,
+					configurable: true,
+				});
+			}
+			return new CallingFields();
+		},
+	],
+	[
+		"NON-ENUMERABLE own properties",
+		(fields) => {
+			const out = {};
+			for (const [key, value] of Object.entries(fields)) {
+				Object.defineProperty(out, key, { value, enumerable: false });
+			}
+			return out;
+		},
+	],
+];
+
+const BACKENDS = [
+	["the Gemini API", false],
+	["Vertex AI", true],
+] as const;
+
+const EMAIL = "jane.doe@example.com";
+
+describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex AI what the SDK sends (real @google/genai, fetch stubbed)", () => {
+	let vault: string;
+	const realFetch = globalThis.fetch;
+	beforeEach(() => {
+		vault = join(tmpdir(), `trust-afc-order-${randomUUID()}`);
+		mkdirSync(vault, { recursive: true });
+	});
+	afterEach(() => {
+		globalThis.fetch = realFetch;
+		rmSync(vault, { recursive: true, force: true });
+	});
+
+	/**
+	 * `native` on the SDK ungoverned, then `governed` on a governed client of the same backend, each on its own wire.
+	 * `native` defaults to the same params (a fresh object from the same factory).
+	 */
+	async function nativeThenGoverned(
+		method: WireMethod,
+		params: { native: () => unknown; governed: () => unknown },
+		opts: { vertex?: boolean; pii?: "redact" } = {},
+	) {
+		const client = () =>
+			new GoogleGenAI(opts.vertex ? { vertexai: true, apiKey: "test" } : { apiKey: "test" });
+		const raw = wire();
+		globalThis.fetch = raw.fetchStub as typeof fetch;
+		const rawResult = await runOn(client().models, method, params.native());
+		const gov = wire();
+		globalThis.fetch = gov.fetchStub as typeof fetch;
+		const audit = recordingAudit();
+		const governed = await trust(client(), {
+			dryRun: true,
+			budget: 500_000,
+			vaultBase: vault,
+			_audit: audit,
+			...(opts.pii !== undefined ? { pii: opts.pii } : {}),
+		});
+		const govResult = await runOn(governed.models, method, params.governed());
+		await governed.destroy();
+		return { raw, rawResult, gov, govResult, auditKinds: audit.events.map((e) => e.kind) };
+	}
+
+	/** The same tools for the native and the governed call, each built with its own read counter. */
+	function sameTools(makeTools: (reads: Reads) => unknown[]) {
+		const rawReads: Reads = {};
+		const govReads: Reads = {};
+		const params = (reads: Reads) => () => ({
+			model: "gemini-2.5-flash",
+			contents: "go",
+			config: { tools: makeTools(reads) },
+		});
+		return { rawReads, govReads, params: { native: params(rawReads), governed: params(govReads) } };
+	}
+
+	for (const method of ["generateContent", "generateContentStream"] as const) {
+		it(`${method}: (a) a googleSearch getter that empties the tool's functionDeclarations runs after they are captured: the SDK's own local rejection, no provider request`, async () => {
+			const t = sameTools((reads) => [searchEmptiesDeclarations(reads), wireCallable()]);
+			const { raw, rawResult, gov, govResult } = await nativeThenGoverned(method, t.params);
+
+			// natively findAfcIncompatibleToolIndexes reads functionDeclarations before any converter reads googleSearch
+			expect(rawResult).toContain("Incompatible tools found at tools[0]");
+			expect(raw.requests).toHaveLength(0);
+			expect(gov.requests).toHaveLength(0);
+			expect(t.rawReads).toEqual({});
+			// the snapshot reads every field the SDK reads, ONCE, up front: the getter runs once, after the capture
+			expect(t.govReads).toEqual({ googleSearch: 1 });
+			if (method === "generateContent") {
+				expect(govResult).toBe(rawResult);
+			} else {
+				// a stream with a callable tool is refused by governance either way (control for this method)
+				expect(govResult).toContain(`models.${method} with automatic function calling`);
+			}
+		});
+
+		it(`${method}: (b) a googleSearch getter that deletes the tool's inputSchema runs after its presence is captured: the same MCP usage header and body`, async () => {
+			const t = sameTools((reads) => [searchDeletesInputSchema(reads)]);
+			const { raw, rawResult, gov, govResult } = await nativeThenGoverned(method, t.params);
+
+			expect(rawResult).toBe("ok");
+			expect(govResult).toBe("ok");
+			expect(raw.requests).toHaveLength(1);
+			expect(gov.requests).toHaveLength(1);
+			// natively hasMcpToolUsage tests `'inputSchema' in tool` before the converters read googleSearch
+			expect(raw.requests[0]?.apiClientHeader).toContain("mcp_used/");
+			expect(gov.requests[0]?.apiClientHeader).toBe(raw.requests[0]?.apiClientHeader);
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			expect(t.rawReads).toEqual({ googleSearch: 1 });
+			expect(t.govReads).toEqual(t.rawReads);
+		});
+
+		it(`${method}: (b) a googleSearch getter that ADDS an inputSchema runs after presence is captured: no MCP usage header, as natively`, async () => {
+			const t = sameTools((reads) => [searchAddsInputSchema(reads)]);
+			const { raw, rawResult, gov, govResult } = await nativeThenGoverned(method, t.params);
+
+			expect(rawResult).toBe("ok");
+			expect(govResult).toBe("ok");
+			expect(raw.requests).toHaveLength(1);
+			expect(gov.requests).toHaveLength(1);
+			expect(raw.requests[0]?.apiClientHeader).not.toContain("mcp_used/");
+			expect(gov.requests[0]?.apiClientHeader).toBe(raw.requests[0]?.apiClientHeader);
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			expect(t.govReads).toEqual(t.rawReads);
+		});
+
+		it(`${method}: every tool's inputSchema presence is captured before any tool's field: a first tool's getter that gives the second one an inputSchema sets no MCP usage header, as natively`, async () => {
+			const t = sameTools((reads) =>
+				pairWhere(reads, { functionDeclarations: [{ name: "lookup" }] }, (second) => {
+					second["inputSchema"] = { type: "object" };
+				}),
+			);
+			const { raw, rawResult, gov, govResult } = await nativeThenGoverned(method, t.params);
+
+			expect(rawResult).toBe("ok");
+			expect(govResult).toBe("ok");
+			expect(raw.requests).toHaveLength(1);
+			expect(gov.requests).toHaveLength(1);
+			// natively hasMcpToolUsage tests every tool before any converter runs
+			expect(raw.requests[0]?.apiClientHeader).not.toContain("mcp_used/");
+			expect(gov.requests[0]?.apiClientHeader).toBe(raw.requests[0]?.apiClientHeader);
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			expect(t.rawReads).toEqual({ googleSearch: 1 });
+			expect(t.govReads).toEqual(t.rawReads);
+		});
+
+		it(`${method}: with a callable tool, every tool's functionDeclarations is captured before any tool's other fields: a first tool's getter that empties the second one's declarations gets the SDK's own local rejection`, async () => {
+			const t = sameTools((reads) => [
+				...pairWhere(reads, { functionDeclarations: [{ name: "lookup" }] }, (second) => {
+					(second["functionDeclarations"] as Loose[]).length = 0;
+				}),
+				wireCallable(),
+			]);
+			const { raw, rawResult, gov, govResult } = await nativeThenGoverned(method, t.params);
+
+			// natively findAfcIncompatibleToolIndexes reads every tool's declarations before the converters run
+			expect(rawResult).toContain("Incompatible tools found at tools[1]");
+			expect(raw.requests).toHaveLength(0);
+			expect(gov.requests).toHaveLength(0);
+			expect(t.rawReads).toEqual({});
+			expect(t.govReads).toEqual({ googleSearch: 1 });
+			if (method === "generateContent") {
+				expect(govResult).toBe(rawResult);
+			} else {
+				expect(govResult).toContain(`models.${method} with automatic function calling`);
+			}
+		});
+
+		it(`${method}: without a callable tool the SDK reads tool by tool: a first tool's getter that adds a declaration to the second one reaches the provider, as natively`, async () => {
+			const t = sameTools((reads) =>
+				pairWhere(reads, { functionDeclarations: [{ name: "lookup" }] }, (second) => {
+					(second["functionDeclarations"] as Loose[]).push({ name: "other" });
+				}),
+			);
+			const { raw, rawResult, gov, govResult } = await nativeThenGoverned(method, t.params);
+
+			expect(rawResult).toBe("ok");
+			expect(govResult).toBe("ok");
+			expect(raw.requests).toHaveLength(1);
+			expect(gov.requests).toHaveLength(1);
+			// natively tTool reads the second tool's declarations after the first tool's converter ran
+			expect(raw.requests[0]?.body["tools"]).toEqual([
+				{},
+				{ functionDeclarations: [{ name: "lookup" }, { name: "other" }] },
+			]);
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			expect(t.rawReads).toEqual({ googleSearch: 1 });
+			expect(t.govReads).toEqual(t.rawReads);
+		});
+
+		it(`${method}: a tool's functionDeclarations is captured before its other fields: a declarations getter that turns on googleSearch reaches the provider with it, as natively`, async () => {
+			const t = sameTools((reads) => [declarationsEnableSearch(reads)]);
+			const { raw, rawResult, gov, govResult } = await nativeThenGoverned(method, t.params);
+
+			expect(rawResult).toBe("ok");
+			expect(govResult).toBe("ok");
+			expect(raw.requests).toHaveLength(1);
+			expect(gov.requests).toHaveLength(1);
+			// natively tTool reads functionDeclarations before the converter reads googleSearch
+			expect(raw.requests[0]?.body["tools"]).toEqual([
+				{ googleSearch: {}, functionDeclarations: [{ name: "lookup" }] },
+			]);
+			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			// natively tTool reads it twice (its test, then its loop) and the converter once; the snapshot once
+			expect(t.rawReads).toEqual({ functionDeclarations: 3 });
+			expect(t.govReads).toEqual({ functionDeclarations: 1 });
+		});
+
+		for (const [backend, vertex] of BACKENDS) {
+			const params = (callingConfig: () => object) => () => ({
+				model: "gemini-2.5-flash",
+				contents: "go",
+				config: {
+					tools: [{ functionDeclarations: [{ name: "lookup" }] }],
+					toolConfig: { functionCallingConfig: callingConfig() },
+				},
+			});
+
+			for (const [shape, make] of HIDDEN_CALLING_FIELDS) {
+				it(`${method} on ${backend}: a functionCallingConfig whose mode and allowedFunctionNames are ${shape} sends what the SDK sends`, async () => {
+					const fields = { mode: "NONE", allowedFunctionNames: ["lookup"] };
+					const p = params(() => make(fields));
+					const { raw, rawResult, gov, govResult } = await nativeThenGoverned(
+						method,
+						{ native: p, governed: p },
+						{ vertex },
+					);
+
+					expect(rawResult).toBe("ok");
+					expect(govResult).toBe("ok");
+					expect(raw.requests).toHaveLength(1);
+					expect(gov.requests).toHaveLength(1);
+					// the Gemini API reads each field by name; Vertex AI passes the object to JSON.stringify, which skips them
+					expect(raw.requests[0]?.body["toolConfig"]).toEqual({
+						functionCallingConfig: vertex ? {} : fields,
+					});
+					expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+				});
+			}
+
+			it(`${method} on ${backend}: an own enumerable mode beside an INHERITED allowedFunctionNames: each sent as the SDK sends it`, async () => {
+				const p = params(() =>
+					Object.assign(Object.create({ allowedFunctionNames: ["lookup"] }) as object, {
+						mode: "ANY",
+					}),
+				);
+				const { raw, rawResult, gov, govResult } = await nativeThenGoverned(
+					method,
+					{ native: p, governed: p },
+					{ vertex },
+				);
+
+				expect(rawResult).toBe("ok");
+				expect(govResult).toBe("ok");
+				expect(raw.requests[0]?.body["toolConfig"]).toEqual({
+					functionCallingConfig: vertex
+						? { mode: "ANY" }
+						: { mode: "ANY", allowedFunctionNames: ["lookup"] },
+				});
+				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			});
+
+			it(`${method} on ${backend}: own enumerable mode and allowedFunctionNames are sent (control)`, async () => {
+				const fields = { mode: "NONE", allowedFunctionNames: ["lookup"] };
+				const p = params(() => ({ ...fields }));
+				const { raw, rawResult, gov, govResult } = await nativeThenGoverned(
+					method,
+					{ native: p, governed: p },
+					{ vertex },
+				);
+
+				expect(rawResult).toBe("ok");
+				expect(govResult).toBe("ok");
+				expect(raw.requests[0]?.body["toolConfig"]).toEqual({ functionCallingConfig: fields });
+				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+			});
+		}
+
+		// pii "redact": what is sent from functionCallingConfig is either redacted or not sent at all.
+		for (const [shape, make] of HIDDEN_CALLING_FIELDS) {
+			const params = (contents: string, names: string[]) => () => ({
+				model: "gemini-2.5-flash",
+				contents,
+				config: {
+					tools: [{ functionDeclarations: [{ name: "lookup" }] }],
+					toolConfig: {
+						functionCallingConfig: make({ mode: "ANY", allowedFunctionNames: names }),
+					},
+				},
+			});
+
+			it(`${method} on Vertex AI, pii "redact", an e-mail address in allowedFunctionNames held as ${shape} and in the prompt: no raw PII is sent, and the body is native Vertex's after redaction`, async () => {
+				const { raw, rawResult, gov, govResult, auditKinds } = await nativeThenGoverned(
+					method,
+					{
+						native: params("[REDACTED:email]", [EMAIL]),
+						governed: params(`write to ${EMAIL}`, [EMAIL]),
+					},
+					{ vertex: true, pii: "redact" },
+				);
+
+				expect(rawResult).toBe("ok");
+				expect(govResult).toBe("ok");
+				expect(gov.requests).toHaveLength(1);
+				expect(JSON.stringify(gov.requests)).not.toContain(EMAIL);
+				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+				expect(auditKinds).not.toContain("policy_denied");
+			});
+
+			it(`${method} on Vertex AI, pii "redact", an e-mail address in allowedFunctionNames held as ${shape} and a clean prompt: no raw PII is sent, and the body is native Vertex's`, async () => {
+				const p = params("go", [EMAIL]);
+				const { raw, rawResult, gov, govResult, auditKinds } = await nativeThenGoverned(
+					method,
+					{ native: p, governed: p },
+					{ vertex: true, pii: "redact" },
+				);
+
+				expect(rawResult).toBe("ok");
+				expect(govResult).toBe("ok");
+				expect(gov.requests).toHaveLength(1);
+				// natively Vertex AI never sends it: JSON.stringify skips an inherited or non-enumerable field
+				expect(JSON.stringify(raw.requests)).not.toContain(EMAIL);
+				expect(JSON.stringify(gov.requests)).not.toContain(EMAIL);
+				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+				expect(auditKinds).not.toContain("policy_denied");
+			});
+
+			it(`${method} on the Gemini API, pii "redact", an e-mail address in allowedFunctionNames held as ${shape} and in the prompt: it is sent REDACTED, as the SDK reads it by name`, async () => {
+				const { raw, rawResult, gov, govResult, auditKinds } = await nativeThenGoverned(
+					method,
+					{
+						native: params("[REDACTED:email]", ["[REDACTED:email]"]),
+						governed: params(`write to ${EMAIL}`, [EMAIL]),
+					},
+					{ pii: "redact" },
+				);
+
+				expect(rawResult).toBe("ok");
+				expect(govResult).toBe("ok");
+				expect(gov.requests).toHaveLength(1);
+				expect(JSON.stringify(gov.requests)).not.toContain(EMAIL);
+				expect(gov.requests[0]?.body["toolConfig"]).toEqual({
+					functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["[REDACTED:email]"] },
+				});
+				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
+				expect(auditKinds).not.toContain("policy_denied");
+			});
+		}
+	}
+});
