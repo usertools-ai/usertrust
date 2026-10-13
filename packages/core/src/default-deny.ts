@@ -649,34 +649,49 @@ const GOVERNED_GOOGLE_HTTP_OPTIONS: ReadonlySet<string> = new Set([
  */
 const PROXY_ROOT_IS_TRUSTED = true;
 
-/** What `readOwn` returns for a property it cannot read without running caller code. */
-const UNREADABLE: unique symbol = Symbol("unreadable");
+/** What `readThroughChain` returns for a property it cannot read without running caller code. */
+export const UNREADABLE: unique symbol = Symbol("unreadable");
+
+/** How many objects `readThroughChain` walks before it gives up and reads the property as unreadable. */
+const MAX_CHAIN_DEPTH = 64;
 
 /**
- * An own property of `holder`, read without running caller code: its value when it is a data
- * property, `undefined` when there is none, and `UNREADABLE` when it cannot be read that way: the
- * holder is a Proxy (its descriptor trap is caller code), the property is an accessor, or the
- * holder itself was unreadable. Fails CLOSED: every check below REFUSES what is unreadable, and
- * never reads it as absent, so an accessor or a Proxy at any step of a chain is refused.
+ * Property `key` of `holder` as the SDK's own `holder[key]` finds it, read without running caller
+ * code: the prototype chain is walked from `holder`, and the first object holding `key` decides.
+ * Its value when that is a data property, `undefined` when no object on the chain holds it, and
+ * `UNREADABLE` when it cannot be read that way: an object on the chain up to that point is a Proxy
+ * (its descriptor and prototype traps are caller code), the property is an accessor, or the holder
+ * itself was unreadable. An inherited property is read, not taken as absent: the SDK reads these
+ * keys by plain property access, so a client built with `Object.create(client)`, or options whose
+ * prototype carries the key, would otherwise send what the check never saw. Fails CLOSED: every
+ * check below REFUSES what is unreadable, and never reads it as absent, so an accessor or a Proxy
+ * at any step of a chain is refused. A chain longer than `MAX_CHAIN_DEPTH` objects is unreadable
+ * too: no SDK object comes near it, and the walk stays bounded however the chain was built.
  */
-function readOwn(holder: unknown, key: string): unknown {
+export function readThroughChain(holder: unknown, key: string): unknown {
 	if (holder === UNREADABLE) return UNREADABLE;
 	if (holder == null || (typeof holder !== "object" && typeof holder !== "function")) {
 		return undefined;
 	}
-	if (utilTypes.isProxy(holder)) return UNREADABLE;
-	const d = Object.getOwnPropertyDescriptor(holder, key);
-	if (d === undefined) return undefined;
-	return "value" in d ? d.value : UNREADABLE;
+	let o: object | null = holder;
+	for (let depth = 0; o !== null; depth++) {
+		if (depth >= MAX_CHAIN_DEPTH || utilTypes.isProxy(o)) return UNREADABLE;
+		const d = Object.getOwnPropertyDescriptor(o, key);
+		if (d !== undefined) return "value" in d ? d.value : UNREADABLE;
+		o = Object.getPrototypeOf(o);
+	}
+	return undefined;
 }
 
 /**
  * A plain object: not a Proxy, and its prototype is null or SOME realm's `Object.prototype` (this
  * one, or a `vm` context's: `isRealmObjectPrototype`, read through descriptors, no caller code). A
- * function, an array or a class instance is not one. A forged prototype can pass that shape check,
- * and gains nothing: what is forwarded is a copy of the OWN data properties read here, and the
- * client options checked this way are read by the SDK through their own properties too (an object
- * spread, `Object.entries`), never through the prototype.
+ * function, an array or a class instance is not one. A forged prototype can pass that shape check.
+ * Where these values are used that gains nothing: per-call options are forwarded as a copy of the
+ * OWN data properties read here, and a client's `fetchOptions` is read by the SDK through an object
+ * spread, which copies own properties only. A Google client's `httpOptions` is the exception: the
+ * SDK reads its keys by plain property access, which finds a key on the prototype, so
+ * `googleClientMoved` holds it to THIS realm's `Object.prototype` (or none) instead.
  */
 function plainObject(value: unknown): value is Record<string, unknown> {
 	if (value === null || typeof value !== "object" || utilTypes.isProxy(value)) return false;
@@ -694,7 +709,9 @@ function plainObject(value: unknown): value is Record<string, unknown> {
  * key would let the check read one array and the SDK spread another.
  */
 function plainArray(value: unknown): value is unknown[] {
-	if (!Array.isArray(value) || utilTypes.isProxy(value)) return false;
+	// The Proxy test first: `Array.isArray` throws on a revoked Proxy, which would escape the
+	// refusal before its denial is recorded.
+	if (utilTypes.isProxy(value) || !Array.isArray(value)) return false;
 	if (Object.getPrototypeOf(value) !== Array.prototype) return false;
 	return Reflect.ownKeys(value).every((key) => {
 		if (key === "length") return true;
@@ -747,13 +764,26 @@ function governedCopy(
 	return copy;
 }
 
-/** A Google client's own `httpOptions`, read through its `apiClient`: what would move every body. */
+/**
+ * A Google client's `httpOptions`, read through its `apiClient`: what would move every body. The
+ * SDK reads `httpOptions.extraBody` by plain property access, so a key on the prototype counts:
+ * the object must be plain with THIS realm's `Object.prototype` or none (another realm's, which can
+ * be given any key, is refused), and `extraBody` is looked for along that chain. It must not carry
+ * `toJSON` either: the SDK merges a call's own `httpOptions` into a `JSON.stringify` copy of the
+ * client's, and a `toJSON` there could answer with an `extraBody`.
+ */
 function googleClientMoved(apiClient: unknown): string[] {
-	const http = readOwn(readOwn(apiClient, "clientOptions"), "httpOptions");
+	const http = readThroughChain(readThroughChain(apiClient, "clientOptions"), "httpOptions");
 	if (http === UNREADABLE) return ["client httpOptions (unreadable)"];
 	if (http === undefined || http === null) return [];
 	if (!plainObject(http)) return ["client httpOptions (not a plain object)"];
-	return Object.hasOwn(http, "extraBody") ? ["client httpOptions.extraBody"] : [];
+	const proto = Object.getPrototypeOf(http);
+	if (proto !== null && proto !== Object.prototype) {
+		return ["client httpOptions (another realm's object)"];
+	}
+	return ["extraBody", "toJSON"]
+		.filter((key) => key in http)
+		.map((key) => `client httpOptions.${key}`);
 }
 
 /**
@@ -769,9 +799,9 @@ export function movedClientOptions(provider: DefaultDenyProvider, client: unknow
 	if (client === UNREADABLE) return ["client (unreadable)"];
 	if (utilTypes.isProxy(client)) return PROXY_ROOT_IS_TRUSTED ? [] : ["client (a Proxy)"];
 	if (provider === "google")
-		return googleClientMoved(readOwn(readOwn(client, "models"), "apiClient"));
+		return googleClientMoved(readThroughChain(readThroughChain(client, "models"), "apiClient"));
 	const moved: string[] = [];
-	const fetchOptions = readOwn(client, "fetchOptions");
+	const fetchOptions = readThroughChain(client, "fetchOptions");
 	if (fetchOptions === UNREADABLE) {
 		moved.push("client fetchOptions (unreadable)");
 	} else if (fetchOptions !== undefined && fetchOptions !== null) {
@@ -784,7 +814,7 @@ export function movedClientOptions(provider: DefaultDenyProvider, client: unknow
 		}
 	}
 	if (provider === "anthropic") {
-		const middleware = readOwn(client, "middleware");
+		const middleware = readThroughChain(client, "middleware");
 		if (middleware === UNREADABLE) {
 			moved.push("client middleware (unreadable)");
 		} else if (middleware !== undefined && middleware !== null) {
@@ -815,23 +845,23 @@ export function movedRequestOptions(
 			...ungovernedKeysOf(args[1], GOVERNED_REQUEST_OPTIONS, "", "options"),
 			...(utilTypes.isProxy(target) && PROXY_ROOT_IS_TRUSTED
 				? []
-				: movedClientOptions(provider, readOwn(target, "_client"))),
+				: movedClientOptions(provider, readThroughChain(target, "_client"))),
 		];
 	}
 	const request = args[0];
 	if (utilTypes.isProxy(request)) return ["request (a Proxy)"];
-	const config = readOwn(request, "config");
+	const config = readThroughChain(request, "config");
 	return [
 		...(config === UNREADABLE ? ["config (unreadable)"] : []),
 		...ungovernedKeysOf(
-			readOwn(config, "httpOptions"),
+			readThroughChain(config, "httpOptions"),
 			GOVERNED_GOOGLE_HTTP_OPTIONS,
 			"config.httpOptions.",
 			"config.httpOptions",
 		),
 		...(utilTypes.isProxy(target) && PROXY_ROOT_IS_TRUSTED
 			? []
-			: googleClientMoved(readOwn(target, "apiClient"))),
+			: googleClientMoved(readThroughChain(target, "apiClient"))),
 	];
 }
 
@@ -849,8 +879,8 @@ export function detachedArgs(provider: DefaultDenyProvider, args: readonly unkno
 		return [args[0], governedCopy(options, GOVERNED_REQUEST_OPTIONS), ...args.slice(2)];
 	}
 	const request = args[0];
-	const config = readOwn(request, "config");
-	const http = readOwn(config, "httpOptions");
+	const config = readThroughChain(request, "config");
+	const http = readThroughChain(config, "httpOptions");
 	if (!plainObject(http)) return [...args];
 	return [
 		{

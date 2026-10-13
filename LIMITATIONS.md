@@ -152,7 +152,11 @@ refused whole, and an option held by an accessor (a getter), allowed or not, is 
 and never called. Nothing in these checks runs caller code. Anything on the way that could
 only be read that way, whether an accessor or a Proxy at any step from a resource's
 `_client` to a client's `fetchOptions`, `middleware` or Google `httpOptions`, is refused,
-never read as absent. **What is forwarded is a copy:** a new options object
+never read as absent. Each of these is read where the SDK reads it, along its prototype
+chain, since the SDK's plain property access finds an inherited value: a client wrapped as
+`Object.create(client)`, a resource whose `_client` is inherited, or an inherited `config` or
+`httpOptions` is checked like an own one, and a Proxy anywhere on that chain is refused,
+and none of its traps runs. A chain longer than 64 objects is refused too. **What is forwarded is a copy:** a new options object
 (on Google, a new `httpOptions` in a shallow copy of the request) holding only the allowed
 keys, each read once. A key the caller adds, or a value it changes, after the call starts
 cannot reach the SDK.
@@ -166,7 +170,10 @@ kept:
 - an Anthropic or OpenAI client constructed with `fetchOptions` carrying `body` or
   `method`. The SDK spreads a client's `fetchOptions` over every request after the body.
   Its transport keys, such as a proxy `dispatcher`, stay allowed;
-- a Google client whose `httpOptions` carry `extraBody`.
+- a Google client whose `httpOptions` carry `extraBody`, own or inherited, or a `toJSON`
+  (the SDK merges a call's own `httpOptions` into a `JSON.stringify` copy of the client's).
+  The SDK reads `extraBody` by property access, so the client's `httpOptions` must be a
+  plain object of this realm, or have no prototype; another realm's is refused.
 
 A default client has no middleware. A cloud-provider subclass's `backendMiddleware()`,
 which signs requests, is never read. **A client handed to `trust()` inside a Proxy is trusted
