@@ -39,6 +39,7 @@ import {
 	appendRegular,
 	eachLine,
 	guardMode,
+	PRE_METERING,
 	READ_BOUND,
 	readRegular,
 	recordWatchEvent,
@@ -521,7 +522,7 @@ const ms = (value) => (typeof value === "string" ? Date.parse(value) : Number.Na
  *   jobCoverage({ job, logs: { <sid>: <readLogs entry, or log text> }, records: [<audit event>, ...],
  *                 watch: [<watch record>, ...], unreadable: { audit, watch } })
  *     → { job, diagnostic: true, note, taggedCostUt: <integer string>, transferIds: [...],
- *         knownGaps: [{ gap, evidence }] }
+ *         beforeMetering: { responses, note }, knownGaps: [{ gap, evidence }] }
  *
  * This is NOT a certification. Every check below is a known-gap GENERATOR, a way the figure
  * can be seen to be incomplete; finding none proves nothing about what no check was written
@@ -873,6 +874,15 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 		}
 	}
 
+	// Usage a session of the job wrote before it was metered: declared by `pre-metering` records,
+	// never billed, and NEVER a known gap (a gap is a call missed while metering was on). Its own
+	// field, so it is seen beside the gaps without changing them.
+	let beforeMetering = 0;
+	for (const w of watch) {
+		if (w?.kind !== PRE_METERING || !intervalsBySession.has(w.session)) continue;
+		if (Number.isSafeInteger(w.responses) && w.responses > 0) beforeMetering += w.responses;
+	}
+
 	const seen = new Set();
 	return {
 		job,
@@ -880,6 +890,10 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 		note: "A diagnostic only: knownGaps lists the ways this figure is known to be incomplete. An empty list does not mean it is complete.",
 		taggedCostUt: String(costUt),
 		transferIds: [...transferCost.keys()],
+		beforeMetering: {
+			responses: beforeMetering,
+			note: `Before metering began: ${beforeMetering} responses (not billed)`,
+		},
 		knownGaps: knownGaps.filter((g) => {
 			const key = `${g.gap}\u0000${JSON.stringify(g.evidence)}`;
 			if (seen.has(key)) return false;

@@ -5,6 +5,23 @@ plugin marketplace (`/plugin marketplace add usertools-ai/usertrust`), not from
 npm, and its version is its own: the `usertrust` packages and their
 [changelog](../../CHANGELOG.md) are versioned separately.
 
+## [Unreleased]
+
+### Fixed
+
+- **A session metered later no longer bills what it did before.** The plugin kept one first-run
+  time per state directory. A session that first ran with no hook of this plugin (a lane switched
+  on later, or a session already open at install) had every response since that time settled at
+  its first metered hook, onto that hook's hold, stamped with the wrong time. Each session now has
+  its own first-run time: SessionStart stamps it, and a session first met at a later hook is
+  stamped there. Nothing a session wrote before its own time is posted. Those responses are
+  declared once per agent instead, as a `pre-metering` watch record
+  (`{"kind":"pre-metering","session":…,"agent":…,"responses":N,"reason":"written before this session was metered; not billed","started":null}`).
+  It is never billed and never a `gap`: the gap figure counts only calls missed while metering
+  was on. The job report shows the count in its own `beforeMetering` field, apart from
+  `knownGaps`. A session the state already held a cursor for before this change keeps the
+  state's time, so a response it left unposted is still posted.
+
 ## [3.0.2] - 2026-10-12
 
 ### Fixed

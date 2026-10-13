@@ -313,7 +313,14 @@ export function modeAnnouncement() {
 }
 
 /**
- * Append one watch record (`would_block`, `gap` or `deferred`) as a JSON line, with the time,
+ * The watch record of the responses a session wrote before it was metered (transcript.mjs
+ * `recordPreMetering`): counts only, never billed, and never a gap. Every reader of the gap
+ * figure counts `gap` records alone, so this kind stays out of it by construction.
+ */
+export const PRE_METERING = "pre-metering";
+
+/**
+ * Append one watch record (`would_block`, `gap`, `deferred` or `pre-metering`) as a JSON line, with the time,
  * session, agent and tool. Never throws: a record that cannot be written is said
  * on stderr, and the tool call proceeds either way. Returns whether the record was
  * written, so no note claims a record that is not there.

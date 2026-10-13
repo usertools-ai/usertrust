@@ -104,7 +104,9 @@
 // Per (session, agent), OUTSIDE the cursor: <state>/transcripts/estimate/
 // <session>__<agent>, the agent's recorded estimate mode. And once:
 // <state>/transcripts/since, when this state was first made — a transcript entry
-// written before it is never posted (see `firstRun`).
+// written before it is never posted (see `firstRun`). And per session:
+// <state>/transcripts/since-session/<session>, when that session was first metered
+// (see `sessionFirstRun`), never earlier than the state's own time.
 // A hold's outcome is journalled beside its pending file (<hold>.settling while
 // in flight, <hold>.done after) so the cursor can be brought up to date by the
 // next hook that gets the lock, even when the settling hook could not. Each name
@@ -146,6 +148,7 @@ import {
 	LINKLESS,
 	listPending,
 	openRegular,
+	PRE_METERING,
 	principalCapable,
 	publishExclusive,
 	READ_BOUND,
@@ -266,6 +269,8 @@ const CLAIMS_DIR = "claims";
 const ESTIMATE_DIR = "estimate";
 /** When this plugin's transcript state was first made (see `firstRun`). */
 const SINCE_FILE = "since";
+/** When each session was first metered, one file per session (see `sessionFirstRun`). */
+const SESSION_SINCE_DIR = "since-session";
 
 /**
  * Untrusted strings in a path or an actor string (agent type/id) →
@@ -785,6 +790,9 @@ function emptyCursor() {
 		estimateReason: null,
 		lastModel: null,
 		unresolved: new Map(),
+		// The responses this agent's transcript holds from before its session was metered
+		// (`recordPreMetering`): their ids until they are declared, then only the count.
+		preMetering: { ids: new Set(), responses: 0, recorded: false },
 	};
 }
 
@@ -860,6 +868,13 @@ function parseCursor(raw) {
 			if (vehicle === null) return null;
 			cursor.unresolved.set(key, vehicle);
 		}
+	}
+	// Absent in a cursor written before per-session first-run times: nothing to declare.
+	if (raw.preMetering !== undefined) {
+		const pm = raw.preMetering;
+		if (!isObject(pm) || !isStringArray(pm.ids) || typeof pm.recorded !== "boolean") return null;
+		if (!Number.isSafeInteger(pm.responses) || pm.responses < 0) return null;
+		cursor.preMetering = { ids: new Set(pm.ids), responses: pm.responses, recorded: pm.recorded };
 	}
 	const seqs = [...cursor.partial.values()].map((m) => m.n + 1);
 	cursor.nextSeq = Math.max(Number.isSafeInteger(raw.nextSeq) ? raw.nextSeq : 0, 0, ...seqs);
@@ -972,6 +987,11 @@ async function writeCursor(path, cursor) {
 			estimateReason: cursor.estimateReason,
 			lastModel: cursor.lastModel,
 			unresolved: Object.fromEntries(cursor.unresolved),
+			preMetering: {
+				ids: [...cursor.preMetering.ids].slice(-ID_HISTORY),
+				responses: cursor.preMetering.responses,
+				recorded: cursor.preMetering.recorded,
+			},
 		}),
 	);
 }
@@ -1264,7 +1284,8 @@ async function ingest(cursor, path, since) {
 	} catch (err) {
 		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
 	}
-	const result = { ok: true, badLines: 0, longLines: 0 };
+	const result = { ok: true, badLines: 0, longLines: 0, metered: false, atEnd: false };
+	const seen = { metered: false };
 	try {
 		const { size } = await handle.stat();
 		if (size < cursor.byteOffset) cursor.byteOffset = 0; // truncated or replaced: start over
@@ -1284,7 +1305,7 @@ async function ingest(cursor, path, since) {
 				const tail = view.subarray(from, end);
 				if (skipping) result.longLines += 1;
 				else if (
-					!foldLine(cursor, line.length === 0 ? tail : Buffer.concat([...line, tail]), since)
+					!foldLine(cursor, line.length === 0 ? tail : Buffer.concat([...line, tail]), since, seen)
 				) {
 					result.badLines += 1;
 				}
@@ -1304,12 +1325,41 @@ async function ingest(cursor, path, since) {
 				line.push(Buffer.from(view.subarray(from)));
 			}
 		}
+		result.atEnd = position >= size;
 	} catch (err) {
 		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
 	} finally {
 		await handle.close().catch(() => {});
 	}
+	result.metered = seen.metered;
 	return result;
+}
+
+/**
+ * Declare, once per agent of a session, the responses its transcript holds from before the
+ * session was metered (`sessionFirstRun`): one watch record, kind `pre-metering`, counts only.
+ * They are never billed, and never a gap: the gap figure counts calls missed while metering
+ * was ON, and this usage predates it. Written once every such response has been read (the
+ * ingest reached a metered one, or the end of the transcript); a record that cannot be
+ * written is tried again by the next hook.
+ */
+async function recordPreMetering(cursor, sessionId, agentId, ingested) {
+	const pm = cursor.preMetering;
+	if (pm.recorded || pm.ids.size === 0 || !(ingested.metered || ingested.atEnd)) return;
+	const responses = pm.ids.size;
+	const written = await recordWatchEvent({
+		kind: PRE_METERING,
+		mode: guardMode(),
+		session: sessionId,
+		agent: agentId,
+		responses,
+		reason: "written before this session was metered; not billed",
+		started: null,
+	});
+	if (!written) return;
+	pm.recorded = true;
+	pm.responses = responses;
+	pm.ids.clear();
 }
 
 /**
@@ -1318,7 +1368,7 @@ async function ingest(cursor, path, since) {
  * placeholder) — skipping an entry written before `since`. False when the line is
  * not JSON.
  */
-function foldLine(cursor, bytes, since) {
+function foldLine(cursor, bytes, since, seen) {
 	if (!bytes.includes(USAGE_FIELD)) return true;
 	let entry;
 	try {
@@ -1326,8 +1376,23 @@ function foldLine(cursor, bytes, since) {
 	} catch {
 		return false;
 	}
-	// Written before this plugin's state was first made: never posted (`firstRun`).
-	if (Date.parse(entry?.timestamp) < since) return true;
+	// Written before this session was first metered: never posted (`sessionFirstRun`), and
+	// counted once per response, to be declared (`recordPreMetering`).
+	if (Date.parse(entry?.timestamp) < since) {
+		const id = entry?.message?.id;
+		const pm = cursor.preMetering;
+		if (
+			!pm.recorded &&
+			typeof id === "string" &&
+			id !== "" &&
+			id.length <= MAX_ID_CHARS &&
+			isObject(entry?.message?.usage)
+		) {
+			pm.ids.add(id);
+		}
+		return true;
+	}
+	seen.metered = true;
 	const message = entry?.message;
 	const usage = message?.usage;
 	const id = message?.id;
@@ -1600,7 +1665,7 @@ async function cursorLocation(sessionId, agentId) {
 	if (!dir.ok) return { ok: false, reason: dir.reason, unavailable: true };
 	let since;
 	try {
-		since = await firstRun(dir.dir);
+		since = await sessionFirstRun(dir.dir, sessionId);
 	} catch (err) {
 		return {
 			ok: false,
@@ -1645,19 +1710,55 @@ async function firstRun(dir) {
 }
 
 /**
- * Stamp this state's first-run time now, if it has none (`firstRun`), and touch nothing else.
- * SessionStart stamps it, before any response of its session is written (session-start.mjs).
+ * When THIS SESSION was first metered, in ms, and never earlier than the state's own time
+ * (`firstRun`): published once per session, whole (`publishOnce`), and never moved. Its
+ * SessionStart stamps it; a session the plugin first meets at a later hook (one that ran with
+ * no hook of this plugin, such as a lane metered later or a session open at install) is
+ * stamped at that hook. A response the session wrote before it is never posted: usage from
+ * before the session was metered is not billed, and is declared instead (`recordPreMetering`),
+ * never settled late onto the session's first hold. A session this state already holds a
+ * cursor for was metered before per-session times existed: it keeps the state's time, so a
+ * response it left unposted is still posted, once.
+ */
+async function sessionFirstRun(dir, sessionId) {
+	const floor = await firstRun(dir);
+	const path = join(dir, SESSION_SINCE_DIR, sanitize(sessionId));
+	const read = () =>
+		readRegular(path, READ_BOUND.small).catch((err) => {
+			if (err?.code === "ENOENT") return null;
+			throw err;
+		});
+	let text = await read();
+	if (text === null) {
+		await mkdir(join(dir, SESSION_SINCE_DIR), { recursive: true, mode: 0o700 });
+		const prefix = `${sanitize(sessionId)}__`;
+		const known = (await readdir(dir)).some((n) => n.startsWith(prefix) && n.endsWith(".json"));
+		await publishOnce(path, new Date(known ? floor : Date.now()).toISOString());
+		text = await read();
+	}
+	const at = Date.parse(text ?? "");
+	if (!Number.isFinite(at)) throw new Error("not a time");
+	return Math.max(floor, at);
+}
+
+/**
+ * Stamp this state's first-run time now, if it has none (`firstRun`), and with a session id the
+ * session's own (`sessionFirstRun`), and touch nothing else. SessionStart stamps both, before
+ * any response of its session is written (session-start.mjs).
  * A transcript-mode hook that skips the server (its breaker is open) stamps it all the same:
  * otherwise the first hook after the breaker closes would, and every transcript entry of the
  * outage would read as from before this state existed, never posted. In estimate mode there is
  * no transcript state, and nothing is stamped. Never throws: the next hook that needs the time
  * reads it, and says what failed.
  */
-export async function stampFirstRun() {
+export async function stampFirstRun(sessionId) {
 	try {
 		if (usageMode() !== "transcript") return;
 		const dir = await privateStateDir();
-		if (dir.ok) await firstRun(dir.dir);
+		if (!dir.ok) return;
+		if (typeof sessionId === "string" && sessionId !== "")
+			await sessionFirstRun(dir.dir, sessionId);
+		else await firstRun(dir.dir);
 	} catch {
 		// The first hook that needs it reports it.
 	}
@@ -1862,6 +1963,7 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			await release();
 			return sticky;
 		}
+		await recordPreMetering(cursor, sessionId, agentId, ingested);
 		if (ingested.badLines > 0) {
 			say(`usertrust: skipped ${ingested.badLines} unparseable transcript line(s)`);
 		}

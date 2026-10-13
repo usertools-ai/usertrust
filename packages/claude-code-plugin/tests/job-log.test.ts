@@ -484,6 +484,37 @@ describe("jobCoverage — a diagnostic, not a certification", () => {
 		expect(r).toMatchObject({ knownGaps: [], taggedCostUt: "14" });
 		expect(r.transferIds).toHaveLength(2);
 	});
+	it("a pre-metering record is NEVER a known gap: the gaps are unchanged, and its count is reported on its own", async () => {
+		const { jobCoverage } = await lib();
+		const base = { job: J, logs: { [SID]: logText }, records: [rec({ job: J, ...inside })] };
+		const pre = {
+			kind: "pre-metering",
+			mode: "watch",
+			session: SID,
+			agent: "main",
+			responses: 3,
+			reason: "written before this session was metered; not billed",
+			started: null,
+			at: iso(T0 + 2500),
+		};
+		const without = jobCoverage(base);
+		const withIt = jobCoverage({
+			...base,
+			watch: [pre, { ...pre, session: "sess-other", responses: 5 }],
+		});
+		// The gap figure means calls missed while metering was ON: this usage predates it.
+		expect(withIt.knownGaps).toEqual(without.knownGaps);
+		expect(withIt.knownGaps).toEqual([]);
+		// Its own field, this job's sessions only.
+		expect(withIt.beforeMetering).toEqual({
+			responses: 3,
+			note: "Before metering began: 3 responses (not billed)",
+		});
+		expect(without.beforeMetering).toEqual({
+			responses: 0,
+			note: "Before metering began: 0 responses (not billed)",
+		});
+	});
 	it("test 12 (R2-B) — an empty interval has a known gap", async () => {
 		const { jobCoverage } = await lib();
 		const r = jobCoverage({ job: J, logs: { [SID]: logText }, records: [] });

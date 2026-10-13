@@ -419,9 +419,16 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   timestamp counts as after it). SessionStart makes it, whatever its `source`, so a
   fresh install posts its first session from the first response on. The history of a
   transcript resumed or compacted then is older than it, and is not posted; and once
-  made it never moves, so a later resume posts what its session left unposted. A
-  plugin installed into a session already under way posts nothing written before its
-  first hook there, the response that triggered that hook included. After a host
+  made it never moves, so a later resume posts what its session left unposted. **Each
+  session also has its own first-run time** (`transcripts/since-session/<session>`), never
+  earlier than the state's: SessionStart stamps it, and a session the plugin first meets at a
+  later hook (one that ran with no hook of this plugin, such as a lane switched on later or a
+  session open at install) is stamped at that hook. A session posts nothing written before its
+  own time, the response that triggered its first hook included, so usage from before it was
+  metered is never settled late onto its first hold. Those responses are **declared** instead,
+  once per agent of the session, as a `pre-metering` watch record (below): not billed, and never
+  a gap. A session the state already held a cursor for before per-session times existed keeps
+  the state's time, so what it left unposted is still posted. After a host
   crash or power loss (not a process crash), usage posted in the moments before it
   can be posted again, because the plugin's state files are not fsynced. Idempotency keys on the server (#205) are
   the fix. **Restoring an older copy of the state dir can
@@ -505,7 +512,10 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
   record (read from `watch.jsonl`, or `--watch FILE`, placed by when its call STARTED); a transfer known only through its
   settlement metadata; a released hold whose usage is unconfirmed; an evidence line that could not be
   parsed. A watch file that exists but cannot be read gives no verdict. An interval is (start, stop]:
-  usage at exactly the start belongs to the earlier job.
+  usage at exactly the start belongs to the earlier job. Separately, `beforeMetering` reports the
+  responses a session of the job wrote before it was metered (its `pre-metering` records, as
+  `{ "responses": N, "note": "Before metering began: N responses (not billed)" }`): never billed,
+  and never one of the `knownGaps`.
 
 ## Modes: watch-only by default
 
@@ -724,7 +734,14 @@ trimmed:
 ```json
 {"at":"2026-10-06T10:00:00.000Z","kind":"would_block","session":"<session id>","agent":"main","tool":"Bash","status":402,"error":"budget_exceeded","reason":"<the server's reason>"}
 {"at":"2026-10-06T10:00:05.000Z","kind":"gap","mode":"watch","session":"<session id>","agent":"main","tool":"Bash","reason":"fetch failed"}
+{"at":"2026-10-06T10:00:09.000Z","kind":"pre-metering","mode":"watch","session":"<session id>","agent":"main","responses":3,"reason":"written before this session was metered; not billed","started":null}
 ```
+
+A `pre-metering` record counts the responses a session's transcript held from before that
+session was metered (see the first-run time above): `responses` is how many, by message id,
+and nothing else about them is kept. They are never billed, and **a `pre-metering` record is
+never a gap**: a gap is a call missed while metering was on, and this usage predates it. The
+job report counts them separately (`beforeMetering`).
 
 `agent` is the subagent's id (`main` for the parent), and a `would_block`'s
 `status` is the refusal's: 402, 403 or 429. A `gap` written in enforce

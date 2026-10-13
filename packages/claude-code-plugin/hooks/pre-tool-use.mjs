@@ -281,7 +281,7 @@ async function governCall(input) {
 async function skipWhileOpen(input) {
 	// The state's first-run time, so the outage's transcript entries count as this state's
 	// (transcript.mjs `stampFirstRun`).
-	if (usageMode() === "transcript") await stampFirstRun();
+	if (usageMode() === "transcript") await stampFirstRun(sessionId);
 	const estimate = await settlesAtEstimate({ sessionId, agentId, input });
 	const kind = estimate ? "gap" : "deferred";
 	const recorded = await recordBreakerSkip({
