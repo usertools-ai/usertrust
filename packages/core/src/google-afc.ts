@@ -519,7 +519,7 @@ function ownDataValue(obj: object, key: string): { value: unknown } | undefined 
  * not plain, so no caller code runs. A user class's prototype, or a user function named
  * "Object", fails it; a deliberately forged prototype can pass (see `hasNativeConstructor`).
  */
-function isRealmObjectPrototype(proto: unknown): boolean {
+export function isRealmObjectPrototype(proto: unknown): boolean {
 	if (proto === Object.prototype) return true;
 	if (proto === null || typeof proto !== "object" || utilTypes.isProxy(proto)) return false;
 	if (Object.getPrototypeOf(proto) !== null) return false;
