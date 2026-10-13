@@ -96,6 +96,8 @@ let requests: Recorded[];
  * raises the allowance only when it was ANSWERED (`responseSeq`), since the plugin cannot know the
  * hold came back before then. So a settle sent before its reissue was answered is reported, as are
  * an unkeyed repeat, a hold returned under different keys, and one a key never returned again.
+ * The order is the fake server's, not the hook's: a settle racing a reissue's answer inside the
+ * server is ordered by when it arrived there, not by what the hook had observed when it sent it.
  */
 function secondSettles(log: Recorded[]): string[] {
 	type Event =
