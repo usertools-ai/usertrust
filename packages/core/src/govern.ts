@@ -5347,7 +5347,7 @@ function googleAfcError(
 			)
 		: new PolicyDeniedError(
 				`ungoverned_method: models.${method} could not be checked for automatic function calling`,
-				"The request could not be read safely: a getter threw, config is not an object, config.tools is not an array, a tool is missing (a hole) or not an object, maximumRemoteCalls is an object, or a callable tool's callTool is a getter. usertrust cannot tell whether the SDK would run automatic function calling, so it refuses. Pass plain data (an array of objects for config.tools).",
+				"The request could not be read safely: a getter threw, config is not an object, config.tools is not an array, a tool is missing (a hole) or not an object, maximumRemoteCalls is an object, a callable tool's callTool is a getter, or, beside config.tools, httpOptions is inherited or non-enumerable or (on the stream) a responseSchema with $schema sits beside a responseJsonSchema that is not an own enumerable field. usertrust cannot tell whether the SDK would run automatic function calling, so it refuses. Pass plain data (an array of objects for config.tools).",
 			);
 }
 

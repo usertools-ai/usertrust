@@ -2459,6 +2459,142 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 						expect(r.raw.requests[0]?.body["generationConfig"]).toEqual({});
 					});
 				}
+
+				// The SDK reads `config` in a different ORDER per method. generateContentStream: maybeMoveToResponseJsonSchem
+				// (responseSchema, then responseJsonSchema), then shouldDisableAfc (automaticFunctionCalling, then tools), then
+				// processParamsMaybeAddMcpUsage (tools, then the copy). generateContent: processParamsMaybeAddMcpUsage first, then
+				// maybeMoveToResponseJsonSchem, whose writes come after the copy but whose READS still happen.
+				if (method === "generateContent") {
+					const THROWING_SCHEMA: Array<[string, () => object]> = [
+						[
+							"an INHERITED",
+							() => {
+								class ThrowingSchemaConfig {
+									get responseSchema(): never {
+										throw new Error("responseSchema getter threw");
+									}
+								}
+								return Object.assign(new ThrowingSchemaConfig(), { tools: SEARCH() });
+							},
+						],
+						[
+							"a NON-ENUMERABLE own",
+							() =>
+								Object.defineProperty({ tools: SEARCH() }, "responseSchema", {
+									get: () => {
+										throw new Error("responseSchema getter threw");
+									},
+									enumerable: false,
+								}),
+						],
+					];
+					for (const [shape, makeConfig] of THROWING_SCHEMA) {
+						it(`${on}: ${shape} responseSchema getter that throws beside tools fails natively (maybeMoveToResponseJsonSchem reads it after the copy) and is refused governed, no request either way`, async () => {
+							const r = await nativeThenGoverned(method, sameConfig(makeConfig).params, { vertex });
+
+							expect(r.rawResult).toContain("responseSchema getter threw");
+							expect(r.raw.requests).toHaveLength(0);
+							expectRefused(r, method);
+						});
+					}
+				}
+
+				it(`${on}: a tools getter that turns automaticFunctionCalling.disable off before it returns a callable tool: ${
+					method === "generateContentStream"
+						? "the stream reads automaticFunctionCalling BEFORE tools, so AFC stays off: one stream request, as natively, not refused"
+						: "generateContent reads tools BEFORE automaticFunctionCalling, so AFC is on: the same requests and tool calls as natively"
+				}`, async () => {
+					const calls = { native: 0, governed: 0 };
+					const params = (who: keyof typeof calls) => () => {
+						const afc: Loose = { disable: true };
+						const callable = {
+							tool: async () => ({ functionDeclarations: [{ name: "lookup" }] }),
+							callTool: async () => {
+								calls[who]++;
+								return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+							},
+						};
+						return request(
+							withGetter({ automaticFunctionCalling: afc }, "tools", {}, () => {
+								afc["disable"] = false;
+								return [callable];
+							}),
+						);
+					};
+					const r = await nativeThenGoverned(
+						method,
+						{ native: params("native"), governed: params("governed") },
+						{
+							vertex,
+							rounds: [
+								{ functionCalls: [{ name: "lookup", args: {} }], text: "calling" },
+								{ text: "done" },
+							],
+						},
+					);
+
+					expect(r.rawResult).toBe("ok");
+					expect(r.govResult).toBe("ok");
+					expect(r.gov.requests.map((q) => q.body)).toEqual(r.raw.requests.map((q) => q.body));
+					expect(calls.governed).toBe(calls.native);
+					if (method === "generateContentStream") {
+						expect(r.raw.requests).toHaveLength(1);
+						expect(calls.native).toBe(0);
+					} else {
+						expect(r.raw.requests).toHaveLength(2);
+						expect(calls.native).toBe(1);
+					}
+				});
+
+				// generateContent reads automaticFunctionCalling only beside a callable tool (`!hasCallableTools(params) ||
+				// shouldDisableAfc(...)`), and the snapshot reads it either way, so its row carries one.
+				const ORDER_TOOLS: Array<[string, () => unknown[]]> =
+					method === "generateContent"
+						? [["a callable tool", () => [wireCallable()]]]
+						: [["a plain tool", SEARCH]];
+				for (const [tool, makeTools] of ORDER_TOOLS) {
+					it(`${on}, ${tool}: config fields are FIRST read in the SDK's order for this method (the order recorded from the SDK itself)`, async () => {
+						const logs = { native: [] as string[], governed: [] as string[] };
+						const params = (log: string[]) => () => {
+							const read = <T>(key: string, value: T): T => {
+								log.push(key);
+								return value;
+							};
+							class OrderedConfig {
+								get responseSchema(): Loose {
+									return read("responseSchema", { type: "object" });
+								}
+								get automaticFunctionCalling(): Loose {
+									return read("automaticFunctionCalling", {});
+								}
+							}
+							const config = new OrderedConfig();
+							Object.defineProperty(config, "temperature", {
+								get: () => read("temperature", 0.25),
+								enumerable: true,
+								configurable: true,
+							});
+							Object.defineProperty(config, "tools", {
+								get: () => read("tools", makeTools()),
+								enumerable: true,
+								configurable: true,
+							});
+							return request(config);
+						};
+						const r = await nativeThenGoverned(
+							method,
+							{ native: params(logs.native), governed: params(logs.governed) },
+							{ vertex },
+						);
+						const firstReads = (log: string[]) => log.filter((key, i) => log.indexOf(key) === i);
+
+						expect(r.rawResult).toBe("ok");
+						expect(r.govResult).toBe("ok");
+						expect(r.gov.requests.map((q) => q.body)).toEqual(r.raw.requests.map((q) => q.body));
+						expect(firstReads(logs.native).length).toBeGreaterThan(0);
+						expect(firstReads(logs.governed)).toEqual(firstReads(logs.native));
+					});
+				}
 			}
 		}
 	});
