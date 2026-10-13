@@ -1251,3 +1251,128 @@ describe("a revoked Proxy is refused and recorded, never thrown past the denial 
 		);
 	});
 });
+
+describe("a request that cannot be serialized to JSON is refused before anything is held or sent", () => {
+	const SECRET = "ssn 123-45-6789";
+	/** A request whose `toJSON` throws the first time it is asked, then answers `later`. */
+	const throwOnce = (base: Record<string, unknown>, later: Record<string, unknown>) => {
+		let first = true;
+		return {
+			...base,
+			toJSON() {
+				if (first) {
+					first = false;
+					throw new Error("not yet");
+				}
+				return later;
+			},
+		};
+	};
+	async function expectUnserializable(
+		call: () => Promise<unknown>,
+		eng: ReturnType<typeof engine>,
+	): Promise<void> {
+		const err = await call().then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(PolicyDeniedError);
+		expect(String((err as Error).message)).toMatch(/request_unserializable/);
+		expect(sent).toEqual([]);
+		expect(eng.spendPending).not.toHaveBeenCalled();
+		expect(policyDenied()).toHaveLength(1);
+	}
+	const surfaces: Array<
+		[
+			string,
+			() => ReturnType<typeof govern>,
+			(c: Loose, p: unknown) => Promise<unknown>,
+			Record<string, unknown>,
+			Record<string, unknown>,
+		]
+	> = [
+		[
+			"Anthropic messages.create",
+			anthropic,
+			(c, p) => c.messages.create(p),
+			A,
+			{ ...A, messages: [{ role: "user", content: SECRET }] },
+		],
+		[
+			"OpenAI chat",
+			openai,
+			(c, p) => c.chat.completions.create(p),
+			C,
+			{ ...C, messages: [{ role: "user", content: SECRET }] },
+		],
+		["OpenAI Responses", openai, (c, p) => c.responses.create(p), R, { ...R, input: SECRET }],
+	];
+
+	it.each(surfaces)(
+		"%s: a toJSON that throws once and then answers is refused, and what it would answer never leaves",
+		async (_, make, call, base, later) => {
+			const { client, eng } = await make();
+			await expectUnserializable(() => call(client, throwOnce(base, later)), eng);
+			expect(bodies.join("")).not.toContain(SECRET);
+		},
+	);
+
+	it("an honest null (a cycle) is refused at entry, with its denial recorded; nothing was ever sent for it", async () => {
+		const { client, eng } = await anthropic();
+		const message: Record<string, unknown> = { role: "user", content: "hi" };
+		message.self = message;
+		await expectUnserializable(() => client.messages.create({ ...A, messages: [message] }), eng);
+	});
+
+	it("an honest null (a BigInt) is refused before any hold, where it used to fail inside the SDK after one", async () => {
+		const { client, eng } = await openai();
+		await expectUnserializable(
+			() => client.chat.completions.create({ ...C, metadata: { n: 1n } as Loose }),
+			eng,
+		);
+	});
+
+	it("the refusal and its record carry no caller data", async () => {
+		const { client, eng } = await anthropic();
+		const later = { ...A, messages: [{ role: "user", content: SECRET }] };
+		const err = await client.messages.create(throwOnce(A, later)).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(String((err as Error).message)).not.toContain(SECRET);
+		expect(readFileSync(join(vault, VAULT_DIR, AUDIT_DIR, "events.jsonl"), "utf8")).not.toContain(
+			SECRET,
+		);
+		expect(eng.spendPending).not.toHaveBeenCalled();
+	});
+
+	it("Google, positive control: a callable tool holding a cyclic client (an MCP client's shape) is sent, as on master", async () => {
+		const { client, eng } = await google();
+		const mcpClient: Record<string, unknown> = { name: "mcp" };
+		mcpClient.self = mcpClient;
+		const tool = {
+			mcpClients: [mcpClient],
+			async tool() {
+				return { functionDeclarations: [{ name: "lookup", description: "x" }] };
+			},
+			async callTool() {
+				return [];
+			},
+		};
+		await client.models.generateContent({
+			...G,
+			config: { tools: [tool], automaticFunctionCalling: { disable: true } },
+		});
+		expect(sent).toHaveLength(1);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		expect(policyDenied()).toEqual([]);
+	});
+
+	it("Google: a request's own toJSON never reaches what is sent (the request gate sends its plain mirror), so there is nothing to refuse", async () => {
+		const { client, eng } = await google();
+		await client.models.generateContent(throwOnce(G, { ...G, contents: SECRET }));
+		expect(sent).toHaveLength(1);
+		expect(bodies.join("")).not.toContain(SECRET);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+	});
+});

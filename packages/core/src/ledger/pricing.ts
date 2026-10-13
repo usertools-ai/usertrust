@@ -710,8 +710,8 @@ export interface SerializedRequest {
 /**
  * Serialize a request once, the way the provider SDKs do (`JSON.stringify`), and scan the
  * result. Returns `null` when the request cannot be serialized to a JSON object (a cycle, a
- * BigInt, a throwing getter or `toJSON`, a text too long to build): the caller must then
- * fail dearest. This replaced a property walk that had to enumerate every way
+ * BigInt, a throwing getter or `toJSON`, a text too long to build): a governed call is then
+ * refused (`unserializableRequestError`), and `requestDeclares1hCache` answers dearest. This replaced a property walk that had to enumerate every way
  * `JSON.stringify` reads a value (accessors, `toJSON` on objects, arrays and built-ins,
  * inherited array entries, ...) and found a new one each review round.
  */
@@ -1267,8 +1267,8 @@ export function estimateBodyTokens(body: unknown): number {
 
 /**
  * The input tokens a hold reserves: the prompt parts' estimate or the whole body's, whichever is
- * larger, so no hold shrinks on input. `snapshot` is the serialized request body, or undefined
- * when the request could not be serialized (the parts' estimate alone then).
+ * larger, so no hold shrinks on input. `snapshot` is the serialized request body (a governed call
+ * without one is refused before it is held); undefined reads as the parts' estimate alone.
  */
 export function holdInputTokens(promptParts: unknown[], snapshot: unknown): number {
 	return Math.max(
