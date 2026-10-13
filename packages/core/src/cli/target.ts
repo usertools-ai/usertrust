@@ -41,13 +41,20 @@ export function warnIfVaultLoose(vaultDir: string): void {
 
 /**
  * `JSON.stringify` for a record that carries an untrusted string: C0 is already escaped by
- * `JSON.stringify`, and C1 is escaped here AFTER serialization as `\uXXXX`, so the field still
- * parses back to the real path. Substituting would corrupt a machine-readable value.
+ * `JSON.stringify`, and C1 plus Unicode format characters (`\p{Cf}`: bidi overrides, zero-width) are
+ * escaped here AFTER serialization as `\uXXXX`, so the field still parses back to the real path. Substituting would corrupt a machine-readable value.
  */
 export function toSafeJson(value: unknown): string {
 	return JSON.stringify(value).replace(
-		/[\u007f-\u009f]/g,
-		(c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+		/[\u007f-\u009f\p{Cf}]/gu,
+		// One `\uXXXX` per UTF-16 unit: some `Cf` members (the tag characters U+E0001..E007F) are
+		// supplementary-plane, so the match is a surrogate PAIR, and a 5-hex-digit code point escape
+		// is not valid JSON.
+		(c) =>
+			Array.from(
+				{ length: c.length },
+				(_, i) => `\\u${c.charCodeAt(i).toString(16).padStart(4, "0")}`,
+			).join(""),
 	);
 }
 

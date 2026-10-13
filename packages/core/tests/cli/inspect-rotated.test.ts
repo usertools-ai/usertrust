@@ -244,6 +244,25 @@ describe("usertrust inspect: rotated audit segments", () => {
 		expect(table).not.toContain("\u200b");
 	});
 
+	it("--json escapes a bidi override and a supplementary-plane tag character, and parses back to the exact name", async () => {
+		const lines = await writeNine();
+		const hostile = "events-\u202e\u{e0041}0001.jsonl";
+		cut(lines, [
+			[hostile, 1, 3],
+			["events-0002.jsonl", 4, 6],
+			["events.jsonl", 7, 9],
+		]);
+		unlinkSync(join(auditDir, "events-0002.jsonl"));
+
+		const data = await inspectJson();
+		const raw = logOutput.join("\n");
+		// Display-safe on the wire, and lossless: the field is the vault's own text once parsed.
+		expect(raw).not.toContain("\u202e");
+		expect(raw).not.toContain("\u{e0041}");
+		expect(raw).toContain("\\u202e\\udb40\\udc41");
+		expect(data.chain.errors.some((e) => e.includes(hostile))).toBe(true);
+	});
+
 	it("with colour forced on (as `CI` does), the error lines are coloured and carry the same text", async () => {
 		const lines = await writeNine();
 		cut(lines, [
