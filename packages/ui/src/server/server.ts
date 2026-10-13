@@ -47,6 +47,9 @@ const BUDGET_POLL_MS = 1000;
 import { serveStatic } from "./static.js";
 import { watchLedger } from "./tail.js";
 
+/** How long close() lets in-flight requests finish before it cuts the connections still open. */
+export const CLOSE_GRACE_MS = 400;
+
 /** Amendment A5: maximum accepted /api/export request body, in bytes. */
 const EXPORT_BODY_CAP = 64 * 1024;
 
@@ -57,11 +60,17 @@ export interface UiServer {
 	reload(): void;
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+function sendJson(
+	res: ServerResponse,
+	status: number,
+	body: unknown,
+	extraHeaders?: Record<string, string>,
+): void {
 	const payload = JSON.stringify(body);
 	res.writeHead(status, {
 		"content-type": "application/json",
 		"content-length": Buffer.byteLength(payload),
+		...extraHeaders,
 	});
 	res.end(payload);
 }
@@ -207,9 +216,23 @@ export async function createUiServer(
 		broadcast("summary", state.summary);
 	}
 
+	/** Set first thing in close(). Once true, a request that starts during the grace is refused. */
+	let closing = false;
+	/** Responses not yet finished, so close() can stop their sockets being reused. */
+	const inFlight = new Set<ServerResponse>();
+
 	const handler = (req: IncomingMessage, res: ServerResponse): void => {
-		// Amendment A3: on every response, including errors.
+		// Amendment A3: on every response, including errors. First, so no early return can skip it.
 		res.setHeader("x-content-type-options", "nosniff");
+
+		// A keep-alive client can send a new request on a socket that was busy when close() was called, and
+		// the grace would let it run (an export writing files after close(), a tail client re-registering).
+		if (closing) {
+			sendJson(res, 503, { error: "server closing" }, { connection: "close" });
+			return;
+		}
+		inFlight.add(res);
+		res.once("close", () => inFlight.delete(res));
 
 		// Amendment A3: DNS-rebinding guard — only loopback Host headers.
 		const host = req.headers.host;
@@ -417,13 +440,26 @@ export async function createUiServer(
 			handleResync();
 		},
 		close(): Promise<void> {
+			closing = true;
+			// A response whose headers are not written yet carries Connection: close, so its socket is not
+			// reused for another request during the grace.
+			for (const res of inFlight) if (!res.headersSent) res.shouldKeepAlive = false;
 			stopWatching();
 			for (const f of budgetFiles) unwatchFile(f, refreshBudget);
 			for (const c of clients) c.end();
 			clients.clear();
-			const closed = new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
-			// server.close() waits for every connection to end, and a connected client can hold it for seconds.
-			server.closeAllConnections();
+			// In-flight requests get the grace to finish; anything still open after it is closed, so a held
+			// connection can't hold close() for seconds. The timer is cleared once every connection has ended
+			// on its own, and unref'd so it never keeps the process alive.
+			let cutTimer: NodeJS.Timeout | undefined;
+			const closed = new Promise<void>((resolvePromise) =>
+				server.close(() => {
+					if (cutTimer !== undefined) clearTimeout(cutTimer);
+					resolvePromise();
+				}),
+			);
+			cutTimer = setTimeout(() => server.closeAllConnections(), CLOSE_GRACE_MS);
+			cutTimer.unref();
 			return closed;
 		},
 	};

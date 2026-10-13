@@ -2503,3 +2503,236 @@ describe("a redirect the plugin follows by hand: to the same origin, a 307 or a 
 		expect(pre.stderr).not.toContain("capabilities are unknown");
 	});
 });
+
+describe("a `.releasing` record whose give-back fails is kept, through SessionEnd, with its gaps written once", () => {
+	const RELEASING = holdName("tu_1", "tx_1", "main", "releasing");
+	const kinds: Array<[string, Record<string, unknown>, string | undefined, number]> = [
+		["a deferred call's claim (unused)", { ...ESTIMATE }, "unused", 0],
+		["a retired hold whose call ran (`ran`)", { ...ESTIMATE, ran: true }, "call-ran", 1],
+		[
+			"a windowed hold its re-fire kept (`windowJournalled`)",
+			{ ...ESTIMATE, windowJournalled: true },
+			undefined,
+			0,
+		],
+	];
+	const classes = () => requests("/v1/release").map((r) => r.body.releaseClass);
+	const kept = async () =>
+		JSON.parse(await readFile(join(stateDir, RELEASING), "utf-8")) as Record<string, unknown>;
+
+	it.each(kinds)(
+		"%s: a 503 writes its gaps at once and keeps it, marked; the next Stop's 200 drops it with no second gap",
+		async (_, fields, releaseClass, callGaps) => {
+			capabilities = ["release", "job"];
+			await seedHold("tu_1", "tx_1", fields, "releasing");
+			fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			// Written at the first failure: a session killed now still has them.
+			expect(await phased("release")).toMatchObject([{ outcome: "failed", transferId: "tx_1" }]);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+			expect(await holdFiles()).toEqual([RELEASING]);
+			expect(await kept()).toMatchObject({ transferId: "tx_1", gapWritten: true });
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(classes()).toEqual([releaseClass, releaseClass]);
+			expect(await holdFiles()).toEqual([]);
+			expect(await phased("release")).toHaveLength(1);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+		},
+		LONG,
+	);
+
+	it.each(kinds)(
+		"%s: failed at two Stops and at SessionEnd, it is still kept, with exactly one release gap; a later 404 drops it with none",
+		async (_, fields, releaseClass, callGaps) => {
+			capabilities = ["release", "job"];
+			await seedHold("tu_1", "tx_1", fields, "releasing");
+			for (const n of [1, 2, 3]) fixed.set(`/v1/release#${n}`, ANSWER.error5xx as Reply);
+			fixed.set("/v1/release#4", ANSWER.gone as Reply);
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			await run("session-end", seInput(), { ...ESTIMATE_MODE, ...seBudget(1_200) });
+			expect(classes()).toEqual([releaseClass, releaseClass, releaseClass]);
+			expect(await holdFiles()).toEqual([RELEASING]);
+			expect(await phased("release")).toHaveLength(1);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+			// A resumed session's Stop: the 404 says the hold is gone.
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await holdFiles()).toEqual([]);
+			expect(await phased("release")).toHaveLength(1);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+		},
+		LONG,
+	);
+
+	it.each<Ending>([
+		"other4xx",
+		"other404",
+		"error5xx",
+		"timeout",
+		"refused",
+		"dropped",
+		"redirect",
+	])(
+		"a deferred call's claim at a plain Stop, %s: its release gap written, and the hold kept, marked",
+		async (ending) => {
+			capabilities = ["release", "job"];
+			await seedHold("tu_1", "tx_1", { ...ESTIMATE }, "releasing");
+			aim("/v1/release", 1, ending, ["/v1/health", 1]);
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await phased("release")).toMatchObject([
+				{ transferId: "tx_1", releaseClass: "unused" },
+			]);
+			expect(await holdFiles()).toEqual([RELEASING]);
+			expect(await kept()).toMatchObject({ gapWritten: true });
+		},
+		LONG,
+	);
+
+	it("`claude --resume` after SessionEnd re-fires the deferred call: the kept record still names its hold, so it reserves nothing beside it", async () => {
+		capabilities = ["release", "job"];
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE, windowJournalled: true }, "releasing");
+		fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
+		fixed.set("/v1/release#2", ANSWER.error5xx as Reply);
+		await run("stop", stopInput(), ESTIMATE_MODE);
+		await run("session-end", seInput(), { ...ESTIMATE_MODE, ...seBudget(1_200) });
+		await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+		expect(requests("/v1/authorize")).toEqual([]);
+		expect(await holdFiles()).toEqual([RELEASING]);
+	});
+
+	it("SessionStart drops any record older than its bound (24 h), and keeps a younger one, marked or not, even past the ledger's timeout", async () => {
+		const names = {
+			oldMarked: holdName("tu_om", "tx_om", "main", "releasing"),
+			oldUnmarked: holdName("tu_ou", "tx_ou", "main", "releasing"),
+			youngMarked: holdName("tu_ym", "tx_ym", "main", "releasing"),
+			youngUnmarked: holdName("tu_yu", "tx_yu", "main", "releasing"),
+		};
+		await seedHold("tu_om", "tx_om", { ...ESTIMATE, gapWritten: true }, "releasing");
+		await seedHold("tu_ou", "tx_ou", { ...ESTIMATE }, "releasing");
+		await seedHold("tu_ym", "tx_ym", { ...ESTIMATE, gapWritten: true }, "releasing");
+		await seedHold("tu_yu", "tx_yu", { ...ESTIMATE }, "releasing");
+		const ago = (ms: number) => new Date(Date.now() - ms);
+		for (const name of [names.oldMarked, names.oldUnmarked]) {
+			await utimes(join(stateDir, name), ago(25 * 3_600_000), ago(25 * 3_600_000));
+		}
+		// Past the ledger's 5-minute pending timeout, but far inside the sweep's bound: kept.
+		for (const name of [names.youngMarked, names.youngUnmarked]) {
+			await utimes(join(stateDir, name), ago(12 * 60_000), ago(12 * 60_000));
+		}
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect((await holdFiles()).sort()).toEqual([names.youngMarked, names.youngUnmarked].sort());
+		// The marked one's gaps were on record already; the unmarked one gets its last gap.
+		expect(await phased("release")).toMatchObject([
+			{ outcome: "unresolved", transferId: "tx_ou", releaseClass: "unused" },
+		]);
+	});
+
+	it("an unmarked `ran` record past the bound is dropped with its last gaps: its call's and an unresolved release", async () => {
+		const name = holdName("tu_1", "tx_1", "main", "releasing");
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE, ran: true }, "releasing");
+		await utimes(
+			join(stateDir, name),
+			new Date(Date.now() - 25 * 3_600_000),
+			new Date(Date.now() - 25 * 3_600_000),
+		);
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect(await holdFiles()).toEqual([]);
+		expect(await unconfirmed()).toMatchObject([{ transferId: "tx_1", releaseClass: "call-ran" }]);
+		expect(await phased("release")).toMatchObject([
+			{ outcome: "unresolved", transferId: "tx_1", releaseClass: "call-ran" },
+		]);
+	});
+
+	it("DECLARED: with watch.jsonl unwritable for a whole day, an unmarked record is still dropped past the bound (its gap lost), and its call is no longer refused", async () => {
+		capabilities = ["release", "job"];
+		const name = holdName("tu_1", "tx_1", "main", "releasing");
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE, windowJournalled: true }, "releasing");
+		await utimes(
+			join(stateDir, name),
+			new Date(Date.now() - 25 * 3_600_000),
+			new Date(Date.now() - 25 * 3_600_000),
+		);
+		await mkdir(join(stateDir, "watch.jsonl"));
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect(await holdFiles()).toEqual([]);
+		nodeFs.rmSync(join(stateDir, "watch.jsonl"), { recursive: true, force: true });
+		await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+		expect(requests("/v1/authorize")).toHaveLength(1);
+	});
+
+	it.each<[string, Record<string, unknown>, number]>([
+		["a `ran` hold (a call gap and a release gap)", { ...ESTIMATE, ran: true }, 1],
+		["a deferred call's claim (a release gap only)", { ...ESTIMATE }, 0],
+	])(
+		"%s: a gap that cannot be written leaves the record unmarked; the next Stop writes it, and only then marks it",
+		async (_, fields, callGaps) => {
+			capabilities = ["release", "job"];
+			await seedHold("tu_1", "tx_1", fields, "releasing");
+			fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
+			fixed.set("/v1/release#2", ANSWER.error5xx as Reply);
+			// watch.jsonl cannot be appended: a directory holds its name.
+			await mkdir(join(stateDir, "watch.jsonl"));
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await holdFiles()).toEqual([RELEASING]);
+			expect(await kept()).not.toHaveProperty("gapWritten");
+			nodeFs.rmSync(join(stateDir, "watch.jsonl"), { recursive: true, force: true });
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+			expect(await phased("release")).toMatchObject([{ outcome: "failed", transferId: "tx_1" }]);
+			expect(await kept()).toMatchObject({ gapWritten: true });
+		},
+		LONG,
+	);
+
+	it("control: a `.settling` record's call ran and is never re-fired: a 503 drops it, with its call gap and its release gap, as before", async () => {
+		capabilities = ["release", "job"];
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE }, "settling");
+		fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
+		await run("stop", stopInput(), ESTIMATE_MODE);
+		expect(await holdFiles()).toEqual([]);
+		expect(await unconfirmed()).toMatchObject([{ transferId: "tx_1", releaseClass: "call-ran" }]);
+		expect(await phased("release")).toMatchObject([{ outcome: "failed", transferId: "tx_1" }]);
+	});
+});
+
+describe("a hold's record stores its session, and the sweep places a dropped record's gaps by it, never by its file name", () => {
+	const DAY_AGO = () => new Date(Date.now() - 25 * 3_600_000);
+
+	it("every hold PreToolUse records carries its session id in its body", async () => {
+		await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+		const [name] = await holdFiles();
+		const body = JSON.parse(await readFile(join(stateDir, String(name)), "utf-8"));
+		expect(body).toMatchObject({ sessionId: SESSION, toolUseId: "tu_1" });
+	});
+
+	it("a session id that contains `__`: the record's last gap names that session, not the prefix its file name starts with", async () => {
+		const name = "sess__child__main__tu_1.tx_1.releasing";
+		await writeFile(
+			join(stateDir, name),
+			JSON.stringify({
+				gate: 1,
+				toolUseId: "tu_1",
+				transferId: "tx_1",
+				agentId: "main",
+				sessionId: "sess__child",
+				...ESTIMATE,
+			}),
+			{ mode: 0o600 },
+		);
+		await utimes(join(stateDir, name), DAY_AGO(), DAY_AGO());
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect(await phased("release")).toMatchObject([
+			{ session: "sess__child", outcome: "unresolved", transferId: "tx_1" },
+		]);
+	});
+
+	it("an older record that stores no session: its last gap names none (counted against every job), never a guess from its name", async () => {
+		const name = holdName("tu_1", "tx_1", "main", "releasing");
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE }, "releasing");
+		await utimes(join(stateDir, name), DAY_AGO(), DAY_AGO());
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		const [gap] = await phased("release");
+		expect(gap).toMatchObject({ outcome: "unresolved", transferId: "tx_1" });
+		expect(gap?.session ?? null).toBeNull();
+	});
+});
