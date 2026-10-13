@@ -74,6 +74,9 @@ export interface ReceiptData {
 
 // ── Formatting helpers ──
 
+// The product name is lowercase, always: the header printed it letter-spaced in capitals.
+const PRODUCT_NAME = "u s e r t r u s t";
+
 const WIDTH = 45; // internal content width (between │ borders)
 
 function pad(text: string, width: number = WIDTH): string {
@@ -373,7 +376,7 @@ export function renderReceipt(data: ReceiptData): string {
 	// ── Header ──
 	lines.push(top());
 	lines.push(blank());
-	lines.push(row(center("U S E R T R U S T")));
+	lines.push(row(center(PRODUCT_NAME)));
 	lines.push(row(center("usertrust.ai")));
 	lines.push(blank());
 
@@ -504,7 +507,7 @@ export function renderNotFound(txId: string): string {
 	const lines: string[] = [];
 	lines.push(top());
 	lines.push(blank());
-	lines.push(row(center("U S E R T R U S T")));
+	lines.push(row(center(PRODUCT_NAME)));
 	lines.push(row(center("usertrust.ai")));
 	lines.push(blank());
 	lines.push(divider());

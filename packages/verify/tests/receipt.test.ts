@@ -338,6 +338,17 @@ describe("renderReceipt — denied status", () => {
 	});
 });
 
+describe("the receipt header", () => {
+	// The product name is lowercase, always. Both receipts printed it letter-spaced in capitals.
+	it("red-first ('U S E R T R U S T'): both receipts print the product name in lowercase", () => {
+		for (const output of [renderReceipt(makeReceiptData()), renderNotFound("tx_1")]) {
+			const header = output.split("\n")[2] as string;
+			expect(header.trim()).toBe("│              u s e r t r u s t              │");
+			expect(output).not.toMatch(/U ?S ?E ?R ?T ?R ?U ?S ?T|UserTrust|Usertrust/);
+		}
+	});
+});
+
 describe("renderNotFound", () => {
 	it("renders not-found with tx ID and proper structure", () => {
 		const txId = "tx_missing_999";
