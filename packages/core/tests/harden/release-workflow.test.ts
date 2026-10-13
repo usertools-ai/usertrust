@@ -39,7 +39,12 @@
  *   registry; the GitHub Release is created only after every package's publish succeeded.
  * - No setup-node restores a cache, and the publish job installs, packs and runs nothing.
  * - Republish gates on the release commit's parent only when the release commit changes
- *   nothing but the lockstep package.json "version" fields.
+ *   nothing but the lockstep package.json "version" fields and the specs that name a lockstep
+ *   sibling, each set to exactly that version.
+ * - A published package names each lockstep sibling at exactly its own version: the bump sets
+ *   them (`npm version`, which must not reinstall, then `release.sh pin-siblings`), the
+ *   release-commit check requires them, and publish refuses a manifest without them. Master
+ *   carries them too, at the version it records.
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -457,6 +462,29 @@ describe("publish.yml", () => {
 		const run = step("build", "Commit and tag (local)").run ?? "";
 		const commits = run.split("\n").filter((l) => /\bgit commit\b/.test(l));
 		expect(commits.map((l) => l.trim())).toEqual([`git commit -s -m "release: v$${"{"}VERSION}"`]);
+	});
+
+	it("the bump pins every sibling to the new version, and npm version reinstalls nothing", () => {
+		// Run in a workspace, npm version reinstalls afterwards unless told not to: with core
+		// bumped, a sibling still pinned to the previous version would be installed from the
+		// registry into the tree the build job builds.
+		const lines = (step("build", "Bump versions").run ?? "").split("\n").map((l) => l.trim());
+		const bumps = lines.filter((l) => /\bnpm\s+version\b/.test(l));
+		expect(bumps.length).toBe(1);
+		expect(bumps[0]).toMatch(
+			/^\(cd "packages\/\$\{dir\}" && npm version "\$BUMP" --no-git-tag-version --no-workspaces-update\)$/,
+		);
+		const pin = lines.indexOf("bash scripts/release.sh pin-siblings");
+		// After every package's version is bumped, in the branch a republish never takes, and
+		// before the version the release commit and tag are made for is read.
+		expect(pin).toBe(lines.indexOf("done") + 1);
+		expect(lines.indexOf("done")).toBeGreaterThan(lines.indexOf(bumps[0] as string));
+		expect(pin).toBeGreaterThan(lines.indexOf("else"));
+		expect(pin).toBeLessThan(lines.indexOf("fi"));
+		expect(pin).toBeLessThan(lines.findIndex((l) => l.startsWith("VERSION=")));
+		expect(lines.indexOf("else")).toBeGreaterThan(
+			lines.findIndex((l) => l.startsWith('if [ "$REPUBLISH" = true ]')),
+		);
 	});
 });
 
@@ -1769,7 +1797,8 @@ describe("release.sh gate (republish)", { timeout: 30_000 }, () => {
 		git("tag", "-a", "v1.0.1", "-m", "v1.0.1");
 		const r = run(["gate"], { REPUBLISH: "true" });
 		expect(r.status).not.toBe(0);
-		expect(r.err).toContain('beyond its "version" field');
+		expect(r.err).toContain('field "scripts" differs');
+		expect(r.err).toContain('beyond its "version" and its lockstep siblings');
 		expect(log()).toEqual([]);
 	});
 
@@ -1782,6 +1811,361 @@ describe("release.sh gate (republish)", { timeout: 30_000 }, () => {
 		const r = run(["gate"], { REPUBLISH: "true" });
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("changes 'README', which is not one of the six");
+	});
+});
+
+// ── The lockstep siblings: a published package requires exactly the siblings it shipped with ──
+
+type Deps = Record<string, string>;
+type Manifest = Record<string, unknown>;
+const deps = (m: Manifest | undefined, field = "dependencies"): Deps =>
+	(m as Manifest)[field] as Deps;
+
+/** The six manifests at <version>, with the dependencies the real ones have, each lockstep
+ * sibling named at <sibling>. */
+function realManifests(version: string, sibling: string): Record<string, Manifest> {
+	const fields: Record<string, Record<string, Deps>> = {
+		core: { dependencies: { zod: "^4.6.5" } },
+		verify: { dependencies: {} },
+		openclaw: {
+			dependencies: { usertrust: sibling },
+			peerDependencies: { openclaw: ">=2026.7.1-0" },
+			devDependencies: { "@mariozechner/pi-ai": "0.73.1" },
+		},
+		server: { dependencies: { usertrust: sibling, zod: "^4.6.5" } },
+		"acs-adapter": { dependencies: { usertrust: sibling } },
+		ui: {
+			dependencies: { usertrust: sibling, "usertrust-verify": sibling },
+			devDependencies: { vite: "^8.2.1" },
+		},
+	};
+	return Object.fromEntries(
+		DIRS.map((d) => [
+			d,
+			{ name: NAMES[d], version, license: "Apache-2.0", files: ["dist"], ...fields[d] },
+		]),
+	);
+}
+
+const manifestPath = (d: string) => join(repo, "packages", d, "package.json");
+
+function writeManifests(ms: Record<string, Manifest>): void {
+	for (const d of DIRS) writeFileSync(manifestPath(d), `${JSON.stringify(ms[d], null, "\t")}\n`);
+}
+
+const readManifest = (d: string): Manifest => JSON.parse(readFileSync(manifestPath(d), "utf8"));
+
+describe("the repository's lockstep manifests", () => {
+	it("name every sibling at exactly the lockstep version", () => {
+		// What the release commit leaves on master. A sibling pinned to any other version is not
+		// the workspace's own package to npm, which then installs it from the registry.
+		const ms = DIRS.map(
+			(d) =>
+				JSON.parse(readFileSync(join(ROOT, "packages", d, "package.json"), "utf8")) as Manifest,
+		);
+		const version = ms[0]?.version;
+		expect(ms.map((m) => m.version)).toEqual(DIRS.map(() => version));
+		const named: string[] = [];
+		for (const m of ms) {
+			for (const field of [
+				"dependencies",
+				"optionalDependencies",
+				"peerDependencies",
+				"devDependencies",
+			]) {
+				for (const [k, v] of Object.entries((m[field] ?? {}) as Deps)) {
+					if (Object.values(NAMES).includes(k)) named.push(`${m.name} ${field} ${k}@${v}`);
+				}
+			}
+		}
+		// The control: the packages this was reported against do name their siblings.
+		expect(named).toContain(`usertrust-server dependencies usertrust@${version}`);
+		expect(named).toContain(`usertrust-ui dependencies usertrust-verify@${version}`);
+		for (const entry of named) expect(entry.endsWith(`@${version}`), entry).toBe(true);
+	});
+});
+
+describe("release.sh pin-siblings", { timeout: 30_000 }, () => {
+	beforeEach(() => {
+		writeManifests(realManifests("1.0.0", "1.0.0"));
+		git("commit", "-q", "-am", "siblings pinned at 1.0.0");
+	});
+
+	it("sets every sibling to the bumped version, and changes nothing else", () => {
+		// What `npm version` leaves: every package at 1.0.1, every sibling still at 1.0.0.
+		writeManifests(realManifests("1.0.1", "1.0.0"));
+		const r = run(["pin-siblings"]);
+		expect(r.status, r.err).toBe(0);
+		const want = realManifests("1.0.1", "1.0.1");
+		for (const d of DIRS) expect(readManifest(d), d).toEqual(want[d]);
+		expect(r.out.trim().split("\n")).toEqual([
+			'usertrust-openclaw: dependencies usertrust "1.0.0" -> "1.0.1"',
+			'usertrust-server: dependencies usertrust "1.0.0" -> "1.0.1"',
+			'usertrust-acs-adapter: dependencies usertrust "1.0.0" -> "1.0.1"',
+			'usertrust-ui: dependencies usertrust "1.0.0" -> "1.0.1"',
+			'usertrust-ui: dependencies usertrust-verify "1.0.0" -> "1.0.1"',
+		]);
+		// In the format the files already have (tabs, a final newline), so biome has nothing to do.
+		expect(readFileSync(manifestPath("server"), "utf8")).toBe(
+			`${JSON.stringify(want.server, null, "\t")}\n`,
+		);
+	});
+
+	it("pins a sibling in every dependency field, from any spec, and leaves other names alone", () => {
+		const ms = realManifests("1.0.1", "*");
+		const server = ms.server as Manifest;
+		server.optionalDependencies = { "usertrust-verify": "^1.0.0", fsevents: "^2.3.3" };
+		server.peerDependencies = { "usertrust-ui": ">=1", react: "^19.0.0" };
+		server.devDependencies = { "usertrust-acs-adapter": "1.0.0", vitest: "^4.0.0" };
+		writeManifests(ms);
+		const r = run(["pin-siblings"]);
+		expect(r.status, r.err).toBe(0);
+		expect(readManifest("server")).toEqual({
+			name: "usertrust-server",
+			version: "1.0.1",
+			license: "Apache-2.0",
+			files: ["dist"],
+			dependencies: { usertrust: "1.0.1", zod: "^4.6.5" },
+			optionalDependencies: { "usertrust-verify": "1.0.1", fsevents: "^2.3.3" },
+			peerDependencies: { "usertrust-ui": "1.0.1", react: "^19.0.0" },
+			devDependencies: { "usertrust-acs-adapter": "1.0.1", vitest: "^4.0.0" },
+		});
+		expect(readManifest("openclaw")).toEqual(realManifests("1.0.1", "1.0.1").openclaw);
+	});
+
+	it("leaves a manifest it does not change byte for byte, and a second run changes nothing", () => {
+		writeManifests(realManifests("1.0.1", "1.0.0"));
+		// core names no sibling; written in a format pin-siblings would not write.
+		const core =
+			'{ "name": "usertrust", "version": "1.0.1", "files": ["dist"], "dependencies": { "zod": "^4.6.5" } }\n';
+		writeFileSync(manifestPath("core"), core);
+		expect(run(["pin-siblings"]).status).toBe(0);
+		expect(readFileSync(manifestPath("core"), "utf8")).toBe(core);
+		const after = DIRS.map((d) => readFileSync(manifestPath(d), "utf8"));
+		const again = run(["pin-siblings"]);
+		expect(again.status, again.err).toBe(0);
+		expect(again.out).toBe("");
+		expect(DIRS.map((d) => readFileSync(manifestPath(d), "utf8"))).toEqual(after);
+	});
+
+	it("refuses packages that disagree on the version, and changes nothing", () => {
+		const ms = realManifests("1.0.1", "1.0.0");
+		(ms.ui as Manifest).version = "1.0.2";
+		writeManifests(ms);
+		const before = DIRS.map((d) => readFileSync(manifestPath(d), "utf8"));
+		const r = run(["pin-siblings"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("packages/ui is at 1.0.2");
+		expect(DIRS.map((d) => readFileSync(manifestPath(d), "utf8"))).toEqual(before);
+	});
+});
+
+describe("the release commit: version and sibling pins, nothing else", { timeout: 30_000 }, () => {
+	/** Commits the six manifests at 1.0.0 with each sibling at <base> (after <arrangeBase>),
+	 * then the release commit v1.0.1: every version and sibling at 1.0.1, then <edit>. Returns
+	 * what release-parent, the verifier the republish gate runs, says of it. */
+	const verifyRelease = (
+		edit: (ms: Record<string, Manifest>) => void = () => {},
+		base = "1.0.0",
+		arrangeBase: (ms: Record<string, Manifest>) => void = () => {},
+	) => {
+		const before = realManifests("1.0.0", base);
+		arrangeBase(before);
+		writeManifests(before);
+		git("commit", "-q", "-am", "siblings");
+		const parent = git("rev-parse", "HEAD");
+		const ms = realManifests("1.0.1", "1.0.1");
+		edit(ms);
+		writeManifests(ms);
+		git("commit", "-q", "-am", "release: v1.0.1");
+		git("tag", "-a", "v1.0.1", "-m", "v1.0.1");
+		return { parent, ...run(["release-parent"]) };
+	};
+
+	for (const base of ["1.0.0", "*", "^1.0.0"]) {
+		it(`accepts every sibling pinned to the new version, from ${JSON.stringify(base)}`, () => {
+			const r = verifyRelease(() => {}, base);
+			expect(r.status, r.err).toBe(0);
+			expect(r.out.trim()).toBe(r.parent);
+		});
+	}
+
+	it("accepts a sibling in every dependency field, each pinned", () => {
+		const extra = (ms: Record<string, Manifest>, spec: string) => {
+			const server = ms.server as Manifest;
+			server.optionalDependencies = { "usertrust-verify": spec };
+			server.peerDependencies = { "usertrust-ui": spec };
+			server.devDependencies = { "usertrust-acs-adapter": spec };
+		};
+		const r = verifyRelease(
+			(ms) => extra(ms, "1.0.1"),
+			"1.0.0",
+			(ms) => extra(ms, "*"),
+		);
+		expect(r.status, r.err).toBe(0);
+	});
+
+	it("accepts the bump the workflow makes (npm version, then pin-siblings) on this run's commit", () => {
+		// The build job's work in a clone, handed over as a bundle, verified as the publish job does.
+		writeManifests(realManifests("1.0.0", "1.0.0"));
+		git("commit", "-q", "-am", "siblings pinned at 1.0.0");
+		const clone = join(dir, "build");
+		gitIn(dir, "clone", "-q", repo, clone);
+		const base = git("rev-parse", "HEAD");
+		const saved = repo;
+		repo = clone;
+		writeManifests(realManifests("1.0.1", "1.0.0"));
+		const pinned = run(["pin-siblings"]);
+		expect(pinned.status, pinned.err).toBe(0);
+		git("add", ...DIRS.map((d) => `packages/${d}/package.json`));
+		git("commit", "-q", "-s", "-m", "release: v1.0.1");
+		git("tag", "-a", "v1.0.1", "-m", "v1.0.1");
+		const bundle = join(dir, "release.bundle");
+		git("bundle", "create", "-q", bundle, "refs/tags/v1.0.1", `^${base}`);
+		repo = saved;
+		const r = run(["verify-release", bundle, "1.0.1"]);
+		expect(r.status, r.err).toBe(0);
+		expect(r.out.trim()).toBe(git("rev-parse", "refs/tags/v1.0.1^{commit}"));
+	});
+
+	const refusals: [string, (ms: Record<string, Manifest>) => void, string][] = [
+		[
+			"a sibling left at the previous version",
+			(ms) => {
+				deps(ms.server).usertrust = "1.0.0";
+			},
+			'usertrust-server: dependencies names usertrust at "1.0.0", not 1.0.1',
+		],
+		[
+			'a sibling left at "*"',
+			(ms) => {
+				deps(ms.ui)["usertrust-verify"] = "*";
+			},
+			'usertrust-ui: dependencies names usertrust-verify at "*", not 1.0.1',
+		],
+		[
+			"a sibling at a range the version satisfies",
+			(ms) => {
+				deps(ms.openclaw).usertrust = "^1.0.1";
+			},
+			'usertrust-openclaw: dependencies names usertrust at "^1.0.1", not 1.0.1',
+		],
+		[
+			"a sibling at another exact version",
+			(ms) => {
+				deps(ms["acs-adapter"]).usertrust = "1.0.2";
+			},
+			'usertrust-acs-adapter: dependencies names usertrust at "1.0.2", not 1.0.1',
+		],
+		[
+			"a changed non-sibling dependency",
+			(ms) => {
+				deps(ms.server).zod = "^5.0.0";
+			},
+			"usertrust-server: dependencies changes zod; a release changes only the lockstep siblings",
+		],
+		[
+			"a changed non-sibling peer",
+			(ms) => {
+				deps(ms.openclaw, "peerDependencies").openclaw = "*";
+			},
+			"usertrust-openclaw: peerDependencies changes openclaw",
+		],
+		[
+			"an added dependency",
+			(ms) => {
+				deps(ms.server)["left-pad"] = "1.3.0";
+			},
+			"usertrust-server: dependencies adds left-pad; a release adds and drops no dependency",
+		],
+		[
+			"an added sibling",
+			(ms) => {
+				deps(ms["acs-adapter"])["usertrust-verify"] = "1.0.1";
+			},
+			"usertrust-acs-adapter: dependencies adds usertrust-verify",
+		],
+		[
+			"a dropped sibling",
+			(ms) => {
+				delete deps(ms.ui)["usertrust-verify"];
+			},
+			"usertrust-ui: dependencies drops usertrust-verify",
+		],
+		[
+			"an added dependency field",
+			(ms) => {
+				(ms.core as Manifest).optionalDependencies = { "usertrust-verify": "1.0.1" };
+			},
+			'usertrust: field "optionalDependencies" differs',
+		],
+		[
+			"a dependency field that is not an object",
+			(ms) => {
+				(ms.verify as Manifest).dependencies = [];
+			},
+			'usertrust-verify: "dependencies" is not an object',
+		],
+	];
+	for (const [what, edit, message] of refusals) {
+		it(`refuses ${what}`, () => {
+			const r = verifyRelease(edit);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain(message);
+			expect(r.err).toContain('beyond its "version" and its lockstep siblings');
+		});
+	}
+
+	it("refuses a sibling in another dependency field left unpinned", () => {
+		const r = verifyRelease(
+			(ms) => {
+				(ms.server as Manifest).peerDependencies = { "usertrust-ui": "*" };
+			},
+			"1.0.0",
+			(ms) => {
+				(ms.server as Manifest).peerDependencies = { "usertrust-ui": "*" };
+			},
+		);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(
+			'usertrust-server: peerDependencies names usertrust-ui at "*", not 1.0.1',
+		);
+	});
+});
+
+describe("release.sh publish ships the pins", { timeout: 30_000 }, () => {
+	/** The package/package.json npm was handed for <d> at 1.0.0, from the fake npm's copy. */
+	const handed = (d: string): Manifest =>
+		JSON.parse(
+			readTar(readFileSync(join(dir, `log.${NAMES[d]}-1.0.0.tgz`)))
+				.find((e) => e.name === "package/package.json")
+				?.data.toString("utf8") ?? "null",
+		);
+
+	it("every published manifest names each sibling at exactly the release's version", () => {
+		writeManifests(realManifests("1.0.0", "1.0.0"));
+		git("commit", "-q", "-am", "siblings pinned at 1.0.0");
+		const out = packAll();
+		const r = run(["publish", out, "HEAD", "--dry-run"]);
+		expect(r.status, r.err).toBe(0);
+		expect(log()).toEqual(published("1.0.0", DIRS, true));
+		expect(deps(handed("server"))).toEqual({ usertrust: "1.0.0", zod: "^4.6.5" });
+		expect(deps(handed("ui"))).toEqual({ usertrust: "1.0.0", "usertrust-verify": "1.0.0" });
+	});
+
+	it("refuses a commit whose manifest names a sibling at anything else, before publishing any", () => {
+		writeManifests(realManifests("1.0.0", "*"));
+		git("commit", "-q", "-am", "siblings at *");
+		const out = packAll();
+		for (const args of [
+			["publish", out, "HEAD", "--dry-run"],
+			["publish", out, "HEAD"],
+		]) {
+			const r = run(args);
+			expect(r.status, args.join(" ")).not.toBe(0);
+			expect(r.err).toContain('usertrust-openclaw: dependencies names usertrust at "*", not 1.0.0');
+		}
+		expect(log()).toEqual([]);
 	});
 });
 
