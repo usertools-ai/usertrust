@@ -46,6 +46,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
+	copyFileSync,
+	cpSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -58,7 +60,7 @@ import {
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { archive, gz, member, readTar } from "./tar-fixture.js";
 
@@ -736,9 +738,33 @@ const protectedEnv = (
 	deployment_branch_policy: policy,
 });
 
-/** The tarballs `release.sh pack` writes, through the fake npm, into <dir>/tarballs. */
+/**
+ * `release.sh pack` run once on the pristine world (beforeAll): the tarballs it wrote, the
+ * fake npm's record of the calls it made, and the commit it packed. Immutable after beforeAll.
+ */
+let packedStore: { tarballs: string; calls: string; head: string } | undefined;
+
+/**
+ * The tarballs `release.sh pack` writes, through the fake npm, into <dir>/tarballs.
+ *
+ * A row that packs the pristine world (nothing committed, nothing modified or added since the
+ * base commit) is handed a copy of the tarballs packed once for all of them, with the calls the
+ * fake npm recorded for that pack, instead of paying for six more `npm pack` and six more
+ * python3 runs that would write the same files. Any row that has changed the tree or the
+ * commit packs for real: the pack depends on the working tree, and a copy of someone else's
+ * pack would put the wrong files into the tarball it asserts about.
+ */
 function packAll(): string {
 	const out = join(dir, "tarballs");
+	if (
+		packedStore &&
+		git("status", "--porcelain") === "" &&
+		git("rev-parse", "HEAD") === packedStore.head
+	) {
+		cpSync(packedStore.tarballs, out, { recursive: true });
+		copyFileSync(packedStore.calls, join(dir, "calls"));
+		return out;
+	}
 	const r = run(["pack", out]);
 	if (r.status !== 0) throw new Error(`pack failed: ${r.err}`);
 	rmSync(join(dir, "log"), { force: true });
@@ -804,8 +830,16 @@ function releaseCommit(version: string): void {
 	git("tag", "-a", `v${version}`, "-m", `v${version}`);
 }
 
-beforeEach(() => {
-	dir = mkdtempSync(join(tmpdir(), "release-sh-"));
+/** The pristine world every row starts from, built once; see beforeAll below. */
+let template: string;
+
+/**
+ * Builds the world a row starts in: the fake npm and gh, a repository with one base commit, and
+ * the bare origin it was pushed to. It is the whole of what each row used to build for itself,
+ * unchanged, except that it is built once and copied (the beforeEach below).
+ */
+function seedWorld(): void {
+	dir = mkdtempSync(join(tmpdir(), "release-sh-template-"));
 	repo = join(dir, "repo");
 	mkdirSync(join(dir, "bin"), { recursive: true });
 	for (const [name, body] of [
@@ -827,6 +861,44 @@ beforeEach(() => {
 	gitIn(dir, "init", "-q", "--bare", "-b", "master", "origin.git");
 	git("remote", "add", "origin", join(dir, "origin.git"));
 	git("push", "-q", "origin", "master");
+}
+
+// One world is built (about a dozen git processes) and copied into a fresh directory for each
+// row, rather than built per row. All 154 rows paid for the build, including the 24 that only
+// read publish.yml, and process creation is what a loaded machine stretches: in one full-suite
+// coverage run those 24 took 1.8 to 3.4 s each of their 5 s limit, and 28 ms each once the
+// build was shared. A row still gets its own directory, repository, origin, registry and logs,
+// copied before it runs and removed after: nothing one row writes is visible to the next,
+// which is what the per-row build guaranteed and the only thing it was for.
+beforeAll(() => {
+	seedWorld();
+	template = dir;
+	// The pristine pack, by the real `release.sh pack`, taken in the template and moved out of it:
+	// a row that never packs must not find tarballs or a calls file it did not make.
+	const tarballs = packAll();
+	const store = mkdtempSync(join(tmpdir(), "release-sh-packed-"));
+	cpSync(tarballs, join(store, "tarballs"), { recursive: true });
+	copyFileSync(join(dir, "calls"), join(store, "calls"));
+	rmSync(tarballs, { recursive: true, force: true });
+	rmSync(join(dir, "calls"), { force: true });
+	packedStore = {
+		tarballs: join(store, "tarballs"),
+		calls: join(store, "calls"),
+		head: git("rev-parse", "HEAD"),
+	};
+});
+
+afterAll(() => {
+	if (template) rmSync(template, { recursive: true, force: true });
+	if (packedStore) rmSync(join(packedStore.tarballs, ".."), { recursive: true, force: true });
+});
+
+beforeEach(() => {
+	dir = mkdtempSync(join(tmpdir(), "release-sh-"));
+	repo = join(dir, "repo");
+	cpSync(template, dir, { recursive: true });
+	// The copy's origin still names the template's directory, which this row must not push to.
+	git("remote", "set-url", "origin", join(dir, "origin.git"));
 	setRegistry([]);
 	setCi(allGreen());
 	setEnvironment(protectedEnv());
@@ -935,6 +1007,10 @@ describe("release.sh publish", { timeout: 30_000 }, () => {
 		}
 	});
 
+	// Six registry answers, each a full `release.sh publish`: the pack is shared across the six,
+	// the publish is not, because each answer must reach the digest check on its own run. This
+	// is the slowest row in the file: ~12 s idle against the 30 s limit, which is the limit it
+	// had before the shared world and pack, and stays.
 	it("a republish refuses when npm's digest for a version it holds cannot be read", () => {
 		const out = packAll();
 		for (const dist of [
