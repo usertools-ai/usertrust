@@ -649,8 +649,11 @@ const GOVERNED_GOOGLE_HTTP_OPTIONS: ReadonlySet<string> = new Set([
  */
 const PROXY_ROOT_IS_TRUSTED = true;
 
-/** What `readData` returns for a property it cannot read without running caller code. */
-const UNREADABLE: unique symbol = Symbol("unreadable");
+/** What `readThroughChain` returns for a property it cannot read without running caller code. */
+export const UNREADABLE: unique symbol = Symbol("unreadable");
+
+/** How many objects `readThroughChain` walks before it gives up and reads the property as unreadable. */
+const MAX_CHAIN_DEPTH = 64;
 
 /**
  * Property `key` of `holder` as the SDK's own `holder[key]` finds it, read without running caller
@@ -662,17 +665,20 @@ const UNREADABLE: unique symbol = Symbol("unreadable");
  * keys by plain property access, so a client built with `Object.create(client)`, or options whose
  * prototype carries the key, would otherwise send what the check never saw. Fails CLOSED: every
  * check below REFUSES what is unreadable, and never reads it as absent, so an accessor or a Proxy
- * at any step of a chain is refused.
+ * at any step of a chain is refused. A chain longer than `MAX_CHAIN_DEPTH` objects is unreadable
+ * too: no SDK object comes near it, and the walk stays bounded however the chain was built.
  */
-function readData(holder: unknown, key: string): unknown {
+export function readThroughChain(holder: unknown, key: string): unknown {
 	if (holder === UNREADABLE) return UNREADABLE;
 	if (holder == null || (typeof holder !== "object" && typeof holder !== "function")) {
 		return undefined;
 	}
-	for (let o: object | null = holder; o !== null; o = Object.getPrototypeOf(o)) {
-		if (utilTypes.isProxy(o)) return UNREADABLE;
+	let o: object | null = holder;
+	for (let depth = 0; o !== null; depth++) {
+		if (depth >= MAX_CHAIN_DEPTH || utilTypes.isProxy(o)) return UNREADABLE;
 		const d = Object.getOwnPropertyDescriptor(o, key);
 		if (d !== undefined) return "value" in d ? d.value : UNREADABLE;
+		o = Object.getPrototypeOf(o);
 	}
 	return undefined;
 }
@@ -767,7 +773,7 @@ function governedCopy(
  * client's, and a `toJSON` there could answer with an `extraBody`.
  */
 function googleClientMoved(apiClient: unknown): string[] {
-	const http = readData(readData(apiClient, "clientOptions"), "httpOptions");
+	const http = readThroughChain(readThroughChain(apiClient, "clientOptions"), "httpOptions");
 	if (http === UNREADABLE) return ["client httpOptions (unreadable)"];
 	if (http === undefined || http === null) return [];
 	if (!plainObject(http)) return ["client httpOptions (not a plain object)"];
@@ -793,9 +799,9 @@ export function movedClientOptions(provider: DefaultDenyProvider, client: unknow
 	if (client === UNREADABLE) return ["client (unreadable)"];
 	if (utilTypes.isProxy(client)) return PROXY_ROOT_IS_TRUSTED ? [] : ["client (a Proxy)"];
 	if (provider === "google")
-		return googleClientMoved(readData(readData(client, "models"), "apiClient"));
+		return googleClientMoved(readThroughChain(readThroughChain(client, "models"), "apiClient"));
 	const moved: string[] = [];
-	const fetchOptions = readData(client, "fetchOptions");
+	const fetchOptions = readThroughChain(client, "fetchOptions");
 	if (fetchOptions === UNREADABLE) {
 		moved.push("client fetchOptions (unreadable)");
 	} else if (fetchOptions !== undefined && fetchOptions !== null) {
@@ -808,7 +814,7 @@ export function movedClientOptions(provider: DefaultDenyProvider, client: unknow
 		}
 	}
 	if (provider === "anthropic") {
-		const middleware = readData(client, "middleware");
+		const middleware = readThroughChain(client, "middleware");
 		if (middleware === UNREADABLE) {
 			moved.push("client middleware (unreadable)");
 		} else if (middleware !== undefined && middleware !== null) {
@@ -839,23 +845,23 @@ export function movedRequestOptions(
 			...ungovernedKeysOf(args[1], GOVERNED_REQUEST_OPTIONS, "", "options"),
 			...(utilTypes.isProxy(target) && PROXY_ROOT_IS_TRUSTED
 				? []
-				: movedClientOptions(provider, readData(target, "_client"))),
+				: movedClientOptions(provider, readThroughChain(target, "_client"))),
 		];
 	}
 	const request = args[0];
 	if (utilTypes.isProxy(request)) return ["request (a Proxy)"];
-	const config = readData(request, "config");
+	const config = readThroughChain(request, "config");
 	return [
 		...(config === UNREADABLE ? ["config (unreadable)"] : []),
 		...ungovernedKeysOf(
-			readData(config, "httpOptions"),
+			readThroughChain(config, "httpOptions"),
 			GOVERNED_GOOGLE_HTTP_OPTIONS,
 			"config.httpOptions.",
 			"config.httpOptions",
 		),
 		...(utilTypes.isProxy(target) && PROXY_ROOT_IS_TRUSTED
 			? []
-			: googleClientMoved(readData(target, "apiClient"))),
+			: googleClientMoved(readThroughChain(target, "apiClient"))),
 	];
 }
 
@@ -873,8 +879,8 @@ export function detachedArgs(provider: DefaultDenyProvider, args: readonly unkno
 		return [args[0], governedCopy(options, GOVERNED_REQUEST_OPTIONS), ...args.slice(2)];
 	}
 	const request = args[0];
-	const config = readData(request, "config");
-	const http = readData(config, "httpOptions");
+	const config = readThroughChain(request, "config");
+	const http = readThroughChain(config, "httpOptions");
 	if (!plainObject(http)) return [...args];
 	return [
 		{

@@ -156,7 +156,7 @@ never read as absent. Each of these is read where the SDK reads it, along its pr
 chain, since the SDK's plain property access finds an inherited value: a client wrapped as
 `Object.create(client)`, a resource whose `_client` is inherited, or an inherited `config` or
 `httpOptions` is checked like an own one, and a Proxy anywhere on that chain is refused,
-and none of its traps runs. **What is forwarded is a copy:** a new options object
+and none of its traps runs. A chain longer than 64 objects is refused too. **What is forwarded is a copy:** a new options object
 (on Google, a new `httpOptions` in a shallow copy of the request) holding only the allowed
 keys, each read once. A key the caller adds, or a value it changes, after the call starts
 cannot reach the SDK.

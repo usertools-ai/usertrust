@@ -1119,6 +1119,20 @@ describe("an INHERITED transport property is read where the SDK reads it, never 
 		expect(trap).not.toHaveBeenCalled();
 	});
 
+	it("the walk is bounded: a key 64 objects down is read, one 65 down is unreadable", () => {
+		const chain = (depth: number): object => {
+			let o: object = { httpOptions: { extraBody: {} } };
+			for (let i = 1; i < depth; i++) o = Object.create(o);
+			return o;
+		};
+		expect(movedRequestOptions("google", [{ ...G, config: chain(64) }])).toEqual([
+			"config.httpOptions.extraBody",
+		]);
+		expect(movedRequestOptions("google", [{ ...G, config: chain(65) }])).toEqual([
+			"config.httpOptions (unreadable)",
+		]);
+	});
+
 	it("an inherited ALLOWED per-call option still sends (Google config from a class instance)", async () => {
 		const { client, eng } = await google();
 		class Config {
