@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { GenerateContentResponse, GoogleGenAI } from "@google/genai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
@@ -1690,6 +1691,54 @@ const UNCOPYABLE_SHAPES: Array<[shape: string, tool: () => object, at: string, h
 		"params.config.tools[0].functionDeclarations.extra",
 		/\barray with a named property\b/,
 	],
+	[
+		"an array whose prototype is another plain array",
+		() => ({ functionDeclarations: Object.setPrototypeOf([{ name: "lookup" }], []) as unknown[] }),
+		"params.config.tools[0].functionDeclarations",
+		/\barray whose prototype\b/,
+	],
+	[
+		'an array with an own "4294967295" (not an index), length 1 and a hole',
+		() => {
+			const declarations: unknown[] = new Array(1);
+			Object.defineProperty(declarations, "4294967295", {
+				value: { name: "lookup" },
+				enumerable: true,
+				writable: true,
+				configurable: true,
+			});
+			return { functionDeclarations: declarations };
+		},
+		"params.config.tools[0].functionDeclarations.4294967295",
+		/\barray with a named property\b/,
+	],
+	[
+		'an array with a non-canonical index key "01"',
+		() => ({
+			functionDeclarations: Object.assign([{ name: "lookup" }], { "01": { name: "other" } }),
+		}),
+		"params.config.tools[0].functionDeclarations.01",
+		/\barray with a named property\b/,
+	],
+];
+
+/** Arrays the walk must still accept: a dense same-realm array, and plain arrays from another realm. */
+const COPYABLE_ARRAYS: Array<[shape: string, tool: () => object]> = [
+	[
+		"a dense array of plain declarations",
+		() => ({ functionDeclarations: [{ name: "lookup" }, { name: "other", parameters: {} }] }),
+	],
+	[
+		"a declarations array from another realm",
+		() => ({ functionDeclarations: runInNewContext('[{ name: "lookup" }]') as unknown[] }),
+	],
+	[
+		"a whole tool from another realm, nested arrays included",
+		() =>
+			runInNewContext(
+				'({ functionDeclarations: [{ name: "lookup", parameters: { type: "OBJECT", required: ["q"] } }] })',
+			) as object,
+	],
 ];
 
 describe("the request is forwarded as a snapshot of the checked AFC config", () => {
@@ -1848,6 +1897,36 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 				expect(engine.spendPending).not.toHaveBeenCalled();
 				expect(client.models.generateContent).not.toHaveBeenCalled();
 				expect(generateContentStream).not.toHaveBeenCalled();
+				await destroy(governed);
+			});
+		}
+
+		for (const [shape, makeTool] of COPYABLE_ARRAYS) {
+			it(`${method}: ${shape} is accepted and forwarded as equal data (control)`, async () => {
+				const engine = makeMockEngine();
+				const audit = makeMockAudit();
+				const { client, generateContentStream } = makeGoogleClient();
+				const governed = await trust(client, {
+					dryRun: false,
+					budget: 50_000,
+					vaultBase: tmpVault,
+					_engine: engine,
+					_audit: audit,
+				});
+				const params = afcParams({ tools: [makeTool()] });
+
+				const receipt = (await callModels(governed, method, params)) as TrustReceipt;
+
+				expect(receipt.settled).toBe(true);
+				expect(audit.events.map((e) => e.kind)).not.toContain("policy_denied");
+				const sdk =
+					method === "generateContent" ? client.models.generateContent : generateContentStream;
+				expect(sdk).toHaveBeenCalledOnce();
+				const received = sdk.mock.calls[0]?.[0] as Record<string, unknown>;
+				// structuredClone makes the copy in this realm, so compare as JSON, as the wire would
+				expect(JSON.stringify((received.config as Record<string, unknown>).tools)).toBe(
+					JSON.stringify((params.config as Record<string, unknown>).tools),
+				);
 				await destroy(governed);
 			});
 		}

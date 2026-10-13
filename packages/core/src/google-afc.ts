@@ -460,8 +460,16 @@ const SDK_TOOL_FIELDS = [
  */
 const SDK_TOOL_PRESENCE_FIELD = "inputSchema";
 
-/** A canonical array index (`"0"`, `"12"`), as an own key of an array. */
+/** A canonical numeric string (`"0"`, `"12"`; never `"01"`): the form an array index key takes. */
 const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
+
+/** The largest array index, 2^32 - 2: a key of 2^32 - 1 or more is a named property, not an index. */
+const MAX_ARRAY_INDEX = 4294967294;
+
+/** `key` is an array index: canonical, and numerically at most 2^32 - 2. */
+function isArrayIndex(key: string): boolean {
+	return ARRAY_INDEX.test(key) && Number(key) <= MAX_ARRAY_INDEX;
+}
 
 /** The built-in, captured at module load: a caller who patches it later cannot make a fake constructor look native. */
 const functionToString = Function.prototype.toString;
@@ -477,27 +485,50 @@ function ownDataValue(obj: object, key: string): { value: unknown } | undefined 
  * it has no prototype of its own, and its own `constructor` is a DATA property holding a
  * native function named "Object" whose own `prototype` is `proto` itself. Read through
  * descriptors only, with the captured `Function.prototype.toString`, and a Proxy anywhere is
- * not plain, so no caller code runs. A user class's prototype, a fake "Object" function, or a
- * bound function (which has no `prototype`) fails it.
+ * not plain, so no caller code runs. A user class's prototype, or a user function named
+ * "Object", fails it; a deliberately forged prototype can pass (see `hasNativeConstructor`).
  */
 function isRealmObjectPrototype(proto: unknown): boolean {
 	if (proto === Object.prototype) return true;
 	if (proto === null || typeof proto !== "object" || utilTypes.isProxy(proto)) return false;
 	if (Object.getPrototypeOf(proto) !== null) return false;
+	return hasNativeConstructor(proto, "Object");
+}
+
+/**
+ * `proto` is SOME realm's `Array.prototype`, authenticated the way `isRealmObjectPrototype`
+ * authenticates Object's: it is an array (every realm's `Array.prototype` is), its own
+ * prototype is some realm's `Object.prototype`, and its own `constructor` is a DATA property
+ * holding a native function named "Array" whose own `prototype` is `proto` itself. Descriptors
+ * only, and a Proxy anywhere is not plain, so no caller code runs. A plain array used as a
+ * prototype (it has no own `constructor`), or an array subclass's prototype, fails it.
+ */
+function isRealmArrayPrototype(proto: unknown): boolean {
+	if (proto === Array.prototype) return true;
+	if (proto === null || typeof proto !== "object" || utilTypes.isProxy(proto)) return false;
+	if (!Array.isArray(proto) || !isRealmObjectPrototype(Object.getPrototypeOf(proto))) return false;
+	return hasNativeConstructor(proto, "Array");
+}
+
+/**
+ * `proto`'s own `constructor` is a DATA property holding a non-Proxy native function whose own
+ * `name` is `name` and whose own `prototype` is `proto`, read through descriptors and the
+ * captured `Function.prototype.toString` only.
+ *
+ * This recognises a realm's prototype by SHAPE; it does not prove it. A deliberately forged
+ * prototype passes: a bound function's toString reads as native code, and a bound function
+ * can be given an own `name` ("Object" or "Array") and an own `prototype` that points back.
+ * Fields inherited from such a prototype are then missing from the forwarded copy. What is
+ * checked, metered and sent is still that same copy, so the effect is on how faithfully
+ * nested fields are copied, never on what governance decides or charges.
+ */
+function hasNativeConstructor(proto: object, name: string): boolean {
 	const ctor = ownDataValue(proto, "constructor")?.value;
 	if (typeof ctor !== "function" || utilTypes.isProxy(ctor)) return false;
 	return (
-		ownDataValue(ctor, "name")?.value === "Object" &&
+		ownDataValue(ctor, "name")?.value === name &&
 		ownDataValue(ctor, "prototype")?.value === proto &&
 		functionToString.call(ctor).includes("[native code]")
-	);
-}
-
-/** `proto` is SOME realm's `Array.prototype`: every realm's `Array.prototype` is itself an array. */
-function isRealmArrayPrototype(proto: unknown): boolean {
-	if (proto === Array.prototype) return true;
-	return (
-		proto !== null && typeof proto === "object" && !utilTypes.isProxy(proto) && Array.isArray(proto)
 	);
 }
 
@@ -512,11 +543,14 @@ function isRealmArrayPrototype(proto: unknown): boolean {
  * Allowed: primitives; plain objects (prototype `null` or ANY realm's `Object.prototype`, so
  * data built in a `vm` context or a test runner's realm counts) whose own string-keyed
  * properties are all enumerable DATA; and DENSE arrays (any realm's `Array.prototype`)
- * holding enumerable data at every index and no named property besides `length`. Refused: an object whose prototype is not Object's or null (a class
- * instance: a user class, `Date`, `Map`, a typed array; or one made with `Object.create` from
- * another object), an array whose prototype is not Array's (an array subclass), an accessor, a non-enumerable property, a sparse array,
- * an array with an extra named property, a function. Symbol keys are neither read by the SDK
- * nor copied by structuredClone, so they are ignored.
+ * holding enumerable data at every index below `length` and no other key besides `length`
+ * (an index is canonical, `"0"` or no leading zero, and at most 2^32 - 2). Refused: an object
+ * whose prototype is not Object's or null (a class instance: a user class, `Date`, `Map`, a
+ * typed array; or one made with `Object.create` from another object), an array whose
+ * prototype is not Array's (an array subclass, or another array used as a prototype), an
+ * accessor, a non-enumerable property, a sparse array, an array with an extra named property
+ * (`"01"` and `"4294967295"` are named properties, not indexes), a function. Symbol keys are
+ * neither read by the SDK nor copied by structuredClone, so they are ignored.
  *
  * The walk runs NO caller code: every object is Proxy-checked (`util.types.isProxy`, no
  * trap) before its prototype or descriptors are read, and only descriptors are read, never
@@ -542,13 +576,18 @@ function refuseLossyClone(root: unknown, rootAt: string): void {
 		const keys = Reflect.ownKeys(value).filter((k): k is string => typeof k === "string");
 		if (isArray) {
 			const length = (value as unknown[]).length; // `length` is own data on a real array
-			let indexes = 0;
 			for (const key of keys) {
 				if (key === "length") continue;
-				if (!ARRAY_INDEX.test(key)) throw new UncloneableAfcInput(`${at}.${key}`);
-				indexes++;
+				if (!isArrayIndex(key)) throw new UncloneableAfcInput(`${at}.${key}`);
 			}
-			if (indexes !== length) throw new UncloneableAfcInput(at); // sparse
+			// Dense: EVERY index below `length` is own (its descriptor is checked below, with the
+			// other keys). This stops at the first hole, so it never runs past the own keys + 1,
+			// and a dense array costs O(length), as its clone does.
+			for (let i = 0; i < length; i++) {
+				if (Object.getOwnPropertyDescriptor(value, String(i)) === undefined) {
+					throw new UncloneableAfcInput(at); // sparse
+				}
+			}
 		}
 		for (const key of keys) {
 			if (isArray && key === "length") continue;

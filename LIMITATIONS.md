@@ -111,7 +111,10 @@ as a non-enumerable property. Inside the values of a tool's fields (a declaratio
 object whose prototype is not Object's or `null` (a class instance, or one made with
 `Object.create` from another object), an array whose prototype is not Array's, an
 accessor, a non-enumerable property, a sparse array or an array with a named property
-at any depth there is refused, as a call that could not be checked. The snapshot covers those
+at any depth there is refused, as a call that could not be checked. The prototype check
+recognises Object's and Array's prototypes by shape, so a deliberately forged prototype
+can pass it; the effect is limited to how faithfully nested fields are copied, never to
+what governance decides or charges, which use the same copy that is sent. The snapshot covers those
 AFC fields only: `contents` and the rest of the request are still read live.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.
