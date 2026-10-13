@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { execFileSync } from "node:child_process";
 import {
 	appendFileSync,
+	chmodSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
-import { loadState } from "../src/server/state.js";
+import { loadState, readRemoteSettings } from "../src/server/state.js";
 
 describe("loadState", () => {
 	let tempDir: string;
@@ -78,6 +82,192 @@ describe("loadState", () => {
 
 		const state = loadState(vaultPath, 2);
 		expect(state.rows.map((r) => r.integrity)).toEqual(["verified", "after-break"]);
+	});
+
+	// A project before its first governed call has no vault, or an audit directory with no log yet. Neither is
+	// tampering, and the dashboard showed both as a red CHAIN INTEGRITY FAILURE (or the second as "verified").
+	it("red-first (red 'Audit directory not found'): a project with no vault yet is EMPTY, valid, with no errors", () => {
+		const fresh = join(tempDir, "fresh-project", ".usertrust");
+		const { summary } = loadState(fresh);
+		expect(summary.chain).toEqual({
+			events: 0,
+			valid: true,
+			empty: true,
+			breakIndex: null,
+			errors: [],
+		});
+	});
+
+	// The live tail reloads when the log shrinks: a reload that finds the audit directory gone, after events were read
+	// from it, applied the first-run exception and replaced the chain with "no governed calls yet, nothing is wrong".
+	it("red-first (deletion read as a first run): an audit directory gone after this process saw it is a FAILURE", () => {
+		const gone = join(tempDir, "deleted-project", ".usertrust");
+		const { summary } = loadState(gone, undefined, true);
+		expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
+		expect(summary.chain.errors.join(" ")).toContain(
+			"disappeared while this dashboard was open (deletion detected)",
+		);
+		// The same directory, never seen, is a first run.
+		expect(loadState(gone).summary.chain).toMatchObject({ valid: true, empty: true });
+		expect(loadState(gone).auditDirPresent).toBe(false);
+		expect(loadState(vaultPath).auditDirPresent).toBe(true);
+	});
+
+	it("red-first (an empty log read as 'verified'): an audit directory with no events is EMPTY", () => {
+		const { summary } = loadState(vaultPath);
+		expect(summary.chain).toMatchObject({ events: 0, valid: true, empty: true, errors: [] });
+	});
+
+	// The over-correction guard: zero events is NOT enough to be empty. A log deleted while its anchor still records
+	// events is the deletion the anchor exists to catch, and it stays a failure.
+	it("a deleted log whose anchor records events stays a FAILURE, never empty", async () => {
+		await seed(3);
+		rmSync(logPath);
+		const { summary } = loadState(vaultPath);
+		expect(summary.chain.events).toBe(0);
+		expect(summary.chain.valid).toBe(false);
+		expect(summary.chain.empty).toBe(false);
+		expect(summary.chain.errors.join(" ")).toContain("deletion detected");
+	});
+
+	it("an emptied log whose anchor records events stays a FAILURE, never empty", async () => {
+		await seed(2);
+		writeFileSync(logPath, "");
+		const { summary } = loadState(vaultPath);
+		expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
+		expect(summary.chain.errors.length).toBeGreaterThan(0);
+	});
+
+	// existsSync is false for a directory this process cannot reach, not only for an absent one, and both readers
+	// then see no events: the empty-vault exception made such a vault read as clean.
+	it("red-first (an unreadable vault read as clean): a vault path that is not a directory is a FAILURE, never empty", () => {
+		const blocked = join(tempDir, "blocked");
+		mkdirSync(blocked);
+		const notADir = join(blocked, ".usertrust");
+		writeFileSync(notADir, "not a directory");
+		const { summary } = loadState(notADir);
+		expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
+		expect(summary.chain.errors.join(" ")).toContain("could not be read (ENOTDIR)");
+	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"red-first (an unreadable vault read as clean): a vault this process may not search is a FAILURE, never empty",
+		async () => {
+			await seed(2);
+			chmodSync(vaultPath, 0o000);
+			try {
+				const { summary } = loadState(vaultPath);
+				expect(summary.chain).toMatchObject({ valid: false, empty: false });
+				expect(summary.chain.errors.join(" ")).toContain("could not be read (EACCES)");
+			} finally {
+				chmodSync(vaultPath, 0o700);
+			}
+		},
+	);
+
+	// statSync follows a link, and a link whose target is missing (an unmounted volume, say) throws ENOENT: the vault
+	// read as absent, the verifier's missing-directory error was dropped, and an unreachable vault showed as a first run.
+	it.skipIf(process.platform === "win32")(
+		"red-first (an unreachable vault read as a first run): an audit link whose target is missing is a FAILURE",
+		() => {
+			rmSync(join(vaultPath, "audit"), { recursive: true });
+			symlinkSync(join(tempDir, "unmounted", "audit"), join(vaultPath, "audit"));
+			const { summary } = loadState(vaultPath);
+			expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
+			expect(summary.chain.errors.join(" ")).toContain(
+				"could not be read (a symbolic link on its path has no target)",
+			);
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"red-first (an unreachable vault read as a first run): a vault link whose target is missing is a FAILURE",
+		() => {
+			const linked = join(tempDir, "project", ".usertrust");
+			mkdirSync(join(tempDir, "project"));
+			symlinkSync(join(tempDir, "unmounted", ".usertrust"), linked);
+			const { summary } = loadState(linked);
+			expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
+			expect(summary.chain.errors.join(" ")).toContain(
+				"could not be read (a symbolic link on its path has no target)",
+			);
+		},
+	);
+
+	// Control: a link that resolves is the directory it names. A linked vault with no audit directory yet is a first run.
+	it.skipIf(process.platform === "win32")(
+		"a vault link to a real directory with no audit directory is a first run",
+		() => {
+			const target = join(tempDir, "mounted");
+			mkdirSync(target);
+			const linked = join(tempDir, "project", ".usertrust");
+			mkdirSync(join(tempDir, "project"));
+			symlinkSync(target, linked);
+			const { summary } = loadState(linked);
+			expect(summary.chain).toMatchObject({ events: 0, valid: true, empty: true, errors: [] });
+		},
+	);
+
+	// Opening a FIFO blocks until a writer appears: a FIFO planted at the config path froze the server at startup and
+	// on every config poll. A helper thread opens the FIFO's write end after 1.5 s (non-blocking, so it never waits
+	// itself): it unblocks a reader that wrongly opened it, so a regression FAILS on the time bound instead of hanging.
+	it.skipIf(process.platform === "win32")(
+		"red-first (blocked on open): a FIFO at the config path is refused without being opened",
+		async () => {
+			const fifo = join(vaultPath, "usertrust.config.json");
+			execFileSync("mkfifo", [fifo]);
+			const helper = new Worker(
+				`const { openSync, writeSync, closeSync, constants } = require("node:fs");
+				const { workerData } = require("node:worker_threads");
+				const pause = new Int32Array(new SharedArrayBuffer(4));
+				Atomics.wait(pause, 0, 0, 1500);
+				const until = Date.now() + 5000;
+				while (Date.now() < until) {
+					try {
+						const fd = openSync(workerData, constants.O_WRONLY | constants.O_NONBLOCK);
+						writeSync(fd, '{"remote":{"kit":true}}');
+						closeSync(fd);
+						break;
+					} catch {
+						Atomics.wait(pause, 0, 0, 50);
+					}
+				}`,
+				{ eval: true, workerData: fifo },
+			);
+			const started = Date.now();
+			const remote = readRemoteSettings(vaultPath);
+			const elapsed = Date.now() - started;
+			await helper.terminate();
+			expect(elapsed).toBeLessThan(1000);
+			expect(remote).toEqual({ kit: false });
+		},
+	);
+
+	it("a vault with events is not empty", async () => {
+		await seed(1);
+		expect(loadState(vaultPath).summary.chain).toMatchObject({
+			events: 1,
+			valid: true,
+			empty: false,
+		});
+	});
+
+	it("the kit mark is off by default, and when the config is unreadable", async () => {
+		await seed(1);
+		expect(loadState(vaultPath).summary.remote).toEqual({ kit: false });
+		writeFileSync(join(vaultPath, "usertrust.config.json"), "{ not json");
+		expect(loadState(vaultPath).summary.remote).toEqual({ kit: false });
+	});
+
+	it("red-first (no setting existed): remote.kit true in the vault config turns the kit mark on, beside the budget", async () => {
+		await seed(1);
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({ budget: 1_000, remote: { kit: true } }),
+		);
+		const { summary } = loadState(vaultPath);
+		expect(summary.remote).toEqual({ kit: true });
+		expect(summary).toMatchObject({ budget: 1_000, budgetSource: "config" });
 	});
 
 	it("reports an absent anchors.jsonl as file-absent, not as a verdict", async () => {

@@ -449,11 +449,31 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// unreadable. NO vendored source, no new dependency: every new import is
 		// `node:*` or `./`-relative, and `dependencies` is still `{}`. 65 lines of
 		// headroom.
+		//
+		// 10300 → 10500, for one transfer verdict (2026-10-12). Post-change total
+		// 10394, measured with the CLI scrubbing change (which landed first, at
+		// 10286) merged in; 10400 would have left 6 lines. WHAT WAS ADDED:
+		// `verdict.ts`, the transfer selection moved out of `verifyTransaction`
+		// unchanged and exported as `transferVerdict`, so the ledger UI shows each
+		// row the verdict `--tx` prints; `--tx`'s transfer match moved beside it
+		// unchanged as `matchesTransfer`, with `transferKeysOf` (the same match as
+		// keys, so the UI groups a hash-only unrecoverable record with its
+		// transfer) and `transferIdHash`; `normalizeEvent` exported; `status` on
+		// the `--tx` result; and the `<kind>_failed` arm in `eventStatus`. NO
+		// vendored source, no new dependency (`node:crypto` only), and
+		// `dependencies` is still `{}`. 106 lines of headroom.
+		//
+		// 11600 → 11800, for the two above merged (2026-10-12): post-merge total
+		// 11753. Both counted from 10300; together they pass 11600. The merge
+		// also drops `--tx`'s second read of the segment files: a gap is named
+		// from the walk's own snapshot (`sequenceSegments`, in both packages), so
+		// no file is opened twice. NO vendored source, no new dependency, and
+		// `dependencies` is still `{}`. 47 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(11600);
+		expect(total).toBeLessThan(11800);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {

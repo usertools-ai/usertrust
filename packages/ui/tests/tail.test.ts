@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { transferIdHash } from "usertrust-verify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
@@ -22,7 +23,7 @@ async function readSse(
 	predicate: (eventName: string) => boolean,
 	act: () => Promise<void>,
 	timeoutMs = 5000,
-): Promise<{ eventName: string; data: string }> {
+): Promise<{ eventName: string; data: string; id: string | undefined }> {
 	const res = await fetch(`http://127.0.0.1:${port}/api/tail`);
 	const reader = (res.body as ReadableStream<Uint8Array>).getReader();
 	await act();
@@ -38,9 +39,10 @@ async function readSse(
 		for (const block of blocks) {
 			const eventName = /event: (.+)/.exec(block)?.[1] ?? "message";
 			const data = /data: (.+)/.exec(block)?.[1] ?? "";
+			const id = /^id: (.+)$/m.exec(block)?.[1];
 			if (predicate(eventName)) {
 				await reader.cancel();
-				return { eventName, data };
+				return { eventName, data, id };
 			}
 		}
 	}
@@ -90,6 +92,146 @@ describe("live tail", () => {
 		expect(rows.some((r) => r.transferId === "tx_live")).toBe(true);
 	});
 
+	it("red-first (deletion read as a first run): deleting the audit directory under an open dashboard turns it red", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				rmSync(join(tempDir, ".usertrust", "audit"), { recursive: true, force: true });
+			},
+		);
+		const chain = JSON.parse(data).chain as { valid: boolean; empty: boolean; errors: string[] };
+		expect(chain).toMatchObject({ valid: false, empty: false });
+		expect(chain.errors.join(" ")).toContain("deletion detected");
+	});
+
+	it("red-first (stays settled): an ambiguity appended after an OPTIMISTIC settlement re-classifies the EARLIER row", async () => {
+		// The audit-first path writes `settled: true` before the POST and appends `settlement_ambiguous` only when the
+		// POST throws: the earlier row's verdict changes after it was sent, so the server sends the change.
+		const seed = createAuditWriter(tempDir);
+		await seed.appendEvent({
+			kind: "llm_call",
+			actor: "local",
+			data: { cost: 3, transferId: "tx_opt", settled: true },
+		});
+		seed.release();
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
+			rows: Array<{ id: string; hash: string; transferId?: string; status?: string }>;
+		};
+		const optimistic = before.rows.find((r) => r.transferId === "tx_opt");
+		expect(optimistic?.status).toBe("settled");
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "status",
+			async () => {
+				const writer = createAuditWriter(tempDir);
+				await writer.appendEvent({
+					kind: "settlement_ambiguous",
+					actor: "local",
+					data: { transferId: "tx_opt", error: "post failed" },
+				});
+				writer.release();
+			},
+		);
+		expect(JSON.parse(data)).toEqual([
+			{ id: optimistic?.id, hash: optimistic?.hash, status: "ambiguous" },
+		]);
+		const after = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
+			rows: Array<{ transferId?: string; kind: string; status?: string }>;
+		};
+		expect(
+			after.rows.filter((r) => r.transferId === "tx_opt").map((r) => [r.kind, r.status]),
+		).toEqual([
+			["llm_call", "ambiguous"],
+			["settlement_ambiguous", "ambiguous"],
+		]);
+	});
+
+	it("every frame carries the state's version as its SSE id, and a snapshot the version it was taken at", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const events = async () =>
+			(await (await fetch(`http://127.0.0.1:${ui?.port}/api/events`)).json()) as {
+				version: number;
+			};
+		const { version: before } = await events();
+		expect(typeof before).toBe("number");
+		const { id } = await readSse(
+			ui.port,
+			(name) => name === "rows",
+			async () => {
+				const writer = createAuditWriter(tempDir);
+				await writer.appendEvent({
+					kind: "llm_call",
+					actor: "local",
+					data: { cost: 2, transferId: "tx_v" },
+				});
+				writer.release();
+			},
+		);
+		expect(id).toBe(String(before + 1));
+		expect((await events()).version).toBe(before + 1);
+	});
+
+	it("red-first (no version, no resync): reload() is a resync — a new version, and every client told", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const events = async () =>
+			(await (await fetch(`http://127.0.0.1:${ui?.port}/api/events`)).json()) as {
+				version: number;
+			};
+		const { version: before } = await events();
+		const { eventName, id } = await readSse(
+			ui.port,
+			(name) => name === "resync",
+			async () => {
+				ui?.reload();
+			},
+		);
+		expect(eventName).toBe("resync");
+		expect(id).toBe(String(before + 1));
+		expect((await events()).version).toBe(before + 1);
+	});
+
+	it("red-first (two requests): the snapshot carries the summary taken at the same version as its rows", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const snap = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
+			rows: unknown[];
+			summary?: { rowCount: number; chain: { events: number } };
+			version: number;
+		};
+		expect(snap.summary).toBeDefined();
+		expect(snap.summary?.rowCount).toBe(snap.rows.length);
+		expect(snap.summary?.chain.events).toBe(snap.rows.length);
+	});
+
+	it("red-first (unrecoverable): a late settle's hash-only record joins its swept transfer live: RELEASED", async () => {
+		const seed = createAuditWriter(tempDir);
+		await seed.appendEvent({
+			kind: "hold_released",
+			actor: "local",
+			data: { transferId: "tx_swept", reason: "pending TTL expired" },
+		});
+		seed.release();
+		ui = await createUiServer(tempDir, { port: 0 });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "rows",
+			async () => {
+				const writer = createAuditWriter(tempDir);
+				await writer.appendEvent({
+					kind: "settlement_unrecoverable",
+					actor: "local",
+					data: { transferIdHash: transferIdHash("tx_swept"), reason: "no hold" },
+				});
+				writer.release();
+			},
+		);
+		expect(
+			(JSON.parse(data) as Array<{ kind: string; status?: string }>).map((r) => [r.kind, r.status]),
+		).toEqual([["settlement_unrecoverable", "released"]]);
+	});
+
 	it("red-first (stale): a governor starting while the UI runs updates the summary's budget (the record is outside audit/)", async () => {
 		ui = await createUiServer(tempDir, { port: 0 });
 		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
@@ -130,6 +272,23 @@ describe("live tail", () => {
 		expect(summary.budgetProvenance).toContain("not a regular file");
 	});
 
+	it("red-first (same version): a budget refresh is a state change: its summary frame carries a NEWER version than a snapshot taken before it", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const snap = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
+			version: number;
+		};
+		const { id, data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				recordEffectiveBudget(join(tempDir, ".usertrust"), 4_000);
+			},
+			8000,
+		);
+		expect(JSON.parse(data)).toMatchObject({ budget: 4_000 });
+		expect(Number(id)).toBeGreaterThan(snap.version);
+	});
+
 	it("signals resync when the log shrinks", async () => {
 		ui = await createUiServer(tempDir, { port: 0 });
 		const logPath = join(tempDir, ".usertrust", "audit", "events.jsonl");
@@ -168,5 +327,177 @@ describe("live tail", () => {
 			},
 		);
 		expect(eventName).toBe("resync");
+	});
+});
+
+// Before a project's first governed call there is no audit directory, and fs.watch cannot watch a path that does not
+// exist: the dashboard opened on a new project showed "no governed calls yet" and never showed the first one.
+describe("live tail on a project with no vault yet", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-fresh-"));
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("red-first (never delivered): the first event, written after the server started, reaches the client", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			chain: { events: number; empty: boolean };
+		};
+		expect(before.chain).toMatchObject({ events: 0, empty: true });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				const writer = createAuditWriter(tempDir);
+				await writer.appendEvent({
+					kind: "llm_call",
+					actor: "local",
+					data: { cost: 4, settled: true, transferId: "tx_first" },
+				});
+				writer.release();
+			},
+			8000,
+		);
+		expect(JSON.parse(data).chain).toMatchObject({ events: 1, valid: true, empty: false });
+		const { rows } = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
+			rows: Array<{ transferId?: string }>;
+		};
+		expect(rows.map((r) => r.transferId)).toEqual(["tx_first"]);
+	});
+});
+
+describe("header spend", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-spend-"));
+		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	// One rule at load and on a live append: the header counts llm_call costs. Trends shows every costed record in
+	// view under its own label, so the two figures are never presented as one quantity.
+	it("counts the same records at load and on a live append", async () => {
+		const seed = createAuditWriter(tempDir);
+		await seed.appendEvent({
+			kind: "llm_call",
+			actor: "local",
+			data: { cost: 7, transferId: "tx_a" },
+		});
+		await seed.appendEvent({
+			kind: "tool_use",
+			actor: "local",
+			data: { cost: 30, settled: true, transferId: "tx_b" },
+		});
+		seed.release();
+		ui = await createUiServer(tempDir, { port: 0 });
+		const loaded = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			spentUt: number;
+		};
+		expect(loaded.spentUt).toBe(7);
+		const append = (kind: string, data: Record<string, unknown>) => async () => {
+			const writer = createAuditWriter(tempDir);
+			await writer.appendEvent({ kind, actor: "local", data });
+			writer.release();
+		};
+		const port = ui.port;
+		const afterTool = await readSse(
+			port,
+			(name) => name === "summary",
+			append("tool_use", { cost: 40, settled: true, transferId: "tx_c" }),
+		);
+		expect(JSON.parse(afterTool.data).spentUt).toBe(7);
+		const afterCall = await readSse(
+			port,
+			(name) => name === "summary",
+			append("llm_call", { cost: 2, transferId: "tx_d" }),
+		);
+		expect(JSON.parse(afterCall.data).spentUt).toBe(9);
+	});
+});
+
+describe("remote settings", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-remote-"));
+		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("turning the kit mark on in the vault config reaches the client without a restart", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			remote: { kit: boolean };
+		};
+		expect(before.remote).toEqual({ kit: false });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				writeFileSync(
+					join(tempDir, ".usertrust", "usertrust.config.json"),
+					JSON.stringify({ remote: { kit: true } }),
+				);
+			},
+		);
+		expect(JSON.parse(data).remote).toEqual({ kit: true });
+	});
+});
+
+// A log of malformed lines only fails verification with ZERO parsed events: a guard that counted parsed events read its
+// later deletion as a first run. The server remembers that it saw the directory, whatever it held.
+describe("deletion of an audit directory that held no parsable event", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-malformed-"));
+		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+		writeFileSync(join(tempDir, ".usertrust", "audit", "events.jsonl"), "{ not json\n");
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("red-first (cleared to a first run): deleting it under an open dashboard stays red", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			chain: { events: number; valid: boolean };
+		};
+		expect(before.chain).toMatchObject({ events: 0, valid: false });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				rmSync(join(tempDir, ".usertrust", "audit"), { recursive: true, force: true });
+			},
+		);
+		const chain = JSON.parse(data).chain as { valid: boolean; empty: boolean; errors: string[] };
+		expect(chain).toMatchObject({ valid: false, empty: false });
+		expect(chain.errors.join(" ")).toContain("deletion detected");
 	});
 });

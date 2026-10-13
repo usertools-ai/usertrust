@@ -8,6 +8,8 @@
  * ZERO DEPENDENCIES — Node built-ins only.
  */
 
+import type { TransferStatus } from "./verdict.js";
+
 // ── Types ──
 
 export interface TransactionEvent {
@@ -44,7 +46,12 @@ export interface ReceiptData {
 	readonly merkleRoot: string;
 	readonly merkleVerified: boolean;
 	readonly chainVerified: boolean;
-	readonly cumulativeSpend: number;
+	/**
+	 * @deprecated Not printed. It is the running total of every `llm_call` cost up to the event, and the receipt
+	 * printed it as "Spend" beside ONE transaction, so a 1,144 UT call read 9,535 UT, the vault's spend. A receipt
+	 * prints its own transaction's cost (`event.data.cost`). Optional, so a caller that still passes it compiles.
+	 */
+	readonly cumulativeSpend?: number | undefined;
 	readonly verifiedAt: Date;
 	/**
 	 * Honest Merkle-row label. "INCLUSION VERIFIED" may ONLY be passed when
@@ -66,6 +73,9 @@ export interface ReceiptData {
 }
 
 // ── Formatting helpers ──
+
+// The product name is lowercase, always: the header printed it letter-spaced in capitals.
+const PRODUCT_NAME = "u s e r t r u s t";
 
 const WIDTH = 45; // internal content width (between │ borders)
 
@@ -116,39 +126,21 @@ function bottom(): string {
 
 // ── Date formatting ──
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-function formatDate(iso: string): string {
-	const d = new Date(iso);
-	const mon = MONTHS[d.getMonth()] ?? "???";
-	const day = d.getDate();
-	const year = d.getFullYear();
-	let hours = d.getHours();
-	const mins = d.getMinutes().toString().padStart(2, "0");
-	const ampm = hours >= 12 ? "PM" : "AM";
-	hours = hours % 12 || 12;
-	return `${mon} ${day}, ${year}  ${hours}:${mins} ${ampm}`;
-}
-
-function formatDateObj(d: Date): string {
-	const mon = MONTHS[d.getMonth()] ?? "???";
-	const day = d.getDate();
-	const year = d.getFullYear();
-	let hours = d.getHours();
-	const mins = d.getMinutes().toString().padStart(2, "0");
-	const ampm = hours >= 12 ? "PM" : "AM";
-	hours = hours % 12 || 12;
-	return `${mon} ${day}, ${year}  ${hours}:${mins} ${ampm}`;
+// UTC, and it says so (`YYYY-MM-DD HH:MM:SSZ`). The receipt printed the verifying machine's local time with no
+// zone, so one instant read differently on every auditor's machine. An unreadable timestamp prints as such:
+// `toISOString` throws on it, and the timestamp is the audited vault's text.
+function formatUtc(d: Date): string {
+	if (Number.isNaN(d.getTime())) return "unreadable time";
+	return `${d.toISOString().slice(0, 19).replace("T", " ")}Z`;
 }
 
 // ── USD conversion ──
-// 1 UT = $0.0001 (one basis point of a cent)
+// 1 UT = $0.0001 (one basis point of a cent), so 4 dp is exact. Rounding to 2 dp above a cent printed a
+// $0.1144 call as $0.11.
 const UT_TO_USD = 0.0001;
 
 function formatUsd(ut: number): string {
-	const usd = ut * UT_TO_USD;
-	if (usd < 0.01) return `$${usd.toFixed(4)}`;
-	return `$${usd.toFixed(2)}`;
+	return `$${(ut * UT_TO_USD).toFixed(4)}`;
 }
 
 // ── Word wrap ──
@@ -315,7 +307,8 @@ export const RELEASE_KINDS = new Set(["hold_released"]);
  */
 export const UNRECOVERABLE_KINDS = new Set(["settlement_unrecoverable"]);
 
-function resolveStatus(event: TransactionEvent): string {
+/** The status ONE record carries on its own; a transfer's verdict picks the record first (`verdict.ts`). */
+export function eventStatus(event: TransactionEvent): TransferStatus {
 	if (DENIAL_KINDS.has(event.kind)) return "DENIED";
 	// `stream_partial_delivery` is a FAILURE TERMINAL (AGENTS.md): the hold was
 	// voided and nothing settled. It is the record that proves a cutoff actually
@@ -330,6 +323,9 @@ function resolveStatus(event: TransactionEvent): string {
 	if (event.kind === "settlement_ambiguous") return "AMBIGUOUS";
 	if (event.kind === "stream_partial_delivery") return "FAILED";
 	if (event.kind === "llm_call_failed") return "FAILED";
+	// An action's `<kind>_failed` (`governAction`'s catch) is a failure terminal too: the selection layer already
+	// counted it as one (`firstTerminalOf`), but its status fell through to PENDING here.
+	if (event.kind.endsWith("_failed")) return "FAILED";
 	if (RELEASE_KINDS.has(event.kind)) return "RELEASED";
 	if (UNRECOVERABLE_KINDS.has(event.kind)) return "UNRECOVERABLE";
 	if (event.data.settled === true) return "SETTLED";
@@ -339,26 +335,17 @@ function resolveStatus(event: TransactionEvent): string {
 // ── Receipt renderer ──
 
 export function renderReceipt(data: ReceiptData): string {
-	const {
-		event,
-		chainLength,
-		merkleRoot,
-		merkleVerified,
-		chainVerified,
-		cumulativeSpend,
-		verifiedAt,
-	} = data;
-	const status = resolveStatus(event);
+	const { event, chainLength, merkleRoot, merkleVerified, chainVerified, verifiedAt } = data;
+	const status = eventStatus(event);
 	// `detectProvider` matches on the RAW value — scrubbing first would let a
 	// leading control character hide a real provider prefix and mislabel the
 	// row. Only the rendered copy is scrubbed.
 	const model = event.data.model ?? "unknown";
 	const provider = detectProvider(model);
 	const cost = event.data.cost;
-	const isFailed =
-		event.kind === "llm_call_failed" ||
-		event.kind === "stream_partial_delivery" ||
-		event.kind === "settlement_ambiguous";
+	// The status's own predicate (`eventStatus`), so every failure it names renders as one: an action's
+	// `<kind>_failed` printed FAILED with no reason block when this listed kinds of its own.
+	const isFailed = status === "FAILED" || status === "AMBIGUOUS";
 	// A denial spent nothing, so it renders no spend lines — but its `error` is
 	// the whole point of the receipt and must still be shown.
 	const isDenied = DENIAL_KINDS.has(event.kind);
@@ -389,7 +376,7 @@ export function renderReceipt(data: ReceiptData): string {
 	// ── Header ──
 	lines.push(top());
 	lines.push(blank());
-	lines.push(row(center("U S E R T R U S T")));
+	lines.push(row(center(PRODUCT_NAME)));
 	lines.push(row(center("usertrust.ai")));
 	lines.push(blank());
 
@@ -403,13 +390,16 @@ export function renderReceipt(data: ReceiptData): string {
 	} else {
 		lines.push(row(`${dotted("  TX", forDisplay(event.data.transferId ?? "(none)"), WIDTH - 1)} `));
 	}
-	lines.push(row(`${dotted("  Date", forDisplay(formatDate(event.timestamp)), WIDTH - 1)} `));
+	lines.push(
+		row(`${dotted("  Date", forDisplay(formatUtc(new Date(event.timestamp))), WIDTH - 1)} `),
+	);
 	lines.push(row(`${dotted("  Model", forDisplay(model), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Provider", provider, WIDTH - 1)} `));
 
+	// THIS transaction's cost: the receipt is for one transaction.
 	if (!isFailed && !isDenied && !isDetection && cost !== undefined) {
-		lines.push(row(`${dotted("  Spend", `${cumulativeSpend} UT`, WIDTH - 1)} `));
-		lines.push(row(`${dotted("  Conversion", formatUsd(cumulativeSpend), WIDTH - 1)} `));
+		lines.push(row(`${dotted("  Spend", `${cost} UT`, WIDTH - 1)} `));
+		lines.push(row(`${dotted("  Conversion", formatUsd(cost), WIDTH - 1)} `));
 	}
 
 	lines.push(row(`${dotted("  Status", status, WIDTH - 1)} `));
@@ -504,7 +494,7 @@ export function renderReceipt(data: ReceiptData): string {
 	// ── Footer ──
 	lines.push(divider());
 	lines.push(row(`${dotted("  Root", truncHash(merkleRoot), WIDTH - 1)} `));
-	lines.push(row(`${dotted("  Verified", formatDateObj(verifiedAt), WIDTH - 1)} `));
+	lines.push(row(`${dotted("  Verified", formatUtc(verifiedAt), WIDTH - 1)} `));
 	lines.push(blank());
 	lines.push(bottom());
 
@@ -517,7 +507,7 @@ export function renderNotFound(txId: string): string {
 	const lines: string[] = [];
 	lines.push(top());
 	lines.push(blank());
-	lines.push(row(center("U S E R T R U S T")));
+	lines.push(row(center(PRODUCT_NAME)));
 	lines.push(row(center("usertrust.ai")));
 	lines.push(blank());
 	lines.push(divider());

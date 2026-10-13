@@ -8,6 +8,7 @@
  */
 
 import type { ChainIntegrity, PersistedAuditEvent } from "usertrust";
+import type { TransferStatus } from "usertrust-verify";
 
 export type RowIntegrity = "verified" | "after-break";
 
@@ -26,12 +27,19 @@ export interface LedgerRow {
 	error?: string;
 	transferId?: string;
 	usageSource?: "provider" | "estimated";
+	/**
+	 * The row's status, set by the SERVER from its transfer's verdict (`transferVerdict` in usertrust-verify, the one
+	 * classification `usertrust-verify --tx` prints). Absent only on a row built without one; `statusOf` then falls
+	 * back to the kind's class.
+	 */
+	status?: RowStatus;
 	hash: string;
 	previousHash: string;
 	integrity: RowIntegrity;
 }
 
-const UT_TO_USD = 0.0001;
+/** Core's fixed rate (`ledger/pricing.ts`): 1 usertoken is $0.0001. */
+export const UT_TO_USD = 0.0001;
 
 /** Mirrors packages/verify/src/receipt.ts (verify stays zero-dep). */
 export function detectProvider(model: string): string {
@@ -53,9 +61,15 @@ function bool(v: unknown): boolean | undefined {
 	return typeof v === "boolean" ? v : undefined;
 }
 
+/**
+ * `verdictOf` gives an event's TRANSFER verdict (the server builds it over every event of the transfer, with
+ * usertrust-verify's `transferVerdict`). Without it, a row whose kind carries a transfer's outcome is "unknown":
+ * this module never guesses an outcome from one row's fields.
+ */
 export function toLedgerRows(
 	events: PersistedAuditEvent[],
 	integrity: ChainIntegrity,
+	verdictOf?: (e: PersistedAuditEvent) => TransferStatus | undefined,
 ): LedgerRow[] {
 	return events.map((e, i) => {
 		const model = str(e.data.model);
@@ -92,48 +106,102 @@ export function toLedgerRows(
 		const transferId = str(e.data.transferId);
 		if (transferId !== undefined) row.transferId = transferId;
 		if (usageSource !== undefined) row.usageSource = usageSource;
+		row.status = statusFor(e.kind, e.data, verdictOf?.(e));
 		return row;
 	});
 }
 
-/**
- * Governance denials. Checked FIRST, because a denial event carries an `error`
- * string and the generic mapping would otherwise file every refusal alongside
- * provider failures — a refused call and a broken call are different facts, and
- * the ledger's own table is where an operator tells them apart.
- */
-const DENIAL_KINDS = new Set(["policy_denied", "ledger_rejected"]);
+// ── Status ──
 
 /**
- * Holds given back with nothing charged and nothing failed: a client's release, a TTL
- * sweep, a shutdown. They carry no `settled` field, so without this arm they read
- * "pending": a hold that can never settle, shown as one that might. Mirrors
- * packages/verify's RELEASED arm.
+ * A row's status. Every status has a reachable input on today's vaults:
+ * - settled, ambiguous, failed, denied, released, unrecoverable: the TRANSFER's verdict (usertrust-verify's
+ *   `transferVerdict`), shown on every row that carries the transfer's outcome. `ambiguous` covers the audit-first
+ *   path's OPTIMISTIC `settled: true` written before the POST: its later `settlement_ambiguous` downgrades the
+ *   transfer, so a per-row reading of `settled` showed it as settled. `unrecoverable` is a money state of its own: the
+ *   call ran and was recorded, and was NOT charged.
+ * - ungoverned: a call let through `trust({ allowUngoverned })`, unmetered.
+ * - info: a record that annotates or detects, and carries no outcome.
+ * - unknown: anything else, including a transfer with no terminal yet. There is no "pending": no producer writes a
+ *   hold-placed event, so a hold that is genuinely open has no record to show.
  */
-const RELEASE_KINDS = new Set(["hold_released"]);
+export type RowStatus =
+	| "settled"
+	| "ambiguous"
+	| "failed"
+	| "denied"
+	| "released"
+	| "unrecoverable"
+	| "ungoverned"
+	| "info"
+	| "unknown";
+
+export type KindClass = "outcome" | "info" | "ungoverned";
 
 /**
- * A call an operator let through `trust({ allowUngoverned })`: it ran unmetered, with no hold and
- * no cost. It carries no `settled` field, so without this arm it read "pending", a hold that
- * might still settle, hiding that nothing was ever held.
+ * Every kind a producer writes to `events.jsonl`, by class. A kind not listed here is "unknown", unless it ends in
+ * `_failed` or carries `settled` (the dynamic action kinds, which `governAction` names after the caller's action):
+ * those carry a transfer's outcome.
  */
-const UNGOVERNED_KINDS = new Set(["ungoverned_call"]);
+export const KIND_CLASS: Readonly<Record<string, KindClass>> = {
+	// A transfer's outcome.
+	llm_call: "outcome",
+	llm_call_failed: "outcome",
+	stream_partial_delivery: "outcome",
+	settlement_ambiguous: "outcome",
+	settlement_unrecoverable: "outcome",
+	policy_denied: "outcome",
+	ledger_rejected: "outcome",
+	hold_released: "outcome",
+	tool_use: "outcome",
+	file_access: "outcome",
+	shell_command: "outcome",
+	api_request: "outcome",
+	// Annotations and detections: no outcome of their own.
+	settlement_shortfall: "info",
+	usage_implausible: "info",
+	injection_detected: "info",
+	anomaly_detected: "info",
+	budget_allocated: "info",
+	budget_reclaimed: "info",
+	"audit.quarantine.torn_tail": "info",
+	credential_added: "info",
+	credential_removed: "info",
+	credential_rotated: "info",
+	credential_access: "info",
+	credential_denied: "info",
+	// An unmetered call.
+	ungoverned_call: "ungoverned",
+};
 
-export type RowStatus = "settled" | "pending" | "failed" | "denied" | "released" | "ungoverned";
+export function kindClass(kind: string, data: Record<string, unknown>): KindClass | "unknown" {
+	// OWN properties only: an action kind is the caller's text, and `KIND_CLASS["constructor"]` is a function.
+	if (Object.hasOwn(KIND_CLASS, kind)) return KIND_CLASS[kind] as KindClass;
+	if (kind.endsWith("_failed") || typeof data.settled === "boolean") return "outcome";
+	return "unknown";
+}
+
+/** A transfer verdict's row status. A transfer with no terminal yet is unknown, never "pending". */
+export const VERDICT_STATUS: Readonly<Record<TransferStatus, RowStatus>> = {
+	SETTLED: "settled",
+	AMBIGUOUS: "ambiguous",
+	FAILED: "failed",
+	DENIED: "denied",
+	RELEASED: "released",
+	UNRECOVERABLE: "unrecoverable",
+	PENDING: "unknown",
+};
+
+export function statusFor(
+	kind: string,
+	data: Record<string, unknown>,
+	verdict: TransferStatus | undefined,
+): RowStatus {
+	const cls = kindClass(kind, data);
+	if (cls === "outcome") return verdict === undefined ? "unknown" : VERDICT_STATUS[verdict];
+	return cls;
+}
 
 export function statusOf(row: LedgerRow): RowStatus {
-	if (DENIAL_KINDS.has(row.kind)) return "denied";
-	if (RELEASE_KINDS.has(row.kind)) return "released";
-	if (UNGOVERNED_KINDS.has(row.kind)) return "ungoverned";
-	// A settle for a hold that was gone: real provider spend recorded, NOT charged. It carries no
-	// `settled` field, so without this arm it would read "pending", a hold that might still settle.
-	if (
-		row.kind === "llm_call_failed" ||
-		row.kind === "settlement_unrecoverable" ||
-		row.error !== undefined
-	) {
-		return "failed";
-	}
-	if (row.settled === true) return "settled";
-	return "pending";
+	return row.status ?? statusFor(row.kind, {}, undefined);
 }

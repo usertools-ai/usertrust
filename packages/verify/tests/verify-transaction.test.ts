@@ -202,7 +202,7 @@ describe("verifyTransaction", () => {
 		expect(result.errors.length).toBeGreaterThan(0);
 	});
 
-	it("computes cumulative spend up to and including the target event", () => {
+	it("prints the target transaction's own spend, never the running total up to it", () => {
 		const lines = buildChain([
 			{
 				kind: "llm_call",
@@ -226,9 +226,11 @@ describe("verifyTransaction", () => {
 
 		expect(result.found).toBe(true);
 		expect(result.valid).toBe(true);
-		// Cumulative spend at tx-b: 5 + 3 = 8
-		expect(result.receipt).toContain("8 UT");
-		expect(result.receipt).toContain("$0.0008");
+		// red-first (the running total, 5 + 3 = 8, printed as Spend): tx-b's OWN cost.
+		const receipt = result.receipt.split("\n");
+		expect(receipt.find((l) => l.includes("Spend"))).toMatch(/Spend \.+ 3 UT │$/);
+		expect(receipt.find((l) => l.includes("Conversion"))).toMatch(/\$0\.0003 │$/);
+		expect(result.receipt).not.toContain("8 UT");
 	});
 
 	it("handles llm_call event with no cost field", () => {

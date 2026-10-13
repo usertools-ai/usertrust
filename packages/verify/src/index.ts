@@ -24,12 +24,11 @@ import {
 import { canonicalize } from "./canonical.js";
 import { GENESIS_HASH } from "./constants.js";
 import {
-	RELEASE_KINDS,
+	eventStatus,
 	type ReceiptData,
 	renderNotFound,
 	renderReceipt,
 	type TransactionEvent,
-	UNRECOVERABLE_KINDS,
 } from "./receipt.js";
 import { parseRekorReceipt, type RekorVerification, verifyRekorReceipt } from "./rekor-verify.js";
 import { LOG_NAME, readVaultSnapshot, type StableReadOptions } from "./stable-read.js";
@@ -43,6 +42,13 @@ import {
 	trailingKind,
 	verdictErrors,
 } from "./tail-state.js";
+import {
+	firstTerminalOf,
+	matchesTransfer,
+	selectTransferEvent,
+	type TransferStatus,
+	transferIdHash,
+} from "./verdict.js";
 import { buildMerkleTree, generateInclusionProof } from "./verify.js";
 
 export {
@@ -95,6 +101,16 @@ export {
 	verifyRekorReceipt,
 } from "./rekor-verify.js";
 export {
+	firstTerminalOf,
+	matchesTransfer,
+	selectTransferEvent,
+	type TransferStatus,
+	type TransferVerdict,
+	transferIdHash,
+	transferKeysOf,
+	transferVerdict,
+} from "./verdict.js";
+export {
 	buildMerkleTree,
 	generateConsistencyProof,
 	generateInclusionProof,
@@ -136,6 +152,11 @@ export interface VaultReading {
 	events: readonly Record<string, unknown>[];
 	/** Every walked line's stored hash, in chain order (`""` where it is not a string). */
 	orderedHashes: readonly string[];
+	/**
+	 * The segment each walked `sequence` was read from (`null` where more than one line holds it, so no
+	 * one file can be named): for naming a sequence gap beside the verdict, never for the verdict.
+	 */
+	sequenceSegments: ReadonlyMap<number, string | null>;
 	/** The anchor mirror as the same snapshot read it, when asked for (`opts.mirror`). */
 	mirror?: FileObservation;
 }
@@ -238,13 +259,29 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
  * whatever the log held THEN, never hash-checked. IDENTICAL in packages/core/src/audit/verify.ts.
  */
 export function verifyVaultReading(vaultPath: string, opts: StableReadOptions = {}): VaultReading {
-	const { result, events, orderedHashes, mirror } = readAuditDirectory(
+	const { result, events, orderedHashes, sequenceSegments, mirror } = readAuditDirectory(
 		join(vaultPath, "audit"),
 		opts,
 		LOG_NAME,
 		"vault",
 	);
-	return { result, events, orderedHashes, ...(mirror !== undefined ? { mirror } : {}) };
+	return {
+		result,
+		events,
+		orderedHashes,
+		sequenceSegments,
+		...(mirror !== undefined ? { mirror } : {}),
+	};
+}
+
+/** Each walked `sequence` and the segment it was read from; `null` where more than one line holds it. */
+function segmentsBySequence(events: readonly ParsedEvent[]): Map<number, string | null> {
+	const out = new Map<number, string | null>();
+	for (const e of events) {
+		if (e.sequence === undefined) continue;
+		out.set(e.sequence, out.has(e.sequence) ? null : e.sourceFile);
+	}
+	return out;
 }
 
 /** A verdict over one audit directory's snapshot, with the count of complete lines it walked. */
@@ -289,6 +326,7 @@ function readAuditDirectory(
 			},
 			events: [],
 			orderedHashes: [],
+			sequenceSegments: new Map(),
 			lines: 0,
 			skipped: 0,
 		};
@@ -514,6 +552,7 @@ function readAuditDirectory(
 		},
 		events: ordered.map((e) => e.parsed),
 		orderedHashes: ordered.map((e) => e.hash),
+		sequenceSegments: segmentsBySequence(events),
 		lines: lineCount,
 		skipped,
 		...(snapshot.mirror !== undefined ? { mirror: snapshot.mirror } : {}),
@@ -588,6 +627,8 @@ export interface AnchoredVaultReading {
 	events: readonly Record<string, unknown>[];
 	/** Their hashes, in the same order: the leaves the anchors cover. */
 	orderedHashes: readonly string[];
+	/** The segment each walked `sequence` was read from, as in {@link VaultReading}. */
+	sequenceSegments: ReadonlyMap<number, string | null>;
 	/**
 	 * The anchor records the verdict was reached on, as read ONCE: the caller's and the vault mirror's.
 	 * Anything built on the verdict (`--tx`'s covering anchor and its rotation keys) takes them from
@@ -757,6 +798,7 @@ export function verifyVaultWithAnchorsReading(
 			},
 			events: reading.events,
 			orderedHashes: reading.orderedHashes,
+			sequenceSegments: reading.sequenceSegments,
 			anchors: { external: [], mirror: [] },
 		};
 	}
@@ -820,6 +862,7 @@ export function verifyVaultWithAnchorsReading(
 		},
 		events: reading.events,
 		orderedHashes: reading.orderedHashes,
+		sequenceSegments: reading.sequenceSegments,
 		anchors: { external: externalRecords, mirror: mirror.records },
 	};
 }
@@ -869,8 +912,10 @@ export interface TransactionVerificationResult {
 	readonly anchoring?: AnchoringReport | undefined;
 	/** The vault kept changing while it was read: no search, no verdict (`errors` says so). */
 	readonly busy?: true | undefined;
-	/** The vault's chain could not be read at all (`errors` says why): a failure, never "not found". */
+	/** The vault's chain could not be read (`errors` says why): a failure, never "not found". */
 	readonly failed?: true | undefined;
+	/** The transfer's verdict (`transferVerdict`), when found: the status the receipt prints. */
+	readonly status?: TransferStatus | undefined;
 }
 
 /**
@@ -899,7 +944,7 @@ export interface TransactionVerificationResult {
  * Unknown keys are PRESERVED — this narrows the fields the verifier reads, and
  * is not a schema that silently drops a field a future producer adds.
  */
-function normalizeEvent(raw: unknown): TransactionEvent {
+export function normalizeEvent(raw: unknown): TransactionEvent {
 	const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 	const num = (v: unknown): number | undefined =>
 		typeof v === "number" && Number.isFinite(v) ? v : undefined;
@@ -965,6 +1010,44 @@ function somethingAt(path: string): boolean {
 	} catch (err) {
 		return (err as { code?: unknown } | null)?.code !== "ENOENT";
 	}
+}
+
+/**
+ * Each `Sequence gap: event X follows Y` the vault reading reported, NAMED: the absent range Y+1..X-1 and the files
+ * holding Y and X. The names come from the verdict's own sequences, as the same snapshot read them
+ * (`sequenceSegments`), not from each file's first and last lines, so an out-of-order segment cannot misname a
+ * gap; a sequence that no one file holds (absent, or held twice) leaves the file names out rather than guessed.
+ */
+function nameGaps(
+	errors: readonly string[],
+	seqFile: ReadonlyMap<number, string | null>,
+): string[] {
+	const out: string[] = [];
+	for (const e of errors) {
+		const m = /^Sequence gap: event (\d+) follows (\d+)/.exec(e);
+		if (m === null) continue;
+		const [x, y] = [Number(m[1]), Number(m[2])];
+		// A duplicated sequence reads "event 1 follows 1": no event is absent, so it keeps only the verdict's own error.
+		if (!(x > y + 1)) continue;
+		const [fileY, fileX] = [seqFile.get(y), seqFile.get(x)];
+		const range = x - y === 2 ? `event ${y + 1} is` : `events ${y + 1}..${x - 1} are`;
+		if (fileY == null || fileX == null) out.push(`audit events missing: ${range} absent`);
+		else if (fileY === fileX)
+			out.push(`audit events missing: ${range} absent inside ${fileY} (between ${y} and ${x})`);
+		else
+			out.push(
+				`audit segment missing: ${range} absent between ${fileY} (ends at ${y}) and ${fileX} (starts at ${x})`,
+			);
+	}
+	return out;
+}
+
+/** An error of the walk's that says a file the chain may be in was never read: a segment, or the directory's listing. */
+function isUnreadError(error: string): boolean {
+	return (
+		error.startsWith("Audit segment could not be read: ") ||
+		error.startsWith("Audit directory could not be enumerated: ")
+	);
 }
 
 /**
@@ -1075,99 +1158,26 @@ export function verifyTransaction(
 
 	// No per-use shape guard needed: `normalizeEvent` already guarantees `kind`
 	// is a string, `data` is an object, and `transferId` is a string.
-	// `settlement_unrecoverable` stores only the SHA-256 of its transferId (the id of a hold the server
-	// did not hold is caller text), so that kind matches on the hash of the queried id, as the producer
-	// computes it. Any other kind carrying a coincidental `transferIdHash` field is not matched.
-	const txHash = createHash("sha256").update(txId).digest("hex");
-	const matching = events.filter(
-		(e) =>
-			e.data.transferId === txId ||
-			(UNRECOVERABLE_KINDS.has(e.kind) && e.data.transferIdHash === txHash),
-	);
-	const isFailureTerminal = (e: TransactionEvent): boolean =>
-		e.kind === "stream_partial_delivery" ||
-		e.kind === "llm_call_failed" ||
-		e.kind.endsWith("_failed");
-	// A DENIAL is conclusive too. It was missing from this predicate, so a later
-	// appended `settled: true` could still override an earlier `policy_denied` or
-	// `ledger_rejected` — the same forgery, one kind along. A refused call moved no
-	// money and will never settle, which is exactly what "terminal" means here.
-	const isDenialTerminal = (e: TransactionEvent): boolean =>
-		e.kind === "policy_denied" || e.kind === "ledger_rejected";
-	// A RELEASE is conclusive at the failure tier: a hold given back moved no money and
-	// will never settle, so a later appended `settled: true` must not rewrite it.
-	const isReleaseTerminal = (e: TransactionEvent): boolean => RELEASE_KINDS.has(e.kind);
-	// `settlement_ambiguous` is CONCLUSIVE and comes FIRST. The producer appends it
-	// BEFORE the `llm_call` it corrects (`headless.ts:1425` then `:1484`;
-	// `govern.ts:1798` then `:1887`), so a crash or a failed second append can
-	// leave it as the only durable record of the outcome. Excluding it let a later
-	// hash-valid `settled: true` rewrite an ambiguous settlement into a clean one —
-	// the same forgery as the failure and denial cases, one kind along, and the
-	// most valuable one to forge because it converts "we do not know whether this
-	// spend landed" into "it did".
-	const isTerminal = (e: TransactionEvent): boolean =>
-		e.data.settled !== undefined ||
-		isFailureTerminal(e) ||
-		isDenialTerminal(e) ||
-		isReleaseTerminal(e) ||
-		UNRECOVERABLE_KINDS.has(e.kind) ||
-		e.kind === "settlement_ambiguous";
+	// `settlement_unrecoverable` stores only the SHA-256 of its transferId, so that kind matches on the
+	// hash of the queried id (`matchesTransfer`).
+	const txHash = transferIdHash(txId);
+	const matching = events.filter((e) => matchesTransfer(e, txId, txHash));
+	const firstTerminal = firstTerminalOf(matching);
+	const targetEvent = selectTransferEvent(matching);
 
-	// FIRST TERMINAL IN CHAIN ORDER WINS. Not the best-TYPED terminal anywhere in
-	// the log — that was a forgery vector, and it was mine.
-	//
-	// Ranking settlement above failure across the WHOLE history let a LATER record
-	// override an EARLIER one. The audited party owns `events.jsonl`, so it could
-	// append a hash-valid `settled: true` reusing a transferId after an anchored
-	// FAILURE or DENIAL, and the receipt would read SETTLED — without altering the
-	// anchored prefix, so anchoring would not catch it either. `finalizeOnce`
-	// makes first-terminal-wins a producer invariant (AGENTS.md); a verifier that
-	// ranks by type instead of by order does not merely miss a forgery, it
-	// performs one.
-	//
-	// A DETECTION is still outranked, which is the whole point of scanning past
-	// the first match: `anomaly_detected` precedes its terminal by construction
-	// and is not conclusive on its own.
-	const firstTerminal = matching.find(isTerminal);
-
-	// AMBIGUITY DOWNGRADES A SETTLEMENT, from anywhere in the transfer's records.
-	//
-	// First-terminal-wins alone is wrong here because the two producers order
-	// these differently. The AUDIT-FIRST path writes the `llm_call` with an
-	// optimistic `settled: true` BEFORE the POST, then appends
-	// `settlement_ambiguous` only if the POST throws (`govern.ts`); the headless
-	// and stream paths append the ambiguity FIRST. Taking the first terminal in
-	// chain order therefore printed SETTLED for an ordinary POST failure.
-	//
-	// The safe generalisation is directional. A correction that REDUCES certainty
-	// can be honoured from anywhere, because forging one gains an attacker
-	// nothing — the worst it does is make a real settlement read as unknown. A
-	// record that INCREASES certainty must never override an earlier terminal,
-	// which is the forgery this selector already refuses. So: ambiguity beats a
-	// settlement, and nothing beats a failure or a denial.
-	const ambiguity = matching.find((e) => e.kind === "settlement_ambiguous");
-	// A SETTLEMENT is not "anything carrying `settled`": `llm_call_failed` records
-	// `settled: false`, so a presence test let ambiguity downgrade a FAILURE. That
-	// inverts the rule above — losing certainty is harmless on a settlement, but a
-	// failure is already the worst verdict, so moving it to "unknown" launders it.
-	const firstIsSettlement =
-		firstTerminal !== undefined &&
-		firstTerminal.data.settled !== undefined &&
-		!isFailureTerminal(firstTerminal) &&
-		!isDenialTerminal(firstTerminal) &&
-		!isReleaseTerminal(firstTerminal);
-	const targetEvent =
-		ambiguity !== undefined && (firstTerminal === undefined || firstIsSettlement)
-			? ambiguity
-			: (firstTerminal ?? matching[0]);
-
+	// SCRUBBED: segment names and event ids are vault text, and these errors reach a terminal. A gap
+	// is named even when the target is absent: its records may be what the missing segment held.
+	const vaultErrors = [
+		...reading.result.errors,
+		...nameGaps(reading.result.errors, reading.sequenceSegments),
+	];
 	if (targetEvent === undefined) {
-		return {
-			found: false,
-			valid: false,
-			receipt: renderNotFound(txId),
-			errors: [],
-		};
+		const errors = vaultErrors.map(scrubForError);
+		// A segment, or the directory, that could not be read may hold the transfer's records: never
+		// "not found" there (a verdict on records nobody read), a failure.
+		return reading.result.errors.some(isUnreadError)
+			? { found: false, valid: false, failed: true, receipt: renderNotFound(txId), errors }
+			: { found: false, valid: false, receipt: renderNotFound(txId), errors };
 	}
 
 	// The chain's verdict, from the same snapshot.
@@ -1177,8 +1187,7 @@ export function verifyTransaction(
 	// self-referential inclusion check (F1: proof AND root computed from the
 	// same allHashes) is retired; inclusion is only ever claimed against a
 	// verified EXTERNAL anchor root below (AC-5.2).
-	const allHashes = [...reading.orderedHashes];
-	const tree = buildMerkleTree(allHashes);
+	const tree = buildMerkleTree([...reading.orderedHashes]);
 	let merkleRoot = tree.root ?? "";
 	const leafIndex = events.indexOf(targetEvent);
 
@@ -1219,7 +1228,11 @@ export function verifyTransaction(
 			} else if (
 				anchorParams.trust !== undefined &&
 				pos >= 1 &&
-				covering.treeSize <= orderedHashes.length
+				covering.treeSize <= orderedHashes.length &&
+				// The proof must be for THIS event. `pos` is the event's stored `sequence`, but the leaf at that
+				// position is whatever the ordered chain holds there: a sequence-less or duplicated-sequence record
+				// can put ANOTHER event's leaf at `pos`, and a proof for that leaf would label this one VERIFIED.
+				orderedHashes[pos - 1] === targetEvent.hash
 			) {
 				const proof = generateInclusionProof(
 					pos - 1,
@@ -1265,15 +1278,6 @@ export function verifyTransaction(
 		}
 	}
 
-	// Compute cumulative spend up to and including this event
-	let cumulativeSpend = 0;
-	for (const evt of events) {
-		if (evt.data.cost !== undefined && evt.kind === "llm_call") {
-			cumulativeSpend += evt.data.cost;
-		}
-		if (evt === targetEvent) break;
-	}
-
 	// Carry the DETECTOR's reason across terminal selection. Ranking a terminal
 	// above the detection is right for status and wrong for reason: a successful
 	// anomaly cutoff selects `stream_partial_delivery`, whose `error` is the SDK's
@@ -1299,21 +1303,21 @@ export function verifyTransaction(
 	const receiptData: ReceiptData = {
 		event: targetEvent,
 		...(detectionReason !== undefined ? { detectionReason } : {}),
-		chainLength: events.length,
+		chainLength: reading.result.chainLength,
 		merkleRoot,
 		merkleVerified,
 		chainVerified,
-		cumulativeSpend,
 		verifiedAt: new Date(),
 		merkleLabel,
 	};
 
-	const allErrors = [...reading.result.errors, ...anchorErrors];
+	const allErrors = [...vaultErrors, ...anchorErrors].map(scrubForError);
 
 	return {
 		found: true,
 		valid: chainVerified && merkleVerified && anchorsValid,
 		receipt: renderReceipt(receiptData),
+		status: eventStatus(targetEvent),
 		errors: allErrors,
 		...(anchorState !== undefined ? { anchorState } : {}),
 		...(anchoring !== undefined ? { anchoring } : {}),

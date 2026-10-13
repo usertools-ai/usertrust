@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawPluginApi, ProviderPlugin } from "../src/types.js";
 import {
 	doneEvent,
@@ -42,6 +42,36 @@ function makeTmpVault(): string {
 	mkdirSync(dir, { recursive: true });
 	return dir;
 }
+
+// File-level guard. Every test in this file runs in a fresh temporary working
+// directory, so a governor built without a vaultBase leaves its vault there, not
+// in the repo. afterAll fails the file if anything was left behind, then restores
+// the working directory and removes the temporary one.
+let savedCwd = "";
+let guardCwd = "";
+
+beforeAll(() => {
+	savedCwd = process.cwd();
+	guardCwd = realpathSync(mkdtempSync(join(tmpdir(), "openclaw-index-guard-")));
+	process.chdir(guardCwd);
+});
+
+afterAll(() => {
+	try {
+		if (process.cwd() !== guardCwd) {
+			throw new Error("a test in this file changed the working directory and did not restore it");
+		}
+		const leaked = readdirSync(guardCwd);
+		if (leaked.length > 0) {
+			throw new Error(
+				`a test in this file created ${leaked.join(", ")} in the working directory; pass vaultBase`,
+			);
+		}
+	} finally {
+		process.chdir(savedCwd);
+		rmSync(guardCwd, { recursive: true, force: true });
+	}
+});
 
 // ── Tests ──
 
@@ -214,6 +244,7 @@ describe("openclaw plugin entry point", () => {
 				{
 					budget: 100_000,
 					dryRun: true,
+					vaultBase,
 				},
 			);
 
@@ -243,6 +274,7 @@ describe("openclaw plugin entry point", () => {
 			const { governor } = await createGovernedStreamFn(mockStreamFn, {
 				budget: 100_000,
 				dryRun: true,
+				vaultBase,
 			});
 
 			const got = getGovernor();
@@ -262,6 +294,7 @@ describe("openclaw plugin entry point", () => {
 			await createGovernedStreamFn(mockStreamFn, {
 				budget: 100_000,
 				dryRun: true,
+				vaultBase,
 			});
 
 			expect(getGovernor()).not.toBeNull();
@@ -284,7 +317,7 @@ describe("openclaw plugin entry point", () => {
 			const { createGovernedStreamFn, getGovernor } = await import("../src/index.js");
 
 			const mockStreamFn = streamOf([startEvent()]);
-			const config = { budget: 100_000, dryRun: true };
+			const config = { budget: 100_000, dryRun: true, vaultBase };
 
 			// First call initializes
 			const { governor: gov1 } = await createGovernedStreamFn(mockStreamFn, config);
@@ -311,7 +344,7 @@ describe("openclaw plugin entry point", () => {
 			const api: OpenClawPluginApi = {
 				id: "usertrust",
 				name: "usertrust",
-				pluginConfig: { budget: 100_000, dryRun: true },
+				pluginConfig: { budget: 100_000, dryRun: true, vaultBase },
 				registerProvider: (p) => {
 					capturedPlugin = p;
 				},
@@ -335,6 +368,55 @@ describe("openclaw plugin entry point", () => {
 			}
 
 			expect(collected).toHaveLength(3);
+		});
+
+		it("keeps the governed vault out of the working directory", async () => {
+			const originalCwd = process.cwd();
+			const workingDir = join(tmpdir(), `openclaw-index-cwd-${randomUUID()}`);
+			mkdirSync(workingDir, { recursive: true });
+			try {
+				// With no vaultBase the governor's vault falls back to process.cwd(), so
+				// run from a directory of our own: a stray vault would show up here.
+				process.chdir(workingDir);
+
+				const mod = await import("../src/index.js");
+				const registerFn = mod.default;
+
+				const captured: { plugin: ProviderPlugin | null } = { plugin: null };
+				const api: OpenClawPluginApi = {
+					id: "usertrust",
+					name: "usertrust",
+					pluginConfig: { budget: 100_000, dryRun: true, vaultBase },
+					registerProvider: (p) => {
+						captured.plugin = p;
+					},
+				};
+
+				registerFn(api);
+
+				const wrapped = captured.plugin?.wrapStreamFn?.({
+					provider: "anthropic",
+					modelId: "claude-sonnet-4-6",
+					streamFn: streamOf([startEvent(), textDelta("hello"), doneEvent(makeUsage(50, 20))]),
+				});
+
+				expect(wrapped).toBeTypeOf("function");
+				// biome-ignore lint/style/noNonNullAssertion: guarded by expect above
+				const stream = await wrapped!(makeModel(), makeContext());
+
+				const collected: unknown[] = [];
+				for await (const event of stream) {
+					collected.push(event);
+				}
+
+				expect(collected).toHaveLength(3);
+				expect(existsSync(join(workingDir, ".usertrust"))).toBe(false);
+				expect(readdirSync(workingDir)).toEqual([]);
+				expect(existsSync(join(vaultBase, ".usertrust"))).toBe(true);
+			} finally {
+				process.chdir(originalCwd);
+				rmSync(workingDir, { recursive: true, force: true });
+			}
 		});
 	});
 });

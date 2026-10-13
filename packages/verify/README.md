@@ -75,6 +75,8 @@ usertrust-verify .usertrust || echo "TAMPERED — do not deploy"
 usertrust-verify .usertrust --tx tx_m4k7p2_a1b2c3
 ```
 
+`--tx` reads the same history as a full verify: `events.jsonl` and every rotated `*.jsonl` segment, as one chain ordered by `sequence`, so a transfer whose records span a rotation gets the same receipt and verdict as on an unrotated vault. A missing segment fails the check and is named, with the absent event range and the two files it lies between.
+
 ## Programmatic API
 
 ```typescript

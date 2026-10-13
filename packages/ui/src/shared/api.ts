@@ -25,10 +25,15 @@ export interface SummaryPayload {
 	spentUt: number;
 	/** `budget - spentUt`, or null when the budget is unknown: there is no remaining figure without a budget. */
 	remainingUt: number | null;
-	/** `busy`: the vault kept changing while it was read, so there is no verdict (`valid` means nothing). */
+	/**
+	 * `empty`: no events and nothing wrong, a project before its first governed call. It is never set beside a
+	 * failure: a log deleted while its anchor still records events has no events either, and is `valid: false`.
+	 * `busy`: the vault kept changing while it was read, so there is no verdict (`valid` means nothing).
+	 */
 	chain: {
 		events: number;
 		valid: boolean;
+		empty: boolean;
 		breakIndex: number | null;
 		errors: string[];
 		busy?: boolean;
@@ -37,6 +42,8 @@ export interface SummaryPayload {
 	// operator-pinned genesis, and inventing one from the vault under audit
 	// would violate "anchor trust never comes from the vault under audit".
 	anchorFile: "present" | "absent";
+	/** The vault config's `remote` section (`shared/kit.ts`): `kit` loads the usertrust mark from usertrust.ai. */
+	remote: { kit: boolean };
 	rowCount: number;
 	truncated: boolean;
 }

@@ -8,6 +8,7 @@
  * and the result-shape contract (unanchoredTail.sinceTimestampMs).
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -151,3 +152,47 @@ describe("HARDEN: result-shape contract (spec §7.3)", () => {
 
 // touch: keep readFileSync imported for potential future fixtures
 void readFileSync;
+
+describe("HARDEN: --tx never labels an event INCLUSION VERIFIED with another event's leaf", () => {
+	it("a sequence-less first record plus a later record reusing sequence 1: the proof at position 1 is for the FIRST record, so the target is not verified", async () => {
+		const s = await makeAnchoredVault(1);
+		const logPath = join(s.vaultPath, "audit", "events.jsonl");
+		const rehash = (rest: Record<string, unknown>): string =>
+			createHash("sha256").update(canonicalize(rest)).digest("hex");
+
+		// 1. The anchored history: one record WITHOUT a `sequence` (a legacy record), rehashed, then anchored.
+		const parsed = JSON.parse(
+			readFileSync(logPath, "utf-8").trim().split("\n")[0] as string,
+		) as Record<string, unknown>;
+		const { hash: _h, sequence: _seq, ...rest } = parsed;
+		const first = { ...rest, hash: rehash(rest) };
+		writeFileSync(logPath, `${canonicalize(first)}\n`);
+		writeFileSync(`${logPath}.meta`, JSON.stringify({ lastHash: first.hash, sequence: 1 }));
+		await anchorOnce(s);
+
+		// 2. An UNANCHORED record appended after the anchor, claiming sequence 1 and chaining to the first.
+		const evilRest = {
+			id: "evt-evil",
+			timestamp: new Date(Date.now() + 5000).toISOString(),
+			previousHash: first.hash,
+			kind: "llm_call",
+			actor: "local",
+			data: { transferId: "tr_evil", model: "m", cost: 1, settled: true },
+			sequence: 1,
+		};
+		const evil = { ...evilRest, hash: rehash(evilRest) };
+		writeFileSync(logPath, `${canonicalize(first)}\n${canonicalize(evil)}\n`);
+		writeFileSync(`${logPath}.meta`, JSON.stringify({ lastHash: evil.hash, sequence: 2 }));
+
+		const result = pkgVerifyTransaction(s.vaultPath, "tr_evil", {
+			externalAnchorsRaw: [storeRaw(s)],
+			trust: s.trust,
+			witness: { requested: false },
+		});
+		// The anchor covers position 1, which holds the FIRST record's leaf. Proving that leaf and labelling the
+		// evil record "INCLUSION VERIFIED (anchor #1)" is a false clean.
+		expect(result.found).toBe(true);
+		expect(result.valid).toBe(false);
+		expect(result.receipt).not.toContain("INCLUSION VERIFIED");
+	});
+});

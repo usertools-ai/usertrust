@@ -100,6 +100,11 @@ export interface VaultReading {
 	events: readonly PersistedAuditEvent[];
 	/** Every walked line's stored hash, in chain order (`""` where it is not a string). */
 	orderedHashes: readonly string[];
+	/**
+	 * The segment each walked `sequence` was read from (`null` where more than one line holds it, so no
+	 * one file can be named): for naming a sequence gap beside the verdict, never for the verdict.
+	 */
+	sequenceSegments: ReadonlyMap<number, string | null>;
 	/** The anchor mirror as the same snapshot read it, when asked for (`opts.mirror`). */
 	mirror?: FileObservation;
 }
@@ -185,13 +190,29 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
  * whatever the log held THEN, never hash-checked. IDENTICAL in packages/verify/src/index.ts.
  */
 export function verifyVaultReading(vaultPath: string, opts: StableReadOptions = {}): VaultReading {
-	const { result, events, orderedHashes, mirror } = readAuditDirectory(
+	const { result, events, orderedHashes, sequenceSegments, mirror } = readAuditDirectory(
 		join(vaultPath, "audit"),
 		opts,
 		LOG_NAME,
 		"vault",
 	);
-	return { result, events, orderedHashes, ...(mirror !== undefined ? { mirror } : {}) };
+	return {
+		result,
+		events,
+		orderedHashes,
+		sequenceSegments,
+		...(mirror !== undefined ? { mirror } : {}),
+	};
+}
+
+/** Each walked `sequence` and the segment it was read from; `null` where more than one line holds it. */
+function segmentsBySequence(events: readonly ParsedEvent[]): Map<number, string | null> {
+	const out = new Map<number, string | null>();
+	for (const e of events) {
+		if (e.sequence === undefined) continue;
+		out.set(e.sequence, out.has(e.sequence) ? null : e.sourceFile);
+	}
+	return out;
 }
 
 /** A verdict over one audit directory's snapshot, with the count of complete lines it walked. */
@@ -236,6 +257,7 @@ function readAuditDirectory(
 			},
 			events: [],
 			orderedHashes: [],
+			sequenceSegments: new Map(),
 			lines: 0,
 			skipped: 0,
 		};
@@ -461,6 +483,7 @@ function readAuditDirectory(
 		},
 		events: ordered.map((e) => e.parsed as unknown as PersistedAuditEvent),
 		orderedHashes: ordered.map((e) => e.hash),
+		sequenceSegments: segmentsBySequence(events),
 		lines: lineCount,
 		skipped,
 		...(snapshot.mirror !== undefined ? { mirror: snapshot.mirror } : {}),
@@ -527,6 +550,8 @@ export interface AnchoredVaultReading {
 	events: readonly PersistedAuditEvent[];
 	/** Their hashes, in the same order: the leaves the anchors cover. */
 	orderedHashes: readonly string[];
+	/** The segment each walked `sequence` was read from, as in {@link VaultReading}. */
+	sequenceSegments: ReadonlyMap<number, string | null>;
 	/**
 	 * The anchor records the verdict was reached on, as read ONCE: the caller's and the vault mirror's.
 	 * Anything built on the verdict (`--tx`'s covering anchor and its rotation keys) takes them from
@@ -696,6 +721,7 @@ export function verifyVaultWithAnchorsReading(
 			},
 			events: reading.events,
 			orderedHashes: reading.orderedHashes,
+			sequenceSegments: reading.sequenceSegments,
 			anchors: { external: [], mirror: [] },
 		};
 	}
@@ -759,6 +785,7 @@ export function verifyVaultWithAnchorsReading(
 		},
 		events: reading.events,
 		orderedHashes: reading.orderedHashes,
+		sequenceSegments: reading.sequenceSegments,
 		anchors: { external: externalRecords, mirror: mirror.records },
 	};
 }

@@ -411,19 +411,25 @@ if (txId !== undefined) {
 	const params = anchorMode ? await anchorParamsOrFail() : undefined;
 	const result = verifiedOrFail(() => verifyTransaction(vaultPath, txId, params));
 	// Neither is "not found" (exit 2): a vault read while it kept changing has no verdict, and one whose
-	// chain could not be read at all has failed.
+	// chain could not be read has failed. Out through writeAllSync, as below.
 	if (result.busy === true) {
-		console.log(BUSY_LINE);
+		writeAllSync(1, `${BUSY_LINE}\n`);
 		process.exit(1);
 	}
 	if (result.failed === true) {
-		console.log("Vault integrity: FAILED");
-		for (const error of result.errors) {
-			console.log(`  - ${forDisplay(error)}`);
-		}
+		writeAllSync(
+			1,
+			`Vault integrity: FAILED\n${result.errors.map((error) => `  - ${forDisplay(error)}\n`).join("")}`,
+		);
 		process.exit(1);
 	}
-	console.log(result.receipt);
+	// The receipt carries no errors; the absent range of a missing segment lives only here. Out through
+	// writeAllSync, as the receipt mode does: process.stdout is asynchronous on a pipe and the exit below does not
+	// drain it, so a long error list reached `| tool` truncated, losing the named range appended last.
+	writeAllSync(
+		1,
+		`${result.receipt}\n${result.errors.map((error) => `  - ${forDisplay(error)}\n`).join("")}`,
+	);
 	// Exit 0: verified, 1: tampered/corrupted, 2: not found
 	if (!result.found) process.exit(2);
 	if (!result.valid) process.exit(1);

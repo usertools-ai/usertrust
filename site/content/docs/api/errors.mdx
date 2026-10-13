@@ -74,7 +74,7 @@ class PolicyDeniedError extends Error {
 }
 ```
 
-**When it fires:** During policy evaluation, before the LLM call. The `reason` field describes which rule or PII type triggered the denial. On an Anthropic or OpenAI client it also fires when you call an SDK method usertrust does not govern and does not list as free: the `reason` starts `ungoverned_method: <path>` (for example `ungoverned_method: embeddings.create`), the promise rejects without calling the SDK, and `trust({ allowUngoverned: ["<path>"] })` lets that method through, audited as `ungoverned_call`.
+**When it fires:** During policy evaluation, before the LLM call. The `reason` field describes which rule or PII type triggered the denial. On any client (Anthropic, OpenAI or Google) it also fires when you call an SDK method usertrust does not govern and does not list as free: the `reason` starts `ungoverned_method: <path>` (for example `ungoverned_method: embeddings.create`), the promise rejects without calling the SDK, and `trust({ allowUngoverned: ["<path>"] })` lets that method through, audited as `ungoverned_call`.
 
 **Hint:** `'Check your policy rules in .usertrust/policies/default.yml, or set "pii": "warn" in .usertrust/usertrust.config.json (or pass { pii: "warn" } to trust()) to downgrade PII enforcement.'`
 
