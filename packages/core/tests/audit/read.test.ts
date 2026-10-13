@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { execFileSync, spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -98,6 +99,54 @@ describe("loadBudgetConfig", () => {
 			reason: null,
 		});
 		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	describe("a planted non-file at the config's path is never opened", () => {
+		const unpublished = { budget: 0, source: "unpublished", writtenAt: null, reason: null };
+		let tempDir: string;
+		let vaultPath: string;
+
+		beforeEach(() => {
+			tempDir = mkdtempSync(join(tmpdir(), "trust-cfg-"));
+			vaultPath = join(tempDir, ".usertrust");
+			mkdirSync(vaultPath, { recursive: true });
+		});
+
+		afterEach(() => {
+			rmSync(tempDir, { recursive: true, force: true });
+		});
+
+		it.skipIf(process.platform === "win32")(
+			"red-first (hangs): a FIFO with no record gives no budget at once; no reader blocks on it",
+			() => {
+				const fifo = join(vaultPath, "usertrust.config.json");
+				execFileSync("mkfifo", [fifo]);
+				// The bound. A reader that OPENS the FIFO blocks this thread, where no timer can fire, so a separate
+				// process releases it after 1.5 s by writing a config with a budget: that reader then returns late, with
+				// the planted figure, and fails both assertions instead of hanging the run.
+				const releaser = spawn(
+					process.execPath,
+					[
+						"-e",
+						'setTimeout(() => require("node:fs").writeFileSync(process.argv[1], \'{"budget":5000}\'), 1500)',
+						fifo,
+					],
+					{ stdio: "ignore" },
+				);
+				try {
+					const t0 = Date.now();
+					expect(loadBudgetConfig(vaultPath)).toEqual(unpublished);
+					expect(Date.now() - t0).toBeLessThan(1_000);
+				} finally {
+					releaser.kill("SIGKILL");
+				}
+			},
+		);
+
+		it("a directory at the config's path gives no budget", () => {
+			mkdirSync(join(vaultPath, "usertrust.config.json"));
+			expect(loadBudgetConfig(vaultPath)).toEqual(unpublished);
+		});
 	});
 });
 
