@@ -421,14 +421,21 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   transcript resumed or compacted then is older than it, and is not posted; and once
   made it never moves, so a later resume posts what its session left unposted. **Each
   session also has its own first-run time** (`transcripts/since-session/<session>`), never
-  earlier than the state's: SessionStart stamps it, and a session the plugin first meets at a
-  later hook (one that ran with no hook of this plugin, such as a lane switched on later or a
-  session open at install) is stamped at that hook. A session posts nothing written before its
-  own time, the response that triggered its first hook included, so usage from before it was
-  metered is never settled late onto its first hold. Those responses are **declared** instead,
-  once per agent of the session, as a `pre-metering` watch record (below): not billed, and never
-  a gap. A session the state already held a cursor for before per-session times existed keeps
-  the state's time, so what it left unposted is still posted. After a host
+  earlier than the state's. The FIRST hook of this plugin that touches the session in this state
+  stamps it, whatever that hook does: SessionStart, or any later hook, including one that only
+  writes a gap, a refusal or a deferral (its watch record stamps it, at the record's time). A
+  failing hook means metering was on, so what the session wrote after it is posted later as for
+  an outage, never "before metering". A session the plugin first meets at a later hook (one that
+  ran with no hook of this plugin at all, such as a lane switched on later or a session open at
+  install) is stamped at that hook. A session posts nothing written before its own time, the
+  response that triggered its first hook included, so usage from before it was metered is never
+  settled late onto its first hold. Those responses are **declared** instead, once per agent of
+  the session, as a `pre-metering` watch record (below): not billed, and never a gap. A session
+  the state already held a cursor for before per-session times existed keeps the state's time,
+  so what it left unposted is still posted. One case is stamped in the wrong place: a hook
+  refused with a configuration whose state dir cannot be used writes its record, and its stamp,
+  to the default state dir. When the repaired configuration names another state dir, the
+  refused period counts as before metering there. After a host
   crash or power loss (not a process crash), usage posted in the moments before it
   can be posted again, because the plugin's state files are not fsynced. Idempotency keys on the server (#205) are
   the fix. **Restoring an older copy of the state dir can

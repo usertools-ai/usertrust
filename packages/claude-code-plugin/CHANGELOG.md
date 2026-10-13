@@ -13,8 +13,11 @@ npm, and its version is its own: the `usertrust` packages and their
   time per state directory. A session that first ran with no hook of this plugin (a lane switched
   on later, or a session already open at install) had every response since that time settled at
   its first metered hook, onto that hook's hold, stamped with the wrong time. Each session now has
-  its own first-run time: SessionStart stamps it, and a session first met at a later hook is
-  stamped there. Nothing a session wrote before its own time is posted. Those responses are
+  its own first-run time, stamped by the first hook of this plugin that touches the session in
+  that state directory, whatever the hook does: SessionStart, or any later hook, including one
+  that only writes a gap, a refusal or a deferral, since metering was on then. A session first met
+  at a later hook (one that ran with no hook at all) is stamped there. Nothing a session wrote
+  before its own time is posted. Those responses are
   declared once per agent instead, as a `pre-metering` watch record
   (`{"kind":"pre-metering","session":…,"agent":…,"responses":N,"reason":"written before this session was metered; not billed","started":null}`).
   It is never billed and never a `gap`: the gap figure counts only calls missed while metering

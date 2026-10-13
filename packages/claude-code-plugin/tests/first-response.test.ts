@@ -16,6 +16,7 @@
 // entries. The hooks run as hooks.json runs them (launch.mjs), against a REAL usertrust-server
 // in dryRun, and the assertions read the server's own audit chain.
 
+import { execFile } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import {
@@ -270,6 +271,24 @@ async function since() {
 	return Date.parse(await readFile(join(stateDir, "transcripts", "since"), "utf-8"));
 }
 
+/**
+ * What a hook that only writes a gap does, and nothing else: one session-tagged watch record,
+ * through the same writer (as launch.mjs does for a hook whose process failed). In a child
+ * process, under the hooks' environment.
+ */
+function gapOnly(sessionId: string): Promise<void> {
+	const code = `const m = await import(${JSON.stringify(join(HOOKS, "lib.mjs"))});
+if (!(await m.recordWatchEvent({ kind: "gap", mode: "watch", session: ${JSON.stringify(sessionId)}, agent: "main", reason: "launch: the hook's process failed (signal SIGKILL)", started: null }))) process.exit(1);`;
+	return new Promise((resolve, reject) => {
+		execFile(
+			process.execPath,
+			["--input-type=module", "-e", code],
+			{ env: { PATH: process.env.PATH ?? "", ...hookEnv } },
+			(err) => (err ? reject(err) : resolve()),
+		);
+	});
+}
+
 /** The plugin's watch records (`watch.jsonl`), parsed. */
 async function watchRecords(): Promise<Array<Record<string, unknown>>> {
 	const text = await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => "");
@@ -406,6 +425,30 @@ describe("what the first-run time keeps out", () => {
 		]);
 		// Never a gap: the gap figure counts calls missed while metering was on.
 		expect(watch.filter((w) => w.kind === "gap")).toEqual([]);
+	});
+
+	it("a hook that only writes a gap stamps the session: what it wrote after that is metering ON, posted, never pre-metering", async () => {
+		await session().start("startup");
+		await sleep(5);
+		const id = randomUUID();
+		const b = session(id);
+		// The session's first hook only writes a gap (its process failed): metering was on, and failing.
+		await gapOnly(id);
+		await sleep(5);
+		await b.transcript.userText("Task.");
+		await b.transcript.assistant(usage("7000:70"), { toolUseId: "toolu_during" });
+		await b.transcript.toolResult("toolu_during");
+		await b.transcript.assistant(usage("8000:80"));
+		await b.toolCall(CALL);
+		await b.end(FINAL);
+		const calls = llmCalls(await chain());
+		// The two responses after the gap ride the first hold with its own call's response.
+		expect(calls.map((e) => e.data.usage)).toEqual([
+			{ inputTokens: 16000, outputTokens: 350, cacheReadTokens: 500, cacheWriteTokens: 100 },
+			recorded(FINAL),
+		]);
+		const watch = (await watchRecords()).filter((w) => w.session === id);
+		expect(watch.map((w) => w.kind)).toEqual(["gap"]);
 	});
 
 	it("a session this state already metered BEFORE per-session times keeps the state's time: a response it left unposted is still posted, once", async () => {

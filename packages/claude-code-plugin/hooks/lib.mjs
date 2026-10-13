@@ -313,6 +313,31 @@ export function modeAnnouncement() {
 }
 
 /**
+ * The first hook that touches a session in this state stamps when that session was first
+ * metered, whatever it does: a hook that only writes a gap, a refusal or a deferral counts.
+ * Metering was ON then, and failing, so what the session wrote after it is a gap to be posted,
+ * never "before metering" (transcript.mjs `sessionFirstRun`, which reads this). Both times are
+ * published once, whole, at the record's own time: the state's first-run time
+ * (`transcripts/since`) if it has none, and the session's (`transcripts/since-session/<id>`).
+ * Transcript mode only (estimate mode keeps no transcript state). Never throws: a stamp that
+ * cannot be made is said on stderr, and the next hook that reaches the session's state stamps it.
+ */
+async function stampSessionSeen(session, at) {
+	if (typeof session !== "string" || session === "" || session === "unknown") return;
+	if (usageMode() !== "transcript") return;
+	try {
+		const dir = join(stateRoot(), "transcripts");
+		await mkdir(join(dir, "since-session"), { recursive: true, mode: 0o700 });
+		await publishOnce(join(dir, "since"), at);
+		await publishOnce(join(dir, "since-session", sanitize(session)), at);
+	} catch (err) {
+		say(
+			`usertrust: could not stamp when this session was first metered (${err?.code ?? (err instanceof Error ? err.message : String(err))})`,
+		);
+	}
+}
+
+/**
  * The watch record of the responses a session wrote before it was metered (transcript.mjs
  * `recordPreMetering`): counts only, never billed, and never a gap. Every reader of the gap
  * figure counts `gap` records alone, so this kind stays out of it by construction.
@@ -332,14 +357,16 @@ export async function recordWatchEvent(event) {
 	// default of it stamped other writers' records with the Stop's time, which could land the
 	// event in a later job while the job it belonged to read clean. An omitted `started` is
 	// UNKNOWN (null), which counts against every job.
+	const at = new Date().toISOString();
 	const line = JSON.stringify({
-		at: new Date().toISOString(),
+		at,
 		...event,
 		started: event.started === undefined ? null : event.started,
 	});
 	try {
 		await mkdir(stateRoot(), { recursive: true });
 		await appendRegular(watchLogPath(), `${line}\n`);
+		await stampSessionSeen(event.session, at);
 		return true;
 	} catch (err) {
 		say(
@@ -684,6 +711,27 @@ export async function skipSettlePoint({ kind, phase, session, agent }) {
 
 /** Errors that mean the state dir's filesystem cannot make hard links. */
 export const LINKLESS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"]);
+
+/**
+ * Publish `content` at `path` unless something is there already: by link(2), which
+ * never replaces a name, so it is whole the moment it exists — on a filesystem
+ * without hard links, by an exclusive create.
+ */
+export async function publishOnce(path, content) {
+	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	try {
+		await writeFile(tmp, content, { flag: "wx", mode: 0o600 });
+		await link(tmp, path);
+	} catch (err) {
+		if (err?.code === "EEXIST") return;
+		if (!LINKLESS.has(err?.code)) throw err;
+		await writeFile(path, content, { flag: "wx", mode: 0o600 }).catch((exclusive) => {
+			if (exclusive?.code !== "EEXIST") throw exclusive;
+		});
+	} finally {
+		await unlink(tmp).catch(() => {});
+	}
+}
 
 /**
  * Publish `content` at `path` unless a file is there already (EEXIST, thrown): written

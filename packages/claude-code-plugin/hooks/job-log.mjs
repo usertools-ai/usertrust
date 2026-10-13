@@ -879,7 +879,7 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 	// field, so it is seen beside the gaps without changing them.
 	let beforeMetering = 0;
 	for (const w of watch) {
-		if (w?.kind !== PRE_METERING || !intervalsBySession.has(w.session)) continue;
+		if (w?.kind !== PRE_METERING || !(intervalsBySession.get(w.session)?.length > 0)) continue;
 		if (Number.isSafeInteger(w.responses) && w.responses > 0) beforeMetering += w.responses;
 	}
 

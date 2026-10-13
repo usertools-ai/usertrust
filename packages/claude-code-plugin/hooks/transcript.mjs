@@ -151,6 +151,7 @@ import {
 	PRE_METERING,
 	principalCapable,
 	publishExclusive,
+	publishOnce,
 	READ_BOUND,
 	readRegular,
 	recordSettleGap,
@@ -791,7 +792,8 @@ function emptyCursor() {
 		lastModel: null,
 		unresolved: new Map(),
 		// The responses this agent's transcript holds from before its session was metered
-		// (`recordPreMetering`): their ids until they are declared, then only the count.
+		// (`recordPreMetering`): how many, and the recent ids that keep one response from being
+		// counted twice (its lines are adjacent), until they are declared.
 		preMetering: { ids: new Set(), responses: 0, recorded: false },
 	};
 }
@@ -1325,7 +1327,9 @@ async function ingest(cursor, path, since) {
 				line.push(Buffer.from(view.subarray(from)));
 			}
 		}
-		result.atEnd = position >= size;
+		// Finished only when every byte read was consumed: a read stopped at MAX_READ_BYTES has
+		// whole lines left in the chunk it fetched, however far `position` went.
+		result.atEnd = position >= size && cursor.byteOffset - start < MAX_READ_BYTES;
 	} catch (err) {
 		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
 	} finally {
@@ -1345,8 +1349,8 @@ async function ingest(cursor, path, since) {
  */
 async function recordPreMetering(cursor, sessionId, agentId, ingested) {
 	const pm = cursor.preMetering;
-	if (pm.recorded || pm.ids.size === 0 || !(ingested.metered || ingested.atEnd)) return;
-	const responses = pm.ids.size;
+	if (pm.recorded || pm.responses === 0 || !(ingested.metered || ingested.atEnd)) return;
+	const responses = pm.responses;
 	const written = await recordWatchEvent({
 		kind: PRE_METERING,
 		mode: guardMode(),
@@ -1358,7 +1362,6 @@ async function recordPreMetering(cursor, sessionId, agentId, ingested) {
 	});
 	if (!written) return;
 	pm.recorded = true;
-	pm.responses = responses;
 	pm.ids.clear();
 }
 
@@ -1386,9 +1389,11 @@ function foldLine(cursor, bytes, since, seen) {
 			typeof id === "string" &&
 			id !== "" &&
 			id.length <= MAX_ID_CHARS &&
-			isObject(entry?.message?.usage)
+			isObject(entry?.message?.usage) &&
+			!pm.ids.has(id)
 		) {
 			pm.ids.add(id);
+			pm.responses += 1;
 		}
 		return true;
 	}
@@ -1761,27 +1766,6 @@ export async function stampFirstRun(sessionId) {
 		else await firstRun(dir.dir);
 	} catch {
 		// The first hook that needs it reports it.
-	}
-}
-
-/**
- * Publish `content` at `path` unless something is there already: by link(2), which
- * never replaces a name, so it is whole the moment it exists — on a filesystem
- * without hard links, by an exclusive create.
- */
-async function publishOnce(path, content) {
-	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-	try {
-		await writeFile(tmp, content, { flag: "wx", mode: 0o600 });
-		await link(tmp, path);
-	} catch (err) {
-		if (err?.code === "EEXIST") return;
-		if (!LINKLESS.has(err?.code)) throw err;
-		await writeFile(path, content, { flag: "wx", mode: 0o600 }).catch((exclusive) => {
-			if (exclusive?.code !== "EEXIST") throw exclusive;
-		});
-	} finally {
-		await unlink(tmp).catch(() => {});
 	}
 }
 

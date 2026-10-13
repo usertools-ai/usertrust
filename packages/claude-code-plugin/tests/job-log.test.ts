@@ -80,6 +80,7 @@ interface Lib {
 		knownGaps: Array<{ gap: string; evidence: Record<string, unknown> }>;
 		transferIds: string[];
 		taggedCostUt: string;
+		beforeMetering: { responses: number; note: string };
 	};
 }
 // A computed specifier: the hooks are plain .mjs with no declarations.
@@ -498,9 +499,20 @@ describe("jobCoverage — a diagnostic, not a certification", () => {
 			at: iso(T0 + 2500),
 		};
 		const without = jobCoverage(base);
+		// A session with no log at all, and one whose log has no interval of THIS job (another
+		// job's): neither is counted.
+		const otherLog =
+			start("sess-b", T0) +
+			op("sess-b", T0 + 1000, "start", "other-job") +
+			op("sess-b", T0 + 5000, "stop", null);
 		const withIt = jobCoverage({
 			...base,
-			watch: [pre, { ...pre, session: "sess-other", responses: 5 }],
+			logs: { [SID]: logText, "sess-b": otherLog },
+			watch: [
+				pre,
+				{ ...pre, session: "sess-other", responses: 5 },
+				{ ...pre, session: "sess-b", responses: 7 },
+			],
 		});
 		// The gap figure means calls missed while metering was ON: this usage predates it.
 		expect(withIt.knownGaps).toEqual(without.knownGaps);
