@@ -560,6 +560,9 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				toolUseId: entry.toolUseId ?? null,
 				transferId: entry.transferId,
 				agentId: String(agentId ?? "main"),
+				// The session, as given, never read back from the file name: a session id may itself
+				// contain the name's `__` separator (`sweepReleasing` places a record's gaps by it).
+				sessionId: String(sessionId),
 				// When the CALL was received, kept on EVERY hold whether or not the server honours
 				// `job`: a give-back at Stop that has to write a gap places it by this time, never
 				// by the Stop's own.
@@ -1158,6 +1161,8 @@ function heldOf(path, body, mtimeMs, releasing) {
 		transferId: body.transferId,
 		toolUseId: body.toolUseId ?? null,
 		agentId: sanitize(body.agentId ?? "main"),
+		// The session the record was made in, as stored (`recordPending`); absent on an older one.
+		...(typeof body.sessionId === "string" ? { sessionId: body.sessionId } : {}),
 		...jobHoldFields(body),
 		...(typeof body.startedAt === "string" ? { startedAt: body.startedAt } : {}),
 		// Why the hold was claimed: `release` when its call was deferred and the claim only
@@ -2217,7 +2222,11 @@ export async function sweepReleasing(maxAgeMs) {
 				// Unreadable: nothing to write its gaps from. Dropped all the same.
 			}
 			if (body?.gapWritten !== true && typeof body?.transferId === "string") {
-				await lastGaps(name.slice(0, name.indexOf("__")), heldOf(path, body, mtimeMs, true));
+				// Its session as the record stores it, never parsed out of the file name (a session id
+				// can contain the name's `__`). An older record without one gets gaps that name no
+				// session, which coverage counts against every job.
+				const held = heldOf(path, body, mtimeMs, true);
+				await lastGaps(held.sessionId ?? null, held);
 			}
 			await unlink(path);
 			dropped += 1;

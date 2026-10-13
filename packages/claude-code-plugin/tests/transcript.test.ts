@@ -2662,6 +2662,7 @@ describe("estimate holds", () => {
 			toolUseId: "tu_1",
 			transferId: "tx_1",
 			agentId: "main",
+			sessionId: SESSION,
 			estimatedInputTokens: 4,
 			// When the call was received: kept on every hold, whatever the server honours.
 			startedAt: expect.any(String),
@@ -4281,6 +4282,12 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			await run("pre-tool-use.mjs", preInput("tu_1"));
 			expect(authorizes()).toHaveLength(1);
 			expect(await holdStateFiles()).toEqual([expect.stringMatching(/\.releasing$/)]);
+			// The kept record names its session in its body: the sweep places its gaps by it.
+			const [kept] = await holdStateFiles();
+			expect(JSON.parse(await readFile(join(stateDir, String(kept)), "utf-8"))).toMatchObject({
+				sessionId: SESSION,
+				windowJournalled: true,
+			});
 			// Stop gives tx_1 back, once, and forgets it. Its call ran and its window's outcome is
 			// journalled already: the give-back carries NO class (never `unused`, which would claim
 			// nothing hides behind it), and Stop writes no second gap about it.
