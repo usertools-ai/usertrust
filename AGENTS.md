@@ -118,13 +118,15 @@ rejection of the hold — throws out to its flow's **denial boundary**, which ap
 as `auditEventHash`, and rethrows. The boundary is a `catch` wrapped **around** the
 try/finally that releases the budget mutex, so the append runs with the lock already
 released; and it ends **lexically before** the provider call in step 6, so a provider that
-throws a same-typed error is never audited as a governor decision. There are **five append
-sites**: the mutex-section boundary in each of the three flows, plus a pre-mutex
-unknown-model site in `interceptCall` and headless `authorize` — actions have no model to
-price, so `governActionImpl` has only the mutex one. Four of the five are `catch (denialErr)`
-blocks; the exception is headless's pre-mutex site, which appends inline before an
-unconditional `throw` because the throw is right there and needs no catch to intercept it.
-Grepping `catch (denialErr)` therefore finds four, not five. Payloads and rationale live in
+throws a same-typed error is never audited as a governor decision. There are **six append
+sites**: the mutex-section boundary in each of the three flows, a pre-mutex unknown-model
+site in `interceptCall` and in headless `authorize` (actions have no model to price, so
+`governActionImpl` has only the mutex one), and the pre-mutex request-option refusal at the
+top of `interceptCall` (`movedRequestOptions`, before anything is held, scanned or sent).
+Four of the six are `catch (denialErr)` blocks. The exceptions are headless's pre-mutex
+unknown-model site and `interceptCall`'s request-option refusal, which append inline
+before an unconditional `throw`, because the throw is right there and needs no catch to
+intercept it. Grepping `catch (denialErr)` therefore finds four, not six. Payloads and rationale live in
 `audit/denial-events.ts`.
 
 `destroy()` waits up to 5s, one deadline for all of them, for the terminals still working (a

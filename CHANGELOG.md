@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **PII redaction now keeps a field that is non-enumerable, and an own `"__proto__"` key.** When `pii: "redact"` rewrote a request, the copy it built dropped every non-enumerable field, and turned an own `"__proto__"` key, which a request built by `JSON.parse` can carry, into the copy's prototype instead of a key. Both are now kept, redacted like any other field: a non-enumerable field stays non-enumerable, and `"__proto__"` stays an ordinary key. A non-enumerable function (such as a hidden `toJSON`) or getter is still left out of the copy, and the getter is never run. A field that refers back to an object enclosing it, or one object referenced from two places, keeps that shape in the copy. Requests built from plain object literals are redacted exactly as before.
 
+- **Only request options that change neither the body nor where it is sent are allowed on a governed call.** A governed call is scanned for PII and injection, held and priced from its request parameters. But the SDKs also take per-call request options, and some of them replace what those parameters describe, so the call sent something governance never saw. Under `pii: "block"`, a clean request whose `options.body` carried a US SSN was sent, unrefused.
+
+  Per-call options are now governed by a list, as default-deny governs methods:
+  - **allowed:** `timeout`, `maxRetries`, `signal`, `headers`, `query`, `method`, `idempotencyKey` and `stream`; on Google, `httpOptions` `apiVersion`, `headers`, `timeout` and `retryOptions`;
+  - **refused, everything else**, with a `PolicyDeniedError` naming the option, after one `policy_denied` event, before anything is held or sent. Among them: `body`; `fetchOptions` (its `body` wins); Anthropic's `middleware` and `fallbackState`; `path`; `defaultBaseURL`; every internal `__` option (`__binaryResponse` skipped reading usage, so the call settled at its estimate); Google's `httpOptions.extraBody`, `baseUrl` and `baseUrlResourceScope`.
+
+  This covers every governed method (create, stream and parse alike), and an option an SDK adds later is refused until listed. What is forwarded is a copy of the allowed options, each read once, so an option the caller changes after the call starts cannot reach the SDK. Request options must be a plain object, and an option held by an accessor is refused. Nothing these checks cannot read without running caller code is read as absent: an accessor or a Proxy anywhere on the way to a client's options refuses the call. A client handed to `trust()` inside a Proxy (an observability wrapper) is trusted as transport, and is not refused. `trust()` also refuses a client that rewrites every request, before the ledger client is built:
+  - an Anthropic client constructed with `middleware` (including the SDK's `betaRefusalFallbackMiddleware`, which re-sends to a fallback model after pricing);
+  - an Anthropic or OpenAI client constructed with `fetchOptions` carrying `body` or `method`;
+  - a Google client created with `httpOptions.extraBody`. A default client, and a cloud-provider subclass that signs requests, are unaffected. (LIMITATIONS.md, "1. The governance surface is the wrapped SDK methods — nothing else".)
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading
