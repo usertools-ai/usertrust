@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `close()` on the dashboard server (`createUiServer`) no longer waits several seconds for a connected client: it closes the remaining connections once it stops listening. A close after a client had read the live tail took about 3.7 s; it now takes a few milliseconds.
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading
