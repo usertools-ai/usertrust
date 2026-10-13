@@ -275,7 +275,8 @@ describe("writes that cannot be confirmed never read as done", () => {
 		// A FileHandle's close is its own property, so the failure is injected where lib.mjs
 		// opens: every handle it opens has a close that closes, then reports the late EIO a full
 		// or failing disk gives.
-		let failures = 0;
+		// The path of every handle whose close failed.
+		const failures: string[] = [];
 		vi.doMock("node:fs/promises", async (importOriginal) => {
 			const real = await importOriginal<typeof import("node:fs/promises")>();
 			return {
@@ -285,7 +286,7 @@ describe("writes that cannot be confirmed never read as done", () => {
 					const close = handle.close.bind(handle);
 					handle.close = async () => {
 						await close();
-						failures += 1;
+						failures.push(String(args[0]));
 						throw Object.assign(new Error("EIO: i/o error, close"), { code: "EIO" });
 					};
 					return handle;
@@ -305,7 +306,10 @@ describe("writes that cannot be confirmed never read as done", () => {
 			vi.doUnmock("node:fs/promises");
 			vi.resetModules();
 		}
-		expect(failures).toBe(1);
+		// The watch log's append failed once. The session's stamp is made all the same (the hook
+		// ran): it is published, then read back, and its read's late close is the other failure here.
+		expect(failures.filter((path) => path.endsWith("watch.jsonl"))).toHaveLength(1);
+		expect(failures.some((path) => path.endsWith(join("since-session", "s")))).toBe(true);
 		expect(said).toContain("could not write a watch record");
 		expect(said).toContain("EIO");
 	});

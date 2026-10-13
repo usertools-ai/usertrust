@@ -1,6 +1,6 @@
 {
 	"name": "usertrust-openclaw",
-	"version": "5.0.0",
+	"version": "5.0.1",
 	"description": "usertrust governance plugin for OpenClaw. Budget, policy, and audit for streamed LLM calls whose provider id matches this plugin's id or aliases (defaults: anthropic, openai, google).",
 	"license": "Apache-2.0",
 	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
@@ -49,7 +49,7 @@
 		"NOTICE"
 	],
 	"dependencies": {
-		"usertrust": "*"
+		"usertrust": "5.0.1"
 	},
 	"peerDependencies": {
 		"@mariozechner/pi-ai": ">=0.12.0",

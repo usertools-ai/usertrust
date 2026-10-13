@@ -33,7 +33,7 @@ try {
 // response of its session, whatever its `source`: a resumed or compacted transcript's
 // history is older than the stamp, and is never posted, and a stamp already made never
 // moves. Local and bounded, and it never throws; in estimate mode it makes nothing.
-await stampFirstRun();
+await stampFirstRun(payload?.session_id);
 // The job log: a NEW session id (startup, clear, fork) gets its `session-start` line;
 // resume and compact write nothing, so neither ever ends or invalidates an open job.
 // Failing to write it must never fail a session: `usertrust-job` then refuses loudly.

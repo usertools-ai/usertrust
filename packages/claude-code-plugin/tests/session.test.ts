@@ -530,6 +530,10 @@ describe("a config refused, then fixed, mid-session: the refused hooks send noth
 		expect(refused.code).toBe(0);
 		expect(server.requests).toEqual([]);
 		expect(await watchRecords(join(home, ".claude", "usertrust-cc"))).toMatchObject([
+			// The refused hook is the session's first touch of this (default) state dir: the response
+			// that triggered it predates it, so it is declared, once, as written before the session was
+			// metered (never billed, never a gap). The call itself is the gap.
+			{ kind: "pre-metering", session: SESSION, responses: 1 },
 			{ kind: "gap", reason: 'config: field "mode" invalid' },
 		]);
 		expect(nodeFs.existsSync(pinOf(home))).toBe(false);
@@ -880,6 +884,10 @@ describe("a session is pinned once: a passwd home that cannot be used, or a look
 		expect((await session.preToolUse()).code).toBe(0);
 		expect(session.server.requests).toHaveLength(before);
 		expect(await watchRecords(join(home, ".claude", "usertrust-cc"))).toMatchObject([
+			// The refused hook is the session's first touch of this (default) state dir: the response
+			// that triggered it predates it, so it is declared, once, as written before the session was
+			// metered (never billed, never a gap). The call itself is the gap.
+			{ kind: "pre-metering", session: SESSION, responses: 1 },
 			{ kind: "gap", tool: "Bash", reason: "pin: dir refused (mode)" },
 		]);
 		// Repaired, the pin under the passwd home is the session's again: msg_b once.
@@ -917,6 +925,10 @@ describe("a session is pinned once: a passwd home that cannot be used, or a look
 		expect((await session.preToolUse()).code).toBe(0);
 		expect(session.server.requests).toHaveLength(before);
 		expect(await watchRecords(join(HOME, ".claude", "usertrust-cc"))).toMatchObject([
+			// The refused hook is the session's first touch of this (default) state dir: the response
+			// that triggered it predates it, so it is declared, once, as written before the session was
+			// metered (never billed, never a gap). The call itself is the gap.
+			{ kind: "pre-metering", session: SESSION, responses: 1 },
 			{ kind: "gap", tool: "Bash", reason: "pin: dir refused (home)" },
 		]);
 		// The lookup answers again: the session's own pin decides, and msg_b is charged once.
