@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GoogleGenAI } from "@google/genai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { trust } from "../../src/govern.js";
 import { resolveGooglePipeline, snapshotGoogleRequest } from "../../src/google-request.js";
+import { trust } from "../../src/govern.js";
 
 vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(() => ({

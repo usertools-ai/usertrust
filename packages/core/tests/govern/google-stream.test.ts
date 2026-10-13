@@ -25,8 +25,8 @@ import { runInNewContext } from "node:vm";
 import { GenerateContentResponse, GoogleGenAI } from "@google/genai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
-import { GOOGLE_REFUSED_METHODS, type TrustEngine, trust } from "../../src/govern.js";
 import { resolveGooglePipeline, snapshotGoogleRequest } from "../../src/google-request.js";
+import { GOOGLE_REFUSED_METHODS, type TrustEngine, trust } from "../../src/govern.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import {
 	AuditDegradedError,
@@ -1183,9 +1183,9 @@ describe("automatic function calling: metered per round on generateContent, refu
 	}
 });
 
-// ── Where the unified AFC predicate deliberately differs from the first afcRequested ──
+// ── Edge values of the AFC config: the SDK's own decision, each pinned ──
 
-describe("the unified AFC predicate: deliberate differences, each pinned", () => {
+describe("edge values of the AFC config are decided by the SDK itself, each pinned", () => {
 	let tmpVault: string;
 	beforeEach(() => {
 		tmpVault = makeTmpVault();
@@ -1562,7 +1562,11 @@ describe("Proxies in the request are read as the SDK reads them, and governed", 
 			_engine: engine,
 			_audit: audit,
 		});
-		const result = await callModels(governed, method, params).then(
+		const result: { receipt?: TrustReceipt; err?: unknown } = await callModels(
+			governed,
+			method,
+			params,
+		).then(
 			(receipt) => ({ receipt: receipt as TrustReceipt }),
 			(err: unknown) => ({ err }),
 		);
