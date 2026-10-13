@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- The dashboard no longer keeps reporting a chain failure after an audit directory that was unreadable or absent at start becomes readable and valid; a chain that is actually broken still reads as broken. The first append after such a start now reloads the whole log and re-checks the chain and the vault, instead of extending a verdict that was never derived from a log. That also closes a case in the other direction: a log whose tail was truncated, created after the dashboard started, used to read as verified, because the events that remain still link from the start. A directory that exists but cannot be listed is now reported as "could not be read" too.
-
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading
@@ -48,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`usertrust-verify --tx` prints the transaction's own spend.** Its receipt printed, under "Spend" and "Conversion", the running total of every `llm_call` cost in the log up to and including the transaction, beside one transaction. A 1,144 UT call read "9535 UT" and "$0.95", its vault's whole spend. It now prints the transaction's cost, in dollars to 4 decimal places, which is exact at $0.0001 per usertoken; above a cent it used to round to 2. The receipt's Date and Verified times are UTC and say so (`2026-10-12 17:59:02Z`), where they were the verifying machine's local time with no zone. `ReceiptData.cumulativeSpend` is now optional and deprecated: it is no longer printed. The receipt's header prints the product name in lowercase (`u s e r t r u s t`), where it was letter-spaced capitals. The ledger UI shows the same receipt, so the same fix applies there.
 
 - **The ledger UI shows a project with no vault yet, or an audit directory with no events, as "No governed calls yet", not as a red CHAIN INTEGRITY FAILURE.** The summary's `chain` gains `empty`, which is true only when there are no events and nothing is wrong. A log deleted while its anchor still records events stays a failure, and so does an audit directory deleted while the dashboard is open, whatever it held, and a vault or audit directory reached through a symbolic link whose target is missing (an unmounted volume, say). The first events written after the server started now reach the page. `fs.watch` cannot watch an audit directory that does not exist yet, so the server polls for it.
+
+- **The ledger UI re-checks the whole vault when an audit directory that was absent or unreadable at start becomes readable.** A truncated log created after the dashboard started read as verified, because the events that remain still link from the start, and an audit directory that was unreadable at start kept reporting a failure after it became readable and valid. The first change after such a start now reloads the whole log and re-checks the chain and the vault; a chain that is actually broken reads as broken. An audit directory that exists but cannot be listed is reported as unreadable.
 
 - **The ledger UI's Verify reports a transaction that is in none of the vault's audit segments as NOT FOUND, not FAILED.** A request that fails is reported as "not checked", which is also not a failed check. A verify response is shown only while the row is still the version it was requested for. Before, a response that landed after a live status correction appeared beside the corrected status.
 

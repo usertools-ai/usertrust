@@ -73,8 +73,8 @@ export async function createUiServer(
 	const appDir = opts?.appDir ?? join(dirname(fileURLToPath(import.meta.url)), "..", "app");
 	let state: LedgerState = loadState(vaultPath);
 	/**
-	 * Whether this process has ever seen the vault's audit directory. A resync that finds it gone after that is a
-	 * deletion, not a first run (`loadState`'s `auditDirSeen`); a verified append proves the directory exists.
+	 * Whether this process has ever seen the vault's audit directory, listable or not. A resync that finds it gone
+	 * after that is a deletion, not a first run (`loadState`'s `auditDirSeen`); a verified append proves it exists.
 	 */
 	let auditDirSeen = state.auditDirPresent;
 	let port = 0;
@@ -89,12 +89,13 @@ export async function createUiServer(
 	}
 
 	function handleGrow(): void {
-		// The incremental path only EXTENDS a verdict; it never derives one. A load that did not see a readable audit
-		// directory (absent, or unreadable) raised its verdict from no log at all, and an append cannot clear an alarm
-		// raised that way, nor see what only the vault's own checks see (a truncated tail still links from genesis, so
-		// extending that state read as verified). So the first append after such a load is a full reload, which
-		// re-derives the verdict from the whole log; once it finds the directory, later appends are incremental again.
-		if (!state.auditDirPresent) {
+		// The incremental path only EXTENDS a verdict; it never derives one. A load that did not see a READABLE audit
+		// directory (absent, or present and unlistable) raised its verdict from no log at all, and an append cannot clear
+		// an alarm raised that way, nor see what only the vault's own checks see (a truncated tail still links from
+		// genesis, so extending that state read as verified). So the first append after such a load is a full reload,
+		// which re-derives the verdict from the whole log; once it finds the directory readable, appends are incremental
+		// again. Readability decides only this; whether the directory was ever SEEN (`auditDirSeen`) is presence alone.
+		if (!state.auditDirReadable) {
 			handleResync();
 			return;
 		}

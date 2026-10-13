@@ -677,6 +677,31 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
 			expect(still.chain.valid).toBe(false);
 			expect(couldNotBeRead(still)).toBe(true);
 		});
+
+		// Presence and readability are different facts. A directory that can be searched but not listed is still THERE, so
+		// deleting it is a deletion; reading "cannot list it" as "never saw it" cleared the alarm to a first run.
+		it("red-first (false clean): a directory that was present but unlistable at start, then DELETED, stays a failure", async () => {
+			chmodSync(auditDir(), 0o111);
+			ui = await createUiServer(tempDir, { port: 0 });
+			const before = await summaryOf(ui.port);
+			expect(before.chain.valid).toBe(false);
+			expect(couldNotBeRead(before)).toBe(true);
+			// Driven as the other deletion rows are: remove the directory and wait for the resync's summary frame.
+			const { data } = await readSse(
+				ui.port,
+				(name) => name === "summary",
+				async () => {
+					chmodSync(auditDir(), 0o700);
+					rmSync(auditDir(), { recursive: true, force: true });
+				},
+			);
+			const chain = JSON.parse(data).chain as { valid: boolean; empty: boolean; errors: string[] };
+			expect(chain).toMatchObject({ valid: false, empty: false });
+			expect(chain.errors.join(" ")).toContain("deletion detected");
+			const served = await summaryOf(ui.port);
+			expect(served.chain).toMatchObject({ valid: false, empty: false });
+			expect(served.chain.errors.join(" ")).toContain("deletion detected");
+		});
 	},
 );
 
