@@ -165,7 +165,11 @@ kept:
 - a Google client whose `httpOptions` carry `extraBody`.
 
 A default client has no middleware. A cloud-provider subclass's `backendMiddleware()`,
-which signs requests, is never read. The row that pins this uses a stand-in subclass that
+which signs requests, is never read. **A client constructed with its own `fetch` is
+trusted transport and is not refused.** That `fetch` can rewrite any request, body
+included; proxies, test harnesses and instrumentation use it legitimately. It is the
+transport `trust()` wraps, so what it does to a request is the caller's own code, out of
+scope as above. The row that pins this uses a stand-in subclass that
 overrides `backendMiddleware()`, not a published cloud SDK, which this package does not
 install. A change made to the raw client between a call's check and its send, from the
 caller's own code, is deliberate bypass, out of scope as above.
