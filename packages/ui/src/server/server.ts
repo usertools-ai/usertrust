@@ -77,6 +77,11 @@ export async function createUiServer(
 	 * after that is a deletion, not a first run (`loadState`'s `auditDirSeen`); a verified append proves it exists.
 	 */
 	let auditDirSeen = state.auditDirPresent;
+	/**
+	 * Whether a load of this process has detected a deletion of the audit directory. Latched for the life of the
+	 * process and passed to every later load: a directory recreated afterwards, holding a valid chain, does not clear it.
+	 */
+	let deletionSeen = state.deletionDetected;
 	let port = 0;
 
 	const clients = new Set<ServerResponse>();
@@ -173,8 +178,9 @@ export async function createUiServer(
 	}
 
 	function handleResync(): void {
-		state = loadState(vaultPath, ROW_CAP, auditDirSeen);
+		state = loadState(vaultPath, ROW_CAP, auditDirSeen, deletionSeen);
 		auditDirSeen ||= state.auditDirPresent;
+		deletionSeen ||= state.deletionDetected;
 		version += 1;
 		broadcast("resync", {});
 		broadcast("summary", state.summary);

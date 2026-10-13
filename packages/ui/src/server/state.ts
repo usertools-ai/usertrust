@@ -39,6 +39,11 @@ export interface LedgerState {
 	 * unreadable alike: a verdict raised from no readable log cannot be extended by an append, only re-derived.
 	 */
 	auditDirReadable: boolean;
+	/**
+	 * Whether this load found a deletion: the audit directory is absent after the process had seen it, or an earlier
+	 * load's deletion was carried in (`loadState`'s `deletionSeen`). The caller latches it for the life of the process.
+	 */
+	deletionDetected: boolean;
 }
 
 // Presence of the mirror file is not a verdict — a planted empty/junk file
@@ -141,15 +146,26 @@ function isDanglingLink(path: string): boolean {
 /** `verifyVault`'s error for a vault with no audit directory: no evidence either way, not tampering. */
 const NO_AUDIT_DIR = "Audit directory not found:";
 
+/** The chain error a deletion detected while the dashboard was open carries, on every load for as long as it is latched. */
+const DELETION_ERROR =
+	"The audit directory disappeared while this dashboard was open (deletion detected)";
+
 /**
  * `auditDirSeen`: whether this process has ever seen the vault's audit directory. A first run has none; a directory that
  * existed and is gone was deleted, whatever it held (events, malformed lines, nothing), and must never read as a first
  * run. A count of parsed events missed a log of malformed lines only, which verification fails with zero events.
+ *
+ * `deletionSeen`: whether an earlier load of this process already detected such a deletion. The caller latches the
+ * returned `deletionDetected` and passes it back, and it holds for the life of the process: the deletion error stays in
+ * `summary.chain.errors` and the chain stays invalid whatever the directory holds afterwards, because a directory
+ * recreated with a fresh valid chain is not the one that was destroyed. Its events may still load and show as rows; only
+ * the verdict is fixed. A first run (never seen, nothing deleted) is unaffected.
  */
 export function loadState(
 	vaultPath: string,
 	rowCap: number = ROW_CAP,
 	auditDirSeen = false,
+	deletionSeen = false,
 ): LedgerState {
 	const events = readLedgerEvents(vaultPath);
 	const integrity = deriveChainIntegrity(events);
@@ -167,23 +183,23 @@ export function loadState(
 	// The exception is for an audit directory this process has never seen: one deleted while the dashboard was open
 	// (the live tail resyncs, and the reload finds it gone) is evidence destroyed, not a first run.
 	const { dir: auditDir, listError } = auditDirState(vaultPath);
-	const deletedWhileOpen = auditDir === "absent" && auditDirSeen;
-	const noAuditDir = events.length === 0 && auditDir === "absent" && !auditDirSeen;
-	const errors = noAuditDir
+	// A deletion is latched: once detected it is carried by every later load, so a directory recreated in its place
+	// (even one holding a valid chain) cannot clear the evidence that the original was destroyed.
+	const deletionDetected = (auditDir === "absent" && auditDirSeen) || deletionSeen;
+	const noAuditDir =
+		events.length === 0 && auditDir === "absent" && !auditDirSeen && !deletionDetected;
+	const readErrors = noAuditDir
 		? vault.errors.filter((e) => !e.startsWith(NO_AUDIT_DIR))
-		: deletedWhileOpen
-			? [
+		: auditDir === "absent" || (auditDir === "present" && listError === undefined)
+			? vault.errors
+			: // verifyVault calls an unreadable directory "not found": say what actually stopped the read.
+				[
 					...vault.errors,
-					"The audit directory disappeared while this dashboard was open (deletion detected)",
-				]
-			: auditDir === "absent" || (auditDir === "present" && listError === undefined)
-				? vault.errors
-				: // verifyVault calls an unreadable directory "not found": say what actually stopped the read.
-					[
-						...vault.errors,
-						`Audit directory could not be read (${listError ?? auditDir}): this vault was not verified`,
-					];
-	const valid = integrity.valid && (vault.valid || (noAuditDir && errors.length === 0));
+					`Audit directory could not be read (${listError ?? auditDir}): this vault was not verified`,
+				];
+	const errors = deletionDetected ? [...readErrors, DELETION_ERROR] : readErrors;
+	const valid =
+		integrity.valid && !deletionDetected && (vault.valid || (noAuditDir && errors.length === 0));
 
 	const truncated = events.length > rowCap;
 	const visible = truncated ? events.slice(-rowCap) : events;
@@ -224,5 +240,6 @@ export function loadState(
 		byteOffset,
 		auditDirPresent: auditDir === "present",
 		auditDirReadable: auditDir === "present" && listError === undefined,
+		deletionDetected,
 	};
 }

@@ -802,3 +802,105 @@ describe("live tail when the audit directory was readable at start", () => {
 		expect(await summaryOf(ui.port)).toMatchObject({ chain: { events: 2, valid: true } });
 	});
 });
+
+// A deletion detected while the dashboard is open is latched for the life of the process. A directory recreated in its
+// place with a fresh valid chain is not the one that was destroyed, so it may show as rows but never clears the verdict.
+describe("a deletion detected while the dashboard is open stays detected when the audit directory is recreated", {
+	timeout: 30_000,
+}, () => {
+	let tempDir: string;
+	let stage: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-latch-"));
+		stage = mkdtempSync(join(tmpdir(), "trust-tail-latch-stage-"));
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+		rmSync(stage, { recursive: true, force: true });
+	});
+
+	const auditDir = (): string => join(tempDir, ".usertrust", "audit");
+
+	async function appendMany(root: string, count: number, prefix: string): Promise<void> {
+		const writer = createAuditWriter(root);
+		for (let i = 0; i < count; i++) {
+			await writer.appendEvent({
+				kind: "llm_call",
+				actor: "local",
+				data: { cost: 1, settled: true, transferId: `${prefix}_${i}` },
+			});
+		}
+		writer.release();
+	}
+
+	/** From the deletion on: delete, reload (reads it), recreate with a fresh valid chain, and watch the verdict. */
+	async function deleteThenRecreate(port: number, reload: () => void): Promise<void> {
+		rmSync(auditDir(), { recursive: true, force: true });
+		reload();
+		const deleted = await summaryOf(port);
+		expect(deleted.chain.valid).toBe(false);
+		expect(deleted.chain.errors.join(" ")).toContain("deletion detected");
+
+		mkdirSync(auditDir(), { recursive: true });
+		await appendMany(tempDir, 2, "tx_fresh");
+
+		// At NO point after the deletion may the summary read valid. Polled for a fixed window (past the watcher's 1 s
+		// poll), so the grow that finds the recreated directory has run, then once more after a reload.
+		const seen: Array<{ events: number; valid: boolean; errors: string[] }> = [];
+		const until = Date.now() + 4000;
+		while (Date.now() < until) {
+			const s = await summaryOf(port);
+			seen.push({ events: s.chain.events, valid: s.chain.valid, errors: s.chain.errors });
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		// The recreated directory's events were loaded: the grow ran, and what it did not do is clear the verdict.
+		expect(seen.some((s) => s.events === 2)).toBe(true);
+		expect(seen.filter((s) => s.valid)).toEqual([]);
+		expect(seen.filter((s) => !s.errors.some((e) => e.includes("deletion detected")))).toEqual([]);
+
+		reload();
+		const after = await summaryOf(port);
+		expect(after.chain.events).toBe(2);
+		expect(after.chain.valid).toBe(false);
+		expect(after.chain.errors.join(" ")).toContain("deletion detected");
+		// Only one such error, however many loads carried it.
+		expect(after.chain.errors.filter((e) => e.includes("deletion detected"))).toHaveLength(1);
+	}
+
+	it("red-first (false clean): absent at start, a valid chain appears, is deleted and recreated: never valid again", async () => {
+		mkdirSync(join(stage, ".usertrust", "audit"), { recursive: true });
+		await appendMany(stage, 3, "tx_first");
+		ui = await createUiServer(tempDir, { port: 0 });
+		expect((await summaryOf(ui.port)).chain).toMatchObject({ events: 0, valid: true, empty: true });
+		renameSync(join(stage, ".usertrust"), join(tempDir, ".usertrust"));
+		const appeared = await summaryWhen(ui.port, (s) => s.chain.events === 3);
+		expect(appeared.chain).toMatchObject({ events: 3, valid: true });
+		const server = ui;
+		await deleteThenRecreate(ui.port, () => server.reload());
+	});
+
+	it("red-first (false clean): readable at start, deleted and recreated with a valid chain: stays a failure", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		await appendMany(tempDir, 3, "tx_first");
+		ui = await createUiServer(tempDir, { port: 0 });
+		expect(await summaryOf(ui.port)).toMatchObject({ chain: { events: 3, valid: true } });
+		const server = ui;
+		await deleteThenRecreate(ui.port, () => server.reload());
+	});
+
+	it("a first run with no audit directory is still not a failure", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		ui.reload();
+		expect((await summaryOf(ui.port)).chain).toMatchObject({
+			events: 0,
+			valid: true,
+			empty: true,
+			errors: [],
+		});
+	});
+});
