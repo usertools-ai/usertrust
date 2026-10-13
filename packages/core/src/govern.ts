@@ -5310,7 +5310,7 @@ function googleAfcGate(
 	method: "generateContent" | "generateContentStream",
 	vertexAI: boolean,
 ): { refusal: PolicyDeniedError } | { runAfcLoop: boolean } {
-	const snap = snapshotGoogleAfcParams(args[0], { vertexAI });
+	const snap = snapshotGoogleAfcParams(args[0], { vertexAI, method });
 	if ("verdict" in snap) return { refusal: googleAfcError(method, snap.verdict) };
 	const verdict =
 		method === "generateContent"

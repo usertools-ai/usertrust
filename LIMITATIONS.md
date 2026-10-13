@@ -106,7 +106,17 @@ fields the SDK reads, each of which must be copyable as data), so a later change
 `config.automaticFunctionCalling` cannot reach the SDK. It carries every field the
 SDK reads from a non-callable tool, `config.toolConfig` and its
 `functionCallingConfig`, including one a class instance inherits (a getter) or holds
-as a non-enumerable property. Inside the values of a tool's fields (a declaration, a
+as a non-enumerable property. For `config` itself it carries what the SDK sends: with
+`config.tools` set (any truthy value, `[]` included) the SDK sends a copy of only
+`config`'s own enumerable fields, and so does the snapshot, so a field `config` inherits
+or holds as non-enumerable is neither read nor sent; without `config.tools` both read
+every field by name, inherited ones included. With `config.tools` set, two shapes are
+refused as calls that could not be checked: an `httpOptions` that `config` inherits or
+holds as non-enumerable (the SDK reads it by name only when it sees MCP tool usage, which
+a process-wide flag can also turn on), and, on `generateContentStream`, an own
+`responseSchema` holding `$schema` beside a `responseJsonSchema` that is set but is not an
+own enumerable field (the SDK would send `responseSchema`, and the copy cannot stop it
+being moved). Inside the values of a tool's fields (a declaration, a
 `parameters` schema) it does not capture field by field: a function, a symbol, an
 object whose prototype is not Object's or `null` (a class instance, or one made with
 `Object.create` from another object), an array whose prototype is not Array's, an

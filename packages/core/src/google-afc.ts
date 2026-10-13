@@ -812,18 +812,34 @@ function copyToolConfig(callerToolConfig: unknown, vertexAI: boolean): unknown {
  * the prompt scan yet skipped by redaction, and sent raw). Methods stay inherited. The
  * `captured` keys are skipped: the snapshot sets those itself. Each prototype on the walk
  * is Proxy-checked before it is touched.
+ *
+ * `ownEnumerableOnly` is the copy the SDK itself makes of `params.config` when `config.tools`
+ * is set (`processParamsMaybeAddMcpUsage`: `Object.assign({}, params.config, …)`), and its
+ * request converters read that copy: only `obj`'s OWN ENUMERABLE properties, string and symbol
+ * keys in `Reflect.ownKeys` order, an accessor among them run once on `obj`. An inherited or
+ * non-enumerable field is neither read nor copied, and the prototype chain is not walked. The
+ * copy's prototype is then `Object.prototype`, as `Object.assign({}, …)` makes it, NOT the
+ * caller's. The SDK still reads a few config fields BY NAME from the object it is given
+ * (`maybeMoveToResponseJsonSchem`'s `responseSchema` and `responseJsonSchema`,
+ * `processParamsMaybeAddMcpUsage`'s `httpOptions`). Through the caller's prototype those reads
+ * would find fields this copy never captured, run an inherited getter a second time with the
+ * copy as its receiver (a `#private`-backed one throws there), and on the stream move what they
+ * found into the request. The snapshot decides those reads itself.
  */
 function capturedCopy(
 	obj: object,
 	captured: readonly string[],
 	at: string,
+	ownEnumerableOnly = false,
 ): Record<string | symbol, unknown> {
-	const out = Object.create(Object.getPrototypeOf(obj)) as Record<string | symbol, unknown>;
+	const out = Object.create(
+		ownEnumerableOnly ? Object.prototype : Object.getPrototypeOf(obj),
+	) as Record<string | symbol, unknown>;
 	const seen = new Set<string | symbol>(captured);
 	for (
 		let o: object | null = obj;
 		o !== null && o !== Object.prototype;
-		o = Object.getPrototypeOf(o)
+		o = ownEnumerableOnly ? null : Object.getPrototypeOf(o)
 	) {
 		rejectProxy(o, o === obj ? at : `${at} (its prototype chain)`);
 		for (const key of Reflect.ownKeys(o)) {
@@ -831,6 +847,7 @@ function capturedCopy(
 			seen.add(key);
 			const d = Object.getOwnPropertyDescriptor(o, key);
 			if (d === undefined) continue;
+			if (ownEnumerableOnly && d.enumerable !== true) continue;
 			if ("value" in d) {
 				// Own data is copied; inherited NON-function data is captured too (a value the
 				// SDK would read through the prototype is one the redactor must see). Methods
@@ -842,6 +859,53 @@ function capturedCopy(
 		}
 	}
 	return out;
+}
+
+/** `key` is an OWN ENUMERABLE property of `obj`, the keys `Object.assign` copies; read from its descriptor, no getter run. */
+function isOwnEnumerable(obj: object, key: string): boolean {
+	return Object.getOwnPropertyDescriptor(obj, key)?.enumerable === true;
+}
+
+/**
+ * `generateContentStream` with `config.tools` set: the SDK runs `maybeMoveToResponseJsonSchem`
+ * on the caller's config BEFORE `processParamsMaybeAddMcpUsage` copies it, so a move it makes
+ * there reaches the request through the copy. It reads `responseSchema` and `responseJsonSchema`
+ * BY NAME, and when `responseSchema` is truthy, `responseJsonSchema` falsy and
+ * `Object.keys(responseSchema)` includes `"$schema"`, writes an OWN `responseJsonSchema` holding
+ * it and deletes the own `responseSchema`. The SDK then makes the same move on the snapshot
+ * (`outConfig`, the own enumerable copy), which matches natively except in two shapes:
+ *
+ *   - `responseSchema` is not in the copy (inherited, non-enumerable) and the move happens: natively
+ *     the copy carries `responseJsonSchema`, so the snapshot carries it the same way, as an own
+ *     `responseJsonSchema` holding the value read once, and no `responseSchema`.
+ *   - `responseSchema` is in the copy with `"$schema"` and `responseJsonSchema` is truthy by name
+ *     but not in it: natively nothing moves and `responseSchema` is sent, but the SDK would move it
+ *     on the snapshot, and a copy cannot hold a field that is truthy by name yet never sent (the
+ *     redaction clone rebuilds the request from `Object.keys`). Can't tell: INDETERMINATE.
+ *
+ * Each field is read once, in the SDK's order, and only where the SDK reads it.
+ */
+function moveResponseSchemaAsTheStreamDoes(
+	config: object,
+	outConfig: Record<string | symbol, unknown>,
+): void {
+	const schemaCopied = Object.hasOwn(outConfig, "responseSchema");
+	const jsonSchemaCopied = Object.hasOwn(outConfig, "responseJsonSchema");
+	if (schemaCopied && jsonSchemaCopied) return; // the SDK's move on the copy is the native one
+	const schema = schemaCopied
+		? outConfig["responseSchema"]
+		: captureOnce(config, "responseSchema", "params.config");
+	if (!schema) return;
+	const jsonSchema = jsonSchemaCopied
+		? outConfig["responseJsonSchema"]
+		: captureOnce(config, "responseJsonSchema", "params.config");
+	if (jsonSchema) {
+		if (schemaCopied && Object.keys(schema).includes("$schema")) throw INDETERMINATE;
+		return;
+	}
+	if (!schemaCopied && Object.keys(schema).includes("$schema")) {
+		setData(outConfig, "responseJsonSchema", schema);
+	}
 }
 
 /**
@@ -875,6 +939,19 @@ export function googleClientIsVertexAI(client: unknown): boolean {
  *     (`capturedCopy`): own data copied, every accessor (own or inherited) CAPTURED once on
  *     the original receiver, none re-installed. `config` itself must be an object (or
  *     absent): anything else is indeterminate.
+ *   - `params.config` is copied AS THE SDK COPIES IT. `config.tools` is read first, by name;
+ *     when it is truthy (`[]` included), `processParamsMaybeAddMcpUsage` sends
+ *     `Object.assign({}, params.config, { tools })`, so the snapshot keeps only the config's
+ *     OWN ENUMERABLE fields, on an `Object.prototype` copy (`capturedCopy`'s
+ *     `ownEnumerableOnly`): an inherited or non-enumerable field is never read and never sent,
+ *     as natively. `toolConfig` is then read only when own enumerable; `automaticFunctionCalling`
+ *     is read by name, as `shouldDisableAfc` reads it. Two shapes are indeterminate there: an
+ *     `httpOptions` present but not own enumerable (the SDK reads it by name only on its MCP
+ *     path, which turns on a flag the snapshot cannot see), and, for `generateContentStream`
+ *     (`options.method`), the one move `maybeMoveToResponseJsonSchem` makes before the copy that
+ *     the snapshot cannot express (`moveResponseSchemaAsTheStreamDoes`). Without tools the SDK
+ *     passes `params` through, its converters read every config field by name, and the snapshot
+ *     captures them all, inherited ones included.
  *   - `config.automaticFunctionCalling`, `config.toolConfig` and its
  *     `functionCallingConfig`: owned NULL-PROTOTYPE copies (`ownedDataCopy`), so `disable`, `maximumRemoteCalls` and
  *     `streamFunctionCallArguments` are values we own, and every field the SDK reads from
@@ -915,7 +992,7 @@ export function googleClientIsVertexAI(client: unknown): boolean {
  */
 export function snapshotGoogleAfcParams(
 	params: unknown,
-	options: { vertexAI?: boolean } = {},
+	options: { vertexAI?: boolean; method?: "generateContent" | "generateContentStream" } = {},
 ): { params: unknown } | { verdict: Exclude<GoogleAfcVerdict, { kind: "no_afc" | "afc" }> } {
 	try {
 		if (params === null || (typeof params !== "object" && typeof params !== "function")) {
@@ -931,12 +1008,32 @@ export function snapshotGoogleAfcParams(
 		// A config that is not an object cannot be read as one: can't tell.
 		if (typeof config !== "object" && typeof config !== "function") throw INDETERMINATE;
 		rejectProxy(config, "params.config");
+		// `tools` FIRST, by name: `processParamsMaybeAddMcpUsage`'s `params.config?.tools` is the
+		// SDK's first read of the config, and ANY truthy value (`[]` included) makes it send a copy.
+		const tools = captureOnce(config, "tools", "params.config");
+		const sdkCopiesConfig = Boolean(tools);
+		// With the copy, an own enumerable `httpOptions` reaches the request through it; any other
+		// reaches it only by name, when `hasMcpToolUsage` is true, which also reads a process-global
+		// flag (set by the SDK's `mcpToTool`) the snapshot cannot see. Can't tell.
+		if (
+			sdkCopiesConfig &&
+			presentOnChain(config, "httpOptions", "params.config") &&
+			!isOwnEnumerable(config, "httpOptions")
+		) {
+			throw INDETERMINATE;
+		}
 		const outConfig = capturedCopy(
 			config,
 			["tools", "automaticFunctionCalling", "toolConfig"],
 			"params.config",
+			sdkCopiesConfig,
 		);
+		if (sdkCopiesConfig && options.method === "generateContentStream") {
+			moveResponseSchemaAsTheStreamDoes(config, outConfig);
+		}
 
+		// By name in both cases: the SDK reads it from the caller's config (`shouldDisableAfc`), and
+		// never sends it.
 		const afcAt = "params.config.automaticFunctionCalling";
 		const afcConfig = ownedDataCopy(
 			captureOnce(config, "automaticFunctionCalling", "params.config"),
@@ -946,14 +1043,17 @@ export function snapshotGoogleAfcParams(
 		setData(outConfig, "automaticFunctionCalling", afcConfig);
 
 		// The config's own `toolConfig` accessor is read here, with the other config fields; the
-		// object's FIELDS are read last (copyToolConfig below), as the SDK reads them.
-		const callerToolConfig = captureOnce(config, "toolConfig", "params.config");
+		// object's FIELDS are read last (copyToolConfig below), as the SDK reads them. With the
+		// SDK's copy, only an own enumerable `toolConfig` reaches the request; any other is not read.
+		const callerToolConfig =
+			sdkCopiesConfig && !isOwnEnumerable(config, "toolConfig")
+				? undefined
+				: captureOnce(config, "toolConfig", "params.config");
 
 		const callables: Array<{ tool: object; at: string; callTool: unknown }> = [];
-		const tools = captureOnce(config, "tools", "params.config");
-		// The AFC keys are always set as OWN data properties, `undefined` included: the
-		// copies keep the caller's prototypes, and an own key shadows anything a prototype
-		// could be given later.
+		// The AFC keys are always set as OWN data properties, `undefined` included: a copy
+		// made without tools keeps the caller's prototype, and an own key shadows anything a
+		// prototype could be given later.
 		setData(outConfig, "tools", tools);
 		if (tools !== undefined && tools !== null) {
 			rejectProxy(tools, "params.config.tools");
