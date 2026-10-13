@@ -60,9 +60,13 @@ export function watchLedger(
 			// Present and now absent is a deletion even when the known size is 0 (a log that held no parsable event, or a
 			// directory that never held a log): an absent log reads as size 0, which resyncs only when the known size is > 0.
 			const lost = (logSeen && !logNow) || (dirSeen && !dirNow);
+			// Absent at the previous check and present now. A directory that stays empty, or holds only an anchor, never grows,
+			// so without this the server never loaded it and never learned it exists: its later deletion was classified as a
+			// first run and read valid and empty. One load per appearance, since `dirSeen` holds until it is gone again.
+			const appeared = dirNow && !dirSeen;
 			logSeen = logNow;
 			dirSeen = dirNow;
-			if (lost) events.onResync();
+			if (lost || appeared) events.onResync();
 			else check();
 		}, MISSING_DIR_POLL_MS);
 		// The poll must never keep a process alive on its own: the server's close() clears it, and a process that has

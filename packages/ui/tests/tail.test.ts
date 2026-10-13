@@ -1040,6 +1040,123 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 	});
 });
 
+// In the polling mode the poller sees the audit directory appear before the server does. A directory that stays empty
+// (or holds only an anchor) never grows, so nothing told the server it exists: its later deletion was classified as a
+// first run and read valid and empty. The poller now asks for a load when it first sees the directory appear.
+describe("an audit directory that appears while polling and holds no log bytes", {
+	timeout: 40_000,
+}, () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-appear-"));
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	const auditDir = (): string => join(tempDir, ".usertrust", "audit");
+	const isDeletion = (s: ChainSummary): boolean =>
+		!s.chain.valid && s.chain.errors.some((e) => e.includes("deletion detected"));
+
+	// Bound: the removal, then up to a few 1 s poll intervals; generous for a slow runner.
+	const OBSERVE_BOUND_MS = 6000;
+
+	async function appearThenDelete(populate: () => void): Promise<void> {
+		ui = await createUiServer(tempDir, { port: 0 });
+		expect((await summaryOf(ui.port)).chain).toMatchObject({ events: 0, valid: true, empty: true });
+		mkdirSync(auditDir(), { recursive: true });
+		populate();
+		// More than two 1 s poll intervals: the directory stays, and nothing ever grows.
+		await new Promise((r) => setTimeout(r, 2500));
+		expect((await summaryOf(ui.port)).chain).toMatchObject({ valid: true, empty: true });
+		rmSync(auditDir(), { recursive: true, force: true });
+		const observed = await summaryWhen(ui.port, isDeletion, OBSERVE_BOUND_MS);
+		expect(observed.chain.valid).toBe(false);
+		expect(observed.chain.errors.join(" ")).toContain("deletion detected");
+		// Once read, it is never a clean first run again, across a polled window past the interval.
+		const until = Date.now() + 2500;
+		while (Date.now() < until) {
+			const s = await summaryOf(ui.port);
+			expect(s.chain.valid && s.chain.empty).toBe(false);
+			expect(s.chain.valid).toBe(false);
+			expect(s.chain.errors.join(" ")).toContain("deletion detected");
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	}
+
+	it("red-first (deletion read as a first run): an EMPTY directory that appears, then is deleted, reads as a deletion", async () => {
+		await appearThenDelete(() => {});
+	});
+
+	it("red-first (deletion read as a first run): a directory holding only an anchor, then deleted, reads as a deletion", async () => {
+		await appearThenDelete(() => {
+			writeFileSync(
+				join(auditDir(), "events.jsonl.meta"),
+				JSON.stringify({ lastHash: "0".repeat(64), sequence: 0 }),
+			);
+		});
+	});
+
+	it("red-first (deletion read as a first run): a directory holding only an empty log file, then deleted, reads as a deletion", async () => {
+		await appearThenDelete(() => {
+			writeFileSync(join(auditDir(), "events.jsonl"), "");
+		});
+	});
+
+	it("guard: an absent start where nothing ever appears still reads as a first run, at every poll", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const until = Date.now() + 3500;
+		while (Date.now() < until) {
+			expect((await summaryOf(ui.port)).chain).toMatchObject({
+				events: 0,
+				valid: true,
+				empty: true,
+				errors: [],
+			});
+			await new Promise((r) => setTimeout(r, 250));
+		}
+	});
+
+	it("guard: nothing appearing delivers no resync and no grow at the watcher", async () => {
+		const delivered: string[] = [];
+		const stop = watchLedger(join(tempDir, ".usertrust"), () => 0, {
+			onGrow: () => delivered.push("grow"),
+			onResync: () => delivered.push("resync"),
+		});
+		try {
+			await new Promise((r) => setTimeout(r, 3500));
+			expect(delivered).toEqual([]);
+		} finally {
+			stop();
+		}
+	});
+
+	it("guard: the resync on appearance is delivered once, not every interval", async () => {
+		const vault = join(tempDir, ".usertrust");
+		const delivered: string[] = [];
+		const stop = watchLedger(vault, () => 0, {
+			onGrow: () => delivered.push("grow"),
+			onResync: () => delivered.push("resync"),
+		});
+		try {
+			// Positive control: nothing has been delivered while the directory is absent.
+			await new Promise((r) => setTimeout(r, 1500));
+			expect(delivered).toEqual([]);
+			mkdirSync(join(vault, "audit"), { recursive: true });
+			// Four or more 1 s intervals with the directory present.
+			await new Promise((r) => setTimeout(r, 4500));
+			expect(delivered).toEqual(["resync"]);
+		} finally {
+			stop();
+		}
+	});
+});
+
 // The polling mode runs its own interval. A leaked poller is the classic failure of that design: it must stop when the
 // watcher is stopped (the server's close() stops it), and must never keep the process alive on its own.
 describe("the polling watcher's own interval", { timeout: 20_000 }, () => {
