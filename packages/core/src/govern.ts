@@ -5328,7 +5328,7 @@ function googleAfcError(
 	if (verdict.kind === "indeterminate" && verdict.uncloneableAt !== undefined) {
 		return new PolicyDeniedError(
 			`ungoverned_method: models.${method} could not be checked for automatic function calling (${verdict.uncloneableAt} cannot be copied as data); pass plain objects`,
-			"With automatic function calling not disabled, the request is forwarded as a copy of what was checked. A tool with no callTool is copied as only the fields the SDK sends from it, and those must hold plain data at every depth: a function, a symbol, a class instance, an accessor (getter or setter), a non-enumerable property, a sparse array or an array with a named property in them cannot be copied. Pass plain data, or set config.automaticFunctionCalling.disable: true.",
+			"With automatic function calling not disabled, the request is forwarded as a copy of what was checked. A tool with no callTool is copied as only the fields the SDK sends from it, and those must hold plain data at every depth: a function, a symbol, an object whose prototype is not Object's or null (a class instance, or one made with Object.create from another object), an array whose prototype is not Array's, an accessor (getter or setter), a non-enumerable property, a sparse array or an array with a named property in them cannot be copied. Pass plain data, or set config.automaticFunctionCalling.disable: true.",
 		);
 	}
 	if (verdict.kind === "indeterminate" && verdict.proxyAt !== undefined) {

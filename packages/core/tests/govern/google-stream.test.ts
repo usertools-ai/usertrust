@@ -1610,6 +1610,9 @@ class DeclarationInstance {
 	name = "lookup";
 }
 
+/** An array subclass: a real array whose prototype is the subclass's, not Array.prototype. */
+class DeclarationList<T> extends Array<T> {}
+
 /**
  * One row per shape the snapshot refuses inside a field the SDK sends from a non-callable
  * tool: the tool, the path the refusal names, and a stable word the hint must carry for it.
@@ -1620,6 +1623,20 @@ const UNCOPYABLE_SHAPES: Array<[shape: string, tool: () => object, at: string, h
 		() => ({ functionDeclarations: [new DeclarationInstance()] }),
 		"params.config.tools[0].functionDeclarations[0]",
 		/\bclass instance\b/,
+	],
+	[
+		"a plain object made with Object.create from another object",
+		() => ({
+			functionDeclarations: [Object.assign(Object.create({ inherited: true }), { name: "lookup" })],
+		}),
+		"params.config.tools[0].functionDeclarations[0]",
+		/\bobject whose prototype\b/,
+	],
+	[
+		"an array whose prototype is not Array's (an array subclass)",
+		() => ({ functionDeclarations: DeclarationList.of({ name: "lookup" }) }),
+		"params.config.tools[0].functionDeclarations",
+		/\barray whose prototype\b/,
 	],
 	[
 		"an accessor",

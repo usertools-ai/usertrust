@@ -512,8 +512,9 @@ function isRealmArrayPrototype(proto: unknown): boolean {
  * Allowed: primitives; plain objects (prototype `null` or ANY realm's `Object.prototype`, so
  * data built in a `vm` context or a test runner's realm counts) whose own string-keyed
  * properties are all enumerable DATA; and DENSE arrays (any realm's `Array.prototype`)
- * holding enumerable data at every index and no named property besides `length`. Refused: a class instance (any other prototype: a user class, `Date`, `Map`, a
- * typed array, an array subclass), an accessor, a non-enumerable property, a sparse array,
+ * holding enumerable data at every index and no named property besides `length`. Refused: an object whose prototype is not Object's or null (a class
+ * instance: a user class, `Date`, `Map`, a typed array; or one made with `Object.create` from
+ * another object), an array whose prototype is not Array's (an array subclass), an accessor, a non-enumerable property, a sparse array,
  * an array with an extra named property, a function. Symbol keys are neither read by the SDK
  * nor copied by structuredClone, so they are ignored.
  *
@@ -704,9 +705,11 @@ function capturedCopy(
  *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
  *     non-callable tool is copied as exactly the fields the SDK reads (`cloneDataTool`:
  *     each captured once, a `functionDeclarations` getter included, and cloned at once; a
- *     field that cannot be copied as data, including one holding a function, symbol, class
- *     instance, accessor, non-enumerable property, sparse array or array with a named
- *     property at any depth (`refuseLossyClone`, then `structuredClone`),
+ *     field that cannot be copied as data, including one holding a function, symbol,
+ *     object whose prototype is not Object's or null (a class instance, or one made with
+ *     `Object.create` from another object), array whose prototype is not Array's,
+ *     accessor, non-enumerable property, sparse array or array with a named property at
+ *     any depth (`refuseLossyClone`, then `structuredClone`),
  *     is indeterminate, so the call is refused naming where);
  *     callable tools keep their
  *     reference (generateContent then runs them through runGovernedAfc, which needs the
