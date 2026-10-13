@@ -2194,7 +2194,7 @@ describe("an accessor anywhere on the option path is read when the SDK reads it,
 				});
 			}
 
-			it(`${on}: a Proxy as config.httpOptions is refused at call start, and none of its traps runs`, async () => {
+			it(`${on}: a Proxy as config.httpOptions on a data config is refused at call start, and none of its traps runs (get, has, getOwnPropertyDescriptor, getPrototypeOf, ownKeys)`, async () => {
 				const traps = { n: 0 };
 				const make = () =>
 					request({
@@ -2205,6 +2205,10 @@ describe("an accessor anywhere on the option path is read when the SDK reads it,
 									traps.n++;
 									return Reflect.get(t, k, r);
 								},
+								has: (t, k) => {
+									traps.n++;
+									return Reflect.has(t, k);
+								},
 								ownKeys: (t) => {
 									traps.n++;
 									return Reflect.ownKeys(t);
@@ -2212,6 +2216,10 @@ describe("an accessor anywhere on the option path is read when the SDK reads it,
 								getOwnPropertyDescriptor: (t, k) => {
 									traps.n++;
 									return Reflect.getOwnPropertyDescriptor(t, k);
+								},
+								getPrototypeOf: (t) => {
+									traps.n++;
+									return Reflect.getPrototypeOf(t);
 								},
 							},
 						),

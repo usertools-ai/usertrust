@@ -711,17 +711,42 @@ const MAX_CHAIN_DEPTH = 64;
  */
 export function readThroughChain(holder: unknown, key: string): unknown {
 	if (holder === UNREADABLE) return UNREADABLE;
+	const found = chainProperty(holder, key);
+	if (found.kind === "data") return found.value;
+	return found.kind === "absent" ? undefined : UNREADABLE;
+}
+
+/** What `chainProperty` finds for a key: its value, or why it cannot be read without running caller code. */
+type ChainProperty =
+	| { kind: "data"; value: unknown }
+	| { kind: "accessor" }
+	| { kind: "proxy" }
+	| { kind: "absent" }
+	| { kind: "too-deep" };
+
+/**
+ * Property `key` of `holder` where plain property access finds it, walked from `holder` up its
+ * prototype chain without running caller code: descriptors only, and a Proxy tested BEFORE every
+ * step (before its descriptor is read, and before its prototype is asked for), so its traps never
+ * run. The first object holding `key` decides: a data property (`data`), or an accessor
+ * (`accessor`). A Proxy on the way is `proxy`, a chain past `MAX_CHAIN_DEPTH` objects `too-deep`,
+ * and no holder at all `absent` (as is anything that is not an object). `readThroughChain` reads
+ * through this one walk.
+ */
+function chainProperty(holder: unknown, key: string): ChainProperty {
 	if (holder == null || (typeof holder !== "object" && typeof holder !== "function")) {
-		return undefined;
+		return { kind: "absent" };
 	}
 	let o: object | null = holder;
 	for (let depth = 0; o !== null; depth++) {
-		if (depth >= MAX_CHAIN_DEPTH || utilTypes.isProxy(o)) return UNREADABLE;
+		if (depth >= MAX_CHAIN_DEPTH) return { kind: "too-deep" };
+		if (utilTypes.isProxy(o)) return { kind: "proxy" };
 		const d = Object.getOwnPropertyDescriptor(o, key);
-		if (d !== undefined) return "value" in d ? d.value : UNREADABLE;
+		if (d !== undefined)
+			return "value" in d ? { kind: "data", value: d.value } : { kind: "accessor" };
 		o = Object.getPrototypeOf(o);
 	}
-	return undefined;
+	return { kind: "absent" };
 }
 
 /**
@@ -906,34 +931,12 @@ export function movedRequestOptions(
 	];
 }
 
-/** One step of the Google option path: what `key` is where plain property access finds it. */
-type GooglePathStep = { found: false } | { found: true; value: unknown } | "accessor" | "proxy";
-
-/**
- * `key` on `holder`'s prototype chain, read as `readThroughChain` reads it (descriptors only, a
- * Proxy checked before every step, at most `MAX_CHAIN_DEPTH` objects), but telling apart the two
- * things that walk cannot read: an accessor (`"accessor"`) and a Proxy or a chain too deep
- * (`"proxy"`).
- */
-function googlePathStep(holder: unknown, key: string): GooglePathStep {
-	if (holder == null || (typeof holder !== "object" && typeof holder !== "function")) {
-		return { found: false };
-	}
-	let o: object | null = holder;
-	for (let depth = 0; o !== null; depth++) {
-		if (depth >= MAX_CHAIN_DEPTH || utilTypes.isProxy(o)) return "proxy";
-		const d = Object.getOwnPropertyDescriptor(o, key);
-		if (d !== undefined) return "value" in d ? { found: true, value: d.value } : "accessor";
-		o = Object.getPrototypeOf(o);
-	}
-	return { found: false };
-}
-
 /**
  * A Google request's option path, `params.config.httpOptions` and its keys, at call start, walked as
- * the SDK's own property access finds it, without running caller code. One rule at every level:
+ * the SDK's own property access finds it (`chainProperty`), without running caller code. One rule at
+ * every level, a Proxy tested first:
  * - a Proxy (or a chain too deep) anywhere on the path cannot be read: REFUSED, as the per-call
- *   option check names it;
+ *   option check names it; that includes a Proxy as `httpOptions` itself (`ungovernedKeysOf`);
  * - an option key off the list held as DATA is REFUSED, as that check refuses it;
  * - an ACCESSOR anywhere on the path (a getter `config`, a getter `httpOptions`, own or inherited,
  *   or a getter key inside `httpOptions`) is DEFERRED: not refused, nothing pinned (`pinned:
@@ -950,14 +953,19 @@ export function googleHttpOptionsAtCallStart(request: unknown):
 	  } {
 	const absent = { pinned: { httpOptions: undefined, enumerable: false } };
 	if (utilTypes.isProxy(request)) return { refused: ["request (a Proxy)"] };
-	const config = googlePathStep(request, "config");
-	if (config === "proxy") return { refused: ["config (unreadable)"] };
-	if (config === "accessor") return { pinned: undefined };
-	if (!config.found) return absent;
-	const http = googlePathStep(config.value, "httpOptions");
-	if (http === "proxy") return { refused: ["config.httpOptions (unreadable)"] };
-	if (http === "accessor") return { pinned: undefined };
-	if (!http.found || http.value === undefined || http.value === null) return absent;
+	// At every level a Proxy (or a chain too deep) is refused BEFORE an accessor is deferred: a Proxy
+	// can answer the dry run's reads one way and the copy's another, which no reading of it reveals.
+	const config = chainProperty(request, "config");
+	if (config.kind === "proxy" || config.kind === "too-deep")
+		return { refused: ["config (unreadable)"] };
+	if (config.kind === "accessor") return { pinned: undefined };
+	if (config.kind === "absent") return absent;
+	const http = chainProperty(config.value, "httpOptions");
+	if (http.kind === "proxy" || http.kind === "too-deep") {
+		return { refused: ["config.httpOptions (unreadable)"] };
+	}
+	if (http.kind === "accessor") return { pinned: undefined };
+	if (http.kind === "absent" || http.value === undefined || http.value === null) return absent;
 	const options = http.value;
 	// A getter key inside httpOptions is deferred too; a data key off the list beside it is not.
 	const accessorKeys = plainObject(options)
