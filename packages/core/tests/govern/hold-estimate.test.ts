@@ -786,8 +786,28 @@ describe("Google automatic function calling: each round is held from its own bod
 	});
 });
 
+describe("a Google callable's declarations are outside the hold's input estimate", () => {
+	it("a callable whose tool() declares ~50,000 tokens of description: the hold is sized without them, the post is capped at the hold, and the shortfall is recorded", async () => {
+		const description = "Reference article paragraph. ".repeat(7_000); // ~210,000 characters
+		const tool = {
+			tool: async () => ({ functionDeclarations: [{ name: "lookup", description }] }),
+			callTool: async () => [],
+		};
+		const { client, log } = await governed(googleRaw());
+		await client.models.generateContent({
+			model: "gemini-2.5-pro",
+			contents: [{ role: "user", parts: [{ text: SMALL }] }],
+			config: { tools: [tool] },
+		});
+		// measured: held 411, the call cost 636, the ledger posted 411 (capped at the hold)
+		expect(log.holds).toEqual([411]);
+		expect(log.posts).toEqual([{ actual: 636, posted: 411 }]);
+		expect(events()).toContain("settlement_shortfall");
+	});
+});
+
 describe("the estimate reads the snapshot, never the live request", () => {
-	it("DECLARED: a Google getter that answers short to the snapshot and long to the SDK is under-held, and the shortfall is recorded", async () => {
+	it("a Google getter that would answer short, then long, is read once, by the request gate's dry run: what is sent is that answer, and it is held in full", async () => {
 		let reads = 0;
 		const part = {};
 		Object.defineProperty(part, "text", {
@@ -802,10 +822,12 @@ describe("the estimate reads the snapshot, never the live request", () => {
 			model: "gemini-2.5-pro",
 			contents: [{ role: "user", parts: [part] }],
 		});
-		// the snapshot read it once, short; the SDK read the original, long
-		expect(reads).toBeGreaterThanOrEqual(2);
-		expect(log.posts[0]?.posted).toBeLessThan(log.posts[0]?.actual ?? 0);
-		expect(events()).toContain("settlement_shortfall");
+		// the dry run read it once, short; the SDK is sent the mirror holding that answer, never the original
+		expect(reads).toBe(1);
+		expect(log.posts[0]?.posted).toBeGreaterThanOrEqual(
+			log.posts[0]?.actual ?? Number.POSITIVE_INFINITY,
+		);
+		expect(events()).not.toContain("settlement_shortfall");
 	});
 });
 

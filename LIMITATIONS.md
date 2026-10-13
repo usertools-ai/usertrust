@@ -96,26 +96,121 @@ classified version; on a duck-typed client, nothing catches it.
 function calling (a streamed loop of provider rounds, which usertrust does not
 yet meter round by round); `models.generateContent` with it is metered per round
 instead, each round its own governed call. Use `generateContent`, or disable AFC with
-`config.automaticFunctionCalling.disable: true`, to have the stream governed. The
-check needs plain objects: a Proxy in `params`, `config`, `config.tools`, a tool or
-`config.automaticFunctionCalling` is refused, because a Proxy can show the check
-one config and the SDK another. Accessors there are read once and their values
-captured, so the check and the SDK use the same value. The request is forwarded as a snapshot of the
-checked config (with AFC not disabled, a non-callable tool is forwarded as exactly the
-fields the SDK reads, each of which must be copyable as data), so a later change to the caller's `config.tools` or
-`config.automaticFunctionCalling` cannot reach the SDK. It carries every field the
-SDK reads from a non-callable tool, `config.toolConfig` and its
-`functionCallingConfig`, including one a class instance inherits (a getter) or holds
-as a non-enumerable property. Inside the values of a tool's fields (a declaration, a
-`parameters` schema) it does not capture field by field: a function, a symbol, an
-object whose prototype is not Object's or `null` (a class instance, or one made with
-`Object.create` from another object), an array whose prototype is not Array's, an
-accessor, a non-enumerable property, a sparse array or an array with a named property
-at any depth there is refused, as a call that could not be checked. The prototype check
-recognises Object's and Array's prototypes by shape, so a deliberately forged prototype
-can pass it; the effect is limited to how faithfully nested fields are copied, never to
-what governance decides or charges, which use the same copy that is sent. The snapshot covers those
-AFC fields only: `contents` and the rest of the request are still read live.
+`config.automaticFunctionCalling.disable: true`, to have the stream governed.
+Whether a call would run that loop is the SDK's own decision. Before anything is
+checked, charged or sent, usertrust runs the SDK's request pipeline over the
+request, against a stand-in for its transport that sends nothing. The pipeline is
+the installed `@google/genai`'s `Models` class, accepted after a short behavioural
+check; a client's own `Models` class is never run (for the SDK's own client it is
+that same class). With no installed SDK, the call is refused. "Installed" means
+resolvable by Node's module resolution from usertrust's own install location, not
+just present somewhere in the app: in an isolated or strict package layout where
+usertrust cannot see the app's copy, or in a bundle that inlined or dropped one of
+the two, Google calls are refused. Install `@google/genai` as a direct dependency
+beside usertrust and keep both external to the bundle; the import uses a variable
+specifier on purpose, so that bundlers do not inline it. Keep the `@google/genai`
+that usertrust resolves at the same version as the one your client was created
+from: a request field that only your client's version reads is not sent.
+In that run every getter, `toJSON` hook and Proxy trap in the request runs as
+often, and in the same order, as when the SDK sends it, apart from what the
+per-call request-option check refuses before the run (a request, `config` or
+`httpOptions` given as a Proxy, an option off the list held as data). The SDK's own writes
+(moving a `$schema` `responseSchema`, rewriting a declaration's `parameters`) land
+on your objects as they would natively, once per call. What the SDK read becomes
+a plain-data copy, and that copy is what the PII scan, redaction, the meter and
+the SDK then use. A callable tool and an `AbortSignal` go by reference. Fields
+beside `model`, `contents` and `config` (a `metadata` a policy rule matches), which
+the SDK neither reads nor sends, are read for the policy rules only, never placed
+on the copy that is serialized, held for and sent. Per call,
+usertrust runs the SDK again over a second copy. It must make exactly the requests
+it made over yours (path, method, body bytes, `httpOptions`) and reach the same
+automatic-function-calling decision, or the call is refused. This costs two extra
+runs of the SDK's request conversion per call, with no I/O: about 7 ms for a
+request carrying 1 MB of inline data. Where a governed call differs from the SDK's
+own:
+- **A value that answers differently on two reads is refused.** If the change
+  would alter what is sent (a getter, a hook or a Proxy trap), the copy cannot hold
+  both answers, so the call is refused rather than sent. The same goes for an
+  object the SDK both reads field by field and serializes through `toJSON`, and for
+  a cycle.
+- **Some request shapes are refused rather than copied.** These are a header value
+  that is not a string, a function of yours in the request that the SDK calls (a
+  built-in method such as an array's `map` is fine), and a callable tool the
+  request also holds outside `config.tools`, and a boxed `Number` or `String`
+  converted by a `toString` or `valueOf` of yours. The copy cannot reproduce what the
+  transport or that code would make of them. A function of yours that the SDK
+  calls is never run: the call is refused instead. Your own iterator on
+  `config.tools` counts as one.
+- **An array whose class is not `Array` is refused where the SDK maps it.** When
+  the SDK's own array methods (`map`, `filter`) build their result from an array
+  of yours, natively they construct its class, and that class's constructor
+  decides what is sent (it can give each instance a `toJSON`). usertrust does not
+  run your code to find out, so such an array, a subclass from any realm, inside
+  `contents` or in a config field other than `config.tools`, is refused: pass a
+  plain array. (At `config.tools` the SDK maps the array but never serializes
+  what it builds, so a subclass there is built as a plain `Array`, its
+  constructor never run.) Another realm's own `Array` is mapped as natively when
+  that realm's `Array[Symbol.species]` is its default; when it was replaced, the
+  call is refused, and so is one whose realm's `Array.prototype.toJSON` was
+  replaced (the per-call self-check cannot reproduce it). The previous release
+  sent all of these.
+- **Policy fields are read once, when the request is checked.** A field beside
+  `model`, `contents` and `config` is read then (a getter there run once, as
+  before) and kept beside the request for the policy rules, never sent,
+  serialized or held for. A rule reads anything below it when the rule is
+  evaluated, as before. These fields are not forwarded:
+  a Google-shaped client that is not the SDK no longer receives them. They were
+  never scanned for PII, held for or metered, so only what was is forwarded.
+- **`config.httpOptions` is read at the start of the call**, as per-call request
+  options are. The SDK is given that copy (only the allowed keys) wherever it
+  later reads `params.config.httpOptions`, even through a `config` added or
+  replaced after the call started; with none at the start, none is given. Your
+  own `httpOptions` is never read again. It is read as the SDK finds it, through
+  the prototype chain, so one the config inherits is governed the same way: its
+  allowed keys are sent, and any other key held as data is refused at the start.
+  That copy is made only when the whole path to it is plain data. At every
+  level, what is refused and what is sent is what the per-call request-option
+  check refused and sent before the SDK's pipeline read the request:
+  - a `config` held by a getter, or a getter `httpOptions` (own or inherited),
+    whose option keys are data, is read when the SDK reads it, not at the start,
+    and is sent; a later change to an allowed key, such as a header, is sent as
+    the SDK reads it. Before, such a getter was run, and its options fixed, at the
+    start of the call;
+  - a getter option key is refused whatever holds it, before its getter runs: at
+    the start of the call inside a data `httpOptions`, and, past a getter `config`
+    or `httpOptions`, when the SDK reaches the `httpOptions` holding it;
+  - a Proxy anywhere on the path (as `config` or `httpOptions`, on their prototype
+    chains, or answered by a getter), or a chain longer than 64 objects, cannot be
+    read without running your code, and the call is refused;
+  - a key off the list is refused, at the start of the call when the path is data,
+    and when the SDK reaches it past a getter.
+
+  A table in the tests pins this, 104 cases (each shape of the path holding an
+  allowed option or `extraBody`, on both methods and both backends), each
+  asserting the outcome and the number of requests; any change to this path
+  keeps every case equal.
+- **Every other field is read when the SDK reads it, not when the call starts.**
+  The SDK reads the request after its own first `await`, so a field you change
+  right after calling (a `systemInstruction`, `contents`) is sent as it is then,
+  as without usertrust, and is what the PII scan, redaction and the meter see.
+  Before this, the request's top-level fields, and its `config`'s, were copied at
+  the start of the call.
+- **A callable tool reaches the SDK as a wrapper.** Its `tool()` runs inside the
+  first governed round, and `callTool()` is passed through; nothing else of the
+  tool object is reachable from the request. A call the SDK sends without its own
+  function-calling loop carries `automaticFunctionCalling.disable: true`, which the
+  SDK never sends to the provider.
+- **Later AFC rounds reuse the copy.** With automatic function calling on
+  `generateContent`, rounds after the first reuse the copy instead of re-reading
+  your objects. Every round is still its own governed, metered call.
+- **A callable tool's `tool()` runs later.** It runs after authorization, once per
+  call; the SDK runs it before its first request. A denied call never runs it, and
+  a `tool()` that changes your config does not change what is sent.
+- **A local SDK rejection is the SDK's own error.** For a request the SDK rejects
+  locally (incompatible tools, empty `contents`, a getter that throws), the call
+  throws the SDK's own error after a `policy_denied` audit event, with nothing sent
+  or charged. The audit event names the error's class, never its message, which
+  can carry your content (a getter can throw anything).
 
 **Only request options that change neither the body nor where it is sent are allowed.**
 A governed call is scanned, held and priced from its request parameters. But each SDK
@@ -269,8 +364,6 @@ are known to land there:
   of body and can bill tens of thousands of tokens;
 - **a Google callable or MCP tool:** its declarations are resolved after authorization;
 - **an uncapped output** above 4096, and Google dynamic thinking with no `maxOutputTokens`;
-- **a Google request whose getter or `toJSON` answers differently** when the SDK reads it
-  later: Google forwards its original object;
 - **a request that cannot be serialized**, which keeps the prompt parts' estimate.
 
 The estimate's byte heuristic is **not calibrated against any provider's tokenizer**

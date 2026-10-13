@@ -52,8 +52,49 @@
  */
 
 import { types as utilTypes } from "node:util";
-import { isRealmObjectPrototype } from "./google-afc.js";
 import { PolicyDeniedError } from "./shared/errors.js";
+
+/** The built-in, captured at module load: a caller who patches it later cannot make a fake constructor look native. */
+const functionToString = Function.prototype.toString;
+
+/** An own DATA property's value, read from its descriptor (never through a getter); `undefined` otherwise. */
+function ownDataValue(obj: object, key: string): { value: unknown } | undefined {
+	const d = Object.getOwnPropertyDescriptor(obj, key);
+	return d !== undefined && "value" in d ? { value: d.value } : undefined;
+}
+
+/**
+ * `proto` is SOME realm's `Object.prototype` (this one, or a `vm` context's, a test runner's):
+ * it has no prototype of its own, and its own `constructor` is a DATA property holding a
+ * native function named "Object" whose own `prototype` is `proto` itself. Read through
+ * descriptors only, with the captured `Function.prototype.toString`, and a Proxy anywhere is
+ * not plain, so no caller code runs. A user class's prototype, or a user function named
+ * "Object", fails it; a deliberately forged prototype can pass (see `hasNativeConstructor`).
+ */
+function isRealmObjectPrototype(proto: unknown): boolean {
+	if (proto === Object.prototype) return true;
+	if (proto === null || typeof proto !== "object" || utilTypes.isProxy(proto)) return false;
+	if (Object.getPrototypeOf(proto) !== null) return false;
+	return hasNativeConstructor(proto, "Object");
+}
+
+/**
+ * `proto`'s own `constructor` is a DATA property holding a non-Proxy native function whose own
+ * `name` is `name` and whose own `prototype` is `proto`, read through descriptors and the
+ * captured `Function.prototype.toString` only. This recognises a realm's prototype by SHAPE; it
+ * does not prove it: a bound function's toString reads as native code, and a bound function can
+ * be given an own `name` and an own `prototype` that points back (see `plainObject` for why that
+ * gains nothing here).
+ */
+function hasNativeConstructor(proto: object, name: string): boolean {
+	const ctor = ownDataValue(proto, "constructor")?.value;
+	if (typeof ctor !== "function" || utilTypes.isProxy(ctor)) return false;
+	return (
+		ownDataValue(ctor, "name")?.value === name &&
+		ownDataValue(ctor, "prototype")?.value === proto &&
+		functionToString.call(ctor).includes("[native code]")
+	);
+}
 
 export type DefaultDenyProvider = "anthropic" | "openai" | "google";
 
@@ -670,17 +711,42 @@ const MAX_CHAIN_DEPTH = 64;
  */
 export function readThroughChain(holder: unknown, key: string): unknown {
 	if (holder === UNREADABLE) return UNREADABLE;
+	const found = chainProperty(holder, key);
+	if (found.kind === "data") return found.value;
+	return found.kind === "absent" ? undefined : UNREADABLE;
+}
+
+/** What `chainProperty` finds for a key: its value, or why it cannot be read without running caller code. */
+type ChainProperty =
+	| { kind: "data"; value: unknown }
+	| { kind: "accessor" }
+	| { kind: "proxy" }
+	| { kind: "absent" }
+	| { kind: "too-deep" };
+
+/**
+ * Property `key` of `holder` where plain property access finds it, walked from `holder` up its
+ * prototype chain without running caller code: descriptors only, and a Proxy tested BEFORE every
+ * step (before its descriptor is read, and before its prototype is asked for), so its traps never
+ * run. The first object holding `key` decides: a data property (`data`), or an accessor
+ * (`accessor`). A Proxy on the way is `proxy`, a chain past `MAX_CHAIN_DEPTH` objects `too-deep`,
+ * and no holder at all `absent` (as is anything that is not an object). `readThroughChain` reads
+ * through this one walk.
+ */
+function chainProperty(holder: unknown, key: string): ChainProperty {
 	if (holder == null || (typeof holder !== "object" && typeof holder !== "function")) {
-		return undefined;
+		return { kind: "absent" };
 	}
 	let o: object | null = holder;
 	for (let depth = 0; o !== null; depth++) {
-		if (depth >= MAX_CHAIN_DEPTH || utilTypes.isProxy(o)) return UNREADABLE;
+		if (depth >= MAX_CHAIN_DEPTH) return { kind: "too-deep" };
+		if (utilTypes.isProxy(o)) return { kind: "proxy" };
 		const d = Object.getOwnPropertyDescriptor(o, key);
-		if (d !== undefined) return "value" in d ? d.value : UNREADABLE;
+		if (d !== undefined)
+			return "value" in d ? { kind: "data", value: d.value } : { kind: "accessor" };
 		o = Object.getPrototypeOf(o);
 	}
-	return undefined;
+	return { kind: "absent" };
 }
 
 /**
@@ -863,6 +929,89 @@ export function movedRequestOptions(
 			? []
 			: googleClientMoved(readThroughChain(target, "apiClient"))),
 	];
+}
+
+/**
+ * What the per-call option check refuses in a Google `httpOptions` object, as it names it (empty:
+ * nothing): for one the request gate's dry run reached through an accessor `config` or `httpOptions`,
+ * which call start defers. Descriptors only, no caller code.
+ */
+export function googleHttpOptionsRefusals(options: unknown): string[] {
+	return ungovernedKeysOf(
+		options,
+		GOVERNED_GOOGLE_HTTP_OPTIONS,
+		"config.httpOptions.",
+		"config.httpOptions",
+	);
+}
+
+/**
+ * The same, for a `config` the dry run reached through an accessor, before its `httpOptions` is
+ * read: a Proxy as the config, or on the chain to its `httpOptions` (or a chain too deep), cannot be
+ * read without running caller code, as at call start.
+ */
+export function googleConfigRefusals(config: unknown): string[] {
+	const http = chainProperty(config, "httpOptions");
+	return http.kind === "proxy" || http.kind === "too-deep"
+		? ["config.httpOptions (unreadable)"]
+		: [];
+}
+
+/**
+ * A Google request's option path, `params.config.httpOptions` and its keys, at call start, walked as
+ * the SDK's own property access finds it (`chainProperty`), without running caller code. One rule at
+ * every level, a Proxy tested first:
+ * - a Proxy (or a chain too deep) anywhere on the path cannot be read: REFUSED, as the per-call
+ *   option check names it; that includes a Proxy as `httpOptions` itself (`ungovernedKeysOf`);
+ * - an option key off the list held as DATA is REFUSED, as that check refuses it;
+ * - an ACCESSOR key inside a data `httpOptions` is REFUSED, its getter never run, as that check
+ *   refuses it on master (`ungovernedKeysOf`'s "(an accessor)");
+ * - an ACCESSOR `config`, or an accessor `httpOptions` (own or inherited), is DEFERRED: not refused,
+ *   nothing pinned (`pinned: undefined`); the request gate's dry run reads it as the SDK does, and
+ *   refuses what this check refuses in the `httpOptions` object it reaches (an accessor key, a key
+ *   off the list, a Proxy: `googleHttpOptionsRefusals`), before anything is held or sent; master
+ *   sends these when every key is data, and refuses the rest;
+ * - a path that is plain data throughout is PINNED for that path at every later read: a NEW object
+ *   holding only the governed keys of the first data `httpOptions` on the chain (and whether the
+ *   SDK's own key listing of config sees it: own and enumerable), or absent when there is none.
+ */
+export function googleHttpOptionsAtCallStart(request: unknown):
+	| { refused: string[] }
+	| {
+			pinned: { httpOptions: Record<string, unknown> | undefined; enumerable: boolean } | undefined;
+	  } {
+	const absent = { pinned: { httpOptions: undefined, enumerable: false } };
+	if (utilTypes.isProxy(request)) return { refused: ["request (a Proxy)"] };
+	// At every level a Proxy (or a chain too deep) is refused BEFORE an accessor is deferred: a Proxy
+	// can answer the dry run's reads one way and the copy's another, which no reading of it reveals.
+	const config = chainProperty(request, "config");
+	if (config.kind === "proxy" || config.kind === "too-deep")
+		return { refused: ["config (unreadable)"] };
+	if (config.kind === "accessor") return { pinned: undefined };
+	if (config.kind === "absent") return absent;
+	const http = chainProperty(config.value, "httpOptions");
+	if (http.kind === "proxy" || http.kind === "too-deep") {
+		return { refused: ["config.httpOptions (unreadable)"] };
+	}
+	if (http.kind === "accessor") return { pinned: undefined };
+	if (http.kind === "absent" || http.value === undefined || http.value === null) return absent;
+	const options = http.value;
+	const refused = ungovernedKeysOf(
+		options,
+		GOVERNED_GOOGLE_HTTP_OPTIONS,
+		"config.httpOptions.",
+		"config.httpOptions",
+	);
+	if (refused.length > 0) return { refused };
+	const own = utilTypes.isProxy(config.value)
+		? undefined
+		: Object.getOwnPropertyDescriptor(config.value as object, "httpOptions");
+	return {
+		pinned: {
+			httpOptions: governedCopy(options as Record<string, unknown>, GOVERNED_GOOGLE_HTTP_OPTIONS),
+			enumerable: own?.enumerable === true,
+		},
+	};
 }
 
 /**

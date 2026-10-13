@@ -1624,7 +1624,14 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 
 ### Client detection
 
-**Duck typing only; never import a provider SDK at runtime.** `detect.ts` imports types only.
+Detection stays duck-typed, and provider SDKs stay optional peers. `detect.ts` imports types only.
+The ONE exception: `packages/core/src/google-request.ts` may `import()` the optional peer
+`@google/genai`, only to obtain the `Models` pipeline the behavioural probe accepts; if it is absent
+or fails the probe, every governed Google call is refused. Nothing else imports a provider SDK at
+runtime: `packages/core/tests/detect/no-runtime-provider-import.test.ts` fails on any other runtime
+reference, including a specifier held in a variable. The reason: usertrust never runs a client's own,
+unverified `Models` before authorization; the SDK exports no request converters or transport hook,
+so its own pipeline is the only way to build the exact request it sends.
 `@anthropic-ai/sdk`, `openai` and `@google/genai` are **optional** peer dependencies. Their floors
 (`>=0.116.0`, `>=7.4.0`, `>=1.52.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
 versions the default-deny free list was classified on. Moving a floor means re-running that
@@ -1667,8 +1674,9 @@ reads; a refused wrapper builds a fresh error per call.
 `FREE_METHODS.google` cites `dist/node/index.mjs:LINE VERB path` per entry.
 `GOOGLE_REFUSED_METHODS` in `govern.ts` is a HINT table only (its names get the governAction() hint);
 it refuses nothing itself. With automatic
-function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in `google-afc.ts`, a mirror of the
-SDK's `shouldDisableAfc`, made on a snapshot of the request that is then what is forwarded),
+function calling (decided by the SDK itself: `google-request.ts` runs the SDK's own request pipeline
+over the request against a transport stand-in that sends nothing, and the plain-data copy of what
+it read, checked per call by a second run, is what is forwarded),
 `models.generateContent` runs the loop itself, each round its own governed call
 (`runGovernedAfc`, which calls the SDK's own `generateContentInternal` on the RAW `models`), and
 `models.generateContentStream` is refused (a streamed loop is not metered per round yet).

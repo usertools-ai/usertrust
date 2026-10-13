@@ -21,9 +21,9 @@
  *   model calls. On `generateContent` governance runs that loop itself, each round its
  *   own governed call (`google-afc.ts`), so every round is held, metered and audited. On
  *   `generateContentStream` a call that would run the loop is REFUSED (a streamed loop is
- *   not metered round by round yet). Both decide on ONE reading (`afcRequested` /
- *   `sdkRunsAfc` in google-afc.ts) made on a snapshot of the request, which is what is
- *   forwarded.
+ *   not metered round by round yet). Both decide by running the SDK's own request
+ *   pipeline over the request without sending (`google-request.ts`): the SDK's AFC
+ *   decision is the decision, and the plain-data copy it read is what is forwarded.
  *
  * **Every client is default-deny** (`default-deny.ts`). Every other
  * SDK method reached off the governed client, at any depth, is REFUSED: the call

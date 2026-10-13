@@ -452,12 +452,16 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 		await governed.destroy();
 	});
 
-	it("a `get tool()` accessor on a call the governor DENIES is never invoked (it is read at use, not at wrap time)", async () => {
+	it("a `get tool()` accessor on a call the governor DENIES is read as the SDK reads it, and the tool() it returns never runs", async () => {
 		let reads = 0;
+		let asked = 0;
 		const tool = {
 			get tool() {
 				reads++;
-				return async () => ({ functionDeclarations: [{ name: "lookup" }] });
+				return async () => {
+					asked++;
+					return { functionDeclarations: [{ name: "lookup" }] };
+				};
 			},
 			callTool: async () => [],
 		};
@@ -472,7 +476,10 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 				config: { tools: [tool] } as never,
 			}),
 		).rejects.toThrow();
-		expect(reads).toBe(0);
+		// The SDK's own pipeline reads the accessor once (processParamsMaybeAddMcpUsage), as natively; the
+		// function it returns is answered by a stand-in, and the real one runs only inside an authorized round.
+		expect(reads).toBe(1);
+		expect(asked).toBe(0);
 		expect(m.sent).toHaveLength(0);
 		await governed.destroy();
 	});
@@ -673,7 +680,12 @@ type WireRound = { functionCalls?: Loose[]; text: string };
  * rows above, nothing inside the SDK is replaced, so its request converters run and the body is what the provider gets.
  */
 function wire(rounds: WireRound[] = [{ text: "done" }]) {
-	const requests: Array<{ url: string; body: Loose; apiClientHeader: string | null }> = [];
+	const requests: Array<{
+		url: string;
+		body: Loose;
+		apiClientHeader: string | null;
+		testHeader: string | null;
+	}> = [];
 	const fetchStub = async (
 		url: unknown,
 		init?: { body?: unknown; headers?: HeadersInit },
@@ -683,6 +695,8 @@ function wire(rounds: WireRound[] = [{ text: "done" }]) {
 			body: JSON.parse(String(init?.body)) as Loose,
 			// the SDK's client label, which carries `mcp_used/...` when it sees MCP tool usage
 			apiClientHeader: new Headers(init?.headers).get("x-goog-api-client"),
+			// a caller's own header, sent through `config.httpOptions.headers`
+			testHeader: new Headers(init?.headers).get("x-test"),
 		});
 		const r = rounds[Math.min(requests.length - 1, rounds.length - 1)] as WireRound;
 		const payload = {
@@ -970,6 +984,11 @@ const NESTED_INSTANCE: Array<[string, () => object]> = [
 	],
 ];
 
+const BACKENDS_OF_BOTH = [
+	["the Gemini API", false],
+	["Vertex AI", true],
+] as const;
+
 describe("the AFC snapshot forwards every field the SDK reads (real @google/genai, fetch stubbed)", () => {
 	let vault: string;
 	const realFetch = globalThis.fetch;
@@ -986,14 +1005,21 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 	 * The same request on the SDK ungoverned, then governed, each on its own client and wire. `auditKinds` lists the
 	 * governed call's audit events, by kind.
 	 */
-	async function both(method: WireMethod, makeParams: () => unknown, rounds?: WireRound[]) {
+	async function both(
+		method: WireMethod,
+		makeParams: () => unknown,
+		rounds?: WireRound[],
+		vertex = false,
+	) {
+		const client = () =>
+			new GoogleGenAI(vertex ? { vertexai: true, apiKey: "test" } : { apiKey: "test" });
 		const raw = wire(rounds);
 		globalThis.fetch = raw.fetchStub as typeof fetch;
-		const rawResult = await runOn(new GoogleGenAI({ apiKey: "test" }).models, method, makeParams());
+		const rawResult = await runOn(client().models, method, makeParams());
 		const gov = wire(rounds);
 		globalThis.fetch = gov.fetchStub as typeof fetch;
 		const audit = recordingAudit();
-		const governed = await trust(new GoogleGenAI({ apiKey: "test" }), {
+		const governed = await trust(client(), {
 			dryRun: true,
 			budget: 500_000,
 			vaultBase: vault,
@@ -1061,10 +1087,11 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 		});
 
 		for (const [shape, makeTool] of HIDDEN_DECLARATIONS) {
-			it(`${method}: a data tool whose functionDeclarations is ${shape} reaches the provider with its declarations`, async () => {
-				let reads: Record<string, number> = {};
+			it(`${method}: a data tool whose functionDeclarations is ${shape} reaches the provider with its declarations, its getter run as often as natively`, async () => {
+				const runs: Array<Record<string, number>> = [];
 				const makeParams = () => {
-					reads = {};
+					const reads: Record<string, number> = {};
+					runs.push(reads);
 					return {
 						model: "gemini-2.5-flash",
 						contents: "go",
@@ -1081,49 +1108,48 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 					{ functionDeclarations: [{ name: "lookup", description: "look it up" }] },
 				]);
 				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
-				if (shape === "a PROTOTYPE getter") expect(reads).toEqual({ functionDeclarations: 1 });
+				// the governed getter runs are the native ones: the SDK's own pass, and nothing after it
+				expect(runs).toHaveLength(2);
+				expect(runs[1]).toEqual(runs[0]);
 			});
 		}
 
-		// Below a tool's top-level fields the snapshot cannot capture field by field (a `parameters` Schema is recursive),
-		// so a value structuredClone would copy lossily there is refused as "can't tell", never forwarded emptied.
+		// What the SDK sends for a class-instance declaration depends on the backend: the Gemini API passes each declaration
+		// through as it is, so JSON.stringify drops its getters, while Vertex AI reads each field
+		// (functionDeclarationToVertex) and sends it. The SDK's own pipeline reads it either way, so each is sent as natively.
 		for (const [shape, makeTool] of NESTED_INSTANCE) {
-			it(`${method}: a class-instance declaration ${shape} is refused as "can't tell" (one policy_denied, no provider request)`, async () => {
-				const makeParams = () => ({
-					model: "gemini-2.5-flash",
-					contents: "go",
-					config: { tools: [makeTool()] },
-				});
-				const { raw, rawResult, gov, govResult, auditKinds } = await both(method, makeParams);
+			for (const [backend, vertex, sent] of [
+				["the Gemini API", false, [{ functionDeclarations: [{}] }]],
+				[
+					"Vertex AI",
+					true,
+					[{ functionDeclarations: [{ name: "lookup", description: "look it up" }] }],
+				],
+			] as const) {
+				it(`${method} on ${backend}: a class-instance declaration ${shape} is sent as natively`, async () => {
+					const makeParams = () => ({
+						model: "gemini-2.5-flash",
+						contents: "go",
+						config: { tools: [makeTool()] },
+					});
+					const { raw, rawResult, gov, govResult, auditKinds } = await both(
+						method,
+						makeParams,
+						undefined,
+						vertex,
+					);
 
-				// Natively, what the SDK sends depends on the backend: the Gemini API passes each declaration through as it
-				// is, so JSON.stringify drops its getters...
-				expect(rawResult).toBe("ok");
-				expect(raw.requests).toHaveLength(1);
-				expect(raw.requests[0]?.body["tools"]).toEqual([{ functionDeclarations: [{}] }]);
-				// ...while Vertex AI reads each field (functionDeclarationToVertex) and sends the declaration.
-				const vertex = wire();
-				globalThis.fetch = vertex.fetchStub as typeof fetch;
-				const vertexResult = await runOn(
-					new GoogleGenAI({ vertexai: true, apiKey: "test" }).models,
-					method,
-					makeParams(),
-				);
-				expect(vertexResult).toBe("ok");
-				expect(vertex.requests).toHaveLength(1);
-				expect(vertex.requests[0]?.body["tools"]).toEqual([
-					{ functionDeclarations: [{ name: "lookup", description: "look it up" }] },
-				]);
-				// A structuredClone would empty it for both; the snapshot cannot match both, so the governed call refuses
-				expect(govResult).toContain(
-					`models.${method} could not be checked for automatic function calling (params.config.tools[0].functionDeclarations[0] cannot be copied as data)`,
-				);
-				expect(auditKinds).toEqual(["policy_denied"]);
-				expect(gov.requests).toHaveLength(0);
-			});
+					expect(rawResult).toBe("ok");
+					expect(govResult).toBe("ok");
+					expect(raw.requests).toHaveLength(1);
+					expect(raw.requests[0]?.body["tools"]).toEqual(sent);
+					expect(gov.requests.map((q) => q.body)).toEqual(raw.requests.map((q) => q.body));
+					expect(auditKinds).not.toContain("policy_denied");
+				});
+			}
 		}
 
-		it(`${method}: a SPARSE functionDeclarations array is refused as "can't tell" (one policy_denied, no provider request)`, async () => {
+		it(`${method}: a SPARSE functionDeclarations array fails as natively, with the SDK's own error and no provider request`, async () => {
 			const makeParams = () => {
 				const declarations: Loose[] = [{ name: "lookup" }];
 				declarations[2] = { name: "other" }; // index 1 is a hole
@@ -1133,12 +1159,13 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 					config: { tools: [{ functionDeclarations: declarations }] },
 				};
 			};
-			const { gov, govResult, auditKinds } = await both(method, makeParams);
+			const { raw, rawResult, gov, govResult, auditKinds } = await both(method, makeParams);
 
-			expect(govResult).toContain(
-				`models.${method} could not be checked for automatic function calling (params.config.tools[0].functionDeclarations cannot be copied as data)`,
-			);
+			// the SDK's own local rejection: rethrown as it is, audited as a refusal, nothing sent
+			expect(rawResult).toContain("Cannot read properties of undefined");
+			expect(govResult).toBe(rawResult);
 			expect(auditKinds).toEqual(["policy_denied"]);
+			expect(raw.requests).toHaveLength(0);
 			expect(gov.requests).toHaveLength(0);
 		});
 
@@ -1262,25 +1289,31 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 			});
 		}
 
-		const STILL_REFUSED: Array<[string, () => object]> = [
+		const ONCE_REFUSED: Array<[string, () => object]> = [
 			["a class-instance declaration from another realm", crossRealmClassTool],
 			["a declaration whose prototype is a FAKE Object.prototype", fakeObjectPrototypeTool],
 		];
-		for (const [shape, makeTool] of STILL_REFUSED) {
-			it(`${method}: ${shape} is still refused as "can't tell" (one policy_denied, no provider request)`, async () => {
-				const makeParams = () => ({
-					model: "gemini-2.5-flash",
-					contents: "go",
-					config: { tools: [makeTool()] },
-				});
-				const { gov, govResult, auditKinds } = await both(method, makeParams);
+		for (const [shape, makeTool] of ONCE_REFUSED) {
+			for (const [backend, vertex] of BACKENDS_OF_BOTH) {
+				it(`${method} on ${backend}: ${shape} is sent as natively`, async () => {
+					const makeParams = () => ({
+						model: "gemini-2.5-flash",
+						contents: "go",
+						config: { tools: [makeTool()] },
+					});
+					const { raw, rawResult, gov, govResult, auditKinds } = await both(
+						method,
+						makeParams,
+						undefined,
+						vertex,
+					);
 
-				expect(govResult).toContain(
-					`models.${method} could not be checked for automatic function calling (params.config.tools[0].functionDeclarations[0] cannot be copied as data)`,
-				);
-				expect(auditKinds).toEqual(["policy_denied"]);
-				expect(gov.requests).toHaveLength(0);
-			});
+					expect(rawResult).toBe("ok");
+					expect(govResult).toBe("ok");
+					expect(gov.requests.map((q) => q.body)).toEqual(raw.requests.map((q) => q.body));
+					expect(auditKinds).not.toContain("policy_denied");
+				});
+			}
 		}
 
 		it(`${method}: a tool field the SDK never reads (an uncloneable \`hook\`) is not copied: accepted, not forwarded, the body is the SDK's own`, async () => {
@@ -1316,16 +1349,10 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 			expect(rawResult).toContain("Incompatible tools found at tools[0]");
 			expect(raw.requests).toHaveLength(0);
 			expect(rawReads.urlContext).toBe(0);
-			// governed: the snapshot reads every SDK field up front, ONCE, after functionDeclarations was already cloned
-			expect(govReads.urlContext).toBe(1);
+			// governed: the SDK's own pipeline makes the same reads and the same rejection, rethrown as it is
+			expect(govReads).toEqual(rawReads);
+			expect(govResult).toBe(rawResult);
 			expect(gov.requests).toHaveLength(0);
-			if (method === "generateContent") {
-				// left to the SDK, which rejects the snapshot's (intact) declarations the same way
-				expect(govResult).toBe(rawResult);
-			} else {
-				// a stream with a callable tool is refused by governance either way (control for this method)
-				expect(govResult).toContain(`models.${method} with automatic function calling`);
-			}
 		});
 
 		it(`${method}: a tool that holds itself, with a one-shot googleSearch getter: the getter runs once and the call succeeds, as natively`, async () => {
@@ -1352,9 +1379,10 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 	}
 
 	it("generateContent with a callable tool: the governed loop's EVERY round carries the class-instance functionCallingConfig, as the SDK's own loop does", async () => {
-		let reads: Record<string, number> = {};
+		const runs: Array<Record<string, number>> = [];
 		const makeParams = () => {
-			reads = {};
+			const reads: Record<string, number> = {};
+			runs.push(reads);
 			return {
 				model: "gemini-2.5-flash",
 				contents: "go",
@@ -1381,7 +1409,9 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 			});
 		}
 		expect(gov.requests.map((r) => r.body)).toEqual(raw.requests.map((r) => r.body));
-		expect(reads).toEqual({ mode: 1, allowedFunctionNames: 1 });
+		// its getters run as natively, once per round: the SDK's own loop, run once over the caller's request
+		expect(runs[1]).toEqual(runs[0]);
+		expect(runs[0]).toEqual({ mode: 2, allowedFunctionNames: 2 });
 	});
 
 	for (const [shape, makeTool] of HIDDEN_DECLARATIONS) {
@@ -1401,17 +1431,21 @@ describe("the AFC snapshot forwards every field the SDK reads (real @google/gena
 			expect(gov.requests).toHaveLength(0);
 		});
 
-		it(`generateContentStream: a data tool whose functionDeclarations is ${shape}, beside a callable tool, makes no provider request (control)`, async () => {
+		it(`generateContentStream: a data tool whose functionDeclarations is ${shape}, beside a callable tool, gets the SDK's own local rejection and no provider request`, async () => {
 			const makeParams = () => ({
 				model: "gemini-2.5-flash",
 				contents: "go",
 				config: { tools: [makeTool({}), wireCallable()] },
 			});
-			const { raw, rawResult, gov, govResult } = await both("generateContentStream", makeParams);
+			const { raw, rawResult, gov, govResult, auditKinds } = await both(
+				"generateContentStream",
+				makeParams,
+			);
 
-			// natively the SDK's own error; governed, the stream's AFC refusal: neither reaches the provider
+			// the SDK rejects it before any request, natively and governed alike (its own error, audited as a refusal)
 			expect(rawResult).toContain("Incompatible tools found at tools[0].");
-			expect(govResult).toContain("generateContentStream");
+			expect(govResult).toBe(rawResult);
+			expect(auditKinds).toEqual(["policy_denied"]);
 			expect(raw.requests).toHaveLength(0);
 			expect(gov.requests).toHaveLength(0);
 		});
@@ -1564,14 +1598,14 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 	async function nativeThenGoverned(
 		method: WireMethod,
 		params: { native: () => unknown; governed: () => unknown },
-		opts: { vertex?: boolean; pii?: "redact" } = {},
+		opts: { vertex?: boolean; pii?: "redact"; rounds?: WireRound[] } = {},
 	) {
 		const client = () =>
 			new GoogleGenAI(opts.vertex ? { vertexai: true, apiKey: "test" } : { apiKey: "test" });
-		const raw = wire();
+		const raw = wire(opts.rounds);
 		globalThis.fetch = raw.fetchStub as typeof fetch;
 		const rawResult = await runOn(client().models, method, params.native());
-		const gov = wire();
+		const gov = wire(opts.rounds);
 		globalThis.fetch = gov.fetchStub as typeof fetch;
 		const audit = recordingAudit();
 		const governed = await trust(client(), {
@@ -1608,14 +1642,9 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 			expect(raw.requests).toHaveLength(0);
 			expect(gov.requests).toHaveLength(0);
 			expect(t.rawReads).toEqual({});
-			// the snapshot reads every field the SDK reads, ONCE, up front: the getter runs once, after the capture
-			expect(t.govReads).toEqual({ googleSearch: 1 });
-			if (method === "generateContent") {
-				expect(govResult).toBe(rawResult);
-			} else {
-				// a stream with a callable tool is refused by governance either way (control for this method)
-				expect(govResult).toContain(`models.${method} with automatic function calling`);
-			}
+			// the SDK's own pipeline makes the same reads, so the getter never runs, and the same rejection
+			expect(t.govReads).toEqual(t.rawReads);
+			expect(govResult).toBe(rawResult);
 		});
 
 		it(`${method}: (b) a googleSearch getter that deletes the tool's inputSchema runs after its presence is captured: the same MCP usage header and body`, async () => {
@@ -1682,12 +1711,8 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 			expect(raw.requests).toHaveLength(0);
 			expect(gov.requests).toHaveLength(0);
 			expect(t.rawReads).toEqual({});
-			expect(t.govReads).toEqual({ googleSearch: 1 });
-			if (method === "generateContent") {
-				expect(govResult).toBe(rawResult);
-			} else {
-				expect(govResult).toContain(`models.${method} with automatic function calling`);
-			}
+			expect(t.govReads).toEqual(t.rawReads);
+			expect(govResult).toBe(rawResult);
 		});
 
 		it(`${method}: without a callable tool the SDK reads tool by tool: a first tool's getter that adds a declaration to the second one reaches the provider, as natively`, async () => {
@@ -1725,9 +1750,9 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 				{ googleSearch: {}, functionDeclarations: [{ name: "lookup" }] },
 			]);
 			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
-			// natively tTool reads it twice (its test, then its loop) and the converter once; the snapshot once
+			// natively tTool reads it twice (its test, then its loop) and the converter once: governed, the same
 			expect(t.rawReads).toEqual({ functionDeclarations: 3 });
-			expect(t.govReads).toEqual({ functionDeclarations: 1 });
+			expect(t.govReads).toEqual(t.rawReads);
 		});
 
 		for (const [backend, vertex] of BACKENDS) {
@@ -1974,7 +1999,7 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 				});
 			}
 
-			it(`${method} on Vertex AI: ${shape} returning null (sent as null natively, which the request converter would drop from a copy) is refused as "can't tell", no provider request`, async () => {
+			it(`${method} on Vertex AI: ${shape} returning null (sent as null natively, which the request converter drops from the mirror) is refused by the self-check as "can't tell", no provider request`, async () => {
 				const p = hooked("go", () => null, {});
 				const { raw, rawResult, gov, govResult, auditKinds } = await nativeThenGoverned(
 					method,
@@ -1984,14 +2009,15 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 
 				expect(rawResult).toBe("ok");
 				expect(raw.requests[0]?.body["toolConfig"]).toEqual({ functionCallingConfig: null });
+				// the mirror holds the hook's output, null, which the converter drops: the self-check sees the difference
 				expect(govResult).toContain(
-					`models.${method} could not be checked for automatic function calling (params.config.toolConfig.functionCallingConfig cannot be copied as data)`,
+					`models.${method} could not be checked for automatic function calling (the mirror of the request does not send what the SDK sends for it)`,
 				);
 				expect(auditKinds).toEqual(["policy_denied"]);
 				expect(gov.requests).toHaveLength(0);
 			});
 
-			it(`${method} on Vertex AI: ${shape} that THROWS fails natively and is refused governed, no provider request either way`, async () => {
+			it(`${method} on Vertex AI: ${shape} that THROWS fails natively and governed with the SDK's own error, no provider request either way`, async () => {
 				const p = hooked(
 					"go",
 					() => {
@@ -2007,9 +2033,8 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 
 				expect(rawResult).toContain("toJSON hook threw");
 				expect(raw.requests).toHaveLength(0);
-				expect(govResult).toContain(
-					`models.${method} could not be checked for automatic function calling (params.config.toolConfig.functionCallingConfig cannot be copied as data)`,
-				);
+				// a local rejection: the SDK's (here the hook's) own error, audited as a refusal
+				expect(govResult).toBe(rawResult);
 				expect(auditKinds).toEqual(["policy_denied"]);
 				expect(gov.requests).toHaveLength(0);
 			});
@@ -2082,13 +2107,9 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 					expect(raw.requests).toHaveLength(0);
 					expect(gov.requests).toHaveLength(0);
 					expect(rawReads).toEqual({});
-					// the snapshot reads it once, after every tool field was captured
-					expect(Object.values(govReads)).toEqual([1]);
-					if (method === "generateContent") {
-						expect(govResult).toBe(rawResult);
-					} else {
-						expect(govResult).toContain(`models.${method} with automatic function calling`);
-					}
+					// the SDK's own pipeline rejects it at the same point, before the hook or getter runs
+					expect(govReads).toEqual(rawReads);
+					expect(govResult).toBe(rawResult);
 				});
 			}
 		}
@@ -2130,7 +2151,11 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 			expect(govReads).toEqual(rawReads);
 		});
 
-		it(`${method}: a toolConfig getter that clears a callable tool's callTool, and restores it a moment later, is refused as "can't tell": never one governed call over the SDK's own loop`, async () => {
+		it(`${method}: a toolConfig getter that clears a callable tool's callTool, and restores it a moment later: ${
+			method === "generateContent"
+				? "the SDK still loops on it, so the governed loop runs, every round metered, with the native requests"
+				: "the SDK still loops on it, so the stream is refused as an AFC stream"
+		}`, async () => {
 			const params = () => {
 				const callable: Loose = wireCallable();
 				const callTool = callable["callTool"];
@@ -2149,16 +2174,752 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 					},
 				};
 			};
-			const { gov, govResult, auditKinds } = await nativeThenGoverned(method, {
+			const { raw, rawResult, gov, govResult, auditKinds } = await nativeThenGoverned(method, {
 				native: params,
 				governed: params,
 			});
 
-			expect(govResult).toContain(
-				`models.${method} could not be checked for automatic function calling`,
-			);
-			expect(auditKinds).toEqual(["policy_denied"]);
-			expect(gov.requests).toHaveLength(0);
+			expect(rawResult).toBe("ok");
+			if (method === "generateContent") {
+				expect(govResult).toBe("ok");
+				expect(gov.requests.map((q) => q.body)).toEqual(raw.requests.map((q) => q.body));
+				expect(auditKinds).not.toContain("policy_denied");
+			} else {
+				expect(govResult).toContain(
+					`models.${method} with automatic function calling is not governed yet`,
+				);
+				expect(auditKinds).toEqual(["policy_denied"]);
+				expect(gov.requests).toHaveLength(0);
+			}
 		});
 	}
+
+	// With `config.tools` set, the SDK sends `Object.assign({}, params.config, { tools })` (processParamsMaybeAddMcpUsage),
+	// and its request converters read THAT copy: an inherited or non-enumerable config field is never sent. Without tools it
+	// passes `params` through, and the converters read every config field by name.
+	describe("with config.tools set, config reaches the provider as the SDK copies it (own enumerable fields only); without, every field by name", () => {
+		const SEARCH = () => [{ googleSearch: {} }];
+		const SYSTEM_INSTRUCTION = `Reply to ${EMAIL} only`;
+		const JSON_SCHEMA = { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object" };
+
+		/** A config class whose `systemInstruction` is a PROTOTYPE getter. */
+		class InstructedConfig {
+			get systemInstruction(): string {
+				return SYSTEM_INSTRUCTION;
+			}
+		}
+
+		const request = (config: object) => ({ model: "gemini-2.5-flash", contents: "go", config });
+
+		/** The same config for the native and the governed call, each built with its own read counter. */
+		function sameConfig(makeConfig: (reads: Reads) => object) {
+			const rawReads: Reads = {};
+			const govReads: Reads = {};
+			return {
+				rawReads,
+				govReads,
+				params: {
+					native: () => request(makeConfig(rawReads)),
+					governed: () => request(makeConfig(govReads)),
+				},
+			};
+		}
+
+		type Outcome = Awaited<ReturnType<typeof nativeThenGoverned>>;
+
+		/** Both calls succeed with one provider request each, and the governed body is the native one. */
+		function expectSameRequest(r: Outcome): void {
+			expect(r.rawResult).toBe("ok");
+			expect(r.govResult).toBe("ok");
+			expect(r.raw.requests).toHaveLength(1);
+			expect(r.gov.requests).toHaveLength(1);
+			expect(r.gov.requests[0]?.body).toEqual(r.raw.requests[0]?.body);
+		}
+
+		/**
+		 * A local rejection by the SDK's own pipeline: the same error the native call throws, rethrown as it is, after a
+		 * refusal is audited (one policy_denied, nothing charged), and no provider request either way.
+		 */
+		function expectSdkError(r: Outcome): void {
+			expect(r.govResult).toBe(r.rawResult);
+			expect(r.auditKinds).toEqual(["policy_denied"]);
+			expect(r.raw.requests).toHaveLength(0);
+			expect(r.gov.requests).toHaveLength(0);
+		}
+
+		/** Refused like every request that cannot be checked: one policy_denied, nothing charged, no provider request. */
+		function expectRefused(r: Outcome, method: WireMethod): void {
+			expect(r.govResult).toContain(
+				`models.${method} could not be checked for automatic function calling`,
+			);
+			expect(r.auditKinds).toEqual(["policy_denied"]);
+			expect(r.gov.requests).toHaveLength(0);
+		}
+
+		for (const method of ["generateContent", "generateContentStream"] as const) {
+			for (const [backend, vertex] of BACKENDS) {
+				const on = `${method} on ${backend}`;
+
+				it(`${on}, pii "redact": an INHERITED systemInstruction getter beside tools is not sent, as natively (a clean prompt, so no redaction runs)`, async () => {
+					const t = sameConfig(() => Object.assign(new InstructedConfig(), { tools: SEARCH() }));
+					const r = await nativeThenGoverned(method, t.params, { vertex, pii: "redact" });
+
+					expectSameRequest(r);
+					expect(r.raw.requests[0]?.body).not.toHaveProperty("systemInstruction");
+					expect(JSON.stringify(r.gov.requests)).not.toContain(EMAIL);
+				});
+
+				it(`${on}: the same INHERITED systemInstruction getter WITHOUT tools is sent, as natively (control: read by name)`, async () => {
+					const t = sameConfig(() => new InstructedConfig());
+					const r = await nativeThenGoverned(method, t.params, { vertex });
+
+					expectSameRequest(r);
+					expect(JSON.stringify(r.raw.requests[0]?.body["systemInstruction"])).toContain(EMAIL);
+				});
+
+				it(`${on}: tools [] (truthy, empty) still makes the SDK copy config: the INHERITED systemInstruction is not sent`, async () => {
+					const t = sameConfig(() => Object.assign(new InstructedConfig(), { tools: [] }));
+					const r = await nativeThenGoverned(method, t.params, { vertex });
+
+					expectSameRequest(r);
+					expect(r.raw.requests[0]?.body).not.toHaveProperty("systemInstruction");
+				});
+
+				it(`${on}: a NON-ENUMERABLE own systemInstruction beside tools is not sent, as natively`, async () => {
+					const t = sameConfig(() =>
+						Object.defineProperty({ tools: SEARCH() }, "systemInstruction", {
+							value: SYSTEM_INSTRUCTION,
+							enumerable: false,
+						}),
+					);
+					const r = await nativeThenGoverned(method, t.params, { vertex });
+
+					expectSameRequest(r);
+					expect(r.raw.requests[0]?.body).not.toHaveProperty("systemInstruction");
+				});
+
+				it(`${on}: an INHERITED toolConfig getter beside tools is never run and not sent, as natively`, async () => {
+					const t = sameConfig((reads) => {
+						class ToolConfigured {
+							get toolConfig(): Loose {
+								counted(reads, "toolConfig");
+								return { functionCallingConfig: { mode: "NONE" } };
+							}
+						}
+						return Object.assign(new ToolConfigured(), { tools: SEARCH() });
+					});
+					const r = await nativeThenGoverned(method, t.params, { vertex });
+
+					expectSameRequest(r);
+					expect(r.raw.requests[0]?.body).not.toHaveProperty("toolConfig");
+					expect(t.rawReads).toEqual({});
+					expect(t.govReads).toEqual({});
+				});
+
+				it(`${on}: an OWN ENUMERABLE toolConfig getter beside tools is sent, read once`, async () => {
+					const t = sameConfig((reads) =>
+						withGetter({ tools: SEARCH() }, "toolConfig", reads, () => ({
+							functionCallingConfig: { mode: "NONE" },
+						})),
+					);
+					const r = await nativeThenGoverned(method, t.params, { vertex });
+
+					expectSameRequest(r);
+					expect(r.raw.requests[0]?.body).toHaveProperty("toolConfig");
+					expect(t.govReads).toEqual({ toolConfig: 1 });
+				});
+
+				it(`${on}: an OWN ENUMERABLE temperature getter beside tools is sent, read once (control)`, async () => {
+					const t = sameConfig((reads) =>
+						withGetter({ tools: SEARCH() }, "temperature", reads, () => 0.25),
+					);
+					const r = await nativeThenGoverned(method, t.params, { vertex });
+
+					expectSameRequest(r);
+					expect(r.raw.requests[0]?.body["generationConfig"]).toEqual({ temperature: 0.25 });
+					expect(t.govReads).toEqual({ temperature: 1 });
+				});
+
+				// The SDK reads a hidden httpOptions by name only on its MCP path (MCP tool usage, or the process-global flag
+				// its mcpToTool sets). Its own pipeline makes that check, so the request is sent as natively either way.
+				const HIDDEN_HTTP_OPTIONS: Array<[string, (tools: Loose[]) => object]> = [
+					[
+						"an INHERITED httpOptions",
+						(tools) =>
+							Object.assign(Object.create({ httpOptions: { headers: { "x-test": "1" } } }), {
+								tools,
+							}),
+					],
+					[
+						"a NON-ENUMERABLE own httpOptions",
+						(tools) =>
+							Object.defineProperty({ tools }, "httpOptions", {
+								value: { headers: { "x-test": "1" } },
+								enumerable: false,
+							}),
+					],
+				];
+				for (const [shape, makeConfig] of HIDDEN_HTTP_OPTIONS) {
+					for (const [toolShape, mcp] of [
+						["a plain tool", false],
+						["a tool with an inputSchema (MCP usage)", true],
+					] as const) {
+						it(`${on}: ${shape} beside ${toolShape} is sent as natively${mcp ? ", its header included (the SDK's MCP path reads it by name)" : ", without its header"}`, async () => {
+							const t = sameConfig(() =>
+								makeConfig(mcp ? [{ inputSchema: {}, googleSearch: {} }] : SEARCH()),
+							);
+							const r = await nativeThenGoverned(method, t.params, { vertex });
+
+							expectSameRequest(r);
+							expect(r.raw.requests[0]?.testHeader).toBe(mcp ? "1" : null);
+							expect(r.gov.requests[0]?.testHeader).toBe(r.raw.requests[0]?.testHeader);
+							expect(r.gov.requests[0]?.apiClientHeader).toBe(r.raw.requests[0]?.apiClientHeader);
+						});
+					}
+				}
+
+				it(`${on}: an OWN ENUMERABLE httpOptions beside tools is sent through the copy, its header included, as natively`, async () => {
+					const t = sameConfig(() => ({
+						tools: SEARCH(),
+						httpOptions: { headers: { "x-test": "1" } },
+					}));
+					const r = await nativeThenGoverned(method, t.params, { vertex });
+
+					expectSameRequest(r);
+					expect(r.raw.requests[0]?.testHeader).toBe("1");
+					expect(r.gov.requests[0]?.testHeader).toBe("1");
+				});
+
+				it(`${on}: automaticFunctionCalling is read BY NAME: an INHERITED { disable: true } beside a callable tool turns the SDK's loop off, as natively`, async () => {
+					const calls = { native: 0, governed: 0 };
+					const config = (who: keyof typeof calls) => () =>
+						request(
+							Object.assign(Object.create({ automaticFunctionCalling: { disable: true } }), {
+								tools: [
+									{
+										tool: async () => ({ functionDeclarations: [{ name: "lookup" }] }),
+										callTool: async () => {
+											calls[who]++;
+											return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+										},
+									},
+								],
+							}),
+						);
+					const r = await nativeThenGoverned(
+						method,
+						{ native: config("native"), governed: config("governed") },
+						{
+							vertex,
+							rounds: [{ functionCalls: [{ name: "lookup", args: {} }], text: "calling" }],
+						},
+					);
+
+					// natively shouldDisableAfc reads it by name: one request, and the model's function call is not run
+					expectSameRequest(r);
+					expect(calls).toEqual({ native: 0, governed: 0 });
+				});
+
+				it(`${on}: tools is read BY NAME: an INHERITED tools getter is sent, as natively`, async () => {
+					const t = sameConfig(() => {
+						class ToolsConfig {
+							get tools(): Loose[] {
+								return SEARCH();
+							}
+						}
+						return new ToolsConfig();
+					});
+					const r = await nativeThenGoverned(method, t.params, { vertex });
+
+					expectSameRequest(r);
+					expect(r.raw.requests[0]?.body["tools"]).toEqual([{ googleSearch: {} }]);
+				});
+
+				if (method === "generateContentStream") {
+					it(`${on}: an INHERITED responseSchema holding $schema beside tools is MOVED before the SDK's copy and sent as responseJsonSchema, as natively (read once)`, async () => {
+						const t = sameConfig((reads) => {
+							class SchemaConfig {
+								get responseSchema(): Loose {
+									counted(reads, "responseSchema");
+									return JSON_SCHEMA;
+								}
+							}
+							return Object.assign(new SchemaConfig(), { tools: SEARCH() });
+						});
+						const r = await nativeThenGoverned(method, t.params, { vertex });
+
+						expectSameRequest(r);
+						expect(r.raw.requests[0]?.body["generationConfig"]).toEqual({
+							responseJsonSchema: JSON_SCHEMA,
+						});
+						// the getter runs as natively (the SDK's own maybeMoveToResponseJsonSchem reads it more than once)
+						expect(t.govReads).toEqual(t.rawReads);
+					});
+				}
+
+				it(`${on}: an own responseSchema holding $schema beside an INHERITED truthy responseJsonSchema and tools: ${
+					method === "generateContentStream"
+						? "natively nothing moves, and the mirror keeps responseJsonSchema hidden from the SDK's copy: the same body"
+						: "the SDK moves after its copy, so the same body as natively"
+				}`, async () => {
+					const t = sameConfig(() =>
+						Object.assign(Object.create({ responseJsonSchema: { type: "string" } }), {
+							tools: SEARCH(),
+							responseSchema: JSON_SCHEMA,
+						}),
+					);
+					const r = await nativeThenGoverned(method, t.params, { vertex });
+
+					expect(r.rawResult).toBe("ok");
+					expect(r.raw.requests[0]?.body["generationConfig"]).not.toHaveProperty(
+						"responseJsonSchema",
+					);
+					expectSameRequest(r);
+				});
+
+				it(`${on}: the copy does not keep the caller's prototype: a #private-backed INHERITED responseSchema getter is never re-read through it (the SDK reads responseSchema by name), the same body as natively`, async () => {
+					const t = sameConfig(() => {
+						class PrivateSchemaConfig {
+							readonly #schema = JSON_SCHEMA;
+							get responseSchema(): Loose {
+								return this.#schema; // throws on any receiver but the instance
+							}
+						}
+						return Object.assign(new PrivateSchemaConfig(), { tools: SEARCH() });
+					});
+					const r = await nativeThenGoverned(method, t.params, { vertex });
+
+					expectSameRequest(r);
+				});
+
+				if (method === "generateContent") {
+					it(`${on}: an INHERITED responseSchema holding $schema beside tools is not sent at all, as natively (the move comes after the SDK's copy)`, async () => {
+						const t = sameConfig(() =>
+							Object.assign(Object.create({ responseSchema: JSON_SCHEMA }), { tools: SEARCH() }),
+						);
+						const r = await nativeThenGoverned(method, t.params, { vertex });
+
+						expectSameRequest(r);
+						expect(r.raw.requests[0]?.body["generationConfig"]).toEqual({});
+					});
+				}
+
+				// The SDK reads `config` in a different ORDER per method. generateContentStream: maybeMoveToResponseJsonSchem
+				// (responseSchema, then responseJsonSchema), then shouldDisableAfc (automaticFunctionCalling, then tools), then
+				// processParamsMaybeAddMcpUsage (tools, then the copy). generateContent: processParamsMaybeAddMcpUsage first, then
+				// maybeMoveToResponseJsonSchem, whose writes come after the copy but whose READS still happen.
+				if (method === "generateContent") {
+					const THROWING_SCHEMA: Array<[string, () => object]> = [
+						[
+							"an INHERITED",
+							() => {
+								class ThrowingSchemaConfig {
+									get responseSchema(): never {
+										throw new Error("responseSchema getter threw");
+									}
+								}
+								return Object.assign(new ThrowingSchemaConfig(), { tools: SEARCH() });
+							},
+						],
+						[
+							"a NON-ENUMERABLE own",
+							() =>
+								Object.defineProperty({ tools: SEARCH() }, "responseSchema", {
+									get: () => {
+										throw new Error("responseSchema getter threw");
+									},
+									enumerable: false,
+								}),
+						],
+					];
+					for (const [shape, makeConfig] of THROWING_SCHEMA) {
+						it(`${on}: ${shape} responseSchema getter that throws beside tools fails natively (maybeMoveToResponseJsonSchem reads it after the copy) and governed with the same error, no request either way`, async () => {
+							const r = await nativeThenGoverned(method, sameConfig(makeConfig).params, { vertex });
+
+							expect(r.rawResult).toContain("responseSchema getter threw");
+							expectSdkError(r);
+						});
+					}
+				}
+
+				it(`${on}: a tools getter that turns automaticFunctionCalling.disable off before it returns a callable tool: ${
+					method === "generateContentStream"
+						? "the stream reads automaticFunctionCalling BEFORE tools, so AFC stays off: one stream request, as natively, not refused"
+						: "generateContent reads tools BEFORE automaticFunctionCalling, so AFC is on: the same requests and tool calls as natively"
+				}`, async () => {
+					const calls = { native: 0, governed: 0 };
+					const params = (who: keyof typeof calls) => () => {
+						const afc: Loose = { disable: true };
+						const callable = {
+							tool: async () => ({ functionDeclarations: [{ name: "lookup" }] }),
+							callTool: async () => {
+								calls[who]++;
+								return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+							},
+						};
+						return request(
+							withGetter({ automaticFunctionCalling: afc }, "tools", {}, () => {
+								afc["disable"] = false;
+								return [callable];
+							}),
+						);
+					};
+					const r = await nativeThenGoverned(
+						method,
+						{ native: params("native"), governed: params("governed") },
+						{
+							vertex,
+							rounds: [
+								{ functionCalls: [{ name: "lookup", args: {} }], text: "calling" },
+								{ text: "done" },
+							],
+						},
+					);
+
+					expect(r.rawResult).toBe("ok");
+					expect(r.govResult).toBe("ok");
+					expect(r.gov.requests.map((q) => q.body)).toEqual(r.raw.requests.map((q) => q.body));
+					expect(calls.governed).toBe(calls.native);
+					if (method === "generateContentStream") {
+						expect(r.raw.requests).toHaveLength(1);
+						expect(calls.native).toBe(0);
+					} else {
+						expect(r.raw.requests).toHaveLength(2);
+						expect(calls.native).toBe(1);
+					}
+				});
+
+				// maybeMoveToResponseJsonSchem also runs `Object.keys(responseSchema)` when responseSchema is truthy and
+				// responseJsonSchema falsy: on a Proxy, that runs its `ownKeys` trap.
+				const keysThrow = () =>
+					new Proxy(
+						{},
+						{
+							ownKeys() {
+								throw new Error("ownKeys trap threw");
+							},
+						},
+					);
+				const HIDDEN_SCHEMA: Array<[string, (schema: () => object) => object]> = [
+					[
+						"an INHERITED",
+						(schema) =>
+							Object.assign(Object.create({ responseSchema: schema() }), { tools: SEARCH() }),
+					],
+					[
+						"a NON-ENUMERABLE own",
+						(schema) =>
+							Object.defineProperty({ tools: SEARCH() }, "responseSchema", {
+								value: schema(),
+								enumerable: false,
+							}),
+					],
+				];
+				for (const [shape, withSchema] of HIDDEN_SCHEMA) {
+					it(`${on}: ${shape} responseSchema whose Object.keys throws (a Proxy's ownKeys trap) beside tools fails natively and governed with the same error, no request either way`, async () => {
+						const r = await nativeThenGoverned(
+							method,
+							sameConfig(() => withSchema(keysThrow)).params,
+							{ vertex },
+						);
+
+						expect(r.rawResult).toContain("ownKeys trap threw");
+						expectSdkError(r);
+					});
+
+					if (method === "generateContent") {
+						it(`${on}: ${shape} PLAIN responseSchema (no $schema) beside tools is read and goes through: the same body as natively, no schema sent (control)`, async () => {
+							const r = await nativeThenGoverned(
+								method,
+								sameConfig(() => withSchema(() => ({ type: "object" }))).params,
+								{ vertex },
+							);
+
+							expectSameRequest(r);
+							expect(r.raw.requests[0]?.body["generationConfig"]).toEqual({});
+						});
+					}
+				}
+
+				for (const withTools of [true, false]) {
+					const beside = withTools ? "beside tools" : "WITHOUT tools";
+					it(`${on}: an OWN ENUMERABLE responseSchema whose Object.keys throws ${beside} fails as natively: the snapshot forwards it and the SDK inspects it once, itself; no request either way (control)`, async () => {
+						const r = await nativeThenGoverned(
+							method,
+							sameConfig(() => ({
+								...(withTools ? { tools: SEARCH() } : {}),
+								responseSchema: keysThrow(),
+							})).params,
+							{ vertex },
+						);
+
+						expect(r.rawResult).toContain("ownKeys trap threw");
+						expect(r.raw.requests).toHaveLength(0);
+						expect(r.govResult).toBe(r.rawResult);
+						expect(r.gov.requests).toHaveLength(0);
+					});
+
+					if (method === "generateContentStream") {
+						it(`${on}: an OWN ENUMERABLE responseSchema whose ownKeys answers differently on each call ${beside}: its trap runs exactly as natively, and the mirror, which cannot hold two answers, is refused by the self-check`, async () => {
+							const calls = { native: 0, governed: 0 };
+							const params = (who: keyof typeof calls) => () => {
+								const schema = new Proxy(
+									{ $schema: "https://json-schema.org/draft/2020-12/schema", type: "object" },
+									{
+										ownKeys(target) {
+											calls[who]++;
+											// the first inspection sees no $schema; any later one does
+											return calls[who] === 1 ? ["type"] : Reflect.ownKeys(target);
+										},
+									},
+								);
+								return request({
+									...(withTools ? { tools: SEARCH() } : {}),
+									responseSchema: schema,
+								});
+							};
+							const r = await nativeThenGoverned(
+								method,
+								{ native: params("native"), governed: params("governed") },
+								{ vertex },
+							);
+
+							expect(r.rawResult).toBe("ok");
+							// The capture IS the native pass, so the trap runs exactly as often as natively; nothing after it
+							// runs caller code (the cost estimate and the send read the mirror, plain data). The mirror holds
+							// one key list, and natively the SDK's two inspections saw two: the self-check refuses it.
+							expect(calls.governed).toBe(calls.native);
+							expectRefused(r, method);
+						});
+					}
+				}
+
+				// generateContent's processParamsMaybeAddMcpUsage reads every tools ENTRY (`tools.map`) before it copies the
+				// config, and holds its own mapped array from then on; maybeMoveToResponseJsonSchem comes after.
+				it(`${on}: tools [] and a hidden responseSchema whose Object.keys APPENDS a tool to the caller's tools array: ${
+					method === "generateContent"
+						? "the SDK already holds its own mapped array, so the appended tool is not sent"
+						: "the stream's Object.keys runs first, so the SDK reads the appended tool"
+				}; the same body as natively`, async () => {
+					const t = sameConfig(() => {
+						const tools: Loose[] = [];
+						const appending = new Proxy(
+							{},
+							{
+								ownKeys() {
+									tools.push({ googleSearch: {} });
+									return [];
+								},
+							},
+						);
+						return Object.assign(Object.create({ responseSchema: appending }), { tools });
+					});
+					const r = await nativeThenGoverned(method, t.params, { vertex });
+
+					expectSameRequest(r);
+					expect(r.raw.requests[0]?.body["tools"]).toEqual(
+						method === "generateContent" ? [] : [{ googleSearch: {} }],
+					);
+				});
+
+				it(`${on}, pii "redact": a tools[0] getter that deletes config.systemInstruction runs before the SDK's copy, so it is not sent, as natively`, async () => {
+					const t = sameConfig(() => {
+						const config: Loose = { systemInstruction: `Reply to ${EMAIL} only` };
+						const tools: Loose[] = [];
+						Object.defineProperty(tools, "0", {
+							get: () => {
+								delete config["systemInstruction"];
+								return { googleSearch: {} };
+							},
+							enumerable: true,
+							configurable: true,
+						});
+						config["tools"] = tools;
+						return config;
+					});
+					const r = await nativeThenGoverned(method, t.params, { vertex, pii: "redact" });
+
+					expectSameRequest(r);
+					expect(r.raw.requests[0]?.body).not.toHaveProperty("systemInstruction");
+					expect(JSON.stringify(r.gov.requests)).not.toContain(EMAIL);
+				});
+
+				// The WHOLE touch sequence, recorded from the SDK itself and NOT deduped: every getter and trap the SDK runs on
+				// config, tools, the entries, automaticFunctionCalling, the schema and a data tool, each run in order. The
+				// governed call's capture IS the SDK's own pass over the caller's request, and nothing after it runs caller
+				// code, so the sequences are equal. `tool()` is not recorded: the capture answers it with a stand-in, and the
+				// real one runs lazily, after authorization (its count is pinned by its own row). With a callable tool the
+				// native model asks for the tool first, as the capture's probe does, so both run the SDK's loop.
+				for (const callable of [false, true]) {
+					it(`${on}, ${callable ? "a callable tool beside a plain one" : "a plain tool"}: the governed touch sequence of the request's getters and traps is the SDK's own, in full`, async () => {
+						const logs = { native: [] as string[], governed: [] as string[] };
+						const params = (log: string[]) => () => {
+							const touch = <T>(key: string, value: T): T => {
+								log.push(key);
+								return value;
+							};
+							const getter = (target: object, key: string, label: string, value: () => unknown) =>
+								Object.defineProperty(target, key, {
+									get: () => touch(label, value()),
+									enumerable: true,
+									configurable: true,
+								});
+							const afc: Loose = {};
+							getter(afc, "disable", "automaticFunctionCalling.disable", () => false);
+							getter(
+								afc,
+								"maximumRemoteCalls",
+								"automaticFunctionCalling.maximumRemoteCalls",
+								() => 10,
+							);
+							const schema = new Proxy(
+								{},
+								{
+									ownKeys() {
+										touch("responseSchema.ownKeys", undefined);
+										return [];
+									},
+								},
+							);
+							const inherited: Loose = { responseJsonSchema: undefined };
+							getter(inherited, "responseSchema", "responseSchema", () => schema);
+							getter(inherited, "automaticFunctionCalling", "automaticFunctionCalling", () => afc);
+							const plain: Loose = { googleSearch: {} };
+							const last = callable ? 1 : 0;
+							getter(
+								plain,
+								"functionDeclarations",
+								`tools[${last}].functionDeclarations`,
+								() => undefined,
+							);
+							const entries = callable ? [wireCallable(), plain] : [plain];
+							const tools: unknown[] = [];
+							for (const [i, entry] of entries.entries())
+								getter(tools, String(i), `tools[${i}]`, () => entry);
+							const config: Loose = Object.create(inherited);
+							getter(config, "temperature", "temperature", () => 0.25);
+							getter(config, "tools", "tools", () => tools);
+							getter(config, "toolConfig", "toolConfig", () => ({}));
+							return request(config);
+						};
+						const r = await nativeThenGoverned(
+							method,
+							{ native: params(logs.native), governed: params(logs.governed) },
+							{
+								vertex,
+								...(callable
+									? {
+											rounds: [
+												{ functionCalls: [{ name: "lookup", args: {} }], text: "calling" },
+												{ text: "done" },
+											],
+										}
+									: {}),
+							},
+						);
+
+						expect(r.rawResult).toBe("ok");
+						if (method === "generateContentStream" && callable) {
+							expect(r.govResult).toContain(`models.${method} with automatic function calling`);
+						} else {
+							expect(r.govResult).toBe("ok");
+							expect(r.gov.requests.map((q) => q.body)).toEqual(r.raw.requests.map((q) => q.body));
+						}
+						expect(logs.native.length).toBeGreaterThan(0);
+						expect(logs.governed).toEqual(logs.native);
+					});
+				}
+
+				it(`${on}: a callable tool's tool() is asked as often as on master (1 on generateContent's governed loop; 0 on the stream, which is refused)`, async () => {
+					const asked = { native: 0, governed: 0 };
+					const params = (who: keyof typeof asked) => () =>
+						request({
+							tools: [
+								{
+									tool: async () => {
+										asked[who]++;
+										return { functionDeclarations: [{ name: "lookup" }] };
+									},
+									callTool: async () => [
+										{ functionResponse: { name: "lookup", response: { ok: true } } },
+									],
+								},
+							],
+						});
+					const r = await nativeThenGoverned(
+						method,
+						{ native: params("native"), governed: params("governed") },
+						{
+							vertex,
+							rounds: [
+								{ functionCalls: [{ name: "lookup", args: {} }], text: "calling" },
+								{ text: "done" },
+							],
+						},
+					);
+
+					// measured on master (7633eee2) with this same request: 1 and 0
+					if (method === "generateContent") {
+						expect(r.govResult).toBe("ok");
+						expect(asked.governed).toBe(1);
+						expect(r.gov.requests).toHaveLength(2);
+					} else {
+						expect(r.govResult).toContain(`models.${method} with automatic function calling`);
+						expect(asked.governed).toBe(0);
+						expect(r.gov.requests).toHaveLength(0);
+					}
+				});
+
+				// generateContent reads automaticFunctionCalling only beside a callable tool (`!hasCallableTools(params) ||
+				// shouldDisableAfc(...)`), and the snapshot reads it either way, so its row carries one.
+				const ORDER_TOOLS: Array<[string, () => unknown[]]> =
+					method === "generateContent"
+						? [["a callable tool", () => [wireCallable()]]]
+						: [["a plain tool", SEARCH]];
+				for (const [tool, makeTools] of ORDER_TOOLS) {
+					it(`${on}, ${tool}: config fields are FIRST read in the SDK's order for this method (the order recorded from the SDK itself)`, async () => {
+						const logs = { native: [] as string[], governed: [] as string[] };
+						const params = (log: string[]) => () => {
+							const read = <T>(key: string, value: T): T => {
+								log.push(key);
+								return value;
+							};
+							class OrderedConfig {
+								get responseSchema(): Loose {
+									return read("responseSchema", { type: "object" });
+								}
+								get automaticFunctionCalling(): Loose {
+									return read("automaticFunctionCalling", {});
+								}
+							}
+							const config = new OrderedConfig();
+							Object.defineProperty(config, "temperature", {
+								get: () => read("temperature", 0.25),
+								enumerable: true,
+								configurable: true,
+							});
+							Object.defineProperty(config, "tools", {
+								get: () => read("tools", makeTools()),
+								enumerable: true,
+								configurable: true,
+							});
+							return request(config);
+						};
+						const r = await nativeThenGoverned(
+							method,
+							{ native: params(logs.native), governed: params(logs.governed) },
+							{ vertex },
+						);
+						const firstReads = (log: string[]) => log.filter((key, i) => log.indexOf(key) === i);
+
+						expect(r.rawResult).toBe("ok");
+						expect(r.govResult).toBe("ok");
+						expect(r.gov.requests.map((q) => q.body)).toEqual(r.raw.requests.map((q) => q.body));
+						expect(firstReads(logs.native).length).toBeGreaterThan(0);
+						expect(firstReads(logs.governed)).toEqual(firstReads(logs.native));
+					});
+				}
+			}
+		}
+	});
 });
