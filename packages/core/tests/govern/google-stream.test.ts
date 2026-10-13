@@ -679,12 +679,14 @@ describe("Google billable methods usertrust does not govern are refused", () => 
 		});
 	}
 
-	it("free metadata calls and non-generation namespaces still pass through", async () => {
+	it("free metadata calls still pass through; fileSearchStores.create, not free, is refused", async () => {
 		const { client, passThrough } = makeGoogleClient();
+		const audit = makeMockAudit();
 		const governed = (await trust(client, {
 			dryRun: true,
 			budget: 50_000,
 			vaultBase: tmpVault,
+			_audit: audit,
 		})) as unknown as typeof client;
 
 		await expect(governed.models.countTokens()).resolves.toEqual({ totalTokens: 7 });
@@ -693,7 +695,6 @@ describe("Google billable methods usertrust does not govern are refused", () => 
 		await governed.interactions.get();
 		await governed.caches.get();
 		await governed.tunings.get();
-		await governed.fileSearchStores.create();
 		await governed.fileSearchStores.documents.list();
 		expect(passThrough.countTokens).toHaveBeenCalledOnce();
 		expect(passThrough.list).toHaveBeenCalledOnce();
@@ -701,8 +702,20 @@ describe("Google billable methods usertrust does not govern are refused", () => 
 		expect(passThrough.interactionsGet).toHaveBeenCalledOnce();
 		expect(passThrough.cachesGet).toHaveBeenCalledOnce();
 		expect(passThrough.tuningsGet).toHaveBeenCalledOnce();
-		expect(passThrough.fileSearchStoresCreate).toHaveBeenCalledOnce();
 		expect(passThrough.documentsList).toHaveBeenCalledOnce();
+		expect(audit.events).toEqual([]);
+
+		// A duck-typed client is default-deny too: `fileSearchStores.create` is not on the free
+		// list, so it is refused with its policy_denied event and the fake is never called.
+		const err = await governed.fileSearchStores.create().then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(PolicyDeniedError);
+		expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+		expect(audit.events[0]?.data.actionName).toBe("fileSearchStores.create");
+		expect((err as PolicyDeniedError).auditEventHash).toBe(audit.hashes[0]);
+		expect(passThrough.fileSearchStoresCreate).not.toHaveBeenCalled();
 
 		// A wrapped namespace keeps a stable identity across accesses.
 		expect(governed.chats).toBe(governed.chats);
@@ -1688,7 +1701,7 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 			);
 		});
 
-		it(`${method}: a non-callable tool that cannot be copied as data, with AFC enabled, is refused`, async () => {
+		it(`${method}: a non-callable tool whose SDK-read field cannot be copied as data, with AFC enabled, is refused`, async () => {
 			const engine = makeMockEngine();
 			const audit = makeMockAudit();
 			const { client, generateContentStream } = makeGoogleClient();
@@ -1699,8 +1712,10 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 				_engine: engine,
 				_audit: audit,
 			});
+			// The function sits inside `googleSearch`, a field the SDK reads and sends; a tool's
+			// OTHER fields are never copied (see the row below).
 			const params = afcParams({
-				tools: [{ googleSearch: {} }, { googleSearch: {}, hook: () => 1 }],
+				tools: [{ googleSearch: {} }, { googleSearch: { hook: () => 1 } }],
 			});
 
 			const err = await callModels(governed, method, params).then(
@@ -1710,7 +1725,7 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 
 			expect(err).toBeInstanceOf(PolicyDeniedError);
 			expect((err as Error).message).toContain(
-				`models.${method} could not be checked for automatic function calling (params.config.tools[1] cannot be copied as data)`,
+				`models.${method} could not be checked for automatic function calling (params.config.tools[1].googleSearch.hook cannot be copied as data)`,
 			);
 			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
 			expect(engine.spendPending).not.toHaveBeenCalled();

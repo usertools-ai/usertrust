@@ -48,17 +48,31 @@ const REAL_IO: EffectiveRecordIo = {
  * the race (its appends fail on the lock and it runs degraded) never overwrites the holder's record. A stored
  * "conflict" flag would go stale; the record is instead rewritten on every start and every destroy while the lock is
  * held, and once more when the lock is taken by a writer it was not published under.
+ *
+ * A write that FAILED publishes nothing, so it does not count as published: the next append retries it. Every append,
+ * not a backoff: an append already writes to this vault, so one more small write beside it costs little, and a timer
+ * would leave readers on "not yet published" after the filesystem recovered. The retries do not warn again: one
+ * warning per lock owner until a write succeeds, so a filesystem that keeps failing warns once, not on every call.
  */
 interface VaultRegistry {
 	live: Map<symbol, number>;
-	/** The lock owner the record was last published under, or undefined if it never was. */
+	/** The lock owner the record was last published under, or undefined if it never was. Set only by a write that succeeded. */
 	publishedUnder: string | undefined;
+	/** The lock owner whose failed write has already warned, until a write succeeds; undefined if none has failed. */
+	warnedUnder: string | undefined;
 }
 const registries = new Map<string, VaultRegistry>();
 
-/** A governor's registration: `appended` after each of its successful appends, `release` from its destroy(). */
+/**
+ * A governor's registration: `appended` after each of its successful appends, `release` from its destroy(), once the
+ * calls it drains and the holds it records have appended and before the audit lock is released: a call that settles
+ * while destroy() drains may be the governor's first append, and must still publish.
+ */
 export interface EnforcedBudgetRegistration {
-	/** The process now holds the vault's writer lock: publish if the record was not published under this owner. */
+	/**
+	 * The process now holds the vault's writer lock: publish if the record was not published under this owner, which
+	 * includes a publish whose write failed (retried here, at every append, until one succeeds).
+	 */
 	appended(): void;
 	/** Drop this governor and republish for the rest while the lock is held (the last one's leaves the record as it was, read "as of" its writtenAt). */
 	release(): void;
@@ -78,7 +92,7 @@ export function registerEnforcedBudget(
 	const key = vaultIdentity(vaultDir);
 	let registry = registries.get(key);
 	if (registry === undefined) {
-		registry = { live: new Map(), publishedUnder: undefined };
+		registry = { live: new Map(), publishedUnder: undefined, warnedUnder: undefined };
 		registries.set(key, registry);
 	}
 	const reg = registry;
@@ -88,8 +102,15 @@ export function registerEnforcedBudget(
 	const publishIfHeld = (): void => {
 		const owner = ownerOf(lockOwner);
 		if (owner === undefined) return;
-		publish(vaultDir, reg.live, seams);
-		reg.publishedUnder = owner;
+		if (publish(vaultDir, reg.live, seams, reg.warnedUnder !== owner)) {
+			reg.publishedUnder = owner;
+			reg.warnedUnder = undefined;
+		} else {
+			// Not published, and an earlier success under this owner no longer stands (the failed write removed its
+			// record, or the live set it described has changed): the next append retries.
+			reg.publishedUnder = undefined;
+			reg.warnedUnder = owner;
+		}
 	};
 	publishIfHeld();
 	let released = false;
@@ -136,17 +157,18 @@ function vaultIdentity(vaultDir: string): string {
 	}
 }
 
+/** Write the live governors' record; true only if it was written. */
 function publish(
 	vaultDir: string,
 	live: Map<symbol, number>,
 	seams: Partial<EffectiveRecordIo>,
-): void {
+	warn: boolean,
+): boolean {
 	const distinct = new Set(live.values());
 	if (distinct.size === 1) {
-		writeRecord(vaultDir, { budget: [...distinct][0] as number }, seams);
-	} else {
-		writeRecord(vaultDir, { budget: null, governors: live.size }, seams);
+		return writeRecord(vaultDir, { budget: [...distinct][0] as number }, seams, warn);
 	}
+	return writeRecord(vaultDir, { budget: null, governors: live.size }, seams, warn);
 }
 
 /**
@@ -158,14 +180,19 @@ export function recordEffectiveBudget(
 	budget: number,
 	seams: Partial<EffectiveRecordIo> = {},
 ): void {
-	writeRecord(vaultDir, { budget }, seams);
+	writeRecord(vaultDir, { budget }, seams, true);
 }
 
+/**
+ * Write the record; true only if it is now on disk. Never throws: a failure removes any earlier record and, when
+ * `warn`, says so on stderr (a retry of a failure already reported passes false).
+ */
 function writeRecord(
 	vaultDir: string,
 	body: { budget: number } | { budget: null; governors: number },
 	seams: Partial<EffectiveRecordIo>,
-): void {
+	warn: boolean,
+): boolean {
 	const io: EffectiveRecordIo = { ...REAL_IO, ...seams };
 	const target = join(vaultDir, EFFECTIVE_BUDGET_FILE);
 	// A unique staging path per write, so two governors starting on one vault never rename each other's half-file.
@@ -180,6 +207,7 @@ function writeRecord(
 		};
 		io.write(tmp, JSON.stringify(record));
 		io.rename(tmp, target);
+		return true;
 	} catch (err) {
 		// The cleanup is best-effort too: `force` ignores a missing file, not a read-only filesystem (EROFS), and an
 		// advisory record must never reject the governor's constructor.
@@ -198,11 +226,14 @@ function writeRecord(
 				removed = `the earlier record could NOT be removed (${code ?? "error"}); readers show its writtenAt, so it reads as old, never as current`;
 		}
 		// The path is the caller's (a vaultBase), and the error quotes it: scrubbed for the terminal, as every echo is.
-		warnBestEffort(
-			`[usertrust] could not record the enforced budget in ${scrubForTerminal(target)}: ${scrubForTerminal(
-				err instanceof Error ? err.message : String(err),
-			)}; ${removed}. Enforcement is unaffected; vault readers fall back to the vault config.\n`,
-		);
+		if (warn) {
+			warnBestEffort(
+				`[usertrust] could not record the enforced budget in ${scrubForTerminal(target)}: ${scrubForTerminal(
+					err instanceof Error ? err.message : String(err),
+				)}; ${removed}. Enforcement is unaffected; vault readers fall back to the vault config.\n`,
+			);
+		}
+		return false;
 	}
 }
 

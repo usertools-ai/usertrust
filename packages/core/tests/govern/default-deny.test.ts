@@ -2,7 +2,8 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * Default-deny on Anthropic and OpenAI clients.
+ * Default-deny on Anthropic and OpenAI clients (Google: google-default-deny.test.ts), and the
+ * parts of the boundary every provider shares (method identity, the SDK peer floors).
  *
  * A trust() client governs a handful of methods (messages.create/stream/parse,
  * chat.completions.create, responses.create, ...). Every OTHER SDK method reached off the
@@ -232,7 +233,8 @@ function writeConfig(config: Record<string, unknown>): void {
 // biome-ignore lint/suspicious/noExplicitAny: the rows reach SDK members the TrustedClient type hides.
 type Loose = any;
 
-async function anthropic(opts: Partial<TrustOpts> = {}) {
+/** `prepare` runs on the raw client before `trust()` wraps it. */
+async function anthropic(opts: Partial<TrustOpts> = {}, prepare?: (raw: Loose) => void) {
 	const engine = mockEngine();
 	const raw = new Anthropic({
 		apiKey: "k",
@@ -240,6 +242,7 @@ async function anthropic(opts: Partial<TrustOpts> = {}) {
 		fetch: recordingFetch(hits, "anthropic"),
 		maxRetries: 0,
 	});
+	prepare?.(raw);
 	const client = await trust(raw, {
 		budget: 1_000_000,
 		vaultBase: vault,
@@ -1326,6 +1329,7 @@ describe("the SDK peer floors are the versions the free list was classified on",
 	it.each([
 		["openai", "openai"],
 		["@anthropic-ai/sdk", "anthropic"],
+		["@google/genai", "google"],
 	] as const)("%s", (pkgName, key) => {
 		expect(classified, "CLASSIFIED_SDK_VERSIONS is exported").toBeDefined();
 		const floor = /^>=(\d+\.\d+\.\d+)$/.exec(corePkg.peerDependencies[pkgName] ?? "")?.[1];
@@ -1762,6 +1766,69 @@ describe("the boundary is inert to inspection and serialization", () => {
 		expect(client.beta.threads.runs).toBe(client.beta.threads.runs);
 		expect(client.embeddings).toBe(client.embeddings);
 	});
+});
+
+// ── Method identity: a wrapper per (path, raw resource, name), built once ──
+
+describe("a method keeps its identity across reads", () => {
+	const CASES = {
+		anthropic: {
+			build: anthropic,
+			free: "models.list",
+			listed: "messages.batches.create",
+			refused: "completions.create",
+			refusedArgs: [{ model: "claude-2.1", max_tokens_to_sample: 8, prompt: "\n\nHuman: hi" }],
+			listGet: "GET /v1/models",
+		},
+		openai: {
+			build: openai,
+			free: "models.list",
+			listed: "embeddings.create",
+			refused: "images.generate",
+			refusedArgs: [{ model: "gpt-image-1", prompt: "a cat" }],
+			listGet: "GET /v1/models",
+		},
+	} as const;
+
+	for (const [provider, c] of Object.entries(CASES)) {
+		it(`${provider}: free, listed and refused methods are the same function on every read`, async () => {
+			const { client } = await c.build({ allowUngoverned: [c.listed] });
+			for (const path of [c.free, c.listed, c.refused]) {
+				const { holder, name } = resolveMember(client, path);
+				expect(holder[name], path).toBe(resolveMember(client, path).holder[name]);
+			}
+		});
+
+		it(`${provider}: the same raw function at two paths gets two wrappers, each deciding by its own path`, async () => {
+			const { client, raw, engine } = await c.build({}, (r: Loose) => {
+				r.aliasedModels = r.models;
+			});
+			expect(raw.aliasedModels.list).toBe(raw.models.list);
+			const free = client.models.list;
+			const gated = client.aliasedModels.list;
+			expect(free).not.toBe(gated);
+			await expectRefused("aliasedModels.list", () => gated(), engine);
+			await free();
+			expect(hits).toEqual([c.listGet]);
+			expect(chainEvents().map((e) => e.kind)).toEqual(["policy_denied"]);
+		});
+
+		it(`${provider}: two calls of one cached refused wrapper give two errors, each with its own event`, async () => {
+			const { client } = await c.build();
+			const { holder, name } = resolveMember(client, c.refused);
+			const refused = holder[name];
+			const first = await refused(...c.refusedArgs).catch((e: unknown) => e);
+			const second = await refused(...c.refusedArgs).catch((e: unknown) => e);
+			expect(first).toBeInstanceOf(PolicyDeniedError);
+			expect(second).toBeInstanceOf(PolicyDeniedError);
+			expect(first).not.toBe(second);
+			const events = chainEvents() as unknown as Array<{ kind: string; hash: string }>;
+			expect(events.map((e) => e.kind)).toEqual(["policy_denied", "policy_denied"]);
+			expect((first as PolicyDeniedError).auditEventHash).toBe(events[0]?.hash);
+			expect((second as PolicyDeniedError).auditEventHash).toBe(events[1]?.hash);
+			expect(events[0]?.hash).not.toBe(events[1]?.hash);
+		});
+	}
 });
 
 // ── Governed paths are unchanged ──

@@ -378,6 +378,19 @@ function captureOnce(obj: unknown, key: string, at: string): unknown {
 }
 
 /**
+ * `key in obj`, answered WITHOUT running caller code: own, then up the prototype chain,
+ * descriptors only (no getter runs), each object Proxy-checked before it is touched (a
+ * Proxy's `has` trap is caller code, so it is refused, not asked).
+ */
+function presentOnChain(obj: object, key: string, at: string): boolean {
+	for (let o: object | null = obj; o !== null; o = Object.getPrototypeOf(o)) {
+		rejectProxy(o, o === obj ? at : `${at} (its prototype chain)`);
+		if (Object.getOwnPropertyDescriptor(o, key) !== undefined) return true;
+	}
+	return false;
+}
+
+/**
  * Write `key` on `obj` as an own data property. ALWAYS through `defineProperty`, never
  * `obj[key] = …`: for a caller-controlled key that is `"__proto__"` (an own property, as
  * `JSON.parse` makes one), plain assignment runs the prototype SETTER and the copy would
@@ -392,13 +405,219 @@ function setData(
 	Object.defineProperty(obj, key, { value, writable: true, enumerable, configurable: true });
 }
 
+// ── What the SDK reads, field by field (@google/genai 1.52.0) ──
+// The SDK reads these objects with plain property access, so a field they INHERIT (a class
+// getter, prototype data) or hold as a NON-ENUMERABLE own property reaches the request. A
+// copy that kept only own enumerable properties would drop it, and the request forwarded
+// would no longer be the caller's.
+
+/** `config.automaticFunctionCalling`: `shouldDisableAfc`, `shouldAppendAfcHistory`, and `generateContent`'s loop bound. */
+const SDK_AFC_CONFIG_FIELDS = ["disable", "maximumRemoteCalls", "ignoreCallHistory"] as const;
+
+/** `config.toolConfig`: `toolConfigToMldev` / `toolConfigToVertex`. */
+const SDK_TOOL_CONFIG_FIELDS = [
+	"functionCallingConfig",
+	"retrievalConfig",
+	"includeServerSideToolInvocations",
+] as const;
+
+/**
+ * `config.toolConfig.functionCallingConfig`: `functionCallingConfigToMldev`, and
+ * `generateContentStream`'s AFC check (`streamFunctionCallArguments`).
+ */
+const SDK_FUNCTION_CALLING_FIELDS = [
+	"mode",
+	"allowedFunctionNames",
+	"streamFunctionCallArguments",
+] as const;
+
+/**
+ * A non-callable tool's VALUE fields: `toolToMldev` / `toolToVertex` build the wire tool from
+ * exactly these (each tested with `!= null` or `!== undefined`); `tTool` and
+ * `findAfcIncompatibleToolIndexes` read `functionDeclarations`.
+ */
+const SDK_TOOL_FIELDS = [
+	"retrieval",
+	"computerUse",
+	"fileSearch",
+	"googleSearch",
+	"googleMaps",
+	"codeExecution",
+	"enterpriseWebSearch",
+	"functionDeclarations",
+	"googleSearchRetrieval",
+	"parallelAiSearch",
+	"urlContext",
+	"mcpServers",
+] as const;
+
+/**
+ * A non-callable tool's one PRESENCE-only field: `hasMcpToolUsage` tests `'inputSchema' in
+ * tool` (the MCP usage header) and never reads the value, and no converter sends it. So the
+ * snapshot carries its presence WITHOUT evaluating it: whatever its descriptor (a getter, which
+ * the SDK never runs, or data of any kind), its value is never read, checked or cloned, and
+ * the copy holds `undefined` there.
+ */
+const SDK_TOOL_PRESENCE_FIELD = "inputSchema";
+
+/** A canonical array index (`"0"`, `"12"`), as an own key of an array. */
+const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
+
+/** The built-in, captured at module load: a caller who patches it later cannot make a fake constructor look native. */
+const functionToString = Function.prototype.toString;
+
+/** An own DATA property's value, read from its descriptor (never through a getter); `undefined` otherwise. */
+function ownDataValue(obj: object, key: string): { value: unknown } | undefined {
+	const d = Object.getOwnPropertyDescriptor(obj, key);
+	return d !== undefined && "value" in d ? { value: d.value } : undefined;
+}
+
+/**
+ * `proto` is SOME realm's `Object.prototype` (this one, or a `vm` context's, a test runner's):
+ * it has no prototype of its own, and its own `constructor` is a DATA property holding a
+ * native function named "Object" whose own `prototype` is `proto` itself. Read through
+ * descriptors only, with the captured `Function.prototype.toString`, and a Proxy anywhere is
+ * not plain, so no caller code runs. A user class's prototype, a fake "Object" function, or a
+ * bound function (which has no `prototype`) fails it.
+ */
+function isRealmObjectPrototype(proto: unknown): boolean {
+	if (proto === Object.prototype) return true;
+	if (proto === null || typeof proto !== "object" || utilTypes.isProxy(proto)) return false;
+	if (Object.getPrototypeOf(proto) !== null) return false;
+	const ctor = ownDataValue(proto, "constructor")?.value;
+	if (typeof ctor !== "function" || utilTypes.isProxy(ctor)) return false;
+	return (
+		ownDataValue(ctor, "name")?.value === "Object" &&
+		ownDataValue(ctor, "prototype")?.value === proto &&
+		functionToString.call(ctor).includes("[native code]")
+	);
+}
+
+/** `proto` is SOME realm's `Array.prototype`: every realm's `Array.prototype` is itself an array. */
+function isRealmArrayPrototype(proto: unknown): boolean {
+	if (proto === Array.prototype) return true;
+	return (
+		proto !== null && typeof proto === "object" && !utilTypes.isProxy(proto) && Array.isArray(proto)
+	);
+}
+
+/**
+ * Refuse (UncloneableAfcInput, naming the path) a value that `structuredClone` would copy
+ * LOSSILY for the SDK. The SDK reads below a tool field with plain property access too (a
+ * declaration's `name`, a `parameters` Schema, recursively), so an inherited getter or a
+ * non-enumerable property there reaches the provider natively, while structuredClone keeps
+ * own enumerable data only. Per-type field lists cannot follow a recursive Schema, so below
+ * the tool's top-level fields the snapshot does not capture, it REFUSES: "can't tell".
+ *
+ * Allowed: primitives; plain objects (prototype `null` or ANY realm's `Object.prototype`, so
+ * data built in a `vm` context or a test runner's realm counts) whose own string-keyed
+ * properties are all enumerable DATA; and DENSE arrays (any realm's `Array.prototype`)
+ * holding enumerable data at every index and no named property besides `length`. Refused: a class instance (any other prototype: a user class, `Date`, `Map`, a
+ * typed array, an array subclass), an accessor, a non-enumerable property, a sparse array,
+ * an array with an extra named property, a function. Symbol keys are neither read by the SDK
+ * nor copied by structuredClone, so they are ignored.
+ *
+ * The walk runs NO caller code: every object is Proxy-checked (`util.types.isProxy`, no
+ * trap) before its prototype or descriptors are read, and only descriptors are read, never
+ * a value through an accessor. It is iterative (no recursion depth limit) and visits each
+ * object once, so a cycle ends it.
+ */
+function refuseLossyClone(root: unknown, rootAt: string): void {
+	const visited = new Set<object>();
+	const pending: Array<{ value: unknown; at: string }> = [{ value: root, at: rootAt }];
+	for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+		const { value, at } = next;
+		if (typeof value === "function") throw new UncloneableAfcInput(at);
+		if (value === null || typeof value !== "object") continue;
+		if (visited.has(value)) continue;
+		visited.add(value);
+		rejectProxy(value, at);
+		const isArray = Array.isArray(value);
+		const proto = Object.getPrototypeOf(value);
+		const plainProto = isArray
+			? isRealmArrayPrototype(proto)
+			: proto === null || isRealmObjectPrototype(proto);
+		if (!plainProto) throw new UncloneableAfcInput(at);
+		const keys = Reflect.ownKeys(value).filter((k): k is string => typeof k === "string");
+		if (isArray) {
+			const length = (value as unknown[]).length; // `length` is own data on a real array
+			let indexes = 0;
+			for (const key of keys) {
+				if (key === "length") continue;
+				if (!ARRAY_INDEX.test(key)) throw new UncloneableAfcInput(`${at}.${key}`);
+				indexes++;
+			}
+			if (indexes !== length) throw new UncloneableAfcInput(at); // sparse
+		}
+		for (const key of keys) {
+			if (isArray && key === "length") continue;
+			const keyAt = isArray ? `${at}[${key}]` : `${at}.${key}`;
+			const d = Object.getOwnPropertyDescriptor(value, key);
+			if (d === undefined || !("value" in d) || d.enumerable !== true) {
+				throw new UncloneableAfcInput(keyAt);
+			}
+			pending.push({ value: d.value, at: keyAt });
+		}
+	}
+}
+
+/**
+ * A non-callable tool as data WE own: EXACTLY the fields the SDK reads, nothing else (its
+ * other properties are neither read nor sent by the SDK, so they are never read here).
+ * Each field in SDK_TOOL_FIELDS is CAPTURED once (`captureOnce`: own, non-enumerable or
+ * inherited, a getter run once), checked to clone faithfully at every depth
+ * (`refuseLossyClone`) and `structuredClone`d AT ONCE, before the next field is read: no
+ * live reference is kept, so a later getter that changes an already-captured value (or a
+ * tool that holds itself) cannot reach the copy. SDK_TOOL_PRESENCE_FIELD is carried as
+ * PRESENT (`undefined`) when `in` would find it, its value never read. So the copy holds
+ * every field the SDK reads, `functionDeclarations` included, and the verdict, which reads
+ * the copy, sees what the SDK will see: a declarations getter beside a callable tool is the
+ * SDK's own local error, not an AFC loop. A field that cannot be copied as data is
+ * UncloneableAfcInput, naming it.
+ */
+function cloneDataTool(tool: unknown, at: string): unknown {
+	if (tool === null || typeof tool !== "object") {
+		try {
+			return structuredClone(tool);
+		} catch {
+			throw new UncloneableAfcInput(at);
+		}
+	}
+	const out: Record<string, unknown> = {};
+	for (const key of SDK_TOOL_FIELDS) {
+		// Own (enumerable or not) or inherited, an accessor read ONCE.
+		const value = captureOnce(tool, key, at);
+		if (value === undefined) continue; // the SDK's `!= null` / `!== undefined`: as absent
+		const keyAt = `${at}.${key}`;
+		// Checked, then cloned at once: neither runs caller code (the walk reads descriptors
+		// only; a value that passed it is plain data, which structuredClone copies without a
+		// getter), so the clone is exactly what was checked, and a later getter on this tool
+		// that changes the caller's value cannot reach it.
+		refuseLossyClone(value, keyAt);
+		let copy: unknown;
+		try {
+			copy = structuredClone(value);
+		} catch {
+			throw new UncloneableAfcInput(keyAt);
+		}
+		setData(out, key, copy);
+	}
+	// PRESENT, as `in` sees it (own, inherited or non-enumerable), with no getter run and
+	// `undefined` whatever it holds: the SDK only tests `in`, and never reads the value.
+	if (presentOnChain(tool, SDK_TOOL_PRESENCE_FIELD, at)) {
+		setData(out, SDK_TOOL_PRESENCE_FIELD, undefined);
+	}
+	return out;
+}
+
 /**
  * `obj` as an object WE own, for an AFC-relevant config object (`automaticFunctionCalling`,
  * `toolConfig`, `functionCallingConfig`): a NULL-PROTOTYPE object, so nothing is inherited
  * from the caller or from `Object.prototype`; every own property captured (an accessor
  * read once, on the original receiver) and written with `setData`; and the named `keys`
- * also resolved through the caller's prototype chain, as the SDK's plain reads would find
- * them. The SDK only reads properties of these objects (and spreads them), so a null
+ * (every field the SDK reads from that object, the SDK_*_FIELDS lists above) also
+ * resolved through the caller's prototype chain, read once, as the SDK's plain reads would
+ * find them. The SDK only reads properties of these objects (and spreads them), so a null
  * prototype is safe for it. The values are the caller's (shallow); the fields the AFC
  * decision reads are primitives.
  */
@@ -480,10 +699,15 @@ function capturedCopy(
  *     absent): anything else is indeterminate.
  *   - `config.automaticFunctionCalling`, `config.toolConfig` and its
  *     `functionCallingConfig`: owned NULL-PROTOTYPE copies (`ownedDataCopy`), so `disable`, `maximumRemoteCalls` and
- *     `streamFunctionCallArguments` are values we own.
+ *     `streamFunctionCallArguments` are values we own, and every field the SDK reads from
+ *     them (`mode` and `allowedFunctionNames` too) is carried, inherited ones included.
  *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
- *     non-callable tool is `structuredClone`d (a tool that cannot be copied as data is
- *     indeterminate, so the call is refused naming it); callable tools keep their
+ *     non-callable tool is copied as exactly the fields the SDK reads (`cloneDataTool`:
+ *     each captured once, a `functionDeclarations` getter included, and cloned at once; a
+ *     field that cannot be copied as data, including one holding a class instance,
+ *     accessor, non-enumerable property or sparse array at any depth (`refuseLossyClone`),
+ *     is indeterminate, so the call is refused naming where);
+ *     callable tools keep their
  *     reference (generateContent then runs them through runGovernedAfc, which needs the
  *     original objects; the stream refuses them). When the snapshot says AFC IS disabled
  *     (`disable` truthy, or a `maximumRemoteCalls` the SDK reads as invalid), the tool
@@ -529,7 +753,7 @@ export function snapshotGoogleAfcParams(
 		const afcConfig = ownedDataCopy(
 			captureOnce(config, "automaticFunctionCalling", "params.config"),
 			afcAt,
-			["disable", "maximumRemoteCalls", "ignoreCallHistory"],
+			SDK_AFC_CONFIG_FIELDS,
 		);
 		setData(outConfig, "automaticFunctionCalling", afcConfig);
 
@@ -537,13 +761,13 @@ export function snapshotGoogleAfcParams(
 		const toolConfig = ownedDataCopy(
 			captureOnce(config, "toolConfig", "params.config"),
 			toolConfigAt,
-			["functionCallingConfig"],
+			SDK_TOOL_CONFIG_FIELDS,
 		);
 		if (toolConfig !== null && typeof toolConfig === "object") {
 			const callingConfig = ownedDataCopy(
 				(toolConfig as Record<string, unknown>).functionCallingConfig,
 				`${toolConfigAt}.functionCallingConfig`,
-				["streamFunctionCallArguments"],
+				SDK_FUNCTION_CALLING_FIELDS,
 			);
 			setData(toolConfig as Record<string, unknown>, "functionCallingConfig", callingConfig);
 		}
@@ -599,11 +823,7 @@ export function snapshotGoogleAfcParams(
 						continue;
 					}
 				}
-				try {
-					outTools[i] = structuredClone(tool);
-				} catch {
-					throw new UncloneableAfcInput(at);
-				}
+				outTools[i] = cloneDataTool(tool, at);
 			}
 			// No caller code runs between this check and the verdict (both read data only), and a
 			// tool classified non-callable is our CLONE (or AFC is off on our own copy), so the
