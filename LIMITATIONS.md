@@ -263,6 +263,8 @@ any hold). What this does not cover:
 - **One event's line is at most 16 MiB.** A larger event is refused before it is written, and
   dead-lettered, so the writer never writes a tail it cannot read back (it reads the last lines
   within 64 MiB). A vault an older version left with longer last lines is refused (`TAIL_OVERSIZE`).
+  Beside one such line left last, an event that would not fit within 64 MiB with it is refused
+  too, and dead-lettered; an ordinary event goes on.
 - **`usertrust verify` reads one log segment, the dead-letter queue and the anchor mirror within
   1 GiB each.** A larger file is named as over that bound and its contents are not judged: the
   vault fails (or, for the dead-letter queue, whether events are missing is unknown).
