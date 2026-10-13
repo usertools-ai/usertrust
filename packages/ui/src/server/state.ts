@@ -58,6 +58,12 @@ export interface LedgerState {
 	 */
 	logId: string | undefined;
 	/**
+	 * The log's mtime and ctime as the descriptor that read it saw them (the load's, then each grow's). Where the log has
+	 * no identity (inode 0), the watcher compares them to notice a same-size replacement. Undefined when the log was
+	 * absent or no load read one unchanged file throughout.
+	 */
+	logTimes: LogTimes | undefined;
+	/**
 	 * Whether the audit directory EXISTED at this load (a `stat` of it succeeded), readable or not: once a server has
 	 * seen it, its absence is a deletion, so a directory that was there and could not be listed still counts.
 	 */
@@ -92,6 +98,12 @@ export interface LedgerState {
  * the log no longer holds events an earlier load or verified append held.
  */
 export type DeletionCause = "directory" | "events";
+
+/** A file's modification and status-change times, in nanoseconds, as one `fstat` saw them. */
+export interface LogTimes {
+	mtimeNs: bigint;
+	ctimeNs: bigint;
+}
 
 /** The events a load or a verified append left the dashboard holding: how many, and the hash of the last one. */
 export interface LogHead {
@@ -267,7 +279,7 @@ export function loadState(
 		// never read consistently twice latches nothing, and its verdict stands on its own. A consistent first failure on
 		// the last retry still gets its confirming pass.
 		if (retry >= LOAD_RETRIES && !unconfirmed)
-			return { ...pass.state, logId: undefined, head: undefined };
+			return { ...pass.state, logId: undefined, logTimes: undefined, head: undefined };
 		failedBefore ||= !pass.contained;
 		// What a discarded pass OBSERVED about the directory stays observed (a recreated directory must not undo a
 		// deletion it saw); only what it read from the file (events, verdict, offset, identity) is rebuilt.
@@ -389,6 +401,7 @@ function loadPass(
 		byteOffset: snapshot?.byteOffset ?? 0,
 		pendingFragment: snapshot?.pendingFragment ?? false,
 		logId: snapshot?.id,
+		logTimes: snapshot?.times,
 		auditDirPresent: auditDir === "present",
 		auditDirReadable: auditDir === "present" && listError === undefined,
 		auditDirId: dirId,
@@ -472,10 +485,14 @@ function pathFingerprint(logPath: string): string | undefined {
  * The log as one descriptor sees it: its identity, its fingerprint, its size, and whether bytes follow its last newline.
  * Undefined when it cannot be read (absent, say): the offset is then 0, so every grow is a full reload.
  */
-function snapshotLog(
-	logPath: string,
-):
-	| { id: string | undefined; fingerprint: string; byteOffset: number; pendingFragment: boolean }
+function snapshotLog(logPath: string):
+	| {
+			id: string | undefined;
+			fingerprint: string;
+			byteOffset: number;
+			pendingFragment: boolean;
+			times: LogTimes;
+	  }
 	| undefined {
 	let fd: number;
 	try {
@@ -491,6 +508,7 @@ function snapshotLog(
 			fingerprint: fingerprintOf(st),
 			byteOffset: size,
 			pendingFragment: afterLastNewline(fd, size) < size,
+			times: { mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs },
 		};
 	} catch {
 		return undefined;
@@ -526,7 +544,7 @@ function readRange(fd: number, start: number, end: number, into?: Buffer): Buffe
 }
 
 export type Appended =
-	| { kind: "bytes"; buf: Buffer }
+	| { kind: "bytes"; buf: Buffer; times: LogTimes }
 	| { kind: "shrunk" }
 	| { kind: "replaced" }
 	| { kind: "unknown" };
@@ -534,7 +552,7 @@ export type Appended =
 /**
  * The bytes appended to the log after `byteOffset`, read through one descriptor whose identity is checked against
  * `logId` (the identity the last load recorded): only `[byteOffset, size)` is read, never the prefix this process has
- * already verified. "replaced" is another file at the path, "shrunk" a log shorter than the offset, and "unknown" an
+ * already verified, with the log's timestamps as that descriptor saw them. "replaced" is another file at the path, "shrunk" a log shorter than the offset, and "unknown" an
  * identity that cannot be compared (none recorded, or inode 0); each calls for a full reload. A read that throws
  * (the log absent, unreadable) propagates.
  */
@@ -551,7 +569,11 @@ export function readAppended(
 		if (id !== logId) return { kind: "replaced" };
 		const size = Number(st.size);
 		if (size < byteOffset) return { kind: "shrunk" };
-		return { kind: "bytes", buf: readRange(fd, byteOffset, size) };
+		return {
+			kind: "bytes",
+			buf: readRange(fd, byteOffset, size),
+			times: { mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs },
+		};
 	} finally {
 		closeSync(fd);
 	}

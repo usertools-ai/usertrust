@@ -187,6 +187,7 @@ export async function createUiServer(
 			state.rows.push(...rows);
 			state.lastHash = lastHash;
 			state.byteOffset += lastNewline + 1;
+			state.logTimes = read.times;
 			for (const r of rows) {
 				if (isHeaderSpend(r.kind, r.costUt)) state.summary.spentUt += r.costUt;
 			}
@@ -400,6 +401,7 @@ export async function createUiServer(
 		{ onGrow: handleGrow, onResync: handleResync },
 		() => state.logId,
 		() => auditDirId,
+		() => state.logTimes,
 	);
 	// The budget's two sources live OUTSIDE `audit/`, which watchLedger watches: a governor writes its record when it
 	// starts, and an operator edits the config. Each change re-reads the budget, and the config's `remote` section, and

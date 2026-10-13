@@ -1539,6 +1539,24 @@ describe("fs.watch mode's backstop when file-change events arrive late or never"
 			}
 		});
 
+		it("red-first (memo hides a replacement): two stats that differ only in an inode above 2^53 check again", () => {
+			// Windows file ids are 64-bit: as JS numbers, 2^53 and 2^53 + 1 are one value.
+			writeFileSync(logPath(), '{}\n{"partial');
+			let ino = 2n ** 53n;
+			__tailTestSeam.statLog = (p) => ({ ...statSync(p, { bigint: true }), ino });
+			const w = start(() => 3);
+			try {
+				tick(3);
+				expect(w.delivered).toEqual(["grow"]);
+				ino = 2n ** 53n + 1n;
+				expect(Number(ino)).toBe(Number(2n ** 53n));
+				tick(3);
+				expect(w.delivered).toEqual(["grow", "grow"]);
+			} finally {
+				w.stop();
+			}
+		});
+
 		it("red-first (reload every tick): a stat error resyncs once, and the same error with the same known size never again", () => {
 			writeFileSync(logPath(), "{}\n");
 			const w = start(() => 3);

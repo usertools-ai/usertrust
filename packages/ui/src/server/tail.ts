@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { existsSync, type FSWatcher, statSync, watch } from "node:fs";
+import { type BigIntStats, existsSync, type FSWatcher, statSync, watch } from "node:fs";
 import { join } from "node:path";
-import { fileIdentity } from "./state.js";
+import { fileIdentity, type LogTimes } from "./state.js";
 
 export interface TailEvents {
 	/** Byte range grew: caller reads/verifies the appended lines itself. */
@@ -19,20 +19,26 @@ const MISSING_DIR_POLL_MS = 1000;
 const BACKSTOP_MS = 1000;
 
 /**
- * For tests only, never exported from the package: the backstop's interval and the fs.watch function, read once when
- * `watchLedger` starts. Tests shorten the one and replace the other with a watcher that never calls back, or that emits
- * `error`. The defaults are the production behaviour.
+ * For tests only, never exported from the package: the backstop's interval, the fs.watch function, and the stat its
+ * memo key is built from, read once when `watchLedger` starts. Tests shorten the interval, replace the watcher with one
+ * that never calls back or that emits `error`, and hand the memo chosen stats. The defaults are the production behaviour.
  */
-export const __tailTestSeam: { backstopMs: number; watch: typeof watch } = {
+export const __tailTestSeam: {
+	backstopMs: number;
+	watch: typeof watch;
+	statLog: (path: string) => BigIntStats;
+} = {
 	backstopMs: BACKSTOP_MS,
 	watch,
+	statLog: (path) => statSync(path, { bigint: true }),
 };
 
 /**
  * Watches the vault's log and calls back on a change. `sizeOf` is the log size the caller holds; `identityOf` the log's
  * identity its last load recorded (`fileIdentity`); `auditDirIdOf` the audit directory's identity when the caller first
- * saw it. Each check compares the log's size, then (at the same size) its identity, and the directory's identity: a
- * directory absent where one was seen, or another directory at the path, is a resync.
+ * saw it; `timesOf` the log's mtime and ctime as its last load or grow saw them. Each check compares the directory's
+ * identity (absent where one was seen, or another directory at the path, is a resync), then the log's size, then at the
+ * same size its identity, or its timestamps when the identity is unknown.
  */
 export function watchLedger(
 	vaultPath: string,
@@ -40,6 +46,7 @@ export function watchLedger(
 	events: TailEvents,
 	identityOf?: () => string | undefined,
 	auditDirIdOf?: () => string | undefined,
+	timesOf?: () => LogTimes | undefined,
 ): () => void {
 	const auditDir = join(vaultPath, "audit");
 	const logPath = join(auditDir, "events.jsonl");
@@ -47,7 +54,7 @@ export function watchLedger(
 	let watcher: FSWatcher | undefined;
 	let poller: NodeJS.Timeout | undefined;
 	let backstop: NodeJS.Timeout | undefined;
-	const { backstopMs, watch: watchDir } = __tailTestSeam;
+	const { backstopMs, watch: watchDir, statLog } = __tailTestSeam;
 
 	const sizeOfLog = (): number => {
 		try {
@@ -86,6 +93,14 @@ export function watchLedger(
 		return true;
 	};
 
+	/**
+	 * Whether the log's timestamps moved at the same size on the previous check too. A filesystem with no stable inode
+	 * numbers (inode 0) gives no identity, so a same-size replacement is seen by its mtime and ctime instead. Both must
+	 * differ from the recorded ones on TWO consecutive checks: some systems update a write's timestamps before its size,
+	 * and one check can land between the two halves of an append.
+	 */
+	let timesMoved = false;
+
 	const check = (): void => {
 		// The directory first: a vault replaced in one step can hold a log of any size, and a directory deleted while it
 		// held no log bytes changes no size at all (an absent log reads as 0).
@@ -95,10 +110,34 @@ export function watchLedger(
 		}
 		const size = sizeOfLog();
 		const known = sizeOf();
+		if (size !== known) timesMoved = false;
 		if (size < known) events.onResync();
 		else if (size > known) events.onGrow();
-		// A same-size replacement changes no size, so the identity is compared.
-		else if (identityOf !== undefined && replacedAtSameSize(identityOf())) events.onResync();
+		else if (identityOf !== undefined) {
+			// A same-size replacement changes no size, so the identity is compared, or the timestamps where it is unknown.
+			const knownId = identityOf();
+			if (knownId !== undefined) {
+				timesMoved = false;
+				if (replacedAtSameSize(knownId)) events.onResync();
+			} else if (rewrittenAtSameSize()) events.onResync();
+		}
+	};
+
+	const rewrittenAtSameSize = (): boolean => {
+		const known = timesOf?.();
+		let moved = false;
+		if (known !== undefined) {
+			try {
+				const st = statSync(logPath, { bigint: true });
+				moved = st.mtimeNs !== known.mtimeNs || st.ctimeNs !== known.ctimeNs;
+			} catch {
+				moved = false;
+			}
+		}
+		const confirmed = moved && timesMoved;
+		// A resync records new timestamps; the next difference starts its own count.
+		timesMoved = moved && !confirmed;
+		return confirmed;
 	};
 
 	const replacedAtSameSize = (known: string | undefined): boolean => {
@@ -131,19 +170,22 @@ export function watchLedger(
 		// same check() the events run, so an append, a shrink or a removal is seen within about one interval whatever
 		// the events do. It checks the log by PATH, so it also sees a directory replaced under the watcher.
 		// The memo stops a torn last line (a writer that died mid-line) from being re-read in full every tick: check()
-		// runs only when the log's size, mtime or inode, its stat error, the audit directory's identity (or absence), or
-		// the known size moved since the last call. Every field check() compares is in the key, or a skip could hide it.
+		// runs only when the log's size, timestamps or identity, its stat error, the audit directory's identity (or
+		// absence), or the known size moved since the last call, or while a timestamp change waits for its second check.
+		// Every field check() compares is in the key, or a skip could hide it. The log's fields come from ONE BigInt stat:
+		// a JS number cannot hold a 64-bit file id (Windows' exceed 2^53), and two ids that round to one value would let
+		// a skip hide a replacement.
 		let memo: string | undefined;
 		backstop = setInterval(() => {
 			let seen: string;
 			try {
-				const st = statSync(logPath);
-				seen = `${st.size}:${st.mtimeMs}:${st.ino}`;
+				const st = statLog(logPath);
+				seen = `${st.size}:${st.mtimeNs}:${st.ctimeNs}:${st.dev}:${st.ino}:${st.birthtimeNs}`;
 			} catch (err) {
 				seen = `error:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
 			}
 			seen += `|${auditDirNow()}|${sizeOf()}`;
-			if (seen === memo) return;
+			if (seen === memo && !timesMoved) return;
 			memo = seen;
 			check();
 		}, backstopMs);
