@@ -1697,7 +1697,7 @@ async function cursorLocation(sessionId, agentId) {
  * with no readable timestamp counts as after it. One that cannot be read leaves the
  * state unavailable: nothing is posted, and nothing settled at the estimate.
  */
-async function firstRun(dir) {
+async function firstRun(dir, now = Date.now()) {
 	const path = join(dir, SINCE_FILE);
 	const read = () =>
 		readRegular(path, READ_BOUND.small).catch((err) => {
@@ -1706,7 +1706,7 @@ async function firstRun(dir) {
 		});
 	let text = await read();
 	if (text === null) {
-		await publishOnce(path, new Date().toISOString());
+		await publishOnce(path, new Date(now).toISOString());
 		text = await read();
 	}
 	const at = Date.parse(text ?? "");
@@ -1726,7 +1726,10 @@ async function firstRun(dir) {
  * response it left unposted is still posted, once.
  */
 async function sessionFirstRun(dir, sessionId) {
-	const floor = await firstRun(dir);
+	// ONE clock read for both stamps: a hook that makes the state's time and the session's makes
+	// them equal, so nothing written between two reads can fall before the session's alone.
+	const now = Date.now();
+	const floor = await firstRun(dir, now);
 	const path = join(dir, SESSION_SINCE_DIR, sanitize(sessionId));
 	const read = () =>
 		readRegular(path, READ_BOUND.small).catch((err) => {
@@ -1738,7 +1741,7 @@ async function sessionFirstRun(dir, sessionId) {
 		await mkdir(join(dir, SESSION_SINCE_DIR), { recursive: true, mode: 0o700 });
 		const prefix = `${sanitize(sessionId)}__`;
 		const known = (await readdir(dir)).some((n) => n.startsWith(prefix) && n.endsWith(".json"));
-		await publishOnce(path, new Date(known ? floor : Date.now()).toISOString());
+		await publishOnce(path, new Date(known ? floor : now).toISOString());
 		text = await read();
 	}
 	const at = Date.parse(text ?? "");
