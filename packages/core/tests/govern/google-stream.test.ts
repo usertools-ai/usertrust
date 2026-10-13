@@ -1605,6 +1605,76 @@ function makeGatedEngine() {
 	return { engine, holdEntered, release };
 }
 
+/** A declaration as a class instance: its prototype is the class's, not Object.prototype. */
+class DeclarationInstance {
+	name = "lookup";
+}
+
+/**
+ * One row per shape the snapshot refuses inside a field the SDK sends from a non-callable
+ * tool: the tool, the path the refusal names, and a stable word the hint must carry for it.
+ */
+const UNCOPYABLE_SHAPES: Array<[shape: string, tool: () => object, at: string, hint: RegExp]> = [
+	[
+		"a class instance",
+		() => ({ functionDeclarations: [new DeclarationInstance()] }),
+		"params.config.tools[0].functionDeclarations[0]",
+		/\bclass instance\b/,
+	],
+	[
+		"an accessor",
+		() => ({
+			functionDeclarations: [
+				{
+					get name() {
+						return "lookup";
+					},
+				},
+			],
+		}),
+		"params.config.tools[0].functionDeclarations[0].name",
+		/\baccessor\b/,
+	],
+	[
+		"a non-enumerable property",
+		() => ({
+			functionDeclarations: [
+				Object.defineProperty({}, "name", { value: "lookup", enumerable: false }),
+			],
+		}),
+		"params.config.tools[0].functionDeclarations[0].name",
+		/\bnon-enumerable property\b/,
+	],
+	[
+		"a function",
+		() => ({ googleSearch: { hook: () => 1 } }),
+		"params.config.tools[0].googleSearch.hook",
+		/\ba function\b/i,
+	],
+	[
+		"a symbol",
+		() => ({ googleSearch: { tag: Symbol("tag") } }),
+		"params.config.tools[0].googleSearch",
+		/\bsymbol\b/,
+	],
+	[
+		"a sparse array",
+		() => {
+			const declarations: unknown[] = [{ name: "lookup" }];
+			declarations[2] = { name: "other" }; // index 1 is a hole
+			return { functionDeclarations: declarations };
+		},
+		"params.config.tools[0].functionDeclarations",
+		/\bsparse array\b/,
+	],
+	[
+		"an array with a named property",
+		() => ({ functionDeclarations: Object.assign([{ name: "lookup" }], { extra: 1 }) }),
+		"params.config.tools[0].functionDeclarations.extra",
+		/\barray with a named property\b/,
+	],
+];
+
 describe("the request is forwarded as a snapshot of the checked AFC config", () => {
 	let tmpVault: string;
 	beforeEach(() => {
@@ -1733,6 +1803,37 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 			expect(generateContentStream).not.toHaveBeenCalled();
 			await destroy(governed);
 		});
+
+		for (const [shape, makeTool, at, hintWord] of UNCOPYABLE_SHAPES) {
+			it(`${method}: ${shape} in a field the SDK sends is refused, and the hint names that shape`, async () => {
+				const engine = makeMockEngine();
+				const audit = makeMockAudit();
+				const { client, generateContentStream } = makeGoogleClient();
+				const governed = await trust(client, {
+					dryRun: false,
+					budget: 50_000,
+					vaultBase: tmpVault,
+					_engine: engine,
+					_audit: audit,
+				});
+
+				const err = await callModels(governed, method, afcParams({ tools: [makeTool()] })).then(
+					() => undefined,
+					(e: unknown) => e,
+				);
+
+				expect(err).toBeInstanceOf(PolicyDeniedError);
+				expect((err as PolicyDeniedError).message).toContain(
+					`models.${method} could not be checked for automatic function calling (${at} cannot be copied as data)`,
+				);
+				expect((err as PolicyDeniedError).hint).toMatch(hintWord);
+				expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+				expect(engine.spendPending).not.toHaveBeenCalled();
+				expect(client.models.generateContent).not.toHaveBeenCalled();
+				expect(generateContentStream).not.toHaveBeenCalled();
+				await destroy(governed);
+			});
+		}
 
 		it(`${method}: AFC disabled with callable tools is governed, and the SDK receives the same tool references`, async () => {
 			const engine = makeMockEngine();

@@ -704,8 +704,9 @@ function capturedCopy(
  *   - `config.tools`: a NEW array. When the snapshot says AFC is NOT disabled, every
  *     non-callable tool is copied as exactly the fields the SDK reads (`cloneDataTool`:
  *     each captured once, a `functionDeclarations` getter included, and cloned at once; a
- *     field that cannot be copied as data, including one holding a class instance,
- *     accessor, non-enumerable property or sparse array at any depth (`refuseLossyClone`),
+ *     field that cannot be copied as data, including one holding a function, symbol, class
+ *     instance, accessor, non-enumerable property, sparse array or array with a named
+ *     property at any depth (`refuseLossyClone`, then `structuredClone`),
  *     is indeterminate, so the call is refused naming where);
  *     callable tools keep their
  *     reference (generateContent then runs them through runGovernedAfc, which needs the
