@@ -29,8 +29,15 @@ import {
 	VAULT_DIR,
 } from "usertrust";
 import { canonicalize, verifyTransaction } from "usertrust-verify";
+import { isHeaderSpend } from "../shared/aggregate.js";
 import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
-import { budgetSummary, type LedgerState, loadState, ROW_CAP } from "./state.js";
+import {
+	budgetSummary,
+	type LedgerState,
+	loadState,
+	ROW_CAP,
+	readRemoteSettings,
+} from "./state.js";
 
 /** How often the budget files are polled for a change (`fs.watchFile`: a missing file is watched too). */
 const BUDGET_POLL_MS = 1000;
@@ -65,6 +72,11 @@ export async function createUiServer(
 	// Compiled location is dist/server/ — the built SPA sits beside it in dist/app/.
 	const appDir = opts?.appDir ?? join(dirname(fileURLToPath(import.meta.url)), "..", "app");
 	let state: LedgerState = loadState(vaultPath);
+	/**
+	 * Whether this process has ever seen the vault's audit directory. A resync that finds it gone after that is a
+	 * deletion, not a first run (`loadState`'s `auditDirSeen`); a verified append proves the directory exists.
+	 */
+	let auditDirSeen = state.auditDirPresent;
 	let port = 0;
 
 	const clients = new Set<ServerResponse>();
@@ -127,11 +139,14 @@ export async function createUiServer(
 			state.lastHash = lastHash;
 			state.byteOffset += lastNewline + 1;
 			for (const r of rows) {
-				if (r.kind === "llm_call" && r.costUt !== undefined) state.summary.spentUt += r.costUt;
+				if (isHeaderSpend(r.kind, r.costUt)) state.summary.spentUt += r.costUt;
 			}
 			state.summary.remainingUt =
 				state.summary.budget === null ? null : state.summary.budget - state.summary.spentUt;
 			state.summary.chain.events += fresh.length;
+			auditDirSeen = true;
+			// A verified append is the first activity of a vault that had none.
+			if (fresh.length > 0) state.summary.chain.empty = false;
 			// Amendment A4: enforce ROW_CAP after append.
 			if (state.rows.length > ROW_CAP) {
 				state.rows.splice(0, state.rows.length - ROW_CAP);
@@ -148,7 +163,8 @@ export async function createUiServer(
 	}
 
 	function handleResync(): void {
-		state = loadState(vaultPath);
+		state = loadState(vaultPath, ROW_CAP, auditDirSeen);
+		auditDirSeen ||= state.auditDirPresent;
 		version += 1;
 		broadcast("resync", {});
 		broadcast("summary", state.summary);
@@ -329,22 +345,25 @@ export async function createUiServer(
 		onResync: handleResync,
 	});
 	// The budget's two sources live OUTSIDE `audit/`, which watchLedger watches: a governor writes its record when it
-	// starts, and an operator edits the config. Each change re-reads the budget and sends the summary.
+	// starts, and an operator edits the config. Each change re-reads the budget, and the config's `remote` section, and
+	// sends the summary: turning the kit mark on or off takes effect without a restart.
 	const budgetFiles = [
 		join(vaultPath, EFFECTIVE_BUDGET_FILE),
 		join(vaultPath, "usertrust.config.json"),
 	];
 	const refreshBudget = (): void => {
 		const next = budgetSummary(vaultPath, state.summary.spentUt);
+		const remote = readRemoteSettings(vaultPath);
 		if (
 			next.budget === state.summary.budget &&
 			next.budgetSource === state.summary.budgetSource &&
 			next.budgetWrittenAt === state.summary.budgetWrittenAt &&
 			// the provenance carries an unreadable record's REASON, which can change while the rest does not
-			next.budgetProvenance === state.summary.budgetProvenance
+			next.budgetProvenance === state.summary.budgetProvenance &&
+			remote.kit === state.summary.remote.kit
 		)
 			return;
-		Object.assign(state.summary, next);
+		Object.assign(state.summary, next, { remote });
 		// A state change like any other: a new version, so a snapshot taken before it is not mistaken for one after.
 		version += 1;
 		broadcast("summary", state.summary);

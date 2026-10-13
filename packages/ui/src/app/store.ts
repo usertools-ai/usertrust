@@ -3,14 +3,23 @@
 
 import { useEffect, useState } from "react";
 import type { SummaryPayload } from "../shared/api.js";
+import type { LoadPhase } from "../shared/display.js";
 import { applyStatusChanges, novelRows, type StatusChange } from "../shared/live.js";
 import { frameVersion, SnapshotReplay, type Update } from "../shared/replay.js";
 import type { LedgerRow } from "../shared/rows.js";
 
+/**
+ * The live stream. `reconnecting` is what EventSource does on its own after an error: the indicator said "offline"
+ * for it. `offline` is a stream the browser has given up on.
+ */
+export type LiveState = "connecting" | "live" | "reconnecting" | "offline";
+
 export interface LedgerData {
 	rows: LedgerRow[];
 	summary: SummaryPayload | null;
-	live: boolean;
+	/** Whether a snapshot has landed: rows start empty, and an empty list before one is loading, not "no rows". */
+	phase: LoadPhase;
+	live: LiveState;
 	/**
 	 * Ephemeral UI state (P6): the event hashes of rows that just arrived over SSE, kept for
 	 * ~1.6s so the table can one-shot flash them. Never persisted — reset
@@ -41,7 +50,8 @@ export function useLedger(): LedgerData {
 	const [data, setData] = useState<LedgerData>({
 		rows: [],
 		summary: null,
-		live: false,
+		phase: "loading",
+		live: "connecting",
 		liveIds: new Set(),
 	});
 
@@ -63,7 +73,12 @@ export function useLedger(): LedgerData {
 					// the replay too: a re-applied frame is not a new arrival).
 					if (!cancelled) {
 						// Undefined: a newer snapshot, or a newer connection's, is already installed.
-						const install = replay.land(generation, version, (d) => ({ ...d, rows, summary }));
+						const install = replay.land(generation, version, (d) => ({
+							...d,
+							rows,
+							summary,
+							phase: "loaded" as const,
+						}));
 						if (install !== undefined)
 							setData((d) => ({ ...install(d), liveIds: new Set<string>() }));
 					}
@@ -72,7 +87,13 @@ export function useLedger(): LedgerData {
 					// Amendment A6: never leave an unhandled rejection; drop the
 					// live indicator so the UI shows the data may be stale.
 					console.error("usertrust-ui: ledger fetch failed", err);
-					if (!cancelled) setData((d) => ({ ...d, live: false }));
+					// A snapshot already held stays "loaded": its rows are still shown, and the next resync replaces them.
+					if (!cancelled)
+						setData((d) => ({
+							...d,
+							live: d.live === "live" ? "reconnecting" : d.live,
+							phase: d.phase === "loaded" ? "loaded" : "failed",
+						}));
 				})
 				.finally(() => replay.end());
 		};
@@ -81,12 +102,15 @@ export function useLedger(): LedgerData {
 		const source = new EventSource("/api/tail");
 		source.addEventListener("open", () => {
 			replay.reset();
-			setData((d) => ({ ...d, live: true }));
+			setData((d) => ({ ...d, live: "live" }));
 			// Amendment A6: resync on every open — covers rows missed while
 			// disconnected (EventSource auto-reconnects).
 			resync();
 		});
-		source.addEventListener("error", () => setData((d) => ({ ...d, live: false })));
+		source.addEventListener("error", () => {
+			const live: LiveState = source.readyState === EventSource.CLOSED ? "offline" : "reconnecting";
+			setData((d) => ({ ...d, live }));
+		});
 		source.addEventListener("rows", (e) => {
 			const fresh = JSON.parse((e as MessageEvent).data) as LedgerRow[];
 			frame(e, (d) => {

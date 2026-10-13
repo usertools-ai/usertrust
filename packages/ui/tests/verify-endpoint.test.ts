@@ -69,7 +69,7 @@ describe("GET /api/verify/:txId", () => {
 		const body = (await res.json()) as { found: boolean; valid: boolean; receipt: string };
 		expect(body.found).toBe(true);
 		expect(body.valid).toBe(true);
-		expect(body.receipt).toContain("U S E R T R U S T");
+		expect(body.receipt).toContain("u s e r t r u s t");
 		expect(body.receipt).toContain("tx_verify_me");
 	});
 

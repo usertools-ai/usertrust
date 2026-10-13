@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { existsSync, type FSWatcher, statSync, watch } from "node:fs";
+import { existsSync, type FSWatcher, statSync, unwatchFile, watch, watchFile } from "node:fs";
 import { join } from "node:path";
 
 export interface TailEvents {
@@ -12,6 +12,8 @@ export interface TailEvents {
 }
 
 const DEBOUNCE_MS = 250;
+/** How often the log's path is polled while its audit directory does not exist yet. */
+const MISSING_DIR_POLL_MS = 1000;
 
 export function watchLedger(
 	vaultPath: string,
@@ -22,6 +24,7 @@ export function watchLedger(
 	const logPath = join(auditDir, "events.jsonl");
 	let timer: NodeJS.Timeout | undefined;
 	let watcher: FSWatcher | undefined;
+	let polling = false;
 
 	const check = (): void => {
 		const size = existsSync(logPath) ? statSync(logPath).size : 0;
@@ -36,11 +39,16 @@ export function watchLedger(
 			timer = setTimeout(check, DEBOUNCE_MS);
 		});
 	} catch {
-		// Audit dir missing — nothing to watch; server still serves empty state.
+		// No audit directory yet: a project before its first governed call. fs.watch cannot watch a path that does not
+		// exist, and returning here left the dashboard on "no governed calls yet" while the first ones were written.
+		// fs.watchFile stats a missing path too, so the log's path is polled until it appears and grows.
+		polling = true;
+		watchFile(logPath, { interval: MISSING_DIR_POLL_MS }, check);
 	}
 
 	return () => {
 		if (timer) clearTimeout(timer);
 		watcher?.close();
+		if (polling) unwatchFile(logPath, check);
 	};
 }

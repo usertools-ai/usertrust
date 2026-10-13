@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { applyFilters, EMPTY_FILTERS, isFiltering } from "../src/shared/filters.js";
+import { applyFilters, EMPTY_FILTERS, isFiltering, sortRows } from "../src/shared/filters.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 function row(overrides: Partial<LedgerRow>): LedgerRow {
@@ -70,6 +70,23 @@ describe("applyFilters", () => {
 		expect(isFiltering({ ...EMPTY_FILTERS, kinds: ["llm_call"] })).toBe(true);
 	});
 
+	// A denial, a release or an ungoverned call carries no cost: its cost is UNKNOWN, not 0. Read as 0, "max 50 UT"
+	// kept every one of them as a cheap call.
+	it("red-first (max 50 UT kept every uncosted row): a cost bound keeps only rows WITH a cost in range", () => {
+		const rows = [...ROWS, row({ id: "d", kind: "policy_denied", status: "denied" })];
+		expect(applyFilters(rows, { ...EMPTY_FILTERS, costMax: 50 }).map((r) => r.id)).toEqual([
+			"1",
+			"2",
+			"3",
+		]);
+		expect(applyFilters(rows, { ...EMPTY_FILTERS, costMin: 0 }).map((r) => r.id)).toEqual([
+			"1",
+			"2",
+			"3",
+		]);
+		expect(applyFilters(rows, EMPTY_FILTERS).map((r) => r.id)).toContain("d");
+	});
+
 	it("filters on the ungoverned status", () => {
 		const rows = [...ROWS, row({ id: "u", kind: "ungoverned_call" })];
 		const out = applyFilters(rows, { ...EMPTY_FILTERS, statuses: ["ungoverned"] });
@@ -77,5 +94,39 @@ describe("applyFilters", () => {
 		expect(
 			applyFilters(rows, { ...EMPTY_FILTERS, statuses: ["pending"] }).map((r) => r.id),
 		).not.toContain("u");
+	});
+});
+
+describe("sortRows", () => {
+	const rows = [
+		row({ id: "a", seq: 1, costUt: 5, ts: "2026-07-25T09:00:00.000Z" }),
+		row({ id: "u", seq: 2, kind: "policy_denied", ts: "2026-07-26T09:00:00.000Z" }),
+		row({ id: "b", seq: 3, costUt: 50, ts: "2026-07-27T09:00:00.000Z" }),
+	];
+
+	it("newest first by chain position, by default", () => {
+		expect(sortRows(rows, "seq", true).map((r) => r.id)).toEqual(["b", "u", "a"]);
+		expect(sortRows(rows, "seq", false).map((r) => r.id)).toEqual(["a", "u", "b"]);
+	});
+
+	it("red-first (an uncosted row sorted as 0): rows with no cost sort after every costed row, either way", () => {
+		expect(sortRows(rows, "costUt", true).map((r) => r.id)).toEqual(["b", "a", "u"]);
+		expect(sortRows(rows, "costUt", false).map((r) => r.id)).toEqual(["a", "b", "u"]);
+	});
+
+	it("by a text column: alphabetical, a row without the value first ascending", () => {
+		const models = [
+			row({ id: "x", model: "gpt-5" }),
+			row({ id: "y" }),
+			row({ id: "z", model: "claude-sonnet-4-6" }),
+		];
+		expect(sortRows(models, "model", false).map((r) => r.id)).toEqual(["y", "z", "x"]);
+		expect(sortRows(models, "model", true).map((r) => r.id)).toEqual(["x", "z", "y"]);
+	});
+
+	it("does not reorder its input", () => {
+		const before = rows.map((r) => r.id);
+		sortRows(rows, "costUt", true);
+		expect(rows.map((r) => r.id)).toEqual(before);
 	});
 });

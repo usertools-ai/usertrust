@@ -46,7 +46,12 @@ export interface ReceiptData {
 	readonly merkleRoot: string;
 	readonly merkleVerified: boolean;
 	readonly chainVerified: boolean;
-	readonly cumulativeSpend: number;
+	/**
+	 * @deprecated Not printed. It is the running total of every `llm_call` cost up to the event, and the receipt
+	 * printed it as "Spend" beside ONE transaction, so a 1,144 UT call read 9,535 UT, the vault's spend. A receipt
+	 * prints its own transaction's cost (`event.data.cost`). Optional, so a caller that still passes it compiles.
+	 */
+	readonly cumulativeSpend?: number | undefined;
 	readonly verifiedAt: Date;
 	/**
 	 * Honest Merkle-row label. "INCLUSION VERIFIED" may ONLY be passed when
@@ -68,6 +73,9 @@ export interface ReceiptData {
 }
 
 // ── Formatting helpers ──
+
+// The product name is lowercase, always: the header printed it letter-spaced in capitals.
+const PRODUCT_NAME = "u s e r t r u s t";
 
 const WIDTH = 45; // internal content width (between │ borders)
 
@@ -118,39 +126,21 @@ function bottom(): string {
 
 // ── Date formatting ──
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-function formatDate(iso: string): string {
-	const d = new Date(iso);
-	const mon = MONTHS[d.getMonth()] ?? "???";
-	const day = d.getDate();
-	const year = d.getFullYear();
-	let hours = d.getHours();
-	const mins = d.getMinutes().toString().padStart(2, "0");
-	const ampm = hours >= 12 ? "PM" : "AM";
-	hours = hours % 12 || 12;
-	return `${mon} ${day}, ${year}  ${hours}:${mins} ${ampm}`;
-}
-
-function formatDateObj(d: Date): string {
-	const mon = MONTHS[d.getMonth()] ?? "???";
-	const day = d.getDate();
-	const year = d.getFullYear();
-	let hours = d.getHours();
-	const mins = d.getMinutes().toString().padStart(2, "0");
-	const ampm = hours >= 12 ? "PM" : "AM";
-	hours = hours % 12 || 12;
-	return `${mon} ${day}, ${year}  ${hours}:${mins} ${ampm}`;
+// UTC, and it says so (`YYYY-MM-DD HH:MM:SSZ`). The receipt printed the verifying machine's local time with no
+// zone, so one instant read differently on every auditor's machine. An unreadable timestamp prints as such:
+// `toISOString` throws on it, and the timestamp is the audited vault's text.
+function formatUtc(d: Date): string {
+	if (Number.isNaN(d.getTime())) return "unreadable time";
+	return `${d.toISOString().slice(0, 19).replace("T", " ")}Z`;
 }
 
 // ── USD conversion ──
-// 1 UT = $0.0001 (one basis point of a cent)
+// 1 UT = $0.0001 (one basis point of a cent), so 4 dp is exact. Rounding to 2 dp above a cent printed a
+// $0.1144 call as $0.11.
 const UT_TO_USD = 0.0001;
 
 function formatUsd(ut: number): string {
-	const usd = ut * UT_TO_USD;
-	if (usd < 0.01) return `$${usd.toFixed(4)}`;
-	return `$${usd.toFixed(2)}`;
+	return `$${(ut * UT_TO_USD).toFixed(4)}`;
 }
 
 // ── Word wrap ──
@@ -345,15 +335,7 @@ export function eventStatus(event: TransactionEvent): TransferStatus {
 // ── Receipt renderer ──
 
 export function renderReceipt(data: ReceiptData): string {
-	const {
-		event,
-		chainLength,
-		merkleRoot,
-		merkleVerified,
-		chainVerified,
-		cumulativeSpend,
-		verifiedAt,
-	} = data;
+	const { event, chainLength, merkleRoot, merkleVerified, chainVerified, verifiedAt } = data;
 	const status = eventStatus(event);
 	// `detectProvider` matches on the RAW value — scrubbing first would let a
 	// leading control character hide a real provider prefix and mislabel the
@@ -394,7 +376,7 @@ export function renderReceipt(data: ReceiptData): string {
 	// ── Header ──
 	lines.push(top());
 	lines.push(blank());
-	lines.push(row(center("U S E R T R U S T")));
+	lines.push(row(center(PRODUCT_NAME)));
 	lines.push(row(center("usertrust.ai")));
 	lines.push(blank());
 
@@ -408,13 +390,16 @@ export function renderReceipt(data: ReceiptData): string {
 	} else {
 		lines.push(row(`${dotted("  TX", forDisplay(event.data.transferId ?? "(none)"), WIDTH - 1)} `));
 	}
-	lines.push(row(`${dotted("  Date", forDisplay(formatDate(event.timestamp)), WIDTH - 1)} `));
+	lines.push(
+		row(`${dotted("  Date", forDisplay(formatUtc(new Date(event.timestamp))), WIDTH - 1)} `),
+	);
 	lines.push(row(`${dotted("  Model", forDisplay(model), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Provider", provider, WIDTH - 1)} `));
 
+	// THIS transaction's cost: the receipt is for one transaction.
 	if (!isFailed && !isDenied && !isDetection && cost !== undefined) {
-		lines.push(row(`${dotted("  Spend", `${cumulativeSpend} UT`, WIDTH - 1)} `));
-		lines.push(row(`${dotted("  Conversion", formatUsd(cumulativeSpend), WIDTH - 1)} `));
+		lines.push(row(`${dotted("  Spend", `${cost} UT`, WIDTH - 1)} `));
+		lines.push(row(`${dotted("  Conversion", formatUsd(cost), WIDTH - 1)} `));
 	}
 
 	lines.push(row(`${dotted("  Status", status, WIDTH - 1)} `));
@@ -509,7 +494,7 @@ export function renderReceipt(data: ReceiptData): string {
 	// ── Footer ──
 	lines.push(divider());
 	lines.push(row(`${dotted("  Root", truncHash(merkleRoot), WIDTH - 1)} `));
-	lines.push(row(`${dotted("  Verified", formatDateObj(verifiedAt), WIDTH - 1)} `));
+	lines.push(row(`${dotted("  Verified", formatUtc(verifiedAt), WIDTH - 1)} `));
 	lines.push(blank());
 	lines.push(bottom());
 
@@ -522,7 +507,7 @@ export function renderNotFound(txId: string): string {
 	const lines: string[] = [];
 	lines.push(top());
 	lines.push(blank());
-	lines.push(row(center("U S E R T R U S T")));
+	lines.push(row(center(PRODUCT_NAME)));
 	lines.push(row(center("usertrust.ai")));
 	lines.push(blank());
 	lines.push(divider());

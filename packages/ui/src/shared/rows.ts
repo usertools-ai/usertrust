@@ -38,7 +38,8 @@ export interface LedgerRow {
 	integrity: RowIntegrity;
 }
 
-const UT_TO_USD = 0.0001;
+/** Core's fixed rate (`ledger/pricing.ts`): 1 usertoken is $0.0001. */
+export const UT_TO_USD = 0.0001;
 
 /** Mirrors packages/verify/src/receipt.ts (verify stays zero-dep). */
 export function detectProvider(model: string): string {
