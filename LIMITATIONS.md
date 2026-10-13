@@ -264,8 +264,10 @@ otherwise the SDK would serialize it on its own, and a hook that throws once and
 would send what nothing checked. With the provider SDKs such a request also fails inside the
 SDK, so an honest one loses nothing: it was never sent. A client of another kind that never
 serializes its request (a stand-in, a test double) would have taken it, and is refused too. A Google request reaches this check as the request gate's
-plain-data mirror (a callable tool in it serializes as `{}`), and the gate refuses one the SDK
-cannot serialize before it gets here.
+plain-data mirror: a callable tool in it serializes as `{}`, and a real `AbortSignal` at
+`config.abortSignal`, the one value the mirror keeps by reference for the transport, is left out
+of the check (an object there that is not a signal is the request's, and is checked). The gate
+refuses most requests the SDK cannot serialize before they get here.
 
 **A client that rewrites every request** is refused by `trust()`, before the ledger client
 is built, and every call refuses too if one is changed later on the raw client the caller

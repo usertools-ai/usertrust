@@ -27,6 +27,7 @@ import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { createClient } from "tigerbeetle-node";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { withCostCenter } from "../../src/budget/attribution.js";
 import { movedClientOptions, movedRequestOptions } from "../../src/default-deny.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
 import { AUDIT_DIR, VAULT_DIR } from "../../src/shared/constants.js";
@@ -101,10 +102,17 @@ async function recordingFetch(input: unknown, init?: RequestInit): Promise<Respo
 			usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
 		});
 	}
-	return json({
+	const gemini = {
 		candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
 		usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
-	});
+	};
+	if (path.endsWith(":streamGenerateContent")) {
+		return new Response(`data: ${JSON.stringify(gemini)}\n\n`, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	}
+	return json(gemini);
 }
 
 /** A streamed Anthropic message, as its SSE events. */
@@ -1374,5 +1382,83 @@ describe("a request that cannot be serialized to JSON is refused before anything
 		expect(sent).toHaveLength(1);
 		expect(bodies.join("")).not.toContain(SECRET);
 		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("what the unserializable-request check leaves as it was", () => {
+	/** A real AbortSignal of this realm carrying an own cycle. */
+	const cyclicSignal = () => {
+		const signal = new AbortController().signal;
+		Object.assign(signal, { self: signal });
+		return signal;
+	};
+	it("Google: a real AbortSignal with an own cycle is the transport's, not the request's: generateContent is sent and held", async () => {
+		const { client, eng } = await google();
+		await client.models.generateContent({ ...G, config: { abortSignal: cyclicSignal() } });
+		expect(sent).toHaveLength(1);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		expect(policyDenied()).toEqual([]);
+	});
+
+	it("Google: the same signal on generateContentStream is sent and held too", async () => {
+		const { client, eng } = await google();
+		const stream = await client.models.generateContentStream({
+			...G,
+			config: { abortSignal: cyclicSignal() },
+		});
+		for await (const _ of stream) {
+			// drain
+		}
+		expect(sent).toHaveLength(1);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		expect(policyDenied()).toEqual([]);
+	});
+
+	it.each(["generateContent", "generateContentStream"] as const)(
+		"Google %s: a NON-signal object with a cycle at config.abortSignal is the request's, and is refused before any hold (it never reached the wire before either: the SDK's transport threw on it, after a hold)",
+		async (method) => {
+			const { client, eng } = await google();
+			const lookalike: Record<string, unknown> = { aborted: false };
+			lookalike.self = lookalike;
+			const err = await (async () => {
+				const result = await client.models[method]({ ...G, config: { abortSignal: lookalike } });
+				if (method === "generateContentStream") {
+					for await (const _ of result as AsyncIterable<unknown>) {
+						// drain
+					}
+				}
+			})().then(
+				() => null,
+				(e: unknown) => e,
+			);
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect(String((err as Error).message)).toMatch(/request_unserializable/);
+			expect(sent).toEqual([]);
+			expect(eng.spendPending).not.toHaveBeenCalled();
+			expect(policyDenied()).toHaveLength(1);
+		},
+	);
+
+	it("an attributed call with no parentUserId fails on its identity first: no hook of the caller's runs, and no refusal is recorded", async () => {
+		const { client, eng } = await anthropic();
+		let hooks = 0;
+		const request = {
+			...A,
+			toJSON() {
+				hooks += 1;
+				throw new Error("never serializable");
+			},
+		};
+		const err = await withCostCenter("team-a", () => client.messages.create(request)).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(Error);
+		expect(String((err as Error).message)).not.toMatch(/request_unserializable/);
+		expect(String((err as Error).message)).toMatch(/parentUserId/);
+		expect(hooks).toBe(0);
+		expect(policyDenied()).toEqual([]);
+		expect(sent).toEqual([]);
+		expect(eng.spendPending).not.toHaveBeenCalled();
 	});
 });

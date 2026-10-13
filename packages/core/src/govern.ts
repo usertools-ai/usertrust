@@ -1231,6 +1231,53 @@ const ENVELOPE_FUNDING_HINT =
 	"another envelope. Raising the trust()/createGovernor() budget funds the session wallet, " +
 	"which an attributed call never debits.";
 
+/** The native `aborted` getter of this realm's AbortSignal, captured at load: a brand check. */
+const abortSignalAborted = Object.getOwnPropertyDescriptor(
+	globalThis.AbortSignal?.prototype ?? {},
+	"aborted",
+)?.get;
+
+/**
+ * Whether `value` is a real AbortSignal of this realm, decided without running caller code: no
+ * Proxy anywhere on its prototype chain (a bounded walk), and the native `aborted` getter accepts
+ * it (it throws for anything without the signal's internal state). A lookalike is not one.
+ */
+function isRealAbortSignal(value: unknown): boolean {
+	if (abortSignalAborted === undefined || value === null || typeof value !== "object") return false;
+	let o: object | null = value;
+	for (let depth = 0; o !== null; depth++) {
+		if (depth >= 64 || utilTypes.isProxy(o)) return false;
+		o = Object.getPrototypeOf(o);
+	}
+	try {
+		abortSignalAborted.call(value);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * What a Google request's snapshot is made from: the gate's mirror, less a real AbortSignal at
+ * `config.abortSignal` (`isRealAbortSignal`), the one transport value the mirror keeps by
+ * reference. The signal goes to the transport as it is and is never sent, so its own fields (even
+ * a cycle among them) are not the request's. Anything else at that key is the request's, and is
+ * serialized like the rest. The mirror itself is untouched: it is what is forwarded.
+ */
+function snapshotSource(request: unknown): unknown {
+	if (request === null || typeof request !== "object") return request ?? {};
+	if (utilTypes.isProxy(request)) return request;
+	const holder = Object.getOwnPropertyDescriptor(request, "config");
+	const config = holder !== undefined && "value" in holder ? holder.value : undefined;
+	if (config === null || typeof config !== "object" || utilTypes.isProxy(config)) return request;
+	const signal = Object.getOwnPropertyDescriptor(config, "abortSignal");
+	if (signal === undefined || !("value" in signal) || !isRealAbortSignal(signal.value)) {
+		return request;
+	}
+	const { abortSignal: _signal, ...rest } = config as Record<string, unknown>;
+	return { ...(request as Record<string, unknown>), config: rest };
+}
+
 /**
  * Resolve the active scope into the envelope this call will debit, or `undefined`
  * when no scope is active.
@@ -1874,11 +1921,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// object (a cycle, a BigInt, a hook that throws, a text too long to build) is refused now,
 			// before anything is held or sent: the SDK would serialize it on its own, and a hook that
 			// throws once and then answers would send what nothing checked.
-			const serialized = serializeRequest(args[0] ?? {});
+			// The envelope first, as before this check existed: an attributed call with no
+			// parentUserId is refused for that, and no hook of the caller's runs before it.
+			const envelope = resolveEnvelope(attribution, config.parentUserId);
+			// Google's request is the gate's mirror, which keeps one transport value BY REFERENCE: a
+			// real AbortSignal at `config.abortSignal`, handed to the transport as it is and never sent.
+			// That signal alone is left out of the check (`snapshotSource`); it is still dispatched.
+			const serialized = serializeRequest(
+				kind === "google" ? snapshotSource(args[0]) : (args[0] ?? {}),
+			);
 			if (serialized === null) {
 				return await entryRefusal(unserializableRequestError(kind), args, attribution);
 			}
-			const envelope = resolveEnvelope(attribution, config.parentUserId);
 			// Spread into every audit record this call emits (A1: an attributed hold
 			// must leave an attributed forensic trail on the settle AND the void
 			// terminals). Empty when unattributed, so those records stay byte-identical
