@@ -1491,6 +1491,115 @@ describe("caller code reached from the request cannot change what is sent after 
 				expect(c.governed.json).toBe(0);
 			});
 
+			it(`${on}: parts in an Array subclass under a forged Array.prototype holding a toJSON are refused (this realm's Array.prototype is known by identity, and a toJSON is looked for before another realm's is recognised), the hook never run`, async () => {
+				const c = counts();
+				const make = (side: "native" | "governed") => () => {
+					class Parts extends Array<unknown> {}
+					const forged = Object.create(Array.prototype, {
+						constructor: { value: Array },
+						toJSON: {
+							value() {
+								c[side].json++;
+								return [{ text: "[redacted]" }];
+							},
+						},
+					});
+					Object.setPrototypeOf(Parts.prototype, forged);
+					return request({}, [{ role: "user", parts: Parts.from([{ text: EMAIL }]) }]);
+				};
+				const r = await nativeThenGoverned(
+					method,
+					{ native: make("native"), governed: make("governed") },
+					{ vertex },
+				);
+				expect(r.rawResult).toBe("ok");
+				expect(JSON.stringify(r.raw.requests)).not.toContain(EMAIL); // the hook's rewrite, natively
+				expect(r.govResult).toContain("could not be checked for automatic function calling");
+				expect(r.gov.requests).toHaveLength(0);
+				expect(c.governed.json).toBe(0);
+			});
+
+			for (const shape of ["a plain array", "a plain Array subclass"] as const) {
+				it(`${on}: parts as ${shape} while this realm's Array.prototype holds a toJSON: sent, rewritten, as on the base (5a7b2cf7: ok, one request)`, async () => {
+					const before = Object.getOwnPropertyDescriptor(Array.prototype, "toJSON");
+					Object.defineProperty(Array.prototype, "toJSON", {
+						value(this: unknown[]) {
+							return Array.from(this).map((p) =>
+								JSON.stringify(p).includes(EMAIL) ? { text: REDACTED } : p,
+							);
+						},
+						writable: true,
+						configurable: true,
+					});
+					try {
+						const w = wire();
+						globalThis.fetch = w.fetchStub as typeof fetch;
+						const governed = await trust(sdkClient(vertex), {
+							dryRun: true,
+							budget: 500_000,
+							vaultBase: vault,
+							_audit: recordingAudit(),
+						});
+						class Parts extends Array<unknown> {}
+						const parts =
+							shape === "a plain array" ? [{ text: EMAIL }] : Parts.from([{ text: EMAIL }]);
+						const { result } = await runOn(
+							governed.models,
+							method,
+							request({}, [{ role: "user", parts }]),
+						);
+						await governed.destroy();
+						expect(result).toBe("ok");
+						expect(w.requests).toHaveLength(1);
+						expect(JSON.stringify(w.requests)).not.toContain(EMAIL);
+					} finally {
+						if (before === undefined) {
+							delete (Array.prototype as unknown as Loose)["toJSON"];
+						} else {
+							Object.defineProperty(Array.prototype, "toJSON", before);
+						}
+					}
+				});
+			}
+
+			it(`${on}: parts in an Array subclass with a Proxy on its class's prototype chain are refused, with the traps that run before the refusal unchanged (1, as measured before this order)`, async () => {
+				const traps = { n: 0 };
+				class Parts extends Array<unknown> {}
+				const count =
+					<A extends unknown[], R>(f: (...a: A) => R) =>
+					(...a: A): R => {
+						traps.n++;
+						return f(...a);
+					};
+				Object.setPrototypeOf(
+					Parts.prototype,
+					new Proxy(Array.prototype, {
+						get: count(Reflect.get),
+						has: count(Reflect.has),
+						getOwnPropertyDescriptor: count(Reflect.getOwnPropertyDescriptor),
+						getPrototypeOf: count(Reflect.getPrototypeOf),
+						ownKeys: count(Reflect.ownKeys),
+					}),
+				);
+				const w = wire();
+				globalThis.fetch = w.fetchStub as typeof fetch;
+				const governed = await trust(sdkClient(vertex), {
+					dryRun: true,
+					budget: 500_000,
+					vaultBase: vault,
+					_audit: recordingAudit(),
+				});
+				const { result } = await runOn(
+					governed.models,
+					method,
+					request({}, [{ role: "user", parts: Parts.from([{ text: "go" }]) }]),
+				);
+				await governed.destroy();
+				expect(result).toContain("could not be checked for automatic function calling");
+				expect(w.requests).toHaveLength(0);
+				expect(traps.n).toBe(1);
+			});
+
 			it(`${on}: config.tools in an Array subclass whose prototype holds a toJSON goes as natively (the SDK never serializes that array): governed == native, the hook never run by governance, as on the base`, async () => {
 				const c = counts();
 				const make = (side: "native" | "governed") => () => {

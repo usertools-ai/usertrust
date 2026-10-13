@@ -458,8 +458,11 @@ function classHoldsToJSON(ctor: object): boolean {
 		if (o === null) return false;
 		if (typeof o !== "object" && typeof o !== "function") return true;
 		if (utilTypes.isProxy(o)) return true;
-		if (isIntrinsicArrayPrototype(o)) return false;
+		if (o === Array.prototype) return false; // this realm's intrinsic, by identity
+		// Before another realm's is recognised: an object forging one (its `constructor` this realm's
+		// Array) still holds the toJSON it carries.
 		if (Reflect.getOwnPropertyDescriptor(o, "toJSON") !== undefined) return true;
+		if (isIntrinsicArrayPrototype(o)) return false; // another realm's, by native source
 		o = Object.getPrototypeOf(o);
 	}
 	return true;
