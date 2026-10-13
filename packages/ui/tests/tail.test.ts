@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { spawn } from "node:child_process";
 import {
 	appendFileSync,
 	chmodSync,
@@ -901,6 +902,139 @@ describe("a deletion detected while the dashboard is open stays detected when th
 			valid: true,
 			empty: true,
 			errors: [],
+		});
+	});
+});
+
+// Whichever way the watcher was started, a deletion of the whole audit directory soon after the last change is observed.
+// The absent-start (polling) mode used fs.watchFile, which calls back only when its own poll sees a stat change, and the
+// poll can land while the directory is half removed: the log is already gone, the resync it triggers reads a directory
+// that still exists and holds nothing, and the directory's own removal is no further change to the log's path. The
+// dashboard then kept reading a verified, empty chain over a deleted audit directory. rmSync in the test's own process
+// cannot show it (it blocks the event loop, so no poll ever lands inside it); a separate process removing a large
+// directory can.
+describe("a deletion soon after the last change is observed", { timeout: 40_000 }, () => {
+	let tempDir: string;
+	let stage: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-soon-"));
+		stage = mkdtempSync(join(tmpdir(), "trust-tail-soon-stage-"));
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+		rmSync(stage, { recursive: true, force: true });
+	});
+
+	const auditDir = (): string => join(tempDir, ".usertrust", "audit");
+	const isDeletion = (s: ChainSummary): boolean =>
+		!s.chain.valid && s.chain.errors.some((e) => e.includes("deletion detected"));
+
+	async function appendMany(root: string, count: number, prefix: string): Promise<void> {
+		const writer = createAuditWriter(root);
+		for (let i = 0; i < count; i++) {
+			await writer.appendEvent({
+				kind: "llm_call",
+				actor: "local",
+				data: { cost: 1, settled: true, transferId: `${prefix}_${i}` },
+			});
+		}
+		writer.release();
+	}
+
+	/** Extra files in the audit directory, so that removing it takes longer than one poll interval. */
+	function padAudit(root: string): void {
+		const dir = join(root, ".usertrust", "audit");
+		for (let i = 0; i < PAD_FILES; i++) writeFileSync(join(dir, `pad-${i}`), "");
+	}
+
+	/**
+	 * From the delivered append on: wait `delayMs`, delete the whole audit directory (no reload), and require the summary
+	 * to read the deletion within OBSERVE_BOUND_MS of the removal's END and never go back to valid. Until the directory is
+	 * gone, a half-removed one that holds nothing legitimately reads as empty: the deletion is not complete yet.
+	 */
+	async function deleteAndObserve(
+		port: number,
+		delayMs: number,
+		remove: () => void | Promise<void>,
+	): Promise<void> {
+		await new Promise((r) => setTimeout(r, delayMs));
+		await remove();
+		const observed = await summaryWhen(port, isDeletion, OBSERVE_BOUND_MS);
+		expect(observed.chain.valid).toBe(false);
+		expect(observed.chain.errors.join(" ")).toContain("deletion detected");
+		// Once read, it is never valid again across a further window past the poll interval.
+		const until = Date.now() + 2500;
+		while (Date.now() < until) {
+			const s = await summaryOf(port);
+			expect(s.chain.valid).toBe(false);
+			expect(s.chain.errors.join(" ")).toContain("deletion detected");
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	}
+
+	// 60 000 files take a few seconds to remove, so more than one 1 s poll lands inside the removal.
+	const PAD_FILES = 60_000;
+	// 4000 ms: four 1 s poll intervals past the end of the removal, so a miss is a real miss and a slow runner is not.
+	const OBSERVE_BOUND_MS = 4000;
+
+	describe.each([0, 600, 1200])("%i ms after the last append", (delayMs) => {
+		it("polling mode (absent at start): the deletion is read within the bound, with no reload", async () => {
+			mkdirSync(join(stage, ".usertrust", "audit"), { recursive: true });
+			await appendMany(stage, 2, "tx_first");
+			padAudit(stage);
+			ui = await createUiServer(tempDir, { port: 0 });
+			expect((await summaryOf(ui.port)).chain).toMatchObject({
+				events: 0,
+				valid: true,
+				empty: true,
+			});
+			renameSync(join(stage, ".usertrust"), join(tempDir, ".usertrust"));
+			const appeared = await summaryWhen(ui.port, (s) => s.chain.events === 2);
+			expect(appeared.chain).toMatchObject({ events: 2, valid: true });
+			await appendOne(tempDir, "tx_last");
+			const delivered = await summaryWhen(ui.port, (s) => s.chain.events === 3);
+			expect(delivered.chain).toMatchObject({ events: 3, valid: true });
+			// Another process removes the large directory, so the poll can land while it is half removed.
+			await deleteAndObserve(
+				ui.port,
+				delayMs,
+				() =>
+					new Promise<void>((resolve) => {
+						spawn("rm", ["-rf", auditDir()], { stdio: "ignore" }).on("close", () => resolve());
+					}),
+			);
+		});
+
+		it("polling mode (absent at start), removed in this process: the same deletion is read too", async () => {
+			mkdirSync(join(stage, ".usertrust", "audit"), { recursive: true });
+			await appendMany(stage, 2, "tx_first");
+			ui = await createUiServer(tempDir, { port: 0 });
+			renameSync(join(stage, ".usertrust"), join(tempDir, ".usertrust"));
+			await summaryWhen(ui.port, (s) => s.chain.events === 2);
+			await appendOne(tempDir, "tx_last");
+			const delivered = await summaryWhen(ui.port, (s) => s.chain.events === 3);
+			expect(delivered.chain).toMatchObject({ events: 3, valid: true });
+			await deleteAndObserve(ui.port, delayMs, () =>
+				rmSync(auditDir(), { recursive: true, force: true }),
+			);
+		});
+
+		it("fs.watch mode (present at start): the deletion is read within the bound, with no reload", async () => {
+			mkdirSync(auditDir(), { recursive: true });
+			await appendMany(tempDir, 2, "tx_first");
+			ui = await createUiServer(tempDir, { port: 0 });
+			expect((await summaryOf(ui.port)).chain).toMatchObject({ events: 2, valid: true });
+			await appendOne(tempDir, "tx_last");
+			const delivered = await summaryWhen(ui.port, (s) => s.chain.events === 3);
+			expect(delivered.chain).toMatchObject({ events: 3, valid: true });
+			await deleteAndObserve(ui.port, delayMs, () =>
+				rmSync(auditDir(), { recursive: true, force: true }),
+			);
 		});
 	});
 });
