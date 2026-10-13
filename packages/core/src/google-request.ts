@@ -57,7 +57,16 @@ export type GoogleSnapshot =
 
 /** Thrown inside the capture or materialization when the request cannot be represented: "can't tell". */
 class CannotTell {
-	constructor(readonly reason: string) {}
+	constructor(readonly reason: string) {
+		cannotTells.add(this);
+	}
+}
+
+/** Ours, recognized without `instanceof`, which would run a caller's Proxy trap on a thrown value. */
+const cannotTells = new WeakSet<object>();
+
+function isCannotTell(error: unknown): error is CannotTell {
+	return typeof error === "object" && error !== null && cannotTells.has(error);
 }
 
 // ── The recording ApiClient ──
@@ -425,6 +434,74 @@ function unboxed(value: object): unknown {
 	return {}; // a Symbol object serializes as an empty object
 }
 
+const BUILT_IN_CONVERSIONS = new Map<object, readonly unknown[]>([
+	[Number.prototype, [Number.prototype.toString, Number.prototype.valueOf]],
+	[String.prototype, [String.prototype.toString, String.prototype.valueOf]],
+]);
+
+/**
+ * What JSON.stringify makes of a boxed primitive that carries fields of its own: a Boolean object's
+ * boolean; a BigInt object's bigint (which JSON then refuses, as natively); a Number or String object
+ * converted through its `Symbol.toPrimitive`, `toString` and `valueOf`. Those are read as descriptors
+ * (no caller code), and must be this realm's built-ins, reached on its built-in prototype past
+ * prototypes that hold none of them: a conversion of the caller's is a function JSON would call, so
+ * can't tell.
+ */
+function jsonUnboxed(real: object): unknown {
+	if (utilTypes.isBooleanObject(real)) return Boolean.prototype.valueOf.call(real);
+	if (utilTypes.isBigIntObject(real)) return BigInt.prototype.valueOf.call(real);
+	const builtIn = utilTypes.isNumberObject(real) ? Number.prototype : String.prototype;
+	const keys = [Symbol.toPrimitive, "toString", "valueOf"] as const;
+	let o: object | null = real;
+	for (let depth = 0; o !== builtIn; depth++) {
+		if (o === null || depth >= 64 || utilTypes.isProxy(o)) break;
+		const holder: object = o;
+		if (keys.some((key) => Object.getOwnPropertyDescriptor(holder, key) !== undefined)) break;
+		o = Object.getPrototypeOf(holder);
+	}
+	const own = (key: string) => Object.getOwnPropertyDescriptor(builtIn, key)?.value;
+	if (
+		o !== builtIn ||
+		Object.getOwnPropertyDescriptor(builtIn, Symbol.toPrimitive) !== undefined ||
+		own("toString") !== BUILT_IN_CONVERSIONS.get(builtIn)?.[0] ||
+		own("valueOf") !== BUILT_IN_CONVERSIONS.get(builtIn)?.[1]
+	) {
+		throw new CannotTell("a boxed value converted by a function of the caller's");
+	}
+	return utilTypes.isNumberObject(real)
+		? Number.prototype.valueOf.call(real)
+		: String.prototype.valueOf.call(real);
+}
+
+/**
+ * A boxed primitive with nothing of its own beyond its primitive (a String object's index keys and
+ * `length`), on its type's built-in prototype: JSON.stringify unboxes it and nothing else of it can
+ * be read, so it goes as it is. Any other (a Number object carrying a `tool` and a `callTool`, say)
+ * is an ordinary object to the membrane: wrapped, its fields recorded, a callable answered by the
+ * stand-ins. Descriptors only, no caller code.
+ */
+function isPureBoxedPrimitive(value: object): boolean {
+	if (!utilTypes.isBoxedPrimitive(value)) return false;
+	const proto = Object.getPrototypeOf(value);
+	const builtIn = utilTypes.isNumberObject(value)
+		? Number.prototype
+		: utilTypes.isStringObject(value)
+			? String.prototype
+			: utilTypes.isBooleanObject(value)
+				? Boolean.prototype
+				: utilTypes.isBigIntObject(value)
+					? BigInt.prototype
+					: Symbol.prototype;
+	if (proto !== builtIn) return false;
+	const length = utilTypes.isStringObject(value) ? String.prototype.valueOf.call(value).length : 0;
+	return Reflect.ownKeys(value).every(
+		(key) =>
+			typeof key === "string" &&
+			((utilTypes.isStringObject(value) && key === "length") ||
+				(ARRAY_INDEX.test(key) && Number(key) < length)),
+	);
+}
+
 function childRole(parent: Role, key: string): Role {
 	if (parent === "params" && key === "config") return "config";
 	if (parent === "config" && key === "tools") return "tools";
@@ -522,7 +599,7 @@ function makeMembrane(
 		if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
 		// A boxed primitive goes as it is: it has no fields the SDK reads, and JSON.stringify unboxes
 		// it (the mirror unboxes it the same way).
-		if (utilTypes.isBoxedPrimitive(value)) return value;
+		if (isPureBoxedPrimitive(value)) return value;
 		if (proxies.has(value)) return value;
 		const known = byReal.get(value);
 		if (known !== undefined) {
@@ -578,7 +655,17 @@ function makeMembrane(
 					return rec.callable[key];
 				}
 				if (key === "toJSON") {
-					if (typeof v !== "function") return v;
+					if (typeof v !== "function") {
+						// A boxed primitive the membrane wraps (one carrying fields of its own): JSON.stringify,
+						// finding no hook, unboxes it. The proxy has no primitive inside it, so it answers that
+						// unboxing as the hook, and the mirror holds what JSON makes of it, as for any hook.
+						if (!utilTypes.isBoxedPrimitive(real) || utilTypes.isSymbolObject(real)) return v;
+						return () => {
+							const out = jsonUnboxed(real);
+							rec.jsonOut ??= { value: out };
+							return out;
+						};
+					}
 					// JSON.stringify calls the hook with its key: the hook read NOW runs on the real object,
 					// each time, as natively (a getter may answer a different hook on each read); the FIRST
 					// result is what this place serialized to, and the self-check sees any later difference.
@@ -804,9 +891,20 @@ function makeMembrane(
 		];
 		for (const key of order) {
 			if (skipSet.has(key)) continue;
-			const value = rec.reads.has(key)
-				? materializeNode(rec.reads.get(key), build, stack, false)
-				: undefined;
+			const read = rec.reads.get(key);
+			// The transport slot keeps its value BY REFERENCE at its path: an abort signal the SDK handed
+			// to the transport goes as it is, even when the same object was reached, and serialized,
+			// somewhere else first (there it materializes as JSON makes it).
+			const transport =
+				rec.role === "config" && key === "abortSignal" && read !== null && typeof read === "object"
+					? proxies.get(read)
+					: undefined;
+			const value =
+				transport?.rec.transport === true
+					? transport.real
+					: rec.reads.has(key)
+						? materializeNode(read, build, stack, false)
+						: undefined;
 			setData(out, key, value, visible(rec, key));
 		}
 		return out;
@@ -847,14 +945,6 @@ function makeMembrane(
 
 // ── The pipeline: resolved once per governed client ──
 
-/** An own DATA property's value, read from its descriptor (no getter, no Proxy trap); `undefined` otherwise. */
-function ownData(obj: unknown, key: string): unknown {
-	if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) return undefined;
-	if (utilTypes.isProxy(obj)) return undefined;
-	const d = Object.getOwnPropertyDescriptor(obj, key);
-	return d !== undefined && "value" in d ? d.value : undefined;
-}
-
 /**
  * A `Models` class is accepted only if it BEHAVES as the SDK's pipeline: `generateContent` on a
  * one-word prompt makes exactly one request, whose body carries that prompt as one user turn. Behaviour,
@@ -891,26 +981,42 @@ async function installedModels(): Promise<unknown> {
 }
 
 /**
- * The pipeline for a governed Google client: the client's own `Models` class (its `models`
- * namespace's constructor, read through descriptors from the RAW client), else the installed SDK's,
- * each accepted only after the behavioural probe; else none, and its requests are refused.
+ * The pipeline for a governed Google client: the installed `@google/genai`'s `Models` class, accepted
+ * after the behavioural probe; else none, and its requests are refused. The client's own class is
+ * not read: for the SDK's own client it IS that class, and any other is never run.
  */
 export async function resolveGooglePipeline(
-	client: unknown,
+	_client: unknown,
 	vertexAI: boolean,
 ): Promise<GooglePipeline | undefined> {
-	const models = ownData(client, "models");
-	const proto =
-		models !== null && typeof models === "object" && !utilTypes.isProxy(models)
-			? Object.getPrototypeOf(models)
-			: undefined;
-	const own = await probeModels(ownData(proto, "constructor"));
-	if (own !== undefined) return { Models: own, vertexAI };
+	// The client's own Models class would be accepted only when it IS the installed SDK's, which is
+	// the class used here either way: an unverified constructor is never run, not even by the probe.
 	const installed = await probeModels(await installedModels());
 	return installed !== undefined ? { Models: installed, vertexAI } : undefined;
 }
 
 // ── One governed request ──
+
+/**
+ * A thrown value's class, for the audit record: never its message, which may carry the caller's
+ * content (a getter can throw anything). Read without running caller code (own data properties only,
+ * no Proxy), and only when it is a plain identifier; anything else is "a non-error value" or "Error".
+ */
+export function errorClass(error: unknown): string {
+	if (typeof error !== "object" || error === null) return "a non-error value";
+	let proto: unknown = error;
+	for (let depth = 0; depth < 64 && typeof proto === "object" && proto !== null; depth++) {
+		if (utilTypes.isProxy(proto)) break;
+		const ctor = Object.getOwnPropertyDescriptor(proto, "constructor")?.value;
+		if (typeof ctor === "function" && !utilTypes.isProxy(ctor)) {
+			const name = Object.getOwnPropertyDescriptor(ctor, "name")?.value;
+			if (typeof name === "string" && /^[A-Za-z_$][\w$]{0,63}$/.test(name)) return name;
+			break;
+		}
+		proto = Object.getPrototypeOf(proto);
+	}
+	return utilTypes.isNativeError(error) ? "Error" : "a non-error value";
+}
 
 function sameRequests(a: RecordedRequest[], b: RecordedRequest[]): boolean {
 	return JSON.stringify(a) === JSON.stringify(b);
@@ -947,7 +1053,7 @@ export async function snapshotGoogleRequest(
 		// A caller function the SDK called was never run: whatever the SDK made of that, can't tell.
 		const why = membrane.tripped();
 		if (why !== undefined) return { kind: "refuse", reason: why };
-		if (error instanceof CannotTell) return { kind: "refuse", reason: error.reason };
+		if (isCannotTell(error)) return { kind: "refuse", reason: error.reason };
 		// Before any request, the error is the SDK's own local rejection of the caller's request.
 		// After one, it answers the recorder's scripted reply, not anything the caller sent: natively
 		// that request would have gone out first, so it is not a local error. Can't tell.
@@ -966,7 +1072,7 @@ export async function snapshotGoogleRequest(
 		check = membrane.materialize(root, "check");
 		send = membrane.materialize(root, "send");
 	} catch (error) {
-		if (error instanceof CannotTell) return { kind: "refuse", reason: error.reason };
+		if (isCannotTell(error)) return { kind: "refuse", reason: error.reason };
 		throw error;
 	}
 	// The SELF-CHECK, on its own tree: the SDK is not idempotent across passes over one object
@@ -989,7 +1095,61 @@ export async function snapshotGoogleRequest(
 	// maximumRemoteCalls of NaN runs zero rounds) has no loop to stop, and forcing the SDK's early
 	// path would make it send one.
 	if (!afcRan && captured.length > 0) forceAfcOff(send);
+	const carried = carryCallerFields(send, params);
+	if (carried !== undefined) return { kind: "refuse", reason: carried };
 	return { kind: "ok", params: send, afcRan };
+}
+
+/** The request fields the SDK builds its request from; every other top-level field is the caller's own. */
+const SDK_REQUEST_FIELDS: ReadonlySet<string | symbol> = new Set(["model", "contents", "config"]);
+
+/**
+ * The caller's request fields the SDK does not read (a `metadata` a policy rule matches, say), put
+ * beside the mirror on the send tree, so policy and redaction see them as they did before this
+ * pipeline; the SDK builds its request from `model`, `contents` and `config` only, so they are never
+ * sent. Read as before: walking `params` and its prototype chain up to `Object.prototype` (a Proxy on
+ * the way ends the walk unread), an own data value as it is, an inherited one unless it is a
+ * function, a getter run once with `params` as `this`; values by reference. A key the mirror already
+ * holds is left alone. A getter that throws: the reason the request cannot be told; otherwise
+ * `undefined`.
+ */
+function carryCallerFields(send: unknown, params: unknown): string | undefined {
+	if (send === null || typeof send !== "object") return undefined;
+	if (params === null || (typeof params !== "object" && typeof params !== "function"))
+		return undefined;
+	const seen = new Set<string | symbol>(SDK_REQUEST_FIELDS);
+	for (const key of Reflect.ownKeys(send)) seen.add(key);
+	for (
+		let o: object | null = params;
+		o !== null && o !== Object.prototype;
+		o = Object.getPrototypeOf(o)
+	) {
+		if (utilTypes.isProxy(o)) return undefined;
+		for (const key of Reflect.ownKeys(o)) {
+			if (seen.has(key)) continue;
+			seen.add(key);
+			const d = Object.getOwnPropertyDescriptor(o, key);
+			if (d === undefined) continue;
+			let value: unknown;
+			if ("value" in d) {
+				if (o !== params && typeof d.value === "function") continue;
+				value = d.value;
+			} else {
+				try {
+					value = d.get === undefined ? undefined : Reflect.apply(d.get, params, []);
+				} catch {
+					return "a request field's getter threw";
+				}
+			}
+			Object.defineProperty(send, key, {
+				value,
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+		}
+	}
+	return undefined;
 }
 
 /**

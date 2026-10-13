@@ -74,6 +74,7 @@ import {
 import { classifyEndpoint, detectClientKind } from "./detect.js";
 import { googleClientIsVertexAI, runGovernedAfc } from "./google-afc.js";
 import {
+	errorClass,
 	type GoogleMethod,
 	type GooglePipeline,
 	type PinnedHttpOptions,
@@ -1719,6 +1720,31 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		})();
 	}
 
+	/** The argument lists of Google calls admitted before a destroy(): interceptCall takes them anyway. */
+	const admittedArgs = new WeakSet<unknown[]>();
+
+	/**
+	 * A Google call's admission, taken synchronously when the call starts, before the request gate's
+	 * first await: counted in flight (destroy() waits for it, as for a call already in interceptCall),
+	 * and its forwarded argument lists marked, so interceptCall runs them even once destroy() has begun.
+	 * Released on every exit, once.
+	 */
+	function admitGoogleCall(): { mark(args: unknown[]): unknown[]; release(): void } {
+		inFlightCount++;
+		let released = false;
+		return {
+			mark(args) {
+				admittedArgs.add(args);
+				return args;
+			},
+			release() {
+				if (released) return;
+				released = true;
+				inFlightCount--;
+			},
+		};
+	}
+
 	/**
 	 * A Google trap's first step, run SYNCHRONOUSLY on the caller's own arguments, before the request
 	 * gate's dry run reads the request at the SDK's own time: the per-call request-option refusal,
@@ -1773,7 +1799,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		// injection (A6) — the surface flag suppresses it below.
 		surfaceKind: "create" | "stream-helper" | "openai-responses" = "create",
 	): Promise<TrustedResponse<unknown>> {
-		if (destroyed) {
+		if (destroyed && !admittedArgs.has(callerArgs)) {
 			throw new Error("TrustedClient has been destroyed");
 		}
 
@@ -4440,6 +4466,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				boundary,
 				preflightRefusal,
 				googleCallStart,
+				admitGoogleCall,
 			);
 		}
 		return build(client, interceptCall, destroyFn, governActionImpl, boundary);
@@ -5430,8 +5457,7 @@ function ownStringDataProperty(obj: unknown, key: string): string | undefined {
  *     metered round by round yet);
  *   - otherwise `args[0]` becomes the mirror, plain data the SDK has not yet seen, and
  *     `runAfcLoop` is the SDK's own AFC decision for `generateContent`.
- * No SDK pipeline at all (neither the client's own `Models` nor an installed `@google/genai`
- * passes the probe): refused.
+ * No SDK pipeline (no installed `@google/genai` whose `Models` passes the probe): refused.
  */
 async function googleRequestGate(
 	args: unknown[],
@@ -5448,7 +5474,7 @@ async function googleRequestGate(
 		return {
 			refusal: new PolicyDeniedError(
 				`ungoverned_method: models.${method} could not be checked: no @google/genai request pipeline was found`,
-				"usertrust governs a Google request by running the SDK's own request pipeline over it, without sending, so what it checks is what the SDK sends. Neither this client's models class nor an installed @google/genai passed that check. Install @google/genai (an optional peer dependency) next to usertrust.",
+				"usertrust governs a Google request by running the SDK's own request pipeline over it, without sending, so what it checks is what the SDK sends. No installed @google/genai passed that check (a client's own models class is never run). Install @google/genai (an optional peer dependency) next to usertrust.",
 			),
 		};
 	}
@@ -5458,9 +5484,9 @@ async function googleRequestGate(
 			return {
 				sdkError: snap.error,
 				denial: new PolicyDeniedError(
-					`ungoverned_method: models.${method} was rejected by the SDK before any request: ${
-						snap.error instanceof Error ? snap.error.message : String(snap.error)
-					}`,
+					// the error's class only: its message may carry the caller's content (a getter can throw
+					// anything), and the audit record is persisted; the error itself is rethrown as it is
+					`ungoverned_method: models.${method} was rejected by the SDK before any request (${errorClass(snap.error)})`,
 					"The SDK's own request pipeline threw for this request, as it would without usertrust; nothing was held, sent or charged. The SDK's error is what the call throws.",
 				),
 			};
@@ -5500,7 +5526,12 @@ async function refuseWithSdkError(
 		if (err !== gate.denial) throw err; // destroyed, or a pre-degraded audit: that error wins
 	}
 	const sdkError = gate.sdkError;
-	if (sdkError !== null && (typeof sdkError === "object" || typeof sdkError === "function")) {
+	// never on a Proxy: defining the fields would run the caller's trap
+	if (
+		sdkError !== null &&
+		(typeof sdkError === "object" || typeof sdkError === "function") &&
+		!utilTypes.isProxy(sdkError)
+	) {
 		try {
 			attachDenialAudit(sdkError, {
 				auditEventHash: gate.denial.auditEventHash,
@@ -5539,6 +5570,7 @@ function buildGoogleProxy<T>(
 		args: readonly unknown[],
 		thisArg: unknown,
 	) => { refused: Promise<never> } | { pinned: PinnedHttpOptions | undefined },
+	admit: () => { mark(args: unknown[]): unknown[]; release(): void },
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const models = original.models as Record<string, unknown>;
@@ -5566,61 +5598,81 @@ function buildGoogleProxy<T>(
 			if (prop === "generateContent") {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
-					// Request options, on the caller's own arguments, before anything reads the request.
-					const start = callStart(args, target);
-					if ("refused" in start) return start.refused;
-					// ── Request gate (args[0] becomes the mirror: what is forwarded is what was checked) ──
-					const gate = await googleRequestGate(
-						args,
-						"generateContent",
-						googlePipeline,
-						start.pinned,
-					);
-					if ("sdkError" in gate) {
-						return refuseWithSdkError(refuse, "models.generateContent", args, gate);
-					}
-					if ("refusal" in gate) {
-						return refuse("models.generateContent", args, gate.refusal);
-					}
-					if (gate.runAfcLoop) {
-						// The SDK would loop internally and only the last round would be metered: run
-						// the loop here instead, ON THE MIRROR, each round its own governed call (see
-						// google-afc.ts). What decides and what is sent are one reading: the verdict is
-						// the dry run's (its capture of the caller's request, with the call-start
-						// httpOptions), and every round, like the single-call forward, is built from
-						// the send tree, `args[0]` after the gate. Nothing reads the caller's object
-						// after the gate.
-						return runGovernedAfc(args[0] as Record<string, unknown>, (roundParams) =>
-							intercept(originalGenerate, target, [roundParams, ...args.slice(1)]),
+					// Admitted NOW, before the gate's first await: a destroy() called right after this call
+					// started waits for it, as it waits for any call already in flight.
+					const admission = admit();
+					try {
+						// Request options, on the caller's own arguments, before anything reads the request.
+						const start = callStart(args, target);
+						if ("refused" in start) return await start.refused;
+						// ── Request gate (args[0] becomes the mirror: what is forwarded is what was checked) ──
+						const gate = await googleRequestGate(
+							args,
+							"generateContent",
+							googlePipeline,
+							start.pinned,
 						);
+						if ("sdkError" in gate) {
+							return await refuseWithSdkError(refuse, "models.generateContent", args, gate);
+						}
+						if ("refusal" in gate) {
+							return await refuse("models.generateContent", args, gate.refusal);
+						}
+						if (gate.runAfcLoop) {
+							// The SDK would loop internally and only the last round would be metered: run
+							// the loop here instead, ON THE MIRROR, each round its own governed call (see
+							// google-afc.ts). What decides and what is sent are one reading: the verdict is
+							// the dry run's (its capture of the caller's request, with the call-start
+							// httpOptions), and every round, like the single-call forward, is built from
+							// the send tree, `args[0]` after the gate. Nothing reads the caller's object
+							// after the gate.
+							return await runGovernedAfc(args[0] as Record<string, unknown>, (roundParams) =>
+								intercept(
+									originalGenerate,
+									target,
+									admission.mark([roundParams, ...args.slice(1)]),
+								),
+							);
+						}
+						// ── end AFC gate ──
+						return await intercept(originalGenerate, target, admission.mark(args));
+					} finally {
+						admission.release();
 					}
-					// ── end AFC gate ──
-					return intercept(originalGenerate, target, args);
 				};
 			}
 			if (prop === "generateContentStream" && originalGenerateStream !== undefined) {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
-					// Request options, on the caller's own arguments, before anything reads the request.
-					const start = callStart(args, target);
-					if ("refused" in start) return start.refused;
-					// ── Request gate: a streamed AFC loop is refused until it is metered per round ──
-					// (args[0] becomes the mirror: what is forwarded is what was checked)
-					const gate = await googleRequestGate(
-						args,
-						"generateContentStream",
-						googlePipeline,
-						start.pinned,
-					);
-					if ("sdkError" in gate) {
-						return refuseWithSdkError(refuse, "models.generateContentStream", args, gate);
+					const admission = admit(); // before the gate's first await (see generateContent)
+					try {
+						// Request options, on the caller's own arguments, before anything reads the request.
+						const start = callStart(args, target);
+						if ("refused" in start) return await start.refused;
+						// ── Request gate: a streamed AFC loop is refused until it is metered per round ──
+						// (args[0] becomes the mirror: what is forwarded is what was checked)
+						const gate = await googleRequestGate(
+							args,
+							"generateContentStream",
+							googlePipeline,
+							start.pinned,
+						);
+						if ("sdkError" in gate) {
+							return await refuseWithSdkError(refuse, "models.generateContentStream", args, gate);
+						}
+						if ("refusal" in gate) {
+							return await refuse("models.generateContentStream", args, gate.refusal);
+						}
+						// ── end AFC gate ──
+						const { response } = await intercept(
+							originalGenerateStream,
+							target,
+							admission.mark(args),
+						);
+						return response;
+					} finally {
+						admission.release();
 					}
-					if ("refusal" in gate) {
-						return refuse("models.generateContentStream", args, gate.refusal);
-					}
-					// ── end AFC gate ──
-					const { response } = await intercept(originalGenerateStream, target, args);
-					return response;
 				};
 			}
 			return guardedGet(target, prop, receiver, "models", boundary);

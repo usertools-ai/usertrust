@@ -100,8 +100,9 @@ instead, each round its own governed call. Use `generateContent`, or disable AFC
 Whether a call would run that loop is the SDK's own decision. Before anything is
 checked, charged or sent, usertrust runs the SDK's request pipeline over the
 request, against a stand-in for its transport that sends nothing. The pipeline is
-the client's own `Models` class, or else the installed `@google/genai`'s, each
-accepted only after a short behavioural check. A client with neither is refused.
+the installed `@google/genai`'s `Models` class, accepted after a short behavioural
+check; a client's own `Models` class is never run (for the SDK's own client it is
+that same class). With no installed SDK, the call is refused.
 In that run every getter, `toJSON` hook and Proxy trap in the request runs as
 often, and in the same order, as when the SDK sends it, apart from what the
 per-call request-option check refuses before the run (a request, `config` or
@@ -109,7 +110,10 @@ per-call request-option check refuses before the run (a request, `config` or
 (moving a `$schema` `responseSchema`, rewriting a declaration's `parameters`) land
 on your objects as they would natively, once per call. What the SDK read becomes
 a plain-data copy, and that copy is what the PII scan, redaction, the meter and
-the SDK then use. A callable tool and an `AbortSignal` go by reference. Per call,
+the SDK then use. A callable tool and an `AbortSignal` go by reference. Fields
+beside `model`, `contents` and `config` (a `metadata` a policy rule matches), which
+the SDK neither reads nor sends, are read as before (a getter once) and kept
+beside the copy, so policy rules and redaction still see them. Per call,
 usertrust runs the SDK again over a second copy. It must make exactly the requests
 it made over yours (path, method, body bytes, `httpOptions`) and reach the same
 automatic-function-calling decision, or the call is refused. This costs two extra
@@ -124,7 +128,8 @@ own:
 - **Some request shapes are refused rather than copied.** These are a header value
   that is not a string, a function of yours in the request that the SDK calls (a
   built-in method such as an array's `map` is fine), and a callable tool the
-  request also holds outside `config.tools`. The copy cannot reproduce what the
+  request also holds outside `config.tools`, and a boxed `Number` or `String`
+  converted by a `toString` or `valueOf` of yours. The copy cannot reproduce what the
   transport or that code would make of them. A function of yours that the SDK
   calls is never run: the call is refused instead. Your own iterator on
   `config.tools` counts as one.
@@ -168,7 +173,8 @@ own:
 - **A local SDK rejection is the SDK's own error.** For a request the SDK rejects
   locally (incompatible tools, empty `contents`, a getter that throws), the call
   throws the SDK's own error after a `policy_denied` audit event, with nothing sent
-  or charged.
+  or charged. The audit event names the error's class, never its message, which
+  can carry your content (a getter can throw anything).
 
 **Only request options that change neither the body nor where it is sent are allowed.**
 A governed call is scanned, held and priced from its request parameters. But each SDK

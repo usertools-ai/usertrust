@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { types as utilTypes } from "node:util";
@@ -249,10 +249,12 @@ function expectSdkError(r: Outcome): void {
 	expect(r.govResult).toBe(r.rawResult);
 	expect((r.govError as Error).constructor).toBe((r.rawError as Error).constructor);
 	expect(r.auditKinds).toEqual(["policy_denied"]);
-	// the refusal carries the SDK's message (the audit record bounds its length)
-	expect(String((r.events[0]?.data as Loose | undefined)?.["error"])).toContain(
-		`rejected by the SDK before any request: ${r.rawResult.slice(0, 40)}`,
+	// the refusal names the error's class, never its message: a message may carry the caller's content
+	const audited = String((r.events[0]?.data as Loose | undefined)?.["error"]);
+	expect(audited).toContain(
+		`rejected by the SDK before any request (${(r.rawError as Error).constructor.name})`,
 	);
+	expect(JSON.stringify(r.events)).not.toContain(r.rawResult);
 	expect(r.raw.requests).toHaveLength(0);
 	expect(r.gov.requests).toHaveLength(0);
 }
@@ -594,7 +596,11 @@ describe("built-ins with internal slots read through as natively (guards)", () =
 
 describe("an AbortSignal travels to the transport, and aborting it aborts the governed call", () => {
 	/** A fetch that waits for its signal: the call ends only when the caller aborts. */
-	async function abortedRun(models: unknown, method: Method) {
+	async function abortedRun(
+		models: unknown,
+		method: Method,
+		make: (signal: AbortSignal) => unknown = (signal) => request({ abortSignal: signal }),
+	) {
 		const controller = new AbortController();
 		let calls = 0;
 		let called: () => void = () => {};
@@ -610,7 +616,7 @@ describe("an AbortSignal travels to the transport, and aborting it aborts the go
 				signal.addEventListener("abort", () => reject(new Error("aborted by the caller")));
 			});
 		}) as typeof fetch;
-		const run = runOn(models, method, request({ abortSignal: controller.signal }));
+		const run = runOn(models, method, make(controller.signal));
 		await firstCall;
 		controller.abort();
 		return { ...(await run), calls };
@@ -626,6 +632,39 @@ describe("an AbortSignal travels to the transport, and aborting it aborts the go
 				_audit: recordingAudit(),
 			});
 			const gov = await abortedRun(governed.models, method);
+			await governed.destroy();
+			expect(native.calls).toBe(1);
+			expect(gov.calls).toBe(1);
+			expect(native.result).not.toBe("ok");
+			expect(gov.result).toBe(native.result);
+		});
+
+		/** The signal is also a value inside the request: a function response carrying it. */
+		const aliased = (signal: AbortSignal) =>
+			request({ abortSignal: signal }, [
+				{ role: "user", parts: [{ text: "go" }] },
+				{ role: "model", parts: [{ functionCall: { name: "f", args: {} } }] },
+				{ role: "user", parts: [{ functionResponse: { name: "f", response: { sig: signal } } }] },
+			]);
+
+		it(`${method}: the same signal also inside a function response: governed == native (it serializes there as JSON does)`, async () => {
+			const r = await nativeThenGoverned(method, {
+				native: () => aliased(new AbortController().signal),
+				governed: () => aliased(new AbortController().signal),
+			});
+			expect(r.rawResult).toBe("ok");
+			expectSameSend(r);
+		});
+
+		it(`${method}: the same signal also inside a function response: aborting it still aborts the governed call, as natively`, async () => {
+			const native = await abortedRun(sdkClient(false).models, method, aliased);
+			const governed = await trust(sdkClient(false), {
+				dryRun: true,
+				budget: 500_000,
+				vaultBase: vault,
+				_audit: recordingAudit(),
+			});
+			const gov = await abortedRun(governed.models, method, aliased);
 			await governed.destroy();
 			expect(native.calls).toBe(1);
 			expect(gov.calls).toBe(1);
@@ -711,6 +750,36 @@ describe("a Google-shaped client that is not the SDK runs requests through the i
 			await governed.destroy();
 			expect((received[0] as { config: { abortSignal: unknown } }).config.abortSignal).toBe(signal);
 		});
+
+		it(`${method}: a client whose models has its own constructor: that constructor is never run, and the installed SDK's pipeline decides what is read`, async () => {
+			const fake = fakeClient();
+			const constructed = { n: 0 };
+			// a foreign Models class: running it as the pipeline would hand the request to code that is not the SDK
+			class ForeignModels {
+				constructor() {
+					constructed.n++;
+				}
+			}
+			Object.setPrototypeOf(fake.client.models, ForeignModels.prototype);
+			const governed = await trust(fake.client, {
+				dryRun: true,
+				budget: 500_000,
+				vaultBase: vault,
+				_audit: recordingAudit(),
+			});
+			class Cfg {
+				get systemInstruction(): string {
+					return `reply to ${EMAIL}`;
+				}
+			}
+			const params = request(Object.assign(new Cfg(), { tools: [{ googleSearch: {} }] }));
+			expect((await runOn(governed.models, method, params)).result).toBe("ok");
+			await governed.destroy();
+			expect(constructed.n).toBe(0);
+			// the installed SDK copies config beside tools, so the inherited field is not forwarded
+			expect(fake.received).toHaveLength(1);
+			expect((fake.received[0] as { config: Loose }).config["systemInstruction"]).toBeUndefined();
+		});
 	}
 });
 
@@ -737,6 +806,88 @@ describe("a local SDK error is the SDK's own, audited as a refusal, with nothing
 				expectSdkError(r);
 			});
 		}
+	}
+
+	for (const method of METHODS) {
+		it(`${method}: a config getter that throws: the caller's error object is rethrown as it is, and its text is in no audit event`, async () => {
+			const TEXT = "CONFIDENTIAL-PROMPT-TEXT the merger closes friday";
+			class SecretError extends Error {}
+			const thrown: unknown[] = [];
+			const make = () =>
+				request({
+					get systemInstruction(): string {
+						const error = new SecretError(TEXT);
+						thrown.push(error);
+						throw error;
+					},
+				});
+			const r = await nativeThenGoverned(method, same(make));
+			expect(r.rawResult).toBe(TEXT);
+			expect(r.govResult).toBe(TEXT);
+			expect(r.govError).toBe(thrown.at(-1));
+			expect(r.auditKinds).toEqual(["policy_denied"]);
+			expect(JSON.stringify(r.events)).not.toContain("CONFIDENTIAL");
+			expect(String((r.events[0]?.data as Loose | undefined)?.["error"])).toContain(
+				"rejected by the SDK before any request (SecretError)",
+			);
+			expect(r.gov.requests).toHaveLength(0);
+		});
+
+		it(`${method}: a config getter that throws a string or a Proxy: rethrown as it is, audited as its class only, and its traps run as natively (none of ours)`, async () => {
+			const TEXT = "CONFIDENTIAL-PROMPT-TEXT";
+			/** An Error behind a Proxy whose every trap counts. */
+			const proxied = (traps: { n: number }) => {
+				const count =
+					<A extends unknown[], R>(f: (...a: A) => R) =>
+					(...a: A): R => {
+						traps.n++;
+						return f(...a);
+					};
+				return new Proxy(new Error(TEXT), {
+					get: count(Reflect.get),
+					has: count(Reflect.has),
+					getPrototypeOf: count(Reflect.getPrototypeOf),
+					getOwnPropertyDescriptor: count(Reflect.getOwnPropertyDescriptor),
+					defineProperty: count(Reflect.defineProperty),
+					ownKeys: count(Reflect.ownKeys),
+				});
+			};
+			const throwing = (value: unknown) =>
+				request({
+					get systemInstruction(): string {
+						throw value;
+					},
+				});
+			const call = async (models: unknown, value: unknown): Promise<unknown> => {
+				try {
+					await (models as Record<Method, (p: unknown) => Promise<unknown>>)[method](
+						throwing(value),
+					);
+				} catch (error) {
+					return error;
+				}
+				return undefined;
+			};
+			const nativeTraps = { n: 0 };
+			const governedTraps = { n: 0 };
+			const nativeProxy = proxied(nativeTraps);
+			expect(await call(sdkClient(false).models, TEXT)).toBe(TEXT);
+			expect(await call(sdkClient(false).models, nativeProxy)).toBe(nativeProxy);
+			for (const value of [TEXT, proxied(governedTraps)]) {
+				const audit = recordingAudit();
+				const governed = await trust(sdkClient(false), {
+					dryRun: true,
+					budget: 500_000,
+					vaultBase: vault,
+					_audit: audit,
+				});
+				expect(await call(governed.models, value)).toBe(value);
+				await governed.destroy();
+				expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+				expect(JSON.stringify(audit.events)).not.toContain("CONFIDENTIAL");
+			}
+			expect(governedTraps.n).toBe(nativeTraps.n);
+		});
 	}
 
 	it("generateContent: a getter that throws only on the SDK's SECOND round fails after the first request natively; governed refuses before any request, and the probe name surfaces nowhere", async () => {
@@ -2325,5 +2476,201 @@ describe("an accessor anywhere on the option path is read when the SDK reads it,
 				expect(r.governed).toBe(r.native);
 			});
 		}
+	}
+});
+
+describe("a boxed primitive carrying the caller's own properties is governed as the caller's object", () => {
+	/** A callable tool's two methods on a boxed Number: the SDK takes it for a callable tool, natively. */
+	function boxedCallable() {
+		const c = callable();
+		return { calls: c.calls, tool: Object.assign(new Number(1), c.tool) };
+	}
+
+	for (const method of METHODS) {
+		it(`${method}: a boxed Number carrying tool() and callTool(), with a budget of 1: neither runs before authorization, the call is refused, nothing is sent`, async () => {
+			const w = wire(LOOP);
+			globalThis.fetch = w.fetchStub as typeof fetch;
+			const audit = recordingAudit();
+			const governed = await trust(sdkClient(false), {
+				dryRun: true,
+				budget: 1,
+				vaultBase: vault,
+				_audit: audit,
+			});
+			const boxed = boxedCallable();
+			const out = await runOn(governed.models, method, request({ tools: [boxed.tool] }));
+			await governed.destroy();
+			expect(boxed.calls).toEqual({ tool: 0, callTool: 0 });
+			expect(out.result).not.toBe("ok");
+			expect(w.requests).toHaveLength(0);
+			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+		});
+	}
+
+	it("generateContent: with a budget, the same boxed callable loops as natively, each round governed: governed == native", async () => {
+		const natives: Array<{ tool: number; callTool: number }> = [];
+		const make = () => {
+			const boxed = boxedCallable();
+			natives.push(boxed.calls);
+			return request({ tools: [boxed.tool] });
+		};
+		const r = await nativeThenGoverned("generateContent", same(make), { rounds: LOOP });
+		expect(r.rawResult).toBe("ok");
+		expectSameSend(r);
+		expect(r.raw.requests).toHaveLength(2);
+		expect(natives.map((c) => c.callTool)).toEqual([1, 1]);
+	});
+
+	for (const method of METHODS) {
+		it(`${method}: a boxed String carrying its own data property, inside a function response: governed == native, or refused, never an altered request`, async () => {
+			const make = () =>
+				request({}, [
+					{ role: "user", parts: [{ text: "go" }] },
+					{ role: "model", parts: [{ functionCall: { name: "f", args: {} } }] },
+					{
+						role: "user",
+						parts: [
+							{
+								functionResponse: {
+									name: "f",
+									response: { s: Object.assign(new String("hi"), { note: "kept off the wire" }) },
+								},
+							},
+						],
+					},
+				]);
+			const r = await nativeThenGoverned(method, same(make));
+			expect(JSON.stringify(r.raw.requests[0]?.body)).toContain('"s":"hi"');
+			if (r.govResult === "ok") {
+				expectSameSend(r);
+			} else {
+				expect(r.gov.requests).toHaveLength(0);
+			}
+			expect(JSON.stringify(r.gov.requests)).not.toContain("kept off the wire");
+		});
+	}
+});
+
+describe("a request's own fields beside model, contents and config reach the policy as before, and are never sent", () => {
+	function denyClassified(): void {
+		mkdirSync(join(vault, ".usertrust", "policies"), { recursive: true });
+		writeFileSync(
+			join(vault, ".usertrust", "policies", "default.yml"),
+			"rules:\n  - name: classified\n    effect: deny\n    enforcement: hard\n    conditions:\n      - field: metadata.classification\n        operator: exists\n",
+		);
+	}
+
+	for (const method of METHODS) {
+		for (const [backend, vertex] of BACKENDS) {
+			const on = `${method} on ${backend}`;
+
+			it(`${on}: a hard-deny policy on metadata.classification denies the call, nothing sent`, async () => {
+				denyClassified();
+				const make = () => ({ ...request({}), metadata: { classification: "secret" } });
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expect(r.raw.requests).toHaveLength(1);
+				expect(r.govResult).toContain("[classified]");
+				expect(r.auditKinds).toEqual(["policy_denied"]);
+				expect(r.gov.requests).toHaveLength(0);
+			});
+
+			it(`${on}: the same field behind a getter: read once, and the call is denied, nothing sent`, async () => {
+				denyClassified();
+				const reads = { n: 0 };
+				const params = request({});
+				Object.defineProperty(params, "metadata", {
+					get() {
+						reads.n++;
+						return { classification: "secret" };
+					},
+					enumerable: true,
+				});
+				const w = wire();
+				globalThis.fetch = w.fetchStub as typeof fetch;
+				const audit = recordingAudit();
+				const governed = await trust(sdkClient(vertex), {
+					dryRun: true,
+					budget: 500_000,
+					vaultBase: vault,
+					_audit: audit,
+				});
+				const out = await runOn(governed.models, method, params);
+				await governed.destroy();
+				expect(out.result).toContain("[classified]");
+				expect(reads.n).toBe(1);
+				expect(w.requests).toHaveLength(0);
+			});
+
+			it(`${on}: with no policy on it, the field is not on the wire: governed == native, the self-check passing`, async () => {
+				const make = () => ({
+					...request({ temperature: 0.5 }),
+					metadata: { classification: "secret" },
+				});
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expect(r.govResult).toBe("ok");
+				expectSameSend(r);
+				expect(JSON.stringify(r.gov.requests)).not.toContain("classification");
+			});
+		}
+	}
+});
+
+describe("destroy() called right after a call starts waits for that call, as for any call in flight", () => {
+	async function governedOnWire() {
+		const w = wire();
+		globalThis.fetch = w.fetchStub as typeof fetch;
+		const governed = await trust(sdkClient(false), {
+			dryRun: true,
+			budget: 500_000,
+			vaultBase: vault,
+			_audit: recordingAudit(),
+		});
+		return { w, governed };
+	}
+
+	function ownMapParts() {
+		const parts: unknown[] = [{ text: "safe" }];
+		Object.defineProperty(parts, "map", { value: () => [], enumerable: false });
+		return request({}, [{ role: "user", parts }]);
+	}
+
+	for (const method of METHODS) {
+		it(`${method}: the call completes and is sent, and destroy() resolves after it`, async () => {
+			const { w, governed } = await governedOnWire();
+			const order: string[] = [];
+			const call = runOn(governed.models, method, request({ temperature: 0.5 })).then((r) => {
+				order.push("call");
+				return r;
+			});
+			const destroyed = governed.destroy().then(() => {
+				order.push("destroy");
+			});
+			await Promise.all([call, destroyed]);
+			expect((await call).result).toBe("ok");
+			expect(w.requests).toHaveLength(1);
+			expect(order).toEqual(["call", "destroy"]);
+			// a call started after destroy() is still refused
+			expect((await runOn(governed.models, method, request({}))).result).toBe(
+				"TrustedClient has been destroyed",
+			);
+		});
+
+		it(`${method}: a call refused at its start, by the request gate, or as a local SDK error is released: destroy() does not wait for it`, async () => {
+			const { w, governed } = await governedOnWire();
+			const refusals = [
+				request({ httpOptions: { extraBody: { x: 1 } } }), // call start: an option off the list
+				ownMapParts(), // the request gate: a caller function the SDK would call
+				request({}, []), // the SDK's own "contents are required"
+			];
+			const outcomes: string[] = [];
+			for (const params of refusals) {
+				outcomes.push((await runOn(governed.models, method, params)).result);
+			}
+			expect(outcomes.map((o) => o === "ok")).toEqual([false, false, false]);
+			const started = Date.now();
+			await governed.destroy();
+			expect(Date.now() - started).toBeLessThan(1_000); // a leaked admission waits 5 s
+			expect(w.requests).toHaveLength(0);
+		});
 	}
 });
