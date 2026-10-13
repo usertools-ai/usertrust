@@ -4101,6 +4101,29 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			expect(server.charges.filter((c) => c.transferId === "tx_1")).toEqual([]);
 		});
 
+		it("no key: a hold that may be live is never left unnamed: its settle's claim is removed only once its `.releasing` record is written, and stays its name when that write fails", async () => {
+			const server = holdingServer();
+			await startServer((path, body) => {
+				if (body.transferId === "tx_1" && path === "/v1/settle") {
+					return { status: 500, json: { error: "internal" } };
+				}
+				if (body.transferId === "tx_1" && (path === "/v1/release" || path === "/v1/abort")) {
+					return { status: 503, json: { error: "unavailable" } };
+				}
+				return server.responder(path, body);
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			// The `.releasing` record cannot be written: a directory holds its name.
+			await mkdir(join(stateDir, RELEASING, "x"), { recursive: true });
+			const refire = await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(refire.stderr).toContain("its claim is kept instead");
+			// The settle's claim is still the hold's name, so the next fire reserves nothing beside it.
+			expect(await holdStateFiles()).toContain(SETTLING);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(authorizes()).toHaveLength(1);
+		});
+
 		it("no key: an EXPIRED first hold's window is released, and the fresh hold carries it, charged once", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);

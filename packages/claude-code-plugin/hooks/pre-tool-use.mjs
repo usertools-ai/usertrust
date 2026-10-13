@@ -316,7 +316,9 @@ function abandon(entry) {
 
 /**
  * Keep a windowed hold that `retire` could not confirm ended NAMED, as a hold claimed only to
- * be ended (`<hold>.releasing`, the name `claimForRelease` gives). Its window's outcome is
+ * be ended (`<hold>.releasing`, the name `claimForRelease` gives). The settle's claim
+ * (`.settling`, `claim`) is removed only after this record is written, so no instant passes
+ * with the hold unnamed; if the record cannot be written, the claim stays its name. Its window's outcome is
  * already journalled, so the record carries no window, only what ends the hold: its transferId,
  * its call, its agent and its tenant binding, marked `windowJournalled` so Stop gives it back
  * with no `releaseClass` (as the hygiene release does) and writes no second gap. A later PreToolUse of the same call then finds it
@@ -326,7 +328,7 @@ function abandon(entry) {
  * pending timeout ends it. A record that cannot be written is said, and the call is refused
  * all the same.
  */
-async function keepForRelease(entry) {
+async function keepForRelease(entry, claim) {
 	const path = `${entry.path.slice(0, -".json".length)}.releasing`;
 	const body = {
 		transferId: entry.transferId,
@@ -343,10 +345,15 @@ async function keepForRelease(entry) {
 	try {
 		await writeFileAtomic(path, JSON.stringify(body));
 	} catch (err) {
+		// Its claim stays its name: a later fire of the call is still refused, and once stale the
+		// journal reads it as a settle of unknown outcome (retried under its key, else accounted).
 		say(
-			`usertrust: hold ${entry.transferId} may still be live, and its record could not be kept (${err?.code ?? "error"}); a later call may reserve beside it until the server's sweep ends it`,
+			`usertrust: hold ${entry.transferId} may still be live, and its record could not be kept (${err?.code ?? "error"})${claim === undefined ? "; a later call may reserve beside it until the server's sweep ends it" : "; its claim is kept instead"}`,
 		);
+		return;
 	}
+	// Written first, removed second: the hold is never without a name a later fire would find.
+	if (claim !== undefined) await unlink(claim).catch(() => {});
 }
 
 /**
@@ -453,7 +460,7 @@ async function unsettled(
  */
 async function retire(entry) {
 	if ((entry.assignedIds?.length ?? 0) > 0) {
-		const result = await settleTranscriptHold(sessionId, entry);
+		const result = await settleTranscriptHold(sessionId, entry, { keepUnendedClaim: true });
 		// Written down as at every settle (transcript.mjs `recordHoldOutcome`): a hold ended
 		// badly here is a gap even when the call then reserves afresh.
 		await recordHoldOutcome(sessionId, entry, result);
@@ -470,7 +477,7 @@ async function retire(entry) {
 			// Its window's outcome is journalled as for any settle, but the hold itself
 			// may still be live: no fresh hold is made beside it, now or at a later re-fire
 			// of this call (`keepForRelease`), and Stop gives it back once.
-			await keepForRelease(entry);
+			await keepForRelease(entry, result.claim);
 			throw new Error(
 				`hold ${entry.transferId} ${result.outcome}, and the server has not confirmed it is gone; no fresh hold is made beside it`,
 			);
