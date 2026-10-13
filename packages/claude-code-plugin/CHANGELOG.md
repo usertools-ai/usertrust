@@ -31,6 +31,16 @@ npm, and its version is its own: the `usertrust` packages and their
     its first hook after it, so what it wrote in between is declared `pre-metering`, once.
   - Two agents of a session whose first hooks race keep the stamp published first, which may be
     the later clock by milliseconds.
+- **A resumed call whose earlier hold could not be ended no longer reserves a second hold beside
+  it.** When PreToolUse fires again for the same tool call, the plugin ends the call's earlier
+  hold first. If that hold carried transcript usage, its settle failed, and its give-back was not
+  confirmed either, the hold might still be live, and the call was refused. But nothing named the
+  hold any more, so the next re-fire of the call reserved a fresh hold beside it, and the budget
+  counted both until the server's sweep ended the original. The hold is now kept named as one
+  whose only remaining job is to be given back (`.releasing`). A later re-fire finds it and is
+  refused as well, and Stop gives it back once, after any retry of its window. The give-back is
+  idempotent on the server, and a hold it cannot end is ended by the ledger's pending timeout
+  ([#248](https://github.com/usertools-ai/usertrust/issues/248)).
 
 ## [3.0.2] - 2026-10-12
 
