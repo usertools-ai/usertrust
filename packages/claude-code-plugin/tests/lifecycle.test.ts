@@ -127,7 +127,9 @@ describe("post-tool-use hook", () => {
 		expect(body.inputTokens).toBe(4);
 		expect(body.outputTokens).toBe(3);
 		expect(body.usageSource).toBe("estimated");
-		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl")).toEqual([]);
+		expect(
+			(await readdir(stateDir)).filter((n) => n !== "watch.jsonl" && n !== "transcripts"),
+		).toEqual([]);
 	});
 
 	it("re-estimates inputTokens from tool_input when the pending file has no estimate", async () => {
@@ -176,7 +178,12 @@ describe("post-tool-use hook", () => {
 		expect(result.code).toBe(0);
 		expect(result.stderr).toContain("settle");
 		// The hold survives for Stop/SubagentStop cleanup (A10), marked settle-attempted.
-		expect((await readdir(stateDir)).sort()).toEqual(["s1__main__tu_1.settling", "watch.jsonl"]);
+		// `transcripts/` holds the session's first-metered time, stamped by its gap record: not hold state.
+		expect((await readdir(stateDir)).sort()).toEqual([
+			"s1__main__tu_1.settling",
+			"transcripts",
+			"watch.jsonl",
+		]);
 		// And the unanswered settle is written down, under the hold's transferId (F2a): refused
 		// at once, it is `failed`, not `unknown`.
 		expect(await watchRecords()).toMatchObject([
@@ -197,7 +204,12 @@ describe("post-tool-use hook", () => {
 		expect(result.stderr).toContain("500");
 		// Kept for Stop cleanup, marked settle-attempted: it may have posted, so no
 		// later hook settles it again (Stop only gives it back).
-		expect((await readdir(stateDir)).sort()).toEqual(["s1__main__tu_1.settling", "watch.jsonl"]);
+		// `transcripts/` holds the session's first-metered time, stamped by its gap record: not hold state.
+		expect((await readdir(stateDir)).sort()).toEqual([
+			"s1__main__tu_1.settling",
+			"transcripts",
+			"watch.jsonl",
+		]);
 		expect(await watchRecords()).toMatchObject([
 			{
 				kind: "gap",
@@ -308,7 +320,9 @@ describe("stop.mjs aborts every hold across all agents", () => {
 			"tx_b",
 			"tx_main",
 		]);
-		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl")).toEqual([]);
+		expect(
+			(await readdir(stateDir)).filter((n) => n !== "watch.jsonl" && n !== "transcripts"),
+		).toEqual([]);
 		// Each give-back of an estimate hold whose call never reported back is a GAP.
 		const gaps = (await readFile(join(stateDir, "watch.jsonl"), "utf-8"))
 			.split("\n")
@@ -336,7 +350,9 @@ describe("stop.mjs aborts every hold across all agents", () => {
 		expect(result.code).toBe(0);
 		expect(result.stderr).toContain("abort");
 		expect(result.stderr).toContain("500");
-		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl")).toEqual([]);
+		expect(
+			(await readdir(stateDir)).filter((n) => n !== "watch.jsonl" && n !== "transcripts"),
+		).toEqual([]);
 	});
 
 	it("capabilities UNKNOWN (health fails): a hold is released, never aborted — an abort counts as a breaker failure", async () => {
@@ -386,10 +402,9 @@ describe("subagent-stop.mjs scopes cleanup to the stopping subagent", () => {
 			"tx_a2",
 		]);
 		// The parent's and sibling subagent's in-flight holds survive.
-		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl").sort()).toEqual([
-			"s2__agent-B__d.json",
-			"s2__main__a.json",
-		]);
+		expect(
+			(await readdir(stateDir)).filter((n) => n !== "watch.jsonl" && n !== "transcripts").sort(),
+		).toEqual(["s2__agent-B__d.json", "s2__main__a.json"]);
 	});
 
 	it("without agent_id aborts nothing and leaves every hold for later reconciliation", async () => {
@@ -400,9 +415,8 @@ describe("subagent-stop.mjs scopes cleanup to the stopping subagent", () => {
 		expect(result.code).toBe(0);
 		expect(requests.filter((r) => r.path === "/v1/abort")).toHaveLength(0);
 		expect(result.stderr).toContain("without agent_id");
-		expect((await readdir(stateDir)).filter((n) => n !== "watch.jsonl").sort()).toEqual([
-			"s2__agent-A__b.json",
-			"s2__main__a.json",
-		]);
+		expect(
+			(await readdir(stateDir)).filter((n) => n !== "watch.jsonl" && n !== "transcripts").sort(),
+		).toEqual(["s2__agent-A__b.json", "s2__main__a.json"]);
 	});
 });

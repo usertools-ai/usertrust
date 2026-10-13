@@ -435,6 +435,33 @@ describe("header spend", () => {
 		);
 		expect(JSON.parse(afterCall.data).spentUt).toBe(9);
 	});
+
+	// Measured on the unfixed close(): about 3.7 s here, against 1-5 ms once it closes the remaining connections.
+	// One live-tail wait leaves close() fast; two in a row hold it. Which connection is held is not established.
+	it("close() resolves in well under two seconds after two live-tail waits", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const port = ui.port;
+		for (const id of ["tx_a", "tx_b"]) {
+			await readSse(
+				port,
+				(name) => name === "summary",
+				async () => {
+					const writer = createAuditWriter(tempDir);
+					await writer.appendEvent({
+						kind: "llm_call",
+						actor: "local",
+						data: { cost: 1, transferId: id },
+					});
+					writer.release();
+				},
+			);
+		}
+		const started = Date.now();
+		await ui.close();
+		const elapsedMs = Date.now() - started;
+		ui = undefined;
+		expect(elapsedMs).toBeLessThan(1500);
+	});
 });
 
 describe("remote settings", () => {

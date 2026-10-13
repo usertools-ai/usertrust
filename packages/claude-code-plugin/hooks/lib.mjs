@@ -313,7 +313,92 @@ export function modeAnnouncement() {
 }
 
 /**
- * Append one watch record (`would_block`, `gap` or `deferred`) as a JSON line, with the time,
+ * When this plugin's transcript state (`dir`, its `transcripts` directory) was first made, in
+ * ms: `since`, published once at `now` if it has none, and never moved (transcript.mjs
+ * `firstRun`).
+ */
+export async function stateFirstRun(dir, now) {
+	const path = join(dir, "since");
+	const read = () =>
+		readRegular(path, READ_BOUND.small).catch((err) => {
+			if (err?.code === "ENOENT") return null;
+			throw err;
+		});
+	let text = await read();
+	if (text === null) {
+		await publishOnce(path, new Date(now).toISOString());
+		text = await read();
+	}
+	const at = Date.parse(text ?? "");
+	if (!Number.isFinite(at)) throw new Error("not a time");
+	return at;
+}
+
+/**
+ * When a session was first metered in this state, in ms, never earlier than the state's own time
+ * (`stateFirstRun`): `since-session/<session>`, published once and never moved. THE one place
+ * that sets it, for every path that stamps it (transcript.mjs `sessionFirstRun`, and every watch
+ * record that names a session, `stampSessionSeen`), so they share one rule:
+ * - a session first stamped now is stamped at `now` (the caller's one clock read, or the
+ *   record's own time), and the state's time with it if the state has none;
+ * - a session this state already holds a cursor for (`<session>__*.json`) was metered before
+ *   per-session times existed: it gets the state's time, so a response it left unposted is
+ *   still posted.
+ */
+export async function sessionFirstRunAt(dir, sessionId, now) {
+	const floor = await stateFirstRun(dir, now);
+	const path = join(dir, "since-session", sanitize(sessionId));
+	const read = () =>
+		readRegular(path, READ_BOUND.small).catch((err) => {
+			if (err?.code === "ENOENT") return null;
+			throw err;
+		});
+	let text = await read();
+	if (text === null) {
+		await mkdir(join(dir, "since-session"), { recursive: true, mode: 0o700 });
+		const prefix = `${sanitize(sessionId)}__`;
+		const known = (await readdir(dir)).some((n) => n.startsWith(prefix) && n.endsWith(".json"));
+		await publishOnce(path, new Date(known ? floor : now).toISOString());
+		text = await read();
+	}
+	const at = Date.parse(text ?? "");
+	if (!Number.isFinite(at)) throw new Error("not a time");
+	return Math.max(floor, at);
+}
+
+/**
+ * The first hook that touches a session in this state stamps when that session was first
+ * metered, whatever it does: a hook that only writes a gap, a refusal or a deferral counts.
+ * Metering was ON then, and failing, so what the session wrote after it is a gap to be posted,
+ * never "before metering" (transcript.mjs `sessionFirstRun`, which reads this). Both times are
+ * published once, whole, at the record's own time: the state's first-run time
+ * (`transcripts/since`) if it has none, and the session's (`transcripts/since-session/<id>`).
+ * Transcript mode only (estimate mode keeps no transcript state). Never throws: a stamp that
+ * cannot be made is said on stderr, and the next hook that reaches the session's state stamps it.
+ */
+async function stampSessionSeen(session, at) {
+	if (typeof session !== "string" || session === "" || session === "unknown") return;
+	if (usageMode() !== "transcript") return;
+	try {
+		const dir = join(stateRoot(), "transcripts");
+		await mkdir(dir, { recursive: true, mode: 0o700 });
+		await sessionFirstRunAt(dir, session, Date.parse(at));
+	} catch (err) {
+		say(
+			`usertrust: could not stamp when this session was first metered (${err?.code ?? (err instanceof Error ? err.message : String(err))})`,
+		);
+	}
+}
+
+/**
+ * The watch record of the responses a session wrote before it was metered (transcript.mjs
+ * `recordPreMetering`): counts only, never billed, and never a gap. Every reader of the gap
+ * figure counts `gap` records alone, so this kind stays out of it by construction.
+ */
+export const PRE_METERING = "pre-metering";
+
+/**
+ * Append one watch record (`would_block`, `gap`, `deferred` or `pre-metering`) as a JSON line, with the time,
  * session, agent and tool. Never throws: a record that cannot be written is said
  * on stderr, and the tool call proceeds either way. Returns whether the record was
  * written, so no note claims a record that is not there.
@@ -325,21 +410,27 @@ export async function recordWatchEvent(event) {
 	// default of it stamped other writers' records with the Stop's time, which could land the
 	// event in a later job while the job it belonged to read clean. An omitted `started` is
 	// UNKNOWN (null), which counts against every job.
+	const at = new Date().toISOString();
 	const line = JSON.stringify({
-		at: new Date().toISOString(),
+		at,
 		...event,
 		started: event.started === undefined ? null : event.started,
 	});
+	let written = false;
 	try {
 		await mkdir(stateRoot(), { recursive: true });
 		await appendRegular(watchLogPath(), `${line}\n`);
-		return true;
+		written = true;
 	} catch (err) {
 		say(
 			`usertrust: could not write a watch record to ${watchLogPath()} (${err instanceof Error ? err.message : String(err)}): ${line}`,
 		);
-		return false;
 	}
+	// The hook ran, for this session, whether or not its record could be written: the session
+	// was metered from here on. A failed append must not leave what follows to be read as
+	// written before metering (never posted). `stampSessionSeen` never throws.
+	await stampSessionSeen(event.session, at);
+	return written;
 }
 
 // Every hook gets a wall-clock budget inside the time Claude Code gives it, so a
@@ -677,6 +768,27 @@ export async function skipSettlePoint({ kind, phase, session, agent }) {
 
 /** Errors that mean the state dir's filesystem cannot make hard links. */
 export const LINKLESS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"]);
+
+/**
+ * Publish `content` at `path` unless something is there already: by link(2), which
+ * never replaces a name, so it is whole the moment it exists — on a filesystem
+ * without hard links, by an exclusive create.
+ */
+export async function publishOnce(path, content) {
+	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	try {
+		await writeFile(tmp, content, { flag: "wx", mode: 0o600 });
+		await link(tmp, path);
+	} catch (err) {
+		if (err?.code === "EEXIST") return;
+		if (!LINKLESS.has(err?.code)) throw err;
+		await writeFile(path, content, { flag: "wx", mode: 0o600 }).catch((exclusive) => {
+			if (exclusive?.code !== "EEXIST") throw exclusive;
+		});
+	} finally {
+		await unlink(tmp).catch(() => {});
+	}
+}
 
 /**
  * Publish `content` at `path` unless a file is there already (EEXIST, thrown): written
@@ -1040,6 +1152,9 @@ async function settlingRecords(sessionId, agentId) {
 				...(releasing ? { intent: "release" } : {}),
 				// A hold whose call ran though its claim says only release (`noCallRan`).
 				...(body.ran === true ? { ran: true } : {}),
+				// A windowed hold kept only to be given back, its window's outcome already journalled
+				// (pre-tool-use.mjs `keepForRelease`): given back with no class, and no second gap.
+				...(body.windowJournalled === true ? { windowJournalled: true } : {}),
 				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
 				transcript: body.usage === "transcript",
 				// Which server and tenant made the hold (`tenantBinding`), as written.
@@ -1929,10 +2044,14 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 		// `unused`: that call never ran, so there is nothing to confirm and no gap. Unless it is
 		// marked `ran`: then its call ran, as any settle-attempted hold's did (`noCallRan`).
 		const releasing = noCallRan(held);
+		// A windowed hold kept only to be given back (`windowJournalled`): its call ran, and its
+		// window's outcome, a gap where it may be unrecorded, is journalled already. It is given back
+		// with NO class, as the hygiene release does: `unused` would claim no usage hides behind it.
+		const journalled = held.windowJournalled === true;
 		// Otherwise the call RAN and its one settle went unanswered: the charge is unconfirmed, and a
 		// give-back of the hold proves nothing about what was charged. Written down as a gap.
-		if (!releasing) await recordUnconfirmedCall(sessionId, held, "call-ran");
-		const releaseClass = releasing ? "unused" : "call-ran";
+		if (!releasing && !journalled) await recordUnconfirmedCall(sessionId, held, "call-ran");
+		const releaseClass = journalled ? undefined : releasing ? "unused" : "call-ran";
 		const unconfirmed = (outcome, reason) =>
 			recordSettleGap({
 				phase: "release",
