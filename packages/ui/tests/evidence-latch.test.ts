@@ -39,10 +39,13 @@ vi.mock("node:fs", async (importOriginal) => {
 const {
 	appendFileSync,
 	chmodSync,
+	closeSync,
 	cpSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	openSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
 	rmSync,
@@ -435,6 +438,8 @@ describe("an audit directory or log that could not be read, then could again", {
 			}
 		}
 		restore = [];
+		loadSeam.afterDescriptor = undefined;
+		loadSeam.afterReaders = undefined;
 		await ui?.close();
 		ui = undefined;
 		rmSync(root, { recursive: true, force: true });
@@ -522,6 +527,70 @@ describe("an audit directory or log that could not be read, then could again", {
 			const seen = await chainsFor(ui.port, 2500);
 			expect(seen.filter((c) => c.errors.includes(DIRECTORY_ERROR))).toEqual([]);
 			expect(seen.at(-1)?.valid).toBe(false);
+		},
+	);
+	it.skipIf(asRoot)(
+		"guard: a load whose reads fail DIFFERENTLY on its passes (the directory unlistable, then the log unreadable) latches nothing and keeps the head",
+		async () => {
+			await appendEvents(root, 3, "tx");
+			const vault = join(root, ".usertrust");
+			const before = loadState(vault);
+			expect(before.head).toMatchObject({ count: 3 });
+			const held = before.head;
+			// Each pass's readers fail, each in its own way: the first finds the audit directory unlistable (EACCES); the
+			// second finds it listable again and `events.jsonl` unreadable (EACCES). Each change lands after its pass's
+			// opening snapshot, so neither pass reads one unchanged vault and the load goes on to a third, which reads the
+			// final state (the directory present and listable, the log unreadable) unchanged throughout.
+			const readers: string[] = [];
+			let passes = 0;
+			loadSeam.afterDescriptor = () => {
+				passes += 1;
+				if (passes === 1) chmodFor(auditDir(), 0o000);
+				if (passes === 2) {
+					chmodSync(auditDir(), 0o700);
+					chmodFor(log(), 0o000);
+				}
+			};
+			// What each pass's readers met, as the error code of opening each: the directory for listing, the log for reading.
+			const openCode = (open: () => void): string => {
+				try {
+					open();
+					return "ok";
+				} catch (err) {
+					return (err as NodeJS.ErrnoException).code ?? "unknown";
+				}
+			};
+			loadSeam.afterReaders = () => {
+				readers.push(
+					`dir=${openCode(() => readdirSync(auditDir()))} log=${openCode(() => closeSync(openSync(log(), "r")))}`,
+				);
+			};
+			const state = loadState(vault, undefined, true, [], before.auditDirId, held);
+			loadSeam.afterDescriptor = undefined;
+			loadSeam.afterReaders = undefined;
+			expect(readers.slice(0, 2)).toEqual(["dir=EACCES log=EACCES", "dir=ok log=EACCES"]);
+			expect(passes).toBeGreaterThanOrEqual(3);
+			// No deletion of either kind: the directory never went away (its identity held) and no read of the events
+			// succeeded, so nothing was compared with the head.
+			expect(state.deletionCauses).toEqual([]);
+			expect(state.deletionDetected).toBe(false);
+			expect(state.summary.chain.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+			expect(state.summary.chain.valid).toBe(false);
+			// The caller keeps the head it had: the load returns none, never the empty reading's.
+			expect(state.head === undefined || state.head === held).toBe(true);
+			// Readable again, the vault is judged against the kept head and holds it.
+			chmodSync(log(), 0o600);
+			const healed = loadState(
+				vault,
+				undefined,
+				true,
+				state.deletionCauses,
+				before.auditDirId,
+				held,
+			);
+			expect(healed.deletionCauses).toEqual([]);
+			expect(healed.summary.chain).toMatchObject({ events: 3, valid: true, errors: [] });
+			expect(healed.head).toEqual(held);
 		},
 	);
 });
