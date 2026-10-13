@@ -31,7 +31,8 @@ const REPO_ROOT = resolve(SITE_ROOT, "..");
 
 /**
  * The sha256 of every file the brand kit serves, except its fonts, each with its kit path
- * (served at https://usertrust.ai/kit/<path>). A new kit file adds its line here.
+ * (served at https://usertrust.ai/kit/<path>). A new kit file adds its line here. When the kit
+ * replaces a file, the old bytes stay listed as `(retired)` and the new bytes get their own row.
  */
 export const KIT_SHA256: ReadonlyArray<{ sha256: string; kit: string }> = [
 	{ sha256: "9d345f2669d6c32fd9c31e1b66cfebaf2f3774d051d1a8be491ea8c525ff73fd", kit: "lattice.js" },
@@ -69,6 +70,10 @@ export const KIT_SHA256: ReadonlyArray<{ sha256: string; kit: string }> = [
 	},
 	{
 		sha256: "e7d27f0c2d7edf145ae885edea82329227eb87533bab3647344b5971e14afc22",
+		kit: "images/favicon.svg (retired)",
+	},
+	{
+		sha256: "875022ea41c74041947a74cd611d0d4e084975a71e534c681e146a4612a1f98f",
 		kit: "images/favicon.svg",
 	},
 ];
@@ -155,8 +160,8 @@ test("the path rule: a brand/ directory at any depth and in any case, and a masc
 });
 
 test("every denylist entry is a sha256 with a kit path, and the list holds the brand images", () => {
-	assert.equal(KIT_SHA256.length, 13, "the kit's 13 non-font files");
-	assert.equal(new Set(KIT_SHA256.map((row) => row.sha256)).size, 13, "no hash listed twice");
+	assert.equal(KIT_SHA256.length, 14, "the kit's 13 non-font files, plus one retired file");
+	assert.equal(new Set(KIT_SHA256.map((row) => row.sha256)).size, 14, "no hash listed twice");
 	for (const { sha256, kit } of KIT_SHA256) {
 		assert.match(sha256, /^[0-9a-f]{64}$/, `${kit}: a sha256 in hex`);
 		assert.ok(kit.length > 0 && !kit.startsWith("fonts/"), `${sha256}: a non-font kit path`);
@@ -172,6 +177,13 @@ test("every denylist entry is a sha256 with a kit path, and the list holds the b
 			`${image} is denylisted`,
 		);
 	}
+
+	const favicon = KIT_SHA256.find((row) => row.kit === "images/favicon.svg");
+	assert.equal(
+		favicon?.sha256,
+		"875022ea41c74041947a74cd611d0d4e084975a71e534c681e146a4612a1f98f",
+		"the kit's current favicon is denylisted",
+	);
 });
 
 test("no tracked file is an exact copy of a kit file, by its bytes", () => {
