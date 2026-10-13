@@ -451,6 +451,64 @@ describe("what the first-run time keeps out", () => {
 		expect(watch.map((w) => w.kind)).toEqual(["gap"]);
 	});
 
+	it("a session this state already metered BEFORE per-session times, first touched again by a gap-only hook, keeps the state's time: its left-over answer is still posted", async () => {
+		const id = randomUUID();
+		const s = session(id);
+		await s.start("startup");
+		await s.transcript.userText("Task.");
+		await s.toolCall(CALL);
+		await s.transcript.assistant(usage("600:60"));
+		await sleep(20);
+		// The state as an older plugin left it (a cursor, no per-session time), and the session's
+		// first hook after the upgrade only writes a gap.
+		await rm(join(stateDir, "transcripts", "since-session", id));
+		await gapOnly(id);
+		expect(
+			Date.parse(await readFile(join(stateDir, "transcripts", "since-session", id), "utf-8")),
+		).toBe(await since());
+		await s.end(FINAL);
+		expect(llmCalls(await chain()).map((e) => e.data.usage)).toEqual([
+			recorded(CALL),
+			{ inputTokens: 1000, outputTokens: 180, cacheReadTokens: 0, cacheWriteTokens: 0 },
+		]);
+		expect((await watchRecords()).filter((w) => w.kind === "pre-metering")).toEqual([]);
+	});
+
+	it("a pre-metering backlog that ends in a line still being written is not declared until that line is whole: then once, counting it", async () => {
+		await session().start("startup");
+		await sleep(5);
+		const id = randomUUID();
+		const b = session(id);
+		await b.transcript.userText("Unmetered task.");
+		await b.transcript.assistant(usage("7000:70"));
+		// The next response, half written (no newline yet): built in a scratch transcript.
+		const scratch = new Transcript(join(projectDir, `scratch-${id}.jsonl`), id, projectDir);
+		await scratch.assistant(usage("8000:80"));
+		const line = (await readFile(scratch.path, "utf-8")).trimEnd();
+		const half = Math.floor(line.length / 2);
+		await appendFile(b.transcript.path, line.slice(0, half));
+		const stop = () =>
+			runHook(
+				join(HOOKS, "stop.mjs"),
+				{
+					session_id: id,
+					transcript_path: b.transcript.path,
+					cwd: projectDir,
+					permission_mode: "default",
+					hook_event_name: "Stop",
+					stop_hook_active: false,
+				},
+				hookEnv,
+			);
+		await stop();
+		expect((await watchRecords()).filter((w) => w.kind === "pre-metering")).toEqual([]);
+		await appendFile(b.transcript.path, `${line.slice(half)}\n`);
+		await stop();
+		expect((await watchRecords()).filter((w) => w.kind === "pre-metering")).toEqual([
+			expect.objectContaining({ session: id, responses: 2 }),
+		]);
+	});
+
 	it("a session this state already metered BEFORE per-session times keeps the state's time: a response it left unposted is still posted, once", async () => {
 		const id = randomUUID();
 		const s = session(id);

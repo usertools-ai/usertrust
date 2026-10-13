@@ -313,6 +313,60 @@ export function modeAnnouncement() {
 }
 
 /**
+ * When this plugin's transcript state (`dir`, its `transcripts` directory) was first made, in
+ * ms: `since`, published once at `now` if it has none, and never moved (transcript.mjs
+ * `firstRun`).
+ */
+export async function stateFirstRun(dir, now) {
+	const path = join(dir, "since");
+	const read = () =>
+		readRegular(path, READ_BOUND.small).catch((err) => {
+			if (err?.code === "ENOENT") return null;
+			throw err;
+		});
+	let text = await read();
+	if (text === null) {
+		await publishOnce(path, new Date(now).toISOString());
+		text = await read();
+	}
+	const at = Date.parse(text ?? "");
+	if (!Number.isFinite(at)) throw new Error("not a time");
+	return at;
+}
+
+/**
+ * When a session was first metered in this state, in ms, never earlier than the state's own time
+ * (`stateFirstRun`): `since-session/<session>`, published once and never moved. THE one place
+ * that sets it, for every path that stamps it (transcript.mjs `sessionFirstRun`, and every watch
+ * record that names a session, `stampSessionSeen`), so they share one rule:
+ * - a session first stamped now is stamped at `now` (the caller's one clock read, or the
+ *   record's own time), and the state's time with it if the state has none;
+ * - a session this state already holds a cursor for (`<session>__*.json`) was metered before
+ *   per-session times existed: it gets the state's time, so a response it left unposted is
+ *   still posted.
+ */
+export async function sessionFirstRunAt(dir, sessionId, now) {
+	const floor = await stateFirstRun(dir, now);
+	const path = join(dir, "since-session", sanitize(sessionId));
+	const read = () =>
+		readRegular(path, READ_BOUND.small).catch((err) => {
+			if (err?.code === "ENOENT") return null;
+			throw err;
+		});
+	let text = await read();
+	if (text === null) {
+		await mkdir(join(dir, "since-session"), { recursive: true, mode: 0o700 });
+		const prefix = `${sanitize(sessionId)}__`;
+		const known = (await readdir(dir)).some((n) => n.startsWith(prefix) && n.endsWith(".json"));
+		await publishOnce(path, new Date(known ? floor : now).toISOString());
+		text = await read();
+	}
+	const at = Date.parse(text ?? "");
+	if (!Number.isFinite(at)) throw new Error("not a time");
+	return Math.max(floor, at);
+}
+
+/**
  * The first hook that touches a session in this state stamps when that session was first
  * metered, whatever it does: a hook that only writes a gap, a refusal or a deferral counts.
  * Metering was ON then, and failing, so what the session wrote after it is a gap to be posted,
@@ -327,9 +381,8 @@ async function stampSessionSeen(session, at) {
 	if (usageMode() !== "transcript") return;
 	try {
 		const dir = join(stateRoot(), "transcripts");
-		await mkdir(join(dir, "since-session"), { recursive: true, mode: 0o700 });
-		await publishOnce(join(dir, "since"), at);
-		await publishOnce(join(dir, "since-session", sanitize(session)), at);
+		await mkdir(dir, { recursive: true, mode: 0o700 });
+		await sessionFirstRunAt(dir, session, Date.parse(at));
 	} catch (err) {
 		say(
 			`usertrust: could not stamp when this session was first metered (${err?.code ?? (err instanceof Error ? err.message : String(err))})`,

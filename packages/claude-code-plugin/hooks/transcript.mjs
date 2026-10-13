@@ -151,7 +151,6 @@ import {
 	PRE_METERING,
 	principalCapable,
 	publishExclusive,
-	publishOnce,
 	READ_BOUND,
 	readRegular,
 	recordSettleGap,
@@ -164,6 +163,8 @@ import {
 	say,
 	serverCapabilities,
 	serverRequest,
+	sessionFirstRunAt,
+	stateFirstRun,
 	stateRoot,
 	tenantBinding,
 	timeLeft,
@@ -268,10 +269,6 @@ const VEHICLE_KEY = /^cc:[0-9a-f]{48}$/;
 const CLAIMS_DIR = "claims";
 /** Where an agent's estimate mode is recorded, outside its cursor (see `stickToEstimate`). */
 const ESTIMATE_DIR = "estimate";
-/** When this plugin's transcript state was first made (see `firstRun`). */
-const SINCE_FILE = "since";
-/** When each session was first metered, one file per session (see `sessionFirstRun`). */
-const SESSION_SINCE_DIR = "since-session";
 
 /**
  * Untrusted strings in a path or an actor string (agent type/id) →
@@ -1327,9 +1324,10 @@ async function ingest(cursor, path, since) {
 				line.push(Buffer.from(view.subarray(from)));
 			}
 		}
-		// Finished only when every byte read was consumed: a read stopped at MAX_READ_BYTES has
-		// whole lines left in the chunk it fetched, however far `position` went.
-		result.atEnd = position >= size && cursor.byteOffset - start < MAX_READ_BYTES;
+		// Finished only when every byte of the transcript was consumed: a read stopped at
+		// MAX_READ_BYTES has whole lines left in the chunk it fetched, and a trailing line still
+		// being written (no newline yet) is not read at all, however far `position` went.
+		result.atEnd = cursor.byteOffset === size;
 	} catch (err) {
 		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
 	} finally {
@@ -1698,20 +1696,7 @@ async function cursorLocation(sessionId, agentId) {
  * state unavailable: nothing is posted, and nothing settled at the estimate.
  */
 async function firstRun(dir, now = Date.now()) {
-	const path = join(dir, SINCE_FILE);
-	const read = () =>
-		readRegular(path, READ_BOUND.small).catch((err) => {
-			if (err?.code === "ENOENT") return null;
-			throw err;
-		});
-	let text = await read();
-	if (text === null) {
-		await publishOnce(path, new Date(now).toISOString());
-		text = await read();
-	}
-	const at = Date.parse(text ?? "");
-	if (!Number.isFinite(at)) throw new Error("not a time");
-	return at;
+	return stateFirstRun(dir, now);
 }
 
 /**
@@ -1727,26 +1712,10 @@ async function firstRun(dir, now = Date.now()) {
  */
 async function sessionFirstRun(dir, sessionId) {
 	// ONE clock read for both stamps: a hook that makes the state's time and the session's makes
-	// them equal, so nothing written between two reads can fall before the session's alone.
-	const now = Date.now();
-	const floor = await firstRun(dir, now);
-	const path = join(dir, SESSION_SINCE_DIR, sanitize(sessionId));
-	const read = () =>
-		readRegular(path, READ_BOUND.small).catch((err) => {
-			if (err?.code === "ENOENT") return null;
-			throw err;
-		});
-	let text = await read();
-	if (text === null) {
-		await mkdir(join(dir, SESSION_SINCE_DIR), { recursive: true, mode: 0o700 });
-		const prefix = `${sanitize(sessionId)}__`;
-		const known = (await readdir(dir)).some((n) => n.startsWith(prefix) && n.endsWith(".json"));
-		await publishOnce(path, new Date(known ? floor : now).toISOString());
-		text = await read();
-	}
-	const at = Date.parse(text ?? "");
-	if (!Number.isFinite(at)) throw new Error("not a time");
-	return Math.max(floor, at);
+	// them equal, so nothing written between two reads can fall before the session's alone. The
+	// rule itself, the legacy cursor included, is lib.mjs `sessionFirstRunAt`'s, shared with
+	// every watch record that stamps a session.
+	return sessionFirstRunAt(dir, sessionId, Date.now());
 }
 
 /**
