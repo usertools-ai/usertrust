@@ -25,6 +25,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import type { Message, RawMessageStreamEvent } from "@anthropic-ai/sdk/resources/messages/messages";
 import type { Stream } from "@anthropic-ai/sdk/streaming";
+import type { EmbedContentResponse, GoogleGenAI } from "@google/genai";
 import type OpenAI from "openai";
 import type { Stream as OpenAIStream } from "openai/core/streaming";
 import type {
@@ -529,10 +530,50 @@ interface FakeGoogleModels {
 		contents: string;
 	}): Promise<AsyncGenerator<{ text: string }>>;
 	countTokens(params: { model: string }): Promise<{ totalTokens: number }>;
+	embedContent(params: { model: string; contents: string }): Promise<{ embeddings: number[] }>;
+	generateImages(params: { model: string; prompt: string }): Promise<{ images: string[] }>;
+}
+
+interface FakeGoogleChat {
+	sendMessage(params: { message: string }): Promise<{ text: string }>;
 }
 
 interface FakeGoogle {
 	models: FakeGoogleModels;
+	chats: { create(params: { model: string }): FakeGoogleChat };
+	live: {
+		connect(params: { model: string }): Promise<{ close(): void }>;
+		music: {
+			connect(params: { model: string }): Promise<{ close(): void }>;
+			label: string;
+		};
+		label: string;
+	};
+	batches: {
+		create(params: { model: string }): Promise<{ name: string }>;
+		createEmbeddings(params: { model: string }): Promise<{ name: string }>;
+		list(): Promise<{ name: string }[]>;
+	};
+	interactions: {
+		create(params: { model: string }): Promise<{ id: string }>;
+		get(id: string): Promise<{ id: string }>;
+	};
+	tunings: {
+		tune(params: { baseModel: string }): Promise<{ name: string }>;
+		get(params: { name: string }): Promise<{ name: string }>;
+	};
+	caches: {
+		create(params: { model: string }): Promise<{ name: string }>;
+		update(params: { name: string }): Promise<{ name: string }>;
+		get(params: { name: string }): Promise<{ name: string }>;
+	};
+	fileSearchStores: {
+		uploadToFileSearchStore(params: { file: string }): Promise<{ name: string }>;
+		importFile(params: { fileName: string }): Promise<{ name: string }>;
+		create(params: { displayName: string }): Promise<{ name: string }>;
+		documents: { list(params: { parent: string }): Promise<{ name: string }[]> };
+	};
+	files: { upload(params: { file: string }): Promise<{ name: string }> };
 }
 
 type GovGoogle = TrustedClient<FakeGoogle>;
@@ -540,21 +581,141 @@ type GovGoogle = TrustedClient<FakeGoogle>;
 export type _GoogleGenerateContentEnvelope = Assert<
 	IsExact<
 		ReturnType<GovGoogle["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
-// generateContentStream is UNGOVERNED: buildGoogleProxy traps `generateContent`
-// only, everything else falls through Reflect.get. Its raw return is a promise of
-// an AsyncGenerator, so a rewrite here would be invisible at the call site until
-// a consumer reached for a `.receipt` that never arrives.
-export type _GoogleGenerateContentStreamRaw = Assert<
+// generateContentStream is GOVERNED: buildGoogleProxy routes it through interceptCall
+// and resolves to the governed stream ITSELF (an async generator of the SDK's chunks)
+// with the settled `.receipt` promise hung off it, the `messages.stream` contract.
+// So the SDK call shape survives (`for await (const c of await ...)`) and `.receipt`
+// is advertised exactly where the runtime puts it.
+export type _GoogleGenerateContentStreamGoverned = Assert<
 	IsExact<
 		ReturnType<GovGoogle["models"]["generateContentStream"]>,
-		Promise<AsyncGenerator<{ text: string }>>
+		Promise<AsyncGenerator<{ text: string }> & { receipt: Promise<TrustReceipt> }>
 	>
 >;
+export type _GoogleGenerateContentStreamParams = Assert<
+	IsExact<
+		Parameters<GovGoogle["models"]["generateContentStream"]>,
+		Parameters<FakeGoogleModels["generateContentStream"]>
+	>
+>;
+// Free metadata calls pass through unchanged.
 export type _GoogleCountTokensRaw = Assert<
 	IsExact<ReturnType<GovGoogle["models"]["countTokens"]>, Promise<{ totalTokens: number }>>
+>;
+// A method the runtime refuses keeps its SDK signature, as on Anthropic and OpenAI: listed in
+// `allowUngoverned` it runs on the raw SDK and returns the SDK's own result, so the type must
+// let that result be read. (Unlisted, the call rejects with a PolicyDeniedError at runtime.)
+export type _GoogleEmbedContentKeepsSignature = Assert<
+	IsExact<GovGoogle["models"]["embedContent"], FakeGoogleModels["embedContent"]>
+>;
+export type _GoogleGenerateImagesKeepsSignature = Assert<
+	IsExact<ReturnType<GovGoogle["models"]["generateImages"]>, Promise<{ images: string[] }>>
+>;
+// A listed `models.embedContent`'s result reads without a cast.
+declare const govGoogle: GovGoogle;
+const listedEmbedding = govGoogle.models.embedContent({ model: "m", contents: "hi" });
+export type _GoogleListedEmbedContentReads = Assert<
+	IsExact<Awaited<typeof listedEmbedding>["embeddings"], number[]>
+>;
+// `chats.create` keeps its signature too (at runtime it is refused, and cannot be listed).
+export type _GoogleChatsCreateKeepsSignature = Assert<
+	IsExact<GovGoogle["chats"]["create"], FakeGoogle["chats"]["create"]>
+>;
+export type _GoogleLiveConnectKeepsSignature = Assert<
+	IsExact<ReturnType<GovGoogle["live"]["connect"]>, Promise<{ close(): void }>>
+>;
+export type _GoogleLiveMusicConnectKeepsSignature = Assert<
+	IsExact<ReturnType<GovGoogle["live"]["music"]["connect"]>, Promise<{ close(): void }>>
+>;
+export type _GoogleLiveRestRaw = Assert<
+	IsExact<[GovGoogle["live"]["label"], GovGoogle["live"]["music"]["label"]], [string, string]>
+>;
+export type _GoogleBatchesCreateKeepsSignature = Assert<
+	IsExact<
+		[
+			ReturnType<GovGoogle["batches"]["create"]>,
+			ReturnType<GovGoogle["batches"]["createEmbeddings"]>,
+		],
+		[Promise<{ name: string }>, Promise<{ name: string }>]
+	>
+>;
+export type _GoogleBatchesListRaw = Assert<
+	IsExact<GovGoogle["batches"]["list"], FakeGoogle["batches"]["list"]>
+>;
+export type _GoogleInteractionsCreateKeepsSignature = Assert<
+	IsExact<ReturnType<GovGoogle["interactions"]["create"]>, Promise<{ id: string }>>
+>;
+export type _GoogleInteractionsGetRaw = Assert<
+	IsExact<GovGoogle["interactions"]["get"], FakeGoogle["interactions"]["get"]>
+>;
+// The billable non-generation calls keep their signatures too; so do their reads.
+export type _GoogleBillableNonGenerationKeepsSignature = Assert<
+	IsExact<
+		[
+			ReturnType<GovGoogle["tunings"]["tune"]>,
+			ReturnType<GovGoogle["caches"]["create"]>,
+			ReturnType<GovGoogle["caches"]["update"]>,
+			ReturnType<GovGoogle["fileSearchStores"]["uploadToFileSearchStore"]>,
+			ReturnType<GovGoogle["fileSearchStores"]["importFile"]>,
+		],
+		[
+			Promise<{ name: string }>,
+			Promise<{ name: string }>,
+			Promise<{ name: string }>,
+			Promise<{ name: string }>,
+			Promise<{ name: string }>,
+		]
+	>
+>;
+// The real @google/genai: a listed `models.embedContent` resolves to the SDK's
+// EmbedContentResponse, and `.embeddings` reads without a cast.
+declare const govRealGoogle: TrustedClient<GoogleGenAI>;
+const realListedEmbedding = govRealGoogle.models.embedContent({
+	model: "gemini-embedding-001",
+	contents: "hi",
+});
+export type _RealGoogleListedEmbedContent = Assert<
+	IsExact<Awaited<typeof realListedEmbedding>, EmbedContentResponse>
+>;
+export type _RealGoogleListedEmbeddingsRead = Assert<
+	IsExact<Awaited<typeof realListedEmbedding>["embeddings"], EmbedContentResponse["embeddings"]>
+>;
+export type _RealGoogleChatsCreateKeepsSignature = Assert<
+	IsExact<TrustedClient<GoogleGenAI>["chats"]["create"], GoogleGenAI["chats"]["create"]>
+>;
+export type _GoogleBillableNamespacesReadsRaw = Assert<
+	IsExact<
+		[
+			GovGoogle["tunings"]["get"],
+			GovGoogle["caches"]["get"],
+			GovGoogle["fileSearchStores"]["create"],
+			GovGoogle["fileSearchStores"]["documents"],
+		],
+		[
+			FakeGoogle["tunings"]["get"],
+			FakeGoogle["caches"]["get"],
+			FakeGoogle["fileSearchStores"]["create"],
+			FakeGoogle["fileSearchStores"]["documents"],
+		]
+	>
+>;
+// A namespace with nothing refused is not touched at all.
+export type _GoogleFilesRaw = Assert<IsExact<GovGoogle["files"], FakeGoogle["files"]>>;
+
+// A Google client WITHOUT the stream method or the refusing namespaces gains no
+// phantom member: the rewrite is homomorphic and the parts are keyed off `keyof T`.
+interface MinimalGoogle {
+	models: { generateContent(params: { model: string }): Promise<{ text: string }> };
+}
+type GovMinimalGoogle = TrustedClient<MinimalGoogle>;
+export type _MinimalGoogleNoStream = Assert<
+	IsExact<"generateContentStream" extends keyof GovMinimalGoogle["models"] ? true : false, false>
+>;
+export type _MinimalGoogleNoChats = Assert<
+	IsExact<"chats" extends keyof GovMinimalGoogle ? true : false, false>
 >;
 export type _GoogleHasDestroy = Assert<Extends<GovGoogle, { destroy(): Promise<void> }>>;
 
@@ -712,7 +873,7 @@ type GovCallableChatWithGoogle = TrustedClient<CallableChatWithGoogle>;
 export type _CallableChatFallsThroughToGoogle = Assert<
 	IsExact<
 		ReturnType<GovCallableChatWithGoogle["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
 export type _CallableChatStaysRaw = Assert<
@@ -733,7 +894,7 @@ type GovCallableCompletions = TrustedClient<CallableCompletionsWithGoogle>;
 export type _CallableCompletionsFallsThroughToGoogle = Assert<
 	IsExact<
 		ReturnType<GovCallableCompletions["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
 export type _CallableCompletionsStaysRaw = Assert<
@@ -836,7 +997,7 @@ export type _ReadonlyModelsStaysReadonly = Assert<
 export type _ReadonlyModelsIsGoverned = Assert<
 	IsExact<
 		ReturnType<GovReadonlyModels["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
 
@@ -866,6 +1027,26 @@ export type _UnionAnthropicMemberGoverned = Assert<
 export type _UnionGoogleMemberGoverned = Assert<
 	IsExact<
 		ReturnType<GovUnionGoogle["models"]["generateContent"]>,
-		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+		Promise<{ response: { text: string }; receipt: TrustReceipt; receipts?: TrustReceipt[] }>
 	>
 >;
+
+// ── withOptions() on a governed client returns the GOVERNED shape ──
+// The SDK declares `withOptions(): this`; carried through `Omit<T, …>` it resolved to the RAW
+// client, so a raw-only member of a governed clone compiled and then failed at runtime. The
+// runtime re-wraps the clone with the same governor (default-deny.ts), and the type must say so.
+
+const govAnthropicClone = govRealAnthropic.withOptions({ timeout: 1000 });
+export type _AnthropicWithOptionsIsGoverned = Assert<
+	IsExact<typeof govAnthropicClone, GovRealAnthropic>
+>;
+// The clone's create resolves to the { response, receipt } envelope, not a raw Message.
+export const _anthropicCloneRawOnly = async () =>
+	// @ts-expect-error `content` is on the raw Message, not on the governed envelope
+	(await govAnthropicClone.messages.create({ model: "m", max_tokens: 1, messages: [] })).content;
+
+const govOpenAIClone = govRealOpenAI.withOptions({ timeout: 1000 });
+export type _OpenAIWithOptionsIsGoverned = Assert<IsExact<typeof govOpenAIClone, GovRealOpenAI>>;
+export const _openaiCloneRawOnly = async () =>
+	// @ts-expect-error `choices` is on the raw ChatCompletion, not on the governed envelope
+	(await govOpenAIClone.chat.completions.create({ model: "m", messages: [] })).choices;

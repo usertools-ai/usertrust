@@ -41,14 +41,23 @@ import { useBreakerHome } from "./breaker.mjs";
 import {
 	childEnv,
 	childUnsupported,
+	claudeDirsEnv,
 	howToSet,
 	isChildEnv,
+	managedSettingsFile,
 	passwdHome,
 	refusedSettings,
 	settings as resolvedSettings,
 	useSession,
 } from "./config.mjs";
 import { launch, readStdin, recordWatchEvent, say } from "./lib.mjs";
+import {
+	alsoEnabledWarning,
+	peerMeter,
+	setPeerWarning,
+	settingsDirs,
+	unknownWarning,
+} from "./peer-meter.mjs";
 import { pinnedSettings, readPin, sessionSettings, sweep, touchPin } from "./session.mjs";
 
 const STARTED = Date.now();
@@ -198,12 +207,35 @@ function runInChild(hook, text, input, session, home) {
 /** What the parent knows so far, for `launcherFailed`: the hook's input and its session's settings. */
 const known = { input: null, settings: null };
 
+/**
+ * SessionStart only: look for `usertrust-claude-code` in the settings files and, when it looks
+ * enabled or cannot be told, leave a warning for SessionStart's line (peer-meter.mjs). It
+ * NEVER stops this plugin metering: settings files are only evidence of what Claude Code
+ * loaded (--settings and --setting-sources, a mid-session change and a different home all
+ * make them wrong), and a wrong "enabled" would be a silent zero meter, where a wrong
+ * warning costs one line. A check that throws is "unknown".
+ */
+async function warnOfPeer(input) {
+	let peer;
+	try {
+		peer = await peerMeter({
+			...settingsDirs({ env: claudeDirsEnv(), payload: input }),
+			managed: managedSettingsFile(),
+		});
+	} catch (err) {
+		peer = { state: "unknown", why: err?.code ?? "check failed" };
+	}
+	if (peer.state === "enabled") setPeerWarning(alsoEnabledWarning(peer.file, peer.key));
+	else if (peer.state === "unknown") setPeerWarning(unknownWarning(peer.why));
+}
+
 /** The parent: resolve the session, then run the hook here or as a child. */
 async function parent(hook) {
 	const text = await readStdin();
 	const input = parsePayload(text);
 	known.input = input;
 	const home = passwdHome();
+	if (hook === "session-start") await warnOfPeer(input);
 	const uid = currentUid();
 	const session = sessionSettings({ payload: input, passwdHome: home, uid });
 	useSession(session.settings);

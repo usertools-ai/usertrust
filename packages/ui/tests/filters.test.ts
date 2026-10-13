@@ -26,15 +26,24 @@ const ROWS: LedgerRow[] = [
 		model: "claude-sonnet-4-6",
 		costUt: 5,
 		settled: true,
+		status: "settled",
 		transferId: "tx_alpha",
 		ts: "2026-07-25T09:00:00.000Z",
 	}),
-	row({ id: "2", kind: "tool_use", actor: "agent-7", costUt: 50, ts: "2026-07-26T09:00:00.000Z" }),
+	row({
+		id: "2",
+		kind: "tool_use",
+		actor: "agent-7",
+		costUt: 50,
+		status: "settled",
+		ts: "2026-07-26T09:00:00.000Z",
+	}),
 	row({
 		id: "3",
 		kind: "llm_call_failed",
 		error: "rate limited",
 		costUt: 0,
+		status: "failed",
 		ts: "2026-07-27T09:00:00.000Z",
 	}),
 ];
@@ -59,5 +68,14 @@ describe("applyFilters", () => {
 			applyFilters(ROWS, { ...EMPTY_FILTERS, from: "2026-07-26", to: "2026-07-26" })[0]?.id,
 		).toBe("2");
 		expect(isFiltering({ ...EMPTY_FILTERS, kinds: ["llm_call"] })).toBe(true);
+	});
+
+	it("filters on the ungoverned status", () => {
+		const rows = [...ROWS, row({ id: "u", kind: "ungoverned_call" })];
+		const out = applyFilters(rows, { ...EMPTY_FILTERS, statuses: ["ungoverned"] });
+		expect(out.map((r) => r.id)).toEqual(["u"]);
+		expect(
+			applyFilters(rows, { ...EMPTY_FILTERS, statuses: ["pending"] }).map((r) => r.id),
+		).not.toContain("u");
 	});
 });

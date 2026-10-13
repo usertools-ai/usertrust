@@ -514,7 +514,7 @@ describe("#195 r3→r5: directory inode reuse cannot alias a lock — nothing is
 		);
 	});
 
-	it("(b) while the first claim's lock file EXISTS, a second same-process writer on the same identity — the same directory, by another spelling — is refused (AUD-471), and the live lock is neither recreated nor duplicated", async () => {
+	it("(b) while the first claim's lock file EXISTS, a second same-process writer on the same identity — the same directory, by another spelling — is refused, and the live lock is neither recreated nor duplicated", async () => {
 		const parent = scratch("trust-audit-reuse-live-");
 		const vaultA = join(parent, "A");
 		mkdirSync(auditDirOf(vaultA), { recursive: true });

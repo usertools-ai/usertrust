@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useEffect, useRef, useState } from "react";
-import { type LedgerRow, statusOf } from "../shared/rows.js";
+import { type LedgerRow, type RowStatus, statusOf } from "../shared/rows.js";
 
 interface VerifyResponse {
 	found: boolean;
@@ -157,10 +157,30 @@ function CopyHash(props: { label: string; hash: string }): React.JSX.Element {
 	);
 }
 
+/** The status line's tone; a Record, so every status is placed deliberately. */
+const STATUS_TONE: Record<RowStatus, string | undefined> = {
+	failed: "text-[var(--danger)]",
+	denied: "text-[var(--danger)]",
+	ambiguous: "text-[var(--amber)]",
+	ungoverned: "text-[var(--amber)]",
+	unrecoverable: "text-[var(--unrecoverable)]",
+	info: "text-[var(--faint)]",
+	unknown: "text-[var(--muted)] italic",
+	settled: undefined,
+	released: undefined,
+};
+
 export function RowPanel(props: { row: LedgerRow; onClose(): void }): React.JSX.Element {
 	const { row, onClose } = props;
 	const [verify, setVerify] = useState<VerifyResponse | "loading" | "error" | null>(null);
 	const closeRef = useRef<HTMLButtonElement>(null);
+
+	// A receipt fetched for the row's earlier status is stale once a correction changes it (settled → ambiguous): drop
+	// it, so the panel never shows the new status beside the old verdict.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: the status is the trigger, not a value read
+	useEffect(() => {
+		setVerify(null);
+	}, [row.status]);
 
 	// Initial focus moves into the panel; on close it returns to the invoking row.
 	useEffect(() => {
@@ -213,12 +233,7 @@ export function RowPanel(props: { row: LedgerRow; onClose(): void }): React.JSX.
 	};
 
 	const status = statusOf(row);
-	const statusTone =
-		status === "failed" || status === "denied"
-			? "text-[var(--danger)]"
-			: status === "pending"
-				? "text-[var(--amber)]"
-				: undefined;
+	const statusTone = STATUS_TONE[status];
 	const result = verify !== null && verify !== "loading" && verify !== "error" ? verify : null;
 	const lines = result ? result.receipt.split("\n") : [];
 

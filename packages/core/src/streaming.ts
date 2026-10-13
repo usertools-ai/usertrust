@@ -43,7 +43,9 @@ import {
 	fromGeminiUsage,
 	fromOpenAICompletionsUsage,
 	fromOpenAIResponsesUsage,
+	type ImplausibleChecks,
 	MAX_PLAUSIBLE_TOKENS_PER_TIER,
+	mergeImplausible,
 	type UsageTier,
 } from "./ledger/usage.js";
 import { AuditDegradedError } from "./shared/errors.js";
@@ -88,6 +90,8 @@ export interface StreamCompletion {
 	 * records the anomaly rather than billing zeroed counts under a provider label.
 	 */
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	/** Which check put each tier in `implausible` (the first that fired for it); a tier with no entry was a "sum". */
+	implausibleBy?: ImplausibleChecks | undefined;
 }
 
 export interface GovernedStream<T> extends AsyncIterable<T> {
@@ -95,7 +99,10 @@ export interface GovernedStream<T> extends AsyncIterable<T> {
 	 * Resolves with the settled trust receipt when the stream completes, or when the
 	 * consumer stops early (the consumed usage settles). Rejects, with the same error the
 	 * iteration threw, when the stream fails mid-way and its iteration THROWS: the hold is
-	 * then voided, not charged. A provider event the SDK yields as a chunk instead of
+	 * then voided, not charged. The exception is the CALLER's own abort (its abort signal for
+	 * this call is aborted when the iteration throws): that is an early stop, so `.receipt`
+	 * resolves with the usage delivered so far settled, as on a `break`, and the iteration
+	 * still throws the SDK's abort error. A provider event the SDK yields as a chunk instead of
 	 * throwing (an OpenAI Responses `error` event) ends the stream like any other, and it
 	 * settles and is charged. Also rejects when settlement itself is refused after it ran
 	 * (`AuditDegradedError`, under `audit.failClosed`): the charge posted, or its POST
@@ -139,6 +146,7 @@ function boundedCount(
 
 function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	implausibleBy?: ImplausibleChecks | undefined;
 } {
 	if (chunk == null || typeof chunk !== "object") return NO_USAGE;
 
@@ -158,6 +166,7 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 				cacheWriteTokens: normalized.cacheWriteTokens,
 				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
 				implausible: Object.keys(found).length > 0 ? found : undefined,
+				implausibleBy: normalized.implausibleBy,
 			};
 		}
 	}
@@ -174,6 +183,7 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 				cacheWriteTokens: normalized.cacheWriteTokens,
 				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
 				implausible: Object.keys(found).length > 0 ? found : undefined,
+				implausibleBy: normalized.implausibleBy,
 			};
 		}
 	}
@@ -195,6 +205,7 @@ function sanitizeCount(value: unknown): number {
 interface SnapshotWithProvenance extends StreamUsage {
 	reported: boolean;
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
+	implausibleBy?: ImplausibleChecks | undefined;
 }
 
 /**
@@ -244,6 +255,7 @@ function extractUsageSnapshot(
 						cacheWriteTokens: n.cacheWriteTokens,
 						reported: n.source === "provider",
 						implausible: n.implausible,
+						implausibleBy: n.implausibleBy,
 					};
 				}
 			}
@@ -260,6 +272,7 @@ function extractUsageSnapshot(
 				cacheWriteTokens: n.cacheWriteTokens,
 				reported: n.source === "provider",
 				implausible: n.implausible,
+				implausibleBy: n.implausibleBy,
 			};
 		}
 		return null;
@@ -277,6 +290,7 @@ function extractUsageSnapshot(
 			cacheWriteTokens: n.cacheWriteTokens,
 			reported: n.source === "provider",
 			implausible: n.implausible,
+			implausibleBy: n.implausibleBy,
 		};
 	}
 	return null;
@@ -327,8 +341,91 @@ export function wrapStream<T>(
 	onComplete: (completion: StreamCompletion) => void | Promise<void>,
 	onError: (error: unknown, partial: StreamCompletion) => void,
 	onChunk?: ChunkHook,
+	callerAborted?: () => boolean,
 ): AsyncIterable<T> {
-	return wrapStreamImpl(stream, kind, onComplete, onError, onChunk);
+	return endsBeforeStart(
+		wrapStreamImpl(stream, kind, onComplete, onError, onChunk, callerAborted),
+		stream,
+		onComplete,
+		onError,
+	);
+}
+
+/** What a stream that delivered nothing reports to its terminal (a fresh object each time). */
+function nothingConsumed(): StreamCompletion {
+	return { usage: { ...NO_USAGE }, chunksDelivered: 0, usageReported: false };
+}
+
+/**
+ * Give a generator that is closed BEFORE its first `next()` the terminal it would have
+ * had once started.
+ *
+ * An async generator in its start state never runs its body when `.return()` or
+ * `.throw()` is called on it: it completes on the spot, so wrapStreamImpl's `finally`
+ * (settle) and `catch` (void) never run, the hold is never ended, `.receipt` never
+ * settles and the governor's in-flight stream count never drops. This patches the two
+ * methods ON THE GENERATOR ITSELF (it stays a real async generator, and
+ * `Symbol.asyncDispose`, which calls `this.return()`, goes through the patch) and, until
+ * the first `next()`, runs the same terminal a started generator would:
+ *   - `.return(v)` is the early `break` with nothing consumed: the provider stream is
+ *     closed, then `onComplete` runs with zero usage, `usageReported: false` (so the hold
+ *     settles at the ESTIMATE, the rule for any stream that reports no usage), and a
+ *     settlement that `onComplete` returns is awaited, as wrapStreamImpl's `finally` does.
+ *   - `.throw(e)` is what `.throw(e)` does to a started stream: the provider stream is
+ *     closed, then `onError(e)` runs (the hold is VOIDED) and `e` is rethrown.
+ * Once `next()` has been called the patched methods defer to the generator's own.
+ */
+function endsBeforeStart<T>(
+	gen: AsyncGenerator<T>,
+	source: AsyncIterable<T>,
+	onComplete: (completion: StreamCompletion) => void | Promise<void>,
+	onError: (error: unknown, partial: StreamCompletion) => void,
+): AsyncGenerator<T> {
+	let started = false;
+	const ownNext = gen.next.bind(gen);
+	const ownReturn = gen.return.bind(gen);
+	const ownThrow = gen.throw.bind(gen);
+	// Best effort, like the iterator close a `for await` break performs on the source.
+	const closeSource = async (): Promise<void> => {
+		try {
+			await source[Symbol.asyncIterator]().return?.();
+		} catch {
+			// nothing to release, or the source refused: the terminal still runs
+		}
+	};
+	gen.next = (...args: [] | [unknown]) => {
+		started = true;
+		return ownNext(...args);
+	};
+	gen.return = async (value: unknown) => {
+		if (started) return ownReturn(value as never);
+		started = true;
+		// Complete the generator (its body never runs). Its own outcome is the caller's: like a
+		// native `return(v)`, it awaits `v`, so `return(Promise.resolve(123))` yields 123 and
+		// `return(Promise.reject(err))` rejects with `err`. Either way the source is closed and
+		// the hold settled FIRST: `started` is already true, so no later call would end it.
+		let outcome: { ok: true; result: IteratorResult<T> } | { ok: false; error: unknown };
+		try {
+			outcome = { ok: true, result: await ownReturn(value as never) };
+		} catch (error) {
+			outcome = { ok: false, error };
+		}
+		await closeSource();
+		const settling = onComplete(nothingConsumed());
+		if (settling !== undefined) await settling;
+		if (!outcome.ok) throw outcome.error;
+		return outcome.result;
+	};
+	gen.throw = async (error: unknown) => {
+		if (started) return ownThrow(error);
+		started = true;
+		// `return(undefined)` awaits nothing that can reject, so this cannot skip the void below.
+		await ownReturn(undefined as never);
+		await closeSource();
+		onError(error, nothingConsumed());
+		throw error;
+	};
+	return gen;
 }
 
 async function* wrapStreamImpl<T>(
@@ -337,7 +434,11 @@ async function* wrapStreamImpl<T>(
 	onComplete: (completion: StreamCompletion) => void | Promise<void>,
 	onError: (error: unknown, partial: StreamCompletion) => void,
 	onChunk?: ChunkHook,
+	callerAborted?: () => boolean,
 ): AsyncGenerator<T> {
+	// Set when OUR per-chunk hook (the anomaly detector) is what threw: that is a governance
+	// cutoff and always voids, whatever state the caller's abort signal is in.
+	let hookThrew = false;
 	let inputTokens = 0;
 	let outputTokens = 0;
 	let cacheReadTokens = 0;
@@ -346,12 +447,17 @@ async function* wrapStreamImpl<T>(
 	let chunksDelivered = 0;
 	let usageReported = false;
 	let implausible: Partial<Record<UsageTier, number>> | undefined;
-	const noteImplausible = (found: Partial<Record<UsageTier, number>> | undefined): void => {
-		if (found === undefined) return;
-		implausible = { ...implausible };
-		for (const [tier, value] of Object.entries(found) as Array<[UsageTier, number]>) {
-			implausible[tier] = Math.max(implausible[tier] ?? 0, value);
-		}
+	let implausibleBy: ImplausibleChecks | undefined;
+	const noteImplausible = (reading: {
+		implausible?: Partial<Record<UsageTier, number>> | undefined;
+		implausibleBy?: ImplausibleChecks | undefined;
+	}): void => {
+		({ implausible, implausibleBy } = mergeImplausible(
+			implausible,
+			implausibleBy,
+			reading.implausible,
+			reading.implausibleBy,
+		));
 	};
 	const snapshot = (): StreamUsage => ({
 		inputTokens,
@@ -381,7 +487,7 @@ async function* wrapStreamImpl<T>(
 				// chunk's values (A7); explicit zeros count as reported usage (A11).
 				const latest = extractUsageSnapshot(chunk, kind);
 				if (latest != null) {
-					noteImplausible(latest.implausible);
+					noteImplausible(latest);
 					deltaInput = Math.max(0, latest.inputTokens - inputTokens);
 					deltaOutput = Math.max(0, latest.outputTokens - outputTokens);
 					inputTokens = latest.inputTokens;
@@ -403,7 +509,7 @@ async function* wrapStreamImpl<T>(
 				// Anthropic: message_start carries input, message_delta carries output —
 				// genuinely incremental chunk types; keep the latest non-zero value.
 				const tokens = extractAnthropicTokens(chunk);
-				noteImplausible(tokens.implausible);
+				noteImplausible(tokens);
 				if (tokens.inputTokens > 0) {
 					deltaInput = Math.max(0, tokens.inputTokens - inputTokens);
 					inputTokens = tokens.inputTokens;
@@ -435,6 +541,7 @@ async function* wrapStreamImpl<T>(
 
 			// Run hook BEFORE yielding so a throw aborts before the consumer sees it.
 			if (onChunk != null) {
+				hookThrew = true;
 				onChunk({
 					chunk,
 					deltaTokens: deltaInput + deltaOutput + deltaCacheRead + deltaCacheWrite,
@@ -444,14 +551,24 @@ async function* wrapStreamImpl<T>(
 					cumulativeCacheWriteTokens: cacheWriteTokens,
 					...(cacheWrite1hTokens > 0 ? { cumulativeCacheWrite1hTokens: cacheWrite1hTokens } : {}),
 				});
+				hookThrew = false;
 			}
 
 			yield chunk;
 			chunksDelivered++;
 		}
 	} catch (err) {
+		// The CALLER cancelled this call through its own abort signal (Google
+		// `config.abortSignal`, OpenAI / Anthropic request-options `signal`), so the SDK's
+		// iterator threw. That is the caller stopping early, like a `break`: the error still
+		// reaches the caller, but the usage delivered so far SETTLES in `finally` (the
+		// consumed snapshot, or the estimate when none was reported) instead of voiding, and
+		// no breaker failure is recorded. Decided by the signal's STATE, never the error's
+		// name. A throw from our own hook (an anomaly cutoff) and any provider error with the
+		// signal not aborted still void below.
+		if (!hookThrew && callerAborted?.() === true) throw err;
 		errored = true;
-		onError(err, { usage: snapshot(), chunksDelivered, usageReported, implausible });
+		onError(err, { usage: snapshot(), chunksDelivered, usageReported, implausible, implausibleBy });
 		throw err;
 	} finally {
 		// Normal completion AND early termination (consumer break → generator
@@ -468,6 +585,7 @@ async function* wrapStreamImpl<T>(
 				chunksDelivered,
 				usageReported,
 				implausible,
+				implausibleBy,
 			});
 			if (settling !== undefined) await settling;
 		}
@@ -499,6 +617,12 @@ export interface GovernedStreamOptions {
 	 * delayed and settlement runs in the background.
 	 */
 	surfaceAuditRefusal?: boolean;
+	/**
+	 * Whether the caller's OWN abort signal for this call is aborted (read when the stream
+	 * throws). True turns that throw into an early stop that settles the usage delivered so
+	 * far, as a `break` does, instead of a void. Absent: every throw voids, as before.
+	 */
+	callerAborted?: () => boolean;
 }
 
 export function createGovernedStream<T>(
@@ -552,6 +676,7 @@ export function createGovernedStream<T>(
 			receiptReject(error);
 		},
 		onChunk,
+		options.callerAborted,
 	);
 
 	return Object.assign(wrapped, {

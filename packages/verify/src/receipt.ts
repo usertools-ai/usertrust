@@ -8,6 +8,8 @@
  * ZERO DEPENDENCIES — Node built-ins only.
  */
 
+import type { TransferStatus } from "./verdict.js";
+
 // ── Types ──
 
 export interface TransactionEvent {
@@ -207,13 +209,38 @@ function wordWrap(text: string, maxWidth: number): string[] {
  * failure details, receipt IDs — to the same terminal, and needs the same
  * defense. Exporting this beats writing a third copy of it.
  */
+/**
+ * Characters that REORDER or HIDE text without printing a glyph: Unicode's format-character category (General_Category
+ * Cf). It holds the zero-width spaces and joiners, the LRM/RLM and Arabic letter marks, the bidi embeddings, overrides
+ * and isolates, the word joiner and invisible operators, the deprecated format controls, the Mongolian vowel
+ * separator, the BOM and the tag characters. A vault string carrying one could reorder the verdict line or hide part
+ * of it in an auditor's terminal. The class is tested by its Unicode PROPERTY, not a hand list: a hand list of ranges
+ * missed nine of its members. The zero-width joiner is replaced too, so an emoji sequence shows as its parts joined by
+ * `?`; this is an audit verifier's display, and a joiner is a format character like the rest.
+ */
+const FORMAT_CHARACTER = /^\p{Cf}$/u;
+
+function isInvisibleFormat(ch: string): boolean {
+	return FORMAT_CHARACTER.test(ch);
+}
+
 export function forDisplay(raw: string): string {
 	let out = "";
 	for (const ch of raw) {
 		const code = ch.codePointAt(0) as number;
-		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : ch;
+		// The control test stays in its own conditional: that exact shape is what the sanitizer inventory counts.
+		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : isInvisibleFormat(ch) ? "?" : ch;
 	}
 	return out;
+}
+
+/**
+ * `forDisplay`, then a clip to `max` CODE POINTS — sanitize first, clip after (AGENTS.md's terminal-sanitization
+ * rule). Clipping the raw string by UTF-16 code units first could cut a surrogate pair in half and print a lone
+ * surrogate; counting code points after sanitizing never splits a character.
+ */
+export function clipForDisplay(raw: string, max: number): string {
+	return [...forDisplay(raw)].slice(0, max).join("");
 }
 
 // ── Hash formatting ──
@@ -290,7 +317,8 @@ export const RELEASE_KINDS = new Set(["hold_released"]);
  */
 export const UNRECOVERABLE_KINDS = new Set(["settlement_unrecoverable"]);
 
-function resolveStatus(event: TransactionEvent): string {
+/** The status ONE record carries on its own; a transfer's verdict picks the record first (`verdict.ts`). */
+export function eventStatus(event: TransactionEvent): TransferStatus {
 	if (DENIAL_KINDS.has(event.kind)) return "DENIED";
 	// `stream_partial_delivery` is a FAILURE TERMINAL (AGENTS.md): the hold was
 	// voided and nothing settled. It is the record that proves a cutoff actually
@@ -305,6 +333,9 @@ function resolveStatus(event: TransactionEvent): string {
 	if (event.kind === "settlement_ambiguous") return "AMBIGUOUS";
 	if (event.kind === "stream_partial_delivery") return "FAILED";
 	if (event.kind === "llm_call_failed") return "FAILED";
+	// An action's `<kind>_failed` (`governAction`'s catch) is a failure terminal too: the selection layer already
+	// counted it as one (`firstTerminalOf`), but its status fell through to PENDING here.
+	if (event.kind.endsWith("_failed")) return "FAILED";
 	if (RELEASE_KINDS.has(event.kind)) return "RELEASED";
 	if (UNRECOVERABLE_KINDS.has(event.kind)) return "UNRECOVERABLE";
 	if (event.data.settled === true) return "SETTLED";
@@ -323,17 +354,16 @@ export function renderReceipt(data: ReceiptData): string {
 		cumulativeSpend,
 		verifiedAt,
 	} = data;
-	const status = resolveStatus(event);
+	const status = eventStatus(event);
 	// `detectProvider` matches on the RAW value — scrubbing first would let a
 	// leading control character hide a real provider prefix and mislabel the
 	// row. Only the rendered copy is scrubbed.
 	const model = event.data.model ?? "unknown";
 	const provider = detectProvider(model);
 	const cost = event.data.cost;
-	const isFailed =
-		event.kind === "llm_call_failed" ||
-		event.kind === "stream_partial_delivery" ||
-		event.kind === "settlement_ambiguous";
+	// The status's own predicate (`eventStatus`), so every failure it names renders as one: an action's
+	// `<kind>_failed` printed FAILED with no reason block when this listed kinds of its own.
+	const isFailed = status === "FAILED" || status === "AMBIGUOUS";
 	// A denial spent nothing, so it renders no spend lines — but its `error` is
 	// the whole point of the receipt and must still be shown.
 	const isDenied = DENIAL_KINDS.has(event.kind);

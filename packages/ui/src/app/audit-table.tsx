@@ -3,7 +3,7 @@
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useMemo, useRef, useState } from "react";
-import { type LedgerRow, statusOf } from "../shared/rows.js";
+import { type LedgerRow, type RowStatus, statusOf } from "../shared/rows.js";
 
 type SortKey = "seq" | "ts" | "kind" | "actor" | "model" | "costUt";
 type ColumnKey = SortKey | "status" | "integrity" | "transferId";
@@ -39,17 +39,28 @@ function compare(a: LedgerRow, b: LedgerRow, key: SortKey): number {
 	return av.localeCompare(bv);
 }
 
+/**
+ * Settling is normal, not a celebration — neutral text. Green is earned by verification only
+ * (integrity column). A Record, so a new status cannot fall into another's colour unnoticed.
+ * An ungoverned call is amber: it ran unmetered, which an operator should see.
+ */
+const STATUS_COLOR: Record<RowStatus, string> = {
+	settled: "text-[var(--text)]",
+	released: "text-[var(--text)]",
+	failed: "text-[var(--danger)]",
+	denied: "text-[var(--danger)]",
+	ambiguous: "text-[var(--amber)]",
+	ungoverned: "text-[var(--amber)]",
+	// Ran and recorded, NOT charged: a money state of its own colour.
+	unrecoverable: "text-[var(--unrecoverable)]",
+	info: "text-[var(--faint)]",
+	// Never settled's colour: an unknown outcome must not read as a settled one.
+	unknown: "text-[var(--muted)] italic",
+};
+
 function StatusBadge(props: { row: LedgerRow }): React.JSX.Element {
 	const status = statusOf(props.row);
-	// Settling is normal, not a celebration — neutral text. Green is earned
-	// by verification only (integrity column).
-	const color =
-		status === "settled" || status === "released"
-			? "text-[var(--text)]"
-			: status === "failed" || status === "denied"
-				? "text-[var(--danger)]"
-				: "text-[var(--amber)]";
-	return <span className={`text-xs uppercase ${color}`}>{status}</span>;
+	return <span className={`text-xs uppercase ${STATUS_COLOR[status]}`}>{status}</span>;
 }
 
 function IntegrityBadge(props: { row: LedgerRow }): React.JSX.Element {
@@ -124,9 +135,10 @@ export function AuditTable(props: {
 							return (
 								<button
 									type="button"
-									key={row.id}
+									// The event hash, unique on the chain: an id can repeat, and duplicate keys drop or duplicate rows.
+									key={row.hash}
 									onClick={() => props.onOpen(row)}
-									className={`absolute left-0 flex w-full border-b border-[var(--border)]/50 px-2 py-2 text-left text-xs tabular-nums transition-colors duration-100 hover:bg-[var(--panel-2)]${props.liveIds?.has(row.id) ? " row-live" : ""}`}
+									className={`absolute left-0 flex w-full border-b border-[var(--border)]/50 px-2 py-2 text-left text-xs tabular-nums transition-colors duration-100 hover:bg-[var(--panel-2)]${props.liveIds?.has(row.hash) ? " row-live" : ""}`}
 									style={{ top: 0, transform: `translateY(${item.start}px)` }}
 								>
 									<span className="w-32 shrink-0 text-[var(--muted)]" title={row.ts}>

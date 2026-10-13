@@ -61,7 +61,7 @@ This creates a `.usertrust/` vault in your project root with default config, pol
 
 `npx usertrust init` does not install the package into your project, so the `npm install` line is required.
 
-usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). `@anthropic-ai/sdk` and `openai` are declared as optional peer dependencies. `@google/genai` is not declared at all: usertrust recognises a Google client by its shape (`models.generateContent`), so nothing in the install names that package, and you install it yourself.
+usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). `@anthropic-ai/sdk` (0.116.0 or newer) and `openai` (7.4.0 or newer) are declared as optional peer dependencies. `@google/genai` is not declared at all: usertrust recognises a Google client by its shape (`models.generateContent`), so nothing in the install names that package, and you install it yourself.
 
 ## Integration
 
@@ -91,7 +91,9 @@ const client = await trust(new Anthropic(), {
 });
 ```
 
-On a Google client only `models.generateContent` is governed. `models.generateContentStream` passes through to the SDK untouched: it is not metered, it gets no receipt, and no policy applies to it. Use `generateContent` for calls you need governed.
+On a Google client `models.generateContent` and `models.generateContentStream` are governed. `generateContentStream` resolves to the stream itself, as the SDK's does, with the settled receipt on it: `const stream = await google.models.generateContentStream({ ... })`, then `for await (const chunk of stream)` and `await stream.receipt`. Every other Google method is refused unless it is free, as on the other providers (below): the billable ones (`models.embedContent`, the image and video methods, `chats.create`, `live.connect`, `batches.create`, `interactions.create`, `tunings.tune`, `caches.create` / `update`, the `fileSearchStores` uploads, imports and creates), every `*Internal` method, `authTokens.create`, `files.upload`, and the SDK's raw transport (`apiClient`, `getNextGenClient()`, a next-gen resource's `_client`, `live.auth`, `live.webSocketFactory`) reject with a `PolicyDeniedError` naming the method, and record a `policy_denied` audit event, before the SDK is called. `files.upload` sends the file's bytes with no PII scan: to upload a file and then pass it to `generateContent`, list it, `allowUngoverned: ["files.upload"]` (audited as `ungoverned_call`, and unredacted), or upload on the original client. With automatic function calling (a callable tool in `config.tools`, AFC not disabled), `generateContent` is metered per round: usertrust runs the loop itself, each round its own governed call, and the envelope carries `receipts`, one per round. `generateContentStream` with automatic function calling is refused the same way for now, because a streamed loop is not yet metered round by round: use `generateContent`, or set `config.automaticFunctionCalling.disable: true` and run the tool calls yourself. Reads, lists, deletes, `models.countTokens` and cancels run free (`@google/genai` 1.52.0 or later).
+
+On every client, every SDK method usertrust does not govern is refused unless it cannot start work: `embeddings.create`, `messages.batches.create`, `chat.completions.parse` and the like return a promise that rejects with a `PolicyDeniedError` (`ungoverned_method: <path>`) and write a `policy_denied` audit event, and the SDK is never called. Methods that cannot start work run as before: reads, lists and deletes (every GET or DELETE request) and a few named POSTs such as `messages.countTokens`, `moderations.create` and cancels. To run a refused method unmetered, list it: `trust(client, { allowUngoverned: ["embeddings.create"] })`; each such call is audited as `ungoverned_call`. `client.withOptions(...)` returns a client governed by the same governor, unless it changes where or how calls are sent (`baseURL`, `fetch`, `fetchOptions`, …), which is refused.
 
 Clients in one process share their vault's audit writer. Separate processes cannot write to one vault: give each process its own vault (`vaultBase`), or send their calls through one `usertrust-server`.
 
@@ -189,6 +191,8 @@ Create `.usertrust/usertrust.config.json`:
 }
 ```
 
+`budget`, `pii`, `parentUserId` and `scope` can also be passed to `trust()` (and to `createGovernor()`), and override the file: `trust(client, { pii: "block" })` blocks PII whatever the file says. Every other setting (`circuitBreaker`, `patterns`, `audit`, …) is read from the file only. Besides these, its own options (`configPath`, `dryRun`, `vaultBase`, `endpoint`, `allowUngoverned`) and `tier` (accepted, but currently not applied), any key passed to `trust()` is refused by name: it throws a `TypeError` such as `trust(): unknown option "circuitBreaker" (set it in .usertrust/usertrust.config.json)` instead of being ignored. So does a `pii` value the config does not allow. `allowUngoverned` is for `trust()` only: `createGovernor()` refuses it by name.
+
 `defineConfig` is available as a TypeScript type-checking helper for validating config objects in your code. The actual config file must be `usertrust.config.json` (JSON format):
 
 ```typescript
@@ -217,7 +221,7 @@ const config = defineConfig({
 
 **Policy engine** — 12 field operators (`eq`, `gt`, `in`, `regex`, etc.) with soft/hard enforcement. Block specific models, cap costs, require approvals.
 
-**PII detection** — Luhn-validated credit card numbers, SSN patterns, email addresses, phone numbers, IPv4 addresses. Block or warn before data leaves your network.
+**PII detection** — a pattern scan of each request's prompt text for email, phone, SSN, Luhn-validated credit card, IPv4 and common secret formats (API keys, cloud and GitHub tokens, JWTs, private keys). Block, redact or warn before the prompt leaves your process. It reads the prompt (messages, input, contents), not tool definitions or other request fields, and never the response; see [what it does and does not cover](https://usertrust.ai/docs/policy/pii).
 
 **Circuit breakers** — Per-provider failure isolation. When a provider starts failing, the breaker opens and requests fail fast instead of cascading.
 

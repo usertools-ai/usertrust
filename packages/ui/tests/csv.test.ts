@@ -61,10 +61,16 @@ describe("toCsv", () => {
 		expect(cells.filter((c) => c === "").length).toBeGreaterThan(0);
 	});
 
-	it("maps status from kind and settled flag", () => {
-		expect(toCsv([row()])).toContain("settled");
-		expect(toCsv([row({ kind: "llm_call_failed", settled: false })])).toContain("failed");
-		expect(toCsv([row({ settled: undefined })])).toContain("pending");
+	it("writes the row's status; an outcome row the server gave none is unknown, never pending", () => {
+		const statusAt = (line: string | undefined) => line?.split(",")[CSV_HEADERS.indexOf("status")];
+		expect(statusAt(toCsv([row({ status: "settled" })]).split("\r\n")[1])).toBe("settled");
+		expect(toCsv([row({ kind: "llm_call_failed", settled: false, status: "failed" })])).toContain(
+			"failed",
+		);
+		const { status: _s, ...noStatus } = row({ settled: undefined });
+		const lines = toCsv([noStatus]).split("\r\n");
+		expect(lines[1]?.split(",")[CSV_HEADERS.indexOf("status")]).toBe("unknown");
+		expect(toCsv([noStatus])).not.toContain("pending");
 	});
 
 	it("returns just the header for an empty ledger", () => {
@@ -80,5 +86,12 @@ describe("csvFilename", () => {
 		expect(csvFilename(new Date("2026-07-27T10:00:00Z"), true)).toBe(
 			"usertrust-ledger-2026-07-27-filtered.csv",
 		);
+	});
+
+	it("writes an ungoverned_call's status as ungoverned", () => {
+		const { settled: _s, costUt: _c, costUsd: _u, ...base } = row({ kind: "ungoverned_call" });
+		const lines = toCsv([base]).split("\r\n");
+		const statusIndex = CSV_HEADERS.indexOf("status");
+		expect(lines[1]?.split(",")[statusIndex]).toBe("ungoverned");
 	});
 });

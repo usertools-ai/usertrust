@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import type { SummaryPayload } from "../shared/api.js";
+import { budgetDisplay } from "../shared/budget-display.js";
 
 // Local motion: live-connectivity pulse only. Disabled globally by the
 // prefers-reduced-motion override in styles.css (stylesheet !important wins).
@@ -47,11 +48,7 @@ export function SummaryStrip(props: {
 				<div className="perforation" />
 			</div>
 		);
-	const pct = s.budget > 0 ? Math.max(0, Math.min(100, (s.remainingUt / s.budget) * 100)) : 0;
-	// Healthy budget is --chart (connectivity-neutral), never green: amber under
-	// 20% remaining, danger under 5%.
-	const frac = s.budget > 0 ? s.remainingUt / s.budget : 0;
-	const budgetFill = frac > 0.2 ? "var(--chart)" : frac >= 0.05 ? "var(--amber)" : "var(--danger)";
+	const budget = budgetDisplay(s);
 
 	return (
 		<div className="reveal reveal-1 flex flex-col gap-2">
@@ -90,17 +87,23 @@ export function SummaryStrip(props: {
 						/>
 						<div className="flex w-48 flex-col gap-1">
 							<span className="text-[10px] uppercase tracking-wide text-[var(--muted)] [font-family:var(--font-sans)]">
-								Budget remaining{s.budget > 0 ? ` ${pct.toFixed(1)}%` : ""}
+								Budget remaining{budget.kind === "known" ? ` ${budget.pct.toFixed(1)}%` : ""}
 							</span>
-							{s.budget > 0 ? (
-								<div className="h-1.5 rounded bg-[var(--bg)]">
-									<div
-										className="h-1.5 rounded"
-										style={{ width: `${pct}%`, background: budgetFill }}
-									/>
-								</div>
+							{budget.kind === "known" ? (
+								<>
+									<div className="h-1.5 rounded bg-[var(--bg)]">
+										<div
+											className="h-1.5 rounded"
+											style={{ width: `${budget.pct}%`, background: `var(--${budget.fill})` }}
+										/>
+									</div>
+									<span className="text-[10px] text-[var(--faint)]">{budget.provenance}</span>
+								</>
 							) : (
-								<span className="text-xs italic text-[var(--faint)]">no budget set</span>
+								<>
+									<span className="text-xs italic text-[var(--faint)]">budget unknown</span>
+									<span className="text-[10px] text-[var(--faint)]">{budget.provenance}</span>
+								</>
 							)}
 						</div>
 						<Stat label="Chain" value={`${s.chain.events.toLocaleString()} events`} />

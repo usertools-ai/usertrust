@@ -198,11 +198,103 @@ export function detectPII(data: unknown): PIIDetection {
 	};
 }
 
+// ---------------------------------------------------------------------------
+// Opaque, text-free values: kept BY REFERENCE, never walked
+// ---------------------------------------------------------------------------
+
+/** The built-in `aborted` getter, a brand check: it throws for anything but a real AbortSignal. */
+const ABORT_SIGNAL_ABORTED: ((this: unknown) => unknown) | undefined =
+	typeof AbortSignal === "function"
+		? (Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get as
+				| ((this: unknown) => unknown)
+				| undefined)
+		: undefined;
+
+/**
+ * The abort state of `signal` as the BUILT-IN `AbortSignal.prototype.aborted` getter reports it,
+ * never an own `aborted` property or getter decorating the object. `undefined` when the value is
+ * not a real AbortSignal (the getter's brand check throws) or the platform has none.
+ */
+export function builtInAborted(signal: object): boolean | undefined {
+	if (ABORT_SIGNAL_ABORTED === undefined) return undefined;
+	try {
+		return ABORT_SIGNAL_ABORTED.call(signal) === true;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Does the built-in getter accept `value` as its receiver (a real instance, not a look-alike)? */
+function passesBrand(getter: ((this: unknown) => unknown) | undefined, value: object): boolean {
+	if (getter === undefined) return false;
+	try {
+		getter.call(value);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * THE CLOSED ALLOWLIST, in one place: the opaque, text-free types that redaction keeps BY
+ * REFERENCE and the scan does not walk into. Today: `AbortSignal` only. Flattening it into
+ * a plain object (what the generic walk does) made it `{}`, so a redacted request could no
+ * longer be cancelled. Binary values (ArrayBuffer, typed arrays, DataView, Blob/File) are
+ * deliberately NOT here: they carry content this scanner cannot read, so they keep today's
+ * behaviour (flattened by redaction).
+ *
+ * Each member is recognised by BRAND, never by duck-typing: `instanceof` this realm's own
+ * constructor (guarded by `typeof … === "function"`), AND the built-in's own getter
+ * accepting the value as its receiver, so neither a look-alike (`{ aborted: false,
+ * addEventListener() {} }`) nor an object made from the prototype
+ * (`Object.create(AbortSignal.prototype)`) is kept.
+ */
+const OPAQUE_TEXT_FREE: ReadonlyArray<(value: object) => boolean> = [
+	(v) =>
+		typeof AbortSignal === "function" &&
+		v instanceof AbortSignal &&
+		passesBrand(ABORT_SIGNAL_ABORTED, v),
+];
+
+/**
+ * `value` is, by brand, a member of OPAQUE_TEXT_FREE, and carries no own STRING-named property
+ * at all, enumerable or not (where a string, or a `toJSON` a serializer would call, could hide).
+ */
+export function isOpaqueTextFree(value: object): boolean {
+	return (
+		OPAQUE_TEXT_FREE.some((isMember) => isMember(value)) &&
+		Object.getOwnPropertyNames(value).length === 0
+	);
+}
+
+/**
+ * The positions, from the root of the value being scanned or redacted, where an opaque value is
+ * a TRANSPORT input the SDK hands to its HTTP layer and never serializes into the request:
+ * Google's `params.config.abortSignal`. Only there is it kept by reference and not walked.
+ * Anywhere else (nested in a function response, a tool, a part) it is walked and flattened
+ * like any other object, because there a serializer would read it. OpenAI and Anthropic take
+ * their signal in the request OPTIONS, the second argument, which redaction never touches.
+ */
+const TRANSPORT_SLOTS: ReadonlySet<string> = new Set(["config.abortSignal"]);
+
+/** Kept by reference and not walked: an opaque, text-free value at a transport position. */
+function keptByReference(value: unknown, path: string): boolean {
+	return (
+		TRANSPORT_SLOTS.has(path) &&
+		value !== null &&
+		typeof value === "object" &&
+		isOpaqueTextFree(value)
+	);
+}
+
 function scanValue(value: unknown, currentPath: string, types: Set<string>, paths: string[]): void {
 	if (typeof value === "string") {
 		scanString(value, currentPath, types, paths);
 		return;
 	}
+
+	// An opaque, text-free value at a transport position is not walked (see TRANSPORT_SLOTS).
+	if (keptByReference(value, currentPath)) return;
 
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i++) {
@@ -289,7 +381,7 @@ function matchedTypes(value: string): string[] {
 }
 
 /** Recursively traverse data and replace PII strings with redacted placeholders. */
-function redactValue(value: unknown): unknown {
+function redactValue(value: unknown, path = ""): unknown {
 	if (typeof value === "string") {
 		const types = matchedTypes(value);
 		if (types.length > 0) {
@@ -299,14 +391,17 @@ function redactValue(value: unknown): unknown {
 	}
 
 	if (Array.isArray(value)) {
-		return value.map((item) => redactValue(item));
+		return value.map((item, i) => redactValue(item, `${path}[${i}]`));
 	}
+
+	// An opaque, text-free value at a transport position is kept BY REFERENCE (TRANSPORT_SLOTS).
+	if (keptByReference(value, path)) return value;
 
 	if (value !== null && typeof value === "object") {
 		const record = value as Record<string, unknown>;
 		const result: Record<string, unknown> = {};
 		for (const key of Object.keys(record)) {
-			result[key] = redactValue(record[key]);
+			result[key] = redactValue(record[key], path === "" ? key : `${path}.${key}`);
 		}
 		return result;
 	}

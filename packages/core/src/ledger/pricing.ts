@@ -460,6 +460,18 @@ const PROVIDER_MODEL_MAP: Record<string, string[]> = {
 	moonshot: ["kimi-"],
 };
 
+/**
+ * The vendor a model id belongs to, from this table's own provider data (`PROVIDER_MODEL_MAP`), or `undefined` when no
+ * vendor publishes that prefix. A reader that labels models (the weekly report) derives from here, so a model added to
+ * the table under a mapped prefix can never be labelled "unknown" by a second, hand-kept list.
+ */
+export function providerOfModel(model: string): string | undefined {
+	for (const [provider, prefixes] of Object.entries(PROVIDER_MODEL_MAP)) {
+		if (prefixes.some((p) => model.startsWith(p))) return provider;
+	}
+	return undefined;
+}
+
 /** Return all PRICING_TABLE model keys that belong to a given provider. */
 export function modelsForProvider(provider: string): string[] {
 	// Object.hasOwn guards against inherited Object.prototype keys: a provider

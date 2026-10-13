@@ -43,7 +43,7 @@ Monorepo, npm workspaces (`packages/*`). `site/` is a Next.js app and is **not**
 | `packages/acs-adapter` | `usertrust-acs-adapter` | ACS adapter. |
 | `packages/ui` | `usertrust-ui` | Visual ledger (bundled front end; `build` = `tsc && vite build`). |
 | `packages/monte-cristo` | `usertrust-monte-cristo` | Simulation engine. Not in the release lockstep. |
-| `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. |
+| `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. The workspace name is internal; the plugin is published as `usertools` (`/plugin install usertools@usertrust`). |
 
 The first six are version-locked and released together. `monte-cristo` and `claude-code-plugin`
 are not.
@@ -64,7 +64,7 @@ the kit first, never committed here.
 
 | Area | Files |
 |---|---|
-| Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `config.ts`, `proxy.ts` |
+| Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `default-deny.ts`, `config.ts`, `proxy.ts` |
 | Ledger | `ledger/{client,engine,pricing}.ts` |
 | Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
@@ -1047,6 +1047,10 @@ the write reported failure", which is strictly more than either field alone.
 *Prevents:* `failClosed` replacing an actionable denial with an `AuditDegradedError` that hides
 *why* the call was refused. `failClosed` exists to stop an unaudited SPEND from settling; a denial
 has already refused the call and moved no money, so it has nothing left to fail closed about.
+This covers a denial whose append fails DURING the call. A `trust()` client whose writer is already
+degraded when a call starts is refused under `failClosed` before any gate runs
+(`refuseIfAuditDegradedAtStart`): no policy is evaluated, so there is no denial to report, and
+nothing is held, called or appended.
 
 `decision: "deny"` on both kinds is load-bearing — it is what `entropy.ts` counts. That filter
 selects denial kinds by NAME as well as by the `"policy"` substring, because `ledger_rejected` does
@@ -1207,8 +1211,21 @@ inside the chain; and a "repair" that chooses which evidence is true. `quarantin
 subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evidence as a segment.
 
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
-`packages/core/src/audit/read.ts`, `packages/core/src/audit/dead-letters.ts`, and
+`packages/core/src/audit/read.ts`, `packages/core/src/audit/effective-budget.ts`, `packages/core/src/audit/dead-letters.ts`, and
 `packages/core/src/audit/verify.ts` contain zero filesystem write calls. Keep it that way — a verifier that mutates its subject is not a verifier.
+
+**A vault reader's budget is the one the governor ENFORCES.** `createGovernor` and `trust()` resolve the budget from
+`opts.budget`, `opts.configPath`, the vault's `usertrust.config.json` or the default, then record the result in
+`.usertrust/effective-budget.json` (`budget/effective-record.ts`; advisory, never throws; a failed write removes any
+earlier record). `loadBudgetConfig` reads that record first, then the vault config, and returns `source: "governor" |
+"config" | "several" | "unreadable" | "unpublished"`, the record's `writtenAt` and, for `unreadable`, its `reason`. The
+last three are an UNKNOWN budget, each said as itself (never "no budget configured": every governor enforces one), and
+a reader shows no remaining figure for them. Wherever a budget is SHOWN, its provenance is shown with it, in the one wording
+`describeBudgetSource` gives: only a governor record reads as the enforced figure, always "as of" its `writtenAt` (so a
+record that outlived a failed removal reads as old, never as current); a config budget says "not confirmed as
+enforced". The ledger UI, `inspect`, `health` and `report` all read it; never add a reader that parses the config file
+alone, or a surface that shows the figure without its provenance.
+The governor registers LAST in both constructors, once it has fully started (a failed start enforces nothing), and every step of the record's failure path is non-throwing. The record is PUBLISHED only while this process holds the vault's audit writer lock, which a governor takes lazily at its first append (`AuditWriter.lockOwner`, `openSharedAuditWriter`'s `onAppended`): before the first successful append nothing is published (`unpublished`), and a second process, whose appends fail on the lock, never overwrites the holder's record. Several live governors on one vault are aggregated in-process (`registerEnforcedBudget`): the record is the agreed budget, or `budget: null` with the governor count when they differ, which every reader shows as unknown (`source: "several"`); it is rewritten on every start and every destroy while the lock is held, and again when a new writer takes the lock, never stored as a flag. Readers stat the record before opening it (a FIFO would block them). The ledger UI re-reads it when it or the vault config changes. Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
 
 **`vaultPath` means two different directories.** `createAuditWriter(vaultPath)` joins
 `vaultPath/.usertrust/audit` — it takes the **project root**. `verifyVault`, `readLedgerEvents`,
@@ -1404,7 +1421,8 @@ invariant is only as strong as the event shapes themselves: the DLQ persists wha
 carried, verbatim (see the DLQ note above).
 
 **`redactPII` is pure.** It deep-clones and never mutates the caller's object. That is what makes
-`pii: "redact"` safe: the *outbound* request is a redacted clone, so PII never egresses. `"block"`
+`pii: "redact"` safe: PII the prompt scan finds never egresses: the outbound request is a redacted
+clone (fields the scan does not read are not redacted unless the prompt scan fired; see LIMITATIONS §11). `"block"`
 throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
 
 **Signature trust is anchored by the operator's publisher→key registry, never by the embedded key.**
@@ -1488,7 +1506,15 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   event's `error` text, so one hostile value arrives through two fields. C1 coverage matters here
   for the same reason it does in `budget.ts`. The UI is deliberately NOT patched: it renders
   these into DOM text nodes, where escapes are inert, and it displays this same already-scrubbed
-  receipt string.
+  receipt string. The standalone CLI (`verify/src/cli.ts`) imports this same function for its
+  verdict output — every chain-error line, `First event:`/`Last event:`, the latest anchor's keyId
+  and timestamp, the witness error, each anchoring warning, and the argv/caught-error echoes —
+  because those, too, are strings the audited vault (or argv) controls, printed at the auditor.
+  It is an import, not a copy: the count above is unchanged.
+  Beyond C0, DEL and C1 it also replaces every character that reorders or hides text without a glyph:
+  Unicode's format-character category, tested by its property (`/^\p{Cf}$/u` in `isInvisibleFormat`), never
+  by a hand list of ranges, which missed nine members of the class. The zero-width joiner is included, so an
+  emoji sequence shows its parts joined by `?`.
 - Independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.
@@ -1592,16 +1618,56 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 ### Client detection
 
 **Duck typing only; never import a provider SDK at runtime.** `detect.ts` imports types only.
-`@anthropic-ai/sdk` and `openai` are **optional** peer dependencies; Google has no peer entry at
-all. This is why provider SDK majors can be bumped with no code change.
+`@anthropic-ai/sdk`, `openai` and `@google/genai` are **optional** peer dependencies. Their floors
+(`>=0.116.0`, `>=7.4.0`, `>=1.52.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
+versions the default-deny free list was classified on. Moving a floor means re-running that
+classification against the new SDK, and `default-deny.test.ts` fails if the floor and the
+constant disagree.
 
-**The governance boundary is deliberately partial and is documented in `detect.ts`.** Governed:
-Anthropic `messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected),
-OpenAI `chat.completions.create` and `responses.create` when present, Google
-`models.generateContent`. Explicitly **ungoverned** — these bypass governance, audit, and budget
-enforcement: `messages.batches`, `beta.models`, `beta.files`, OpenAI `responses.retrieve/cancel/
-delete`, the `responses.stream()` / `responses.parse()` helpers, the OpenAI `beta.*` namespace, and
-legacy `completions.create`. If you add a governed surface, update that doc block.
+**The governance boundary is documented in `detect.ts`.** Governed: Anthropic
+`messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected), OpenAI
+`chat.completions.create` and `responses.create` when present, Google `models.generateContent`
+and `models.generateContentStream`.
+**Every client is default-deny** (`default-deny.ts`): every other function-valued
+SDK member reached off the governed client, at any depth, is refused through ONE function,
+`refuseUngovernedMethod` in `trust()` (the same one Google's AFC refusals use, below), which first runs
+the degraded-audit preflight (under `failClosed`, a writer already degraded refuses with
+`AuditDegradedError` before anything is recorded), then writes `policy_denied` at the denial boundary
+and rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
+requests are all GET or DELETE, plus POSTs named with a reason, minus GET/DELETE methods named as
+exceptions. Each entry cites its SDK source line and verb; they run with the RAW resource as
+`this`, because `this._client` through the boundary is a refusing stand-in, and
+`default-deny.test.ts` calls every entry and fails on a POST its `FREE_POSTS` does not name and `trust({ allowUngoverned })` (audited as
+`ungoverned_call`). `_client` and the client's raw HTTP members are refused by name; `withOptions`
+is re-wrapped by the same governor, unless an option outside `GOVERNED_WITH_OPTIONS_KEYS` (an
+allow-list) changes the transport, when the new client is a refusing stand-in. A POST is freed only with a reason it cannot start billable work, written in both places; a create that can
+allocate storage is not free. If you add a governed surface, update that doc block and the free list.
+A method wrapper is cached per (path, raw target, name), so a method keeps its identity across
+reads; a refused wrapper builds a fresh error per call.
+**Google clients are default-deny through the same boundary**, with four Google rules in
+`default-deny.ts`:
+- members are read with the RAW target as receiver, so the `interactions` / `webhooks` getters run
+  on the raw client (they call `this.getNextGenClient()` and cache on `this`);
+- the raw transport is a refusing stand-in BY NAME, matched before anything else: `apiClient`
+  (client and every namespace), `_client`, `_nextGenClient`, and `auth` / `webSocketFactory`
+  under `live` (`GOOGLE_RAW_MEMBERS`, `GOOGLE_TRANSPORT_OBJECTS`);
+- a resource is recognised by SHAPE (`isResource`): it carries `apiClient` or `_client`, or it is a
+  non-array object with a function member or an accessor, own or inherited below
+  `Object.prototype`, read through descriptors so no getter runs. A duck-typed client's namespaces
+  are guarded too; plain data (`httpOptions`) is returned as it is, unexamined;
+- a method is decided by its PATH: `chats.modelsModule` (the raw `Models`) and the cached
+  `_interactions` / `_webhooks` are guarded at their own paths, where nothing is free.
+`FREE_METHODS.google` cites `dist/node/index.mjs:LINE VERB path` per entry.
+`GOOGLE_REFUSED_METHODS` in `govern.ts` is a HINT table only (its names get the governAction() hint);
+it refuses nothing itself. With automatic
+function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in `google-afc.ts`, a mirror of the
+SDK's `shouldDisableAfc`, made on a snapshot of the request that is then what is forwarded),
+`models.generateContent` runs the loop itself, each round its own governed call
+(`runGovernedAfc`, which calls the SDK's own `generateContentInternal` on the RAW `models`), and
+`models.generateContentStream` is refused (a streamed loop is not metered per round yet).
+`google-default-deny.test.ts` pins the classification: it walks a real Gemini and Vertex client and
+fails on a function the table does not name, or a callable object left raw. If you add a governed
+or free Google surface, update `detect.ts`, the free list and that table.
 
 ---
 
@@ -1655,8 +1721,8 @@ Drop every line whose raw text contains `from "`, then require exact string equa
   lines **are** compared, so both packages must import the same names in the same order and may
   differ only in the module path.
 
-Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 10200 (a
-vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900→10000→10100→10200 on this line as
+Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 10500 (a
+vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900→10000→10100→10200→10300→10500 (2026-10-12) on this line as
 `packages/verify` grew legitimate node-builtins-only surface, with master separately raising
 4200→4300→4320 for its own receipt-hardening work over the same period — both lineages are folded
 in here and both are recorded in `packages/core/tests/harden/anchoring/anchor-additive.test.ts`

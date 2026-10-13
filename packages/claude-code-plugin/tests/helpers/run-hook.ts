@@ -82,7 +82,15 @@ export function runHook(
 	const preload = nodeArgs.includes(PASSWD_HOME_PRELOAD) ? [] : ["--import", PASSWD_HOME_PRELOAD];
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [...preload, ...nodeArgs, ...script], {
-			env: { ...inherited, ...env, TEST_PASSWD_HOME: passwdHomeFor(env) },
+			env: {
+				...inherited,
+				// Never the developer's own Claude Code settings (peer-meter.mjs reads
+				// `enabledPlugins` from them): a home and a project of the run's own.
+				CLAUDE_CONFIG_DIR: join(passwdHomeFor(env), ".claude"),
+				CLAUDE_PROJECT_DIR: join(passwdHomeFor(env), "project"),
+				...env,
+				TEST_PASSWD_HOME: passwdHomeFor(env),
+			},
 			stdio: ["pipe", "pipe", "pipe"],
 			...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
 		});
