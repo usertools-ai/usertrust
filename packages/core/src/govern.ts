@@ -1783,7 +1783,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// enters here, so one check covers create, stream and parse alike.
 			const refused = movedOptionsRefusal(args, thisArg, attribution);
 			if (refused !== undefined) await refused;
-			args = detachedArgs(kind, args);
+			// Google's request reaches here as the request gate's mirror: plain data already holding the
+			// governed copy of `config.httpOptions` pinned at call start, so it is not copied again.
+			if (kind !== "google") args = detachedArgs(kind, args);
 			const envelope = resolveEnvelope(attribution, config.parentUserId);
 			// Spread into every audit record this call emits (A1: an attributed hold
 			// must leave an attributed forensic trail on the settle AND the void
@@ -5560,7 +5562,11 @@ function buildGoogleProxy<T>(
 					if (gate.runAfcLoop) {
 						// The SDK would loop internally and only the last round would be metered: run
 						// the loop here instead, ON THE MIRROR, each round its own governed call (see
-						// google-afc.ts).
+						// google-afc.ts). What decides and what is sent are one reading: the verdict is
+						// the dry run's (its capture of the caller's request, with the call-start
+						// httpOptions), and every round, like the single-call forward, is built from
+						// the send tree, `args[0]` after the gate. Nothing reads the caller's object
+						// after the gate.
 						return runGovernedAfc(args[0] as Record<string, unknown>, (roundParams) =>
 							intercept(originalGenerate, target, [roundParams, ...args.slice(1)]),
 						);

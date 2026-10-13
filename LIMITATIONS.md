@@ -133,9 +133,18 @@ own:
   a plain array rather than constructing your subclass, so your subclass's
   constructor does not run. The result serializes the same.
 - **`config.httpOptions` is read at the start of the call**, as per-call request
-  options are, and the SDK is given that copy; every other field is read when the
-  SDK reads it. An `httpOptions` the config inherits is read by the SDK through
-  the prototype, unchecked (a known gap).
+  options are. The SDK is given that copy (only the allowed keys) wherever it
+  later reads `params.config.httpOptions`, even through a `config` added or
+  replaced after the call started; with none at the start, none is given. Your
+  own `httpOptions` is never read again. An `httpOptions` the config inherits is
+  not an own property, so it is not read at the start, and none is sent, where the
+  SDK alone would send its headers.
+- **Every other field is read when the SDK reads it, not when the call starts.**
+  The SDK reads the request after its own first `await`, so a field you change
+  right after calling (a `systemInstruction`, `contents`) is sent as it is then,
+  as without usertrust, and is what the PII scan, redaction and the meter see.
+  Before this, the request's top-level fields, and its `config`'s, were copied at
+  the start of the call.
 - **A callable tool reaches the SDK as a wrapper.** Its `tool()` runs inside the
   first governed round, and `callTool()` is passed through; nothing else of the
   tool object is reachable from the request. A call the SDK sends without its own

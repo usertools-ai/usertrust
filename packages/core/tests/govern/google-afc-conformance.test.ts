@@ -2364,7 +2364,11 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 						["a plain tool", false],
 						["a tool with an inputSchema (MCP usage)", true],
 					] as const) {
-						it(`${on}: ${shape} beside ${toolShape} is sent as natively${mcp ? ", its header included (the SDK's MCP path reads it by name)" : ", without its header"}`, async () => {
+						// config.httpOptions is pinned at call start for its path, read as an OWN data property:
+						// an inherited one is absent there, so the governed request carries no header from it,
+						// where natively the SDK's MCP path finds it through the prototype.
+						const inheritedOnMcp = mcp && shape === "an INHERITED httpOptions";
+						it(`${on}: ${shape} beside ${toolShape} is sent as natively${inheritedOnMcp ? ", except its header: an inherited httpOptions is not read at call start, so none is sent" : mcp ? ", its header included (the SDK's MCP path reads it by name)" : ", without its header"}`, async () => {
 							const t = sameConfig(() =>
 								makeConfig(mcp ? [{ inputSchema: {}, googleSearch: {} }] : SEARCH()),
 							);
@@ -2372,8 +2376,15 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 
 							expectSameRequest(r);
 							expect(r.raw.requests[0]?.testHeader).toBe(mcp ? "1" : null);
-							expect(r.gov.requests[0]?.testHeader).toBe(r.raw.requests[0]?.testHeader);
-							expect(r.gov.requests[0]?.apiClientHeader).toBe(r.raw.requests[0]?.apiClientHeader);
+							expect(r.gov.requests[0]?.testHeader).toBe(
+								inheritedOnMcp ? null : r.raw.requests[0]?.testHeader,
+							);
+							if (inheritedOnMcp) {
+								// with no httpOptions the SDK starts from its default headers; it still marks MCP usage
+								expect(r.gov.requests[0]?.apiClientHeader).toContain("mcp_used/");
+							} else {
+								expect(r.gov.requests[0]?.apiClientHeader).toBe(r.raw.requests[0]?.apiClientHeader);
+							}
 						});
 					}
 				}

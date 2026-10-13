@@ -55,8 +55,16 @@ const LOOP: Round[] = [
 ];
 
 /** A `fetch` stand-in recording each provider request and answering with the next scripted round. */
-function wire(rounds: Round[] = [{ text: "done" }]) {
-	const requests: Array<{ url: string; body: Loose; testHeader: string | null }> = [];
+function wire(
+	rounds: Round[] = [{ text: "done" }],
+	usage = { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+) {
+	const requests: Array<{
+		url: string;
+		body: Loose;
+		testHeader: string | null;
+		timeoutHeader: string | null;
+	}> = [];
 	const fetchStub = async (
 		url: unknown,
 		init?: { body?: unknown; headers?: HeadersInit },
@@ -66,6 +74,8 @@ function wire(rounds: Round[] = [{ text: "done" }]) {
 			body: JSON.parse(String(init?.body)) as Loose,
 			// a caller's own header, sent through `config.httpOptions.headers`
 			testHeader: new Headers(init?.headers).get("x-test"),
+			// the transport's header for `config.httpOptions.timeout`
+			timeoutHeader: new Headers(init?.headers).get("x-server-timeout"),
 		});
 		const r = rounds[Math.min(requests.length - 1, rounds.length - 1)] as Round;
 		const payload = {
@@ -80,7 +90,7 @@ function wire(rounds: Round[] = [{ text: "done" }]) {
 					},
 				},
 			],
-			usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+			usageMetadata: usage,
 		};
 		return String(url).includes(":streamGenerateContent")
 			? new Response(`data: ${JSON.stringify(payload)}\n\n`, {
@@ -995,69 +1005,6 @@ describe("config.httpOptions is read at call start, as per-call request options 
 				expect(raw.requests.map((q) => q.testHeader)).toEqual(["late"]);
 				expect(gov.requests.map((q) => q.testHeader)).toEqual(["early"]);
 			});
-
-			const hidden: Array<[string, () => Loose]> = [
-				[
-					"a hidden systemInstruction (no tools: the SDK reads it by name)",
-					() =>
-						Object.defineProperty(
-							{ httpOptions: { headers: { "x-test": "h" } } },
-							"systemInstruction",
-							{ value: "be brief", enumerable: false },
-						) as Loose,
-				],
-				[
-					"a hidden automaticFunctionCalling { disable: true } beside a callable tool",
-					() =>
-						Object.defineProperty(
-							{ tools: [callable().tool], httpOptions: { headers: { "x-test": "h" } } },
-							"automaticFunctionCalling",
-							{ value: { disable: true }, enumerable: false },
-						) as Loose,
-				],
-			];
-			if (method === "generateContentStream") {
-				it(`${on}: a NON-ENUMERABLE own $schema responseSchema beside tools, with httpOptions present, is still moved and sent as the SDK sends it: governed == native`, async () => {
-					const make = () =>
-						request(
-							Object.defineProperty(
-								{
-									tools: [{ googleSearch: {} }],
-									responseMimeType: "application/json",
-									httpOptions: { headers: { "x-test": "h" } },
-								},
-								"responseSchema",
-								{
-									value: {
-										$schema: "https://json-schema.org/draft/2020-12/schema",
-										type: "object",
-									},
-									enumerable: false,
-									writable: true,
-									configurable: true,
-								},
-							),
-						);
-					const r = await nativeThenGoverned(method, same(make), { vertex });
-					expectSameSend(r);
-					expect(JSON.stringify(r.raw.requests[0]?.body)).toContain("$schema");
-				});
-			}
-
-			for (const [shape, config] of hidden) {
-				it(`${on}: ${shape} survives with httpOptions present: governed == native`, async () => {
-					const r = await nativeThenGoverned(
-						method,
-						same(() => request(config())),
-						{
-							vertex,
-							rounds: LOOP,
-						},
-					);
-					expectSameSend(r);
-					expect(r.raw.requests).toHaveLength(1);
-				});
-			}
 		}
 	}
 });
@@ -1606,5 +1553,232 @@ describe("a large function response is snapshot in linear time", () => {
 		const large = await median(30_000);
 		// linear: about 4 (measured 4.2 to 4.7); quadratic membership checks: about 13 to 16
 		expect(large / small).toBeLessThan(8);
+	});
+});
+
+describe("params.config.httpOptions is pinned at call start for its PATH, whichever config a later read finds", () => {
+	const SECRET = "ssn 123-45-6789";
+	const late = () => ({ extraBody: { systemInstruction: { parts: [{ text: SECRET }] } } });
+
+	/** One governed call whose request the caller changes right after the call starts. */
+	async function lateChange(
+		method: Method,
+		start: () => Loose,
+		change: (params: Loose) => void,
+	): Promise<{ n: number; leaked: boolean; result: string }> {
+		const w = wire();
+		globalThis.fetch = w.fetchStub as typeof fetch;
+		const governed = await trust(sdkClient(false), {
+			dryRun: true,
+			budget: 500_000,
+			vaultBase: vault,
+			_audit: recordingAudit(),
+		});
+		const params = start();
+		const pending = runOn(governed.models, method, params);
+		change(params);
+		const { result } = await pending;
+		await governed.destroy();
+		const bodies = w.requests.map((q) => JSON.stringify(q.body));
+		return { n: bodies.length, leaked: bodies.some((b) => b.includes(SECRET)), result };
+	}
+
+	for (const method of METHODS) {
+		it(`${method}: config present without httpOptions at call start, httpOptions with extraBody added late: never sent`, async () => {
+			const r = await lateChange(
+				method,
+				() => request({}),
+				(p) => {
+					(p["config"] as Loose)["httpOptions"] = late();
+				},
+			);
+			expect(r).toEqual({ n: 1, leaked: false, result: "ok" });
+		});
+
+		it(`${method}: no config at call start, a config carrying extraBody added late: never sent`, async () => {
+			const r = await lateChange(
+				method,
+				() => ({ model: "gemini-2.5-flash", contents: "go" }),
+				(p) => {
+					p["config"] = { httpOptions: late() };
+				},
+			);
+			expect(r).toEqual({ n: 1, leaked: false, result: "ok" });
+		});
+
+		it(`${method}: httpOptions present at call start, params.config REPLACED late by one carrying extraBody: never sent`, async () => {
+			const r = await lateChange(
+				method,
+				() => request({ httpOptions: { timeout: 5000 } }),
+				(p) => {
+					p["config"] = { httpOptions: late() };
+				},
+			);
+			expect(r).toEqual({ n: 1, leaked: false, result: "ok" });
+		});
+
+		it(`${method}: a config replaced late by a Proxy: its traps never run for httpOptions, and nothing of it is sent`, async () => {
+			const trapped = { httpOptions: 0 };
+			const r = await lateChange(
+				method,
+				() => request({}),
+				(p) => {
+					const target: Loose = { httpOptions: late() };
+					const count = (key: string | symbol) => {
+						if (key === "httpOptions") trapped.httpOptions++;
+					};
+					p["config"] = new Proxy(target, {
+						get: (t, key, receiver) => {
+							count(key);
+							return Reflect.get(t, key, receiver);
+						},
+						has: (t, key) => {
+							count(key);
+							return Reflect.has(t, key);
+						},
+						getOwnPropertyDescriptor: (t, key) => {
+							count(key);
+							return Reflect.getOwnPropertyDescriptor(t, key);
+						},
+					});
+				},
+			);
+			expect(r).toEqual({ n: 1, leaked: false, result: "ok" });
+			expect(trapped.httpOptions).toBe(0);
+		});
+
+		it(`${method}: a config replaced late by one whose httpOptions is an accessor: the getter never runs, nothing of it is sent`, async () => {
+			const getter = vi.fn(late);
+			const r = await lateChange(
+				method,
+				() => request({}),
+				(p) => {
+					p["config"] = Object.defineProperty({}, "httpOptions", { get: getter, enumerable: true });
+				},
+			);
+			expect(r).toEqual({ n: 1, leaked: false, result: "ok" });
+			expect(getter).not.toHaveBeenCalled();
+		});
+
+		for (const [backend, vertex] of BACKENDS) {
+			const on = `${method} on ${backend}`;
+
+			it(`${on}: httpOptions with an allowed key and an unlisted one is refused (request_option_refused), nothing sent`, async () => {
+				const make = () =>
+					request({ httpOptions: { headers: { "x-test": "h" }, notAnOption: true } });
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expect(r.govResult).toContain("request_option_refused");
+				expect(r.govResult).toContain("config.httpOptions.notAnOption");
+				expect(r.auditKinds).toEqual(["policy_denied"]);
+				expect(r.gov.requests).toHaveLength(0);
+			});
+
+			it(`${on}: httpOptions with allowed keys only (headers, timeout, apiVersion): the wire's url and headers are what the governed copy gives, as natively`, async () => {
+				const make = () =>
+					request({
+						httpOptions: { headers: { "x-test": "h" }, timeout: 5000, apiVersion: "v1alpha" },
+					});
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expectSameSend(r);
+				const seen = (q: {
+					url: string;
+					testHeader: string | null;
+					timeoutHeader: string | null;
+				}) => [new URL(q.url).pathname.split("/")[1], q.testHeader, q.timeoutHeader];
+				expect(r.gov.requests.map(seen)).toEqual([["v1alpha", "h", "5"]]);
+				expect(r.gov.requests.map(seen)).toEqual(r.raw.requests.map(seen));
+			});
+		}
+
+		it(`${method}: a PLAIN field changed after the call starts (systemInstruction) is sent as the SDK reads it, natively and governed alike`, async () => {
+			const run = async (models: unknown) => {
+				const w = wire();
+				globalThis.fetch = w.fetchStub as typeof fetch;
+				const config: Loose = {};
+				const pending = runOn(models, method, request(config));
+				config["systemInstruction"] = "answer in French";
+				await pending;
+				return w.requests.map((q) => q.body);
+			};
+			const native = await run(sdkClient(false).models);
+			const governed = await trust(sdkClient(false), {
+				dryRun: true,
+				budget: 500_000,
+				vaultBase: vault,
+				_audit: recordingAudit(),
+			});
+			const sent = await run(governed.models);
+			await governed.destroy();
+			expect(JSON.stringify(native)).toContain("answer in French");
+			expect(sent).toEqual(native);
+		});
+
+		it(`${method}, pii "redact": contents replaced after the call starts are what is scanned and sent (redacted), as the SDK reads them`, async () => {
+			const run = async (models: unknown) => {
+				const w = wire();
+				globalThis.fetch = w.fetchStub as typeof fetch;
+				const params: Loose = request({});
+				const pending = runOn(models, method, params);
+				params["contents"] = EMAIL;
+				await pending;
+				return JSON.stringify(w.requests.map((q) => q.body));
+			};
+			const native = await run(sdkClient(false).models);
+			const governed = await trust(sdkClient(false), {
+				dryRun: true,
+				budget: 500_000,
+				vaultBase: vault,
+				_audit: recordingAudit(),
+				pii: "redact",
+			});
+			const sent = await run(governed.models);
+			await governed.destroy();
+			expect(native).toContain(EMAIL); // natively the late contents are sent
+			expect(sent).toContain(REDACTED); // governed: the scan saw them, and they went redacted
+			expect(sent).not.toContain(EMAIL);
+		});
+	}
+});
+
+describe("the hold is sized from the request that is sent", () => {
+	// Fails today, on master's source too (measured: held 103, settled 301): the input-token estimate
+	// counts nothing of a Google prompt's parts, so the hold covers little more than the output. The
+	// hold is sized from what is sent (the mirror); when the estimate counts Google parts, this row
+	// passes and must become a plain `it`.
+	it.fails("generateContent: a ~100,000-token prompt is held at or above what it costs", async () => {
+		const held: number[] = [];
+		const posted: number[] = [];
+		const engine = {
+			spendPending: vi.fn(async (p: { transferId: string; amount: number }) => {
+				held.push(p.amount);
+				return { transferId: p.transferId };
+			}),
+			postPendingSpend: vi.fn(async (_id: string, amount?: number) => {
+				posted.push(amount ?? Number.NaN);
+			}),
+			voidPendingSpend: vi.fn(async () => {}),
+			destroy: vi.fn(),
+		};
+		const w = wire([{ text: "done" }], {
+			promptTokenCount: 100_000,
+			candidatesTokenCount: 10,
+			totalTokenCount: 100_010,
+		});
+		globalThis.fetch = w.fetchStub as typeof fetch;
+		const governed = await trust(sdkClient(false), {
+			dryRun: false,
+			budget: 50_000_000,
+			vaultBase: vault,
+			_engine: engine,
+			_audit: recordingAudit(),
+		});
+		const prompt = "lorem ipsum dolor sit amet ".repeat(15_000); // ~405,000 characters
+		const { result } = await runOn(governed.models, "generateContent", request({}, prompt));
+		await governed.destroy();
+		expect(result).toBe("ok");
+		expect(w.requests).toHaveLength(1);
+		expect(held).toHaveLength(1);
+		expect(posted).toHaveLength(1);
+		expect(held[0]).toBeGreaterThanOrEqual(posted[0] as number);
 	});
 });

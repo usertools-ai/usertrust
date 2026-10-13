@@ -446,12 +446,15 @@ interface Membrane {
  * writes react to the recorder's scripted answers, not to the caller's request, so they are absorbed
  * (neither written through to the caller's objects nor recorded).
  */
-/** `config.httpOptions` as read at call start (see `snapshotGoogleRequest`): served in place of a live read. */
+/**
+ * `params.config.httpOptions` as call start pinned it (see `snapshotGoogleRequest`): served for
+ * that PATH, whichever config object a later read returns, in place of any read of the caller's.
+ */
 export interface PinnedHttpOptions {
-	/** The caller's own config object that holds it. */
-	readonly config: object;
-	/** The copy that is served for its `httpOptions` key. */
-	readonly httpOptions: Record<string, unknown>;
+	/** The governed copy, or `undefined`: absent at call start, so absent at every later read. */
+	readonly httpOptions: Record<string, unknown> | undefined;
+	/** Whether it was an enumerable property at call start. */
+	readonly enumerable: boolean;
 }
 
 function makeMembrane(
@@ -539,6 +542,9 @@ function makeMembrane(
 		const shadow: object = typeof real === "function" ? function shadow() {} : isArray ? [] : {};
 		if (isArray) (shadow as unknown[]).length = (real as unknown[]).length;
 		const self: Wrapped = { real, rec };
+		/** Is `key` here the pinned path, `params.config.httpOptions`? */
+		const pinnedHere = (key: string | symbol): boolean =>
+			pinned !== undefined && key === "httpOptions" && rec.role === "config";
 		const proxy = new Proxy(shadow, {
 			get(_t, key) {
 				if (typeof key === "symbol") {
@@ -548,12 +554,11 @@ function makeMembrane(
 					return sv !== null && typeof sv === "object" ? wrap(sv, undefined) : sv;
 				}
 				rec.touched = true;
-				// PASS-THROUGH: every access reads the caller's object, with it as the receiver. One key is
-				// pinned: the caller's config's own data `httpOptions`, read and copied at call start.
-				const v =
-					pinned !== undefined && key === "httpOptions" && real === pinned.config
-						? pinned.httpOptions
-						: Reflect.get(real, key, real);
+				// PASS-THROUGH: every access reads the caller's object, with it as the receiver. One path
+				// is pinned: `params.config.httpOptions` answers the call-start copy (or absent), whichever
+				// config object this is; the caller's own property is never read for it.
+				const pin = pinnedHere(key);
+				const v = pin ? pinned?.httpOptions : Reflect.get(real, key, real);
 				if (
 					rec.role === "toolEntry" &&
 					(key === "tool" || key === "callTool") &&
@@ -599,18 +604,22 @@ function makeMembrane(
 				const priorRec =
 					prior !== null && typeof prior === "object" ? proxies.get(prior)?.rec : undefined;
 				const w = wrap(v, childRole(rec.role, key), priorRec);
-				if (v !== undefined || presentWithoutTraps(real, key)) record(rec, key, w);
+				if (v !== undefined || (!pin && presentWithoutTraps(real, key))) record(rec, key, w);
 				return w;
 			},
 			has(_t, key) {
 				rec.touched = true;
-				const found = Reflect.has(real, key);
+				const found = pinnedHere(key) ? pinned?.httpOptions !== undefined : Reflect.has(real, key);
 				if (found && typeof key === "string" && !rec.reads.has(key)) rec.present.add(key);
 				return found;
 			},
 			ownKeys() {
 				rec.touched = true;
-				const keys = Reflect.ownKeys(real);
+				let keys = Reflect.ownKeys(real);
+				if (pinnedHere("httpOptions")) {
+					keys = keys.filter((k) => k !== "httpOptions");
+					if (pinned?.httpOptions !== undefined) keys.push("httpOptions");
+				}
 				rec.keysSeen ??= keys;
 				for (const k of keys) if (typeof k === "string") rec.ownSeen.add(k);
 				return keys;
@@ -622,7 +631,11 @@ function makeMembrane(
 					(t as unknown[]).length = length;
 					return { value: length, writable: true, enumerable: false, configurable: false };
 				}
-				const d = Reflect.getOwnPropertyDescriptor(real, key);
+				const d = pinnedHere(key)
+					? pinned?.httpOptions === undefined
+						? undefined
+						: { value: pinned.httpOptions, enumerable: pinned.enumerable }
+					: Reflect.getOwnPropertyDescriptor(real, key);
 				if (typeof key === "string") rec.enumerable.set(key, d?.enumerable === true);
 				if (d === undefined) return undefined;
 				return {
