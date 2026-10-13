@@ -42,6 +42,15 @@ npm, and its version is its own: the `usertrust` packages and their
   idempotent on the server, and a hold it cannot end is ended by the ledger's pending timeout
   ([#248](https://github.com/usertools-ai/usertrust/issues/248)).
 
+- **Stop keeps a `.releasing` hold whose give-back failed, so a re-fire still finds it.** Stop
+  gave each `.releasing` hold back once and then forgot it, whatever the server answered. After a
+  5xx or a timeout the hold could still be live with nothing naming it, and a re-fire of the same
+  call reserved a second hold beside it: an early refusal near the budget until the ledger's
+  pending timeout ended the first. The hold is now kept, and the next Stop gives it back again (a
+  200 ends it; a 404 says it is gone). Its gaps are written once, when it is dropped, never once
+  per attempt. SessionEnd drops it as before, with its one gap, since no later call in that
+  session can fire. A `.settling` hold, whose call ran and is never re-fired, is unchanged.
+
 ## [3.0.2] - 2026-10-12
 
 ### Fixed

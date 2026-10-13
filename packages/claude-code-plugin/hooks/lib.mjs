@@ -2050,19 +2050,18 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 		const journalled = held.windowJournalled === true;
 		// Otherwise the call RAN and its one settle went unanswered: the charge is unconfirmed, and a
 		// give-back of the hold proves nothing about what was charged. Written down as a gap.
-		if (!releasing && !journalled) await recordUnconfirmedCall(sessionId, held, "call-ran");
+		const callRan = !releasing && !journalled;
+		// A `.releasing` record is the NAME a re-fired PreToolUse of the same call finds
+		// (`holdOfCall`), and is refused by instead of reserving beside a hold that may be live. So
+		// one whose give-back fails is KEPT for the next Stop, which retries it (a release is
+		// idempotent by transferId: a 200 ends it, a 404 says it is gone, as the ledger's pending
+		// timeout makes it). Its gaps are written once, when the record is dropped, never per
+		// attempt. Not at the final Stop: no later fire in this session reads the name. A `.settling`
+		// record's call ran, and is never re-fired: it is given back once and dropped, as before.
+		const keepOnFailure = held.path.endsWith(".releasing") && !final;
+		if (callRan && !keepOnFailure) await recordUnconfirmedCall(sessionId, held, "call-ran");
 		const releaseClass = journalled ? undefined : releasing ? "unused" : "call-ran";
-		const unconfirmed = (outcome, reason) =>
-			recordSettleGap({
-				phase: "release",
-				outcome,
-				session: sessionId,
-				agent: held.agentId,
-				transferId: held.transferId,
-				reason,
-				started: callStart(held),
-				releaseClass,
-			});
+		let failed = null;
 		try {
 			const response = await releaseHold(
 				held.transferId,
@@ -2072,12 +2071,30 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 			// A 404 `unknown transferId` says the hold is gone already: no give-back failed.
 			if (response.status !== 200 && !isUnknownTransfer(response)) {
 				say(`usertrust: ${response.route} ${held.transferId} returned ${response.status}`);
-				await unconfirmed("failed", `${response.route} returned ${response.status}`);
+				failed = { outcome: "failed", reason: `${response.route} returned ${response.status}` };
 			}
 		} catch (err) {
 			const why = err instanceof Error ? err.message : String(err);
 			say(`usertrust: failed to give back ${held.transferId}: ${why}`);
-			await unconfirmed(failureOutcome(err), `give-back unanswered: ${why}`);
+			failed = { outcome: failureOutcome(err), reason: `give-back unanswered: ${why}` };
+		}
+		if (failed !== null && keepOnFailure) {
+			say(`usertrust: hold ${held.transferId} is kept for the next Stop to give back`);
+			continue;
+		}
+		// Written before the record goes, so dropping it never erases them.
+		if (callRan && keepOnFailure) await recordUnconfirmedCall(sessionId, held, "call-ran");
+		if (failed !== null) {
+			await recordSettleGap({
+				phase: "release",
+				outcome: failed.outcome,
+				session: sessionId,
+				agent: held.agentId,
+				transferId: held.transferId,
+				reason: failed.reason,
+				started: callStart(held),
+				releaseClass,
+			});
 		}
 		await unlink(held.path).catch(() => {});
 	}
