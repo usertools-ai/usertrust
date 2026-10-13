@@ -91,9 +91,11 @@ let requests: Recorded[];
 
 /**
  * Every settle of a transferId past the number it may have when it was SENT: ONE, but for the
- * standard idempotent retry. A hold that successful authorizes under the SAME idempotency key have
- * returned N times may be settled N times, the most under any one key: the retry settles again, at
- * most once per reissue. Order is read from the server's own stamps, never from the log's order
+ * standard idempotent retry. A delivered reissue of the hold under the SAME idempotency key that
+ * returned it before raises its allowance by one, and only when every settle it was allowed has
+ * already arrived (an outstanding settle attempt): the retry settles again once per reissue. So
+ * two hooks that authorize under one key before either settles are allowed ONE settle between them,
+ * and their double settle is reported. Order is read from the server's own stamps, never from the log's order
  * (which is completion order): a settle counts when it ARRIVED (`arrivalSeq`), and a reissue
  * raises the allowance only when it was ANSWERED (`responseSeq`), since the plugin cannot know the
  * hold came back before then. So a settle sent before its reissue was answered is reported, as are
@@ -127,10 +129,16 @@ function secondSettles(log: Recorded[]): string[] {
 	for (const e of events) {
 		if (e.kind === "returned") {
 			const byHold = returned.get(e.key) ?? new Map<string, number>();
-			const n = (byHold.get(e.transferId) ?? 0) + 1;
-			byHold.set(e.transferId, n);
+			const before = byHold.get(e.transferId) ?? 0;
+			byHold.set(e.transferId, before + 1);
 			returned.set(e.key, byHold);
-			allowed.set(e.transferId, Math.max(allowed.get(e.transferId) ?? 1, n));
+			// A reissue (this key returned the hold before) grants one more settle, for the settle it
+			// retries: only while every settle the hold was allowed has been attempted, so two
+			// authorizes ahead of any settle grant nothing between them.
+			const allowance = allowed.get(e.transferId) ?? 1;
+			if (before > 0 && (settled.get(e.transferId) ?? 0) >= allowance) {
+				allowed.set(e.transferId, allowance + 1);
+			}
 		} else {
 			const n = (settled.get(e.transferId) ?? 0) + 1;
 			settled.set(e.transferId, n);
@@ -467,6 +475,23 @@ describe("the no-second-settle invariant (`secondSettles`), on logs built by han
 			settle("tx_1"),
 		];
 		expect(secondSettles(log)).toEqual(["tx_1"]);
+	});
+	it("two authorizes under one key BEFORE either settles allow one settle between them: their double settle is reported", () => {
+		const concurrent = [
+			authorize("k1", "tx_1"),
+			authorize("k1", "tx_1"),
+			settle("tx_1"),
+			settle("tx_1"),
+		];
+		expect(secondSettles(concurrent)).toEqual(["tx_1"]);
+		// The sequential retry, a settle between the two authorizes, still passes.
+		const retry = [
+			authorize("k1", "tx_1"),
+			settle("tx_1"),
+			authorize("k1", "tx_1"),
+			settle("tx_1"),
+		];
+		expect(secondSettles(retry)).toEqual([]);
 	});
 	it("a hold returned under two DIFFERENT keys is reported, as is one the same key never returned again", () => {
 		expect(
