@@ -5501,8 +5501,8 @@ async function googleRequestGate(
 	if (resolved === undefined) {
 		return {
 			refusal: new PolicyDeniedError(
-				`ungoverned_method: models.${method} could not be checked: no @google/genai request pipeline was found`,
-				"usertrust governs a Google request by running the SDK's own request pipeline over it, without sending, so what it checks is what the SDK sends. No installed @google/genai passed that check (a client's own models class is never run). Install @google/genai (an optional peer dependency) next to usertrust.",
+				`ungoverned_method: models.${method} refused: @google/genai could not be loaded beside usertrust, or its request pipeline is not one usertrust recognises (install @google/genai, in the supported version range, as a direct dependency next to usertrust, and keep both external to your bundle)`,
+				"usertrust governs a Google request by running the installed @google/genai's own request pipeline over it, without sending, so what it checks is what the SDK sends; it loads that SDK from its own install location (a client's own models class is never run). Install @google/genai as a direct dependency beside usertrust, and mark both external in your bundler (esbuild, webpack and the like).",
 			),
 		};
 	}

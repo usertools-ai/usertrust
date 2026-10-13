@@ -68,9 +68,16 @@ describe("a Google-shaped client with no SDK pipeline anywhere is refused", () =
 				{ dryRun: true, budget: 500_000, vaultBase: vault, _audit: audit },
 			);
 			const models = governed.models as unknown as Record<string, (p: unknown) => Promise<unknown>>;
-			await expect(models[method]?.({ model: "gemini-2.5-flash", contents: "go" })).rejects.toThrow(
-				"no @google/genai request pipeline was found",
+			const refused = await models[method]?.({ model: "gemini-2.5-flash", contents: "go" }).then(
+				() => undefined,
+				(error: unknown) => error,
 			);
+			expect(refused).toBeInstanceOf(Error);
+			const message = (refused as Error).message;
+			expect(message).toContain("@google/genai could not be loaded beside usertrust");
+			expect(message).toContain("as a direct dependency next to usertrust");
+			expect(message).toContain("keep both external to your bundle");
+			expect(message).not.toContain("could not be checked");
 			await governed.destroy();
 			expect(generateContent).not.toHaveBeenCalled();
 			expect(generateContentStream).not.toHaveBeenCalled();

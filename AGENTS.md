@@ -1625,6 +1625,13 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 ### Client detection
 
 **Duck typing only; never import a provider SDK at runtime.** `detect.ts` imports types only.
+One exception, and only one: `packages/core/src/google-request.ts` loads the installed
+`@google/genai`'s `Models` class (through a variable specifier, `installedModels`) for the governed
+Google request pipeline, and accepts it only after the behavioural probe; when it is absent, or
+fails the probe, the call is refused, never sent ungoverned. The reason: the SDK exports no request
+converters and no transport hook, so the only way to build the exact request it sends is to run its
+own `Models` pipeline over a recording client. `tests/detect/no-runtime-provider-import.test.ts`
+fails on any other runtime reference to a provider SDK under `packages/*/src`.
 `@anthropic-ai/sdk`, `openai` and `@google/genai` are **optional** peer dependencies. Their floors
 (`>=0.116.0`, `>=7.4.0`, `>=1.52.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
 versions the default-deny free list was classified on. Moving a floor means re-running that

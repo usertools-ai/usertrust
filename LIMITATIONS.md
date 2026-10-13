@@ -102,7 +102,13 @@ checked, charged or sent, usertrust runs the SDK's request pipeline over the
 request, against a stand-in for its transport that sends nothing. The pipeline is
 the installed `@google/genai`'s `Models` class, accepted after a short behavioural
 check; a client's own `Models` class is never run (for the SDK's own client it is
-that same class). With no installed SDK, the call is refused.
+that same class). With no installed SDK, the call is refused. "Installed" means
+resolvable by Node's module resolution from usertrust's own install location, not
+just present somewhere in the app: in an isolated or strict package layout where
+usertrust cannot see the app's copy, or in a bundle that inlined or dropped one of
+the two, Google calls are refused. Install `@google/genai` as a direct dependency
+beside usertrust and keep both external to the bundle; the import uses a variable
+specifier on purpose, so that bundlers do not inline it.
 In that run every getter, `toJSON` hook and Proxy trap in the request runs as
 often, and in the same order, as when the SDK sends it, apart from what the
 per-call request-option check refuses before the run (a request, `config` or
