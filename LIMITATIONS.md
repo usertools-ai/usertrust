@@ -108,7 +108,9 @@ just present somewhere in the app: in an isolated or strict package layout where
 usertrust cannot see the app's copy, or in a bundle that inlined or dropped one of
 the two, Google calls are refused. Install `@google/genai` as a direct dependency
 beside usertrust and keep both external to the bundle; the import uses a variable
-specifier on purpose, so that bundlers do not inline it.
+specifier on purpose, so that bundlers do not inline it. Keep the `@google/genai`
+that usertrust resolves at the same version as the one your client was created
+from: a request field that only your client's version reads is not sent.
 In that run every getter, `toJSON` hook and Proxy trap in the request runs as
 often, and in the same order, as when the SDK sends it, apart from what the
 per-call request-option check refuses before the run (a request, `config` or
