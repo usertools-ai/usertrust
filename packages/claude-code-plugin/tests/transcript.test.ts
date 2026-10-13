@@ -4252,6 +4252,109 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			expect(await holdStateFiles()).toEqual([]);
 		});
 
+		it("no key: a re-fire whose settle fails AND whose give-back fails keeps the first hold named: the next fire reserves nothing beside it, and Stop gives it back once, with no class and no second gap", async () => {
+			// A job-capable server: a give-back may carry a `releaseClass`, which the server records.
+			capabilities = ["release", "job"];
+			const server = holdingServer();
+			let failing = true;
+			const giveBack = (r: { path: string; body: Record<string, unknown> }) =>
+				(r.path === "/v1/release" || r.path === "/v1/abort") && r.body.transferId === "tx_1";
+			await startServer((path, body) => {
+				if (failing && body.transferId === "tx_1" && path === "/v1/settle") {
+					return { status: 500, json: { error: "internal" } };
+				}
+				if (
+					failing &&
+					body.transferId === "tx_1" &&
+					(path === "/v1/release" || path === "/v1/abort")
+				) {
+					return { status: 503, json: { error: "unavailable" } };
+				}
+				return server.responder(path, body);
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			// The re-fire's settle of tx_1 fails, and so does its give-back: tx_1 may still be live.
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(requests.filter(giveBack).map((r) => r.status)).toEqual([503]);
+			// Fired again: before the fix nothing named tx_1 any more, and tx_2 was reserved beside it.
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(authorizes()).toHaveLength(1);
+			expect(await holdStateFiles()).toEqual([expect.stringMatching(/\.releasing$/)]);
+			// Stop gives tx_1 back, once, and forgets it. Its call ran and its window's outcome is
+			// journalled already: the give-back carries NO class (never `unused`, which would claim
+			// nothing hides behind it), and Stop writes no second gap about it.
+			const tx1Gaps = async () =>
+				(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+					.split("\n")
+					.filter((line) => line !== "")
+					.map((line) => JSON.parse(line) as { kind?: string; transferId?: string })
+					.filter((g) => g.kind === "gap" && g.transferId === "tx_1");
+			const gapsBefore = (await tx1Gaps()).length;
+			failing = false;
+			await run("stop.mjs", stopInput());
+			expect(requests.filter(giveBack).map((r) => r.status)).toEqual([503, 200]);
+			expect(requests.filter(giveBack)[1]?.body).not.toHaveProperty("releaseClass");
+			expect(await tx1Gaps()).toHaveLength(gapsBefore);
+			expect(await holdStateFiles()).toEqual([]);
+			// The call then reserves afresh, and a later Stop never gives tx_1 back again.
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(authorizes()).toHaveLength(2);
+			await run("stop.mjs", stopInput());
+			expect(requests.filter(giveBack)).toHaveLength(2);
+			// tx_1 was never charged: its window's settle failed unkeyed, so its ids stay claimed.
+			expect(server.charges.filter((c) => c.transferId === "tx_1")).toEqual([]);
+		});
+
+		it("no key: a hold that may be live is never left unnamed: its settle's claim is removed only once its `.releasing` record is written, and stays its name when that write fails", async () => {
+			const server = holdingServer();
+			await startServer((path, body) => {
+				if (body.transferId === "tx_1" && path === "/v1/settle") {
+					return { status: 500, json: { error: "internal" } };
+				}
+				if (body.transferId === "tx_1" && (path === "/v1/release" || path === "/v1/abort")) {
+					return { status: 503, json: { error: "unavailable" } };
+				}
+				return server.responder(path, body);
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			// The `.releasing` record cannot be written: a directory holds its name.
+			await mkdir(join(stateDir, RELEASING, "x"), { recursive: true });
+			const refire = await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(refire.stderr).toContain("its claim is kept instead");
+			// The settle's claim is still the hold's name, so the next fire reserves nothing beside it.
+			expect(await holdStateFiles()).toContain(SETTLING);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(authorizes()).toHaveLength(1);
+		});
+
+		it("no key: a settle the server REFUSED (400) whose give-back fails and whose `.releasing` record cannot be written drops its claim: its window is carried, and charged, by the next hold", async () => {
+			const server = holdingServer();
+			await startServer((path, body) => {
+				if (body.transferId === "tx_1" && path === "/v1/settle") {
+					return { status: 400, json: { error: "invalid settle" } };
+				}
+				if (body.transferId === "tx_1" && (path === "/v1/release" || path === "/v1/abort")) {
+					return { status: 503, json: { error: "unavailable" } };
+				}
+				return server.responder(path, body);
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await mkdir(join(stateDir, RELEASING, "x"), { recursive: true });
+			const refire = await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(refire.stderr).toContain("a later call may reserve beside it");
+			// Nothing was posted for the refused settle: no claim holds its ids out of new windows.
+			expect(await holdStateFiles()).not.toContain(SETTLING);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			expect(authorizes()).toHaveLength(2);
+			expect(server.charges.filter((c) => c.inputTokens !== 0)).toEqual([
+				{ transferId: "tx_2", inputTokens: 9, outputTokens: 9 },
+			]);
+		});
+
 		it("no key: an EXPIRED first hold's window is released, and the fresh hold carries it, charged once", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);

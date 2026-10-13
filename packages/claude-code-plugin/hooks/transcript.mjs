@@ -2303,9 +2303,11 @@ async function returnEmptyHold(transferId) {
  * `claimed`, or `unresolved` under a key, never `deferred`. A windowed hold's
  * `holdEnded` says whether the server is known to hold it no more: settled or
  * spent, a 404 `unknown transferId`, or a confirmed release. Otherwise it may
- * still be live.
+ * still be live. With `keepUnendedClaim`, such a hold's claim (`.settling`) is kept
+ * after its outcome is journalled, and its path returned (`claim`): the caller names
+ * the hold anew before it removes the claim, so a name exists throughout.
  */
-export async function settleTranscriptHold(sessionId, entry) {
+export async function settleTranscriptHold(sessionId, entry, { keepUnendedClaim = false } = {}) {
 	if (callTimeout() < minCall()) return { outcome: "deferred", reason: "out of time" };
 	const ids = entry.assignedIds ?? [];
 	if (ids.length === 0) {
@@ -2387,7 +2389,13 @@ export async function settleTranscriptHold(sessionId, entry) {
 			}),
 			{ mode: 0o600 },
 		);
-		await unlink(`${base}.settling`).catch(() => {});
+		if (keepUnendedClaim && result.holdEnded !== true) {
+			// The hold may still be live: its claim stays its name until the caller has
+			// written the next one (pre-tool-use.mjs `keepForRelease`).
+			result.claim = `${base}.settling`;
+		} else {
+			await unlink(`${base}.settling`).catch(() => {});
+		}
 	} catch (err) {
 		// The .settling file stays: once stale, its settle reads as unknown — retried
 		// under its key, or (unkeyed) its ids stay claimed.

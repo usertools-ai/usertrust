@@ -33,8 +33,9 @@ repository or mint an OIDC token for provenance:
 2. **build** (token: `contents: read` only; no OIDC token, no secret).
    1. Installs (`npm ci`, with install scripts, exactly as CI does), typechecks and tests.
    2. Refuses to start if the committed version is not fully on npm (finish it with republish
-      first), bumps all six packages by the chosen `version` (patch, minor or major), and
-      refuses if the new version already has a tag or is already on npm.
+      first), bumps all six packages by the chosen `version` (patch, minor or major), pins
+      every lockstep sibling they depend on to the new version (see "Sibling dependencies are
+      pinned" below), and refuses if the new version already has a tag or is already on npm.
    3. Builds, then **commits the bump (`git commit -s`, so it carries a DCO sign-off) and
       creates the tag `v<version>` locally**, and checks that nothing under `packages/`
       differs from that commit.
@@ -67,7 +68,9 @@ repository or mint an OIDC token for provenance:
         trailer, nothing more;
       - it changes exactly the six `packages/<dir>/package.json` paths (literal strings), each a
         regular file (mode 100644) before and after;
-      - each manifest is unchanged but for `version`, and none has `publishConfig`.
+      - each manifest names every lockstep sibling at exactly the new version, is otherwise
+        unchanged but for `version` (no dependency added, dropped or changed, no field added,
+        dropped or changed), and none has `publishConfig`.
    3. **Assembles the tarball npm will publish**, for each package, and verifies it (see "The
       publish tarball is assembled, not taken from the build" below). Then runs
       `npm publish <assembled tarball> --access public [--tag backfill] --provenance
@@ -130,6 +133,46 @@ repository or mint an OIDC token for provenance:
 
    Each step runs only if every step before it succeeded, so a normal release publishes
    nothing unless its push to `master` went through.
+
+### Sibling dependencies are pinned
+
+Four of the six packages depend on others in the set: `usertrust-openclaw`, `usertrust-server`
+and `usertrust-acs-adapter` on `usertrust`, and `usertrust-ui` on `usertrust` and
+`usertrust-verify`. Each names those siblings at **exactly its own version**, so that installing
+`usertrust-server@X` installs `usertrust@X` and no other. A range such as `"*"` lets an install
+keep a sibling from an earlier release: npm keeps an installed package that satisfies the
+range, so a package upgraded in place (an `npx usertrust-server` folder made while an older
+version was latest, for one) can run against an older `usertrust` that lacks an export it
+imports, and fail to start.
+
+- **The bump sets them.** The build job runs `npm version <bump> --no-git-tag-version
+  --no-workspaces-update` in each package, which sets that package's own `version` and nothing
+  else, then `scripts/release.sh pin-siblings`, which sets every lockstep package a manifest
+  names in `dependencies`, `optionalDependencies`, `peerDependencies` or `devDependencies` to
+  the new version. No sibling is a peer today; one added as a peer is pinned exactly too, by
+  design, since the six only work together at one version. `--no-workspaces-update` stops npm
+  reinstalling after each bump: run inside
+  a workspace, `npm version` reinstalls the tree, and once `usertrust` is bumped, a sibling's
+  pin to the previous version no longer matches the workspace's own package, so npm would
+  install that previous version from the registry into the tree the build job builds.
+- **The checks require them.** The release-commit check accepts exactly those changes, each
+  to exactly the new version, and refuses a sibling at any other spec (`"*"`, a range, another
+  version). The publish step refuses a manifest whose siblings are not at the version it
+  publishes.
+- **`master` carries them.** The release commit lands on `master`, so between releases every
+  sibling is pinned at the version `master` records, which is the workspace's own package, and
+  `npm ci` links it. A release commit changes only the six manifests, so after a release
+  `package-lock.json` records the previous release's pins until it is next regenerated, as it
+  already lags the workspace versions; `npm ci` accepts both, since the workspace packages
+  satisfy the pins. A pin to any version but the workspace's own does not match the workspace
+  package, so npm would install that version from the registry instead; the release-workflow
+  test checks the repository's manifests for this.
+- **Why not a native rewrite.** `pnpm publish` rewrites pnpm's `workspace:` protocol to an exact
+  version, but this repository uses npm workspaces: npm has no workspace protocol (npm 10.9.2
+  refuses `workspace:*` with `EUNSUPPORTEDPROTOCOL`, and `npm pack` keeps every spec as
+  written), and `npm version` never rewrites a spec that names the package it bumps. The
+  published `package.json` is also the release commit's git blob, not one a packer writes, so
+  the pin has to be in the commit.
 
 ### Build output is untrusted data
 
@@ -219,7 +262,8 @@ publishes an archive the build made and never lets npm walk a directory the buil
      case. No name may repeat (compared without case), and no file may also be a directory
      or sit inside a file.
 3. **The output is written from scratch.** Its root files come from the release commit's git
-   blobs (`package.json` among them, version-checked); its other files are the accepted
+   blobs (`package.json` among them, checked for its version and for every sibling at that
+   version); its other files are the accepted
    `dist/` members' bytes. Every header is new: the name, the size, mode 0644, owner 0 with
    empty user and group names, the release commit's time, type "regular file". Members are
    sorted. The format is USTAR when every name fits its fields (true of every name the six
@@ -266,7 +310,8 @@ OIDC token or `NPM_TOKEN`.
   repository's dependencies. A compromised build dependency can still change the `dist/`
   bytes, and which permitted `dist/` paths exist (see above). The split stops it reaching the
   push, the OIDC token and `NPM_TOKEN`; the release commit it hands on is checked to be a
-  version bump and nothing else, and the tarball it packs is used only as a source of
+  version bump (the versions and the sibling pins) and nothing else, and the tarball it packs
+  is used only as a source of
   `dist/` bytes.
 
 ## Before approving the `npm-publish` deployment
@@ -292,7 +337,8 @@ Call the expected version `V`: the committed version bumped by the dispatched `v
    - the bundle holds exactly one tag, and it is `vV` (`git bundle list-heads release.bundle`);
    - fetch it (`git fetch release.bundle "refs/tags/vV:refs/tags/vV"`), and the tag's commit has
      exactly one parent, the dispatched commit;
-   - in that commit, all six `packages/<dir>/package.json` files have `"version": "V"`.
+   - in that commit, all six `packages/<dir>/package.json` files have `"version": "V"`, and
+     every lockstep package one of them depends on is named at exactly `"V"`.
 3. **Build the dispatched commit yourself**, on a machine you trust: check out the dispatched
    commit, apply the same version bump the build job applies (its "Bump versions" step in
    `.github/workflows/publish.yml`, with the dispatched `version` input), install with `npm ci`,
@@ -344,17 +390,20 @@ describes, and the next release would compute the same number again.
 
 The provenance attestation records the commit the workflow was dispatched on (the parent of
 the release commit, the one CI tested); the release commit differs from it only in the six
-`version` fields.
+`version` fields and the sibling pins.
 
 ## Republishing
 
 Dispatch the Release workflow **on the tag** (`Use workflow from` → tag `v<version>`) with
-`republish` checked. The ci-gate job checks that the tag's commit changes nothing but the
-`version` field of the lockstep `package.json` files, and gates on its parent, the commit CI
-ran on. (The release commit itself has no CI run: pushes made with the workflow's token do not
-trigger workflows.) It also fetches `master` afresh and requires the tag's commit to be on it:
-a version-only commit tagged on a side branch was never released and is refused, and so is a
-shallow history or a `master` it cannot fetch. Dispatching on `master` also works while
+`republish` checked. The ci-gate job checks that the tag's commit is a release commit (it
+changes nothing but the `version` fields and the sibling pins of the lockstep `package.json`
+files), and gates on its parent, the commit CI ran on. (The release commit itself has no CI
+run: pushes made with the workflow's token do not trigger workflows.) It also fetches `master`
+afresh and requires the tag's commit to be on it: a release commit tagged on a side branch was
+never released and is refused, and so is a shallow history or a `master` it cannot fetch. A tag
+made before siblings were pinned (v5.0.1 and earlier) names them as `"*"`, so republish
+refuses it. None needs one, as npm holds those versions in full; republishing one would take a
+deliberate change to the release-commit check. Dispatching on `master` also works while
 `master` is still the release commit. A republish of a version older than the newest `v*`
 release publishes under the dist-tag `backfill`, not `latest`, so npm users who install
 without a version keep getting the newest release.
