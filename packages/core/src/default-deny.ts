@@ -932,6 +932,32 @@ export function movedRequestOptions(
 }
 
 /**
+ * What the per-call option check refuses in a Google `httpOptions` object, as it names it (empty:
+ * nothing): for one the request gate's dry run reached through an accessor `config` or `httpOptions`,
+ * which call start defers. Descriptors only, no caller code.
+ */
+export function googleHttpOptionsRefusals(options: unknown): string[] {
+	return ungovernedKeysOf(
+		options,
+		GOVERNED_GOOGLE_HTTP_OPTIONS,
+		"config.httpOptions.",
+		"config.httpOptions",
+	);
+}
+
+/**
+ * The same, for a `config` the dry run reached through an accessor, before its `httpOptions` is
+ * read: a Proxy as the config, or on the chain to its `httpOptions` (or a chain too deep), cannot be
+ * read without running caller code, as at call start.
+ */
+export function googleConfigRefusals(config: unknown): string[] {
+	const http = chainProperty(config, "httpOptions");
+	return http.kind === "proxy" || http.kind === "too-deep"
+		? ["config.httpOptions (unreadable)"]
+		: [];
+}
+
+/**
  * A Google request's option path, `params.config.httpOptions` and its keys, at call start, walked as
  * the SDK's own property access finds it (`chainProperty`), without running caller code. One rule at
  * every level, a Proxy tested first:
@@ -942,8 +968,9 @@ export function movedRequestOptions(
  *   refuses it on master (`ungovernedKeysOf`'s "(an accessor)");
  * - an ACCESSOR `config`, or an accessor `httpOptions` (own or inherited), is DEFERRED: not refused,
  *   nothing pinned (`pinned: undefined`); the request gate's dry run reads it as the SDK does, and
- *   the per-call option check on the request that is sent governs what was read, before anything is
- *   held or sent (master sends these);
+ *   refuses what this check refuses in the `httpOptions` object it reaches (an accessor key, a key
+ *   off the list, a Proxy: `googleHttpOptionsRefusals`), before anything is held or sent; master
+ *   sends these when every key is data, and refuses the rest;
  * - a path that is plain data throughout is PINNED for that path at every later read: a NEW object
  *   holding only the governed keys of the first data `httpOptions` on the chain (and whether the
  *   SDK's own key listing of config sees it: own and enumerable), or absent when there is none.

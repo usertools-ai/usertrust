@@ -31,6 +31,7 @@
  */
 
 import { types as utilTypes } from "node:util";
+import { googleConfigRefusals, googleHttpOptionsRefusals } from "./default-deny.js";
 import { governedCallable } from "./google-afc.js";
 
 type Loose = Record<string, unknown>;
@@ -53,6 +54,7 @@ export type GoogleSnapshot =
 	| { kind: "ok"; params: unknown; afcRan: boolean }
 	| { kind: "afcStream" }
 	| { kind: "refuse"; reason: string }
+	| { kind: "optionRefused"; names: string[] }
 	| { kind: "sdkError"; error: unknown };
 
 /** Thrown inside the capture or materialization when the request cannot be represented: "can't tell". */
@@ -251,7 +253,7 @@ async function runPipeline(
 // ── The recording membrane ──
 
 /** Where an object was reached from, as far as the stand-ins need to know. */
-type Role = "params" | "config" | "tools" | "toolEntry" | undefined;
+type Role = "params" | "config" | "httpOptions" | "tools" | "toolEntry" | undefined;
 
 /**
  * What the SDK read at one place in the request: the root, or one key of a recorded object. Each
@@ -504,6 +506,7 @@ function isPureBoxedPrimitive(value: object): boolean {
 
 function childRole(parent: Role, key: string): Role {
 	if (parent === "params" && key === "config") return "config";
+	if (parent === "config" && key === "httpOptions") return "httpOptions";
 	if (parent === "config" && key === "tools") return "tools";
 	if (parent === "tools" && ARRAY_INDEX.test(key)) return "toolEntry";
 	return undefined;
@@ -516,6 +519,8 @@ interface Membrane {
 	standIns: StandIns;
 	/** Why the capture cannot be told, when the SDK called a caller function. */
 	tripped(): string | undefined;
+	/** What the per-call option check refuses in an `httpOptions` the SDK reached (its names). */
+	optionRefusals(): string[];
 }
 
 /**
@@ -547,6 +552,19 @@ function makeMembrane(
 	 * the membrane), and the request is refused even if the SDK swallowed that throw.
 	 */
 	let tripped: string | undefined;
+	/**
+	 * The per-call option check, on what the SDK reaches past an accessor `config` or `httpOptions`
+	 * (call start deferred those): the config before its `httpOptions` is read, and the `httpOptions`
+	 * object before any of its keys is, from descriptors, as call start checks a data path. A refusal
+	 * stops the dry run there, before anything of it runs (an accessor key's getter included); the
+	 * mirror's plain copy would no longer show what was refused.
+	 */
+	const optionRefusals = new Set<string>();
+	function refuseOptions(names: string[]): void {
+		if (names.length === 0) return;
+		for (const name of names) optionRefusals.add(name);
+		throw new CannotTell("request options the per-call check refuses");
+	}
 
 	function trip(): never {
 		tripped ??= "the SDK called a function the request holds";
@@ -635,7 +653,21 @@ function makeMembrane(
 				// is pinned: `params.config.httpOptions` answers the call-start copy (or absent), whichever
 				// config object this is; the caller's own property is never read for it.
 				const pin = pinnedHere(key);
+				const options = rec.role === "config" && key === "httpOptions" && !pin;
+				if (options) refuseOptions(googleConfigRefusals(real));
+				if (rec.role === "httpOptions") refuseOptions(googleHttpOptionsRefusals(real));
 				const v = pin ? pinned?.httpOptions : Reflect.get(real, key, real);
+				if (options) refuseOptions(googleHttpOptionsRefusals(v));
+				// A Proxy config past an accessor (call start deferred it); with the path pinned, the SDK
+				// is served the pinned httpOptions whatever config it reads, as before.
+				if (
+					pinned === undefined &&
+					rec.role === "params" &&
+					key === "config" &&
+					utilTypes.isProxy(v)
+				) {
+					refuseOptions(["config.httpOptions (unreadable)"]);
+				}
 				if (
 					rec.role === "toolEntry" &&
 					(key === "tool" || key === "callTool") &&
@@ -940,6 +972,7 @@ function makeMembrane(
 		markTransport,
 		standIns,
 		tripped: () => tripped,
+		optionRefusals: () => [...optionRefusals],
 	};
 }
 
@@ -1032,6 +1065,8 @@ function sameRequests(a: RecordedRequest[], b: RecordedRequest[]): boolean {
  * - `afcStream`: on `generateContentStream`, the SDK would run its AFC loop (refused by the governor:
  *   a streamed loop is not metered round by round).
  * - `refuse`: the mirror cannot reproduce what the SDK sends for the caller's request ("can't tell").
+ * - `optionRefused`: an `httpOptions` the SDK reached past an accessor holds what the per-call
+ *   option check refuses (an accessor key, a key off the list, a Proxy), named as it names them.
  * - `sdkError`: the SDK's pipeline threw over the caller's request, as it would natively.
  *
  * `pinned` is the request's `config.httpOptions` as the call-start check read and copied it (an own
@@ -1050,6 +1085,9 @@ export async function snapshotGoogleRequest(
 	try {
 		await runPipeline(pipeline, method, root, captured, membrane.markTransport);
 	} catch (error) {
+		// Request options the per-call check refuses, as at call start, whatever the SDK did next.
+		const names = membrane.optionRefusals();
+		if (names.length > 0) return { kind: "optionRefused", names };
 		// A caller function the SDK called was never run: whatever the SDK made of that, can't tell.
 		const why = membrane.tripped();
 		if (why !== undefined) return { kind: "refuse", reason: why };
@@ -1062,6 +1100,8 @@ export async function snapshotGoogleRequest(
 		}
 		return { kind: "sdkError", error };
 	}
+	const names = membrane.optionRefusals();
+	if (names.length > 0) return { kind: "optionRefused", names };
 	const tripped = membrane.tripped();
 	if (tripped !== undefined) return { kind: "refuse", reason: tripped };
 	const afcRan = membrane.standIns.afcRan;

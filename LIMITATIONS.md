@@ -144,18 +144,22 @@ own:
   own `httpOptions` is never read again. It is read as the SDK finds it, through
   the prototype chain, so one the config inherits is governed the same way: its
   allowed keys are sent, and any other key held as data is refused at the start.
-  That copy is made only when the whole path to it is plain data. By level:
-  - a `config` held by a getter, or a getter `httpOptions` (own or inherited), is
-    read when the SDK reads it, not at the start, and governed on what was read:
-    anything off the list is refused, by the check on the request that is sent,
-    before anything is held or sent, and a later change to an allowed key, such
-    as a header, is sent as the SDK reads it. Before, such a getter was run, and
-    its options fixed, at the start of the call;
-  - a getter key inside a data `httpOptions` is refused at the start, its getter
-    never run, as before;
-  - a Proxy anywhere on the path, or a chain longer than 64 objects, cannot be
-    read without running your code, and the call is refused at the start;
-  - a key off the list held as data is refused at the start.
+  That copy is made only when the whole path to it is plain data. At every
+  level, what is refused and what is sent is what the per-call request-option
+  check refused and sent before the SDK's pipeline read the request:
+  - a `config` held by a getter, or a getter `httpOptions` (own or inherited),
+    whose option keys are data, is read when the SDK reads it, not at the start,
+    and is sent; a later change to an allowed key, such as a header, is sent as
+    the SDK reads it. Before, such a getter was run, and its options fixed, at the
+    start of the call;
+  - a getter option key is refused whatever holds it, before its getter runs: at
+    the start of the call inside a data `httpOptions`, and, past a getter `config`
+    or `httpOptions`, when the SDK reaches the `httpOptions` holding it;
+  - a Proxy anywhere on the path (as `config` or `httpOptions`, on their prototype
+    chains, or answered by a getter), or a chain longer than 64 objects, cannot be
+    read without running your code, and the call is refused;
+  - a key off the list is refused, at the start of the call when the path is data,
+    and when the SDK reaches it past a getter.
 - **Every other field is read when the SDK reads it, not when the call starts.**
   The SDK reads the request after its own first `await`, so a field you change
   right after calling (a `systemInstruction`, `contents`) is sent as it is then,

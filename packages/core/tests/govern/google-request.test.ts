@@ -2296,8 +2296,10 @@ describe("a getter config that answers a different httpOptions on its later read
 					expect(r.result).toContain("config.httpOptions.extraBody");
 					expect(r.gov.requests).toHaveLength(0);
 					expect(r.atHold).toEqual([]);
-					// every read is the dry run's, as natively (pass-through): measured 7 without tools, 8 with
-					expect(r.governed).toBe(r.native);
+					// every read is the dry run's (pass-through), which stops at the read the check refuses:
+					// measured 6 of native's 7 without tools, 2 or 5 of native's 8 with
+					expect(r.governed).toBeGreaterThan(0);
+					expect(r.governed).toBeLessThan(r.native);
 				});
 
 				it(`${on}: a later answer holding only an allowed header: sent as natively, and the send makes no read of the caller's config`, async () => {
@@ -2405,6 +2407,37 @@ describe("an accessor config or httpOptions is read when the SDK reads it, and g
 					expect(runs.governed.n).toBe(0);
 				});
 			}
+
+			it(`${on}: a getter key inside a data httpOptions, made data just after the call starts: refused, as on the base, which checks it at call start`, async () => {
+				const w = wire();
+				globalThis.fetch = w.fetchStub as typeof fetch;
+				const governed = await trust(sdkClient(vertex), {
+					dryRun: true,
+					budget: 500_000,
+					vaultBase: vault,
+					_audit: recordingAudit(),
+				});
+				const runs = { n: 0 };
+				const options = Object.defineProperty({}, "headers", {
+					get: () => {
+						runs.n++;
+						return { "x-test": "via an accessor" };
+					},
+					enumerable: true,
+					configurable: true,
+				});
+				const pending = runOn(governed.models, method, request({ httpOptions: options }));
+				Object.defineProperty(options, "headers", {
+					value: { "x-test": "data" },
+					enumerable: true,
+				});
+				const { result } = await pending;
+				await governed.destroy();
+				expect(result).toContain("request_option_refused");
+				expect(result).toContain("(config.httpOptions.headers (an accessor))");
+				expect(runs.n).toBe(0);
+				expect(w.requests).toHaveLength(0);
+			});
 
 			it(`${on}: a Proxy as config.httpOptions on a data config is refused at call start, and none of its traps runs (get, has, getOwnPropertyDescriptor, getPrototypeOf, ownKeys)`, async () => {
 				const traps = { n: 0 };
@@ -2524,7 +2557,9 @@ describe("an accessor config or httpOptions is read when the SDK reads it, and g
 				expect(r.result).toContain("config.httpOptions.extraBody");
 				expect(r.gov.requests).toHaveLength(0);
 				expect(r.atHold).toEqual([]);
-				expect(r.governed).toBe(r.native);
+				// the dry run stops at the read the check refuses: measured 2 of native's 3
+				expect(r.governed).toBe(2);
+				expect(r.native).toBe(3);
 			});
 
 			it(`${on}: the same getter beside an MCP-usage tool answering an allowed header later: sent as natively, no read of it after the hold`, async () => {
@@ -2757,5 +2792,142 @@ describe("destroy() called right after a call starts waits for that call, as for
 			expect(Date.now() - started).toBeLessThan(1_000); // a leaked admission waits 5 s
 			expect(w.requests).toHaveLength(0);
 		});
+	}
+});
+
+describe("every level of the option path refuses or sends as the base does (the base's measured table)", () => {
+	const EXTRA_BODY = { extraBody: { injected: "SECRET-X" } };
+	const ALLOWED = { headers: { "x-test": "ok" } };
+
+	/** A data httpOptions whose every key is a getter answering `value`'s, its runs counted. */
+	function keyGetters(value: object, runs: { n: number }): Loose {
+		const options: Loose = {};
+		for (const [key, v] of Object.entries(value)) {
+			Object.defineProperty(options, key, {
+				get: () => {
+					runs.n++;
+					return v;
+				},
+				enumerable: true,
+			});
+		}
+		return options;
+	}
+	const getterConfig = (config: unknown) =>
+		Object.defineProperty({ model: "gemini-2.5-flash", contents: "go" }, "config", {
+			get: () => config,
+			enumerable: true,
+		});
+	const getterHttpOptions = (options: unknown) =>
+		request(Object.defineProperty({}, "httpOptions", { get: () => options, enumerable: true }));
+
+	/** Each shape of the path, holding `v`. */
+	const shapes: Array<[string, (v: object, runs: { n: number }) => unknown]> = [
+		["a getter config", (v) => getterConfig({ httpOptions: v })],
+		["a getter httpOptions", (v) => getterHttpOptions(v)],
+		["a getter key", (v, runs) => request({ httpOptions: keyGetters(v, runs) })],
+		["a Proxy config", (v) => request(new Proxy({ httpOptions: v }, {}))],
+		["a Proxy httpOptions", (v) => request({ httpOptions: new Proxy(v, {}) })],
+		["all data", (v) => request({ httpOptions: v })],
+		["a getter httpOptions -> a getter key", (v, runs) => getterHttpOptions(keyGetters(v, runs))],
+		[
+			"a getter config -> a getter key",
+			(v, runs) => getterConfig({ httpOptions: keyGetters(v, runs) }),
+		],
+		["a getter config -> a Proxy config", (v) => getterConfig(new Proxy({ httpOptions: v }, {}))],
+		[
+			"a getter config -> a Proxy httpOptions",
+			(v) => getterConfig({ httpOptions: new Proxy(v, {}) }),
+		],
+		["a getter httpOptions -> a Proxy httpOptions", (v) => getterHttpOptions(new Proxy(v, {}))],
+		[
+			"an inherited getter httpOptions -> a getter key",
+			(v, runs) =>
+				request(
+					Object.create(
+						Object.defineProperty({}, "httpOptions", { get: () => keyGetters(v, runs) }),
+					) as Loose,
+				),
+		],
+	];
+
+	/**
+	 * The base's outcome for each shape, measured there (5a7b2cf7) on both methods and both backends,
+	 * alike on all four: "ok" with one request, or refused with none and the name it gave. The two
+	 * Proxy-config shapes are refused there as a request that could not be checked (a Proxy in
+	 * params.config), here as an unreadable option path: refused, nothing sent, either way.
+	 */
+	const BASE: Record<string, { extraBody: string; allowed: string }> = {
+		"a getter config": { extraBody: "config.httpOptions.extraBody", allowed: "ok" },
+		"a getter httpOptions": { extraBody: "config.httpOptions.extraBody", allowed: "ok" },
+		"a getter key": {
+			extraBody: "config.httpOptions.extraBody",
+			allowed: "config.httpOptions.headers (an accessor)",
+		},
+		"a Proxy config": { extraBody: "refused", allowed: "refused" },
+		"a Proxy httpOptions": {
+			extraBody: "config.httpOptions (a Proxy)",
+			allowed: "config.httpOptions (a Proxy)",
+		},
+		"all data": { extraBody: "config.httpOptions.extraBody", allowed: "ok" },
+		"a getter httpOptions -> a getter key": {
+			extraBody: "config.httpOptions.extraBody",
+			allowed: "config.httpOptions.headers (an accessor)",
+		},
+		"a getter config -> a getter key": {
+			extraBody: "config.httpOptions.extraBody",
+			allowed: "config.httpOptions.headers (an accessor)",
+		},
+		"a getter config -> a Proxy config": { extraBody: "refused", allowed: "refused" },
+		"a getter config -> a Proxy httpOptions": {
+			extraBody: "config.httpOptions (a Proxy)",
+			allowed: "config.httpOptions (a Proxy)",
+		},
+		"a getter httpOptions -> a Proxy httpOptions": {
+			extraBody: "config.httpOptions (a Proxy)",
+			allowed: "config.httpOptions (a Proxy)",
+		},
+		"an inherited getter httpOptions -> a getter key": {
+			extraBody: "config.httpOptions.extraBody",
+			allowed: "config.httpOptions.headers (an accessor)",
+		},
+	};
+
+	for (const method of METHODS) {
+		for (const [backend, vertex] of BACKENDS) {
+			for (const [shape, make] of shapes) {
+				for (const [variant, value] of [
+					["extraBody", EXTRA_BODY],
+					["allowed", ALLOWED],
+				] as const) {
+					const expected = BASE[shape]?.[variant] as string;
+					it(`${method} on ${backend}, ${shape} holding ${variant}: ${expected === "ok" ? "sent, as on the base" : "refused before anything is sent, as on the base"}`, async () => {
+						const w = wire();
+						globalThis.fetch = w.fetchStub as typeof fetch;
+						const audit = recordingAudit();
+						const governed = await trust(sdkClient(vertex), {
+							dryRun: true,
+							budget: 500_000,
+							vaultBase: vault,
+							_audit: audit,
+						});
+						const runs = { n: 0 };
+						const { result } = await runOn(governed.models, method, make(value, runs));
+						await governed.destroy();
+						expect(runs.n).toBe(0); // no getter key runs: the base ran none
+						expect(JSON.stringify(w.requests)).not.toContain("SECRET-X");
+						if (expected === "ok") {
+							expect(result).toBe("ok");
+							expect(w.requests).toHaveLength(1);
+							return;
+						}
+						expect(result).toContain("request_option_refused");
+						if (expected !== "refused") expect(result).toContain(`(${expected})`);
+						expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+						expect(w.requests).toHaveLength(0);
+					});
+				}
+			}
+		}
 	}
 });

@@ -1759,8 +1759,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		const attribution = getCurrentCostCenter();
 		// The option path (config, httpOptions, its keys) is decided by googleHttpOptionsAtCallStart:
 		// a Proxy, a data key off the list or an accessor key inside httpOptions refused; an accessor
-		// config or httpOptions deferred to the dry run (and checked, in interceptCall, on what it
-		// read); plain data pinned. Its names
+		// config or httpOptions deferred to the dry run, which refuses the same things in what it
+		// reaches past it (and interceptCall checks the mirror again); plain data pinned. Its names
 		// replace the per-call option check's for that path; the check's others (a request given as a
 		// Proxy, the client's own options) still refuse.
 		const atStart = googleHttpOptionsAtCallStart(args[0]);
@@ -4468,6 +4468,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				preflightRefusal,
 				googleCallStart,
 				admitGoogleCall,
+				(names, args) =>
+					optionsRefusal(names, args, getCurrentCostCenter()) ??
+					Promise.reject(new Error("no request option to refuse")),
 			);
 		}
 		return build(client, interceptCall, destroyFn, governActionImpl, boundary);
@@ -5467,6 +5470,7 @@ async function googleRequestGate(
 	pinned?: PinnedHttpOptions,
 ): Promise<
 	| { refusal: PolicyDeniedError }
+	| { optionRefused: string[] }
 	| { sdkError: unknown; denial: PolicyDeniedError }
 	| { runAfcLoop: boolean }
 > {
@@ -5498,6 +5502,8 @@ async function googleRequestGate(
 					"With a callable tool, the SDK streams one provider round after another inside this call, and usertrust does not yet meter a streamed loop round by round (models.generateContent with automatic function calling is metered per round). Use models.generateContent, set config.automaticFunctionCalling.disable: true and run the tool calls yourself, or make the call on the original (unwrapped) client inside governAction() with a cost estimate.",
 				),
 			};
+		case "optionRefused":
+			return { optionRefused: snap.names };
 		case "refuse":
 			return {
 				refusal: new PolicyDeniedError(
@@ -5572,6 +5578,7 @@ function buildGoogleProxy<T>(
 		thisArg: unknown,
 	) => { refused: Promise<never> } | { pinned: PinnedHttpOptions | undefined },
 	admit: () => { mark(args: unknown[]): unknown[]; release(): void },
+	refuseOptions: (names: string[], args: unknown[]) => Promise<never>,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const models = original.models as Record<string, unknown>;
@@ -5613,6 +5620,7 @@ function buildGoogleProxy<T>(
 							googlePipeline,
 							start.pinned,
 						);
+						if ("optionRefused" in gate) return await refuseOptions(gate.optionRefused, args);
 						if ("sdkError" in gate) {
 							return await refuseWithSdkError(refuse, "models.generateContent", args, gate);
 						}
@@ -5658,6 +5666,7 @@ function buildGoogleProxy<T>(
 							googlePipeline,
 							start.pinned,
 						);
+						if ("optionRefused" in gate) return await refuseOptions(gate.optionRefused, args);
 						if ("sdkError" in gate) {
 							return await refuseWithSdkError(refuse, "models.generateContentStream", args, gate);
 						}
