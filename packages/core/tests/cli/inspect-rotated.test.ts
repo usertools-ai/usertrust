@@ -200,6 +200,22 @@ describe("usertrust inspect: rotated audit segments", () => {
 		expect(data.chain.errors.some((e) => e.includes("missing"))).toBe(false);
 	});
 
+	it("a sequence present in two segments is not pinned on whichever file was read first", async () => {
+		const lines = await writeNine();
+		// events.jsonl holds 1 and 3 (2 absent); another segment also holds 1. Reading events.jsonl first
+		// and keeping the first file per sequence said "event 2 is absent inside events.jsonl".
+		unlinkSync(join(auditDir, "events.jsonl"));
+		const [e1, , e3] = lines as [string, string, string];
+		writeFileSync(join(auditDir, "events.jsonl"), `${[e1, e3].join("\n")}\n`);
+		writeFileSync(join(auditDir, "events-0001.jsonl"), `${e1}\n`);
+
+		const data = await inspectJson();
+		expect(data.chain.valid).toBe(false);
+		expect(data.chain.errors).toContain("audit events missing: event 2 is absent");
+		expect(data.chain.errors.some((e) => e.includes("absent inside"))).toBe(false);
+		expect(data.chain.errors.some((e) => e.includes("absent between"))).toBe(false);
+	});
+
 	it("a hostile segment file name (ESC + a C1 byte): the table shows `?`, --json keeps the bytes escaped", async () => {
 		const lines = await writeNine();
 		const hostile = "events-\x1b[2J\x9b0001.jsonl";
@@ -276,8 +292,10 @@ describe("usertrust inspect: rotated audit segments", () => {
 		// colour-enabled instance, which is what `CI=1` gives the real one.
 		vi.resetModules();
 		vi.doMock("picocolors", async () => {
-			const real = await vi.importActual<typeof import("picocolors")>("picocolors");
-			return { default: real.default.createColors(true) };
+			const mod = await vi.importActual<typeof import("picocolors")>("picocolors");
+			// A CommonJS module: the namespace's `default` is the module itself under Node's interop.
+			const real = (mod as { default?: typeof mod }).default ?? mod;
+			return { default: real.createColors(true) };
 		});
 		const { run: colouredRun } = await import("../../src/cli/inspect.js");
 		logOutput = [];

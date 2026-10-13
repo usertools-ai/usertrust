@@ -43,6 +43,9 @@ export function describeMissingSegments(auditDir: string, errors: readonly strin
 	}
 
 	const seqFile = new Map<number, string>();
+	// A sequence that occurs more than once (in two segments, or twice in one) has no single file to
+	// name: first-wins would pin the diagnosis on whichever file happened to be read first.
+	const duplicated = new Set<number>();
 	for (const name of names) {
 		let text: string;
 		try {
@@ -54,8 +57,9 @@ export function describeMissingSegments(auditDir: string, errors: readonly strin
 		for (const line of text.split("\n")) {
 			try {
 				const seq = (JSON.parse(line) as { sequence?: unknown } | null)?.sequence;
-				if (Number.isSafeInteger(seq) && !seqFile.has(seq as number))
-					seqFile.set(seq as number, name);
+				if (!Number.isSafeInteger(seq)) continue;
+				if (seqFile.has(seq as number)) duplicated.add(seq as number);
+				else seqFile.set(seq as number, name);
 			} catch {
 				// A malformed or blank line is the vault reading's error; it carries no sequence to place.
 			}
@@ -69,7 +73,10 @@ export function describeMissingSegments(auditDir: string, errors: readonly strin
 		const [x, y] = [Number(m[1]), Number(m[2])];
 		// A duplicated sequence reads "event 3 follows 3": nothing is absent, so only the verdict's own error stands.
 		if (!(x > y + 1)) continue;
-		const [fileY, fileX] = [seqFile.get(y), seqFile.get(x)];
+		const [fileY, fileX] = [
+			duplicated.has(y) ? undefined : seqFile.get(y),
+			duplicated.has(x) ? undefined : seqFile.get(x),
+		];
 		const range = x - y === 2 ? `event ${y + 1} is` : `events ${y + 1}..${x - 1} are`;
 		if (fileY === undefined || fileX === undefined) {
 			lines.push(`audit events missing: ${range} absent`);
