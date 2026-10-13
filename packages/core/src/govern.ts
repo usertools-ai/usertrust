@@ -1503,14 +1503,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		rawAllowUngoverned,
 		rawAllowUngoverned === undefined ? undefined : detectClientKind(client),
 	);
-	// A client that rewrites every request after governance reads it (Anthropic middleware given to
-	// the constructor, Google httpOptions.extraBody) is refused here, before anything touches the
-	// vault, as every call through it would be (`movedRequestOptions` reads the same per call).
-	{
-		const clientKind = detectClientKind(client);
-		const clientMoved = movedClientOptions(clientKind, client);
-		if (clientMoved.length > 0) throw movedRequestError(clientKind, clientMoved);
-	}
 
 	// 1. Load config
 	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,
@@ -1613,6 +1605,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// class, not the model string, picks local vs cloud metering (A3: this scope
 	// is captured once here and used verbatim at every authorize/settle below).
 	const kind: LLMClientKind = detectClientKind(client);
+	// A client that rewrites every request after governance reads it (Anthropic middleware given to
+	// the constructor, Google httpOptions.extraBody) is refused here, where an unsupported client is,
+	// as every call through it would be (`movedRequestOptions` reads the same per call).
+	const clientMoved = movedClientOptions(kind, client);
+	if (clientMoved.length > 0) throw movedRequestError(kind, clientMoved);
 	const endpoint: EndpointInfo = classifyEndpoint(client, config, opts?.endpoint);
 
 	// 6. Track state
