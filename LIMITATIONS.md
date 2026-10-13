@@ -146,9 +146,13 @@ listed. Among the refused ones, as measured:
 - on Google, `httpOptions.extraBody` (merged into the body), `baseUrl` and
   `baseUrlResourceScope`.
 
-A key counts when it is present, even as `undefined` (the SDK copies that too). Options
-given as a Proxy are refused whole, and an option held by an accessor (a getter), allowed
-or not, is refused and never called. **What is forwarded is a copy:** a new options object
+A key counts when it is present, even as `undefined` (the SDK copies that too). Request
+options must be a plain object: a function, an array, a class instance or a Proxy is
+refused whole, and an option held by an accessor (a getter), allowed or not, is refused
+and never called. Nothing in these checks runs caller code. Anything on the way that could
+only be read that way, whether an accessor or a Proxy at any step from a resource's
+`_client` to a client's `fetchOptions`, `middleware` or Google `httpOptions`, is refused,
+never read as absent. **What is forwarded is a copy:** a new options object
 (on Google, a new `httpOptions` in a shallow copy of the request) holding only the allowed
 keys, each read once. A key the caller adds, or a value it changes, after the call starts
 cannot reach the SDK.
@@ -165,7 +169,12 @@ kept:
 - a Google client whose `httpOptions` carry `extraBody`.
 
 A default client has no middleware. A cloud-provider subclass's `backendMiddleware()`,
-which signs requests, is never read. **A client constructed with its own `fetch` is
+which signs requests, is never read. **A client handed to `trust()` inside a Proxy is trusted
+as transport, and is not refused.** Observability wrappers return the SDK client inside a
+forwarding Proxy. A Proxy's traps can show these checks one value and the SDK another, so
+nothing is read through it, and a Proxy built to do that is deliberate bypass, out of scope
+as above. To have the checks read the client itself, wrap the raw client with `trust()`
+first, then instrument the trusted client. **A client constructed with its own `fetch` is
 trusted transport and is not refused.** That `fetch` can rewrite any request, body
 included; proxies, test harnesses and instrumentation use it legitimately. It is the
 transport `trust()` wraps, so what it does to a request is the caller's own code, out of

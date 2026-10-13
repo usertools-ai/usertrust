@@ -711,6 +711,137 @@ describe("a client constructed with fetchOptions that replace the body is refuse
 	});
 });
 
+describe("nothing that cannot be read without running caller code is read as absent", () => {
+	const SECRET = "ssn 123-45-6789";
+	const rawAnthropic = () =>
+		new Anthropic({
+			apiKey: "k",
+			baseURL: "https://anthropic.test",
+			fetch: recordingFetch as typeof fetch,
+			maxRetries: 0,
+		});
+	const rawOpenAI = () =>
+		new OpenAI({
+			apiKey: "k",
+			baseURL: "https://openai.test/v1",
+			fetch: recordingFetch as typeof fetch,
+			maxRetries: 0,
+		});
+
+	it("per-call options given as a FUNCTION (its own length and name deleted) are refused", async () => {
+		const { client, eng } = await anthropic();
+		const options = () => {};
+		delete (options as Loose).length;
+		delete (options as Loose).name;
+		await expectRefused(
+			() => client.messages.create(A, options),
+			eng,
+			/options \(not a plain object\)/,
+		);
+	});
+
+	for (const [name, make] of [
+		["Anthropic", rawAnthropic],
+		["OpenAI", rawOpenAI],
+	] as const) {
+		const call = (c: Loose) =>
+			name === "Anthropic" ? c.messages.create(A) : c.chat.completions.create(C);
+
+		it(`${name}: a client fetchOptions that is a FUNCTION carrying body is refused at trust()`, async () => {
+			const fetchOptions = Object.assign(() => {}, { body: "{}" });
+			const raw = make();
+			Object.defineProperty(raw, "fetchOptions", {
+				value: fetchOptions,
+				writable: true,
+				configurable: true,
+			});
+			await expect(
+				trust(raw as Loose, { budget: 1_000_000, vaultBase: vault, _engine: engine() }),
+			).rejects.toThrow(/client fetchOptions \(not a plain object\)/);
+		});
+
+		it(`${name}: a client fetchOptions.body set on the raw client AFTER trust() refuses every call`, async () => {
+			const raw = make();
+			const { client, eng } = await govern(raw);
+			(raw as Loose).fetchOptions = { body: JSON.stringify({ secret: SECRET }) };
+			await expectRefused(() => call(client), eng, /client fetchOptions\.body/);
+		});
+
+		it(`${name}: the raw client's fetchOptions turned into an ACCESSOR after trust() refuses every call, and is never read`, async () => {
+			const raw = make();
+			const { client, eng } = await govern(raw);
+			const getter = vi.fn(() => ({ body: JSON.stringify({ secret: SECRET }) }));
+			Object.defineProperty(raw, "fetchOptions", { get: getter, configurable: true });
+			await expectRefused(() => call(client), eng, /client fetchOptions \(unreadable\)/);
+			expect(getter).not.toHaveBeenCalled();
+		});
+
+		it(`${name}: an ACCESSOR on the resource's _client after trust() refuses every call`, async () => {
+			const raw = make();
+			const { client, eng } = await govern(raw);
+			const resource =
+				name === "Anthropic" ? (raw as Loose).messages : (raw as Loose).chat.completions;
+			Object.defineProperty(resource, "_client", { get: () => raw, configurable: true });
+			await expectRefused(() => call(client), eng, /client \(unreadable\)/);
+		});
+	}
+
+	it("Anthropic: the raw client's middleware turned into an ACCESSOR after trust() refuses every call", async () => {
+		const raw = rawAnthropic();
+		const { client, eng } = await govern(raw);
+		Object.defineProperty(raw, "middleware", { get: () => [], configurable: true });
+		await expectRefused(() => client.messages.create(A), eng, /client middleware \(unreadable\)/);
+	});
+
+	it("Google: the raw client's httpOptions.extraBody turned into an ACCESSOR after trust() refuses every call", async () => {
+		const raw = new GoogleGenAI({ apiKey: "k" });
+		const { client, eng } = await govern(raw);
+		const http = (raw.models as Loose).apiClient.clientOptions.httpOptions;
+		Object.defineProperty(http, "extraBody", {
+			get: () => ({ systemInstruction: { parts: [{ text: SECRET }] } }),
+			enumerable: true,
+			configurable: true,
+		});
+		await expectRefused(
+			() => client.models.generateContent(G),
+			eng,
+			/client httpOptions\.extraBody/,
+		);
+	});
+
+	it("Google: a Proxy for the raw client's clientOptions after trust() refuses every call", async () => {
+		const raw = new GoogleGenAI({ apiKey: "k" });
+		const { client, eng } = await govern(raw);
+		const apiClient = (raw.models as Loose).apiClient;
+		apiClient.clientOptions = new Proxy(apiClient.clientOptions, {});
+		await expectRefused(
+			() => client.models.generateContent(G),
+			eng,
+			/client httpOptions \(unreadable\)/,
+		);
+	});
+
+	it("Google: an ACCESSOR on models.apiClient after trust() refuses every call", async () => {
+		const raw = new GoogleGenAI({ apiKey: "k" });
+		const { client, eng } = await govern(raw);
+		const apiClient = (raw.models as Loose).apiClient;
+		Object.defineProperty(raw.models, "apiClient", { get: () => apiClient, configurable: true });
+		await expectRefused(
+			() => client.models.generateContent(G),
+			eng,
+			/client httpOptions \(unreadable\)/,
+		);
+	});
+
+	it("DECLARED: a client handed to trust() inside a forwarding Proxy is trusted transport, and works", async () => {
+		const { client, eng } = await govern(new Proxy(rawAnthropic(), {}));
+		await client.messages.create(A);
+		expect(sent).toEqual(["POST https://anthropic.test/v1/messages"]);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		expect(policyDenied()).toEqual([]);
+	});
+});
+
 describe("movedRequestOptions, on argument lists built by hand", () => {
 	it("names every refused key, and only those", () => {
 		expect(
