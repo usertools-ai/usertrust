@@ -1840,11 +1840,31 @@ describe("an inherited config.httpOptions is read at call start as the SDK finds
 				expect(r.gov.requests.map(seen)).toEqual(r.raw.requests.map(seen));
 			});
 
-			it(`${on}: an INHERITED httpOptions carrying extraBody is refused, nothing sent`, async () => {
-				const make = () => inheriting({ httpOptions: { extraBody: { labels: { a: "b" } } } });
-				const r = await nativeThenGoverned(method, same(make), { vertex });
+			it(`${on}: an INHERITED httpOptions carrying extraBody is refused at call start, before anything reads the request; nothing sent`, async () => {
+				const reads = { native: 0, governed: 0 };
+				const make = (side: keyof typeof reads) => () =>
+					inheriting(
+						Object.defineProperty(
+							{ httpOptions: { extraBody: { labels: { a: "b" } } } },
+							"systemInstruction",
+							{
+								get: () => {
+									reads[side]++;
+									return "be brief";
+								},
+							},
+						),
+					);
+				const r = await nativeThenGoverned(
+					method,
+					{ native: make("native"), governed: make("governed") },
+					{ vertex },
+				);
 				expect(r.raw.requests).toHaveLength(1); // natively merged and sent
+				expect(reads.native).toBeGreaterThan(0);
 				expectOptionRefused(r, "config.httpOptions.extraBody");
+				// refused at call start: the request's own getters never ran
+				expect(reads.governed).toBe(0);
 			});
 
 			it(`${on}: an httpOptions ACCESSOR on the config's prototype is refused, and the getter never runs`, async () => {

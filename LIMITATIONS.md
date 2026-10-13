@@ -137,8 +137,8 @@ own:
   later reads `params.config.httpOptions`, even through a `config` added or
   replaced after the call started; with none at the start, none is given. Your
   own `httpOptions` is never read again. It is read as the SDK finds it, through
-  the prototype chain, so one the config inherits is checked and pinned the same
-  way. An accessor or a Proxy on the way (for `config` too), or a chain longer than
+  the prototype chain, so one the config inherits is governed the same way: its
+  allowed keys are sent, and any other key is refused. An accessor or a Proxy on the way (for `config` too), or a chain longer than
   64 objects, cannot be read without running your code, and the call is refused.
 - **Every other field is read when the SDK reads it, not when the call starts.**
   The SDK reads the request after its own first `await`, so a field you change
