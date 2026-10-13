@@ -2,91 +2,204 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import {
+	type ChainStatus,
+	costView,
+	ESTIMATED_TITLE,
+	type LoadPhase,
+	listState,
+	transferView,
+} from "../shared/display.js";
+import { type SortKey, sortRows } from "../shared/filters.js";
+import { compactActor, formatUtc } from "../shared/format.js";
 import { type LedgerRow, type RowStatus, statusOf } from "../shared/rows.js";
 
-type SortKey = "seq" | "ts" | "kind" | "actor" | "model" | "costUt";
-type ColumnKey = SortKey | "status" | "integrity" | "transferId";
-const COLUMNS: Array<{
-	key: ColumnKey;
-	label: string;
-	width: string;
-}> = [
-	{ key: "ts", label: "Time", width: "w-32" },
-	{ key: "kind", label: "Kind", width: "w-32" },
-	{ key: "actor", label: "Actor", width: "w-28" },
-	{ key: "model", label: "Model", width: "w-44" },
-	{ key: "costUt", label: "Cost", width: "w-28" },
-	{ key: "status", label: "Status", width: "w-24" },
-	{ key: "integrity", label: "Integrity", width: "w-28" },
-	{ key: "transferId", label: "Tx", width: "flex-1" },
+const SORTS: Array<{ key: SortKey; label: string }> = [
+	{ key: "seq", label: "Position" },
+	{ key: "ts", label: "Time" },
+	{ key: "costUt", label: "Cost" },
+	{ key: "model", label: "Model" },
+	{ key: "actor", label: "Actor" },
+	{ key: "kind", label: "Kind" },
 ];
 
-function isSortKey(key: ColumnKey): key is SortKey {
-	return key !== "status" && key !== "integrity" && key !== "transferId";
-}
-
-/** Display-only reformat (P6): "MM-DD HH:mm:ss" — the full ISO stays in `title`. */
-function formatTs(iso: string): string {
-	return `${iso.slice(5, 10)} ${iso.slice(11, 19)}`;
-}
-
-function compare(a: LedgerRow, b: LedgerRow, key: SortKey): number {
-	if (key === "seq") return (a.seq ?? 0) - (b.seq ?? 0);
-	if (key === "costUt") return (a.costUt ?? 0) - (b.costUt ?? 0);
-	const av = String(a[key] ?? "");
-	const bv = String(b[key] ?? "");
-	return av.localeCompare(bv);
-}
-
 /**
- * Settling is normal, not a celebration — neutral text. Green is earned by verification only
- * (integrity column). A Record, so a new status cannot fall into another's colour unnoticed.
- * An ungoverned call is amber: it ran unmetered, which an operator should see.
+ * Each status's badge tone. Settling is normal, not a celebration: neutral. Green is earned by verification only
+ * (the integrity mark). A Record, so a new status cannot fall into another's colour unnoticed. An ungoverned call is
+ * amber: it ran unmetered, which an operator should see.
  */
-const STATUS_COLOR: Record<RowStatus, string> = {
-	settled: "text-[var(--text)]",
-	released: "text-[var(--text)]",
-	failed: "text-[var(--danger)]",
-	denied: "text-[var(--danger)]",
-	ambiguous: "text-[var(--amber)]",
-	ungoverned: "text-[var(--amber)]",
+export const STATUS_TONE: Record<RowStatus, string | undefined> = {
+	settled: undefined,
+	released: "faint",
+	failed: "stakes",
+	denied: "stakes",
+	ambiguous: "info",
+	ungoverned: "info",
 	// Ran and recorded, NOT charged: a money state of its own colour.
-	unrecoverable: "text-[var(--unrecoverable)]",
-	info: "text-[var(--faint)]",
-	// Never settled's colour: an unknown outcome must not read as a settled one.
-	unknown: "text-[var(--muted)] italic",
+	unrecoverable: "alert",
+	info: "faint",
+	// Never settled's look: an unknown outcome must not read as a settled one.
+	unknown: "unknown",
 };
 
-function StatusBadge(props: { row: LedgerRow }): React.JSX.Element {
-	const status = statusOf(props.row);
-	return <span className={`text-xs uppercase ${STATUS_COLOR[status]}`}>{status}</span>;
+function Sep(): React.JSX.Element {
+	return (
+		<span className="d" aria-hidden="true">
+			·
+		</span>
+	);
 }
 
-function IntegrityBadge(props: { row: LedgerRow }): React.JSX.Element {
-	if (props.row.integrity === "verified")
-		return <span className="text-xs text-[var(--verify)]">✓ verified</span>;
-	return <span className="text-xs text-[var(--danger)]">⚠ after break</span>;
+function Row(props: { row: LedgerRow }): React.JSX.Element {
+	const { row } = props;
+	const status = statusOf(row);
+	const cost = costView(row);
+	const tx = transferView(row);
+	return (
+		<>
+			<span className="ut-l">
+				<span className="ut-line">
+					<span className="ut-badge" data-tone={STATUS_TONE[status]}>
+						<i aria-hidden="true" />
+						{status}
+					</span>
+					<span className="ut-rtitle">{row.model ?? row.kind}</span>
+				</span>
+				<span className="ut-meta">
+					{/* The description may be cut; the integrity mark after it never is (the banner says rows are marked). */}
+					<span className="txt">
+						<span className="m" title={row.ts}>
+							{formatUtc(row.ts)}
+						</span>
+						<Sep />
+						<span title={`actor ${row.actor}`}>{compactActor(row.actor)}</span>
+						{row.model !== undefined && (
+							<>
+								<Sep />
+								<span className="m">{row.kind}</span>
+							</>
+						)}
+						<Sep />
+						{tx.kind === "transfer" ? (
+							<span className="m" title={`transfer ${tx.id}`}>
+								tx {tx.id}
+							</span>
+						) : (
+							<span className="none">no transfer</span>
+						)}
+					</span>
+					<Sep />
+					{row.integrity === "verified" ? (
+						<span className="ok">✓ verified</span>
+					) : (
+						<span className="bad">⚠ after break</span>
+					)}
+				</span>
+			</span>
+			<span className="ut-fig">
+				{cost === null ? (
+					<span className="ut-amt na">no cost recorded</span>
+				) : (
+					<>
+						<span className="ut-amt">{cost.ut}</span>
+						<span className="ut-recd">
+							{cost.estimated && (
+								<span className="ut-est" title={ESTIMATED_TITLE}>
+									est.
+								</span>
+							)}
+							{cost.usd}
+						</span>
+					</>
+				)}
+			</span>
+		</>
+	);
+}
+
+function Empty(props: {
+	state: Exclude<ReturnType<typeof listState>, "rows">;
+	hidden: number;
+	onClearFilters(): void;
+}): React.JSX.Element {
+	switch (props.state) {
+		case "loading":
+			return (
+				<div className="ut-skel">
+					<span className="sr-only">Loading the ledger…</span>
+					{[0, 1, 2, 3, 4, 5].map((i) => (
+						<span key={i} aria-hidden="true" />
+					))}
+				</div>
+			);
+		case "failed":
+			return (
+				<div className="ut-empty" role="status">
+					<b>The ledger could not be loaded</b>
+					The server did not answer. This view loads again when the live connection returns.
+				</div>
+			);
+		case "first-run":
+			return (
+				<div className="ut-empty" role="status">
+					<b>No governed calls yet</b>
+					This vault has no events, and nothing is wrong with it. The ledger starts at the first
+					governed call: wrap a client with <code>trust()</code>, make a call, and it appears here.
+				</div>
+			);
+		case "no-rows":
+			return (
+				<div className="ut-empty" role="status">
+					<b>No events to show</b>
+					The vault failed verification: see the integrity failure above.
+				</div>
+			);
+		case "filtered-out":
+			return (
+				<div className="ut-empty" role="status">
+					<b>Nothing matches these filters</b>
+					{props.hidden.toLocaleString()} {props.hidden === 1 ? "record is" : "records are"} hidden
+					by them.
+					<br />
+					<button type="button" className="ut-ghost" onClick={props.onClearFilters}>
+						Clear filters
+					</button>
+				</div>
+			);
+	}
 }
 
 export function AuditTable(props: {
+	/** The rows in view, after the filters. */
 	rows: LedgerRow[];
+	/** Every row held, before the filters. */
+	total: number;
+	phase: LoadPhase;
+	chain: ChainStatus | null;
 	liveIds?: Set<string>;
+	selected: string | null;
 	onOpen(row: LedgerRow): void;
+	onClearFilters(): void;
 }): React.JSX.Element {
 	const [sortKey, setSortKey] = useState<SortKey>("seq");
 	const [desc, setDesc] = useState(true);
-	const sorted = useMemo(() => {
-		const copy = [...props.rows].sort((a, b) => compare(a, b, sortKey));
-		return desc ? copy.reverse() : copy;
-	}, [props.rows, sortKey, desc]);
+	const sorted = useMemo(() => sortRows(props.rows, sortKey, desc), [props.rows, sortKey, desc]);
 
 	const parentRef = useRef<HTMLDivElement>(null);
+	// Stable while the rows are: the virtualizer's measurement cache is keyed on this callback's identity, and a new one
+	// each render (a scroll re-renders) re-scanned every row of a large vault.
+	const getItemKey = useCallback((i: number) => (sorted[i] as LedgerRow).hash, [sorted]);
 	const virtualizer = useVirtualizer({
 		count: sorted.length,
 		getScrollElement: () => parentRef.current,
-		estimateSize: () => 36,
-		overscan: 20,
+		// Two-line rows; a narrow list stacks the cost under them, so each row is measured.
+		estimateSize: () => 62,
+		getItemKey,
+		gap: 2,
+		paddingStart: 8,
+		paddingEnd: 24,
+		overscan: 12,
 	});
 
 	const sortBy = (key: SortKey): void => {
@@ -97,84 +210,79 @@ export function AuditTable(props: {
 		}
 	};
 
+	const state = listState({
+		phase: props.phase,
+		chain: props.chain,
+		total: props.total,
+		shown: sorted.length,
+	});
+
 	return (
-		<div className="flex min-h-0 flex-1 flex-col rounded border border-[var(--border)]">
-			<div className="flex border-b border-[var(--border)] bg-[var(--panel)] px-2 py-1.5 text-[10px] uppercase tracking-wider text-[var(--faint)] [font-family:var(--font-sans)]">
-				{COLUMNS.map((c) =>
-					isSortKey(c.key) ? (
-						<button
-							key={c.key}
-							type="button"
-							className={`${c.width} shrink-0 text-left`}
-							onClick={() => sortBy(c.key as SortKey)}
-						>
-							{c.label}{" "}
-							<span
-								aria-hidden="true"
-								className={c.key === sortKey ? "text-[var(--text)]" : "text-[var(--faint)]"}
-							>
-								{c.key === sortKey ? (desc ? "↓" : "↑") : "↕"}
-							</span>
-						</button>
-					) : (
-						<span key={c.key} className={`${c.width} shrink-0 text-left`}>
-							{c.label}
-						</span>
-					),
-				)}
+		<>
+			<div className="ut-cap">
+				<span className="lead">Sort</span>
+				{SORTS.map((s) => (
+					<button
+						key={s.key}
+						type="button"
+						aria-pressed={s.key === sortKey}
+						onClick={() => sortBy(s.key)}
+						title={
+							s.key === sortKey
+								? `sorted by ${s.label.toLowerCase()}, ${desc ? "descending" : "ascending"}`
+								: `sort by ${s.label.toLowerCase()}`
+						}
+					>
+						{s.label}
+						{s.key === sortKey && <span aria-hidden="true">{desc ? " ↓" : " ↑"}</span>}
+					</button>
+				))}
 			</div>
-			<div ref={parentRef} className="min-h-0 flex-1 overflow-auto">
-				{sorted.length === 0 ? (
-					<div className="flex h-full items-center justify-center p-8 text-xs text-[var(--faint)] [font-family:var(--font-sans)]">
-						no matching transactions — clear filters
-					</div>
+			<div ref={parentRef} className="ut-list">
+				{state !== "rows" ? (
+					<Empty
+						state={state}
+						hidden={props.total - sorted.length}
+						onClearFilters={props.onClearFilters}
+					/>
 				) : (
 					<div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
 						{virtualizer.getVirtualItems().map((item) => {
 							const row = sorted[item.index] as LedgerRow;
+							const sel = props.selected === row.hash;
 							return (
 								<button
 									type="button"
 									// The event hash, unique on the chain: an id can repeat, and duplicate keys drop or duplicate rows.
 									key={row.hash}
+									data-index={item.index}
+									ref={virtualizer.measureElement}
 									onClick={() => props.onOpen(row)}
-									className={`absolute left-0 flex w-full border-b border-[var(--border)]/50 px-2 py-2 text-left text-xs tabular-nums transition-colors duration-100 hover:bg-[var(--panel-2)]${props.liveIds?.has(row.hash) ? " row-live" : ""}`}
-									style={{ top: 0, transform: `translateY(${item.start}px)` }}
+									aria-current={sel ? "true" : undefined}
+									className={`ut-row${sel ? " sel" : ""}${props.liveIds?.has(row.hash) ? " fresh" : ""}`}
+									style={{
+										position: "absolute",
+										top: 0,
+										left: 8,
+										right: 8,
+										transform: `translateY(${item.start}px)`,
+									}}
 								>
-									<span className="w-32 shrink-0 text-[var(--muted)]" title={row.ts}>
-										{formatTs(row.ts)}
-									</span>
-									<span className="w-32 shrink-0">{row.kind}</span>
-									<span className="w-28 shrink-0 truncate text-[var(--muted)]" title={row.actor}>
-										{row.actor}
-									</span>
-									<span className="w-44 shrink-0 truncate" title={row.model}>
-										{row.model ?? "—"}
-									</span>
-									<span className="w-28 shrink-0">
-										{row.costUt !== undefined ? `${row.costUt} UT` : "—"}
-										{row.costUsd !== undefined && (
-											<span className="text-[var(--muted)]"> ${row.costUsd.toFixed(4)}</span>
-										)}
-									</span>
-									<span className="w-24 shrink-0">
-										<StatusBadge row={row} />
-									</span>
-									<span className="w-28 shrink-0">
-										<IntegrityBadge row={row} />
-									</span>
-									<span className="flex-1 truncate text-[var(--muted)]">
-										{row.transferId ?? row.id}
-									</span>
+									<Row row={row} />
 								</button>
 							);
 						})}
 					</div>
 				)}
 			</div>
-			<div className="border-t border-[var(--border)] px-2 py-1 text-xs text-[var(--muted)] tabular-nums">
-				{sorted.length} transactions
+			<div className="ut-foot">
+				<span>
+					{sorted.length === props.total
+						? `${props.total.toLocaleString()} ${props.total === 1 ? "record" : "records"}`
+						: `${sorted.length.toLocaleString()} of ${props.total.toLocaleString()} records`}
+				</span>
+				<span>times in UTC</span>
 			</div>
-		</div>
+		</>
 	);
 }

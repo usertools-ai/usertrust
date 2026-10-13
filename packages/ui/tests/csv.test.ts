@@ -95,3 +95,26 @@ describe("csvFilename", () => {
 		expect(lines[1]?.split(",")[statusIndex]).toBe("ungoverned");
 	});
 });
+
+describe("the row window and the usage source in Export", () => {
+	it("red-first (no trace of the 100k window): an export of a windowed ledger says so in its filename", () => {
+		expect(csvFilename(new Date("2026-07-27T10:00:00Z"), false, 100_000)).toBe(
+			"usertrust-ledger-2026-07-27-newest-100000.csv",
+		);
+		expect(csvFilename(new Date("2026-07-27T10:00:00Z"), true, 100_000)).toBe(
+			"usertrust-ledger-2026-07-27-newest-100000-filtered.csv",
+		);
+		expect(csvFilename(new Date("2026-07-27T10:00:00Z"), false, undefined)).toBe(
+			"usertrust-ledger-2026-07-27.csv",
+		);
+	});
+
+	it("red-first (an estimated cost exported like a reported one): each row says where its usage came from", () => {
+		const at = (csv: string) =>
+			csv.split("\r\n")[1]?.split(",")[CSV_HEADERS.indexOf("usage_source")];
+		expect(CSV_HEADERS.at(-1)).toBe("usage_source");
+		expect(at(toCsv([row({ usageSource: "estimated" })]))).toBe("estimated");
+		expect(at(toCsv([row({ usageSource: "provider" })]))).toBe("provider");
+		expect(at(toCsv([row()]))).toBe("");
+	});
+});

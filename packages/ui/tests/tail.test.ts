@@ -92,6 +92,20 @@ describe("live tail", () => {
 		expect(rows.some((r) => r.transferId === "tx_live")).toBe(true);
 	});
 
+	it("red-first (deletion read as a first run): deleting the audit directory under an open dashboard turns it red", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				rmSync(join(tempDir, ".usertrust", "audit"), { recursive: true, force: true });
+			},
+		);
+		const chain = JSON.parse(data).chain as { valid: boolean; empty: boolean; errors: string[] };
+		expect(chain).toMatchObject({ valid: false, empty: false });
+		expect(chain.errors.join(" ")).toContain("deletion detected");
+	});
+
 	it("red-first (stays settled): an ambiguity appended after an OPTIMISTIC settlement re-classifies the EARLIER row", async () => {
 		// The audit-first path writes `settled: true` before the POST and appends `settlement_ambiguous` only when the
 		// POST throws: the earlier row's verdict changes after it was sent, so the server sends the change.
@@ -313,5 +327,177 @@ describe("live tail", () => {
 			},
 		);
 		expect(eventName).toBe("resync");
+	});
+});
+
+// Before a project's first governed call there is no audit directory, and fs.watch cannot watch a path that does not
+// exist: the dashboard opened on a new project showed "no governed calls yet" and never showed the first one.
+describe("live tail on a project with no vault yet", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-fresh-"));
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("red-first (never delivered): the first event, written after the server started, reaches the client", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			chain: { events: number; empty: boolean };
+		};
+		expect(before.chain).toMatchObject({ events: 0, empty: true });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				const writer = createAuditWriter(tempDir);
+				await writer.appendEvent({
+					kind: "llm_call",
+					actor: "local",
+					data: { cost: 4, settled: true, transferId: "tx_first" },
+				});
+				writer.release();
+			},
+			8000,
+		);
+		expect(JSON.parse(data).chain).toMatchObject({ events: 1, valid: true, empty: false });
+		const { rows } = (await (await fetch(`http://127.0.0.1:${ui.port}/api/events`)).json()) as {
+			rows: Array<{ transferId?: string }>;
+		};
+		expect(rows.map((r) => r.transferId)).toEqual(["tx_first"]);
+	});
+});
+
+describe("header spend", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-spend-"));
+		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	// One rule at load and on a live append: the header counts llm_call costs. Trends shows every costed record in
+	// view under its own label, so the two figures are never presented as one quantity.
+	it("counts the same records at load and on a live append", async () => {
+		const seed = createAuditWriter(tempDir);
+		await seed.appendEvent({
+			kind: "llm_call",
+			actor: "local",
+			data: { cost: 7, transferId: "tx_a" },
+		});
+		await seed.appendEvent({
+			kind: "tool_use",
+			actor: "local",
+			data: { cost: 30, settled: true, transferId: "tx_b" },
+		});
+		seed.release();
+		ui = await createUiServer(tempDir, { port: 0 });
+		const loaded = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			spentUt: number;
+		};
+		expect(loaded.spentUt).toBe(7);
+		const append = (kind: string, data: Record<string, unknown>) => async () => {
+			const writer = createAuditWriter(tempDir);
+			await writer.appendEvent({ kind, actor: "local", data });
+			writer.release();
+		};
+		const port = ui.port;
+		const afterTool = await readSse(
+			port,
+			(name) => name === "summary",
+			append("tool_use", { cost: 40, settled: true, transferId: "tx_c" }),
+		);
+		expect(JSON.parse(afterTool.data).spentUt).toBe(7);
+		const afterCall = await readSse(
+			port,
+			(name) => name === "summary",
+			append("llm_call", { cost: 2, transferId: "tx_d" }),
+		);
+		expect(JSON.parse(afterCall.data).spentUt).toBe(9);
+	});
+});
+
+describe("remote settings", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-remote-"));
+		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("turning the kit mark on in the vault config reaches the client without a restart", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			remote: { kit: boolean };
+		};
+		expect(before.remote).toEqual({ kit: false });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				writeFileSync(
+					join(tempDir, ".usertrust", "usertrust.config.json"),
+					JSON.stringify({ remote: { kit: true } }),
+				);
+			},
+		);
+		expect(JSON.parse(data).remote).toEqual({ kit: true });
+	});
+});
+
+// A log of malformed lines only fails verification with ZERO parsed events: a guard that counted parsed events read its
+// later deletion as a first run. The server remembers that it saw the directory, whatever it held.
+describe("deletion of an audit directory that held no parsable event", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-malformed-"));
+		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+		writeFileSync(join(tempDir, ".usertrust", "audit", "events.jsonl"), "{ not json\n");
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("red-first (cleared to a first run): deleting it under an open dashboard stays red", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			chain: { events: number; valid: boolean };
+		};
+		expect(before.chain).toMatchObject({ events: 0, valid: false });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				rmSync(join(tempDir, ".usertrust", "audit"), { recursive: true, force: true });
+			},
+		);
+		const chain = JSON.parse(data).chain as { valid: boolean; empty: boolean; errors: string[] };
+		expect(chain).toMatchObject({ valid: false, empty: false });
+		expect(chain.errors.join(" ")).toContain("deletion detected");
 	});
 });

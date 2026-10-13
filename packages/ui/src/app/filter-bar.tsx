@@ -5,31 +5,48 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { EMPTY_FILTERS, type FilterState, isFiltering } from "../shared/filters.js";
 import { type LedgerRow, statusOf } from "../shared/rows.js";
 
-function distinct(values: Array<string | undefined>): string[] {
-	return [...new Set(values.filter((v): v is string => v !== undefined))].sort();
+/** Each distinct value with the number of rows carrying it, by value. */
+function counted(values: Array<string | undefined>): Array<{ value: string; n: number }> {
+	const counts = new Map<string, number>();
+	for (const v of values) if (v !== undefined) counts.set(v, (counts.get(v) ?? 0) + 1);
+	return [...counts.entries()]
+		.sort(([a], [b]) => a.localeCompare(b))
+		.map(([value, n]) => ({ value, n }));
 }
 
-/** Shared field chrome: 32px tall, mono 12px, panel fill, dark-scheme native pickers. */
-const FIELD_CLASSES =
-	"h-8 rounded-md border border-[var(--border)] bg-[var(--panel)] px-2 font-mono text-xs text-[var(--text)] [color-scheme:dark] placeholder:text-[var(--faint)]";
-
-function FacetPill(props: {
+function Facet(props: {
 	label: string;
-	options: string[];
+	options: Array<{ value: string; n: number }>;
 	selected: string[];
 	onChange(next: string[]): void;
 }): React.JSX.Element {
 	const { label, options, selected, onChange } = props;
 	const [open, setOpen] = useState(false);
+	// Placed when it opens: a fixed width, its left edge clamped 16 px inside BOTH window edges (aligning to the trigger's
+	// right edge alone pushed a narrow screen's first facet off the left), and no taller than the room below the trigger.
+	const [place, setPlace] = useState({ left: 0, width: 260, maxHeight: 300 });
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const triggerRef = useRef<HTMLButtonElement | null>(null);
+
+	const toggle = (): void => {
+		const trigger = triggerRef.current;
+		if (!open && trigger !== null) {
+			const r = trigger.getBoundingClientRect();
+			const width = Math.min(260, window.innerWidth - 32);
+			const x = Math.min(Math.max(r.left, 16), window.innerWidth - 16 - width);
+			setPlace({
+				left: x - r.left,
+				width,
+				maxHeight: Math.max(140, Math.min(300, window.innerHeight - r.bottom - 24)),
+			});
+		}
+		setOpen((o) => !o);
+	};
 
 	useEffect(() => {
 		if (!open) return;
 		const onPointerDown = (e: PointerEvent) => {
-			if (rootRef.current !== null && !rootRef.current.contains(e.target as Node)) {
-				setOpen(false);
-			}
+			if (rootRef.current !== null && !rootRef.current.contains(e.target as Node)) setOpen(false);
 		};
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (e.key === "Escape") {
@@ -47,52 +64,52 @@ function FacetPill(props: {
 
 	const active = selected.length > 0;
 	return (
-		<div ref={rootRef} className="relative">
+		<div ref={rootRef} className="ut-facet">
 			<button
 				ref={triggerRef}
 				type="button"
 				aria-haspopup="true"
 				aria-expanded={open}
-				onClick={() => setOpen((o) => !o)}
-				title={active ? `${label}: ${selected.join(", ")}` : label}
-				className={`h-8 max-w-[220px] truncate rounded-md border bg-[var(--panel)] px-3 font-mono text-xs ${
-					active
-						? "border-[var(--text)] text-[var(--text)]"
-						: "border-[var(--border)] text-[var(--muted)]"
-				}`}
+				onClick={toggle}
+				title={active ? `${label}: ${selected.join(", ")}` : `filter by ${label}`}
+				className={`ut-chip${active ? " on" : ""}`}
 			>
-				{active ? `${label} · ${selected.length}` : label}
+				<span className="t">{label}</span>
+				{active && <span className="n">{selected.length}</span>}
+				<span className="chev" aria-hidden="true">
+					▾
+				</span>
 			</button>
 			{open && (
-				<div
-					className="absolute top-full left-0 z-20 mt-1 max-h-60 min-w-40 max-w-[260px] overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--panel-2)] p-1"
-					style={{ boxShadow: "var(--shadow)" }}
+				<fieldset
+					className="ut-pop"
+					style={{ left: place.left, width: place.width, maxHeight: place.maxHeight }}
 				>
+					<legend className="sr-only">filter by {label}</legend>
 					{options.length === 0 ? (
-						<div className="px-2 py-1.5 font-mono text-[11px] text-[var(--faint)]">no values</div>
+						<div className="ut-opt">no values</div>
 					) : (
 						options.map((o) => (
-							<label
-								key={o}
-								className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 font-mono text-xs text-[var(--text)] hover:bg-[var(--border)]"
-							>
+							<label key={o.value} className="ut-opt">
 								<input
 									type="checkbox"
-									checked={selected.includes(o)}
+									checked={selected.includes(o.value)}
 									onChange={(e) =>
 										onChange(
-											e.currentTarget.checked ? [...selected, o] : selected.filter((x) => x !== o),
+											e.currentTarget.checked
+												? [...selected, o.value]
+												: selected.filter((x) => x !== o.value),
 										)
 									}
-									className="accent-[var(--chart)]"
 								/>
-								<span className="max-w-[220px] truncate" title={o}>
-									{o}
+								<span className="t" title={o.value}>
+									{o.value}
 								</span>
+								<span className="n">{o.n}</span>
 							</label>
 						))
 					)}
-				</div>
+				</fieldset>
 			)}
 		</div>
 	);
@@ -104,12 +121,17 @@ export function FilterBar(props: {
 	onChange(f: FilterState): void;
 }): React.JSX.Element {
 	const { rows, filters, onChange } = props;
-	const kinds = useMemo(() => distinct(rows.map((r) => r.kind)), [rows]);
-	const models = useMemo(() => distinct(rows.map((r) => r.model)), [rows]);
-	const actors = useMemo(() => distinct(rows.map((r) => r.actor)), [rows]);
-	const statuses = useMemo(() => distinct(rows.map((r) => statusOf(r))), [rows]);
+	const kinds = useMemo(() => counted(rows.map((r) => r.kind)), [rows]);
+	const models = useMemo(() => counted(rows.map((r) => r.model)), [rows]);
+	const actors = useMemo(() => counted(rows.map((r) => r.actor)), [rows]);
+	const statuses = useMemo(() => counted(rows.map((r) => statusOf(r))), [rows]);
 
 	const chips: Array<{ label: string; clear(): void }> = [];
+	if (filters.search.trim() !== "")
+		chips.push({
+			label: `search: ${filters.search.trim()}`,
+			clear: () => onChange({ ...filters, search: "" }),
+		});
 	for (const k of filters.kinds)
 		chips.push({
 			label: `kind: ${k}`,
@@ -132,126 +154,122 @@ export function FilterBar(props: {
 		});
 	if (filters.from)
 		chips.push({
-			label: `from: ${filters.from}`,
+			label: `from ${filters.from} UTC`,
 			clear: () => onChange({ ...filters, from: undefined }),
 		});
 	if (filters.to)
 		chips.push({
-			label: `to: ${filters.to}`,
+			label: `to ${filters.to} UTC`,
 			clear: () => onChange({ ...filters, to: undefined }),
 		});
+	// A cost bound hides every row WITHOUT a cost (an unknown cost is not 0), and the chip says so.
 	if (filters.costMin !== undefined)
 		chips.push({
-			label: `cost ≥ ${filters.costMin}`,
+			label: `cost ≥ ${filters.costMin} UT · uncosted hidden`,
 			clear: () => onChange({ ...filters, costMin: undefined }),
 		});
 	if (filters.costMax !== undefined)
 		chips.push({
-			label: `cost ≤ ${filters.costMax}`,
+			label: `cost ≤ ${filters.costMax} UT · uncosted hidden`,
 			clear: () => onChange({ ...filters, costMax: undefined }),
 		});
 
+	const cost = (key: "costMin" | "costMax", value: string): void =>
+		onChange({ ...filters, [key]: value === "" ? undefined : Number(value) });
+
 	return (
-		<div className="flex flex-col gap-2">
-			<div className="flex flex-wrap items-center gap-2">
-				<input
-					type="search"
-					placeholder="Search transactions…"
-					value={filters.search}
-					onChange={(e) => onChange({ ...filters, search: e.currentTarget.value })}
-					className={`${FIELD_CLASSES} w-[260px]`}
-				/>
-				<FacetPill
+		<>
+			<div className="ut-bar">
+				<Facet
 					label="kind"
 					options={kinds}
 					selected={filters.kinds}
 					onChange={(v) => onChange({ ...filters, kinds: v })}
 				/>
-				<FacetPill
+				<Facet
 					label="model"
 					options={models}
 					selected={filters.models}
 					onChange={(v) => onChange({ ...filters, models: v })}
 				/>
-				<FacetPill
+				<Facet
 					label="actor"
 					options={actors}
 					selected={filters.actors}
 					onChange={(v) => onChange({ ...filters, actors: v })}
 				/>
-				<FacetPill
+				<Facet
 					label="status"
 					options={statuses}
 					selected={filters.statuses}
 					onChange={(v) => onChange({ ...filters, statuses: v })}
 				/>
-				<input
-					type="date"
-					aria-label="from date"
-					title="from"
-					value={filters.from ?? ""}
-					onChange={(e) => onChange({ ...filters, from: e.currentTarget.value || undefined })}
-					className={FIELD_CLASSES}
-				/>
-				<input
-					type="date"
-					aria-label="to date"
-					title="to"
-					value={filters.to ?? ""}
-					onChange={(e) => onChange({ ...filters, to: e.currentTarget.value || undefined })}
-					className={FIELD_CLASSES}
-				/>
-				<input
-					type="number"
-					aria-label="min cost (UT)"
-					placeholder="min UT"
-					value={filters.costMin ?? ""}
-					onChange={(e) =>
-						onChange({
-							...filters,
-							costMin: e.currentTarget.value === "" ? undefined : Number(e.currentTarget.value),
-						})
-					}
-					className={`${FIELD_CLASSES} w-20`}
-				/>
-				<input
-					type="number"
-					aria-label="max cost (UT)"
-					placeholder="max UT"
-					value={filters.costMax ?? ""}
-					onChange={(e) =>
-						onChange({
-							...filters,
-							costMax: e.currentTarget.value === "" ? undefined : Number(e.currentTarget.value),
-						})
-					}
-					className={`${FIELD_CLASSES} w-20`}
-				/>
+				<span className="ut-sep" aria-hidden="true" />
+				{/* The filters compare the UTC date, the date each row shows: the pickers say so. */}
+				<label className="ut-field">
+					From (UTC)
+					<input
+						type="date"
+						value={filters.from ?? ""}
+						onChange={(e) => onChange({ ...filters, from: e.currentTarget.value || undefined })}
+					/>
+				</label>
+				<label className="ut-field">
+					To (UTC)
+					<input
+						type="date"
+						value={filters.to ?? ""}
+						onChange={(e) => onChange({ ...filters, to: e.currentTarget.value || undefined })}
+					/>
+				</label>
+				<span className="ut-sep" aria-hidden="true" />
+				<span className="ut-range">
+					<label className="ut-field">
+						Cost
+						<input
+							type="number"
+							aria-label="minimum cost in UT"
+							placeholder="min UT"
+							value={filters.costMin ?? ""}
+							onChange={(e) => cost("costMin", e.currentTarget.value)}
+						/>
+					</label>
+					<span className="to" aria-hidden="true">
+						to
+					</span>
+					<input
+						className="ut-field-bare"
+						type="number"
+						aria-label="maximum cost in UT"
+						placeholder="max UT"
+						value={filters.costMax ?? ""}
+						onChange={(e) => cost("costMax", e.currentTarget.value)}
+					/>
+				</span>
 			</div>
 			{isFiltering(filters) && (
-				<div className="flex flex-wrap items-center gap-1">
+				<div className="ut-active">
+					<span className="ut-label">Filtering</span>
 					{chips.map((c) => (
 						<button
 							key={c.label}
 							type="button"
 							onClick={c.clear}
-							title={c.label}
+							title={`clear ${c.label}`}
 							aria-label={`clear ${c.label}`}
-							className="flex max-w-[220px] items-center gap-1 rounded-full border border-[var(--faint)] bg-[var(--panel)] px-2 py-0.5 font-mono text-[11px] text-[var(--muted)] hover:text-[var(--text)]"
+							className="ut-chip on"
 						>
-							<span className="truncate">{c.label}</span>
-							<span aria-hidden="true">×</span>
+							<span className="t">{c.label}</span>
+							<span className="x" aria-hidden="true">
+								×
+							</span>
 						</button>
 					))}
-					<button
-						type="button"
-						onClick={() => onChange(EMPTY_FILTERS)}
-						className="px-2 font-mono text-[11px] text-[var(--muted)] hover:text-[var(--text)]"
-					>
-						clear all
+					<button type="button" className="ut-ghost" onClick={() => onChange(EMPTY_FILTERS)}>
+						Clear all
 					</button>
 				</div>
 			)}
-		</div>
+		</>
 	);
 }
