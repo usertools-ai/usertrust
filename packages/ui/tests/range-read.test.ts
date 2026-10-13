@@ -294,6 +294,32 @@ describe("loadState's identity", () => {
 		expect(settled.logId).toBeDefined();
 	});
 
+	it("red-first (false clean): a deletion seen by a pass that is redone stays detected when the retry finds a fresh valid chain", async () => {
+		// A fresh valid chain, built elsewhere, to put in the deleted directory's place.
+		const other = mkdtempSync(join(tmpdir(), "trust-range-fresh-"));
+		try {
+			await appendEvents(other, 2, "fresh");
+			const audit = join(vault, "audit");
+			let pass = 0;
+			// The directory is checked after `afterReaders`, so the first pass must still find it absent there: it is
+			// removed on the first pass's `afterDescriptor` (its log vanishes, so that pass is inconsistent and redone)
+			// and recreated on the retry's `afterDescriptor`, before that pass reads anything.
+			loadSeam.afterDescriptor = () => {
+				pass += 1;
+				if (pass === 1) rmSync(audit, { recursive: true, force: true });
+				if (pass === 2) cpSync(join(other, ".usertrust", "audit"), audit, { recursive: true });
+			};
+			const state = loadState(vault, undefined, true, false);
+			expect(pass).toBe(2);
+			// The retry read the recreated chain, and the deletion the first pass saw is still the verdict.
+			expect(state.summary.chain.events).toBe(2);
+			expect(state.deletionDetected).toBe(true);
+			expect(state.summary.chain.valid).toBe(false);
+		} finally {
+			rmSync(other, { recursive: true, force: true });
+		}
+	});
+
 	it("records a fragment after the last newline, with the offset at the size the descriptor saw", () => {
 		appendFileSync(log, '{"id":"torn');
 		const state = loadState(vault);

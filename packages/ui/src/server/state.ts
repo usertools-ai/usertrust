@@ -201,6 +201,10 @@ export function loadState(
 		if (pass.consistent) return pass.state;
 		// Still changing: every later grow is a full reload until a load reads one unchanged file throughout.
 		if (retry === LOAD_RETRIES) return { ...pass.state, logId: undefined };
+		// What a discarded pass OBSERVED about the directory stays observed (a recreated directory must not undo a
+		// deletion it saw); only what it read from the file (events, verdict, offset, identity) is rebuilt.
+		auditDirSeen ||= pass.state.auditDirPresent;
+		deletionSeen ||= pass.state.deletionDetected;
 	}
 }
 
