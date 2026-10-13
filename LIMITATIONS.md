@@ -117,33 +117,47 @@ can pass it; the effect is limited to how faithfully nested fields are copied, n
 what governance decides or charges, which use the same copy that is sent. The snapshot covers those
 AFC fields only: `contents` and the rest of the request are still read live.
 
-**Request options that change what is sent are refused.** A governed call is scanned,
-held and priced from its request parameters, but each SDK takes per-call request options
-too (the second argument on Anthropic and OpenAI, `config.httpOptions` on Google), and
-some of them replace what those parameters describe. These are refused before anything
-is held or sent, with a `policy_denied` event:
-- options that replace the body: `body`; `fetchOptions` (spread over the request last,
-  so its `body` wins); Anthropic's per-call `middleware`, which rewrites the built
-  request; Google's `httpOptions.extraBody`, merged into the body, per call or on the
-  client (refused by `trust()`, and on every call if it is added later);
-- options that move the call: `path`, which can name an endpoint default-deny refuses
-  as a method; `defaultBaseURL`; Google's `httpOptions.baseUrl`;
-- every option whose name starts with `__`: the SDKs' internal, non-public options.
-  `__binaryResponse` returns the raw body, so usage is never read and the call would
-  settle at its estimate.
+**Only request options that change neither the body nor where it is sent are allowed.**
+A governed call is scanned, held and priced from its request parameters. But each SDK
+takes per-call request options too: the second argument on Anthropic and OpenAI, and
+`config.httpOptions` on Google. Some of them replace what those parameters describe, so
+they are governed by a list, as default-deny governs methods.
 
-A refused key counts when it is present, even as `undefined` (the SDK copies that too).
-Options given as a Proxy are refused whole, and an accessor is never called.
-
-These stay governed, because they move neither the body nor the host:
+**Allowed, because they were measured to change neither the body nor the host:**
 - `timeout`, `maxRetries`, `signal`, `idempotencyKey`;
-- `headers` (a beta header such as Anthropic's long-context one is priced from the usage
-  the provider reports);
+- `stream`, which the SDK sets itself after reading the options;
+- `headers`: a beta header, such as Anthropic's long-context one, is priced from the
+  usage the provider reports;
 - `query`, which changes only the URL's query string;
 - `method`;
-- Google's `apiVersion`, `headers`, `timeout` and `retryOptions`.
+- on Google, `httpOptions` `apiVersion`, `headers`, `timeout` and `retryOptions`.
 
-Anthropic's beta-only `fallbackState` is not refused and has not been measured.
+**Every other option is refused** before anything is held or sent, with a
+`policy_denied` event. An option an SDK adds later is refused until it is measured and
+listed. Among the refused ones, as measured:
+- `body`;
+- `fetchOptions`, which is spread over the request last, so its `body` wins;
+- Anthropic's per-call `middleware`, which rewrites the built request;
+- `path`, which can name an endpoint default-deny refuses as a method;
+- `defaultBaseURL`;
+- Anthropic's beta-only `fallbackState`, which is not measured;
+- every internal `__` option, named as such: `__binaryResponse` returns the raw body, so
+  usage would never be read and the call would settle at its estimate;
+- on Google, `httpOptions.extraBody` (merged into the body), `baseUrl` and
+  `baseUrlResourceScope`.
+
+A key counts when it is present, even as `undefined` (the SDK copies that too). Options
+given as a Proxy are refused whole, and an accessor is never called.
+
+**A client that rewrites every request** is refused by `trust()`, and every call refuses
+too if one is changed later on the raw client the caller kept:
+- an Anthropic client constructed with `middleware`, including the SDK's own
+  `betaRefusalFallbackMiddleware`, which re-sends a refused call to a fallback model
+  after it was priced;
+- a Google client whose `httpOptions` carry `extraBody`.
+
+A default client has no middleware. A cloud-provider subclass's `backendMiddleware()`,
+which signs requests, is not refused.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.
 That is what makes it a one-line integration with zero SDK dependencies across

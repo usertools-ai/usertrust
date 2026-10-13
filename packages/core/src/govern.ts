@@ -57,6 +57,7 @@ import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
 	guardedGet,
 	type MethodBoundary,
+	movedClientOptions,
 	movedRequestError,
 	movedRequestOptions,
 	rawClientStandIn,
@@ -1502,6 +1503,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		rawAllowUngoverned,
 		rawAllowUngoverned === undefined ? undefined : detectClientKind(client),
 	);
+	// A client that rewrites every request after governance reads it (Anthropic middleware given to
+	// the constructor, Google httpOptions.extraBody) is refused here, before anything touches the
+	// vault, as every call through it would be (`movedRequestOptions` reads the same per call).
+	{
+		const clientKind = detectClientKind(client);
+		const clientMoved = movedClientOptions(clientKind, client);
+		if (clientMoved.length > 0) throw movedRequestError(clientKind, clientMoved);
+	}
 
 	// 1. Load config
 	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,
@@ -4332,10 +4341,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			readOnly: new WeakMap(),
 		};
 		if (kind === "google") {
-			// A client whose own httpOptions carry `extraBody` merges it into every request: refused
-			// here, at creation, as every call through it would be (`movedRequestOptions`).
-			const clientMoved = movedRequestOptions(kind, [], ownDataProperty(client, "models"));
-			if (clientMoved.length > 0) throw movedRequestError(kind, clientMoved);
 			return buildGoogleProxy(
 				client,
 				interceptCall,

@@ -21,11 +21,11 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { betaRefusalFallbackMiddleware } from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { movedRequestOptions } from "../../src/default-deny.js";
+import { movedClientOptions, movedRequestOptions } from "../../src/default-deny.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
 import { AUDIT_DIR, VAULT_DIR } from "../../src/shared/constants.js";
 import { PolicyDeniedError } from "../../src/shared/errors.js";
@@ -61,6 +61,8 @@ async function recordingFetch(input: unknown, init?: RequestInit): Promise<Respo
 	const url = String(input instanceof Request ? input.url : input);
 	sent.push(`${init?.method ?? "GET"} ${url}`);
 	const path = new URL(url).pathname;
+	const streamed = typeof init?.body === "string" && JSON.parse(init.body).stream === true;
+	if (path.endsWith("/messages") && streamed) return sse(ANTHROPIC_STREAM);
 	if (path.endsWith("/messages")) {
 		return json({
 			id: "msg_1",
@@ -98,6 +100,36 @@ async function recordingFetch(input: unknown, init?: RequestInit): Promise<Respo
 		candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
 		usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
 	});
+}
+
+/** A streamed Anthropic message, as its SSE events. */
+const ANTHROPIC_STREAM = [
+	{
+		type: "message_start",
+		message: {
+			id: "msg_1",
+			type: "message",
+			role: "assistant",
+			model: "claude-sonnet-4-5",
+			content: [],
+			stop_reason: null,
+			stop_sequence: null,
+			usage: { input_tokens: 10, output_tokens: 0 },
+		},
+	},
+	{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+	{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+	{ type: "content_block_stop", index: 0 },
+	{
+		type: "message_delta",
+		delta: { stop_reason: "end_turn", stop_sequence: null },
+		usage: { output_tokens: 5 },
+	},
+	{ type: "message_stop" },
+];
+function sse(events: Array<{ type: string }>): Response {
+	const body = events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
+	return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
 const realFetch = globalThis.fetch;
@@ -305,6 +337,37 @@ describe("per-call request options that replace the body, the destination or the
 			/\bbody\b/,
 		],
 		[
+			"Anthropic messages.create, fallbackState (not on the list, unmeasured)",
+			anthropic,
+			(c) => c.messages.create(A, { fallbackState: {} }),
+			/fallbackState/,
+		],
+		[
+			"Anthropic messages.create, an option an SDK adds later",
+			anthropic,
+			(c) => c.messages.create(A, { someFutureOption: 1 }),
+			/someFutureOption/,
+		],
+		[
+			"OpenAI chat.completions.create, an option an SDK adds later",
+			openai,
+			(c) => c.chat.completions.create(C, { someFutureOption: 1 }),
+			/someFutureOption/,
+		],
+		[
+			"OpenAI chat.completions.create, an internal option is named as internal",
+			openai,
+			(c) => c.chat.completions.create(C, { __metadata: {} }),
+			/__metadata \(internal\)/,
+		],
+		[
+			"Google generateContent, httpOptions.baseUrlResourceScope (not on the list)",
+			google,
+			(c) =>
+				c.models.generateContent({ ...G, config: { httpOptions: { baseUrlResourceScope: "x" } } }),
+			/httpOptions\.baseUrlResourceScope/,
+		],
+		[
 			"Google generateContent, httpOptions.extraBody",
 			google,
 			(c) =>
@@ -437,11 +500,84 @@ describe("a Google client whose own httpOptions carry extraBody", () => {
 	});
 });
 
+describe("an Anthropic client constructed with middleware (it rewrites every request after governance)", () => {
+	const raw = (middleware?: unknown[]) =>
+		new Anthropic({
+			apiKey: "k",
+			baseURL: "https://anthropic.test",
+			fetch: recordingFetch as typeof fetch,
+			maxRetries: 0,
+			...(middleware ? { middleware: middleware as Loose } : {}),
+		});
+
+	it("is refused at trust(): a middleware that swaps the body", async () => {
+		const swap = async (req: Loose, next: Loose) => next({ ...req, body: JSON.stringify(A) });
+		await expect(
+			trust(raw([swap]) as Loose, { budget: 1_000_000, vaultBase: vault, _engine: engine() }),
+		).rejects.toThrow(/request_option_refused.*client middleware/s);
+		expect(sent).toEqual([]);
+	});
+
+	it("is refused at trust(): the SDK's own betaRefusalFallbackMiddleware, which re-sends to another model after pricing", async () => {
+		const fallback = betaRefusalFallbackMiddleware({ fallbackModel: "claude-sonnet-4-5" } as Loose);
+		await expect(
+			trust(raw([fallback]) as Loose, { budget: 1_000_000, vaultBase: vault, _engine: engine() }),
+		).rejects.toThrow(/client middleware/);
+	});
+
+	it("given middleware AFTER trust() (pushed on the raw client the caller kept), refuses every call", async () => {
+		const r = raw();
+		const { client, eng } = await govern(r);
+		(r as Loose).middleware.push(async (req: Loose, next: Loose) => next(req));
+		await expectRefused(() => client.messages.create(A), eng, /client middleware/);
+	});
+
+	it("never widens to the default: a default client, and a subclass whose backendMiddleware() signs requests, both pass", async () => {
+		expect(movedClientOptions("anthropic", new Anthropic({ apiKey: "k" }))).toEqual([]);
+		class Signed extends Anthropic {
+			override backendMiddleware() {
+				return [async (req: Loose, next: Loose) => next(req)] as Loose;
+			}
+		}
+		const { client, eng } = await govern(
+			new Signed({
+				apiKey: "k",
+				baseURL: "https://anthropic.test",
+				fetch: recordingFetch as typeof fetch,
+				maxRetries: 0,
+			}),
+		);
+		await client.messages.create(A);
+		expect(sent).toEqual(["POST https://anthropic.test/v1/messages"]);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		expect(policyDenied()).toEqual([]);
+	});
+});
+
+describe("the SDK helpers' own options are on the governed list", () => {
+	it("Anthropic messages.stream is held and sent", async () => {
+		const { client, eng } = await anthropic();
+		// The governed stream authorizes first, so it is awaited; it resolves to the SDK's handle.
+		const handle = await client.messages.stream(A);
+		await handle.finalMessage();
+		expect(sent).toEqual(["POST https://anthropic.test/v1/messages"]);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		expect(policyDenied()).toEqual([]);
+	});
+
+	it("Anthropic messages.parse is held and sent", async () => {
+		const { client, eng } = await anthropic();
+		await client.messages.parse(A);
+		expect(sent).toEqual(["POST https://anthropic.test/v1/messages"]);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("movedRequestOptions, on argument lists built by hand", () => {
 	it("names every refused key, and only those", () => {
 		expect(
 			movedRequestOptions("openai", [C, { body: 1, timeout: 1, __metadata: {}, query: {} }]),
-		).toEqual(["body", "__metadata"]);
+		).toEqual(["body", "__metadata (internal)"]);
 		expect(movedRequestOptions("anthropic", [A])).toEqual([]);
 		expect(movedRequestOptions("anthropic", [A, null])).toEqual([]);
 	});

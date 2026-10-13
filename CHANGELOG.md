@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Request options that change what a governed call sends are refused.** A governed call is scanned for PII and injection, held and priced from its request parameters. But the SDKs also take per-call request options, and some of them replace what those parameters describe, so the call sent something governance never saw:
-  - **Anthropic and OpenAI, the second argument:** `body`; `fetchOptions` (its `body` wins); Anthropic's `middleware`; `path`; `defaultBaseURL`; and every internal `__` option (`__binaryResponse` skipped reading usage, so the call settled at its estimate).
-  - **Google:** `config.httpOptions.extraBody` and `config.httpOptions.baseUrl`.
+- **Only request options that change neither the body nor where it is sent are allowed on a governed call.** A governed call is scanned for PII and injection, held and priced from its request parameters. But the SDKs also take per-call request options, and some of them replace what those parameters describe, so the call sent something governance never saw. Under `pii: "block"`, a clean request whose `options.body` carried a US SSN was sent, unrefused.
 
-  For example, under `pii: "block"`, a clean request whose `options.body` carried a US SSN was sent, unrefused.
+  Per-call options are now governed by a list, as default-deny governs methods:
+  - **allowed:** `timeout`, `maxRetries`, `signal`, `headers`, `query`, `method`, `idempotencyKey` and `stream`; on Google, `httpOptions` `apiVersion`, `headers`, `timeout` and `retryOptions`;
+  - **refused, everything else**, with a `PolicyDeniedError` naming the option, after one `policy_denied` event, before anything is held or sent. Among them: `body`; `fetchOptions` (its `body` wins); Anthropic's `middleware` and `fallbackState`; `path`; `defaultBaseURL`; every internal `__` option (`__binaryResponse` skipped reading usage, so the call settled at its estimate); Google's `httpOptions.extraBody`, `baseUrl` and `baseUrlResourceScope`.
 
-  Every governed method (create, stream and parse alike) now rejects such a call with a `PolicyDeniedError` naming the option, after one `policy_denied` event, before anything is held or sent. A Google client created with `httpOptions.extraBody` is refused by `trust()`. `timeout`, `maxRetries`, `signal`, `headers`, `query`, `method`, `idempotencyKey`, and Google's `apiVersion`, `headers` and `timeout` stay governed. (LIMITATIONS.md, "1. The governance surface is the wrapped SDK methods — nothing else".)
+  This covers every governed method (create, stream and parse alike), and an option an SDK adds later is refused until listed. `trust()` also refuses a client that rewrites every request: an Anthropic client constructed with `middleware` (including the SDK's `betaRefusalFallbackMiddleware`, which re-sends to a fallback model after pricing), and a Google client created with `httpOptions.extraBody`. A default client, and a cloud-provider subclass that signs requests, are unaffected. (LIMITATIONS.md, "1. The governance surface is the wrapped SDK methods — nothing else".)
 
 ## [5.0.1] - 2026-10-13
 

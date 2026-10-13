@@ -609,41 +609,49 @@ export function transportOptionKeys(provider: DefaultDenyProvider, options: unkn
 }
 
 /**
- * The per-call request options (the SECOND argument on Anthropic and OpenAI) that would change
- * what is sent past governance. Each SDK posts `{ body, ...options }` and spreads `fetchOptions`
- * last over the request, so these replace what trust() scanned, held and priced:
- *   - the body: `body`, `fetchOptions` (its `body` replaces the request's), `middleware` (Anthropic:
- *     it rewrites the request after the SDK built it);
- *   - the destination: `path` (another endpoint, one default-deny may refuse as a method),
- *     `defaultBaseURL` (another host, on a client left on its default one);
- *   - how the answer is read: every `__`-prefixed key (internal, not public API; `__binaryResponse`
- *     returns the raw body, so usage is never extracted and the call settles at its estimate).
- * Measured through the real SDKs. `timeout`, `maxRetries`, `signal`, `headers`, `query`, `method`
- * and `idempotencyKey` change neither the body nor the host and stay governed.
+ * The per-call request options (the SECOND argument on Anthropic and OpenAI) a governed call may
+ * carry: the ones measured to change neither the body nor where it is sent. Every other option is
+ * refused, as default-deny refuses every method it does not govern and `withOptions()` refuses every
+ * key it does not list, so an option an SDK adds later is refused until it is measured. Measured
+ * through the real SDKs (each posts `{ body, ...options }` and spreads `fetchOptions` last over the
+ * request): `body`, `fetchOptions` and Anthropic's `middleware` replaced the body, `path` and
+ * `defaultBaseURL` moved the call, `__binaryResponse` hid the usage. `stream` is listed because the
+ * SDK sets its own after the spread; `headers` and `query` change only the header and the URL's
+ * query string.
  */
-const MOVED_REQUEST_OPTIONS: ReadonlySet<string> = new Set([
-	"body",
-	"fetchOptions",
-	"middleware",
-	"path",
-	"defaultBaseURL",
+const GOVERNED_REQUEST_OPTIONS: ReadonlySet<string> = new Set([
+	"timeout",
+	"maxRetries",
+	"signal",
+	"headers",
+	"query",
+	"method",
+	"idempotencyKey",
+	"stream",
 ]);
 
-/** Google's `httpOptions` keys that do the same: `extraBody` merges into the body, `baseUrl` moves the host. */
-const MOVED_GOOGLE_HTTP_OPTIONS: ReadonlySet<string> = new Set(["extraBody", "baseUrl"]);
+/** Google's per-call `config.httpOptions` keys a governed call may carry (`extraBody` merges into the body, `baseUrl` moves the host). */
+const GOVERNED_GOOGLE_HTTP_OPTIONS: ReadonlySet<string> = new Set([
+	"apiVersion",
+	"headers",
+	"timeout",
+	"retryOptions",
+]);
 
 /**
- * The refused keys `obj` carries, each named under `at`. A key counts when it is present at all,
- * whatever its value: the SDK's spread copies an `undefined` too, so `{ path: undefined }` replaces
- * the call's path. Fails CLOSED where it cannot read without running caller code: a Proxy is
- * refused whole (the spread would run its traps), and an accessor is never called.
+ * The keys of `obj` the governed list does not allow, each named under `at`. An internal `__`
+ * option is named as such, though the list refuses it anyway: it is not public API. A key counts
+ * when it is present at all, whatever its value: the SDK's spread copies an `undefined` too, so
+ * `{ path: undefined }` replaces the call's path. Fails CLOSED where it cannot read without running
+ * caller code: a Proxy is refused whole (the spread would run its traps), and an accessor is never
+ * called (`getOwnPropertyNames` reads names only).
  */
-function refusedKeysOf(obj: unknown, refused: (key: string) => boolean, at: string): string[] {
+function ungovernedKeysOf(obj: unknown, governed: ReadonlySet<string>, at: string): string[] {
 	if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) return [];
 	if (utilTypes.isProxy(obj)) return [`${at} (a Proxy)`];
 	return Object.getOwnPropertyNames(obj)
-		.filter(refused)
-		.map((key) => `${at}${key}`);
+		.filter((key) => key.startsWith("__") || !governed.has(key))
+		.map((key) => (key.startsWith("__") ? `${at}${key} (internal)` : `${at}${key}`));
 }
 
 /** An own data property, or undefined: no accessor and no Proxy trap runs. */
@@ -655,10 +663,32 @@ function ownData(obj: unknown, key: string): unknown {
 }
 
 /**
- * What a governed call carries that would change what is sent past governance (empty: nothing).
- * Anthropic and OpenAI: the per-call request options, `args[1]`. Google: the request's
- * `config.httpOptions`, and, through `target` (the SDK resource the call runs on), the client's own
- * `httpOptions`, which the SDK merges into every request.
+ * What a client carries that rewrites every request after governance read it (empty: nothing).
+ * Anthropic: a `middleware` chain given to the constructor (the SDK's own
+ * `betaRefusalFallbackMiddleware` re-sends a refused call to a fallback model, after it was
+ * priced). Google: `httpOptions.extraBody`, merged into every body. `client` is the SDK client.
+ */
+export function movedClientOptions(provider: DefaultDenyProvider, client: unknown): string[] {
+	if (provider === "anthropic") {
+		const middleware = ownData(client, "middleware");
+		return Array.isArray(middleware) && middleware.length > 0 ? ["client middleware"] : [];
+	}
+	if (provider === "google") {
+		const http = ownData(
+			ownData(ownData(ownData(client, "models"), "apiClient"), "clientOptions"),
+			"httpOptions",
+		);
+		return ownData(http, "extraBody") !== undefined ? ["client httpOptions.extraBody"] : [];
+	}
+	return [];
+}
+
+/**
+ * What a governed call carries that is not on the governed list, or that its client rewrites
+ * (empty: nothing). Anthropic and OpenAI: every per-call request option, `args[1]`, outside
+ * `GOVERNED_REQUEST_OPTIONS`. Google: every `config.httpOptions` key outside
+ * `GOVERNED_GOOGLE_HTTP_OPTIONS`. Both: the client options `movedClientOptions` names, read through
+ * `target` (the SDK resource the call runs on), so a client changed after trust() is refused too.
  */
 export function movedRequestOptions(
 	provider: DefaultDenyProvider,
@@ -666,30 +696,32 @@ export function movedRequestOptions(
 	target?: unknown,
 ): string[] {
 	if (provider !== "google") {
-		return refusedKeysOf(
-			args[1],
-			(key) => MOVED_REQUEST_OPTIONS.has(key) || key.startsWith("__"),
-			"",
-		);
+		return [
+			...ungovernedKeysOf(args[1], GOVERNED_REQUEST_OPTIONS, ""),
+			...movedClientOptions(provider, ownData(target, "_client")),
+		];
 	}
 	const config = ownData(args[0], "config");
-	const perCall = ownData(config, "httpOptions");
-	const client = ownData(ownData(ownData(target, "apiClient"), "clientOptions"), "httpOptions");
+	const http = ownData(ownData(ownData(target, "apiClient"), "clientOptions"), "httpOptions");
 	return [
 		...(utilTypes.isProxy(config) ? ["config (a Proxy)"] : []),
-		...refusedKeysOf(perCall, (key) => MOVED_GOOGLE_HTTP_OPTIONS.has(key), "config.httpOptions."),
-		...refusedKeysOf(client, (key) => key === "extraBody", "client httpOptions."),
+		...ungovernedKeysOf(
+			ownData(config, "httpOptions"),
+			GOVERNED_GOOGLE_HTTP_OPTIONS,
+			"config.httpOptions.",
+		),
+		...(ownData(http, "extraBody") !== undefined ? ["client httpOptions.extraBody"] : []),
 	];
 }
 
-/** The refusal for a governed call whose request options would move what is sent (`movedRequestOptions`). */
+/** The refusal for a governed call, or a client, carrying what `movedRequestOptions` / `movedClientOptions` name. */
 export function movedRequestError(
 	provider: DefaultDenyProvider,
 	keys: readonly string[],
 ): PolicyDeniedError {
 	return new PolicyDeniedError(
-		`request_option_refused: ${PROVIDER_NAME[provider]} call's request options would change what is sent past governance (${keys.join(", ")})`,
-		"A governed call is scanned, held and priced from its request parameters, so options that replace its body (body, fetchOptions, middleware, Google's httpOptions.extraBody), move it to another endpoint or host (path, defaultBaseURL, Google's httpOptions.baseUrl), or change how its answer is read (any __ option) are refused. timeout, maxRetries, signal, headers, query, method and idempotencyKey stay governed. Put the request in the call's parameters, or wrap a client built for that transport with its own trust() call.",
+		`request_option_refused: ${PROVIDER_NAME[provider]} call carries request options that are not on the governed list (${keys.join(", ")})`,
+		"A governed call is scanned, held and priced from its request parameters, so only request options that change neither its body nor where it is sent are allowed: timeout, maxRetries, signal, headers, query, method, idempotencyKey and stream (on Google, httpOptions apiVersion, headers, timeout and retryOptions). Every other option is refused, among them body, fetchOptions, middleware, path, defaultBaseURL and every internal __ option, as is a client constructed with middleware (Anthropic) or httpOptions.extraBody (Google). Put the request in the call's parameters. See LIMITATIONS.md, section 1.",
 	);
 }
 
