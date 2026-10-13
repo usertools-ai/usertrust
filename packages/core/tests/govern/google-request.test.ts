@@ -1925,7 +1925,7 @@ describe("an inherited config.httpOptions is read at call start as the SDK finds
 					{ native: () => request({}), governed: make },
 					{ vertex },
 				);
-				expectOptionRefused(r, "config.httpOptions (unreadable, inherited)");
+				expectOptionRefused(r, "config.httpOptions (unreadable)");
 				expect(getter).not.toHaveBeenCalled();
 			});
 
@@ -1961,7 +1961,7 @@ describe("an inherited config.httpOptions is read at call start as the SDK finds
 					{ native: () => request({}), governed: make },
 					{ vertex },
 				);
-				expectOptionRefused(r, "config.httpOptions (unreadable, inherited)");
+				expectOptionRefused(r, "config.httpOptions (unreadable)");
 				expect(traps.n).toBe(0);
 			});
 
@@ -1972,7 +1972,7 @@ describe("an inherited config.httpOptions is read at call start as the SDK finds
 					return request(Object.create(proto) as Loose);
 				};
 				const r = await nativeThenGoverned(method, same(make), { vertex });
-				expectOptionRefused(r, "config.httpOptions (unreadable, inherited)");
+				expectOptionRefused(r, "config.httpOptions (unreadable)");
 			});
 		}
 	}

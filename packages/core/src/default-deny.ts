@@ -908,11 +908,12 @@ export function movedRequestOptions(
 
 /**
  * A Google request's `params.config.httpOptions` at call start, read as the SDK's own plain property
- * access finds it, through the prototype chain (`readThroughChain`: no caller code runs), and
- * governed: what to refuse (the per-call option check's names: an unreadable step, an accessor or a
- * Proxy on the chain, or a key off the list), or the pin served for that PATH at every later read:
- * the first data `httpOptions` on the chain, as a NEW object holding only its governed keys (and
- * whether the SDK's own key listing of config would see it: own and enumerable), or absent.
+ * access finds it, through the prototype chain (`readThroughChain`: no caller code runs), pinned for
+ * that PATH at every later read: the first data `httpOptions` on the chain, as a NEW object holding
+ * only its governed keys (and whether the SDK's own key listing of config would see it: own and
+ * enumerable), or absent. `movedRequestOptions`, which runs first, reads it the same way and has
+ * already refused anything unreadable or off the list; should this be reached without that, it
+ * refuses the same names.
  */
 export function googleHttpOptionsAtCallStart(
 	request: unknown,
@@ -920,23 +921,19 @@ export function googleHttpOptionsAtCallStart(
 	| { refused: string[] }
 	| { pinned: { httpOptions: Record<string, unknown> | undefined; enumerable: boolean } } {
 	const config = readThroughChain(request, "config");
-	if (config === UNREADABLE) return { refused: ["config (unreadable)"] };
 	const http = readThroughChain(config, "httpOptions");
+	const refused = ungovernedKeysOf(
+		http,
+		GOVERNED_GOOGLE_HTTP_OPTIONS,
+		"config.httpOptions.",
+		"config.httpOptions",
+	);
+	if (refused.length > 0) return { refused };
+	if (!plainObject(http)) return { pinned: { httpOptions: undefined, enumerable: false } };
 	const own =
 		config !== null && typeof config === "object" && !utilTypes.isProxy(config)
 			? Object.getOwnPropertyDescriptor(config, "httpOptions")
 			: undefined;
-	const name = own === undefined ? "config.httpOptions (inherited)" : "config.httpOptions";
-	if (http === UNREADABLE) {
-		return {
-			refused: [
-				own === undefined ? "config.httpOptions (unreadable, inherited)" : `${name} (unreadable)`,
-			],
-		};
-	}
-	const refused = ungovernedKeysOf(http, GOVERNED_GOOGLE_HTTP_OPTIONS, "config.httpOptions.", name);
-	if (refused.length > 0) return { refused };
-	if (!plainObject(http)) return { pinned: { httpOptions: undefined, enumerable: false } };
 	return {
 		pinned: {
 			httpOptions: governedCopy(http, GOVERNED_GOOGLE_HTTP_OPTIONS),
