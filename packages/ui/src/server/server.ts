@@ -100,7 +100,11 @@ export async function createUiServer(
 		// genesis, so extending that state read as verified). So the first append after such a load is a full reload,
 		// which re-derives the verdict from the whole log; once it finds the directory readable, appends are incremental
 		// again. Readability decides only this; whether the directory was ever SEEN (`auditDirSeen`) is presence alone.
-		if (!state.auditDirReadable) {
+		// The same holds for a load that saw NO LOG BYTES (`byteOffset === 0`): a readable directory that held no log yet
+		// (an empty one, one with only an anchor) gave a verdict with nothing to check, and a truncated log that arrives
+		// later still links from genesis, so extending that state read as verified over a mismatched anchor. When the last
+		// load saw no log bytes, a grow re-derives the verdict from the whole vault.
+		if (!state.auditDirReadable || state.byteOffset === 0) {
 			handleResync();
 			return;
 		}

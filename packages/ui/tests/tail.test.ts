@@ -1157,6 +1157,152 @@ describe("an audit directory that appears while polling and holds no log bytes",
 	});
 });
 
+// The incremental append path only extends a verdict. A load that saw no log bytes (the directory absent or unlistable, or
+// present with no log yet) derived its verdict from nothing, so a log that arrives afterwards must be checked in FULL: a
+// truncated log still links from genesis, and only the vault's own anchor check sees what is missing.
+describe("a log that arrives after a load that saw no log bytes is checked in full", {
+	timeout: 40_000,
+}, () => {
+	let tempDir: string;
+	let stage: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-nobytes-"));
+		stage = mkdtempSync(join(tmpdir(), "trust-tail-nobytes-stage-"));
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+		rmSync(stage, { recursive: true, force: true });
+	});
+
+	const auditDir = (): string => join(tempDir, ".usertrust", "audit");
+
+	/** A vault of `count` events built in its own directory under `root`, returning its log text and its anchor text. */
+	async function buildVault(root: string, count: number, prefix: string) {
+		mkdirSync(join(root, ".usertrust", "audit"), { recursive: true });
+		const writer = createAuditWriter(root);
+		for (let i = 0; i < count; i++) {
+			await writer.appendEvent({
+				kind: "llm_call",
+				actor: "local",
+				data: { cost: 1, settled: true, transferId: `${prefix}_${i}` },
+			});
+		}
+		writer.release();
+		const dir = join(root, ".usertrust", "audit");
+		return {
+			log: readFileSync(join(dir, "events.jsonl"), "utf-8"),
+			meta: readFileSync(join(dir, "events.jsonl.meta"), "utf-8"),
+		};
+	}
+
+	/** Puts a file in place in one step (a rename from the staging directory), so a reader never sees it half written. */
+	function place(name: string, text: string): void {
+		const from = join(stage, `incoming-${name}`);
+		writeFileSync(from, text);
+		renameSync(from, join(auditDir(), name));
+	}
+
+	/** The anchor first, then a log that is one event short of it. */
+	async function deliverTruncated(): Promise<void> {
+		const built = await buildVault(join(stage, "a"), 3, "tx");
+		const lines = built.log.trim().split("\n");
+		place("events.jsonl.meta", built.meta);
+		place("events.jsonl", `${lines.slice(0, 2).join("\n")}\n`);
+	}
+
+	/** The anchor of ANOTHER vault first, then a whole log of four events whose head that anchor does not record. */
+	async function deliverMismatched(): Promise<void> {
+		const other = await buildVault(join(stage, "other"), 3, "other");
+		const mine = await buildVault(join(stage, "mine"), 4, "mine");
+		place("events.jsonl.meta", other.meta);
+		place("events.jsonl", mine.log);
+	}
+
+	/** Polls for a fixed window past the watcher's interval: no sample may show a log's events as verified. */
+	async function expectNeverVerifiedThenInvalid(minEvents: number): Promise<void> {
+		if (ui === undefined) throw new Error("no server");
+		const seen: Array<{ events: number; valid: boolean }> = [];
+		const until = Date.now() + 4500;
+		while (Date.now() < until) {
+			const s = await summaryOf(ui.port);
+			seen.push({ events: s.chain.events, valid: s.chain.valid });
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		// Positive control: the events really were loaded, so the window saw the log and not only the empty state.
+		expect(seen.some((s) => s.events >= minEvents)).toBe(true);
+		expect(seen.filter((s) => s.events >= 1 && s.valid)).toEqual([]);
+		const after = await summaryOf(ui.port);
+		expect(after.chain.events).toBeGreaterThanOrEqual(minEvents);
+		expect(after.chain.valid).toBe(false);
+	}
+
+	it("(a) polling mode: an empty directory appears and is loaded, then a TRUNCATED log arrives: never verified", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		expect((await summaryOf(ui.port)).chain).toMatchObject({ events: 0, valid: true, empty: true });
+		mkdirSync(auditDir(), { recursive: true });
+		// Past one interval: the appearance has been delivered and loaded, and that load saw no log bytes.
+		await new Promise((r) => setTimeout(r, 2500));
+		expect((await summaryOf(ui.port)).chain).toMatchObject({ events: 0, valid: true });
+		await deliverTruncated();
+		await expectNeverVerifiedThenInvalid(2);
+	});
+
+	it("(b) polling mode: an empty directory appears and is loaded, then a log with a MISMATCHED anchor arrives: never verified", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		expect((await summaryOf(ui.port)).chain).toMatchObject({ events: 0, valid: true, empty: true });
+		mkdirSync(auditDir(), { recursive: true });
+		await new Promise((r) => setTimeout(r, 2500));
+		expect((await summaryOf(ui.port)).chain).toMatchObject({ events: 0, valid: true });
+		await deliverMismatched();
+		await expectNeverVerifiedThenInvalid(4);
+	});
+
+	it("(c) fs.watch mode: a start with an EMPTY audit directory, then a TRUNCATED log and its anchor: never verified", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		ui = await createUiServer(tempDir, { port: 0 });
+		expect((await summaryOf(ui.port)).chain).toMatchObject({ events: 0, valid: true });
+		await deliverTruncated();
+		await expectNeverVerifiedThenInvalid(2);
+	});
+
+	it("(c) fs.watch mode: a start with an EMPTY audit directory, then a log with a MISMATCHED anchor: never verified", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		ui = await createUiServer(tempDir, { port: 0 });
+		expect((await summaryOf(ui.port)).chain).toMatchObject({ events: 0, valid: true });
+		await deliverMismatched();
+		await expectNeverVerifiedThenInvalid(4);
+	});
+
+	it("(d) polling mode: a directory appears holding ONLY an anchor that records events: it reads red before any deletion", async () => {
+		const built = await buildVault(join(stage, "a"), 3, "tx");
+		ui = await createUiServer(tempDir, { port: 0 });
+		expect((await summaryOf(ui.port)).chain).toMatchObject({ events: 0, valid: true, empty: true });
+		// The whole audit directory appears in one step, holding the anchor and no log.
+		const incoming = join(stage, "incoming-audit");
+		mkdirSync(incoming);
+		writeFileSync(join(incoming, "events.jsonl.meta"), built.meta);
+		mkdirSync(join(tempDir, ".usertrust"), { recursive: true });
+		renameSync(incoming, auditDir());
+		const red = await summaryWhen(ui.port, (s) => !s.chain.valid, 6000);
+		expect(red.chain.valid).toBe(false);
+		expect(red.chain.empty).toBe(false);
+		expect(red.chain.errors.length).toBeGreaterThan(0);
+		// It stays red across a polled window: never "No governed calls yet".
+		const until = Date.now() + 2500;
+		while (Date.now() < until) {
+			const s = await summaryOf(ui.port);
+			expect(s.chain.valid).toBe(false);
+			expect(s.chain.empty).toBe(false);
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	});
+});
+
 // The polling mode runs its own interval. A leaked poller is the classic failure of that design: it must stop when the
 // watcher is stopped (the server's close() stops it), and must never keep the process alive on its own.
 describe("the polling watcher's own interval", { timeout: 20_000 }, () => {
