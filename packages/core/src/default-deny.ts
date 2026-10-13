@@ -52,8 +52,49 @@
  */
 
 import { types as utilTypes } from "node:util";
-import { isRealmObjectPrototype } from "./google-afc.js";
 import { PolicyDeniedError } from "./shared/errors.js";
+
+/** The built-in, captured at module load: a caller who patches it later cannot make a fake constructor look native. */
+const functionToString = Function.prototype.toString;
+
+/** An own DATA property's value, read from its descriptor (never through a getter); `undefined` otherwise. */
+function ownDataValue(obj: object, key: string): { value: unknown } | undefined {
+	const d = Object.getOwnPropertyDescriptor(obj, key);
+	return d !== undefined && "value" in d ? { value: d.value } : undefined;
+}
+
+/**
+ * `proto` is SOME realm's `Object.prototype` (this one, or a `vm` context's, a test runner's):
+ * it has no prototype of its own, and its own `constructor` is a DATA property holding a
+ * native function named "Object" whose own `prototype` is `proto` itself. Read through
+ * descriptors only, with the captured `Function.prototype.toString`, and a Proxy anywhere is
+ * not plain, so no caller code runs. A user class's prototype, or a user function named
+ * "Object", fails it; a deliberately forged prototype can pass (see `hasNativeConstructor`).
+ */
+function isRealmObjectPrototype(proto: unknown): boolean {
+	if (proto === Object.prototype) return true;
+	if (proto === null || typeof proto !== "object" || utilTypes.isProxy(proto)) return false;
+	if (Object.getPrototypeOf(proto) !== null) return false;
+	return hasNativeConstructor(proto, "Object");
+}
+
+/**
+ * `proto`'s own `constructor` is a DATA property holding a non-Proxy native function whose own
+ * `name` is `name` and whose own `prototype` is `proto`, read through descriptors and the
+ * captured `Function.prototype.toString` only. This recognises a realm's prototype by SHAPE; it
+ * does not prove it: a bound function's toString reads as native code, and a bound function can
+ * be given an own `name` and an own `prototype` that points back (see `plainObject` for why that
+ * gains nothing here).
+ */
+function hasNativeConstructor(proto: object, name: string): boolean {
+	const ctor = ownDataValue(proto, "constructor")?.value;
+	if (typeof ctor !== "function" || utilTypes.isProxy(ctor)) return false;
+	return (
+		ownDataValue(ctor, "name")?.value === name &&
+		ownDataValue(ctor, "prototype")?.value === proto &&
+		functionToString.call(ctor).includes("[native code]")
+	);
+}
 
 export type DefaultDenyProvider = "anthropic" | "openai" | "google";
 

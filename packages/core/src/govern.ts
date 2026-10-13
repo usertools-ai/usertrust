@@ -70,14 +70,13 @@ import {
 	validateAllowUngoverned,
 } from "./default-deny.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
+import { googleClientIsVertexAI, runGovernedAfc } from "./google-afc.js";
 import {
-	afcRequestedVerdict,
-	type GoogleAfcVerdict,
-	googleClientIsVertexAI,
-	runGovernedAfc,
-	sdkRunsAfcVerdict,
-	snapshotGoogleAfcParams,
-} from "./google-afc.js";
+	type GoogleMethod,
+	type GooglePipeline,
+	resolveGooglePipeline,
+	snapshotGoogleRequest,
+} from "./google-request.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	copyAppliedRates,
@@ -1781,9 +1780,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// reads (the 1-hour hold verdict, PII and injection scans, redaction) and what is
 			// forwarded, so the bytes scanned are the bytes sent: a stateful getter or `toJSON`
 			// has nothing left to flip between the scan and the SDK's own serialization.
-			// Google is the exception, named: its SDK reads non-JSON members off the request
-			// (callable tools), so the original object is forwarded; Google has no 1-hour tier
-			// and its extractor never reports a 1-hour share, so a flip cannot under-hold there.
+			// Google is the exception, named: its request is already the mirror (google-request.ts),
+			// plain data with no caller hook or getter left in it, but the SDK reads non-JSON
+			// members off it (callable tools, by reference), so the mirror itself is forwarded, not
+			// the parse of its serialization; Google has no 1-hour tier.
 			// A request that cannot be serialized forwards as given and holds dearest.
 			const originalParams = (args[0] ?? {}) as Record<string, unknown>;
 			// The caller's abort signal OBJECT, captured NOW, before any await: a caller that
@@ -5353,59 +5353,81 @@ function ownStringDataProperty(obj: unknown, key: string): string | undefined {
 }
 
 /**
- * The AFC gate both Google traps run before `intercept` (after the audit preflight):
- * snapshot `args[0]` (google-afc.ts), then decide ON the snapshot with the one AFC
- * reading. `generateContent` uses `afcRequestedVerdict`: "afc" runs the governed per-round
- * loop on the snapshot. `generateContentStream` uses `sdkRunsAfcVerdict`: "afc" is refused,
- * because a streamed AFC loop is not metered round by round yet. "indeterminate" is refused
- * on both. When the call proceeds, `args[0]` IS the snapshot, so what is forwarded (to the
- * loop or to the single governed call) is what was checked. `vertexAI` is the client's backend,
- * which decides how the SDK serializes `functionCallingConfig` (see snapshotGoogleAfcParams).
+ * The gate both Google traps run before `intercept` (after the audit preflight). The SDK's own
+ * pipeline runs over the caller's `args[0]` (google-request.ts: the capture, then the mirror and its
+ * per-call self-check), and decides:
+ *   - the SDK rejects the request locally (incompatible tools, missing contents, a caller getter that
+ *     throws): `sdkError`, the SDK's own error, raised after a refusal is audited;
+ *   - the mirror cannot reproduce what the SDK sends: refused, "can't tell";
+ *   - `generateContentStream` that the SDK would run as an AFC loop: refused (a streamed loop is not
+ *     metered round by round yet);
+ *   - otherwise `args[0]` becomes the mirror, plain data the SDK has not yet seen, and
+ *     `runAfcLoop` is the SDK's own AFC decision for `generateContent`.
+ * No SDK pipeline at all (neither the client's own `Models` nor an installed `@google/genai`
+ * passes the probe): refused.
  */
-function googleAfcGate(
+async function googleRequestGate(
 	args: unknown[],
-	method: "generateContent" | "generateContentStream",
-	vertexAI: boolean,
-): { refusal: PolicyDeniedError } | { runAfcLoop: boolean } {
-	const snap = snapshotGoogleAfcParams(args[0], { vertexAI });
-	if ("verdict" in snap) return { refusal: googleAfcError(method, snap.verdict) };
-	const verdict =
-		method === "generateContent"
-			? afcRequestedVerdict(snap.params)
-			: sdkRunsAfcVerdict(snap.params);
-	if (verdict.kind === "indeterminate") return { refusal: googleAfcError(method, verdict) };
-	if (verdict.kind === "afc" && method === "generateContentStream") {
-		return { refusal: googleAfcError(method, verdict) };
+	method: GoogleMethod,
+	pipeline: () => Promise<GooglePipeline | undefined>,
+): Promise<
+	| { refusal: PolicyDeniedError }
+	| { sdkError: unknown; denial: PolicyDeniedError }
+	| { runAfcLoop: boolean }
+> {
+	const resolved = await pipeline();
+	if (resolved === undefined) {
+		return {
+			refusal: new PolicyDeniedError(
+				`ungoverned_method: models.${method} could not be checked: no @google/genai request pipeline was found`,
+				"usertrust governs a Google request by running the SDK's own request pipeline over it, without sending, so what it checks is what the SDK sends. Neither this client's models class nor an installed @google/genai passed that check. Install @google/genai (an optional peer dependency) next to usertrust.",
+			),
+		};
+	}
+	const snap = await snapshotGoogleRequest(resolved, method, args[0]);
+	switch (snap.kind) {
+		case "sdkError":
+			return {
+				sdkError: snap.error,
+				denial: new PolicyDeniedError(
+					`ungoverned_method: models.${method} was rejected by the SDK before any request: ${
+						snap.error instanceof Error ? snap.error.message : String(snap.error)
+					}`,
+					"The SDK's own request pipeline threw for this request, as it would without usertrust; nothing was held, sent or charged. The SDK's error is what the call throws.",
+				),
+			};
+		case "afcStream":
+			return {
+				refusal: new PolicyDeniedError(
+					`ungoverned_method: models.${method} with automatic function calling is not governed yet`,
+					"With a callable tool, the SDK streams one provider round after another inside this call, and usertrust does not yet meter a streamed loop round by round (models.generateContent with automatic function calling is metered per round). Use models.generateContent, set config.automaticFunctionCalling.disable: true and run the tool calls yourself, or make the call on the original (unwrapped) client inside governAction() with a cost estimate.",
+				),
+			};
+		case "refuse":
+			return {
+				refusal: new PolicyDeniedError(
+					`ungoverned_method: models.${method} could not be checked for automatic function calling (${snap.reason})`,
+					"usertrust sends a plain-data copy of the request that the SDK's own pipeline reads exactly as it reads yours, and checks that per call. For this request it could not: an object the SDK both reads field by field and serializes through toJSON, a cycle, a getter that answered the SDK differently on two reads in a way that changes what is sent, or a property definition by the SDK. Pass plain data.",
+				),
+			};
 	}
 	if (args.length > 0) args[0] = snap.params;
-	return { runAfcLoop: verdict.kind === "afc" };
+	return { runAfcLoop: snap.afcRan };
 }
 
-function googleAfcError(
-	method: "generateContent" | "generateContentStream",
-	verdict: Exclude<GoogleAfcVerdict, { kind: "no_afc" }>,
-): PolicyDeniedError {
-	if (verdict.kind === "indeterminate" && verdict.uncloneableAt !== undefined) {
-		return new PolicyDeniedError(
-			`ungoverned_method: models.${method} could not be checked for automatic function calling (${verdict.uncloneableAt} cannot be copied as data); pass plain objects`,
-			"With automatic function calling not disabled, the request is forwarded as a copy of what was checked. A tool with no callTool is copied as only the fields the SDK sends from it, and those must hold plain data at every depth: a function, a symbol, an object whose prototype is not Object's or null (a class instance, or one made with Object.create from another object), an array whose prototype is not Array's, an accessor (getter or setter), a non-enumerable property, a sparse array or an array with a named property in them cannot be copied. Pass plain data, or set config.automaticFunctionCalling.disable: true.",
-		);
+/** A local SDK rejection: audited as a refusal carrying the SDK's message, then the SDK's own error. */
+async function refuseWithSdkError(
+	refuse: MethodBoundary["refuse"],
+	path: string,
+	args: unknown[],
+	gate: { sdkError: unknown; denial: PolicyDeniedError },
+): Promise<never> {
+	try {
+		await refuse(path, args, gate.denial);
+	} catch (err) {
+		if (err !== gate.denial) throw err; // destroyed, or a pre-degraded audit: that error wins
 	}
-	if (verdict.kind === "indeterminate" && verdict.proxyAt !== undefined) {
-		return new PolicyDeniedError(
-			`ungoverned_method: models.${method} could not be checked for automatic function calling (a Proxy in ${verdict.proxyAt}); pass plain objects`,
-			"A Proxy can show this check one config and the SDK another, so usertrust refuses it rather than trust what it saw. Pass plain objects for params, params.config, config.tools, each tool and config.automaticFunctionCalling.",
-		);
-	}
-	return verdict.kind === "afc"
-		? new PolicyDeniedError(
-				`ungoverned_method: models.${method} with automatic function calling is not governed yet`,
-				"With a callable tool, the SDK streams one provider round after another inside this call, and usertrust does not yet meter a streamed loop round by round (models.generateContent with automatic function calling is metered per round). Use models.generateContent, set config.automaticFunctionCalling.disable: true and run the tool calls yourself, or make the call on the original (unwrapped) client inside governAction() with a cost estimate.",
-			)
-		: new PolicyDeniedError(
-				`ungoverned_method: models.${method} could not be checked for automatic function calling`,
-				"The request could not be read safely: a getter threw, config is not an object, config.tools is not an array, a tool is missing (a hole) or not an object, maximumRemoteCalls is an object, or a callable tool's callTool is a getter. usertrust cannot tell whether the SDK would run automatic function calling, so it refuses. Pass plain data (an array of objects for config.tools).",
-			);
+	throw gate.sdkError;
 }
 
 /**
@@ -5442,23 +5464,33 @@ function buildGoogleProxy<T>(
 			: undefined;
 	const refuse = boundary.refuse;
 	// The backend the SDK serializes each request for, read ONCE from the raw client (never
-	// through a proxy): the AFC snapshot sends on Vertex AI what the SDK sends there.
+	// through a proxy).
 	const vertexAI = googleClientIsVertexAI(original);
+	// The SDK pipeline governed requests run through, resolved once, on the first call (so
+	// trust() stays synchronous).
+	let pipeline: Promise<GooglePipeline | undefined> | undefined;
+	const googlePipeline = () => {
+		pipeline ??= resolveGooglePipeline(original, vertexAI);
+		return pipeline;
+	};
 
 	const modelsProxy = new Proxy(models, {
 		get(target, prop, receiver) {
 			if (prop === "generateContent") {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
-					// ── AFC gate (snapshots args[0]: what is forwarded is what was checked) ──
-					const gate = googleAfcGate(args, "generateContent", vertexAI);
+					// ── Request gate (args[0] becomes the mirror: what is forwarded is what was checked) ──
+					const gate = await googleRequestGate(args, "generateContent", googlePipeline);
+					if ("sdkError" in gate) {
+						return refuseWithSdkError(refuse, "models.generateContent", args, gate);
+					}
 					if ("refusal" in gate) {
 						return refuse("models.generateContent", args, gate.refusal);
 					}
 					if (gate.runAfcLoop) {
-						// With a callable tool the SDK would loop internally and only the last round
-						// would be metered: run the loop here instead, ON THE SNAPSHOT, each round its
-						// own governed call (see google-afc.ts).
+						// The SDK would loop internally and only the last round would be metered: run
+						// the loop here instead, ON THE MIRROR, each round its own governed call (see
+						// google-afc.ts).
 						return runGovernedAfc(args[0] as Record<string, unknown>, (roundParams) =>
 							intercept(originalGenerate, target, [roundParams, ...args.slice(1)]),
 						);
@@ -5470,9 +5502,12 @@ function buildGoogleProxy<T>(
 			if (prop === "generateContentStream" && originalGenerateStream !== undefined) {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
-					// ── AFC gate: a streamed AFC loop is refused until it is metered per round ──
-					// (snapshots args[0]: what is forwarded is what was checked)
-					const gate = googleAfcGate(args, "generateContentStream", vertexAI);
+					// ── Request gate: a streamed AFC loop is refused until it is metered per round ──
+					// (args[0] becomes the mirror: what is forwarded is what was checked)
+					const gate = await googleRequestGate(args, "generateContentStream", googlePipeline);
+					if ("sdkError" in gate) {
+						return refuseWithSdkError(refuse, "models.generateContentStream", args, gate);
+					}
 					if ("refusal" in gate) {
 						return refuse("models.generateContentStream", args, gate.refusal);
 					}

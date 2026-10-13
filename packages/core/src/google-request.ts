@@ -1,0 +1,686 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+/**
+ * The governed Google request, read by the SDK's OWN pipeline.
+ *
+ * A governed `generateContent` / `generateContentStream` must check, meter and send ONE set of
+ * values, and those values must be the ones the SDK would send for the caller's request. Describing
+ * the SDK's reads by hand (field lists, read order, its copy and serialization semantics, its AFC
+ * decision) kept missing them. So nothing here describes them: the SDK's `Models` pipeline itself runs
+ * over the caller's request, behind a recording membrane, against a recording ApiClient that sends
+ * nothing.
+ *
+ *   1. CAPTURE. The pipeline runs once over a membrane around the caller's `params`. Every read
+ *      passes through to the caller's objects (each getter runs as often, in the same order, with the
+ *      same receiver, as natively), and the SDK's writes land on them, as natively. The membrane
+ *      records, per object, each key's FIRST read: the caller's state as the SDK first saw it.
+ *      Callable tools are answered by stand-ins, so no `tool()` / `callTool()` of the caller runs
+ *      before authorization.
+ *   2. MATERIALIZE, twice. The recording becomes plain data (the mirror): tree A for the self-check,
+ *      tree B for the send. Tree B has never been passed to the SDK when it is sent, so the send is
+ *      a first pass, like the native one.
+ *   3. SELF-CHECK. The pipeline runs again over tree A, with the same stand-ins and script. It must
+ *      make the same `request()` / `requestStream()` calls, argument for argument (path, method,
+ *      query, body bytes, `httpOptions`), and the same AFC outcome. If not, the call is refused.
+ *
+ * The AFC decision is the SDK's own: each callable is answered by a stand-in declaring a probe
+ * function, the recorder's first answer calls it, and the SDK ran its loop iff it called a stand-in's
+ * `callTool`. A local SDK error (incompatible tools, missing contents, a caller getter that throws)
+ * is the SDK's own error, raised before anything is held or sent.
+ */
+
+import { types as utilTypes } from "node:util";
+
+type Loose = Record<string, unknown>;
+
+export type GoogleMethod = "generateContent" | "generateContentStream";
+
+type ModelsLike = Record<GoogleMethod, (params: unknown) => Promise<unknown>>;
+
+/** A `Models` class: `new Models(apiClient)` runs the SDK's request pipeline against `apiClient`. */
+export type GoogleModelsCtor = new (apiClient: unknown) => ModelsLike;
+
+/** The pipeline a governed client runs requests through, and the backend it serializes for. */
+export interface GooglePipeline {
+	readonly Models: GoogleModelsCtor;
+	readonly vertexAI: boolean;
+}
+
+/** What one governed request becomes. */
+export type GoogleSnapshot =
+	| { kind: "ok"; params: unknown; afcRan: boolean }
+	| { kind: "afcStream" }
+	| { kind: "refuse"; reason: string }
+	| { kind: "sdkError"; error: unknown };
+
+/** Thrown inside the capture or materialization when the request cannot be represented: "can't tell". */
+class CannotTell {
+	constructor(readonly reason: string) {}
+}
+
+// ── The recording ApiClient ──
+
+/** One `request()` / `requestStream()` call, as the arguments the SDK passed (compared by the self-check). */
+interface RecordedRequest {
+	stream: boolean;
+	path: unknown;
+	httpMethod: unknown;
+	queryParams: string | undefined;
+	body: unknown;
+	httpOptions: string | undefined;
+	abortSignal: boolean;
+}
+
+/** The probe function each callable's stand-in declares; the recorder's first answer calls the first one. */
+const PROBE = "__usertrust_probe_";
+
+/** The scripted model answer to the n-th request: a call to the first probe, then text. */
+function scriptedAnswer(n: number): Loose {
+	const part = n === 0 ? { functionCall: { name: `${PROBE}0`, args: {} } } : { text: "" };
+	return { candidates: [{ content: { role: "model", parts: [part] } }] };
+}
+
+/**
+ * `httpOptions` as the real ApiClient reads it (`patchHttpOptions`: every own enumerable entry, an
+ * object value copied shallowly, then the merged options serialized with the body), as JSON.
+ */
+function httpOptionsForm(httpOptions: unknown): string | undefined {
+	if (!httpOptions) return undefined;
+	const patched: Loose = {};
+	for (const [key, value] of Object.entries(httpOptions as Loose)) {
+		if (typeof value === "object") patched[key] = Object.assign({}, value);
+		else if (value !== undefined) patched[key] = value;
+	}
+	return JSON.stringify(patched);
+}
+
+/** An ApiClient that records each request and answers from the script; nothing is sent. */
+function recordingClient(
+	vertexAI: boolean,
+	sink: RecordedRequest[],
+	onTransport: (value: unknown) => void = () => {},
+): Loose {
+	const record = (stream: boolean, request: unknown): Loose => {
+		const r = request as Loose;
+		// The abort signal goes to the transport as it is: the request keeps it by reference.
+		if (r["abortSignal"] !== undefined) onTransport(r["abortSignal"]);
+		sink.push({
+			stream,
+			path: r["path"],
+			httpMethod: r["httpMethod"],
+			queryParams: r["queryParams"] === undefined ? undefined : JSON.stringify(r["queryParams"]),
+			body: r["body"],
+			httpOptions: httpOptionsForm(r["httpOptions"]),
+			abortSignal: r["abortSignal"] !== undefined,
+		});
+		return scriptedAnswer(sink.length - 1);
+	};
+	return {
+		isVertexAI: () => vertexAI,
+		getProject: () => undefined,
+		getLocation: () => undefined,
+		getDefaultHeaders: () => ({}),
+		request: async (request: unknown) => {
+			const answer = record(false, request);
+			return { headers: {}, json: async () => answer };
+		},
+		requestStream: async (request: unknown) => {
+			const answer = record(true, request);
+			return (async function* () {
+				yield { headers: {}, json: async () => answer };
+			})();
+		},
+	};
+}
+
+/** The callables' stand-ins: what the SDK sees instead of the caller's `tool()` / `callTool()`. */
+interface StandIns {
+	/** Set when the SDK called a stand-in `callTool`: it ran its AFC loop. Reset per pipeline run. */
+	afcRan: boolean;
+	count: number;
+}
+
+function standInFunctions(
+	standIns: StandIns,
+	index: number,
+): { tool: () => Promise<Loose>; callTool: () => Promise<unknown[]> } {
+	return {
+		tool: async () => ({ functionDeclarations: [{ name: `${PROBE}${index}` }] }),
+		// It answers as a tool that ran: one function response. The SDK's stream loop ends a round that
+		// yields none, so an empty answer would stop the dry run short of the native loop's reads.
+		callTool: async () => {
+			standIns.afcRan = true;
+			return [{ functionResponse: { name: `${PROBE}${index}`, response: {} } }];
+		},
+	};
+}
+
+/** Run the SDK's pipeline for `method` over `params` against a recorder (into `sink`); a stream is drained. */
+async function runPipeline(
+	pipeline: GooglePipeline,
+	method: GoogleMethod,
+	params: unknown,
+	sink: RecordedRequest[] = [],
+	onTransport?: (value: unknown) => void,
+): Promise<RecordedRequest[]> {
+	const models = new pipeline.Models(recordingClient(pipeline.vertexAI, sink, onTransport));
+	const out = await models[method](params);
+	if (method === "generateContentStream") {
+		for await (const _ of out as AsyncIterable<unknown>) {
+			// drained: an AFC stream makes its requests while it is read
+		}
+	}
+	return sink;
+}
+
+// ── The recording membrane ──
+
+/** Where an object was reached from, as far as the stand-ins need to know. */
+type Role = "params" | "config" | "tools" | "toolEntry" | undefined;
+
+/**
+ * What the SDK read at one place in the request: the root, or one key of a recorded object. Each
+ * object the SDK reaches gets its own proxy, and passes reads through to ITSELF; but an object read
+ * again from the same place (a getter that builds a fresh object on each read) records into the
+ * recording of the first one read there. So each place keeps each key's FIRST read, whichever object
+ * it came through.
+ */
+interface Recording {
+	/** The first object read here: what a callable is forwarded as. */
+	real: object;
+	isArray: boolean;
+	isFunction: boolean;
+	role: Role;
+	/** Each string key's FIRST read (a membrane proxy, or a primitive), in first-read order. */
+	reads: Map<string, unknown>;
+	/** Keys `in` found that were never read: present, value unknown to the SDK. */
+	present: Set<string>;
+	/** Keys the SDK wrote before ever reading them: it writes them again over the mirror. */
+	sdkWrote: Set<string>;
+	/** The caller's own key order, as `ownKeys` first answered. */
+	keysSeen?: (string | symbol)[];
+	/** Every string key any `ownKeys` answer here listed. */
+	ownSeen: Set<string>;
+	/** Each key's enumerability, as the last descriptor the SDK asked for reported it. */
+	enumerable: Map<string, boolean>;
+	/** The real prototype, when the SDK asked for it. */
+	proto?: object | null;
+	touched: boolean;
+	/** Handed to the transport as it is (an abort signal): kept by reference if the SDK read nothing of it. */
+	transport?: boolean;
+	/** A string key other than `toJSON` was read: the SDK read the object by name. */
+	readByName: boolean;
+	/** The first result of a `toJSON` hook here, when `JSON.stringify` called it. */
+	jsonOut?: { value: unknown };
+	/** A callable tool: its stand-ins and their probe index. */
+	callable?: { index: number; tool: () => Promise<Loose>; callTool: () => Promise<unknown[]> };
+}
+
+/** One membrane proxy: the caller's object it passes through to, and the recording it records into. */
+interface Wrapped {
+	real: object;
+	rec: Recording;
+	jsonHook?: (key: unknown) => unknown;
+}
+
+const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
+
+/**
+ * Does `key` exist on `obj` or its prototype chain? Descriptors only, so no getter runs; a Proxy on
+ * the chain answers "no" without being asked (its trap would be caller code the SDK did not run).
+ * A read that found nothing records nothing: the mirror must not gain a key the caller's object
+ * lacks, which an SDK `in` test would then find.
+ */
+function presentWithoutTraps(obj: object, key: string): boolean {
+	for (let o: object | null = obj; o !== null; o = Object.getPrototypeOf(o)) {
+		if (utilTypes.isProxy(o)) return false;
+		if (Object.getOwnPropertyDescriptor(o, key) !== undefined) return true;
+	}
+	return false;
+}
+
+function childRole(parent: Role, key: string): Role {
+	if (parent === "params" && key === "config") return "config";
+	if (parent === "config" && key === "tools") return "tools";
+	if (parent === "tools" && ARRAY_INDEX.test(key)) return "toolEntry";
+	return undefined;
+}
+
+interface Membrane {
+	wrap(value: unknown, role: Role): unknown;
+	materialize(value: unknown, tree: "check" | "send"): unknown;
+	markTransport(value: unknown): void;
+	standIns: StandIns;
+}
+
+function makeMembrane(): Membrane {
+	const proxies = new Map<object, Wrapped>(); // proxy -> what it wraps
+	const byReal = new WeakMap<object, object>(); // caller's object -> its proxy
+	const standIns: StandIns = { afcRan: false, count: 0 };
+
+	/** Replace every membrane proxy inside an SDK-built value with the caller's real object. */
+	function unwrapDeep(value: unknown, seen = new Set<object>()): unknown {
+		if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
+		const w = proxies.get(value);
+		if (w !== undefined) return w.real;
+		if (typeof value === "function" || seen.has(value)) return value;
+		seen.add(value);
+		for (const key of Object.keys(value)) {
+			const d = Object.getOwnPropertyDescriptor(value, key);
+			if (d === undefined || !("value" in d)) continue;
+			const unwrapped = unwrapDeep(d.value, seen);
+			if (unwrapped !== d.value) (value as Loose)[key] = unwrapped;
+		}
+		return value;
+	}
+
+	function record(rec: Recording, key: string, value: unknown): void {
+		if (typeof value === "function" && !proxies.has(value)) return; // methods are not data
+		if (rec.reads.has(key) || rec.sdkWrote.has(key)) return;
+		rec.reads.set(key, value);
+	}
+
+	function newRecording(real: object, role: Role): Recording {
+		return {
+			real,
+			isArray: Array.isArray(real),
+			isFunction: typeof real === "function",
+			role,
+			reads: new Map(),
+			present: new Set(),
+			sdkWrote: new Set(),
+			ownSeen: new Set(),
+			enumerable: new Map(),
+			touched: false,
+			readByName: false,
+		};
+	}
+
+	/**
+	 * The membrane proxy for `value`. `place` is the recording already holding the first object read
+	 * at the same place, if any: a different object read there records into it.
+	 */
+	function wrap(value: unknown, role: Role, place?: Recording): unknown {
+		if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
+		// A function is data only as a tool entry (a callable implemented as a function object).
+		if (typeof value === "function" && role !== "toolEntry") return value;
+		if (proxies.has(value)) return value;
+		const known = byReal.get(value);
+		if (known !== undefined) {
+			const rec = (proxies.get(known) as Wrapped).rec;
+			rec.role ??= role;
+			return known;
+		}
+		const real = value;
+		const isArray = Array.isArray(real);
+		const rec =
+			place !== undefined &&
+			place.isArray === isArray &&
+			place.isFunction === (typeof real === "function")
+				? place
+				: newRecording(real, role);
+		const shadow: object = typeof real === "function" ? () => undefined : isArray ? [] : {};
+		if (isArray) (shadow as unknown[]).length = (real as unknown[]).length;
+		const self: Wrapped = { real, rec };
+		const proxy = new Proxy(shadow, {
+			get(_t, key) {
+				if (typeof key === "symbol") return Reflect.get(real, key, real);
+				rec.touched = true;
+				// PASS-THROUGH: every access reads the caller's object, with it as the receiver.
+				const v = Reflect.get(real, key, real);
+				if (
+					rec.role === "toolEntry" &&
+					(key === "tool" || key === "callTool") &&
+					typeof v === "function"
+				) {
+					// The send forwards the place's FIRST object as the callable. A callable read here through
+					// another object while the first was not seen as one (a getter that answered with a
+					// different tool) cannot be told apart; a callable answered again by an equivalent fresh
+					// object (a getter that builds one per read) is the first one's.
+					if (real !== rec.real && rec.callable === undefined) {
+						throw new CannotTell("a tool entry the SDK read as two different objects");
+					}
+					if (rec.callable === undefined) {
+						const index = standIns.count++;
+						rec.callable = { index, ...standInFunctions(standIns, index) };
+					}
+					return rec.callable[key];
+				}
+				if (key === "toJSON") {
+					if (typeof v !== "function") return v;
+					// JSON.stringify calls the hook with its key: the real hook runs on the real object,
+					// each time, as natively; its FIRST result is what this place serialized to.
+					self.jsonHook ??= (k: unknown) => {
+						const out = wrap(Reflect.apply(v as (k: unknown) => unknown, real, [k]), undefined);
+						rec.jsonOut ??= { value: out };
+						return out;
+					};
+					return self.jsonHook;
+				}
+				rec.readByName = true;
+				const prior = rec.reads.get(key);
+				const priorRec =
+					prior !== null && typeof prior === "object" ? proxies.get(prior)?.rec : undefined;
+				const w = wrap(v, childRole(rec.role, key), priorRec);
+				if (v !== undefined || presentWithoutTraps(real, key)) record(rec, key, w);
+				return w;
+			},
+			has(_t, key) {
+				rec.touched = true;
+				const found = Reflect.has(real, key);
+				if (found && typeof key === "string" && !rec.reads.has(key)) rec.present.add(key);
+				return found;
+			},
+			ownKeys() {
+				rec.touched = true;
+				const keys = Reflect.ownKeys(real);
+				rec.keysSeen ??= keys;
+				for (const k of keys) if (typeof k === "string") rec.ownSeen.add(k);
+				return keys;
+			},
+			getOwnPropertyDescriptor(t, key) {
+				rec.touched = true;
+				if (isArray && key === "length") {
+					const length = (real as unknown[]).length;
+					(t as unknown[]).length = length;
+					return { value: length, writable: true, enumerable: false, configurable: false };
+				}
+				const d = Reflect.getOwnPropertyDescriptor(real, key);
+				if (typeof key === "string") rec.enumerable.set(key, d?.enumerable === true);
+				if (d === undefined) return undefined;
+				return {
+					value: undefined,
+					writable: true,
+					enumerable: d.enumerable === true,
+					configurable: true,
+				};
+			},
+			// WRITE-THROUGH: the SDK's writes land on the caller's object, as natively, with no
+			// membrane proxy stored in it. They are not recorded: the SDK writes them again over the
+			// mirror, which keeps the state the SDK first read.
+			set(_t, key, v) {
+				rec.touched = true;
+				if (typeof key === "string" && !rec.reads.has(key)) rec.sdkWrote.add(key);
+				return Reflect.set(real, key, unwrapDeep(v), real);
+			},
+			deleteProperty(_t, key) {
+				rec.touched = true;
+				return Reflect.deleteProperty(real, key);
+			},
+			getPrototypeOf() {
+				rec.touched = true;
+				const proto = Reflect.getPrototypeOf(real);
+				if (!("proto" in rec)) rec.proto = proto;
+				return proto;
+			},
+			apply(_t, thisArg, args) {
+				return Reflect.apply(real as (...a: unknown[]) => unknown, thisArg, args);
+			},
+			defineProperty() {
+				throw new CannotTell("the SDK defined a property on the request");
+			},
+			setPrototypeOf() {
+				throw new CannotTell("the SDK set a prototype on the request");
+			},
+			preventExtensions() {
+				throw new CannotTell("the SDK made the request non-extensible");
+			},
+		});
+		proxies.set(proxy, self);
+		byReal.set(real, proxy);
+		return proxy;
+	}
+
+	function setData(obj: object, key: string, value: unknown, enumerable = true): void {
+		Object.defineProperty(obj, key, { value, writable: true, enumerable, configurable: true });
+	}
+
+	/**
+	 * Is `key` enumerable here, as the SDK saw it? Where the SDK enumerated this object (an
+	 * `Object.assign`, a `JSON.stringify`), a key it also read by name that those passes did not list
+	 * as own and enumerable (an inherited or non-enumerable field) is HIDDEN in the mirror too, a
+	 * non-enumerable own property: by-name reads find it, `Object.assign` and `JSON.stringify` skip it,
+	 * as natively. Where the SDK never enumerated the object, no reader will: every key is visible.
+	 */
+	function visible(rec: Recording, key: string): boolean {
+		if (rec.keysSeen === undefined) return true;
+		return rec.ownSeen.has(key) && rec.enumerable.get(key) !== false;
+	}
+
+	function materialize(
+		value: unknown,
+		tree: "check" | "send",
+		stack = new Set<Recording>(),
+	): unknown {
+		if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
+		const w = proxies.get(value);
+		if (w === undefined) return value; // not one of ours: a value the SDK built
+		const rec = w.rec;
+		if (rec.callable !== undefined) {
+			// The send keeps the caller's callable (runGovernedAfc runs it after authorization); the
+			// self-check gets the capture's stand-in, so no caller tool()/callTool() runs in it.
+			return tree === "send" ? rec.real : standInCallable(rec, stack);
+		}
+		if (rec.jsonOut !== undefined) {
+			if (rec.readByName) {
+				throw new CannotTell("an object the SDK both read by name and serialized through toJSON");
+			}
+			return materialize(rec.jsonOut.value, tree, stack);
+		}
+		// Never read: a transport value (an AbortSignal) goes as it is; anything else sends nothing of
+		// itself, so it is an empty object, never the caller's.
+		if (!rec.touched) return rec.transport === true ? w.real : rec.isArray ? [] : {};
+		if (stack.has(rec)) throw new CannotTell("a cycle in the request");
+		stack.add(rec);
+		try {
+			return rec.isArray
+				? materializeArray(rec, tree, stack)
+				: materializeObject(rec, tree, stack, {});
+		} finally {
+			stack.delete(rec);
+		}
+	}
+
+	function materializeArray(
+		rec: Recording,
+		tree: "check" | "send",
+		stack: Set<Recording>,
+	): unknown[] {
+		// The FIRST `length` read is the array's length, as for any key: an entry read later, past it
+		// (one a caller hook appended after the SDK took its length), is not part of it.
+		const read = rec.reads.get("length");
+		let length = typeof read === "number" ? read : 0;
+		if (!rec.reads.has("length")) {
+			for (const key of rec.reads.keys()) {
+				if (ARRAY_INDEX.test(key)) length = Math.max(length, Number(key) + 1);
+			}
+		}
+		let out: unknown[];
+		try {
+			out = new Array(length);
+		} catch {
+			throw new CannotTell("an array length the mirror cannot hold");
+		}
+		for (const [key, v] of rec.reads) {
+			if (ARRAY_INDEX.test(key) && Number(key) < length)
+				out[Number(key)] = materialize(v, tree, stack);
+		}
+		return out;
+	}
+
+	function materializeObject(
+		rec: Recording,
+		tree: "check" | "send",
+		stack: Set<Recording>,
+		out: object,
+		skip: readonly string[] = [],
+	): object {
+		const readKeys = [...rec.reads.keys()];
+		const own = rec.keysSeen?.filter((k): k is string => typeof k === "string") ?? [];
+		const order = [
+			...own.filter((k) => rec.reads.has(k) || rec.present.has(k)),
+			...readKeys.filter((k) => !own.includes(k)),
+			...[...rec.present].filter((k) => !own.includes(k) && !rec.reads.has(k)),
+		];
+		for (const key of order) {
+			if (skip.includes(key)) continue;
+			const value = rec.reads.has(key) ? materialize(rec.reads.get(key), tree, stack) : undefined;
+			setData(out, key, value, visible(rec, key));
+		}
+		return out;
+	}
+
+	/** A callable's stand-in for the self-check: its prototype, what the SDK read of it, and the stand-ins. */
+	function standInCallable(rec: Recording, stack: Set<Recording>): object {
+		const callable = rec.callable as NonNullable<Recording["callable"]>;
+		const proto = rec.proto === undefined ? Object.prototype : rec.proto;
+		const out = materializeObject(rec, "check", stack, Object.create(proto) as object, [
+			"tool",
+			"callTool",
+		]);
+		setData(out, "tool", callable.tool);
+		setData(out, "callTool", callable.callTool);
+		return out;
+	}
+
+	function markTransport(value: unknown): void {
+		const w = value !== null && typeof value === "object" ? proxies.get(value) : undefined;
+		if (w !== undefined) w.rec.transport = true;
+	}
+
+	return { wrap: (value, role) => wrap(value, role), materialize, markTransport, standIns };
+}
+
+// ── The pipeline: resolved once per governed client ──
+
+/** An own DATA property's value, read from its descriptor (no getter, no Proxy trap); `undefined` otherwise. */
+function ownData(obj: unknown, key: string): unknown {
+	if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) return undefined;
+	if (utilTypes.isProxy(obj)) return undefined;
+	const d = Object.getOwnPropertyDescriptor(obj, key);
+	return d !== undefined && "value" in d ? d.value : undefined;
+}
+
+/**
+ * A `Models` class is accepted only if it BEHAVES as the SDK's pipeline: `generateContent` on a
+ * one-word prompt makes exactly one request, whose body carries that prompt as one user turn. Behaviour,
+ * not names, so an SDK that renames its internals still passes.
+ */
+async function probeModels(Models: unknown): Promise<GoogleModelsCtor | undefined> {
+	if (typeof Models !== "function") return undefined;
+	try {
+		const sink: RecordedRequest[] = [];
+		const models = new (Models as GoogleModelsCtor)(recordingClient(false, sink));
+		if (typeof models?.generateContent !== "function") return undefined;
+		if (typeof models.generateContentStream !== "function") return undefined;
+		await models.generateContent({ model: "m", contents: "x" });
+		if (sink.length !== 1 || typeof sink[0]?.body !== "string") return undefined;
+		const body = JSON.parse(sink[0].body) as Loose;
+		const turn = JSON.stringify(body["contents"]);
+		return turn === JSON.stringify([{ parts: [{ text: "x" }], role: "user" }])
+			? (Models as GoogleModelsCtor)
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** The installed `@google/genai`'s `Models`, if the optional peer is there. */
+async function installedModels(): Promise<unknown> {
+	const specifier = "@google/genai";
+	try {
+		const mod = (await import(specifier)) as Loose;
+		return mod["Models"];
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The pipeline for a governed Google client: the client's own `Models` class (its `models`
+ * namespace's constructor, read through descriptors from the RAW client), else the installed SDK's,
+ * each accepted only after the behavioural probe; else none, and its requests are refused.
+ */
+export async function resolveGooglePipeline(
+	client: unknown,
+	vertexAI: boolean,
+): Promise<GooglePipeline | undefined> {
+	const models = ownData(client, "models");
+	const proto =
+		models !== null && typeof models === "object" && !utilTypes.isProxy(models)
+			? Object.getPrototypeOf(models)
+			: undefined;
+	const own = await probeModels(ownData(proto, "constructor"));
+	if (own !== undefined) return { Models: own, vertexAI };
+	const installed = await probeModels(await installedModels());
+	return installed !== undefined ? { Models: installed, vertexAI } : undefined;
+}
+
+// ── One governed request ──
+
+function sameRequests(a: RecordedRequest[], b: RecordedRequest[]): boolean {
+	return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Snapshot one governed request: run the SDK's pipeline over the caller's `params` (CAPTURE),
+ * materialize the mirror twice, run the pipeline again over the self-check tree, and compare.
+ *
+ * - `ok`: `params` is the send tree (plain data the SDK has never seen; callable tools by reference,
+ *   values the SDK never read, such as an AbortSignal, by reference), and `afcRan` is the SDK's AFC
+ *   decision.
+ * - `afcStream`: on `generateContentStream`, the SDK would run its AFC loop (refused by the governor:
+ *   a streamed loop is not metered round by round).
+ * - `refuse`: the mirror cannot reproduce what the SDK sends for the caller's request ("can't tell").
+ * - `sdkError`: the SDK's pipeline threw over the caller's request, as it would natively.
+ */
+export async function snapshotGoogleRequest(
+	pipeline: GooglePipeline,
+	method: GoogleMethod,
+	params: unknown,
+): Promise<GoogleSnapshot> {
+	const membrane = makeMembrane();
+	const captured: RecordedRequest[] = [];
+	const root = membrane.wrap(params, "params");
+	try {
+		await runPipeline(pipeline, method, root, captured, membrane.markTransport);
+	} catch (error) {
+		if (error instanceof CannotTell) return { kind: "refuse", reason: error.reason };
+		// Before any request, the error is the SDK's own local rejection of the caller's request.
+		// After one, it answers the recorder's scripted reply, not anything the caller sent: natively
+		// that request would have gone out first, so it is not a local error. Can't tell.
+		if (captured.length > 0) {
+			return { kind: "refuse", reason: "the SDK failed after its first request in the dry run" };
+		}
+		return { kind: "sdkError", error };
+	}
+	const afcRan = membrane.standIns.afcRan;
+	if (afcRan && method === "generateContentStream") return { kind: "afcStream" };
+	let check: unknown;
+	let send: unknown;
+	try {
+		check = membrane.materialize(root, "check");
+		send = membrane.materialize(root, "send");
+	} catch (error) {
+		if (error instanceof CannotTell) return { kind: "refuse", reason: error.reason };
+		throw error;
+	}
+	// The SELF-CHECK, on its own tree: the SDK is not idempotent across passes over one object
+	// (its moves land on the object it is given), so the tree that is sent must not have been
+	// through it before.
+	membrane.standIns.afcRan = false;
+	let rerun: RecordedRequest[];
+	try {
+		rerun = await runPipeline(pipeline, method, check);
+	} catch {
+		return { kind: "refuse", reason: "the SDK rejects the mirror of the request" };
+	}
+	if (!sameRequests(captured, rerun) || membrane.standIns.afcRan !== afcRan) {
+		return {
+			kind: "refuse",
+			reason: "the mirror of the request does not send what the SDK sends for it",
+		};
+	}
+	return { kind: "ok", params: send, afcRan };
+}

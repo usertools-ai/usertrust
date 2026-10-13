@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { GoogleGenAI } from "@google/genai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { afcRequested } from "../../src/google-afc.js";
 import { trust } from "../../src/govern.js";
+import { resolveGooglePipeline, snapshotGoogleRequest } from "../../src/google-request.js";
 
 vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(() => ({
@@ -217,7 +218,15 @@ describe("Google automatic function calling is metered round by round", () => {
 		for (const config of [
 			undefined,
 			{ tools: [{ googleSearch: {} }] },
-			{ tools: [{ callTool: async () => [] }], automaticFunctionCalling: { disable: true } },
+			{
+				tools: [
+					{
+						tool: async () => ({ functionDeclarations: [{ name: "f" }] }),
+						callTool: async () => [],
+					},
+				],
+				automaticFunctionCalling: { disable: true },
+			},
 		]) {
 			const { client } = sdkLikeClient([{ prompt: 1000, output: 100 }]);
 			const governed = await trust(client, { dryRun: true, budget: 500_000, vaultBase: vault });
@@ -239,30 +248,39 @@ describe("Google automatic function calling is metered round by round", () => {
 		await governed.destroy();
 	});
 
-	it("afcRequested mirrors the SDK's decision", () => {
-		const tool = { callTool: async () => [] };
-		expect(afcRequested({ config: { tools: [tool] } })).toBe(true);
+	it("the AFC decision is the SDK's own, made by running its pipeline over the request", async () => {
+		const pipeline = await resolveGooglePipeline(new GoogleGenAI({ apiKey: "test" }), false);
+		if (pipeline === undefined) throw new Error("the installed SDK's pipeline did not resolve");
+		const tool = {
+			tool: async () => ({ functionDeclarations: [{ name: "f" }] }),
+			callTool: async () => [],
+		};
+		const decide = async (config?: Record<string, unknown>) => {
+			const snap = await snapshotGoogleRequest(pipeline, "generateContent", {
+				model: "gemini-2.5-flash",
+				contents: "go",
+				...(config !== undefined ? { config } : {}),
+			});
+			return snap.kind === "ok" ? snap.afcRan : snap.kind;
+		};
+		expect(await decide({ tools: [tool] })).toBe(true);
 		expect(
-			afcRequested({
-				config: { tools: [tool], automaticFunctionCalling: { maximumRemoteCalls: 3 } },
-			}),
+			await decide({ tools: [tool], automaticFunctionCalling: { maximumRemoteCalls: 3 } }),
 		).toBe(true);
-		expect(afcRequested({})).toBe(false);
-		expect(afcRequested({ config: { tools: [{ googleSearch: {} }] } })).toBe(false);
-		expect(
-			afcRequested({ config: { tools: [tool], automaticFunctionCalling: { disable: true } } }),
-		).toBe(false);
+		expect(await decide()).toBe(false);
+		expect(await decide({ tools: [{ googleSearch: {} }] })).toBe(false);
+		expect(await decide({ tools: [tool], automaticFunctionCalling: { disable: true } })).toBe(
+			false,
+		);
 		// the SDK disables AFC for an invalid maximum: one plain call
 		for (const bad of [0, -1, 1.5]) {
 			expect(
-				afcRequested({
-					config: { tools: [tool], automaticFunctionCalling: { maximumRemoteCalls: bad } },
-				}),
+				await decide({ tools: [tool], automaticFunctionCalling: { maximumRemoteCalls: bad } }),
 			).toBe(false);
 		}
-		// a plain function declaration beside a callable tool is the SDK's own error to raise
-		expect(
-			afcRequested({ config: { tools: [tool, { functionDeclarations: [{ name: "f" }] }] } }),
-		).toBe(false);
+		// a plain function declaration beside a callable tool is the SDK's own error
+		expect(await decide({ tools: [tool, { functionDeclarations: [{ name: "g" }] }] })).toBe(
+			"sdkError",
+		);
 	});
 });
