@@ -384,8 +384,15 @@ function defineData(obj: object, key: string, value: unknown, enumerable: boolea
 	Object.defineProperty(obj, key, { value, writable: true, enumerable, configurable: true });
 }
 
-/** Recursively traverse data and replace PII strings with redacted placeholders. */
-function redactValue(value: unknown, path = ""): unknown {
+/**
+ * Recursively traverse data and replace PII strings with redacted placeholders.
+ *
+ * `clones` maps each object or array already visited to its clone, registered BEFORE its
+ * properties are walked: a revisit (a cycle, such as a hidden back-reference to a parent, or one
+ * object referenced twice) answers that clone, so the copy keeps the original's shape and the walk
+ * always ends.
+ */
+function redactValue(value: unknown, path = "", clones = new WeakMap<object, unknown>()): unknown {
 	if (typeof value === "string") {
 		const types = matchedTypes(value);
 		if (types.length > 0) {
@@ -395,19 +402,39 @@ function redactValue(value: unknown, path = ""): unknown {
 	}
 
 	if (Array.isArray(value)) {
-		return value.map((item, i) => redactValue(item, `${path}[${i}]`));
+		const clone = clones.get(value);
+		if (clone !== undefined) return clone;
+		// Built by index, not with `map`, so the clone is registered before its items are walked. As
+		// with `map`: the length read once, and a hole stays a hole.
+		const length = value.length;
+		const result: unknown[] = new Array(length);
+		clones.set(value, result);
+		for (let i = 0; i < length; i++) {
+			if (i in value) result[i] = redactValue(value[i], `${path}[${i}]`, clones);
+		}
+		return result;
 	}
 
 	// An opaque, text-free value at a transport position is kept BY REFERENCE (TRANSPORT_SLOTS).
 	if (keptByReference(value, path)) return value;
 
 	if (value !== null && typeof value === "object") {
+		// Looked up only after the transport check: the same signal is kept by reference at its
+		// transport slot even when it was flattened where it appeared earlier.
+		const clone = clones.get(value);
+		if (clone !== undefined) return clone;
 		const record = value as Record<string, unknown>;
 		const result: Record<string, unknown> = {};
+		clones.set(value, result);
 		// Every key is DEFINED, never assigned: an own "__proto__" key (as JSON.parse makes one) stays
 		// a key of the clone instead of becoming its prototype.
 		for (const key of Object.keys(record)) {
-			defineData(result, key, redactValue(record[key], path === "" ? key : `${path}.${key}`), true);
+			defineData(
+				result,
+				key,
+				redactValue(record[key], path === "" ? key : `${path}.${key}`, clones),
+				true,
+			);
 		}
 		// A non-enumerable own DATA property stays one, redacted, so a consumer that reads the request
 		// by name still finds the field, and JSON.stringify still skips it. Data only: a function (a
@@ -417,7 +444,12 @@ function redactValue(value: unknown, path = ""): unknown {
 			const d = Object.getOwnPropertyDescriptor(record, key);
 			if (d === undefined || d.enumerable === true || !("value" in d)) continue;
 			if (typeof d.value === "function") continue;
-			defineData(result, key, redactValue(d.value, path === "" ? key : `${path}.${key}`), false);
+			defineData(
+				result,
+				key,
+				redactValue(d.value, path === "" ? key : `${path}.${key}`, clones),
+				false,
+			);
 		}
 		return result;
 	}

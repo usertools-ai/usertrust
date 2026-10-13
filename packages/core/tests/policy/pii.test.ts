@@ -935,3 +935,66 @@ describe("redactPII — non-enumerable fields and an own __proto__ key", () => {
 		});
 	}
 });
+
+describe("redactPII — cycles and shared references keep their shape in the copy", () => {
+	const EMAIL = "alice@example.com";
+
+	it("a non-enumerable back-reference to the object itself: no throw, the clone's hidden parent is the clone, the email redacted", () => {
+		const input: Record<string, unknown> = { email: EMAIL };
+		Object.defineProperty(input, "parent", { value: input, enumerable: false });
+		const out = redactPII(input).data as Record<string, unknown>;
+		expect(out.email).toBe("[REDACTED:email]");
+		const d = Object.getOwnPropertyDescriptor(out, "parent");
+		expect(d?.enumerable).toBe(false);
+		expect(d?.value).toBe(out);
+	});
+
+	it("a non-enumerable reference to a grandparent: no throw, it points at the grandparent's clone", () => {
+		const input: Record<string, unknown> = { note: EMAIL, child: { grandchild: { email: EMAIL } } };
+		const grandchild = (input.child as Record<string, Record<string, unknown>>).grandchild;
+		Object.defineProperty(grandchild, "root", { value: input, enumerable: false });
+		const out = redactPII(input).data as {
+			note: string;
+			child: { grandchild: Record<string, unknown> };
+		};
+		expect(out.child.grandchild.email).toBe("[REDACTED:email]");
+		expect(Object.getOwnPropertyDescriptor(out.child.grandchild, "root")?.value).toBe(out);
+		expect(out.note).toBe("[REDACTED:email]");
+	});
+
+	it("one object referenced twice (no cycle): one clone, referenced twice, redacted", () => {
+		const shared = { email: EMAIL };
+		const out = redactPII({ a: shared, b: [shared] }).data as {
+			a: Record<string, unknown>;
+			b: Array<Record<string, unknown>>;
+		};
+		expect(out.a).not.toBe(shared);
+		expect(out.b[0]).toBe(out.a);
+		expect(out.a.email).toBe("[REDACTED:email]");
+	});
+
+	it("an ENUMERABLE cycle: detection overflows before redaction runs (unchanged), so redactPII throws the same RangeError", () => {
+		const input: Record<string, unknown> = { email: EMAIL };
+		input.self = input;
+		const fromDetect = (() => {
+			try {
+				detectPII(input);
+				return undefined;
+			} catch (err) {
+				return err;
+			}
+		})();
+		expect(fromDetect).toBeInstanceOf(RangeError);
+		const fromRedact = (() => {
+			try {
+				redactPII(input);
+				return undefined;
+			} catch (err) {
+				return err;
+			}
+		})();
+		expect(fromRedact).toBeInstanceOf(RangeError);
+		// the overflow is detection's own walk, which this change does not touch
+		expect((fromRedact as Error).stack).toContain("scanValue");
+	});
+});
