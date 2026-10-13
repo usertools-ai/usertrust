@@ -65,6 +65,9 @@ export function watchLedger(
 			if (lost) events.onResync();
 			else check();
 		}, MISSING_DIR_POLL_MS);
+		// The poll must never keep a process alive on its own: the server's close() clears it, and a process that has
+		// nothing else to do exits even if a caller forgets to close.
+		poller.unref();
 	}
 
 	return () => {

@@ -17,10 +17,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { transferIdHash } from "usertrust-verify";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
 import { createUiServer, type UiServer } from "../src/server/server.js";
+import { watchLedger } from "../src/server/tail.js";
 
 async function readSse(
 	port: number,
@@ -1036,5 +1037,57 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 				rmSync(auditDir(), { recursive: true, force: true }),
 			);
 		});
+	});
+});
+
+// The polling mode runs its own interval. A leaked poller is the classic failure of that design: it must stop when the
+// watcher is stopped (the server's close() stops it), and must never keep the process alive on its own.
+describe("the polling watcher's own interval", { timeout: 20_000 }, () => {
+	let vault: string;
+
+	beforeEach(() => {
+		vault = mkdtempSync(join(tmpdir(), "trust-tail-poller-"));
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		rmSync(vault, { recursive: true, force: true });
+	});
+
+	it("a stopped watcher polls no more, and reacts to nothing after it is stopped", async () => {
+		let polls = 0;
+		const delivered: string[] = [];
+		const stop = watchLedger(
+			vault,
+			() => {
+				polls++;
+				return 0;
+			},
+			{ onGrow: () => delivered.push("grow"), onResync: () => delivered.push("resync") },
+		);
+		// Positive control: the audit directory is absent, so this is the polling mode, and it is polling.
+		await new Promise((r) => setTimeout(r, 2500));
+		expect(polls).toBeGreaterThan(0);
+		stop();
+		const atStop = polls;
+		// A log appearing would be a grow if anything were still polling.
+		mkdirSync(join(vault, "audit"), { recursive: true });
+		writeFileSync(join(vault, "audit", "events.jsonl"), "{}\n");
+		await new Promise((r) => setTimeout(r, 2500));
+		expect(polls).toBe(atStop);
+		expect(delivered).toEqual([]);
+	});
+
+	it("the polling interval never keeps the process alive on its own (it is unref'd)", () => {
+		const spy = vi.spyOn(globalThis, "setInterval");
+		const stop = watchLedger(vault, () => 0, { onGrow: () => {}, onResync: () => {} });
+		try {
+			// Positive control: the polling mode really made an interval.
+			expect(spy).toHaveBeenCalledTimes(1);
+			const timer = spy.mock.results[0]?.value as NodeJS.Timeout;
+			expect(timer.hasRef()).toBe(false);
+		} finally {
+			stop();
+		}
 	});
 });
