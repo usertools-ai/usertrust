@@ -380,15 +380,12 @@ export function redactMessages(messages: unknown): RedactedData {
 	return redactPII(messages);
 }
 
-/** Return matched PII type names for a string value. */
+/**
+ * Return matched PII type names for a string value. Built with `filter` / `map`, which define each
+ * element rather than assign it, so an index setter on Array.prototype cannot swallow a name.
+ */
 function matchedTypes(value: string): string[] {
-	const matched: string[] = [];
-	for (const pattern of PII_PATTERNS) {
-		if (pattern.test(value)) {
-			matched.push(pattern.type);
-		}
-	}
-	return matched;
+	return PII_PATTERNS.filter((pattern) => pattern.test(value)).map((pattern) => pattern.type);
 }
 
 function defineData(obj: object, key: string, value: unknown, enumerable: boolean): void {
@@ -400,9 +397,10 @@ function defineData(obj: object, key: string, value: unknown, enumerable: boolea
  * registered BEFORE its properties are walked, so a revisit (a cycle, such as a hidden
  * back-reference to a parent, or one object referenced twice) answers that clone: the copy keeps
  * the original's shape and the walk always ends. At a prefix of a transport slot the clone depends
- * on the path (the same object walked elsewhere first has its signal flattened), so there only a
- * clone made at that same path is answered, from `atPrefix`; finitely many prefixes exist, so a
- * cycle through one still ends.
+ * on the path (walked there, it keeps the signal by reference; walked anywhere else, the signal is
+ * flattened), so reuse never crosses that line, in either direction: at such a path only a clone
+ * made at that same path is answered, from `atPrefix`, and a clone made there is never answered
+ * anywhere else. Finitely many prefixes exist, so a cycle through one still ends.
  */
 interface Clones {
 	anywhere: WeakMap<object, unknown>;
@@ -446,12 +444,14 @@ function redactValue(
 		const clone = cachedClone(clones, value, path);
 		if (clone !== undefined) return clone;
 		// Built by index, not with `map`, so the clone is registered before its items are walked. As
-		// with `map`: the length read once, and a hole stays a hole.
+		// with `map`: the length read once, a hole stays a hole, and each item is an own property.
 		const length = value.length;
 		const result: unknown[] = new Array(length);
 		registerClone(clones, value, path, result);
 		for (let i = 0; i < length; i++) {
-			if (i in value) result[i] = redactValue(value[i], `${path}[${i}]`, clones);
+			// Defined, never assigned: an index setter on Array.prototype must not swallow the item.
+			if (i in value)
+				defineData(result, String(i), redactValue(value[i], `${path}[${i}]`, clones), true);
 		}
 		return result;
 	}

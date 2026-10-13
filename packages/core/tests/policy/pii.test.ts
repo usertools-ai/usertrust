@@ -1002,26 +1002,50 @@ describe("redactPII — cycles and shared references keep their shape in the cop
 describe("redactPII — an object reached before config is walked again at config, so its signal stays by reference", () => {
 	const EMAIL = "write to alice@example.com";
 
-	const shapes: Array<[string, (cfg: object) => Record<string, unknown>]> = [
-		["as an earlier key", (cfg) => ({ model: "m", alias: cfg, contents: EMAIL, config: cfg })],
+	type Out = Record<string, unknown> & { config: { abortSignal: unknown } };
+	/** Each shape, and where its other copy of config lands in the redacted request. */
+	const shapes: Array<[string, (cfg: object) => Record<string, unknown>, (out: Out) => unknown]> = [
 		[
-			"inside a content part",
+			"as an earlier key",
+			(cfg) => ({ model: "m", alias: cfg, contents: EMAIL, config: cfg }),
+			(out) => out.alias,
+		],
+		[
+			"inside an earlier content part",
 			(cfg) => ({
 				model: "m",
 				contents: [{ role: "user", parts: [{ text: EMAIL, meta: cfg }] }],
 				config: cfg,
 			}),
+			(out) => (out.contents as Array<{ parts: Array<{ meta: unknown }> }>)[0]?.parts[0]?.meta,
+		],
+		[
+			"as a LATER key",
+			(cfg) => ({ model: "m", contents: EMAIL, config: cfg, backup: cfg }),
+			(out) => out.backup,
+		],
+		[
+			"inside a LATER content part",
+			(cfg) => ({
+				model: "m",
+				config: cfg,
+				contents: [{ role: "user", parts: [{ text: EMAIL, meta: cfg }] }],
+			}),
+			(out) => (out.contents as Array<{ parts: Array<{ meta: unknown }> }>)[0]?.parts[0]?.meta,
 		],
 	];
-	for (const [label, make] of shapes) {
-		it(`config reached ${label} first: config.abortSignal is the caller's signal; the earlier copy is flattened, as before`, () => {
+	for (const [label, make, other] of shapes) {
+		it(`config also reached ${label}: config.abortSignal is the caller's signal; the other copy's is flattened, as before`, () => {
 			const signal = new AbortController().signal;
 			const cfg = { abortSignal: signal };
-			const out = redactPII(make(cfg)).data as { config: { abortSignal: unknown } };
+			const out = redactPII(make(cfg)).data as Out;
 			expect(out.config.abortSignal).toBe(signal);
+			// the other copy is its own clone, whose signal is a plain object, never the caller's
+			const copy = other(out) as { abortSignal: unknown };
+			expect(copy).not.toBe(out.config);
+			expect(copy.abortSignal).not.toBe(signal);
+			expect(Object.getPrototypeOf(copy.abortSignal)).toBe(Object.prototype);
 			expect(JSON.stringify(out)).not.toContain("alice@example.com");
-			const earlier = JSON.stringify(out).match(/"abortSignal":(\{[^}]*\})/);
-			expect(earlier?.[1]).toBe("{}");
 		});
 	}
 
@@ -1053,5 +1077,36 @@ describe("redactPII — an object reached before config is walked again at confi
 		>;
 		expect(config.abortSignal).toBe(signal);
 		expect(Object.getOwnPropertyDescriptor(config, "config")?.value).toBe(looped);
+	});
+});
+
+describe("redactPII — an array's items are defined on the copy, never assigned", () => {
+	it("an index setter on Array.prototype never runs from redaction, and the copy holds its own redacted [0]", () => {
+		// redactPII is detectPII, then the copy. detectPII, unchanged, assigns its own scan list, which
+		// runs the setter as before; what redaction adds is the difference between the two counts.
+		const calls = { set: 0 };
+		Object.defineProperty(Array.prototype, "0", {
+			get: () => undefined,
+			set: () => {
+				calls.set++;
+			},
+			configurable: true,
+		});
+		try {
+			const input = () => ({ messages: ["mail alice@example.com"] });
+			detectPII(input());
+			const byDetection = calls.set;
+			calls.set = 0;
+			const out = redactPII(input()).data as { messages: unknown[] };
+			expect(calls.set - byDetection).toBe(0);
+			// field by field: a deep comparison would itself read the polluted index
+			const own = Object.getOwnPropertyDescriptor(out.messages, "0");
+			expect(own?.value).toBe("[REDACTED:email]");
+			expect(own?.enumerable).toBe(true);
+			expect(own?.writable).toBe(true);
+			expect(out.messages.length).toBe(1);
+		} finally {
+			Reflect.deleteProperty(Array.prototype, "0");
+		}
 	});
 });
