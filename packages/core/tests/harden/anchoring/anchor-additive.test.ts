@@ -435,6 +435,21 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// events the walk read, never a second read of the log. NO vendored source,
 		// no new import, and `dependencies` is still `{}`. 74 lines of headroom.
 		//
+		// 10300 → 11600, for the audit tail's one classification (2026-10-12).
+		// Post-change total 11535, so 10300 failed by 1235. WHAT WAS ADDED: three
+		// modules mirrored from core as the parity contract requires, each pinned
+		// to its core copy by the file-diff test: `tail-state.ts` (the classifier of
+		// a chain's tail against its anchor), `tail-read.ts` (its bounded, no-follow
+		// acquisition, with the line split that never decodes a file whole) and
+		// `stable-read.ts` (one consistent snapshot of a vault read without its
+		// lock, the anchor mirror in it for an anchored verdict); `index.ts`'s walk
+		// on them, which `verifyChain` now shares (moved here from `verify.ts`);
+		// `anchor-verify.ts` reading the mirror line by line; and `--tx` taking
+		// its anchors from its verdict and saying when a vault is busy or
+		// unreadable. NO vendored source, no new dependency: every new import is
+		// `node:*` or `./`-relative, and `dependencies` is still `{}`. 65 lines of
+		// headroom.
+		//
 		// 10300 → 10500, for one transfer verdict (2026-10-12). Post-change total
 		// 10394, measured with the CLI scrubbing change (which landed first, at
 		// 10286) merged in; 10400 would have left 6 lines. WHAT WAS ADDED:
@@ -447,11 +462,18 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// the `--tx` result; and the `<kind>_failed` arm in `eventStatus`. NO
 		// vendored source, no new dependency (`node:crypto` only), and
 		// `dependencies` is still `{}`. 106 lines of headroom.
+		//
+		// 11600 → 11800, for the two above merged (2026-10-12): post-merge total
+		// 11753. Both counted from 10300; together they pass 11600. The merge
+		// also drops `--tx`'s second read of the segment files: a gap is named
+		// from the walk's own snapshot (`sequenceSegments`, in both packages), so
+		// no file is opened twice. NO vendored source, no new dependency, and
+		// `dependencies` is still `{}`. 47 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(10500);
+		expect(total).toBeLessThan(11800);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {

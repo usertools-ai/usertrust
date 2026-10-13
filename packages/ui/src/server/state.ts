@@ -188,6 +188,7 @@ export function loadState(
 				empty: valid && events.length === 0,
 				breakIndex: integrity.breakIndex,
 				errors,
+				...(vault.busy === true ? { busy: true } : {}),
 			},
 			anchorFile: anchorFile(vaultPath),
 			remote: readRemoteSettings(vaultPath),

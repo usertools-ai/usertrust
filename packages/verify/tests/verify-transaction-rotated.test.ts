@@ -172,15 +172,24 @@ describe("verifyTransaction over rotated segments", () => {
 		);
 	});
 
-	it("an UNREADABLE rotated segment fails loudly, as an unreadable live file always did", () => {
-		const { lines } = buildChain(EVENTS);
-		const rotated = vault("unreadable", { "events.jsonl": lines.slice(3) });
-		// A DIRECTORY named like a segment: readFileSync throws EISDIR on it, whatever user runs the tests
-		// (a chmod 000 file is readable by root).
+	it("an UNREADABLE rotated segment is a failure, never 'not found' and never a pass", () => {
+		const { lines, hashes } = buildChain(EVENTS);
+		const rotated = vault("unreadable", { "events.jsonl": lines.slice(3) }, hashes[5]);
+		// A DIRECTORY named like a segment: unreadable whatever user runs the tests (a chmod 000 file is
+		// readable by root).
 		mkdirSync(join(rotated, "audit", "events-0001.jsonl"));
-		// A verdict here would read "not found" for a transfer whose records sit in the file nobody could
-		// open: the CLI's exit 2, where the vault was never read.
-		expect(() => verifyTransaction(rotated, "tx-x")).toThrow();
+		// tx-x's terminal (event 5) is in the live file: found, and its verdict fails, naming the segment.
+		const found = verifyTransaction(rotated, "tx-x");
+		expect(found.found).toBe(true);
+		expect(found.valid).toBe(false);
+		expect(found.errors.join("\n")).toContain("Audit segment could not be read: events-0001.jsonl");
+		// tx-a's only record (event 1) sat in the file nobody could open: "not found" there would be a
+		// verdict on records never read (the CLI's exit 2). It is a failure.
+		const unread = verifyTransaction(rotated, "tx-a");
+		expect(unread).toMatchObject({ found: false, valid: false, failed: true });
+		expect(unread.errors.join("\n")).toContain(
+			"Audit segment could not be read: events-0001.jsonl",
+		);
 	});
 
 	it("a gap is named from the verdict's own sequences, not each file's first and last lines", () => {
@@ -224,7 +233,9 @@ describe("verifyTransaction over rotated segments", () => {
 		const result = verifyTransaction(dup, "tx-x");
 		expect(result.valid).toBe(false);
 		expect(result.errors.some((e) => e.startsWith("Sequence gap:"))).toBe(true);
-		expect(result.errors.some((e) => e.includes("missing"))).toBe(false);
+		// No gap line (`audit events missing` / `audit segment missing`): this vault has no anchor, so its
+		// own errors also say the anchor is missing, which is not a gap.
+		expect(result.errors.some((e) => /^audit (events|segment) missing/.test(e))).toBe(false);
 	});
 
 	it("a not-found transfer's errors are scrubbed too (a hostile segment name beside the gap)", () => {
@@ -242,11 +253,16 @@ describe("verifyTransaction over rotated segments", () => {
 	});
 
 	it("a vault holding only rotated segments is a vault with history, not 'Audit log not found'", () => {
-		const { lines } = buildChain(EVENTS);
-		const onlyRotated = vault("only-rotated", {
-			"events-0001.jsonl": lines.slice(0, 3),
-			"events-0002.jsonl": lines.slice(3),
-		});
+		const { lines, hashes } = buildChain(EVENTS);
+		// With its anchor: a chain of several events with no anchor is refused (ANCHOR_MISSING).
+		const onlyRotated = vault(
+			"only-rotated",
+			{
+				"events-0001.jsonl": lines.slice(0, 3),
+				"events-0002.jsonl": lines.slice(3),
+			},
+			hashes[5],
+		);
 		const result = verifyTransaction(onlyRotated, "tx-x");
 		expect(result.errors.some((e) => e.startsWith("Audit log not found"))).toBe(false);
 		expect(result.found).toBe(true);

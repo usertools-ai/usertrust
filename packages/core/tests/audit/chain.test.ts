@@ -15,7 +15,11 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { canonicalize } from "../../src/audit/canonical.js";
-import { AuditWriterLockHeldError, createAuditWriter } from "../../src/audit/chain.js";
+import {
+	AuditTailMismatchError,
+	AuditWriterLockHeldError,
+	createAuditWriter,
+} from "../../src/audit/chain.js";
 import { GENESIS_HASH, VAULT_DIR } from "../../src/shared/constants.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
@@ -273,28 +277,23 @@ describe("Audit Chain Writer", () => {
 		expect(meta.lastHash).toBe(event.hash);
 	});
 
-	it("reads .meta sidecar when log is empty (post-rotation)", async () => {
-		const event = await writer.appendEvent({
-			kind: "test.prerotate",
-			actor: "sys",
-			data: {},
-		});
-
-		// Simulate rotation: empty the log but keep .meta
+	it("refuses an EMPTY log whose anchor records events, and writes nothing (core never rotates the log)", async () => {
+		await writer.appendEvent({ kind: "test.before", actor: "sys", data: {} });
+		// The log emptied under its anchor: chaining from the anchor (as the writer once did) appended
+		// event 2 onto a log that no longer held event 1, and the next anchor made that the truth.
 		const logPath = join(tempDir, ".usertrust", "audit", "events.jsonl");
 		writeFileSync(logPath, "");
-
-		// Release and recreate writer (clears cache)
+		const anchor = readFileSync(`${logPath}.meta`);
 		writer.release();
 		writer = createAuditWriter(tempDir);
-
-		const next = await writer.appendEvent({
-			kind: "test.postrotate",
-			actor: "sys",
-			data: {},
-		});
-
-		expect(next.previousHash).toBe(event.hash);
+		const refused = await writer.appendEvent({ kind: "test.after", actor: "sys", data: {} }).then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+		expect(refused).toBeInstanceOf(AuditTailMismatchError);
+		expect((refused as AuditTailMismatchError).state).toBe("LOG_EMPTY_ANCHOR_RECORDS_EVENTS");
+		expect(readFileSync(logPath, "utf-8")).toBe("");
+		expect(readFileSync(`${logPath}.meta`)).toEqual(anchor);
 	});
 });
 
@@ -704,60 +703,51 @@ describe("Audit Chain Writer — one vault, many spellings (one lock file, whate
 	});
 });
 
-describe("Audit Chain Writer — getLastEvent edge cases", () => {
+describe("Audit Chain Writer — the tail it starts from", () => {
 	let tempDir: string;
 
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("falls back to .meta when last JSONL line is corrupt", async () => {
+	/** An append into `tempDir`'s vault that must be refused in `state`, leaving the log and anchor as they were. */
+	async function expectRefusedIn(state: string): Promise<void> {
+		const logPath = join(tempDir, VAULT_DIR, "audit", "events.jsonl");
+		const read = (p: string) => (existsSync(p) ? readFileSync(p) : null);
+		const before = { log: read(logPath), meta: read(`${logPath}.meta`) };
+		const writer = createAuditWriter(tempDir);
+		try {
+			const refused = await writer
+				.appendEvent({ kind: "test.refused", actor: "sys", data: {} })
+				.then(
+					() => undefined,
+					(err: unknown) => err,
+				);
+			expect(refused).toBeInstanceOf(AuditTailMismatchError);
+			expect((refused as AuditTailMismatchError).state).toBe(state);
+		} finally {
+			writer.release();
+		}
+		expect({ log: read(logPath), meta: read(`${logPath}.meta`) }).toEqual(before);
+	}
+
+	it("refuses a log whose last line is not JSON: nothing is appended after it, and the anchor is not adopted", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "trust-audit-corrupt-line-"));
 		const writer1 = createAuditWriter(tempDir);
-
-		const event = await writer1.appendEvent({
-			kind: "test.preCorrupt",
-			actor: "sys",
-			data: {},
-		});
+		await writer1.appendEvent({ kind: "test.preCorrupt", actor: "sys", data: {} });
 		writer1.release();
-
-		// Corrupt the JSONL (append garbage that will be the "last line")
+		// The writer once fell back to the anchor here and appended after the garbage line.
 		const logPath = join(tempDir, VAULT_DIR, "audit", "events.jsonl");
-		const content = readFileSync(logPath, "utf-8");
-		writeFileSync(logPath, `${content}NOT_VALID_JSON\n`);
-
-		// Create a new writer — it should fall back to .meta
-		const writer2 = createAuditWriter(tempDir);
-		const next = await writer2.appendEvent({
-			kind: "test.postCorrupt",
-			actor: "sys",
-			data: {},
-		});
-
-		// Should chain from the .meta sidecar (the last valid event's hash)
-		expect(next.previousHash).toBe(event.hash);
-		writer2.release();
+		writeFileSync(logPath, `${readFileSync(logPath, "utf-8")}NOT_VALID_JSON\n`);
+		await expectRefusedIn("TAIL_UNPARSEABLE");
 	});
 
-	it("returns genesis hash when JSONL is corrupt and .meta is missing", async () => {
+	it("refuses a log of one line that is not JSON, with no anchor: it does not start over at genesis", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "trust-audit-corrupt-no-meta-"));
 		const auditDir = join(tempDir, VAULT_DIR, "audit");
 		mkdirSync(auditDir, { recursive: true });
-
-		const logPath = join(auditDir, "events.jsonl");
-		writeFileSync(logPath, "NOT_VALID_JSON\n");
-
-		const writer = createAuditWriter(tempDir);
-		const event = await writer.appendEvent({
-			kind: "test.fromGenesis",
-			actor: "sys",
-			data: {},
-		});
-
-		// No .meta, corrupt JSONL → fallback to genesis
-		expect(event.previousHash).toBe(GENESIS_HASH);
-		writer.release();
+		writeFileSync(join(auditDir, "events.jsonl"), "NOT_VALID_JSON\n");
+		await expectRefusedIn("TAIL_UNPARSEABLE");
 	});
 
 	it("returns genesis hash when JSONL is empty and .meta is missing", async () => {
@@ -812,24 +802,14 @@ describe("Audit Chain Writer — getLastEvent edge cases", () => {
 		writer2.release();
 	});
 
-	it("returns genesis hash when JSONL is corrupt and .meta is also corrupt", async () => {
+	it("refuses an anchor that is not JSON before it reads the log: nothing is written", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "trust-audit-all-corrupt-"));
 		const auditDir = join(tempDir, VAULT_DIR, "audit");
 		mkdirSync(auditDir, { recursive: true });
-
 		const logPath = join(auditDir, "events.jsonl");
 		writeFileSync(logPath, "NOT_VALID_JSON\n");
 		writeFileSync(`${logPath}.meta`, "ALSO_NOT_VALID_JSON");
-
-		const writer = createAuditWriter(tempDir);
-		const event = await writer.appendEvent({
-			kind: "test.allCorrupt",
-			actor: "sys",
-			data: {},
-		});
-
-		expect(event.previousHash).toBe(GENESIS_HASH);
-		writer.release();
+		await expectRefusedIn("ANCHOR_UNREADABLE");
 	});
 });
 

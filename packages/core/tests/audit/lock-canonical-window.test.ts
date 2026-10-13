@@ -22,12 +22,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  * the writerId it carries must be held in memory, and the file must be the inode that writer's
  * exclusive create made (#195 r5). Nothing is keyed by a directory — not a path spelling (r2), not
  * the directory's `(st_dev, st_ino)` (r3/r4, replaced: a directory's identity can be stale by the
- * time it is used). The lock's path is remembered PHYSICALLY (the JS realpath of its directory)
- * and refreshed whenever the lock is verified, so release still reaches it after a rename.
+ * time it is used). The lock's path is remembered PHYSICALLY (its directory resolved as a vault is:
+ * realpath(3), or the JS realpath only where it names the directory the path opens) and refreshed
+ * whenever the lock is verified, so release still reaches it after a rename.
  *
  * `node:fs` is mocked at module level, wrapping a few calls and passing everything else through:
  *  - `realpathSync` and `realpathSync.native` COUNT their calls, and `.native` can be made to fail
- *    on every call (musl without /proc), so a test can pin that the lock never needs realpath(3).
+ *    on every call (musl without /proc), so a test can pin that the lock works without realpath(3).
  *    The JS realpath can also be made to KEEP the caller's spelling under a prefix — what it does
  *    with letter case on a case-insensitive mount — so the "a spelling is not a second lock" property is
  *    pinned on case-sensitive CI too, where the real case-variant test is skipped;
@@ -398,11 +399,7 @@ describe("one lock per directory, whatever the spelling — the lock file says w
 		expect(inodeOf(lockOf(vault))).toBe(ino);
 	});
 
-	it("the lock never needs realpath(3): with realpathSync.native failing on EVERY call (musl without /proc), every acquire path works and .native is never called", async () => {
-		// Positive control: the counter does see a .native call made through this module.
-		const control = scratch("trust-audit-nonative-control-");
-		realpathSync.native(control);
-		expect(realpathCalls.native).toBe(1);
+	it("the lock works without realpath(3): with realpathSync.native failing on EVERY call (musl without /proc), every acquire path works through the portable resolver", async () => {
 		realpathCalls.native = 0;
 		realpathCalls.nativeAlwaysFails = true;
 
@@ -421,7 +418,8 @@ describe("one lock per directory, whatever the spelling — the lock file says w
 			withAuditWriterLock(join(parent, "absent", "events.jsonl"), () => {}),
 		).rejects.toMatchObject({ code: "ENOENT" }); // the absent directory
 
-		expect(realpathCalls.native).toBe(0);
+		// realpath(3) was tried, and failed, every time: each path above ran on the fallback.
+		expect(realpathCalls.native).toBeGreaterThan(0);
 	});
 });
 

@@ -29,6 +29,7 @@ import type { PersistedAuditEvent } from "../audit/read.js";
 import {
 	type AnchorVerifyParams,
 	exitCodeForAnchored,
+	type VaultVerificationResult,
 	verifyVaultWithAnchorsReading,
 	type WitnessInput,
 } from "../audit/verify.js";
@@ -541,6 +542,44 @@ function formatAttestedMs(ms: number): string {
 	return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : `${ms} ms`;
 }
 
+/** A vault being written has no verdict: it is said so, never as a FAILED chain. Exit 1. */
+function printBusy(): void {
+	console.log(
+		pc.yellow(
+			"Chain: the vault is being written (its audit files kept changing while they were read), so there is no verdict. Run verify again.",
+		),
+	);
+	console.log(
+		pc.yellow(
+			"Dead letters, receipts and anchors: not evaluated (there is no snapshot to judge them against).",
+		),
+	);
+}
+
+/**
+ * The JSON fields of a BUSY read: no verdict, and nothing judged against a chain nobody read (a chain
+ * of no events, which every dead letter, receipt and anchor would call missing).
+ */
+function busyJson(result: VaultVerificationResult): Record<string, unknown> {
+	return {
+		valid: false,
+		complete: null,
+		deadLetters: null,
+		busy: true,
+		chainLength: 0,
+		errors: result.errors,
+		merkleRoot: null,
+		tailState: null,
+	};
+}
+
+/** A valid chain whose tail says more: an event one past its anchor, from an interrupted write. */
+function printTailNote(result: VaultVerificationResult): void {
+	if (result.tailState?.state === "ONE_PAST_ANCHOR") {
+		console.log(pc.dim(`Note: ${scrubForTerminal(result.tailState.note)}.`));
+	}
+}
+
 export async function run(rootDir?: string, opts?: CliOptions, args?: string[]): Promise<void> {
 	const json = opts?.json === true;
 
@@ -667,6 +706,28 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 
 	if (flags.anchorMode) {
 		const { result, events } = verifyVaultWithAnchorsReading(verifiedVault, flags.params);
+		if (result.busy === true) {
+			if (json) {
+				console.log(
+					toSafeJson({
+						command: "verify",
+						success: false,
+						data: {
+							...busyJson(result),
+							anchorState: result.anchorState,
+							anchoring: result.anchoring,
+							vaultPath: verifiedVault,
+							verifiedAt,
+						},
+					}),
+				);
+			} else {
+				printBusy();
+				console.log(pc.dim(`Verified at: ${verifiedAt}`));
+			}
+			process.exitCode = 1;
+			return;
+		}
 		const deadLetters = deadLettersAgainst(verifiedVault, events);
 		const receipts =
 			flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
@@ -694,6 +755,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 						chainLength: result.chainLength,
 						errors: result.errors,
 						merkleRoot: result.merkleRoot,
+						tailState: result.tailState ?? null,
 						anchorState: result.anchorState,
 						anchoring: result.anchoring,
 						vaultPath: verifiedVault,
@@ -706,6 +768,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		}
 		if (result.valid) {
 			console.log(pc.green(`Chain verified: ${result.chainLength} events, all hashes valid.`));
+			printTailNote(result);
 		} else {
 			console.log(pc.red(`Chain verification FAILED: ${result.errors.length} error(s) found.`));
 			for (const err of result.errors) {
@@ -749,6 +812,27 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		reading: { result, events },
 		deadLetters,
 	} = verifyVaultComplete(verifiedVault);
+	if (result.busy === true || deadLetters === null) {
+		if (json) {
+			console.log(
+				toSafeJson({
+					command: "verify",
+					success: false,
+					data: {
+						...busyJson(result),
+						anchorState: "UNANCHORED",
+						vaultPath: verifiedVault,
+						verifiedAt,
+					},
+				}),
+			);
+		} else {
+			printBusy();
+			console.log(pc.dim(`Verified at: ${verifiedAt}`));
+		}
+		process.exitCode = 1;
+		return;
+	}
 	const receipts =
 		flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
 	const complete = isComplete(deadLetters) && receiptsComplete(receipts);
@@ -766,6 +850,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 					chainLength: result.chainLength,
 					errors: result.errors,
 					merkleRoot: result.merkleRoot,
+					tailState: result.tailState ?? null,
 					anchorState: "UNANCHORED",
 					vaultPath: verifiedVault,
 					verifiedAt,
@@ -779,6 +864,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 	if (!complete) process.exitCode = 1;
 	if (result.valid) {
 		console.log(pc.green(`Chain verified: ${result.chainLength} events, all hashes valid.`));
+		printTailNote(result);
 		printIncompleteness(deadLetters);
 		printReceiptCheck(receipts);
 		if (result.merkleRoot) console.log(`Merkle root: ${pc.dim(result.merkleRoot)}`);

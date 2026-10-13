@@ -495,6 +495,14 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		// command (audit/complete.ts). The report makes no integrity claim of its own. The instant is taken before the read.
 		const readAtIso = new Date().toISOString();
 		const complete = verifyVaultComplete(vaultPath);
+		// A vault that kept changing while it was read has no snapshot: no report is made from it (its
+		// figures would be a chain of no events, read as no spend).
+		if (complete.reading.result.busy === true || complete.deadLetters === null) {
+			fail(
+				"the vault is being written: its audit files kept changing while they were read, so there is no report (run it again)",
+			);
+			return;
+		}
 		const { result } = complete.reading;
 		// The figures come from the events the verifier walked, never from a second read of the log.
 		const events = complete.reading.events;

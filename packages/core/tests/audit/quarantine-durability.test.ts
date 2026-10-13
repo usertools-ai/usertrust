@@ -213,10 +213,13 @@ describe("#196 r1: quarantine durability", () => {
 		const v = mkdtempSync(join(tmpdir(), "trust-qdur-"));
 		dirs.push(v);
 		const w = createAuditWriter(v);
+		// The first append syncs the directory before it chains (its baseline); only then does the
+		// ANCHOR's directory fsync, after the event's bytes are synced, meet the EIO.
+		await w.appendEvent({ kind: "t", actor: "sys", data: { n: 1 } });
 		state.dirFsync = "eio";
 		let caught: unknown;
 		try {
-			await w.appendEvent({ kind: "t", actor: "sys", data: {} });
+			await w.appendEvent({ kind: "t", actor: "sys", data: { n: 2 } });
 		} catch (err) {
 			caught = err;
 		}
@@ -224,6 +227,35 @@ describe("#196 r1: quarantine durability", () => {
 		expect(caught).toBeInstanceOf(Error);
 		expect(String((caught as Error).message)).toMatch(/EIO/);
 		expect(typeof readDurableEventHash(caught)).toBe("string");
+	});
+
+	it("after a failed directory sync, the next append syncs the directory again BEFORE it chains: a second EIO refuses it with nothing written", async () => {
+		const v = mkdtempSync(join(tmpdir(), "trust-qdur-"));
+		dirs.push(v);
+		const w = createAuditWriter(v);
+		try {
+			await w.appendEvent({ kind: "t", actor: "sys", data: { n: 1 } });
+			state.dirFsync = "eio";
+			// The anchor's rename landed, its directory sync did not: event 2 is on the chain, not known durable.
+			await expect(w.appendEvent({ kind: "t", actor: "sys", data: { n: 2 } })).rejects.toThrow(
+				/EIO/,
+			);
+			const log = readFileSync(logOf(v), "utf-8");
+			// Still failing: the next append does not chain from a rename that may not survive a crash.
+			const third = await w.appendEvent({ kind: "t", actor: "sys", data: { n: 3 } }).then(
+				() => undefined,
+				(err: unknown) => err,
+			);
+			expect(String((third as Error).message)).toMatch(/EIO/);
+			expect(readDurableEventHash(third)).toBeUndefined();
+			expect(readFileSync(logOf(v), "utf-8"), "nothing was appended").toBe(log);
+			// The directory syncs again: the append goes on, from event 2.
+			state.dirFsync = "ok";
+			const fourth = await w.appendEvent({ kind: "t", actor: "sys", data: { n: 4 } });
+			expect((fourth as unknown as { sequence: number }).sequence).toBe(3);
+		} finally {
+			w.release();
+		}
 	});
 
 	it("an UNSUPPORTED anchor-directory fsync (EINVAL) stays best effort — the append succeeds", async () => {

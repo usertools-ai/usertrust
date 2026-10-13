@@ -193,6 +193,15 @@ The billing claim is made in one place only: the catch around `await response.re
 
 **Skipping `await response.receipt` never crashes the process:** a rejected receipt is never left as an unhandled rejection. On `messages.create`, `chat.completions.create`, `responses.create` and `models.generateContentStream` streams, a stream failure reaches the iteration, and so does an audit refusal under `failClosed` when the loop ends normally or with a `break` (not when your loop body throws); any other settlement error reaches only `.receipt`. A `messages.stream()` caller under `failClosed` hears of an audit refusal only from `.receipt`.
 
+**`audit.failClosed`, path by path.** Before any hold, every governed call first runs the audit pre-flight: a vault whose audit append would be refused (events missing after the anchored head, a torn line, another writer holding the vault) refuses the call with `AuditDegradedError` before the provider is called, and nothing is charged. A vault that becomes refused after the pre-flight follows each path's own order:
+
+| Path | Refused before the hold (the pre-flight) | An audit failure after the call |
+|---|---|---|
+| `trust()`, not streaming | yes | the append fails before settlement: the hold is voided, then `AuditDegradedError` |
+| `trust()`, streaming | yes | settlement runs first, then `AuditDegradedError` (nothing is voided) |
+| `governAction()` | yes | the append fails before settlement: the hold is voided, then `AuditDegradedError` |
+| headless `authorize()` / `settle()` | `authorize()`: yes | `settle()` stays fail-open: the receipt carries `auditDegraded` |
+
 Token counts are accumulated per-provider from stream chunks:
 - **Anthropic**: `message_start` (input tokens), `message_delta` (output tokens)
 - **OpenAI**: `usage` field on the final chunk

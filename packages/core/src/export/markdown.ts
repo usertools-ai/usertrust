@@ -24,6 +24,8 @@ export interface ExportResult {
 	/** Full vault verification (segments, malformed lines, .meta anchor). */
 	vaultValid: boolean;
 	vaultErrors: string[];
+	/** The vault kept changing while it was read: no verdict (`vaultValid` is false, and means nothing). */
+	vaultBusy?: true;
 }
 
 const UT_TO_USD = 0.0001;
@@ -153,8 +155,15 @@ export function exportMarkdown(vaultPath: string, outDir: string): ExportResult 
 	index.push(
 		`- Chain integrity: ${integrity.valid ? "verified" : `BROKEN at seq ${(events[integrity.breakIndex ?? 0]?.sequence ?? integrity.breakIndex ?? 0).toString()}`}`,
 	);
+	// A vault that kept changing while it was read has no verdict: never "FAILED".
 	index.push(
-		`- Vault verification: ${vault.valid ? "passed" : `FAILED — ${vault.errors[0] ?? "unknown error"}`}`,
+		`- Vault verification: ${
+			vault.busy === true
+				? "no verdict — the vault was being written while it was read (export again)"
+				: vault.valid
+					? "passed"
+					: `FAILED — ${vault.errors[0] ?? "unknown error"}`
+		}`,
 	);
 	index.push(`- Anchor state: ${anchor}`);
 	index.push(`- Vault: ${vaultPath}`);
@@ -170,5 +179,6 @@ export function exportMarkdown(vaultPath: string, outDir: string): ExportResult 
 		breakIndex: integrity.breakIndex,
 		vaultValid: vault.valid,
 		vaultErrors: vault.errors,
+		...(vault.busy === true ? { vaultBusy: true as const } : {}),
 	};
 }

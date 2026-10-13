@@ -10,13 +10,15 @@ import type { SummaryPayload } from "./api.js";
 import { formatUsd, formatUt } from "./format.js";
 import type { LedgerRow } from "./rows.js";
 
-export type ChainStatus = "empty" | "verified" | "broken";
+export type ChainStatus = "empty" | "verified" | "broken" | "busy";
 
 /**
  * A failure always wins: `empty` never quiets one. Before this state existed, a project with no vault yet showed a red
- * CHAIN INTEGRITY FAILURE, and an empty audit directory showed "verified".
+ * CHAIN INTEGRITY FAILURE, and an empty audit directory showed "verified". `busy` (the vault kept changing while it was
+ * read) is no verdict at all: neither a failure nor a pass.
  */
 export function chainStatus(chain: SummaryPayload["chain"]): ChainStatus {
+	if (chain.busy === true) return "busy";
 	if (!chain.valid) return "broken";
 	return chain.empty ? "empty" : "verified";
 }

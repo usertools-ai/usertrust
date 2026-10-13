@@ -263,6 +263,16 @@ export function SummaryStrip(props: {
 							no events
 						</span>
 					)}
+					{status === "busy" && (
+						<span
+							className="ut-pill"
+							data-tone="alert"
+							title="The vault kept changing while it was read: no verdict, neither verified nor broken"
+						>
+							<i />
+							no verdict
+						</span>
+					)}
 				</div>
 				<AnchorFact anchorFile={s.anchorFile} />
 			</section>

@@ -131,6 +131,7 @@ import { createAnomalyDetector } from "./anomaly/detector.js";
 import type { AnomalyChunkEvent } from "./anomaly/types.js";
 import {
 	AnomalyError,
+	AUDIT_PREFLIGHT_HINT,
 	AuditDegradedError,
 	InsufficientBalanceError,
 	LedgerUnavailableError,
@@ -1543,6 +1544,24 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		(isTestEnv ? opts?._audit : undefined) ??
 		openSharedAuditWriter(vaultPath, { onAppended: () => enforcedBudget?.appended() });
 
+	/**
+	 * Under `audit.failClosed`, the audit writer's pre-flight: the tail classified exactly as the
+	 * call's own append would classify it. A vault whose append would be refused (events missing after
+	 * the anchored head, a replaced head, a torn tail, another writer holding it) refuses the call HERE,
+	 * before any hold and before the provider is called, never after the money moved.
+	 */
+	async function preflightAudit(): Promise<void> {
+		if (!config.audit.failClosed || audit.preflight === undefined) return;
+		try {
+			await audit.preflight();
+		} catch (err) {
+			throw new AuditDegradedError(
+				`the audit trail cannot be appended to (${err instanceof Error ? err.message : String(err)}); refused before any hold`,
+				{ cause: err, hint: AUDIT_PREFLIGHT_HINT },
+			);
+		}
+	}
+
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
 	// No `existsSync` preflight: it answers false for a file inside a directory
 	// it cannot traverse, which would report an unreadable policy as an absent
@@ -1695,6 +1714,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// pins the emitter-tick hazard as a negative case.
 			const attribution = getCurrentCostCenter();
 			const envelope = resolveEnvelope(attribution, config.parentUserId);
+			// The audit pre-flight (audit.failClosed): after the ALS read, before any hold.
+			await preflightAudit();
 			// Spread into every audit record this call emits (A1: an attributed hold
 			// must leave an attributed forensic trail on the settle AND the void
 			// terminals). Empty when unattributed, so those records stay byte-identical
@@ -3575,6 +3596,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// note there for why a later read would be wrong.
 			const attribution = getCurrentCostCenter();
 			const envelope = resolveEnvelope(attribution, config.parentUserId);
+			// The audit pre-flight (audit.failClosed): after the ALS read, before any hold.
+			await preflightAudit();
 			const costCenterAudit: { costCenter?: string } =
 				envelope === undefined ? {} : { costCenter: envelope.attribution.costCenter };
 

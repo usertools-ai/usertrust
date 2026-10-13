@@ -241,16 +241,40 @@ const REGISTRY: Readonly<Record<string, ParseSiteDisposition>> = {
 	"index.ts": {
 		// 3 → 4 when origin/master merged in on 2026-08-14. The registry refused the
 		// build until this line moved, which is the whole point of counting.
-		sites: 4,
+		// 4 → 3 on 2026-10-12: verifyVault's line parse moved into tail-state.ts.
+		// 3 → 2 the same day: --tx reads the events of the anchored snapshot, not the log again.
+		sites: 2,
 		policy:
 			"MIRRORED into packages/core — out of scope for this ship; disposition tracked " +
 			"internally. splitReceiptDocuments' parse is a well-formedness probe that keeps the " +
 			"raw text and is IMMUNE.",
 	},
-	"verify.ts": {
+	"tail-state.ts": {
 		sites: 2,
 		policy:
-			"MIRRORED into packages/core — out of scope for this ship; disposition tracked internally.",
+			"MIRRORED into packages/core. parseLine and readAnchorObservation read `sequence` ONLY " +
+			"as a safe integer (positive for an event, non-negative for the anchor): a fraction, a " +
+			"string or a number past 2^53 is refused by name (TAIL_MALFORMED, ANCHOR_UNREADABLE), " +
+			"never rounded into a position.",
+	},
+	"tail-read.ts": {
+		sites: 0,
+		policy:
+			"NO PARSE SITE — it acquires bytes, bounded and never through a link; tail-state.ts parses them.",
+	},
+	"stable-read.ts": {
+		sites: 1,
+		policy:
+			"MIRRORED into packages/core. The writer lock's claim: its pid is read only as a " +
+			"positive safe integer, and anything else counts as a live writer (it cannot prove none).",
+	},
+	"verify.ts": {
+		// 2 → 0 on 2026-10-12: verifyChain reads its lines through tail-state.ts's parseLine, and
+		// its anchor through readAnchorObservation.
+		sites: 0,
+		policy:
+			"NO PARSE SITE — verifyChain's lines and anchor are parsed by tail-state.ts (registered " +
+			"above), where every sequence is read as a safe integer or refused.",
 	},
 	"cli.ts": {
 		sites: 1,

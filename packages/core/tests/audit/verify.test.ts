@@ -76,14 +76,28 @@ describe("verifyChain", () => {
 		expect(result.errors.some((e) => e.includes("previousHash mismatch"))).toBe(true);
 	});
 
-	it("handles empty file (content is whitespace)", async () => {
+	it("verifyChain refuses ANY bytes after the last newline, over a chain that is otherwise valid", async () => {
+		await writer.appendEvent({ kind: "test.a", actor: "sys", data: {} });
+		await writer.appendEvent({ kind: "test.b", actor: "sys", data: {} });
+		writeFileSync(logPath, `${readFileSync(logPath, "utf-8")}{"torn`);
+		const result = verifyChain(logPath);
+		expect(result.valid).toBe(false);
+		// One answer path: the vault's own wording, which names the file.
+		expect(result.errors).toContain(
+			"torn tail: 6 byte(s) after the last newline of events.jsonl (fragment)",
+		);
+	});
+
+	it("an empty log is valid; a log of blank lines is not an empty one", async () => {
 		const { mkdirSync } = await import("node:fs");
 		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+		writeFileSync(logPath, "");
+		expect(verifyChain(logPath)).toMatchObject({ valid: true, eventsVerified: 0 });
+		// The writer never writes a blank line: these were trimmed away, and read as an empty chain.
 		writeFileSync(logPath, "   \n  \n");
-
 		const result = verifyChain(logPath);
-		expect(result.valid).toBe(true);
-		expect(result.eventsVerified).toBe(0);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toMatch(/malformed JSON/);
 	});
 
 	it("detects malformed JSON", async () => {

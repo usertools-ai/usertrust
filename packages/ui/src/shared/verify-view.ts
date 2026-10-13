@@ -9,6 +9,7 @@ export type VerifyOutcome =
 	| { kind: "verified"; receipt: string }
 	| { kind: "failed"; receipt: string; reason: string | undefined }
 	| { kind: "not-found"; receipt: string; reason: string | undefined }
+	| { kind: "busy"; reason: string | undefined }
 	| { kind: "request-failed"; reason: string };
 
 /**
@@ -27,6 +28,10 @@ export function verifyOutcome(httpStatus: number, body: unknown): VerifyOutcome 
 		};
 	const errors = Array.isArray(b.errors) ? b.errors.filter((e) => typeof e === "string") : [];
 	const reason = errors[0] as string | undefined;
+	// Neither is "not found": a vault being written has no verdict (503), and one whose chain could not be read
+	// has failed (500).
+	if (b.busy === true) return { kind: "busy", reason };
+	if (b.failed === true) return { kind: "failed", receipt: b.receipt, reason };
 	if (!b.found) return { kind: "not-found", receipt: b.receipt, reason };
 	return b.valid
 		? { kind: "verified", receipt: b.receipt }

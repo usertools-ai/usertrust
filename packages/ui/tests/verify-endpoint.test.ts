@@ -81,15 +81,21 @@ describe("GET /api/verify/:txId", () => {
 		expect(body.found).toBe(false);
 	});
 
-	it("500s, and keeps serving, when an audit segment cannot be read", async () => {
-		// A DIRECTORY named like a segment: readFileSync throws EISDIR on it, whatever the user running the test.
+	it("an audit segment that cannot be read: a transfer found elsewhere fails its check, any other is a 500, never a 404; and it keeps serving", async () => {
+		// A DIRECTORY named like a segment: unreadable whatever the user running the test.
 		mkdirSync(join(tempDir, ".usertrust", "audit", "events-0001.jsonl"));
 		ui = await createUiServer(tempDir, { port: 0 });
-		const res = await fetch(`http://127.0.0.1:${ui.port}/api/verify/tx_verify_me`);
-		expect(res.status).toBe(500);
-		const body = (await res.json()) as { error: string };
-		expect(body.error).toBe("audit log could not be read");
-		expect(JSON.stringify(body)).not.toContain("events-0001");
+		const found = await fetch(`http://127.0.0.1:${ui.port}/api/verify/tx_verify_me`);
+		expect(found.status).toBe(200);
+		const checked = (await found.json()) as { found: boolean; valid: boolean; errors: string[] };
+		expect(checked).toMatchObject({ found: true, valid: false });
+		expect(checked.errors.join("\n")).toContain(
+			"Audit segment could not be read: events-0001.jsonl",
+		);
+		// A transfer in none of the files that were read may sit in the one that was not: never "not found".
+		const unread = await fetch(`http://127.0.0.1:${ui.port}/api/verify/tx_elsewhere`);
+		expect(unread.status).toBe(500);
+		expect(await unread.json()).toMatchObject({ found: false, valid: false, failed: true });
 		const after = await fetch(`http://127.0.0.1:${ui.port}/api/tail`);
 		expect(after.status).toBe(200);
 	});

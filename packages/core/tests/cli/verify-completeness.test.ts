@@ -8,8 +8,18 @@
  * (`success: false`, `complete: false`, `valid` still true), and health's chain line is critical.
  */
 
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -66,9 +76,29 @@ const deadLetterLines = () =>
 const noEvent = (): ChainEventView | undefined => undefined;
 
 /**
- * tx_1 on the chain; then tx_2's event reaches the chain but its `.meta` update fails (a directory
- * in its place), so the append rejects, the receipt would be AUDIT_DEGRADED, and the writer
- * dead-letters the event WITH its hash. Returns both events' hashes.
+ * A one-shot fault: the next anchor write (the create of its temp file) fails EACCES, after the
+ * append's event was synced to the log. What a failed anchor update leaves: the event on the chain,
+ * the OLD anchor in place (the next append rolls it forward), and the event dead-lettered with its hash.
+ */
+const anchorFault = vi.hoisted(() => ({ armed: false }));
+vi.mock("node:fs", async (importOriginal) => {
+	const fs = await importOriginal<typeof import("node:fs")>();
+	const openSync = ((p: unknown, ...rest: unknown[]) => {
+		if (anchorFault.armed && /\.meta\.[0-9a-f-]+\.tmp$/.test(String(p))) {
+			anchorFault.armed = false;
+			throw Object.assign(new Error(`EACCES: permission denied, open '${String(p)}'`), {
+				code: "EACCES",
+			});
+		}
+		return (fs.openSync as (...a: unknown[]) => number)(p, ...rest);
+	}) as typeof fs.openSync;
+	return { ...fs, openSync, default: { ...fs, openSync } };
+});
+
+/**
+ * tx_1 on the chain; then tx_2's event reaches the chain but its `.meta` update fails (the anchor's
+ * write fails after the event is synced), so the append rejects, the receipt would be AUDIT_DEGRADED,
+ * and the writer dead-letters the event WITH its hash. Returns both events' hashes.
  */
 async function vaultWithMetaOnlyFailure(): Promise<{ h1: string; h2: string }> {
 	const a = createAuditWriter(tempDir);
@@ -78,9 +108,7 @@ async function vaultWithMetaOnlyFailure(): Promise<{ h1: string; h2: string }> {
 			actor: "local",
 			data: { transferId: "tx_1" },
 		});
-		const meta = join(vaultDir(), "audit", "events.jsonl.meta");
-		rmSync(meta);
-		mkdirSync(meta);
+		anchorFault.armed = true;
 		await expect(
 			a.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_2" } }),
 		).rejects.toThrow();
@@ -89,7 +117,6 @@ async function vaultWithMetaOnlyFailure(): Promise<{ h1: string; h2: string }> {
 			.split("\n");
 		expect(log).toHaveLength(2);
 		const h2 = (JSON.parse(log[1] ?? "{}") as { hash: string }).hash;
-		rmSync(meta, { recursive: true });
 		return { h1: e1.hash, h2 };
 	} finally {
 		a.release();
@@ -97,22 +124,17 @@ async function vaultWithMetaOnlyFailure(): Promise<{ h1: string; h2: string }> {
 }
 
 /**
- * Append `input` through `writer` so that its bytes reach the chain but its `.meta` update fails (a
- * directory in the anchor's place): the append rejects, and the writer dead-letters the event WITH
- * its hash. Returns the event's hash, read back from the log.
+ * Append `input` through `writer` so that its bytes reach the chain but its `.meta` update fails: the
+ * append rejects, and the writer dead-letters the event WITH its hash. Returns the event's hash, read
+ * back from the log.
  */
 async function appendWithMetaFailure(
 	writer: ReturnType<typeof createAuditWriter>,
 	input: Parameters<ReturnType<typeof createAuditWriter>["appendEvent"]>[0],
 ): Promise<string> {
-	const meta = join(vaultDir(), "audit", "events.jsonl.meta");
-	rmSync(meta, { force: true });
-	mkdirSync(meta);
-	try {
-		await expect(writer.appendEvent(input)).rejects.toThrow();
-	} finally {
-		rmSync(meta, { recursive: true });
-	}
+	anchorFault.armed = true;
+	await expect(writer.appendEvent(input)).rejects.toThrow();
+	expect(anchorFault.armed, "the anchor write met the fault").toBe(false);
 	const log = readFileSync(join(vaultDir(), "audit", "events.jsonl"), "utf-8")
 		.trim()
 		.split("\n");
@@ -278,6 +300,26 @@ describe("verify: a dead-lettered event makes the vault INCOMPLETE", () => {
 			expect(process.exitCode).toBe(1);
 		} finally {
 			chmodSync(dlqPath(), 0o600);
+		}
+	});
+
+	it("a dead-letter queue that is a dangling symlink, or a FIFO, is unknown, never 'none', and never blocks", async () => {
+		mkdirSync(join(vaultDir(), "dlq"), { recursive: true });
+		for (const make of [
+			() => symlinkSync(join(tempDir, "nowhere.jsonl"), dlqPath()),
+			() => execFileSync("mkfifo", [dlqPath()]),
+		]) {
+			make();
+			out.length = 0;
+			process.exitCode = 0;
+			await verifyRun(tempDir, { json: true });
+			const r = json();
+			expect(r.data.complete).toBe(false);
+			expect(r.data.deadLetters).toMatchObject({
+				unreadable: expect.stringMatching(/not a regular file/),
+			});
+			expect(process.exitCode).toBe(1);
+			unlinkSync(dlqPath());
 		}
 	});
 });

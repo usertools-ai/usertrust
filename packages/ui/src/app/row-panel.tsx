@@ -69,6 +69,19 @@ function Verdict(props: { outcome: VerifyOutcome; delayMs: number }): React.JSX.
 					</span>
 				</div>
 			);
+		case "busy":
+			return (
+				<div className="ut-verdict" style={style}>
+					<span className="ut-pill" data-tone="alert">
+						<i />
+						no verdict
+					</span>
+					<span className="ut-why info">
+						The vault is being written: its audit files kept changing while they were read. Verify
+						again.
+					</span>
+				</div>
+			);
 		case "request-failed":
 			return (
 				<div className="ut-verdict" style={style}>

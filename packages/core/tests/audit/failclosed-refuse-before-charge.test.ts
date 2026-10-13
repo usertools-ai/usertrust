@@ -10,10 +10,12 @@
  * refused. Before this, such a call still placed its hold, reached the provider, settled — and only
  * then did the post-settle check refuse it, after the charge had posted.
  *
- * The writer here is the shipped one, degraded the way a real client degrades: another process holds
- * the vault's writer lock (the parent PID stands in for it), so the first call's audit writes fail.
- * The lock is then let go, so a later call COULD append — which is what makes "nothing reached the
- * chain" a claim this suite can fail on.
+ * The writer here is the shipped one, degraded the way a real client degrades: another process takes
+ * the vault's writer lock while the first call is at its provider (the parent PID stands in for it),
+ * so that call's audit writes fail. (A lock held already when a call STARTS refuses the call at the
+ * audit pre-flight, before its hold, and degrades nothing: that call wrote nothing, so no audit write
+ * failed. The last row says so.) The lock is then let go, so a later call COULD append — which is
+ * what makes "nothing reached the chain" a claim this suite can fail on.
  */
 
 import { randomUUID } from "node:crypto";
@@ -132,16 +134,21 @@ describe("audit.failClosed: a client already degraded refuses a call before it i
 
 	/**
 	 * A client whose writer one earlier call degraded: that call's audit writes failed on a lock
-	 * another process held. `releaseLock` then lets go of it, so the writer could append again — but
-	 * the handle stays degraded for the rest of the client's life.
+	 * another process took while the call was at its provider. `releaseLock` then lets go of it, so
+	 * the writer could append again — but the handle stays degraded for the rest of the client's life.
 	 */
 	async function degradedClient(failClosed: boolean, releaseLock: boolean) {
 		writeFileSync(
 			join(vault, VAULT_DIR, "usertrust.config.json"),
 			JSON.stringify({ budget: 500_000, audit: { failClosed } }),
 		);
-		heldByAnotherProcess();
 		const client = provider();
+		const answer = client.messages.create.getMockImplementation();
+		if (answer === undefined) throw new Error("the provider mock has no implementation");
+		client.messages.create.mockImplementationOnce(async (params: MessagesRequest) => {
+			heldByAnotherProcess();
+			return answer(params);
+		});
 		const engine = makeEngine();
 		const governed = await trust(client, {
 			dryRun: false,
@@ -264,6 +271,30 @@ describe("audit.failClosed: a client already degraded refuses a call before it i
 		expect(result).not.toBeInstanceOf(Error);
 		expect(run).toHaveBeenCalledOnce();
 		await degraded.governed.destroy();
+	});
+
+	it("a lock already held when a call starts: refused at the audit pre-flight, before its hold, and the client is NOT degraded", async () => {
+		writeFileSync(
+			join(vault, VAULT_DIR, "usertrust.config.json"),
+			JSON.stringify({ budget: 500_000, audit: { failClosed: true } }),
+		);
+		heldByAnotherProcess();
+		const client = provider();
+		const engine = makeEngine();
+		const governed = await trust(client, { dryRun: false, vaultBase: vault, _engine: engine });
+		const refused = await outcome(governed.messages.create(REQUEST));
+		expect(refused).toBeInstanceOf(AuditDegradedError);
+		expect((refused as Error).message).toMatch(/refused before any hold/);
+		expect(client.messages.create).not.toHaveBeenCalled();
+		expect(engine.spendPending).not.toHaveBeenCalled();
+		// Nothing was written, so no audit write failed: once the lock is let go, the next call runs.
+		rmSync(lockPath());
+		const next = await outcome(governed.messages.create(REQUEST));
+		expect(next, "the next call, once the lock is let go").not.toBeInstanceOf(Error);
+		const { receipt } = next as { receipt: { settled: boolean; transferId: string } };
+		expect(receipt.settled).toBe(true);
+		expect(read(chainPath())).toContain(receipt.transferId);
+		await governed.destroy();
 	});
 
 	it("CONTROL, writer healthy under failClosed: the call runs, settles and reaches the chain", async () => {

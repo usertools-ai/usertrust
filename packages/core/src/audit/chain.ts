@@ -34,6 +34,27 @@ import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import { mkdirPrivate, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE } from "../shared/private-fs.js";
 import type { AuditEvent } from "../shared/types.js";
 import { canonicalize } from "./canonical.js";
+import {
+	acquireSmallFile,
+	countLogLines,
+	fileKindOf,
+	listDirectory,
+	MAX_EVENT_LINE_BYTES,
+	MAX_INVENTORY_NAMES,
+	openFailure,
+	readLogTail,
+} from "./tail-read.js";
+import {
+	classifyAuditTail,
+	type LogObservation,
+	type LogTail,
+	MAX_ANCHOR_BYTES,
+	parseLine,
+	type TailState,
+	type TailStateName,
+	type TrailingKind,
+	writerAction,
+} from "./tail-state.js";
 
 // ── Durable writes ──
 
@@ -104,14 +125,57 @@ export function isUnsupportedDirSync(err: unknown): boolean {
  * The log ends in a TORN line — bytes after its last newline, from an append that never
  * completed. Nothing is appended after it: the new line would be concatenated onto the torn
  * bytes, burying them mid-file. `usertrust audit quarantine-tail` moves a torn tail aside,
- * recorded on the chain.
+ * recorded on the chain, when the bytes are a fragment (not JSON) after a chain it can vouch for;
+ * anything else after the last newline (JSON that is not an event, or a whole event without its
+ * newline) is not a torn write, and is not for it.
  */
 export class AuditTornTailError extends Error {
-	constructor(logPath: string, bytes: number) {
+	/** What the bytes after the last newline are, when the writer classified them. */
+	readonly kind: TrailingKind | undefined;
+	/** The state of the complete lines before them, when the writer classified them. */
+	readonly state: TailStateName | undefined;
+	constructor(logPath: string, bytes: number, tail?: TailState) {
+		const kind = tail?.torn?.kind;
+		const quarantinable =
+			tail === undefined ||
+			(kind === "fragment" &&
+				(tail.state === "FRESH" || tail.state === "MATCH" || tail.state === "ONE_PAST_ANCHOR"));
 		super(
-			`Audit log ${logPath} ends in a torn line (${bytes} byte(s) after its last newline). Refusing to append. Run \`usertrust audit quarantine-tail\` to move it aside, recorded on the chain.`,
+			`Audit log ${logPath} ends in a torn line (${bytes} byte(s) after its last newline${
+				kind === undefined || kind === "fragment" ? "" : `: ${kind.replaceAll("_", " ")}`
+			}). Refusing to append. ${
+				quarantinable
+					? "Run `usertrust audit quarantine-tail` to move it aside, recorded on the chain."
+					: "It is not a torn write that `usertrust audit quarantine-tail` can move aside: keep the vault exactly as it is, and run `usertrust verify` for the details."
+			}`,
 		);
 		this.name = "AuditTornTailError";
+		this.kind = kind;
+		this.state = tail?.state;
+	}
+}
+
+/**
+ * The log's tail is not one this writer can explain against its `.meta` anchor (`tail-state.ts`):
+ * events missing after the anchored head, a replaced head, events past it that do not chain from it,
+ * an anchor or a log that cannot be read, a vault mid-recovery. NOTHING is appended (the writer once
+ * adopted any last line it found and rewrote the anchor to it, so a truncated log became the anchored
+ * truth at the next call), and nothing is created or changed: the event is dead-lettered as any failed
+ * append's is. `state` names the classification; `found` is the log's last event and `anchored` the
+ * anchor, where they could be read.
+ */
+export class AuditTailMismatchError extends Error {
+	readonly state: TailStateName;
+	readonly found: TailState["found"];
+	readonly anchored: TailState["anchored"];
+	constructor(logPath: string, tail: TailState) {
+		super(
+			`Audit log ${logPath} cannot be appended to: ${tail.state} (${tail.note}). Nothing was written to it. Keep the vault exactly as it is, and run \`usertrust verify\` for the details.`,
+		);
+		this.name = "AuditTailMismatchError";
+		this.state = tail.state;
+		this.found = tail.found;
+		this.anchored = tail.anchored;
 	}
 }
 
@@ -151,6 +215,17 @@ export function readDurableEventHash(err: unknown): string | undefined {
 
 export interface AuditWriter {
 	appendEvent(input: AppendEventInput): Promise<AuditEvent>;
+	/**
+	 * Check that the next append could go on: the log's tail classified against its anchor exactly as
+	 * the append classifies it, under the same mutex and lock. Throws what the append would throw for a
+	 * refused tail ({@link AuditTailMismatchError}, {@link AuditTornTailError}), or the lock's refusal.
+	 * Nothing is written to the chain or its anchor, rolled forward, or counted as a failed write; the
+	 * lock is taken as an append takes it (its file created, and the directory synced, when this writer
+	 * does not hold it yet). `audit.failClosed` callers run it before any hold, so a vault whose append
+	 * would be refused is refused before money moves. Optional: a writer without it is never
+	 * pre-flighted.
+	 */
+	preflight?(): Promise<void>;
 	getWriteFailures(): number;
 	isDegraded(): boolean;
 	flush(): Promise<void>;
@@ -364,8 +439,8 @@ interface HeldLock {
  * This is the ONLY thing that can make a lock file "a live writer's in this process": the file
  * carries a writerId, and it is live iff that writer holds the file's own inode here. A same-PID
  * lock file that is not — a crashed earlier instance of this PID, a recycled PID, a copy — is
- * reclaimable; one that is, is refused (reclaiming a live sibling's lock forks the chain,
- * each writer caching its own tail).
+ * reclaimable; one that is, is refused (reclaiming a live sibling's lock forks the chain: two
+ * writers append, each from the tail it read).
  *
  * Deliberately NOT keyed by the directory. Keyed by the directory's `(dev, ino)`, every hit had to
  * be re-verified, because a directory's identity can be stale by the time it is used: a directory
@@ -881,17 +956,20 @@ function verifyOwnLock(lockPath: string, writerId: string): boolean {
  * Take (or confirm) the vault's advisory lock. Returns `true` when a lock file was CREATED by this
  * call, `false` when the writer's existing lock was verified still held. A writer whose earlier
  * lock turned out to be gone gets `true` here: its lock was lost for a while, someone else may
- * have appended in that time, and any cached chain tail it holds must not be trusted.
+ * have appended (and failed) in that time, so the directory is synced again before anything chains
+ * from what is there.
  *
  * Every decision is made from the lock FILE in the requested directory — whose it is, read from
  * the file — never from a directory's identity or a remembered path. A lock file that cannot be
  * read makes this THROW: it is never reclaimed.
  */
 function acquireProcessLock(logPath: string, writerId: string): boolean {
-	// The physical spelling (the JS realpath: lstat + readlink, no /proc — never `.native`, which
-	// needs /proc on musl). An absent directory throws ENOENT here, before anything is created
-	// (#182.1).
-	const dir = realpathSync(dirname(logPath));
+	// The directory the OS opens for the log, resolved as a vault is ({@link canonicalPath}):
+	// realpath(3), or the portable resolver only where it names that same directory. The portable
+	// resolver alone folds a `..` in a link's target lexically, which put the lock in ANOTHER directory
+	// than the log's (a link `.usertrust -> a/link/../vault`), where a second writer never met it. An
+	// absent directory throws ENOENT here, before anything is created.
+	const dir = canonicalPath(dirname(logPath));
 	const lockPath = join(dir, LOCK_FILE_NAME);
 
 	// A writer that already holds a lock first looks for it here, so its every append does not
@@ -956,7 +1034,7 @@ function releaseLocks(writerId: string, logPath: string): void {
 	heldLocks.delete(writerId);
 	let spelled: string | undefined;
 	try {
-		spelled = join(realpathSync(dirname(logPath)), LOCK_FILE_NAME);
+		spelled = join(canonicalPath(dirname(logPath)), LOCK_FILE_NAME);
 	} catch {
 		/* the caller's spelling no longer leads anywhere */
 	}
@@ -1024,67 +1102,163 @@ export async function withAuditWriterLock<T>(
 	return result;
 }
 
-// ── Last Event Cache ──
+// ── The tail, classified on every append ──
 
-interface CachedTail {
-	hash: string;
-	sequence: number;
+const O_NONBLOCK = fsConstants.O_NONBLOCK ?? 0;
+
+/**
+ * The log opened BY PATH for an append, never through a descriptor kept from an earlier one: a log
+ * replaced by another file renamed over it, even one of the same size, is the file at the path now, and that is what is
+ * classified and written. `O_NOFOLLOW`: never through a symlink; `O_NONBLOCK`: a FIFO in its place
+ * never blocks the open. Never created here: `undefined` means absent, and what a failed open stands
+ * for (a symlink, a directory, a FIFO, or a log that cannot be opened) is classified like any input.
+ */
+function openLogByPath(logPath: string): { fd: number } | { fd: undefined; log: LogObservation } {
+	try {
+		return {
+			fd: openSync(logPath, fsConstants.O_RDWR | fsConstants.O_APPEND | O_NOFOLLOW | O_NONBLOCK),
+		};
+	} catch (err) {
+		return { fd: undefined, log: openFailure(err) };
+	}
 }
 
-function getLastEvent(logPath: string, cache: Map<string, CachedTail>): CachedTail | null {
-	const cached = cache.get(logPath);
-	if (cached) return cached;
+/** Whether a line read from the tail is an event without a `sequence` (written by an older version). */
+function isLegacyEvent(line: Buffer): boolean {
+	const parsed = parseLine(line);
+	return parsed.kind === "event" && parsed.sequence === undefined;
+}
 
-	if (!existsSync(logPath)) return null;
-
-	const raw = readFileSync(logPath, "utf-8");
-	// A log whose last byte is not a newline ends in a TORN line (#194). Appending would
-	// concatenate onto it; refuse, and let the operator quarantine it (recorded on the chain).
-	if (raw.length > 0 && !raw.endsWith("\n")) {
-		throw new AuditTornTailError(logPath, Buffer.byteLength(raw.slice(raw.lastIndexOf("\n") + 1)));
-	}
-	const content = raw.trim();
-	if (!content) {
-		const metaPath = `${logPath}.meta`;
-		if (existsSync(metaPath)) {
-			try {
-				const meta = JSON.parse(readFileSync(metaPath, "utf-8")) as {
-					lastHash: string;
-					sequence: number;
-				};
-				return { hash: meta.lastHash, sequence: meta.sequence };
-			} catch {
-				/* ignore corrupt meta */
+/**
+ * Classify the vault's audit tail for an append: the log through `opened` (its tail read backward
+ * through that descriptor, bounded), the `.meta` anchor, and the names in `audit/` and
+ * `audit/quarantine/`, each acquired without following a link or blocking on a FIFO (the audit
+ * directory itself is the one the OS opens at its path, as every reader lists it). Whenever one of
+ * the last two lines is a legacy event (one without a `sequence`, written by an older version), its
+ * position is its line number, so the log's lines are counted: a full read, on every append and
+ * pre-flight while such a line is one of the last two (a vault's first appends after an upgrade).
+ * A read that fails on the open log is LOG_UNREADABLE, by name, like any other input.
+ */
+function classifyForAppend(
+	auditDir: string,
+	logPath: string,
+	opened: ReturnType<typeof openLogByPath>,
+): TailState {
+	let log: LogObservation;
+	if (opened.fd === undefined) {
+		log = opened.log;
+	} else {
+		try {
+			const st = fstatSync(opened.fd);
+			if (!st.isFile()) {
+				log = { kind: "not_regular", fileKind: fileKindOf(st) };
+			} else {
+				log = readLogTail(opened.fd, st.size);
+				if (log.kind === "tail" && !log.tail.fromStart && log.tail.lines.some(isLegacyEvent)) {
+					const tail: LogTail = { ...log.tail, count: countLogLines(opened.fd, st.size) };
+					log = { kind: "tail", tail };
+				}
 			}
+		} catch (err) {
+			log = { kind: "unavailable", code: errorCode(err) ?? "EUNKNOWN" };
 		}
-		return null;
 	}
+	return classifyAuditTail(
+		{
+			audit: listDirectory(auditDir, MAX_INVENTORY_NAMES, true),
+			quarantine: listDirectory(join(auditDir, "quarantine")),
+			log,
+			anchor: acquireSmallFile(`${logPath}.meta`, MAX_ANCHOR_BYTES),
+		},
+		"writer",
+	);
+}
 
-	const lines = content.split("\n");
-	const lastLine = lines[lines.length - 1];
-	if (!lastLine) return null;
+/** The error an append refused in `tail` throws: nothing has been written. */
+function refusalOf(logPath: string, tail: TailState): Error {
+	return tail.torn !== null
+		? new AuditTornTailError(logPath, tail.torn.length, tail)
+		: new AuditTailMismatchError(logPath, tail);
+}
 
+/**
+ * Fsync a directory the chain depends on. Only an UNSUPPORTED directory fsync (`isUnsupportedDirSync`)
+ * is tolerated, as for the anchor's rename: a genuine failure (`EIO`) throws, and the append it
+ * guards does not chain from entries a crash could still roll back.
+ */
+function syncDirectoryForChain(dir: string): void {
+	let fd: number | undefined;
 	try {
-		const event = JSON.parse(lastLine) as AuditEvent & { sequence?: number };
-		const sequence = typeof event.sequence === "number" ? event.sequence : lines.length;
-		const tail: CachedTail = { hash: event.hash, sequence };
-		cache.set(logPath, tail);
-		return tail;
-	} catch {
-		const metaPath = `${logPath}.meta`;
-		if (existsSync(metaPath)) {
-			try {
-				const meta = JSON.parse(readFileSync(metaPath, "utf-8")) as {
-					lastHash: string;
-					sequence: number;
-				};
-				return { hash: meta.lastHash, sequence: meta.sequence };
-			} catch {
-				/* ignore corrupt meta */
-			}
-		}
-		return null;
+		fd = openSync(dir, fsConstants.O_RDONLY);
+		fsyncSync(fd);
+	} catch (err) {
+		if (!isUnsupportedDirSync(err)) throw err;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
 	}
+}
+
+/** Fsync a directory, best effort: a failure changes nothing that depends on it. */
+function syncDirectoryBestEffort(dir: string): void {
+	try {
+		syncDirectoryForChain(dir);
+	} catch {
+		/* best effort */
+	}
+}
+
+/** An event ready to append: the hashed object, its hash, and the exact line persisted. */
+interface BuiltEvent {
+	event: AuditEvent & { sequence: number };
+	hash: string;
+	sequence: number;
+	/** The canonical bytes persisted, without the newline. */
+	line: string;
+	/** Its kind, actor and data as persisted: what a dead letter records. */
+	persistedInput: AppendEventInput;
+}
+
+/**
+ * Build the event that chains from `previousHash` at `sequence`, and the bytes that persist it.
+ * Throws on an input that cannot be hashed as it would be persisted, before anything is written.
+ */
+function buildEvent(input: AppendEventInput, previousHash: string, sequence: number): BuiltEvent {
+	const event: Omit<AuditEvent, "hash"> & { sequence: number } = {
+		id: randomUUID(),
+		timestamp: new Date().toISOString(),
+		previousHash,
+		kind: input.kind,
+		actor: input.actor,
+		data: input.data,
+		sequence,
+	};
+
+	const canonical = canonicalize(event);
+	let snapshot: Record<string, unknown>;
+	try {
+		snapshot = JSON.parse(canonical) as Record<string, unknown>;
+	} catch {
+		throw new Error("appendEvent: canonical bytes are not JSON");
+	}
+	// Refuse drift: the hashed bytes must be what we would persist
+	// for the event (minus hash). A Date#toISOString that returns an
+	// object is valid JSON in insertion order; re-canonicalizing
+	// sorts it. Hash the first snapshot only if it is idempotent.
+	const normalized = canonicalize(snapshot);
+	if (normalized !== canonical) {
+		throw new Error("appendEvent: canonical snapshot is not idempotent");
+	}
+	const hash = createHash("sha256").update(canonical).digest("hex");
+	const line = canonicalize({ ...snapshot, hash });
+	const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
+	fullEvent.hash = hash;
+	return {
+		event: fullEvent,
+		hash,
+		sequence,
+		line,
+		persistedInput: { kind: fullEvent.kind, actor: fullEvent.actor, data: fullEvent.data },
+	};
 }
 
 // ── DLQ Writer ──
@@ -1146,9 +1320,19 @@ function writeDeadLetter(
 					})
 				: JSON.stringify({ ...entry, checksum, checksumAlg: "sha256" });
 
+		// Opened as the log is, never blind: through no symlink (a dead letter is never written to a file
+		// outside the vault), never blocking on a FIFO in its place (the writer's mutex is held), and
+		// only into a regular file.
 		const dlqPath = join(dlqDir, "dead-letters.jsonl");
-		const fd = openSync(dlqPath, "a", 0o600);
+		const fd = openSync(
+			dlqPath,
+			fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | O_NOFOLLOW | O_NONBLOCK,
+			0o600,
+		);
 		try {
+			if (!fstatSync(fd).isFile()) {
+				throw new Error(`the dead-letter queue ${dlqPath} is not a regular file`);
+			}
 			// Every byte, as for the log (#194): this line is now the only record of an event the
 			// chain lacks, and `usertrust verify` counts the vault's missing events from it.
 			writeFully(fd, `${line}\n`);
@@ -1194,15 +1378,65 @@ function createAuditWriterAt(
 	options: CreateAuditWriterOptions = {},
 ): AuditWriter {
 	const logPath = join(auditDir, "events.jsonl");
+	const metaPath = `${logPath}.meta`;
 
 	const writerId = randomUUID();
 	const mutex = new AsyncMutex();
-	const lastEventCache = new Map<string, CachedTail>();
+	// Whether the audit directory's entries an append chains from (the log's own, the anchor's last
+	// rename) are known durable. False until this writer has synced the directory under its lock, and
+	// again after a failed append (a rename whose directory sync failed) or a lock it had to take anew
+	// (another writer appended, and may have failed, meanwhile): the directory is then synced before
+	// anything chains from what is there.
+	let baselineDurable = false;
 	let degraded = false;
 	let writeFailures = 0;
 	// Eager: a second writer fails HERE. The append's own acquire then only verifies this
 	// writer's lock (the file carries this writer's id and inode) and creates nothing.
 	if (options.lockAtCreate === true) acquireProcessLock(logPath, writerId);
+
+	/** Take the lock, or verify this writer holds it. One this call had to create is a new baseline. */
+	function holdLock(): void {
+		if (acquireProcessLock(logPath, writerId)) baselineDurable = false;
+	}
+
+	/**
+	 * Decide an append, under the mutex and the lock, from ONE classification of the tail, read through
+	 * the descriptor the append then writes: refuse (nothing written, nothing created), roll the anchor
+	 * forward (a write interrupted between its log append and its anchor update: the log is synced
+	 * before the anchor records it), or go on. Nothing is cached between appends: every input is
+	 * acquired again, so a log truncated, replaced by a rename or given a new segment, an anchor
+	 * restored alone, or a recovery begun since the last append is seen by the next one. Returns the
+	 * open log (the caller owns it), or no descriptor for a FRESH vault without one: the log is never
+	 * created here, only by the append, with its event in hand.
+	 */
+	function prepareAppend(): { fd: number | undefined; previousHash: string; sequence: number } {
+		const opened = openLogByPath(logPath);
+		try {
+			const tail = classifyForAppend(auditDir, logPath, opened);
+			const action = writerAction(tail);
+			if (action === "refuse") throw refusalOf(logPath, tail);
+			if (!baselineDurable) {
+				syncDirectoryForChain(auditDir);
+				syncDirectoryBestEffort(dirname(auditDir));
+				baselineDurable = true;
+			}
+			if (action === "roll_forward") {
+				if (opened.fd === undefined || tail.found === null) {
+					throw new Error("audit writer: a roll-forward needs the open log and its last event");
+				}
+				fsyncSync(opened.fd);
+				writeAnchorAtomically(
+					metaPath,
+					JSON.stringify({ lastHash: tail.found.hash, sequence: tail.found.sequence }),
+				);
+			}
+			const head = tail.found ?? { hash: GENESIS_HASH, sequence: 0 };
+			return { fd: opened.fd, previousHash: head.hash, sequence: head.sequence + 1 };
+		} catch (err) {
+			if (opened.fd !== undefined) closeSync(opened.fd);
+			throw err;
+		}
+	}
 
 	async function appendEvent(input: AppendEventInput): Promise<AuditEvent> {
 		const release = await mutex.acquire();
@@ -1210,85 +1444,87 @@ function createAuditWriterAt(
 		// still throw (the sidecar above all), and the event is on the chain
 		// regardless — see DURABLE_EVENT_HASH.
 		let durableHash: string | undefined;
+		// Set as soon as the event's bytes are fsync'd into the log, before anything that can still fail
+		// (the directory sync of a log this append created, the close): its dead letter then names the
+		// hash, and a reader counts it on the chain exactly when the event at that hash is there. Not a
+		// durability claim: a crash that loses a new log's directory entry loses the event, and the reader
+		// then finds no event at the hash.
+		let writtenHash: string | undefined;
 		// The event as it is persisted (its kind, actor and data parsed back from the hashed bytes),
 		// once it is built. A dead letter records THIS, never `input` serialised a second time: an input
 		// that serialises differently twice (a getter, a stateful toJSON) would no longer match its own
 		// event on the chain, and verify would report a durable event missing for good.
 		let persistedInput: AppendEventInput | undefined;
 		try {
-			// A lock created by THIS call means this writer did not hold it a moment ago (first
-			// append, or its earlier lock was found stale), and another writer may have appended
-			// meanwhile. Its cached tail is then not the chain's tail: chaining from it forks.
-			if (acquireProcessLock(logPath, writerId)) lastEventCache.clear();
-
-			const last = getLastEvent(logPath, lastEventCache);
-			const previousHash = last?.hash ?? GENESIS_HASH;
-			const sequence = (last?.sequence ?? 0) + 1;
-
-			const event: Omit<AuditEvent, "hash"> & { sequence: number } = {
-				id: randomUUID(),
-				timestamp: new Date().toISOString(),
-				previousHash,
-				kind: input.kind,
-				actor: input.actor,
-				data: input.data,
-				sequence,
-			};
-
-			const canonical = canonicalize(event);
-			let snapshot: Record<string, unknown>;
+			holdLock();
+			let fd: number | undefined;
+			let built: BuiltEvent;
+			// Whether this append created the log: its directory entry is then synced before the event
+			// is claimed durable (the anchor's rename would otherwise be the first to sync it).
+			let created = false;
 			try {
-				snapshot = JSON.parse(canonical) as Record<string, unknown>;
-			} catch {
-				throw new Error("appendEvent: canonical bytes are not JSON");
-			}
-			// Refuse drift: the hashed bytes must be what we would persist
-			// for the event (minus hash). A Date#toISOString that returns an
-			// object is valid JSON in insertion order; re-canonicalizing
-			// sorts it. Hash the first snapshot only if it is idempotent.
-			const normalized = canonicalize(snapshot);
-			if (normalized !== canonical) {
-				throw new Error("appendEvent: canonical snapshot is not idempotent");
-			}
-			const hash = createHash("sha256").update(canonical).digest("hex");
-			const persisted = canonicalize({ ...snapshot, hash });
-			const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
-			fullEvent.hash = hash;
-			persistedInput = { kind: fullEvent.kind, actor: fullEvent.actor, data: fullEvent.data };
-
-			// O_NOFOLLOW: an append never writes THROUGH a symlinked log into a file outside the
-			// vault. Created owner-only: the log is the vault's audit trail.
-			const fd = openSync(
-				logPath,
-				fsConstants.O_WRONLY |
-					fsConstants.O_APPEND |
-					fsConstants.O_CREAT |
-					(fsConstants.O_NOFOLLOW ?? 0),
-				PRIVATE_FILE_MODE,
-			);
-			try {
-				writeFully(fd, `${persisted}\n`);
+				for (let attempt = 1; ; attempt++) {
+					const head = prepareAppend();
+					fd = head.fd;
+					built = buildEvent(input, head.previousHash, head.sequence);
+					persistedInput = built.persistedInput;
+					// Refused before anything is written or created: a line over the bound would make a
+					// tail this writer then refuses to read (TAIL_OVERSIZE), for good.
+					const lineBytes = Buffer.byteLength(built.line, "utf-8");
+					if (lineBytes > MAX_EVENT_LINE_BYTES) {
+						throw new Error(
+							`audit event refused: its line is ${lineBytes} bytes, over the ${MAX_EVENT_LINE_BYTES}-byte bound for one event (this event was not written)`,
+						);
+					}
+					if (fd !== undefined) break;
+					// A FRESH vault with no log: created only now, with the event in hand, exclusively and
+					// owner-only. One made since it was classified (by something other than a writer: the
+					// lock excludes those) is classified again.
+					try {
+						fd = openSync(
+							logPath,
+							fsConstants.O_RDWR |
+								fsConstants.O_APPEND |
+								fsConstants.O_CREAT |
+								fsConstants.O_EXCL |
+								O_NOFOLLOW |
+								O_NONBLOCK,
+							PRIVATE_FILE_MODE,
+						);
+						created = true;
+						break;
+					} catch (err) {
+						if (errorCode(err) !== "EEXIST" || attempt >= 3) throw err;
+					}
+				}
+				// Through the descriptor the tail was classified through: the bytes judged are the bytes
+				// appended to.
+				writeFully(fd, `${built.line}\n`);
 				fsyncSync(fd);
+				writtenHash = built.hash;
+				// A log made by this append exists only once the directory holding its entry is synced.
+				if (created) syncDirectoryForChain(auditDir);
 			} finally {
-				closeSync(fd);
+				if (fd !== undefined) closeSync(fd);
 			}
-			lastEventCache.set(logPath, { hash, sequence });
+			const { event: fullEvent, hash, sequence } = built;
 			// The bytes are fsync'd: this event is on the chain even if the sidecar
 			// write below throws. Deliberately set AFTER `closeSync` has run, so a
 			// close that itself fails leaves this unset — under-claiming durability
 			// is the safe direction here.
 			durableHash = hash;
 
-			// Persist last hash to sidecar for cross-segment chain continuity
-			writeAnchorAtomically(`${logPath}.meta`, JSON.stringify({ lastHash: hash, sequence }));
+			// The anchor: what the next append checks the log's tail against.
+			writeAnchorAtomically(metaPath, JSON.stringify({ lastHash: hash, sequence }));
+			baselineDurable = true;
 
 			return fullEvent;
 		} catch (err) {
 			degraded = true;
 			writeFailures++;
-			// The cached tail may no longer be the log's tail (a partial write): the next append
-			// re-reads the log, and refuses a torn one.
-			lastEventCache.delete(logPath);
+			// Whatever failed, the directory's entries are not known durable now (a rename whose
+			// directory sync failed): the next append syncs the directory again before it chains.
+			baselineDurable = false;
 			if (durableHash !== undefined && err !== null && typeof err === "object") {
 				Object.defineProperty(err, DURABLE_EVENT_HASH, {
 					value: durableHash,
@@ -1305,9 +1541,32 @@ function createAuditWriterAt(
 				payload: persistedInput ?? input,
 				error: err instanceof Error ? err.message : String(err),
 				timestamp: new Date().toISOString(),
-				...(durableHash !== undefined ? { eventHash: durableHash } : {}),
+				...(writtenHash !== undefined ? { eventHash: writtenHash } : {}),
 			});
 			throw err;
+		} finally {
+			release();
+		}
+	}
+
+	/**
+	 * The append's own decision, without the append: the tail classified as the next append would
+	 * classify it, under the same mutex and lock, and what the append would throw for a refused state
+	 * thrown here. Nothing is written to the chain or its anchor, and nothing is rolled forward (a tail
+	 * ONE past its anchor passes: the append rolls it forward) or counts as a failed write. The lock is
+	 * taken as an append takes it: its file is created, and the directory synced, when it is not held.
+	 */
+	async function preflight(): Promise<void> {
+		const release = await mutex.acquire();
+		try {
+			holdLock();
+			const opened = openLogByPath(logPath);
+			try {
+				const tail = classifyForAppend(auditDir, logPath, opened);
+				if (writerAction(tail) === "refuse") throw refusalOf(logPath, tail);
+			} finally {
+				if (opened.fd !== undefined) closeSync(opened.fd);
+			}
 		} finally {
 			release();
 		}
@@ -1327,7 +1586,7 @@ function createAuditWriterAt(
 	}
 
 	function releaseWriter(): void {
-		lastEventCache.clear();
+		baselineDurable = false;
 		degraded = false;
 		writeFailures = 0;
 		// Last: it throws (AuditLockReleaseError) if a lock was left in place — after every lock was tried.
@@ -1336,6 +1595,7 @@ function createAuditWriterAt(
 
 	return {
 		appendEvent,
+		preflight,
 		getWriteFailures,
 		isDegraded: isDegradedFn,
 		flush,
@@ -1375,7 +1635,8 @@ const sharedWriters = new Map<string, SharedVaultWriter>();
 /**
  * A governor's handle on the process's ONE audit writer for `vaultPath`. Every `trust()` client and
  * `createGovernor()` in a process that names the same vault appends through the same writer: one
- * mutex, one cached tail, one lock. Before this, each made its own writer, the first to append took
+ * mutex and one lock (the tail itself is read and classified anew on every append). Before this,
+ * each made its own writer, the first to append took
  * the vault's lock, and every append by the others failed on it (`AuditWriterLockHeldError`, a live
  * writer in this process): their calls settled with their audit events in the dead-letter queue, off
  * the chain — the README's own pattern of an Anthropic and an OpenAI client dead-lettered half its
@@ -1475,6 +1736,21 @@ export function openSharedAuditWriter(
 		}
 	}
 
+	/**
+	 * The shared writer's pre-flight, through a lease taken exactly as an append takes one (a second way
+	 * in: the handle joins here too, and holds the writer for itself until the check finishes). A
+	 * refusal is the call's, not a failed write: nothing is counted, warned or dead-lettered.
+	 */
+	async function preflight(): Promise<void> {
+		if (!released) joined ??= joinSharedWriter(vault);
+		const lease = joinSharedWriter(vault);
+		try {
+			await lease.shared.writer.preflight?.();
+		} finally {
+			leaveSharedWriterReporting(lease);
+		}
+	}
+
 	async function flush(): Promise<void> {
 		if (joined !== undefined) await joined.shared.writer.flush();
 	}
@@ -1493,6 +1769,7 @@ export function openSharedAuditWriter(
 
 	return {
 		appendEvent,
+		preflight,
 		getWriteFailures: () => writeFailures,
 		isDegraded: () => degraded,
 		flush,
@@ -1568,9 +1845,10 @@ function resolveSharedVault(vaultPath: string): SharedVault {
 /**
  * A directory's real path, in its on-disk case where the platform can say: `realpathSync.native`
  * (realpath(3)), else the JS `realpathSync`. On musl without `/proc`, realpath(3) fails even for an
- * existing directory (the lock resolves with the JS resolver for the same reason); the JS resolver
- * then gives the path with symlinks followed and the caller's case. The writer map does not depend
- * on which: its key is the directories' `dev:ino`, so every spelling is still one writer.
+ * existing directory; the JS resolver then gives the path with symlinks followed and the caller's
+ * case. The writer map does not depend on which: its key is the directories' `dev:ino`, so every
+ * spelling is still one writer. The audit lock resolves its directory here too, so the lock is
+ * always beside the log the OS writes, whoever opens the writer.
  */
 function canonicalPath(path: string): string {
 	try {

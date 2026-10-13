@@ -28,6 +28,7 @@ export interface SummaryPayload {
 	/**
 	 * `empty`: no events and nothing wrong, a project before its first governed call. It is never set beside a
 	 * failure: a log deleted while its anchor still records events has no events either, and is `valid: false`.
+	 * `busy`: the vault kept changing while it was read, so there is no verdict (`valid` means nothing).
 	 */
 	chain: {
 		events: number;
@@ -35,6 +36,7 @@ export interface SummaryPayload {
 		empty: boolean;
 		breakIndex: number | null;
 		errors: string[];
+		busy?: boolean;
 	};
 	// File presence only — not a verification verdict. The UI has no
 	// operator-pinned genesis, and inventing one from the vault under audit
