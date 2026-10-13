@@ -62,6 +62,7 @@ import {
 	movedClientOptions,
 	movedRequestError,
 	movedRequestOptions,
+	pinnedGoogleHttpOptions,
 	rawClientStandIn,
 	refuseWrites,
 	transportChangedError,
@@ -75,6 +76,7 @@ import { googleClientIsVertexAI, runGovernedAfc } from "./google-afc.js";
 import {
 	type GoogleMethod,
 	type GooglePipeline,
+	type PinnedHttpOptions,
 	resolveGooglePipeline,
 	snapshotGoogleRequest,
 } from "./google-request.js";
@@ -1678,6 +1680,59 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	}
 
 	// 7. Two-phase intercept
+	/**
+	 * The per-call request-option refusal (default-deny.ts `movedRequestOptions`): when `args` carry an
+	 * option off the governed list, its denial event is appended and the refusal thrown (the promise
+	 * returned rejects with it); otherwise `undefined`. The check itself is synchronous and runs no
+	 * caller code; `attribution` is the call's own ALS read.
+	 */
+	function movedOptionsRefusal(
+		args: readonly unknown[],
+		thisArg: unknown,
+		attribution: ReturnType<typeof getCurrentCostCenter>,
+	): Promise<never> | undefined {
+		const moved = movedRequestOptions(kind, args, thisArg);
+		if (moved.length === 0) return undefined;
+		const refusal = movedRequestError(kind, moved);
+		const model = ownStringDataProperty(args[0], "model");
+		return (async () => {
+			await appendDenialEvent({
+				audit,
+				actor: "local",
+				error: refusal,
+				record: { denialClass: "policy" },
+				fields: {
+					...(model !== undefined ? { model } : {}),
+					endpointClass: endpoint.class,
+					...(attribution !== undefined ? { costCenter: attribution.costCenter } : {}),
+				},
+			});
+			throw refusal;
+		})();
+	}
+
+	/**
+	 * A Google trap's first step, run SYNCHRONOUSLY on the caller's own arguments, before the request
+	 * gate's dry run reads the request at the SDK's own time: the per-call request-option refusal,
+	 * exactly as interceptCall makes it (a request given as a Proxy, an accessor on an option key, an
+	 * option off the list), or the `config.httpOptions` call start pins (an own data property, read and
+	 * copied now, so a later change to the caller's options cannot reach the SDK).
+	 */
+	function googleCallStart(
+		args: readonly unknown[],
+		thisArg: unknown,
+	): { refused: Promise<never> } | { pinned: PinnedHttpOptions | undefined } {
+		const refused = movedOptionsRefusal(args, thisArg, getCurrentCostCenter());
+		if (refused === undefined) return { pinned: pinnedGoogleHttpOptions(args[0]) };
+		// Counted in flight, like every refusal, so destroy() waits for its audit append.
+		inFlightCount++;
+		return {
+			refused: refused.finally(() => {
+				inFlightCount--;
+			}),
+		};
+	}
+
 	async function interceptCall(
 		originalFn: (...args: unknown[]) => unknown,
 		thisArg: unknown,
@@ -1726,23 +1781,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// Read before anything is scanned, held or priced, and without running caller code
 			// (default-deny.ts `movedRequestOptions`): every governed method of every provider
 			// enters here, so one check covers create, stream and parse alike.
-			const moved = movedRequestOptions(kind, args, thisArg);
-			if (moved.length > 0) {
-				const refusal = movedRequestError(kind, moved);
-				const model = ownStringDataProperty(args[0], "model");
-				await appendDenialEvent({
-					audit,
-					actor: "local",
-					error: refusal,
-					record: { denialClass: "policy" },
-					fields: {
-						...(model !== undefined ? { model } : {}),
-						endpointClass: endpoint.class,
-						...(attribution !== undefined ? { costCenter: attribution.costCenter } : {}),
-					},
-				});
-				throw refusal;
-			}
+			const refused = movedOptionsRefusal(args, thisArg, attribution);
+			if (refused !== undefined) await refused;
 			args = detachedArgs(kind, args);
 			const envelope = resolveEnvelope(attribution, config.parentUserId);
 			// Spread into every audit record this call emits (A1: an attributed hold
@@ -4374,6 +4414,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				governActionImpl,
 				boundary,
 				preflightRefusal,
+				googleCallStart,
 			);
 		}
 		return build(client, interceptCall, destroyFn, governActionImpl, boundary);
@@ -5371,6 +5412,7 @@ async function googleRequestGate(
 	args: unknown[],
 	method: GoogleMethod,
 	pipeline: () => Promise<GooglePipeline | undefined>,
+	pinned?: PinnedHttpOptions,
 ): Promise<
 	| { refusal: PolicyDeniedError }
 	| { sdkError: unknown; denial: PolicyDeniedError }
@@ -5385,7 +5427,7 @@ async function googleRequestGate(
 			),
 		};
 	}
-	const snap = await snapshotGoogleRequest(resolved, method, args[0]);
+	const snap = await snapshotGoogleRequest(resolved, method, args[0], pinned);
 	switch (snap.kind) {
 		case "sdkError":
 			return {
@@ -5468,6 +5510,10 @@ function buildGoogleProxy<T>(
 	governAction: GovernActionFn,
 	boundary: MethodBoundary,
 	preflight: () => void,
+	callStart: (
+		args: readonly unknown[],
+		thisArg: unknown,
+	) => { refused: Promise<never> } | { pinned: PinnedHttpOptions | undefined },
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const models = original.models as Record<string, unknown>;
@@ -5495,8 +5541,16 @@ function buildGoogleProxy<T>(
 			if (prop === "generateContent") {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
+					// Request options, on the caller's own arguments, before anything reads the request.
+					const start = callStart(args, target);
+					if ("refused" in start) return start.refused;
 					// ── Request gate (args[0] becomes the mirror: what is forwarded is what was checked) ──
-					const gate = await googleRequestGate(args, "generateContent", googlePipeline);
+					const gate = await googleRequestGate(
+						args,
+						"generateContent",
+						googlePipeline,
+						start.pinned,
+					);
 					if ("sdkError" in gate) {
 						return refuseWithSdkError(refuse, "models.generateContent", args, gate);
 					}
@@ -5518,9 +5572,17 @@ function buildGoogleProxy<T>(
 			if (prop === "generateContentStream" && originalGenerateStream !== undefined) {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
+					// Request options, on the caller's own arguments, before anything reads the request.
+					const start = callStart(args, target);
+					if ("refused" in start) return start.refused;
 					// ── Request gate: a streamed AFC loop is refused until it is metered per round ──
 					// (args[0] becomes the mirror: what is forwarded is what was checked)
-					const gate = await googleRequestGate(args, "generateContentStream", googlePipeline);
+					const gate = await googleRequestGate(
+						args,
+						"generateContentStream",
+						googlePipeline,
+						start.pinned,
+					);
 					if ("sdkError" in gate) {
 						return refuseWithSdkError(refuse, "models.generateContentStream", args, gate);
 					}

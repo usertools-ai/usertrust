@@ -907,11 +907,50 @@ export function movedRequestOptions(
 }
 
 /**
+ * A copy of `obj`'s own DATA properties, each keeping its enumerability (a spread would drop a
+ * non-enumerable one, which the SDK still reads by name), with `replace`'s keys set over them. An
+ * accessor is not copied: it is never handed on as a live getter.
+ */
+function dataCopy(obj: object, replace: Record<string, unknown>): Record<string, unknown> {
+	const copy: Record<string, unknown> = {};
+	for (const key of Reflect.ownKeys(obj)) {
+		const d = Object.getOwnPropertyDescriptor(obj, key);
+		if (d === undefined || !("value" in d)) continue;
+		Object.defineProperty(copy, key, {
+			value: typeof key === "string" && Object.hasOwn(replace, key) ? replace[key] : d.value,
+			writable: true,
+			enumerable: d.enumerable === true,
+			configurable: true,
+		});
+	}
+	for (const [key, value] of Object.entries(replace)) {
+		if (!Object.hasOwn(copy, key)) copy[key] = value;
+	}
+	return copy;
+}
+
+/**
+ * A Google request's `config.httpOptions`, pinned at call start: when the request's own DATA
+ * `config` holds an own DATA `httpOptions` that is a plain object (enumerable or not), the config
+ * object and a NEW object holding only its governed keys, each read once; `undefined` otherwise.
+ * Run after `movedRequestOptions` passed the request, so nothing here runs caller code.
+ */
+export function pinnedGoogleHttpOptions(
+	request: unknown,
+): { config: object; httpOptions: Record<string, unknown> } | undefined {
+	const config = readOwn(request, "config");
+	const http = readOwn(config, "httpOptions");
+	if (config === null || typeof config !== "object" || !plainObject(http)) return undefined;
+	return { config, httpOptions: governedCopy(http, GOVERNED_GOOGLE_HTTP_OPTIONS) };
+}
+
+/**
  * The argument list to FORWARD for a governed call `movedRequestOptions` passed: the caller's
  * request, with its request options replaced by a new object holding only the governed keys, each
- * read once (Anthropic and OpenAI: `args[1]`; Google: `config.httpOptions`, in a shallow copy of
- * the request and its config, which keeps every callable member). A later change to the caller's
- * own options cannot reach the SDK, and the copy cannot carry an unlisted key.
+ * read once (Anthropic and OpenAI: `args[1]`; Google: `config.httpOptions`, in a copy of the
+ * request and its config that keeps each own data key and its enumerability, and every callable
+ * member). A later change to the caller's own options cannot reach the SDK, and the copy cannot
+ * carry an unlisted key.
  */
 export function detachedArgs(provider: DefaultDenyProvider, args: readonly unknown[]): unknown[] {
 	if (provider !== "google") {
@@ -924,13 +963,11 @@ export function detachedArgs(provider: DefaultDenyProvider, args: readonly unkno
 	const http = readThroughChain(config, "httpOptions");
 	if (!plainObject(http)) return [...args];
 	return [
-		{
-			...(request as Record<string, unknown>),
-			config: {
-				...(config as Record<string, unknown>),
+		dataCopy(request as object, {
+			config: dataCopy(config as object, {
 				httpOptions: governedCopy(http, GOVERNED_GOOGLE_HTTP_OPTIONS),
-			},
-		},
+			}),
+		}),
 		...args.slice(1),
 	];
 }

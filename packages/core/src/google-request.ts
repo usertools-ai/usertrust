@@ -446,7 +446,18 @@ interface Membrane {
  * writes react to the recorder's scripted answers, not to the caller's request, so they are absorbed
  * (neither written through to the caller's objects nor recorded).
  */
-function makeMembrane(absorbing: () => boolean = () => false): Membrane {
+/** `config.httpOptions` as read at call start (see `snapshotGoogleRequest`): served in place of a live read. */
+export interface PinnedHttpOptions {
+	/** The caller's own config object that holds it. */
+	readonly config: object;
+	/** The copy that is served for its `httpOptions` key. */
+	readonly httpOptions: Record<string, unknown>;
+}
+
+function makeMembrane(
+	absorbing: () => boolean = () => false,
+	pinned?: PinnedHttpOptions,
+): Membrane {
 	const proxies = new Map<object, Wrapped>(); // proxy -> what it wraps
 	const byReal = new WeakMap<object, object>(); // caller's object -> its proxy
 	const standIns: StandIns = { afcRan: false, count: 0 };
@@ -537,8 +548,12 @@ function makeMembrane(absorbing: () => boolean = () => false): Membrane {
 					return sv !== null && typeof sv === "object" ? wrap(sv, undefined) : sv;
 				}
 				rec.touched = true;
-				// PASS-THROUGH: every access reads the caller's object, with it as the receiver.
-				const v = Reflect.get(real, key, real);
+				// PASS-THROUGH: every access reads the caller's object, with it as the receiver. One key is
+				// pinned: the caller's config's own data `httpOptions`, read and copied at call start.
+				const v =
+					pinned !== undefined && key === "httpOptions" && real === pinned.config
+						? pinned.httpOptions
+						: Reflect.get(real, key, real);
 				if (
 					rec.role === "toolEntry" &&
 					(key === "tool" || key === "callTool") &&
@@ -899,14 +914,19 @@ function sameRequests(a: RecordedRequest[], b: RecordedRequest[]): boolean {
  *   a streamed loop is not metered round by round).
  * - `refuse`: the mirror cannot reproduce what the SDK sends for the caller's request ("can't tell").
  * - `sdkError`: the SDK's pipeline threw over the caller's request, as it would natively.
+ *
+ * `pinned` is the request's `config.httpOptions` as the call-start check read and copied it (an own
+ * data property): the dry run is served that copy for that key, so a later change to the caller's
+ * options cannot reach the SDK; every other key is read live, at the SDK's own time.
  */
 export async function snapshotGoogleRequest(
 	pipeline: GooglePipeline,
 	method: GoogleMethod,
 	params: unknown,
+	pinned?: PinnedHttpOptions,
 ): Promise<GoogleSnapshot> {
 	const captured: RecordedRequest[] = [];
-	const membrane = makeMembrane(() => captured.length > 0);
+	const membrane = makeMembrane(() => captured.length > 0, pinned);
 	const root = membrane.wrap(params, "params");
 	try {
 		await runPipeline(pipeline, method, root, captured, membrane.markTransport);

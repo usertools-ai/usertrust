@@ -1140,18 +1140,7 @@ describe("automatic function calling: metered per round on generateContent, refu
 	});
 
 	for (const method of AFC_METHODS) {
-		it(`${method}: a config getter that THROWS fails with the getter's own error, as natively: audited, nothing held or sent`, async () => {
-			await expectSdkRejection(tmpVault, method, () =>
-				Object.defineProperty({ model: "gemini-2.5-flash", contents: "hi" }, "config", {
-					get: () => {
-						throw new Error("getter exploded");
-					},
-					enumerable: true,
-				}),
-			);
-		});
-
-		it(`${method}: a config that is not an object (here from a getter) is governed as natively: the SDK reads nothing from it`, async () => {
+		it(`${method}: a config held by an accessor (here one that would THROW) is refused at call start, its getter never run: audited, nothing held or sent`, async () => {
 			const engine = makeMockEngine();
 			const audit = makeMockAudit();
 			const { client, generateContentStream } = makeGoogleClient();
@@ -1162,11 +1151,43 @@ describe("automatic function calling: metered per round on generateContent, refu
 				_engine: engine,
 				_audit: audit,
 			});
-			const params = () =>
-				Object.defineProperty({ model: "gemini-2.5-flash", contents: "hi" }, "config", {
-					get: () => 42,
+			const getter = vi.fn(() => {
+				throw new Error("getter exploded");
+			});
+			const params = Object.defineProperty(
+				{ model: "gemini-2.5-flash", contents: "hi" },
+				"config",
+				{
+					get: getter,
 					enumerable: true,
-				});
+				},
+			);
+			const err = await callModels(governed, method, params).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect((err as Error).message).toContain("config (unreadable)");
+			expect(getter).not.toHaveBeenCalled();
+			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+			expect(engine.spendPending).not.toHaveBeenCalled();
+			expect(client.models.generateContent).not.toHaveBeenCalled();
+			expect(generateContentStream).not.toHaveBeenCalled();
+			await destroy(governed);
+		});
+
+		it(`${method}: a config that is not an object (here a data property holding a number) is governed as natively: the SDK reads nothing from it`, async () => {
+			const engine = makeMockEngine();
+			const audit = makeMockAudit();
+			const { client, generateContentStream } = makeGoogleClient();
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_engine: engine,
+				_audit: audit,
+			});
+			const params = () => ({ model: "gemini-2.5-flash", contents: "hi", config: 42 });
 			const native = await nativeRun(method, params());
 			expect(native).toEqual({ result: "ok", requests: 1 });
 
@@ -1330,11 +1351,7 @@ describe("a config getter that flips after its first read cannot turn the SDK's 
 	}
 
 	for (const method of AFC_METHODS) {
-		it(`${method}: ${
-			method === "generateContent"
-				? 'the SDK reads a different tools list on different reads, which the mirror cannot hold: refused as "can\'t tell"'
-				: "the SDK, reading the callable on its AFC check, would run its streamed loop: refused as an AFC stream"
-		}; no model request, and the callable tool's code never runs`, async () => {
+		it(`${method}: config held by an accessor is refused at call start, as per-call request options are (config unreadable): the getter never runs, no model request, and the callable tool's code never runs`, async () => {
 			const { sdk, sent } = realSdk();
 			const { params, getter, tool } = flippingRequest();
 			const audit = makeMockAudit();
@@ -1355,14 +1372,11 @@ describe("a config getter that flips after its first read cannot turn the SDK's 
 			);
 
 			expect(err).toBeInstanceOf(PolicyDeniedError);
-			expect((err as Error).message).toContain(
-				method === "generateContent"
-					? `models.${method} could not be checked for automatic function calling`
-					: `models.${method} with automatic function calling is not governed yet`,
-			);
+			expect((err as Error).message).toContain("request_option_refused");
+			expect((err as Error).message).toContain("config (unreadable)");
 			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
-			// the getter ran as the SDK reads it, more than once; nothing was sent, and no tool code ran
-			expect(getter.mock.calls.length).toBeGreaterThan(1);
+			// refused before anything read the request: the getter never ran, nothing was sent
+			expect(getter).not.toHaveBeenCalled();
 			expect(sent).toHaveLength(0);
 			expect(tool.tool).not.toHaveBeenCalled();
 			expect(tool.callTool).not.toHaveBeenCalled();
@@ -1549,6 +1563,23 @@ describe("Proxies in the request are read as the SDK reads them, and governed", 
 		],
 	];
 
+	/** Positions the per-call request-option check refuses at call start: it cannot read the request, or its config, there. */
+	const REFUSED_AT_CALL_START = new Set([
+		"params",
+		"params.config",
+		"params, its descriptors hiding the callable tool its get trap returns",
+	]);
+
+	/** Refused at call start as a per-call request-option refusal: audited, nothing held or sent. */
+	function expectRefusedAtCallStart(r: Awaited<ReturnType<typeof governedCall>>): void {
+		expect(r.err).toBeInstanceOf(PolicyDeniedError);
+		expect((r.err as Error).message).toContain("request_option_refused");
+		expect(r.audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
+		expect(r.engine.spendPending).not.toHaveBeenCalled();
+		expect(r.client.models.generateContent).not.toHaveBeenCalled();
+		expect(r.generateContentStream).not.toHaveBeenCalled();
+	}
+
 	async function governedCall(
 		method: (typeof AFC_METHODS)[number],
 		params: Record<string, unknown>,
@@ -1576,9 +1607,14 @@ describe("Proxies in the request are read as the SDK reads them, and governed", 
 	}
 
 	it.each(POSITIONS)(
-		"generateContent: a Proxy in %s → the SDK, reading it, would loop: the governed per-round loop runs on the plain mirror",
-		async (_, params) => {
-			const { receipt, engine, audit, client } = await governedCall("generateContent", params());
+		"generateContent: a Proxy in %s → refused at call start where the request-option check cannot read the request or its config; elsewhere the SDK, reading it, would loop: the governed per-round loop runs on the plain mirror",
+		async (position, params) => {
+			const r = await governedCall("generateContent", params());
+			if (REFUSED_AT_CALL_START.has(position)) {
+				expectRefusedAtCallStart(r);
+				return;
+			}
+			const { receipt, engine, audit, client } = r;
 
 			expect(receipt?.settled).toBe(true);
 			expect(audit.events.map((e) => e.kind)).toEqual(["llm_call"]);
@@ -1595,12 +1631,14 @@ describe("Proxies in the request are read as the SDK reads them, and governed", 
 	);
 
 	it.each(POSITIONS)(
-		"generateContentStream: a Proxy in %s → the SDK, reading it, would loop: refused as an AFC stream, no hold, no SDK call",
-		async (_, params) => {
-			const { err, engine, audit, client, generateContentStream } = await governedCall(
-				"generateContentStream",
-				params(),
-			);
+		"generateContentStream: a Proxy in %s → refused at call start where the request-option check cannot read the request or its config; elsewhere refused as an AFC stream; no hold, no SDK call",
+		async (position, params) => {
+			const r = await governedCall("generateContentStream", params());
+			if (REFUSED_AT_CALL_START.has(position)) {
+				expectRefusedAtCallStart(r);
+				return;
+			}
+			const { err, engine, audit, client, generateContentStream } = r;
 
 			expect(err).toBeInstanceOf(PolicyDeniedError);
 			expect((err as Error).message).toContain(
@@ -1614,12 +1652,13 @@ describe("Proxies in the request are read as the SDK reads them, and governed", 
 	);
 
 	for (const method of AFC_METHODS) {
-		it(`${method}: a Proxy-backed request with no callable tool is governed as one call, and the SDK receives plain data`, async () => {
+		it(`${method}: a request with Proxies inside it (tools, a tool) and no callable tool is governed as one call, and the SDK receives plain data`, async () => {
 			const { receipt, engine, client, generateContentStream } = await governedCall(
 				method,
-				proxied(
-					afcParams({ tools: [proxied({ googleSearch: {} })], automaticFunctionCalling: {} }),
-				),
+				afcParams({
+					tools: proxied([proxied({ googleSearch: {} })]),
+					automaticFunctionCalling: proxied({}),
+				}),
 			);
 
 			expect(receipt?.settled).toBe(true);

@@ -898,46 +898,166 @@ describe('an own "__proto__" key (as JSON.parse makes one) on a config beside to
 	}
 });
 
-describe("the self-check compares every request argument, not only the body", () => {
+describe("config.httpOptions is read at call start, as per-call request options are", () => {
 	/** A data tool the SDK counts as MCP usage, so it re-reads config.httpOptions for its usage header. */
 	const mcpTool = () => ({
 		functionDeclarations: [{ name: "lookup" }],
 		inputSchema: { type: "object" },
 	});
 
-	/** An own enumerable httpOptions getter answering `headers(n)` on its n-th read. */
-	const withHttpOptions = (headers: (n: number) => string) => () => {
-		let reads = 0;
-		const config: Loose = { tools: [mcpTool()] };
-		Object.defineProperty(config, "httpOptions", {
-			enumerable: true,
-			configurable: true,
-			get: () => {
-				reads++;
-				return { headers: { "x-test": headers(reads) } };
-			},
-		});
-		return request(config);
-	};
+	/** Refused at call start as an option off the governed list: audited, nothing sent. */
+	function expectOptionRefused(r: Outcome, named: string): void {
+		expect(r.govResult).toContain("request_option_refused");
+		expect(r.govResult).toContain(named);
+		expect(r.auditKinds).toEqual(["policy_denied"]);
+		expect(r.gov.requests).toHaveLength(0);
+	}
 
 	for (const method of METHODS) {
 		for (const [backend, vertex] of BACKENDS) {
-			it(`${method} on ${backend}: a stable httpOptions getter beside an MCP-usage tool: the same request and header as natively`, async () => {
-				const r = await nativeThenGoverned(method, same(withHttpOptions(() => "same")), { vertex });
+			const on = `${method} on ${backend}`;
+
+			it(`${on}: an ACCESSOR config.httpOptions is refused at call start, and its getter never runs`, async () => {
+				const reads = { governed: 0 };
+				const make = () => {
+					const config: Loose = { tools: [mcpTool()] };
+					Object.defineProperty(config, "httpOptions", {
+						enumerable: true,
+						configurable: true,
+						get: () => {
+							reads.governed++;
+							return { headers: { "x-test": "from a getter" } };
+						},
+					});
+					return request(config);
+				};
+				const r = await nativeThenGoverned(
+					method,
+					{ native: () => request({}), governed: make },
+					{ vertex },
+				);
+				expectOptionRefused(r, "config.httpOptions (unreadable)");
+				expect(reads.governed).toBe(0);
+			});
+
+			it(`${on}: a data config.httpOptions beside an MCP-usage tool: the same request and header as natively`, async () => {
+				const make = () =>
+					request({ tools: [mcpTool()], httpOptions: { headers: { "x-test": "same" } } });
+				const r = await nativeThenGoverned(method, same(make), { vertex });
 				expectSameSend(r);
-				expect(r.raw.requests.map((q) => q.testHeader)).toEqual(["same"]);
 				expect(r.gov.requests.map((q) => q.testHeader)).toEqual(["same"]);
 			});
 
-			it(`${method} on ${backend}: an httpOptions getter answering differently on each of the SDK's three reads: the header comes from its second, and governed sends that one too`, async () => {
-				const r = await nativeThenGoverned(method, same(withHttpOptions((n) => `read-${n}`)), {
-					vertex,
-				});
-				// the SDK copies config (read 1), reads headers (read 2), then spreads the options (read 3)
-				expectSameSend(r);
-				expect(r.raw.requests.map((q) => q.testHeader)).toEqual(["read-2"]);
-				expect(r.gov.requests.map((q) => q.testHeader)).toEqual(["read-2"]);
+			it(`${on}: a NON-ENUMERABLE own config.httpOptions is checked: carrying extraBody it is refused`, async () => {
+				const make = () =>
+					request(
+						Object.defineProperty({}, "httpOptions", {
+							value: { extraBody: { labels: { a: "b" } } },
+							enumerable: false,
+						}),
+					);
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expectOptionRefused(r, "config.httpOptions.extraBody");
 			});
+
+			it(`${on}: a NON-ENUMERABLE own config.httpOptions holding only allowed keys sends its copy: governed == native`, async () => {
+				const make = () =>
+					request(
+						Object.defineProperty({ temperature: 0.5 }, "httpOptions", {
+							value: { headers: { "x-test": "hidden" } },
+							enumerable: false,
+						}),
+					);
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expectSameSend(r);
+				expect(r.gov.requests.map((q) => q.testHeader)).toEqual(["hidden"]);
+			});
+
+			it(`${on}: replacing the caller's httpOptions.headers after the call starts never reaches the wire (natively the SDK, reading later, sends the new one)`, async () => {
+				const run = async (models: unknown, w: ReturnType<typeof wire>) => {
+					globalThis.fetch = w.fetchStub as typeof fetch;
+					const httpOptions: Loose = { headers: { "x-test": "early" } };
+					const pending = runOn(models, method, request({ httpOptions }));
+					httpOptions["headers"] = { "x-test": "late" };
+					return pending;
+				};
+				const raw = wire();
+				await run(sdkClient(vertex).models, raw);
+				const gov = wire();
+				const governed = await trust(sdkClient(vertex), {
+					dryRun: true,
+					budget: 500_000,
+					vaultBase: vault,
+					_audit: recordingAudit(),
+				});
+				expect((await run(governed.models, gov)).result).toBe("ok");
+				await governed.destroy();
+				expect(raw.requests.map((q) => q.testHeader)).toEqual(["late"]);
+				expect(gov.requests.map((q) => q.testHeader)).toEqual(["early"]);
+			});
+
+			const hidden: Array<[string, () => Loose]> = [
+				[
+					"a hidden systemInstruction (no tools: the SDK reads it by name)",
+					() =>
+						Object.defineProperty(
+							{ httpOptions: { headers: { "x-test": "h" } } },
+							"systemInstruction",
+							{ value: "be brief", enumerable: false },
+						) as Loose,
+				],
+				[
+					"a hidden automaticFunctionCalling { disable: true } beside a callable tool",
+					() =>
+						Object.defineProperty(
+							{ tools: [callable().tool], httpOptions: { headers: { "x-test": "h" } } },
+							"automaticFunctionCalling",
+							{ value: { disable: true }, enumerable: false },
+						) as Loose,
+				],
+			];
+			if (method === "generateContentStream") {
+				it(`${on}: a NON-ENUMERABLE own $schema responseSchema beside tools, with httpOptions present, is still moved and sent as the SDK sends it: governed == native`, async () => {
+					const make = () =>
+						request(
+							Object.defineProperty(
+								{
+									tools: [{ googleSearch: {} }],
+									responseMimeType: "application/json",
+									httpOptions: { headers: { "x-test": "h" } },
+								},
+								"responseSchema",
+								{
+									value: {
+										$schema: "https://json-schema.org/draft/2020-12/schema",
+										type: "object",
+									},
+									enumerable: false,
+									writable: true,
+									configurable: true,
+								},
+							),
+						);
+					const r = await nativeThenGoverned(method, same(make), { vertex });
+					expectSameSend(r);
+					expect(JSON.stringify(r.raw.requests[0]?.body)).toContain("$schema");
+				});
+			}
+
+			for (const [shape, config] of hidden) {
+				it(`${on}: ${shape} survives with httpOptions present: governed == native`, async () => {
+					const r = await nativeThenGoverned(
+						method,
+						same(() => request(config())),
+						{
+							vertex,
+							rounds: LOOP,
+						},
+					);
+					expectSameSend(r);
+					expect(r.raw.requests).toHaveLength(1);
+				});
+			}
 		}
 	}
 });
@@ -1110,20 +1230,18 @@ describe("caller code reached from the request cannot change what is sent after 
 				expect(r.gov.requests).toHaveLength(0);
 			});
 
-			it(`${on}: httpOptions.extraBody is merged into the body as the transport merges it: governed == native`, async () => {
+			it(`${on}: a per-call httpOptions.extraBody is refused at call start (request_option_refused), nothing sent`, async () => {
 				const make = () =>
 					request({
 						temperature: 0.5,
-						httpOptions: {
-							extraBody: { generationConfig: { candidateCount: 2 }, labels: { a: "b" } },
-						},
+						httpOptions: { extraBody: { generationConfig: { candidateCount: 2 } } },
 					});
 				const r = await nativeThenGoverned(method, same(make), { vertex });
-				expectSameSend(r);
-				expect(r.raw.requests[0]?.body["generationConfig"]).toMatchObject({
-					temperature: 0.5,
-					candidateCount: 2,
-				});
+				expect(r.raw.requests).toHaveLength(1); // natively it is merged and sent
+				expect(r.govResult).toContain("request_option_refused");
+				expect(r.govResult).toContain("config.httpOptions.extraBody");
+				expect(r.auditKinds).toEqual(["policy_denied"]);
+				expect(r.gov.requests).toHaveLength(0);
 			});
 
 			it(`${on}: an own map method on contents' parts, which the SDK calls, is refused without ever running (its output could hand the SDK anything)`, async () => {

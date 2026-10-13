@@ -103,7 +103,9 @@ request, against a stand-in for its transport that sends nothing. The pipeline i
 the client's own `Models` class, or else the installed `@google/genai`'s, each
 accepted only after a short behavioural check. A client with neither is refused.
 In that run every getter, `toJSON` hook and Proxy trap in the request runs as
-often, and in the same order, as when the SDK sends it. The SDK's own writes
+often, and in the same order, as when the SDK sends it, apart from what the
+per-call request-option check refuses before the run (a request or `config` given
+as a Proxy or held by an accessor, an accessor on an option key). The SDK's own writes
 (moving a `$schema` `responseSchema`, rewriting a declaration's `parameters`) land
 on your objects as they would natively, once per call. What the SDK read becomes
 a plain-data copy, and that copy is what the PII scan, redaction, the meter and
@@ -130,6 +132,10 @@ own:
   methods (`map`, `filter`) build their result from an array of yours, they build
   a plain array rather than constructing your subclass, so your subclass's
   constructor does not run. The result serializes the same.
+- **`config.httpOptions` is read at the start of the call**, as per-call request
+  options are, and the SDK is given that copy; every other field is read when the
+  SDK reads it. An `httpOptions` the config inherits is read by the SDK through
+  the prototype, unchecked (a known gap).
 - **A callable tool reaches the SDK as a wrapper.** Its `tool()` runs inside the
   first governed round, and `callTool()` is passed through; nothing else of the
   tool object is reachable from the request. A call the SDK sends without its own
