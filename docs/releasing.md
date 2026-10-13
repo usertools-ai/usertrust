@@ -401,7 +401,7 @@ files), and gates on its parent, the commit CI ran on. (The release commit itsel
 run: pushes made with the workflow's token do not trigger workflows.) It also fetches `master`
 afresh and requires the tag's commit to be on it: a release commit tagged on a side branch was
 never released and is refused, and so is a shallow history or a `master` it cannot fetch. A tag
-made before siblings were pinned (v5.0.0 and earlier) names them as `"*"`, so republish
+made before siblings were pinned (v5.0.1 and earlier) names them as `"*"`, so republish
 refuses it. None needs one, as npm holds those versions in full; republishing one would take a
 deliberate change to the release-commit check. Dispatching on `master` also works while
 `master` is still the release commit. A republish of a version older than the newest `v*`

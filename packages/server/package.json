@@ -42,7 +42,7 @@
 		"NOTICE"
 	],
 	"dependencies": {
-		"usertrust": "5.0.0",
+		"usertrust": "5.0.1",
 		"zod": "^4.6.5"
 	}
 }

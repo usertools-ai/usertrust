@@ -37,8 +37,8 @@
 		"NOTICE"
 	],
 	"dependencies": {
-		"usertrust": "5.0.0",
-		"usertrust-verify": "5.0.0"
+		"usertrust": "5.0.1",
+		"usertrust-verify": "5.0.1"
 	},
 	"devDependencies": {
 		"@tailwindcss/vite": "^4.0.0",
