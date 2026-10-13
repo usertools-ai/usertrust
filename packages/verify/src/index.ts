@@ -880,8 +880,14 @@ export function verifyTransaction(
 	// EVERY segment: a rotated transfer straddles files, and the live file alone lacks its history.
 	const segments = auditSegments(join(vaultPath, "audit"));
 	if (segments.count === 0 || segments.empty) {
+		// No log at all means nothing could be read; an empty log is a clean, empty reading.
 		const error = segments.count === 0 ? `Audit log not found: ${mainLog}` : "Audit log is empty";
-		return { found: false, valid: false, receipt: renderNotFound(txId), errors: [error] };
+		return {
+			found: false,
+			valid: false,
+			receipt: renderNotFound(txId, segments.count !== 0),
+			errors: [error],
+		};
 	}
 
 	// Find the target event.
@@ -943,7 +949,10 @@ export function verifyTransaction(
 	];
 	if (targetEvent === undefined) {
 		const errors = vaultErrors.map(scrubForError);
-		return { found: false, valid: false, receipt: renderNotFound(txId), errors };
+		// The absolute sentence only for a reading with no errors: a missing segment, an unreadable
+		// directory or a failed chain may hold the records that were asked for.
+		const receipt = renderNotFound(txId, vaultErrors.length === 0);
+		return { found: false, valid: false, receipt, errors };
 	}
 
 	const chainVerified = reading.result.valid;
