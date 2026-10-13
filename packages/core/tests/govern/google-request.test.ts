@@ -1769,11 +1769,53 @@ describe("params.config.httpOptions is pinned at call start for its PATH, whiche
 });
 
 describe("the hold is sized from the request that is sent", () => {
-	// Fails today, on master's source too (measured: held 103, settled 301): the input-token estimate
-	// counts nothing of a Google prompt's parts, so the hold covers little more than the output. The
-	// hold is sized from what is sent (the mirror); when the estimate counts Google parts, this row
-	// passes and must become a plain `it`.
-	it.fails("generateContent: a ~100,000-token prompt is held at or above what it costs", async () => {
+	/** An engine recording each hold and each post (and any shortfall it reports). */
+	function recordingEngine() {
+		const held: number[] = [];
+		const posted: number[] = [];
+		const engine = {
+			spendPending: vi.fn(async (p: { transferId: string; amount: number }) => {
+				held.push(p.amount);
+				return { transferId: p.transferId };
+			}),
+			postPendingSpend: vi.fn(async (_id: string, amount?: number) => {
+				posted.push(amount ?? Number.NaN);
+			}),
+			voidPendingSpend: vi.fn(async () => {}),
+			destroy: vi.fn(),
+		};
+		return { engine, held, posted };
+	}
+
+	it("generateContent: contents that grow to ~100,000 tokens just after the call starts are what is held for, since they are what is sent", async () => {
+		const { engine, held, posted } = recordingEngine();
+		const w = wire([{ text: "done" }], {
+			promptTokenCount: 100_000,
+			candidatesTokenCount: 10,
+			totalTokenCount: 100_010,
+		});
+		globalThis.fetch = w.fetchStub as typeof fetch;
+		const governed = await trust(sdkClient(false), {
+			dryRun: false,
+			budget: 50_000_000,
+			vaultBase: vault,
+			_engine: engine,
+			_audit: recordingAudit(),
+		});
+		const long = "lorem ipsum dolor sit amet ".repeat(15_000); // ~405,000 characters
+		const params: Loose = request({}, "short");
+		const pending = runOn(governed.models, "generateContent", params);
+		params["contents"] = long; // read by the SDK after its first await: this is what is sent
+		const { result } = await pending;
+		await governed.destroy();
+		expect(result).toBe("ok");
+		expect(JSON.stringify(w.requests[0]?.body)).toContain(long);
+		expect(held).toHaveLength(1);
+		expect(posted).toHaveLength(1);
+		expect(held[0]).toBeGreaterThanOrEqual(posted[0] as number);
+	});
+
+	it("generateContent: a ~100,000-token prompt is held at or above what it costs", async () => {
 		const held: number[] = [];
 		const posted: number[] = [];
 		const engine = {
@@ -1793,12 +1835,13 @@ describe("the hold is sized from the request that is sent", () => {
 			totalTokenCount: 100_010,
 		});
 		globalThis.fetch = w.fetchStub as typeof fetch;
+		const audit = recordingAudit();
 		const governed = await trust(sdkClient(false), {
 			dryRun: false,
 			budget: 50_000_000,
 			vaultBase: vault,
 			_engine: engine,
-			_audit: recordingAudit(),
+			_audit: audit,
 		});
 		const prompt = "lorem ipsum dolor sit amet ".repeat(15_000); // ~405,000 characters
 		const { result } = await runOn(governed.models, "generateContent", request({}, prompt));
@@ -1807,7 +1850,11 @@ describe("the hold is sized from the request that is sent", () => {
 		expect(w.requests).toHaveLength(1);
 		expect(held).toHaveLength(1);
 		expect(posted).toHaveLength(1);
+		// measured: held 559, settled 301 (gemini-2.5-flash rates)
 		expect(held[0]).toBeGreaterThanOrEqual(posted[0] as number);
+		expect(held[0]).toBeGreaterThanOrEqual(301);
+		expect(posted[0]).toBe(301);
+		expect(audit.events.map((e) => e.kind)).not.toContain("settlement_shortfall");
 	});
 });
 

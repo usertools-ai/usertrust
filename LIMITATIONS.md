@@ -314,8 +314,6 @@ are known to land there:
   of body and can bill tens of thousands of tokens;
 - **a Google callable or MCP tool:** its declarations are resolved after authorization;
 - **an uncapped output** above 4096, and Google dynamic thinking with no `maxOutputTokens`;
-- **a Google request whose getter or `toJSON` answers differently** when the SDK reads it
-  later: Google forwards its original object;
 - **a request that cannot be serialized**, which keeps the prompt parts' estimate.
 
 The estimate's byte heuristic is **not calibrated against any provider's tokenizer**

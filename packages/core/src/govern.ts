@@ -1896,8 +1896,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// request body (`estimateBodyTokens`), whichever is larger, so no hold ever shrinks and a
 			// field the parts do not walk (a block-form system, tools, Google `contents` and its
 			// config, a prompt variable) is held too. Both read the one serialized snapshot, never
-			// the live request (Google forwards its original, and reads it later: its named
-			// exception). A request with no snapshot keeps the parts' estimate.
+			// the live request; on Google the request here is the request gate's mirror, plain data
+			// that is exactly what is sent. A request with no snapshot keeps the parts' estimate.
 			const snapshot = serialized?.body;
 			const estimatedInputTokens = holdInputTokens(promptParts, snapshot);
 			// F1: size the output estimate to the caller's ACTUAL cap, per provider, per candidate
