@@ -161,6 +161,12 @@ jobs:
         run: bash scripts/release.sh assert-published
 
       # ── Version bump (all packages in lockstep; skipped in republish mode) ──
+      # `npm version` sets each package's own version; `release.sh pin-siblings` then sets every
+      # lockstep package a manifest depends on to that same version, so each published package
+      # requires exactly the siblings it is released with. --no-workspaces-update: run inside a
+      # workspace, npm version reinstalls afterwards, and once core is bumped a sibling's pin
+      # to the previous version no longer matches the workspace, so npm would install that
+      # previous version from the registry into the tree this job builds.
       - name: Bump versions
         id: version
         env:
@@ -170,8 +176,9 @@ jobs:
             echo "Republish mode: using the committed versions, no bump"
           else
             for dir in $(bash scripts/release.sh dirs); do
-              (cd "packages/${dir}" && npm version "$BUMP" --no-git-tag-version)
+              (cd "packages/${dir}" && npm version "$BUMP" --no-git-tag-version --no-workspaces-update)
             done
+            bash scripts/release.sh pin-siblings
           fi
           VERSION=$(bash scripts/release.sh version)
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -337,9 +344,10 @@ jobs:
       # The release commit was made in the build job, which ran dependency code. Push it only
       # if it is exactly a version bump on top of the dispatched commit: one parent, that
       # parent is this run's commit, it changes exactly the six package.json files, each a
-      # regular file and nothing but its "version" field, and the tag points at it. Nothing is
-      # checked out: the commit is read as git objects. A republish publishes the dispatched
-      # commit itself, which the gate has verified.
+      # regular file and nothing but its "version" field and its lockstep siblings' specs, set
+      # to exactly that version, and the tag points at it. Nothing is checked out: the commit
+      # is read as git objects. A republish publishes the dispatched commit itself, which the
+      # gate has verified.
       - name: Select and verify what to publish
         id: source
         env:
