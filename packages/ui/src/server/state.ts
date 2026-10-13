@@ -318,8 +318,8 @@ function loadPass(
  *
  * What it cannot see: a rewrite in place (same inode) that does not shorten the log, and a delete-and-recreate that
  * reuses the inode number where no birth time is reported. The load's bracket compares size and mtime as well, and
- * mtime is coarse on some filesystems (1 s on HFS+, 2 s on FAT, coarser on some network mounts), so a same-size rewrite
- * within one tick passes it too.
+ * mtime is coarse on every filesystem (a few milliseconds on Linux's local filesystems, 1 s on HFS+, 2 s on FAT, coarser
+ * on some network mounts), so a same-size rewrite within one tick passes it too.
  */
 export function fileIdentity(st: BigIntStats): string | undefined {
 	if (st.ino === 0n) return undefined;

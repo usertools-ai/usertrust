@@ -66,6 +66,7 @@ const {
 	rmSync,
 	statSync,
 	truncateSync,
+	utimesSync,
 	writeFileSync,
 } = await import("node:fs");
 const { canonicalize } = await import("usertrust-verify");
@@ -281,10 +282,14 @@ describe("loadState's identity", () => {
 
 	it("a log that keeps changing under every pass leaves the identity unknown, and the next consistent load sets it", () => {
 		let n = 0;
+		const baseMs = statSync(log).mtimeMs;
 		loadSeam.afterReaders = () => {
 			n += 1;
-			// The same bytes rewritten: a new mtime, so the path no longer matches what the descriptor saw.
+			// The same bytes rewritten, then given an mtime a whole second later per pass, so the path no longer matches
+			// what the descriptor saw. A rewrite alone is not enough: within one tick of a coarse file-system clock it
+			// leaves size, inode and mtime all unchanged, and the pass reads as consistent.
 			writeFileSync(log, readFileSync(log));
+			utimesSync(log, new Date(), new Date(baseMs + n * 1000));
 		};
 		const unsettled = loadState(vault);
 		expect(n).toBe(4);
