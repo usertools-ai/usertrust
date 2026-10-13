@@ -4124,6 +4124,32 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			expect(authorizes()).toHaveLength(1);
 		});
 
+		it("no key: a settle the server REFUSED (400) whose give-back fails and whose `.releasing` record cannot be written drops its claim: its window is carried, and charged, by the next hold", async () => {
+			const server = holdingServer();
+			await startServer((path, body) => {
+				if (body.transferId === "tx_1" && path === "/v1/settle") {
+					return { status: 400, json: { error: "invalid settle" } };
+				}
+				if (body.transferId === "tx_1" && (path === "/v1/release" || path === "/v1/abort")) {
+					return { status: 503, json: { error: "unavailable" } };
+				}
+				return server.responder(path, body);
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await mkdir(join(stateDir, RELEASING, "x"), { recursive: true });
+			const refire = await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(refire.stderr).toContain("a later call may reserve beside it");
+			// Nothing was posted for the refused settle: no claim holds its ids out of new windows.
+			expect(await holdStateFiles()).not.toContain(SETTLING);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			expect(authorizes()).toHaveLength(2);
+			expect(server.charges.filter((c) => c.inputTokens !== 0)).toEqual([
+				{ transferId: "tx_2", inputTokens: 9, outputTokens: 9 },
+			]);
+		});
+
 		it("no key: an EXPIRED first hold's window is released, and the fresh hold carries it, charged once", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);
