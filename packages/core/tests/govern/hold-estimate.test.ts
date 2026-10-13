@@ -634,21 +634,38 @@ describe("holdOutputTokens: the cap the provider enforces, per candidate", () =>
 		expect(holdOutputTokens("openai", { max_output_tokens: 512 }, "responses")).toBe(512);
 	});
 
-	it("Google: never below the default per candidate; the thinking budget is added; times candidateCount", () => {
-		expect(holdOutputTokens("google", { config: { maxOutputTokens: 64 } })).toBe(
-			DEFAULT_OUTPUT_HOLD,
-		);
+	it("Google: maxOutputTokens per candidate, thoughts included (documented), times candidateCount", () => {
+		// the cap bounds thoughts too, so the thinking budget is never added to it
+		expect(holdOutputTokens("google", { config: { maxOutputTokens: 64 } })).toBe(64);
 		expect(
 			holdOutputTokens("google", {
 				config: { maxOutputTokens: 64, thinkingConfig: { thinkingBudget: 8192 } },
 			}),
-		).toBe(64 + 8192);
+		).toBe(64);
+		expect(
+			holdOutputTokens("google", {
+				config: { maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 8192 } },
+			}),
+		).toBe(8192);
 		expect(
 			holdOutputTokens("google", { config: { maxOutputTokens: 2048, candidateCount: 3 } }),
-		).toBe(3 * DEFAULT_OUTPUT_HOLD);
-		// dynamic thinking (-1) has no budget to add: the default holds
+		).toBe(3 * 2048);
+	});
+
+	it("Google with no cap: never below the default, never below the thinking budget, times candidateCount", () => {
+		expect(holdOutputTokens("google", {})).toBe(DEFAULT_OUTPUT_HOLD);
+		expect(
+			holdOutputTokens("google", { config: { thinkingConfig: { thinkingBudget: 1024 } } }),
+		).toBe(DEFAULT_OUTPUT_HOLD);
+		expect(
+			holdOutputTokens("google", { config: { thinkingConfig: { thinkingBudget: 8192 } } }),
+		).toBe(8192);
+		// dynamic thinking (-1) names no budget: the default holds
 		expect(holdOutputTokens("google", { config: { thinkingConfig: { thinkingBudget: -1 } } })).toBe(
 			DEFAULT_OUTPUT_HOLD,
+		);
+		expect(holdOutputTokens("google", { config: { candidateCount: 2 } })).toBe(
+			2 * DEFAULT_OUTPUT_HOLD,
 		);
 	});
 });
@@ -679,8 +696,8 @@ describe("with thinking or reasoning on, output billed at the documented maximum
 		expect(events()).not.toContain("settlement_shortfall");
 	});
 
-	it("Google, maxOutputTokens 64 with a thinking budget of 8192: candidates at 64 plus thoughts at 8192 are held", async () => {
-		outputReport = { output: 64, thoughts: 8192 };
+	it("Google, maxOutputTokens 64 with a thinking budget of 8192: output and thoughts at their documented total of 64 are held", async () => {
+		outputReport = { output: 32, thoughts: 32 };
 		const { client, log } = await governed(googleRaw());
 		await client.models.generateContent({
 			model: "gemini-2.5-pro",
@@ -689,6 +706,22 @@ describe("with thinking or reasoning on, output billed at the documented maximum
 		});
 		expect(log.posts[0]?.posted).toBe(log.posts[0]?.actual);
 		expect(events()).not.toContain("settlement_shortfall");
+	});
+
+	it("Google: a thinking budget beside a cap does not raise the hold (the cap already bounds the thoughts)", async () => {
+		const { client, log } = await governed(googleRaw());
+		await client.models.generateContent({
+			model: "gemini-2.5-pro",
+			contents: SMALL,
+			config: { maxOutputTokens: 8192 },
+		});
+		await client.models.generateContent({
+			model: "gemini-2.5-pro",
+			contents: SMALL,
+			config: { maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 8192 } },
+		});
+		expect(log.holds).toHaveLength(2);
+		expect(log.holds[1]).toBe(log.holds[0]);
 	});
 });
 

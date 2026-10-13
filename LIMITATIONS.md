@@ -245,8 +245,12 @@ Its output leg is the request's own cap, per candidate:
 - Anthropic `max_tokens`;
 - OpenAI chat `max_completion_tokens`, else `max_tokens`, times `n`;
 - Responses `max_output_tokens`;
-- Google: never below 4096 per candidate, plus `thinkingConfig.thinkingBudget`, times
-  `candidateCount`. Google bills its thoughts outside its candidates.
+- Google `maxOutputTokens`, times `candidateCount`. Google bills its thoughts apart from its
+  candidates, but documents `maxOutputTokens` as a hard cutoff on everything a response
+  generates, thought tokens included
+  (https://ai.google.dev/gemini-api/docs/thinking, "Token limits and max_output_tokens"), so the
+  thinking budget is not added to it. With no cap: never below 4096 per candidate, nor below
+  `thinkingConfig.thinkingBudget`.
 
 A request with no cap holds 4096 output tokens.
 
@@ -257,7 +261,7 @@ are known to land there:
   and `file_id` inputs, Google `fileData.fileUri`. A document by URL is a few dozen bytes
   of body and can bill tens of thousands of tokens;
 - **a Google callable or MCP tool:** its declarations are resolved after authorization;
-- **an uncapped output** above 4096, and Google dynamic thinking (no budget);
+- **an uncapped output** above 4096, and Google dynamic thinking with no `maxOutputTokens`;
 - **a Google request whose getter or `toJSON` answers differently** when the SDK reads it
   later: Google forwards its original object;
 - **a request that cannot be serialized**, which keeps the prompt parts' estimate.

@@ -1287,10 +1287,11 @@ export const DEFAULT_OUTPUT_HOLD = 4096;
  * - Anthropic: `max_tokens`, which bounds thinking too (`budget_tokens` must be below it).
  * - OpenAI Responses: `max_output_tokens`, reasoning included.
  * - OpenAI chat: `max_completion_tokens`, else `max_tokens`, reasoning included, times `n`.
- * - Google: NEVER below the default, per candidate. Its output is billed as candidates plus
- *   thoughts, and `maxOutputTokens` is not documented to bound the thoughts, so the cap and the
- *   thinking budget are added: max(default, maxOutputTokens + thinkingBudget) times
- *   `candidateCount`.
+ * - Google: `maxOutputTokens` when it names one, per candidate. Google documents it as a hard
+ *   cutoff on everything a response generates, thought tokens included
+ *   (https://ai.google.dev/gemini-api/docs/thinking, "Token limits and max_output_tokens"), so
+ *   the thinking budget is not added to it. With no cap, never below the default, and never below
+ *   the thinking budget. Either way, times `candidateCount`.
  * Anything else: the cap if named, else the default.
  */
 export function holdOutputTokens(
@@ -1310,10 +1311,8 @@ export function holdOutputTokens(
 			c.thinkingConfig !== null && typeof c.thinkingConfig === "object"
 				? (c.thinkingConfig as Record<string, unknown>)
 				: {};
-		const perCandidate = Math.max(
-			DEFAULT_OUTPUT_HOLD,
-			(cap(c.maxOutputTokens) ?? 0) + (cap(thinking.thinkingBudget) ?? 0),
-		);
+		const perCandidate =
+			cap(c.maxOutputTokens) ?? Math.max(DEFAULT_OUTPUT_HOLD, cap(thinking.thinkingBudget) ?? 0);
 		return perCandidate * count(c.candidateCount);
 	}
 	if (kind === "openai" && surface === "chat") {
