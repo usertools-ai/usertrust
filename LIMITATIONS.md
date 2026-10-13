@@ -385,7 +385,7 @@ The full scope, per provider, is on the [PII Detection](https://usertrust.ai/doc
 
 ## 12. A stream aborted by the caller's own signal is not charged for what it consumed
 
-Fixed after 5.0.0: a governed stream the caller aborts with its own `AbortSignal` now settles
+Fixed in 5.0.1: a governed stream the caller aborts with its own `AbortSignal` now settles
 the usage it consumed, as an early `break` does, instead of voiding its hold. 5.0.0 still has
 the gap, on OpenAI and Anthropic `create({ stream: true })`.
 
