@@ -998,3 +998,60 @@ describe("redactPII — cycles and shared references keep their shape in the cop
 		expect((fromRedact as Error).stack).toContain("scanValue");
 	});
 });
+
+describe("redactPII — an object reached before config is walked again at config, so its signal stays by reference", () => {
+	const EMAIL = "write to alice@example.com";
+
+	const shapes: Array<[string, (cfg: object) => Record<string, unknown>]> = [
+		["as an earlier key", (cfg) => ({ model: "m", alias: cfg, contents: EMAIL, config: cfg })],
+		[
+			"inside a content part",
+			(cfg) => ({
+				model: "m",
+				contents: [{ role: "user", parts: [{ text: EMAIL, meta: cfg }] }],
+				config: cfg,
+			}),
+		],
+	];
+	for (const [label, make] of shapes) {
+		it(`config reached ${label} first: config.abortSignal is the caller's signal; the earlier copy is flattened, as before`, () => {
+			const signal = new AbortController().signal;
+			const cfg = { abortSignal: signal };
+			const out = redactPII(make(cfg)).data as { config: { abortSignal: unknown } };
+			expect(out.config.abortSignal).toBe(signal);
+			expect(JSON.stringify(out)).not.toContain("alice@example.com");
+			const earlier = JSON.stringify(out).match(/"abortSignal":(\{[^}]*\})/);
+			expect(earlier?.[1]).toBe("{}");
+		});
+	}
+
+	it("control: config reached only at config keeps its signal by reference", () => {
+		const signal = new AbortController().signal;
+		const out = redactPII({ model: "m", contents: EMAIL, config: { abortSignal: signal } })
+			.data as {
+			config: { abortSignal: unknown };
+		};
+		expect(out.config.abortSignal).toBe(signal);
+	});
+
+	it("a cycle through config ends: a hidden config.self back to the request, and a hidden config that is the request itself", () => {
+		const signal = new AbortController().signal;
+		const params: Record<string, unknown> = { model: "m", contents: EMAIL };
+		const cfg: Record<string, unknown> = { abortSignal: signal };
+		Object.defineProperty(cfg, "self", { value: params, enumerable: false });
+		params.config = cfg;
+		const out = redactPII(params).data as Record<string, Record<string, unknown>>;
+		expect(out.config?.abortSignal).toBe(signal);
+		expect(Object.getOwnPropertyDescriptor(out.config, "self")?.value).toBe(out);
+
+		const loop: Record<string, unknown> = { model: "m", contents: EMAIL, abortSignal: signal };
+		Object.defineProperty(loop, "config", { value: loop, enumerable: false });
+		const looped = redactPII(loop).data as Record<string, unknown>;
+		const config = Object.getOwnPropertyDescriptor(looped, "config")?.value as Record<
+			string,
+			unknown
+		>;
+		expect(config.abortSignal).toBe(signal);
+		expect(Object.getOwnPropertyDescriptor(config, "config")?.value).toBe(looped);
+	});
+});

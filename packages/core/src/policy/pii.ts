@@ -277,6 +277,17 @@ export function isOpaqueTextFree(value: object): boolean {
  */
 const TRANSPORT_SLOTS: ReadonlySet<string> = new Set(["config.abortSignal"]);
 
+/**
+ * Every strict prefix of a transport slot ("config" for "config.abortSignal"): an object reached
+ * there may hold a slot, so its clone depends on WHERE it is walked, not only on what it is.
+ */
+const TRANSPORT_PREFIXES: ReadonlySet<string> = new Set(
+	[...TRANSPORT_SLOTS].flatMap((slot) => {
+		const parts = slot.split(".");
+		return parts.slice(1).map((_, i) => parts.slice(0, i + 1).join("."));
+	}),
+);
+
 /** Kept by reference and not walked: an opaque, text-free value at a transport position. */
 function keptByReference(value: unknown, path: string): boolean {
 	return (
@@ -385,14 +396,44 @@ function defineData(obj: object, key: string, value: unknown, enumerable: boolea
 }
 
 /**
- * Recursively traverse data and replace PII strings with redacted placeholders.
- *
- * `clones` maps each object or array already visited to its clone, registered BEFORE its
- * properties are walked: a revisit (a cycle, such as a hidden back-reference to a parent, or one
- * object referenced twice) answers that clone, so the copy keeps the original's shape and the walk
- * always ends.
+ * The clones made so far in one redaction walk. `anywhere` maps each object or array to its clone,
+ * registered BEFORE its properties are walked, so a revisit (a cycle, such as a hidden
+ * back-reference to a parent, or one object referenced twice) answers that clone: the copy keeps
+ * the original's shape and the walk always ends. At a prefix of a transport slot the clone depends
+ * on the path (the same object walked elsewhere first has its signal flattened), so there only a
+ * clone made at that same path is answered, from `atPrefix`; finitely many prefixes exist, so a
+ * cycle through one still ends.
  */
-function redactValue(value: unknown, path = "", clones = new WeakMap<object, unknown>()): unknown {
+interface Clones {
+	anywhere: WeakMap<object, unknown>;
+	atPrefix: Map<string, WeakMap<object, unknown>>;
+}
+
+function cachedClone(clones: Clones, value: object, path: string): unknown {
+	return TRANSPORT_PREFIXES.has(path)
+		? clones.atPrefix.get(path)?.get(value)
+		: clones.anywhere.get(value);
+}
+
+function registerClone(clones: Clones, value: object, path: string, clone: unknown): void {
+	if (!TRANSPORT_PREFIXES.has(path)) {
+		clones.anywhere.set(value, clone);
+		return;
+	}
+	let atPath = clones.atPrefix.get(path);
+	if (atPath === undefined) {
+		atPath = new WeakMap();
+		clones.atPrefix.set(path, atPath);
+	}
+	atPath.set(value, clone);
+}
+
+/** Recursively traverse data and replace PII strings with redacted placeholders. */
+function redactValue(
+	value: unknown,
+	path = "",
+	clones: Clones = { anywhere: new WeakMap(), atPrefix: new Map() },
+): unknown {
 	if (typeof value === "string") {
 		const types = matchedTypes(value);
 		if (types.length > 0) {
@@ -402,13 +443,13 @@ function redactValue(value: unknown, path = "", clones = new WeakMap<object, unk
 	}
 
 	if (Array.isArray(value)) {
-		const clone = clones.get(value);
+		const clone = cachedClone(clones, value, path);
 		if (clone !== undefined) return clone;
 		// Built by index, not with `map`, so the clone is registered before its items are walked. As
 		// with `map`: the length read once, and a hole stays a hole.
 		const length = value.length;
 		const result: unknown[] = new Array(length);
-		clones.set(value, result);
+		registerClone(clones, value, path, result);
 		for (let i = 0; i < length; i++) {
 			if (i in value) result[i] = redactValue(value[i], `${path}[${i}]`, clones);
 		}
@@ -421,11 +462,11 @@ function redactValue(value: unknown, path = "", clones = new WeakMap<object, unk
 	if (value !== null && typeof value === "object") {
 		// Looked up only after the transport check: the same signal is kept by reference at its
 		// transport slot even when it was flattened where it appeared earlier.
-		const clone = clones.get(value);
+		const clone = cachedClone(clones, value, path);
 		if (clone !== undefined) return clone;
 		const record = value as Record<string, unknown>;
 		const result: Record<string, unknown> = {};
-		clones.set(value, result);
+		registerClone(clones, value, path, result);
 		// Every key is DEFINED, never assigned: an own "__proto__" key (as JSON.parse makes one) stays
 		// a key of the clone instead of becoming its prototype.
 		for (const key of Object.keys(record)) {
