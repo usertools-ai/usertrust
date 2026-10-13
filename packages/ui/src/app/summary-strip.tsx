@@ -3,9 +3,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { SummaryPayload } from "../shared/api.js";
-import { budgetDisplay, budgetSourceWord } from "../shared/budget-display.js";
+import { budgetAsOf, budgetDisplay, budgetSourceWord } from "../shared/budget-display.js";
 import { ANCHOR_VERIFY_COMMAND, anchorView, chainStatus, windowNotice } from "../shared/display.js";
-import { formatUsd, formatUt, formatUtc, middleTruncate } from "../shared/format.js";
+import { formatUsd, formatUt, middleTruncate } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
 import type { LiveState } from "./store.js";
 
@@ -165,11 +165,7 @@ function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 							{formatUt(s.remainingUt)} of {formatUt(s.budget)}
 						</span>
 					)}
-					<span className="ut-why">
-						{s.budgetSource === "governor" && s.budgetWrittenAt !== null
-							? `published by the governor, as of ${formatUtc(s.budgetWrittenAt)}`
-							: s.budgetProvenance}
-					</span>
+					<span className="ut-why">{budgetAsOf(s)}</span>
 				</>
 			) : (
 				<>

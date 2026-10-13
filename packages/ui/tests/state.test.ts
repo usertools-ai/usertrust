@@ -9,6 +9,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -161,6 +162,49 @@ describe("loadState", () => {
 			} finally {
 				chmodSync(vaultPath, 0o700);
 			}
+		},
+	);
+
+	// statSync follows a link, and a link whose target is missing (an unmounted volume, say) throws ENOENT: the vault
+	// read as absent, the verifier's missing-directory error was dropped, and an unreachable vault showed as a first run.
+	it.skipIf(process.platform === "win32")(
+		"red-first (an unreachable vault read as a first run): an audit link whose target is missing is a FAILURE",
+		() => {
+			rmSync(join(vaultPath, "audit"), { recursive: true });
+			symlinkSync(join(tempDir, "unmounted", "audit"), join(vaultPath, "audit"));
+			const { summary } = loadState(vaultPath);
+			expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
+			expect(summary.chain.errors.join(" ")).toContain(
+				"could not be read (a symbolic link on its path has no target)",
+			);
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"red-first (an unreachable vault read as a first run): a vault link whose target is missing is a FAILURE",
+		() => {
+			const linked = join(tempDir, "project", ".usertrust");
+			mkdirSync(join(tempDir, "project"));
+			symlinkSync(join(tempDir, "unmounted", ".usertrust"), linked);
+			const { summary } = loadState(linked);
+			expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
+			expect(summary.chain.errors.join(" ")).toContain(
+				"could not be read (a symbolic link on its path has no target)",
+			);
+		},
+	);
+
+	// Control: a link that resolves is the directory it names. A linked vault with no audit directory yet is a first run.
+	it.skipIf(process.platform === "win32")(
+		"a vault link to a real directory with no audit directory is a first run",
+		() => {
+			const target = join(tempDir, "mounted");
+			mkdirSync(target);
+			const linked = join(tempDir, "project", ".usertrust");
+			mkdirSync(join(tempDir, "project"));
+			symlinkSync(target, linked);
+			const { summary } = loadState(linked);
+			expect(summary.chain).toMatchObject({ events: 0, valid: true, empty: true, errors: [] });
 		},
 	);
 

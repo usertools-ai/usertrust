@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import type { SummaryPayload } from "./api.js";
+import { formatUtcMinute } from "./format.js";
 
 /**
  * What the summary strip shows for the budget. An UNKNOWN budget shows as unknown with NO remaining figure: computing
@@ -40,4 +41,16 @@ export function budgetSourceWord(source: SummaryPayload["budgetSource"]): {
 	if (source === "governor") return { word: "enforced", tone: "ink" };
 	if (source === "config") return { word: "config · unconfirmed", tone: "info" };
 	return { word: "unknown", tone: "body" };
+}
+
+/**
+ * The line under a known budget. A governor's record says when it was written, WITH its year: a record surviving from an
+ * earlier year must not read as current. Any other source shows its provenance sentence.
+ */
+export function budgetAsOf(
+	s: Pick<SummaryPayload, "budgetSource" | "budgetWrittenAt" | "budgetProvenance">,
+): string {
+	return s.budgetSource === "governor" && s.budgetWrittenAt !== null
+		? `published by the governor, as of ${formatUtcMinute(s.budgetWrittenAt)}`
+		: s.budgetProvenance;
 }

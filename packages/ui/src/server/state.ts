@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	deriveChainIntegrity,
@@ -82,12 +82,33 @@ export function readRemoteSettings(vaultPath: string): RemoteSettings {
  * then see no events, so treating those as absence showed a vault this process cannot read as empty and clean.
  */
 function auditDirState(vaultPath: string): "absent" | "present" | string {
+	const auditPath = join(vaultPath, "audit");
 	try {
-		statSync(join(vaultPath, "audit"));
+		statSync(auditPath);
 		return "present";
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;
-		return code === "ENOENT" ? "absent" : (code ?? "unknown error");
+		if (code !== "ENOENT") return code ?? "unknown error";
+		// statSync follows links, so a link whose target is missing (an unmounted volume, say) throws ENOENT too: the vault
+		// is out of reach, not absent. Either link counts: the audit entry or the vault directory itself.
+		if (isDanglingLink(auditPath) || isDanglingLink(vaultPath))
+			return "a symbolic link on its path has no target";
+		return "absent";
+	}
+}
+
+/** True for a symbolic link that does not resolve; false for anything else, including a path that does not exist. */
+function isDanglingLink(path: string): boolean {
+	try {
+		if (!lstatSync(path).isSymbolicLink()) return false;
+	} catch {
+		return false;
+	}
+	try {
+		statSync(path);
+		return false;
+	} catch {
+		return true;
 	}
 }
 

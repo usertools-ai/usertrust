@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { budgetDisplay, budgetSourceWord } from "../src/shared/budget-display.js";
+import { budgetAsOf, budgetDisplay, budgetSourceWord } from "../src/shared/budget-display.js";
 
 /** What the summary strip shows for the budget: an UNKNOWN budget has no remaining figure at all. */
 describe("budgetDisplay", () => {
@@ -57,5 +57,33 @@ describe("budgetSourceWord", () => {
 		expect(budgetSourceWord("config")).toEqual({ word: "config · unconfirmed", tone: "info" });
 		for (const source of ["several", "unreadable", "unpublished"] as const)
 			expect(budgetSourceWord(source)).toEqual({ word: "unknown", tone: "body" });
+	});
+});
+
+/** The line under a known budget: a governor's record says when it was written, with its year. */
+describe("budgetAsOf", () => {
+	it("red-first (MM-DD only): a record from an earlier year shows its year, so it never reads as current", () => {
+		const line = budgetAsOf({
+			budgetSource: "governor",
+			budgetWrittenAt: "2025-10-12T21:58:00.000Z",
+			budgetProvenance: "P",
+		});
+		expect(line).toBe("published by the governor, as of 2025-10-12 21:58Z");
+	});
+
+	it("the date is the UTC instant's, even where an offset moves it into another year", () => {
+		const line = budgetAsOf({
+			budgetSource: "governor",
+			budgetWrittenAt: "2026-01-01T01:30:00+02:00",
+			budgetProvenance: "P",
+		});
+		expect(line).toBe("published by the governor, as of 2025-12-31 23:30Z");
+	});
+
+	it.each([
+		["a config budget", "config", "2026-10-12T21:58:00.000Z"],
+		["a governor record with no time", "governor", null],
+	] as const)("%s shows its provenance sentence", (_n, budgetSource, budgetWrittenAt) => {
+		expect(budgetAsOf({ budgetSource, budgetWrittenAt, budgetProvenance: "P" })).toBe("P");
 	});
 });
