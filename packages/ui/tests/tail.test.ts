@@ -757,7 +757,18 @@ describe("live tail when the audit directory is absent at start", { timeout: 20_
 		ui = await createUiServer(tempDir, { port: 0 });
 		expect((await summaryOf(ui.port)).chain.valid).toBe(true);
 		renameSync(join(stage, ".usertrust"), join(tempDir, ".usertrust"));
-		const after = await summaryWhen(ui.port, (s) => s.chain.events >= 2 && !s.chain.valid, 4000);
+		// Not only the final state: at NO point may the summary report these events as verified. Polled for a fixed window
+		// (past the watcher's 1 s poll), the way the release check probed this case on each tree.
+		const seen: Array<{ events: number; valid: boolean }> = [];
+		const until = Date.now() + 4000;
+		while (Date.now() < until) {
+			const s = await summaryOf(ui.port);
+			seen.push({ events: s.chain.events, valid: s.chain.valid });
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		expect(seen.some((s) => s.events >= 2)).toBe(true);
+		expect(seen.filter((s) => s.events >= 2 && s.valid)).toEqual([]);
+		const after = await summaryOf(ui.port);
 		expect(after.chain.events).toBe(2);
 		expect(after.chain.valid).toBe(false);
 		expect(after.chain.errors.join(" ")).toMatch(/truncation/);
