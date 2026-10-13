@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	deriveChainIntegrity,
@@ -85,6 +85,9 @@ function auditDirState(vaultPath: string): "absent" | "present" | string {
 	const auditPath = join(vaultPath, "audit");
 	try {
 		statSync(auditPath);
+		// A directory this process may stat but not list (mode 000 on it) is present and unreadable: both readers see no
+		// events, and the verifier names it "could not be enumerated". Listing it here says so as an unreadable read.
+		readdirSync(auditPath);
 		return "present";
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;

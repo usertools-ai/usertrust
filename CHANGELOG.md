@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The dashboard no longer keeps reporting a chain failure after an audit directory that was unreadable or absent at start becomes readable and valid; a chain that is actually broken still reads as broken. The first append after such a start now reloads the whole log and re-checks the chain and the vault, instead of extending a verdict that was never derived from a log. That also closes a case in the other direction: a log whose tail was truncated, created after the dashboard started, used to read as verified, because the events that remain still link from the start. A directory that exists but cannot be listed is now reported as "could not be read" too.
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading

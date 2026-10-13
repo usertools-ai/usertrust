@@ -3,9 +3,12 @@
 
 import {
 	appendFileSync,
+	chmodSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	truncateSync,
 	writeFileSync,
@@ -499,5 +502,267 @@ describe("deletion of an audit directory that held no parsable event", () => {
 		const chain = JSON.parse(data).chain as { valid: boolean; empty: boolean; errors: string[] };
 		expect(chain).toMatchObject({ valid: false, empty: false });
 		expect(chain.errors.join(" ")).toContain("deletion detected");
+	});
+});
+
+type ChainSummary = {
+	chain: {
+		events: number;
+		valid: boolean;
+		empty: boolean;
+		breakIndex: number | null;
+		errors: string[];
+	};
+};
+
+/** The summary the server serves now. */
+async function summaryOf(port: number): Promise<ChainSummary> {
+	return (await (await fetch(`http://127.0.0.1:${port}/api/summary`)).json()) as ChainSummary;
+}
+
+/** Polls the served summary until `done` holds, and returns the last one read: a caller asserts on it, so a timeout is a failed assertion. */
+async function summaryWhen(
+	port: number,
+	done: (s: ChainSummary) => boolean,
+	timeoutMs = 6000,
+): Promise<ChainSummary> {
+	const deadline = Date.now() + timeoutMs;
+	let last = await summaryOf(port);
+	while (!done(last) && Date.now() < deadline) {
+		await new Promise((r) => setTimeout(r, 100));
+		last = await summaryOf(port);
+	}
+	return last;
+}
+
+const couldNotBeRead = (s: ChainSummary): boolean =>
+	s.chain.errors.some((e) => e.includes("could not be read"));
+
+async function appendOne(root: string, transferId: string): Promise<void> {
+	const writer = createAuditWriter(root);
+	await writer.appendEvent({
+		kind: "llm_call",
+		actor: "local",
+		data: { cost: 2, settled: true, transferId },
+	});
+	writer.release();
+}
+
+// The chain verdict is derived by a full load. The incremental append path only extends it, so it cannot clear an alarm
+// the load raised because it could not READ the audit directory, nor see what only the vault's own checks see.
+describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+	"live tail when the audit directory could not be read at start",
+	{ timeout: 20_000 },
+	() => {
+		let tempDir: string;
+		let ui: UiServer | undefined;
+		const vaultDir = () => join(tempDir, ".usertrust");
+		const auditDir = () => join(vaultDir(), "audit");
+		const logPath = () => join(auditDir(), "events.jsonl");
+
+		beforeEach(async () => {
+			tempDir = mkdtempSync(join(tmpdir(), "trust-tail-unreadable-"));
+			mkdirSync(auditDir(), { recursive: true });
+			const writer = createAuditWriter(tempDir);
+			for (let i = 0; i < 3; i++) {
+				await writer.appendEvent({
+					kind: "llm_call",
+					actor: "local",
+					data: { cost: 1, settled: true, transferId: `tx_${i}` },
+				});
+			}
+			writer.release();
+		});
+
+		afterEach(async () => {
+			// Restore before anything else: rmSync cannot clear a directory it may not search.
+			for (const dir of [vaultDir(), auditDir()]) if (existsSync(dir)) chmodSync(dir, 0o700);
+			await ui?.close();
+			ui = undefined;
+			rmSync(tempDir, { recursive: true, force: true });
+		});
+
+		it("red-first (stale alarm): a vault that becomes readable with a VALID chain stops reading as a failure", async () => {
+			chmodSync(vaultDir(), 0o000);
+			ui = await createUiServer(tempDir, { port: 0 });
+			const before = await summaryOf(ui.port);
+			expect(before.chain.valid).toBe(false);
+			expect(couldNotBeRead(before)).toBe(true);
+			chmodSync(vaultDir(), 0o700);
+			await appendOne(tempDir, "tx_after");
+			const after = await summaryWhen(ui.port, (s) => s.chain.events === 4 && s.chain.valid);
+			expect(after.chain).toMatchObject({ events: 4, valid: true, empty: false, breakIndex: null });
+			expect(couldNotBeRead(after)).toBe(false);
+			expect(after.chain.errors).toEqual([]);
+		});
+
+		it("red-first (stale alarm): the same when the AUDIT directory itself, not the vault, could not be read", async () => {
+			chmodSync(auditDir(), 0o000);
+			ui = await createUiServer(tempDir, { port: 0 });
+			const before = await summaryOf(ui.port);
+			expect(before.chain.valid).toBe(false);
+			expect(couldNotBeRead(before)).toBe(true);
+			chmodSync(auditDir(), 0o700);
+			await appendOne(tempDir, "tx_after");
+			const after = await summaryWhen(ui.port, (s) => s.chain.events === 4 && s.chain.valid);
+			expect(after.chain).toMatchObject({ events: 4, valid: true, breakIndex: null });
+			expect(after.chain.errors).toEqual([]);
+		});
+
+		// Control: this one already passes on the old code (the incremental path throws on the forged line and resyncs). It
+		// pins that routing the first append through a full load does not hide a real break.
+		it("a chain that is BROKEN when the vault becomes readable still reads as broken, never verified", async () => {
+			const lines = readFileSync(logPath(), "utf-8").trim().split("\n");
+			lines[1] = (lines[1] as string).replace('"cost":1', '"cost":9');
+			expect(lines[1]).toContain('"cost":9');
+			writeFileSync(logPath(), `${lines.join("\n")}\n`);
+			chmodSync(vaultDir(), 0o000);
+			ui = await createUiServer(tempDir, { port: 0 });
+			expect(couldNotBeRead(await summaryOf(ui.port))).toBe(true);
+			chmodSync(vaultDir(), 0o700);
+			await appendOne(tempDir, "tx_after");
+			const after = await summaryWhen(ui.port, (s) => !couldNotBeRead(s));
+			expect(couldNotBeRead(after)).toBe(false);
+			expect(after.chain.valid).toBe(false);
+			expect(after.chain.breakIndex).toBe(1);
+		});
+
+		// Only the vault's own checks (its anchor) see a truncated tail: the events that remain still link from genesis.
+		// No append here: an append moves the anchor to the new head, which is an honest repair of the record, not tampering.
+		it("a TRUNCATED log that becomes readable reads as broken: the log's own linkage cannot see it", async () => {
+			const lines = readFileSync(logPath(), "utf-8").trim().split("\n");
+			writeFileSync(logPath(), `${lines.slice(0, 2).join("\n")}\n`);
+			chmodSync(vaultDir(), 0o000);
+			ui = await createUiServer(tempDir, { port: 0 });
+			expect(couldNotBeRead(await summaryOf(ui.port))).toBe(true);
+			chmodSync(vaultDir(), 0o700);
+			const after = await summaryWhen(ui.port, (s) => !couldNotBeRead(s));
+			expect(couldNotBeRead(after)).toBe(false);
+			expect(after.chain.events).toBe(2);
+			expect(after.chain.valid).toBe(false);
+			expect(after.chain.errors.join(" ")).toMatch(/truncation/);
+		});
+
+		it("after the recovery, the next append takes the incremental path again: a rows frame, no resync", async () => {
+			chmodSync(vaultDir(), 0o000);
+			ui = await createUiServer(tempDir, { port: 0 });
+			chmodSync(vaultDir(), 0o700);
+			await appendOne(tempDir, "tx_recover");
+			await summaryWhen(ui.port, (s) => s.chain.events === 4 && s.chain.valid);
+			const frame = await readSse(
+				ui.port,
+				(name) => name === "rows" || name === "resync",
+				() => appendOne(tempDir, "tx_incremental"),
+			);
+			expect(frame.eventName).toBe("rows");
+			expect(
+				(JSON.parse(frame.data) as Array<{ transferId?: string }>).map((r) => r.transferId),
+			).toEqual(["tx_incremental"]);
+			expect(await summaryOf(ui.port)).toMatchObject({ chain: { events: 5, valid: true } });
+		});
+
+		it("a directory that is STILL unreadable stays a failure: every append is a full reload, never a verdict", async () => {
+			chmodSync(vaultDir(), 0o000);
+			ui = await createUiServer(tempDir, { port: 0 });
+			// The log cannot be appended to while the vault is shut, so the watcher is nudged through reload().
+			const frame = await readSse(
+				ui.port,
+				(name) => name === "resync",
+				async () => {
+					ui?.reload();
+				},
+			);
+			expect(frame.eventName).toBe("resync");
+			const still = await summaryOf(ui.port);
+			expect(still.chain.valid).toBe(false);
+			expect(couldNotBeRead(still)).toBe(true);
+		});
+	},
+);
+
+describe("live tail when the audit directory is absent at start", { timeout: 20_000 }, () => {
+	let tempDir: string;
+	let stage: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-absent-"));
+		stage = mkdtempSync(join(tmpdir(), "trust-tail-stage-"));
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+		rmSync(stage, { recursive: true, force: true });
+	});
+
+	/** A vault built beside the project and moved into place in one step, so the server sees it appear whole. */
+	async function stageVault(count: number): Promise<void> {
+		mkdirSync(join(stage, ".usertrust", "audit"), { recursive: true });
+		const writer = createAuditWriter(stage);
+		for (let i = 0; i < count; i++) {
+			await writer.appendEvent({
+				kind: "llm_call",
+				actor: "local",
+				data: { cost: 1, settled: true, transferId: `tx_${i}` },
+			});
+		}
+		writer.release();
+	}
+
+	it("a VALID log created after the start reads as verified, with every event counted", async () => {
+		await stageVault(2);
+		ui = await createUiServer(tempDir, { port: 0 });
+		expect((await summaryOf(ui.port)).chain).toMatchObject({ events: 0, valid: true, empty: true });
+		renameSync(join(stage, ".usertrust"), join(tempDir, ".usertrust"));
+		await appendOne(tempDir, "tx_after");
+		const after = await summaryWhen(ui.port, (s) => s.chain.events === 3);
+		expect(after.chain).toMatchObject({ events: 3, valid: true, empty: false, breakIndex: null });
+		expect(after.chain.errors).toEqual([]);
+	});
+
+	// A log the incremental path would call valid: what remains links from genesis. Only the vault's anchor knows an event
+	// is missing. Before the first append took a full load, this showed as verified.
+	it("red-first (false verified): a TRUNCATED log created after the start reads as broken, never verified", async () => {
+		await stageVault(3);
+		const log = join(stage, ".usertrust", "audit", "events.jsonl");
+		const lines = readFileSync(log, "utf-8").trim().split("\n");
+		writeFileSync(log, `${lines.slice(0, 2).join("\n")}\n`);
+		ui = await createUiServer(tempDir, { port: 0 });
+		expect((await summaryOf(ui.port)).chain.valid).toBe(true);
+		renameSync(join(stage, ".usertrust"), join(tempDir, ".usertrust"));
+		const after = await summaryWhen(ui.port, (s) => s.chain.events >= 2 && !s.chain.valid, 4000);
+		expect(after.chain.events).toBe(2);
+		expect(after.chain.valid).toBe(false);
+		expect(after.chain.errors.join(" ")).toMatch(/truncation/);
+	});
+});
+
+describe("live tail when the audit directory was readable at start", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-readable-"));
+		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+		await appendOne(tempDir, "tx_seed");
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("the append is delivered incrementally: a rows frame, not a resync, and the verdict stays valid", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const frame = await readSse(
+			ui.port,
+			(name) => name === "rows" || name === "resync",
+			() => appendOne(tempDir, "tx_live"),
+		);
+		expect(frame.eventName).toBe("rows");
+		expect(await summaryOf(ui.port)).toMatchObject({ chain: { events: 2, valid: true } });
 	});
 });

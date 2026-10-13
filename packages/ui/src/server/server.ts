@@ -89,6 +89,15 @@ export async function createUiServer(
 	}
 
 	function handleGrow(): void {
+		// The incremental path only EXTENDS a verdict; it never derives one. A load that did not see a readable audit
+		// directory (absent, or unreadable) raised its verdict from no log at all, and an append cannot clear an alarm
+		// raised that way, nor see what only the vault's own checks see (a truncated tail still links from genesis, so
+		// extending that state read as verified). So the first append after such a load is a full reload, which
+		// re-derives the verdict from the whole log; once it finds the directory, later appends are incremental again.
+		if (!state.auditDirPresent) {
+			handleResync();
+			return;
+		}
 		const logPath = join(vaultPath, "audit", "events.jsonl");
 		try {
 			const buf = readFileSync(logPath);
