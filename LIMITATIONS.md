@@ -140,10 +140,10 @@ own:
   its own `Symbol.species` is refused instead: what that class would build is not
   known without running it.
 - **Policy fields are read once, when the request is checked.** A field beside
-  `model`, `contents` and `config` is read then, a getter at any depth run once,
-  and copied as data for the policy rules; before, the rules read it, and any
-  getter inside it, when they were evaluated. A function there is a value that
-  exists for an `exists` rule but is never called. These fields are not forwarded:
+  `model`, `contents` and `config` is read then (a getter there run once, as
+  before) and kept beside the request for the policy rules, never sent,
+  serialized or held for. A rule reads anything below it when the rule is
+  evaluated, as before. These fields are not forwarded:
   a Google-shaped client that is not the SDK no longer receives them. They were
   never scanned for PII, held for or metered, so only what was is forwarded.
 - **`config.httpOptions` is read at the start of the call**, as per-call request

@@ -1726,8 +1726,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	let admissionsRevoked = false;
 	/**
 	 * The policy fields a Google call's request gate read beside the request (google-request.ts
-	 * `policyFields`), for each argument list it forwards: data the policy gate reads, kept OFF the
-	 * request, so nothing of them is serialized, held for or sent.
+	 * `carryPolicyFields`: its top level, values by reference), for each argument list it forwards:
+	 * only the policy gate reads them, kept OFF the request, so nothing of them is serialized, held
+	 * for or sent.
 	 */
 	const googlePolicyFields = new WeakMap<unknown[], Record<string | symbol, unknown>>();
 

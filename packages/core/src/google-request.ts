@@ -1174,7 +1174,7 @@ export async function snapshotGoogleRequest(
 	// maximumRemoteCalls of NaN runs zero rounds) has no loop to stop, and forcing the SDK's early
 	// path would make it send one.
 	if (!afcRan && captured.length > 0) forceAfcOff(send);
-	const policy = policyFields(params, send);
+	const policy = carryPolicyFields(params, send);
 	if ("refuse" in policy) return { kind: "refuse", reason: policy.refuse };
 	return { kind: "ok", params: send, afcRan, policy: policy.fields };
 }
@@ -1183,90 +1183,58 @@ export async function snapshotGoogleRequest(
 const SDK_REQUEST_FIELDS: ReadonlySet<string | symbol> = new Set(["model", "contents", "config"]);
 
 /**
- * A function, or a value past `POLICY_DEPTH`, in a policy field: the key EXISTS for a policy rule,
- * and nothing callable or live of the caller's is carried. Frozen, with no prototype.
- */
-export const OPAQUE_POLICY_VALUE: object = Object.freeze(Object.create(null));
-const POLICY_DEPTH = 64;
-
-/**
  * The caller's request fields the SDK does not read (a `metadata` a policy rule matches, say), for
- * the policy gate only: a SIDE CHANNEL beside the send tree, never on it, so nothing of them is
- * serialized, sized for the hold or sent. Read once, here, at the request gate, as DATA: the top
- * level as before (`params` and its prototype chain up to `Object.prototype`, a Proxy on the way
- * ending the walk; own data, inherited data that is not a function, a getter run once with `params`
- * as `this`), and every value below it copied deep (own keys, each getter run once); a function,
- * at any depth, is `OPAQUE_POLICY_VALUE`. A key the send tree holds is left out. A getter that
- * throws: the reason the request cannot be told.
+ * the policy gate only: kept BESIDE the send tree, never on it, so nothing of them is serialized,
+ * held for or sent. The top level is read once, here, as before this pipeline: `params` and its
+ * prototype chain up to `Object.prototype` (a Proxy on the way ends the walk unread), own data as it
+ * is, inherited data unless it is a function, a getter run once with `params` as `this`. Values go
+ * BY REFERENCE: what is below them is read by the policy evaluator, when a rule asks for it, as
+ * before. A null-prototype record, each key defined, never assigned, so an own `__proto__` is a
+ * field like any other. A key the send tree holds is left out. A getter that throws: the reason the
+ * request cannot be told.
  */
-function policyFields(
+function carryPolicyFields(
 	params: unknown,
 	send: unknown,
 ): { fields: Record<string | symbol, unknown> } | { refuse: string } {
-	const fields: Record<string | symbol, unknown> = {};
+	const fields = Object.create(null) as Record<string | symbol, unknown>;
 	if (params === null || (typeof params !== "object" && typeof params !== "function")) {
 		return { fields };
 	}
 	const seen = new Set<string | symbol>(SDK_REQUEST_FIELDS);
 	if (send !== null && typeof send === "object")
 		for (const key of Reflect.ownKeys(send)) seen.add(key);
-	const copies = new Map<object, unknown>();
-	try {
-		for (
-			let o: object | null = params;
-			o !== null && o !== Object.prototype;
-			o = Object.getPrototypeOf(o)
-		) {
-			if (utilTypes.isProxy(o)) break;
-			for (const key of Reflect.ownKeys(o)) {
-				if (seen.has(key)) continue;
-				seen.add(key);
-				const d = Object.getOwnPropertyDescriptor(o, key);
-				if (d === undefined) continue;
-				if ("value" in d && o !== params && typeof d.value === "function") continue;
-				const value =
-					"value" in d
-						? d.value
-						: d.get === undefined
-							? undefined
-							: Reflect.apply(d.get, params, []);
-				fields[key] = policyCopy(value, copies, 1);
+	for (
+		let o: object | null = params;
+		o !== null && o !== Object.prototype;
+		o = Object.getPrototypeOf(o)
+	) {
+		if (utilTypes.isProxy(o)) break;
+		for (const key of Reflect.ownKeys(o)) {
+			if (seen.has(key)) continue;
+			seen.add(key);
+			const d = Object.getOwnPropertyDescriptor(o, key);
+			if (d === undefined) continue;
+			let value: unknown;
+			if ("value" in d) {
+				if (o !== params && typeof d.value === "function") continue;
+				value = d.value;
+			} else {
+				try {
+					value = d.get === undefined ? undefined : Reflect.apply(d.get, params, []);
+				} catch {
+					return { refuse: "a request field's getter threw" };
+				}
 			}
+			Object.defineProperty(fields, key, {
+				value,
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
 		}
-	} catch {
-		return { refuse: "a request field's getter threw" };
 	}
 	return { fields };
-}
-
-/** A deep data copy of one policy value (see `policyFields`); one object reached twice is copied once. */
-function policyCopy(value: unknown, copies: Map<object, unknown>, depth: number): unknown {
-	if (typeof value === "function") return OPAQUE_POLICY_VALUE;
-	if (value === null || typeof value !== "object") return value;
-	const known = copies.get(value);
-	if (known !== undefined) return known;
-	if (depth > POLICY_DEPTH) return OPAQUE_POLICY_VALUE;
-	const out = (Array.isArray(value) ? [] : {}) as Record<string | symbol, unknown>;
-	copies.set(value, out);
-	for (const key of Reflect.ownKeys(value)) {
-		const d = Reflect.getOwnPropertyDescriptor(value, key);
-		if (d === undefined) continue;
-		const v =
-			"value" in d ? d.value : d.get === undefined ? undefined : Reflect.apply(d.get, value, []);
-		if (Array.isArray(out) && key === "length") {
-			if (typeof v === "number" && Number.isInteger(v) && v >= out.length && v < 2 ** 32) {
-				out.length = v;
-			}
-			continue;
-		}
-		Object.defineProperty(out, key, {
-			value: policyCopy(v, copies, depth + 1),
-			writable: true,
-			enumerable: d.enumerable === true,
-			configurable: true,
-		});
-	}
-	return out;
 }
 
 /**

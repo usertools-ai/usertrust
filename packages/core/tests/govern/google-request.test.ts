@@ -2969,12 +2969,12 @@ describe("every level of the option path refuses or sends as the base does (the 
 	}
 });
 
-describe("policy fields beside the request travel off the sent request, as data", () => {
-	function denyPolicy(field: string): void {
+describe("policy fields beside the request are kept off the sent request, by reference, and a rule reads them as before", () => {
+	function denyPolicy(field: string, operator = "exists"): void {
 		mkdirSync(join(vault, ".usertrust", "policies"), { recursive: true });
 		writeFileSync(
 			join(vault, ".usertrust", "policies", "default.yml"),
-			`rules:\n  - name: present\n    effect: deny\n    enforcement: hard\n    conditions:\n      - field: ${field}\n        operator: exists\n`,
+			`rules:\n  - name: present\n    effect: deny\n    enforcement: hard\n    conditions:\n      - field: ${field}\n        operator: ${operator}\n`,
 		);
 	}
 	async function governedRun(method: Method, params: unknown, budget = 500_000) {
@@ -3029,7 +3029,7 @@ describe("policy fields beside the request travel off the sent request, as data"
 			expect(runs.n).toBe(0);
 		});
 
-		it(`${method}: a nested getter in a policy field is read once, when the call starts its gate, and denies on what it answered`, async () => {
+		it(`${method}: a nested getter in a policy field is read when the rule asks for it, once, as on the base, and denies on what it answered`, async () => {
 			denyPolicy("metadata.classification");
 			const reads = { n: 0 };
 			const r = await governedRun(method, {
@@ -3044,6 +3044,90 @@ describe("policy fields beside the request travel off the sent request, as data"
 			expect(r.result).toContain("[present]");
 			expect(reads.n).toBe(1);
 			expect(r.requests).toHaveLength(0);
+		});
+		// The base's outcome for each shape, measured there (5a7b2cf7): denied, nothing sent.
+		class Meta {
+			get classification(): string {
+				return "secret";
+			}
+		}
+		for (const [shape, field, make] of [
+			[
+				"an inherited getter below a field",
+				"metadata.classification",
+				() => ({ ...request({}), metadata: new Meta() }),
+			],
+			[
+				"inherited data below a field",
+				"metadata.classification",
+				() => ({ ...request({}), metadata: Object.create({ classification: "secret" }) as Loose }),
+			],
+			[
+				"an own __proto__ field (JSON.parse)",
+				"__proto__.classification",
+				() =>
+					JSON.parse(
+						'{"model":"gemini-2.5-flash","contents":"go","__proto__":{"classification":"secret"}}',
+					) as unknown,
+			],
+		] as const) {
+			it(`${method}: a hard exists deny reaching ${shape} denies, nothing sent, as on the base`, async () => {
+				denyPolicy(field);
+				const r = await governedRun(method, make());
+				expect(r.result).toContain("[present]");
+				expect(r.requests).toHaveLength(0);
+			});
+		}
+
+		// The base's outcome for a not_exists deny on `approval` (5a7b2cf7): present in any of these
+		// forms, sent; absent, denied.
+		for (const [shape, make, sent] of [
+			["own enumerable", () => ({ ...request({}), approval: "yes" }), true],
+			[
+				"inherited",
+				() => Object.assign(Object.create({ approval: "yes" }), request({})) as Loose,
+				true,
+			],
+			[
+				"own non-enumerable",
+				() => Object.defineProperty(request({}), "approval", { value: "yes", enumerable: false }),
+				true,
+			],
+			["absent", () => request({}), false],
+		] as const) {
+			it(`${method}: a not_exists deny on a field held ${shape}: ${sent ? "sent" : "denied"}, as on the base`, async () => {
+				denyPolicy("approval", "not_exists");
+				const r = await governedRun(method, make());
+				if (sent) {
+					expect(r.result).toBe("ok");
+					expect(r.requests).toHaveLength(1);
+				} else {
+					expect(r.result).toContain("[present]");
+					expect(r.requests).toHaveLength(0);
+				}
+			});
+		}
+
+		it(`${method}: a policy field holding its own toJSON and a getter, with a rule on another path: the hook never runs (on the base the hold ran it once), the getter runs as on the base (0), and the call is sent`, async () => {
+			denyPolicy("other.thing");
+			const runs = { json: 0, get: 0 };
+			const r = await governedRun(method, {
+				...request({}),
+				metadata: {
+					toJSON() {
+						runs.json++;
+						return {};
+					},
+					get inner() {
+						runs.get++;
+						return 1;
+					},
+				},
+			});
+			expect(r.result).toBe("ok");
+			expect(r.requests).toHaveLength(1);
+			expect(runs.json).toBe(0);
+			expect(runs.get).toBe(0);
 		});
 	}
 
