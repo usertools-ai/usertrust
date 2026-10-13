@@ -149,7 +149,9 @@ imports, and fail to start.
   --no-workspaces-update` in each package, which sets that package's own `version` and nothing
   else, then `scripts/release.sh pin-siblings`, which sets every lockstep package a manifest
   names in `dependencies`, `optionalDependencies`, `peerDependencies` or `devDependencies` to
-  the new version. `--no-workspaces-update` stops npm reinstalling after each bump: run inside
+  the new version. No sibling is a peer today; one added as a peer is pinned exactly too, by
+  design, since the six only work together at one version. `--no-workspaces-update` stops npm
+  reinstalling after each bump: run inside
   a workspace, `npm version` reinstalls the tree, and once `usertrust` is bumped, a sibling's
   pin to the previous version no longer matches the workspace's own package, so npm would
   install that previous version from the registry into the tree the build job builds.
@@ -159,11 +161,12 @@ imports, and fail to start.
   publishes.
 - **`master` carries them.** The release commit lands on `master`, so between releases every
   sibling is pinned at the version `master` records, which is the workspace's own package, and
-  `npm ci` links it. (The lockfile still records these specs as `"*"`, and already lags the
-  workspace versions, since a release commit changes only the six manifests; `npm ci` accepts
-  both.) A pin to any other version is not the workspace's package to npm, which would install
-  it from the registry instead; the release-workflow test checks the repository's manifests for
-  this.
+  `npm ci` links it. A release commit changes only the six manifests, so after a release
+  `package-lock.json` records the previous release's pins until it is next regenerated, as it
+  already lags the workspace versions; `npm ci` accepts both, since the workspace packages
+  satisfy the pins. A pin to any version but the workspace's own does not match the workspace
+  package, so npm would install that version from the registry instead; the release-workflow
+  test checks the repository's manifests for this.
 - **Why not a native rewrite.** `pnpm publish` rewrites pnpm's `workspace:` protocol to an exact
   version, but this repository uses npm workspaces: npm has no workspace protocol (npm 10.9.2
   refuses `workspace:*` with `EUNSUPPORTEDPROTOCOL`, and `npm pack` keeps every spec as
@@ -399,7 +402,8 @@ run: pushes made with the workflow's token do not trigger workflows.) It also fe
 afresh and requires the tag's commit to be on it: a release commit tagged on a side branch was
 never released and is refused, and so is a shallow history or a `master` it cannot fetch. A tag
 made before siblings were pinned (v5.0.0 and earlier) names them as `"*"`, so republish
-refuses it; none needs one, as npm holds those versions in full. Dispatching on `master` also works while
+refuses it. None needs one, as npm holds those versions in full; republishing one would take a
+deliberate change to the release-commit check. Dispatching on `master` also works while
 `master` is still the release commit. A republish of a version older than the newest `v*`
 release publishes under the dist-tag `backfill`, not `latest`, so npm users who install
 without a version keep getting the newest release.
