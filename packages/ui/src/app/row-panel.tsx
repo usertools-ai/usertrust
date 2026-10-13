@@ -226,7 +226,10 @@ export function RowPanel(props: { row: LedgerRow; onClose(): void }): React.JSX.
 		setVerify("loading");
 		try {
 			const res = await fetch(`/api/verify/${encodeURIComponent(row.transferId)}`);
-			setVerify((await res.json()) as VerifyResponse);
+			// A 500 (an audit segment that cannot be read) carries `{ error }`, not a receipt: render it as the
+			// panel's error state instead of letting the next render read `receipt` off it.
+			const body = (await res.json()) as Partial<VerifyResponse>;
+			setVerify(typeof body.receipt === "string" ? (body as VerifyResponse) : "error");
 		} catch {
 			setVerify("error");
 		}
