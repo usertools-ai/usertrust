@@ -6,8 +6,10 @@ import {
 	anchorView,
 	chainStatus,
 	costView,
+	ESTIMATED_TITLE,
 	listState,
 	transferView,
+	usageView,
 	windowNotice,
 } from "../src/shared/display.js";
 import type { LedgerRow } from "../src/shared/rows.js";
@@ -76,6 +78,24 @@ describe("costView", () => {
 
 	it("no cost: nothing to show, never a 0", () => {
 		expect(costView(row())).toBeNull();
+	});
+});
+
+describe("usageView", () => {
+	// Usage is estimated when the provider reported none, when a reported count is refused as implausible, or when the
+	// caller supplied an estimate; the record does not say which. The inspector said "the provider reported none".
+	it("red-first (a cause the record does not support): an estimate is named, never explained", () => {
+		const shown = usageView(row({ costUt: 530, usageSource: "estimated" }));
+		expect(shown).toEqual({ text: "estimated", tone: "info" });
+		expect(`${shown.text} ${ESTIMATED_TITLE}`).not.toMatch(/reported none|no usage|did not report/);
+	});
+
+	it("provider-reported, or no source recorded", () => {
+		expect(usageView(row({ costUt: 412, usageSource: "provider" }))).toEqual({
+			text: "provider-reported",
+			tone: "ink",
+		});
+		expect(usageView(row({ costUt: 25 }))).toEqual({ text: "source not recorded", tone: "na" });
 	});
 });
 

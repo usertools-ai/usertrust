@@ -499,7 +499,6 @@ body {
 	/* ── Work panel ── */
 	.ut-work {
 		flex: 1 1 auto;
-		min-height: 0;
 		display: flex;
 		flex-direction: column;
 		border: 1px solid var(--line);
@@ -507,6 +506,8 @@ body {
 		/* Not clipped here: the filter popovers open from this panel's bar and must reach past it. The body below
 		   clips the list and the inspector to the rounded corners. */
 		background: var(--page);
+		/* Never squeezed to nothing: on a short window (a landscape phone) the page scrolls to the ledger instead. */
+		min-height: 440px;
 	}
 	.ut-head {
 		display: flex;

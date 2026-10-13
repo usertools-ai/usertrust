@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useEffect, useRef, useState } from "react";
-import { costView, transferView } from "../shared/display.js";
+import { costView, transferView, usageView } from "../shared/display.js";
 import { formatUtc } from "../shared/format.js";
 import { type LedgerRow, statusOf } from "../shared/rows.js";
 import { type Held, heldFor, type VerifyOutcome, verifyOutcome } from "../shared/verify-view.js";
@@ -160,6 +160,7 @@ export function RowPanel(props: {
 
 	const status = statusOf(row);
 	const cost = costView(row);
+	const usage = usageView(row);
 	const tx = transferView(row);
 	const result = shown !== null && shown !== "loading" ? shown : null;
 
@@ -266,13 +267,9 @@ export function RowPanel(props: {
 						<div className="ut-rcpt">
 							<span>Usage</span>
 							<span className="dots" />
-							{cost.estimated ? (
-								<span className="v info">estimated: the provider reported none</span>
-							) : row.usageSource === "provider" ? (
-								<span className="v">provider-reported</span>
-							) : (
-								<span className="v na">source not recorded</span>
-							)}
+							<span className={`v${usage.tone === "ink" ? "" : ` ${usage.tone}`}`}>
+								{usage.text}
+							</span>
 						</div>
 					</>
 				)}

@@ -47,10 +47,24 @@ export function costView(row: LedgerRow): { ut: string; usd: string; estimated: 
 	return {
 		ut: formatUt(row.costUt),
 		usd: formatUsd(row.costUt),
-		// The governor estimated the usage (the provider reported none): the cost is an estimate, and says so.
+		// The usage behind the cost is an estimate: it says so, and claims no cause (see usageView).
 		estimated: row.usageSource === "estimated",
 	};
 }
+
+/**
+ * Where a cost's usage came from, in words that claim no cause for an estimate: usage is estimated when the provider
+ * reported none, when a reported count is refused as implausible (it exceeds the plausibility ceiling), or when the
+ * caller supplied the estimate itself, and the record does not say which.
+ */
+export function usageView(row: LedgerRow): { text: string; tone: "info" | "ink" | "na" } {
+	if (row.usageSource === "estimated") return { text: "estimated", tone: "info" };
+	if (row.usageSource === "provider") return { text: "provider-reported", tone: "ink" };
+	return { text: "source not recorded", tone: "na" };
+}
+
+/** What the row's `est.` mark says on hover: the cost rests on an estimate, with no cause claimed. */
+export const ESTIMATED_TITLE = "This cost rests on estimated usage";
 
 /**
  * A row's transfer. A row with none (a denial written before any hold, an ungoverned call) has nothing to verify,

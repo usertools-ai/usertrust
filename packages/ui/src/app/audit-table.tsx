@@ -6,6 +6,7 @@ import { useMemo, useRef, useState } from "react";
 import {
 	type ChainStatus,
 	costView,
+	ESTIMATED_TITLE,
 	type LoadPhase,
 	listState,
 	transferView,
@@ -104,7 +105,7 @@ function Row(props: { row: LedgerRow }): React.JSX.Element {
 						<span className="ut-amt">{cost.ut}</span>
 						<span className="ut-recd">
 							{cost.estimated && (
-								<span className="ut-est" title="Estimated: the provider reported no usage">
+								<span className="ut-est" title={ESTIMATED_TITLE}>
 									est.
 								</span>
 							)}
