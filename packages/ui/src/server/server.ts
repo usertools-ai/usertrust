@@ -377,10 +377,12 @@ export async function createUiServer(
 
 	// Watch only once the bind succeeded — a failed bind must not leak an
 	// fs.watch handle (createUiServer throws and close() is never reachable).
-	const stopWatching = watchLedger(vaultPath, () => state.byteOffset, {
-		onGrow: handleGrow,
-		onResync: handleResync,
-	});
+	const stopWatching = watchLedger(
+		vaultPath,
+		() => state.byteOffset,
+		{ onGrow: handleGrow, onResync: handleResync },
+		() => state.logId,
+	);
 	// The budget's two sources live OUTSIDE `audit/`, which watchLedger watches: a governor writes its record when it
 	// starts, and an operator edits the config. Each change re-reads the budget, and the config's `remote` section, and
 	// sends the summary: turning the kit mark on or off takes effect without a restart.

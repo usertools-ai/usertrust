@@ -321,7 +321,7 @@ function loadPass(
  * mtime is coarse on some filesystems (1 s on HFS+, 2 s on FAT, coarser on some network mounts), so a same-size rewrite
  * within one tick passes it too.
  */
-function fileIdentity(st: BigIntStats): string | undefined {
+export function fileIdentity(st: BigIntStats): string | undefined {
 	if (st.ino === 0n) return undefined;
 	return st.birthtimeNs === 0n ? `${st.dev}:${st.ino}` : `${st.dev}:${st.ino}:${st.birthtimeNs}`;
 }

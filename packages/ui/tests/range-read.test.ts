@@ -535,3 +535,111 @@ describe("the grow path under a running dashboard", { timeout: 30_000 }, () => {
 		expect({ events, valid, breakIndex }).toMatchObject({ events: 5, valid: false, breakIndex: 0 });
 	});
 });
+
+// A log replaced by another file of the SAME size, with nothing written after it, changes no size: the watcher must
+// compare the log's identity, or the replacement never reaches the identity check and the old verdict stays.
+describe("a same-size replacement under a running dashboard", { timeout: 30_000 }, () => {
+	let root: string;
+	let vault: string;
+	let log: string;
+	let ui: Awaited<ReturnType<typeof createUiServer>> | undefined;
+
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "trust-range-same-"));
+		vault = join(root, ".usertrust");
+		log = join(vault, "audit", "events.jsonl");
+		io.zeroInode = false;
+	});
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	/** A copy of the log with event 1's cost changed from 5 to 9: the same length, and no extra event. */
+	function sameSizeTampered(): string {
+		const text = readFileSync(log, "utf-8");
+		const lines = text.split("\n");
+		lines[0] = (lines[0] as string).replace('"cost":5', '"cost":9');
+		const out = lines.join("\n");
+		expect(out).not.toBe(text);
+		expect(Buffer.byteLength(out)).toBe(Buffer.byteLength(text));
+		const tampered = join(vault, "audit", "tampered.tmp");
+		writeFileSync(tampered, out);
+		return tampered;
+	}
+
+	async function waitFor(pred: () => Promise<boolean>, ms: number): Promise<boolean> {
+		const deadline = Date.now() + ms;
+		while (Date.now() < deadline) {
+			if (await pred()) return true;
+			await sleep(100);
+		}
+		return pred();
+	}
+
+	it("red-first (false clean, fs.watch): a same-size tampered copy renamed over the log reads invalid, as a fresh load does", async () => {
+		await appendEvents(root, 3, "tx");
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		expect((await summaryOf(port)).chain).toMatchObject({ events: 3, valid: true });
+		const tampered = sameSizeTampered();
+		renameSync(tampered, log);
+		const invalid = await waitFor(async () => !(await summaryOf(port)).chain.valid, 5000);
+		expect(invalid).toBe(true);
+		const live = liveChain(await summaryOf(port));
+		expect(live).toMatchObject({ events: 3, valid: false });
+		expect(live).toEqual(freshChain(root));
+	});
+
+	it("red-first (false clean, polling): the same replacement reads invalid when the directory was absent at start", async () => {
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		await appendEvents(root, 3, "tx");
+		const loaded = await waitFor(async () => (await summaryOf(port)).chain.events === 3, 5000);
+		expect(loaded).toBe(true);
+		expect((await summaryOf(port)).chain).toMatchObject({ events: 3, valid: true });
+		// Two poll intervals with the log in place, so the next change is seen by a check, not by the appearance.
+		await sleep(2200);
+		const tampered = sameSizeTampered();
+		renameSync(tampered, log);
+		const invalid = await waitFor(async () => !(await summaryOf(port)).chain.valid, 5000);
+		expect(invalid).toBe(true);
+		const live = liveChain(await summaryOf(port));
+		expect(live).toMatchObject({ events: 3, valid: false });
+		expect(live).toEqual(freshChain(root));
+	});
+
+	it("guard: an unchanged log over several checks delivers no resync", async () => {
+		await appendEvents(root, 3, "tx");
+		ui = await createUiServer(root, { port: 0 });
+		io.logBytes = 0;
+		const names = await readFrames(
+			ui.port,
+			async () => {
+				for (let i = 0; i < 5; i++) {
+					writeFileSync(join(vault, "audit", "poke.txt"), String(i));
+					await sleep(450);
+				}
+			},
+			() => false,
+			500,
+		);
+		expect(names).toEqual([]);
+		expect(io.logBytes).toBe(0);
+	});
+
+	it("guard: a normal append is rows, not resync (the identity is unchanged)", async () => {
+		await appendEvents(root, 3, "tx");
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		const names = await readFrames(
+			port,
+			() => appendEvents(root, 1, "tx_more"),
+			(n) => n.includes("rows"),
+		);
+		expect(names).toContain("rows");
+		expect(names).not.toContain("resync");
+		expect(liveChain(await summaryOf(port))).toMatchObject({ events: 4, valid: true });
+	});
+});

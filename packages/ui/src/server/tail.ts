@@ -3,6 +3,7 @@
 
 import { existsSync, type FSWatcher, statSync, watch } from "node:fs";
 import { join } from "node:path";
+import { fileIdentity } from "./state.js";
 
 export interface TailEvents {
 	/** Byte range grew: caller reads/verifies the appended lines itself. */
@@ -19,6 +20,7 @@ export function watchLedger(
 	vaultPath: string,
 	sizeOf: () => number,
 	events: TailEvents,
+	identityOf?: () => string | undefined,
 ): () => void {
 	const auditDir = join(vaultPath, "audit");
 	const logPath = join(auditDir, "events.jsonl");
@@ -39,6 +41,18 @@ export function watchLedger(
 		const known = sizeOf();
 		if (size < known) events.onResync();
 		else if (size > known) events.onGrow();
+		// A same-size replacement changes no size, so the identity is compared.
+		else if (identityOf !== undefined && replacedAtSameSize(identityOf())) events.onResync();
+	};
+
+	const replacedAtSameSize = (known: string | undefined): boolean => {
+		if (known === undefined) return false;
+		try {
+			const now = fileIdentity(statSync(logPath, { bigint: true }));
+			return now !== undefined && now !== known;
+		} catch {
+			return false;
+		}
 	};
 
 	try {
