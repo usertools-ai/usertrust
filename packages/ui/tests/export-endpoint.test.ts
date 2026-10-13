@@ -92,7 +92,11 @@ describe("POST /api/export", () => {
 			ui = await createUiServer(tempDir, { port: 0 });
 			const body = JSON.stringify({ outDir: "in-flight-out" });
 			const cut = Math.floor(body.length / 2);
-			const result = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+			const result = await new Promise<{
+				status: number;
+				text: string;
+				connection: string | undefined;
+			}>((resolve, reject) => {
 				const req = request(
 					{
 						host: "127.0.0.1",
@@ -110,7 +114,13 @@ describe("POST /api/export", () => {
 						res.on("data", (chunk: string) => {
 							text += chunk;
 						});
-						res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
+						res.on("end", () =>
+							resolve({
+								status: res.statusCode ?? 0,
+								text,
+								connection: res.headers.connection,
+							}),
+						);
 					},
 				);
 				req.on("error", reject);
@@ -125,8 +135,44 @@ describe("POST /api/export", () => {
 				})().catch(reject);
 			});
 			expect(result.status).toBe(200);
+			expect(result.connection).toBe("close");
 			expect((JSON.parse(result.text) as { written: number }).written).toBe(1);
 			expect(existsSync(join(tempDir, "in-flight-out", "Receipts.base"))).toBe(true);
+		});
+
+		it("refuses a request whose headers arrive on a kept-alive socket after close() was called", async () => {
+			ui = await createUiServer(tempDir, { port: 0 });
+			const socket = connect(ui.port, "127.0.0.1");
+			await new Promise<void>((r) => socket.once("connect", () => r()));
+			let received = "";
+			socket.setEncoding("utf8");
+			socket.on("data", (chunk: string) => {
+				received += chunk;
+			});
+			socket.on("error", () => undefined);
+			const host = `Host: 127.0.0.1:${ui.port}`;
+			socket.write(`GET /api/summary HTTP/1.1\r\n${host}\r\n\r\n`);
+			while (!received.includes("\r\n\r\n") || !received.includes("}")) await sleep(10);
+			expect(received).toContain("HTTP/1.1 200");
+			received = "";
+			// The second request has begun (its first bytes are in), so the socket is not idle and close()
+			// leaves it open for the grace; its headers finish after close().
+			const body = JSON.stringify({ outDir: "after-close-out" });
+			socket.write(`POST /api/export HTTP/1.1\r\n${host}\r\n`);
+			await sleep(50);
+			const closing = ui.close();
+			await sleep(50);
+			socket.write(
+				"Content-Type: application/json\r\n" +
+					`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+			);
+			await closing;
+			ui = undefined;
+			await new Promise<void>((r) => (socket.destroyed ? r() : socket.once("close", () => r())));
+			expect(received).toContain("HTTP/1.1 503");
+			expect(received.toLowerCase()).toContain("connection: close");
+			expect(received).toContain('{"error":"server closing"}');
+			expect(existsSync(join(tempDir, "after-close-out"))).toBe(false);
 		});
 
 		it("cuts a request still open after the grace, so close() is held no longer than that", async () => {

@@ -60,11 +60,17 @@ export interface UiServer {
 	reload(): void;
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+function sendJson(
+	res: ServerResponse,
+	status: number,
+	body: unknown,
+	extraHeaders?: Record<string, string>,
+): void {
 	const payload = JSON.stringify(body);
 	res.writeHead(status, {
 		"content-type": "application/json",
 		"content-length": Buffer.byteLength(payload),
+		...extraHeaders,
 	});
 	res.end(payload);
 }
@@ -210,7 +216,21 @@ export async function createUiServer(
 		broadcast("summary", state.summary);
 	}
 
+	/** Set first thing in close(). Once true, a request that starts during the grace is refused. */
+	let closing = false;
+	/** Responses not yet finished, so close() can stop their sockets being reused. */
+	const inFlight = new Set<ServerResponse>();
+
 	const handler = (req: IncomingMessage, res: ServerResponse): void => {
+		// A keep-alive client can send a new request on a socket that was busy when close() was called, and
+		// the grace would let it run (an export writing files after close(), a tail client re-registering).
+		if (closing) {
+			sendJson(res, 503, { error: "server closing" }, { connection: "close" });
+			return;
+		}
+		inFlight.add(res);
+		res.once("close", () => inFlight.delete(res));
+
 		// Amendment A3: on every response, including errors.
 		res.setHeader("x-content-type-options", "nosniff");
 
@@ -420,6 +440,10 @@ export async function createUiServer(
 			handleResync();
 		},
 		close(): Promise<void> {
+			closing = true;
+			// A response whose headers are not written yet carries Connection: close, so its socket is not
+			// reused for another request during the grace.
+			for (const res of inFlight) if (!res.headersSent) res.shouldKeepAlive = false;
 			stopWatching();
 			for (const f of budgetFiles) unwatchFile(f, refreshBudget);
 			for (const c of clients) c.end();
