@@ -995,7 +995,11 @@ export function verifyTransaction(
 			} else if (
 				anchorParams.trust !== undefined &&
 				pos >= 1 &&
-				covering.treeSize <= orderedHashes.length
+				covering.treeSize <= orderedHashes.length &&
+				// The proof must be for THIS event. `pos` is the event's stored `sequence`, but the leaf at that
+				// position is whatever the ordered chain holds there: a sequence-less or duplicated-sequence record
+				// can put ANOTHER event's leaf at `pos`, and a proof for that leaf would label this one VERIFIED.
+				orderedHashes[pos - 1] === targetEvent.hash
 			) {
 				const proof = generateInclusionProof(
 					pos - 1,
