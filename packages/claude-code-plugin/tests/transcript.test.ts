@@ -84,34 +84,35 @@ let port: number;
 let requests: Recorded[];
 
 /**
- * Every settle of a transferId past the number it may have: ONE, but for the standard idempotent
- * retry. A hold that successful authorizes under the SAME idempotency key returned N times (the
- * server gave back the live hold it holds for that key) may be settled N times, the most under any
- * one key: the retry settles again, at most once per reissue. Each settle past that number is
- * reported (unkeyed, a hold returned under different keys, one a key never returned again).
+ * Every settle of a transferId past the number it may have AT THAT POINT in the log: ONE, but for
+ * the standard idempotent retry. Read in request order, a hold that successful authorizes under the
+ * SAME idempotency key have returned N times so far (the server gave back the live hold it holds for
+ * that key) may by then have been settled N times, the most under any one key: the retry settles
+ * again, at most once per reissue, and only after the reissue. Each settle past that number is
+ * reported (unkeyed, a hold returned under different keys, one a key never returned again, and one
+ * that a LATER reissue would have covered).
  */
 function secondSettles(log: Recorded[]): string[] {
 	const allowed = new Map<string, number>();
 	const returned = new Map<string, Map<string, number>>();
-	for (const r of log) {
-		if (r.path !== "/v1/authorize" || r.status !== 200) continue;
-		const key = r.body.idempotencyKey;
-		const transferId = (r.response as { transferId?: unknown } | null)?.transferId;
-		if (typeof key !== "string" || typeof transferId !== "string") continue;
-		const byHold = returned.get(key) ?? new Map<string, number>();
-		const n = (byHold.get(transferId) ?? 0) + 1;
-		byHold.set(transferId, n);
-		returned.set(key, byHold);
-		allowed.set(transferId, Math.max(allowed.get(transferId) ?? 1, n));
-	}
 	const settled = new Map<string, number>();
 	const over: string[] = [];
 	for (const r of log) {
-		if (r.path !== "/v1/settle") continue;
-		const id = String(r.body.transferId);
-		const n = (settled.get(id) ?? 0) + 1;
-		settled.set(id, n);
-		if (n > (allowed.get(id) ?? 1)) over.push(id);
+		if (r.path === "/v1/authorize" && r.status === 200) {
+			const key = r.body.idempotencyKey;
+			const transferId = (r.response as { transferId?: unknown } | null)?.transferId;
+			if (typeof key !== "string" || typeof transferId !== "string") continue;
+			const byHold = returned.get(key) ?? new Map<string, number>();
+			const n = (byHold.get(transferId) ?? 0) + 1;
+			byHold.set(transferId, n);
+			returned.set(key, byHold);
+			allowed.set(transferId, Math.max(allowed.get(transferId) ?? 1, n));
+		} else if (r.path === "/v1/settle") {
+			const id = String(r.body.transferId);
+			const n = (settled.get(id) ?? 0) + 1;
+			settled.set(id, n);
+			if (n > (allowed.get(id) ?? 1)) over.push(id);
+		}
 	}
 	return over;
 }
@@ -380,6 +381,10 @@ describe("the no-second-settle invariant (`secondSettles`), on logs built by han
 			settle("tx_1"),
 			settle("tx_1"),
 		];
+		expect(secondSettles(log)).toEqual(["tx_1"]);
+	});
+	it("a LATER reissue does not excuse an EARLIER second settle", () => {
+		const log = [authorize("k1", "tx_1"), settle("tx_1"), settle("tx_1"), authorize("k1", "tx_1")];
 		expect(secondSettles(log)).toEqual(["tx_1"]);
 	});
 	it("a hold returned under two DIFFERENT keys is reported, as is one the same key never returned again", () => {
