@@ -1154,24 +1154,45 @@ describe("caller code reached from the request cannot change what is sent after 
 				expectSameSend(r);
 			});
 
-			it(`${on}: one object as both config.tools[0] (a callable whose tool() turns AFC back on) and config.automaticFunctionCalling { disable: true }: refused, never an unmetered loop`, async () => {
-				const calls = { native: { tool: 0, callTool: 0 }, governed: { tool: 0, callTool: 0 } };
-				const make = (side: "native" | "governed") => () => {
-					const shared: Loose = { disable: true };
-					shared["tool"] = async function (this: Loose) {
-						calls[side].tool++;
-						this["disable"] = false;
-						return { functionDeclarations: [{ name: "lookup" }] };
-					};
-					shared["callTool"] = async () => {
-						calls[side].callTool++;
-						return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
-					};
-					return request({ tools: [shared], automaticFunctionCalling: shared });
+			/** One object as both config.tools[0] and config.automaticFunctionCalling; its tool() turns AFC back on. */
+			const aliasing = (calls: { tool: number; callTool: number }) => () => {
+				const shared: Loose = { disable: true };
+				shared["tool"] = async function (this: Loose) {
+					calls.tool++;
+					this["disable"] = false;
+					return { functionDeclarations: [{ name: "lookup" }] };
 				};
+				shared["callTool"] = async () => {
+					calls.callTool++;
+					return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+				};
+				return request({ tools: [shared], automaticFunctionCalling: shared });
+			};
+
+			it(`${on}: the aliasing callable never gets an unmetered loop: refused, or exactly one metered request with the caller's callTool never run`, async () => {
+				const nat = { tool: 0, callTool: 0 };
+				const gov = { tool: 0, callTool: 0 };
 				const r = await nativeThenGoverned(
 					method,
-					{ native: make("native"), governed: make("governed") },
+					{ native: aliasing(nat), governed: aliasing(gov) },
+					{ vertex, rounds: LOOP },
+				);
+				expect(r.raw.requests).toHaveLength(method === "generateContent" ? 2 : 1);
+				if (r.govResult === "ok") {
+					expect(r.gov.requests).toHaveLength(1);
+					expect(r.auditKinds.filter((k) => k === "llm_call")).toHaveLength(1);
+					expect(gov.callTool).toBe(0);
+				} else {
+					expect(r.gov.requests).toHaveLength(0);
+					expect(r.auditKinds).toEqual(["policy_denied"]);
+				}
+			});
+
+			it(`${on}: one object as both config.tools[0] (a callable whose tool() turns AFC back on) and config.automaticFunctionCalling { disable: true }: refused, never an unmetered loop`, async () => {
+				const calls = { native: { tool: 0, callTool: 0 }, governed: { tool: 0, callTool: 0 } };
+				const r = await nativeThenGoverned(
+					method,
+					{ native: aliasing(calls.native), governed: aliasing(calls.governed) },
 					{ vertex, rounds: LOOP },
 				);
 				// natively generateContent runs tool() before its AFC check, so the SDK's own loop runs inside
@@ -1242,4 +1263,58 @@ describe("caller code reached from the request cannot change what is sent after 
 		expect(counts.governed).toEqual(counts.native);
 		expect(counts.governed.toJSON).toBe(0);
 	});
+});
+
+describe('pii "redact" with a clean prompt: a hidden config field and the same field enumerable are treated alike', () => {
+	// The Google PII scan reads the prompt (`contents`) only, never `config` (LIMITATIONS.md, section 11):
+	// with a clean prompt nothing is redacted, whether a field is enumerable, non-enumerable or inherited.
+	const SYSTEM = `reply to ${EMAIL}`;
+	const shapes: Array<[string, () => Loose]> = [
+		["ENUMERABLE", () => ({ systemInstruction: SYSTEM })],
+		[
+			"NON-ENUMERABLE",
+			() =>
+				Object.defineProperty({}, "systemInstruction", {
+					value: SYSTEM,
+					enumerable: false,
+				}) as Loose,
+		],
+		[
+			"INHERITED",
+			() => {
+				class Cfg {
+					get systemInstruction(): string {
+						return SYSTEM;
+					}
+				}
+				return new Cfg() as unknown as Loose;
+			},
+		],
+	];
+	for (const method of METHODS) {
+		for (const [backend, vertex] of BACKENDS) {
+			for (const tools of [false, true]) {
+				it(`${method} on ${backend}, ${tools ? "with" : "without"} tools: each shape is sent as the SDK sends it, none redacted`, async () => {
+					const sent: unknown[] = [];
+					for (const [, make] of shapes) {
+						const config = () =>
+							tools ? Object.assign(make(), { tools: [{ googleSearch: {} }] }) : make();
+						const r = await nativeThenGoverned(
+							method,
+							same(() => request(config())),
+							{
+								vertex,
+								pii: "redact",
+							},
+						);
+						expectSameSend(r);
+						expect(JSON.stringify(r.gov.requests)).not.toContain("[REDACTED");
+						sent.push(r.gov.requests[0]?.body["systemInstruction"] !== undefined);
+					}
+					// natively: by name without tools; with tools, only the own enumerable field survives the SDK's copy
+					expect(sent).toEqual(tools ? [true, false, false] : [true, true, true]);
+				});
+			}
+		}
+	}
 });

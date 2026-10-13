@@ -368,6 +368,8 @@ const functionSource = Function.prototype.toString;
  * (an array made in a `vm` context, or parsed by a host whose realm is not this module's) are known
  * by their own source text, `function <key>() { [native code] }`, which only a built-in function
  * prints: a bound function and a Proxy print no name, and a caller's function prints its code.
+ * That source text is V8's `Function.prototype.toString` (captured when this module loads), which
+ * this check relies on: usertrust runs on Node only.
  */
 function isBuiltInMethod(fn: unknown, key: string): boolean {
 	if (INTRINSIC_METHODS.has(fn)) return true;
