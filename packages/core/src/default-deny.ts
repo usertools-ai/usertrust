@@ -52,6 +52,7 @@
  */
 
 import { types as utilTypes } from "node:util";
+import { isRealmObjectPrototype } from "./google-afc.js";
 import { PolicyDeniedError } from "./shared/errors.js";
 
 export type DefaultDenyProvider = "anthropic" | "openai" | "google";
@@ -670,17 +671,24 @@ function readOwn(holder: unknown, key: string): unknown {
 }
 
 /**
- * A plain object: not a Proxy, and its prototype is Object's or null, so a spread or a copy sees
- * exactly its own properties. A function, an array or a class instance is not one.
+ * A plain object: not a Proxy, and its prototype is null or SOME realm's `Object.prototype` (this
+ * one, or a `vm` context's: `isRealmObjectPrototype`, read through descriptors, no caller code). A
+ * function, an array or a class instance is not one. A forged prototype can pass that shape check,
+ * and gains nothing: what is forwarded is a copy of the OWN data properties read here, and the
+ * client options checked this way are read by the SDK through their own properties too (an object
+ * spread, `Object.entries`), never through the prototype.
  */
 function plainObject(value: unknown): value is Record<string, unknown> {
 	if (value === null || typeof value !== "object" || utilTypes.isProxy(value)) return false;
 	const proto = Object.getPrototypeOf(value);
-	return proto === Object.prototype || proto === null;
+	return proto === null || isRealmObjectPrototype(proto);
 }
 
 /**
- * A plain array: not a Proxy, its prototype is Array's, and its own keys are only `length` and
+ * A plain array: not a Proxy, its prototype is THIS realm's `Array.prototype` (exactly, not by
+ * shape: the SDK spreads it, which runs the prototype's iterator, and a forged prototype would pass
+ * a shape check; the SDK copies a constructor's middleware into this realm, so only an array put on
+ * the raw client afterwards can be another realm's), and its own keys are only `length` and
  * indices, each held as data. So a spread of it (`[...array]`, which runs its iterator) sees exactly
  * what `length` and the indices say: an own `Symbol.iterator`, an accessor index or any other own
  * key would let the check read one array and the SDK spread another.

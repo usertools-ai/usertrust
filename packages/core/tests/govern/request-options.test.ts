@@ -21,6 +21,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import Anthropic, { betaRefusalFallbackMiddleware } from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
@@ -929,6 +930,75 @@ describe("nothing that cannot be read without running caller code is read as abs
 		expect(sent).toEqual(["POST https://anthropic.test/v1/messages"]);
 		expect(eng.spendPending).toHaveBeenCalledTimes(1);
 		expect(policyDenied()).toEqual([]);
+	});
+});
+
+describe("plain options from another realm (a vm context) are plain", () => {
+	const foreign = <T>(source: string): T => runInNewContext(`(${source})`) as T;
+
+	it("Anthropic messages.create with cross-realm options is held and sent", async () => {
+		const { client, eng } = await anthropic();
+		await client.messages.create(A, foreign("{ timeout: 5000 }"));
+		expect(sent).toEqual(["POST https://anthropic.test/v1/messages"]);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+	});
+
+	it("OpenAI chat and Responses with cross-realm options are held and sent", async () => {
+		const { client, eng } = await openai();
+		await client.chat.completions.create(C, foreign("{ timeout: 5000 }"));
+		await client.responses.create(R, foreign("{ maxRetries: 0 }"));
+		expect(sent).toHaveLength(2);
+		expect(eng.spendPending).toHaveBeenCalledTimes(2);
+	});
+
+	it("Google with a cross-realm config.httpOptions is held and sent", async () => {
+		const { client, eng } = await google();
+		await client.models.generateContent({
+			...G,
+			config: { httpOptions: foreign("{ timeout: 5000 }") },
+		});
+		expect(sent).toHaveLength(1);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+	});
+
+	it("a cross-realm client fetchOptions carrying body is still refused at trust(); one carrying a dispatcher passes", async () => {
+		const withBody = new OpenAI({
+			apiKey: "k",
+			baseURL: "https://openai.test/v1",
+			fetch: recordingFetch as typeof fetch,
+			maxRetries: 0,
+			fetchOptions: foreign("{ body: '{}' }"),
+		});
+		await expect(
+			trust(withBody as Loose, { budget: 1_000_000, vaultBase: vault, _engine: engine() }),
+		).rejects.toThrow(/client fetchOptions\.body/);
+		const { client, eng } = await govern(
+			new OpenAI({
+				apiKey: "k",
+				baseURL: "https://openai.test/v1",
+				fetch: recordingFetch as typeof fetch,
+				maxRetries: 0,
+				fetchOptions: foreign("{ dispatcher: {} }"),
+			}),
+		);
+		await client.chat.completions.create(C);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+	});
+
+	it("a cross-realm middleware ARRAY put on the raw client after trust() is refused (the SDK spreads it)", async () => {
+		const raw = new Anthropic({
+			apiKey: "k",
+			baseURL: "https://anthropic.test",
+			fetch: recordingFetch as typeof fetch,
+			maxRetries: 0,
+		});
+		const { client, eng } = await govern(raw);
+		(raw as Loose).middleware = foreign("[]");
+		await expectRefused(
+			() => client.messages.create(A),
+			eng,
+			/client middleware \(not a plain array\)/,
+		);
 	});
 });
 
