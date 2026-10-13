@@ -2065,7 +2065,15 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 		// given back once and dropped, as before.
 		const keepOnFailure = held.path.endsWith(".releasing");
 		const gapWritten = held.gapWritten === true;
-		if (callRan && !gapWritten) await recordUnconfirmedCall(sessionId, held, "call-ran");
+		// Whether every gap this give-back needs is on record: the record is marked only then. A
+		// gap that could not be appended (watch.jsonl unwritable; the writers never throw) leaves it
+		// unmarked, so the next Stop writes it again: a duplicate at worst, never a missing gap.
+		let gapsOnRecord = gapWritten;
+		if (callRan && !gapWritten) {
+			gapsOnRecord = await recordUnconfirmedCall(sessionId, held, "call-ran");
+		} else if (!gapWritten) {
+			gapsOnRecord = true;
+		}
 		const releaseClass = journalled ? undefined : releasing ? "unused" : "call-ran";
 		let failed = null;
 		try {
@@ -2085,7 +2093,7 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 			failed = { outcome: failureOutcome(err), reason: `give-back unanswered: ${why}` };
 		}
 		if (failed !== null && !gapWritten) {
-			await recordSettleGap({
+			const written = await recordSettleGap({
 				phase: "release",
 				outcome: failed.outcome,
 				session: sessionId,
@@ -2095,9 +2103,10 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 				started: callStart(held),
 				releaseClass,
 			});
+			gapsOnRecord = gapsOnRecord && written;
 		}
 		if (failed !== null && keepOnFailure) {
-			if (!gapWritten) await markGapWritten(held.path);
+			if (!gapWritten && gapsOnRecord) await markGapWritten(held.path);
 			say(`usertrust: hold ${held.transferId} is kept for a later Stop to give back`);
 			continue;
 		}
@@ -2108,24 +2117,38 @@ export async function cleanup(sessionId, agentId, { final = false } = {}) {
 /**
  * Mark a kept `.releasing` record `gapWritten` (its gaps are written), through the record's own
  * atomic rewrite, so no later give-back of it writes them again. A record already gone is left
- * gone. Should another hook remove it between this read and the rename, the rename puts it back:
- * harmless, since it is marked, a later Stop's give-back is idempotent (a 404 drops it, with no
- * gap), and `sweepReleasing` ends it in any case.
+ * gone: the rename is made only if the record still exists just before it. Declared: another
+ * hook can still remove it in the instant between that check and the rename, and the rename then
+ * puts it back. That is bounded and harmless: it is marked, so a later Stop's give-back is
+ * idempotent (a 200 or 404 drops it, with no gap), a re-fire meanwhile is refused rather than
+ * double-held, and `sweepReleasing` ends it in any case.
  */
 async function markGapWritten(path) {
 	try {
 		const body = JSON.parse(await readRegular(path, READ_BOUND.record));
 		if (body === null || typeof body !== "object" || Array.isArray(body)) return;
-		await writeFileAtomic(path, JSON.stringify({ ...body, gapWritten: true }));
+		await writeFileAtomic(path, JSON.stringify({ ...body, gapWritten: true }), {
+			// Still there? A record a concurrent cleanup dropped is not put back (ENOENT aborts).
+			beforeCommit: () => stat(path),
+		});
 	} catch {
 		// Gone, or unreadable: a later give-back writes its gaps again rather than none.
 	}
 }
 
 /**
+ * How old a kept `.releasing` record must be before SessionStart drops it (`sweepReleasing`). The
+ * sweep is only garbage collection: any bound above the ledger's pending timeout (core's
+ * `LEDGER_HOLD_TIMEOUT_MS`, 5 min) is correct, so it is set far above it. Declared: the age is read
+ * on the wall clock, so a clock stepped forward by more than this could drop the name of a hold
+ * that is still live, and a re-fire could then reserve beside it until the ledger voids it.
+ */
+export const RELEASING_SWEEP_MS = 24 * 60 * 60_000;
+
+/**
  * Drop every `.releasing` record (of any session) that is marked `gapWritten` and older than
- * `maxAgeMs`: run at SessionStart, so a record kept for a re-fire cannot outlive its hold. Its
- * gaps are written already, and past the ledger's pending timeout (`maxAgeMs` is above it) the
+ * `maxAgeMs`: run at SessionStart, so a record kept for a re-fire cannot live forever. Its gaps
+ * are written already, and past the ledger's pending timeout (`maxAgeMs` is far above it) the
  * hold is voided, so dropping its name cannot let a re-fire reserve beside a live hold. Its age
  * is its file's mtime, which is never earlier than the hold. Local, bounded to one listing, and
  * it never throws. Returns how many it dropped.

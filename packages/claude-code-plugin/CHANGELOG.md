@@ -50,8 +50,9 @@ npm, and its version is its own: the `usertrust` packages and their
   since `claude --resume` can re-fire the deferred call later. A later Stop gives it back again
   (a 200 ends it; a 404 says it is gone). Its gaps are written at the first failed give-back, so a
   session killed afterwards still has them, and the record is marked so no later attempt writes
-  them again. SessionStart drops a marked record once it is older than the ledger's pending
-  timeout, when its hold is void. A `.settling` hold, whose call ran and is never re-fired, is
+  them again (a gap that cannot be written leaves it unmarked, and the next Stop writes it).
+  SessionStart drops a marked record after 24 hours, long past the ledger's pending timeout,
+  when its hold is void. A `.settling` hold, whose call ran and is never re-fired, is
   unchanged.
 
 ## [3.0.2] - 2026-10-12

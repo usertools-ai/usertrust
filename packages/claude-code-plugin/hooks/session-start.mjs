@@ -16,13 +16,14 @@ import { rejectedSinceLastStart, warningText } from "./key-rejected.mjs";
 import {
 	announce,
 	modeAnnouncement,
+	RELEASING_SWEEP_MS,
 	readStdin,
 	requireLaunch,
 	say,
 	sweepReleasing,
 } from "./lib.mjs";
 import { takePeerWarning } from "./peer-meter.mjs";
-import { STALE_SETTLING_MS, stampFirstRun } from "./transcript.mjs";
+import { stampFirstRun } from "./transcript.mjs";
 
 requireLaunch();
 
@@ -50,9 +51,9 @@ try {
 	say(`usertrust: job log not started: ${err instanceof Error ? err.message : String(err)}`);
 }
 // A `.releasing` record kept for a re-fire (lib.mjs `cleanup`), its gaps written, is dropped once
-// it is older than the ledger's pending timeout (`STALE_SETTLING_MS` stays above it): its hold is
-// voided by then. Local and bounded, and it never throws.
-await sweepReleasing(STALE_SETTLING_MS);
+// it is far older than the ledger's pending timeout (`RELEASING_SWEEP_MS`): its hold is voided by
+// then. Local and bounded, and it never throws.
+await sweepReleasing(RELEASING_SWEEP_MS);
 // The warning first, so the clip at `announce`'s bound can only ever cut the mode line after it.
 let warning = null;
 try {

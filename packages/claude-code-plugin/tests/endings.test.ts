@@ -2600,20 +2600,45 @@ describe("a `.releasing` record whose give-back fails is kept, through SessionEn
 		expect(await holdFiles()).toEqual([RELEASING]);
 	});
 
-	it("SessionStart drops a marked record older than the ledger's pending timeout, and keeps a young one and an unmarked one", async () => {
+	it("SessionStart drops a marked record older than its bound (24 h), and keeps a younger one, even past the ledger's timeout, and an unmarked one", async () => {
 		const old = holdName("tu_old", "tx_old", "main", "releasing");
-		const young = holdName("tu_young", "tx_young", "main", "releasing");
+		const younger = holdName("tu_younger", "tx_younger", "main", "releasing");
 		const unmarked = holdName("tu_unmarked", "tx_unmarked", "main", "releasing");
 		await seedHold("tu_old", "tx_old", { ...ESTIMATE, gapWritten: true }, "releasing");
-		await seedHold("tu_young", "tx_young", { ...ESTIMATE, gapWritten: true }, "releasing");
+		await seedHold("tu_younger", "tx_younger", { ...ESTIMATE, gapWritten: true }, "releasing");
 		await seedHold("tu_unmarked", "tx_unmarked", { ...ESTIMATE }, "releasing");
-		// Older than STALE_SETTLING_MS (10 min), which stays above the ledger's 5-minute timeout.
-		const stale = new Date(Date.now() - 11 * 60_000);
-		await utimes(join(stateDir, old), stale, stale);
-		await utimes(join(stateDir, unmarked), stale, stale);
+		const ago = (ms: number) => new Date(Date.now() - ms);
+		await utimes(join(stateDir, old), ago(25 * 3_600_000), ago(25 * 3_600_000));
+		await utimes(join(stateDir, unmarked), ago(25 * 3_600_000), ago(25 * 3_600_000));
+		// Past the ledger's 5-minute pending timeout, but far inside the sweep's bound: kept.
+		await utimes(join(stateDir, younger), ago(12 * 60_000), ago(12 * 60_000));
 		await run("session-start", { session_id: SESSION, source: "startup" });
-		expect((await holdFiles()).sort()).toEqual([unmarked, young].sort());
+		expect((await holdFiles()).sort()).toEqual([unmarked, younger].sort());
 	});
+
+	it.each<[string, Record<string, unknown>, number]>([
+		["a `ran` hold (a call gap and a release gap)", { ...ESTIMATE, ran: true }, 1],
+		["a deferred call's claim (a release gap only)", { ...ESTIMATE }, 0],
+	])(
+		"%s: a gap that cannot be written leaves the record unmarked; the next Stop writes it, and only then marks it",
+		async (_, fields, callGaps) => {
+			capabilities = ["release", "job"];
+			await seedHold("tu_1", "tx_1", fields, "releasing");
+			fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
+			fixed.set("/v1/release#2", ANSWER.error5xx as Reply);
+			// watch.jsonl cannot be appended: a directory holds its name.
+			await mkdir(join(stateDir, "watch.jsonl"));
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await holdFiles()).toEqual([RELEASING]);
+			expect(await kept()).not.toHaveProperty("gapWritten");
+			nodeFs.rmSync(join(stateDir, "watch.jsonl"), { recursive: true, force: true });
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+			expect(await phased("release")).toMatchObject([{ outcome: "failed", transferId: "tx_1" }]);
+			expect(await kept()).toMatchObject({ gapWritten: true });
+		},
+		LONG,
+	);
 
 	it("control: a `.settling` record's call ran and is never re-fired: a 503 drops it, with its call gap and its release gap, as before", async () => {
 		capabilities = ["release", "job"];
