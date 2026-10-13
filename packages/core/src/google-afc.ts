@@ -826,22 +826,22 @@ function copyToolConfig(callerToolConfig: unknown, vertexAI: boolean): unknown {
  * copy as its receiver (a `#private`-backed one throws there), and on the stream move what they
  * found into the request. The snapshot decides those reads itself.
  *
- * `preset` holds fields the snapshot already read BY NAME, once, before the copy (the stream's
- * `maybeMoveToResponseJsonSchem` reads come first): a key in it that the copy takes (own
- * enumerable with `ownEnumerableOnly`, found on the chain without it) gets that value, and its
- * getter does not run a second time.
+ * `readOnce` (the snapshot's one read-once memo of `params.config`'s fields by name) reads every
+ * string key the copy takes, so a field already read by name is not read again, and one read here
+ * is not read again later. With `ownEnumerableOnly` a `captured` key is still READ at its key
+ * position, as `Object.assign` reads it, though the snapshot sets it itself.
  */
 function capturedCopy(
 	obj: object,
 	captured: readonly string[],
 	at: string,
 	ownEnumerableOnly = false,
-	preset: ReadonlyMap<string | symbol, unknown> = new Map(),
+	readOnce?: (key: string) => unknown,
 ): Record<string | symbol, unknown> {
 	const out = Object.create(
 		ownEnumerableOnly ? Object.prototype : Object.getPrototypeOf(obj),
 	) as Record<string | symbol, unknown>;
-	const seen = new Set<string | symbol>(captured);
+	const seen = new Set<string | symbol>();
 	for (
 		let o: object | null = obj;
 		o !== null && o !== Object.prototype;
@@ -854,20 +854,21 @@ function capturedCopy(
 			const d = Object.getOwnPropertyDescriptor(o, key);
 			if (d === undefined) continue;
 			if (ownEnumerableOnly && d.enumerable !== true) continue;
+			const byName = readOnce !== undefined && typeof key === "string";
+			if (typeof key === "string" && captured.includes(key)) {
+				if (ownEnumerableOnly && byName) readOnce(key);
+				continue;
+			}
 			if ("value" in d) {
 				// Own data is copied; inherited NON-function data is captured too (a value the
 				// SDK would read through the prototype is one the redactor must see). Methods
 				// stay inherited.
 				if (o === obj || typeof d.value !== "function") {
-					setData(out, key, preset.has(key) ? preset.get(key) : d.value);
+					setData(out, key, byName ? readOnce(key) : d.value);
 				}
 				continue;
 			}
-			setData(
-				out,
-				key,
-				preset.has(key) ? preset.get(key) : d.get === undefined ? undefined : d.get.call(obj),
-			);
+			setData(out, key, byName ? readOnce(key) : d.get === undefined ? undefined : d.get.call(obj));
 		}
 	}
 	return out;
@@ -896,12 +897,14 @@ function isOwnEnumerable(obj: object, key: string): boolean {
  *     on the snapshot, and a copy cannot hold a field that is truthy by name yet never sent (the
  *     redaction clone rebuilds the request from `Object.keys`). Can't tell: INDETERMINATE.
  *
- * Nothing is read again here: the values are the ones read first.
+ * Nothing is read again here: the values, and `moves` (`Object.keys(responseSchema)` includes
+ * `"$schema"`, run where the SDK runs it), are the ones read first.
  */
 function moveResponseSchemaAsTheStreamDoes(
 	outConfig: Record<string | symbol, unknown>,
 	schema: unknown,
 	jsonSchema: unknown,
+	moves: boolean,
 ): void {
 	if (!schema) return;
 	const schemaCopied = Object.hasOwn(outConfig, "responseSchema");
@@ -912,9 +915,7 @@ function moveResponseSchemaAsTheStreamDoes(
 		}
 		return;
 	}
-	if (!schemaCopied && Object.keys(schema).includes("$schema")) {
-		setData(outConfig, "responseJsonSchema", schema);
-	}
+	if (!schemaCopied && moves) setData(outConfig, "responseJsonSchema", schema);
 }
 
 /**
@@ -923,24 +924,20 @@ function moveResponseSchemaAsTheStreamDoes(
  * request, but what it READS is read: `responseSchema` by name; when that is truthy,
  * `responseJsonSchema` by name; and when that is falsy, `Object.keys(responseSchema)`, which runs a
  * Proxy's `ownKeys` trap. So a getter or a trap there that throws fails the call natively, before
- * any request. Each field is read here, once, where the copy (`outConfig`) did not already read it,
- * and its value is otherwise discarded. `Object.keys` runs here only on a `responseSchema` the copy
- * did NOT take: a copied one is the same value the SDK inspects on the forwarded copy, once, as
- * natively. A throw is INDETERMINATE, as for any getter that throws.
+ * any request. Each field is read here through the snapshot's read-once memo (a field the copy
+ * already read is not read again), and its value is otherwise discarded. `Object.keys` runs here
+ * only on a `responseSchema` the copy did NOT take: a copied one is the same value the SDK
+ * inspects on the forwarded copy, once, as natively. A throw is INDETERMINATE, as for any getter
+ * that throws.
  */
 function readResponseSchemaAsGenerateContentDoes(
-	config: object,
+	readOnce: (key: string) => unknown,
 	outConfig: Record<string | symbol, unknown>,
 ): void {
-	const schemaCopied = Object.hasOwn(outConfig, "responseSchema");
-	const schema = schemaCopied
-		? outConfig["responseSchema"]
-		: captureOnce(config, "responseSchema", "params.config");
+	const schema = readOnce("responseSchema");
 	if (!schema) return;
-	const jsonSchema = Object.hasOwn(outConfig, "responseJsonSchema")
-		? outConfig["responseJsonSchema"]
-		: captureOnce(config, "responseJsonSchema", "params.config");
-	if (!jsonSchema && !schemaCopied) Object.keys(schema);
+	const jsonSchema = readOnce("responseJsonSchema");
+	if (!jsonSchema && !Object.hasOwn(outConfig, "responseSchema")) Object.keys(schema);
 }
 
 /**
@@ -1047,77 +1044,142 @@ export function snapshotGoogleAfcParams(
 		// A config that is not an object cannot be read as one: can't tell.
 		if (typeof config !== "object" && typeof config !== "function") throw INDETERMINATE;
 		rejectProxy(config, "params.config");
-		// Each config field the SDK reads by name is read ONCE, in the SDK's order for the method.
-		// generateContentStream: `maybeMoveToResponseJsonSchem` (`responseSchema`, then
-		// `responseJsonSchema` when that is truthy), then `shouldDisableAfc` (`automaticFunctionCalling`
-		// before `tools`), then `processParamsMaybeAddMcpUsage` (`tools`, then its copy).
-		// generateContent: `processParamsMaybeAddMcpUsage` first, then `maybeMoveToResponseJsonSchem`,
-		// then `automaticFunctionCalling`.
-		const streamOrder = options.method === "generateContentStream";
-		const preset = new Map<string, unknown>();
+		// Every config field the SDK reads by name is read ONCE (`readOnce`), and in the SDK's own
+		// order for the method: the order is the step list below, as data.
+		const memo = new Map<string, unknown>();
+		const readOnce = (key: string): unknown => {
+			if (!memo.has(key)) memo.set(key, captureOnce(config, key, "params.config"));
+			return memo.get(key);
+		};
 		const afcAt = "params.config.automaticFunctionCalling";
-		// By name for both methods (`shouldDisableAfc` reads it from the caller's config, and the SDK
-		// never sends it), and copied AT its read, so a later getter cannot change what was read.
-		const readAfcConfig = () =>
-			ownedDataCopy(
-				captureOnce(config, "automaticFunctionCalling", "params.config"),
-				afcAt,
-				SDK_AFC_CONFIG_FIELDS,
-			);
+		let tools: unknown;
+		let sdkCopiesConfig = false;
+		/**
+		 * `tools`' entries, read once each (holes stay holes), to the length read then, each with its
+		 * `callTool` as data (`readDataProperty`: no getter or trap runs; what it threw, if it did),
+		 * read when the entry is, as `tools.map` tests `isCallableTool` on each entry as it reads it.
+		 */
+		const entries: Array<{ i: number; tool: unknown; callTool?: DataRead | { thrown: unknown } }> =
+			[];
+		let length = 0;
+		let outConfig: Record<string | symbol, unknown> = {};
+		let schema: unknown;
+		let jsonSchema: unknown;
+		let schemaMoves = false;
 		let afcConfig: unknown;
-		if (streamOrder) {
-			const schema = captureOnce(config, "responseSchema", "params.config");
-			preset.set("responseSchema", schema);
-			if (schema) {
-				preset.set(
-					"responseJsonSchema",
-					captureOnce(config, "responseJsonSchema", "params.config"),
+		let callerToolConfig: unknown;
+		const step = {
+			/** `processParamsMaybeAddMcpUsage`'s `params.config?.tools`: ANY truthy value (`[]` included) makes the SDK copy the config. */
+			tools: () => {
+				tools = readOnce("tools");
+				sdkCopiesConfig = Boolean(tools);
+			},
+			/** Its `tools.map`, which reads every entry before the copy: the later steps use these, never the live array. */
+			toolEntries: () => {
+				if (tools === undefined || tools === null) return;
+				rejectProxy(tools, "params.config.tools");
+				if (!Array.isArray(tools)) throw INDETERMINATE;
+				length = tools.length;
+				for (let i = 0; i < length; i++) {
+					if (!(i in tools)) continue;
+					const tool = captureOnce(tools, String(i), "params.config.tools");
+					if (tool === null || (typeof tool !== "object" && typeof tool !== "function")) {
+						entries.push({ i, tool });
+						continue;
+					}
+					let callTool: DataRead | { thrown: unknown };
+					try {
+						callTool = readDataProperty(tool, "callTool", `params.config.tools[${i}]`);
+					} catch (thrown) {
+						callTool = { thrown };
+					}
+					entries.push({ i, tool, callTool });
+				}
+			},
+			// With the copy, an own enumerable `httpOptions` reaches the request through it; any other
+			// reaches it only by name, when `hasMcpToolUsage` is true, which also reads a process-global
+			// flag (set by the SDK's `mcpToTool`) the snapshot cannot see. Can't tell.
+			httpOptions: () => {
+				if (
+					sdkCopiesConfig &&
+					presentOnChain(config, "httpOptions", "params.config") &&
+					!isOwnEnumerable(config, "httpOptions")
+				) {
+					throw INDETERMINATE;
+				}
+			},
+			configCopy: () => {
+				outConfig = capturedCopy(
+					config,
+					["tools", "automaticFunctionCalling", "toolConfig"],
+					"params.config",
+					sdkCopiesConfig,
+					readOnce,
 				);
-			}
-			afcConfig = readAfcConfig();
-		}
-		// `tools` by name: `processParamsMaybeAddMcpUsage`'s `params.config?.tools`, where ANY truthy
-		// value (`[]` included) makes the SDK send a copy of the config.
-		const tools = captureOnce(config, "tools", "params.config");
-		const sdkCopiesConfig = Boolean(tools);
-		// With the copy, an own enumerable `httpOptions` reaches the request through it; any other
-		// reaches it only by name, when `hasMcpToolUsage` is true, which also reads a process-global
-		// flag (set by the SDK's `mcpToTool`) the snapshot cannot see. Can't tell.
-		if (
-			sdkCopiesConfig &&
-			presentOnChain(config, "httpOptions", "params.config") &&
-			!isOwnEnumerable(config, "httpOptions")
-		) {
-			throw INDETERMINATE;
-		}
-		const outConfig = capturedCopy(
-			config,
-			["tools", "automaticFunctionCalling", "toolConfig"],
-			"params.config",
-			sdkCopiesConfig,
-			preset,
-		);
-		if (sdkCopiesConfig) {
-			if (streamOrder) {
-				moveResponseSchemaAsTheStreamDoes(
-					outConfig,
-					preset.get("responseSchema"),
-					preset.get("responseJsonSchema"),
+			},
+			/** generateContent: `maybeMoveToResponseJsonSchem`'s reads, after the copy. */
+			schemaReadsAfterCopy: () => {
+				if (sdkCopiesConfig) readResponseSchemaAsGenerateContentDoes(readOnce, outConfig);
+			},
+			/** generateContentStream: `maybeMoveToResponseJsonSchem` runs FIRST, its `Object.keys` included. */
+			schemaReadsFirst: () => {
+				schema = readOnce("responseSchema");
+				if (schema) jsonSchema = readOnce("responseJsonSchema");
+			},
+			/** Its `Object.keys(responseSchema)` (a Proxy's `ownKeys` trap), when that is truthy and `responseJsonSchema` falsy. */
+			schemaKeys: () => {
+				if (schema && !jsonSchema) schemaMoves = Object.keys(schema).includes("$schema");
+			},
+			streamMove: () => {
+				if (sdkCopiesConfig) {
+					moveResponseSchemaAsTheStreamDoes(outConfig, schema, jsonSchema, schemaMoves);
+				}
+			},
+			// By name for both methods (`shouldDisableAfc` reads it from the caller's config, and the SDK
+			// never sends it), and copied AT its read, so a later getter cannot change what was read.
+			automaticFunctionCalling: () => {
+				afcConfig = ownedDataCopy(
+					readOnce("automaticFunctionCalling"),
+					afcAt,
+					SDK_AFC_CONFIG_FIELDS,
 				);
-			} else {
-				readResponseSchemaAsGenerateContentDoes(config, outConfig);
-			}
-		}
-		if (!streamOrder) afcConfig = readAfcConfig();
+			},
+			// The accessor is read here, or at its key position by the copy; the object's FIELDS are
+			// read last (copyToolConfig below), as the SDK reads them. With the SDK's copy, only an own
+			// enumerable `toolConfig` reaches the request, and the copy has then read it; any other is
+			// not read.
+			toolConfig: () => {
+				callerToolConfig = sdkCopiesConfig ? memo.get("toolConfig") : readOnce("toolConfig");
+			},
+		};
+		// generateContent: `processParamsMaybeAddMcpUsage` (tools, its entries, the copy), then
+		// `maybeMoveToResponseJsonSchem`, then `shouldDisableAfc`. generateContentStream:
+		// `maybeMoveToResponseJsonSchem`, then `shouldDisableAfc` (automaticFunctionCalling before
+		// tools), then `processParamsMaybeAddMcpUsage`.
+		const order =
+			options.method === "generateContentStream"
+				? [
+						step.schemaReadsFirst,
+						step.schemaKeys,
+						step.automaticFunctionCalling,
+						step.tools,
+						step.toolEntries,
+						step.httpOptions,
+						step.configCopy,
+						step.streamMove,
+						step.toolConfig,
+					]
+				: [
+						step.tools,
+						step.toolEntries,
+						step.httpOptions,
+						step.configCopy,
+						step.schemaReadsAfterCopy,
+						step.automaticFunctionCalling,
+						step.toolConfig,
+					];
+		for (const run of order) run();
 		setData(outConfig, "automaticFunctionCalling", afcConfig);
-
-		// The config's own `toolConfig` accessor is read here, with the other config fields; the
-		// object's FIELDS are read last (copyToolConfig below), as the SDK reads them. With the
-		// SDK's copy, only an own enumerable `toolConfig` reaches the request; any other is not read.
-		const callerToolConfig =
-			sdkCopiesConfig && !isOwnEnumerable(config, "toolConfig")
-				? undefined
-				: captureOnce(config, "toolConfig", "params.config");
 
 		const callables: Array<{ tool: object; at: string; callTool: unknown }> = [];
 		// The AFC keys are always set as OWN data properties, `undefined` included: a copy
@@ -1125,8 +1187,6 @@ export function snapshotGoogleAfcParams(
 		// prototype could be given later.
 		setData(outConfig, "tools", tools);
 		if (tools !== undefined && tools !== null) {
-			rejectProxy(tools, "params.config.tools");
-			if (!Array.isArray(tools)) throw INDETERMINATE;
 			// The SNAPSHOT's own AFC switch, read the way the SDK reads it. Callable tools are
 			// ALWAYS kept by reference (runGovernedAfc wraps them and delegates callTool to the
 			// original object); only non-callable tools are ever cloned.
@@ -1142,7 +1202,7 @@ export function snapshotGoogleAfcParams(
 				invalidMax = false;
 			}
 			const afcDisabled = Boolean(disable) || invalidMax;
-			const outTools: unknown[] = new Array(tools.length);
+			const outTools: unknown[] = new Array(length);
 			// Each callable tool is classified ONCE, here, from a CAPTURED `callTool` reference,
 			// and kept by reference (runGovernedAfc needs the original object). Caller code can
 			// still run after a callable was read: a later tool's array-index getter, or a data
@@ -1152,12 +1212,9 @@ export function snapshotGoogleAfcParams(
 			// every tool is read, each callable must still hold the SAME captured function, or
 			// the request is "can't tell".
 			const dataTools: DataToolCopy[] = [];
-			// Every element first, each read once, as the SDK iterates the whole array
-			// (`tools.map` in processParamsMaybeAddMcpUsage) before it reads any tool's field.
-			for (let i = 0; i < tools.length; i++) {
-				if (!(i in tools)) continue; // keep holes as holes
+			// The entries `toolEntries` read, each once (holes stay holes), before any tool's field.
+			for (const { i, tool, callTool: entryCallTool } of entries) {
 				const at = `params.config.tools[${i}]`;
-				const tool = captureOnce(tools, String(i), "params.config.tools");
 				if (afcDisabled) {
 					outTools[i] = tool; // references: see the doc comment
 					continue;
@@ -1167,7 +1224,10 @@ export function snapshotGoogleAfcParams(
 					continue;
 				}
 				rejectProxy(tool, at);
-				const callTool = dataValue(tool, "callTool", at);
+				// `dataValue`'s answer, from the read made when the entry was read.
+				if (entryCallTool !== undefined && "thrown" in entryCallTool) throw entryCallTool.thrown;
+				if (entryCallTool === undefined) throw INDETERMINATE;
+				const callTool = entryCallTool.value;
 				if (typeof callTool === "function") {
 					callables.push({ tool, at, callTool });
 					outTools[i] = tool; // callable: by reference, never cloned
