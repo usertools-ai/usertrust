@@ -8,8 +8,10 @@ import {
 	formatUsd,
 	formatUt,
 	formatUtc,
+	formatUtcMinute,
 	middleTruncate,
 	utcDay,
+	utcHour,
 } from "../src/shared/format.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
@@ -63,6 +65,14 @@ describe("formatUtc", () => {
 			[row],
 		);
 		expect(applyFilters([row], { ...EMPTY_FILTERS, from: "2026-10-13" })).toEqual([]);
+	});
+});
+
+describe("formatUtcMinute and utcHour", () => {
+	it("red-first (sliced and labelled Z): an offset timestamp is shown at its UTC instant", () => {
+		expect(formatUtcMinute("2026-10-13T01:30:00+02:00")).toBe("2026-10-12 23:30Z");
+		expect(utcHour("2026-10-13T01:30:00+02:00")).toBe("2026-10-12 23:00");
+		expect(formatUtcMinute("not a time")).toBe("not a time");
 	});
 });
 

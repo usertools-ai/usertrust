@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { utcDay, utcHour } from "./format.js";
 import { type LedgerRow, type RowStatus, statusOf } from "./rows.js";
 
 /**
@@ -18,17 +19,37 @@ export interface TimeBucket {
 	count: number;
 }
 
+/** Cost per UTC day or hour: each timestamp is converted to its UTC instant (an offset one is not sliced). */
 export function spendOverTime(rows: LedgerRow[], granularity: "day" | "hour"): TimeBucket[] {
 	const buckets = new Map<string, TimeBucket>();
 	for (const r of rows) {
-		const key =
-			granularity === "day" ? r.ts.slice(0, 10) : `${r.ts.slice(0, 10)} ${r.ts.slice(11, 13)}:00`;
+		const key = granularity === "day" ? utcDay(r.ts) : utcHour(r.ts);
 		const b = buckets.get(key) ?? { bucket: key, costUt: 0, count: 0 };
 		b.costUt += r.costUt ?? 0;
 		b.count += 1;
 		buckets.set(key, b);
 	}
 	return [...buckets.values()].sort((a, b) => a.bucket.localeCompare(b.bucket));
+}
+
+/**
+ * The first and last instants of the rows, as UTC ISO strings, ordered by INSTANT: compared as strings, an offset
+ * timestamp sorts by its local clock. Unreadable timestamps are left out; none readable gives undefined.
+ */
+export function timeWindow(
+	rows: readonly LedgerRow[],
+): { first: string; last: string } | undefined {
+	let first = Number.POSITIVE_INFINITY;
+	let last = Number.NEGATIVE_INFINITY;
+	for (const r of rows) {
+		const t = Date.parse(r.ts);
+		if (Number.isNaN(t)) continue;
+		if (t < first) first = t;
+		if (t > last) last = t;
+	}
+	return first <= last
+		? { first: new Date(first).toISOString(), last: new Date(last).toISOString() }
+		: undefined;
 }
 
 export interface KeyTotal {

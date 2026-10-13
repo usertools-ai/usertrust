@@ -9,8 +9,9 @@ import {
 	type KeyTotal,
 	spendOverTime,
 	statTiles,
+	timeWindow,
 } from "../shared/aggregate.js";
-import { formatUsd, formatUt } from "../shared/format.js";
+import { formatUsd, formatUt, formatUtcMinute } from "../shared/format.js";
 import type { LedgerRow } from "../shared/rows.js";
 
 type Granularity = "day" | "hour";
@@ -31,11 +32,6 @@ function formatBucketUtc(t: number, granularity: Granularity): string {
 	const d = new Date(t);
 	const ymd = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 	return granularity === "day" ? `${ymd} (UTC)` : `${ymd} ${pad2(d.getUTCHours())}:00Z`;
-}
-
-/** Display-only compaction of a full ISO timestamp: `YYYY-MM-DD HH:mmZ`. */
-function formatIsoCompact(ts: string): string {
-	return `${ts.slice(0, 16).replace("T", " ")}Z`;
 }
 
 function Tile(props: {
@@ -99,15 +95,7 @@ export function Trends(props: {
 		[props.rows, granularity],
 	);
 	const tiles = useMemo(() => statTiles(props.rows), [props.rows]);
-	const window = useMemo(() => {
-		let first: string | undefined;
-		let last: string | undefined;
-		for (const r of props.rows) {
-			if (first === undefined || r.ts < first) first = r.ts;
-			if (last === undefined || r.ts > last) last = r.ts;
-		}
-		return first !== undefined && last !== undefined ? { first, last } : undefined;
-	}, [props.rows]);
+	const window = useMemo(() => timeWindow(props.rows), [props.rows]);
 	// Everything here is the rows in view: never the vault, when the server holds a window of it.
 	const scope =
 		props.newestOf === undefined
@@ -233,7 +221,7 @@ export function Trends(props: {
 			</div>
 			<div className="ut-sub mono">
 				{props.rows.length.toLocaleString()} records {scope}
-				{window && ` · ${formatIsoCompact(window.first)} to ${formatIsoCompact(window.last)}`}
+				{window && ` · ${formatUtcMinute(window.first)} to ${formatUtcMinute(window.last)}`}
 			</div>
 		</div>
 	);

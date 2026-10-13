@@ -8,6 +8,7 @@ import {
 	isHeaderSpend,
 	spendOverTime,
 	statTiles,
+	timeWindow,
 } from "../src/shared/aggregate.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
@@ -99,6 +100,28 @@ describe("aggregate", () => {
 		});
 		// the error rate is FAILED rows only: an unrecoverable settle is a money state, not an error
 		expect(tiles.errorRate).toBeCloseTo(1 / 8);
+	});
+});
+
+// The chart and its footer are labelled UTC. An offset timestamp sliced as a string lands on its LOCAL day and hour,
+// and string comparison orders it by its local clock: both now go through the UTC instant.
+describe("Trends in UTC", () => {
+	const offset = row({ ts: "2026-10-13T01:30:00+02:00", costUt: 7 }); // 2026-10-12 23:30Z
+	const later = row({ ts: "2026-10-13T00:10:00.000Z", costUt: 3 });
+
+	it("red-first (sliced to its local day): an offset timestamp is bucketed at its UTC day and hour", () => {
+		expect(spendOverTime([offset], "day")).toEqual([{ bucket: "2026-10-12", costUt: 7, count: 1 }]);
+		expect(spendOverTime([offset], "hour")).toEqual([
+			{ bucket: "2026-10-12 23:00", costUt: 7, count: 1 },
+		]);
+	});
+
+	it("red-first (ordered as strings): the window's first and last are by instant, in UTC", () => {
+		expect(timeWindow([later, offset])).toEqual({
+			first: "2026-10-12T23:30:00.000Z",
+			last: "2026-10-13T00:10:00.000Z",
+		});
+		expect(timeWindow([row({ ts: "not a time" })])).toBeUndefined();
 	});
 });
 

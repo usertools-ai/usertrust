@@ -33,6 +33,19 @@ export function utcDay(iso: string): string {
 	return Number.isNaN(t) ? iso.slice(0, 10) : new Date(t).toISOString().slice(0, 10);
 }
 
+/** The UTC hour bucket `YYYY-MM-DD HH:00` of a timestamp: converted like `utcDay`, never sliced. */
+export function utcHour(iso: string): string {
+	const t = Date.parse(iso);
+	const s = Number.isNaN(t) ? iso : new Date(t).toISOString();
+	return `${s.slice(0, 10)} ${s.slice(11, 13)}:00`;
+}
+
+/** `YYYY-MM-DD HH:MMZ` at the UTC instant; an unreadable timestamp is shown as it was written. */
+export function formatUtcMinute(iso: string): string {
+	const t = Date.parse(iso);
+	return Number.isNaN(t) ? iso : `${new Date(t).toISOString().slice(0, 16).replace("T", " ")}Z`;
+}
+
 /** Usertokens, with their unit. */
 export function formatUt(ut: number): string {
 	return `${ut.toLocaleString()} UT`;
