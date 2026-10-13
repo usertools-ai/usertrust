@@ -4047,6 +4047,47 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			expect(await holdStateFiles()).toEqual([]);
 		});
 
+		it("no key: a re-fire whose settle fails AND whose give-back fails keeps the first hold named: the next fire reserves nothing beside it, and Stop gives it back once", async () => {
+			const server = holdingServer();
+			let failing = true;
+			const giveBack = (r: { path: string; body: Record<string, unknown> }) =>
+				(r.path === "/v1/release" || r.path === "/v1/abort") && r.body.transferId === "tx_1";
+			await startServer((path, body) => {
+				if (failing && body.transferId === "tx_1" && path === "/v1/settle") {
+					return { status: 500, json: { error: "internal" } };
+				}
+				if (
+					failing &&
+					body.transferId === "tx_1" &&
+					(path === "/v1/release" || path === "/v1/abort")
+				) {
+					return { status: 503, json: { error: "unavailable" } };
+				}
+				return server.responder(path, body);
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			// The re-fire's settle of tx_1 fails, and so does its give-back: tx_1 may still be live.
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(requests.filter(giveBack).map((r) => r.status)).toEqual([503]);
+			// Fired again: before the fix nothing named tx_1 any more, and tx_2 was reserved beside it.
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(authorizes()).toHaveLength(1);
+			expect(await holdStateFiles()).toEqual([expect.stringMatching(/\.releasing$/)]);
+			// Stop gives tx_1 back, once, and forgets it.
+			failing = false;
+			await run("stop.mjs", stopInput());
+			expect(requests.filter(giveBack).map((r) => r.status)).toEqual([503, 200]);
+			expect(await holdStateFiles()).toEqual([]);
+			// The call then reserves afresh, and a later Stop never gives tx_1 back again.
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(authorizes()).toHaveLength(2);
+			await run("stop.mjs", stopInput());
+			expect(requests.filter(giveBack)).toHaveLength(2);
+			// tx_1 was never charged: its window's settle failed unkeyed, so its ids stay claimed.
+			expect(server.charges.filter((c) => c.transferId === "tx_1")).toEqual([]);
+		});
+
 		it("no key: an EXPIRED first hold's window is released, and the fresh hold carries it, charged once", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);

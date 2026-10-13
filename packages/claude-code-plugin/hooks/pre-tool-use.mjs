@@ -84,6 +84,7 @@ import {
 	isTransferId,
 	isUnknownTransfer,
 	jobCapable,
+	jobHoldFields,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	noCallRan,
@@ -102,6 +103,7 @@ import {
 	serverRequest,
 	timeLeft,
 	usageMode,
+	writeFileAtomic,
 } from "./lib.mjs";
 import {
 	authorizeLabels,
@@ -313,6 +315,37 @@ function abandon(entry) {
 }
 
 /**
+ * Keep a windowed hold that `retire` could not confirm ended NAMED, as a hold claimed only to
+ * be ended (`<hold>.releasing`, the name `claimForRelease` gives). Its window's outcome is
+ * already journalled, so the record carries no window, only what ends the hold: its transferId,
+ * its call, its agent and its tenant binding. A later PreToolUse of the same call then finds it
+ * (`holdOfCall`) and is refused instead of reserving beside a hold that may be live, and Stop
+ * gives it back once (lib.mjs `cleanup`: a release, idempotent by transferId on the server: a
+ * 200 ends it, a 404 says it is gone), after any retry of its window. Past that, the ledger's
+ * pending timeout ends it. A record that cannot be written is said, and the call is refused
+ * all the same.
+ */
+async function keepForRelease(entry) {
+	const path = `${entry.path.slice(0, -".json".length)}.releasing`;
+	const body = {
+		transferId: entry.transferId,
+		toolUseId: entry.toolUseId,
+		agentId: entry.agentId,
+		...(typeof entry.startedAt === "string" ? { startedAt: entry.startedAt } : {}),
+		...jobHoldFields(entry),
+		...(typeof entry.serverUrl === "string" ? { serverUrl: entry.serverUrl } : {}),
+		...(typeof entry.keyHash === "string" ? { keyHash: entry.keyHash } : {}),
+	};
+	try {
+		await writeFileAtomic(path, JSON.stringify(body));
+	} catch (err) {
+		say(
+			`usertrust: hold ${entry.transferId} may still be live, and its record could not be kept (${err?.code ?? "error"}); a later call may reserve beside it until the server's sweep ends it`,
+		);
+	}
+}
+
+/**
  * End a `.settling` record made under ANOTHER server or key, or an unknown one,
  * without this tenant's journal ever deciding it. Only a STALE one
  * (`STALE_SETTLING_MS`) is ended: a fresh one's settle may still be in flight, so
@@ -431,8 +464,9 @@ async function retire(entry) {
 		}
 		if (result.holdEnded !== true) {
 			// Its window's outcome is journalled as for any settle, but the hold itself
-			// may still be live: no fresh hold is made beside it. The server's sweep
-			// ends it.
+			// may still be live: no fresh hold is made beside it, now or at a later re-fire
+			// of this call (`keepForRelease`), and Stop gives it back once.
+			await keepForRelease(entry);
 			throw new Error(
 				`hold ${entry.transferId} ${result.outcome}, and the server has not confirmed it is gone; no fresh hold is made beside it`,
 			);
