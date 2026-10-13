@@ -1411,9 +1411,20 @@ function sdkMethodPaths(raw: Loose): string[] {
 	return [...new Set(out)].sort();
 }
 
+// This walk makes one governed call per SDK method, and each refusal appends a `policy_denied`
+// event to the audit chain before the next call starts, so its cost is proportional to the SDK's
+// method count and grows with every method an SDK release adds. The openai row against the 5 s
+// default, with coverage on, on a 14-core box: 1.7 s idle, 3.8 s in a full-suite run, 3.2 s in a
+// full-suite run with 14 busy loops beside it, 5.9 s in the same run when it also carried a
+// second copy of the release-workflow file (it failed there), and 5.6 s once on a box running
+// other jobs. The anthropic row, with fewer methods: 0.9 s idle, 1.8 s in the full-suite run,
+// 2.7 s in the loaded one. 12 s is twice the worst. The limit is a hang guard: the row asserts
+// every refusal and that no refused call reached the SDK or the ledger, not how long that took.
+const REFUSAL_WALK_TIMEOUT_MS = 12_000;
+
 describe("every other SDK method that is not free is refused: no trap outside GOVERNED_PATHS", () => {
 	for (const provider of ["anthropic", "openai"] as const) {
-		it(provider, async () => {
+		it(provider, { timeout: REFUSAL_WALK_TIMEOUT_MS }, async () => {
 			const { client, raw, engine } = provider === "anthropic" ? await anthropic() : await openai();
 			const paths = sdkMethodPaths(raw).filter(
 				(p) => !GOVERNED_PATHS[provider].has(p) && !FREE_METHODS[provider].has(p),
