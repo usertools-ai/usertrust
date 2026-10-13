@@ -887,10 +887,17 @@ export function verifyTransaction(
 	if (segments.count === 0 || (segments.empty && segments.enumerated)) {
 		// No log at all means nothing could be read; an empty log is a clean, empty reading.
 		const error = segments.count === 0 ? `Audit log not found: ${mainLog}` : "Audit log is empty";
+		// An empty log is a complete reading only beside an anchor that agrees it is empty: absent, or at
+		// sequence 0 on the genesis hash. An anchor that records events, or cannot be read, means the
+		// records are gone, and the receipt must not assert the transfer never existed.
+		const anchor = readAnchor(`${mainLog}.meta`);
+		const anchorClean =
+			anchor === null ||
+			(!("corrupt" in anchor) && anchor.sequence === 0 && anchor.lastHash === GENESIS_HASH);
 		return {
 			found: false,
 			valid: false,
-			receipt: renderNotFound(txId, segments.count !== 0),
+			receipt: renderNotFound(txId, segments.count !== 0 && anchorClean),
 			errors: [error],
 		};
 	}

@@ -346,6 +346,60 @@ describe("verifyTransaction over rotated segments", () => {
 		},
 	);
 
+	/** A vault whose live log is empty, with `anchor` as its `.meta` (absent when undefined). */
+	function emptyLogVault(name: string, anchor?: string): string {
+		const vaultPath = join(root, name);
+		const auditDir = join(vaultPath, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		writeFileSync(join(auditDir, "events.jsonl"), "");
+		if (anchor !== undefined) writeFileSync(join(auditDir, "events.jsonl.meta"), anchor);
+		return vaultPath;
+	}
+
+	it("an EMPTY log whose anchor records events is not a complete reading", () => {
+		const dir = emptyLogVault(
+			"empty-anchor-records",
+			JSON.stringify({ lastHash: "a".repeat(64), sequence: 5 }),
+		);
+		const result = verifyTransaction(dir, "tx-a");
+		expect(result.found).toBe(false);
+		expect(result.errors).toEqual(["Audit log is empty"]);
+		expect(result.receipt).toContain(INCOMPLETE);
+		expect(result.receipt).not.toContain(ABSOLUTE);
+	});
+
+	it("an EMPTY log with a malformed anchor is not a complete reading", () => {
+		const dir = emptyLogVault("empty-anchor-corrupt", "{not json");
+		const result = verifyTransaction(dir, "tx-a");
+		expect(result.found).toBe(false);
+		expect(result.errors).toEqual(["Audit log is empty"]);
+		expect(result.receipt).toContain(INCOMPLETE);
+		expect(result.receipt).not.toContain(ABSOLUTE);
+	});
+
+	it("guard: an EMPTY log with no anchor keeps the absolute sentence", () => {
+		const dir = emptyLogVault("empty-no-anchor");
+		const result = verifyTransaction(dir, "tx-a");
+		expect(result.found).toBe(false);
+		expect(result.errors).toEqual(["Audit log is empty"]);
+		expect(result.receipt).toContain(ABSOLUTE);
+		expect(result.receipt).not.toContain(INCOMPLETE);
+	});
+
+	// Hand-made: the writer only writes `.meta` after an append (sequence >= 1), so it never produces this
+	// shape; the verifier accepts it as an agreeing empty anchor (`verifyChain`), so the receipt does too.
+	it("guard: an EMPTY log with an anchor at sequence 0 on the genesis hash keeps the absolute sentence", () => {
+		const dir = emptyLogVault(
+			"empty-anchor-genesis",
+			JSON.stringify({ lastHash: GENESIS_HASH, sequence: 0 }),
+		);
+		const result = verifyTransaction(dir, "tx-a");
+		expect(result.found).toBe(false);
+		expect(result.errors).toEqual(["Audit log is empty"]);
+		expect(result.receipt).toContain(ABSOLUTE);
+		expect(result.receipt).not.toContain(INCOMPLETE);
+	});
+
 	it("guard: a clean rotated vault and an id that exists nowhere keeps the absolute sentence", () => {
 		const { lines, hashes } = buildChain(EVENTS);
 		const rotated = vault(

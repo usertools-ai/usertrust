@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`usertrust inspect`, `usertrust health` and the ledger UI no longer block on a FIFO at `.usertrust/usertrust.config.json`.** With no enforced-budget record, the budget reader opened the vault config without checking what it was, so a named pipe planted at that path hung each of them until something wrote to the pipe. The path is now checked first, as the UI's remote-settings reader and the enforced-budget reader already did: anything that is not a regular file gives no budget (the budget reads as not yet published), and is never opened.
-- **`usertrust-verify --tx` no longer says a transaction does not exist when it could not read the whole audit chain.** With a missing segment, an unreadable directory or a chain that failed verification, the not-found receipt says the transaction was not found in the records that could be read and points to the errors below it. The exit code and the errors are unchanged.
+- **`usertrust-verify --tx` no longer says a transaction does not exist when it could not read the whole audit chain.** With a missing segment, an unreadable directory, an empty log whose anchor records events or cannot be read, or a chain that failed verification, the not-found receipt says the transaction was not found in the records that could be read and points to the errors below it. The exit code and the errors are unchanged.
 
 ## [5.0.1] - 2026-10-13
 
