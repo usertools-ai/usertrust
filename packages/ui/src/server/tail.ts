@@ -28,11 +28,18 @@ export const __tailTestSeam: { backstopMs: number; watch: typeof watch } = {
 	watch,
 };
 
+/**
+ * Watches the vault's log and calls back on a change. `sizeOf` is the log size the caller holds; `identityOf` the log's
+ * identity its last load recorded (`fileIdentity`); `auditDirIdOf` the audit directory's identity when the caller first
+ * saw it. Each check compares the log's size, then (at the same size) its identity, and the directory's identity: a
+ * directory absent where one was seen, or another directory at the path, is a resync.
+ */
 export function watchLedger(
 	vaultPath: string,
 	sizeOf: () => number,
 	events: TailEvents,
 	identityOf?: () => string | undefined,
+	auditDirIdOf?: () => string | undefined,
 ): () => void {
 	const auditDir = join(vaultPath, "audit");
 	const logPath = join(auditDir, "events.jsonl");
@@ -50,7 +57,42 @@ export function watchLedger(
 		}
 	};
 
+	/** The audit directory as a stat sees it: its identity, "absent", or "unknown" (another error, or inode 0). */
+	const auditDirNow = (): string => {
+		try {
+			return fileIdentity(statSync(auditDir, { bigint: true })) ?? "unknown";
+		} catch (err) {
+			return (err as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unknown";
+		}
+	};
+
+	// The directory state a resync was last asked for: the same mismatch is reported once, not on every check.
+	let dirReported: string | undefined;
+	/**
+	 * Whether the audit directory is absent where the caller saw one, or is another directory (a different identity),
+	 * and this was not already reported. Unknown on either side (none recorded, inode 0, a stat that fails otherwise)
+	 * asks for nothing: the log's own checks still run.
+	 */
+	const auditDirMoved = (): boolean => {
+		const known = auditDirIdOf?.();
+		if (known === undefined) return false;
+		const now = auditDirNow();
+		if (now === known || now === "unknown") {
+			dirReported = undefined;
+			return false;
+		}
+		if (now === dirReported) return false;
+		dirReported = now;
+		return true;
+	};
+
 	const check = (): void => {
+		// The directory first: a vault replaced in one step can hold a log of any size, and a directory deleted while it
+		// held no log bytes changes no size at all (an absent log reads as 0).
+		if (auditDirMoved()) {
+			events.onResync();
+			return;
+		}
 		const size = sizeOfLog();
 		const known = sizeOf();
 		if (size < known) events.onResync();
@@ -89,7 +131,8 @@ export function watchLedger(
 		// same check() the events run, so an append, a shrink or a removal is seen within about one interval whatever
 		// the events do. It checks the log by PATH, so it also sees a directory replaced under the watcher.
 		// The memo stops a torn last line (a writer that died mid-line) from being re-read in full every tick: check()
-		// runs only when the log's size, mtime or inode, its stat error, or the known size moved since the last call.
+		// runs only when the log's size, mtime or inode, its stat error, the audit directory's identity (or absence), or
+		// the known size moved since the last call. Every field check() compares is in the key, or a skip could hide it.
 		let memo: string | undefined;
 		backstop = setInterval(() => {
 			let seen: string;
@@ -99,7 +142,7 @@ export function watchLedger(
 			} catch (err) {
 				seen = `error:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
 			}
-			seen += `|${sizeOf()}`;
+			seen += `|${auditDirNow()}|${sizeOf()}`;
 			if (seen === memo) return;
 			memo = seen;
 			check();
@@ -126,8 +169,11 @@ export function watchLedger(
 			const appeared = dirNow && !dirSeen;
 			logSeen = logNow;
 			dirSeen = dirNow;
-			if (lost || appeared) events.onResync();
-			else check();
+			if (lost || appeared) {
+				// The reload this asks for reads the directory as it is now; the same state is not reported again by check().
+				dirReported = auditDirNow();
+				events.onResync();
+			} else check();
 		}, MISSING_DIR_POLL_MS);
 		// The poll must never keep a process alive on its own: the server's close() clears it, and a process that has
 		// nothing else to do exits even if a caller forgets to close.

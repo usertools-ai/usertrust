@@ -68,10 +68,35 @@ export interface LedgerState {
 	 */
 	auditDirReadable: boolean;
 	/**
-	 * Whether this load found a deletion: the audit directory is absent after the process had seen it, or an earlier
-	 * load's deletion was carried in (`loadState`'s `deletionSeen`). The caller latches it for the life of the process.
+	 * The audit directory's identity at this load (`fileIdentity`), or undefined when it is absent, cannot be statted,
+	 * or reports inode 0. The caller records the first one it sees and passes it to every later load (`auditDirId`).
+	 */
+	auditDirId: string | undefined;
+	/**
+	 * Whether this load found a deletion: the audit directory is absent after the process had seen it, or replaced by
+	 * another directory, or the log lost or changed events an earlier load held, or an earlier load's deletion was carried
+	 * in (`loadState`'s `deletionSeen`). The caller latches `deletionCauses` for the life of the process.
 	 */
 	deletionDetected: boolean;
+	/** What this load's `deletionDetected` rests on, the carried-in causes included: one chain error per cause. */
+	deletionCauses: DeletionCause[];
+	/**
+	 * The events this load read: their number and the last one's hash (`LogHead`). Undefined when no pass of the load read
+	 * the vault unchanged throughout: the caller then keeps the head it had.
+	 */
+	head: LogHead | undefined;
+}
+
+/**
+ * Why a deletion was detected: "directory", the audit directory disappeared or was replaced by another one; "events",
+ * the log no longer holds events an earlier load or verified append held.
+ */
+export type DeletionCause = "directory" | "events";
+
+/** The events a load or a verified append left the dashboard holding: how many, and the hash of the last one. */
+export interface LogHead {
+	count: number;
+	hash: string | undefined;
 }
 
 // Presence of the mirror file is not a verdict — a planted empty/junk file
@@ -128,10 +153,12 @@ export function readRemoteSettings(vaultPath: string): RemoteSettings {
 function auditDirState(vaultPath: string): {
 	dir: "absent" | "present" | string;
 	listError?: string;
+	id?: string | undefined;
 } {
 	const auditPath = join(vaultPath, "audit");
+	let id: string | undefined;
 	try {
-		statSync(auditPath);
+		id = fileIdentity(statSync(auditPath, { bigint: true }));
 	} catch (err) {
 		return { dir: statFailure(vaultPath, auditPath, err) };
 	}
@@ -140,9 +167,13 @@ function auditDirState(vaultPath: string): {
 	try {
 		readdirSync(auditPath);
 	} catch (err) {
-		return { dir: "present", listError: (err as NodeJS.ErrnoException).code ?? "unknown error" };
+		return {
+			dir: "present",
+			listError: (err as NodeJS.ErrnoException).code ?? "unknown error",
+			id,
+		};
 	}
-	return { dir: "present" };
+	return { dir: "present", id };
 }
 
 /** "absent" for a path that is really missing, else the code (or reason) the check could not be made. */
@@ -174,37 +205,75 @@ function isDanglingLink(path: string): boolean {
 /** `verifyVault`'s error for a vault with no audit directory: no evidence either way, not tampering. */
 const NO_AUDIT_DIR = "Audit directory not found:";
 
-/** The chain error a deletion detected while the dashboard was open carries, on every load for as long as it is latched. */
-const DELETION_ERROR =
-	"The audit directory disappeared while this dashboard was open (deletion detected)";
+/** What a latched deletion's error tells the operator to do when the change was theirs. */
+const RESTART_REMEDY = "If you restored or replaced this vault on purpose, restart the dashboard.";
+
+/**
+ * The chain error each cause of a deletion detected while the dashboard was open carries, on every load for as long as
+ * it is latched. Each names the cause and the remedy: a legitimate restore reads as a deletion until a restart.
+ */
+const DELETION_ERRORS: Record<DeletionCause, string> = {
+	directory: `The audit directory was replaced or deleted while this dashboard was open (deletion detected). ${RESTART_REMEDY}`,
+	events: `The audit log lost or changed events it held while this dashboard was open (deletion detected). ${RESTART_REMEDY}`,
+};
 
 /**
  * `auditDirSeen`: whether this process has ever seen the vault's audit directory. A first run has none; a directory that
  * existed and is gone was deleted, whatever it held (events, malformed lines, nothing), and must never read as a first
  * run. A count of parsed events missed a log of malformed lines only, which verification fails with zero events.
  *
- * `deletionSeen`: whether an earlier load of this process already detected such a deletion. The caller latches the
- * returned `deletionDetected` and passes it back, and it holds for the life of the process: the deletion error stays in
+ * `deletionSeen`: the causes of a deletion an earlier load of this process already detected. The caller latches the
+ * returned `deletionCauses` and passes them back, and they hold for the life of the process: the deletion error stays in
  * `summary.chain.errors` and the chain stays invalid whatever the directory holds afterwards, because a directory
  * recreated with a fresh valid chain is not the one that was destroyed. Its events may still load and show as rows; only
  * the verdict is fixed. A first run (never seen, nothing deleted) is unaffected.
+ *
+ * `auditDirId`: the audit directory's identity when this process first saw it (`fileIdentity`). A present directory
+ * with a different identity is another directory in its place (removed, and a fresh vault renamed in, between two
+ * checks): a deletion, as its absence would be. Unknown on either side (none recorded, inode 0) proves nothing.
+ *
+ * `head`: the events the dashboard held before this load (`LogHead`). The events read now must include the head's hash
+ * and number at least its count; a log that does not was truncated, emptied or replaced by another chain, whatever its
+ * own verdict. Membership, not position: in file order (events without `sequence`) `events.jsonl` is read before the
+ * rotated segments, so a rotation moves positions. A pass that fails it is read again, and the deletion is latched only
+ * when the failure persists on a pass that read the vault unchanged throughout (`consistent`): a read that raced a
+ * rotation written in two steps (a segment, then `events.jsonl`) can see events missing that never were.
  */
 export function loadState(
 	vaultPath: string,
 	rowCap: number = ROW_CAP,
 	auditDirSeen = false,
-	deletionSeen = false,
+	deletionSeen: readonly DeletionCause[] = [],
+	auditDirId: string | undefined = undefined,
+	head: LogHead | undefined = undefined,
 ): LedgerState {
+	// Whether an earlier pass of this load already failed containment: the next consistent pass that fails it confirms.
+	let failedBefore = false;
 	// A retry redoes the WHOLE load, so one pass's identity is never paired with another pass's events, verdict or offset.
 	for (let retry = 0; ; retry++) {
-		const pass = loadPass(vaultPath, rowCap, auditDirSeen, deletionSeen);
-		if (pass.consistent) return pass.state;
-		// Still changing: every later grow is a full reload until a load reads one unchanged file throughout.
-		if (retry === LOAD_RETRIES) return { ...pass.state, logId: undefined };
+		const pass = loadPass(
+			vaultPath,
+			rowCap,
+			auditDirSeen,
+			deletionSeen,
+			auditDirId,
+			head,
+			failedBefore,
+		);
+		// A consistent pass that holds the head, or one that confirms a failure (latched inside the pass), is the answer.
+		if (pass.consistent && (pass.contained || failedBefore)) return pass.state;
+		const unconfirmed = pass.consistent && !pass.contained;
+		// Still changing: every later grow is a full reload until a load reads one unchanged file throughout. A failure
+		// never read consistently twice latches nothing, and its verdict stands on its own. A consistent first failure on
+		// the last retry still gets its confirming pass.
+		if (retry >= LOAD_RETRIES && !unconfirmed)
+			return { ...pass.state, logId: undefined, head: undefined };
+		failedBefore ||= !pass.contained;
 		// What a discarded pass OBSERVED about the directory stays observed (a recreated directory must not undo a
 		// deletion it saw); only what it read from the file (events, verdict, offset, identity) is rebuilt.
 		auditDirSeen ||= pass.state.auditDirPresent;
-		deletionSeen ||= pass.state.deletionDetected;
+		auditDirId ??= pass.state.auditDirId;
+		deletionSeen = pass.state.deletionCauses;
 	}
 }
 
@@ -224,10 +293,14 @@ function loadPass(
 	vaultPath: string,
 	rowCap: number,
 	auditDirSeen: boolean,
-	deletionSeen: boolean,
-): { state: LedgerState; consistent: boolean } {
+	deletionSeen: readonly DeletionCause[],
+	auditDirId: string | undefined,
+	head: LogHead | undefined,
+	confirming: boolean,
+): { state: LedgerState; consistent: boolean; contained: boolean } {
 	const logPath = join(vaultPath, "audit", "events.jsonl");
 	const snapshot = snapshotLog(logPath);
+	const segmentsBefore = segmentsFingerprint(join(vaultPath, "audit"));
 	loadSeam.afterDescriptor?.();
 	const events = readLedgerEvents(vaultPath);
 	const integrity = deriveChainIntegrity(events);
@@ -235,8 +308,12 @@ function loadPass(
 	loadSeam.afterReaders?.();
 	// The readers read by PATH. Only if the path still names the file the descriptor read, with the same size and mtime,
 	// do `lastHash`, `byteOffset` and `logId` all describe one file; otherwise (a rename, an append) the load is redone.
-	// The bracket covers `events.jsonl` only, not rotated segments: the incremental path tails that file alone.
-	const consistent = snapshot === undefined || snapshot.fingerprint === pathFingerprint(logPath);
+	// The rotated segments are bracketed too (the directory's listing, and each segment's identity and size), so a
+	// containment failure is latched only on a read of one unchanged set of files.
+	const consistent =
+		(snapshot === undefined || snapshot.fingerprint === pathFingerprint(logPath)) &&
+		segmentsBefore === segmentsFingerprint(join(vaultPath, "audit"));
+	const contained = holdsHead(events, head);
 	let spentUt = 0;
 	for (const e of events) {
 		if (isHeaderSpend(e.kind, e.data.cost)) spentUt += e.data.cost;
@@ -249,10 +326,18 @@ function loadPass(
 	// words the missing-directory error differently, it is kept too: the vault reads as broken, never as clean.
 	// The exception is for an audit directory this process has never seen: one deleted while the dashboard was open
 	// (the live tail resyncs, and the reload finds it gone) is evidence destroyed, not a first run.
-	const { dir: auditDir, listError } = auditDirState(vaultPath);
+	const { dir: auditDir, listError, id: dirId } = auditDirState(vaultPath);
 	// A deletion is latched: once detected it is carried by every later load, so a directory recreated in its place
-	// (even one holding a valid chain) cannot clear the evidence that the original was destroyed.
-	const deletionDetected = (auditDir === "absent" && auditDirSeen) || deletionSeen;
+	// (even one holding a valid chain) cannot clear the evidence that the original was destroyed. Another directory at
+	// the path (a different identity) is the same evidence, however fast it was swapped in.
+	const replaced = auditDirId !== undefined && dirId !== undefined && dirId !== auditDirId;
+	const causes = new Set(deletionSeen);
+	if ((auditDir === "absent" && auditDirSeen) || replaced) causes.add("directory");
+	// Only a CONFIRMING pass that read the vault unchanged throughout latches a containment failure. A directory gone or
+	// replaced lost its events with it, so that deletion is named once, by its directory.
+	if (confirming && consistent && !contained && !causes.has("directory")) causes.add("events");
+	const deletionCauses = (["directory", "events"] as const).filter((c) => causes.has(c));
+	const deletionDetected = deletionCauses.length > 0;
 	const noAuditDir =
 		events.length === 0 && auditDir === "absent" && !auditDirSeen && !deletionDetected;
 	const readErrors = noAuditDir
@@ -264,7 +349,7 @@ function loadPass(
 					...vault.errors,
 					`Audit directory could not be read (${listError ?? auditDir}): this vault was not verified`,
 				];
-	const errors = deletionDetected ? [...readErrors, DELETION_ERROR] : readErrors;
+	const errors = [...readErrors, ...deletionCauses.map((c) => DELETION_ERRORS[c])];
 	const valid =
 		integrity.valid && !deletionDetected && (vault.valid || (noAuditDir && errors.length === 0));
 
@@ -306,14 +391,58 @@ function loadPass(
 		logId: snapshot?.id,
 		auditDirPresent: auditDir === "present",
 		auditDirReadable: auditDir === "present" && listError === undefined,
+		auditDirId: dirId,
 		deletionDetected,
+		deletionCauses,
+		head: { count: events.length, hash: headHash(events) },
 	};
-	return { state, consistent };
+	return { state, consistent, contained };
+}
+
+/** The last event's hash, when it has one: what a later load must still hold. */
+function headHash(events: readonly { hash?: unknown }[]): string | undefined {
+	const hash = events.at(-1)?.hash;
+	return typeof hash === "string" ? hash : undefined;
 }
 
 /**
- * A file's identity: device and inode number, plus its birth time where the platform reports one (so a log deleted and
- * recreated on an inode number the filesystem reused still reads as another file). BigInt fields throughout: Windows
+ * Whether `events` still hold `head`: at least its count, and its hash among them (anywhere: a rotation moves positions
+ * in file order). No head, or a head of no events, holds trivially.
+ */
+function holdsHead(events: readonly { hash?: unknown }[], head: LogHead | undefined): boolean {
+	if (head === undefined || head.count === 0) return true;
+	if (events.length < head.count) return false;
+	return head.hash === undefined || events.some((e) => e.hash === head.hash);
+}
+
+/**
+ * The rotated segments as the readers would gather them: every `*.jsonl` but `events.jsonl` in the audit directory,
+ * sorted, each with its identity, size and mtime. A listing or stat that fails is part of the answer, so two reads
+ * that both fail the same way compare equal and a read that fails differently does not.
+ */
+function segmentsFingerprint(auditPath: string): string {
+	let names: string[];
+	try {
+		names = readdirSync(auditPath)
+			.filter((n) => n.endsWith(".jsonl") && n !== "events.jsonl")
+			.sort();
+	} catch (err) {
+		return `list:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
+	}
+	return names
+		.map((n) => {
+			try {
+				return `${n}=${fingerprintOf(statSync(join(auditPath, n), { bigint: true }))}`;
+			} catch (err) {
+				return `${n}=${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
+			}
+		})
+		.join("|");
+}
+
+/**
+ * A file's (or the audit directory's) identity: device and inode number, plus its birth time where the platform reports
+ * one (so a log deleted and recreated on an inode number the filesystem reused still reads as another file). BigInt fields throughout: Windows
  * file ids exceed 2^53. Undefined for inode 0, which some filesystems report for every file.
  *
  * What it cannot see: a rewrite in place (same inode) that does not shorten the log, and a delete-and-recreate that

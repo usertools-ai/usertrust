@@ -34,7 +34,9 @@ import { isHeaderSpend } from "../shared/aggregate.js";
 import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
 import {
 	budgetSummary,
+	type DeletionCause,
 	type LedgerState,
+	type LogHead,
 	loadState,
 	ROW_CAP,
 	readAppended,
@@ -80,10 +82,21 @@ export async function createUiServer(
 	 */
 	let auditDirSeen = state.auditDirPresent;
 	/**
-	 * Whether a load of this process has detected a deletion of the audit directory. Latched for the life of the
-	 * process and passed to every later load: a directory recreated afterwards, holding a valid chain, does not clear it.
+	 * The audit directory's identity when this process first saw it (`loadState`'s `auditDirId`). A load, or a watcher
+	 * check, that finds another directory at the path reads a deletion. Recorded once and never moved.
 	 */
-	let deletionSeen = state.deletionDetected;
+	let auditDirId = state.auditDirId;
+	/**
+	 * What a load of this process has detected as a deletion (the audit directory gone or replaced, the log missing
+	 * events it held). Latched for the life of the process and passed to every later load: a directory recreated
+	 * afterwards, holding a valid chain, does not clear it.
+	 */
+	let deletionSeen: DeletionCause[] = state.deletionCauses;
+	/**
+	 * The events this process holds (`LogHead`): from the last load that read the vault unchanged throughout, extended
+	 * by each verified append. Every later load must still hold them (`loadState`'s `head`).
+	 */
+	let head: LogHead | undefined = state.head;
 	let port = 0;
 
 	const clients = new Set<ServerResponse>();
@@ -180,6 +193,8 @@ export async function createUiServer(
 			state.summary.remainingUt =
 				state.summary.budget === null ? null : state.summary.budget - state.summary.spentUt;
 			state.summary.chain.events += fresh.length;
+			if (head !== undefined && fresh.length > 0)
+				head = { count: head.count + fresh.length, hash: lastHash };
 			auditDirSeen = true;
 			// A verified append is the first activity of a vault that had none.
 			if (fresh.length > 0) state.summary.chain.empty = false;
@@ -199,9 +214,11 @@ export async function createUiServer(
 	}
 
 	function handleResync(): void {
-		state = loadState(vaultPath, ROW_CAP, auditDirSeen, deletionSeen);
+		state = loadState(vaultPath, ROW_CAP, auditDirSeen, deletionSeen, auditDirId, head);
 		auditDirSeen ||= state.auditDirPresent;
-		deletionSeen ||= state.deletionDetected;
+		auditDirId ??= state.auditDirId;
+		deletionSeen = state.deletionCauses;
+		head = state.head ?? head;
 		version += 1;
 		broadcast("resync", {});
 		broadcast("summary", state.summary);
@@ -382,6 +399,7 @@ export async function createUiServer(
 		() => state.byteOffset,
 		{ onGrow: handleGrow, onResync: handleResync },
 		() => state.logId,
+		() => auditDirId,
 	);
 	// The budget's two sources live OUTSIDE `audit/`, which watchLedger watches: a governor writes its record when it
 	// starts, and an operator edits the config. Each change re-reads the budget, and the config's `remote` section, and

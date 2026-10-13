@@ -12,6 +12,7 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	statSync,
 	truncateSync,
 	utimesSync,
 	writeFileSync,
@@ -1426,8 +1427,11 @@ describe("fs.watch mode's backstop when file-change events arrive late or never"
 		rmSync(vault, { recursive: true, force: true });
 	});
 
-	/** Starts the watcher over the vault with a known size the row controls, recording what it delivers. */
-	function start(known: () => number) {
+	/**
+	 * Starts the watcher over the vault with a known size the row controls, recording what it delivers. `auditDirId` is
+	 * the audit directory's identity as the server recorded it (none by default).
+	 */
+	function start(known: () => number, auditDirId?: () => string | undefined) {
 		const delivered: string[] = [];
 		let sizeOfCalls = 0;
 		const stop = watchLedger(
@@ -1437,6 +1441,8 @@ describe("fs.watch mode's backstop when file-change events arrive late or never"
 				return known();
 			},
 			{ onGrow: () => delivered.push("grow"), onResync: () => delivered.push("resync") },
+			undefined,
+			auditDirId,
 		);
 		return { delivered, stop, sizeOfCalls: () => sizeOfCalls };
 	}
@@ -1546,7 +1552,7 @@ describe("fs.watch mode's backstop when file-change events arrive late or never"
 			}
 		});
 
-		it.each([
+		const noLogBytes: Array<[string, () => void]> = [
 			["no log", () => {}],
 			[
 				"only an anchor",
@@ -1557,21 +1563,73 @@ describe("fs.watch mode's backstop when file-change events arrive late or never"
 					),
 			],
 			["an empty log", () => writeFileSync(logPath(), "")],
-		])(
-			"guard (declared): a directory holding %s, present at start and then deleted, delivers no resync",
+		];
+		/** The audit directory's identity now, as the server records it when it first sees the directory. */
+		const dirIdentity = (): string => {
+			const st = statSync(auditDir(), { bigint: true });
+			return st.birthtimeNs === 0n
+				? `${st.dev}:${st.ino}`
+				: `${st.dev}:${st.ino}:${st.birthtimeNs}`;
+		};
+
+		// A directory that held no log bytes changes no size when it is deleted (an absent log reads as 0, and so does the
+		// known size): the directory's own identity is what sees it, on the backstop with no event at all.
+		it.each(noLogBytes)(
+			"red-first (deletion read as a first run): a directory holding %s, present at start and then deleted, delivers one resync",
 			(_name, populate) => {
 				populate();
-				const w = start(() => 0);
+				const recorded = dirIdentity();
+				const w = start(
+					() => 0,
+					() => recorded,
+				);
 				try {
 					tick(2);
+					expect(w.delivered).toEqual([]);
 					rmSync(auditDir(), { recursive: true, force: true });
 					tick(10);
-					expect(w.delivered).toEqual([]);
+					expect(w.delivered).toEqual(["resync"]);
 				} finally {
 					w.stop();
 				}
 			},
 		);
+
+		it.each(noLogBytes)(
+			"red-first (false clean): a directory holding %s, replaced in one step by another, delivers one resync",
+			(_name, populate) => {
+				populate();
+				const recorded = dirIdentity();
+				const w = start(
+					() => 0,
+					() => recorded,
+				);
+				try {
+					tick(2);
+					const other = `${auditDir()}.next`;
+					mkdirSync(other);
+					rmSync(auditDir(), { recursive: true, force: true });
+					renameSync(other, auditDir());
+					populate();
+					tick(10);
+					expect(w.delivered).toEqual(["resync"]);
+				} finally {
+					w.stop();
+				}
+			},
+		);
+
+		it("guard: with no recorded directory identity, a deletion that changes no size delivers nothing", () => {
+			const w = start(() => 0);
+			try {
+				tick(2);
+				rmSync(auditDir(), { recursive: true, force: true });
+				tick(10);
+				expect(w.delivered).toEqual([]);
+			} finally {
+				w.stop();
+			}
+		});
 
 		it("red-first (crash): a watcher error closes the watcher, throws nothing, and the backstop still sees an append", () => {
 			writeFileSync(logPath(), "{}\n");

@@ -314,8 +314,10 @@ describe("loadState's identity", () => {
 				if (pass === 1) rmSync(audit, { recursive: true, force: true });
 				if (pass === 2) cpSync(join(other, ".usertrust", "audit"), audit, { recursive: true });
 			};
-			const state = loadState(vault, undefined, true, false);
-			expect(pass).toBe(2);
+			const state = loadState(vault, undefined, true, []);
+			// The second pass sees the directory's listing change under it (the rotated segments are bracketed too), so a
+			// third pass reads the recreated directory unchanged.
+			expect(pass).toBe(3);
 			// The retry read the recreated chain, and the deletion the first pass saw is still the verdict.
 			expect(state.summary.chain.events).toBe(2);
 			expect(state.deletionDetected).toBe(true);
