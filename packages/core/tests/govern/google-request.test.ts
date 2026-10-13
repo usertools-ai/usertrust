@@ -1977,3 +1977,62 @@ describe("an inherited config.httpOptions is read at call start as the SDK finds
 		}
 	}
 });
+
+describe("a config held by a getter is read by the SDK, as before; its httpOptions is governed on what is sent", () => {
+	/** A request whose `config` is a getter answering `config` (the same object on every read). */
+	const viaGetter = (config: Loose) =>
+		Object.defineProperty({ model: "gemini-2.5-flash", contents: "go" }, "config", {
+			get: () => config,
+			enumerable: true,
+		});
+
+	for (const method of METHODS) {
+		for (const [backend, vertex] of BACKENDS) {
+			const on = `${method} on ${backend}`;
+
+			it(`${on}: a getter config whose httpOptions carries extraBody is refused (the check on what the SDK read), nothing sent`, async () => {
+				const make = () => viaGetter({ httpOptions: { extraBody: { labels: { a: "b" } } } });
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expect(r.raw.requests).toHaveLength(1); // natively merged and sent
+				expect(r.govResult).toContain("request_option_refused");
+				expect(r.govResult).toContain("config.httpOptions.extraBody");
+				expect(r.auditKinds).toEqual(["policy_denied"]);
+				expect(r.gov.requests).toHaveLength(0);
+			});
+
+			it(`${on}: a getter config whose httpOptions holds only allowed keys is sent as natively`, async () => {
+				const make = () =>
+					viaGetter({
+						temperature: 0.5,
+						httpOptions: { headers: { "x-test": "g" }, timeout: 5000 },
+					});
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expectSameSend(r);
+				expect(r.gov.requests.map((q) => [q.testHeader, q.timeoutHeader])).toEqual([["g", "5"]]);
+			});
+
+			it(`${on}: under a getter config, httpOptions is read when the SDK reads it: a header replaced after the call starts is sent, as natively`, async () => {
+				const run = async (models: unknown, w: ReturnType<typeof wire>) => {
+					globalThis.fetch = w.fetchStub as typeof fetch;
+					const httpOptions: Loose = { headers: { "x-test": "early" } };
+					const pending = runOn(models, method, viaGetter({ httpOptions }));
+					httpOptions["headers"] = { "x-test": "late" };
+					return pending;
+				};
+				const raw = wire();
+				await run(sdkClient(vertex).models, raw);
+				const gov = wire();
+				const governed = await trust(sdkClient(vertex), {
+					dryRun: true,
+					budget: 500_000,
+					vaultBase: vault,
+					_audit: recordingAudit(),
+				});
+				expect((await run(governed.models, gov)).result).toBe("ok");
+				await governed.destroy();
+				expect(raw.requests.map((q) => q.testHeader)).toEqual(["late"]);
+				expect(gov.requests.map((q) => q.testHeader)).toEqual(["late"]);
+			});
+		}
+	}
+});

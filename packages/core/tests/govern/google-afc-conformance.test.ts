@@ -516,7 +516,7 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 		await governed.destroy();
 	});
 
-	it("a class-instance request whose config is a PROTOTYPE getter is refused at call start (its config is unreadable without running that getter); nothing is sent", async () => {
+	it("a class-instance request whose contents and config.tools are PROTOTYPE getters runs its rounds", async () => {
 		const tool = {
 			tool: async () => ({ functionDeclarations: [{ name: "lookup" }] }),
 			callTool: async () => [{ functionResponse: { name: "lookup", response: { ok: true } } }],
@@ -539,13 +539,11 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 		const sdk = new GoogleGenAI({ apiKey: "test" });
 		(sdk.models as unknown as Loose)["generateContentInternal"] = m.respond;
 		const governed = await trust(sdk, { dryRun: true, budget: 500_000, vaultBase: vault });
-		const err = await governed.models.generateContent(new Request() as never).then(
-			() => undefined,
-			(e: unknown) => e,
-		);
-		expect((err as Error).message).toContain("request_option_refused");
-		expect((err as Error).message).toContain("config (unreadable)");
-		expect(m.sent).toHaveLength(0);
+		const out = (await governed.models.generateContent(new Request() as never)) as unknown as {
+			receipts?: unknown[];
+		};
+		expect(out.receipts).toHaveLength(3);
+		expect(m.sent).toHaveLength(3);
 		await governed.destroy();
 	});
 

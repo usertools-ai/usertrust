@@ -907,6 +907,25 @@ export function movedRequestOptions(
 }
 
 /**
+ * Is a Google request's `config`, where the SDK's `params.config` finds it on the prototype chain,
+ * an ACCESSOR (a getter), with no Proxy on the way? Descriptors only, bounded as `readThroughChain`
+ * is. Such a config is not refused at call start, as the request was before this pipeline: the
+ * request gate's dry run reads it as the SDK does, and the `httpOptions` it holds is checked on what
+ * the dry run read (`movedRequestOptions` on the request that is sent), before anything is held or
+ * sent. A Proxy on the way stays unreadable, and refused.
+ */
+export function googleConfigIsGetter(request: unknown): boolean {
+	let o: unknown = request;
+	for (let depth = 0; o !== null && (typeof o === "object" || typeof o === "function"); depth++) {
+		if (depth >= MAX_CHAIN_DEPTH || utilTypes.isProxy(o)) return false;
+		const d = Object.getOwnPropertyDescriptor(o, "config");
+		if (d !== undefined) return !("value" in d);
+		o = Object.getPrototypeOf(o);
+	}
+	return false;
+}
+
+/**
  * A Google request's `params.config.httpOptions` at call start, read as the SDK's own plain property
  * access finds it, through the prototype chain (`readThroughChain`: no caller code runs), pinned for
  * that PATH at every later read: the first data `httpOptions` on the chain, as a NEW object holding
@@ -915,11 +934,14 @@ export function movedRequestOptions(
  * already refused anything unreadable or off the list; should this be reached without that, it
  * refuses the same names.
  */
-export function googleHttpOptionsAtCallStart(
-	request: unknown,
-):
+export function googleHttpOptionsAtCallStart(request: unknown):
 	| { refused: string[] }
-	| { pinned: { httpOptions: Record<string, unknown> | undefined; enumerable: boolean } } {
+	| {
+			pinned: { httpOptions: Record<string, unknown> | undefined; enumerable: boolean } | undefined;
+	  } {
+	// A getter `config` is read by the SDK, natively, and `httpOptions` with it: nothing is pinned
+	// (see `googleConfigIsGetter`).
+	if (googleConfigIsGetter(request)) return { pinned: undefined };
 	const config = readThroughChain(request, "config");
 	const http = readThroughChain(config, "httpOptions");
 	const refused = ungovernedKeysOf(

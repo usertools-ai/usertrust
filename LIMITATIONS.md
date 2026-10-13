@@ -105,7 +105,7 @@ accepted only after a short behavioural check. A client with neither is refused.
 In that run every getter, `toJSON` hook and Proxy trap in the request runs as
 often, and in the same order, as when the SDK sends it, apart from what the
 per-call request-option check refuses before the run (a request or `config` given
-as a Proxy or held by an accessor, an accessor on an option key). The SDK's own writes
+as a Proxy, an accessor on an option key). The SDK's own writes
 (moving a `$schema` `responseSchema`, rewriting a declaration's `parameters`) land
 on your objects as they would natively, once per call. What the SDK read becomes
 a plain-data copy, and that copy is what the PII scan, redaction, the meter and
@@ -138,8 +138,14 @@ own:
   replaced after the call started; with none at the start, none is given. Your
   own `httpOptions` is never read again. It is read as the SDK finds it, through
   the prototype chain, so one the config inherits is governed the same way: its
-  allowed keys are sent, and any other key is refused. An accessor or a Proxy on the way (for `config` too), or a chain longer than
-  64 objects, cannot be read without running your code, and the call is refused.
+  allowed keys are sent, and any other key is refused. An accessor or a Proxy on the way to `httpOptions`, a Proxy on the way to
+  `config`, or a chain longer than 64 objects, cannot be read without running your
+  code, and the call is refused. A `config` held by a getter is the exception: nothing
+  is pinned, and the SDK reads it and its `httpOptions` when it reads them, so a
+  later change to an allowed key such as a header is sent as the SDK reads it
+  (before, a getter `config` was read, and its `httpOptions` fixed, at the start of
+  the call); anything off the list is still refused, by the check on the request
+  that is sent.
 - **Every other field is read when the SDK reads it, not when the call starts.**
   The SDK reads the request after its own first `await`, so a field you change
   right after calling (a `systemInstruction`, `contents`) is sent as it is then,

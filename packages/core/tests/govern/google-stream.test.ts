@@ -1140,43 +1140,18 @@ describe("automatic function calling: metered per round on generateContent, refu
 	});
 
 	for (const method of AFC_METHODS) {
-		it(`${method}: a config held by an accessor (here one that would THROW) is refused at call start, its getter never run: audited, nothing held or sent`, async () => {
-			const engine = makeMockEngine();
-			const audit = makeMockAudit();
-			const { client, generateContentStream } = makeGoogleClient();
-			const governed = await trust(client, {
-				dryRun: false,
-				budget: 50_000,
-				vaultBase: tmpVault,
-				_engine: engine,
-				_audit: audit,
-			});
-			const getter = vi.fn(() => {
-				throw new Error("getter exploded");
-			});
-			const params = Object.defineProperty(
-				{ model: "gemini-2.5-flash", contents: "hi" },
-				"config",
-				{
-					get: getter,
+		it(`${method}: a config getter that THROWS fails with the getter's own error, as natively: audited, nothing held or sent`, async () => {
+			await expectSdkRejection(tmpVault, method, () =>
+				Object.defineProperty({ model: "gemini-2.5-flash", contents: "hi" }, "config", {
+					get: () => {
+						throw new Error("getter exploded");
+					},
 					enumerable: true,
-				},
+				}),
 			);
-			const err = await callModels(governed, method, params).then(
-				() => undefined,
-				(e: unknown) => e,
-			);
-			expect(err).toBeInstanceOf(PolicyDeniedError);
-			expect((err as Error).message).toContain("config (unreadable)");
-			expect(getter).not.toHaveBeenCalled();
-			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
-			expect(engine.spendPending).not.toHaveBeenCalled();
-			expect(client.models.generateContent).not.toHaveBeenCalled();
-			expect(generateContentStream).not.toHaveBeenCalled();
-			await destroy(governed);
 		});
 
-		it(`${method}: a config that is not an object (here a data property holding a number) is governed as natively: the SDK reads nothing from it`, async () => {
+		it(`${method}: a config that is not an object (here from a getter) is governed as natively: the SDK reads nothing from it`, async () => {
 			const engine = makeMockEngine();
 			const audit = makeMockAudit();
 			const { client, generateContentStream } = makeGoogleClient();
@@ -1187,7 +1162,11 @@ describe("automatic function calling: metered per round on generateContent, refu
 				_engine: engine,
 				_audit: audit,
 			});
-			const params = () => ({ model: "gemini-2.5-flash", contents: "hi", config: 42 });
+			const params = () =>
+				Object.defineProperty({ model: "gemini-2.5-flash", contents: "hi" }, "config", {
+					get: () => 42,
+					enumerable: true,
+				});
 			const native = await nativeRun(method, params());
 			expect(native).toEqual({ result: "ok", requests: 1 });
 
@@ -1351,7 +1330,11 @@ describe("a config getter that flips after its first read cannot turn the SDK's 
 	}
 
 	for (const method of AFC_METHODS) {
-		it(`${method}: config held by an accessor is refused at call start, as per-call request options are (config unreadable): the getter never runs, no model request, and the callable tool's code never runs`, async () => {
+		it(`${method}: ${
+			method === "generateContent"
+				? 'the SDK reads a different tools list on different reads, which the mirror cannot hold: refused as "can\'t tell"'
+				: "the SDK, reading the callable on its AFC check, would run its streamed loop: refused as an AFC stream"
+		}; no model request, and the callable tool's code never runs`, async () => {
 			const { sdk, sent } = realSdk();
 			const { params, getter, tool } = flippingRequest();
 			const audit = makeMockAudit();
@@ -1372,11 +1355,14 @@ describe("a config getter that flips after its first read cannot turn the SDK's 
 			);
 
 			expect(err).toBeInstanceOf(PolicyDeniedError);
-			expect((err as Error).message).toContain("request_option_refused");
-			expect((err as Error).message).toContain("config (unreadable)");
+			expect((err as Error).message).toContain(
+				method === "generateContent"
+					? `models.${method} could not be checked for automatic function calling`
+					: `models.${method} with automatic function calling is not governed yet`,
+			);
 			expect(audit.events.map((e) => e.kind)).toEqual(["policy_denied"]);
-			// refused before anything read the request: the getter never ran, nothing was sent
-			expect(getter).not.toHaveBeenCalled();
+			// the getter ran as the SDK reads it, more than once; nothing was sent, and no tool code ran
+			expect(getter.mock.calls.length).toBeGreaterThan(1);
 			expect(sent).toHaveLength(0);
 			expect(tool.tool).not.toHaveBeenCalled();
 			expect(tool.callTool).not.toHaveBeenCalled();

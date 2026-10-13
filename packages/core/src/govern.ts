@@ -57,6 +57,7 @@ import {
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
 	detachedArgs,
+	googleConfigIsGetter,
 	googleHttpOptionsAtCallStart,
 	guardedGet,
 	type MethodBoundary,
@@ -1731,7 +1732,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		thisArg: unknown,
 	): { refused: Promise<never> } | { pinned: PinnedHttpOptions | undefined } {
 		const attribution = getCurrentCostCenter();
-		const moved = movedRequestOptions(kind, args, thisArg);
+		// A getter `config` is exempt here: it, and the `httpOptions` it holds, are read by the dry run
+		// as the SDK reads them, and checked on that reading in interceptCall (googleConfigIsGetter).
+		// The two names the check gives a config it cannot read without that getter are dropped; any
+		// other (the client's own options) still refuses.
+		const configGetter = googleConfigIsGetter(args[0]);
+		const moved = movedRequestOptions(kind, args, thisArg).filter(
+			(name) =>
+				!configGetter ||
+				(name !== "config (unreadable)" && name !== "config.httpOptions (unreadable)"),
+		);
 		// `config.httpOptions` as the SDK will find it, through the prototype chain: governed, then
 		// pinned for its path (or refused, as the per-call option check refuses).
 		const atStart = moved.length > 0 ? undefined : googleHttpOptionsAtCallStart(args[0]);
