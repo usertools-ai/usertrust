@@ -42,6 +42,24 @@ npm, and its version is its own: the `usertrust` packages and their
   idempotent on the server, and a hold it cannot end is ended by the ledger's pending timeout
   ([#248](https://github.com/usertools-ai/usertrust/issues/248)).
 
+- **Stop keeps a `.releasing` hold whose give-back failed, so a re-fire still finds it.** Stop
+  gave each `.releasing` hold back once and then forgot it, whatever the server answered. After a
+  5xx or a timeout the hold could still be live with nothing naming it, and a re-fire of the same
+  call reserved a second hold beside it: an early refusal near the budget until the ledger's
+  pending timeout ended the first. The hold is now kept, at every Stop and at SessionEnd too,
+  since `claude --resume` can re-fire the deferred call later. A later Stop gives it back again
+  (a 200 ends it; a 404 says it is gone). Its gaps are written at the first failed give-back, so a
+  session killed afterwards still has them, and the record is marked so no later attempt writes
+  them again (a gap that cannot be written leaves it unmarked, and the next Stop writes it).
+  SessionStart drops any such record after 24 hours, long past the ledger's pending timeout,
+  when its hold is void; one whose gaps never made it on record gets a last attempt to write
+  them first. A `.settling` hold, whose call ran and is never re-fired, is
+  unchanged.
+
+- **A kept release record carries its session id, so its gaps are placed in the right session.**
+  Every hold's record now stores its session id, and SessionStart reads it from there instead of
+  from the record's file name, which a session id containing `__` could split in the wrong place.
+
 ## [3.0.2] - 2026-10-12
 
 ### Fixed

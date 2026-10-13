@@ -120,16 +120,19 @@ rejection of the hold — throws out to its flow's **denial boundary**, which ap
 as `auditEventHash`, and rethrows. The boundary is a `catch` wrapped **around** the
 try/finally that releases the budget mutex, so the append runs with the lock already
 released; and it ends **lexically before** the provider call in step 6, so a provider that
-throws a same-typed error is never audited as a governor decision. There are **six append
+throws a same-typed error is never audited as a governor decision. There are **seven append
 sites**: the mutex-section boundary in each of the three flows, a pre-mutex unknown-model
 site in `interceptCall` and in headless `authorize` (actions have no model to price, so
-`governActionImpl` has only the mutex one), and the pre-mutex request-option refusal at the
-top of `interceptCall` (`movedRequestOptions`, before anything is held, scanned or sent).
-Four of the six are `catch (denialErr)` blocks. The exceptions are headless's pre-mutex
-unknown-model site and `interceptCall`'s request-option refusal, which append inline
-before an unconditional `throw`, because the throw is right there and needs no catch to
-intercept it. Grepping `catch (denialErr)` therefore finds four, not six. Payloads and rationale live in
-`audit/denial-events.ts`.
+`governActionImpl` has only the mutex one), the pre-mutex request-option refusal at the
+top of `interceptCall` (`movedRequestOptions`, before anything is held, scanned or sent), and
+`refuseUngovernedMethod`, which records a call default-deny refuses (an ungoverned SDK method,
+a call through the raw client, a Google automatic-function-calling refusal, or a
+`withOptions()` client whose transport changed) before any of it reaches a flow.
+Four of the seven are `catch (denialErr)` blocks. The exceptions are headless's pre-mutex
+unknown-model site, `interceptCall`'s request-option refusal and `refuseUngovernedMethod`,
+which append inline before an unconditional `throw`, because the throw is right there and
+needs no catch to intercept it. Grepping `catch (denialErr)` therefore finds four, not seven.
+Payloads and rationale live in `audit/denial-events.ts`.
 
 `destroy()` waits up to 5s, one deadline for all of them, for the terminals still working (a
 settle's POST, an abort or release parked on its void). At the deadline it takes every remaining
@@ -1621,7 +1624,14 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 
 ### Client detection
 
-**Duck typing only; never import a provider SDK at runtime.** `detect.ts` imports types only.
+Detection stays duck-typed, and provider SDKs stay optional peers. `detect.ts` imports types only.
+The ONE exception: `packages/core/src/google-request.ts` may `import()` the optional peer
+`@google/genai`, only to obtain the `Models` pipeline the behavioural probe accepts; if it is absent
+or fails the probe, every governed Google call is refused. Nothing else imports a provider SDK at
+runtime: `packages/core/tests/detect/no-runtime-provider-import.test.ts` fails on any other runtime
+reference, including a specifier held in a variable. The reason: usertrust never runs a client's own,
+unverified `Models` before authorization; the SDK exports no request converters or transport hook,
+so its own pipeline is the only way to build the exact request it sends.
 `@anthropic-ai/sdk`, `openai` and `@google/genai` are **optional** peer dependencies. Their floors
 (`>=0.116.0`, `>=7.4.0`, `>=1.52.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
 versions the default-deny free list was classified on. Moving a floor means re-running that
@@ -1664,8 +1674,9 @@ reads; a refused wrapper builds a fresh error per call.
 `FREE_METHODS.google` cites `dist/node/index.mjs:LINE VERB path` per entry.
 `GOOGLE_REFUSED_METHODS` in `govern.ts` is a HINT table only (its names get the governAction() hint);
 it refuses nothing itself. With automatic
-function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in `google-afc.ts`, a mirror of the
-SDK's `shouldDisableAfc`, made on a snapshot of the request that is then what is forwarded),
+function calling (decided by the SDK itself: `google-request.ts` runs the SDK's own request pipeline
+over the request against a transport stand-in that sends nothing, and the plain-data copy of what
+it read, checked per call by a second run, is what is forwarded),
 `models.generateContent` runs the loop itself, each round its own governed call
 (`runGovernedAfc`, which calls the SDK's own `generateContentInternal` on the RAW `models`), and
 `models.generateContentStream` is refused (a streamed loop is not metered per round yet).
