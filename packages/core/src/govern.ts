@@ -57,7 +57,6 @@ import {
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
 	detachedArgs,
-	googleConfigIsGetter,
 	googleHttpOptionsAtCallStart,
 	guardedGet,
 	type MethodBoundary,
@@ -1732,26 +1731,21 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		thisArg: unknown,
 	): { refused: Promise<never> } | { pinned: PinnedHttpOptions | undefined } {
 		const attribution = getCurrentCostCenter();
-		// A getter `config` is exempt here: it, and the `httpOptions` it holds, are read by the dry run
-		// as the SDK reads them, and checked on that reading in interceptCall (googleConfigIsGetter).
-		// The two names the check gives a config it cannot read without that getter are dropped; any
-		// other (the client's own options) still refuses.
-		const configGetter = googleConfigIsGetter(args[0]);
-		const moved = movedRequestOptions(kind, args, thisArg).filter(
-			(name) =>
-				!configGetter ||
-				(name !== "config (unreadable)" && name !== "config.httpOptions (unreadable)"),
-		);
-		// `config.httpOptions` as the SDK will find it, through the prototype chain: governed, then
-		// pinned for its path (or refused, as the per-call option check refuses).
-		const atStart = moved.length > 0 ? undefined : googleHttpOptionsAtCallStart(args[0]);
-		const refused = optionsRefusal(
-			atStart !== undefined && "refused" in atStart ? atStart.refused : moved,
-			args,
-			attribution,
-		);
+		// The option path (config, httpOptions, its keys) is decided by googleHttpOptionsAtCallStart,
+		// one rule at every level: a Proxy or a data key off the list refused, an accessor deferred to
+		// the dry run (and checked, in interceptCall, on what it read), plain data pinned. Its names
+		// replace the per-call option check's for that path; the check's others (a request given as a
+		// Proxy, the client's own options) still refuse.
+		const atStart = googleHttpOptionsAtCallStart(args[0]);
+		const moved = [
+			...new Set([
+				...movedRequestOptions(kind, args, thisArg).filter((name) => !name.startsWith("config")),
+				...("refused" in atStart ? atStart.refused : []),
+			]),
+		];
+		const refused = optionsRefusal(moved, args, attribution);
 		if (refused === undefined) {
-			return { pinned: atStart !== undefined && "pinned" in atStart ? atStart.pinned : undefined };
+			return { pinned: "pinned" in atStart ? atStart.pinned : undefined };
 		}
 		// Counted in flight, like every refusal, so destroy() waits for its audit append.
 		inFlightCount++;

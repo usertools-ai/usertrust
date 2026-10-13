@@ -906,59 +906,87 @@ export function movedRequestOptions(
 	];
 }
 
+/** One step of the Google option path: what `key` is where plain property access finds it. */
+type GooglePathStep = { found: false } | { found: true; value: unknown } | "accessor" | "proxy";
+
 /**
- * Is a Google request's `config`, where the SDK's `params.config` finds it on the prototype chain,
- * an ACCESSOR (a getter), with no Proxy on the way? Descriptors only, bounded as `readThroughChain`
- * is. Such a config is not refused at call start, as the request was before this pipeline: the
- * request gate's dry run reads it as the SDK does, and the `httpOptions` it holds is checked on what
- * the dry run read (`movedRequestOptions` on the request that is sent), before anything is held or
- * sent. A Proxy on the way stays unreadable, and refused.
+ * `key` on `holder`'s prototype chain, read as `readThroughChain` reads it (descriptors only, a
+ * Proxy checked before every step, at most `MAX_CHAIN_DEPTH` objects), but telling apart the two
+ * things that walk cannot read: an accessor (`"accessor"`) and a Proxy or a chain too deep
+ * (`"proxy"`).
  */
-export function googleConfigIsGetter(request: unknown): boolean {
-	let o: unknown = request;
-	for (let depth = 0; o !== null && (typeof o === "object" || typeof o === "function"); depth++) {
-		if (depth >= MAX_CHAIN_DEPTH || utilTypes.isProxy(o)) return false;
-		const d = Object.getOwnPropertyDescriptor(o, "config");
-		if (d !== undefined) return !("value" in d);
+function googlePathStep(holder: unknown, key: string): GooglePathStep {
+	if (holder == null || (typeof holder !== "object" && typeof holder !== "function")) {
+		return { found: false };
+	}
+	let o: object | null = holder;
+	for (let depth = 0; o !== null; depth++) {
+		if (depth >= MAX_CHAIN_DEPTH || utilTypes.isProxy(o)) return "proxy";
+		const d = Object.getOwnPropertyDescriptor(o, key);
+		if (d !== undefined) return "value" in d ? { found: true, value: d.value } : "accessor";
 		o = Object.getPrototypeOf(o);
 	}
-	return false;
+	return { found: false };
 }
 
 /**
- * A Google request's `params.config.httpOptions` at call start, read as the SDK's own plain property
- * access finds it, through the prototype chain (`readThroughChain`: no caller code runs), pinned for
- * that PATH at every later read: the first data `httpOptions` on the chain, as a NEW object holding
- * only its governed keys (and whether the SDK's own key listing of config would see it: own and
- * enumerable), or absent. `movedRequestOptions`, which runs first, reads it the same way and has
- * already refused anything unreadable or off the list; should this be reached without that, it
- * refuses the same names.
+ * A Google request's option path, `params.config.httpOptions` and its keys, at call start, walked as
+ * the SDK's own property access finds it, without running caller code. One rule at every level:
+ * - a Proxy (or a chain too deep) anywhere on the path cannot be read: REFUSED, as the per-call
+ *   option check names it;
+ * - an option key off the list held as DATA is REFUSED, as that check refuses it;
+ * - an ACCESSOR anywhere on the path (a getter `config`, a getter `httpOptions`, own or inherited,
+ *   or a getter key inside `httpOptions`) is DEFERRED: not refused, nothing pinned (`pinned:
+ *   undefined`); the request gate's dry run reads it as the SDK does, and the per-call option check
+ *   on the request that is sent governs what was read, before anything is held or sent;
+ * - a path that is plain data throughout is PINNED for that path at every later read: a NEW object
+ *   holding only the governed keys of the first data `httpOptions` on the chain (and whether the
+ *   SDK's own key listing of config sees it: own and enumerable), or absent when there is none.
  */
 export function googleHttpOptionsAtCallStart(request: unknown):
 	| { refused: string[] }
 	| {
 			pinned: { httpOptions: Record<string, unknown> | undefined; enumerable: boolean } | undefined;
 	  } {
-	// A getter `config` is read by the SDK, natively, and `httpOptions` with it: nothing is pinned
-	// (see `googleConfigIsGetter`).
-	if (googleConfigIsGetter(request)) return { pinned: undefined };
-	const config = readThroughChain(request, "config");
-	const http = readThroughChain(config, "httpOptions");
+	const absent = { pinned: { httpOptions: undefined, enumerable: false } };
+	if (utilTypes.isProxy(request)) return { refused: ["request (a Proxy)"] };
+	const config = googlePathStep(request, "config");
+	if (config === "proxy") return { refused: ["config (unreadable)"] };
+	if (config === "accessor") return { pinned: undefined };
+	if (!config.found) return absent;
+	const http = googlePathStep(config.value, "httpOptions");
+	if (http === "proxy") return { refused: ["config.httpOptions (unreadable)"] };
+	if (http === "accessor") return { pinned: undefined };
+	if (!http.found || http.value === undefined || http.value === null) return absent;
+	const options = http.value;
+	// A getter key inside httpOptions is deferred too; a data key off the list beside it is not.
+	const accessorKeys = plainObject(options)
+		? Object.getOwnPropertyNames(options).filter((key) => {
+				const d = Object.getOwnPropertyDescriptor(options, key);
+				return d !== undefined && !("value" in d);
+			})
+		: [];
+	const deferredNames = new Set(
+		accessorKeys.flatMap((key) => [
+			`config.httpOptions.${key}`,
+			`config.httpOptions.${key} (an accessor)`,
+			`config.httpOptions.${key} (internal)`,
+		]),
+	);
 	const refused = ungovernedKeysOf(
-		http,
+		options,
 		GOVERNED_GOOGLE_HTTP_OPTIONS,
 		"config.httpOptions.",
 		"config.httpOptions",
-	);
+	).filter((name) => !deferredNames.has(name));
 	if (refused.length > 0) return { refused };
-	if (!plainObject(http)) return { pinned: { httpOptions: undefined, enumerable: false } };
-	const own =
-		config !== null && typeof config === "object" && !utilTypes.isProxy(config)
-			? Object.getOwnPropertyDescriptor(config, "httpOptions")
-			: undefined;
+	if (accessorKeys.length > 0) return { pinned: undefined };
+	const own = utilTypes.isProxy(config.value)
+		? undefined
+		: Object.getOwnPropertyDescriptor(config.value as object, "httpOptions");
 	return {
 		pinned: {
-			httpOptions: governedCopy(http, GOVERNED_GOOGLE_HTTP_OPTIONS),
+			httpOptions: governedCopy(options as Record<string, unknown>, GOVERNED_GOOGLE_HTTP_OPTIONS),
 			enumerable: own?.enumerable === true,
 		},
 	};

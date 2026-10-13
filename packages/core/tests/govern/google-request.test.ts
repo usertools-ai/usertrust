@@ -927,15 +927,15 @@ describe("config.httpOptions is read at call start, as per-call request options 
 		for (const [backend, vertex] of BACKENDS) {
 			const on = `${method} on ${backend}`;
 
-			it(`${on}: an ACCESSOR config.httpOptions is refused at call start, and its getter never runs`, async () => {
-				const reads = { governed: 0 };
-				const make = () => {
+			it(`${on}: an ACCESSOR config.httpOptions holding only allowed keys is read when the SDK reads it, and sent as natively`, async () => {
+				const reads = { native: 0, governed: 0 };
+				const make = (side: keyof typeof reads) => () => {
 					const config: Loose = { tools: [mcpTool()] };
 					Object.defineProperty(config, "httpOptions", {
 						enumerable: true,
 						configurable: true,
 						get: () => {
-							reads.governed++;
+							reads[side]++;
 							return { headers: { "x-test": "from a getter" } };
 						},
 					});
@@ -943,11 +943,12 @@ describe("config.httpOptions is read at call start, as per-call request options 
 				};
 				const r = await nativeThenGoverned(
 					method,
-					{ native: () => request({}), governed: make },
+					{ native: make("native"), governed: make("governed") },
 					{ vertex },
 				);
-				expectOptionRefused(r, "config.httpOptions (unreadable)");
-				expect(reads.governed).toBe(0);
+				expectSameSend(r);
+				expect(r.gov.requests.map((q) => q.testHeader)).toEqual(["from a getter"]);
+				expect(reads.governed).toBe(reads.native);
 			});
 
 			it(`${on}: a data config.httpOptions beside an MCP-usage tool: the same request and header as natively`, async () => {
@@ -1917,16 +1918,25 @@ describe("an inherited config.httpOptions is read at call start as the SDK finds
 				expect(reads.governed).toBe(0);
 			});
 
-			it(`${on}: an httpOptions ACCESSOR on the config's prototype is refused, and the getter never runs`, async () => {
-				const getter = vi.fn(() => ({ headers: { "x-test": "from a getter" } }));
-				const make = () => inheriting(Object.defineProperty({}, "httpOptions", { get: getter }));
+			it(`${on}: an httpOptions ACCESSOR on the config's prototype holding only allowed keys is read when the SDK reads it, and sent as natively`, async () => {
+				const reads = { native: 0, governed: 0 };
+				const make = (side: keyof typeof reads) => () =>
+					inheriting(
+						Object.defineProperty({}, "httpOptions", {
+							get: () => {
+								reads[side]++;
+								return { headers: { "x-test": "from a getter" } };
+							},
+						}),
+					);
 				const r = await nativeThenGoverned(
 					method,
-					{ native: () => request({}), governed: make },
+					{ native: make("native"), governed: make("governed") },
 					{ vertex },
 				);
-				expectOptionRefused(r, "config.httpOptions (unreadable)");
-				expect(getter).not.toHaveBeenCalled();
+				expectSameSend(r);
+				expect(r.gov.requests.map((q) => q.testHeader)).toEqual(["from a getter"]);
+				expect(reads.governed).toBe(reads.native);
 			});
 
 			it(`${on}: a Proxy on the config's prototype chain is refused, and none of its traps runs`, async () => {
@@ -2120,6 +2130,192 @@ describe("a getter config that answers a different httpOptions on its later read
 					expect(r.governed).toBe(r.native);
 				});
 			}
+		}
+	}
+});
+
+describe("an accessor anywhere on the option path is read when the SDK reads it, and governed on what was read", () => {
+	const SECRET = "ssn 123-45-6789";
+	const EXTRA = () => ({ extraBody: { labels: { secret: SECRET } } });
+
+	/** Refused by the per-call option check on the request that would be sent: audited, nothing sent. */
+	function expectRefusedOnWhatWasRead(r: Outcome): void {
+		expect(JSON.stringify(r.raw.requests)).toContain(SECRET); // natively it is sent
+		expect(r.govResult).toContain("request_option_refused");
+		expect(r.govResult).toContain("config.httpOptions.extraBody");
+		expect(r.auditKinds).toEqual(["policy_denied"]);
+		expect(r.gov.requests).toHaveLength(0);
+	}
+
+	/** Each accessor level, holding what `answer` gives. */
+	const levels: Array<[string, (answer: () => Loose) => () => Loose]> = [
+		[
+			"a getter config.httpOptions (own)",
+			(answer) => () =>
+				request(
+					Object.defineProperty({}, "httpOptions", { get: answer, enumerable: true }) as Loose,
+				),
+		],
+		[
+			"a getter config.httpOptions (inherited)",
+			(answer) => () =>
+				request(Object.create(Object.defineProperty({}, "httpOptions", { get: answer })) as Loose),
+		],
+		[
+			"a getter key inside a data httpOptions",
+			(answer) => () => {
+				const value = answer();
+				const options = {};
+				for (const [key, v] of Object.entries(value)) {
+					Object.defineProperty(options, key, { get: () => v, enumerable: true });
+				}
+				return request({ httpOptions: options });
+			},
+		],
+	];
+
+	for (const method of METHODS) {
+		for (const [backend, vertex] of BACKENDS) {
+			const on = `${method} on ${backend}`;
+			for (const [level, make] of levels) {
+				it(`${on}, ${level} holding only allowed keys: sent as natively`, async () => {
+					const r = await nativeThenGoverned(
+						method,
+						same(make(() => ({ headers: { "x-test": "via an accessor" } }))),
+						{ vertex },
+					);
+					expectSameSend(r);
+					expect(r.gov.requests.map((q) => q.testHeader)).toEqual(["via an accessor"]);
+				});
+
+				it(`${on}, ${level} holding extraBody: refused on what the SDK read, nothing sent`, async () => {
+					const r = await nativeThenGoverned(method, same(make(EXTRA)), { vertex });
+					expectRefusedOnWhatWasRead(r);
+				});
+			}
+
+			it(`${on}: a Proxy as config.httpOptions is refused at call start, and none of its traps runs`, async () => {
+				const traps = { n: 0 };
+				const make = () =>
+					request({
+						httpOptions: new Proxy(
+							{ headers: { "x-test": "behind a Proxy" } },
+							{
+								get: (t, k, r) => {
+									traps.n++;
+									return Reflect.get(t, k, r);
+								},
+								ownKeys: (t) => {
+									traps.n++;
+									return Reflect.ownKeys(t);
+								},
+								getOwnPropertyDescriptor: (t, k) => {
+									traps.n++;
+									return Reflect.getOwnPropertyDescriptor(t, k);
+								},
+							},
+						),
+					});
+				const r = await nativeThenGoverned(
+					method,
+					{ native: () => request({}), governed: make },
+					{ vertex },
+				);
+				expect(r.govResult).toContain("request_option_refused");
+				expect(r.govResult).toContain("config.httpOptions (a Proxy)");
+				expect(r.gov.requests).toHaveLength(0);
+				expect(traps.n).toBe(0);
+			});
+		}
+	}
+
+	/** A data tool the SDK counts as MCP usage: it then re-reads config.httpOptions (three reads). */
+	const mcpTool = () => ({
+		functionDeclarations: [{ name: "lookup" }],
+		inputSchema: { type: "object" },
+	});
+
+	/** A data config whose own httpOptions getter answers `{ timeout }` first and `later()` on every later read. */
+	function flippingHttpOptions(mcp: boolean, later: () => Loose) {
+		const reads = { n: 0 };
+		const params = request(
+			Object.defineProperty(mcp ? { tools: [mcpTool()] } : {}, "httpOptions", {
+				get: () => {
+					reads.n++;
+					return reads.n === 1 ? { timeout: 5000 } : later();
+				},
+				enumerable: true,
+			}) as Loose,
+		);
+		return { params, reads };
+	}
+
+	async function runFlip(method: Method, vertex: boolean, mcp: boolean, later: () => Loose) {
+		const native = flippingHttpOptions(mcp, later);
+		const raw = wire();
+		globalThis.fetch = raw.fetchStub as typeof fetch;
+		await runOn(sdkClient(vertex).models, method, native.params);
+		const governed = flippingHttpOptions(mcp, later);
+		const atHold: number[] = [];
+		const engine = {
+			spendPending: vi.fn(async (p: { transferId: string; amount: number }) => {
+				atHold.push(governed.reads.n);
+				return { transferId: p.transferId };
+			}),
+			postPendingSpend: vi.fn(async () => {}),
+			voidPendingSpend: vi.fn(async () => {}),
+			destroy: vi.fn(),
+		};
+		const gov = wire();
+		globalThis.fetch = gov.fetchStub as typeof fetch;
+		const client = await trust(sdkClient(vertex), {
+			dryRun: false,
+			budget: 50_000_000,
+			vaultBase: vault,
+			_engine: engine,
+			_audit: recordingAudit(),
+		});
+		const { result } = await runOn(client.models, method, governed.params);
+		await client.destroy();
+		return { raw, gov, result, native: native.reads.n, governed: governed.reads.n, atHold };
+	}
+
+	for (const method of METHODS) {
+		for (const [backend, vertex] of BACKENDS) {
+			const on = `${method} on ${backend}`;
+
+			it(`${on}: an httpOptions getter answering timeout first and extraBody (SECRET) later, no tools: the SDK reads it once, so both send the timeout only; SECRET nowhere`, async () => {
+				const r = await runFlip(method, vertex, false, EXTRA);
+				expect(JSON.stringify(r.raw.requests)).not.toContain(SECRET);
+				expect(JSON.stringify(r.gov.requests)).not.toContain(SECRET);
+				expect(r.gov.requests.map((q) => q.timeoutHeader)).toEqual(["5"]);
+				expect(r.gov.requests.map((q) => q.timeoutHeader)).toEqual(
+					r.raw.requests.map((q) => q.timeoutHeader),
+				);
+				expect(r.governed).toBe(r.native); // measured: 1
+				expect(r.atHold).toEqual([r.governed]); // no read after the hold
+			});
+
+			it(`${on}: the same getter beside an MCP-usage tool (the SDK re-reads it): SECRET is sent natively, and governed it is refused on what was read, every read the dry run's`, async () => {
+				const r = await runFlip(method, vertex, true, EXTRA);
+				expect(JSON.stringify(r.raw.requests)).toContain(SECRET);
+				expect(JSON.stringify(r.gov.requests)).not.toContain(SECRET);
+				expect(r.result).toContain("request_option_refused");
+				expect(r.result).toContain("config.httpOptions.extraBody");
+				expect(r.gov.requests).toHaveLength(0);
+				expect(r.atHold).toEqual([]);
+				expect(r.governed).toBe(r.native);
+			});
+
+			it(`${on}: the same getter beside an MCP-usage tool answering an allowed header later: sent as natively, no read of it after the hold`, async () => {
+				const r = await runFlip(method, vertex, true, () => ({ headers: { "x-test": "later" } }));
+				expect(r.result).toBe("ok");
+				expect(r.gov.requests.map((q) => q.testHeader)).toEqual(
+					r.raw.requests.map((q) => q.testHeader),
+				);
+				expect(r.atHold).toEqual([r.governed]);
+				expect(r.governed).toBe(r.native);
+			});
 		}
 	}
 });
