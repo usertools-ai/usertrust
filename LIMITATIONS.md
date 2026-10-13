@@ -119,6 +119,16 @@ own:
   both answers, so the call is refused rather than sent. The same goes for an
   object the SDK both reads field by field and serializes through `toJSON`, and for
   a cycle.
+- **Some request shapes are refused rather than copied.** These are a header value
+  that is not a string, a function of yours in the request that the SDK calls (a
+  built-in method such as an array's `map` is fine), and a callable tool the
+  request also holds outside `config.tools`. The copy cannot reproduce what the
+  transport or that code would make of them.
+- **A callable tool reaches the SDK as a wrapper.** Its `tool()` runs inside the
+  first governed round, and `callTool()` is passed through; nothing else of the
+  tool object is reachable from the request. A call the SDK sends without its own
+  function-calling loop carries `automaticFunctionCalling.disable: true`, which the
+  SDK never sends to the provider.
 - **Later AFC rounds reuse the copy.** With automatic function calling on
   `generateContent`, rounds after the first reuse the copy instead of re-reading
   your objects. Every round is still its own governed, metered call.

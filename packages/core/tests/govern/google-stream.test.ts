@@ -1217,8 +1217,9 @@ describe("edge values of the AFC config are decided by the SDK itself, each pinn
 		expect(out.receipts).toBeUndefined(); // not the governed loop
 		expect(engine.spendPending).toHaveBeenCalledOnce();
 		const sent = client.models.generateContent.mock.calls[0]?.[0] as Record<string, unknown>;
+		// the SDK decided no AFC on disable: 1; the forward then owns its off switch as disable: true
 		expect((sent.config as Record<string, unknown>).automaticFunctionCalling).toEqual({
-			disable: 1,
+			disable: true,
 		});
 		await destroy(governed);
 	});
@@ -1953,7 +1954,7 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 			});
 		}
 
-		it(`${method}: AFC disabled with callable tools is governed, and the SDK receives the same tool references`, async () => {
+		it(`${method}: AFC disabled with callable tools is governed, and the SDK receives a governed wrapper of each, whose tool() has not run`, async () => {
 			const engine = makeMockEngine();
 			const { client, generateContentStream } = makeGoogleClient();
 			const governed = await trust(client, {
@@ -1972,10 +1973,26 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 			const sdk =
 				method === "generateContent" ? client.models.generateContent : generateContentStream;
 			const received = sdk.mock.calls[0]?.[0] as Record<string, unknown>;
-			const receivedTools = (received.config as Record<string, unknown>).tools as unknown[];
+			const receivedTools = (received.config as Record<string, unknown>).tools as Array<
+				Record<string, unknown>
+			>;
 			expect(receivedTools).not.toBe(tools);
-			expect(receivedTools[0]).toBe(tools[0]);
-			expect(receivedTools[1]).toBe(tools[1]);
+			// each a fresh wrapper with the tool's prototype, its callTool delegating to the caller's, and
+			// a hidden toJSON answering {}: no other caller property is reachable from the request
+			for (const [i, wrapper] of receivedTools.entries()) {
+				const tool = tools[i] as unknown as Record<string, unknown>;
+				expect(wrapper).not.toBe(tool);
+				expect(Object.getPrototypeOf(wrapper)).toBe(Object.getPrototypeOf(tool));
+				expect(Object.keys(wrapper)).toEqual(["tool", "callTool"]);
+				expect(JSON.stringify(wrapper)).toBe("{}");
+				expect(tool.tool).not.toHaveBeenCalled();
+				await (wrapper.callTool as (c: unknown[]) => Promise<unknown>)([]);
+				expect(tool.callTool).toHaveBeenCalledOnce();
+			}
+			// the forward carries an owned disable: true, after the SDK's own decision of no AFC
+			expect((received.config as Record<string, unknown>).automaticFunctionCalling).toEqual({
+				disable: true,
+			});
 			await destroy(governed);
 		});
 
@@ -2001,10 +2018,15 @@ describe("the request is forwarded as a snapshot of the checked AFC config", () 
 			const sdk =
 				method === "generateContent" ? client.models.generateContent : generateContentStream;
 			const received = sdk.mock.calls[0]?.[0] as Record<string, unknown>;
-			// With no callable tool the SDK never reads maximumRemoteCalls, so the mirror does not carry it.
+			// With no callable tool the SDK never reads maximumRemoteCalls, so the mirror does not carry it;
+			// the single-call forward owns automaticFunctionCalling, with disable: true.
 			expect(received).toEqual({
 				...params,
-				config: { tools: [{ googleSearch: {} }], temperature: 0.2, automaticFunctionCalling: {} },
+				config: {
+					tools: [{ googleSearch: {} }],
+					temperature: 0.2,
+					automaticFunctionCalling: { disable: true },
+				},
 			});
 			expect(received).not.toBe(params);
 			expect(received.config).not.toBe(params.config);

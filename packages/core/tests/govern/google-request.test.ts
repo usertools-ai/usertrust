@@ -178,7 +178,7 @@ const sdkClient = (vertex: boolean) =>
 async function nativeThenGoverned(
 	method: Method,
 	params: { native: () => unknown; governed: () => unknown },
-	opts: { vertex?: boolean; pii?: "redact"; rounds?: Round[] } = {},
+	opts: { vertex?: boolean; pii?: "redact" | "block"; rounds?: Round[] } = {},
 ) {
 	const raw = wire(opts.rounds);
 	globalThis.fetch = raw.fetchStub as typeof fetch;
@@ -664,7 +664,11 @@ describe("a Google-shaped client that is not the SDK runs requests through the i
 			expect((await runOn(governed.models, method, params)).result).toBe("ok");
 			await governed.destroy();
 			expect(received).toHaveLength(1);
-			expect(received[0]).toEqual(params);
+			// the single-call forward owns automaticFunctionCalling, with disable: true (never on the wire)
+			expect(received[0]).toEqual({
+				...params,
+				config: { ...params.config, automaticFunctionCalling: { disable: true } },
+			});
 			expect(received[0]).not.toBe(params);
 		});
 
@@ -1084,4 +1088,158 @@ describe("the SDK's writes land on the caller's objects as natively, and no wrap
 			}
 		}
 	}
+});
+
+describe("caller code reached from the request cannot change what is sent after the snapshot", () => {
+	for (const method of METHODS) {
+		for (const [backend, vertex] of BACKENDS) {
+			const on = `${method} on ${backend}`;
+
+			it(`${on}: a header value that is an object (its toJSON and toString answer differently) is refused; natively the transport sends its toString`, async () => {
+				const note = { toJSON: () => EMAIL, toString: () => "safe" };
+				const make = () =>
+					request({ httpOptions: { headers: { "x-test": note as unknown as string } } });
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expect(r.raw.requests.map((q) => q.testHeader)).toEqual(["safe"]);
+				expect(r.govResult).toContain("could not be checked for automatic function calling");
+				expect(r.auditKinds).toEqual(["policy_denied"]);
+				expect(r.gov.requests).toHaveLength(0);
+			});
+
+			it(`${on}: httpOptions.extraBody is merged into the body as the transport merges it: governed == native`, async () => {
+				const make = () =>
+					request({
+						temperature: 0.5,
+						httpOptions: {
+							extraBody: { generationConfig: { candidateCount: 2 }, labels: { a: "b" } },
+						},
+					});
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expectSameSend(r);
+				expect(r.raw.requests[0]?.body["generationConfig"]).toMatchObject({
+					temperature: 0.5,
+					candidateCount: 2,
+				});
+			});
+
+			it(`${on}: an own map method on contents' parts, which the SDK calls, is refused (its output is not recorded); it ran as often as natively`, async () => {
+				const runs = { native: 0, governed: 0 };
+				const make = (side: "native" | "governed") => () => {
+					const parts: unknown[] = [{ text: "safe" }];
+					Object.defineProperty(parts, "map", {
+						value(this: unknown[], fn: (v: unknown, i: number, a: unknown[]) => unknown) {
+							runs[side]++;
+							return runs[side] >= 3 ? [{ text: EMAIL }] : Array.prototype.map.call(this, fn);
+						},
+						enumerable: false,
+					});
+					return request({}, [{ role: "user", parts }]);
+				};
+				const r = await nativeThenGoverned(
+					method,
+					{ native: make("native"), governed: make("governed") },
+					{ vertex },
+				);
+				expect(r.rawResult).toBe("ok");
+				expect(runs.native).toBeGreaterThan(0);
+				expect(runs.governed).toBe(runs.native);
+				expect(r.govResult).toContain("could not be checked for automatic function calling");
+				expect(r.gov.requests).toHaveLength(0);
+			});
+
+			it(`${on}: parts in an Array subclass (its map inherited from Array.prototype) go through: governed == native (control)`, async () => {
+				class Parts extends Array<unknown> {}
+				const make = () => request({}, [{ role: "user", parts: Parts.from([{ text: "safe" }]) }]);
+				const r = await nativeThenGoverned(method, same(make), { vertex });
+				expectSameSend(r);
+			});
+
+			it(`${on}: one object as both config.tools[0] (a callable whose tool() turns AFC back on) and config.automaticFunctionCalling { disable: true }: refused, never an unmetered loop`, async () => {
+				const calls = { native: { tool: 0, callTool: 0 }, governed: { tool: 0, callTool: 0 } };
+				const make = (side: "native" | "governed") => () => {
+					const shared: Loose = { disable: true };
+					shared["tool"] = async function (this: Loose) {
+						calls[side].tool++;
+						this["disable"] = false;
+						return { functionDeclarations: [{ name: "lookup" }] };
+					};
+					shared["callTool"] = async () => {
+						calls[side].callTool++;
+						return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+					};
+					return request({ tools: [shared], automaticFunctionCalling: shared });
+				};
+				const r = await nativeThenGoverned(
+					method,
+					{ native: make("native"), governed: make("governed") },
+					{ vertex, rounds: LOOP },
+				);
+				// natively generateContent runs tool() before its AFC check, so the SDK's own loop runs inside
+				// the one call (two provider requests); the stream checks first and sends one
+				expect(r.raw.requests).toHaveLength(method === "generateContent" ? 2 : 1);
+				expect(r.govResult).toContain("could not be checked for automatic function calling");
+				expect(r.auditKinds).toEqual(["policy_denied"]);
+				expect(r.gov.requests).toHaveLength(0);
+				expect(calls.governed).toEqual({ tool: 0, callTool: 0 });
+			});
+		}
+
+		it(`${method}: a callable whose own toJSON calls this.tool(): a call refused by policy runs neither`, async () => {
+			const calls = { tool: 0, toJSON: 0 };
+			const tool = {
+				async tool() {
+					calls.tool++;
+					return { functionDeclarations: [{ name: "lookup" }] };
+				},
+				async callTool() {
+					return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+				},
+				toJSON(this: { tool: () => Promise<unknown> }) {
+					calls.toJSON++;
+					void this.tool();
+					return {};
+				},
+			};
+			const r = await nativeThenGoverned(
+				method,
+				{ native: () => request({ tools: [] }), governed: () => request({ tools: [tool] }, EMAIL) },
+				{ pii: "block", rounds: LOOP },
+			);
+			expect(r.govResult).not.toBe("ok");
+			expect(r.gov.requests).toHaveLength(0);
+			expect(calls).toEqual({ tool: 0, toJSON: 0 });
+		});
+	}
+
+	it("generateContent: a callable whose own toJSON calls this.tool(): an authorized loop runs tool() as often as natively, and the governor never runs the toJSON", async () => {
+		const counts = { native: { tool: 0, toJSON: 0 }, governed: { tool: 0, toJSON: 0 } };
+		const make = (side: "native" | "governed") => () =>
+			request({
+				tools: [
+					{
+						async tool() {
+							counts[side].tool++;
+							return { functionDeclarations: [{ name: "lookup" }] };
+						},
+						async callTool() {
+							return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+						},
+						toJSON(this: { tool: () => Promise<unknown> }) {
+							counts[side].toJSON++;
+							void this.tool();
+							return {};
+						},
+					},
+				],
+			});
+		const r = await nativeThenGoverned(
+			"generateContent",
+			{ native: make("native"), governed: make("governed") },
+			{ rounds: LOOP },
+		);
+		expectSameSend(r);
+		expect(r.raw.requests).toHaveLength(2);
+		expect(counts.governed).toEqual(counts.native);
+		expect(counts.governed.toJSON).toBe(0);
+	});
 });

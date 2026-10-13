@@ -88,7 +88,6 @@ function detach(value: unknown): unknown {
  * delegates `callTool` to the real tool.
  */
 function snapshotTool(tool: CallableTool): CallableTool {
-	let memo: Promise<unknown> | undefined;
 	const wrapper = Object.create(Object.getPrototypeOf(tool)) as CallableTool;
 	for (const key of Reflect.ownKeys(tool)) {
 		const desc = Object.getOwnPropertyDescriptor(tool, key);
@@ -106,21 +105,7 @@ function snapshotTool(tool: CallableTool): CallableTool {
 		Object.defineProperty(wrapper, key, copy);
 	}
 	Object.defineProperty(wrapper, "tool", {
-		value: function (this: unknown): Promise<unknown> {
-			// Called synchronously on first use, like the SDK's own `await callableTool.tool()` inside its map.
-			memo ??= (async () => {
-				// ALWAYS on the real tool: the state `tool()` sets up (a ready flag, a dispatch table, a session) must live
-				// where `callTool` finds it, which is also the real tool. The accessor is read here, at use, never at wrap time.
-				const declaration = await (Reflect.get(tool, "tool") as () => Promise<unknown>).call(tool);
-				// Asked through the redacted request CLONE (pii "redact" with PII in the prompt): redact the answer itself, so
-				// the declaration the model sees has passed the same redaction as the rest of the request, whether it was held
-				// as state or in a closure. Asked through the wrapper (nothing was cloned): the answer as it is, as natively.
-				// redactPII hands its input back UNCHANGED when it detects nothing, so redact a DETACHED copy: the memo must never
-				// alias the real tool's live object, or a later callTool() that writes PII into it would leak in later rounds.
-				return this === wrapper ? declaration : redactPII(detach(declaration)).data;
-			})();
-			return memo;
-		},
+		value: lazyTool(tool, wrapper),
 		writable: true,
 		enumerable: true,
 		configurable: true,
@@ -129,6 +114,58 @@ function snapshotTool(tool: CallableTool): CallableTool {
 		value: (calls: unknown[]): Promise<unknown[]> => tool.callTool(calls),
 		writable: true,
 		enumerable: true,
+		configurable: true,
+	});
+	return wrapper;
+}
+
+/** `wrapper`'s `tool()`: the real tool's, asked once, lazily, its answer redacted when asked through a clone (see snapshotTool). */
+function lazyTool(tool: CallableTool, wrapper: object): (this: unknown) => Promise<unknown> {
+	let memo: Promise<unknown> | undefined;
+	return function (this: unknown): Promise<unknown> {
+		// Called synchronously on first use, like the SDK's own `await callableTool.tool()` inside its map.
+		memo ??= (async () => {
+			// ALWAYS on the real tool: the state `tool()` sets up (a ready flag, a dispatch table, a session) must live
+			// where `callTool` finds it, which is also the real tool. The accessor is read here, at use, never at wrap time.
+			const declaration = await (Reflect.get(tool, "tool") as () => Promise<unknown>).call(tool);
+			// Asked through the redacted request CLONE (pii "redact" with PII in the prompt): redact the answer itself, so
+			// the declaration the model sees has passed the same redaction as the rest of the request, whether it was held
+			// as state or in a closure. Asked through the wrapper (nothing was cloned): the answer as it is, as natively.
+			// redactPII hands its input back UNCHANGED when it detects nothing, so redact a DETACHED copy: the memo must never
+			// alias the real tool's live object, or a later callTool() that writes PII into it would leak in later rounds.
+			return this === wrapper ? declaration : redactPII(detach(declaration)).data;
+		})();
+		return memo;
+	};
+}
+
+/**
+ * A callable tool as the governed request holds it: a fresh object with the tool's prototype (so
+ * the SDK's `instanceof McpCallableTool` holds), whose own `tool` is the lazy memo (the real
+ * `tool()` runs only inside the first governed round), whose own `callTool` delegates, and whose
+ * non-enumerable own `toJSON` answers `{}`. None of the caller's other properties is copied, so no
+ * caller code but `tool()` / `callTool()` can be reached from the request: serializing it for the
+ * governor's own estimate, before authorization, runs nothing of the caller's.
+ */
+export function governedCallable(tool: object, proto: object | null): object {
+	const callable = tool as CallableTool;
+	const wrapper = Object.create(proto) as CallableTool;
+	Object.defineProperty(wrapper, "tool", {
+		value: lazyTool(callable, wrapper),
+		writable: true,
+		enumerable: true,
+		configurable: true,
+	});
+	Object.defineProperty(wrapper, "callTool", {
+		value: (calls: unknown[]): Promise<unknown[]> => callable.callTool(calls),
+		writable: true,
+		enumerable: true,
+		configurable: true,
+	});
+	Object.defineProperty(wrapper, "toJSON", {
+		value: () => ({}),
+		writable: true,
+		enumerable: false,
 		configurable: true,
 	});
 	return wrapper;

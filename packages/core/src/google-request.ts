@@ -31,6 +31,7 @@
  */
 
 import { types as utilTypes } from "node:util";
+import { governedCallable } from "./google-afc.js";
 
 type Loose = Record<string, unknown>;
 
@@ -82,17 +83,80 @@ function scriptedAnswer(n: number): Loose {
 }
 
 /**
- * `httpOptions` as the real ApiClient reads it (`patchHttpOptions`: every own enumerable entry, an
- * object value copied shallowly, then the merged options serialized with the body), as JSON.
+ * The request's `httpOptions` as the real ApiClient takes them (`patchHttpOptions`): ONE pass over
+ * the caller's object, every own enumerable entry, an object value copied shallowly. Everything
+ * after reads this copy, as natively, so each caller getter and trap there runs as often.
  */
-function httpOptionsForm(httpOptions: unknown): string | undefined {
+function patchedHttpOptions(httpOptions: unknown): Loose | undefined {
 	if (!httpOptions) return undefined;
 	const patched: Loose = {};
 	for (const [key, value] of Object.entries(httpOptions as Loose)) {
 		if (typeof value === "object") patched[key] = Object.assign({}, value);
 		else if (value !== undefined) patched[key] = value;
 	}
-	return JSON.stringify(patched);
+	return patched;
+}
+
+/**
+ * The patched options as JSON, without `extraBody`, which goes into the body (`transportBody`). A
+ * header goes to the transport's `Headers` as `String(value)`, which is not what JSON makes of an
+ * object (a `toJSON` and a `toString` can answer differently), and the SDK types headers as
+ * strings: any other header value cannot be told.
+ */
+function httpOptionsForm(patched: Loose | undefined): string | undefined {
+	if (patched === undefined) return undefined;
+	const headers = patched["headers"];
+	if (headers) {
+		for (const value of Object.values(headers as Loose)) {
+			if (typeof value !== "string") throw new CannotTell("a header value that is not a string");
+		}
+	}
+	const { extraBody: _extraBody, ...rest } = patched;
+	return JSON.stringify(rest);
+}
+
+/**
+ * The body the transport sends: the SDK's ApiClient deep-merges the patched `extraBody` into the
+ * request body and serializes the result (`includeExtraBodyToRequestInit`), so that is what the
+ * self-check compares. The merge is the SDK's, step for step.
+ */
+function transportBody(body: unknown, patched: Loose | undefined): unknown {
+	if (patched === undefined || patched["extraBody"] === null) return body;
+	const extraBody = patched["extraBody"];
+	if (!extraBody || Object.keys(extraBody).length === 0) return body;
+	let current: unknown = {};
+	if (typeof body === "string" && body.length > 0) {
+		try {
+			const parsed: unknown = JSON.parse(body);
+			if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return body;
+			current = parsed;
+		} catch {
+			return body;
+		}
+	}
+	const deepMerge = (target: unknown, source: unknown): Loose => {
+		const output: Loose = Object.assign({}, target);
+		for (const key in source as Loose) {
+			if (Object.hasOwn(source as object, key)) {
+				const sourceValue = (source as Loose)[key];
+				const targetValue = output[key];
+				if (
+					sourceValue &&
+					typeof sourceValue === "object" &&
+					!Array.isArray(sourceValue) &&
+					targetValue &&
+					typeof targetValue === "object" &&
+					!Array.isArray(targetValue)
+				) {
+					output[key] = deepMerge(targetValue, sourceValue);
+				} else {
+					output[key] = sourceValue;
+				}
+			}
+		}
+		return output;
+	};
+	return JSON.stringify(deepMerge(current, extraBody));
 }
 
 /** An ApiClient that records each request and answers from the script; nothing is sent. */
@@ -105,13 +169,14 @@ function recordingClient(
 		const r = request as Loose;
 		// The abort signal goes to the transport as it is: the request keeps it by reference.
 		if (r["abortSignal"] !== undefined) onTransport(r["abortSignal"]);
+		const patched = patchedHttpOptions(r["httpOptions"]);
 		sink.push({
 			stream,
 			path: r["path"],
 			httpMethod: r["httpMethod"],
 			queryParams: r["queryParams"] === undefined ? undefined : JSON.stringify(r["queryParams"]),
-			body: r["body"],
-			httpOptions: httpOptionsForm(r["httpOptions"]),
+			body: transportBody(r["body"], patched),
+			httpOptions: httpOptionsForm(patched),
 			abortSignal: r["abortSignal"] !== undefined,
 		});
 		return scriptedAnswer(sink.length - 1);
@@ -240,6 +305,80 @@ function presentWithoutTraps(obj: object, key: string): boolean {
 	return false;
 }
 
+/** The built-in prototypes of this realm and of the host: a method found on one of them is not caller code. */
+const INTRINSIC_PROTOTYPES: ReadonlySet<object> = new Set<object>([
+	...[
+		Object,
+		Array,
+		Function,
+		String,
+		Number,
+		Boolean,
+		Symbol,
+		BigInt,
+		Date,
+		RegExp,
+		Error,
+		Map,
+		Set,
+		WeakMap,
+		WeakSet,
+		Promise,
+		ArrayBuffer,
+		DataView,
+		Int8Array,
+		Uint8Array,
+		Uint8ClampedArray,
+		Int16Array,
+		Uint16Array,
+		Int32Array,
+		Uint32Array,
+		Float32Array,
+		Float64Array,
+		BigInt64Array,
+		BigUint64Array,
+		...["Buffer", "URL", "URLSearchParams", "AbortSignal", "EventTarget", "Blob"].map(
+			(name) => (globalThis as Loose)[name],
+		),
+	]
+		.filter((ctor): ctor is { prototype: object } => typeof ctor === "function")
+		.map((ctor) => ctor.prototype),
+	Object.getPrototypeOf(Uint8Array.prototype) as object,
+]);
+
+/**
+ * Every built-in method of this realm and host: each function held as an own data property of a
+ * built-in prototype. A function the SDK reads is built-in only if it IS one of these, wherever it
+ * was found (a Proxy's trap may hand back `Array.prototype.map` itself): its output is then a
+ * function of what it read through the membrane, which is recorded.
+ */
+const INTRINSIC_METHODS: ReadonlySet<unknown> = new Set(
+	[...INTRINSIC_PROTOTYPES].flatMap((proto) =>
+		Reflect.ownKeys(proto).flatMap((key) => {
+			const d = Object.getOwnPropertyDescriptor(proto, key);
+			return d !== undefined && "value" in d && typeof d.value === "function" ? [d.value] : [];
+		}),
+	),
+);
+
+const functionSource = Function.prototype.toString;
+
+/**
+ * Is `fn`, read at `key`, a built-in method? This realm's are known by identity. Another realm's
+ * (an array made in a `vm` context, or parsed by a host whose realm is not this module's) are known
+ * by their own source text, `function <key>() { [native code] }`, which only a built-in function
+ * prints: a bound function and a Proxy print no name, and a caller's function prints its code.
+ */
+function isBuiltInMethod(fn: unknown, key: string): boolean {
+	if (INTRINSIC_METHODS.has(fn)) return true;
+	if (typeof fn !== "function" || utilTypes.isProxy(fn)) return false;
+	try {
+		return Reflect.apply(functionSource, fn, []) === `function ${key}() { [native code] }`;
+	} catch {
+		return false;
+	}
+}
+
 function childRole(parent: Role, key: string): Role {
 	if (parent === "params" && key === "config") return "config";
 	if (parent === "config" && key === "tools") return "tools";
@@ -252,12 +391,38 @@ interface Membrane {
 	materialize(value: unknown, tree: "check" | "send"): unknown;
 	markTransport(value: unknown): void;
 	standIns: StandIns;
+	/** Why the capture cannot be told, when the SDK called a caller function. */
+	tripped(): string | undefined;
 }
 
 function makeMembrane(): Membrane {
 	const proxies = new Map<object, Wrapped>(); // proxy -> what it wraps
 	const byReal = new WeakMap<object, object>(); // caller's object -> its proxy
 	const standIns: StandIns = { afcRan: false, count: 0 };
+	/** Set when the SDK called a function of the caller's: its output was not recorded, so the mirror cannot be told. */
+	let tripped: string | undefined;
+	const tripwires = new WeakMap<object, (...args: unknown[]) => unknown>();
+
+	/**
+	 * A caller's function as the SDK gets it: it calls through to the real one (with the caller's
+	 * object, not our proxy, as `this`), so the capture stays native, and marks the request as one
+	 * the mirror cannot reproduce: what the function returned to the SDK is not recorded anywhere.
+	 */
+	function tripwire(fn: (...args: unknown[]) => unknown): (...args: unknown[]) => unknown {
+		let t = tripwires.get(fn);
+		if (t === undefined) {
+			t = function (this: unknown, ...args: unknown[]): unknown {
+				tripped ??= "the SDK called a function the request holds";
+				const self =
+					this !== null && (typeof this === "object" || typeof this === "function")
+						? (proxies.get(this)?.real ?? this)
+						: this;
+				return Reflect.apply(fn, self, args);
+			};
+			tripwires.set(fn, t);
+		}
+		return t;
+	}
 
 	/** Replace every membrane proxy inside an SDK-built value with the caller's real object. */
 	function unwrapDeep(value: unknown, seen = new Set<object>()): unknown {
@@ -359,6 +524,15 @@ function makeMembrane(): Membrane {
 					return self.jsonHook;
 				}
 				rec.readByName = true;
+				// A function the SDK may call: a built-in method goes as it is; any other (an own or a
+				// user-prototype method) is the caller's code, handed out behind a tripwire.
+				if (
+					typeof v === "function" &&
+					childRole(rec.role, key) !== "toolEntry" &&
+					!isBuiltInMethod(v, key)
+				) {
+					return tripwire(v as (...args: unknown[]) => unknown);
+				}
 				const prior = rec.reads.get(key);
 				const priorRec =
 					prior !== null && typeof prior === "object" ? proxies.get(prior)?.rec : undefined;
@@ -448,25 +622,46 @@ function makeMembrane(): Membrane {
 		return rec.ownSeen.has(key) && rec.enumerable.get(key) !== false;
 	}
 
-	function materialize(
+	/** One materialization: the tree it builds, and each callable placed in it so far. */
+	interface Build {
+		tree: "check" | "send";
+		callables: Set<Recording>;
+	}
+
+	function materialize(value: unknown, tree: "check" | "send"): unknown {
+		return materializeNode(value, { tree, callables: new Set() }, new Set(), false);
+	}
+
+	function materializeNode(
 		value: unknown,
-		tree: "check" | "send",
-		stack = new Set<Recording>(),
+		build: Build,
+		stack: Set<Recording>,
+		toolSlot: boolean,
 	): unknown {
 		if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
 		const w = proxies.get(value);
 		if (w === undefined) return value; // not one of ours: a value the SDK built
 		const rec = w.rec;
 		if (rec.callable !== undefined) {
-			// The send keeps the caller's callable (runGovernedAfc runs it after authorization); the
-			// self-check gets the capture's stand-in, so no caller tool()/callTool() runs in it.
-			return tree === "send" ? rec.real : standInCallable(rec, stack);
+			// A callable stands only at a config.tools[i] slot, once. The same object at another slot
+			// (an alias of another config field) would hand the real tool() a part of the request the
+			// stand-ins never answered for.
+			if (!toolSlot || build.callables.has(rec)) {
+				throw new CannotTell("a callable tool the request also holds outside config.tools");
+			}
+			build.callables.add(rec);
+			// The send holds a governed wrapper (its real tool() runs after authorization, inside the
+			// first round); the self-check gets the capture's stand-in, so no caller tool()/callTool()
+			// runs in it.
+			return build.tree === "send"
+				? governedCallable(rec.real, callableProto(rec))
+				: standInCallable(rec, build, stack);
 		}
 		if (rec.jsonOut !== undefined) {
 			if (rec.readByName) {
 				throw new CannotTell("an object the SDK both read by name and serialized through toJSON");
 			}
-			return materialize(rec.jsonOut.value, tree, stack);
+			return materializeNode(rec.jsonOut.value, build, stack, false);
 		}
 		// Never read: a transport value (an AbortSignal) goes as it is; anything else sends nothing of
 		// itself, so it is an empty object, never the caller's.
@@ -475,18 +670,14 @@ function makeMembrane(): Membrane {
 		stack.add(rec);
 		try {
 			return rec.isArray
-				? materializeArray(rec, tree, stack)
-				: materializeObject(rec, tree, stack, {});
+				? materializeArray(rec, build, stack)
+				: materializeObject(rec, build, stack, {});
 		} finally {
 			stack.delete(rec);
 		}
 	}
 
-	function materializeArray(
-		rec: Recording,
-		tree: "check" | "send",
-		stack: Set<Recording>,
-	): unknown[] {
+	function materializeArray(rec: Recording, build: Build, stack: Set<Recording>): unknown[] {
 		// The FIRST `length` read is the array's length, as for any key: an entry read later, past it
 		// (one a caller hook appended after the SDK took its length), is not part of it.
 		const read = rec.reads.get("length");
@@ -504,14 +695,14 @@ function makeMembrane(): Membrane {
 		}
 		for (const [key, v] of rec.reads) {
 			if (ARRAY_INDEX.test(key) && Number(key) < length)
-				out[Number(key)] = materialize(v, tree, stack);
+				out[Number(key)] = materializeNode(v, build, stack, rec.role === "tools");
 		}
 		return out;
 	}
 
 	function materializeObject(
 		rec: Recording,
-		tree: "check" | "send",
+		build: Build,
 		stack: Set<Recording>,
 		out: object,
 		skip: readonly string[] = [],
@@ -525,17 +716,25 @@ function makeMembrane(): Membrane {
 		];
 		for (const key of order) {
 			if (skip.includes(key)) continue;
-			const value = rec.reads.has(key) ? materialize(rec.reads.get(key), tree, stack) : undefined;
+			const value = rec.reads.has(key)
+				? materializeNode(rec.reads.get(key), build, stack, false)
+				: undefined;
 			setData(out, key, value, visible(rec, key));
 		}
 		return out;
 	}
 
+	/** A callable's prototype: the one the SDK was answered with, else read without running a trap. */
+	function callableProto(rec: Recording): object | null {
+		if (rec.proto !== undefined) return rec.proto;
+		return utilTypes.isProxy(rec.real) ? Object.prototype : Object.getPrototypeOf(rec.real);
+	}
+
 	/** A callable's stand-in for the self-check: its prototype, what the SDK read of it, and the stand-ins. */
-	function standInCallable(rec: Recording, stack: Set<Recording>): object {
+	function standInCallable(rec: Recording, build: Build, stack: Set<Recording>): object {
 		const callable = rec.callable as NonNullable<Recording["callable"]>;
 		const proto = rec.proto === undefined ? Object.prototype : rec.proto;
-		const out = materializeObject(rec, "check", stack, Object.create(proto) as object, [
+		const out = materializeObject(rec, build, stack, Object.create(proto) as object, [
 			"tool",
 			"callTool",
 		]);
@@ -549,7 +748,13 @@ function makeMembrane(): Membrane {
 		if (w !== undefined) w.rec.transport = true;
 	}
 
-	return { wrap: (value, role) => wrap(value, role), materialize, markTransport, standIns };
+	return {
+		wrap: (value, role) => wrap(value, role),
+		materialize,
+		markTransport,
+		standIns,
+		tripped: () => tripped,
+	};
 }
 
 // ── The pipeline: resolved once per governed client ──
@@ -655,6 +860,8 @@ export async function snapshotGoogleRequest(
 		}
 		return { kind: "sdkError", error };
 	}
+	const tripped = membrane.tripped();
+	if (tripped !== undefined) return { kind: "refuse", reason: tripped };
 	const afcRan = membrane.standIns.afcRan;
 	if (afcRan && method === "generateContentStream") return { kind: "afcStream" };
 	let check: unknown;
@@ -682,5 +889,35 @@ export async function snapshotGoogleRequest(
 			reason: "the mirror of the request does not send what the SDK sends for it",
 		};
 	}
+	// Only where the dry run made a request: a run that made none (the stream's loop with a
+	// maximumRemoteCalls of NaN runs zero rounds) has no loop to stop, and forcing the SDK's early
+	// path would make it send one.
+	if (!afcRan && captured.length > 0) forceAfcOff(send);
 	return { kind: "ok", params: send, afcRan };
+}
+
+/**
+ * The single-call forward, after the SDK's own decision (by the probe) said it runs no AFC loop:
+ * its config carries an owned `automaticFunctionCalling` with `disable: true`, so the SDK's loop
+ * cannot run on the forward whatever caller code does after the snapshot (a real `tool()` that
+ * flips a field it shares with the request). The field is never sent on the wire, and the
+ * self-check's tree keeps the recorded value, so the check still compares the SDK's own decision.
+ */
+function forceAfcOff(send: unknown): void {
+	const config =
+		send !== null && typeof send === "object"
+			? Object.getOwnPropertyDescriptor(send, "config")?.value
+			: undefined;
+	if (config === null || typeof config !== "object" || Array.isArray(config)) return;
+	const prior = Object.getOwnPropertyDescriptor(config, "automaticFunctionCalling")?.value;
+	const afc: Loose = {
+		...(prior !== null && typeof prior === "object" ? (prior as Loose) : {}),
+		disable: true,
+	};
+	Object.defineProperty(config, "automaticFunctionCalling", {
+		value: afc,
+		writable: true,
+		enumerable: true,
+		configurable: true,
+	});
 }
