@@ -395,7 +395,7 @@ export function classifyAuditTail(snapshot: TailSnapshot, mode: ClassifyMode): T
 		}
 		return result(
 			"ANCHOR_MISSING",
-			`no anchor on a chain of ${n ?? "several"} events: deleted, or never written by an older version`,
+			`no anchor on a chain of ${n ?? "several"} events: deleted, or every write of it failed`,
 			{ torn, found },
 		);
 	}
@@ -564,7 +564,7 @@ function stateErrors(
 			];
 		case "ANCHOR_MISSING":
 			return [
-				`Audit anchor (.meta) missing on a chain of ${count} event(s): deleted, or never written by an older version`,
+				`Audit anchor (.meta) missing on a chain of ${count} event(s): deleted, or every write of it failed`,
 			];
 		case "HEAD_MISMATCH":
 		case "FEWER_THAN_ANCHOR":

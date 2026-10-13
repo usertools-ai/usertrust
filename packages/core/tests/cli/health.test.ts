@@ -559,8 +559,8 @@ describe("usertrust health — vault states", () => {
 	});
 
 	it("does NOT report verified for a legacy chain of several events whose anchor is missing", async () => {
-		// An older version that never wrote `.meta`, or a deleted one: with no anchor, a truncated log
-		// cannot be told from a whole one, so a chain of more than one event is refused after upgrade.
+		// A `.meta` deleted, or one every write of which failed: with no anchor, a truncated log cannot
+		// be told from a whole one, so a chain of more than one event is refused after upgrade.
 		let prev = "0".repeat(64);
 		const legacy: string[] = [];
 		for (let i = 1; i <= 3; i++) {

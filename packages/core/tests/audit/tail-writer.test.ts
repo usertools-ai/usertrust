@@ -520,7 +520,7 @@ describe("every refused state writes nothing and creates nothing", () => {
 		}
 	});
 
-	it("upgrade: an older version's chain of several events with no anchor is ANCHOR_MISSING, refused", async () => {
+	it("upgrade: a chain of several events with no anchor (deleted, or every write of it failed) is ANCHOR_MISSING, refused", async () => {
 		await vaultOf(3);
 		rmSync(metaPath());
 		const w = createAuditWriter(root);

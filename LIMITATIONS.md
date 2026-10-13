@@ -252,8 +252,9 @@ any hold). What this does not cover:
   itself.** The anchor lives in the vault too. Only an anchor held outside it (`usertrust
   anchor`, verified with `--anchor`) catches that deletion.
 - **A vault of more than one event with no `.meta` is refused** (`ANCHOR_MISSING`): with no
-  anchor, a truncated log cannot be told from a whole one. An older version that never wrote
-  the anchor leaves such a vault.
+  anchor, a truncated log cannot be told from a whole one. Every release writes `.meta` after
+  each append, so a vault comes to this only when its `.meta` was deleted, or every write of it
+  failed (each of those appends was reported degraded and dead-lettered).
 - **A refused vault has no recovery command yet.** Keep it exactly as it is and save
   `usertrust verify --json`; the evidence decides what happened.
 - **Where a directory cannot be synced** (the filesystem refuses directory fsync), a power

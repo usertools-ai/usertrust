@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`audit.failClosed` now also applies to headless `authorize()`:** a vault whose audit tail is refused refuses before any hold.
 
-- **A vault whose audit chain holds more than one event and has no `.meta` anchor (deleted, or never written by an older version) is refused after upgrading (`ANCHOR_MISSING`).** Its appends are dead-lettered, or its calls refused under `audit.failClosed`, and `usertrust verify` fails. With no anchor, a truncated log cannot be told from a whole one. Keep the vault exactly as it is, and save `usertrust verify --json`.
+- **A vault whose audit chain holds more than one event and has no `.meta` anchor (deleted, or every write of it failed) is refused after upgrading (`ANCHOR_MISSING`).** Its appends are dead-lettered, or its calls refused under `audit.failClosed`, and `usertrust verify` fails. With no anchor, a truncated log cannot be told from a whole one. Keep the vault exactly as it is, and save `usertrust verify --json`.
 
 ### Added
 
