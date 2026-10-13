@@ -171,6 +171,7 @@ describe("POST /api/export", () => {
 			await new Promise<void>((r) => (socket.destroyed ? r() : socket.once("close", () => r())));
 			expect(received).toContain("HTTP/1.1 503");
 			expect(received.toLowerCase()).toContain("connection: close");
+			expect(received.toLowerCase()).toContain("x-content-type-options: nosniff");
 			expect(received).toContain('{"error":"server closing"}');
 			expect(existsSync(join(tempDir, "after-close-out"))).toBe(false);
 		});

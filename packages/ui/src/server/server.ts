@@ -222,6 +222,9 @@ export async function createUiServer(
 	const inFlight = new Set<ServerResponse>();
 
 	const handler = (req: IncomingMessage, res: ServerResponse): void => {
+		// Amendment A3: on every response, including errors. First, so no early return can skip it.
+		res.setHeader("x-content-type-options", "nosniff");
+
 		// A keep-alive client can send a new request on a socket that was busy when close() was called, and
 		// the grace would let it run (an export writing files after close(), a tail client re-registering).
 		if (closing) {
@@ -230,9 +233,6 @@ export async function createUiServer(
 		}
 		inFlight.add(res);
 		res.once("close", () => inFlight.delete(res));
-
-		// Amendment A3: on every response, including errors.
-		res.setHeader("x-content-type-options", "nosniff");
 
 		// Amendment A3: DNS-rebinding guard — only loopback Host headers.
 		const host = req.headers.host;
