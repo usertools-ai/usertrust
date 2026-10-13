@@ -809,13 +809,16 @@ export function normalizeEvent(raw: unknown): TransactionEvent {
 function auditSegments(auditDir: string): {
 	count: number;
 	empty: boolean;
+	enumerated: boolean;
 	seqFile: Map<number, string>;
 } {
 	let names: string[] = [];
+	let enumerated = true;
 	try {
 		names = readdirSync(auditDir).filter((n) => n.endsWith(".jsonl") && n !== "events.jsonl");
 	} catch {
 		// Not enumerable: with events.jsonl also absent, "Audit log not found" returns before the vault reading.
+		enumerated = false;
 	}
 	if (existsSync(join(auditDir, "events.jsonl"))) names.unshift("events.jsonl");
 	let empty = true;
@@ -830,7 +833,7 @@ function auditSegments(auditDir: string): {
 			} catch {}
 		}
 	}
-	return { count: names.length, empty, seqFile };
+	return { count: names.length, empty, enumerated, seqFile };
 }
 
 /**
@@ -879,7 +882,9 @@ export function verifyTransaction(
 	const mainLog = join(vaultPath, "audit", "events.jsonl");
 	// EVERY segment: a rotated transfer straddles files, and the live file alone lacks its history.
 	const segments = auditSegments(join(vaultPath, "audit"));
-	if (segments.count === 0 || segments.empty) {
+	// An empty live log is a clean, empty reading only when the directory was listed: an unlistable one may
+	// hold the records in segments, so it falls through to the vault reading, which reports the enumeration error.
+	if (segments.count === 0 || (segments.empty && segments.enumerated)) {
 		// No log at all means nothing could be read; an empty log is a clean, empty reading.
 		const error = segments.count === 0 ? `Audit log not found: ${mainLog}` : "Audit log is empty";
 		return {

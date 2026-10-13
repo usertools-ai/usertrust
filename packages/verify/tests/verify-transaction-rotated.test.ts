@@ -76,7 +76,7 @@ describe("verifyTransaction over rotated segments", () => {
 
 	afterEach(() => {
 		// A test may leave an audit dir unreadable; restore it so the cleanup can descend.
-		for (const name of ["unenumerable"]) {
+		for (const name of ["unenumerable", "unenumerable-empty-live"]) {
 			try {
 				chmodSync(join(root, name, "audit"), 0o700);
 			} catch {
@@ -322,6 +322,27 @@ describe("verifyTransaction over rotated segments", () => {
 			expect(result.receipt).not.toContain(ABSOLUTE);
 			expect(result.receipt).toContain(INCOMPLETE);
 			expect(result.errors.some((e) => e.includes("could not be enumerated"))).toBe(true);
+		},
+	);
+
+	it.skipIf(process.getuid?.() === 0)(
+		"an audit dir that cannot be enumerated, with an EMPTY live log, is not an empty complete reading",
+		() => {
+			const { lines, hashes } = buildChain(EVENTS);
+			const dir = vault(
+				"unenumerable-empty-live",
+				{ "events-0001.jsonl": lines, "events.jsonl": [] },
+				hashes[5],
+			);
+			chmodSync(join(dir, "audit"), 0o300);
+			const result = verifyTransaction(dir, "tx-a");
+			expect(result.found).toBe(false);
+			expect(result.receipt).not.toContain(ABSOLUTE);
+			expect(result.receipt).toContain(INCOMPLETE);
+			expect(result.errors).not.toContain("Audit log is empty");
+			expect(
+				result.errors.some((e) => e.startsWith("Audit directory could not be enumerated:")),
+			).toBe(true);
 		},
 	);
 
