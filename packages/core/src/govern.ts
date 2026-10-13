@@ -83,8 +83,9 @@ import {
 	copyAppliedRates,
 	costFromRates,
 	costFromRatesUnfloored,
-	estimateInputTokens,
 	holdInputRate,
+	holdInputTokens,
+	holdOutputTokens,
 	holdTierRates,
 	PRICING_TABLE_VERSION,
 	promptTokenCount,
@@ -1829,15 +1830,22 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// receipt's meter provenance. unknownModelPolicy is enforced here, at
 			// authorize time, before any PENDING hold (A5).
 			const transferId = trustId("tx");
-			const estimatedInputTokens = estimateInputTokens(promptParts);
-			// F1: size the output estimate to the caller's ACTUAL cap. Responses callers
-			// set `max_output_tokens`; chat.completions set `max_tokens`. Read the
-			// Responses field first, then chat, then the 4096 default — each only when it
-			// is a finite positive number (a 0/negative/NaN cap never shrinks the hold).
-			const finitePositiveCap = (value: unknown): number | undefined =>
-				typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
-			const maxOutputTokens =
-				finitePositiveCap(params.max_output_tokens) ?? finitePositiveCap(params.max_tokens) ?? 4096;
+			// The hold covers what the provider bills for: the prompt parts as before, or the WHOLE
+			// request body (`estimateBodyTokens`), whichever is larger, so no hold ever shrinks and a
+			// field the parts do not walk (a block-form system, tools, Google `contents` and its
+			// config, a prompt variable) is held too. Both read the one serialized snapshot, never
+			// the live request (Google forwards its original, and reads it later: its named
+			// exception). A request with no snapshot keeps the parts' estimate.
+			const snapshot = serialized?.body;
+			const estimatedInputTokens = holdInputTokens(promptParts, snapshot);
+			// F1: size the output estimate to the caller's ACTUAL cap, per provider, per candidate
+			// (`holdOutputTokens`), read from the snapshot. Google never holds below the default:
+			// its thoughts are billed outside its candidates.
+			const maxOutputTokens = holdOutputTokens(
+				kind,
+				snapshot ?? params,
+				kind !== "openai" ? "other" : surfaceKind === "openai-responses" ? "responses" : "chat",
+			);
 			const rateResolution = resolveRates(model, endpoint.class, config);
 			// ── Denial boundary 1 of 2: the PRE-MUTEX unknown-model refusal ──
 			// Its own boundary because it fires before the budget lock is taken and

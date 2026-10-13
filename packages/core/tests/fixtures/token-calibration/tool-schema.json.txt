@@ -1,0 +1,222 @@
+{
+  "type": "object",
+  "properties": {
+    "field_0": {
+      "type": "string",
+      "description": "The value of field 0, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_1": {
+      "type": "string",
+      "description": "The value of field 1, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_2": {
+      "type": "string",
+      "description": "The value of field 2, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_3": {
+      "type": "string",
+      "description": "The value of field 3, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_4": {
+      "type": "string",
+      "description": "The value of field 4, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_5": {
+      "type": "string",
+      "description": "The value of field 5, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_6": {
+      "type": "string",
+      "description": "The value of field 6, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_7": {
+      "type": "string",
+      "description": "The value of field 7, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_8": {
+      "type": "string",
+      "description": "The value of field 8, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_9": {
+      "type": "string",
+      "description": "The value of field 9, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_10": {
+      "type": "string",
+      "description": "The value of field 10, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_11": {
+      "type": "string",
+      "description": "The value of field 11, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_12": {
+      "type": "string",
+      "description": "The value of field 12, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_13": {
+      "type": "string",
+      "description": "The value of field 13, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_14": {
+      "type": "string",
+      "description": "The value of field 14, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_15": {
+      "type": "string",
+      "description": "The value of field 15, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_16": {
+      "type": "string",
+      "description": "The value of field 16, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_17": {
+      "type": "string",
+      "description": "The value of field 17, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_18": {
+      "type": "string",
+      "description": "The value of field 18, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_19": {
+      "type": "string",
+      "description": "The value of field 19, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_20": {
+      "type": "string",
+      "description": "The value of field 20, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_21": {
+      "type": "string",
+      "description": "The value of field 21, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_22": {
+      "type": "string",
+      "description": "The value of field 22, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_23": {
+      "type": "string",
+      "description": "The value of field 23, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_24": {
+      "type": "string",
+      "description": "The value of field 24, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_25": {
+      "type": "string",
+      "description": "The value of field 25, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_26": {
+      "type": "string",
+      "description": "The value of field 26, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_27": {
+      "type": "string",
+      "description": "The value of field 27, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_28": {
+      "type": "string",
+      "description": "The value of field 28, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_29": {
+      "type": "string",
+      "description": "The value of field 29, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_30": {
+      "type": "string",
+      "description": "The value of field 30, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_31": {
+      "type": "string",
+      "description": "The value of field 31, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_32": {
+      "type": "string",
+      "description": "The value of field 32, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_33": {
+      "type": "string",
+      "description": "The value of field 33, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_34": {
+      "type": "string",
+      "description": "The value of field 34, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_35": {
+      "type": "string",
+      "description": "The value of field 35, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_36": {
+      "type": "string",
+      "description": "The value of field 36, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_37": {
+      "type": "string",
+      "description": "The value of field 37, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_38": {
+      "type": "string",
+      "description": "The value of field 38, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    },
+    "field_39": {
+      "type": "string",
+      "description": "The value of field 39, as an ISO 8601 date or an empty string.",
+      "pattern": "^(\\\\d{4}-\\\\d{2}-\\\\d{2})?$"
+    }
+  },
+  "required": [
+    "field_0",
+    "field_3",
+    "field_6",
+    "field_9",
+    "field_12",
+    "field_15",
+    "field_18",
+    "field_21",
+    "field_24",
+    "field_27",
+    "field_30",
+    "field_33",
+    "field_36",
+    "field_39"
+  ],
+  "additionalProperties": false
+}

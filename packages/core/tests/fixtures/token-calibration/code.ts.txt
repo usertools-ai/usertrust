@@ -1,0 +1,125 @@
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
+export function settle(hold: Hold, usage: Usage): Settlement {
+	const cost = priceOf(usage, hold.rates);
+	if (cost > hold.amount) return { posted: hold.amount, shortfall: cost - hold.amount };
+	return { posted: cost, shortfall: 0 };
+}
