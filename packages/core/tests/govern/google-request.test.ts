@@ -1815,7 +1815,10 @@ describe("the hold is sized from the request that is sent", () => {
 		expect(held[0]).toBeGreaterThanOrEqual(posted[0] as number);
 	});
 
-	it("generateContent: a ~100,000-token prompt is held at or above what it costs", async () => {
+	// REGRESSION GUARD, not evidence for the request pipeline: master's own hold estimate makes this
+	// pass with or without it (it counts a Google prompt's contents). It stays to keep the Google path
+	// on that estimate.
+	it("REGRESSION GUARD: generateContent: a ~100,000-token prompt is held at or above what it costs", async () => {
 		const held: number[] = [];
 		const posted: number[] = [];
 		const engine = {
