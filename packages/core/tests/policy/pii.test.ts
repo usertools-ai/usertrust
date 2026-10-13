@@ -776,3 +776,162 @@ describe("redactPII — the closed allowlist kept by reference (AbortSignal only
 		expect(out.data).not.toBe(bytes);
 	});
 });
+
+describe("redactPII — non-enumerable fields and an own __proto__ key", () => {
+	const EMAIL = "write to alice@example.com";
+
+	/** Every own key of every object, in order, with its descriptor flags and prototype. */
+	function shape(value: unknown): unknown {
+		if (Array.isArray(value)) return value.map(shape);
+		if (value === null || typeof value !== "object") return value;
+		return {
+			proto: Object.getPrototypeOf(value) === Object.prototype ? "Object.prototype" : "other",
+			keys: Reflect.ownKeys(value).map((k) => {
+				const d = Object.getOwnPropertyDescriptor(value, k) as PropertyDescriptor;
+				return [
+					String(k),
+					"value" in d ? "data" : "accessor",
+					d.enumerable,
+					d.writable,
+					d.configurable,
+					shape(d.value),
+				];
+			}),
+		};
+	}
+
+	/** The clone as it was built before this change: own enumerable keys, ASSIGNED. */
+	function assignedClone(value: unknown): unknown {
+		if (typeof value === "string") return redactPII(value).data;
+		if (Array.isArray(value)) return value.map(assignedClone);
+		if (value === null || typeof value !== "object") return value;
+		const out: Record<string, unknown> = {};
+		for (const key of Object.keys(value)) {
+			out[key] = assignedClone((value as Record<string, unknown>)[key]);
+		}
+		return out;
+	}
+
+	it("a non-enumerable own field is kept, still non-enumerable, and redacted", () => {
+		const config: Record<string, unknown> = { temperature: 0 };
+		Object.defineProperty(config, "systemInstruction", { value: EMAIL, enumerable: false });
+		Object.defineProperty(config, "nested", { value: { note: EMAIL }, enumerable: false });
+		const out = (redactPII({ prompt: EMAIL, config }).data as { config: object }).config;
+		const d = Object.getOwnPropertyDescriptor(out, "systemInstruction");
+		expect(d?.enumerable).toBe(false);
+		expect(d?.value).toBe("[REDACTED:email]");
+		const n = Object.getOwnPropertyDescriptor(out, "nested");
+		expect(n?.enumerable).toBe(false);
+		expect(n?.value).toEqual({ note: "[REDACTED:email]" });
+		expect(Object.keys(out)).toEqual(["temperature"]);
+		expect(JSON.stringify(out)).toBe('{"temperature":0}');
+	});
+
+	it("a non-enumerable function (a hidden toJSON) is not carried into the clone", () => {
+		const carrier: Record<string, unknown> = { text: "plain" };
+		Object.defineProperty(carrier, "toJSON", { value: () => EMAIL, enumerable: false });
+		const out = redactPII({ prompt: EMAIL, carrier }).data as { carrier: object };
+		expect(Object.hasOwn(out.carrier, "toJSON")).toBe(false);
+		expect(JSON.stringify(out)).not.toContain("alice@example.com");
+	});
+
+	it('an own "__proto__" key from JSON.parse stays an own key, redacted; the prototype is unchanged', () => {
+		const input = JSON.parse(
+			`{"prompt":"hi","__proto__":{"note":"${EMAIL}"},"contents":[{"__proto__":"${EMAIL}"}]}`,
+		) as object;
+		expect(Object.hasOwn(input, "__proto__")).toBe(true);
+		const out = redactPII(input).data as { contents: object[] };
+		expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+		expect(Object.getOwnPropertyDescriptor(out, "__proto__")?.value).toEqual({
+			note: "[REDACTED:email]",
+		});
+		expect(Object.getPrototypeOf(out.contents[0])).toBe(Object.prototype);
+		expect(Object.getOwnPropertyDescriptor(out.contents[0], "__proto__")?.value).toBe(
+			"[REDACTED:email]",
+		);
+		expect(Object.keys(out)).toEqual(["prompt", "__proto__", "contents"]);
+		expect(JSON.stringify(out)).toBe(
+			'{"prompt":"hi","__proto__":{"note":"[REDACTED:email]"},"contents":[{"__proto__":"[REDACTED:email]"}]}',
+		);
+	});
+
+	// Unchanged by keeping hidden fields: an accessor is not a data property. detectPII and the clone
+	// each read an enumerable getter once, and the clone keeps its value as plain data.
+	it("accessors: an enumerable getter is read by detection and by the clone, its value kept as redacted data; a non-enumerable one is never invoked", () => {
+		let enumReads = 0;
+		let hiddenReads = 0;
+		const input: Record<string, unknown> = {};
+		Object.defineProperty(input, "shown", {
+			get: () => {
+				enumReads++;
+				return EMAIL;
+			},
+			enumerable: true,
+		});
+		Object.defineProperty(input, "hidden", {
+			get: () => {
+				hiddenReads++;
+				return EMAIL;
+			},
+			enumerable: false,
+		});
+		const out = redactPII(input).data as object;
+		expect(enumReads).toBe(2);
+		expect(hiddenReads).toBe(0);
+		expect(Object.getOwnPropertyDescriptor(out, "shown")).toEqual({
+			value: "[REDACTED:email]",
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
+		expect(Object.hasOwn(out, "hidden")).toBe(false);
+	});
+
+	// Ordinary inputs (own enumerable data keys only): the clone is identical to the one assignment
+	// built, key for key, descriptor for descriptor, prototype for prototype.
+	const ORDINARY: ReadonlyArray<readonly [string, unknown]> = [
+		["no PII", { name: "John", age: 30, active: true }],
+		["an email", { email: "user@example.com" }],
+		["nested objects", { user: { profile: { email: "user@example.com" } } }],
+		["arrays", { emails: ["user@example.com", "admin@test.org"] }],
+		["several types in one string", { note: "Call 234-567-8901 or email user@example.com" }],
+		["an API key", { key: "sk-proj-abc123def456ghi789jkl" }],
+		["non-string values", { count: 42, flag: true, empty: null, email: "user@example.com" }],
+		["empty structures", { a: {}, b: [], c: "" }],
+		["a top-level array", [{ ip: "192.168.1.1" }, "plain", 3]],
+		[
+			"an Anthropic request",
+			{
+				model: "claude-sonnet-4-6",
+				max_tokens: 64,
+				system: EMAIL,
+				messages: [{ role: "user", content: [{ type: "text", text: EMAIL }] }],
+			},
+		],
+		[
+			"an OpenAI request",
+			{
+				model: "gpt-4o",
+				messages: [
+					{ role: "system", content: "be brief" },
+					{ role: "user", content: EMAIL },
+				],
+				tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
+			},
+		],
+		[
+			"a Google request",
+			{
+				model: "gemini-2.5-flash",
+				contents: [{ role: "user", parts: [{ text: EMAIL }] }],
+				config: { temperature: 0, systemInstruction: EMAIL },
+			},
+		],
+		["a JSON.parse request", JSON.parse(`{"messages":[{"role":"user","content":"${EMAIL}"}]}`)],
+	];
+	for (const [label, input] of ORDINARY) {
+		it(`ordinary input, ${label}: identical to the assigned clone`, () => {
+			expect(shape(redactPII(input).data)).toEqual(shape(assignedClone(input)));
+		});
+	}
+});

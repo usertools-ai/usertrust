@@ -380,6 +380,10 @@ function matchedTypes(value: string): string[] {
 	return matched;
 }
 
+function defineData(obj: object, key: string, value: unknown, enumerable: boolean): void {
+	Object.defineProperty(obj, key, { value, writable: true, enumerable, configurable: true });
+}
+
 /** Recursively traverse data and replace PII strings with redacted placeholders. */
 function redactValue(value: unknown, path = ""): unknown {
 	if (typeof value === "string") {
@@ -400,8 +404,20 @@ function redactValue(value: unknown, path = ""): unknown {
 	if (value !== null && typeof value === "object") {
 		const record = value as Record<string, unknown>;
 		const result: Record<string, unknown> = {};
+		// Every key is DEFINED, never assigned: an own "__proto__" key (as JSON.parse makes one) stays
+		// a key of the clone instead of becoming its prototype.
 		for (const key of Object.keys(record)) {
-			result[key] = redactValue(record[key], path === "" ? key : `${path}.${key}`);
+			defineData(result, key, redactValue(record[key], path === "" ? key : `${path}.${key}`), true);
+		}
+		// A non-enumerable own DATA property stays one, redacted, so a consumer that reads the request
+		// by name still finds the field, and JSON.stringify still skips it. Data only: a function (a
+		// hidden `toJSON` hook) is never carried into the clone, where serializing would run it; an
+		// accessor is never invoked.
+		for (const key of Object.getOwnPropertyNames(record)) {
+			const d = Object.getOwnPropertyDescriptor(record, key);
+			if (d === undefined || d.enumerable === true || !("value" in d)) continue;
+			if (typeof d.value === "function") continue;
+			defineData(result, key, redactValue(d.value, path === "" ? key : `${path}.${key}`), false);
 		}
 		return result;
 	}

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **PII redaction now keeps a field that is non-enumerable, and an own `"__proto__"` key.** When `pii: "redact"` rewrote a request, the copy it built dropped every non-enumerable field, and turned an own `"__proto__"` key, which a request built by `JSON.parse` can carry, into the copy's prototype instead of a key. Both are now kept, redacted like any other field: a non-enumerable field stays non-enumerable, and `"__proto__"` stays an ordinary key. A non-enumerable function (such as a hidden `toJSON`) or getter is still left out of the copy, and the getter is never run. Requests built from plain object literals are redacted exactly as before.
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading
