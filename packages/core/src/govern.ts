@@ -2141,8 +2141,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// now simply ABSENT rather than caller-chosen, which is the fail-closed
 						// answer. See HOST_CONTROLLED_POLICY_FIELDS for why the hand-maintained
 						// list needed a mechanism behind it.
-						// Google: the policy fields its request gate read beside the request (data, never
-						// sent), under the request's own fields.
+						// Google: the caller's top-level fields beside the request, read once by its request
+						// gate and held by reference off the sent request (never sent, serialized or held
+						// for); a rule reads below them here, as before. The request's own fields win.
 						...sanitizePolicyContext({ ...googlePolicyFields.get(callerArgs), ...params }),
 						model,
 						tier: config.tier,
