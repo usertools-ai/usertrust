@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - an Anthropic or OpenAI client constructed with `fetchOptions` carrying `body` or `method`;
   - a Google client created with `httpOptions.extraBody`. A default client, and a cloud-provider subclass that signs requests, are unaffected. (LIMITATIONS.md, "1. The governance surface is the wrapped SDK methods — nothing else".)
 
+- **Each package requires its sibling packages at exactly its own version**, which fixes the 5.0.1 known issue about `npx`. `usertrust-server`, `usertrust-openclaw` and `usertrust-acs-adapter` depended on `usertrust` as `"*"`, and `usertrust-ui` on `usertrust` and `usertrust-verify` as `"*"`, so an install could keep a sibling from an earlier release. An `npx usertrust-server` folder made while 4.1.0 was latest was upgraded in place to `usertrust-server@5.0.0` with `usertrust@4.1.0` kept, and the server failed to start (`does not provide an export named 'kernelVaultBase'`). Each now names its siblings at exactly its own version (`usertrust-server@X` requires `usertrust@X`), and the release refuses to publish one that does not. If your project depends on `usertrust` itself, keep it at the same version as the other usertrust packages you install; a different version makes npm install a second copy for them.
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading

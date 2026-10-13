@@ -39,6 +39,6 @@
 		"NOTICE"
 	],
 	"dependencies": {
-		"usertrust": "*"
+		"usertrust": "5.0.1"
 	}
 }

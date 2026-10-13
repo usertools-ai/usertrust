@@ -49,7 +49,7 @@
 		"NOTICE"
 	],
 	"dependencies": {
-		"usertrust": "*"
+		"usertrust": "5.0.1"
 	},
 	"peerDependencies": {
 		"@mariozechner/pi-ai": ">=0.12.0",
