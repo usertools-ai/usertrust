@@ -29,6 +29,8 @@ export interface LedgerState {
 	summary: SummaryPayload;
 	lastHash: string;
 	byteOffset: number;
+	/** Whether the audit directory existed at this load: once a server has seen it, its absence is a deletion. */
+	auditDirPresent: boolean;
 }
 
 // Presence of the mirror file is not a verdict — a planted empty/junk file
@@ -93,13 +95,14 @@ function auditDirState(vaultPath: string): "absent" | "present" | string {
 const NO_AUDIT_DIR = "Audit directory not found:";
 
 /**
- * `observedEvents`: how many events this process has already read from the vault. A first run has no audit directory;
- * a vault whose audit directory disappears after its events were read has been deleted, and must never read as one.
+ * `auditDirSeen`: whether this process has ever seen the vault's audit directory. A first run has none; a directory that
+ * existed and is gone was deleted, whatever it held (events, malformed lines, nothing), and must never read as a first
+ * run. A count of parsed events missed a log of malformed lines only, which verification fails with zero events.
  */
 export function loadState(
 	vaultPath: string,
 	rowCap: number = ROW_CAP,
-	observedEvents = 0,
+	auditDirSeen = false,
 ): LedgerState {
 	const events = readLedgerEvents(vaultPath);
 	const integrity = deriveChainIntegrity(events);
@@ -114,17 +117,17 @@ export function loadState(
 	// absent, is dropped; every other error stands. A log deleted while its anchor records events keeps its
 	// "deletion detected" (the anchor lives in the audit directory, so that directory exists), and if verifyVault ever
 	// words the missing-directory error differently, it is kept too: the vault reads as broken, never as clean.
-	// The exception is for a vault never seen with events: a directory deleted while the dashboard was open (the live
-	// tail resyncs, and the reload finds it gone) is evidence destroyed, not a first run.
+	// The exception is for an audit directory this process has never seen: one deleted while the dashboard was open
+	// (the live tail resyncs, and the reload finds it gone) is evidence destroyed, not a first run.
 	const auditDir = auditDirState(vaultPath);
-	const deletedWhileOpen = events.length === 0 && auditDir === "absent" && observedEvents > 0;
-	const noAuditDir = events.length === 0 && auditDir === "absent" && !deletedWhileOpen;
+	const deletedWhileOpen = auditDir === "absent" && auditDirSeen;
+	const noAuditDir = events.length === 0 && auditDir === "absent" && !auditDirSeen;
 	const errors = noAuditDir
 		? vault.errors.filter((e) => !e.startsWith(NO_AUDIT_DIR))
 		: deletedWhileOpen
 			? [
 					...vault.errors,
-					`The audit directory disappeared after ${observedEvents} event(s) were read from it (deletion detected)`,
+					"The audit directory disappeared while this dashboard was open (deletion detected)",
 				]
 			: auditDir === "absent" || auditDir === "present"
 				? vault.errors
@@ -172,5 +175,6 @@ export function loadState(
 		},
 		lastHash: events.at(-1)?.hash ?? GENESIS,
 		byteOffset,
+		auditDirPresent: auditDir === "present",
 	};
 }

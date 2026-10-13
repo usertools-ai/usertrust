@@ -464,3 +464,40 @@ describe("remote settings", () => {
 		expect(JSON.parse(data).remote).toEqual({ kit: true });
 	});
 });
+
+// A log of malformed lines only fails verification with ZERO parsed events: a guard that counted parsed events read its
+// later deletion as a first run. The server remembers that it saw the directory, whatever it held.
+describe("deletion of an audit directory that held no parsable event", () => {
+	let tempDir: string;
+	let ui: UiServer | undefined;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-tail-malformed-"));
+		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+		writeFileSync(join(tempDir, ".usertrust", "audit", "events.jsonl"), "{ not json\n");
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("red-first (cleared to a first run): deleting it under an open dashboard stays red", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
+			chain: { events: number; valid: boolean };
+		};
+		expect(before.chain).toMatchObject({ events: 0, valid: false });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				rmSync(join(tempDir, ".usertrust", "audit"), { recursive: true, force: true });
+			},
+		);
+		const chain = JSON.parse(data).chain as { valid: boolean; empty: boolean; errors: string[] };
+		expect(chain).toMatchObject({ valid: false, empty: false });
+		expect(chain.errors.join(" ")).toContain("deletion detected");
+	});
+});

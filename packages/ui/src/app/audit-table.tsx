@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
 	type ChainStatus,
 	costView,
@@ -187,12 +187,15 @@ export function AuditTable(props: {
 	const sorted = useMemo(() => sortRows(props.rows, sortKey, desc), [props.rows, sortKey, desc]);
 
 	const parentRef = useRef<HTMLDivElement>(null);
+	// Stable while the rows are: the virtualizer's measurement cache is keyed on this callback's identity, and a new one
+	// each render (a scroll re-renders) re-scanned every row of a large vault.
+	const getItemKey = useCallback((i: number) => (sorted[i] as LedgerRow).hash, [sorted]);
 	const virtualizer = useVirtualizer({
 		count: sorted.length,
 		getScrollElement: () => parentRef.current,
 		// Two-line rows; a narrow list stacks the cost under them, so each row is measured.
 		estimateSize: () => 62,
-		getItemKey: (i) => (sorted[i] as LedgerRow).hash,
+		getItemKey,
 		gap: 2,
 		paddingStart: 8,
 		paddingEnd: 24,
