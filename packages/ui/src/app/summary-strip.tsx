@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { SummaryPayload } from "../shared/api.js";
 import { budgetDisplay, budgetSourceWord } from "../shared/budget-display.js";
-import { anchorView, chainStatus, windowNotice } from "../shared/display.js";
+import { ANCHOR_VERIFY_COMMAND, anchorView, chainStatus, windowNotice } from "../shared/display.js";
 import { formatUsd, formatUt, formatUtc, middleTruncate } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
 import type { LiveState } from "./store.js";
@@ -106,7 +106,7 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 			document.removeEventListener("keydown", esc);
 		};
 	}, [open]);
-	const [before, after] = shown.explainer.split("usertrust verify --anchors <file>");
+	const [before, after] = shown.explainer.split(ANCHOR_VERIFY_COMMAND);
 	return (
 		<div className="ut-fact">
 			<b>Anchor file</b>
@@ -126,7 +126,7 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 				{open && (
 					<div className="ut-pop text" role="note">
 						{before}
-						<code>usertrust verify --anchors &lt;file&gt;</code>
+						<code>{ANCHOR_VERIFY_COMMAND}</code>
 						{after}
 					</div>
 				)}

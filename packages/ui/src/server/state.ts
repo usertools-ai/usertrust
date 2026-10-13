@@ -92,7 +92,15 @@ function auditDirState(vaultPath: string): "absent" | "present" | string {
 /** `verifyVault`'s error for a vault with no audit directory: no evidence either way, not tampering. */
 const NO_AUDIT_DIR = "Audit directory not found:";
 
-export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerState {
+/**
+ * `observedEvents`: how many events this process has already read from the vault. A first run has no audit directory;
+ * a vault whose audit directory disappears after its events were read has been deleted, and must never read as one.
+ */
+export function loadState(
+	vaultPath: string,
+	rowCap: number = ROW_CAP,
+	observedEvents = 0,
+): LedgerState {
 	const events = readLedgerEvents(vaultPath);
 	const integrity = deriveChainIntegrity(events);
 	const vault = verifyVault(vaultPath);
@@ -106,17 +114,25 @@ export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerSt
 	// absent, is dropped; every other error stands. A log deleted while its anchor records events keeps its
 	// "deletion detected" (the anchor lives in the audit directory, so that directory exists), and if verifyVault ever
 	// words the missing-directory error differently, it is kept too: the vault reads as broken, never as clean.
+	// The exception is for a vault never seen with events: a directory deleted while the dashboard was open (the live
+	// tail resyncs, and the reload finds it gone) is evidence destroyed, not a first run.
 	const auditDir = auditDirState(vaultPath);
-	const noAuditDir = events.length === 0 && auditDir === "absent";
+	const deletedWhileOpen = events.length === 0 && auditDir === "absent" && observedEvents > 0;
+	const noAuditDir = events.length === 0 && auditDir === "absent" && !deletedWhileOpen;
 	const errors = noAuditDir
 		? vault.errors.filter((e) => !e.startsWith(NO_AUDIT_DIR))
-		: auditDir === "absent" || auditDir === "present"
-			? vault.errors
-			: // verifyVault calls an unreadable directory "not found": say what actually stopped the read.
-				[
+		: deletedWhileOpen
+			? [
 					...vault.errors,
-					`Audit directory could not be read (${auditDir}): this vault was not verified`,
-				];
+					`The audit directory disappeared after ${observedEvents} event(s) were read from it (deletion detected)`,
+				]
+			: auditDir === "absent" || auditDir === "present"
+				? vault.errors
+				: // verifyVault calls an unreadable directory "not found": say what actually stopped the read.
+					[
+						...vault.errors,
+						`Audit directory could not be read (${auditDir}): this vault was not verified`,
+					];
 	const valid = integrity.valid && (vault.valid || (noAuditDir && errors.length === 0));
 
 	const truncated = events.length > rowCap;

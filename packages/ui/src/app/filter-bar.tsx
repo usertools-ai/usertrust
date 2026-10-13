@@ -22,9 +22,9 @@ function Facet(props: {
 }): React.JSX.Element {
 	const { label, options, selected, onChange } = props;
 	const [open, setOpen] = useState(false);
-	// Placed when it opens: aligned to the trigger's right edge when it would otherwise run past the window's, and no
-	// taller than the room below the trigger, so no option is cut off at a window edge.
-	const [place, setPlace] = useState({ right: false, maxHeight: 300 });
+	// Placed when it opens: a fixed width, its left edge clamped 16 px inside BOTH window edges (aligning to the trigger's
+	// right edge alone pushed a narrow screen's first facet off the left), and no taller than the room below the trigger.
+	const [place, setPlace] = useState({ left: 0, width: 260, maxHeight: 300 });
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const triggerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -32,9 +32,11 @@ function Facet(props: {
 		const trigger = triggerRef.current;
 		if (!open && trigger !== null) {
 			const r = trigger.getBoundingClientRect();
-			const width = Math.min(320, window.innerWidth - 32);
+			const width = Math.min(260, window.innerWidth - 32);
+			const x = Math.min(Math.max(r.left, 16), window.innerWidth - 16 - width);
 			setPlace({
-				right: r.left + width > window.innerWidth - 16,
+				left: x - r.left,
+				width,
 				maxHeight: Math.max(140, Math.min(300, window.innerHeight - r.bottom - 24)),
 			});
 		}
@@ -80,8 +82,8 @@ function Facet(props: {
 			</button>
 			{open && (
 				<fieldset
-					className={`ut-pop${place.right ? " right" : ""}`}
-					style={{ maxHeight: place.maxHeight }}
+					className="ut-pop"
+					style={{ left: place.left, width: place.width, maxHeight: place.maxHeight }}
 				>
 					<legend className="sr-only">filter by {label}</legend>
 					{options.length === 0 ? (

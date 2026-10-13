@@ -92,6 +92,20 @@ describe("live tail", () => {
 		expect(rows.some((r) => r.transferId === "tx_live")).toBe(true);
 	});
 
+	it("red-first (deletion read as a first run): deleting the audit directory under an open dashboard turns it red", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const { data } = await readSse(
+			ui.port,
+			(name) => name === "summary",
+			async () => {
+				rmSync(join(tempDir, ".usertrust", "audit"), { recursive: true, force: true });
+			},
+		);
+		const chain = JSON.parse(data).chain as { valid: boolean; empty: boolean; errors: string[] };
+		expect(chain).toMatchObject({ valid: false, empty: false });
+		expect(chain.errors.join(" ")).toContain("deletion detected");
+	});
+
 	it("red-first (stays settled): an ambiguity appended after an OPTIMISTIC settlement re-classifies the EARLIER row", async () => {
 		// The audit-first path writes `settled: true` before the POST and appends `settlement_ambiguous` only when the
 		// POST throws: the earlier row's verdict changes after it was sent, so the server sends the change.

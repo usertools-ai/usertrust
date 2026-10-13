@@ -25,14 +25,19 @@ export function chainStatus(chain: SummaryPayload["chain"]): ChainStatus {
  * The anchor file's presence is all the dashboard knows about anchors: the server has no operator-pinned genesis, so
  * it cannot verify them. The cell says that, and how to verify, instead of a bare "absent".
  */
+/**
+ * How to verify the chain against anchors. Without `--pubkey` the CLI cannot verify anchors at all (it reports them
+ * unverifiable), and the key must be pinned outside the vault: anchor trust never comes from the vault under audit.
+ */
+export const ANCHOR_VERIFY_COMMAND = "usertrust verify --anchors <file> --pubkey <genesis.pem>";
+
 export function anchorView(anchorFile: SummaryPayload["anchorFile"]): {
 	label: "present" | "not present";
 	explainer: string;
 } {
 	return {
 		label: anchorFile === "present" ? "present" : "not present",
-		explainer:
-			"An anchor file mirrors chain checkpoints outside this vault's log. This dashboard only checks whether the file exists; it does not verify anchors. To check the chain against anchors, run usertrust verify --anchors <file> in the project directory.",
+		explainer: `An anchor file mirrors chain checkpoints outside this vault's log. This dashboard only checks whether the file exists; it does not verify anchors. To check the chain against anchors, run ${ANCHOR_VERIFY_COMMAND} in the project directory, where <genesis.pem> is the anchoring public key you pinned outside this vault, never one read from it.`,
 	};
 }
 

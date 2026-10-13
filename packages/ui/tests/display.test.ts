@@ -50,7 +50,9 @@ describe("anchorView", () => {
 		expect(shown.label).toBe("not present");
 		expect(shown.explainer).toMatch(/only checks whether the file exists/);
 		expect(shown.explainer).toMatch(/does not verify anchors/);
-		expect(shown.explainer).toContain("usertrust verify --anchors <file>");
+		expect(shown.explainer).toContain("usertrust verify --anchors <file> --pubkey <genesis.pem>");
+		// red-first (no trust input): without --pubkey the CLI reports anchors unverifiable; the key is pinned outside
+		expect(shown.explainer).toMatch(/pinned outside this vault, never one read from it/);
 	});
 
 	it("a present file is still not a verdict: the same explainer", () => {

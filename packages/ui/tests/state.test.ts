@@ -97,6 +97,19 @@ describe("loadState", () => {
 		});
 	});
 
+	// The live tail reloads when the log shrinks: a reload that finds the audit directory gone, after events were read
+	// from it, applied the first-run exception and replaced the chain with "no governed calls yet, nothing is wrong".
+	it("red-first (deletion read as a first run): an audit directory gone after events were read is a FAILURE", () => {
+		const gone = join(tempDir, "deleted-project", ".usertrust");
+		const { summary } = loadState(gone, undefined, 3);
+		expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
+		expect(summary.chain.errors.join(" ")).toContain(
+			"disappeared after 3 event(s) were read from it (deletion detected)",
+		);
+		// The same directory, never seen with events, is a first run.
+		expect(loadState(gone).summary.chain).toMatchObject({ valid: true, empty: true });
+	});
+
 	it("red-first (an empty log read as 'verified'): an audit directory with no events is EMPTY", () => {
 		const { summary } = loadState(vaultPath);
 		expect(summary.chain).toMatchObject({ events: 0, valid: true, empty: true, errors: [] });

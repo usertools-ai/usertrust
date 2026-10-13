@@ -72,6 +72,11 @@ export async function createUiServer(
 	// Compiled location is dist/server/ — the built SPA sits beside it in dist/app/.
 	const appDir = opts?.appDir ?? join(dirname(fileURLToPath(import.meta.url)), "..", "app");
 	let state: LedgerState = loadState(vaultPath);
+	/**
+	 * The most events this process has read from the vault. A resync that finds the audit directory gone after events
+	 * were read is a deletion, not a first run (`loadState`'s `observedEvents`).
+	 */
+	let observedEvents = state.summary.chain.events;
 	let port = 0;
 
 	const clients = new Set<ServerResponse>();
@@ -139,6 +144,7 @@ export async function createUiServer(
 			state.summary.remainingUt =
 				state.summary.budget === null ? null : state.summary.budget - state.summary.spentUt;
 			state.summary.chain.events += fresh.length;
+			observedEvents = Math.max(observedEvents, state.summary.chain.events);
 			// A verified append is the first activity of a vault that had none.
 			if (fresh.length > 0) state.summary.chain.empty = false;
 			// Amendment A4: enforce ROW_CAP after append.
@@ -157,7 +163,8 @@ export async function createUiServer(
 	}
 
 	function handleResync(): void {
-		state = loadState(vaultPath);
+		state = loadState(vaultPath, ROW_CAP, observedEvents);
+		observedEvents = Math.max(observedEvents, state.summary.chain.events);
 		version += 1;
 		broadcast("resync", {});
 		broadcast("summary", state.summary);

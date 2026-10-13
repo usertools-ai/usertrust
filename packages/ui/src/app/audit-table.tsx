@@ -66,25 +66,28 @@ function Row(props: { row: LedgerRow }): React.JSX.Element {
 					<span className="ut-rtitle">{row.model ?? row.kind}</span>
 				</span>
 				<span className="ut-meta">
-					<span className="m" title={row.ts}>
-						{formatUtc(row.ts)}
-					</span>
-					<Sep />
-					<span title={`actor ${row.actor}`}>{compactActor(row.actor)}</span>
-					{row.model !== undefined && (
-						<>
-							<Sep />
-							<span className="m">{row.kind}</span>
-						</>
-					)}
-					<Sep />
-					{tx.kind === "transfer" ? (
-						<span className="m" title={`transfer ${tx.id}`}>
-							tx {tx.id}
+					{/* The description may be cut; the integrity mark after it never is (the banner says rows are marked). */}
+					<span className="txt">
+						<span className="m" title={row.ts}>
+							{formatUtc(row.ts)}
 						</span>
-					) : (
-						<span className="none">no transfer</span>
-					)}
+						<Sep />
+						<span title={`actor ${row.actor}`}>{compactActor(row.actor)}</span>
+						{row.model !== undefined && (
+							<>
+								<Sep />
+								<span className="m">{row.kind}</span>
+							</>
+						)}
+						<Sep />
+						{tx.kind === "transfer" ? (
+							<span className="m" title={`transfer ${tx.id}`}>
+								tx {tx.id}
+							</span>
+						) : (
+							<span className="none">no transfer</span>
+						)}
+					</span>
 					<Sep />
 					{row.integrity === "verified" ? (
 						<span className="ok">✓ verified</span>
