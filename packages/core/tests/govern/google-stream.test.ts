@@ -2585,6 +2585,24 @@ describe('pii "redact" keeps the caller\'s AbortSignal (and only that) by refere
 		await destroy(governed);
 	});
 
+	it("Google: config reached first under another key still reaches the SDK with the caller's AbortSignal", async () => {
+		const { governed, received } = await redactingGoogle();
+		const controller = new AbortController();
+		const cfg = { abortSignal: controller.signal };
+
+		await governed.models.generateContent({
+			model: "gemini-2.5-flash",
+			alias: cfg,
+			contents: `mail ${EMAIL} please`,
+			config: cfg,
+		} as Record<string, unknown>);
+
+		const sent = received[0] as { contents: unknown; config: { abortSignal: unknown } };
+		expect(sent.config.abortSignal).toBe(controller.signal);
+		expect(JSON.stringify(sent.contents)).not.toContain(EMAIL);
+		await destroy(governed);
+	});
+
 	it("NO-REGRESSION: a class instance holding a PII string is NOT sent unredacted", async () => {
 		const { governed, received } = await redactingGoogle();
 		class Note {

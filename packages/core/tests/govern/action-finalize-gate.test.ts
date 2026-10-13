@@ -448,3 +448,51 @@ describe("A2 on the action path: governAction settles XOR voids its hold", () =>
 		await client.destroy();
 	});
 });
+
+describe("governAction: audit redaction of params that hold a hidden back-reference", () => {
+	let vault: string;
+	beforeEach(() => {
+		vault = join(tmpdir(), `action-redact-cycle-${randomUUID()}`);
+		mkdirSync(join(vault, ".usertrust"), { recursive: true });
+		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+		rmSync(vault, { recursive: true, force: true });
+	});
+
+	for (const pii of ["warn", "redact"] as const) {
+		it(`pii "${pii}": the action ran, so its hold SETTLES and its audit event is written, the params redacted`, async () => {
+			writeFileSync(
+				join(vault, ".usertrust", "usertrust.config.json"),
+				JSON.stringify({ budget: 500_000 }),
+			);
+			const { engine, held, posted, voided } = recordingEngine();
+			const audit = makeAudit();
+			const client = await trust(
+				{ messages: { create: vi.fn() } },
+				{ dryRun: false, vaultBase: vault, _engine: engine, _audit: audit, pii },
+			);
+			const params: Record<string, unknown> = { email: "alice@example.com" };
+			Object.defineProperty(params, "parent", { value: params, enumerable: false });
+			const run = vi.fn(async () => "ran");
+
+			const result = await outcome(client.governAction({ ...ACTION, params }, run));
+
+			expect(result).not.toBeInstanceOf(Error);
+			expect(run).toHaveBeenCalledOnce();
+			expect(held).toHaveLength(1);
+			expect(posted).toEqual(held);
+			expect(voided).toEqual([]);
+			const events = (audit.appendEvent as unknown as MockInstance).mock.calls.map(
+				(c) => c[0] as AppendEventInput,
+			);
+			const own = events.find((e) => e.kind === ACTION.kind) as AppendEventInput;
+			expect(own).toBeDefined();
+			expect((own.data as { params: Record<string, unknown> }).params.email).toBe(
+				"[REDACTED:email]",
+			);
+			await client.destroy();
+		});
+	}
+});
