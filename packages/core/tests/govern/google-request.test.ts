@@ -2036,3 +2036,90 @@ describe("a config held by a getter is read by the SDK, as before; its httpOptio
 		}
 	}
 });
+
+describe("a getter config that answers a different httpOptions on its later reads: the send never reads it", () => {
+	const SECRET = "ssn 123-45-6789";
+
+	/** The getter answers `{ timeout }` on its first read and `later()` on every later one; its reads counted. */
+	function flipping(tools: boolean, later: () => Loose) {
+		const reads = { n: 0 };
+		const params = Object.defineProperty({ model: "gemini-2.5-flash", contents: "go" }, "config", {
+			get: () => {
+				reads.n++;
+				const httpOptions = reads.n === 1 ? { timeout: 5000 } : later();
+				return tools ? { tools: [{ googleSearch: {} }], httpOptions } : { httpOptions };
+			},
+			enumerable: true,
+		});
+		return { params, reads };
+	}
+
+	/**
+	 * The call natively, then governed on an engine that notes the getter's read count when the hold is
+	 * placed: after the request gate, before the send. Reads past that count are the send's.
+	 */
+	async function run(method: Method, vertex: boolean, tools: boolean, later: () => Loose) {
+		const native = flipping(tools, later);
+		const raw = wire();
+		globalThis.fetch = raw.fetchStub as typeof fetch;
+		await runOn(sdkClient(vertex).models, method, native.params);
+
+		const governed = flipping(tools, later);
+		const atHold: number[] = [];
+		const engine = {
+			spendPending: vi.fn(async (p: { transferId: string; amount: number }) => {
+				atHold.push(governed.reads.n);
+				return { transferId: p.transferId };
+			}),
+			postPendingSpend: vi.fn(async () => {}),
+			voidPendingSpend: vi.fn(async () => {}),
+			destroy: vi.fn(),
+		};
+		const gov = wire();
+		globalThis.fetch = gov.fetchStub as typeof fetch;
+		const client = await trust(sdkClient(vertex), {
+			dryRun: false,
+			budget: 50_000_000,
+			vaultBase: vault,
+			_engine: engine,
+			_audit: recordingAudit(),
+		});
+		const { result } = await runOn(client.models, method, governed.params);
+		await client.destroy();
+		return { raw, gov, result, native: native.reads.n, governed: governed.reads.n, atHold };
+	}
+
+	for (const method of METHODS) {
+		for (const [backend, vertex] of BACKENDS) {
+			for (const tools of [false, true]) {
+				const on = `${method} on ${backend}, ${tools ? "with" : "without"} tools`;
+
+				it(`${on}: a later answer carrying extraBody (SECRET): never on the wire; the copy holds what the SDK read and is refused before any hold`, async () => {
+					const r = await run(method, vertex, tools, () => ({
+						extraBody: { labels: { secret: SECRET } },
+					}));
+					expect(JSON.stringify(r.raw.requests)).toContain(SECRET); // natively it is sent
+					// the SDK reads httpOptions from a later read of config: the copy holds that answer, and the
+					// request-option check on the request that would be sent refuses it
+					expect(r.result).toContain("request_option_refused");
+					expect(r.result).toContain("config.httpOptions.extraBody");
+					expect(r.gov.requests).toHaveLength(0);
+					expect(r.atHold).toEqual([]);
+					// every read is the dry run's, as natively (pass-through): measured 7 without tools, 8 with
+					expect(r.governed).toBe(r.native);
+				});
+
+				it(`${on}: a later answer holding only an allowed header: sent as natively, and the send makes no read of the caller's config`, async () => {
+					const r = await run(method, vertex, tools, () => ({ headers: { "x-test": "later" } }));
+					expect(r.result).toBe("ok");
+					expect(r.gov.requests.map((q) => q.testHeader)).toEqual(["later"]);
+					expect(r.gov.requests.map((q) => q.testHeader)).toEqual(
+						r.raw.requests.map((q) => q.testHeader),
+					);
+					expect(r.atHold).toEqual([r.governed]); // no read of the getter after the request gate
+					expect(r.governed).toBe(r.native);
+				});
+			}
+		}
+	}
+});
