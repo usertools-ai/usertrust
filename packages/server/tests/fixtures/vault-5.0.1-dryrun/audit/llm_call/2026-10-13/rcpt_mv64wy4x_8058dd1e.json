@@ -1,0 +1,14 @@
+{
+	"v": 3,
+	"ts": "2026-10-13T03:41:55.281Z",
+	"kind": "llm_call",
+	"subsystem": "headless",
+	"actor": "compat-fixture",
+	"data": {
+		"receiptId": "rcpt_mv64wy4x_8058dd1e",
+		"model": "claude-sonnet-4-6",
+		"cost": 14,
+		"settled": true,
+		"transferId": "tx_mv64wy4k_cf2022c9"
+	}
+}
