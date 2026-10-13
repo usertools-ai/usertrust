@@ -520,9 +520,10 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
   settlement metadata; a released hold whose usage is unconfirmed; an evidence line that could not be
   parsed. A watch file that exists but cannot be read gives no verdict. An interval is (start, stop]:
   usage at exactly the start belongs to the earlier job. Separately, `beforeMetering` reports the
-  responses a session of the job wrote before it was metered (its `pre-metering` records, as
-  `{ "responses": N, "note": "Before metering began: N responses (not billed)" }`): never billed,
-  and never one of the `knownGaps`.
+  responses a session of the job wrote before it was metered (its `pre-metering` records), as
+  `{ "responses": 0, "unattributed": { "sessions": { "<session>": N } }, "note": … }`: never billed,
+  never one of the `knownGaps`, and attributed to no job, since when they were written is not kept.
+  Two jobs that share a session both name the same entry, so total it by session, never by job.
 
 ## Modes: watch-only by default
 
@@ -748,7 +749,7 @@ A `pre-metering` record counts the responses a session's transcript held from be
 session was metered (see the first-run time above): `responses` is how many, by message id,
 and nothing else about them is kept. They are never billed, and **a `pre-metering` record is
 never a gap**: a gap is a call missed while metering was on, and this usage predates it. The
-job report counts them separately (`beforeMetering`).
+job report names them separately, per session and attributed to no job (`beforeMetering`).
 
 `agent` is the subagent's id (`main` for the parent), and a `would_block`'s
 `status` is the refusal's: 402, 403 or 429. A `gap` written in enforce

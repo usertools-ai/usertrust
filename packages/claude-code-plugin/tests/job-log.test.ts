@@ -80,7 +80,11 @@ interface Lib {
 		knownGaps: Array<{ gap: string; evidence: Record<string, unknown> }>;
 		transferIds: string[];
 		taggedCostUt: string;
-		beforeMetering: { responses: number; note: string };
+		beforeMetering: {
+			responses: number;
+			unattributed: { sessions: Record<string, number> } & Record<string, unknown>;
+			note: string;
+		};
 	};
 }
 // A computed specifier: the hooks are plain .mjs with no declarations.
@@ -517,15 +521,51 @@ describe("jobCoverage — a diagnostic, not a certification", () => {
 		// The gap figure means calls missed while metering was ON: this usage predates it.
 		expect(withIt.knownGaps).toEqual(without.knownGaps);
 		expect(withIt.knownGaps).toEqual([]);
-		// Its own field, this job's sessions only.
+		// Its own field, this job's sessions only, by session: attributed to no job.
 		expect(withIt.beforeMetering).toEqual({
-			responses: 3,
-			note: "Before metering began: 3 responses (not billed)",
+			responses: 0,
+			unattributed: { sessions: { [SID]: 3 } },
+			note: "Before metering began, in 1 of this job's sessions: responses not billed and attributed to no job (when they were written is not kept); count them by session",
 		});
 		expect(without.beforeMetering).toEqual({
 			responses: 0,
-			note: "Before metering began: 0 responses (not billed)",
+			unattributed: { sessions: {} },
+			note: "Before metering began: none in this job's sessions",
 		});
+	});
+	it("a pre-metering record of a session two jobs share is attributed to NEITHER: each names it by session, and no report carries a total of it", async () => {
+		const { jobCoverage } = await lib();
+		const OTHER = "job-2";
+		const shared =
+			start(SID, T0) +
+			op(SID, T0 + 1000, "start", J) +
+			op(SID, T0 + 3000, "stop", null) +
+			op(SID, T0 + 4000, "start", OTHER) +
+			op(SID, T0 + 6000, "stop", null);
+		const watch = [
+			{
+				kind: "pre-metering",
+				mode: "watch",
+				session: SID,
+				agent: "main",
+				responses: 3,
+				reason: "written before this session was metered; not billed",
+				started: null,
+				at: iso(T0 + 2500),
+			},
+		];
+		const reports = [J, OTHER].map(
+			(job) => jobCoverage({ job, logs: { [SID]: shared }, records: [], watch }).beforeMetering,
+		);
+		for (const before of reports) {
+			// Attributed to this job: none. Their times are not kept, so no interval holds them.
+			expect(before.responses).toBe(0);
+			expect(before.unattributed.sessions).toEqual({ [SID]: 3 });
+			// The only way to total it is by session key, which two reports cannot double.
+			expect(Object.keys(before.unattributed)).toEqual(["sessions"]);
+		}
+		// Summed across the jobs, what is attributed is the truth: nothing.
+		expect(reports.reduce((n, b) => n + b.responses, 0)).toBe(0);
 	});
 	it("test 12 (R2-B) — an empty interval has a known gap", async () => {
 		const { jobCoverage } = await lib();

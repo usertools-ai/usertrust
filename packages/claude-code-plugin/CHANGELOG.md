@@ -21,8 +21,9 @@ npm, and its version is its own: the `usertrust` packages and their
   declared once per agent instead, as a `pre-metering` watch record
   (`{"kind":"pre-metering","session":…,"agent":…,"responses":N,"reason":"written before this session was metered; not billed","started":null}`).
   It is never billed and never a `gap`: the gap figure counts only calls missed while metering
-  was on. The job report shows the count in its own `beforeMetering` field, apart from
-  `knownGaps`. A session the state already held a cursor for before this change keeps the
+  was on. The job report names the count in its own `beforeMetering` field, apart from
+  `knownGaps`, per session (`unattributed.sessions`) and attributed to no job: when those
+  responses were written is not kept, so two jobs that share a session name the same entry. A session the state already held a cursor for before this change keeps the
   state's time, so a response it left unposted is still posted.
 
 ## [3.0.2] - 2026-10-12
