@@ -113,6 +113,8 @@ describe("pre-tool-use hook", () => {
 			toolUseId: "tu_1",
 			transferId: "tx_1",
 			agentId: "main",
+			// The session as given: a session id can contain the file name's `__` separator.
+			sessionId: "sess1",
 			estimatedInputTokens: 4,
 			// When the call was received: kept on every hold, whatever the server honours.
 			startedAt: expect.any(String),

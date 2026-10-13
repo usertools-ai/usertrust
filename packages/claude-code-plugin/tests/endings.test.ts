@@ -2694,3 +2694,45 @@ describe("a `.releasing` record whose give-back fails is kept, through SessionEn
 		expect(await phased("release")).toMatchObject([{ outcome: "failed", transferId: "tx_1" }]);
 	});
 });
+
+describe("a hold's record stores its session, and the sweep places a dropped record's gaps by it, never by its file name", () => {
+	const DAY_AGO = () => new Date(Date.now() - 25 * 3_600_000);
+
+	it("every hold PreToolUse records carries its session id in its body", async () => {
+		await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+		const [name] = await holdFiles();
+		const body = JSON.parse(await readFile(join(stateDir, String(name)), "utf-8"));
+		expect(body).toMatchObject({ sessionId: SESSION, toolUseId: "tu_1" });
+	});
+
+	it("a session id that contains `__`: the record's last gap names that session, not the prefix its file name starts with", async () => {
+		const name = "sess__child__main__tu_1.tx_1.releasing";
+		await writeFile(
+			join(stateDir, name),
+			JSON.stringify({
+				gate: 1,
+				toolUseId: "tu_1",
+				transferId: "tx_1",
+				agentId: "main",
+				sessionId: "sess__child",
+				...ESTIMATE,
+			}),
+			{ mode: 0o600 },
+		);
+		await utimes(join(stateDir, name), DAY_AGO(), DAY_AGO());
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect(await phased("release")).toMatchObject([
+			{ session: "sess__child", outcome: "unresolved", transferId: "tx_1" },
+		]);
+	});
+
+	it("an older record that stores no session: its last gap names none (counted against every job), never a guess from its name", async () => {
+		const name = holdName("tu_1", "tx_1", "main", "releasing");
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE }, "releasing");
+		await utimes(join(stateDir, name), DAY_AGO(), DAY_AGO());
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		const [gap] = await phased("release");
+		expect(gap).toMatchObject({ outcome: "unresolved", transferId: "tx_1" });
+		expect(gap?.session ?? null).toBeNull();
+	});
+});

@@ -335,6 +335,9 @@ async function keepForRelease(entry, claim, outcome) {
 		transferId: entry.transferId,
 		toolUseId: entry.toolUseId,
 		agentId: entry.agentId,
+		// Its session, as stored on every hold (lib.mjs `recordPending`): `sweepReleasing` places
+		// the record's gaps by it.
+		sessionId: String(sessionId),
 		// Its call ran and its window's outcome is already journalled (a gap where it may be
 		// unrecorded): Stop gives it back with no class and writes no second gap.
 		windowJournalled: true,
