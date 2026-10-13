@@ -37,6 +37,8 @@ describe("usertrust inspect: rotated audit segments", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
+		vi.resetModules();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -68,10 +70,15 @@ describe("usertrust inspect: rotated audit segments", () => {
 		return (JSON.parse(logOutput.at(-1) as string) as InspectJson).data;
 	}
 
+	// picocolors turns colour on when `CI` is set, so the same row printed plain locally and wrapped in
+	// SGR codes in CI: assert on the text, never on whether a line happened to be coloured.
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: strips SGR codes (ESC [ ... m) from captured output
+	const SGR = /\x1b\[[0-9;]*m/g;
+
 	async function inspectTable(): Promise<string> {
 		logOutput = [];
 		await run(tempDir);
-		return logOutput.join("\n");
+		return logOutput.join("\n").replace(SGR, "");
 	}
 
 	it("one rotation (events-0001.jsonl + events.jsonl): valid, all events, and the single file's hash and root", async () => {
@@ -193,7 +200,7 @@ describe("usertrust inspect: rotated audit segments", () => {
 		expect(data.chain.errors.some((e) => e.includes("missing"))).toBe(false);
 	});
 
-	it("a hostile segment file name (ESC + a C1 byte) is scrubbed before it reaches the terminal or the JSON", async () => {
+	it("a hostile segment file name (ESC + a C1 byte): the table shows `?`, --json keeps the bytes escaped", async () => {
 		const lines = await writeNine();
 		const hostile = "events-\x1b[2J\x9b0001.jsonl";
 		cut(lines, [
@@ -203,21 +210,68 @@ describe("usertrust inspect: rotated audit segments", () => {
 		]);
 		unlinkSync(join(auditDir, "events-0002.jsonl"));
 
-		const named =
-			"audit segment missing: events 4..6 are absent between events-?[2J?0001.jsonl (ends at 3) and events.jsonl (starts at 7)";
+		const named = (name: string) =>
+			`audit segment missing: events 4..6 are absent between ${name} (ends at 3) and events.jsonl (starts at 7)`;
 		const data = await inspectJson();
-		expect(data.chain.errors).toContain(named);
+		// The field parses back to the vault's real file name: evidence is not replaced by `?`.
+		expect(data.chain.errors).toContain(named(hostile));
 		const json = logOutput.join("\n");
-		expect(json).not.toContain("\x1b[2J");
+		expect(json).not.toContain("\x1b");
 		expect(json).not.toContain("\x9b");
+		expect(json).toContain("\\u001b[2J\\u009b0001");
 
 		const table = await inspectTable();
-		expect(table).toContain(`  - ${named}`);
+		expect(table).toContain(`  - ${named("events-?[2J?0001.jsonl")}`);
 		expect(table).not.toContain("\x1b[2J");
 		expect(table).not.toContain("\x9b");
 	});
 
-	it("the vault reading's own errors are scrubbed too: a malformed line in a hostile-named segment", async () => {
+	it("a bidi override (U+202E) and a zero-width space in a segment name print as `?` in the table", async () => {
+		const lines = await writeNine();
+		const hostile = "events-\u202e\u200b0001.jsonl";
+		cut(lines, [
+			[hostile, 1, 3],
+			["events-0002.jsonl", 4, 6],
+			["events.jsonl", 7, 9],
+		]);
+		unlinkSync(join(auditDir, "events-0002.jsonl"));
+
+		const table = await inspectTable();
+		expect(table).toContain(
+			"  - audit segment missing: events 4..6 are absent between events-??0001.jsonl (ends at 3) and events.jsonl (starts at 7)",
+		);
+		expect(table).not.toContain("\u202e");
+		expect(table).not.toContain("\u200b");
+	});
+
+	it("with colour forced on (as `CI` does), the error lines are coloured and carry the same text", async () => {
+		const lines = await writeNine();
+		cut(lines, [
+			["events-0001.jsonl", 1, 3],
+			["events-0002.jsonl", 4, 6],
+			["events.jsonl", 7, 9],
+		]);
+		unlinkSync(join(auditDir, "events-0002.jsonl"));
+
+		// picocolors is external to vitest's module graph, so its env read cannot be re-run: swap in a
+		// colour-enabled instance, which is what `CI=1` gives the real one.
+		vi.resetModules();
+		vi.doMock("picocolors", async () => {
+			const real = await vi.importActual<typeof import("picocolors")>("picocolors");
+			return { default: real.default.createColors(true) };
+		});
+		const { run: colouredRun } = await import("../../src/cli/inspect.js");
+		logOutput = [];
+		await colouredRun(tempDir);
+		const raw = logOutput.join("\n");
+		const named =
+			"audit segment missing: events 4..6 are absent between events-0001.jsonl (ends at 3) and events.jsonl (starts at 7)";
+		expect(raw).toContain("\x1b[31m");
+		vi.doUnmock("picocolors");
+		expect(raw.replace(SGR, "").split("\n")).toContain(`  - ${named}`);
+	});
+
+	it("the vault reading's own errors are scrubbed in the table too: a malformed line in a hostile-named segment", async () => {
 		// `verifyVault` quotes a segment's file name in its malformed-line error without scrubbing it
 		// (that string is byte-mirrored with usertrust-verify and stays as it is), so inspect scrubs
 		// every line it prints, not only the ones it composes.
@@ -231,7 +285,9 @@ describe("usertrust inspect: rotated audit segments", () => {
 
 		const data = await inspectJson();
 		expect(data.chain.valid).toBe(false);
-		expect(data.chain.errors).toContain("malformed JSON (events-?]0;pwned??0001.jsonl:5)");
+		// --json keeps the vault's bytes (JSON-escaped); only the table substitutes.
+		expect(data.chain.errors).toContain(`malformed JSON (${hostile}:5)`);
+		expect(logOutput.join("\n")).not.toContain("\x1b");
 		const table = await inspectTable();
 		expect(table).toContain("  - malformed JSON (events-?]0;pwned??0001.jsonl:5)");
 		expect(table).not.toContain("\x1b]0;pwned");

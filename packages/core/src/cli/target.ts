@@ -18,13 +18,16 @@ import { looseVaultWarning } from "../shared/private-fs.js";
 import { GLOBAL_FLAGS, JSON_FLAG } from "./flags.js";
 
 /**
- * Untrusted text (argv, a resolved path) echoed at a terminal. Replaces C0, DEL and C1 with `?`.
- * C1 is covered because it holds the 8-bit CSI/OSC introducers. NOT clipped: a clipped path is
+ * Untrusted text (argv, a resolved path) echoed at a terminal. Replaces C0, DEL, C1 and Unicode
+ * format characters (`\p{Cf}`) with `?`. C1 is covered because it holds the 8-bit CSI/OSC
+ * introducers; `Cf` because bidi overrides and isolates (U+202E, U+2066..2069) and zero-width
+ * characters reorder or hide the text around them, which can disguise a verdict line. Same set
+ * `usertrust-verify`'s `forDisplay` strips. NOT clipped: a clipped path is
  * not the path that was verified, and printing the subject of a verdict is the point.
  */
 export function scrubForTerminal(text: string): string {
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: the control-character strip is a terminal-injection defense
-	return text.replace(/[\x00-\x1f\x7f-\x9f]/g, "?");
+	return text.replace(/[\x00-\x1f\x7f-\x9f\p{Cf}]/gu, "?");
 }
 
 /**

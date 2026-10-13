@@ -20,13 +20,13 @@
  * words with its own code for its `--tx` receipt; no parity test holds the two together, and neither is
  * part of `verifyVault`'s byte-mirrored logic, which this module does not touch.
  *
- * SCRUBBED. Segment file names come from the audited vault, and these lines are printed at a terminal: a
- * file can be NAMED with an escape sequence that repaints the verdict above it.
+ * NOT SCRUBBED HERE. Segment file names come from the audited vault and can carry an escape sequence
+ * or a bidi override, but scrubbing is a property of the RENDER: the caller scrubs each line it prints
+ * at a terminal, while --json keeps the vault's own bytes (escaped by `toSafeJson`) as evidence.
  */
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { scrubForTerminal } from "./target.js";
 
 /** One line per `Sequence gap:` in `errors`, in the order the vault reading reported them (none when it reported none). */
 export function describeMissingSegments(auditDir: string, errors: readonly string[]): string[] {
@@ -74,12 +74,10 @@ export function describeMissingSegments(auditDir: string, errors: readonly strin
 		if (fileY === undefined || fileX === undefined) {
 			lines.push(`audit events missing: ${range} absent`);
 		} else if (fileY === fileX) {
-			lines.push(
-				`audit events missing: ${range} absent inside ${scrubForTerminal(fileY)} (between ${y} and ${x})`,
-			);
+			lines.push(`audit events missing: ${range} absent inside ${fileY} (between ${y} and ${x})`);
 		} else {
 			lines.push(
-				`audit segment missing: ${range} absent between ${scrubForTerminal(fileY)} (ends at ${y}) and ${scrubForTerminal(fileX)} (starts at ${x})`,
+				`audit segment missing: ${range} absent between ${fileY} (ends at ${y}) and ${fileX} (starts at ${x})`,
 			);
 		}
 	}

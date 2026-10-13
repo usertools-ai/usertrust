@@ -92,12 +92,13 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const latestHash = reading.orderedHashes.at(-1) ?? GENESIS_HASH;
 	const merkleRoot = verification.merkleRoot;
 	// A `Sequence gap:` says an event follows the wrong one, not which file is gone: name the absent
-	// range and its neighbouring segments beside it. SCRUBBED, every line: event ids and segment file
-	// names inside these errors are text from the vault under inspection, printed at a terminal.
+	// range and its neighbouring segments beside it. Event ids and segment file names inside these
+	// errors are text from the vault under inspection: the TABLE scrubs every line it prints, while
+	// --json keeps the vault's own bytes (`toSafeJson` escapes C1) so the evidence is not replaced by `?`.
 	const chainErrors = [
 		...verification.errors,
 		...describeMissingSegments(join(vaultPath, "audit"), verification.errors),
-	].map(scrubForTerminal);
+	];
 
 	if (json) {
 		const transactions = events
@@ -181,6 +182,6 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// Show integrity status with color below the table
 	if (!verification.valid) {
 		console.log(pc.red("WARNING: Chain integrity check failed!"));
-		for (const err of chainErrors) console.log(pc.red(`  - ${err}`));
+		for (const err of chainErrors) console.log(pc.red(`  - ${scrubForTerminal(err)}`));
 	}
 }
