@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - an Anthropic or OpenAI client constructed with `fetchOptions` carrying `body` or `method`;
   - a Google client created with `httpOptions.extraBody`. A default client, and a cloud-provider subclass that signs requests, are unaffected. (LIMITATIONS.md, "1. The governance surface is the wrapped SDK methods — nothing else".)
 
+- **The request-option checks now read an inherited property where the SDK reads it.** The SDKs read a client's `fetchOptions`, `middleware`, `_client`, `clientOptions` and `httpOptions`, and a request's `config` and `httpOptions`, by plain property access, which finds a value on the prototype. The checks read own properties only, so a client wrapped as `Object.create(client)`, a resource whose `_client` was inherited, or Google `clientOptions` inheriting an `httpOptions` with `extraBody` sent a body the check never saw. Each is now read along its prototype chain and refused as before; a Proxy on that chain is refused as unreadable, and none of its traps runs. A Google client's own `httpOptions` must now be a plain object of this realm (or with no prototype), and must carry neither `extraBody` (own or inherited) nor `toJSON` (the SDK JSON-copies it under a call's own `httpOptions`). A revoked Proxy as an Anthropic client's `middleware` is now refused with a `policy_denied` event, instead of throwing a `TypeError` before the event was recorded.
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading

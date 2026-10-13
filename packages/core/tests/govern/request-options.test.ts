@@ -1011,3 +1011,229 @@ describe("movedRequestOptions, on argument lists built by hand", () => {
 		expect(movedRequestOptions("anthropic", [A, null])).toEqual([]);
 	});
 });
+
+describe("an INHERITED transport property is read where the SDK reads it, never taken as absent", () => {
+	const SECRET = "ssn 123-45-6789";
+	const extraBody = () => ({ systemInstruction: { parts: [{ text: SECRET }] } });
+	const rawAnthropic = () =>
+		new Anthropic({
+			apiKey: "k",
+			baseURL: "https://anthropic.test",
+			fetch: recordingFetch as typeof fetch,
+			maxRetries: 0,
+		});
+
+	it("a client handed to trust() as Object.create(client), whose fetchOptions carries body, is refused at trust()", async () => {
+		const raw = rawAnthropic();
+		(raw as Loose).fetchOptions = { body: JSON.stringify({ secret: SECRET }) };
+		await expect(
+			trust(Object.create(raw) as Loose, {
+				budget: 1_000_000,
+				vaultBase: vault,
+				_engine: engine(),
+			}),
+		).rejects.toThrow(/request_option_refused.*client fetchOptions\.body/s);
+	});
+
+	it("a resource whose _client is inherited, on a client given fetchOptions.body after trust(), refuses every call", async () => {
+		const raw = rawAnthropic();
+		const { client, eng } = await govern(raw);
+		// the resource the governed client runs on now INHERITS its _client from a prototype
+		const messages = (raw as Loose).messages;
+		const proto = Object.create(Object.getPrototypeOf(messages));
+		proto._client = raw;
+		Object.setPrototypeOf(messages, proto);
+		delete messages._client;
+		(raw as Loose).fetchOptions = { body: JSON.stringify({ secret: SECRET }) };
+		await expectRefused(() => client.messages.create(A), eng, /client fetchOptions\.body/);
+		expect(bodies.join("")).not.toContain(SECRET);
+	});
+
+	it("Google: a client whose clientOptions INHERIT an httpOptions carrying extraBody refuses every call", async () => {
+		const raw = new GoogleGenAI({ apiKey: "k" });
+		const { client, eng } = await govern(raw);
+		const apiClient = (raw.models as Loose).apiClient;
+		const own = apiClient.clientOptions;
+		apiClient.clientOptions = Object.create({
+			...own,
+			httpOptions: { ...own.httpOptions, extraBody: extraBody() },
+		});
+		await expectRefused(
+			() => client.models.generateContent(G),
+			eng,
+			/client httpOptions\.extraBody/,
+		);
+	});
+
+	it("Google: a per-call config whose httpOptions is INHERITED is checked, and refused for extraBody", async () => {
+		const { client, eng } = await google();
+		await expectRefused(
+			() =>
+				client.models.generateContent({
+					...G,
+					config: Object.create({ httpOptions: { extraBody: extraBody() } }),
+				}),
+			eng,
+			/config\.httpOptions\.extraBody/,
+		);
+	});
+
+	it("Google: a request whose config is INHERITED is checked, and refused for extraBody", async () => {
+		const { client, eng } = await google();
+		const request = Object.assign(
+			Object.create({ config: { httpOptions: { extraBody: extraBody() } } }),
+			G,
+		);
+		await expectRefused(
+			() => client.models.generateContent(request),
+			eng,
+			/config\.httpOptions\.extraBody/,
+		);
+	});
+
+	it("a Proxy on the prototype chain is refused as unreadable, and none of its traps runs", async () => {
+		const trap = vi.fn();
+		const proto = new Proxy(
+			{},
+			{
+				get: () => trap(),
+				getOwnPropertyDescriptor: () => trap(),
+				getPrototypeOf: () => trap() ?? null,
+				has: () => trap() ?? false,
+			},
+		);
+		const config = Object.create(proto);
+		expect(movedRequestOptions("google", [{ ...G, config }])).toEqual([
+			"config.httpOptions (unreadable)",
+		]);
+		// Through the client, by whichever check reaches it first: nothing sent, held, or run.
+		const { client, eng } = await google();
+		const err = await client.models.generateContent({ ...G, config }).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(PolicyDeniedError);
+		expect(sent).toEqual([]);
+		expect(eng.spendPending).not.toHaveBeenCalled();
+		expect(policyDenied()).toHaveLength(1);
+		expect(trap).not.toHaveBeenCalled();
+	});
+
+	it("an inherited ALLOWED per-call option still sends (Google config from a class instance)", async () => {
+		const { client, eng } = await google();
+		class Config {
+			get kind(): string {
+				return "config";
+			}
+		}
+		const config = Object.assign(new Config(), { httpOptions: { timeout: 5000 } });
+		await client.models.generateContent({ ...G, config });
+		expect(sent).toHaveLength(1);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("a Google client's httpOptions is held to what the SDK would find on it", () => {
+	const SECRET = "ssn 123-45-6789";
+	const extraBody = { systemInstruction: { parts: [{ text: SECRET }] } };
+
+	it("one from another realm, whose Object.prototype carries extraBody, refuses every call", async () => {
+		const raw = new GoogleGenAI({ apiKey: "k" });
+		const { client, eng } = await govern(raw);
+		const apiClient = (raw.models as Loose).apiClient;
+		const foreign = runInNewContext(
+			"(extraBody) => { Object.prototype.extraBody = extraBody; return {}; }",
+		) as (e: unknown) => Record<string, unknown>;
+		apiClient.clientOptions.httpOptions = Object.assign(
+			foreign(extraBody),
+			apiClient.clientOptions.httpOptions,
+		);
+		await expectRefused(
+			() => client.models.generateContent(G),
+			eng,
+			/client httpOptions \(another realm's object\)/,
+		);
+		expect(bodies.join("")).not.toContain(SECRET);
+	});
+
+	it("one carrying toJSON (the SDK JSON-copies it under a call's own httpOptions) refuses every call", async () => {
+		const raw = new GoogleGenAI({ apiKey: "k" });
+		const { client, eng } = await govern(raw);
+		const http = (raw.models as Loose).apiClient.clientOptions.httpOptions;
+		const copy = { ...http };
+		http.toJSON = () => ({ ...copy, extraBody });
+		await expectRefused(
+			() => client.models.generateContent({ ...G, config: { httpOptions: { timeout: 5000 } } }),
+			eng,
+			/client httpOptions\.toJSON/,
+		);
+		expect(bodies.join("")).not.toContain(SECRET);
+	});
+
+	it("an extraBody it inherits from this realm's Object.prototype refuses every call", async () => {
+		const raw = new GoogleGenAI({ apiKey: "k" });
+		const { client, eng } = await govern(raw);
+		Object.defineProperty(Object.prototype, "extraBody", {
+			value: extraBody,
+			configurable: true,
+			writable: true,
+		});
+		try {
+			await expectRefused(
+				() => client.models.generateContent(G),
+				eng,
+				/client httpOptions\.extraBody/,
+			);
+		} finally {
+			delete (Object.prototype as Loose).extraBody;
+		}
+		expect(bodies.join("")).not.toContain(SECRET);
+	});
+
+	it("a null-prototype one of data passes, and the call is held and sent", async () => {
+		const raw = new GoogleGenAI({ apiKey: "k" });
+		const { client, eng } = await govern(raw);
+		const apiClient = (raw.models as Loose).apiClient;
+		apiClient.clientOptions.httpOptions = Object.assign(
+			Object.create(null),
+			apiClient.clientOptions.httpOptions,
+		);
+		await client.models.generateContent(G);
+		expect(sent).toHaveLength(1);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("a revoked Proxy is refused and recorded, never thrown past the denial record", () => {
+	const rawAnthropic = () =>
+		new Anthropic({
+			apiKey: "k",
+			baseURL: "https://anthropic.test",
+			fetch: recordingFetch as typeof fetch,
+			maxRetries: 0,
+		});
+	const revoked = (): unknown => {
+		const { proxy, revoke } = Proxy.revocable([], {});
+		revoke();
+		return proxy;
+	};
+
+	it("Anthropic: a revoked Proxy as the client's middleware is refused at trust()", async () => {
+		const raw = rawAnthropic();
+		(raw as Loose).middleware = revoked();
+		await expect(
+			trust(raw as Loose, { budget: 1_000_000, vaultBase: vault, _engine: engine() }),
+		).rejects.toThrow(/request_option_refused.*client middleware \(not a plain array\)/s);
+	});
+
+	it("Anthropic: a revoked Proxy put on the raw client's middleware after trust() refuses every call, recorded", async () => {
+		const raw = rawAnthropic();
+		const { client, eng } = await govern(raw);
+		(raw as Loose).middleware = revoked();
+		await expectRefused(
+			() => client.messages.create(A),
+			eng,
+			/client middleware \(not a plain array\)/,
+		);
+	});
+});
