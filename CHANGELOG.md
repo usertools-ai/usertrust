@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`usertrust inspect`, `usertrust health` and the ledger UI no longer block on a FIFO at `.usertrust/usertrust.config.json`.** With no enforced-budget record, the budget reader opened the vault config without checking what it was, so a named pipe planted at that path hung each of them until something wrote to the pipe. The path is now checked first, as the UI's remote-settings reader and the enforced-budget reader already did: anything that is not a regular file gives no budget (the budget reads as not yet published), and is never opened.
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading
