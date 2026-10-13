@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import {
 	appendFileSync,
 	chmodSync,
@@ -12,6 +13,7 @@ import {
 	renameSync,
 	rmSync,
 	truncateSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
 import { createUiServer, type UiServer } from "../src/server/server.js";
-import { watchLedger } from "../src/server/tail.js";
+import { __tailTestSeam, watchLedger } from "../src/server/tail.js";
 
 async function readSse(
 	port: number,
@@ -1379,5 +1381,313 @@ describe("the polling watcher's own interval", { timeout: 20_000 }, () => {
 		} finally {
 			stop();
 		}
+	});
+});
+
+// In fs.watch mode (the audit directory present at start), nothing but a file-change event used to run a check, and the
+// operating system can deliver one late or never: on macOS, an append's event was observed about 45 s late while another
+// test suite was running, and the dashboard showed nothing new until a later write. A backstop checks the log every
+// second. These rows replace fs.watch with a stub that never calls back, so whatever they observe came from the backstop.
+// The watcher-level rows use vitest's fake timers at the production interval, so each tick is placed exactly and the
+// bound is the real one; the server-level rows use real timers and a shortened interval, because they wait on HTTP.
+class StubWatcher extends EventEmitter {
+	closed = 0;
+	close(): void {
+		this.closed++;
+	}
+}
+
+describe("fs.watch mode's backstop when file-change events arrive late or never", {
+	timeout: 20_000,
+}, () => {
+	const original = { ...__tailTestSeam };
+	let stubs: StubWatcher[];
+	let vault: string;
+	const auditDir = (): string => join(vault, "audit");
+	const logPath = (): string => join(auditDir(), "events.jsonl");
+
+	beforeEach(() => {
+		stubs = [];
+		// Like fs.watch, the stub throws on a directory that does not exist, so an absent start is still the polling mode.
+		__tailTestSeam.watch = ((dir: string) => {
+			if (!existsSync(dir)) throw Object.assign(new Error(`ENOENT: ${dir}`), { code: "ENOENT" });
+			const w = new StubWatcher();
+			stubs.push(w);
+			return w;
+		}) as unknown as typeof __tailTestSeam.watch;
+		vault = mkdtempSync(join(tmpdir(), "trust-tail-backstop-"));
+		mkdirSync(auditDir(), { recursive: true });
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		Object.assign(__tailTestSeam, original);
+		rmSync(vault, { recursive: true, force: true });
+	});
+
+	/** Starts the watcher over the vault with a known size the row controls, recording what it delivers. */
+	function start(known: () => number) {
+		const delivered: string[] = [];
+		let sizeOfCalls = 0;
+		const stop = watchLedger(
+			vault,
+			() => {
+				sizeOfCalls++;
+				return known();
+			},
+			{ onGrow: () => delivered.push("grow"), onResync: () => delivered.push("resync") },
+		);
+		return { delivered, stop, sizeOfCalls: () => sizeOfCalls };
+	}
+
+	const BOUND = 1000;
+	const tick = (n = 1): void => {
+		vi.advanceTimersByTime(BOUND * n);
+	};
+
+	describe("at the watcher", () => {
+		beforeEach(() => {
+			vi.useFakeTimers();
+			expect(__tailTestSeam.backstopMs).toBe(BOUND);
+		});
+
+		it("red-first (never seen): an append with no event reaches the server within one interval", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			try {
+				expect(stubs).toHaveLength(1);
+				tick();
+				expect(w.delivered).toEqual([]);
+				appendFileSync(logPath(), "{}\n");
+				tick();
+				expect(w.delivered).toEqual(["grow"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (never seen): the audit directory's removal with no event reaches the server within one interval", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			try {
+				tick();
+				expect(w.delivered).toEqual([]);
+				rmSync(auditDir(), { recursive: true, force: true });
+				tick();
+				expect(w.delivered).toEqual(["resync"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (read every tick): a torn last line is read once, not once per tick", () => {
+			// A complete line, then a writer that died mid-line: the known size stops at the newline.
+			writeFileSync(logPath(), '{}\n{"partial');
+			const w = start(() => 3);
+			try {
+				tick(10);
+				expect(w.delivered).toEqual(["grow"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("guard: an unchanged log over many intervals delivers nothing", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			try {
+				tick(10);
+				expect(w.delivered).toEqual([]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (memo never re-armed): a change of mtime alone, at the same size, checks again", () => {
+			writeFileSync(logPath(), '{}\n{"partial');
+			const w = start(() => 3);
+			try {
+				tick(3);
+				expect(w.delivered).toEqual(["grow"]);
+				utimesSync(logPath(), new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+				tick(3);
+				expect(w.delivered).toEqual(["grow", "grow"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (memo never re-armed): a change of the known size alone checks again", () => {
+			writeFileSync(logPath(), '{}\n{"partial');
+			let known = 3;
+			const w = start(() => known);
+			try {
+				tick(3);
+				expect(w.delivered).toEqual(["grow"]);
+				known = 2;
+				tick(3);
+				expect(w.delivered).toEqual(["grow", "grow"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (reload every tick): a stat error resyncs once, and the same error with the same known size never again", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			try {
+				tick();
+				rmSync(logPath());
+				tick(10);
+				expect(w.delivered).toEqual(["resync"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it.each([
+			["no log", () => {}],
+			[
+				"only an anchor",
+				() =>
+					writeFileSync(
+						`${logPath()}.meta`,
+						JSON.stringify({ lastHash: "0".repeat(64), sequence: 0 }),
+					),
+			],
+			["an empty log", () => writeFileSync(logPath(), "")],
+		])(
+			"guard (declared): a directory holding %s, present at start and then deleted, delivers no resync",
+			(_name, populate) => {
+				populate();
+				const w = start(() => 0);
+				try {
+					tick(2);
+					rmSync(auditDir(), { recursive: true, force: true });
+					tick(10);
+					expect(w.delivered).toEqual([]);
+				} finally {
+					w.stop();
+				}
+			},
+		);
+
+		it("red-first (crash): a watcher error closes the watcher, throws nothing, and the backstop still sees an append", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			try {
+				const stub = stubs[0] as StubWatcher;
+				expect(() =>
+					stub.emit("error", Object.assign(new Error("EPERM"), { code: "EPERM" })),
+				).not.toThrow();
+				expect(stub.closed).toBe(1);
+				appendFileSync(logPath(), "{}\n");
+				tick();
+				expect(w.delivered).toEqual(["grow"]);
+				w.stop();
+				// Dropped at the error: stopping does not close it a second time.
+				expect(stub.closed).toBe(1);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (leak): a stopped watcher checks no more, and reacts to nothing after it is stopped", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			tick(3);
+			// Positive control: the backstop really was ticking.
+			expect(w.sizeOfCalls()).toBeGreaterThan(0);
+			w.stop();
+			expect(vi.getTimerCount()).toBe(0);
+			const atStop = w.sizeOfCalls();
+			appendFileSync(logPath(), "{}\n");
+			tick(5);
+			expect(w.sizeOfCalls()).toBe(atStop);
+			expect(w.delivered).toEqual([]);
+		});
+	});
+
+	it("red-first (keeps the process alive): the backstop interval is unref'd", () => {
+		const spy = vi.spyOn(globalThis, "setInterval");
+		const w = start(() => 0);
+		try {
+			// Positive control: fs.watch mode really made an interval (the stub watcher was used, not the polling mode).
+			expect(stubs).toHaveLength(1);
+			expect(spy).toHaveBeenCalledTimes(1);
+			const timer = spy.mock.results[0]?.value as NodeJS.Timeout;
+			expect(timer.hasRef()).toBe(false);
+		} finally {
+			w.stop();
+		}
+	});
+
+	describe("through the server", () => {
+		let root: string;
+		let ui: UiServer | undefined;
+		const rootAudit = (): string => join(root, ".usertrust", "audit");
+		const isDeletion = (s: ChainSummary): boolean =>
+			!s.chain.valid && s.chain.errors.some((e) => e.includes("deletion detected"));
+
+		beforeEach(async () => {
+			__tailTestSeam.backstopMs = 100;
+			root = mkdtempSync(join(tmpdir(), "trust-tail-backstop-ui-"));
+			mkdirSync(rootAudit(), { recursive: true });
+			for (let i = 0; i < 3; i++) await appendOne(root, `tx_first_${i}`);
+		});
+
+		afterEach(async () => {
+			await ui?.close();
+			ui = undefined;
+			rmSync(root, { recursive: true, force: true });
+		});
+
+		it("red-first (never seen): an append with no event reaches the client as rows", async () => {
+			ui = await createUiServer(root, { port: 0 });
+			expect(stubs).toHaveLength(1);
+			// readSse waits on the stream itself, so a frame that never comes would hang it: the race fails the row instead.
+			const frame = await Promise.race([
+				readSse(
+					ui.port,
+					(name) => name === "rows" || name === "resync",
+					() => appendOne(root, "tx_live"),
+					3000,
+				),
+				new Promise<never>((_, reject) =>
+					setTimeout(() => reject(new Error("no frame within 3 s")), 3000),
+				),
+			]);
+			expect(frame.eventName).toBe("rows");
+			expect(await summaryOf(ui.port)).toMatchObject({ chain: { events: 4, valid: true } });
+		});
+
+		it("red-first (never seen): the audit directory's deletion with no event reads as a deletion", async () => {
+			ui = await createUiServer(root, { port: 0 });
+			rmSync(rootAudit(), { recursive: true, force: true });
+			const observed = await summaryWhen(ui.port, isDeletion, 3000);
+			expect(observed.chain.valid).toBe(false);
+			expect(observed.chain.errors.join(" ")).toContain("deletion detected");
+		});
+
+		it("guard: deleted, then recreated with a valid chain, never reads valid again", async () => {
+			ui = await createUiServer(root, { port: 0 });
+			rmSync(rootAudit(), { recursive: true, force: true });
+			// Several intervals with the directory gone, so the backstop has had its chance to see the deletion.
+			await new Promise((r) => setTimeout(r, 600));
+			mkdirSync(rootAudit(), { recursive: true });
+			for (let i = 0; i < 2; i++) await appendOne(root, `tx_fresh_${i}`);
+			const seen: ChainSummary["chain"][] = [];
+			const until = Date.now() + 1500;
+			while (Date.now() < until) {
+				seen.push((await summaryOf(ui.port)).chain);
+				await new Promise((r) => setTimeout(r, 50));
+			}
+			// The recreated chain is never shown as verified, and once the deletion is read, nothing after it is valid.
+			expect(seen.filter((c) => c.valid && c.events === 2)).toEqual([]);
+			const firstDeletion = seen.findIndex((c) => isDeletion({ chain: c }));
+			if (firstDeletion !== -1)
+				expect(seen.slice(firstDeletion).filter((c) => c.valid)).toEqual([]);
+		});
 	});
 });

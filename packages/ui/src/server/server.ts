@@ -6,7 +6,8 @@
  * POST /api/export. Non-API routes serve the prebuilt SPA. GET /api/tail
  * streams SSE: appended events are incrementally verified (linkage AND a
  * full hash recompute via usertrust-verify's canonicalize); any mismatch,
- * parse failure, or file shrink triggers a full reload + `resync` event.
+ * parse failure, file shrink, or a log replaced by another file triggers a
+ * full reload + `resync` event.
  * Every state change bumps a version: each SSE frame carries it as its `id`,
  * and GET /api/events returns the version its snapshot was taken at, so the
  * client can re-apply frames newer than a snapshot that overtook them.
@@ -18,7 +19,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync, unwatchFile, watchFile } from "node:fs";
+import { unwatchFile, watchFile } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +37,7 @@ import {
 	type LedgerState,
 	loadState,
 	ROW_CAP,
+	readAppended,
 	readRemoteSettings,
 } from "./state.js";
 
@@ -108,10 +110,25 @@ export async function createUiServer(
 			handleResync();
 			return;
 		}
+		// A load that saw a fragment after the log's last newline counted it as a malformed line. Whatever follows it (the
+		// rest of an in-flight line, or a complete line after a dead writer's fragment) is re-derived by a full reload,
+		// never extended onto a verdict that already counted the fragment.
+		if (state.pendingFragment) {
+			handleResync();
+			return;
+		}
 		const logPath = join(vaultPath, "audit", "events.jsonl");
 		try {
-			const buf = readFileSync(logPath);
-			const appended = buf.subarray(state.byteOffset);
+			// Only the bytes after the offset are read, through a descriptor whose identity is the one the last load
+			// recorded. Another file at the path (a log replaced by rename, deleted and recreated), a log shorter than the
+			// offset, or an identity that cannot be compared is a full reload: extending would append to a verdict derived
+			// from a prefix this file may not hold. A same-inode rewrite that does not shorten the log is not seen here.
+			const read = readAppended(logPath, state.byteOffset, state.logId);
+			if (read.kind !== "bytes") {
+				handleResync();
+				return;
+			}
+			const appended = read.buf;
 			// Amendment A4: process only complete newline-terminated lines — hold
 			// a partial tail back and let the next watch tick deliver the rest.
 			const lastNewline = appended.lastIndexOf(0x0a);
@@ -360,10 +377,12 @@ export async function createUiServer(
 
 	// Watch only once the bind succeeded — a failed bind must not leak an
 	// fs.watch handle (createUiServer throws and close() is never reachable).
-	const stopWatching = watchLedger(vaultPath, () => state.byteOffset, {
-		onGrow: handleGrow,
-		onResync: handleResync,
-	});
+	const stopWatching = watchLedger(
+		vaultPath,
+		() => state.byteOffset,
+		{ onGrow: handleGrow, onResync: handleResync },
+		() => state.logId,
+	);
 	// The budget's two sources live OUTSIDE `audit/`, which watchLedger watches: a governor writes its record when it
 	// starts, and an operator edits the config. Each change re-reads the budget, and the config's `remote` section, and
 	// sends the summary: turning the kit mark on or off takes effect without a restart.

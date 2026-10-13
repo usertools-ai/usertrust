@@ -10,7 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -75,6 +75,14 @@ describe("verifyTransaction over rotated segments", () => {
 	});
 
 	afterEach(() => {
+		// A test may leave an audit dir unreadable; restore it so the cleanup can descend.
+		for (const name of ["unenumerable", "unenumerable-empty-live"]) {
+			try {
+				chmodSync(join(root, name, "audit"), 0o700);
+			} catch {
+				// not created by this test
+			}
+		}
 		rmSync(root, { recursive: true, force: true });
 	});
 
@@ -272,6 +280,161 @@ describe("verifyTransaction over rotated segments", () => {
 		for (const e of result.errors) {
 			// biome-ignore lint/suspicious/noControlCharactersInRegex: the probe must match them.
 			expect(e).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+		}
+	});
+
+	const INCOMPLETE = "in the records that could be read";
+	const ABSOLUTE = "No event with this transferId exists";
+
+	it("a transfer whose records were ALL in the missing segment is not 'nonexistent': the box says what was read", () => {
+		const { lines, hashes } = buildChain([
+			...EVENTS.slice(0, 2),
+			{ kind: "llm_call", data: { transferId: "tx-gone", model: "m", cost: 1, settled: true } },
+			...EVENTS.slice(3),
+		]);
+		const rotated = vault(
+			"gap-receipt",
+			{ "events-0001.jsonl": lines.slice(0, 2), "events.jsonl": lines.slice(4) },
+			hashes[5],
+		);
+		const result = verifyTransaction(rotated, "tx-gone");
+		expect(result.found).toBe(false);
+		expect(result.receipt).not.toContain(ABSOLUTE);
+		expect(result.receipt).toContain(INCOMPLETE);
+		expect(result.receipt).toContain("Transaction not found");
+		expect(result.errors.some((e) => e.startsWith("Sequence gap: event 5 follows 2"))).toBe(true);
+		expect(result.errors.some((e) => e.startsWith("audit segment missing:"))).toBe(true);
+	});
+
+	it.skipIf(process.getuid?.() === 0)(
+		"an audit dir that cannot be enumerated, with the transfer only in a rotated segment, does not claim non-existence",
+		() => {
+			const { lines, hashes } = buildChain(EVENTS);
+			const dir = vault(
+				"unenumerable",
+				{ "events-0001.jsonl": lines.slice(0, 3), "events.jsonl": lines.slice(3) },
+				hashes[5],
+			);
+			chmodSync(join(dir, "audit"), 0o300);
+			const result = verifyTransaction(dir, "tx-a");
+			chmodSync(join(dir, "audit"), 0o700);
+			expect(result.found).toBe(false);
+			expect(result.receipt).not.toContain(ABSOLUTE);
+			expect(result.receipt).toContain(INCOMPLETE);
+			expect(result.errors.some((e) => e.includes("could not be enumerated"))).toBe(true);
+		},
+	);
+
+	it.skipIf(process.getuid?.() === 0)(
+		"an audit dir that cannot be enumerated, with an EMPTY live log, is not an empty complete reading",
+		() => {
+			const { lines, hashes } = buildChain(EVENTS);
+			const dir = vault(
+				"unenumerable-empty-live",
+				{ "events-0001.jsonl": lines, "events.jsonl": [] },
+				hashes[5],
+			);
+			chmodSync(join(dir, "audit"), 0o300);
+			const result = verifyTransaction(dir, "tx-a");
+			expect(result.found).toBe(false);
+			expect(result.receipt).not.toContain(ABSOLUTE);
+			expect(result.receipt).toContain(INCOMPLETE);
+			expect(result.errors).not.toContain("Audit log is empty");
+			expect(
+				result.errors.some((e) => e.startsWith("Audit directory could not be enumerated:")),
+			).toBe(true);
+		},
+	);
+
+	/** A vault whose live log is empty, with `anchor` as its `.meta` (absent when undefined). */
+	function emptyLogVault(name: string, anchor?: string): string {
+		const vaultPath = join(root, name);
+		const auditDir = join(vaultPath, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		writeFileSync(join(auditDir, "events.jsonl"), "");
+		if (anchor !== undefined) writeFileSync(join(auditDir, "events.jsonl.meta"), anchor);
+		return vaultPath;
+	}
+
+	it("an EMPTY log whose anchor records events is not a complete reading", () => {
+		const dir = emptyLogVault(
+			"empty-anchor-records",
+			JSON.stringify({ lastHash: "a".repeat(64), sequence: 5 }),
+		);
+		const result = verifyTransaction(dir, "tx-a");
+		expect(result.found).toBe(false);
+		expect(result.errors).toEqual(["Audit log is empty"]);
+		expect(result.receipt).toContain(INCOMPLETE);
+		expect(result.receipt).not.toContain(ABSOLUTE);
+	});
+
+	it("an EMPTY log with a malformed anchor is not a complete reading", () => {
+		const dir = emptyLogVault("empty-anchor-corrupt", "{not json");
+		const result = verifyTransaction(dir, "tx-a");
+		expect(result.found).toBe(false);
+		expect(result.errors).toEqual(["Audit log is empty"]);
+		expect(result.receipt).toContain(INCOMPLETE);
+		expect(result.receipt).not.toContain(ABSOLUTE);
+	});
+
+	it("guard: an EMPTY log with no anchor keeps the absolute sentence", () => {
+		const dir = emptyLogVault("empty-no-anchor");
+		const result = verifyTransaction(dir, "tx-a");
+		expect(result.found).toBe(false);
+		expect(result.errors).toEqual(["Audit log is empty"]);
+		expect(result.receipt).toContain(ABSOLUTE);
+		expect(result.receipt).not.toContain(INCOMPLETE);
+	});
+
+	// Hand-made: the writer only writes `.meta` after an append (sequence >= 1), so it never produces this
+	// shape; the verifier accepts it as an agreeing empty anchor (`verifyChain`), so the receipt does too.
+	it("guard: an EMPTY log with an anchor at sequence 0 on the genesis hash keeps the absolute sentence", () => {
+		const dir = emptyLogVault(
+			"empty-anchor-genesis",
+			JSON.stringify({ lastHash: GENESIS_HASH, sequence: 0 }),
+		);
+		const result = verifyTransaction(dir, "tx-a");
+		expect(result.found).toBe(false);
+		expect(result.errors).toEqual(["Audit log is empty"]);
+		expect(result.receipt).toContain(ABSOLUTE);
+		expect(result.receipt).not.toContain(INCOMPLETE);
+	});
+
+	it("guard: a clean rotated vault and an id that exists nowhere keeps the absolute sentence", () => {
+		const { lines, hashes } = buildChain(EVENTS);
+		const rotated = vault(
+			"clean-notfound",
+			{ "events-0001.jsonl": lines.slice(0, 3), "events.jsonl": lines.slice(3) },
+			hashes[5],
+		);
+		const result = verifyTransaction(rotated, "tx-nowhere");
+		expect(result.found).toBe(false);
+		expect(result.errors).toEqual([]);
+		expect(result.receipt).toContain(ABSOLUTE);
+		expect(result.receipt).not.toContain(INCOMPLETE);
+	});
+
+	it("regression: a same-length tamper inside a ROTATED segment fails every transfer's verdict", () => {
+		const { lines, hashes } = buildChain(EVENTS);
+		const tampered = (lines[1] as string).replace("velocity spike", "velocity spikE");
+		expect(tampered).not.toBe(lines[1]);
+		expect(tampered.length).toBe((lines[1] as string).length);
+		const rotated = vault(
+			"tampered",
+			{
+				"events-0001.jsonl": [lines[0] as string, tampered, lines[2] as string],
+				"events.jsonl": lines.slice(3),
+			},
+			hashes[5],
+		);
+		// tx-x has records in the rotated segment; tx-c only in the live file.
+		for (const tx of ["tx-x", "tx-c"]) {
+			const result = verifyTransaction(rotated, tx);
+			expect(result.valid, tx).toBe(false);
+			expect(
+				result.errors.some((e) => /Event 2\b.*hash mismatch/i.test(e)),
+				tx,
+			).toBe(true);
 		}
 	});
 });

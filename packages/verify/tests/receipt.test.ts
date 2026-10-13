@@ -358,5 +358,19 @@ describe("renderNotFound", () => {
 		expect(output).toContain(txId);
 
 		assertBoxStructure(output);
+		expect(output).toContain("No event with this transferId exists");
+	});
+
+	it("an incomplete reading says what was read, in the same box", () => {
+		const output = renderNotFound("tx_missing_999", false);
+
+		expect(output).toContain("Transaction not found");
+		expect(output).toContain("tx_missing_999");
+		expect(output).not.toContain("exists");
+		expect(output).toContain("was found");
+		expect(output).toContain("in the records that could be read.");
+		expect(output).toContain("The audit chain is incomplete or failed");
+		expect(output).toContain("verification; see the errors below.");
+		assertBoxStructure(output);
 	});
 });

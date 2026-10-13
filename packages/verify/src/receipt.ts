@@ -503,7 +503,12 @@ export function renderReceipt(data: ReceiptData): string {
 
 // ── Not-found renderer ──
 
-export function renderNotFound(txId: string): string {
+/**
+ * `readingComplete` is true only when the whole audit chain was read without error. Then the box
+ * says the transfer does not exist; otherwise it says only that none was FOUND in what could be
+ * read, because a missing segment or an unreadable directory may hold the very records asked for.
+ */
+export function renderNotFound(txId: string, readingComplete = true): string {
 	const lines: string[] = [];
 	lines.push(top());
 	lines.push(blank());
@@ -519,8 +524,15 @@ export function renderNotFound(txId: string): string {
 	// a defense, since an erase-line sequence is four characters.
 	lines.push(row(pad(`  TX: ${forDisplay(txId)}`)));
 	lines.push(blank());
-	lines.push(row(pad("  No event with this transferId exists")));
-	lines.push(row(pad("  in the audit chain.")));
+	if (readingComplete) {
+		lines.push(row(pad("  No event with this transferId exists")));
+		lines.push(row(pad("  in the audit chain.")));
+	} else {
+		lines.push(row(pad("  No event with this transferId was found")));
+		lines.push(row(pad("  in the records that could be read.")));
+		lines.push(row(pad("  The audit chain is incomplete or failed")));
+		lines.push(row(pad("  verification; see the errors below.")));
+	}
 	lines.push(blank());
 	lines.push(divider());
 	lines.push(blank());

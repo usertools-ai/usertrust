@@ -3,6 +3,7 @@
 
 import { existsSync, type FSWatcher, statSync, watch } from "node:fs";
 import { join } from "node:path";
+import { fileIdentity } from "./state.js";
 
 export interface TailEvents {
 	/** Byte range grew: caller reads/verifies the appended lines itself. */
@@ -14,17 +15,32 @@ export interface TailEvents {
 const DEBOUNCE_MS = 250;
 /** How often the log's path is polled while its audit directory does not exist yet. */
 const MISSING_DIR_POLL_MS = 1000;
+/** How often the log is checked in fs.watch mode whether or not an event arrived: the bound on a late or lost event. */
+const BACKSTOP_MS = 1000;
+
+/**
+ * For tests only, never exported from the package: the backstop's interval and the fs.watch function, read once when
+ * `watchLedger` starts. Tests shorten the one and replace the other with a watcher that never calls back, or that emits
+ * `error`. The defaults are the production behaviour.
+ */
+export const __tailTestSeam: { backstopMs: number; watch: typeof watch } = {
+	backstopMs: BACKSTOP_MS,
+	watch,
+};
 
 export function watchLedger(
 	vaultPath: string,
 	sizeOf: () => number,
 	events: TailEvents,
+	identityOf?: () => string | undefined,
 ): () => void {
 	const auditDir = join(vaultPath, "audit");
 	const logPath = join(auditDir, "events.jsonl");
 	let timer: NodeJS.Timeout | undefined;
 	let watcher: FSWatcher | undefined;
 	let poller: NodeJS.Timeout | undefined;
+	let backstop: NodeJS.Timeout | undefined;
+	const { backstopMs, watch: watchDir } = __tailTestSeam;
 
 	const sizeOfLog = (): number => {
 		try {
@@ -39,13 +55,57 @@ export function watchLedger(
 		const known = sizeOf();
 		if (size < known) events.onResync();
 		else if (size > known) events.onGrow();
+		// A same-size replacement changes no size, so the identity is compared.
+		else if (identityOf !== undefined && replacedAtSameSize(identityOf())) events.onResync();
+	};
+
+	const replacedAtSameSize = (known: string | undefined): boolean => {
+		if (known === undefined) return false;
+		try {
+			const now = fileIdentity(statSync(logPath, { bigint: true }));
+			return now !== undefined && now !== known;
+		} catch {
+			return false;
+		}
 	};
 
 	try {
-		watcher = watch(auditDir, () => {
+		watcher = watchDir(auditDir, () => {
 			if (timer) clearTimeout(timer);
 			timer = setTimeout(check, DEBOUNCE_MS);
 		});
+		// A watcher that reports an error (its directory deleted, on some platforms) is dropped rather than left to
+		// throw an unhandled `error` and end the process; the backstop below keeps checking the log on its own.
+		watcher.on("error", () => {
+			try {
+				watcher?.close();
+			} catch {
+				// already closed: nothing more to release
+			}
+			watcher = undefined;
+		});
+		// fs.watch can deliver an event late or not at all: on macOS under heavy filesystem activity an append's event
+		// was observed about 45 s late, and the dashboard showed nothing new until a later write. This tick runs the
+		// same check() the events run, so an append, a shrink or a removal is seen within about one interval whatever
+		// the events do. It checks the log by PATH, so it also sees a directory replaced under the watcher.
+		// The memo stops a torn last line (a writer that died mid-line) from being re-read in full every tick: check()
+		// runs only when the log's size, mtime or inode, its stat error, or the known size moved since the last call.
+		let memo: string | undefined;
+		backstop = setInterval(() => {
+			let seen: string;
+			try {
+				const st = statSync(logPath);
+				seen = `${st.size}:${st.mtimeMs}:${st.ino}`;
+			} catch (err) {
+				seen = `error:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
+			}
+			seen += `|${sizeOf()}`;
+			if (seen === memo) return;
+			memo = seen;
+			check();
+		}, backstopMs);
+		// Like the polling mode's interval: it never keeps a process alive on its own.
+		backstop.unref();
 	} catch {
 		// No audit directory yet: a project before its first governed call. fs.watch cannot watch a path that does not
 		// exist, and returning here left the dashboard on "no governed calls yet" while the first ones were written.
@@ -77,6 +137,7 @@ export function watchLedger(
 	return () => {
 		if (timer) clearTimeout(timer);
 		watcher?.close();
+		if (backstop) clearInterval(backstop);
 		if (poller) clearInterval(poller);
 	};
 }
