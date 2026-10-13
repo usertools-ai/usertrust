@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `close()` on the dashboard server (`createUiServer`) no longer waits several seconds for a connected client: it closes the remaining connections once it stops listening. A close after a client had read the live tail took about 3.7 s; it now takes a few milliseconds.
 
+- **`usertrust-verify --tx` no longer says a transaction does not exist when it could not read the whole audit chain.** With a missing segment, an unreadable directory, an empty log whose anchor records events or cannot be read, or a chain that failed verification, the not-found receipt says the transaction was not found in the records that could be read and points to the errors below it. The exit code and the errors are unchanged.
+
 ## [5.0.1] - 2026-10-13
 
 ### Read before upgrading
