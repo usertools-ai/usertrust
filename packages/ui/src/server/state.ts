@@ -88,7 +88,8 @@ export interface LedgerState {
 	deletionCauses: DeletionCause[];
 	/**
 	 * The events this load read: their number and the last one's hash (`LogHead`). Undefined when no pass of the load read
-	 * the vault unchanged throughout: the caller then keeps the head it had.
+	 * the vault unchanged throughout, or when its read failed (an audit directory or audit file that could not be read):
+	 * the caller then keeps the head it had, because a read that failed is not evidence of what the vault holds.
 	 */
 	head: LogHead | undefined;
 }
@@ -249,7 +250,11 @@ const DELETION_ERRORS: Record<DeletionCause, string> = {
  * own verdict. Membership, not position: in file order (events without `sequence`) `events.jsonl` is read before the
  * rotated segments, so a rotation moves positions. A pass that fails it is read again, and the deletion is latched only
  * when the failure persists on a pass that read the vault unchanged throughout (`consistent`): a read that raced a
- * rotation written in two steps (a segment, then `events.jsonl`) can see events missing that never were.
+ * rotation written in two steps (a segment, then `events.jsonl`) can see events missing that never were. Containment is
+ * judged only on a read that SUCCEEDED (the audit directory present and listable, and every audit file it reads opened
+ * or absent): a directory or file that could not be read gives no events, which is not evidence that events are gone.
+ * Such a read never latches a deletion and returns no head; its own verdict (unreadable, invalid) stands, and a later
+ * read that succeeds is judged against the head the caller kept.
  */
 export function loadState(
 	vaultPath: string,
@@ -312,6 +317,8 @@ function loadPass(
 ): { state: LedgerState; consistent: boolean; contained: boolean } {
 	const logPath = join(vaultPath, "audit", "events.jsonl");
 	const snapshot = snapshotLog(logPath);
+	const metaPath = `${logPath}.meta`;
+	const unreadBefore = readFailure(logPath) ?? readFailure(metaPath);
 	const segmentsBefore = segmentsFingerprint(join(vaultPath, "audit"));
 	loadSeam.afterDescriptor?.();
 	const events = readLedgerEvents(vaultPath);
@@ -322,10 +329,27 @@ function loadPass(
 	// do `lastHash`, `byteOffset` and `logId` all describe one file; otherwise (a rename, an append) the load is redone.
 	// The rotated segments are bracketed too (the directory's listing, and each segment's identity and size), so a
 	// containment failure is latched only on a read of one unchanged set of files.
+	const segmentsAfter = segmentsFingerprint(join(vaultPath, "audit"));
 	const consistent =
 		(snapshot === undefined || snapshot.fingerprint === pathFingerprint(logPath)) &&
-		segmentsBefore === segmentsFingerprint(join(vaultPath, "audit"));
-	const contained = holdsHead(events, head);
+		segmentsBefore.fingerprint === segmentsAfter.fingerprint;
+	const { dir: auditDir, listError, id: dirId } = auditDirState(vaultPath);
+	// Whether the readers' read SUCCEEDED: the audit directory present and listable, and every audit file they read
+	// (`events.jsonl`, each rotated segment, the `.meta` anchor) opened without an error, before and after them. A file
+	// that is absent (ENOENT) was read successfully as "nothing there", so a log and anchor removed from a directory that
+	// stays is still a read of the vault. An unreadable directory or file gives no events, and a read that failed is not
+	// evidence that events are gone: its verdict stands on its own (the readability errors fail it), and it is never
+	// compared with the head, nor recorded as one.
+	const readSucceeded =
+		auditDir === "present" &&
+		listError === undefined &&
+		unreadBefore === undefined &&
+		segmentsBefore.unreadable === undefined &&
+		segmentsAfter.unreadable === undefined &&
+		(readFailure(logPath) ?? readFailure(metaPath)) === undefined;
+	// Containment is evaluated only on a read that succeeded; a failed one holds the head trivially, so it is neither
+	// read again for a confirmation nor latched.
+	const contained = !readSucceeded || holdsHead(events, head);
 	let spentUt = 0;
 	for (const e of events) {
 		if (isHeaderSpend(e.kind, e.data.cost)) spentUt += e.data.cost;
@@ -338,7 +362,6 @@ function loadPass(
 	// words the missing-directory error differently, it is kept too: the vault reads as broken, never as clean.
 	// The exception is for an audit directory this process has never seen: one deleted while the dashboard was open
 	// (the live tail resyncs, and the reload finds it gone) is evidence destroyed, not a first run.
-	const { dir: auditDir, listError, id: dirId } = auditDirState(vaultPath);
 	// A deletion is latched: once detected it is carried by every later load, so a directory recreated in its place
 	// (even one holding a valid chain) cannot clear the evidence that the original was destroyed. Another directory at
 	// the path (a different identity) is the same evidence, however fast it was swapped in.
@@ -407,7 +430,7 @@ function loadPass(
 		auditDirId: dirId,
 		deletionDetected,
 		deletionCauses,
-		head: { count: events.length, hash: headHash(events) },
+		head: readSucceeded ? { count: events.length, hash: headHash(events) } : undefined,
 	};
 	return { state, consistent, contained };
 }
@@ -430,27 +453,61 @@ function holdsHead(events: readonly { hash?: unknown }[], head: LogHead | undefi
 
 /**
  * The rotated segments as the readers would gather them: every `*.jsonl` but `events.jsonl` in the audit directory,
- * sorted, each with its identity, size and mtime. A listing or stat that fails is part of the answer, so two reads
- * that both fail the same way compare equal and a read that fails differently does not.
+ * sorted, each with its identity, size and mtime, read through a descriptor so a segment that cannot be OPENED records
+ * its error code. A listing or open that fails is part of the fingerprint, so two reads that both fail the same way
+ * compare equal and a read that fails differently does not. `unreadable` is the first error code other than ENOENT (a
+ * segment removed after the listing was read as absent, which is a read), undefined when every segment opened.
  */
-function segmentsFingerprint(auditPath: string): string {
+function segmentsFingerprint(auditPath: string): {
+	fingerprint: string;
+	unreadable: string | undefined;
+} {
 	let names: string[];
 	try {
 		names = readdirSync(auditPath)
 			.filter((n) => n.endsWith(".jsonl") && n !== "events.jsonl")
 			.sort();
 	} catch (err) {
-		return `list:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
+		const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+		return { fingerprint: `list:${code}`, unreadable: code };
 	}
-	return names
+	let unreadable: string | undefined;
+	const fingerprint = names
 		.map((n) => {
+			let fd: number;
 			try {
-				return `${n}=${fingerprintOf(statSync(join(auditPath, n), { bigint: true }))}`;
+				fd = openSync(join(auditPath, n), "r");
 			} catch (err) {
-				return `${n}=${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
+				const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+				if (code !== "ENOENT") unreadable ??= code;
+				return `${n}=${code}`;
+			}
+			try {
+				return `${n}=${fingerprintOf(fstatSync(fd, { bigint: true }))}`;
+			} catch (err) {
+				const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+				unreadable ??= code;
+				return `${n}=${code}`;
+			} finally {
+				closeSync(fd);
 			}
 		})
 		.join("|");
+	return { fingerprint, unreadable };
+}
+
+/**
+ * The error code of opening `path` for reading, or undefined when it opens or is absent (ENOENT): an absent file is
+ * read as "nothing there", which is a read; a file that exists and cannot be opened (EACCES, say) is a read that failed.
+ */
+function readFailure(path: string): string | undefined {
+	try {
+		closeSync(openSync(path, "r"));
+		return undefined;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		return code === "ENOENT" ? undefined : (code ?? "unknown error");
+	}
 }
 
 /**

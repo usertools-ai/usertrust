@@ -38,6 +38,7 @@ vi.mock("node:fs", async (importOriginal) => {
 
 const {
 	appendFileSync,
+	chmodSync,
 	cpSync,
 	existsSync,
 	mkdirSync,
@@ -409,4 +410,118 @@ describe("a log that loses or changes events the dashboard held", { timeout: 30_
 		expect(after.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
 		expect(statSync(log()).size).toBeGreaterThan(text.length);
 	});
+});
+
+describe("an audit directory or log that could not be read, then could again", {
+	timeout: 30_000,
+}, () => {
+	let root: string;
+	let ui: Awaited<ReturnType<typeof createUiServer>> | undefined;
+	/** Paths whose mode a row changed, restored before the vault is removed (a mode-000 directory cannot be emptied). */
+	let restore: { path: string; mode: number }[] = [];
+	const auditDir = (): string => join(root, ".usertrust", "audit");
+	const log = (): string => join(auditDir(), "events.jsonl");
+	const asRoot = process.getuid?.() === 0;
+
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "trust-latch-unread-"));
+	});
+	afterEach(async () => {
+		for (const { path, mode } of restore.reverse()) {
+			try {
+				chmodSync(path, mode);
+			} catch {
+				// Already removed: nothing to restore.
+			}
+		}
+		restore = [];
+		await ui?.close();
+		ui = undefined;
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	function chmodFor(path: string, mode: number): void {
+		restore.push({ path, mode: statSync(path).mode & 0o777 });
+		chmodSync(path, mode);
+	}
+
+	const unreadable = (c: Chain): boolean =>
+		!c.valid && c.events === 0 && !c.errors.some((e) => e.includes("deletion detected"));
+	const healed = (c: Chain): boolean => c.valid && c.events === 3 && c.errors.length === 0;
+
+	/**
+	 * The vault made unreadable by `lock`, then readable again by `unlock`: it heals, equal to a fresh load. `reload`
+	 * forces a load after each change, for a change the watcher does not notice on its own.
+	 */
+	async function expectHeals(lock: () => void, unlock: () => void, reload = false): Promise<void> {
+		await appendEvents(root, 3, "tx");
+		ui = await createUiServer(root, { port: 0 });
+		expect(await chainOf(ui.port)).toMatchObject({ events: 3, valid: true });
+		lock();
+		if (reload) ui.reload();
+		const during = await chainWhen(ui.port, unreadable);
+		expect(during.valid).toBe(false);
+		expect(during.events).toBe(0);
+		// Two backstop intervals unreadable, so a confirming read has every chance to latch.
+		await sleep(2200);
+		unlock();
+		if (reload) ui.reload();
+		const after = await chainWhen(ui.port, healed);
+		const fresh = loadState(join(root, ".usertrust")).summary.chain;
+		expect(fresh).toMatchObject({ events: 3, valid: true, errors: [] });
+		expect(after).toMatchObject({ events: fresh.events, valid: fresh.valid, errors: fresh.errors });
+		ui.reload();
+		expect(await chainOf(ui.port)).toMatchObject({ events: 3, valid: true, errors: [] });
+	}
+
+	it.skipIf(asRoot)(
+		"red-first (latched deletion): an audit directory made unlistable and then listable again heals, no deletion",
+		async () => {
+			await expectHeals(
+				() => chmodFor(auditDir(), 0o000),
+				() => chmodSync(auditDir(), 0o700),
+			);
+		},
+	);
+
+	it.skipIf(asRoot)(
+		"red-first (latched deletion): a log made unreadable and then readable again heals, no deletion",
+		async () => {
+			// A mode change alone moves neither the log's size nor its mtime, so the watcher does not reload on it: each
+			// phase is read by a forced reload (what a later append, or any other resync, would do).
+			await expectHeals(
+				() => chmodFor(log(), 0o000),
+				() => chmodSync(log(), 0o600),
+				true,
+			);
+		},
+	);
+
+	it.skipIf(asRoot)(
+		"guard: the head kept through an unreadable spell still holds: the log and its anchor removed afterwards read as a deletion of events",
+		async () => {
+			await expectHeals(
+				() => chmodFor(auditDir(), 0o000),
+				() => chmodSync(auditDir(), 0o700),
+			);
+			const port = (ui as NonNullable<typeof ui>).port;
+			rmSync(`${log()}.meta`);
+			rmSync(log());
+			const observed = await chainWhen(port, isDeletion);
+			expect(observed.errors).toContain(EVENTS_ERROR);
+			expect(observed.errors).not.toContain(DIRECTORY_ERROR);
+		},
+	);
+
+	it.skipIf(asRoot)(
+		"guard: an unlistable audit directory (its stat still succeeds) is never read as a replaced or deleted directory",
+		async () => {
+			await appendEvents(root, 3, "tx");
+			ui = await createUiServer(root, { port: 0 });
+			chmodFor(auditDir(), 0o000);
+			const seen = await chainsFor(ui.port, 2500);
+			expect(seen.filter((c) => c.errors.includes(DIRECTORY_ERROR))).toEqual([]);
+			expect(seen.at(-1)?.valid).toBe(false);
+		},
+	);
 });
