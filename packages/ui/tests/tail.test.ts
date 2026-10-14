@@ -1069,10 +1069,11 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 				async () => {
 					unlinkSync(join(auditDir(), "events.jsonl"));
 					unlinkSync(join(auditDir(), "events.jsonl.meta"));
-					await summaryWhen(port, isDeletion, 15_000);
-					expect((await summaryOf(port)).chain.errors.join(" ")).not.toContain(
-						"Audit directory not found",
-					);
+					// `summaryWhen` returns its last summary when the bound passes, so the first stage is asserted: a watcher
+					// that never read the log's removal would otherwise leave this stage on a stale valid summary.
+					const logGone = await summaryWhen(port, isDeletion, 15_000);
+					expect(isDeletion(logGone)).toBe(true);
+					expect(logGone.chain.errors.join(" ")).not.toContain("Audit directory not found");
 					rmSync(auditDir(), { recursive: true, force: true });
 				},
 				isDirectoryGone,
