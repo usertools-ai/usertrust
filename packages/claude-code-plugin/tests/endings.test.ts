@@ -1380,6 +1380,10 @@ describe("SessionEnd, the last settle point: what it cannot finish is written do
 // ── The fixes of the sixth review round: the mechanisms that replace exit-by-exit patching ──
 
 const FAULT_AT = join(import.meta.dirname, "helpers", "fault-at.mjs");
+// The failpoint's own log: a fault that was never reached leaves no `FAULT` line, so a row that
+// injects one reads this to prove the injection fired, not only that the accounting held.
+const faultLogPath = () => join(stateDir, "fault.log");
+const faultLog = async () => readFile(faultLogPath(), "utf-8").catch(() => "");
 const seBudget = (ms: number) => ({ CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: String(ms + 300) });
 const seInput = () => ({ ...stopInput(), hook_event_name: "SessionEnd", reason: "other" });
 
@@ -1715,11 +1719,19 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 				seInput(),
 				envFor({
 					...seBudget(scenario.budgetMs ?? 1_200),
-					...(scenario.fault === undefined ? {} : { UT_CC_FAULT: scenario.fault }),
+					...(scenario.fault === undefined
+						? {}
+						: { UT_CC_FAULT: scenario.fault, UT_CC_FAULT_LOG: faultLogPath() }),
 				}),
 				scenario.fault === undefined ? [] : ["--import", FAULT_AT],
 			);
 			await chmod(join(stateDir, "transcripts", "claims"), 0o700).catch(() => {});
+			// The fault must have FIRED: a k past the saves the row reaches is silently inert.
+			if (scenario.fault !== undefined) {
+				const action = scenario.fault.split("|")[2] ?? "";
+				expect(await faultLog()).toContain(`FAULT ${action}\n`);
+				if (action === "throw") expect(end.stderr).toContain("injected rename failure");
+			}
 			// A retried vehicle's own record (haiku, its start unknown) is not the fresh messages'.
 			const vehicle = scenario.lines().some((line) => line.includes("msg_v"));
 			const remainder = (await phased("remainder")).filter(
@@ -1809,12 +1821,19 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			// and then defers both groups unclaimed instead). The authorize reply comes after the hook's
 			// whole budget, so no host stall lets the client see it.
 			slowBy.set("/v1/authorize#1", 4_000);
-			await runHook(
+			// This flow saves the cursor three times (claim, release, deferral); the third is its last.
+			const end = await runHook(
 				join(HOOKS, "session-end.mjs"),
 				seInput(),
-				envFor({ ...seBudget(3_000), UT_CC_FAULT: "__main.json|5|throw" }),
+				envFor({
+					...seBudget(3_000),
+					UT_CC_FAULT: "__main.json|3|throw",
+					UT_CC_FAULT_LOG: faultLogPath(),
+				}),
 				["--import", FAULT_AT],
 			);
+			expect(await faultLog()).toContain("FAULT throw\n");
+			expect(end.stderr).toContain("transcript usage failed for main: injected rename failure");
 			expect(seen.map((request) => request.path)).toEqual(["/v1/health", "/v1/authorize"]);
 			expect(requests("/v1/settle")).toEqual([]);
 			const remainder = await phased("remainder");
@@ -1824,6 +1843,7 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			expect(released[0]).toMatchObject({ kind: "gap", started: T.A, messages: 1 });
 			expect(deferred).toHaveLength(1);
 			expect(deferred[0]).toMatchObject({ agent: "main", started: T.B, messages: 1 });
+			expect(String(deferred[0]?.reason)).toContain("an error ended it (injected rename failure)");
 			expect(await records()).toEqual(remainder);
 			const sum = remainder.reduce((n, r) => n + Number(r.messages ?? 0), 0);
 			expect(sum).toBe(2);
@@ -1843,12 +1863,19 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			// settle's reply, held 3 s, is aborted by the client although the server did settle it. The client cannot know that, so it gives
 			// the call back and writes the group down; the second group is not slowed.
 			slowBy.set("/v1/settle#1", 3_000);
-			await runHook(
+			// This flow saves the cursor five times; the fifth is its last.
+			const end = await runHook(
 				join(HOOKS, "session-end.mjs"),
 				seInput(),
-				envFor({ ...seBudget(6_000), UT_CC_FAULT: "__main.json|5|throw" }),
+				envFor({
+					...seBudget(6_000),
+					UT_CC_FAULT: "__main.json|5|throw",
+					UT_CC_FAULT_LOG: faultLogPath(),
+				}),
 				["--import", FAULT_AT],
 			);
+			expect(await faultLog()).toContain("FAULT throw\n");
+			expect(end.stderr).toContain("transcript usage failed for main: injected rename failure");
 			expect(seen.map((request) => request.path)).toEqual([
 				"/v1/health",
 				"/v1/authorize",
