@@ -69,7 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The known issue in 5.0.2 about authorize calls that hang while the ledger is unreachable is fixed in this release (see *Fixed*). These remain:
 
-- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold can exit before ending it: the hold may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold, or with an authorize still reserving, can exit before ending it: the hold or reservation may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+
+- An eviction learned in the instant between a governor's shutdown request and the `destroy()` that follows it (no `await` between them) still aborts the process. The voids, audit flush and lock release have already run. What is lost is the exit status (134, which a supervisor reads as a crash) and anything the process does after `destroy()`.
 
 - `GET /v1/health` still reports `ok` while the ledger is down, so a monitor cannot read an outage from health in this release. Read the `503 ledger_unavailable` answers on `POST /v1/authorize` instead.
 
