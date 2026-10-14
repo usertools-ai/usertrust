@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.3] - 2026-10-14
+
 ### Read before upgrading
 
 - **A governed call whose request cannot be serialized to JSON is now refused, even through a client that would have taken it.** The provider SDKs serialize a request with `JSON.stringify`, so with them such a request (a cycle, a BigInt, a `toJSON` or getter that throws) already failed and was never sent; it now fails with `request_unserializable`, a `PolicyDeniedError`, instead of the SDK's `TypeError` or `RangeError`. A client of another kind that never serializes its request (an in-process stand-in, a test double) used to receive such a request; it is now refused before any hold. Pass plain data. (See the Fixed entry below.)
@@ -62,6 +64,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A Google client with no usable SDK pipeline is refused.** usertrust needs the SDK's `Models` class to read a request: the installed `@google/genai`'s. A client's own `Models` class is never run (for the SDK's own client it is that same class). A duck-typed Google client with no `@google/genai` installed beside usertrust now has `models.generateContent` and `models.generateContentStream` refused (`no @google/genai request pipeline was found`), audited as `policy_denied`, with the client never called. Install `@google/genai` (an optional peer dependency) to govern it.
 
 - **A Google client that is not the SDK receives only `model`, `contents` and `config`.** Before, the caller's other top-level fields (a `metadata`, say) were forwarded to that client's method, though nothing scanned them for PII, held budget for them or metered them. Only what was checked, held for and metered is forwarded now. A policy rule still sees those fields.
+
+### Known issues
+
+The known issue in 5.0.2 about authorize calls that hang while the ledger is unreachable is fixed in this release (see *Fixed*). These remain:
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold, or with an authorize still reserving, can exit before ending it: the hold or reservation may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+
+- An eviction learned in the instant between a governor's shutdown request and the `destroy()` that follows it (no `await` between them) still aborts the process. The voids, audit flush and lock release have already run. What is lost is the exit status (134, which a supervisor reads as a crash) and anything the process does after `destroy()`.
+
+- `GET /v1/health` still reports `ok` while the ledger is down, so a monitor cannot read an outage from health in this release. Read the `503 ledger_unavailable` answers on `POST /v1/authorize` instead.
+
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound during an outage, and complete when it returns. `ledgerTimeoutMs` applies to `POST /v1/authorize` only.
+
+- An authorize that ends without a ledger reply (an evicted client session) may still have reserved, and that reservation expires at the hold timeout (300 seconds).
+
+- A tenant's authorizes are served one at a time, so a burst counts against `ledgerTimeoutMs` too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, the default 5 s deadline was reached at roughly 350 concurrent authorizes for one tenant, and a slower or remote ledger reaches it sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
+
+- A `TrustTBClient` whose session the cluster evicted while it was idle still aborts the process when `TrustTBClient.destroy()` is called directly on it, with no request since. Make one ledger request before `destroy()`, or end the process with `process.exit()` without calling `destroy()`.
+
+- A process that holds an evicted ledger client it has dropped does not exit on its own after `destroy()`. End such a process with `process.exit()` after `destroy()`.
+
+- A Google request field that only your client's `@google/genai` version reads is not sent. Keep the `@google/genai` that usertrust resolves at the same version as your client's.
+
+This list is not complete. LIMITATIONS.md gives the full account: section 13, "A ledger-backed server refuses authorizes while its ledger is unreachable, health still reports `ok`, and a hold it releases on SIGINT or SIGTERM may not be audited", and section 14, "A ledger client the cluster evicted cannot be released, and keeps its process from exiting on its own".
 
 ## [5.0.2] - 2026-10-13
 
