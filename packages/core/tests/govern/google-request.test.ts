@@ -2138,42 +2138,53 @@ describe("a large function response is snapshot in linear time", () => {
 	// wall-clock ratio of 8.49 against a bound of 8, so the row failed on a correct
 	// snapshot. What the row guards is a quadratic MEMBERSHIP check: every test in
 	// the snapshot uses a Set or Map, and the realistic regression is one of them
-	// becoming an array search (`includes`, `indexOf`), O(n) per key. A count of
-	// calls cannot see that (the calls stay linear), so the row counts the WORK: the
-	// elements Array.prototype.includes/indexOf/lastIndexOf search over arrays of
-	// 1,000 or more during the snapshot. Only the request's own key lists are that
-	// long. The count is deterministic: neither coverage nor load moves it.
+	// becoming an array search, O(n) per key. A count of calls cannot see that (the
+	// calls stay linear), so the row counts the WORK: the elements that
+	// includes/indexOf/lastIndexOf and the callback searches (find, findIndex,
+	// findLast, findLastIndex, some, every, filter) walk over arrays of 1,000 or
+	// more during the snapshot. Only the request's own key lists are that long. The
+	// count is deterministic: neither coverage nor load moves it. The correct code
+	// walks a fixed number of passes over each list (a few times n, through filter
+	// and the like), so the budget is linear in n; an array search per key walks
+	// about n^2 / 2 and fails it by orders of magnitude.
 	const BIG_ARRAY = 1_000;
+	const SEARCHES = [
+		"includes",
+		"indexOf",
+		"lastIndexOf",
+		"find",
+		"findIndex",
+		"findLast",
+		"findLastIndex",
+		"some",
+		"every",
+		"filter",
+	] as const;
 
-	/** Elements searched by includes/indexOf/lastIndexOf over big arrays while `run` executes. */
+	/** Elements walked by the search methods over big arrays while `run` executes. */
 	async function searchedElements(run: () => Promise<void>): Promise<number> {
 		let searched = 0;
-		const originals = {
-			includes: Array.prototype.includes,
-			indexOf: Array.prototype.indexOf,
-			lastIndexOf: Array.prototype.lastIndexOf,
-		};
-		const counting = (original: (...args: never[]) => unknown) =>
-			function (this: unknown[], ...args: unknown[]) {
-				if (Array.isArray(this) && this.length >= BIG_ARRAY) searched += this.length;
-				return Reflect.apply(original, this, args);
-			};
+		// biome-ignore lint/suspicious/noExplicitAny: the originals are stored and restored by name
+		const proto = Array.prototype as any;
+		// biome-ignore lint/suspicious/noExplicitAny: the originals are stored and restored by name
+		const originals: Record<string, any> = {};
+		for (const name of SEARCHES) originals[name] = proto[name];
 		try {
-			Array.prototype.includes = counting(originals.includes) as typeof Array.prototype.includes;
-			Array.prototype.indexOf = counting(originals.indexOf) as typeof Array.prototype.indexOf;
-			Array.prototype.lastIndexOf = counting(
-				originals.lastIndexOf,
-			) as typeof Array.prototype.lastIndexOf;
+			for (const name of SEARCHES) {
+				const original = originals[name];
+				proto[name] = function (this: unknown[], ...args: unknown[]) {
+					if (Array.isArray(this) && this.length >= BIG_ARRAY) searched += this.length;
+					return Reflect.apply(original, this, args);
+				};
+			}
 			await run();
 		} finally {
-			Array.prototype.includes = originals.includes;
-			Array.prototype.indexOf = originals.indexOf;
-			Array.prototype.lastIndexOf = originals.lastIndexOf;
+			for (const name of SEARCHES) proto[name] = originals[name];
 		}
 		return searched;
 	}
 
-	it("a 30,000-key response does linear work: no array search over its keys (counted, so coverage and load cannot move it)", async () => {
+	it("a 30,000-key response does linear work: no array search per key over its keys; includes/indexOf and find/some/filter-style searches are counted, so coverage and load cannot move it", async () => {
 		const pipeline = await resolveGooglePipeline(sdkClient(false), false);
 		if (pipeline === undefined) throw new Error("the installed SDK's pipeline did not resolve");
 		const make = (n: number) => {
@@ -2194,9 +2205,10 @@ describe("a large function response is snapshot in linear time", () => {
 		const small = await count(7_500);
 		const large = await count(30_000);
 		console.log(`searched elements: n=7500 -> ${small}, n=30000 -> ${large}`);
-		// correct code searches none of the keys; a quadratic membership check searches about n^2/2
-		expect(small).toBeLessThan(7_500);
-		expect(large).toBeLessThan(30_000);
+		// a linear budget: the correct code walks a fixed few passes over each list; a
+		// search per key walks about n^2 / 2
+		expect(small).toBeLessThanOrEqual(16 * 7_500);
+		expect(large).toBeLessThanOrEqual(16 * 30_000);
 		// and the total may not grow faster than linearly (guards a partial regression)
 		expect(large).toBeLessThanOrEqual(8 * small + 30_000);
 	});
