@@ -29,21 +29,53 @@ export interface ChainIntegrity {
 	breakIndex: number | null;
 }
 
-export function readLedgerEvents(vaultPath: string): PersistedAuditEvent[] {
+/**
+ * Every event in the vault's audit log and rotated segments, ordered by `sequence` when every event carries one (else
+ * in file order: `events.jsonl` first, then the segments by name). A directory, log or segment that cannot be read is
+ * skipped, so the result alone cannot tell a file this process could not read from one that is empty or absent.
+ *
+ * `onReadError`, when given, is called for each existence check, listing or file read that fails with an error OTHER
+ * than ENOENT, with the path and the error code (`"unknown"` when the error carries none). ENOENT is absence, which is
+ * a read: a vault with no audit directory, or a segment removed after the listing named it. A caller that must know
+ * whether the events it got are the vault's (a monitor deciding whether events are gone) takes the answer from the
+ * same call that produced them. Without it the behaviour, and the result, are exactly as before.
+ */
+export function readLedgerEvents(
+	vaultPath: string,
+	options: { onReadError?: (path: string, code: string) => void } = {},
+): PersistedAuditEvent[] {
+	const { onReadError } = options;
+	const report = (path: string, err: unknown): void => {
+		const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+		if (code !== "ENOENT") onReadError?.(path, code);
+	};
+	// `existsSync` answers false on EACCES and ENOTDIR as on ENOENT; a stat says which, and answers the same boolean.
+	const exists = (path: string): boolean => {
+		if (onReadError === undefined) return existsSync(path);
+		try {
+			statSync(path);
+			return true;
+		} catch (err) {
+			report(path, err);
+			return false;
+		}
+	};
+
 	const auditDir = join(vaultPath, "audit");
-	if (!existsSync(auditDir)) return [];
+	if (!exists(auditDir)) return [];
 
 	const segmentFiles: string[] = [];
 	const mainLog = join(auditDir, "events.jsonl");
-	if (existsSync(mainLog)) segmentFiles.push(mainLog);
+	if (exists(mainLog)) segmentFiles.push(mainLog);
 	try {
 		for (const entry of readdirSync(auditDir).sort()) {
 			if (entry.endsWith(".jsonl") && entry !== "events.jsonl") {
 				segmentFiles.push(join(auditDir, entry));
 			}
 		}
-	} catch {
+	} catch (err) {
 		// Directory read failure — treat as no extra segments
+		report(auditDir, err);
 	}
 
 	const events: PersistedAuditEvent[] = [];
@@ -51,7 +83,8 @@ export function readLedgerEvents(vaultPath: string): PersistedAuditEvent[] {
 		let content: string;
 		try {
 			content = readFileSync(segmentFile, "utf-8").trim();
-		} catch {
+		} catch (err) {
+			report(segmentFile, err);
 			continue;
 		}
 		if (content === "") continue;

@@ -60,6 +60,7 @@ vi.mock("node:fs", async (importOriginal) => {
 const {
 	appendFileSync,
 	cpSync,
+	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	renameSync,
@@ -72,7 +73,9 @@ const {
 const { canonicalize } = await import("usertrust-verify");
 const { createAuditWriter } = await import("../../core/src/audit/chain.js");
 const { createUiServer } = await import("../src/server/server.js");
-const { loadSeam, loadState, readAppended } = await import("../src/server/state.js");
+const { fileIdentity, loadSeam, loadState, readAppended } = await import("../src/server/state.js");
+const { __tailTestSeam, watchLedger } = await import("../src/server/tail.js");
+const { EventEmitter } = await import("node:events");
 
 type Summary = {
 	chain: { events: number; valid: boolean; breakIndex: number | null; errors: string[] };
@@ -314,8 +317,10 @@ describe("loadState's identity", () => {
 				if (pass === 1) rmSync(audit, { recursive: true, force: true });
 				if (pass === 2) cpSync(join(other, ".usertrust", "audit"), audit, { recursive: true });
 			};
-			const state = loadState(vault, undefined, true, false);
-			expect(pass).toBe(2);
+			const state = loadState(vault, undefined, true, []);
+			// The second pass sees the directory's listing change under it (the rotated segments are bracketed too), so a
+			// third pass reads the recreated directory unchanged.
+			expect(pass).toBe(3);
 			// The retry read the recreated chain, and the deletion the first pass saw is still the verdict.
 			expect(state.summary.chain.events).toBe(2);
 			expect(state.deletionDetected).toBe(true);
@@ -646,5 +651,152 @@ describe("a same-size replacement under a running dashboard", { timeout: 30_000 
 		expect(names).toContain("rows");
 		expect(names).not.toContain("resync");
 		expect(liveChain(await summaryOf(port))).toMatchObject({ events: 4, valid: true });
+	});
+});
+
+// On a file system without stable inode numbers (every file reports inode 0) the log has no identity, so a same-size
+// replacement changes nothing the watcher compared: it is noticed by the log's mtime and ctime instead, once they differ
+// from the ones the last load or grow recorded on two consecutive checks.
+describe("a same-size replacement without stable inode numbers", { timeout: 30_000 }, () => {
+	let root: string;
+	let vault: string;
+	let log: string;
+	let ui: Awaited<ReturnType<typeof createUiServer>> | undefined;
+
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "trust-range-noino-"));
+		vault = join(root, ".usertrust");
+		log = join(vault, "audit", "events.jsonl");
+		io.zeroInode = true;
+	});
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		io.zeroInode = false;
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	async function waitFor(pred: () => Promise<boolean>, ms: number): Promise<boolean> {
+		const deadline = Date.now() + ms;
+		while (Date.now() < deadline) {
+			if (await pred()) return true;
+			await sleep(100);
+		}
+		return pred();
+	}
+
+	it("red-first (false clean): a same-size tampered copy renamed over the log reads invalid within the bound, as a fresh load does", async () => {
+		await appendEvents(root, 3, "tx");
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		expect((await summaryOf(port)).chain).toMatchObject({ events: 3, valid: true });
+		const text = readFileSync(log, "utf-8");
+		const tampered = text.replace('"cost":5', '"cost":9');
+		expect(Buffer.byteLength(tampered)).toBe(Buffer.byteLength(text));
+		writeFileSync(join(vault, "audit", "tampered.tmp"), tampered);
+		// An explicit, distinct mtime: written within one tick of a coarse file-system clock, the copy would carry the
+		// mtime (and ctime) the load recorded, and inode 0 leaves the watcher nothing else to see the replacement by.
+		const loaded = statSync(log).mtimeMs;
+		utimesSync(join(vault, "audit", "tampered.tmp"), new Date(), new Date(loaded + 5000));
+		renameSync(join(vault, "audit", "tampered.tmp"), log);
+		const invalid = await waitFor(async () => !(await summaryOf(port)).chain.valid, 5000);
+		expect(invalid).toBe(true);
+		const live = liveChain(await summaryOf(port));
+		expect(live).toMatchObject({ events: 3, valid: false });
+		expect(live).toEqual(freshChain(root));
+	});
+
+	it("guard: an unchanged log over several checks delivers no resync", async () => {
+		await appendEvents(root, 3, "tx");
+		ui = await createUiServer(root, { port: 0 });
+		const names = await readFrames(
+			ui.port,
+			async () => {
+				for (let i = 0; i < 5; i++) {
+					writeFileSync(join(vault, "audit", "poke.txt"), String(i));
+					await sleep(450);
+				}
+			},
+			() => false,
+			500,
+		);
+		expect(names).toEqual([]);
+	});
+
+	describe("at the watcher", () => {
+		const original = { ...__tailTestSeam };
+		class StubWatcher extends EventEmitter {
+			close(): void {}
+		}
+
+		beforeEach(() => {
+			vi.useFakeTimers();
+			__tailTestSeam.watch = (() => new StubWatcher()) as unknown as typeof __tailTestSeam.watch;
+			__tailTestSeam.backstopMs = 1000;
+		});
+		afterEach(() => {
+			vi.useRealTimers();
+			Object.assign(__tailTestSeam, original);
+		});
+
+		/** The watcher over a three-byte log, given what a load under inode 0 records: no identity, and the timestamps. */
+		function start() {
+			mkdirSync(join(vault, "audit"), { recursive: true });
+			writeFileSync(log, "{}\n");
+			const st = statSync(log, { bigint: true });
+			expect(fileIdentity(st)).toBeUndefined();
+			const times = { mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs };
+			const delivered: string[] = [];
+			const stop = watchLedger(
+				vault,
+				() => 3,
+				{ onGrow: () => delivered.push("grow"), onResync: () => delivered.push("resync") },
+				() => fileIdentity(statSync(log, { bigint: true })),
+				undefined,
+				() => times,
+			);
+			return { delivered, stop };
+		}
+
+		it("red-first (false clean): new timestamps at the same size on two consecutive checks resync once", () => {
+			const w = start();
+			try {
+				vi.advanceTimersByTime(2000);
+				expect(w.delivered).toEqual([]);
+				utimesSync(log, new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+				vi.advanceTimersByTime(1000);
+				expect(w.delivered).toEqual([]);
+				vi.advanceTimersByTime(1000);
+				expect(w.delivered).toEqual(["resync"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("guard: an append seen with new timestamps but the old size is a grow once the size catches up, never a resync", () => {
+			const w = start();
+			try {
+				vi.advanceTimersByTime(2000);
+				// The first half of an append, as some systems show it: timestamps moved, size not yet.
+				utimesSync(log, new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+				vi.advanceTimersByTime(1000);
+				expect(w.delivered).toEqual([]);
+				appendFileSync(log, "{}\n");
+				vi.advanceTimersByTime(3000);
+				expect(w.delivered).toEqual(["grow"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("guard: an unchanged log over several checks delivers nothing", () => {
+			const w = start();
+			try {
+				vi.advanceTimersByTime(10_000);
+				expect(w.delivered).toEqual([]);
+			} finally {
+				w.stop();
+			}
+		});
 	});
 });

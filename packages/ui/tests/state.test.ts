@@ -105,7 +105,7 @@ describe("loadState", () => {
 		const { summary } = loadState(gone, undefined, true);
 		expect(summary.chain).toMatchObject({ events: 0, valid: false, empty: false });
 		expect(summary.chain.errors.join(" ")).toContain(
-			"disappeared while this dashboard was open (deletion detected)",
+			"The audit directory was replaced or deleted while this dashboard was open (deletion detected). If you restored or replaced this vault on purpose, restart the dashboard.",
 		);
 		// The same directory, never seen, is a first run.
 		expect(loadState(gone).summary.chain).toMatchObject({ valid: true, empty: true });
