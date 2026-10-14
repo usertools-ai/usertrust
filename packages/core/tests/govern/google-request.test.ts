@@ -1520,47 +1520,44 @@ describe("caller code reached from the request cannot change what is sent after 
 				expect(r.gov.requests).toHaveLength(0);
 				expect(c.governed.json).toBe(0);
 			});
-
-			{
-				it(`${on}: parts as a plain array while this realm's Array.prototype holds a toJSON: sent, rewritten, as on the base`, async () => {
-					const before = Object.getOwnPropertyDescriptor(Array.prototype, "toJSON");
-					Object.defineProperty(Array.prototype, "toJSON", {
-						value(this: unknown[]) {
-							return Array.from(this).map((p) =>
-								JSON.stringify(p).includes(EMAIL) ? { text: REDACTED } : p,
-							);
-						},
-						writable: true,
-						configurable: true,
-					});
-					try {
-						const w = wire();
-						globalThis.fetch = w.fetchStub as typeof fetch;
-						const governed = await trust(sdkClient(vertex), {
-							dryRun: true,
-							budget: 500_000,
-							vaultBase: vault,
-							_audit: recordingAudit(),
-						});
-						const parts = [{ text: EMAIL }];
-						const { result } = await runOn(
-							governed.models,
-							method,
-							request({}, [{ role: "user", parts }]),
+			it(`${on}: parts as a plain array while this realm's Array.prototype holds a toJSON: sent, rewritten, as on the base`, async () => {
+				const before = Object.getOwnPropertyDescriptor(Array.prototype, "toJSON");
+				Object.defineProperty(Array.prototype, "toJSON", {
+					value(this: unknown[]) {
+						return Array.from(this).map((p) =>
+							JSON.stringify(p).includes(EMAIL) ? { text: REDACTED } : p,
 						);
-						await governed.destroy();
-						expect(result).toBe("ok");
-						expect(w.requests).toHaveLength(1);
-						expect(JSON.stringify(w.requests)).not.toContain(EMAIL);
-					} finally {
-						if (before === undefined) {
-							delete (Array.prototype as unknown as Loose)["toJSON"];
-						} else {
-							Object.defineProperty(Array.prototype, "toJSON", before);
-						}
-					}
+					},
+					writable: true,
+					configurable: true,
 				});
-			}
+				try {
+					const w = wire();
+					globalThis.fetch = w.fetchStub as typeof fetch;
+					const governed = await trust(sdkClient(vertex), {
+						dryRun: true,
+						budget: 500_000,
+						vaultBase: vault,
+						_audit: recordingAudit(),
+					});
+					const parts = [{ text: EMAIL }];
+					const { result } = await runOn(
+						governed.models,
+						method,
+						request({}, [{ role: "user", parts }]),
+					);
+					await governed.destroy();
+					expect(result).toBe("ok");
+					expect(w.requests).toHaveLength(1);
+					expect(JSON.stringify(w.requests)).not.toContain(EMAIL);
+				} finally {
+					if (before === undefined) {
+						delete (Array.prototype as unknown as Loose)["toJSON"];
+					} else {
+						Object.defineProperty(Array.prototype, "toJSON", before);
+					}
+				}
+			});
 
 			it(`${on}: parts in an Array subclass with a Proxy on its class's prototype chain are refused, nothing sent (the base sent them), one trap run before the refusal`, async () => {
 				const traps = { n: 0 };
