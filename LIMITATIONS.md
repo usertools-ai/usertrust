@@ -256,6 +256,19 @@ and none of its traps runs. A chain longer than 64 objects is refused too. **Wha
 keys, each read once. A key the caller adds, or a value it changes, after the call starts
 cannot reach the SDK.
 
+**A request that cannot be serialized to JSON is refused.** A governed call is scanned, held
+and sent as one JSON serialization of its request. A request that has none (a cycle, a BigInt,
+a `toJSON` or getter that throws, a text too long to build) is refused with
+`request_unserializable` and a `policy_denied` event, before anything is held or sent:
+otherwise the SDK would serialize it on its own, and a hook that throws once and then answers
+would send what nothing checked. With the provider SDKs such a request also fails inside the
+SDK, so an honest one loses nothing: it was never sent. A client of another kind that never
+serializes its request (a stand-in, a test double) would have taken it, and is refused too. A Google request reaches this check as the request gate's
+plain-data mirror: a callable tool in it serializes as `{}`, and a real `AbortSignal` at
+`config.abortSignal`, the one value the mirror keeps by reference for the transport, is left out
+of the check (an object there that is not a signal is the request's, and is checked). The gate
+refuses most requests the SDK cannot serialize before they get here.
+
 **A client that rewrites every request** is refused by `trust()`, before the ledger client
 is built, and every call refuses too if one is changed later on the raw client the caller
 kept:
@@ -363,8 +376,7 @@ are known to land there:
   and `file_id` inputs, Google `fileData.fileUri`. A document by URL is a few dozen bytes
   of body and can bill tens of thousands of tokens;
 - **a Google callable or MCP tool:** its declarations are resolved after authorization;
-- **an uncapped output** above 4096, and Google dynamic thinking with no `maxOutputTokens`;
-- **a request that cannot be serialized**, which keeps the prompt parts' estimate.
+- **an uncapped output** above 4096, and Google dynamic thinking with no `maxOutputTokens`.
 
 The estimate's byte heuristic is **not calibrated against any provider's tokenizer**
 (Anthropic, OpenAI and Google are all unmeasured), so a dense input such as a JSON schema

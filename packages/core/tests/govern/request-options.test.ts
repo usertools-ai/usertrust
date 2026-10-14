@@ -27,6 +27,7 @@ import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { createClient } from "tigerbeetle-node";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { withCostCenter } from "../../src/budget/attribution.js";
 import { movedClientOptions, movedRequestOptions } from "../../src/default-deny.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
 import { AUDIT_DIR, VAULT_DIR } from "../../src/shared/constants.js";
@@ -101,10 +102,17 @@ async function recordingFetch(input: unknown, init?: RequestInit): Promise<Respo
 			usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
 		});
 	}
-	return json({
+	const gemini = {
 		candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
 		usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
-	});
+	};
+	if (path.endsWith(":streamGenerateContent")) {
+		return new Response(`data: ${JSON.stringify(gemini)}\n\n`, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	}
+	return json(gemini);
 }
 
 /** A streamed Anthropic message, as its SSE events. */
@@ -1249,5 +1257,239 @@ describe("a revoked Proxy is refused and recorded, never thrown past the denial 
 			eng,
 			/client middleware \(not a plain array\)/,
 		);
+	});
+});
+
+describe("a request that cannot be serialized to JSON is refused before anything is held or sent", () => {
+	const SECRET = "ssn 123-45-6789";
+	/** A request whose `toJSON` throws the first time it is asked, then answers `later`. */
+	const throwOnce = (base: Record<string, unknown>, later: Record<string, unknown>) => {
+		let first = true;
+		return {
+			...base,
+			toJSON() {
+				if (first) {
+					first = false;
+					throw new Error("not yet");
+				}
+				return later;
+			},
+		};
+	};
+	async function expectUnserializable(
+		call: () => Promise<unknown>,
+		eng: ReturnType<typeof engine>,
+	): Promise<void> {
+		const err = await call().then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(PolicyDeniedError);
+		expect(String((err as Error).message)).toMatch(/request_unserializable/);
+		expect(sent).toEqual([]);
+		expect(eng.spendPending).not.toHaveBeenCalled();
+		expect(policyDenied()).toHaveLength(1);
+	}
+	const surfaces: Array<
+		[
+			string,
+			() => ReturnType<typeof govern>,
+			(c: Loose, p: unknown) => Promise<unknown>,
+			Record<string, unknown>,
+			Record<string, unknown>,
+		]
+	> = [
+		[
+			"Anthropic messages.create",
+			anthropic,
+			(c, p) => c.messages.create(p),
+			A,
+			{ ...A, messages: [{ role: "user", content: SECRET }] },
+		],
+		[
+			"OpenAI chat",
+			openai,
+			(c, p) => c.chat.completions.create(p),
+			C,
+			{ ...C, messages: [{ role: "user", content: SECRET }] },
+		],
+		["OpenAI Responses", openai, (c, p) => c.responses.create(p), R, { ...R, input: SECRET }],
+	];
+
+	it.each(surfaces)(
+		"%s: a toJSON that throws once and then answers is refused, and what it would answer never leaves",
+		async (_, make, call, base, later) => {
+			const { client, eng } = await make();
+			await expectUnserializable(() => call(client, throwOnce(base, later)), eng);
+			expect(bodies.join("")).not.toContain(SECRET);
+		},
+	);
+
+	it("an honest null (a cycle) is refused at entry, with its denial recorded; nothing was ever sent for it", async () => {
+		const { client, eng } = await anthropic();
+		const message: Record<string, unknown> = { role: "user", content: "hi" };
+		message.self = message;
+		await expectUnserializable(() => client.messages.create({ ...A, messages: [message] }), eng);
+	});
+
+	it("an honest null (a BigInt) is refused before any hold, where it used to fail inside the SDK after one", async () => {
+		const { client, eng } = await openai();
+		await expectUnserializable(
+			() => client.chat.completions.create({ ...C, metadata: { n: 1n } as Loose }),
+			eng,
+		);
+	});
+
+	it("the refusal and its record carry no caller data", async () => {
+		const { client, eng } = await anthropic();
+		const later = { ...A, messages: [{ role: "user", content: SECRET }] };
+		const err = await client.messages.create(throwOnce(A, later)).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(String((err as Error).message)).not.toContain(SECRET);
+		expect(readFileSync(join(vault, VAULT_DIR, AUDIT_DIR, "events.jsonl"), "utf8")).not.toContain(
+			SECRET,
+		);
+		expect(eng.spendPending).not.toHaveBeenCalled();
+	});
+
+	it("Google, positive control: a callable tool holding a cyclic client (an MCP client's shape) is sent, as on master", async () => {
+		const { client, eng } = await google();
+		const mcpClient: Record<string, unknown> = { name: "mcp" };
+		mcpClient.self = mcpClient;
+		const tool = {
+			mcpClients: [mcpClient],
+			async tool() {
+				return { functionDeclarations: [{ name: "lookup", description: "x" }] };
+			},
+			async callTool() {
+				return [];
+			},
+		};
+		await client.models.generateContent({
+			...G,
+			config: { tools: [tool], automaticFunctionCalling: { disable: true } },
+		});
+		expect(sent).toHaveLength(1);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		expect(policyDenied()).toEqual([]);
+	});
+
+	it("Google: a request's own toJSON never reaches what is sent (the request gate sends its plain mirror), so there is nothing to refuse", async () => {
+		const { client, eng } = await google();
+		await client.models.generateContent(throwOnce(G, { ...G, contents: SECRET }));
+		expect(sent).toHaveLength(1);
+		expect(bodies.join("")).not.toContain(SECRET);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("what the unserializable-request check leaves as it was", () => {
+	/** A real AbortSignal of this realm carrying an own cycle. */
+	const cyclicSignal = () => {
+		const signal = new AbortController().signal;
+		Object.assign(signal, { self: signal });
+		return signal;
+	};
+	it("Google: a real AbortSignal with an own cycle is the transport's, not the request's: generateContent is sent and held", async () => {
+		const { client, eng } = await google();
+		await client.models.generateContent({ ...G, config: { abortSignal: cyclicSignal() } });
+		expect(sent).toHaveLength(1);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		expect(policyDenied()).toEqual([]);
+	});
+
+	it("Google: the same signal on generateContentStream is sent and held too", async () => {
+		const { client, eng } = await google();
+		const stream = await client.models.generateContentStream({
+			...G,
+			config: { abortSignal: cyclicSignal() },
+		});
+		for await (const _ of stream) {
+			// drain
+		}
+		expect(sent).toHaveLength(1);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		expect(policyDenied()).toEqual([]);
+	});
+
+	it.each<[string, () => AbortSignal]>([
+		["AbortSignal.timeout()", () => AbortSignal.timeout(60_000)],
+		["AbortSignal.any()", () => AbortSignal.any([new AbortController().signal])],
+	])(
+		"Google: a real signal from %s with an own cycle is the transport's too, and is sent",
+		async (_, make) => {
+			const { client, eng } = await google();
+			const signal = make();
+			Object.assign(signal, { self: signal });
+			await client.models.generateContent({ ...G, config: { abortSignal: signal } });
+			expect(sent).toHaveLength(1);
+			expect(eng.spendPending).toHaveBeenCalledTimes(1);
+			expect(policyDenied()).toEqual([]);
+		},
+	);
+
+	it("Google: a spread copy of a signal (its own state, a plain prototype) with a cycle is the request's, and is refused before any hold", async () => {
+		const { client, eng } = await google();
+		const copy: Record<string, unknown> = { ...new AbortController().signal };
+		copy.self = copy;
+		const err = await client.models.generateContent({ ...G, config: { abortSignal: copy } }).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(PolicyDeniedError);
+		expect(String((err as Error).message)).toMatch(/request_unserializable/);
+		expect(sent).toEqual([]);
+		expect(eng.spendPending).not.toHaveBeenCalled();
+		expect(policyDenied()).toHaveLength(1);
+	});
+
+	it.each(["generateContent", "generateContentStream"] as const)(
+		"Google %s: a NON-signal object with a cycle at config.abortSignal is the request's, and is refused before any hold (it never reached the wire before either: the SDK's transport threw on it, after a hold)",
+		async (method) => {
+			const { client, eng } = await google();
+			const lookalike: Record<string, unknown> = { aborted: false };
+			lookalike.self = lookalike;
+			const err = await (async () => {
+				const result = await client.models[method]({ ...G, config: { abortSignal: lookalike } });
+				if (method === "generateContentStream") {
+					for await (const _ of result as AsyncIterable<unknown>) {
+						// drain
+					}
+				}
+			})().then(
+				() => null,
+				(e: unknown) => e,
+			);
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect(String((err as Error).message)).toMatch(/request_unserializable/);
+			expect(sent).toEqual([]);
+			expect(eng.spendPending).not.toHaveBeenCalled();
+			expect(policyDenied()).toHaveLength(1);
+		},
+	);
+
+	it("an attributed call with no parentUserId fails on its identity first: no hook of the caller's runs, and no refusal is recorded", async () => {
+		const { client, eng } = await anthropic();
+		let hooks = 0;
+		const request = {
+			...A,
+			toJSON() {
+				hooks += 1;
+				throw new Error("never serializable");
+			},
+		};
+		const err = await withCostCenter("team-a", () => client.messages.create(request)).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(Error);
+		expect(String((err as Error).message)).not.toMatch(/request_unserializable/);
+		expect(String((err as Error).message)).toMatch(/parentUserId/);
+		expect(hooks).toBe(0);
+		expect(policyDenied()).toEqual([]);
+		expect(sent).toEqual([]);
+		expect(eng.spendPending).not.toHaveBeenCalled();
 	});
 });

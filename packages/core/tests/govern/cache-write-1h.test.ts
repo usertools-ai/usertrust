@@ -248,7 +248,7 @@ describe("1-hour cache writes: governed paths", () => {
 		expect(calls).toBe(1);
 	});
 
-	it("a request that cannot be serialized is held DEAREST (and forwarded as given)", async () => {
+	it("a request that cannot be serialized is refused before it is held or forwarded, even through a client that would take it", async () => {
 		const engine = makeCappingEngine();
 		const client = anthropic({ input_tokens: 10, output_tokens: 1 });
 		const governed = await trust(client, {
@@ -262,10 +262,12 @@ describe("1-hour cache writes: governed paths", () => {
 			messages: [{ role: "user", content: "x".repeat(2000) }],
 		};
 		cyclic.self = cyclic;
-		await governed.messages.create(cyclic);
+		// This client never serializes the request, so it would take it: what it would be sent is
+		// still nothing a scan saw, and a hold priced on no snapshot.
+		await expect(governed.messages.create(cyclic)).rejects.toThrow(/request_unserializable/);
 		await governed.destroy();
-		expect(heldAmount(engine)).toBe(46);
-		expect(client.messages.create.mock.calls[0]?.[0]).toBe(cyclic);
+		expect(engine.spendPending).not.toHaveBeenCalled();
+		expect(client.messages.create).not.toHaveBeenCalled();
 	});
 
 	it("positive control: a call that settles WITH 1h writes never exceeds its hold", async () => {

@@ -69,6 +69,7 @@ import {
 	transportOptionKeys,
 	UNGOVERNED_CALL_KIND,
 	ungovernedMethodError,
+	unserializableRequestError,
 	validateAllowUngoverned,
 } from "./default-deny.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
@@ -1230,6 +1231,57 @@ const ENVELOPE_FUNDING_HINT =
 	"another envelope. Raising the trust()/createGovernor() budget funds the session wallet, " +
 	"which an attributed call never debits.";
 
+/** This realm's AbortSignal prototype and its native `aborted` getter, captured at load. */
+const abortSignalPrototype: object | undefined = globalThis.AbortSignal?.prototype;
+const abortSignalAborted = Object.getOwnPropertyDescriptor(
+	abortSignalPrototype ?? {},
+	"aborted",
+)?.get;
+
+/**
+ * Whether `value` is a real AbortSignal of this realm, decided without running caller code: no
+ * Proxy anywhere on its prototype chain (a bounded walk), its prototype IS this realm's
+ * `AbortSignal.prototype` (a spread copy of a signal carries the signal's own state, symbols
+ * included, so the getter alone would take it), and the native `aborted` getter accepts it (it
+ * throws for anything without the signal's state). A lookalike is not one.
+ */
+function isRealAbortSignal(value: unknown): boolean {
+	if (abortSignalAborted === undefined || value === null || typeof value !== "object") return false;
+	let o: object | null = value;
+	for (let depth = 0; o !== null; depth++) {
+		if (depth >= 64 || utilTypes.isProxy(o)) return false;
+		o = Object.getPrototypeOf(o);
+	}
+	if (Object.getPrototypeOf(value) !== abortSignalPrototype) return false;
+	try {
+		abortSignalAborted.call(value);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * What a Google request's snapshot is made from: the gate's mirror, less a real AbortSignal at
+ * `config.abortSignal` (`isRealAbortSignal`), the one transport value the mirror keeps by
+ * reference. The signal goes to the transport as it is and is never sent, so its own fields (even
+ * a cycle among them) are not the request's. Anything else at that key is the request's, and is
+ * serialized like the rest. The mirror itself is untouched: it is what is forwarded.
+ */
+function snapshotSource(request: unknown): unknown {
+	if (request === null || typeof request !== "object") return request ?? {};
+	if (utilTypes.isProxy(request)) return request;
+	const holder = Object.getOwnPropertyDescriptor(request, "config");
+	const config = holder !== undefined && "value" in holder ? holder.value : undefined;
+	if (config === null || typeof config !== "object" || utilTypes.isProxy(config)) return request;
+	const signal = Object.getOwnPropertyDescriptor(config, "abortSignal");
+	if (signal === undefined || !("value" in signal) || !isRealAbortSignal(signal.value)) {
+		return request;
+	}
+	const { abortSignal: _signal, ...rest } = config as Record<string, unknown>;
+	return { ...(request as Record<string, unknown>), config: rest };
+}
+
 /**
  * Resolve the active scope into the envelope this call will debit, or `undefined`
  * when no scope is active.
@@ -1702,7 +1754,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		attribution: ReturnType<typeof getCurrentCostCenter>,
 	): Promise<never> | undefined {
 		if (moved.length === 0) return undefined;
-		const refusal = movedRequestError(kind, moved);
+		return entryRefusal(movedRequestError(kind, moved), args, attribution);
+	}
+
+	/**
+	 * A refusal at a call's entry, before anything is scanned, held or sent: a request option off the
+	 * governed list (`optionsRefusal`) or a request that cannot be serialized
+	 * (`unserializableRequestError`). One append site for both: its denial event, then the error.
+	 */
+	function entryRefusal(
+		refusal: PolicyDeniedError,
+		args: readonly unknown[],
+		attribution: ReturnType<typeof getCurrentCostCenter>,
+	): Promise<never> {
 		const model = ownStringDataProperty(args[0], "model");
 		return (async () => {
 			await appendDenialEvent({
@@ -1853,7 +1917,26 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// Google's request reaches here as the request gate's mirror: plain data already holding the
 			// governed copy of `config.httpOptions` pinned at call start, so it is not copied again.
 			if (kind !== "google") args = detachedArgs(kind, args);
+			// ── The request is serialized ONCE, here, and refused if it cannot be ──
+			// The parse of that one text is what every later step reads (the 1-hour hold verdict, the
+			// PII and injection scans, redaction, the hold estimate) and what is forwarded, so the bytes
+			// scanned are the bytes sent: a stateful getter or `toJSON` has nothing left to flip between
+			// the scan and the SDK's own serialization. A request that cannot be serialized to a JSON
+			// object (a cycle, a BigInt, a hook that throws, a text too long to build) is refused now,
+			// before anything is held or sent: the SDK would serialize it on its own, and a hook that
+			// throws once and then answers would send what nothing checked.
+			// The envelope first, as before this check existed: an attributed call with no
+			// parentUserId is refused for that, and no hook of the caller's runs before it.
 			const envelope = resolveEnvelope(attribution, config.parentUserId);
+			// Google's request is the gate's mirror, which keeps one transport value BY REFERENCE: a
+			// real AbortSignal at `config.abortSignal`, handed to the transport as it is and never sent.
+			// That signal alone is left out of the check (`snapshotSource`); it is still dispatched.
+			const serialized = serializeRequest(
+				kind === "google" ? snapshotSource(args[0]) : (args[0] ?? {}),
+			);
+			if (serialized === null) {
+				return await entryRefusal(unserializableRequestError(kind), args, attribution);
+			}
 			// Spread into every audit record this call emits (A1: an attributed hold
 			// must leave an attributed forensic trail on the settle AND the void
 			// terminals). Empty when unattributed, so those records stay byte-identical
@@ -1886,25 +1969,21 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				await persistSpendLedger(vaultBase, budgetSpent);
 			};
 
-			// The request is serialized ONCE, and the parse of that text is what every later step
-			// reads (the 1-hour hold verdict, PII and injection scans, redaction) and what is
-			// forwarded, so the bytes scanned are the bytes sent: a stateful getter or `toJSON`
-			// has nothing left to flip between the scan and the SDK's own serialization.
+			// What is forwarded is the parse of the one serialization made above (`serialized`).
 			// Google is the exception, named: its request is already the mirror (google-request.ts),
 			// plain data with no caller hook or getter left in it, but the SDK reads non-JSON
 			// members off it (callable tools, by reference), so the mirror itself is forwarded, not
 			// the parse of its serialization; Google has no 1-hour tier.
-			// A request that cannot be serialized forwards as given and holds dearest.
 			const originalParams = (args[0] ?? {}) as Record<string, unknown>;
 			// The caller's abort signal OBJECT, captured NOW, before any await: a caller that
 			// replaces or deletes `options.signal` while the provider call is pending must not
 			// change which signal decides whether a stream's throw was their own abort.
 			const callerSignal = callerAbortSignal(kind, args);
-			const serialized = serializeRequest(originalParams);
-			const params = (
-				kind !== "google" && serialized !== null ? serialized.body : originalParams
-			) as Record<string, unknown>;
-			const declares1h = serialized?.declares1h ?? true;
+			const params = (kind !== "google" ? serialized.body : originalParams) as Record<
+				string,
+				unknown
+			>;
+			const declares1h = serialized.declares1h;
 			const model = (params.model as string) ?? "unknown";
 			// P3-PROVIDER-BLINDSPOT: normalize the prompt-bearing payload across
 			// providers (Anthropic/OpenAI `messages` + `system`, Google `contents`) so
@@ -1945,15 +2024,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// field the parts do not walk (a block-form system, tools, Google `contents` and its
 			// config, a prompt variable) is held too. Both read the one serialized snapshot, never
 			// the live request; on Google the request here is the request gate's mirror, plain data
-			// that is exactly what is sent. A request with no snapshot keeps the parts' estimate.
-			const snapshot = serialized?.body;
+			// that is exactly what is sent.
+			const snapshot = serialized.body;
 			const estimatedInputTokens = holdInputTokens(promptParts, snapshot);
 			// F1: size the output estimate to the caller's ACTUAL cap, per provider, per candidate
-			// (`holdOutputTokens`), read from the snapshot. Google never holds below the default:
-			// its thoughts are billed outside its candidates.
+			// (`holdOutputTokens`), read from the snapshot. A capped Google call holds its
+			// `maxOutputTokens`, which Google documents as bounding thought tokens too; an uncapped
+			// one holds at least the default.
 			const maxOutputTokens = holdOutputTokens(
 				kind,
-				snapshot ?? params,
+				snapshot,
 				kind !== "openai" ? "other" : surfaceKind === "openai-responses" ? "responses" : "chat",
 			);
 			const rateResolution = resolveRates(model, endpoint.class, config);
