@@ -1245,3 +1245,57 @@ describe("close(): destroy(), after asking the native client whether it was evic
 		expect(native.aborts).toEqual([]);
 	});
 });
+
+describe("the health check is single-flight: a tick submits nothing while the previous check is outstanding", () => {
+	// tigerbeetle-node 0.17.9 has no request timeout and no way to cancel a request: one the cluster
+	// never answers stays queued in the native client. Each row builds its client under fake timers,
+	// so its 30 s health check runs on them, and gives it a treasury, so the check makes a lookup.
+	const lookups = (since: number) =>
+		native.calls.slice(since).filter((call) => call.endsWith(":lookupAccounts")).length;
+
+	it("a ledger that never answers: six ticks, ONE lookup outstanding", async () => {
+		vi.useFakeTimers();
+		const c = new TrustTBClient({ addresses: ["3000"] });
+		await c.createTreasury();
+		native.respond = never;
+		const before = native.calls.length;
+		await vi.advanceTimersByTimeAsync(6 * 30_000);
+		expect(lookups(before)).toBe(1);
+		c.destroy();
+	});
+
+	it("control: a ledger that answers is checked on every tick", async () => {
+		vi.useFakeTimers();
+		const c = new TrustTBClient({ addresses: ["3000"] });
+		const treasury = await c.createTreasury();
+		native.respond = async (_id, op) =>
+			op === "lookupAccounts"
+				? [{ id: treasury, credits_posted: 0n, debits_posted: 0n, debits_pending: 0n }]
+				: [];
+		const before = native.calls.length;
+		await vi.advanceTimersByTimeAsync(6 * 30_000);
+		expect(lookups(before)).toBe(6);
+		c.destroy();
+	});
+
+	it("once the outstanding check is answered, the next tick checks again", async () => {
+		vi.useFakeTimers();
+		const c = new TrustTBClient({ addresses: ["3000"] });
+		await c.createTreasury();
+		let answer: () => void = () => {};
+		const held = new Promise<void>((resolve) => {
+			answer = resolve;
+		});
+		native.respond = async () => {
+			await held;
+			return [];
+		};
+		const before = native.calls.length;
+		await vi.advanceTimersByTimeAsync(3 * 30_000);
+		expect(lookups(before)).toBe(1);
+		answer();
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(lookups(before)).toBe(2);
+		c.destroy();
+	});
+});

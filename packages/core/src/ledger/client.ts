@@ -290,6 +290,8 @@ export class TrustTBClient {
 	private onAlert?: (message: string, meta: Record<string, unknown>) => void;
 	private healthCheckInterval: ReturnType<typeof setInterval> | null = null;
 	private reconnectPromise: Promise<void> | null = null;
+	// The health check's ping (and the reconnect a failed one starts) is still outstanding.
+	private healthCheckInFlight = false;
 	// Set first by destroy(); from then on this client never reconnects (#249). The native
 	// client cannot say so itself: its ERR_CLIENT_CLOSED does not tell a destroy() from our
 	// own reconnect, which closes the old client too, and an operation in flight on THAT one
@@ -327,22 +329,32 @@ export class TrustTBClient {
 			replica_addresses: this.opts.addresses,
 		});
 		this.healthCheckInterval = setInterval(() => {
-			this.ping().catch(() =>
-				this.reconnect().catch((err) => {
-					console.error("[TB] Health check reconnection failed:", err);
-					if (this.healthCheckInterval) {
-						clearInterval(this.healthCheckInterval);
-						this.healthCheckInterval = null;
-					}
-					const msg = "TigerBeetle health check failed — interval stopped";
-					const meta = { error: err instanceof Error ? err.message : String(err) };
-					if (this.onAlert) {
-						this.onAlert(msg, meta);
-					} else {
-						console.warn(`[usertrust] ${msg}`, meta);
-					}
-				}),
-			);
+			// Single-flight: a tick submits nothing while the previous tick's check is outstanding.
+			// tigerbeetle-node has no request timeout, and a request the cluster never answers stays
+			// queued in the native client, so during an outage each tick would otherwise add one more
+			// request (and its callback) for as long as the outage lasts.
+			if (this.healthCheckInFlight) return;
+			this.healthCheckInFlight = true;
+			this.ping()
+				.catch(() =>
+					this.reconnect().catch((err) => {
+						console.error("[TB] Health check reconnection failed:", err);
+						if (this.healthCheckInterval) {
+							clearInterval(this.healthCheckInterval);
+							this.healthCheckInterval = null;
+						}
+						const msg = "TigerBeetle health check failed — interval stopped";
+						const meta = { error: err instanceof Error ? err.message : String(err) };
+						if (this.onAlert) {
+							this.onAlert(msg, meta);
+						} else {
+							console.warn(`[usertrust] ${msg}`, meta);
+						}
+					}),
+				)
+				.finally(() => {
+					this.healthCheckInFlight = false;
+				});
 		}, 30_000);
 		// Do not let the health-check timer keep the Node event loop alive. Without
 		// this, a process that forgets to call destroy() can never exit — and the
