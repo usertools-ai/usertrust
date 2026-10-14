@@ -1167,6 +1167,17 @@ describe("redactPII — signalSent: a request whose transport slot is never seri
 		expect(JSON.stringify(out.contents)).not.toContain("alice@example.com");
 	});
 
+	it("a real signal whose prototype derives from AbortSignal.prototype is still kept by the default rule (as instanceof kept it); an object two levels down with no signal state is not", () => {
+		const signal = new AbortController().signal;
+		Object.setPrototypeOf(signal, Object.create(AbortSignal.prototype));
+		expect(isOpaqueTextFree(signal)).toBe(true);
+		const out = redactPII({ prompt: EMAIL, config: { abortSignal: signal } }).data as Out;
+		expect(out.config.abortSignal).toBe(signal);
+		expect(isOpaqueTextFree(Object.create(Object.create(AbortSignal.prototype)) as object)).toBe(
+			false,
+		);
+	});
+
 	it("the brand check runs no caller code: a Proxy of a real signal is not opaque, and its getPrototypeOf trap never runs", () => {
 		let traps = 0;
 		const proxy = new Proxy(new AbortController().signal, {

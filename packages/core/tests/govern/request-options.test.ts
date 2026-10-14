@@ -1577,6 +1577,41 @@ describe('under pii: "redact", the Google transport signal is the one the serial
 		},
 	);
 
+	it("a real signal whose prototype was replaced with one derived from AbortSignal.prototype, with an own cycle and PII in the prompt: sent redacted and cancellable, as master sent it", async () => {
+		const { client, eng } = await redacting();
+		const c = new AbortController();
+		const signal = c.signal;
+		Object.setPrototypeOf(signal, Object.create(AbortSignal.prototype));
+		Object.assign(signal, { self: signal });
+		await client.models.generateContent({
+			model: "gemini-2.5-pro",
+			contents: EMAIL,
+			config: { abortSignal: signal },
+		});
+		expect(sent).toHaveLength(1);
+		expect(bodies[0]).not.toContain("alice@example.com");
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		expect(policyDenied()).toEqual([]);
+		c.abort();
+		expect(signals[0]?.aborted).toBe(true);
+	});
+
+	it("without PII, the same derived-prototype signal with an own cycle is the transport's too, and is sent", async () => {
+		const { client, eng } = await google();
+		const c = new AbortController();
+		const signal = c.signal;
+		Object.setPrototypeOf(signal, Object.create(AbortSignal.prototype));
+		Object.assign(signal, { self: signal });
+		await client.models.generateContent({
+			model: "gemini-2.5-pro",
+			contents: "hello",
+			config: { abortSignal: signal },
+		});
+		expect(sent).toHaveLength(1);
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		expect(policyDenied()).toEqual([]);
+	});
+
 	it("a real signal holding PII in an own field is kept for the transport, and the field is never sent", async () => {
 		const { client, eng } = await redacting();
 		const c = new AbortController();
