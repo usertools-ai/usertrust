@@ -580,6 +580,11 @@ it never completes, they keep failing fast until it does: the fail-closed direct
   authorize after boot on a slow ledger can get the 503, which is retryable.
 - While that creation itself hangs, fast-fail does not engage: each authorize waits one
   deadline before its 503.
+- A tenant's authorizes are served one at a time, so a burst counts against the deadline
+  too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, each took about
+  14 ms, and the default 5 s deadline was reached at roughly 350 concurrent authorizes for
+  one tenant (300 were all served; 400 drew 503s). A slower or remote ledger reaches it
+  sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
 - `GET /v1/health` still reports `ok` while the ledger is down. Reachability on health is
   a later change; a monitor cannot read an outage from health in this release.
 - `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound,

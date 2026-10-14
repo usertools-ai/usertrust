@@ -170,6 +170,11 @@ request whose client hangs up before its answer is treated the same way.
   its 503.
 - **Cold start.** A tenant's governor is created on its first authorize, inside the deadline, so
   the first authorize after boot on a slow ledger can get the 503. It is retryable.
+- **Bursts.** A tenant's authorizes are served one at a time, so a burst counts against the
+  deadline too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, each took
+  about 14 ms, and the default 5 s deadline was reached at roughly 350 concurrent authorizes for
+  one tenant (300 were all served; 400 drew 503s). A slower or remote ledger reaches it sooner. A
+  tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
 - **`voidsOwed`** on the authenticated `GET /v1/budget` counts the tenant's late holds whose
   give-back has not landed: those still waiting on the ledger (a second outage), and those whose
   void the ledger refused, until the hold's own life has run out. The server also logs each of
