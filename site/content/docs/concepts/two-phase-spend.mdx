@@ -63,7 +63,7 @@ The LLM provider returned an error (rate limit, server error, etc.). The pending
 The LLM call and ledger settlement both succeeded, but the audit chain write failed. The response is returned with `auditDegraded: true` on the receipt (except that a failed warn-mode `injection_detected` append is swallowed without marking the call or its receipt). The failed audit event is written to the dead-letter queue when that write succeeds.
 
 <Callout type="info">
-By default, usertrust does not fail a call because the audit write degraded: if the LLM call succeeded and the ledger settled, the response is returned. With `audit.failClosed: true`, a `trust()` client throws `AuditDegradedError` instead of returning the response; see the AuditDegradedError entry on the [Errors](/docs/api/errors) page for when such a call may still have been charged.
+By default, usertrust does not fail a call because the audit write degraded: if the LLM call succeeded and the ledger settled, the response is returned. With `audit.failClosed: true`, a `trust()` client refuses the call with `AuditDegradedError`: a non-stream call throws it instead of returning the response, and a streamed call raises it through the stream (a `messages.stream()` call only through its `.receipt`, so await it); see the AuditDegradedError entry on the [Errors](/docs/api/errors) page for when such a call may still have been charged.
 </Callout>
 
 ### 15.4 -- TigerBeetle Unreachable
