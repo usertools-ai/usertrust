@@ -1834,120 +1834,141 @@ describe("TrustTBClient", () => {
 			expect(mockLookupAccounts).toHaveBeenCalled();
 		});
 
-		it("exercises health check failure path when ping rejects (onAlert)", async () => {
-			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		// ping() answers false rather than rejecting, so the tick reads its answer: one alert when a
+		// check first fails, silence while it keeps failing, one when a check answers again.
+		const failed = (calls: unknown[][]) =>
+			calls.filter(([m]) => String(m).includes("health check failed")).length;
+		const recovered = (calls: unknown[][]) =>
+			calls.filter(([m]) => String(m).includes("health check recovered")).length;
+
+		it("a failing check alerts once per outage through onAlert, and once when it recovers", async () => {
 			client.destroy();
-
 			const onAlert = vi.fn();
-			const alertClient = new TrustTBClient({
-				addresses: ["3000"],
-				onAlert,
-			});
-
-			// Override ping to reject — forces the health check .catch path
-			vi.spyOn(alertClient, "ping").mockRejectedValue(new Error("ping boom"));
-			// Override reconnect to also reject
-			vi.spyOn(alertClient, "reconnect").mockRejectedValue(new Error("reconnect boom"));
-
-			// Fire health check interval
-			await vi.advanceTimersByTimeAsync(30_000);
-
-			expect(errorSpy).toHaveBeenCalledWith(
-				expect.stringContaining("Health check reconnection failed"),
-				expect.any(Error),
-			);
+			const alertClient = new TrustTBClient({ addresses: ["3000"], onAlert });
+			alertClient.setTreasuryId(42n);
+			mockLookupAccounts.mockReset();
+			mockLookupAccounts.mockResolvedValue([]);
+			await vi.advanceTimersByTimeAsync(3 * 30_000);
+			expect(failed(onAlert.mock.calls)).toBe(1);
 			expect(onAlert).toHaveBeenCalledWith(
 				expect.stringContaining("health check failed"),
-				expect.objectContaining({ error: "reconnect boom" }),
+				expect.objectContaining({ reason: expect.stringContaining("treasury lookup") }),
 			);
+			mockLookupAccounts.mockResolvedValue([{ id: 42n }]);
+			await vi.advanceTimersByTimeAsync(2 * 30_000);
+			expect(recovered(onAlert.mock.calls)).toBe(1);
+			// A second outage is said again.
+			mockLookupAccounts.mockResolvedValue([]);
+			await vi.advanceTimersByTimeAsync(2 * 30_000);
+			expect(failed(onAlert.mock.calls)).toBe(2);
+			expect(onAlert).toHaveBeenCalledTimes(3);
+			alertClient.destroy();
+		});
 
+		it("without onAlert, says it once through console.warn", async () => {
+			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+			client.setTreasuryId(42n);
+			mockLookupAccounts.mockReset();
+			mockLookupAccounts.mockResolvedValue([]);
+			await vi.advanceTimersByTimeAsync(3 * 30_000);
+			const said = warnSpy.mock.calls.filter(([m]) => String(m).includes("health check failed"));
+			expect(said).toEqual([
+				[
+					expect.stringContaining("[usertrust] TigerBeetle health check failed"),
+					expect.any(Object),
+				],
+			]);
+			warnSpy.mockRestore();
+		});
+
+		it("a ledger that never answers: alerted at the next tick, once, with no second lookup sent", async () => {
+			client.destroy();
+			const onAlert = vi.fn();
+			const alertClient = new TrustTBClient({ addresses: ["3000"], onAlert });
+			alertClient.setTreasuryId(42n);
+			mockLookupAccounts.mockReset();
+			mockLookupAccounts.mockReturnValue(new Promise(() => {}));
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(onAlert).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(onAlert).toHaveBeenCalledWith(
+				expect.stringContaining("health check failed"),
+				expect.objectContaining({ reason: expect.stringContaining("not been answered") }),
+			);
+			await vi.advanceTimersByTimeAsync(4 * 30_000);
+			expect(onAlert).toHaveBeenCalledTimes(1);
+			expect(mockLookupAccounts).toHaveBeenCalledTimes(1);
+			alertClient.destroy();
+		});
+
+		it("the tick reconnects nothing itself (the lookup's own reconnect is all), and never stops", async () => {
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+			client.destroy();
+			const onAlert = vi.fn();
+			const alertClient = new TrustTBClient({ addresses: ["3000"], onAlert });
+			alertClient.setTreasuryId(42n);
+			mockLookupAccounts.mockReset();
+			mockLookupAccounts.mockRejectedValue(new Error("connection refused"));
+			const built = mockCreateClient.mock.calls.length;
+			await vi.advanceTimersByTimeAsync(3 * 30_000);
+			// Each check's lookup reconnects once (withReconnect) and retries: one client per check.
+			expect(mockCreateClient.mock.calls.length - built).toBe(3);
+			expect(mockLookupAccounts).toHaveBeenCalledTimes(6);
+			expect(failed(onAlert.mock.calls)).toBe(1);
+			// Still checking.
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(mockLookupAccounts).toHaveBeenCalledTimes(8);
 			alertClient.destroy();
 			logSpy.mockRestore();
-			errorSpy.mockRestore();
 		});
 
-		it("exercises health check failure path when ping rejects (console.warn fallback)", async () => {
-			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		it("a client with no treasury is not checked, and never alerted about", async () => {
 			client.destroy();
+			const onAlert = vi.fn();
+			const alertClient = new TrustTBClient({ addresses: ["3000"], onAlert });
+			mockLookupAccounts.mockReset();
+			// Past the 60 s start-up grace, when ping() answers false.
+			await vi.advanceTimersByTimeAsync(5 * 30_000);
+			expect(onAlert).not.toHaveBeenCalled();
+			expect(mockLookupAccounts).not.toHaveBeenCalled();
+			alertClient.destroy();
+		});
 
-			// No onAlert callback
-			const noAlertClient = new TrustTBClient({ addresses: ["3000"] });
-
-			vi.spyOn(noAlertClient, "ping").mockRejectedValue(new Error("ping boom"));
-			vi.spyOn(noAlertClient, "reconnect").mockRejectedValue(new Error("reconnect boom"));
-
+		it("a check that fails after destroy() says nothing", async () => {
+			client.destroy();
+			const onAlert = vi.fn();
+			const alertClient = new TrustTBClient({ addresses: ["3000"], onAlert });
+			alertClient.setTreasuryId(42n);
+			let fail: (err: Error) => void = () => {};
+			mockLookupAccounts.mockReset();
+			mockLookupAccounts.mockReturnValue(
+				new Promise((_resolve, reject) => {
+					fail = reject;
+				}),
+			);
 			await vi.advanceTimersByTimeAsync(30_000);
-
-			expect(errorSpy).toHaveBeenCalledWith(
-				expect.stringContaining("Health check reconnection failed"),
-				expect.any(Error),
-			);
-			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining("[usertrust]"),
-				expect.objectContaining({ error: "reconnect boom" }),
-			);
-
-			noAlertClient.destroy();
-			warnSpy.mockRestore();
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
+			alertClient.destroy();
+			fail(new Error("Client was closed."));
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(onAlert).not.toHaveBeenCalled();
 		});
 
-		it("exercises health check failure path with non-Error rejection", async () => {
-			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		it("an onAlert that throws breaks nothing: the next check runs, and its recovery is said", async () => {
 			client.destroy();
-
-			const noAlertClient = new TrustTBClient({ addresses: ["3000"] });
-
-			vi.spyOn(noAlertClient, "ping").mockRejectedValue("string error");
-			vi.spyOn(noAlertClient, "reconnect").mockRejectedValue("string reconnect error");
-
-			await vi.advanceTimersByTimeAsync(30_000);
-
-			// Non-Error → String(err) path
-			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining("[usertrust]"),
-				expect.objectContaining({ error: "string reconnect error" }),
-			);
-
-			noAlertClient.destroy();
-			warnSpy.mockRestore();
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
-		});
-
-		it("clears health check interval on reconnection failure", async () => {
-			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-			client.destroy();
-
-			const alertClient = new TrustTBClient({
-				addresses: ["3000"],
-				onAlert: vi.fn(),
+			const onAlert = vi.fn(() => {
+				throw new Error("alert sink down");
 			});
-
-			vi.spyOn(alertClient, "ping").mockRejectedValue(new Error("ping boom"));
-			vi.spyOn(alertClient, "reconnect").mockRejectedValue(new Error("reconnect boom"));
-
-			// Fire first health check
+			const alertClient = new TrustTBClient({ addresses: ["3000"], onAlert });
+			alertClient.setTreasuryId(42n);
+			mockLookupAccounts.mockReset();
+			mockLookupAccounts.mockResolvedValue([]);
 			await vi.advanceTimersByTimeAsync(30_000);
-
-			// After failure, interval should be cleared — no more calls
-			const pingMock = alertClient.ping as ReturnType<typeof vi.fn>;
-			const callCount = pingMock.mock.calls.length;
-
-			// Advance another 30s — should NOT trigger another health check
+			mockLookupAccounts.mockResolvedValue([{ id: 42n }]);
 			await vi.advanceTimersByTimeAsync(30_000);
-			expect(pingMock.mock.calls.length).toBe(callCount);
-
+			expect(failed(onAlert.mock.calls)).toBe(1);
+			expect(recovered(onAlert.mock.calls)).toBe(1);
+			expect(mockLookupAccounts).toHaveBeenCalledTimes(2);
 			alertClient.destroy();
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
 		});
 	});
 
