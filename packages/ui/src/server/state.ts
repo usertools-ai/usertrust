@@ -88,9 +88,10 @@ export interface LedgerState {
 	deletionCauses: DeletionCause[];
 	/**
 	 * What this load verified (`LogHead`): the hash of the chain's tip (`tipHash`), and whether the vault held any
-	 * evidence. Set only when the load is `verified`, and, when the caller passed no head (nothing verified yet), from
-	 * any read of the whole vault that did not latch, so a first read that is already broken still has its events held
-	 * against a later replacement. Undefined otherwise: when no pass read the vault unchanged throughout, when its read
+	 * evidence. Set only when the load is `verified`, and, when the caller passed no head (nothing remembered yet), from
+	 * any read of the whole vault that did not latch: on the first full read, the tip of a chain that does not verify is
+	 * remembered when it is unambiguous, so a later replacement can still be detected (an ambiguous tip remembers no
+	 * hash, only `hadEvidence`, and latches nothing). Undefined otherwise: when no pass read the vault unchanged throughout, when its read
 	 * failed, when its own check latched a deletion of events, or when its chain did not verify against a head the
 	 * caller already had. The caller then keeps the head it had: a read that failed is not evidence of what the vault
 	 * holds, and a chain that did not verify is not one to judge later loads against (another chain appended to a
@@ -501,11 +502,17 @@ function loadPass(
 		auditDirId: dirId,
 		deletionDetected,
 		deletionCauses,
-		// Set only by a pass that read the whole vault, whose own check did not latch, and whose chain VERIFIED; or, when
-		// the caller had no head yet, by any such read, verified or not, since there is nothing verified to keep. A pass
+		// Set only by a pass that read the whole vault, whose own check did not latch, and whose chain VERIFIED. A pass
 		// that latched keeps the head it was judged against: the events it read are not the ones verified. So does one
 		// whose chain did not verify: its events may hold another chain beside the verified one, and that chain's tip
 		// would let the verified events be removed unseen.
+		// The one exception, kept on purpose: on the FIRST load (the caller remembers nothing yet, `head` undefined), the
+		// tip of a chain that does not verify is remembered when it is unambiguous, so a vault already broken at startup
+		// still has something to hold a later replacement against. It can only add detection: a replacement lacking that
+		// tip latches. Strictly the first load: once a head exists, a broken load never takes this branch. An ambiguous
+		// tip there (a fork, a cycle, no events) remembers NO hash (`tipHash` gives none) but keeps `hadEvidence` as
+		// observed, and never latches: with no head, `holdsHead` holds, and the vault already reads red as broken, so a
+		// permanent "events lost" on top would be a false red.
 		head:
 			loadSucceeded && readSucceeded && !latchesEvents && (verified || head === undefined)
 				? {

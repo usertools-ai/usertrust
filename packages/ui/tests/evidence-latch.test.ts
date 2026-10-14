@@ -1082,6 +1082,83 @@ describe("the last verified event: what a full load must still hold, and when fu
 		});
 	});
 
+	// The first-load exception: with nothing remembered yet, a whole read that did not latch records its head even when
+	// its chain does not verify (the tip only when it is unambiguous). Strictly the first load, and an ambiguous tip there
+	// never latches.
+	describe("the first load, and only the first, remembers from a chain that does not verify", () => {
+		const genesis = "0".repeat(64);
+		/** Two independent chains, each from genesis with sequences 1..n: read together they fork (two tips). */
+		const chains = () => {
+			const a1 = eventLine(genesis, "tx_a1", 1);
+			const a2 = eventLine(a1.hash, "tx_a2", 2);
+			const a3 = eventLine(a2.hash, "tx_a3", 3);
+			const b1 = eventLine(genesis, "tx_b1", 1);
+			const b2 = eventLine(b1.hash, "tx_b2", 2);
+			return { a: a1.line + a2.line + a3.line, b: b1.line + b2.line, a3 };
+		};
+
+		it("red-first (head moved by a broken load): a remembered verified chain, then an independent chain appended (reads broken), does not move the head; the verified chain removed is latched", async () => {
+			mkdirSync(auditDir(), { recursive: true });
+			const { a, b, a3 } = chains();
+			writeFileSync(log(), a);
+			const held = loadState(vault());
+			expect(held.head).toEqual({ verifiedHash: a3.hash, hadEvidence: true });
+			ui = await createUiServer(root, { port: 0 });
+			const port = ui.port;
+			expect(await chainOf(port)).toMatchObject({ events: 3, valid: true });
+			appendFileSync(log(), b);
+			// Against the remembered head, the broken read returns no head: the caller keeps the one it had.
+			const broken = loadState(vault(), undefined, true, [], held.auditDirId, held.head);
+			expect(broken.head).toBeUndefined();
+			check();
+			const appended = await chainWhen(port, (c) => c.events === 5);
+			expect(appended.valid).toBe(false);
+			expect(appended.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+			// Only the independent chain left: on its own it verifies, and it lacks the remembered tip.
+			writeFileSync(log(), b);
+			expect(loadState(vault()).summary.chain.valid).toBe(true);
+			check();
+			const after = await chainWhen(port, isDeletion);
+			expect(after).toMatchObject({ events: 2, valid: false });
+			expect(after.errors).toContain(EVENTS_ERROR);
+		});
+
+		it("red-first (false red): a vault forked at startup reads broken, latches no deletion, and remembers no event", async () => {
+			mkdirSync(auditDir(), { recursive: true });
+			const { a, b } = chains();
+			writeFileSync(log(), a + b);
+			const first = loadState(vault());
+			expect(first.head).toEqual({ verifiedHash: undefined, hadEvidence: true });
+			expect(first.deletionCauses).toEqual([]);
+			ui = await createUiServer(root, { port: 0 });
+			const port = ui.port;
+			for (let i = 0; i < 2; i++) {
+				const chain = await chainOf(port);
+				expect(chain).toMatchObject({ events: 5, valid: false });
+				expect(chain.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+				ui.reload();
+			}
+		});
+
+		it("red-first (deletion read as a first run): a vault forked at startup, then its log and anchor deleted, is latched by its evidence", async () => {
+			await appendEvents(root, 3, "tx");
+			const { b } = chains();
+			appendFileSync(log(), b);
+			expect(loadState(vault()).head).toEqual({ verifiedHash: undefined, hadEvidence: true });
+			ui = await createUiServer(root, { port: 0 });
+			const port = ui.port;
+			const forked = await chainOf(port);
+			expect(forked).toMatchObject({ events: 5, valid: false });
+			expect(forked.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+			rmSync(log());
+			rmSync(meta(), { force: true });
+			ui.reload();
+			const after = await chainOf(port);
+			expect(after).toMatchObject({ events: 0, valid: false, empty: false });
+			expect(after.errors).toContain(EVENTS_ERROR);
+		});
+	});
+
 	it("events appended after a successful full load, then the log truncated back to its first three, are latched", async () => {
 		await appendEvents(root, 3, "tx");
 		const text = readFileSync(log(), "utf-8");

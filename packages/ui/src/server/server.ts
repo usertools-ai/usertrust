@@ -103,7 +103,8 @@ export async function createUiServer(
 	let deletionSeen: DeletionCause[] = state.deletionCauses;
 	/**
 	 * What this process last verified (`LogHead`): set by each full load that VERIFIED the vault (its read succeeded and
-	 * its chain verified) and did not latch, and advanced to the last event of each verified append, but ONLY while the
+	 * its chain verified) and did not latch (or, while nothing is remembered yet, by the first whole read that did not
+	 * latch, verified or not: `loadState`'s `head`), and advanced to the last event of each verified append, but ONLY while the
 	 * last full load verified. Every later full load must still hold it (`loadState`'s `head`). Without the append's
 	 * advance, a truncation of events appended since the last full load would go unseen; with it after a load that did
 	 * not verify, an append onto a chain that no full load verified (another chain renamed in while the read failed, or
