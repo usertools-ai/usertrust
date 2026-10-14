@@ -21,7 +21,9 @@ npm, and its version is its own: the `usertrust` packages and their
   5 s, the server's default deadline, and its timer started first, so the server's `503`
   arrived after the hook had given up and read it as an outage of its own. It now waits up to
   6.5 s, within the hook's budget; in an outage that adds about 1.5 s before the call is blocked
-  or recorded as a gap.
+  or recorded as a gap. The retry works with a server deadline (`ledgerTimeoutMs`) up to about
+  5 s, the server's default; with a deadline above about 6.5 s the hook gives up before the
+  server's `503` arrives, and the call is an outage at once, with no retry.
 
 - **A session metered later no longer bills what it did before.** The plugin kept one first-run
   time per state directory. A session that first ran with no hook of this plugin (a lane switched

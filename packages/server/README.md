@@ -177,7 +177,9 @@ have reached the client.
   deadline too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, each took
   about 14 ms, and the default 5 s deadline was reached at roughly 350 concurrent authorizes for
   one tenant (300 were all served; 400 drew 503s). A slower or remote ledger reaches it sooner. A
-  tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
+  tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`. With a deadline
+  above about 6.5 s, the Claude Code plugin's PreToolUse cannot receive the `503` (it gives up
+  first) and treats the call as an outage.
 - **`voidsOwed`** on the authenticated `GET /v1/budget` counts the tenant's late holds whose
   give-back has not landed: those still waiting on the ledger (a second outage), and those whose
   void the ledger refused, until the hold's own life has run out. The server also logs each of

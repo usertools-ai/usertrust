@@ -591,7 +591,10 @@ answers in time. Nothing was authorized. PreToolUse makes one retry after a shor
 drained by then. In an outage it adds about 1 s (and the longer first-call timeout, 6.5 s,
 about 1.5 s) before the call is blocked or recorded as a gap. A second `503` is an outage
 like any other: in enforce mode, while it lasts, every tool call is **blocked** unless
-`UT_FAIL_OPEN=1`.
+`UT_FAIL_OPEN=1`. This works with a server deadline (`ledgerTimeoutMs`) up to about 5 s, the
+server's default, at the hook's default budget. With a deadline above about 6.5 s the hook
+gives up before the server's `503` arrives, and treats the call as an outage at once, with no
+retry.
 
 **Known limitation: a call that does not complete keeps its reservation for a
 while.** PostToolUse, the hook that closes a call's hold,
