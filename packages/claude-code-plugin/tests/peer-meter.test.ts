@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runHook } from "./helpers/run-hook.js";
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
-const { peerMeter, settingsDirs, alsoEnabledWarning } = (await import(
+const { peerMeter, settingsDirs, alsoEnabledWarning, unknownWarning } = (await import(
 	join(HOOKS, "peer-meter.mjs")
 )) as {
 	peerMeter: (args: {
@@ -25,7 +25,12 @@ const { peerMeter, settingsDirs, alsoEnabledWarning } = (await import(
 		projectDir: string | null;
 	};
 	alsoEnabledWarning: (file: string, key: string) => string;
+	unknownWarning: (why: string) => string;
 };
+
+const COST_ENABLED = "every tool call reserves budget twice, and some of its versions charge twice";
+const COST_UNKNOWN =
+	"it would reserve budget twice per tool call, and some of its versions charge twice";
 
 const OLD = "usertrust-claude-code@usertrust";
 
@@ -296,13 +301,32 @@ describe("SessionStart warns of an enabled usertrust-claude-code, and usertools 
 		const message = JSON.parse(start.stdout).systemMessage as string;
 		expect(message.startsWith(`${alsoEnabledWarning(file, OLD)} usertrust: watch-only`)).toBe(true);
 		expect(alsoEnabledWarning("/the/file.json", "usertrust-claude-code@sample")).toBe(
-			"usertrust: usertrust-claude-code also appears to be enabled (/the/file.json); if it is, every tool call is metered twice. Uninstall it: /plugin uninstall usertrust-claude-code@sample",
+			"usertrust: usertrust-claude-code also appears to be enabled (/the/file.json); if it is, every tool call reserves budget twice, and some of its versions charge twice. Uninstall it: /plugin uninstall usertrust-claude-code@sample",
 		);
+		expect(message).toContain(COST_ENABLED);
 		const before = hits;
 		const pre = await run("pre-tool-use", "both-1");
 		expect(pre.code).toBe(0);
 		expect(hits, "pre-tool-use sent its request").toBeGreaterThan(before);
 		await expect(readdir(stateDir)).resolves.not.toEqual([]);
+	});
+
+	it("unknownWarning: the exact text, cost included", () => {
+		expect(unknownWarning("settings.json is not JSON")).toBe(
+			"usertrust: could not tell whether usertrust-claude-code is also enabled (settings.json is not JSON); usertools meters this session, so a second meter may be running: it would reserve budget twice per tool call, and some of its versions charge twice.",
+		);
+	});
+
+	it("a value that is not true or false: SessionStart warns with the cost, and meters", async () => {
+		await user({ enabledPlugins: { [OLD]: "yes" } });
+		const start = await run("session-start", "ambiguous-1");
+		const message = JSON.parse(start.stdout).systemMessage as string;
+		expect(message).toMatch(
+			/^usertrust: could not tell whether usertrust-claude-code is also enabled/,
+		);
+		expect(message).toContain(COST_UNKNOWN);
+		await run("pre-tool-use", "ambiguous-1");
+		expect(hits).toBeGreaterThan(0);
 	});
 
 	it("the warning is SessionStart's alone: no other hook says it", async () => {
@@ -338,6 +362,7 @@ describe("SessionStart warns of an enabled usertrust-claude-code, and usertools 
 			/^usertrust: could not tell whether usertrust-claude-code is also enabled/,
 		);
 		expect(message).toContain("usertools meters this session");
+		expect(message).toContain(COST_UNKNOWN);
 		expect(message).toContain("watch-only");
 		await run("pre-tool-use", "bad-1");
 		expect(hits).toBeGreaterThan(0);
