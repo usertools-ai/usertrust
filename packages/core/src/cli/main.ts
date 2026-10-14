@@ -158,7 +158,12 @@ switch (command) {
 	case "budget": {
 		// Forwarded verbatim (global flags included) — budget.js accepts them.
 		const rest = argv.slice(argv.indexOf("budget") + 1);
-		await import("./budget.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		const leftOpen = await import("./budget.js").then((m) =>
+			m.run(undefined, { json: jsonFlag }, rest),
+		);
+		// The only command that builds a ledger client. One the cluster evicted is left open (destroying
+		// it aborts the process), and keeps the process alive after the output: end it, once drained.
+		if (leftOpen) await import("./drain-exit.js").then((m) => m.exitWhenDrained());
 		break;
 	}
 	case "completions":

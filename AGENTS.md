@@ -141,8 +141,8 @@ settle's POST, an abort or release parked on its void). At the deadline it takes
 hold in ONE synchronous step, before its first await: it records each abort or release still in
 flight, and voids and records (`hold_released`, `governor destroyed`) each hold still held. Then it
 voids the engine's remaining pending transfers, and flushes and releases the audit writer. Every
-teardown step (that drain, the sweep, the flush, the release, then the engine and proxy destroy)
-always runs, through `runTeardownSteps`: a step that throws skips none after it, and destroy()
+teardown step (that drain, the sweep, the flush, the release, then the engine's `close()`, awaited,
+or its `destroy()` for an engine without one, and the proxy destroy) always runs, through `runTeardownSteps`: a step that throws skips none after it, and destroy()
 rejects with its error (several as one `AggregateError`, in step order) only once the last has run. An
 `authorize()` refuses from destroy()'s start, and one still reserving registers no hold: it gives
 back its accounting and fails, and sends no void (the engine sweep, or the ledger's pending timeout
@@ -300,11 +300,17 @@ from then on nothing reconnects and no request reaches a native client. An opera
   runs before the operation's own input checks and before any shortcut that answers without the
   ledger (a cached wallet id), so an operation started after `destroy()` fails with
   `LedgerClientClosedError` whatever its arguments. A caller can tell shutdown from a refused input.
+  `close()` is the one exception: it is internal teardown (`destroy()` after an eviction probe), and
+  after `destroy()` it returns, as a second `destroy()` does. A governor's teardown awaits it, and a
+  finished shutdown must not turn into a rejection.
 - **At each request**, `native()` checks `closed` at the moment the request is made, because an
   await lets `destroy()` land between an operation's steps, or between a reconnect and its retry.
-  Only `withReconnect()` calls `native()`, for the request and for its retry. It hands the client
-  to a closure that makes its one request at once. A native destroy that throws leaves its client
-  open, and this check is what keeps requests off it.
+  `withReconnect()` calls `native()` for the request and for its retry, and hands the client to a
+  closure that makes its one request at once. `close()` calls it once, for its probe, which goes
+  through `send()` (so an eviction marks the client) but not through `withReconnect()` (a shutdown
+  probe must never reconnect). `native()` still checks `closed` there, and `close()` does not use
+  the reference after its await: the `destroy()` that follows reads the client again. A native
+  destroy that throws leaves its client open, and this check is what keeps requests off it.
 
 The rest of the closed state:
 - `ping()` reports unhealthy.
@@ -317,9 +323,9 @@ The rest of the closed state:
   touch only this object's memory and are not refused.
 
 The tests hold this. Two parse `client.ts` and fail in any of these cases:
-- a public async method other than `ping()` does not open with `this.assertOpen()`;
+- a public async method other than `ping()` and `close()` does not open with `this.assertOpen()`;
 - anything but the constructor, `native()`, `_doReconnect()` and `destroy()` reads the native client;
-- anything but `withReconnect()` calls `native()`;
+- anything but `withReconnect()` (and `close()`, once, for its probe) calls `native()`;
 - a request closure is anything but `(native) => native.<request>(…)`.
 
 Another set runs every operation with `destroy()` landing at each of its await boundaries.

@@ -618,6 +618,54 @@ A ledger-backed server stopped by SIGINT or SIGTERM ends each pending hold throu
 reached the ledger stays reserved until the ledger's 300-second hold timeout, and a
 release can be missing from the chain.
 
+## 14. A ledger client the cluster evicted cannot be released, and keeps its process from exiting on its own
+
+A TigerBeetle cluster evicts a client's session when it has more sessions than it keeps
+(a shared cluster past its session limit, or churn), or when the client's release does not
+match. tigerbeetle-node 0.17.9 aborts the whole process (SIGABRT) when `destroy()` is called
+on an evicted client, and nothing in JavaScript can catch that. usertrust therefore never
+destroys a client it knows was evicted, and it knows in two ways:
+
+- **A request is refused with an eviction code** (`ERR_CLIENT_EVICTED`, or a release the
+  cluster does not take).
+- **A request fails "closed" on a client usertrust never destroyed.** A client whose session
+  was pushed out while it was idle learns of that from its own traffic (measured: about 25 s
+  later), and from then on fails every request `ERR_CLIENT_CLOSED`, never with an eviction
+  code. tigerbeetle-node raises "closed" otherwise only for a client that was destroyed.
+
+Either way the request is retried on a fresh client, and the evicted client is dropped and
+left open. At shutdown a governor asks its client first: its `destroy()` makes one empty
+request (bounded at 2 s) after its voids, its audit flush and its audit lock release, and
+leaves the client open if that request shows an eviction. So neither a governor nor
+`usertrust-server`, whose shutdown tears every tenant's governor down at once, aborts on an
+evicted client.
+
+An evicted client left open holds no thread, file descriptor or memory that grows with
+repeated evictions (measured over 20 evictions in one process, against a real cluster: threads
+stayed at 13 and open file descriptors at 18; resident memory rose 1.7 MiB from the first
+eviction to the twentieth and levelled off). But it keeps the process from exiting on
+its own: after `destroy()` the event loop stays alive, with nothing in JavaScript
+holding it. `destroy()` says so (through `onAlert`, or a `console.warn`) whenever an evicted
+client was dropped. A process that relies on exiting when its work is done, such as a script,
+should end with `process.exit()` after `destroy()`. `usertrust-server` already ends with
+`process.exit()` when it is stopped (SIGINT or SIGTERM), and `usertrust budget` ends the process
+itself, once its output has drained and with its own exit code, when it left an evicted client
+open. This lasts until a tigerbeetle-node release can release an evicted client.
+
+What is still open:
+
+- **`TrustTBClient.destroy()` called directly** on a client whose session was pushed out
+  while it was idle, with no request since, cannot know the client is evicted, and aborts the
+  process. A program that uses `TrustTBClient` directly and may sit idle should make one ledger
+  request before `destroy()` (it marks an evicted client, which `destroy()` then leaves), or
+  end with `process.exit()` without calling `destroy()`.
+- **An eviction learned in the instant between a governor's shutdown request and the destroy
+  that follows it** (no `await` between them) still aborts. The client learns of an eviction
+  from its own traffic about 25 s after the cluster pushed the session out, so this needs that
+  moment to fall inside one synchronous step. By then the governor has finished its voids, its
+  audit flush and its lock release, so what is lost is the exit status (134, which a supervisor
+  reads as a crash) and anything the process does after `destroy()`.
+
 ---
 
 Found a boundary we haven't documented? That is a bug in this file — open an

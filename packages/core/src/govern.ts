@@ -530,6 +530,13 @@ export interface TrustEngine {
 	 */
 	lookupBalances?(accountIds: bigint[]): Promise<Map<bigint, number>>;
 	destroy?(): void;
+	/**
+	 * `destroy()`, asynchronously, made safe for a ledger client the cluster evicted while it
+	 * was idle. A governor's teardown calls this when the engine has it, and `destroy()`
+	 * otherwise. OPTIONAL because an injected engine may omit it; both `createTBEngine`
+	 * factories implement it.
+	 */
+	close?(): Promise<void>;
 }
 
 // ── F5: governed-surface type rewrites ────────────────────────────────────────
@@ -4488,8 +4495,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// teardown reports it as a USERTRUST_AUDIT_LOCK_LEFT warning instead.
 				() => releaseAuditWriterForTeardown(audit),
 				// Destroy the engine if connected and the proxy connection if active.
-				() => {
-					if (engine != null && typeof engine.destroy === "function") engine.destroy();
+				// close() where the engine has it: the TigerBeetle client's destroy() aborts the process
+				// on a client the cluster evicted while it was idle, and close() asks it first. An
+				// injected engine without it is destroyed as before.
+				async () => {
+					if (engine == null) return;
+					if (typeof engine.close === "function") await engine.close();
+					else if (typeof engine.destroy === "function") engine.destroy();
 				},
 				() => {
 					if (proxyConn != null) proxyConn.destroy();
@@ -5095,6 +5107,12 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 
 		destroy(): void {
 			tbClient.destroy();
+		},
+
+		// What a governor's teardown calls: destroy(), after asking the client whether the
+		// cluster evicted it while it was idle (TrustTBClient.close()).
+		async close(): Promise<void> {
+			await tbClient.close();
 		},
 	};
 }
