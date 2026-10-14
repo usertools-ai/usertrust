@@ -899,6 +899,101 @@ describe("an evicted native client is never destroyed (tigerbeetle-node 0.17.9 a
 		expect(onAlert).not.toHaveBeenCalled();
 	});
 
+	it("a release the cluster refuses on EVERY client: three calls in a row, and no evicted client is ever destroyed, nor at destroy()", async () => {
+		// Each fresh client is evicted on its first request, as a persistent release mismatch is.
+		native.respond = async (id) => {
+			if (!native.evicted.has(id)) {
+				native.evicted.add(id);
+				throw evictedError("ERR_CLIENT_RELEASE_TOO_LOW");
+			}
+			return [];
+		};
+		for (const id of [1n, 2n, 3n]) {
+			await expect(client.lookupBalances([id])).rejects.toThrow();
+		}
+		expect(native.aborts).toEqual([]);
+		client.destroy();
+		expect(native.aborts).toEqual([]);
+		// Every client built was evicted, and none was destroyed.
+		expect(native.destroyed.size).toBe(0);
+		expect(native.evicted.size).toBe(native.created);
+	});
+
+	it("an eviction from a client already replaced (a stale one) is retried on the current client, which is not replaced again", async () => {
+		let release: () => void = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let first = true;
+		native.respond = async (id) => {
+			if (id !== 1) return [];
+			if (first) {
+				first = false;
+				await held; // the slow request, still in flight on client 1
+			} else {
+				native.evicted.add(1);
+			}
+			throw evictedError();
+		};
+		const slow = client.lookupBalances([1n]);
+		await tick();
+		// The fast request is evicted at once: client 1 is replaced by client 2.
+		await expect(client.lookupBalances([2n])).resolves.toBeDefined();
+		expect(native.created).toBe(2);
+		// Then the slow one fails evicted too, from the old client: no third client, and
+		// client 2 is not destroyed.
+		release();
+		await expect(slow).resolves.toBeDefined();
+		expect(native.created).toBe(2);
+		expect(native.destroyed.has(2)).toBe(false);
+		expect(native.aborts).toEqual([]);
+	});
+
+	it("an onAlert that calls destroy() again gets one alert, and returns", async () => {
+		const onAlert = vi.fn(() => alerting.destroy());
+		const alerting: TrustTBClient = new TrustTBClient({ addresses: ["3000"], onAlert });
+		evict(native.created);
+		await expect(alerting.lookupBalances([1n])).resolves.toBeDefined();
+		expect(() => alerting.destroy()).not.toThrow();
+		expect(onAlert).toHaveBeenCalledTimes(1);
+		expect(native.aborts).toEqual([]);
+	});
+
+	it("an evicted client is counted once, however many reconnect attempts fail after it, and destroy() alerts once", async () => {
+		vi.useFakeTimers();
+		const onAlert = vi.fn();
+		const alerting = new TrustTBClient({ addresses: ["3000"], onAlert });
+		evict(native.created);
+		native.failCreate = 5;
+		const failed = alerting.lookupBalances([1n]).catch((err: unknown) => err);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(await failed).toBeInstanceOf(Error);
+		alerting.destroy();
+		alerting.destroy();
+		// (The reconnect that failed raised its own alert; this counts destroy()'s.)
+		const evictionAlerts = onAlert.mock.calls.filter(([msg]) =>
+			String(msg).includes("could not be released"),
+		);
+		expect(evictionAlerts).toEqual([[expect.any(String), { droppedEvicted: 1 }]]);
+		expect(native.aborts).toEqual([]);
+	});
+
+	it("money: the request retried after an eviction is the same transfer, with its original id", async () => {
+		const ids: Array<[number, bigint]> = [];
+		native.respond = async (id, op, batch) => {
+			if (op === "createTransfers") ids.push([id, (batch[0] as { id: bigint }).id]);
+			if (id === 1 && !native.evicted.has(1)) {
+				native.evicted.add(1);
+				throw evictedError();
+			}
+			return [];
+		};
+		await client.postTransfer(42n, 100);
+		expect(ids.map(([id]) => id)).toEqual([1, 2]);
+		expect(ids[1]?.[1]).toBe(ids[0]?.[1]);
+		expect(native.aborts).toEqual([]);
+	});
+
 	it("control: a lost connection on a HEALTHY client still destroys it before building the next", async () => {
 		native.respond = async (id) => {
 			if (id === 1) throw new Error("connection refused");

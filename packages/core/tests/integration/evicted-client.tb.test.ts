@@ -135,16 +135,19 @@ describe.skipIf(!TB_ADDRESS)(
 			if (dir !== "") rmSync(dir, { recursive: true, force: true });
 		});
 
-		it("after the cluster evicts its session, the process survives and its next request is answered", async () => {
-			const run = await runFixture(address, "1", 150_000);
+		it("evicted twice (the second time on the fresh client its reconnect built): the process survives, and each next request is answered", async () => {
+			const run = await runFixture(address, "2", 240_000);
 			// The positive control: the cluster did evict the session.
-			expect(run.stderr).toContain("session evicted");
+			expect(run.stderr.match(/session evicted/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
 			expect(run.stderr).not.toContain("panic");
 			expect({ code: run.code, signal: run.signal }).toEqual({ code: 0, signal: null });
-			const cycle = run.lines.find((line) => line.step === "cycle");
-			expect(cycle).toMatchObject({ answered: true });
+			const cycles = run.lines.filter((line) => line.step === "cycle");
+			expect(cycles).toHaveLength(2);
 			// The request was answered THROUGH a reconnect: the eviction reached the client.
-			expect(Number(cycle?.reconnected)).toBeGreaterThanOrEqual(1);
+			for (const cycle of cycles) {
+				expect(cycle).toMatchObject({ answered: true });
+				expect(Number(cycle.reconnected)).toBeGreaterThanOrEqual(1);
+			}
 			// destroy() says what it could not release.
 			expect(run.stderr).toContain("could not be released");
 			// DECLARED (LIMITATIONS): the evicted native client is left open, since destroying it
@@ -152,7 +155,7 @@ describe.skipIf(!TB_ADDRESS)(
 			// unref'd timer still fires, where the control (the same stdio pipes) ends first.
 			// Once tigerbeetle-node can release an evicted client, this flips: drop the declaration.
 			expect(run.lines.at(-1)).toMatchObject({ step: "still-alive" });
-		}, 180_000);
+		}, 300_000);
 
 		it("control: a reconnect of a HEALTHY client (destroy(), then a new client) is unchanged", async () => {
 			const run = await runFixture(address, "control", 60_000);
