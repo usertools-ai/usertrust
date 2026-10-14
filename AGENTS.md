@@ -123,13 +123,15 @@ released; and it ends **lexically before** the provider call in step 6, so a pro
 throws a same-typed error is never audited as a governor decision. There are **seven append
 sites**: the mutex-section boundary in each of the three flows, a pre-mutex unknown-model
 site in `interceptCall` and in headless `authorize` (actions have no model to price, so
-`governActionImpl` has only the mutex one), the pre-mutex request-option refusal at the
-top of `interceptCall` (`movedRequestOptions`, before anything is held, scanned or sent), and
+`governActionImpl` has only the mutex one), the pre-mutex entry refusal at the top of
+`interceptCall` (`entryRefusal`: a request option off the governed list, `movedRequestOptions`,
+or a request that cannot be serialized, `unserializableRequestError`; before anything is held,
+scanned or sent), and
 `refuseUngovernedMethod`, which records a call default-deny refuses (an ungoverned SDK method,
 a call through the raw client, a Google automatic-function-calling refusal, or a
 `withOptions()` client whose transport changed) before any of it reaches a flow.
 Four of the seven are `catch (denialErr)` blocks. The exceptions are headless's pre-mutex
-unknown-model site, `interceptCall`'s request-option refusal and `refuseUngovernedMethod`,
+unknown-model site, `interceptCall`'s entry refusal and `refuseUngovernedMethod`,
 which append inline before an unconditional `throw`, because the throw is right there and
 needs no catch to intercept it. Grepping `catch (denialErr)` therefore finds four, not seven.
 Payloads and rationale live in `audit/denial-events.ts`.
@@ -655,8 +657,9 @@ no auditor can reproduce from the record.
 data for a `cache_control` with `ttl: "1h"`. `trust()` then reads that body everywhere (hold
 verdict, PII and injection scans, redaction) and forwards it, so a getter or `toJSON` that answers
 5-minute to a scan and 1-hour to the SDK has nothing left to flip: the SDK never sees the original.
-A request that cannot be serialized to a JSON object (a cycle, a BigInt, a throwing hook) holds
-dearest and is forwarded as given; the dearest hold covers whatever it then writes. Google is the
+A request that cannot be serialized to a JSON object (a cycle, a BigInt, a throwing hook) is
+REFUSED at entry (`unserializableRequestError`), before anything is held or sent: forwarding it
+as given let a hook that throws once and then answers send what no scan saw. Google is the
 named exception to forwarding the body: its SDK reads callable members off the request, so the
 original goes through; Google has no 1-hour tier and its extractor never reports a 1-hour share, so
 a flip cannot under-hold there. *Prevents:* the property-walk scan this replaced, which had to

@@ -2134,7 +2134,57 @@ describe("values inside a function response serialize as natively", () => {
 });
 
 describe("a large function response is snapshot in linear time", () => {
-	it("a 30,000-key response takes about 4 times a 7,500-key one, not 16 (the ratio, so the machine's speed cancels)", async () => {
+	// Timing was dropped: under coverage instrumentation a linear run measured a
+	// wall-clock ratio of 8.49 against a bound of 8, so the row failed on a correct
+	// snapshot. What the row guards is a quadratic MEMBERSHIP check: every test in
+	// the snapshot uses a Set or Map, and the realistic regression is one of them
+	// becoming an array search, O(n) per key. A count of calls cannot see that (the
+	// calls stay linear), so the row counts the WORK: the elements that
+	// includes/indexOf/lastIndexOf and the callback searches (find, findIndex,
+	// findLast, findLastIndex, some, every, filter) walk over arrays of 1,000 or
+	// more during the snapshot. Only the request's own key lists are that long. The
+	// count is deterministic: neither coverage nor load moves it. The correct code
+	// walks a fixed number of passes over each list (a few times n, through filter
+	// and the like), so the budget is linear in n; an array search per key walks
+	// about n^2 / 2 and fails it by orders of magnitude.
+	const BIG_ARRAY = 1_000;
+	const SEARCHES = [
+		"includes",
+		"indexOf",
+		"lastIndexOf",
+		"find",
+		"findIndex",
+		"findLast",
+		"findLastIndex",
+		"some",
+		"every",
+		"filter",
+	] as const;
+
+	/** Elements walked by the search methods over big arrays while `run` executes. */
+	async function searchedElements(run: () => Promise<void>): Promise<number> {
+		let searched = 0;
+		// biome-ignore lint/suspicious/noExplicitAny: the originals are stored and restored by name
+		const proto = Array.prototype as any;
+		// biome-ignore lint/suspicious/noExplicitAny: the originals are stored and restored by name
+		const originals: Record<string, any> = {};
+		for (const name of SEARCHES) originals[name] = proto[name];
+		try {
+			for (const name of SEARCHES) {
+				const original = originals[name];
+				proto[name] = function (this: unknown[], ...args: unknown[]) {
+					if (Array.isArray(this) && this.length >= BIG_ARRAY) searched += this.length;
+					return Reflect.apply(original, this, args);
+				};
+			}
+			await run();
+		} finally {
+			for (const name of SEARCHES) proto[name] = originals[name];
+		}
+		return searched;
+	}
+
+	it("a 30,000-key response does linear work: no array search per key over its keys; includes/indexOf and find/some/filter-style searches are counted, so coverage and load cannot move it", async () => {
 		const pipeline = await resolveGooglePipeline(sdkClient(false), false);
 		if (pipeline === undefined) throw new Error("the installed SDK's pipeline did not resolve");
 		const make = (n: number) => {
@@ -2146,21 +2196,21 @@ describe("a large function response is snapshot in linear time", () => {
 				{ role: "user", parts: [{ functionResponse: { name: "lookup", response } }] },
 			]);
 		};
-		const median = async (n: number) => {
-			const times: number[] = [];
-			for (let i = 0; i < 5; i++) {
-				const params = make(n);
-				const start = performance.now();
+		const count = (n: number) => {
+			const params = make(n);
+			return searchedElements(async () => {
 				expect((await snapshotGoogleRequest(pipeline, "generateContent", params)).kind).toBe("ok");
-				times.push(performance.now() - start);
-			}
-			return times.sort((x, y) => x - y)[2] as number;
+			});
 		};
-		await median(2_000); // warm-up
-		const small = await median(7_500);
-		const large = await median(30_000);
-		// linear: about 4 (measured 4.2 to 4.7); quadratic membership checks: about 13 to 16
-		expect(large / small).toBeLessThan(8);
+		const small = await count(7_500);
+		const large = await count(30_000);
+		console.log(`searched elements: n=7500 -> ${small}, n=30000 -> ${large}`);
+		// a linear budget: the correct code walks a fixed few passes over each list; a
+		// search per key walks about n^2 / 2
+		expect(small).toBeLessThanOrEqual(16 * 7_500);
+		expect(large).toBeLessThanOrEqual(16 * 30_000);
+		// and the total may not grow faster than linearly (guards a partial regression)
+		expect(large).toBeLessThanOrEqual(8 * small + 30_000);
 	});
 });
 
