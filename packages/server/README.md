@@ -187,8 +187,8 @@ have reached the client.
   7 to 8.5 s after the start for 400, about 18.5 to 19 s for 1000). That is an order of magnitude,
   not a promise. Measured there with the default 5 s deadline, the first 503 came about 5.2 s
   after the burst began. After a burst of 400 the fast-fail ended 1.7 to 3.3 s later, and after a
-  burst of 1000 about 13 s later. With a retry arriving every 25 ms, a retry sent during a
-  1000-request burst's fast-fail typically succeeded about 21 s later. Retries extend the window:
+  burst of 1000 about 13 s later. A client retrying every 25 ms after a 503 during a 1000-request
+  burst's fast-fail typically got its first success about 21 s later. Retries extend the window:
   one that is let in while the queue is still long waits behind it and can reach the deadline
   itself. So back off with jitter, waiting longer after each 503, rather than all retrying at
   `retryAfterMs`: retrying at one common moment re-creates the burst. In an outage nothing
