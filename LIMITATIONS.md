@@ -582,7 +582,8 @@ the gap, on OpenAI and Anthropic `create({ stream: true })`.
 A ledger-backed `usertrust-server` waits at most `ledgerTimeoutMs` (default 5 seconds) for
 its ledger on `POST /v1/authorize`, including the wait behind the tenant's earlier
 authorizes (the governor serves them one at a time), then answers `503 ledger_unavailable`:
-nothing was authorized, and the client retries after `retryAfterMs`. The TigerBeetle client has no
+nothing was authorized, and the client retries no sooner than `retryAfterMs`, which is a minimum
+wait, not a promise that the retry succeeds (the server README's *Retrying*). The TigerBeetle client has no
 timeout or cancel, so the refused request stays queued and executes when the ledger
 returns; the hold it then creates is voided at once, never registered as pending. While
 such a request is outstanding, every authorize on that tenant gets the same 503 at once. If
