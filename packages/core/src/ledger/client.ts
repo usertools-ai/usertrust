@@ -290,8 +290,10 @@ export class TrustTBClient {
 	private onAlert?: (message: string, meta: Record<string, unknown>) => void;
 	private healthCheckInterval: ReturnType<typeof setInterval> | null = null;
 	private reconnectPromise: Promise<void> | null = null;
-	// The health check's ping (and the reconnect a failed one starts) is still outstanding.
+	// The health check's ping is still outstanding.
 	private healthCheckInFlight = false;
+	// The health check has said it is failing, and no check has answered since (noteHealth).
+	private healthAlerted = false;
 	// Set first by destroy(); from then on this client never reconnects (#249). The native
 	// client cannot say so itself: its ERR_CLIENT_CLOSED does not tell a destroy() from our
 	// own reconnect, which closes the old client too, and an operation in flight on THAT one
@@ -333,25 +335,21 @@ export class TrustTBClient {
 			// tigerbeetle-node has no request timeout, and a request the cluster never answers stays
 			// queued in the native client, so during an outage each tick would otherwise add one more
 			// request (and its callback) for as long as the outage lasts.
-			if (this.healthCheckInFlight) return;
+			// A check still unanswered a whole interval later is itself the ledger not answering.
+			if (this.healthCheckInFlight) {
+				this.noteHealth(false, "the previous check has not been answered for 30 s");
+				return;
+			}
 			this.healthCheckInFlight = true;
+			// ping() answers false rather than rejecting, and its lookup already reconnects on a lost
+			// connection or an eviction (withReconnect): the tick reads the answer and reconnects nothing.
 			this.ping()
-				.catch(() =>
-					this.reconnect().catch((err) => {
-						console.error("[TB] Health check reconnection failed:", err);
-						if (this.healthCheckInterval) {
-							clearInterval(this.healthCheckInterval);
-							this.healthCheckInterval = null;
-						}
-						const msg = "TigerBeetle health check failed — interval stopped";
-						const meta = { error: err instanceof Error ? err.message : String(err) };
-						if (this.onAlert) {
-							this.onAlert(msg, meta);
-						} else {
-							console.warn(`[usertrust] ${msg}`, meta);
-						}
-					}),
+				.then((healthy) =>
+					this.noteHealth(healthy, "the treasury lookup failed or found no account"),
 				)
+				// ping() answers false rather than rejecting today. Should that ever change, a rejection
+				// here would have no consumer, and an unhandled rejection ends the process.
+				.catch(() => this.noteHealth(false, "the health check itself failed"))
 				.finally(() => {
 					this.healthCheckInFlight = false;
 				});
@@ -361,6 +359,29 @@ export class TrustTBClient {
 		// beforeExit cleanup net (which only fires on an otherwise-empty loop) never
 		// runs. The timer still fires while the loop is busy.
 		this.healthCheckInterval.unref?.();
+	}
+
+	/**
+	 * What the health check concluded, said once per outage: one alert when a check first fails,
+	 * none while it keeps failing, and one when a check answers again. Only a client with a
+	 * treasury is checked (without one, ping() answers its start-up grace, not the ledger), and
+	 * nothing is said once destroy() has run. The alert never throws out of here: an onAlert that
+	 * throws would otherwise reject the tick's promise, with nothing to catch it.
+	 */
+	private noteHealth(healthy: boolean, why: string): void {
+		if (this.closed || !this.initialized || !this.treasuryId) return;
+		if (healthy !== this.healthAlerted) return;
+		this.healthAlerted = !healthy;
+		const msg = healthy
+			? "TigerBeetle health check recovered: the ledger answers again"
+			: `TigerBeetle health check failed: ${why}`;
+		const meta = healthy ? {} : { reason: why };
+		try {
+			if (this.onAlert) this.onAlert(msg, meta);
+			else console.warn(`[usertrust] ${msg}`, meta);
+		} catch {
+			/* an alert sink that throws must not break the health check */
+		}
 	}
 
 	private isConnectionError(err: unknown): boolean {

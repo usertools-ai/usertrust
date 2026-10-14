@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The ledger client's 30 s health check no longer piles up requests while the ledger is unreachable.** Each tick looked up the treasury whether or not the previous lookup had been answered. tigerbeetle-node has no request timeout, and a request the cluster never answers stays queued in the native client, so an outage added one queued request (and its callback) every 30 s for as long as it lasted. A tick now submits nothing while the previous check, and any reconnect it started, is still outstanding. `ping()` itself is unchanged.
+- **The ledger client's 30 s health check no longer piles up requests while the ledger is unreachable.** Each tick looked up the treasury whether or not the previous lookup had been answered. tigerbeetle-node has no request timeout, and a request the cluster never answers stays queued in the native client, so an outage added one queued request (and its callback) every 30 s for as long as it lasted. A tick now submits nothing while the previous check is still outstanding. `ping()` itself is unchanged.
+
+- **A failing ledger health check now says so, once per outage.** The check's alert (and the reconnect before it) ran only if `ping()` rejected, and `ping()` answers `false` instead, so a failing check raised nothing. The tick now reads the answer: a check that answers `false`, or that is still unanswered at the next tick (a ledger that does not answer at all), raises one alert through `onAlert` (or a `console.warn`), and a check that answers again raises one more, saying so. Nothing is said while it keeps failing, for a client with no treasury (which is not checked), or after `destroy()`. The tick no longer reconnects or stops itself: a failed lookup already reconnects on its own, and the check keeps running so a recovery is seen. `ping()` is unchanged.
 
 ### Changed
 
