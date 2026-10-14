@@ -31,6 +31,12 @@ const abortSignalAborted = Object.getOwnPropertyDescriptor(
  *
  * The one predicate for "the transport's signal": the governor's serialization check and PII
  * redaction both use it, so the two cannot disagree about which value is the signal.
+ *
+ * CONTRACT, fixed: `instanceof AbortSignal` without running any trap, plus the native brand
+ * getter. A further look-alike (a real signal's symbols copied onto some object that derives from
+ * the prototype) is declared, not answered by another check here. It fails safe: the Google SDK
+ * never serializes `config.abortSignal`, so such an object is never sent, and the transport's
+ * rejection voids the hold.
  */
 export function isRealAbortSignal(value: unknown): boolean {
 	if (abortSignalAborted === undefined || value === null || typeof value !== "object") return false;
