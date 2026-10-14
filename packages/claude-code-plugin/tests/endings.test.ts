@@ -90,6 +90,8 @@ let fixed = new Map<string, Reply>();
 let aimed: { path: string; nth: number; ending: Ending } | null = null;
 /** The request after whose answer the server stops listening: the next one is refused. */
 let closeAfter: { path: string; nth: number } | null = null;
+/** Extra milliseconds the fake server holds the reply to `<path>#<nth>` before sending it. */
+let slowBy = new Map<string, number>();
 
 /** How the fake server answers what nothing else decides: as a healthy usertrust server. */
 function usual(path: string): Reply {
@@ -148,8 +150,9 @@ function startServer(): Promise<string> {
 					});
 					res.end(JSON.stringify(reply.json ?? {}));
 				};
-				if (reply.delayMs === undefined) send();
-				else setTimeout(send, reply.delayMs);
+				const holdMs = (reply.delayMs ?? 0) + (slowBy.get(`${path}#${nth}`) ?? 0);
+				if (holdMs === 0) send();
+				else setTimeout(send, holdMs);
 			});
 		});
 		servers.push(server);
@@ -179,6 +182,7 @@ beforeEach(async () => {
 	fixed = new Map();
 	aimed = null;
 	closeAfter = null;
+	slowBy = new Map();
 	url = await startServer();
 });
 
@@ -1580,7 +1584,9 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			"the group loop: out of time",
 			{
 				lines: TWO,
-				fault: "__main.json|3|sleep 900",
+				budgetMs: 6_000,
+				// The sleep outlasts the whole budget, so the time runs out whatever the first group took.
+				fault: "__main.json|3|sleep 6500",
 				selected: 2,
 				posted: 1,
 				deferred: ["B"],
@@ -1615,6 +1621,7 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			"an error after a group settled (its cursor save fails)",
 			{
 				lines: TWO,
+				budgetMs: 6_000,
 				fault: "__main.json|3|throw",
 				selected: 2,
 				posted: 1,
@@ -1624,7 +1631,14 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 		],
 		[
 			"an error after every group posted (the last cursor save fails)",
-			{ lines: TWO, fault: "__main.json|5|throw", selected: 2, posted: 2, deferred: [] },
+			{
+				lines: TWO,
+				budgetMs: 6_000,
+				fault: "__main.json|5|throw",
+				selected: 2,
+				posted: 2,
+				deferred: [],
+			},
 		],
 		[
 			"the agent's lock is busy",
@@ -1779,6 +1793,87 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			const sum = remainder.reduce((n, r) => n + Number(r.messages ?? 0), 0);
 			expect(sum).toBe(2);
 			expect(remainder.map((r) => String(r.started)).sort()).toEqual([T.A, T.B].sort());
+		},
+		LONG,
+	);
+
+	it(
+		"a reply slower than the call's time limit, with the last cursor save failing too: the group is released with its gap, the next deferred, and each message accounted for exactly once",
+		async () => {
+			await backdate();
+			await mkdir(join(stateDir, "jobs"), { recursive: true });
+			await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), JOB_LOG);
+			await writeLines(main(), TWO());
+			// The authorize reply comes after the hook's whole budget, so no host stall lets the client see it.
+			slowBy.set("/v1/authorize#1", 2_000);
+			await runHook(
+				join(HOOKS, "session-end.mjs"),
+				seInput(),
+				envFor({ ...seBudget(1_200), UT_CC_FAULT: "__main.json|5|throw" }),
+				["--import", FAULT_AT],
+			);
+			expect(seen.map((request) => request.path)).toEqual(["/v1/health", "/v1/authorize"]);
+			expect(requests("/v1/settle")).toEqual([]);
+			const remainder = await phased("remainder");
+			const released = remainder.filter((r) => r.outcome === "released");
+			const deferred = remainder.filter((r) => r.outcome === "deferred");
+			expect(released).toHaveLength(1);
+			expect(released[0]).toMatchObject({ kind: "gap", started: T.A, messages: 1 });
+			expect(deferred).toHaveLength(1);
+			expect(deferred[0]).toMatchObject({ agent: "main", started: T.B, messages: 1 });
+			expect(await records()).toEqual(remainder);
+			const sum = remainder.reduce((n, r) => n + Number(r.messages ?? 0), 0);
+			expect(sum).toBe(2);
+			expect(remainder.map((r) => String(r.started)).sort()).toEqual([T.A, T.B].sort());
+		},
+		LONG,
+	);
+
+	it(
+		"a settle reply slower than the call's time limit, with the last cursor save failing too: the settled group is written down as a gap, the next posts, and each message accounted for exactly once",
+		async () => {
+			await backdate();
+			await mkdir(join(stateDir, "jobs"), { recursive: true });
+			await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), JOB_LOG);
+			await writeLines(main(), TWO());
+			// At a 6 s budget each call gets at most 1.8 s (about 1.4 s for a settle here): the first
+			// settle's reply, held 3 s, is aborted by the client although the server did settle it. The client cannot know that, so it gives
+			// the call back and writes the group down; the second group is not slowed.
+			slowBy.set("/v1/settle#1", 3_000);
+			await runHook(
+				join(HOOKS, "session-end.mjs"),
+				seInput(),
+				envFor({ ...seBudget(6_000), UT_CC_FAULT: "__main.json|5|throw" }),
+				["--import", FAULT_AT],
+			);
+			expect(seen.map((request) => request.path)).toEqual([
+				"/v1/health",
+				"/v1/authorize",
+				"/v1/settle",
+				"/v1/abort",
+				"/v1/authorize",
+				"/v1/settle",
+			]);
+			// The server settled the first group and the client never heard it: it gives the call back
+			// (the server has no such hold) and writes the group down. The second group posts.
+			expect(requests("/v1/abort").map((r) => r.body.transferId)).toEqual(["tx_s1"]);
+			const remainder = await phased("remainder");
+			expect(remainder).toHaveLength(1);
+			expect(remainder[0]).toMatchObject({
+				kind: "gap",
+				outcome: "claimed",
+				transferId: "tx_s1",
+				started: T.A,
+				messages: 1,
+			});
+			expect(String(remainder[0]?.reason)).toContain("settle unreachable");
+			expect(await records()).toEqual(remainder);
+			const second = requests("/v1/settle")[1];
+			expect(second && answered(second, 200)).toBe(true);
+			expect(second?.body.transferId).toBe("tx_s2");
+			// One message posted and one written down: each accounted for exactly once.
+			const sum = remainder.reduce((n, r) => n + Number(r.messages ?? 0), 0);
+			expect(carried((r) => r === requests("/v1/authorize")[1]) + sum).toBe(2);
 		},
 		LONG,
 	);
