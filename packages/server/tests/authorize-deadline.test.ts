@@ -169,7 +169,7 @@ describe("authorize against a ledger that does not answer: the deadline", () => 
 		expect(res.status).toBe(503);
 		expect(res.json).toEqual({
 			error: "ledger_unavailable",
-			reason: "the ledger did not answer within the deadline; nothing was authorized; retry later",
+			reason: `no answer came within ${DEADLINE_MS} ms, either from the ledger or from this tenant's earlier authorizes queued ahead of this one; nothing was authorized; retry later`,
 			retryAfterMs: DEADLINE_MS,
 		});
 		expect(res.ms).toBeGreaterThanOrEqual(DEADLINE_MS - 20);
@@ -432,6 +432,32 @@ describe("the late give-back's outcome, by the exhaustive table, on /v1/budget",
 		await server?.sweepExpired(Date.now() + 300_000 + 30_000 + 1_000);
 		expect((await budget(s.base)).voidsOwed).toBe(0);
 		expect(written.some((line) => line.includes("has expired"))).toBe(true);
+	});
+
+	it("after an outage longer than the hold's life, a refused void's obligation is counted from the late reply, not from the request's arrival", async () => {
+		const s = await start({}, { holdTimeoutMs: 1_000 });
+		let released = 0;
+		s.fake.governor.release = async () => {
+			released += 1;
+			return { released: true, voidError: "exceeds_credits" };
+		};
+		const g = gate();
+		s.next.gate = g;
+		const arrival = Date.now();
+		expect((await post(s.base, "/v1/authorize", AUTHORIZE)).status).toBe(503);
+		// The ledger answers 1.5 s after the request arrived: longer than the hold's 1 s life.
+		await sleep(1_500 - (Date.now() - arrival));
+		g.open();
+		await until(() => released === 1);
+		await sleep(20);
+		const reply = Date.now();
+		expect((await budget(s.base)).voidsOwed).toBe(1);
+		// The hold was reserved no earlier than the reply, so it can be reserved until the reply plus
+		// its life: still counted just before that (plus one sweep interval), dropped just after.
+		await server?.sweepExpired(reply + 1_000 + 30_000 - 400);
+		expect((await budget(s.base)).voidsOwed).toBe(1);
+		await server?.sweepExpired(reply + 1_000 + 30_000 + 400);
+		expect((await budget(s.base)).voidsOwed).toBe(0);
 	});
 
 	it("a release that rejects is refused under the error's class name, and counted", async () => {

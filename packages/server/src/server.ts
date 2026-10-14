@@ -195,12 +195,18 @@ type AuthorizeState = "waiting" | "delivered" | "answered" | "refused" | "abando
 /**
  * A late hold the server is giving back: its authorize was refused or abandoned, then the ledger
  * answered it. `voiding` until `release()` settles; `refused` when the ledger refused the void with a
- * code that does not mean "done", kept (and counted) until the hold's own life has run out.
+ * code that does not mean "done", kept (and counted) until the hold's own life, counted from the late
+ * reply, has run out.
  */
 interface OwedEntry {
 	tenantId: string;
 	transferId: string;
-	/** When the authorize request arrived, in epoch ms (an explicit `sweepExpired(now)` reads it). */
+	/**
+	 * When the ledger's late reply reached the server, in epoch ms (an explicit `sweepExpired(now)`
+	 * reads it). The hold's pending timeout starts when its reserve reaches the cluster, which after an
+	 * outage is at recovery, not at the request's arrival; the reserve committed no later than its
+	 * reply, so the hold's life counted from here is a safe upper bound.
+	 */
 	createdAt: number;
 	/** The same moment on the monotonic clock (the server's own sweep reads it). */
 	startedMono: number;
@@ -349,10 +355,13 @@ export function createUsertrustServer(opts: {
 		return token;
 	}
 
-	/** The 503 an authorize gets when the ledger did not answer in time: nothing was authorized. */
+	/**
+	 * The 503 an authorize gets when no answer came in time: from the ledger, or from this tenant's
+	 * earlier authorizes queued ahead of it (the governor serves a tenant's authorizes one at a time).
+	 * Nothing was authorized.
+	 */
 	function refuseUnavailable(tenant: TenantConfig, res: ServerResponse): void {
-		const reason =
-			"the ledger did not answer within the deadline; nothing was authorized; retry later";
+		const reason = `no answer came within ${ledgerTimeoutMs} ms, either from the ledger or from this tenant's earlier authorizes queued ahead of this one; nothing was authorized; retry later`;
 		bus.publish(tenant.id, {
 			type: "denied",
 			error: "ledger_unavailable",
@@ -396,20 +405,15 @@ export function createUsertrustServer(opts: {
 	 * cannot meet `pending_transfer_not_found`. The hold never enters `pending`. If the ledger is down
 	 * again, the release waits for it (the client never times out) and stays visible as `voiding`.
 	 */
-	function releaseLate(
-		tenantId: string,
-		governor: Governor,
-		auth: Authorization,
-		createdAt: number,
-		startedMono: number,
-	): void {
+	function releaseLate(tenantId: string, governor: Governor, auth: Authorization): void {
 		const transferId = auth.transferId;
 		const key = `${tenantId}\0${transferId}`;
 		const entry: OwedEntry = {
 			tenantId,
 			transferId,
-			createdAt,
-			startedMono,
+			// The obligation's clock starts at the late reply, never at the request's arrival (OwedEntry).
+			createdAt: Date.now(),
+			startedMono: performance.now(),
 			state: "voiding",
 			...(auth.holdTimeoutMs === undefined ? {} : { holdTimeoutMs: auth.holdTimeoutMs }),
 		};
@@ -558,13 +562,13 @@ export function createUsertrustServer(opts: {
 		}
 		settle();
 		if (state !== "waiting") {
-			releaseLate(tenant.id, governor, auth, createdAt, startedMono);
+			releaseLate(tenant.id, governor, auth);
 			return;
 		}
 		// The client may be gone without its close event having run yet: then nothing is delivered.
 		if (gone()) {
 			leave("abandoned");
-			releaseLate(tenant.id, governor, auth, createdAt, startedMono);
+			releaseLate(tenant.id, governor, auth);
 			return;
 		}
 		leave("delivered");
@@ -591,7 +595,7 @@ export function createUsertrustServer(opts: {
 			});
 		} catch {
 			state = "abandoned";
-			releaseLate(tenant.id, governor, auth, createdAt, startedMono);
+			releaseLate(tenant.id, governor, auth);
 			return;
 		}
 		pending.set(auth.transferId, entry);
@@ -1102,8 +1106,9 @@ export function createUsertrustServer(opts: {
 			const left = remainingLifeMs(entry.auth, config, age);
 			return left === null ? age >= config.pendingTtlMs : left === 0;
 		};
-		// A late hold whose void the ledger refused stays counted until the hold's own life has run out
-		// (the ledger's pending timeout has ended it by then), plus one sweep interval.
+		// A late hold whose void the ledger refused stays counted until the hold's own life, counted from
+		// the late reply (OwedEntry), has run out (the ledger's pending timeout has ended it by then), plus
+		// one sweep interval.
 		for (const [key, entry] of owed) {
 			if (entry.state !== "refused") continue;
 			const age = now === undefined ? performance.now() - entry.startedMono : now - entry.createdAt;

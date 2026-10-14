@@ -147,10 +147,11 @@ A TigerBeetle-state probe for this case is a follow-up (#241).
 
 A ledger-backed server waits at most `ledgerTimeoutMs` (config, an integer of at least 100,
 default 5000; not read in dryRun) for the tenant's governor and the ledger on
-`POST /v1/authorize`. Past that it answers:
+`POST /v1/authorize`. That wait includes this tenant's earlier authorizes queued ahead of the
+request: the governor serves a tenant's authorizes one at a time. Past it the server answers:
 
 ```json
-{ "error": "ledger_unavailable", "reason": "the ledger did not answer within the deadline; nothing was authorized; retry later", "retryAfterMs": 5000 }
+{ "error": "ledger_unavailable", "reason": "no answer came within 5000 ms, either from the ledger or from this tenant's earlier authorizes queued ahead of this one; nothing was authorized; retry later", "retryAfterMs": 5000 }
 ```
 
 **Nothing was authorized.** Retry after `retryAfterMs`. The TigerBeetle client has no timeout or
