@@ -1265,9 +1265,13 @@ export class TrustTBClient {
 	 * What is left: an eviction the native client learns of between the probe's answer and its
 	 * destroy, which follows with no await between them.
 	 * A client already closed, or already known to be evicted, is not asked.
+	 *
+	 * Resolves `true` when an evicted native client was left open, now or earlier (a reconnect
+	 * dropped one): it cannot be released, and keeps the process from exiting on its own, so a
+	 * caller that ends when its work is done must end the process itself.
 	 */
-	async close(timeoutMs = CLOSE_PROBE_TIMEOUT_MS): Promise<void> {
-		if (this.closed) return;
+	async close(timeoutMs = CLOSE_PROBE_TIMEOUT_MS): Promise<boolean> {
+		if (this.closed) return this.droppedEvicted > 0;
 		const current = this.native();
 		if (!this.evicted.has(current)) {
 			let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1282,6 +1286,7 @@ export class TrustTBClient {
 			clearTimeout(timer);
 		}
 		this.destroy();
+		return this.droppedEvicted > 0;
 	}
 
 	destroy(): void {

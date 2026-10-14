@@ -1167,7 +1167,8 @@ describe("close(): destroy(), after asking the native client whether it was evic
 		const c = new TrustTBClient({ addresses: ["3000"], onAlert });
 		const first = native.created;
 		native.evicted.add(first);
-		await c.close();
+		// It reports the client it left open: the caller must end the process itself.
+		await expect(c.close()).resolves.toBe(true);
 		expect(native.attempts).toEqual([`client${first}:lookupAccounts`]);
 		expect(native.aborts).toEqual([]);
 		expect(native.created).toBe(first);
@@ -1197,7 +1198,7 @@ describe("close(): destroy(), after asking the native client whether it was evic
 			batches.push(batch);
 			return [];
 		};
-		await c.close();
+		await expect(c.close()).resolves.toBe(false);
 		expect(native.calls).toEqual([`client${first}:lookupAccounts`]);
 		expect(batches).toEqual([[]]);
 		expect(native.destroyed.has(first)).toBe(true);

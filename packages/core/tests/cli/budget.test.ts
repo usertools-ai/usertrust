@@ -252,15 +252,37 @@ describe("usertrust budget — ledger client teardown", () => {
 		ledger.evictAfterRead = true;
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-		await run(tempDir, { json: true }, ["--cost-center", "research", "--allocated", "1000"]);
+		const leftOpen = await run(tempDir, { json: true }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+		]);
 
 		expect(jsonOut().success).toBe(true);
 		expect(ledger.aborts).toBe(0);
+		// Left open, and the command says so: main.ts then ends the process itself.
+		expect(leftOpen).toBe(true);
 		// The control: the client was evicted, and left open (which the client says).
 		expect(warn).toHaveBeenCalledWith(
 			expect.stringContaining("could not be released"),
 			expect.anything(),
 		);
+	});
+});
+
+describe("usertrust budget — ledger client teardown, control", () => {
+	it("a healthy client is closed, and the command reports none left open", async () => {
+		makeVault();
+		setBalance(750);
+		const leftOpen = await run(tempDir, { json: true }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+		]);
+		expect(jsonOut().success).toBe(true);
+		expect(leftOpen).toBe(false);
 	});
 });
 

@@ -648,8 +648,9 @@ its own: after `destroy()` the event loop stays alive, with nothing in JavaScrip
 holding it. `destroy()` says so (through `onAlert`, or a `console.warn`) whenever an evicted
 client was dropped. A process that relies on exiting when its work is done, such as a script,
 should end with `process.exit()` after `destroy()`. `usertrust-server` already ends with
-`process.exit()` when it is stopped (SIGINT or SIGTERM). This lasts until a tigerbeetle-node
-release can release an evicted client.
+`process.exit()` when it is stopped (SIGINT or SIGTERM), and `usertrust budget` ends the process
+itself, once its output has drained and with its own exit code, when it left an evicted client
+open. This lasts until a tigerbeetle-node release can release an evicted client.
 
 What is still open:
 
