@@ -55,7 +55,9 @@ export const HOST_SESSION_END_DEFAULT_MS = 1_500;
  * the value of `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` when it reads as one (digits only, the
  * same reading as the hook's, lib.mjs `sessionEndBudgetMs`), else the host's default
  * (`HOST_SESSION_END_DEFAULT_MS`) for a variable that is absent, empty or unreadable. Any other
- * hook has no deadline here.
+ * hook has no deadline here. The documentation gives the default only for a variable that is not
+ * set; it says nothing of an empty or unreadable value, and the harness assumes the host falls
+ * back to its default there too, as the hook itself does.
  */
 function hostDeadlineFor(script: string[], env: Record<string, string | undefined>) {
 	const isSessionEnd =
