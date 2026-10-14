@@ -483,20 +483,28 @@ export function createUsertrustServer(opts: {
 		const onClose = (): void => {
 			if (!res.writableEnded) leave("abandoned");
 		};
+		/**
+		 * This request's authorize joins the governor's `unsettled` set: it is past the deadline and the
+		 * ledger has not answered it. Only then: a client hanging up early is no evidence of an outage.
+		 */
+		const joinUnsettled = (): void => {
+			if (running === undefined) return;
+			let set = unsettled.get(tenant.id);
+			if (set === undefined) {
+				set = new Set();
+				unsettled.set(tenant.id, set);
+			}
+			set.add(running);
+		};
 		/** The one way out of WAITING: synchronous, first caller wins, before any write. */
 		const leave = (to: Exclude<AuthorizeState, "waiting">): boolean => {
 			if (state !== "waiting") return false;
 			state = to;
-			if (timer !== undefined) clearTimeout(timer);
+			// An abandoned request keeps its deadline: if its authorize is still running when the deadline
+			// passes, it joins `unsettled` then (with no write: the client is gone).
+			if (timer !== undefined && to !== "abandoned") clearTimeout(timer);
 			res.off("close", onClose);
-			if ((to === "refused" || to === "abandoned") && running !== undefined) {
-				let set = unsettled.get(tenant.id);
-				if (set === undefined) {
-					set = new Set();
-					unsettled.set(tenant.id, set);
-				}
-				set.add(running);
-			}
+			if (to === "refused") joinUnsettled();
 			return true;
 		};
 		/** Is the client already gone: its socket destroyed, or the answer already ended? Read fresh each time. */
@@ -515,6 +523,7 @@ export function createUsertrustServer(opts: {
 			// timeout stays the backstop.
 			timer = setTimeout(() => {
 				if (leave("refused")) refuseUnavailable(tenant, res);
+				else if (state === "abandoned") joinUnsettled();
 			}, ledgerTimeoutMs);
 			timer.unref();
 		}
@@ -534,6 +543,7 @@ export function createUsertrustServer(opts: {
 		running = token;
 		const settle = (): void => {
 			running = undefined;
+			if (timer !== undefined) clearTimeout(timer);
 			const set = unsettled.get(tenant.id);
 			if (set?.delete(token) === true && set.size === 0) unsettled.delete(tenant.id);
 		};

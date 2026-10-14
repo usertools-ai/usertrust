@@ -246,19 +246,21 @@ describe("a late reply is given back, never delivered", () => {
 		expect((await budget(s.base)).voidsOwed).toBe(0);
 	});
 
-	it("a client that hangs up before the answer: the later success is released, not put in pending", async () => {
-		const s = await start({ ledgerTimeoutMs: 60_000 });
+	it("a client that hangs up while the ledger is down: no answer is written, and once its authorize is past the deadline, the next authorize fails fast", async () => {
+		const s = await start();
 		const g = gate();
 		s.next.gate = g;
 		const raw = rawAuthorize(s.port);
 		await until(() => s.authorizes() === 1);
 		raw.destroy();
 		expect(await raw.answered).toBeUndefined();
-		await sleep(50);
-		// Abandoned while its authorize is outstanding: the ledger has not answered it, so the next
-		// authorize fails fast without calling the governor.
+		// Past the deadline with its authorize still unanswered: abandoned, so the deadline wrote and
+		// published nothing for it, and the ledger is now known not to have answered.
+		await sleep(DEADLINE_MS + 50);
+		expect(s.events.some((e) => e.type === "denied")).toBe(false);
 		const next = await post(s.base, "/v1/authorize", AUTHORIZE);
 		expect(next.status).toBe(503);
+		expect(next.ms).toBeLessThan(DEADLINE_MS / 2);
 		expect(s.authorizes()).toBe(1);
 		g.open();
 		await until(() => s.fake.calls.released.length === 1);
@@ -267,6 +269,27 @@ describe("a late reply is given back, never delivered", () => {
 		expect(s.events.some((e) => e.type === "authorized")).toBe(false);
 		// Settled: authorize works again.
 		expect((await post(s.base, "/v1/authorize", AUTHORIZE)).status).toBe(200);
+	});
+
+	it("a client that hangs up on a healthy ledger engages no fast-fail: a concurrent authorize gets its 200, and the abandoned hold is still given back", async () => {
+		const s = await start();
+		const g = gate();
+		s.next.gate = g;
+		// The abandoned authorize answers at half the deadline: slow, not down.
+		setTimeout(() => g.open(), DEADLINE_MS * 0.5);
+		const raw = rawAuthorize(s.port);
+		await until(() => s.authorizes() === 1);
+		setTimeout(() => raw.destroy(), DEADLINE_MS * 0.2);
+		await sleep(DEADLINE_MS * 0.3);
+		const concurrent = await post(s.base, "/v1/authorize", AUTHORIZE);
+		expect(concurrent.status).toBe(200);
+		expect(s.authorizes()).toBe(2);
+		expect(await raw.answered).toBeUndefined();
+		await until(() => s.fake.calls.released.length === 1);
+		expect(s.fake.calls.releaseReasons).toEqual([LATE_REASON]);
+		// Only the concurrent hold is pending; nothing was refused.
+		expect(server?.pendingCount()).toBe(1);
+		expect(s.events.some((e) => e.type === "denied")).toBe(false);
 	});
 
 	it("a normal POST that completes is not a hang-up: 200, and the hold is in pending", async () => {

@@ -575,6 +575,10 @@ returns; the hold it then creates is voided at once, never registered as pending
 such a request is outstanding, every authorize on that tenant gets the same 503 at once. If
 it never completes, they keep failing fast until it does: the fail-closed direction.
 
+- A tenant's governor is created on its first authorize, inside the deadline, so the first
+  authorize after boot on a slow ledger can get the 503, which is retryable.
+- While that creation itself hangs, fast-fail does not engage: each authorize waits one
+  deadline before its 503.
 - `GET /v1/health` still reports `ok` while the ledger is down. Reachability on health is
   a later change; a monitor cannot read an outage from health in this release.
 - `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound,

@@ -159,11 +159,16 @@ creates is given back at once by an explicit void (a `hold_released` record), ne
 pending; the ledger's pending timeout stays the backstop, and a hold it ends expires there. A
 request whose client hangs up before its answer is treated the same way.
 
-- **Fast-fail.** While an authorize the ledger has not answered is still outstanding on a tenant,
-  every new authorize on that tenant gets the same 503 at once, without queueing another ledger
-  request. If that request never completes, they keep failing fast until it does: the fail-closed
+- **Fast-fail.** While an authorize the ledger has not answered within the deadline is still
+  outstanding on a tenant (refused, or abandoned by its client and now past the deadline), every
+  new authorize on that tenant gets the same 503 at once, without queueing another ledger
+  request. A client hanging up earlier engages nothing. If that request never completes, they keep failing fast until it does: the fail-closed
   direction. If it ends with a local error while the ledger is still down, the next authorize
-  waits one deadline and is refused again.
+  waits one deadline and is refused again. While the tenant's governor is still being created
+  (its acquisition hangs), fast-fail does not engage: each authorize waits one deadline before
+  its 503.
+- **Cold start.** A tenant's governor is created on its first authorize, inside the deadline, so
+  the first authorize after boot on a slow ledger can get the 503. It is retryable.
 - **`voidsOwed`** on the authenticated `GET /v1/budget` counts the tenant's late holds whose
   give-back has not landed: those still waiting on the ledger (a second outage), and those whose
   void the ledger refused, until the hold's own life has run out. The server also logs each of
