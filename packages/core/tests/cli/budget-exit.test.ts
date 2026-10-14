@@ -68,6 +68,47 @@ async function runChild(args: string[], cwd: string, env: NodeJS.ProcessEnv): Pr
 	});
 }
 
+/**
+ * The drain child, with its stdout pipe held FULL while it ends: the parent reads nothing until the
+ * child says its writes are queued, then 300 ms more, or until the child exits. Without the drain,
+ * the child exits with most of its output still queued, and that output is lost every time.
+ * `resumedBy`: what let the parent read, the child's own word ("queued") or its exit.
+ */
+async function runHeldDrainChild(bytes: number): Promise<Run & { resumedBy: string }> {
+	return await new Promise((done) => {
+		const child = spawn(process.execPath, ["--import", TSX, DRAIN_CHILD, String(bytes)], {
+			cwd: ROOT,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let stdout = "";
+		let stderr = "";
+		let killed = false;
+		let resumedBy = "";
+		const resume = (by: string): void => {
+			if (resumedBy !== "") return;
+			resumedBy = by;
+			child.stdout.resume();
+		};
+		child.stdout.on("data", (chunk: Buffer) => {
+			stdout += chunk.toString();
+		});
+		child.stdout.pause();
+		child.stderr.on("data", (chunk: Buffer) => {
+			stderr += chunk.toString();
+			if (stderr.includes("queued")) setTimeout(() => resume("queued"), 300);
+		});
+		child.on("exit", () => resume("exit"));
+		const timer = setTimeout(() => {
+			killed = true;
+			child.kill("SIGKILL");
+		}, BOUND_MS);
+		child.on("close", (code, signal) => {
+			clearTimeout(timer);
+			done({ code, signal, stdout, stderr, killed, resumedBy });
+		});
+	});
+}
+
 const dirs: string[] = [];
 afterEach(() => {
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -152,14 +193,18 @@ describe("usertrust budget ends the process when its ledger client was left open
 	}, 30_000);
 });
 
-// Where a pipe is written asynchronously (macOS), process.exit() without the drain cuts this output
-// short. On Linux a pipe is written synchronously, so there this row cannot tell the two apart.
+// Where a pipe is written asynchronously (macOS), process.exit() without the drain drops what is
+// still queued, and with the reader held off most of 1 MiB is: that is lost on every run. On Linux
+// a pipe is written synchronously (a full pipe blocks the writer), so there this row cannot tell the
+// two apart.
 describe("exitWhenDrained(): the exit path loses no output", () => {
-	it("1 MiB written to a pipe, then the exit path: every byte arrives, with the exit code the command set", async () => {
+	it("1 MiB written to a pipe its reader holds full, then the exit path: every byte arrives, with the exit code the command set", async () => {
 		const bytes = 1024 * 1024;
-		const run = await runChild(["--import", TSX, DRAIN_CHILD, String(bytes)], ROOT, {});
+		const run = await runHeldDrainChild(bytes);
 		expect(run.killed).toBe(false);
-		expect({ code: run.code, signal: run.signal }).toEqual({ code: 3, signal: null });
 		expect(run.stdout.length).toBe(bytes);
+		expect({ code: run.code, signal: run.signal }).toEqual({ code: 3, signal: null });
+		// The control: the child waited on the full pipe, and it was the reader that let it go.
+		expect(run.resumedBy).toBe("queued");
 	}, 30_000);
 });
