@@ -37,6 +37,7 @@ import {
 	type DeletionCause,
 	type LedgerState,
 	type LogHead,
+	lastLineOfAppend,
 	loadState,
 	ROW_CAP,
 	readAppended,
@@ -171,9 +172,12 @@ export async function createUiServer(
 			// Only the bytes after the offset are read, through a descriptor whose identity is the one the last load
 			// recorded. Another file at the path (a log replaced by rename, deleted and recreated), a log shorter than the
 			// offset, or an identity that cannot be compared is a full reload: extending would append to a verdict derived
-			// from a prefix this file may not hold. A same-inode rewrite that does not shorten the log is not seen here.
-			const read = readAppended(logPath, state.byteOffset, state.logId);
-			if (read.kind !== "bytes") {
+			// from a prefix this file may not hold. Before extending, the last line this state verified is re-read through
+			// the same descriptor: an earlier event rewritten in place longer shifts every later byte and grows the log, and
+			// the bytes after the offset are then the shifted tail, which holds no new line; only the moved last line shows
+			// it. A same-inode rewrite that keeps the last line where it was (a same-length edit) is not seen here.
+			const read = readAppended(logPath, state.byteOffset, state.logId, state.lastLine);
+			if (read.kind !== "bytes" || read.lastLine === "changed") {
 				handleResync();
 				return;
 			}
@@ -222,6 +226,7 @@ export async function createUiServer(
 			);
 			state.rows.push(...rows);
 			state.lastHash = lastHash;
+			state.lastLine = lastLineOfAppend(state.byteOffset, appended, lastNewline);
 			state.byteOffset += lastNewline + 1;
 			state.logTimes = read.times;
 			for (const r of rows) {
@@ -475,6 +480,7 @@ export async function createUiServer(
 		() => auditDirId,
 		() => state.logTimes,
 		() => !lastLoadSucceeded,
+		() => state.anchorStamp,
 	);
 	// The budget's two sources live OUTSIDE `audit/`, which watchLedger watches: a governor writes its record when it
 	// starts, and an operator edits the config. Each change re-reads the budget, and the config's `remote` section, and
