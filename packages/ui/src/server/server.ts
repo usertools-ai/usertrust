@@ -102,10 +102,11 @@ export async function createUiServer(
 	 */
 	let deletionSeen: DeletionCause[] = state.deletionCauses;
 	/**
-	 * What this process last verified (`LogHead`): set by each full load that VERIFIED the vault (its read succeeded and
-	 * its chain verified) and did not latch (or, while nothing is remembered yet, by the first whole read that did not
-	 * latch, verified or not: `loadState`'s `head`), and advanced to the last event of each verified append, but ONLY while the
-	 * last full load verified. Every later full load must still hold it (`loadState`'s `head`). Without the append's
+	 * What this process last verified (`LogHead`): its verified hash set by each full load that VERIFIED the vault (its
+	 * read succeeded and its chain verified) and did not latch (or, while nothing is remembered yet, by the first whole
+	 * read that did not latch, verified or not), and its `hadEvidence` by every whole read that did not latch, verified
+	 * or not, once true staying true (`loadState`'s `head`); advanced to the last event of each verified append, but ONLY
+	 * while the last full load verified. Every later full load must still hold it (`loadState`'s `head`). Without the append's
 	 * advance, a truncation of events appended since the last full load would go unseen; with it after a load that did
 	 * not verify, an append onto a chain that no full load verified (another chain renamed in while the read failed, or
 	 * appended beside the verified one) would become the event the next load looks for.
@@ -263,8 +264,8 @@ export async function createUiServer(
 		auditDirSeen ||= state.auditDirPresent;
 		auditDirId ??= state.auditDirId;
 		deletionSeen = state.deletionCauses;
-		// A load that failed, latched, or did not verify keeps the head it was judged against (`state.head` is then
-		// undefined, unless there was no head yet).
+		// A load that failed or latched keeps the head it was judged against (`state.head` is then undefined). One that
+		// did not verify returns the verified hash it was judged against, with any evidence it saw added.
 		head = state.head ?? head;
 		lastLoadSucceeded = state.loadSucceeded;
 		lastLoadVerified = state.verified;

@@ -426,10 +426,10 @@ describe("a log that loses or changes events the dashboard held", { timeout: 30_
 		expect(state.deletionCauses).toEqual([]);
 		expect(state.summary.chain.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
 		expect(state.summary.chain.events).toBe(4);
-		// In file order the log's event is read before the segment's, so the chain does not verify: the caller keeps the
-		// head it had, and this load returns none.
+		// In file order the log's event is read before the segment's, so the chain does not verify: the verified hash
+		// stays the one the caller had, and only evidence could be added.
 		expect(state.verified).toBe(false);
-		expect(state.head).toBeUndefined();
+		expect(state.head).toEqual(held);
 	});
 
 	it("guard: a normal append stays incremental (rows, no resync), and a reload after it holds every event", async () => {
@@ -974,6 +974,21 @@ describe("the last verified event: what a full load must still hold, and when fu
 		expect(after.errors).toContain(EVENTS_ERROR);
 	});
 
+	it("red-first (deletion read as valid and empty): an EMPTY audit directory at start, then malformed log bytes (read, not verified), then the log removed, is latched", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		expect(await chainOf(port)).toMatchObject({ events: 0, valid: true, empty: true });
+		writeFileSync(log(), "not an event\n{also not\n");
+		ui.reload();
+		expect(await chainOf(port)).toMatchObject({ events: 0, valid: false, empty: false });
+		rmSync(log());
+		ui.reload();
+		const after = await chainOf(port);
+		expect(after).toMatchObject({ events: 0, valid: false, empty: false });
+		expect(after.errors).toContain(EVENTS_ERROR);
+	});
+
 	it("red-first (false red): a log of malformed lines only, rotated whole into a segment, is not a deletion", async () => {
 		mkdirSync(auditDir(), { recursive: true });
 		writeFileSync(log(), "not an event\n{also not\n");
@@ -1042,7 +1057,7 @@ describe("the last verified event: what a full load must still hold, and when fu
 			expect(before.head).toEqual({ verifiedHash: a3.hash, hadEvidence: true });
 			appendFileSync(log(), b1.line + b2.line);
 			const after = loadState(vault(), undefined, true, [], before.auditDirId, before.head);
-			expect(after.head).toBeUndefined();
+			expect(after.head).toEqual(before.head);
 			expect(after.verified).toBe(false);
 			expect(after.summary.chain.valid).toBe(false);
 		});
@@ -1107,9 +1122,9 @@ describe("the last verified event: what a full load must still hold, and when fu
 			const port = ui.port;
 			expect(await chainOf(port)).toMatchObject({ events: 3, valid: true });
 			appendFileSync(log(), b);
-			// Against the remembered head, the broken read returns no head: the caller keeps the one it had.
+			// Against the remembered head, the broken read does not move the verified hash.
 			const broken = loadState(vault(), undefined, true, [], held.auditDirId, held.head);
-			expect(broken.head).toBeUndefined();
+			expect(broken.head).toEqual(held.head);
 			check();
 			const appended = await chainWhen(port, (c) => c.events === 5);
 			expect(appended.valid).toBe(false);
