@@ -24,16 +24,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const ledger = vi.hoisted(() => ({
 	/** Empty means the cost-center wallet does not exist — an implicit zero balance. */
 	accounts: [] as Array<{ credits_posted: bigint; debits_posted: bigint; debits_pending: bigint }>,
+	/**
+	 * Each client learns, right after answering a read, that the cluster evicted it while it
+	 * was idle: from then on it fails every request "closed", as tigerbeetle-node 0.17.9 does.
+	 */
+	evictAfterRead: false,
+	/** destroy() on an evicted client: in tigerbeetle-node 0.17.9 that aborts the process. */
+	aborts: 0,
 }));
 
 vi.mock("tigerbeetle-node", () => ({
-	createClient: () => ({
-		lookupAccounts: async () => ledger.accounts,
-		createAccounts: async () => [],
-		createTransfers: async () => [],
-		lookupTransfers: async () => [],
-		destroy: () => {},
-	}),
+	createClient: () => {
+		let evicted = false;
+		return {
+			lookupAccounts: async (ids: unknown[]) => {
+				if (evicted) {
+					throw Object.assign(new Error("Client was closed."), { code: "ERR_CLIENT_CLOSED" });
+				}
+				if (ids.length > 0 && ledger.evictAfterRead) evicted = true;
+				return ledger.accounts;
+			},
+			createAccounts: async () => [],
+			createTransfers: async () => [],
+			lookupTransfers: async () => [],
+			destroy: () => {
+				if (evicted) ledger.aborts += 1;
+			},
+		};
+	},
 	AccountFlags: { debits_must_not_exceed_credits: 1 << 2, history: 1 << 5 },
 	TransferFlags: { pending: 1, post_pending_transfer: 2, void_pending_transfer: 4 },
 	CreateAccountStatus: { created: 4294967295, exists: 1, exists_with_different_flags: 2 },
@@ -102,6 +120,8 @@ beforeEach(() => {
 	tempDir = mkdtempSync(join(tmpdir(), "trust-budget-cli-"));
 	logOutput = [];
 	ledger.accounts = [];
+	ledger.evictAfterRead = false;
+	ledger.aborts = 0;
 	savedParentEnv = process.env.USERTRUST_USER_ID;
 	delete process.env.USERTRUST_USER_ID;
 	vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
@@ -222,6 +242,25 @@ describe("usertrust budget — JSON payload", () => {
 			periodEnd,
 		]);
 		expect(jsonOut().data.onPace).toBe(false);
+	});
+});
+
+describe("usertrust budget — ledger client teardown", () => {
+	it("a client evicted after the command's last read is never destroyed: the command closes it, which asks it first", async () => {
+		makeVault();
+		setBalance(750);
+		ledger.evictAfterRead = true;
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+		await run(tempDir, { json: true }, ["--cost-center", "research", "--allocated", "1000"]);
+
+		expect(jsonOut().success).toBe(true);
+		expect(ledger.aborts).toBe(0);
+		// The control: the client was evicted, and left open (which the client says).
+		expect(warn).toHaveBeenCalledWith(
+			expect.stringContaining("could not be released"),
+			expect.anything(),
+		);
 	});
 });
 

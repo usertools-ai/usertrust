@@ -138,6 +138,30 @@ function isEviction(err: unknown): boolean {
 }
 
 /**
+ * A request failed `ERR_CLIENT_CLOSED`. tigerbeetle-node raises it in two cases only:
+ *  - its JavaScript wrapper, for a request made after OUR `destroy()` of that native client
+ *    (`if (!context) throw new RequestError(ERR_CLIENT_CLOSED)` in its `dist/index.js`, 0.17.9),
+ *    and for one in flight at that destroy;
+ *  - the native client, for every request once it has learned of its own eviction. Measured on
+ *    a 0.17.9 cluster: a client whose session was pushed out while it was idle logs "session
+ *    evicted" about 25 s later, from its own traffic, and from then on every request fails
+ *    `ERR_CLIENT_CLOSED`, at once (0-1 ms), never `ERR_CLIENT_EVICTED`.
+ * So a CLOSED from a native client this wrapper never destroyed means that client was evicted
+ * (`send`). If a tigerbeetle-node release raises it in another case, the rows that pin both
+ * cases (client-destroy.test.ts) are where that shows.
+ */
+function isClosedByClient(err: unknown): boolean {
+	return err instanceof Error && (err as { code?: unknown }).code === "ERR_CLIENT_CLOSED";
+}
+
+/**
+ * How long `close()` waits for its probe. On loopback the probe answers in about 1 ms. A
+ * client that has learned of its eviction fails it at once, so one that has not answered
+ * within this has learned of none.
+ */
+const CLOSE_PROBE_TIMEOUT_MS = 2_000;
+
+/**
  * What a TrustTBClient holds in place of its native client once destroy() has closed it:
  * every request is refused, so even a read of the field fails closed, and destroying it
  * again is a no-op.
@@ -271,10 +295,15 @@ export class TrustTBClient {
 	// own reconnect, which closes the old client too, and an operation in flight on THAT one
 	// must still retry on the new client. Only this wrapper knows it was destroyed.
 	private closed = false;
-	// Native clients the cluster has evicted (a request on one failed with an eviction code).
-	// Never destroyed (`isEviction`): a reconnect drops one and builds a fresh client, and
-	// destroy() leaves one alone. Weak, so a dropped client is not kept alive by this set.
+	// Native clients the cluster has evicted (a request on one failed with an eviction code, or
+	// with CLOSED though this wrapper never destroyed it: `isClosedByClient`). Never destroyed:
+	// a reconnect drops one and builds a fresh client, and destroy() leaves one alone. Weak, so
+	// a dropped client is not kept alive by this set.
 	private readonly evicted = new WeakSet<Client>();
+	// Native clients this wrapper has destroyed (or tried to: one whose native destroy threw is
+	// here too), each added BEFORE its native destroy is called. A CLOSED from one of these is
+	// our own destroy's, never an eviction.
+	private readonly released = new WeakSet<Client>();
 	// How many native clients were evicted, counted once each, when first marked. Each is left
 	// open (it cannot be released) and keeps the process from exiting on its own: destroy()
 	// says so, once.
@@ -393,6 +422,7 @@ export class TrustTBClient {
 				// process (`EVICTION_CODES`). Its requests have all failed already, and nothing
 				// here keeps a reference to it once the fresh client below replaces it.
 				if (!this.evicted.has(this.client)) {
+					this.released.add(this.client);
 					try {
 						this.client.destroy();
 					} catch {
@@ -423,15 +453,18 @@ export class TrustTBClient {
 	}
 
 	/**
-	 * One request on `native`. A request the cluster refuses with an eviction code marks the
-	 * client it ran on as evicted (counted once), so nothing ever destroys it; every attempt
-	 * goes through here, the retry included, so a fresh client evicted in turn is marked too.
+	 * One request on `native`. A request the cluster refuses with an eviction code, or that fails
+	 * CLOSED on a client this wrapper never destroyed (it learned of its eviction on its own:
+	 * `isClosedByClient`), marks the client it ran on as evicted (counted once), so nothing ever
+	 * destroys it. Every attempt goes through here, the retry and close()'s probe included, so a
+	 * fresh client evicted in turn is marked too.
 	 */
 	private async send<T>(request: (native: Client) => Promise<T>, native: Client): Promise<T> {
 		try {
 			return await request(native);
 		} catch (err) {
-			if (isEviction(err) && !this.evicted.has(native)) {
+			const evicted = isEviction(err) || (isClosedByClient(err) && !this.released.has(native));
+			if (evicted && !this.evicted.has(native)) {
 				this.evicted.add(native);
 				this.droppedEvicted += 1;
 			}
@@ -453,8 +486,9 @@ export class TrustTBClient {
 			if (this.closed) throw err;
 			// The cluster evicted this client (`send` marked it, so no reconnect or destroy() ever
 			// destroys it): the request is retried on a fresh client, as for a lost connection.
-			// (Its next request would fail "closed", which reaches the same reconnect.) A client
-			// whose release the cluster refuses is evicted again: one more dropped client per call.
+			// A client that learned of its eviction on its own fails "closed" instead, which
+			// `send` marked too, and which reaches the same reconnect. A client whose release the
+			// cluster refuses is evicted again: one more dropped client per call.
 			if (isEviction(err) || this.isConnectionError(err)) {
 				await this.reconnect(from);
 				// native() again: destroy() may have landed while the reconnect settled.
@@ -1212,6 +1246,44 @@ export class TrustTBClient {
 		}
 	}
 
+	/**
+	 * @internal Not part of the public API: the governors' teardown (the ledger engine's
+	 * `close()`) and `usertrust budget` are its only supported callers, and it may change in
+	 * any release. Code outside this package calls `destroy()`.
+	 *
+	 * `destroy()`, after asking the native client whether it was evicted. A client whose
+	 * session the cluster pushed out while it was idle learns of that from its own traffic,
+	 * with no request failing, and `destroy()` on it aborts the process (tigerbeetle-node
+	 * 0.17.9). This makes ONE request first, an empty `lookupAccounts`, on the current native
+	 * client, through `send` and with no reconnect:
+	 *  - it fails CLOSED at once if the client has learned of its eviction, or with an eviction
+	 *    code if the cluster tells it now: either way `send` marks it, and `destroy()` leaves it;
+	 *  - it is answered by a client still registered: `destroy()` destroys it;
+	 *  - it is not answered within `timeoutMs` (the cluster is unreachable or slow): `destroy()`
+	 *    destroys it. A client that has heard nothing back has learned of no eviction, since one
+	 *    that has fails at once, and leaving it open would keep the process from exiting.
+	 * What is left: an eviction the native client learns of between the probe's answer and its
+	 * destroy, which follows with no await between them.
+	 * A client already closed, or already known to be evicted, is not asked.
+	 */
+	async close(timeoutMs = CLOSE_PROBE_TIMEOUT_MS): Promise<void> {
+		if (this.closed) return;
+		const current = this.native();
+		if (!this.evicted.has(current)) {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const bound = new Promise<void>((resolve) => {
+				timer = setTimeout(resolve, timeoutMs);
+			});
+			const probe = this.send((native) => native.lookupAccounts([]), current).then(
+				() => {},
+				() => {},
+			);
+			await Promise.race([probe, bound]);
+			clearTimeout(timer);
+		}
+		this.destroy();
+	}
+
 	destroy(): void {
 		// First, so this client is closed even if the native destroy below throws: it is native
 		// and unguarded, and a throw there leaves the native client open. The rejections it
@@ -1221,8 +1293,13 @@ export class TrustTBClient {
 			clearInterval(this.healthCheckInterval);
 			this.healthCheckInterval = null;
 		}
-		// An evicted native client is left as it is: destroy() on one aborts the process.
-		if (!this.evicted.has(this.client)) this.client.destroy();
+		// An evicted native client is left as it is: destroy() on one aborts the process. One this
+		// wrapper does not know is evicted is destroyed, and aborts if it learned of an eviction
+		// that no request has seen since: close() asks it first.
+		if (!this.evicted.has(this.client)) {
+			this.released.add(this.client);
+			this.client.destroy();
+		}
 		// Only once that returned. A native destroy that throws leaves its client here, refused
 		// by native(), for a second destroy() to retry. Past this line nothing in this object
 		// holds the native client.

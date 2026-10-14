@@ -141,8 +141,8 @@ settle's POST, an abort or release parked on its void). At the deadline it takes
 hold in ONE synchronous step, before its first await: it records each abort or release still in
 flight, and voids and records (`hold_released`, `governor destroyed`) each hold still held. Then it
 voids the engine's remaining pending transfers, and flushes and releases the audit writer. Every
-teardown step (that drain, the sweep, the flush, the release, then the engine and proxy destroy)
-always runs, through `runTeardownSteps`: a step that throws skips none after it, and destroy()
+teardown step (that drain, the sweep, the flush, the release, then the engine's `close()`, awaited,
+or its `destroy()` for an engine without one, and the proxy destroy) always runs, through `runTeardownSteps`: a step that throws skips none after it, and destroy()
 rejects with its error (several as one `AggregateError`, in step order) only once the last has run. An
 `authorize()` refuses from destroy()'s start, and one still reserving registers no hold: it gives
 back its accounting and fails, and sends no void (the engine sweep, or the ledger's pending timeout

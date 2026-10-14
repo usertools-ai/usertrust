@@ -1344,8 +1344,38 @@ describe("headless governor", () => {
 			_audit: audit,
 		});
 		await gov.authorize({ model: "claude-sonnet-4-6" });
-		return { gov, engineDestroy, audit, calls };
+		return { gov, engine, engineDestroy, audit, calls };
 	}
+
+	it("destroy: an engine with close(): the teardown AWAITS it as its ledger step, after the voids, the flush and the lock release, and never calls the sync destroy()", async () => {
+		const { gov, engine, engineDestroy, calls } = await governorForTeardown();
+		let finishClose: () => void = () => {};
+		engine.close = vi.fn(() => {
+			calls.push("engine.close");
+			return new Promise<void>((resolve) => {
+				finishClose = resolve;
+			});
+		});
+		let done = false;
+		const destroying = gov.destroy().then(() => {
+			done = true;
+		});
+		await vi.waitFor(() => expect(calls).toContain("engine.close"));
+		await new Promise((r) => setImmediate(r));
+		expect(done).toBe(false);
+		finishClose();
+		await destroying;
+		expect(calls).toEqual([
+			"voidPendingSpend",
+			"hold_released",
+			"voidAllPending",
+			"flush",
+			"release",
+			"engine.close",
+		]);
+		expect(engine.close).toHaveBeenCalledOnce();
+		expect(engineDestroy).not.toHaveBeenCalled();
+	});
 
 	it("destroy: a throwing voidAllPending is still swallowed (unchanged), and every later step runs", async () => {
 		const { gov, engineDestroy, audit } = await governorForTeardown({

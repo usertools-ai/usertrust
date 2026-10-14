@@ -428,7 +428,9 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		fail(err instanceof Error ? err.message : String(err));
 		return;
 	} finally {
-		tb?.destroy();
+		// close(), not destroy(): destroy() aborts the process on a client the cluster evicted
+		// without this command seeing it, and close() asks the client first.
+		await tb?.close();
 	}
 
 	const { balance, runway } = status;

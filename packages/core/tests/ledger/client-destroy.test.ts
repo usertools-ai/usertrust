@@ -36,9 +36,9 @@
  *    a native destroy that throws leaves the native client open, only the closed check
  *    stands between a later request and the ledger;
  *  - the source holds the shape that makes this so: every public async method but `ping()`
- *    opens with `this.assertOpen()`, and every request reaches the native client through
- *    `native()`, called by `withReconnect()` alone and handed to a closure that makes its
- *    one request at once;
+ *    and `close()` opens with `this.assertOpen()`, and every request reaches the native
+ *    client through `native()`, called by `withReconnect()` (handing it to a closure that
+ *    makes its one request at once) and by `close()` for its one probe;
  *  - CONTROLS: without `destroy()`, a lost connection still reconnects and retries, an
  *    operation on a client closed by OUR OWN reconnect still retries on the new one, and
  *    every refused input above is refused by its own check.
@@ -564,7 +564,7 @@ describe("every entry path honours destroy(), shortcuts included", () => {
 	}
 
 	// 30 s: it imports `typescript`, which under a loaded suite can outlast vitest's default 5 s.
-	it("every public async method but ping() opens with this.assertOpen(), and each is in both tables", async () => {
+	it("every public async method but ping() and close() opens with this.assertOpen(), and each is in both tables", async () => {
 		const { ts, source, klass } = await parseClient();
 		const opens: string[] = [];
 		const doesNot: string[] = [];
@@ -581,8 +581,8 @@ describe("every entry path honours destroy(), shortcuts included", () => {
 				first.expression.getText(source) === "this.assertOpen()";
 			(checksFirst ? opens : doesNot).push(member.name.getText(source));
 		}
-		// ping() answers `false` instead (pinned below).
-		expect(doesNot).toEqual(["ping"]);
+		// ping() answers `false` instead, and close() returns, asking nothing (both pinned below).
+		expect(doesNot).toEqual(["ping", "close"]);
 		// A new operation fails this until it has a row in OPERATIONS (refused after destroy())
 		// and in SCENARIOS (destroy() at each of its await boundaries), so behaviour pins it too.
 		const tabled = new Set(OPERATIONS.map(([name]) => name.split(",")[0]));
@@ -644,8 +644,9 @@ describe("every entry path honours destroy(), shortcuts included", () => {
 		}
 		// Only the client's lifecycle touches the field; requests go through native().
 		expect([...readsClient].sort()).toEqual(["_doReconnect", "constructor", "destroy", "native"]);
-		// withReconnect() alone calls native(): for the request, and for its retry.
-		expect(callsNative).toEqual(["withReconnect", "withReconnect"]);
+		// withReconnect() calls native(): for the request, and for its retry; close() calls it once,
+		// for its probe, which it makes through send() at once.
+		expect(callsNative).toEqual(["withReconnect", "withReconnect", "close"]);
 		expect(notOneRequest).toEqual([]);
 		// A control: the walk sees the requests, every kind this client makes.
 		expect([...requests].sort()).toEqual([
@@ -1071,6 +1072,175 @@ describe("an evicted native client is never destroyed (tigerbeetle-node 0.17.9 a
 		await expect(client.lookupBalances([1n])).resolves.toBeDefined();
 		expect(native.destroyed.has(1)).toBe(true);
 		expect(native.created).toBe(2);
+		expect(native.aborts).toEqual([]);
+	});
+});
+
+describe("an eviction the native client learned of on its own: it fails CLOSED, never EVICTED", () => {
+	// Measured on a tigerbeetle-node 0.17.9 cluster: a client whose session was pushed out while
+	// it was idle logs "session evicted" about 25 s later, from its own traffic, and from then on
+	// fails every request ERR_CLIENT_CLOSED at once. The fake does the same: an id in
+	// `native.evicted` answers "closed" to every request, and records an abort if destroyed.
+	const closedError = (): Error =>
+		Object.assign(new Error("Client was closed."), { code: "ERR_CLIENT_CLOSED" });
+	const evictionAlerts = (onAlert: ReturnType<typeof vi.fn>) =>
+		onAlert.mock.calls.filter(([msg]) => String(msg).includes("could not be released"));
+
+	it("an ordinary request on it is answered through a reconnect, and it is dropped, never destroyed", async () => {
+		native.evicted.add(1);
+		await expect(client.lookupBalances([1n])).resolves.toBeDefined();
+		expect(native.attempts).toEqual(["client1:lookupAccounts", "client2:lookupAccounts"]);
+		expect(native.destroyed.has(1)).toBe(false);
+		expect(native.aborts).toEqual([]);
+		client.destroy();
+		expect(native.aborts).toEqual([]);
+	});
+
+	it("the health-check ping on it, with no call from the caller, does not abort", async () => {
+		vi.useFakeTimers();
+		// Built under fake timers, so its 30 s health check is too.
+		const c = new TrustTBClient({ addresses: ["3000"] });
+		const first = native.created;
+		await c.createTreasury();
+		native.evicted.add(first);
+		await vi.advanceTimersByTimeAsync(30_000);
+		// The ping's lookup reached the evicted client, and was answered on a fresh one.
+		expect(native.attempts).toContain(`client${first}:lookupAccounts`);
+		expect(native.created).toBe(first + 1);
+		expect(native.aborts).toEqual([]);
+		c.destroy();
+		expect(native.aborts).toEqual([]);
+	});
+
+	it("control: a CLOSED from a client OUR reconnect destroyed is not an eviction: retried on the current client, and nothing is counted", async () => {
+		const onAlert = vi.fn();
+		const c = new TrustTBClient({ addresses: ["3000"], onAlert });
+		const first = native.created;
+		native.respond = async (id) => (id === first ? never() : []);
+		const lookup = c.lookupBalances([1n]);
+		await tick();
+		await c.reconnect();
+		await expect(lookup).resolves.toEqual(new Map());
+		expect(native.destroyed.has(first)).toBe(true);
+		c.destroy();
+		expect(evictionAlerts(onAlert)).toEqual([]);
+	});
+
+	it("control: a CLOSED from a request in flight at OUR destroy() is not an eviction: its own error, no reconnect, nothing counted", async () => {
+		const onAlert = vi.fn();
+		const c = new TrustTBClient({ addresses: ["3000"], onAlert });
+		native.respond = never;
+		const lookup = c.lookupBalances([1n]);
+		await tick();
+		const built = native.created;
+		c.destroy();
+		await expect(lookup).rejects.toThrow("Client was closed.");
+		expect(native.created).toBe(built);
+		expect(evictionAlerts(onAlert)).toEqual([]);
+	});
+
+	it("control: a native destroy() that threw leaves its client ours: a CLOSED from it later is not counted, and a second destroy() retries it", async () => {
+		const onAlert = vi.fn();
+		const c = new TrustTBClient({ addresses: ["3000"], onAlert });
+		const first = native.created;
+		let fail: (err: Error) => void = () => {};
+		native.respond = () =>
+			new Promise((_resolve, reject) => {
+				fail = reject;
+			});
+		const lookup = c.lookupBalances([1n]).catch((err: unknown) => err);
+		await tick();
+		native.destroyThrows = true;
+		expect(() => c.destroy()).toThrow("deinit failed");
+		// What the failed deinit left behind fails "closed" afterwards.
+		fail(closedError());
+		expect(await lookup).toBeInstanceOf(Error);
+		c.destroy();
+		expect(native.destroyed.has(first)).toBe(true);
+		expect(evictionAlerts(onAlert)).toEqual([]);
+	});
+});
+
+describe("close(): destroy(), after asking the native client whether it was evicted", () => {
+	it("a client that learned of its eviction on its own: the probe fails CLOSED, and it is left, never destroyed; destroy() says so once", async () => {
+		const onAlert = vi.fn();
+		const c = new TrustTBClient({ addresses: ["3000"], onAlert });
+		const first = native.created;
+		native.evicted.add(first);
+		await c.close();
+		expect(native.attempts).toEqual([`client${first}:lookupAccounts`]);
+		expect(native.aborts).toEqual([]);
+		expect(native.created).toBe(first);
+		expect(onAlert.mock.calls.filter(([m]) => String(m).includes("could not be released"))).toEqual(
+			[[expect.any(String), { droppedEvicted: 1 }]],
+		);
+		await expect(c.lookupBalances([1n])).rejects.toBeInstanceOf(LedgerClientClosedError);
+	});
+
+	it("a client the cluster evicts as the probe reaches it (ERR_CLIENT_EVICTED): left, never destroyed", async () => {
+		native.respond = async (id) => {
+			native.evicted.add(id);
+			throw Object.assign(new Error("Client was evicted."), { code: "ERR_CLIENT_EVICTED" });
+		};
+		await client.close();
+		expect(native.aborts).toEqual([]);
+		expect(native.destroyed.has(1)).toBe(false);
+		expect(native.created).toBe(1);
+	});
+
+	it("control: a healthy client answers the probe (an empty lookup) and is destroyed, with nothing said", async () => {
+		const onAlert = vi.fn();
+		const c = new TrustTBClient({ addresses: ["3000"], onAlert });
+		const first = native.created;
+		const batches: unknown[][] = [];
+		native.respond = async (_id, _op, batch) => {
+			batches.push(batch);
+			return [];
+		};
+		await c.close();
+		expect(native.calls).toEqual([`client${first}:lookupAccounts`]);
+		expect(batches).toEqual([[]]);
+		expect(native.destroyed.has(first)).toBe(true);
+		expect(onAlert).not.toHaveBeenCalled();
+	});
+
+	it("a probe the cluster never answers: after its bound, the client is destroyed (the process can end), and the probe's own CLOSED is not counted", async () => {
+		vi.useFakeTimers();
+		const onAlert = vi.fn();
+		const c = new TrustTBClient({ addresses: ["3000"], onAlert });
+		const first = native.created;
+		native.respond = never;
+		let done = false;
+		const closing = c.close().then(() => {
+			done = true;
+		});
+		await vi.advanceTimersByTimeAsync(1_999);
+		expect(done).toBe(false);
+		expect(native.destroyed.has(first)).toBe(false);
+		await vi.advanceTimersByTimeAsync(1);
+		await closing;
+		expect(native.destroyed.has(first)).toBe(true);
+		expect(onAlert).not.toHaveBeenCalled();
+	});
+
+	it("close() after destroy() asks nothing and destroys nothing", async () => {
+		client.destroy();
+		const after = native.attempts.length;
+		await client.close();
+		expect(native.attempts.slice(after)).toEqual([]);
+	});
+
+	it("a client already known to be evicted is not asked again, and is left", async () => {
+		native.evicted.add(1);
+		// The failed request marks it; its retry runs on client 2, which is then evicted too.
+		native.respond = async (id) => {
+			native.evicted.add(id);
+			throw Object.assign(new Error("Client was evicted."), { code: "ERR_CLIENT_EVICTED" });
+		};
+		await expect(client.lookupBalances([1n])).rejects.toThrow("Client was evicted.");
+		const after = native.attempts.length;
+		await client.close();
+		expect(native.attempts.slice(after)).toEqual([]);
 		expect(native.aborts).toEqual([]);
 	});
 });
