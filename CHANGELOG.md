@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The ledger client's 30 s health check no longer piles up requests while the ledger is unreachable.** Each tick looked up the treasury whether or not the previous lookup had been answered. tigerbeetle-node has no request timeout, and a request the cluster never answers stays queued in the native client, so an outage added one queued request (and its callback) every 30 s for as long as it lasted. A tick now submits nothing while the previous check, and any reconnect it started, is still outstanding. `ping()` itself is unchanged.
+
 ## [5.0.3] - 2026-10-14
 
 ### Read before upgrading
