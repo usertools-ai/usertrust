@@ -1804,12 +1804,15 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			await mkdir(join(stateDir, "jobs"), { recursive: true });
 			await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), JOB_LOG);
 			await writeLines(main(), TWO());
-			// The authorize reply comes after the hook's whole budget, so no host stall lets the client see it.
-			slowBy.set("/v1/authorize#1", 2_000);
+			// At a 3 s budget each call gets at most 0.9 s, and claiming must start within the first
+			// 1.2 s (the default 1.2 s budget leaves 0.48 s, which a hook slow to start does not meet,
+			// and then defers both groups unclaimed instead). The authorize reply comes after the hook's
+			// whole budget, so no host stall lets the client see it.
+			slowBy.set("/v1/authorize#1", 4_000);
 			await runHook(
 				join(HOOKS, "session-end.mjs"),
 				seInput(),
-				envFor({ ...seBudget(1_200), UT_CC_FAULT: "__main.json|5|throw" }),
+				envFor({ ...seBudget(3_000), UT_CC_FAULT: "__main.json|5|throw" }),
 				["--import", FAULT_AT],
 			);
 			expect(seen.map((request) => request.path)).toEqual(["/v1/health", "/v1/authorize"]);
