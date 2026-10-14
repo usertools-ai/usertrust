@@ -23,7 +23,7 @@ import { transferIdHash } from "usertrust-verify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
-import { createUiServer, type UiServer } from "../src/server/server.js";
+import { CLOSE_GRACE_MS, createUiServer, type UiServer } from "../src/server/server.js";
 import { fileIdentity } from "../src/server/state.js";
 import { __tailTestSeam, watchLedger } from "../src/server/tail.js";
 
@@ -393,6 +393,7 @@ describe("header spend", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await ui?.close();
 		ui = undefined;
 		rmSync(tempDir, { recursive: true, force: true });
@@ -440,7 +441,14 @@ describe("header spend", () => {
 
 	// Measured on the unfixed close(): about 3.7 s here, against about CLOSE_GRACE_MS (400 ms) once it cuts the remaining connections.
 	// One live-tail wait leaves close() fast; two in a row hold it. Which connection is held is not established.
-	it("close() resolves in well under two seconds after two live-tail waits", async () => {
+	// The row asserts what ended the close, never how long it took: under load the same close() measured 1.5 to 2.2 s
+	// against a 1.5 s bound, and two live-tail waits alone passed the 5 s default. The unfixed close() armed no grace timer,
+	// so a held connection kept it waiting for the keep-alive timeout. A fixed close() either has nothing held (the timer
+	// is cleared before it fires) or its grace timer fires and cuts, and only then resolves. The timeout is derived: each
+	// wait is bounded by its own deadline, and close() by the grace.
+	it("close() ends by the grace timer's cut, not by a held connection's own timeout, after two live-tail waits", {
+		timeout: 2 * 5000 + 2 * CLOSE_GRACE_MS + 5000,
+	}, async () => {
 		ui = await createUiServer(tempDir, { port: 0 });
 		const port = ui.port;
 		for (const id of ["tx_a", "tx_b"]) {
@@ -458,11 +466,30 @@ describe("header spend", () => {
 				},
 			);
 		}
-		const started = Date.now();
+		const order: string[] = [];
+		const graceTimers: NodeJS.Timeout[] = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const realCutAll = ui.server.closeAllConnections.bind(ui.server);
+		vi.spyOn(ui.server, "closeAllConnections").mockImplementation(() => {
+			order.push("cut");
+			realCutAll();
+		});
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+			if (ms !== CLOSE_GRACE_MS) return realSetTimeout(fn, ms);
+			const timer = realSetTimeout(() => {
+				order.push("grace-timer-fired");
+				fn();
+			}, ms);
+			graceTimers.push(timer);
+			return timer;
+		}) as unknown as typeof setTimeout);
 		await ui.close();
-		const elapsedMs = Date.now() - started;
+		order.push("close-resolved");
 		ui = undefined;
-		expect(elapsedMs).toBeLessThan(1500);
+		expect(graceTimers).toHaveLength(1);
+		expect([["close-resolved"], ["grace-timer-fired", "cut", "close-resolved"]]).toContainEqual(
+			order,
+		);
 	});
 });
 
