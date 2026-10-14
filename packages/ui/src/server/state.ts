@@ -87,12 +87,23 @@ export interface LedgerState {
 	/** What this load's `deletionDetected` rests on, the carried-in causes included: one chain error per cause. */
 	deletionCauses: DeletionCause[];
 	/**
-	 * What this load verified (`LogHead`): the hash of the last event it read, and whether the vault held any evidence.
-	 * Undefined when no pass of the load read the vault unchanged throughout, when its read failed (an audit directory or
-	 * audit file that could not be read), or when its own check latched a deletion of events: the caller then keeps the
-	 * head it had, because a read that failed is not evidence of what the vault holds.
+	 * What this load verified (`LogHead`): the hash of the chain's tip (`tipHash`), and whether the vault held any
+	 * evidence. Set only when the load is `verified`, and, when the caller passed no head (nothing verified yet), from
+	 * any read of the whole vault that did not latch, so a first read that is already broken still has its events held
+	 * against a later replacement. Undefined otherwise: when no pass read the vault unchanged throughout, when its read
+	 * failed, when its own check latched a deletion of events, or when its chain did not verify against a head the
+	 * caller already had. The caller then keeps the head it had: a read that failed is not evidence of what the vault
+	 * holds, and a chain that did not verify is not one to judge later loads against (another chain appended to a
+	 * verified one, then the verified events removed, would otherwise leave only the other chain, reading valid).
 	 */
 	head: LogHead | undefined;
+	/**
+	 * Whether this load VERIFIED the vault: it read the vault whole (`loadSucceeded`), and that read's own verdict is
+	 * valid, before any deletion cause (carried in or found by this load) is added. The caller keeps it as the last full
+	 * load's outcome: while it is false, no append is extended onto the state, and a load is the only thing that moves
+	 * the head.
+	 */
+	verified: boolean;
 	/**
 	 * Whether this load read the vault whole: one pass read it unchanged throughout, and its reads succeeded (an absent
 	 * audit directory is a read of nothing). The caller keeps it as the last full load's outcome: while it is false, no
@@ -116,13 +127,15 @@ export interface LogTimes {
 /**
  * What the dashboard last verified of the log, and what every later full load must still hold.
  *
- * `verifiedHash` is the hash of the last event a full load read, or of the last event a verified append added while the
- * last full load had succeeded. Each event's hash commits to every event before it, so an honest later log still holds
- * an event with that hash, whatever was appended or rotated since; one that does not was truncated, emptied or replaced
- * by another chain. Undefined when the load read no event with a hash.
+ * `verifiedHash` is the hash of the chain's tip as a full load that verified read it (`tipHash`: by linkage, never by
+ * reading order), or of the last event a verified append added while the last full load had verified. Each event's
+ * hash commits to every event before it, so an honest later log still holds an event with that hash, whatever was
+ * appended or rotated since; one that does not was truncated, emptied or replaced by another chain. Undefined when the
+ * load read no event with a hash.
  *
- * `hadEvidence` is whether the vault held anything: log bytes (malformed lines included), an anchor, or events. A log
- * of malformed lines only has no event to remember, so its removal is seen by this instead.
+ * `hadEvidence` is whether the vault held anything: log bytes in `events.jsonl` or in any rotated segment (malformed
+ * lines included), an anchor, or events. A log of malformed lines only has no event to remember, so its removal is seen
+ * by this instead, wherever its bytes are: a rotation that moves them into a segment still holds them.
  *
  * No count and no position: a load that races a rotation written in two steps reads some events twice, and a count
  * taken there is larger than the finished rotation's; in file order a rotation moves positions.
@@ -267,7 +280,9 @@ const DELETION_ERRORS: Record<DeletionCause, string> = {
  *
  * `head`: what the dashboard last verified (`LogHead`). A load fails the check when the head names a verified hash and
  * no event read now has it, or when the head had evidence and this read found no log bytes, no anchor and no events:
- * the log was truncated, emptied or replaced by another chain, whatever its own verdict. Membership only, never a count
+ * the log was truncated, emptied or replaced by another chain, whatever its own verdict. The CHECK runs on any read that
+ * succeeded, valid or not; the head this load RETURNS for later loads is set only from a read whose chain verified
+ * (`LedgerState.head`). Membership only, never a count
  * or a position: a rotation moves positions, and a load that raced a rotation written in two steps (a segment, then
  * `events.jsonl`) reads events twice. A pass that fails it is read again, and the deletion is latched only when a
  * second pass that read the vault unchanged throughout (`consistent`) fails it too: a log renamed away and back during
@@ -314,6 +329,7 @@ export function loadState(
 				logTimes: undefined,
 				head: undefined,
 				loadSucceeded: false,
+				verified: false,
 				summary: { ...pass.state.summary, verifiedAt: null },
 			};
 		failedBefore ||= !pass.contained;
@@ -352,7 +368,7 @@ function loadPass(
 ): { state: LedgerState; consistent: boolean; contained: boolean } {
 	const logPath = join(vaultPath, "audit", "events.jsonl");
 	const snapshot = snapshotLog(logPath);
-	const segmentsBefore = segmentsFingerprint(join(vaultPath, "audit"));
+	const segmentsBefore = segmentsState(join(vaultPath, "audit"));
 	loadSeam.afterDescriptor?.();
 	// What the pass's own reads could not read: the error codes the events' reader reported (a directory it could not
 	// stat or list, a log or segment it could not read), and the anchor's read. ENOENT is absence, which is a read.
@@ -370,7 +386,7 @@ function loadPass(
 	// before it was read gave the reader ENOENT, which it reads as absence, and only the bracket sees it went.
 	const consistent =
 		(snapshot === undefined || snapshot.fingerprint === pathFingerprint(logPath)) &&
-		segmentsBefore === segmentsFingerprint(join(vaultPath, "audit"));
+		segmentsBefore.fingerprint === segmentsState(join(vaultPath, "audit")).fingerprint;
 	const { dir: auditDir, listError, id: dirId } = auditDirState(vaultPath);
 	// Whether the pass's read SUCCEEDED, decided by the reads themselves, never by a separate probe of the files (a
 	// permission change between a probe and the read would let a failed read pass): the audit directory present and
@@ -380,10 +396,12 @@ function loadPass(
 	// events are gone: its verdict stands on its own (the readability errors fail it), and it is never compared with the
 	// head, nor recorded as one.
 	const readSucceeded = auditDir === "present" && listError === undefined && unread.length === 0;
-	// What the vault held, as this pass read it: log bytes (the descriptor's size; the bracket checked it did not change),
-	// an anchor, or events (a rotated segment).
+	// What the vault held, as this pass read it: log bytes in `events.jsonl` (the descriptor's size) or in any rotated
+	// segment (its size, from the same bracket; the bracket checked neither changed), an anchor, or events. Bytes in a
+	// segment count: a malformed-only log rotated into a segment still holds them, and malformed bytes only in a segment,
+	// then that segment removed, held something and now hold nothing.
 	const evidence = {
-		logBytes: (snapshot?.byteOffset ?? 0) > 0,
+		logBytes: (snapshot?.byteOffset ?? 0) > 0 || segmentsBefore.bytes,
 		anchor: anchor.present,
 		events: events.length > 0,
 	};
@@ -429,8 +447,11 @@ function loadPass(
 					`Audit directory could not be read (${listError ?? auditDir}): this vault was not verified`,
 				];
 	const errors = [...readErrors, ...deletionCauses.map((c) => DELETION_ERRORS[c])];
+	// The read's own verdict, before any deletion cause is added: what `verified` rests on.
+	const readValid = integrity.valid && (vault.valid || (noAuditDir && readErrors.length === 0));
 	const valid =
 		integrity.valid && !deletionDetected && (vault.valid || (noAuditDir && errors.length === 0));
+	const verified = loadSucceeded && readValid;
 
 	const truncated = events.length > rowCap;
 	const visible = truncated ? events.slice(-rowCap) : events;
@@ -475,25 +496,49 @@ function loadPass(
 		auditDirId: dirId,
 		deletionDetected,
 		deletionCauses,
-		// Set only by a pass that read the whole vault and whose own check did not latch. A pass that latched keeps the head
-		// it was judged against: the events it read are not the ones verified.
+		// Set only by a pass that read the whole vault, whose own check did not latch, and whose chain VERIFIED; or, when
+		// the caller had no head yet, by any such read, verified or not, since there is nothing verified to keep. A pass
+		// that latched keeps the head it was judged against: the events it read are not the ones verified. So does one
+		// whose chain did not verify: its events may hold another chain beside the verified one, and that chain's tip
+		// would let the verified events be removed unseen.
 		head:
-			loadSucceeded && readSucceeded && !latchesEvents
+			loadSucceeded && readSucceeded && !latchesEvents && (verified || head === undefined)
 				? {
-						verifiedHash: headHash(events),
+						verifiedHash: tipHash(events, head),
 						hadEvidence: evidence.logBytes || evidence.anchor || evidence.events,
 					}
 				: undefined,
 		loadSucceeded,
+		verified,
 	};
 	loadSeam.afterPass?.({ consistent, readSucceeded, contained });
 	return { state, consistent, contained };
 }
 
-/** The last event's hash, when it has one: what a later load must still hold. */
-function headHash(events: readonly { hash?: unknown }[]): string | undefined {
-	const hash = events.at(-1)?.hash;
-	return typeof hash === "string" ? hash : undefined;
+/**
+ * The chain's tip, by LINKAGE: the one event whose hash no other event's `previousHash` names. Never the last event in
+ * reading order: in file order (events without `sequence`) `events.jsonl` is read first and the segments after it, so
+ * the last event read can be an older segment's tail. When no single event is the tip (a broken or forked chain, which
+ * a load that verified never reads), the last event in sequence order if every event has a `sequence` (the order the
+ * reader returns them in then), and otherwise the head's own hash, unchanged: no tip is guessed from file order.
+ * Undefined when the read holds no event with a hash.
+ */
+function tipHash(
+	events: readonly { hash?: unknown; previousHash?: unknown; sequence?: unknown }[],
+	head: LogHead | undefined,
+): string | undefined {
+	const named = new Set<unknown>();
+	for (const e of events) named.add(e.previousHash);
+	// A Set, so an event read twice (a load racing a rotation's two steps) is one candidate, not two.
+	const tips = new Set<string>();
+	for (const e of events) if (typeof e.hash === "string" && !named.has(e.hash)) tips.add(e.hash);
+	if (tips.size === 1) return [...tips][0];
+	if (events.length === 0) return undefined;
+	if (events.every((e) => typeof e.sequence === "number")) {
+		const hash = events.at(-1)?.hash;
+		return typeof hash === "string" ? hash : undefined;
+	}
+	return head?.verifiedHash;
 }
 
 /**
@@ -517,18 +562,23 @@ function holdsHead(
  * sorted, each with its identity, size and mtime, read through a descriptor so a segment that cannot be opened records
  * its error code. A listing or open that fails is part of the fingerprint, so two reads that both fail the same way
  * compare equal and a read that fails differently does not. It answers whether the set of files stayed the same, never
- * whether the readers could read them: that comes from the readers.
+ * whether the readers could read them: that comes from the readers. `bytes`: whether any segment it opened holds bytes,
+ * from the same `fstat`, so the evidence it reports describes the same set of files the bracket compared.
  */
-function segmentsFingerprint(auditPath: string): string {
+function segmentsState(auditPath: string): { fingerprint: string; bytes: boolean } {
 	let names: string[];
 	try {
 		names = readdirSync(auditPath)
 			.filter((n) => n.endsWith(".jsonl") && n !== "events.jsonl")
 			.sort();
 	} catch (err) {
-		return `list:${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
+		return {
+			fingerprint: `list:${(err as NodeJS.ErrnoException).code ?? "unknown"}`,
+			bytes: false,
+		};
 	}
-	return names
+	let bytes = false;
+	const fingerprint = names
 		.map((n) => {
 			let fd: number;
 			try {
@@ -537,7 +587,9 @@ function segmentsFingerprint(auditPath: string): string {
 				return `${n}=${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
 			}
 			try {
-				return `${n}=${fingerprintOf(fstatSync(fd, { bigint: true }))}`;
+				const st = fstatSync(fd, { bigint: true });
+				if (st.size > 0n) bytes = true;
+				return `${n}=${fingerprintOf(st)}`;
 			} catch (err) {
 				return `${n}=${(err as NodeJS.ErrnoException).code ?? "unknown"}`;
 			} finally {
@@ -545,6 +597,7 @@ function segmentsFingerprint(auditPath: string): string {
 			}
 		})
 		.join("|");
+	return { fingerprint, bytes };
 }
 
 /**

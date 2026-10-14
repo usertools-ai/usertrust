@@ -396,11 +396,14 @@ describe("a log that loses or changes events the dashboard held", { timeout: 30_
 		const e3 = eventLine(e2.hash, "tx_3");
 		const segment = join(auditDir(), "events.0001.jsonl");
 		writeFileSync(segment, e1.line + e2.line + e3.line);
-		writeFileSync(log(), eventLine(e3.hash, "tx_4").line);
+		const e4 = eventLine(e3.hash, "tx_4");
+		writeFileSync(log(), e4.line);
 		const vault = join(root, ".usertrust");
 		const before = loadState(vault);
-		// In file order the log is read before the segment, so the last event read is the segment's last.
-		expect(before.head).toEqual({ verifiedHash: e3.hash, hadEvidence: true });
+		// The head is the chain's tip by linkage, the log's event, though in file order the segment is read after it.
+		expect(before.head).toEqual({ verifiedHash: e4.hash, hadEvidence: true });
+		// What a load verified before the rotation: its tip is in the segment, so a read that misses the segment misses it.
+		const held = { verifiedHash: e3.hash, hadEvidence: true };
 		const aside = join(root, "aside.jsonl");
 		const passes: { consistent: boolean; readSucceeded: boolean; contained: boolean }[] = [];
 		loadSeam.afterDescriptor = () => {
@@ -413,7 +416,7 @@ describe("a log that loses or changes events the dashboard held", { timeout: 30_
 			// Put back, the same file, before the next pass begins: that pass reads the vault whole.
 			if (passes.length === 1) renameSync(aside, segment);
 		};
-		const state = loadState(vault, undefined, true, [], before.auditDirId, before.head);
+		const state = loadState(vault, undefined, true, [], before.auditDirId, held);
 		// The first pass read three events fewer than the head, and is not judged on them: the segment it listed went
 		// before it was read, so the pass did not read one unchanged set of files.
 		expect(passes).toEqual([
@@ -423,7 +426,10 @@ describe("a log that loses or changes events the dashboard held", { timeout: 30_
 		expect(state.deletionCauses).toEqual([]);
 		expect(state.summary.chain.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
 		expect(state.summary.chain.events).toBe(4);
-		expect(state.head).toEqual(before.head);
+		// In file order the log's event is read before the segment's, so the chain does not verify: the caller keeps the
+		// head it had, and this load returns none.
+		expect(state.verified).toBe(false);
+		expect(state.head).toBeUndefined();
 	});
 
 	it("guard: a normal append stays incremental (rows, no resync), and a reload after it holds every event", async () => {
@@ -891,6 +897,116 @@ describe("the last verified event: what a full load must still hold, and when fu
 			expect(after.errors).toContain(EVENTS_ERROR);
 		},
 	);
+
+	it("red-first (false clean): another chain appended beside the verified one (the reload reads invalid), then the verified tip removed so only the other chain is left, is latched, never valid", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		const genesis = "0".repeat(64);
+		const a1 = eventLine(genesis, "tx_a1", 1);
+		const a2 = eventLine(a1.hash, "tx_a2", 2);
+		const a3 = eventLine(a2.hash, "tx_a3", 3);
+		writeFileSync(log(), a1.line + a2.line + a3.line);
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		expect(await chainOf(port)).toMatchObject({ events: 3, valid: true });
+		// Another chain, forked from the second event: its first event does not link to the verified tip. Every event
+		// carries a sequence, so the read's last event in sequence order is the other chain's tail.
+		const b1 = eventLine(a2.hash, "tx_b1", 3);
+		const b2 = eventLine(b1.hash, "tx_b2", 4);
+		appendFileSync(log(), b1.line + b2.line);
+		check();
+		const forked = await chainWhen(port, (c) => c.events === 5);
+		expect(forked.events).toBe(5);
+		expect(forked.valid).toBe(false);
+		expect(forked.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+		// The verified tip removed: only the other chain is left, and on its own it verifies.
+		writeFileSync(log(), a1.line + a2.line + b1.line + b2.line);
+		expect(loadState(vault()).summary.chain.valid).toBe(true);
+		check();
+		const after = await chainWhen(port, isDeletion);
+		expect(after).toMatchObject({ events: 4, valid: false });
+		expect(after.errors).toContain(EVENTS_ERROR);
+		ui.reload();
+		expect((await chainOf(port)).errors).toContain(EVENTS_ERROR);
+	});
+
+	it("red-first (false clean): after a full load that reads a broken chain (the read itself succeeded), an append is a full reload, and the verified event does not move", async () => {
+		await appendEvents(root, 3, "tx");
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		expect(await chainOf(port)).toMatchObject({ events: 3, valid: true });
+		// Event 1's cost changed in place (same length): the chain is broken, and the read of it succeeds.
+		const text = readFileSync(log(), "utf-8");
+		writeFileSync(log(), text.replace('"cost":1', '"cost":7'));
+		ui.reload();
+		const broken = await chainOf(port);
+		expect(broken.valid).toBe(false);
+		expect(broken.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+		const appended = nextEvent("tx_appended");
+		appendFileSync(log(), appended.line);
+		const names = await framesDuring(
+			port,
+			check,
+			(n) => n.includes("resync") || n.includes("rows"),
+		);
+		expect(names).toContain("resync");
+		expect(names).not.toContain("rows");
+		// The log replaced by one holding only the appended event: the event the last VERIFIED load read last is gone.
+		const next = join(auditDir(), "next.tmp");
+		writeFileSync(next, appended.line);
+		renameSync(next, log());
+		ui.reload();
+		const after = await chainOf(port);
+		expect(after.valid).toBe(false);
+		expect(after.errors).toContain(EVENTS_ERROR);
+	});
+
+	it("red-first (deletion read as valid and empty): malformed bytes only in a ROTATED segment, then that segment removed, is latched", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		const segment = join(auditDir(), "events.0001.jsonl");
+		writeFileSync(segment, "not an event\n{also not\n");
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		expect(await chainOf(port)).toMatchObject({ events: 0, valid: false });
+		rmSync(segment);
+		ui.reload();
+		const after = await chainOf(port);
+		expect(after).toMatchObject({ events: 0, valid: false, empty: false });
+		expect(after.errors).toContain(EVENTS_ERROR);
+	});
+
+	it("red-first (false red): a log of malformed lines only, rotated whole into a segment, is not a deletion", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		writeFileSync(log(), "not an event\n{also not\n");
+		const first = loadState(vault());
+		expect(first.head).toEqual({ verifiedHash: undefined, hadEvidence: true });
+		renameSync(log(), join(auditDir(), "events.0001.jsonl"));
+		const after = loadState(vault(), undefined, true, [], first.auditDirId, first.head);
+		expect(after.deletionCauses).toEqual([]);
+		expect(after.summary.chain.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+	});
+
+	it("red-first (false red): in a file-order vault rotated so an older segment is read last, the remembered event is the chain's tip, and an append still holds it", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		const genesis = "0".repeat(64);
+		const e1 = eventLine(genesis, "tx_1");
+		const e2 = eventLine(e1.hash, "tx_2");
+		const e3 = eventLine(e2.hash, "tx_3");
+		const e4 = eventLine(e3.hash, "tx_4");
+		writeFileSync(join(auditDir(), "events.0001.jsonl"), e1.line + e2.line + e3.line);
+		writeFileSync(log(), e4.line);
+		// `events.jsonl` is read first in file order, so the segment's tail is the last event read; the tip is the log's.
+		expect(loadState(vault()).head?.verifiedHash).toBe(e4.hash);
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		appendFileSync(log(), eventLine(e4.hash, "tx_5").line);
+		check();
+		const grown = await chainWhen(port, (c) => c.events === 5);
+		expect(grown.events).toBe(5);
+		ui.reload();
+		const after = await chainOf(port);
+		expect(after.events).toBe(5);
+		expect(after.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
+	});
 
 	it("events appended after a successful full load, then the log truncated back to its first three, are latched", async () => {
 		await appendEvents(root, 3, "tx");
