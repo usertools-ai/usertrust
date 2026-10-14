@@ -64,7 +64,7 @@ interface TrustReceipt {
   timestamp: string;
   auditDegraded?: boolean;
   usageSource?: "provider" | "estimated";
-  /** Four-tier disjoint token split. Present iff cost was computed from these counts and their input and output counts were usable: always for "provider", and for "estimated" counts a headless settle priced from. */
+  /** Four-tier disjoint token split. Present exactly when these counts priced the call (see ReceiptUsage): always for "provider", and for "estimated" counts a headless settle priced from. */
   usage?: ReceiptUsage;
   /** The 1-hour share of usage.cacheWriteTokens and its rate. Present only when the call wrote 1h cache. */
   cacheWrite1h?: { tokens: number; ratePer1k: number };
@@ -105,8 +105,12 @@ the rates recorded in the audit chain diverge from the rates your cost was compu
 ### ReceiptUsage
 
 The four-tier disjoint token split a settle was metered from (spec D5). Present on
-`TrustReceipt.usage` and `llm_call` audit events only when usage was provider-reported —
-never zero-filled for an estimated settle.
+`TrustReceipt.usage` and `llm_call` audit events exactly when these counts priced the call:
+always for provider-reported usage, and for a headless settle's own `"estimated"` counts. It is
+absent, never zero-filled, when the cost is the metered pre-call estimate (no counts, or counts
+refused as implausible), and when an input or output count was non-finite, negative or
+non-numeric. An input or output a headless settle leaves out, while reporting others, is 0, and
+is published as 0.
 
 ```typescript
 interface ReceiptUsage {

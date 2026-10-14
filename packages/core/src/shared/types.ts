@@ -68,8 +68,8 @@ export interface CacheWrite1h {
  * and cache writes are separate tiers, and the four sum to the call's billable
  * tokens with nothing double-counted.
  *
- * Present on a record only when the usage was provider-reported. See
- * `TrustReceipt.usage`.
+ * Present on a record exactly when these counts priced the call: always for provider-reported
+ * usage, and for a headless settle's own `"estimated"` counts. See `TrustReceipt.usage`.
  */
 export interface ReceiptUsage {
 	/** Fresh (non-cached) prompt tokens. */
@@ -116,10 +116,12 @@ export interface TrustReceipt {
 	 * counts were both usable: always for `usageSource: "provider"`, and for
 	 * `"estimated"` counts a headless settle priced from (the caller's own estimate).
 	 * Absent when the cost is the metered pre-call estimate (no counts, or counts
-	 * refused as implausible), and when an input or output count was unusable (its
-	 * clamped 0 is fabricated). A four-tier block with fabricated zeros would invite an
-	 * auditor to "recompute" a cost never derived from those counts, so it is omitted
-	 * outright, never zero-filled.
+	 * refused as implausible), and when an input or output count was unusable: non-finite,
+	 * negative or non-numeric, whose clamped 0 is fabricated. A four-tier block with
+	 * fabricated zeros would invite an auditor to "recompute" a cost never derived from
+	 * those counts, so it is omitted outright, never zero-filled. An input or output a
+	 * headless settle leaves out is not unusable: when it reports some counts, the ones it
+	 * leaves out are 0, are priced as 0, and are published as 0.
 	 *
 	 * With `pricing.appliedRates` this is the whole reconciliation surface:
 	 * `ceil(sum(counts x rates / 1000))` floored at 1 equals `cost`.

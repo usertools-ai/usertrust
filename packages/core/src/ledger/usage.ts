@@ -337,7 +337,9 @@ export function withImplausible(
  * Whether a candidate's input and output counts are both usable: the rule by which
  * `sanitizeUsage` keeps a "provider" label (an explicit 0 qualifies; an absent, non-finite,
  * negative or non-numeric count does not, since its clamped 0 is fabricated). A caller
- * that publishes counts under any label applies it to the same candidate it sanitizes.
+ * that publishes counts under any label applies it to the same candidate it sanitizes, so
+ * a count the caller has already defaulted to 0 (headless, for one its caller left out)
+ * is usable.
  */
 export function inputOutputUsable(
 	raw: Pick<RawUsageCandidate, "inputTokens" | "outputTokens">,

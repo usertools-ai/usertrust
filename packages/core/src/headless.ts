@@ -2008,8 +2008,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// Published exactly when these counts price the call (`usageTrusted`), whatever the caller's
 				// label: a caller's counts labelled "estimated" price the call too, so the record must carry
 				// them to reproduce its cost (`usageSource` stays the label). Never when the input or output
-				// count was unusable: its clamped 0 is fabricated, and a record with a fabricated 0 is what D5
-				// forbids (`inputOutputUsable`, the rule that also downgrades a "provider" label).
+				// count was unusable (non-finite, negative or non-numeric): its clamped 0 is fabricated, and a
+				// record with a fabricated 0 is what D5 forbids (`inputOutputUsable`, the rule that also
+				// downgrades a "provider" label). An input or output the caller left out is not unusable here:
+				// `candidate` already holds it as 0 (the rule above), so it is priced and published as 0.
 				const usageAudit = publishableUsageFields(
 					usageSnapshot,
 					rateInfo.rates,
@@ -2355,7 +2357,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					provider: "headless",
 					timestamp: new Date().toISOString(),
 					usageSource,
-					// D5: present IFF provider-sourced — same snapshot the cost came from.
+					// D5: present exactly when these counts priced the call (see `usageAudit`): the
+					// same snapshot the cost came from.
 					...usageAudit,
 					// M2: endpoint classification + metering provenance (A6: computeMs is
 					// OMITTED, never undefined, when absent/invalid).

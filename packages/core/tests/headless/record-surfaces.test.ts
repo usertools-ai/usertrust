@@ -438,6 +438,27 @@ describe("headless record surfaces (spec D5)", () => {
 		await gov.destroy();
 	});
 
+	it("an input or output left out, under either label, is a 0 that is priced and published", async () => {
+		const gov = await governor();
+		const rates = getModelRates(MODEL);
+		for (const usageSource of ["provider", "estimated"] as const) {
+			const auth = await gov.authorize(AUTHORIZE);
+			const receipt = await gov.settle(auth, { outputTokens: 500, usageSource });
+			// Reporting some counts makes the ones left out 0 (the operator-boundary rule), so this is not an
+			// unusable count: the 0 priced the call, and the record carries it and recomputes.
+			expect(receipt.cost).toBe(costFromRates(rates, 0, 500));
+			expect(receipt.usage).toEqual({
+				inputTokens: 0,
+				outputTokens: 500,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+			});
+			expectRecomputable(receipt, usageSource);
+		}
+
+		await gov.destroy();
+	});
+
 	it("a garbage count under a provider label publishes NO usage record", async () => {
 		const gov = await governor();
 		const auth = await gov.authorize(AUTHORIZE);
