@@ -292,6 +292,10 @@ jobs:
           # The gated tests write this into tigerbeetle.addresses; "3000" resolves to
           # 127.0.0.1:3000, matching the server's --addresses=3000 bind above.
           USERTRUST_TB_ADDRESS: "3000"
+          # The binary downloaded above. `evicted-client.tb.test.ts` starts its own private
+          # cluster with it: eviction pushes out every older session, so it must never run
+          # against the shared one on port 3000. It fails when this is unset.
+          USERTRUST_TB_BINARY: ${{ github.workspace }}/tigerbeetle
         # Every real-cluster suite in the repo, named explicitly rather than by
         # directory: `packages/openclaw/tests/envelope-integration.test.ts` does not
         # live under any integration/ folder, and a glob over
@@ -313,6 +317,7 @@ jobs:
           packages/core/tests/integration/destroy.tb.test.ts
           packages/core/tests/integration/reconciliation-cache-day.tb.test.ts
           packages/core/tests/integration/job.tb.test.ts
+          packages/core/tests/integration/evicted-client.tb.test.ts
           packages/openshell/tests/engine.tb.test.ts
           packages/openclaw/tests/envelope-integration.test.ts
 

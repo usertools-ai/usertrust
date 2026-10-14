@@ -119,6 +119,25 @@ export class LedgerClientClosedError extends Error {
 const refuseClosed = (): Promise<never> => Promise.reject(new LedgerClientClosedError());
 
 /**
+ * The tigerbeetle-node error codes that say the cluster EVICTED this client's session (too
+ * many sessions, or a release the cluster does not take). An evicted native client must
+ * never be destroyed: in tigerbeetle-node 0.17.9, `destroy()` on one aborts the whole
+ * process (SIGABRT, "attempt to unwrap error: ClientInvalid"), which no try/catch can stop.
+ */
+const EVICTION_CODES: ReadonlySet<string> = new Set([
+	"ERR_CLIENT_EVICTED",
+	"ERR_CLIENT_RELEASE_TOO_LOW",
+	"ERR_CLIENT_RELEASE_TOO_HIGH",
+]);
+
+/** A request failed because the cluster evicted the client's session (`EVICTION_CODES`). */
+function isEviction(err: unknown): boolean {
+	if (!(err instanceof Error)) return false;
+	const code = (err as { code?: unknown }).code;
+	return typeof code === "string" && EVICTION_CODES.has(code);
+}
+
+/**
  * What a TrustTBClient holds in place of its native client once destroy() has closed it:
  * every request is refused, so even a read of the field fails closed, and destroying it
  * again is a no-op.
@@ -252,6 +271,13 @@ export class TrustTBClient {
 	// own reconnect, which closes the old client too, and an operation in flight on THAT one
 	// must still retry on the new client. Only this wrapper knows it was destroyed.
 	private closed = false;
+	// Native clients the cluster has evicted (a request on one failed with an eviction code).
+	// Never destroyed (`isEviction`): a reconnect drops one and builds a fresh client, and
+	// destroy() leaves one alone. Weak, so a dropped client is not kept alive by this set.
+	private readonly evicted = new WeakSet<Client>();
+	// How many evicted native clients were dropped. Each is left open (it cannot be released),
+	// and keeps the process from exiting on its own: destroy() says so.
+	private droppedEvicted = 0;
 
 	constructor(opts: TrustTBClientOptions) {
 		this.opts = {
@@ -347,10 +373,17 @@ export class TrustTBClient {
 			this.assertOpen();
 			try {
 				console.log(`[TB] Reconnection attempt ${attempt + 1}/${maxRetries}`);
-				try {
-					this.client.destroy();
-				} catch {
-					/* ignore destroy errors */
+				// An evicted client is dropped, never destroyed: destroy() on one aborts the
+				// process (`EVICTION_CODES`). Its requests have all failed already, and nothing
+				// here keeps a reference to it once the fresh client below replaces it.
+				if (this.evicted.has(this.client)) {
+					this.droppedEvicted += 1;
+				} else {
+					try {
+						this.client.destroy();
+					} catch {
+						/* ignore destroy errors */
+					}
 				}
 				this.client = createClient({
 					cluster_id: this.opts.clusterId,
@@ -375,8 +408,10 @@ export class TrustTBClient {
 	}
 
 	private async withReconnect<T>(request: (native: Client) => Promise<T>): Promise<T> {
+		let used: Client | undefined;
 		try {
-			return await request(this.native());
+			used = this.native();
+			return await request(used);
 		} catch (err) {
 			// Destroyed while this was in flight: its own error stands, and no reconnect.
 			// A POST that committed but lost its reply here would, by reconnecting, have been
@@ -384,7 +419,12 @@ export class TrustTBClient {
 			// It now fails (a settle records `settlement_ambiguous`); its charge stands.
 			// native()'s own LedgerClientClosedError is rethrown here too.
 			if (this.closed) throw err;
-			if (this.isConnectionError(err)) {
+			// The cluster evicted this client: it is marked so no reconnect or destroy() ever
+			// destroys it, and the request is retried on a fresh client, as for a lost connection.
+			// (Its next request would fail "closed", which reaches the same reconnect.)
+			const evicted = isEviction(err);
+			if (evicted && used !== undefined) this.evicted.add(used);
+			if (evicted || this.isConnectionError(err)) {
 				await this.reconnect();
 				// native() again: destroy() may have landed while the reconnect settled.
 				return await request(this.native());
@@ -1150,7 +1190,15 @@ export class TrustTBClient {
 			clearInterval(this.healthCheckInterval);
 			this.healthCheckInterval = null;
 		}
-		this.client.destroy();
+		// An evicted native client is left as it is: destroy() on one aborts the process.
+		if (this.evicted.has(this.client)) this.droppedEvicted += 1;
+		else this.client.destroy();
+		if (this.droppedEvicted > 0) {
+			const msg = `TigerBeetle evicted this client's session; ${this.droppedEvicted} evicted native client(s) could not be released (tigerbeetle-node aborts the process on destroying one), so this process will not exit on its own: end it with process.exit()`;
+			const meta = { droppedEvicted: this.droppedEvicted };
+			if (this.onAlert) this.onAlert(msg, meta);
+			else console.warn(`[usertrust] ${msg}`, meta);
+		}
 		// Only once that returned. A native destroy that throws leaves its client here, refused
 		// by native(), for a second destroy() to retry. Past this line nothing in this object
 		// holds the native client.
