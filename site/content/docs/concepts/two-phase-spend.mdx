@@ -56,14 +56,14 @@ The hold remains pending in TigerBeetle and will eventually expire.
 
 ### 15.2 -- LLM Fails (Retryable)
 
-The LLM provider returned an error (rate limit, server error, etc.). The pending hold is voided immediately, returning tokens to the available budget. The original error is propagated to the caller.
+The LLM provider returned an error (rate limit, server error, etc.). The pending hold is released by a void request sent before the original error is passed on. The void is best-effort, so if the ledger refuses it or cannot be reached, the hold stays reserved until it expires, up to 300 seconds (the ledger's hold timeout). Once voided, the tokens return to the available budget. The original error is propagated to the caller.
 
 ### 15.3 -- Audit Write Fails After POST
 
-The LLM call and ledger settlement both succeeded, but the audit chain write failed. The response is returned with an `auditDegraded` flag. The failed audit event is written to the dead-letter queue.
+The LLM call and ledger settlement both succeeded, but the audit chain write failed. The response is returned with `auditDegraded: true` on the receipt (except that a failed warn-mode `injection_detected` append is swallowed without marking the call or its receipt). The failed audit event is written to the dead-letter queue when that write succeeds.
 
 <Callout type="info">
-usertrust never fails the user on audit degradation. If the LLM call succeeded and the ledger settled, the response is always returned. Audit failures are recoverable.
+By default, usertrust does not fail a call because the audit write degraded: if the LLM call succeeded and the ledger settled, the response is returned. With `audit.failClosed: true`, a `trust()` client refuses the call with `AuditDegradedError`: a non-stream call throws it instead of returning the response, and a streamed call raises it through the stream (a `messages.stream()` call only through its `.receipt`, so await it); see the AuditDegradedError entry on the [Errors](/docs/api/errors) page for when such a call may still have been charged.
 </Callout>
 
 ### 15.4 -- TigerBeetle Unreachable

@@ -34,7 +34,9 @@ import { isHeaderSpend } from "../shared/aggregate.js";
 import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
 import {
 	budgetSummary,
+	type DeletionCause,
 	type LedgerState,
+	type LogHead,
 	loadState,
 	ROW_CAP,
 	readAppended,
@@ -89,10 +91,43 @@ export async function createUiServer(
 	 */
 	let auditDirSeen = state.auditDirPresent;
 	/**
-	 * Whether a load of this process has detected a deletion of the audit directory. Latched for the life of the
-	 * process and passed to every later load: a directory recreated afterwards, holding a valid chain, does not clear it.
+	 * The audit directory's identity when this process first saw it (`loadState`'s `auditDirId`). A load, or a watcher
+	 * check, that finds another directory at the path reads a deletion. Recorded once and never moved.
 	 */
-	let deletionSeen = state.deletionDetected;
+	let auditDirId = state.auditDirId;
+	/**
+	 * What a load of this process has detected as a deletion (the audit directory gone or replaced, the log missing
+	 * events it held). Latched for the life of the process and passed to every later load: a directory recreated
+	 * afterwards, holding a valid chain, does not clear it.
+	 */
+	let deletionSeen: DeletionCause[] = state.deletionCauses;
+	/**
+	 * What this process last verified (`LogHead`): its verified hash set by each full load that VERIFIED the vault (its
+	 * read succeeded and its chain verified) and did not latch (or, while nothing is remembered yet, by the first whole
+	 * read that did not latch, verified or not), and its `hadEvidence` by every whole read that did not latch, verified
+	 * or not, once true staying true (`loadState`'s `head`); advanced to the last event of each verified append, but ONLY
+	 * while the last full load verified. Every later full load must still hold it (`loadState`'s `head`). Without the append's
+	 * advance, a truncation of events appended since the last full load would go unseen; with it after a load that did
+	 * not verify, an append onto a chain that no full load verified (another chain renamed in while the read failed, or
+	 * appended beside the verified one) would become the event the next load looks for.
+	 */
+	let head: LogHead | undefined = state.head;
+	/**
+	 * Whether the last full load read the whole vault (`loadState`'s `loadSucceeded`), set by every full load. While it
+	 * is false, the watcher retries the read in full: at once on any change it sees, and otherwise at most every ten
+	 * seconds (`watchLedger`), until a load succeeds again. A read that succeeded of a chain that does not verify is not
+	 * retried on that schedule: reading it again changes nothing until the vault changes.
+	 */
+	let lastLoadSucceeded = state.loadSucceeded;
+	/**
+	 * Whether the last full load VERIFIED the vault (`loadState`'s `verified`): its read succeeded and its chain verified.
+	 * While it is false, every grow is a full reload and the head moves only with a load that verifies.
+	 */
+	let lastLoadVerified = state.verified;
+	/** When a full load last read the whole vault: the summary's `verifiedAt`, kept through loads that failed. */
+	let verifiedAt = state.summary.verifiedAt;
+	/** Whether a full load is running: the periodic re-verify is skipped then, never queued behind it. */
+	let loading = false;
 	let port = 0;
 
 	const clients = new Set<ServerResponse>();
@@ -115,7 +150,12 @@ export async function createUiServer(
 		// (an empty one, one with only an anchor) gave a verdict with nothing to check, and a truncated log that arrives
 		// later still links from genesis, so extending that state read as verified over a mismatched anchor. When the last
 		// load saw no log bytes, a grow re-derives the verdict from the whole vault.
-		if (!state.auditDirReadable || state.byteOffset === 0) {
+		// And after a full load that did not VERIFY (its read failed, or its chain did not verify), every grow is a full
+		// reload until one verifies: an append is extended only onto a state a full load verified, never onto one whose
+		// log was never read whole (another chain renamed in while the anchor could not be read, then appended to) or
+		// whose chain is broken (another chain appended beside the verified one), either of which would otherwise become
+		// the verified state.
+		if (!lastLoadVerified || !state.auditDirReadable || state.byteOffset === 0) {
 			handleResync();
 			return;
 		}
@@ -183,12 +223,19 @@ export async function createUiServer(
 			state.rows.push(...rows);
 			state.lastHash = lastHash;
 			state.byteOffset += lastNewline + 1;
+			state.logTimes = read.times;
 			for (const r of rows) {
 				if (isHeaderSpend(r.kind, r.costUt)) state.summary.spentUt += r.costUt;
 			}
 			state.summary.remainingUt =
 				state.summary.budget === null ? null : state.summary.budget - state.summary.spentUt;
 			state.summary.chain.events += fresh.length;
+			// The appended events were verified against the state the last full load verified (or this grow would have
+			// been a full reload), so the last of them is now the event every later load must hold. `lastLoadVerified` is
+			// already guaranteed by the early return above; it is checked again here as defence in depth, so a change to
+			// that return cannot let an append onto an unverified state move the head.
+			if (lastLoadVerified && fresh.length > 0)
+				head = { verifiedHash: lastHash, hadEvidence: true };
 			auditDirSeen = true;
 			// A verified append is the first activity of a vault that had none.
 			if (fresh.length > 0) state.summary.chain.empty = false;
@@ -208,9 +255,22 @@ export async function createUiServer(
 	}
 
 	function handleResync(): void {
-		state = loadState(vaultPath, ROW_CAP, auditDirSeen, deletionSeen);
+		loading = true;
+		try {
+			state = loadState(vaultPath, ROW_CAP, auditDirSeen, deletionSeen, auditDirId, head);
+		} finally {
+			loading = false;
+		}
 		auditDirSeen ||= state.auditDirPresent;
-		deletionSeen ||= state.deletionDetected;
+		auditDirId ??= state.auditDirId;
+		deletionSeen = state.deletionCauses;
+		// A load that failed or latched keeps the head it was judged against (`state.head` is then undefined). One that
+		// did not verify returns the verified hash it was judged against, with any evidence it saw added.
+		head = state.head ?? head;
+		lastLoadSucceeded = state.loadSucceeded;
+		lastLoadVerified = state.verified;
+		if (state.loadSucceeded) verifiedAt = state.summary.verifiedAt;
+		else state.summary.verifiedAt = verifiedAt;
 		version += 1;
 		broadcast("resync", {});
 		broadcast("summary", state.summary);
@@ -403,8 +463,18 @@ export async function createUiServer(
 	const stopWatching = watchLedger(
 		vaultPath,
 		() => state.byteOffset,
-		{ onGrow: handleGrow, onResync: handleResync },
+		{
+			onGrow: handleGrow,
+			onResync: handleResync,
+			// The same full load, on a schedule; skipped while one is running.
+			onReverify: () => {
+				if (!loading) handleResync();
+			},
+		},
 		() => state.logId,
+		() => auditDirId,
+		() => state.logTimes,
+		() => !lastLoadSucceeded,
 	);
 	// The budget's two sources live OUTSIDE `audit/`, which watchLedger watches: a governor writes its record when it
 	// starts, and an operator edits the config. Each change re-reads the budget, and the config's `remote` section, and

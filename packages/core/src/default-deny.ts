@@ -1054,6 +1054,19 @@ export function movedRequestError(
 	);
 }
 
+/**
+ * The refusal for a governed call whose request cannot be serialized to a JSON object
+ * (`serializeRequest` returns null: a cycle, a BigInt, a `toJSON` or getter that throws, a text too
+ * long to build). The request is scanned, held and sent as ONE serialization; without one, the SDK
+ * would serialize it on its own, and could send something other than what was checked.
+ */
+export function unserializableRequestError(provider: DefaultDenyProvider): PolicyDeniedError {
+	return new PolicyDeniedError(
+		`request_unserializable: ${PROVIDER_NAME[provider]} request cannot be serialized to a JSON object (a cycle, a BigInt, a toJSON or getter that throws, or a text too long to build)`,
+		"A governed call is scanned, held and sent as one JSON serialization of its request, so a request that cannot be serialized is refused before anything is held or sent: the SDK would serialize it again on its own and could send something other than what was checked. Pass plain data. See LIMITATIONS.md, section 1.",
+	);
+}
+
 /** The refusal for every call through a `withOptions()` client whose transport changed. */
 export function transportChangedError(
 	provider: DefaultDenyProvider,

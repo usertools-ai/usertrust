@@ -2,7 +2,16 @@
 // Copyright 2026 Usertools, Inc.
 
 import { execFileSync, spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -79,6 +88,78 @@ describe("readLedgerEvents", () => {
 
 		const events = readLedgerEvents(vaultPath);
 		expect(events.map((e) => e.sequence)).toEqual([1, 2]);
+	});
+
+	describe("onReadError", () => {
+		const asRoot = process.getuid?.() === 0;
+		/** A vault of two events, the first rotated into a segment. */
+		async function rotated(): Promise<{ log: string; segment: string }> {
+			const writer = createAuditWriter(tempDir);
+			await writer.appendEvent({ kind: "llm_call", actor: "local", data: { cost: 1 } });
+			await writer.appendEvent({ kind: "llm_call", actor: "local", data: { cost: 2 } });
+			writer.release();
+			const log = join(vaultPath, "audit", "events.jsonl");
+			const segment = join(vaultPath, "audit", "events-2026-01-01.jsonl");
+			const lines = readFileSync(log, "utf-8").trim().split("\n");
+			writeFileSync(segment, `${lines[0]}\n`);
+			writeFileSync(log, `${lines[1]}\n`);
+			return { log, segment };
+		}
+		const collect = (): {
+			errors: [string, string][];
+			onReadError: (path: string, code: string) => void;
+		} => {
+			const errors: [string, string][] = [];
+			return { errors, onReadError: (path, code) => errors.push([path, code]) };
+		};
+
+		it.skipIf(asRoot)(
+			"an unreadable segment and an unreadable log are each reported with EACCES; the result is what the call without it returns",
+			async () => {
+				const { log, segment } = await rotated();
+				for (const unreadable of [segment, log]) {
+					chmodSync(unreadable, 0o000);
+					try {
+						const { errors, onReadError } = collect();
+						const events = readLedgerEvents(vaultPath, { onReadError });
+						expect(errors).toEqual([[unreadable, "EACCES"]]);
+						expect(events).toEqual(readLedgerEvents(vaultPath));
+						expect(events).toHaveLength(1);
+					} finally {
+						chmodSync(unreadable, 0o600);
+					}
+				}
+			},
+		);
+
+		it.skipIf(asRoot)(
+			"an audit directory that cannot be listed is reported with EACCES",
+			async () => {
+				await rotated();
+				const auditDir = join(vaultPath, "audit");
+				chmodSync(auditDir, 0o000);
+				try {
+					const { errors, onReadError } = collect();
+					expect(readLedgerEvents(vaultPath, { onReadError })).toEqual([]);
+					// No search permission either: the log's existence cannot be checked, and the listing fails.
+					expect(errors.map(([, code]) => code)).toEqual(["EACCES", "EACCES"]);
+					expect(errors.map(([path]) => path)).toEqual([join(auditDir, "events.jsonl"), auditDir]);
+				} finally {
+					chmodSync(auditDir, 0o700);
+				}
+			},
+		);
+
+		it("ENOENT is absence, never reported: a missing vault, and a listed segment whose target is gone", async () => {
+			const { errors, onReadError } = collect();
+			expect(readLedgerEvents(join(tempDir, "nope"), { onReadError })).toEqual([]);
+			await rotated();
+			symlinkSync(join(tempDir, "gone.jsonl"), join(vaultPath, "audit", "events-2026-02-01.jsonl"));
+			const events = readLedgerEvents(vaultPath, { onReadError });
+			expect(errors).toEqual([]);
+			expect(events.map((e) => e.sequence)).toEqual([1, 2]);
+			expect(events).toEqual(readLedgerEvents(vaultPath));
+		});
 	});
 });
 
