@@ -1768,24 +1768,33 @@ describe("fs.watch mode's backstop when file-change events arrive late or never"
 
 			it("on the real file system: a chmod loop whose every ctime change is OBSERVED reloads exactly once in one window", () => {
 				__tailTestSeam.sameSizeReloadMs = 60 * BOUND;
-				// A synchronous wait the fake timers do not touch: each wait is at least 1 ms, so 2000 of them bound it by 2 s.
+				// A synchronous wait the fake timers do not touch: each wait is at least 25 ms, so 80 of them span at least 2 s.
 				const pause = new Int32Array(new SharedArrayBuffer(4));
 				const ctime = (): bigint => statSync(logPath(), { bigint: true }).ctimeNs;
 				const w = startLoaded();
 				try {
 					tick(2);
 					expect(w.what()).toEqual([]);
+					let mode = statSync(logPath()).mode & 0o777;
+					const toggle = (): void => {
+						mode = mode === 0o600 ? 0o644 : 0o600;
+						chmodSync(logPath(), mode);
+					};
 					for (let i = 0; i < 5; i++) {
 						const before = ctime();
-						chmodSync(logPath(), i % 2 === 0 ? 0o600 : 0o644);
+						toggle();
 						let waits = 0;
+						// ctime is stamped when the inode changes: a chmod inside the same clock tick as the change before it
+						// leaves ctime as it was, and waiting alone never moves it. So the mode is changed again after each
+						// pause, back and forth, until a change lands in a later tick.
 						while (ctime() === before) {
-							if (waits >= 2000)
+							if (waits >= 80)
 								throw new Error(
-									"ctime did not change within 2 s of chmod: the file system's timestamp clock is coarser than the bound",
+									"ctime did not change within 2 s of repeated chmods: the file system's timestamp clock is coarser than the bound",
 								);
-							Atomics.wait(pause, 0, 0, 1);
+							Atomics.wait(pause, 0, 0, 25);
 							waits += 1;
+							toggle();
 						}
 						tick();
 					}
