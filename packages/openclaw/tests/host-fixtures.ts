@@ -22,22 +22,70 @@ import type {
 
 export const TEST_MODEL_ID = "claude-sonnet-4-6";
 
+/** Kinds of native request that complete into a promise: fs, and the close of a handle. */
+const REQUEST_KIND = /^(FSReq|CloseReq)/;
+
 /**
- * Guard against a promise that never settles. A hung `result()` is the whole
- * failure mode half these tests exist to catch, and it would otherwise surface
- * as an opaque suite-level timeout instead of a named assertion failure.
+ * Whether anything the process could still complete is outstanding: a pending fs
+ * request or close, a queued immediate, or a live (ref'd) timer. Sockets and
+ * pipes are ignored; these tests open none, and the runner's own pipes are
+ * always live.
  */
-export async function withTimeout<T>(promise: Promise<T>, ms = 500): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
+function hasPendingWork(): boolean {
+	for (const kind of process.getActiveResourcesInfo()) {
+		if (kind === "Timeout" || kind === "Immediate" || REQUEST_KIND.test(kind)) return true;
+	}
+	return false;
+}
+
+/**
+ * Await `start()`'s promise, failing with "promise never settled" if it can
+ * never settle. A hung `result()` is the whole failure mode half these tests
+ * exist to catch, and it would otherwise surface as an opaque suite-level
+ * timeout instead of a named assertion failure.
+ *
+ * "Never" is decided by the event loop, not by a clock. Once every microtask
+ * has drained (a check runs from `setImmediate`, which is after them), a
+ * promise that is still pending can only be woken by an fs request, an
+ * immediate or a timer. If none is outstanding, nothing can ever settle it. A
+ * slow promise always has one: these governors append to a real, fsync'd audit
+ * log and persist the spend ledger, tens of fsyncs and several fs requests per
+ * settle, about 150-400 ms on a quiet disk and unbounded under contention. The
+ * 500 ms deadline this replaces measured that disk, and failed 65 of 84 runs
+ * when 28 copies of host-loop.test.ts shared one machine. Nothing here depends
+ * on how long anything takes.
+ *
+ * Why not count only what is new since the guard began: the runner keeps a
+ * timer of its own alive for its first ~100 ms, and one that expires while the
+ * promise's own timer is pending would net out against it (measured: a 700 ms
+ * timer read as absent at 100 ms). Any live timer counts instead.
+ *
+ * Blind spots, all of which fail toward waiting (the suite's own timeout still
+ * ends the test), never toward a false hang: an fs request or ref'd timer that
+ * is unrelated to the promise makes the loop look busy, so a hang is named only
+ * once they are gone. Not covered: work that waits on a socket or pipe (reads
+ * as a hang), and fake timers (invisible); no test here uses either.
+ */
+export async function awaitSettled<T>(start: () => Promise<T>): Promise<T> {
+	const work = start();
+	let finished = false;
+	const stalled = new Promise<never>((_resolve, reject) => {
+		const check = (): void => {
+			if (finished) return;
+			if (hasPendingWork()) {
+				// Poll gently: a timer, then an immediate (the poll timer has run by the
+				// time the check does, so it never counts itself).
+				setTimeout(() => setImmediate(check), 1);
+			} else {
+				reject(new Error("promise never settled"));
+			}
+		};
+		setImmediate(check);
+	});
 	try {
-		return await Promise.race([
-			promise,
-			new Promise<never>((_resolve, reject) => {
-				timer = setTimeout(() => reject(new Error("promise never settled")), ms);
-			}),
-		]);
+		return await Promise.race([work, stalled]);
 	} finally {
-		if (timer !== undefined) clearTimeout(timer);
+		finished = true;
 	}
 }
 
