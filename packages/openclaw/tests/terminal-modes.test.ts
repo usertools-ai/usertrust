@@ -42,6 +42,7 @@ import type { StreamEvent, StreamFn } from "../src/types.js";
 import {
 	abortedEvent,
 	asHostStream,
+	awaitSettled,
 	doneEvent,
 	errorEvent,
 	makeContext,
@@ -50,7 +51,6 @@ import {
 	startEvent,
 	streamOf,
 	textDelta,
-	withTimeout,
 } from "./host-fixtures.js";
 
 vi.mock("tigerbeetle-node", () => ({
@@ -205,7 +205,7 @@ describe("stream terminal modes", () => {
 		// and OpenClaw consumes it as the terminal assistant turn, branching on
 		// `message.stopReason` afterwards (`dist/proxy-BzhBz8iM.js:264`). The VOID
 		// is what protects the money; rejecting here would only misreport the turn.
-		const failed = await withTimeout(stream.result());
+		const failed = await awaitSettled(() => stream.result());
 		expect(failed.stopReason).toBe("error");
 		expect(failed.errorMessage).toBe("boom");
 	});
@@ -231,7 +231,7 @@ describe("stream terminal modes", () => {
 		// Same resolution as the drain-to-end error path — the break changes
 		// nothing, because governance now finishes BEFORE the terminal event is
 		// yielded rather than after the loop unwinds.
-		const failed = await withTimeout(stream.result());
+		const failed = await awaitSettled(() => stream.result());
 		expect(failed.stopReason).toBe("error");
 	});
 
@@ -290,7 +290,7 @@ describe("stream terminal modes", () => {
 			chunksDelivered: 3,
 		});
 
-		const aborted = await withTimeout(stream.result());
+		const aborted = await awaitSettled(() => stream.result());
 		expect(aborted.stopReason).toBe("aborted");
 	});
 
@@ -328,7 +328,9 @@ describe("stream terminal modes", () => {
 		// `EventStream.end()` resolves it only when handed an explicit result
 		// (`pi-ai/dist/utils/event-stream.js:33-43`). Adopting it would mark the
 		// deferred settled while it hung forever.
-		await expect(withTimeout(stream.result())).rejects.toThrow(/closed without a terminal event/);
+		await expect(awaitSettled(() => stream.result())).rejects.toThrow(
+			/closed without a terminal event/,
+		);
 	});
 
 	it("still takes exactly one ledger action when the settle fails on a terminal event", async () => {
@@ -355,7 +357,7 @@ describe("stream terminal modes", () => {
 		// more than one abort would be the double-void this guard exists to catch.
 		expect(settle).toHaveBeenCalledOnce();
 		expect(abort).toHaveBeenCalledOnce();
-		await expect(withTimeout(stream.result())).rejects.toThrow("settle_unavailable");
+		await expect(awaitSettled(() => stream.result())).rejects.toThrow("settle_unavailable");
 	});
 
 	it("settles exactly once at provider usage on normal completion", async () => {

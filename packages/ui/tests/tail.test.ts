@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
 	appendFileSync,
@@ -14,6 +13,7 @@ import {
 	rmSync,
 	statSync,
 	truncateSync,
+	unlinkSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
@@ -23,7 +23,7 @@ import { transferIdHash } from "usertrust-verify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
-import { createUiServer, type UiServer } from "../src/server/server.js";
+import { CLOSE_GRACE_MS, createUiServer, type UiServer } from "../src/server/server.js";
 import { fileIdentity } from "../src/server/state.js";
 import { __tailTestSeam, watchLedger } from "../src/server/tail.js";
 
@@ -393,6 +393,7 @@ describe("header spend", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await ui?.close();
 		ui = undefined;
 		rmSync(tempDir, { recursive: true, force: true });
@@ -440,7 +441,14 @@ describe("header spend", () => {
 
 	// Measured on the unfixed close(): about 3.7 s here, against about CLOSE_GRACE_MS (400 ms) once it cuts the remaining connections.
 	// One live-tail wait leaves close() fast; two in a row hold it. Which connection is held is not established.
-	it("close() resolves in well under two seconds after two live-tail waits", async () => {
+	// The row asserts what ended the close, never how long it took: under load the same close() measured 1.5 to 2.2 s
+	// against a 1.5 s bound, and two live-tail waits alone passed the 5 s default. The unfixed close() armed no grace timer,
+	// so a held connection kept it waiting for the keep-alive timeout. A fixed close() either has nothing held (the timer
+	// is cleared before it fires) or its grace timer fires and cuts, and only then resolves. The timeout is derived: each
+	// wait is bounded by its own deadline, and close() by the grace.
+	it("close() ends by the grace timer's cut, not by a held connection's own timeout, after two live-tail waits", {
+		timeout: 2 * 5000 + 2 * CLOSE_GRACE_MS + 5000,
+	}, async () => {
 		ui = await createUiServer(tempDir, { port: 0 });
 		const port = ui.port;
 		for (const id of ["tx_a", "tx_b"]) {
@@ -458,11 +466,30 @@ describe("header spend", () => {
 				},
 			);
 		}
-		const started = Date.now();
+		const order: string[] = [];
+		const graceTimers: NodeJS.Timeout[] = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const realCutAll = ui.server.closeAllConnections.bind(ui.server);
+		vi.spyOn(ui.server, "closeAllConnections").mockImplementation(() => {
+			order.push("cut");
+			realCutAll();
+		});
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+			if (ms !== CLOSE_GRACE_MS) return realSetTimeout(fn, ms);
+			const timer = realSetTimeout(() => {
+				order.push("grace-timer-fired");
+				fn();
+			}, ms);
+			graceTimers.push(timer);
+			return timer;
+		}) as unknown as typeof setTimeout);
 		await ui.close();
-		const elapsedMs = Date.now() - started;
+		order.push("close-resolved");
 		ui = undefined;
-		expect(elapsedMs).toBeLessThan(1500);
+		expect(graceTimers).toHaveLength(1);
+		expect([["close-resolved"], ["grace-timer-fired", "cut", "close-resolved"]]).toContainEqual(
+			order,
+		);
 	});
 });
 
@@ -943,8 +970,10 @@ describe("a deletion detected while the dashboard is open stays detected when th
 // poll can land while the directory is half removed: the log is already gone, the resync it triggers reads a directory
 // that still exists and holds nothing, and the directory's own removal is no further change to the log's path. The
 // dashboard then kept reading a verified, empty chain over a deleted audit directory. rmSync in the test's own process
-// cannot show it (it blocks the event loop, so no poll ever lands inside it); a separate process removing a large
-// directory can.
+// cannot show it (it blocks the event loop, so no poll ever lands inside it). The polling row stages the half-removed
+// state itself, in two steps with the observation between them, instead of racing a poll against a large `rm -rf`: the
+// race needed 60 000 files and a separate process, and a loaded host spent a minute or more only building and removing
+// them, so the row measured the filesystem and not the poller.
 describe("a deletion soon after the last change is observed", { timeout: 40_000 }, () => {
 	let tempDir: string;
 	let stage: string;
@@ -978,25 +1007,27 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 		writer.release();
 	}
 
-	/** Extra files in the audit directory, so that removing it takes longer than one poll interval. */
-	function padAudit(root: string): void {
-		const dir = join(root, ".usertrust", "audit");
-		for (let i = 0; i < PAD_FILES; i++) writeFileSync(join(dir, `pad-${i}`), "");
-	}
+	const isDirectoryGone = (s: ChainSummary): boolean =>
+		!s.chain.valid && s.chain.errors.some((e) => e.includes("Audit directory not found"));
 
 	/**
 	 * From the delivered append on: wait `delayMs`, delete the whole audit directory (no reload), and require the summary
 	 * to read the deletion within OBSERVE_BOUND_MS of the removal's END and never go back to valid. Until the directory is
 	 * gone, a half-removed one that holds nothing legitimately reads as empty: the deletion is not complete yet.
+	 * `observedWhen` is what has to be read, and it is asserted: `summaryWhen` hands back its last summary when the
+	 * bound passes, so without the assertion a caller whose predicate never held still passed on a deletion read earlier.
+	 * It defaults to the deletion itself.
 	 */
 	async function deleteAndObserve(
 		port: number,
 		delayMs: number,
 		remove: () => void | Promise<void>,
+		observedWhen: (s: ChainSummary) => boolean = isDeletion,
 	): Promise<void> {
 		await new Promise((r) => setTimeout(r, delayMs));
 		await remove();
-		const observed = await summaryWhen(port, isDeletion, OBSERVE_BOUND_MS);
+		const observed = await summaryWhen(port, observedWhen, OBSERVE_BOUND_MS);
+		expect(observedWhen(observed)).toBe(true);
 		expect(observed.chain.valid).toBe(false);
 		expect(observed.chain.errors.join(" ")).toContain("deletion detected");
 		// Once read, it is never valid again across a further window past the poll interval.
@@ -1009,8 +1040,6 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 		}
 	}
 
-	// 60 000 files take a few seconds to remove, so more than one 1 s poll lands inside the removal.
-	const PAD_FILES = 60_000;
 	// 4000 ms: four 1 s poll intervals past the end of the removal, so a miss is a real miss and a slow runner is not.
 	const OBSERVE_BOUND_MS = 4000;
 
@@ -1018,7 +1047,6 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 		it("polling mode (absent at start): the deletion is read within the bound, with no reload", async () => {
 			mkdirSync(join(stage, ".usertrust", "audit"), { recursive: true });
 			await appendMany(stage, 2, "tx_first");
-			padAudit(stage);
 			ui = await createUiServer(tempDir, { port: 0 });
 			expect((await summaryOf(ui.port)).chain).toMatchObject({
 				events: 0,
@@ -1031,14 +1059,24 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 			await appendOne(tempDir, "tx_last");
 			const delivered = await summaryWhen(ui.port, (s) => s.chain.events === 3);
 			expect(delivered.chain).toMatchObject({ events: 3, valid: true });
-			// Another process removes the large directory, so the poll can land while it is half removed.
+			// Half removed on purpose: the log and its anchor go first and the directory stays, so the resync the
+			// poller asks for reads a directory that exists. Only once that is served is the directory removed, and the
+			// poller must then notice the directory itself going: no further change to the log's path follows.
+			const port = ui.port;
 			await deleteAndObserve(
-				ui.port,
+				port,
 				delayMs,
-				() =>
-					new Promise<void>((resolve) => {
-						spawn("rm", ["-rf", auditDir()], { stdio: "ignore" }).on("close", () => resolve());
-					}),
+				async () => {
+					unlinkSync(join(auditDir(), "events.jsonl"));
+					unlinkSync(join(auditDir(), "events.jsonl.meta"));
+					// `summaryWhen` returns its last summary when the bound passes, so the first stage is asserted: a watcher
+					// that never read the log's removal would otherwise leave this stage on a stale valid summary.
+					const logGone = await summaryWhen(port, isDeletion, 15_000);
+					expect(isDeletion(logGone)).toBe(true);
+					expect(logGone.chain.errors.join(" ")).not.toContain("Audit directory not found");
+					rmSync(auditDir(), { recursive: true, force: true });
+				},
+				isDirectoryGone,
 			);
 		});
 
