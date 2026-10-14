@@ -309,8 +309,8 @@ from then on nothing reconnects and no request reaches a native client. An opera
   closure that makes its one request at once. `close()` calls it once, for its probe, which goes
   through `send()` (so an eviction marks the client) but not through `withReconnect()` (a shutdown
   probe must never reconnect). `native()` still checks `closed` there, and `close()` does not use
-  the reference after its await: the `destroy()` that follows reads the client again. A native destroy that throws leaves its client
-  open, and this check is what keeps requests off it.
+  the reference after its await: the `destroy()` that follows reads the client again. A native
+  destroy that throws leaves its client open, and this check is what keeps requests off it.
 
 The rest of the closed state:
 - `ping()` reports unhealthy.
@@ -323,9 +323,9 @@ The rest of the closed state:
   touch only this object's memory and are not refused.
 
 The tests hold this. Two parse `client.ts` and fail in any of these cases:
-- a public async method other than `ping()` does not open with `this.assertOpen()`;
+- a public async method other than `ping()` and `close()` does not open with `this.assertOpen()`;
 - anything but the constructor, `native()`, `_doReconnect()` and `destroy()` reads the native client;
-- anything but `withReconnect()` calls `native()`;
+- anything but `withReconnect()` (and `close()`, once, for its probe) calls `native()`;
 - a request closure is anything but `(native) => native.<request>(…)`.
 
 Another set runs every operation with `destroy()` landing at each of its await boundaries.
