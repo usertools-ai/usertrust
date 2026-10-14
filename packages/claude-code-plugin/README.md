@@ -550,7 +550,7 @@ both modes.
 | A reservation (200) | No decision: your permission settings apply | No decision |
 | Refused: over budget (402), denied by policy (403), an anomaly cutoff (429) | No decision, and a `would_block` record | `deny`: the call is blocked |
 | The key rejected: a 401, or a 403 whose `error` is `unauthorized` | No decision, a `gap` record (`"cause":"key-rejected"`), and a message shown to you | Blocked (exit 2). With `UT_FAIL_OPEN=1`: as in watch |
-| No usable answer: unreachable, a timeout, any other status, a malformed body | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: no decision, and a `gap` record |
+| No usable answer: unreachable, a timeout, any other status, a malformed body, a `503 ledger_unavailable` that a retry did not clear | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: no decision, and a `gap` record |
 | A shadow answer from an `evaluate_only` server | No decision | No decision |
 
 **No decision** means PreToolUse exits 0 with nothing on stdout, which Claude
@@ -583,6 +583,18 @@ more than enforcement — a stopped server then never blocks your session, and t
 usage it misses stays in the transcript to be posted at a later settle point.
 Leave it unset when the budget must be enforced. Upgrading from a release where
 blocking was the default: set `UT_CC_MODE=enforce` to keep it.
+
+A `503` whose `error` is `ledger_unavailable` means no answer came in time, from the server's
+ledger or from the authorizes queued ahead: in an outage, or in a burst past what the server
+answers in time. Nothing was authorized. PreToolUse makes one retry after a short wait (up to
+1 s, within the hook's budget). It clears a `503` whose cause, such as a burst's queue, has
+drained by then. In an outage it adds about 1 s (and the longer first-call timeout, 6.5 s,
+about 1.5 s) before the call is blocked or recorded as a gap. A second `503` is an outage
+like any other: in enforce mode, while it lasts, every tool call is **blocked** unless
+`UT_FAIL_OPEN=1`. This works with a server deadline (`ledgerTimeoutMs`) up to about 5 s, the
+server's default, at the hook's default budget. With a deadline above about 6.5 s the hook
+gives up before the server's `503` arrives, and treats the call as an outage at once, with no
+retry.
 
 **Known limitation: a call that does not complete keeps its reservation for a
 while.** PostToolUse, the hook that closes a call's hold,

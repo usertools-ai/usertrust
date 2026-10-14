@@ -1501,7 +1501,8 @@ describe("idempotency and concurrency", () => {
 
 describe("hardening", () => {
 	it("a server slower than the per-call timeout: every hook exits 0 in < 12 s, the breaker opens, and no id is lost", async () => {
-		delayMs = 5_500;
+		// Past every call's timeout: 5 s, and the authorize's 6.5 s (AUTHORIZE_TIMEOUT_MS, lib.mjs).
+		delayMs = 7_000;
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(1, 1)));
 		await writeSubagent("a1", "Plan", responseEntries("msg_s", SONNET, u(2, 2), sub("a1")));
