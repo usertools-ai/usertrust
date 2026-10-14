@@ -74,9 +74,12 @@ export const __tailTestSeam: {
  * or another directory at the path, is a resync), then the log's size (a shrink resyncs, a grow is incremental), then at
  * the same size: its identity (another file resyncs), whether the last full load failed (a failed read is retried), and
  * its timestamps (a rewrite in place at the same length; guarded, see `rewrittenAtSameSize`). While the known size is
- * 0, `anchorOf` (the `.meta` anchor's `anchorStamp` at the last full load) is compared too: an anchor written or changed
- * beside no log is a resync. Once the log holds bytes the anchor is not watched: the writer rewrites it after every
- * append, and each append would be a full reload.
+ * 0, or the last full load saw no anchor, `anchorOf` (the `.meta` anchor's `anchorStamp` at the last full load) is
+ * compared too, after the size and identity checks: an anchor written or changed beside no log is a resync, and so is
+ * the anchor a first append writes after a load that caught its log line but not yet its anchor (the writer fsyncs the
+ * log before it renames the anchor into place). Once the log holds bytes AND a load has seen an anchor, the anchor is
+ * not watched: the writer rewrites it after every append, and each append would be a full reload. A vault whose anchor
+ * never appears costs one stat of it per check, and no reload while it stays absent.
  * With `events.onReverify`, the whole vault is also re-verified every `REVERIFY_MS`, whatever the checks saw.
  */
 export function watchLedger(
@@ -109,7 +112,7 @@ export function watchLedger(
 
 	/**
 	 * The log's stat (none where it failed), and a key of every field of it a check compares, or of its error, of the
-	 * audit directory's state, and, while the known size is 0, of the anchor's (`anchorWatched`): two equal keys are a
+	 * audit directory's state, and, while the anchor is watched, of the anchor's (`anchorWatched`): two equal keys are a
 	 * vault no check could tell apart. The log's fields come from ONE
 	 * BigInt stat: a JS number cannot hold a 64-bit file id (Windows' exceed 2^53), and two ids that round to one value
 	 * would let a key hide a replacement.
@@ -126,12 +129,17 @@ export function watchLedger(
 		return { st, key: `${key}|${auditDirNow()}|${anchorWatched() ? anchorStamp(metaPath) : "-"}` };
 	};
 
-	/** Whether the anchor is compared: only while the known log size is 0, and only where the caller records one. */
-	const anchorWatched = (): boolean => anchorOf !== undefined && sizeOf() === 0;
+	/**
+	 * Whether the anchor is compared: only where the caller records one, and only while the known log size is 0 or the
+	 * last full load saw no anchor ("absent"). The second keeps a first append's anchor watched when a load landed
+	 * between its log write and its anchor rename; the load that sees the anchor records its stamp, and watching stops.
+	 */
+	const anchorWatched = (): boolean =>
+		anchorOf !== undefined && (sizeOf() === 0 || anchorOf() === "absent");
 
 	/**
-	 * An anchor that appeared, went, or changed (another inode, a new ctime) since the last full load, while the log
-	 * holds no bytes. A load records the stamp it saw, so the same change is reported once. Unknown recorded proves nothing.
+	 * An anchor that appeared, went, or changed (another inode, a new ctime) since the last full load, while it is watched
+	 * (`anchorWatched`). A load records the stamp it saw, so the same change is reported once. Unknown recorded proves nothing.
 	 */
 	const anchorMoved = (): boolean => {
 		const known = anchorOf?.();
@@ -230,8 +238,9 @@ export function watchLedger(
 			timesMoved = false;
 			events.onResync();
 		}
-		// No log bytes on either side: an anchor written beside no log changes no size, identity or timestamp of the log.
-		else if (known === 0 && anchorMoved()) events.onResync();
+		// An anchor written beside no log, or after a load that saw the log but no anchor yet, changes no size, identity or
+		// timestamp of the log. After the size and identity checks: a grow is still a grow.
+		else if (anchorMoved()) events.onResync();
 		// A read that failed is not a verdict: a check `failedReadRetry` let through reloads in full, whatever changed (a
 		// permission restored changes neither the log's size nor its identity).
 		else if (reloadPending?.() === true) events.onResync();
@@ -297,7 +306,7 @@ export function watchLedger(
 		// the events do. It checks the log by PATH, so it also sees a directory replaced under the watcher.
 		// The memo stops a torn last line (a writer that died mid-line) from being re-read in full every tick: check()
 		// runs only when the log's size, timestamps or identity, its stat error, the audit directory's identity (or
-		// absence), the anchor's stamp while the known size is 0, or the known size moved since the last call, while a timestamp change waits for its second check or
+		// absence), the anchor's stamp while it is watched (`anchorWatched`), or the known size moved since the last call, while a timestamp change waits for its second check or
 		// for the same-size limit, or, while the last full load failed, once a retry of it is due (`failedReadRetry`).
 		// Every field check() compares is in the key (`readLog`'s, and the known size), or a skip could hide it.
 		let memo: string | undefined;

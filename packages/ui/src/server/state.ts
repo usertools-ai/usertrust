@@ -72,8 +72,9 @@ export interface LedgerState {
 	 */
 	lastLine: LineCheck | undefined;
 	/**
-	 * The `.meta` anchor as a stat saw it just before this load read it (`anchorStamp`). While the log holds no bytes, the
-	 * watcher compares it with the anchor now, so an anchor written or changed beside no log is a full reload at once.
+	 * The `.meta` anchor as a stat saw it just before this load read it (`anchorStamp`). While the log holds no bytes, or
+	 * this stamp is "absent", the watcher compares it with the anchor now, so an anchor written or changed beside no log,
+	 * or written after a load that caught a first append's log line before its anchor, is a full reload at once.
 	 */
 	anchorStamp: string;
 	/**
