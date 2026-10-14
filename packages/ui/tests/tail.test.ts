@@ -1671,12 +1671,15 @@ describe("fs.watch mode's backstop when file-change events arrive late or never"
 		});
 
 		describe("full loads at an unchanged size, and on a schedule", () => {
-			/** The log's identity and timestamps now, as a load records them. */
+			/**
+			 * The log's identity and timestamps now, as a load records them: through the stat seam, so a row that drives the
+			 * timestamps there records the ones the watcher sees.
+			 */
 			const recorded = (): {
 				id: string | undefined;
 				times: { mtimeNs: bigint; ctimeNs: bigint };
 			} => {
-				const st = statSync(logPath(), { bigint: true });
+				const st = __tailTestSeam.statLog(logPath());
 				return {
 					id: fileIdentity(st),
 					times: { mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs },
@@ -1714,23 +1717,80 @@ describe("fs.watch mode's backstop when file-change events arrive late or never"
 				writeFileSync(logPath(), "{}\n");
 			});
 
-			it("guard (a reload per ctime change): a mode-change churn at an unchanged size reloads at most once per window", () => {
-				__tailTestSeam.sameSizeReloadMs = 5 * BOUND;
+			/**
+			 * A row that needs a timestamp to move must observe it moving, or drive it through the seam. On a kernel whose
+			 * file timestamps advance on a coarse clock (a jiffy, a few milliseconds), a churn of `chmod` calls inside one
+			 * tick leaves ctime unchanged: a row that counted on the kernel moving it saw no reload at all on a Linux CI
+			 * runner. These rows hand the watcher each churn step's ctime through `statLog`, at the real size and identity.
+			 * `distinct` false is that coarse clock: every step reports the ctime the load recorded.
+			 */
+			function churnThroughSeam(steps: number, distinct: boolean) {
+				const real = __tailTestSeam.statLog;
+				const base = real(logPath()).ctimeNs;
+				let step = 0;
+				__tailTestSeam.statLog = (p) => {
+					const st = real(p);
+					return Object.assign(Object.create(Object.getPrototypeOf(st)), st, {
+						ctimeNs: distinct ? base + BigInt(step) * 1_000_000n : base,
+					});
+				};
 				const w = startLoaded();
 				try {
-					for (let i = 0; i < 30; i++) {
-						chmodSync(logPath(), i % 2 === 0 ? 0o644 : 0o600);
+					for (let i = 0; i < steps; i++) {
+						// One mode change: a new ctime at the same size, and the check that sees it.
+						step += 1;
 						tick();
 					}
-					const resyncs = w.delivered.filter((d) => d.what === "resync");
-					// Positive control: the churn is seen at all.
-					expect(resyncs.length).toBeGreaterThanOrEqual(1);
-					expect(resyncs.length).toBeLessThanOrEqual(6);
-					const ats = resyncs.map((d) => d.at);
-					for (let i = 1; i < ats.length; i++) {
-						expect((ats[i] ?? 0) - (ats[i - 1] ?? 0)).toBeGreaterThanOrEqual(5 * BOUND);
+					return w.delivered.filter((d) => d.what === "resync").map((d) => d.at);
+				} finally {
+					w.stop();
+				}
+			}
+
+			it("guard (a reload per ctime change): a mode-change churn at an unchanged size reloads at most once per window", () => {
+				__tailTestSeam.sameSizeReloadMs = 5 * BOUND;
+				const start = Date.now();
+				const ats = churnThroughSeam(30, true);
+				// Positive control: the churn is seen at all, the change holding on two consecutive checks (the second tick).
+				expect(ats[0]).toBe(start + 2 * BOUND);
+				// A second window allows one more, and no window allows two.
+				expect(ats.length).toBeGreaterThanOrEqual(2);
+				expect(ats.length).toBeLessThanOrEqual(Math.ceil(30 / 5));
+				for (let i = 1; i < ats.length; i++) {
+					expect((ats[i] ?? 0) - (ats[i - 1] ?? 0)).toBeGreaterThanOrEqual(5 * BOUND);
+				}
+			});
+
+			it("a coarse timestamp clock (the same ctime at every churn step) reloads nothing: why the row above drives ctime through the seam", () => {
+				__tailTestSeam.sameSizeReloadMs = 5 * BOUND;
+				expect(churnThroughSeam(30, false)).toEqual([]);
+			});
+
+			it("on the real file system: a chmod loop whose every ctime change is OBSERVED reloads exactly once in one window", () => {
+				__tailTestSeam.sameSizeReloadMs = 60 * BOUND;
+				// A synchronous wait the fake timers do not touch: each wait is at least 1 ms, so 2000 of them bound it by 2 s.
+				const pause = new Int32Array(new SharedArrayBuffer(4));
+				const ctime = (): bigint => statSync(logPath(), { bigint: true }).ctimeNs;
+				const w = startLoaded();
+				try {
+					tick(2);
+					expect(w.what()).toEqual([]);
+					for (let i = 0; i < 5; i++) {
+						const before = ctime();
+						chmodSync(logPath(), i % 2 === 0 ? 0o600 : 0o644);
+						let waits = 0;
+						while (ctime() === before) {
+							if (waits >= 2000)
+								throw new Error(
+									"ctime did not change within 2 s of chmod: the file system's timestamp clock is coarser than the bound",
+								);
+							Atomics.wait(pause, 0, 0, 1);
+							waits += 1;
+						}
+						tick();
 					}
-					expect(w.what().filter((x) => x !== "resync")).toEqual([]);
+					// The first change, held on two consecutive checks, reloads once; every later one waits on the window.
+					expect(w.what()).toEqual(["resync"]);
 				} finally {
 					w.stop();
 				}

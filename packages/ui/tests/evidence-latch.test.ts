@@ -1008,6 +1008,80 @@ describe("the last verified event: what a full load must still hold, and when fu
 		expect(after.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
 	});
 
+	// The tip is the ONE event no other event's `previousHash` names. A fork has two or more, a crafted cycle none: from
+	// neither is a tip picked, so the remembered event is never set or moved by such a read, and it never reads verified.
+	describe("a read with no single tip fails closed", () => {
+		/** An event whose `hash` and `previousHash` are chosen, not computed: what a crafted cycle needs. */
+		function crafted(hash: string, previousHash: string, sequence: number): string {
+			return `${canonicalize({ actor: "local", data: { cost: 1, settled: true, transferId: `tx_${sequence}` }, hash, id: `c${sequence}`, kind: "llm_call", previousHash, sequence, timestamp: new Date().toISOString() })}\n`;
+		}
+		const genesis = "0".repeat(64);
+		const chainOfThree = () => {
+			const a1 = eventLine(genesis, "tx_a1", 1);
+			const a2 = eventLine(a1.hash, "tx_a2", 2);
+			const a3 = eventLine(a2.hash, "tx_a3", 3);
+			return { a1, a2, a3 };
+		};
+
+		it("red-first (tip guessed): a FORK, two events with no successor, sets no remembered event and never reads verified", () => {
+			mkdirSync(auditDir(), { recursive: true });
+			const { a1, a2, a3 } = chainOfThree();
+			// Forked from the second event, with the later sequences: the last in sequence order is b2, the first tip read a3.
+			const b1 = eventLine(a2.hash, "tx_b1", 4);
+			const b2 = eventLine(b1.hash, "tx_b2", 5);
+			writeFileSync(log(), a1.line + a2.line + a3.line + b1.line + b2.line);
+			// A first load (no head yet) records its head from any whole read: the evidence, but no event.
+			const first = loadState(vault());
+			expect(first.head).toEqual({ verifiedHash: undefined, hadEvidence: true });
+			expect(first.verified).toBe(false);
+			expect(first.summary.chain.valid).toBe(false);
+			// With a head held from a verified read of the first three, the fork moves nothing: the caller keeps its head.
+			writeFileSync(log(), a1.line + a2.line + a3.line);
+			const before = loadState(vault());
+			expect(before.verified).toBe(true);
+			expect(before.head).toEqual({ verifiedHash: a3.hash, hadEvidence: true });
+			appendFileSync(log(), b1.line + b2.line);
+			const after = loadState(vault(), undefined, true, [], before.auditDirId, before.head);
+			expect(after.head).toBeUndefined();
+			expect(after.verified).toBe(false);
+			expect(after.summary.chain.valid).toBe(false);
+		});
+
+		it("red-first (tip guessed): a crafted CYCLE of previousHash has no tip: no remembered event, never verified", () => {
+			mkdirSync(auditDir(), { recursive: true });
+			const x = "a".repeat(64);
+			const y = "b".repeat(64);
+			writeFileSync(log(), crafted(x, y, 1) + crafted(y, x, 2));
+			const first = loadState(vault());
+			expect(first.summary.chain.events).toBe(2);
+			expect(first.head).toEqual({ verifiedHash: undefined, hadEvidence: true });
+			expect(first.verified).toBe(false);
+			expect(first.summary.chain.valid).toBe(false);
+			// Against a held head the cycle moves nothing either.
+			const held = { verifiedHash: "c".repeat(64), hadEvidence: true };
+			const after = loadState(vault(), undefined, true, [], first.auditDirId, held);
+			expect(after.head).toBeUndefined();
+			expect(after.verified).toBe(false);
+		});
+
+		it("an EMPTY log claims no event: a first load remembers none, and a held one is not moved by it", () => {
+			mkdirSync(auditDir(), { recursive: true });
+			writeFileSync(log(), "");
+			const first = loadState(vault());
+			expect(first.summary.chain.events).toBe(0);
+			expect(first.head?.verifiedHash).toBeUndefined();
+			// A held event the empty log no longer holds: latched, the head kept, and the vault reads invalid. (`verified` is
+			// the read's own verdict before deletion causes, true for an empty log; it moves no head on a latched read.)
+			const { a3 } = chainOfThree();
+			const held = { verifiedHash: a3.hash, hadEvidence: true };
+			const after = loadState(vault(), undefined, true, [], first.auditDirId, held);
+			expect(after.head).toBeUndefined();
+			expect(after.deletionCauses).toEqual(["events"]);
+			expect(after.summary.chain.valid).toBe(false);
+			expect(after.summary.chain.errors).toContain(EVENTS_ERROR);
+		});
+	});
+
 	it("events appended after a successful full load, then the log truncated back to its first three, are latched", async () => {
 		await appendEvents(root, 3, "tx");
 		const text = readFileSync(log(), "utf-8");

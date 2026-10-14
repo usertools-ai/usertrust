@@ -694,6 +694,10 @@ describe("a same-size replacement without stable inode numbers", { timeout: 30_0
 		const tampered = text.replace('"cost":5', '"cost":9');
 		expect(Buffer.byteLength(tampered)).toBe(Buffer.byteLength(text));
 		writeFileSync(join(vault, "audit", "tampered.tmp"), tampered);
+		// An explicit, distinct mtime: written within one tick of a coarse file-system clock, the copy would carry the
+		// mtime (and ctime) the load recorded, and inode 0 leaves the watcher nothing else to see the replacement by.
+		const loaded = statSync(log).mtimeMs;
+		utimesSync(join(vault, "audit", "tampered.tmp"), new Date(), new Date(loaded + 5000));
 		renameSync(join(vault, "audit", "tampered.tmp"), log);
 		const invalid = await waitFor(async () => !(await summaryOf(port)).chain.valid, 5000);
 		expect(invalid).toBe(true);

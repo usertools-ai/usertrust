@@ -98,8 +98,9 @@ export interface LedgerState {
 	 */
 	head: LogHead | undefined;
 	/**
-	 * Whether this load VERIFIED the vault: it read the vault whole (`loadSucceeded`), and that read's own verdict is
-	 * valid, before any deletion cause (carried in or found by this load) is added. The caller keeps it as the last full
+	 * Whether this load VERIFIED the vault: it read the vault whole (`loadSucceeded`), that read's own verdict is
+	 * valid, before any deletion cause (carried in or found by this load) is added, and its events have a single tip
+	 * when they have any (`tipHash`). The caller keeps it as the last full
 	 * load's outcome: while it is false, no append is extended onto the state, and a load is the only thing that moves
 	 * the head.
 	 */
@@ -131,7 +132,7 @@ export interface LogTimes {
  * reading order), or of the last event a verified append added while the last full load had verified. Each event's
  * hash commits to every event before it, so an honest later log still holds an event with that hash, whatever was
  * appended or rotated since; one that does not was truncated, emptied or replaced by another chain. Undefined when the
- * load read no event with a hash.
+ * load read no event with a hash, or no single tip (a fork or a cycle, which only a first load records: see `head`).
  *
  * `hadEvidence` is whether the vault held anything: log bytes in `events.jsonl` or in any rotated segment (malformed
  * lines included), an anchor, or events. A log of malformed lines only has no event to remember, so its removal is seen
@@ -451,7 +452,11 @@ function loadPass(
 	const readValid = integrity.valid && (vault.valid || (noAuditDir && readErrors.length === 0));
 	const valid =
 		integrity.valid && !deletionDetected && (vault.valid || (noAuditDir && errors.length === 0));
-	const verified = loadSucceeded && readValid;
+	// The chain's tip by linkage (`tipHash`). A read whose events hold no single tip (a fork, or a crafted cycle of
+	// `previousHash`) never counts as verified, whatever the verifier said: no tip is ever picked from it.
+	const tip = tipHash(events);
+	const noUniqueTip = tip === undefined && events.some((e) => typeof e.hash === "string");
+	const verified = loadSucceeded && readValid && !noUniqueTip;
 
 	const truncated = events.length > rowCap;
 	const visible = truncated ? events.slice(-rowCap) : events;
@@ -504,7 +509,7 @@ function loadPass(
 		head:
 			loadSucceeded && readSucceeded && !latchesEvents && (verified || head === undefined)
 				? {
-						verifiedHash: tipHash(events, head),
+						verifiedHash: tip,
 						hadEvidence: evidence.logBytes || evidence.anchor || evidence.events,
 					}
 				: undefined,
@@ -518,27 +523,21 @@ function loadPass(
 /**
  * The chain's tip, by LINKAGE: the one event whose hash no other event's `previousHash` names. Never the last event in
  * reading order: in file order (events without `sequence`) `events.jsonl` is read first and the segments after it, so
- * the last event read can be an older segment's tail. When no single event is the tip (a broken or forked chain, which
- * a load that verified never reads), the last event in sequence order if every event has a `sequence` (the order the
- * reader returns them in then), and otherwise the head's own hash, unchanged: no tip is guessed from file order.
- * Undefined when the read holds no event with a hash.
+ * the last event read can be an older segment's tail. Undefined unless exactly one event is the tip: a read with no
+ * event with a hash has none, a FORK (two or more events with no successor) has no tip, and neither has a crafted CYCLE
+ * of `previousHash` (no event without a successor). No tip is ever picked from those, neither the last in sequence
+ * order nor the first in reading order: a valid chain always has exactly one, and a guessed one would be remembered as
+ * verified and let the verified events be removed unseen.
  */
 function tipHash(
-	events: readonly { hash?: unknown; previousHash?: unknown; sequence?: unknown }[],
-	head: LogHead | undefined,
+	events: readonly { hash?: unknown; previousHash?: unknown }[],
 ): string | undefined {
 	const named = new Set<unknown>();
 	for (const e of events) named.add(e.previousHash);
 	// A Set, so an event read twice (a load racing a rotation's two steps) is one candidate, not two.
 	const tips = new Set<string>();
 	for (const e of events) if (typeof e.hash === "string" && !named.has(e.hash)) tips.add(e.hash);
-	if (tips.size === 1) return [...tips][0];
-	if (events.length === 0) return undefined;
-	if (events.every((e) => typeof e.sequence === "number")) {
-		const hash = events.at(-1)?.hash;
-		return typeof hash === "string" ? hash : undefined;
-	}
-	return head?.verifiedHash;
+	return tips.size === 1 ? [...tips][0] : undefined;
 }
 
 /**
