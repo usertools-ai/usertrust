@@ -1,7 +1,7 @@
 // A second meter is visible, a missing one is not. This plugin was renamed from
 // `usertrust-claude-code`; an install of the old name cannot be updated, and with both
 // loaded (both share one state dir), every tool call reserves budget twice, and some versions
-// of the old plugin also charge twice. SessionStart WARNS when the old plugin looks enabled,
+// of the old plugin can also charge twice. SessionStart WARNS when the old plugin looks enabled,
 // and this plugin always meters: settings files are evidence of what Claude Code loaded, not
 // proof (--settings and --setting-sources, a change made after the session started, and a
 // different home all make them wrong), and a wrong "enabled" that stopped metering would be a
@@ -209,22 +209,22 @@ export function settingsDirs({ env, payload }) {
 /**
  * The warning SessionStart shows when the old plugin looks enabled. It names the cost of
  * running both, as measured: budget reserved twice per tool call, and some versions of the old
- * plugin charging twice. This plugin STILL meters: the settings are evidence, not proof, of
+ * plugin able to charge twice. This plugin STILL meters: the settings are evidence, not proof, of
  * what Claude Code loaded. The file is named so a
  * `true` left for a plugin that is not installed can be removed, and `key` is the exact
  * `<name>@<marketplace>` whose winning value is true.
  */
 export function alsoEnabledWarning(file, key) {
-	return `usertrust: usertrust-claude-code also appears to be enabled (${file}); if it is, every tool call reserves budget twice, and some of its versions charge twice. Uninstall it: /plugin uninstall ${key}`;
+	return `usertrust: usertrust-claude-code also appears to be enabled (${file}); if it is, every tool call reserves budget twice, and some of its versions can charge twice. Uninstall it: /plugin uninstall ${key}`;
 }
 
 /**
  * The warning SessionStart prefixes when the old plugin's state could not be told. It names the
  * same cost as `alsoEnabledWarning`, as a possibility: a second meter would reserve budget
- * twice per tool call, and some versions of the old plugin charge twice.
+ * twice per tool call, and some versions of the old plugin can charge twice.
  */
 export function unknownWarning(why) {
-	return `usertrust: could not tell whether usertrust-claude-code is also enabled (${why}); usertools meters this session, so a second meter may be running: it would reserve budget twice per tool call, and some of its versions charge twice.`;
+	return `usertrust: could not tell whether usertrust-claude-code is also enabled (${why}); usertools meters this session, so a second meter may be running: it would reserve budget twice per tool call, and some of its versions can charge twice.`;
 }
 
 /** What `launch.mjs` found, for SessionStart (same process) to put first on its line. */

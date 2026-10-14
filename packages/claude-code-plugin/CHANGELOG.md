@@ -80,7 +80,7 @@ npm, and its version is its own: the `usertrust` packages and their
 
 - **The SessionStart warning about the old plugin now says what running both costs.** With
   `usertrust-claude-code` also enabled, every tool call reserves budget twice, and some versions
-  of the old plugin charge twice. The warning (enabled, or unable to tell) says so in one line.
+  of the old plugin can charge twice. The warning (enabled, or unable to tell) says so in one line.
   `usertools` still meters either way.
 
 ## [3.0.2] - 2026-10-12

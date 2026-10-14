@@ -28,9 +28,10 @@ const { peerMeter, settingsDirs, alsoEnabledWarning, unknownWarning } = (await i
 	unknownWarning: (why: string) => string;
 };
 
-const COST_ENABLED = "every tool call reserves budget twice, and some of its versions charge twice";
+const COST_ENABLED =
+	"every tool call reserves budget twice, and some of its versions can charge twice";
 const COST_UNKNOWN =
-	"it would reserve budget twice per tool call, and some of its versions charge twice";
+	"it would reserve budget twice per tool call, and some of its versions can charge twice";
 
 const OLD = "usertrust-claude-code@usertrust";
 
@@ -301,7 +302,7 @@ describe("SessionStart warns of an enabled usertrust-claude-code, and usertools 
 		const message = JSON.parse(start.stdout).systemMessage as string;
 		expect(message.startsWith(`${alsoEnabledWarning(file, OLD)} usertrust: watch-only`)).toBe(true);
 		expect(alsoEnabledWarning("/the/file.json", "usertrust-claude-code@sample")).toBe(
-			"usertrust: usertrust-claude-code also appears to be enabled (/the/file.json); if it is, every tool call reserves budget twice, and some of its versions charge twice. Uninstall it: /plugin uninstall usertrust-claude-code@sample",
+			"usertrust: usertrust-claude-code also appears to be enabled (/the/file.json); if it is, every tool call reserves budget twice, and some of its versions can charge twice. Uninstall it: /plugin uninstall usertrust-claude-code@sample",
 		);
 		expect(message).toContain(COST_ENABLED);
 		const before = hits;
@@ -313,7 +314,7 @@ describe("SessionStart warns of an enabled usertrust-claude-code, and usertools 
 
 	it("unknownWarning: the exact text, cost included", () => {
 		expect(unknownWarning("settings.json is not JSON")).toBe(
-			"usertrust: could not tell whether usertrust-claude-code is also enabled (settings.json is not JSON); usertools meters this session, so a second meter may be running: it would reserve budget twice per tool call, and some of its versions charge twice.",
+			"usertrust: could not tell whether usertrust-claude-code is also enabled (settings.json is not JSON); usertools meters this session, so a second meter may be running: it would reserve budget twice per tool call, and some of its versions can charge twice.",
 		);
 	});
 

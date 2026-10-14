@@ -35,7 +35,7 @@ in 3.0.0. If `usertrust-claude-code` is installed, uninstall it BEFORE installin
 ```
 
 With both installed, every tool call reserves budget twice, and some versions of the old plugin
-charge twice. `usertools` always meters, and when `usertrust-claude-code` looks ENABLED in your
+can charge twice. `usertools` always meters, and when `usertrust-claude-code` looks ENABLED in your
 settings (or it cannot tell), SessionStart opens with a warning naming the settings file. Your
 configuration file, state directory and server settings are unchanged by the rename.
 
