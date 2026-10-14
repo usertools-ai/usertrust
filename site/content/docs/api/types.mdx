@@ -64,7 +64,7 @@ interface TrustReceipt {
   timestamp: string;
   auditDegraded?: boolean;
   usageSource?: "provider" | "estimated";
-  /** Four-tier disjoint token split. Present iff usageSource === "provider". */
+  /** Four-tier disjoint token split. Present iff cost was computed from these counts and their input and output counts were usable: always for "provider", and for "estimated" counts a headless settle priced from. */
   usage?: ReceiptUsage;
   /** The 1-hour share of usage.cacheWriteTokens and its rate. Present only when the call wrote 1h cache. */
   cacheWrite1h?: { tokens: number; ratePer1k: number };

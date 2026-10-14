@@ -334,6 +334,18 @@ export function withImplausible(
 }
 
 /**
+ * Whether a candidate's input and output counts are both usable: the rule by which
+ * `sanitizeUsage` keeps a "provider" label (an explicit 0 qualifies; an absent, non-finite,
+ * negative or non-numeric count does not, since its clamped 0 is fabricated). A caller
+ * that publishes counts under any label applies it to the same candidate it sanitizes.
+ */
+export function inputOutputUsable(
+	raw: Pick<RawUsageCandidate, "inputTokens" | "outputTokens">,
+): boolean {
+	return readCount(raw.inputTokens) != null && readCount(raw.outputTokens) != null;
+}
+
+/**
  * The single sanitizer. Every extractor ends here, and any boundary that
  * assembles a snapshot from already-disjoint counters (the pi-ai pass-through
  * rows, headless caller-supplied usage) should route through it too rather
@@ -380,6 +392,7 @@ export function sanitizeUsage(
 	const input = readCount(r.inputTokens);
 	const output = readCount(r.outputTokens);
 	const reported = input != null && output != null;
+	// (`inputOutputUsable` states the same rule, for a caller deciding publication.)
 	// Each raw count is read EXACTLY ONCE and reused: a getter that answers differently on a second read must not
 	// pass the plausibility check on one value and be priced on another.
 	const cacheRead = readCount(r.cacheReadTokens) ?? 0;
@@ -502,6 +515,11 @@ export function implausibleUsageData(
  */
 export function publishableUsage(snapshot: NormalizedUsage): ReceiptUsage | undefined {
 	if (snapshot.source !== "provider") return undefined;
+	return usageBlock(snapshot);
+}
+
+/** The four tiers, as a fresh copy (`source` dropped: it is published as `usageSource`). */
+function usageBlock(snapshot: NormalizedUsage): ReceiptUsage {
 	return {
 		inputTokens: snapshot.inputTokens,
 		outputTokens: snapshot.outputTokens,
@@ -558,17 +576,25 @@ export function withSupported1hTier(
 }
 
 /**
- * The record fields a PUBLISHABLE snapshot adds to a chain event or receipt: the
- * four-tier `usage` block and, only when the call wrote 1-hour cache, the root
- * `cacheWrite1h` record. ONE function so the four emission sites cannot disagree
- * about either; both are absent for an estimated snapshot.
+ * The record fields a settle adds to its chain event and receipt: the four-tier `usage`
+ * block and, only when the call wrote 1-hour cache, the root `cacheWrite1h` record. ONE
+ * function so the emission sites cannot disagree about either.
+ *
+ * Published exactly when these counts PRICED the call (`pricedFromCounts`), whatever the
+ * call's `usageSource` label: then `cost` recomputes from them and `pricing.appliedRates`,
+ * and leaving them out makes the record unable to reproduce its own cost. A call priced at
+ * the metered estimate (no counts, or counts refused as implausible) publishes neither, since
+ * nothing tokens-based produced its cost. Each caller says which it is: govern prices only
+ * provider-sourced counts (`snapshot.source === "provider"`); headless also prices a caller's
+ * counts it labels `"estimated"`, which stays the provenance label.
  */
 export function publishableUsageFields(
 	snapshot: NormalizedUsage,
 	rates: ModelRates,
+	pricedFromCounts: boolean,
 ): { usage?: ReceiptUsage; cacheWrite1h?: CacheWrite1h } {
-	const usage = publishableUsage(snapshot);
-	if (usage === undefined) return {};
+	if (!pricedFromCounts) return {};
+	const usage = usageBlock(snapshot);
 	// The 1-hour rate published is the one THIS call's prompt tier priced it at (a
 	// `longPrompt` row), from the same counts the cost used.
 	const cacheWrite1h = resolveCacheWrite1h(

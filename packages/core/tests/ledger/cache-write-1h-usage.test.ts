@@ -12,6 +12,7 @@ import {
 import {
 	fromAnthropicUsage,
 	fromOpenAICompletionsUsage,
+	inputOutputUsable,
 	publishableUsageFields,
 	sanitizeUsage,
 	withSupported1hTier,
@@ -120,7 +121,7 @@ describe("1h share in usage extraction", () => {
 			cacheWrite1hTokens: 40,
 			source: "provider",
 		});
-		const f = publishableUsageFields(with1h, SONNET);
+		const f = publishableUsageFields(with1h, SONNET, true);
 		expect(f.usage).toEqual({
 			inputTokens: 1,
 			outputTokens: 1,
@@ -131,15 +132,61 @@ describe("1h share in usage extraction", () => {
 		const without = publishableUsageFields(
 			sanitizeUsage({ inputTokens: 1, outputTokens: 1, cacheWriteTokens: 100, source: "provider" }),
 			SONNET,
+			true,
 		);
 		expect(without.usage).toBeDefined();
 		expect("cacheWrite1h" in without).toBe(false);
-		// An ESTIMATED snapshot publishes nothing, 1h share or not.
+		// A call its counts did not price publishes nothing, 1h share or not.
 		const est = publishableUsageFields(
 			sanitizeUsage({ inputTokens: 1, cacheWriteTokens: 100, cacheWrite1hTokens: 40 }),
 			SONNET,
+			false,
 		);
 		expect(est).toEqual({});
+	});
+
+	it("publishableUsageFields: the caller's pricedFromCounts decides, not the snapshot's label", () => {
+		// Counts that priced the call are published under an "estimated" label too, 1h record included:
+		// without them the record cannot reproduce its cost.
+		const labelledEstimated = sanitizeUsage({
+			inputTokens: 1,
+			outputTokens: 1,
+			cacheWriteTokens: 100,
+			cacheWrite1hTokens: 40,
+			source: "estimated",
+		});
+		expect(labelledEstimated.source).toBe("estimated");
+		const priced = publishableUsageFields(labelledEstimated, SONNET, true);
+		expect(priced.usage).toEqual({
+			inputTokens: 1,
+			outputTokens: 1,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 100,
+		});
+		expect(priced.cacheWrite1h).toEqual({ tokens: 40, ratePer1k: 60 });
+		// And a "provider" snapshot whose counts did not price the call publishes nothing.
+		const provider = sanitizeUsage({ inputTokens: 1, outputTokens: 1, source: "provider" });
+		expect(provider.source).toBe("provider");
+		expect(publishableUsageFields(provider, SONNET, false)).toEqual({});
+	});
+
+	it("inputOutputUsable: the rule sanitizeUsage keeps a provider label by", () => {
+		const cases: Array<[unknown, unknown]> = [
+			[1, 1],
+			[0, 0],
+			[undefined, 1],
+			[1, undefined],
+			[Number.NaN, 1],
+			[1, Number.POSITIVE_INFINITY],
+			[-1, 1],
+			["5", 1],
+		];
+		for (const [inputTokens, outputTokens] of cases) {
+			const raw = { inputTokens, outputTokens, source: "provider" } as never;
+			expect(inputOutputUsable(raw)).toBe(sanitizeUsage(raw).source === "provider");
+		}
+		expect(inputOutputUsable({ inputTokens: 0, outputTokens: 0 })).toBe(true);
+		expect(inputOutputUsable({ inputTokens: Number.NaN, outputTokens: 1 })).toBe(false);
 	});
 });
 

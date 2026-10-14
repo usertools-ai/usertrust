@@ -73,11 +73,11 @@
 		"usageSource": {
 			"type": "string",
 			"enum": ["provider", "estimated"],
-			"description": "Whether cost came from provider-reported usage or the pre-call estimate."
+			"description": "Where the token counts behind cost came from: 'provider' (reported by the provider) or 'estimated' (the caller's or the library's estimate). A provenance label only: whether cost was priced from counts is said by usage being present. With no counts at all, cost is the metered pre-call estimate and usage is absent."
 		},
 		"usage": {
 			"type": "object",
-			"description": "NEW in v2. The four-tier DISJOINT token split this cost was metered from. Present iff usageSource is 'provider' — an estimated settle has no reported counts, so this is omitted outright rather than zero-filled, to avoid inviting a recompute of a cost that was never derived from token counts. inputTokens is fresh (non-cached) prompt tokens only; cacheReadTokens and cacheWriteTokens are separate tiers, so the four fields sum to the call's billable tokens with nothing double-counted. Together with pricing.appliedRates this is the whole reconciliation surface: ceil(sum(counts x rates / 1000)), floored at 1, reproduces cost exactly (when the call wrote 1-hour cache, split the write term with the root cacheWrite1h field). Multiply THEN divide: (tokens * ratePer1k) / 1000, not (tokens / 1000) * ratePer1k, which can differ by a whole usertoken after the ceil.",
+			"description": "NEW in v2. The four-tier DISJOINT token split this cost was metered from. Present iff cost was computed from these counts and their input and output counts were both usable: always for usageSource 'provider', and for 'estimated' when the caller's estimated counts are what the cost was computed from (a headless settle that reports them). Omitted outright, never zero-filled, when cost is the metered pre-call estimate (no counts, or counts refused as implausible), since that cost was never derived from token counts, and when an input or output count was unusable, since its clamped 0 would be fabricated. inputTokens is fresh (non-cached) prompt tokens only; cacheReadTokens and cacheWriteTokens are separate tiers, so the four fields sum to the call's billable tokens with nothing double-counted. Together with pricing.appliedRates this is the whole reconciliation surface: ceil(sum(counts x rates / 1000)), floored at 1, reproduces cost exactly (when the call wrote 1-hour cache, split the write term with the root cacheWrite1h field). Multiply THEN divide: (tokens * ratePer1k) / 1000, not (tokens / 1000) * ratePer1k, which can differ by a whole usertoken after the ceil.",
 			"required": ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"],
 			"properties": {
 				"inputTokens": {

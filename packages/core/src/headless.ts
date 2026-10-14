@@ -112,6 +112,7 @@ import {
 } from "./ledger/pricing.js";
 import {
 	implausibleUsageData,
+	inputOutputUsable,
 	materializeMaxima,
 	materializeRefused,
 	publishableUsageFields,
@@ -1987,27 +1988,33 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// — the reason a NaN from a caller's arithmetic cannot reach audit
 				// canonicalization, which throws on non-finite — and downgrades a
 				// "provider" label whose input/output is unusable.
+				const candidate = {
+					inputTokens: reportedCounts.inputTokens ?? 0,
+					outputTokens: reportedCounts.outputTokens ?? 0,
+					cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
+					cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
+					cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
+					source: usageReported ? (input.usageSource ?? "provider") : "estimated",
+				} as const;
 				const usageSnapshot = withSupported1hTier(
-					sanitizeUsage(
-						{
-							inputTokens: reportedCounts.inputTokens ?? 0,
-							outputTokens: reportedCounts.outputTokens ?? 0,
-							cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
-							cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
-							cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
-							source: usageReported ? (input.usageSource ?? "provider") : "estimated",
-						},
-						{ responses, maxima, refused },
-					),
+					sanitizeUsage(candidate, { responses, maxima, refused }),
 					rateInfo.rates,
 					rateInfo.rateSource !== "table",
 				);
-				// Present IFF provider-sourced (D5) — the single rule, in one place.
-				const usageAudit = publishableUsageFields(usageSnapshot, rateInfo.rates);
 				// An implausible count (above the per-tier ceiling) is not usage: it is charged at the estimate, like a
 				// missing count, and the anomaly is a chain event. Without this the figure reached the session counter and
 				// the persisted ledger and refused every later call.
 				const usageTrusted = usageReported && usageSnapshot.implausible === undefined;
+				// Published exactly when these counts price the call (`usageTrusted`), whatever the caller's
+				// label: a caller's counts labelled "estimated" price the call too, so the record must carry
+				// them to reproduce its cost (`usageSource` stays the label). Never when the input or output
+				// count was unusable: its clamped 0 is fabricated, and a record with a fabricated 0 is what D5
+				// forbids (`inputOutputUsable`, the rule that also downgrades a "provider" label).
+				const usageAudit = publishableUsageFields(
+					usageSnapshot,
+					rateInfo.rates,
+					usageTrusted && inputOutputUsable(candidate),
+				);
 				const implausibleData = implausibleUsageData(usageSnapshot, {
 					model,
 					transferId,

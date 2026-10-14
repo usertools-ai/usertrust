@@ -38,6 +38,7 @@ import { costFromRates, getModelRates, PRICING_TABLE_VERSION } from "../../src/l
 import type {
 	AppliedRates,
 	AuditEvent,
+	CacheWrite1h,
 	ReceiptUsage,
 	TrustReceipt,
 } from "../../src/shared/types.js";
@@ -87,24 +88,33 @@ function llmCalls(audit: { events: AppendEventInput[] }): AppendEventInput[] {
 	return audit.events.filter((e) => e.kind === "llm_call");
 }
 
-/** The D5 reconciliation claim, hand-written from the record (see the govern twin). */
-function recomputeCost(usage: ReceiptUsage, rates: AppliedRates): number {
+/**
+ * The D5 reconciliation claim, hand-written from the record (see the govern twin), with the
+ * write term split on the root `cacheWrite1h` record when the call wrote 1-hour cache.
+ */
+function recomputeCost(usage: ReceiptUsage, rates: AppliedRates, oneHour?: CacheWrite1h): number {
+	const h = oneHour?.tokens ?? 0;
+	const hRate = oneHour?.ratePer1k ?? 0;
 	const total =
 		(usage.inputTokens * rates.inputPer1k) / 1000 +
 		(usage.outputTokens * rates.outputPer1k) / 1000 +
 		(usage.cacheReadTokens * rates.cacheReadPer1k) / 1000 +
-		(usage.cacheWriteTokens * rates.cacheWritePer1k) / 1000;
+		((usage.cacheWriteTokens - h) * rates.cacheWritePer1k) / 1000 +
+		(h * hRate) / 1000;
 	return Math.max(1, Math.ceil(total));
 }
 
-function expectRecomputable(receipt: TrustReceipt): void {
-	expect(receipt.usageSource).toBe("provider");
+function expectRecomputable(
+	receipt: TrustReceipt,
+	source: "provider" | "estimated" = "provider",
+): void {
+	expect(receipt.usageSource).toBe(source);
 	const usage = receipt.usage;
 	const applied = receipt.pricing?.appliedRates;
 	if (usage === undefined || applied === undefined) {
 		throw new Error("receipt is not recomputable: usage or appliedRates missing");
 	}
-	expect(recomputeCost(usage, applied)).toBe(receipt.cost);
+	expect(recomputeCost(usage, applied, receipt.cacheWrite1h)).toBe(receipt.cost);
 }
 
 const MODEL = "claude-sonnet-4-6";
@@ -331,7 +341,7 @@ describe("headless record surfaces (spec D5)", () => {
 		await gov.destroy();
 	});
 
-	it('omits usage when the caller labels its own counts "estimated"', async () => {
+	it('publishes usage when the caller labels its own counts "estimated": they priced the call', async () => {
 		const gov = await governor();
 		const auth = await gov.authorize(AUTHORIZE);
 		const receipt = await gov.settle(auth, {
@@ -340,11 +350,90 @@ describe("headless record surfaces (spec D5)", () => {
 			usageSource: "estimated",
 		});
 
-		// The caller's label is honoured (operator boundary) — and the counts it
-		// supplied still price the call, exactly as before.
+		// The caller's label is honoured (operator boundary), and the counts it supplied price the
+		// call. So the record carries them: without them, cost could not be reproduced from it.
 		expect(receipt.usageSource).toBe("estimated");
-		expect(Object.hasOwn(receipt, "usage")).toBe(false);
 		expect(receipt.cost).toBe(costFromRates(getModelRates(MODEL), 1000, 500));
+		expect(receipt.usage).toEqual({
+			inputTokens: 1000,
+			outputTokens: 500,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+		});
+		expectRecomputable(receipt, "estimated");
+		const data = llmCalls(audit)[0]?.data as Record<string, unknown>;
+		expect(data.usage).toEqual(receipt.usage);
+		expect(data.usageSource).toBe("estimated");
+
+		await gov.destroy();
+	});
+
+	it('an "estimated" label with 1-hour cache writes publishes the 1-hour record, and recomputes', async () => {
+		const gov = await governor();
+		const auth = await gov.authorize(AUTHORIZE);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 1000,
+			outputTokens: 500,
+			cacheWriteTokens: 4000,
+			cacheWrite1hTokens: 1500,
+			usageSource: "estimated",
+		});
+
+		expect(receipt.usageSource).toBe("estimated");
+		expect(receipt.cost).toBe(costFromRates(getModelRates(MODEL), 1000, 500, 0, 4000, 1500));
+		expect(receipt.usage?.cacheWriteTokens).toBe(4000);
+		expect(receipt.cacheWrite1h?.tokens).toBe(1500);
+		// The 1-hour term is what separates this cost from an all-5-minute one.
+		expect(receipt.cost).not.toBe(costFromRates(getModelRates(MODEL), 1000, 500, 0, 4000));
+		expectRecomputable(receipt, "estimated");
+
+		await gov.destroy();
+	});
+
+	it('an "estimated" label with an implausible count publishes no usage: the estimate priced it', async () => {
+		const gov = await governor();
+		const auth = await gov.authorize(AUTHORIZE);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 1000,
+			outputTokens: 500,
+			cacheReadTokens: 1e15,
+			usageSource: "estimated",
+		});
+
+		expect(receipt.usageSource).toBe("estimated");
+		expect(receipt.cost).toBe(costFromRates(getModelRates(MODEL), 10_000, 1));
+		expect(Object.hasOwn(receipt, "usage")).toBe(false);
+		expect(Object.hasOwn(receipt, "cacheWrite1h")).toBe(false);
+		const data = llmCalls(audit)[0]?.data as Record<string, unknown>;
+		expect(Object.hasOwn(data, "usage")).toBe(false);
+
+		await gov.destroy();
+	});
+
+	it('an "estimated" label with an unusable input or output count publishes no usage: its 0 is fabricated', async () => {
+		const gov = await governor();
+		const rates = getModelRates(MODEL);
+		const cases: Array<[SettleParams, number]> = [
+			[
+				{ inputTokens: Number.NaN, outputTokens: 500, usageSource: "estimated" },
+				costFromRates(rates, 0, 500),
+			],
+			[
+				{ inputTokens: 1000, outputTokens: Number.NaN, usageSource: "estimated" },
+				costFromRates(rates, 1000, 0),
+			],
+		];
+		for (const [params, cost] of cases) {
+			const auth = await gov.authorize(AUTHORIZE);
+			const receipt = await gov.settle(auth, params);
+			// Priced from the usable count, as under a provider label; never published with a made-up 0.
+			expect(receipt.usageSource).toBe("estimated");
+			expect(receipt.cost).toBe(cost);
+			expect(Object.hasOwn(receipt, "usage")).toBe(false);
+		}
+		const calls = llmCalls(audit);
+		expect(calls).toHaveLength(2);
+		for (const call of calls) expect(Object.hasOwn(call.data as object, "usage")).toBe(false);
 
 		await gov.destroy();
 	});

@@ -104,15 +104,22 @@ export interface TrustReceipt {
 	timestamp: string;
 	/** Present and true when the audit chain write failed (failure mode 15.3). */
 	auditDegraded?: boolean;
-	/** Whether cost came from provider-reported usage or the pre-call estimate. */
+	/**
+	 * Where the token counts behind `cost` came from: the provider, or an estimate. A provenance
+	 * label only: `usage` being present is what says the cost was priced from counts.
+	 */
 	usageSource?: "provider" | "estimated";
 	/**
 	 * The four-tier disjoint token split this cost was metered from (D5).
 	 *
-	 * PRESENT IFF `usageSource === "provider"`. An estimated settle has no
-	 * reported counts, and a four-tier block full of fabricated zeros would
-	 * invite an auditor to "recompute" a cost that was never derived from
-	 * counts at all — so it is omitted outright, never zero-filled.
+	 * PRESENT IFF the cost was computed from these counts and their input and output
+	 * counts were both usable: always for `usageSource: "provider"`, and for
+	 * `"estimated"` counts a headless settle priced from (the caller's own estimate).
+	 * Absent when the cost is the metered pre-call estimate (no counts, or counts
+	 * refused as implausible), and when an input or output count was unusable (its
+	 * clamped 0 is fabricated). A four-tier block with fabricated zeros would invite an
+	 * auditor to "recompute" a cost never derived from those counts, so it is omitted
+	 * outright, never zero-filled.
 	 *
 	 * With `pricing.appliedRates` this is the whole reconciliation surface:
 	 * `ceil(sum(counts x rates / 1000))` floored at 1 equals `cost`.
