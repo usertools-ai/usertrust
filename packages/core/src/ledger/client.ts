@@ -280,6 +280,10 @@ export class TrustTBClient {
 	// says so, once.
 	private droppedEvicted = 0;
 	private evictionAlerted = false;
+	// Which native client is current, as a count: _doReconnect bumps it each time it installs
+	// one. A failed request carries the generation it ran on, so a failure from a client already
+	// replaced is told apart without reading the client itself.
+	private generation = 0;
 
 	constructor(opts: TrustTBClientOptions) {
 		this.opts = {
@@ -356,26 +360,28 @@ export class TrustTBClient {
 	}
 
 	/**
-	 * Replace the native client. `used`: the client a failed request ran on. When it is no
-	 * longer the current one (a reconnect already replaced it), nothing is replaced again: the
-	 * request's retry goes to the current client, and a late failure from an old client (its
-	 * eviction, or the "closed" after it) cannot churn a healthy replacement.
+	 * Replace the native client, or join the reconnect in flight. `from`: the generation a
+	 * failed request ran on. When that client was already replaced, nothing is started and
+	 * nothing is cached: the request retries on the current client. So a late failure from an
+	 * old client (its eviction, or the "closed" after it) neither churns a healthy replacement
+	 * nor leaves a no-op behind for a failure on the current client to join.
 	 */
-	async reconnect(used?: Client): Promise<void> {
+	async reconnect(from?: number): Promise<void> {
 		// Refused once destroyed, BEFORE the dedup. A reconnect that just finished stays
 		// cached until its cleanup runs, and handing it back would answer success for a
 		// client destroy() has closed.
 		this.assertOpen();
 		if (this.reconnectPromise) return this.reconnectPromise;
-		this.reconnectPromise = this._doReconnect(used).finally(() => {
+		// Staleness is decided only now, after joining any reconnect in flight, and a stale
+		// failure never caches anything: its retry goes to the client that replaced its own.
+		if (from !== undefined && from !== this.generation) return;
+		this.reconnectPromise = this._doReconnect().finally(() => {
 			this.reconnectPromise = null;
 		});
 		return this.reconnectPromise;
 	}
 
-	private async _doReconnect(used?: Client): Promise<void> {
-		// Already replaced since that request started: there is nothing to replace.
-		if (used !== undefined && used !== this.client) return;
+	private async _doReconnect(): Promise<void> {
 		const maxRetries = 5;
 		for (let attempt = 0; attempt < maxRetries; attempt++) {
 			// destroy() may have landed while this waited out its backoff: build no client.
@@ -397,6 +403,7 @@ export class TrustTBClient {
 					cluster_id: this.opts.clusterId,
 					replica_addresses: this.opts.addresses,
 				});
+				this.generation += 1;
 				return;
 			} catch (err) {
 				if (attempt === maxRetries - 1) {
@@ -433,10 +440,10 @@ export class TrustTBClient {
 	}
 
 	private async withReconnect<T>(request: (native: Client) => Promise<T>): Promise<T> {
-		let used: Client | undefined;
+		// Read with the client, before the request: the generation this request runs on.
+		const from = this.generation;
 		try {
-			used = this.native();
-			return await this.send(request, used);
+			return await this.send(request, this.native());
 		} catch (err) {
 			// Destroyed while this was in flight: its own error stands, and no reconnect.
 			// A POST that committed but lost its reply here would, by reconnecting, have been
@@ -449,7 +456,7 @@ export class TrustTBClient {
 			// (Its next request would fail "closed", which reaches the same reconnect.) A client
 			// whose release the cluster refuses is evicted again: one more dropped client per call.
 			if (isEviction(err) || this.isConnectionError(err)) {
-				await this.reconnect(used);
+				await this.reconnect(from);
 				// native() again: destroy() may have landed while the reconnect settled.
 				return await this.send(request, this.native());
 			}

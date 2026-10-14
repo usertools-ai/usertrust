@@ -994,6 +994,75 @@ describe("an evicted native client is never destroyed (tigerbeetle-node 0.17.9 a
 		expect(native.aborts).toEqual([]);
 	});
 
+	it("the same tick: a late failure from a replaced client and an eviction on the CURRENT one; every call is answered, with no abort", async () => {
+		let release: () => void = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const count = new Map<number, number>();
+		native.respond = async (id) => {
+			const n = (count.get(id) ?? 0) + 1;
+			count.set(id, n);
+			if (id === 1 && n === 1) {
+				// A: slow on client 1, then its late "closed" (client 1 is gone by then).
+				await held;
+				throw Object.assign(new Error("Client was closed."), { code: "ERR_CLIENT_CLOSED" });
+			}
+			if (id === 1 && n === 2) {
+				// B: evicted on client 1, so client 1 is replaced by client 2.
+				native.evicted.add(1);
+				throw evictedError();
+			}
+			if (id === 2 && n === 2) {
+				// D: evicted on client 2, in the same tick as A's late failure.
+				await held;
+				native.evicted.add(2);
+				throw evictedError();
+			}
+			return [];
+		};
+		const a = client.lookupBalances([1n]);
+		await tick();
+		await expect(client.lookupBalances([2n])).resolves.toBeDefined();
+		const d = client.lookupBalances([3n]);
+		await tick();
+		release();
+		await expect(a).resolves.toBeDefined();
+		await expect(d).resolves.toBeDefined();
+		expect(native.aborts).toEqual([]);
+		expect(native.destroyed.has(1)).toBe(false);
+		expect(native.destroyed.has(2)).toBe(false);
+	});
+
+	it("two requests in flight on one client, both refused with an eviction code, count ONE dropped client", async () => {
+		const onAlert = vi.fn();
+		const alerting = new TrustTBClient({ addresses: ["3000"], onAlert });
+		const first = native.created;
+		let release: () => void = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		native.respond = async (id) => {
+			if (id === first) {
+				await held;
+				native.evicted.add(first);
+				throw evictedError();
+			}
+			return [];
+		};
+		const one = alerting.lookupBalances([1n]);
+		const two = alerting.lookupBalances([2n]);
+		await tick();
+		release();
+		await Promise.all([one, two]);
+		alerting.destroy();
+		const evictionAlerts = onAlert.mock.calls.filter(([msg]) =>
+			String(msg).includes("could not be released"),
+		);
+		expect(evictionAlerts).toEqual([[expect.any(String), { droppedEvicted: 1 }]]);
+		expect(native.aborts).toEqual([]);
+	});
+
 	it("control: a lost connection on a HEALTHY client still destroys it before building the next", async () => {
 		native.respond = async (id) => {
 			if (id === 1) throw new Error("connection refused");
