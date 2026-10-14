@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { forgetPins, runHook } from "./helpers/run-hook.js";
+import { assertNotKilledAtHostDeadline, forgetPins, runHook } from "./helpers/run-hook.js";
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
 const CRASH_AT = join(import.meta.dirname, "helpers", "crash-at.mjs");
@@ -215,8 +215,13 @@ const envFor = (extra: Record<string, string> = {}): Record<string, string> => (
 	...extra,
 });
 
-const run = (hook: string, input: Record<string, unknown>, extra: Record<string, string> = {}) =>
-	runHook(join(HOOKS, `${hook}.mjs`), input, envFor(extra));
+// A SessionEnd run the host would have killed at its deadline fails here, naming the deadline:
+// its records are not the evidence of an exit that production reaches.
+const run = async (
+	hook: string,
+	input: Record<string, unknown>,
+	extra: Record<string, string> = {},
+) => assertNotKilledAtHostDeadline(await runHook(join(HOOKS, `${hook}.mjs`), input, envFor(extra)));
 
 const ESTIMATE_MODE = { UT_CC_USAGE: "estimate" };
 const transcriptPath = () => join(projectDir, `${SESSION}.jsonl`);
@@ -1486,6 +1491,26 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 		fixed = new Map();
 		await writeLines(main(), [V(), A()]);
 	};
+	// "The group loop: out of time" and the two numbers it runs on. The hook's budget B is the row's
+	// budgetMs (`seBudget` gives the host B + 300 ms, and sessionEndBudgetMs takes SESSION_END_MARGIN_MS
+	// = 300 back off, lib.mjs:450,460-463), so the HOST deadline is B + 300.
+	// The hook stops before a group when callBudget() < minCall() (transcript.mjs:2806-2811), where
+	//   callBudget() = min(0.3 B, floor((timeLeft - cleanupReserve()) / 3))   (:239,:2676; reserve 0.3 B, :242)
+	//   minCall()    = floor(0.025 B)                                          (:240)
+	// and the second term binds: (timeLeft - 0.3 B) / 3 < 0.025 B  <=>  timeLeft < 0.375 B, that is,
+	// more than 0.625 B after the hook started. At B = 8,000 that point is 5,000 ms.
+	// The injected sleep is on the third cursor save, which comes after the first group settled
+	// (claim floor 0.6 B = 4,800 ms left, :244,:1530, is met at the first claim, well before). So the
+	// second group is refused whenever the sleep ends past 5,000 ms, and the sleep starts at or after 0.
+	// 6,000 ms puts its end 1,000 ms past that point (OOT_MARGIN_MS) however fast the first group ran.
+	// The hook then writes its sweep and exits at about 6,000 ms + its start-up and the first group's
+	// time: against the host deadline of 8,300 ms that leaves 2,300 ms less those, which is at least the
+	// 1,000 ms above as long as they total under 1,300 ms. The sleep alone (6,000 ms) is inside the
+	// host deadline, which the old 6,500 ms sleep at B = 6,000 (host deadline 6,300) was not.
+	const OOT_BUDGET_MS = 8_000;
+	const OOT_MARGIN_MS = 1_000;
+	const OOT_POINT_MS = Math.round(OOT_BUDGET_MS * (1 - (0.3 + 3 * 0.025)));
+	const OOT_SLEEP_MS = OOT_POINT_MS + OOT_MARGIN_MS;
 	const scenarios: Array<[string, Scenario]> = [
 		// These two rows test no timing: they run at a budget whose per-call cap (about 1.75 s) a
 		// loaded host's stall cannot reach. The default 1.2 s gives each call about 300 ms, and a
@@ -1588,9 +1613,8 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			"the group loop: out of time",
 			{
 				lines: TWO,
-				budgetMs: 6_000,
-				// The sleep outlasts the whole budget, so the time runs out whatever the first group took.
-				fault: "__main.json|3|sleep 6500",
+				budgetMs: OOT_BUDGET_MS,
+				fault: `__main.json|3|sleep ${OOT_SLEEP_MS}`,
 				selected: 2,
 				posted: 1,
 				deferred: ["B"],
@@ -1725,6 +1749,7 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 				}),
 				scenario.fault === undefined ? [] : ["--import", FAULT_AT],
 			);
+			assertNotKilledAtHostDeadline(end);
 			await chmod(join(stateDir, "transcripts", "claims"), 0o700).catch(() => {});
 			// The fault must have FIRED: a k past the saves the row reaches is silently inert.
 			if (scenario.fault !== undefined) {
@@ -1774,6 +1799,71 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 		LONG,
 	);
 
+	describe("the host deadline is enforced on a SessionEnd hook", () => {
+		const sleepPastDeadline = async (timeoutMs?: number) => {
+			await backdate();
+			await writeLines(main(), TWO());
+			// The first cursor save sleeps 2.5 s; the host deadline of a 1.2 s budget is 1.5 s.
+			return runHook(
+				join(HOOKS, "session-end.mjs"),
+				seInput(),
+				envFor({
+					...seBudget(1_200),
+					UT_CC_FAULT: "__main.json|1|sleep 2500",
+					UT_CC_FAULT_LOG: faultLogPath(),
+				}),
+				["--import", FAULT_AT],
+				timeoutMs === undefined ? {} : { timeoutMs },
+			);
+		};
+
+		it(
+			"a hook still running at the deadline is killed there, and an assertion on its exit fails naming the deadline",
+			async () => {
+				const started = Date.now();
+				const end = await sleepPastDeadline();
+				expect(Date.now() - started).toBeLessThan(2_400);
+				expect(end.hostDeadlineMs).toBe(1_500);
+				expect(end.killedAtHostDeadline).toBe(true);
+				expect(await faultLog()).toContain("FAULT sleep 2500\n");
+				expect(() => assertNotKilledAtHostDeadline(end)).toThrow(
+					/still running at the host deadline of 1500 ms/,
+				);
+				// What the table runner asserts of an exit is not there: the exit sweep never ran.
+				expect(await phased("remainder")).toEqual([]);
+			},
+			LONG,
+		);
+
+		it(
+			"a caller's earlier timeoutMs applies instead, and is not reported as the host's kill",
+			async () => {
+				const end = await sleepPastDeadline(600);
+				expect(end.hostDeadlineMs).toBe(1_500);
+				expect(end.killedAtHostDeadline).toBe(false);
+				expect(end.code).not.toBe(0);
+				expect(() => assertNotKilledAtHostDeadline(end)).not.toThrow();
+			},
+			LONG,
+		);
+
+		it(
+			"applies to SessionEnd and only when the run carries the variable",
+			async () => {
+				await backdate();
+				await writeLines(main(), []);
+				const plain = await runHook(join(HOOKS, "session-end.mjs"), seInput(), envFor());
+				expect(plain.hostDeadlineMs).toBeUndefined();
+				const stop = await runHook(join(HOOKS, "stop.mjs"), stopInput(), envFor(seBudget(1_200)));
+				expect(stop.hostDeadlineMs).toBeUndefined();
+				const ended = await run("session-end", seInput(), seBudget(1_200));
+				expect(ended.hostDeadlineMs).toBe(1_500);
+				expect(ended.killedAtHostDeadline).toBe(false);
+			},
+			LONG,
+		);
+	});
+
 	it(
 		"a 402 slower than the call's time limit: the group is released with its gap, the next deferred, nothing else sent, and each message accounted for exactly once",
 		async () => {
@@ -1785,7 +1875,9 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			// the hook's WHOLE budget (1.5 s with its margin), so a loaded host would have to stall the
 			// hook's own abort by well over a second before the client could see it (the server did send it).
 			fixed.set("/v1/authorize#1", { ...(ANSWER.refusal402 as Answer), delayMs: 2_000 });
-			await runHook(join(HOOKS, "session-end.mjs"), seInput(), envFor(seBudget(1_200)));
+			assertNotKilledAtHostDeadline(
+				await runHook(join(HOOKS, "session-end.mjs"), seInput(), envFor(seBudget(1_200))),
+			);
 			await chmod(join(stateDir, "transcripts", "claims"), 0o700).catch(() => {});
 			expect(seen.map((request) => request.path)).toEqual(["/v1/health", "/v1/authorize"]);
 			expect(requests("/v1/settle")).toEqual([]);
@@ -1832,6 +1924,7 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 				}),
 				["--import", FAULT_AT],
 			);
+			assertNotKilledAtHostDeadline(end);
 			expect(await faultLog()).toContain("FAULT throw\n");
 			expect(end.stderr).toContain("transcript usage failed for main: injected rename failure");
 			expect(seen.map((request) => request.path)).toEqual(["/v1/health", "/v1/authorize"]);
@@ -1874,6 +1967,7 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 				}),
 				["--import", FAULT_AT],
 			);
+			assertNotKilledAtHostDeadline(end);
 			expect(await faultLog()).toContain("FAULT throw\n");
 			expect(end.stderr).toContain("transcript usage failed for main: injected rename failure");
 			expect(seen.map((request) => request.path)).toEqual([

@@ -10,6 +10,48 @@ export interface HookRunResult {
 	stderr: string;
 	/** The hook process's pid: the parent, when a configured session's hook runs as a child. */
 	pid: number | undefined;
+	/**
+	 * The SessionEnd deadline in force for this run, in ms from spawn
+	 * (`CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`), or undefined when none applies.
+	 */
+	hostDeadlineMs: number | undefined;
+	/**
+	 * True when `runHook` killed the hook at that deadline, as Claude Code does. What a test
+	 * asserts of such a run's records is an exit a real host never lets the hook reach.
+	 */
+	killedAtHostDeadline: boolean;
+}
+
+/**
+ * Fail a test that read a SessionEnd hook's exit from a run the host would have killed. The
+ * message names the deadline, so the failure says why the records it would have asserted
+ * are not the evidence they look like.
+ */
+export function assertNotKilledAtHostDeadline(result: HookRunResult): HookRunResult {
+	if (result.killedAtHostDeadline) {
+		throw new Error(
+			`the SessionEnd hook was still running at the host deadline of ${result.hostDeadlineMs} ms (CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS) and was killed there, as Claude Code kills it: what this test asserts of the hook's exit never happens in production`,
+		);
+	}
+	return result;
+}
+
+/** How long a killed hook gets to exit on SIGTERM before SIGKILL (launch.mjs forwards SIGTERM to its child). */
+const KILL_GRACE_MS = 1_000;
+
+/**
+ * The deadline Claude Code enforces on a SessionEnd hook, from the env the hook runs with.
+ * The same reading as the hook's (lib.mjs `sessionEndBudgetMs`): digits only, else no
+ * variable. Only a value the variable carries is enforced; an absent or unreadable one
+ * leaves the host's own 1.5 s default, which this harness does not apply.
+ */
+function hostDeadlineFor(script: string[], env: Record<string, string | undefined>) {
+	const isSessionEnd =
+		script.length === 2
+			? script[1] === "session-end"
+			: basename(script[0] ?? "") === "session-end.mjs";
+	const raw = env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS ?? "";
+	return isSessionEnd && /^[0-9]{1,9}$/.test(raw) ? Number(raw) : undefined;
 }
 
 const HOOKS = join(import.meta.dirname, "..", "..", "hooks");
@@ -64,6 +106,12 @@ export function forgetPins(env: Record<string, string>): void {
  *   launch.mjs's path (another test-only `--import` preload, say).
  * - `timeoutMs`, when given, kills a hook that runs longer (exit code 1): a test of a
  *   hook that must never hang reports the hang as a failure instead of hanging itself.
+ * - SessionEnd's host deadline is enforced as Claude Code enforces it: when the run's env
+ *   carries `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`, a session-end hook still running that
+ *   many ms after spawn is killed (SIGTERM, then SIGKILL), and the result says so
+ *   (`killedAtHostDeadline`, with the deadline in `hostDeadlineMs`). The earlier of that and
+ *   `timeoutMs` applies. A test of a SessionEnd exit passes the result through
+ *   `assertNotKilledAtHostDeadline`, so a path a real host kills cannot pass on its records.
  */
 export function runHook(
 	hookPath: string,
@@ -80,6 +128,11 @@ export function runHook(
 			? [LAUNCH, basename(hookPath, ".mjs")]
 			: [hookPath];
 	const preload = nodeArgs.includes(PASSWD_HOME_PRELOAD) ? [] : ["--import", PASSWD_HOME_PRELOAD];
+	const hostDeadlineMs = hostDeadlineFor(script, { ...inherited, ...env });
+	// The earlier of the host's deadline and the caller's own: the host's is ours to enforce
+	// only when it comes first, so a kill is attributed to the one that made it.
+	const hostFirst =
+		hostDeadlineMs !== undefined && (timeoutMs === undefined || hostDeadlineMs < timeoutMs);
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [...preload, ...nodeArgs, ...script], {
 			env: {
@@ -92,8 +145,17 @@ export function runHook(
 				TEST_PASSWD_HOME: passwdHomeFor(env),
 			},
 			stdio: ["pipe", "pipe", "pipe"],
-			...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
+			...(timeoutMs === undefined || hostFirst ? {} : { timeout: timeoutMs }),
 		});
+		let killedAtHostDeadline = false;
+		let hardKill: NodeJS.Timeout | undefined;
+		const hostKill = hostFirst
+			? setTimeout(() => {
+					killedAtHostDeadline = true;
+					child.kill("SIGTERM");
+					hardKill = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+				}, hostDeadlineMs)
+			: undefined;
 		let stdout = "";
 		let stderr = "";
 		child.stdout.setEncoding("utf-8");
@@ -106,7 +168,16 @@ export function runHook(
 		});
 		child.on("error", reject);
 		child.on("close", (code) => {
-			resolve({ code: code ?? 1, stdout, stderr, pid: child.pid });
+			clearTimeout(hostKill);
+			clearTimeout(hardKill);
+			resolve({
+				code: code ?? 1,
+				stdout,
+				stderr,
+				pid: child.pid,
+				hostDeadlineMs,
+				killedAtHostDeadline,
+			});
 		});
 		child.stdin.write(JSON.stringify(input));
 		child.stdin.end();
