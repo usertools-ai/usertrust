@@ -310,3 +310,95 @@ describe("pre-tool-use hook", () => {
 		expect(body.estimatedInputTokens).toBe(4);
 	});
 });
+
+describe("pre-tool-use: a 503 ledger_unavailable is tried once more", () => {
+	const UNAVAILABLE = {
+		status: 503,
+		json: {
+			error: "ledger_unavailable",
+			reason: "no answer came within 5000 ms",
+			retryAfterMs: 5000,
+		},
+	};
+	/** Answers the authorizes in turn, then 500 for any past the list. */
+	function answers(...list: Array<{ status: number; json: unknown }>) {
+		let n = 0;
+		return () => list[n++] ?? { status: 500, json: { error: "unexpected extra authorize" } };
+	}
+
+	it("503 then 200: the call is reserved, after exactly one retry", async () => {
+		const port = await startFake(
+			answers(UNAVAILABLE, {
+				status: 200,
+				json: { transferId: "tx_after_retry", estimatedCost: 3 },
+			}),
+		);
+		const result = await runHook(HOOK, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expect(result.code).toBe(0);
+		expect(result.stdout).toBe("");
+		expect(requests).toHaveLength(2);
+		// The retry is the same authorize.
+		expect(requests[1]).toEqual(requests[0]);
+		expect(await holdFiles()).toHaveLength(1);
+		expect(result.stderr).toContain("reserved tx_after_retry");
+	});
+
+	for (const [label, env, code] of [
+		["enforce", {}, 2],
+		["enforce with failOpen", { UT_FAIL_OPEN: "1" }, 0],
+		["watch", { UT_CC_MODE: "watch" }, 0],
+	] as const) {
+		it(`503 then 503 (${label}): the outage path, as before, after exactly one retry`, async () => {
+			const port = await startFake(answers(UNAVAILABLE, UNAVAILABLE));
+			const result = await runHook(HOOK, PAYLOAD, {
+				...baseEnv,
+				...env,
+				UT_SERVER_URL: `http://127.0.0.1:${port}`,
+			});
+			expect(result.code).toBe(code);
+			expect(requests).toHaveLength(2);
+			expect(result.stderr).toContain("unexpected governance response 503");
+			// No hold. Where the call proceeds, its miss is a `gap` record, as for any outage.
+			const files = await holdFiles();
+			expect(files.filter((name) => name !== "watch.jsonl")).toEqual([]);
+			if (code === 0) {
+				const records = (await readFile(join(stateDir, "watch.jsonl"), "utf-8"))
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line) as { kind: string });
+				expect(records).toMatchObject([{ kind: "gap", tool: "Bash" }]);
+			} else {
+				expect(files).toEqual([]);
+			}
+		});
+	}
+
+	for (const status of [402, 403, 429]) {
+		it(`a ${status} refusal is never retried`, async () => {
+			const port = await startFake(
+				answers({ status, json: { error: "denied", reason: "no" } }, { status: 200, json: {} }),
+			);
+			const result = await runHook(HOOK, PAYLOAD, {
+				...baseEnv,
+				UT_SERVER_URL: `http://127.0.0.1:${port}`,
+			});
+			expect(requests).toHaveLength(1);
+			expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+		});
+	}
+
+	it("a 503 that is not ledger_unavailable is not retried: the outage path at once", async () => {
+		const port = await startFake(
+			answers({ status: 503, json: { error: "overloaded" } }, { status: 200, json: {} }),
+		);
+		const result = await runHook(HOOK, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expect(result.code).toBe(2);
+		expect(requests).toHaveLength(1);
+	});
+});

@@ -314,3 +314,38 @@ describe("writes that cannot be confirmed never read as done", () => {
 		expect(said).toContain("EIO");
 	});
 });
+
+describe("retriesAuthorize: a 503 ledger_unavailable is tried once more, when the budget leaves room", () => {
+	const unavailable = { status: 503, json: { error: "ledger_unavailable", reason: "r" } };
+	/** retriesAuthorize, from lib.mjs. */
+	// @ts-expect-error TS7016: the hooks are plain .mjs, without type declarations.
+	const lib = () => import("../hooks/lib.mjs");
+
+	it("a 503 ledger_unavailable with at least the minimum left is retried", async () => {
+		const { retriesAuthorize, AUTHORIZE_RETRY_MIN_MS } = await lib();
+		expect(retriesAuthorize(unavailable, AUTHORIZE_RETRY_MIN_MS)).toBe(true);
+		expect(retriesAuthorize(unavailable, 5_000)).toBe(true);
+	});
+
+	it("not when the hook's budget cannot fit the retry's call", async () => {
+		const { retriesAuthorize, AUTHORIZE_RETRY_MIN_MS } = await lib();
+		expect(retriesAuthorize(unavailable, AUTHORIZE_RETRY_MIN_MS - 1)).toBe(false);
+		expect(retriesAuthorize(unavailable, -500)).toBe(false);
+	});
+
+	it("never a refusal, a rejected key, another 503 or any other answer", async () => {
+		const { retriesAuthorize } = await lib();
+		for (const response of [
+			{ status: 402, json: { error: "budget_exceeded" } },
+			{ status: 403, json: { error: "policy_denied" } },
+			{ status: 429, json: { error: "anomaly" } },
+			{ status: 401, json: { error: "unauthorized" } },
+			{ status: 503, json: { error: "overloaded" } },
+			{ status: 503, json: null },
+			{ status: 500, json: { error: "ledger_unavailable" } },
+			{ status: 200, json: { transferId: "t" } },
+		]) {
+			expect(retriesAuthorize(response, 5_000), JSON.stringify(response)).toBe(false);
+		}
+	});
+});

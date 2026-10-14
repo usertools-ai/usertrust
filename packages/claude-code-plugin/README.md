@@ -550,7 +550,7 @@ both modes.
 | A reservation (200) | No decision: your permission settings apply | No decision |
 | Refused: over budget (402), denied by policy (403), an anomaly cutoff (429) | No decision, and a `would_block` record | `deny`: the call is blocked |
 | The key rejected: a 401, or a 403 whose `error` is `unauthorized` | No decision, a `gap` record (`"cause":"key-rejected"`), and a message shown to you | Blocked (exit 2). With `UT_FAIL_OPEN=1`: as in watch |
-| No usable answer: unreachable, a timeout, any other status, a malformed body | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: no decision, and a `gap` record |
+| No usable answer: unreachable, a timeout, any other status, a malformed body, a `503 ledger_unavailable` that a retry did not clear | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: no decision, and a `gap` record |
 | A shadow answer from an `evaluate_only` server | No decision | No decision |
 
 **No decision** means PreToolUse exits 0 with nothing on stdout, which Claude
@@ -583,6 +583,12 @@ more than enforcement — a stopped server then never blocks your session, and t
 usage it misses stays in the transcript to be posted at a later settle point.
 Leave it unset when the budget must be enforced. Upgrading from a release where
 blocking was the default: set `UT_CC_MODE=enforce` to keep it.
+
+A `503` whose `error` is `ledger_unavailable` means the server's ledger did not answer in
+time, in an outage or in a burst of authorizes past what the server answers in time. Nothing
+was authorized, and PreToolUse tries the authorize once more when the hook has at least 1 s
+left. A second `503` is an outage like any other: in enforce mode, while it lasts, every tool
+call is **blocked** unless `UT_FAIL_OPEN=1`.
 
 **Known limitation: a call that does not complete keeps its reservation for a
 while.** PostToolUse, the hook that closes a call's hold,

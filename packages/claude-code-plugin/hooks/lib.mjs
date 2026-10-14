@@ -1837,6 +1837,24 @@ export function isSettleGone(response) {
 	);
 }
 
+/** The least time an authorize retry gets for its own call; with less left, it is not tried. */
+export const AUTHORIZE_RETRY_MIN_MS = 1_000;
+
+/**
+ * Whether PreToolUse tries an authorize once more: a `503` whose `error` is
+ * `ledger_unavailable` (usertrust-server: no answer came in time, from its ledger or from the
+ * tenant's authorizes queued ahead; nothing was authorized), with at least
+ * `AUTHORIZE_RETRY_MIN_MS` left for the retry's call (`msLeft`). A late hold the first attempt
+ * leaves is given back by the server itself. Any other answer, a refusal included, is final.
+ */
+export function retriesAuthorize(response, msLeft) {
+	return (
+		response.status === 503 &&
+		response.json?.error === "ledger_unavailable" &&
+		msLeft >= AUTHORIZE_RETRY_MIN_MS
+	);
+}
+
 /**
  * The server's answer that a key's charge already stands (usertrust #205): from
  * `/v1/authorize` when an earlier settle under the key landed, and from

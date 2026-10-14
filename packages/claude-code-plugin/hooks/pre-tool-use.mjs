@@ -96,6 +96,7 @@ import {
 	recordWatchEvent,
 	releaseHold,
 	requireLaunch,
+	retriesAuthorize,
 	sameTenant,
 	sanitizeReason,
 	say,
@@ -613,7 +614,7 @@ async function reserve(input) {
 		// Never past the hook's own budget: a hook killed mid-call leaves the tool
 		// ungoverned and this agent's lock held.
 		const callTimeout = () => Math.min(5_000, timeLeft() - 500);
-		const authorize = () =>
+		const authorizeOnce = () =>
 			serverRequest(
 				"/v1/authorize",
 				{
@@ -647,6 +648,13 @@ async function reserve(input) {
 				},
 				{ timeoutMs: callTimeout() },
 			);
+		// A 503 `ledger_unavailable` (an outage, or a burst past what the server answers in time) is
+		// tried once more when the hook's budget leaves room (`retriesAuthorize`); a second miss is the
+		// outage it was, below. A refusal is a decision and is never retried.
+		const authorize = async () => {
+			const response = await authorizeOnce();
+			return retriesAuthorize(response, callTimeout()) ? await authorizeOnce() : response;
+		};
 		let response = await authorize();
 		if (window && keyed && isAlreadySettled(response)) {
 			// An earlier settle of exactly this window landed, though the cursor never

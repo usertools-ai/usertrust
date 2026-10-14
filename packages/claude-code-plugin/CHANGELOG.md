@@ -9,6 +9,13 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ### Fixed
 
+- **A `503 ledger_unavailable` at PreToolUse is tried once more before it counts as an outage.**
+  The server answers it when its ledger, or the authorizes queued ahead, did not answer in time:
+  in an outage, or in a burst. Nothing was authorized, and the hook read it as an outage at
+  once, so in enforce mode a burst blocked the tool call. The authorize is now tried once more
+  when the hook has at least 1 s left; a second `503` is the outage it was, unchanged in watch,
+  enforce and `failOpen`. A refusal (402, 403, 429) is never retried.
+
 - **A session metered later no longer bills what it did before.** The plugin kept one first-run
   time per state directory. A session that first ran with no hook of this plugin (a lane switched
   on later, or a session already open at install) had every response since that time settled at
