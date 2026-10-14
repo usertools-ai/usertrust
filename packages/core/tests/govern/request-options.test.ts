@@ -62,10 +62,13 @@ const json = (body: unknown) =>
 let sent: string[] = [];
 /** Every request body any SDK sends, in order. */
 let bodies: string[] = [];
+/** The `signal` each request was sent with, in order. */
+let signals: Array<AbortSignal | null | undefined> = [];
 async function recordingFetch(input: unknown, init?: RequestInit): Promise<Response> {
 	const url = String(input instanceof Request ? input.url : input);
 	sent.push(`${init?.method ?? "GET"} ${url}`);
 	bodies.push(typeof init?.body === "string" ? init.body : "");
+	signals.push(init?.signal);
 	const path = new URL(url).pathname;
 	const streamed = typeof init?.body === "string" && JSON.parse(init.body).stream === true;
 	if (path.endsWith("/messages") && streamed) return sse(ANTHROPIC_STREAM);
@@ -160,6 +163,7 @@ beforeEach(() => {
 	mkdirSync(vault, { recursive: true });
 	sent = [];
 	bodies = [];
+	signals = [];
 	open = [];
 	vi.mocked(createClient).mockClear();
 });
@@ -1492,4 +1496,129 @@ describe("what the unserializable-request check leaves as it was", () => {
 		expect(sent).toEqual([]);
 		expect(eng.spendPending).not.toHaveBeenCalled();
 	});
+});
+
+describe('under pii: "redact", the Google transport signal is the one the serialization check left out', () => {
+	const EMAIL = "write to alice@example.com";
+	const redacting = async () => {
+		const eng = engine();
+		const client = await trust(new GoogleGenAI({ apiKey: "k" }) as Loose, {
+			budget: 1_000_000,
+			vaultBase: vault,
+			_engine: eng,
+			pii: "redact",
+		});
+		open.push(client);
+		return { client: client as Loose, eng };
+	};
+	const consume = async (method: "generateContent" | "generateContentStream", out: unknown) => {
+		if (method === "generateContentStream") for await (const _ of out as AsyncIterable<unknown>);
+	};
+	const refusal = (p: Promise<unknown>) =>
+		p.then(
+			() => null,
+			(e: unknown) => e,
+		);
+
+	it.each<
+		[
+			string,
+			"generateContent" | "generateContentStream",
+			() => { signal: AbortSignal; abort: () => void },
+		]
+	>([
+		[
+			"an AbortController's signal",
+			"generateContent",
+			() => {
+				const c = new AbortController();
+				return { signal: c.signal, abort: () => c.abort() };
+			},
+		],
+		[
+			"an AbortController's signal",
+			"generateContentStream",
+			() => {
+				const c = new AbortController();
+				return { signal: c.signal, abort: () => c.abort() };
+			},
+		],
+		[
+			"AbortSignal.any()",
+			"generateContent",
+			() => {
+				const c = new AbortController();
+				return { signal: AbortSignal.any([c.signal]), abort: () => c.abort() };
+			},
+		],
+	])(
+		"%s with an own cycle, %s, with PII in the prompt: sent redacted, held once, and the caller's signal still cancels it (it threw RangeError in redaction, unrecorded)",
+		async (_, method, make) => {
+			const { client, eng } = await redacting();
+			const { signal, abort } = make();
+			Object.assign(signal, { self: signal });
+			await consume(
+				method,
+				await client.models[method]({
+					model: "gemini-2.5-pro",
+					contents: EMAIL,
+					config: { abortSignal: signal },
+				}),
+			);
+			expect(sent).toHaveLength(1);
+			expect(bodies[0]).not.toContain("alice@example.com");
+			expect(bodies[0]).toContain("[REDACTED:email]");
+			expect(eng.spendPending).toHaveBeenCalledTimes(1);
+			expect(policyDenied()).toEqual([]);
+			// The transport was given the caller's own signal: aborting it aborts the request's.
+			expect(signals[0]?.aborted).toBe(false);
+			abort();
+			expect(signals[0]?.aborted).toBe(true);
+		},
+	);
+
+	it("a real signal holding PII in an own field is kept for the transport, and the field is never sent", async () => {
+		const { client, eng } = await redacting();
+		const c = new AbortController();
+		const signal = Object.assign(c.signal, { note: "ssn 123-45-6789, mail bob@example.com" });
+		await client.models.generateContent({
+			model: "gemini-2.5-pro",
+			contents: EMAIL,
+			config: { abortSignal: signal },
+		});
+		expect(sent).toHaveLength(1);
+		expect(bodies[0]).not.toContain("alice@example.com");
+		expect(bodies[0]).not.toContain("123-45-6789");
+		expect(bodies[0]).not.toContain("bob@example.com");
+		expect(eng.spendPending).toHaveBeenCalledTimes(1);
+		c.abort();
+		expect(signals[0]?.aborted).toBe(true);
+	});
+
+	it.each<[string, () => Record<string, unknown>]>([
+		["a spread copy of a signal", () => ({ ...new AbortController().signal })],
+		[
+			"an object made from AbortSignal.prototype with no signal state",
+			() => Object.create(AbortSignal.prototype) as Record<string, unknown>,
+		],
+	])(
+		"%s with a cycle, with PII in the prompt: still refused before any hold, with its record (as without redaction)",
+		async (_, make) => {
+			const { client, eng } = await redacting();
+			const fake = make();
+			fake.self = fake;
+			const err = await refusal(
+				client.models.generateContent({
+					model: "gemini-2.5-pro",
+					contents: EMAIL,
+					config: { abortSignal: fake },
+				}),
+			);
+			expect(err).toBeInstanceOf(PolicyDeniedError);
+			expect(String((err as Error).message)).toMatch(/request_unserializable/);
+			expect(sent).toEqual([]);
+			expect(eng.spendPending).not.toHaveBeenCalled();
+			expect(policyDenied()).toHaveLength(1);
+		},
+	);
 });

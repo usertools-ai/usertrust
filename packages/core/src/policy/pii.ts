@@ -14,6 +14,8 @@
  * API keys, AWS keys, GitHub tokens, bearer tokens, generic secrets.
  */
 
+import { isRealAbortSignal } from "../shared/abort-signal.js";
+
 // ---------------------------------------------------------------------------
 // Result type
 // ---------------------------------------------------------------------------
@@ -186,10 +188,14 @@ const PII_PATTERNS: PIIPattern[] = [
  * Returns which PII types were found and at which dot-paths.
  */
 export function detectPII(data: unknown): PIIDetection {
+	return detectIn(data, false);
+}
+
+function detectIn(data: unknown, signalSent: boolean): PIIDetection {
 	const types = new Set<string>();
 	const paths: string[] = [];
 
-	scanValue(data, "", types, paths);
+	scanValue(data, "", types, paths, signalSent);
 
 	return {
 		found: types.size > 0,
@@ -224,17 +230,6 @@ export function builtInAborted(signal: object): boolean | undefined {
 	}
 }
 
-/** Does the built-in getter accept `value` as its receiver (a real instance, not a look-alike)? */
-function passesBrand(getter: ((this: unknown) => unknown) | undefined, value: object): boolean {
-	if (getter === undefined) return false;
-	try {
-		getter.call(value);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 /**
  * THE CLOSED ALLOWLIST, in one place: the opaque, text-free types that redaction keeps BY
  * REFERENCE and the scan does not walk into. Today: `AbortSignal` only. Flattening it into
@@ -243,18 +238,13 @@ function passesBrand(getter: ((this: unknown) => unknown) | undefined, value: ob
  * deliberately NOT here: they carry content this scanner cannot read, so they keep today's
  * behaviour (flattened by redaction).
  *
- * Each member is recognised by BRAND, never by duck-typing: `instanceof` this realm's own
- * constructor (guarded by `typeof … === "function"`), AND the built-in's own getter
- * accepting the value as its receiver, so neither a look-alike (`{ aborted: false,
- * addEventListener() {} }`) nor an object made from the prototype
- * (`Object.create(AbortSignal.prototype)`) is kept.
+ * Each member is recognised by BRAND, never by duck-typing, and without running caller code: an
+ * AbortSignal by `isRealAbortSignal` (shared/abort-signal.ts), the same predicate the governor uses
+ * to leave the transport's signal out of its serialization check, so neither a look-alike
+ * (`{ aborted: false, addEventListener() {} }`), a Proxy, nor an object made from the prototype
+ * with no signal state (`Object.create(AbortSignal.prototype)`) is kept.
  */
-const OPAQUE_TEXT_FREE: ReadonlyArray<(value: object) => boolean> = [
-	(v) =>
-		typeof AbortSignal === "function" &&
-		v instanceof AbortSignal &&
-		passesBrand(ABORT_SIGNAL_ABORTED, v),
-];
+const OPAQUE_TEXT_FREE: ReadonlyArray<(value: object) => boolean> = [(v) => isRealAbortSignal(v)];
 
 /**
  * `value` is, by brand, a member of OPAQUE_TEXT_FREE, and carries no own STRING-named property
@@ -288,29 +278,42 @@ const TRANSPORT_PREFIXES: ReadonlySet<string> = new Set(
 	}),
 );
 
-/** Kept by reference and not walked: an opaque, text-free value at a transport position. */
-function keptByReference(value: unknown, path: string): boolean {
-	return (
-		TRANSPORT_SLOTS.has(path) &&
-		value !== null &&
-		typeof value === "object" &&
-		isOpaqueTextFree(value)
-	);
+/**
+ * Kept by reference and not walked: the transport's value at a transport position. By default
+ * that is an opaque, text-free value (`isOpaqueTextFree`).
+ *
+ * `signalSent` is the caller's statement that the value walked is a request whose transport slot
+ * goes to the transport and is never serialized: the governor's Google request, whose SDK hands
+ * `config.abortSignal` to its HTTP layer as it is. There a real signal is kept whatever own fields
+ * it carries, because none of them is sent (the governor's serialization check leaves it out for
+ * the same reason). Walking it instead flattened it into a plain object the transport rejects, and
+ * a cycle among its fields never ended the scan. Everywhere else (an action's audit copy, the
+ * public `detectPII`) a value is kept only when it has no own string-named field at all.
+ */
+function keptByReference(value: unknown, path: string, signalSent: boolean): boolean {
+	if (!TRANSPORT_SLOTS.has(path) || value === null || typeof value !== "object") return false;
+	return signalSent ? isRealAbortSignal(value) : isOpaqueTextFree(value);
 }
 
-function scanValue(value: unknown, currentPath: string, types: Set<string>, paths: string[]): void {
+function scanValue(
+	value: unknown,
+	currentPath: string,
+	types: Set<string>,
+	paths: string[],
+	signalSent: boolean,
+): void {
 	if (typeof value === "string") {
 		scanString(value, currentPath, types, paths);
 		return;
 	}
 
-	// An opaque, text-free value at a transport position is not walked (see TRANSPORT_SLOTS).
-	if (keptByReference(value, currentPath)) return;
+	// The transport's value at a transport position is not walked (see keptByReference).
+	if (keptByReference(value, currentPath, signalSent)) return;
 
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i++) {
 			const itemPath = currentPath ? `${currentPath}[${i}]` : `[${i}]`;
-			scanValue(value[i], itemPath, types, paths);
+			scanValue(value[i], itemPath, types, paths, signalSent);
 		}
 		return;
 	}
@@ -319,7 +322,7 @@ function scanValue(value: unknown, currentPath: string, types: Set<string>, path
 		const record = value as Record<string, unknown>;
 		for (const key of Object.keys(record)) {
 			const fieldPath = currentPath ? `${currentPath}.${key}` : key;
-			scanValue(record[key], fieldPath, types, paths);
+			scanValue(record[key], fieldPath, types, paths, signalSent);
 		}
 	}
 }
@@ -344,16 +347,31 @@ export interface RedactedData {
 	detection: PIIDetection;
 }
 
+/** How a redaction walk treats the request's transport slot (see `keptByReference`). */
+export interface RedactOptions {
+	/**
+	 * The data is a request whose transport slot is handed to the transport and never serialized
+	 * (the governor's Google request): a real AbortSignal there is kept by reference whatever own
+	 * fields it carries. Default `false`: kept only with no own string-named field.
+	 */
+	signalSent?: boolean;
+}
+
 /**
  * Deep-clone data and replace detected PII values with redacted placeholders.
  * Returns both the redacted data and the detection metadata.
  */
-export function redactPII(data: unknown): RedactedData {
-	const detection = detectPII(data);
+export function redactPII(data: unknown, options: RedactOptions = {}): RedactedData {
+	const signalSent = options.signalSent === true;
+	const detection = detectIn(data, signalSent);
 	if (!detection.found) {
 		return { data, detection };
 	}
-	const redacted = redactValue(data);
+	const redacted = redactValue(data, "", {
+		anywhere: new WeakMap(),
+		atPrefix: new Map(),
+		signalSent,
+	});
 	return { data: redacted, detection };
 }
 
@@ -405,6 +423,8 @@ function defineData(obj: object, key: string, value: unknown, enumerable: boolea
 interface Clones {
 	anywhere: WeakMap<object, unknown>;
 	atPrefix: Map<string, WeakMap<object, unknown>>;
+	/** The transport rule this walk was asked for (`RedactOptions.signalSent`). */
+	signalSent: boolean;
 }
 
 function cachedClone(clones: Clones, value: object, path: string): unknown {
@@ -427,11 +447,7 @@ function registerClone(clones: Clones, value: object, path: string, clone: unkno
 }
 
 /** Recursively traverse data and replace PII strings with redacted placeholders. */
-function redactValue(
-	value: unknown,
-	path = "",
-	clones: Clones = { anywhere: new WeakMap(), atPrefix: new Map() },
-): unknown {
+function redactValue(value: unknown, path: string, clones: Clones): unknown {
 	if (typeof value === "string") {
 		const types = matchedTypes(value);
 		if (types.length > 0) {
@@ -456,8 +472,8 @@ function redactValue(
 		return result;
 	}
 
-	// An opaque, text-free value at a transport position is kept BY REFERENCE (TRANSPORT_SLOTS).
-	if (keptByReference(value, path)) return value;
+	// The transport's value at a transport position is kept BY REFERENCE (see keptByReference).
+	if (keptByReference(value, path, clones.signalSent)) return value;
 
 	if (value !== null && typeof value === "object") {
 		// Looked up only after the transport check: the same signal is kept by reference at its

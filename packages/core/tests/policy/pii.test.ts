@@ -1110,3 +1110,72 @@ describe("redactPII — an array's items are defined on the copy, never assigned
 		}
 	});
 });
+
+describe("redactPII — signalSent: a request whose transport slot is never serialized (the governor's Google request)", () => {
+	const EMAIL = "write to alice@example.com";
+	type Out = { prompt: string; config: { abortSignal: unknown }; contents?: unknown };
+
+	it("a real signal at config.abortSignal is kept by reference whatever own fields it carries, a cycle among them included", () => {
+		const signal = new AbortController().signal as AbortSignal & Record<string, unknown>;
+		signal.note = EMAIL;
+		signal.self = signal;
+		const { data, detection } = redactPII(
+			{ prompt: EMAIL, config: { abortSignal: signal } },
+			{ signalSent: true },
+		);
+		const out = data as Out;
+		expect(out.config.abortSignal).toBe(signal);
+		expect(out.prompt).not.toContain("alice@example.com");
+		// The signal is not walked, so its field is no finding: it is never sent.
+		expect(detection.paths).toEqual(["prompt(email)"]);
+	});
+
+	it("without it (an action's audit copy, the public detectPII), a real signal with an own field is still walked and its text redacted", () => {
+		const signal = Object.assign(new AbortController().signal, { note: EMAIL });
+		const out = redactPII({ prompt: EMAIL, config: { abortSignal: signal } }).data as Out;
+		expect(out.config.abortSignal).not.toBe(signal);
+		expect(JSON.stringify(out)).not.toContain("alice@example.com");
+		expect(detectPII({ config: { abortSignal: signal } }).paths).toEqual([
+			"config.abortSignal.note(email)",
+		]);
+	});
+
+	it("with it, a look-alike at the slot is still walked and redacted: a spread copy, and a duck-typed object", () => {
+		for (const fake of [
+			{ ...new AbortController().signal, note: EMAIL },
+			{ aborted: false, addEventListener() {}, note: EMAIL },
+		]) {
+			const out = redactPII({ prompt: EMAIL, config: { abortSignal: fake } }, { signalSent: true })
+				.data as Out;
+			expect(out.config.abortSignal).not.toBe(fake);
+			expect(JSON.stringify(out)).not.toContain("alice@example.com");
+		}
+	});
+
+	it("with it, a real signal anywhere but the slot is still walked and redacted", () => {
+		const nested = Object.assign(new AbortController().signal, { note: EMAIL });
+		const clean = new AbortController().signal;
+		const out = redactPII(
+			{
+				prompt: EMAIL,
+				contents: [{ parts: [{ functionResponse: { response: { nested } } }] }],
+				config: { abortSignal: clean },
+			},
+			{ signalSent: true },
+		).data as Out;
+		expect(out.config.abortSignal).toBe(clean);
+		expect(JSON.stringify(out.contents)).not.toContain("alice@example.com");
+	});
+
+	it("the brand check runs no caller code: a Proxy of a real signal is not opaque, and its getPrototypeOf trap never runs", () => {
+		let traps = 0;
+		const proxy = new Proxy(new AbortController().signal, {
+			getPrototypeOf(target) {
+				traps++;
+				return Reflect.getPrototypeOf(target);
+			},
+		});
+		expect(isOpaqueTextFree(proxy)).toBe(false);
+		expect(traps).toBe(0);
+	});
+});
