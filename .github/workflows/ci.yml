@@ -86,7 +86,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx biome check .
+      # The repository's own biome: a missing one fails, where npx would fetch whatever package
+      # owns the name.
+      - run: ./node_modules/.bin/biome check .
+      # `biome check` passes a file whose remaining fixes are only warnings or infos, and
+      # `biome check --write` applies them. So a tree this job accepted could still be rewritten
+      # by a later --write (the release formats with one). It must change nothing here.
+      - name: biome check --write changes nothing
+        run: |
+          ./node_modules/.bin/biome check --write .
+          git diff --exit-code
 
   typecheck:
     name: typecheck
