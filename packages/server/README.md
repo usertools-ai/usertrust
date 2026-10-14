@@ -128,12 +128,13 @@ one you cannot reuse.
 | POST   | `/v1/settle`    | Bearer | Phase 2a: post actual usage, returns a TrustReceipt |
 | POST   | `/v1/abort`     | Bearer | Phase 2b: void the hold for a failed call           |
 | POST   | `/v1/release`   | Bearer | Phase 2c: give back a hold that did not fail        |
-| GET    | `/v1/budget`    | Bearer | Remaining tenant budget                             |
+| GET    | `/v1/budget`    | Bearer | Remaining tenant budget, `voidsOwed`                |
 | GET    | `/v1/events`    | Bearer | SSE stream of tenant governance events              |
 | GET    | `/v1/health`    | none   | Liveness and `capabilities`                         |
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
-`404 not_found` (unknown transferId on `/v1/abort` and `/v1/release`; for `/v1/settle` see the three codes below), `413 too_large` (1 MiB body cap).
+`404 not_found` (unknown transferId on `/v1/abort` and `/v1/release`; for `/v1/settle` see the three codes below), `413 too_large` (1 MiB body cap),
+`503 ledger_unavailable` (`/v1/authorize` only; see below).
 Pending holds are swept and released when their advertised life runs out: `pendingTtlMs` (default 5 min),
 or the ledger's pending timeout when that comes first. The sweep reads hold ages on a monotonic clock, so
 no wall-clock step moves it, and it never ends a hold before its advertised life. Declared: after the host
@@ -141,6 +142,36 @@ sleeps, a hold that was pending across the sleep can keep counting against the b
 life (T, 300 s by default) plus up to one sweep interval (30 s) after wake. In enforce mode that can mean
 false denials. It's the safe direction: nothing is charged and the ledger releases the funds on time.
 A TigerBeetle-state probe for this case is a follow-up (#241).
+
+### When the ledger does not answer: `503 ledger_unavailable`
+
+A ledger-backed server waits at most `ledgerTimeoutMs` (config, an integer of at least 100,
+default 5000; not read in dryRun) for the tenant's governor and the ledger on
+`POST /v1/authorize`. Past that it answers:
+
+```json
+{ "error": "ledger_unavailable", "reason": "the ledger did not answer within the deadline; nothing was authorized; retry later", "retryAfterMs": 5000 }
+```
+
+**Nothing was authorized.** Retry after `retryAfterMs`. The TigerBeetle client has no timeout or
+cancel, so the refused request stays queued and executes when the ledger returns. The hold it then
+creates is given back at once by an explicit void (a `hold_released` record), never registered as
+pending; the ledger's pending timeout stays the backstop, and a hold it ends expires there. A
+request whose client hangs up before its answer is treated the same way.
+
+- **Fast-fail.** While an authorize the ledger has not answered is still outstanding on a tenant,
+  every new authorize on that tenant gets the same 503 at once, without queueing another ledger
+  request. If that request never completes, they keep failing fast until it does: the fail-closed
+  direction. If it ends with a local error while the ledger is still down, the next authorize
+  waits one deadline and is refused again.
+- **`voidsOwed`** on the authenticated `GET /v1/budget` counts the tenant's late holds whose
+  give-back has not landed: those still waiting on the ledger (a second outage), and those whose
+  void the ledger refused, until the hold's own life has run out. The server also logs each of
+  these to stderr, naming the transfer only by a short SHA-256 prefix.
+- **Residual race.** A client that hangs up AFTER the `200` is written cannot be detected: that
+  hold is registered as pending and swept as any other.
+- `GET /v1/health` still reports `ok` while the ledger is down. `/v1/settle`, `/v1/abort` and
+  `/v1/release` still wait for the ledger without a bound.
 
 ### Giving a hold back: `/v1/release`, not `/v1/abort`
 

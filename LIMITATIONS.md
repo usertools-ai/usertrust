@@ -565,13 +565,28 @@ Fixed in 5.0.1: a governed stream the caller aborts with its own `AbortSignal` n
 the usage it consumed, as an early `break` does, instead of voiding its hold. 5.0.0 still has
 the gap, on OpenAI and Anthropic `create({ stream: true })`.
 
-## 13. A ledger-backed server can hang when its ledger is unreachable, and may not audit a hold it releases on SIGINT or SIGTERM
+## 13. A ledger-backed server refuses authorizes while its ledger is unreachable, health still reports `ok`, and a hold it releases on SIGINT or SIGTERM may not be audited
 
-A ledger-backed `usertrust-server` answers `POST /v1/authorize` only when its ledger
-answers. If the ledger becomes unreachable, authorize calls hang without an answer, and
-`GET /v1/health` still reports `ok`. A request the client abandons can leave its hold
-reserved for up to 300 seconds after the ledger returns. These are known defects in
-5.0.0. Until a later release fixes them, set a client timeout on every call to the server.
+A ledger-backed `usertrust-server` waits at most `ledgerTimeoutMs` (default 5 seconds) for
+its ledger on `POST /v1/authorize`, then answers `503 ledger_unavailable`: nothing was
+authorized, and the client retries after `retryAfterMs`. The TigerBeetle client has no
+timeout or cancel, so the refused request stays queued and executes when the ledger
+returns; the hold it then creates is voided at once, never registered as pending. While
+such a request is outstanding, every authorize on that tenant gets the same 503 at once. If
+it never completes, they keep failing fast until it does: the fail-closed direction.
+
+- `GET /v1/health` still reports `ok` while the ledger is down. Reachability on health is
+  a later change; a monitor cannot read an outage from health in this release.
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound,
+  and complete when it returns.
+- A client that hangs up after the server has written its `200` cannot be detected: that
+  hold is registered as pending and swept as any other.
+- An authorize that ends without a ledger reply (an evicted client session) may still have
+  reserved, and that reservation expires at the hold timeout.
+- An authorize still outstanding at shutdown whose reserve lands after `destroy()` began
+  expires at the hold timeout.
+- The `hold_released` record of a late hold's give-back is best-effort. The operational
+  record is `voidsOwed` on the authenticated `GET /v1/budget` and the server's log line.
 
 A ledger-backed server stopped by SIGINT or SIGTERM ends each pending hold through
 `destroy()`, which the process can exit before finishing. A hold whose void had not
