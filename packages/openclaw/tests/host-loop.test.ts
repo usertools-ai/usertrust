@@ -43,6 +43,7 @@ import { wrapStreamWithGovernance } from "../src/stream-governor.js";
 import type { AssistantMessageEventStreamLike, StreamEvent, StreamFn } from "../src/types.js";
 import {
 	abortedEvent,
+	awaitSettled,
 	consumeLikeOpenClawLoop,
 	doneEvent,
 	errorEvent,
@@ -53,7 +54,6 @@ import {
 	pinnedStreamOf,
 	startEvent,
 	textDelta,
-	withTimeout,
 } from "./host-fixtures.js";
 
 vi.mock("tigerbeetle-node", () => ({
@@ -120,7 +120,7 @@ describe("pinned OpenClaw host loop", () => {
 		const stream = await governed(model, makeContext());
 
 		const observed: StreamEvent[] = [];
-		const finalMessage = await withTimeout(consumeLikeOpenClawLoop(stream, observed));
+		const finalMessage = await awaitSettled(() => consumeLikeOpenClawLoop(stream, observed));
 
 		// The host saw the whole stream and got its final message back.
 		expect(observed.map((e) => e.type)).toEqual(["start", "text_delta", "done"]);
@@ -163,6 +163,38 @@ describe("pinned OpenClaw host loop", () => {
 		expect(order).toEqual(["settle", "host-sees-done"]);
 	});
 
+	it("does not call a settle that takes longer than any fixed deadline a hang", async () => {
+		// A governed run is slow for honest reasons: the settle appends to a real,
+		// fsync'd audit log. The hang guard must tell slow from stuck by whether
+		// anything is still pending, never by elapsed time, so a settle that
+		// outlasts the old 500 ms deadline still has to resolve.
+		settle.mockImplementation(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 700));
+		});
+		const governed = wrapStreamWithGovernance(
+			pinnedStreamOf([startEvent(), doneEvent(makeUsage(10, 5))]),
+			gov,
+		);
+		const stream = await governed(model, makeContext());
+
+		const finalMessage = await awaitSettled(() => consumeLikeOpenClawLoop(stream));
+
+		expect(finalMessage.usage.input).toBe(10);
+		expect(settle).toHaveBeenCalledOnce();
+	});
+
+	it("names a governed stream that never ends instead of waiting on a deadline", async () => {
+		// Positive control for the hang guard: a provider that goes quiet, with no
+		// terminal event and no close, leaves nothing that could ever settle the
+		// run, and that must fail as "promise never settled" every time.
+		const governed = wrapStreamWithGovernance(() => new PinnedEventStream(), gov);
+		const stream = await governed(model, makeContext());
+
+		await expect(awaitSettled(() => consumeLikeOpenClawLoop(stream))).rejects.toThrow(
+			"promise never settled",
+		);
+	});
+
 	it("resolves result() awaited from inside the loop body on an `error` event", async () => {
 		// [P2-4] The pinned `AssistantMessageEventStream` RESOLVES its result with
 		// `event.error` for an in-band error event — `extractResult` returns
@@ -175,7 +207,7 @@ describe("pinned OpenClaw host loop", () => {
 		const stream = await governed(model, makeContext());
 
 		const observed: StreamEvent[] = [];
-		const finalMessage = await withTimeout(consumeLikeOpenClawLoop(stream, observed));
+		const finalMessage = await awaitSettled(() => consumeLikeOpenClawLoop(stream, observed));
 
 		expect(observed.map((e) => e.type)).toEqual(["start", "text_delta", "error"]);
 		expect(finalMessage.stopReason).toBe("error");
@@ -195,7 +227,7 @@ describe("pinned OpenClaw host loop", () => {
 		const governed = wrapStreamWithGovernance(pinnedStreamOf(events), gov);
 		const stream = await governed(model, makeContext());
 
-		const finalMessage = await withTimeout(consumeLikeOpenClawLoop(stream));
+		const finalMessage = await awaitSettled(() => consumeLikeOpenClawLoop(stream));
 
 		expect(finalMessage.stopReason).toBe("aborted");
 
@@ -239,7 +271,7 @@ describe("pinned OpenClaw host loop", () => {
 		const stream = await governed(model, makeContext(), { signal: controller.signal });
 		controller.abort();
 
-		const finalMessage = await withTimeout(consumeLikeOpenClawLoop(stream));
+		const finalMessage = await awaitSettled(() => consumeLikeOpenClawLoop(stream));
 
 		expect(finalMessage.stopReason).toBe("aborted");
 		expect(terminalCount()).toBe(1);
@@ -260,7 +292,7 @@ describe("pinned OpenClaw host loop", () => {
 		const governed = wrapStreamWithGovernance(pinnedStreamOf([startEvent(), textDelta("x")]), gov);
 		const stream = await governed(model, makeContext());
 
-		await expect(withTimeout(consumeLikeOpenClawLoop(stream))).rejects.toThrow(
+		await expect(awaitSettled(() => consumeLikeOpenClawLoop(stream))).rejects.toThrow(
 			/closed without a terminal event/,
 		);
 
@@ -281,7 +313,7 @@ describe("pinned OpenClaw host loop", () => {
 		const governed = wrapStreamWithGovernance(pinnedStreamOf(events), gov);
 		const stream = await governed(model, makeContext());
 
-		const finalMessage = await withTimeout(stream.result());
+		const finalMessage = await awaitSettled(() => stream.result());
 		expect(finalMessage.usage.input).toBe(10);
 
 		const seen: StreamEvent[] = [];
@@ -302,7 +334,7 @@ describe("pinned OpenClaw host loop", () => {
 		const seen: StreamEvent[] = [];
 		for await (const event of stream) seen.push(event);
 
-		await withTimeout(resultPromise);
+		await awaitSettled(() => resultPromise);
 		expect(seen.map((e) => e.type)).toEqual(["start", "text_delta", "text_delta", "done"]);
 		expect(terminalCount()).toBe(1);
 	});
@@ -318,7 +350,7 @@ describe("pinned OpenClaw host loop", () => {
 		const governed = wrapStreamWithGovernance(streamFn, gov);
 		const stream = await governed(model, makeContext());
 
-		await expect(withTimeout(stream.result())).rejects.toThrow("provider_exploded");
+		await expect(awaitSettled(() => stream.result())).rejects.toThrow("provider_exploded");
 
 		const seen: StreamEvent[] = [];
 		await expect(async () => {
