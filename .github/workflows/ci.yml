@@ -292,6 +292,9 @@ jobs:
           # The gated tests write this into tigerbeetle.addresses; "3000" resolves to
           # 127.0.0.1:3000, matching the server's --addresses=3000 bind above.
           USERTRUST_TB_ADDRESS: "3000"
+          # The binary downloaded above: suites that start, stop and restart their OWN cluster
+          # (on a free port, never the one above) read it.
+          USERTRUST_TB_BINARY: ${{ github.workspace }}/tigerbeetle
         # Every real-cluster suite in the repo, named explicitly rather than by
         # directory: `packages/openclaw/tests/envelope-integration.test.ts` does not
         # live under any integration/ folder, and a glob over
@@ -315,6 +318,7 @@ jobs:
           packages/core/tests/integration/job.tb.test.ts
           packages/openshell/tests/engine.tb.test.ts
           packages/openclaw/tests/envelope-integration.test.ts
+          packages/server/tests/ledger-outage.tb.test.ts
 
   site-build:
     name: site-build

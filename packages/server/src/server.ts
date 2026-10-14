@@ -1,14 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import type { AbortOutcome, Authorization, ReleaseOutcome } from "usertrust";
+import type {
+	AbortOutcome,
+	Authorization,
+	Governor,
+	ReleaseClass,
+	ReleaseOutcome,
+} from "usertrust";
 import { sanitizeReleaseReason } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
-import { resolveTenant } from "./config.js";
+import { DEFAULT_LEDGER_TIMEOUT_MS, resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
 import type { GovernorFactory } from "./pool.js";
 import { GovernorPool } from "./pool.js";
@@ -87,6 +93,18 @@ const HELD_POLL_MS = 50;
 const RELEASE_WAIT_MAX_MS = 30_000;
 /** The longest transferId a settle for an UNKNOWN hold may carry: it is hashed into an audit event. */
 const MAX_RECORDED_TRANSFER_ID = 256;
+/** The reason a late hold is given back under: its authorize was answered without it. */
+const LATE_RELEASE_REASON = "ledger reply after the authorize was refused";
+/**
+ * A late hold's void refused with one of these codes is DONE: the ledger no longer holds it (its
+ * pending timeout ended it, or it was voided). The names are the ones `releaseVoidError` (core)
+ * gives these TigerBeetle results.
+ */
+const DONE_VOID_ERRORS: ReadonlySet<string> = new Set([
+	"pending_transfer_expired",
+	"pending_transfer_already_voided",
+]);
+
 /** Max concurrent SSE streams a single tenant may hold open at once. */
 const MAX_SSE_PER_TENANT = 8;
 /** Drop an SSE subscriber whose kernel send buffer backs up past this. */
@@ -172,6 +190,42 @@ type TerminalKind = "settle" | "abort" | "release" | "sweep" | "shutdown";
 
 const noop = (): void => {};
 
+/**
+ * One authorize request's state. It leaves WAITING exactly once, the first transition wins, and every
+ * transition is synchronous and comes before any write: DELIVERED (the 200 was written and the hold is
+ * in `pending`), ANSWERED (an error or a shadow answer was written), REFUSED (the deadline wrote the
+ * 503) or ABANDONED (the client went away; nothing is written).
+ */
+type AuthorizeState = "waiting" | "delivered" | "answered" | "refused" | "abandoned";
+
+/**
+ * A late hold the server is giving back: its authorize was refused or abandoned, then the ledger
+ * answered it. `voiding` until `release()` settles; `refused` when the ledger refused the void with a
+ * code that does not mean "done", kept (and counted) until the hold's own life, counted from the late
+ * reply, has run out.
+ */
+interface OwedEntry {
+	tenantId: string;
+	transferId: string;
+	/**
+	 * When the ledger's late reply reached the server, in epoch ms (an explicit `sweepExpired(now)`
+	 * reads it). The hold's pending timeout starts when its reserve reaches the cluster, which after an
+	 * outage is at recovery, not at the request's arrival; the reserve committed no later than its
+	 * reply, so the hold's life counted from here is a safe upper bound.
+	 */
+	createdAt: number;
+	/** The same moment on the monotonic clock (the server's own sweep reads it). */
+	startedMono: number;
+	state: "voiding" | "refused";
+	code?: string;
+	holdTimeoutMs?: number;
+}
+
+/** A transfer id in a log line: a short SHA-256 prefix, never the id itself. */
+function idHash(transferId: string): string {
+	return createHash("sha256").update(transferId, "utf-8").digest("hex").slice(0, 12);
+}
+
 /** `claim` found the entry gone or replaced: another terminal owns it, and this caller ended nothing. */
 const NOT_CLAIMED = Symbol("not-claimed");
 
@@ -248,6 +302,20 @@ export function createUsertrustServer(opts: {
 	 * process, a sleep and a forward wall-clock step look alike.
 	 */
 	const monoAge = (entry: PendingEntry): number => performance.now() - entry.startedMono;
+	/**
+	 * Late holds being given back (see `OwedEntry`), keyed `${tenantId}\0${transferId}`. An entry is
+	 * added BEFORE its `release()` starts, so a give-back waiting on the ledger is visible
+	 * (`voidsOwed` on /v1/budget) from the moment it begins.
+	 */
+	const owed = new Map<string, OwedEntry>();
+	/**
+	 * Per governor (one pool entry per tenant, so keyed by tenant id): the authorizes whose request was
+	 * refused or abandoned while the governor's `authorize()` had not settled. While any is in here the
+	 * ledger is known not to have answered, and a new authorize on that governor is refused at once.
+	 * An authorize leaves when its promise settles, however it settles.
+	 */
+	const unsettled = new Map<string, Set<object>>();
+	const ledgerTimeoutMs = config.ledgerTimeoutMs ?? DEFAULT_LEDGER_TIMEOUT_MS;
 	// Live SSE stream count per tenant id, enforcing MAX_SSE_PER_TENANT.
 	const sseCounts = new Map<string, number>();
 	let httpServer: Server | undefined;
@@ -293,6 +361,112 @@ export function createUsertrustServer(opts: {
 		return token;
 	}
 
+	/**
+	 * The 503 an authorize gets when no answer came in time: from the ledger, or from this tenant's
+	 * earlier authorizes queued ahead of it (the governor serves a tenant's authorizes one at a time).
+	 * Nothing was authorized.
+	 */
+	function refuseUnavailable(tenant: TenantConfig, res: ServerResponse): void {
+		const reason = `no answer came within ${ledgerTimeoutMs} ms, either from the ledger or from this tenant's earlier authorizes queued ahead of this one; nothing was authorized; retry later`;
+		bus.publish(tenant.id, {
+			type: "denied",
+			error: "ledger_unavailable",
+			reason,
+			// Never a shadow, even in evaluate_only: nothing was evaluated.
+			shadow: false,
+			at: new Date().toISOString(),
+		});
+		sendJson(res, 503, { error: "ledger_unavailable", reason, retryAfterMs: ledgerTimeoutMs });
+	}
+
+	/** Today's answer to an authorize the governor refused: the mapped error, or evaluate-only's shadow 200. */
+	function answerDenied(tenant: TenantConfig, err: unknown, res: ServerResponse): void {
+		const mapped = toHttpError(err);
+		const shadow = config.enforcement === "evaluate_only" && mapped.status !== 500;
+		bus.publish(tenant.id, {
+			type: "denied",
+			error: mapped.body.error,
+			reason: mapped.body.reason,
+			shadow,
+			at: new Date().toISOString(),
+		});
+		if (shadow) {
+			// Shadow ids are NOT transferIds: no reservation exists, so they can
+			// never be settled or aborted (those routes 404 on unknown ids).
+			sendJson(res, 200, {
+				shadow: true,
+				shadowId: `shadow_${randomUUID()}`,
+				decision: "would_deny",
+				reason: mapped.body.reason,
+			});
+			return;
+		}
+		sendJson(res, mapped.status, mapped.body);
+	}
+
+	/**
+	 * Give back a hold whose authorize was answered without it (refused at the deadline, or abandoned
+	 * by its client), then answered by the ledger. The obligation is registered in `owed` FIRST, then
+	 * `release()` is called ONCE: the native void, submitted only after the reserve's reply, so it
+	 * cannot meet `pending_transfer_not_found`. The hold never enters `pending`. If the ledger is down
+	 * again, the release waits for it (the client never times out) and stays visible as `voiding`.
+	 */
+	function releaseLate(
+		tenantId: string,
+		governor: Governor,
+		auth: Authorization,
+		releaseClass: ReleaseClass,
+	): void {
+		const transferId = auth.transferId;
+		const key = `${tenantId}\0${transferId}`;
+		const entry: OwedEntry = {
+			tenantId,
+			transferId,
+			// The obligation's clock starts at the late reply, never at the request's arrival (OwedEntry).
+			createdAt: Date.now(),
+			startedMono: performance.now(),
+			state: "voiding",
+			...(auth.holdTimeoutMs === undefined ? {} : { holdTimeoutMs: auth.holdTimeoutMs }),
+		};
+		owed.set(key, entry);
+		const refused = (code: string): void => {
+			entry.state = "refused";
+			entry.code = code;
+			process.stderr.write(
+				`usertrust-server: a late hold's void was refused (transfer ${idHash(transferId)}, ${code}); it expires at the hold timeout\n`,
+			);
+		};
+		let releasing: Promise<ReleaseOutcome>;
+		try {
+			releasing = governor.release(auth, LATE_RELEASE_REASON, { releaseClass });
+		} catch (err) {
+			refused(err instanceof Error ? err.constructor.name : "Error");
+			return;
+		}
+		releasing.then(
+			(outcome) => {
+				if (owed.get(key) !== entry) return;
+				if (!outcome.released) {
+					// Teardown or another terminal owned the hold: never counted as a landed void.
+					owed.delete(key);
+					process.stderr.write(
+						`usertrust-server: a late hold was taken by another terminal before its release (transfer ${idHash(transferId)})\n`,
+					);
+					return;
+				}
+				if (outcome.voidError === undefined || DONE_VOID_ERRORS.has(outcome.voidError)) {
+					owed.delete(key);
+					return;
+				}
+				refused(outcome.voidError);
+			},
+			(err: unknown) => {
+				if (owed.get(key) !== entry) return;
+				refused(err instanceof Error ? err.constructor.name : "Error");
+			},
+		);
+	}
+
 	async function handleAuthorize(
 		tenant: TenantConfig,
 		body: unknown,
@@ -306,32 +480,125 @@ export function createUsertrustServer(opts: {
 			});
 			return;
 		}
+		// Fast-fail: while an authorize on this governor that was refused or abandoned has not
+		// settled, the ledger has not answered it, so a new one would only queue behind it.
+		if (!config.dryRun && (unsettled.get(tenant.id)?.size ?? 0) > 0) {
+			refuseUnavailable(tenant, res);
+			return;
+		}
 		// The hold's clock starts NOW, before any ledger I/O this request causes: the
 		// ledger's own pending timeout starts when the reserve commits, which is later.
 		const createdAt = Date.now();
 		const startedMono = performance.now();
-		const governor = await pool.get(tenant);
+
+		let state: AuthorizeState = "waiting";
+		let timer: NodeJS.Timeout | undefined;
+		/** This request's authorize, while it is running: what joins `unsettled` if the request ends first. */
+		let running: object | undefined;
+		const onClose = (): void => {
+			if (!res.writableEnded) leave("abandoned");
+		};
+		/**
+		 * This request's authorize joins the governor's `unsettled` set: it is past the deadline and the
+		 * ledger has not answered it. Only then: a client hanging up early is no evidence of an outage.
+		 */
+		const joinUnsettled = (): void => {
+			if (running === undefined) return;
+			let set = unsettled.get(tenant.id);
+			if (set === undefined) {
+				set = new Set();
+				unsettled.set(tenant.id, set);
+			}
+			set.add(running);
+		};
+		/** The one way out of WAITING: synchronous, first caller wins, before any write. */
+		const leave = (to: Exclude<AuthorizeState, "waiting">): boolean => {
+			if (state !== "waiting") return false;
+			state = to;
+			// An abandoned request keeps its deadline: if its authorize is still running when the deadline
+			// passes, it joins `unsettled` then (with no write: the client is gone).
+			if (timer !== undefined && to !== "abandoned") clearTimeout(timer);
+			res.off("close", onClose);
+			if (to === "refused") joinUnsettled();
+			return true;
+		};
+		/** Is the client already gone: its socket destroyed, or the answer already ended? Read fresh each time. */
+		const gone = (): boolean =>
+			res.destroyed || res.socket?.destroyed === true || res.writableEnded;
+		// "close" on the RESPONSE (never the request's, which fires on every completed POST body).
+		res.on("close", onClose);
+		if (gone()) {
+			leave("abandoned");
+			return;
+		}
+		if (!config.dryRun) {
+			// tigerbeetle-node has no request timeout or cancel ("the TigerBeetle client will never time
+			// out"): this deadline is the server's. A request it refuses stays queued and executes when
+			// the cluster returns; its late hold is then voided (`releaseLate`), and the hold's pending
+			// timeout stays the backstop.
+			timer = setTimeout(() => {
+				if (leave("refused")) refuseUnavailable(tenant, res);
+				else if (state === "abandoned") joinUnsettled();
+			}, ledgerTimeoutMs);
+			timer.unref();
+		}
+
+		let governor: Governor;
 		try {
-			const auth = await governor.authorize(parsed.data);
-			const entry: PendingEntry = {
-				auth,
-				tenantId: tenant.id,
-				createdAt,
-				startedMono,
-				labels: {
-					...(parsed.data.job === undefined ? {} : { job: parsed.data.job }),
-					...(parsed.data.jobState === undefined ? {} : { jobState: parsed.data.jobState }),
-					...(parsed.data.usageFrom === undefined ? {} : { usageFrom: parsed.data.usageFrom }),
-				},
-			};
-			pending.set(auth.transferId, entry);
-			bus.publish(tenant.id, {
-				type: "authorized",
-				transferId: auth.transferId,
-				model: auth.model,
-				estimatedCost: auth.estimatedCost,
-				at: new Date().toISOString(),
-			});
+			governor = await pool.get(tenant);
+		} catch (err) {
+			// Today's answer to a governor that could not be created; consumed if the request ended.
+			if (leave("answered")) throw err;
+			return;
+		}
+		// Acquisition finished after the request ended: its authorize is never started.
+		if (state !== "waiting") return;
+
+		const token = {};
+		running = token;
+		const settle = (): void => {
+			running = undefined;
+			if (timer !== undefined) clearTimeout(timer);
+			const set = unsettled.get(tenant.id);
+			if (set?.delete(token) === true && set.size === 0) unsettled.delete(tenant.id);
+		};
+		let auth: Authorization;
+		try {
+			auth = await governor.authorize(parsed.data);
+		} catch (err) {
+			settle();
+			// A rejection after the request ended is consumed: no second write, no second event.
+			if (leave("answered")) answerDenied(tenant, err, res);
+			return;
+		}
+		settle();
+		// The client never received this hold's transferId (the 503 was written instead, or it was
+		// gone before any answer), so no call can have run under it: `unused`.
+		if (state !== "waiting") {
+			releaseLate(tenant.id, governor, auth, "unused");
+			return;
+		}
+		// The client may be gone without its close event having run yet: then nothing is delivered.
+		if (gone()) {
+			leave("abandoned");
+			releaseLate(tenant.id, governor, auth, "unused");
+			return;
+		}
+		leave("delivered");
+		const entry: PendingEntry = {
+			auth,
+			tenantId: tenant.id,
+			createdAt,
+			startedMono,
+			labels: {
+				...(parsed.data.job === undefined ? {} : { job: parsed.data.job }),
+				...(parsed.data.jobState === undefined ? {} : { jobState: parsed.data.jobState }),
+				...(parsed.data.usageFrom === undefined ? {} : { usageFrom: parsed.data.usageFrom }),
+			},
+		};
+		// The answer is written, and the hold registered, in one synchronous step: no settle for this
+		// id can arrive between the two. A write that throws registers nothing: the hold is given back.
+		try {
 			sendJson(res, 200, {
 				transferId: auth.transferId,
 				estimatedCost: auth.estimatedCost,
@@ -339,29 +606,24 @@ export function createUsertrustServer(opts: {
 				createdAt: auth.createdAt,
 				...expiresIn(remainingLifeMs(auth, config, monoAge(entry))),
 			});
-		} catch (err) {
-			const mapped = toHttpError(err);
-			const shadow = config.enforcement === "evaluate_only" && mapped.status !== 500;
-			bus.publish(tenant.id, {
-				type: "denied",
-				error: mapped.body.error,
-				reason: mapped.body.reason,
-				shadow,
-				at: new Date().toISOString(),
-			});
-			if (shadow) {
-				// Shadow ids are NOT transferIds: no reservation exists, so they can
-				// never be settled or aborted (those routes 404 on unknown ids).
-				sendJson(res, 200, {
-					shadow: true,
-					shadowId: `shadow_${randomUUID()}`,
-					decision: "would_deny",
-					reason: mapped.body.reason,
-				});
-				return;
-			}
-			sendJson(res, mapped.status, mapped.body);
+		} catch {
+			state = "abandoned";
+			// `call-unconfirmed`, not `unused`: the 200 may have reached the client. Most throws come
+			// before any byte is queued (JSON.stringify, writeHead, end()'s argument checks), but end()
+			// writes the payload, uncorks the socket and only then runs the response's `_finish`
+			// (performance observers, a synchronous 'prefinish' emit), and a throw there follows a
+			// sent answer.
+			releaseLate(tenant.id, governor, auth, "call-unconfirmed");
+			return;
 		}
+		pending.set(auth.transferId, entry);
+		bus.publish(tenant.id, {
+			type: "authorized",
+			transferId: auth.transferId,
+			model: auth.model,
+			estimatedCost: auth.estimatedCost,
+			at: new Date().toISOString(),
+		});
 	}
 
 	async function handleSettle(
@@ -775,6 +1037,7 @@ export function createUsertrustServer(opts: {
 			sendJson(res, 200, {
 				remaining: governor.budgetRemaining(),
 				settlementsUnrecoverable: settlementsUnrecoverable.get(tenant.id) ?? 0,
+				voidsOwed: [...owed.values()].filter((entry) => entry.tenantId === tenant.id).length,
 			});
 			return;
 		}
@@ -861,6 +1124,18 @@ export function createUsertrustServer(opts: {
 			const left = remainingLifeMs(entry.auth, config, age);
 			return left === null ? age >= config.pendingTtlMs : left === 0;
 		};
+		// A late hold whose void the ledger refused stays counted until the hold's own life, counted from
+		// the late reply (OwedEntry), has run out (the ledger's pending timeout has ended it by then), plus
+		// one sweep interval.
+		for (const [key, entry] of owed) {
+			if (entry.state !== "refused") continue;
+			const age = now === undefined ? performance.now() - entry.startedMono : now - entry.createdAt;
+			if (age < (entry.holdTimeoutMs ?? config.pendingTtlMs) + SWEEP_INTERVAL_MS) continue;
+			owed.delete(key);
+			process.stderr.write(
+				`usertrust-server: a late hold whose void was refused has expired (transfer ${idHash(entry.transferId)}, ${entry.code ?? "unknown"})\n`,
+			);
+		}
 		let swept = 0;
 		for (const [transferId, entry] of pending) {
 			if (!due(entry)) continue;
@@ -902,6 +1177,15 @@ export function createUsertrustServer(opts: {
 		},
 		async close(): Promise<void> {
 			if (sweeper) clearInterval(sweeper);
+			// What this PR leaves to the ledger's pending timeout at shutdown: authorizes still waiting
+			// on the ledger after their request ended, and late holds whose void has not landed.
+			const outstanding = [...unsettled.values()].reduce((n, set) => n + set.size, 0);
+			const voiding = [...owed.values()].filter((entry) => entry.state === "voiding").length;
+			if (outstanding > 0 || voiding > 0) {
+				process.stderr.write(
+					`usertrust-server: shutting down with ${outstanding} authorize(s) still waiting on the ledger and ${voiding} late hold void(s) not landed; their holds expire at the hold timeout\n`,
+				);
+			}
 			// Release every remaining pending hold (best-effort) so the control plane
 			// and the ledger stay consistent; Governor.destroy() voids at the ledger
 			// layer as the backstop.
