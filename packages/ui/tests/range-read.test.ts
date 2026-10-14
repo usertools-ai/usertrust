@@ -1125,7 +1125,9 @@ describe("an anchor written beside an empty log", { timeout: 30_000 }, () => {
 		const startup = passes;
 		const names = await readFrames(
 			port,
-			() => sleep(5000),
+			async () => {
+				await sleep(5000);
+			},
 			() => false,
 			500,
 		);
