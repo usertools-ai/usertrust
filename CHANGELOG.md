@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The ledger client's 30 s health check no longer piles up requests while the ledger is unreachable.** Each tick looked up the treasury whether or not the previous lookup had been answered. tigerbeetle-node has no request timeout, and a request the cluster never answers stays queued in the native client, so an outage added one queued request (and its callback) every 30 s for as long as it lasted. A tick now submits nothing while the previous check, and any reconnect it started, is still outstanding. `ping()` itself is unchanged.
 
+### Changed
+
+- **usertrust-server's README now says what `retryAfterMs` means.** It is a suggested wait before retrying a `503 ledger_unavailable`, never a promise that the retry succeeds. A client that can wait should back off with jitter rather than all retry at `retryAfterMs`; one with a hard deadline may retry once sooner, as the Claude Code plugin's PreToolUse does. The README gives how long a burst's fast-fail lasted when measured, and why retries extend it.
+
 ## [5.0.3] - 2026-10-14
 
 ### Read before upgrading
