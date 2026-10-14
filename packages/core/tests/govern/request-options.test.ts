@@ -1577,7 +1577,7 @@ describe('under pii: "redact", the Google transport signal is the one the serial
 		},
 	);
 
-	it("a real signal whose prototype was replaced with one derived from AbortSignal.prototype, with an own cycle and PII in the prompt: sent redacted and cancellable, as master sent it", async () => {
+	it("a real signal whose prototype was replaced with one derived from AbortSignal.prototype, with an own cycle and PII in the prompt: sent redacted and cancellable (master refused it as unserializable)", async () => {
 		const { client, eng } = await redacting();
 		const c = new AbortController();
 		const signal = c.signal;
