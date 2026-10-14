@@ -88,6 +88,55 @@ describe("POST /api/export", () => {
 	describe("close()", () => {
 		const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		/**
+		 * Calls `server.close()` while recording the grace timer it arms and every `closeAllConnections`
+		 * call, in one shared order. The rows that use it assert that ORDER (the timer fired, then it cut,
+		 * then close() resolved; or the timer never fired and nothing cut), because a bound on elapsed time
+		 * measures the host's load: with every response taking 600 ms, a close() that was in fact ended by
+		 * the grace timer measured 1,158 ms against a 1,000 ms bound.
+		 */
+		function observeClose(server: UiServer): {
+			closing: Promise<void>;
+			order: string[];
+			graceTimers: NodeJS.Timeout[];
+			cleared: NodeJS.Timeout[];
+		} {
+			const order: string[] = [];
+			const graceTimers: NodeJS.Timeout[] = [];
+			const cleared: NodeJS.Timeout[] = [];
+			const realSetTimeout = globalThis.setTimeout;
+			const realClearTimeout = globalThis.clearTimeout;
+			const realCutAll = server.server.closeAllConnections.bind(server.server);
+			vi.spyOn(server.server, "closeAllConnections").mockImplementation(() => {
+				order.push("cut");
+				realCutAll();
+			});
+			vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+				if (ms !== CLOSE_GRACE_MS) return realSetTimeout(fn, ms);
+				const timer = realSetTimeout(() => {
+					order.push("grace-timer-fired");
+					fn();
+				}, ms);
+				graceTimers.push(timer);
+				return timer;
+			}) as unknown as typeof setTimeout);
+			vi.spyOn(globalThis, "clearTimeout").mockImplementation(((timer?: NodeJS.Timeout) => {
+				if (timer !== undefined && graceTimers.includes(timer)) cleared.push(timer);
+				realClearTimeout(timer);
+			}) as unknown as typeof clearTimeout);
+			// Both timer spies stay until the row's afterEach: the server clears the grace timer later, in its
+			// close callback, and a second grace-long timer armed there (a close() that waits out the grace
+			// itself) must show up in `graceTimers` too.
+			const closing = server.close().then(() => {
+				order.push("close-resolved");
+			});
+			return { closing, order, graceTimers, cleared };
+		}
+
 		it("lets an export still receiving its body at close() complete", async () => {
 			ui = await createUiServer(tempDir, { port: 0 });
 			const body = JSON.stringify({ outDir: "in-flight-out" });
@@ -187,12 +236,17 @@ describe("POST /api/export", () => {
 			);
 			await sleep(50);
 			const started = Date.now();
-			await ui.close();
+			const { closing, order, graceTimers } = observeClose(ui);
+			await closing;
 			const elapsedMs = Date.now() - started;
 			ui = undefined;
 			socket.destroy();
+			// Ended BY the grace: the timer was armed once, it fired, it was what cut the open connection,
+			// and close() resolved only after that. Nothing else cut it or ended it.
+			expect(graceTimers).toHaveLength(1);
+			expect(order).toEqual(["grace-timer-fired", "cut", "close-resolved"]);
+			// A lower bound still holds under any load: a timer never fires early.
 			expect(elapsedMs).toBeGreaterThanOrEqual(CLOSE_GRACE_MS - 100);
-			expect(elapsedMs).toBeLessThan(CLOSE_GRACE_MS + 600);
 		});
 
 		it("the timer that cuts connections is unref'd, so it never keeps the process alive", async () => {
@@ -233,11 +287,15 @@ describe("POST /api/export", () => {
 
 		it("resolves without waiting for the grace when nothing is open", async () => {
 			ui = await createUiServer(tempDir, { port: 0 });
-			const started = Date.now();
-			await ui.close();
-			const elapsedMs = Date.now() - started;
+			const { closing, order, graceTimers, cleared } = observeClose(ui);
+			await closing;
 			ui = undefined;
-			expect(elapsedMs).toBeLessThan(CLOSE_GRACE_MS / 2);
+			// close() resolved with the grace timer cleared before it fired, and nothing cut: it did not
+			// wait for the grace. server.close() reports an empty server on a nextTick, which runs before
+			// any timer can, so this order holds at any load.
+			expect(order).toEqual(["close-resolved"]);
+			expect(graceTimers).toHaveLength(1);
+			expect(cleared).toEqual(graceTimers);
 		});
 
 		it("does not cut connections after the grace once every connection ended on its own", async () => {
