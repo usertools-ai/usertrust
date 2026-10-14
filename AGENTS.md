@@ -300,10 +300,16 @@ from then on nothing reconnects and no request reaches a native client. An opera
   runs before the operation's own input checks and before any shortcut that answers without the
   ledger (a cached wallet id), so an operation started after `destroy()` fails with
   `LedgerClientClosedError` whatever its arguments. A caller can tell shutdown from a refused input.
+  `close()` is the one exception: it is internal teardown (`destroy()` after an eviction probe), and
+  after `destroy()` it returns, as a second `destroy()` does. A governor's teardown awaits it, and a
+  finished shutdown must not turn into a rejection.
 - **At each request**, `native()` checks `closed` at the moment the request is made, because an
   await lets `destroy()` land between an operation's steps, or between a reconnect and its retry.
-  Only `withReconnect()` calls `native()`, for the request and for its retry. It hands the client
-  to a closure that makes its one request at once. A native destroy that throws leaves its client
+  `withReconnect()` calls `native()` for the request and for its retry, and hands the client to a
+  closure that makes its one request at once. `close()` calls it once, for its probe, which goes
+  through `send()` (so an eviction marks the client) but not through `withReconnect()` (a shutdown
+  probe must never reconnect). `native()` still checks `closed` there, and `close()` does not use
+  the reference after its await: the `destroy()` that follows reads the client again. A native destroy that throws leaves its client
   open, and this check is what keeps requests off it.
 
 The rest of the closed state:
