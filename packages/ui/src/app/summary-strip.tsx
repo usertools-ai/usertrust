@@ -4,7 +4,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { SummaryPayload } from "../shared/api.js";
 import { budgetAsOf, budgetDisplay, budgetSourceWord } from "../shared/budget-display.js";
-import { ANCHOR_VERIFY_COMMAND, anchorView, chainStatus, windowNotice } from "../shared/display.js";
+import {
+	ANCHOR_VERIFY_COMMAND,
+	anchorView,
+	chainStatus,
+	verifiedAsOf,
+	windowNotice,
+} from "../shared/display.js";
 import { formatUsd, formatUt, middleTruncate } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
 import type { LiveState } from "./store.js";
@@ -263,6 +269,12 @@ export function SummaryStrip(props: {
 							no events
 						</span>
 					)}
+					<span
+						className="ut-why"
+						title="The dashboard is a monitor: usertrust verify is the authoritative check of a vault"
+					>
+						{verifiedAsOf(s.verifiedAt)}
+					</span>
 				</div>
 				<AnchorFact anchorFile={s.anchorFile} />
 			</section>
