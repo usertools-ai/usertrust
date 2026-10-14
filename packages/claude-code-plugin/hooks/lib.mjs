@@ -1837,22 +1837,31 @@ export function isSettleGone(response) {
 	);
 }
 
+/**
+ * The longest an authorize call waits: usertrust-server's default deadline (`ledgerTimeoutMs`,
+ * 5 s) plus 1.5 s for its answer to arrive. At 5 s the call gave up before the server's own 503
+ * reached it, and read the server's answer as an outage of its own.
+ */
+export const AUTHORIZE_TIMEOUT_MS = 6_500;
+/** The longest PreToolUse waits before it tries a `503 ledger_unavailable` authorize again. */
+export const AUTHORIZE_RETRY_WAIT_MS = 1_000;
 /** The least time an authorize retry gets for its own call; with less left, it is not tried. */
 export const AUTHORIZE_RETRY_MIN_MS = 1_000;
 
 /**
- * Whether PreToolUse tries an authorize once more: a `503` whose `error` is
- * `ledger_unavailable` (usertrust-server: no answer came in time, from its ledger or from the
- * tenant's authorizes queued ahead; nothing was authorized), with at least
- * `AUTHORIZE_RETRY_MIN_MS` left for the retry's call (`msLeft`). A late hold the first attempt
- * leaves is given back by the server itself. Any other answer, a refusal included, is final.
+ * How long PreToolUse waits before trying an authorize once more, or `null` for no retry.
+ * Only a `503` whose `error` is `ledger_unavailable` is retried: usertrust-server answers it when
+ * no answer came in time, from its ledger or from the tenant's authorizes queued ahead, and
+ * nothing was authorized. In a burst the server keeps answering it at once until its queue has
+ * drained, so the retry waits first: `AUTHORIZE_RETRY_WAIT_MS`, less if the hook's budget
+ * (`msLeft`, as `timeLeft()`) would not then leave its 500 ms margin and `AUTHORIZE_RETRY_MIN_MS`
+ * for the retry's call. With no time for any wait, there is no retry. A late hold the first
+ * attempt leaves is given back by the server itself. Any other answer, a refusal included, is final.
  */
-export function retriesAuthorize(response, msLeft) {
-	return (
-		response.status === 503 &&
-		response.json?.error === "ledger_unavailable" &&
-		msLeft >= AUTHORIZE_RETRY_MIN_MS
-	);
+export function authorizeRetryWait(response, msLeft) {
+	if (response.status !== 503 || response.json?.error !== "ledger_unavailable") return null;
+	const wait = Math.min(AUTHORIZE_RETRY_WAIT_MS, msLeft - 500 - AUTHORIZE_RETRY_MIN_MS);
+	return wait > 0 ? wait : null;
 }
 
 /**

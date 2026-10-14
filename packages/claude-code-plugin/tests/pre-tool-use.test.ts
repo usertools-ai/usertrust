@@ -12,9 +12,14 @@ let server: Server | undefined;
 let stateDir: string;
 let baseEnv: Record<string, string>;
 let requests: unknown[];
+/** When each request reached the fake server (ms, from performance.now). */
+let arrivals: number[];
 
-function startFake(handler: (body: unknown) => { status: number; json: unknown }): Promise<number> {
+function startFake(
+	handler: (body: unknown) => { status: number; json: unknown; delayMs?: number },
+): Promise<number> {
 	requests = [];
+	arrivals = [];
 	return new Promise((resolve) => {
 		server = createServer((req, res) => {
 			let raw = "";
@@ -30,9 +35,12 @@ function startFake(handler: (body: unknown) => { status: number; json: unknown }
 				}
 				const body = JSON.parse(raw) as unknown;
 				requests.push(body);
+				arrivals.push(performance.now());
 				const out = handler(body);
-				res.writeHead(out.status, { "content-type": "application/json" });
-				res.end(JSON.stringify(out.json));
+				setTimeout(() => {
+					res.writeHead(out.status, { "content-type": "application/json" });
+					res.end(JSON.stringify(out.json));
+				}, out.delayMs ?? 0);
 			});
 		});
 		server.listen(0, "127.0.0.1", () => {
@@ -311,6 +319,9 @@ describe("pre-tool-use hook", () => {
 	});
 });
 
+/** The preload that leaves a set part of the hook's budget once an authorize is answered 503. */
+const BUDGET_AFTER_503 = join(import.meta.dirname, "helpers", "budget-after-503.mjs");
+
 describe("pre-tool-use: a 503 ledger_unavailable is tried once more", () => {
 	const UNAVAILABLE = {
 		status: 503,
@@ -321,18 +332,17 @@ describe("pre-tool-use: a 503 ledger_unavailable is tried once more", () => {
 		},
 	};
 	/** Answers the authorizes in turn, then 500 for any past the list. */
-	function answers(...list: Array<{ status: number; json: unknown }>) {
+	function answers(...list: Array<{ status: number; json: unknown; delayMs?: number }>) {
 		let n = 0;
 		return () => list[n++] ?? { status: 500, json: { error: "unexpected extra authorize" } };
 	}
 
-	it("503 then 200: the call is reserved, after exactly one retry", async () => {
-		const port = await startFake(
-			answers(UNAVAILABLE, {
-				status: 200,
-				json: { transferId: "tx_after_retry", estimatedCost: 3 },
-			}),
-		);
+	const RESERVED = { status: 200, json: { transferId: "tx_after_retry", estimatedCost: 3 } };
+	/** How long the hook waited between the 503 and its retry, as the server saw it. */
+	const gap = () => (arrivals[1] ?? Number.NaN) - (arrivals[0] ?? Number.NaN);
+
+	it("503 then 200: the call is reserved, after exactly one retry, made a full 1 s later", async () => {
+		const port = await startFake(answers(UNAVAILABLE, RESERVED));
 		const result = await runHook(HOOK, PAYLOAD, {
 			...baseEnv,
 			UT_SERVER_URL: `http://127.0.0.1:${port}`,
@@ -342,9 +352,50 @@ describe("pre-tool-use: a 503 ledger_unavailable is tried once more", () => {
 		expect(requests).toHaveLength(2);
 		// The retry is the same authorize.
 		expect(requests[1]).toEqual(requests[0]);
+		expect(gap()).toBeGreaterThanOrEqual(950);
+		expect(gap()).toBeLessThan(2_500);
 		expect(await holdFiles()).toHaveLength(1);
 		expect(result.stderr).toContain("reserved tx_after_retry");
 	});
+
+	it("a short budget cuts the wait: 1.8 s left after the 503 leaves a wait of about 300 ms, then the retry", async () => {
+		const port = await startFake(answers(UNAVAILABLE, RESERVED));
+		const result = await runHook(
+			HOOK,
+			PAYLOAD,
+			{ ...baseEnv, UT_SERVER_URL: `http://127.0.0.1:${port}`, UT_CC_TEST_LEFT_AFTER_503: "1800" },
+			["--import", BUDGET_AFTER_503],
+		);
+		expect(result.code).toBe(0);
+		expect(requests).toHaveLength(2);
+		expect(gap()).toBeGreaterThanOrEqual(200);
+		expect(gap()).toBeLessThan(800);
+		expect(result.stderr).toContain("reserved tx_after_retry");
+	});
+
+	it("no retry when no wait fits: 1.4 s left after the 503 is the outage path at once", async () => {
+		const port = await startFake(answers(UNAVAILABLE, RESERVED));
+		const result = await runHook(
+			HOOK,
+			PAYLOAD,
+			{ ...baseEnv, UT_SERVER_URL: `http://127.0.0.1:${port}`, UT_CC_TEST_LEFT_AFTER_503: "1400" },
+			["--import", BUDGET_AFTER_503],
+		);
+		expect(result.code).toBe(2);
+		expect(requests).toHaveLength(1);
+		expect(result.stderr).toContain("unexpected governance response 503");
+	});
+
+	it("a 503 answered AT the server's 5 s deadline is received (not given up on first), and retried", async () => {
+		const port = await startFake(answers({ ...UNAVAILABLE, delayMs: 5_000 }, RESERVED));
+		const result = await runHook(HOOK, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expect(result.code).toBe(0);
+		expect(requests).toHaveLength(2);
+		expect(result.stderr).toContain("reserved tx_after_retry");
+	}, 20_000);
 
 	for (const [label, env, code] of [
 		["enforce", {}, 2],

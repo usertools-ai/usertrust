@@ -584,11 +584,14 @@ usage it misses stays in the transcript to be posted at a later settle point.
 Leave it unset when the budget must be enforced. Upgrading from a release where
 blocking was the default: set `UT_CC_MODE=enforce` to keep it.
 
-A `503` whose `error` is `ledger_unavailable` means the server's ledger did not answer in
-time, in an outage or in a burst of authorizes past what the server answers in time. Nothing
-was authorized, and PreToolUse tries the authorize once more when the hook has at least 1 s
-left. A second `503` is an outage like any other: in enforce mode, while it lasts, every tool
-call is **blocked** unless `UT_FAIL_OPEN=1`.
+A `503` whose `error` is `ledger_unavailable` means no answer came in time, from the server's
+ledger or from the authorizes queued ahead: in an outage, or in a burst past what the server
+answers in time. Nothing was authorized. PreToolUse makes one retry after a short wait (up to
+1 s, within the hook's budget). It clears a `503` whose cause, such as a burst's queue, has
+drained by then. In an outage it adds about 1 s (and the longer first-call timeout, 6.5 s,
+about 1.5 s) before the call is blocked or recorded as a gap. A second `503` is an outage
+like any other: in enforce mode, while it lasts, every tool call is **blocked** unless
+`UT_FAIL_OPEN=1`.
 
 **Known limitation: a call that does not complete keeps its reservation for a
 while.** PostToolUse, the hook that closes a call's hold,

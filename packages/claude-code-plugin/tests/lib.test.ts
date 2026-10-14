@@ -315,26 +315,33 @@ describe("writes that cannot be confirmed never read as done", () => {
 	});
 });
 
-describe("retriesAuthorize: a 503 ledger_unavailable is tried once more, when the budget leaves room", () => {
+describe("authorizeRetryWait: a 503 ledger_unavailable is retried once, after a wait the budget bounds", () => {
 	const unavailable = { status: 503, json: { error: "ledger_unavailable", reason: "r" } };
-	/** retriesAuthorize, from lib.mjs. */
+	/** authorizeRetryWait, from lib.mjs. */
 	// @ts-expect-error TS7016: the hooks are plain .mjs, without type declarations.
 	const lib = () => import("../hooks/lib.mjs");
 
-	it("a 503 ledger_unavailable with at least the minimum left is retried", async () => {
-		const { retriesAuthorize, AUTHORIZE_RETRY_MIN_MS } = await lib();
-		expect(retriesAuthorize(unavailable, AUTHORIZE_RETRY_MIN_MS)).toBe(true);
-		expect(retriesAuthorize(unavailable, 5_000)).toBe(true);
+	it("waits AUTHORIZE_RETRY_WAIT_MS (1 s) when the budget leaves room for it, its margin and the retry's call", async () => {
+		const { authorizeRetryWait, AUTHORIZE_RETRY_WAIT_MS } = await lib();
+		expect(AUTHORIZE_RETRY_WAIT_MS).toBe(1_000);
+		expect(authorizeRetryWait(unavailable, 9_000)).toBe(1_000);
+		expect(authorizeRetryWait(unavailable, 2_500)).toBe(1_000);
 	});
 
-	it("not when the hook's budget cannot fit the retry's call", async () => {
-		const { retriesAuthorize, AUTHORIZE_RETRY_MIN_MS } = await lib();
-		expect(retriesAuthorize(unavailable, AUTHORIZE_RETRY_MIN_MS - 1)).toBe(false);
-		expect(retriesAuthorize(unavailable, -500)).toBe(false);
+	it("waits less when the budget is short: what is left after the 500 ms margin and the retry's 1 s", async () => {
+		const { authorizeRetryWait } = await lib();
+		expect(authorizeRetryWait(unavailable, 2_000)).toBe(500);
+		expect(authorizeRetryWait(unavailable, 1_501)).toBe(1);
+	});
+
+	it("no retry when no wait fits", async () => {
+		const { authorizeRetryWait } = await lib();
+		expect(authorizeRetryWait(unavailable, 1_500)).toBeNull();
+		expect(authorizeRetryWait(unavailable, -500)).toBeNull();
 	});
 
 	it("never a refusal, a rejected key, another 503 or any other answer", async () => {
-		const { retriesAuthorize } = await lib();
+		const { authorizeRetryWait } = await lib();
 		for (const response of [
 			{ status: 402, json: { error: "budget_exceeded" } },
 			{ status: 403, json: { error: "policy_denied" } },
@@ -345,7 +352,12 @@ describe("retriesAuthorize: a 503 ledger_unavailable is tried once more, when th
 			{ status: 500, json: { error: "ledger_unavailable" } },
 			{ status: 200, json: { transferId: "t" } },
 		]) {
-			expect(retriesAuthorize(response, 5_000), JSON.stringify(response)).toBe(false);
+			expect(authorizeRetryWait(response, 9_000), JSON.stringify(response)).toBeNull();
 		}
+	});
+
+	it("the first call waits past the server's default 5 s deadline", async () => {
+		const { AUTHORIZE_TIMEOUT_MS } = await lib();
+		expect(AUTHORIZE_TIMEOUT_MS).toBeGreaterThan(5_000);
 	});
 });

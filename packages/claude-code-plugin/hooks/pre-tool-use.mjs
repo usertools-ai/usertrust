@@ -67,8 +67,10 @@ import {
 	rejectionDetail,
 } from "./key-rejected.mjs";
 import {
+	AUTHORIZE_TIMEOUT_MS,
 	abandonHold,
 	announce,
+	authorizeRetryWait,
 	breakerOpen,
 	claimForRelease,
 	claimForSettle,
@@ -96,7 +98,6 @@ import {
 	recordWatchEvent,
 	releaseHold,
 	requireLaunch,
-	retriesAuthorize,
 	sameTenant,
 	sanitizeReason,
 	say,
@@ -646,14 +647,19 @@ async function reserve(input) {
 					...(principal === undefined ? {} : { principal }),
 					...authorizeLabels(holdAuthorizeLabels()),
 				},
-				{ timeoutMs: callTimeout() },
+				// Past the server's own deadline, so its 503 is received (`AUTHORIZE_TIMEOUT_MS`).
+				{ timeoutMs: Math.min(AUTHORIZE_TIMEOUT_MS, timeLeft() - 500) },
 			);
 		// A 503 `ledger_unavailable` (an outage, or a burst past what the server answers in time) is
-		// tried once more when the hook's budget leaves room (`retriesAuthorize`); a second miss is the
-		// outage it was, below. A refusal is a decision and is never retried.
+		// tried once more, after a short wait, when the hook's budget leaves room for both
+		// (`authorizeRetryWait`); a second miss is the outage it was, below. A refusal is a decision
+		// and is never retried.
 		const authorize = async () => {
 			const response = await authorizeOnce();
-			return retriesAuthorize(response, callTimeout()) ? await authorizeOnce() : response;
+			const wait = authorizeRetryWait(response, timeLeft());
+			if (wait === null) return response;
+			await new Promise((resolve) => setTimeout(resolve, wait));
+			return await authorizeOnce();
 		};
 		let response = await authorize();
 		if (window && keyed && isAlreadySettled(response)) {
