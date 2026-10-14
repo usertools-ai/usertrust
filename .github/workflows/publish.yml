@@ -190,12 +190,26 @@ jobs:
         if: ${{ !inputs.republish }}
         run: bash scripts/release.sh assert-unreleased
 
-      # ── Re-format package.json after bump (biome) ──
-      # npm version produces multi-line keywords/files arrays that fail biome.
-      # Auto-format so master stays lint-clean after release.
+      # ── Re-format the package.json files the bump changed (biome) ──
+      # npm version produces multi-line keywords/files arrays that fail biome. Only the files the
+      # bump changed are formatted: the rest of the tree is the commit CI checked, and CI's lint
+      # job refuses a tree that `biome check --write` would change, so formatting the whole tree
+      # here could only rewrite files CI accepted (and the tree-to-publish check would then
+      # refuse). The repository's own biome, from node_modules/.bin: a missing one fails the
+      # step, where npx would fetch whatever package owns the name.
       - name: Format package.json after bump
         if: ${{ !inputs.republish }}
-        run: npx biome check . --write
+        run: |
+          changed=()
+          for dir in $(bash scripts/release.sh dirs); do
+            file="packages/${dir}/package.json"
+            git diff --quiet -- "$file" || changed+=("$file")
+          done
+          if [ "${#changed[@]}" -eq 0 ]; then
+            echo "::error::The bump changed no package.json."
+            exit 1
+          fi
+          ./node_modules/.bin/biome check --write "${changed[@]}"
 
       # ── Build ──
       - name: Build usertrust

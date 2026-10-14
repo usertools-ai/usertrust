@@ -2621,3 +2621,85 @@ describe("npm publish is handed exactly the assembled tarball", { timeout: 120_0
 		);
 	});
 });
+
+describe("the release formats only what its bump changed, with the repository's own biome", {
+	timeout: 30_000,
+}, () => {
+	const formatRun = (): string => step("build", "Format package.json after bump").run ?? "";
+	/** A tracked file the formatter WOULD change: a release must leave it as CI accepted it. */
+	const LOOSE = "packages/core/src/loose.ts";
+	const LOOSE_TEXT = "export const z = {a:1,\n    b: 2};\n";
+
+	beforeEach(() => {
+		writeManifests(realManifests("1.0.0", "1.0.0"));
+		copyFileSync(join(ROOT, "biome.json"), join(repo, "biome.json"));
+		mkdirSync(join(repo, "packages/core/src"), { recursive: true });
+		writeFileSync(join(repo, LOOSE), LOOSE_TEXT);
+		git("add", ".");
+		git("commit", "-q", "-m", "manifests, and a file biome would reformat");
+	});
+
+	/** The step's script, run as Actions runs a `run:` block, with `biome` linked or not. */
+	function runFormat(linkBiome: boolean) {
+		if (linkBiome) symlinkSync(join(ROOT, "node_modules"), join(repo, "node_modules"));
+		// A decoy npx and biome on PATH: the step must never reach for either.
+		const bin = join(dir, "decoys");
+		mkdirSync(bin, { recursive: true });
+		for (const name of ["npx", "biome"]) {
+			writeFileSync(join(bin, name), `#!/bin/sh\necho ${name} >> "${join(dir, "decoy-calls")}"\n`);
+			chmodSync(join(bin, name), 0o755);
+		}
+		const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", formatRun()], {
+			cwd: repo,
+			encoding: "utf8",
+			timeout: 20_000,
+			env: { ...gitEnv(), PATH: `${bin}:${process.env.PATH}` },
+		});
+		const decoys = existsSync(join(dir, "decoy-calls"))
+			? readFileSync(join(dir, "decoy-calls"), "utf8")
+			: "";
+		return { status: r.status, out: `${r.stdout}${r.stderr}`, decoys };
+	}
+
+	it("formats the bumped package.json, and leaves every other file as committed", () => {
+		// What a bump can leave: a new version, written in a layout biome reformats.
+		const bumped = realManifests("1.0.1", "1.0.0").core as Manifest;
+		writeFileSync(manifestPath("core"), `${JSON.stringify(bumped, null, 2)}\n`);
+		const r = runFormat(true);
+		expect(r.status, r.out).toBe(0);
+		expect(readFileSync(manifestPath("core"), "utf8")).toBe(
+			`${JSON.stringify(bumped, null, "\t")}\n`,
+		);
+		// The control: biome would have reformatted this file, and the step left it alone.
+		expect(readFileSync(join(repo, LOOSE), "utf8")).toBe(LOOSE_TEXT);
+		expect(git("status", "--porcelain", "--untracked-files=no")).toBe(
+			"M packages/core/package.json",
+		);
+		expect(r.decoys).toBe("");
+	});
+
+	it("refuses when the bump changed no package.json", () => {
+		const r = runFormat(true);
+		expect(r.status).toBe(1);
+		expect(r.out).toContain("The bump changed no package.json.");
+	});
+
+	it("refuses when the repository's biome is missing, and never fetches one", () => {
+		writeFileSync(
+			manifestPath("core"),
+			`${JSON.stringify(realManifests("1.0.1", "1.0.0").core, null, 2)}\n`,
+		);
+		const r = runFormat(false);
+		expect(r.status).not.toBe(0);
+		expect(r.decoys).toBe("");
+	});
+
+	it("CI's lint job runs the repository's biome, and fails when `biome check --write` changes the tree", () => {
+		const steps = ci.jobs.lint?.steps ?? [];
+		const runs = steps.map((s) => (s.run ?? "").trim());
+		expect(runs).toContain("./node_modules/.bin/biome check .");
+		expect(runs).toContain("./node_modules/.bin/biome check --write .\ngit diff --exit-code");
+		expect(runs.filter((r) => /\bnpx\b[^\n]*\bbiome\b/.test(r))).toEqual([]);
+		expect(/\bnpx\b/.test(formatRun())).toBe(false);
+	});
+});
