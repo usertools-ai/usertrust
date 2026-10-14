@@ -128,6 +128,7 @@ import { detectInjection } from "./policy/injection.js";
 import { builtInAborted, detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
+import { isRealAbortSignal } from "./shared/abort-signal.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/private-fs.js";
 import { isPersistableSpend } from "./shared/spend-guard.js";
@@ -1231,36 +1232,6 @@ const ENVELOPE_FUNDING_HINT =
 	"another envelope. Raising the trust()/createGovernor() budget funds the session wallet, " +
 	"which an attributed call never debits.";
 
-/** This realm's AbortSignal prototype and its native `aborted` getter, captured at load. */
-const abortSignalPrototype: object | undefined = globalThis.AbortSignal?.prototype;
-const abortSignalAborted = Object.getOwnPropertyDescriptor(
-	abortSignalPrototype ?? {},
-	"aborted",
-)?.get;
-
-/**
- * Whether `value` is a real AbortSignal of this realm, decided without running caller code: no
- * Proxy anywhere on its prototype chain (a bounded walk), its prototype IS this realm's
- * `AbortSignal.prototype` (a spread copy of a signal carries the signal's own state, symbols
- * included, so the getter alone would take it), and the native `aborted` getter accepts it (it
- * throws for anything without the signal's state). A lookalike is not one.
- */
-function isRealAbortSignal(value: unknown): boolean {
-	if (abortSignalAborted === undefined || value === null || typeof value !== "object") return false;
-	let o: object | null = value;
-	for (let depth = 0; o !== null; depth++) {
-		if (depth >= 64 || utilTypes.isProxy(o)) return false;
-		o = Object.getPrototypeOf(o);
-	}
-	if (Object.getPrototypeOf(value) !== abortSignalPrototype) return false;
-	try {
-		abortSignalAborted.call(value);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 /**
  * What a Google request's snapshot is made from: the gate's mirror, less a real AbortSignal at
  * `config.abortSignal` (`isRealAbortSignal`), the one transport value the mirror keeps by
@@ -2289,7 +2260,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						if (config.pii === "redact" && piiResult.found) {
 							// redact mode: forward a redacted DEEP CLONE so PII never egresses.
 							// redactPII is pure — the caller's original object is never mutated.
-							const redactedBody = redactPII(params).data as Record<string, unknown>;
+							// Google's request is the mirror, which keeps a real AbortSignal at
+							// `config.abortSignal` for the transport: the SDK never serializes it, so it
+							// is kept by reference whatever own fields it carries, the same signal the
+							// serialization check above left out (`snapshotSource`, by `isRealAbortSignal`).
+							// Any other provider's request here is the parse of its serialization.
+							const redactedBody = redactPII(params, { signalSent: kind === "google" })
+								.data as Record<string, unknown>;
 							forwardArgs = [redactedBody, ...args.slice(1)];
 						}
 						// "warn" mode: continue, no transform (audit copy is redacted later).
