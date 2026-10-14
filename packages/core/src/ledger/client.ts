@@ -347,6 +347,9 @@ export class TrustTBClient {
 				.then((healthy) =>
 					this.noteHealth(healthy, "the treasury lookup failed or found no account"),
 				)
+				// ping() answers false rather than rejecting today. Should that ever change, a rejection
+				// here would have no consumer, and an unhandled rejection ends the process.
+				.catch(() => this.noteHealth(false, "the health check itself failed"))
 				.finally(() => {
 					this.healthCheckInFlight = false;
 				});

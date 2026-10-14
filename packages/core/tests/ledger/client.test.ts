@@ -1953,6 +1953,82 @@ describe("TrustTBClient", () => {
 			expect(onAlert).not.toHaveBeenCalled();
 		});
 
+		/** Records what would escape the health check: unhandled rejections and uncaught exceptions. */
+		function escapes(): { seen: unknown[]; stop: () => void } {
+			const seen: unknown[] = [];
+			const onRejection = (reason: unknown) => seen.push(reason);
+			const onException = (err: unknown) => seen.push(err);
+			process.on("unhandledRejection", onRejection);
+			process.on("uncaughtException", onException);
+			return {
+				seen,
+				stop: () => {
+					process.off("unhandledRejection", onRejection);
+					process.off("uncaughtException", onException);
+				},
+			};
+		}
+
+		it("a ping() that rejects is a failed check: one alert, nothing escapes, and the next check runs", async () => {
+			client.destroy();
+			const onAlert = vi.fn();
+			const alertClient = new TrustTBClient({ addresses: ["3000"], onAlert });
+			alertClient.setTreasuryId(42n);
+			mockLookupAccounts.mockReset();
+			mockLookupAccounts.mockResolvedValue([{ id: 42n }]);
+			vi.spyOn(alertClient, "ping").mockRejectedValueOnce(new Error("ping contract changed"));
+			const watch = escapes();
+			try {
+				await vi.advanceTimersByTimeAsync(30_000);
+				expect(onAlert).toHaveBeenCalledWith(
+					expect.stringContaining("health check failed"),
+					expect.objectContaining({ reason: "the health check itself failed" }),
+				);
+				await vi.advanceTimersByTimeAsync(30_000);
+				expect(recovered(onAlert.mock.calls)).toBe(1);
+				await vi.advanceTimersByTimeAsync(0);
+				expect(watch.seen).toEqual([]);
+			} finally {
+				watch.stop();
+				alertClient.destroy();
+			}
+		});
+
+		it("an onAlert that throws on every path (an unanswered check, a rejected ping, a recovery): nothing escapes, and the check keeps running", async () => {
+			client.destroy();
+			const onAlert = vi.fn(() => {
+				throw new Error("alert sink down");
+			});
+			const alertClient = new TrustTBClient({ addresses: ["3000"], onAlert });
+			alertClient.setTreasuryId(42n);
+			let answer: (accounts: unknown[]) => void = () => {};
+			mockLookupAccounts.mockReset();
+			mockLookupAccounts.mockReturnValueOnce(
+				new Promise((resolve) => {
+					answer = resolve;
+				}),
+			);
+			const watch = escapes();
+			try {
+				// The unanswered-check path: noteHealth runs inside the timer callback itself.
+				await vi.advanceTimersByTimeAsync(2 * 30_000);
+				expect(failed(onAlert.mock.calls)).toBe(1);
+				// The recovery path, on the ping's own chain.
+				answer([{ id: 42n }]);
+				await vi.advanceTimersByTimeAsync(0);
+				expect(recovered(onAlert.mock.calls)).toBe(1);
+				// The rejected-ping path, through the terminal catch.
+				vi.spyOn(alertClient, "ping").mockRejectedValueOnce(new Error("ping contract changed"));
+				await vi.advanceTimersByTimeAsync(30_000);
+				expect(failed(onAlert.mock.calls)).toBe(2);
+				await vi.advanceTimersByTimeAsync(0);
+				expect(watch.seen).toEqual([]);
+			} finally {
+				watch.stop();
+				alertClient.destroy();
+			}
+		});
+
 		it("an onAlert that throws breaks nothing: the next check runs, and its recovery is said", async () => {
 			client.destroy();
 			const onAlert = vi.fn(() => {
