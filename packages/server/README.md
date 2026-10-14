@@ -154,8 +154,8 @@ request: the governor serves a tenant's authorizes one at a time. Past it the se
 { "error": "ledger_unavailable", "reason": "no answer came within 5000 ms, either from the ledger or from this tenant's earlier authorizes queued ahead of this one; nothing was authorized; retry later", "retryAfterMs": 5000 }
 ```
 
-**Nothing was authorized.** `retryAfterMs` (the deadline) is the least a client should wait
-before retrying, not a promise that a retry then succeeds (see *Retrying*, below). The TigerBeetle
+**Nothing was authorized.** `retryAfterMs` (the deadline) is a suggested wait before retrying,
+not a promise that a retry then succeeds (see *Retrying*, below). The TigerBeetle
 client has no timeout or cancel, so the refused request stays queued and executes when the ledger returns. The hold it then
 creates is given back at once by an explicit void (a `hold_released` record), never registered as
 pending; the ledger's pending timeout stays the backstop, and a hold it ends expires there. A
@@ -181,19 +181,22 @@ have reached the client.
   tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`. With a deadline
   above about 6.5 s, the Claude Code plugin's PreToolUse cannot receive the `503` (it gives up
   first) and treats the call as an outage.
-- **Retrying.** After a burst, the fast-fail lasts until the tenant's admitted authorizes have
-  drained, at about one authorize's time each: draining a burst of N takes roughly N ÷ 65 seconds
-  from its start on the machine above, and the fast-fail ends a little after that (measured: about
-  7 to 8.5 s after the start for 400, about 18.5 to 19 s for 1000). That is an order of magnitude,
-  not a promise. Measured there with the default 5 s deadline, the first 503 came about 5.2 s
-  after the burst began. After a burst of 400 the fast-fail ended 1.7 to 3.3 s later, and after a
-  burst of 1000 about 13 s later. A client retrying every 25 ms after a 503 during a 1000-request
-  burst's fast-fail typically got its first success about 21 s later. Retries extend the window:
-  one that is let in while the queue is still long waits behind it and can reach the deadline
-  itself. So back off with jitter, waiting longer after each 503, rather than all retrying at
-  `retryAfterMs`: retrying at one common moment re-creates the burst. In an outage nothing
-  predicts when the ledger returns. A fast-fail costs the server no ledger request, so a retry
-  that comes too early costs one cheap 503.
+- **Retrying.** `retryAfterMs` is a suggestion, not a promise. A client that can wait should back
+  off with jitter, waiting longer after each 503, rather than retrying at one common moment: a
+  burst's clients all retrying at `retryAfterMs` re-create the burst. A client with its own hard
+  deadline may instead retry once sooner, expecting another 503, which is cheap: a fast-fail costs
+  the server no ledger request. The Claude Code plugin's PreToolUse does exactly that, one retry
+  after up to 1 s within its time budget (see its README). How long a 503 lasts: after a burst,
+  the fast-fail lasts until the tenant's admitted authorizes have drained, at about one
+  authorize's time each: draining a burst of N takes roughly N ÷ 65 seconds from its start on the
+  machine above, and the fast-fail ends a little after that (measured: about 7 to 8.5 s after the
+  start for 400, about 18.5 to 19 s for 1000). That is an order of magnitude, not a promise.
+  Measured there with the default 5 s deadline, the first 503 came about 5.2 s after the burst
+  began. After a burst of 400 the fast-fail ended 1.7 to 3.3 s later, and after a burst of 1000
+  about 13 s later. A client retrying every 25 ms after a 503 during a 1000-request burst's
+  fast-fail typically got its first success about 21 s later. Retries extend the window: one that
+  is let in while the queue is still long waits behind it and can reach the deadline itself. In an
+  outage nothing predicts when the ledger returns.
 - **`voidsOwed`** on the authenticated `GET /v1/budget` counts the tenant's late holds whose
   give-back has not landed: those still waiting on the ledger (a second outage), and those whose
   void the ledger refused, until the hold's own life has run out. The server also logs each of
