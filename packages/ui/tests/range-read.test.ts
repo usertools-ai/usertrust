@@ -59,9 +59,12 @@ vi.mock("node:fs", async (importOriginal) => {
 
 const {
 	appendFileSync,
+	closeSync,
 	cpSync,
+	ftruncateSync,
 	mkdirSync,
 	mkdtempSync,
+	openSync,
 	readFileSync,
 	renameSync,
 	rmSync,
@@ -69,11 +72,14 @@ const {
 	truncateSync,
 	utimesSync,
 	writeFileSync,
+	writeSync,
 } = await import("node:fs");
 const { canonicalize } = await import("usertrust-verify");
 const { createAuditWriter } = await import("../../core/src/audit/chain.js");
 const { createUiServer } = await import("../src/server/server.js");
-const { fileIdentity, loadSeam, loadState, readAppended } = await import("../src/server/state.js");
+const { appendSeam, fileIdentity, loadSeam, loadState, readAppended } = await import(
+	"../src/server/state.js"
+);
 const { __tailTestSeam, watchLedger } = await import("../src/server/tail.js");
 const { EventEmitter } = await import("node:events");
 
@@ -160,6 +166,28 @@ function chainedAfter(text: string, transferId: string): string {
 	};
 	const hash = createHash("sha256").update(canonicalize(rest)).digest("hex");
 	return `${canonicalize({ ...rest, hash })}\n`;
+}
+
+/** The first event of a chain, as the writer would persist it (its line, newline included), and its hash. */
+function firstEvent(transferId: string): { line: string; hash: string } {
+	const rest = {
+		actor: "local",
+		data: { cost: 5, settled: true, transferId },
+		id: `${transferId}-id`,
+		kind: "llm_call",
+		previousHash: "0".repeat(64),
+		sequence: 1,
+		timestamp: new Date().toISOString(),
+	};
+	const hash = createHash("sha256").update(canonicalize(rest)).digest("hex");
+	return { line: `${canonicalize({ ...rest, hash })}\n`, hash };
+}
+
+/** Publishes the `.meta` anchor as the writer does: a temporary file, renamed into place. */
+function publishAnchor(auditDir: string, anchor: { lastHash: string; sequence: number }): void {
+	const meta = join(auditDir, "events.jsonl.meta");
+	writeFileSync(`${meta}.tmp`, JSON.stringify(anchor));
+	renameSync(`${meta}.tmp`, meta);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -798,5 +826,385 @@ describe("a same-size replacement without stable inode numbers", { timeout: 30_0
 				w.stop();
 			}
 		});
+	});
+});
+
+// An earlier event rewritten IN PLACE one byte longer keeps the log's inode and grows it by one byte, every later byte
+// shifted by one. The grow path reads only the bytes after the offset (the shifted final newline), which hold no new
+// line, so before each extension it re-reads the last line it verified: moved or changed, the grow is a full reload.
+// The bound is 10 s, far inside the five-minute re-read, which these rows never reach.
+describe("an earlier event rewritten in place under a running dashboard", {
+	timeout: 30_000,
+}, () => {
+	let root: string;
+	let vault: string;
+	let log: string;
+	let ui: Awaited<ReturnType<typeof createUiServer>> | undefined;
+
+	beforeEach(async () => {
+		root = mkdtempSync(join(tmpdir(), "trust-range-inplace-"));
+		vault = join(root, ".usertrust");
+		log = join(vault, "audit", "events.jsonl");
+		io.zeroInode = false;
+		await appendEvents(root, 3, "tx");
+	});
+	afterEach(async () => {
+		appendSeam.afterStat = undefined;
+		await ui?.close();
+		ui = undefined;
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	async function waitFor(pred: () => Promise<boolean>, ms: number): Promise<boolean> {
+		const deadline = Date.now() + ms;
+		while (Date.now() < deadline) {
+			if (await pred()) return true;
+			await sleep(100);
+		}
+		return pred();
+	}
+
+	/** Rewrites the log through its own inode (no rename, no truncate to 0): in event 1, `from` becomes `to`. */
+	function rewriteFirstInPlace(from: string, to: string): void {
+		const text = readFileSync(log, "utf-8");
+		const lines = text.split("\n");
+		expect(lines[0]).toContain(from);
+		lines[0] = (lines[0] as string).replace(from, to);
+		const out = Buffer.from(lines.join("\n"));
+		const id = fileIdentity(statSync(log, { bigint: true }));
+		const fd = openSync(log, "r+");
+		try {
+			writeSync(fd, out, 0, out.length, 0);
+			ftruncateSync(fd, out.length);
+		} finally {
+			closeSync(fd);
+		}
+		expect(fileIdentity(statSync(log, { bigint: true }))).toBe(id);
+	}
+
+	/** The byte length of the range the grow re-checks: the log's last line with the newline before it. */
+	function lastLineRangeBytes(text: string): number {
+		const body = text.slice(0, -1);
+		return Buffer.byteLength(text) - Buffer.byteLength(body.slice(0, body.lastIndexOf("\n")));
+	}
+
+	it("red-first (false clean): event 1 rewritten in place one byte LONGER reads invalid on the next check, as a fresh load does", async () => {
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		expect((await summaryOf(port)).chain).toMatchObject({ events: 3, valid: true });
+		const before = statSync(log).size;
+		rewriteFirstInPlace('"cost":5', '"cost":59');
+		expect(statSync(log).size).toBe(before + 1);
+		const invalid = await waitFor(async () => !(await summaryOf(port)).chain.valid, 10_000);
+		expect(invalid).toBe(true);
+		const live = liveChain(await summaryOf(port));
+		expect(live).toMatchObject({ events: 3, valid: false });
+		expect(live).toEqual(freshChain(root));
+	});
+
+	it("guard: event 1 rewritten in place one byte SHORTER is a shrink, a full reload: invalid at once", async () => {
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		expect((await summaryOf(port)).chain).toMatchObject({ events: 3, valid: true });
+		const before = statSync(log).size;
+		rewriteFirstInPlace('"settled":true', '"settled":"t"');
+		expect(statSync(log).size).toBe(before - 1);
+		const invalid = await waitFor(async () => !(await summaryOf(port)).chain.valid, 10_000);
+		expect(invalid).toBe(true);
+		expect(liveChain(await summaryOf(port))).toEqual(freshChain(root));
+	});
+
+	it("guard: an honest append stays incremental, and its grow reads the new bytes plus the one re-checked line", async () => {
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		const text = readFileSync(log, "utf-8");
+		const line = chainedAfter(text, "tx_next");
+		const recheck = lastLineRangeBytes(text);
+		io.logBytes = 0;
+		const names = await readFrames(
+			port,
+			() => appendFileSync(log, line),
+			(n) => n.includes("rows"),
+		);
+		expect(names).toContain("rows");
+		expect(names).not.toContain("resync");
+		// Exactly the appended line and the re-checked range, never the log.
+		expect(io.logBytes).toBe(Buffer.byteLength(line) + recheck);
+		expect(io.logBytes).toBeLessThan(Buffer.byteLength(text));
+		expect(liveChain(await summaryOf(port))).toMatchObject({ events: 4, valid: true });
+		// The next append re-checks the line the first one added.
+		const next = chainedAfter(text + line, "tx_after");
+		io.logBytes = 0;
+		const more = await readFrames(
+			port,
+			() => appendFileSync(log, next),
+			(n) => n.includes("rows"),
+		);
+		expect(more).not.toContain("resync");
+		expect(io.logBytes).toBe(Buffer.byteLength(next) + Buffer.byteLength(line) + 1);
+		// Not compared with a fresh load: these lines are appended by hand, without the writer's anchor.
+		expect(liveChain(await summaryOf(port))).toMatchObject({ events: 5, valid: true });
+	});
+
+	it("guard: an append landing between the grow's stat and its re-check is a later grow: both rows, valid, no reload", async () => {
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		const text = readFileSync(log, "utf-8");
+		const first = chainedAfter(text, "tx_one");
+		const second = chainedAfter(text + first, "tx_two");
+		let landed = 0;
+		appendSeam.afterStat = () => {
+			if (landed > 0) return;
+			landed += 1;
+			appendFileSync(log, second);
+		};
+		const names = await readFrames(
+			port,
+			() => appendFileSync(log, first),
+			(n) => n.filter((x) => x === "rows").length >= 2,
+			8000,
+		);
+		expect(landed).toBe(1);
+		expect(names.filter((x) => x === "rows")).toHaveLength(2);
+		expect(names).not.toContain("resync");
+		const live = liveChain(await summaryOf(port));
+		expect(live).toMatchObject({ events: 5, valid: true, errors: [] });
+	});
+});
+
+// An anchor written beside no log changes nothing about the log: while the known size is 0 the watcher compares the
+// anchor's presence, identity and ctime with what the last full load saw, and a change is a full reload.
+describe("an anchor written beside an empty log", { timeout: 30_000 }, () => {
+	let root: string;
+	let vault: string;
+	let ui: Awaited<ReturnType<typeof createUiServer>> | undefined;
+	let passes = 0;
+
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "trust-range-anchor-"));
+		vault = join(root, ".usertrust");
+		mkdirSync(join(vault, "audit"), { recursive: true });
+		io.zeroInode = false;
+		passes = 0;
+		loadSeam.afterPass = () => {
+			passes += 1;
+		};
+	});
+	afterEach(async () => {
+		loadSeam.afterPass = undefined;
+		await ui?.close();
+		ui = undefined;
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	async function waitFor(pred: () => Promise<boolean>, ms: number): Promise<boolean> {
+		const deadline = Date.now() + ms;
+		while (Date.now() < deadline) {
+			if (await pred()) return true;
+			await sleep(100);
+		}
+		return pred();
+	}
+
+	it("red-first (false clean): an anchor recording 5 events written into an empty audit directory reads red on the next check", async () => {
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		expect((await summaryOf(port)).chain).toMatchObject({ events: 0, valid: true });
+		// As the writer writes it: a temporary file, renamed into place.
+		const meta = join(vault, "audit", "events.jsonl.meta");
+		writeFileSync(`${meta}.tmp`, JSON.stringify({ lastHash: "a".repeat(64), sequence: 5 }));
+		renameSync(`${meta}.tmp`, meta);
+		const red = await waitFor(async () => !(await summaryOf(port)).chain.valid, 10_000);
+		expect(red).toBe(true);
+		const live = liveChain(await summaryOf(port));
+		expect(live.errors.join("\n")).toContain("anchor records 5 event(s)");
+		expect(live).toEqual(freshChain(root));
+	});
+
+	// The exact counts are pinned by the two rows after this one, which place the anchor deterministically: with a load
+	// between the log line and the anchor (two resyncs) and with none (one). This row uses the real writer, whose log and
+	// anchor writes are separate steps, so a check (the backstop ticks every second) may or may not land between them.
+	it("guard: a normal first append into the empty directory reads valid, with one full reload for it, or two when a check lands between its log and its anchor", async () => {
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		const startup = passes;
+		const names = await readFrames(
+			port,
+			async () => {
+				await appendEvents(root, 1, "tx_first");
+				// Room for the anchor's own events, and two backstop ticks after it.
+				await sleep(2500);
+			},
+			() => false,
+			3000,
+		);
+		// Counted before `freshChain`, which loads the vault itself.
+		const served = passes - startup;
+		const live = liveChain(await summaryOf(port));
+		expect(live).toMatchObject({ events: 1, valid: true });
+		expect(live).toEqual(freshChain(root));
+		const resyncs = names.filter((x) => x === "resync").length;
+		expect(resyncs).toBe(served);
+		expect([1, 2]).toContain(resyncs);
+	});
+
+	/** Writes the first log line, then waits until the server has loaded it: a load that saw the log and no anchor. */
+	async function firstLineLoaded(port: number): Promise<string> {
+		const { line, hash } = firstEvent("tx_first");
+		writeFileSync(join(vault, "audit", "events.jsonl"), line);
+		const loaded = await waitFor(async () => {
+			const chain = (await summaryOf(port)).chain;
+			return chain.events === 1 && chain.valid;
+		}, 10_000);
+		expect(loaded).toBe(true);
+		return hash;
+	}
+
+	it("red-first (false clean): a mismatched anchor written after a load that caught a first append's log line reads red on the next check", async () => {
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		await firstLineLoaded(port);
+		publishAnchor(join(vault, "audit"), { lastHash: "a".repeat(64), sequence: 5 });
+		const red = await waitFor(async () => !(await summaryOf(port)).chain.valid, 10_000);
+		expect(red).toBe(true);
+		expect(liveChain(await summaryOf(port))).toEqual(freshChain(root));
+	});
+
+	it("guard: the correct anchor written after a load that caught the log line is one more full reload: two resyncs, two load passes", async () => {
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		const startup = passes;
+		const names = await readFrames(
+			port,
+			async () => {
+				const hash = await firstLineLoaded(port);
+				publishAnchor(join(vault, "audit"), { lastHash: hash, sequence: 1 });
+				// Room for the anchor's own events, and two backstop ticks after it.
+				await sleep(2500);
+			},
+			() => false,
+			3000,
+		);
+		const served = passes - startup;
+		const live = liveChain(await summaryOf(port));
+		expect(live).toMatchObject({ events: 1, valid: true });
+		expect(live).toEqual(freshChain(root));
+		// One for the log line (a load that saw no log bytes is never extended), one for the anchor renamed in after it.
+		expect(names.filter((x) => x === "resync")).toHaveLength(2);
+		expect(served).toBe(2);
+	});
+
+	it("guard: the log line and its anchor written with no check between them are one full reload: one resync, one load pass", async () => {
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		const startup = passes;
+		const names = await readFrames(
+			port,
+			async () => {
+				const { line, hash } = firstEvent("tx_first");
+				// No await between the two writes: no check can run between them.
+				writeFileSync(join(vault, "audit", "events.jsonl"), line);
+				publishAnchor(join(vault, "audit"), { lastHash: hash, sequence: 1 });
+				await sleep(2500);
+			},
+			() => false,
+			3000,
+		);
+		const served = passes - startup;
+		const live = liveChain(await summaryOf(port));
+		expect(live).toMatchObject({ events: 1, valid: true });
+		expect(live).toEqual(freshChain(root));
+		expect(names.filter((x) => x === "resync")).toHaveLength(1);
+		expect(served).toBe(1);
+	});
+
+	it("guard: a log with bytes whose anchor never appears is not reloaded: no resync and no load pass over 5 s", async () => {
+		writeFileSync(join(vault, "audit", "events.jsonl"), firstEvent("tx_first").line);
+		ui = await createUiServer(root, { port: 0 });
+		const port = ui.port;
+		const startup = passes;
+		const names = await readFrames(
+			port,
+			async () => {
+				await sleep(5000);
+			},
+			() => false,
+			500,
+		);
+		const served = passes - startup;
+		expect(names).not.toContain("resync");
+		expect(served).toBe(0);
+		expect(liveChain(await summaryOf(port))).toMatchObject({ events: 1, valid: true });
+	});
+});
+
+// A reviewer's row: fs.watch silent and the timers fake, so only the backstop's memo key can deliver the anchor.
+describe("the backstop alone, with fs.watch silent", () => {
+	const original = { ...__tailTestSeam };
+	class Silent extends EventEmitter {
+		close(): void {}
+	}
+	let root: string;
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "trust-range-backstop-"));
+		mkdirSync(join(root, ".usertrust", "audit"), { recursive: true });
+		vi.useFakeTimers();
+		__tailTestSeam.watch = (() => new Silent()) as unknown as typeof __tailTestSeam.watch;
+		__tailTestSeam.backstopMs = 1000;
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		Object.assign(__tailTestSeam, original);
+		rmSync(root, { recursive: true, force: true });
+	});
+	it("an anchor written beside no log is a resync from the backstop's tick alone", () => {
+		const vault = join(root, ".usertrust");
+		const delivered: string[] = [];
+		const stop = watchLedger(
+			vault,
+			() => 0,
+			{ onGrow: () => delivered.push("grow"), onResync: () => delivered.push("resync") },
+			() => undefined,
+			() => fileIdentity(statSync(join(vault, "audit"), { bigint: true })),
+			() => undefined,
+			() => false,
+			() => "absent",
+		);
+		vi.advanceTimersByTime(2500);
+		const before = delivered.length;
+		const meta = join(vault, "audit", "events.jsonl.meta");
+		writeFileSync(`${meta}.tmp`, "{}");
+		renameSync(`${meta}.tmp`, meta);
+		vi.advanceTimersByTime(3500);
+		stop();
+		expect(before).toBe(0);
+		expect(delivered.slice(before)).toContain("resync");
+	});
+	it("an anchor written after a load that saw the log's bytes and no anchor is a resync from the backstop's tick alone", () => {
+		const vault = join(root, ".usertrust");
+		const log = join(vault, "audit", "events.jsonl");
+		writeFileSync(log, firstEvent("tx_first").line);
+		const size = statSync(log).size;
+		const logId = fileIdentity(statSync(log, { bigint: true }));
+		const delivered: string[] = [];
+		const stop = watchLedger(
+			vault,
+			() => size,
+			{ onGrow: () => delivered.push("grow"), onResync: () => delivered.push("resync") },
+			() => logId,
+			() => fileIdentity(statSync(join(vault, "audit"), { bigint: true })),
+			() => undefined,
+			() => false,
+			() => "absent",
+		);
+		vi.advanceTimersByTime(2500);
+		const before = delivered.length;
+		const meta = join(vault, "audit", "events.jsonl.meta");
+		writeFileSync(`${meta}.tmp`, "{}");
+		renameSync(`${meta}.tmp`, meta);
+		vi.advanceTimersByTime(3500);
+		stop();
+		expect(before).toBe(0);
+		expect(delivered.slice(before)).toContain("resync");
 	});
 });

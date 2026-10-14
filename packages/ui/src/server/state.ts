@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { createHash } from "node:crypto";
 import {
 	type BigIntStats,
 	closeSync,
@@ -64,6 +65,19 @@ export interface LedgerState {
 	 */
 	logTimes: LogTimes | undefined;
 	/**
+	 * The last line this state verified, the one ending at `byteOffset` (`LineCheck`): set by every load, from the load's
+	 * descriptor, and moved by every verified append. A grow re-reads it before extending, so an earlier event rewritten
+	 * in place longer (every later byte shifts, the log grows) is a full reload, never an append. Undefined when the log
+	 * holds no bytes, or ends in a fragment (`pendingFragment`): every grow is then a full reload anyway.
+	 */
+	lastLine: LineCheck | undefined;
+	/**
+	 * The `.meta` anchor as a stat saw it just before this load read it (`anchorStamp`). While the log holds no bytes, or
+	 * this stamp is "absent", the watcher compares it with the anchor now, so an anchor written or changed beside no log,
+	 * or written after a load that caught a first append's log line before its anchor, is a full reload at once.
+	 */
+	anchorStamp: string;
+	/**
 	 * Whether the audit directory EXISTED at this load (a `stat` of it succeeded), readable or not: once a server has
 	 * seen it, its absence is a deletion, so a directory that was there and could not be listed still counts.
 	 */
@@ -120,6 +134,16 @@ export interface LedgerState {
  * the vault no longer holds the event the dashboard last verified, or holds nothing where it held something (`LogHead`).
  */
 export type DeletionCause = "directory" | "events";
+
+/**
+ * A line of the log by its byte range `[start, end)` and the SHA-256 of those bytes. The range begins at the newline
+ * that ends the line before it (at 0 for the first line), so a blank last line still has bytes a shift would change.
+ */
+export interface LineCheck {
+	start: number;
+	end: number;
+	sha256: string;
+}
 
 /** A file's modification and status-change times, in nanoseconds, as one `fstat` saw them. */
 export interface LogTimes {
@@ -330,6 +354,7 @@ export function loadState(
 				...pass.state,
 				logId: undefined,
 				logTimes: undefined,
+				lastLine: undefined,
 				head: undefined,
 				loadSucceeded: false,
 				verified: false,
@@ -377,6 +402,9 @@ function loadPass(
 	// stat or list, a log or segment it could not read), and the anchor's read. ENOENT is absence, which is a read.
 	const unread: string[] = [];
 	const events = readLedgerEvents(vaultPath, { onReadError: (_path, code) => unread.push(code) });
+	// Statted BEFORE the read: an anchor rewritten between the two leaves an older stamp, which the watcher then sees as
+	// a change (one more reload), never a newer stamp over bytes this pass did not read.
+	const anchorBefore = anchorStamp(`${logPath}.meta`);
 	const anchor = readAnchor(`${logPath}.meta`);
 	if (anchor.error !== undefined) unread.push(anchor.error);
 	const integrity = deriveChainIntegrity(events);
@@ -498,6 +526,8 @@ function loadPass(
 		pendingFragment: snapshot?.pendingFragment ?? false,
 		logId: snapshot?.id,
 		logTimes: snapshot?.times,
+		lastLine: snapshot?.lastLine,
+		anchorStamp: anchorBefore,
 		auditDirPresent: auditDir === "present",
 		auditDirReadable: auditDir === "present" && listError === undefined,
 		auditDirId: dirId,
@@ -614,6 +644,21 @@ function segmentsState(auditPath: string): { fingerprint: string; bytes: boolean
 }
 
 /**
+ * The `.meta` anchor's presence, identity (`fileIdentity`, "no-id" for inode 0) and ctime, from one BigInt stat:
+ * "absent", or the error code of a stat that failed otherwise. The writer replaces the anchor by a rename, so every
+ * write gives it a new inode, and the identity changes even where ctime is too coarse to.
+ */
+export function anchorStamp(metaPath: string): string {
+	try {
+		const st = statSync(metaPath, { bigint: true });
+		return `${fileIdentity(st) ?? "no-id"}:${st.ctimeNs}`;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		return code === "ENOENT" ? "absent" : `error:${code ?? "unknown"}`;
+	}
+}
+
+/**
  * Reads the `.meta` anchor: whether it is there, and the error code of a read that failed (none when it read, or is
  * absent: ENOENT).
  * `verifyVault` reads the anchor too, but folds a read that failed into "present but corrupt", the same answer as bytes
@@ -659,8 +704,9 @@ function pathFingerprint(logPath: string): string | undefined {
 }
 
 /**
- * The log as one descriptor sees it: its identity, its fingerprint, its size, and whether bytes follow its last newline.
- * Undefined when it cannot be read (absent, say): the offset is then 0, so every grow is a full reload.
+ * The log as one descriptor sees it: its identity, its fingerprint, its size, whether bytes follow its last newline, and
+ * its last line (`LineCheck`; none when it holds no bytes or ends in a fragment). Undefined when it cannot be read
+ * (absent, say): the offset is then 0, so every grow is a full reload.
  */
 function snapshotLog(logPath: string):
 	| {
@@ -669,6 +715,7 @@ function snapshotLog(logPath: string):
 			byteOffset: number;
 			pendingFragment: boolean;
 			times: LogTimes;
+			lastLine: LineCheck | undefined;
 	  }
 	| undefined {
 	let fd: number;
@@ -680,12 +727,14 @@ function snapshotLog(logPath: string):
 	try {
 		const st = fstatSync(fd, { bigint: true });
 		const size = Number(st.size);
+		const pendingFragment = afterLastNewline(fd, size) < size;
 		return {
 			id: fileIdentity(st),
 			fingerprint: fingerprintOf(st),
 			byteOffset: size,
-			pendingFragment: afterLastNewline(fd, size) < size,
+			pendingFragment,
 			times: { mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs },
+			lastLine: size === 0 || pendingFragment ? undefined : lastLineOf(fd, size),
 		};
 	} catch {
 		return undefined;
@@ -708,6 +757,50 @@ function afterLastNewline(fd: number, size: number): number {
 	return 0;
 }
 
+/** The line of `fd` that ends at `end` (a newline at `end - 1`), with the newline before it (`LineCheck`). */
+function lastLineOf(fd: number, end: number): LineCheck {
+	const after = afterLastNewline(fd, end - 1);
+	const start = after > 0 ? after - 1 : 0;
+	return { start, end, sha256: hashRange(fd, start, end) };
+}
+
+/** The SHA-256 of `[start, end)` of `fd`, read in chunks; a file that ends early hashes the bytes it has. */
+function hashRange(fd: number, start: number, end: number): string {
+	const hash = createHash("sha256");
+	const chunk = Buffer.alloc(Math.min(64 * 1024, Math.max(1, end - start)));
+	for (let at = start; at < end; ) {
+		const buf = readRange(fd, at, Math.min(end, at + chunk.length), chunk);
+		if (buf.length === 0) break;
+		hash.update(buf);
+		at += buf.length;
+	}
+	return hash.digest("hex");
+}
+
+/**
+ * The last line of a verified append (`LineCheck`): the line ending at `appended[lastNewline]`, where `appended` was read
+ * from `byteOffset`. When the append is one line, the newline before it is the last byte of the log before the append
+ * (the offset follows a newline: a load that saw a fragment never extends); a guess wrong there only makes the next
+ * re-check read other bytes, and reload.
+ */
+export function lastLineOfAppend(
+	byteOffset: number,
+	appended: Buffer,
+	lastNewline: number,
+): LineCheck {
+	const end = byteOffset + lastNewline + 1;
+	// Not `lastIndexOf(0x0a, -1)`: a negative offset counts from the buffer's end.
+	const prev = lastNewline === 0 ? -1 : appended.lastIndexOf(0x0a, lastNewline - 1);
+	const hash = createHash("sha256");
+	if (prev === -1) hash.update("\n");
+	hash.update(appended.subarray(prev === -1 ? 0 : prev, lastNewline + 1));
+	return {
+		start: prev === -1 ? byteOffset - 1 : byteOffset + prev,
+		end,
+		sha256: hash.digest("hex"),
+	};
+}
+
 /** Reads `[start, end)` of `fd` into `into` (or a new buffer), looping on short reads; stops early at end of file. */
 function readRange(fd: number, start: number, end: number, into?: Buffer): Buffer {
 	const buf = into ?? Buffer.alloc(end - start);
@@ -721,10 +814,16 @@ function readRange(fd: number, start: number, end: number, into?: Buffer): Buffe
 }
 
 export type Appended =
-	| { kind: "bytes"; buf: Buffer; times: LogTimes }
+	| { kind: "bytes"; buf: Buffer; times: LogTimes; lastLine: "intact" | "changed" | "unchecked" }
 	| { kind: "shrunk" }
 	| { kind: "replaced" }
 	| { kind: "unknown" };
+
+/**
+ * Test-only: called inside `readAppended` after its `fstat`, so a row can write to the log between a grow's stat and its
+ * reads. Not exported from the package (its entry point is `server.js`).
+ */
+export const appendSeam: { afterStat?: (() => void) | undefined } = {};
 
 /**
  * The bytes appended to the log after `byteOffset`, read through one descriptor whose identity is checked against
@@ -732,24 +831,43 @@ export type Appended =
  * already verified, with the log's timestamps as that descriptor saw them. "replaced" is another file at the path, "shrunk" a log shorter than the offset, and "unknown" an
  * identity that cannot be compared (none recorded, or inode 0); each calls for a full reload. A read that throws
  * (the log absent, unreadable) propagates.
+ *
+ * `lastLine`, the last line the caller verified (the one ending at `byteOffset`), is re-read through the SAME descriptor
+ * when the appended bytes hold a newline (an append the caller would extend): "changed" when its bytes no longer hash
+ * the same, as when an earlier event was rewritten in place longer and every later byte shifted, which calls for a full
+ * reload; "intact" when they do. "unchecked" when none was given or nothing would be extended: a torn tail re-read on
+ * each check costs its own bytes, never the last line's too.
  */
 export function readAppended(
 	logPath: string,
 	byteOffset: number,
 	logId: string | undefined,
+	lastLine?: LineCheck,
 ): Appended {
 	const fd = openSync(logPath, "r");
 	try {
 		const st = fstatSync(fd, { bigint: true });
+		appendSeam.afterStat?.();
 		const id = fileIdentity(st);
 		if (id === undefined || logId === undefined) return { kind: "unknown" };
 		if (id !== logId) return { kind: "replaced" };
 		const size = Number(st.size);
 		if (size < byteOffset) return { kind: "shrunk" };
+		const buf = readRange(fd, byteOffset, size);
+		let recheck: "intact" | "changed" | "unchecked" = "unchecked";
+		if (lastLine !== undefined && buf.includes(0x0a)) {
+			// A range that does not end at the offset describes some other state: re-derived in full, never trusted.
+			recheck =
+				lastLine.end === byteOffset &&
+				hashRange(fd, lastLine.start, lastLine.end) === lastLine.sha256
+					? "intact"
+					: "changed";
+		}
 		return {
 			kind: "bytes",
-			buf: readRange(fd, byteOffset, size),
+			buf,
 			times: { mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs },
+			lastLine: recheck,
 		};
 	} finally {
 		closeSync(fd);
