@@ -596,7 +596,10 @@ it never completes, they keep failing fast until it does: the fail-closed direct
 - An authorize still outstanding at shutdown whose reserve lands after `destroy()` began
   expires at the hold timeout.
 - The `hold_released` record of a late hold's give-back is best-effort. The operational
-  record is `voidsOwed` on the authenticated `GET /v1/budget` and the server's log line.
+  record is `voidsOwed` on the authenticated `GET /v1/budget` and the server's log line. The
+  record carries `releaseClass: "unused"` (the client never received the transferId), or
+  `"call-unconfirmed"` when writing the `200` itself failed, since that answer may have reached
+  the client.
 
 A ledger-backed server stopped by SIGINT or SIGTERM ends each pending hold through
 `destroy()`, which the process can exit before finishing. A hold whose void had not

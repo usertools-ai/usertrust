@@ -19,6 +19,7 @@ import { Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Authorization, AuthorizeParams, Governor, ReleaseOutcome } from "usertrust";
+import { createGovernor, readLedgerEvents } from "usertrust";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ServerConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
@@ -474,5 +475,120 @@ describe("the late give-back's outcome, by the exhaustive table, on /v1/budget",
 		expect((await budget(s.base)).voidsOwed).toBe(1);
 		expect(written.some((line) => line.includes("LedgerGone"))).toBe(true);
 		expect(written.some((line) => line.includes("secret detail"))).toBe(false);
+	});
+});
+
+describe("a late hold's give-back states why, on its hold_released record (a real governor, dry run)", () => {
+	/**
+	 * A server with a deadline (not dryRun) over a real governor in dry run: its release writes the
+	 * `hold_released` record this reads. `transform` rewrites the authorization the governor returns.
+	 */
+	async function startReal(transform?: (auth: Authorization) => Authorization) {
+		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-class-"));
+		const next: { gate?: Gate | undefined } = {};
+		let authorizes = 0;
+		server = createUsertrustServer({
+			config: {
+				host: "127.0.0.1",
+				port: 0,
+				stateDir,
+				enforcement: "enforce",
+				pendingTtlMs: 300_000,
+				dryRun: false,
+				ledgerTimeoutMs: DEADLINE_MS,
+				tenants: [{ id: "acme", keyHash: hashKey(KEY), budget: 1_000_000 }],
+			},
+			factory: async (opts) => {
+				const real = await createGovernor({ ...opts, dryRun: true });
+				return Object.assign(Object.create(real) as Governor, {
+					authorize: async (params: AuthorizeParams) => {
+						authorizes += 1;
+						const g = next.gate;
+						next.gate = undefined;
+						if (g !== undefined) await g.promise;
+						const auth = await real.authorize(params);
+						return transform === undefined ? auth : transform(auth);
+					},
+				});
+			},
+		});
+		const { port } = await server.listen();
+		const lateRecords = async () => {
+			await server?.close();
+			server = undefined;
+			return (
+				readLedgerEvents(join(stateDir, "acme", ".usertrust")) as unknown as Array<{
+					kind: string;
+					data: { reason?: string; releaseClass?: string };
+				}>
+			).filter((e) => e.kind === "hold_released" && e.data.reason === LATE_REASON);
+		};
+		return {
+			base: `http://127.0.0.1:${port}`,
+			port,
+			next,
+			authorizes: () => authorizes,
+			lateRecords,
+		};
+	}
+
+	it("refused at the deadline: unused (the client never received the transferId)", async () => {
+		const s = await startReal();
+		const g = gate();
+		s.next.gate = g;
+		expect((await post(s.base, "/v1/authorize", AUTHORIZE)).status).toBe(503);
+		g.open();
+		await sleep(100);
+		const records = await s.lateRecords();
+		expect(records.map((r) => r.data.releaseClass)).toEqual(["unused"]);
+	});
+
+	it("the client hung up before any answer: unused", async () => {
+		const s = await startReal();
+		const g = gate();
+		s.next.gate = g;
+		const raw = rawAuthorize(s.port);
+		await until(() => s.authorizes() === 1);
+		raw.destroy();
+		expect(await raw.answered).toBeUndefined();
+		await sleep(30);
+		g.open();
+		await sleep(100);
+		const records = await s.lateRecords();
+		expect(records.map((r) => r.data.releaseClass)).toEqual(["unused"]);
+	});
+
+	it("the socket was already destroyed when the reply landed: unused", async () => {
+		const sockets: Array<{ destroy: () => void }> = [];
+		const emit = Server.prototype.emit;
+		vi.spyOn(Server.prototype, "emit").mockImplementation(function (
+			this: Server,
+			event: string | symbol,
+			...args: unknown[]
+		) {
+			if (event === "connection") sockets.push(args[0] as { destroy: () => void });
+			return emit.call(this, event, ...args);
+		});
+		const s = await startReal((auth) => {
+			for (const socket of sockets) socket.destroy();
+			return auth;
+		});
+		const raw = rawAuthorize(s.port);
+		expect(await raw.answered).toBeUndefined();
+		await sleep(100);
+		const records = await s.lateRecords();
+		expect(records.map((r) => r.data.releaseClass)).toEqual(["unused"]);
+	});
+
+	it("the 200's write threw: call-unconfirmed (the answer may have reached the client)", async () => {
+		// A value JSON cannot serialize makes the 200's write throw (here before any byte is sent; the
+		// class covers the throws that come after, which this cannot tell apart).
+		const s = await startReal((auth) => ({ ...auth, createdAt: 1n as unknown as number }));
+		const raw = rawAuthorize(s.port);
+		await until(() => s.authorizes() === 1);
+		await sleep(100);
+		raw.destroy();
+		const records = await s.lateRecords();
+		expect(records.map((r) => r.data.releaseClass)).toEqual(["call-unconfirmed"]);
 	});
 });

@@ -5,7 +5,13 @@ import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import type { AbortOutcome, Authorization, Governor, ReleaseOutcome } from "usertrust";
+import type {
+	AbortOutcome,
+	Authorization,
+	Governor,
+	ReleaseClass,
+	ReleaseOutcome,
+} from "usertrust";
 import { sanitizeReleaseReason } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
 import { DEFAULT_LEDGER_TIMEOUT_MS, resolveTenant } from "./config.js";
@@ -405,7 +411,12 @@ export function createUsertrustServer(opts: {
 	 * cannot meet `pending_transfer_not_found`. The hold never enters `pending`. If the ledger is down
 	 * again, the release waits for it (the client never times out) and stays visible as `voiding`.
 	 */
-	function releaseLate(tenantId: string, governor: Governor, auth: Authorization): void {
+	function releaseLate(
+		tenantId: string,
+		governor: Governor,
+		auth: Authorization,
+		releaseClass: ReleaseClass,
+	): void {
 		const transferId = auth.transferId;
 		const key = `${tenantId}\0${transferId}`;
 		const entry: OwedEntry = {
@@ -427,7 +438,7 @@ export function createUsertrustServer(opts: {
 		};
 		let releasing: Promise<ReleaseOutcome>;
 		try {
-			releasing = governor.release(auth, LATE_RELEASE_REASON);
+			releasing = governor.release(auth, LATE_RELEASE_REASON, { releaseClass });
 		} catch (err) {
 			refused(err instanceof Error ? err.constructor.name : "Error");
 			return;
@@ -561,14 +572,16 @@ export function createUsertrustServer(opts: {
 			return;
 		}
 		settle();
+		// The client never received this hold's transferId (the 503 was written instead, or it was
+		// gone before any answer), so no call can have run under it: `unused`.
 		if (state !== "waiting") {
-			releaseLate(tenant.id, governor, auth);
+			releaseLate(tenant.id, governor, auth, "unused");
 			return;
 		}
 		// The client may be gone without its close event having run yet: then nothing is delivered.
 		if (gone()) {
 			leave("abandoned");
-			releaseLate(tenant.id, governor, auth);
+			releaseLate(tenant.id, governor, auth, "unused");
 			return;
 		}
 		leave("delivered");
@@ -584,7 +597,7 @@ export function createUsertrustServer(opts: {
 			},
 		};
 		// The answer is written, and the hold registered, in one synchronous step: no settle for this
-		// id can arrive between the two. A write that throws delivers nothing, so the hold is given back.
+		// id can arrive between the two. A write that throws registers nothing: the hold is given back.
 		try {
 			sendJson(res, 200, {
 				transferId: auth.transferId,
@@ -595,7 +608,12 @@ export function createUsertrustServer(opts: {
 			});
 		} catch {
 			state = "abandoned";
-			releaseLate(tenant.id, governor, auth);
+			// `call-unconfirmed`, not `unused`: the 200 may have reached the client. Most throws come
+			// before any byte is queued (JSON.stringify, writeHead, end()'s argument checks), but end()
+			// writes the payload, uncorks the socket and only then runs the response's `_finish`
+			// (performance observers, a synchronous 'prefinish' emit), and a throw there follows a
+			// sent answer.
+			releaseLate(tenant.id, governor, auth, "call-unconfirmed");
 			return;
 		}
 		pending.set(auth.transferId, entry);

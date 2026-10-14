@@ -158,7 +158,10 @@ request: the governor serves a tenant's authorizes one at a time. Past it the se
 cancel, so the refused request stays queued and executes when the ledger returns. The hold it then
 creates is given back at once by an explicit void (a `hold_released` record), never registered as
 pending; the ledger's pending timeout stays the backstop, and a hold it ends expires there. A
-request whose client hangs up before its answer is treated the same way.
+request whose client hangs up before its answer is treated the same way. The record states why
+(`releaseClass`): `unused`, since the client never received the transferId, or
+`call-unconfirmed` in the rare case where writing the `200` itself failed, when the answer may
+have reached the client.
 
 - **Fast-fail.** While an authorize the ledger has not answered within the deadline is still
   outstanding on a tenant (refused, or abandoned by its client and now past the deadline), every
