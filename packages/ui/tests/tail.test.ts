@@ -1014,7 +1014,9 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 	 * From the delivered append on: wait `delayMs`, delete the whole audit directory (no reload), and require the summary
 	 * to read the deletion within OBSERVE_BOUND_MS of the removal's END and never go back to valid. Until the directory is
 	 * gone, a half-removed one that holds nothing legitimately reads as empty: the deletion is not complete yet.
-	 * `observedWhen` is what has to be read; it defaults to the deletion itself.
+	 * `observedWhen` is what has to be read, and it is asserted: `summaryWhen` hands back its last summary when the
+	 * bound passes, so without the assertion a caller whose predicate never held still passed on a deletion read earlier.
+	 * It defaults to the deletion itself.
 	 */
 	async function deleteAndObserve(
 		port: number,
@@ -1025,6 +1027,7 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 		await new Promise((r) => setTimeout(r, delayMs));
 		await remove();
 		const observed = await summaryWhen(port, observedWhen, OBSERVE_BOUND_MS);
+		expect(observedWhen(observed)).toBe(true);
 		expect(observed.chain.valid).toBe(false);
 		expect(observed.chain.errors.join(" ")).toContain("deletion detected");
 		// Once read, it is never valid again across a further window past the poll interval.
