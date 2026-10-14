@@ -1847,17 +1847,56 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 		);
 
 		it(
-			"applies to SessionEnd and only when the run carries the variable",
+			"applies to SessionEnd alone: the host's 1,500 ms default when the run carries no readable variable, the variable's own value when it does",
 			async () => {
 				await backdate();
 				await writeLines(main(), []);
 				const plain = await runHook(join(HOOKS, "session-end.mjs"), seInput(), envFor());
-				expect(plain.hostDeadlineMs).toBeUndefined();
+				expect(plain.hostDeadlineMs).toBe(1_500);
+				expect(plain.killedAtHostDeadline).toBe(false);
+				const unreadable = await runHook(
+					join(HOOKS, "session-end.mjs"),
+					seInput(),
+					envFor({ CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "1.5s" }),
+				);
+				expect(unreadable.hostDeadlineMs).toBe(1_500);
 				const stop = await runHook(join(HOOKS, "stop.mjs"), stopInput(), envFor(seBudget(1_200)));
 				expect(stop.hostDeadlineMs).toBeUndefined();
+				const stopPlain = await runHook(join(HOOKS, "stop.mjs"), stopInput(), envFor());
+				expect(stopPlain.hostDeadlineMs).toBeUndefined();
 				const ended = await run("session-end", seInput(), seBudget(1_200));
 				expect(ended.hostDeadlineMs).toBe(1_500);
 				expect(ended.killedAtHostDeadline).toBe(false);
+				const roomy = await run("session-end", seInput(), seBudget(2_700));
+				expect(roomy.hostDeadlineMs).toBe(3_000);
+			},
+			LONG,
+		);
+
+		it.each<[string, Record<string, string>]>([
+			["absent", {}],
+			["the empty string", { CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "" }],
+		])(
+			"a hook still running at the default deadline is killed there when the variable is %s",
+			async (_, variable) => {
+				await backdate();
+				await writeLines(main(), TWO());
+				const end = await runHook(
+					join(HOOKS, "session-end.mjs"),
+					seInput(),
+					envFor({
+						...variable,
+						UT_CC_FAULT: "__main.json|1|sleep 2500",
+						UT_CC_FAULT_LOG: faultLogPath(),
+					}),
+					["--import", FAULT_AT],
+				);
+				expect(end.hostDeadlineMs).toBe(1_500);
+				expect(end.killedAtHostDeadline).toBe(true);
+				expect(await faultLog()).toContain("FAULT sleep 2500\n");
+				expect(() => assertNotKilledAtHostDeadline(end)).toThrow(
+					/still running at the host deadline of 1500 ms/,
+				);
 			},
 			LONG,
 		);

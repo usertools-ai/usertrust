@@ -11,8 +11,9 @@ export interface HookRunResult {
 	/** The hook process's pid: the parent, when a configured session's hook runs as a child. */
 	pid: number | undefined;
 	/**
-	 * The SessionEnd deadline in force for this run, in ms from spawn
-	 * (`CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`), or undefined when none applies.
+	 * The SessionEnd deadline in force for this run, in ms from spawn: the run's
+	 * `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` when it carries a readable one, else the host's
+	 * default of 1,500 ms. Undefined for any other hook.
 	 */
 	hostDeadlineMs: number | undefined;
 	/**
@@ -40,18 +41,30 @@ export function assertNotKilledAtHostDeadline(result: HookRunResult): HookRunRes
 const KILL_GRACE_MS = 1_000;
 
 /**
- * The deadline Claude Code enforces on a SessionEnd hook, from the env the hook runs with.
- * The same reading as the hook's (lib.mjs `sessionEndBudgetMs`): digits only, else no
- * variable. Only a value the variable carries is enforced; an absent or unreadable one
- * leaves the host's own 1.5 s default, which this harness does not apply.
+ * The host's default SessionEnd deadline, in ms from spawn. From Claude Code's hooks reference,
+ * https://code.claude.com/docs/en/hooks, section "SessionEnd": "SessionEnd hooks have a default
+ * timeout of 1.5 seconds. It applies when you exit, run `/clear`, or switch sessions with
+ * interactive `/resume`." and "Timeouts set on plugin-provided hooks don't raise the budget."
+ * Written from the documentation, not from the hook's own constant, so a drift in the hook's
+ * default cannot move the deadline the hook is tested against.
+ */
+export const HOST_SESSION_END_DEFAULT_MS = 1_500;
+
+/**
+ * The deadline Claude Code enforces on a SessionEnd hook, from the env the hook runs with:
+ * the value of `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` when it reads as one (digits only, the
+ * same reading as the hook's, lib.mjs `sessionEndBudgetMs`), else the host's default
+ * (`HOST_SESSION_END_DEFAULT_MS`) for a variable that is absent, empty or unreadable. Any other
+ * hook has no deadline here.
  */
 function hostDeadlineFor(script: string[], env: Record<string, string | undefined>) {
 	const isSessionEnd =
 		script.length === 2
 			? script[1] === "session-end"
 			: basename(script[0] ?? "") === "session-end.mjs";
+	if (!isSessionEnd) return undefined;
 	const raw = env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS ?? "";
-	return isSessionEnd && /^[0-9]{1,9}$/.test(raw) ? Number(raw) : undefined;
+	return /^[0-9]{1,9}$/.test(raw) ? Number(raw) : HOST_SESSION_END_DEFAULT_MS;
 }
 
 const HOOKS = join(import.meta.dirname, "..", "..", "hooks");
@@ -108,9 +121,10 @@ export function forgetPins(env: Record<string, string>): void {
  *   launch.mjs's path (another test-only `--import` preload, say).
  * - `timeoutMs`, when given, kills a hook that runs longer (exit code 1): a test of a
  *   hook that must never hang reports the hang as a failure instead of hanging itself.
- * - SessionEnd's host deadline is enforced as Claude Code enforces it: when the run's env
- *   carries `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`, a session-end hook still running that
- *   many ms after spawn is killed (SIGTERM, then SIGKILL), and the result says so
+ * - SessionEnd's host deadline is enforced as Claude Code enforces it: a session-end hook
+ *   still running `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` ms after spawn is killed (SIGTERM,
+ *   then SIGKILL), or the host's default of 1,500 ms when the run's env leaves the variable
+ *   absent, empty or unreadable, and the result says so
  *   (`killedAtHostDeadline`, with the deadline in `hostDeadlineMs`). The earlier of that and
  *   `timeoutMs` applies. A test of a SessionEnd exit passes the result through
  *   `assertNotKilledAtHostDeadline`, so a path a real host kills cannot pass on its records.
