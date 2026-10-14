@@ -101,7 +101,9 @@ export function forgetPins(env: Record<string, string>): void {
  * Promisified execFile has no `input` option, hence spawn.
  * - The plugin's own `UT_*` variables are never inherited from the shell running the
  *   tests: a developer with `UT_CC_MODE=enforce` exported would otherwise flip every
- *   mode-dependent test. Each test passes the ones it means.
+ *   mode-dependent test. Each test passes the ones it means. Nor is
+ *   `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`: one exported in the shell would set the
+ *   budget and the host deadline of every SessionEnd run; only a test's own value counts.
  * - Every run gets the passwd-home preload (`passwdHomeFor`). `nodeArgs` go before
  *   launch.mjs's path (another test-only `--import` preload, say).
  * - `timeoutMs`, when given, kills a hook that runs longer (exit code 1): a test of a
@@ -121,7 +123,9 @@ export function runHook(
 	{ timeoutMs }: { timeoutMs?: number } = {},
 ): Promise<HookRunResult> {
 	const inherited = Object.fromEntries(
-		Object.entries(process.env).filter(([name]) => !name.startsWith("UT_")),
+		Object.entries(process.env).filter(
+			([name]) => !name.startsWith("UT_") && name !== "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS",
+		),
 	);
 	const script =
 		dirname(hookPath) === HOOKS && basename(hookPath) !== "launch.mjs"
