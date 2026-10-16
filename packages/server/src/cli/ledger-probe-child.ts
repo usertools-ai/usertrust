@@ -12,15 +12,7 @@
  * end, so the child keeps its own deadline, and exits as soon as its parent is gone.
  */
 
-import { createRequire } from "node:module";
-
-/** The slice of `tigerbeetle-node` the probe uses. */
-interface TigerBeetleModule {
-	createClient(args: { cluster_id: bigint; replica_addresses: string[] }): {
-		lookupAccounts(ids: bigint[]): Promise<unknown[]>;
-		destroy(): void;
-	};
-}
+import { loadTigerBeetle } from "./tigerbeetle-load.js";
 
 /** Read by the parent's classifier (ledger-probe.ts, CHILD_DEADLINE_LINE): keep them equal. */
 const DEADLINE_LINE = "ledger probe: no answer before the deadline";
@@ -55,8 +47,7 @@ setInterval(() => {
 
 // Resolved from the core package's own location, so the probe loads the very
 // `tigerbeetle-node` the server's governors load.
-const require = createRequire(import.meta.resolve("usertrust"));
-const { createClient } = require("tigerbeetle-node") as TigerBeetleModule;
+const { createClient } = loadTigerBeetle();
 
 try {
 	const client = createClient({
