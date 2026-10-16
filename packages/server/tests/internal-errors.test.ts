@@ -810,7 +810,12 @@ describe.skipIf(onWindows)(
 				// Still alive after both failed writes, and still answering.
 				await new Promise((resolve) => setTimeout(resolve, 200));
 				expect(run.proc.exitCode).toBeNull();
-				expect((await fetch(`${base}/v1/health`)).status).toBe(200);
+				// Lost log lines are informational: health stays ok, whatever the count.
+				const health = await fetch(`${base}/v1/health`);
+				expect(health.status).toBe(200);
+				const body = (await health.json()) as { ok: unknown; logLinesDropped: unknown };
+				expect(body.ok).toBe(true);
+				expect(body.logLinesDropped).toBeGreaterThanOrEqual(1);
 
 				run.proc.kill("SIGTERM");
 				expect(await run.exited).toBe(0);
