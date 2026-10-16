@@ -51,17 +51,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
-import { type TrustEngine, trust } from "../../src/govern.js";
+import { extractPromptParts, type TrustEngine, trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
 import {
 	costFromRates,
 	effectiveCacheWriteRate,
 	estimateInputTokens,
 	getModelRates,
+	holdInputTokens,
 	type ModelRates,
 } from "../../src/ledger/pricing.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import type { AuditEvent, TrustReceipt } from "../../src/shared/types.js";
+
+/**
+ * The input tokens trust() holds for `request`: the larger of the prompt parts' estimate and the
+ * whole body's (`holdInputTokens`). These rows test the hold's RATE; the estimator has its own
+ * rows (hold-estimate.test.ts), so the token count is taken from it for the exact request sent.
+ */
+const heldInput = (request: Record<string, unknown>): number =>
+	holdInputTokens(extractPromptParts(request, "anthropic"), JSON.parse(JSON.stringify(request)));
 
 // tigerbeetle-node is a native module and is never loaded in unit tests.
 vi.mock("tigerbeetle-node", () => ({
@@ -325,7 +334,7 @@ describe("govern trust() hold sizing (spec D3)", () => {
 		});
 
 		const rates = getModelRates("claude-sonnet-4-6");
-		const estInput = estimateInputTokens(messages);
+		const estInput = heldInput({ model: "claude-sonnet-4-6", max_tokens: 1, messages });
 		const preFixHold = costFromRates(rates, estInput, 1);
 		const holdRate = Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates));
 		const expectedHold = costFromRates({ ...rates, inputPer1k: holdRate }, estInput, 1);
@@ -519,8 +528,12 @@ describe("estimated-settle never charges the write-premium-inflated hold (review
 		};
 
 		const messages = [{ role: "user", content: "x".repeat(2000) }];
-		const estInput = estimateInputTokens(messages);
 		const maxOutputTokens = 1;
+		const estInput = heldInput({
+			model: "claude-sonnet-4-6",
+			max_tokens: maxOutputTokens,
+			messages,
+		});
 		const rates = getModelRates("claude-sonnet-4-6");
 		const holdRate = Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates));
 		const expectedHold = costFromRates(
@@ -564,8 +577,12 @@ describe("estimated-settle never charges the write-premium-inflated hold (review
 		const mockClient = makeStreamingAnthropicMock(chunks);
 
 		const messages = [{ role: "user", content: "x".repeat(2000) }];
-		const estInput = estimateInputTokens(messages);
 		const maxOutputTokens = 1;
+		const estInput = heldInput({
+			model: "claude-sonnet-4-6",
+			max_tokens: maxOutputTokens,
+			messages,
+		});
 		const rates = getModelRates("claude-sonnet-4-6");
 		const holdRate = Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates));
 		const expectedHold = costFromRates(

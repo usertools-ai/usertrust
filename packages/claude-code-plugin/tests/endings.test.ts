@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { forgetPins, runHook } from "./helpers/run-hook.js";
+import { assertNotKilledAtHostDeadline, forgetPins, runHook } from "./helpers/run-hook.js";
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
 const CRASH_AT = join(import.meta.dirname, "helpers", "crash-at.mjs");
@@ -90,6 +90,8 @@ let fixed = new Map<string, Reply>();
 let aimed: { path: string; nth: number; ending: Ending } | null = null;
 /** The request after whose answer the server stops listening: the next one is refused. */
 let closeAfter: { path: string; nth: number } | null = null;
+/** Extra milliseconds the fake server holds the reply to `<path>#<nth>` before sending it. */
+let slowBy = new Map<string, number>();
 
 /** How the fake server answers what nothing else decides: as a healthy usertrust server. */
 function usual(path: string): Reply {
@@ -148,8 +150,9 @@ function startServer(): Promise<string> {
 					});
 					res.end(JSON.stringify(reply.json ?? {}));
 				};
-				if (reply.delayMs === undefined) send();
-				else setTimeout(send, reply.delayMs);
+				const holdMs = (reply.delayMs ?? 0) + (slowBy.get(`${path}#${nth}`) ?? 0);
+				if (holdMs === 0) send();
+				else setTimeout(send, holdMs);
 			});
 		});
 		servers.push(server);
@@ -179,6 +182,7 @@ beforeEach(async () => {
 	fixed = new Map();
 	aimed = null;
 	closeAfter = null;
+	slowBy = new Map();
 	url = await startServer();
 });
 
@@ -211,8 +215,13 @@ const envFor = (extra: Record<string, string> = {}): Record<string, string> => (
 	...extra,
 });
 
-const run = (hook: string, input: Record<string, unknown>, extra: Record<string, string> = {}) =>
-	runHook(join(HOOKS, `${hook}.mjs`), input, envFor(extra));
+// A SessionEnd run the host would have killed at its deadline fails here, naming the deadline:
+// its records are not the evidence of an exit that production reaches.
+const run = async (
+	hook: string,
+	input: Record<string, unknown>,
+	extra: Record<string, string> = {},
+) => assertNotKilledAtHostDeadline(await runHook(join(HOOKS, `${hook}.mjs`), input, envFor(extra)));
 
 const ESTIMATE_MODE = { UT_CC_USAGE: "estimate" };
 const transcriptPath = () => join(projectDir, `${SESSION}.jsonl`);
@@ -1288,9 +1297,10 @@ describe("SessionEnd, the last settle point: what it cannot finish is written do
 	it("a backlog spanning two jobs: one deferred gap per job, each a known gap of its own job's coverage", async () => {
 		const now = Date.now();
 		const at = (offsetS: number) => new Date(now + offsetS * 1000).toISOString();
-		// The state is older than the backlog, so both messages are the session's to post.
+		// The state (and the session) are older than the backlog, so both messages are the session's to post.
 		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
 		await writeFile(join(stateDir, "transcripts", "since"), "2000-01-01T00:00:00.000Z");
+		await backdateSession(stateDir, SESSION);
 		const line = (ts: string, op: string, job: string | null) =>
 			JSON.stringify({ sid: SESSION, ts, op, job });
 		const log = [
@@ -1375,6 +1385,10 @@ describe("SessionEnd, the last settle point: what it cannot finish is written do
 // ── The fixes of the sixth review round: the mechanisms that replace exit-by-exit patching ──
 
 const FAULT_AT = join(import.meta.dirname, "helpers", "fault-at.mjs");
+// The failpoint's own log: a fault that was never reached leaves no `FAULT` line, so a row that
+// injects one reads this to prove the injection fired, not only that the accounting held.
+const faultLogPath = () => join(stateDir, "fault.log");
+const faultLog = async () => readFile(faultLogPath(), "utf-8").catch(() => "");
 const seBudget = (ms: number) => ({ CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: String(ms + 300) });
 const seInput = () => ({ ...stopInput(), hook_event_name: "SessionEnd", reason: "other" });
 
@@ -1406,7 +1420,17 @@ const writeLines = (path: string, lines: string[]) =>
 async function backdate(): Promise<void> {
 	await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
 	await writeFile(join(stateDir, "transcripts", "since"), "2000-01-01T00:00:00.000Z");
+	await backdateSession(stateDir, SESSION);
 }
+/**
+ * The session's own first-run time, as old as the state's (`transcripts/since-session/<id>`): a
+ * session that ran SessionStart has one, so every message this test writes is the session's to post.
+ */
+async function backdateSession(dir: string, session: string): Promise<void> {
+	await mkdir(join(dir, "transcripts", "since-session"), { recursive: true, mode: 0o700 });
+	await writeFile(join(dir, "transcripts", "since-session", session), "2000-01-01T00:00:00.000Z");
+}
+
 const answered = (request: Seen, status: number) =>
 	typeof request.reply === "object" && request.reply.status === status;
 const replyJson = (request: Seen) =>
@@ -1467,12 +1491,39 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 		fixed = new Map();
 		await writeLines(main(), [V(), A()]);
 	};
+	// "The group loop: out of time" and the two numbers it runs on. The hook's budget B is the row's
+	// budgetMs (`seBudget` gives the host B + 300 ms, and sessionEndBudgetMs takes SESSION_END_MARGIN_MS
+	// = 300 back off, lib.mjs:450,460-463), so the HOST deadline is B + 300.
+	// The hook stops before a group when callBudget() < minCall() (transcript.mjs:2806-2811), where
+	//   callBudget() = min(0.3 B, floor((timeLeft - cleanupReserve()) / 3))   (:239,:2676; reserve 0.3 B, :242)
+	//   minCall()    = floor(0.025 B)                                          (:240)
+	// and the second term binds: (timeLeft - 0.3 B) / 3 < 0.025 B  <=>  timeLeft < 0.375 B, that is,
+	// more than 0.625 B after the hook started. At B = 8,000 that point is 5,000 ms.
+	// The injected sleep is on the third cursor save, which comes after the first group settled
+	// (claim floor 0.6 B = 4,800 ms left, :244,:1530, is met at the first claim, well before). So the
+	// second group is refused whenever the sleep ends past 5,000 ms, and the sleep starts at or after 0.
+	// 6,000 ms puts its end 1,000 ms past that point (OOT_MARGIN_MS) however fast the first group ran.
+	// The hook then writes its sweep and exits at about 6,000 ms + its start-up and the first group's
+	// time: against the host deadline of 8,300 ms that leaves 2,300 ms less those, which is at least the
+	// 1,000 ms above as long as they total under 1,300 ms. The sleep alone (6,000 ms) is inside the
+	// host deadline, which the old 6,500 ms sleep at B = 6,000 (host deadline 6,300) was not.
+	const OOT_BUDGET_MS = 8_000;
+	const OOT_MARGIN_MS = 1_000;
+	const OOT_POINT_MS = Math.round(OOT_BUDGET_MS * (1 - (0.3 + 3 * 0.025)));
+	const OOT_SLEEP_MS = OOT_POINT_MS + OOT_MARGIN_MS;
 	const scenarios: Array<[string, Scenario]> = [
-		["every group posted (the control)", { lines: TWO, selected: 2, posted: 2, deferred: [] }],
+		// These two rows test no timing: they run at a budget whose per-call cap (about 1.75 s) a
+		// loaded host's stall cannot reach. The default 1.2 s gives each call about 300 ms, and a
+		// reply slower than that is aborted client-side (the test after this table pins that outcome).
+		[
+			"every group posted (the control)",
+			{ lines: TWO, budgetMs: 6_000, selected: 2, posted: 2, deferred: [] },
+		],
 		[
 			"a group refused (402)",
 			{
 				lines: TWO,
+				budgetMs: 6_000,
 				prepare: async () => {
 					fixed.set("/v1/authorize#1", ANSWER.refusal402 as Reply);
 				},
@@ -1562,7 +1613,8 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			"the group loop: out of time",
 			{
 				lines: TWO,
-				fault: "__main.json|3|sleep 900",
+				budgetMs: OOT_BUDGET_MS,
+				fault: `__main.json|3|sleep ${OOT_SLEEP_MS}`,
 				selected: 2,
 				posted: 1,
 				deferred: ["B"],
@@ -1597,6 +1649,7 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			"an error after a group settled (its cursor save fails)",
 			{
 				lines: TWO,
+				budgetMs: 6_000,
 				fault: "__main.json|3|throw",
 				selected: 2,
 				posted: 1,
@@ -1606,7 +1659,14 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 		],
 		[
 			"an error after every group posted (the last cursor save fails)",
-			{ lines: TWO, fault: "__main.json|5|throw", selected: 2, posted: 2, deferred: [] },
+			{
+				lines: TWO,
+				budgetMs: 6_000,
+				fault: "__main.json|5|throw",
+				selected: 2,
+				posted: 2,
+				deferred: [],
+			},
 		],
 		[
 			"the agent's lock is busy",
@@ -1683,11 +1743,20 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 				seInput(),
 				envFor({
 					...seBudget(scenario.budgetMs ?? 1_200),
-					...(scenario.fault === undefined ? {} : { UT_CC_FAULT: scenario.fault }),
+					...(scenario.fault === undefined
+						? {}
+						: { UT_CC_FAULT: scenario.fault, UT_CC_FAULT_LOG: faultLogPath() }),
 				}),
 				scenario.fault === undefined ? [] : ["--import", FAULT_AT],
 			);
+			assertNotKilledAtHostDeadline(end);
 			await chmod(join(stateDir, "transcripts", "claims"), 0o700).catch(() => {});
+			// The fault must have FIRED: a k past the saves the row reaches is silently inert.
+			if (scenario.fault !== undefined) {
+				const action = scenario.fault.split("|")[2] ?? "";
+				expect(await faultLog()).toContain(`FAULT ${action}\n`);
+				if (action === "throw") expect(end.stderr).toContain("injected rename failure");
+			}
 			// A retried vehicle's own record (haiku, its start unknown) is not the fresh messages'.
 			const vehicle = scenario.lines().some((line) => line.includes("msg_v"));
 			const remainder = (await phased("remainder")).filter(
@@ -1726,6 +1795,208 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 				for (const record of deferred) expect(String(record.reason)).toContain(scenario.why);
 			}
 			if (scenario.said !== undefined) expect(end.stderr).toContain(scenario.said);
+		},
+		LONG,
+	);
+
+	describe("the host deadline is enforced on a SessionEnd hook", () => {
+		const sleepPastDeadline = async (timeoutMs?: number) => {
+			await backdate();
+			await writeLines(main(), TWO());
+			// The first cursor save sleeps 2.5 s; the host deadline of a 1.2 s budget is 1.5 s.
+			return runHook(
+				join(HOOKS, "session-end.mjs"),
+				seInput(),
+				envFor({
+					...seBudget(1_200),
+					UT_CC_FAULT: "__main.json|1|sleep 2500",
+					UT_CC_FAULT_LOG: faultLogPath(),
+				}),
+				["--import", FAULT_AT],
+				timeoutMs === undefined ? {} : { timeoutMs },
+			);
+		};
+
+		it(
+			"a hook still running at the deadline is killed there, and an assertion on its exit fails naming the deadline",
+			async () => {
+				// No wall-clock bound: the kill is shown by the flag and by the sweep that never ran.
+				const end = await sleepPastDeadline();
+				expect(end.hostDeadlineMs).toBe(1_500);
+				expect(end.killedAtHostDeadline).toBe(true);
+				expect(await faultLog()).toContain("FAULT sleep 2500\n");
+				expect(() => assertNotKilledAtHostDeadline(end)).toThrow(
+					/still running at the host deadline of 1500 ms/,
+				);
+				// What the table runner asserts of an exit is not there: the exit sweep never ran.
+				expect(await phased("remainder")).toEqual([]);
+			},
+			LONG,
+		);
+
+		it(
+			"a caller's earlier timeoutMs applies instead, and is not reported as the host's kill",
+			async () => {
+				const end = await sleepPastDeadline(600);
+				expect(end.hostDeadlineMs).toBe(1_500);
+				expect(end.killedAtHostDeadline).toBe(false);
+				expect(end.code).not.toBe(0);
+				expect(() => assertNotKilledAtHostDeadline(end)).not.toThrow();
+			},
+			LONG,
+		);
+
+		it(
+			"applies to SessionEnd and only when the run carries the variable",
+			async () => {
+				await backdate();
+				await writeLines(main(), []);
+				const plain = await runHook(join(HOOKS, "session-end.mjs"), seInput(), envFor());
+				expect(plain.hostDeadlineMs).toBeUndefined();
+				const stop = await runHook(join(HOOKS, "stop.mjs"), stopInput(), envFor(seBudget(1_200)));
+				expect(stop.hostDeadlineMs).toBeUndefined();
+				const ended = await run("session-end", seInput(), seBudget(1_200));
+				expect(ended.hostDeadlineMs).toBe(1_500);
+				expect(ended.killedAtHostDeadline).toBe(false);
+			},
+			LONG,
+		);
+	});
+
+	it(
+		"a 402 slower than the call's time limit: the group is released with its gap, the next deferred, nothing else sent, and each message accounted for exactly once",
+		async () => {
+			await backdate();
+			await mkdir(join(stateDir, "jobs"), { recursive: true });
+			await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), JOB_LOG);
+			await writeLines(main(), TWO());
+			// At the default 1.2 s budget each call gets about 300 ms. The 402 below is sent only after
+			// the hook's WHOLE budget (1.5 s with its margin), so a loaded host would have to stall the
+			// hook's own abort by well over a second before the client could see it (the server did send it).
+			fixed.set("/v1/authorize#1", { ...(ANSWER.refusal402 as Answer), delayMs: 2_000 });
+			assertNotKilledAtHostDeadline(
+				await runHook(join(HOOKS, "session-end.mjs"), seInput(), envFor(seBudget(1_200))),
+			);
+			await chmod(join(stateDir, "transcripts", "claims"), 0o700).catch(() => {});
+			expect(seen.map((request) => request.path)).toEqual(["/v1/health", "/v1/authorize"]);
+			expect(requests("/v1/settle")).toEqual([]);
+			const remainder = await phased("remainder");
+			const released = remainder.filter((r) => r.outcome === "released");
+			const deferred = remainder.filter((r) => r.outcome === "deferred");
+			expect(released).toHaveLength(1);
+			expect(released[0]).toMatchObject({ started: T.A, messages: 1 });
+			expect(String(released[0]?.reason)).toContain("authorize unreachable");
+			expect(deferred).toHaveLength(1);
+			expect(deferred[0]).toMatchObject({ agent: "main", started: T.B, messages: 1 });
+			expect(String(deferred[0]?.reason)).toContain("not posted (the server stopped answering)");
+			// Both are gap records, and nothing else is written for either message, anywhere.
+			expect(released[0]?.kind).toBe("gap");
+			expect(await records()).toEqual(remainder);
+			// Every message selected is accounted for exactly once, each by its own start.
+			const sum = remainder.reduce((n, r) => n + Number(r.messages ?? 0), 0);
+			expect(sum).toBe(2);
+			expect(remainder.map((r) => String(r.started)).sort()).toEqual([T.A, T.B].sort());
+		},
+		LONG,
+	);
+
+	it(
+		"a reply slower than the call's time limit, with the last cursor save failing too: the group is released with its gap, the next deferred, and each message accounted for exactly once",
+		async () => {
+			await backdate();
+			await mkdir(join(stateDir, "jobs"), { recursive: true });
+			await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), JOB_LOG);
+			await writeLines(main(), TWO());
+			// At a 3 s budget each call gets at most 0.9 s, and claiming must start within the first
+			// 1.2 s (the default 1.2 s budget leaves 0.48 s, which a hook slow to start does not meet,
+			// and then defers both groups unclaimed instead). The authorize reply comes after the hook's
+			// whole budget, so no host stall lets the client see it.
+			slowBy.set("/v1/authorize#1", 4_000);
+			// This flow saves the cursor three times (claim, release, deferral); the third is its last.
+			const end = await runHook(
+				join(HOOKS, "session-end.mjs"),
+				seInput(),
+				envFor({
+					...seBudget(3_000),
+					UT_CC_FAULT: "__main.json|3|throw",
+					UT_CC_FAULT_LOG: faultLogPath(),
+				}),
+				["--import", FAULT_AT],
+			);
+			assertNotKilledAtHostDeadline(end);
+			expect(await faultLog()).toContain("FAULT throw\n");
+			expect(end.stderr).toContain("transcript usage failed for main: injected rename failure");
+			expect(seen.map((request) => request.path)).toEqual(["/v1/health", "/v1/authorize"]);
+			expect(requests("/v1/settle")).toEqual([]);
+			const remainder = await phased("remainder");
+			const released = remainder.filter((r) => r.outcome === "released");
+			const deferred = remainder.filter((r) => r.outcome === "deferred");
+			expect(released).toHaveLength(1);
+			expect(released[0]).toMatchObject({ kind: "gap", started: T.A, messages: 1 });
+			expect(deferred).toHaveLength(1);
+			expect(deferred[0]).toMatchObject({ agent: "main", started: T.B, messages: 1 });
+			expect(String(deferred[0]?.reason)).toContain("an error ended it (injected rename failure)");
+			expect(await records()).toEqual(remainder);
+			const sum = remainder.reduce((n, r) => n + Number(r.messages ?? 0), 0);
+			expect(sum).toBe(2);
+			expect(remainder.map((r) => String(r.started)).sort()).toEqual([T.A, T.B].sort());
+		},
+		LONG,
+	);
+
+	it(
+		"a settle reply slower than the call's time limit, with the last cursor save failing too: the settled group is written down as a gap, the next posts, and each message accounted for exactly once",
+		async () => {
+			await backdate();
+			await mkdir(join(stateDir, "jobs"), { recursive: true });
+			await writeFile(join(stateDir, "jobs", `${SESSION}.jsonl`), JOB_LOG);
+			await writeLines(main(), TWO());
+			// At a 6 s budget each call gets at most 1.8 s (about 1.4 s for a settle here): the first
+			// settle's reply, held 3 s, is aborted by the client although the server did settle it. The client cannot know that, so it gives
+			// the call back and writes the group down; the second group is not slowed.
+			slowBy.set("/v1/settle#1", 3_000);
+			// This flow saves the cursor five times; the fifth is its last.
+			const end = await runHook(
+				join(HOOKS, "session-end.mjs"),
+				seInput(),
+				envFor({
+					...seBudget(6_000),
+					UT_CC_FAULT: "__main.json|5|throw",
+					UT_CC_FAULT_LOG: faultLogPath(),
+				}),
+				["--import", FAULT_AT],
+			);
+			assertNotKilledAtHostDeadline(end);
+			expect(await faultLog()).toContain("FAULT throw\n");
+			expect(end.stderr).toContain("transcript usage failed for main: injected rename failure");
+			expect(seen.map((request) => request.path)).toEqual([
+				"/v1/health",
+				"/v1/authorize",
+				"/v1/settle",
+				"/v1/abort",
+				"/v1/authorize",
+				"/v1/settle",
+			]);
+			// The server settled the first group and the client never heard it: it gives the call back
+			// (the server has no such hold) and writes the group down. The second group posts.
+			expect(requests("/v1/abort").map((r) => r.body.transferId)).toEqual(["tx_s1"]);
+			const remainder = await phased("remainder");
+			expect(remainder).toHaveLength(1);
+			expect(remainder[0]).toMatchObject({
+				kind: "gap",
+				outcome: "claimed",
+				transferId: "tx_s1",
+				started: T.A,
+				messages: 1,
+			});
+			expect(String(remainder[0]?.reason)).toContain("settle unreachable");
+			expect(await records()).toEqual(remainder);
+			const second = requests("/v1/settle")[1];
+			expect(second && answered(second, 200)).toBe(true);
+			expect(second?.body.transferId).toBe("tx_s2");
+			// One message posted and one written down: each accounted for exactly once.
+			const sum = remainder.reduce((n, r) => n + Number(r.messages ?? 0), 0);
+			expect(carried((r) => r === requests("/v1/authorize")[1]) + sum).toBe(2);
 		},
 		LONG,
 	);
@@ -2448,5 +2719,238 @@ describe("a redirect the plugin follows by hand: to the same origin, a 307 or a 
 		const pre = await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
 		expect(requests("/v1/health")).toHaveLength(2);
 		expect(pre.stderr).not.toContain("capabilities are unknown");
+	});
+});
+
+describe("a `.releasing` record whose give-back fails is kept, through SessionEnd, with its gaps written once", () => {
+	const RELEASING = holdName("tu_1", "tx_1", "main", "releasing");
+	const kinds: Array<[string, Record<string, unknown>, string | undefined, number]> = [
+		["a deferred call's claim (unused)", { ...ESTIMATE }, "unused", 0],
+		["a retired hold whose call ran (`ran`)", { ...ESTIMATE, ran: true }, "call-ran", 1],
+		[
+			"a windowed hold its re-fire kept (`windowJournalled`)",
+			{ ...ESTIMATE, windowJournalled: true },
+			undefined,
+			0,
+		],
+	];
+	const classes = () => requests("/v1/release").map((r) => r.body.releaseClass);
+	const kept = async () =>
+		JSON.parse(await readFile(join(stateDir, RELEASING), "utf-8")) as Record<string, unknown>;
+
+	it.each(kinds)(
+		"%s: a 503 writes its gaps at once and keeps it, marked; the next Stop's 200 drops it with no second gap",
+		async (_, fields, releaseClass, callGaps) => {
+			capabilities = ["release", "job"];
+			await seedHold("tu_1", "tx_1", fields, "releasing");
+			fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			// Written at the first failure: a session killed now still has them.
+			expect(await phased("release")).toMatchObject([{ outcome: "failed", transferId: "tx_1" }]);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+			expect(await holdFiles()).toEqual([RELEASING]);
+			expect(await kept()).toMatchObject({ transferId: "tx_1", gapWritten: true });
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(classes()).toEqual([releaseClass, releaseClass]);
+			expect(await holdFiles()).toEqual([]);
+			expect(await phased("release")).toHaveLength(1);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+		},
+		LONG,
+	);
+
+	it.each(kinds)(
+		"%s: failed at two Stops and at SessionEnd, it is still kept, with exactly one release gap; a later 404 drops it with none",
+		async (_, fields, releaseClass, callGaps) => {
+			capabilities = ["release", "job"];
+			await seedHold("tu_1", "tx_1", fields, "releasing");
+			for (const n of [1, 2, 3]) fixed.set(`/v1/release#${n}`, ANSWER.error5xx as Reply);
+			fixed.set("/v1/release#4", ANSWER.gone as Reply);
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			await run("session-end", seInput(), { ...ESTIMATE_MODE, ...seBudget(1_200) });
+			expect(classes()).toEqual([releaseClass, releaseClass, releaseClass]);
+			expect(await holdFiles()).toEqual([RELEASING]);
+			expect(await phased("release")).toHaveLength(1);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+			// A resumed session's Stop: the 404 says the hold is gone.
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await holdFiles()).toEqual([]);
+			expect(await phased("release")).toHaveLength(1);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+		},
+		LONG,
+	);
+
+	it.each<Ending>([
+		"other4xx",
+		"other404",
+		"error5xx",
+		"timeout",
+		"refused",
+		"dropped",
+		"redirect",
+	])(
+		"a deferred call's claim at a plain Stop, %s: its release gap written, and the hold kept, marked",
+		async (ending) => {
+			capabilities = ["release", "job"];
+			await seedHold("tu_1", "tx_1", { ...ESTIMATE }, "releasing");
+			aim("/v1/release", 1, ending, ["/v1/health", 1]);
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await phased("release")).toMatchObject([
+				{ transferId: "tx_1", releaseClass: "unused" },
+			]);
+			expect(await holdFiles()).toEqual([RELEASING]);
+			expect(await kept()).toMatchObject({ gapWritten: true });
+		},
+		LONG,
+	);
+
+	it("`claude --resume` after SessionEnd re-fires the deferred call: the kept record still names its hold, so it reserves nothing beside it", async () => {
+		capabilities = ["release", "job"];
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE, windowJournalled: true }, "releasing");
+		fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
+		fixed.set("/v1/release#2", ANSWER.error5xx as Reply);
+		await run("stop", stopInput(), ESTIMATE_MODE);
+		await run("session-end", seInput(), { ...ESTIMATE_MODE, ...seBudget(1_200) });
+		await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+		expect(requests("/v1/authorize")).toEqual([]);
+		expect(await holdFiles()).toEqual([RELEASING]);
+	});
+
+	it("SessionStart drops any record older than its bound (24 h), and keeps a younger one, marked or not, even past the ledger's timeout", async () => {
+		const names = {
+			oldMarked: holdName("tu_om", "tx_om", "main", "releasing"),
+			oldUnmarked: holdName("tu_ou", "tx_ou", "main", "releasing"),
+			youngMarked: holdName("tu_ym", "tx_ym", "main", "releasing"),
+			youngUnmarked: holdName("tu_yu", "tx_yu", "main", "releasing"),
+		};
+		await seedHold("tu_om", "tx_om", { ...ESTIMATE, gapWritten: true }, "releasing");
+		await seedHold("tu_ou", "tx_ou", { ...ESTIMATE }, "releasing");
+		await seedHold("tu_ym", "tx_ym", { ...ESTIMATE, gapWritten: true }, "releasing");
+		await seedHold("tu_yu", "tx_yu", { ...ESTIMATE }, "releasing");
+		const ago = (ms: number) => new Date(Date.now() - ms);
+		for (const name of [names.oldMarked, names.oldUnmarked]) {
+			await utimes(join(stateDir, name), ago(25 * 3_600_000), ago(25 * 3_600_000));
+		}
+		// Past the ledger's 5-minute pending timeout, but far inside the sweep's bound: kept.
+		for (const name of [names.youngMarked, names.youngUnmarked]) {
+			await utimes(join(stateDir, name), ago(12 * 60_000), ago(12 * 60_000));
+		}
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect((await holdFiles()).sort()).toEqual([names.youngMarked, names.youngUnmarked].sort());
+		// The marked one's gaps were on record already; the unmarked one gets its last gap.
+		expect(await phased("release")).toMatchObject([
+			{ outcome: "unresolved", transferId: "tx_ou", releaseClass: "unused" },
+		]);
+	});
+
+	it("an unmarked `ran` record past the bound is dropped with its last gaps: its call's and an unresolved release", async () => {
+		const name = holdName("tu_1", "tx_1", "main", "releasing");
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE, ran: true }, "releasing");
+		await utimes(
+			join(stateDir, name),
+			new Date(Date.now() - 25 * 3_600_000),
+			new Date(Date.now() - 25 * 3_600_000),
+		);
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect(await holdFiles()).toEqual([]);
+		expect(await unconfirmed()).toMatchObject([{ transferId: "tx_1", releaseClass: "call-ran" }]);
+		expect(await phased("release")).toMatchObject([
+			{ outcome: "unresolved", transferId: "tx_1", releaseClass: "call-ran" },
+		]);
+	});
+
+	it("DECLARED: with watch.jsonl unwritable for a whole day, an unmarked record is still dropped past the bound (its gap lost), and its call is no longer refused", async () => {
+		capabilities = ["release", "job"];
+		const name = holdName("tu_1", "tx_1", "main", "releasing");
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE, windowJournalled: true }, "releasing");
+		await utimes(
+			join(stateDir, name),
+			new Date(Date.now() - 25 * 3_600_000),
+			new Date(Date.now() - 25 * 3_600_000),
+		);
+		await mkdir(join(stateDir, "watch.jsonl"));
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect(await holdFiles()).toEqual([]);
+		nodeFs.rmSync(join(stateDir, "watch.jsonl"), { recursive: true, force: true });
+		await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+		expect(requests("/v1/authorize")).toHaveLength(1);
+	});
+
+	it.each<[string, Record<string, unknown>, number]>([
+		["a `ran` hold (a call gap and a release gap)", { ...ESTIMATE, ran: true }, 1],
+		["a deferred call's claim (a release gap only)", { ...ESTIMATE }, 0],
+	])(
+		"%s: a gap that cannot be written leaves the record unmarked; the next Stop writes it, and only then marks it",
+		async (_, fields, callGaps) => {
+			capabilities = ["release", "job"];
+			await seedHold("tu_1", "tx_1", fields, "releasing");
+			fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
+			fixed.set("/v1/release#2", ANSWER.error5xx as Reply);
+			// watch.jsonl cannot be appended: a directory holds its name.
+			await mkdir(join(stateDir, "watch.jsonl"));
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await holdFiles()).toEqual([RELEASING]);
+			expect(await kept()).not.toHaveProperty("gapWritten");
+			nodeFs.rmSync(join(stateDir, "watch.jsonl"), { recursive: true, force: true });
+			await run("stop", stopInput(), ESTIMATE_MODE);
+			expect(await unconfirmed()).toHaveLength(callGaps);
+			expect(await phased("release")).toMatchObject([{ outcome: "failed", transferId: "tx_1" }]);
+			expect(await kept()).toMatchObject({ gapWritten: true });
+		},
+		LONG,
+	);
+
+	it("control: a `.settling` record's call ran and is never re-fired: a 503 drops it, with its call gap and its release gap, as before", async () => {
+		capabilities = ["release", "job"];
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE }, "settling");
+		fixed.set("/v1/release#1", ANSWER.error5xx as Reply);
+		await run("stop", stopInput(), ESTIMATE_MODE);
+		expect(await holdFiles()).toEqual([]);
+		expect(await unconfirmed()).toMatchObject([{ transferId: "tx_1", releaseClass: "call-ran" }]);
+		expect(await phased("release")).toMatchObject([{ outcome: "failed", transferId: "tx_1" }]);
+	});
+});
+
+describe("a hold's record stores its session, and the sweep places a dropped record's gaps by it, never by its file name", () => {
+	const DAY_AGO = () => new Date(Date.now() - 25 * 3_600_000);
+
+	it("every hold PreToolUse records carries its session id in its body", async () => {
+		await run("pre-tool-use", preInput("tu_1"), ESTIMATE_MODE);
+		const [name] = await holdFiles();
+		const body = JSON.parse(await readFile(join(stateDir, String(name)), "utf-8"));
+		expect(body).toMatchObject({ sessionId: SESSION, toolUseId: "tu_1" });
+	});
+
+	it("a session id that contains `__`: the record's last gap names that session, not the prefix its file name starts with", async () => {
+		const name = "sess__child__main__tu_1.tx_1.releasing";
+		await writeFile(
+			join(stateDir, name),
+			JSON.stringify({
+				gate: 1,
+				toolUseId: "tu_1",
+				transferId: "tx_1",
+				agentId: "main",
+				sessionId: "sess__child",
+				...ESTIMATE,
+			}),
+			{ mode: 0o600 },
+		);
+		await utimes(join(stateDir, name), DAY_AGO(), DAY_AGO());
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		expect(await phased("release")).toMatchObject([
+			{ session: "sess__child", outcome: "unresolved", transferId: "tx_1" },
+		]);
+	});
+
+	it("an older record that stores no session: its last gap names none (counted against every job), never a guess from its name", async () => {
+		const name = holdName("tu_1", "tx_1", "main", "releasing");
+		await seedHold("tu_1", "tx_1", { ...ESTIMATE }, "releasing");
+		await utimes(join(stateDir, name), DAY_AGO(), DAY_AGO());
+		await run("session-start", { session_id: SESSION, source: "startup" });
+		const [gap] = await phased("release");
+		expect(gap).toMatchObject({ outcome: "unresolved", transferId: "tx_1" });
+		expect(gap?.session ?? null).toBeNull();
 	});
 });

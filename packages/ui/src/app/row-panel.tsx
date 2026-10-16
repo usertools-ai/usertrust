@@ -2,176 +2,114 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useEffect, useRef, useState } from "react";
+import { costView, transferView, usageView } from "../shared/display.js";
+import { formatUtc } from "../shared/format.js";
 import { type LedgerRow, statusOf } from "../shared/rows.js";
+import { type Held, heldFor, type VerifyOutcome, verifyOutcome } from "../shared/verify-view.js";
+import { STATUS_TONE } from "./audit-table.js";
 
-interface VerifyResponse {
-	found: boolean;
-	valid: boolean;
-	receipt: string;
-	errors: string[];
+/** The badge tone as a pill tone: the pill colours only the loud states. */
+function pillTone(tone: string | undefined): string | undefined {
+	return tone === "stakes" || tone === "info" || tone === "alert" ? tone : undefined;
+}
+
+function CopyHash(props: { hash: string }): React.JSX.Element {
+	const [copied, setCopied] = useState(false);
+	return (
+		<button
+			type="button"
+			title="copy to clipboard"
+			className="ut-copy"
+			onClick={() => {
+				navigator.clipboard.writeText(props.hash).catch(() => {});
+				setCopied(true);
+				setTimeout(() => setCopied(false), 1200);
+			}}
+		>
+			{props.hash}
+			{copied && <span className="done">copied</span>}
+		</button>
+	);
+}
+
+function Verdict(props: { outcome: VerifyOutcome; delayMs: number }): React.JSX.Element {
+	const { outcome } = props;
+	const style = { animationDelay: `${props.delayMs}ms` };
+	switch (outcome.kind) {
+		case "verified":
+			return (
+				<div className="ut-verdict" style={style}>
+					<span className="ut-pill" data-tone="approve">
+						<i />
+						verified
+					</span>
+				</div>
+			);
+		case "failed":
+			return (
+				<div className="ut-verdict" style={style}>
+					<span className="ut-pill" data-tone="stakes">
+						<i />
+						failed
+					</span>
+					{outcome.reason !== undefined && <span className="ut-why red">{outcome.reason}</span>}
+				</div>
+			);
+		case "not-found":
+			return (
+				<div className="ut-verdict" style={style}>
+					<span className="ut-pill" data-tone="info">
+						<i />
+						not found
+					</span>
+					<span className="ut-why">
+						This transaction is in none of the vault's audit segments (events.jsonl and any rotated
+						segment), the records the verifier reads. Not finding it is not a failed check.
+						{outcome.reason !== undefined && ` ${outcome.reason}.`}
+					</span>
+				</div>
+			);
+		case "request-failed":
+			return (
+				<div className="ut-verdict" style={style}>
+					<span className="ut-pill" data-tone="info">
+						<i />
+						not checked
+					</span>
+					<span className="ut-why info">The verification request failed: {outcome.reason}</span>
+				</div>
+			);
+	}
 }
 
 /**
- * Local styles for the drill-in panel: scrim, slide-in, dotted leaders,
- * thermal receipt frame, delayed verdict reveal. Tokens only — no raw colors
- * (P3). Keyframes are file-local; `.receipt-line` comes from styles.css.
+ * The selected row. Docked beside the list on a wide screen (a region, the list stays usable); otherwise a modal
+ * drawer, a bottom sheet on a phone, that takes focus and returns it to the row on close.
  */
-const PANEL_CSS = `
-@keyframes rp-scrim-in {
-	from { opacity: 0; }
-}
-@keyframes rp-panel-in {
-	from { transform: translateX(24px); opacity: 0; }
-}
-@keyframes rp-verdict-in {
-	from { opacity: 0; }
-	to { opacity: 1; }
-}
-.rp-scrim {
-	position: fixed;
-	inset: 0;
-	z-index: 40;
-	border: 0;
-	margin: 0;
-	padding: 0;
-	background: var(--scrim);
-	backdrop-filter: blur(2px);
-	-webkit-backdrop-filter: blur(2px);
-	animation: rp-scrim-in 240ms ease-out both;
-	cursor: default;
-}
-.rp-panel {
-	position: fixed;
-	top: 0;
-	right: 0;
-	bottom: 0;
-	z-index: 50;
-	display: flex;
-	flex-direction: column;
-	gap: 14px;
-	width: 440px;
-	max-width: calc(100vw - 24px);
-	overflow-y: auto;
-	background: var(--panel);
-	border-left: 1px solid var(--border);
-	box-shadow: var(--shadow);
-	padding: 16px;
-	animation: rp-panel-in 240ms cubic-bezier(0.32, 0.72, 0, 1) both;
-}
-.rp-field {
-	display: flex;
-	align-items: baseline;
-}
-.rp-label {
-	flex: none;
-	white-space: nowrap;
-	font-family: var(--font-sans);
-	font-size: 10px;
-	font-weight: 500;
-	text-transform: uppercase;
-	letter-spacing: 0.05em;
-	color: var(--muted);
-}
-.rp-leader {
-	flex: 1;
-	min-width: 16px;
-	border-bottom: 1px dotted var(--faint);
-	margin: 0 6px 4px;
-}
-.rp-value {
-	max-width: 62%;
-	font-size: 12px;
-	text-align: right;
-	font-variant-numeric: tabular-nums;
-	overflow-wrap: anywhere;
-}
-.rp-value--hash {
-	font-size: 11px;
-	word-break: break-all;
-}
-.rp-receipt {
-	overflow-x: auto;
-	border-radius: 2px;
-	background: var(--bg);
-	box-shadow: 0 0 0 1px var(--border), var(--shadow);
-	padding: 10px 12px;
-	font-family: var(--font-mono);
-	font-size: 10px;
-	line-height: 1.45;
-}
-.rp-verdict {
-	font-size: 13px;
-	font-weight: 700;
-	letter-spacing: 0.06em;
-	opacity: 0;
-	animation: rp-verdict-in 240ms ease-out forwards;
-}
-@media (prefers-reduced-motion: reduce) {
-	.rp-verdict {
-		opacity: 1;
-	}
-}
-`;
-
-function Field(props: {
-	label: string;
-	value: React.ReactNode;
-	hash?: boolean;
-	tone?: string;
+export function RowPanel(props: {
+	row: LedgerRow;
+	docked: boolean;
+	onClose(): void;
 }): React.JSX.Element {
-	return (
-		<div className="rp-field">
-			<dt className="rp-label">{props.label}</dt>
-			<span className="rp-leader" aria-hidden="true" />
-			<dd
-				className={`rp-value${props.hash ? " rp-value--hash" : ""}${props.tone ? ` ${props.tone}` : ""}`}
-			>
-				{props.value}
-			</dd>
-		</div>
-	);
-}
-
-function CopyHash(props: { label: string; hash: string }): React.JSX.Element {
-	const [copied, setCopied] = useState(false);
-	return (
-		<Field
-			label={props.label}
-			hash
-			value={
-				<button
-					type="button"
-					title="copy to clipboard"
-					className="cursor-pointer text-right underline decoration-[var(--faint)] decoration-dotted underline-offset-2 hover:decoration-[var(--muted)]"
-					onClick={() => {
-						navigator.clipboard.writeText(props.hash).catch(() => {});
-						setCopied(true);
-						setTimeout(() => setCopied(false), 1200);
-					}}
-				>
-					{props.hash}
-					{copied && <span className="text-[var(--muted)]"> ✓ copied</span>}
-				</button>
-			}
-		/>
-	);
-}
-
-export function RowPanel(props: { row: LedgerRow; onClose(): void }): React.JSX.Element {
-	const { row, onClose } = props;
-	const [verify, setVerify] = useState<VerifyResponse | "loading" | "error" | null>(null);
+	const { row, docked, onClose } = props;
+	// A verify response is held for the row VERSION it was requested for (the row object: a status correction replaces
+	// it) and shown only while the row is still that version. Clearing the panel when the status changed ran BEFORE an
+	// in-flight response landed, so the earlier status's receipt was then shown beside the corrected status.
+	const [verify, setVerify] = useState<Held<LedgerRow, VerifyOutcome | "loading"> | null>(null);
+	const shown = heldFor(verify, row);
 	const closeRef = useRef<HTMLButtonElement>(null);
+	const panelRef = useRef<HTMLElement>(null);
+	const verdictRef = useRef<HTMLElement>(null);
 
-	// Initial focus moves into the panel; on close it returns to the invoking row.
+	// A modal panel takes focus, and returns it to the invoking row on close. A docked one leaves it on the row.
 	useEffect(() => {
+		if (docked) return;
 		const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 		closeRef.current?.focus();
 		return () => {
 			if (opener?.isConnected) opener.focus();
 		};
-	}, []);
-
-	const panelRef = useRef<HTMLElement>(null);
+	}, [docked]);
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent): void => {
@@ -180,7 +118,7 @@ export function RowPanel(props: { row: LedgerRow; onClose(): void }): React.JSX.
 				return;
 			}
 			// aria-modal promises modality: keep Tab cycling inside the panel.
-			if (e.key === "Tab" && panelRef.current) {
+			if (!docked && e.key === "Tab" && panelRef.current) {
 				const focusables = panelRef.current.querySelectorAll<HTMLElement>(
 					"button, [href], input, [tabindex]:not([tabindex='-1'])",
 				);
@@ -199,120 +137,240 @@ export function RowPanel(props: { row: LedgerRow; onClose(): void }): React.JSX.
 		};
 		document.addEventListener("keydown", onKey);
 		return () => document.removeEventListener("keydown", onKey);
-	}, [onClose]);
+	}, [onClose, docked]);
 
 	const runVerify = async (): Promise<void> => {
-		if (!row.transferId) return;
-		setVerify("loading");
+		const forRow = row;
+		if (forRow.transferId === undefined) return;
+		setVerify({ row: forRow, value: "loading" });
+		let outcome: VerifyOutcome;
 		try {
-			const res = await fetch(`/api/verify/${encodeURIComponent(row.transferId)}`);
-			setVerify((await res.json()) as VerifyResponse);
-		} catch {
-			setVerify("error");
+			const res = await fetch(`/api/verify/${encodeURIComponent(forRow.transferId)}`);
+			// A 500 (an audit segment that cannot be read) carries `{ error }`, not a receipt, and a proxy's page is not JSON:
+			// verifyOutcome makes either a failed request ("not checked"), never a receipt read off the wrong body.
+			const body: unknown = await res.json().catch(() => null);
+			outcome = verifyOutcome(res.status, body);
+		} catch (err) {
+			outcome = {
+				kind: "request-failed",
+				reason: err instanceof Error ? err.message : String(err),
+			};
 		}
+		// Kept for the version it was requested for; a newer request (a newer version) is never overwritten.
+		setVerify((held) => (held?.row === forRow ? { row: forRow, value: outcome } : held));
 	};
 
 	const status = statusOf(row);
-	const statusTone =
-		status === "failed" || status === "denied"
-			? "text-[var(--danger)]"
-			: status === "pending"
-				? "text-[var(--amber)]"
-				: undefined;
-	const result = verify !== null && verify !== "loading" && verify !== "error" ? verify : null;
-	const lines = result ? result.receipt.split("\n") : [];
+	const cost = costView(row);
+	const usage = usageView(row);
+	const tx = transferView(row);
+	const result = shown !== null && shown !== "loading" ? shown : null;
 
-	return (
-		<>
-			<style>{PANEL_CSS}</style>
-			<button
-				type="button"
-				className="rp-scrim"
-				aria-hidden="true"
-				tabIndex={-1}
-				onClick={onClose}
-			/>
-			<aside
-				ref={panelRef}
-				className="rp-panel"
-				role="dialog"
-				aria-modal="true"
-				aria-label={`event detail — ${row.kind} seq ${row.seq ?? "?"}`}
-			>
-				<header className="flex items-start justify-between gap-2">
-					<h2 className="text-[13px] font-semibold tracking-wide">
-						{row.kind} · seq {row.seq ?? "?"}
-					</h2>
-					<button
-						ref={closeRef}
-						type="button"
-						onClick={onClose}
-						aria-label="close detail panel"
-						className="-m-1 cursor-pointer p-1 text-[var(--muted)] hover:text-[var(--text)]"
+	// The receipt and verdict land below the button, often below the panel's fold: bring them into view.
+	useEffect(() => {
+		if (result === null) return;
+		const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+		verdictRef.current?.scrollIntoView({ block: "end", behavior: reduce ? "auto" : "smooth" });
+	}, [result]);
+	const lines =
+		result !== null && result.kind !== "request-failed" ? result.receipt.split("\n") : [];
+
+	const body = (
+		<div className="ut-insp-in">
+			<div className="ut-dhead">
+				<div>
+					<h2>{row.model ?? row.kind}</h2>
+					<div className="ut-dkind">
+						{row.kind} · seq {row.seq ?? "?"} · {formatUtc(row.ts)}
+					</div>
+				</div>
+				<button
+					ref={closeRef}
+					type="button"
+					className="ut-x"
+					onClick={onClose}
+					aria-label="close the inspector"
+				>
+					✕
+				</button>
+			</div>
+			<div className="ut-pills">
+				<span className="ut-pill" data-tone={pillTone(STATUS_TONE[status])}>
+					<i />
+					{status}
+				</span>
+				{row.integrity === "verified" ? (
+					<span
+						className="ut-pill"
+						data-tone="approve"
+						title="hash chain verified up to this record"
 					>
-						✕
-					</button>
-				</header>
-				<dl className="flex flex-col gap-2">
-					<Field label="Timestamp" value={row.ts} />
-					<Field label="Actor" value={row.actor} />
-					{row.model && <Field label="Model" value={`${row.model} (${row.provider})`} />}
-					{row.costUt !== undefined && (
-						<Field label="Cost" value={`${row.costUt} UT · $${(row.costUsd ?? 0).toFixed(4)}`} />
-					)}
-					<Field label="Status" value={status} tone={statusTone} />
-					<Field
-						label="Integrity"
-						value={row.integrity}
-						tone={row.integrity === "verified" ? "text-[var(--verify)]" : "text-[var(--danger)]"}
-					/>
-					{row.transferId && <Field label="Transfer" value={row.transferId} hash />}
-					{row.error && <Field label="Error" value={row.error} tone="text-[var(--danger)]" />}
-					<CopyHash label="Hash" hash={row.hash} />
-					<CopyHash label="Previous hash" hash={row.previousHash} />
-					<Field label="Event id" value={row.id} hash />
-				</dl>
-				{row.transferId ? (
-					<button
-						type="button"
-						onClick={runVerify}
-						disabled={verify === "loading"}
-						aria-busy={verify === "loading"}
-						className="cursor-pointer rounded border border-[var(--verify)] px-3 py-1.5 text-xs text-[var(--verify)] hover:bg-[var(--panel-2)] disabled:cursor-default disabled:opacity-40"
-					>
-						{verify === "loading" ? "verifying…" : "verify this transaction"}
-					</button>
+						<i />
+						chain verified
+					</span>
 				) : (
-					<span className="text-[11px] text-[var(--faint)] italic">
-						no transfer id — nothing to verify
+					<span className="ut-pill" data-tone="stakes">
+						<i />
+						after break
 					</span>
 				)}
-				{result && (
-					<pre className="rp-receipt">
+			</div>
+			<section className="ut-sec">
+				<div className="ut-lbl">Call</div>
+				<dl className="ut-dl">
+					<dt>Time</dt>
+					<dd className="m">{row.ts}</dd>
+					<dt>Actor</dt>
+					<dd className="m">{row.actor}</dd>
+					{row.model !== undefined && (
+						<>
+							<dt>Model</dt>
+							<dd>
+								{row.model} <span className="ut-sub mono">{row.provider}</span>
+							</dd>
+						</>
+					)}
+					<dt>Kind</dt>
+					<dd className="m">{row.kind}</dd>
+					{row.source !== undefined && (
+						<>
+							<dt>Source</dt>
+							<dd>{row.source}</dd>
+						</>
+					)}
+					{row.error !== undefined && (
+						<>
+							<dt>Error</dt>
+							<dd className="red">{row.error}</dd>
+						</>
+					)}
+				</dl>
+			</section>
+			<section className="ut-sec">
+				<div className="ut-lbl">Cost</div>
+				{cost === null ? (
+					<div className="ut-rcpt">
+						<span>Cost</span>
+						<span className="dots" />
+						<span className="v na">not recorded</span>
+					</div>
+				) : (
+					<>
+						<div className="ut-rcpt">
+							<span>Usertokens</span>
+							<span className="dots" />
+							<span className="v">{cost.ut}</span>
+						</div>
+						<div className="ut-rcpt">
+							<span>Dollars</span>
+							<span className="dots" />
+							<span className="v">{cost.usd}</span>
+						</div>
+						<div className="ut-rcpt">
+							<span>Usage</span>
+							<span className="dots" />
+							<span className={`v${usage.tone === "ink" ? "" : ` ${usage.tone}`}`}>
+								{usage.text}
+							</span>
+						</div>
+					</>
+				)}
+			</section>
+			<section className="ut-sec">
+				<div className="ut-lbl">Chain</div>
+				<dl className="ut-dl">
+					<dt>Transfer</dt>
+					{tx.kind === "transfer" ? <dd className="m">{tx.id}</dd> : <dd className="na">none</dd>}
+					<dt>Event id</dt>
+					<dd className="m">{row.id}</dd>
+					<dt>Hash</dt>
+					<dd>
+						<CopyHash hash={row.hash} />
+					</dd>
+					<dt>Previous</dt>
+					<dd>
+						<CopyHash hash={row.previousHash} />
+					</dd>
+				</dl>
+			</section>
+			<section className="ut-sec" ref={verdictRef}>
+				<div className="ut-lbl">Independent verification</div>
+				{tx.kind === "transfer" ? (
+					<>
+						<span className="ut-why">
+							Runs the usertrust-verify check for this transfer and prints its receipt.
+						</span>
+						<button
+							type="button"
+							className="ut-verify"
+							onClick={runVerify}
+							disabled={shown === "loading"}
+							aria-busy={shown === "loading"}
+						>
+							{shown === "loading" ? "verifying…" : "verify this transaction"}
+						</button>
+					</>
+				) : (
+					<span className="ut-why">No transfer id: there is no transaction to verify.</span>
+				)}
+				{lines.length > 0 && (
+					<pre className="ut-receipt">
 						{lines.map((line, i) => (
 							// biome-ignore lint/suspicious/noArrayIndexKey: receipt lines are static per response and never reorder
-							<span key={i} className="receipt-line" style={{ animationDelay: `${i * 26}ms` }}>
+							<span key={i} className="ut-receipt-line" style={{ animationDelay: `${i * 26}ms` }}>
 								{`${line}\n`}
 							</span>
 						))}
 					</pre>
 				)}
 				<div aria-live="polite">
-					{verify === "error" && (
-						<span className="rp-verdict text-[var(--danger)]">verification request failed</span>
-					)}
-					{result && (
-						<span
-							className={`rp-verdict ${result.valid ? "text-[var(--verify)]" : "text-[var(--danger)]"}`}
-							style={{ animationDelay: `${lines.length * 26 + 150}ms` }}
-						>
-							{result.valid
-								? "VERIFIED"
-								: `FAILED${result.errors.length ? `: ${result.errors[0]}` : ""}`}
-						</span>
-					)}
+					{result !== null && <Verdict outcome={result} delayMs={lines.length * 26 + 150} />}
 				</div>
+			</section>
+		</div>
+	);
+
+	if (docked)
+		return (
+			<aside
+				ref={panelRef}
+				className="ut-insp"
+				aria-label={`transaction ${row.kind} seq ${row.seq ?? "?"}`}
+			>
+				{body}
+			</aside>
+		);
+	return (
+		<>
+			<button
+				type="button"
+				className="ut-scrim"
+				aria-hidden="true"
+				tabIndex={-1}
+				onClick={onClose}
+			/>
+			<aside
+				ref={panelRef}
+				className="ut-drawer"
+				role="dialog"
+				aria-modal="true"
+				aria-label={`transaction ${row.kind} seq ${row.seq ?? "?"}`}
+			>
+				{body}
 			</aside>
 		</>
+	);
+}
+
+/** The docked inspector before a row is selected: what it will hold. */
+export function InspectorHint(): React.JSX.Element {
+	return (
+		<aside className="ut-insp" aria-label="transaction inspector">
+			<div className="ut-hint">
+				<b>Select a record</b>
+				Its call, its cost and its place on the chain show here, with an independent verification of
+				its receipt.
+			</div>
+		</aside>
 	);
 }

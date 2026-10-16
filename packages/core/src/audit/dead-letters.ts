@@ -47,6 +47,41 @@ export interface ChainDeadLetters {
 	onChain: number;
 	/** Lines from another source: not chain events, reported for completeness only. */
 	otherSources: number;
+	/**
+	 * `posted` of each dead-lettered `settlement_shortfall` chain event, by transfer id: a capped post whose shortfall append
+	 * failed. Read from the SAME lines as the completeness count, so the two cannot disagree. Meaningful only when
+	 * `shortfallsReliable`.
+	 */
+	shortfalls: Map<string, number>;
+	/** False when a dead-lettered shortfall could not be read as one (no string transferId, or `posted` not a count). */
+	shortfallsReliable: boolean;
+}
+
+/** The dead-letter file under a vault directory (the `.usertrust` directory): the ONE place its path is spelled. */
+export function deadLetterPath(vaultDir: string): string {
+	return join(vaultDir, "dlq", "dead-letters.jsonl");
+}
+
+/** One line of the file: a record whose checksum holds, or one that cannot be read as a dead letter. */
+export type DeadLetterLine =
+	| { unreadable: true }
+	| { unreadable?: false; entry: Record<string, unknown> };
+
+/**
+ * Parse one non-blank line of the dead-letter file. EVERY reader of the file goes through this: a line that does not
+ * parse, is not an object, or fails the writer's checksum is `unreadable`, and no reader may look inside it. The
+ * checksum is recomputed exactly as the writer computes it, including its `JSON.stringify` fallback for a `NaN` payload.
+ */
+export function parseDeadLetterLine(line: string): DeadLetterLine {
+	let entry: unknown;
+	try {
+		entry = JSON.parse(line);
+	} catch {
+		return { unreadable: true };
+	}
+	if (entry === null || typeof entry !== "object") return { unreadable: true };
+	if (!checksumHolds(entry as Record<string, unknown>)) return { unreadable: true };
+	return { entry: entry as Record<string, unknown> };
 }
 
 /** What the reader compares of the chain's event at a dead letter's `eventHash`. */
@@ -72,7 +107,7 @@ export function readChainDeadLetters(
 	vaultDir: string,
 	eventAt: (hash: string) => ChainEventView | undefined,
 ): ChainDeadLetters | ChainDeadLettersUnreadable {
-	const path = join(vaultDir, "dlq", "dead-letters.jsonl");
+	const path = deadLetterPath(vaultDir);
 	let raw: string;
 	try {
 		raw = readFileSync(path, "utf-8");
@@ -85,6 +120,8 @@ export function readChainDeadLetters(
 				missingTransferIds: [],
 				onChain: 0,
 				otherSources: 0,
+				shortfalls: new Map(),
+				shortfallsReliable: true,
 			};
 		}
 		const code = (err as { code?: unknown })?.code;
@@ -99,6 +136,8 @@ export function readChainDeadLetters(
 		missingTransferIds: [],
 		onChain: 0,
 		otherSources: 0,
+		shortfalls: new Map(),
+		shortfallsReliable: true,
 	};
 	const countMissing = (kind: string, transferId: unknown) => {
 		result.missing++;
@@ -108,22 +147,12 @@ export function readChainDeadLetters(
 	};
 	for (const line of raw.split("\n")) {
 		if (line.trim() === "") continue;
-		let entry: unknown;
-		try {
-			entry = JSON.parse(line);
-		} catch {
+		const parsed = parseDeadLetterLine(line);
+		if (parsed.unreadable === true) {
 			countMissing("<unreadable>", undefined);
 			continue;
 		}
-		if (entry === null || typeof entry !== "object") {
-			countMissing("<unreadable>", undefined);
-			continue;
-		}
-		if (!checksumHolds(entry as Record<string, unknown>)) {
-			countMissing("<unreadable>", undefined);
-			continue;
-		}
-		const e = entry as { source?: unknown; eventHash?: unknown; payload?: unknown };
+		const e = parsed.entry as { source?: unknown; eventHash?: unknown; payload?: unknown };
 		if (e.source !== CHAIN_APPEND_DEAD_LETTER_SOURCE) {
 			if (typeof e.source === "string") {
 				result.otherSources++;
@@ -133,6 +162,19 @@ export function readChainDeadLetters(
 			continue;
 		}
 		const payload = (e.payload ?? {}) as ChainEventView;
+		if (payload.kind === "settlement_shortfall") {
+			const d = (payload.data ?? {}) as { transferId?: unknown; posted?: unknown };
+			if (
+				typeof d.transferId === "string" &&
+				typeof d.posted === "number" &&
+				Number.isFinite(d.posted) &&
+				d.posted >= 0
+			) {
+				result.shortfalls.set(d.transferId, d.posted);
+			} else {
+				result.shortfallsReliable = false;
+			}
+		}
 		if (typeof e.eventHash === "string" && isThisEvent(eventAt(e.eventHash), payload)) {
 			result.onChain++;
 			continue;

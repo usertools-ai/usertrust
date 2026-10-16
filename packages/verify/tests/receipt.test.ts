@@ -80,15 +80,47 @@ describe("renderReceipt", () => {
 		expect(output).toContain("tx_test_12345678");
 		expect(output).toContain("claude-haiku-4-5-20251001");
 		expect(output).toContain("anthropic");
-		expect(output).toContain("14 UT");
-		expect(output).toContain("14 UT");
-		expect(output).toContain("$0.0014");
 		expect(output).toContain("Event 19 of 21");
 		// Truncated hashes
 		expect(output).toContain("33a1bc0f...34e6f5db");
 		expect(output).toContain("d156f844...e9be61d5");
 		// Merkle root (truncated)
 		expect(output).toContain("954fb19e...9d8c7048");
+	});
+
+	// The receipt printed `cumulativeSpend` (the running total of every llm_call up to the event) as "Spend", beside
+	// ONE transaction: a 1,144 UT call read 9,535 UT, its vault's spend.
+	it("red-first (the running total printed as Spend): the receipt prints its OWN transaction's cost", () => {
+		const output = renderReceipt(
+			makeReceiptData({
+				event: makeEvent({
+					data: { model: "gpt-5", cost: 1144, settled: true, transferId: "tx_7c1e19e3" },
+				}),
+				cumulativeSpend: 9535,
+			}),
+		);
+		const lines = output.split("\n");
+		expect(lines.find((l) => l.includes("Spend"))).toMatch(/Spend \.+ 1144 UT │$/);
+		expect(lines.find((l) => l.includes("Conversion"))).toMatch(/Conversion \.+ \$0\.1144 │$/);
+		expect(output).not.toContain("9535");
+		// Without the deprecated field, the same receipt.
+		const { cumulativeSpend: _c, ...withoutTotal } = makeReceiptData({
+			event: makeEvent({
+				data: { model: "gpt-5", cost: 1144, settled: true, transferId: "tx_7c1e19e3" },
+			}),
+		});
+		expect(renderReceipt(withoutTotal)).toBe(output);
+	});
+
+	it("red-first ($0.11 for a $0.1144 call): dollars are exact, at 4 dp", () => {
+		const output = renderReceipt(
+			makeReceiptData({
+				event: makeEvent({
+					data: { model: "gpt-5", cost: 9535, settled: true, transferId: "tx_1" },
+				}),
+			}),
+		);
+		expect(output).toContain("$0.9535");
 	});
 
 	it("renders a failed transaction", () => {
@@ -173,14 +205,20 @@ describe("renderReceipt", () => {
 			}),
 		);
 
-		// The date is formatted in local time with AM/PM.
-		// Check structure: month abbreviation, year, and AM/PM indicator.
+		// red-first (local time, no zone): UTC, and the Z says so — the same instant on every auditor's machine.
 		const lines = output.split("\n");
-		const dateLine = lines.find((l) => l.includes("Date"));
-		expect(dateLine).toBeDefined();
-		expect(dateLine).toMatch(/AM|PM/);
-		expect(dateLine).toMatch(/Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/);
-		expect(dateLine).toContain("2026");
+		expect(lines.find((l) => l.includes("Date"))).toMatch(/Date \.+ 2026-03-28 19:59:18Z │$/);
+		expect(lines.find((l) => l.includes("Verified"))).toMatch(
+			/Verified \.+ 2026-03-28 20:15:00Z │$/,
+		);
+	});
+
+	it("an unreadable timestamp prints as such, and the receipt still renders", () => {
+		const output = renderReceipt(
+			makeReceiptData({ event: makeEvent({ timestamp: "not a time" }) }),
+		);
+		expect(output.split("\n").find((l) => l.includes("Date"))).toMatch(/unreadable time │$/);
+		assertBoxStructure(output);
 	});
 
 	it("detects providers correctly", () => {
@@ -300,6 +338,17 @@ describe("renderReceipt — denied status", () => {
 	});
 });
 
+describe("the receipt header", () => {
+	// The product name is lowercase, always. Both receipts printed it letter-spaced in capitals.
+	it("red-first ('U S E R T R U S T'): both receipts print the product name in lowercase", () => {
+		for (const output of [renderReceipt(makeReceiptData()), renderNotFound("tx_1")]) {
+			const header = output.split("\n")[2] as string;
+			expect(header.trim()).toBe("│              u s e r t r u s t              │");
+			expect(output).not.toMatch(/U ?S ?E ?R ?T ?R ?U ?S ?T|UserTrust|Usertrust/);
+		}
+	});
+});
+
 describe("renderNotFound", () => {
 	it("renders not-found with tx ID and proper structure", () => {
 		const txId = "tx_missing_999";
@@ -308,6 +357,20 @@ describe("renderNotFound", () => {
 		expect(output).toContain("Transaction not found");
 		expect(output).toContain(txId);
 
+		assertBoxStructure(output);
+		expect(output).toContain("No event with this transferId exists");
+	});
+
+	it("an incomplete reading says what was read, in the same box", () => {
+		const output = renderNotFound("tx_missing_999", false);
+
+		expect(output).toContain("Transaction not found");
+		expect(output).toContain("tx_missing_999");
+		expect(output).not.toContain("exists");
+		expect(output).toContain("was found");
+		expect(output).toContain("in the records that could be read.");
+		expect(output).toContain("The audit chain is incomplete or failed");
+		expect(output).toContain("verification; see the errors below.");
 		assertBoxStructure(output);
 	});
 });

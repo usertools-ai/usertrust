@@ -11,10 +11,13 @@ import { type ChildProcess, spawn } from "node:child_process";
 import {
 	existsSync,
 	lstatSync,
+	mkdirSync,
 	mkdtempSync,
 	readdirSync,
+	realpathSync,
 	rmSync,
 	statSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -169,6 +172,48 @@ describe.skipIf(onWindows).each([
 		// Nothing outside stateDir: no stray `.usertrust/patterns/memory.json` in the cwd.
 		expect(readdirSync(cwd)).toEqual([]);
 		expect(readdirSync(parent)).toEqual(["state"]);
+	});
+});
+
+describe.skipIf(onWindows)("usertrust-server, a stateDir with `..` after a symbolic link", () => {
+	it("puts the tenant vault where the kernel resolves stateDir, nothing at the lexical path", async () => {
+		const parent = mkdtempSync(join(tmpdir(), "utsrv-dotdot-"));
+		tracked.push(parent);
+		// `link -> <parent>/elsewhere/sub`, so the kernel reads `link/..` as `<parent>/elsewhere`.
+		mkdirSync(join(parent, "elsewhere", "sub"), { recursive: true });
+		symlinkSync(join(parent, "elsewhere", "sub"), join(parent, "link"));
+		const stateDir = `${parent}/link/../state`;
+		const kernel = join(realpathSync.native(join(parent, "elsewhere")), "state");
+
+		server = createUsertrustServer({
+			config: {
+				host: "127.0.0.1",
+				port: 0,
+				stateDir,
+				enforcement: "enforce",
+				pendingTtlMs: 300_000,
+				dryRun: true,
+				tenants: [{ id: "t1", keyHash: hashKey(KEY), budget: 50_000 }],
+			},
+		});
+		const { port } = await server.listen();
+		const headers = { "content-type": "application/json", authorization: `Bearer ${KEY}` };
+		const res = await fetch(`http://127.0.0.1:${port}/v1/authorize`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({
+				model: "claude-sonnet-4-6",
+				estimatedInputTokens: 200,
+				maxOutputTokens: 100,
+			}),
+		});
+		expect(res.status).toBe(200);
+		await server.close();
+		server = undefined;
+
+		expect(existsSync(join(kernel, "t1", ".usertrust", "audit", "events.jsonl"))).toBe(true);
+		// The lexical spelling, `<parent>/state`, was never created.
+		expect(existsSync(join(parent, "state"))).toBe(false);
 	});
 });
 

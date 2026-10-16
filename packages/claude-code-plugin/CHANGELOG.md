@@ -1,4 +1,4 @@
-# Changelog: usertrust-claude-code
+# Changelog: usertools (formerly usertrust-claude-code)
 
 The Claude Code plugin's own changes. It is installed from this repository's
 plugin marketplace (`/plugin marketplace add usertools-ai/usertrust`), not from
@@ -6,6 +6,137 @@ npm, and its version is its own: the `usertrust` packages and their
 [changelog](../../CHANGELOG.md) are versioned separately.
 
 ## [Unreleased]
+
+### Fixed
+
+- **A `503 ledger_unavailable` at PreToolUse is tried once more before it counts as an outage.**
+  The server answers it when no answer came in time, from its ledger or from the authorizes
+  queued ahead: in an outage, or in a burst. Nothing was authorized, and the hook read it as an
+  outage at once, so in enforce mode a burst blocked the tool call. PreToolUse now makes one
+  retry after a short wait (up to 1 s, within the hook's budget). It clears a `503` whose cause,
+  such as a burst's queue, has drained by then. In an outage it adds about 1 s before the call
+  is blocked or recorded as a gap. A second `503` is the outage it was, unchanged in watch,
+  enforce and `failOpen`. A refusal (402, 403, 429) is never retried.
+- **The authorize call no longer gives up before the server's own deadline.** It waited at most
+  5 s, the server's default deadline, and its timer started first, so the server's `503`
+  arrived after the hook had given up and read it as an outage of its own. It now waits up to
+  6.5 s, within the hook's budget; in an outage that adds about 1.5 s before the call is blocked
+  or recorded as a gap. The retry works with a server deadline (`ledgerTimeoutMs`) up to about
+  5 s, the server's default; with a deadline above about 6.5 s the hook gives up before the
+  server's `503` arrives, and the call is an outage at once, with no retry.
+
+- **A session metered later no longer bills what it did before.** The plugin kept one first-run
+  time per state directory. A session that first ran with no hook of this plugin (a lane switched
+  on later, or a session already open at install) had every response since that time settled at
+  its first metered hook, onto that hook's hold, stamped with the wrong time. Each session now has
+  its own first-run time, stamped by the first hook of this plugin that touches the session in
+  that state directory, whatever the hook does: SessionStart, or any later hook, including one
+  that only writes a gap, a refusal or a deferral, since metering was on then. A session first met
+  at a later hook (one that ran with no hook at all) is stamped there. Nothing a session wrote
+  before its own time is posted. Those responses are
+  declared once per agent instead, as a `pre-metering` watch record
+  (`{"kind":"pre-metering","session":…,"agent":…,"responses":N,"reason":"written before this session was metered; not billed","started":null}`).
+  It is never billed and never a `gap`: the gap figure counts only calls missed while metering
+  was on. The job report names the count in its own `beforeMetering` field, apart from
+  `knownGaps`, per session (`unattributed.sessions`) and attributed to no job: when those
+  responses were written is not kept, so two jobs that share a session name the same entry.
+  It counts each agent's transcript, so a fork's copied history counts again: an upper bound. A session the state already held a cursor for before this change keeps the
+  state's time, so a response it left unposted is still posted.
+  Two edges are declared, not fixed:
+  - A session that ran an older SessionStart but had no cursor yet at the upgrade is stamped at
+    its first hook after it, so what it wrote in between is declared `pre-metering`, once.
+  - Two agents of a session whose first hooks race keep the stamp published first, which may be
+    the later clock by milliseconds.
+- **A resumed call whose earlier hold could not be ended no longer reserves a second hold beside
+  it.** When PreToolUse fires again for the same tool call, the plugin ends the call's earlier
+  hold first. If that hold carried transcript usage, its settle failed, and its give-back was not
+  confirmed either, the hold might still be live, and the call was refused. But nothing named the
+  hold any more, so the next re-fire of the call reserved a fresh hold beside it, and the budget
+  counted both until the server's sweep ended the original. The hold is now kept named as one
+  whose only remaining job is to be given back (`.releasing`). A later re-fire finds it and is
+  refused as well, and Stop gives it back once, after any retry of its window. The give-back is
+  idempotent on the server, and a hold it cannot end is ended by the ledger's pending timeout
+  ([#248](https://github.com/usertools-ai/usertrust/issues/248)).
+
+- **Stop keeps a `.releasing` hold whose give-back failed, so a re-fire still finds it.** Stop
+  gave each `.releasing` hold back once and then forgot it, whatever the server answered. After a
+  5xx or a timeout the hold could still be live with nothing naming it, and a re-fire of the same
+  call reserved a second hold beside it: an early refusal near the budget until the ledger's
+  pending timeout ended the first. The hold is now kept, at every Stop and at SessionEnd too,
+  since `claude --resume` can re-fire the deferred call later. A later Stop gives it back again
+  (a 200 ends it; a 404 says it is gone). Its gaps are written at the first failed give-back, so a
+  session killed afterwards still has them, and the record is marked so no later attempt writes
+  them again (a gap that cannot be written leaves it unmarked, and the next Stop writes it).
+  SessionStart drops any such record after 24 hours, long past the ledger's pending timeout,
+  when its hold is void; one whose gaps never made it on record gets a last attempt to write
+  them first. A `.settling` hold, whose call ran and is never re-fired, is
+  unchanged.
+
+- **A kept release record carries its session id, so its gaps are placed in the right session.**
+  Every hold's record now stores its session id, and SessionStart reads it from there instead of
+  from the record's file name, which a session id containing `__` could split in the wrong place.
+
+### Changed
+
+- **The SessionStart warning about the old plugin now says what running both costs.** With
+  `usertrust-claude-code` also enabled, every tool call reserves budget twice, and some versions
+  of the old plugin can charge twice. The warning (enabled, or unable to tell) says so in one line.
+  `usertools` still meters either way.
+
+## [3.0.2] - 2026-10-12
+
+### Fixed
+
+- **The "also enabled" warning reads the local settings file Claude Code writes.** Started in a
+  subdirectory of a git repository, Claude Code reads and writes `.claude/settings.local.json` at
+  the repository root; in a git worktree, at the main checkout's root. A file left in the starting
+  directory from before v2.1.211 is still read, and where both set the same key the root's value
+  applies. The warning now reads those files in that order (managed, the root's local file, the
+  starting directory's local file when it is a different path, the shared `.claude/settings.json`
+  in the starting directory only, then the user's). A `.git` pointer, gitdir, or commondir that
+  exists but cannot be read or parsed is "could not tell", naming the path. **`usertools` always
+  meters:** a reading never stops metering. Without the root file, a plugin enabled only there
+  was not warned about, and both metered every tool call.
+- **The uninstall advice names the exact key that is enabled.** The line now ends
+  `/plugin uninstall <name>@<marketplace>` for the highest-precedence key whose winning value is
+  `true` (for example `usertrust-claude-code@elsewhere`), not always
+  `usertrust-claude-code@usertrust`. A copy enabled under another marketplace was told to
+  uninstall a key that was not the one loaded.
+
+## [3.0.1] - 2026-10-12
+
+### Fixed
+
+- **A warning when both plugin names are enabled.** `usertrust-claude-code` cannot be updated,
+  and with it and `usertools` both loaded every tool call is metered twice (they share one state
+  dir). At SessionStart, `usertools` reads Claude Code's `enabledPlugins` setting (managed
+  settings, `.claude/settings.local.json`, `.claude/settings.json`, then the user's
+  `settings.json`, the highest-precedence statement winning) and, when `usertrust-claude-code`
+  looks enabled under any marketplace, opens its line with `usertrust: usertrust-claude-code also
+  appears to be enabled (<the settings file>); if it is, every tool call is metered twice.
+  Uninstall it: /plugin uninstall usertrust-claude-code@usertrust`. **`usertools` always meters.**
+  Settings files are evidence of what Claude Code loaded, not proof (`--settings`,
+  `--setting-sources`, a change made after the session started, a different home), and a wrong
+  "enabled" that stopped metering would be a silent zero meter; a wrong warning costs one line.
+  - **Anything unreadable or ambiguous warns too:** a settings file that is not JSON, is not a
+    regular file (a FIFO), is over the read bound, holds a value that is not `true` or `false`,
+    or a hook told no project directory opens the line with `usertrust: could not tell whether
+    usertrust-claude-code is also enabled (...)`.
+  - **May not warn** (an old plugin enabled only there is not seen): MDM and server-managed
+    settings, `--settings`, `managed-settings.d/`, and the Windows managed path.
+  - Unchanged: `~/.config/usertrust/`, every `UT_CC_*` variable, the `usertrust-cc` state dir and
+    the `usertrust:` session messages.
+
+## [3.0.0] - 2026-10-12
+
+### Changed
+
+- **BREAKING: the plugin is renamed from `usertrust-claude-code` to `usertools`.** Install it
+  with `/plugin install usertools@usertrust`. An existing install does not migrate itself:
+  uninstall `usertrust-claude-code` BEFORE installing `usertools`. With both installed,
+  every tool call is metered twice. Unchanged by the rename: the marketplace name
+  (`usertrust`), the state directory, the configuration path (`~/.config/usertrust/`), the
+  hooks and their behaviour.
 
 ### Fixed
 

@@ -468,7 +468,7 @@ describe("governAction() — action governance pipeline", () => {
 	// 11. Negative cost validation
 	// ─────────────────────────────────────────────────────────────────────
 
-	describe("11. Negative cost validation (AUD-466)", () => {
+	describe("11. Negative cost validation", () => {
 		it("rejects negative cost to prevent budget inflation", async () => {
 			const governed = await trust(makeAnthropicMock(), {
 				dryRun: true,
@@ -544,7 +544,7 @@ describe("governAction() — action governance pipeline", () => {
 	// 12. Policy context field shadowing prevention
 	// ─────────────────────────────────────────────────────────────────────
 
-	describe("12. Policy context field shadowing (AUD-467)", () => {
+	describe("12. Policy context field shadowing", () => {
 		it("governance fields cannot be overridden by action.params", async () => {
 			writePolicyFile(tmpVault, ".usertrust/policies/default.yml", [
 				{

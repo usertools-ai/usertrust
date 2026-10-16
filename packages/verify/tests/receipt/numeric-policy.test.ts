@@ -228,6 +228,10 @@ const REGISTRY: Readonly<Record<string, ParseSiteDisposition>> = {
 		policy: "NO PARSE SITE — display helpers over an already-parsed value.",
 	},
 	"canonical.ts": { sites: 0, policy: "NO PARSE SITE — a serializer, not a reader." },
+	"verdict.ts": {
+		sites: 0,
+		policy: "NO PARSE SITE — selects a transfer's verdict from already-parsed events.",
+	},
 	"constants.ts": { sites: 0, policy: "NO PARSE SITE — string constants only." },
 	// ── Mirrored into packages/core. Enumerated here so the assertion below stays
 	// exhaustive; the frozen numeric rule is deliberately NOT applied on this side.

@@ -1,6 +1,6 @@
 {
 	"name": "usertrust-server",
-	"version": "4.1.0",
+	"version": "5.0.3",
 	"description": "Self-hostable HTTP control plane for the usertrust governance kernel",
 	"license": "Apache-2.0",
 	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
@@ -42,7 +42,7 @@
 		"NOTICE"
 	],
 	"dependencies": {
-		"usertrust": "*",
+		"usertrust": "5.0.3",
 		"zod": "^4.6.5"
 	}
 }

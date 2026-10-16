@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditLockReleaseError, type AuditWriter } from "../../src/audit/chain.js";
-import type { TrustEngine } from "../../src/govern.js";
+import { type TrustEngine, type TrustOpts, trust } from "../../src/govern.js";
 import type { Governor } from "../../src/headless.js";
 import { createGovernor } from "../../src/headless.js";
 import { costFromRates, getModelRates } from "../../src/ledger/pricing.js";
@@ -353,7 +354,7 @@ describe("headless governor", () => {
 
 	// ── Proxy mode removed ──
 
-	it("createGovernor throws when proxy is set (AUD-456)", async () => {
+	it("createGovernor throws when proxy is set", async () => {
 		await expect(
 			createGovernor({
 				budget: 100_000,
@@ -364,14 +365,14 @@ describe("headless governor", () => {
 		).rejects.toThrow("proxy mode is not yet implemented");
 	});
 
-	it("createGovernor throws with AUD-456 reference when proxy is set", async () => {
+	it("createGovernor throws the proxy-removal error when proxy is set", async () => {
 		await expect(
 			createGovernor({
 				budget: 100_000,
 				vaultBase,
 				proxy: "https://proxy.example.com",
 			}),
-		).rejects.toThrow("AUD-456");
+		).rejects.toThrow("proxy mode is not yet implemented");
 	});
 
 	it("createGovernor error suggests dryRun when proxy is set", async () => {
@@ -686,6 +687,204 @@ describe("headless governor", () => {
 		await gov.destroy();
 	});
 
+	// The `pii` option overrides the config file in createGovernor() exactly as in
+	// trust(): the two build their config with one shared override list.
+	it('{ pii: "block" } blocks over a config file of warn, before any hold', async () => {
+		const configDir = join(vaultBase, VAULT_DIR);
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			join(configDir, "usertrust.config.json"),
+			JSON.stringify({ budget: 100_000, pii: "warn" }),
+		);
+		const engine = mockEngine();
+
+		const gov = await createGovernor({ _engine: engine, vaultBase, pii: "block" });
+
+		expect(gov.config.pii).toBe("block");
+		await expect(
+			gov.authorize({
+				model: "claude-sonnet-4-6",
+				messages: [{ role: "user", content: "Charge my card 4111 1111 1111 1111 please" }],
+			}),
+		).rejects.toThrow(/PII detected: .*credit_card/);
+		expect(engine.pendingIds).toHaveLength(0);
+
+		await gov.destroy();
+	});
+
+	it('{ pii: "warn" } over a config file of block authorizes', async () => {
+		const configDir = join(vaultBase, VAULT_DIR);
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			join(configDir, "usertrust.config.json"),
+			JSON.stringify({ budget: 100_000, pii: "block" }),
+		);
+
+		const gov = await createGovernor({ dryRun: true, vaultBase, pii: "warn" });
+
+		expect(gov.config.pii).toBe("warn");
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			messages: [{ role: "user", content: "Charge my card 4111 1111 1111 1111 please" }],
+		});
+		expect(auth.transferId).toMatch(/^tx_/);
+
+		await gov.settle(auth);
+		await gov.destroy();
+	});
+
+	it("refuses an option it does not read, by name, before the vault is created", async () => {
+		// `as never`: a JavaScript caller has no type check; this models one.
+		await expect(
+			createGovernor({
+				dryRun: true,
+				vaultBase,
+				circuitBreaker: { failureThreshold: 1, resetTimeout: 1 },
+			} as never),
+		).rejects.toThrow(
+			'createGovernor(): unknown option "circuitBreaker" (set it in .usertrust/usertrust.config.json)',
+		);
+		await expect(createGovernor({ dryRun: true, vaultBase, pi: "block" } as never)).rejects.toThrow(
+			'createGovernor(): unknown option "pi"',
+		);
+		await expect(createGovernor({ dryRun: true, vaultBase, pii: "blok" } as never)).rejects.toThrow(
+			'createGovernor(): invalid option pii "blok"',
+		);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
+	it("refuses an own option a getter removed while the options were read (never the inherited value)", async () => {
+		const options = Object.create({ pii: "off" }) as Record<string, unknown>;
+		Object.defineProperty(options, "dryRun", {
+			enumerable: true,
+			get() {
+				delete options.pii;
+				return true;
+			},
+		});
+		options.vaultBase = vaultBase;
+		options.pii = "block";
+		await expect(createGovernor(options as never)).rejects.toThrow(
+			'createGovernor(): option "pii" was removed while the options were being read',
+		);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
+	// `allowUngoverned` opts SDK methods out of a wrapped client's default-deny boundary; a
+	// governor wraps no client, so createGovernor() refuses it by name. GovernorOpts does not
+	// offer it, but a value typed as TrustOpts still carries it past the type check.
+	const TRUST_ONLY_REFUSAL =
+		'createGovernor(): option "allowUngoverned" applies to trust()-wrapped clients only';
+
+	it("refuses allowUngoverned by name, before anything is created", async () => {
+		await expect(
+			createGovernor({
+				dryRun: true,
+				vaultBase,
+				// @ts-expect-error GovernorOpts does not offer allowUngoverned
+				allowUngoverned: ["embeddings.create"],
+			}),
+		).rejects.toThrow(TRUST_ONLY_REFUSAL);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
+	it("refuses allowUngoverned passed through a value typed as TrustOpts (the type check misses it)", async () => {
+		const asTrustOpts: TrustOpts = {
+			dryRun: true,
+			vaultBase,
+			allowUngoverned: ["embeddings.create"],
+		};
+		await expect(createGovernor(asTrustOpts)).rejects.toThrow(TRUST_ONLY_REFUSAL);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
+	it("does not list allowUngoverned among the options createGovernor() accepts", async () => {
+		const err = await createGovernor({ dryRun: true, vaultBase, pi: "block" } as never).then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+		const accepts = /accepts only: (.*)\.$/.exec((err as Error).message)?.[1];
+		expect(accepts).toBe(
+			"budget, configPath, dryRun, endpoint, parentUserId, pii, scope, vaultBase",
+		);
+	});
+
+	it("trust() still accepts allowUngoverned", async () => {
+		const governed = await trust(
+			{ messages: { create: vi.fn(async (_params: unknown) => ({ id: "msg" })) } },
+			{ dryRun: true, vaultBase, allowUngoverned: ["embeddings.create"] },
+		);
+		await governed.destroy();
+	});
+
+	// Only an omitted (undefined) argument means "no options"; cwd points at the temp
+	// vault so a regression builds its vault where the assertion sees it.
+	it("refuses null options by name, before anything is created", async () => {
+		const cwd = vi.spyOn(process, "cwd").mockReturnValue(vaultBase);
+		try {
+			await expect(createGovernor(null as never)).rejects.toThrow(
+				"createGovernor(): options must be an object, got null",
+			);
+			expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+		} finally {
+			cwd.mockRestore();
+		}
+	});
+
+	it("still treats an undefined options argument as none", async () => {
+		const cwd = vi.spyOn(process, "cwd").mockReturnValue(vaultBase);
+		vi.stubEnv("USERTRUST_DRY_RUN", "true");
+		try {
+			const gov = await createGovernor(undefined);
+			expect(gov.config.pii).toBe("warn");
+			expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(true);
+			await gov.destroy();
+		} finally {
+			vi.unstubAllEnvs();
+			cwd.mockRestore();
+		}
+	});
+
+	it("refuses an inherited pii by name instead of applying it (own properties only)", async () => {
+		const options = Object.create({ pii: "block" }) as Record<string, unknown>;
+		options.dryRun = true;
+		options.vaultBase = vaultBase;
+		await expect(createGovernor(options as never)).rejects.toThrow(
+			'createGovernor(): option "pii" is inherited from the options object\'s prototype',
+		);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
+	it("accepts a plain options object from another realm, and applies its pii", async () => {
+		const engine = mockEngine();
+		const options = runInNewContext('({ vaultBase: v, pii: "block", _engine: e })', {
+			v: vaultBase,
+			e: engine,
+		}) as object;
+		expect(Object.getPrototypeOf(options)).not.toBe(Object.prototype);
+		const gov = await createGovernor(options as never);
+		expect(gov.config.pii).toBe("block");
+		await expect(
+			gov.authorize({
+				model: "claude-sonnet-4-6",
+				messages: [{ role: "user", content: "Charge my card 4111 1111 1111 1111 please" }],
+			}),
+		).rejects.toThrow(/PII detected: .*credit_card/);
+		expect(engine.pendingIds).toHaveLength(0);
+		await gov.destroy();
+	});
+
+	it("still refuses an option inherited from a custom prototype made in another realm", async () => {
+		const options = runInNewContext(
+			'Object.assign(Object.create({ pii: "block" }), { dryRun: true, vaultBase: v })',
+			{ v: vaultBase },
+		) as object;
+		await expect(createGovernor(options as never)).rejects.toThrow(
+			'createGovernor(): option "pii" is inherited',
+		);
+		expect(existsSync(join(vaultBase, VAULT_DIR))).toBe(false);
+	});
+
 	// ── D8 migration warning ──
 
 	it(
@@ -882,7 +1081,7 @@ describe("headless governor", () => {
 
 	// ── Proxy settle failure branch removed ──
 
-	it("createGovernor rejects proxy option (AUD-456)", async () => {
+	it("createGovernor rejects proxy option", async () => {
 		await expect(
 			createGovernor({
 				budget: 100_000,
@@ -1145,8 +1344,38 @@ describe("headless governor", () => {
 			_audit: audit,
 		});
 		await gov.authorize({ model: "claude-sonnet-4-6" });
-		return { gov, engineDestroy, audit, calls };
+		return { gov, engine, engineDestroy, audit, calls };
 	}
+
+	it("destroy: an engine with close(): the teardown AWAITS it as its ledger step, after the voids, the flush and the lock release, and never calls the sync destroy()", async () => {
+		const { gov, engine, engineDestroy, calls } = await governorForTeardown();
+		let finishClose: () => void = () => {};
+		engine.close = vi.fn(() => {
+			calls.push("engine.close");
+			return new Promise<void>((resolve) => {
+				finishClose = resolve;
+			});
+		});
+		let done = false;
+		const destroying = gov.destroy().then(() => {
+			done = true;
+		});
+		await vi.waitFor(() => expect(calls).toContain("engine.close"));
+		await new Promise((r) => setImmediate(r));
+		expect(done).toBe(false);
+		finishClose();
+		await destroying;
+		expect(calls).toEqual([
+			"voidPendingSpend",
+			"hold_released",
+			"voidAllPending",
+			"flush",
+			"release",
+			"engine.close",
+		]);
+		expect(engine.close).toHaveBeenCalledOnce();
+		expect(engineDestroy).not.toHaveBeenCalled();
+	});
 
 	it("destroy: a throwing voidAllPending is still swallowed (unchanged), and every later step runs", async () => {
 		const { gov, engineDestroy, audit } = await governorForTeardown({

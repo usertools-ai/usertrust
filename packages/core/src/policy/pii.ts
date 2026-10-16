@@ -14,6 +14,8 @@
  * API keys, AWS keys, GitHub tokens, bearer tokens, generic secrets.
  */
 
+import { isRealAbortSignal } from "../shared/abort-signal.js";
+
 // ---------------------------------------------------------------------------
 // Result type
 // ---------------------------------------------------------------------------
@@ -186,10 +188,14 @@ const PII_PATTERNS: PIIPattern[] = [
  * Returns which PII types were found and at which dot-paths.
  */
 export function detectPII(data: unknown): PIIDetection {
+	return detectIn(data, false);
+}
+
+function detectIn(data: unknown, signalSent: boolean): PIIDetection {
 	const types = new Set<string>();
 	const paths: string[] = [];
 
-	scanValue(data, "", types, paths);
+	scanValue(data, "", types, paths, signalSent);
 
 	return {
 		found: types.size > 0,
@@ -198,16 +204,116 @@ export function detectPII(data: unknown): PIIDetection {
 	};
 }
 
-function scanValue(value: unknown, currentPath: string, types: Set<string>, paths: string[]): void {
+// ---------------------------------------------------------------------------
+// Opaque, text-free values: kept BY REFERENCE, never walked
+// ---------------------------------------------------------------------------
+
+/** The built-in `aborted` getter, a brand check: it throws for anything but a real AbortSignal. */
+const ABORT_SIGNAL_ABORTED: ((this: unknown) => unknown) | undefined =
+	typeof AbortSignal === "function"
+		? (Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get as
+				| ((this: unknown) => unknown)
+				| undefined)
+		: undefined;
+
+/**
+ * The abort state of `signal` as the BUILT-IN `AbortSignal.prototype.aborted` getter reports it,
+ * never an own `aborted` property or getter decorating the object. `undefined` when the value is
+ * not a real AbortSignal (the getter's brand check throws) or the platform has none.
+ */
+export function builtInAborted(signal: object): boolean | undefined {
+	if (ABORT_SIGNAL_ABORTED === undefined) return undefined;
+	try {
+		return ABORT_SIGNAL_ABORTED.call(signal) === true;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * THE CLOSED ALLOWLIST, in one place: the opaque, text-free types that redaction keeps BY
+ * REFERENCE and the scan does not walk into. Today: `AbortSignal` only. Flattening it into
+ * a plain object (what the generic walk does) made it `{}`, so a redacted request could no
+ * longer be cancelled. Binary values (ArrayBuffer, typed arrays, DataView, Blob/File) are
+ * deliberately NOT here: they carry content this scanner cannot read, so they keep today's
+ * behaviour (flattened by redaction).
+ *
+ * Each member is recognised by BRAND, never by duck-typing, and without running caller code: an
+ * AbortSignal by `isRealAbortSignal` (shared/abort-signal.ts), the same predicate the governor uses
+ * to leave the transport's signal out of its serialization check, so neither a look-alike
+ * (`{ aborted: false, addEventListener() {} }`), a Proxy, nor an object made from the prototype
+ * with no signal state (`Object.create(AbortSignal.prototype)`) is kept.
+ */
+const OPAQUE_TEXT_FREE: ReadonlyArray<(value: object) => boolean> = [(v) => isRealAbortSignal(v)];
+
+/**
+ * `value` is, by brand, a member of OPAQUE_TEXT_FREE, and carries no own STRING-named property
+ * at all, enumerable or not (where a string, or a `toJSON` a serializer would call, could hide).
+ */
+export function isOpaqueTextFree(value: object): boolean {
+	return (
+		OPAQUE_TEXT_FREE.some((isMember) => isMember(value)) &&
+		Object.getOwnPropertyNames(value).length === 0
+	);
+}
+
+/**
+ * The positions, from the root of the value being scanned or redacted, where an opaque value is
+ * a TRANSPORT input the SDK hands to its HTTP layer and never serializes into the request:
+ * Google's `params.config.abortSignal`. Only there is it kept by reference and not walked.
+ * Anywhere else (nested in a function response, a tool, a part) it is walked and flattened
+ * like any other object, because there a serializer would read it. OpenAI and Anthropic take
+ * their signal in the request OPTIONS, the second argument, which redaction never touches.
+ */
+const TRANSPORT_SLOTS: ReadonlySet<string> = new Set(["config.abortSignal"]);
+
+/**
+ * Every strict prefix of a transport slot ("config" for "config.abortSignal"): an object reached
+ * there may hold a slot, so its clone depends on WHERE it is walked, not only on what it is.
+ */
+const TRANSPORT_PREFIXES: ReadonlySet<string> = new Set(
+	[...TRANSPORT_SLOTS].flatMap((slot) => {
+		const parts = slot.split(".");
+		return parts.slice(1).map((_, i) => parts.slice(0, i + 1).join("."));
+	}),
+);
+
+/**
+ * Kept by reference and not walked: the transport's value at a transport position. By default
+ * that is an opaque, text-free value (`isOpaqueTextFree`).
+ *
+ * `signalSent` is the caller's statement that the value walked is a request whose transport slot
+ * goes to the transport and is never serialized: the governor's Google request, whose SDK hands
+ * `config.abortSignal` to its HTTP layer as it is. There a real signal is kept whatever own fields
+ * it carries, because none of them is sent (the governor's serialization check leaves it out for
+ * the same reason). Walking it instead flattened it into a plain object the transport rejects, and
+ * a cycle among its fields never ended the scan. Everywhere else (an action's audit copy, the
+ * public `detectPII`) a value is kept only when it has no own string-named field at all.
+ */
+function keptByReference(value: unknown, path: string, signalSent: boolean): boolean {
+	if (!TRANSPORT_SLOTS.has(path) || value === null || typeof value !== "object") return false;
+	return signalSent ? isRealAbortSignal(value) : isOpaqueTextFree(value);
+}
+
+function scanValue(
+	value: unknown,
+	currentPath: string,
+	types: Set<string>,
+	paths: string[],
+	signalSent: boolean,
+): void {
 	if (typeof value === "string") {
 		scanString(value, currentPath, types, paths);
 		return;
 	}
 
+	// The transport's value at a transport position is not walked (see keptByReference).
+	if (keptByReference(value, currentPath, signalSent)) return;
+
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i++) {
 			const itemPath = currentPath ? `${currentPath}[${i}]` : `[${i}]`;
-			scanValue(value[i], itemPath, types, paths);
+			scanValue(value[i], itemPath, types, paths, signalSent);
 		}
 		return;
 	}
@@ -216,7 +322,7 @@ function scanValue(value: unknown, currentPath: string, types: Set<string>, path
 		const record = value as Record<string, unknown>;
 		for (const key of Object.keys(record)) {
 			const fieldPath = currentPath ? `${currentPath}.${key}` : key;
-			scanValue(record[key], fieldPath, types, paths);
+			scanValue(record[key], fieldPath, types, paths, signalSent);
 		}
 	}
 }
@@ -241,16 +347,31 @@ export interface RedactedData {
 	detection: PIIDetection;
 }
 
+/** How a redaction walk treats the request's transport slot (see `keptByReference`). */
+export interface RedactOptions {
+	/**
+	 * The data is a request whose transport slot is handed to the transport and never serialized
+	 * (the governor's Google request): a real AbortSignal there is kept by reference whatever own
+	 * fields it carries. Default `false`: kept only with no own string-named field.
+	 */
+	signalSent?: boolean;
+}
+
 /**
  * Deep-clone data and replace detected PII values with redacted placeholders.
  * Returns both the redacted data and the detection metadata.
  */
-export function redactPII(data: unknown): RedactedData {
-	const detection = detectPII(data);
+export function redactPII(data: unknown, options: RedactOptions = {}): RedactedData {
+	const signalSent = options.signalSent === true;
+	const detection = detectIn(data, signalSent);
 	if (!detection.found) {
 		return { data, detection };
 	}
-	const redacted = redactValue(data);
+	const redacted = redactValue(data, "", {
+		anywhere: new WeakMap(),
+		atPrefix: new Map(),
+		signalSent,
+	});
 	return { data: redacted, detection };
 }
 
@@ -277,19 +398,56 @@ export function redactMessages(messages: unknown): RedactedData {
 	return redactPII(messages);
 }
 
-/** Return matched PII type names for a string value. */
+/**
+ * Return matched PII type names for a string value. Built with `filter` / `map`, which define each
+ * element rather than assign it, so an index setter on Array.prototype cannot swallow a name.
+ */
 function matchedTypes(value: string): string[] {
-	const matched: string[] = [];
-	for (const pattern of PII_PATTERNS) {
-		if (pattern.test(value)) {
-			matched.push(pattern.type);
-		}
+	return PII_PATTERNS.filter((pattern) => pattern.test(value)).map((pattern) => pattern.type);
+}
+
+function defineData(obj: object, key: string, value: unknown, enumerable: boolean): void {
+	Object.defineProperty(obj, key, { value, writable: true, enumerable, configurable: true });
+}
+
+/**
+ * The clones made so far in one redaction walk. `anywhere` maps each object or array to its clone,
+ * registered BEFORE its properties are walked, so a revisit (a cycle, such as a hidden
+ * back-reference to a parent, or one object referenced twice) answers that clone: the copy keeps
+ * the original's shape and the walk always ends. At a prefix of a transport slot the clone depends
+ * on the path (walked there, it keeps the signal by reference; walked anywhere else, the signal is
+ * flattened), so reuse never crosses that line, in either direction: at such a path only a clone
+ * made at that same path is answered, from `atPrefix`, and a clone made there is never answered
+ * anywhere else. Finitely many prefixes exist, so a cycle through one still ends.
+ */
+interface Clones {
+	anywhere: WeakMap<object, unknown>;
+	atPrefix: Map<string, WeakMap<object, unknown>>;
+	/** The transport rule this walk was asked for (`RedactOptions.signalSent`). */
+	signalSent: boolean;
+}
+
+function cachedClone(clones: Clones, value: object, path: string): unknown {
+	return TRANSPORT_PREFIXES.has(path)
+		? clones.atPrefix.get(path)?.get(value)
+		: clones.anywhere.get(value);
+}
+
+function registerClone(clones: Clones, value: object, path: string, clone: unknown): void {
+	if (!TRANSPORT_PREFIXES.has(path)) {
+		clones.anywhere.set(value, clone);
+		return;
 	}
-	return matched;
+	let atPath = clones.atPrefix.get(path);
+	if (atPath === undefined) {
+		atPath = new WeakMap();
+		clones.atPrefix.set(path, atPath);
+	}
+	atPath.set(value, clone);
 }
 
 /** Recursively traverse data and replace PII strings with redacted placeholders. */
-function redactValue(value: unknown): unknown {
+function redactValue(value: unknown, path: string, clones: Clones): unknown {
 	if (typeof value === "string") {
 		const types = matchedTypes(value);
 		if (types.length > 0) {
@@ -299,14 +457,56 @@ function redactValue(value: unknown): unknown {
 	}
 
 	if (Array.isArray(value)) {
-		return value.map((item) => redactValue(item));
+		const clone = cachedClone(clones, value, path);
+		if (clone !== undefined) return clone;
+		// Built by index, not with `map`, so the clone is registered before its items are walked. As
+		// with `map`: the length read once, a hole stays a hole, and each item is an own property.
+		const length = value.length;
+		const result: unknown[] = new Array(length);
+		registerClone(clones, value, path, result);
+		for (let i = 0; i < length; i++) {
+			// Defined, never assigned: an index setter on Array.prototype must not swallow the item.
+			if (i in value)
+				defineData(result, String(i), redactValue(value[i], `${path}[${i}]`, clones), true);
+		}
+		return result;
 	}
 
+	// The transport's value at a transport position is kept BY REFERENCE (see keptByReference).
+	if (keptByReference(value, path, clones.signalSent)) return value;
+
 	if (value !== null && typeof value === "object") {
+		// Looked up only after the transport check: the same signal is kept by reference at its
+		// transport slot even when it was flattened where it appeared earlier.
+		const clone = cachedClone(clones, value, path);
+		if (clone !== undefined) return clone;
 		const record = value as Record<string, unknown>;
 		const result: Record<string, unknown> = {};
+		registerClone(clones, value, path, result);
+		// Every key is DEFINED, never assigned: an own "__proto__" key (as JSON.parse makes one) stays
+		// a key of the clone instead of becoming its prototype.
 		for (const key of Object.keys(record)) {
-			result[key] = redactValue(record[key]);
+			defineData(
+				result,
+				key,
+				redactValue(record[key], path === "" ? key : `${path}.${key}`, clones),
+				true,
+			);
+		}
+		// A non-enumerable own DATA property stays one, redacted, so a consumer that reads the request
+		// by name still finds the field, and JSON.stringify still skips it. Data only: a function (a
+		// hidden `toJSON` hook) is never carried into the clone, where serializing would run it; an
+		// accessor is never invoked.
+		for (const key of Object.getOwnPropertyNames(record)) {
+			const d = Object.getOwnPropertyDescriptor(record, key);
+			if (d === undefined || d.enumerable === true || !("value" in d)) continue;
+			if (typeof d.value === "function") continue;
+			defineData(
+				result,
+				key,
+				redactValue(d.value, path === "" ? key : `${path}.${key}`, clones),
+				false,
+			);
 		}
 		return result;
 	}

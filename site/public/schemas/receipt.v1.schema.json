@@ -47,7 +47,7 @@
 		},
 		"receiptUrl": {
 			"type": ["string", "null"],
-			"description": "Hosted receipt URL. Currently always null: the only code path that populates it requires proxy mode, which was removed under AUD-456 and fails fast today. Retained for forward compatibility."
+			"description": "Hosted receipt URL. Currently always null: the only code path that populates it requires proxy mode, which was removed and fails fast today. Retained for forward compatibility."
 		},
 		"settled": {
 			"type": "boolean",

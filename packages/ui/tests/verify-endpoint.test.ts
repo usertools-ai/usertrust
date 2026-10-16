@@ -69,7 +69,7 @@ describe("GET /api/verify/:txId", () => {
 		const body = (await res.json()) as { found: boolean; valid: boolean; receipt: string };
 		expect(body.found).toBe(true);
 		expect(body.valid).toBe(true);
-		expect(body.receipt).toContain("U S E R T R U S T");
+		expect(body.receipt).toContain("u s e r t r u s t");
 		expect(body.receipt).toContain("tx_verify_me");
 	});
 
@@ -79,6 +79,19 @@ describe("GET /api/verify/:txId", () => {
 		expect(res.status).toBe(404);
 		const body = (await res.json()) as { found: boolean };
 		expect(body.found).toBe(false);
+	});
+
+	it("500s, and keeps serving, when an audit segment cannot be read", async () => {
+		// A DIRECTORY named like a segment: readFileSync throws EISDIR on it, whatever the user running the test.
+		mkdirSync(join(tempDir, ".usertrust", "audit", "events-0001.jsonl"));
+		ui = await createUiServer(tempDir, { port: 0 });
+		const res = await fetch(`http://127.0.0.1:${ui.port}/api/verify/tx_verify_me`);
+		expect(res.status).toBe(500);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe("audit log could not be read");
+		expect(JSON.stringify(body)).not.toContain("events-0001");
+		const after = await fetch(`http://127.0.0.1:${ui.port}/api/tail`);
+		expect(after.status).toBe(200);
 	});
 
 	it("returns 400 for malformed percent-encoding instead of crashing", async () => {

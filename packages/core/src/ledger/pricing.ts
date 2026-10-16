@@ -460,6 +460,18 @@ const PROVIDER_MODEL_MAP: Record<string, string[]> = {
 	moonshot: ["kimi-"],
 };
 
+/**
+ * The vendor a model id belongs to, from this table's own provider data (`PROVIDER_MODEL_MAP`), or `undefined` when no
+ * vendor publishes that prefix. A reader that labels models (the weekly report) derives from here, so a model added to
+ * the table under a mapped prefix can never be labelled "unknown" by a second, hand-kept list.
+ */
+export function providerOfModel(model: string): string | undefined {
+	for (const [provider, prefixes] of Object.entries(PROVIDER_MODEL_MAP)) {
+		if (prefixes.some((p) => model.startsWith(p))) return provider;
+	}
+	return undefined;
+}
+
 /** Return all PRICING_TABLE model keys that belong to a given provider. */
 export function modelsForProvider(provider: string): string[] {
 	// Object.hasOwn guards against inherited Object.prototype keys: a provider
@@ -698,8 +710,8 @@ export interface SerializedRequest {
 /**
  * Serialize a request once, the way the provider SDKs do (`JSON.stringify`), and scan the
  * result. Returns `null` when the request cannot be serialized to a JSON object (a cycle, a
- * BigInt, a throwing getter or `toJSON`, a text too long to build): the caller must then
- * fail dearest. This replaced a property walk that had to enumerate every way
+ * BigInt, a throwing getter or `toJSON`, a text too long to build): a governed call is then
+ * refused (`unserializableRequestError`), and `requestDeclares1hCache` answers dearest. This replaced a property walk that had to enumerate every way
  * `JSON.stringify` reads a value (accessors, `toJSON` on objects, arrays and built-ins,
  * inherited array entries, ...) and found a new one each review round.
  */
@@ -1221,6 +1233,95 @@ function estimateBlockTokens(block: Record<string, unknown>): number {
 	if (chars === 0) chars = JSON.stringify(block).length;
 
 	return Math.ceil(chars / 4);
+}
+
+/**
+ * The input-token estimate of a WHOLE request body: the UTF-8 byte length of every key and every
+ * scalar (string, number, boolean) in it, at the estimator's own heuristic and margin
+ * (bytes / 4 x 1.5). `body` is the plain-data snapshot `serializeRequest` makes, the body that is
+ * sent, so nothing is skipped by name: a field an SDK adds later is counted by default, a
+ * user-named prompt variable is text like any other, schema keys and numeric payloads are billed
+ * and counted. Bytes, not UTF-16 chars, so non-ASCII text holds near what tokenizers bill. Iterative
+ * (no recursion), and a JSON parse has no cycles.
+ */
+export function estimateBodyTokens(body: unknown): number {
+	let bytes = 0;
+	const stack: unknown[] = [body];
+	while (stack.length > 0) {
+		const value = stack.pop();
+		if (typeof value === "string") {
+			bytes += Buffer.byteLength(value, "utf8");
+		} else if (typeof value === "number" || typeof value === "boolean") {
+			bytes += String(value).length;
+		} else if (Array.isArray(value)) {
+			for (const item of value) stack.push(item);
+		} else if (value !== null && typeof value === "object") {
+			for (const [key, item] of Object.entries(value)) {
+				bytes += Buffer.byteLength(key, "utf8");
+				stack.push(item);
+			}
+		}
+	}
+	return Math.max(1, Math.ceil((bytes / 4) * 1.5));
+}
+
+/**
+ * The input tokens a hold reserves: the prompt parts' estimate or the whole body's, whichever is
+ * larger, so no hold shrinks on input. `snapshot` is the serialized request body (a governed call
+ * without one is refused before it is held); undefined reads as the parts' estimate alone.
+ */
+export function holdInputTokens(promptParts: unknown[], snapshot: unknown): number {
+	return Math.max(
+		estimateInputTokens(promptParts),
+		snapshot !== undefined ? estimateBodyTokens(snapshot) : 0,
+	);
+}
+
+/** The output tokens a hold reserves when a request names no cap. */
+export const DEFAULT_OUTPUT_HOLD = 4096;
+
+/**
+ * The output tokens a hold reserves: the cap the request names, per candidate, times the number
+ * of candidates it asks for. A cap that is not a finite positive number, or a count that is not a
+ * positive integer, reads as absent.
+ * - Anthropic: `max_tokens`, which bounds thinking too (`budget_tokens` must be below it).
+ * - OpenAI Responses: `max_output_tokens`, reasoning included.
+ * - OpenAI chat: `max_completion_tokens`, else `max_tokens`, reasoning included, times `n`.
+ * - Google: `maxOutputTokens` when it names one, per candidate. Google documents it as a hard
+ *   cutoff on everything a response generates, thought tokens included
+ *   (https://ai.google.dev/gemini-api/docs/thinking, "Token limits and max_output_tokens"), so
+ *   the thinking budget is not added to it. With no cap, never below the default, and never below
+ *   the thinking budget. Either way, times `candidateCount`.
+ * Anything else: the cap if named, else the default.
+ */
+export function holdOutputTokens(
+	kind: "anthropic" | "openai" | "google" | string,
+	request: Record<string, unknown>,
+	surface: "chat" | "responses" | "other" = "other",
+): number {
+	const cap = (value: unknown): number | undefined =>
+		typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+	const count = (value: unknown): number =>
+		typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 1;
+	if (kind === "google") {
+		const config = request.config;
+		const c =
+			config !== null && typeof config === "object" ? (config as Record<string, unknown>) : {};
+		const thinking =
+			c.thinkingConfig !== null && typeof c.thinkingConfig === "object"
+				? (c.thinkingConfig as Record<string, unknown>)
+				: {};
+		const perCandidate =
+			cap(c.maxOutputTokens) ?? Math.max(DEFAULT_OUTPUT_HOLD, cap(thinking.thinkingBudget) ?? 0);
+		return perCandidate * count(c.candidateCount);
+	}
+	if (kind === "openai" && surface === "chat") {
+		return (
+			(cap(request.max_completion_tokens) ?? cap(request.max_tokens) ?? DEFAULT_OUTPUT_HOLD) *
+			count(request.n)
+		);
+	}
+	return cap(request.max_output_tokens) ?? cap(request.max_tokens) ?? DEFAULT_OUTPUT_HOLD;
 }
 
 /**

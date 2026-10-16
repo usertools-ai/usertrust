@@ -131,16 +131,16 @@ Default: `"./policies/default.yml"`. Path to the YAML policy rules file, resolve
 
 ### pii
 
-Default: `"warn"`. PII detection mode applied to all outgoing prompts.
+Default: `"warn"`. PII detection mode, applied to the prompt text of each governed request (not to the whole request body or to responses; see [PII Detection](/docs/policy/pii) for exactly what is read). A `pii` passed to `trust()` overrides this value.
 
 | Mode | Behavior |
 |------|----------|
-| `redact` | Replace detected PII with `[REDACTED]` before sending to the provider |
-| `warn` | Allow the request but attach a warning to the receipt |
-| `block` | Throw a `PolicyDeniedError` if PII is detected |
+| `redact` | When the prompt scan finds PII, forward a copy of the whole request body in which each matching string value is replaced by `[REDACTED:<types>]` |
+| `warn` | Allow the request unchanged; the `llm_call` audit event records the PII types and paths (never the values) |
+| `block` | Throw a `PolicyDeniedError` if the prompt scan finds PII |
 | `off` | Disable PII detection entirely |
 
-Detected PII types: email addresses, phone numbers, SSNs, credit card numbers (Luhn-validated), and IPv4 addresses.
+Detected types: email, phone, SSN, credit card (Luhn-validated), IPv4, and the secret formats `api_key`, `aws_key`, `github_token`, `bearer_token`, `jwt`, `private_key` and `generic_secret`. Fields outside the prompt text, such as tool definitions, an array-form `system` prompt or Google's `config`, are not scanned. See [PII Detection](/docs/policy/pii).
 
 ### circuitBreaker
 
@@ -187,6 +187,20 @@ Default: `{ addresses: ["127.0.0.1:3001"], clusterId: 0 }`.
 <Callout type="info">
 In dry-run mode (`dryRun: true` or `USERTRUST_DRY_RUN=true`), TigerBeetle is skipped entirely. The audit chain and policy engine still run.
 </Callout>
+
+### remote
+
+Read by the local dashboard, `usertrust-ui`, and ignored by the SDK: `TrustConfigSchema` does not declare it, and `loadConfig()` drops it. It lists what the dashboard may load from outside your machine. Each entry is off unless set to the JSON boolean `true`.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `kit` | `false` | Show the usertrust mark in the dashboard header. When this is on, the browser fetches the usertrust website's icon, `https://usertrust.ai/favicon.svg`, on each page load. The request carries no query string, cookies or referrer, but does carry an `Origin` header naming the dashboard's local address. If the load fails, no mark is shown. |
+
+```json
+{
+  "remote": { "kit": true }
+}
+```
 
 ## Environment Variables
 

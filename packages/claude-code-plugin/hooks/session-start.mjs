@@ -13,7 +13,16 @@
 // failure to read it is the normal banner, never a thrown error or a wait.
 import { writeSessionStart } from "./job-log.mjs";
 import { rejectedSinceLastStart, warningText } from "./key-rejected.mjs";
-import { announce, modeAnnouncement, readStdin, requireLaunch, say } from "./lib.mjs";
+import {
+	announce,
+	modeAnnouncement,
+	RELEASING_SWEEP_MS,
+	readStdin,
+	requireLaunch,
+	say,
+	sweepReleasing,
+} from "./lib.mjs";
+import { takePeerWarning } from "./peer-meter.mjs";
 import { stampFirstRun } from "./transcript.mjs";
 
 requireLaunch();
@@ -32,7 +41,7 @@ try {
 // response of its session, whatever its `source`: a resumed or compacted transcript's
 // history is older than the stamp, and is never posted, and a stamp already made never
 // moves. Local and bounded, and it never throws; in estimate mode it makes nothing.
-await stampFirstRun();
+await stampFirstRun(payload?.session_id);
 // The job log: a NEW session id (startup, clear, fork) gets its `session-start` line;
 // resume and compact write nothing, so neither ever ends or invalidates an open job.
 // Failing to write it must never fail a session: `usertrust-job` then refuses loudly.
@@ -41,6 +50,10 @@ try {
 } catch (err) {
 	say(`usertrust: job log not started: ${err instanceof Error ? err.message : String(err)}`);
 }
+// A `.releasing` record kept for a re-fire (lib.mjs `cleanup`), its gaps written, is dropped once
+// it is far older than the ledger's pending timeout (`RELEASING_SWEEP_MS`): its hold is voided by
+// then. Local and bounded, and it never throws.
+await sweepReleasing(RELEASING_SWEEP_MS);
 // The warning first, so the clip at `announce`'s bound can only ever cut the mode line after it.
 let warning = null;
 try {
@@ -49,4 +62,8 @@ try {
 } catch {
 	// Never a reason to fail the start: the normal banner.
 }
+// The old plugin's state, when it could not be told (launch.mjs `warnOfPeer`: it looks enabled, or could not be told; this plugin meters either way): first, for the
+// same reason as the rejected-key warning.
+const peerWarning = takePeerWarning();
+if (peerWarning !== null) warning = warning === null ? peerWarning : `${peerWarning} ${warning}`;
 announce(warning === null ? modeAnnouncement() : `${warning} ${modeAnnouncement()}`);

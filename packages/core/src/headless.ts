@@ -68,6 +68,10 @@ import {
 	type EnvelopeStatus,
 	envelopeStatusFrom,
 } from "./budget/context.js";
+import {
+	type EnforcedBudgetRegistration,
+	registerEnforcedBudget,
+} from "./budget/effective-record.js";
 // The cost-center envelope helpers are SHARED with `govern.ts`, not copied from
 // it (see the block comment above `ResolvedEnvelope` there). D1's throw, A2's
 // pre-gate refusal, A7's unfloored arithmetic and D5's label re-wrap all decide
@@ -81,11 +85,14 @@ import {
 	envelopeTierFields,
 	preflightEnvelopeRemaining,
 	type ResolvedEnvelope,
+	readOwnOptions,
 	resolveEnvelope,
 	runTeardownSteps,
 	snapshotEnvelopeRemaining,
+	TRUST_OPTS_KEYS,
 	type TrustEngine,
 	type TrustOpts,
+	trustConfigOverrides,
 } from "./govern.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
@@ -106,6 +113,7 @@ import {
 import {
 	implausibleUsageData,
 	materializeMaxima,
+	materializeRefused,
 	publishableUsageFields,
 	sanitizeUsage,
 	withSupported1hTier,
@@ -150,6 +158,7 @@ import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/pr
 import { isPersistableSpend } from "./shared/spend-guard.js";
 import type { EndpointInfo, TrustConfig, TrustReceipt } from "./shared/types.js";
 import { TrustConfigSchema } from "./shared/types.js";
+import { governorVaultBase } from "./shared/vault-base.js";
 
 // ── Public types ──
 
@@ -170,13 +179,18 @@ export { principalFieldRefusal, principalLedgerTags } from "./shared/principal.j
  * Options for createGovernor(): TrustOpts plus a governor-wide default
  * endpoint scope (M2 local-model governance).
  *
+ * `allowUngoverned` is NOT inherited: it opts SDK methods out of a wrapped
+ * client's default-deny boundary, and a governor wraps no client. Passed anyway
+ * (from JavaScript, or through a value typed as TrustOpts), createGovernor()
+ * refuses it by name.
+ *
  * The envelope identity `parentUserId` is INHERITED from TrustOpts — one field
  * and one validation rule across both governors, so a cost center derives the
  * same account whichever one holds the client. Host-owned policy `scope` is
  * inherited the same way — `scopePatterns` match that value, never request
  * content.
  */
-export interface GovernorOpts extends TrustOpts {
+export interface GovernorOpts extends Omit<TrustOpts, "allowUngoverned"> {
 	/**
 	 * Governor-wide default endpoint scope for rate resolution. Applies to every
 	 * authorize() call that does not carry its own per-call `endpoint` override
@@ -196,6 +210,26 @@ export interface GovernorOpts extends TrustOpts {
 	 */
 	_destroyDrainMs?: number;
 }
+
+/**
+ * The TrustOpts fields createGovernor() does not take, each with the reason its
+ * refusal gives. Keyed by exactly the fields GovernorOpts omits, so omitting
+ * another one without a reason fails to compile.
+ */
+const TRUST_ONLY_OPTS: Readonly<Record<Exclude<keyof TrustOpts, keyof GovernorOpts>, string>> = {
+	allowUngoverned: "applies to trust()-wrapped clients only",
+};
+
+/**
+ * Every key `GovernorOpts` declares: `TrustOpts`'s minus the trust()-only ones,
+ * plus its own. A `Record` over `keyof GovernorOpts`, so the list and the
+ * interface cannot drift.
+ */
+const { allowUngoverned: _trustOnly, ...GOVERNOR_TRUST_OPTS_KEYS } = TRUST_OPTS_KEYS;
+const GOVERNOR_OPTS_KEYS: Readonly<Record<keyof GovernorOpts, true>> = {
+	...GOVERNOR_TRUST_OPTS_KEYS,
+	_destroyDrainMs: true,
+};
 
 /** Handle returned by authorize(), passed to settle() or abort(). */
 export interface Authorization {
@@ -1130,6 +1164,12 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		destroy(): void {
 			tbClient.destroy();
 		},
+
+		// What a governor's teardown calls: destroy(), after asking the client whether the
+		// cluster evicted it while it was idle (TrustTBClient.close()).
+		async close(): Promise<void> {
+			await tbClient.close();
+		},
 	};
 }
 
@@ -1156,10 +1196,17 @@ function estimateTier(value: unknown, field: string): number {
 }
 
 export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
+	// 0. An option this function does not declare is refused by name, before anything
+	// is read or created (see readOwnOptions; same rule as trust()). From here on
+	// `opts` is the checked copy of the caller's OWN properties.
+	opts = readOwnOptions("createGovernor()", opts, GOVERNOR_OPTS_KEYS, TRUST_ONLY_OPTS);
+
 	// 1. Load config
-	// Absolute from here: every vault file this client touches is in the vault it was created for,
-	// whatever the working directory becomes later (its audit writer is fixed at creation too).
-	const vaultBase = resolve(opts?.vaultBase ?? process.cwd());
+	// Where the kernel resolves it: a `..` base is never folded lexically (see vault-base.ts). Then absolute,
+	// so every vault file this client touches is in the vault it was created for, whatever the working
+	// directory becomes later (its audit writer is fixed at creation too). With no `..` left, resolve() only
+	// prefixes the working directory and drops `.` segments; it has nothing to fold.
+	const vaultBase = resolve(governorVaultBase(opts?.vaultBase ?? process.cwd()));
 	// The vault is owner-only: an absent one is created here, exclusively, and one an earlier
 	// version left group/world-readable is closed; one another user owns is refused (see
 	// securePrivateVault). This runs before ANYTHING under the vault is read, the config
@@ -1172,16 +1219,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		const raw: unknown = JSON.parse(await readFile(configPath, "utf-8"));
 		config = TrustConfigSchema.parse({
 			...(raw as Record<string, unknown>),
-			...(opts?.budget !== undefined ? { budget: opts.budget } : {}),
-			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
-			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
+			...trustConfigOverrides(opts),
 		});
 	} else {
-		config = TrustConfigSchema.parse({
-			budget: opts?.budget ?? DEFAULT_BUDGET,
-			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
-			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
-		});
+		config = TrustConfigSchema.parse({ budget: DEFAULT_BUDGET, ...trustConfigOverrides(opts) });
 	}
 
 	const customRates = config.pricing === "custom" ? config.customRates : undefined;
@@ -1196,8 +1237,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 	// 2. Initialize subsystems
 	const vaultPath = vaultBase;
+	// This governor's budget on its vault's record (budget/effective-record.ts); set once it has started. Its first
+	// successful append means this process holds the vault's writer lock, which is when the record may be published.
+	let enforcedBudget: EnforcedBudgetRegistration | undefined;
 	const audit: AuditWriter =
-		(isTestEnv ? opts?._audit : undefined) ?? openSharedAuditWriter(vaultPath);
+		(isTestEnv ? opts?._audit : undefined) ??
+		openSharedAuditWriter(vaultPath, { onAppended: () => enforcedBudget?.appended() });
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
 	// No `existsSync` preflight: it answers false for a file inside a directory
@@ -1222,7 +1267,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// 3. Proxy mode removed — throw early with clear error
 	if (opts?.proxy) {
 		throw new Error(
-			"usertrust: proxy mode is not yet implemented (AUD-456). " +
+			"usertrust: proxy mode is not yet implemented. " +
 				"Use dryRun mode for testing, or connect a real TigerBeetle instance for production.",
 		);
 	}
@@ -1836,7 +1881,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// Each tier read by name, once, BEFORE the claim below: a getter that throws changes nothing, and the
 				// governor never touches the caller's object again.
 				maxima: materializeMaxima(params?.maxima),
-				refused: materializeMaxima(params?.refused),
+				// A refused tier is kept whatever its value (presence is the flag), never dropped like an unusable maximum.
+				refused: materializeRefused(params?.refused),
 				usageSource: params?.usageSource,
 				chunksDelivered: params?.chunksDelivered,
 				computeMs: params?.computeMs,
@@ -2021,6 +2067,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 				// POST settlement
 				let settled = true;
+				// True only once the ledger (or proxy) ANSWERED the post: a dry run never sets it, so a record can tell a
+				// real post from a settle that moved no money.
+				let ledgerPosted = false;
+				// What the ledger actually POSTED, known the moment it answered and so before the `llm_call` is appended. The
+				// call record carries it, so a reader can tell a capped post from a full one from that record alone: the
+				// `settlement_shortfall` is appended AFTER the call and can be late, lost to a crash, or dead-lettered.
+				let ledgerPostedAmount: number | undefined;
 				// D4: set only when the engine capped the post at the reserved hold.
 				let postedCost: number | undefined;
 				// D4 event-order buffer: the truncation is learned at POST time but the
@@ -2034,6 +2087,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				if (proxyConn != null && !isDryRun) {
 					try {
 						await proxyConn.settle(auth.proxyTransferId ?? transferId, actualCost);
+						ledgerPosted = true;
+						// NO posted amount on this path: `settle` resolves void, so the client never learns whether the server
+						// capped the post at its hold. Assuming the metered cost would report a cap as a full, exact post. The
+						// record stays an upper bound until the server reports what it posted (a wire change).
 					} catch (postErr) {
 						settled = false;
 						await audit
@@ -2062,6 +2119,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// Post the ACTUAL consumed cost (RECON #3), capped by the engine at
 						// the reserved hold; a truncation comes back as `shortfall`.
 						const postResult = await engine.postPendingSpend(transferId, actualCost);
+						ledgerPosted = true;
+						// Only what the engine REPORTS. A custom engine whose post resolves void gives no evidence of a full post,
+						// so nothing is recorded and the call stays an upper bound; the built-in engines always return `posted`.
+						if (
+							postResult != null &&
+							Number.isFinite(postResult.posted) &&
+							postResult.posted >= 0
+						) {
+							ledgerPostedAmount = postResult.posted;
+						}
 						if (postResult != null && postResult.shortfall > 0) {
 							postedCost = postResult.posted;
 							// EVENT ORDER: captured here, APPENDED after `llm_call` below.
@@ -2151,6 +2218,17 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							pricingTableVersion: PRICING_TABLE_VERSION,
 							...(input.chunksDelivered != null ? { chunksDelivered: input.chunksDelivered } : {}),
 							source: "headless",
+							// The denomination, on the record: a local call is NOMINAL units, and a reader must not
+							// have to guess it. Additive, like `ledgerPosted`.
+							costBasis: rateInfo.costBasis,
+							endpointClass: endpoint.class,
+							...(ledgerPosted ? { ledgerPosted: true } : {}),
+							// The posted amount the ledger REPORTED, equal to `cost` for a full post and lower for a capped one.
+							// Absent when the settle path reported none (proxy mode, a custom engine resolving void), a dry run,
+							// and records from before this field: such a record cannot say which it was. Additive.
+							...(ledgerPosted && ledgerPostedAmount !== undefined
+								? { postedAmount: ledgerPostedAmount }
+								: {}),
 							...costCenterAudit,
 							...principalAudit,
 							...jobAudit,
@@ -2537,7 +2615,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			};
 			// Every remaining field is read ONCE into a local and validated from that local: a getter
 			// that answers differently on a second read cannot get unchecked text onto the chain.
-			const refusedTiers = materializeMaxima(params.refused);
+			const refusedTiers = materializeRefused(params.refused);
 			const rawComputeMs: unknown = params.computeMs;
 			const computeMs =
 				typeof rawComputeMs === "number" && Number.isFinite(rawComputeMs) && rawComputeMs >= 0
@@ -2649,6 +2727,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		async destroy(): Promise<void> {
 			if (destroyed) return;
 			destroyed = true;
+			// This governor's budget stays on the vault's record until the teardown step that
+			// releases it, after the drain and the records below: a call that settles while
+			// destroy() drains, or a hold destroy() records, is still this governor's, and may be
+			// its first append, which takes the vault's lock and publishes the record
+			// (budget/effective-record.ts).
 
 			// Never void a hold a terminal is still working on: a settle's POST, or an abort
 			// or release parked on the budget lock or its own void. ONE deadline for both
@@ -2769,10 +2852,21 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// behind: callers call it without await or catch, and an unhandled rejection kills
 				// the process. The teardown reports it as a USERTRUST_AUDIT_LOCK_LEFT warning instead.
 				() => audit.flush(),
+				// Drop this governor's budget from the vault's record (never throws), once its last
+				// append has landed and BEFORE the audit lock is released: the record is republished
+				// for the governors still live only while this process holds the lock. It waits on the
+				// audit flush (an unbounded mutex wait), as the lock release after it does, so a hung
+				// flush keeps a destroyed governor on the record exactly as long as destroy() hangs.
+				() => enforcedBudget?.release(),
 				() => releaseAuditWriterForTeardown(audit),
 				// Destroy the engine and the proxy.
-				() => {
-					if (engine != null && typeof engine.destroy === "function") engine.destroy();
+				// close() where the engine has it: the TigerBeetle client's destroy() aborts the process
+				// on a client the cluster evicted while it was idle, and close() asks it first. An
+				// injected engine without it is destroyed as before.
+				async () => {
+					if (engine == null) return;
+					if (typeof engine.close === "function") await engine.close();
+					else if (typeof engine.destroy === "function") engine.destroy();
 				},
 				() => {
 					if (proxyConn != null) proxyConn.destroy();
@@ -2858,6 +2952,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	process.once("beforeExit", cleanupHandler);
 	process.once("SIGTERM", cleanupHandler);
 	process.once("SIGINT", cleanupHandler);
+
+	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
+	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Registered LAST,
+	// once the governor is fully initialised: a start that fails later (an invalid policy) enforces nothing and must not
+	// replace the record of a governor that is running. Published only while this process holds the vault's writer lock
+	// (from the first successful append), so a process that never gets the lock never overwrites the holder's record.
+	// Advisory: it never throws, and a failed write removes any earlier record rather than leave a stale one.
+	enforcedBudget = registerEnforcedBudget(join(vaultBase, VAULT_DIR), config.budget, () =>
+		audit.lockOwner?.(),
+	);
 
 	return governor;
 }

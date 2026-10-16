@@ -28,8 +28,17 @@ const ServerConfigSchema = z.object({
 	 * Unset means DEFAULT_LEDGER_PROBE_TIMEOUT_MS. Not read in dryRun, which needs no ledger.
 	 */
 	ledgerProbeTimeoutMs: z.number().int().min(1_000).optional(),
+	/**
+	 * How long `POST /v1/authorize` waits for its governor and the ledger before answering 503
+	 * `ledger_unavailable` (server.ts). Unset means DEFAULT_LEDGER_TIMEOUT_MS. Not read in dryRun,
+	 * which needs no ledger.
+	 */
+	ledgerTimeoutMs: z.number().int().min(100).optional(),
 	tenants: z.array(TenantSchema).min(1),
 });
+
+/** `ledgerTimeoutMs` when the config leaves it unset. */
+export const DEFAULT_LEDGER_TIMEOUT_MS = 5_000;
 
 export type TenantConfig = z.infer<typeof TenantSchema>;
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;

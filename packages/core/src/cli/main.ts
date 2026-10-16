@@ -5,7 +5,13 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { VAULT_DIR } from "../shared/constants.js";
-import { GLOBAL_FLAGS, JSON_FLAG, RECONFIGURE_FLAG, SKIP_VERIFY_FLAG } from "./flags.js";
+import {
+	GLOBAL_FLAGS,
+	JSON_FLAG,
+	RECONFIGURE_FLAG,
+	reportArgv,
+	SKIP_VERIFY_FLAG,
+} from "./flags.js";
 import { scrubForTerminal } from "./target.js";
 
 const COMMANDS = [
@@ -25,6 +31,7 @@ const COMMANDS = [
 	"skill",
 	"ui",
 	"audit",
+	"report",
 ] as const;
 
 const argv = process.argv.slice(2);
@@ -151,7 +158,12 @@ switch (command) {
 	case "budget": {
 		// Forwarded verbatim (global flags included) — budget.js accepts them.
 		const rest = argv.slice(argv.indexOf("budget") + 1);
-		await import("./budget.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		const leftOpen = await import("./budget.js").then((m) =>
+			m.run(undefined, { json: jsonFlag }, rest),
+		);
+		// The only command that builds a ledger client. One the cluster evicted is left open (destroying
+		// it aborts the process), and keeps the process alive after the output: end it, once drained.
+		if (leftOpen) await import("./drain-exit.js").then((m) => m.exitWhenDrained());
 		break;
 	}
 	case "completions":
@@ -171,6 +183,13 @@ switch (command) {
 	case "audit": {
 		const rest = argv.slice(argv.indexOf("audit") + 1).filter((a) => a !== JSON_FLAG);
 		await import("./audit.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		break;
+	}
+	case "report": {
+		// Forwarded verbatim, --json included wherever it appeared: report.ts owns which of the rest are flags and which
+		// are values, and it counts occurrences, so a repeated --json is refused like any other repeated option.
+		const rest = reportArgv(argv);
+		await import("./report.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
 	}
 	default: {
@@ -201,6 +220,7 @@ Commands:
   skill         Verify skill manifests
   ui            Open the visual ledger (local web UI)
   audit         Repair a torn audit-log tail (quarantine-tail [--dry-run])
+  report        Weekly spend report from the vault (report --week --end <ISO instant>)
 
 Options:
   --json     Output machine-readable JSON`);

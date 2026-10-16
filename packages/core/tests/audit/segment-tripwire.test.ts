@@ -20,12 +20,13 @@ const ROTATION_MESSAGE =
  * docs alike), and where. A new name, or a known name in a new place, trips this.
  */
 const KNOWN_JSONL: Record<string, string[]> = {
-	"*.jsonl": ["audit/read.ts", "audit/verify.ts"],
+	"*.jsonl": ["audit/read.ts", "audit/verify.ts", "cli/audit-segments.ts"],
 	".jsonl": [
 		"audit/anchor-verify.ts",
 		"audit/quarantine.ts",
 		"audit/read.ts",
 		"audit/verify.ts",
+		"cli/audit-segments.ts",
 		"cli/health.ts",
 	],
 	"a.jsonl": ["cli/anchor.ts"],
@@ -44,8 +45,8 @@ const KNOWN_JSONL: Record<string, string[]> = {
 		"audit/quarantine.ts",
 		"audit/read.ts",
 		"audit/verify.ts",
+		"cli/audit-segments.ts",
 		"cli/health.ts",
-		"cli/inspect.ts",
 		"snapshot/checkpoint.ts",
 	],
 	"events.jsonl.meta": ["audit/anchor.ts", "cli/anchor.ts", "snapshot/checkpoint.ts"],

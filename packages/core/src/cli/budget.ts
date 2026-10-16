@@ -371,7 +371,12 @@ function processArgs(): string[] {
 	return argv[0] === "budget" ? argv.slice(1) : argv;
 }
 
-export async function run(rootDir?: string, opts?: CliOptions, args?: string[]): Promise<void> {
+/**
+ * Resolves `true` when the command left a ledger client open: one the cluster evicted, which
+ * cannot be released (destroying it aborts the process) and keeps the process from exiting on its
+ * own. `main.ts` then ends the process itself, once what this wrote has drained.
+ */
+export async function run(rootDir?: string, opts?: CliOptions, args?: string[]): Promise<boolean> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
 	warnIfVaultLoose(vaultPath);
@@ -396,7 +401,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		flags = parseBudgetFlags(args ?? processArgs(), nowMs);
 	} catch (err) {
 		fail(err instanceof Error ? err.message : String(err));
-		return;
+		return false;
 	}
 
 	if (!existsSync(vaultPath)) {
@@ -404,11 +409,12 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			"No trust vault found. Run `usertrust init` first.",
 			`${pc.red("No trust vault found.")} Run \`usertrust init\` first.`,
 		);
-		return;
+		return false;
 	}
 
 	let tb: TrustTBClient | undefined;
-	let status: BudgetStatus;
+	let status: BudgetStatus | undefined;
+	let leftOpen = false;
 	try {
 		const config = await loadConfig(undefined, root);
 		tb = new TrustTBClient({
@@ -426,10 +432,14 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		});
 	} catch (err) {
 		fail(err instanceof Error ? err.message : String(err));
-		return;
 	} finally {
-		tb?.destroy();
+		// close(), not destroy(): destroy() aborts the process on a client the cluster evicted
+		// without this command seeing it, and close() asks the client first. No return in the
+		// catch above: a return's value is read before this runs.
+		leftOpen = (await tb?.close()) === true;
 	}
+	// Unset only when the read threw, which the catch reported.
+	if (status === undefined) return leftOpen;
 
 	const { balance, runway } = status;
 	// `spent` is derived, not stored: the ledger holds a balance, and what was
@@ -460,7 +470,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 				},
 			}),
 		);
-		return;
+		return leftOpen;
 	}
 
 	const pct = (runway.fractionRemaining * 100).toFixed(1);
@@ -473,4 +483,5 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 	console.log(field("Burn rate", `${runway.burnRatePerHour.toFixed(2)} UT/hour`));
 	console.log(field("Projected exhaustion", formatExhaustion(runway.projectedExhaustionMs)));
 	console.log(field("On pace", runway.onPace === null ? "n/a" : runway.onPace ? "yes" : "no"));
+	return leftOpen;
 }

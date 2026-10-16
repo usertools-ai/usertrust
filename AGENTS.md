@@ -43,10 +43,12 @@ Monorepo, npm workspaces (`packages/*`). `site/` is a Next.js app and is **not**
 | `packages/acs-adapter` | `usertrust-acs-adapter` | ACS adapter. |
 | `packages/ui` | `usertrust-ui` | Visual ledger (bundled front end; `build` = `tsc && vite build`). |
 | `packages/monte-cristo` | `usertrust-monte-cristo` | Simulation engine. Not in the release lockstep. |
-| `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. |
+| `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. The workspace name is internal; the plugin is published as `usertools` (`/plugin install usertools@usertrust`). |
 
 The first six are version-locked and released together. `monte-cristo` and `claude-code-plugin`
-are not.
+are not. Each of the six names any other it depends on at exactly its own version, never a range
+such as `"*"`: the release sets and checks those pins (docs/releasing.md, "Sibling dependencies
+are pinned").
 
 **No brand asset is committed to this repository**: no font file of any kind (Usertools Sans and
 every other face, first-party or OFL), no logo or mark, no lattice code. `site/` loads them at
@@ -64,7 +66,7 @@ the kit first, never committed here.
 
 | Area | Files |
 |---|---|
-| Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `config.ts`, `proxy.ts` |
+| Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `default-deny.ts`, `config.ts`, `proxy.ts` |
 | Ledger | `ledger/{client,engine,pricing}.ts` |
 | Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
@@ -118,22 +120,29 @@ rejection of the hold — throws out to its flow's **denial boundary**, which ap
 as `auditEventHash`, and rethrows. The boundary is a `catch` wrapped **around** the
 try/finally that releases the budget mutex, so the append runs with the lock already
 released; and it ends **lexically before** the provider call in step 6, so a provider that
-throws a same-typed error is never audited as a governor decision. There are **five append
-sites**: the mutex-section boundary in each of the three flows, plus a pre-mutex
-unknown-model site in `interceptCall` and headless `authorize` — actions have no model to
-price, so `governActionImpl` has only the mutex one. Four of the five are `catch (denialErr)`
-blocks; the exception is headless's pre-mutex site, which appends inline before an
-unconditional `throw` because the throw is right there and needs no catch to intercept it.
-Grepping `catch (denialErr)` therefore finds four, not five. Payloads and rationale live in
-`audit/denial-events.ts`.
+throws a same-typed error is never audited as a governor decision. There are **seven append
+sites**: the mutex-section boundary in each of the three flows, a pre-mutex unknown-model
+site in `interceptCall` and in headless `authorize` (actions have no model to price, so
+`governActionImpl` has only the mutex one), the pre-mutex entry refusal at the top of
+`interceptCall` (`entryRefusal`: a request option off the governed list, `movedRequestOptions`,
+or a request that cannot be serialized, `unserializableRequestError`; before anything is held,
+scanned or sent), and
+`refuseUngovernedMethod`, which records a call default-deny refuses (an ungoverned SDK method,
+a call through the raw client, a Google automatic-function-calling refusal, or a
+`withOptions()` client whose transport changed) before any of it reaches a flow.
+Four of the seven are `catch (denialErr)` blocks. The exceptions are headless's pre-mutex
+unknown-model site, `interceptCall`'s entry refusal and `refuseUngovernedMethod`,
+which append inline before an unconditional `throw`, because the throw is right there and
+needs no catch to intercept it. Grepping `catch (denialErr)` therefore finds four, not seven.
+Payloads and rationale live in `audit/denial-events.ts`.
 
 `destroy()` waits up to 5s, one deadline for all of them, for the terminals still working (a
 settle's POST, an abort or release parked on its void). At the deadline it takes every remaining
 hold in ONE synchronous step, before its first await: it records each abort or release still in
 flight, and voids and records (`hold_released`, `governor destroyed`) each hold still held. Then it
 voids the engine's remaining pending transfers, and flushes and releases the audit writer. Every
-teardown step (that drain, the sweep, the flush, the release, then the engine and proxy destroy)
-always runs, through `runTeardownSteps`: a step that throws skips none after it, and destroy()
+teardown step (that drain, the sweep, the flush, the release, then the engine's `close()`, awaited,
+or its `destroy()` for an engine without one, and the proxy destroy) always runs, through `runTeardownSteps`: a step that throws skips none after it, and destroy()
 rejects with its error (several as one `AggregateError`, in step order) only once the last has run. An
 `authorize()` refuses from destroy()'s start, and one still reserving registers no hold: it gives
 back its accounting and fails, and sends no void (the engine sweep, or the ledger's pending timeout
@@ -291,11 +300,17 @@ from then on nothing reconnects and no request reaches a native client. An opera
   runs before the operation's own input checks and before any shortcut that answers without the
   ledger (a cached wallet id), so an operation started after `destroy()` fails with
   `LedgerClientClosedError` whatever its arguments. A caller can tell shutdown from a refused input.
+  `close()` is the one exception: it is internal teardown (`destroy()` after an eviction probe), and
+  after `destroy()` it returns, as a second `destroy()` does. A governor's teardown awaits it, and a
+  finished shutdown must not turn into a rejection.
 - **At each request**, `native()` checks `closed` at the moment the request is made, because an
   await lets `destroy()` land between an operation's steps, or between a reconnect and its retry.
-  Only `withReconnect()` calls `native()`, for the request and for its retry. It hands the client
-  to a closure that makes its one request at once. A native destroy that throws leaves its client
-  open, and this check is what keeps requests off it.
+  `withReconnect()` calls `native()` for the request and for its retry, and hands the client to a
+  closure that makes its one request at once. `close()` calls it once, for its probe, which goes
+  through `send()` (so an eviction marks the client) but not through `withReconnect()` (a shutdown
+  probe must never reconnect). `native()` still checks `closed` there, and `close()` does not use
+  the reference after its await: the `destroy()` that follows reads the client again. A native
+  destroy that throws leaves its client open, and this check is what keeps requests off it.
 
 The rest of the closed state:
 - `ping()` reports unhealthy.
@@ -308,9 +323,9 @@ The rest of the closed state:
   touch only this object's memory and are not refused.
 
 The tests hold this. Two parse `client.ts` and fail in any of these cases:
-- a public async method other than `ping()` does not open with `this.assertOpen()`;
+- a public async method other than `ping()` and `close()` does not open with `this.assertOpen()`;
 - anything but the constructor, `native()`, `_doReconnect()` and `destroy()` reads the native client;
-- anything but `withReconnect()` calls `native()`;
+- anything but `withReconnect()` (and `close()`, once, for its probe) calls `native()`;
 - a request closure is anything but `(native) => native.<request>(…)`.
 
 Another set runs every operation with `destroy()` landing at each of its await boundaries.
@@ -648,8 +663,9 @@ no auditor can reproduce from the record.
 data for a `cache_control` with `ttl: "1h"`. `trust()` then reads that body everywhere (hold
 verdict, PII and injection scans, redaction) and forwards it, so a getter or `toJSON` that answers
 5-minute to a scan and 1-hour to the SDK has nothing left to flip: the SDK never sees the original.
-A request that cannot be serialized to a JSON object (a cycle, a BigInt, a throwing hook) holds
-dearest and is forwarded as given; the dearest hold covers whatever it then writes. Google is the
+A request that cannot be serialized to a JSON object (a cycle, a BigInt, a throwing hook) is
+REFUSED at entry (`unserializableRequestError`), before anything is held or sent: forwarding it
+as given let a hook that throws once and then answers send what no scan saw. Google is the
 named exception to forwarding the body: its SDK reads callable members off the request, so the
 original goes through; Google has no 1-hour tier and its extractor never reports a 1-hour share, so
 a flip cannot under-hold there. *Prevents:* the property-walk scan this replaced, which had to
@@ -1211,8 +1227,21 @@ inside the chain; and a "repair" that chooses which evidence is true. `quarantin
 subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evidence as a segment.
 
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
-`packages/core/src/audit/read.ts`, `packages/core/src/audit/dead-letters.ts`, and
+`packages/core/src/audit/read.ts`, `packages/core/src/audit/effective-budget.ts`, `packages/core/src/audit/dead-letters.ts`, and
 `packages/core/src/audit/verify.ts` contain zero filesystem write calls. Keep it that way — a verifier that mutates its subject is not a verifier.
+
+**A vault reader's budget is the one the governor ENFORCES.** `createGovernor` and `trust()` resolve the budget from
+`opts.budget`, `opts.configPath`, the vault's `usertrust.config.json` or the default, then record the result in
+`.usertrust/effective-budget.json` (`budget/effective-record.ts`; advisory, never throws; a failed write removes any
+earlier record). `loadBudgetConfig` reads that record first, then the vault config, and returns `source: "governor" |
+"config" | "several" | "unreadable" | "unpublished"`, the record's `writtenAt` and, for `unreadable`, its `reason`. The
+last three are an UNKNOWN budget, each said as itself (never "no budget configured": every governor enforces one), and
+a reader shows no remaining figure for them. Wherever a budget is SHOWN, its provenance is shown with it, in the one wording
+`describeBudgetSource` gives: only a governor record reads as the enforced figure, always "as of" its `writtenAt` (so a
+record that outlived a failed removal reads as old, never as current); a config budget says "not confirmed as
+enforced". The ledger UI, `inspect`, `health` and `report` all read it; never add a reader that parses the config file
+alone, or a surface that shows the figure without its provenance.
+The governor registers LAST in both constructors, once it has fully started (a failed start enforces nothing), and every step of the record's failure path is non-throwing. The record is PUBLISHED only while this process holds the vault's audit writer lock, which a governor takes lazily at its first append (`AuditWriter.lockOwner`, `openSharedAuditWriter`'s `onAppended`): before the first successful append nothing is published (`unpublished`), and a second process, whose appends fail on the lock, never overwrites the holder's record. Several live governors on one vault are aggregated in-process (`registerEnforcedBudget`): the record is the agreed budget, or `budget: null` with the governor count when they differ, which every reader shows as unknown (`source: "several"`); it is rewritten on every start and every destroy while the lock is held, and again when a new writer takes the lock, never stored as a flag. Readers stat the record before opening it (a FIFO would block them). The ledger UI re-reads it when it or the vault config changes. Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
 
 **`vaultPath` means two different directories.** `createAuditWriter(vaultPath)` joins
 `vaultPath/.usertrust/audit` — it takes the **project root**. `verifyVault`, `readLedgerEvents`,
@@ -1408,7 +1437,8 @@ invariant is only as strong as the event shapes themselves: the DLQ persists wha
 carried, verbatim (see the DLQ note above).
 
 **`redactPII` is pure.** It deep-clones and never mutates the caller's object. That is what makes
-`pii: "redact"` safe: the *outbound* request is a redacted clone, so PII never egresses. `"block"`
+`pii: "redact"` safe: PII the prompt scan finds never egresses: the outbound request is a redacted
+clone (fields the scan does not read are not redacted unless the prompt scan fired; see LIMITATIONS §11). `"block"`
 throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
 
 **Signature trust is anchored by the operator's publisher→key registry, never by the embedded key.**
@@ -1492,7 +1522,15 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   event's `error` text, so one hostile value arrives through two fields. C1 coverage matters here
   for the same reason it does in `budget.ts`. The UI is deliberately NOT patched: it renders
   these into DOM text nodes, where escapes are inert, and it displays this same already-scrubbed
-  receipt string.
+  receipt string. The standalone CLI (`verify/src/cli.ts`) imports this same function for its
+  verdict output — every chain-error line, `First event:`/`Last event:`, the latest anchor's keyId
+  and timestamp, the witness error, each anchoring warning, and the argv/caught-error echoes —
+  because those, too, are strings the audited vault (or argv) controls, printed at the auditor.
+  It is an import, not a copy: the count above is unchanged.
+  Beyond C0, DEL and C1 it also replaces every character that reorders or hides text without a glyph:
+  Unicode's format-character category, tested by its property (`/^\p{Cf}$/u` in `isInvisibleFormat`), never
+  by a hand list of ranges, which missed nine members of the class. The zero-width joiner is included, so an
+  emoji sequence shows its parts joined by `?`.
 - Independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.
@@ -1595,17 +1633,65 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 
 ### Client detection
 
-**Duck typing only; never import a provider SDK at runtime.** `detect.ts` imports types only.
-`@anthropic-ai/sdk` and `openai` are **optional** peer dependencies; Google has no peer entry at
-all. This is why provider SDK majors can be bumped with no code change.
+Detection stays duck-typed, and provider SDKs stay optional peers. `detect.ts` imports types only.
+The ONE exception: `packages/core/src/google-request.ts` may `import()` the optional peer
+`@google/genai`, only to obtain the `Models` pipeline the behavioural probe accepts; if it is absent
+or fails the probe, every governed Google call is refused. Nothing else imports a provider SDK at
+runtime: `packages/core/tests/detect/no-runtime-provider-import.test.ts` fails on any other runtime
+reference, including a specifier held in a variable. The reason: usertrust never runs a client's own,
+unverified `Models` before authorization; the SDK exports no request converters or transport hook,
+so its own pipeline is the only way to build the exact request it sends.
+`@anthropic-ai/sdk`, `openai` and `@google/genai` are **optional** peer dependencies. Their floors
+(`>=0.116.0`, `>=7.4.0`, `>=1.52.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
+versions the default-deny free list was classified on. Moving a floor means re-running that
+classification against the new SDK, and `default-deny.test.ts` fails if the floor and the
+constant disagree.
 
-**The governance boundary is deliberately partial and is documented in `detect.ts`.** Governed:
-Anthropic `messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected),
-OpenAI `chat.completions.create` and `responses.create` when present, Google
-`models.generateContent`. Explicitly **ungoverned** — these bypass governance, audit, and budget
-enforcement: `messages.batches`, `beta.models`, `beta.files`, OpenAI `responses.retrieve/cancel/
-delete`, the `responses.stream()` / `responses.parse()` helpers, the OpenAI `beta.*` namespace, and
-legacy `completions.create`. If you add a governed surface, update that doc block.
+**The governance boundary is documented in `detect.ts`.** Governed: Anthropic
+`messages.create/stream/parse` (and the `beta.messages` equivalents when feature-detected), OpenAI
+`chat.completions.create` and `responses.create` when present, Google `models.generateContent`
+and `models.generateContentStream`.
+**Every client is default-deny** (`default-deny.ts`): every other function-valued
+SDK member reached off the governed client, at any depth, is refused through ONE function,
+`refuseUngovernedMethod` in `trust()` (the same one Google's AFC refusals use, below), which first runs
+the degraded-audit preflight (under `failClosed`, a writer already degraded refuses with
+`AuditDegradedError` before anything is recorded), then writes `policy_denied` at the denial boundary
+and rejects. The exceptions are the free list in `default-deny.ts`, built by ONE rule: every method whose
+requests are all GET or DELETE, plus POSTs named with a reason, minus GET/DELETE methods named as
+exceptions. Each entry cites its SDK source line and verb; they run with the RAW resource as
+`this`, because `this._client` through the boundary is a refusing stand-in, and
+`default-deny.test.ts` calls every entry and fails on a POST its `FREE_POSTS` does not name and `trust({ allowUngoverned })` (audited as
+`ungoverned_call`). `_client` and the client's raw HTTP members are refused by name; `withOptions`
+is re-wrapped by the same governor, unless an option outside `GOVERNED_WITH_OPTIONS_KEYS` (an
+allow-list) changes the transport, when the new client is a refusing stand-in. A POST is freed only with a reason it cannot start billable work, written in both places; a create that can
+allocate storage is not free. If you add a governed surface, update that doc block and the free list.
+A method wrapper is cached per (path, raw target, name), so a method keeps its identity across
+reads; a refused wrapper builds a fresh error per call.
+**Google clients are default-deny through the same boundary**, with four Google rules in
+`default-deny.ts`:
+- members are read with the RAW target as receiver, so the `interactions` / `webhooks` getters run
+  on the raw client (they call `this.getNextGenClient()` and cache on `this`);
+- the raw transport is a refusing stand-in BY NAME, matched before anything else: `apiClient`
+  (client and every namespace), `_client`, `_nextGenClient`, and `auth` / `webSocketFactory`
+  under `live` (`GOOGLE_RAW_MEMBERS`, `GOOGLE_TRANSPORT_OBJECTS`);
+- a resource is recognised by SHAPE (`isResource`): it carries `apiClient` or `_client`, or it is a
+  non-array object with a function member or an accessor, own or inherited below
+  `Object.prototype`, read through descriptors so no getter runs. A duck-typed client's namespaces
+  are guarded too; plain data (`httpOptions`) is returned as it is, unexamined;
+- a method is decided by its PATH: `chats.modelsModule` (the raw `Models`) and the cached
+  `_interactions` / `_webhooks` are guarded at their own paths, where nothing is free.
+`FREE_METHODS.google` cites `dist/node/index.mjs:LINE VERB path` per entry.
+`GOOGLE_REFUSED_METHODS` in `govern.ts` is a HINT table only (its names get the governAction() hint);
+it refuses nothing itself. With automatic
+function calling (decided by the SDK itself: `google-request.ts` runs the SDK's own request pipeline
+over the request against a transport stand-in that sends nothing, and the plain-data copy of what
+it read, checked per call by a second run, is what is forwarded),
+`models.generateContent` runs the loop itself, each round its own governed call
+(`runGovernedAfc`, which calls the SDK's own `generateContentInternal` on the RAW `models`), and
+`models.generateContentStream` is refused (a streamed loop is not metered per round yet).
+`google-default-deny.test.ts` pins the classification: it walks a real Gemini and Vertex client and
+fails on a function the table does not name, or a callable object left raw. If you add a governed
+or free Google surface, update `detect.ts`, the free list and that table.
 
 ---
 
@@ -1659,8 +1745,8 @@ Drop every line whose raw text contains `from "`, then require exact string equa
   lines **are** compared, so both packages must import the same names in the same order and may
   differ only in the module path.
 
-Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 10200 (a
-vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900→10000→10100→10200 on this line as
+Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 10500 (a
+vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900→10000→10100→10200→10300→10500 (2026-10-12) on this line as
 `packages/verify` grew legitimate node-builtins-only surface, with master separately raising
 4200→4300→4320 for its own receipt-hardening work over the same period — both lineages are folded
 in here and both are recorded in `packages/core/tests/harden/anchoring/anchor-additive.test.ts`

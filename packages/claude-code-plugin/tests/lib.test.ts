@@ -275,7 +275,8 @@ describe("writes that cannot be confirmed never read as done", () => {
 		// A FileHandle's close is its own property, so the failure is injected where lib.mjs
 		// opens: every handle it opens has a close that closes, then reports the late EIO a full
 		// or failing disk gives.
-		let failures = 0;
+		// The path of every handle whose close failed.
+		const failures: string[] = [];
 		vi.doMock("node:fs/promises", async (importOriginal) => {
 			const real = await importOriginal<typeof import("node:fs/promises")>();
 			return {
@@ -285,7 +286,7 @@ describe("writes that cannot be confirmed never read as done", () => {
 					const close = handle.close.bind(handle);
 					handle.close = async () => {
 						await close();
-						failures += 1;
+						failures.push(String(args[0]));
 						throw Object.assign(new Error("EIO: i/o error, close"), { code: "EIO" });
 					};
 					return handle;
@@ -305,8 +306,58 @@ describe("writes that cannot be confirmed never read as done", () => {
 			vi.doUnmock("node:fs/promises");
 			vi.resetModules();
 		}
-		expect(failures).toBe(1);
+		// The watch log's append failed once. The session's stamp is made all the same (the hook
+		// ran): it is published, then read back, and its read's late close is the other failure here.
+		expect(failures.filter((path) => path.endsWith("watch.jsonl"))).toHaveLength(1);
+		expect(failures.some((path) => path.endsWith(join("since-session", "s")))).toBe(true);
 		expect(said).toContain("could not write a watch record");
 		expect(said).toContain("EIO");
+	});
+});
+
+describe("authorizeRetryWait: a 503 ledger_unavailable is retried once, after a wait the budget bounds", () => {
+	const unavailable = { status: 503, json: { error: "ledger_unavailable", reason: "r" } };
+	/** authorizeRetryWait, from lib.mjs. */
+	// @ts-expect-error TS7016: the hooks are plain .mjs, without type declarations.
+	const lib = () => import("../hooks/lib.mjs");
+
+	it("waits AUTHORIZE_RETRY_WAIT_MS (1 s) when the budget leaves room for it, its margin and the retry's call", async () => {
+		const { authorizeRetryWait, AUTHORIZE_RETRY_WAIT_MS } = await lib();
+		expect(AUTHORIZE_RETRY_WAIT_MS).toBe(1_000);
+		expect(authorizeRetryWait(unavailable, 9_000)).toBe(1_000);
+		expect(authorizeRetryWait(unavailable, 2_500)).toBe(1_000);
+	});
+
+	it("waits less when the budget is short: what is left after the 500 ms margin and the retry's 1 s", async () => {
+		const { authorizeRetryWait } = await lib();
+		expect(authorizeRetryWait(unavailable, 2_000)).toBe(500);
+		expect(authorizeRetryWait(unavailable, 1_501)).toBe(1);
+	});
+
+	it("no retry when no wait fits", async () => {
+		const { authorizeRetryWait } = await lib();
+		expect(authorizeRetryWait(unavailable, 1_500)).toBeNull();
+		expect(authorizeRetryWait(unavailable, -500)).toBeNull();
+	});
+
+	it("never a refusal, a rejected key, another 503 or any other answer", async () => {
+		const { authorizeRetryWait } = await lib();
+		for (const response of [
+			{ status: 402, json: { error: "budget_exceeded" } },
+			{ status: 403, json: { error: "policy_denied" } },
+			{ status: 429, json: { error: "anomaly" } },
+			{ status: 401, json: { error: "unauthorized" } },
+			{ status: 503, json: { error: "overloaded" } },
+			{ status: 503, json: null },
+			{ status: 500, json: { error: "ledger_unavailable" } },
+			{ status: 200, json: { transferId: "t" } },
+		]) {
+			expect(authorizeRetryWait(response, 9_000), JSON.stringify(response)).toBeNull();
+		}
+	});
+
+	it("the first call waits past the server's default 5 s deadline", async () => {
+		const { AUTHORIZE_TIMEOUT_MS } = await lib();
+		expect(AUTHORIZE_TIMEOUT_MS).toBeGreaterThan(5_000);
 	});
 });

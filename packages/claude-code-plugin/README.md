@@ -1,4 +1,4 @@
-# usertrust-claude-code
+# usertools
 
 Ledger-backed governance for Claude Code: every tool call gets a two-phase spend
 authorization against a [usertrust-server](../server) you host, and the session's
@@ -22,8 +22,22 @@ call it lets through, exactly as they would without it.
 
 ```
 /plugin marketplace add usertools-ai/usertrust
-/plugin install usertrust-claude-code@usertrust
+/plugin install usertools@usertrust
 ```
+
+**Upgrading from `usertrust-claude-code`?** This plugin was renamed to `usertools`
+in 3.0.0. If `usertrust-claude-code` is installed, uninstall it BEFORE installing
+`usertools`:
+
+```
+/plugin uninstall usertrust-claude-code@usertrust
+/plugin install usertools@usertrust
+```
+
+With both installed, every tool call reserves budget twice, and some versions of the old plugin
+can charge twice. `usertools` always meters, and when `usertrust-claude-code` looks ENABLED in your
+settings (or it cannot tell), SessionStart opens with a warning naming the settings file. Your
+configuration file, state directory and server settings are unchanged by the rename.
 
 ## Quickstart (against usertrust-server)
 
@@ -405,9 +419,33 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   timestamp counts as after it). SessionStart makes it, whatever its `source`, so a
   fresh install posts its first session from the first response on. The history of a
   transcript resumed or compacted then is older than it, and is not posted; and once
-  made it never moves, so a later resume posts what its session left unposted. A
-  plugin installed into a session already under way posts nothing written before its
-  first hook there, the response that triggered that hook included. After a host
+  made it never moves, so a later resume posts what its session left unposted. **Each
+  session also has its own first-run time** (`transcripts/since-session/<session>`), never
+  earlier than the state's. The FIRST hook of this plugin that touches the session in this state
+  stamps it, whatever that hook does: SessionStart, or any later hook, including one that only
+  writes a gap, a refusal or a deferral (its watch record stamps it, at the record's time). A
+  failing hook means metering was on, so what the session wrote after it is posted later as for
+  an outage, never "before metering". A session the plugin first meets at a later hook (one that
+  ran with no hook of this plugin at all, such as a lane switched on later or a session open at
+  install) is stamped at that hook. A session posts nothing written before its own time, the
+  response that triggered its first hook included, so usage from before it was metered is never
+  settled late onto its first hold. Those responses are **declared** instead, once per agent of
+  the session, as a `pre-metering` watch record (below): not billed, and never a gap. A session
+  the state already held a cursor for before per-session times existed keeps the state's time,
+  so what it left unposted is still posted. Two upgrade and timing edges are declared, not
+  fixed:
+  - A session that ran an older plugin's SessionStart but had no transcript cursor yet when this
+    version was installed is stamped at its first hook after the upgrade. The responses it wrote
+    between that SessionStart and the upgrade are declared `pre-metering`, not billed. This
+    happens once per such session.
+  - When two agents of one session reach their first hook at the same instant, the session's time
+    is the one published first, which may be the later of the two clocks by milliseconds. A
+    response written by the other agent inside that window counts as before metering.
+
+  One case is stamped in the wrong place: a hook
+  refused with a configuration whose state dir cannot be used writes its record, and its stamp,
+  to the default state dir. When the repaired configuration names another state dir, the
+  refused period counts as before metering there. After a host
   crash or power loss (not a process crash), usage posted in the moments before it
   can be posted again, because the plugin's state files are not fsynced. Idempotency keys on the server (#205) are
   the fix. **Restoring an older copy of the state dir can
@@ -491,7 +529,13 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
   record (read from `watch.jsonl`, or `--watch FILE`, placed by when its call STARTED); a transfer known only through its
   settlement metadata; a released hold whose usage is unconfirmed; an evidence line that could not be
   parsed. A watch file that exists but cannot be read gives no verdict. An interval is (start, stop]:
-  usage at exactly the start belongs to the earlier job.
+  usage at exactly the start belongs to the earlier job. Separately, `beforeMetering` reports the
+  responses a session of the job wrote before it was metered (its `pre-metering` records), as
+  `{ "responses": 0, "unattributed": { "sessions": { "<session>": N } }, "note": … }`: never billed,
+  never one of the `knownGaps`, and attributed to no job, since when they were written is not kept.
+  Two jobs that share a session both name the same entry, so total it by session, never by job.
+  It counts each agent's transcript, and a fork's transcript starts with copies of its ancestor's
+  messages, so a session with forks counts those again: an upper bound, never billed.
 
 ## Modes: watch-only by default
 
@@ -506,7 +550,7 @@ both modes.
 | A reservation (200) | No decision: your permission settings apply | No decision |
 | Refused: over budget (402), denied by policy (403), an anomaly cutoff (429) | No decision, and a `would_block` record | `deny`: the call is blocked |
 | The key rejected: a 401, or a 403 whose `error` is `unauthorized` | No decision, a `gap` record (`"cause":"key-rejected"`), and a message shown to you | Blocked (exit 2). With `UT_FAIL_OPEN=1`: as in watch |
-| No usable answer: unreachable, a timeout, any other status, a malformed body | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: no decision, and a `gap` record |
+| No usable answer: unreachable, a timeout, any other status, a malformed body, a `503 ledger_unavailable` that a retry did not clear | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: no decision, and a `gap` record |
 | A shadow answer from an `evaluate_only` server | No decision | No decision |
 
 **No decision** means PreToolUse exits 0 with nothing on stdout, which Claude
@@ -539,6 +583,18 @@ more than enforcement — a stopped server then never blocks your session, and t
 usage it misses stays in the transcript to be posted at a later settle point.
 Leave it unset when the budget must be enforced. Upgrading from a release where
 blocking was the default: set `UT_CC_MODE=enforce` to keep it.
+
+A `503` whose `error` is `ledger_unavailable` means no answer came in time, from the server's
+ledger or from the authorizes queued ahead: in an outage, or in a burst past what the server
+answers in time. Nothing was authorized. PreToolUse makes one retry after a short wait (up to
+1 s, within the hook's budget). It clears a `503` whose cause, such as a burst's queue, has
+drained by then. In an outage it adds about 1 s (and the longer first-call timeout, 6.5 s,
+about 1.5 s) before the call is blocked or recorded as a gap. A second `503` is an outage
+like any other: in enforce mode, while it lasts, every tool call is **blocked** unless
+`UT_FAIL_OPEN=1`. This works with a server deadline (`ledgerTimeoutMs`) up to about 5 s, the
+server's default, at the hook's default budget. With a deadline above about 6.5 s the hook
+gives up before the server's `503` arrives, and treats the call as an outage at once, with no
+retry.
 
 **Known limitation: a call that does not complete keeps its reservation for a
 while.** PostToolUse, the hook that closes a call's hold,
@@ -602,10 +658,13 @@ again, and the plugin finds the hold the call already has.
   - A hold carrying transcript usage is settled once, at its counts. If that
     settle fails and the server does not confirm the hold is gone (its release
     unconfirmed too), the hold may be live: no fresh hold is made beside it, and
-    the call fails as a failed authorization does. A later re-fire of the call no
-    longer finds that hold, though. It reserves a replacement, and the budget
-    counts both until the server's sweep ends the original: an early refusal,
-    never an overspend ([#248](https://github.com/usertools-ai/usertrust/issues/248)).
+    the call fails as a failed authorization does. The hold is kept named, as one
+    whose only remaining job is to be given back (`.releasing`): a later re-fire of
+    the call finds it and is refused too, rather than reserving beside it, and Stop
+    gives it back once, after any retry of its window, then forgets it. A give-back
+    is idempotent on the server (a 200 ends the hold, a 404 `unknown transferId`
+    says it is gone), and a hold whose give-back fails again is ended by the
+    ledger's pending timeout.
   - Any other hold is given back only through a `release` the server advertises,
     and never aborted. On a server without `release`, it counts against the budget
     until the server's pending-hold sweep voids it, which is one of the aborts
@@ -710,7 +769,15 @@ trimmed:
 ```json
 {"at":"2026-10-06T10:00:00.000Z","kind":"would_block","session":"<session id>","agent":"main","tool":"Bash","status":402,"error":"budget_exceeded","reason":"<the server's reason>"}
 {"at":"2026-10-06T10:00:05.000Z","kind":"gap","mode":"watch","session":"<session id>","agent":"main","tool":"Bash","reason":"fetch failed"}
+{"at":"2026-10-06T10:00:09.000Z","kind":"pre-metering","mode":"watch","session":"<session id>","agent":"main","responses":3,"reason":"written before this session was metered; not billed","started":null}
 ```
+
+A `pre-metering` record counts the responses a session's transcript held from before that
+session was metered (see the first-run time above): `responses` is how many, by message id,
+and nothing else about them is kept. One record per agent transcript: a fork's transcript
+starts with copies of its ancestor's messages, which it counts again. They are never billed, and **a `pre-metering` record is
+never a gap**: a gap is a call missed while metering was on, and this usage predates it. The
+job report names them separately, per session and attributed to no job (`beforeMetering`).
 
 `agent` is the subagent's id (`main` for the parent), and a `would_block`'s
 `status` is the refusal's: 402, 403 or 429. A `gap` written in enforce

@@ -10,7 +10,7 @@ software and the safety of our users.
 | ------- | ------------------ |
 | 4.1.x   | Yes                |
 | < 4.1   | No                 |
-| usertrust-claude-code 2.1.x | Yes |
+| usertools (Claude Code plugin) 3.0.x | Yes |
 
 ## Reporting a Vulnerability
 
@@ -51,7 +51,7 @@ request a mutually agreed-upon extension.
 
 - `usertrust` (core SDK)
 - `usertrust-server` (the self-hosted control plane)
-- `usertrust-claude-code` (the Claude Code plugin)
+- `usertools` (the Claude Code plugin, formerly `usertrust-claude-code`)
 - `usertrust-verify` (verification package)
 - `usertrust-openclaw` (OpenClaw integration)
 - The usertrust CLI

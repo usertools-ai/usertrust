@@ -405,6 +405,29 @@ describe("client.destroy()", () => {
 		return { governed, engine, mockAudit, calls };
 	}
 
+	it("an engine with close(): the teardown AWAITS it as its ledger step, after the voids, the flush and the lock release, and never calls the sync destroy()", async () => {
+		const { governed, engine, calls } = await governedForTeardown();
+		let finishClose: () => void = () => {};
+		engine.close = vi.fn(() => {
+			calls.push("engine.close");
+			return new Promise<void>((resolve) => {
+				finishClose = resolve;
+			});
+		});
+		let done = false;
+		const destroying = governed.destroy().then(() => {
+			done = true;
+		});
+		await vi.waitFor(() => expect(calls).toContain("engine.close"));
+		await new Promise((r) => setImmediate(r));
+		expect(done).toBe(false);
+		finishClose();
+		await destroying;
+		expect(calls).toEqual(["voidAllPending", "flush", "release", "engine.close"]);
+		expect(engine.close).toHaveBeenCalledOnce();
+		expect(engine.destroy).not.toHaveBeenCalled();
+	});
+
 	it("a throwing voidAllPending still flushes, releases and destroys the engine, then rejects with its error", async () => {
 		const voidErr = new Error("voidAllPending failed");
 		const { governed, engine, mockAudit } = await governedForTeardown({ voidAll: voidErr });

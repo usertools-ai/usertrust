@@ -399,7 +399,7 @@ describe("trust() non-stream record surfaces (spec D5)", () => {
 		await governed.destroy();
 	});
 
-	it("non-finite provider garbage never reaches the record", async () => {
+	it("non-finite provider garbage never reaches the record: it is refused, and the call settles at the estimate", async () => {
 		const audit = makeMockAudit();
 		const client = makeAnthropicMock({
 			input_tokens: 1000,
@@ -420,17 +420,21 @@ describe("trust() non-stream record surfaces (spec D5)", () => {
 			messages: MESSAGES,
 		});
 
-		expect(receipt.usage).toEqual({
-			inputTokens: 1000,
-			outputTokens: 500,
-			cacheReadTokens: 0,
-			cacheWriteTokens: 0,
-		});
-		// canonicalize() throws on non-finite: the chain write only survives
-		// because the snapshot sanitized these before emission.
+		// Read as absent, the two garbage tiers would price at 0 under a "provider"
+		// label, an undercharge. They are refused: no usage block is published.
+		expect(receipt.usageSource).toBe("estimated");
+		expect(receipt.usage).toBeUndefined();
 		const data = llmCalls(audit)[0]?.data as Record<string, unknown>;
-		expect(JSON.stringify(data.usage)).toBe(JSON.stringify(receipt.usage));
-		expectRecomputable(receipt);
+		expect(data.usage).toBeUndefined();
+		// canonicalize() throws on non-finite: the refusal records a FINITE figure
+		// per tier, which survives JSON as a number.
+		const event = audit.events.find((e) => e.kind === "usage_implausible");
+		expect(event?.data).toMatchObject({
+			charged: "estimate",
+			tiers: { cacheReadTokens: Number.MAX_VALUE, cacheWriteTokens: 1 },
+			checks: { cacheReadTokens: "refused", cacheWriteTokens: "refused" },
+		});
+		expect(JSON.parse(JSON.stringify(event?.data))).toEqual(event?.data);
 
 		await governed.destroy();
 	});
