@@ -122,9 +122,11 @@ export interface TrustReceipt {
 	 * INCOMPLETE report (an input or output absent, non-finite, negative or non-numeric,
 	 * or cache tiers alone), which costs max(the metered estimate, its partial counts)
 	 * even when its counts set that cost: publishing them would publish the fabricated 0
-	 * of its missing side. A four-tier block with fabricated zeros would invite an auditor
-	 * to "recompute" a cost never derived from those counts, so it is omitted outright,
-	 * never zero-filled.
+	 * of its missing side. In `trust()`, a provider count that is present but not a count (a
+	 * string, NaN, a negative) is refused instead: the whole report is recorded as
+	 * implausible and costs the estimate exactly. A four-tier block with fabricated zeros
+	 * would invite an auditor to "recompute" a cost never derived from those counts, so it is
+	 * omitted outright, never zero-filled.
 	 *
 	 * With `pricing.appliedRates` this is the whole reconciliation surface:
 	 * `ceil(sum(counts x rates / 1000))` floored at 1 equals `cost`.
