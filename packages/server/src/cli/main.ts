@@ -22,6 +22,8 @@ async function main(): Promise<void> {
 	// would otherwise fail every request (an opaque 500) or crash or hang the first one.
 	secureTenantVaults(config);
 	await probeLedger(config);
+	// The operator's server reports ledger reachability unless its config turns it off.
+	config.ledgerHealth ??= "child";
 	const server = createUsertrustServer({ config });
 	// The handlers go in BEFORE the server listens: a supervisor (or a test) that signals the
 	// moment it reads the listening line must reach shutdown, never the default action, which

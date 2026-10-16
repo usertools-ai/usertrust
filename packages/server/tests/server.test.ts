@@ -52,6 +52,15 @@ describe("HTTP control plane", () => {
 		const body = (await res.json()) as { ok: boolean; name: string };
 		expect(body.ok).toBe(true);
 		expect(body.name).toBe("usertrust-server");
+		// The whole shape: the ledger's reachability beside the dropped-line count.
+		expect(Object.keys(body).sort()).toEqual([
+			"capabilities",
+			"ledger",
+			"logLinesDropped",
+			"name",
+			"ok",
+			"version",
+		]);
 	});
 
 	it("rejects missing or wrong bearer key with 401", async () => {

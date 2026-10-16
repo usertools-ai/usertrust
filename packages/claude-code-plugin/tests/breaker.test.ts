@@ -1232,4 +1232,27 @@ describe("a probe that fails falls back to a remembered answer, for the principa
 			[...Object.keys(without ?? {}), "principal"].sort(),
 		);
 	});
+	it("a health that reports its ledger unreachable (HTTP 200, ok:false) reads the same capabilities as a healthy one", async () => {
+		capabilities = ["idempotency-key", "principal", "release"];
+		const answers = [
+			["session-a", { ok: true, ledger: "reachable" }],
+			["session-b", { ok: false, ledger: "unreachable" }],
+		] as const;
+		for (const [session, health] of answers) {
+			override = (path) =>
+				path === "/v1/health" ? { status: 200, json: { ...health, capabilities } } : undefined;
+			await writeTranscript(session, `msg_${session}`);
+			const pre = await run("pre-tool-use", preInput(`tu_${session}`, session));
+			expect(pre.stderr).not.toContain("capabilities are unknown");
+			const entry = JSON.parse(await readFile(cacheFile(), "utf-8")) as { capabilities: string[] };
+			expect(entry.capabilities).toEqual(["idempotency-key", "principal", "release"]);
+		}
+		const [healthy, unreachable] = seen
+			.filter((request) => request.path === "/v1/authorize")
+			.map((request) => request.body);
+		expect(healthy?.idempotencyKey).toBeDefined();
+		expect(unreachable?.idempotencyKey).toBeDefined();
+		expect(unreachable?.principal).toBeDefined();
+		expect(Object.keys(unreachable ?? {}).sort()).toEqual(Object.keys(healthy ?? {}).sort());
+	});
 });

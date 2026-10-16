@@ -99,11 +99,19 @@ async function tenantLedger(config: ServerConfig, tenant: TenantConfig): Promise
 	}
 }
 
+/** The ledger each tenant resolves to, by tenant id, in tenant order. */
+export async function resolveTenantTargets(
+	config: ServerConfig,
+): Promise<Map<string, LedgerTarget>> {
+	const byTenant = new Map<string, LedgerTarget>();
+	for (const tenant of config.tenants) byTenant.set(tenant.id, await tenantLedger(config, tenant));
+	return byTenant;
+}
+
 /** Every distinct ledger the tenants resolve to, in tenant order. */
 export async function resolveLedgerTargets(config: ServerConfig): Promise<LedgerTarget[]> {
 	const targets = new Map<string, LedgerTarget>();
-	for (const tenant of config.tenants) {
-		const target = await tenantLedger(config, tenant);
+	for (const target of (await resolveTenantTargets(config)).values()) {
 		const key = JSON.stringify([target.clusterId, target.addresses]);
 		if (!targets.has(key)) targets.set(key, target);
 	}
