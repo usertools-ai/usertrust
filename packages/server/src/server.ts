@@ -208,8 +208,14 @@ function routeOf(req: IncomingMessage): RouteName | "unrouted" {
 
 /** A bearer token wherever a message quotes one: `Bearer <token>`. */
 const BEARER_TOKEN = /\b(Bearer)\s+[^\s"',;]+/gi;
-/** An api-key style value: `x-api-key: <v>`, `api_key=<v>`, `"api-key": "<v>"`. */
-const API_KEY_VALUE = /\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*["']?)[^\s"',;&]+/gi;
+/**
+ * An api-key style value: `x-api-key: <v>`, `api_key=<v>`, `"api-key": "<v>"`. A QUOTED value is
+ * consumed through its closing quote (or to the end, unclosed), whatever it holds: `"abc;def"` is
+ * one value, never `abc` followed by text. An unquoted value ends at whitespace, a quote, `,`, `;`
+ * or `&`.
+ */
+const API_KEY_VALUE =
+	/\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(?:"((?:[^"\\]|\\.)*)"?|'((?:[^'\\]|\\.)*)'?|[^\s"',;&]+)/gi;
 
 /**
  * `text` with every `secret` (the caller's own bearer key, when known), every `Bearer <token>` and
@@ -219,7 +225,12 @@ const API_KEY_VALUE = /\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*["']?)[^\s"',;&]+
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {
 	let out = text;
 	for (const secret of secrets) if (secret !== "") out = out.split(secret).join("[redacted]");
-	return out.replace(BEARER_TOKEN, "$1 [redacted]").replace(API_KEY_VALUE, "$1$2[redacted]");
+	return out
+		.replace(BEARER_TOKEN, "$1 [redacted]")
+		.replace(API_KEY_VALUE, (_match, name: string, sep: string, dq?: string, sq?: string) => {
+			const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : "";
+			return `${name}${sep}${quote}[redacted]${quote}`;
+		});
 }
 
 /**
@@ -284,51 +295,110 @@ function idHash(transferId: string): string {
 	return createHash("sha256").update(transferId, "utf-8").digest("hex").slice(0, 12);
 }
 
+/**
+ * Log lines this process's servers could write nowhere: the sink failed (or there was none) and
+ * the write to stderr failed too. Process-wide, never reset; served on `/v1/health`.
+ */
+let logLinesDropped = 0;
+
+/**
+ * `line` to stderr. It never throws, and a line stderr refuses is COUNTED in `logLinesDropped`.
+ * The failure is read from THIS write's own callback, never from the stream's `'error'` event,
+ * which also fires for every other writer's failed write in the process: those are not this
+ * server's lines.
+ */
+function writeLogLine(line: string): void {
+	let counted = false;
+	const dropped = (): void => {
+		if (counted) return;
+		counted = true;
+		logLinesDropped += 1;
+	};
+	try {
+		process.stderr.write(`${line}\n`, (err) => {
+			if (err) dropped();
+		});
+	} catch {
+		dropped();
+	}
+}
+
+/** Marks the `'error'` listener this module installs, so no copy of it installs a second one. */
+const STDERR_CONTAINED = Symbol.for("usertrust-server.stderr-errors-contained");
+
+/**
+ * A write to a stderr whose reader has gone does not throw: Node reports EPIPE as an `'error'`
+ * event on the stream, and an `'error'` with no listener is an uncaught exception that kills the
+ * process. One listener, installed at most once per process and never removed, contains it. It
+ * only stops the crash: each write's own callback still receives its error, and an embedder's
+ * own `'error'` listeners are neither removed nor replaced.
+ */
+function containStderrErrors(): void {
+	try {
+		const stderr = process.stderr as NodeJS.WriteStream & { [STDERR_CONTAINED]?: true };
+		if (stderr[STDERR_CONTAINED] === true) return;
+		stderr.on("error", () => {});
+		stderr[STDERR_CONTAINED] = true;
+	} catch {
+		/* a stderr that cannot take a listener: writeLogLine still never throws */
+	}
+}
+
 /** `claim` found the entry gone or replaced: another terminal owns it, and this caller ended nothing. */
 const NOT_CLAIMED = Symbol("not-claimed");
 
+/**
+ * A usertrust-server: the HTTP surface over one governor per tenant.
+ *
+ * PROCESS-WIDE SIDE EFFECT: the first server created in a process adds one `'error'` listener to
+ * `process.stderr`, and it stays for the life of the process. Without it a write to a stderr whose
+ * reader has gone (EPIPE) is an uncaught exception that ends the process at the server's first
+ * logged 500. With it, an EPIPE on stderr from ANY writer in the embedding process (`console.warn`,
+ * another library) is contained instead of crashing it. It is installed at most once per process,
+ * and the embedder's own `'error'` listeners are neither removed nor replaced. A log line the server
+ * could write nowhere is counted in `/v1/health`'s `logLinesDropped`.
+ */
 export function createUsertrustServer(opts: {
 	config: ServerConfig;
 	factory?: GovernorFactory;
-	/** Where operator log lines go, one line per call. Default: stderr, as the CLI's own lines. */
+	/**
+	 * Where operator log lines go, one line per call. Default: stderr, as the CLI's own lines. A
+	 * sink that throws or rejects is contained, and its line goes to stderr instead.
+	 */
 	log?: (line: string) => void;
 }): UsertrustServer {
 	const { config } = opts;
-	const sink = opts.log ?? ((line: string): void => void process.stderr.write(`${line}\n`));
-	/** The line to stderr, if it can go anywhere at all: never throws. */
-	const toStderr = (line: string): void => {
-		try {
-			process.stderr.write(`${line}\n`);
-		} catch {
-			/* nowhere left to write it */
-		}
-	};
+	const sink = opts.log;
+	containStderrErrors();
 	/**
-	 * The ONLY way this server writes a log line. A sink that fails is contained here, once: it
-	 * must never stop a 500 from being sent, surface as an unhandled rejection, or break the
-	 * sweep's or shutdown's best-effort release. The line then goes to stderr if it can. A sink
-	 * may be async (`async (line) => …` satisfies `(line: string) => void`): a promise it returns
-	 * gets a rejection handler, so its failure is contained the same way as a synchronous throw.
+	 * The ONLY way this server writes a log line, and ONE containment boundary: the sink call, the
+	 * test for a thenable (reading `then` included) and attaching its rejection handler all sit in
+	 * one `try`, and every failure, synchronous or asynchronous, goes to one fallback,
+	 * `writeLogLine`, which cannot throw and counts a line that stderr refused too. A failing sink
+	 * therefore never stops a 500 from being sent, never surfaces as an unhandled rejection, and
+	 * never breaks the sweep's or shutdown's best-effort release. Without a sink the line goes
+	 * straight to `writeLogLine`: retrying stderr on stderr would only write it twice.
 	 */
 	const log = (line: string): void => {
-		let returned: unknown;
-		try {
-			returned = sink(line);
-		} catch {
-			toStderr(line);
+		if (sink === undefined) {
+			writeLogLine(line);
 			return;
 		}
-		if (
-			returned !== null &&
-			typeof returned === "object" &&
-			typeof (returned as PromiseLike<unknown>).then === "function"
-		) {
-			try {
-				(returned as PromiseLike<unknown>).then(undefined, () => toStderr(line));
-			} catch {
-				// A hostile thenable whose `then` throws: the line still goes somewhere.
-				toStderr(line);
+		// A hostile thenable may call its rejection handler more than once: one line, one fallback.
+		let fellBack = false;
+		const fallBack = (): void => {
+			if (fellBack) return;
+			fellBack = true;
+			writeLogLine(line);
+		};
+		try {
+			const returned: unknown = sink(line);
+			if (returned !== null && (typeof returned === "object" || typeof returned === "function")) {
+				const then: unknown = (returned as { then?: unknown }).then;
+				if (typeof then === "function") then.call(returned, undefined, fallBack);
 			}
+		} catch {
+			fallBack();
 		}
 	};
 	/** The internal-error line for `err`, logged; an error that cannot even be read is still logged. */
@@ -1157,6 +1227,7 @@ export function createUsertrustServer(opts: {
 				name: SERVER_NAME,
 				version: SERVER_VERSION,
 				capabilities: config.dryRun ? DRY_RUN_CAPABILITIES : SERVER_CAPABILITIES,
+				logLinesDropped,
 			});
 			return;
 		}

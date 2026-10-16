@@ -130,7 +130,7 @@ one you cannot reuse.
 | POST   | `/v1/release`   | Bearer | Phase 2c: give back a hold that did not fail        |
 | GET    | `/v1/budget`    | Bearer | Remaining tenant budget, `voidsOwed`                |
 | GET    | `/v1/events`    | Bearer | SSE stream of tenant governance events              |
-| GET    | `/v1/health`    | none   | Liveness and `capabilities`                         |
+| GET    | `/v1/health`    | none   | Liveness, `capabilities` and `logLinesDropped`      |
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
 `404 not_found` (unknown transferId on `/v1/abort` and `/v1/release`; for `/v1/settle` see the three codes below), `413 too_large` (1 MiB body cap),
@@ -142,6 +142,15 @@ sleeps, a hold that was pending across the sleep can keep counting against the b
 life (T, 300 s by default) plus up to one sweep interval (30 s) after wake. In enforce mode that can mean
 false denials. It's the safe direction: nothing is charged and the ledger releases the funds on time.
 A TigerBeetle-state probe for this case is a follow-up (#241).
+
+### `GET /v1/health`
+
+Unauthenticated. It answers `ok`, the server's `name` and `version`, its `capabilities`, and
+`logLinesDropped`: the number of log lines this server could write nowhere, because its log sink
+failed and its write to stderr failed too (a stderr whose reader has gone, say). It is `0`
+normally. It is process-wide, counted across every tenant and route, and names no tenant, route
+or error. It never resets except on a restart. Alert on it going above `0`: internal errors
+happened that no log recorded.
 
 ### When the ledger does not answer: `503 ledger_unavailable`
 
