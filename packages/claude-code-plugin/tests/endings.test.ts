@@ -1901,6 +1901,68 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			LONG,
 		);
 
+		// A configured session's launcher forwards the host's SIGTERM to its child and then exits 0 with
+		// a gap, so the run's exit code and signal show nothing of the kill: the only evidence is the
+		// launcher's stderr line. The real session-end hook is built never to outlast its budget
+		// (every read is non-blocking, every call is aborted, every wait is bounded) and the child
+		// runs with a clean environment, so no failpoint reaches it. The child here is therefore a
+		// stand-in session-end.mjs in a copy of the hooks, run by the copy's own launcher: the launcher
+		// is the real code (it spawns the stand-in as the child of a configured session), and the
+		// stand-in asks the server once, with the key only the config file holds, and then stays
+		// running far past the deadline.
+		it(
+			"a configured session whose hook is still running at the deadline is reported killed, though the launcher exits 0",
+			async () => {
+				const copy = nodeFs.realpathSync(await mkdtemp(join(tmpdir(), "utcc-end-hooks-")));
+				nodeFs.cpSync(HOOKS, copy, { recursive: true });
+				await writeFile(
+					join(copy, "session-end.mjs"),
+					[
+						'import { settings } from "./config.mjs";',
+						'import { requireLaunch } from "./lib.mjs";',
+						"requireLaunch();",
+						"const { url, key } = settings();",
+						'await fetch(url + "/v1/health", { headers: { authorization: "Bearer " + key } });',
+						"await new Promise((resolve) => setTimeout(resolve, 30_000));",
+						"",
+					].join("\n"),
+				);
+				const anchor = join(home, ".config", "usertrust");
+				await mkdir(anchor, { recursive: true });
+				await chmod(anchor, 0o700);
+				const config = join(anchor, "session.json");
+				await writeFile(
+					config,
+					JSON.stringify({ url, key: "the-configured-key", mode: "watch", stateDir }),
+				);
+				await chmod(config, 0o600);
+				const end = await runHook(
+					join(HOOKS, "session-end.mjs"),
+					seInput(),
+					{
+						TEST_PASSWD_HOME: home,
+						UT_CC_CONFIG: config,
+						CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "2000",
+					},
+					[],
+					{ hooksDir: copy },
+				);
+				// A CONFIGURED run whose child ran: the environment names no server, so the only way a
+				// request reaches this one, bearing the config file's key, is the child reading its pin.
+				expect(seen.map((request) => request.path)).toEqual(["/v1/health"]);
+				expect(seen[0]?.auth).toBe("Bearer the-configured-key");
+				// The launcher turned the kill into a gap and exited 0, so only its line shows it.
+				expect(end.code).toBe(0);
+				expect(end.stderr).toContain("the hook's process failed (signal SIGTERM)");
+				expect(end.hostDeadlineMs).toBe(2_000);
+				expect(end.killedAtHostDeadline).toBe(true);
+				expect(() => assertNotKilledAtHostDeadline(end)).toThrow(
+					/still running at the host deadline of 2000 ms/,
+				);
+			},
+			LONG,
+		);
+
 		// The runner's own event loop, busy past the deadline, runs the deadline timer BEFORE the
 		// `close` of a hook that exited at once. Killed is decided by how the hook ended. The hook
 		// here is a stub named session-end.mjs that exits without reading its input: the real one

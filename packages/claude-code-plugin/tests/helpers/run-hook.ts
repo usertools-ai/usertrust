@@ -148,6 +148,9 @@ export function forgetPins(env: Record<string, string>): void {
  *   launch.mjs's path (another test-only `--import` preload, say).
  * - `timeoutMs`, when given, kills a hook that runs longer (exit code 1): a test of a
  *   hook that must never hang reports the hang as a failure instead of hanging itself.
+ * - `hooksDir`, when given, runs that directory's launch.mjs for the hook named by `hookPath`'s
+ *   file name instead of the plugin's own: a test's copy of the hooks, in which one hook is a
+ *   stand-in (a hook that stays running, for a path the real one is built never to take).
  * - SessionEnd's host deadline is enforced as Claude Code enforces it: a session-end hook
  *   still running `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` ms after spawn is killed (SIGTERM,
  *   then SIGKILL), or the host's default of 1,500 ms when the run's env leaves the variable
@@ -163,7 +166,7 @@ export function runHook(
 	input: unknown,
 	env: Record<string, string>,
 	nodeArgs: string[] = [],
-	{ timeoutMs }: { timeoutMs?: number } = {},
+	{ timeoutMs, hooksDir }: { timeoutMs?: number; hooksDir?: string } = {},
 ): Promise<HookRunResult> {
 	const inherited = Object.fromEntries(
 		Object.entries(process.env).filter(
@@ -171,9 +174,11 @@ export function runHook(
 		),
 	);
 	const script =
-		dirname(hookPath) === HOOKS && basename(hookPath) !== "launch.mjs"
-			? [LAUNCH, basename(hookPath, ".mjs")]
-			: [hookPath];
+		hooksDir !== undefined
+			? [join(hooksDir, "launch.mjs"), basename(hookPath, ".mjs")]
+			: dirname(hookPath) === HOOKS && basename(hookPath) !== "launch.mjs"
+				? [LAUNCH, basename(hookPath, ".mjs")]
+				: [hookPath];
 	const preload = nodeArgs.includes(PASSWD_HOME_PRELOAD) ? [] : ["--import", PASSWD_HOME_PRELOAD];
 	const hostDeadlineMs = hostDeadlineFor(script, { ...inherited, ...env });
 	// The earlier of the host's deadline and the caller's own: the host's is ours to enforce
