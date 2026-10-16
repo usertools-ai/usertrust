@@ -776,3 +776,417 @@ describe("redactPII — the closed allowlist kept by reference (AbortSignal only
 		expect(out.data).not.toBe(bytes);
 	});
 });
+
+describe("redactPII — non-enumerable fields and an own __proto__ key", () => {
+	const EMAIL = "write to alice@example.com";
+
+	/** Every own key of every object, in order, with its descriptor flags and prototype. */
+	function shape(value: unknown): unknown {
+		if (Array.isArray(value)) return value.map(shape);
+		if (value === null || typeof value !== "object") return value;
+		return {
+			proto: Object.getPrototypeOf(value) === Object.prototype ? "Object.prototype" : "other",
+			keys: Reflect.ownKeys(value).map((k) => {
+				const d = Object.getOwnPropertyDescriptor(value, k) as PropertyDescriptor;
+				return [
+					String(k),
+					"value" in d ? "data" : "accessor",
+					d.enumerable,
+					d.writable,
+					d.configurable,
+					shape(d.value),
+				];
+			}),
+		};
+	}
+
+	/** The clone as it was built before this change: own enumerable keys, ASSIGNED. */
+	function assignedClone(value: unknown): unknown {
+		if (typeof value === "string") return redactPII(value).data;
+		if (Array.isArray(value)) return value.map(assignedClone);
+		if (value === null || typeof value !== "object") return value;
+		const out: Record<string, unknown> = {};
+		for (const key of Object.keys(value)) {
+			out[key] = assignedClone((value as Record<string, unknown>)[key]);
+		}
+		return out;
+	}
+
+	it("a non-enumerable own field is kept, still non-enumerable, and redacted", () => {
+		const config: Record<string, unknown> = { temperature: 0 };
+		Object.defineProperty(config, "systemInstruction", { value: EMAIL, enumerable: false });
+		Object.defineProperty(config, "nested", { value: { note: EMAIL }, enumerable: false });
+		const out = (redactPII({ prompt: EMAIL, config }).data as { config: object }).config;
+		const d = Object.getOwnPropertyDescriptor(out, "systemInstruction");
+		expect(d?.enumerable).toBe(false);
+		expect(d?.value).toBe("[REDACTED:email]");
+		const n = Object.getOwnPropertyDescriptor(out, "nested");
+		expect(n?.enumerable).toBe(false);
+		expect(n?.value).toEqual({ note: "[REDACTED:email]" });
+		expect(Object.keys(out)).toEqual(["temperature"]);
+		expect(JSON.stringify(out)).toBe('{"temperature":0}');
+	});
+
+	it("a non-enumerable function (a hidden toJSON) is not carried into the clone", () => {
+		const carrier: Record<string, unknown> = { text: "plain" };
+		Object.defineProperty(carrier, "toJSON", { value: () => EMAIL, enumerable: false });
+		const out = redactPII({ prompt: EMAIL, carrier }).data as { carrier: object };
+		expect(Object.hasOwn(out.carrier, "toJSON")).toBe(false);
+		expect(JSON.stringify(out)).not.toContain("alice@example.com");
+	});
+
+	it('an own "__proto__" key from JSON.parse stays an own key, redacted; the prototype is unchanged', () => {
+		const input = JSON.parse(
+			`{"prompt":"hi","__proto__":{"note":"${EMAIL}"},"contents":[{"__proto__":"${EMAIL}"}]}`,
+		) as object;
+		expect(Object.hasOwn(input, "__proto__")).toBe(true);
+		const out = redactPII(input).data as { contents: object[] };
+		expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+		expect(Object.getOwnPropertyDescriptor(out, "__proto__")?.value).toEqual({
+			note: "[REDACTED:email]",
+		});
+		expect(Object.getPrototypeOf(out.contents[0])).toBe(Object.prototype);
+		expect(Object.getOwnPropertyDescriptor(out.contents[0], "__proto__")?.value).toBe(
+			"[REDACTED:email]",
+		);
+		expect(Object.keys(out)).toEqual(["prompt", "__proto__", "contents"]);
+		expect(JSON.stringify(out)).toBe(
+			'{"prompt":"hi","__proto__":{"note":"[REDACTED:email]"},"contents":[{"__proto__":"[REDACTED:email]"}]}',
+		);
+	});
+
+	// Unchanged by keeping hidden fields: an accessor is not a data property. detectPII and the clone
+	// each read an enumerable getter once, and the clone keeps its value as plain data.
+	it("accessors: an enumerable getter is read by detection and by the clone, its value kept as redacted data; a non-enumerable one is never invoked", () => {
+		let enumReads = 0;
+		let hiddenReads = 0;
+		const input: Record<string, unknown> = {};
+		Object.defineProperty(input, "shown", {
+			get: () => {
+				enumReads++;
+				return EMAIL;
+			},
+			enumerable: true,
+		});
+		Object.defineProperty(input, "hidden", {
+			get: () => {
+				hiddenReads++;
+				return EMAIL;
+			},
+			enumerable: false,
+		});
+		const out = redactPII(input).data as object;
+		expect(enumReads).toBe(2);
+		expect(hiddenReads).toBe(0);
+		expect(Object.getOwnPropertyDescriptor(out, "shown")).toEqual({
+			value: "[REDACTED:email]",
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
+		expect(Object.hasOwn(out, "hidden")).toBe(false);
+	});
+
+	// Ordinary inputs (own enumerable data keys only): the clone is identical to the one assignment
+	// built, key for key, descriptor for descriptor, prototype for prototype.
+	const ORDINARY: ReadonlyArray<readonly [string, unknown]> = [
+		["no PII", { name: "John", age: 30, active: true }],
+		["an email", { email: "user@example.com" }],
+		["nested objects", { user: { profile: { email: "user@example.com" } } }],
+		["arrays", { emails: ["user@example.com", "admin@test.org"] }],
+		["several types in one string", { note: "Call 234-567-8901 or email user@example.com" }],
+		["an API key", { key: "sk-proj-abc123def456ghi789jkl" }],
+		["non-string values", { count: 42, flag: true, empty: null, email: "user@example.com" }],
+		["empty structures", { a: {}, b: [], c: "" }],
+		["a top-level array", [{ ip: "192.168.1.1" }, "plain", 3]],
+		[
+			"an Anthropic request",
+			{
+				model: "claude-sonnet-4-6",
+				max_tokens: 64,
+				system: EMAIL,
+				messages: [{ role: "user", content: [{ type: "text", text: EMAIL }] }],
+			},
+		],
+		[
+			"an OpenAI request",
+			{
+				model: "gpt-4o",
+				messages: [
+					{ role: "system", content: "be brief" },
+					{ role: "user", content: EMAIL },
+				],
+				tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
+			},
+		],
+		[
+			"a Google request",
+			{
+				model: "gemini-2.5-flash",
+				contents: [{ role: "user", parts: [{ text: EMAIL }] }],
+				config: { temperature: 0, systemInstruction: EMAIL },
+			},
+		],
+		["a JSON.parse request", JSON.parse(`{"messages":[{"role":"user","content":"${EMAIL}"}]}`)],
+	];
+	for (const [label, input] of ORDINARY) {
+		it(`ordinary input, ${label}: identical to the assigned clone`, () => {
+			expect(shape(redactPII(input).data)).toEqual(shape(assignedClone(input)));
+		});
+	}
+});
+
+describe("redactPII — cycles and shared references keep their shape in the copy", () => {
+	const EMAIL = "alice@example.com";
+
+	it("a non-enumerable back-reference to the object itself: no throw, the clone's hidden parent is the clone, the email redacted", () => {
+		const input: Record<string, unknown> = { email: EMAIL };
+		Object.defineProperty(input, "parent", { value: input, enumerable: false });
+		const out = redactPII(input).data as Record<string, unknown>;
+		expect(out.email).toBe("[REDACTED:email]");
+		const d = Object.getOwnPropertyDescriptor(out, "parent");
+		expect(d?.enumerable).toBe(false);
+		expect(d?.value).toBe(out);
+	});
+
+	it("a non-enumerable reference to a grandparent: no throw, it points at the grandparent's clone", () => {
+		const input: Record<string, unknown> = { note: EMAIL, child: { grandchild: { email: EMAIL } } };
+		const grandchild = (input.child as Record<string, Record<string, unknown>>).grandchild;
+		Object.defineProperty(grandchild, "root", { value: input, enumerable: false });
+		const out = redactPII(input).data as {
+			note: string;
+			child: { grandchild: Record<string, unknown> };
+		};
+		expect(out.child.grandchild.email).toBe("[REDACTED:email]");
+		expect(Object.getOwnPropertyDescriptor(out.child.grandchild, "root")?.value).toBe(out);
+		expect(out.note).toBe("[REDACTED:email]");
+	});
+
+	it("one object referenced twice (no cycle): one clone, referenced twice, redacted", () => {
+		const shared = { email: EMAIL };
+		const out = redactPII({ a: shared, b: [shared] }).data as {
+			a: Record<string, unknown>;
+			b: Array<Record<string, unknown>>;
+		};
+		expect(out.a).not.toBe(shared);
+		expect(out.b[0]).toBe(out.a);
+		expect(out.a.email).toBe("[REDACTED:email]");
+	});
+
+	it("an ENUMERABLE cycle: detection overflows before redaction runs (unchanged), so redactPII throws the same RangeError", () => {
+		const input: Record<string, unknown> = { email: EMAIL };
+		input.self = input;
+		const fromDetect = (() => {
+			try {
+				detectPII(input);
+				return undefined;
+			} catch (err) {
+				return err;
+			}
+		})();
+		expect(fromDetect).toBeInstanceOf(RangeError);
+		const fromRedact = (() => {
+			try {
+				redactPII(input);
+				return undefined;
+			} catch (err) {
+				return err;
+			}
+		})();
+		expect(fromRedact).toBeInstanceOf(RangeError);
+		// the overflow is detection's own walk, which this change does not touch
+		expect((fromRedact as Error).stack).toContain("scanValue");
+	});
+});
+
+describe("redactPII — an object reached before config is walked again at config, so its signal stays by reference", () => {
+	const EMAIL = "write to alice@example.com";
+
+	type Out = Record<string, unknown> & { config: { abortSignal: unknown } };
+	/** Each shape, and where its other copy of config lands in the redacted request. */
+	const shapes: Array<[string, (cfg: object) => Record<string, unknown>, (out: Out) => unknown]> = [
+		[
+			"as an earlier key",
+			(cfg) => ({ model: "m", alias: cfg, contents: EMAIL, config: cfg }),
+			(out) => out.alias,
+		],
+		[
+			"inside an earlier content part",
+			(cfg) => ({
+				model: "m",
+				contents: [{ role: "user", parts: [{ text: EMAIL, meta: cfg }] }],
+				config: cfg,
+			}),
+			(out) => (out.contents as Array<{ parts: Array<{ meta: unknown }> }>)[0]?.parts[0]?.meta,
+		],
+		[
+			"as a LATER key",
+			(cfg) => ({ model: "m", contents: EMAIL, config: cfg, backup: cfg }),
+			(out) => out.backup,
+		],
+		[
+			"inside a LATER content part",
+			(cfg) => ({
+				model: "m",
+				config: cfg,
+				contents: [{ role: "user", parts: [{ text: EMAIL, meta: cfg }] }],
+			}),
+			(out) => (out.contents as Array<{ parts: Array<{ meta: unknown }> }>)[0]?.parts[0]?.meta,
+		],
+	];
+	for (const [label, make, other] of shapes) {
+		it(`config also reached ${label}: config.abortSignal is the caller's signal; the other copy's is flattened, as before`, () => {
+			const signal = new AbortController().signal;
+			const cfg = { abortSignal: signal };
+			const out = redactPII(make(cfg)).data as Out;
+			expect(out.config.abortSignal).toBe(signal);
+			// the other copy is its own clone, whose signal is a plain object, never the caller's
+			const copy = other(out) as { abortSignal: unknown };
+			expect(copy).not.toBe(out.config);
+			expect(copy.abortSignal).not.toBe(signal);
+			expect(Object.getPrototypeOf(copy.abortSignal)).toBe(Object.prototype);
+			expect(JSON.stringify(out)).not.toContain("alice@example.com");
+		});
+	}
+
+	it("control: config reached only at config keeps its signal by reference", () => {
+		const signal = new AbortController().signal;
+		const out = redactPII({ model: "m", contents: EMAIL, config: { abortSignal: signal } })
+			.data as {
+			config: { abortSignal: unknown };
+		};
+		expect(out.config.abortSignal).toBe(signal);
+	});
+
+	it("a cycle through config ends: a hidden config.self back to the request, and a hidden config that is the request itself", () => {
+		const signal = new AbortController().signal;
+		const params: Record<string, unknown> = { model: "m", contents: EMAIL };
+		const cfg: Record<string, unknown> = { abortSignal: signal };
+		Object.defineProperty(cfg, "self", { value: params, enumerable: false });
+		params.config = cfg;
+		const out = redactPII(params).data as Record<string, Record<string, unknown>>;
+		expect(out.config?.abortSignal).toBe(signal);
+		expect(Object.getOwnPropertyDescriptor(out.config, "self")?.value).toBe(out);
+
+		const loop: Record<string, unknown> = { model: "m", contents: EMAIL, abortSignal: signal };
+		Object.defineProperty(loop, "config", { value: loop, enumerable: false });
+		const looped = redactPII(loop).data as Record<string, unknown>;
+		const config = Object.getOwnPropertyDescriptor(looped, "config")?.value as Record<
+			string,
+			unknown
+		>;
+		expect(config.abortSignal).toBe(signal);
+		expect(Object.getOwnPropertyDescriptor(config, "config")?.value).toBe(looped);
+	});
+});
+
+describe("redactPII — an array's items are defined on the copy, never assigned", () => {
+	it("an index setter on Array.prototype never runs from redaction, and the copy holds its own redacted [0]", () => {
+		// redactPII is detectPII, then the copy. detectPII, unchanged, assigns its own scan list, which
+		// runs the setter as before; what redaction adds is the difference between the two counts.
+		const calls = { set: 0 };
+		Object.defineProperty(Array.prototype, "0", {
+			get: () => undefined,
+			set: () => {
+				calls.set++;
+			},
+			configurable: true,
+		});
+		try {
+			const input = () => ({ messages: ["mail alice@example.com"] });
+			detectPII(input());
+			const byDetection = calls.set;
+			calls.set = 0;
+			const out = redactPII(input()).data as { messages: unknown[] };
+			expect(calls.set - byDetection).toBe(0);
+			// field by field: a deep comparison would itself read the polluted index
+			const own = Object.getOwnPropertyDescriptor(out.messages, "0");
+			expect(own?.value).toBe("[REDACTED:email]");
+			expect(own?.enumerable).toBe(true);
+			expect(own?.writable).toBe(true);
+			expect(out.messages.length).toBe(1);
+		} finally {
+			Reflect.deleteProperty(Array.prototype, "0");
+		}
+	});
+});
+
+describe("redactPII — signalSent: a request whose transport slot is never serialized (the governor's Google request)", () => {
+	const EMAIL = "write to alice@example.com";
+	type Out = { prompt: string; config: { abortSignal: unknown }; contents?: unknown };
+
+	it("a real signal at config.abortSignal is kept by reference whatever own fields it carries, a cycle among them included", () => {
+		const signal = new AbortController().signal as AbortSignal & Record<string, unknown>;
+		signal.note = EMAIL;
+		signal.self = signal;
+		const { data, detection } = redactPII(
+			{ prompt: EMAIL, config: { abortSignal: signal } },
+			{ signalSent: true },
+		);
+		const out = data as Out;
+		expect(out.config.abortSignal).toBe(signal);
+		expect(out.prompt).not.toContain("alice@example.com");
+		// The signal is not walked, so its field is no finding: it is never sent.
+		expect(detection.paths).toEqual(["prompt(email)"]);
+	});
+
+	it("without it (an action's audit copy, the public detectPII), a real signal with an own field is still walked and its text redacted", () => {
+		const signal = Object.assign(new AbortController().signal, { note: EMAIL });
+		const out = redactPII({ prompt: EMAIL, config: { abortSignal: signal } }).data as Out;
+		expect(out.config.abortSignal).not.toBe(signal);
+		expect(JSON.stringify(out)).not.toContain("alice@example.com");
+		expect(detectPII({ config: { abortSignal: signal } }).paths).toEqual([
+			"config.abortSignal.note(email)",
+		]);
+	});
+
+	it("with it, a look-alike at the slot is still walked and redacted: a spread copy, and a duck-typed object", () => {
+		for (const fake of [
+			{ ...new AbortController().signal, note: EMAIL },
+			{ aborted: false, addEventListener() {}, note: EMAIL },
+		]) {
+			const out = redactPII({ prompt: EMAIL, config: { abortSignal: fake } }, { signalSent: true })
+				.data as Out;
+			expect(out.config.abortSignal).not.toBe(fake);
+			expect(JSON.stringify(out)).not.toContain("alice@example.com");
+		}
+	});
+
+	it("with it, a real signal anywhere but the slot is still walked and redacted", () => {
+		const nested = Object.assign(new AbortController().signal, { note: EMAIL });
+		const clean = new AbortController().signal;
+		const out = redactPII(
+			{
+				prompt: EMAIL,
+				contents: [{ parts: [{ functionResponse: { response: { nested } } }] }],
+				config: { abortSignal: clean },
+			},
+			{ signalSent: true },
+		).data as Out;
+		expect(out.config.abortSignal).toBe(clean);
+		expect(JSON.stringify(out.contents)).not.toContain("alice@example.com");
+	});
+
+	it("a real signal whose prototype derives from AbortSignal.prototype is still kept by the default rule (as instanceof kept it); an object two levels down with no signal state is not", () => {
+		const signal = new AbortController().signal;
+		Object.setPrototypeOf(signal, Object.create(AbortSignal.prototype));
+		expect(isOpaqueTextFree(signal)).toBe(true);
+		const out = redactPII({ prompt: EMAIL, config: { abortSignal: signal } }).data as Out;
+		expect(out.config.abortSignal).toBe(signal);
+		expect(isOpaqueTextFree(Object.create(Object.create(AbortSignal.prototype)) as object)).toBe(
+			false,
+		);
+	});
+
+	it("the brand check runs no caller code: a Proxy of a real signal is not opaque, and its getPrototypeOf trap never runs", () => {
+		let traps = 0;
+		const proxy = new Proxy(new AbortController().signal, {
+			getPrototypeOf(target) {
+				traps++;
+				return Reflect.getPrototypeOf(target);
+			},
+		});
+		expect(isOpaqueTextFree(proxy)).toBe(false);
+		expect(traps).toBe(0);
+	});
+});

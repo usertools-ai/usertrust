@@ -1076,7 +1076,8 @@ export function verifyTransaction(
 		return {
 			found: false,
 			valid: false,
-			receipt: renderNotFound(txId),
+			// Nothing could be read: never the absolute "no event exists" sentence.
+			receipt: renderNotFound(txId, false),
 			errors: [`Audit log not found: ${mainLog}`],
 		};
 	}
@@ -1093,7 +1094,7 @@ export function verifyTransaction(
 			found: false,
 			valid: false,
 			busy: true,
-			receipt: renderNotFound(txId),
+			receipt: renderNotFound(txId, false),
 			errors: reading.result.errors,
 		};
 	}
@@ -1103,14 +1104,15 @@ export function verifyTransaction(
 			? {
 					found: false,
 					valid: false,
-					receipt: renderNotFound(txId),
+					// A clean, empty reading: the classification agreed the anchor records no events.
+					receipt: renderNotFound(txId, true),
 					errors: ["Audit log is empty"],
 				}
 			: {
 					found: false,
 					valid: false,
 					failed: true,
-					receipt: renderNotFound(txId),
+					receipt: renderNotFound(txId, false),
 					errors: reading.result.errors,
 				};
 	}
@@ -1174,10 +1176,12 @@ export function verifyTransaction(
 	if (targetEvent === undefined) {
 		const errors = vaultErrors.map(scrubForError);
 		// A segment, or the directory, that could not be read may hold the transfer's records: never
-		// "not found" there (a verdict on records nobody read), a failure.
+		// "not found" there (a verdict on records nobody read), a failure. The absolute receipt sentence only
+		// for a reading with no errors: a missing segment or a failed chain may hold the records asked for.
+		const receipt = renderNotFound(txId, vaultErrors.length === 0);
 		return reading.result.errors.some(isUnreadError)
-			? { found: false, valid: false, failed: true, receipt: renderNotFound(txId), errors }
-			: { found: false, valid: false, receipt: renderNotFound(txId), errors };
+			? { found: false, valid: false, failed: true, receipt, errors }
+			: { found: false, valid: false, receipt, errors };
 	}
 
 	// The chain's verdict, from the same snapshot.

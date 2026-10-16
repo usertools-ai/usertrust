@@ -9,6 +9,7 @@ import { wrapCompleteWithGovernance, wrapStreamWithGovernance } from "../src/str
 import type { Context, StreamEvent, StreamFn, StreamOptions, Usage } from "../src/types.js";
 import {
 	asHostStream,
+	awaitSettled,
 	doneEvent,
 	makeAssistantMessage,
 	makeContext,
@@ -17,7 +18,6 @@ import {
 	startEvent,
 	streamOf,
 	textDelta,
-	withTimeout,
 } from "./host-fixtures.js";
 
 /**
@@ -465,7 +465,7 @@ describe("wrapStreamWithGovernance result() settlement", () => {
 		// Iterating first marks the stream consumed, so `result()` cannot fall
 		// back to its own drain — the governed run has to settle the deferred.
 		await expect(drain(stream)).rejects.toThrow("policy_denied");
-		await expect(withTimeout(stream.result())).rejects.toThrow("policy_denied");
+		await expect(awaitSettled(() => stream.result())).rejects.toThrow("policy_denied");
 	});
 
 	it("rejects result() on a policy DENY for a result()-only consumer", async () => {
@@ -474,7 +474,7 @@ describe("wrapStreamWithGovernance result() settlement", () => {
 		const governed = wrapStreamWithGovernance(mockStreamFn(okEvents), gov);
 		const stream = await governed(model, makeContext());
 
-		await expect(withTimeout(stream.result())).rejects.toThrow("policy_denied");
+		await expect(awaitSettled(() => stream.result())).rejects.toThrow("policy_denied");
 	});
 
 	it("rejects result() when the budget is exhausted and the consumer also iterates", async () => {
@@ -484,7 +484,7 @@ describe("wrapStreamWithGovernance result() settlement", () => {
 		const stream = await governed(model, makeContext());
 
 		await expect(drain(stream)).rejects.toThrow("budget exhausted");
-		await expect(withTimeout(stream.result())).rejects.toThrow("budget exhausted");
+		await expect(awaitSettled(() => stream.result())).rejects.toThrow("budget exhausted");
 	});
 
 	it("rejects result() when settle fails after the provider stream succeeded", async () => {
@@ -496,7 +496,7 @@ describe("wrapStreamWithGovernance result() settlement", () => {
 		// The provider's own `result()` resolves as soon as its stream ends —
 		// well before settle runs. `result()` must not report that success.
 		await expect(drain(stream)).rejects.toThrow("settle_failed");
-		await expect(withTimeout(stream.result())).rejects.toThrow("settle_failed");
+		await expect(awaitSettled(() => stream.result())).rejects.toThrow("settle_failed");
 	});
 
 	it("surfaces a settle failure to a result()-only consumer instead of swallowing it", async () => {
@@ -505,7 +505,7 @@ describe("wrapStreamWithGovernance result() settlement", () => {
 		const governed = wrapStreamWithGovernance(mockStreamFn(okEvents), gov);
 		const stream = await governed(model, makeContext());
 
-		await expect(withTimeout(stream.result())).rejects.toThrow("settle_failed");
+		await expect(awaitSettled(() => stream.result())).rejects.toThrow("settle_failed");
 	});
 
 	it("rejects result() when the provider stream itself fails mid-flight", async () => {
@@ -513,7 +513,7 @@ describe("wrapStreamWithGovernance result() settlement", () => {
 		const stream = await governed(model, makeContext());
 
 		await expect(drain(stream)).rejects.toThrow("stream_failed");
-		await expect(withTimeout(stream.result())).rejects.toThrow("stream_failed");
+		await expect(awaitSettled(() => stream.result())).rejects.toThrow("stream_failed");
 	});
 
 	it("rejects result() when the consumer abandons the stream early", async () => {
@@ -524,7 +524,9 @@ describe("wrapStreamWithGovernance result() settlement", () => {
 			break; // caller walks away before `done`
 		}
 
-		await expect(withTimeout(stream.result())).rejects.toThrow("abandoned before completion");
+		await expect(awaitSettled(() => stream.result())).rejects.toThrow(
+			"abandoned before completion",
+		);
 	});
 
 	it("resolves result() with the host's final message, and only after settle", async () => {
@@ -547,7 +549,7 @@ describe("wrapStreamWithGovernance result() settlement", () => {
 		const stream = await governed(model, makeContext());
 
 		const iteration = drain(stream);
-		const got = await withTimeout(stream.result());
+		const got = await awaitSettled(() => stream.result());
 		order.push("result");
 		await iteration;
 

@@ -86,7 +86,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx biome check .
+      # The repository's own biome: a missing one fails, where npx would fetch whatever package
+      # owns the name.
+      - run: ./node_modules/.bin/biome check .
+      # `biome check` passes a file whose remaining fixes are only warnings or infos, and
+      # `biome check --write` applies them. So a tree this job accepted could still be rewritten
+      # by a later --write (the release formats with one). It must change nothing here.
+      - name: biome check --write changes nothing
+        run: |
+          ./node_modules/.bin/biome check --write .
+          git diff --exit-code
 
   typecheck:
     name: typecheck
@@ -292,6 +301,11 @@ jobs:
           # The gated tests write this into tigerbeetle.addresses; "3000" resolves to
           # 127.0.0.1:3000, matching the server's --addresses=3000 bind above.
           USERTRUST_TB_ADDRESS: "3000"
+          # The binary downloaded above, for the suites that run their OWN cluster on a free port,
+          # never the shared one above: `ledger-outage.tb.test.ts` stops and restarts its cluster,
+          # and `evicted-client.tb.test.ts` and `evicted-tenant.tb.test.ts` evict sessions from
+          # their own (the first fails, rather than skips, when this is unset).
+          USERTRUST_TB_BINARY: ${{ github.workspace }}/tigerbeetle
         # Every real-cluster suite in the repo, named explicitly rather than by
         # directory: `packages/openclaw/tests/envelope-integration.test.ts` does not
         # live under any integration/ folder, and a glob over
@@ -313,8 +327,11 @@ jobs:
           packages/core/tests/integration/destroy.tb.test.ts
           packages/core/tests/integration/reconciliation-cache-day.tb.test.ts
           packages/core/tests/integration/job.tb.test.ts
+          packages/core/tests/integration/evicted-client.tb.test.ts
           packages/openshell/tests/engine.tb.test.ts
           packages/openclaw/tests/envelope-integration.test.ts
+          packages/server/tests/ledger-outage.tb.test.ts
+          packages/server/tests/evicted-tenant.tb.test.ts
 
   site-build:
     name: site-build

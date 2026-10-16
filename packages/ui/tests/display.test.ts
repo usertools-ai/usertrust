@@ -10,6 +10,7 @@ import {
 	listState,
 	transferView,
 	usageView,
+	verifiedAsOf,
 	windowNotice,
 } from "../src/shared/display.js";
 import type { LedgerRow } from "../src/shared/rows.js";
@@ -162,5 +163,22 @@ describe("windowNotice", () => {
 				chain: { events: 20, valid: true, empty: false, breakIndex: null, errors: [] },
 			}),
 		).toBeNull();
+	});
+});
+
+describe("verifiedAsOf: when the integrity verdict was last derived from a full read", () => {
+	it("shows the instant of the last full read in the reader's local time", () => {
+		const local = (d: Date): string => `local(${d.toISOString()})`;
+		expect(verifiedAsOf("2026-10-13T09:15:00.000Z", local)).toBe(
+			"verified as of local(2026-10-13T09:15:00.000Z)",
+		);
+	});
+
+	it("says no full read has succeeded yet, never a time, when there is none", () => {
+		expect(verifiedAsOf(null)).toBe("not yet read in full");
+	});
+
+	it("shows an unparseable value as it is, never as a made-up time", () => {
+		expect(verifiedAsOf("not a time", () => "never")).toBe("verified as of not a time");
 	});
 });

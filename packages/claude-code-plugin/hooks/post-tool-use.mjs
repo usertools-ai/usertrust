@@ -375,7 +375,7 @@ try {
 		// SubagentStop, SessionEnd), a deferral. An ESTIMATE hold is charged by this hook alone, and
 		// a later one only gives it back: its charge is lost, a gap.
 		const estimate = entry !== null && entry.usage !== "transcript";
-		if (usageMode() === "transcript") await stampFirstRun();
+		if (usageMode() === "transcript") await stampFirstRun(input.session_id);
 		// The estimate hold's call RAN, so the hold is claimed as settle-attempted
 		// (`claimForSettle`: a local rename, nothing sent), the state that says so. Left `.json`, it
 		// would read as a call that never reached this hook: Stop would give it back as

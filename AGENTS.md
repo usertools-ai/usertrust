@@ -47,7 +47,9 @@ Monorepo, npm workspaces (`packages/*`). `site/` is a Next.js app and is **not**
 | `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. The workspace name is internal; the plugin is published as `usertools` (`/plugin install usertools@usertrust`). |
 
 The first six are version-locked and released together. `monte-cristo` and `claude-code-plugin`
-are not.
+are not. Each of the six names any other it depends on at exactly its own version, never a range
+such as `"*"`: the release sets and checks those pins (docs/releasing.md, "Sibling dependencies
+are pinned").
 
 **No brand asset is committed to this repository**: no font file of any kind (Usertools Sans and
 every other face, first-party or OFL), no logo or mark, no lattice code. `site/` loads them at
@@ -119,22 +121,29 @@ rejection of the hold — throws out to its flow's **denial boundary**, which ap
 as `auditEventHash`, and rethrows. The boundary is a `catch` wrapped **around** the
 try/finally that releases the budget mutex, so the append runs with the lock already
 released; and it ends **lexically before** the provider call in step 6, so a provider that
-throws a same-typed error is never audited as a governor decision. There are **five append
-sites**: the mutex-section boundary in each of the three flows, plus a pre-mutex
-unknown-model site in `interceptCall` and headless `authorize` — actions have no model to
-price, so `governActionImpl` has only the mutex one. Four of the five are `catch (denialErr)`
-blocks; the exception is headless's pre-mutex site, which appends inline before an
-unconditional `throw` because the throw is right there and needs no catch to intercept it.
-Grepping `catch (denialErr)` therefore finds four, not five. Payloads and rationale live in
-`audit/denial-events.ts`.
+throws a same-typed error is never audited as a governor decision. There are **seven append
+sites**: the mutex-section boundary in each of the three flows, a pre-mutex unknown-model
+site in `interceptCall` and in headless `authorize` (actions have no model to price, so
+`governActionImpl` has only the mutex one), the pre-mutex entry refusal at the top of
+`interceptCall` (`entryRefusal`: a request option off the governed list, `movedRequestOptions`,
+or a request that cannot be serialized, `unserializableRequestError`; before anything is held,
+scanned or sent), and
+`refuseUngovernedMethod`, which records a call default-deny refuses (an ungoverned SDK method,
+a call through the raw client, a Google automatic-function-calling refusal, or a
+`withOptions()` client whose transport changed) before any of it reaches a flow.
+Four of the seven are `catch (denialErr)` blocks. The exceptions are headless's pre-mutex
+unknown-model site, `interceptCall`'s entry refusal and `refuseUngovernedMethod`,
+which append inline before an unconditional `throw`, because the throw is right there and
+needs no catch to intercept it. Grepping `catch (denialErr)` therefore finds four, not seven.
+Payloads and rationale live in `audit/denial-events.ts`.
 
 `destroy()` waits up to 5s, one deadline for all of them, for the terminals still working (a
 settle's POST, an abort or release parked on its void). At the deadline it takes every remaining
 hold in ONE synchronous step, before its first await: it records each abort or release still in
 flight, and voids and records (`hold_released`, `governor destroyed`) each hold still held. Then it
 voids the engine's remaining pending transfers, and flushes and releases the audit writer. Every
-teardown step (that drain, the sweep, the flush, the release, then the engine and proxy destroy)
-always runs, through `runTeardownSteps`: a step that throws skips none after it, and destroy()
+teardown step (that drain, the sweep, the flush, the release, then the engine's `close()`, awaited,
+or its `destroy()` for an engine without one, and the proxy destroy) always runs, through `runTeardownSteps`: a step that throws skips none after it, and destroy()
 rejects with its error (several as one `AggregateError`, in step order) only once the last has run. An
 `authorize()` refuses from destroy()'s start, and one still reserving registers no hold: it gives
 back its accounting and fails, and sends no void (the engine sweep, or the ledger's pending timeout
@@ -292,11 +301,17 @@ from then on nothing reconnects and no request reaches a native client. An opera
   runs before the operation's own input checks and before any shortcut that answers without the
   ledger (a cached wallet id), so an operation started after `destroy()` fails with
   `LedgerClientClosedError` whatever its arguments. A caller can tell shutdown from a refused input.
+  `close()` is the one exception: it is internal teardown (`destroy()` after an eviction probe), and
+  after `destroy()` it returns, as a second `destroy()` does. A governor's teardown awaits it, and a
+  finished shutdown must not turn into a rejection.
 - **At each request**, `native()` checks `closed` at the moment the request is made, because an
   await lets `destroy()` land between an operation's steps, or between a reconnect and its retry.
-  Only `withReconnect()` calls `native()`, for the request and for its retry. It hands the client
-  to a closure that makes its one request at once. A native destroy that throws leaves its client
-  open, and this check is what keeps requests off it.
+  `withReconnect()` calls `native()` for the request and for its retry, and hands the client to a
+  closure that makes its one request at once. `close()` calls it once, for its probe, which goes
+  through `send()` (so an eviction marks the client) but not through `withReconnect()` (a shutdown
+  probe must never reconnect). `native()` still checks `closed` there, and `close()` does not use
+  the reference after its await: the `destroy()` that follows reads the client again. A native
+  destroy that throws leaves its client open, and this check is what keeps requests off it.
 
 The rest of the closed state:
 - `ping()` reports unhealthy.
@@ -309,9 +324,9 @@ The rest of the closed state:
   touch only this object's memory and are not refused.
 
 The tests hold this. Two parse `client.ts` and fail in any of these cases:
-- a public async method other than `ping()` does not open with `this.assertOpen()`;
+- a public async method other than `ping()` and `close()` does not open with `this.assertOpen()`;
 - anything but the constructor, `native()`, `_doReconnect()` and `destroy()` reads the native client;
-- anything but `withReconnect()` calls `native()`;
+- anything but `withReconnect()` (and `close()`, once, for its probe) calls `native()`;
 - a request closure is anything but `(native) => native.<request>(…)`.
 
 Another set runs every operation with `destroy()` landing at each of its await boundaries.
@@ -649,8 +664,9 @@ no auditor can reproduce from the record.
 data for a `cache_control` with `ttl: "1h"`. `trust()` then reads that body everywhere (hold
 verdict, PII and injection scans, redaction) and forwards it, so a getter or `toJSON` that answers
 5-minute to a scan and 1-hour to the SDK has nothing left to flip: the SDK never sees the original.
-A request that cannot be serialized to a JSON object (a cycle, a BigInt, a throwing hook) holds
-dearest and is forwarded as given; the dearest hold covers whatever it then writes. Google is the
+A request that cannot be serialized to a JSON object (a cycle, a BigInt, a throwing hook) is
+REFUSED at entry (`unserializableRequestError`), before anything is held or sent: forwarding it
+as given let a hook that throws once and then answers send what no scan saw. Google is the
 named exception to forwarding the body: its SDK reads callable members off the request, so the
 original goes through; Google has no 1-hour tier and its extractor never reports a 1-hour share, so
 a flip cannot under-hold there. *Prevents:* the property-walk scan this replaced, which had to
@@ -1644,7 +1660,14 @@ exit 0. A verifier that certifies the wrong subject is the worst failure it can 
 
 ### Client detection
 
-**Duck typing only; never import a provider SDK at runtime.** `detect.ts` imports types only.
+Detection stays duck-typed, and provider SDKs stay optional peers. `detect.ts` imports types only.
+The ONE exception: `packages/core/src/google-request.ts` may `import()` the optional peer
+`@google/genai`, only to obtain the `Models` pipeline the behavioural probe accepts; if it is absent
+or fails the probe, every governed Google call is refused. Nothing else imports a provider SDK at
+runtime: `packages/core/tests/detect/no-runtime-provider-import.test.ts` fails on any other runtime
+reference, including a specifier held in a variable. The reason: usertrust never runs a client's own,
+unverified `Models` before authorization; the SDK exports no request converters or transport hook,
+so its own pipeline is the only way to build the exact request it sends.
 `@anthropic-ai/sdk`, `openai` and `@google/genai` are **optional** peer dependencies. Their floors
 (`>=0.116.0`, `>=7.4.0`, `>=1.52.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
 versions the default-deny free list was classified on. Moving a floor means re-running that
@@ -1687,8 +1710,9 @@ reads; a refused wrapper builds a fresh error per call.
 `FREE_METHODS.google` cites `dist/node/index.mjs:LINE VERB path` per entry.
 `GOOGLE_REFUSED_METHODS` in `govern.ts` is a HINT table only (its names get the governAction() hint);
 it refuses nothing itself. With automatic
-function calling (ONE reading, `afcRequested` / `sdkRunsAfc` in `google-afc.ts`, a mirror of the
-SDK's `shouldDisableAfc`, made on a snapshot of the request that is then what is forwarded),
+function calling (decided by the SDK itself: `google-request.ts` runs the SDK's own request pipeline
+over the request against a transport stand-in that sends nothing, and the plain-data copy of what
+it read, checked per call by a second run, is what is forwarded),
 `models.generateContent` runs the loop itself, each round its own governed call
 (`runGovernedAfc`, which calls the SDK's own `generateContentInternal` on the RAW `models`), and
 `models.generateContentStream` is refused (a streamed loop is not metered per round yet).

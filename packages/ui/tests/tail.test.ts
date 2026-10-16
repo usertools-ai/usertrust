@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import {
 	appendFileSync,
 	chmodSync,
@@ -11,7 +11,10 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	statSync,
 	truncateSync,
+	unlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,8 +23,9 @@ import { transferIdHash } from "usertrust-verify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
-import { createUiServer, type UiServer } from "../src/server/server.js";
-import { watchLedger } from "../src/server/tail.js";
+import { CLOSE_GRACE_MS, createUiServer, type UiServer } from "../src/server/server.js";
+import { fileIdentity } from "../src/server/state.js";
+import { __tailTestSeam, watchLedger } from "../src/server/tail.js";
 
 async function readSse(
 	port: number,
@@ -389,6 +393,7 @@ describe("header spend", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await ui?.close();
 		ui = undefined;
 		rmSync(tempDir, { recursive: true, force: true });
@@ -432,6 +437,59 @@ describe("header spend", () => {
 			append("llm_call", { cost: 2, transferId: "tx_d" }),
 		);
 		expect(JSON.parse(afterCall.data).spentUt).toBe(9);
+	});
+
+	// Measured on the unfixed close(): about 3.7 s here, against about CLOSE_GRACE_MS (400 ms) once it cuts the remaining connections.
+	// One live-tail wait leaves close() fast; two in a row hold it. Which connection is held is not established.
+	// The row asserts what ended the close, never how long it took: under load the same close() measured 1.5 to 2.2 s
+	// against a 1.5 s bound, and two live-tail waits alone passed the 5 s default. The unfixed close() armed no grace timer,
+	// so a held connection kept it waiting for the keep-alive timeout. A fixed close() either has nothing held (the timer
+	// is cleared before it fires) or its grace timer fires and cuts, and only then resolves. The timeout is derived: each
+	// wait is bounded by its own deadline, and close() by the grace.
+	it("close() ends by the grace timer's cut, not by a held connection's own timeout, after two live-tail waits", {
+		timeout: 2 * 5000 + 2 * CLOSE_GRACE_MS + 5000,
+	}, async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const port = ui.port;
+		for (const id of ["tx_a", "tx_b"]) {
+			await readSse(
+				port,
+				(name) => name === "summary",
+				async () => {
+					const writer = createAuditWriter(tempDir);
+					await writer.appendEvent({
+						kind: "llm_call",
+						actor: "local",
+						data: { cost: 1, transferId: id },
+					});
+					writer.release();
+				},
+			);
+		}
+		const order: string[] = [];
+		const graceTimers: NodeJS.Timeout[] = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const realCutAll = ui.server.closeAllConnections.bind(ui.server);
+		vi.spyOn(ui.server, "closeAllConnections").mockImplementation(() => {
+			order.push("cut");
+			realCutAll();
+		});
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+			if (ms !== CLOSE_GRACE_MS) return realSetTimeout(fn, ms);
+			const timer = realSetTimeout(() => {
+				order.push("grace-timer-fired");
+				fn();
+			}, ms);
+			graceTimers.push(timer);
+			return timer;
+		}) as unknown as typeof setTimeout);
+		await ui.close();
+		order.push("close-resolved");
+		ui = undefined;
+		expect(graceTimers).toHaveLength(1);
+		expect([["close-resolved"], ["grace-timer-fired", "cut", "close-resolved"]]).toContainEqual(
+			order,
+		);
 	});
 });
 
@@ -912,8 +970,10 @@ describe("a deletion detected while the dashboard is open stays detected when th
 // poll can land while the directory is half removed: the log is already gone, the resync it triggers reads a directory
 // that still exists and holds nothing, and the directory's own removal is no further change to the log's path. The
 // dashboard then kept reading a verified, empty chain over a deleted audit directory. rmSync in the test's own process
-// cannot show it (it blocks the event loop, so no poll ever lands inside it); a separate process removing a large
-// directory can.
+// cannot show it (it blocks the event loop, so no poll ever lands inside it). The polling row stages the half-removed
+// state itself, in two steps with the observation between them, instead of racing a poll against a large `rm -rf`: the
+// race needed 60 000 files and a separate process, and a loaded host spent a minute or more only building and removing
+// them, so the row measured the filesystem and not the poller.
 describe("a deletion soon after the last change is observed", { timeout: 40_000 }, () => {
 	let tempDir: string;
 	let stage: string;
@@ -947,25 +1007,27 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 		writer.release();
 	}
 
-	/** Extra files in the audit directory, so that removing it takes longer than one poll interval. */
-	function padAudit(root: string): void {
-		const dir = join(root, ".usertrust", "audit");
-		for (let i = 0; i < PAD_FILES; i++) writeFileSync(join(dir, `pad-${i}`), "");
-	}
+	const isDirectoryGone = (s: ChainSummary): boolean =>
+		!s.chain.valid && s.chain.errors.some((e) => e.includes("Audit directory not found"));
 
 	/**
 	 * From the delivered append on: wait `delayMs`, delete the whole audit directory (no reload), and require the summary
 	 * to read the deletion within OBSERVE_BOUND_MS of the removal's END and never go back to valid. Until the directory is
 	 * gone, a half-removed one that holds nothing legitimately reads as empty: the deletion is not complete yet.
+	 * `observedWhen` is what has to be read, and it is asserted: `summaryWhen` hands back its last summary when the
+	 * bound passes, so without the assertion a caller whose predicate never held still passed on a deletion read earlier.
+	 * It defaults to the deletion itself.
 	 */
 	async function deleteAndObserve(
 		port: number,
 		delayMs: number,
 		remove: () => void | Promise<void>,
+		observedWhen: (s: ChainSummary) => boolean = isDeletion,
 	): Promise<void> {
 		await new Promise((r) => setTimeout(r, delayMs));
 		await remove();
-		const observed = await summaryWhen(port, isDeletion, OBSERVE_BOUND_MS);
+		const observed = await summaryWhen(port, observedWhen, OBSERVE_BOUND_MS);
+		expect(observedWhen(observed)).toBe(true);
 		expect(observed.chain.valid).toBe(false);
 		expect(observed.chain.errors.join(" ")).toContain("deletion detected");
 		// Once read, it is never valid again across a further window past the poll interval.
@@ -978,8 +1040,6 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 		}
 	}
 
-	// 60 000 files take a few seconds to remove, so more than one 1 s poll lands inside the removal.
-	const PAD_FILES = 60_000;
 	// 4000 ms: four 1 s poll intervals past the end of the removal, so a miss is a real miss and a slow runner is not.
 	const OBSERVE_BOUND_MS = 4000;
 
@@ -987,7 +1047,6 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 		it("polling mode (absent at start): the deletion is read within the bound, with no reload", async () => {
 			mkdirSync(join(stage, ".usertrust", "audit"), { recursive: true });
 			await appendMany(stage, 2, "tx_first");
-			padAudit(stage);
 			ui = await createUiServer(tempDir, { port: 0 });
 			expect((await summaryOf(ui.port)).chain).toMatchObject({
 				events: 0,
@@ -1000,14 +1059,24 @@ describe("a deletion soon after the last change is observed", { timeout: 40_000 
 			await appendOne(tempDir, "tx_last");
 			const delivered = await summaryWhen(ui.port, (s) => s.chain.events === 3);
 			expect(delivered.chain).toMatchObject({ events: 3, valid: true });
-			// Another process removes the large directory, so the poll can land while it is half removed.
+			// Half removed on purpose: the log and its anchor go first and the directory stays, so the resync the
+			// poller asks for reads a directory that exists. Only once that is served is the directory removed, and the
+			// poller must then notice the directory itself going: no further change to the log's path follows.
+			const port = ui.port;
 			await deleteAndObserve(
-				ui.port,
+				port,
 				delayMs,
-				() =>
-					new Promise<void>((resolve) => {
-						spawn("rm", ["-rf", auditDir()], { stdio: "ignore" }).on("close", () => resolve());
-					}),
+				async () => {
+					unlinkSync(join(auditDir(), "events.jsonl"));
+					unlinkSync(join(auditDir(), "events.jsonl.meta"));
+					// `summaryWhen` returns its last summary when the bound passes, so the first stage is asserted: a watcher
+					// that never read the log's removal would otherwise leave this stage on a stale valid summary.
+					const logGone = await summaryWhen(port, isDeletion, 15_000);
+					expect(isDeletion(logGone)).toBe(true);
+					expect(logGone.chain.errors.join(" ")).not.toContain("Audit directory not found");
+					rmSync(auditDir(), { recursive: true, force: true });
+				},
+				isDirectoryGone,
 			);
 		});
 
@@ -1352,5 +1421,744 @@ describe("the polling watcher's own interval", { timeout: 20_000 }, () => {
 		} finally {
 			stop();
 		}
+	});
+});
+
+// In fs.watch mode (the audit directory present at start), nothing but a file-change event used to run a check, and the
+// operating system can deliver one late or never: on macOS, an append's event was observed about 45 s late while another
+// test suite was running, and the dashboard showed nothing new until a later write. A backstop checks the log every
+// second. These rows replace fs.watch with a stub that never calls back, so whatever they observe came from the backstop.
+// The watcher-level rows use vitest's fake timers at the production interval, so each tick is placed exactly and the
+// bound is the real one; the server-level rows use real timers and a shortened interval, because they wait on HTTP.
+class StubWatcher extends EventEmitter {
+	closed = 0;
+	close(): void {
+		this.closed++;
+	}
+}
+
+describe("fs.watch mode's backstop when file-change events arrive late or never", {
+	timeout: 20_000,
+}, () => {
+	const original = { ...__tailTestSeam };
+	let stubs: StubWatcher[];
+	let vault: string;
+	const auditDir = (): string => join(vault, "audit");
+	const logPath = (): string => join(auditDir(), "events.jsonl");
+
+	beforeEach(() => {
+		stubs = [];
+		// Like fs.watch, the stub throws on a directory that does not exist, so an absent start is still the polling mode.
+		__tailTestSeam.watch = ((dir: string) => {
+			if (!existsSync(dir)) throw Object.assign(new Error(`ENOENT: ${dir}`), { code: "ENOENT" });
+			const w = new StubWatcher();
+			stubs.push(w);
+			return w;
+		}) as unknown as typeof __tailTestSeam.watch;
+		vault = mkdtempSync(join(tmpdir(), "trust-tail-backstop-"));
+		mkdirSync(auditDir(), { recursive: true });
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		Object.assign(__tailTestSeam, original);
+		rmSync(vault, { recursive: true, force: true });
+	});
+
+	/**
+	 * Starts the watcher over the vault with a known size the row controls, recording what it delivers. `auditDirId` is
+	 * the audit directory's identity as the server recorded it (none by default).
+	 */
+	function start(known: () => number, auditDirId?: () => string | undefined) {
+		const delivered: string[] = [];
+		let sizeOfCalls = 0;
+		const stop = watchLedger(
+			vault,
+			() => {
+				sizeOfCalls++;
+				return known();
+			},
+			{ onGrow: () => delivered.push("grow"), onResync: () => delivered.push("resync") },
+			undefined,
+			auditDirId,
+		);
+		return { delivered, stop, sizeOfCalls: () => sizeOfCalls };
+	}
+
+	const BOUND = 1000;
+	const tick = (n = 1): void => {
+		vi.advanceTimersByTime(BOUND * n);
+	};
+
+	describe("at the watcher", () => {
+		beforeEach(() => {
+			vi.useFakeTimers();
+			expect(__tailTestSeam.backstopMs).toBe(BOUND);
+		});
+
+		it("red-first (never seen): an append with no event reaches the server within one interval", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			try {
+				expect(stubs).toHaveLength(1);
+				tick();
+				expect(w.delivered).toEqual([]);
+				appendFileSync(logPath(), "{}\n");
+				tick();
+				expect(w.delivered).toEqual(["grow"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (never seen): the audit directory's removal with no event reaches the server within one interval", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			try {
+				tick();
+				expect(w.delivered).toEqual([]);
+				rmSync(auditDir(), { recursive: true, force: true });
+				tick();
+				expect(w.delivered).toEqual(["resync"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (read every tick): a torn last line is read once, not once per tick", () => {
+			// A complete line, then a writer that died mid-line: the known size stops at the newline.
+			writeFileSync(logPath(), '{}\n{"partial');
+			const w = start(() => 3);
+			try {
+				tick(10);
+				expect(w.delivered).toEqual(["grow"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("guard: an unchanged log over many intervals delivers nothing", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			try {
+				tick(10);
+				expect(w.delivered).toEqual([]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (memo never re-armed): a change of mtime alone, at the same size, checks again", () => {
+			writeFileSync(logPath(), '{}\n{"partial');
+			const w = start(() => 3);
+			try {
+				tick(3);
+				expect(w.delivered).toEqual(["grow"]);
+				utimesSync(logPath(), new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+				tick(3);
+				expect(w.delivered).toEqual(["grow", "grow"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (memo never re-armed): a change of the known size alone checks again", () => {
+			writeFileSync(logPath(), '{}\n{"partial');
+			let known = 3;
+			const w = start(() => known);
+			try {
+				tick(3);
+				expect(w.delivered).toEqual(["grow"]);
+				known = 2;
+				tick(3);
+				expect(w.delivered).toEqual(["grow", "grow"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (memo hides a replacement): two stats that differ only in an inode above 2^53 check again", () => {
+			// Windows file ids are 64-bit: as JS numbers, 2^53 and 2^53 + 1 are one value.
+			writeFileSync(logPath(), '{}\n{"partial');
+			let ino = 2n ** 53n;
+			__tailTestSeam.statLog = (p) => ({ ...statSync(p, { bigint: true }), ino });
+			const w = start(() => 3);
+			try {
+				tick(3);
+				expect(w.delivered).toEqual(["grow"]);
+				ino = 2n ** 53n + 1n;
+				expect(Number(ino)).toBe(Number(2n ** 53n));
+				tick(3);
+				expect(w.delivered).toEqual(["grow", "grow"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (reload every tick): a stat error resyncs once, and the same error with the same known size never again", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			try {
+				tick();
+				rmSync(logPath());
+				tick(10);
+				expect(w.delivered).toEqual(["resync"]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		const noLogBytes: Array<[string, () => void]> = [
+			["no log", () => {}],
+			[
+				"only an anchor",
+				() =>
+					writeFileSync(
+						`${logPath()}.meta`,
+						JSON.stringify({ lastHash: "0".repeat(64), sequence: 0 }),
+					),
+			],
+			["an empty log", () => writeFileSync(logPath(), "")],
+		];
+		/** The audit directory's identity now, as the server records it when it first sees the directory. */
+		const dirIdentity = (): string => {
+			const st = statSync(auditDir(), { bigint: true });
+			return st.birthtimeNs === 0n
+				? `${st.dev}:${st.ino}`
+				: `${st.dev}:${st.ino}:${st.birthtimeNs}`;
+		};
+
+		// A directory that held no log bytes changes no size when it is deleted (an absent log reads as 0, and so does the
+		// known size): the directory's own identity is what sees it, on the backstop with no event at all.
+		it.each(noLogBytes)(
+			"red-first (deletion read as a first run): a directory holding %s, present at start and then deleted, delivers one resync",
+			(_name, populate) => {
+				populate();
+				const recorded = dirIdentity();
+				const w = start(
+					() => 0,
+					() => recorded,
+				);
+				try {
+					tick(2);
+					expect(w.delivered).toEqual([]);
+					rmSync(auditDir(), { recursive: true, force: true });
+					tick(10);
+					expect(w.delivered).toEqual(["resync"]);
+				} finally {
+					w.stop();
+				}
+			},
+		);
+
+		it.each(noLogBytes)(
+			"red-first (false clean): a directory holding %s, replaced in one step by another, delivers one resync",
+			(_name, populate) => {
+				populate();
+				const recorded = dirIdentity();
+				const w = start(
+					() => 0,
+					() => recorded,
+				);
+				try {
+					tick(2);
+					const other = `${auditDir()}.next`;
+					mkdirSync(other);
+					rmSync(auditDir(), { recursive: true, force: true });
+					renameSync(other, auditDir());
+					populate();
+					tick(10);
+					expect(w.delivered).toEqual(["resync"]);
+				} finally {
+					w.stop();
+				}
+			},
+		);
+
+		it("guard: with no recorded directory identity, a deletion that changes no size delivers nothing", () => {
+			const w = start(() => 0);
+			try {
+				tick(2);
+				rmSync(auditDir(), { recursive: true, force: true });
+				tick(10);
+				expect(w.delivered).toEqual([]);
+			} finally {
+				w.stop();
+			}
+		});
+
+		it("red-first (crash): a watcher error closes the watcher, throws nothing, and the backstop still sees an append", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			try {
+				const stub = stubs[0] as StubWatcher;
+				expect(() =>
+					stub.emit("error", Object.assign(new Error("EPERM"), { code: "EPERM" })),
+				).not.toThrow();
+				expect(stub.closed).toBe(1);
+				appendFileSync(logPath(), "{}\n");
+				tick();
+				expect(w.delivered).toEqual(["grow"]);
+				w.stop();
+				// Dropped at the error: stopping does not close it a second time.
+				expect(stub.closed).toBe(1);
+			} finally {
+				w.stop();
+			}
+		});
+
+		describe("full loads at an unchanged size, and on a schedule", () => {
+			/**
+			 * The log's identity and timestamps now, as a load records them: through the stat seam, so a row that drives the
+			 * timestamps there records the ones the watcher sees.
+			 */
+			const recorded = (): {
+				id: string | undefined;
+				times: { mtimeNs: bigint; ctimeNs: bigint };
+			} => {
+				const st = __tailTestSeam.statLog(logPath());
+				return {
+					id: fileIdentity(st),
+					times: { mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs },
+				};
+			};
+
+			/**
+			 * The watcher with a known identity, as the server runs it: a resync records the log's new timestamps, as the
+			 * full load it asks for would. `failed` says whether the last full load failed.
+			 */
+			function startLoaded(opts: { failed?: () => boolean; onReverify?: () => void } = {}) {
+				let held = recorded();
+				const delivered: { what: string; at: number }[] = [];
+				const stop = watchLedger(
+					vault,
+					() => 3,
+					{
+						onGrow: () => delivered.push({ what: "grow", at: Date.now() }),
+						onResync: () => {
+							delivered.push({ what: "resync", at: Date.now() });
+							held = recorded();
+						},
+						...(opts.onReverify !== undefined ? { onReverify: opts.onReverify } : {}),
+					},
+					() => held.id,
+					undefined,
+					() => held.times,
+					opts.failed,
+				);
+				return { delivered, stop, what: () => delivered.map((d) => d.what) };
+			}
+
+			beforeEach(() => {
+				__tailTestSeam.now = () => Date.now();
+				writeFileSync(logPath(), "{}\n");
+			});
+
+			/**
+			 * A row that needs a timestamp to move must observe it moving, or drive it through the seam. On a kernel whose
+			 * file timestamps advance on a coarse clock (a jiffy, a few milliseconds), a churn of `chmod` calls inside one
+			 * tick leaves ctime unchanged: a row that counted on the kernel moving it saw no reload at all on a Linux CI
+			 * runner. These rows hand the watcher each churn step's ctime through `statLog`, at the real size and identity.
+			 * `distinct` false is that coarse clock: every step reports the ctime the load recorded.
+			 */
+			function churnThroughSeam(steps: number, distinct: boolean) {
+				const real = __tailTestSeam.statLog;
+				const base = real(logPath()).ctimeNs;
+				let step = 0;
+				__tailTestSeam.statLog = (p) => {
+					const st = real(p);
+					return Object.assign(Object.create(Object.getPrototypeOf(st)), st, {
+						ctimeNs: distinct ? base + BigInt(step) * 1_000_000n : base,
+					});
+				};
+				const w = startLoaded();
+				try {
+					for (let i = 0; i < steps; i++) {
+						// One mode change: a new ctime at the same size, and the check that sees it.
+						step += 1;
+						tick();
+					}
+					return w.delivered.filter((d) => d.what === "resync").map((d) => d.at);
+				} finally {
+					w.stop();
+				}
+			}
+
+			it("guard (a reload per ctime change): a mode-change churn at an unchanged size reloads at most once per window", () => {
+				__tailTestSeam.sameSizeReloadMs = 5 * BOUND;
+				const start = Date.now();
+				const ats = churnThroughSeam(30, true);
+				// Positive control: the churn is seen at all, the change holding on two consecutive checks (the second tick).
+				expect(ats[0]).toBe(start + 2 * BOUND);
+				// A second window allows one more, and no window allows two.
+				expect(ats.length).toBeGreaterThanOrEqual(2);
+				expect(ats.length).toBeLessThanOrEqual(Math.ceil(30 / 5));
+				for (let i = 1; i < ats.length; i++) {
+					expect((ats[i] ?? 0) - (ats[i - 1] ?? 0)).toBeGreaterThanOrEqual(5 * BOUND);
+				}
+			});
+
+			it("a coarse timestamp clock (the same ctime at every churn step) reloads nothing: why the row above drives ctime through the seam", () => {
+				__tailTestSeam.sameSizeReloadMs = 5 * BOUND;
+				expect(churnThroughSeam(30, false)).toEqual([]);
+			});
+
+			it("on the real file system: a chmod loop whose every ctime change is OBSERVED reloads exactly once in one window", () => {
+				__tailTestSeam.sameSizeReloadMs = 60 * BOUND;
+				// A synchronous wait the fake timers do not touch: each wait is at least 25 ms, so 80 of them span at least 2 s.
+				const pause = new Int32Array(new SharedArrayBuffer(4));
+				const ctime = (): bigint => statSync(logPath(), { bigint: true }).ctimeNs;
+				const w = startLoaded();
+				try {
+					tick(2);
+					expect(w.what()).toEqual([]);
+					let mode = statSync(logPath()).mode & 0o777;
+					const toggle = (): void => {
+						mode = mode === 0o600 ? 0o644 : 0o600;
+						chmodSync(logPath(), mode);
+					};
+					for (let i = 0; i < 5; i++) {
+						const before = ctime();
+						toggle();
+						let waits = 0;
+						// ctime is stamped when the inode changes: a chmod inside the same clock tick as the change before it
+						// leaves ctime as it was, and waiting alone never moves it. So the mode is changed again after each
+						// pause, back and forth, until a change lands in a later tick.
+						while (ctime() === before) {
+							if (waits >= 80)
+								throw new Error(
+									"ctime did not change within 2 s of repeated chmods: the file system's timestamp clock is coarser than the bound",
+								);
+							Atomics.wait(pause, 0, 0, 25);
+							waits += 1;
+							toggle();
+						}
+						tick();
+					}
+					// The first change, held on two consecutive checks, reloads once; every later one waits on the window.
+					expect(w.what()).toEqual(["resync"]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			it("guard (a reload inside an append): new timestamps at the old size on one check, then the size catching up, is a grow and never a reload", () => {
+				// The seam is read when the watcher starts: the stat it gets moves the times only while `midAppend` is set.
+				const real = __tailTestSeam.statLog;
+				let midAppend = false;
+				__tailTestSeam.statLog = (p) => {
+					const st = real(p);
+					if (!midAppend) return st;
+					return Object.assign(Object.create(Object.getPrototypeOf(st)), st, {
+						mtimeNs: st.mtimeNs + 1_000_000n,
+						ctimeNs: st.ctimeNs + 1_000_000n,
+					});
+				};
+				const w = startLoaded();
+				try {
+					tick(2);
+					expect(w.what()).toEqual([]);
+					// The first half of an append, as Linux can show it: the times moved, the size not yet.
+					midAppend = true;
+					tick();
+					expect(w.what()).toEqual([]);
+					midAppend = false;
+					appendFileSync(logPath(), "{}\n");
+					tick(3);
+					expect(w.what()).toEqual(["grow"]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			it("a same-length rewrite in place (new times at the same size, on two checks) reloads once", () => {
+				const w = startLoaded();
+				try {
+					tick(2);
+					writeFileSync(logPath(), "[]\n");
+					utimesSync(logPath(), new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+					tick();
+					expect(w.what()).toEqual([]);
+					tick();
+					expect(w.what()).toEqual(["resync"]);
+					tick(5);
+					expect(w.what()).toEqual(["resync"]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			it("after a full load that failed, nothing changed: the read is retried once per retry window, until a load succeeds", () => {
+				__tailTestSeam.failedReadRetryMs = 5 * BOUND;
+				let failed = true;
+				const w = startLoaded({ failed: () => failed });
+				try {
+					// The failure is first seen at the first tick; the window runs from there.
+					tick(5);
+					expect(w.what()).toEqual([]);
+					tick(1);
+					expect(w.what()).toEqual(["resync"]);
+					tick(5);
+					expect(w.what()).toEqual(["resync", "resync"]);
+					failed = false;
+					tick(10);
+					expect(w.what()).toEqual(["resync", "resync"]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			// The rows below count reloads over N ticks against the bound ceil(N x tick / retry): a retry on every tick
+			// fails the first.
+			const N = 60;
+			const RETRY = 7 * BOUND;
+			const bound = Math.ceil((N * BOUND) / RETRY);
+
+			it("red-first (a reload per tick): a read that keeps failing, with nothing changed, reloads at most once per retry window", () => {
+				__tailTestSeam.failedReadRetryMs = RETRY;
+				const w = startLoaded({ failed: () => true });
+				try {
+					tick(N);
+					const resyncs = w.delivered.filter((d) => d.what === "resync");
+					// Positive control: the failed read is retried at all.
+					expect(resyncs.length).toBeGreaterThanOrEqual(1);
+					expect(resyncs.length).toBeLessThanOrEqual(bound);
+					const ats = resyncs.map((d) => d.at);
+					for (let i = 1; i < ats.length; i++) {
+						expect((ats[i] ?? 0) - (ats[i - 1] ?? 0)).toBeGreaterThanOrEqual(RETRY);
+					}
+					expect(w.what().filter((x) => x !== "resync")).toEqual([]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			it("the same when the log itself cannot be stat'd: a stat error that stays the same reloads at most once per window", () => {
+				__tailTestSeam.failedReadRetryMs = RETRY;
+				__tailTestSeam.statLog = () => {
+					throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+				};
+				const delivered: string[] = [];
+				const stop = watchLedger(
+					vault,
+					() => 0,
+					{ onGrow: () => delivered.push("grow"), onResync: () => delivered.push("resync") },
+					() => undefined,
+					undefined,
+					() => undefined,
+					() => true,
+				);
+				try {
+					tick(N);
+					expect(delivered.length).toBeGreaterThanOrEqual(1);
+					expect(delivered.length).toBeLessThanOrEqual(bound);
+				} finally {
+					stop();
+				}
+			});
+
+			it("recovery: once the read succeeds again, the reloads stop; the retry that succeeded came within one window", () => {
+				__tailTestSeam.failedReadRetryMs = RETRY;
+				let failed = true;
+				// The caller's load succeeds from `readableAt` on, as a read of a vault made readable again does.
+				let readableAt = Number.POSITIVE_INFINITY;
+				let recoveredAt: number | undefined;
+				let held = recorded();
+				const delivered: number[] = [];
+				const stop = watchLedger(
+					vault,
+					() => 3,
+					{
+						onGrow: () => {},
+						onResync: () => {
+							delivered.push(Date.now());
+							held = recorded();
+							if (Date.now() >= readableAt) {
+								failed = false;
+								recoveredAt ??= Date.now();
+							}
+						},
+					},
+					() => held.id,
+					undefined,
+					() => held.times,
+					() => failed,
+				);
+				try {
+					tick(17);
+					readableAt = Date.now();
+					tick(RETRY / BOUND);
+					expect(recoveredAt).toBeDefined();
+					expect((recoveredAt ?? 0) - readableAt).toBeLessThanOrEqual(RETRY);
+					const count = delivered.length;
+					tick(N);
+					expect(delivered.length).toBe(count);
+				} finally {
+					stop();
+				}
+			});
+
+			it("a grow while the read keeps failing reloads at the next check, without waiting for the retry window", () => {
+				__tailTestSeam.failedReadRetryMs = 1000 * BOUND;
+				const w = startLoaded({ failed: () => true });
+				try {
+					tick(3);
+					expect(w.what()).toEqual([]);
+					appendFileSync(logPath(), "{}\n");
+					tick();
+					// The known size is the row's own (3), so the grow is delivered as a grow: the server makes it a full load.
+					expect(w.what()).toEqual(["grow"]);
+					tick(5);
+					expect(w.what()).toEqual(["grow"]);
+					// A same-size change the key shows (new timestamps) goes on at once too.
+					utimesSync(logPath(), new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+					tick();
+					expect(w.what()).toEqual(["grow", "grow"]);
+				} finally {
+					w.stop();
+				}
+			});
+
+			it("the periodic re-verify runs on its interval, and stops with the watcher", () => {
+				__tailTestSeam.reverifyMs = 5 * BOUND;
+				let reverified = 0;
+				const w = startLoaded({
+					onReverify: () => {
+						reverified += 1;
+					},
+				});
+				try {
+					tick(4);
+					expect(reverified).toBe(0);
+					tick(1);
+					expect(reverified).toBe(1);
+					tick(10);
+					expect(reverified).toBe(3);
+					// It is a full load of its own, not a check: nothing is delivered through the check's callbacks.
+					expect(w.what()).toEqual([]);
+				} finally {
+					w.stop();
+				}
+				expect(vi.getTimerCount()).toBe(0);
+				tick(20);
+				expect(reverified).toBe(3);
+			});
+		});
+
+		it("red-first (leak): a stopped watcher checks no more, and reacts to nothing after it is stopped", () => {
+			writeFileSync(logPath(), "{}\n");
+			const w = start(() => 3);
+			tick(3);
+			// Positive control: the backstop really was ticking.
+			expect(w.sizeOfCalls()).toBeGreaterThan(0);
+			w.stop();
+			expect(vi.getTimerCount()).toBe(0);
+			const atStop = w.sizeOfCalls();
+			appendFileSync(logPath(), "{}\n");
+			tick(5);
+			expect(w.sizeOfCalls()).toBe(atStop);
+			expect(w.delivered).toEqual([]);
+		});
+	});
+
+	it("the periodic re-verify interval is unref'd", () => {
+		__tailTestSeam.reverifyMs = 3_600_002;
+		const spy = vi.spyOn(globalThis, "setInterval");
+		const stop = watchLedger(vault, () => 0, {
+			onGrow: () => {},
+			onResync: () => {},
+			onReverify: () => {},
+		});
+		try {
+			const call = spy.mock.calls.findIndex((c) => c[1] === 3_600_002);
+			expect(call).not.toBe(-1);
+			const timer = spy.mock.results[call]?.value as NodeJS.Timeout;
+			expect(timer.hasRef()).toBe(false);
+		} finally {
+			stop();
+		}
+	});
+
+	it("red-first (keeps the process alive): the backstop interval is unref'd", () => {
+		const spy = vi.spyOn(globalThis, "setInterval");
+		const w = start(() => 0);
+		try {
+			// Positive control: fs.watch mode really made an interval (the stub watcher was used, not the polling mode).
+			expect(stubs).toHaveLength(1);
+			expect(spy).toHaveBeenCalledTimes(1);
+			const timer = spy.mock.results[0]?.value as NodeJS.Timeout;
+			expect(timer.hasRef()).toBe(false);
+		} finally {
+			w.stop();
+		}
+	});
+
+	describe("through the server", () => {
+		let root: string;
+		let ui: UiServer | undefined;
+		const rootAudit = (): string => join(root, ".usertrust", "audit");
+		const isDeletion = (s: ChainSummary): boolean =>
+			!s.chain.valid && s.chain.errors.some((e) => e.includes("deletion detected"));
+
+		beforeEach(async () => {
+			__tailTestSeam.backstopMs = 100;
+			root = mkdtempSync(join(tmpdir(), "trust-tail-backstop-ui-"));
+			mkdirSync(rootAudit(), { recursive: true });
+			for (let i = 0; i < 3; i++) await appendOne(root, `tx_first_${i}`);
+		});
+
+		afterEach(async () => {
+			await ui?.close();
+			ui = undefined;
+			rmSync(root, { recursive: true, force: true });
+		});
+
+		it("red-first (never seen): an append with no event reaches the client as rows", async () => {
+			ui = await createUiServer(root, { port: 0 });
+			expect(stubs).toHaveLength(1);
+			// readSse waits on the stream itself, so a frame that never comes would hang it: the race fails the row instead.
+			const frame = await Promise.race([
+				readSse(
+					ui.port,
+					(name) => name === "rows" || name === "resync",
+					() => appendOne(root, "tx_live"),
+					3000,
+				),
+				new Promise<never>((_, reject) =>
+					setTimeout(() => reject(new Error("no frame within 3 s")), 3000),
+				),
+			]);
+			expect(frame.eventName).toBe("rows");
+			expect(await summaryOf(ui.port)).toMatchObject({ chain: { events: 4, valid: true } });
+		});
+
+		it("red-first (never seen): the audit directory's deletion with no event reads as a deletion", async () => {
+			ui = await createUiServer(root, { port: 0 });
+			rmSync(rootAudit(), { recursive: true, force: true });
+			const observed = await summaryWhen(ui.port, isDeletion, 3000);
+			expect(observed.chain.valid).toBe(false);
+			expect(observed.chain.errors.join(" ")).toContain("deletion detected");
+		});
+
+		it("guard: deleted, then recreated with a valid chain, never reads valid again", async () => {
+			ui = await createUiServer(root, { port: 0 });
+			rmSync(rootAudit(), { recursive: true, force: true });
+			// Several intervals with the directory gone, so the backstop has had its chance to see the deletion.
+			await new Promise((r) => setTimeout(r, 600));
+			mkdirSync(rootAudit(), { recursive: true });
+			for (let i = 0; i < 2; i++) await appendOne(root, `tx_fresh_${i}`);
+			const seen: ChainSummary["chain"][] = [];
+			const until = Date.now() + 1500;
+			while (Date.now() < until) {
+				seen.push((await summaryOf(ui.port)).chain);
+				await new Promise((r) => setTimeout(r, 50));
+			}
+			// The recreated chain is never shown as verified, and once the deletion is read, nothing after it is valid.
+			expect(seen.filter((c) => c.valid && c.events === 2)).toEqual([]);
+			const firstDeletion = seen.findIndex((c) => isDeletion({ chain: c }));
+			if (firstDeletion !== -1)
+				expect(seen.slice(firstDeletion).filter((c) => c.valid)).toEqual([]);
+		});
 	});
 });

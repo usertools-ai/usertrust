@@ -46,4 +46,10 @@ export interface SummaryPayload {
 	remote: { kit: boolean };
 	rowCount: number;
 	truncated: boolean;
+	/**
+	 * When the chain verdict was last derived from a full read of the vault (ISO-8601), or null when no full read has
+	 * succeeded yet. An append extends the verdict without changing it; a read that failed leaves it as it was. The
+	 * dashboard is a monitor: `usertrust verify` is the authoritative check.
+	 */
+	verifiedAt: string | null;
 }

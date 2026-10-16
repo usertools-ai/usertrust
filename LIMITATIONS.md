@@ -96,26 +96,212 @@ classified version; on a duck-typed client, nothing catches it.
 function calling (a streamed loop of provider rounds, which usertrust does not
 yet meter round by round); `models.generateContent` with it is metered per round
 instead, each round its own governed call. Use `generateContent`, or disable AFC with
-`config.automaticFunctionCalling.disable: true`, to have the stream governed. The
-check needs plain objects: a Proxy in `params`, `config`, `config.tools`, a tool or
-`config.automaticFunctionCalling` is refused, because a Proxy can show the check
-one config and the SDK another. Accessors there are read once and their values
-captured, so the check and the SDK use the same value. The request is forwarded as a snapshot of the
-checked config (with AFC not disabled, a non-callable tool is forwarded as exactly the
-fields the SDK reads, each of which must be copyable as data), so a later change to the caller's `config.tools` or
-`config.automaticFunctionCalling` cannot reach the SDK. It carries every field the
-SDK reads from a non-callable tool, `config.toolConfig` and its
-`functionCallingConfig`, including one a class instance inherits (a getter) or holds
-as a non-enumerable property. Inside the values of a tool's fields (a declaration, a
-`parameters` schema) it does not capture field by field: a function, a symbol, an
-object whose prototype is not Object's or `null` (a class instance, or one made with
-`Object.create` from another object), an array whose prototype is not Array's, an
-accessor, a non-enumerable property, a sparse array or an array with a named property
-at any depth there is refused, as a call that could not be checked. The prototype check
-recognises Object's and Array's prototypes by shape, so a deliberately forged prototype
-can pass it; the effect is limited to how faithfully nested fields are copied, never to
-what governance decides or charges, which use the same copy that is sent. The snapshot covers those
-AFC fields only: `contents` and the rest of the request are still read live.
+`config.automaticFunctionCalling.disable: true`, to have the stream governed.
+Whether a call would run that loop is the SDK's own decision. Before anything is
+checked, charged or sent, usertrust runs the SDK's request pipeline over the
+request, against a stand-in for its transport that sends nothing. The pipeline is
+the installed `@google/genai`'s `Models` class, accepted after a short behavioural
+check; a client's own `Models` class is never run (for the SDK's own client it is
+that same class). With no installed SDK, the call is refused. "Installed" means
+resolvable by Node's module resolution from usertrust's own install location, not
+just present somewhere in the app: in an isolated or strict package layout where
+usertrust cannot see the app's copy, or in a bundle that inlined or dropped one of
+the two, Google calls are refused. Install `@google/genai` as a direct dependency
+beside usertrust and keep both external to the bundle; the import uses a variable
+specifier on purpose, so that bundlers do not inline it. Keep the `@google/genai`
+that usertrust resolves at the same version as the one your client was created
+from: a request field that only your client's version reads is not sent.
+In that run every getter, `toJSON` hook and Proxy trap in the request runs as
+often, and in the same order, as when the SDK sends it, apart from what the
+per-call request-option check refuses before the run (a request, `config` or
+`httpOptions` given as a Proxy, an option off the list held as data). The SDK's own writes
+(moving a `$schema` `responseSchema`, rewriting a declaration's `parameters`) land
+on your objects as they would natively, once per call. What the SDK read becomes
+a plain-data copy, and that copy is what the PII scan, redaction, the meter and
+the SDK then use. A callable tool and an `AbortSignal` go by reference. Fields
+beside `model`, `contents` and `config` (a `metadata` a policy rule matches), which
+the SDK neither reads nor sends, are read for the policy rules only, never placed
+on the copy that is serialized, held for and sent. Per call,
+usertrust runs the SDK again over a second copy. It must make exactly the requests
+it made over yours (path, method, body bytes, `httpOptions`) and reach the same
+automatic-function-calling decision, or the call is refused. This costs two extra
+runs of the SDK's request conversion per call, with no I/O: about 7 ms for a
+request carrying 1 MB of inline data. Where a governed call differs from the SDK's
+own:
+- **A value that answers differently on two reads is refused.** If the change
+  would alter what is sent (a getter, a hook or a Proxy trap), the copy cannot hold
+  both answers, so the call is refused rather than sent. The same goes for an
+  object the SDK both reads field by field and serializes through `toJSON`, and for
+  a cycle.
+- **Some request shapes are refused rather than copied.** These are a header value
+  that is not a string, a function of yours in the request that the SDK calls (a
+  built-in method such as an array's `map` is fine), and a callable tool the
+  request also holds outside `config.tools`, and a boxed `Number` or `String`
+  converted by a `toString` or `valueOf` of yours. The copy cannot reproduce what the
+  transport or that code would make of them. A function of yours that the SDK
+  calls is never run: the call is refused instead. Your own iterator on
+  `config.tools` counts as one.
+- **An array whose class is not `Array` is refused where the SDK maps it.** When
+  the SDK's own array methods (`map`, `filter`) build their result from an array
+  of yours, natively they construct its class, and that class's constructor
+  decides what is sent (it can give each instance a `toJSON`). usertrust does not
+  run your code to find out, so such an array, a subclass from any realm, inside
+  `contents` or in a config field other than `config.tools`, is refused: pass a
+  plain array. (At `config.tools` the SDK maps the array but never serializes
+  what it builds, so a subclass there is built as a plain `Array`, its
+  constructor never run.) Another realm's own `Array` is mapped as natively when
+  that realm's `Array[Symbol.species]` is its default; when it was replaced, the
+  call is refused, and so is one whose realm's `Array.prototype.toJSON` was
+  replaced (the per-call self-check cannot reproduce it). The previous release
+  sent all of these.
+- **Policy fields are read once, when the request is checked.** A field beside
+  `model`, `contents` and `config` is read then (a getter there run once, as
+  before) and kept beside the request for the policy rules, never sent,
+  serialized or held for. A rule reads anything below it when the rule is
+  evaluated, as before. These fields are not forwarded:
+  a Google-shaped client that is not the SDK no longer receives them. They were
+  never scanned for PII, held for or metered, so only what was is forwarded.
+- **`config.httpOptions` is read at the start of the call**, as per-call request
+  options are. The SDK is given that copy (only the allowed keys) wherever it
+  later reads `params.config.httpOptions`, even through a `config` added or
+  replaced after the call started; with none at the start, none is given. Your
+  own `httpOptions` is never read again. It is read as the SDK finds it, through
+  the prototype chain, so one the config inherits is governed the same way: its
+  allowed keys are sent, and any other key held as data is refused at the start.
+  That copy is made only when the whole path to it is plain data. At every
+  level, what is refused and what is sent is what the per-call request-option
+  check refused and sent before the SDK's pipeline read the request:
+  - a `config` held by a getter, or a getter `httpOptions` (own or inherited),
+    whose option keys are data, is read when the SDK reads it, not at the start,
+    and is sent; a later change to an allowed key, such as a header, is sent as
+    the SDK reads it. Before, such a getter was run, and its options fixed, at the
+    start of the call;
+  - a getter option key is refused whatever holds it, before its getter runs: at
+    the start of the call inside a data `httpOptions`, and, past a getter `config`
+    or `httpOptions`, when the SDK reaches the `httpOptions` holding it;
+  - a Proxy anywhere on the path (as `config` or `httpOptions`, on their prototype
+    chains, or answered by a getter), or a chain longer than 64 objects, cannot be
+    read without running your code, and the call is refused;
+  - a key off the list is refused, at the start of the call when the path is data,
+    and when the SDK reaches it past a getter.
+
+  A table in the tests pins this, 104 cases (each shape of the path holding an
+  allowed option or `extraBody`, on both methods and both backends), each
+  asserting the outcome and the number of requests; any change to this path
+  keeps every case equal.
+- **Every other field is read when the SDK reads it, not when the call starts.**
+  The SDK reads the request after its own first `await`, so a field you change
+  right after calling (a `systemInstruction`, `contents`) is sent as it is then,
+  as without usertrust, and is what the PII scan, redaction and the meter see.
+  Before this, the request's top-level fields, and its `config`'s, were copied at
+  the start of the call.
+- **A callable tool reaches the SDK as a wrapper.** Its `tool()` runs inside the
+  first governed round, and `callTool()` is passed through; nothing else of the
+  tool object is reachable from the request. A call the SDK sends without its own
+  function-calling loop carries `automaticFunctionCalling.disable: true`, which the
+  SDK never sends to the provider.
+- **Later AFC rounds reuse the copy.** With automatic function calling on
+  `generateContent`, rounds after the first reuse the copy instead of re-reading
+  your objects. Every round is still its own governed, metered call.
+- **A callable tool's `tool()` runs later.** It runs after authorization, once per
+  call; the SDK runs it before its first request. A denied call never runs it, and
+  a `tool()` that changes your config does not change what is sent.
+- **A local SDK rejection is the SDK's own error.** For a request the SDK rejects
+  locally (incompatible tools, empty `contents`, a getter that throws), the call
+  throws the SDK's own error after a `policy_denied` audit event, with nothing sent
+  or charged. The audit event names the error's class, never its message, which
+  can carry your content (a getter can throw anything).
+
+**Only request options that change neither the body nor where it is sent are allowed.**
+A governed call is scanned, held and priced from its request parameters. But each SDK
+takes per-call request options too: the second argument on Anthropic and OpenAI, and
+`config.httpOptions` on Google. Some of them replace what those parameters describe, so
+they are governed by a list, as default-deny governs methods.
+
+**Allowed, because they were measured to change neither the body nor the host:**
+- `timeout`, `maxRetries`, `signal`, `idempotencyKey`;
+- `stream`, which the SDK sets itself after reading the options;
+- `headers`: a beta header, such as Anthropic's long-context one, is priced from the
+  usage the provider reports;
+- `query`, which changes only the URL's query string;
+- `method`;
+- on Google, `httpOptions` `apiVersion`, `headers`, `timeout` and `retryOptions`.
+
+**Every other option is refused** before anything is held or sent, with a
+`policy_denied` event. An option an SDK adds later is refused until it is measured and
+listed. Among the refused ones, as measured:
+- `body`;
+- `fetchOptions`, which is spread over the request last, so its `body` wins;
+- Anthropic's per-call `middleware`, which rewrites the built request;
+- `path`, which can name an endpoint default-deny refuses as a method;
+- `defaultBaseURL`;
+- Anthropic's beta-only `fallbackState`, which is not measured;
+- every internal `__` option, named as such: `__binaryResponse` returns the raw body, so
+  usage would never be read and the call would settle at its estimate;
+- on Google, `httpOptions.extraBody` (merged into the body), `baseUrl` and
+  `baseUrlResourceScope`.
+
+A key counts when it is present, even as `undefined` (the SDK copies that too). Request
+options must be a plain object: a function, an array, a class instance or a Proxy is
+refused whole, and an option held by an accessor (a getter), allowed or not, is refused
+and never called. Nothing in these checks runs caller code. Anything on the way that could
+only be read that way, whether an accessor or a Proxy at any step from a resource's
+`_client` to a client's `fetchOptions`, `middleware` or Google `httpOptions`, is refused,
+never read as absent. Each of these is read where the SDK reads it, along its prototype
+chain, since the SDK's plain property access finds an inherited value: a client wrapped as
+`Object.create(client)`, a resource whose `_client` is inherited, or an inherited `config` or
+`httpOptions` is checked like an own one, and a Proxy anywhere on that chain is refused,
+and none of its traps runs. A chain longer than 64 objects is refused too. **What is forwarded is a copy:** a new options object
+(on Google, a new `httpOptions` in a shallow copy of the request) holding only the allowed
+keys, each read once. A key the caller adds, or a value it changes, after the call starts
+cannot reach the SDK.
+
+**A request that cannot be serialized to JSON is refused.** A governed call is scanned, held
+and sent as one JSON serialization of its request. A request that has none (a cycle, a BigInt,
+a `toJSON` or getter that throws, a text too long to build) is refused with
+`request_unserializable` and a `policy_denied` event, before anything is held or sent:
+otherwise the SDK would serialize it on its own, and a hook that throws once and then answers
+would send what nothing checked. With the provider SDKs such a request also fails inside the
+SDK, so an honest one loses nothing: it was never sent. A client of another kind that never
+serializes its request (a stand-in, a test double) would have taken it, and is refused too. A Google request reaches this check as the request gate's
+plain-data mirror: a callable tool in it serializes as `{}`, and a real `AbortSignal` at
+`config.abortSignal`, the one value the mirror keeps by reference for the transport, is left out
+of the check (an object there that is not a signal is the request's, and is checked). The gate
+refuses most requests the SDK cannot serialize before they get here.
+
+**A client that rewrites every request** is refused by `trust()`, before the ledger client
+is built, and every call refuses too if one is changed later on the raw client the caller
+kept:
+- an Anthropic client constructed with `middleware`, including the SDK's own
+  `betaRefusalFallbackMiddleware`, which re-sends a refused call to a fallback model
+  after it was priced;
+- an Anthropic or OpenAI client constructed with `fetchOptions` carrying `body` or
+  `method`. The SDK spreads a client's `fetchOptions` over every request after the body.
+  Its transport keys, such as a proxy `dispatcher`, stay allowed;
+- a Google client whose `httpOptions` carry `extraBody`, own or inherited, or a `toJSON`
+  (the SDK merges a call's own `httpOptions` into a `JSON.stringify` copy of the client's).
+  The SDK reads `extraBody` by property access, so the client's `httpOptions` must be a
+  plain object of this realm, or have no prototype; another realm's is refused.
+
+A default client has no middleware. A cloud-provider subclass's `backendMiddleware()`,
+which signs requests, is never read. **A client handed to `trust()` inside a Proxy is trusted
+as transport, and is not refused.** Observability wrappers return the SDK client inside a
+forwarding Proxy. A Proxy's traps can show these checks one value and the SDK another, so
+nothing is read through it, and a Proxy built to do that is deliberate bypass, out of scope
+as above. To have the checks read the client itself, wrap the raw client with `trust()`
+first, then instrument the trusted client. Only the Proxy itself is trusted: the per-call
+checks still read the SDK resource each call runs on, and its client, so a body-moving
+option reached through a Proxy client is refused all the same. The checks hold every
+object they read to being plain: request options and client `fetchOptions` must be plain
+objects, and a client's `middleware` must be a plain array (no own iterator or other own
+key, no accessor index), so the check and the SDK read the same thing. **A client constructed with its own `fetch` is
+trusted transport and is not refused.** That `fetch` can rewrite any request, body
+included; proxies, test harnesses and instrumentation use it legitimately. It is the
+transport `trust()` wraps, so what it does to a request is the caller's own code, out of
+scope as above. The row that pins this uses a stand-in subclass that
+overrides `backendMiddleware()`, not a published cloud SDK, which this package does not
+install. A change made to the raw client between a call's check and its send, from the
+caller's own code, is deliberate bypass, out of scope as above.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.
 That is what makes it a one-line integration with zero SDK dependencies across
@@ -163,6 +349,39 @@ audit-chain-only. It exists as the explicit, honest way to bypass financial
 enforcement — in tests, in evaluation. Every claim about atomic budget
 enforcement (an over-budget PENDING hold rejected by the ledger before the
 provider is called) applies to full mode with a live TigerBeetle instance.
+
+**The hold is an estimate, made before the call.** Its input leg is the larger of two
+figures, both read from the one serialized snapshot of the request, never the live
+object:
+- the prompt parts' estimate;
+- an estimate of the whole request body: the UTF-8 bytes of every key and value, / 4 × 1.5.
+
+Its output leg is the request's own cap, per candidate:
+- Anthropic `max_tokens`;
+- OpenAI chat `max_completion_tokens`, else `max_tokens`, times `n`;
+- Responses `max_output_tokens`;
+- Google `maxOutputTokens`, times `candidateCount`. Google bills its thoughts apart from its
+  candidates, but documents `maxOutputTokens` as a hard cutoff on everything a response
+  generates, thought tokens included
+  (https://ai.google.dev/gemini-api/docs/thinking, "Token limits and max_output_tokens"), so the
+  thinking budget is not added to it. With no cap: never below 4096 per candidate, nor below
+  `thinkingConfig.thinkingBudget`.
+
+A request with no cap holds 4096 output tokens.
+
+A call whose real cost turns out above its hold is posted capped at the hold, and the
+truncation is recorded as a `settlement_shortfall` event: visible, never silent. These
+are known to land there:
+- **content passed by reference:** Anthropic `url`/`file_id` sources, OpenAI image URLs
+  and `file_id` inputs, Google `fileData.fileUri`. A document by URL is a few dozen bytes
+  of body and can bill tens of thousands of tokens;
+- **a Google callable or MCP tool:** its declarations are resolved after authorization;
+- **an uncapped output** above 4096, and Google dynamic thinking with no `maxOutputTokens`.
+
+The estimate's byte heuristic is **not calibrated against any provider's tokenizer**
+(Anthropic, OpenAI and Google are all unmeasured), so a dense input such as a JSON schema
+can bill above it. The calibration corpus and the format for recorded counts are in
+`packages/core/tests/fixtures/token-calibration/`.
 
 One caveat from our own release history: the unit suite validates live-ledger enforcement against a stateful `tigerbeetle-node` fake that implements real double-entry balance math and `debits_must_not_exceed_credits` (see `packages/core/tests/harden/ledger-funded-wallet.test.ts`) — a behavioral test against real ledger semantics, not a mock asserting a mock. CI also runs a separate job (`tb-integration`) against a real single-node TigerBeetle cluster. Neither is your deployment: validate against your own TigerBeetle cluster before relying on enforcement in production.
 
@@ -392,18 +611,97 @@ Fixed in 5.0.1: a governed stream the caller aborts with its own `AbortSignal` n
 the usage it consumed, as an early `break` does, instead of voiding its hold. 5.0.0 still has
 the gap, on OpenAI and Anthropic `create({ stream: true })`.
 
-## 13. A ledger-backed server can hang when its ledger is unreachable, and may not audit a hold it releases on SIGINT or SIGTERM
+## 13. A ledger-backed server refuses authorizes while its ledger is unreachable, health still reports `ok`, and a hold it releases on SIGINT or SIGTERM may not be audited
 
-A ledger-backed `usertrust-server` answers `POST /v1/authorize` only when its ledger
-answers. If the ledger becomes unreachable, authorize calls hang without an answer, and
-`GET /v1/health` still reports `ok`. A request the client abandons can leave its hold
-reserved for up to 300 seconds after the ledger returns. These are known defects in
-5.0.0. Until a later release fixes them, set a client timeout on every call to the server.
+A ledger-backed `usertrust-server` waits at most `ledgerTimeoutMs` (default 5 seconds) for
+its ledger on `POST /v1/authorize`, including the wait behind the tenant's earlier
+authorizes (the governor serves them one at a time), then answers `503 ledger_unavailable`:
+nothing was authorized. `retryAfterMs` is a suggested wait, not a promise that a retry succeeds: a
+client that can wait backs off with jitter, and one with a hard time budget, such as the Claude Code
+plugin's PreToolUse, may make one short retry instead (the server README's *Retrying*). The
+TigerBeetle client has no
+timeout or cancel, so the refused request stays queued and executes when the ledger
+returns; the hold it then creates is voided at once, never registered as pending. While
+such a request is outstanding, every authorize on that tenant gets the same 503 at once. If
+it never completes, they keep failing fast until it does: the fail-closed direction.
+
+- A tenant's governor is created on its first authorize, inside the deadline, so the first
+  authorize after boot on a slow ledger can get the 503, which is retryable.
+- While that creation itself hangs, fast-fail does not engage: each authorize waits one
+  deadline before its 503.
+- A tenant's authorizes are served one at a time, so a burst counts against the deadline
+  too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, each took about
+  14 ms, and the default 5 s deadline was reached at roughly 350 concurrent authorizes for
+  one tenant (300 were all served; 400 drew 503s). A slower or remote ledger reaches it
+  sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
+- `GET /v1/health` still reports `ok` while the ledger is down. Reachability on health is
+  a later change; a monitor cannot read an outage from health in this release.
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound,
+  and complete when it returns.
+- A client that hangs up after the server has written its `200` cannot be detected: that
+  hold is registered as pending and swept as any other.
+- An authorize that ends without a ledger reply (an evicted client session) may still have
+  reserved, and that reservation expires at the hold timeout.
+- An authorize still outstanding at shutdown whose reserve lands after `destroy()` began
+  expires at the hold timeout.
+- The `hold_released` record of a late hold's give-back is best-effort. The operational
+  record is `voidsOwed` on the authenticated `GET /v1/budget` and the server's log line. The
+  record carries `releaseClass: "unused"` (the client never received the transferId), or
+  `"call-unconfirmed"` when writing the `200` itself failed, since that answer may have reached
+  the client.
 
 A ledger-backed server stopped by SIGINT or SIGTERM ends each pending hold through
 `destroy()`, which the process can exit before finishing. A hold whose void had not
 reached the ledger stays reserved until the ledger's 300-second hold timeout, and a
 release can be missing from the chain.
+
+## 14. A ledger client the cluster evicted cannot be released, and keeps its process from exiting on its own
+
+A TigerBeetle cluster evicts a client's session when it has more sessions than it keeps
+(a shared cluster past its session limit, or churn), or when the client's release does not
+match. tigerbeetle-node 0.17.9 aborts the whole process (SIGABRT) when `destroy()` is called
+on an evicted client, and nothing in JavaScript can catch that. usertrust therefore never
+destroys a client it knows was evicted, and it knows in two ways:
+
+- **A request is refused with an eviction code** (`ERR_CLIENT_EVICTED`, or a release the
+  cluster does not take).
+- **A request fails "closed" on a client usertrust never destroyed.** A client whose session
+  was pushed out while it was idle learns of that from its own traffic (measured: about 25 s
+  later), and from then on fails every request `ERR_CLIENT_CLOSED`, never with an eviction
+  code. tigerbeetle-node raises "closed" otherwise only for a client that was destroyed.
+
+Either way the request is retried on a fresh client, and the evicted client is dropped and
+left open. At shutdown a governor asks its client first: its `destroy()` makes one empty
+request (bounded at 2 s) after its voids, its audit flush and its audit lock release, and
+leaves the client open if that request shows an eviction. So neither a governor nor
+`usertrust-server`, whose shutdown tears every tenant's governor down at once, aborts on an
+evicted client.
+
+An evicted client left open holds no thread, file descriptor or memory that grows with
+repeated evictions (measured over 20 evictions in one process, against a real cluster: threads
+stayed at 13 and open file descriptors at 18; resident memory rose 1.7 MiB from the first
+eviction to the twentieth and levelled off). But it keeps the process from exiting on
+its own: after `destroy()` the event loop stays alive, with nothing in JavaScript
+holding it. `destroy()` says so (through `onAlert`, or a `console.warn`) whenever an evicted
+client was dropped. A process that relies on exiting when its work is done, such as a script,
+should end with `process.exit()` after `destroy()`. `usertrust-server` already ends with
+`process.exit()` when it is stopped (SIGINT or SIGTERM), and `usertrust budget` ends the process
+itself, once its output has drained and with its own exit code, when it left an evicted client
+open. This lasts until a tigerbeetle-node release can release an evicted client.
+
+What is still open:
+
+- **`TrustTBClient.destroy()` called directly** on a client whose session was pushed out
+  while it was idle, with no request since, cannot know the client is evicted, and aborts the
+  process. A program that uses `TrustTBClient` directly and may sit idle should make one ledger
+  request before `destroy()` (it marks an evicted client, which `destroy()` then leaves), or
+  end with `process.exit()` without calling `destroy()`.
+- **An eviction learned in the instant between a governor's shutdown request and the destroy
+  that follows it** (no `await` between them) still aborts. The client learns of an eviction
+  from its own traffic about 25 s after the cluster pushed the session out, so this needs that
+  moment to fall inside one synchronous step. By then the governor has finished its voids, its
+  audit flush and its lock release, so what is lost is the exit status (134, which a supervisor
+  reads as a crash) and anything the process does after `destroy()`.
 
 ---
 

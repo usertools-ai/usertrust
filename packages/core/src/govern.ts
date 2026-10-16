@@ -41,6 +41,7 @@ import {
 } from "./audit/chain.js";
 import {
 	appendDenialEvent,
+	attachDenialAudit,
 	classifyPolicyDenial,
 	type DenialRecord,
 	isGovernanceDenial,
@@ -55,32 +56,40 @@ import {
 } from "./budget/effective-record.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import {
+	detachedArgs,
+	googleHttpOptionsAtCallStart,
 	guardedGet,
 	type MethodBoundary,
+	movedClientOptions,
+	movedRequestError,
+	movedRequestOptions,
 	rawClientStandIn,
 	refuseWrites,
 	transportChangedError,
 	transportOptionKeys,
 	UNGOVERNED_CALL_KIND,
 	ungovernedMethodError,
+	unserializableRequestError,
 	validateAllowUngoverned,
 } from "./default-deny.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
+import { googleClientIsVertexAI, runGovernedAfc } from "./google-afc.js";
 import {
-	afcRequestedVerdict,
-	type GoogleAfcVerdict,
-	googleClientIsVertexAI,
-	runGovernedAfc,
-	sdkRunsAfcVerdict,
-	snapshotGoogleAfcParams,
-} from "./google-afc.js";
+	errorClass,
+	type GoogleMethod,
+	type GooglePipeline,
+	type PinnedHttpOptions,
+	resolveGooglePipeline,
+	snapshotGoogleRequest,
+} from "./google-request.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	copyAppliedRates,
 	costFromRates,
 	costFromRatesUnfloored,
-	estimateInputTokens,
 	holdInputRate,
+	holdInputTokens,
+	holdOutputTokens,
 	holdTierRates,
 	PRICING_TABLE_VERSION,
 	promptTokenCount,
@@ -119,6 +128,7 @@ import { detectInjection } from "./policy/injection.js";
 import { builtInAborted, detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
+import { isRealAbortSignal } from "./shared/abort-signal.js";
 import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 import { mkdirPrivate, PRIVATE_FILE_MODE, securePrivateVault } from "./shared/private-fs.js";
 import { isPersistableSpend } from "./shared/spend-guard.js";
@@ -521,6 +531,13 @@ export interface TrustEngine {
 	 */
 	lookupBalances?(accountIds: bigint[]): Promise<Map<bigint, number>>;
 	destroy?(): void;
+	/**
+	 * `destroy()`, asynchronously, made safe for a ledger client the cluster evicted while it
+	 * was idle. A governor's teardown calls this when the engine has it, and `destroy()`
+	 * otherwise. OPTIONAL because an injected engine may omit it; both `createTBEngine`
+	 * factories implement it.
+	 */
+	close?(): Promise<void>;
 }
 
 // ── F5: governed-surface type rewrites ────────────────────────────────────────
@@ -1224,6 +1241,27 @@ const ENVELOPE_FUNDING_HINT =
 	"which an attributed call never debits.";
 
 /**
+ * What a Google request's snapshot is made from: the gate's mirror, less a real AbortSignal at
+ * `config.abortSignal` (`isRealAbortSignal`), the one transport value the mirror keeps by
+ * reference. The signal goes to the transport as it is and is never sent, so its own fields (even
+ * a cycle among them) are not the request's. Anything else at that key is the request's, and is
+ * serialized like the rest. The mirror itself is untouched: it is what is forwarded.
+ */
+function snapshotSource(request: unknown): unknown {
+	if (request === null || typeof request !== "object") return request ?? {};
+	if (utilTypes.isProxy(request)) return request;
+	const holder = Object.getOwnPropertyDescriptor(request, "config");
+	const config = holder !== undefined && "value" in holder ? holder.value : undefined;
+	if (config === null || typeof config !== "object" || utilTypes.isProxy(config)) return request;
+	const signal = Object.getOwnPropertyDescriptor(config, "abortSignal");
+	if (signal === undefined || !("value" in signal) || !isRealAbortSignal(signal.value)) {
+		return request;
+	}
+	const { abortSignal: _signal, ...rest } = config as Record<string, unknown>;
+	return { ...(request as Record<string, unknown>), config: rest };
+}
+
+/**
  * Resolve the active scope into the envelope this call will debit, or `undefined`
  * when no scope is active.
  *
@@ -1596,6 +1634,25 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// enforcing holding account can be seeded with the REMAINING budget.
 	let budgetSpent = await loadSpendLedger(vaultBase);
 
+	// A client that rewrites every request after governance reads it (Anthropic middleware or a
+	// client `fetchOptions` carrying `body`/`method`, Google httpOptions.extraBody) is refused here:
+	// after the spend ledger is read, so a corrupt one is refused for what it is, and before the
+	// engine is built, so a refusal leaves no native ledger client behind. Every call through such a
+	// client would be refused too (`movedRequestOptions`). A client of no known kind is left to
+	// step 5, which refuses it as before.
+	{
+		let clientKind: LLMClientKind | undefined;
+		try {
+			clientKind = detectClientKind(client);
+		} catch {
+			clientKind = undefined;
+		}
+		if (clientKind !== undefined) {
+			const clientMoved = movedClientOptions(clientKind, client);
+			if (clientMoved.length > 0) throw movedRequestError(clientKind, clientMoved);
+		}
+	}
+
 	// 4. Engine (injected for tests, real TB client in production, null in dry-run/proxy)
 	// _engine injection only accepted in test environments
 	let engine: TrustEngine | null;
@@ -1673,10 +1730,141 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	}
 
 	// 7. Two-phase intercept
+	/**
+	 * The per-call request-option refusal (default-deny.ts `movedRequestOptions`): when `args` carry an
+	 * option off the governed list, its denial event is appended and the refusal thrown (the promise
+	 * returned rejects with it); otherwise `undefined`. The check itself is synchronous and runs no
+	 * caller code; `attribution` is the call's own ALS read.
+	 */
+	function movedOptionsRefusal(
+		args: readonly unknown[],
+		thisArg: unknown,
+		attribution: ReturnType<typeof getCurrentCostCenter>,
+	): Promise<never> | undefined {
+		return optionsRefusal(movedRequestOptions(kind, args, thisArg), args, attribution);
+	}
+
+	/** The refusal for request options named `moved` (none: `undefined`): its denial event, then the error. */
+	function optionsRefusal(
+		moved: readonly string[],
+		args: readonly unknown[],
+		attribution: ReturnType<typeof getCurrentCostCenter>,
+	): Promise<never> | undefined {
+		if (moved.length === 0) return undefined;
+		return entryRefusal(movedRequestError(kind, moved), args, attribution);
+	}
+
+	/**
+	 * A refusal at a call's entry, before anything is scanned, held or sent: a request option off the
+	 * governed list (`optionsRefusal`) or a request that cannot be serialized
+	 * (`unserializableRequestError`). One append site for both: its denial event, then the error.
+	 */
+	function entryRefusal(
+		refusal: PolicyDeniedError,
+		args: readonly unknown[],
+		attribution: ReturnType<typeof getCurrentCostCenter>,
+	): Promise<never> {
+		const model = ownStringDataProperty(args[0], "model");
+		return (async () => {
+			await appendDenialEvent({
+				audit,
+				actor: "local",
+				error: refusal,
+				record: { denialClass: "policy" },
+				fields: {
+					...(model !== undefined ? { model } : {}),
+					endpointClass: endpoint.class,
+					...(attribution !== undefined ? { costCenter: attribution.costCenter } : {}),
+				},
+			});
+			throw refusal;
+		})();
+	}
+
+	/** The argument lists of Google calls admitted before a destroy(): interceptCall takes them anyway. */
+	const admittedArgs = new WeakSet<unknown[]>();
+	/** Set when destroy()'s drain deadline passes: no admission licenses a request after it. */
+	let admissionsRevoked = false;
+	/**
+	 * The policy fields a Google call's request gate read beside the request (google-request.ts
+	 * `carryPolicyFields`: its top level, values by reference), for each argument list it forwards:
+	 * only the policy gate reads them, kept OFF the request, so nothing of them is serialized, held
+	 * for or sent.
+	 */
+	const googlePolicyFields = new WeakMap<unknown[], Record<string | symbol, unknown>>();
+
+	/**
+	 * A Google call's admission: ONE record, taken synchronously when its trap is entered, before the
+	 * request gate's first await, and counted in flight, so a destroy() that begins while the call is
+	 * still behind the gate waits for it. It licenses the call's FIRST provider request only: that
+	 * argument list is admitted past a destroy() begun since (interceptCall), and the record is
+	 * released as soon as that request has started (interceptCall counts it from there, as it counts
+	 * any call on the wire). Every later request of the call (an AFC round) is a new request, and
+	 * after destroy() begins it is refused as destroyed. Released on every exit, once; past destroy()'s
+	 * drain deadline, revoked: it licenses nothing.
+	 */
+	function admitGoogleCall(): GoogleAdmission {
+		inFlightCount++;
+		let released = false;
+		let used = false;
+		const release = (): void => {
+			if (released) return;
+			released = true;
+			inFlightCount--;
+		};
+		return {
+			forward(args, policy) {
+				googlePolicyFields.set(args, policy);
+				if (!used && !admissionsRevoked) admittedArgs.add(args);
+				used = true;
+				return args;
+			},
+			release,
+		};
+	}
+
+	/**
+	 * A Google trap's first step, run SYNCHRONOUSLY on the caller's own arguments, before the request
+	 * gate's dry run reads the request at the SDK's own time: the per-call request-option refusal,
+	 * exactly as interceptCall makes it (a request given as a Proxy, an accessor on an option key, an
+	 * option off the list), or the `config.httpOptions` call start pins (an own data property, read and
+	 * copied now, so a later change to the caller's options cannot reach the SDK).
+	 */
+	function googleCallStart(
+		args: readonly unknown[],
+		thisArg: unknown,
+	): { refused: Promise<never> } | { pinned: PinnedHttpOptions | undefined } {
+		const attribution = getCurrentCostCenter();
+		// The option path (config, httpOptions, its keys) is decided by googleHttpOptionsAtCallStart:
+		// a Proxy, a data key off the list or an accessor key inside httpOptions refused; an accessor
+		// config or httpOptions deferred to the dry run, which refuses the same things in what it
+		// reaches past it (and interceptCall checks the mirror again); plain data pinned. Its names
+		// replace the per-call option check's for that path; the check's others (a request given as a
+		// Proxy, the client's own options) still refuse.
+		const atStart = googleHttpOptionsAtCallStart(args[0]);
+		const moved = [
+			...new Set([
+				...movedRequestOptions(kind, args, thisArg).filter((name) => !name.startsWith("config")),
+				...("refused" in atStart ? atStart.refused : []),
+			]),
+		];
+		const refused = optionsRefusal(moved, args, attribution);
+		if (refused === undefined) {
+			return { pinned: "pinned" in atStart ? atStart.pinned : undefined };
+		}
+		// Counted in flight, like every refusal, so destroy() waits for its audit append.
+		inFlightCount++;
+		return {
+			refused: refused.finally(() => {
+				inFlightCount--;
+			}),
+		};
+	}
+
 	async function interceptCall(
 		originalFn: (...args: unknown[]) => unknown,
 		thisArg: unknown,
-		args: unknown[],
+		callerArgs: unknown[],
 		// A1: which provider surface this call arrived through. "create" is the
 		// default request/response (and create-stream) path. "stream-helper" is the
 		// Anthropic messages.stream / beta.messages.stream convenience helper, whose
@@ -1690,11 +1878,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		// injection (A6) — the surface flag suppresses it below.
 		surfaceKind: "create" | "stream-helper" | "openai-responses" = "create",
 	): Promise<TrustedResponse<unknown>> {
-		if (destroyed) {
+		if (destroyed && !(admittedArgs.has(callerArgs) && !admissionsRevoked)) {
 			throw new Error("TrustedClient has been destroyed");
 		}
 
 		refuseIfAuditDegradedAtStart("this call was refused before it reached the provider");
+
+		// What this call forwards: the caller's arguments until the request options are checked,
+		// then a copy holding only the governed options (`detachedArgs`), never the caller's object.
+		let args = callerArgs;
 
 		// Track in-flight calls so destroy() can wait for them
 		inFlightCount++;
@@ -1713,7 +1905,35 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// reason. `budget/attribution.ts` documents the mechanics and its suite
 			// pins the emitter-tick hazard as a negative case.
 			const attribution = getCurrentCostCenter();
+			// ── Request options that would move what is sent past governance ──
+			// Read before anything is scanned, held or priced, and without running caller code
+			// (default-deny.ts `movedRequestOptions`): every governed method of every provider
+			// enters here, so one check covers create, stream and parse alike.
+			const refused = movedOptionsRefusal(args, thisArg, attribution);
+			if (refused !== undefined) await refused;
+			// Google's request reaches here as the request gate's mirror: plain data already holding the
+			// governed copy of `config.httpOptions` pinned at call start, so it is not copied again.
+			if (kind !== "google") args = detachedArgs(kind, args);
+			// ── The request is serialized ONCE, here, and refused if it cannot be ──
+			// The parse of that one text is what every later step reads (the 1-hour hold verdict, the
+			// PII and injection scans, redaction, the hold estimate) and what is forwarded, so the bytes
+			// scanned are the bytes sent: a stateful getter or `toJSON` has nothing left to flip between
+			// the scan and the SDK's own serialization. A request that cannot be serialized to a JSON
+			// object (a cycle, a BigInt, a hook that throws, a text too long to build) is refused now,
+			// before anything is held or sent: the SDK would serialize it on its own, and a hook that
+			// throws once and then answers would send what nothing checked.
+			// The envelope first, as before this check existed: an attributed call with no
+			// parentUserId is refused for that, and no hook of the caller's runs before it.
 			const envelope = resolveEnvelope(attribution, config.parentUserId);
+			// Google's request is the gate's mirror, which keeps one transport value BY REFERENCE: a
+			// real AbortSignal at `config.abortSignal`, handed to the transport as it is and never sent.
+			// That signal alone is left out of the check (`snapshotSource`); it is still dispatched.
+			const serialized = serializeRequest(
+				kind === "google" ? snapshotSource(args[0]) : (args[0] ?? {}),
+			);
+			if (serialized === null) {
+				return await entryRefusal(unserializableRequestError(kind), args, attribution);
+			}
 			// The audit pre-flight (audit.failClosed): after the ALS read, before any hold.
 			await preflightAudit();
 			// Spread into every audit record this call emits (A1: an attributed hold
@@ -1748,24 +1968,21 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				await persistSpendLedger(vaultBase, budgetSpent);
 			};
 
-			// The request is serialized ONCE, and the parse of that text is what every later step
-			// reads (the 1-hour hold verdict, PII and injection scans, redaction) and what is
-			// forwarded, so the bytes scanned are the bytes sent: a stateful getter or `toJSON`
-			// has nothing left to flip between the scan and the SDK's own serialization.
-			// Google is the exception, named: its SDK reads non-JSON members off the request
-			// (callable tools), so the original object is forwarded; Google has no 1-hour tier
-			// and its extractor never reports a 1-hour share, so a flip cannot under-hold there.
-			// A request that cannot be serialized forwards as given and holds dearest.
+			// What is forwarded is the parse of the one serialization made above (`serialized`).
+			// Google is the exception, named: its request is already the mirror (google-request.ts),
+			// plain data with no caller hook or getter left in it, but the SDK reads non-JSON
+			// members off it (callable tools, by reference), so the mirror itself is forwarded, not
+			// the parse of its serialization; Google has no 1-hour tier.
 			const originalParams = (args[0] ?? {}) as Record<string, unknown>;
 			// The caller's abort signal OBJECT, captured NOW, before any await: a caller that
 			// replaces or deletes `options.signal` while the provider call is pending must not
 			// change which signal decides whether a stream's throw was their own abort.
 			const callerSignal = callerAbortSignal(kind, args);
-			const serialized = serializeRequest(originalParams);
-			const params = (
-				kind !== "google" && serialized !== null ? serialized.body : originalParams
-			) as Record<string, unknown>;
-			const declares1h = serialized?.declares1h ?? true;
+			const params = (kind !== "google" ? serialized.body : originalParams) as Record<
+				string,
+				unknown
+			>;
+			const declares1h = serialized.declares1h;
 			const model = (params.model as string) ?? "unknown";
 			// P3-PROVIDER-BLINDSPOT: normalize the prompt-bearing payload across
 			// providers (Anthropic/OpenAI `messages` + `system`, Google `contents`) so
@@ -1801,15 +2018,23 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// receipt's meter provenance. unknownModelPolicy is enforced here, at
 			// authorize time, before any PENDING hold (A5).
 			const transferId = trustId("tx");
-			const estimatedInputTokens = estimateInputTokens(promptParts);
-			// F1: size the output estimate to the caller's ACTUAL cap. Responses callers
-			// set `max_output_tokens`; chat.completions set `max_tokens`. Read the
-			// Responses field first, then chat, then the 4096 default — each only when it
-			// is a finite positive number (a 0/negative/NaN cap never shrinks the hold).
-			const finitePositiveCap = (value: unknown): number | undefined =>
-				typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
-			const maxOutputTokens =
-				finitePositiveCap(params.max_output_tokens) ?? finitePositiveCap(params.max_tokens) ?? 4096;
+			// The hold covers what the provider bills for: the prompt parts as before, or the WHOLE
+			// request body (`estimateBodyTokens`), whichever is larger, so no hold ever shrinks and a
+			// field the parts do not walk (a block-form system, tools, Google `contents` and its
+			// config, a prompt variable) is held too. Both read the one serialized snapshot, never
+			// the live request; on Google the request here is the request gate's mirror, plain data
+			// that is exactly what is sent.
+			const snapshot = serialized.body;
+			const estimatedInputTokens = holdInputTokens(promptParts, snapshot);
+			// F1: size the output estimate to the caller's ACTUAL cap, per provider, per candidate
+			// (`holdOutputTokens`), read from the snapshot. A capped Google call holds its
+			// `maxOutputTokens`, which Google documents as bounding thought tokens too; an uncapped
+			// one holds at least the default.
+			const maxOutputTokens = holdOutputTokens(
+				kind,
+				snapshot,
+				kind !== "openai" ? "other" : surfaceKind === "openai-responses" ? "responses" : "chat",
+			);
 			const rateResolution = resolveRates(model, endpoint.class, config);
 			// ── Denial boundary 1 of 2: the PRE-MUTEX unknown-model refusal ──
 			// Its own boundary because it fires before the budget lock is taken and
@@ -1995,7 +2220,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// now simply ABSENT rather than caller-chosen, which is the fail-closed
 						// answer. See HOST_CONTROLLED_POLICY_FIELDS for why the hand-maintained
 						// list needed a mechanism behind it.
-						...sanitizePolicyContext(params),
+						// Google: the caller's top-level fields beside the request, read once by its request
+						// gate and held by reference off the sent request (never sent, serialized or held
+						// for); a rule reads below them here, as before. The request's own fields win.
+						...sanitizePolicyContext({ ...googlePolicyFields.get(callerArgs), ...params }),
 						model,
 						tier: config.tier,
 						estimated_cost: estimatedCost,
@@ -2060,7 +2288,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						if (config.pii === "redact" && piiResult.found) {
 							// redact mode: forward a redacted DEEP CLONE so PII never egresses.
 							// redactPII is pure — the caller's original object is never mutated.
-							const redactedBody = redactPII(params).data as Record<string, unknown>;
+							// Google's request is the mirror, which keeps a real AbortSignal at
+							// `config.abortSignal` for the transport: the SDK never serializes it, so it
+							// is kept by reference whatever own fields it carries, the same signal the
+							// serialization check above left out (`snapshotSource`, by `isRealAbortSignal`).
+							// Any other provider's request here is the parse of its serialization.
+							const redactedBody = redactPII(params, { signalSent: kind === "google" })
+								.data as Record<string, unknown>;
 							forwardArgs = [redactedBody, ...args.slice(1)];
 						}
 						// "warn" mode: continue, no transform (audit copy is redacted later).
@@ -4248,6 +4482,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			while ((inFlightCount > 0 || inFlightStreamCount > 0) && Date.now() < deadline) {
 				await new Promise<void>((r) => setTimeout(r, 50));
 			}
+			// What is left admitted now licenses no request: a Google call still behind its gate past
+			// the deadline is refused as destroyed when it reaches interceptCall.
+			admissionsRevoked = true;
 
 			// Every step runs, whatever an earlier one throws; destroy() rejects with what a step
 			// threw only once the last has run, so the TigerBeetle client is always closed, and the
@@ -4281,8 +4518,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// teardown reports it as a USERTRUST_AUDIT_LOCK_LEFT warning instead.
 				() => releaseAuditWriterForTeardown(audit),
 				// Destroy the engine if connected and the proxy connection if active.
-				() => {
-					if (engine != null && typeof engine.destroy === "function") engine.destroy();
+				// close() where the engine has it: the TigerBeetle client's destroy() aborts the process
+				// on a client the cluster evicted while it was idle, and close() asks it first. An
+				// injected engine without it is destroyed as before.
+				async () => {
+					if (engine == null) return;
+					if (typeof engine.close === "function") await engine.close();
+					else if (typeof engine.destroy === "function") engine.destroy();
 				},
 				() => {
 					if (proxyConn != null) proxyConn.destroy();
@@ -4339,6 +4581,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				governActionImpl,
 				boundary,
 				preflightRefusal,
+				googleCallStart,
+				admitGoogleCall,
+				(names, args) =>
+					optionsRefusal(names, args, getCurrentCostCenter()) ??
+					Promise.reject(new Error("no request option to refuse")),
 			);
 		}
 		return build(client, interceptCall, destroyFn, governActionImpl, boundary);
@@ -4884,6 +5131,12 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		destroy(): void {
 			tbClient.destroy();
 		},
+
+		// What a governor's teardown calls: destroy(), after asking the client whether the
+		// cluster evicted it while it was idle (TrustTBClient.close()).
+		async close(): Promise<void> {
+			await tbClient.close();
+		},
 	};
 }
 
@@ -5319,59 +5572,104 @@ function ownStringDataProperty(obj: unknown, key: string): string | undefined {
 }
 
 /**
- * The AFC gate both Google traps run before `intercept` (after the audit preflight):
- * snapshot `args[0]` (google-afc.ts), then decide ON the snapshot with the one AFC
- * reading. `generateContent` uses `afcRequestedVerdict`: "afc" runs the governed per-round
- * loop on the snapshot. `generateContentStream` uses `sdkRunsAfcVerdict`: "afc" is refused,
- * because a streamed AFC loop is not metered round by round yet. "indeterminate" is refused
- * on both. When the call proceeds, `args[0]` IS the snapshot, so what is forwarded (to the
- * loop or to the single governed call) is what was checked. `vertexAI` is the client's backend,
- * which decides how the SDK serializes `functionCallingConfig` (see snapshotGoogleAfcParams).
+ * The gate both Google traps run before `intercept` (after the audit preflight). The SDK's own
+ * pipeline runs over the caller's `args[0]` (google-request.ts: the capture, then the mirror and its
+ * per-call self-check), and decides:
+ *   - the SDK rejects the request locally (incompatible tools, missing contents, a caller getter that
+ *     throws): `sdkError`, the SDK's own error, raised after a refusal is audited;
+ *   - the mirror cannot reproduce what the SDK sends: refused, "can't tell";
+ *   - `generateContentStream` that the SDK would run as an AFC loop: refused (a streamed loop is not
+ *     metered round by round yet);
+ *   - otherwise `args[0]` becomes the mirror, plain data the SDK has not yet seen, and
+ *     `runAfcLoop` is the SDK's own AFC decision for `generateContent`.
+ * No SDK pipeline (no installed `@google/genai` whose `Models` passes the probe): refused.
  */
-function googleAfcGate(
+async function googleRequestGate(
 	args: unknown[],
-	method: "generateContent" | "generateContentStream",
-	vertexAI: boolean,
-): { refusal: PolicyDeniedError } | { runAfcLoop: boolean } {
-	const snap = snapshotGoogleAfcParams(args[0], { vertexAI });
-	if ("verdict" in snap) return { refusal: googleAfcError(method, snap.verdict) };
-	const verdict =
-		method === "generateContent"
-			? afcRequestedVerdict(snap.params)
-			: sdkRunsAfcVerdict(snap.params);
-	if (verdict.kind === "indeterminate") return { refusal: googleAfcError(method, verdict) };
-	if (verdict.kind === "afc" && method === "generateContentStream") {
-		return { refusal: googleAfcError(method, verdict) };
+	method: GoogleMethod,
+	pipeline: () => Promise<GooglePipeline | undefined>,
+	pinned?: PinnedHttpOptions,
+): Promise<
+	| { refusal: PolicyDeniedError }
+	| { optionRefused: string[] }
+	| { sdkError: unknown; denial: PolicyDeniedError }
+	| { runAfcLoop: boolean; policy: Record<string | symbol, unknown> }
+> {
+	const resolved = await pipeline();
+	if (resolved === undefined) {
+		return {
+			refusal: new PolicyDeniedError(
+				`ungoverned_method: models.${method} refused: @google/genai could not be loaded beside usertrust, or its request pipeline is not one usertrust recognises (install @google/genai, in the supported version range, as a direct dependency next to usertrust, and keep both external to your bundle)`,
+				"usertrust governs a Google request by running the installed @google/genai's own request pipeline over it, without sending, so what it checks is what the SDK sends; it loads that SDK from its own install location (a client's own models class is never run). Install @google/genai as a direct dependency beside usertrust, and mark both external in your bundler (esbuild, webpack and the like).",
+			),
+		};
+	}
+	const snap = await snapshotGoogleRequest(resolved, method, args[0], pinned);
+	switch (snap.kind) {
+		case "sdkError":
+			return {
+				sdkError: snap.error,
+				denial: new PolicyDeniedError(
+					// the error's class only: its message may carry the caller's content (a getter can throw
+					// anything), and the audit record is persisted; the error itself is rethrown as it is
+					`ungoverned_method: models.${method} was rejected by the SDK before any request (${errorClass(snap.error)})`,
+					"The SDK's own request pipeline threw for this request, as it would without usertrust; nothing was held, sent or charged. The SDK's error is what the call throws.",
+				),
+			};
+		case "afcStream":
+			return {
+				refusal: new PolicyDeniedError(
+					`ungoverned_method: models.${method} with automatic function calling is not governed yet`,
+					"With a callable tool, the SDK streams one provider round after another inside this call, and usertrust does not yet meter a streamed loop round by round (models.generateContent with automatic function calling is metered per round). Use models.generateContent, set config.automaticFunctionCalling.disable: true and run the tool calls yourself, or make the call on the original (unwrapped) client inside governAction() with a cost estimate.",
+				),
+			};
+		case "optionRefused":
+			return { optionRefused: snap.names };
+		case "refuse":
+			return {
+				refusal: new PolicyDeniedError(
+					`ungoverned_method: models.${method} could not be checked for automatic function calling (${snap.reason})`,
+					"usertrust sends a plain-data copy of the request that the SDK's own pipeline reads exactly as it reads yours, and checks that per call. For this request it could not: an object the SDK both reads field by field and serializes through toJSON, a cycle, a getter that answered the SDK differently on two reads in a way that changes what is sent, or a property definition by the SDK. Pass plain data.",
+				),
+			};
 	}
 	if (args.length > 0) args[0] = snap.params;
-	return { runAfcLoop: verdict.kind === "afc" };
+	return { runAfcLoop: snap.afcRan, policy: snap.policy };
 }
 
-function googleAfcError(
-	method: "generateContent" | "generateContentStream",
-	verdict: Exclude<GoogleAfcVerdict, { kind: "no_afc" }>,
-): PolicyDeniedError {
-	if (verdict.kind === "indeterminate" && verdict.uncloneableAt !== undefined) {
-		return new PolicyDeniedError(
-			`ungoverned_method: models.${method} could not be checked for automatic function calling (${verdict.uncloneableAt} cannot be copied as data); pass plain objects`,
-			"With automatic function calling not disabled, the request is forwarded as a copy of what was checked. A tool with no callTool is copied as only the fields the SDK sends from it, and those must hold plain data at every depth: a function, a symbol, an object whose prototype is not Object's or null (a class instance, or one made with Object.create from another object), an array whose prototype is not Array's, an accessor (getter or setter), a non-enumerable property, a sparse array or an array with a named property in them cannot be copied. Pass plain data, or set config.automaticFunctionCalling.disable: true.",
-		);
+/**
+ * A local SDK rejection: audited as a refusal carrying the SDK's message, then the SDK's own error,
+ * which carries the denial's correlation handle (`auditEventHash` / `auditDegraded`), attached to
+ * that same error object as on every other denial.
+ */
+async function refuseWithSdkError(
+	refuse: MethodBoundary["refuse"],
+	path: string,
+	args: unknown[],
+	gate: { sdkError: unknown; denial: PolicyDeniedError },
+): Promise<never> {
+	try {
+		await refuse(path, args, gate.denial);
+	} catch (err) {
+		if (err !== gate.denial) throw err; // destroyed, or a pre-degraded audit: that error wins
 	}
-	if (verdict.kind === "indeterminate" && verdict.proxyAt !== undefined) {
-		return new PolicyDeniedError(
-			`ungoverned_method: models.${method} could not be checked for automatic function calling (a Proxy in ${verdict.proxyAt}); pass plain objects`,
-			"A Proxy can show this check one config and the SDK another, so usertrust refuses it rather than trust what it saw. Pass plain objects for params, params.config, config.tools, each tool and config.automaticFunctionCalling.",
-		);
+	const sdkError = gate.sdkError;
+	// never on a Proxy: defining the fields would run the caller's trap
+	if (
+		sdkError !== null &&
+		(typeof sdkError === "object" || typeof sdkError === "function") &&
+		!utilTypes.isProxy(sdkError)
+	) {
+		try {
+			attachDenialAudit(sdkError, {
+				auditEventHash: gate.denial.auditEventHash,
+				auditDegraded: gate.denial.auditDegraded,
+			});
+		} catch {
+			// a frozen error cannot carry it; the SDK's error is still what the call throws
+		}
 	}
-	return verdict.kind === "afc"
-		? new PolicyDeniedError(
-				`ungoverned_method: models.${method} with automatic function calling is not governed yet`,
-				"With a callable tool, the SDK streams one provider round after another inside this call, and usertrust does not yet meter a streamed loop round by round (models.generateContent with automatic function calling is metered per round). Use models.generateContent, set config.automaticFunctionCalling.disable: true and run the tool calls yourself, or make the call on the original (unwrapped) client inside governAction() with a cost estimate.",
-			)
-		: new PolicyDeniedError(
-				`ungoverned_method: models.${method} could not be checked for automatic function calling`,
-				"The request could not be read safely: a getter threw, config is not an object, config.tools is not an array, a tool is missing (a hole) or not an object, maximumRemoteCalls is an object, or a callable tool's callTool is a getter. usertrust cannot tell whether the SDK would run automatic function calling, so it refuses. Pass plain data (an array of objects for config.tools).",
-			);
+	throw sdkError;
 }
 
 /**
@@ -5389,6 +5687,13 @@ function googleAfcError(
  * default-deny.ts): free methods run on the raw namespace, `allowUngoverned` methods run
  * there audited, and everything else is refused through `refuse`.
  */
+/** A Google call's admission (see trust()'s `admitGoogleCall`). */
+interface GoogleAdmission {
+	/** One argument list the call forwards, with the policy fields its gate read; the first is admitted. */
+	forward(args: unknown[], policy: Record<string | symbol, unknown>): unknown[];
+	release(): void;
+}
+
 function buildGoogleProxy<T>(
 	client: T,
 	intercept: InterceptFn,
@@ -5396,6 +5701,12 @@ function buildGoogleProxy<T>(
 	governAction: GovernActionFn,
 	boundary: MethodBoundary,
 	preflight: () => void,
+	callStart: (
+		args: readonly unknown[],
+		thisArg: unknown,
+	) => { refused: Promise<never> } | { pinned: PinnedHttpOptions | undefined },
+	admit: () => GoogleAdmission,
+	refuseOptions: (names: string[], args: unknown[]) => Promise<never>,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const models = original.models as Record<string, unknown>;
@@ -5408,43 +5719,104 @@ function buildGoogleProxy<T>(
 			: undefined;
 	const refuse = boundary.refuse;
 	// The backend the SDK serializes each request for, read ONCE from the raw client (never
-	// through a proxy): the AFC snapshot sends on Vertex AI what the SDK sends there.
+	// through a proxy).
 	const vertexAI = googleClientIsVertexAI(original);
+	// The SDK pipeline governed requests run through, resolved once, on the first call (so
+	// trust() stays synchronous).
+	let pipeline: Promise<GooglePipeline | undefined> | undefined;
+	const googlePipeline = () => {
+		pipeline ??= resolveGooglePipeline(original, vertexAI);
+		return pipeline;
+	};
 
 	const modelsProxy = new Proxy(models, {
 		get(target, prop, receiver) {
 			if (prop === "generateContent") {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
-					// ── AFC gate (snapshots args[0]: what is forwarded is what was checked) ──
-					const gate = googleAfcGate(args, "generateContent", vertexAI);
-					if ("refusal" in gate) {
-						return refuse("models.generateContent", args, gate.refusal);
-					}
-					if (gate.runAfcLoop) {
-						// With a callable tool the SDK would loop internally and only the last round
-						// would be metered: run the loop here instead, ON THE SNAPSHOT, each round its
-						// own governed call (see google-afc.ts).
-						return runGovernedAfc(args[0] as Record<string, unknown>, (roundParams) =>
-							intercept(originalGenerate, target, [roundParams, ...args.slice(1)]),
+					// Admitted NOW, before the gate's first await: a destroy() called right after this call
+					// started waits for it, as it waits for any call already in flight.
+					const admission = admit();
+					try {
+						// Request options, on the caller's own arguments, before anything reads the request.
+						const start = callStart(args, target);
+						if ("refused" in start) return await start.refused;
+						// ── Request gate (args[0] becomes the mirror: what is forwarded is what was checked) ──
+						const gate = await googleRequestGate(
+							args,
+							"generateContent",
+							googlePipeline,
+							start.pinned,
 						);
+						if ("optionRefused" in gate) return await refuseOptions(gate.optionRefused, args);
+						if ("sdkError" in gate) {
+							return await refuseWithSdkError(refuse, "models.generateContent", args, gate);
+						}
+						if ("refusal" in gate) {
+							return await refuse("models.generateContent", args, gate.refusal);
+						}
+						if (gate.runAfcLoop) {
+							// The SDK would loop internally and only the last round would be metered: run
+							// the loop here instead, ON THE MIRROR, each round its own governed call (see
+							// google-afc.ts). What decides and what is sent are one reading: the verdict is
+							// the dry run's (its capture of the caller's request, with the call-start
+							// httpOptions), and every round, like the single-call forward, is built from
+							// the send tree, `args[0]` after the gate. Nothing reads the caller's object
+							// after the gate.
+							return await runGovernedAfc(args[0] as Record<string, unknown>, (roundParams) => {
+								const round = intercept(
+									originalGenerate,
+									target,
+									admission.forward([roundParams, ...args.slice(1)], gate.policy),
+								);
+								admission.release(); // the first round has started: interceptCall counts it
+								return round;
+							});
+						}
+						// ── end AFC gate ──
+						const sent = intercept(originalGenerate, target, admission.forward(args, gate.policy));
+						admission.release(); // the request has started: interceptCall counts it
+						return await sent;
+					} finally {
+						admission.release();
 					}
-					// ── end AFC gate ──
-					return intercept(originalGenerate, target, args);
 				};
 			}
 			if (prop === "generateContentStream" && originalGenerateStream !== undefined) {
 				return async (...args: unknown[]) => {
 					preflight(); // destroyed / pre-degraded audit: before any gate evaluation
-					// ── AFC gate: a streamed AFC loop is refused until it is metered per round ──
-					// (snapshots args[0]: what is forwarded is what was checked)
-					const gate = googleAfcGate(args, "generateContentStream", vertexAI);
-					if ("refusal" in gate) {
-						return refuse("models.generateContentStream", args, gate.refusal);
+					const admission = admit(); // before the gate's first await (see generateContent)
+					try {
+						// Request options, on the caller's own arguments, before anything reads the request.
+						const start = callStart(args, target);
+						if ("refused" in start) return await start.refused;
+						// ── Request gate: a streamed AFC loop is refused until it is metered per round ──
+						// (args[0] becomes the mirror: what is forwarded is what was checked)
+						const gate = await googleRequestGate(
+							args,
+							"generateContentStream",
+							googlePipeline,
+							start.pinned,
+						);
+						if ("optionRefused" in gate) return await refuseOptions(gate.optionRefused, args);
+						if ("sdkError" in gate) {
+							return await refuseWithSdkError(refuse, "models.generateContentStream", args, gate);
+						}
+						if ("refusal" in gate) {
+							return await refuse("models.generateContentStream", args, gate.refusal);
+						}
+						// ── end AFC gate ──
+						const sent = intercept(
+							originalGenerateStream,
+							target,
+							admission.forward(args, gate.policy),
+						);
+						admission.release(); // the request has started: interceptCall counts it
+						const { response } = await sent;
+						return response;
+					} finally {
+						admission.release();
 					}
-					// ── end AFC gate ──
-					const { response } = await intercept(originalGenerateStream, target, args);
-					return response;
 				};
 			}
 			return guardedGet(target, prop, receiver, "models", boundary);

@@ -51,7 +51,50 @@
  * Duck-typed like detect.ts: no provider SDK is imported here.
  */
 
+import { types as utilTypes } from "node:util";
 import { PolicyDeniedError } from "./shared/errors.js";
+
+/** The built-in, captured at module load: a caller who patches it later cannot make a fake constructor look native. */
+const functionToString = Function.prototype.toString;
+
+/** An own DATA property's value, read from its descriptor (never through a getter); `undefined` otherwise. */
+function ownDataValue(obj: object, key: string): { value: unknown } | undefined {
+	const d = Object.getOwnPropertyDescriptor(obj, key);
+	return d !== undefined && "value" in d ? { value: d.value } : undefined;
+}
+
+/**
+ * `proto` is SOME realm's `Object.prototype` (this one, or a `vm` context's, a test runner's):
+ * it has no prototype of its own, and its own `constructor` is a DATA property holding a
+ * native function named "Object" whose own `prototype` is `proto` itself. Read through
+ * descriptors only, with the captured `Function.prototype.toString`, and a Proxy anywhere is
+ * not plain, so no caller code runs. A user class's prototype, or a user function named
+ * "Object", fails it; a deliberately forged prototype can pass (see `hasNativeConstructor`).
+ */
+function isRealmObjectPrototype(proto: unknown): boolean {
+	if (proto === Object.prototype) return true;
+	if (proto === null || typeof proto !== "object" || utilTypes.isProxy(proto)) return false;
+	if (Object.getPrototypeOf(proto) !== null) return false;
+	return hasNativeConstructor(proto, "Object");
+}
+
+/**
+ * `proto`'s own `constructor` is a DATA property holding a non-Proxy native function whose own
+ * `name` is `name` and whose own `prototype` is `proto`, read through descriptors and the
+ * captured `Function.prototype.toString` only. This recognises a realm's prototype by SHAPE; it
+ * does not prove it: a bound function's toString reads as native code, and a bound function can
+ * be given an own `name` and an own `prototype` that points back (see `plainObject` for why that
+ * gains nothing here).
+ */
+function hasNativeConstructor(proto: object, name: string): boolean {
+	const ctor = ownDataValue(proto, "constructor")?.value;
+	if (typeof ctor !== "function" || utilTypes.isProxy(ctor)) return false;
+	return (
+		ownDataValue(ctor, "name")?.value === name &&
+		ownDataValue(ctor, "prototype")?.value === proto &&
+		functionToString.call(ctor).includes("[native code]")
+	);
+}
 
 export type DefaultDenyProvider = "anthropic" | "openai" | "google";
 
@@ -605,6 +648,423 @@ const GOVERNED_WITH_OPTIONS_KEYS: Record<DefaultDenyProvider, ReadonlySet<string
 export function transportOptionKeys(provider: DefaultDenyProvider, options: unknown): string[] {
 	if (options == null || typeof options !== "object") return [];
 	return Object.keys(options).filter((key) => !GOVERNED_WITH_OPTIONS_KEYS[provider].has(key));
+}
+
+/**
+ * The per-call request options (the SECOND argument on Anthropic and OpenAI) a governed call may
+ * carry: the ones measured to change neither the body nor where it is sent. Every other option is
+ * refused, as default-deny refuses every method it does not govern and `withOptions()` refuses every
+ * key it does not list, so an option an SDK adds later is refused until it is measured. Measured
+ * through the real SDKs (each posts `{ body, ...options }` and spreads `fetchOptions` last over the
+ * request): `body`, `fetchOptions` and Anthropic's `middleware` replaced the body, `path` and
+ * `defaultBaseURL` moved the call, `__binaryResponse` hid the usage. `stream` is listed because the
+ * SDK sets its own after the spread; `headers` and `query` change only the header and the URL's
+ * query string.
+ */
+const GOVERNED_REQUEST_OPTIONS: ReadonlySet<string> = new Set([
+	"timeout",
+	"maxRetries",
+	"signal",
+	"headers",
+	"query",
+	"method",
+	"idempotencyKey",
+	"stream",
+]);
+
+/** Google's per-call `config.httpOptions` keys a governed call may carry (`extraBody` merges into the body, `baseUrl` moves the host). */
+const GOVERNED_GOOGLE_HTTP_OPTIONS: ReadonlySet<string> = new Set([
+	"apiVersion",
+	"headers",
+	"timeout",
+	"retryOptions",
+]);
+
+/**
+ * The ROOT of every client chain: a client handed to trust() inside a Proxy, or the SDK resource a
+ * call runs on when it is one, is TRUSTED transport. Observability wrappers hand back the SDK
+ * client inside a forwarding Proxy, and a Proxy built to show these checks one value and the SDK
+ * another is deliberate bypass from the caller's own code, out of scope (LIMITATIONS §1). Its
+ * traps are not run here, and nothing is read through it. Below the root every step still fails
+ * closed. One switch, so tightening it is one line.
+ */
+const PROXY_ROOT_IS_TRUSTED = true;
+
+/** What `readThroughChain` returns for a property it cannot read without running caller code. */
+export const UNREADABLE: unique symbol = Symbol("unreadable");
+
+/** How many objects `readThroughChain` walks before it gives up and reads the property as unreadable. */
+const MAX_CHAIN_DEPTH = 64;
+
+/**
+ * Property `key` of `holder` as the SDK's own `holder[key]` finds it, read without running caller
+ * code: the prototype chain is walked from `holder`, and the first object holding `key` decides.
+ * Its value when that is a data property, `undefined` when no object on the chain holds it, and
+ * `UNREADABLE` when it cannot be read that way: an object on the chain up to that point is a Proxy
+ * (its descriptor and prototype traps are caller code), the property is an accessor, or the holder
+ * itself was unreadable. An inherited property is read, not taken as absent: the SDK reads these
+ * keys by plain property access, so a client built with `Object.create(client)`, or options whose
+ * prototype carries the key, would otherwise send what the check never saw. Fails CLOSED: every
+ * check below REFUSES what is unreadable, and never reads it as absent, so an accessor or a Proxy
+ * at any step of a chain is refused. A chain longer than `MAX_CHAIN_DEPTH` objects is unreadable
+ * too: no SDK object comes near it, and the walk stays bounded however the chain was built.
+ */
+export function readThroughChain(holder: unknown, key: string): unknown {
+	if (holder === UNREADABLE) return UNREADABLE;
+	const found = chainProperty(holder, key);
+	if (found.kind === "data") return found.value;
+	return found.kind === "absent" ? undefined : UNREADABLE;
+}
+
+/** What `chainProperty` finds for a key: its value, or why it cannot be read without running caller code. */
+type ChainProperty =
+	| { kind: "data"; value: unknown }
+	| { kind: "accessor" }
+	| { kind: "proxy" }
+	| { kind: "absent" }
+	| { kind: "too-deep" };
+
+/**
+ * Property `key` of `holder` where plain property access finds it, walked from `holder` up its
+ * prototype chain without running caller code: descriptors only, and a Proxy tested BEFORE every
+ * step (before its descriptor is read, and before its prototype is asked for), so its traps never
+ * run. The first object holding `key` decides: a data property (`data`), or an accessor
+ * (`accessor`). A Proxy on the way is `proxy`, a chain past `MAX_CHAIN_DEPTH` objects `too-deep`,
+ * and no holder at all `absent` (as is anything that is not an object). `readThroughChain` reads
+ * through this one walk.
+ */
+function chainProperty(holder: unknown, key: string): ChainProperty {
+	if (holder == null || (typeof holder !== "object" && typeof holder !== "function")) {
+		return { kind: "absent" };
+	}
+	let o: object | null = holder;
+	for (let depth = 0; o !== null; depth++) {
+		if (depth >= MAX_CHAIN_DEPTH) return { kind: "too-deep" };
+		if (utilTypes.isProxy(o)) return { kind: "proxy" };
+		const d = Object.getOwnPropertyDescriptor(o, key);
+		if (d !== undefined)
+			return "value" in d ? { kind: "data", value: d.value } : { kind: "accessor" };
+		o = Object.getPrototypeOf(o);
+	}
+	return { kind: "absent" };
+}
+
+/**
+ * A plain object: not a Proxy, and its prototype is null or SOME realm's `Object.prototype` (this
+ * one, or a `vm` context's: `isRealmObjectPrototype`, read through descriptors, no caller code). A
+ * function, an array or a class instance is not one. A forged prototype can pass that shape check.
+ * Where these values are used that gains nothing: per-call options are forwarded as a copy of the
+ * OWN data properties read here, and a client's `fetchOptions` is read by the SDK through an object
+ * spread, which copies own properties only. A Google client's `httpOptions` is the exception: the
+ * SDK reads its keys by plain property access, which finds a key on the prototype, so
+ * `googleClientMoved` holds it to THIS realm's `Object.prototype` (or none) instead.
+ */
+function plainObject(value: unknown): value is Record<string, unknown> {
+	if (value === null || typeof value !== "object" || utilTypes.isProxy(value)) return false;
+	const proto = Object.getPrototypeOf(value);
+	return proto === null || isRealmObjectPrototype(proto);
+}
+
+/**
+ * A plain array: not a Proxy, its prototype is THIS realm's `Array.prototype` (exactly, not by
+ * shape: the SDK spreads it, which runs the prototype's iterator, and a forged prototype would pass
+ * a shape check; the SDK copies a constructor's middleware into this realm, so only an array put on
+ * the raw client afterwards can be another realm's), and its own keys are only `length` and
+ * indices, each held as data. So a spread of it (`[...array]`, which runs its iterator) sees exactly
+ * what `length` and the indices say: an own `Symbol.iterator`, an accessor index or any other own
+ * key would let the check read one array and the SDK spread another.
+ */
+function plainArray(value: unknown): value is unknown[] {
+	// The Proxy test first: `Array.isArray` throws on a revoked Proxy, which would escape the
+	// refusal before its denial is recorded.
+	if (utilTypes.isProxy(value) || !Array.isArray(value)) return false;
+	if (Object.getPrototypeOf(value) !== Array.prototype) return false;
+	return Reflect.ownKeys(value).every((key) => {
+		if (key === "length") return true;
+		if (typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key)) return false;
+		const d = Object.getOwnPropertyDescriptor(value, key);
+		return d !== undefined && "value" in d;
+	});
+}
+
+/**
+ * What is wrong with request options `value` (empty: nothing). They must be absent, or a plain
+ * object whose every key the governed list allows, each held as data. A key counts when it is
+ * present at all, whatever its value: the SDK's spread copies an `undefined` too, so
+ * `{ path: undefined }` replaces the call's path. An internal `__` key is named as such. Nothing
+ * here runs caller code: names are listed, descriptors read, no accessor called.
+ */
+function ungovernedKeysOf(
+	value: unknown,
+	governed: ReadonlySet<string>,
+	prefix: string,
+	name: string,
+): string[] {
+	if (value === undefined || value === null) return [];
+	if (value === UNREADABLE) return [`${name} (unreadable)`];
+	if (utilTypes.isProxy(value)) return [`${name} (a Proxy)`];
+	if (!plainObject(value)) return [`${name} (not a plain object)`];
+	return Object.getOwnPropertyNames(value).flatMap((key) => {
+		if (key.startsWith("__")) return [`${prefix}${key} (internal)`];
+		if (!governed.has(key)) return [`${prefix}${key}`];
+		const d = Object.getOwnPropertyDescriptor(value, key);
+		return d !== undefined && !("value" in d) ? [`${prefix}${key} (an accessor)`] : [];
+	});
+}
+
+/**
+ * A NEW object holding only the governed keys of options `ungovernedKeysOf` passed (a plain
+ * object of data properties), each read once. What is forwarded is this copy, never the caller's
+ * object, so a key the caller adds, or a value it changes, after the check cannot reach the SDK.
+ */
+function governedCopy(
+	options: Record<string, unknown>,
+	governed: ReadonlySet<string>,
+): Record<string, unknown> {
+	const copy: Record<string, unknown> = {};
+	for (const key of Object.getOwnPropertyNames(options)) {
+		if (!governed.has(key)) continue;
+		const d = Object.getOwnPropertyDescriptor(options, key);
+		if (d !== undefined && "value" in d) copy[key] = d.value;
+	}
+	return copy;
+}
+
+/**
+ * A Google client's `httpOptions`, read through its `apiClient`: what would move every body. The
+ * SDK reads `httpOptions.extraBody` by plain property access, so a key on the prototype counts:
+ * the object must be plain with THIS realm's `Object.prototype` or none (another realm's, which can
+ * be given any key, is refused), and `extraBody` is looked for along that chain. It must not carry
+ * `toJSON` either: the SDK merges a call's own `httpOptions` into a `JSON.stringify` copy of the
+ * client's, and a `toJSON` there could answer with an `extraBody`.
+ */
+function googleClientMoved(apiClient: unknown): string[] {
+	const http = readThroughChain(readThroughChain(apiClient, "clientOptions"), "httpOptions");
+	if (http === UNREADABLE) return ["client httpOptions (unreadable)"];
+	if (http === undefined || http === null) return [];
+	if (!plainObject(http)) return ["client httpOptions (not a plain object)"];
+	const proto = Object.getPrototypeOf(http);
+	if (proto !== null && proto !== Object.prototype) {
+		return ["client httpOptions (another realm's object)"];
+	}
+	return ["extraBody", "toJSON"]
+		.filter((key) => key in http)
+		.map((key) => `client httpOptions.${key}`);
+}
+
+/**
+ * What a client carries that rewrites every request after governance read it (empty: nothing).
+ * Anthropic and OpenAI: their own `fetchOptions` carrying `body` or `method` (the SDKs spread a
+ * client's `fetchOptions` over every request after the body; its transport keys, such as a proxy
+ * `dispatcher`, stay allowed). Anthropic: a `middleware` chain given to the constructor (the SDK's
+ * own `betaRefusalFallbackMiddleware` re-sends a refused call to a fallback model, after it was
+ * priced). Google: `httpOptions.extraBody`, merged into every body. `client` is the SDK client;
+ * anything on the way that cannot be read without running caller code is refused.
+ */
+export function movedClientOptions(provider: DefaultDenyProvider, client: unknown): string[] {
+	if (client === UNREADABLE) return ["client (unreadable)"];
+	if (utilTypes.isProxy(client)) return PROXY_ROOT_IS_TRUSTED ? [] : ["client (a Proxy)"];
+	if (provider === "google")
+		return googleClientMoved(readThroughChain(readThroughChain(client, "models"), "apiClient"));
+	const moved: string[] = [];
+	const fetchOptions = readThroughChain(client, "fetchOptions");
+	if (fetchOptions === UNREADABLE) {
+		moved.push("client fetchOptions (unreadable)");
+	} else if (fetchOptions !== undefined && fetchOptions !== null) {
+		if (!plainObject(fetchOptions)) {
+			moved.push("client fetchOptions (not a plain object)");
+		} else {
+			for (const key of ["body", "method"]) {
+				if (Object.hasOwn(fetchOptions, key)) moved.push(`client fetchOptions.${key}`);
+			}
+		}
+	}
+	if (provider === "anthropic") {
+		const middleware = readThroughChain(client, "middleware");
+		if (middleware === UNREADABLE) {
+			moved.push("client middleware (unreadable)");
+		} else if (middleware !== undefined && middleware !== null) {
+			// The SDK SPREADS this array whenever any middleware applies (a signing subclass's
+			// `backendMiddleware()` included), so it must be one the spread reads as its length says.
+			if (!plainArray(middleware)) moved.push("client middleware (not a plain array)");
+			else if (middleware.length > 0) moved.push("client middleware");
+		}
+	}
+	return moved;
+}
+
+/**
+ * What a governed call carries that is not on the governed list, or that its client rewrites
+ * (empty: nothing). Anthropic and OpenAI: the per-call request options, `args[1]`, must be a plain
+ * object of `GOVERNED_REQUEST_OPTIONS`. Google: the request's `config.httpOptions` must be a plain
+ * object of `GOVERNED_GOOGLE_HTTP_OPTIONS`. Both: the client options `movedClientOptions` names,
+ * read through `target` (the SDK resource the call runs on), so a client changed after trust() is
+ * refused too, as is anything on the way that cannot be read without running caller code.
+ */
+export function movedRequestOptions(
+	provider: DefaultDenyProvider,
+	args: readonly unknown[],
+	target?: unknown,
+): string[] {
+	if (provider !== "google") {
+		return [
+			...ungovernedKeysOf(args[1], GOVERNED_REQUEST_OPTIONS, "", "options"),
+			...(utilTypes.isProxy(target) && PROXY_ROOT_IS_TRUSTED
+				? []
+				: movedClientOptions(provider, readThroughChain(target, "_client"))),
+		];
+	}
+	const request = args[0];
+	if (utilTypes.isProxy(request)) return ["request (a Proxy)"];
+	const config = readThroughChain(request, "config");
+	return [
+		...(config === UNREADABLE ? ["config (unreadable)"] : []),
+		...ungovernedKeysOf(
+			readThroughChain(config, "httpOptions"),
+			GOVERNED_GOOGLE_HTTP_OPTIONS,
+			"config.httpOptions.",
+			"config.httpOptions",
+		),
+		...(utilTypes.isProxy(target) && PROXY_ROOT_IS_TRUSTED
+			? []
+			: googleClientMoved(readThroughChain(target, "apiClient"))),
+	];
+}
+
+/**
+ * What the per-call option check refuses in a Google `httpOptions` object, as it names it (empty:
+ * nothing): for one the request gate's dry run reached through an accessor `config` or `httpOptions`,
+ * which call start defers. Descriptors only, no caller code.
+ */
+export function googleHttpOptionsRefusals(options: unknown): string[] {
+	return ungovernedKeysOf(
+		options,
+		GOVERNED_GOOGLE_HTTP_OPTIONS,
+		"config.httpOptions.",
+		"config.httpOptions",
+	);
+}
+
+/**
+ * The same, for a `config` the dry run reached through an accessor, before its `httpOptions` is
+ * read: a Proxy as the config, or on the chain to its `httpOptions` (or a chain too deep), cannot be
+ * read without running caller code, as at call start.
+ */
+export function googleConfigRefusals(config: unknown): string[] {
+	const http = chainProperty(config, "httpOptions");
+	return http.kind === "proxy" || http.kind === "too-deep"
+		? ["config.httpOptions (unreadable)"]
+		: [];
+}
+
+/**
+ * A Google request's option path, `params.config.httpOptions` and its keys, at call start, walked as
+ * the SDK's own property access finds it (`chainProperty`), without running caller code. One rule at
+ * every level, a Proxy tested first:
+ * - a Proxy (or a chain too deep) anywhere on the path cannot be read: REFUSED, as the per-call
+ *   option check names it; that includes a Proxy as `httpOptions` itself (`ungovernedKeysOf`);
+ * - an option key off the list held as DATA is REFUSED, as that check refuses it;
+ * - an ACCESSOR key inside a data `httpOptions` is REFUSED, its getter never run, as that check
+ *   refuses it on master (`ungovernedKeysOf`'s "(an accessor)");
+ * - an ACCESSOR `config`, or an accessor `httpOptions` (own or inherited), is DEFERRED: not refused,
+ *   nothing pinned (`pinned: undefined`); the request gate's dry run reads it as the SDK does, and
+ *   refuses what this check refuses in the `httpOptions` object it reaches (an accessor key, a key
+ *   off the list, a Proxy: `googleHttpOptionsRefusals`), before anything is held or sent; master
+ *   sends these when every key is data, and refuses the rest;
+ * - a path that is plain data throughout is PINNED for that path at every later read: a NEW object
+ *   holding only the governed keys of the first data `httpOptions` on the chain (and whether the
+ *   SDK's own key listing of config sees it: own and enumerable), or absent when there is none.
+ */
+export function googleHttpOptionsAtCallStart(request: unknown):
+	| { refused: string[] }
+	| {
+			pinned: { httpOptions: Record<string, unknown> | undefined; enumerable: boolean } | undefined;
+	  } {
+	const absent = { pinned: { httpOptions: undefined, enumerable: false } };
+	if (utilTypes.isProxy(request)) return { refused: ["request (a Proxy)"] };
+	// At every level a Proxy (or a chain too deep) is refused BEFORE an accessor is deferred: a Proxy
+	// can answer the dry run's reads one way and the copy's another, which no reading of it reveals.
+	const config = chainProperty(request, "config");
+	if (config.kind === "proxy" || config.kind === "too-deep")
+		return { refused: ["config (unreadable)"] };
+	if (config.kind === "accessor") return { pinned: undefined };
+	if (config.kind === "absent") return absent;
+	const http = chainProperty(config.value, "httpOptions");
+	if (http.kind === "proxy" || http.kind === "too-deep") {
+		return { refused: ["config.httpOptions (unreadable)"] };
+	}
+	if (http.kind === "accessor") return { pinned: undefined };
+	if (http.kind === "absent" || http.value === undefined || http.value === null) return absent;
+	const options = http.value;
+	const refused = ungovernedKeysOf(
+		options,
+		GOVERNED_GOOGLE_HTTP_OPTIONS,
+		"config.httpOptions.",
+		"config.httpOptions",
+	);
+	if (refused.length > 0) return { refused };
+	const own = utilTypes.isProxy(config.value)
+		? undefined
+		: Object.getOwnPropertyDescriptor(config.value as object, "httpOptions");
+	return {
+		pinned: {
+			httpOptions: governedCopy(options as Record<string, unknown>, GOVERNED_GOOGLE_HTTP_OPTIONS),
+			enumerable: own?.enumerable === true,
+		},
+	};
+}
+
+/**
+ * The argument list to FORWARD for a governed call `movedRequestOptions` passed: the caller's
+ * request, with its request options replaced by a new object holding only the governed keys, each
+ * read once (Anthropic and OpenAI: `args[1]`; Google: `config.httpOptions`, in a shallow copy of
+ * the request and its config, which keeps every callable member). A later change to the caller's
+ * own options cannot reach the SDK, and the copy cannot carry an unlisted key.
+ */
+export function detachedArgs(provider: DefaultDenyProvider, args: readonly unknown[]): unknown[] {
+	if (provider !== "google") {
+		const options = args[1];
+		if (!plainObject(options)) return [...args];
+		return [args[0], governedCopy(options, GOVERNED_REQUEST_OPTIONS), ...args.slice(2)];
+	}
+	const request = args[0];
+	const config = readThroughChain(request, "config");
+	const http = readThroughChain(config, "httpOptions");
+	if (!plainObject(http)) return [...args];
+	return [
+		{
+			...(request as Record<string, unknown>),
+			config: {
+				...(config as Record<string, unknown>),
+				httpOptions: governedCopy(http, GOVERNED_GOOGLE_HTTP_OPTIONS),
+			},
+		},
+		...args.slice(1),
+	];
+}
+
+/** The refusal for a governed call, or a client, carrying what `movedRequestOptions` / `movedClientOptions` name. */
+export function movedRequestError(
+	provider: DefaultDenyProvider,
+	keys: readonly string[],
+): PolicyDeniedError {
+	return new PolicyDeniedError(
+		`request_option_refused: ${PROVIDER_NAME[provider]} call carries request options that are not on the governed list (${keys.join(", ")})`,
+		"A governed call is scanned, held and priced from its request parameters, so only request options that change neither its body nor where it is sent are allowed: timeout, maxRetries, signal, headers, query, method, idempotencyKey and stream (on Google, httpOptions apiVersion, headers, timeout and retryOptions). Every other option is refused, among them body, fetchOptions, middleware, path, defaultBaseURL and every internal __ option, as is a client constructed with middleware (Anthropic) or httpOptions.extraBody (Google). Put the request in the call's parameters. See LIMITATIONS.md, section 1.",
+	);
+}
+
+/**
+ * The refusal for a governed call whose request cannot be serialized to a JSON object
+ * (`serializeRequest` returns null: a cycle, a BigInt, a `toJSON` or getter that throws, a text too
+ * long to build). The request is scanned, held and sent as ONE serialization; without one, the SDK
+ * would serialize it on its own, and could send something other than what was checked.
+ */
+export function unserializableRequestError(provider: DefaultDenyProvider): PolicyDeniedError {
+	return new PolicyDeniedError(
+		`request_unserializable: ${PROVIDER_NAME[provider]} request cannot be serialized to a JSON object (a cycle, a BigInt, a toJSON or getter that throws, or a text too long to build)`,
+		"A governed call is scanned, held and sent as one JSON serialization of its request, so a request that cannot be serialized is refused before anything is held or sent: the SDK would serialize it again on its own and could send something other than what was checked. Pass plain data. See LIMITATIONS.md, section 1.",
+	);
 }
 
 /** The refusal for every call through a `withOptions()` client whose transport changed. */

@@ -1166,6 +1166,12 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		destroy(): void {
 			tbClient.destroy();
 		},
+
+		// What a governor's teardown calls: destroy(), after asking the client whether the
+		// cluster evicted it while it was idle (TrustTBClient.close()).
+		async close(): Promise<void> {
+			await tbClient.close();
+		},
 	};
 }
 
@@ -2879,8 +2885,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				() => enforcedBudget?.release(),
 				() => releaseAuditWriterForTeardown(audit),
 				// Destroy the engine and the proxy.
-				() => {
-					if (engine != null && typeof engine.destroy === "function") engine.destroy();
+				// close() where the engine has it: the TigerBeetle client's destroy() aborts the process
+				// on a client the cluster evicted while it was idle, and close() asks it first. An
+				// injected engine without it is destroyed as before.
+				async () => {
+					if (engine == null) return;
+					if (typeof engine.close === "function") await engine.close();
+					else if (typeof engine.destroy === "function") engine.destroy();
 				},
 				() => {
 					if (proxyConn != null) proxyConn.destroy();

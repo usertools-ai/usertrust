@@ -24,6 +24,21 @@ export function chainStatus(chain: SummaryPayload["chain"]): ChainStatus {
 }
 
 /**
+ * When the integrity verdict was last derived from a full read of the vault, in the reader's local time. Between full
+ * reads the dashboard extends the verdict append by append, and a rewrite in place that no check sees is caught at the
+ * next full read, so the verdict says how old its last full read is. `local` formats the instant (the browser's own
+ * locale and time zone by default; a test passes a fixed one).
+ */
+export function verifiedAsOf(
+	verifiedAt: SummaryPayload["verifiedAt"],
+	local: (d: Date) => string = (d) => d.toLocaleString(),
+): string {
+	if (verifiedAt === null) return "not yet read in full";
+	const t = Date.parse(verifiedAt);
+	return Number.isNaN(t) ? `verified as of ${verifiedAt}` : `verified as of ${local(new Date(t))}`;
+}
+
+/**
  * The anchor file's presence is all the dashboard knows about anchors: the server has no operator-pinned genesis, so
  * it cannot verify them. The cell says that, and how to verify, instead of a bare "absent".
  */

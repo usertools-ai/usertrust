@@ -1,7 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -79,6 +89,78 @@ describe("readLedgerEvents", () => {
 		const events = readLedgerEvents(vaultPath);
 		expect(events.map((e) => e.sequence)).toEqual([1, 2]);
 	});
+
+	describe("onReadError", () => {
+		const asRoot = process.getuid?.() === 0;
+		/** A vault of two events, the first rotated into a segment. */
+		async function rotated(): Promise<{ log: string; segment: string }> {
+			const writer = createAuditWriter(tempDir);
+			await writer.appendEvent({ kind: "llm_call", actor: "local", data: { cost: 1 } });
+			await writer.appendEvent({ kind: "llm_call", actor: "local", data: { cost: 2 } });
+			writer.release();
+			const log = join(vaultPath, "audit", "events.jsonl");
+			const segment = join(vaultPath, "audit", "events-2026-01-01.jsonl");
+			const lines = readFileSync(log, "utf-8").trim().split("\n");
+			writeFileSync(segment, `${lines[0]}\n`);
+			writeFileSync(log, `${lines[1]}\n`);
+			return { log, segment };
+		}
+		const collect = (): {
+			errors: [string, string][];
+			onReadError: (path: string, code: string) => void;
+		} => {
+			const errors: [string, string][] = [];
+			return { errors, onReadError: (path, code) => errors.push([path, code]) };
+		};
+
+		it.skipIf(asRoot)(
+			"an unreadable segment and an unreadable log are each reported with EACCES; the result is what the call without it returns",
+			async () => {
+				const { log, segment } = await rotated();
+				for (const unreadable of [segment, log]) {
+					chmodSync(unreadable, 0o000);
+					try {
+						const { errors, onReadError } = collect();
+						const events = readLedgerEvents(vaultPath, { onReadError });
+						expect(errors).toEqual([[unreadable, "EACCES"]]);
+						expect(events).toEqual(readLedgerEvents(vaultPath));
+						expect(events).toHaveLength(1);
+					} finally {
+						chmodSync(unreadable, 0o600);
+					}
+				}
+			},
+		);
+
+		it.skipIf(asRoot)(
+			"an audit directory that cannot be listed is reported with EACCES",
+			async () => {
+				await rotated();
+				const auditDir = join(vaultPath, "audit");
+				chmodSync(auditDir, 0o000);
+				try {
+					const { errors, onReadError } = collect();
+					expect(readLedgerEvents(vaultPath, { onReadError })).toEqual([]);
+					// No search permission either: the log's existence cannot be checked, and the listing fails.
+					expect(errors.map(([, code]) => code)).toEqual(["EACCES", "EACCES"]);
+					expect(errors.map(([path]) => path)).toEqual([join(auditDir, "events.jsonl"), auditDir]);
+				} finally {
+					chmodSync(auditDir, 0o700);
+				}
+			},
+		);
+
+		it("ENOENT is absence, never reported: a missing vault, and a listed segment whose target is gone", async () => {
+			const { errors, onReadError } = collect();
+			expect(readLedgerEvents(join(tempDir, "nope"), { onReadError })).toEqual([]);
+			await rotated();
+			symlinkSync(join(tempDir, "gone.jsonl"), join(vaultPath, "audit", "events-2026-02-01.jsonl"));
+			const events = readLedgerEvents(vaultPath, { onReadError });
+			expect(errors).toEqual([]);
+			expect(events.map((e) => e.sequence)).toEqual([1, 2]);
+			expect(events).toEqual(readLedgerEvents(vaultPath));
+		});
+	});
 });
 
 describe("loadBudgetConfig", () => {
@@ -98,6 +180,54 @@ describe("loadBudgetConfig", () => {
 			reason: null,
 		});
 		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	describe("a planted non-file at the config's path is never opened", () => {
+		const unpublished = { budget: 0, source: "unpublished", writtenAt: null, reason: null };
+		let tempDir: string;
+		let vaultPath: string;
+
+		beforeEach(() => {
+			tempDir = mkdtempSync(join(tmpdir(), "trust-cfg-"));
+			vaultPath = join(tempDir, ".usertrust");
+			mkdirSync(vaultPath, { recursive: true });
+		});
+
+		afterEach(() => {
+			rmSync(tempDir, { recursive: true, force: true });
+		});
+
+		it.skipIf(process.platform === "win32")(
+			"red-first (hangs): a FIFO with no record gives no budget at once; no reader blocks on it",
+			() => {
+				const fifo = join(vaultPath, "usertrust.config.json");
+				execFileSync("mkfifo", [fifo]);
+				// The bound. A reader that OPENS the FIFO blocks this thread, where no timer can fire, so a separate
+				// process releases it after 1.5 s by writing a config with a budget: that reader then returns late, with
+				// the planted figure, and fails both assertions instead of hanging the run.
+				const releaser = spawn(
+					process.execPath,
+					[
+						"-e",
+						'setTimeout(() => require("node:fs").writeFileSync(process.argv[1], \'{"budget":5000}\'), 1500)',
+						fifo,
+					],
+					{ stdio: "ignore" },
+				);
+				try {
+					const t0 = Date.now();
+					expect(loadBudgetConfig(vaultPath)).toEqual(unpublished);
+					expect(Date.now() - t0).toBeLessThan(1_000);
+				} finally {
+					releaser.kill("SIGKILL");
+				}
+			},
+		);
+
+		it("a directory at the config's path gives no budget", () => {
+			mkdirSync(join(vaultPath, "usertrust.config.json"));
+			expect(loadBudgetConfig(vaultPath)).toEqual(unpublished);
+		});
 	});
 });
 
