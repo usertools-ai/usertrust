@@ -130,7 +130,7 @@ one you cannot reuse.
 | POST   | `/v1/release`   | Bearer | Phase 2c: give back a hold that did not fail        |
 | GET    | `/v1/budget`    | Bearer | Remaining tenant budget, `voidsOwed`                |
 | GET    | `/v1/events`    | Bearer | SSE stream of tenant governance events              |
-| GET    | `/v1/health`    | none   | Liveness and `capabilities`                         |
+| GET    | `/v1/health`    | none   | Liveness, `capabilities` and `logLinesDropped`      |
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
 `404 not_found` (unknown transferId on `/v1/abort` and `/v1/release`; for `/v1/settle` see the three codes below), `413 too_large` (1 MiB body cap),
@@ -142,6 +142,15 @@ sleeps, a hold that was pending across the sleep can keep counting against the b
 life (T, 300 s by default) plus up to one sweep interval (30 s) after wake. In enforce mode that can mean
 false denials. It's the safe direction: nothing is charged and the ledger releases the funds on time.
 A TigerBeetle-state probe for this case is a follow-up (#241).
+
+### `GET /v1/health`
+
+Unauthenticated. It answers `ok`, the server's `name` and `version`, its `capabilities`, and
+`logLinesDropped`: the number of log lines this server could write nowhere, because its log sink
+failed and its write to stderr failed too (a stderr whose reader has gone, say). It is `0`
+normally. It is process-wide, counted across every tenant and route, and names no tenant, route
+or error. It never resets except on a restart. Alert on it going above `0`: server diagnostics
+(internal errors, and the late-hold, expiry and shutdown notices) happened that no log recorded.
 
 ### When the ledger does not answer: `503 ledger_unavailable`
 
@@ -200,7 +209,8 @@ have reached the client.
 - **`voidsOwed`** on the authenticated `GET /v1/budget` counts the tenant's late holds whose
   give-back has not landed: those still waiting on the ledger (a second outage), and those whose
   void the ledger refused, until the hold's own life has run out. The server also logs each of
-  these to stderr, naming the transfer only by a short SHA-256 prefix.
+  these (to stderr, unless an embedder gives it a log sink), naming the transfer only by a short
+  SHA-256 prefix.
 - **Residual race.** A client that hangs up AFTER the `200` is written cannot be detected: that
   hold is registered as pending and swept as any other.
 - `GET /v1/health` still reports `ok` while the ledger is down. `/v1/settle`, `/v1/abort` and
@@ -261,7 +271,12 @@ the tenant's Governor (per-tenant `stateDir/<tenant>` vault: separate audit chai
 spend ledger). Each tenant vault is owner-only (directories `0700`, files `0600`, whatever
 the umask; a vault another user owns is refused), and the server writes nothing outside
 `stateDir`; a `stateDir` the server creates is `0700`, and one you created is left as you
-made it. On Windows the server neither sets nor checks permissions: the `stateDir` folder's
+made it. At start the CLI creates every configured tenant's vault that does not exist yet
+(owner-only) and checks each the way its governor will, and refuses to start, naming the tenant
+and the reason, on one it cannot create or the governor would refuse. An error a client sees only
+as the opaque `500 internal` is written to stderr as
+`usertrust-server: internal error: tenant=<id> route=<route>: <reason>`, never with a header or a
+request body; a bearer key or api-key value quoted in the reason is replaced with `[redacted]`. On Windows the server neither sets nor checks permissions: the `stateDir` folder's
 inherited ACL decides who can read it, so keep it under the service account's own profile or
 give it an owner-only ACL (see the repository's `LIMITATIONS.md`). The SSE stream is
 best-effort operational telemetry, NOT an audit source — dropped subscribers lose events.

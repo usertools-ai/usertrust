@@ -12,15 +12,22 @@ const ESCAPE_SEQUENCES =
 	/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x9d)[^\x07\x1b\x9c\n]*(?:\x07|\x1b\\|\x9c)?|\x1b[@-_]?/g;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: the control-character strip is a terminal-injection defense
 const CONTROL_CHARACTERS = /[\x00-\x1f\x7f-\x9f]/g;
+// LINE SEPARATOR and PARAGRAPH SEPARATOR: no control class holds them, and a viewer that
+// honours them starts a new line there, so a caller's message could show a forged log line.
+// Built from code points so the source carries no invisible character.
+const LINE_SEPARATORS = new RegExp(`[${String.fromCodePoint(0x2028, 0x2029)}]`, "g");
 
 /**
  * Text the CLI prints at an operator's terminal that carries configured values (a ledger
- * address, a config path, a child's stderr). Removes escape sequences, then every C0, DEL
- * and C1 character, keeping only the line breaks; then clips to MAX_PRINTED_CHARS. In that
+ * address, a config path, a child's stderr). Turns U+2028 and U+2029 into `\n`, so they are
+ * line breaks like any other (a caller that joins lines on `\n` folds them too, and an OSC body
+ * stops at them); removes escape sequences, then every C0, DEL and C1 character (U+0085
+ * included), keeping only the line breaks; then clips to MAX_PRINTED_CHARS. In that
  * order: sanitized before it is clipped, so a cut can never leave half a sequence behind.
  */
 export function scrubForStderr(text: string): string {
 	const clean = text
+		.replace(LINE_SEPARATORS, "\n")
 		.replace(ESCAPE_SEQUENCES, "")
 		.split("\n")
 		.map((line) => line.replace(CONTROL_CHARACTERS, ""))

@@ -220,6 +220,9 @@ export {
 // id `createGovernor()` then rejects, or (worse) admit a `::` parent whose account
 // derivation lands on stranded pre-v3 cost-center money.
 export { parentUserIdRefusal } from "./shared/ids.js";
+// The check a governor gives its vault, for code that opens vaults ahead of a governor
+// (usertrust-server refuses to start on a tenant vault this refuses).
+export { securePrivateVault } from "./shared/private-fs.js";
 // Types
 export type {
 	ActionDescriptor,
