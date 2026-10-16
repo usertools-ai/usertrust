@@ -26,6 +26,7 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	statSync,
 	symlinkSync,
 	writeFileSync,
 	writeSync,
@@ -169,6 +170,32 @@ describe("files past V8's string limit, and past the bound for one read", () => 
 			);
 		}
 	}, 60_000);
+
+	it("segments each under the bound for one read but over a snapshot's bound together: the one that does not fit is named, never read, in both", async () => {
+		{
+			await vaultOf(10);
+			const all = lines();
+			const segment = join(auditDir(), "events.0001.jsonl");
+			writeFileSync(segment, `${all.slice(0, 5).join("\n")}\n`);
+			writeFileSync(logPath(), `${all.slice(5).join("\n")}\n`);
+			const logBytes = statSync(logPath()).size;
+			const segmentBytes = statSync(segment).size;
+			// The log is read first; the bound leaves the segment one byte short.
+			const bound = logBytes + segmentBytes - 1;
+			for (const read of [verifyVaultReading, standaloneVerifyVaultReading]) {
+				const { result } = read(vaultDir(), { maxSnapshotBytes: bound });
+				expect(result.valid).toBe(false);
+				expect(result.errors).toContain(
+					`Audit segment could not be read: events.0001.jsonl (${segmentBytes} bytes: with the segments read before it, over the ${bound}-byte bound one verdict reads within)`,
+				);
+				// CONTROL: a bound they fit in together: valid.
+				expect(read(vaultDir(), { maxSnapshotBytes: bound + 1 }).result).toMatchObject({
+					valid: true,
+					chainLength: 10,
+				});
+			}
+		}
+	});
 
 	it("a dead-letter queue of one line past the string limit: that letter is unreadable, so counted missing; nothing throws", async () => {
 		mkdirSync(join(vaultDir(), "dlq"), { recursive: true });

@@ -37,6 +37,8 @@ import {
 	acquireWholeFile,
 	listDirectory,
 	MAX_INVENTORY_NAMES,
+	MAX_SEGMENT_BYTES,
+	MAX_SNAPSHOT_BYTES,
 } from "./tail-read.js";
 import { type FileObservation, type InventoryObservation, MAX_ANCHOR_BYTES } from "./tail-state.js";
 
@@ -70,6 +72,11 @@ export interface StableReadOptions {
 	delayMs?: number;
 	/** Read the anchor mirror into the snapshot too, bracketed like the anchor: an anchored verdict. */
 	mirror?: boolean;
+	/**
+	 * The most bytes the segments may take together (default `MAX_SNAPSHOT_BYTES`): each is read within what is
+	 * left of it, after the ones before it, and one that does not fit is `oversize`, never read.
+	 */
+	maxSnapshotBytes?: number;
 }
 
 /** An audit directory's log. */
@@ -143,6 +150,8 @@ interface AttemptScope {
 	logName: string;
 	withSegments: boolean;
 	withMirror: boolean;
+	/** The bytes every segment may take together. */
+	maxSnapshotBytes: number;
 }
 
 /** One bracketed attempt. */
@@ -159,9 +168,12 @@ function attempt(
 	const mirror = scope.withMirror ? acquireWholeFile(mirrorPath) : undefined;
 	const segments: SegmentRead[] = [];
 	let changed = mirror?.changed === true;
+	// Every segment is held at once: each is read within what the ones before it left of the snapshot's bound.
+	let left = scope.maxSnapshotBytes;
 	for (const name of segmentNames(audit, scope.logName, scope.withSegments)) {
-		const read = acquireWholeFile(join(auditDir, name));
+		const read = acquireWholeFile(join(auditDir, name), Math.min(MAX_SEGMENT_BYTES, left));
 		changed ||= read.changed;
+		if (read.file.kind === "read") left -= read.file.bytes.length;
 		segments.push({ name, file: read.file });
 	}
 	const consistent =
@@ -207,7 +219,12 @@ export function readVaultSnapshot(
 	logName = LOG_NAME,
 	withSegments = true,
 ): VaultRead {
-	const scope: AttemptScope = { logName, withSegments, withMirror: opts.mirror === true };
+	const scope: AttemptScope = {
+		logName,
+		withSegments,
+		withMirror: opts.mirror === true,
+		maxSnapshotBytes: Math.max(0, opts.maxSnapshotBytes ?? MAX_SNAPSHOT_BYTES),
+	};
 	const attempts = Math.max(1, opts.attempts ?? 26);
 	const delayMs = Math.max(0, opts.delayMs ?? 100);
 	// The torn snapshot seen under a live writer, while it stays the same: a completed failure, not a

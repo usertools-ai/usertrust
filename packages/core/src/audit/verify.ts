@@ -45,7 +45,7 @@ import { buildMerkleTree } from "./merkle.js";
 import type { PersistedAuditEvent } from "./read.js";
 import { parseRekorReceipt, type RekorVerification, verifyRekorReceipt } from "./rekor-verify.js";
 import { LOG_NAME, readVaultSnapshot, type StableReadOptions } from "./stable-read.js";
-import { MAX_SEGMENT_BYTES, splitLines } from "./tail-read.js";
+import { MAX_SEGMENT_BYTES, MAX_SNAPSHOT_BYTES, splitLines } from "./tail-read.js";
 import {
 	classifyAuditTail,
 	type FileObservation,
@@ -322,7 +322,9 @@ function readAuditDirectory(
 				file.kind === "not_regular"
 					? `Audit segment could not be read: ${name} (a ${file.fileKind}, not a regular file)`
 					: file.kind === "oversize"
-						? `Audit segment could not be read: ${name} (${file.size} bytes, over the ${MAX_SEGMENT_BYTES}-byte bound for one read)`
+						? file.size > MAX_SEGMENT_BYTES
+							? `Audit segment could not be read: ${name} (${file.size} bytes, over the ${MAX_SEGMENT_BYTES}-byte bound for one read)`
+							: `Audit segment could not be read: ${name} (${file.size} bytes: with the segments read before it, over the ${opts.maxSnapshotBytes ?? MAX_SNAPSHOT_BYTES}-byte bound one verdict reads within)`
 						: `Audit segment could not be read: ${name}`,
 			);
 			unreadableSegment ??=

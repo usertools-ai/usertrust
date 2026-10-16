@@ -485,8 +485,10 @@ any hold). What this does not cover:
   Beside one such line left last, an event that would not fit within 64 MiB with it is refused
   too, and dead-lettered; an ordinary event goes on.
 - **`usertrust verify` reads one log segment, the dead-letter queue and the anchor mirror within
-  1 GiB each.** A larger file is named as over that bound and its contents are not judged: the
-  vault fails (or, for the dead-letter queue, whether events are missing is unknown).
+  1 GiB each, and a vault's log segments within 2 GiB together.** A larger file, or a segment that
+  does not fit in what the segments read before it left of the 2 GiB, is named as over that bound
+  and its contents are not judged: the vault fails (or, for the dead-letter queue, whether events
+  are missing is unknown).
 - **Dead letters are read after the chain's snapshot.** A letter written while verify runs, for an
   event appended after its snapshot, reads as missing: verify fails, and a run at rest settles it.
 

@@ -50,6 +50,12 @@ export const MAX_EVENT_LINE_BYTES = 16 * 1024 * 1024;
 /** The most bytes a file read whole (a log segment, the dead-letter queue, the anchor mirror) may take. */
 export const MAX_SEGMENT_BYTES = 1024 * 1024 * 1024;
 
+/**
+ * The most bytes a snapshot's log segments may take TOGETHER: a verdict holds every segment at once (it walks
+ * the chain across them), so a vault of many segments each under the bound for one read is bounded too.
+ */
+export const MAX_SNAPSHOT_BYTES = 2 * MAX_SEGMENT_BYTES;
+
 /** The most names a vault directory listing may hold. */
 export const MAX_INVENTORY_NAMES = 100_000;
 
