@@ -23,8 +23,9 @@ import {
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { hashKey } from "../src/config.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { hashKey, type ServerConfig } from "../src/config.js";
+import { GovernorPool, secureTenantVaults } from "../src/pool.js";
 import { createUsertrustServer, type UsertrustServer } from "../src/server.js";
 
 const KEY = "ut_vault_perm_key";
@@ -214,6 +215,96 @@ describe.skipIf(onWindows)("usertrust-server, a stateDir with `..` after a symbo
 		expect(existsSync(join(kernel, "t1", ".usertrust", "audit", "events.jsonl"))).toBe(true);
 		// The lexical spelling, `<parent>/state`, was never created.
 		expect(existsSync(join(parent, "state"))).toBe(false);
+	});
+});
+
+/**
+ * The start-time check and the first request judge ONE directory. `stateDir` is
+ * `<parent>/link/../state` with `link -> <parent>/elsewhere/sub`: the kernel reads it as
+ * `<parent>/elsewhere/state`, a lexical fold as `<parent>/state`. One of the two holds a vault
+ * the governor refuses (a regular file named `.usertrust`), the other a fine owner-only vault.
+ * Whichever is which, `secureTenantVaults` and the tenant's governor must give the same answer.
+ */
+describe.skipIf(onWindows)("secureTenantVaults, a stateDir with `..` after a symbolic link", () => {
+	/** Both spellings of the tenant directory exist; `bad` names the one whose vault is a file. */
+	function dotDotState(bad: "kernel" | "lexical"): ServerConfig {
+		const parent = mkdtempSync(join(tmpdir(), "utsrv-dotdot-start-"));
+		tracked.push(parent);
+		mkdirSync(join(parent, "elsewhere", "sub"), { recursive: true });
+		symlinkSync(join(parent, "elsewhere", "sub"), join(parent, "link"));
+		const kernelTenant = join(parent, "elsewhere", "state", "t1");
+		const lexicalTenant = join(parent, "state", "t1");
+		for (const dir of [kernelTenant, lexicalTenant]) {
+			mkdirSync(dir, { recursive: true, mode: 0o700 });
+		}
+		const [refused, fine] =
+			bad === "kernel" ? [kernelTenant, lexicalTenant] : [lexicalTenant, kernelTenant];
+		writeFileSync(join(refused, ".usertrust"), "not a vault");
+		mkdirSync(join(fine, ".usertrust"), { mode: 0o700 });
+		return {
+			host: "127.0.0.1",
+			port: 0,
+			stateDir: `${parent}/link/../state`,
+			enforcement: "enforce",
+			pendingTtlMs: 300_000,
+			dryRun: true,
+			tenants: [{ id: "t1", keyHash: hashKey(KEY), budget: 50_000 }],
+		};
+	}
+
+	it.each([
+		["the kernel-resolved vault is a file, the lexical one fine", "kernel"],
+		["the lexical vault is a file, the kernel-resolved one fine", "lexical"],
+	] as const)("judges as the governor does: %s", async (_label, bad) => {
+		const config = dotDotState(bad);
+		const [tenant] = config.tenants;
+		if (tenant === undefined) throw new Error("no tenant");
+
+		let atStart: string | undefined;
+		try {
+			secureTenantVaults(config);
+		} catch (err) {
+			atStart = (err as Error).message;
+		}
+		const pool = new GovernorPool(config);
+		let atRequest: string | undefined;
+		try {
+			await pool.get(tenant);
+		} catch (err) {
+			atRequest = (err as Error).message;
+		} finally {
+			await pool.destroyAll();
+		}
+
+		// The same verdict: both refuse (naming the same vault) or both accept.
+		expect(atStart === undefined).toBe(atRequest === undefined);
+		if (bad === "kernel") {
+			expect(atRequest).toContain("not a directory");
+			expect(atStart).toBe(`tenant t1: ${atRequest}`);
+		} else {
+			expect(atRequest).toBeUndefined();
+		}
+	});
+
+	it("the mapping line is printed once: by the governor, not by the start check", async () => {
+		const config = dotDotState("lexical");
+		const [tenant] = config.tenants;
+		if (tenant === undefined) throw new Error("no tenant");
+		const lines: string[] = [];
+		const write = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+			lines.push(String(chunk));
+			return true;
+		});
+		const pool = new GovernorPool(config);
+		try {
+			secureTenantVaults(config);
+			await pool.get(tenant);
+		} finally {
+			write.mockRestore();
+			await pool.destroyAll();
+		}
+		const mapping = lines.join("").match(/vault base .* resolves to /g) ?? [];
+		expect(mapping).toHaveLength(1);
 	});
 });
 

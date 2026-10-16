@@ -13,6 +13,7 @@ import type {
 	ReleaseOutcome,
 } from "usertrust";
 import { sanitizeReleaseReason } from "usertrust";
+import { scrubForStderr } from "./cli/scrub.js";
 import type { ServerConfig, TenantConfig } from "./config.js";
 import { DEFAULT_LEDGER_TIMEOUT_MS, resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
@@ -188,6 +189,78 @@ export interface UsertrustServer {
 
 type TerminalKind = "settle" | "abort" | "release" | "sweep" | "shutdown";
 
+/** The routes a request can reach, by the server's own names: a log line never echoes a caller's URL. */
+const ROUTES = [
+	"GET /v1/budget",
+	"GET /v1/events",
+	"POST /v1/authorize",
+	"POST /v1/settle",
+	"POST /v1/abort",
+	"POST /v1/release",
+] as const;
+type RouteName = (typeof ROUTES)[number] | "sweep" | "shutdown";
+
+/** The route a request names, if it is one of the server's own; otherwise "unrouted". */
+function routeOf(req: IncomingMessage): RouteName | "unrouted" {
+	const named = `${req.method ?? ""} ${req.url ?? ""}`;
+	return (ROUTES as readonly string[]).includes(named) ? (named as RouteName) : "unrouted";
+}
+
+/** A bearer token wherever a message quotes one: `Bearer <token>`. */
+const BEARER_TOKEN = /\b(Bearer)\s+[^\s"',;]+/gi;
+/**
+ * An api-key style value: `x-api-key: <v>`, `api_key=<v>`, `"api-key": "<v>"`. A QUOTED value is
+ * consumed through its closing quote (or to the end, unclosed), whatever it holds: `"abc;def"` is
+ * one value, never `abc` followed by text. An escape inside it is a backslash and ANY character,
+ * a line terminator included (`\\[\s\S]`): with `\\.` an escaped CR or LF ended the match there,
+ * and the rest of the value was logged. An unquoted value ends at whitespace, a quote, `,`, `;` or
+ * `&`. Two leaks have now been found in this pattern; a third replaces it with a structured
+ * redactor rather than another case.
+ */
+/** Exported for the redaction sweep's positive control only; not part of the package entry. */
+export const API_KEY_VALUE =
+	/\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(?:"((?:[^"\\]|\\[\s\S])*)"?|'((?:[^'\\]|\\[\s\S])*)'?|[^\s"',;&]+)/gi;
+
+/**
+ * `text` with every `secret` (the caller's own bearer key, when known), every `Bearer <token>` and
+ * every api-key style value replaced by `[redacted]`. Scrubbing is not redaction: `scrubForStderr`
+ * removes terminal control, never a credential.
+ */
+export function redactSecrets(text: string, secrets: readonly string[] = []): string {
+	let out = text;
+	for (const secret of secrets) if (secret !== "") out = out.split(secret).join("[redacted]");
+	return out
+		.replace(BEARER_TOKEN, "$1 [redacted]")
+		.replace(API_KEY_VALUE, (_match, name: string, sep: string, dq?: string, sq?: string) => {
+			const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : "";
+			return `${name}${sep}${quote}[redacted]${quote}`;
+		});
+}
+
+/**
+ * One line for the operator's log about an error a client only ever sees as the opaque
+ * `500 internal`: which tenant, which route, and the error's own name and message, so a
+ * tenant refused at its first request (its vault, say) says why somewhere. It carries no key,
+ * header or request body of its own. The message is the server's or governor's text, which can
+ * quote what a caller sent, so credentials in it are REDACTED (`redactSecrets`, with the caller's
+ * own key in `secrets`) before escape sequences and control characters are removed
+ * (`scrubForStderr`) and its lines joined into one; and once more after, so a key a control
+ * character had split cannot come back together.
+ */
+export function internalErrorLine(
+	err: unknown,
+	tenantId: string | undefined,
+	route: RouteName | "unrouted",
+	secrets: readonly string[] = [],
+): string {
+	const name = err instanceof Error ? err.name : typeof err;
+	const message = err instanceof Error ? err.message : String(err);
+	const raw = redactSecrets(`${name}: ${message}`, secrets);
+	const text = redactSecrets(scrubForStderr(raw).replace(/\s*\n\s*/g, " "), secrets);
+	const tenant = tenantId === undefined ? "-" : scrubForStderr(tenantId);
+	return `usertrust-server: internal error: tenant=${tenant} route=${route}: ${text}`;
+}
+
 const noop = (): void => {};
 
 /**
@@ -226,14 +299,155 @@ function idHash(transferId: string): string {
 	return createHash("sha256").update(transferId, "utf-8").digest("hex").slice(0, 12);
 }
 
+/**
+ * Log lines this process's servers could write nowhere: the sink failed (or there was none) and
+ * the write to stderr failed too. Process-wide, never reset; served on `/v1/health`.
+ */
+let logLinesDropped = 0;
+
+/**
+ * `line` to stderr. It never throws, and a line stderr refuses is COUNTED in `logLinesDropped`.
+ * The failure is read from THIS write's own callback, never from the stream's `'error'` event,
+ * which also fires for every other writer's failed write in the process: those are not this
+ * server's lines.
+ */
+function writeLogLine(line: string): void {
+	let counted = false;
+	const dropped = (): void => {
+		if (counted) return;
+		counted = true;
+		logLinesDropped += 1;
+	};
+	try {
+		process.stderr.write(`${line}\n`, (err) => {
+			if (err) dropped();
+		});
+	} catch {
+		dropped();
+	}
+}
+
+/** Marks the `'error'` listener this module installs, so no copy of it installs a second one. */
+const STDERR_CONTAINED = Symbol.for("usertrust-server.stderr-errors-contained");
+
+/**
+ * A write to a stderr whose reader has gone does not throw: Node reports EPIPE as an `'error'`
+ * event on the stream, and an `'error'` with no listener is an uncaught exception that kills the
+ * process. One listener, installed at most once per process and never removed, contains it. It
+ * only stops the crash: each write's own callback still receives its error, and an embedder's
+ * own `'error'` listeners are neither removed nor replaced.
+ */
+function containStderrErrors(): void {
+	try {
+		const stderr = process.stderr as NodeJS.WriteStream & { [STDERR_CONTAINED]?: true };
+		if (stderr[STDERR_CONTAINED] === true) return;
+		stderr.on("error", () => {});
+		stderr[STDERR_CONTAINED] = true;
+	} catch {
+		/* a stderr that cannot take a listener: writeLogLine still never throws */
+	}
+}
+
 /** `claim` found the entry gone or replaced: another terminal owns it, and this caller ended nothing. */
 const NOT_CLAIMED = Symbol("not-claimed");
 
+/**
+ * A usertrust-server: the HTTP surface over one governor per tenant.
+ *
+ * PROCESS-WIDE SIDE EFFECT: the first server created in a process adds one `'error'` listener to
+ * `process.stderr`, and it stays for the life of the process. Without it a write to a stderr whose
+ * reader has gone (EPIPE) is an uncaught exception that ends the process at the server's first
+ * logged 500. With it, an EPIPE on stderr from ANY writer in the embedding process (`console.warn`,
+ * another library) is contained instead of crashing it. It is installed at most once per process,
+ * and the embedder's own `'error'` listeners are neither removed nor replaced. A log line the server
+ * could write nowhere is counted in `/v1/health`'s `logLinesDropped`.
+ */
 export function createUsertrustServer(opts: {
 	config: ServerConfig;
 	factory?: GovernorFactory;
+	/**
+	 * Where operator log lines go, one line per call. Default: stderr, as the CLI's own lines. A
+	 * sink that throws or rejects is contained, and its line goes to stderr instead. Every server
+	 * diagnostic goes here: internal errors, and the late-hold, expiry and shutdown notices.
+	 *
+	 * Contract: the sink returns nothing or a real promise. A custom thenable's OWN failures (a
+	 * `then` method that is itself async and rejects, say, before calling the handler it was given)
+	 * happen inside the embedder's code, outside this containment: not even `await` could observe
+	 * them.
+	 */
+	log?: (line: string) => void;
 }): UsertrustServer {
 	const { config } = opts;
+	const sink = opts.log;
+	containStderrErrors();
+	/**
+	 * The ONLY way this server writes a log line, and ONE containment boundary: the sink call, the
+	 * test for a thenable (reading `then` included) and attaching its rejection handler all sit in
+	 * one `try`, and every failure, synchronous or asynchronous, goes to one fallback,
+	 * `writeLogLine`, which cannot throw and counts a line that stderr refused too. A failing sink
+	 * therefore never stops a 500 from being sent, never surfaces as an unhandled rejection, and
+	 * never breaks the sweep's or shutdown's best-effort release. Without a sink the line goes
+	 * straight to `writeLogLine`: retrying stderr on stderr would only write it twice.
+	 */
+	const log = (line: string): void => {
+		if (sink === undefined) {
+			writeLogLine(line);
+			return;
+		}
+		// A hostile thenable may call its rejection handler more than once: one line, one fallback.
+		let fellBack = false;
+		const fallBack = (): void => {
+			if (fellBack) return;
+			fellBack = true;
+			writeLogLine(line);
+		};
+		try {
+			const returned: unknown = sink(line);
+			if (returned !== null && (typeof returned === "object" || typeof returned === "function")) {
+				const then: unknown = (returned as { then?: unknown }).then;
+				if (typeof then === "function") then.call(returned, undefined, fallBack);
+			}
+		} catch {
+			fallBack();
+		}
+	};
+	/** The internal-error line for `err`, logged; an error that cannot even be read is still logged. */
+	function logInternalError(
+		err: unknown,
+		tenantId: string | undefined,
+		route: RouteName | "unrouted",
+		secrets: readonly string[] = [],
+	): void {
+		let line: string;
+		try {
+			line = internalErrorLine(err, tenantId, route, secrets);
+		} catch {
+			const tenant = tenantId === undefined ? "-" : scrubForStderr(tenantId);
+			line = `usertrust-server: internal error: tenant=${tenant} route=${route}: (the error could not be read)`;
+		}
+		log(line);
+	}
+	/**
+	 * Who each request authenticated as, by its response: the tenant, for the log line of an
+	 * error, and the caller's own bearer key, so that line can redact it.
+	 */
+	const requestCaller = new WeakMap<ServerResponse, { tenantId: string; key: string }>();
+	/**
+	 * `toHttpError`, plus the operator's log line for the opaque 500. The client's answer is
+	 * exactly `toHttpError`'s: the reason lands in the log, never in the response.
+	 */
+	function httpError(
+		err: unknown,
+		res: ServerResponse,
+		route: RouteName | "unrouted",
+	): ReturnType<typeof toHttpError> {
+		const mapped = toHttpError(err);
+		if (mapped.status === 500) {
+			const caller = requestCaller.get(res);
+			logInternalError(err, caller?.tenantId, route, caller === undefined ? [] : [caller.key]);
+		}
+		return mapped;
+	}
 	const bus = new EventBus();
 	const pool = opts.factory ? new GovernorPool(config, opts.factory) : new GovernorPool(config);
 	const pending = new Map<string, PendingEntry>();
@@ -381,7 +595,7 @@ export function createUsertrustServer(opts: {
 
 	/** Today's answer to an authorize the governor refused: the mapped error, or evaluate-only's shadow 200. */
 	function answerDenied(tenant: TenantConfig, err: unknown, res: ServerResponse): void {
-		const mapped = toHttpError(err);
+		const mapped = httpError(err, res, "POST /v1/authorize");
 		const shadow = config.enforcement === "evaluate_only" && mapped.status !== 500;
 		bus.publish(tenant.id, {
 			type: "denied",
@@ -432,8 +646,8 @@ export function createUsertrustServer(opts: {
 		const refused = (code: string): void => {
 			entry.state = "refused";
 			entry.code = code;
-			process.stderr.write(
-				`usertrust-server: a late hold's void was refused (transfer ${idHash(transferId)}, ${code}); it expires at the hold timeout\n`,
+			log(
+				`usertrust-server: a late hold's void was refused (transfer ${idHash(transferId)}, ${code}); it expires at the hold timeout`,
 			);
 		};
 		let releasing: Promise<ReleaseOutcome>;
@@ -449,8 +663,8 @@ export function createUsertrustServer(opts: {
 				if (!outcome.released) {
 					// Teardown or another terminal owned the hold: never counted as a landed void.
 					owed.delete(key);
-					process.stderr.write(
-						`usertrust-server: a late hold was taken by another terminal before its release (transfer ${idHash(transferId)})\n`,
+					log(
+						`usertrust-server: a late hold was taken by another terminal before its release (transfer ${idHash(transferId)})`,
 					);
 					return;
 				}
@@ -686,7 +900,7 @@ export function createUsertrustServer(opts: {
 			// Another terminal took the hold between the lookup and the claim: this is an unheld settle.
 			if (claimedNow === NOT_CLAIMED) await handleUnheldSettle(tenant, transferId, usage, res);
 		} catch (err) {
-			const mapped = toHttpError(err);
+			const mapped = httpError(err, res, "POST /v1/settle");
 			sendJson(res, mapped.status, mapped.body);
 		}
 	}
@@ -857,7 +1071,7 @@ export function createUsertrustServer(opts: {
 				...(outcome.auditDegraded === true ? { auditDegraded: true } : {}),
 			});
 		} catch (err) {
-			const mapped = toHttpError(err);
+			const mapped = httpError(err, res, "POST /v1/settle");
 			sendJson(res, mapped.status, mapped.body);
 		}
 	}
@@ -886,7 +1100,7 @@ export function createUsertrustServer(opts: {
 				return governor.abort(entry.auth, parsed.data.error);
 			});
 		} catch (err) {
-			const mapped = toHttpError(err);
+			const mapped = httpError(err, res, "POST /v1/abort");
 			sendJson(res, mapped.status, mapped.body);
 			return;
 		}
@@ -936,7 +1150,7 @@ export function createUsertrustServer(opts: {
 				return governor.release(entry.auth, reason, { releaseClass });
 			});
 		} catch (err) {
-			const mapped = toHttpError(err);
+			const mapped = httpError(err, res, "POST /v1/release");
 			sendJson(res, mapped.status, mapped.body);
 			return;
 		}
@@ -1023,15 +1237,17 @@ export function createUsertrustServer(opts: {
 				name: SERVER_NAME,
 				version: SERVER_VERSION,
 				capabilities: config.dryRun ? DRY_RUN_CAPABILITIES : SERVER_CAPABILITIES,
+				logLinesDropped,
 			});
 			return;
 		}
 		const key = bearerKey(req);
 		const tenant = key ? resolveTenant(config, key) : null;
-		if (!tenant) {
+		if (!key || !tenant) {
 			sendJson(res, 401, { error: "unauthorized", reason: "missing or invalid bearer key" });
 			return;
 		}
+		requestCaller.set(res, { tenantId: tenant.id, key });
 		if (req.method === "GET" && url === "/v1/budget") {
 			const governor = await pool.get(tenant);
 			sendJson(res, 200, {
@@ -1104,9 +1320,10 @@ export function createUsertrustServer(opts: {
 				try {
 					const governor = await pool.get(tenant);
 					return await governor.release(entry.auth, reason);
-				} catch {
+				} catch (err) {
 					// Best-effort — the Governor's own destroy()/reconciliation voids
-					// anything the control plane fails to release here.
+					// anything the control plane fails to release here. Logged, never silent.
+					logInternalError(err, tenant.id, kind);
 					return undefined;
 				}
 			},
@@ -1132,8 +1349,8 @@ export function createUsertrustServer(opts: {
 			const age = now === undefined ? performance.now() - entry.startedMono : now - entry.createdAt;
 			if (age < (entry.holdTimeoutMs ?? config.pendingTtlMs) + SWEEP_INTERVAL_MS) continue;
 			owed.delete(key);
-			process.stderr.write(
-				`usertrust-server: a late hold whose void was refused has expired (transfer ${idHash(entry.transferId)}, ${entry.code ?? "unknown"})\n`,
+			log(
+				`usertrust-server: a late hold whose void was refused has expired (transfer ${idHash(entry.transferId)}, ${entry.code ?? "unknown"})`,
 			);
 		}
 		let swept = 0;
@@ -1159,7 +1376,7 @@ export function createUsertrustServer(opts: {
 			return new Promise((resolve, reject) => {
 				httpServer = createServer((req, res) => {
 					route(req, res).catch((err: unknown) => {
-						const mapped = toHttpError(err);
+						const mapped = httpError(err, res, routeOf(req));
 						if (!res.headersSent) sendJson(res, mapped.status, mapped.body);
 					});
 				});
@@ -1182,8 +1399,8 @@ export function createUsertrustServer(opts: {
 			const outstanding = [...unsettled.values()].reduce((n, set) => n + set.size, 0);
 			const voiding = [...owed.values()].filter((entry) => entry.state === "voiding").length;
 			if (outstanding > 0 || voiding > 0) {
-				process.stderr.write(
-					`usertrust-server: shutting down with ${outstanding} authorize(s) still waiting on the ledger and ${voiding} late hold void(s) not landed; their holds expire at the hold timeout\n`,
+				log(
+					`usertrust-server: shutting down with ${outstanding} authorize(s) still waiting on the ledger and ${voiding} late hold void(s) not landed; their holds expire at the hold timeout`,
 				);
 			}
 			// Release every remaining pending hold (best-effort) so the control plane

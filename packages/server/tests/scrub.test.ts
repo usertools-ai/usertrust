@@ -13,6 +13,17 @@ describe("scrubForStderr", () => {
 		expect(scrubForStderr("one\x00\x07\t\r\x7f\x85\x9f\ntwo")).toBe("one\ntwo");
 	});
 
+	it("U+2028 and U+2029 are line breaks, and U+0085 is removed as a C1 control", () => {
+		const ls = String.fromCodePoint(0x2028);
+		const ps = String.fromCodePoint(0x2029);
+		const nel = String.fromCodePoint(0x85);
+		const out = scrubForStderr(`one${ls}two${ps}three${nel}four`);
+		expect(out).toBe("one\ntwo\nthreefour");
+		for (const char of [ls, ps, nel]) expect(out).not.toContain(char);
+		// An OSC body stops at them as it does at a newline.
+		expect(scrubForStderr(`a\x1b]0;title${ls}the fix`)).toBe("a\nthe fix");
+	});
+
 	it("an unterminated OSC cannot swallow the lines after it", () => {
 		expect(scrubForStderr("a\x1b]0;title\nthe fix")).toBe("a\nthe fix");
 	});

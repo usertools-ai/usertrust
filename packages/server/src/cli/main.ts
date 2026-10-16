@@ -4,6 +4,7 @@
 
 import { loadServerConfig } from "../config.js";
 import { probeLedger } from "../ledger-probe.js";
+import { secureTenantVaults } from "../pool.js";
 import { createUsertrustServer } from "../server.js";
 import { scrubForStderr } from "./scrub.js";
 
@@ -17,11 +18,14 @@ async function main(): Promise<void> {
 	const config = await loadServerConfig(configPath);
 	const portOverride = argValue("--port");
 	if (portOverride) config.port = Number.parseInt(portOverride, 10);
-	// Before anything binds: an unusable ledger would otherwise crash or hang the first request.
+	// Before anything binds: a tenant vault its governor would refuse, or an unusable ledger,
+	// would otherwise fail every request (an opaque 500) or crash or hang the first one.
+	secureTenantVaults(config);
 	await probeLedger(config);
 	const server = createUsertrustServer({ config });
-	const { port } = await server.listen();
-	process.stderr.write(`usertrust-server listening on ${scrubForStderr(config.host)}:${port}\n`);
+	// The handlers go in BEFORE the server listens: a supervisor (or a test) that signals the
+	// moment it reads the listening line must reach shutdown, never the default action, which
+	// kills the process. close() is safe on a server that is not listening yet.
 	const shutdown = async (): Promise<void> => {
 		process.stderr.write("usertrust-server shutting down — voiding pending holds\n");
 		await server.close();
@@ -29,6 +33,8 @@ async function main(): Promise<void> {
 	};
 	process.on("SIGINT", () => void shutdown());
 	process.on("SIGTERM", () => void shutdown());
+	const { port } = await server.listen();
+	process.stderr.write(`usertrust-server listening on ${scrubForStderr(config.host)}:${port}\n`);
 }
 
 main().catch((err: unknown) => {
