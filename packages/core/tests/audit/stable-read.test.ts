@@ -144,7 +144,10 @@ describe("verify on a live vault", () => {
 		// loaded machine must not turn this row into the steady-torn one below.
 		const { result } = verifyVaultReading(vaultDir(), { attempts: 200, delayMs: 25 });
 		await done;
-		expect(result).toMatchObject({ valid: true, chainLength: 3, tailState: { state: "MATCH" } });
+		expect(result).toMatchObject({ valid: true, chainLength: 3 });
+		// The other process appends the rest of the line, THEN writes the anchor: a snapshot that lands between the
+		// two holds a complete event one past its anchor, which is a valid verdict too (an interrupted write's).
+		expect(["MATCH", "ONE_PAST_ANCHOR"]).toContain(result.tailState?.state);
 		expect(result.busy).toBeUndefined();
 		expect(result.writerLive).toBeUndefined();
 	});
