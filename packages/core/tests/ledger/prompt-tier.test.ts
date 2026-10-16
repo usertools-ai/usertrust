@@ -238,6 +238,7 @@ describe("the record publishes the tier that priced the call", () => {
 				source: "provider",
 			},
 			haiku(),
+			true,
 		);
 		expect(low.cacheWrite1h).toStrictEqual({ tokens: 500, ratePer1k: LOW.cacheWrite1hPer1k });
 		const high = publishableUsageFields(
@@ -250,6 +251,7 @@ describe("the record publishes the tier that priced the call", () => {
 				source: "provider",
 			},
 			haiku(),
+			true,
 		);
 		expect(high.cacheWrite1h).toStrictEqual({ tokens: 500, ratePer1k: HIGH.cacheWrite1hPer1k });
 		// The helper itself prices whatever rates it is handed: the TIER is the caller's job.

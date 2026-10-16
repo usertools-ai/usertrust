@@ -2565,7 +2565,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				);
 				// D5: the record half of the SAME snapshot the cost comes from —
 				// present iff provider-sourced, omitted (never zero-filled) otherwise.
-				const usageAudit = publishableUsageFields(usageSnapshot, rateResolution.rates);
+				// Govern prices only provider-sourced counts: an estimated settle is priced at the metered estimate.
+				const usageAudit = publishableUsageFields(
+					usageSnapshot,
+					rateResolution.rates,
+					usageSnapshot.source === "provider",
+				);
 				// A reported count above the per-tier plausibility ceiling is not usage (see
 				// MAX_PLAUSIBLE_TOKENS_PER_TIER): the snapshot is "estimated", so the call is charged at the
 				// estimate, and the anomaly is reported on stderr and, after the `llm_call` it annotates, on the chain.
@@ -3374,7 +3379,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
 				// D5: the record half of the SAME snapshot the cost comes from. Nothing
 				// below re-reads `response.usage` — one read, one object, two uses.
-				const usageAudit = publishableUsageFields(usageSnapshot, rateResolution.rates);
+				// Govern prices only provider-sourced counts: an estimated settle is priced at the metered estimate.
+				const usageAudit = publishableUsageFields(
+					usageSnapshot,
+					rateResolution.rates,
+					usageSnapshot.source === "provider",
+				);
 				// A reported count above the per-tier plausibility ceiling is not usage (see
 				// MAX_PLAUSIBLE_TOKENS_PER_TIER): the snapshot is "estimated", so the call is charged at the
 				// estimate, and the anomaly is reported on stderr and, after the `llm_call` it annotates, on the chain.
