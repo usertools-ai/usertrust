@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Read before upgrading
+
+- **usertrust-server: `GET /v1/health` can now answer `ok: false`, and `GET /v1/budget` can answer `503 ledger_unavailable`.** Health stays HTTP `200`, with its `capabilities` unchanged, and gains `ledger`; `ok` is `false` when `ledger` is `unreachable`. A monitor that alerted on `ok` now sees ledger outages, and should read `ledger` (`unknown` is not an outage). `/v1/budget` waits at most `ledgerTimeoutMs` for the tenant's governor, then answers `{ error: "ledger_unavailable", reason, retryAfterMs, ledger }` with no `remaining`: treat it as retryable.
+
+- **usertrust-server: the CLI now runs one child process per ledger cluster it watches.** By default the `usertrust-server` CLI starts a long-lived health child per distinct ledger target its tenants configure (`ledgerHealth: "child"`). Each holds one TigerBeetle client session for the life of the server, beside the governors' own sessions: configure every tenant of one cluster with identical `tigerbeetle.addresses`, or each address list costs a session. `"ledgerHealth": "off"` runs none. `createUsertrustServer()` runs none unless asked.
+
+### Added
+
+- **usertrust-server: `ledger` on `/v1/health` and `/v1/budget`, and `ledgerHealth`.** `GET /v1/health` reports the ledger's reachability as `ledger` (`reachable`, `unreachable`, `unknown`, or `none` in dryRun), the worst over every ledger the tenants use; `ok` is `false` exactly when it is `unreachable`. The authenticated `GET /v1/budget` reports the tenant's own `ledger`, and `ledgerObserver: { failures, lastFailure }`: how often the observer for that ledger failed, and the class of its last failure only. Reachability is observed by a child process per distinct ledger target, holding one TigerBeetle session and probing it every 30 s and when health is asked, so the server process loads no native ledger code for it. `ledgerHealth` (`"child"` or `"off"`) chooses it: the CLI defaults to `"child"`, `createUsertrustServer()` to `"off"`, which answers `ledger: "unknown"` and `ok: true` through an outage. `healthRespawnCooldownMs` (default 300000) is how long a child that died waits to be started again. See the server README, "Ledger reachability".
+
 ## [5.1.0] - 2026-10-18
 
 ### Read before upgrading
