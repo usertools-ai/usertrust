@@ -25,8 +25,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Governor } from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
+import { scrubForStderr } from "../src/cli/scrub.js";
 import { hashKey } from "../src/config.js";
-import { createUsertrustServer, internalErrorLine, type UsertrustServer } from "../src/server.js";
+import {
+	API_KEY_VALUE,
+	createUsertrustServer,
+	internalErrorLine,
+	type UsertrustServer,
+} from "../src/server.js";
 import { createFakeGovernor } from "./helpers/fake-governor.js";
 
 const CLI = join(import.meta.dirname, "..", "src", "cli", "main.ts");
@@ -342,6 +348,245 @@ describe("one containment boundary: a failing log sink never changes what the se
 	});
 });
 
+/** `logLinesDropped`, read through a throwaway server: it is process-wide, and outlives a closed one. */
+async function droppedNow(): Promise<number> {
+	const probe = createUsertrustServer({ config: inProcessConfig(tmp("utsrv-err-probe-")) });
+	try {
+		const { port } = await probe.listen();
+		return await logLinesDropped(`http://127.0.0.1:${port}`);
+	} finally {
+		await probe.close();
+	}
+}
+
+/** Lets late failures (a rejection, a write's callback) land. */
+async function settleTurns(): Promise<void> {
+	for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * A ledger-backed server (a deadline, not dryRun) over a fake governor whose late give-back the
+ * ledger refuses (`exceeds_credits`), and whose next authorize waits until `openGate()`.
+ */
+async function noticeServer(sink?: (line: string) => void): Promise<{
+	base: string;
+	openGate: () => void;
+	released: () => number;
+}> {
+	const fake = createFakeGovernor({
+		holdTimeoutMs: 300_000,
+		release: { voidError: "exceeds_credits" },
+	});
+	let open: () => void = () => {};
+	const gated = new Promise<void>((resolve) => {
+		open = resolve;
+	});
+	const governor: Governor = {
+		...fake.governor,
+		async authorize(params) {
+			await gated;
+			return fake.governor.authorize(params);
+		},
+	};
+	server = createUsertrustServer({
+		config: { ...inProcessConfig(tmp("utsrv-err-notice-")), dryRun: false, ledgerTimeoutMs: 100 },
+		factory: async () => governor,
+		...(sink === undefined ? {} : { log: sink }),
+	});
+	const { port } = await server.listen();
+	return {
+		base: `http://127.0.0.1:${port}`,
+		openGate: () => open(),
+		released: () => fake.calls.released.length,
+	};
+}
+
+const NOTICE_BODY = { model: "m", estimatedInputTokens: 1, maxOutputTokens: 1 };
+
+/** An authorize refused at the deadline, its hold still owed by the ledger. */
+async function refusedAtDeadline(base: string): Promise<void> {
+	expect((await post(base, "/v1/authorize", NOTICE_BODY)).status).toBe(503);
+}
+
+/** Polls until the late give-back has reached the governor. */
+async function released(count: () => number): Promise<void> {
+	const deadline = Date.now() + 5_000;
+	while (count() < 1 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+	expect(count()).toBe(1);
+	await settleTurns();
+}
+
+/**
+ * Each server notice, triggered with stderr answering by `shape` (and nothing else logging
+ * meanwhile). Returns the lines that reached stderr.
+ */
+const NOTICES: Array<[string, RegExp, (shape: StderrShape) => Promise<string[]>]> = [
+	[
+		"the late-hold refusal (releaseLate)",
+		/^usertrust-server: a late hold's void was refused \(transfer [0-9a-f]{12}, exceeds_credits\); it expires at the hold timeout\n$/,
+		async (shape) => {
+			const s = await noticeServer();
+			await refusedAtDeadline(s.base);
+			const stderr = stubStderr(shape);
+			try {
+				s.openGate();
+				await released(s.released);
+			} finally {
+				stderr.restore();
+			}
+			return stderr.written;
+		},
+	],
+	[
+		"the expiry warning (sweepExpired)",
+		/^usertrust-server: a late hold whose void was refused has expired \(transfer [0-9a-f]{12}, exceeds_credits\)\n$/,
+		async (shape) => {
+			const s = await noticeServer();
+			await refusedAtDeadline(s.base);
+			// The refusal's own line, captured and not counted: this row measures the expiry alone.
+			const quiet = stubStderr("ok");
+			try {
+				s.openGate();
+				await released(s.released);
+			} finally {
+				quiet.restore();
+			}
+			expect(quiet.written).toHaveLength(1);
+			const stderr = stubStderr(shape);
+			try {
+				// Past the hold's life plus one sweep interval: the refused obligation expires.
+				expect(await server?.sweepExpired(Date.now() + 300_000 + 30_000 + 1_000)).toBe(0);
+				await settleTurns();
+			} finally {
+				stderr.restore();
+			}
+			return stderr.written;
+		},
+	],
+	[
+		"the shutdown warning (close)",
+		/^usertrust-server: shutting down with 1 authorize\(s\) still waiting on the ledger and 0 late hold void\(s\) not landed; their holds expire at the hold timeout\n$/,
+		async (shape) => {
+			const s = await noticeServer();
+			// The gate never opens: the authorize is still waiting on the ledger at shutdown.
+			await refusedAtDeadline(s.base);
+			const stderr = stubStderr(shape);
+			try {
+				await server?.close();
+				server = undefined;
+				await settleTurns();
+			} finally {
+				stderr.restore();
+			}
+			return stderr.written;
+		},
+	],
+];
+
+describe("every server notice goes through the counted log writer", () => {
+	describe.each(NOTICES)("%s", (_name, text, trigger) => {
+		it.each(STDERR_SHAPES)(
+			"stderr %s: the request or shutdown completes, nothing goes unhandled; dropped += %i",
+			async (shape, droppedBy) => {
+				const unhandled: unknown[] = [];
+				const onUnhandled = (reason: unknown): void => {
+					unhandled.push(reason);
+				};
+				process.on("unhandledRejection", onUnhandled);
+				process.on("uncaughtException", onUnhandled);
+				try {
+					const before = await droppedNow();
+					const written = await trigger(shape);
+					expect(await droppedNow()).toBe(before + droppedBy);
+					// The text is unchanged: one line, as it was written before.
+					if (shape === "ok") {
+						expect(written).toHaveLength(1);
+						expect(written[0]).toMatch(text);
+					}
+					expect(unhandled).toEqual([]);
+				} finally {
+					process.off("unhandledRejection", onUnhandled);
+					process.off("uncaughtException", onUnhandled);
+				}
+			},
+			20_000,
+		);
+	});
+
+	it.each(NOTICES)(
+		"%s reaches an embedder's sink, and nothing reaches stderr",
+		async (name, text) => {
+			const lines: string[] = [];
+			const s = await noticeServer((line) => lines.push(line));
+			const stderr = stubStderr("ok");
+			try {
+				await refusedAtDeadline(s.base);
+				if (name.includes("close")) {
+					await server?.close();
+					server = undefined;
+				} else {
+					s.openGate();
+					await released(s.released);
+					if (name.includes("sweepExpired")) {
+						await server?.sweepExpired(Date.now() + 300_000 + 30_000 + 1_000);
+					}
+				}
+				await settleTurns();
+			} finally {
+				stderr.restore();
+			}
+			expect(stderr.written).toEqual([]);
+			expect(lines.filter((line) => text.test(`${line}\n`))).toHaveLength(1);
+		},
+		20_000,
+	);
+});
+
+describe("a thenable that calls its rejection handler twice", () => {
+	it.each(STDERR_SHAPES)(
+		"stderr %s: the line falls back once, and is counted at most once; dropped += %i",
+		async (shape, droppedBy) => {
+			const fake = createFakeGovernor();
+			const governor: Governor = {
+				...fake.governor,
+				async authorize() {
+					throw new Error("governor exploded");
+				},
+			};
+			server = createUsertrustServer({
+				config: inProcessConfig(tmp("utsrv-err-twice-")),
+				factory: async () => governor,
+				log: () =>
+					({
+						// biome-ignore lint/suspicious/noThenProperty: the hostile thenable is the case under test
+						then(_resolve: unknown, reject: (err: Error) => void) {
+							reject(new Error("first"));
+							reject(new Error("second"));
+						},
+					}) as unknown as undefined,
+			});
+			const { port } = await server.listen();
+			const base = `http://127.0.0.1:${port}`;
+			const before = await logLinesDropped(base);
+			const stderr = stubStderr(shape);
+			try {
+				const res = await post(base, "/v1/authorize", NOTICE_BODY);
+				expect(res.status).toBe(500);
+				await settleTurns();
+			} finally {
+				stderr.restore();
+			}
+			expect(await logLinesDropped(base)).toBe(before + droppedBy);
+			if (shape === "ok") {
+				expect(stderr.written).toEqual([
+					"usertrust-server: internal error: tenant=t1 route=POST /v1/authorize: Error: governor exploded\n",
+				]);
+			}
+		},
+		20_000,
+	);
+});
+
 describe("the log line never carries the caller's key", () => {
 	it.each([
 		["thrown inside a route (authorize)", "route"],
@@ -386,17 +631,15 @@ describe("the log line never carries the caller's key", () => {
 		expect(line).toContain("tenant=t1 route=POST /v1/authorize");
 	});
 
-	it("a QUOTED api-key value is redacted through its closing quote, whatever it holds", () => {
-		const message =
-			'upstream said: {"x-api-key":"abc;def","api_key":"abc,def","api-key":"abc&def"} and x-api-key: plain';
+	it("an UNQUOTED api-key value is redacted up to whitespace, a quote, `,`, `;` or `&`", () => {
+		const message = "upstream said: x-api-key: plain and api_key=other;rest";
 		// Positive control: every value is in what was thrown.
-		for (const value of ["abc;def", "abc,def", "abc&def", "plain"])
-			expect(message).toContain(value);
+		for (const value of ["plain", "other"]) expect(message).toContain(value);
 		const line = internalErrorLine(new Error(message), "t1", "sweep");
 		expect(line).toBe(
-			'usertrust-server: internal error: tenant=t1 route=sweep: Error: upstream said: {"x-api-key":"[redacted]","api_key":"[redacted]","api-key":"[redacted]"} and x-api-key: [redacted]',
+			"usertrust-server: internal error: tenant=t1 route=sweep: Error: upstream said: x-api-key: [redacted] and api_key=[redacted];rest",
 		);
-		for (const left of ["abc", ";def", ",def", "&def", "plain"]) expect(line).not.toContain(left);
+		for (const left of ["plain", "other"]) expect(line).not.toContain(left);
 	});
 
 	it("a Bearer token and an api-key value are redacted even when the key is not the caller's", () => {
@@ -410,6 +653,122 @@ describe("the log line never carries the caller's key", () => {
 		expect(line).toBe(
 			"usertrust-server: internal error: tenant=t1 route=sweep: Error: upstream said: Authorization: Bearer [redacted] and x-api-key=[redacted]",
 		);
+	});
+});
+
+/** Known fragments on either side of the swept character: neither may survive in the line. */
+const PREFIX = "PFXsecret41";
+const SUFFIX = "SFXsecret73";
+/** Each key spelling with the quote its value is written in. */
+const KEY_SPELLINGS: Array<[key: string, quote: string]> = [
+	['"x-api-key"', '"'],
+	['"api_key"', '"'],
+	['"api-key"', '"'],
+	["'x-api-key'", "'"],
+];
+/** Every ASCII character, the three non-ASCII line breaks, and one astral character. */
+const SWEPT_CHARS: string[] = [
+	...Array.from({ length: 0x80 }, (_, i) => String.fromCharCode(i)),
+	" ",
+	" ",
+	"\u0085",
+	"\u{1F600}",
+];
+
+interface SweepCase {
+	label: string;
+	message: string;
+}
+
+/**
+ * For each key spelling and each swept character: (i) the character inside the quoted value,
+ * between PREFIX and SUFFIX; (ii) the same, right after a backslash. The value's OWN quote,
+ * unescaped, ends the value, so for it only (ii) is a character inside the value.
+ */
+function sweepCases(): SweepCase[] {
+	const cases: SweepCase[] = [];
+	for (const [key, quote] of KEY_SPELLINGS) {
+		for (const char of SWEPT_CHARS) {
+			const code = `U+${(char.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}`;
+			if (char !== quote) {
+				cases.push({
+					label: `${key} ${code}`,
+					message: `upstream said: {${key}:${quote}${PREFIX}${char}${SUFFIX}${quote}}`,
+				});
+			}
+			cases.push({
+				label: `${key} \\${code}`,
+				message: `upstream said: {${key}:${quote}${PREFIX}\\${char}${SUFFIX}${quote}}`,
+			});
+		}
+	}
+	return cases;
+}
+
+/** The labels of the cases whose line still holds a fragment of the value. */
+function sweepFailures(line: (message: string) => string): string[] {
+	return sweepCases()
+		.filter((c) => {
+			const out = line(c.message);
+			return out.includes(PREFIX) || out.includes(SUFFIX);
+		})
+		.map((c) => c.label);
+}
+
+/** The line the server logs for a message, through the server's own function. */
+const serverLine = (message: string): string =>
+	internalErrorLine(new Error(message), "t1", "sweep");
+
+/**
+ * `internalErrorLine`'s pipeline (redact, scrub and join, redact again) with `pattern` in place
+ * of the server's api-key pattern. The parity row pins it to the real function on every sweep
+ * case, so the positive control below measures the sweep, not a different pipeline.
+ */
+function lineWith(pattern: RegExp): (message: string) => string {
+	const redact = (text: string): string =>
+		text.replace(pattern, (_m, name: string, sep: string, dq?: string, sq?: string) => {
+			const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : "";
+			return `${name}${sep}${quote}[redacted]${quote}`;
+		});
+	return (message) => {
+		const raw = redact(`Error: ${message}`);
+		const text = redact(scrubForStderr(raw).replace(/\s*\n\s*/g, " "));
+		return `usertrust-server: internal error: tenant=t1 route=sweep: ${text}`;
+	};
+}
+
+/** The escape the server's pattern uses, and the one it replaced (`.` stops at a line terminator). */
+const ANY_ESCAPE = String.raw`\\[\s\S]`;
+const BROKEN_ESCAPE = String.raw`\\.`;
+
+describe("a quoted api-key value: the generated sweep, never point rows", () => {
+	it("1052 cases (132 characters x 4 key spellings, raw and escaped): no fragment of any value survives", () => {
+		const cases = sweepCases();
+		expect(cases).toHaveLength(1052);
+		// Positive control: both fragments are in every message.
+		for (const c of cases) {
+			expect(c.message).toContain(PREFIX);
+			expect(c.message).toContain(SUFFIX);
+		}
+		expect(sweepFailures(serverLine)).toEqual([]);
+	});
+
+	it("the replica pipeline with the server's own pattern logs exactly internalErrorLine's line, case for case", () => {
+		const replica = lineWith(API_KEY_VALUE);
+		for (const c of sweepCases()) expect(replica(c.message)).toBe(serverLine(c.message));
+	});
+
+	it("positive control: the sweep, against the old `\\\\.` escape, reports every escaped line terminator", () => {
+		// The server's pattern carries the any-character escape in both quoted branches.
+		expect(API_KEY_VALUE.source.split(ANY_ESCAPE).length - 1).toBe(2);
+		const broken = new RegExp(
+			API_KEY_VALUE.source.split(ANY_ESCAPE).join(BROKEN_ESCAPE),
+			API_KEY_VALUE.flags,
+		);
+		const expected = KEY_SPELLINGS.flatMap(([key]) =>
+			["000A", "000D", "2028", "2029"].map((code) => `${key} \\U+${code}`),
+		);
+		expect(sweepFailures(lineWith(broken)).sort()).toEqual(expected.sort());
 	});
 });
 
@@ -718,12 +1077,20 @@ interface ScriptRun {
 }
 
 /** The default-sink server script; its stderr reader is closed before any request when `closeReader`. */
-async function startScript(closeReader: boolean): Promise<{ run: ScriptRun; base: string }> {
+async function startScript(
+	closeReader: boolean,
+	mode?: "hang",
+): Promise<{ run: ScriptRun; base: string }> {
 	let stdout = "";
 	let stderr = "";
 	const proc = spawn(
 		process.execPath,
-		[CLOSED_STDERR_SERVER, tmp("utsrv-err-closed-state-"), hashKey(KEY)],
+		[
+			CLOSED_STDERR_SERVER,
+			tmp("utsrv-err-closed-state-"),
+			hashKey(KEY),
+			...(mode === undefined ? [] : [mode]),
+		],
 		{
 			env: {
 				...process.env,
@@ -820,6 +1187,34 @@ describe.skipIf(onWindows)(
 				run.proc.kill("SIGTERM");
 				expect(await run.exited).toBe(0);
 				child = undefined;
+			},
+			START_MS * 2,
+		);
+
+		it.each([
+			[true, 1],
+			[false, 0],
+		])(
+			"reader closed %s: the shutdown warning is written or counted, and the shutdown exits 0; dropped = %i",
+			async (closeReader, dropped) => {
+				const { run, base } = await startScript(closeReader, "hang");
+				// Refused at the deadline, and still waiting on the ledger when the server shuts down.
+				const res = await post(base, "/v1/authorize", {
+					model: "m",
+					estimatedInputTokens: 1,
+					maxOutputTokens: 1,
+				});
+				expect(res.status).toBe(503);
+				expect(await logLinesDropped(base)).toBe(0);
+				run.proc.kill("SIGTERM");
+				expect(await run.exited).toBe(0);
+				child = undefined;
+				expect((await stdoutShows(run, /dropped-after-close:(\d+)/))[1]).toBe(String(dropped));
+				if (!closeReader) {
+					expect(run.stderr()).toContain(
+						"usertrust-server: shutting down with 1 authorize(s) still waiting on the ledger and 0 late hold void(s) not landed; their holds expire at the hold timeout\n",
+					);
+				}
 			},
 			START_MS * 2,
 		);

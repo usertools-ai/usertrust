@@ -211,11 +211,15 @@ const BEARER_TOKEN = /\b(Bearer)\s+[^\s"',;]+/gi;
 /**
  * An api-key style value: `x-api-key: <v>`, `api_key=<v>`, `"api-key": "<v>"`. A QUOTED value is
  * consumed through its closing quote (or to the end, unclosed), whatever it holds: `"abc;def"` is
- * one value, never `abc` followed by text. An unquoted value ends at whitespace, a quote, `,`, `;`
- * or `&`.
+ * one value, never `abc` followed by text. An escape inside it is a backslash and ANY character,
+ * a line terminator included (`\\[\s\S]`): with `\\.` an escaped CR or LF ended the match there,
+ * and the rest of the value was logged. An unquoted value ends at whitespace, a quote, `,`, `;` or
+ * `&`. Two leaks have now been found in this pattern; a third replaces it with a structured
+ * redactor rather than another case.
  */
-const API_KEY_VALUE =
-	/\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(?:"((?:[^"\\]|\\.)*)"?|'((?:[^'\\]|\\.)*)'?|[^\s"',;&]+)/gi;
+/** Exported for the redaction sweep's positive control only; not part of the package entry. */
+export const API_KEY_VALUE =
+	/\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(?:"((?:[^"\\]|\\[\s\S])*)"?|'((?:[^'\\]|\\[\s\S])*)'?|[^\s"',;&]+)/gi;
 
 /**
  * `text` with every `secret` (the caller's own bearer key, when known), every `Bearer <token>` and
@@ -363,7 +367,13 @@ export function createUsertrustServer(opts: {
 	factory?: GovernorFactory;
 	/**
 	 * Where operator log lines go, one line per call. Default: stderr, as the CLI's own lines. A
-	 * sink that throws or rejects is contained, and its line goes to stderr instead.
+	 * sink that throws or rejects is contained, and its line goes to stderr instead. Every server
+	 * diagnostic goes here: internal errors, and the late-hold, expiry and shutdown notices.
+	 *
+	 * Contract: the sink returns nothing or a real promise. A custom thenable's OWN failures (a
+	 * `then` method that is itself async and rejects, say, before calling the handler it was given)
+	 * happen inside the embedder's code, outside this containment: not even `await` could observe
+	 * them.
 	 */
 	log?: (line: string) => void;
 }): UsertrustServer {
@@ -636,8 +646,8 @@ export function createUsertrustServer(opts: {
 		const refused = (code: string): void => {
 			entry.state = "refused";
 			entry.code = code;
-			process.stderr.write(
-				`usertrust-server: a late hold's void was refused (transfer ${idHash(transferId)}, ${code}); it expires at the hold timeout\n`,
+			log(
+				`usertrust-server: a late hold's void was refused (transfer ${idHash(transferId)}, ${code}); it expires at the hold timeout`,
 			);
 		};
 		let releasing: Promise<ReleaseOutcome>;
@@ -653,8 +663,8 @@ export function createUsertrustServer(opts: {
 				if (!outcome.released) {
 					// Teardown or another terminal owned the hold: never counted as a landed void.
 					owed.delete(key);
-					process.stderr.write(
-						`usertrust-server: a late hold was taken by another terminal before its release (transfer ${idHash(transferId)})\n`,
+					log(
+						`usertrust-server: a late hold was taken by another terminal before its release (transfer ${idHash(transferId)})`,
 					);
 					return;
 				}
@@ -1339,8 +1349,8 @@ export function createUsertrustServer(opts: {
 			const age = now === undefined ? performance.now() - entry.startedMono : now - entry.createdAt;
 			if (age < (entry.holdTimeoutMs ?? config.pendingTtlMs) + SWEEP_INTERVAL_MS) continue;
 			owed.delete(key);
-			process.stderr.write(
-				`usertrust-server: a late hold whose void was refused has expired (transfer ${idHash(entry.transferId)}, ${entry.code ?? "unknown"})\n`,
+			log(
+				`usertrust-server: a late hold whose void was refused has expired (transfer ${idHash(entry.transferId)}, ${entry.code ?? "unknown"})`,
 			);
 		}
 		let swept = 0;
@@ -1389,8 +1399,8 @@ export function createUsertrustServer(opts: {
 			const outstanding = [...unsettled.values()].reduce((n, set) => n + set.size, 0);
 			const voiding = [...owed.values()].filter((entry) => entry.state === "voiding").length;
 			if (outstanding > 0 || voiding > 0) {
-				process.stderr.write(
-					`usertrust-server: shutting down with ${outstanding} authorize(s) still waiting on the ledger and ${voiding} late hold void(s) not landed; their holds expire at the hold timeout\n`,
+				log(
+					`usertrust-server: shutting down with ${outstanding} authorize(s) still waiting on the ledger and ${voiding} late hold void(s) not landed; their holds expire at the hold timeout`,
 				);
 			}
 			// Release every remaining pending hold (best-effort) so the control plane

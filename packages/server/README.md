@@ -149,8 +149,8 @@ Unauthenticated. It answers `ok`, the server's `name` and `version`, its `capabi
 `logLinesDropped`: the number of log lines this server could write nowhere, because its log sink
 failed and its write to stderr failed too (a stderr whose reader has gone, say). It is `0`
 normally. It is process-wide, counted across every tenant and route, and names no tenant, route
-or error. It never resets except on a restart. Alert on it going above `0`: internal errors
-happened that no log recorded.
+or error. It never resets except on a restart. Alert on it going above `0`: server diagnostics
+(internal errors, and the late-hold, expiry and shutdown notices) happened that no log recorded.
 
 ### When the ledger does not answer: `503 ledger_unavailable`
 
@@ -209,7 +209,8 @@ have reached the client.
 - **`voidsOwed`** on the authenticated `GET /v1/budget` counts the tenant's late holds whose
   give-back has not landed: those still waiting on the ledger (a second outage), and those whose
   void the ledger refused, until the hold's own life has run out. The server also logs each of
-  these to stderr, naming the transfer only by a short SHA-256 prefix.
+  these (to stderr, unless an embedder gives it a log sink), naming the transfer only by a short
+  SHA-256 prefix.
 - **Residual race.** A client that hangs up AFTER the `200` is written cannot be detected: that
   hold is registered as pending and swept as any other.
 - `GET /v1/health` still reports `ok` while the ledger is down. `/v1/settle`, `/v1/abort` and
