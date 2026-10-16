@@ -276,7 +276,12 @@ made it. At start the CLI creates every configured tenant's vault that does not 
 and the reason, on one it cannot create or the governor would refuse. An error a client sees only
 as the opaque `500 internal` is written to stderr as
 `usertrust-server: internal error: tenant=<id> route=<route>: <reason>`, never with a header or a
-request body; a bearer key or api-key value quoted in the reason is replaced with `[redacted]`. On Windows the server neither sets nor checks permissions: the `stateDir` folder's
+request body; a bearer key or api-key value quoted in the reason is replaced with `[redacted]`.
+In that line only three kinds of value are redacted: the caller's own bearer key, any `Bearer`
+token, and any `x-api-key`, `api-key` or `api_key` value. Any other secret a reason quotes, such
+as a password or a token in another format, is logged as it is; the cleanup of terminal escape
+sequences and control characters removes those, not secrets. On Windows the server
+neither sets nor checks permissions: the `stateDir` folder's
 inherited ACL decides who can read it, so keep it under the service account's own profile or
 give it an owner-only ACL (see the repository's `LIMITATIONS.md`). The SSE stream is
 best-effort operational telemetry, NOT an audit source — dropped subscribers lose events.
