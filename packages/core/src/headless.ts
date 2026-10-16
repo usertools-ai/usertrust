@@ -2034,6 +2034,17 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// the cost itself when they priced the call, else the floor an incomplete report is held
 				// to beside the un-inflated metering estimate (never the fattened hold carried on
 				// `auth.estimatedCost`; see the `meteredEstimate` comment on `AuthorizationCapture`).
+				// The prompt length the counts' tier is chosen from (a `longPrompt` row). A complete report
+				// keeps its own. An incomplete one, whose input may be missing and priced as 0, is held to
+				// no cheaper a tier than the prompt it was authorized with.
+				const countsPrompt = promptTokenCount(
+					usageSnapshot.inputTokens,
+					usageSnapshot.cacheReadTokens,
+					usageSnapshot.cacheWriteTokens,
+				);
+				const countsTierPrompt = pricedFromCounts
+					? countsPrompt
+					: Math.max(countsPrompt, capture.meteredEstimatePromptTokens);
 				const countsCost = costFromRates(
 					rateInfo.rates,
 					usageSnapshot.inputTokens,
@@ -2041,6 +2052,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					usageSnapshot.cacheReadTokens,
 					usageSnapshot.cacheWriteTokens,
 					usageSnapshot.cacheWrite1hTokens ?? 0,
+					countsTierPrompt,
 				);
 				const incomplete = pricedFromCounts
 					? undefined
@@ -2058,13 +2070,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// prompt length when the counts set the cost, else from the estimate the cost came from.
 				const appliedRates = resolveAppliedRates(
 					rateInfo.rates,
-					costFromCounts
-						? promptTokenCount(
-								usageSnapshot.inputTokens,
-								usageSnapshot.cacheReadTokens,
-								usageSnapshot.cacheWriteTokens,
-							)
-						: capture.meteredEstimatePromptTokens,
+					costFromCounts ? countsTierPrompt : capture.meteredEstimatePromptTokens,
 				);
 
 				// SESSION accounting waits until after the POST attempt below. A

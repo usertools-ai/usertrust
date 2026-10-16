@@ -353,6 +353,105 @@ describe("trust(): an incomplete report never prices below the metered estimate"
 	});
 });
 
+describe("trust(), a tiered row (claude-haiku-5-5): an incomplete report is priced no cheaper than the tier authorize held", () => {
+	const HAIKU_MODEL = "claude-haiku-5-5";
+	const HAIKU = getModelRates(HAIKU_MODEL);
+	/**
+	 * About 150,000 estimated prompt tokens: over the 100,000-token threshold. Prose-like (a word
+	 * and a space): a 400,000-character run with no separator makes the PII scan crawl.
+	 */
+	const LONG = [{ role: "user", content: "abcd ".repeat(80_000) }];
+	const LOW_OUT = HAIKU.outputPer1k;
+	const HIGH_OUT = HAIKU.longPrompt?.rates.outputPer1k ?? Number.NaN;
+	let vaultBase: string;
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `incomplete-tier-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+	});
+	afterEach(() => {
+		rmSync(vaultBase, { recursive: true, force: true });
+	});
+
+	async function settle(client: unknown, stream: boolean): Promise<TrustReceipt> {
+		const g = (await trust(client as never, {
+			budget: 100_000_000,
+			vaultBase,
+			_engine: makeEngine(),
+			_audit: makeAudit(),
+		})) as unknown as Governed;
+		const result = (await g.messages.create({
+			model: HAIKU_MODEL,
+			max_tokens: 10,
+			messages: LONG,
+		})) as {
+			receipt: TrustReceipt;
+			response: AsyncIterable<unknown> & { receipt: Promise<TrustReceipt> };
+		};
+		let receipt = result.receipt;
+		if (stream) {
+			for await (const _ of result.response) {
+				// drain
+			}
+			receipt = await result.response.receipt;
+		}
+		await g.destroy();
+		return receipt;
+	}
+	const anthropicHaiku = (usage: unknown) => ({
+		messages: {
+			create: vi.fn(async () => ({
+				id: "msg_1",
+				type: "message",
+				role: "assistant",
+				content: [{ type: "text", text: "ok" }],
+				model: HAIKU_MODEL,
+				usage,
+			})),
+		},
+	});
+
+	/** The metered estimate at the dearer tier, and the two tiers' prices for 100,000 output tokens. */
+	async function bounds(): Promise<{ estimate: number; low: number; high: number }> {
+		const estimate = (await settle(anthropicHaiku(undefined), false)).cost;
+		const low = (100_000 * LOW_OUT) / 1000;
+		const high = (100_000 * HIGH_OUT) / 1000;
+		expect(low).toBeLessThan(estimate);
+		expect(high).toBeGreaterThan(estimate);
+		return { estimate, low, high };
+	}
+
+	it("non-stream, input missing, output 100,000: the output at the HIGH tier", async () => {
+		const { high } = await bounds();
+		const receipt = await settle(anthropicHaiku({ output_tokens: 100_000 }), false);
+		expect(receipt.cost).toBe(high);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(receipt.pricing?.appliedRates.outputPer1k).toBe(HIGH_OUT);
+		expect(Object.hasOwn(receipt, "usage")).toBe(false);
+	});
+
+	it("stream, no input_tokens, output 100,000: the output at the HIGH tier", async () => {
+		const { high } = await bounds();
+		const receipt = await settle(
+			anthropicStream([start({}), delta({ output_tokens: 100_000 }), STOP]),
+			true,
+		);
+		expect(receipt.cost).toBe(high);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(receipt.pricing?.appliedRates.outputPer1k).toBe(HIGH_OUT);
+		expect(Object.hasOwn(receipt, "usage")).toBe(false);
+	});
+
+	it("CONTROL: a complete report under the threshold keeps the LOW tier, whatever authorize held", async () => {
+		const receipt = await settle(
+			anthropicHaiku({ input_tokens: 1000, output_tokens: 100_000 }),
+			false,
+		);
+		expect(receipt.cost).toBe((1000 * HAIKU.inputPer1k) / 1000 + (100_000 * LOW_OUT) / 1000);
+		expect(receipt.usageSource).toBe("provider");
+		expect(receipt.pricing?.appliedRates.outputPer1k).toBe(LOW_OUT);
+	});
+});
+
 describe("the other stream extractors already require both sides (pins)", () => {
 	async function complete(
 		kind: "openai" | "google",

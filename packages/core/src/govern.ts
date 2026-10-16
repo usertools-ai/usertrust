@@ -2570,6 +2570,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// none): at least the un-inflated metering estimate, never the fattened hold (see the
 				// `meteredEstimateCost` comment at the hold-sizing site), and never less than the usable
 				// counts show (`incompleteReportCost`).
+				// The prompt length the counts' tier is chosen from (a `longPrompt` row): a provider-sourced
+				// report keeps its own; any other is held to no cheaper a tier than the prompt it was
+				// authorized with, since its input may be missing and priced as 0.
+				const countsPrompt = promptTokenCount(
+					usageSnapshot.inputTokens,
+					usageSnapshot.cacheReadTokens,
+					usageSnapshot.cacheWriteTokens,
+				);
+				const countsTierPrompt =
+					usageSnapshot.source === "provider"
+						? countsPrompt
+						: Math.max(countsPrompt, estimatedInputTokens);
 				const countsCost = costFromRates(
 					rateResolution.rates,
 					usageSnapshot.inputTokens,
@@ -2577,6 +2589,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					usageSnapshot.cacheReadTokens,
 					usageSnapshot.cacheWriteTokens,
 					usageSnapshot.cacheWrite1hTokens ?? 0,
+					countsTierPrompt,
 				);
 				const incomplete =
 					usageSnapshot.source === "provider"
@@ -2584,14 +2597,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						: incompleteReportCost(countsCost, meteredEstimateCost);
 				const settledAppliedRates =
 					incomplete === undefined || incomplete.countsWon
-						? resolveAppliedRates(
-								rateResolution.rates,
-								promptTokenCount(
-									usageSnapshot.inputTokens,
-									usageSnapshot.cacheReadTokens,
-									usageSnapshot.cacheWriteTokens,
-								),
-							)
+						? resolveAppliedRates(rateResolution.rates, countsTierPrompt)
 						: appliedRates;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
 				const streamCost = incomplete === undefined ? countsCost : incomplete.cost;
@@ -3368,6 +3374,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// Without provider usage (an incomplete report, or none): at least the un-inflated metering
 				// estimate, never the fattened hold (see the `meteredEstimateCost` comment at the hold-sizing
 				// site), and never less than the usable counts show (`incompleteReportCost`).
+				// The prompt length the counts' tier is chosen from (a `longPrompt` row): a provider-sourced
+				// report keeps its own; any other is held to no cheaper a tier than the prompt it was
+				// authorized with, since its input may be missing and priced as 0.
+				const countsPrompt = promptTokenCount(
+					usageSnapshot.inputTokens,
+					usageSnapshot.cacheReadTokens,
+					usageSnapshot.cacheWriteTokens,
+				);
+				const countsTierPrompt =
+					usageSnapshot.source === "provider"
+						? countsPrompt
+						: Math.max(countsPrompt, estimatedInputTokens);
 				const countsCost = costFromRates(
 					rateResolution.rates,
 					usageSnapshot.inputTokens,
@@ -3375,6 +3393,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					usageSnapshot.cacheReadTokens,
 					usageSnapshot.cacheWriteTokens,
 					usageSnapshot.cacheWrite1hTokens ?? 0,
+					countsTierPrompt,
 				);
 				const incomplete =
 					usageSnapshot.source === "provider"
@@ -3386,14 +3405,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// do its rates.
 				const settledAppliedRates =
 					incomplete === undefined || incomplete.countsWon
-						? resolveAppliedRates(
-								rateResolution.rates,
-								promptTokenCount(
-									usageSnapshot.inputTokens,
-									usageSnapshot.cacheReadTokens,
-									usageSnapshot.cacheWriteTokens,
-								),
-							)
+						? resolveAppliedRates(rateResolution.rates, countsTierPrompt)
 						: appliedRates;
 				const actualCost = incomplete === undefined ? countsCost : incomplete.cost;
 

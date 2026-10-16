@@ -960,6 +960,7 @@ function tieredCostRaw(
 	cacheReadTokens: number,
 	cacheWriteTokens: number,
 	cacheWrite1hTokens: number,
+	promptTokensFloor: number,
 ): number {
 	const inTok = usableCount(inputTokens);
 	const outTok = usableCount(outputTokens);
@@ -967,8 +968,12 @@ function tieredCostRaw(
 	const cacheWriteTok = usableCount(cacheWriteTokens);
 	// The per-request prompt tier (a `longPrompt` row), decided HERE from the same counts
 	// this function prices, so no caller can price a tiered row at one tier by forgetting
-	// a helper. A row without a tier comes back unchanged.
-	const rates = promptTierRates(rowRates, inTok + cacheReadTok + cacheWriteTok);
+	// a helper. A row without a tier comes back unchanged. `promptTokensFloor` only ever
+	// raises the prompt length the tier is chosen from (see `costFromRates`).
+	const rates = promptTierRates(
+		rowRates,
+		Math.max(inTok + cacheReadTok + cacheWriteTok, usableCount(promptTokensFloor)),
+	);
 
 	// OPERATION ORDER IS PART OF THE CONTRACT (Codex PR-85 P2-4). Multiply THEN
 	// divide — `(tokens * ratePer1k) / 1000`, never `(tokens / 1000) * ratePer1k`.
@@ -1015,6 +1020,13 @@ function tieredCostRaw(
  *
  * Cache rates resolve per D1 via effectiveCacheRate: absent means inputPer1k,
  * never zero.
+ *
+ * `promptTokensFloor` (default 0) raises the prompt length a tiered row's tier is
+ * chosen from, never the counts priced: the tier is the one for
+ * max(`promptTokenCount` of these counts, the floor). It is for an INCOMPLETE usage
+ * report, whose input may be missing and priced as 0: its partial counts must not land
+ * on a cheaper tier than the prompt the request was authorized with. A complete report
+ * never passes one, so it keeps its own tier exactly.
  */
 export function costFromRates(
 	rates: ModelRates,
@@ -1023,6 +1035,7 @@ export function costFromRates(
 	cacheReadTokens = 0,
 	cacheWriteTokens = 0,
 	cacheWrite1hTokens = 0,
+	promptTokensFloor = 0,
 ): number {
 	return Math.max(
 		1,
@@ -1034,6 +1047,7 @@ export function costFromRates(
 				cacheReadTokens,
 				cacheWriteTokens,
 				cacheWrite1hTokens,
+				promptTokensFloor,
 			),
 		),
 	);
@@ -1066,6 +1080,7 @@ export function costFromRatesUnfloored(
 		cacheReadTokens,
 		cacheWriteTokens,
 		cacheWrite1hTokens,
+		0,
 	);
 }
 

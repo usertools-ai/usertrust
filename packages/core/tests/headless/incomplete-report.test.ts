@@ -231,4 +231,42 @@ describe("headless: an incomplete report never prices below the metered estimate
 		expect(receipt.cost).toBe(EST);
 		expectEstimateClass(receipt);
 	});
+
+	describe("a tiered row (claude-haiku-5-5): an incomplete report is priced no cheaper than the tier authorize held", () => {
+		const HAIKU = getModelRates("claude-haiku-5-5");
+		/** Authorized with a prompt over the 100,000-token threshold: the dearer tier. */
+		const AUTHORIZE_LONG = {
+			model: "claude-haiku-5-5",
+			estimatedInputTokens: 150_000,
+			maxOutputTokens: 10,
+		};
+		const LOW_OUT = HAIKU.outputPer1k;
+		const HIGH_OUT = HAIKU.longPrompt?.rates.outputPer1k ?? Number.NaN;
+
+		it("input missing, output 100,000: the output at the HIGH tier, not the low", async () => {
+			const estimate = costFromRates(HAIKU, 150_000, 10);
+			// Hand-written: 100,000 output tokens at each tier's output rate.
+			const lowTier = (100_000 * LOW_OUT) / 1000;
+			const highTier = (100_000 * HIGH_OUT) / 1000;
+			expect(lowTier).toBeLessThan(estimate);
+			expect(highTier).toBeGreaterThan(estimate);
+			for (const usageSource of LABELS) {
+				const receipt = await settle(
+					{ outputTokens: 100_000, ...(usageSource ? { usageSource } : {}) },
+					AUTHORIZE_LONG,
+				);
+				expect(receipt.cost, String(usageSource)).toBe(highTier);
+				expect(receipt.pricing?.appliedRates.outputPer1k).toBe(HIGH_OUT);
+				expectEstimateClass(receipt);
+			}
+		});
+
+		it("CONTROL: a complete report under the threshold keeps the LOW tier, whatever authorize held", async () => {
+			const receipt = await settle({ inputTokens: 1000, outputTokens: 100_000 }, AUTHORIZE_LONG);
+			expect(receipt.cost).toBe((1000 * HAIKU.inputPer1k) / 1000 + (100_000 * LOW_OUT) / 1000);
+			expect(receipt.usageSource).toBe("provider");
+			expect(receipt.pricing?.appliedRates.outputPer1k).toBe(LOW_OUT);
+			expect(receipt.usage?.outputTokens).toBe(100_000);
+		});
+	});
 });
