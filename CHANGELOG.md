@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Read before upgrading
+
+- **usertrust-server now refuses to start on a tenant vault its governor would refuse.** Before, such a vault showed up only as an opaque `500` on that tenant's first request, with no reason anywhere. These vaults are refused:
+  - a vault other users can read that cannot be made owner-only;
+  - a symbolic link to such a vault;
+  - a dangling link;
+  - a path that is not a directory.
+
+  The server now stops before its port opens and exits 1, writing `usertrust-server failed to start: tenant <id>: <reason>` to stderr. Before restarting on this version, check each tenant's `<stateDir>/<tenant>/.usertrust`, and fix any vault that line names. A loose real directory is still tightened to owner-only, as before.
+- **A tenant vault that does not exist yet is now created at start, owner-only, instead of on the tenant's first request.** A state directory the server cannot write to (read-only, say) now stops the start with the same `failed to start: tenant <id>: <reason>` line, instead of failing every request once the port is open.
+
 ### Fixed
 
 - **The ledger client's 30 s health check no longer piles up requests while the ledger is unreachable.** Each tick looked up the treasury whether or not the previous lookup had been answered. tigerbeetle-node has no request timeout, and a request the cluster never answers stays queued in the native client, so an outage added one queued request (and its callback) every 30 s for as long as it lasted. A tick now submits nothing while the previous check is still outstanding. `ping()` itself is unchanged.
