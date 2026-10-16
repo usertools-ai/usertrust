@@ -642,6 +642,17 @@ describe("the log line never carries the caller's key", () => {
 		for (const left of ["plain", "other"]) expect(line).not.toContain(left);
 	});
 
+	it("an UNCLOSED quoted api-key value is redacted to the end of the message", () => {
+		const message = 'upstream said: {"x-api-key":"abcSECRET';
+		// Positive control: the value is in what was thrown.
+		expect(message).toContain("abcSECRET");
+		const line = internalErrorLine(new Error(message), "t1", "sweep");
+		expect(line).toBe(
+			'usertrust-server: internal error: tenant=t1 route=sweep: Error: upstream said: {"x-api-key":"[redacted]"',
+		);
+		expect(line).not.toContain("SECRET");
+	});
+
 	it("a Bearer token and an api-key value are redacted even when the key is not the caller's", () => {
 		const line = internalErrorLine(
 			new Error("upstream said: Authorization: Bearer sk-other-123 and x-api-key=abc.def"),
@@ -669,9 +680,9 @@ const KEY_SPELLINGS: Array<[key: string, quote: string]> = [
 /** Every ASCII character, the three non-ASCII line breaks, and one astral character. */
 const SWEPT_CHARS: string[] = [
 	...Array.from({ length: 0x80 }, (_, i) => String.fromCharCode(i)),
-	" ",
-	" ",
-	"\u0085",
+	String.fromCodePoint(0x2028),
+	String.fromCodePoint(0x2029),
+	String.fromCodePoint(0x85),
 	"\u{1F600}",
 ];
 
@@ -774,10 +785,19 @@ describe("a quoted api-key value: the generated sweep, never point rows", () => 
 
 describe("the internal-error log line", () => {
 	it("is one line with no escape sequence or control character, whatever the message holds", () => {
-		const err = new TypeError("bad \u001b[2Jthing\nsecond line\u0007 end");
-		expect(internalErrorLine(err, "t1", "POST /v1/settle")).toBe(
-			"usertrust-server: internal error: tenant=t1 route=POST /v1/settle: TypeError: bad thing second line end",
+		const ls = String.fromCodePoint(0x2028);
+		const ps = String.fromCodePoint(0x2029);
+		const nel = String.fromCodePoint(0x85);
+		const err = new TypeError(
+			`bad \x1b[2Jthing\nsecond line\x07 end${ls}usertrust-server: forged${ps}third${nel}x`,
 		);
+		const line = internalErrorLine(err, "t1", "POST /v1/settle");
+		expect(line).toBe(
+			"usertrust-server: internal error: tenant=t1 route=POST /v1/settle: TypeError: bad thing second line end usertrust-server: forged thirdx",
+		);
+		for (const char of [ls, ps, nel, "\n", "\r"]) expect(line).not.toContain(char);
+		expect(line.split(/\r\n|[\n\r\v\f\x85]/).length).toBe(1);
+		expect(line.split(new RegExp(`[${ls}${ps}]`)).length).toBe(1);
 		expect(internalErrorLine("not an error", undefined, "unrouted")).toBe(
 			"usertrust-server: internal error: tenant=- route=unrouted: string: not an error",
 		);
