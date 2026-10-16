@@ -2360,8 +2360,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					provider: "headless",
 					timestamp: new Date().toISOString(),
 					usageSource,
-					// D5: present exactly when these counts priced the call (see `usageAudit`): the
-					// same snapshot the cost came from.
+					// D5: present exactly when a complete report's counts priced the call (see
+					// `usageAudit`): the same snapshot the cost came from.
 					...usageAudit,
 					// M2: endpoint classification + metering provenance (A6: computeMs is
 					// OMITTED, never undefined, when absent/invalid).

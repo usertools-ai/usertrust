@@ -515,10 +515,11 @@ export function implausibleUsageData(
  *
  * What a settle publishes is decided by {@link publishableUsageFields}`(snapshot, rates,
  * pricedFromCounts)`: `receipt.usage` and `llm_call.data.usage` are present exactly when
- * these counts priced the call. For `trust()` that is exactly when the snapshot is
- * provider-sourced, which this function answers. A headless settle also publishes a
- * caller's own `"estimated"` counts that priced the call, which this function does not.
- * A settle priced at the metered estimate publishes neither: a four-tier block of
+ * a complete report's counts priced the call. For `trust()` that is exactly when the
+ * snapshot is provider-sourced, which this function answers. A headless settle also
+ * publishes a caller's own complete `"estimated"` counts, which this function does not.
+ * An incomplete report publishes neither, even when its counts set the cost, and nor does
+ * a settle priced at the metered estimate: a four-tier block of
  * fabricated zeros beside it would invite an auditor to "recompute" a number that was
  * never derived from tokens, and to conclude the call cost 1 usertoken.
  *
