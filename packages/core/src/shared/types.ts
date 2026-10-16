@@ -68,8 +68,8 @@ export interface CacheWrite1h {
  * and cache writes are separate tiers, and the four sum to the call's billable
  * tokens with nothing double-counted.
  *
- * Present on a record only when the usage was provider-reported. See
- * `TrustReceipt.usage`.
+ * Present on a record exactly when these counts priced the call: always for provider-reported
+ * usage, and for a headless settle's own `"estimated"` counts. See `TrustReceipt.usage`.
  */
 export interface ReceiptUsage {
 	/** Fresh (non-cached) prompt tokens. */
@@ -104,15 +104,24 @@ export interface TrustReceipt {
 	timestamp: string;
 	/** Present and true when the audit chain write failed (failure mode 15.3). */
 	auditDegraded?: boolean;
-	/** Whether cost came from provider-reported usage or the pre-call estimate. */
+	/**
+	 * Where the token counts behind `cost` came from: the provider, or an estimate. A provenance
+	 * label only: `usage` being present is what says the cost was priced from counts.
+	 */
 	usageSource?: "provider" | "estimated";
 	/**
 	 * The four-tier disjoint token split this cost was metered from (D5).
 	 *
-	 * PRESENT IFF `usageSource === "provider"`. An estimated settle has no
-	 * reported counts, and a four-tier block full of fabricated zeros would
-	 * invite an auditor to "recompute" a cost that was never derived from
-	 * counts at all — so it is omitted outright, never zero-filled.
+	 * PRESENT IFF the cost was computed from these counts and their input and output
+	 * counts were both usable: always for `usageSource: "provider"`, and for
+	 * `"estimated"` counts a headless settle priced from (the caller's own estimate).
+	 * Absent when the cost is the metered pre-call estimate (no counts, or counts
+	 * refused as implausible), and when an input or output count was unusable: non-finite,
+	 * negative or non-numeric, whose clamped 0 is fabricated. A four-tier block with
+	 * fabricated zeros would invite an auditor to "recompute" a cost never derived from
+	 * those counts, so it is omitted outright, never zero-filled. An input or output a
+	 * headless settle leaves out is not unusable: when it reports some counts, the ones it
+	 * leaves out are 0, are priced as 0, and are published as 0.
 	 *
 	 * With `pricing.appliedRates` this is the whole reconciliation surface:
 	 * `ceil(sum(counts x rates / 1000))` floored at 1 equals `cost`.

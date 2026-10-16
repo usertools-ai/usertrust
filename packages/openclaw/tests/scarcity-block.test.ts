@@ -44,6 +44,7 @@ import type { Context, FrozenCostCenters, StreamEvent, StreamFn } from "../src/t
 import {
 	asHostStream,
 	assistantToolCalls,
+	awaitSettled,
 	doneEvent,
 	makeModel,
 	makeUsage,
@@ -87,21 +88,6 @@ function makeTmpVault(): string {
 async function drain(stream: AsyncIterable<StreamEvent>): Promise<void> {
 	for await (const _event of stream) {
 		// consume
-	}
-}
-
-/** Guards against a promise that never settles, per `stream-governor.test.ts`. */
-async function withTimeout<T>(promise: Promise<T>, ms = 500): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			promise,
-			new Promise<never>((_resolve, reject) => {
-				timer = setTimeout(() => reject(new Error("promise never settled")), ms);
-			}),
-		]);
-	} finally {
-		if (timer !== undefined) clearTimeout(timer);
 	}
 }
 
@@ -512,7 +498,7 @@ describe("wrapStreamWithGovernance — onReceipt", () => {
 
 		const stream = await wrapped(model, attributedContext());
 		await expect(drain(stream)).resolves.toBeUndefined();
-		await expect(withTimeout(stream.result())).resolves.toBeDefined();
+		await expect(awaitSettled(() => stream.result())).resolves.toBeDefined();
 	});
 
 	it("isolates a returned REJECTION from the callback — the stream still completes", async () => {
@@ -523,7 +509,7 @@ describe("wrapStreamWithGovernance — onReceipt", () => {
 
 		const stream = await wrapped(model, attributedContext());
 		await expect(drain(stream)).resolves.toBeUndefined();
-		await expect(withTimeout(stream.result())).resolves.toBeDefined();
+		await expect(awaitSettled(() => stream.result())).resolves.toBeDefined();
 	});
 
 	it("never delays stream termination — settle/result finish before a slow callback does", async () => {
@@ -539,7 +525,7 @@ describe("wrapStreamWithGovernance — onReceipt", () => {
 		const stream = await wrapped(model, attributedContext());
 		await drain(stream);
 		order.push("drained");
-		await withTimeout(stream.result());
+		await awaitSettled(() => stream.result());
 		order.push("result");
 
 		// The callback is still in flight — drain/result did not wait on it.

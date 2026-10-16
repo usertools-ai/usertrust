@@ -1327,7 +1327,7 @@ function buildPlain(
 	}
 	if (t.estimatedCalls > 0) {
 		notes.push(
-			`${t.estimatedCalls} confirmed call(s) were priced from an ESTIMATE (the provider reported no usage); they have no token split.`,
+			`${t.estimatedCalls} confirmed call(s) were priced from an ESTIMATE (the provider reported no usage); they are not in the token split.`,
 		);
 	}
 	if (t.nominalCalls > 0) {
