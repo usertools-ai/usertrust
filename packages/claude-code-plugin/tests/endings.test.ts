@@ -16,7 +16,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
 import { assertNotKilledAtHostDeadline, forgetPins, runHook } from "./helpers/run-hook.js";
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
@@ -1914,6 +1914,7 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			"a configured session whose hook is still running at the deadline is reported killed, though the launcher exits 0",
 			async () => {
 				const copy = nodeFs.realpathSync(await mkdtemp(join(tmpdir(), "utcc-end-hooks-")));
+				onTestFinished(() => nodeFs.rmSync(copy, { recursive: true, force: true }));
 				nodeFs.cpSync(HOOKS, copy, { recursive: true });
 				await writeFile(
 					join(copy, "session-end.mjs"),
