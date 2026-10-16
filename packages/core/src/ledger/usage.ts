@@ -140,10 +140,15 @@ export interface NormalizedUsage {
 	cacheWrite1hTokens?: number | undefined;
 	/**
 	 * Provenance (D5). `"provider"` means the provider reported BOTH input and
-	 * output; absent cache fields then legitimately mean zero. `"estimated"`
-	 * means at least one of input/output was missing or unusable, so the caller
-	 * must substitute its estimate and MUST NOT publish a `usage` record — a
-	 * half-provider snapshot labelled "provider" is a mislabel, not a saving.
+	 * output; absent cache fields then legitimately mean zero. `"estimated"` is
+	 * every other snapshot, and publication follows PRICING, not this label
+	 * (`publishableUsageFields`): a `usage` record is published exactly when these
+	 * counts priced the call. A snapshot `sanitizeUsage` DOWNGRADED (an input or
+	 * output that was missing or unusable) publishes nothing, however the caller
+	 * prices it, since its clamped 0 is fabricated. A caller's own
+	 * `"estimated"` label over complete counts that priced the call (a headless
+	 * settle) publishes them. A half-provider snapshot labelled "provider" is a
+	 * mislabel, not a saving.
 	 *
 	 * Held by construction: `sanitizeUsage` downgrades a `"provider"` label to
 	 * `"estimated"` whenever the input or output it was handed is not a usable
