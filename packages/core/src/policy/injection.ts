@@ -131,8 +131,21 @@ function checkBase64Evasion(value: string): boolean {
 // Layer 4: Delimiter injection detection
 // ---------------------------------------------------------------------------
 
-/** Triple backtick escape followed by system-like content. */
-const DELIMITER_BACKTICK_RE = /```[\s\S]*?(?:system|instruction|admin)/i;
+/**
+ * Triple backtick escape followed by system-like content: what
+ * `/```[\s\S]*?(?:system|instruction|admin)/i` matches, a fence with one of the keywords anywhere
+ * after it. As that one regex it was tried from every fence and each try read to the end of the
+ * text, so a long run of backticks with no keyword took time in N squared (1M characters: about
+ * half a minute). The FIRST fence has the most text after it, so the text matches exactly when a
+ * keyword appears after the first fence, and that is one `indexOf` and one keyword scan.
+ */
+const DELIMITER_FENCE = "```";
+const DELIMITER_KEYWORD_RE = /system|instruction|admin/i;
+
+function hasBacktickDelimiter(value: string): boolean {
+	const fence = value.indexOf(DELIMITER_FENCE);
+	return fence !== -1 && DELIMITER_KEYWORD_RE.test(value.slice(fence + DELIMITER_FENCE.length));
+}
 
 /** XML tag injection closing a role-like tag. */
 const DELIMITER_XML_RE = /<\/(?:system|user|assistant|human|ai)>/i;
@@ -142,9 +155,7 @@ const DELIMITER_HEADING_RE = /^#{1,3}\s*(?:system|instruction|new role)/im;
 
 function checkDelimiterInjection(value: string): boolean {
 	return (
-		DELIMITER_BACKTICK_RE.test(value) ||
-		DELIMITER_XML_RE.test(value) ||
-		DELIMITER_HEADING_RE.test(value)
+		hasBacktickDelimiter(value) || DELIMITER_XML_RE.test(value) || DELIMITER_HEADING_RE.test(value)
 	);
 }
 
