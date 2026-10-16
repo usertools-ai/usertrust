@@ -1713,6 +1713,49 @@ describe("messages.stream: an incomplete report never prices below the metered e
 		expect(Object.hasOwn(receipt, "usage")).toBe(false);
 	});
 
+	it("an 'end' without finalMessage is incomplete even when the tap saw both sides: max(estimate, counts)", async () => {
+		// finalMessage is the stream's own completion signal; without it the tap's counts are the last
+		// ones seen, not a confirmed final, so the settle fails dear.
+		const estimate = await estimateOnlyCost(tmpVault);
+		const small = await streamReceipt({ events: PROVIDER_EVENTS, endWithoutFinal: true });
+		expect(costFromRatesFor(100, 20)).toBeLessThan(estimate);
+		expect(small.cost).toBe(estimate);
+		expect(small.usageSource).toBe("estimated");
+		expect(Object.hasOwn(small, "usage")).toBe(false);
+
+		const large = await streamReceipt({
+			events: [
+				{
+					type: "message_start",
+					message: { usage: { input_tokens: 100, cache_read_input_tokens: 1_000_000 } },
+				},
+				{ type: "message_delta", usage: { output_tokens: 20 } },
+			],
+			endWithoutFinal: true,
+		});
+		const counts = costFromRatesFor(100, 20, 1_000_000);
+		expect(counts).toBeGreaterThan(estimate);
+		expect(large.cost).toBe(counts);
+		expect(large.usageSource).toBe("estimated");
+		expect(Object.hasOwn(large, "usage")).toBe(false);
+	});
+
+	it("the same events WITH a finalMessage are complete and price at the counts", async () => {
+		const receipt = await streamReceipt({
+			events: PROVIDER_EVENTS,
+			final: { id: "msg_1", usage: { input_tokens: 100, output_tokens: 20 } },
+		});
+		expect(receipt.cost).toBe(costFromRatesFor(100, 20));
+		expect(receipt.cost).toBeLessThan(await estimateOnlyCost(tmpVault));
+		expect(receipt.usageSource).toBe("provider");
+		expect(receipt.usage).toEqual({
+			inputTokens: 100,
+			outputTokens: 20,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+		});
+	});
+
 	it("CONTROL: a finalMessage with input and output prices from the counts", async () => {
 		const receipt = await streamReceipt({ events: PROVIDER_EVENTS, final: PROVIDER_FINAL });
 		expect(receipt.cost).toBe(costFromRatesFor(100, 30));
