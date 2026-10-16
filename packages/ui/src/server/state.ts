@@ -21,7 +21,7 @@ import {
 	isKnownBudget,
 	loadBudgetConfig,
 	readLedgerEvents,
-	verifyVault,
+	verifyVaultBounded,
 } from "usertrust";
 import { isHeaderSpend } from "../shared/aggregate.js";
 import type { SummaryPayload } from "../shared/api.js";
@@ -369,6 +369,14 @@ export function loadState(
 	}
 }
 
+/**
+ * The verifier's snapshot read for a load: at most 3 attempts, 10 ms apart, never its default of 26 attempts 100 ms
+ * apart. Its sleeps are synchronous, and this server's event loop waited on them: a load of a vault under continuous
+ * appends stalled it up to 649 ms, against about 240 ms for a single read (measured, 2026-10-16). A read still
+ * changing after these is `busy`, a failed read this server retries on its own (`watchLedger`'s failed-read retry).
+ */
+export const VAULT_READ = { attempts: 3, delayMs: 10 } as const;
+
 /** How many times a load whose log changed under it is redone before its identity is left unknown. */
 const LOAD_RETRIES = 3;
 
@@ -408,7 +416,7 @@ function loadPass(
 	const anchor = readAnchor(`${logPath}.meta`);
 	if (anchor.error !== undefined) unread.push(anchor.error);
 	const integrity = deriveChainIntegrity(events);
-	const vault = verifyVault(vaultPath);
+	const vault = verifyVaultBounded(vaultPath, VAULT_READ);
 	loadSeam.afterReaders?.();
 	// The readers read by PATH. Only if the path still names the file the descriptor read, with the same size and mtime,
 	// do `lastHash`, `byteOffset` and `logId` all describe one file; otherwise (a rename, an append) the load is redone.

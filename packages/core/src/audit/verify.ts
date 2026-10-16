@@ -185,6 +185,19 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 }
 
 /**
+ * @internal {@link verifyVault} with the snapshot's retries bounded by the caller, for one that retries on its own and
+ * must not block while a vault keeps changing: the live dashboard. The verifier's default (26 attempts, 100 ms apart)
+ * sleeps synchronously. A read that still changes within the bound is `busy`. Core-only: the standalone verifier is a
+ * CLI that may block, and has no such caller.
+ */
+export function verifyVaultBounded(
+	vaultPath: string,
+	opts: Pick<StableReadOptions, "attempts" | "delayMs">,
+): VaultVerificationResult {
+	return verifyVaultReading(vaultPath, opts).result;
+}
+
+/**
  * {@link verifyVault}, handing back the events it verified with its verdict. A check that judges
  * the vault after its verification takes them from here: reading the log a second time judged
  * whatever the log held THEN, never hash-checked. IDENTICAL in packages/verify/src/index.ts.

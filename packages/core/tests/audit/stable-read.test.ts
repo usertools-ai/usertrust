@@ -59,7 +59,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { canonicalize } from "../../src/audit/canonical.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
 import { readVaultSnapshot, writerMayHoldLock } from "../../src/audit/stable-read.js";
-import { verifyVaultReading } from "../../src/audit/verify.js";
+import { verifyVaultBounded, verifyVaultReading } from "../../src/audit/verify.js";
 import { run as healthRun } from "../../src/cli/health.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 
@@ -209,6 +209,15 @@ describe("verify on a live vault", () => {
 		seam.flipListingsFrom = 4;
 		const read = readVaultSnapshot(auditDir(), { attempts: 5, delayMs: 1 });
 		expect(read.kind).toBe("busy");
+	});
+
+	it("verifyVaultBounded reads with its caller's bound: a vault that keeps changing is busy after exactly that many attempts", async () => {
+		await vaultOf(2);
+		// Every attempt is inconsistent, its second listing never its first: two listings an attempt, then busy.
+		seam.flipListingsFrom = 1;
+		const result = verifyVaultBounded(vaultDir(), { attempts: 3, delayMs: 1 });
+		expect(result).toMatchObject({ valid: false, busy: true });
+		expect(seam.listings).toBe(6);
 	});
 
 	it("a writer that finishes its line and lets go DURING an attempt: read again, then valid, never 'torn'", async () => {
