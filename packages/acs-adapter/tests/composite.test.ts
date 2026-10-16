@@ -1,4 +1,8 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createGovernor } from "../../core/src/headless.js";
 import { CompositeEvaluator, type PolicyDecider } from "../src/composite.js";
 import { createMockGovernor } from "../src/mock.js";
 import { ACS_BUDGET_REASONS } from "../src/vocabulary.js";
@@ -165,5 +169,31 @@ describe("CompositeEvaluator", () => {
 		const budgetAfterSettle = governor.budgetRemaining();
 		await evaluator.abort(settled, new Error("late abort"));
 		expect(governor.budgetRemaining()).toBe(budgetAfterSettle);
+	});
+});
+
+describe("CompositeEvaluator over the real headless governor", () => {
+	it("passes a partial report through: it costs no less than the estimate", async () => {
+		const vaultBase = await mkdtemp(join(tmpdir(), "acs-incomplete-"));
+		const governor = await createGovernor({ dryRun: true, budget: 1_000_000, vaultBase });
+		try {
+			const action = {
+				kind: "tool_call",
+				model: "claude-sonnet-4-6",
+				estimatedInputTokens: 2000,
+				maxOutputTokens: 500,
+			};
+			const evaluator = new CompositeEvaluator({ policy: () => ({ decision: "allow" }), governor });
+			const estimate = await evaluator.settle(await evaluator.evaluate(action));
+			const partial = await evaluator.settle(await evaluator.evaluate(action), {
+				outputTokens: 500,
+			});
+			expect(partial?.cost).toBe(estimate?.cost);
+			expect(partial?.usageSource).toBe("estimated");
+			expect(partial?.usage).toBeUndefined();
+		} finally {
+			await governor.destroy();
+			await rm(vaultBase, { recursive: true, force: true });
+		}
 	});
 });

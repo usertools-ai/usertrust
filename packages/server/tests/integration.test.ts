@@ -68,6 +68,57 @@ describe("integration: real governor in dryRun mode", () => {
 		expect(receipt.meter?.computeMs).toBe(4709);
 	});
 
+	it("a settle that reports only some of input and output costs no less than the estimate", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-int-"));
+		server = createUsertrustServer({
+			config: {
+				host: "127.0.0.1",
+				port: 0,
+				stateDir,
+				enforcement: "enforce",
+				pendingTtlMs: 300_000,
+				dryRun: true,
+				tenants: [{ id: "real", keyHash: hashKey(KEY), budget: 50_000 }],
+			},
+		});
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+		const headers = { "content-type": "application/json", authorization: `Bearer ${KEY}` };
+		const settleWith = async (counts: Record<string, unknown>) => {
+			const authRes = await fetch(`${base}/v1/authorize`, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({
+					model: "claude-sonnet-4-6",
+					estimatedInputTokens: 2000,
+					maxOutputTokens: 500,
+				}),
+			});
+			const auth = (await authRes.json()) as { transferId: string };
+			const settleRes = await fetch(`${base}/v1/settle`, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ transferId: auth.transferId, ...counts }),
+			});
+			expect(settleRes.status).toBe(200);
+			return (await settleRes.json()) as { cost: number; usageSource: string; usage?: unknown };
+		};
+		const estimate = (await settleWith({})).cost;
+		// The wire's input and output are optional: one left out is an incomplete report.
+		const partial = await settleWith({ outputTokens: 500, usageSource: "provider" });
+		expect(partial.cost).toBe(estimate);
+		expect(partial.usageSource).toBe("estimated");
+		expect(partial.usage).toBeUndefined();
+		// CONTROL: the same call reported in full prices from its counts.
+		const full = await settleWith({
+			inputTokens: 2000,
+			outputTokens: 500,
+			usageSource: "provider",
+		});
+		expect(full.usageSource).toBe("provider");
+		expect(full.usage).toBeDefined();
+	});
+
 	it("the real governor records the wire's actor and principal on llm_call", async () => {
 		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-int-"));
 		server = createUsertrustServer({

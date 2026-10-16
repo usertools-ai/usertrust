@@ -12,7 +12,7 @@ was lost, but the counter was not capped.
 Three things now prevent it:
 
 - **A plausibility ceiling.** A reported count above 100,000,000 tokens in any single tier (`MAX_PLAUSIBLE_TOKENS_PER_TIER`)
-  is not charged. The call settles at the estimate, exactly as for a missing count, and a `usage_implausible` event is
+  is not charged. The call settles at the estimate, exactly as for a call that reports no counts, and a `usage_implausible` event is
   appended to the audit chain (and a line is written to stderr) naming the call, the model, the refused figures and the
   ceiling.
 - **The counter keeps the metered cost.** The budget enforces what the provider charges, so a plausible call that costs more than its hold is counted in full; `receipt.postedCost` and `settlement_shortfall` show the gap to what the ledger posted. The ceiling above and the persist guard below are what keep one bad figure from refusing every later call.

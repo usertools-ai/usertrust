@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
+import { costFromRates, getModelRates } from "../../src/ledger/pricing.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import type { AuditEvent, TrustReceipt } from "../../src/shared/types.js";
 
@@ -242,6 +243,41 @@ const STREAM_PARAMS = {
 	max_tokens: 1024,
 	messages: [{ role: "user", content: "Hello" }],
 };
+
+/** A governed client's `messages.stream`, typed loosely enough to take STREAM_PARAMS. */
+function streamOf(governed: unknown): (params: unknown) => Promise<unknown> {
+	const messages = (governed as { messages: { stream: (params: unknown) => Promise<unknown> } })
+		.messages;
+	return (params) => messages.stream(params);
+}
+
+/** costFromRates at STREAM_PARAMS' model. */
+function costFromRatesFor(input: number, output: number, cacheRead = 0): number {
+	return costFromRates(getModelRates(STREAM_PARAMS.model), input, output, cacheRead);
+}
+
+/** The metered estimate STREAM_PARAMS settles at: a messages.stream that ends with no usage at all. */
+async function estimateOnlyCost(vaultBase: string): Promise<number> {
+	const governed = await trust(
+		{
+			messages: {
+				create: vi.fn(),
+				stream: vi.fn(() => new FakeMessageStream({ events: [], endWithoutFinal: true })),
+			},
+		},
+		{
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase,
+			_engine: makeMockEngine(),
+			_audit: makeMockAudit(),
+		},
+	);
+	const stream = (await streamOf(governed)(STREAM_PARAMS)) as { receipt: Promise<TrustReceipt> };
+	const receipt = await stream.receipt;
+	await governed.destroy();
+	return receipt.cost;
+}
 
 // ── Tests ──
 
@@ -1605,10 +1641,81 @@ describe("cache tiers survive the MessageStream accumulator", () => {
 		stream.abort();
 		const receipt = await stream.receipt;
 
-		// input 100 + cacheRead 9000 + cacheWrite 1000, no output yet:
-		// 3 + 27 + 37.5 = 67.5 → 68. Without the cache tiers this would be 3 → 3.
-		expect(receipt.cost).toBe(68);
+		// input 100 + cacheRead 9000 + cacheWrite 1000, no output yet: 3 + 27 + 37.5 = 67.5 → 68.
+		// Without the cache tiers this would be 3. No output count arrived, so the report is
+		// incomplete: max(the metered estimate, 68), labelled "estimated", with no usage.
+		const estimate = await estimateOnlyCost(tmpVault);
+		expect(receipt.cost).toBe(Math.max(estimate, 68));
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Object.hasOwn(receipt, "usage")).toBe(false);
 
 		await governed.destroy();
+	});
+});
+
+describe("messages.stream: an incomplete report never prices below the metered estimate", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {}
+	});
+
+	async function streamReceipt(opts: FakeStreamOpts): Promise<TrustReceipt> {
+		const client = {
+			messages: { create: vi.fn(), stream: vi.fn(() => new FakeMessageStream(opts)) },
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase: tmpVault,
+			_engine: makeMockEngine(),
+			_audit: makeMockAudit(),
+		});
+		const stream = (await streamOf(governed)(STREAM_PARAMS)) as {
+			receipt: Promise<TrustReceipt>;
+		};
+		const receipt = await stream.receipt;
+		await governed.destroy();
+		return receipt;
+	}
+
+	it("a finalMessage that names only output, with no input seen anywhere, prices at the estimate", async () => {
+		const estimate = await estimateOnlyCost(tmpVault);
+		const receipt = await streamReceipt({
+			events: [{ type: "message_delta", usage: { output_tokens: 20 } }],
+			final: { id: "msg_1", usage: { output_tokens: 20 } },
+		});
+		expect(costFromRatesFor(0, 20)).toBeLessThan(estimate);
+		expect(receipt.cost).toBe(estimate);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Object.hasOwn(receipt, "usage")).toBe(false);
+	});
+
+	it("an 'end' with no finalMessage keeps a large cache read the tap accumulated (max picks the counts)", async () => {
+		const estimate = await estimateOnlyCost(tmpVault);
+		const receipt = await streamReceipt({
+			events: [
+				{
+					type: "message_start",
+					message: { usage: { input_tokens: 100, cache_read_input_tokens: 1_000_000 } },
+				},
+			],
+			endWithoutFinal: true,
+		});
+		const counts = costFromRatesFor(100, 0, 1_000_000);
+		expect(counts).toBeGreaterThan(estimate);
+		expect(receipt.cost).toBe(counts);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Object.hasOwn(receipt, "usage")).toBe(false);
+	});
+
+	it("CONTROL: a finalMessage with input and output prices from the counts", async () => {
+		const receipt = await streamReceipt({ events: PROVIDER_EVENTS, final: PROVIDER_FINAL });
+		expect(receipt.cost).toBe(costFromRatesFor(100, 30));
+		expect(receipt.usageSource).toBe("provider");
 	});
 });

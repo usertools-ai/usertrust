@@ -142,10 +142,11 @@ export interface NormalizedUsage {
 	 * Provenance (D5). `"provider"` means the provider reported BOTH input and
 	 * output; absent cache fields then legitimately mean zero. `"estimated"` is
 	 * every other snapshot, and publication follows PRICING, not this label
-	 * (`publishableUsageFields`): a `usage` record is published exactly when these
-	 * counts priced the call. A snapshot `sanitizeUsage` DOWNGRADED (an input or
-	 * output that was missing or unusable) publishes nothing, however the caller
-	 * prices it, since its clamped 0 is fabricated. A caller's own
+	 * (`publishableUsageFields`): a `usage` record is published exactly when a
+	 * complete report's counts priced the call. A snapshot `sanitizeUsage` DOWNGRADED
+	 * (an input or output that was missing or unusable) publishes nothing, and costs
+	 * max(the metered estimate, its counts) (`incompleteReportCost`), since its
+	 * clamped 0 is fabricated. A caller's own
 	 * `"estimated"` label over complete counts that priced the call (a headless
 	 * settle) publishes them. A half-provider snapshot labelled "provider" is a
 	 * mislabel, not a saving.
@@ -159,7 +160,7 @@ export interface NormalizedUsage {
 	/**
 	 * Present ONLY when a reported count exceeded {@link MAX_PLAUSIBLE_TOKENS_PER_TIER}: the offending tiers and the raw
 	 * figures. The snapshot is then `"estimated"` with zero counts (the call is charged at the estimate, exactly as for a
-	 * missing count) and the caller records a `usage_implausible` event instead of charging the figure.
+	 * report of no counts) and the caller records a `usage_implausible` event instead of charging the figure.
 	 */
 	implausible?: Partial<Record<UsageTier, number>>;
 	/** Which check put each tier in `implausible`: the aggregate sum (absent) or one response's maximum. */
@@ -339,17 +340,25 @@ export function withImplausible(
 }
 
 /**
- * Whether a candidate's input and output counts are both usable: the rule by which
- * `sanitizeUsage` keeps a "provider" label (an explicit 0 qualifies; an absent, non-finite,
- * negative or non-numeric count does not, since its clamped 0 is fabricated). A caller
- * that publishes counts under any label applies it to the same candidate it sanitizes, so
- * a count the caller has already defaulted to 0 (headless, for one its caller left out)
- * is usable.
+ * Whether one raw count is usable: a finite number >= 0 (an explicit 0 qualifies). An
+ * absent, non-finite, negative or non-numeric count is not, since the 0 it would clamp to
+ * is fabricated.
+ */
+export function isUsableCount(value: unknown): boolean {
+	return readCount(value) != null;
+}
+
+/**
+ * Whether a report's input and output counts are both present and usable
+ * ({@link isUsableCount}): the rule by which `sanitizeUsage` keeps a "provider" label, and
+ * the rule for a COMPLETE report. A complete report is priced from its counts; an
+ * incomplete one at {@link incompleteReportCost}. Apply it to the counts as the caller
+ * gave them, before any default fills a missing one with 0.
  */
 export function inputOutputUsable(
 	raw: Pick<RawUsageCandidate, "inputTokens" | "outputTokens">,
 ): boolean {
-	return readCount(raw.inputTokens) != null && readCount(raw.outputTokens) != null;
+	return isUsableCount(raw.inputTokens) && isUsableCount(raw.outputTokens);
 }
 
 /**
@@ -585,13 +594,15 @@ export function withSupported1hTier(
  * block and, only when the call wrote 1-hour cache, the root `cacheWrite1h` record. ONE
  * function so the emission sites cannot disagree about either.
  *
- * Published exactly when these counts PRICED the call (`pricedFromCounts`), whatever the
- * call's `usageSource` label: then `cost` recomputes from them and `pricing.appliedRates`,
- * and leaving them out makes the record unable to reproduce its own cost. A call priced at
- * the metered estimate (no counts, or counts refused as implausible) publishes neither, since
- * nothing tokens-based produced its cost. Each caller says which it is: govern prices only
- * provider-sourced counts (`snapshot.source === "provider"`); headless also prices a caller's
- * counts it labels `"estimated"`, which stays the provenance label.
+ * Published exactly when a COMPLETE report's counts PRICED the call (`pricedFromCounts`),
+ * whatever the call's `usageSource` label: then `cost` recomputes from them and
+ * `pricing.appliedRates`, and leaving them out makes the record unable to reproduce its own
+ * cost. A call priced at the metered estimate (no counts, or counts refused as implausible)
+ * publishes neither, since nothing tokens-based produced its cost; nor does an incomplete
+ * report (see {@link incompleteReportCost}), even when its counts set the cost, since its
+ * missing side's 0 is fabricated. Each caller says which it is: govern prices from counts only
+ * provider-sourced ones (`snapshot.source === "provider"`); headless also prices a caller's
+ * complete counts it labels `"estimated"`, which stays the provenance label.
  */
 export function publishableUsageFields(
 	snapshot: NormalizedUsage,
@@ -611,6 +622,29 @@ export function publishableUsageFields(
 		snapshot.cacheWriteTokens,
 	);
 	return cacheWrite1h === undefined ? { usage } : { usage, cacheWrite1h };
+}
+
+/**
+ * The cost of a settle whose counts did not price it: an INCOMPLETE report (an input or
+ * output absent or unusable, or cache tiers alone), or none at all. Never below the
+ * metered estimate, and never below what its usable counts show: `max(meteredEstimate,
+ * fromCounts)`, where `fromCounts` is `costFromRates` over the settle's own snapshot (its
+ * missing side 0, its 1-hour share already through `withSupported1hTier`). It fails dear
+ * without discarding counts that show more (a large cache read with no output).
+ * `countsWon` says which side set the cost, for the tier the applied rates publish. Such a
+ * settle publishes no `usage` either way: the 0 its missing side is priced at is fabricated.
+ *
+ * max() never sees an absurd count: plausibility zeroes it first (`sanitizeUsage`, the
+ * stream's `boundedCount`, `withSupported1hTier`), so an implausible report, like a report
+ * of nothing, costs exactly the estimate.
+ */
+export function incompleteReportCost(
+	fromCounts: number,
+	meteredEstimate: number,
+): { cost: number; countsWon: boolean } {
+	return fromCounts > meteredEstimate
+		? { cost: fromCounts, countsWon: true }
+		: { cost: meteredEstimate, countsWon: false };
 }
 
 /**

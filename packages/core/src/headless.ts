@@ -112,6 +112,7 @@ import {
 } from "./ledger/pricing.js";
 import {
 	implausibleUsageData,
+	incompleteReportCost,
 	inputOutputUsable,
 	materializeMaxima,
 	materializeRefused,
@@ -428,14 +429,24 @@ export interface AuthorizeParams {
  * leave cache tokens inside `inputTokens` — they would then price at
  * `inputPer1k` instead of the cache rates, which overstates reads by ~10x.
  *
- * Supplying ANY of the four counts makes the settle "reported": the cost is
- * metered from what was supplied and the omitted counts are 0. Supplying NONE
- * falls back to the pre-call metering estimate.
+ * Supplying `inputTokens` AND `outputTokens` as usable counts makes the report
+ * COMPLETE: the cost is metered from the counts supplied, and an omitted cache
+ * tier is 0. Anything less (one of them omitted or unusable, cache tiers alone,
+ * or nothing) costs max(the pre-call metering estimate, the usable counts),
+ * is labelled `"estimated"`, and publishes no `usage`. Report an explicit 0 for
+ * a count that is genuinely zero.
  */
 export interface SettleParams {
-	/** Actual FRESH input tokens consumed (cache tiers excluded). */
+	/**
+	 * Actual FRESH input tokens consumed (cache tiers excluded). With `outputTokens`, what
+	 * makes a report COMPLETE: only a settle that reports both as usable counts (an explicit
+	 * 0 counts) is priced from its counts. One that reports only some of input and output, or
+	 * cache tiers alone, costs max(the metered pre-call estimate, its usable counts), is
+	 * labelled `"estimated"`, and publishes no `usage`. Report an explicit 0 for a count that is
+	 * genuinely zero.
+	 */
 	inputTokens?: number | undefined;
-	/** Actual output tokens consumed, including provider-billed thinking tokens. */
+	/** Actual output tokens consumed, including provider-billed thinking tokens. See `inputTokens`. */
 	outputTokens?: number | undefined;
 	/**
 	 * Cache-hit prompt tokens (D5). Priced at the model's resolved
@@ -496,10 +507,11 @@ export interface SettleParams {
 	 *
 	 * Headless trusts this label — it is an operator boundary, and the caller is
 	 * the only party that knows where its counts came from (D5). What is NOT
-	 * trusted is a count: a `"provider"` label over an unusable `inputTokens` or
-	 * `outputTokens` still yields `usageSource: "estimated"` and NO `usage`
-	 * record, because a published four-tier record containing a fabricated zero
-	 * is the one thing D5 forbids outright.
+	 * trusted is a count: a `"provider"` label over an incomplete report (an
+	 * `inputTokens` or `outputTokens` absent, non-finite, negative or non-numeric)
+	 * still yields `usageSource: "estimated"` and NO `usage` record, because a
+	 * published four-tier record containing a fabricated zero is the one thing D5
+	 * forbids outright.
 	 */
 	usageSource?: "provider" | "estimated" | undefined;
 	/**
@@ -1967,34 +1979,29 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				const responses = input.responses;
 				const maxima = input.maxima;
 				const refused = input.refused;
-				// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
-				// read only input/output, so a settle carrying nothing but cache counts
-				// looked like "nothing reported" and silently fell back to the pre-call
-				// estimate — discarding real billable tokens at the one boundary
-				// (openclaw, and every non-SDK integration) that has them.
-				const usageReported =
-					reportedCounts.inputTokens != null ||
-					reportedCounts.outputTokens != null ||
-					reportedCounts.cacheReadTokens != null ||
-					reportedCounts.cacheWriteTokens != null;
+				// A COMPLETE report: input and output both present and usable counts, judged on the caller's
+				// own values before any default below fills a missing one (an explicit 0 is usable). Only a
+				// complete report is priced from its counts. An incomplete one (one side absent or unusable,
+				// or cache tiers alone) is labelled "estimated" and costs max(metered estimate, its usable
+				// counts) (`incompleteReportCost`): a caller that leaves out a count that is genuinely zero
+				// must report it as 0. Cache counts alone are never discarded (D4: they are real billable
+				// tokens); the max() keeps them. Absent CACHE tiers stay 0, as D5 states for providers.
+				const complete = inputOutputUsable(reportedCounts);
 
 				// D5 — THE ONE SNAPSHOT. Both the cost below and the `usage` record on
 				// the chain event and the receipt derive from THIS object; nothing
-				// downstream re-reads `params`. Omitted counts collapse to 0 at this
-				// operator boundary: when a caller reported some of the four, the ones
-				// it left out are zero (the same "absent cache fields mean zero" rule
-				// D5 states for providers), not an invitation to re-estimate half the
-				// call. `sanitizeUsage` then clamps every count to a finite integer >= 0
+				// downstream re-reads `params`. A count left out enters it as 0, so an
+				// incomplete report's usable counts can still be priced against the
+				// estimate. `sanitizeUsage` then clamps every count to a finite integer >= 0
 				// — the reason a NaN from a caller's arithmetic cannot reach audit
-				// canonicalization, which throws on non-finite — and downgrades a
-				// "provider" label whose input/output is unusable.
+				// canonicalization, which throws on non-finite.
 				const candidate = {
 					inputTokens: reportedCounts.inputTokens ?? 0,
 					outputTokens: reportedCounts.outputTokens ?? 0,
 					cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
 					cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
 					cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
-					source: usageReported ? (input.usageSource ?? "provider") : "estimated",
+					source: complete ? (input.usageSource ?? "provider") : "estimated",
 				} as const;
 				const usageSnapshot = withSupported1hTier(
 					sanitizeUsage(candidate, { responses, maxima, refused }),
@@ -2002,21 +2009,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					rateInfo.rateSource !== "table",
 				);
 				// An implausible count (above the per-tier ceiling) is not usage: it is charged at the estimate, like a
-				// missing count, and the anomaly is a chain event. Without this the figure reached the session counter and
+				// report of no counts, and the anomaly is a chain event. Without this the figure reached the session counter and
 				// the persisted ledger and refused every later call.
-				const usageTrusted = usageReported && usageSnapshot.implausible === undefined;
-				// Published exactly when these counts price the call (`usageTrusted`), whatever the caller's
-				// label: a caller's counts labelled "estimated" price the call too, so the record must carry
-				// them to reproduce its cost (`usageSource` stays the label). Never when the input or output
-				// count was unusable (non-finite, negative or non-numeric): its clamped 0 is fabricated, and a
-				// record with a fabricated 0 is what D5 forbids (`inputOutputUsable`, the rule that also
-				// downgrades a "provider" label). An input or output the caller left out is not unusable here:
-				// `candidate` already holds it as 0 (the rule above), so it is priced and published as 0.
-				const usageAudit = publishableUsageFields(
-					usageSnapshot,
-					rateInfo.rates,
-					usageTrusted && inputOutputUsable(candidate),
-				);
+				// These counts price the call exactly when the report is complete and plausible, whatever the
+				// caller's label: a caller's complete counts labelled "estimated" price it too.
+				const pricedFromCounts = complete && usageSnapshot.implausible === undefined;
+				// Published exactly when these counts priced the call, so the record reproduces its cost
+				// (`usageSource` stays the label). Never for an incomplete report, even when its counts
+				// show more than the estimate: the 0 its missing side is priced at is fabricated, and a
+				// record with a fabricated 0 is what D5 forbids.
+				const usageAudit = publishableUsageFields(usageSnapshot, rateInfo.rates, pricedFromCounts);
 				const implausibleData = implausibleUsageData(usageSnapshot, {
 					model,
 					transferId,
@@ -2028,34 +2030,35 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					);
 				}
 
-				// Determine actual cost
-				let actualCost: number;
+				// Determine actual cost. The counts' own cost, over the one snapshot (a missing side 0):
+				// the cost itself when they priced the call, else the floor an incomplete report is held
+				// to beside the un-inflated metering estimate (never the fattened hold carried on
+				// `auth.estimatedCost`; see the `meteredEstimate` comment on `AuthorizationCapture`).
+				const countsCost = costFromRates(
+					rateInfo.rates,
+					usageSnapshot.inputTokens,
+					usageSnapshot.outputTokens,
+					usageSnapshot.cacheReadTokens,
+					usageSnapshot.cacheWriteTokens,
+					usageSnapshot.cacheWrite1hTokens ?? 0,
+				);
+				const incomplete = pricedFromCounts
+					? undefined
+					: incompleteReportCost(countsCost, capture.meteredEstimate);
+				const actualCost = incomplete === undefined ? countsCost : incomplete.cost;
+				// Whether the cost came from these counts, for the tier the applied rates publish.
+				const costFromCounts = incomplete === undefined || incomplete.countsWon;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
-				if (usageTrusted) {
-					actualCost = costFromRates(
-						rateInfo.rates,
-						usageSnapshot.inputTokens,
-						usageSnapshot.outputTokens,
-						usageSnapshot.cacheReadTokens,
-						usageSnapshot.cacheWriteTokens,
-						usageSnapshot.cacheWrite1hTokens ?? 0,
-					);
-				} else {
-					// FIX: the un-inflated metering estimate, never the fattened hold
-					// carried on `auth.estimatedCost` (see the `meteredEstimate`
-					// comment on `AuthorizationCapture`).
-					actualCost = capture.meteredEstimate;
-				}
 
 				// D5 — the rates the money was computed with, published so the record is
 				// self-sufficient: `ceil(sum(counts x appliedRates / 1000))` floored at 1
 				// reproduces `cost` exactly. RESOLVED rates, so the D1 cache fallback is
 				// visible as the number it actually charges rather than as a hole.
 				// A tiered row (`longPrompt`) publishes the tier it SETTLED at: from the reported
-				// prompt length when usage was reported, else from the estimate the cost came from.
+				// prompt length when the counts set the cost, else from the estimate the cost came from.
 				const appliedRates = resolveAppliedRates(
 					rateInfo.rates,
-					usageTrusted
+					costFromCounts
 						? promptTokenCount(
 								usageSnapshot.inputTokens,
 								usageSnapshot.cacheReadTokens,
