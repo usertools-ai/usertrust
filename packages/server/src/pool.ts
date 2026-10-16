@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import type { Governor, TrustOpts } from "usertrust";
-import { createGovernor, securePrivateVault, VAULT_DIR } from "usertrust";
+import { createGovernor, kernelVaultBase, securePrivateVault, VAULT_DIR } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
 
 export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
@@ -33,12 +33,21 @@ export function tenantVaultBase(config: ServerConfig, tenant: TenantConfig): str
  * CREATED here, owner-only, as its governor would create it: one that cannot be created (a
  * read-only state dir, say) refuses the start instead of failing every request once the
  * port is open.
+ *
+ * The vault judged is the one the governor opens. `createGovernor` computes it as
+ * `join(resolve(governorVaultBase(base)), VAULT_DIR)` over the base `GovernorPool` hands it: the
+ * base resolved where the kernel resolves it (a `..` after a symbolic link is the link target's
+ * parent), and only then joined. A `join` of the raw base would fold that `..` lexically and judge
+ * another directory than the first request opens. `governorVaultBase` is `kernelVaultBase` plus a
+ * stderr line naming the mapping, printed on every call; this check uses `kernelVaultBase`, the
+ * same resolution without the line, so the governor's own call prints it once.
  */
 export function secureTenantVaults(config: ServerConfig): void {
 	const refusals: string[] = [];
 	for (const tenant of config.tenants) {
 		try {
-			securePrivateVault(join(tenantVaultBase(config, tenant), VAULT_DIR), { create: true });
+			const vaultBase = resolve(kernelVaultBase(tenantVaultBase(config, tenant)));
+			securePrivateVault(join(vaultBase, VAULT_DIR), { create: true });
 		} catch (err) {
 			refusals.push(`tenant ${tenant.id}: ${err instanceof Error ? err.message : String(err)}`);
 		}
