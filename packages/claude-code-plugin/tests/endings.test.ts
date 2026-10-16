@@ -1900,6 +1900,36 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 			},
 			LONG,
 		);
+
+		// The runner's own event loop, busy past the deadline, runs the deadline timer BEFORE the
+		// `close` of a hook that exited at once. Killed is decided by how the hook ended. The hook
+		// here is a stub named session-end.mjs that exits without reading its input: the real one
+		// waits for its stdin to close, and the runner's loop, held busy, cannot close it, so the real
+		// hook would still be running at the deadline and be killed there, rightly.
+		const busyWait = (ms: number) => {
+			const until = Date.now() + ms;
+			while (Date.now() < until) {
+				/* hold the runner's event loop */
+			}
+		};
+		it.each<[string, Record<string, string>, number]>([
+			["unset (the 1,500 ms default)", {}, 2_000],
+			["set to a small value (1,000 ms)", seBudget(700), 1_700],
+		])(
+			"a hook that exited at once is not reported killed when the runner is busy past the deadline, with the variable %s",
+			async (_, variable, busyMs) => {
+				const stub = join(stateDir, "session-end.mjs");
+				await writeFile(stub, "process.exitCode = 0;\n");
+				const pending = runHook(stub, seInput(), envFor(variable));
+				busyWait(busyMs);
+				const end = await pending;
+				expect(end.hostDeadlineMs).toBeLessThan(busyMs);
+				expect(end.code).toBe(0);
+				expect(end.killedAtHostDeadline).toBe(false);
+				expect(() => assertNotKilledAtHostDeadline(end)).not.toThrow();
+			},
+			LONG,
+		);
 	});
 
 	it(

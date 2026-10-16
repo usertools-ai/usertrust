@@ -17,8 +17,11 @@ export interface HookRunResult {
 	 */
 	hostDeadlineMs: number | undefined;
 	/**
-	 * True when `runHook` killed the hook at that deadline, as Claude Code does. What a test
-	 * asserts of such a run's records is an exit a real host never lets the hook reach.
+	 * True when `runHook` sent the kill at that deadline, as Claude Code does, AND the hook
+	 * ended by it (`endedBySignal`). Never true merely because the deadline timer fired: a
+	 * test runner busy past the deadline runs that timer before the `close` of a hook that
+	 * exited long before, and that hook was not killed. What a test asserts of a killed run's
+	 * records is an exit a real host never lets the hook reach.
 	 */
 	killedAtHostDeadline: boolean;
 }
@@ -39,6 +42,28 @@ export function assertNotKilledAtHostDeadline(result: HookRunResult): HookRunRes
 
 /** How long a killed hook gets to exit on SIGTERM before SIGKILL (launch.mjs forwards SIGTERM to its child). */
 const KILL_GRACE_MS = 1_000;
+
+/**
+ * Whether a run ended BECAUSE of a signal the harness sent, read from how it ended, never from
+ * the deadline timer having fired. There are two ways the hook's process ends by a signal:
+ * - The process the harness spawned dies by it: `close` reports that signal (an unconfigured
+ *   session, whose launcher runs the hook itself and has no handler; any SIGKILL; a SIGTERM
+ *   that lands before the launcher has installed its forwarding).
+ * - A configured session's launcher forwards SIGTERM to its child (launch.mjs). The child dies
+ *   by it, and the launcher then exits 0 with a gap, exactly as it does for a hook that
+ *   exited normally: its exit code and signal show nothing. The only observable is the line it
+ *   writes, `the hook's process failed (signal SIGTERM)` (childOutcome's reason, which it
+ *   also records as a gap), so that line is read here.
+ * A hook that had already exited when the timer ran leaves neither: the signal reached a
+ * process that was gone or a zombie, which is harmless.
+ */
+function endedBySignal(sent: ReadonlySet<string>, signal: string | null, stderr: string): boolean {
+	if (signal !== null && sent.has(signal)) return true;
+	for (const name of sent) {
+		if (stderr.includes(`the hook's process failed (signal ${name})`)) return true;
+	}
+	return false;
+}
 
 /**
  * The host's default SessionEnd deadline, in ms from spawn. From Claude Code's hooks reference,
@@ -127,7 +152,9 @@ export function forgetPins(env: Record<string, string>): void {
  *   still running `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` ms after spawn is killed (SIGTERM,
  *   then SIGKILL), or the host's default of 1,500 ms when the run's env leaves the variable
  *   absent, empty or unreadable, and the result says so
- *   (`killedAtHostDeadline`, with the deadline in `hostDeadlineMs`). The earlier of that and
+ *   (`killedAtHostDeadline`, with the deadline in `hostDeadlineMs`), but only when the hook
+ *   ended by that kill (`endedBySignal`): a hook that exited before a busy runner ran the
+ *   deadline timer is not reported killed. The earlier of that and
  *   `timeoutMs` applies. A test of a SessionEnd exit passes the result through
  *   `assertNotKilledAtHostDeadline`, so a path a real host kills cannot pass on its records.
  */
@@ -167,13 +194,16 @@ export function runHook(
 			stdio: ["pipe", "pipe", "pipe"],
 			...(timeoutMs === undefined || hostFirst ? {} : { timeout: timeoutMs }),
 		});
-		let killedAtHostDeadline = false;
+		const sent = new Set<string>();
 		let hardKill: NodeJS.Timeout | undefined;
 		const hostKill = hostFirst
 			? setTimeout(() => {
-					killedAtHostDeadline = true;
+					sent.add("SIGTERM");
 					child.kill("SIGTERM");
-					hardKill = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+					hardKill = setTimeout(() => {
+						sent.add("SIGKILL");
+						child.kill("SIGKILL");
+					}, KILL_GRACE_MS);
 				}, hostDeadlineMs)
 			: undefined;
 		let stdout = "";
@@ -187,7 +217,7 @@ export function runHook(
 			stderr += chunk;
 		});
 		child.on("error", reject);
-		child.on("close", (code) => {
+		child.on("close", (code, signal) => {
 			clearTimeout(hostKill);
 			clearTimeout(hardKill);
 			resolve({
@@ -196,7 +226,7 @@ export function runHook(
 				stderr,
 				pid: child.pid,
 				hostDeadlineMs,
-				killedAtHostDeadline,
+				killedAtHostDeadline: endedBySignal(sent, signal, stderr),
 			});
 		});
 		child.stdin.write(JSON.stringify(input));
