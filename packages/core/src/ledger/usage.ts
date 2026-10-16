@@ -140,10 +140,15 @@ export interface NormalizedUsage {
 	cacheWrite1hTokens?: number | undefined;
 	/**
 	 * Provenance (D5). `"provider"` means the provider reported BOTH input and
-	 * output; absent cache fields then legitimately mean zero. `"estimated"`
-	 * means at least one of input/output was missing or unusable, so the caller
-	 * must substitute its estimate and MUST NOT publish a `usage` record — a
-	 * half-provider snapshot labelled "provider" is a mislabel, not a saving.
+	 * output; absent cache fields then legitimately mean zero. `"estimated"` is
+	 * every other snapshot, and publication follows PRICING, not this label
+	 * (`publishableUsageFields`): a `usage` record is published exactly when these
+	 * counts priced the call. A snapshot `sanitizeUsage` DOWNGRADED (an input or
+	 * output that was missing or unusable) publishes nothing, however the caller
+	 * prices it, since its clamped 0 is fabricated. A caller's own
+	 * `"estimated"` label over complete counts that priced the call (a headless
+	 * settle) publishes them. A half-provider snapshot labelled "provider" is a
+	 * mislabel, not a saving.
 	 *
 	 * Held by construction: `sanitizeUsage` downgrades a `"provider"` label to
 	 * `"estimated"` whenever the input or output it was handed is not a usable
@@ -334,6 +339,20 @@ export function withImplausible(
 }
 
 /**
+ * Whether a candidate's input and output counts are both usable: the rule by which
+ * `sanitizeUsage` keeps a "provider" label (an explicit 0 qualifies; an absent, non-finite,
+ * negative or non-numeric count does not, since its clamped 0 is fabricated). A caller
+ * that publishes counts under any label applies it to the same candidate it sanitizes, so
+ * a count the caller has already defaulted to 0 (headless, for one its caller left out)
+ * is usable.
+ */
+export function inputOutputUsable(
+	raw: Pick<RawUsageCandidate, "inputTokens" | "outputTokens">,
+): boolean {
+	return readCount(raw.inputTokens) != null && readCount(raw.outputTokens) != null;
+}
+
+/**
  * The single sanitizer. Every extractor ends here, and any boundary that
  * assembles a snapshot from already-disjoint counters (the pi-ai pass-through
  * rows, headless caller-supplied usage) should route through it too rather
@@ -380,6 +399,7 @@ export function sanitizeUsage(
 	const input = readCount(r.inputTokens);
 	const output = readCount(r.outputTokens);
 	const reported = input != null && output != null;
+	// (`inputOutputUsable` states the same rule, for a caller deciding publication.)
 	// Each raw count is read EXACTLY ONCE and reused: a getter that answers differently on a second read must not
 	// pass the plausibility check on one value and be priced on another.
 	const cacheRead = readCount(r.cacheReadTokens) ?? 0;
@@ -481,19 +501,17 @@ export function implausibleUsageData(
 }
 
 /**
- * The four tiers of a snapshot, but ONLY when they are publishable (D5).
+ * The provider-label form: the four tiers of a snapshot when it is provider-sourced, else
+ * `undefined` (D5). Kept as a public export; no settle calls it.
  *
- * Returns `undefined` for an estimated snapshot, and that is the whole point:
- * `receipt.usage` and `llm_call.data.usage` are present IFF the settle was
- * provider-sourced. An estimated settle's cost comes from the pre-call
- * estimate, not from counts, so publishing a four-tier block of fabricated
- * zeros beside it would invite an auditor to "recompute" a number that was
- * never derived from tokens — and to conclude the call cost 1 usertoken.
- *
- * The rule lives HERE, in one function, rather than as an `if` repeated at
- * each of the four emission sites (headless settle, govern non-stream, govern
- * stream terminal, the estimate-priced stream handle). Four copies of a
- * provenance rule is three chances to publish a fabrication.
+ * What a settle publishes is decided by {@link publishableUsageFields}`(snapshot, rates,
+ * pricedFromCounts)`: `receipt.usage` and `llm_call.data.usage` are present exactly when
+ * these counts priced the call. For `trust()` that is exactly when the snapshot is
+ * provider-sourced, which this function answers. A headless settle also publishes a
+ * caller's own `"estimated"` counts that priced the call, which this function does not.
+ * A settle priced at the metered estimate publishes neither: a four-tier block of
+ * fabricated zeros beside it would invite an auditor to "recompute" a number that was
+ * never derived from tokens, and to conclude the call cost 1 usertoken.
  *
  * The returned object is a fresh copy, so a caller cannot hand the same
  * mutable snapshot to both the chain and the receipt and have a later mutation
@@ -502,6 +520,11 @@ export function implausibleUsageData(
  */
 export function publishableUsage(snapshot: NormalizedUsage): ReceiptUsage | undefined {
 	if (snapshot.source !== "provider") return undefined;
+	return usageBlock(snapshot);
+}
+
+/** The four tiers, as a fresh copy (`source` dropped: it is published as `usageSource`). */
+function usageBlock(snapshot: NormalizedUsage): ReceiptUsage {
 	return {
 		inputTokens: snapshot.inputTokens,
 		outputTokens: snapshot.outputTokens,
@@ -558,17 +581,25 @@ export function withSupported1hTier(
 }
 
 /**
- * The record fields a PUBLISHABLE snapshot adds to a chain event or receipt: the
- * four-tier `usage` block and, only when the call wrote 1-hour cache, the root
- * `cacheWrite1h` record. ONE function so the four emission sites cannot disagree
- * about either; both are absent for an estimated snapshot.
+ * The record fields a settle adds to its chain event and receipt: the four-tier `usage`
+ * block and, only when the call wrote 1-hour cache, the root `cacheWrite1h` record. ONE
+ * function so the emission sites cannot disagree about either.
+ *
+ * Published exactly when these counts PRICED the call (`pricedFromCounts`), whatever the
+ * call's `usageSource` label: then `cost` recomputes from them and `pricing.appliedRates`,
+ * and leaving them out makes the record unable to reproduce its own cost. A call priced at
+ * the metered estimate (no counts, or counts refused as implausible) publishes neither, since
+ * nothing tokens-based produced its cost. Each caller says which it is: govern prices only
+ * provider-sourced counts (`snapshot.source === "provider"`); headless also prices a caller's
+ * counts it labels `"estimated"`, which stays the provenance label.
  */
 export function publishableUsageFields(
 	snapshot: NormalizedUsage,
 	rates: ModelRates,
+	pricedFromCounts: boolean,
 ): { usage?: ReceiptUsage; cacheWrite1h?: CacheWrite1h } {
-	const usage = publishableUsage(snapshot);
-	if (usage === undefined) return {};
+	if (!pricedFromCounts) return {};
+	const usage = usageBlock(snapshot);
 	// The 1-hour rate published is the one THIS call's prompt tier priced it at (a
 	// `longPrompt` row), from the same counts the cost used.
 	const cacheWrite1h = resolveCacheWrite1h(

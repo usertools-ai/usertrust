@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A headless settle whose caller labels its own counts `"estimated"` now records them.** `createGovernor().settle(auth, { inputTokens, outputTokens, …, usageSource: "estimated" })` has always priced the call from those counts, but its receipt and `llm_call` event left out `usage` (and `cacheWrite1h`), so the record could not reproduce its own `cost` from `pricing.appliedRates`. Both are now published whenever the counts priced the call, under either label, and `usageSource` stays the caller's label. They are still absent when the cost is the metered pre-call estimate (no counts, or counts refused as implausible), and when an input or output count was non-finite, negative or non-numeric. An input or output the caller leaves out while reporting others is 0, as before: it is priced and now published as 0 under either label. A reader that took a present `usage` to mean `usageSource: "provider"` should read `usageSource` for provenance. `trust()` is unchanged: it prices only provider-reported counts.
+
 ### Fixed
 
 - **The ledger client's 30 s health check no longer piles up requests while the ledger is unreachable.** Each tick looked up the treasury whether or not the previous lookup had been answered. tigerbeetle-node has no request timeout, and a request the cluster never answers stays queued in the native client, so an outage added one queued request (and its callback) every 30 s for as long as it lasted. A tick now submits nothing while the previous check is still outstanding. `ping()` itself is unchanged.
