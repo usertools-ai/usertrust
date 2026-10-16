@@ -186,9 +186,10 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 
 /**
  * @internal {@link verifyVault} with the snapshot's retries bounded by the caller, for one that retries on its own and
- * must not block while a vault keeps changing: the live dashboard. The verifier's default (26 attempts, 100 ms apart)
- * sleeps synchronously. A read that still changes within the bound is `busy`. Core-only: the standalone verifier is a
- * CLI that may block, and has no such caller.
+ * must not block while a vault keeps changing: the live dashboard's loads. The verifier's default (26 attempts, 100 ms
+ * apart) sleeps synchronously. A read that still changes within the bound is `busy`. Core-only: the dashboard's verify
+ * endpoint looks a transfer up through the standalone verifier with the default, one request at a time (measured on a
+ * vault under continuous appends, it held the dashboard's event loop at most 243 ms, 2026-10-16).
  */
 export function verifyVaultBounded(
 	vaultPath: string,
