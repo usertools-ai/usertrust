@@ -11,13 +11,17 @@ export interface HookRunResult {
 	/** The hook process's pid: the parent, when a configured session's hook runs as a child. */
 	pid: number | undefined;
 	/**
-	 * The SessionEnd deadline in force for this run, in ms from spawn
-	 * (`CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`), or undefined when none applies.
+	 * The SessionEnd deadline in force for this run, in ms from spawn: the run's
+	 * `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` when it carries a readable one, else the host's
+	 * default of 1,500 ms. Undefined for any other hook.
 	 */
 	hostDeadlineMs: number | undefined;
 	/**
-	 * True when `runHook` killed the hook at that deadline, as Claude Code does. What a test
-	 * asserts of such a run's records is an exit a real host never lets the hook reach.
+	 * True when `runHook` sent the kill at that deadline, as Claude Code does, AND the hook
+	 * ended by it (`endedBySignal`). Never true merely because the deadline timer fired: a
+	 * test runner busy past the deadline runs that timer before the `close` of a hook that
+	 * exited long before, and that hook was not killed. What a test asserts of a killed run's
+	 * records is an exit a real host never lets the hook reach.
 	 */
 	killedAtHostDeadline: boolean;
 }
@@ -40,18 +44,54 @@ export function assertNotKilledAtHostDeadline(result: HookRunResult): HookRunRes
 const KILL_GRACE_MS = 1_000;
 
 /**
- * The deadline Claude Code enforces on a SessionEnd hook, from the env the hook runs with.
- * The same reading as the hook's (lib.mjs `sessionEndBudgetMs`): digits only, else no
- * variable. Only a value the variable carries is enforced; an absent or unreadable one
- * leaves the host's own 1.5 s default, which this harness does not apply.
+ * Whether a run ended BECAUSE of a signal the harness sent, read from how it ended, never from
+ * the deadline timer having fired. There are two ways the hook's process ends by a signal:
+ * - The process the harness spawned dies by it: `close` reports that signal (an unconfigured
+ *   session, whose launcher runs the hook itself and has no handler; any SIGKILL; a SIGTERM
+ *   that lands before the launcher has installed its forwarding).
+ * - A configured session's launcher forwards SIGTERM to its child (launch.mjs). The child dies
+ *   by it, and the launcher then exits 0 with a gap, exactly as it does for a hook that
+ *   exited normally: its exit code and signal show nothing. The only observable is the line it
+ *   writes, `the hook's process failed (signal SIGTERM)` (childOutcome's reason, which it
+ *   also records as a gap), so that line is read here.
+ * A hook that had already exited when the timer ran leaves neither: the signal reached a
+ * process that was gone or a zombie, which is harmless.
+ */
+function endedBySignal(sent: ReadonlySet<string>, signal: string | null, stderr: string): boolean {
+	if (signal !== null && sent.has(signal)) return true;
+	for (const name of sent) {
+		if (stderr.includes(`the hook's process failed (signal ${name})`)) return true;
+	}
+	return false;
+}
+
+/**
+ * The host's default SessionEnd deadline, in ms from spawn. From Claude Code's hooks reference,
+ * https://code.claude.com/docs/en/hooks, section "SessionEnd": "SessionEnd hooks have a default
+ * timeout of 1.5 seconds. It applies when you exit, run `/clear`, or switch sessions with
+ * interactive `/resume`." and "Timeouts set on plugin-provided hooks don't raise the budget."
+ * Written from the documentation, not from the hook's own constant, so a drift in the hook's
+ * default cannot move the deadline the hook is tested against.
+ */
+export const HOST_SESSION_END_DEFAULT_MS = 1_500;
+
+/**
+ * The deadline Claude Code enforces on a SessionEnd hook, from the env the hook runs with:
+ * the value of `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` when it reads as one (digits only, the
+ * same reading as the hook's, lib.mjs `sessionEndBudgetMs`), else the host's default
+ * (`HOST_SESSION_END_DEFAULT_MS`) for a variable that is absent, empty or unreadable. Any other
+ * hook has no deadline here. The documentation gives the default only for a variable that is not
+ * set; it says nothing of an empty or unreadable value, and the harness assumes the host falls
+ * back to its default there too, as the hook itself does.
  */
 function hostDeadlineFor(script: string[], env: Record<string, string | undefined>) {
 	const isSessionEnd =
 		script.length === 2
 			? script[1] === "session-end"
 			: basename(script[0] ?? "") === "session-end.mjs";
+	if (!isSessionEnd) return undefined;
 	const raw = env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS ?? "";
-	return isSessionEnd && /^[0-9]{1,9}$/.test(raw) ? Number(raw) : undefined;
+	return /^[0-9]{1,9}$/.test(raw) ? Number(raw) : HOST_SESSION_END_DEFAULT_MS;
 }
 
 const HOOKS = join(import.meta.dirname, "..", "..", "hooks");
@@ -108,10 +148,16 @@ export function forgetPins(env: Record<string, string>): void {
  *   launch.mjs's path (another test-only `--import` preload, say).
  * - `timeoutMs`, when given, kills a hook that runs longer (exit code 1): a test of a
  *   hook that must never hang reports the hang as a failure instead of hanging itself.
- * - SessionEnd's host deadline is enforced as Claude Code enforces it: when the run's env
- *   carries `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`, a session-end hook still running that
- *   many ms after spawn is killed (SIGTERM, then SIGKILL), and the result says so
- *   (`killedAtHostDeadline`, with the deadline in `hostDeadlineMs`). The earlier of that and
+ * - `hooksDir`, when given, runs that directory's launch.mjs for the hook named by `hookPath`'s
+ *   file name instead of the plugin's own: a test's copy of the hooks, in which one hook is a
+ *   stand-in (a hook that stays running, for a path the real one is built never to take).
+ * - SessionEnd's host deadline is enforced as Claude Code enforces it: a session-end hook
+ *   still running `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` ms after spawn is killed (SIGTERM,
+ *   then SIGKILL), or the host's default of 1,500 ms when the run's env leaves the variable
+ *   absent, empty or unreadable, and the result says so
+ *   (`killedAtHostDeadline`, with the deadline in `hostDeadlineMs`), but only when the hook
+ *   ended by that kill (`endedBySignal`): a hook that exited before a busy runner ran the
+ *   deadline timer is not reported killed. The earlier of that and
  *   `timeoutMs` applies. A test of a SessionEnd exit passes the result through
  *   `assertNotKilledAtHostDeadline`, so a path a real host kills cannot pass on its records.
  */
@@ -120,7 +166,7 @@ export function runHook(
 	input: unknown,
 	env: Record<string, string>,
 	nodeArgs: string[] = [],
-	{ timeoutMs }: { timeoutMs?: number } = {},
+	{ timeoutMs, hooksDir }: { timeoutMs?: number; hooksDir?: string } = {},
 ): Promise<HookRunResult> {
 	const inherited = Object.fromEntries(
 		Object.entries(process.env).filter(
@@ -128,9 +174,11 @@ export function runHook(
 		),
 	);
 	const script =
-		dirname(hookPath) === HOOKS && basename(hookPath) !== "launch.mjs"
-			? [LAUNCH, basename(hookPath, ".mjs")]
-			: [hookPath];
+		hooksDir !== undefined
+			? [join(hooksDir, "launch.mjs"), basename(hookPath, ".mjs")]
+			: dirname(hookPath) === HOOKS && basename(hookPath) !== "launch.mjs"
+				? [LAUNCH, basename(hookPath, ".mjs")]
+				: [hookPath];
 	const preload = nodeArgs.includes(PASSWD_HOME_PRELOAD) ? [] : ["--import", PASSWD_HOME_PRELOAD];
 	const hostDeadlineMs = hostDeadlineFor(script, { ...inherited, ...env });
 	// The earlier of the host's deadline and the caller's own: the host's is ours to enforce
@@ -151,13 +199,16 @@ export function runHook(
 			stdio: ["pipe", "pipe", "pipe"],
 			...(timeoutMs === undefined || hostFirst ? {} : { timeout: timeoutMs }),
 		});
-		let killedAtHostDeadline = false;
+		const sent = new Set<string>();
 		let hardKill: NodeJS.Timeout | undefined;
 		const hostKill = hostFirst
 			? setTimeout(() => {
-					killedAtHostDeadline = true;
+					sent.add("SIGTERM");
 					child.kill("SIGTERM");
-					hardKill = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+					hardKill = setTimeout(() => {
+						sent.add("SIGKILL");
+						child.kill("SIGKILL");
+					}, KILL_GRACE_MS);
 				}, hostDeadlineMs)
 			: undefined;
 		let stdout = "";
@@ -171,7 +222,7 @@ export function runHook(
 			stderr += chunk;
 		});
 		child.on("error", reject);
-		child.on("close", (code) => {
+		child.on("close", (code, signal) => {
 			clearTimeout(hostKill);
 			clearTimeout(hardKill);
 			resolve({
@@ -180,7 +231,7 @@ export function runHook(
 				stderr,
 				pid: child.pid,
 				hostDeadlineMs,
-				killedAtHostDeadline,
+				killedAtHostDeadline: endedBySignal(sent, signal, stderr),
 			});
 		});
 		child.stdin.write(JSON.stringify(input));

@@ -16,7 +16,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
 import { assertNotKilledAtHostDeadline, forgetPins, runHook } from "./helpers/run-hook.js";
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
@@ -1847,17 +1847,149 @@ describe("SessionEnd's one exit sweep: whatever the exit, what it selected and d
 		);
 
 		it(
-			"applies to SessionEnd and only when the run carries the variable",
+			"applies to SessionEnd alone: the host's 1,500 ms default when the run carries no readable variable, the variable's own value when it does",
 			async () => {
 				await backdate();
 				await writeLines(main(), []);
 				const plain = await runHook(join(HOOKS, "session-end.mjs"), seInput(), envFor());
-				expect(plain.hostDeadlineMs).toBeUndefined();
+				expect(plain.hostDeadlineMs).toBe(1_500);
+				expect(plain.killedAtHostDeadline).toBe(false);
+				const unreadable = await runHook(
+					join(HOOKS, "session-end.mjs"),
+					seInput(),
+					envFor({ CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "1.5s" }),
+				);
+				expect(unreadable.hostDeadlineMs).toBe(1_500);
 				const stop = await runHook(join(HOOKS, "stop.mjs"), stopInput(), envFor(seBudget(1_200)));
 				expect(stop.hostDeadlineMs).toBeUndefined();
+				const stopPlain = await runHook(join(HOOKS, "stop.mjs"), stopInput(), envFor());
+				expect(stopPlain.hostDeadlineMs).toBeUndefined();
 				const ended = await run("session-end", seInput(), seBudget(1_200));
 				expect(ended.hostDeadlineMs).toBe(1_500);
 				expect(ended.killedAtHostDeadline).toBe(false);
+				const roomy = await run("session-end", seInput(), seBudget(2_700));
+				expect(roomy.hostDeadlineMs).toBe(3_000);
+			},
+			LONG,
+		);
+
+		it.each<[string, Record<string, string>]>([
+			["absent", {}],
+			["the empty string", { CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "" }],
+		])(
+			"a hook still running at the default deadline is killed there when the variable is %s",
+			async (_, variable) => {
+				await backdate();
+				await writeLines(main(), TWO());
+				const end = await runHook(
+					join(HOOKS, "session-end.mjs"),
+					seInput(),
+					envFor({
+						...variable,
+						UT_CC_FAULT: "__main.json|1|sleep 2500",
+						UT_CC_FAULT_LOG: faultLogPath(),
+					}),
+					["--import", FAULT_AT],
+				);
+				expect(end.hostDeadlineMs).toBe(1_500);
+				expect(end.killedAtHostDeadline).toBe(true);
+				expect(await faultLog()).toContain("FAULT sleep 2500\n");
+				expect(() => assertNotKilledAtHostDeadline(end)).toThrow(
+					/still running at the host deadline of 1500 ms/,
+				);
+			},
+			LONG,
+		);
+
+		// A configured session's launcher forwards the host's SIGTERM to its child and then exits 0 with
+		// a gap, so the run's exit code and signal show nothing of the kill: the only evidence is the
+		// launcher's stderr line. The real session-end hook is built never to outlast its budget
+		// (every read is non-blocking, every call is aborted, every wait is bounded) and the child
+		// runs with a clean environment, so no failpoint reaches it. The child here is therefore a
+		// stand-in session-end.mjs in a copy of the hooks, run by the copy's own launcher: the launcher
+		// is the real code (it spawns the stand-in as the child of a configured session), and the
+		// stand-in asks the server once, with the key only the config file holds, and then stays
+		// running far past the deadline.
+		it(
+			"a configured session whose hook is still running at the deadline is reported killed, though the launcher exits 0",
+			async () => {
+				const copy = nodeFs.realpathSync(await mkdtemp(join(tmpdir(), "utcc-end-hooks-")));
+				onTestFinished(() => nodeFs.rmSync(copy, { recursive: true, force: true }));
+				nodeFs.cpSync(HOOKS, copy, { recursive: true });
+				await writeFile(
+					join(copy, "session-end.mjs"),
+					[
+						'import { settings } from "./config.mjs";',
+						'import { requireLaunch } from "./lib.mjs";',
+						"requireLaunch();",
+						"const { url, key } = settings();",
+						'await fetch(url + "/v1/health", { headers: { authorization: "Bearer " + key } });',
+						"await new Promise((resolve) => setTimeout(resolve, 30_000));",
+						"",
+					].join("\n"),
+				);
+				const anchor = join(home, ".config", "usertrust");
+				await mkdir(anchor, { recursive: true });
+				await chmod(anchor, 0o700);
+				const config = join(anchor, "session.json");
+				await writeFile(
+					config,
+					JSON.stringify({ url, key: "the-configured-key", mode: "watch", stateDir }),
+				);
+				await chmod(config, 0o600);
+				const end = await runHook(
+					join(HOOKS, "session-end.mjs"),
+					seInput(),
+					{
+						TEST_PASSWD_HOME: home,
+						UT_CC_CONFIG: config,
+						CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "2000",
+					},
+					[],
+					{ hooksDir: copy },
+				);
+				// A CONFIGURED run whose child ran: the environment names no server, so the only way a
+				// request reaches this one, bearing the config file's key, is the child reading its pin.
+				expect(seen.map((request) => request.path)).toEqual(["/v1/health"]);
+				expect(seen[0]?.auth).toBe("Bearer the-configured-key");
+				// The launcher turned the kill into a gap and exited 0, so only its line shows it.
+				expect(end.code).toBe(0);
+				expect(end.stderr).toContain("the hook's process failed (signal SIGTERM)");
+				expect(end.hostDeadlineMs).toBe(2_000);
+				expect(end.killedAtHostDeadline).toBe(true);
+				expect(() => assertNotKilledAtHostDeadline(end)).toThrow(
+					/still running at the host deadline of 2000 ms/,
+				);
+			},
+			LONG,
+		);
+
+		// The runner's own event loop, busy past the deadline, runs the deadline timer BEFORE the
+		// `close` of a hook that exited at once. Killed is decided by how the hook ended. The hook
+		// here is a stub named session-end.mjs that exits without reading its input: the real one
+		// waits for its stdin to close, and the runner's loop, held busy, cannot close it, so the real
+		// hook would still be running at the deadline and be killed there, rightly.
+		const busyWait = (ms: number) => {
+			const until = Date.now() + ms;
+			while (Date.now() < until) {
+				/* hold the runner's event loop */
+			}
+		};
+		it.each<[string, Record<string, string>, number]>([
+			["unset (the 1,500 ms default)", {}, 2_000],
+			["set to a small value (1,000 ms)", seBudget(700), 1_700],
+		])(
+			"a hook that exited at once is not reported killed when the runner is busy past the deadline, with the variable %s",
+			async (_, variable, busyMs) => {
+				const stub = join(stateDir, "session-end.mjs");
+				await writeFile(stub, "process.exitCode = 0;\n");
+				const pending = runHook(stub, seInput(), envFor(variable));
+				busyWait(busyMs);
+				const end = await pending;
+				expect(end.hostDeadlineMs).toBeLessThan(busyMs);
+				expect(end.code).toBe(0);
+				expect(end.killedAtHostDeadline).toBe(false);
+				expect(() => assertNotKilledAtHostDeadline(end)).not.toThrow();
 			},
 			LONG,
 		);
