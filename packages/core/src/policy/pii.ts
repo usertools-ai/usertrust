@@ -38,9 +38,56 @@ interface PIIPattern {
 	test: (value: string) => boolean;
 }
 
-/** RFC 5322 simplified — local@domain.tld */
+/** `[a-zA-Z0-9]` by char code. */
+function isAsciiAlnum(c: number): boolean {
+	return (c >= 0x30 && c <= 0x39) || isAsciiLetter(c);
+}
+
+/** `[a-zA-Z]` by char code. */
+function isAsciiLetter(c: number): boolean {
+	return (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a);
+}
+
+/** The local-part class `[a-zA-Z0-9._%+-]`. */
+function isEmailLocalChar(c: number): boolean {
+	// . _ % + -
+	return isAsciiAlnum(c) || c === 0x2e || c === 0x5f || c === 0x25 || c === 0x2b || c === 0x2d;
+}
+
+/** The domain class `[a-zA-Z0-9.-]`. */
+function isEmailDomainChar(c: number): boolean {
+	return isAsciiAlnum(c) || c === 0x2e || c === 0x2d;
+}
+
+/**
+ * RFC 5322 simplified — local@domain.tld. Exactly what
+ * `/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/` matches, found from each `@` instead of from
+ * every position. That regex re-scanned the greedy local part from every start when no `@`
+ * followed, so one message of N separator-free characters took time in N squared (200k `x`
+ * characters: 26 s, on the event loop, before the hold).
+ *
+ * The pattern carries no boundary, so it matches as soon as ONE local character sits right before
+ * an `@` and the domain-class run after it holds a `.` (not its first character) followed by two
+ * letters. Both checks are made from the `@`: the local side reads one character, and the domain
+ * side reads the run after the `@`, which ends at the next `@` at the latest (`@` is not in the
+ * domain class), so no character is read by two domain scans and the whole scan is linear. Neither
+ * side is clipped to a length limit: a longer local part or domain matches today, and still does.
+ */
 function isEmail(value: string): boolean {
-	return /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(value);
+	for (let at = value.indexOf("@"); at !== -1; at = value.indexOf("@", at + 1)) {
+		if (at === 0 || !isEmailLocalChar(value.charCodeAt(at - 1))) continue;
+		for (let i = at + 1; i < value.length && isEmailDomainChar(value.charCodeAt(i)); i++) {
+			if (
+				i > at + 1 &&
+				value.charCodeAt(i) === 0x2e &&
+				isAsciiLetter(value.charCodeAt(i + 1)) &&
+				isAsciiLetter(value.charCodeAt(i + 2))
+			) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 /** US/international phone: +1-234-567-8901, (234) 567-8901, 234.567.8901, etc. */
@@ -136,9 +183,42 @@ function isBearerToken(value: string): boolean {
 	return /\bBearer\s+\S{20,}/.test(value);
 }
 
-/** JWT token: eyJ... header.payload.signature */
+/** Where a JWT can start: `eyJ` after a word boundary. */
+const JWT_START_RE = /\beyJ/g;
+
+/** A whole JWT, tried only at a start `JWT_START_RE` found (sticky). */
+const JWT_AT_RE = /eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/y;
+
+/** The segment class `[a-zA-Z0-9_-]`. */
+function isJwtSegmentChar(c: number): boolean {
+	return isAsciiAlnum(c) || c === 0x5f || c === 0x2d;
+}
+
+/**
+ * JWT token: eyJ... header.payload.signature. Exactly what
+ * `/\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/` matches. As one regex it
+ * was tried from every start, and a start's header ran to the end of its segment-class run before
+ * failing on the missing `.`; `-eyJ-eyJ-eyJ…` is one such run with a start every four characters,
+ * so it took time in N squared (1M characters: minutes).
+ *
+ * The header is the whole segment-class run after `eyJ`, because it must be followed by a `.`,
+ * which the class does not contain. Every later start inside that run therefore ends its header
+ * at the same `.` with a shorter header and the same payload and signature after it, so it fails
+ * whenever this start fails, and the search resumes at the end of the run. Each run is then read
+ * a bounded number of times (as a header, a payload, a signature), so the scan is linear.
+ */
 function isJwt(value: string): boolean {
-	return /\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/.test(value);
+	let from = 0;
+	for (;;) {
+		JWT_START_RE.lastIndex = from;
+		const start = JWT_START_RE.exec(value);
+		if (start === null) return false;
+		JWT_AT_RE.lastIndex = start.index;
+		if (JWT_AT_RE.test(value)) return true;
+		let end = start.index + 3;
+		while (end < value.length && isJwtSegmentChar(value.charCodeAt(end))) end++;
+		from = end;
+	}
 }
 
 /** PEM-encoded private key */

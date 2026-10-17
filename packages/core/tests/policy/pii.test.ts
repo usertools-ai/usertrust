@@ -1190,3 +1190,101 @@ describe("redactPII — signalSent: a request whose transport slot is never seri
 		expect(traps).toBe(0);
 	});
 });
+
+// ===========================================================================
+// The email scan, found from each "@" (linear in the message)
+// ===========================================================================
+
+describe("detectPII — email, found from each @", () => {
+	const hasEmail = (text: string): boolean => detectPII(text).types.includes("email");
+
+	it("finds real emails: plain, + % and dots in the local part, a subdomain, short and long TLDs", () => {
+		for (const email of [
+			"user@example.com",
+			"first.last+tag@example.com",
+			"user%relay@example.org",
+			"a.b.c@mail.eu.example.com",
+			"someone@example.io",
+			"someone@example.technology",
+		]) {
+			expect(hasEmail(`write to ${email} today`), email).toBe(true);
+		}
+	});
+
+	it("a local part of 64 characters is found, and so is one of 65: the pattern matches from the last local character before the @, so no length limit applies on that side (as before)", () => {
+		expect(hasEmail(`${"a".repeat(64)}@example.com`)).toBe(true);
+		expect(hasEmail(`${"a".repeat(65)}@example.com`)).toBe(true);
+		expect(hasEmail(`${"a".repeat(10_000)}@example.com`)).toBe(true);
+	});
+
+	it("a domain of 255 characters is found, and so is a longer one: the TLD is looked for along the whole domain run (as before)", () => {
+		const label = "a".repeat(63);
+		const domain255 = `${label}.${label}.${label}.${"a".repeat(59)}.com`;
+		expect(domain255.length).toBe(255);
+		expect(hasEmail(`u@${domain255}`)).toBe(true);
+		expect(hasEmail(`u@${"a".repeat(10_000)}.com`)).toBe(true);
+	});
+
+	it("an email at the very start and at the very end of the text", () => {
+		expect(hasEmail("a@b.co and then some text")).toBe(true);
+		expect(hasEmail("some text and then a@b.co")).toBe(true);
+		expect(hasEmail("a@b.co")).toBe(true);
+	});
+
+	it("two emails close together, and an @ that is not one before one that is", () => {
+		expect(hasEmail("a@b.co,c@d.co")).toBe(true);
+		expect(hasEmail("x@y z@example.com")).toBe(true);
+		expect(hasEmail("@@a@b.co")).toBe(true);
+		expect(hasEmail("a@@b.co")).toBe(false);
+	});
+
+	it("an @ with no valid domain is not an email", () => {
+		for (const text of [
+			"user@",
+			"user@localhost",
+			"user@.com",
+			"user@example.c",
+			"user@example.c0m",
+			"user@example.",
+			"user@-.x",
+			" @example.com",
+			"@example.com",
+			"user@ example.com",
+		]) {
+			expect(hasEmail(text), text).toBe(false);
+		}
+	});
+
+	it("the TLD needs two letters right after a dot, and nothing after them: a longer run still matches", () => {
+		expect(hasEmail("user@a.bc")).toBe(true);
+		expect(hasEmail("user@a.bc9")).toBe(true);
+		expect(hasEmail("user@a-b.cd-e")).toBe(true);
+		expect(hasEmail("user@a..bc")).toBe(true);
+		expect(hasEmail("user@a.b.c")).toBe(false);
+	});
+
+	it("an @ inside a long run of letters is not an email without a dotted domain, and is one with it", () => {
+		const run = "a".repeat(100_000);
+		expect(hasEmail(`${run}@${run}`)).toBe(false);
+		expect(hasEmail(`${run}@${run}.com${run}`)).toBe(true);
+	});
+});
+
+describe("detectPII — jwt", () => {
+	const hasJwt = (text: string): boolean => detectPII(text).types.includes("jwt");
+	const JWT =
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+
+	it("finds a JWT alone, in text, and after a run that holds other starts", () => {
+		expect(hasJwt(JWT)).toBe(true);
+		expect(hasJwt(`Authorization: ${JWT}.`)).toBe(true);
+		expect(hasJwt(`-eyJ-eyJ-eyJ ${JWT}`)).toBe(true);
+		expect(hasJwt(`-eyJ-eyJ-${JWT}`)).toBe(true);
+	});
+
+	it("does not find one with a short segment, a missing segment, or no boundary before eyJ", () => {
+		expect(hasJwt("eyJshort.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N")).toBe(false);
+		expect(hasJwt("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0")).toBe(false);
+		expect(hasJwt(`x${JWT}`)).toBe(false);
+	});
+});
