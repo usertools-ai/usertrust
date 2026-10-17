@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.4] - 2026-10-17
+
 ### Read before upgrading
 
 - **usertrust-server now refuses to start on a tenant vault its governor would refuse.** Before, such a vault showed up only as an opaque `500` on that tenant's first request, with no reason anywhere. These vaults are refused:
@@ -16,7 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - a path that is not a directory.
 
   The server now stops before its port opens and exits 1, writing `usertrust-server failed to start: tenant <id>: <reason>` to stderr. Before restarting on this version, check each tenant's `<stateDir>/<tenant>/.usertrust`, and fix any vault that line names. A loose real directory is still tightened to owner-only, as before.
+
 - **A tenant vault that does not exist yet is now created at start, owner-only, instead of on the tenant's first request.** A state directory the server cannot write to (read-only, say) now stops the start with the same `failed to start: tenant <id>: <reason>` line, instead of failing every request once the port is open.
+
+- **A settle that reports only some of input and output is priced at no less than the metered estimate.** An incomplete report costs max(metered estimate, its partial counts) and publishes no usage; report an explicit 0 for a count that is genuinely zero. Incomplete means `inputTokens` or `outputTokens` absent, non-finite, negative or non-numeric, or cache tiers alone; such a settle is labelled `usageSource: "estimated"` whatever label the caller gave. Before, a count left out was priced as 0: `createGovernor().settle(auth, { outputTokens: 500 })` cost the output alone, 44% under the call's true cost in the measured case, and a cache-only settle cost its cache tokens alone. Absent cache tiers still mean 0 (D5), and a report with both input and output usable is priced from its counts as before. This changes the headless governor's `settle()`, and through it usertrust-server's `POST /v1/settle` (whose `inputTokens` and `outputTokens` are optional) and acs-adapter's `CompositeEvaluator.settle()`, which passes its caller's usage through. In `trust()`, an Anthropic stream now counts as reported only once it has shown both an input and an output count: a stream cut before its `message_delta` (an error, or a consumer that stops reading, on `messages.create` streams and `messages.stream()` alike) settled with its output priced at 0 under a `"provider"` label, and now costs no less than the estimate. In `trust()`, a provider count that is present but not a count (a string, NaN, a negative) is refused, as before: the whole report is recorded as implausible and costs the estimate exactly, even when its other counts are usable. Any other `trust()` settle without a complete provider report now also costs no less than its usable counts, so a large cache read with no output is never priced below what it shows.
+
+- **A headless settle whose caller labels its own counts `"estimated"` now records them.** `createGovernor().settle(auth, { inputTokens, outputTokens, …, usageSource: "estimated" })` has always priced the call from those counts, but its receipt and `llm_call` event left out `usage` (and `cacheWrite1h`), so the record could not reproduce its own `cost` from `pricing.appliedRates`. Both are now published whenever the counts priced the call, under either label, and `usageSource` stays the caller's label. They are still absent when the cost is the metered pre-call estimate (no counts, or counts refused as implausible), and for a report missing input or output (see the entry above). A reader that took a present `usage` to mean `usageSource: "provider"` should read `usageSource` for provenance. `trust()` is unchanged: it prices only provider-reported counts.
 
 ### Fixed
 
@@ -38,9 +45,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **usertrust-server's README now says which secrets its internal-error log line redacts, and which it does not.** It redacts the caller's own bearer key, any `Bearer` token and any `x-api-key`, `api-key` or `api_key` value. Any other secret a reason quotes, such as a password, is logged as it is.
 
-- **A settle that reports only some of input and output is priced at no less than the metered estimate.** An incomplete report costs max(metered estimate, its partial counts) and publishes no usage; report an explicit 0 for a count that is genuinely zero. Incomplete means `inputTokens` or `outputTokens` absent, non-finite, negative or non-numeric, or cache tiers alone; such a settle is labelled `usageSource: "estimated"` whatever label the caller gave. Before, a count left out was priced as 0: `createGovernor().settle(auth, { outputTokens: 500 })` cost the output alone, 44% under the call's true cost in the measured case, and a cache-only settle cost its cache tokens alone. Absent cache tiers still mean 0 (D5), and a report with both input and output usable is priced from its counts as before. This changes the headless governor's `settle()`, and through it usertrust-server's `POST /v1/settle` (whose `inputTokens` and `outputTokens` are optional) and acs-adapter's `CompositeEvaluator.settle()`, which passes its caller's usage through. In `trust()`, an Anthropic stream now counts as reported only once it has shown both an input and an output count: a stream cut before its `message_delta` (an error, or a consumer that stops reading, on `messages.create` streams and `messages.stream()` alike) settled with its output priced at 0 under a `"provider"` label, and now costs no less than the estimate. In `trust()`, a provider count that is present but not a count (a string, NaN, a negative) is refused, as before: the whole report is recorded as implausible and costs the estimate exactly, even when its other counts are usable. Any other `trust()` settle without a complete provider report now also costs no less than its usable counts, so a large cache read with no output is never priced below what it shows.
+### Known issues
 
-- **A headless settle whose caller labels its own counts `"estimated"` now records them.** `createGovernor().settle(auth, { inputTokens, outputTokens, …, usageSource: "estimated" })` has always priced the call from those counts, but its receipt and `llm_call` event left out `usage` (and `cacheWrite1h`), so the record could not reproduce its own `cost` from `pricing.appliedRates`. Both are now published whenever the counts priced the call, under either label, and `usageSource` stays the caller's label. They are still absent when the cost is the metered pre-call estimate (no counts, or counts refused as implausible), and for a report missing input or output (see the entry above). A reader that took a present `usage` to mean `usageSource: "provider"` should read `usageSource` for provenance. `trust()` is unchanged: it prices only provider-reported counts.
+These remain open in this release:
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold, or with an authorize still reserving, can exit before ending it: the hold or reservation may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+
+- An eviction learned in the instant between a governor's shutdown request and the `destroy()` that follows it (no `await` between them) still aborts the process. The voids, audit flush and lock release have already run. What is lost is the exit status (134, which a supervisor reads as a crash) and anything the process does after `destroy()`.
+
+- `GET /v1/health` still reports `ok` while the ledger is down, so a monitor cannot read an outage from health in this release. Read the `503 ledger_unavailable` answers on `POST /v1/authorize` instead.
+
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound during an outage, and complete when it returns. `ledgerTimeoutMs` applies to `POST /v1/authorize` only.
+
+- An authorize that ends without a ledger reply (an evicted client session) may still have reserved, and that reservation expires at the hold timeout (300 seconds).
+
+- A tenant's authorizes are served one at a time, so a burst counts against `ledgerTimeoutMs` too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, the default 5 s deadline was reached at roughly 350 concurrent authorizes for one tenant, and a slower or remote ledger reaches it sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
+
+- A `TrustTBClient` whose session the cluster evicted while it was idle still aborts the process when `TrustTBClient.destroy()` is called directly on it, with no request since. Make one ledger request before `destroy()`, or end the process with `process.exit()` without calling `destroy()`.
+
+- A process that holds an evicted ledger client it has dropped does not exit on its own after `destroy()`. End such a process with `process.exit()` after `destroy()`.
+
+- A Google request field that only your client's `@google/genai` version reads is not sent. Keep the `@google/genai` that usertrust resolves at the same version as your client's.
+
+- In `trust()`, a provider count that is present but not a count (a string, NaN or a negative) still costs the estimate exactly, even when the call's other counts are usable.
+
+This list is not complete. LIMITATIONS.md gives the full account: section 13, "A ledger-backed server refuses authorizes while its ledger is unreachable, health still reports `ok`, and a hold it releases on SIGINT or SIGTERM may not be audited", and section 14, "A ledger client the cluster evicted cannot be released, and keeps its process from exiting on its own".
 
 ## [5.0.3] - 2026-10-14
 

@@ -7,6 +7,8 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+## [3.0.3] - 2026-10-17
+
 ### Fixed
 
 - **A `503 ledger_unavailable` at PreToolUse is tried once more before it counts as an outage.**
