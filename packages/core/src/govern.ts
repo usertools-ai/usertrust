@@ -4816,13 +4816,19 @@ function readFinalMessageUsage(msg: unknown): {
 					implausibleBy: cacheTiers.implausibleBy,
 				};
 			}
-			// No usable headline counts: the cache readings are still reported, so an absurd tier is not lost.
+			// No usable headline counts: not reported (that is decided from input and output seen), but each
+			// usable cache tier is returned exactly as the branch above returns it, so a finalMessage that
+			// carries only cache counts still reaches the settle, where an incomplete report costs
+			// max(estimate, its counts). An absurd tier's reading is kept in `implausible`, so it is not lost.
 			return {
 				inputTokens: undefined,
 				outputTokens: undefined,
-				cacheReadTokens: undefined,
-				cacheWriteTokens: undefined,
-				cacheWrite1hTokens: undefined,
+				cacheReadTokens: readUsable ? cacheTiers.cacheReadTokens : undefined,
+				cacheWriteTokens: writeUsable ? cacheTiers.cacheWriteTokens : undefined,
+				cacheWrite1hTokens:
+					oneHourUsable || (cacheTiers.cacheWrite1hTokens ?? 0) > 0
+						? (cacheTiers.cacheWrite1hTokens ?? 0)
+						: undefined,
 				reported: false,
 				implausible: cacheTiers.implausible,
 				implausibleBy: cacheTiers.implausibleBy,

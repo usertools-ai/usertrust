@@ -1756,6 +1756,40 @@ describe("messages.stream: an incomplete report never prices below the metered e
 		});
 	});
 
+	it("a finalMessage with ONLY a cache read, and no stream events, prices the read (max picks the counts)", async () => {
+		const estimate = await estimateOnlyCost(tmpVault);
+		const receipt = await streamReceipt({
+			events: [],
+			final: { id: "msg_1", usage: { cache_read_input_tokens: 1_000_000 } },
+		});
+		const counts = costFromRatesFor(0, 0, 1_000_000);
+		expect(counts).toBeGreaterThan(estimate);
+		expect(receipt.cost).toBe(counts);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Object.hasOwn(receipt, "usage")).toBe(false);
+	});
+
+	it("a finalMessage with ONLY a cache write, and no stream events, prices the write above the estimate", async () => {
+		const estimate = await estimateOnlyCost(tmpVault);
+		const receipt = await streamReceipt({
+			events: [],
+			final: { id: "msg_1", usage: { cache_creation_input_tokens: 1_000_000 } },
+		});
+		expect(receipt.cost).toBeGreaterThan(estimate);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Object.hasOwn(receipt, "usage")).toBe(false);
+	});
+
+	it("CONTROL: a finalMessage with only an ABSURD cache read prices at the estimate exactly", async () => {
+		const estimate = await estimateOnlyCost(tmpVault);
+		const receipt = await streamReceipt({
+			events: [],
+			final: { id: "msg_1", usage: { cache_read_input_tokens: 2e9 } },
+		});
+		expect(receipt.cost).toBe(estimate);
+		expect(receipt.usageSource).toBe("estimated");
+	});
+
 	it("CONTROL: a finalMessage with input and output prices from the counts", async () => {
 		const receipt = await streamReceipt({ events: PROVIDER_EVENTS, final: PROVIDER_FINAL });
 		expect(receipt.cost).toBe(costFromRatesFor(100, 30));
