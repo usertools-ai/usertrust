@@ -181,9 +181,11 @@ settle-then-void leaving the ledger holding a debit its accounting does not.
 
 **The settle/void asymmetry is deliberate. Do not "make it consistent."**
 - Usage-extraction failure *after a successful provider call* settles at the estimate, never voids.
-- A clean SSE close with no `message_stop` settles at the estimate rather than dangling.
+- A clean SSE close with no `message_stop` settles rather than dangling: at no less than the
+  estimate, nor than the counts the stream showed.
 - A consumer-initiated abort settles the partial; it does **not** void, and must **not** record a
-  circuit-breaker failure.
+  circuit-breaker failure. A partial that lacks input or output is an incomplete report: it costs
+  max(metered estimate, its counts) and publishes no `usage`.
 - A governance anomaly cutoff voids.
 - A post-commit `failClosed` throw must **not** void an already-posted transfer.
 
