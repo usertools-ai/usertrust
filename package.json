@@ -20,12 +20,12 @@
 		"typecheck:types": "tsc -p packages/core/tsconfig.type-tests.json"
 	},
 	"devDependencies": {
-		"@anthropic-ai/sdk": "^0.116.0",
-		"@biomejs/biome": "^2.5.7",
-		"@types/node": "^26.2.0",
+		"@anthropic-ai/sdk": "^0.133.0",
+		"@biomejs/biome": "^2.5.15",
+		"@types/node": "^26.6.5",
 		"@vitest/coverage-v8": "^4.1.0",
-		"openai": "^7.4.0",
-		"tsx": "^4.23.11",
+		"openai": "^7.32.0",
+		"tsx": "^4.23.15",
 		"typescript": "^5.9.0",
 		"vitest": "^4.0.0"
 	},
