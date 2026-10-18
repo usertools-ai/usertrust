@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.5] - 2026-10-18
+
+### Read before upgrading
+
+- **A request that holds one of the newly recognised secrets is now refused under `pii: "block"` and redacted under `pii: "redact"`; before, it passed unchanged.** Under the default `pii: "warn"` it is now reported. These are the formats listed under Fixed: GitHub fine-grained and user access tokens and stateless installation tokens, AWS `ASIA` key ids, Stripe restricted and organization keys, Slack app-level, workflow and refresh tokens, GitLab's other token types, SendGrid keys whose first part ends in dashes, and a dashed card beside its expiry.
+
+- **Digits joined to a word are no longer read as a phone number, and neither is a group of 16 or more digits.** A tool call id such as `toolu_1234567890123abc`, a reference such as `ref-5558675309z`, or an order id of 20 digits was reported as a phone. A request whose only match was such a value was refused under `pii: "block"` and had it replaced under `pii: "redact"`; it now passes unchanged. A number dialled with an international access prefix (`0114915123456789`) is still a phone.
+
 ### Fixed
 
 - **PII detection no longer misses a value that sits beside one it rejects, and no longer reads digits inside an identifier as a phone number.** Four checks are fixed, and each still takes time proportional to the message:
@@ -36,6 +44,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - GitLab's token types other than `glpat-`: `gloas-`, `gldt-`, `glrt-`, `glrtr-`, `glcbt-`, `glptt-`, `glft-`, `glimt-`, `glagent-`, `glwt-`, `glsoat-` and `glffct-`.
 
   A token of a newly recognised type must hold a capital letter after its prefix, as a real token's random characters almost surely do, so a lowercase name that only starts like one (`glrt-runner-registration-walkthrough`, `sk_org_settings_for_the_dashboard`) is not a secret. The formats that were already detected are still detected: classic GitHub tokens, `AKIA`, `sk_live_` and `sk_test_`, `xoxb-` and `xoxp-`, `glpat-`, `npm_`, SendGrid's `SG.`, Anthropic and OpenAI `sk-` keys, PEM private keys, JWTs and bearer tokens. Each one now has a test in the format its provider documents. OpenAI publishes no format, so its test uses the `sk-proj-` prefix that OpenAI's dashboard issues.
+
+### Known issues
+
+These remain open in this release:
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold, or with an authorize still reserving, can exit before ending it: the hold or reservation may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+
+- An eviction learned in the instant between a governor's shutdown request and the `destroy()` that follows it (no `await` between them) still aborts the process. The voids, audit flush and lock release have already run. What is lost is the exit status (134, which a supervisor reads as a crash) and anything the process does after `destroy()`.
+
+- `GET /v1/health` still reports `ok` while the ledger is down, so a monitor cannot read an outage from health in this release. Read the `503 ledger_unavailable` answers on `POST /v1/authorize` instead.
+
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound during an outage, and complete when it returns. `ledgerTimeoutMs` applies to `POST /v1/authorize` only.
+
+- An authorize that ends without a ledger reply (an evicted client session) may still have reserved, and that reservation expires at the hold timeout (300 seconds).
+
+- A tenant's authorizes are served one at a time, so a burst counts against `ledgerTimeoutMs` too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, the default 5 s deadline was reached at roughly 350 concurrent authorizes for one tenant, and a slower or remote ledger reaches it sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
+
+- A `TrustTBClient` whose session the cluster evicted while it was idle still aborts the process when `TrustTBClient.destroy()` is called directly on it, with no request since. Make one ledger request before `destroy()`, or end the process with `process.exit()` without calling `destroy()`.
+
+- A process that holds an evicted ledger client it has dropped does not exit on its own after `destroy()`. End such a process with `process.exit()` after `destroy()`.
+
+- A Google request field that only your client's `@google/genai` version reads is not sent. Keep the `@google/genai` that usertrust resolves at the same version as your client's.
+
+- In `trust()`, a provider count that is present but not a count (a string, NaN or a negative) still costs the estimate exactly, even when the call's other counts are usable.
+
+This list is not complete. LIMITATIONS.md gives the full account: section 13, "A ledger-backed server refuses authorizes while its ledger is unreachable, health still reports `ok`, and a hold it releases on SIGINT or SIGTERM may not be audited", and section 14, "A ledger client the cluster evicted cannot be released, and keeps its process from exiting on its own".
 
 ## [5.0.4] - 2026-10-17
 
