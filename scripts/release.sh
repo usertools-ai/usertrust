@@ -440,12 +440,20 @@ expected_version() {
 # The release's CHANGELOG section, read as data from CHANGELOG.md (argv[1]): [Unreleased] must
 # hold no entry (everything is cut into the release's section before dispatch), and the section
 # under it, `## [<version>] - <date>`, must hold at least one entry under a class heading. Prints
-# "<version> <class>", the class being the highest among its entries'. A heading that is not a
-# class or a note, or an entry under no heading, is refused: an unknown heading could otherwise
-# hide an entry from the count. An entry is a list item of any Markdown marker (`-`, `*`, `+`,
-# `1.`, `1)`) at the line's start; one indented by up to three spaces is accepted only under an
-# entry, as its sub-item, and refused anywhere else, so no entry is silently not counted. The
-# classes are docs/releasing.md's "Choosing the version".
+# "<version> <class>", the class being the highest among its entries'. It DENIES BY DEFAULT: a
+# line it cannot place is refused, never skipped, so no entry can hide from the count.
+# - An entry is a list item of any Markdown marker (`-`, `*`, `+`, `1.`, `1)`) at the line's
+#   start. An indented line is accepted only under an entry (its continuation or sub-item).
+# - Under a class heading, every other line is refused: a quote, HTML, prose, an indented item
+#   under no entry. A class heading with no entry is refused.
+# - Anywhere in [Unreleased] and the release's section, a line that reads as a heading but is not
+#   a `### ` class or note heading (`####`, `###Removed`, an indented `#`), a setext underline
+#   (`---`, `===`), a line that is only a class or note name in emphasis or HTML
+#   (`**Removed**`), and a `## ` line that is not the next version's header are refused.
+# - A note's text, and text that opens the section before its first heading, is free but for
+#   those lines; an entry under a note counts as no class, and one under no heading is refused.
+#   A link reference definition (`[1.0.0]: <url>`) is accepted anywhere.
+#   The classes are docs/releasing.md's "Choosing the version".
 CHANGELOG_PY='
 import re, sys
 CLASSES = {
@@ -454,13 +462,29 @@ CLASSES = {
     "Fixed": "patch", "Security": "patch", "Dependencies": "patch",
 }
 NOTES = {"Read before upgrading", "Known issues"}
+NAMES = {n.lower() for n in list(CLASSES) + list(NOTES)}
 RANK = {"patch": 1, "minor": 2, "major": 3}
 ENTRY = re.compile(r"(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
 NESTED = re.compile(r" {1,3}(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
+VERSION = re.compile(r"\[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}")
+ATX = re.compile(r"[ \t]{0,3}#")
+SETEXT = re.compile(r"[ \t]{0,3}(?:=+|-+)[ \t]*")
+LINK_REF = re.compile(r"\[[^\]]+\]:[ \t]+\S+.*")
 
 def fail(msg):
     print(msg, file=sys.stderr)
     sys.exit(1)
+
+def bare(line):
+    return re.sub(r"[\s*_`#:>]+", " ", re.sub(r"<[^>]*>", " ", line)).strip().lower()
+
+def refuse_disguised(where, line):
+    if ATX.match(line) and not line.startswith("### "):
+        fail("%s has a line that reads as a heading but is not a ### heading: \"%s\". Use \"### <class>\" (docs/releasing.md, \"Cutting the CHANGELOG\")." % (where, line.strip()))
+    if SETEXT.fullmatch(line):
+        fail("%s has a line \"%s\", which would make the line above it a heading. Use \"### <class>\"." % (where, line.strip()))
+    if not ENTRY.match(line) and not line.startswith("### ") and bare(line) in NAMES:
+        fail("%s has a line that names a heading but is not one: \"%s\". Use \"### <class>\"." % (where, line.strip()))
 
 lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
 sections = []
@@ -474,36 +498,54 @@ if not sections or sections[0][0] != "[Unreleased]":
 left = [l for l in sections[0][1] if ENTRY.match(l) or NESTED.match(l)]
 if left:
     fail("[Unreleased] still holds %d entr%s. Cut every entry into the release section before dispatching (docs/releasing.md, \"Cutting the CHANGELOG\")." % (len(left), "y" if len(left) == 1 else "ies"))
+for line in sections[0][1]:
+    if line.strip() == "":
+        continue
+    refuse_disguised("[Unreleased]", line)
+    if not line.startswith("### ") or line[4:].strip() not in CLASSES and line[4:].strip() not in NOTES:
+        fail("[Unreleased] holds a line that is not a class or note heading: \"%s\". Cut it into the release section, or remove it." % line.strip())
 if len(sections) < 2:
     fail("CHANGELOG.md has no section under [Unreleased] to release.")
-m = re.fullmatch(r"\[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}", sections[1][0])
+m = VERSION.fullmatch(sections[1][0])
 if not m:
     fail("The section under [Unreleased] is \"## %s\", not \"## [major.minor.patch] - YYYY-MM-DD\"." % sections[1][0])
+where = "The %s section" % m.group(1)
+if len(sections) > 2 and not VERSION.fullmatch(sections[2][0]):
+    fail("%s is followed by \"## %s\", which is not a version\x27s section. A ## line ends the section, so its entries would not be counted; use \"### <class>\"." % (where, sections[2][0]))
 heading, best, counts, under = None, None, [], False
 for line in sections[1][1]:
+    if line.strip() == "":
+        continue
+    refuse_disguised(where, line)
     if line.startswith("### "):
         heading, under = line[4:].strip(), False
         if heading not in CLASSES and heading not in NOTES:
-            fail("The %s section has a heading \"%s\", which is neither a class (%s) nor a note (%s)." % (m.group(1), heading, ", ".join(CLASSES), ", ".join(sorted(NOTES))))
+            fail("%s has a heading \"%s\", which is neither a class (%s) nor a note (%s)." % (where, heading, ", ".join(CLASSES), ", ".join(sorted(NOTES))))
         if heading in CLASSES:
             counts.append([heading, 0])
     elif NESTED.match(line):
         if not under:
-            fail("The %s section has an indented entry that is not under an entry: \"%s\". Start an entry at the line\x27s start." % (m.group(1), line.strip()))
+            fail("%s has an indented entry that is not under an entry: \"%s\". Start an entry at the line\x27s start." % (where, line.strip()))
     elif ENTRY.match(line):
         if heading is None:
-            fail("The %s section has an entry under no ### heading." % m.group(1))
+            fail("%s has an entry under no ### heading." % where)
         under = True
         if heading in CLASSES:
             counts[-1][1] += 1
             c = CLASSES[heading]
             if best is None or RANK[c] > RANK[best]:
                 best = c
+    elif LINK_REF.fullmatch(line):
+        continue
+    elif heading in CLASSES and (line[0] not in " \t" or not under):
+        fail("%s has a line under ### %s that is not an entry, nor indented under one: \"%s\". Every entry is a list item at the line\x27s start, so that it is counted." % (where, heading, line.strip()))
 if best is None:
-    fail("The %s section is empty: it has no entry under %s." % (m.group(1), ", ".join(CLASSES)))
+    fail("%s is empty: it has no entry under %s." % (where, ", ".join(CLASSES)))
 for h, n in counts:
-    if n:
-        print("%s: %d entr%s (%s)" % (h, n, "y" if n == 1 else "ies", CLASSES[h]), file=sys.stderr)
+    if n == 0:
+        fail("%s has a ### %s heading with no entry under it. Remove the heading, or write its entries as list items at the line\x27s start." % (where, h))
+for h, n in counts:
+    print("%s: %d entr%s (%s)" % (h, n, "y" if n == 1 else "ies", CLASSES[h]), file=sys.stderr)
 print(m.group(1), best)
 '
 
@@ -1465,19 +1507,33 @@ assert_npm() {
 	echo "npm ${npmv} >= ${NPM_FLOOR} and node ${nodev} >= ${NODE_FLOOR}: npm uses trusted publishing (OIDC) where npmjs.com trusts this workflow, and the token otherwise."
 }
 
+# <text> as one Markdown code span, so the Release notes show it literally: no mention, link,
+# HTML or emphasis in it renders. Its whitespace runs become one space each (a span holds one
+# line), and its fence is one backtick longer than its longest run of them.
+code_span() {
+	local text fence='`'
+	text=$(printf '%s' "${1:-}" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//')
+	while [[ "$text" == *"$fence"* ]]; do fence+='`'; done
+	# A span that starts or ends with a backtick needs a space inside each fence; Markdown strips them.
+	if [[ "$text" == '`'* || "$text" == *'`' ]]; then text=" ${text} "; fi
+	printf '%s%s%s' "$fence" "$text" "$fence"
+}
+
 # Annotates the release tag on <commit> in the publish job, replacing the one the build job made
 # (whose message is never read): the version, then, for a major released early, its reason
-# (ALLOW_EARLY_MAJOR). The tag is pushed with the release commit, so the reason outlives the run:
-# a republish, which refuses allow_early_major, reads it back with release-note.
+# (ALLOW_EARLY_MAJOR) as a code span, since it is dispatch input that the Release notes render.
+# The tag is pushed with the release commit, so the reason outlives the run: a republish, which
+# refuses allow_early_major, reads it back with release-note.
 tag_release() {
-	local version="${1:-}" commit="${2:-}"
+	local version="${1:-}" commit="${2:-}" reason
 	local message=(-m "v${version}")
 	if ! valid_version "$version" || [ -z "$commit" ]; then
 		err "usage: tag-release <version> <commit>"
 		return 1
 	fi
-	if [ -n "${ALLOW_EARLY_MAJOR:-}" ]; then
-		message+=(-m "Released less than 90 days after the previous major: ${ALLOW_EARLY_MAJOR}")
+	reason=$(printf '%s' "${ALLOW_EARLY_MAJOR:-}" | tr -d '[:space:]')
+	if [ -n "$reason" ]; then
+		message+=(-m "Released less than 90 days after the previous major: $(code_span "$ALLOW_EARLY_MAJOR")")
 	fi
 	git -c user.name="github-actions[bot]" \
 		-c user.email="41898282+github-actions[bot]@users.noreply.github.com" \

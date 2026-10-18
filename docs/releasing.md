@@ -36,12 +36,24 @@ heading is refused, so an entry cannot sit outside the policy.
 on the dispatched commit. It reads `CHANGELOG.md` from that commit (the git blob, not a working
 tree) and refuses the release, before anything is built, when:
 
-- `[Unreleased]` still holds an entry (cut them first: "Cutting the CHANGELOG", below);
+- `[Unreleased]` still holds an entry, or any line but an empty class or note heading (cut
+  them first: "Cutting the CHANGELOG", below);
 - the section under `[Unreleased]` is not `## [X.Y.Z] - YYYY-MM-DD`, or `X.Y.Z` is not the
   version this dispatch makes (the committed version bumped by the `version` input);
-- that section has no entry under a class heading, an entry under no heading, an indented
-  entry that is not a sub-item of an entry, or a heading that is neither a class nor a note. An
-  entry is a list item of any Markdown marker (`-`, `*`, `+`, `1.`, `1)`), so none is skipped;
+- that section has no entry under a class heading, a class heading with no entry, an entry
+  under no heading, or a heading that is neither a class nor a note;
+- a line could hide an entry from the count. The check denies by default, so a line it cannot
+  place is refused, never skipped:
+  - An entry is a list item of any Markdown marker (`-`, `*`, `+`, `1.`, `1)`) at the line's
+    start. An indented line is accepted only under an entry, as its continuation or sub-item.
+  - Under a class heading, every other line is refused: prose, a quote, HTML, or an indented
+    item under no entry.
+  - Anywhere in the section, a line that would render as a heading but is not a `###` class or
+    note heading is refused: `####`, `###Removed`, an indented `#`, a setext underline (`---` or
+    `===` under a line), a line that is only a class or note name in emphasis or HTML
+    (`**Removed**`), and a `##` line that is not the next version's header.
+  - A note's text, and a paragraph that opens the section before its first heading, are free
+    but for those lines. Link reference definitions (`[1.0.0]: <url>`) are accepted anywhere;
 - the `version` input is not exactly the highest class among its entries. Both directions are
   refused: a patch release of a section with an `Added` entry, and a major release of a section
   with nothing under `Removed` or `Breaking`.
@@ -49,8 +61,8 @@ tree) and refuses the release, before anything is built, when:
 **At most one major a quarter.** A major is refused while the last one is less than 90 days
 old: the highest `v<N>.0.0` tag on `master`, aged by its tag date (a tag whose commit is not on
 `master` was never released and does not count). To release one anyway, give the reason in the
-`allow_early_major` input. It is written into the release tag and leads the GitHub Release's
-notes, so a republish, which refuses the input, still has it. The input is refused on any
+`allow_early_major` input. It is written into the release tag, as one code span (so no mention,
+link or HTML in it renders), and leads the GitHub Release's notes, so a republish, which refuses the input, still has it. The input is refused on any
 release that does not need it (a patch, a minor, or a major more than 90 days after the last
 one) and on a republish, so a reason is never given and then silently unused.
 
@@ -206,7 +218,7 @@ repository or mint an OIDC token for provenance:
       has a higher version on npm (prereleases never take it), so finishing an older version
       never takes Latest from a newer one. It runs only after every package's publish
       succeeded. For a major released early, the `allow_early_major` reason leads the notes,
-      above the generated ones; it is read from the release tag, which step 4 annotated with it.
+      above the generated ones, as a code span; it is read from the release tag, which step 4 annotated with it.
       This is the same answer that chose the npm dist-tag in steps 3 and 5.
 
    Each step runs only if every step before it succeeded, so a normal release publishes

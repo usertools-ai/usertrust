@@ -1690,10 +1690,11 @@ describe("release.sh assert-bump", { timeout: 30_000 }, () => {
 		expect(run(["assert-bump", "minor"]).err).toContain("requires a major release");
 	});
 
-	it("an empty heading has no class: Added with no entry beside Fixed is a patch", () => {
+	it("refuses a class heading with no entry under it", () => {
 		changelog("1.0.1", `### Added\n\n${entries("Fixed")}`);
-		expect(run(["assert-bump", "patch"]).status).toBe(0);
-		expect(run(["assert-bump", "minor"]).err).toContain("requires a patch release");
+		const r = run(["assert-bump", "patch"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("has a ### Added heading with no entry under it");
 	});
 
 	it("refuses a section with no classed entry, notes alone included", () => {
@@ -1743,6 +1744,86 @@ describe("release.sh assert-bump", { timeout: 30_000 }, () => {
 		const r = run(["assert-bump", "major"]);
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain('an indented entry that is not under an entry: "* Remove an export."');
+	});
+
+	it("denies by default: a line that could hide an entry from the count is refused, never skipped", () => {
+		// Each shape follows a Fixed entry. Read line by line with only entries counted, each was
+		// a patch: the removal it holds was never seen.
+		const notHeading = "reads as a heading but is not a ### heading";
+		const named = "names a heading but is not one";
+		const underRemoved = "under ### Removed that is not an entry, nor indented under one";
+		const shapes = [
+			["#### Removed\n\n- Remove an export.\n", `${notHeading}: "#### Removed"`],
+			["###Removed\n\n- Remove an export.\n", `${notHeading}: "###Removed"`],
+			[" ### Removed\n\n- Remove an export.\n", `${notHeading}: "### Removed"`],
+			["Removed\n-------\n\n- Remove an export.\n", `${named}: "Removed"`],
+			["**Removed**\n\n- Remove an export.\n", `${named}: "**Removed**"`],
+			["### Known issues\n\n**Removed**\n\n- Remove an export.\n", `${named}: "**Removed**"`],
+			[
+				"### Known issues\n\nOne thing\n---\n",
+				'a line "---", which would make the line above it a heading',
+			],
+			[
+				"## Removed\n\n- Remove an export.\n",
+				'is followed by "## Removed", which is not a version',
+			],
+			["### Removed\n\nThe export is removed.\n", `${underRemoved}: "The export is removed."`],
+			["### Removed\n\n> - Remove an export.\n", `${underRemoved}: "> - Remove an export."`],
+			["### Removed\n\n<ul><li>Remove an export.</li></ul>\n", `${underRemoved}: "<ul><li>`],
+			["### Removed\n\n\t- Remove an export.\n", `${underRemoved}: "- Remove an export."`],
+			["### Removed\n\n    - Remove an export.\n", `${underRemoved}: "- Remove an export."`],
+		] as const;
+		for (const [shape, reason] of shapes) {
+			changelog("1.0.1", `${entries("Fixed")}\n${shape}`);
+			const r = run(["assert-bump", "patch"]);
+			expect(r.status, shape).not.toBe(0);
+			expect(r.err, shape).toContain(reason);
+		}
+	});
+
+	it("accepts what a section rightly holds: an opening paragraph, a note's text, wrapped entries, link references", () => {
+		changelog(
+			"1.0.1",
+			"An opening paragraph.\n\n### Known issues\n\nThese remain open:\n\n- One.\n\n### Fixed\n\n- A fix\n  that wraps.\n  - A sub-item.\n\n[1.0.1]: https://example.com/compare\n",
+		);
+		const r = run(["assert-bump", "patch"]);
+		expect(r.status, r.err).toBe(0);
+		expect(r.out).toContain("Fixed: 1 entry (patch)");
+	});
+
+	it("refuses a line in [Unreleased] that is not a class or note heading, and accepts empty headings", () => {
+		changelog("1.0.1", entries("Fixed"), "\n### Added\n\n### Fixed\n");
+		const ok = run(["assert-bump", "patch"]);
+		expect(ok.status, ok.err).toBe(0);
+		for (const line of [
+			"> - Remove an export.",
+			"The export is removed.",
+			"#### Removed",
+			"**Removed**",
+		]) {
+			changelog("1.0.1", entries("Fixed"), `\n### Removed\n\n${line}\n`);
+			const r = run(["assert-bump", "patch"]);
+			expect(r.status, line).not.toBe(0);
+			expect(r.err, line).toContain("[Unreleased]");
+		}
+	});
+
+	it("reads every section this repository has released, refusing only the one with no entry", () => {
+		const py = /^CHANGELOG_PY='\n([\s\S]*?)\n'$/m.exec(readFileSync(SCRIPT, "utf8"))?.[1] ?? "";
+		expect(py).toContain("def refuse_disguised");
+		const text = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8");
+		const heads = [...text.matchAll(/^## \[\d+\.\d+\.\d+\] - .*$/gm)];
+		let accepted = 0;
+		for (const [i, head] of heads.entries()) {
+			const next = heads[i + 1];
+			const body = text.slice(head.index ?? 0, next?.index ?? text.length);
+			const file = join(dir, "released.md");
+			writeFileSync(file, `## [Unreleased]\n\n${body}${next ? "## [0.0.1] - 2026-01-01\n" : ""}`);
+			const r = spawnSync("python3", ["-c", py, file], { encoding: "utf8" });
+			if (r.status === 0) accepted++;
+			else expect(r.stderr, head[0]).toContain("section is empty");
+		}
+		expect(accepted).toBeGreaterThanOrEqual(20);
 	});
 
 	it("refuses a section for another version than the release makes", () => {
@@ -2168,7 +2249,31 @@ describe("release.sh tag-release and release-note", { timeout: 30_000 }, () => {
 		git("fetch", "-q", "--no-tags", "origin", "+refs/tags/v2.0.0:refs/tags/v2.0.0");
 		const note = run(["release-note", "2.0.0"]);
 		expect(note.status, note.err).toBe(0);
-		expect(note.out.trim()).toBe(`Released less than 90 days after the previous major: ${reason}`);
+		expect(note.out.trim()).toBe(
+			`Released less than 90 days after the previous major: \`${reason}\``,
+		);
+	});
+
+	it("writes the reason as one code span, so no mention, link or HTML in it renders", () => {
+		releaseCommit("2.0.0");
+		const commit = git("rev-parse", "HEAD");
+		const reasons = [
+			[
+				"@team see <b>this</b> [here](https://example.com)",
+				"`@team see <b>this</b> [here](https://example.com)`",
+			],
+			["uses `x` here", "``uses `x` here``"],
+			["`starts\n\nand  ends`", "`` `starts and ends` ``"],
+		] as const;
+		for (const [given, span] of reasons) {
+			const r = run(["tag-release", "2.0.0", commit], { ALLOW_EARLY_MAJOR: given });
+			expect(r.status, r.err).toBe(0);
+			expect(run(["release-note", "2.0.0"]).out.trim(), given).toBe(
+				`Released less than 90 days after the previous major: ${span}`,
+			);
+		}
+		expect(run(["tag-release", "2.0.0", commit], { ALLOW_EARLY_MAJOR: " \n " }).status).toBe(0);
+		expect(run(["release-note", "2.0.0"]).out.trim()).toBe("");
 	});
 
 	it("writes no note without a reason", () => {
