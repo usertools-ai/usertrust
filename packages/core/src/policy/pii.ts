@@ -860,6 +860,14 @@ const FORMAT_CHAR_RE = /^\p{Cf}$/u;
 /** Only ASCII: the characters every pattern here reads. */
 const ASCII_ONLY_RE = /^[ -~\t\n\r\f\v]+$/;
 
+/** A letter or a digit. */
+const ALNUM_RE = /[A-Za-z0-9]/;
+
+/** The fullwidth forms of the printable ASCII characters: U+FF01 to U+FF5E. */
+function isFullwidthAscii(cp: number): boolean {
+	return cp >= 0xff01 && cp <= 0xff5e;
+}
+
 /** What the view does with a code point: not yet seen, keep it, remove it, or replace it. */
 const KIND_UNSEEN = 0;
 const KIND_KEEP = 1;
@@ -867,36 +875,48 @@ const KIND_REMOVE = 2;
 const KIND_REPLACE = 3;
 
 /**
- * Each code point's kind, found the first time it is seen. A fixed table (1.1 MB), so no input can
- * grow it; the replacements hold only the code points whose NFKC form is ASCII (1,439 under Unicode
- * 16, 1,440 under 17).
+ * Each code point's kind, found the first time it is seen. A fixed table (1.1 MB), allocated with
+ * the first string that is not ASCII, so no input can grow it and ASCII-only use never pays for it.
+ * The replacements hold 170 code points under Unicode 16.
  */
-const CODE_POINT_KIND = new Uint8Array(0x110000);
+let codePointKinds: Uint8Array | undefined;
 const ASCII_FORM = new Map<number, string>();
 
 function codePointKind(cp: number): number {
-	let kind = CODE_POINT_KIND[cp] as number;
+	codePointKinds ??= new Uint8Array(0x110000);
+	let kind = codePointKinds[cp] as number;
 	if (kind !== KIND_UNSEEN) return kind;
 	const c = String.fromCodePoint(cp);
 	const form = c.normalize("NFKC");
 	if (FORMAT_CHAR_RE.test(c)) kind = KIND_REMOVE;
-	else if (form !== c && ASCII_ONLY_RE.test(form)) {
+	else if (
+		form !== c &&
+		ASCII_ONLY_RE.test(form) &&
+		(isFullwidthAscii(cp) || !ALNUM_RE.test(form))
+	) {
 		kind = KIND_REPLACE;
 		ASCII_FORM.set(cp, form);
 	} else kind = KIND_KEEP;
-	CODE_POINT_KIND[cp] = kind;
+	codePointKinds[cp] = kind;
 	return kind;
 }
 
 /**
  * The view each pattern is also tried on. Every pattern here reads ASCII, so the view is the string
- * with each format character (category Cf) removed and each character whose NFKC form is ASCII
- * replaced by that form: fullwidth letters and digits, the ideographic space, circled and
- * parenthesized numbers. A key with a zero-width space inside, or a key, card or phone number typed
- * in fullwidth forms (as an input method may type it), reads as the plain value there. Any other
- * character stays as it is. One pass; no character becomes more than 4 (`VIII`, `(10)`), so the
- * view is never more than four times the string, where NFKC itself can make one character 18
- * (U+FDFA). ASCII text is its own view, and is returned as it is.
+ * with each format character (category Cf) removed, and two kinds of character replaced by their
+ * NFKC form, which is ASCII:
+ * - the fullwidth forms of ASCII (U+FF01 to U+FF5E): letters, digits and punctuation, as an input
+ *   method may type them;
+ * - a character whose form holds no letter or digit: the ideographic and no-break spaces, small and
+ *   vertical forms of punctuation.
+ * A key with a zero-width space inside, or a key, card or phone number typed in fullwidth forms,
+ * reads as the plain value there. Any other character stays as it is, including a superscript,
+ * subscript, circled, parenthesized or mathematical letter or digit: those mark up text rather than
+ * spell it, and one glued to a number or a word would extend it (`id 2026-1011-125` with a
+ * superscript 3 after it would read as a longer number, and match a phone, SSN or card shape). One
+ * pass; no character becomes more than 3 (U+2026, the ellipsis, is `...`), so the view is never more
+ * than three times the string, where NFKC itself can make one character 18 (U+FDFA). ASCII text is
+ * its own view, and is returned as it is.
  */
 export function normalizedView(value: string): string {
 	if (isAscii(value)) return value;

@@ -6,7 +6,7 @@
  * Part C: Edge cases
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	detectPII,
 	isOpaqueTextFree,
@@ -1594,27 +1594,35 @@ describe("the normalized view: fullwidth forms and format characters", () => {
 		}
 	});
 
-	it("the view, for EVERY code point: removed if a format character, its NFKC form if that is ASCII, else kept", () => {
+	it("the view, for EVERY code point: removed if a format character; its NFKC form if that is ASCII and the character is a fullwidth form or the form holds no letter or digit; else kept", () => {
 		const wrong: string[] = [];
 		let replaced = 0;
+		let fullwidthReplaced = 0;
 		for (let code = 0x80; code <= 0x10ffff; code++) {
 			if (code >= 0xd800 && code <= 0xdfff) continue;
 			const c = cp(code);
 			const form = c.normalize("NFKC");
+			const isFullwidth = code >= 0xff01 && code <= 0xff5e;
 			const expected = /^\p{Cf}$/u.test(c)
 				? ""
-				: form !== c && /^[ -~\t\n\r\f\v]+$/.test(form)
+				: form !== c &&
+						/^[ -~\t\n\r\f\v]+$/.test(form) &&
+						(isFullwidth || !/[A-Za-z0-9]/.test(form))
 					? form
 					: c;
-			if (expected !== c && expected !== "") replaced++;
+			if (expected !== c && expected !== "") {
+				replaced++;
+				if (isFullwidth) fullwidthReplaced++;
+			}
 			const got = normalizedView(`a${c}b`);
 			if (got !== `a${expected}b`) wrong.push(code.toString(16));
-			if (got.length - 2 > 4 * c.length) wrong.push(`${code.toString(16)} longer than 4`);
+			if (got.length - 2 > 3 * c.length) wrong.push(`${code.toString(16)} longer than 3`);
 		}
 		expect(wrong.slice(0, 10)).toEqual([]);
-		// 1,439 under Unicode 16, 1,440 under 17 (U+A7F1, a modifier capital S). NFKC mappings are
-		// stable, so a later Unicode version only adds to them.
-		expect(replaced).toBeGreaterThanOrEqual(1439);
+		// Every fullwidth form of printable ASCII, and 76 spaces and punctuation forms: 170 under
+		// Unicode 16. NFKC mappings are stable, so a later Unicode version only adds to them.
+		expect(fullwidthReplaced).toBe(94);
+		expect(replaced).toBeGreaterThanOrEqual(170);
 	}, 60_000);
 
 	it("the view of ASCII text is the same string; a lone surrogate is kept", () => {
@@ -1633,5 +1641,64 @@ describe("the normalized view: fullwidth forms and format characters", () => {
 		]) {
 			expect(detectPII(text).found, text.slice(0, 12)).toBe(true);
 		}
+	});
+
+	// A superscript, subscript, circled, full-stop or mathematical digit or letter, glued to a value
+	// one character short of a pattern, used to complete it in the view: a footnote marker after a
+	// number read as its last digit. Each is now kept, so the answer is the plain text's.
+	const MARKS = [0xb9, 0x2081, 0x2460, 0x2488, 0x1d7cf].map(cp);
+	const LETTER_MARKS = [0x1d43, 0x1d41a, 0x24d0].map(cp);
+	const HEX63 = "0123456789abcdef".repeat(4).slice(0, 63);
+
+	it("a digit mark glued after a number does not extend it into a phone, SSN, card or hex secret", () => {
+		for (const mark of MARKS) {
+			for (const text of ["234-567-890", "123-45-678", "4111 1111 1111 111", HEX63]) {
+				const label = `${text.slice(0, 12)} + U+${mark.codePointAt(0)?.toString(16)}`;
+				expect(detectPII(text + mark).types, label).toEqual(detectPII(text).types);
+				expect(normalizedView(text + mark), label).toBe(text + mark);
+			}
+		}
+		// Positive control: the same rows with the digit typed plainly, or in its fullwidth form.
+		for (const digit of ["1", cp(0xff11)]) {
+			expect(detectPII(`234-567-890${digit}`).types).toContain("phone");
+			expect(detectPII(`123-45-678${digit}`).types).toContain("ssn");
+			expect(detectPII(`4111 1111 1111 111${digit}`).types).toContain("credit_card");
+			expect(detectPII(`${HEX63}${digit}`).types).toContain("generic_secret");
+		}
+	});
+
+	it("a letter mark glued after a hex run does not extend it into a secret", () => {
+		for (const mark of LETTER_MARKS) {
+			expect(detectPII(HEX63 + mark).found, `U+${mark.codePointAt(0)?.toString(16)}`).toBe(false);
+		}
+		for (const letter of ["a", cp(0xff41)]) {
+			expect(detectPII(HEX63 + letter).types).toContain("generic_secret");
+		}
+	});
+
+	it("a value written entirely in superscript digits is not read (the declared cost)", () => {
+		const ssn = [0xb9, 0xb2, 0xb3, 0x2d, 0x2074, 0x2075, 0x2d, 0x2076, 0x2077, 0x2078, 0x2079]
+			.map(cp)
+			.join("");
+		expect(detectPII(ssn).found).toBe(false);
+	});
+
+	it("spaces and punctuation forms are still read: a no-break space, a small hyphen", () => {
+		const nbsp = cp(0xa0);
+		const header = `-----BEGIN${nbsp}RSA${nbsp}PRIVATE${nbsp}KEY-----`;
+		expect(normalizedView(header)).toBe("-----BEGIN RSA PRIVATE KEY-----");
+		expect(normalizedView(`234${cp(0xfe63)}567`)).toBe("234-567");
+	});
+
+	it("the code point table is allocated with the first string that is not ASCII, not at import", async () => {
+		vi.resetModules();
+		const before = process.memoryUsage().arrayBuffers;
+		const fresh = await import("../../src/policy/pii.js");
+		fresh.detectPII({ note: `plain ASCII ${key}` });
+		const afterAscii = process.memoryUsage().arrayBuffers;
+		fresh.normalizedView(fullwidth("x"));
+		const afterView = process.memoryUsage().arrayBuffers;
+		expect(afterAscii - before).toBeLessThan(0x110000 / 2);
+		expect(afterView - afterAscii).toBeGreaterThanOrEqual(0x110000);
 	});
 });
