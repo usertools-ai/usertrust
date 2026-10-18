@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
 	detectPII,
 	isOpaqueTextFree,
+	normalizedView,
 	type PIIDetection,
 	type RedactedData,
 	redactPII,
@@ -1526,5 +1527,111 @@ describe("detectPII — jwt", () => {
 		expect(hasJwt("eyJshort.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N")).toBe(false);
 		expect(hasJwt("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0")).toBe(false);
 		expect(hasJwt(`x${JWT}`)).toBe(false);
+	});
+});
+
+describe("the normalized view: fullwidth forms and format characters", () => {
+	const cp = (n: number) => String.fromCodePoint(n);
+	const ZWSP = cp(0x200b);
+	const fullwidth = (s: string) =>
+		[...s]
+			.map((c) => {
+				const code = c.codePointAt(0) as number;
+				return code > 0x20 && code < 0x7f ? cp(code + 0xfee0) : c;
+			})
+			.join("");
+	const key = ["sk", "-proj-", "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xY"].join("");
+	const split = (s: string, cf: string) => `${s.slice(0, 9)}${cf}${s.slice(9)}`;
+
+	it("a key split by any one format character is a key", () => {
+		// Zero-width space, non-joiner, joiner, word joiner, byte order mark, soft hyphen, and a
+		// left-to-right mark: each is Unicode category Cf.
+		for (const cf of [0x200b, 0x200c, 0x200d, 0x2060, 0xfeff, 0xad, 0x200e].map(cp)) {
+			expect(detectPII(split(key, cf)).types, cf.codePointAt(0)?.toString(16)).toContain("api_key");
+		}
+	});
+
+	it("a key, card, phone, SSN, email and address in fullwidth forms are found", () => {
+		const rows: Array<[string, string]> = [
+			["api_key", fullwidth(key)],
+			["credit_card", fullwidth("4111 1111 1111 1111")],
+			["phone", fullwidth("(234) 567-8901")],
+			["ssn", fullwidth("123-45-6789")],
+			["email", fullwidth("alice@example.com")],
+			["ipv4", fullwidth("192.168.1.1")],
+		];
+		for (const [type, text] of rows) expect(detectPII(text).types, type).toContain(type);
+	});
+
+	it("paths and types are the same whichever view matched", () => {
+		const plain = detectPII({ a: { b: key }, c: ["4111 1111 1111 1111"] });
+		const hidden = detectPII({ a: { b: split(key, ZWSP) }, c: [fullwidth("4111 1111 1111 1111")] });
+		expect(hidden.types).toEqual(plain.types);
+		expect(hidden.paths).toEqual(plain.paths);
+		expect(hidden.found).toBe(true);
+	});
+
+	it("redaction replaces the WHOLE original value, format characters and all, as it does the plain one", () => {
+		const card = "4111 1111 1111 1111";
+		const plain = redactPII({ note: `use ${key} today`, card }).data as Record<string, string>;
+		const out = redactPII({ note: `use ${split(key, ZWSP)} today`, card: fullwidth(card) })
+			.data as Record<string, string>;
+		expect(out.note).toBe("[REDACTED:api_key]");
+		expect(out).toEqual(plain);
+	});
+
+	it("text with fullwidth forms or format characters and no PII is left byte for byte", () => {
+		const text = `${fullwidth("Hello")} ${ZWSP}world${cp(0xfeff)} ${cp(0xfdfa)} ok`;
+		const out = redactPII({ text }).data as Record<string, string>;
+		expect(out.text).toBe(text);
+		expect(detectPII(text).found).toBe(false);
+	});
+
+	it("a character NFKC expands (U+FDFA, to 18) beside a key leaves the key found", () => {
+		const fdfa = cp(0xfdfa);
+		for (const text of [`${fdfa}${key}`, `${key}${fdfa}`, `${fdfa} ${split(key, ZWSP)} ${fdfa}`]) {
+			expect(detectPII(text).types).toContain("api_key");
+		}
+	});
+
+	it("the view, for EVERY code point: removed if a format character, its NFKC form if that is ASCII, else kept", () => {
+		const wrong: string[] = [];
+		let replaced = 0;
+		for (let code = 0x80; code <= 0x10ffff; code++) {
+			if (code >= 0xd800 && code <= 0xdfff) continue;
+			const c = cp(code);
+			const form = c.normalize("NFKC");
+			const expected = /^\p{Cf}$/u.test(c)
+				? ""
+				: form !== c && /^[ -~\t\n\r\f\v]+$/.test(form)
+					? form
+					: c;
+			if (expected !== c && expected !== "") replaced++;
+			const got = normalizedView(`a${c}b`);
+			if (got !== `a${expected}b`) wrong.push(code.toString(16));
+			if (got.length - 2 > 4 * c.length) wrong.push(`${code.toString(16)} longer than 4`);
+		}
+		expect(wrong.slice(0, 10)).toEqual([]);
+		// 1,439 under Unicode 16, 1,440 under 17 (U+A7F1, a modifier capital S). NFKC mappings are
+		// stable, so a later Unicode version only adds to them.
+		expect(replaced).toBeGreaterThanOrEqual(1439);
+	}, 60_000);
+
+	it("the view of ASCII text is the same string; a lone surrogate is kept", () => {
+		const ascii = `plain ASCII ${key}`;
+		expect(normalizedView(ascii)).toBe(ascii);
+		const lone = `x${cp(0xd800)}y`;
+		expect(normalizedView(lone)).toBe(lone);
+	});
+
+	it("a value 5.0.4's patterns already read stays found (the view only adds)", () => {
+		for (const text of [
+			key,
+			"4111 1111 1111 1111",
+			"alice@example.com",
+			`${fullwidth("x")} ${key}`,
+		]) {
+			expect(detectPII(text).found, text.slice(0, 12)).toBe(true);
+		}
 	});
 });

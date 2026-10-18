@@ -156,6 +156,21 @@ const WORST: ReadonlyArray<[string, (n: number) => string]> = [
 	["api key: pplx- then digits", after("pplx-", "1")],
 	["generic secret: whsec_ then slashes", after("whsec_", "/")],
 	["generic secret: repeated whsec_ starts", run(".whsec_")],
+	// The normalized view (NFKC, format characters removed): built once per string, then scanned.
+	["normalized view: zero-width spaces", run(String.fromCodePoint(0x200b))],
+	["normalized view: a digit, then a zero-width space", run(`1${String.fromCodePoint(0x200b)}`)],
+	["normalized view: a letter, then a zero-width joiner", run(`a${String.fromCodePoint(0x200d)}`)],
+	["normalized view: fullwidth digits", run(String.fromCodePoint(0xff11))],
+	["normalized view: fullwidth digits and spaces", run(`${String.fromCodePoint(0xff14)} `)],
+	["normalized view: U+FDFA, which NFKC expands to 18", run(String.fromCodePoint(0xfdfa))],
+	[
+		"normalized view: a key prefix, then zero-width spaces",
+		after("sk-", String.fromCodePoint(0x200b)),
+	],
+	[
+		"normalized view: fullwidth letters and an at sign",
+		run(`${String.fromCodePoint(0xff41)}${String.fromCodePoint(0xff20)}`),
+	],
 	["aws key: repeated temporary placeholders", run(`ASIA${"X".repeat(16)} `)],
 	["github token: repeated user-token placeholders", run(`ghu_${"X".repeat(36)} `)],
 	[
