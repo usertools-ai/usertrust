@@ -88,6 +88,11 @@ const GAINED: ReadonlyArray<[Kind, string]> = [
 	],
 	["generic_secret", `xw${"fp-"}${alnum(40, 14)}`],
 	["generic_secret", `xo${"xe-"}1-${alnum(140, 32)}`],
+	["api_key", `AI${"za"}Sy${alnum(33, 33)}`],
+	["api_key", `xa${"i-"}${alnum(80, 34)}`],
+	["api_key", `gs${"k_"}${alnum(52, 35)}`],
+	["api_key", `pp${"lx-"}${alnum(48, 36)}`],
+	["generic_secret", `wh${"sec_"}${alnum(32, 37)}`],
 	["generic_secret", `gl${"dt-"}${alnum(20, 15)}`],
 	["generic_secret", `gl${"rt-"}${alnum(20, 16)}`],
 	["generic_secret", `gl${"agent-"}${alnum(20, 17)}`],
@@ -321,6 +326,11 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 			"glagent-",
 			"glft-",
 			"npm_",
+			"AIza",
+			"xai-",
+			"gsk_",
+			"pplx-",
+			"whsec_",
 		];
 		const words = [
 			"config",

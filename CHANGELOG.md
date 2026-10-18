@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Secret detection now recognises Google, xAI, Groq and Perplexity API keys, and webhook signing secrets.** Before this, they were reported clean under `pii: "block"` and `pii: "redact"`:
+  - Google API keys: `AIza`, then 35 letters, digits, `_` and `-`, holding a capital, as Google's docs describe them.
+  - xAI (`xai-`), Groq (`gsk_`) and Perplexity (`pplx-`) API keys: the prefix, then letters and digits. Their docs show the prefix, or a placeholder of letters and digits, but no full format.
+  - Webhook signing secrets: `whsec_`, then base64, as Stripe and the Standard Webhooks format issue them.
+
+  A kebab-case or snake_case name after one of these prefixes is not a key, and neither is a lowercase Google-length string or the placeholder Groq's docs show.
+
 ## [5.0.5] - 2026-10-18
 
 ### Read before upgrading

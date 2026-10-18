@@ -37,6 +37,11 @@ const GITLAB = "docs.gitlab.com/security/tokens";
 const NPM = "github.blog/changelog/2021-09-23-npm-has-a-new-access-token-format";
 const SENDGRID = "twilio.com/docs/sendgrid/ui/account-and-settings/api-keys";
 const ANTHROPIC = "platform.claude.com/docs/en/manage-claude/authentication";
+const GOOGLE = "docs.cloud.google.com/docs/authentication/api-keys";
+const XAI = "docs.x.ai/build/overview";
+const GROQ = "console.groq.com/docs/production-readiness/security-onboarding";
+const PERPLEXITY = "docs.perplexity.ai/docs/admin/api-key-management";
+const STRIPE_WEBHOOKS = "docs.stripe.com/webhooks";
 
 /** A JWT's shape: three base64url segments, the header starting `eyJ` (`{"`). */
 const jwt = (seed: number): string =>
@@ -366,6 +371,74 @@ describe("the capital-letter rule for the prefixes this release adds", () => {
 			}
 		});
 	}
+});
+
+describe("Google, xAI, Groq and Perplexity API keys, and webhook signing secrets", () => {
+	const rows: Array<[string, string, string]> = [
+		[
+			"api_key",
+			`Google API key (AIza, then 35 letters, digits, _ and -, upper and lower case), per ${GOOGLE}`,
+			`AI${"za"}Sy${chars(33, 60, URLSAFE)}`,
+		],
+		[
+			"api_key",
+			`xAI API key (xai-; the docs show the prefix only), per ${XAI}`,
+			`xa${"i-"}${chars(80, 61)}`,
+		],
+		[
+			"api_key",
+			`Groq API key (gsk_; the docs show the prefix only), per ${GROQ}`,
+			`gs${"k_"}${chars(52, 62)}`,
+		],
+		["api_key", `Perplexity API key (pplx-), per ${PERPLEXITY}`, `pp${"lx-"}${chars(48, 63)}`],
+		[
+			"api_key",
+			`Perplexity's documented placeholder shape (pplx-, then 16 letters and digits), per ${PERPLEXITY}`,
+			`pp${"lx-"}${"1234567890"}${"abcdef"}`,
+		],
+		[
+			"generic_secret",
+			`Stripe webhook signing secret (whsec_), per ${STRIPE_WEBHOOKS}`,
+			`wh${"sec_"}${chars(32, 64)}`,
+		],
+		[
+			"generic_secret",
+			"a base64 webhook signing secret (whsec_, the Standard Webhooks format) with + and / early",
+			`wh${"sec_"}Ab/c+${chars(27, 65)}=`,
+		],
+	];
+	for (const [kind, name, token] of rows) {
+		it(name, () => {
+			for (const text of [token, `KEY=${token}`, JSON.stringify({ secret: token })]) {
+				expect(types(text), text.slice(0, 16)).toContain(kind);
+			}
+		});
+	}
+
+	const names: Array<[string, string]> = [
+		["api_key", `AI${"za"}${"-config-service-production-guide-v2"}`],
+		["api_key", `AI${"za"}${chars(35, 66, URLSAFE).replace(/[A-Z]/g, "a")}`],
+		["api_key", `AI${"za"}Sy${chars(34, 67, URLSAFE)}`],
+		["api_key", `xa${"i-"}config-service-production-v2`],
+		["api_key", `gs${"k_"}feature_toggle_client_library`],
+		["api_key", `gs${"k_"}your_secret_key_here`],
+		["api_key", `pp${"lx-"}config-loader-module`],
+		["generic_secret", `wh${"sec_"}webhook-signing-secret-rotation`],
+		["generic_secret", `wh${"sec_"}...`],
+	];
+	it("names and placeholders after these prefixes are not keys: kebab-case, snake_case, a lowercase Google-length payload, a 36-character one, the docs' own placeholders", () => {
+		for (const [kind, text] of names) {
+			expect(types(`const ${text} = 1;`), text).not.toContain(kind);
+		}
+	});
+
+	it("a decoy after one of these prefixes does not hide a real key after it", () => {
+		for (const [kind, , token] of rows) {
+			const decoy = names.find(([k, t]) => k === kind && t.slice(0, 3) === token.slice(0, 3));
+			if (decoy === undefined) continue;
+			expect(types(`${decoy[1]} then ${token}`), decoy[1]).toContain(kind);
+		}
+	});
 });
 
 describe("identifiers that share a new prefix", () => {
