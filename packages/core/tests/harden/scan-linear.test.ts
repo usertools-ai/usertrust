@@ -56,9 +56,13 @@ interface Verdict {
  * that does not. A scan over the bound is measured once more and the faster time kept, so one
  * garbage-collection pause does not fail it.
  */
-function withinRatio(scan: (s: string) => unknown, make: (n: number) => string): Verdict {
+function withinRatio(
+	scan: (s: string) => unknown,
+	make: (n: number) => string,
+	sizes: readonly number[] = SIZES,
+): Verdict {
 	let last: Verdict = { ok: true, size: 0, ratio: 0 };
-	for (const size of SIZES) {
+	for (const size of sizes) {
 		const s = make(size);
 		expect(s.length).toBe(size);
 		const baseline = Math.max(
@@ -219,6 +223,26 @@ function sameAnswers(
 	expect(found).toBeLessThan(texts.length - texts.length / 100);
 }
 
+describe("long inputs: no detector throws, and the scans stay linear, up to 10M characters", () => {
+	// A regex that repeats a group can overflow the regexp stack on a long enough run (a card-run
+	// pattern did, at 6M characters of digit groups). 5.0.4 completed these at 8M.
+	const LONG: ReadonlyArray<[string, (n: number) => string]> = [
+		["digits and spaces", run("1 ")],
+		["digits and dashes", run("1-")],
+		["four-digit groups and spaces", run("4111 ")],
+		["a phone run glued on both sides", after("x", "1 ", "1x")],
+		["digits and dots", run("12.")],
+	];
+	for (const [name, make] of LONG) {
+		it(`detectPII: ${name}`, () => {
+			const verdict = withinRatio(detectPII, make, [3_000_000, 10_000_000]);
+			expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at ${verdict.size}`).toMatchObject({
+				ok: true,
+			});
+		}, 120_000);
+	}
+});
+
 describe("the linear scans give the old patterns' answers", () => {
 	it("email", () => {
 		const OLD_EMAIL = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
@@ -321,7 +345,10 @@ describe("the linear scans give the old patterns' answers", () => {
 				if (k % 2 === 1) return false;
 				let rest = part;
 				if (/\w$/.test(parts[k - 1] ?? "")) rest = rest.replace(/^\d+/, "");
-				if (/^\w/.test(parts[k + 1] ?? "")) rest = rest.replace(/\d+$/, "");
+				// An extension (x, ext or ext., spaces, 1-6 digits ending the token) does not glue.
+				const after = parts.slice(k + 1).join("");
+				const extension = /^(?:x|ext\.?)\s*\d{1,6}(?![A-Za-z0-9_])/i.test(after);
+				if (/^\w/.test(after) && !extension) rest = rest.replace(/\d+$/, "");
 				const split = rest.replace(/\d{16,}/g, (g) =>
 					["0011", "011", "010", "00"].some((p) => g.startsWith(p) && g.length - p.length <= 15)
 						? g
@@ -330,16 +357,45 @@ describe("the linear scans give the old patterns' answers", () => {
 				return OLD_PHONE.test(split.replace(/\s+/g, ""));
 			});
 		};
-		const pieces = ["5", "555", "1234", " ", "-", ".", "(", "+", "x", "_", "id", ":", ","];
-		sameAnswers(corpus(6, pieces, 12, 50_000), reference, (s) =>
+		const pieces = [
+			"5",
+			"555",
+			"1234",
+			" ",
+			"-",
+			".",
+			"(",
+			"+",
+			"x",
+			"_",
+			"id",
+			":",
+			",",
+			"ext",
+			"ext.",
+			"555",
+			"1234",
+		];
+		sameAnswers(corpus(6, pieces, 16, 50_000), reference, (s) =>
 			detectPII(s).types.includes("phone"),
 		);
 	});
 
-	it("credit card: the span sums give a digit-by-digit Luhn check of every span", () => {
-		// The reference checks every span of whole groups in a run, joining its digits and running
-		// Luhn over them one by one; the detector gets each span's sum from prefix sums instead.
-		const RUN = /(?<!\w)\d+(?:[\s-]+\d+)*(?!\w)/g;
+	it("credit card: 5.0.4's candidates, or a card's layout with one separator, checked one way and another", () => {
+		// The reference: 5.0.4's candidate check as it was written, or a span of digit groups found by
+		// splitting the text (not by the detector's scan) whose lengths are a card's layout, joined by
+		// one separator of whitespace or dashes with no line break, untouched by a word character at
+		// either end; or one such group of 13-19 digits. Luhn digit by digit.
+		const OLD_CANDIDATE = /\b[\d][\d\s-]{11,22}[\d]\b/g;
+		const LAYOUTS = ["4,4,4,4", "4,4,4,4,1", "4,4,4,4,2", "4,4,4,4,3", "4,6,5", "4,6,4"];
+		const lineBreaks = [
+			"\n",
+			"\v",
+			"\f",
+			"\r",
+			String.fromCodePoint(0x2028),
+			String.fromCodePoint(0x2029),
+		];
 		const luhn = (digits: string): boolean => {
 			let sum = 0;
 			for (let i = 0; i < digits.length; i++) {
@@ -348,22 +404,65 @@ describe("the linear scans give the old patterns' answers", () => {
 			}
 			return sum % 10 === 0;
 		};
-		const reference = (s: string): boolean => {
-			for (const run of s.matchAll(RUN)) {
-				const groups = run[0].split(/[\s-]+/);
-				for (let i = 0; i < groups.length; i++) {
-					let digits = "";
-					for (let j = i; j < groups.length; j++) {
-						digits += groups[j];
-						if (digits.length >= 13 && digits.length <= 19 && luhn(digits)) return true;
-					}
+		const candidate = (s: string): boolean =>
+			(s.match(OLD_CANDIDATE) ?? []).some((c) => {
+				const digits = c.replace(/[\s-]/g, "");
+				return digits.length >= 13 && digits.length <= 19 && luhn(digits);
+			});
+		const layout = (s: string): boolean => {
+			// parts: text, group, text, group, ..., text
+			const parts = s.split(/(\d+)/);
+			const groups = parts.filter((_, k) => k % 2 === 1);
+			const before = (g: number) => parts[2 * g] ?? "";
+			const after = (g: number) => parts[2 * g + 2] ?? "";
+			const word = /[A-Za-z0-9_]/;
+			const free = (g: number, edge: "start" | "end") =>
+				edge === "start" ? !word.test(before(g).slice(-1)) : !word.test(after(g).slice(0, 1));
+			const separatorOk = (sep: string) =>
+				/^[\s-]+$/.test(sep) && !lineBreaks.some((b) => sep.includes(b));
+			for (let a = 0; a < groups.length; a++) {
+				const one = groups[a] as string;
+				if (
+					one.length >= 13 &&
+					one.length <= 19 &&
+					free(a, "start") &&
+					free(a, "end") &&
+					luhn(one)
+				) {
+					return true;
+				}
+				for (let b = a + 2; b < groups.length && b < a + 5; b++) {
+					const span = groups.slice(a, b + 1);
+					if (!LAYOUTS.includes(span.map((g) => g.length).join(","))) continue;
+					const seps = span.slice(1).map((_, k) => after(a + k));
+					if (!seps.every((sep) => sep === seps[0] && separatorOk(sep))) continue;
+					if (free(a, "start") && free(b, "end") && luhn(span.join(""))) return true;
 				}
 			}
 			return false;
 		};
-		const pieces = ["4111", "1111", "4242", "378", "5", "12", "0", " ", " ", "-", "  ", "/", "x"];
-		sameAnswers(corpus(4, pieces, 12, 50_000), reference, (s) =>
-			detectPII(s).types.includes("credit_card"),
+		const pieces = [
+			"4111",
+			"1111",
+			"4242",
+			"3782",
+			"822463",
+			"10005",
+			"5",
+			"12",
+			"0",
+			" ",
+			" ",
+			"-",
+			"  ",
+			"/",
+			"x",
+			"\n",
+		];
+		sameAnswers(
+			corpus(4, pieces, 12, 50_000),
+			(s) => candidate(s) || layout(s),
+			(s) => detectPII(s).types.includes("credit_card"),
 		);
 	});
 

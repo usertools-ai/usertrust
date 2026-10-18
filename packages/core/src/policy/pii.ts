@@ -119,6 +119,13 @@ const OVERSIZED_DIGITS_RE = /\d{16,}/g;
  */
 const ACCESS_PREFIXES = ["0011", "011", "010", "00"];
 
+/**
+ * An extension written right after a phone number: x, ext or ext., optional whitespace, then 1-6
+ * digits that end the token ("555-867-5309x123", "…5309 ext. 12"). Tried where a run of phone
+ * characters stops at a letter.
+ */
+const EXTENSION_RE = /(?:x|ext\.?)\s*\d{1,6}(?![A-Za-z0-9_])/iy;
+
 /** Whether a long digit group is a dial string: an access prefix, then at most 15 digits. */
 function isDialString(group: string): boolean {
 	return ACCESS_PREFIXES.some(
@@ -137,7 +144,8 @@ function isDialString(group: string): boolean {
  * `toolu_1234567890123abc`, or `ref-5558675309z`), while a number after one still is
  * ("SKU12 555 867 5309"). Those ids read as phones, and redaction then gave different ids the same
  * placeholder. A group of 16 or more digits is a token too: it splits the run, so no phone is read
- * from part of it (`12345678901234567890`), unless it is a dial string. Each character is read a
+ * from part of it (`12345678901234567890`), unless it is a dial string. A letter that starts an
+ * extension (`x123`, `ext12`) does not glue the number before it. Each character is read a
  * bounded number of times, so the check is linear.
  */
 function isPhoneNumber(value: string): boolean {
@@ -149,7 +157,10 @@ function isPhoneNumber(value: string): boolean {
 			while (start < end && isAsciiDigit(value.charCodeAt(start))) start++;
 		}
 		if (end < value.length && isWordChar(value.charCodeAt(end))) {
-			while (end > start && isAsciiDigit(value.charCodeAt(end - 1))) end--;
+			EXTENSION_RE.lastIndex = end;
+			if (!EXTENSION_RE.test(value)) {
+				while (end > start && isAsciiDigit(value.charCodeAt(end - 1))) end--;
+			}
 		}
 		const rest = value
 			.slice(start, end)
@@ -206,23 +217,27 @@ function isIPv4(value: string): boolean {
 	}
 }
 
-/**
- * Where a card number can be: a run of digit groups joined by spaces or dashes, with no word
- * character on either side.
- */
-const CARD_RUN_RE = /(?<!\w)\d+(?:[\s-]+\d+)*(?!\w)/g;
+/** 5.0.4's card candidate: 13-24 characters of digits, whitespace and dashes, a digit at each end. */
+const CARD_CANDIDATE_RE = /\b[\d][\d\s-]{11,22}[\d]\b/g;
 
 /**
- * Credit card number detection: 13-19 digits that pass the Luhn check.
+ * Credit card number detection: 13-19 digits that pass the Luhn check, found two ways.
  *
- * Within each run of digit groups, every span of whole, adjacent groups holding 13-19 digits is
- * checked. So a number written beside a card cannot hide it by joining its run: an expiry
- * ("4111 1111 1111 1111 12 29") or a reference before it. A digit string with no separator is a
- * single group, so it is still checked only whole, and a long numeric id gains no card inside it.
+ * 1. 5.0.4's check, unchanged: each candidate with its separators removed. Nothing it found is lost.
+ * 2. A card printed in a card's layout inside a longer run of numbers, which (1) misses because an
+ *    adjacent number joins its candidate: an expiry ("4111-1111-1111-1111 12/29"), or a number
+ *    before it ("12 4111 1111 1111 1111"). See `hasCardInLayout`.
  */
 function isCreditCard(value: string): boolean {
-	for (const run of value.matchAll(CARD_RUN_RE)) {
-		if (hasLuhnSpan(run[0])) return true;
+	return hasCardCandidate(value) || hasCardInLayout(value);
+}
+
+/** 5.0.4's check: some candidate, its whitespace and dashes removed, has 13-19 digits and passes Luhn. */
+function hasCardCandidate(value: string): boolean {
+	CARD_CANDIDATE_RE.lastIndex = 0;
+	for (let m = CARD_CANDIDATE_RE.exec(value); m !== null; m = CARD_CANDIDATE_RE.exec(value)) {
+		const digits = m[0].replace(/[\s-]/g, "");
+		if (digits.length >= 13 && digits.length <= 19 && luhnValid(digits)) return true;
 	}
 	return false;
 }
@@ -232,47 +247,150 @@ function luhnDoubled(d: number): number {
 	return d < 5 ? d * 2 : d * 2 - 9;
 }
 
+/** The Luhn check over a string of digits: every second digit from the right doubled, sum % 10 === 0. */
+function luhnValid(digits: string): boolean {
+	let sum = 0;
+	for (let i = 0; i < digits.length; i++) {
+		const d = digits.charCodeAt(digits.length - 1 - i) - 0x30;
+		sum += i % 2 === 1 ? luhnDoubled(d) : d;
+	}
+	return sum % 10 === 0;
+}
+
+/** JavaScript's `\s`, by char code. */
+function isWhitespace(c: number): boolean {
+	return (
+		(c >= 0x09 && c <= 0x0d) ||
+		c === 0x20 ||
+		c === 0xa0 ||
+		c === 0x1680 ||
+		(c >= 0x2000 && c <= 0x200a) ||
+		c === 0x2028 ||
+		c === 0x2029 ||
+		c === 0x202f ||
+		c === 0x205f ||
+		c === 0x3000 ||
+		c === 0xfeff
+	);
+}
+
+/** A line break: LF, VT, FF, CR, and the Unicode line and paragraph separators. */
+function isLineBreak(c: number): boolean {
+	return (c >= 0x0a && c <= 0x0d) || c === 0x2028 || c === 0x2029;
+}
+
 /**
- * Whether some span of whole groups in `run` holds 13-19 digits and passes the Luhn check.
- *
- * Luhn doubles every second digit counting back from a span's last digit, which are the digits
- * whose index has the same parity as the span's end. So `sums[p][k]` adds up the run's first k
- * digits, doubling those whose index has parity p, and the Luhn sum of the span [a, b) is
- * `sums[b % 2][b] - sums[b % 2][a]`, one subtraction. A span starts and ends at a group boundary,
- * and every group holds at least one digit, so a start has at most 19 ends within reach and the
- * check is linear in the run.
+ * The group lengths a card number is printed in: 4-4-4-4 (16 digits), 4-4-4-4 then 1-3 more
+ * (17-19), 4-6-5 (15, American Express) and 4-6-4 (14, Diners Club).
  */
-function hasLuhnSpan(run: string): boolean {
-	const sums: [number[], number[]] = [[0], [0]];
-	/** The digit index where each group starts, then the digit count. */
-	const boundaries: number[] = [];
-	let count = 0;
-	let inGroup = false;
-	for (let i = 0; i < run.length; i++) {
-		const c = run.charCodeAt(i);
-		if (c < 0x30 || c > 0x39) {
-			inGroup = false;
+const CARD_LAYOUTS: ReadonlyArray<Int32Array> = [
+	Int32Array.of(4, 4, 4, 4),
+	Int32Array.of(4, 4, 4, 4, 1),
+	Int32Array.of(4, 4, 4, 4, 2),
+	Int32Array.of(4, 4, 4, 4, 3),
+	Int32Array.of(4, 6, 5),
+	Int32Array.of(4, 6, 4),
+];
+
+/** The most groups a layout has: the scan keeps that many of the latest groups. */
+const LAYOUT_GROUPS = 5;
+
+/**
+ * Whether the text holds a card printed in a card's layout: a span of digit groups whose lengths are
+ * one of CARD_LAYOUTS, joined by one separator throughout (the same run of whitespace or dashes
+ * between every two groups, never a line break), with no letter, digit or underscore touching
+ * either end; or a single group of 13-19 digits touching none. Its digits must pass Luhn.
+ *
+ * A list of numbers is not a card unless its groups fall in a card's layout, so space-separated
+ * pairs, a printed bit vector or one number per line add nothing to what (1) finds.
+ *
+ * One pass over the text, keeping only the latest five groups (typed arrays, so nothing inherited
+ * from Array.prototype is read or written). Each group is checked against six layouts of at most
+ * five groups and 19 digits, and a separator is compared at most a fixed number of times, so the
+ * check is linear and never recurses.
+ */
+function hasCardInLayout(value: string): boolean {
+	const groupStart = new Int32Array(LAYOUT_GROUPS);
+	const groupLength = new Int32Array(LAYOUT_GROUPS);
+	const separatorStart = new Int32Array(LAYOUT_GROUPS);
+	const gluedBefore = new Uint8Array(LAYOUT_GROUPS);
+	const ring: GroupRing = { value, groupStart, groupLength, separatorStart, gluedBefore };
+	const n = value.length;
+	let groups = 0;
+	let chain = 0;
+	let separatorFrom = 0;
+	let separatorValid = false;
+	let i = 0;
+	while (i < n) {
+		const c = value.charCodeAt(i);
+		if (!isAsciiDigit(c)) {
+			if (!(c === 0x2d || (isWhitespace(c) && !isLineBreak(c)))) separatorValid = false;
+			i++;
 			continue;
 		}
-		if (!inGroup) boundaries.push(count);
-		inGroup = true;
-		const d = c - 0x30;
-		const doubledAtEven = count % 2 === 0 ? luhnDoubled(d) : d;
-		const doubledAtOdd = count % 2 === 1 ? luhnDoubled(d) : d;
-		sums[0].push((sums[0][count] as number) + doubledAtEven);
-		sums[1].push((sums[1][count] as number) + doubledAtOdd);
-		count++;
+		const start = i;
+		while (i < n && isAsciiDigit(value.charCodeAt(i))) i++;
+		chain = chain > 0 && separatorValid ? chain + 1 : 1;
+		const slot = groups % LAYOUT_GROUPS;
+		groups++;
+		groupStart[slot] = start;
+		groupLength[slot] = i - start;
+		separatorStart[slot] = separatorFrom;
+		gluedBefore[slot] = start > 0 && isWordChar(value.charCodeAt(start - 1)) ? 1 : 0;
+		const gluedAfter = i < n && isWordChar(value.charCodeAt(i));
+		if (!gluedAfter && cardEndsAt(ring, groups - 1, chain)) return true;
+		separatorFrom = i;
+		separatorValid = true;
 	}
-	boundaries.push(count);
-	for (let s = 0; s < boundaries.length - 1; s++) {
-		const a = boundaries[s] as number;
-		for (let e = s + 1; e < boundaries.length; e++) {
-			const b = boundaries[e] as number;
-			if (b - a > 19) break;
-			if (b - a < 13) continue;
-			const parity = sums[b % 2] as number[];
-			if (((parity[b] as number) - (parity[a] as number)) % 10 === 0) return true;
+	return false;
+}
+
+interface GroupRing {
+	value: string;
+	groupStart: Int32Array;
+	groupLength: Int32Array;
+	/** Where the separator before each group starts; it ends where the group starts. */
+	separatorStart: Int32Array;
+	gluedBefore: Uint8Array;
+}
+
+/** Whether a card in a card's layout ends at group `last`, the latest of `chain` joined groups. */
+function cardEndsAt(ring: GroupRing, last: number, chain: number): boolean {
+	const { value, groupStart, groupLength, separatorStart, gluedBefore } = ring;
+	const at = (k: number) => k % LAYOUT_GROUPS;
+	const digitsOf = (k: number) =>
+		value.slice(
+			groupStart[at(k)] as number,
+			(groupStart[at(k)] as number) + (groupLength[at(k)] as number),
+		);
+	const lastLength = groupLength[at(last)] as number;
+	if (
+		lastLength >= 13 &&
+		lastLength <= 19 &&
+		gluedBefore[at(last)] === 0 &&
+		luhnValid(digitsOf(last))
+	) {
+		return true;
+	}
+	for (const layout of CARD_LAYOUTS) {
+		const size = layout.length;
+		if (size > chain) continue;
+		const first = last - size + 1;
+		let fits = gluedBefore[at(first)] === 0;
+		for (let g = 0; g < size && fits; g++) fits = groupLength[at(first + g)] === layout[g];
+		if (!fits) continue;
+		// One separator throughout: each one between the span's groups equals the first of them.
+		const sepFrom = separatorStart[at(first + 1)] as number;
+		const separator = value.slice(sepFrom, groupStart[at(first + 1)] as number);
+		for (let g = 2; g < size && fits; g++) {
+			const from = separatorStart[at(first + g)] as number;
+			const to = groupStart[at(first + g)] as number;
+			fits = to - from === separator.length && value.startsWith(separator, from);
 		}
+		if (!fits) continue;
+		let digits = "";
+		for (let g = 0; g < size; g++) digits += digitsOf(first + g);
+		if (luhnValid(digits)) return true;
 	}
 	return false;
 }

@@ -11,8 +11,10 @@
  *   value the 5.0.4 detector flagged may be lost.
  * - phone: two losses are intended, both tokens, and each is accepted only when its own check
  *   explains it:
- *   - digits glued to a word (`toolu_123…`, `…5309z`): explained when the current detector flags
- *     the same input once every letter or underscore touching a digit is spaced apart from it;
+ *   - digits glued to a word (`toolu_123…`, `…5309z`): explained when the 5.0.4 detector stops
+ *     flagging the input once every digit group a letter or underscore touches is removed, a
+ *     group followed by an extension (`x123`, `ext12`) excepted. The test decides that on its own;
+ *     the current detector is never asked, so a loss it causes cannot excuse itself;
  *   - a group of 16 or more digits (an id, a card): explained when the 5.0.4 detector stops
  *     flagging the input once those groups are removed.
  *   Both rules applied together explain an input that holds both kinds of token. Any other loss
@@ -83,6 +85,11 @@ const CURATED: Record<Kind, string[]> = {
 		"00491512345678901",
 		"0011 61 2 9374 4000",
 		"001161293744000",
+		// Extensions: part of the number, not glue.
+		"555-867-5309x123",
+		"555-867-5309ext12",
+		"555-867-5309 ext. 12",
+		"555-867-5309#123",
 		// The intended losses: the differential must see these, or it sees nothing.
 		"0012345678901234567",
 		"toolu_1234567890123abc",
@@ -172,9 +179,19 @@ function lost(old: Check, current: Check, inputs: readonly string[]): string[] {
 	return inputs.filter((s) => old(s) && !current(s));
 }
 
-/** The input with every letter or underscore that touches a digit spaced apart from it. */
-function unglue(s: string): string {
-	return s.replace(/(?<=[A-Za-z_])(?=\d)|(?<=\d)(?=[A-Za-z_])/g, " ");
+/**
+ * The input without the digit groups that belong to a word: each group a letter or underscore
+ * touches, unless what follows it is an extension (x, ext or ext., spaces, then 1-6 digits that end
+ * the token), which belongs to the number before it. Written here from the rule.
+ */
+function dropGlued(s: string): string {
+	return s.replace(/\d+/g, (group: string, at: number) => {
+		const touchedBefore = at > 0 && /[A-Za-z_]/.test(s.charAt(at - 1));
+		const rest = s.slice(at + group.length);
+		const extension = /^(?:x|ext\.?)\s*\d{1,6}(?![A-Za-z0-9_])/i.test(rest);
+		const touchedAfter = /^[A-Za-z_]/.test(rest) && !extension;
+		return touchedBefore || touchedAfter ? "|" : group;
+	});
 }
 
 /**
@@ -190,17 +207,21 @@ function dropOversized(s: string): string {
 	);
 }
 
-/** Which token rule explains a phone value lost by `current`, the first that does, or none. */
-function phoneLossRule(current: Check, s: string): "glued" | "oversized" | "both" | "none" {
-	if (current(unglue(s))) return "glued";
-	if (!before("phone")(dropOversized(s))) return "oversized";
-	if (current(unglue(dropOversized(s)))) return "both";
+/**
+ * Which token rule explains a phone value the current detector lost, the first that does, or none.
+ * Each asks only the 5.0.4 detector: does it stop flagging the input once those tokens are gone?
+ */
+function phoneLossRule(s: string): "glued" | "oversized" | "both" | "none" {
+	const old = before("phone");
+	if (!old(dropGlued(s))) return "glued";
+	if (!old(dropOversized(s))) return "oversized";
+	if (!old(dropGlued(dropOversized(s)))) return "both";
 	return "none";
 }
 
 /** The phone values the 5.0.4 detector flagged that `current` does not, and no token rule explains. */
 function unexplainedPhoneLosses(current: Check, inputs: readonly string[]): string[] {
-	return lost(before("phone"), current, inputs).filter((s) => phoneLossRule(current, s) === "none");
+	return lost(before("phone"), current, inputs).filter((s) => phoneLossRule(s) === "none");
 }
 
 describe("PII detector differential: 5.0.4 beside the current detector", () => {
@@ -228,8 +249,15 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 		]) {
 			expect(losses).toContain(token);
 		}
-		// Spaced, international and non-breaking-spaced numbers: flagged before, and still flagged.
+		// Spaced, international and non-breaking-spaced numbers, and numbers with an extension:
+		// flagged before, and still flagged.
 		for (const s of [
+			"555-867-5309x123",
+			"555-867-5309ext12",
+			"555-867-5309 ext. 12",
+			"(555) 867-5309 x123",
+			"555-867-5309#123",
+			"call 555.867.5309X42 today",
 			"+44 20 7946 0958",
 			"+33 1 42 68 53 00",
 			"+49 30 901820",
@@ -241,6 +269,44 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 		]) {
 			expect(before("phone")(s), `5.0.4: ${JSON.stringify(s)}`).toBe(true);
 			expect(now("phone")(s), `current: ${JSON.stringify(s)}`).toBe(true);
+		}
+	});
+
+	it("card: on lists of numbers, the current check flags exactly what 5.0.4 flagged", () => {
+		// Spans of groups count only in a card's layout, so lists whose groups never fall in one add
+		// nothing: space-separated pairs, a printed bit vector, four-digit numbers one per line.
+		const rand = seeded(20261018);
+		const digits = (n: number) => {
+			let out = "";
+			for (let i = 0; i < n; i++) out += String(Math.floor(rand() * 10));
+			return out;
+		};
+		const lists: Array<[string, () => string]> = [
+			[
+				"10 two-digit numbers, space-separated",
+				() => Array.from({ length: 10 }, () => digits(2)).join(" "),
+			],
+			[
+				"20 two-digit numbers, space-separated",
+				() => Array.from({ length: 20 }, () => digits(2)).join(" "),
+			],
+			[
+				"16 binary digits, space-separated",
+				() => `[${Array.from({ length: 16 }, () => String(Math.floor(rand() * 2))).join(" ")}]`,
+			],
+			[
+				"8 four-digit numbers, one per line",
+				() => Array.from({ length: 8 }, () => digits(4)).join("\n"),
+			],
+			[
+				"30 numbers of 1-3 digits, one per line",
+				() => Array.from({ length: 30 }, () => digits(1 + Math.floor(rand() * 3))).join("\n"),
+			],
+		];
+		for (const [name, make] of lists) {
+			const texts = Array.from({ length: 4000 }, make);
+			const differ = texts.filter((t) => before("credit_card")(t) !== now("credit_card")(t));
+			expect(differ.slice(0, 3), name).toEqual([]);
 		}
 	});
 
@@ -297,7 +363,7 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 		const phoneLosses = lost(before("phone"), now("phone"), inputsFor("phone"));
 		const byRule: Record<string, number> = {};
 		for (const s of phoneLosses) {
-			const rule = phoneLossRule(now("phone"), s);
+			const rule = phoneLossRule(s);
 			byRule[rule] = (byRule[rule] ?? 0) + 1;
 		}
 		// Written only when asked for (the PR body carries it); the assertions above are the gate.

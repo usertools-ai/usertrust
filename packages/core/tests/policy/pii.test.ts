@@ -127,6 +127,25 @@ describe("detectPII — phone", () => {
 		}
 	});
 
+	it("detects a phone with an extension written right after it", () => {
+		for (const text of [
+			"555-867-5309x123",
+			"555-867-5309ext12",
+			"555-867-5309 ext. 12",
+			"call 555.867.5309X42 today",
+			"(555) 867-5309 x123",
+			"555-867-5309#123",
+		]) {
+			expect(detectPII({ text }).types, text).toContain("phone");
+		}
+	});
+
+	it("does not read digits before a word that only starts like an extension as a phone", () => {
+		for (const text of ["id-5558675309x9f2a", "ref-5558675309xyz", "5558675309extra"]) {
+			expect(detectPII({ text }).types, text).not.toContain("phone");
+		}
+	});
+
 	it("detects a phone after digits that belong to a word", () => {
 		// "12" belongs to "SKU12" and is left out; the number after it is still a phone.
 		expect(detectPII({ text: "SKU12 555 867 5309" }).types).toContain("phone");
@@ -405,6 +424,29 @@ describe("detectPII — credit card edge cases", () => {
 		// No span of whole groups here, with 13-19 digits, passes Luhn.
 		for (const text of ["4111 1111 1111 1112 12 29", "4111 1111 1111 1112 1234 5678"]) {
 			expect(detectPII({ text }).types, text).not.toContain("credit_card");
+		}
+	});
+
+	it("detects a card in a card's layout among other numbers", () => {
+		for (const text of [
+			"3782 822463 10005 12", // 4-6-5, American Express
+			"30569309025904 7", // one group of 14
+			"41111111 11111111", // 5.0.4's check: one candidate, 16 digits
+			"4222222222222 7", // one group of 13, beside another number
+		]) {
+			expect(detectPII({ text }).types, text).toContain("credit_card");
+		}
+	});
+
+	it("does not read a card from groups that are not printed as one", () => {
+		for (const text of [
+			"9 4111 1111-1111 1111 5", // two kinds of separator
+			"9 4111\n1111\n1111\n1111 5", // one group per line
+			"[0 1 1 0 1 0 0 1 1 1 0 1 0 1 1 0]", // a printed bit vector
+			"ref4111 1111 1111 1111", // the first group belongs to a word
+			"4111 1111 1111 1111z", // the last group belongs to a word
+		]) {
+			expect(detectPII({ text }).types, JSON.stringify(text)).not.toContain("credit_card");
 		}
 	});
 
@@ -1246,6 +1288,25 @@ describe("redactPII — an array's items are defined on the copy, never assigned
 			expect(own?.enumerable).toBe(true);
 			expect(own?.writable).toBe(true);
 			expect(out.messages.length).toBe(1);
+		} finally {
+			Reflect.deleteProperty(Array.prototype, "0");
+		}
+	});
+});
+
+describe("detectPII — a card is found with an index setter on Array.prototype", () => {
+	it("detects and redacts a card by either check while Array.prototype[0] swallows writes", () => {
+		Object.defineProperty(Array.prototype, "0", {
+			get: () => undefined,
+			set: () => {},
+			configurable: true,
+		});
+		try {
+			for (const card of ["4111111111111111", "4111 1111 1111 1111", "4111-1111-1111-1111 12/29"]) {
+				expect(detectPII({ v: card }).types, card).toContain("credit_card");
+				const out = redactPII({ v: card }).data as { v: string };
+				expect(out.v, card).toMatch(/^\[REDACTED:.*credit_card/);
+			}
 		} finally {
 			Reflect.deleteProperty(Array.prototype, "0");
 		}
