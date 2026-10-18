@@ -371,19 +371,111 @@ function wholeChainIsCard(
 	return false;
 }
 
-/** API key: sk-... (OpenAI/Anthropic) or sk_live_/sk_test_ (Stripe) */
+/** A payload holds a letter or a digit: a run of dashes or underscores alone is not a key. */
+const HAS_ALNUM_RE = /[A-Za-z0-9]/;
+
+/**
+ * A payload holds a capital letter. Applied to the prefixes this release adds: a real token's random
+ * characters almost surely hold one (20 random base64url characters lack one about once in 30,000
+ * tokens, and longer tokens far less often), while a lowercase kebab-case name after a prefix
+ * holds none, even with a version number in it (`glrt-runner-registration-walkthrough`,
+ * `xapp-config-service-production-v2`).
+ */
+const HAS_CAPITAL_RE = /[A-Z]/;
+
+/**
+ * Whether some match of `re` (global, its payload in the first group that matched) has a payload
+ * that passes `payloadOk`. A failed match is skipped whole: a later start inside its payload sees
+ * the same characters, so it fails too, and the scan stays linear.
+ */
+function hasPrefixedToken(value: string, re: RegExp, payloadOk: RegExp): boolean {
+	re.lastIndex = 0;
+	for (let m = re.exec(value); m !== null; m = re.exec(value)) {
+		const payload = m[1] ?? m[2] ?? "";
+		if (payloadOk.test(payload)) return true;
+	}
+	return false;
+}
+
+/**
+ * API keys released before: sk-... (OpenAI, Anthropic), and Stripe's sk_live_ and sk_test_. No
+ * closing `\b`, since the payload can hold `-` and a key whose characters end in `-` has no word
+ * boundary there; instead the payload must hold a letter or a digit.
+ */
+const API_KEY_RE = /\b(?:sk-|sk_(?:live|test)_)([a-zA-Z0-9_-]{20,})/g;
+
+/** Stripe's restricted keys (rk_live_, rk_test_) and organization keys (sk_org_). */
+const NEW_API_KEY_RE = /\b(?:rk_(?:live|test)_|sk_org_)([a-zA-Z0-9_-]{20,})/g;
+
+/** API key: sk-... (OpenAI, Anthropic), or a Stripe secret, restricted or organization key. */
 function isApiKey(value: string): boolean {
-	return /\b(?:sk-|sk_(?:live|test)_)[a-zA-Z0-9_-]{20,}\b/.test(value);
+	return (
+		hasPrefixedToken(value, API_KEY_RE, HAS_ALNUM_RE) ||
+		hasPrefixedToken(value, NEW_API_KEY_RE, HAS_CAPITAL_RE)
+	);
 }
 
-/** AWS access key: AKIA followed by 16 uppercase alphanumeric chars */
+/**
+ * AWS access key id: AKIA (long-term) then 16 uppercase alphanumerics, as released; or ASIA
+ * (temporary, from STS) then 16 base32 characters, the alphabet AWS key ids are written in, so a
+ * word such as `ASIA` then `PACIFICREGION001` is not one.
+ */
 function isAwsKey(value: string): boolean {
-	return /\bAKIA[0-9A-Z]{16}\b/.test(value);
+	return /\b(?:AKIA[0-9A-Z]{16}|ASIA[A-Z2-7]{16})\b/.test(value);
 }
 
-/** GitHub token: ghp_, gho_, ghs_, ghr_, github_pat_ followed by 22+ alphanumeric chars */
+/** GitHub's prefixes as released: ghp_, gho_, ghs_, ghr_, github_pat_, then 22+ alphanumerics. */
+const GITHUB_TOKEN_RE = /\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[a-zA-Z0-9]{22,}\b/;
+
+/**
+ * A fine-grained personal access token: github_pat_, 22 alphanumerics, `_`, then 59. The `_` is a
+ * word character, so the released form's closing `\b` never matched inside one.
+ */
+const GITHUB_FINE_GRAINED_RE = /\bgithub_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/;
+
+/** A user access token for a GitHub App: ghu_ then 22+ alphanumerics. */
+const GITHUB_USER_TOKEN_RE = /\bghu_([a-zA-Z0-9]{22,})\b/g;
+
+/** Where a stateless installation token can start: ghs_, the app id, `_`, then a JWT's `eyJ`. */
+const GITHUB_STATELESS_START_RE = /\bghs_[0-9]+_(?=eyJ)/g;
+
+/** The JWT after it: three base64url segments, tried at the `eyJ` (sticky). */
+const GITHUB_STATELESS_JWT_RE = /eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/y;
+
+/**
+ * A stateless installation token, `ghs_<app id>_<JWT>`: the prefix and a whole JWT after it, so
+ * `ghs_1_eyJ` alone is not one. Where the JWT fails, the search resumes at the end of its run of
+ * segment characters: a later start inside that run is followed by the same characters, so it
+ * fails too. Each run is read a bounded number of times, so the check is linear.
+ */
+function hasStatelessInstallationToken(value: string): boolean {
+	let from = 0;
+	for (;;) {
+		GITHUB_STATELESS_START_RE.lastIndex = from;
+		const start = GITHUB_STATELESS_START_RE.exec(value);
+		if (start === null) return false;
+		const jwtAt = start.index + start[0].length;
+		GITHUB_STATELESS_JWT_RE.lastIndex = jwtAt;
+		if (GITHUB_STATELESS_JWT_RE.test(value)) return true;
+		let end = jwtAt;
+		while (end < value.length && isJwtSegmentChar(value.charCodeAt(end))) end++;
+		from = end;
+	}
+}
+
+/**
+ * GitHub token, by the prefixes GitHub documents for each type: ghp_ (classic personal access
+ * token), gho_ (OAuth), ghs_ (installation access token), ghr_ (refresh token) and github_pat_, as
+ * released; the fine-grained form; ghu_ (user access token for an app); and the stateless
+ * installation token.
+ */
 function isGithubToken(value: string): boolean {
-	return /\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[a-zA-Z0-9]{22,}\b/.test(value);
+	return (
+		GITHUB_TOKEN_RE.test(value) ||
+		GITHUB_FINE_GRAINED_RE.test(value) ||
+		hasPrefixedToken(value, GITHUB_USER_TOKEN_RE, HAS_CAPITAL_RE) ||
+		hasStatelessInstallationToken(value)
+	);
 }
 
 /** Bearer token: Authorization header with 20+ char token */
@@ -434,13 +526,37 @@ function isPrivateKey(value: string): boolean {
 	return /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value);
 }
 
-/** Generic secret: known prefixes (xox, SG., glpat-, npm_) or long hex strings (64+ chars) */
+/**
+ * Secret prefixes released before: Slack's xoxb-, xoxp-, xoxa-, xoxr-, xoxs- (a rotating token,
+ * xoxe.xoxb- or xoxe.xoxp-, is matched by its inner prefix); SendGrid's SG.; GitLab's glpat-. No
+ * closing `\b`, since the payload can hold `-` and one that ends in `-` has no word boundary there
+ * (a SendGrid key whose first part ends `---` read as clean); instead the payload must hold a
+ * letter or a digit. A Slack payload never holds `_`, so no word character may follow one:
+ * `xoxb-service_policy_production` is a name, as 5.0.4 read it.
+ */
+const SECRET_PREFIX_RE =
+	/\b(?:xox[bpars]-([a-zA-Z0-9-]+)(?!\w)|(?:SG\.|glpat-)([a-zA-Z0-9_-]{20,}))/g;
+
+/** npm's access tokens: npm_ then letters and digits, so the closing `\b` stays. */
+const NPM_TOKEN_RE = /\bnpm_[a-zA-Z0-9]{36,}\b/;
+
+/**
+ * Secret prefixes this release adds, each payload holding a capital letter:
+ * - Slack: xapp- (app-level; rotating ones as xoxe.xapp-), xwfp- (workflow) and xoxe-<n>- (the
+ *   refresh token that rotation issues);
+ * - GitLab: the token types GitLab documents besides glpat- (OAuth application secret, deploy,
+ *   runner, CI/CD job, trigger, feed, incoming mail, agent, workspace, SCIM, feature flags client).
+ */
+const NEW_SECRET_PREFIX_RE =
+	/\b(?:(?:xapp|xwfp|xoxe-[0-9])-([a-zA-Z0-9-]{20,})(?!\w)|gl(?:oas|dt|rtr?|cbt|ptt|ft|imt|agent|wt|soat|ffct)-([a-zA-Z0-9_-]{20,}))/g;
+
+/** Generic secret: known prefixes, or long hex strings (64+ chars). */
 function isGenericSecret(value: string): boolean {
 	// Note: sk- and sk_ prefixes handled by isApiKey — not duplicated here
 	if (
-		/\b(?:xox[bpars]-[a-zA-Z0-9-]+|SG\.[a-zA-Z0-9_-]{20,}|glpat-[a-zA-Z0-9_-]{20,}|npm_[a-zA-Z0-9]{36,})\b/.test(
-			value,
-		)
+		hasPrefixedToken(value, SECRET_PREFIX_RE, HAS_ALNUM_RE) ||
+		NPM_TOKEN_RE.test(value) ||
+		hasPrefixedToken(value, NEW_SECRET_PREFIX_RE, HAS_CAPITAL_RE)
 	) {
 		return true;
 	}
@@ -484,7 +600,7 @@ function detectIn(data: unknown, signalSent: boolean): PIIDetection {
 	const types = new Set<string>();
 	const paths: string[] = [];
 
-	scanValue(data, "", types, paths, signalSent);
+	scanValue(data, types, paths, signalSent);
 
 	return {
 		found: types.size > 0,
@@ -567,6 +683,19 @@ const TRANSPORT_PREFIXES: ReadonlySet<string> = new Set(
 	}),
 );
 
+/** The longest transport path. A longer path is none of them. */
+const TRANSPORT_PATH_MAX = Math.max(...[...TRANSPORT_SLOTS].map((slot) => slot.length));
+
+/**
+ * Whether `path` is in `paths` (TRANSPORT_SLOTS or TRANSPORT_PREFIXES), answered by its length
+ * alone when it is longer than any of them. Each level of a walk builds its path from its parent's,
+ * and looking a path up in a set hashes its characters, so without this a walk thousands of levels
+ * deep spent most of its time rehashing paths (6,250 levels: about 100 times slower).
+ */
+function isTransportPath(paths: ReadonlySet<string>, path: string): boolean {
+	return path.length <= TRANSPORT_PATH_MAX && paths.has(path);
+}
+
 /**
  * Kept by reference and not walked: the transport's value at a transport position. By default
  * that is an opaque, text-free value (`isOpaqueTextFree`).
@@ -580,39 +709,69 @@ const TRANSPORT_PREFIXES: ReadonlySet<string> = new Set(
  * public `detectPII`) a value is kept only when it has no own string-named field at all.
  */
 function keptByReference(value: unknown, path: string, signalSent: boolean): boolean {
-	if (!TRANSPORT_SLOTS.has(path) || value === null || typeof value !== "object") return false;
+	if (!isTransportPath(TRANSPORT_SLOTS, path) || value === null || typeof value !== "object") {
+		return false;
+	}
 	return signalSent ? isRealAbortSignal(value) : isOpaqueTextFree(value);
 }
 
-function scanValue(
-	value: unknown,
-	currentPath: string,
-	types: Set<string>,
-	paths: string[],
-	signalSent: boolean,
-): void {
-	if (typeof value === "string") {
-		scanString(value, currentPath, types, paths);
-		return;
-	}
+/** An array or object being scanned: its children are read one at a time, in order. */
+type ScanFrame =
+	| { kind: "array"; items: unknown[]; path: string; next: number; below: ScanFrame | undefined }
+	| {
+			kind: "object";
+			record: Record<string, unknown>;
+			keys: string[];
+			path: string;
+			next: number;
+			below: ScanFrame | undefined;
+	  };
 
-	// The transport's value at a transport position is not walked (see keptByReference).
-	if (keptByReference(value, currentPath, signalSent)) return;
-
-	if (Array.isArray(value)) {
-		for (let i = 0; i < value.length; i++) {
-			const itemPath = currentPath ? `${currentPath}[${i}]` : `[${i}]`;
-			scanValue(value[i], itemPath, types, paths, signalSent);
+/**
+ * Scan `root` and everything under it: each string is scanned at its dot-path, in the order a
+ * depth-first walk reaches it (an array's items by index, an object's enumerable keys in order).
+ *
+ * The walk keeps its own stack of frames, linked one to the next, instead of recursing: nesting a
+ * few thousand levels deep (about 20 KB of JSON) exhausted the call stack, and detection threw.
+ * The frames are linked objects, not an array, so an index setter on Array.prototype cannot
+ * swallow one. Each child is read when its turn comes, as before, so getters run in the same order.
+ * An object already open on the current path (an enumerable cycle) is not entered again: the
+ * recursion never ended there either, and threw.
+ */
+function scanValue(root: unknown, types: Set<string>, paths: string[], signalSent: boolean): void {
+	let top: ScanFrame | undefined;
+	const open = new Set<object>();
+	const visit = (value: unknown, path: string): void => {
+		if (typeof value === "string") {
+			scanString(value, path, types, paths);
+			return;
 		}
-		return;
-	}
-
-	if (value !== null && typeof value === "object") {
-		const record = value as Record<string, unknown>;
-		for (const key of Object.keys(record)) {
-			const fieldPath = currentPath ? `${currentPath}.${key}` : key;
-			scanValue(record[key], fieldPath, types, paths, signalSent);
+		// The transport's value at a transport position is not walked (see keptByReference).
+		if (keptByReference(value, path, signalSent)) return;
+		if (value === null || typeof value !== "object" || open.has(value)) return;
+		open.add(value);
+		if (Array.isArray(value)) {
+			top = { kind: "array", items: value, path, next: 0, below: top };
+		} else {
+			const record = value as Record<string, unknown>;
+			top = { kind: "object", record, keys: Object.keys(record), path, next: 0, below: top };
 		}
+	};
+	visit(root, "");
+	while (top !== undefined) {
+		const frame = top;
+		if (frame.kind === "array" && frame.next < frame.items.length) {
+			const i = frame.next++;
+			visit(frame.items[i], frame.path ? `${frame.path}[${i}]` : `[${i}]`);
+			continue;
+		}
+		if (frame.kind === "object" && frame.next < frame.keys.length) {
+			const key = frame.keys[frame.next++] as string;
+			visit(frame.record[key], frame.path ? `${frame.path}.${key}` : key);
+			continue;
+		}
+		open.delete(frame.kind === "array" ? frame.items : frame.record);
+		top = frame.below;
 	}
 }
 
@@ -656,7 +815,7 @@ export function redactPII(data: unknown, options: RedactOptions = {}): RedactedD
 	if (!detection.found) {
 		return { data, detection };
 	}
-	const redacted = redactValue(data, "", {
+	const redacted = redactValue(data, {
 		anywhere: new WeakMap(),
 		atPrefix: new Map(),
 		signalSent,
@@ -717,13 +876,13 @@ interface Clones {
 }
 
 function cachedClone(clones: Clones, value: object, path: string): unknown {
-	return TRANSPORT_PREFIXES.has(path)
+	return isTransportPath(TRANSPORT_PREFIXES, path)
 		? clones.atPrefix.get(path)?.get(value)
 		: clones.anywhere.get(value);
 }
 
 function registerClone(clones: Clones, value: object, path: string, clone: unknown): void {
-	if (!TRANSPORT_PREFIXES.has(path)) {
+	if (!isTransportPath(TRANSPORT_PREFIXES, path)) {
 		clones.anywhere.set(value, clone);
 		return;
 	}
@@ -735,70 +894,130 @@ function registerClone(clones: Clones, value: object, path: string, clone: unkno
 	atPath.set(value, clone);
 }
 
-/** Recursively traverse data and replace PII strings with redacted placeholders. */
-function redactValue(value: unknown, path: string, clones: Clones): unknown {
-	if (typeof value === "string") {
-		const types = matchedTypes(value);
-		if (types.length > 0) {
-			return `[REDACTED:${types.join(",")}]`;
+/**
+ * A container being copied: its clone (registered before any child is walked) and where the walk
+ * is. An array's items by index, holes kept; an object's enumerable keys, then its own property
+ * names (`hidden`, listed when the enumerable keys are done), of which only non-enumerable data
+ * properties are copied.
+ */
+type RedactFrame =
+	| {
+			kind: "array";
+			source: unknown[];
+			clone: unknown[];
+			length: number;
+			path: string;
+			next: number;
+			below: RedactFrame | undefined;
+	  }
+	| {
+			kind: "object";
+			source: Record<string, unknown>;
+			clone: Record<string, unknown>;
+			keys: string[];
+			hidden: string[] | undefined;
+			/** The next of `hidden`, a cursor of its own: `next` stays past the enumerable keys. */
+			nextHidden: number;
+			path: string;
+			next: number;
+			below: RedactFrame | undefined;
+	  };
+
+/**
+ * Copy `root` with each PII string replaced by its placeholder. The same copy the recursive walk
+ * made, built on an explicit stack of linked frames, so a deeply nested value no longer exhausts
+ * the call stack and throws:
+ * - a string matching a pattern becomes `[REDACTED:<types>]`, any other value stays as it is;
+ * - an array is copied by index (its length read once, a hole kept a hole), an object by its
+ *   enumerable keys, then its non-enumerable own data properties, redacted and still
+ *   non-enumerable; a function there (a hidden `toJSON` hook) is never carried into the copy,
+ *   and an accessor is never invoked;
+ * - each property is DEFINED on the copy, never assigned, so an index setter on Array.prototype
+ *   cannot swallow an item and an own "__proto__" key stays a key;
+ * - each clone is registered before its children are walked, so a revisit (a cycle, or one object
+ *   referenced twice) answers that clone and the walk ends;
+ * - the transport's value at a transport position is kept by reference (see keptByReference),
+ *   checked after the array case and before the object case, as before.
+ */
+function redactValue(root: unknown, clones: Clones): unknown {
+	let top: RedactFrame | undefined;
+	const copy = (value: unknown, path: string): unknown => {
+		if (typeof value === "string") {
+			const types = matchedTypes(value);
+			return types.length > 0 ? `[REDACTED:${types.join(",")}]` : value;
+		}
+		if (Array.isArray(value)) {
+			const cached = cachedClone(clones, value, path);
+			if (cached !== undefined) return cached;
+			const length = value.length;
+			const clone: unknown[] = new Array(length);
+			registerClone(clones, value, path, clone);
+			top = { kind: "array", source: value, clone, length, path, next: 0, below: top };
+			return clone;
+		}
+		if (keptByReference(value, path, clones.signalSent)) return value;
+		if (value !== null && typeof value === "object") {
+			// Looked up only after the transport check: the same signal is kept by reference at its
+			// transport slot even when it was flattened where it appeared earlier.
+			const cached = cachedClone(clones, value, path);
+			if (cached !== undefined) return cached;
+			const source = value as Record<string, unknown>;
+			const clone: Record<string, unknown> = {};
+			registerClone(clones, value, path, clone);
+			const keys = Object.keys(source);
+			top = {
+				kind: "object",
+				source,
+				clone,
+				keys,
+				hidden: undefined,
+				nextHidden: 0,
+				path,
+				next: 0,
+				below: top,
+			};
+			return clone;
 		}
 		return value;
-	}
-
-	if (Array.isArray(value)) {
-		const clone = cachedClone(clones, value, path);
-		if (clone !== undefined) return clone;
-		// Built by index, not with `map`, so the clone is registered before its items are walked. As
-		// with `map`: the length read once, a hole stays a hole, and each item is an own property.
-		const length = value.length;
-		const result: unknown[] = new Array(length);
-		registerClone(clones, value, path, result);
-		for (let i = 0; i < length; i++) {
-			// Defined, never assigned: an index setter on Array.prototype must not swallow the item.
-			if (i in value)
-				defineData(result, String(i), redactValue(value[i], `${path}[${i}]`, clones), true);
+	};
+	const childPath = (path: string, key: string) => (path === "" ? key : `${path}.${key}`);
+	const result = copy(root, "");
+	while (top !== undefined) {
+		const frame = top;
+		if (frame.kind === "array") {
+			if (frame.next < frame.length) {
+				const i = frame.next++;
+				if (i in frame.source) {
+					defineData(frame.clone, String(i), copy(frame.source[i], `${frame.path}[${i}]`), true);
+				}
+				continue;
+			}
+		} else if (frame.next < frame.keys.length) {
+			const key = frame.keys[frame.next++] as string;
+			defineData(frame.clone, key, copy(frame.source[key], childPath(frame.path, key)), true);
+			continue;
+		} else {
+			if (frame.hidden === undefined) {
+				// The enumerable keys are done: list the own property names now, as the walk did.
+				frame.hidden = Object.getOwnPropertyNames(frame.source);
+			}
+			if (frame.nextHidden < frame.hidden.length) {
+				// Each one's descriptor is read once, in its turn. Only a non-enumerable DATA property
+				// that is not a function is copied.
+				const key = frame.hidden[frame.nextHidden++] as string;
+				const d = Object.getOwnPropertyDescriptor(frame.source, key);
+				if (
+					d !== undefined &&
+					d.enumerable !== true &&
+					"value" in d &&
+					typeof d.value !== "function"
+				) {
+					defineData(frame.clone, key, copy(d.value, childPath(frame.path, key)), false);
+				}
+				continue;
+			}
 		}
-		return result;
+		top = frame.below;
 	}
-
-	// The transport's value at a transport position is kept BY REFERENCE (see keptByReference).
-	if (keptByReference(value, path, clones.signalSent)) return value;
-
-	if (value !== null && typeof value === "object") {
-		// Looked up only after the transport check: the same signal is kept by reference at its
-		// transport slot even when it was flattened where it appeared earlier.
-		const clone = cachedClone(clones, value, path);
-		if (clone !== undefined) return clone;
-		const record = value as Record<string, unknown>;
-		const result: Record<string, unknown> = {};
-		registerClone(clones, value, path, result);
-		// Every key is DEFINED, never assigned: an own "__proto__" key (as JSON.parse makes one) stays
-		// a key of the clone instead of becoming its prototype.
-		for (const key of Object.keys(record)) {
-			defineData(
-				result,
-				key,
-				redactValue(record[key], path === "" ? key : `${path}.${key}`, clones),
-				true,
-			);
-		}
-		// A non-enumerable own DATA property stays one, redacted, so a consumer that reads the request
-		// by name still finds the field, and JSON.stringify still skips it. Data only: a function (a
-		// hidden `toJSON` hook) is never carried into the clone, where serializing would run it; an
-		// accessor is never invoked.
-		for (const key of Object.getOwnPropertyNames(record)) {
-			const d = Object.getOwnPropertyDescriptor(record, key);
-			if (d === undefined || d.enumerable === true || !("value" in d)) continue;
-			if (typeof d.value === "function") continue;
-			defineData(
-				result,
-				key,
-				redactValue(d.value, path === "" ? key : `${path}.${key}`, clones),
-				false,
-			);
-		}
-		return result;
-	}
-
-	return value;
+	return result;
 }

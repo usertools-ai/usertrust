@@ -466,6 +466,11 @@ describe("detectPII — credit card edge cases", () => {
 			"ref4111 1111 1111 1111", // the first group belongs to a word
 			"4111 1111 1111 1111z", // the last group belongs to a word
 			"4111.1111.1111.1111 12", // joined by dots, not one space or one dash
+			"4111 and 1111 and 1111 and 1111", // a gap that only starts with a space joins nothing
+			// Known limits, kept as in 5.0.4: a chain is checked whole, never a window inside it.
+			"4111-1111-1111-1111-123", // the card joined by the same dash to one more group
+			"order 2024-4111-1111-1111-1111", // a number joined to the card by the same dash
+			"4111 1111 1111 1111 12/29", // a spaced card, then its expiry after one space
 		]) {
 			expect(detectPII({ text }).types, JSON.stringify(text)).not.toContain("credit_card");
 		}
@@ -1201,29 +1206,17 @@ describe("redactPII — cycles and shared references keep their shape in the cop
 		expect(out.a.email).toBe("[REDACTED:email]");
 	});
 
-	it("an ENUMERABLE cycle: detection overflows before redaction runs (unchanged), so redactPII throws the same RangeError", () => {
+	it("an ENUMERABLE cycle: detection scans it once and redaction copies its shape, where both threw RangeError", () => {
 		const input: Record<string, unknown> = { email: EMAIL };
 		input.self = input;
-		const fromDetect = (() => {
-			try {
-				detectPII(input);
-				return undefined;
-			} catch (err) {
-				return err;
-			}
-		})();
-		expect(fromDetect).toBeInstanceOf(RangeError);
-		const fromRedact = (() => {
-			try {
-				redactPII(input);
-				return undefined;
-			} catch (err) {
-				return err;
-			}
-		})();
-		expect(fromRedact).toBeInstanceOf(RangeError);
-		// the overflow is detection's own walk, which this change does not touch
-		expect((fromRedact as Error).stack).toContain("scanValue");
+		// The walk does not enter an object already open on its path, so the cycle is scanned once.
+		const detection = detectPII(input);
+		expect(detection.types).toEqual(["email"]);
+		expect(detection.paths).toEqual(["email(email)"]);
+		const out = redactPII(input).data as Record<string, unknown>;
+		expect(out.email).toBe("[REDACTED:email]");
+		expect(out.self).toBe(out);
+		expect(input.email).toBe(EMAIL);
 	});
 });
 
