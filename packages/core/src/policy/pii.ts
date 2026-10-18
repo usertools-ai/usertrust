@@ -388,13 +388,27 @@ const HAS_CAPITAL_RE = /[A-Z]/;
  * that passes `payloadOk`. A failed match is skipped whole: a later start inside its payload sees
  * the same characters, so it fails too, and the scan stays linear.
  */
-function hasPrefixedToken(value: string, re: RegExp, payloadOk: RegExp): boolean {
+function hasPrefixedToken(
+	value: string,
+	re: RegExp,
+	payloadOk: RegExp | ((payload: string) => boolean),
+): boolean {
+	const ok = typeof payloadOk === "function" ? payloadOk : (p: string) => payloadOk.test(p);
 	re.lastIndex = 0;
 	for (let m = re.exec(value); m !== null; m = re.exec(value)) {
 		const payload = m[1] ?? m[2] ?? "";
-		if (payloadOk.test(payload)) return true;
+		if (ok(payload)) return true;
 	}
 	return false;
+}
+
+/**
+ * A payload of at least four distinct characters. Applied to the prefixes 5.0.6 adds: a real key's
+ * random characters always pass, while a placeholder of one repeated character, or a few
+ * (`gsk_xxxx…`, an `.env.example` value), does not.
+ */
+function hasVariedPayload(payload: string): boolean {
+	return new Set(payload).size >= 4;
 }
 
 /**
@@ -408,20 +422,21 @@ const API_KEY_RE = /\b(?:sk-|sk_(?:live|test)_)([a-zA-Z0-9_-]{20,})/g;
 const NEW_API_KEY_RE = /\b(?:rk_(?:live|test)_|sk_org_)([a-zA-Z0-9_-]{20,})/g;
 
 /**
- * A Google API key: AIza, then exactly 35 letters, digits, `_` and `-` (Google's docs show one,
- * `AIzaSy…`, 39 characters in all, and describe the string as upper and lower case letters,
- * numbers, underscores and hyphens). Its payload must hold a capital, as that description gives
- * it, so a lowercase name of the same length is not a key.
+ * A Google API key: AIza, then exactly 35 letters, digits, `_` and `-`, and no further token
+ * character (Google's docs show one, `AIzaSy…`, 39 characters in all, and describe the string as
+ * upper and lower case letters, numbers, underscores and hyphens).
  */
 const GOOGLE_API_KEY_RE = /\bAIza([A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])/g;
 
 /**
- * xAI (xai-), Groq (gsk_) and Perplexity (pplx-) API keys: the prefix, then letters and digits.
- * Their docs show the prefix (xAI `xai-...`, Groq `gsk_...`) or a placeholder of letters and
- * digits (Perplexity's: `pplx-`, then 16 of them), not a full format. A payload of
- * letters and digits only keeps a kebab-case or snake_case name after the prefix clean.
+ * xAI (xai-), Groq (gsk_) and Perplexity (pplx-) API keys: the prefix, then a run of letters and
+ * digits, 20 or more (16 for Perplexity), that is the whole run of token characters after it: no
+ * `-` or `_` joins another word on. Their docs show the prefix (xAI `xai-...`, Groq `gsk_...`) or
+ * a placeholder of letters and digits (Perplexity's: `pplx-`, then 16 of them), not a full format,
+ * so a kebab-case name after the prefix is a name, not a key, however long its first word.
  */
-const PROVIDER_API_KEY_RE = /\b(?:(?:xai-|gsk_)[A-Za-z0-9]{20}|pplx-[A-Za-z0-9]{16})/;
+const PROVIDER_API_KEY_RE =
+	/\b(?:(?:xai-|gsk_)([A-Za-z0-9]{20,})|pplx-([A-Za-z0-9]{16,}))(?![A-Za-z0-9_-])/g;
 
 /**
  * API key: sk-... (OpenAI, Anthropic), a Stripe secret, restricted or organization key, or a
@@ -431,8 +446,8 @@ function isApiKey(value: string): boolean {
 	return (
 		hasPrefixedToken(value, API_KEY_RE, HAS_ALNUM_RE) ||
 		hasPrefixedToken(value, NEW_API_KEY_RE, HAS_CAPITAL_RE) ||
-		hasPrefixedToken(value, GOOGLE_API_KEY_RE, HAS_CAPITAL_RE) ||
-		PROVIDER_API_KEY_RE.test(value)
+		hasPrefixedToken(value, GOOGLE_API_KEY_RE, hasVariedPayload) ||
+		hasPrefixedToken(value, PROVIDER_API_KEY_RE, hasVariedPayload)
 	);
 }
 
@@ -572,11 +587,12 @@ const NEW_SECRET_PREFIX_RE =
 	/\b(?:(?:xapp|xwfp|xoxe-[0-9])-([a-zA-Z0-9-]{20,})(?!\w)|gl(?:oas|dt|rtr?|cbt|ptt|ft|imt|agent|wt|soat|ffct)-([a-zA-Z0-9_-]{20,}))/g;
 
 /**
- * A webhook signing secret: whsec_, then 20 or more characters of base64 (Stripe's are letters and
- * digits; the Standard Webhooks format, which other providers use, is base64, so `+` and `/` can
- * fall in the first 20).
+ * A webhook signing secret: whsec_, then base64 of 24 to 64 bytes (32 or more characters), as the
+ * Standard Webhooks specification serializes one; Stripe's are 32 letters and digits. It must be
+ * the whole run of token characters after the prefix, so a snake_case name after the prefix is a
+ * name, not a secret, however long its first word.
  */
-const WEBHOOK_SECRET_RE = /\bwhsec_[A-Za-z0-9+/]{20}/;
+const WEBHOOK_SECRET_RE = /\bwhsec_([A-Za-z0-9+/]{32,}={0,2})(?![A-Za-z0-9+/=_-])/g;
 
 /** Generic secret: known prefixes, or long hex strings (64+ chars). */
 function isGenericSecret(value: string): boolean {
@@ -585,7 +601,7 @@ function isGenericSecret(value: string): boolean {
 		hasPrefixedToken(value, SECRET_PREFIX_RE, HAS_ALNUM_RE) ||
 		NPM_TOKEN_RE.test(value) ||
 		hasPrefixedToken(value, NEW_SECRET_PREFIX_RE, HAS_CAPITAL_RE) ||
-		WEBHOOK_SECRET_RE.test(value)
+		hasPrefixedToken(value, WEBHOOK_SECRET_RE, hasVariedPayload)
 	) {
 		return true;
 	}

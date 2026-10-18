@@ -382,6 +382,11 @@ describe("Google, xAI, Groq and Perplexity API keys, and webhook signing secrets
 		],
 		[
 			"api_key",
+			"a Google API key of lowercase letters and digits only (the docs describe the alphabet, not a capital in every key)",
+			`AI${"za"}${chars(35, 66).toLowerCase()}`,
+		],
+		[
+			"api_key",
 			`xAI API key (xai-; the docs show the prefix only), per ${XAI}`,
 			`xa${"i-"}${chars(80, 61)}`,
 		],
@@ -397,8 +402,13 @@ describe("Google, xAI, Groq and Perplexity API keys, and webhook signing secrets
 			`pp${"lx-"}${"1234567890"}${"abcdef"}`,
 		],
 		[
+			"api_key",
+			"a payload of exactly four distinct characters, the floor these prefixes take",
+			`pp${"lx-"}${"abcd".repeat(4)}`,
+		],
+		[
 			"generic_secret",
-			`Stripe webhook signing secret (whsec_), per ${STRIPE_WEBHOOKS}`,
+			`Stripe webhook signing secret (whsec_, 32 or more characters), per ${STRIPE_WEBHOOKS}`,
 			`wh${"sec_"}${chars(32, 64)}`,
 		],
 		[
@@ -416,8 +426,7 @@ describe("Google, xAI, Groq and Perplexity API keys, and webhook signing secrets
 	}
 
 	const names: Array<[string, string]> = [
-		["api_key", `AI${"za"}${"-config-service-production-guide-v2"}`],
-		["api_key", `AI${"za"}${chars(35, 66, URLSAFE).replace(/[A-Z]/g, "a")}`],
+		["api_key", `AI${"za"}${"-config-service-production-guide"}`],
 		["api_key", `AI${"za"}Sy${chars(34, 67, URLSAFE)}`],
 		["api_key", `xa${"i-"}config-service-production-v2`],
 		["api_key", `gs${"k_"}feature_toggle_client_library`],
@@ -425,8 +434,29 @@ describe("Google, xAI, Groq and Perplexity API keys, and webhook signing secrets
 		["api_key", `pp${"lx-"}config-loader-module`],
 		["generic_secret", `wh${"sec_"}webhook-signing-secret-rotation`],
 		["generic_secret", `wh${"sec_"}...`],
+		// A long first word, then a dash or underscore and more words: the whole run is a name.
+		["api_key", `pp${"lx-"}internationalization-guide`],
+		["api_key", `gs${"k_"}configurationmanagement-docs`],
+		["api_key", `xa${"i-"}responsibledisclosurepolicy-v2`],
+		["generic_secret", `wh${"sec_"}webhooksigningsecret_rotation`],
+		["generic_secret", `wh${"sec_"}webhooksigningsecretforstagingenv_rotation`],
+		// Shorter than the Standard Webhooks minimum of 32.
+		["generic_secret", `wh${"sec_"}webhooksigningsecret`],
+		["generic_secret", `wh${"sec_"}${chars(31, 68)}`],
+		// Placeholders: one character, repeated.
+		["api_key", `AI${"za"}Sy${"X".repeat(33)}`],
+		["api_key", `xa${"i-"}${"a".repeat(80)}`],
+		["api_key", `gs${"k_"}${"x".repeat(52)}`],
+		["api_key", `pp${"lx-"}${"0".repeat(16)}`],
+		["generic_secret", `wh${"sec_"}${"/".repeat(32)}`],
+		// Three distinct characters, one under the floor.
+		["api_key", `pp${"lx-"}${"abc".repeat(6)}`],
+		["generic_secret", `wh${"sec_"}${"ab/".repeat(11)}`],
+		// One under the minimum of 20.
+		["api_key", `xa${"i-"}${chars(19, 69)}`],
+		["api_key", `gs${"k_"}${chars(19, 70)}`],
 	];
-	it("names and placeholders after these prefixes are not keys: kebab-case, snake_case, a lowercase Google-length payload, a 36-character one, the docs' own placeholders", () => {
+	it("names and placeholders after these prefixes are not keys: kebab-case, snake_case, a long first word joined to more, a 36-character Google payload, a short webhook secret, a repeated character", () => {
 		for (const [kind, text] of names) {
 			expect(types(`const ${text} = 1;`), text).not.toContain(kind);
 		}

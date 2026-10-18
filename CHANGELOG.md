@@ -10,11 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Secret detection now recognises Google, xAI, Groq and Perplexity API keys, and webhook signing secrets.** Before this, they were reported clean under `pii: "block"` and `pii: "redact"`:
-  - Google API keys: `AIza`, then 35 letters, digits, `_` and `-`, holding a capital, as Google's docs describe them.
-  - xAI (`xai-`), Groq (`gsk_`) and Perplexity (`pplx-`) API keys: the prefix, then letters and digits. Their docs show the prefix, or a placeholder of letters and digits, but no full format.
-  - Webhook signing secrets: `whsec_`, then base64, as Stripe and the Standard Webhooks format issue them.
+  - Google API keys: `AIza`, then exactly 35 letters, digits, `_` and `-`, as Google's docs describe them.
+  - xAI (`xai-`), Groq (`gsk_`) and Perplexity (`pplx-`) API keys: the prefix, then 20 or more letters and digits (16 or more for Perplexity) that end the token. Their docs show the prefix, or a placeholder of letters and digits, but no full format.
+  - Webhook signing secrets: `whsec_`, then 32 or more characters of base64, as the Standard Webhooks format specifies and Stripe issues them.
 
-  A kebab-case or snake_case name after one of these prefixes is not a key, and neither is a lowercase Google-length string or the placeholder Groq's docs show.
+  A name after one of these prefixes is not a key: a `-` or `_` that joins another word on makes the whole run a name, however long its first word. Neither is a placeholder: the payload must hold at least four distinct characters, so a repeated `x` is not a key. One shape stays ambiguous: a name of exactly 35 characters after `AIza` has a Google key's shape, and is reported.
 
 ## [5.0.5] - 2026-10-18
 
