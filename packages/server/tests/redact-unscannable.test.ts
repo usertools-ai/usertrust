@@ -12,9 +12,10 @@
  * - `redactSecrets` reads the whole text: a credential far past where a cut used to fall is
  *   redacted. Should a pattern still throw RangeError (forced by a stub of RegExp.prototype.exec),
  *   the whole text is replaced; any other error still throws.
- * - `redactSecrets` finds the caller's key, when it holds a space, with a line break, a tab, a
- *   CRLF or a control character in that place, or none, BEFORE the `Bearer` or api-key pattern
- *   can take its first word and leave the rest.
+ * - `redactSecrets` finds the caller's key with whitespace or a control character anywhere inside
+ *   it (in place of a space the key holds, or within a word, as a hard-wrapped key has), or with a
+ *   space removed, BEFORE the `Bearer` or api-key pattern can take its first part and leave the
+ *   rest. It stays linear on a near miss with long runs between the key's characters.
  * - `joinLines` joins what `/\s*\n\s*\/g` joined, in one pass: 10.4M spaces finish fast.
  * - `internalErrorLine` redacts before sanitizing, while the delimiters the patterns read are still
  *   there (`Bearer\t<token>`); sanitizes the whole text and redacts again, so a key a control
@@ -141,7 +142,7 @@ describe("redactSecrets", () => {
 			expect(redactSecrets("text", [" ", ""])).toBe("text");
 		});
 
-		it("drops empty words, so the pattern never starts or ends with a gap", () => {
+		it("drops the key's own whitespace, so the pattern never starts or ends with a gap", () => {
 			expect(redactSecrets("x abc\ndef y", [" abc  def "])).toBe("x [redacted] y");
 			expect(redactSecrets("x abc  def y", ["abc def"])).toBe("x [redacted] y");
 		});
@@ -159,6 +160,54 @@ describe("redactSecrets", () => {
 			const long = `tenant${" ".repeat(N)}x`;
 			expectSame(redactSecrets(long, [key]), long);
 			expectSame(redactSecrets(`tenant${" ".repeat(N)}key-0123456789`, [key]), "[redacted]");
+			expect(performance.now() - started).toBeLessThan(3_000);
+		});
+	});
+
+	describe("finds a caller's key that whitespace splits within a word, as a hard-wrapped key is", () => {
+		const key = "sk-SECRETsecret-0123456789";
+		const splits = ["\n", "\r\n", " ", "\t", " \n ", "\n\n", String.fromCodePoint(0xa0)];
+		splits.push(String.fromCodePoint(0x2028));
+
+		it("finds it with no head, after Bearer, and as an api-key value", () => {
+			for (const gap of splits) {
+				const split = `sk-SEC${gap}RETsecret-0123456789`;
+				const name = JSON.stringify(gap);
+				expect(redactSecrets(`${split} after`, [key]), name).toBe("[redacted] after");
+				expect(redactSecrets(`Bearer ${split} after`, [key]), name).toBe("Bearer [redacted] after");
+				expect(redactSecrets(`x-api-key: ${split} after`, [key]), name).toBe(
+					"x-api-key: [redacted] after",
+				);
+			}
+		});
+
+		it("finds it split at any point, and at every point at once, but not one character off", () => {
+			for (let at = 1; at < key.length; at++) {
+				for (const gap of ["\n", "\0\x1b", " \t "]) {
+					const text = `${key.slice(0, at)}${gap}${key.slice(at)}`;
+					expect(redactSecrets(text, [key]), JSON.stringify(text)).toBe("[redacted]");
+				}
+			}
+			expect(redactSecrets(Array.from(key).join("\n"), [key])).toBe("[redacted]");
+			expect(redactSecrets("sk-SEC\nRETsecret-012345678X", [key])).toBe(
+				"sk-SEC\nRETsecret-012345678X",
+			);
+		});
+
+		it("stays linear on a near miss with long runs between its characters, and on fragments", () => {
+			const spaced = "tenant key-0123456789";
+			const run = " ".repeat(20_000);
+			const started = performance.now();
+			// Every character but the last, each after a run: each start reads to the X and fails.
+			// Were the key's own space a literal between two gaps, every run would split two ways
+			// and this would take minutes.
+			const near = `${Array.from("tenantkey-012345678").join(run)}${run}X`.repeat(50);
+			expectSame(redactSecrets(near, [spaced]), near);
+			const parts = ["ten", "tenant", "key-01", "tenant key-0123", "0123456789", "\n", "\t"];
+			let fragments = "";
+			for (let i = 0; fragments.length < N; i++)
+				fragments += `${parts[i % parts.length]}${" ".repeat(5_000)}`;
+			expectSame(redactSecrets(fragments, [spaced]), fragments);
 			expect(performance.now() - started).toBeLessThan(3_000);
 		});
 	});
@@ -297,6 +346,30 @@ describe("internalErrorLine redacts the whole message before anything is cut", (
 				clean(out);
 			}
 		});
+	});
+
+	it("replaces a key that whitespace splits within a word: no head, Bearer, api-key, across the clip", () => {
+		const key = "sk-SECRETsecret-0123456789";
+		const splits = [
+			"\n",
+			"\r\n",
+			" ",
+			" \n ",
+			"\n\n",
+			String.fromCodePoint(0xa0),
+			String.fromCodePoint(0x2028),
+		];
+		for (const gap of splits) {
+			const split = `sk-SEC${gap}RETsecret-0123456789`;
+			const name = JSON.stringify(gap);
+			expect(line(split, [key]), name).toBe(`${LINE}Error: [redacted]`);
+			expect(line(`Bearer ${split}`, [key]), name).toBe(`${LINE}Error: Bearer [redacted]`);
+			expect(line(`x-api-key: ${split}`, [key]), name).toBe(`${LINE}Error: x-api-key: [redacted]`);
+		}
+		const pad = "x".repeat(MAX_PRINTED_CHARS - "Error: ".length - 10);
+		const out = line(`${pad}sk-SEC\nRETsecret-0123456789 after`, [key]);
+		expect(out).toBe(`${LINE}Error: ${pad}[redacted]\u2026`);
+		expect(out).not.toContain("RET");
 	});
 
 	it("joins the lines before the clip, so what follows a long run of line breaks is kept", () => {

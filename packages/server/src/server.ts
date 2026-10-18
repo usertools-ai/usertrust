@@ -269,23 +269,29 @@ export function redactApiKeys(text: string): string {
 /** What `redactSecrets` returns for text its patterns could not finish reading. */
 const UNREADABLE = "[redacted: the message could not be scanned]";
 
-/** What stands in a secret's spaces: any run of whitespace or control characters, or nothing. */
-const SECRET_GAP = String.raw`[\s\x00-\x1f\x7f-\x9f]*`;
+/** A whitespace or control character. */
+const GAP_CLASS = String.raw`[\s\x00-\x1f\x7f-\x9f]`;
+const GAP_CHAR = new RegExp(GAP_CLASS);
+/** What may stand between a secret's characters: any run of whitespace or control characters, or nothing. */
+const SECRET_GAP = `${GAP_CLASS}*`;
 const REGEXP_SYNTAX = /[.*+?^${}()|[\]\\]/g;
 
 /**
  * A pattern for `secret` (a bearer key, which may hold spaces) that also finds it where a message
- * has a line break, a tab or a control character in place of a space, or no space at all
- * (sanitizing removes a control character and joins the words). A plain match misses those, and
- * then the `Bearer` pattern, or an api-key one, takes the key's first word and leaves the rest in
- * the line. Finding a key with a space removed redacts text that is not quite the key, which is
- * the safe side. The words are literal and only the gap between them repeats a class, so the
- * pattern reads text of any length in one pass. `null` for a secret with no word in it.
+ * has whitespace or a control character anywhere inside it: in place of a space, or within a word,
+ * as a hard-wrapped key in a dump has (sanitizing removes a control character and joins what was
+ * on either side). A plain match misses those, and then the `Bearer` pattern, or an api-key one,
+ * takes the key's first part and leaves the rest in the line. The secret's own whitespace and
+ * control characters are dropped, and any run of them, or none, may stand between any two of its
+ * other characters. Finding a key with a space removed, or added, redacts text that is not quite
+ * the key, which is the safe side. Each character is literal and only the gap between two of them
+ * repeats a class, never a group, so the pattern reads text of any length without a RangeError.
+ * `null` for a secret with no other character in it.
  */
 function secretPattern(secret: string): RegExp | null {
-	const words = secret.split(/\s+/).filter((word) => word !== "");
-	if (words.length === 0) return null;
-	return new RegExp(words.map((word) => word.replace(REGEXP_SYNTAX, "\\$&")).join(SECRET_GAP), "g");
+	const chars = Array.from(secret).filter((char) => !GAP_CHAR.test(char));
+	if (chars.length === 0) return null;
+	return new RegExp(chars.map((char) => char.replace(REGEXP_SYNTAX, "\\$&")).join(SECRET_GAP), "g");
 }
 
 /**
