@@ -110,7 +110,7 @@ const PHONE_RE = /(?:\+?\d{1,3}[-.\s()]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/;
  * A group of 16 or more digits: longer than any phone number (E.164 allows 15), so an id or a card
  * number, never part of a phone, unless it is a dial string (`isDialString`).
  */
-const OVERSIZED_DIGITS_RE = /\d{16,}/g;
+const OVERSIZED_DIGITS_RE = /\d{16}\d*/g;
 
 /**
  * International access prefixes: 00 in most of the world, 011 in North America, 010 in Japan, 0011
@@ -421,10 +421,10 @@ function hasVariedCapitalPayload(payload: string): boolean {
  * closing `\b`, since the payload can hold `-` and a key whose characters end in `-` has no word
  * boundary there; instead the payload must hold a letter or a digit.
  */
-const API_KEY_RE = /\b(?:sk-|sk_(?:live|test)_)([a-zA-Z0-9_-]{20,})/g;
+const API_KEY_RE = /\b(?:sk-|sk_(?:live|test)_)([a-zA-Z0-9_-]{20}[a-zA-Z0-9_-]*)/g;
 
 /** Stripe's restricted keys (rk_live_, rk_test_) and organization keys (sk_org_). */
-const NEW_API_KEY_RE = /\b(?:rk_(?:live|test)_|sk_org_)([a-zA-Z0-9_-]{20,})/g;
+const NEW_API_KEY_RE = /\b(?:rk_(?:live|test)_|sk_org_)([a-zA-Z0-9_-]{20}[a-zA-Z0-9_-]*)/g;
 
 /**
  * A Google API key: AIza, then exactly 35 letters, digits, `_` and `-`, and no further token
@@ -441,7 +441,7 @@ const GOOGLE_API_KEY_RE = /\bAIza([A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])/g;
  * so a kebab-case name after the prefix is a name, not a key, however long its first word.
  */
 const PROVIDER_API_KEY_RE =
-	/\b(?:(?:xai-|gsk_)([A-Za-z0-9]{20,})|pplx-([A-Za-z0-9]{16,}))(?![A-Za-z0-9_-])/g;
+	/\b(?:(?:xai-|gsk_)([A-Za-z0-9]{20}[A-Za-z0-9]*)|pplx-([A-Za-z0-9]{16}[A-Za-z0-9]*))(?![A-Za-z0-9_-])/g;
 
 /**
  * API key: sk-... (OpenAI, Anthropic), a Stripe secret, restricted or organization key, or a
@@ -474,7 +474,7 @@ function isAwsKey(value: string): boolean {
 }
 
 /** GitHub's prefixes as released: ghp_, gho_, ghs_, ghr_, github_pat_, then 22+ alphanumerics. */
-const GITHUB_TOKEN_RE = /\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[a-zA-Z0-9]{22,}\b/;
+const GITHUB_TOKEN_RE = /\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[a-zA-Z0-9]{22}[a-zA-Z0-9]*\b/;
 
 /**
  * A fine-grained personal access token: github_pat_, 22 alphanumerics, `_`, then 59. The `_` is a
@@ -483,7 +483,7 @@ const GITHUB_TOKEN_RE = /\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[a-zA-Z0-9]{22,}\b
 const GITHUB_FINE_GRAINED_RE = /\bgithub_pat_([a-zA-Z0-9]{22}_[a-zA-Z0-9]{59})/g;
 
 /** A user access token for a GitHub App: ghu_ then 22+ alphanumerics. */
-const GITHUB_USER_TOKEN_RE = /\bghu_([a-zA-Z0-9]{22,})\b/g;
+const GITHUB_USER_TOKEN_RE = /\bghu_([a-zA-Z0-9]{22}[a-zA-Z0-9]*)\b/g;
 
 /** Where a stateless installation token can start: ghs_, the app id, `_`, then a JWT's `eyJ`. */
 const GITHUB_STATELESS_START_RE = /\bghs_[0-9]+_(?=eyJ)/g;
@@ -536,14 +536,15 @@ function isGithubToken(value: string): boolean {
 
 /** Bearer token: Authorization header with 20+ char token */
 function isBearerToken(value: string): boolean {
-	return /\bBearer\s+\S{20,}/.test(value);
+	return /\bBearer\s+\S{20}\S*/.test(value);
 }
 
 /** Where a JWT can start: `eyJ` after a word boundary. */
 const JWT_START_RE = /\beyJ/g;
 
 /** A whole JWT, tried only at a start `JWT_START_RE` found (sticky). */
-const JWT_AT_RE = /eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/y;
+const JWT_AT_RE =
+	/eyJ[a-zA-Z0-9_-]{10}[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]{10}[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]{10}[a-zA-Z0-9_-]*\b/y;
 
 /** The segment class `[a-zA-Z0-9_-]`. */
 function isJwtSegmentChar(c: number): boolean {
@@ -591,17 +592,17 @@ function isPrivateKey(value: string): boolean {
  * `xoxb-service_policy_production` is a name, as 5.0.4 read it.
  */
 const SECRET_PREFIX_RE =
-	/\b(?:xox[bpars]-([a-zA-Z0-9-]+)(?!\w)|(?:SG\.|glpat-)([a-zA-Z0-9_-]{20,}))/g;
+	/\b(?:xox[bpars]-([a-zA-Z0-9-]+)(?!\w)|(?:SG\.|glpat-)([a-zA-Z0-9_-]{20}[a-zA-Z0-9_-]*))/g;
 
 /** npm's access tokens: npm_ then letters and digits, so the closing `\b` stays. */
-const NPM_TOKEN_RE = /\bnpm_[a-zA-Z0-9]{36,}\b/;
+const NPM_TOKEN_RE = /\bnpm_[a-zA-Z0-9]{36}[a-zA-Z0-9]*\b/;
 
 /**
  * Slack's prefixes 5.0.5 added: xapp- (app-level; rotating ones as xoxe.xapp-), xwfp- (workflow)
  * and xoxe-<n>- (the refresh token that rotation issues). The payload holds a capital and at least
  * four distinct characters.
  */
-const SLACK_NEW_PREFIX_RE = /\b(?:xapp|xwfp|xoxe-[0-9])-([a-zA-Z0-9-]{20,})(?!\w)/g;
+const SLACK_NEW_PREFIX_RE = /\b(?:xapp|xwfp|xoxe-[0-9])-([a-zA-Z0-9-]{20}[a-zA-Z0-9-]*)(?!\w)/g;
 
 /**
  * GitLab's prefixes 5.0.5 added: the token types GitLab documents besides glpat- (OAuth
@@ -609,7 +610,7 @@ const SLACK_NEW_PREFIX_RE = /\b(?:xapp|xwfp|xoxe-[0-9])-([a-zA-Z0-9-]{20,})(?!\w
  * SCIM, feature flags client). The payload holds a capital and at least four distinct characters.
  */
 const GITLAB_NEW_PREFIX_RE =
-	/\bgl(?:oas|dt|rtr?|cbt|ptt|ft|imt|agent|wt|soat|ffct)-([a-zA-Z0-9_-]{20,})/g;
+	/\bgl(?:oas|dt|rtr?|cbt|ptt|ft|imt|agent|wt|soat|ffct)-([a-zA-Z0-9_-]{20}[a-zA-Z0-9_-]*)/g;
 
 /**
  * A webhook signing secret: whsec_, then base64 of 24 to 64 bytes (32 or more characters), as the
@@ -617,7 +618,7 @@ const GITLAB_NEW_PREFIX_RE =
  * the whole run of token characters after the prefix, so a snake_case name after the prefix is a
  * name, not a secret, however long its first word.
  */
-const WEBHOOK_SECRET_RE = /\bwhsec_([A-Za-z0-9+/]{32,}={0,2})(?![A-Za-z0-9+/=_-])/g;
+const WEBHOOK_SECRET_RE = /\bwhsec_([A-Za-z0-9+/]{32}[A-Za-z0-9+/]*={0,2})(?![A-Za-z0-9+/=_-])/g;
 
 /** Generic secret: known prefixes, or long hex strings (64+ chars). */
 function isGenericSecret(value: string): boolean {
@@ -633,7 +634,7 @@ function isGenericSecret(value: string): boolean {
 	}
 	// Long hex strings — require at least one digit and one letter to avoid false positives. Every
 	// candidate is checked, so a run of letters or of digits alone cannot hide a real one after it.
-	for (const match of value.matchAll(/\b[0-9a-fA-F]{64,}\b/g)) {
+	for (const match of value.matchAll(/\b[0-9a-fA-F]{64}[0-9a-fA-F]*\b/g)) {
 		if (/[0-9]/.test(match[0]) && /[a-fA-F]/.test(match[0])) return true;
 	}
 	return false;

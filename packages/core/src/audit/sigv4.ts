@@ -90,7 +90,7 @@ function canonicalParts(
 ): { canonical: string; signedHeaders: string } {
 	const merged = new Map<string, string>();
 	for (const [name, value] of Object.entries(req.headers)) {
-		merged.set(name.trim().toLowerCase(), value.trim().replace(/ {2,}/g, " "));
+		merged.set(name.trim().toLowerCase(), value.trim().replace(/ {2} */g, " "));
 	}
 	// These three are ours: a caller-supplied `host` header must never decide
 	// what the signature covers, and the digest must match the bytes we send.

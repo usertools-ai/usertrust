@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Read before upgrading
+
+- **Results can change for existing callers.** The two entries under Added are new detections: text that 5.0.5 reported clean can now be flagged under `pii: "warn"`, blocked under `pii: "block"` and rewritten under `pii: "redact"`. No export, option, default or output shape changed, so no code change is needed. Text 5.0.5 flagged is still flagged, except the placeholders described under Fixed.
+
+### Added
 
 - **Secret detection now recognises Google, xAI, Groq and Perplexity API keys, and webhook signing secrets.** Before this, they were reported clean under `pii: "block"` and `pii: "redact"`:
   - Google API keys: `AIza`, then exactly 35 letters, digits, `_` and `-`, as Google's docs describe them.
@@ -16,13 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   A name after one of these prefixes is not a key: a `-` or `_` that joins another word on makes the whole run a name, however long its first word. Neither is a placeholder: the payload must hold at least four distinct characters, so a repeated `x` is not a key. One shape stays ambiguous: a name of exactly 35 characters after `AIza` has a Google key's shape, and is reported.
 
-- **A placeholder after a prefix 5.0.5 added is no longer reported as a secret.** 5.0.5 flagged placeholder values such as `rk_live_XXXX…`: one capital, repeated, satisfied the capital rule those prefixes take. The payload after each of them must now also hold at least four distinct characters. This covers `ghu_`, the stateless `ghs_` and fine-grained `github_pat_` GitHub tokens, `ASIA`, `rk_live_`, `rk_test_`, `sk_org_`, `xapp-`, `xwfp-`, `xoxe-<n>-`, and GitLab's twelve prefixes besides `glpat-`. The prefixes released before 5.0.5 are unchanged.
-
 - **PII and secret detection now reads values hidden by fullwidth forms or invisible format characters.** Before this, a key with a zero-width space inside, or a key, card number, phone number, SSN, email or IPv4 address typed in fullwidth forms (as an input method may type it), was reported clean under `pii: "block"` and `pii: "redact"`. Each pattern is now also tried on a view of the value:
   - format characters (Unicode category Cf: zero-width spaces and joiners, soft hyphens, bidi marks) removed;
   - the fullwidth forms of ASCII (letters, digits and punctuation) replaced by the ASCII characters, and spaces and punctuation forms whose NFKC form is ASCII (the ideographic and no-break spaces, small and vertical punctuation) replaced by that form.
 
   A value flagged before is still flagged, and redaction still replaces the whole value. Any other character stays as it is, including superscript, subscript, circled, parenthesized and mathematical letters and digits: a footnote marker glued to a number would otherwise read as one more digit and turn it into a phone, SSN or card number. So a value written entirely in superscripts is not read. The view is never more than three times the value's length, and the scan stays linear (full NFKC can turn one character into 18). The view's 1.1 MB lookup table is allocated with the first value that is not ASCII, not when the module is imported.
+
+### Fixed
+
+- **`detectPII`, `redactPII` and `detectInjection` could throw `RangeError` on inputs containing a very long run of letters or digits.** From about 6 million characters in one run (6 MB of plain text; a run of `b` was enough), V8's regular-expression engine ran out of stack on the patterns with an open counted quantifier (`[a-z]{20,}` and the like), and the scan threw "Maximum call stack size exceeded" instead of returning. That covered the 64-character hex rule, the 16-or-more digit rule, every token prefix with a minimum length (`sk-`, `ghp_`, `ghu_`, `npm_`, `glpat-`, `Bearer`, JWTs, `whsec_` and the rest), and the base64 rule in injection detection. Each is now written as the minimum count followed by an open run (`[a-z]{20}[a-z]*`), which matches exactly the same text, and detection completes at 10 million characters. A test fails on any open counted quantifier in the packages' source, so one cannot come back unnoticed.
+
+- **A placeholder after a prefix 5.0.5 added is no longer reported as a secret.** 5.0.5 flagged placeholder values such as `rk_live_XXXX…`: one capital, repeated, satisfied the capital rule those prefixes take. The payload after each of them must now also hold at least four distinct characters. This covers `ghu_`, the stateless `ghs_` and fine-grained `github_pat_` GitHub tokens, `ASIA`, `rk_live_`, `rk_test_`, `sk_org_`, `xapp-`, `xwfp-`, `xoxe-<n>-`, and GitLab's twelve prefixes besides `glpat-`. The prefixes released before 5.0.5 are unchanged.
 
 ## [5.0.5] - 2026-10-18
 

@@ -107,7 +107,7 @@ function checkRoleBoundary(lower: string): boolean {
 // Layer 3: Base64 evasion detection
 // ---------------------------------------------------------------------------
 
-const BASE64_RE = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{20,}={0,2}(?![A-Za-z0-9=])/g;
+const BASE64_RE = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{20}[A-Za-z0-9+/]*={0,2}(?![A-Za-z0-9=])/g;
 
 function checkBase64Evasion(value: string): boolean {
 	const candidates = value.match(BASE64_RE);
