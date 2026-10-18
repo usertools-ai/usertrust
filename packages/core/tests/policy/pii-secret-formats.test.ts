@@ -37,6 +37,11 @@ const GITLAB = "docs.gitlab.com/security/tokens";
 const NPM = "github.blog/changelog/2021-09-23-npm-has-a-new-access-token-format";
 const SENDGRID = "twilio.com/docs/sendgrid/ui/account-and-settings/api-keys";
 const ANTHROPIC = "platform.claude.com/docs/en/manage-claude/authentication";
+const GOOGLE = "docs.cloud.google.com/docs/authentication/api-keys";
+const XAI = "docs.x.ai/build/overview";
+const GROQ = "console.groq.com/docs/production-readiness/security-onboarding";
+const PERPLEXITY = "docs.perplexity.ai/docs/admin/api-key-management";
+const STRIPE_WEBHOOKS = "docs.stripe.com/webhooks";
 
 /** A JWT's shape: three base64url segments, the header starting `eyJ` (`{"`). */
 const jwt = (seed: number): string =>
@@ -368,6 +373,104 @@ describe("the capital-letter rule for the prefixes this release adds", () => {
 	}
 });
 
+describe("Google, xAI, Groq and Perplexity API keys, and webhook signing secrets", () => {
+	const rows: Array<[string, string, string]> = [
+		[
+			"api_key",
+			`Google API key (AIza, then 35 letters, digits, _ and -, upper and lower case), per ${GOOGLE}`,
+			`AI${"za"}Sy${chars(33, 60, URLSAFE)}`,
+		],
+		[
+			"api_key",
+			"a Google API key of lowercase letters and digits only (the docs describe the alphabet, not a capital in every key)",
+			`AI${"za"}${chars(35, 66).toLowerCase()}`,
+		],
+		[
+			"api_key",
+			`xAI API key (xai-; the docs show the prefix only), per ${XAI}`,
+			`xa${"i-"}${chars(80, 61)}`,
+		],
+		[
+			"api_key",
+			`Groq API key (gsk_; the docs show the prefix only), per ${GROQ}`,
+			`gs${"k_"}${chars(52, 62)}`,
+		],
+		["api_key", `Perplexity API key (pplx-), per ${PERPLEXITY}`, `pp${"lx-"}${chars(48, 63)}`],
+		[
+			"api_key",
+			`Perplexity's documented placeholder shape (pplx-, then 16 letters and digits), per ${PERPLEXITY}`,
+			`pp${"lx-"}${"1234567890"}${"abcdef"}`,
+		],
+		[
+			"api_key",
+			"a payload of exactly four distinct characters, the floor these prefixes take",
+			`pp${"lx-"}${"abcd".repeat(4)}`,
+		],
+		[
+			"generic_secret",
+			`Stripe webhook signing secret (whsec_, 32 or more characters), per ${STRIPE_WEBHOOKS}`,
+			`wh${"sec_"}${chars(32, 64)}`,
+		],
+		[
+			"generic_secret",
+			"a base64 webhook signing secret (whsec_, the Standard Webhooks format) with + and / early",
+			`wh${"sec_"}Ab/c+${chars(27, 65)}=`,
+		],
+	];
+	for (const [kind, name, token] of rows) {
+		it(name, () => {
+			for (const text of [token, `KEY=${token}`, JSON.stringify({ secret: token })]) {
+				expect(types(text), text.slice(0, 16)).toContain(kind);
+			}
+		});
+	}
+
+	const names: Array<[string, string]> = [
+		["api_key", `AI${"za"}${"-config-service-production-guide"}`],
+		["api_key", `AI${"za"}Sy${chars(34, 67, URLSAFE)}`],
+		["api_key", `xa${"i-"}config-service-production-v2`],
+		["api_key", `gs${"k_"}feature_toggle_client_library`],
+		["api_key", `gs${"k_"}your_secret_key_here`],
+		["api_key", `pp${"lx-"}config-loader-module`],
+		["generic_secret", `wh${"sec_"}webhook-signing-secret-rotation`],
+		["generic_secret", `wh${"sec_"}...`],
+		// A long first word, then a dash or underscore and more words: the whole run is a name.
+		["api_key", `pp${"lx-"}internationalization-guide`],
+		["api_key", `gs${"k_"}configurationmanagement-docs`],
+		["api_key", `xa${"i-"}responsibledisclosurepolicy-v2`],
+		["generic_secret", `wh${"sec_"}webhooksigningsecret_rotation`],
+		["generic_secret", `wh${"sec_"}webhooksigningsecretforstagingenv_rotation`],
+		// Shorter than the Standard Webhooks minimum of 32.
+		["generic_secret", `wh${"sec_"}webhooksigningsecret`],
+		["generic_secret", `wh${"sec_"}${chars(31, 68)}`],
+		// Placeholders: one character, repeated.
+		["api_key", `AI${"za"}Sy${"X".repeat(33)}`],
+		["api_key", `xa${"i-"}${"a".repeat(80)}`],
+		["api_key", `gs${"k_"}${"x".repeat(52)}`],
+		["api_key", `pp${"lx-"}${"0".repeat(16)}`],
+		["generic_secret", `wh${"sec_"}${"/".repeat(32)}`],
+		// Three distinct characters, one under the floor.
+		["api_key", `pp${"lx-"}${"abc".repeat(6)}`],
+		["generic_secret", `wh${"sec_"}${"ab/".repeat(11)}`],
+		// One under the minimum of 20.
+		["api_key", `xa${"i-"}${chars(19, 69)}`],
+		["api_key", `gs${"k_"}${chars(19, 70)}`],
+	];
+	it("names and placeholders after these prefixes are not keys: kebab-case, snake_case, a long first word joined to more, a 36-character Google payload, a short webhook secret, a repeated character", () => {
+		for (const [kind, text] of names) {
+			expect(types(`const ${text} = 1;`), text).not.toContain(kind);
+		}
+	});
+
+	it("a decoy after one of these prefixes does not hide a real key after it", () => {
+		for (const [kind, , token] of rows) {
+			const decoy = names.find(([k, t]) => k === kind && t.slice(0, 3) === token.slice(0, 3));
+			if (decoy === undefined) continue;
+			expect(types(`${decoy[1]} then ${token}`), decoy[1]).toContain(kind);
+		}
+	});
+});
+
 describe("identifiers that share a new prefix", () => {
 	// Short identifiers are clean. A long one that begins with a whole documented prefix is
 	// flagged, as sk_live_ always has been: over-redaction is the safe direction for a secret.
@@ -424,6 +527,113 @@ describe("identifiers that share a new prefix", () => {
 			["generic_secret", `xo${"xb-"}${dashes}`],
 		] as const) {
 			expect(types(text), text).not.toContain(kind);
+		}
+	});
+});
+
+describe("a placeholder after a prefix 5.0.5 added is not a token", () => {
+	// One capital repeated: it satisfies the capital rule these prefixes already had, so 5.0.5
+	// reported it. Each prefix 5.0.5 added now also needs four distinct characters in its payload.
+	// The prefixes released before 5.0.5 are unchanged.
+	const X = (n: number): string => "X".repeat(n);
+	const rows: Array<[string, string, string, string]> = [
+		[
+			"github_token",
+			"GitHub user access token (ghu_)",
+			`gh${"u_"}${chars(36, 90)}`,
+			`gh${"u_"}${X(36)}`,
+		],
+		[
+			"github_token",
+			"GitHub stateless installation token (ghs_<app id>_<JWT>)",
+			`gh${"s_"}1234567_${jwt(91)}`,
+			`gh${"s_"}1234567_ey${"J"}${X(30)}.${X(60)}.${X(43)}`,
+		],
+		[
+			"github_token",
+			"GitHub fine-grained personal access token (github_pat_)",
+			`github${"_pat_"}${chars(22, 94)}_${chars(59, 95)}`,
+			`github${"_pat_"}${X(22)}_${X(59)}`,
+		],
+		[
+			"aws_key",
+			"AWS temporary access key id (ASIA)",
+			`AS${"IA"}${chars(16, 96, `${UPPER}234567`)}`,
+			`AS${"IA"}${X(16)}`,
+		],
+		[
+			"api_key",
+			"Stripe restricted (rk_live_)",
+			`rk${"_live_"}${chars(99, 97)}`,
+			`rk${"_live_"}${X(99)}`,
+		],
+		[
+			"api_key",
+			"Stripe restricted (rk_test_)",
+			`rk${"_test_"}${chars(99, 98)}`,
+			`rk${"_test_"}${X(99)}`,
+		],
+		[
+			"api_key",
+			"Stripe organization (sk_org_)",
+			`sk${"_org_"}${chars(99, 99)}`,
+			`sk${"_org_"}${X(99)}`,
+		],
+		[
+			"generic_secret",
+			"Slack app-level (xapp-)",
+			`xa${"pp-"}${chars(40, 100)}`,
+			`xa${"pp-"}${X(40)}`,
+		],
+		[
+			"generic_secret",
+			"Slack workflow (xwfp-)",
+			`xw${"fp-"}${chars(40, 101)}`,
+			`xw${"fp-"}${X(40)}`,
+		],
+		[
+			"generic_secret",
+			"Slack refresh (xoxe-1-)",
+			`xo${"xe-"}1-${chars(140, 102)}`,
+			`xo${"xe-"}1-${X(140)}`,
+		],
+		...[
+			"gloas-",
+			"gldt-",
+			"glrt-",
+			"glrtr-",
+			"glcbt-",
+			"glptt-",
+			"glft-",
+			"glimt-",
+			"glagent-",
+			"glwt-",
+			"glsoat-",
+			"glffct-",
+		].map((prefix, k): [string, string, string, string] => [
+			"generic_secret",
+			`GitLab (${prefix})`,
+			`${prefix.slice(0, 2)}${prefix.slice(2)}${chars(20, 110 + k)}`,
+			`${prefix.slice(0, 2)}${prefix.slice(2)}${X(20)}`,
+		]),
+	];
+	for (const [kind, name, token, placeholder] of rows) {
+		it(`${name}: a real-shaped token is detected, and one character repeated is not`, () => {
+			expect(types(`TOKEN=${token}`), token.slice(0, 12)).toContain(kind);
+			expect(types(`TOKEN=${placeholder}`), placeholder.slice(0, 12)).not.toContain(kind);
+			// A placeholder before the real token does not hide it.
+			expect(types(`${placeholder} then ${token}`), placeholder.slice(0, 12)).toContain(kind);
+		});
+	}
+
+	it("the prefixes released before 5.0.5 still read one character repeated as a token", () => {
+		for (const [kind, token] of [
+			["github_token", `gh${"p_"}${X(36)}`],
+			["aws_key", `AK${"IA"}${X(16)}`],
+			["api_key", `sk${"_live_"}${X(99)}`],
+			["generic_secret", `gl${"pat-"}${X(20)}`],
+		] as const) {
+			expect(types(token), token.slice(0, 8)).toContain(kind);
 		}
 	});
 });

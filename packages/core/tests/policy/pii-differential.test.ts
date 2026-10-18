@@ -88,6 +88,11 @@ const GAINED: ReadonlyArray<[Kind, string]> = [
 	],
 	["generic_secret", `xw${"fp-"}${alnum(40, 14)}`],
 	["generic_secret", `xo${"xe-"}1-${alnum(140, 32)}`],
+	["api_key", `AI${"za"}Sy${alnum(33, 33)}`],
+	["api_key", `xa${"i-"}${alnum(80, 34)}`],
+	["api_key", `gs${"k_"}${alnum(52, 35)}`],
+	["api_key", `pp${"lx-"}${alnum(48, 36)}`],
+	["generic_secret", `wh${"sec_"}${alnum(32, 37)}`],
 	["generic_secret", `gl${"dt-"}${alnum(20, 15)}`],
 	["generic_secret", `gl${"rt-"}${alnum(20, 16)}`],
 	["generic_secret", `gl${"agent-"}${alnum(20, 17)}`],
@@ -321,6 +326,11 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 			"glagent-",
 			"glft-",
 			"npm_",
+			"AIza",
+			"xai-",
+			"gsk_",
+			"pplx-",
+			"whsec_",
 		];
 		const words = [
 			"config",
@@ -348,21 +358,67 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 			while (out.length < 24 + Math.floor(rand() * 30)) out += joiner + pick();
 			return out;
 		};
+		// A long first word, then more words: the first word alone fills a minimum run.
+		const longWords = [
+			"internationalization",
+			"configurationmanagement",
+			"responsibledisclosurepolicy",
+			"webhooksigningsecretforstagingenv",
+		];
+		// The prefixes whose payload must hold four distinct characters: those 5.0.5 and 5.0.6 add.
+		const placeholderPrefixes = [
+			"rk_live_",
+			"sk_org_",
+			"ASIA",
+			"ghu_",
+			"xapp-",
+			"xwfp-",
+			"xoxe-1-",
+			"gldt-",
+			"glrt-",
+			"glagent-",
+			"glft-",
+			"AIza",
+			"xai-",
+			"gsk_",
+			"pplx-",
+			"whsec_",
+		];
 		const texts: string[] = [];
 		for (const prefix of prefixes) {
 			for (let i = 0; i < 40; i++) {
 				texts.push(prefix + phrase("-"), prefix + phrase("_"), `${prefix}${"-".repeat(20 + i)}`);
+			}
+			for (const word of longWords) {
+				texts.push(`${prefix}${word}-${phrase("-")}`, `${prefix}${word}_${phrase("_")}`);
+			}
+			if (placeholderPrefixes.includes(prefix)) {
+				// Placeholders: one character, repeated.
+				for (const c of ["x", "X", "a", "0", "/"]) {
+					for (const n of [16, 20, 32, 33, 35, 40, 52, 80]) texts.push(prefix + c.repeat(n));
+				}
 			}
 			texts.push(
 				`${prefix} is the start of a sentence about tokens.`,
 				`use ${prefix}something here`,
 			);
 		}
+		// The two GitHub formats with a structure of their own, as placeholders.
+		for (const c of ["x", "X", "a", "0"]) {
+			texts.push(
+				`ghs_1234567_eyJ${c.repeat(30)}.${c.repeat(60)}.${c.repeat(43)}`,
+				`github_pat_${c.repeat(22)}_${c.repeat(59)}`,
+			);
+		}
 		const kinds = ["api_key", "aws_key", "github_token", "generic_secret"] as const;
 		const gained = kinds.flatMap((kind) =>
 			texts.filter((t) => now(kind)(t) && !before(kind)(t)).map((t) => `${kind}: ${t}`),
 		);
-		expect(gained).toEqual([]);
+		// With no capital rule, a name of exactly 35 letters, digits, `_` and `-` after AIza, its words
+		// joined by `-` or `_`, has a Google key's shape and is reported: the one shape here that a real
+		// key and a name share.
+		const googleLength = (t: string) => /^api_key: AIza(?=[^-_]*[-_])[A-Za-z0-9_-]{35}$/.test(t);
+		expect(gained.filter((t) => !googleLength(t))).toEqual([]);
 	});
 
 	it("redaction: two non-enumerable and two enumerable properties, a getter among them, copied as 5.0.4 copied them", () => {
