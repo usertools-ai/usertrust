@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **PII detection no longer misses a value that sits beside one it rejects, and no longer reads digits inside an identifier as a phone number.** Four checks are fixed, and each still takes time proportional to the message:
+  - **IPv4 addresses.** Only the first IPv4-shaped candidate in a string was checked, so `1.2.3.256 192.168.1.1` read as clean. Every candidate is now checked, including one that overlaps a rejected one (`999.1.2.3.4` holds `1.2.3.4`).
+  - **Long hex secrets.** Only the first run of 64 or more hex characters was checked, so a run of letters alone, or digits alone, hid a real secret after it. Every run is now checked.
+  - **Card numbers.** A number next to a card joined the card's candidate and failed the Luhn check. So a card beside its expiry (`4111-1111-1111-1111 12/29`) passed as clean under `pii: "block"` and `pii: "redact"`. Now, within each run of digit groups joined by spaces or dashes, every span of whole groups that holds 13 to 19 digits is checked. A digit string with no separator is still checked only whole, so a long numeric id gains no card inside it. As a result, `4111 1111 1111 1111 1111` is now detected: its first four groups are a valid card.
+  - **Phone numbers.** Ten digits inside a word matched, so a tool call id such as `toolu_1234567890123abc` read as a phone: under `pii: "block"` that blocked a request with no PII in it, and under `pii: "redact"` different tool ids got the same placeholder. Now a group of digits joined to a letter or an underscore (`toolu_1234…`, `…5309z`, `SKU12`) is treated as part of that word, not as part of a phone number. So is a group of 16 or more digits, longer than any phone number (an order id such as `12345678901234567890`, or a card number written without spaces, which is still detected as a card), unless it is a number dialled with an international access prefix: 00, 011, 010 or 0011, then at most 15 digits (`0114915123456789`). Every other format detected before is still detected, spaced and international ones included (`555  867 5309`, `+44 20 7946 0958`, `5 5 5 8 6 7 5 3 0 9`, and numbers spaced with non-breaking spaces).
+
 ## [5.0.4] - 2026-10-17
 
 ### Read before upgrading

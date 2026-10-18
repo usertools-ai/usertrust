@@ -63,6 +63,93 @@ describe("detectPII — phone", () => {
 		expect(result.types).toContain("phone");
 	});
 
+	it("detects a phone written with repeated separators, or after punctuation", () => {
+		for (const text of [
+			"call 555  867 5309 today",
+			"+1 (234)  567 - 8901",
+			"tel:5558675309",
+			"(5558675309)",
+			"5 5 5 8 6 7 5 3 0 9",
+		]) {
+			expect(detectPII({ text }).types, text).toContain("phone");
+		}
+	});
+
+	it("detects international numbers written with spaces", () => {
+		for (const text of [
+			"call +44 20 7946 0958 today",
+			"+33 1 42 68 53 00",
+			"+49 30 901820",
+			"+61 2 9374 4000",
+			"+91 98765 43210",
+		]) {
+			expect(detectPII({ text }).types, text).toContain("phone");
+		}
+	});
+
+	it("detects a phone spaced with any whitespace, non-breaking spaces included", () => {
+		const nbsp = String.fromCodePoint(0xa0);
+		const narrow = String.fromCodePoint(0x202f);
+		for (const text of [
+			["555", "867", "5309"].join(nbsp),
+			["+44", "20", "7946", "0958"].join(narrow),
+			["+33", "1", "42", "68", "53", "00"].join(nbsp),
+		]) {
+			expect(detectPII({ text }).types, JSON.stringify(text)).toContain("phone");
+		}
+	});
+
+	it("does not read part of a group of 16 or more digits as a phone", () => {
+		for (const text of [
+			'order_id: "12345678901234567890"',
+			"12345678901234567",
+			"4111111111111111",
+			// "00" and then 16 or 17 digits: it starts like a dial string, but is too long for one.
+			"001234567890123456",
+			"0012345678901234567",
+		]) {
+			expect(detectPII({ text }).types, text).not.toContain("phone");
+		}
+		// The card is still a card.
+		expect(detectPII({ text: "4111111111111111" }).types).toContain("credit_card");
+	});
+
+	it("detects a number dialled with an international access prefix, 16 digits or more", () => {
+		for (const text of [
+			"Call 0114915123456789",
+			"0114915123456789",
+			"00491512345678901",
+			"0011 61 2 9374 4000",
+			"001161293744000",
+			"0104915123456789",
+		]) {
+			expect(detectPII({ text }).types, text).toContain("phone");
+		}
+	});
+
+	it("detects a phone after digits that belong to a word", () => {
+		// "12" belongs to "SKU12" and is left out; the number after it is still a phone.
+		expect(detectPII({ text: "SKU12 555 867 5309" }).types).toContain("phone");
+	});
+
+	it("does not read digits inside an identifier as a phone", () => {
+		for (const text of [
+			"toolu_1234567890123abc",
+			"call_12345678901",
+			"id-x5558675309y",
+			"ref-5558675309z",
+		]) {
+			expect(detectPII({ text }).types, text).not.toContain("phone");
+		}
+	});
+
+	it("leaves tool call ids unredacted, so two different ids stay different", () => {
+		const ids = { use: "toolu_1234567890123abc", result: "toolu_9876543210987xyz" };
+		const redacted = redactPII(ids);
+		expect(redacted.detection.found).toBe(false);
+		expect(redacted.data).toEqual(ids);
+	});
+
 	it("does not false-positive on short numbers", () => {
 		const result = detectPII({ code: "12345" });
 		expect(result.types).not.toContain("phone");
@@ -147,6 +234,21 @@ describe("detectPII — IPv4", () => {
 	it("does not detect partial IPs", () => {
 		const result = detectPII({ partial: "192.168.1" });
 		expect(result.types).not.toContain("ipv4");
+	});
+
+	it("detects an address after an out-of-range candidate", () => {
+		for (const text of ["1.2.3.256 192.168.1.1", "version 999.999.999.999, host 10.0.0.1"]) {
+			expect(detectPII({ text }).types, text).toContain("ipv4");
+		}
+	});
+
+	it("detects an address that overlaps an out-of-range candidate", () => {
+		// The first candidate is 999.1.2.3; the address 1.2.3.4 starts inside it.
+		expect(detectPII({ text: "999.1.2.3.4" }).types).toContain("ipv4");
+	});
+
+	it("does not detect a string of out-of-range candidates only", () => {
+		expect(detectPII({ text: "1.2.3.256 300.1.1.1 999.1.2.3" }).types).not.toContain("ipv4");
 	});
 });
 
@@ -277,10 +379,39 @@ describe("detectPII — credit card edge cases", () => {
 		expect(result.types).not.toContain("credit_card");
 	});
 
-	it("does not detect a number that is too long after stripping", () => {
-		// 20+ digits — exceeds 19 digit limit
+	it("detects a card followed by one more group of digits", () => {
+		// 20 digits in all, but the first four groups are the Luhn-valid card 4111111111111111.
 		const result = detectPII({ card: "4111 1111 1111 1111 1111" });
+		expect(result.types).toContain("credit_card");
+	});
+
+	it("does not detect a bare run that is too long: a run with no separator is checked whole", () => {
+		const result = detectPII({ id: "41111111111111111111" });
 		expect(result.types).not.toContain("credit_card");
+	});
+
+	it("detects a card beside its expiry or after another number", () => {
+		for (const text of [
+			"4111-1111-1111-1111 12/29",
+			"card 4111 1111 1111 1111 exp 12 29",
+			"12 4111 1111 1111 1111",
+			"4111 1111 1111 1111 1234 5678",
+		]) {
+			expect(detectPII({ text }).types, text).toContain("credit_card");
+		}
+	});
+
+	it("does not detect a Luhn-invalid number beside its expiry", () => {
+		// No span of whole groups here, with 13-19 digits, passes Luhn.
+		for (const text of ["4111 1111 1111 1112 12 29", "4111 1111 1111 1112 1234 5678"]) {
+			expect(detectPII({ text }).types, text).not.toContain("credit_card");
+		}
+	});
+
+	it("detects cards of 13 and of 19 digits", () => {
+		for (const card of ["4222222222222", "4111111111111111110"]) {
+			expect(detectPII({ card }).types, card).toContain("credit_card");
+		}
 	});
 
 	it("does not detect when candidate has non-digit characters after stripping", () => {
@@ -633,6 +764,16 @@ describe("detectPII — generic_secret", () => {
 		const result = detectPII({ token: "xoxb-12345-67890-abcdef" });
 		expect(result.found).toBe(true);
 		expect(result.types).toContain("generic_secret");
+	});
+
+	it("detects a long hex secret after a run of hex letters or of digits alone", () => {
+		const secret = "a1b2c3d4e5f6".repeat(6);
+		for (const text of [`${"a".repeat(64)} ${secret}`, `${"1".repeat(64)} ${secret}`]) {
+			expect(detectPII({ text }).types).toContain("generic_secret");
+		}
+		expect(detectPII({ text: `${"a".repeat(64)} ${"1".repeat(64)}` }).types).not.toContain(
+			"generic_secret",
+		);
 	});
 
 	it("detects long hex string (64+ chars)", () => {

@@ -95,10 +95,18 @@ const WORST: ReadonlyArray<[string, (n: number) => string]> = [
 	["email: @ then a domain run with no TLD", after("x@", "x.")],
 	["email: an @ every other character", run("x@")],
 	["phone: digits and dots", run("12.")],
+	["phone: three-digit groups, repeated separators", run("123 - ")],
+	["phone: a digit, then parentheses", after("1", "(")],
+	["phone: one run of digits and spaces, glued to words", after("x", "1 ", "1x")],
+	["phone: a run of separators, glued to words", after("x", " (-.)+", "1x")],
+	["phone: short runs between words", run("x12 ")],
+	["phone: 15-digit groups, one short of oversized", run("123456789012345 ")],
 	["ssn: digits", run("1")],
 	["ipv4: digits and dots", run("1.")],
+	["ipv4: out-of-range candidates", run("999.")],
 	["credit card: digits, then a letter", run("1", "x")],
 	["credit card: digits and spaces", run("1 ")],
+	["credit card: two-digit groups and dashes", run("12-")],
 	["api key: sk- then dashes, then a dot", after("sk-", "-", ".")],
 	["api key: repeated starts", run(".sk-")],
 	["aws key: repeated prefix", run("AKIA")],
@@ -114,6 +122,7 @@ const WORST: ReadonlyArray<[string, (n: number) => string]> = [
 	["generic secret: SG. then dashes", after("SG.", "-", ".")],
 	["generic secret: repeated npm_", run("-npm_")],
 	["generic secret: hex run, then g", run("a", "g")],
+	["generic secret: hex-letter runs", run(`${"a".repeat(64)} `)],
 	["injection intent: verb then spaces", after("ignore", " ")],
 	["injection intent: repeated verb and filler", run("ignore all ")],
 	["base64: run then ===", run("A", "===")],
@@ -263,6 +272,98 @@ describe("the linear scans give the old patterns' answers", () => {
 			texts,
 			(s) => OLD_JWT.test(s),
 			(s) => detectPII(s).types.includes("jwt"),
+		);
+	});
+
+	it("phone: with no letter or underscore in the text, the old whole-text answers, a group of 16+ digits splitting it", () => {
+		const OLD_PHONE = /(?:\+?\d{1,3}[-.\s()]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/;
+		// A group of 16 or more digits splits the text, unless it is a dial string (00, 011, 010 or
+		// 0011, then at most 15 digits).
+		const split = (s: string): string =>
+			s.replace(/\d{16,}/g, (g) =>
+				["0011", "011", "010", "00"].some((p) => g.startsWith(p) && g.length - p.length <= 15)
+					? g
+					: "|",
+			);
+		const pieces = [
+			"5",
+			"55",
+			"555",
+			"1234",
+			"00",
+			"011",
+			" ",
+			"  ",
+			"-",
+			".",
+			"(",
+			")",
+			"+",
+			"+44",
+			"/",
+			",",
+		];
+		sameAnswers(
+			corpus(5, pieces, 10, 50_000),
+			(s) => OLD_PHONE.test(split(s).replace(/\s+/g, "")),
+			(s) => detectPII(s).types.includes("phone"),
+		);
+	});
+
+	it("phone: a digit group glued to a word is left out, and the rest is checked as before", () => {
+		// The reference splits the text into runs of phone characters and the words between them,
+		// drops a run's edge digits where a word character touches them, splits what is left at each
+		// group of 16 or more digits, and tests the old pattern on it with its whitespace removed.
+		const OLD_PHONE = /(?:\+?\d{1,3}[-.\s()]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/;
+		const reference = (s: string): boolean => {
+			const parts = s.split(/([^\d\s()+.-]+)/);
+			return parts.some((part, k) => {
+				if (k % 2 === 1) return false;
+				let rest = part;
+				if (/\w$/.test(parts[k - 1] ?? "")) rest = rest.replace(/^\d+/, "");
+				if (/^\w/.test(parts[k + 1] ?? "")) rest = rest.replace(/\d+$/, "");
+				const split = rest.replace(/\d{16,}/g, (g) =>
+					["0011", "011", "010", "00"].some((p) => g.startsWith(p) && g.length - p.length <= 15)
+						? g
+						: "|",
+				);
+				return OLD_PHONE.test(split.replace(/\s+/g, ""));
+			});
+		};
+		const pieces = ["5", "555", "1234", " ", "-", ".", "(", "+", "x", "_", "id", ":", ","];
+		sameAnswers(corpus(6, pieces, 12, 50_000), reference, (s) =>
+			detectPII(s).types.includes("phone"),
+		);
+	});
+
+	it("credit card: the span sums give a digit-by-digit Luhn check of every span", () => {
+		// The reference checks every span of whole groups in a run, joining its digits and running
+		// Luhn over them one by one; the detector gets each span's sum from prefix sums instead.
+		const RUN = /(?<!\w)\d+(?:[\s-]+\d+)*(?!\w)/g;
+		const luhn = (digits: string): boolean => {
+			let sum = 0;
+			for (let i = 0; i < digits.length; i++) {
+				const d = Number(digits[digits.length - 1 - i]);
+				sum += i % 2 === 1 ? (d * 2 > 9 ? d * 2 - 9 : d * 2) : d;
+			}
+			return sum % 10 === 0;
+		};
+		const reference = (s: string): boolean => {
+			for (const run of s.matchAll(RUN)) {
+				const groups = run[0].split(/[\s-]+/);
+				for (let i = 0; i < groups.length; i++) {
+					let digits = "";
+					for (let j = i; j < groups.length; j++) {
+						digits += groups[j];
+						if (digits.length >= 13 && digits.length <= 19 && luhn(digits)) return true;
+					}
+				}
+			}
+			return false;
+		};
+		const pieces = ["4111", "1111", "4242", "378", "5", "12", "0", " ", " ", "-", "  ", "/", "x"];
+		sameAnswers(corpus(4, pieces, 12, 50_000), reference, (s) =>
+			detectPII(s).types.includes("credit_card"),
 		);
 	});
 
