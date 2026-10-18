@@ -442,7 +442,10 @@ expected_version() {
 # under it, `## [<version>] - <date>`, must hold at least one entry under a class heading. Prints
 # "<version> <class>", the class being the highest among its entries'. A heading that is not a
 # class or a note, or an entry under no heading, is refused: an unknown heading could otherwise
-# hide an entry from the count. The classes are docs/releasing.md's "Choosing the version".
+# hide an entry from the count. An entry is a list item of any Markdown marker (`-`, `*`, `+`,
+# `1.`, `1)`) at the line's start; one indented by up to three spaces is accepted only under an
+# entry, as its sub-item, and refused anywhere else, so no entry is silently not counted. The
+# classes are docs/releasing.md's "Choosing the version".
 CHANGELOG_PY='
 import re, sys
 CLASSES = {
@@ -452,6 +455,8 @@ CLASSES = {
 }
 NOTES = {"Read before upgrading", "Known issues"}
 RANK = {"patch": 1, "minor": 2, "major": 3}
+ENTRY = re.compile(r"(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
+NESTED = re.compile(r" {1,3}(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
 
 def fail(msg):
     print(msg, file=sys.stderr)
@@ -466,7 +471,7 @@ for line in lines:
         sections[-1][1].append(line)
 if not sections or sections[0][0] != "[Unreleased]":
     fail("CHANGELOG.md does not begin with a ## [Unreleased] section.")
-left = [l for l in sections[0][1] if l.startswith("- ")]
+left = [l for l in sections[0][1] if ENTRY.match(l) or NESTED.match(l)]
 if left:
     fail("[Unreleased] still holds %d entr%s. Cut every entry into the release section before dispatching (docs/releasing.md, \"Cutting the CHANGELOG\")." % (len(left), "y" if len(left) == 1 else "ies"))
 if len(sections) < 2:
@@ -474,17 +479,21 @@ if len(sections) < 2:
 m = re.fullmatch(r"\[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}", sections[1][0])
 if not m:
     fail("The section under [Unreleased] is \"## %s\", not \"## [major.minor.patch] - YYYY-MM-DD\"." % sections[1][0])
-heading, best, counts = None, None, []
+heading, best, counts, under = None, None, [], False
 for line in sections[1][1]:
     if line.startswith("### "):
-        heading = line[4:].strip()
+        heading, under = line[4:].strip(), False
         if heading not in CLASSES and heading not in NOTES:
             fail("The %s section has a heading \"%s\", which is neither a class (%s) nor a note (%s)." % (m.group(1), heading, ", ".join(CLASSES), ", ".join(sorted(NOTES))))
         if heading in CLASSES:
             counts.append([heading, 0])
-    elif line.startswith("- "):
+    elif NESTED.match(line):
+        if not under:
+            fail("The %s section has an indented entry that is not under an entry: \"%s\". Start an entry at the line\x27s start." % (m.group(1), line.strip()))
+    elif ENTRY.match(line):
         if heading is None:
             fail("The %s section has an entry under no ### heading." % m.group(1))
+        under = True
         if heading in CLASSES:
             counts[-1][1] += 1
             c = CLASSES[heading]

@@ -39,8 +39,9 @@ tree) and refuses the release, before anything is built, when:
 - `[Unreleased]` still holds an entry (cut them first: "Cutting the CHANGELOG", below);
 - the section under `[Unreleased]` is not `## [X.Y.Z] - YYYY-MM-DD`, or `X.Y.Z` is not the
   version this dispatch makes (the committed version bumped by the `version` input);
-- that section has no entry under a class heading, an entry under no heading, or a heading
-  that is neither a class nor a note;
+- that section has no entry under a class heading, an entry under no heading, an indented
+  entry that is not a sub-item of an entry, or a heading that is neither a class nor a note. An
+  entry is a list item of any Markdown marker (`-`, `*`, `+`, `1.`, `1)`), so none is skipped;
 - the `version` input is not exactly the highest class among its entries. Both directions are
   refused: a patch release of a section with an `Added` entry, and a major release of a section
   with nothing under `Removed` or `Breaking`.

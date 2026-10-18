@@ -85,16 +85,17 @@ jobs:
           REF: ${{ github.ref }}
           ALLOW_EARLY_MAJOR: ${{ inputs.allow_early_major }}
         run: |
+          # A republish (on a tag or on master) skips the bump check, which is what reads
+          # allow_early_major; its reason is already in the release tag.
+          if [ "$REPUBLISH" = true ] && [ -n "$ALLOW_EARLY_MAJOR" ]; then
+            echo "::error::allow_early_major is for a new major release, not a republish. Clear it."
+            exit 1
+          fi
           case "$REF" in
             refs/heads/master) ;;
             refs/tags/v*)
               if [ "$REPUBLISH" != true ]; then
                 echo "::error::A tag ref is only for republish. Dispatch a new release on master."
-                exit 1
-              fi
-              # A republish skips the bump check, which is what reads allow_early_major.
-              if [ -n "$ALLOW_EARLY_MAJOR" ]; then
-                echo "::error::allow_early_major is for a new major release, not a republish. Clear it."
                 exit 1
               fi
               ;;

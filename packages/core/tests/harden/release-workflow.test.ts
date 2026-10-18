@@ -239,7 +239,11 @@ describe("publish.yml", () => {
 		// A republish skips assert-bump, the only check that reads the reason.
 		const ref = step("ci-gate", "Ensure a releasable ref");
 		expect(ref.env?.ALLOW_EARLY_MAJOR).toBe("${{ inputs.allow_early_major }}");
-		expect(ref.run).toContain('if [ -n "$ALLOW_EARLY_MAJOR" ]; then');
+		// On either ref a republish may take: the check stands before the ref's case.
+		const refRun = ref.run ?? "";
+		const check = refRun.indexOf('if [ "$REPUBLISH" = true ] && [ -n "$ALLOW_EARLY_MAJOR" ]; then');
+		expect(check).toBeGreaterThan(-1);
+		expect(check).toBeLessThan(refRun.indexOf('case "$REF" in'));
 		expect(ref.run).toContain("allow_early_major is for a new major release, not a republish");
 		// The push step writes the reason into the tag; the release step reads it from origin's
 		// tag, so a republish (no input) keeps it.
@@ -1717,6 +1721,28 @@ describe("release.sh assert-bump", { timeout: 30_000 }, () => {
 		r = run(["assert-bump", "patch"]);
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("an entry under no ### heading");
+	});
+
+	it("counts an entry of any list marker, so none hides a class", () => {
+		for (const marker of ["*", "+", "1.", "1)"]) {
+			changelog("2.0.0", `### Breaking\n\n${marker} Remove an export.\n\n${entries("Fixed")}`);
+			const r = run(["assert-bump", "patch"]);
+			expect(r.status, marker).not.toBe(0);
+			expect(r.err, marker).toContain("requires a major release");
+		}
+		changelog("1.0.1", entries("Fixed"), `\n### Added\n\n* Not cut yet.\n`);
+		expect(run(["assert-bump", "patch"]).err).toContain("[Unreleased] still holds 1 entry");
+	});
+
+	it("accepts a sub-item under an entry, and refuses an indented entry under none", () => {
+		changelog("1.0.1", `### Fixed\n\n- An entry:\n  - its sub-item;\n  * another.\n`);
+		const ok = run(["assert-bump", "patch"]);
+		expect(ok.status, ok.err).toBe(0);
+		expect(ok.out).toContain("Fixed: 1 entry (patch)");
+		changelog("2.0.0", `### Breaking\n\n  * Remove an export.\n\n${entries("Fixed")}`);
+		const r = run(["assert-bump", "major"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain('an indented entry that is not under an entry: "* Remove an export."');
 	});
 
 	it("refuses a section for another version than the release makes", () => {
