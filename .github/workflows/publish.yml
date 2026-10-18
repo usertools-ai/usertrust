@@ -39,6 +39,11 @@ on:
         required: false
         default: false
         type: boolean
+      allow_early_major:
+        description: "Only for a major less than 90 days after the last one: the reason, which goes into the release notes. Empty otherwise"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: release
@@ -78,12 +83,18 @@ jobs:
       - name: Ensure a releasable ref
         env:
           REF: ${{ github.ref }}
+          ALLOW_EARLY_MAJOR: ${{ inputs.allow_early_major }}
         run: |
           case "$REF" in
             refs/heads/master) ;;
             refs/tags/v*)
               if [ "$REPUBLISH" != true ]; then
                 echo "::error::A tag ref is only for republish. Dispatch a new release on master."
+                exit 1
+              fi
+              # A republish skips the bump check, which is what reads allow_early_major.
+              if [ -n "$ALLOW_EARLY_MAJOR" ]; then
+                echo "::error::allow_early_major is for a new major release, not a republish. Clear it."
                 exit 1
               fi
               ;;
@@ -97,6 +108,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # The bump is the one the release's CHANGELOG section requires, never the dispatcher's
+      # pick: docs/releasing.md, "Choosing the version".
+      - name: Require the bump the CHANGELOG requires
+        if: ${{ !inputs.republish }}
+        env:
+          BUMP: ${{ inputs.version }}
+          ALLOW_EARLY_MAJOR: ${{ inputs.allow_early_major }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
+            echo "::error::Checked out $(git rev-parse HEAD), but this run is for ${GITHUB_SHA}."
+            exit 1
+          fi
+          bash scripts/release.sh assert-bump "$BUMP"
 
       - name: Require CI success on the commit being released
         env:
@@ -470,6 +495,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.source.outputs.version }}
+          ALLOW_EARLY_MAJOR: ${{ inputs.allow_early_major }}
         run: |
           if [ "$REPUBLISH" = true ] && gh release view "v${VERSION}" >/dev/null 2>&1; then
             echo "GitHub Release v${VERSION} already exists."
@@ -477,10 +503,16 @@ jobs:
           fi
           latest=$(bash scripts/release.sh latest-flag "$VERSION")
           echo "Latest: ${latest}"
+          # An early major's reason (ci-gate refused it on any other release) leads the notes.
+          notes=()
+          if [ -n "$ALLOW_EARLY_MAJOR" ]; then
+            notes=(--notes "Released less than 90 days after the previous major: ${ALLOW_EARLY_MAJOR}")
+          fi
           gh release create "v${VERSION}" \
             --verify-tag \
             --title "v${VERSION}" \
             --generate-notes \
+            "${notes[@]}" \
             "--latest=${latest}"
 
       - name: Dry run summary

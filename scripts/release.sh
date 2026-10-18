@@ -19,6 +19,10 @@
 #   release.sh version-at <commit>       the lockstep version recorded in <commit> (git blobs)
 #   release.sh expected-version <bump>   the version a release dispatched on HEAD makes: HEAD's
 #                                        committed version bumped by patch, minor or major
+#   release.sh assert-bump <bump>        fails unless <bump> is the class the CHANGELOG's release
+#                                        section requires (docs/releasing.md, "Choosing the
+#                                        version"), and refuses an early major unless
+#                                        ALLOW_EARLY_MAJOR gives the reason
 #   release.sh verify-release <bundle> <version>
 #                                        imports the release tag from the build job's bundle,
 #                                        verifies the commit, and prints it
@@ -431,6 +435,152 @@ expected_version() {
 		;;
 	esac
 	echo "$((10#$major)).$((10#$minor)).$((10#$patch))"
+}
+
+# The release's CHANGELOG section, read as data from CHANGELOG.md (argv[1]): [Unreleased] must
+# hold no entry (everything is cut into the release's section before dispatch), and the section
+# under it, `## [<version>] - <date>`, must hold at least one entry under a class heading. Prints
+# "<version> <class>", the class being the highest among its entries'. A heading that is not a
+# class or a note, or an entry under no heading, is refused: an unknown heading could otherwise
+# hide an entry from the count. The classes are docs/releasing.md's "Choosing the version".
+CHANGELOG_PY='
+import re, sys
+CLASSES = {
+    "Removed": "major", "Breaking": "major",
+    "Added": "minor", "Changed": "minor", "Deprecated": "minor",
+    "Fixed": "patch", "Security": "patch", "Dependencies": "patch",
+}
+NOTES = {"Read before upgrading", "Known issues"}
+RANK = {"patch": 1, "minor": 2, "major": 3}
+
+def fail(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+sections = []
+for line in lines:
+    if line.startswith("## "):
+        sections.append([line[3:].strip(), []])
+    elif sections:
+        sections[-1][1].append(line)
+if not sections or sections[0][0] != "[Unreleased]":
+    fail("CHANGELOG.md does not begin with a ## [Unreleased] section.")
+left = [l for l in sections[0][1] if l.startswith("- ")]
+if left:
+    fail("[Unreleased] still holds %d entr%s. Cut every entry into the release section before dispatching (docs/releasing.md, \"Cutting the CHANGELOG\")." % (len(left), "y" if len(left) == 1 else "ies"))
+if len(sections) < 2:
+    fail("CHANGELOG.md has no section under [Unreleased] to release.")
+m = re.fullmatch(r"\[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}", sections[1][0])
+if not m:
+    fail("The section under [Unreleased] is \"## %s\", not \"## [major.minor.patch] - YYYY-MM-DD\"." % sections[1][0])
+heading, best, counts = None, None, []
+for line in sections[1][1]:
+    if line.startswith("### "):
+        heading = line[4:].strip()
+        if heading not in CLASSES and heading not in NOTES:
+            fail("The %s section has a heading \"%s\", which is neither a class (%s) nor a note (%s)." % (m.group(1), heading, ", ".join(CLASSES), ", ".join(sorted(NOTES))))
+        if heading in CLASSES:
+            counts.append([heading, 0])
+    elif line.startswith("- "):
+        if heading is None:
+            fail("The %s section has an entry under no ### heading." % m.group(1))
+        if heading in CLASSES:
+            counts[-1][1] += 1
+            c = CLASSES[heading]
+            if best is None or RANK[c] > RANK[best]:
+                best = c
+if best is None:
+    fail("The %s section is empty: it has no entry under %s." % (m.group(1), ", ".join(CLASSES)))
+for h, n in counts:
+    if n:
+        print("%s: %d entr%s (%s)" % (h, n, "y" if n == 1 else "ies", CLASSES[h]), file=sys.stderr)
+print(m.group(1), best)
+'
+
+# The policy's cap on majors: at most one a quarter.
+EARLY_MAJOR_DAYS=90
+
+# Refuses a new release whose bump is not the one its CHANGELOG section requires (the highest
+# class among its entries: docs/releasing.md, "Choosing the version"), in either direction: a
+# patch with an Added entry, and a major with no Removed or Breaking entry, alike. Refuses an
+# empty section, entries left in [Unreleased], and a section for another version. A major less
+# than EARLY_MAJOR_DAYS after the last major (its v<N>.0.0 tag on master) is refused unless
+# ALLOW_EARLY_MAJOR (the dispatch's allow_early_major input) gives a reason, which the release
+# notes carry; a reason given to any other release is refused, so it is never silently unused.
+# CHANGELOG.md is read from HEAD's blob, as every file this script releases is.
+assert_bump() {
+	local bump="${1:-}" reason="${ALLOW_EARLY_MAJOR:-}" expected tmp out section required
+	local tags last="" last_n=-1 t n when now age
+	expected=$(expected_version "$bump") || return 1
+	tmp=$(mktemp -d) || return 1
+	if ! blob_to HEAD CHANGELOG.md "${tmp}/CHANGELOG.md"; then
+		rm -rf "$tmp"
+		return 1
+	fi
+	if ! out=$(python3 -c "$CHANGELOG_PY" "${tmp}/CHANGELOG.md" 2>"${tmp}/err"); then
+		err "$(cat "${tmp}/err")"
+		rm -rf "$tmp"
+		return 1
+	fi
+	cat "${tmp}/err"
+	rm -rf "$tmp"
+	read -r section required <<<"$out"
+	if [ "$required" != "$bump" ]; then
+		err "The CHANGELOG's ${section} section requires a ${required} release (its highest class), but this dispatch is ${bump}. Refusing (docs/releasing.md, \"Choosing the version\")."
+		return 1
+	fi
+	if [ "$section" != "$expected" ]; then
+		err "A ${bump} release of $(version_at HEAD) is ${expected}, but the CHANGELOG's newest section is ${section}. Refusing."
+		return 1
+	fi
+	reason="$(printf '%s' "$reason" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+	if [ "$bump" != major ]; then
+		if [ -n "$reason" ]; then
+			err "allow_early_major is set, but this is a ${bump} release. Clear it and dispatch again."
+			return 1
+		fi
+		echo "${expected}: a ${bump} release, as its CHANGELOG section requires."
+		return 0
+	fi
+	if ! git fetch --quiet --tags origin; then
+		err "Could not fetch tags from origin, so cannot tell when the last major release was."
+		return 1
+	fi
+	fetch_master "when the last major release was" || return 1
+	tags=$(git tag -l 'v*.0.0' --merged refs/remotes/origin/master) || return 1
+	for t in $tags; do
+		[[ "$t" =~ ^v([0-9]+)\.0\.0$ ]] || continue
+		n=$((10#${BASH_REMATCH[1]}))
+		if [ "$n" -gt "$last_n" ]; then
+			last_n=$n
+			last=$t
+		fi
+	done
+	if [ -z "$last" ]; then
+		age=""
+	else
+		when=$(git for-each-ref --format='%(creatordate:unix)' "refs/tags/${last}") || return 1
+		if ! [[ "$when" =~ ^[0-9]+$ ]]; then
+			err "Could not read when ${last} was tagged."
+			return 1
+		fi
+		now=$(date +%s)
+		age=$(((now - when) / 86400))
+	fi
+	if [ -n "$age" ] && [ "$age" -lt "$EARLY_MAJOR_DAYS" ]; then
+		if [ -z "$reason" ]; then
+			err "${last} was released ${age} days ago; a major release comes at most once every ${EARLY_MAJOR_DAYS} days. To release ${expected} anyway, give the reason in allow_early_major: it goes into the release notes."
+			return 1
+		fi
+		echo "${expected}: a major release ${age} days after ${last}, allowed early: ${reason}"
+		return 0
+	fi
+	if [ -n "$reason" ]; then
+		err "allow_early_major is set, but ${last:-no earlier major} is not under ${EARLY_MAJOR_DAYS} days old. Clear it and dispatch again."
+		return 1
+	fi
+	echo "${expected}: a major release, as its CHANGELOG section requires${last:+, ${age} days after ${last}}."
 }
 
 # Prints "yes" if <name>@<version> is on npm and "no" if it is not. Anything else (network,
@@ -1326,6 +1476,7 @@ pin-siblings) pin_siblings ;;
 version-at) version_at "${2:?usage: version-at <commit>}" ;;
 verify-release) verify_release "${2:-}" "${3:-}" ;;
 expected-version) expected_version "${2:-}" ;;
+assert-bump) assert_bump "${2:-}" ;;
 assert-published) assert_published ;;
 assert-unreleased) assert_unreleased ;;
 assert-protected) assert_protected "${2:-}" ;;
@@ -1338,7 +1489,7 @@ publish) publish "${2:-}" "${3:-}" "${4:-}" ;;
 compare-builds) compare_builds "${2:-}" "${3:-}" "${4:-}" ;;
 gate) gate ;;
 *)
-	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | expected-version <bump> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run] | compare-builds <dir> <rebuild dir> <commit>"
+	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | expected-version <bump> | assert-bump <bump> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run] | compare-builds <dir> <rebuild dir> <commit>"
 	exit 2
 	;;
 esac

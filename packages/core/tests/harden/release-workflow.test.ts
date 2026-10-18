@@ -115,6 +115,11 @@ interface Job {
 	steps?: Step[];
 }
 interface Workflow {
+	on?: {
+		workflow_dispatch?: {
+			inputs?: Record<string, { type?: string; default?: unknown; required?: boolean }>;
+		};
+	};
 	env?: Record<string, string>;
 	permissions?: Record<string, string>;
 	jobs: Record<string, Job>;
@@ -210,6 +215,38 @@ describe("publish.yml", () => {
 		expect(sel.run).toContain(
 			'commit=$(bash scripts/release.sh verify-release "${RUNNER_TEMP}/release/release.bundle" "$expected")',
 		);
+	});
+
+	it("ci-gate requires the bump the CHANGELOG requires, before anything else is checked", () => {
+		const bump = step("ci-gate", "Require the bump the CHANGELOG requires");
+		expect(bump.if).toBe("${{ !inputs.republish }}");
+		expect(bump.env).toEqual({
+			BUMP: "${{ inputs.version }}",
+			ALLOW_EARLY_MAJOR: "${{ inputs.allow_early_major }}",
+		});
+		expect(bump.run?.trim().split("\n").at(-1)).toBe('bash scripts/release.sh assert-bump "$BUMP"');
+		expect(bump.run).toContain('if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then');
+		expect(stepIndex("ci-gate", "Require the bump the CHANGELOG requires")).toBe(
+			stepIndex("ci-gate", "Require CI success on the commit being released") - 1,
+		);
+	});
+
+	it("allow_early_major is a string, empty by default, refused on a republish, and leads the notes", () => {
+		const input = publish.on?.workflow_dispatch?.inputs?.allow_early_major;
+		expect(input).toEqual(
+			expect.objectContaining({ type: "string", default: "", required: false }),
+		);
+		// A republish skips assert-bump, the only check that reads the reason.
+		const ref = step("ci-gate", "Ensure a releasable ref");
+		expect(ref.env?.ALLOW_EARLY_MAJOR).toBe("${{ inputs.allow_early_major }}");
+		expect(ref.run).toContain('if [ -n "$ALLOW_EARLY_MAJOR" ]; then');
+		expect(ref.run).toContain("allow_early_major is for a new major release, not a republish");
+		const rel = step("publish", "Create GitHub Release");
+		expect(rel.env?.ALLOW_EARLY_MAJOR).toBe("${{ inputs.allow_early_major }}");
+		expect(rel.run).toContain(
+			'notes=(--notes "Released less than 90 days after the previous major: ${ALLOW_EARLY_MAJOR}")',
+		);
+		expect(rel.run).toContain('"${notes[@]}"');
 	});
 
 	it("grants nothing by default, and write and OIDC only to the publish job", () => {
@@ -1504,7 +1541,17 @@ describe("release.sh assert-npm", { timeout: 30_000 }, () => {
 		expect(r.out).toContain(`node ${process.version}, npm 11.19.0`);
 	});
 
-	for (const v of ["11.5.0", "11.4.2", "11.0.0", "10.9.9", "9.9.4", "", "eleven", "11.5", "11.5.1-pre"]) {
+	for (const v of [
+		"11.5.0",
+		"11.4.2",
+		"11.0.0",
+		"10.9.9",
+		"9.9.4",
+		"",
+		"eleven",
+		"11.5",
+		"11.5.1-pre",
+	]) {
 		it(`refuses npm ${JSON.stringify(v)}`, () => {
 			const r = assertNpm(v, "v24.21.0");
 			expect(r.status).not.toBe(0);
@@ -1560,6 +1607,211 @@ describe("release.sh expected-version", { timeout: 30_000 }, () => {
 	}
 });
 
+describe("release.sh assert-bump", { timeout: 30_000 }, () => {
+	// The base world records 1.0.0, so a release is 1.0.1, 1.1.0 or 2.0.0.
+	const NEXT = { patch: "1.0.1", minor: "1.1.0", major: "2.0.0" } as const;
+	type Bump = keyof typeof NEXT;
+	const BUMPS = Object.keys(NEXT) as Bump[];
+
+	/** Commits CHANGELOG.md: an empty [Unreleased], then `## [<version>] - <date>` and <body>. */
+	const changelog = (version: string, body: string, unreleased = "") => {
+		writeFileSync(
+			join(repo, "CHANGELOG.md"),
+			`# Changelog\n\n## [Unreleased]\n${unreleased}\n## [${version}] - 2026-10-18\n\n${body}\n## [1.0.0] - 2026-01-01\n\n### Added\n\n- The first release.\n`,
+		);
+		git("add", "CHANGELOG.md");
+		git("commit", "-q", "-m", "changelog");
+	};
+	const entries = (...headings: string[]) =>
+		headings.map((h) => `### ${h}\n\n- An entry under ${h}.\n`).join("\n");
+	/** An annotated major tag made <days> ago, on master and pushed to origin. */
+	const majorTag = (tag: string, days: number) => {
+		const when = `${Math.floor(Date.now() / 1000) - days * 86_400} +0000`;
+		const r = spawnSync("git", ["tag", "-a", tag, "-m", tag], {
+			cwd: repo,
+			encoding: "utf8",
+			env: { ...gitEnv(), GIT_COMMITTER_DATE: when },
+		});
+		if (r.status !== 0) throw new Error(r.stderr);
+		git("push", "-q", "origin", "--tags");
+	};
+
+	const CLASSES: [string, Bump][] = [
+		["Removed", "major"],
+		["Breaking", "major"],
+		["Added", "minor"],
+		["Changed", "minor"],
+		["Deprecated", "minor"],
+		["Fixed", "patch"],
+		["Security", "patch"],
+		["Dependencies", "patch"],
+	];
+	for (const [heading, cls] of CLASSES) {
+		it(`an entry under ${heading} requires a ${cls} release, and refuses the other two`, () => {
+			changelog(NEXT[cls], entries(heading));
+			for (const bump of BUMPS) {
+				const r = run(["assert-bump", bump]);
+				if (bump === cls) {
+					expect(r.status, `${bump}: ${r.err}`).toBe(0);
+					expect(r.out).toContain(`${NEXT[cls]}: a ${cls} release`);
+				} else {
+					expect(r.status, bump).not.toBe(0);
+					expect(r.err).toContain(
+						`requires a ${cls} release (its highest class), but this dispatch is ${bump}`,
+					);
+				}
+			}
+		});
+	}
+
+	it("the highest class decides: Fixed and Added is a minor, and Removed beside them a major", () => {
+		changelog("1.1.0", entries("Read before upgrading", "Added", "Fixed", "Known issues"));
+		expect(run(["assert-bump", "minor"]).status).toBe(0);
+		expect(run(["assert-bump", "patch"]).err).toContain("requires a minor release");
+		changelog("2.0.0", entries("Fixed", "Added", "Removed"));
+		expect(run(["assert-bump", "major"]).status).toBe(0);
+		expect(run(["assert-bump", "minor"]).err).toContain("requires a major release");
+	});
+
+	it("an empty heading has no class: Added with no entry beside Fixed is a patch", () => {
+		changelog("1.0.1", `### Added\n\n${entries("Fixed")}`);
+		expect(run(["assert-bump", "patch"]).status).toBe(0);
+		expect(run(["assert-bump", "minor"]).err).toContain("requires a patch release");
+	});
+
+	it("refuses a section with no classed entry, notes alone included", () => {
+		for (const body of ["", "### Fixed\n", entries("Read before upgrading", "Known issues")]) {
+			changelog("1.0.1", body);
+			const r = run(["assert-bump", "patch"]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("The 1.0.1 section is empty");
+		}
+	});
+
+	it("refuses while [Unreleased] still holds an entry", () => {
+		changelog("1.0.1", entries("Fixed"), "\n### Added\n\n- Not cut yet.\n");
+		const r = run(["assert-bump", "patch"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("[Unreleased] still holds 1 entry");
+	});
+
+	it("refuses a heading that is neither a class nor a note, and an entry under no heading", () => {
+		changelog("1.0.1", `${entries("Fixed")}\n${entries("Improvements")}`);
+		let r = run(["assert-bump", "patch"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain('has a heading "Improvements", which is neither a class');
+		changelog("1.0.1", `- A stray entry.\n\n${entries("Fixed")}`);
+		r = run(["assert-bump", "patch"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("an entry under no ### heading");
+	});
+
+	it("refuses a section for another version than the release makes", () => {
+		changelog("1.0.2", entries("Fixed"));
+		const r = run(["assert-bump", "patch"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(
+			"A patch release of 1.0.0 is 1.0.1, but the CHANGELOG's newest section is 1.0.2",
+		);
+	});
+
+	it("refuses a CHANGELOG with no [Unreleased] section, an undated section, or none at all", () => {
+		const r0 = run(["assert-bump", "patch"]);
+		expect(r0.status).not.toBe(0);
+		expect(r0.err).toContain("CHANGELOG.md in HEAD is not a regular file");
+		writeFileSync(
+			join(repo, "CHANGELOG.md"),
+			`# Changelog\n\n## [1.0.1] - 2026-10-18\n\n${entries("Fixed")}`,
+		);
+		git("add", "CHANGELOG.md");
+		git("commit", "-q", "-m", "no unreleased");
+		expect(run(["assert-bump", "patch"]).err).toContain(
+			"does not begin with a ## [Unreleased] section",
+		);
+		writeFileSync(
+			join(repo, "CHANGELOG.md"),
+			`## [Unreleased]\n\n## [1.0.1]\n\n${entries("Fixed")}`,
+		);
+		git("add", "CHANGELOG.md");
+		git("commit", "-q", "-m", "undated");
+		expect(run(["assert-bump", "patch"]).err).toContain(
+			'is "## [1.0.1]", not "## [major.minor.patch] - YYYY-MM-DD"',
+		);
+	});
+
+	it("reads the CHANGELOG HEAD records, not the working tree", () => {
+		changelog("1.0.1", entries("Fixed"));
+		writeFileSync(
+			join(repo, "CHANGELOG.md"),
+			`## [Unreleased]\n\n## [1.1.0] - 2026-10-18\n\n${entries("Added")}`,
+		);
+		expect(run(["assert-bump", "patch"]).status).toBe(0);
+		expect(run(["assert-bump", "minor"]).status).not.toBe(0);
+	});
+
+	it("refuses a major under 90 days after the last one, unless a reason is given", () => {
+		majorTag("v1.0.0", 10);
+		changelog("2.0.0", entries("Removed"));
+		let r = run(["assert-bump", "major"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(
+			"v1.0.0 was released 10 days ago; a major release comes at most once every 90 days",
+		);
+		for (const blank of ["", "  \t "]) {
+			expect(run(["assert-bump", "major"], { ALLOW_EARLY_MAJOR: blank }).status).not.toBe(0);
+		}
+		r = run(["assert-bump", "major"], { ALLOW_EARLY_MAJOR: " a removal that cannot wait " });
+		expect(r.status, r.err).toBe(0);
+		expect(r.out).toContain(
+			"2.0.0: a major release 10 days after v1.0.0, allowed early: a removal that cannot wait",
+		);
+	});
+
+	it("allows a major 90 days or more after the last one, and refuses an unneeded reason", () => {
+		majorTag("v1.0.0", 90);
+		changelog("2.0.0", entries("Breaking"));
+		const r = run(["assert-bump", "major"]);
+		expect(r.status, r.err).toBe(0);
+		expect(r.out).toContain(
+			"2.0.0: a major release, as its CHANGELOG section requires, 90 days after v1.0.0.",
+		);
+		const extra = run(["assert-bump", "major"], { ALLOW_EARLY_MAJOR: "just because" });
+		expect(extra.status).not.toBe(0);
+		expect(extra.err).toContain("allow_early_major is set, but v1.0.0 is not under 90 days old");
+	});
+
+	it("the last major is the highest v<N>.0.0 on master, and one only on a side branch does not count", () => {
+		majorTag("v1.0.0", 200);
+		gitIn(join(dir, "origin.git"), "tag", "v0.0.0", "master");
+		changelog("2.0.0", entries("Removed"));
+		// A recent v7.0.0 on a commit master never took.
+		git("switch", "-q", "-c", "side");
+		writeFileSync(join(repo, "README"), "side\n");
+		git("commit", "-q", "-am", "side");
+		majorTag("v7.0.0", 1);
+		git("switch", "-q", "master");
+		const r = run(["assert-bump", "major"]);
+		expect(r.status, r.err).toBe(0);
+		expect(r.out).toContain("200 days after v1.0.0");
+	});
+
+	it("refuses a reason on a patch or a minor release", () => {
+		changelog("1.0.1", entries("Fixed"));
+		const r = run(["assert-bump", "patch"], { ALLOW_EARLY_MAJOR: "x" });
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("allow_early_major is set, but this is a patch release");
+	});
+
+	it("refuses a bump that is not patch, minor or major", () => {
+		changelog("1.0.1", entries("Fixed"));
+		for (const bump of ["", "PATCH", "1.0.1"]) {
+			const r = run(["assert-bump", bump]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("not patch, minor or major");
+		}
+	});
+});
+
 describe("release.sh compare-builds", { timeout: 30_000 }, () => {
 	/** Two packs of the same tree, as the two legs would make them, with dist/ files. */
 	function twoBuilds(): [string, string] {
@@ -1594,7 +1846,9 @@ describe("release.sh compare-builds", { timeout: 30_000 }, () => {
 		expect(lines.length).toBe(6);
 		for (const [i, d] of DIRS.entries()) {
 			expect(lines[i]).toMatch(
-				new RegExp(`^${NAMES[d]}-1\\.0\\.0\\.tgz sha256 [0-9a-f]{64}: the build and the rebuild agree$`),
+				new RegExp(
+					`^${NAMES[d]}-1\\.0\\.0\\.tgz sha256 [0-9a-f]{64}: the build and the rebuild agree$`,
+				),
 			);
 		}
 		// It reads the registry for nothing and publishes nothing.
@@ -1606,7 +1860,9 @@ describe("release.sh compare-builds", { timeout: 30_000 }, () => {
 		changeDist(b, "server", 'export const name = "tampered";\n');
 		const r = run(["compare-builds", a, b, "HEAD"]);
 		expect(r.status).not.toBe(0);
-		expect(r.err).toMatch(/usertrust-server-1\.0\.0\.tgz: the build assembles to sha256 [0-9a-f]{64}, the rebuild to [0-9a-f]{64}\./);
+		expect(r.err).toMatch(
+			/usertrust-server-1\.0\.0\.tgz: the build assembles to sha256 [0-9a-f]{64}, the rebuild to [0-9a-f]{64}\./,
+		);
 		expect(r.err).toContain("differ for: usertrust-server.");
 		expect(r.err).toContain("Refusing to publish anything");
 		// The other five still agree, and are reported as such.
