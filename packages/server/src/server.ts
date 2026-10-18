@@ -233,6 +233,13 @@ export const REDACT_INPUT_MAX = 64 * 1024;
 /** What `redactSecrets` returns for text its patterns could not finish reading. */
 const UNREADABLE = "[redacted: the message could not be scanned]";
 
+/** `text` with every `secret` replaced by `[redacted]`: a plain split, no regular expression. */
+function replaceSecrets(text: string, secrets: readonly string[]): string {
+	let out = text;
+	for (const secret of secrets) if (secret !== "") out = out.split(secret).join("[redacted]");
+	return out;
+}
+
 /**
  * `text` with every `secret` (the caller's own bearer key, when known), every `Bearer <token>` and
  * every api-key style value replaced by `[redacted]`. Scrubbing is not redaction: `scrubForStderr`
@@ -246,8 +253,7 @@ const UNREADABLE = "[redacted: the message could not be scanned]";
  * is not caught.
  */
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {
-	let out = text;
-	for (const secret of secrets) if (secret !== "") out = out.split(secret).join("[redacted]");
+	let out = replaceSecrets(text, secrets);
 	if (out.length > REDACT_INPUT_MAX) out = `${out.slice(0, REDACT_INPUT_MAX)} [cut]`;
 	try {
 		return out
@@ -267,10 +273,16 @@ export function redactSecrets(text: string, secrets: readonly string[] = []): st
  * `500 internal`: which tenant, which route, and the error's own name and message, so a
  * tenant refused at its first request (its vault, say) says why somewhere. It carries no key,
  * header or request body of its own. The message is the server's or governor's text, which can
- * quote what a caller sent, so credentials in it are REDACTED (`redactSecrets`, with the caller's
- * own key in `secrets`) before escape sequences and control characters are removed
- * (`scrubForStderr`) and its lines joined into one; and once more after, so a key a control
- * character had split cannot come back together.
+ * quote what a caller sent, so credentials in it are REDACTED, with the caller's own key in
+ * `secrets`, and escape sequences and control characters removed (`scrubForStderr`).
+ *
+ * Nothing is cut until no key can come back together. On the WHOLE text, the known secrets are
+ * replaced, the text is sanitized without a clip (removing a control character a caller put
+ * inside a key joins it), and the secrets are replaced again (`redactSecrets` does that first,
+ * before its own cut). Only then do the bounded steps run: the patterns (`redactSecrets`, which
+ * keeps the first `REDACT_INPUT_MAX` code units) and the clip to `MAX_PRINTED_CHARS`. A cut before the sanitizing could keep a key's first part, which no
+ * pass after it can recognize. The lines are joined into one last, and the patterns run once more
+ * on the joined line.
  */
 export function internalErrorLine(
 	err: unknown,
@@ -280,8 +292,16 @@ export function internalErrorLine(
 ): string {
 	const name = err instanceof Error ? err.name : typeof err;
 	const message = err instanceof Error ? err.message : String(err);
-	const raw = redactSecrets(`${name}: ${message}`, secrets);
-	const text = redactSecrets(scrubForStderr(raw).replace(/\s*\n\s*/g, " "), secrets);
+	const whole = scrubForStderr(
+		replaceSecrets(`${name}: ${message}`, secrets),
+		Number.POSITIVE_INFINITY,
+	);
+	// redactSecrets replaces the secrets in the whole sanitized text again before its own cut.
+	const clipped = scrubForStderr(redactSecrets(whole, secrets));
+	// QUADRATIC: `\s*\n\s*` retries its leading `\s*` from every position of a whitespace run that
+	// holds no newline (500k spaces took 162 s). It must only ever see clipped text, so it stays
+	// AFTER the clip above; never move it earlier.
+	const text = redactSecrets(clipped.replace(/\s*\n\s*/g, " "), secrets);
 	const tenant = tenantId === undefined ? "-" : scrubForStderr(tenantId);
 	return `usertrust-server: internal error: tenant=${tenant} route=${route}: ${text}`;
 }
