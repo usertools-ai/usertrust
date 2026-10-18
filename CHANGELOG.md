@@ -20,9 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **PII and secret detection now reads values hidden by fullwidth forms or invisible format characters.** Before this, a key with a zero-width space inside, or a key, card number, phone number, SSN, email or IPv4 address typed in fullwidth forms (as an input method may type it), was reported clean under `pii: "block"` and `pii: "redact"`. Each pattern is now also tried on a view of the value:
   - format characters (Unicode category Cf: zero-width spaces and joiners, soft hyphens, bidi marks) removed;
-  - each character whose NFKC form is ASCII replaced by that form (fullwidth letters and digits, the ideographic space, circled and parenthesized numbers).
+  - the fullwidth forms of ASCII (letters, digits and punctuation) replaced by the ASCII characters, and spaces and punctuation forms whose NFKC form is ASCII (the ideographic and no-break spaces, small and vertical punctuation) replaced by that form.
 
-  A value flagged before is still flagged, and redaction still replaces the whole value. Any other character stays as it is, so the view is never more than four times the value's length and the scan stays linear (full NFKC can turn one character into 18).
+  A value flagged before is still flagged, and redaction still replaces the whole value. Any other character stays as it is, including superscript, subscript, circled, parenthesized and mathematical letters and digits: a footnote marker glued to a number would otherwise read as one more digit and turn it into a phone, SSN or card number. So a value written entirely in superscripts is not read. The view is never more than three times the value's length, and the scan stays linear (full NFKC can turn one character into 18). The view's 1.1 MB lookup table is allocated with the first value that is not ASCII, not when the module is imported.
 
 ## [5.0.5] - 2026-10-18
 

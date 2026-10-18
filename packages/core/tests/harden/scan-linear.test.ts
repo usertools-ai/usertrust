@@ -156,7 +156,8 @@ const WORST: ReadonlyArray<[string, (n: number) => string]> = [
 	["api key: pplx- then digits", after("pplx-", "1")],
 	["generic secret: whsec_ then slashes", after("whsec_", "/")],
 	["generic secret: repeated whsec_ starts", run(".whsec_")],
-	// The normalized view (NFKC, format characters removed): built once per string, then scanned.
+	// The normalized view (format characters removed, fullwidth forms read): built once per string,
+	// then scanned.
 	["normalized view: zero-width spaces", run(String.fromCodePoint(0x200b))],
 	["normalized view: a digit, then a zero-width space", run(`1${String.fromCodePoint(0x200b)}`)],
 	["normalized view: a letter, then a zero-width joiner", run(`a${String.fromCodePoint(0x200d)}`)],

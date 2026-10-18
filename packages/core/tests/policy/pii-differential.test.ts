@@ -233,7 +233,7 @@ const CURATED: Record<Kind, string[]> = {
 
 /**
  * Values hidden from a plain pattern by fullwidth forms or format characters: the same values the
- * detector reads in its normalized view (NFKC, format characters removed). 5.0.4 reads none of them.
+ * detector reads in its normalized view. 5.0.4 reads none of them.
  */
 const NORMALIZED: Record<Kind, string[]> = {
 	phone: [fullwidth("234-567-8901"), interleaved("2345678901"), mixed("+1 (234) 567-8901")],
@@ -529,8 +529,23 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 	});
 
 	it("normalized view: every gain on text the view changes is what 5.0.4 reads in that view", () => {
-		// The view, written here from the rule (NFKC, then format characters removed), not imported.
-		const view = (s: string) => s.normalize("NFKC").replace(/\p{Cf}/gu, "");
+		// The view, written here from its rule, not imported: format characters removed; a character
+		// replaced by its NFKC form if that is ASCII and the character is a fullwidth form (U+FF01 to
+		// U+FF5E) or the form holds no letter or digit; any other character kept.
+		const view = (s: string) =>
+			[...s]
+				.map((c) => {
+					if (/^\p{Cf}$/u.test(c)) return "";
+					const form = c.normalize("NFKC");
+					const code = c.codePointAt(0) as number;
+					const fullwidthForm = code >= 0xff01 && code <= 0xff5e;
+					return form !== c &&
+						/^[ -~\t\n\r\f\v]+$/.test(form) &&
+						(fullwidthForm || !/[A-Za-z0-9]/.test(form))
+						? form
+						: c;
+				})
+				.join("");
 		const kinds: Kind[] = [
 			"phone",
 			"credit_card",
