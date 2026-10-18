@@ -269,25 +269,57 @@ export function redactApiKeys(text: string): string {
 /** What `redactSecrets` returns for text its patterns could not finish reading. */
 const UNREADABLE = "[redacted: the message could not be scanned]";
 
+/** What stands in a secret's spaces: any run of whitespace or control characters, or nothing. */
+const SECRET_GAP = String.raw`[\s\x00-\x1f\x7f-\x9f]*`;
+const REGEXP_SYNTAX = /[.*+?^${}()|[\]\\]/g;
+
+/**
+ * A pattern for `secret` (a bearer key, which may hold spaces) that also finds it where a message
+ * has a line break, a tab or a control character in place of a space, or no space at all
+ * (sanitizing removes a control character and joins the words). A plain match misses those, and
+ * then the `Bearer` pattern, or an api-key one, takes the key's first word and leaves the rest in
+ * the line. Finding a key with a space removed redacts text that is not quite the key, which is
+ * the safe side. The words are literal and only the gap between them repeats a class, so the
+ * pattern reads text of any length in one pass. `null` for a secret with no word in it.
+ */
+function secretPattern(secret: string): RegExp | null {
+	const words = secret.split(/\s+/).filter((word) => word !== "");
+	if (words.length === 0) return null;
+	return new RegExp(words.map((word) => word.replace(REGEXP_SYNTAX, "\\$&")).join(SECRET_GAP), "g");
+}
+
 /**
  * `text` with every `secret` (the caller's own bearer key, when known), every `Bearer <token>` and
  * every api-key style value replaced by `[redacted]`. Scrubbing is not redaction: `scrubForStderr`
  * removes terminal control, never a credential.
  *
- * It reads the whole text: the secrets are replaced with a plain split, and neither pattern
- * repeats a group, so a message of any length is read to its end. Should a pattern still throw
- * `RangeError`, the whole text is replaced: it fails closed, never returning text it did not scan.
- * Any other error is not caught.
+ * The secrets are replaced FIRST (`secretPattern`), before a heuristic pattern can take part of
+ * one. It reads the whole text: no pattern repeats a group, so a message of any length is read to
+ * its end. Should a pattern still throw `RangeError`, the whole text is replaced: it fails closed,
+ * never returning text it did not scan. Any other error is not caught.
  */
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {
-	let out = text;
-	for (const secret of secrets) if (secret !== "") out = out.split(secret).join("[redacted]");
 	try {
+		let out = text;
+		for (const secret of secrets) {
+			const pattern = secretPattern(secret);
+			if (pattern !== null) out = out.replace(pattern, "[redacted]");
+		}
 		return redactApiKeys(out.replace(BEARER_TOKEN, "$1 [redacted]"));
 	} catch (err) {
 		if (err instanceof RangeError) return UNREADABLE;
 		throw err;
 	}
+}
+
+/**
+ * `text` with each whitespace run that holds a line break replaced by one space: what
+ * `/\s*\n\s*\/g` replaced, read in one pass. That pattern is QUADRATIC: it retries its leading
+ * `\s*` from every position of a whitespace run with no line break (500k spaces took 162 s), so it
+ * must not come back. Here each run is matched once, from its start to its end.
+ */
+export function joinLines(text: string): string {
+	return text.replace(/\s+/g, (run) => (run.includes("\n") ? " " : run));
 }
 
 /**
@@ -302,10 +334,12 @@ export function redactSecrets(text: string, secrets: readonly string[] = []): st
  * Every redaction runs on the WHOLE text, and nothing is cut until no credential can come back
  * together. The credentials are redacted first, while the delimiters the patterns read are still
  * there (removing a tab joins `Bearer\t<token>` into one word, and an escape sequence can take a
- * key's first character with it). The text is then sanitized without a clip and redacted again,
- * since removing a control character a caller put inside a key joins it. Only then is it clipped
- * to `MAX_PRINTED_CHARS`: a cut any earlier could keep a key's first part, which no pass after it
- * can recognize. The lines are joined into one last, and the line is redacted once more.
+ * key's first character with it). The text is then sanitized without a clip, its lines are
+ * joined into one in one pass (`joinLines`), and it is redacted again, since removing a control
+ * character a caller put inside a key joins it. (No pattern reads a line break differently from
+ * other whitespace, so joining can make no new match, and one pass after both is enough.) Only
+ * then is it clipped to `MAX_PRINTED_CHARS`: a cut any earlier could keep a key's first part,
+ * which no pass after it can recognize.
  */
 export function internalErrorLine(
 	err: unknown,
@@ -316,12 +350,9 @@ export function internalErrorLine(
 	const name = err instanceof Error ? err.name : typeof err;
 	const message = err instanceof Error ? err.message : String(err);
 	const raw = redactSecrets(`${name}: ${message}`, secrets);
-	const whole = redactSecrets(scrubForStderr(raw, Number.POSITIVE_INFINITY), secrets);
-	const clipped = scrubForStderr(whole);
-	// QUADRATIC: `\s*\n\s*` retries its leading `\s*` from every position of a whitespace run that
-	// holds no newline (500k spaces took 162 s). It must only ever see clipped text, so it stays
-	// AFTER the clip above; never move it earlier.
-	const text = redactSecrets(clipped.replace(/\s*\n\s*/g, " "), secrets);
+	const joined = redactSecrets(joinLines(scrubForStderr(raw, Number.POSITIVE_INFINITY)), secrets);
+	// The clip is LAST: it only drops the end of text already redacted, so it can expose nothing.
+	const text = scrubForStderr(joined);
 	const tenant = tenantId === undefined ? "-" : scrubForStderr(tenantId);
 	return `usertrust-server: internal error: tenant=${tenant} route=${route}: ${text}`;
 }

@@ -727,7 +727,7 @@ const serverLine = (message: string): string =>
 	internalErrorLine(new Error(message), "t1", "sweep");
 
 /**
- * `internalErrorLine`'s pipeline (redact; scrub without a clip and redact; clip, join and redact)
+ * `internalErrorLine`'s pipeline (redact; scrub without a clip, join and redact; clip)
  * with `pattern` in place of the server's api-key redactor. The parity row pins it to the real
  * function on every sweep case, so the positive control below measures the sweep, not a
  * different pipeline.
@@ -736,8 +736,10 @@ function lineWith(pattern: RegExp): (message: string) => string {
 	const redact = (text: string): string => redactWith(pattern, text);
 	return (message) => {
 		const raw = redact(`Error: ${message}`);
-		const whole = redact(scrubForStderr(raw, Number.POSITIVE_INFINITY));
-		const text = redact(scrubForStderr(whole).replace(/\s*\n\s*/g, " "));
+		const whole = scrubForStderr(raw, Number.POSITIVE_INFINITY);
+		// The quadratic join the server replaced, safe on these short messages: the parity row then
+		// also pins the server's one-pass join to it.
+		const text = scrubForStderr(redact(whole.replace(/\s*\n\s*/g, " ")));
 		return `usertrust-server: internal error: tenant=t1 route=sweep: ${text}`;
 	};
 }

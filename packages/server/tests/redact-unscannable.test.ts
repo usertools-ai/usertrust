@@ -12,16 +12,19 @@
  * - `redactSecrets` reads the whole text: a credential far past where a cut used to fall is
  *   redacted. Should a pattern still throw RangeError (forced by a stub of RegExp.prototype.exec),
  *   the whole text is replaced; any other error still throws.
+ * - `redactSecrets` finds the caller's key, when it holds a space, with a line break, a tab, a
+ *   CRLF or a control character in that place, or none, BEFORE the `Bearer` or api-key pattern
+ *   can take its first word and leave the rest.
+ * - `joinLines` joins what `/\s*\n\s*\/g` joined, in one pass: 10.4M spaces finish fast.
  * - `internalErrorLine` redacts before sanitizing, while the delimiters the patterns read are still
  *   there (`Bearer\t<token>`); sanitizes the whole text and redacts again, so a key a control
- *   character split is found once joined; and cuts only after that, at the printed clip. Its line
- *   join, quadratic on a whitespace run with no newline, runs only on clipped text: 500k spaces
- *   finish fast.
+ *   character split is found once joined; joins the lines and redacts again; and cuts only after
+ *   that, at the printed clip.
  */
 
 import { describe, expect, it } from "vitest";
 import { MAX_PRINTED_CHARS } from "../src/cli/scrub.js";
-import { internalErrorLine, redactApiKeys, redactSecrets } from "../src/server.js";
+import { internalErrorLine, joinLines, redactApiKeys, redactSecrets } from "../src/server.js";
 import { OLD_API_KEY_VALUE, redactWith } from "./helpers/old-api-key-pattern.js";
 
 const MARKER = "throw-here";
@@ -41,6 +44,20 @@ function throwingOn<T>(error: () => Error, fn: () => T): T {
 	} finally {
 		RegExp.prototype.exec = exec;
 	}
+}
+
+/**
+ * `actual` is `expected`. On a difference it fails with where they part and their lengths, never
+ * a diff: a diff of two strings of millions of characters takes minutes.
+ */
+function expectSame(actual: string, expected: string): void {
+	if (actual === expected) return;
+	let at = 0;
+	while (at < actual.length && actual[at] === expected[at]) at++;
+	const near = (text: string): string => JSON.stringify(text.slice(at, at + 40));
+	expect.fail(
+		`they part at ${at}: ${near(actual)} (length ${actual.length}), expected ${near(expected)} (length ${expected.length})`,
+	);
 }
 
 const line = (message: string, secrets: readonly string[] = []): string =>
@@ -75,9 +92,9 @@ describe("redactApiKeys", () => {
 		expect(() => unclosed.replace(OLD_API_KEY_VALUE, "")).toThrow(RangeError);
 		const unrolled = /'([^'\\]*(?:\\[\s\S][^'\\]*)*)'?/g;
 		expect(() => escapes.replace(unrolled, "")).toThrow(RangeError);
-		expect(redactApiKeys(unclosed)).toBe('x-api-key: "[redacted]"');
-		expect(redactApiKeys(`${escapes}' after`)).toBe("api_key='[redacted]' after");
-		expect(redactApiKeys(`x-api-key=${"a".repeat(N)} after`)).toBe("x-api-key=[redacted] after");
+		expectSame(redactApiKeys(unclosed), 'x-api-key: "[redacted]"');
+		expectSame(redactApiKeys(`${escapes}' after`), "api_key='[redacted]' after");
+		expectSame(redactApiKeys(`x-api-key=${"a".repeat(N)} after`), "x-api-key=[redacted] after");
 	});
 });
 
@@ -105,6 +122,77 @@ describe("redactSecrets", () => {
 			),
 		).toThrow(TypeError);
 	});
+
+	describe("finds a caller's key that holds a space, whatever stands in that space", () => {
+		const key = "tenant key-0123456789";
+
+		it("finds it before the Bearer pattern can take its first word", () => {
+			for (const gap of ["\n", "\t", "\r\n", " \n ", "\0", "\x1b", "  "]) {
+				const text = `Bearer tenant${gap}key-0123456789 after`;
+				expect(redactSecrets(text, [key]), JSON.stringify(gap)).toBe("Bearer [redacted] after");
+			}
+		});
+
+		it("finds it with the space removed, and only the key", () => {
+			expect(redactSecrets("tenantkey-0123456789", [key])).toBe("[redacted]");
+			expect(redactSecrets("tenant key-012345678", [key])).toBe("tenant key-012345678");
+			expect(redactSecrets("a.b+c", ["a.b+c"])).toBe("[redacted]");
+			expect(redactSecrets("aXb+c", ["a.b+c"])).toBe("aXb+c");
+			expect(redactSecrets("text", [" ", ""])).toBe("text");
+		});
+
+		it("drops empty words, so the pattern never starts or ends with a gap", () => {
+			expect(redactSecrets("x abc\ndef y", [" abc  def "])).toBe("x [redacted] y");
+			expect(redactSecrets("x abc  def y", ["abc def"])).toBe("x [redacted] y");
+		});
+
+		it("replaces a one-word key wherever it stands, as a plain split did", () => {
+			expect(redactSecrets("a cat", ["a"])).toBe("[redacted] c[redacted]t");
+		});
+
+		it("stays linear where the key's first word recurs before long whitespace runs", () => {
+			const started = performance.now();
+			const runs = `tenant${" ".repeat(20_000)}`.repeat(100);
+			expectSame(redactSecrets(runs, [key]), runs);
+			const words = "tenant ".repeat(500_000);
+			expectSame(redactSecrets(words, [key]), words);
+			const long = `tenant${" ".repeat(N)}x`;
+			expectSame(redactSecrets(long, [key]), long);
+			expectSame(redactSecrets(`tenant${" ".repeat(N)}key-0123456789`, [key]), "[redacted]");
+			expect(performance.now() - started).toBeLessThan(3_000);
+		});
+	});
+});
+
+describe("joinLines", () => {
+	it("joins exactly what the quadratic pattern joined, over a seeded corpus", () => {
+		const parts = [" ", "\t", "\n", "\r", "\v", "\f", "a", "b"];
+		parts.push(String.fromCodePoint(0xa0), String.fromCodePoint(0x2028));
+		let seed = 54_321;
+		const next = (): number => {
+			seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
+			return seed / 2 ** 32;
+		};
+		let joined = 0;
+		for (let i = 0; i < 50_000; i++) {
+			let text = "";
+			const length = 1 + Math.floor(next() * 12);
+			for (let j = 0; j < length; j++) text += parts[Math.floor(next() * parts.length)];
+			const expected = text.replace(/\s*\n\s*/g, " ");
+			if (expected !== text) joined++;
+			expect(joinLines(text), JSON.stringify(text)).toBe(expected);
+		}
+		// The positive control: the corpus joins often, and leaves runs with no line break.
+		expect(joined).toBeGreaterThan(10_000);
+		expect(joined).toBeLessThan(50_000);
+	}, 60_000);
+
+	it("reads a 10.4M-character whitespace run in one pass", () => {
+		const started = performance.now();
+		expectSame(joinLines(`a${" ".repeat(N)}b`), `a${" ".repeat(N)}b`);
+		expectSame(joinLines(`a${" ".repeat(N / 2)}\n${" ".repeat(N / 2)}b`), "a b");
+		expect(performance.now() - started).toBeLessThan(2_000);
+	});
 });
 
 describe("internalErrorLine redacts the whole message before anything is cut", () => {
@@ -120,7 +208,7 @@ describe("internalErrorLine redacts the whole message before anything is cut", (
 	});
 
 	it("redacts a 10.4M-character unclosed api-key value", () => {
-		expect(line(`x-api-key: "${"a".repeat(N)}`)).toBe(`${LINE}Error: x-api-key: "[redacted]"`);
+		expectSame(line(`x-api-key: "${"a".repeat(N)}`), `${LINE}Error: x-api-key: "[redacted]"`);
 	});
 
 	it("redacts a credential that only removed padding brings into the printed line", () => {
@@ -157,14 +245,65 @@ describe("internalErrorLine redacts the whole message before anything is cut", (
 		expect(out).not.toContain("enant-key");
 	});
 
-	it("replaces a key again after the lines are joined", () => {
-		// Joining turns the line break inside this key into the space the key holds.
-		expect(line("tenant\nkey-0123456789", ["tenant key-0123456789"])).toBe(
-			`${LINE}Error: [redacted]`,
-		);
+	describe("a caller's key that holds a space, quoted with something else in that place", () => {
+		const key = "tenant key-0123456789";
+		const clean = (out: string): void => {
+			expect(out).not.toContain("key-0");
+			expect(out).not.toContain("tenant key");
+		};
+
+		it("is replaced whole where a line break in its space reaches across the printed clip", () => {
+			const pad = "x".repeat(MAX_PRINTED_CHARS - "Error: ".length - 10);
+			const out = line(`${pad}tenant\nkey-0123456789 after`, [key]);
+			expect(out).toBe(`${LINE}Error: ${pad}[redacted]\u2026`);
+			clean(out);
+		});
+
+		it("is replaced whole across the printed clip with an escape sequence inside a word", () => {
+			// The first pass cannot match it; the pass after sanitizing does, before the clip.
+			const pad = "x".repeat(MAX_PRINTED_CHARS - "Error: ".length - 4);
+			const out = line(`${pad}ten\x1b[0mant\nkey-0123456789 after`, [key]);
+			expect(out).toBe(`${LINE}Error: ${pad}[red\u2026`);
+			clean(out);
+		});
+
+		it("is replaced whole where a Bearer pattern would take its first word", () => {
+			// Sanitizing removes the NUL and makes the word `Bearer` only after the first pass.
+			for (const message of ["Bea\0rer tenant\nkey-0123456789", "Bearer tenant\nkey-0123456789"]) {
+				const out = line(message, [key]);
+				expect(out, JSON.stringify(message)).toBe(`${LINE}Error: Bearer [redacted]`);
+				clean(out);
+			}
+		});
+
+		it("is replaced whole where an api-key pattern would take its first word", () => {
+			const out = line("x-api-key: abc\n def-0123456789XYZ", ["abc def-0123456789XYZ"]);
+			expect(out).toBe(`${LINE}Error: x-api-key: [redacted]`);
+			expect(out).not.toContain("def-0");
+		});
+
+		it("is replaced whole where the control character in its space would take the next character", () => {
+			// `ESC K` is one escape sequence: sanitizing would leave `tenantey-...`, which is no
+			// longer the key, so the key must be found before, with the ESC in its space.
+			const out = line("tenant\x1bKey-0123456789", ["tenant Key-0123456789"]);
+			expect(out).toBe(`${LINE}Error: [redacted]`);
+			expect(out).not.toContain("ey-0");
+		});
+
+		it("is replaced whole with a tab, a CRLF, a control character or an escape sequence in its space", () => {
+			for (const gap of ["\t", "\r\n", "\0", "\x07", "\x1b[0m"]) {
+				const out = line(`Bearer tenant${gap}key-0123456789`, [key]);
+				expect(out, JSON.stringify(gap)).toBe(`${LINE}Error: Bearer [redacted]`);
+				clean(out);
+			}
+		});
 	});
 
-	it("joins lines only on clipped text, so a long whitespace run finishes fast", () => {
+	it("joins the lines before the clip, so what follows a long run of line breaks is kept", () => {
+		expect(line(`a${"\n".repeat(10_000)}b`)).toBe(`${LINE}Error: a b`);
+	});
+
+	it("joins lines in one pass, so a long whitespace run finishes fast", () => {
 		const started = performance.now();
 		const out = line(`${" ".repeat(500_000)}end`);
 		expect(performance.now() - started).toBeLessThan(1_000);
