@@ -27,8 +27,11 @@
 
 import { writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { detectPII } from "../../src/policy/pii.js";
-import { detectPII as detectPII504 } from "../fixtures/pii-detector-5.0.4.js";
+import { detectPII, redactPII } from "../../src/policy/pii.js";
+import {
+	detectPII as detectPII504,
+	redactPII as redactPII504,
+} from "../fixtures/pii-detector-5.0.4.js";
 
 type Kind =
 	| "phone"
@@ -360,6 +363,46 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 			texts.filter((t) => now(kind)(t) && !before(kind)(t)).map((t) => `${kind}: ${t}`),
 		);
 		expect(gained).toEqual([]);
+	});
+
+	it("redaction: two non-enumerable and two enumerable properties, a getter among them, copied as 5.0.4 copied them", () => {
+		// The walk lists an object's own names once its enumerable keys are done, and copies its
+		// non-enumerable data properties from that list: with a cursor of their own, not the
+		// enumerable keys' cursor reset to 0, which walked the enumerable keys again and skipped names.
+		const make = () => {
+			const reads = { shown: 0 };
+			const input: Record<string, unknown> = {};
+			Object.defineProperty(input, "hidden0", { value: "plain text", enumerable: false });
+			Object.defineProperty(input, "hidden1", { value: "mail bob@example.com", enumerable: false });
+			Object.defineProperty(input, "email", { value: "mail alice@example.com", enumerable: true });
+			Object.defineProperty(input, "shown", {
+				get: () => {
+					reads.shown++;
+					return "visible";
+				},
+				enumerable: true,
+			});
+			return { input, reads };
+		};
+		const describeCopy = (copy: Record<string, unknown>) =>
+			Object.getOwnPropertyNames(copy).map((name) => {
+				const d = Object.getOwnPropertyDescriptor(copy, name) as PropertyDescriptor;
+				return [name, d.enumerable, d.value];
+			});
+		const now504 = make();
+		const old = describeCopy(redactPII504(now504.input).data as Record<string, unknown>);
+		const current = make();
+		const out = describeCopy(redactPII(current.input).data as Record<string, unknown>);
+		expect(out).toEqual(old);
+		// The copy defines the enumerable keys first, then the non-enumerable ones, as 5.0.4 did.
+		expect(out).toEqual([
+			["email", true, "[REDACTED:email]"],
+			["shown", true, "visible"],
+			["hidden0", false, "plain text"],
+			["hidden1", false, "[REDACTED:email]"],
+		]);
+		expect(current.reads.shown).toBe(now504.reads.shown);
+		expect(current.reads.shown).toBe(2);
 	});
 
 	it("secrets: every format each provider documents that 5.0.4 missed is a gained positive", () => {

@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 100,000 levels take time in proportion to the depth;
   - a cycle is scanned once, and a redacted copy keeps the cycle;
   - only an in-process caller can pass a value that contains itself, since a JSON body cannot hold one.
+  - a value that holds one object at several places (not a cycle) is still walked at each place, as before, so a deeply shared structure takes as long as it did.
 
 - **Secret detection now recognises the token formats GitHub, AWS, Stripe, Slack and GitLab document.** Before this, the following tokens were reported clean under `pii: "block"` and `pii: "redact"`:
   - GitHub fine-grained personal access tokens (`github_pat_`, 22 characters, `_`, 59 characters). The check ended at a word boundary, which the `_` inside such a token never gives, so it never matched one.

@@ -88,6 +88,10 @@ describe("GitHub tokens, by the prefixes GitHub documents", () => {
 });
 
 describe("AWS access key ids, by the prefixes AWS documents", () => {
+	it("AKIA keeps its released alphabet: 0, 1, 8 and 9 in the body are still a key", () => {
+		expect(types(`AK${"IA"}0189${chars(12, 45, UPPER)}`)).toContain("aws_key");
+	});
+
 	it(`AKIA (access key) and ASIA (temporary STS access key id), per ${AWS}`, () => {
 		for (const prefix of ["AK", "AS"]) {
 			const key = `${prefix}IA${chars(16, 10, `${UPPER}234567`)}`;
@@ -149,6 +153,32 @@ describe("Slack tokens, by the prefixes Slack documents", () => {
 
 	it("an app-level prefix with a short payload, a capital in it, is not a token: a token's payload is 20 characters or more", () => {
 		expect(types(`xa${"pp-"}MyConfig-2024`)).not.toContain("generic_secret");
+	});
+
+	it("an app-level payload with a capital, then _: not a token, a Slack payload never holds _", () => {
+		expect(types(`xa${"pp-"}ABCDEFGHIJKLMNOPQRSTUV_suffix`)).not.toContain("generic_secret");
+	});
+
+	it("a decoy that only starts like a token does not hide a real one after it", () => {
+		const decoys: Array<[string, string, string]> = [
+			["api_key", `rk${"_live_"}mode_settings_for_this_account`, `rk${"_live_"}${chars(99, 46)}Q`],
+			["api_key", `sk${"-"}${"-".repeat(26)}`, `sk${"-proj-"}${chars(60, 47, URLSAFE)}`],
+			[
+				"generic_secret",
+				`gl${"rt-"}runner-registration-walkthrough`,
+				`gl${"rt-"}${chars(19, 48)}Q`,
+			],
+			[
+				"generic_secret",
+				`xo${"xb-"}${"-".repeat(10)}`,
+				`xo${"xb-"}${chars(12, 49, "0123456789")}-${chars(24, 50)}`,
+			],
+			["github_token", `gh${"u_"}userlookupservicehandler`, `gh${"u_"}${chars(35, 51)}Q`],
+		];
+		for (const [kind, decoy, token] of decoys) {
+			expect(types(decoy), decoy).not.toContain(kind);
+			expect(types(`${decoy} then ${token}`), decoy).toContain(kind);
+		}
 	});
 
 	it("a bot-token prefix followed by a snake_case name is not a token: a Slack payload never holds _", () => {

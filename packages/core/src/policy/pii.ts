@@ -916,6 +916,8 @@ type RedactFrame =
 			clone: Record<string, unknown>;
 			keys: string[];
 			hidden: string[] | undefined;
+			/** The next of `hidden`, a cursor of its own: `next` stays past the enumerable keys. */
+			nextHidden: number;
 			path: string;
 			next: number;
 			below: RedactFrame | undefined;
@@ -963,7 +965,17 @@ function redactValue(root: unknown, clones: Clones): unknown {
 			const clone: Record<string, unknown> = {};
 			registerClone(clones, value, path, clone);
 			const keys = Object.keys(source);
-			top = { kind: "object", source, clone, keys, hidden: undefined, path, next: 0, below: top };
+			top = {
+				kind: "object",
+				source,
+				clone,
+				keys,
+				hidden: undefined,
+				nextHidden: 0,
+				path,
+				next: 0,
+				below: top,
+			};
 			return clone;
 		}
 		return value;
@@ -988,12 +1000,11 @@ function redactValue(root: unknown, clones: Clones): unknown {
 			if (frame.hidden === undefined) {
 				// The enumerable keys are done: list the own property names now, as the walk did.
 				frame.hidden = Object.getOwnPropertyNames(frame.source);
-				frame.next = 0;
 			}
-			if (frame.next < frame.hidden.length) {
+			if (frame.nextHidden < frame.hidden.length) {
 				// Each one's descriptor is read once, in its turn. Only a non-enumerable DATA property
 				// that is not a function is copied.
-				const key = frame.hidden[frame.next++] as string;
+				const key = frame.hidden[frame.nextHidden++] as string;
 				const d = Object.getOwnPropertyDescriptor(frame.source, key);
 				if (
 					d !== undefined &&
