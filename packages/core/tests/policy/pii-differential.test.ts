@@ -46,6 +46,27 @@ type Check = (s: string) => boolean;
 const NBSP = String.fromCodePoint(0xa0);
 const NARROW_NBSP = String.fromCodePoint(0x202f);
 
+/** `s` in fullwidth forms: each printable ASCII character but the space moved to its U+FF01-FF5E form. */
+function fullwidth(s: string): string {
+	return [...s]
+		.map((c) => {
+			const cp = c.codePointAt(0) as number;
+			return cp > 0x20 && cp < 0x7f ? String.fromCodePoint(cp + 0xfee0) : c;
+		})
+		.join("");
+}
+
+/** `s` with the format character `cf` (a zero-width space unless named) after every 4th character. */
+function interleaved(s: string, cf = String.fromCodePoint(0x200b)): string {
+	return [...s].map((c, i) => (i % 4 === 3 ? c + cf : c)).join("");
+}
+
+/** `s` half in fullwidth forms, half with zero-width joiners: both at once. */
+function mixed(s: string): string {
+	const half = Math.floor(s.length / 2);
+	return fullwidth(s.slice(0, half)) + interleaved(s.slice(half), String.fromCodePoint(0x200d));
+}
+
 /** Every code point up to 0xFFFF that `\s` matches: the space, the ASCII controls, and the rest. */
 const WHITESPACE: string[] = [];
 for (let cp = 0; cp <= 0xffff; cp++) {
@@ -210,6 +231,40 @@ const CURATED: Record<Kind, string[]> = {
 	],
 };
 
+/**
+ * Values hidden from a plain pattern by fullwidth forms or format characters: the same values the
+ * detector reads in its normalized view (NFKC, format characters removed). 5.0.4 reads none of them.
+ */
+const NORMALIZED: Record<Kind, string[]> = {
+	phone: [fullwidth("234-567-8901"), interleaved("2345678901"), mixed("+1 (234) 567-8901")],
+	credit_card: [
+		fullwidth("4111 1111 1111 1111"),
+		interleaved("4111111111111111"),
+		mixed("5500-0000-0000-0004"),
+	],
+	ipv4: [fullwidth("192.168.1.1"), interleaved("10.0.0.1"), mixed("host 172.16.254.1 up")],
+	api_key: [
+		interleaved(`sk${"-proj-"}${alnum(156, 40)}`),
+		fullwidth(`sk${"-ant-api03-"}${alnum(93, 41)}AA`),
+		mixed(`sk${"_live_"}${alnum(99, 42)}`),
+		interleaved(`sk${"-"}${alnum(48, 43)}`, String.fromCodePoint(0xad)),
+	],
+	aws_key: [
+		interleaved(`AK${"IA"}${alnum(16, 44, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")}`),
+		fullwidth(`AK${"IA"}${alnum(16, 45, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")}`),
+	],
+	github_token: [
+		interleaved(`gh${"p_"}${alnum(36, 46)}`, String.fromCodePoint(0xfeff)),
+		fullwidth(`gh${"o_"}${alnum(36, 47)}`),
+		mixed(`gh${"s_"}${alnum(36, 48)}`),
+	],
+	generic_secret: [
+		interleaved(HEX64, String.fromCodePoint(0x2060)),
+		fullwidth(`gl${"pat-"}${alnum(20, 49)}`),
+		mixed(`np${"m_"}${alnum(36, 50)}`),
+	],
+};
+
 /** A seeded generator, so the fuzz set is the same on every run. */
 function seeded(seed: number): () => number {
 	let a = seed >>> 0;
@@ -241,6 +296,7 @@ const FUZZ = fuzz(20261018, 20_000);
 const inputsFor = (kind: Kind): string[] => [
 	...CURATED[kind],
 	...GAINED.filter(([k]) => k === kind).map(([, token]) => token),
+	...NORMALIZED[kind],
 	...FUZZ,
 ];
 const before =
@@ -459,6 +515,43 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 		]);
 		expect(current.reads.shown).toBe(now504.reads.shown);
 		expect(current.reads.shown).toBe(2);
+	});
+
+	it("normalized view: a value in fullwidth forms or split by format characters is a gained positive", () => {
+		const notGained: string[] = [];
+		for (const [kind, values] of Object.entries(NORMALIZED) as Array<[Kind, string[]]>) {
+			for (const s of values) {
+				if (before(kind)(s) || !now(kind)(s))
+					notGained.push(`${kind}: ${JSON.stringify(s.slice(0, 24))}`);
+			}
+		}
+		expect(notGained).toEqual([]);
+	});
+
+	it("normalized view: every gain on text the view changes is what 5.0.4 reads in that view", () => {
+		// The view, written here from the rule (NFKC, then format characters removed), not imported.
+		const view = (s: string) => s.normalize("NFKC").replace(/\p{Cf}/gu, "");
+		const kinds: Kind[] = [
+			"phone",
+			"credit_card",
+			"ipv4",
+			"generic_secret",
+			"api_key",
+			"aws_key",
+			"github_token",
+		];
+		let explained = 0;
+		const unexplained: string[] = [];
+		for (const kind of kinds) {
+			for (const s of inputsFor(kind)) {
+				if (!now(kind)(s) || before(kind)(s) || view(s) === s) continue;
+				if (before(kind)(view(s))) explained++;
+				else unexplained.push(`${kind}: ${JSON.stringify(s.slice(0, 30))}`);
+			}
+		}
+		expect(unexplained).toEqual([]);
+		// Positive control: the rows above hold such gains, so the rule is exercised.
+		expect(explained).toBeGreaterThanOrEqual(20);
 	});
 
 	it("secrets: every format each provider documents that 5.0.4 missed is a gained positive", () => {

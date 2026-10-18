@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A placeholder after a prefix 5.0.5 added is no longer reported as a secret.** 5.0.5 flagged placeholder values such as `rk_live_XXXX…`: one capital, repeated, satisfied the capital rule those prefixes take. The payload after each of them must now also hold at least four distinct characters. This covers `ghu_`, the stateless `ghs_` and fine-grained `github_pat_` GitHub tokens, `ASIA`, `rk_live_`, `rk_test_`, `sk_org_`, `xapp-`, `xwfp-`, `xoxe-<n>-`, and GitLab's twelve prefixes besides `glpat-`. The prefixes released before 5.0.5 are unchanged.
 
+- **PII and secret detection now reads values hidden by fullwidth forms or invisible format characters.** Before this, a key with a zero-width space inside, or a key, card number, phone number, SSN, email or IPv4 address typed in fullwidth forms (as an input method may type it), was reported clean under `pii: "block"` and `pii: "redact"`. Each pattern is now also tried on a view of the value:
+  - format characters (Unicode category Cf: zero-width spaces and joiners, soft hyphens, bidi marks) removed;
+  - each character whose NFKC form is ASCII replaced by that form (fullwidth letters and digits, the ideographic space, circled and parenthesized numbers).
+
+  A value flagged before is still flagged, and redaction still replaces the whole value. Any other character stays as it is, so the view is never more than four times the value's length and the scan stays linear (full NFKC can turn one character into 18).
+
 ## [5.0.5] - 2026-10-18
 
 ### Read before upgrading

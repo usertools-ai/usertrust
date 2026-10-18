@@ -846,9 +846,90 @@ function scanValue(root: unknown, types: Set<string>, paths: string[], signalSen
 	}
 }
 
+/** Whether every character is ASCII: NFKC changes none of those, and no format character is one. */
+function isAscii(value: string): boolean {
+	for (let i = 0; i < value.length; i++) {
+		if (value.charCodeAt(i) > 0x7f) return false;
+	}
+	return true;
+}
+
+/** A format character (Unicode category Cf): zero-width spaces and joiners, soft hyphens, bidi marks. */
+const FORMAT_CHAR_RE = /^\p{Cf}$/u;
+
+/** Only ASCII: the characters every pattern here reads. */
+const ASCII_ONLY_RE = /^[ -~\t\n\r\f\v]+$/;
+
+/** What the view does with a code point: not yet seen, keep it, remove it, or replace it. */
+const KIND_UNSEEN = 0;
+const KIND_KEEP = 1;
+const KIND_REMOVE = 2;
+const KIND_REPLACE = 3;
+
+/**
+ * Each code point's kind, found the first time it is seen. A fixed table (1.1 MB), so no input can
+ * grow it; the replacements hold only the code points whose NFKC form is ASCII (1,439 under Unicode
+ * 16, 1,440 under 17).
+ */
+const CODE_POINT_KIND = new Uint8Array(0x110000);
+const ASCII_FORM = new Map<number, string>();
+
+function codePointKind(cp: number): number {
+	let kind = CODE_POINT_KIND[cp] as number;
+	if (kind !== KIND_UNSEEN) return kind;
+	const c = String.fromCodePoint(cp);
+	const form = c.normalize("NFKC");
+	if (FORMAT_CHAR_RE.test(c)) kind = KIND_REMOVE;
+	else if (form !== c && ASCII_ONLY_RE.test(form)) {
+		kind = KIND_REPLACE;
+		ASCII_FORM.set(cp, form);
+	} else kind = KIND_KEEP;
+	CODE_POINT_KIND[cp] = kind;
+	return kind;
+}
+
+/**
+ * The view each pattern is also tried on. Every pattern here reads ASCII, so the view is the string
+ * with each format character (category Cf) removed and each character whose NFKC form is ASCII
+ * replaced by that form: fullwidth letters and digits, the ideographic space, circled and
+ * parenthesized numbers. A key with a zero-width space inside, or a key, card or phone number typed
+ * in fullwidth forms (as an input method may type it), reads as the plain value there. Any other
+ * character stays as it is. One pass; no character becomes more than 4 (`VIII`, `(10)`), so the
+ * view is never more than four times the string, where NFKC itself can make one character 18
+ * (U+FDFA). ASCII text is its own view, and is returned as it is.
+ */
+export function normalizedView(value: string): string {
+	if (isAscii(value)) return value;
+	let out = "";
+	let from = 0;
+	for (let i = 0; i < value.length; ) {
+		const cp = value.codePointAt(i) as number;
+		const width = cp > 0xffff ? 2 : 1;
+		if (cp > 0x7f) {
+			const kind = codePointKind(cp);
+			if (kind !== KIND_KEEP) {
+				out += value.slice(from, i);
+				if (kind === KIND_REPLACE) out += ASCII_FORM.get(cp) as string;
+				from = i + width;
+			}
+		}
+		i += width;
+	}
+	return from === 0 ? value : out + value.slice(from);
+}
+
+/**
+ * Whether `pattern` matches `value` or its normalized view `view`. A value flagged before is still
+ * flagged; the view only adds. Either way the whole value is what redaction replaces.
+ */
+function matches(pattern: PIIPattern, value: string, view: string): boolean {
+	return pattern.test(value) || (view !== value && pattern.test(view));
+}
+
 function scanString(value: string, currentPath: string, types: Set<string>, paths: string[]): void {
+	const view = normalizedView(value);
 	for (const pattern of PII_PATTERNS) {
-		if (pattern.test(value)) {
+		if (matches(pattern, value, view)) {
 			types.add(pattern.type);
 			paths.push(currentPath ? `${currentPath}(${pattern.type})` : `(${pattern.type})`);
 		}
@@ -922,7 +1003,10 @@ export function redactMessages(messages: unknown): RedactedData {
  * element rather than assign it, so an index setter on Array.prototype cannot swallow a name.
  */
 function matchedTypes(value: string): string[] {
-	return PII_PATTERNS.filter((pattern) => pattern.test(value)).map((pattern) => pattern.type);
+	const view = normalizedView(value);
+	return PII_PATTERNS.filter((pattern) => matches(pattern, value, view)).map(
+		(pattern) => pattern.type,
+	);
 }
 
 function defineData(obj: object, key: string, value: unknown, enumerable: boolean): void {
