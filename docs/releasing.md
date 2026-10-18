@@ -48,7 +48,8 @@ tree) and refuses the release, before anything is built, when:
 **At most one major a quarter.** A major is refused while the last one is less than 90 days
 old: the highest `v<N>.0.0` tag on `master`, aged by its tag date (a tag whose commit is not on
 `master` was never released and does not count). To release one anyway, give the reason in the
-`allow_early_major` input. It leads the GitHub Release's notes. The input is refused on any
+`allow_early_major` input. It is written into the release tag and leads the GitHub Release's
+notes, so a republish, which refuses the input, still has it. The input is refused on any
 release that does not need it (a patch, a minor, or a major more than 90 days after the last
 one) and on a republish, so a reason is never given and then silently unused.
 
@@ -194,7 +195,8 @@ repository or mint an OIDC token for provenance:
       would publish under `backfill`).
    4. **Pushes the release commit and tag** to `master`, atomically, and only while `master`
       is still the dispatched commit (see "Why the commit and tag are pushed before
-      publishing").
+      publishing"). The tag is annotated in this job, on the verified commit, with the version
+      and an early major's reason.
    5. Assembles the six tarballs again (the same commit gives the same bytes) and publishes
       each with the same command, without `--dry-run`. Publishing a tarball runs no lifecycle
       script.
@@ -203,7 +205,7 @@ repository or mint an OIDC token for provenance:
       has a higher version on npm (prereleases never take it), so finishing an older version
       never takes Latest from a newer one. It runs only after every package's publish
       succeeded. For a major released early, the `allow_early_major` reason leads the notes,
-      above the generated ones.
+      above the generated ones; it is read from the release tag, which step 4 annotated with it.
       This is the same answer that chose the npm dist-tag in steps 3 and 5.
 
    Each step runs only if every step before it succeeded, so a normal release publishes

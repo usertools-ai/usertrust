@@ -231,7 +231,7 @@ describe("publish.yml", () => {
 		);
 	});
 
-	it("allow_early_major is a string, empty by default, refused on a republish, and leads the notes", () => {
+	it("allow_early_major is a string, empty by default, refused on a republish, and written into the tag the notes read", () => {
 		const input = publish.on?.workflow_dispatch?.inputs?.allow_early_major;
 		expect(input).toEqual(
 			expect.objectContaining({ type: "string", default: "", required: false }),
@@ -241,11 +241,20 @@ describe("publish.yml", () => {
 		expect(ref.env?.ALLOW_EARLY_MAJOR).toBe("${{ inputs.allow_early_major }}");
 		expect(ref.run).toContain('if [ -n "$ALLOW_EARLY_MAJOR" ]; then');
 		expect(ref.run).toContain("allow_early_major is for a new major release, not a republish");
-		const rel = step("publish", "Create GitHub Release");
-		expect(rel.env?.ALLOW_EARLY_MAJOR).toBe("${{ inputs.allow_early_major }}");
-		expect(rel.run).toContain(
-			'notes=(--notes "Released less than 90 days after the previous major: ${ALLOW_EARLY_MAJOR}")',
+		// The push step writes the reason into the tag; the release step reads it from origin's
+		// tag, so a republish (no input) keeps it.
+		const push = step("publish", "Push the release commit and tag");
+		expect(push.env?.ALLOW_EARLY_MAJOR).toBe("${{ inputs.allow_early_major }}");
+		expect(push.run?.trim().split("\n")[0]).toBe(
+			'bash scripts/release.sh tag-release "$VERSION" "$COMMIT"',
 		);
+		const rel = step("publish", "Create GitHub Release");
+		expect(rel.env ?? {}).not.toHaveProperty("ALLOW_EARLY_MAJOR");
+		expect(rel.run).toContain(
+			'git fetch --quiet --no-tags --force origin "+refs/tags/v${VERSION}:refs/tags/v${VERSION}"',
+		);
+		expect(rel.run).toContain('note=$(bash scripts/release.sh release-note "$VERSION")');
+		expect(rel.run).toContain('notes=(--notes "$note")');
 		expect(rel.run).toContain('"${notes[@]}"');
 	});
 
@@ -1535,10 +1544,14 @@ describe("release.sh assert-npm", { timeout: 30_000 }, () => {
 		}
 	});
 
-	it("the real node passes too (the floor is below every Node this repository runs)", () => {
+	it("reads the real node's version, and holds it to the same floor", () => {
 		const r = run(["assert-npm"], { FAKE_NPM_VERSION: "11.19.0" });
-		expect(r.status, r.err).toBe(0);
 		expect(r.out).toContain(`node ${process.version}, npm 11.19.0`);
+		// The floor is for publishing: a Node this package supports but below it (22.12, say) is
+		// refused here, which is not a failure of this test.
+		const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
+		const atFloor = major > 22 || (major === 22 && minor >= 14);
+		expect(r.status === 0, r.err).toBe(atFloor);
 	});
 
 	for (const v of [
@@ -2108,6 +2121,53 @@ describe("release.sh gate (normal release)", { timeout: 30_000 }, () => {
 		const r = run(["gate"], { REQUIRED_CI_JOBS: "  " });
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("REQUIRED_CI_JOBS is empty");
+	});
+});
+
+describe("release.sh tag-release and release-note", { timeout: 30_000 }, () => {
+	const reason = "a removal that cannot wait";
+
+	it("writes an early major's reason into the tag, which a republish reads back from origin", () => {
+		releaseCommit("2.0.0");
+		const commit = git("rev-parse", "HEAD");
+		// The build job's tag carries no reason; the publish job's replaces it, on the same commit.
+		expect(run(["release-note", "2.0.0"]).out.trim()).toBe("");
+		const r = run(["tag-release", "2.0.0", commit], { ALLOW_EARLY_MAJOR: reason });
+		expect(r.status, r.err).toBe(0);
+		expect(git("rev-parse", "v2.0.0^{commit}")).toBe(commit);
+		expect(git("for-each-ref", "--format=%(contents:subject)", "refs/tags/v2.0.0")).toBe("v2.0.0");
+		git("push", "-q", "origin", "refs/tags/v2.0.0");
+		// A republish holds only what origin has.
+		git("tag", "-d", "v2.0.0");
+		git("fetch", "-q", "--no-tags", "origin", "+refs/tags/v2.0.0:refs/tags/v2.0.0");
+		const note = run(["release-note", "2.0.0"]);
+		expect(note.status, note.err).toBe(0);
+		expect(note.out.trim()).toBe(`Released less than 90 days after the previous major: ${reason}`);
+	});
+
+	it("writes no note without a reason", () => {
+		releaseCommit("1.1.0");
+		expect(run(["tag-release", "1.1.0", git("rev-parse", "HEAD")]).status).toBe(0);
+		const note = run(["release-note", "1.1.0"]);
+		expect(note.status, note.err).toBe(0);
+		expect(note.out.trim()).toBe("");
+	});
+
+	it("refuses a missing or lightweight tag, and bad arguments", () => {
+		const missing = run(["release-note", "9.9.9"]);
+		expect(missing.status).not.toBe(0);
+		expect(missing.err).toContain("v9.9.9 is not an annotated tag here");
+		git("tag", "v3.0.0");
+		expect(run(["release-note", "3.0.0"]).err).toContain("v3.0.0 is not an annotated tag here");
+		for (const args of [
+			["tag-release", "x", "HEAD"],
+			["tag-release", "1.0.1"],
+			["release-note", ""],
+		]) {
+			const r = run(args, { ALLOW_EARLY_MAJOR: reason });
+			expect(r.status, args.join(" ")).not.toBe(0);
+			expect(r.err).toContain("usage:");
+		}
 	});
 });
 

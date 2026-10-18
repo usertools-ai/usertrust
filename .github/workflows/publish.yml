@@ -457,13 +457,17 @@ jobs:
       # parent is that commit, so the push is still a fast-forward: nothing is overwritten.
       # The token is handed to this one git process through the environment (GIT_CONFIG_*),
       # so it is never written to .git/config or any other file a later step could read.
+      # The tag is annotated here, on the verified commit, with an early major's reason, so a
+      # republish after a failed publish still has it for the GitHub Release.
       - name: Push the release commit and tag
         if: ${{ !inputs.dry_run && !inputs.republish }}
         env:
           COMMIT: ${{ steps.source.outputs.commit }}
           VERSION: ${{ steps.source.outputs.version }}
+          ALLOW_EARLY_MAJOR: ${{ inputs.allow_early_major }}
           PUSH_TOKEN: ${{ github.token }}
         run: |
+          bash scripts/release.sh tag-release "$VERSION" "$COMMIT"
           auth=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
           echo "::add-mask::${auth}"
           GIT_CONFIG_COUNT=1 \
@@ -495,7 +499,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.source.outputs.version }}
-          ALLOW_EARLY_MAJOR: ${{ inputs.allow_early_major }}
         run: |
           if [ "$REPUBLISH" = true ] && gh release view "v${VERSION}" >/dev/null 2>&1; then
             echo "GitHub Release v${VERSION} already exists."
@@ -503,10 +506,13 @@ jobs:
           fi
           latest=$(bash scripts/release.sh latest-flag "$VERSION")
           echo "Latest: ${latest}"
-          # An early major's reason (ci-gate refused it on any other release) leads the notes.
+          # An early major's reason leads the notes. It is read from the tag on origin, which the
+          # push step annotated, so a republish (which refuses allow_early_major) keeps it.
+          git fetch --quiet --no-tags --force origin "+refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+          note=$(bash scripts/release.sh release-note "$VERSION")
           notes=()
-          if [ -n "$ALLOW_EARLY_MAJOR" ]; then
-            notes=(--notes "Released less than 90 days after the previous major: ${ALLOW_EARLY_MAJOR}")
+          if [ -n "$note" ]; then
+            notes=(--notes "$note")
           fi
           gh release create "v${VERSION}" \
             --verify-tag \

@@ -1456,6 +1456,41 @@ assert_npm() {
 	echo "npm ${npmv} >= ${NPM_FLOOR} and node ${nodev} >= ${NODE_FLOOR}: npm uses trusted publishing (OIDC) where npmjs.com trusts this workflow, and the token otherwise."
 }
 
+# Annotates the release tag on <commit> in the publish job, replacing the one the build job made
+# (whose message is never read): the version, then, for a major released early, its reason
+# (ALLOW_EARLY_MAJOR). The tag is pushed with the release commit, so the reason outlives the run:
+# a republish, which refuses allow_early_major, reads it back with release-note.
+tag_release() {
+	local version="${1:-}" commit="${2:-}"
+	local message=(-m "v${version}")
+	if ! valid_version "$version" || [ -z "$commit" ]; then
+		err "usage: tag-release <version> <commit>"
+		return 1
+	fi
+	if [ -n "${ALLOW_EARLY_MAJOR:-}" ]; then
+		message+=(-m "Released less than 90 days after the previous major: ${ALLOW_EARLY_MAJOR}")
+	fi
+	git -c user.name="github-actions[bot]" \
+		-c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+		tag -a -f "${message[@]}" "v${version}" "${commit}^{commit}" > /dev/null
+}
+
+# What leads the GitHub Release's notes: the release tag's message after its first line (an
+# early major's reason), or nothing. The tag must be an annotated one; any other is refused, so a
+# reason can never be lost by reading the wrong object.
+release_note() {
+	local version="${1:-}"
+	if ! valid_version "$version"; then
+		err "usage: release-note <version>"
+		return 1
+	fi
+	if [ "$(git cat-file -t "refs/tags/v${version}" 2> /dev/null)" != tag ]; then
+		err "v${version} is not an annotated tag here; refusing to guess the release notes."
+		return 1
+	fi
+	git for-each-ref --format='%(contents:body)' "refs/tags/v${version}"
+}
+
 gate() {
 	local sha
 	if [ "${REPUBLISH:-}" = true ]; then
@@ -1483,13 +1518,15 @@ assert-protected) assert_protected "${2:-}" ;;
 assert-npm) assert_npm ;;
 release-parent) verify_release_commit HEAD ;;
 latest-flag) latest_flag "${2:-}" ;;
+tag-release) tag_release "${2:-}" "${3:-}" ;;
+release-note) release_note "${2:-}" ;;
 dist-tag) dist_tag "${2:-}" ;;
 pack) pack "${2:-}" ;;
 publish) publish "${2:-}" "${3:-}" "${4:-}" ;;
 compare-builds) compare_builds "${2:-}" "${3:-}" "${4:-}" ;;
 gate) gate ;;
 *)
-	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | expected-version <bump> | assert-bump <bump> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run] | compare-builds <dir> <rebuild dir> <commit>"
+	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | expected-version <bump> | assert-bump <bump> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | tag-release <version> <commit> | release-note <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run] | compare-builds <dir> <rebuild dir> <commit>"
 	exit 2
 	;;
 esac
