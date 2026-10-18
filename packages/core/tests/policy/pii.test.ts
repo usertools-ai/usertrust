@@ -1206,29 +1206,17 @@ describe("redactPII — cycles and shared references keep their shape in the cop
 		expect(out.a.email).toBe("[REDACTED:email]");
 	});
 
-	it("an ENUMERABLE cycle: detection overflows before redaction runs (unchanged), so redactPII throws the same RangeError", () => {
+	it("an ENUMERABLE cycle: detection scans it once and redaction copies its shape, where both threw RangeError", () => {
 		const input: Record<string, unknown> = { email: EMAIL };
 		input.self = input;
-		const fromDetect = (() => {
-			try {
-				detectPII(input);
-				return undefined;
-			} catch (err) {
-				return err;
-			}
-		})();
-		expect(fromDetect).toBeInstanceOf(RangeError);
-		const fromRedact = (() => {
-			try {
-				redactPII(input);
-				return undefined;
-			} catch (err) {
-				return err;
-			}
-		})();
-		expect(fromRedact).toBeInstanceOf(RangeError);
-		// the overflow is detection's own walk, which this change does not touch
-		expect((fromRedact as Error).stack).toContain("scanValue");
+		// The walk does not enter an object already open on its path, so the cycle is scanned once.
+		const detection = detectPII(input);
+		expect(detection.types).toEqual(["email"]);
+		expect(detection.paths).toEqual(["email(email)"]);
+		const out = redactPII(input).data as Record<string, unknown>;
+		expect(out.email).toBe("[REDACTED:email]");
+		expect(out.self).toBe(out);
+		expect(input.email).toBe(EMAIL);
 	});
 });
 

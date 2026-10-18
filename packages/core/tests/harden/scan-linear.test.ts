@@ -18,7 +18,7 @@
 
 import { describe, expect, it } from "vitest";
 import { detectInjection } from "../../src/policy/injection.js";
-import { detectPII } from "../../src/policy/pii.js";
+import { detectPII, redactPII } from "../../src/policy/pii.js";
 
 const FULL = 1_000_000;
 const SIZES = [FULL / 16, FULL];
@@ -126,6 +126,12 @@ const WORST: ReadonlyArray<[string, (n: number) => string]> = [
 	["github token: repeated fine-grained starts", run("-github_pat_")],
 	["github token: stateless prefix, then digits", after("ghs_", "1")],
 	["github token: repeated stateless starts", run("-ghs_1_")],
+	["github token: repeated stateless starts with eyJ", run("-ghs_1_eyJ")],
+	["github token: repeated stateless JWTs of two segments", run("-ghs_1_eyJa.b")],
+	["github token: stateless start, then a long segment run", after("ghs_1_eyJ", "a")],
+	["generic secret: repeated lowercase GitLab payloads", run("-gldt-abcdefghijklmnopqrstu")],
+	["generic secret: xoxb- then a run, then _", after("xoxb-", "a", "_")],
+	["api key: sk- then dashes only", after("sk-", "-")],
 	["github token: stateless prefix, digits, then _", after("ghs_", "1", "_")],
 	["github token: fine-grained prefix, then underscores", after("github_pat_", "_")],
 	["api key: sk_org_ then dashes", after("sk_org_", "-")],
@@ -257,6 +263,105 @@ describe("long inputs: no detector throws, and the scans stay linear, up to 10M 
 			expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at ${verdict.size}`).toMatchObject({
 				ok: true,
 			});
+		}, 120_000);
+	}
+});
+
+describe("deep nesting: detection and redaction walk 100,000 levels, in time linear in the depth", () => {
+	// A recursive walk exhausted the call stack at about 10,000 levels (20 KB of JSON) and threw.
+	// The time bound is a ratio, as above, to a walk doing the same kinds of work per level in the
+	// same run: a frame, a path built from its parent's, a set lookup. At 6,250 levels and at
+	// 100,000, detection and redaction must stay within MAX_RATIO of it; a walk that rehashed its
+	// whole path at every level was more than a thousand times over.
+	const DEPTHS = [6_250, 100_000];
+	const LEAF = "write to alice@example.com";
+	const SHORT_PATHS: ReadonlySet<string> = new Set(["config", "config.abortSignal"]);
+	const shapes: ReadonlyArray<[string, (depth: number) => unknown, (v: unknown) => unknown]> = [
+		[
+			"arrays",
+			(depth) => {
+				let v: unknown = LEAF;
+				for (let i = 0; i < depth; i++) v = [v];
+				return v;
+			},
+			(v) => (v as unknown[])[0],
+		],
+		[
+			"objects",
+			(depth) => {
+				let v: unknown = LEAF;
+				for (let i = 0; i < depth; i++) v = { a: v };
+				return v;
+			},
+			(v) => (v as { a: unknown }).a,
+		],
+	];
+	/** The baseline: an iterative walk with the same per-level work. */
+	const baselineWalk = (v: unknown, child: (v: unknown) => unknown): void => {
+		type Frame = { x: unknown; path: string; below: Frame | undefined };
+		let top: Frame | undefined = { x: v, path: "", below: undefined };
+		let levels = 0;
+		while (top !== undefined) {
+			const frame: Frame = top;
+			top = frame.below;
+			if (frame.x !== null && typeof frame.x === "object") {
+				if (SHORT_PATHS.has(frame.path.length <= 18 ? frame.path : "")) levels++;
+				top = { x: child(frame.x), path: `${frame.path}.a`, below: top };
+				levels++;
+			}
+		}
+		sink ^= levels;
+	};
+	/** The innermost value, reached without recursing. */
+	const innermost = (v: unknown, child: (v: unknown) => unknown): unknown => {
+		let x = v;
+		while (x !== null && typeof x === "object") x = child(x);
+		return x;
+	};
+	const withinDepthRatio = (
+		walk: (v: unknown) => unknown,
+		make: (depth: number) => unknown,
+		child: (v: unknown) => unknown,
+	): Verdict => {
+		let last: Verdict = { ok: true, size: 0, ratio: 0 };
+		for (const depth of DEPTHS) {
+			const v = make(depth);
+			const baseline = Math.max(
+				median([1, 2, 3, 4, 5].map(() => timeMs(() => baselineWalk(v, child)))),
+				0.001,
+			);
+			let t = timeMs(() => walk(v));
+			if (t / baseline > MAX_RATIO)
+				t = Math.min(
+					t,
+					timeMs(() => walk(v)),
+				);
+			last = { ok: t / baseline <= MAX_RATIO, size: depth, ratio: t / baseline };
+			if (!last.ok) return last;
+		}
+		return last;
+	};
+
+	for (const [shape, make, child] of shapes) {
+		it(`detectPII: ${shape}`, () => {
+			const verdict = withinDepthRatio(detectPII, make, child);
+			expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at depth ${verdict.size}`).toMatchObject({
+				ok: true,
+			});
+			const found = detectPII(make(100_000));
+			expect(found.types).toEqual(["email"]);
+			expect(found.paths).toHaveLength(1);
+			expect(found.paths[0]?.endsWith("(email)")).toBe(true);
+		}, 120_000);
+
+		it(`redactPII: ${shape}`, () => {
+			const verdict = withinDepthRatio(redactPII, make, child);
+			expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at depth ${verdict.size}`).toMatchObject({
+				ok: true,
+			});
+			const deep = make(100_000);
+			expect(innermost(redactPII(deep).data, child)).toBe("[REDACTED:email]");
+			expect(innermost(deep, child)).toBe(LEAF);
 		}, 120_000);
 	}
 });

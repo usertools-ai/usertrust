@@ -32,6 +32,7 @@ const GITHUB =
 const AWS = "docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html";
 const STRIPE = "docs.stripe.com/keys";
 const SLACK = "docs.slack.dev/authentication/tokens";
+const SLACK_ROTATION = "docs.slack.dev/authentication/using-token-rotation";
 const GITLAB = "docs.gitlab.com/security/tokens";
 const NPM = "github.blog/changelog/2021-09-23-npm-has-a-new-access-token-format";
 const SENDGRID = "twilio.com/docs/sendgrid/ui/account-and-settings/api-keys";
@@ -73,6 +74,17 @@ describe("GitHub tokens, by the prefixes GitHub documents", () => {
 	it("an undocumented gh?_ prefix is not a GitHub token", () => {
 		expect(types(`gh${"x_"}${chars(36, 9)}`)).not.toContain("github_token");
 	});
+
+	it(`a stateless installation token needs its whole JWT, three segments (ghs_APPID_JWT, GitHub's changelog of 2026-10-02 and ${GITHUB})`, () => {
+		for (const text of [
+			`gh${"s_"}1_ey${"J"}`,
+			`gh${"s_"}12345_ey${"J"} is the start`,
+			`gh${"s_"}7_ey${"J"}abc.def`,
+		]) {
+			expect(types(text), text).not.toContain("github_token");
+		}
+		expect(types(`gh${"s_"}7_ey${"J"}abc.def.ghi`)).toContain("github_token");
+	});
 });
 
 describe("AWS access key ids, by the prefixes AWS documents", () => {
@@ -81,6 +93,10 @@ describe("AWS access key ids, by the prefixes AWS documents", () => {
 			const key = `${prefix}IA${chars(16, 10, `${UPPER}234567`)}`;
 			expect(types(`aws_access_key_id = ${key}`), prefix).toContain("aws_key");
 		}
+	});
+
+	it("ASIA then characters outside base32 (0, 1, 8, 9) is not an AWS key", () => {
+		expect(types(`AS${"IA"}PACIFICREGION001`)).not.toContain("aws_key");
 	});
 
 	it("an IAM unique id that is not a key (AIDA, an IAM user) is not an AWS key", () => {
@@ -129,6 +145,21 @@ describe("Slack tokens, by the prefixes Slack documents", () => {
 
 	it("a word that only starts like an app-level token (xapp-config) is not a secret", () => {
 		expect(types(`xa${"pp-"}config`)).not.toContain("generic_secret");
+	});
+
+	it("an app-level prefix with a short payload, a capital in it, is not a token: a token's payload is 20 characters or more", () => {
+		expect(types(`xa${"pp-"}MyConfig-2024`)).not.toContain("generic_secret");
+	});
+
+	it("a bot-token prefix followed by a snake_case name is not a token: a Slack payload never holds _", () => {
+		expect(types(`xo${"xb-"}service_policy_production`)).not.toContain("generic_secret");
+	});
+
+	it(`refresh token (xoxe-1-), bare and as a refresh_token value, per ${SLACK_ROTATION}`, () => {
+		const token = `xo${"xe-"}1-${chars(140, 44, `${ALNUM}-`)}`;
+		for (const text of [token, JSON.stringify({ ok: true, refresh_token: token })]) {
+			expect(types(text), text.slice(0, 20)).toContain("generic_secret");
+		}
 	});
 });
 
@@ -248,6 +279,65 @@ describe("payloads that end in - or _, then any delimiter (the closing-boundary 
 	});
 });
 
+describe("the capital-letter rule for the prefixes this release adds", () => {
+	// A token of a newly recognised type must hold a capital after its prefix. A real token's random
+	// characters almost surely do: 20 random base64url characters lack one about once in 30,000
+	// tokens, and longer tokens far less often. A digit-or-capital rule would still read
+	// "xapp-config-service-production-v2" as a secret, through its "2".
+	const HEX = "0123456789abcdef";
+	/** `n` characters of `alphabet`, with a capital at position 3, as random characters almost always have. */
+	const withCapital = (n: number, seed: number, alphabet = URLSAFE): string => {
+		const body = chars(n, seed, alphabet);
+		return `${body.slice(0, 3)}Q${body.slice(4)}`;
+	};
+	const tokens: Array<[string, string, string]> = [
+		[
+			"generic_secret",
+			"Slack app-level (xapp-)",
+			`xa${"pp-"}1-A${chars(10, 50, UPPER)}-${chars(13, 51, "0123456789")}-${chars(64, 52, HEX)}`,
+		],
+		["generic_secret", "Slack workflow (xwfp-)", `xw${"fp-"}${withCapital(40, 53, ALNUM)}`],
+		[
+			"generic_secret",
+			"Slack refresh (xoxe-1-)",
+			`xo${"xe-"}1-${withCapital(140, 54, `${ALNUM}-`)}`,
+		],
+		...[
+			"gloas-",
+			"gldt-",
+			"glrt-",
+			"glrtr-",
+			"glcbt-",
+			"glptt-",
+			"glft-",
+			"glimt-",
+			"glagent-",
+			"glwt-",
+			"glsoat-",
+			"glffct-",
+		].map((prefix, k): [string, string, string] => [
+			"generic_secret",
+			`GitLab (${prefix})`,
+			`${prefix.slice(0, 2)}${prefix.slice(2)}${withCapital(20, 60 + k)}`,
+		]),
+		["api_key", "Stripe restricted (rk_live_)", `rk${"_live_"}${withCapital(99, 80, ALNUM)}`],
+		["api_key", "Stripe restricted (rk_test_)", `rk${"_test_"}${withCapital(99, 81, ALNUM)}`],
+		["api_key", "Stripe organization (sk_org_)", `sk${"_org_"}${withCapital(99, 82, ALNUM)}`],
+		["github_token", "GitHub user access token (ghu_)", `gh${"u_"}${withCapital(36, 83, ALNUM)}`],
+	];
+	for (const [kind, name, token] of tokens) {
+		it(`${name}: a token with a capital is detected, and the same characters in lowercase are not`, () => {
+			expect(types(`TOKEN=${token}`), token.slice(0, 12)).toContain(kind);
+			// Every prefix here is lowercase, so lowercasing the token leaves the prefix and takes the
+			// capitals out of the payload. The app-level token ends in 64 hex characters, which the
+			// long-hex rule reads as a secret whatever their case, so it is not checked this way.
+			if (!/[0-9a-f]{64}/i.test(token)) {
+				expect(types(`TOKEN=${token.toLowerCase()}`), token.slice(0, 12)).not.toContain(kind);
+			}
+		});
+	}
+});
+
 describe("identifiers that share a new prefix", () => {
 	// Short identifiers are clean. A long one that begins with a whole documented prefix is
 	// flagged, as sk_live_ always has been: over-redaction is the safe direction for a secret.
@@ -276,7 +366,34 @@ describe("identifiers that share a new prefix", () => {
 		});
 	}
 
-	it("a long identifier that begins with a whole documented prefix is flagged", () => {
-		expect(types(`sk${"_org_"}settings_for_the_dashboard`)).toContain("api_key");
+	it("lowercase kebab-case names after a new prefix are not secrets, a version number in them included", () => {
+		const names: Array<[string, string]> = [
+			["generic_secret", `xa${"pp-"}config-service-production-v2`],
+			["generic_secret", `xw${"fp-"}workflow-runner-configuration`],
+			["generic_secret", `gl${"ft-"}feature-toggle-client-library`],
+			["generic_secret", `gl${"rt-"}runner-registration-walkthrough`],
+			["generic_secret", `gl${"dt-"}deploy-token-rotation-policy-doc`],
+			["generic_secret", `gl${"agent-"}kubernetes-integration-guide`],
+			["api_key", `sk${"_org_"}settings_for_the_dashboard`],
+			["api_key", `rk${"_live_"}mode_enabled_for_this_account_v2`],
+			["github_token", `gh${"u_"}userlookupservicehandler`],
+		];
+		for (const [kind, text] of names) {
+			expect(types(text), text).not.toContain(kind);
+		}
+		// The same name with a capital in it is flagged: the rule is the payload, not the prefix.
+		expect(types(`sk${"_org_"}Settings_for_the_dashboard`)).toContain("api_key");
+	});
+
+	it("a prefix followed by dashes alone is not a key", () => {
+		const dashes = "-".repeat(26);
+		for (const [kind, text] of [
+			["api_key", `sk${"-"}${dashes}`],
+			["generic_secret", `S${"G."}${dashes}`],
+			["generic_secret", `gl${"pat-"}${dashes}`],
+			["generic_secret", `xo${"xb-"}${dashes}`],
+		] as const) {
+			expect(types(text), text).not.toContain(kind);
+		}
 	});
 });

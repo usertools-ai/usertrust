@@ -84,6 +84,7 @@ const GAINED: ReadonlyArray<[Kind, string]> = [
 		`xa${"pp-"}1-A${alnum(10, 11, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")}-${alnum(13, 12, "0123456789")}-${alnum(40, 13)}`,
 	],
 	["generic_secret", `xw${"fp-"}${alnum(40, 14)}`],
+	["generic_secret", `xo${"xe-"}1-${alnum(140, 32)}`],
 	["generic_secret", `gl${"dt-"}${alnum(20, 15)}`],
 	["generic_secret", `gl${"rt-"}${alnum(20, 16)}`],
 	["generic_secret", `gl${"agent-"}${alnum(20, 17)}`],
@@ -293,6 +294,74 @@ function unexplainedPhoneLosses(current: Check, inputs: readonly string[]): stri
 }
 
 describe("PII detector differential: 5.0.4 beside the current detector", () => {
+	it("secrets: on text that only starts like a token, nothing is flagged that 5.0.4 did not flag", () => {
+		// Each token prefix, then lowercase kebab-case or snake_case words, a run of dashes, or prose.
+		const prefixes = [
+			"sk-",
+			"sk_live_",
+			"rk_live_",
+			"sk_org_",
+			"AKIA",
+			"ASIA",
+			"ghp_",
+			"ghu_",
+			"ghs_1_",
+			"github_pat_",
+			"xoxb-",
+			"xoxe-1-",
+			"xapp-",
+			"xwfp-",
+			"SG.",
+			"glpat-",
+			"gldt-",
+			"glrt-",
+			"glagent-",
+			"glft-",
+			"npm_",
+		];
+		const words = [
+			"config",
+			"service",
+			"production",
+			"runner",
+			"registration",
+			"walkthrough",
+			"feature",
+			"toggle",
+			"client",
+			"library",
+			"deploy",
+			"token",
+			"rotation",
+			"policy",
+			"doc",
+			"guide",
+			"v2",
+		];
+		const rand = seeded(20261019);
+		const pick = () => words[Math.floor(rand() * words.length)] as string;
+		const phrase = (joiner: string) => {
+			let out = pick();
+			while (out.length < 24 + Math.floor(rand() * 30)) out += joiner + pick();
+			return out;
+		};
+		const texts: string[] = [];
+		for (const prefix of prefixes) {
+			for (let i = 0; i < 40; i++) {
+				texts.push(prefix + phrase("-"), prefix + phrase("_"), `${prefix}${"-".repeat(20 + i)}`);
+			}
+			texts.push(
+				`${prefix} is the start of a sentence about tokens.`,
+				`use ${prefix}something here`,
+			);
+		}
+		const kinds = ["api_key", "aws_key", "github_token", "generic_secret"] as const;
+		const gained = kinds.flatMap((kind) =>
+			texts.filter((t) => now(kind)(t) && !before(kind)(t)).map((t) => `${kind}: ${t}`),
+		);
+		expect(gained).toEqual([]);
+	});
+
 	it("secrets: every format each provider documents that 5.0.4 missed is a gained positive", () => {
 		const notGained = GAINED.filter(([kind, token]) => !(!before(kind)(token) && now(kind)(token)));
 		expect(notGained.map(([kind, token]) => `${kind}: ${token.slice(0, 14)}`)).toEqual([]);
