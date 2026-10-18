@@ -466,6 +466,11 @@ describe("detectPII — credit card edge cases", () => {
 			"ref4111 1111 1111 1111", // the first group belongs to a word
 			"4111 1111 1111 1111z", // the last group belongs to a word
 			"4111.1111.1111.1111 12", // joined by dots, not one space or one dash
+			"4111 and 1111 and 1111 and 1111", // a gap that only starts with a space joins nothing
+			// Known limits, kept as in 5.0.4: a chain is checked whole, never a window inside it.
+			"4111-1111-1111-1111-123", // the card joined by the same dash to one more group
+			"order 2024-4111-1111-1111-1111", // a number joined to the card by the same dash
+			"4111 1111 1111 1111 12/29", // a spaced card, then its expiry after one space
 		]) {
 			expect(detectPII({ text }).types, JSON.stringify(text)).not.toContain("credit_card");
 		}

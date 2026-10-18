@@ -17,8 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - groups joined by exactly one space throughout, or by exactly one dash throughout, the whole chain of them in that layout;
     - the digits pass the Luhn check.
 
-    A chain of six groups or more is never a card, and no part of one is either. So a list of numbers adds no detection: space-separated pairs, lists of four-digit numbers, a printed bit vector and one number per line are flagged exactly as before. As before, `4111 1111 1111 1111 1111` is not a card.
+    A chain of six groups or more is never a card, and no part of one is either. So a list of numbers adds no detection: space-separated pairs, lists of four-digit numbers, a printed bit vector and one number per line are flagged exactly as before. As before, `4111 1111 1111 1111 1111` is not a card. A card written with spaces directly before its expiry (`4111 1111 1111 1111 12/29`, and the same for American Express and Diners Club cards) is also still not detected, as in 5.0.4: the layout check covers a dashed card next to its expiry. Likewise, a card joined by the same separator to an adjacent group of digits is not detected (`4111-1111-1111-1111-123`, `order 2024-4111-1111-1111-1111`): each chain of groups is checked whole, never a window inside it, which keeps lists of numbers from reading as cards.
   - **Phone numbers.** Ten digits inside a word matched, so a tool call id such as `toolu_1234567890123abc` read as a phone: under `pii: "block"` that blocked a request with no PII in it, and under `pii: "redact"` different tool ids got the same placeholder. Now a group of digits joined to a letter or an underscore (`toolu_1234…`, `…5309z`, `SKU12`) is treated as part of that word, not as part of a phone number. So is a group of 16 or more digits, longer than any phone number (an order id such as `12345678901234567890`, or a card number written without spaces, which is still detected as a card), unless it is a number dialled with an international access prefix: 00, 011, 010 or 0011, then at most 15 digits (`0114915123456789`). An extension written right after a number (`555-867-5309x123`, `…5309ext12`) is part of the phone, not a word. Every other format detected before is still detected, spaced and international ones included (`555  867 5309`, `+44 20 7946 0958`, `5 5 5 8 6 7 5 3 0 9`, and numbers spaced with non-breaking spaces).
+
+- **Secret detection now recognises the token formats GitHub, AWS, Stripe, Slack and GitLab document.** Before this, the following tokens were reported clean under `pii: "block"` and `pii: "redact"`:
+  - GitHub fine-grained personal access tokens (`github_pat_`, 22 characters, `_`, 59 characters). The check ended at a word boundary, which the `_` inside such a token never gives, so it never matched one.
+  - GitHub user access tokens for a GitHub App (`ghu_`), and the stateless installation tokens (`ghs_<app id>_<JWT>`).
+  - AWS temporary access key ids from STS (`ASIA`).
+  - Stripe restricted keys (`rk_live_`, `rk_test_`) and organization keys (`sk_org_`).
+  - Slack app-level tokens (`xapp-`, or `xoxe.xapp-` when rotating) and workflow tokens (`xwfp-`).
+  - SendGrid keys whose first part ends in dashes (`SG.` and 22 characters ending `---`): the check ended at a word boundary that a trailing `-` never gives. The same boundary is dropped from every pattern whose payload can hold `-`.
+  - GitLab's token types other than `glpat-`: `gloas-`, `gldt-`, `glrt-`, `glrtr-`, `glcbt-`, `glptt-`, `glft-`, `glimt-`, `glagent-`, `glwt-`, `glsoat-` and `glffct-`.
+
+  The formats that were already detected are unchanged: classic GitHub tokens, `AKIA`, `sk_live_` and `sk_test_`, `xoxb-` and `xoxp-`, `glpat-`, `npm_`, SendGrid's `SG.`, Anthropic and OpenAI `sk-` keys, PEM private keys, JWTs and bearer tokens. Each one now has a test in the format its provider documents. OpenAI publishes no format, so its test uses the `sk-proj-` prefix that OpenAI's dashboard issues.
 
 ## [5.0.4] - 2026-10-17
 

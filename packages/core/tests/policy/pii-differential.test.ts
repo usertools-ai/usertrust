@@ -30,7 +30,14 @@ import { describe, expect, it } from "vitest";
 import { detectPII } from "../../src/policy/pii.js";
 import { detectPII as detectPII504 } from "../fixtures/pii-detector-5.0.4.js";
 
-type Kind = "phone" | "credit_card" | "ipv4" | "generic_secret";
+type Kind =
+	| "phone"
+	| "credit_card"
+	| "ipv4"
+	| "generic_secret"
+	| "api_key"
+	| "aws_key"
+	| "github_token";
 type Check = (s: string) => boolean;
 
 const NBSP = String.fromCodePoint(0xa0);
@@ -43,6 +50,45 @@ for (let cp = 0; cp <= 0xffff; cp++) {
 	if (/\s/.test(ch)) WHITESPACE.push(ch);
 }
 const HEX64 = "3f79bb7b435b05321651daefd374cdc681dc06faa65e374e38337b88ca046dea";
+
+/** `n` letters and digits, the same on every run for the same seed: synthetic token payloads. */
+function alnum(
+	n: number,
+	seed: number,
+	alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+): string {
+	let x = seed >>> 0;
+	let out = "";
+	for (let i = 0; i < n; i++) {
+		x = (Math.imul(x, 1103515245) + 12345) >>> 0;
+		out += alphabet[(x >>> 16) % alphabet.length];
+	}
+	return out;
+}
+
+/**
+ * Token formats each provider documents that 5.0.4 did not detect, built at run time from their
+ * parts (no token-shaped literal in this file). Each is a GAINED positive: the current detector
+ * flags it, 5.0.4 did not.
+ */
+const GAINED: ReadonlyArray<[Kind, string]> = [
+	["github_token", `github${"_pat_"}${alnum(22, 1)}_${alnum(59, 2)}`],
+	["github_token", `gh${"u_"}${alnum(36, 3)}`],
+	["github_token", `gh${"s_"}1234567_ey${"J"}${alnum(30, 4)}.${alnum(40, 5)}.${alnum(43, 6)}`],
+	["aws_key", `AS${"IA"}${alnum(16, 7, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")}`],
+	["api_key", `rk${"_live_"}${alnum(99, 8)}`],
+	["api_key", `rk${"_test_"}${alnum(99, 9)}`],
+	["api_key", `sk${"_org_"}${alnum(99, 10)}`],
+	[
+		"generic_secret",
+		`xa${"pp-"}1-A${alnum(10, 11, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")}-${alnum(13, 12, "0123456789")}-${alnum(40, 13)}`,
+	],
+	["generic_secret", `xw${"fp-"}${alnum(40, 14)}`],
+	["generic_secret", `gl${"dt-"}${alnum(20, 15)}`],
+	["generic_secret", `gl${"rt-"}${alnum(20, 16)}`],
+	["generic_secret", `gl${"agent-"}${alnum(20, 17)}`],
+	["generic_secret", `S${"G."}${alnum(19, 18)}---.${alnum(43, 19)}`],
+];
 
 const CURATED: Record<Kind, string[]> = {
 	phone: [
@@ -125,13 +171,31 @@ const CURATED: Record<Kind, string[]> = {
 		"1.2.3.256 192.168.1.1",
 		"from 203.0.113.7 to 198.51.100.2",
 	],
+	api_key: [
+		`sk${"-ant-api03-"}${alnum(93, 20)}AA`,
+		`sk${"-proj-"}${alnum(156, 21)}`,
+		`sk${"_live_"}${alnum(99, 22)}`,
+		`sk${"_test_"}${alnum(24, 23)}`,
+		`OPENAI_API_KEY=sk${"-"}${alnum(48, 24)}`,
+	],
+	aws_key: [
+		`AK${"IA"}${alnum(16, 25, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")}`,
+		`aws_access_key_id = AK${"IA"}${alnum(16, 26, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")}`,
+	],
+	github_token: [
+		`gh${"p_"}${alnum(36, 27)}`,
+		`gh${"o_"}${alnum(36, 28)}`,
+		`gh${"s_"}${alnum(36, 29)}`,
+		`gh${"r_"}${alnum(76, 30)}`,
+		`token=gh${"p_"}${alnum(36, 31)}`,
+	],
 	generic_secret: [
 		HEX64,
 		`sha256:${HEX64}`,
 		`https://files.example/${HEX64}/raw`,
 		`${"a".repeat(64)} ${HEX64}`,
-		"xoxb-123456789012-abcdefghijkl",
-		"glpat-abcdefghijklmnopqrstuvwx",
+		`xo${"xb-"}123456789012-abcdefghijkl`,
+		`gl${"pat-"}abcdefghijklmnopqrstuvwx`,
 		`npm_${"a1".repeat(18)}`,
 		`SG.${"x".repeat(22)}`,
 	],
@@ -165,7 +229,11 @@ function fuzz(seed: number, count: number): string[] {
 
 const FUZZ = fuzz(20261018, 20_000);
 
-const inputsFor = (kind: Kind): string[] => [...CURATED[kind], ...FUZZ];
+const inputsFor = (kind: Kind): string[] => [
+	...CURATED[kind],
+	...GAINED.filter(([k]) => k === kind).map(([, token]) => token),
+	...FUZZ,
+];
 const before =
 	(kind: Kind): Check =>
 	(s) =>
@@ -225,7 +293,19 @@ function unexplainedPhoneLosses(current: Check, inputs: readonly string[]): stri
 }
 
 describe("PII detector differential: 5.0.4 beside the current detector", () => {
-	for (const kind of ["credit_card", "ipv4", "generic_secret"] as const) {
+	it("secrets: every format each provider documents that 5.0.4 missed is a gained positive", () => {
+		const notGained = GAINED.filter(([kind, token]) => !(!before(kind)(token) && now(kind)(token)));
+		expect(notGained.map(([kind, token]) => `${kind}: ${token.slice(0, 14)}`)).toEqual([]);
+	});
+
+	for (const kind of [
+		"credit_card",
+		"ipv4",
+		"generic_secret",
+		"api_key",
+		"aws_key",
+		"github_token",
+	] as const) {
 		it(`${kind}: no value the 5.0.4 detector flagged is lost`, () => {
 			const inputs = inputsFor(kind);
 			// A set the old detector never flags proves nothing.
@@ -376,7 +456,17 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 	});
 
 	it("the table: inputs, flagged before and now, lost and gained, per detector", () => {
-		const rows = (["phone", "credit_card", "ipv4", "generic_secret"] as const).map((kind) => {
+		const rows = (
+			[
+				"phone",
+				"credit_card",
+				"ipv4",
+				"generic_secret",
+				"api_key",
+				"aws_key",
+				"github_token",
+			] as const
+		).map((kind) => {
 			const inputs = inputsFor(kind);
 			const old = before(kind);
 			const current = now(kind);

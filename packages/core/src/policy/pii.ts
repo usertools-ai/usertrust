@@ -371,19 +371,32 @@ function wholeChainIsCard(
 	return false;
 }
 
-/** API key: sk-... (OpenAI/Anthropic) or sk_live_/sk_test_ (Stripe) */
+/**
+ * API key: sk-... (OpenAI, Anthropic), or a Stripe secret, restricted or organization key
+ * (sk_live_, sk_test_, rk_live_, rk_test_, sk_org_). No closing `\b`: the payload can hold `-`,
+ * and a key whose characters end in `-` has no word boundary there.
+ */
 function isApiKey(value: string): boolean {
-	return /\b(?:sk-|sk_(?:live|test)_)[a-zA-Z0-9_-]{20,}\b/.test(value);
+	return /\b(?:sk-|[rs]k_(?:live|test)_|sk_org_)[a-zA-Z0-9_-]{20,}/.test(value);
 }
 
-/** AWS access key: AKIA followed by 16 uppercase alphanumeric chars */
+/** AWS access key id: AKIA (long-term) or ASIA (temporary, from STS), then 16 uppercase alphanumerics */
 function isAwsKey(value: string): boolean {
-	return /\bAKIA[0-9A-Z]{16}\b/.test(value);
+	return /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/.test(value);
 }
 
-/** GitHub token: ghp_, gho_, ghs_, ghr_, github_pat_ followed by 22+ alphanumeric chars */
+/**
+ * GitHub token, by the prefixes GitHub documents for each type:
+ * - ghp_ (classic personal access token), gho_ (OAuth), ghu_ (user access token for an app),
+ *   ghs_ (installation access token), ghr_ (refresh token), then 22+ alphanumerics;
+ * - github_pat_ (fine-grained personal access token): 22 alphanumerics, `_`, then 59. The `_`
+ *   is a word character, so the first form's closing `\b` never matches inside one;
+ * - ghs_<app id>_<JWT>, the stateless installation token: a JWT always starts with `eyJ`.
+ */
 function isGithubToken(value: string): boolean {
-	return /\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[a-zA-Z0-9]{22,}\b/.test(value);
+	return /\b(?:(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[a-zA-Z0-9]{22,}\b|github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}|ghs_[0-9]+_eyJ)/.test(
+		value,
+	);
 }
 
 /** Bearer token: Authorization header with 20+ char token */
@@ -434,16 +447,25 @@ function isPrivateKey(value: string): boolean {
 	return /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value);
 }
 
-/** Generic secret: known prefixes (xox, SG., glpat-, npm_) or long hex strings (64+ chars) */
+/**
+ * Generic secret: known prefixes or long hex strings (64+ chars). The prefixes:
+ * - Slack: xoxb-, xoxp- and the older xoxa-, xoxr-, xoxs-; xapp- (app-level, rotating ones as
+ *   xoxe.xapp-) and xwfp- (workflow);
+ * - SendGrid: SG.;
+ * - GitLab: glpat- (personal, project, group and impersonation tokens) and the other token types
+ *   GitLab documents (deploy, runner, CI/CD job, trigger, feed, incoming mail, agent, workspace,
+ *   SCIM, feature flags client, OAuth application secret);
+ * - npm: npm_.
+ * Only npm_, whose payload is letters and digits, keeps a closing `\b`. The other payloads can
+ * hold `-`, and one that ends in `-` has no word boundary there: a SendGrid key whose first part
+ * ends `---` read as clean.
+ */
+const SECRET_PREFIX_RE =
+	/\b(?:xox[bpars]-[a-zA-Z0-9-]+|(?:xapp|xwfp)-[a-zA-Z0-9-]{20,}|SG\.[a-zA-Z0-9_-]{20,}|gl(?:pat|oas|dt|rtr?|cbt|ptt|ft|imt|agent|wt|soat|ffct)-[a-zA-Z0-9_-]{20,}|npm_[a-zA-Z0-9]{36,}\b)/;
+
 function isGenericSecret(value: string): boolean {
 	// Note: sk- and sk_ prefixes handled by isApiKey — not duplicated here
-	if (
-		/\b(?:xox[bpars]-[a-zA-Z0-9-]+|SG\.[a-zA-Z0-9_-]{20,}|glpat-[a-zA-Z0-9_-]{20,}|npm_[a-zA-Z0-9]{36,})\b/.test(
-			value,
-		)
-	) {
-		return true;
-	}
+	if (SECRET_PREFIX_RE.test(value)) return true;
 	// Long hex strings — require at least one digit and one letter to avoid false positives. Every
 	// candidate is checked, so a run of letters or of digits alone cannot hide a real one after it.
 	for (const match of value.matchAll(/\b[0-9a-fA-F]{64,}\b/g)) {
