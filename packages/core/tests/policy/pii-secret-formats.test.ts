@@ -530,3 +530,110 @@ describe("identifiers that share a new prefix", () => {
 		}
 	});
 });
+
+describe("a placeholder after a prefix 5.0.5 added is not a token", () => {
+	// One capital repeated: it satisfies the capital rule these prefixes already had, so 5.0.5
+	// reported it. Each prefix 5.0.5 added now also needs four distinct characters in its payload.
+	// The prefixes released before 5.0.5 are unchanged.
+	const X = (n: number): string => "X".repeat(n);
+	const rows: Array<[string, string, string, string]> = [
+		[
+			"github_token",
+			"GitHub user access token (ghu_)",
+			`gh${"u_"}${chars(36, 90)}`,
+			`gh${"u_"}${X(36)}`,
+		],
+		[
+			"github_token",
+			"GitHub stateless installation token (ghs_<app id>_<JWT>)",
+			`gh${"s_"}1234567_${jwt(91)}`,
+			`gh${"s_"}1234567_ey${"J"}${X(30)}.${X(60)}.${X(43)}`,
+		],
+		[
+			"github_token",
+			"GitHub fine-grained personal access token (github_pat_)",
+			`github${"_pat_"}${chars(22, 94)}_${chars(59, 95)}`,
+			`github${"_pat_"}${X(22)}_${X(59)}`,
+		],
+		[
+			"aws_key",
+			"AWS temporary access key id (ASIA)",
+			`AS${"IA"}${chars(16, 96, `${UPPER}234567`)}`,
+			`AS${"IA"}${X(16)}`,
+		],
+		[
+			"api_key",
+			"Stripe restricted (rk_live_)",
+			`rk${"_live_"}${chars(99, 97)}`,
+			`rk${"_live_"}${X(99)}`,
+		],
+		[
+			"api_key",
+			"Stripe restricted (rk_test_)",
+			`rk${"_test_"}${chars(99, 98)}`,
+			`rk${"_test_"}${X(99)}`,
+		],
+		[
+			"api_key",
+			"Stripe organization (sk_org_)",
+			`sk${"_org_"}${chars(99, 99)}`,
+			`sk${"_org_"}${X(99)}`,
+		],
+		[
+			"generic_secret",
+			"Slack app-level (xapp-)",
+			`xa${"pp-"}${chars(40, 100)}`,
+			`xa${"pp-"}${X(40)}`,
+		],
+		[
+			"generic_secret",
+			"Slack workflow (xwfp-)",
+			`xw${"fp-"}${chars(40, 101)}`,
+			`xw${"fp-"}${X(40)}`,
+		],
+		[
+			"generic_secret",
+			"Slack refresh (xoxe-1-)",
+			`xo${"xe-"}1-${chars(140, 102)}`,
+			`xo${"xe-"}1-${X(140)}`,
+		],
+		...[
+			"gloas-",
+			"gldt-",
+			"glrt-",
+			"glrtr-",
+			"glcbt-",
+			"glptt-",
+			"glft-",
+			"glimt-",
+			"glagent-",
+			"glwt-",
+			"glsoat-",
+			"glffct-",
+		].map((prefix, k): [string, string, string, string] => [
+			"generic_secret",
+			`GitLab (${prefix})`,
+			`${prefix.slice(0, 2)}${prefix.slice(2)}${chars(20, 110 + k)}`,
+			`${prefix.slice(0, 2)}${prefix.slice(2)}${X(20)}`,
+		]),
+	];
+	for (const [kind, name, token, placeholder] of rows) {
+		it(`${name}: a real-shaped token is detected, and one character repeated is not`, () => {
+			expect(types(`TOKEN=${token}`), token.slice(0, 12)).toContain(kind);
+			expect(types(`TOKEN=${placeholder}`), placeholder.slice(0, 12)).not.toContain(kind);
+			// A placeholder before the real token does not hide it.
+			expect(types(`${placeholder} then ${token}`), placeholder.slice(0, 12)).toContain(kind);
+		});
+	}
+
+	it("the prefixes released before 5.0.5 still read one character repeated as a token", () => {
+		for (const [kind, token] of [
+			["github_token", `gh${"p_"}${X(36)}`],
+			["aws_key", `AK${"IA"}${X(16)}`],
+			["api_key", `sk${"_live_"}${X(99)}`],
+			["generic_secret", `gl${"pat-"}${X(20)}`],
+		] as const) {
+			expect(types(token), token.slice(0, 8)).toContain(kind);
+		}
+	});
+});

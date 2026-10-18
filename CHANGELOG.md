@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   A name after one of these prefixes is not a key: a `-` or `_` that joins another word on makes the whole run a name, however long its first word. Neither is a placeholder: the payload must hold at least four distinct characters, so a repeated `x` is not a key. One shape stays ambiguous: a name of exactly 35 characters after `AIza` has a Google key's shape, and is reported.
 
+- **A placeholder after a prefix 5.0.5 added is no longer reported as a secret.** 5.0.5 flagged placeholder values such as `rk_live_XXXX…`: one capital, repeated, satisfied the capital rule those prefixes take. The payload after each of them must now also hold at least four distinct characters. This covers `ghu_`, the stateless `ghs_` and fine-grained `github_pat_` GitHub tokens, `ASIA`, `rk_live_`, `rk_test_`, `sk_org_`, `xapp-`, `xwfp-`, `xoxe-<n>-`, and GitLab's twelve prefixes besides `glpat-`. The prefixes released before 5.0.5 are unchanged.
+
 ## [5.0.5] - 2026-10-18
 
 ### Read before upgrading

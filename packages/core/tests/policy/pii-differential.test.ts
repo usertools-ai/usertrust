@@ -365,8 +365,25 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 			"responsibledisclosurepolicy",
 			"webhooksigningsecretforstagingenv",
 		];
-		// The prefixes whose payload must hold four distinct characters.
-		const placeholderPrefixes = ["AIza", "xai-", "gsk_", "pplx-", "whsec_"];
+		// The prefixes whose payload must hold four distinct characters: those 5.0.5 and 5.0.6 add.
+		const placeholderPrefixes = [
+			"rk_live_",
+			"sk_org_",
+			"ASIA",
+			"ghu_",
+			"xapp-",
+			"xwfp-",
+			"xoxe-1-",
+			"gldt-",
+			"glrt-",
+			"glagent-",
+			"glft-",
+			"AIza",
+			"xai-",
+			"gsk_",
+			"pplx-",
+			"whsec_",
+		];
 		const texts: string[] = [];
 		for (const prefix of prefixes) {
 			for (let i = 0; i < 40; i++) {
@@ -384,6 +401,13 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 			texts.push(
 				`${prefix} is the start of a sentence about tokens.`,
 				`use ${prefix}something here`,
+			);
+		}
+		// The two GitHub formats with a structure of their own, as placeholders.
+		for (const c of ["x", "X", "a", "0"]) {
+			texts.push(
+				`ghs_1234567_eyJ${c.repeat(30)}.${c.repeat(60)}.${c.repeat(43)}`,
+				`github_pat_${c.repeat(22)}_${c.repeat(59)}`,
 			);
 		}
 		const kinds = ["api_key", "aws_key", "github_token", "generic_secret"] as const;

@@ -375,7 +375,7 @@ function wholeChainIsCard(
 const HAS_ALNUM_RE = /[A-Za-z0-9]/;
 
 /**
- * A payload holds a capital letter. Applied to the prefixes this release adds: a real token's random
+ * A payload holds a capital letter. Applied to the prefixes 5.0.5 added: a real token's random
  * characters almost surely hold one (20 random base64url characters lack one about once in 30,000
  * tokens, and longer tokens far less often), while a lowercase kebab-case name after a prefix
  * holds none, even with a version number in it (`glrt-runner-registration-walkthrough`,
@@ -403,12 +403,17 @@ function hasPrefixedToken(
 }
 
 /**
- * A payload of at least four distinct characters. Applied to the prefixes 5.0.6 adds: a real key's
- * random characters always pass, while a placeholder of one repeated character, or a few
- * (`gsk_xxxx…`, an `.env.example` value), does not.
+ * A payload of at least four distinct characters. Applied to the prefixes 5.0.5 and 5.0.6 add, not
+ * to those released before: a real key's random characters always pass, while a placeholder of one
+ * repeated character, or a few (`gsk_xxxx…`, an `.env.example` value), does not.
  */
 function hasVariedPayload(payload: string): boolean {
 	return new Set(payload).size >= 4;
+}
+
+/** A capital and at least four distinct characters: the guard for the prefixes 5.0.5 added. */
+function hasVariedCapitalPayload(payload: string): boolean {
+	return HAS_CAPITAL_RE.test(payload) && hasVariedPayload(payload);
 }
 
 /**
@@ -445,19 +450,27 @@ const PROVIDER_API_KEY_RE =
 function isApiKey(value: string): boolean {
 	return (
 		hasPrefixedToken(value, API_KEY_RE, HAS_ALNUM_RE) ||
-		hasPrefixedToken(value, NEW_API_KEY_RE, HAS_CAPITAL_RE) ||
+		hasPrefixedToken(value, NEW_API_KEY_RE, hasVariedCapitalPayload) ||
 		hasPrefixedToken(value, GOOGLE_API_KEY_RE, hasVariedPayload) ||
 		hasPrefixedToken(value, PROVIDER_API_KEY_RE, hasVariedPayload)
 	);
 }
 
 /**
- * AWS access key id: AKIA (long-term) then 16 uppercase alphanumerics, as released; or ASIA
- * (temporary, from STS) then 16 base32 characters, the alphabet AWS key ids are written in, so a
- * word such as `ASIA` then `PACIFICREGION001` is not one.
+ * A temporary AWS access key id (from STS): ASIA then 16 base32 characters, the alphabet AWS key
+ * ids are written in, so a word such as `ASIA` then `PACIFICREGION001` is not one.
+ */
+const AWS_TEMPORARY_KEY_RE = /\bASIA([A-Z2-7]{16})\b/g;
+
+/**
+ * AWS access key id: AKIA (long-term) then 16 uppercase alphanumerics, as released; or a temporary
+ * one, its 16 characters holding at least four distinct ones.
  */
 function isAwsKey(value: string): boolean {
-	return /\b(?:AKIA[0-9A-Z]{16}|ASIA[A-Z2-7]{16})\b/.test(value);
+	return (
+		/\bAKIA[0-9A-Z]{16}\b/.test(value) ||
+		hasPrefixedToken(value, AWS_TEMPORARY_KEY_RE, hasVariedPayload)
+	);
 }
 
 /** GitHub's prefixes as released: ghp_, gho_, ghs_, ghr_, github_pat_, then 22+ alphanumerics. */
@@ -467,7 +480,7 @@ const GITHUB_TOKEN_RE = /\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[a-zA-Z0-9]{22,}\b
  * A fine-grained personal access token: github_pat_, 22 alphanumerics, `_`, then 59. The `_` is a
  * word character, so the released form's closing `\b` never matched inside one.
  */
-const GITHUB_FINE_GRAINED_RE = /\bgithub_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/;
+const GITHUB_FINE_GRAINED_RE = /\bgithub_pat_([a-zA-Z0-9]{22}_[a-zA-Z0-9]{59})/g;
 
 /** A user access token for a GitHub App: ghu_ then 22+ alphanumerics. */
 const GITHUB_USER_TOKEN_RE = /\bghu_([a-zA-Z0-9]{22,})\b/g;
@@ -480,9 +493,11 @@ const GITHUB_STATELESS_JWT_RE = /eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-
 
 /**
  * A stateless installation token, `ghs_<app id>_<JWT>`: the prefix and a whole JWT after it, so
- * `ghs_1_eyJ` alone is not one. Where the JWT fails, the search resumes at the end of its run of
- * segment characters: a later start inside that run is followed by the same characters, so it
- * fails too. Each run is read a bounded number of times, so the check is linear.
+ * `ghs_1_eyJ` alone is not one, and the JWT's characters after `eyJ`, its dots aside, holding at
+ * least four distinct ones. Where the JWT fails, the search resumes at the end of its run of
+ * segment characters: a later start inside that run is followed by the same characters, so its
+ * JWT has the same end and a subset of these characters, and it fails too. Each run is read a
+ * bounded number of times, so the check is linear.
  */
 function hasStatelessInstallationToken(value: string): boolean {
 	let from = 0;
@@ -492,7 +507,12 @@ function hasStatelessInstallationToken(value: string): boolean {
 		if (start === null) return false;
 		const jwtAt = start.index + start[0].length;
 		GITHUB_STATELESS_JWT_RE.lastIndex = jwtAt;
-		if (GITHUB_STATELESS_JWT_RE.test(value)) return true;
+		if (
+			GITHUB_STATELESS_JWT_RE.test(value) &&
+			hasVariedPayload(value.slice(jwtAt + 3, GITHUB_STATELESS_JWT_RE.lastIndex).replace(/\./g, ""))
+		) {
+			return true;
+		}
 		let end = jwtAt;
 		while (end < value.length && isJwtSegmentChar(value.charCodeAt(end))) end++;
 		from = end;
@@ -508,8 +528,8 @@ function hasStatelessInstallationToken(value: string): boolean {
 function isGithubToken(value: string): boolean {
 	return (
 		GITHUB_TOKEN_RE.test(value) ||
-		GITHUB_FINE_GRAINED_RE.test(value) ||
-		hasPrefixedToken(value, GITHUB_USER_TOKEN_RE, HAS_CAPITAL_RE) ||
+		hasPrefixedToken(value, GITHUB_FINE_GRAINED_RE, hasVariedPayload) ||
+		hasPrefixedToken(value, GITHUB_USER_TOKEN_RE, hasVariedCapitalPayload) ||
 		hasStatelessInstallationToken(value)
 	);
 }
@@ -577,14 +597,19 @@ const SECRET_PREFIX_RE =
 const NPM_TOKEN_RE = /\bnpm_[a-zA-Z0-9]{36,}\b/;
 
 /**
- * Secret prefixes this release adds, each payload holding a capital letter:
- * - Slack: xapp- (app-level; rotating ones as xoxe.xapp-), xwfp- (workflow) and xoxe-<n>- (the
- *   refresh token that rotation issues);
- * - GitLab: the token types GitLab documents besides glpat- (OAuth application secret, deploy,
- *   runner, CI/CD job, trigger, feed, incoming mail, agent, workspace, SCIM, feature flags client).
+ * Slack's prefixes 5.0.5 added: xapp- (app-level; rotating ones as xoxe.xapp-), xwfp- (workflow)
+ * and xoxe-<n>- (the refresh token that rotation issues). The payload holds a capital and at least
+ * four distinct characters.
  */
-const NEW_SECRET_PREFIX_RE =
-	/\b(?:(?:xapp|xwfp|xoxe-[0-9])-([a-zA-Z0-9-]{20,})(?!\w)|gl(?:oas|dt|rtr?|cbt|ptt|ft|imt|agent|wt|soat|ffct)-([a-zA-Z0-9_-]{20,}))/g;
+const SLACK_NEW_PREFIX_RE = /\b(?:xapp|xwfp|xoxe-[0-9])-([a-zA-Z0-9-]{20,})(?!\w)/g;
+
+/**
+ * GitLab's prefixes 5.0.5 added: the token types GitLab documents besides glpat- (OAuth
+ * application secret, deploy, runner, CI/CD job, trigger, feed, incoming mail, agent, workspace,
+ * SCIM, feature flags client). The payload holds a capital and at least four distinct characters.
+ */
+const GITLAB_NEW_PREFIX_RE =
+	/\bgl(?:oas|dt|rtr?|cbt|ptt|ft|imt|agent|wt|soat|ffct)-([a-zA-Z0-9_-]{20,})/g;
 
 /**
  * A webhook signing secret: whsec_, then base64 of 24 to 64 bytes (32 or more characters), as the
@@ -600,7 +625,8 @@ function isGenericSecret(value: string): boolean {
 	if (
 		hasPrefixedToken(value, SECRET_PREFIX_RE, HAS_ALNUM_RE) ||
 		NPM_TOKEN_RE.test(value) ||
-		hasPrefixedToken(value, NEW_SECRET_PREFIX_RE, HAS_CAPITAL_RE) ||
+		hasPrefixedToken(value, SLACK_NEW_PREFIX_RE, hasVariedCapitalPayload) ||
+		hasPrefixedToken(value, GITLAB_NEW_PREFIX_RE, hasVariedCapitalPayload) ||
 		hasPrefixedToken(value, WEBHOOK_SECRET_RE, hasVariedPayload)
 	) {
 		return true;
