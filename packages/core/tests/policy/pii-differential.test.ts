@@ -281,7 +281,37 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 			for (let i = 0; i < n; i++) out += String(Math.floor(rand() * 10));
 			return out;
 		};
+		const fourDigitList = (count: number) => () =>
+			Array.from({ length: count }, () => digits(4)).join(" ");
 		const lists: Array<[string, () => string]> = [
+			["5 four-digit numbers, space-separated", fourDigitList(5)],
+			["6 four-digit numbers, space-separated", fourDigitList(6)],
+			["8 four-digit numbers, space-separated", fourDigitList(8)],
+			["12 four-digit numbers, space-separated", fourDigitList(12)],
+			[
+				"10 three-digit numbers, space-separated",
+				() => Array.from({ length: 10 }, () => digits(3)).join(" "),
+			],
+			[
+				"5 four-digit numbers, dash-separated",
+				() => Array.from({ length: 5 }, () => digits(4)).join("-"),
+			],
+			[
+				"8 four-digit numbers, dash-separated",
+				() => Array.from({ length: 8 }, () => digits(4)).join("-"),
+			],
+			[
+				"8 four-digit numbers, tab-separated",
+				() => Array.from({ length: 8 }, () => digits(4)).join("\t"),
+			],
+			[
+				"10 three-digit numbers, dash-separated",
+				() => Array.from({ length: 10 }, () => digits(3)).join("-"),
+			],
+			[
+				"10 three-digit numbers, tab-separated",
+				() => Array.from({ length: 10 }, () => digits(3)).join("\t"),
+			],
 			[
 				"10 two-digit numbers, space-separated",
 				() => Array.from({ length: 10 }, () => digits(2)).join(" "),

@@ -381,20 +381,22 @@ describe("the linear scans give the old patterns' answers", () => {
 		);
 	});
 
-	it("credit card: 5.0.4's candidates, or a card's layout with one separator, checked one way and another", () => {
-		// The reference: 5.0.4's candidate check as it was written, or a span of digit groups found by
-		// splitting the text (not by the detector's scan) whose lengths are a card's layout, joined by
-		// one separator of whitespace or dashes with no line break, untouched by a word character at
-		// either end; or one such group of 13-19 digits. Luhn digit by digit.
+	it("credit card: 5.0.4's candidates, or a whole chain in a card's layout, checked one way and another", () => {
+		// The reference: 5.0.4's candidate check as it was written, or a whole chain of digit groups,
+		// found by splitting the text (not by the detector's scan), each joined to the next by exactly
+		// one space, or each by exactly one dash, whose lengths are a card's layout and which no word
+		// character touches at either end; or one such group of 13-19 digits. Luhn digit by digit.
 		const OLD_CANDIDATE = /\b[\d][\d\s-]{11,22}[\d]\b/g;
-		const LAYOUTS = ["4,4,4,4", "4,4,4,4,1", "4,4,4,4,2", "4,4,4,4,3", "4,6,5", "4,6,4"];
-		const lineBreaks = [
-			"\n",
-			"\v",
-			"\f",
-			"\r",
-			String.fromCodePoint(0x2028),
-			String.fromCodePoint(0x2029),
+		const LAYOUTS = [
+			"4,4,4,1",
+			"4,4,4,2",
+			"4,4,4,3",
+			"4,4,4,4",
+			"4,4,4,4,1",
+			"4,4,4,4,2",
+			"4,4,4,4,3",
+			"4,6,5",
+			"4,6,4",
 		];
 		const luhn = (digits: string): boolean => {
 			let sum = 0;
@@ -416,27 +418,29 @@ describe("the linear scans give the old patterns' answers", () => {
 			const before = (g: number) => parts[2 * g] ?? "";
 			const after = (g: number) => parts[2 * g + 2] ?? "";
 			const word = /[A-Za-z0-9_]/;
-			const free = (g: number, edge: "start" | "end") =>
-				edge === "start" ? !word.test(before(g).slice(-1)) : !word.test(after(g).slice(0, 1));
-			const separatorOk = (sep: string) =>
-				/^[\s-]+$/.test(sep) && !lineBreaks.some((b) => sep.includes(b));
-			for (let a = 0; a < groups.length; a++) {
-				const one = groups[a] as string;
-				if (
-					one.length >= 13 &&
-					one.length <= 19 &&
-					free(a, "start") &&
-					free(a, "end") &&
-					luhn(one)
-				) {
+			const freeStart = (g: number) => !word.test(before(g).slice(-1));
+			const freeEnd = (g: number) => !word.test(after(g).slice(0, 1));
+			for (let g = 0; g < groups.length; g++) {
+				const one = groups[g] as string;
+				if (one.length >= 13 && one.length <= 19 && freeStart(g) && freeEnd(g) && luhn(one)) {
 					return true;
 				}
-				for (let b = a + 2; b < groups.length && b < a + 5; b++) {
-					const span = groups.slice(a, b + 1);
-					if (!LAYOUTS.includes(span.map((g) => g.length).join(","))) continue;
-					const seps = span.slice(1).map((_, k) => after(a + k));
-					if (!seps.every((sep) => sep === seps[0] && separatorOk(sep))) continue;
-					if (free(a, "start") && free(b, "end") && luhn(span.join(""))) return true;
+			}
+			for (const joiner of [" ", "-"]) {
+				let a = 0;
+				while (a < groups.length) {
+					let b = a;
+					while (b + 1 < groups.length && after(b) === joiner) b++;
+					const chain = groups.slice(a, b + 1);
+					if (
+						LAYOUTS.includes(chain.map((g) => g.length).join(",")) &&
+						freeStart(a) &&
+						freeEnd(b) &&
+						luhn(chain.join(""))
+					) {
+						return true;
+					}
+					a = b + 1;
 				}
 			}
 			return false;
@@ -448,11 +452,14 @@ describe("the linear scans give the old patterns' answers", () => {
 			"3782",
 			"822463",
 			"10005",
+			"3056",
+			"04",
 			"5",
 			"12",
 			"0",
 			" ",
 			" ",
+			"-",
 			"-",
 			"  ",
 			"/",

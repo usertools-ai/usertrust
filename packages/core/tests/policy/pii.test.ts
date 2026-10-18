@@ -140,6 +140,18 @@ describe("detectPII — phone", () => {
 		}
 	});
 
+	it("not a phone: letters that are not an extension marker (x, ext, ext.) make the digits before them part of a word", () => {
+		for (const text of [
+			"555-867-5309abc123",
+			"5558675309q42",
+			"ref 5558675309abc12",
+			"555-867-5309xy12", // x, then a letter: not x followed by digits
+			"555-867-5309extra12", // ext, then more letters: not ext followed by digits
+		]) {
+			expect(detectPII({ text }).types, text).not.toContain("phone");
+		}
+	});
+
 	it("does not read digits before a word that only starts like an extension as a phone", () => {
 		for (const text of ["id-5558675309x9f2a", "ref-5558675309xyz", "5558675309extra"]) {
 			expect(detectPII({ text }).types, text).not.toContain("phone");
@@ -398,10 +410,10 @@ describe("detectPII — credit card edge cases", () => {
 		expect(result.types).not.toContain("credit_card");
 	});
 
-	it("detects a card followed by one more group of digits", () => {
-		// 20 digits in all, but the first four groups are the Luhn-valid card 4111111111111111.
+	it("does not detect a number that is too long after stripping", () => {
+		// 20+ digits — exceeds 19 digit limit
 		const result = detectPII({ card: "4111 1111 1111 1111 1111" });
-		expect(result.types).toContain("credit_card");
+		expect(result.types).not.toContain("credit_card");
 	});
 
 	it("does not detect a bare run that is too long: a run with no separator is checked whole", () => {
@@ -409,14 +421,21 @@ describe("detectPII — credit card edge cases", () => {
 		expect(result.types).not.toContain("credit_card");
 	});
 
-	it("detects a card beside its expiry or after another number", () => {
+	it("detects a card beside its expiry", () => {
+		for (const text of ["4111-1111-1111-1111 12/29", "card 4111 1111 1111 1111 exp 12 29"]) {
+			expect(detectPII({ text }).types, text).toContain("credit_card");
+		}
+	});
+
+	it("does not read a card from part of a longer list of groups, as 5.0.4 did not", () => {
+		// A chain of groups joined by one space is checked whole. Any four of a list of four-digit
+		// numbers pass Luhn one time in ten, so a window inside the list would read as a card.
 		for (const text of [
-			"4111-1111-1111-1111 12/29",
-			"card 4111 1111 1111 1111 exp 12 29",
 			"12 4111 1111 1111 1111",
 			"4111 1111 1111 1111 1234 5678",
+			"1234 5678 9012 3456 7890 1234",
 		]) {
-			expect(detectPII({ text }).types, text).toContain("credit_card");
+			expect(detectPII({ text }).types, text).not.toContain("credit_card");
 		}
 	});
 
@@ -429,7 +448,8 @@ describe("detectPII — credit card edge cases", () => {
 
 	it("detects a card in a card's layout among other numbers", () => {
 		for (const text of [
-			"3782 822463 10005 12", // 4-6-5, American Express
+			"3782-822463-10005 12/29", // 4-6-5, American Express, beside its expiry
+			"3056-9309-0259-04 12/29", // 4-4-4-2, Diners Club, beside its expiry
 			"30569309025904 7", // one group of 14
 			"41111111 11111111", // 5.0.4's check: one candidate, 16 digits
 			"4222222222222 7", // one group of 13, beside another number
@@ -445,9 +465,34 @@ describe("detectPII — credit card edge cases", () => {
 			"[0 1 1 0 1 0 0 1 1 1 0 1 0 1 1 0]", // a printed bit vector
 			"ref4111 1111 1111 1111", // the first group belongs to a word
 			"4111 1111 1111 1111z", // the last group belongs to a word
+			"4111.1111.1111.1111 12", // joined by dots, not one space or one dash
 		]) {
 			expect(detectPII({ text }).types, JSON.stringify(text)).not.toContain("credit_card");
 		}
+	});
+
+	it("detects each card layout as a whole dashed chain, alone and at either end of the text", () => {
+		// Luhn-valid numbers in each layout. Beside an expiry, or after one, 5.0.4's candidate takes
+		// the neighbour in and fails, so these rows are found by the layout check.
+		const layouts: Array<[string, string]> = [
+			["4-4-4-4-1", "4111-1111-1111-1111-3"],
+			["4-4-4-4-2", "4111-1111-1111-1111-18"],
+			["4-4-4-4-3", "4111-1111-1111-1111-110"],
+			["4-4-4-1", "4111-1111-1111-9"],
+			["4-4-4-2", "4111-1111-1111-14"],
+			["4-4-4-3", "4111-1111-1111-116"],
+		];
+		for (const [layout, card] of layouts) {
+			for (const text of [card, `${card} 12/29`, `exp 12/29 ${card}`]) {
+				expect(detectPII({ text }).types, `${layout}: ${text}`).toContain("credit_card");
+			}
+		}
+	});
+
+	it("a chain of five groups in a layout is a card, and the same chain with one group more is not", () => {
+		expect(detectPII({ text: "4111-1111-1111-1111-3 12/29" }).types).toContain("credit_card");
+		expect(detectPII({ text: "7-4111-1111-1111-1111-3 12/29" }).types).not.toContain("credit_card");
+		expect(detectPII({ text: "4111-1111-1111-1111-3-7 12/29" }).types).not.toContain("credit_card");
 	});
 
 	it("detects cards of 13 and of 19 digits", () => {

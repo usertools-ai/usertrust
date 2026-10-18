@@ -224,9 +224,9 @@ const CARD_CANDIDATE_RE = /\b[\d][\d\s-]{11,22}[\d]\b/g;
  * Credit card number detection: 13-19 digits that pass the Luhn check, found two ways.
  *
  * 1. 5.0.4's check, unchanged: each candidate with its separators removed. Nothing it found is lost.
- * 2. A card printed in a card's layout inside a longer run of numbers, which (1) misses because an
- *    adjacent number joins its candidate: an expiry ("4111-1111-1111-1111 12/29"), or a number
- *    before it ("12 4111 1111 1111 1111"). See `hasCardInLayout`.
+ * 2. A card printed in a card's layout, which (1) misses when an adjacent number joins its
+ *    candidate: a dashed card beside its expiry ("4111-1111-1111-1111 12/29"). See
+ *    `hasCardInLayout`.
  */
 function isCreditCard(value: string): boolean {
 	return hasCardCandidate(value) || hasCardInLayout(value);
@@ -257,33 +257,15 @@ function luhnValid(digits: string): boolean {
 	return sum % 10 === 0;
 }
 
-/** JavaScript's `\s`, by char code. */
-function isWhitespace(c: number): boolean {
-	return (
-		(c >= 0x09 && c <= 0x0d) ||
-		c === 0x20 ||
-		c === 0xa0 ||
-		c === 0x1680 ||
-		(c >= 0x2000 && c <= 0x200a) ||
-		c === 0x2028 ||
-		c === 0x2029 ||
-		c === 0x202f ||
-		c === 0x205f ||
-		c === 0x3000 ||
-		c === 0xfeff
-	);
-}
-
-/** A line break: LF, VT, FF, CR, and the Unicode line and paragraph separators. */
-function isLineBreak(c: number): boolean {
-	return (c >= 0x0a && c <= 0x0d) || c === 0x2028 || c === 0x2029;
-}
-
 /**
- * The group lengths a card number is printed in: 4-4-4-4 (16 digits), 4-4-4-4 then 1-3 more
- * (17-19), 4-6-5 (15, American Express) and 4-6-4 (14, Diners Club).
+ * The group lengths a card number is printed in: 4-4-4-4 (16 digits), 4-4-4 then 1-3 (13-15, as
+ * in the Diners Club test number 3056 9309 0259 04), 4-4-4-4 then 1-3 more (17-19), 4-6-5 (15,
+ * American Express) and 4-6-4 (14, Diners Club).
  */
 const CARD_LAYOUTS: ReadonlyArray<Int32Array> = [
+	Int32Array.of(4, 4, 4, 1),
+	Int32Array.of(4, 4, 4, 2),
+	Int32Array.of(4, 4, 4, 3),
 	Int32Array.of(4, 4, 4, 4),
 	Int32Array.of(4, 4, 4, 4, 1),
 	Int32Array.of(4, 4, 4, 4, 2),
@@ -292,105 +274,99 @@ const CARD_LAYOUTS: ReadonlyArray<Int32Array> = [
 	Int32Array.of(4, 6, 4),
 ];
 
-/** The most groups a layout has: the scan keeps that many of the latest groups. */
+/** The most groups a layout has. A longer chain is never a card. */
 const LAYOUT_GROUPS = 5;
 
+/** What joins a card's groups: one space (kind 0) or one dash (kind 1). */
+const CARD_SEPARATORS = Int32Array.of(0x20, 0x2d);
+
 /**
- * Whether the text holds a card printed in a card's layout: a span of digit groups whose lengths are
- * one of CARD_LAYOUTS, joined by one separator throughout (the same run of whitespace or dashes
- * between every two groups, never a line break), with no letter, digit or underscore touching
- * either end; or a single group of 13-19 digits touching none. Its digits must pass Luhn.
+ * Whether the text holds a card printed in a card's layout: a WHOLE chain of digit groups, each
+ * joined to the next by exactly one space, or each by exactly one dash, whose group lengths are
+ * one of CARD_LAYOUTS; or one group of 13-19 digits. No letter, digit or underscore may touch
+ * either end, and the digits must pass Luhn.
  *
- * A list of numbers is not a card unless its groups fall in a card's layout, so space-separated
- * pairs, a printed bit vector or one number per line add nothing to what (1) finds.
+ * The whole chain, never a window inside it: any four of a list of four-digit numbers pass Luhn
+ * one time in ten, so a list of them would read as a card. A chain of six groups or more is never
+ * one. A chain ends where the separator changes, so in "4111-1111-1111-1111 12/29" the dashed card
+ * is one chain and the space before the expiry starts another.
  *
- * One pass over the text, keeping only the latest five groups (typed arrays, so nothing inherited
- * from Array.prototype is read or written). Each group is checked against six layouts of at most
- * five groups and 19 digits, and a separator is compared at most a fixed number of times, so the
- * check is linear and never recurses.
+ * One pass over the text. Per separator kind, the current chain's first five groups are kept in
+ * typed arrays, so nothing inherited from Array.prototype is read or written; each chain is
+ * checked once, when it ends, so the check is linear and never recurses.
  */
 function hasCardInLayout(value: string): boolean {
-	const groupStart = new Int32Array(LAYOUT_GROUPS);
-	const groupLength = new Int32Array(LAYOUT_GROUPS);
-	const separatorStart = new Int32Array(LAYOUT_GROUPS);
-	const gluedBefore = new Uint8Array(LAYOUT_GROUPS);
-	const ring: GroupRing = { value, groupStart, groupLength, separatorStart, gluedBefore };
 	const n = value.length;
-	let groups = 0;
-	let chain = 0;
-	let separatorFrom = 0;
-	let separatorValid = false;
+	const chainStarts = [new Int32Array(LAYOUT_GROUPS), new Int32Array(LAYOUT_GROUPS)] as const;
+	const chainEnds = [new Int32Array(LAYOUT_GROUPS), new Int32Array(LAYOUT_GROUPS)] as const;
+	const chainSizes = new Int32Array(2);
+	const chainGluedAfter = new Uint8Array(2);
+	const chainIsCard = (kind: 0 | 1): boolean =>
+		wholeChainIsCard(
+			value,
+			chainStarts[kind],
+			chainEnds[kind],
+			chainSizes[kind] as number,
+			chainGluedAfter[kind] === 1,
+		);
+	let previousEnd = -1;
 	let i = 0;
 	while (i < n) {
-		const c = value.charCodeAt(i);
-		if (!isAsciiDigit(c)) {
-			if (!(c === 0x2d || (isWhitespace(c) && !isLineBreak(c)))) separatorValid = false;
+		if (!isAsciiDigit(value.charCodeAt(i))) {
 			i++;
 			continue;
 		}
 		const start = i;
 		while (i < n && isAsciiDigit(value.charCodeAt(i))) i++;
-		chain = chain > 0 && separatorValid ? chain + 1 : 1;
-		const slot = groups % LAYOUT_GROUPS;
-		groups++;
-		groupStart[slot] = start;
-		groupLength[slot] = i - start;
-		separatorStart[slot] = separatorFrom;
-		gluedBefore[slot] = start > 0 && isWordChar(value.charCodeAt(start - 1)) ? 1 : 0;
+		const gluedBefore = start > 0 && isWordChar(value.charCodeAt(start - 1));
 		const gluedAfter = i < n && isWordChar(value.charCodeAt(i));
-		if (!gluedAfter && cardEndsAt(ring, groups - 1, chain)) return true;
-		separatorFrom = i;
-		separatorValid = true;
+		const length = i - start;
+		if (length >= 13 && length <= 19 && !gluedBefore && !gluedAfter) {
+			if (luhnValid(value.slice(start, i))) return true;
+		}
+		const joinedBy =
+			previousEnd >= 0 && start - previousEnd === 1 ? value.charCodeAt(previousEnd) : -1;
+		for (let k = 0; k < 2; k++) {
+			const kind = k as 0 | 1;
+			let size = chainSizes[kind] as number;
+			if (joinedBy !== CARD_SEPARATORS[kind]) {
+				// This group starts a new chain of this kind: the one before it has ended.
+				if (chainIsCard(kind)) return true;
+				size = 0;
+			}
+			if (size < LAYOUT_GROUPS) {
+				chainStarts[kind][size] = start;
+				chainEnds[kind][size] = i;
+			}
+			chainSizes[kind] = Math.min(size + 1, LAYOUT_GROUPS + 1);
+			chainGluedAfter[kind] = gluedAfter ? 1 : 0;
+		}
+		previousEnd = i;
 	}
-	return false;
+	return chainIsCard(0) || chainIsCard(1);
 }
 
-interface GroupRing {
-	value: string;
-	groupStart: Int32Array;
-	groupLength: Int32Array;
-	/** Where the separator before each group starts; it ends where the group starts. */
-	separatorStart: Int32Array;
-	gluedBefore: Uint8Array;
-}
-
-/** Whether a card in a card's layout ends at group `last`, the latest of `chain` joined groups. */
-function cardEndsAt(ring: GroupRing, last: number, chain: number): boolean {
-	const { value, groupStart, groupLength, separatorStart, gluedBefore } = ring;
-	const at = (k: number) => k % LAYOUT_GROUPS;
-	const digitsOf = (k: number) =>
-		value.slice(
-			groupStart[at(k)] as number,
-			(groupStart[at(k)] as number) + (groupLength[at(k)] as number),
-		);
-	const lastLength = groupLength[at(last)] as number;
-	if (
-		lastLength >= 13 &&
-		lastLength <= 19 &&
-		gluedBefore[at(last)] === 0 &&
-		luhnValid(digitsOf(last))
-	) {
-		return true;
-	}
+/** Whether a whole chain of `size` groups is a card: a card's layout, untouched at both ends, Luhn. */
+function wholeChainIsCard(
+	value: string,
+	starts: Int32Array,
+	ends: Int32Array,
+	size: number,
+	gluedAfter: boolean,
+): boolean {
+	if (size < 3 || size > LAYOUT_GROUPS || gluedAfter) return false;
+	const first = starts[0] as number;
+	if (first > 0 && isWordChar(value.charCodeAt(first - 1))) return false;
 	for (const layout of CARD_LAYOUTS) {
-		const size = layout.length;
-		if (size > chain) continue;
-		const first = last - size + 1;
-		let fits = gluedBefore[at(first)] === 0;
-		for (let g = 0; g < size && fits; g++) fits = groupLength[at(first + g)] === layout[g];
-		if (!fits) continue;
-		// One separator throughout: each one between the span's groups equals the first of them.
-		const sepFrom = separatorStart[at(first + 1)] as number;
-		const separator = value.slice(sepFrom, groupStart[at(first + 1)] as number);
-		for (let g = 2; g < size && fits; g++) {
-			const from = separatorStart[at(first + g)] as number;
-			const to = groupStart[at(first + g)] as number;
-			fits = to - from === separator.length && value.startsWith(separator, from);
+		if (layout.length !== size) continue;
+		let fits = true;
+		for (let g = 0; g < size && fits; g++) {
+			fits = (ends[g] as number) - (starts[g] as number) === layout[g];
 		}
 		if (!fits) continue;
 		let digits = "";
-		for (let g = 0; g < size; g++) digits += digitsOf(first + g);
-		if (luhnValid(digits)) return true;
+		for (let g = 0; g < size; g++) digits += value.slice(starts[g] as number, ends[g] as number);
+		return luhnValid(digits);
 	}
 	return false;
 }
