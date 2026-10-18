@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **PII detection no longer misses a value that sits beside one it rejects, and no longer reads digits inside an identifier as a phone number.** Four checks are fixed, and each still takes time proportional to the message:
+  - **IPv4 addresses.** Only the first IPv4-shaped candidate in a string was checked, so `1.2.3.256 192.168.1.1` read as clean. Every candidate is now checked, including one that overlaps a rejected one (`999.1.2.3.4` holds `1.2.3.4`).
+  - **Long hex secrets.** Only the first run of 64 or more hex characters was checked, so a run of letters alone, or digits alone, hid a real secret after it. Every run is now checked.
+  - **Card numbers.** A number next to a card joined the card's candidate and failed the Luhn check, so a dashed card beside its expiry (`4111-1111-1111-1111 12/29`) passed as clean under `pii: "block"` and `pii: "redact"`. The old check still runs unchanged, so everything it found is still found. In addition, a card is now found when it is printed in a card's layout:
+    - groups of 4-4-4-4, 4-4-4 or 4-4-4-4 followed by 1 to 3 more digits, 4-6-5 or 4-6-4, or one group of 13 to 19 digits;
+    - groups joined by exactly one space throughout, or by exactly one dash throughout, the whole chain of them in that layout;
+    - the digits pass the Luhn check.
+
+    A chain of six groups or more is never a card, and no part of one is either. So a list of numbers adds no detection: space-separated pairs, lists of four-digit numbers, a printed bit vector and one number per line are flagged exactly as before. As before, `4111 1111 1111 1111 1111` is not a card.
+  - **Phone numbers.** Ten digits inside a word matched, so a tool call id such as `toolu_1234567890123abc` read as a phone: under `pii: "block"` that blocked a request with no PII in it, and under `pii: "redact"` different tool ids got the same placeholder. Now a group of digits joined to a letter or an underscore (`toolu_1234…`, `…5309z`, `SKU12`) is treated as part of that word, not as part of a phone number. So is a group of 16 or more digits, longer than any phone number (an order id such as `12345678901234567890`, or a card number written without spaces, which is still detected as a card), unless it is a number dialled with an international access prefix: 00, 011, 010 or 0011, then at most 15 digits (`0114915123456789`). An extension written right after a number (`555-867-5309x123`, `…5309ext12`) is part of the phone, not a word. Every other format detected before is still detected, spaced and international ones included (`555  867 5309`, `+44 20 7946 0958`, `5 5 5 8 6 7 5 3 0 9`, and numbers spaced with non-breaking spaces).
+
 ## [5.0.4] - 2026-10-17
 
 ### Read before upgrading

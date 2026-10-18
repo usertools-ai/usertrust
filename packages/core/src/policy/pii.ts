@@ -38,9 +38,19 @@ interface PIIPattern {
 	test: (value: string) => boolean;
 }
 
+/** `[0-9]` by char code. */
+function isAsciiDigit(c: number): boolean {
+	return c >= 0x30 && c <= 0x39;
+}
+
 /** `[a-zA-Z0-9]` by char code. */
 function isAsciiAlnum(c: number): boolean {
-	return (c >= 0x30 && c <= 0x39) || isAsciiLetter(c);
+	return isAsciiDigit(c) || isAsciiLetter(c);
+}
+
+/** A word character, `\w`: `[a-zA-Z0-9_]` by char code. */
+function isWordChar(c: number): boolean {
+	return isAsciiAlnum(c) || c === 0x5f;
 }
 
 /** `[a-zA-Z]` by char code. */
@@ -90,10 +100,75 @@ function isEmail(value: string): boolean {
 	return false;
 }
 
-/** US/international phone: +1-234-567-8901, (234) 567-8901, 234.567.8901, etc. */
+/** A run of the characters a phone number is written with: digits, whitespace and `( ) + - .`. */
+const PHONE_RUN_RE = /[\d\s()+.-]+/g;
+
+/** The phone pattern, tested on a run with its whitespace removed. */
+const PHONE_RE = /(?:\+?\d{1,3}[-.\s()]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/;
+
+/**
+ * A group of 16 or more digits: longer than any phone number (E.164 allows 15), so an id or a card
+ * number, never part of a phone, unless it is a dial string (`isDialString`).
+ */
+const OVERSIZED_DIGITS_RE = /\d{16,}/g;
+
+/**
+ * International access prefixes: 00 in most of the world, 011 in North America, 010 in Japan, 0011
+ * in Australia. Dialled before a number of up to 15 digits, one makes a group longer than 15
+ * ("0114915123456789" is +49 1512 3456789 dialled from North America).
+ */
+const ACCESS_PREFIXES = ["0011", "011", "010", "00"];
+
+/**
+ * An extension written right after a phone number: x, ext or ext., optional whitespace, then 1-6
+ * digits that end the token ("555-867-5309x123", "…5309 ext. 12"). Tried where a run of phone
+ * characters stops at a letter.
+ */
+const EXTENSION_RE = /(?:x|ext\.?)\s*\d{1,6}(?![A-Za-z0-9_])/iy;
+
+/** Whether a long digit group is a dial string: an access prefix, then at most 15 digits. */
+function isDialString(group: string): boolean {
+	return ACCESS_PREFIXES.some(
+		(prefix) => group.startsWith(prefix) && group.length - prefix.length <= 15,
+	);
+}
+
+/**
+ * US/international phone: +1-234-567-8901, (234) 567-8901, 234.567.8901, +44 20 7946 0958, etc.
+ *
+ * The pattern is tested on each run of phone characters with its whitespace removed, so spaced
+ * formats match, international ones included. That is what testing it on the whole message with
+ * its whitespace removed did, since the pattern holds phone characters only. The difference: a
+ * digit group at the edge of a run that touches a letter or an underscore belongs to that word, and
+ * is left out. So digits inside an identifier are not a phone (a tool call id such as
+ * `toolu_1234567890123abc`, or `ref-5558675309z`), while a number after one still is
+ * ("SKU12 555 867 5309"). Those ids read as phones, and redaction then gave different ids the same
+ * placeholder. A group of 16 or more digits is a token too: it splits the run, so no phone is read
+ * from part of it (`12345678901234567890`), unless it is a dial string. A letter that starts an
+ * extension (`x123`, `ext12`) does not glue the number before it. Each character is read a
+ * bounded number of times, so the check is linear.
+ */
 function isPhoneNumber(value: string): boolean {
-	const stripped = value.replace(/\s+/g, "");
-	return /(?:\+?\d{1,3}[-.\s()]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/.test(stripped);
+	PHONE_RUN_RE.lastIndex = 0;
+	for (let run = PHONE_RUN_RE.exec(value); run !== null; run = PHONE_RUN_RE.exec(value)) {
+		let start = run.index;
+		let end = start + run[0].length;
+		if (start > 0 && isWordChar(value.charCodeAt(start - 1))) {
+			while (start < end && isAsciiDigit(value.charCodeAt(start))) start++;
+		}
+		if (end < value.length && isWordChar(value.charCodeAt(end))) {
+			EXTENSION_RE.lastIndex = end;
+			if (!EXTENSION_RE.test(value)) {
+				while (end > start && isAsciiDigit(value.charCodeAt(end - 1))) end--;
+			}
+		}
+		const rest = value
+			.slice(start, end)
+			.replace(OVERSIZED_DIGITS_RE, (group) => (isDialString(group) ? group : "|"))
+			.replace(/\s+/g, "");
+		if (PHONE_RE.test(rest)) return true;
+	}
+	return false;
 }
 
 /**
@@ -121,46 +196,179 @@ function isSSN(value: string): boolean {
 	return false;
 }
 
-/** IPv4 address: 0-255.0-255.0-255.0-255 */
+/** An IPv4-shaped candidate: four numbers of 1-3 digits joined by dots. */
+const IPV4_RE = /\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g;
+
+/**
+ * IPv4 address: 0-255.0-255.0-255.0-255.
+ *
+ * Every candidate is checked, not only the first, so an out-of-range one ("1.2.3.256") cannot hide
+ * a real address after it. Candidates can overlap ("999.1.2.3.4" holds 1.2.3.4), so after a
+ * rejected candidate the search resumes one character after its start, not after its end. A
+ * candidate is at most 15 characters long, so the scan stays linear.
+ */
 function isIPv4(value: string): boolean {
-	const match = value.match(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/);
-	if (!match) return false;
-	return [match[1], match[2], match[3], match[4]].every((octet) => {
-		const n = Number(octet);
-		return n >= 0 && n <= 255;
-	});
+	for (let from = 0; ; ) {
+		IPV4_RE.lastIndex = from;
+		const match = IPV4_RE.exec(value);
+		if (match === null) return false;
+		if (match.slice(1, 5).every((octet) => Number(octet) <= 255)) return true;
+		from = match.index + 1;
+	}
+}
+
+/** 5.0.4's card candidate: 13-24 characters of digits, whitespace and dashes, a digit at each end. */
+const CARD_CANDIDATE_RE = /\b[\d][\d\s-]{11,22}[\d]\b/g;
+
+/**
+ * Credit card number detection: 13-19 digits that pass the Luhn check, found two ways.
+ *
+ * 1. 5.0.4's check, unchanged: each candidate with its separators removed. Nothing it found is lost.
+ * 2. A card printed in a card's layout, which (1) misses when an adjacent number joins its
+ *    candidate: a dashed card beside its expiry ("4111-1111-1111-1111 12/29"). See
+ *    `hasCardInLayout`.
+ */
+function isCreditCard(value: string): boolean {
+	return hasCardCandidate(value) || hasCardInLayout(value);
+}
+
+/** 5.0.4's check: some candidate, its whitespace and dashes removed, has 13-19 digits and passes Luhn. */
+function hasCardCandidate(value: string): boolean {
+	CARD_CANDIDATE_RE.lastIndex = 0;
+	for (let m = CARD_CANDIDATE_RE.exec(value); m !== null; m = CARD_CANDIDATE_RE.exec(value)) {
+		const digits = m[0].replace(/[\s-]/g, "");
+		if (digits.length >= 13 && digits.length <= 19 && luhnValid(digits)) return true;
+	}
+	return false;
+}
+
+/** A digit's value when Luhn doubles it: twice the digit, less 9 when that has two digits. */
+function luhnDoubled(d: number): number {
+	return d < 5 ? d * 2 : d * 2 - 9;
+}
+
+/** The Luhn check over a string of digits: every second digit from the right doubled, sum % 10 === 0. */
+function luhnValid(digits: string): boolean {
+	let sum = 0;
+	for (let i = 0; i < digits.length; i++) {
+		const d = digits.charCodeAt(digits.length - 1 - i) - 0x30;
+		sum += i % 2 === 1 ? luhnDoubled(d) : d;
+	}
+	return sum % 10 === 0;
 }
 
 /**
- * Credit card number detection.
- * Finds 13-19 digit sequences (with optional dashes/spaces) and
- * validates them using the Luhn algorithm.
+ * The group lengths a card number is printed in: 4-4-4-4 (16 digits), 4-4-4 then 1-3 (13-15, as
+ * in the Diners Club test number 3056 9309 0259 04), 4-4-4-4 then 1-3 more (17-19), 4-6-5 (15,
+ * American Express) and 4-6-4 (14, Diners Club).
  */
-function isCreditCard(value: string): boolean {
-	const candidates = value.match(/\b[\d][\d\s-]{11,22}[\d]\b/g);
-	if (!candidates) return false;
-	return candidates.some((candidate) => {
-		const digits = candidate.replace(/[\s-]/g, "");
-		if (digits.length < 13 || digits.length > 19) return false;
-		if (!/^\d+$/.test(digits)) return false;
-		return luhnCheck(digits);
-	});
+const CARD_LAYOUTS: ReadonlyArray<Int32Array> = [
+	Int32Array.of(4, 4, 4, 1),
+	Int32Array.of(4, 4, 4, 2),
+	Int32Array.of(4, 4, 4, 3),
+	Int32Array.of(4, 4, 4, 4),
+	Int32Array.of(4, 4, 4, 4, 1),
+	Int32Array.of(4, 4, 4, 4, 2),
+	Int32Array.of(4, 4, 4, 4, 3),
+	Int32Array.of(4, 6, 5),
+	Int32Array.of(4, 6, 4),
+];
+
+/** The most groups a layout has. A longer chain is never a card. */
+const LAYOUT_GROUPS = 5;
+
+/** What joins a card's groups: one space (kind 0) or one dash (kind 1). */
+const CARD_SEPARATORS = Int32Array.of(0x20, 0x2d);
+
+/**
+ * Whether the text holds a card printed in a card's layout: a WHOLE chain of digit groups, each
+ * joined to the next by exactly one space, or each by exactly one dash, whose group lengths are
+ * one of CARD_LAYOUTS; or one group of 13-19 digits. No letter, digit or underscore may touch
+ * either end, and the digits must pass Luhn.
+ *
+ * The whole chain, never a window inside it: any four of a list of four-digit numbers pass Luhn
+ * one time in ten, so a list of them would read as a card. A chain of six groups or more is never
+ * one. A chain ends where the separator changes, so in "4111-1111-1111-1111 12/29" the dashed card
+ * is one chain and the space before the expiry starts another.
+ *
+ * One pass over the text. Per separator kind, the current chain's first five groups are kept in
+ * typed arrays, so nothing inherited from Array.prototype is read or written; each chain is
+ * checked once, when it ends, so the check is linear and never recurses.
+ */
+function hasCardInLayout(value: string): boolean {
+	const n = value.length;
+	const chainStarts = [new Int32Array(LAYOUT_GROUPS), new Int32Array(LAYOUT_GROUPS)] as const;
+	const chainEnds = [new Int32Array(LAYOUT_GROUPS), new Int32Array(LAYOUT_GROUPS)] as const;
+	const chainSizes = new Int32Array(2);
+	const chainGluedAfter = new Uint8Array(2);
+	const chainIsCard = (kind: 0 | 1): boolean =>
+		wholeChainIsCard(
+			value,
+			chainStarts[kind],
+			chainEnds[kind],
+			chainSizes[kind] as number,
+			chainGluedAfter[kind] === 1,
+		);
+	let previousEnd = -1;
+	let i = 0;
+	while (i < n) {
+		if (!isAsciiDigit(value.charCodeAt(i))) {
+			i++;
+			continue;
+		}
+		const start = i;
+		while (i < n && isAsciiDigit(value.charCodeAt(i))) i++;
+		const gluedBefore = start > 0 && isWordChar(value.charCodeAt(start - 1));
+		const gluedAfter = i < n && isWordChar(value.charCodeAt(i));
+		const length = i - start;
+		if (length >= 13 && length <= 19 && !gluedBefore && !gluedAfter) {
+			if (luhnValid(value.slice(start, i))) return true;
+		}
+		const joinedBy =
+			previousEnd >= 0 && start - previousEnd === 1 ? value.charCodeAt(previousEnd) : -1;
+		for (let k = 0; k < 2; k++) {
+			const kind = k as 0 | 1;
+			let size = chainSizes[kind] as number;
+			if (joinedBy !== CARD_SEPARATORS[kind]) {
+				// This group starts a new chain of this kind: the one before it has ended.
+				if (chainIsCard(kind)) return true;
+				size = 0;
+			}
+			if (size < LAYOUT_GROUPS) {
+				chainStarts[kind][size] = start;
+				chainEnds[kind][size] = i;
+			}
+			chainSizes[kind] = Math.min(size + 1, LAYOUT_GROUPS + 1);
+			chainGluedAfter[kind] = gluedAfter ? 1 : 0;
+		}
+		previousEnd = i;
+	}
+	return chainIsCard(0) || chainIsCard(1);
 }
 
-/** Luhn algorithm for credit card validation. */
-function luhnCheck(digits: string): boolean {
-	let sum = 0;
-	let alternate = false;
-	for (let i = digits.length - 1; i >= 0; i--) {
-		let n = Number(digits[i]);
-		if (alternate) {
-			n *= 2;
-			if (n > 9) n -= 9;
+/** Whether a whole chain of `size` groups is a card: a card's layout, untouched at both ends, Luhn. */
+function wholeChainIsCard(
+	value: string,
+	starts: Int32Array,
+	ends: Int32Array,
+	size: number,
+	gluedAfter: boolean,
+): boolean {
+	if (size < 3 || size > LAYOUT_GROUPS || gluedAfter) return false;
+	const first = starts[0] as number;
+	if (first > 0 && isWordChar(value.charCodeAt(first - 1))) return false;
+	for (const layout of CARD_LAYOUTS) {
+		if (layout.length !== size) continue;
+		let fits = true;
+		for (let g = 0; g < size && fits; g++) {
+			fits = (ends[g] as number) - (starts[g] as number) === layout[g];
 		}
-		sum += n;
-		alternate = !alternate;
+		if (!fits) continue;
+		let digits = "";
+		for (let g = 0; g < size; g++) digits += value.slice(starts[g] as number, ends[g] as number);
+		return luhnValid(digits);
 	}
-	return sum % 10 === 0;
+	return false;
 }
 
 /** API key: sk-... (OpenAI/Anthropic) or sk_live_/sk_test_ (Stripe) */
@@ -236,11 +444,12 @@ function isGenericSecret(value: string): boolean {
 	) {
 		return true;
 	}
-	// Long hex strings — require at least one digit and one letter to avoid false positives
-	const hexMatch = value.match(/\b[0-9a-fA-F]{64,}\b/);
-	if (!hexMatch) return false;
-	const hex = hexMatch[0];
-	return /[0-9]/.test(hex) && /[a-fA-F]/.test(hex);
+	// Long hex strings — require at least one digit and one letter to avoid false positives. Every
+	// candidate is checked, so a run of letters or of digits alone cannot hide a real one after it.
+	for (const match of value.matchAll(/\b[0-9a-fA-F]{64,}\b/g)) {
+		if (/[0-9]/.test(match[0]) && /[a-fA-F]/.test(match[0])) return true;
+	}
+	return false;
 }
 
 const PII_PATTERNS: PIIPattern[] = [
