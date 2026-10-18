@@ -1527,7 +1527,7 @@ describe("release.sh assert-npm", { timeout: 30_000 }, () => {
 			["11.19.0", "v24.21.0"],
 			["11.10.0", "v22.22.1"],
 			["12.0.0", "v23.0.0"],
-		]) {
+		] as const) {
 			const r = assertNpm(npm, node);
 			expect(r.status, `${npm} ${node}: ${r.err}`).toBe(0);
 			expect(r.out).toContain(`node ${node}, npm ${npm}`);
@@ -1580,7 +1580,7 @@ describe("release.sh expected-version", { timeout: 30_000 }, () => {
 			["patch", "1.0.1"],
 			["minor", "1.1.0"],
 			["major", "2.0.0"],
-		]) {
+		] as const) {
 			const r = run(["expected-version", bump]);
 			expect(r.status, `${bump}: ${r.err}`).toBe(0);
 			expect(r.out.trim()).toBe(want);
