@@ -31,8 +31,10 @@ const REPO_ROOT = resolve(SITE_ROOT, "..");
 
 /**
  * The sha256 of every file the brand kit serves, except its fonts, each with its kit path
- * (served at https://usertrust.ai/kit/<path>). A new kit file adds its line here. When the kit
- * replaces a file, the old bytes stay listed as `(retired)` and the new bytes get their own row.
+ * (served at https://usertrust.ai/kit/<path>). A new kit file adds its line here. The email-signature
+ * PNGs are kit files too: mail clients load them from the kit, and none may be committed here. When
+ * the kit replaces a file, the old bytes stay listed as `(retired)` and the new bytes get their own
+ * row, as the five earlier email-signature PNGs are.
  */
 export const KIT_SHA256: ReadonlyArray<{ sha256: string; kit: string }> = [
 	{ sha256: "9d345f2669d6c32fd9c31e1b66cfebaf2f3774d051d1a8be491ea8c525ff73fd", kit: "lattice.js" },
@@ -75,6 +77,54 @@ export const KIT_SHA256: ReadonlyArray<{ sha256: string; kit: string }> = [
 	{
 		sha256: "875022ea41c74041947a74cd611d0d4e084975a71e534c681e146a4612a1f98f",
 		kit: "images/favicon.svg",
+	},
+	{
+		sha256: "653c4d87654b7aeaaedaef4c68aeef3cd7054f4fccab5483c1545c0d33ede3e9",
+		kit: "images/brand-mark-usertools-signature-4x.png",
+	},
+	{
+		sha256: "c29cd1b3eb7c50e2d188a62a3f053498a983cdcd5c1e7cca25e6f5ac915ca187",
+		kit: "images/brand-mark-usertools-signature-2x.png",
+	},
+	{
+		sha256: "6110931e1bfaea749872b3d4cea5c17eea752bf8fe2757240cf39b89202d2e98",
+		kit: "images/brand-mark-usertrust-signature-4x.png",
+	},
+	{
+		sha256: "d297ac9f8df8cbef708cb979bbde35bee289efcb39e37d1372e151f43951d274",
+		kit: "images/brand-mark-userintel-signature-4x.png",
+	},
+	{
+		sha256: "4facc7e1f5bf02cfb8aeab453eb60ce04f15d15e4e9f0bc83fe41e8ac1390b3d",
+		kit: "images/brand-mark-usermemory-signature-4x.png",
+	},
+	{
+		sha256: "d6af6342077c38e93c6c1caab569cf5196327516d0d7cb85598c9e2cbb57b14d",
+		kit: "images/brand-mark-userbank-signature-4x.png",
+	},
+	{
+		sha256: "9b9c964e71fc241482abc8c6d0aa3d887f9c9de30526d50a53ac24d0ded2c6e3",
+		kit: "images/brand-mark-usertokens-signature-4x.png",
+	},
+	{
+		sha256: "6c72d72b8d53c600e629bcdd0afb2ab7515167497bf2eef149a7a8699e4d0d56",
+		kit: "images/wordmark-light-email@2x.png (retired)",
+	},
+	{
+		sha256: "034c33882acd0aa0d4ca835193458aef68188c94a0c44ac176bde244141d5c4b",
+		kit: "images/wordmark-light-email@3x.png (retired)",
+	},
+	{
+		sha256: "a69c2b0ba1c31cca818a165a67e4393514d3ac78288553dd46dcf1fd64273ac9",
+		kit: "images/brand-lockup-light-24@2x.png (retired)",
+	},
+	{
+		sha256: "5f3371f38fc6731c87bf8812906471f2ad43ca5aae1cda52d990a6d8c4313a45",
+		kit: "images/brand-lockup-light-32@2x.png (retired)",
+	},
+	{
+		sha256: "4fe9d589907615847983748b81d7ee7bb00eea493d1a2d1c6eac5186252d7877",
+		kit: "images/brand-lockup-light-42@2x.png (retired)",
 	},
 ];
 
@@ -160,8 +210,8 @@ test("the path rule: a brand/ directory at any depth and in any case, and a masc
 });
 
 test("every denylist entry is a sha256 with a kit path, and the list holds the brand images", () => {
-	assert.equal(KIT_SHA256.length, 14, "the kit's 13 non-font files, plus one retired file");
-	assert.equal(new Set(KIT_SHA256.map((row) => row.sha256)).size, 14, "no hash listed twice");
+	assert.equal(KIT_SHA256.length, 26, "the kit's 20 non-font files, plus six retired files");
+	assert.equal(new Set(KIT_SHA256.map((row) => row.sha256)).size, 26, "no hash listed twice");
 	for (const { sha256, kit } of KIT_SHA256) {
 		assert.match(sha256, /^[0-9a-f]{64}$/, `${kit}: a sha256 in hex`);
 		assert.ok(kit.length > 0 && !kit.startsWith("fonts/"), `${sha256}: a non-font kit path`);
@@ -171,6 +221,18 @@ test("every denylist entry is a sha256 with a kit path, and the list holds the b
 		"images/intro-poster.jpg",
 		"images/intro-first.jpg",
 		"images/favicon.svg",
+		"images/brand-mark-usertools-signature-4x.png",
+		"images/brand-mark-usertools-signature-2x.png",
+		"images/brand-mark-usertrust-signature-4x.png",
+		"images/brand-mark-userintel-signature-4x.png",
+		"images/brand-mark-usermemory-signature-4x.png",
+		"images/brand-mark-userbank-signature-4x.png",
+		"images/brand-mark-usertokens-signature-4x.png",
+		"images/wordmark-light-email@2x.png (retired)",
+		"images/wordmark-light-email@3x.png (retired)",
+		"images/brand-lockup-light-24@2x.png (retired)",
+		"images/brand-lockup-light-32@2x.png (retired)",
+		"images/brand-lockup-light-42@2x.png (retired)",
 	]) {
 		assert.ok(
 			KIT_SHA256.some((row) => row.kit === image),
