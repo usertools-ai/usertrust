@@ -188,7 +188,7 @@ export { detectCanaryLeak, generateCanary, injectCanary } from "./policy/canary.
 export { detectInjection } from "./policy/injection.js";
 export type { PIIDetection } from "./policy/pii.js";
 // PII detection
-export { detectPII } from "./policy/pii.js";
+export { detectPII, UNSCANNABLE } from "./policy/pii.js";
 export type { CircuitBreakerSnapshot } from "./resilience/circuit.js";
 // Circuit breaker
 export { CircuitBreaker, CircuitBreakerRegistry, CircuitOpenError } from "./resilience/circuit.js";

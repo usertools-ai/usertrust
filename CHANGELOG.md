@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Read before upgrading
 
-- **Results can change for existing callers.** The two entries under Added are new detections: text that 5.0.5 reported clean can now be flagged under `pii: "warn"`, blocked under `pii: "block"` and rewritten under `pii: "redact"`. No export, option, default or output shape changed, so no code change is needed. Text 5.0.5 flagged is still flagged, except the placeholders described under Fixed.
+- **Results can change for existing callers.** The first two entries under Added are new detections: text that 5.0.5 reported clean can now be flagged under `pii: "warn"`, blocked under `pii: "block"` and rewritten under `pii: "redact"`. No option, default or output shape changed, and no export was removed or renamed, so no code change is needed. Text 5.0.5 flagged is still flagged, except the placeholders described under Fixed.
+
+- **A new detection type and injection pattern, `unscannable`, can appear in results.** It marks a value the detectors could not finish reading (see Added). Where 5.0.5 threw `RangeError` on such a value, `detectPII` and `redactPII` now report it as type `unscannable`, `pii: "redact"` replaces it with `[REDACTED:unscannable]`, and `detectInjection` reports it at score 1, so `pii: "block"` and `injection: "block"` refuse the call. Code that handles each type name or pattern name it knows (to label or route a detection, say) meets one more.
 
 ### Added
 
@@ -26,9 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   A value flagged before is still flagged, and redaction still replaces the whole value. Any other character stays as it is, including superscript, subscript, circled, parenthesized and mathematical letters and digits: a footnote marker glued to a number would otherwise read as one more digit and turn it into a phone, SSN or card number. So a value written entirely in superscripts is not read. The view is never more than three times the value's length, and the scan stays linear (full NFKC can turn one character into 18). The view's 1.1 MB lookup table is allocated with the first value that is not ASCII, not when the module is imported.
 
+- **A value the detectors cannot finish reading is reported as `unscannable`: never thrown, never passed as clean.** V8's regular-expression engine throws `RangeError` ("Maximum call stack size exceeded") on some pattern shapes over a run of millions of characters. Under Fixed, every such shape the detectors had is removed; this is the backstop for any shape that is missed or added later.
+  - `detectPII` reports the type `unscannable` at that value's path, and `redactPII` (`pii: "redact"`) replaces that value whole with `[REDACTED:unscannable]`. The values beside it are scanned and redacted as usual. If the walk itself cannot finish, the whole data is reported as `unscannable`, and `redactPII` returns `[REDACTED:unscannable]` in its place.
+  - `detectInjection` reports the pattern `unscannable` at that value's path, or for the whole data, at score 1. That includes a value that refers to itself, on which `detectInjection` threw `RangeError` before.
+  - Only `RangeError` is caught. Any other error still throws, so a bug is never reported as an unscannable value.
+  - The name is exported as `UNSCANNABLE`.
+
 ### Fixed
 
 - **`detectPII`, `redactPII` and `detectInjection` could throw `RangeError` on inputs containing a very long run of letters or digits.** From about 6 million characters in one run (6 MB of plain text; a run of `b` was enough), V8's regular-expression engine ran out of stack on the patterns with an open counted quantifier (`[a-z]{20,}` and the like), and the scan threw "Maximum call stack size exceeded" instead of returning. That covered the 64-character hex rule, the 16-or-more digit rule, every token prefix with a minimum length (`sk-`, `ghp_`, `ghu_`, `npm_`, `glpat-`, `Bearer`, JWTs, `whsec_` and the rest), and the base64 rule in injection detection. Each is now written as the minimum count followed by an open run (`[a-z]{20}[a-z]*`), which matches exactly the same text, and detection completes at 10 million characters. A test fails on any open counted quantifier in the packages' source, so one cannot come back unnoticed.
+
+- **`usertrust-server` logged a very long error message as "(the error could not be read)".** Before writing an internal error to its log, the server redacts api-key values with a pattern that V8 could not finish on an unclosed quoted value of about 10 million characters, so the line lost the error's reason. The server now replaces the caller's own key everywhere in the message, keeps the first 64 KiB marked ` [cut]`, and redacts that. If the patterns still cannot finish, the message is replaced by `[redacted: the message could not be scanned]`.
 
 - **A placeholder after a prefix 5.0.5 added is no longer reported as a secret.** 5.0.5 flagged placeholder values such as `rk_live_XXXX...`: one capital, repeated, satisfied the capital rule those prefixes take. The payload after each of them must now also hold at least four distinct characters. This covers `ghu_`, the stateless `ghs_` and fine-grained `github_pat_` GitHub tokens, `ASIA`, `rk_live_`, `rk_test_`, `sk_org_`, `xapp-`, `xwfp-`, `xoxe-<n>-`, and GitLab's twelve prefixes besides `glpat-`. The prefixes released before 5.0.5 are unchanged.
 

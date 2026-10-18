@@ -222,19 +222,44 @@ export const API_KEY_VALUE =
 	/\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(?:"((?:[^"\\]|\\[\s\S])*)"?|'((?:[^'\\]|\\[\s\S])*)'?|[^\s"',;&]+)/gi;
 
 /**
+ * The most of a message `redactSecrets` reads, in UTF-16 code units; the rest is dropped, never
+ * logged. `API_KEY_VALUE` has a quantified group with an alternation inside it, and V8 throws
+ * `RangeError` (call stack exhausted) running it over an unclosed quoted value of about 10 million
+ * characters (measured on Node 23.6: 3 million passed). 64 Ki is far below that and far above any
+ * error line worth reading.
+ */
+export const REDACT_INPUT_MAX = 64 * 1024;
+
+/** What `redactSecrets` returns for text its patterns could not finish reading. */
+const UNREADABLE = "[redacted: the message could not be scanned]";
+
+/**
  * `text` with every `secret` (the caller's own bearer key, when known), every `Bearer <token>` and
  * every api-key style value replaced by `[redacted]`. Scrubbing is not redaction: `scrubForStderr`
  * removes terminal control, never a credential.
+ *
+ * The known secrets are replaced in the whole text first (a plain split, no regular expression),
+ * so the cut below can never leave part of one; then only the first `REDACT_INPUT_MAX` code units
+ * are kept, marked as cut, before the patterns run. Cutting only drops text, and a value the cut
+ * leaves unclosed is still redacted to its end. Should the patterns still throw `RangeError`, the
+ * whole text is replaced: it fails closed, never returning text it did not scan. Any other error
+ * is not caught.
  */
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {
 	let out = text;
 	for (const secret of secrets) if (secret !== "") out = out.split(secret).join("[redacted]");
-	return out
-		.replace(BEARER_TOKEN, "$1 [redacted]")
-		.replace(API_KEY_VALUE, (_match, name: string, sep: string, dq?: string, sq?: string) => {
-			const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : "";
-			return `${name}${sep}${quote}[redacted]${quote}`;
-		});
+	if (out.length > REDACT_INPUT_MAX) out = `${out.slice(0, REDACT_INPUT_MAX)} [cut]`;
+	try {
+		return out
+			.replace(BEARER_TOKEN, "$1 [redacted]")
+			.replace(API_KEY_VALUE, (_match, name: string, sep: string, dq?: string, sq?: string) => {
+				const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : "";
+				return `${name}${sep}${quote}[redacted]${quote}`;
+			});
+	} catch (err) {
+		if (err instanceof RangeError) return UNREADABLE;
+		throw err;
+	}
 }
 
 /**
