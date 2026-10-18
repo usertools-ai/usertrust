@@ -27,13 +27,9 @@ import type { Governor } from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
 import { scrubForStderr } from "../src/cli/scrub.js";
 import { hashKey } from "../src/config.js";
-import {
-	API_KEY_VALUE,
-	createUsertrustServer,
-	internalErrorLine,
-	type UsertrustServer,
-} from "../src/server.js";
+import { createUsertrustServer, internalErrorLine, type UsertrustServer } from "../src/server.js";
 import { createFakeGovernor } from "./helpers/fake-governor.js";
+import { OLD_API_KEY_VALUE, redactWith } from "./helpers/old-api-key-pattern.js";
 
 const CLI = join(import.meta.dirname, "..", "src", "cli", "main.ts");
 const PRELOAD = join(import.meta.dirname, "helpers", "source-preload.mjs");
@@ -731,24 +727,22 @@ const serverLine = (message: string): string =>
 	internalErrorLine(new Error(message), "t1", "sweep");
 
 /**
- * `internalErrorLine`'s pipeline (redact, scrub and join, redact again) with `pattern` in place
- * of the server's api-key pattern. The parity row pins it to the real function on every sweep
- * case, so the positive control below measures the sweep, not a different pipeline.
+ * `internalErrorLine`'s pipeline (redact; scrub without a clip and redact; clip, join and redact)
+ * with `pattern` in place of the server's api-key redactor. The parity row pins it to the real
+ * function on every sweep case, so the positive control below measures the sweep, not a
+ * different pipeline.
  */
 function lineWith(pattern: RegExp): (message: string) => string {
-	const redact = (text: string): string =>
-		text.replace(pattern, (_m, name: string, sep: string, dq?: string, sq?: string) => {
-			const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : "";
-			return `${name}${sep}${quote}[redacted]${quote}`;
-		});
+	const redact = (text: string): string => redactWith(pattern, text);
 	return (message) => {
 		const raw = redact(`Error: ${message}`);
-		const text = redact(scrubForStderr(raw).replace(/\s*\n\s*/g, " "));
+		const whole = redact(scrubForStderr(raw, Number.POSITIVE_INFINITY));
+		const text = redact(scrubForStderr(whole).replace(/\s*\n\s*/g, " "));
 		return `usertrust-server: internal error: tenant=t1 route=sweep: ${text}`;
 	};
 }
 
-/** The escape the server's pattern uses, and the one it replaced (`.` stops at a line terminator). */
+/** The escape the old pattern used, and the one it replaced (`.` stops at a line terminator). */
 const ANY_ESCAPE = String.raw`\\[\s\S]`;
 const BROKEN_ESCAPE = String.raw`\\.`;
 
@@ -764,17 +758,17 @@ describe("a quoted api-key value: the generated sweep, never point rows", () => 
 		expect(sweepFailures(serverLine)).toEqual([]);
 	});
 
-	it("the replica pipeline with the server's own pattern logs exactly internalErrorLine's line, case for case", () => {
-		const replica = lineWith(API_KEY_VALUE);
+	it("the replica pipeline with the old pattern logs exactly internalErrorLine's line, case for case", () => {
+		const replica = lineWith(OLD_API_KEY_VALUE);
 		for (const c of sweepCases()) expect(replica(c.message)).toBe(serverLine(c.message));
 	});
 
 	it("positive control: the sweep, against the old `\\\\.` escape, reports every escaped line terminator", () => {
-		// The server's pattern carries the any-character escape in both quoted branches.
-		expect(API_KEY_VALUE.source.split(ANY_ESCAPE).length - 1).toBe(2);
+		// The old pattern carries the any-character escape in both quoted branches.
+		expect(OLD_API_KEY_VALUE.source.split(ANY_ESCAPE).length - 1).toBe(2);
 		const broken = new RegExp(
-			API_KEY_VALUE.source.split(ANY_ESCAPE).join(BROKEN_ESCAPE),
-			API_KEY_VALUE.flags,
+			OLD_API_KEY_VALUE.source.split(ANY_ESCAPE).join(BROKEN_ESCAPE),
+			OLD_API_KEY_VALUE.flags,
 		);
 		const expected = KEY_SPELLINGS.flatMap(([key]) =>
 			["000A", "000D", "2028", "2029"].map((code) => `${key} \\U+${code}`),

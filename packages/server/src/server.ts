@@ -208,60 +208,82 @@ function routeOf(req: IncomingMessage): RouteName | "unrouted" {
 
 /** A bearer token wherever a message quotes one: `Bearer <token>`. */
 const BEARER_TOKEN = /\b(Bearer)\s+[^\s"',;]+/gi;
-/**
- * An api-key style value: `x-api-key: <v>`, `api_key=<v>`, `"api-key": "<v>"`. A QUOTED value is
- * consumed through its closing quote (or to the end, unclosed), whatever it holds: `"abc;def"` is
- * one value, never `abc` followed by text. An escape inside it is a backslash and ANY character,
- * a line terminator included (`\\[\s\S]`): with `\\.` an escaped CR or LF ended the match there,
- * and the rest of the value was logged. An unquoted value ends at whitespace, a quote, `,`, `;` or
- * `&`. Two leaks have now been found in this pattern; a third replaces it with a structured
- * redactor rather than another case.
- */
-/** Exported for the redaction sweep's positive control only; not part of the package entry. */
-export const API_KEY_VALUE =
-	/\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(?:"((?:[^"\\]|\\[\s\S])*)"?|'((?:[^'\\]|\\[\s\S])*)'?|[^\s"',;&]+)/gi;
+/** The start of an api-key style value: its name, the separator, and its opening quote, if any. */
+const API_KEY_START = /\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(["']?)/gi;
+/** An unquoted api-key value: it ends at whitespace, a quote, `,`, `;` or `&`. */
+const UNQUOTED_VALUE = /[^\s"',;&]+/y;
+const BACKSLASH = 0x5c;
 
 /**
- * The most of a message `redactSecrets` reads, in UTF-16 code units; the rest is dropped, never
- * logged. `API_KEY_VALUE` has a quantified group with an alternation inside it, and V8 throws
- * `RangeError` (call stack exhausted) running it over an unclosed quoted value of about 10 million
- * characters (measured on Node 23.6: 3 million passed). 64 Ki is far below that and far above any
- * error line worth reading.
+ * Where the quoted value that starts at `from` ends: just past its closing `quote`, or at the end
+ * of the text when it has none. An escape is a backslash and ANY character, a line terminator
+ * included: with `\\.` in the old pattern, an escaped CR or LF ended the value there, and the rest
+ * of it was logged. A backslash with nothing after it is not part of the value.
  */
-export const REDACT_INPUT_MAX = 64 * 1024;
+function quotedEnd(text: string, from: number, quote: string): number {
+	const close = quote.charCodeAt(0);
+	for (let i = from; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (code === BACKSLASH) {
+			if (i + 1 === text.length) return i;
+			i++;
+		} else if (code === close) return i + 1;
+	}
+	return text.length;
+}
+
+/**
+ * `text` with every api-key style value replaced by `[redacted]`: `x-api-key: <v>`, `api_key=<v>`,
+ * `"api-key": "<v>"`. A QUOTED value is consumed through its closing quote (or to the end,
+ * unclosed), whatever it holds: `"abc;def"` is one value, never `abc` followed by text.
+ *
+ * A regular expression finds only where a value starts; a loop finds where a quoted one ends.
+ * The single pattern this replaces held the whole value in a quantified group, and V8 throws
+ * `RangeError` (call stack exhausted) running such a group over millions of characters: on an
+ * unclosed run of letters in that pattern, on a run of escapes in its unrolled form. Nothing here
+ * repeats a group, so it reads text of any length in one linear pass. Its matches are the old
+ * pattern's, exactly (the agreement test pins that).
+ */
+export function redactApiKeys(text: string): string {
+	let out = "";
+	let kept = 0;
+	API_KEY_START.lastIndex = 0;
+	for (let m = API_KEY_START.exec(text); m !== null; m = API_KEY_START.exec(text)) {
+		const [, name, sep, quote] = m as unknown as [string, string, string, string];
+		let end: number;
+		if (quote !== "") end = quotedEnd(text, API_KEY_START.lastIndex, quote);
+		else {
+			UNQUOTED_VALUE.lastIndex = API_KEY_START.lastIndex;
+			// No value here. The old pattern looked again from the next character, but the only
+			// start inside this one (`api-key` in `x-api-key`) meets the same separator and fails too.
+			if (!UNQUOTED_VALUE.test(text)) continue;
+			end = UNQUOTED_VALUE.lastIndex;
+		}
+		out += `${text.slice(kept, m.index)}${name}${sep}${quote}[redacted]${quote}`;
+		kept = end;
+		API_KEY_START.lastIndex = end;
+	}
+	return out + text.slice(kept);
+}
 
 /** What `redactSecrets` returns for text its patterns could not finish reading. */
 const UNREADABLE = "[redacted: the message could not be scanned]";
-
-/** `text` with every `secret` replaced by `[redacted]`: a plain split, no regular expression. */
-function replaceSecrets(text: string, secrets: readonly string[]): string {
-	let out = text;
-	for (const secret of secrets) if (secret !== "") out = out.split(secret).join("[redacted]");
-	return out;
-}
 
 /**
  * `text` with every `secret` (the caller's own bearer key, when known), every `Bearer <token>` and
  * every api-key style value replaced by `[redacted]`. Scrubbing is not redaction: `scrubForStderr`
  * removes terminal control, never a credential.
  *
- * The known secrets are replaced in the whole text first (a plain split, no regular expression),
- * so the cut below can never leave part of one; then only the first `REDACT_INPUT_MAX` code units
- * are kept, marked as cut, before the patterns run. Cutting only drops text, and a value the cut
- * leaves unclosed is still redacted to its end. Should the patterns still throw `RangeError`, the
- * whole text is replaced: it fails closed, never returning text it did not scan. Any other error
- * is not caught.
+ * It reads the whole text: the secrets are replaced with a plain split, and neither pattern
+ * repeats a group, so a message of any length is read to its end. Should a pattern still throw
+ * `RangeError`, the whole text is replaced: it fails closed, never returning text it did not scan.
+ * Any other error is not caught.
  */
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {
-	let out = replaceSecrets(text, secrets);
-	if (out.length > REDACT_INPUT_MAX) out = `${out.slice(0, REDACT_INPUT_MAX)} [cut]`;
+	let out = text;
+	for (const secret of secrets) if (secret !== "") out = out.split(secret).join("[redacted]");
 	try {
-		return out
-			.replace(BEARER_TOKEN, "$1 [redacted]")
-			.replace(API_KEY_VALUE, (_match, name: string, sep: string, dq?: string, sq?: string) => {
-				const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : "";
-				return `${name}${sep}${quote}[redacted]${quote}`;
-			});
+		return redactApiKeys(out.replace(BEARER_TOKEN, "$1 [redacted]"));
 	} catch (err) {
 		if (err instanceof RangeError) return UNREADABLE;
 		throw err;
@@ -273,16 +295,17 @@ export function redactSecrets(text: string, secrets: readonly string[] = []): st
  * `500 internal`: which tenant, which route, and the error's own name and message, so a
  * tenant refused at its first request (its vault, say) says why somewhere. It carries no key,
  * header or request body of its own. The message is the server's or governor's text, which can
- * quote what a caller sent, so credentials in it are REDACTED, with the caller's own key in
- * `secrets`, and escape sequences and control characters removed (`scrubForStderr`).
+ * quote what a caller sent, so credentials in it are REDACTED (`redactSecrets`, with the caller's
+ * own key in `secrets`), and escape sequences and control characters are removed
+ * (`scrubForStderr`).
  *
- * Nothing is cut until no key can come back together. On the WHOLE text, the known secrets are
- * replaced, the text is sanitized without a clip (removing a control character a caller put
- * inside a key joins it), and the secrets are replaced again (`redactSecrets` does that first,
- * before its own cut). Only then do the bounded steps run: the patterns (`redactSecrets`, which
- * keeps the first `REDACT_INPUT_MAX` code units) and the clip to `MAX_PRINTED_CHARS`. A cut before the sanitizing could keep a key's first part, which no
- * pass after it can recognize. The lines are joined into one last, and the patterns run once more
- * on the joined line.
+ * Every redaction runs on the WHOLE text, and nothing is cut until no credential can come back
+ * together. The credentials are redacted first, while the delimiters the patterns read are still
+ * there (removing a tab joins `Bearer\t<token>` into one word, and an escape sequence can take a
+ * key's first character with it). The text is then sanitized without a clip and redacted again,
+ * since removing a control character a caller put inside a key joins it. Only then is it clipped
+ * to `MAX_PRINTED_CHARS`: a cut any earlier could keep a key's first part, which no pass after it
+ * can recognize. The lines are joined into one last, and the line is redacted once more.
  */
 export function internalErrorLine(
 	err: unknown,
@@ -292,12 +315,9 @@ export function internalErrorLine(
 ): string {
 	const name = err instanceof Error ? err.name : typeof err;
 	const message = err instanceof Error ? err.message : String(err);
-	const whole = scrubForStderr(
-		replaceSecrets(`${name}: ${message}`, secrets),
-		Number.POSITIVE_INFINITY,
-	);
-	// redactSecrets replaces the secrets in the whole sanitized text again before its own cut.
-	const clipped = scrubForStderr(redactSecrets(whole, secrets));
+	const raw = redactSecrets(`${name}: ${message}`, secrets);
+	const whole = redactSecrets(scrubForStderr(raw, Number.POSITIVE_INFINITY), secrets);
+	const clipped = scrubForStderr(whole);
 	// QUADRATIC: `\s*\n\s*` retries its leading `\s*` from every position of a whitespace run that
 	// holds no newline (500k spaces took 162 s). It must only ever see clipped text, so it stays
 	// AFTER the clip above; never move it earlier.
